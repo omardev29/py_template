@@ -1,0 +1,38 @@
+{
+    // --- Pylance (motor pyright) ---
+    // Busca los módulos locales en src/, p. ej. `from app import main` en src/main.py.
+    // OJO: si algún día añades [tool.pyright] a pyproject.toml o un pyrightconfig.json,
+    // Pylance IGNORA todo lo "python.analysis.*" de aquí: muévelo a ese archivo.
+    "python.analysis.extraPaths": ["src"],
+
+    // Al fijar "exclude" se reemplazan los valores por defecto, así que los repetimos.
+    // build/ tiene una copia de src/ durante la compilación: sin esto verías
+    // símbolos duplicados y "Ir a definición" saltaría a la copia.
+    "python.analysis.exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        "**/.*",
+        "build",
+        "dist"
+    ],
+
+    // mypy --strict es el juez de verdad (mypyc usa mypy). Pylance en "standard"
+    // marca errores reales sin duplicar/contradecir los avisos de mypy.
+    "python.analysis.typeCheckingMode": "standard",
+
+    // --- Extensión de mypy (ms-python.mypy-type-checker) ---
+    // Usa el mypy del .venv (la versión fijada en uv.lock, la misma que usa mypyc),
+    // no el que trae la extensión, y lee la config de [tool.mypy] en pyproject.toml.
+    "mypy-type-checker.importStrategy": "fromEnvironment",
+
+    // --- Explorador y búsqueda ---
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/.mypy_cache": true
+    },
+    "search.exclude": {
+        "build": true,
+        "dist": true,
+        "uv.lock": true
+    }
+}
