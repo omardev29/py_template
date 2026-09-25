@@ -1,0 +1,75 @@
+# pytemplate.toml: configuración del proyecto y "modo" de trabajo (preset raylib).
+#
+# Cambia un valor y ejecuta cualquier ./deploy: los archivos generados (.mypy.ini,
+# pyrightconfig.json, .ruff.toml, .vscode/) se actualizan solos. Lo que afecta a
+# uv.lock (backend.supported, [python], [preset.raylib]) se aplica con `./deploy lock`.
+schema = 1
+
+[app]
+name = "{{name}}"   # nombre del ejecutable; el paquete de Python es src/{{pkg}}/
+preset = "raylib"
+gui = true          # ejecutable sin consola; lanzadores portables con pythonw/pypyw
+assets = "assets"   # src/assets/ se empaqueta con la app (acceso: {{pkg}}.resources.asset())
+
+[backend]
+# PyPy por defecto: su JIT acelera tu lógica Y las llamadas cffi a raylib (medido en un
+# bunnymark de 30k: PyPy 254 fps, mypyc 144, CPython 79). mypyc gana en lógica pura.
+active = "pypy"
+supported = ["cpython", "pypy", "mypyc"]   # con PyPy: sintaxis de Python 3.11
+
+[python]
+cpython = "3.14"
+pypy = "pypy@3.11.15"   # EXACTA: PyPy 8.0 cambió el ABI y raylib aún no tiene wheels para él
+jit = false
+
+[typing]
+profile = "auto"      # "mypyc" con backend mypyc; con cpython/pypy, lo que diga `relaxed`
+relaxed = "off"       # off | warn | strict
+editor = "pylance"
+
+# typings/raylib es el stub de raylib corregido (./deploy stubs): no se revisa como código propio
+[[typing.mypy_overrides]]
+module = ["raylib", "raylib.*"]
+ignore_errors = true
+
+[compile]
+modules = ["{{pkg}}.core"]   # física y bucle de dibujo: lo caliente
+exclude = []
+forbid_imports = ["pyray"]   # pyray envuelve cada llamada en Python (~7x más lenta que raylib)
+annotate = false
+opt_level = "3"
+
+[deploy]
+optimize = 1
+default = { cpython = "exe", mypyc = "exe", pypy = "portable" }
+
+[deploy.exe]
+mode = "onedir"   # arranca al instante (onefile se descomprime en cada ejecución)
+console = "auto"
+icon = ""
+# cffi arrastra setuptools/pycparser, que el juego no necesita en runtime
+extra_args = ["--exclude-module", "setuptools", "--exclude-module", "pycparser", "--exclude-module", "_distutils_hack"]
+
+[deploy.portable]
+runtime = "bundled"
+targets = ["host"]
+
+[deploy.pyz]
+targets = ["host"]   # p. ej. añade "cp314-linux-x86_64" para incluir el raylib de Linux
+
+[preset.raylib]
+package = "raylib"   # raylib (GLFW) | raylib_sdl (SDL3) | raylib_software
+version = "6.0.1.0"
+
+[tasks.stubs]
+help = "Regenera typings/raylib (el stub de raylib corregido) tras cambiar de versión"
+cmd = ["python", ".pytemplate/presets/raylib/tools/raylib_stubs.py", "typings/raylib/__init__.pyi"]
+backend = "cpython"
+
+[tasks.bunnymark]
+help = "Mide FPS con 30.000 conejos y 900 frames (otro backend: ./deploy run mypyc --frames 900 --bunnies 30000)"
+deps = ["run --frames 900 --bunnies 30000"]   # un comando de ./deploy: con mypyc, compila antes
+
+[tasks.ci]
+help = "Lo mismo que la CI: check y tests en todos los backends"
+deps = ["check all", "test all"]

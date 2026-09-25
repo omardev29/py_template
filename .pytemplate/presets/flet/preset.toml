@@ -1,0 +1,23 @@
+description = "App de escritorio con Flet: UI interpretada + núcleo compilado con mypyc"
+
+# flet y flet-desktop fijados a la MISMA versión: si no coinciden, Flet se auto-instala
+# flet-desktop con pip en tiempo de ejecución (saltándose uv.lock)
+dependencies = ["flet=={version}", "flet-desktop=={version}"]
+dev_dependencies = ["flet-cli=={version}"]
+
+# Tablas extra de pyproject.toml (las lee `flet build`)
+pyproject = """
+[tool.flet]
+org = "com.example"
+product = "{{name}}"
+company = "{{name}}"
+copyright = "Copyright (C) 2026"
+
+[tool.flet.app]
+path = "src"
+module = "main"
+"""
+
+# Valores por defecto de [preset.flet] en pytemplate.toml
+[options]
+version = "1.0.1"

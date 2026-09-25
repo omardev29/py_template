@@ -1,5 +1,20 @@
-"""Punto de entrada. NO se compila con mypyc: solo importa la lógica compilada."""
+"""Lanzador de la app. NUNCA se compila con mypyc.
 
-from app import main
+Un módulo compilado siempre se importa (nunca es __main__), así que toda la lógica
+vive en el paquete miapp y este archivo solo la llama.
+"""
 
-raise SystemExit(main())
+import sys
+
+
+def _main() -> int:
+    from miapp.app import main
+
+    return main()
+
+
+if __name__ == "__main__":
+    import multiprocessing
+
+    multiprocessing.freeze_support()  # necesario si usas procesos en un ejecutable
+    sys.exit(_main())

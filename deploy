@@ -1,0 +1,43 @@
+#!/bin/sh
+# Lanzador POSIX de ./deploy (bash, zsh, fish, xonsh en Linux/macOS, Git Bash).
+# Solo busca uv y reenvía los argumentos: toda la lógica está en .pytemplate/deploy.py.
+# Shebang #!/bin/sh a propósito: en Windows, xonsh traduce "/usr/bin/env bash" a `bash`,
+# que puede ser WSL; `sh` es el de Git.
+set -eu
+
+if ! command -v uv >/dev/null 2>&1; then
+    for d in "${UV_INSTALL_DIR:-}" "${XDG_BIN_HOME:-}" "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+        if [ -n "$d" ] && [ -x "$d/uv" ]; then
+            PATH="$d:$PATH"
+            export PATH
+            break
+        fi
+    done
+fi
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "deploy: no se encuentra uv (https://docs.astral.sh/uv/)." >&2
+    if [ -t 0 ] && [ -t 1 ]; then
+        printf "¿Instalarlo ahora con el instalador oficial? [s/N] " >&2
+        read -r answer || answer=""
+        case "$answer" in
+            s | S | si | sí | y | Y | yes)
+                if command -v curl >/dev/null 2>&1; then
+                    curl -LsSf https://astral.sh/uv/install.sh | sh
+                else
+                    wget -qO- https://astral.sh/uv/install.sh | sh
+                fi
+                PATH="${UV_INSTALL_DIR:-$HOME/.local/bin}:$PATH"
+                export PATH
+                ;;
+        esac
+    fi
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "Instálalo con:  curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+        exit 127
+    fi
+fi
+
+PYTEMPLATE_CALLER_CWD=$PWD
+export PYTEMPLATE_CALLER_CWD
+exec uv run --quiet --script "$(dirname -- "$0")/.pytemplate/deploy.py" "$@"

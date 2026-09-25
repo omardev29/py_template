@@ -1,0 +1,36 @@
+# Perfil de tipado "warn": los tipos son opcionales y los problemas salen como AVISOS.
+# Nunca bloquea `./deploy check` ni `build`. Actívalo con typing.relaxed = "warn".
+
+description = "Tipos opcionales; los problemas se muestran como avisos y nunca bloquean"
+blocking = false
+
+[mypy]
+check_untyped_defs = true
+enable_error_code = ["possibly-undefined", "deprecated"]
+report_deprecated_as_note = true
+
+[pyright]
+typeCheckingMode = "standard"
+reportArgumentType = "warning"
+reportAttributeAccessIssue = "warning"
+reportCallIssue = "warning"
+reportIndexIssue = "warning"
+reportOptionalMemberAccess = "warning"
+reportOptionalSubscript = "warning"
+reportOptionalIterable = "warning"
+reportOptionalCall = "warning"
+reportOptionalOperand = "warning"
+reportPossiblyUnbound = "warning"
+reportRedeclaration = "warning"
+reportGeneralTypeIssues = "warning"
+reportAssignmentType = "warning"
+reportReturnType = "warning"
+reportOperatorIssue = "warning"
+
+[ruff]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]
+exit_zero = true
+
+[vscode]
+"mypy-type-checker.severity" = { error = "Warning", note = "Information" }

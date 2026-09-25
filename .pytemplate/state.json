@@ -1,0 +1,14 @@
+{
+  "comment": "Hashes de los archivos generados por ./deploy (detecta ediciones a mano)",
+  "files": {
+    ".github/workflows/ci.yml": "cb34c84f0bdb659b9edbeb019b2e6ca81149bb5f5a116cf39283d74165dd769e",
+    ".mypy.ini": "0e52020d5dd0e4a6f0b7b28934e4fbbfddc2bdf98dffb8f1cb29f8ea15e8ba97",
+    ".python-version": "a876e0b10411037a012498b9fe18d9bc1df32ed8b722a13564dc944ddcfd9135",
+    ".ruff.toml": "c7092f85c4e079e11e71b326bd83368339713425c54d7c633abacfa4109c3545",
+    ".vscode/extensions.json": "00f69b31bb96d0e045010694ecbcaf36d64235cd97cd34ac73f93573c5511a52",
+    ".vscode/launch.json": "89bb2c4cb778710e62291647932a98f04b246331ce394fba90bb521583fce892",
+    ".vscode/settings.json": "5c390f69485452e114b99f9b37d4c16d9665a5a00766fe8df87fac1cb59b3bee",
+    ".vscode/tasks.json": "3b53df958266cf29971150a52ed564e96cabeffd9571adbb52ee1c304cdb53da",
+    "pyrightconfig.json": "2cab929caa7391154d0c362c9e8a940e0a65c5bccd8b40301a19c280952d0990"
+  }
+}

@@ -1,23 +1,37 @@
 [project]
 name = "miapp"
 version = "0.1.0"
-description = "Add your description here"
+description = "Plantilla uv multi-backend: CPython, PyPy y mypyc"
 readme = "README.md"
+# Gestionado por ./deploy desde pytemplate.toml: ">=3.11" si PyPy está soportado
 requires-python = ">=3.14"
 dependencies = [
+    "mypy-extensions>=1.1.0",
     "rich>=15.0.0",
+    "typing-extensions>=4.15.0",
 ]
 
 [dependency-groups]
+# Herramientas solo en CPython: mypy depende de ast-serialize (Rust, sin wheels para
+# PyPy) y PyInstaller no soporta PyPy. En el entorno de PyPy solo entra pytest.
 dev = [
-    "mypy>=2.3.1",
-    "pyinstaller>=6.22.3",
-    "setuptools>=84.0.0",
+    "mypy>=2.3.1; implementation_name == 'cpython'",
+    "pyinstaller>=6.22.3; implementation_name == 'cpython'",
+    "pytest>=9.1",
+    "ruff>=0.15; implementation_name == 'cpython'",
+    "setuptools>=84.0.0; implementation_name == 'cpython'",
 ]
 
-[tool.mypy]
-strict = true
-files = ["src", "build.py"]
-# src/ no es un paquete: sus módulos se importan por nombre (`from app import main`).
-# mypy ya lo deduce de la ruta del archivo; esto solo lo deja explícito.
-mypy_path = "src"
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = ["-ra"]
+
+[tool.uv]
+# >>> pytemplate: generado desde pytemplate.toml por ./deploy; no editar hasta la marca de cierre
+# uv.lock solo resuelve para la versión menor fijada (p. ej. sin la rama de 3.15, donde
+# librerías como raylib aún no tienen wheels). Cambiarla: python.cpython + ./deploy lock
+environments = [
+    "implementation_name == 'cpython' and python_full_version >= '3.14' and python_full_version < '3.15'",
+]
+python-preference = "only-managed"  # <<< pytemplate

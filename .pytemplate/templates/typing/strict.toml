@@ -1,0 +1,37 @@
+# Perfil de tipado "strict": tipado obligatorio y bloqueante, pero Any permitido.
+# Para proyectos CPython/PyPy que quieren disciplina de tipos sin las reglas de mypyc.
+
+description = "Tipado obligatorio (mypy --strict), Any permitido"
+blocking = true
+
+[mypy]
+strict = true
+warn_unreachable = true
+strict_equality_for_none = true
+enable_error_code = [
+    "ignore-without-code",
+    "redundant-expr",
+    "truthy-bool",
+    "possibly-undefined",
+    "explicit-override",
+    "exhaustive-match",
+    "deprecated",
+    "mutable-override",
+    "unused-awaitable",
+]
+
+[pyright]
+typeCheckingMode = "standard"
+enableTypeIgnoreComments = false
+reportImplicitOverride = "error"
+reportUninitializedInstanceVariable = "error"
+reportPropertyTypeMismatch = "error"
+reportUnnecessaryTypeIgnoreComment = "warning"
+
+[ruff]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "RUF", "ANN"]
+ignore = ["ANN401", "RUF001", "RUF002", "RUF003"]
+exit_zero = false
+
+[vscode]
+"mypy-type-checker.severity" = { error = "Error", note = "Information" }

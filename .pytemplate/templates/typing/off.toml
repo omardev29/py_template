@@ -1,0 +1,19 @@
+# Perfil de tipado "off": sin obligaciones de tipos. Es el de CPython/PyPy por defecto.
+# Solo se comprueban errores reales: sintaxis y nombres no definidos.
+
+description = "Sin comprobación de tipos (solo errores de sintaxis y nombres no definidos)"
+blocking = false
+skip_mypy = true
+
+[mypy]
+ignore_errors = true
+
+[pyright]
+typeCheckingMode = "off"
+
+[ruff]
+select = ["E9", "F63", "F7", "F82"]
+ignore = []
+exit_zero = false
+
+[vscode]

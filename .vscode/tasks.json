@@ -1,0 +1,106 @@
+// GENERADO por ./deploy a partir de pytemplate.toml y .pytemplate/templates: no lo edites a mano
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "deploy: run",
+            "type": "process",
+            "command": "${workspaceFolder}/deploy",
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd"
+            },
+            "args": [
+                "run"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "deploy: test",
+            "type": "process",
+            "command": "${workspaceFolder}/deploy",
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd"
+            },
+            "args": [
+                "test"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "deploy: check",
+            "type": "process",
+            "command": "${workspaceFolder}/deploy",
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd"
+            },
+            "args": [
+                "check"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "deploy: build",
+            "type": "process",
+            "command": "${workspaceFolder}/deploy",
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd"
+            },
+            "args": [
+                "build"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "deploy: run mypyc",
+            "type": "process",
+            "command": "${workspaceFolder}/deploy",
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd"
+            },
+            "args": [
+                "run",
+                "mypyc"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "deploy: report (mypyc)",
+            "type": "process",
+            "command": "${workspaceFolder}/deploy",
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd"
+            },
+            "args": [
+                "report",
+                "--open"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        }
+    ]
+}

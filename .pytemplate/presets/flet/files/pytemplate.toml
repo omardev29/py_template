@@ -1,0 +1,78 @@
+# pytemplate.toml: configuración del proyecto y "modo" de trabajo (preset flet).
+#
+# Cambia un valor y ejecuta cualquier ./deploy: los archivos generados (.mypy.ini,
+# pyrightconfig.json, .ruff.toml, .vscode/) se actualizan solos. Lo que afecta a
+# uv.lock (backend.supported, [python], [preset.flet]) se aplica con `./deploy lock`.
+schema = 1
+
+[app]
+name = "{{name}}"   # nombre del ejecutable; el paquete de Python es src/{{pkg}}/
+preset = "flet"
+gui = true
+assets = "assets"   # src/assets/: Flet lo sirve (assets_dir) y se empaqueta con la app
+
+[backend]
+# Flet: la UI la pinta Flutter y el Python de Flet (diffs, mensajes) no se puede compilar.
+# mypyc acelera tu núcleo (src/{{pkg}}/core); la UI siempre va interpretada.
+active = "cpython"
+supported = ["cpython", "mypyc"]   # PyPy: experimental, solo para ejecutar en desarrollo
+
+[python]
+cpython = "3.14"   # `flet build` embebe CPython 3.14: los .pyd de mypyc son compatibles
+pypy = "pypy@3.11.15"
+jit = false
+
+[typing]
+profile = "auto"
+relaxed = "off"
+editor = "pylance"
+
+# La UI habla con Flet, cuyo API expone Any: se relajan solo esas reglas ahí
+[[typing.mypy_overrides]]
+module = ["{{pkg}}.ui.*"]
+warn_return_any = false
+disable_error_code = ["explicit-override", "no-untyped-call"]
+
+[compile]
+modules = ["{{pkg}}.core"]
+exclude = []
+# Nada de Flet en código compilado (medido con Flet 1.0.1 + mypyc 2.3.1): los handlers
+# `async def` se llaman SIN el evento, los generadores no se ejecutan, @ft.component
+# falla al importar y @ft.control pierde los tipos de sus eventos.
+forbid_imports = ["flet", "flet_desktop", "flet_cli"]
+annotate = false
+opt_level = "3"
+
+[deploy]
+optimize = 1
+default = { cpython = "exe", mypyc = "exe", pypy = "portable" }
+
+[deploy.exe]
+mode = "onedir"   # flet pack: el cliente Flutter va dentro; onedir arranca mucho antes
+console = "auto"
+icon = ""
+
+[deploy.portable]
+runtime = "bundled"
+targets = ["host"]
+
+[deploy.pyz]
+targets = ["host"]
+
+[deploy.wheel]
+entry = "{{pkg}}.ui.app:run"   # comando que instala el wheel (uv tool install)
+
+[deploy.flet]
+target = "host"   # `./deploy build --method flet`: host | windows | macos | linux | apk | aab | ipa | web
+
+[preset.flet]
+version = "1.0.1"   # flet, flet-desktop y flet-cli siempre a la misma versión
+
+[tasks.dev]
+help = "Desarrollo con recarga en caliente (flet run -r)"
+cmd = ["flet", "run", "-d", "-r", "src/main.py"]
+backend = "cpython"
+
+[tasks.ci]
+help = "Lo mismo que la CI: check y tests en todos los backends"
+deps = ["check all", "test all"]

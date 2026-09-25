@@ -1,0 +1,66 @@
+# GENERADO por ./deploy a partir de pytemplate.toml y .pytemplate/templates: no lo edites a mano
+#
+# CI: en Windows, Linux y macOS ejecuta los mismos comandos que en tu máquina
+# (./deploy setup, check, test) y compila un .pyz por sistema. mypyc no compila para
+# otros sistemas, así que cada runner aporta sus binarios y el job "pyz" los une en un
+# único .pyz que usa el binario de cada SO (y el .py en cualquier otro intérprete).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            backends: "cpython mypyc"
+          - os: windows-latest
+            backends: "cpython mypyc"
+          - os: macos-latest
+            backends: "cpython mypyc"
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Entornos de los backends
+        run: ./deploy setup
+      - name: Tipos y lint (perfil de cada backend)
+        run: ./deploy check all
+      - name: Tests en cada backend
+        run: for b in ${{ matrix.backends }}; do ./deploy test "$b" || exit 1; done
+      - name: pyz con el núcleo compilado para este sistema
+        run: ./deploy build mypyc --method pyz --no-check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pyz-${{ matrix.os }}
+          path: dist/miapp-mypyc-pyz/miapp.pyz
+
+  pyz:
+    name: pyz multiplataforma
+    needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/download-artifact@v4
+        with:
+          path: pyz-parts
+      - name: Une los binarios de cada sistema en un solo .pyz
+        run: ./deploy --no-render pyz-merge pyz-parts/*/*.pyz --out dist/miapp.pyz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: miapp-pyz
+          path: dist/miapp.pyz

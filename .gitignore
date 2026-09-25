@@ -1,16 +1,23 @@
-# Python-generated files
+# Python
 __pycache__/
 *.py[oc]
-build/
-dist/
-wheels/
-.mypy_cache/
 *.egg-info
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
 
-# Virtual environments
-.venv
+# Entornos (uno por backend: .venv, .venv-pypy, .venv-jit, y -wsl)
+.venv*/
 
-# Artefactos de mypyc / PyInstaller
+# Salidas de ./deploy (stage de mypyc, PyInstaller, runtimes, informes) y artefactos
+.build/
+dist/
+build/
+*.spec
+
+# Extensiones compiladas: solo existen en .build/ (si aparecen en src/, sobran)
 *.so
 *.pyd
-*.spec
+
+# Flet (flet run / flet build)
+.flet/

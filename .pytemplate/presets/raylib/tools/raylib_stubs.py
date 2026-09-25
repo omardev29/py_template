@@ -1,0 +1,144 @@
+"""Genera typings/raylib/__init__.pyi: el stub de raylib con sus "mentiras" corregidas.
+
+Uso (lo lanza la tarea `./deploy stubs` del preset raylib, dentro del .venv):
+    python raylib_stubs.py typings/raylib/__init__.pyi
+
+Por qué: mypyc comprueba EN RUNTIME los tipos simples (bytes, int, list...). El stub
+oficial declara `-> bytes` en funciones que devuelven un puntero cdata (`char *`) y
+`Color.r: bytes` cuando es un int: interpretado no pasa nada, pero compilado lanza
+TypeError. Este script compara cada anotación con el tipo real de cffi y reescribe:
+  - retornos que mienten        -> CData
+  - campos que mienten          -> int (unsigned char/char) o CData (punteros, arrays)
+  - parámetros bytes que son int -> int
+  - `X|list|tuple`              -> `X|Sequence[object]` (sin Any implícito)
+  - `from warnings import deprecated` -> typing_extensions (válido también en 3.11)
+"""
+
+from __future__ import annotations
+
+import ast
+import re
+import sys
+from pathlib import Path
+
+import raylib
+from raylib import ffi, rl
+
+CHECKED = {"int", "float", "bool", "bytes", "str", "None"}
+
+
+def py_kind(ct: object) -> str:
+    kind: str = ct.kind  # type: ignore[attr-defined]
+    cname: str = ct.cname  # type: ignore[attr-defined]
+    if kind == "void":
+        return "None"
+    if kind == "primitive":
+        if cname == "char":
+            return "bytes"
+        if cname in ("_Bool", "bool"):
+            return "bool"
+        if cname in ("float", "double", "long double"):
+            return "float"
+        return "int"
+    if kind == "enum":
+        return "int"
+    return f"cdata:{kind}"
+
+
+def lies(declared: str, runtime: str, aliases: dict[str, str]) -> bool:
+    """¿La anotación es un tipo simple que mypyc comprobaría y no coincide con el real?"""
+    d = aliases.get(declared.replace(" ", ""), declared.replace(" ", ""))
+    if d in ("Any", "", runtime) or (d == "int" and runtime == "bool") or (d == "float" and runtime == "int"):
+        return False
+    base = d.split("[", 1)[0]
+    return base in CHECKED or base in ("list", "tuple", "dict")
+
+
+def main() -> int:
+    out_path = Path(sys.argv[1] if len(sys.argv) > 1 else "typings/raylib/__init__.pyi")
+    stub_path = Path(raylib.__file__).with_name("__init__.pyi")
+    source = stub_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    aliases = {
+        n.targets[0].id: ast.unparse(n.value)
+        for n in tree.body
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+    }
+
+    bad_returns: set[str] = set()
+    int_params: set[tuple[str, str]] = set()
+    for fn in (n for n in tree.body if isinstance(n, ast.FunctionDef)):
+        obj = getattr(rl, fn.name, None)
+        if obj is None:
+            continue
+        try:
+            ct = ffi.typeof(obj)
+        except Exception:  # noqa: BLE001 - no es una función de C
+            continue
+        if fn.returns is not None and lies(ast.unparse(fn.returns), py_kind(ct.result), aliases):
+            bad_returns.add(fn.name)
+        for param, c_arg in zip(fn.args.args, ct.args, strict=False):
+            ann = ast.unparse(param.annotation) if param.annotation else ""
+            if ann in ("bytes", "str") and c_arg.kind == "primitive" and py_kind(c_arg) in ("int", "float"):
+                int_params.add((fn.name, param.arg))
+
+    bad_fields: dict[tuple[str, str], str] = {}
+    for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
+        try:
+            ct = ffi.typeof(cls.name)
+        except Exception:  # noqa: BLE001
+            continue
+        if ct.kind not in ("struct", "union"):
+            continue
+        fields = dict(ct.fields or [])
+        for stmt in cls.body:
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.target.id in fields:
+                ftype = fields[stmt.target.id].type
+                runtime = py_kind(ftype)
+                if lies(ast.unparse(stmt.annotation), runtime, aliases):
+                    bad_fields[(cls.name, stmt.target.id)] = "int" if runtime == "int" else "CData"
+
+    lines: list[str] = [
+        f"# GENERADO por raylib_stubs.py a partir del stub de raylib {getattr(raylib, '__version__', '')}",
+        "# (tarea `./deploy stubs`). No lo edites a mano: regenéralo al actualizar raylib.",
+    ]
+    current: str | None = None
+    for line in source.splitlines():
+        if line.startswith("from warnings import deprecated"):
+            lines += ["from collections.abc import Sequence", "from typing_extensions import deprecated"]
+            continue
+        if line.startswith("import _cffi_backend"):
+            lines += ["import _cffi_backend", "from _cffi_backend import _CDataBase as CData"]
+            continue
+        m = re.match(r"class (\w+)", line)
+        if m:
+            current = m.group(1)
+        elif line and not line.startswith(" "):
+            current = None
+        fm = re.match(r"def (\w+)\((.*)\) -> (.+):$", line)
+        if fm:
+            name, params, ret = fm.groups()
+            if name in bad_returns:
+                ret = "CData"
+            for fname, pname in int_params:
+                if fname == name:
+                    params = params.replace(f"{pname}: bytes", f"{pname}: int").replace(f"{pname}: str", f"{pname}: int")
+            params = params.replace("|list|tuple", "|Sequence[object]")
+            line = f"def {name}({params}) -> {ret}:"
+        elif current:
+            am = re.match(r"    (\w+): (.+)$", line)
+            if am and (current, am.group(1)) in bad_fields:
+                line = f"    {am.group(1)}: {bad_fields[(current, am.group(1))]}"
+        lines.append(line)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    print(
+        f"{out_path}: {len(bad_returns)} retornos, {len(bad_fields)} campos y "
+        f"{len(int_params)} parámetros corregidos"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

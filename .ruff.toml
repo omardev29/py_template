@@ -1,0 +1,14 @@
+# GENERADO por ./deploy a partir de pytemplate.toml y .pytemplate/templates: no lo edites a mano
+# Perfil de tipado: off
+
+target-version = "py314"
+line-length = 100
+src = ["src", "tests"]
+extend-exclude = [".build", "dist", ".pytemplate", "typings"]
+
+[lint]
+select = ["E9", "F63", "F7", "F82"]
+ignore = []
+
+[format]
+docstring-code-format = true

@@ -1,0 +1,21 @@
+// GENERADO por ./deploy a partir de pytemplate.toml y .pytemplate/templates: no lo edites a mano
+{
+    "include": [
+        "src",
+        "tests"
+    ],
+    "exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        "**/.*",
+        "dist",
+        "build"
+    ],
+    "extraPaths": [
+        "src"
+    ],
+    "pythonVersion": "3.14",
+    "venvPath": ".",
+    "venv": ".venv",
+    "typeCheckingMode": "off"
+}

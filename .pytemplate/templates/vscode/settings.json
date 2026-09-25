@@ -1,0 +1,26 @@
+{
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestEnabled": false,
+    "mypy-type-checker.importStrategy": "fromEnvironment",
+    "mypy-type-checker.reportingScope": "file",
+    "mypy-type-checker.preferDaemon": false,
+    "mypy-type-checker.cwd": "${workspaceFolder}",
+    "ruff.importStrategy": "fromEnvironment",
+    "[python]": {
+        "editor.defaultFormatter": "charliermarsh.ruff"
+    },
+    "files.associations": {
+        "deploy": "shellscript"
+    },
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/.mypy_cache": true,
+        "**/.ruff_cache": true,
+        "**/.pytest_cache": true
+    },
+    "search.exclude": {
+        ".build": true,
+        "dist": true,
+        "uv.lock": true
+    }
+}

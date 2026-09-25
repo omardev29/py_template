@@ -1,0 +1,58 @@
+# pytemplate.toml: configuración del proyecto y "modo" de trabajo.
+#
+# Cambia un valor y ejecuta cualquier ./deploy: los archivos generados (.mypy.ini,
+# pyrightconfig.json, .ruff.toml, .vscode/) se actualizan solos. Lo que afecta a
+# uv.lock (backend.supported, [python]) se aplica con `./deploy lock`, o cámbialo
+# directamente con `./deploy mode`.
+schema = 1
+
+[app]
+name = "{{name}}"   # nombre del ejecutable; el paquete de Python es src/{{pkg}}/
+preset = "script"   # script | raylib | flet   (cambiar: ./deploy init <preset>)
+gui = false         # true: ejecutable sin consola y lanzadores con pythonw/pypyw
+assets = ""         # carpeta dentro de src/ que se empaqueta con la app ("" = ninguna)
+
+[backend]
+# cpython: el intérprete de siempre. Sin obligaciones de tipos.
+# pypy:    compilador JIT. Ideal para Python puro y librerías cffi (raylib). Sintaxis 3.11.
+# mypyc:   compila compile.modules a C (AOT). Tipado estricto; Any prohibido en lo compilado.
+active = "cpython"
+supported = ["cpython", "mypyc"]   # añadir PyPy: ./deploy mode --supports +pypy
+
+[python]
+cpython = "3.14"        # versión menor; uv gestiona el parche
+pypy = "pypy@3.11.15"   # EXACTA: PyPy 8.0 cambió el ABI (pp80) y aún no hay wheels
+jit = false             # JIT experimental de CPython (solo run/test/portable; necesita python.org)
+
+[typing]
+profile = "auto"     # auto: "mypyc" con backend mypyc; con cpython/pypy, lo que diga `relaxed`
+relaxed = "off"      # off | warn | strict   (tipado con cpython/pypy)
+editor = "pylance"   # pylance | basedpyright (este marca Any también en el editor)
+
+[compile]
+modules = ["{{pkg}}.core"]   # lo que compila mypyc: paquetes o módulos de src/
+exclude = []                 # módulos dentro de esos paquetes que se quedan interpretados
+forbid_imports = []          # imports prohibidos en código compilado (p. ej. librerías de UI)
+annotate = false             # informe HTML de líneas lentas en cada compilación (o ./deploy report)
+opt_level = "3"
+
+[deploy]
+optimize = 1   # 0 | 1 | 2: nivel -O del bytecode; con >= 1 mypyc también quita los assert
+default = { cpython = "exe", mypyc = "exe", pypy = "portable" }   # método de ./deploy build
+
+[deploy.exe]
+mode = "onefile"   # onefile | onedir (onedir arranca más rápido y no se descomprime cada vez)
+console = "auto"   # auto (= not app.gui) | yes | no
+icon = ""          # ruta a un .ico
+
+[deploy.portable]
+runtime = "bundled"   # bundled: la carpeta incluye el intérprete | system: usa el del destino
+targets = ["host"]
+
+[deploy.pyz]
+targets = ["host"]    # añade claves como "cp314-linux-x86_64" para incluir nativos de otros SO
+
+# Recetas propias estilo Justfile: ./deploy <nombre> [argumentos...]
+[tasks.ci]
+help = "Lo mismo que la CI: check y tests en todos los backends"
+deps = ["check all", "test all"]

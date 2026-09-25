@@ -1,0 +1,69 @@
+# Perfil de tipado "mypyc": el más estricto. Se aplica solo con backend.active = "mypyc"
+# (y siempre en `./deploy check mypyc`, `test mypyc` y `build mypyc`).
+#
+# ./deploy convierte estas variantes en .mypy.ini, pyrightconfig.json, .ruff.toml y
+# .vscode/settings.json. Puedes editarlas aquí; nunca edites los archivos generados.
+#
+# Por qué tan estricto: mypyc compila tus tipos a C. Donde hay Any (o un global sin
+# Final) genera operaciones genéricas, que pueden ser MÁS lentas que CPython sin compilar.
+
+description = "Tipado obligatorio en todo src/; Any prohibido en los módulos compilados"
+blocking = true
+
+# -> sección [mypy] global (todo src/ y tests/)
+[mypy]
+strict = true
+warn_unreachable = true
+strict_equality_for_none = true
+enable_error_code = [
+    "ignore-without-code",
+    "redundant-expr",
+    "truthy-bool",
+    "truthy-iterable",
+    "possibly-undefined",
+    "explicit-override",
+    "exhaustive-match",
+    "deprecated",
+    "mutable-override",
+    "unused-awaitable",
+    "redundant-self",
+    "unimported-reveal",
+]
+
+# -> [mypy-<módulo>.*] para cada módulo de compile.modules
+[mypy_compiled]
+disallow_any_explicit = true
+disallow_any_expr = true
+disallow_any_decorated = true
+disallow_any_unimported = true
+
+# -> pyrightconfig.json (Pylance)
+[pyright]
+typeCheckingMode = "standard"
+# mypy es el dueño de `# type: ignore[código]`; pyright solo respeta `# pyright: ignore[regla]`
+enableTypeIgnoreComments = false
+reportImplicitOverride = "error"
+reportUninitializedInstanceVariable = "error"
+reportPropertyTypeMismatch = "error"
+reportUnnecessaryTypeIgnoreComment = "warning"
+reportUnreachable = "warning"
+
+# Rutas compiladas -> lista "strict" de pyright
+[pyright_compiled]
+strict = true
+
+# Solo con typing.editor = "basedpyright": marca Any también en el editor
+[basedpyright_compiled]
+reportAny = "error"
+reportExplicitAny = "error"
+
+# -> .ruff.toml
+[ruff]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "RUF", "ANN", "PLW0603"]
+# ANN401 (Any en firmas) lo decide mypy según el módulo; RUF001-003 molestan con textos en español
+ignore = ["ANN401", "RUF001", "RUF002", "RUF003"]
+exit_zero = false
+
+# -> .vscode/settings.json
+[vscode]
+"mypy-type-checker.severity" = { error = "Error", note = "Information" }

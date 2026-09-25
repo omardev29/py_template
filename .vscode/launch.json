@@ -1,14 +1,24 @@
+// GENERADO por ./deploy a partir de pytemplate.toml y .pytemplate/templates: no lo edites a mano
 {
     "version": "0.2.0",
     "configurations": [
         {
-            // F5: ejecuta y depura el código fuente (modo interpretado, sin compilar)
-            "name": "miapp (src/main.py)",
+            "name": "src/main.py (CPython, interpretado)",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/src/main.py",
+            "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "justMyCode": true
+        },
+        {
+            "name": "Tests (pytest)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
         }
     ]
 }
