@@ -46,9 +46,7 @@ def _is_explicitly_non_native(node: ast.expr) -> bool:
     )
 
 
-def lint_file(cfg: Config, path: Path, *_compat: object) -> list[Finding]:
-    # *_compat: the removed `forbidden_calls` argument (the preset [lint] forbid_calls_file
-    # support was dead code). Drop it once no caller passes it (test_runner.py still does).
+def lint_file(cfg: Config, path: Path) -> list[Finding]:
     findings: list[Finding] = []
     tree = parse(path)
 

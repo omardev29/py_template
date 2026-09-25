@@ -353,6 +353,7 @@ def cmd_init(cfg: Config, args: list[str]) -> int:
     parser.add_argument("--force", action="store_true")
     ns = _parse(parser, args)
     if proc.DRY_RUN:
+        presets.check_name_free(cfg, ns.preset, ns.name or cfg.app.name)
         _plan_init(cfg, ns.preset, ns.name, force=ns.force)
         return 0
     presets.init(cfg, ns.preset, ns.name, force=ns.force)
@@ -381,6 +382,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
             f"new: '{name}' is not a valid app name (letters, digits, '-' and '_', starting with a letter). "
             "Choose one with --name NAME"
         )
+    presets.check_name_free(cfg, ns.preset, name)
     if proc.DRY_RUN:
         ui.step(f"new project in {dest} {_DRY}")
         ui.info(f"  preset  {ns.preset}")

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import shutil
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,13 +92,6 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
 def _size(path: Path) -> str:
     total = path.stat().st_size if path.is_file() else sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
     return f"{total / 1_048_576:.1f} MB"
-
-
-def fresh_dir(path: Path) -> Path:
-    if path.exists():
-        shutil.rmtree(path)
-    path.mkdir(parents=True)
-    return path
 
 
 def dist_path(req: BuildRequest, suffix: str = "") -> Path:

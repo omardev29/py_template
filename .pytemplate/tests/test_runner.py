@@ -135,7 +135,7 @@ def test_lintc_rules(tmp_path: Path) -> None:
         "if __name__ == '__main__':\n    pass\n"
     )
     cfg = make({"compile": {"forbid_imports": ["flet"]}})
-    messages = [f.message for f in lintc.lint_file(cfg, mod, {})]
+    messages = [f.message for f in lintc.lint_file(cfg, mod)]
     assert any("flet" in m for m in messages)
     assert any("@cache" in m for m in messages)
     assert any("nested class" in m for m in messages)

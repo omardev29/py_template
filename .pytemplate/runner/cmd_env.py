@@ -56,12 +56,16 @@ def cmd_setup(cfg: Config, args: list[str]) -> int:
 
 
 def _fix_exec_bit() -> None:
-    """Make the POSIX launcher `deploy` executable in git (core.filemode=false on Windows)."""
+    """Keep `deploy` and `deploy.ps1` executable in git (core.filemode=false on Windows).
+
+    deploy.ps1 needs it for `./deploy.ps1` from pwsh on Linux/macOS.
+    """
     if not (ROOT / ".git").exists() or not shutil.which("git"):
         return
-    r = proc.run(["git", "ls-files", "-s", "deploy"], capture=True, check=False, echo=False)
-    if r.stdout.startswith("100644"):
-        proc.run(["git", "update-index", "--chmod=+x", "deploy"], check=False)
+    for launcher in ("deploy", "deploy.ps1"):
+        r = proc.run(["git", "ls-files", "-s", launcher], capture=True, check=False, echo=False)
+        if r.stdout.startswith("100644"):
+            proc.run(["git", "update-index", "--chmod=+x", launcher], check=False)
 
 
 def cmd_sync(cfg: Config, args: list[str]) -> int:
@@ -237,11 +241,15 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
 
 
 def _long_paths() -> bool:
-    try:
+    # `sys.platform == "win32"` (not an early return): mypy --strict checks this module on every
+    # OS and would flag the winreg code as unreachable/undefined elsewhere.
+    if sys.platform == "win32":
         import winreg
 
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as key:
-            value, _ = winreg.QueryValueEx(key, "LongPathsEnabled")
-            return bool(value)
-    except OSError:
-        return False
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as key:
+                value, _ = winreg.QueryValueEx(key, "LongPathsEnabled")
+                return bool(value)
+        except OSError:
+            pass
+    return False

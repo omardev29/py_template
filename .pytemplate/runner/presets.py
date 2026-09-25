@@ -147,6 +147,35 @@ def _declared(group: str | None) -> set[str]:
     return {_norm_name(r) for r in reqs if isinstance(r, str)}
 
 
+def _dependency_names(cfg: Config | None, preset: str) -> set[str]:
+    """Return the normalized names of every dependency the project has after `init preset`."""
+    target = load(preset)
+    opts: dict[str, Any] = dict(target.get("options", {}))
+    if cfg is not None and preset == cfg.app.preset:
+        opts.update(cfg.preset_options(preset))
+    new = [str(_fmt(d, opts)) for d in (*target.get("dependencies", []), *target.get("dev_dependencies", []))]
+    declared = _declared(None) | _declared("dev")
+    if cfg is not None:  # the current preset's own dependencies are removed by init
+        old_deps, old_dev = dependencies(cfg)
+        declared -= {_norm_name(d) for d in (*old_deps, *old_dev)}
+    return {_norm_name(d) for d in new} | declared
+
+
+def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
+    """Reject an app name that is also a dependency's name (e.g. `flet`, `raylib`, `rich`).
+
+    uv refuses a project that depends on itself ("self-dependencies are not permitted"), and
+    src/<pkg>/ would shadow the library's own import.
+    """
+    clash = _norm_name(name)
+    if clash in _dependency_names(cfg, preset):
+        raise DeployError(
+            f"the app name '{name}' is also the name of a dependency of the '{preset}' preset "
+            f"({clash}): uv would refuse the project and src/{name.replace('-', '_').lower()}/ would "
+            "shadow the library.\n  Choose another name with --name NAME"
+        )
+
+
 def _set_project_name(text: str, name: str) -> str:
     return re.sub(r'(?m)^(name\s*=\s*)"[^"]*"', lambda m: f'{m.group(1)}"{name}"', text, count=1)
 
@@ -173,6 +202,7 @@ def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
     new_name = name or cfg.app.name
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", new_name):
         raise DeployError("the name may only contain letters, digits, '-' and '_' (and must start with a letter)")
+    check_name_free(cfg, preset, new_name)
     target = load(preset)
     if not force and not pristine(cfg):
         raise DeployError(
@@ -190,7 +220,7 @@ def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
         path.write_bytes(data)
         ui.detail(f"  + {rel}")
     if os.name != "nt":
-        for script in ("deploy",):
+        for script in ("deploy", "deploy.ps1"):
             p = ROOT / script
             if p.exists():
                 p.chmod(p.stat().st_mode | 0o111)
@@ -259,5 +289,5 @@ def new(dest: Path, preset: str, name: str | None) -> None:
     )
     if shutil.which("git") and not (dest / ".git").exists():
         proc.run(["git", "init", "--quiet"], cwd=dest, check=False)
-        proc.run(["git", "add", "--chmod=+x", "deploy"], cwd=dest, check=False)
+        proc.run(["git", "add", "--chmod=+x", "deploy", "deploy.ps1"], cwd=dest, check=False)
     ui.ok(f"project created. cd {dest} && ./deploy setup")

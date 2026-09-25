@@ -940,22 +940,23 @@ def _expand_percent(value: str, env: Mapping[str, str]) -> str:
 
 def registry_path_dirs(env: Mapping[str, str]) -> list[str]:
     """The user and machine PATH from the Windows registry, %VARS% expanded with `env`."""
-    if sys.platform != "win32":
-        return []
-    import winreg
-
-    keys = (
-        (winreg.HKEY_CURRENT_USER, "Environment"),
-        (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
-    )
     dirs: list[str] = []
-    for hive, key in keys:
-        try:
-            with winreg.OpenKey(hive, key) as handle:
-                value, _ = winreg.QueryValueEx(handle, "Path")
-        except OSError:
-            continue
-        dirs += [_expand_percent(p.strip().strip('"'), env) for p in str(value).split(";") if p.strip()]
+    # `== "win32"` around the code, not an early return: mypy (warn_unreachable) checks this
+    # module for every OS, and the winreg code would be unreachable elsewhere.
+    if sys.platform == "win32":
+        import winreg
+
+        keys = (
+            (winreg.HKEY_CURRENT_USER, "Environment"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        )
+        for hive, key in keys:
+            try:
+                with winreg.OpenKey(hive, key) as handle:
+                    value, _ = winreg.QueryValueEx(handle, "Path")
+            except OSError:
+                continue
+            dirs += [_expand_percent(p.strip().strip('"'), env) for p in str(value).split(";") if p.strip()]
     return dirs
 
 

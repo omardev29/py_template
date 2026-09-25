@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -27,15 +28,17 @@ MOBILE_WEB = {"apk", "aab", "ipa", "ios-simulator", "web"}
 
 
 def _developer_mode() -> bool:
-    try:
+    if sys.platform == "win32":  # not an early return: see cmd_env._long_paths
         import winreg
 
         path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as key:
-            value, _ = winreg.QueryValueEx(key, "AllowDevelopmentWithoutDevLicense")
-            return bool(value)
-    except OSError:
-        return False
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as key:
+                value, _ = winreg.QueryValueEx(key, "AllowDevelopmentWithoutDevLicense")
+                return bool(value)
+        except OSError:
+            pass
+    return False
 
 
 def _pinned_requirements(cfg_tool: envs.PyEnv) -> list[str]:

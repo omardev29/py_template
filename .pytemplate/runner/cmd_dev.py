@@ -90,7 +90,9 @@ def _run_mypy(cfg: Config, profile: str, blocking: bool) -> bool:
     return False
 
 
-def run_checks(cfg: Config, backend: str) -> bool:
+def run_checks(cfg: Config, backend: str, *, rules: bool = True) -> bool:
+    """ruff + mypy with the backend's typing profile, the mypyc rules (unless `rules` is False)
+    and basedpyright when it is the editor. Return whether everything passed."""
     profile = cfg.profile_for(backend)
     data = render.load_profile(profile)
     blocking = bool(data.get("blocking", False))
@@ -108,7 +110,7 @@ def run_checks(cfg: Config, backend: str) -> bool:
     if not data.get("skip_mypy"):
         ok = _run_mypy(cfg, profile, blocking) and ok
 
-    if cfg.supports("mypyc"):
+    if rules and cfg.supports("mypyc"):
         files = mypyc.compiled_sources(cfg)
         findings = lintc.lint(cfg, files)
         strict = profile == "mypyc"
@@ -136,16 +138,16 @@ def cmd_check(cfg: Config, args: list[str]) -> int:
     if rest:
         raise DeployError(f"check: unrecognized arguments: {' '.join(rest)}")
     targets = cfg.backend.supported if target == "all" else [target]
-    # Each profile is checked only once (cpython and pypy usually share it)
-    seen: set[str] = set()
-    ok = True
+    # Each profile is checked only once (cpython and pypy usually share it), and the mypyc rules
+    # only once, with the strictest profile (otherwise every finding shows up twice)
+    chosen: dict[str, str] = {}
     for b in targets:
         envs.ensure_supported(cfg, b)
-        profile = cfg.profile_for(b)
-        if profile in seen:
-            continue
-        seen.add(profile)
-        ok = run_checks(cfg, b) and ok
+        chosen.setdefault(cfg.profile_for(b), b)
+    rules_profile = "mypyc" if "mypyc" in chosen else next(iter(chosen))
+    ok = True
+    for profile, b in chosen.items():
+        ok = run_checks(cfg, b, rules=profile == rules_profile) and ok
     if ok:
         ui.ok("check: no errors")
         return 0

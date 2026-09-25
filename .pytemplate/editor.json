@@ -167,8 +167,8 @@
     },
     {
       "name": "shell-setup",
-      "usage": "[xonsh|pwsh|bash|zsh|niubash|msys2|fish|nu]",
-      "summary": "Print an alias to use `deploy` without ./",
+      "usage": "[xonsh|pwsh|powershell|bash|zsh|niubash|msys2|fish|nu]",
+      "summary": "Print a `deploy` function/alias for your shell (works from any subfolder)",
       "group": "Other"
     },
     {

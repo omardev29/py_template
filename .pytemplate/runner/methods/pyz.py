@@ -168,5 +168,5 @@ def merge(parts: list[Path], out: Path) -> Path:
         (root / "_pyz.json").write_text(json.dumps(merged, indent=2), encoding="utf-8", newline="\n")
         out.parent.mkdir(parents=True, exist_ok=True)
         zipapp.create_archive(root, out, interpreter="/usr/bin/env python3", compressed=True)
-    ui.ok(f"{rel(out)}: binaries for {', '.join(targets)}")
+    ui.ok(f"{rel(out)}: binaries for {', '.join(targets) or 'no platform (pure Python)'}")
     return out
