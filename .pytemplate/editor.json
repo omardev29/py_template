@@ -6,6 +6,7 @@
   "preset": "script",
   "gui": false,
   "min_python": "3.14",
+  "pypy_enabled": false,
   "backend": {
     "active": "cpython",
     "supported": [
@@ -20,7 +21,8 @@
     "mypy_severity": {
       "error": "Error",
       "note": "Information"
-    }
+    },
+    "python_version": null
   },
   "envs": {
     "tools": ".venv",
@@ -35,5 +37,172 @@
       "help": "Same as CI: check and tests on every backend",
       "background": false
     }
-  ]
+  ],
+  "commands": [
+    {
+      "name": "setup",
+      "usage": "",
+      "summary": "Install interpreters and backend environments, lock deps and generate configs",
+      "group": "Environment"
+    },
+    {
+      "name": "doctor",
+      "usage": "",
+      "summary": "Check uv, compiler, PyPy, JIT, shells and generated files",
+      "group": "Environment"
+    },
+    {
+      "name": "sync",
+      "usage": "[cpython|pypy|mypyc|all]",
+      "summary": "Run uv sync --locked on one or all environments",
+      "group": "Environment"
+    },
+    {
+      "name": "lock",
+      "usage": "[--upgrade] [--upgrade-package PKG]",
+      "summary": "Apply the managed parts of pyproject and re-lock uv.lock",
+      "group": "Environment"
+    },
+    {
+      "name": "add",
+      "usage": "PKG... [--dev|--group G] [--cpython-only]",
+      "summary": "Add dependencies (uv add)",
+      "group": "Environment"
+    },
+    {
+      "name": "remove",
+      "usage": "PKG... [--dev|--group G]",
+      "summary": "Remove dependencies (uv remove)",
+      "group": "Environment"
+    },
+    {
+      "name": "clean",
+      "usage": "[--envs]",
+      "summary": "Remove .build/ and dist/ (and the environments with --envs)",
+      "group": "Environment"
+    },
+    {
+      "name": "mode",
+      "usage": "[BACKEND] [--supports +pypy|-pypy] [--typing off|warn|strict|auto] [--jit on|off] [--editor pylance|basedpyright]",
+      "summary": "Show or change the mode (backend, supported, typing, JIT, editor)",
+      "group": "Mode"
+    },
+    {
+      "name": "render",
+      "usage": "[--check] [--diff] [--force]",
+      "summary": "Regenerate .mypy.ini, pyrightconfig.json, .ruff.toml and .vscode/",
+      "group": "Mode"
+    },
+    {
+      "name": "init",
+      "usage": "PRESET [--name NAME] [--force]",
+      "summary": "Convert this project to a preset (script, raylib, flet)",
+      "group": "Mode"
+    },
+    {
+      "name": "new",
+      "usage": "DIR [--preset P] [--name NAME]",
+      "summary": "Create a new project from this template",
+      "group": "Mode"
+    },
+    {
+      "name": "run",
+      "usage": "[BACKEND] [app args...]",
+      "summary": "Run the app (mypyc: compile first)",
+      "group": "Development"
+    },
+    {
+      "name": "check",
+      "usage": "[BACKEND|all]",
+      "summary": "Run ruff + mypy with the backend's typing profile + mypyc rules",
+      "group": "Development"
+    },
+    {
+      "name": "lint",
+      "usage": "[--fix]",
+      "summary": "ruff check",
+      "group": "Development"
+    },
+    {
+      "name": "fmt",
+      "usage": "[--check]",
+      "summary": "ruff format",
+      "group": "Development"
+    },
+    {
+      "name": "test",
+      "usage": "[BACKEND|all] [pytest args...]",
+      "summary": "Run pytest on one backend (mypyc: against the .pyd files) or on all of them",
+      "group": "Development"
+    },
+    {
+      "name": "report",
+      "usage": "[--open] [--no-mypy]",
+      "summary": "Generate the mypyc HTML report of slow lines + mypy's Any reports",
+      "group": "Development"
+    },
+    {
+      "name": "compile",
+      "usage": "[--release]",
+      "summary": "Compile the mypyc stage without running it (for debuggers and editors)",
+      "group": "Development"
+    },
+    {
+      "name": "build",
+      "usage": "[BACKEND] [--method exe|portable|pyz|wheel|nuitka|flet] [--onefile|--onedir] [--target KEY]... [--no-check]",
+      "summary": "Compile and package into dist/",
+      "group": "Distribution"
+    },
+    {
+      "name": "pyz-merge",
+      "usage": "A.pyz B.pyz... --out C.pyz",
+      "summary": "Merge the .pyz files of each OS (e.g. from CI) into a cross-platform one",
+      "group": "Distribution"
+    },
+    {
+      "name": "tasks",
+      "usage": "",
+      "summary": "List the custom tasks in pytemplate.toml [tasks]",
+      "group": "Other"
+    },
+    {
+      "name": "shell-setup",
+      "usage": "[xonsh|pwsh|bash|zsh|niubash|msys2|fish|nu]",
+      "summary": "Print an alias to use `deploy` without ./",
+      "group": "Other"
+    },
+    {
+      "name": "nvim",
+      "usage": "[doctor|trust|extras|bootstrap|sync]",
+      "summary": "Neovim/LazyVim integration: check it, trust .lazy.lua, enable extras, sync plugins",
+      "group": "Other"
+    },
+    {
+      "name": "selftest",
+      "usage": "[--shells|--nvim|--e2e] [args...]",
+      "summary": "Run the runner's own tests and mypy --strict (.pytemplate)",
+      "group": "Other"
+    },
+    {
+      "name": "help",
+      "usage": "[COMMAND]",
+      "summary": "Show this help (or a command's help)",
+      "group": "Other"
+    }
+  ],
+  "build": {
+    "methods": [
+      "exe",
+      "portable",
+      "pyz",
+      "wheel",
+      "nuitka",
+      "flet"
+    ],
+    "default": {
+      "cpython": "exe",
+      "mypyc": "exe",
+      "pypy": "portable"
+    }
+  }
 }
