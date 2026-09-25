@@ -21,3 +21,7 @@ build/
 
 # Flet (flet run / flet build)
 .flet/
+
+# Claude Code: agent worktrees and personal settings
+.claude/worktrees/
+.claude/settings.local.json
