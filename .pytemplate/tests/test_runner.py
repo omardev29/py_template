@@ -104,6 +104,19 @@ def test_pyproject_rewrite_is_idempotent() -> None:
     tomllib.loads(once)
 
 
+def test_write_pyproject_writes_nothing_under_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from runner import proc
+
+    target = tmp_path / "pyproject.toml"
+    target.write_text('[project]\nname = "x"\nrequires-python = ">=3.11"\n\n[tool.uv]\nfoo = 1\n', encoding="utf-8")
+    before = target.read_bytes()
+    monkeypatch.setattr(render, "PYPROJECT", target)
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert render.write_pyproject(make({})) is True  # it would change...
+    assert target.read_bytes() == before  # ...but nothing is written
+    assert render.pyproject_message().startswith("pyproject.toml: would update")
+
+
 def test_toml_serializer_roundtrip() -> None:
     data = {"a": 1, "b": ["x", "y"], "lint": {"select": ["E"], "per-file-ignores": {"tests/**": ["ANN"]}}}
     assert tomllib.loads(render.to_toml(data)) == data

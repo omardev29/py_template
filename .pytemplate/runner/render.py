@@ -386,10 +386,19 @@ def pyproject_outdated(cfg: Config) -> bool:
 
 
 def write_pyproject(cfg: Config) -> bool:
+    """Rewrite the managed parts of pyproject.toml. Return whether they changed (or, under
+    --dry-run, would change: nothing is written then)."""
     text = _norm(PYPROJECT.read_text(encoding="utf-8"))
     new = pyproject_expected(cfg, text)
     if new == text:
         return False
     tomllib.loads(new)
-    PYPROJECT.write_text(new, encoding="utf-8", newline="\n")
+    if not proc.DRY_RUN:
+        PYPROJECT.write_text(new, encoding="utf-8", newline="\n")
     return True
+
+
+def pyproject_message() -> str:
+    """Return the line printed after write_pyproject returned True."""
+    verb = "would update" if proc.DRY_RUN else "updated"
+    return f"pyproject.toml: {verb} the parts managed by pytemplate"

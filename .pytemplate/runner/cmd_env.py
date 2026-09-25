@@ -35,7 +35,7 @@ def ensure_lock(cfg: Config) -> None:
     """Apply the managed parts of pyproject and re-lock if needed."""
     tool = envs.tool_env(cfg)
     if render.write_pyproject(cfg):
-        ui.info("pyproject.toml: updated the parts managed by pytemplate")
+        ui.info(render.pyproject_message())
     r = envs.uv(tool, ["lock", "--check"], check=False, capture=True, echo=False)
     if r.returncode != 0:
         envs.uv(tool, ["lock"])
@@ -81,7 +81,7 @@ def cmd_sync(cfg: Config, args: list[str]) -> int:
 def cmd_lock(cfg: Config, args: list[str]) -> int:
     """lock [--upgrade] [--upgrade-package PKG]: apply the managed pyproject parts and `uv lock`."""
     if render.write_pyproject(cfg):
-        ui.info("pyproject.toml: updated the parts managed by pytemplate")
+        ui.info(render.pyproject_message())
     envs.uv(envs.tool_env(cfg), ["lock", *args])
     render.apply(cfg)
     return 0
