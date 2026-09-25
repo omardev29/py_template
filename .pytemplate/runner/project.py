@@ -1,4 +1,4 @@
-"""Rutas del proyecto y detección de plataforma."""
+"""Project paths and platform detection."""
 
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ STATE_FILE = TEMPLATE / "state.json"
 
 IS_WINDOWS = os.name == "nt"
 IS_MACOS = sys.platform == "darwin"
-# WSL sobre un checkout de Windows (/mnt/c/...): entornos y builds aparte, para no
-# convertir el .venv de Windows en uno de Linux.
+# WSL on a Windows checkout (/mnt/c/...): separate environments and builds, so the
+# Windows .venv is not turned into a Linux one.
 IS_WSL = (
     sys.platform == "linux"
     and "WSL_DISTRO_NAME" in os.environ
@@ -35,7 +35,7 @@ EXT_SUFFIXES = (".pyd", ".so")
 
 
 def venv_python(env_dir: Path) -> Path:
-    """Intérprete dentro de un entorno virtual (Scripts/ en Windows, bin/ en el resto)."""
+    """Return the interpreter inside a virtual environment (Scripts/ on Windows, bin/ elsewhere)."""
     if IS_WINDOWS:
         return env_dir / "Scripts" / "python.exe"
     return env_dir / "bin" / "python"
@@ -49,7 +49,7 @@ def host_os() -> str:
 
 
 def host_arch() -> str:
-    """x86_64 | aarch64 | x86 (nombres de uv)."""
+    """x86_64 | aarch64 | x86 (uv names)."""
     machine = platform.machine().lower()
     return {
         "amd64": "x86_64",
@@ -63,7 +63,7 @@ def host_arch() -> str:
 
 
 def rel(path: Path | str) -> str:
-    """Ruta relativa a la raíz del proyecto para mostrarla (o la absoluta si está fuera)."""
+    """Return a path relative to the project root for display (or the absolute one if outside)."""
     p = Path(path)
     try:
         return p.resolve().relative_to(ROOT).as_posix() or "."
@@ -72,5 +72,5 @@ def rel(path: Path | str) -> str:
 
 
 def code_dirs() -> list[str]:
-    """Carpetas de código que revisan ruff/mypy (las que existan)."""
+    """Return the code folders that ruff/mypy check (those that exist)."""
     return [d for d in ("src", "tests") if (ROOT / d).is_dir()]

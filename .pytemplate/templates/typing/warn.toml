@@ -1,7 +1,7 @@
-# Perfil de tipado "warn": los tipos son opcionales y los problemas salen como AVISOS.
-# Nunca bloquea `./deploy check` ni `build`. Actívalo con typing.relaxed = "warn".
+# Typing profile "warn": types are optional and problems are reported as WARNINGS.
+# Never blocks `./deploy check` or `build`. Enable it with typing.relaxed = "warn".
 
-description = "Tipos opcionales; los problemas se muestran como avisos y nunca bloquean"
+description = "Optional types; problems are shown as warnings and never block"
 blocking = false
 
 [mypy]

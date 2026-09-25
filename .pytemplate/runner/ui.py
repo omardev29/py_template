@@ -1,4 +1,4 @@
-"""Salida por consola del runner: todo va a stderr para no mezclarse con la de tu app."""
+"""Runner console output: everything goes to stderr so it does not mix with your app's output."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ import sys
 
 
 class DeployError(Exception):
-    """Error esperado: se muestra sin traceback y el runner sale con `code`.
+    """Expected error: shown without a traceback, and the runner exits with `code`.
 
-    Códigos: 2 = uso/configuración, 3 = falta un requisito (uv, compilador, intérprete).
+    Codes: 2 = usage/configuration, 3 = a requirement is missing (uv, compiler, interpreter).
     """
 
     def __init__(self, message: str, code: int = 2) -> None:
@@ -22,7 +22,7 @@ QUIET = False
 
 _COLOR = sys.stderr.isatty() and "NO_COLOR" not in os.environ
 if _COLOR and os.name == "nt":
-    os.system("")  # activa las secuencias ANSI en la consola clásica de Windows
+    os.system("")  # enables ANSI sequences in the classic Windows console
 
 
 def _paint(code: str, text: str) -> str:
@@ -59,7 +59,7 @@ def ok(msg: str) -> None:
 
 
 def warn(msg: str) -> None:
-    _out(_paint("33", "aviso: ") + msg)
+    _out(_paint("33", "warning: ") + msg)
 
 
 def error(msg: str) -> None:
@@ -67,7 +67,7 @@ def error(msg: str) -> None:
 
 
 def check_line(passed: bool | None, label: str, hint: str = "") -> None:
-    """Una línea de `doctor`: ✓ / ✗ / – (no aplica) más una pista opcional."""
+    """Print one `doctor` line: ✓ / ✗ / – (not applicable) plus an optional hint."""
     mark = {True: _paint("32", "ok"), False: _paint("31", "XX"), None: _paint("2", "--")}[passed]
     _out(f"  [{mark}] {label}")
     if hint and passed is not True:

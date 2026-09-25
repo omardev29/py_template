@@ -3,12 +3,12 @@
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
 *.sh  text eol=lf
-# Lanzadores de ./deploy (van DESPUÉS: en git gana la última línea que coincide).
-# El de sh necesita LF siempre; el .ps1 también, porque su shebang lo usa xonsh
-# (PowerShell 5.1 lee LF sin problema).
+# ./deploy launchers (they go AFTER: in git the last matching line wins).
+# The sh one always needs LF; so does the .ps1, because xonsh uses its shebang
+# (PowerShell 5.1 reads LF just fine).
 deploy     text eol=lf
 deploy.ps1 text eol=lf
-# Binarios
+# Binaries
 *.png binary
 *.ico binary
 *.pyz binary

@@ -1,4 +1,4 @@
-"""Comandos de modo y plantilla: mode, render, init, new."""
+"""Mode and template commands: mode, render, init, new."""
 
 from __future__ import annotations
 
@@ -12,15 +12,15 @@ from .ui import DeployError
 
 
 def _describe(cfg: Config) -> None:
-    ui.step("modo actual")
-    ui.info(f"  app            {cfg.app.name}  (preset {cfg.app.preset}, paquete src/{cfg.pkg}/)")
-    ui.info(f"  backend activo {cfg.backend.active}")
-    ui.info(f"  soportados     {', '.join(cfg.backend.supported)}  (sintaxis Python {cfg.min_python}+)")
+    ui.step("current mode")
+    ui.info(f"  app            {cfg.app.name}  (preset {cfg.app.preset}, package src/{cfg.pkg}/)")
+    ui.info(f"  active backend {cfg.backend.active}")
+    ui.info(f"  supported      {', '.join(cfg.backend.supported)}  (Python {cfg.min_python}+ syntax)")
     for b in cfg.backend.supported:
-        ui.info(f"  tipado {b:<8} {cfg.profile_for(b)}")
+        ui.info(f"  {'typing ' + b:<14} {cfg.profile_for(b)}")
     ui.info(f"  editor         {cfg.typing.editor}")
-    ui.info(f"  compila mypyc  {', '.join(cfg.compile.modules)}")
-    ui.info(f"  JIT CPython    {'sí' if cfg.python.jit else 'no'}")
+    ui.info(f"  mypyc compiles {', '.join(cfg.compile.modules)}")
+    ui.info(f"  CPython JIT    {'yes' if cfg.python.jit else 'no'}")
 
 
 def _supports_after(cfg: Config, spec: str) -> list[str]:
@@ -29,7 +29,7 @@ def _supports_after(cfg: Config, spec: str) -> list[str]:
         for token in spec.split(","):
             name = token[1:]
             if name not in BACKENDS:
-                raise DeployError(f"mode --supports: backend desconocido '{name}'")
+                raise DeployError(f"mode --supports: unknown backend '{name}'")
             if token[0] == "+" and name not in current:
                 current.append(name)
             elif token[0] == "-" and name in current:
@@ -38,25 +38,25 @@ def _supports_after(cfg: Config, spec: str) -> list[str]:
     names = [n.strip() for n in spec.split(",") if n.strip()]
     for n in names:
         if n not in BACKENDS:
-            raise DeployError(f"mode --supports: backend desconocido '{n}'")
+            raise DeployError(f"mode --supports: unknown backend '{n}'")
     return [b for b in BACKENDS if b in names]
 
 
 def _precheck_py311(cfg: Config) -> None:
-    """Antes de soportar PyPy: ¿el código es válido en Python 3.11?"""
-    ui.step("comprobando que el código es válido en Python 3.11 (requisito de PyPy)")
+    """Check that the code is valid on Python 3.11 before adding PyPy support."""
+    ui.step("checking that the code is valid on Python 3.11 (required by PyPy)")
     tool = envs.tool_env(cfg)
     dirs = code_dirs()
-    # 1) sintaxis: ruff marca como error la sintaxis que no existe en la versión objetivo
+    # 1) syntax: ruff reports syntax that does not exist in the target version as an error
     r = envs.uv_run(
         tool,
         ["ruff", "check", "--no-cache", "--isolated", "--target-version", "py311", "--select", "E9,F63,F7,F82", *dirs],
         check=False,
     )
     if r.returncode != 0:
-        raise DeployError("hay sintaxis que no existe en Python 3.11 (ver arriba); corrígela antes de activar PyPy")
+        raise DeployError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
 
-    # 2) APIs: errores de mypy que aparecen SOLO al comprobar como 3.11 (p. ej. typing.override)
+    # 2) APIs: mypy errors that appear ONLY when checking as 3.11 (e.g. typing.override)
     def mypy_errors(version: str) -> set[str]:
         argv = [
             proc.find_uv(), "run", "--locked", "mypy", "--no-incremental", "--ignore-missing-imports",
@@ -71,21 +71,21 @@ def _precheck_py311(cfg: Config) -> None:
         for line in new:
             ui.error(line)
         raise DeployError(
-            "el código usa APIs que no existen en Python 3.11 (arriba). Corrígelo antes de activar PyPy "
-            "(p. ej. typing.override -> typing_extensions.override)"
+            "the code uses APIs that do not exist in Python 3.11 (above). Fix it before enabling PyPy "
+            "(e.g. typing.override -> typing_extensions.override)"
         )
-    ui.ok("el código es válido en Python 3.11")
+    ui.ok("the code is valid on Python 3.11")
 
 
 def cmd_mode(cfg: Config, args: list[str]) -> int:
     """mode [BACKEND] [--supports +pypy|-pypy|a,b] [--typing off|warn|strict|auto] [--jit on|off] [--editor pylance|basedpyright]"""
     parser = argparse.ArgumentParser(prog="./deploy mode")
     parser.add_argument("backend", nargs="?", choices=BACKENDS)
-    parser.add_argument("--supports", help="+pypy, -pypy o lista completa (cpython,mypyc)")
+    parser.add_argument("--supports", help="+pypy, -pypy or a full list (cpython,mypyc)")
     parser.add_argument("--typing", choices=("auto", "off", "warn", "strict", "mypyc"))
     parser.add_argument("--jit", choices=("on", "off"))
     parser.add_argument("--editor", choices=config.EDITORS)
-    # `--supports -pypy`: argparse tomaría "-pypy" por una opción; lo unimos como --supports=-pypy
+    # `--supports -pypy`: argparse would take "-pypy" for an option; join it as --supports=-pypy
     fixed: list[str] = []
     it = iter(args)
     for a in it:
@@ -133,7 +133,7 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
         ensure_lock(new_cfg)
     changed, _ = render.apply(new_cfg)
     if changed:
-        ui.info(f"render: actualizado {', '.join(changed)}")
+        ui.info(f"render: updated {', '.join(changed)}")
     if adding_pypy:
         envs.sync(envs.pypy_env(new_cfg))
     if ns.jit == "on":
@@ -143,26 +143,26 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
 
 
 def cmd_render(cfg: Config, args: list[str]) -> int:
-    """render [--check] [--diff] [--force]: regenera los archivos de configuración."""
+    """render [--check] [--diff] [--force]: regenerate the configuration files."""
     check = "--check" in args
     changed, edited = render.apply(cfg, force="--force" in args, check=check, show_diff="--diff" in args)
     for path in changed:
-        ui.info(("desactualizado: " if check else "actualizado: ") + path)
+        ui.info(("outdated: " if check else "updated: ") + path)
     for path in edited:
-        ui.warn(f"editado a mano (no se toca sin --force): {path}")
+        ui.warn(f"hand-edited (left untouched without --force): {path}")
     if render.pyproject_outdated(cfg):
-        ui.warn("pyproject.toml no coincide con pytemplate.toml: ./deploy lock")
+        ui.warn("pyproject.toml does not match pytemplate.toml: ./deploy lock")
         if check:
             return 1
     if check and (changed or edited):
         return 1
     if not changed and not edited:
-        ui.ok("archivos generados al día")
+        ui.ok("generated files up to date")
     return 0
 
 
 def cmd_init(cfg: Config, args: list[str]) -> int:
-    """init PRESET [--name NOMBRE] [--force]: convierte este proyecto al preset."""
+    """init PRESET [--name NAME] [--force]: convert this project to the preset."""
     parser = argparse.ArgumentParser(prog="./deploy init")
     parser.add_argument("preset", choices=presets.available())
     parser.add_argument("--name")
@@ -173,7 +173,7 @@ def cmd_init(cfg: Config, args: list[str]) -> int:
 
 
 def cmd_new(cfg: Config, args: list[str]) -> int:
-    """new CARPETA [--preset P] [--name NOMBRE]: copia la plantilla a un proyecto nuevo."""
+    """new DIR [--preset P] [--name NAME]: copy the template to a new project."""
     parser = argparse.ArgumentParser(prog="./deploy new")
     parser.add_argument("dest")
     parser.add_argument("--preset", default="script", choices=presets.available())
@@ -186,6 +186,6 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
     if not dest.is_absolute():
         dest = base / dest
     if dest.resolve() == ROOT or ROOT in dest.resolve().parents:
-        raise DeployError("new: la carpeta destino no puede estar dentro de esta plantilla")
+        raise DeployError("new: the destination folder cannot be inside this template")
     presets.new(dest, ns.preset, ns.name)
     return 0

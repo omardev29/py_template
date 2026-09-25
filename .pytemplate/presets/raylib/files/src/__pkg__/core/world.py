@@ -1,10 +1,10 @@
-"""Estado y física del juego (sin raylib): lo compila mypyc.
+"""Game state and physics (no raylib): compiled by mypyc.
 
-- Clases nativas (@final, atributos float): mypyc las guarda como dobles de C, sin
-  objetos intermedios.
-- Constantes Final: un global sin Final se busca en un diccionario en cada acceso.
-- Aleatoriedad propia (LCG): determinista e igual en CPython, PyPy y mypyc.
-- Sintaxis de Python 3.11 (PyPy): nada de `type X = ...` ni genéricos PEP 695.
+- Native classes (@final, float attributes): mypyc stores them as C doubles, with no
+  intermediate objects.
+- Final constants: a global without Final is looked up in a dictionary on every access.
+- Custom random generator (LCG): deterministic and identical on CPython, PyPy and mypyc.
+- Python 3.11 syntax (PyPy): no `type X = ...` and no PEP 695 generics.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ class World:
         self.seed = seed
 
     def random(self) -> float:
-        """Número en [0, 1) con un generador congruencial lineal."""
+        """Return a number in [0, 1) from a linear congruential generator."""
         self.seed = (self.seed * 1103515245 + 12345) & 0x7FFFFFFF
         return self.seed / 2147483648.0
 

@@ -1,5 +1,5 @@
 # Assets
 
-Todo lo que pongas aquí se empaqueta con el juego (exe, portable y pyz).
-Cárgalo con `{{pkg}}.resources.asset("nombre.png")`, o con `gfx.load_texture("nombre.png")`
-para texturas. Las rutas funcionan igual en desarrollo y en el ejecutable.
+Everything you put here is packaged with the game (exe, portable and pyz).
+Load a file with `{{pkg}}.resources.asset("name.png")`, or with `gfx.load_texture("name.png")`
+for textures. Paths work the same in development and in the executable.

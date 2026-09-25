@@ -1,7 +1,7 @@
-"""Lanzador del juego. NUNCA se compila con mypyc.
+"""Game launcher. NEVER compiled with mypyc.
 
-Un módulo compilado siempre se importa (nunca es __main__), así que la lógica vive
-en el paquete {{pkg}} y este archivo solo la llama.
+A compiled module is always imported (it is never __main__), so the logic lives
+in the {{pkg}} package and this file only calls it.
 """
 
 import sys

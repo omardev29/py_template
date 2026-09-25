@@ -1,6 +1,6 @@
 """Console interface (boundary module, interpreted): times the core and shows the results.
 
-The heavy work lives in {{pkg}}.core, which is what mypyc compiles. This module
+The heavy work lives in myapp.core, which is what mypyc compiles. This module
 only orchestrates and renders, so it gains nothing from being compiled.
 """
 
@@ -10,7 +10,7 @@ import time
 from rich.console import Console
 from rich.table import Table
 
-from {{pkg}}.core import bench
+from myapp.core import bench
 
 
 def _backend() -> str:
@@ -27,7 +27,7 @@ def main() -> int:
     number, steps = bench.collatz_max(bench.COLLATZ_LIMIT)
     t2 = time.perf_counter()
 
-    table = Table(title=f"{{name}}: {_backend()}")
+    table = Table(title=f"myapp: {_backend()}")
     table.add_column("Task")
     table.add_column("Result", justify="right")
     table.add_column("Time", justify="right")

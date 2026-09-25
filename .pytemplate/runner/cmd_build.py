@@ -1,4 +1,4 @@
-"""build [BACKEND] [--method M]: prepara la carga útil del backend y la empaqueta."""
+"""build [BACKEND] [--method M]: prepare the backend's payload and package it."""
 
 from __future__ import annotations
 
@@ -14,11 +14,11 @@ from .config import BACKENDS, METHODS, Config
 from .project import BUILD, DIST, SRC, rel
 from .ui import DeployError
 
-# Qué backends admite cada método (y por qué no el resto)
+# Which backends each method supports (and why not the rest)
 COMPAT: dict[str, dict[str, str]] = {
-    "exe": {"pypy": "PyInstaller no soporta PyPy. Usa --method portable (carpeta con PyPy dentro)."},
-    "nuitka": {"pypy": "Nuitka solo compila para CPython. Usa --method portable."},
-    "flet": {"pypy": "flet build embebe CPython. Usa --method portable."},
+    "exe": {"pypy": "PyInstaller does not support PyPy. Use --method portable (a folder with PyPy inside)."},
+    "nuitka": {"pypy": "Nuitka only compiles for CPython. Use --method portable."},
+    "flet": {"pypy": "flet build embeds CPython. Use --method portable."},
     "portable": {},
     "pyz": {},
     "wheel": {},
@@ -30,7 +30,7 @@ class BuildRequest:
     cfg: Config
     backend: str
     method: str
-    app_dir: Path  # carpeta con main.py, el paquete (y los .pyd si es mypyc) y assets/
+    app_dir: Path  # folder with main.py, the package (plus the .pyd files with mypyc) and assets/
     onefile: bool | None = None
     targets: list[str] = field(default_factory=list)
     extra: list[str] = field(default_factory=list)
@@ -45,7 +45,7 @@ class BuildRequest:
 
 
 def payload(cfg: Config, backend: str) -> Path:
-    """Código de la app listo para empaquetar: src/ tal cual, o el stage release de mypyc."""
+    """Return the app code ready to package: src/ as-is, or the mypyc release stage."""
     if backend == "mypyc":
         return mypyc.build(cfg, "release")
     dest = BUILD / "payload" / backend
@@ -60,11 +60,11 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--onefile", action="store_true")
     mode.add_argument("--onedir", action="store_true")
-    parser.add_argument("--target", action="append", default=[], help="plataformas extra (pyz/portable), p. ej. cp314-linux-x86_64")
-    parser.add_argument("--no-check", action="store_true", help="no ejecutar ./deploy check antes")
+    parser.add_argument("--target", action="append", default=[], help="extra platforms (pyz/portable), e.g. cp314-linux-x86_64")
+    parser.add_argument("--no-check", action="store_true", help="do not run ./deploy check first")
     ns, extra = parser.parse_known_args(rest)
     if backend not in BACKENDS:
-        raise DeployError(f"backend desconocido: {backend}")
+        raise DeployError(f"unknown backend: {backend}")
     from . import envs
 
     envs.ensure_supported(cfg, backend)
@@ -74,9 +74,9 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
         raise DeployError(f"{method} + {backend}: {reason}")
 
     if not ns.no_check and not run_checks(cfg, backend):
-        raise DeployError("check falló: corrígelo o usa --no-check")
+        raise DeployError("check failed: fix it or use --no-check")
     if proc.DRY_RUN:
-        ui.info(f"(--dry-run) build {backend} -> {method}: saldría en {rel(DIST)}/{cfg.app.name}-{backend}-{method}*")
+        ui.info(f"(--dry-run) build {backend} -> {method}: would output {rel(DIST)}/{cfg.app.name}-{backend}-{method}*")
         return 0
 
     app_dir = payload(cfg, backend)
@@ -85,7 +85,7 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
     ui.step(f"build {backend} -> {method}")
     module = importlib.import_module(f"{__package__}.methods.{method}")
     result: Path = module.build(req)
-    ui.ok(f"listo: {rel(result)}  ({_size(result)})")
+    ui.ok(f"done: {rel(result)}  ({_size(result)})")
     return 0
 
 
@@ -107,7 +107,7 @@ def dist_path(req: BuildRequest, suffix: str = "") -> Path:
 
 
 def cmd_pyz_merge(cfg: Config, args: list[str]) -> int:
-    """pyz-merge A.pyz B.pyz ... --out C.pyz: une los .pyz de cada SO en uno solo."""
+    """pyz-merge A.pyz B.pyz ... --out C.pyz: merge the per-OS .pyz files into one."""
     parser = argparse.ArgumentParser(prog="./deploy pyz-merge")
     parser.add_argument("parts", nargs="+", type=Path)
     parser.add_argument("--out", type=Path, required=True)

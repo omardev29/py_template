@@ -6,16 +6,16 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 
-# Entornos (uno por backend: .venv, .venv-pypy, .venv-jit, y -wsl)
+# Environments (one per backend: .venv, .venv-pypy, .venv-jit, and their -wsl variants)
 .venv*/
 
-# Salidas de ./deploy (stage de mypyc, PyInstaller, runtimes, informes) y artefactos
+# ./deploy outputs (mypyc stage, PyInstaller, runtimes, reports) and artifacts
 .build/
 dist/
 build/
 *.spec
 
-# Extensiones compiladas: solo existen en .build/ (si aparecen en src/, sobran)
+# Compiled extensions: they only exist in .build/ (any that show up in src/ are stray)
 *.so
 *.pyd
 

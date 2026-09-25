@@ -1,6 +1,6 @@
-"""Lanzador de la app Flet. NUNCA se compila con mypyc (`flet build` también lo necesita en .py).
+"""Flet app launcher. NEVER compiled with mypyc (`flet build` also needs it as .py).
 
-La UI vive en {{pkg}}.ui (interpretada) y el trabajo pesado en {{pkg}}.core (compilado).
+The UI lives in {{pkg}}.ui (interpreted) and the heavy work in {{pkg}}.core (compiled).
 """
 
 
@@ -13,6 +13,6 @@ def _main() -> None:
 if __name__ == "__main__":
     import multiprocessing
 
-    # Imprescindible con ProcessPoolExecutor en un ejecutable (PyInstaller / flet pack)
+    # Required with ProcessPoolExecutor in an executable (PyInstaller / flet pack)
     multiprocessing.freeze_support()
     _main()

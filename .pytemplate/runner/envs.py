@@ -1,12 +1,12 @@
-"""Entornos de Python por backend y cómo llamar a uv dentro de cada uno.
+"""Python environments per backend, and how to call uv inside each one.
 
-- cpython / mypyc -> .venv       (CPython gestionado por uv; aquí corren TODAS las herramientas)
-- pypy            -> .venv-pypy  (PyPy fijado exactamente)
-- python.jit      -> .venv-jit   (un python.org 3.14 del sistema: los CPython de uv para
-                                  Windows no traen el JIT)
+- cpython / mypyc -> .venv       (uv-managed CPython; ALL the tools run here)
+- pypy            -> .venv-pypy  (PyPy pinned exactly)
+- python.jit      -> .venv-jit   (a system python.org 3.14: uv's CPython builds for
+                                  Windows do not ship the JIT)
 
-uv necesita UV_PROJECT_ENVIRONMENT y UV_PYTHON *juntos*: con solo uno de los dos
-recrea el entorno con el intérprete equivocado sin avisar.
+uv needs UV_PROJECT_ENVIRONMENT and UV_PYTHON *together*: with only one of them it
+silently recreates the environment with the wrong interpreter.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ from .ui import DeployError
 class PyEnv:
     key: str  # cpython | pypy | jit
     dir: Path
-    request: str  # valor de UV_PYTHON
-    preference: str  # valor de UV_PYTHON_PREFERENCE
+    request: str  # value of UV_PYTHON
+    preference: str  # value of UV_PYTHON_PREFERENCE
 
     @property
     def python(self) -> Path:
@@ -48,12 +48,12 @@ def jit_env(cfg: Config) -> PyEnv:
 
 
 def tool_env(cfg: Config) -> PyEnv:
-    """Entorno de las herramientas (mypy, ruff, mypyc, PyInstaller...): siempre CPython."""
+    """Return the tools environment (mypy, ruff, mypyc, PyInstaller...): always CPython."""
     return cpython_env(cfg)
 
 
 def runtime_env(cfg: Config, backend: str) -> PyEnv:
-    """Entorno en el que se EJECUTA la app o los tests de un backend."""
+    """Return the environment that RUNS the app or the tests of a backend."""
     if backend == "pypy":
         return pypy_env(cfg)
     return jit_env(cfg) if cfg.python.jit else cpython_env(cfg)
@@ -62,9 +62,9 @@ def runtime_env(cfg: Config, backend: str) -> PyEnv:
 def ensure_supported(cfg: Config, backend: str) -> None:
     if not cfg.supports(backend):
         raise DeployError(
-            f"el backend '{backend}' no está en backend.supported {cfg.backend.supported}.\n"
-            f"  Actívalo con: ./deploy mode --supports +{backend}"
-            + ("  (baja la sintaxis a Python 3.11 y re-bloquea uv.lock)" if backend == "pypy" else "")
+            f"backend '{backend}' is not in backend.supported {cfg.backend.supported}.\n"
+            f"  Enable it with: ./deploy mode --supports +{backend}"
+            + ("  (lowers the syntax to Python 3.11 and re-locks uv.lock)" if backend == "pypy" else "")
         )
 
 
@@ -73,7 +73,7 @@ def env_vars(env: PyEnv, extra: Mapping[str, str] | None = None) -> dict[str, st
     e["UV_PROJECT_ENVIRONMENT"] = str(env.dir)
     e["UV_PYTHON"] = env.request
     e["UV_PYTHON_PREFERENCE"] = env.preference
-    # PYTHON_JIT se lee por su primer carácter: "false" lo ACTIVARÍA. Siempre "0" o "1".
+    # PYTHON_JIT is read by its first character: "false" would ENABLE it. Always "0" or "1".
     e["PYTHON_JIT"] = "1" if env.key == "jit" else "0"
     if extra:
         e.update(extra)
@@ -109,7 +109,7 @@ def uv_run(
     check: bool = True,
     groups: Sequence[str] = (),
 ) -> subprocess.CompletedProcess[str]:
-    """`uv run --locked ...` en el entorno dado (sincroniza solo si hace falta)."""
+    """Run `uv run --locked ...` in the given environment (syncs only when needed)."""
     group_args = [a for g in groups for a in ("--group", g)]
     return uv(env, ["run", "--locked", *group_args, *args], cwd=cwd, extra_env=extra_env, check=check)
 
@@ -120,7 +120,7 @@ def sync(env: PyEnv, *, groups: Sequence[str] = ()) -> None:
 
 
 def interpreter_info(python: str | Path) -> dict[str, object]:
-    """Datos del intérprete (impl, versión, JIT) sin importar nada del proyecto."""
+    """Return interpreter data (impl, version, JIT) without importing anything from the project."""
     code = (
         "import json,sys,sysconfig;"
         "j=getattr(sys,'_jit',None);"
@@ -135,7 +135,7 @@ def interpreter_info(python: str | Path) -> dict[str, object]:
 
 
 def find_jit_interpreter(cfg: Config) -> str:
-    """Busca un CPython del sistema (python.org) con el JIT disponible."""
+    """Find a system CPython (python.org) with the JIT available."""
     if cfg.python.jit_interpreter:
         return cfg.python.jit_interpreter
     candidates: list[str] = []
@@ -158,10 +158,10 @@ def find_jit_interpreter(cfg: Config) -> str:
         except (DeployError, json.JSONDecodeError):
             continue
     raise DeployError(
-        f"python.jit = true pero no hay un CPython {cfg.python.cpython} del sistema con JIT.\n"
-        "  Los CPython que descarga uv para Windows no lo traen. Instala uno de python.org, fijo:\n"
-        f"    py install {cfg.python.cpython}      (gestor oficial de Python para Windows)\n"
+        f"python.jit = true but there is no system CPython {cfg.python.cpython} with the JIT.\n"
+        "  The CPython builds uv downloads for Windows do not ship it. Install a pinned one from python.org:\n"
+        f"    py install {cfg.python.cpython}      (official Python install manager for Windows)\n"
         f"    scoop install versions/python{cfg.python.cpython.replace('.', '')}\n"
-        "  o indica la ruta en python.jit_interpreter.",
+        "  or set its path in python.jit_interpreter.",
         3,
     )

@@ -1,7 +1,7 @@
-"""Núcleo compilado (mypyc): el conjunto de Mandelbrot como imagen PNG.
+"""Compiled core (mypyc): the Mandelbrot set as a PNG image.
 
-No importa Flet: recibe y devuelve tipos simples (int, float, bytes), así la UI puede
-llamarlo desde un handler o desde otro proceso. Solo biblioteca estándar.
+It does not import Flet: it takes and returns simple types (int, float, bytes), so the UI
+can call it from a handler or from another process. Standard library only.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ PNG_SIGNATURE: Final = b"\x89PNG\r\n\x1a\n"
 
 
 def escape_time(cr: float, ci: float, max_iter: int) -> int:
-    """Iteraciones hasta que el punto escapa (max_iter si pertenece al conjunto)."""
+    """Return the iterations until the point escapes (max_iter if it is in the set)."""
     zr = 0.0
     zi = 0.0
     n = 0
@@ -30,7 +30,7 @@ def escape_time(cr: float, ci: float, max_iter: int) -> int:
 
 
 def render_rgb(width: int, height: int, max_iter: int, center_x: float = -0.6, center_y: float = 0.0) -> bytes:
-    """Píxeles RGB por filas, cada una precedida del byte de filtro PNG (0)."""
+    """Return RGB pixels row by row, each row preceded by the PNG filter byte (0)."""
     scale = 3.0 / width
     data: list[int] = []
     for y in range(height):

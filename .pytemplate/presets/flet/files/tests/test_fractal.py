@@ -4,8 +4,8 @@ from {{pkg}}.core import fractal
 
 
 def test_escape_time() -> None:
-    assert fractal.escape_time(0.0, 0.0, 50) == 50  # dentro del conjunto
-    assert fractal.escape_time(2.0, 2.0, 50) == 1  # escapa enseguida
+    assert fractal.escape_time(0.0, 0.0, 50) == 50  # inside the set
+    assert fractal.escape_time(2.0, 2.0, 50) == 1  # escapes immediately
 
 
 def test_render_rgb_size() -> None:

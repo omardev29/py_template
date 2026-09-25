@@ -1,10 +1,10 @@
-"""Trabajo de CPU puro: el caso ideal para mypyc y para PyPy.
+"""Pure CPU work: the ideal case for mypyc and for PyPy.
 
-Reglas para que mypyc genere código rápido (./deploy report las comprueba):
-- Constantes con Final: un global sin Final se busca en un diccionario en cada acceso.
-- Nada de Any: con Any, mypyc usa operaciones genéricas (puede ir más lento que CPython).
-- Tipos concretos: list[bool] se compila a accesos directos; bytearray va por la vía
-  genérica (medido: criba con list[bool] 4,2x más rápida compilada, bytearray solo 1,9x).
+Rules for mypyc to generate fast code (./deploy report checks them):
+- Constants with Final: a global without Final is looked up in a dict on every access.
+- No Any: with Any, mypyc uses generic operations (it can be slower than CPython).
+- Concrete types: list[bool] compiles to direct accesses; bytearray takes the generic
+  path (measured: sieve with list[bool] 4.2x faster compiled, bytearray only 1.9x).
 """
 
 from typing import Final
@@ -14,7 +14,7 @@ COLLATZ_LIMIT: Final = 300_000
 
 
 def count_primes(limit: int) -> int:
-    """Criba de Eratóstenes: cuántos primos hay <= limit."""
+    """Count the primes <= limit with the sieve of Eratosthenes."""
     if limit < 2:
         return 0
     sieve = [True] * (limit + 1)
@@ -36,7 +36,7 @@ def count_primes(limit: int) -> int:
 
 
 def collatz_max(n: int) -> tuple[int, int]:
-    """El número < n con la secuencia de Collatz más larga: (número, pasos)."""
+    """Return the number < n with the longest Collatz sequence: (number, steps)."""
     best_n = 1
     best_len = 1
     for start in range(1, n):

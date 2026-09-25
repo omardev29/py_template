@@ -1,7 +1,7 @@
-"""Bucle principal (frontera, interpretado): ventana, entrada y orden de dibujo.
+"""Main loop (boundary, interpreted): window, input and draw order.
 
-Lo caliente está en {{pkg}}.core: la física (world) y el bucle de dibujo por entidad
-(render). Eso es lo que acelera mypyc o el JIT de PyPy.
+The hot code lives in {{pkg}}.core: the physics (world) and the per-entity draw loop
+(render). That is what mypyc or the PyPy JIT speeds up.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def _backend() -> str:
 
 
 def _option(argv: list[str], name: str, default: int) -> int:
-    """`--frames N` sale tras N frames sin límite de FPS (medir, CI); `--bunnies N` inicial."""
+    """`--frames N`: quit after N frames, no FPS cap (benchmark, CI); `--bunnies N`: start count."""
     if name in argv:
         return int(argv[argv.index(name) + 1])
     return default
@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
 
     game = World(WIDTH, HEIGHT)
     game.spawn(WIDTH / 2, HEIGHT / 3, bunnies, len(tints))
-    # PyPy: GC incremental repartido por frame (evita tirones); no existe en CPython
+    # PyPy: incremental GC spread across frames (avoids stutters); it does not exist on CPython
     gc_step = getattr(gc, "collect_step", None)
 
     frames = 0
@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         rl.ClearBackground(background)
         render.draw_world(game, texture, tints)
         rl.DrawRectangle(0, 0, WIDTH, 36, panel)
-        gfx.text(f"{len(game.bunnies)} conejos | {rl.GetFPS()} FPS | {backend} | clic: mas conejos", 10, 8, 20, white)
+        gfx.text(f"{len(game.bunnies)} bunnies | {rl.GetFPS()} FPS | {backend} | click: more bunnies", 10, 8, 20, white)
         rl.EndDrawing()
 
         if gc_step is not None:
@@ -81,5 +81,5 @@ def main(argv: list[str] | None = None) -> int:
     elapsed = time.perf_counter() - start
     rl.UnloadTexture(texture)
     rl.CloseWindow()
-    print(f"{frames} frames en {elapsed:.2f} s: {frames / elapsed:.0f} FPS de media con {len(game.bunnies)} conejos ({backend})")
+    print(f"{frames} frames in {elapsed:.2f} s: {frames / elapsed:.0f} FPS average with {len(game.bunnies)} bunnies ({backend})")
     return 0

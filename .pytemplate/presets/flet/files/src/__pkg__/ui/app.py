@@ -1,13 +1,13 @@
-"""Interfaz Flet (frontera, interpretada): controles, estado y TODOS los handlers.
+"""Flet UI (boundary, interpreted): controls, state and ALL the handlers.
 
-Reglas para que Flet y mypyc convivan sin perder rendimiento:
-- Nada de Flet en código compilado (compile.forbid_imports lo comprueba).
-- Llamadas gruesas al núcleo: una por evento, con tipos simples. Convierte los valores
-  de Flet (float | None, str...) ANTES de llamar: compilado, el núcleo comprueba los
-  tipos en runtime y lanzaría TypeError.
-- Trabajo pesado en OTRO PROCESO (ProcessPoolExecutor): el código compilado no suelta
-  el GIL, así que en un hilo congelaría la interfaz igual que en el bucle de eventos.
-- Actualiza la UI en bloque: cambia varios controles y llama a page.update() una vez.
+Rules for Flet and mypyc to coexist without losing performance:
+- No Flet in compiled code (compile.forbid_imports checks it).
+- Coarse calls into the core: one per event, with simple types. Convert the Flet values
+  (float | None, str...) BEFORE the call: once compiled, the core checks the types
+  at runtime and would raise TypeError.
+- Heavy work in ANOTHER PROCESS (ProcessPoolExecutor): compiled code does not release
+  the GIL, so in a thread it would freeze the UI just like in the event loop.
+- Update the UI in one batch: change several controls and call page.update() once.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ HEIGHT = 400
 
 @functools.cache
 def _executor() -> ProcessPoolExecutor:
-    """Un proceso de trabajo, creado al primer uso (no al importar: lo reimportan los hijos)."""
+    """One worker process, created on first use (not on import: child processes re-import it)."""
     return ProcessPoolExecutor(max_workers=1)
 
 
@@ -42,27 +42,27 @@ async def main(page: ft.Page) -> None:
     page.title = "{{name}}"
     page.theme_mode = ft.ThemeMode.DARK
 
-    iterations = ft.Slider(min=50, max=2000, divisions=39, value=300, label="{value} iteraciones", expand=True)
+    iterations = ft.Slider(min=50, max=2000, divisions=39, value=300, label="{value} iterations", expand=True)
     image = ft.Image(src=fractal.render_png(8, 5, 1), width=WIDTH, height=HEIGHT)
-    status = ft.Text(f"Núcleo: {_backend()}. Pulsa Dibujar.")
+    status = ft.Text(f"Core: {_backend()}. Press Draw.")
 
     async def draw(e: ft.Event[ft.Button]) -> None:
         button.disabled = True
-        status.value = "Calculando..."
+        status.value = "Computing..."
         page.update()
         start = time.perf_counter()
         max_iter = int(iterations.value or 300)
         loop = asyncio.get_running_loop()
         png = await loop.run_in_executor(_executor(), fractal.render_png, WIDTH, HEIGHT, max_iter)
         image.src = png
-        status.value = f"{max_iter} iteraciones en {time.perf_counter() - start:.2f} s (núcleo: {_backend()})"
+        status.value = f"{max_iter} iterations in {time.perf_counter() - start:.2f} s (core: {_backend()})"
         button.disabled = False
         page.update()
 
-    button = ft.Button("Dibujar", on_click=draw)
+    button = ft.Button("Draw", on_click=draw)
     page.add(ft.Row([iterations, button]), image, status)
 
 
 def run() -> None:
-    """Arranca la app (lo usan src/main.py y el comando del wheel)."""
+    """Start the app (used by src/main.py and by the wheel command)."""
     ft.run(main, assets_dir=str(assets_dir()))

@@ -1,7 +1,7 @@
-# Perfil de tipado "off": sin obligaciones de tipos. Es el de CPython/PyPy por defecto.
-# Solo se comprueban errores reales: sintaxis y nombres no definidos.
+# Typing profile "off": no typing requirements. The default for CPython/PyPy.
+# Only real errors are checked: syntax and undefined names.
 
-description = "Sin comprobación de tipos (solo errores de sintaxis y nombres no definidos)"
+description = "No type checking: only syntax errors and undefined names"
 blocking = false
 skip_mypy = true
 

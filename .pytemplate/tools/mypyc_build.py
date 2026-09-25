@@ -1,9 +1,9 @@
-"""Compila con mypyc. Se ejecuta DENTRO del .venv del proyecto (necesita mypy y setuptools).
+"""mypyc build script. Runs INSIDE the project's .venv (needs mypy and setuptools).
 
-Uso (lo llama ./deploy): python mypyc_build.py <spec.json>
+Usage (called by ./deploy): python mypyc_build.py <spec.json>
 
-Llamamos a mypycify() en lugar de `python -m mypyc` porque la CLI no permite
-strip_asserts, group_name ni multi_file, y siempre escribe en ./build.
+We call mypycify() instead of `python -m mypyc` because the CLI does not allow
+strip_asserts, group_name or multi_file, and it always writes to ./build.
 """
 
 from __future__ import annotations

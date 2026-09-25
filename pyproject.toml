@@ -1,9 +1,9 @@
 [project]
-name = "miapp"
+name = "myapp"
 version = "0.1.0"
-description = "Plantilla uv multi-backend: CPython, PyPy y mypyc"
+description = "Multi-backend uv template: CPython, PyPy and mypyc"
 readme = "README.md"
-# Gestionado por ./deploy desde pytemplate.toml: ">=3.11" si PyPy está soportado
+# Managed by ./deploy from pytemplate.toml: ">=3.11" if PyPy is supported
 requires-python = ">=3.14"
 dependencies = [
     "mypy-extensions>=1.1.0",
@@ -12,8 +12,8 @@ dependencies = [
 ]
 
 [dependency-groups]
-# Herramientas solo en CPython: mypy depende de ast-serialize (Rust, sin wheels para
-# PyPy) y PyInstaller no soporta PyPy. En el entorno de PyPy solo entra pytest.
+# CPython-only tools: mypy depends on ast-serialize (Rust, no wheels for
+# PyPy) and PyInstaller does not support PyPy. The PyPy environment only gets pytest.
 dev = [
     "mypy>=2.3.1; implementation_name == 'cpython'",
     "pyinstaller>=6.22.3; implementation_name == 'cpython'",
@@ -28,9 +28,9 @@ pythonpath = ["src"]
 addopts = ["-ra"]
 
 [tool.uv]
-# >>> pytemplate: generado desde pytemplate.toml por ./deploy; no editar hasta la marca de cierre
-# uv.lock solo resuelve para la versión menor fijada (p. ej. sin la rama de 3.15, donde
-# librerías como raylib aún no tienen wheels). Cambiarla: python.cpython + ./deploy lock
+# >>> pytemplate: generated from pytemplate.toml by ./deploy; do not edit up to the closing marker
+# uv.lock only resolves for the pinned minor version (e.g. without the 3.15 branch, where
+# libraries such as raylib have no wheels yet). To change it: python.cpython + ./deploy lock
 environments = [
     "implementation_name == 'cpython' and python_full_version >= '3.14' and python_full_version < '3.15'",
 ]

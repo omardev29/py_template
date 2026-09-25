@@ -1,1 +1,1 @@
-"""Runner de ./deploy: solo biblioteca estándar, Python >= 3.11."""
+"""./deploy runner: standard library only, Python >= 3.11."""

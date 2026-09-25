@@ -1,13 +1,13 @@
-"""Backend mypyc: stage incremental de src/ + compilación con mypycify.
+"""mypyc backend: incremental stage of src/ + compilation with mypycify.
 
-Se compila en una COPIA de src/ (.build/mypyc-<perfil>/stage): si el .pyd quedara
-junto a tu .py en src/, Python importaría ese binario en lugar de tu código editado.
-El .py se queda junto al .pyd en el stage (el cargador de extensiones tiene
-prioridad) para que un pyz/portable pueda caer al .py en otro intérprete.
+Compilation happens in a COPY of src/ (.build/mypyc-<profile>/stage): if the .pyd ended
+up next to your .py in src/, Python would import that binary instead of your edited code.
+The .py stays next to the .pyd in the stage (the extension loader takes
+precedence) so that a pyz/portable can fall back to the .py on another interpreter.
 
-Dos perfiles:
-- dev (run/test/report): asserts activos y símbolos de depuración.
-- release (build): asserts eliminados si deploy.optimize >= 1, sin símbolos.
+Two profiles:
+- dev (run/test/report): asserts enabled and debug symbols.
+- release (build): asserts stripped if deploy.optimize >= 1, no symbols.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def group_name(cfg: Config) -> str:
 
 
 def compiled_sources(cfg: Config) -> list[Path]:
-    """Archivos .py (en src/) que compila mypyc."""
+    """Return the .py files (in src/) that mypyc compiles."""
     excluded = set(cfg.compile.exclude)
     files: list[Path] = []
     for rel_path in compiled_paths(cfg):
@@ -63,10 +63,10 @@ def compiled_sources(cfg: Config) -> list[Path]:
         elif path.is_file():
             candidates = [path]
         else:
-            raise DeployError(f"compile.modules: no existe src/{rel_path}")
+            raise DeployError(f"compile.modules: src/{rel_path} does not exist")
         files += [p for p in candidates if module_name(p, SRC) not in excluded]
     if not files:
-        raise DeployError("compile.modules no contiene ningún archivo .py que compilar")
+        raise DeployError("compile.modules contains no .py file to compile")
     return files
 
 
@@ -79,7 +79,7 @@ def _is_ext(name: str) -> bool:
 
 
 def sync_tree(src: Path, dst: Path) -> int:
-    """Copia src -> dst: solo lo cambiado; borra lo eliminado (salvo extensiones compiladas)."""
+    """Copy src -> dst: only what changed; remove what was deleted (except compiled extensions)."""
     changed = 0
     dst.mkdir(parents=True, exist_ok=True)
     seen: set[Path] = set()
@@ -124,12 +124,12 @@ def remove_stale_extensions(stage: Path, modules: list[str], group: str) -> None
     wanted = set(modules) | {f"{group}__mypyc"}
     for ext in extension_files(stage):
         if _ext_module(ext, stage) not in wanted:
-            ui.detail(f"  - {rel(ext)} (ya no se compila)")
+            ui.detail(f"  - {rel(ext)} (no longer compiled)")
             ext.unlink()
 
 
 def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compile_c: bool = True) -> Path:
-    """Prepara el stage y compila. Devuelve la ruta del stage."""
+    """Prepare the stage and compile. Return the stage path."""
     prof = profile(cfg, profile_name)
     sources = compiled_sources(cfg)
     modules = [module_name(p, SRC) for p in sources]
@@ -137,7 +137,7 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
 
     ui.step(f"mypyc ({prof.name}): {', '.join(modules)}")
     changed = sync_tree(SRC, prof.stage)
-    ui.detail(f"  stage: {changed} archivo(s) actualizados en {rel(prof.stage)}")
+    ui.detail(f"  stage: {changed} file(s) updated in {rel(prof.stage)}")
     remove_stale_extensions(prof.stage, modules, group)
 
     config_file = prof.dir / "mypy.ini"
@@ -155,7 +155,7 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
         "separate": cfg.compile.separate,
         "strict_dunder_typing": cfg.compile.strict_dunder_typing,
         "group": group,
-        # Rutas relativas al stage: cortas, por el límite MAX_PATH de MSVC
+        # Paths relative to the stage: short, because of the MSVC MAX_PATH limit
         "c_dir": "../c",
         "build_temp": "../obj",
         "build_lib": "../lib",
@@ -167,8 +167,8 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
         annotate.parent.mkdir(parents=True, exist_ok=True)
 
     tool = envs.tool_env(cfg)
-    # La salida de MSVC/setuptools solo se muestra si falla (o con -v). VSLANG=1033: mensajes
-    # del compilador en inglés, que evita el cp1252 ilegible en la terminal.
+    # MSVC/setuptools output is only shown on failure (or with -v). VSLANG=1033: compiler
+    # messages in English, which avoids unreadable cp1252 text in the terminal.
     envs_extra = {"VSLANG": "1033"}
     argv: list[str | Path] = [proc.find_uv(), "run", "--locked", "python", TOOLS / "mypyc_build.py", spec_file]
     result = proc.run(argv, env=envs.env_vars(tool, envs_extra), capture=not ui.VERBOSE, check=False)
@@ -176,7 +176,7 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
         if not ui.VERBOSE:
             ui.info((result.stdout or "") + (result.stderr or ""))
         hint = "" if "error: " in (result.stdout or "") else "\n" + has_compiler_hint()
-        raise DeployError(f"mypyc falló (código {result.returncode}){hint}", result.returncode)
+        raise DeployError(f"mypyc failed (exit code {result.returncode}){hint}", result.returncode)
     if annotate and result.stdout:
         ui.detail(result.stdout)
     if not compile_c or proc.DRY_RUN:
@@ -185,18 +185,18 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
     built = {_ext_module(p, prof.stage) for p in extension_files(prof.stage)}
     missing = [m for m in modules if m not in built]
     if missing:
-        raise DeployError(f"mypyc no generó extensión para: {', '.join(missing)}")
-    ui.ok(f"compilado en {rel(prof.stage)}")
+        raise DeployError(f"mypyc did not generate an extension for: {', '.join(missing)}")
+    ui.ok(f"compiled in {rel(prof.stage)}")
     return prof.stage
 
 
 def runtime_env_vars(cfg: Config) -> dict[str, str]:
-    """Variables para que tests/conftest.py verifique que se cargaron los .pyd."""
+    """Return the variables that let tests/conftest.py verify the .pyd files were loaded."""
     return {"PYTEMPLATE_BACKEND": "mypyc", "PYTEMPLATE_COMPILED": ",".join(compiled_modules(cfg))}
 
 
 def hidden_imports(cfg: Config, stage: Path) -> list[str]:
-    """Lo que PyInstaller/Nuitka no ven: los módulos compilados y todo lo que importan."""
+    """Return what PyInstaller/Nuitka cannot see: the compiled modules and everything they import."""
     hidden: set[str] = set()
     for path in compiled_sources(cfg):
         module = module_name(path, SRC)
@@ -208,7 +208,7 @@ def hidden_imports(cfg: Config, stage: Path) -> list[str]:
 
 
 def exe_stage(cfg: Config, stage: Path, dest: Path) -> Path:
-    """Copia del stage SIN los .py compilados: así el empaquetador solo puede meter el binario."""
+    """Copy the stage WITHOUT the compiled .py files, so the packager can only bundle the binary."""
     if dest.exists():
         shutil.rmtree(dest)
     shutil.copytree(stage, dest, ignore=shutil.ignore_patterns(*SKIP_DIRS))
@@ -227,8 +227,8 @@ def clean_bytecode(path: Path) -> None:
 def has_compiler_hint() -> str:
     if os.name == "nt":
         return (
-            "mypyc necesita MSVC (Build Tools de Visual Studio) con el SDK de Windows:\n"
+            "mypyc needs MSVC (Visual Studio Build Tools) with the Windows SDK:\n"
             'winget install -e --id Microsoft.VisualStudio.BuildTools --override "--wait --passive '
             '--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.26100"'
         )
-    return "mypyc necesita un compilador de C (gcc/clang; en macOS: xcode-select --install)"
+    return "mypyc needs a C compiler (gcc/clang; on macOS: xcode-select --install)"

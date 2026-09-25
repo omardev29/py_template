@@ -1,11 +1,11 @@
-"""Frontera con raylib (interpretada): todo lo que toca cdata, bytes o recursos.
+"""raylib boundary (interpreted): everything that touches cdata, bytes or resources.
 
-Reglas que hacen ir rápido al resto del juego:
-- Colores y structs se crean UNA vez con ffi (cdata). Pasar tuplas como `rl.RED`
-  obliga a convertirlas en cada llamada: con tuplas PyPy pierde toda su ventaja.
-- raylib crudo (`import raylib as rl`), nunca pyray en bucles: pyray envuelve cada
-  llamada en Python (~700 ns frente a ~100 ns).
-- Texto y rutas a raylib siempre como bytes.
+Rules that keep the rest of the game fast:
+- Colors and structs are created ONCE with ffi (cdata). Passing tuples such as `rl.RED`
+  forces a conversion on every call: with tuples PyPy loses all its advantage.
+- Raw raylib (`import raylib as rl`), never pyray in loops: pyray wraps every
+  call in Python (~700 ns versus ~100 ns).
+- Text and paths always go to raylib as bytes.
 """
 
 from __future__ import annotations
@@ -22,12 +22,12 @@ if TYPE_CHECKING:
 
 
 def color(r: int, g: int, b: int, a: int = 255) -> Color:
-    """Un Color de verdad (cdata), para crearlo una vez fuera del bucle."""
+    """Return a real Color (cdata); create it once, outside the loop."""
     return cast("Color", ffi.new("Color *", (r, g, b, a))[0])
 
 
 def bunny_texture(size: int) -> Texture:
-    """Textura generada (sin archivos): blanca, para teñirla con cualquier color."""
+    """Return a generated texture (no files): white, so it can be tinted any color."""
     image = rl.GenImageChecked(size, size, size // 4, size // 4, rl.WHITE, rl.LIGHTGRAY)
     texture = rl.LoadTextureFromImage(image)
     rl.UnloadImage(image)
@@ -35,7 +35,7 @@ def bunny_texture(size: int) -> Texture:
 
 
 def load_texture(name: str) -> Texture:
-    """Textura desde src/assets/ (ejemplo de uso de recursos)."""
+    """Load a texture from src/assets/ (an example of using resources)."""
     return rl.LoadTexture(str(asset(name)).encode())
 
 

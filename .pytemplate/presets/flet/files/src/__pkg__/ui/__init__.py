@@ -1,1 +1,1 @@
-"""Interfaz Flet (frontera): se queda interpretada, nunca se compila."""
+"""Flet UI (boundary): it stays interpreted and is never compiled."""

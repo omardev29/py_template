@@ -1,15 +1,15 @@
-"""Recetas propias estilo Justfile: la tabla [tasks] de pytemplate.toml.
+"""Custom Justfile-style recipes: the [tasks] table of pytemplate.toml.
 
     [tasks.gen]
-    help = "Genera los assets"
-    cmd = ["python", "scripts/gen.py", "{backend}"]   # argv, sin shell: igual en todos los shells
-    deps = ["check"]                                   # otras tareas o comandos de ./deploy
+    help = "Generate the assets"
+    cmd = ["python", "scripts/gen.py", "{backend}"]   # argv, no shell: the same in every shell
+    deps = ["check"]                                   # other tasks or ./deploy commands
     env = { SEED = "42" }
-    backend = "pypy"   # entorno en el que corre (vacío = backend activo)
-    uv = true          # true: `uv run` dentro de ese entorno; false: ejecuta el programa tal cual
+    backend = "pypy"   # environment it runs in (empty = active backend)
+    uv = true          # true: `uv run` inside that environment; false: run the program as-is
 
-Marcadores en cmd/env/cwd: {root} {src} {build} {dist} {backend} {name} {pkg} {python}.
-Los argumentos extra de `./deploy <tarea> ...` se añaden al final de cmd.
+Placeholders in cmd/env/cwd: {root} {src} {build} {dist} {backend} {name} {pkg} {python}.
+Extra arguments to `./deploy <task> ...` are appended to the end of cmd.
 """
 
 from __future__ import annotations
@@ -41,9 +41,9 @@ def _placeholders(cfg: Config, backend: str) -> dict[str, str]:
 
 def list_tasks(cfg: Config) -> None:
     if not cfg.tasks:
-        ui.info("No hay tareas propias. Añádelas en pytemplate.toml, sección [tasks].")
+        ui.info("No custom tasks. Add them in pytemplate.toml, section [tasks].")
         return
-    ui.step("tareas propias (pytemplate.toml [tasks])")
+    ui.step("custom tasks (pytemplate.toml [tasks])")
     for name, task in cfg.tasks.items():
         what = task.help or " ".join(task.cmd) or "deps: " + ", ".join(task.deps)
         ui.info(f"  {name:<14} {what}")
@@ -51,7 +51,7 @@ def list_tasks(cfg: Config) -> None:
 
 def run_task(cfg: Config, name: str, extra: list[str], dispatch: Dispatcher, stack: tuple[str, ...] = ()) -> int:
     if name in stack:
-        raise DeployError(f"tareas en ciclo: {' -> '.join((*stack, name))}")
+        raise DeployError(f"task cycle: {' -> '.join((*stack, name))}")
     task = cfg.tasks[name]
     for dep in task.deps:
         argv = shlex.split(dep)
@@ -70,8 +70,8 @@ def run_task(cfg: Config, name: str, extra: list[str], dispatch: Dispatcher, sta
         extra_env = {k: v.format_map(values) for k, v in task.env.items()}
         cwd = ROOT / task.cwd.format_map(values) if task.cwd else ROOT
     except KeyError as e:
-        raise DeployError(f"tarea '{name}': marcador desconocido {e}") from None
-    ui.step(f"tarea {name}")
+        raise DeployError(f"task '{name}': unknown placeholder {e}") from None
+    ui.step(f"task {name}")
     if task.uv:
         env = envs.runtime_env(cfg, backend)
         return envs.uv_run(env, argv, cwd=cwd, extra_env=extra_env, check=False).returncode

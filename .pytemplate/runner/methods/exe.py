@@ -1,7 +1,7 @@
-"""exe: ejecutable con PyInstaller (CPython y mypyc; PyInstaller no soporta PyPy).
+"""exe: executable with PyInstaller (CPython and mypyc; PyInstaller does not support PyPy).
 
-En Flet se usa `flet pack` (PyInstaller + el cliente Flutter empaquetado): con
-PyInstaller a secas la app descargaría ~40 MB de cliente en el primer arranque.
+With Flet, `flet pack` is used (PyInstaller + the bundled Flutter client): with
+plain PyInstaller the app would download a ~40 MB client on first startup.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ def _onefile(req: BuildRequest) -> bool:
 
 
 def _stage(req: BuildRequest) -> Path:
-    """Carpeta que ve PyInstaller: en mypyc, sin los .py de lo compilado (solo el binario)."""
+    """Return the folder PyInstaller sees: with mypyc, without the .py of compiled modules (only the binary)."""
     dest = BUILD / "exe-stage" / req.backend
     if req.compiled:
         return mypyc.exe_stage(req.cfg, req.app_dir, dest)
@@ -71,7 +71,7 @@ def build(req: BuildRequest) -> Path:
         "--paths", stage,
         "--optimize", str(cfg.deploy.optimize),
         "--noupx",
-        # UTF-8 como en desarrollo (el runner exporta PYTHONUTF8=1)
+        # UTF-8 as in development (the runner exports PYTHONUTF8=1)
         "--python-option", "X utf8",
     ]
     if not ui.VERBOSE:
@@ -95,7 +95,7 @@ def _is_windows() -> bool:
 
 
 def _flet_pack(req: BuildRequest) -> Path:
-    """`flet pack` desde una carpeta propia: borra <cwd>/build y el distpath sin preguntar (-y)."""
+    """Run `flet pack` from its own folder: it removes <cwd>/build and the distpath without asking (-y)."""
     cfg = req.cfg
     stage = _stage(req)
     work = BUILD / "flet-pack" / req.backend
@@ -128,5 +128,5 @@ def _flet_pack(req: BuildRequest) -> Path:
     if out.exists():
         shutil.rmtree(out)
     shutil.move(str(work / "dist"), str(out))
-    ui.info("Flet: el cliente Flutter va dentro del ejecutable (no se descarga en el primer arranque)")
+    ui.info("Flet: the Flutter client is inside the executable (it is not downloaded on first startup)")
     return out

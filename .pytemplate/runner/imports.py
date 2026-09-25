@@ -1,7 +1,7 @@
-"""Análisis estático de imports (ast), para los módulos compilados.
+"""Static import analysis (ast) for the compiled modules.
 
-PyInstaller y Nuitka descubren dependencias leyendo bytecode: dentro de un .pyd de
-mypyc no ven nada, así que les pasamos a mano lo que importa cada módulo compilado.
+PyInstaller and Nuitka discover dependencies by reading bytecode: inside a mypyc .pyd
+they see nothing, so we hand them what each compiled module imports.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ def _is_type_checking(test: ast.expr) -> bool:
 
 
 def iter_runtime_nodes(tree: ast.AST) -> list[ast.AST]:
-    """Todos los nodos salvo los que están bajo `if TYPE_CHECKING:` (no existen en runtime)."""
+    """Return every node except those under `if TYPE_CHECKING:` (they do not exist at runtime)."""
     out: list[ast.AST] = []
     stack: list[ast.AST] = [tree]
     while stack:
@@ -31,12 +31,12 @@ def iter_runtime_nodes(tree: ast.AST) -> list[ast.AST]:
 
 
 def parse(path: Path) -> ast.Module:
-    # En bytes: así ast respeta el BOM que añade Windows PowerShell 5.1
+    # As bytes: that way ast honors the BOM that Windows PowerShell 5.1 adds
     return ast.parse(path.read_bytes(), filename=str(path))
 
 
 def imports_of(path: Path, module: str, src: Path) -> set[str]:
-    """Módulos que importa `path` (nombre de módulo `module`) en tiempo de ejecución."""
+    """Return the modules that `path` (module name `module`) imports at runtime."""
     is_pkg = path.name == "__init__.py"
     package = module if is_pkg else module.rpartition(".")[0]
     found: set[str] = set()
@@ -54,7 +54,7 @@ def imports_of(path: Path, module: str, src: Path) -> set[str]:
             if not target or target == "__future__":
                 continue
             found.add(target)
-            # `from paquete import submodulo`: si es un submódulo local, también cuenta
+            # `from package import submodule`: if it is a local submodule, it counts too
             for alias in node.names:
                 candidate = f"{target}.{alias.name}"
                 rel = candidate.replace(".", "/")

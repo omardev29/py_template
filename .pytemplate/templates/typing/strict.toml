@@ -1,7 +1,7 @@
-# Perfil de tipado "strict": tipado obligatorio y bloqueante, pero Any permitido.
-# Para proyectos CPython/PyPy que quieren disciplina de tipos sin las reglas de mypyc.
+# Typing profile "strict": typing is required and blocking, but Any is allowed.
+# For CPython/PyPy projects that want type discipline without the mypyc rules.
 
-description = "Tipado obligatorio (mypy --strict), Any permitido"
+description = "Typing required with mypy --strict; Any allowed"
 blocking = true
 
 [mypy]

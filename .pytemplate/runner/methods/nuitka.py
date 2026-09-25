@@ -1,9 +1,9 @@
-"""nuitka: ejecutable con Nuitka (solo CPython). Compila a C también tus dependencias.
+"""nuitka: executable built with Nuitka (CPython only). It also compiles your dependencies to C.
 
-Builds mucho más lentos que PyInstaller, a cambio de un ejecutable nativo. Con el
-backend mypyc, tus módulos del núcleo ya van compilados por mypyc (Nuitka incluye los
-.pyd tal cual) y Nuitka compila el resto. Nuitka se usa con `uv run --with nuitka`
-(no entra en uv.lock ni en el entorno de desarrollo).
+Much slower builds than PyInstaller, in exchange for a native executable. With the
+mypyc backend, your core modules are already compiled by mypyc (Nuitka includes the
+.pyd files as-is) and Nuitka compiles the rest. Nuitka runs through `uv run --with nuitka`
+(it does not go into uv.lock or the development environment).
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def build(req: BuildRequest) -> Path:
         argv.append(f"--windows-icon-from-ico={ROOT / cfg.deploy.exe.icon}")
     argv += cfg.deploy.nuitka.extra_args + req.extra
 
-    ui.info("  Nuitka compila todo a C: la primera vez tarda varios minutos")
+    ui.info("  Nuitka compiles everything to C: the first build takes several minutes")
     envs.uv(envs.tool_env(cfg), ["run", "--locked", "--with", "nuitka", *argv], cwd=stage)
 
     out = dist_path(req)

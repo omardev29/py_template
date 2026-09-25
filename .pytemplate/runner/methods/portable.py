@@ -1,10 +1,10 @@
-"""portable: carpeta autocontenida  runtime/ + lib/ + app/ + boot.py + lanzadores.
+"""portable: self-contained folder  runtime/ + lib/ + app/ + boot.py + launchers.
 
-Es la única vía standalone para PyPy (PyInstaller y Nuitka solo admiten CPython).
-- runtime = "bundled": copia el intérprete del backend (gestionado por uv, reubicable) y
-  lo poda. Solo para el sistema operativo del host.
-- runtime = "system": sin intérprete; los lanzadores usan el Python/PyPy del destino.
-  Con dependencias puras, esa carpeta funciona en cualquier sistema operativo.
+The only standalone option for PyPy (PyInstaller and Nuitka only support CPython).
+- runtime = "bundled": copies the backend's interpreter (managed by uv, relocatable) and
+  prunes it. Host OS only.
+- runtime = "system": no interpreter; the launchers use the Python/PyPy of the target machine.
+  With pure dependencies, that folder works on any OS.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ LONG_PREFIX = "\\\\?\\"
 
 
 def long_path(path: Path) -> str:
-    """En Windows, ruta de longitud extendida (\\\\?\\C:\\...): sin el límite de 260 caracteres."""
+    """Return the path in extended-length form on Windows (\\\\?\\C:\\...): no 260-character limit."""
     resolved = str(path.resolve())
     return LONG_PREFIX + resolved if IS_WINDOWS and not resolved.startswith(LONG_PREFIX) else resolved
 ROOT_PRUNE = {"include", "libs", "Tools", "share"}
@@ -36,7 +36,7 @@ def _stdlib_dirs(base: Path, version: str) -> set[Path]:
 
 
 def copy_runtime(cfg: Config, backend: str, dest: Path) -> Path:
-    """Copia el intérprete (podado) y devuelve la ruta del ejecutable dentro de `dest`."""
+    """Copy the (pruned) interpreter and return the path of its executable inside `dest`."""
     info = envs.interpreter_info(envs.runtime_env(cfg, backend).python)
     base = Path(str(info["base_prefix"])).resolve()
     version = ".".join(str(info["version"]).split(".")[:2])
@@ -54,22 +54,22 @@ def copy_runtime(cfg: Config, backend: str, dest: Path) -> Path:
         if d in stdlib:
             skip |= {n for n in names if n in STDLIB_PRUNE or (not keep_tk and n in TK)}
         if d.name == "hpy" and d.parent in stdlib:
-            skip |= {"devel"}  # cabeceras C de HPy (PyPy): solo sirven para compilar extensiones
+            skip |= {"devel"}  # HPy C headers (PyPy): only needed to compile extensions
         return skip
 
-    ui.info(f"  runtime: {base} -> {rel(dest)}{' (podado)' if prune else ''}")
+    ui.info(f"  runtime: {base} -> {rel(dest)}{' (pruned)' if prune else ''}")
     try:
         shutil.copytree(long_path(base), long_path(dest), ignore=ignore, symlinks=True)
     except (shutil.Error, OSError) as e:
         raise DeployError(
-            f"no se pudo copiar el intérprete a {rel(dest)}: {str(e)[:300]}\n"
-            "  En Windows suele ser el límite de 260 caracteres: acorta la ruta del proyecto o activa\n"
-            "  LongPathsEnabled (./deploy doctor lo comprueba)."
+            f"could not copy the interpreter to {rel(dest)}: {str(e)[:300]}\n"
+            "  On Windows this is usually the 260-character limit: shorten the project path or enable\n"
+            "  LongPathsEnabled (./deploy doctor checks it)."
         ) from None
     for marker in dest.rglob("EXTERNALLY-MANAGED"):
         marker.unlink()
     if IS_WINDOWS and info["impl"] == "pypy":
-        # El zip de PyPy no trae el runtime de VC++ (sí lo trae el CPython de uv)
+        # The PyPy zip does not ship the VC++ runtime (uv's CPython does)
         cp_base = Path(str(envs.interpreter_info(envs.cpython_env(cfg).python)["base_prefix"])).resolve()
         for dll in ("vcruntime140.dll", "vcruntime140_1.dll"):
             if (cp_base / dll).is_file() and not (dest / dll).exists():
@@ -91,7 +91,7 @@ def _opt_flag(cfg: Config) -> str:
 
 
 def write_launchers(cfg: Config, backend: str, out: Path, python: Path | None) -> list[Path]:
-    """<nombre>.cmd (Windows) y/o <nombre>.sh (POSIX). Nunca -I/-E: desactivarían PYTHON_JIT."""
+    """Write <name>.cmd (Windows) and/or <name>.sh (POSIX). Never -I/-E: they would disable PYTHON_JIT."""
     name = cfg.app.name
     flags = f"-s{_opt_flag(cfg)}"
     written: list[Path] = []
@@ -106,10 +106,10 @@ def write_launchers(cfg: Config, backend: str, out: Path, python: Path | None) -
             for i, cmd in enumerate(order):
                 prog = cmd.split()[0]
                 body.append(f"where {prog} >nul 2>nul && goto run{i}")
-            body += [f"echo {name}: hace falta {'PyPy' if backend == 'pypy' else 'Python ' + cfg.python.cpython} en el PATH 1>&2", "exit /b 9009"]
+            body += [f"echo {name}: needs {'PyPy' if backend == 'pypy' else 'Python ' + cfg.python.cpython} in PATH 1>&2", "exit /b 9009"]
             for i, cmd in enumerate(order):
                 body += [f":run{i}", f'{cmd} {flags} "%~dp0boot.py" %*', "exit /b %ERRORLEVEL%"]
-        lines = ["@echo off", f"rem Lanzador de {name} (carpeta portable generada por ./deploy)", "setlocal", *_env_lines(cfg, True), *body]
+        lines = ["@echo off", f"rem Launcher for {name} (portable folder generated by ./deploy)", "setlocal", *_env_lines(cfg, True), *body]
         path = out / f"{name}.cmd"
         path.write_text("\r\n".join(lines) + "\r\n", encoding="ascii", errors="replace", newline="")
         written.append(path)
@@ -120,7 +120,7 @@ def write_launchers(cfg: Config, backend: str, out: Path, python: Path | None) -
             prog = "$(command -v pypy3 || command -v pypy)" if backend == "pypy" else f"$(command -v python{cfg.python.cpython} || command -v python3)"
         lines = [
             "#!/bin/sh",
-            f"# Lanzador de {name} (carpeta portable generada por ./deploy)",
+            f"# Launcher for {name} (portable folder generated by ./deploy)",
             'HERE=$(cd "$(dirname "$0")" && pwd)',
             *_env_lines(cfg, False),
             f'exec {prog} {flags} "$HERE/boot.py" "$@"',
@@ -137,7 +137,7 @@ def build(req: BuildRequest) -> Path:
     bundled = cfg.deploy.portable.runtime == "bundled"
     host = common.host_target(cfg, req.backend)
     if req.targets and bundled:
-        raise DeployError("portable con runtime incluido solo se genera para el sistema del host; usa --method pyz para otros SO")
+        raise DeployError("portable with a bundled runtime is only built for the host OS; use --method pyz for other OSes")
     out = dist_path(req, f"-{host.key}" if bundled else "")
     if out.exists():
         shutil.rmtree(out)
@@ -147,7 +147,7 @@ def build(req: BuildRequest) -> Path:
     requirements = common.export_requirements(cfg)
     common.install_deps(cfg, req.backend, host, out / "lib", requirements)
     if not bundled and common.has_native(out / "lib"):
-        ui.warn("runtime = \"system\" con dependencias nativas: solo funcionará en " + host.key)
+        ui.warn("runtime = \"system\" with native dependencies: it will only work on " + host.key)
     python = copy_runtime(cfg, req.backend, out / "runtime") if bundled else None
     shutil.copy2(TEMPLATES / "portable" / "boot.py", out / "boot.py")
     launchers = write_launchers(cfg, req.backend, out, python)
@@ -156,14 +156,14 @@ def build(req: BuildRequest) -> Path:
         console_python = python.with_name("python.exe") if IS_WINDOWS else python
         dirs: list[Path] = [out / "lib", out / "app"]
         if (out / "runtime" / "Lib").is_dir() and not any((out / "runtime" / "Lib").rglob("*.pyc")):
-            dirs.append(out / "runtime" / "Lib")  # PyPy no trae .pyc: sin esto recompila la stdlib en cada arranque
+            dirs.append(out / "runtime" / "Lib")  # PyPy ships no .pyc: without this it recompiles the stdlib on every startup
         levels = ["-o", "0"] + (["-o", str(cfg.deploy.optimize)] if cfg.deploy.optimize else [])
         compiled = proc.run([console_python, "-m", "compileall", "-q", "-j", "0", *levels, *dirs], check=False, capture=True)
         if compiled.returncode != 0:
             failed = compiled.stdout.count("*** Error compiling")
             ui.warn(
-                f"no se pudieron precompilar {failed} archivo(s) .pyc (¿rutas de más de 260 caracteres?). "
-                "La app funciona igual; solo arranca algo más lenta la primera vez."
+                f"could not precompile {failed} file(s) to .pyc (paths longer than 260 characters?). "
+                "The app still works; it just starts a bit slower the first time."
             )
         if req.compiled:
             _smoke_compiled(cfg, console_python, out)
@@ -171,8 +171,8 @@ def build(req: BuildRequest) -> Path:
     if cfg.deploy.portable.archive:
         fmt = "zip" if IS_WINDOWS else "gztar"
         archive = shutil.make_archive(str(out), fmt, root_dir=out.parent, base_dir=out.name)
-        ui.info(f"  archivo: {rel(Path(archive))}")
-    ui.info(f"  ejecuta: {', '.join(rel(p) for p in launchers)}  ({common.dir_size_mb(out):.0f} MB)")
+        ui.info(f"  archive: {rel(Path(archive))}")
+    ui.info(f"  run:{', '.join(rel(p) for p in launchers)}  ({common.dir_size_mb(out):.0f} MB)")
     return out
 
 
@@ -187,5 +187,5 @@ def _smoke_compiled(cfg: Config, python: Path, out: Path) -> None:
     )
     bad = proc.output([python, "-s", "-c", code], cwd=out)
     if bad:
-        raise DeployError(f"la carpeta portable no carga los binarios de mypyc para: {bad}")
-    ui.ok("verificado: los módulos compilados cargan desde .pyd/.so")
+        raise DeployError(f"the portable folder does not load the mypyc binaries for: {bad}")
+    ui.ok("verified: the compiled modules load from .pyd/.so")

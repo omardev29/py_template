@@ -1,9 +1,9 @@
-"""Presets (script, raylib, flet): esqueleto de código + dependencias + config inicial.
+"""Presets (script, raylib, flet): code skeleton + dependencies + initial config.
 
-Cada preset vive en .pytemplate/presets/<nombre>/:
-  preset.toml   descripción, dependencias, claves extra de [tool.uv] y tablas extra de pyproject
-  files/        esqueleto que se copia a la raíz. `__pkg__` en una ruta se sustituye por el
-                paquete de la app, y en los textos `{{name}}`/`{{pkg}}` por nombre y paquete.
+Each preset lives in .pytemplate/presets/<name>/:
+  preset.toml   description, dependencies, extra [tool.uv] keys and extra pyproject tables
+  files/        skeleton copied to the root. `__pkg__` in a path is replaced with the app
+                package, and `{{name}}`/`{{pkg}}` in text with the name and the package.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 TEXT_SUFFIXES = {".py", ".pyi", ".toml", ".md", ".txt", ".json", ".cfg", ".ini", ".yml", ".yaml", ""}
 EXTRA_BEGIN = "# >>> pytemplate-preset"
 EXTRA_END = "# <<< pytemplate-preset"
-# Carpetas que pertenecen al preset: se reemplazan enteras al cambiar de preset
+# Folders owned by the preset: replaced as a whole when switching presets
 OWNED_DIRS = ("src", "tests", "typings")
 
 
@@ -36,7 +36,7 @@ def available() -> list[str]:
 def load(name: str) -> dict[str, Any]:
     path = PRESETS / name / "preset.toml"
     if not path.is_file():
-        raise DeployError(f"no existe el preset '{name}' (disponibles: {', '.join(available())})")
+        raise DeployError(f"unknown preset '{name}' (available: {', '.join(available())})")
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
@@ -49,7 +49,7 @@ def _fmt(value: Any, options: dict[str, Any]) -> Any:
 
 
 def options(cfg: Config) -> dict[str, Any]:
-    """Opciones del preset: los valores por defecto de preset.toml + [preset.<nombre>] del usuario."""
+    """Return the preset options: the preset.toml defaults + the user's [preset.<name>]."""
     data = load(cfg.app.preset)
     merged: dict[str, Any] = dict(data.get("options", {}))
     merged.update(cfg.preset_options(cfg.app.preset))
@@ -57,7 +57,7 @@ def options(cfg: Config) -> dict[str, Any]:
 
 
 def uv_extras(cfg: Config) -> dict[str, Any]:
-    """Claves extra del bloque gestionado de [tool.uv] (p. ej. no-build-package para raylib)."""
+    """Return the extra keys of the managed [tool.uv] block (e.g. no-build-package for raylib)."""
     data = load(cfg.app.preset)
     opts = options(cfg)
     return {k: _fmt(v, opts) for k, v in data.get("uv", {}).items()}
@@ -74,11 +74,11 @@ def dependencies(cfg: Config, name: str | None = None) -> tuple[list[str], list[
     return deps, dev
 
 
-# --- archivos del esqueleto --------------------------------------------------------------------
+# --- skeleton files ----------------------------------------------------------------------------
 
 
 def skeleton(preset: str, name: str) -> dict[str, bytes]:
-    """Archivos del preset ya personalizados: ruta relativa -> contenido."""
+    """Return the preset files, already customized: relative path -> content."""
     pkg = name.replace("-", "_").lower()
     base = PRESETS / preset / "files"
     out: dict[str, bytes] = {}
@@ -107,7 +107,7 @@ def _owned_files() -> dict[str, bytes]:
 
 
 def pristine(cfg: Config) -> bool:
-    """¿src/, tests/ y typings/ son exactamente el esqueleto del preset actual (sin tocar)?"""
+    """Return whether src/, tests/ and typings/ are exactly the current preset's skeleton (untouched)."""
     expected = {k: v for k, v in skeleton(cfg.app.preset, cfg.app.name).items() if k.split("/")[0] in OWNED_DIRS}
     return _owned_files() == expected
 
@@ -154,16 +154,16 @@ def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
 
     new_name = name or cfg.app.name
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", new_name):
-        raise DeployError("el nombre solo admite letras, números, '-' y '_' (y empieza por letra)")
+        raise DeployError("the name may only contain letters, digits, '-' and '_' (and must start with a letter)")
     target = load(preset)
     if not force and not pristine(cfg):
         raise DeployError(
-            "src/, tests/ o typings/ tienen cambios respecto al esqueleto del preset actual "
-            f"('{cfg.app.preset}'). init los reemplazaría.\n  Si estás seguro: ./deploy init {preset} --force"
+            "src/, tests/ or typings/ have changes compared to the skeleton of the current preset "
+            f"('{cfg.app.preset}'). init would replace them.\n  If you are sure: ./deploy init {preset} --force"
         )
     old_deps, old_dev = dependencies(cfg)
 
-    ui.step(f"preset {preset} ({target.get('description', '')}) como '{new_name}'")
+    ui.step(f"preset {preset} ({target.get('description', '')}) as '{new_name}'")
     for d in OWNED_DIRS:
         shutil.rmtree(ROOT / d, ignore_errors=True)
     for rel, data in skeleton(preset, new_name).items():
@@ -202,18 +202,19 @@ def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
         proc.run([uv, "add", "--no-sync", "--dev", *new_dev], env=env)
     proc.run([uv, "lock"], env=env)
     render.apply(new_cfg, force=True)
-    ui.ok(f"preset '{preset}' listo. Siguiente paso: ./deploy setup && ./deploy run")
+    ui.ok(f"preset '{preset}' done. Next step: ./deploy setup && ./deploy run")
 
 
 def copy_template(dest: Path) -> None:
-    """Copia la plantilla (sin entornos, builds ni historial) a `dest`."""
-    skip_names = {".git", ".build", "dist", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".flet"}
+    """Copy the template (without environments, builds or history) to `dest`."""
+    # template-repo: marker of the template repository itself (enables the language guard test)
+    skip_names = {".git", ".build", "dist", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".flet", "template-repo"}
 
     def ignore(directory: str, names: list[str]) -> set[str]:
         return {n for n in names if n in skip_names or n.startswith(".venv")}
 
     if dest.exists() and any(dest.iterdir()):
-        raise DeployError(f"{dest} ya existe y no está vacío")
+        raise DeployError(f"{dest} already exists and is not empty")
     shutil.copytree(ROOT, dest, ignore=ignore, dirs_exist_ok=True)
 
 
@@ -221,7 +222,7 @@ def new(dest: Path, preset: str, name: str | None) -> None:
     dest = dest.resolve()
     app_name = name or re.sub(r"[^A-Za-z0-9_-]", "-", dest.name)
     load(preset)
-    ui.step(f"nuevo proyecto en {dest}")
+    ui.step(f"new project in {dest}")
     copy_template(dest)
     proc.run(
         [proc.find_uv(), "run", "--quiet", "--script", dest / ".pytemplate" / "deploy.py", "init", preset, "--name", app_name, "--force"],
@@ -230,7 +231,7 @@ def new(dest: Path, preset: str, name: str | None) -> None:
     if shutil.which("git") and not (dest / ".git").exists():
         proc.run(["git", "init", "--quiet"], cwd=dest, check=False)
         proc.run(["git", "add", "--chmod=+x", "deploy"], cwd=dest, check=False)
-    ui.ok(f"proyecto creado. cd {dest} && ./deploy setup")
+    ui.ok(f"project created. cd {dest} && ./deploy setup")
 
 
 def config_text(preset: str, name: str) -> str | None:

@@ -1,4 +1,4 @@
-from miapp.core import bench
+from myapp.core import bench
 
 
 def test_count_primes() -> None:

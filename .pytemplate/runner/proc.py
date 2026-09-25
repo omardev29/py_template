@@ -1,4 +1,4 @@
-"""Ejecución de procesos hijo con un entorno explícito y reproducible."""
+"""Running child processes with an explicit, reproducible environment."""
 
 from __future__ import annotations
 
@@ -19,17 +19,17 @@ DRY_RUN = False
 
 class CommandFailed(DeployError):
     def __init__(self, argv: Sequence[str], code: int) -> None:
-        super().__init__(f"falló (código {code}): {show(argv)}", code)
+        super().__init__(f"failed (exit code {code}): {show(argv)}", code)
 
 
 def find_uv() -> str:
-    """uv exporta su propia ruta en $UV a los procesos que lanza con `uv run`."""
+    """Find uv: it exports its own path in $UV to the processes it starts with `uv run`."""
     uv = os.environ.get("UV")
     if uv and Path(uv).is_file():
         return uv
     found = shutil.which("uv")
     if not found:
-        raise DeployError("no se encuentra uv en el PATH", 3)
+        raise DeployError("uv not found in PATH", 3)
     return found
 
 
@@ -42,13 +42,13 @@ def vs_installer_dir() -> Path | None:
 
 
 def base_env() -> dict[str, str]:
-    """Entorno base para los hijos.
+    """Return the base environment for child processes.
 
-    - Sin VIRTUAL_ENV ni el bin/ del entorno aislado de este runner (`uv run --script`
-      los exporta y confundirían al `uv` del proyecto).
-    - PYTHONUTF8=1: mypy/mypyc abren archivos con la codificación local (cp1252 en Windows).
-    - En Windows, el instalador de Visual Studio en el PATH: el vcvarsall.bat de VS 2026
-      llama a vswhere.exe sin ruta y, si falla, setuptools no encuentra el compilador.
+    - No VIRTUAL_ENV and no bin/ of this runner's isolated environment (`uv run --script`
+      exports them and they would confuse the project's `uv`).
+    - PYTHONUTF8=1: mypy/mypyc open files with the locale encoding (cp1252 on Windows).
+    - On Windows, the Visual Studio installer in PATH: VS 2026's vcvarsall.bat calls
+      vswhere.exe without a path and, if that fails, setuptools cannot find the compiler.
     """
     env = dict(os.environ)
     for key in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "PYTHONHOME", "PYTHONPATH"):
@@ -91,7 +91,7 @@ def run(
     echo: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     args = [str(a) for a in argv]
-    where = f"   (en {rel(cwd)})" if cwd is not None and cwd.resolve() != ROOT else ""
+    where = f"   (in {rel(cwd)})" if cwd is not None and cwd.resolve() != ROOT else ""
     if echo:
         ui.command(show(args) + where)
     else:
@@ -109,7 +109,7 @@ def run(
             errors="replace",
         )
     except FileNotFoundError:
-        raise DeployError(f"no se encuentra el programa: {args[0]}", 3) from None
+        raise DeployError(f"program not found: {args[0]}", 3) from None
     if check and proc.returncode != 0:
         if capture and proc.stderr:
             ui.info(proc.stderr.rstrip())
@@ -118,5 +118,5 @@ def run(
 
 
 def output(argv: Sequence[str | Path], *, env: Mapping[str, str] | None = None, cwd: Path | None = None) -> str:
-    """Ejecuta sin eco y devuelve stdout (lanza CommandFailed si falla)."""
+    """Run without echo and return stdout (raises CommandFailed on failure)."""
     return run(argv, env=env, cwd=cwd, capture=True, echo=False).stdout.strip()

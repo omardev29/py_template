@@ -1,5 +1,5 @@
-description = "Script o app de consola (ejemplo: benchmark de criba y Collatz con rich)"
+description = "Script or console app (example: sieve and Collatz benchmark with rich)"
 
-# Dependencias propias del preset (las comunes, como mypy-extensions, están en pyproject.toml)
+# Preset-specific dependencies (the shared ones, such as mypy-extensions, are in pyproject.toml)
 dependencies = ["rich>=15.0.0"]
 dev_dependencies = []

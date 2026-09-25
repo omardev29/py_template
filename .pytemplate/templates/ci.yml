@@ -1,9 +1,9 @@
 # __HEADER__
 #
-# CI: en Windows, Linux y macOS ejecuta los mismos comandos que en tu máquina
-# (./deploy setup, check, test) y compila un .pyz por sistema. mypyc no compila para
-# otros sistemas, así que cada runner aporta sus binarios y el job "pyz" los une en un
-# único .pyz que usa el binario de cada SO (y el .py en cualquier otro intérprete).
+# CI: on Windows, Linux and macOS it runs the same commands as on your machine
+# (./deploy setup, check, test) and builds one .pyz per OS. mypyc does not compile for
+# other OSes, so each runner contributes its binaries and the "pyz" job merges them into
+# a single .pyz that uses the binary for each OS (and the .py on any other interpreter).
 name: ci
 
 on:
@@ -28,13 +28,13 @@ __MATRIX__
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
 __LINUX_DEPS__
-      - name: Entornos de los backends
+      - name: Backend environments
         run: ./deploy setup
-      - name: Tipos y lint (perfil de cada backend)
+      - name: Types and lint (typing profile of each backend)
         run: ./deploy check all
-      - name: Tests en cada backend
+      - name: Tests on every backend
         run: for b in ${{ matrix.backends }}; do ./deploy test "$b" || exit 1; done
-      - name: pyz con el núcleo compilado para este sistema
+      - name: pyz with the compiled core for this OS
         run: ./deploy build __BUILD_BACKEND__ --method pyz --no-check
       - uses: actions/upload-artifact@v4
         with:
@@ -42,7 +42,7 @@ __LINUX_DEPS__
           path: dist/__NAME__-__BUILD_BACKEND__-pyz/__NAME__.pyz
 
   pyz:
-    name: pyz multiplataforma
+    name: cross-platform pyz
     needs: test
     runs-on: ubuntu-latest
     defaults:
@@ -54,7 +54,7 @@ __LINUX_DEPS__
       - uses: actions/download-artifact@v4
         with:
           path: pyz-parts
-      - name: Une los binarios de cada sistema en un solo .pyz
+      - name: Merge the binaries of every OS into a single .pyz
         run: ./deploy --no-render pyz-merge pyz-parts/*/*.pyz --out dist/__NAME__.pyz
       - uses: actions/upload-artifact@v4
         with:

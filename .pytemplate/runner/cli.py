@@ -1,9 +1,9 @@
-"""./deploy: runner estilo Justfile, sin binarios extra (solo uv).
+"""./deploy: Justfile-style runner, no extra binaries (only uv).
 
-    ./deploy [-v|-q] [--dry-run] [--no-render] COMANDO [argumentos...]
+    ./deploy [-v|-q] [--dry-run] [--no-render] COMMAND [args...]
 
-Las opciones globales van ANTES del comando; todo lo que va después es del comando
-(y en `run`/`test`, de tu app o de pytest).
+Global options go BEFORE the command; everything after it belongs to the command
+(and for `run`/`test`, to your app or to pytest).
 """
 
 from __future__ import annotations
@@ -24,51 +24,51 @@ class Command:
     func: str
     summary: str
     usage: str = ""
-    render: bool = True  # regenerar configs antes de ejecutarlo
+    render: bool = True  # regenerate configs before running it
     group: str = ""
 
 
 COMMANDS: dict[str, Command] = {
-    # entorno
-    "setup": Command("cmd_env", "cmd_setup", "Instala intérpretes y entornos de los backends, bloquea deps y genera configs", group="Entorno"),
-    "doctor": Command("cmd_env", "cmd_doctor", "Comprueba uv, compilador, PyPy, JIT, shells y archivos generados", group="Entorno"),
-    "sync": Command("cmd_env", "cmd_sync", "uv sync --locked de uno o todos los entornos", "[cpython|pypy|mypyc|all]", group="Entorno"),
-    "lock": Command("cmd_env", "cmd_lock", "Aplica lo gestionado de pyproject y re-bloquea uv.lock", "[--upgrade] [--upgrade-package PAQ]", group="Entorno"),
-    "add": Command("cmd_env", "cmd_add", "Añade dependencias (uv add)", "PAQ... [--dev|--group G] [--cpython-only]", group="Entorno"),
-    "remove": Command("cmd_env", "cmd_remove", "Quita dependencias (uv remove)", "PAQ... [--dev|--group G]", group="Entorno"),
-    "clean": Command("cmd_env", "cmd_clean", "Borra .build/ y dist/ (y los entornos con --envs)", "[--envs]", render=False, group="Entorno"),
-    # modo y plantilla
-    "mode": Command("cmd_mode", "cmd_mode", "Muestra o cambia el modo (backend, soportados, tipado, JIT, editor)", "[BACKEND] [--supports +pypy|-pypy] [--typing off|warn|strict|auto] [--jit on|off] [--editor pylance|basedpyright]", group="Modo"),
-    "render": Command("cmd_mode", "cmd_render", "Regenera .mypy.ini, pyrightconfig.json, .ruff.toml y .vscode/", "[--check] [--diff] [--force]", render=False, group="Modo"),
-    "init": Command("cmd_mode", "cmd_init", "Convierte este proyecto a un preset (script, raylib, flet)", "PRESET [--name NOMBRE] [--force]", group="Modo"),
-    "new": Command("cmd_mode", "cmd_new", "Crea un proyecto nuevo a partir de esta plantilla", "CARPETA [--preset P] [--name NOMBRE]", render=False, group="Modo"),
-    # desarrollo
-    "run": Command("cmd_dev", "cmd_run", "Ejecuta la app (mypyc: compila antes)", "[BACKEND] [argumentos de la app...]", group="Desarrollo"),
-    "check": Command("cmd_dev", "cmd_check", "ruff + mypy con el perfil de tipado del backend + reglas de mypyc", "[BACKEND|all]", group="Desarrollo"),
-    "lint": Command("cmd_dev", "cmd_lint", "ruff check", "[--fix]", group="Desarrollo"),
-    "fmt": Command("cmd_dev", "cmd_fmt", "ruff format", "[--check]", group="Desarrollo"),
-    "test": Command("cmd_dev", "cmd_test", "pytest en un backend (mypyc: contra los .pyd) o en todos", "[BACKEND|all] [argumentos de pytest...]", group="Desarrollo"),
-    "report": Command("cmd_dev", "cmd_report", "Informe HTML de mypyc con las líneas lentas + Any de mypy", "[--open] [--no-mypy]", group="Desarrollo"),
-    # distribución
-    "build": Command("cmd_build", "cmd_build", "Compila y empaqueta en dist/", "[BACKEND] [--method exe|portable|pyz|wheel|nuitka|flet] [--onefile|--onedir] [--target CLAVE]... [--no-check]", group="Distribución"),
-    "pyz-merge": Command("cmd_build", "cmd_pyz_merge", "Une los .pyz de cada sistema (p. ej. de la CI) en uno multiplataforma", "A.pyz B.pyz... --out C.pyz", render=False, group="Distribución"),
-    # otros
-    "tasks": Command("cli", "cmd_tasks", "Lista las tareas propias de pytemplate.toml [tasks]", render=False, group="Otros"),
-    "shell-setup": Command("cmd_env", "cmd_shell_setup", "Imprime un alias para usar `deploy` sin ./", "[xonsh|pwsh|bash|zsh]", render=False, group="Otros"),
-    "selftest": Command("cli", "cmd_selftest", "Tests y mypy --strict del propio runner (.pytemplate)", render=False, group="Otros"),
-    "help": Command("cli", "cmd_help", "Esta ayuda (o la de un comando)", "[COMANDO]", render=False, group="Otros"),
+    # environment
+    "setup": Command("cmd_env", "cmd_setup", "Install interpreters and backend environments, lock deps and generate configs", group="Environment"),
+    "doctor": Command("cmd_env", "cmd_doctor", "Check uv, compiler, PyPy, JIT, shells and generated files", group="Environment"),
+    "sync": Command("cmd_env", "cmd_sync", "Run uv sync --locked on one or all environments", "[cpython|pypy|mypyc|all]", group="Environment"),
+    "lock": Command("cmd_env", "cmd_lock", "Apply the managed parts of pyproject and re-lock uv.lock", "[--upgrade] [--upgrade-package PKG]", group="Environment"),
+    "add": Command("cmd_env", "cmd_add", "Add dependencies (uv add)", "PKG... [--dev|--group G] [--cpython-only]", group="Environment"),
+    "remove": Command("cmd_env", "cmd_remove", "Remove dependencies (uv remove)", "PKG... [--dev|--group G]", group="Environment"),
+    "clean": Command("cmd_env", "cmd_clean", "Remove .build/ and dist/ (and the environments with --envs)", "[--envs]", render=False, group="Environment"),
+    # mode and template
+    "mode": Command("cmd_mode", "cmd_mode", "Show or change the mode (backend, supported, typing, JIT, editor)", "[BACKEND] [--supports +pypy|-pypy] [--typing off|warn|strict|auto] [--jit on|off] [--editor pylance|basedpyright]", group="Mode"),
+    "render": Command("cmd_mode", "cmd_render", "Regenerate .mypy.ini, pyrightconfig.json, .ruff.toml and .vscode/", "[--check] [--diff] [--force]", render=False, group="Mode"),
+    "init": Command("cmd_mode", "cmd_init", "Convert this project to a preset (script, raylib, flet)", "PRESET [--name NAME] [--force]", group="Mode"),
+    "new": Command("cmd_mode", "cmd_new", "Create a new project from this template", "DIR [--preset P] [--name NAME]", render=False, group="Mode"),
+    # development
+    "run": Command("cmd_dev", "cmd_run", "Run the app (mypyc: compile first)", "[BACKEND] [app args...]", group="Development"),
+    "check": Command("cmd_dev", "cmd_check", "Run ruff + mypy with the backend's typing profile + mypyc rules", "[BACKEND|all]", group="Development"),
+    "lint": Command("cmd_dev", "cmd_lint", "ruff check", "[--fix]", group="Development"),
+    "fmt": Command("cmd_dev", "cmd_fmt", "ruff format", "[--check]", group="Development"),
+    "test": Command("cmd_dev", "cmd_test", "Run pytest on one backend (mypyc: against the .pyd files) or on all of them", "[BACKEND|all] [pytest args...]", group="Development"),
+    "report": Command("cmd_dev", "cmd_report", "Generate the mypyc HTML report of slow lines + mypy's Any reports", "[--open] [--no-mypy]", group="Development"),
+    # distribution
+    "build": Command("cmd_build", "cmd_build", "Compile and package into dist/", "[BACKEND] [--method exe|portable|pyz|wheel|nuitka|flet] [--onefile|--onedir] [--target KEY]... [--no-check]", group="Distribution"),
+    "pyz-merge": Command("cmd_build", "cmd_pyz_merge", "Merge the .pyz files of each OS (e.g. from CI) into a cross-platform one", "A.pyz B.pyz... --out C.pyz", render=False, group="Distribution"),
+    # other
+    "tasks": Command("cli", "cmd_tasks", "List the custom tasks in pytemplate.toml [tasks]", render=False, group="Other"),
+    "shell-setup": Command("cmd_env", "cmd_shell_setup", "Print an alias to use `deploy` without ./", "[xonsh|pwsh|bash|zsh]", render=False, group="Other"),
+    "selftest": Command("cli", "cmd_selftest", "Run the runner's own tests and mypy --strict (.pytemplate)", render=False, group="Other"),
+    "help": Command("cli", "cmd_help", "Show this help (or a command's help)", "[COMMAND]", render=False, group="Other"),
 }
 
 EXAMPLES = """\
-Ejemplos:
-  ./deploy setup                 # primera vez: intérpretes, entornos y configs
-  ./deploy run                   # ejecuta con el backend activo (pytemplate.toml)
-  ./deploy run mypyc --verbose   # compila con mypyc y ejecuta (--verbose va a tu app)
-  ./deploy test all              # pytest en cada backend soportado
-  ./deploy mode mypyc            # cambia el backend activo (tipado estricto)
-  ./deploy mode --supports +pypy # añade PyPy (sintaxis 3.11)
-  ./deploy build mypyc           # exe con PyInstaller (método por defecto de mypyc)
-  ./deploy build pypy            # carpeta portable con PyPy dentro
+Examples:
+  ./deploy setup                 # first time: interpreters, environments and configs
+  ./deploy run                   # run with the active backend (pytemplate.toml)
+  ./deploy run mypyc --verbose   # compile with mypyc and run (--verbose goes to your app)
+  ./deploy test all              # pytest on every supported backend
+  ./deploy mode mypyc            # change the active backend (strict typing)
+  ./deploy mode --supports +pypy # add PyPy (3.11 syntax)
+  ./deploy build mypyc           # exe with PyInstaller (mypyc's default method)
+  ./deploy build pypy            # portable folder with PyPy bundled
   ./deploy build cpython --method pyz"""
 
 
@@ -78,7 +78,7 @@ def cmd_help(cfg: object, args: list[str]) -> int:
         print(f"./deploy {args[0]} {c.usage}".rstrip())
         print(f"  {c.summary}")
         return 0
-    print("./deploy [-v|-q] [--dry-run] [--no-render] COMANDO [argumentos...]\n")
+    print("./deploy [-v|-q] [--dry-run] [--no-render] COMMAND [args...]\n")
     groups: dict[str, list[str]] = {}
     for name, c in COMMANDS.items():
         groups.setdefault(c.group, []).append(name)
@@ -92,13 +92,13 @@ def cmd_help(cfg: object, args: list[str]) -> int:
 
         loaded = config.load(set(COMMANDS))
         if loaded.tasks:
-            print("Tareas propias (pytemplate.toml [tasks]):")
+            print("Custom tasks (pytemplate.toml [tasks]):")
             for name, task in loaded.tasks.items():
                 print(f"  {name:<12} {task.help or ' '.join(task.cmd)}")
             print()
     except DeployError:
         pass
-    print("BACKEND = cpython | pypy | mypyc (por defecto, backend.active de pytemplate.toml)\n")
+    print("BACKEND = cpython | pypy | mypyc (default: backend.active from pytemplate.toml)\n")
     print(EXAMPLES)
     return 0
 
@@ -143,7 +143,7 @@ def _parse_globals(argv: list[str]) -> list[str]:
         elif flag in ("-h", "--help"):
             return ["help"]
         else:
-            raise DeployError(f"opción global desconocida: {flag}  (las opciones del comando van DESPUÉS del comando)")
+            raise DeployError(f"unknown global option: {flag}  (command options go AFTER the command)")
     return rest
 
 
@@ -163,7 +163,7 @@ def dispatch(argv: list[str]) -> int:
             if not _OPTS["no_render"]:
                 render.auto(cfg)
             return tasks.run_task(cfg, name, args, dispatch)
-        raise DeployError(f"comando desconocido: {name}  (./deploy help)")
+        raise DeployError(f"unknown command: {name}  (./deploy help)")
     if command.render and not _OPTS["no_render"]:
         render.auto(cfg)
     module = importlib.import_module(f"{__package__}.{command.module}")
@@ -178,13 +178,13 @@ def main(argv: list[str]) -> int:
         ui.error(str(e))
         return e.code
     except KeyboardInterrupt:
-        ui.error("interrumpido")
+        ui.error("interrupted")
         return 130
     except SystemExit as e:  # argparse
         return e.code if isinstance(e.code, int) else 2
     except Exception:
         traceback.print_exc()
-        ui.error("fallo interno del runner (lo de arriba es un bug de .pytemplate/runner)")
+        ui.error("internal runner error (the traceback above is a bug in .pytemplate/runner)")
         return 1
     finally:
         sys.stdout.flush()

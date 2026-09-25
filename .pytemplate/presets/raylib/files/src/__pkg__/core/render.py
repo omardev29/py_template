@@ -1,8 +1,8 @@
-"""Bucle de dibujo por entidad: una llamada a raylib por conejo (compilado con mypyc).
+"""Per-entity draw loop: one raylib call per bunny (compiled with mypyc).
 
-`_draw_texture: Final = rl.DrawTexture`: con el alias Final, mypyc llama directamente
-a la función en lugar de buscar `rl.DrawTexture` en cada iteración. Es válido sin Any
-gracias al stub corregido de typings/raylib (./deploy stubs).
+`_draw_texture: Final = rl.DrawTexture`: with the Final alias, mypyc calls the function
+directly instead of looking up `rl.DrawTexture` on every iteration. It is valid without
+Any thanks to the fixed stub in typings/raylib (./deploy stubs).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import raylib as rl
 from .world import World
 
 if TYPE_CHECKING:
-    # Solo existen en el stub: en runtime los structs de raylib son cdata
+    # These only exist in the stub: at runtime the raylib structs are cdata
     from raylib import Color, Texture
 
 _draw_texture: Final = rl.DrawTexture

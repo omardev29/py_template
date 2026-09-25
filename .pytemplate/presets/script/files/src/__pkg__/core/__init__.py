@@ -1,1 +1,1 @@
-"""Núcleo compilado por mypyc (compile.modules): tipado estricto y sin Any."""
+"""Core compiled by mypyc (compile.modules): strict typing and no Any."""

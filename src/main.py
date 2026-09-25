@@ -1,14 +1,14 @@
-"""Lanzador de la app. NUNCA se compila con mypyc.
+"""App launcher. NEVER compiled with mypyc.
 
-Un módulo compilado siempre se importa (nunca es __main__), así que toda la lógica
-vive en el paquete miapp y este archivo solo la llama.
+A compiled module is always imported (it is never __main__), so all the logic
+lives in the myapp package and this file only calls it.
 """
 
 import sys
 
 
 def _main() -> int:
-    from miapp.app import main
+    from myapp.app import main
 
     return main()
 
@@ -16,5 +16,5 @@ def _main() -> int:
 if __name__ == "__main__":
     import multiprocessing
 
-    multiprocessing.freeze_support()  # necesario si usas procesos en un ejecutable
+    multiprocessing.freeze_support()  # needed if you use processes in an executable
     sys.exit(_main())

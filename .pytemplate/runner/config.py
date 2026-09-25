@@ -1,8 +1,8 @@
-"""Carga, valida y edita pytemplate.toml.
+"""Loading, validation and editing of pytemplate.toml.
 
-El esquema se define con dataclasses: cada campo con su valor por defecto. Una clave
-desconocida o de tipo incorrecto es un error (exit 2) con la ruta completa de la clave,
-para que una errata no se ignore en silencio.
+The schema is defined with dataclasses: each field with its default value. An unknown key
+or a key of the wrong type is an error (exit 2) that shows the full path of the key, so a
+typo is never silently ignored.
 """
 
 from __future__ import annotations
@@ -27,10 +27,10 @@ _DOTTED = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 @dataclass
 class AppConfig:
-    name: str = "miapp"  # nombre del ejecutable/dist; el paquete es su versión en snake_case
+    name: str = "myapp"  # executable/dist name; the package is its snake_case version
     preset: str = "script"  # script | raylib | flet
-    gui: bool = False  # True: exe sin consola, lanzadores con pythonw/pypyw
-    assets: str = "assets"  # carpeta dentro de src/ que se empaqueta ("" = ninguna)
+    gui: bool = False  # True: exe without a console, launchers use pythonw/pypyw
+    assets: str = "assets"  # folder inside src/ that gets packaged ("" = none)
 
 
 @dataclass
@@ -44,20 +44,20 @@ class PythonConfig:
     cpython: str = "3.14"
     pypy: str = "pypy@3.11.15"
     jit: bool = False
-    jit_interpreter: str = ""  # ruta a un python.org 3.14 con JIT (vacío = buscarlo)
+    jit_interpreter: str = ""  # path to a python.org 3.14 build with JIT (empty = search for it)
 
 
 @dataclass
 class TypingConfig:
     profile: str = "auto"  # auto | mypyc | strict | warn | off
-    relaxed: str = "off"  # lo que significa "auto" con backend cpython/pypy
+    relaxed: str = "off"  # what "auto" means with the cpython/pypy backends
     editor: str = "pylance"  # pylance | basedpyright
     mypy_overrides: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
 class CompileConfig:
-    modules: list[str] = field(default_factory=lambda: ["miapp.core"])
+    modules: list[str] = field(default_factory=lambda: ["myapp.core"])
     exclude: list[str] = field(default_factory=list)
     forbid_imports: list[str] = field(default_factory=list)
     annotate: bool = False
@@ -78,7 +78,7 @@ class ExeConfig:
 
 @dataclass
 class PortableConfig:
-    runtime: str = "bundled"  # bundled (incluye el intérprete) | system (usa el del destino)
+    runtime: str = "bundled"  # bundled (includes the interpreter) | system (uses the target's own)
     prune: bool = True
     archive: bool = True
     targets: list[str] = field(default_factory=lambda: ["host"])
@@ -92,7 +92,7 @@ class PyzConfig:
 
 @dataclass
 class WheelConfig:
-    entry: str = ""  # "paquete.modulo:funcion" para [project.scripts]; vacío = <pkg>.app:main
+    entry: str = ""  # "package.module:function" for [project.scripts]; empty = <pkg>.app:main
 
 
 @dataclass
@@ -126,8 +126,8 @@ class TaskConfig:
     cmd: list[str] = field(default_factory=list)
     deps: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
-    backend: str = ""  # entorno en el que corre (vacío = backend activo)
-    uv: bool = True  # True: se ejecuta con `uv run` dentro del entorno del backend
+    backend: str = ""  # environment it runs in (empty = active backend)
+    uv: bool = True  # True: runs with `uv run` inside the backend's environment
     cwd: str = ""
     help: str = ""
 
@@ -145,11 +145,11 @@ class Config:
     preset: dict[str, dict[str, Any]] = field(default_factory=dict)
     vscode: dict[str, Any] = field(default_factory=dict)
 
-    # --- valores derivados -------------------------------------------------------------
+    # --- derived values ----------------------------------------------------------------
 
     @property
     def pkg(self) -> str:
-        """Nombre del paquete Python de la app (src/<pkg>/)."""
+        """Name of the app's Python package (src/<pkg>/)."""
         return self.app.name.replace("-", "_").lower()
 
     def supports(self, backend: str) -> bool:
@@ -161,14 +161,14 @@ class Config:
 
     @property
     def min_python(self) -> str:
-        """Versión mínima de sintaxis: 3.11 si PyPy está soportado."""
+        """Minimum syntax version: 3.11 if PyPy is supported."""
         if self.pypy_enabled:
             m = re.search(r"@(\d+\.\d+)", self.python.pypy)
             return m.group(1) if m else "3.11"
         return self.python.cpython
 
     def profile_for(self, backend: str | None = None) -> str:
-        """Perfil de tipado efectivo para un backend (por defecto, el activo)."""
+        """Return the effective typing profile for a backend (the active one by default)."""
         b = backend or self.backend.active
         if b == "mypyc":
             return "mypyc"
@@ -178,7 +178,7 @@ class Config:
         return self.preset.get(name, {})
 
 
-# --- carga -------------------------------------------------------------------------------
+# --- loading -----------------------------------------------------------------------------
 
 
 def _default_of(f: dataclasses.Field[Any]) -> Any:
@@ -191,11 +191,11 @@ def _default_of(f: dataclasses.Field[Any]) -> Any:
 
 def _type_name(value: Any) -> str:
     return {
-        bool: "booleano",
-        int: "entero",
-        str: "texto",
-        list: "lista",
-        dict: "tabla",
+        bool: "boolean",
+        int: "integer",
+        str: "string",
+        list: "list",
+        dict: "table",
     }.get(type(value), type(value).__name__)
 
 
@@ -208,19 +208,19 @@ def _check_type(value: Any, default: Any, where: str) -> None:
         ok = isinstance(value, type(default))
     if not ok:
         raise DeployError(
-            f"pytemplate.toml: '{where}' debe ser {_type_name(default)}, no {_type_name(value)}"
+            f"pytemplate.toml: '{where}' must be of type {_type_name(default)}, not {_type_name(value)}"
         )
     if isinstance(default, list) and all(isinstance(x, str) for x in default):
         wants_str = bool(default) or where.endswith(
             ("supported", "modules", "exclude", "forbid_imports", "targets", "args", "deps", "cmd", "imports")
         )
         if wants_str and not all(isinstance(x, str) for x in value):
-            raise DeployError(f"pytemplate.toml: '{where}' debe ser una lista de textos")
+            raise DeployError(f"pytemplate.toml: '{where}' must be a list of strings")
 
 
 def _build(cls: type[Any], data: Any, where: str) -> Any:
     if not isinstance(data, dict):
-        raise DeployError(f"pytemplate.toml: '{where}' debe ser una tabla")
+        raise DeployError(f"pytemplate.toml: '{where}' must be a table")
     fields = {f.name: f for f in dataclasses.fields(cls)}
     kwargs: dict[str, Any] = {}
     for key, value in data.items():
@@ -228,7 +228,7 @@ def _build(cls: type[Any], data: Any, where: str) -> Any:
         f = fields.get(key)
         if f is None:
             valid = ", ".join(sorted(fields))
-            raise DeployError(f"pytemplate.toml: clave desconocida '{path}' (válidas: {valid})")
+            raise DeployError(f"pytemplate.toml: unknown key '{path}' (valid: {valid})")
         default = _default_of(f)
         if dataclasses.is_dataclass(default):
             kwargs[key] = _build(type(default), value, path)
@@ -244,57 +244,57 @@ def _build(cls: type[Any], data: Any, where: str) -> Any:
 
 def _table(value: Any, where: str) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise DeployError(f"pytemplate.toml: '{where}' debe ser una tabla")
+        raise DeployError(f"pytemplate.toml: '{where}' must be a table")
     return value
 
 
 def _one_of(value: str, allowed: tuple[str, ...], where: str) -> None:
     if value not in allowed:
-        raise DeployError(f"pytemplate.toml: '{where}' = {value!r} no es válido ({' | '.join(allowed)})")
+        raise DeployError(f"pytemplate.toml: '{where}' = {value!r} is not valid ({' | '.join(allowed)})")
 
 
 def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", cfg.app.name):
-        raise DeployError("pytemplate.toml: 'app.name' solo admite letras, números, '-' y '_'")
+        raise DeployError("pytemplate.toml: 'app.name' only allows letters, digits, '-' and '_'")
     for b in cfg.backend.supported:
         _one_of(b, BACKENDS, "backend.supported")
     if not cfg.backend.supported:
-        raise DeployError("pytemplate.toml: 'backend.supported' no puede estar vacío")
+        raise DeployError("pytemplate.toml: 'backend.supported' cannot be empty")
     _one_of(cfg.backend.active, BACKENDS, "backend.active")
     if cfg.backend.active not in cfg.backend.supported:
         raise DeployError(
-            f"pytemplate.toml: backend.active = {cfg.backend.active!r} no está en backend.supported "
-            f"{cfg.backend.supported}. Usa: ./deploy mode {cfg.backend.active} --supports +{cfg.backend.active}"
+            f"pytemplate.toml: backend.active = {cfg.backend.active!r} is not in backend.supported "
+            f"{cfg.backend.supported}. Use: ./deploy mode {cfg.backend.active} --supports +{cfg.backend.active}"
         )
     if not re.fullmatch(r"\d+\.\d+", cfg.python.cpython):
-        raise DeployError("pytemplate.toml: 'python.cpython' debe ser una versión menor, p. ej. \"3.14\"")
+        raise DeployError("pytemplate.toml: 'python.cpython' must be a minor version, e.g. \"3.14\"")
     if not re.fullmatch(r"pypy@\d+\.\d+\.\d+", cfg.python.pypy):
         raise DeployError(
-            "pytemplate.toml: 'python.pypy' debe ser exacto, p. ej. \"pypy@3.11.15\" "
-            "(una versión suelta puede resolverse a PyPy 8.0, cuyo ABI pp80 aún no tiene wheels)"
+            "pytemplate.toml: 'python.pypy' must be an exact version, e.g. \"pypy@3.11.15\" "
+            "(a loose version may resolve to PyPy 8.0, whose pp80 ABI has no wheels yet)"
         )
     _one_of(cfg.typing.profile, ("auto", *PROFILES), "typing.profile")
     _one_of(cfg.typing.relaxed, ("off", "warn", "strict"), "typing.relaxed")
     _one_of(cfg.typing.editor, EDITORS, "typing.editor")
     if cfg.backend.active == "mypyc" and cfg.typing.profile in ("warn", "off"):
         raise DeployError(
-            "pytemplate.toml: con backend mypyc el tipado no puede ser 'warn' ni 'off' "
-            "(mypyc aborta con cualquier error de mypy). Usa typing.profile = \"auto\"."
+            "pytemplate.toml: with the mypyc backend, typing cannot be 'warn' or 'off' "
+            "(mypyc aborts on any mypy error). Use typing.profile = \"auto\"."
         )
     for m in [*cfg.compile.modules, *cfg.compile.exclude]:
         if not _DOTTED.match(m):
-            raise DeployError(f"pytemplate.toml: módulo no válido en [compile]: {m!r}")
+            raise DeployError(f"pytemplate.toml: invalid module in [compile]: {m!r}")
     for o in cfg.typing.mypy_overrides:
         if "module" not in o:
-            raise DeployError("pytemplate.toml: cada [[typing.mypy_overrides]] necesita 'module'")
+            raise DeployError("pytemplate.toml: each [[typing.mypy_overrides]] needs 'module'")
         if "strict" in o:
             raise DeployError(
-                "pytemplate.toml: no pongas 'strict' en typing.mypy_overrides "
-                "(mypy lo aplicaría a TODOS los módulos); usa opciones concretas"
+                "pytemplate.toml: do not put 'strict' in typing.mypy_overrides "
+                "(mypy would apply it to ALL modules); use specific options instead"
             )
     _one_of(cfg.compile.opt_level, ("0", "1", "2", "3"), "compile.opt_level")
     if cfg.deploy.optimize not in (0, 1, 2):
-        raise DeployError("pytemplate.toml: 'deploy.optimize' debe ser 0, 1 o 2")
+        raise DeployError("pytemplate.toml: 'deploy.optimize' must be 0, 1 or 2")
     for backend, method in cfg.deploy.default.items():
         _one_of(backend, BACKENDS, "deploy.default")
         _one_of(method, METHODS, f"deploy.default.{backend}")
@@ -304,30 +304,30 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     _one_of(cfg.deploy.nuitka.mode, ("standalone", "onefile"), "deploy.nuitka.mode")
     for name, task in cfg.tasks.items():
         if not re.fullmatch(r"[a-z][a-z0-9_-]*", name):
-            raise DeployError(f"pytemplate.toml: nombre de tarea no válido: {name!r}")
+            raise DeployError(f"pytemplate.toml: invalid task name: {name!r}")
         if builtin_commands and name in builtin_commands:
-            raise DeployError(f"pytemplate.toml: la tarea '{name}' choca con el comando interno ./deploy {name}")
+            raise DeployError(f"pytemplate.toml: task '{name}' clashes with the built-in command ./deploy {name}")
         if not task.cmd and not task.deps:
-            raise DeployError(f"pytemplate.toml: la tarea '{name}' necesita 'cmd' o 'deps'")
+            raise DeployError(f"pytemplate.toml: task '{name}' needs 'cmd' or 'deps'")
         if task.backend:
             _one_of(task.backend, BACKENDS, f"tasks.{name}.backend")
 
 
 def load(builtin_commands: set[str] | None = None) -> Config:
     if not CONFIG_FILE.is_file():
-        raise DeployError(f"no existe {CONFIG_FILE.name} en la raíz del proyecto")
+        raise DeployError(f"{CONFIG_FILE.name} not found in the project root")
     text = CONFIG_FILE.read_text(encoding="utf-8-sig")
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        raise DeployError(f"pytemplate.toml no es TOML válido: {e}") from None
+        raise DeployError(f"pytemplate.toml is not valid TOML: {e}") from None
     cfg: Config = _build(Config, data, "")
     validate(cfg, builtin_commands)
     return cfg
 
 
 def compiled_paths(cfg: Config) -> list[str]:
-    """Rutas (relativas a src/) de los módulos/paquetes de compile.modules."""
+    """Return the paths (relative to src/) of the modules/packages in compile.modules."""
     out: list[str] = []
     for m in cfg.compile.modules:
         base = m.replace(".", "/")
@@ -335,7 +335,7 @@ def compiled_paths(cfg: Config) -> list[str]:
     return out
 
 
-# --- edición de pytemplate.toml conservando comentarios ----------------------------------------
+# --- editing pytemplate.toml while keeping comments --------------------------------------------
 
 
 def toml_value(value: Any) -> str:
@@ -351,7 +351,7 @@ def toml_value(value: Any) -> str:
 
 
 def set_value(text: str, table: str, key: str, value: Any) -> str:
-    """Cambia `key = ...` dentro de `[table]` (o lo añade) conservando el comentario de la línea."""
+    """Change `key = ...` inside `[table]` (or add it), keeping the comment on that line."""
     lines = text.splitlines(keepends=True)
     header = re.compile(r"^\s*\[\s*" + re.escape(table) + r"\s*\]\s*(#.*)?$")
     any_header = re.compile(r"^\s*\[")
@@ -378,5 +378,5 @@ def update_file(changes: list[tuple[str, str, Any]]) -> None:
     text = CONFIG_FILE.read_text(encoding="utf-8-sig")
     for table, key, value in changes:
         text = set_value(text, table, key, value)
-    tomllib.loads(text)  # nunca dejamos un archivo roto
+    tomllib.loads(text)  # never leave a broken file behind
     CONFIG_FILE.write_text(text, encoding="utf-8", newline="\n")

@@ -1,16 +1,16 @@
-"""pyz: un solo archivo zipapp que ejecuta cualquier CPython o PyPy compatible.
+"""pyz: a single zipapp file that runs on any compatible CPython or PyPy.
 
-    miapp.pyz
-      __main__.py             arranque (extrae a una caché la primera vez)
-      _pyz.json               build_id, versión mínima, destinos
-      common/app/             tu código en .py (sirve en cualquier intérprete)
-      common/lib/             dependencias puras (si ninguna es nativa)
-      targets/<clave>/lib/    dependencias para esa plataforma (si hay nativas)
-      targets/<clave>/app/    los paquetes compilados por mypyc (solo la clave del host)
+    myapp.pyz
+      __main__.py             bootstrap (extracts to a cache the first time)
+      _pyz.json               build_id, minimum version, targets
+      common/app/             your code as .py (works on any interpreter)
+      common/lib/             pure dependencies (if none is native)
+      targets/<key>/lib/      dependencies for that platform (if any are native)
+      targets/<key>/app/      the packages compiled by mypyc (host key only)
 
-Claves: cp314-windows-x86_64, cp314-linux-x86_64, pp311-windows-x86_64...
-Extra con [deploy.pyz] targets o --target. mypyc no compila para otros sistemas: allí
-se usa el .py (más lento, mismo resultado).
+Keys: cp314-windows-x86_64, cp314-linux-x86_64, pp311-windows-x86_64...
+Add more with [deploy.pyz] targets or --target. mypyc does not compile for other OSes:
+there the .py is used (slower, same result).
 """
 
 from __future__ import annotations
@@ -45,11 +45,11 @@ def _wrapper_cmd(cfg: Config, backend: str, pyz_name: str) -> str:
     major, minor = cfg.min_python.split(".")
     probe = f'-c "import sys; sys.exit(sys.version_info[:2] < ({major}, {minor}))"'
     lines = ["@echo off", "setlocal", 'set "PYTHONUTF8=1"']
-    # Se prueba cada intérprete de verdad (que exista Y cumpla la versión mínima): el
-    # lanzador `py` puede estar instalado sin ningún Python registrado
+    # Actually run each interpreter (it must exist AND meet the minimum version): the
+    # `py` launcher can be installed with no Python registered
     for i, cmd in enumerate(order):
         lines.append(f"{cmd} {probe} >nul 2>nul && goto run{i}")
-    lines += [f"echo {cfg.app.name}: hace falta Python o PyPy en el PATH 1>&2", "exit /b 9009"]
+    lines += [f"echo {cfg.app.name}: needs Python or PyPy in PATH 1>&2", "exit /b 9009"]
     for i, cmd in enumerate(order):
         lines += [f":run{i}", f'{cmd} "%~dp0{pyz_name}" %*', "exit /b %ERRORLEVEL%"]
     return "\r\n".join(lines) + "\r\n"
@@ -66,13 +66,13 @@ def build(req: BuildRequest) -> Path:
         shutil.rmtree(root)
     root.mkdir(parents=True)
 
-    # Código puro (sin .pyd): funciona en cualquier intérprete >= versión mínima
+    # Pure code (no .pyd): works on any interpreter >= the minimum version
     common.copy_app(req.app_dir, root / "common" / "app", extensions=False)
 
     requirements = common.export_requirements(cfg)
     sites: dict[str, Path] = {}
     for t in targets:
-        ui.info(f"  dependencias para {t.key}")
+        ui.info(f"  dependencies for {t.key}")
         sites[t.key] = common.install_deps(cfg, req.backend, t, work / "site" / t.key, requirements)
     native = any(common.has_native(p) for p in sites.values())
     if native:
@@ -82,8 +82,8 @@ def build(req: BuildRequest) -> Path:
         shutil.copytree(sites[host.key], root / "common" / "lib")
 
     if req.compiled:
-        # Paquetes compilados COMPLETOS (con __init__.py): un overlay parcial sería un
-        # namespace package y Python cargaría los .py del zip en su lugar
+        # COMPLETE compiled packages (with __init__.py): a partial overlay would be a
+        # namespace package and Python would load the .py files from the zip instead
         overlay = root / "targets" / host.key / "app"
         common.copy_app(req.app_dir, overlay, extensions=True)
 
@@ -111,26 +111,26 @@ def build(req: BuildRequest) -> Path:
     if not IS_WINDOWS:
         pyz.chmod(0o755)
 
-    where = ", ".join(target_keys) if target_keys else "cualquier plataforma"
+    where = ", ".join(target_keys) if target_keys else "any platform"
     if req.compiled:
-        ui.info(f"  compilado (mypyc) para {host.key}; en el resto se usa el .py")
+        ui.info(f"  compiled (mypyc) for {host.key}; everywhere else the .py is used")
     if pure:
-        ui.info(f"  puro: funciona con CPython o PyPy >= {cfg.min_python} en cualquier sistema")
+        ui.info(f"  pure: works with CPython or PyPy >= {cfg.min_python} on any OS")
     else:
-        ui.info(f"  binarios para: {where}")
-    ui.info(f"  ejecuta: python {rel(pyz)}   (en Windows también {rel(out_dir / (cfg.app.name + '.cmd'))})")
+        ui.info(f"  binaries for: {where}")
+    ui.info(f"  run: python {rel(pyz)}   (on Windows also {rel(out_dir / (cfg.app.name + '.cmd'))})")
     if any(p.name.endswith(EXT_SUFFIXES) for p in (root / "common").rglob("*")):
-        raise DeployError("bug: hay extensiones compiladas en common/ del pyz")
+        raise DeployError("bug: the pyz has compiled extensions in common/")
     return pyz
 
 
 def merge(parts: list[Path], out: Path) -> Path:
-    """Une varios .pyz del mismo proyecto (uno por SO, p. ej. de la CI) en uno multiplataforma."""
+    """Merge several .pyz files of the same project (one per OS, e.g. from CI) into a multi-platform one."""
     import tempfile
     import zipfile
 
     if len(parts) < 2:
-        raise DeployError("pyz-merge necesita al menos dos .pyz")
+        raise DeployError("pyz-merge needs at least two .pyz files")
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "root"
         infos: list[dict[str, object]] = []
@@ -141,7 +141,7 @@ def merge(parts: list[Path], out: Path) -> Path:
                 for member in archive.namelist():
                     if member.endswith("/") or member == "_pyz.json":
                         continue
-                    # common/ y __main__.py del primero; targets/ de todos
+                    # common/ and __main__.py from the first one; targets/ from all of them
                     if i > 0 and not member.startswith("targets/"):
                         continue
                     target = root / member
@@ -149,7 +149,7 @@ def merge(parts: list[Path], out: Path) -> Path:
                     target.write_bytes(archive.read(member))
         names = {str(i["name"]) for i in infos}
         if len(names) != 1:
-            raise DeployError(f"pyz-merge: son de apps distintas: {', '.join(sorted(names))}")
+            raise DeployError(f"pyz-merge: they come from different apps: {', '.join(sorted(names))}")
         targets = sorted({str(t) for i in infos for t in i["targets"]})  # type: ignore[attr-defined]
         merged = {
             **infos[0],
@@ -160,5 +160,5 @@ def merge(parts: list[Path], out: Path) -> Path:
         (root / "_pyz.json").write_text(json.dumps(merged, indent=2), encoding="utf-8")
         out.parent.mkdir(parents=True, exist_ok=True)
         zipapp.create_archive(root, out, interpreter="/usr/bin/env python3", compressed=True)
-    ui.ok(f"{rel(out)}: binarios para {', '.join(targets)}")
+    ui.ok(f"{rel(out)}: binaries for {', '.join(targets)}")
     return out

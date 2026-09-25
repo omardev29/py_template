@@ -1,4 +1,4 @@
-"""Tests del runner de ./deploy (se ejecutan con `./deploy selftest`)."""
+"""Tests for the ./deploy runner (run them with `./deploy selftest`)."""
 
 from __future__ import annotations
 
@@ -34,22 +34,22 @@ def test_defaults_are_valid() -> None:
 
 
 def test_unknown_key_is_an_error() -> None:
-    with pytest.raises(DeployError, match="clave desconocida 'backend.activo'"):
-        make({"backend": {"activo": "pypy"}})
+    with pytest.raises(DeployError, match="unknown key 'backend.mode'"):
+        make({"backend": {"mode": "pypy"}})
 
 
 def test_wrong_type_is_an_error() -> None:
-    with pytest.raises(DeployError, match="booleano"):
+    with pytest.raises(DeployError, match="boolean"):
         make({"python": {"jit": "yes"}})
 
 
 def test_active_must_be_supported() -> None:
-    with pytest.raises(DeployError, match="no está en backend.supported"):
+    with pytest.raises(DeployError, match="is not in backend.supported"):
         make({"backend": {"active": "pypy", "supported": ["cpython"]}})
 
 
 def test_pypy_must_be_exact() -> None:
-    with pytest.raises(DeployError, match="exacto"):
+    with pytest.raises(DeployError, match="exact version"):
         make({"python": {"pypy": "pypy@3.11"}})
 
 
@@ -64,15 +64,15 @@ def test_pypy_lowers_min_python() -> None:
 
 
 def test_task_cannot_shadow_builtin() -> None:
-    with pytest.raises(DeployError, match="choca"):
+    with pytest.raises(DeployError, match="clashes with"):
         cfg: Config = config._build(Config, {"tasks": {"run": {"cmd": ["x"]}}}, "")
         config.validate(cfg, {"run"})
 
 
 def test_set_value_keeps_comments() -> None:
-    text = '[backend]\nactive = "cpython"   # el modo\nsupported = ["cpython"]\n\n[python]\njit = false\n'
+    text = '[backend]\nactive = "cpython"   # the mode\nsupported = ["cpython"]\n\n[python]\njit = false\n'
     out = set_value(text, "backend", "active", "mypyc")
-    assert 'active = "mypyc"   # el modo' in out
+    assert 'active = "mypyc"   # the mode' in out
     out = set_value(out, "python", "jit", True)
     assert "jit = true" in out
     out = set_value(out, "typing", "relaxed", "warn")
@@ -109,7 +109,7 @@ def test_toml_serializer_roundtrip() -> None:
     assert tomllib.loads(render.to_toml(data)) == data
 
 
-# --- imports / lint de mypyc ----------------------------------------------------------------------
+# --- imports / mypyc lint -------------------------------------------------------------------------
 
 
 def test_imports_skip_type_checking(tmp_path: Path) -> None:
@@ -138,7 +138,7 @@ def test_lintc_rules(tmp_path: Path) -> None:
     messages = [f.message for f in lintc.lint_file(cfg, mod, {})]
     assert any("flet" in m for m in messages)
     assert any("@cache" in m for m in messages)
-    assert any("anidada" in m for m in messages)
+    assert any("nested class" in m for m in messages)
     assert any("__file__" in m for m in messages)
     assert any("__main__" in m for m in messages)
 

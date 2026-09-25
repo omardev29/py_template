@@ -1,16 +1,16 @@
-description = "Juego 2D con raylib: lógica compilable con mypyc, y PyPy (JIT + cffi) por defecto"
+description = "2D game with raylib: mypyc-compilable logic, and PyPy (JIT + cffi) by default"
 
 dependencies = ["{package}=={version}"]
-# types-cffi: tipos de `ffi` y de _cffi_backend (los usa el stub corregido de typings/)
+# types-cffi: types for `ffi` and _cffi_backend (used by the corrected stub in typings/)
 dev_dependencies = ["types-cffi"]
 
-# Valores por defecto de [preset.raylib] en pytemplate.toml
+# Defaults for [preset.raylib] in pytemplate.toml
 [options]
-package = "raylib"   # raylib (GLFW) | raylib_sdl (SDL3) | raylib_software: mismos imports, excluyentes
+package = "raylib"   # raylib (GLFW) | raylib_sdl (SDL3) | raylib_software: same imports, pick one
 version = "6.0.1.0"
 
-# Claves extra del bloque gestionado de [tool.uv]
+# Extra keys for the managed [tool.uv] block
 [uv]
-# raylib siempre desde wheel: si falta uno (PyPy 8, Apple Silicon + PyPy...) error claro
-# en lugar de intentar compilar raylib desde el código fuente
+# raylib always from a wheel: if one is missing (PyPy 8, Apple Silicon + PyPy...) a clear error
+# instead of trying to build raylib from source
 no-build-package = ["{package}"]

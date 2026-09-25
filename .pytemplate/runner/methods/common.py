@@ -1,4 +1,4 @@
-"""Piezas comunes de portable y pyz: claves de plataforma, dependencias por destino."""
+"""Pieces shared by portable and pyz: platform keys, per-target dependencies."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from ..ui import DeployError
 
 NATIVE_SUFFIXES = (*EXT_SUFFIXES, ".dll", ".dylib")
 KEY_RE = re.compile(r"^(cp|pp)(\d)(\d+)-(windows|linux|macos)-(x86_64|aarch64)$")
-# Plataforma de uv (--python-platform) para cada (so, arquitectura)
+# uv platform (--python-platform) for each (OS, architecture)
 UV_PLATFORMS = {
     ("windows", "x86_64"): "x86_64-pc-windows-msvc",
     ("windows", "aarch64"): "aarch64-pc-windows-msvc",
@@ -51,7 +51,7 @@ def parse_key(key: str) -> Target:
     m = KEY_RE.match(key)
     if not m:
         raise DeployError(
-            f"clave de plataforma no válida: {key!r} (formato: cp314-linux-x86_64, pp311-windows-x86_64...)"
+            f"invalid platform key: {key!r} (format: cp314-linux-x86_64, pp311-windows-x86_64...)"
         )
     impl, major, minor, os_name, arch = m.groups()
     return Target(impl, int(major), int(minor), os_name, arch)
@@ -72,14 +72,14 @@ def targets_for(cfg: Config, backend: str, keys: list[str]) -> list[Target]:
             continue
         t = parse_key(k)
         if t.impl == "pp" and not t.is_host:
-            raise DeployError(f"{k}: uv no puede resolver wheels de PyPy para otro sistema; solo el PyPy del host")
+            raise DeployError(f"{k}: uv cannot resolve PyPy wheels for another OS; only the host PyPy")
         if t.key not in {x.key for x in out}:
             out.append(t)
     return out
 
 
 def export_requirements(cfg: Config) -> Path:
-    """Dependencias de runtime (sin dev) con versiones y hashes exactos de uv.lock."""
+    """Export the runtime dependencies (no dev) with exact versions and hashes from uv.lock."""
     out = BUILD / "deploy" / "requirements.txt"
     out.parent.mkdir(parents=True, exist_ok=True)
     envs.uv(
@@ -90,7 +90,7 @@ def export_requirements(cfg: Config) -> Path:
 
 
 def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirements: Path) -> Path:
-    """`uv pip install --target` de las deps de runtime para un destino (host o cruzado)."""
+    """Install the runtime deps for one target (host or cross) with `uv pip install --target`."""
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
@@ -101,13 +101,13 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
     if target.is_host and env.python.is_file():
         argv += ["--python", env.python]
         if target.impl == "cp" and backend == "pypy":
-            raise DeployError("destino CPython desde un build PyPy: usa claves pp311-...")
+            raise DeployError("CPython target from a PyPy build: use pp311-... keys")
     else:
         argv += [
             "--python", envs.tool_env(cfg).python,
             "--python-platform", UV_PLATFORMS[(target.os, target.arch)],
             "--python-version", target.version,
-            "--only-binary", ":all:",  # compilar sdists para otro SO daría binarios del host
+            "--only-binary", ":all:",  # building sdists for another OS would produce host binaries
         ]
     envs.uv(env, argv)
     for junk in dest.glob("_virtualenv*"):
@@ -120,7 +120,7 @@ def has_native(path: Path) -> bool:
 
 
 def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:
-    """Copia la carga útil. extensions=False deja solo los .py (fallback puro)."""
+    """Copy the payload. extensions=False keeps only the .py files (pure fallback)."""
     if dest.exists():
         shutil.rmtree(dest)
 
