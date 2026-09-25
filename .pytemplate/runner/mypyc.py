@@ -25,6 +25,8 @@ from .project import BUILD, EXT_SUFFIXES, SRC, TOOLS, rel
 from .ui import DeployError
 
 SKIP_DIRS = {"__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
+# The annotated HTML report (slow lines): ./deploy report, and every build with compile.annotate
+ANNOTATE_HTML = BUILD / "reports" / "mypyc-annotate.html"
 
 
 @dataclass(frozen=True)
@@ -79,7 +81,11 @@ def _is_ext(name: str) -> bool:
 
 
 def sync_tree(src: Path, dst: Path) -> int:
-    """Copy src -> dst: only what changed; remove what was deleted (except compiled extensions)."""
+    """Copy src -> dst: only what changed; remove what was deleted (except compiled extensions).
+
+    "Changed" = different size or different mtime in nanoseconds: copy2 preserves the exact
+    mtime, so a same-size edit within the same second is still detected.
+    """
     changed = 0
     dst.mkdir(parents=True, exist_ok=True)
     seen: set[Path] = set()
@@ -94,7 +100,7 @@ def sync_tree(src: Path, dst: Path) -> int:
         st = path.stat()
         if target.is_file():
             tt = target.stat()
-            if tt.st_size == st.st_size and int(tt.st_mtime) == int(st.st_mtime):
+            if tt.st_size == st.st_size and tt.st_mtime_ns == st.st_mtime_ns:
                 continue
         shutil.copy2(path, target)
         changed += 1
@@ -129,7 +135,14 @@ def remove_stale_extensions(stage: Path, modules: list[str], group: str) -> None
 
 
 def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compile_c: bool = True) -> Path:
-    """Prepare the stage and compile. Return the stage path."""
+    """Prepare the stage and compile. Return the stage path.
+
+    `annotate`: also write mypyc's annotated HTML report there. With compile.annotate = true
+    every build writes it to ANNOTATE_HTML (mypyc generates it from the IR it already built).
+    """
+    from_config = annotate is None and cfg.compile.annotate
+    if from_config:
+        annotate = ANNOTATE_HTML
     prof = profile(cfg, profile_name)
     sources = compiled_sources(cfg)
     modules = [module_name(p, SRC) for p in sources]
@@ -162,7 +175,7 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
         "compile": compile_c,
     }
     spec_file = prof.dir / "spec.json"
-    spec_file.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+    spec_file.write_text(json.dumps(spec, indent=2), encoding="utf-8", newline="\n")
     if annotate:
         annotate.parent.mkdir(parents=True, exist_ok=True)
 
@@ -179,6 +192,8 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
         raise DeployError(f"mypyc failed (exit code {result.returncode}){hint}", result.returncode)
     if annotate and result.stdout:
         ui.detail(result.stdout)
+    if from_config and annotate and not proc.DRY_RUN:
+        ui.info(f"  mypyc report (compile.annotate): {rel(annotate)}")
     if not compile_c or proc.DRY_RUN:
         return prof.stage
 
@@ -217,11 +232,6 @@ def exe_stage(cfg: Config, stage: Path, dest: Path) -> Path:
         if target.exists():
             target.unlink()
     return dest
-
-
-def clean_bytecode(path: Path) -> None:
-    for cache in path.rglob("__pycache__"):
-        shutil.rmtree(cache, ignore_errors=True)
 
 
 def has_compiler_hint() -> str:

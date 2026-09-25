@@ -137,20 +137,29 @@ def interpreter_info(python: str | Path) -> dict[str, object]:
 def find_jit_interpreter(cfg: Config) -> str:
     """Find a system CPython (python.org) with the JIT available."""
     if cfg.python.jit_interpreter:
-        return cfg.python.jit_interpreter
-    candidates: list[str] = []
+        given = Path(cfg.python.jit_interpreter).expanduser()
+        path = given if given.is_absolute() else ROOT / given  # relative to the project, never the cwd
+        if not path.is_file():
+            raise DeployError(
+                f"python.jit_interpreter = {cfg.python.jit_interpreter!r} does not exist "
+                "(it must be the path to python.exe / bin/python3 of a CPython with the JIT)",
+                3,
+            )
+        return str(path)
     env = proc.base_env()
     env["UV_PYTHON_PREFERENCE"] = "only-system"
-    try:
-        found = proc.output([proc.find_uv(), "python", "find", cfg.python.cpython], env=env)
-        candidates.append(found)
-    except DeployError:
-        pass
+    queries: list[list[str | Path]] = [[proc.find_uv(), "python", "find", cfg.python.cpython]]
     if IS_WINDOWS:
+        queries.append(["py", f"-{cfg.python.cpython}", "-c", "import sys;print(sys.executable)"])
+    candidates: list[str] = []
+    for argv in queries:
+        # Quiet: a missing candidate is expected (`py` prints "No suitable Python runtime found")
         try:
-            candidates.append(proc.output(["py", f"-{cfg.python.cpython}", "-c", "import sys;print(sys.executable)"]))
-        except DeployError:
-            pass
+            r = proc.run(argv, env=env, capture=True, check=False, echo=False)
+        except DeployError:  # program not found
+            continue
+        if r.returncode == 0 and r.stdout.strip():
+            candidates.append(r.stdout.strip())
     for c in candidates:
         try:
             if interpreter_info(c).get("jit"):

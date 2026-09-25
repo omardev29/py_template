@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 from . import cmd_nvim, envs, mypyc, proc, render, shells, ui
+from .cmd_dev import only_flags
 from .config import Config
 from .project import BUILD, DIST, IS_WINDOWS, ROOT, rel
 from .ui import DeployError
@@ -42,6 +43,7 @@ def ensure_lock(cfg: Config) -> None:
 
 def cmd_setup(cfg: Config, args: list[str]) -> int:
     """setup: interpreters, uv.lock and the environments of every supported backend."""
+    only_flags("setup", args, ())
     ui.step("setup")
     ensure_lock(cfg)
     for env in _envs_for(cfg, "all"):
@@ -49,7 +51,7 @@ def cmd_setup(cfg: Config, args: list[str]) -> int:
         envs.sync(env)
     _fix_exec_bit()
     render.apply(cfg)
-    ui.ok("done. Try: ./deploy run   ·   ./deploy test   ·   ./deploy doctor")
+    ui.ok("done. Try: ./deploy run  |  ./deploy test  |  ./deploy doctor")
     return 0
 
 
@@ -64,6 +66,8 @@ def _fix_exec_bit() -> None:
 
 def cmd_sync(cfg: Config, args: list[str]) -> int:
     """sync [cpython|pypy|mypyc|all]: `uv sync --locked` of the environment(s)."""
+    if len(args) > 1:
+        raise DeployError(f"sync: unrecognized arguments: {' '.join(args[1:])}  (one target: cpython | pypy | mypyc | all)")
     target = args[0] if args else "all"
     for env in _envs_for(cfg, target):
         envs.sync(env)
@@ -120,8 +124,9 @@ def cmd_remove(cfg: Config, args: list[str]) -> int:
 
 def cmd_clean(cfg: Config, args: list[str]) -> int:
     """clean [--envs]: remove .build/ and dist/ (and the .venv* environments with --envs)."""
+    flags = only_flags("clean", args, ("--envs",))
     targets = [BUILD, DIST]
-    if "--envs" in args:
+    if "--envs" in flags:
         targets += sorted(p for p in ROOT.glob(".venv*") if p.is_dir())
     for t in targets:
         if t.exists():
@@ -161,6 +166,7 @@ def _c_compiler() -> tuple[bool, str]:
 
 def cmd_doctor(cfg: Config, args: list[str]) -> int:
     """doctor: check requirements, environments and generated files."""
+    only_flags("doctor", args, ())
     problems = 0
 
     def check(passed: bool | None, label: str, hint: str = "") -> None:

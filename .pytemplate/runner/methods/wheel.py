@@ -69,10 +69,26 @@ setup(
         opt_level={opt!r},
         debug_level="0",
         strip_asserts={strip!r},
+        multi_file={multi_file!r},
+        separate={separate!r},
+        strict_dunder_typing={strict_dunder_typing!r},
         group_name={group!r},
     )
 )
 '''
+
+
+def setup_py(cfg: Config) -> str:
+    """Return the setup.py of a mypyc wheel: the same [compile] options as the mypyc stage."""
+    return SETUP_PY.format(
+        files=[f"src/{p.relative_to(SRC).as_posix()}" for p in mypyc.compiled_sources(cfg)],
+        opt=cfg.compile.opt_level,
+        strip=cfg.deploy.optimize >= 1,
+        multi_file=cfg.compile.multi_file,
+        separate=cfg.compile.separate,
+        strict_dunder_typing=cfg.compile.strict_dunder_typing,
+        group=None if cfg.compile.separate else mypyc.group_name(cfg),
+    )
 
 
 def build(req: BuildRequest) -> Path:
@@ -89,19 +105,10 @@ def build(req: BuildRequest) -> Path:
     if assets and (SRC / assets).is_dir():
         # In a wheel the assets travel inside the package (resources.py looks for them there)
         shutil.copytree(SRC / assets, work / "src" / cfg.pkg / "assets")
-    (work / "pyproject.toml").write_text(_pyproject(cfg, req.compiled), encoding="utf-8")
+    (work / "pyproject.toml").write_text(_pyproject(cfg, req.compiled), encoding="utf-8", newline="\n")
     if req.compiled:
-        (work / "mypy.ini").write_text(render.mypy_ini(cfg, "mypyc", for_compile=True), encoding="utf-8")
-        files = [f"src/{p.relative_to(SRC).as_posix()}" for p in mypyc.compiled_sources(cfg)]
-        (work / "setup.py").write_text(
-            SETUP_PY.format(
-                files=files,
-                opt=cfg.compile.opt_level,
-                strip=cfg.deploy.optimize >= 1,
-                group=mypyc.group_name(cfg),
-            ),
-            encoding="utf-8",
-        )
+        (work / "mypy.ini").write_text(render.mypy_ini(cfg, "mypyc", for_compile=True), encoding="utf-8", newline="\n")
+        (work / "setup.py").write_text(setup_py(cfg), encoding="utf-8", newline="\n")
     out = dist_path(req)
     if out.exists():
         shutil.rmtree(out)

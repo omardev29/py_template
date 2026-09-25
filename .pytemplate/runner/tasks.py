@@ -5,11 +5,13 @@
     cmd = ["python", "scripts/gen.py", "{backend}"]   # argv, no shell: the same in every shell
     deps = ["check"]                                   # other tasks or ./deploy commands
     env = { SEED = "42" }
-    backend = "pypy"   # environment it runs in (empty = active backend)
+    backend = "pypy"   # environment it runs in (empty = active backend; "mypyc" = the .venv,
+                       # interpreted: add deps = ["compile"] and run the stage to use the binaries)
     uv = true          # true: `uv run` inside that environment; false: run the program as-is
 
 Placeholders in cmd/env/cwd: {root} {src} {build} {dist} {backend} {name} {pkg} {python}.
-Extra arguments to `./deploy <task> ...` are appended to the end of cmd.
+{python} (the backend's interpreter) is only resolved when used. Extra arguments to
+`./deploy <task> ...` are appended to the end of cmd.
 """
 
 from __future__ import annotations
@@ -25,18 +27,29 @@ from .ui import DeployError
 Dispatcher = Callable[[list[str]], int]
 
 
-def _placeholders(cfg: Config, backend: str) -> dict[str, str]:
-    env = envs.runtime_env(cfg, backend)
-    return {
-        "root": str(ROOT),
-        "src": str(SRC),
-        "build": str(BUILD),
-        "dist": str(DIST),
-        "backend": backend,
-        "name": cfg.app.name,
-        "pkg": cfg.pkg,
-        "python": str(env.python),
-    }
+class Placeholders(dict[str, str]):
+    """The placeholder values. {python} is resolved only when a task uses it: with
+    python.jit = true that means looking for the JIT interpreter, which may not exist."""
+
+    def __init__(self, cfg: Config, backend: str) -> None:
+        super().__init__(
+            root=str(ROOT),
+            src=str(SRC),
+            build=str(BUILD),
+            dist=str(DIST),
+            backend=backend,
+            name=cfg.app.name,
+            pkg=cfg.pkg,
+        )
+        self._cfg = cfg
+        self._backend = backend
+
+    def __missing__(self, key: str) -> str:
+        if key != "python":
+            raise KeyError(key)
+        value = str(envs.runtime_env(self._cfg, self._backend).python)
+        self[key] = value
+        return value
 
 
 def list_tasks(cfg: Config) -> None:
@@ -64,7 +77,7 @@ def run_task(cfg: Config, name: str, extra: list[str], dispatch: Dispatcher, sta
     if not task.cmd:
         return 0
     backend = task.backend or cfg.backend.active
-    values = _placeholders(cfg, backend)
+    values = Placeholders(cfg, backend)
     try:
         argv = [a.format_map(values) for a in task.cmd] + extra
         extra_env = {k: v.format_map(values) for k, v in task.env.items()}

@@ -2,7 +2,7 @@
 
 Much slower builds than PyInstaller, in exchange for a native executable. With the
 mypyc backend, your core modules are already compiled by mypyc (Nuitka includes the
-.pyd files as-is) and Nuitka compiles the rest. Nuitka runs through `uv run --with nuitka`
+.pyd files as-is) and Nuitka compiles the rest. Nuitka runs through `uv run --with nuitka==...`
 (it does not go into uv.lock or the development environment).
 """
 
@@ -14,6 +14,11 @@ from pathlib import Path
 from .. import envs, mypyc, ui
 from ..cmd_build import BuildRequest, dist_path
 from ..project import BUILD, IS_WINDOWS, ROOT
+from ..ui import DeployError
+
+# Nuitka is not in uv.lock (`uv run --with`), so it is pinned here to keep builds reproducible:
+# the latest release on PyPI in September 2026. Bump it deliberately.
+NUITKA = "nuitka==4.2.2"
 
 
 def build(req: BuildRequest) -> Path:
@@ -54,16 +59,21 @@ def build(req: BuildRequest) -> Path:
     argv += cfg.deploy.nuitka.extra_args + req.extra
 
     ui.info("  Nuitka compiles everything to C: the first build takes several minutes")
-    envs.uv(envs.tool_env(cfg), ["run", "--locked", "--with", "nuitka", *argv], cwd=stage)
+    envs.uv(envs.tool_env(cfg), ["run", "--locked", "--with", NUITKA, *argv], cwd=stage)
 
     out = dist_path(req)
     if out.exists():
         shutil.rmtree(out)
+    produced = sorted(work.iterdir()) if work.is_dir() else []
     if onefile:
+        exe = next((p for p in produced if p.is_file() and p.name.startswith(cfg.app.name)), None)
+        if exe is None:
+            raise DeployError(f"nuitka finished without producing {cfg.app.name}* in {work}")
         out.mkdir(parents=True)
-        exe = next(p for p in work.iterdir() if p.is_file() and p.name.startswith(cfg.app.name))
         shutil.move(str(exe), str(out / exe.name))
         return out / exe.name
-    dist_dir = next(p for p in work.iterdir() if p.is_dir() and p.name.endswith(".dist"))
+    dist_dir = next((p for p in produced if p.is_dir() and p.name.endswith(".dist")), None)
+    if dist_dir is None:
+        raise DeployError(f"nuitka finished without producing a *.dist folder in {work}")
     shutil.move(str(dist_dir), str(out))
     return out

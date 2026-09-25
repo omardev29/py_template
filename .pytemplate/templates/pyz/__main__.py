@@ -68,6 +68,15 @@ def _prune_old(root: Path, keep: str) -> None:
             shutil.rmtree(old, ignore_errors=True)
 
 
+def _prepend_sitedir(path: Path) -> None:
+    """Like site.addsitedir (it also processes the .pth files), but at the FRONT of sys.path:
+    the locked dependencies in lib/ must win over packages installed in this Python."""
+    before = list(sys.path)
+    site.addsitedir(str(path))
+    added = [p for p in sys.path if p not in before]
+    sys.path[:] = added + before
+
+
 def main() -> None:
     pyz = Path(__file__).resolve().parent
     with zipfile.ZipFile(pyz) as archive:
@@ -91,9 +100,9 @@ def main() -> None:
     _prune_old(root, info["build_id"])
 
     app = dest / "app"
-    sys.path.insert(0, str(app))
     if (dest / "lib").is_dir():
-        site.addsitedir(str(dest / "lib"))
+        _prepend_sitedir(dest / "lib")
+    sys.path.insert(0, str(app))
     os.environ.setdefault("PYTEMPLATE_ASSETS", str(app / "assets"))
     sys.argv[0] = str(app / "main.py")
     runpy.run_path(str(app / "main.py"), run_name="__main__")

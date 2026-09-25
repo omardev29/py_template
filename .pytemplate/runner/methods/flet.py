@@ -11,13 +11,15 @@
 
 from __future__ import annotations
 
-import os
+import json
 import shutil
 import tomllib
 from pathlib import Path
+from typing import Any
 
-from .. import envs, mypyc, proc, ui
+from .. import envs, mypyc, proc, render, ui
 from ..cmd_build import BuildRequest, dist_path
+from ..config import Config
 from ..project import BUILD, IS_WINDOWS, PYPROJECT, SRC, host_os
 from ..ui import DeployError
 
@@ -46,6 +48,26 @@ def _pinned_requirements(cfg_tool: envs.PyEnv) -> list[str]:
     return [ln.strip() for ln in out.splitlines() if ln.strip() and not ln.startswith("#")]
 
 
+def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
+    """Return the pyproject.toml that `flet build` reads: the exact versions of uv.lock plus the
+    project's whole [tool.flet] (parsed, so no other table of pyproject.toml leaks into it)."""
+    project = data["project"]
+    tool_flet = data.get("tool", {}).get("flet") or {"app": {"path": "src"}}
+    lines = [
+        "[project]",
+        f"name = {json.dumps(project['name'])}",
+        f"version = {json.dumps(project['version'])}",
+        f'requires-python = ">={cfg.python.cpython}"',
+        "dependencies = [",
+        *[f"    {json.dumps(p)}," for p in pins],
+        "]",
+        "",
+        "[tool.flet]",
+        render.to_toml(tool_flet, "tool.flet"),
+    ]
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
 def build(req: BuildRequest) -> Path:
     cfg = req.cfg
     if cfg.app.preset != "flet":
@@ -71,35 +93,23 @@ def build(req: BuildRequest) -> Path:
     work = BUILD / "flet-build" / req.backend
     work.mkdir(parents=True, exist_ok=True)
     mypyc.sync_tree(app_dir, work / "src")
+    # sync_tree keeps extensions: drop those of a previous build (a desktop build's .pyd must
+    # not reach a mobile/web one), then copy this payload's binaries
+    for stale in mypyc.extension_files(work / "src"):
+        stale.unlink()
     for ext in mypyc.extension_files(app_dir):
         target_ext = work / "src" / ext.relative_to(app_dir)
         target_ext.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ext, target_ext)
 
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
-    project = data["project"]
-    pins = _pinned_requirements(envs.tool_env(cfg))
-    text = PYPROJECT.read_text(encoding="utf-8")
-    tool_flet = text[text.index("[tool.flet]"):] if "[tool.flet]" in text else '[tool.flet.app]\npath = "src"\n'
-    tool_flet = tool_flet.split("# <<< pytemplate-preset")[0]
-    lines = [
-        "[project]",
-        f'name = "{project["name"]}"',
-        f'version = "{project["version"]}"',
-        f'requires-python = ">={cfg.python.cpython}"',
-        "dependencies = [",
-        *[f'    "{p}",' for p in pins],
-        "]",
-        "",
-        tool_flet.strip(),
-    ]
-    (work / "pyproject.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    text = build_pyproject(cfg, data, _pinned_requirements(envs.tool_env(cfg)))
+    (work / "pyproject.toml").write_text(text, encoding="utf-8", newline="\n")
 
     out = dist_path(req, f"-{target}")
     argv: list[str | Path] = ["flet", "build", target, work, "--yes", "--output", out]
     argv += cfg.deploy.flet.extra_args + req.extra
-    env = dict(os.environ)
-    envs.uv_run(envs.tool_env(cfg), argv, cwd=work, extra_env={k: v for k, v in env.items() if k.startswith("FLET_")})
+    envs.uv_run(envs.tool_env(cfg), argv, cwd=work)  # FLET_* variables pass through (base_env copies os.environ)
     if not out.exists() and not proc.DRY_RUN:
         raise DeployError("flet build finished without producing the output")
     return out

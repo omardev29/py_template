@@ -16,13 +16,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import proc, ui
-from .project import CONFIG_FILE, PRESETS, PYPROJECT, ROOT
+from .project import PRESETS, PYPROJECT, ROOT
 from .ui import DeployError
 
 if TYPE_CHECKING:
     from .config import Config
 
-TEXT_SUFFIXES = {".py", ".pyi", ".toml", ".md", ".txt", ".json", ".cfg", ".ini", ".yml", ".yaml", ""}
+# Files with these suffixes (or none, e.g. LICENSE) get token replacement and LF line endings,
+# but only if they are really text (see _text_of); anything else is copied byte for byte
+TEXT_SUFFIXES = {".py", ".pyi", ".toml", ".md", ".txt", ".json", ".cfg", ".ini", ".yml", ".yaml"}
 EXTRA_BEGIN = "# >>> pytemplate-preset"
 EXTRA_END = "# <<< pytemplate-preset"
 # Folders owned by the preset: replaced as a whole when switching presets
@@ -77,6 +79,18 @@ def dependencies(cfg: Config, name: str | None = None) -> tuple[list[str], list[
 # --- skeleton files ----------------------------------------------------------------------------
 
 
+def _text_of(path: Path, data: bytes) -> str | None:
+    """Return the file as text, or None if it must be treated as binary."""
+    if path.suffix not in TEXT_SUFFIXES and path.suffix != "":
+        return None
+    if b"\0" in data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def skeleton(preset: str, name: str) -> dict[str, bytes]:
     """Return the preset files, already customized: relative path -> content."""
     pkg = name.replace("-", "_").lower()
@@ -87,8 +101,9 @@ def skeleton(preset: str, name: str) -> dict[str, bytes]:
             continue
         rel = path.relative_to(base).as_posix().replace("__pkg__", pkg)
         data = path.read_bytes()
-        if path.suffix in TEXT_SUFFIXES:
-            text = data.decode("utf-8").replace("{{name}}", name).replace("{{pkg}}", pkg)
+        text = _text_of(path, data)
+        if text is not None:
+            text = text.replace("{{name}}", name).replace("{{pkg}}", pkg)
             data = text.replace("\r\n", "\n").encode("utf-8")
         out[rel] = data
     return out
@@ -102,7 +117,10 @@ def _owned_files() -> dict[str, bytes]:
             continue
         for path in base.rglob("*"):
             if path.is_file() and not any(p in path.parts for p in ("__pycache__", ".pytest_cache")):
-                out[path.relative_to(ROOT).as_posix()] = path.read_bytes().replace(b"\r\n", b"\n")
+                data = path.read_bytes()
+                if _text_of(path, data) is not None:  # git may check text files out with CRLF
+                    data = data.replace(b"\r\n", b"\n")
+                out[path.relative_to(ROOT).as_posix()] = data
     return out
 
 
@@ -243,8 +261,3 @@ def new(dest: Path, preset: str, name: str | None) -> None:
         proc.run(["git", "init", "--quiet"], cwd=dest, check=False)
         proc.run(["git", "add", "--chmod=+x", "deploy"], cwd=dest, check=False)
     ui.ok(f"project created. cd {dest} && ./deploy setup")
-
-
-def config_text(preset: str, name: str) -> str | None:
-    data = skeleton(preset, name).get(CONFIG_FILE.name)
-    return data.decode("utf-8") if data else None

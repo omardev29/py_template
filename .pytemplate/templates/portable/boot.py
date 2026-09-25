@@ -12,8 +12,18 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 APP = HERE / "app"
 
+
+def _prepend_sitedir(path: Path) -> None:
+    """Like site.addsitedir (it also processes the .pth files), but at the FRONT of sys.path:
+    the locked dependencies in lib/ must win over packages installed in a system Python."""
+    before = list(sys.path)
+    site.addsitedir(str(path))
+    added = [p for p in sys.path if p not in before]
+    sys.path[:] = added + before
+
+
+_prepend_sitedir(HERE / "lib")
 sys.path.insert(0, str(APP))
-site.addsitedir(str(HERE / "lib"))  # also processes the .pth files of the dependencies
 os.environ.setdefault("PYTEMPLATE_ASSETS", str(APP / "assets"))
 sys.argv[0] = str(APP / "main.py")
 runpy.run_path(str(APP / "main.py"), run_name="__main__")

@@ -14,7 +14,7 @@ import tomllib
 from dataclasses import dataclass, field
 from typing import Any
 
-from .project import CONFIG_FILE, SRC
+from .project import CONFIG_FILE, PRESETS, SRC
 from .ui import DeployError
 
 BACKENDS = ("cpython", "pypy", "mypyc")
@@ -60,6 +60,8 @@ class CompileConfig:
     modules: list[str] = field(default_factory=lambda: ["myapp.core"])
     exclude: list[str] = field(default_factory=list)
     forbid_imports: list[str] = field(default_factory=list)
+    # True: every mypyc build (run, test, compile, build) also writes the annotated HTML report
+    # of slow lines to .build/reports/mypyc-annotate.html (./deploy report does it on demand)
     annotate: bool = False
     opt_level: str = "3"
     multi_file: bool = False
@@ -223,6 +225,11 @@ def _check_type(value: Any, default: Any, where: str) -> None:
         )
         if wants_str and not all(isinstance(x, str) for x in value):
             raise DeployError(f"pytemplate.toml: '{where}' must be a list of strings")
+    if isinstance(default, dict) and where.endswith(".env"):
+        # Environment variables (tasks.X.env, deploy.portable.env): string values only
+        for k, v in value.items():
+            if not isinstance(v, str):
+                raise DeployError(f"pytemplate.toml: '{where}.{k}' must be of type string, not {_type_name(v)}")
 
 
 def _build(cls: type[Any], data: Any, where: str) -> Any:
@@ -260,9 +267,21 @@ def _one_of(value: str, allowed: tuple[str, ...], where: str) -> None:
         raise DeployError(f"pytemplate.toml: '{where}' = {value!r} is not valid ({' | '.join(allowed)})")
 
 
+def _presets() -> list[str]:
+    """Return the presets of this template (like presets.available(), which would be an import cycle)."""
+    if not PRESETS.is_dir():
+        return []
+    return sorted(p.name for p in PRESETS.iterdir() if (p / "preset.toml").is_file())
+
+
 def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", cfg.app.name):
         raise DeployError("pytemplate.toml: 'app.name' only allows letters, digits, '-' and '_'")
+    if not re.fullmatch(r"[a-z][a-z0-9_-]*", cfg.app.preset) or not (PRESETS / cfg.app.preset / "preset.toml").is_file():
+        raise DeployError(
+            f"pytemplate.toml: app.preset = {cfg.app.preset!r} is not a preset of this template "
+            f"(available: {', '.join(_presets()) or 'none'}). To switch presets: ./deploy init <preset>"
+        )
     for b in cfg.backend.supported:
         _one_of(b, BACKENDS, "backend.supported")
     if not cfg.backend.supported:
@@ -308,6 +327,10 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     _one_of(cfg.deploy.exe.mode, ("onefile", "onedir"), "deploy.exe.mode")
     _one_of(cfg.deploy.exe.console, ("auto", "yes", "no"), "deploy.exe.console")
     _one_of(cfg.deploy.portable.runtime, ("bundled", "system"), "deploy.portable.runtime")
+    for key in cfg.deploy.portable.env:
+        # They become `set "K=v"` / `export K=v` lines of the .cmd/.sh launchers
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise DeployError(f"pytemplate.toml: deploy.portable.env: invalid environment variable name {key!r}")
     _one_of(cfg.deploy.nuitka.mode, ("standalone", "onefile"), "deploy.nuitka.mode")
     for name, task in cfg.tasks.items():
         if not re.fullmatch(r"[a-z][a-z0-9_-]*", name):

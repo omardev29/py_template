@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .. import envs, mypyc, ui
 from ..cmd_build import BuildRequest, dist_path
-from ..project import BUILD, IS_MACOS, ROOT
+from ..project import BUILD, IS_WINDOWS, ROOT
 
 
 def _console(req: BuildRequest) -> bool:
@@ -84,14 +84,8 @@ def build(req: BuildRequest) -> Path:
     if out.exists():
         shutil.rmtree(out)
     envs.uv_run(envs.tool_env(cfg), argv)
-    result = out / (cfg.app.name + (".exe" if not IS_MACOS and _is_windows() else "")) if onefile else out / cfg.app.name
+    result = out / (cfg.app.name + (".exe" if IS_WINDOWS else "")) if onefile else out / cfg.app.name
     return result if result.exists() else out
-
-
-def _is_windows() -> bool:
-    import os
-
-    return os.name == "nt"
 
 
 def _flet_pack(req: BuildRequest) -> Path:

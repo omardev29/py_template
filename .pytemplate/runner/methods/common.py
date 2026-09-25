@@ -7,7 +7,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import envs, proc, ui
+from .. import envs
 from ..config import Config
 from ..imports import iter_runtime_nodes, parse
 from ..project import BUILD, EXT_SUFFIXES, SRC, host_arch, host_os
@@ -154,11 +154,3 @@ def uses_tkinter() -> bool:
 
 def dir_size_mb(path: Path) -> float:
     return sum(p.stat().st_size for p in path.rglob("*") if p.is_file()) / 1_048_576
-
-
-def note(msg: str) -> None:
-    ui.info(f"  {msg}")
-
-
-def run_python(python: Path, args: list[str | Path], *, cwd: Path | None = None) -> None:
-    proc.run([python, *args], cwd=cwd)

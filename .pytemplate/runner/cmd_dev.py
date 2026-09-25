@@ -12,6 +12,20 @@ from .config import BACKENDS, Config
 from .project import BUILD, SRC, code_dirs, rel
 from .ui import DeployError
 
+# basedpyright is not in uv.lock (`uv run --with`; the VS Code extension ships its own), so it
+# is pinned here to keep `check` reproducible: the latest release on PyPI in September 2026.
+# Bump it deliberately.
+BASEDPYRIGHT = "basedpyright==1.40.1"
+
+
+def only_flags(command: str, args: list[str], allowed: tuple[str, ...]) -> set[str]:
+    """Return the flags given, rejecting anything else (a typo must never be silently ignored)."""
+    unknown = [a for a in args if a not in allowed]
+    if unknown:
+        valid = f"valid: {' '.join(allowed)}" if allowed else "it takes no arguments"
+        raise DeployError(f"{command}: unrecognized arguments: {' '.join(unknown)}  ({valid})", 2)
+    return set(args)
+
 
 def split_backend(cfg: Config, args: list[str], *, allow_all: bool = False) -> tuple[str, list[str]]:
     """Take the first argument as the backend only if it is a valid one; pass the rest through as-is."""
@@ -63,7 +77,7 @@ def cmd_compile(cfg: Config, args: list[str]) -> int:
 # --- check / lint / fmt --------------------------------------------------------------------------
 
 
-def _run_mypy(cfg: Config, backend: str, profile: str, blocking: bool) -> bool:
+def _run_mypy(cfg: Config, profile: str, blocking: bool) -> bool:
     tool = envs.tool_env(cfg)
     config_file = _profile_file(cfg, profile, "mypy")
     argv: list[str | Path] = ["mypy", "--config-file", config_file, *render.mypy_cli_args(cfg, tool.python)]
@@ -92,7 +106,7 @@ def run_checks(cfg: Config, backend: str) -> bool:
         ok = False
 
     if not data.get("skip_mypy"):
-        ok = _run_mypy(cfg, backend, profile, blocking) and ok
+        ok = _run_mypy(cfg, profile, blocking) and ok
 
     if cfg.supports("mypyc"):
         files = mypyc.compiled_sources(cfg)
@@ -109,8 +123,8 @@ def run_checks(cfg: Config, backend: str) -> bool:
         # Profile config of THIS backend (the editor's pyrightconfig.json is the active backend's).
         # --with: used without adding it to uv.lock (the VS Code extension ships its own)
         conf = BUILD / "cfg" / f"pyright-{profile}.json"
-        conf.write_text(json.dumps(render.pyright_config(cfg, profile, absolute=True), indent=2), encoding="utf-8")
-        r = envs.uv(tool, ["run", "--locked", "--with", "basedpyright", "basedpyright", "--project", conf], check=False)
+        conf.write_text(json.dumps(render.pyright_config(cfg, profile, absolute=True), indent=2), encoding="utf-8", newline="\n")
+        r = envs.uv(tool, ["run", "--locked", "--with", BASEDPYRIGHT, "basedpyright", "--project", conf], check=False)
         if r.returncode != 0 and blocking:
             ok = False
     return ok
@@ -141,15 +155,15 @@ def cmd_check(cfg: Config, args: list[str]) -> int:
 
 def cmd_lint(cfg: Config, args: list[str]) -> int:
     """lint [--fix]: ruff check with the active profile."""
-    fix = ["--fix"] if "--fix" in args else []
-    r = envs.uv_run(envs.tool_env(cfg), ["ruff", "check", *fix, *code_dirs()], check=False)
+    flags = only_flags("lint", args, ("--fix",))
+    r = envs.uv_run(envs.tool_env(cfg), ["ruff", "check", *sorted(flags), *code_dirs()], check=False)
     return r.returncode
 
 
 def cmd_fmt(cfg: Config, args: list[str]) -> int:
     """fmt [--check]: ruff format."""
-    extra = ["--check"] if "--check" in args else []
-    r = envs.uv_run(envs.tool_env(cfg), ["ruff", "format", *extra, *code_dirs()], check=False)
+    flags = only_flags("fmt", args, ("--check",))
+    r = envs.uv_run(envs.tool_env(cfg), ["ruff", "format", *sorted(flags), *code_dirs()], check=False)
     return r.returncode
 
 
@@ -197,8 +211,8 @@ def cmd_report(cfg: Config, args: list[str]) -> int:
     ns = parser.parse_args(args)
     if not cfg.supports("mypyc"):
         raise DeployError("the report comes from mypyc, and 'mypyc' is not in backend.supported")
-    reports = BUILD / "reports"
-    html = reports / "mypyc-annotate.html"
+    html = mypyc.ANNOTATE_HTML
+    reports = html.parent
     # The report is generated before compiling C: no compiler needed
     mypyc.build(cfg, "dev", annotate=html, compile_c=False)
     ui.ok(f"mypyc report: {rel(html)}  (in red: generic/slow operations and how to avoid them)")

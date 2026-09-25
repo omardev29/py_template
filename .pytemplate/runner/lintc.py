@@ -8,14 +8,12 @@ compiled core, `__file__` at module level, etc.
 from __future__ import annotations
 
 import ast
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import presets
 from .config import Config
 from .imports import iter_runtime_nodes, module_name, parse
-from .project import PRESETS, SRC
+from .project import SRC
 
 # Class decorators that keep the class native (any other one turns it into a slow Python class)
 NATIVE_CLASS_DECORATORS = {"dataclass", "mypyc_attr", "trait", "final", "define", "frozen", "mutable", "attrs"}
@@ -48,26 +46,9 @@ def _is_explicitly_non_native(node: ast.expr) -> bool:
     )
 
 
-def _forbidden_calls(cfg: Config) -> dict[str, str]:
-    """Return the functions a preset forbids calling from compiled code (e.g. stubs that lie)."""
-    try:
-        data = presets.load(cfg.app.preset)
-    except Exception:
-        return {}
-    spec = data.get("lint", {})
-    out: dict[str, str] = {}
-    source = spec.get("forbid_calls_file")
-    if source:
-        path = PRESETS / cfg.app.preset / source
-        if path.is_file():
-            listing = json.loads(path.read_text(encoding="utf-8"))
-            reason = str(listing.get("reason", "forbidden in compiled code"))
-            for name in listing.get("functions", []):
-                out[str(name)] = reason
-    return out
-
-
-def lint_file(cfg: Config, path: Path, forbidden_calls: dict[str, str]) -> list[Finding]:
+def lint_file(cfg: Config, path: Path, *_compat: object) -> list[Finding]:
+    # *_compat: the removed `forbidden_calls` argument (the preset [lint] forbid_calls_file
+    # support was dead code). Drop it once no caller passes it (test_runner.py still does).
     findings: list[Finding] = []
     tree = parse(path)
 
@@ -100,10 +81,6 @@ def lint_file(cfg: Config, path: Path, forbidden_calls: dict[str, str]) -> list[
             for child in ast.walk(node):
                 if isinstance(child, ast.ClassDef):
                     add(child, f"class '{child.name}' defined inside a function: mypyc does not support it")
-        elif isinstance(node, ast.Call) and forbidden_calls:
-            callee = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
-            if callee in forbidden_calls:
-                add(node, f"{callee}(): {forbidden_calls[callee]}")
         elif hasattr(ast, "TemplateStr") and isinstance(node, ast.TemplateStr):  # 3.14+
             add(node, "t-strings: mypyc does not support them")
 
@@ -126,10 +103,9 @@ def lint_file(cfg: Config, path: Path, forbidden_calls: dict[str, str]) -> list[
 
 
 def lint(cfg: Config, files: list[Path]) -> list[Finding]:
-    forbidden = _forbidden_calls(cfg)
     out: list[Finding] = []
     for path in files:
-        out += lint_file(cfg, path, forbidden)
+        out += lint_file(cfg, path)
     return sorted(out, key=lambda f: (str(f.path), f.line))
 
 
