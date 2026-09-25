@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import importlib
 import shutil
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import mypyc, proc, ui
 from .cmd_dev import run_checks, split_backend
 from .config import BACKENDS, METHODS, Config
-from .project import BUILD, DIST, SRC, rel
+from .project import BUILD, DIST, SRC, rel, user_path
 from .ui import DeployError
 
 # Which backends each method supports (and why not the rest)
@@ -107,12 +108,32 @@ def dist_path(req: BuildRequest, suffix: str = "") -> Path:
 
 
 def cmd_pyz_merge(cfg: Config, args: list[str]) -> int:
-    """pyz-merge A.pyz B.pyz ... --out C.pyz: merge the per-OS .pyz files into one."""
+    """pyz-merge A.pyz B.pyz ... --out C.pyz: merge the per-OS .pyz files into one.
+
+    The paths are the user's (relative to the folder ./deploy was typed in, /c/x, ~ ...).
+    """
     parser = argparse.ArgumentParser(prog="./deploy pyz-merge")
-    parser.add_argument("parts", nargs="+", type=Path)
-    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("parts", nargs="+", metavar="PART.pyz")
+    parser.add_argument("--out", required=True, metavar="OUT.pyz")
     ns = parser.parse_args(args)
+    parts = [user_path(p) for p in ns.parts]
+    out = user_path(ns.out)
+    if len(parts) < 2:
+        raise DeployError("pyz-merge needs at least two .pyz files")
+    for part in parts:
+        if not part.is_file():
+            raise DeployError(f"pyz-merge: {part} not found")
+        if not zipfile.is_zipfile(part):
+            raise DeployError(f"pyz-merge: {part} is not a .pyz (zip) file")
+    if out.is_dir():
+        raise DeployError(f"pyz-merge: --out {out} is a folder; give the path of the .pyz to write")
+    if proc.DRY_RUN:
+        ui.step("pyz-merge: dry run, nothing is written")
+        for part in parts:
+            ui.info(f"  in   {part}")
+        ui.info(f"  out  {out}" + ("   (exists: would be replaced)" if out.exists() else ""))
+        return 0
     from .methods import pyz
 
-    pyz.merge(ns.parts, ns.out)
+    pyz.merge(parts, out)
     return 0

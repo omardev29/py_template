@@ -10,6 +10,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import ui
+from .ui import DeployError
+
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE = ROOT / ".pytemplate"
 TEMPLATES = TEMPLATE / "templates"
@@ -80,52 +83,110 @@ def code_dirs() -> list[str]:
 
 
 # --- paths typed by the user ------------------------------------------------------------------
+#
+# Every path the RUNNER takes from the command line (./deploy new DEST, pyz-merge ... --out X)
+# goes through user_path(). Arguments forwarded to the app or to pytest are never touched.
 
-_DRIVE_MOUNT = re.compile(r"/(?:cygdrive/)?([A-Za-z])(/.*)?")
+_DRIVE_ABS = re.compile(r"[A-Za-z]:[\\/]")
+_DRIVE_MOUNT = re.compile(r"/(?:cygdrive/)?([A-Za-z])(?:/(.*))?", re.DOTALL)
+# PYTEMPLATE_LAUNCHER suffix -> the DLL of that POSIX runtime (next to its real cygpath.exe)
+_POSIX_RUNTIMES = {":msys": "msys-2.0.dll", ":cygwin": "cygwin1.dll"}
+
+
+def _upper_drive(path: str) -> str:
+    return path[0].upper() + path[1:] if _DRIVE_ABS.match(path) else path
+
+
+def find_cygpath(dll: str) -> str | None:
+    """Return the cygpath.exe of the calling MSYS2 / Git for Windows / Cygwin installation.
+
+    Only a cygpath.exe next to the runtime DLL counts: WinuxCmd (niubash, xonsh-shell-kit)
+    ships its own cygpath.exe, which knows nothing about the MSYS root (/tmp -> \\tmp). Order:
+    MSYSTEM_PREFIX (MSYS2 login shells), EXEPATH (Git Bash), SHELL, then the first one on PATH.
+    MSYS turns those variables into Windows paths for native programs such as this one.
+    """
+    dirs: list[Path] = []
+    prefix = os.environ.get("MSYSTEM_PREFIX", "")  # <root>\usr or <root>\mingw64
+    if _DRIVE_ABS.match(prefix):
+        dirs.append(Path(prefix).parent / "usr" / "bin")
+    exepath = os.environ.get("EXEPATH", "")  # <git>\bin
+    if _DRIVE_ABS.match(exepath):
+        dirs += [Path(exepath).parent / "usr" / "bin", Path(exepath) / "usr" / "bin"]
+    shell = os.environ.get("SHELL", "")  # <root>\usr\bin\bash.exe, or Git's <git>\bin\bash.exe
+    if _DRIVE_ABS.match(shell):
+        dirs += [Path(shell).parent, Path(shell).parent.parent / "usr" / "bin"]
+    found = shutil.which("cygpath")
+    if found:
+        dirs.append(Path(found).parent)
+    for d in dirs:
+        if (d / "cygpath.exe").is_file() and (d / dll).is_file():
+            return str(d / "cygpath.exe")
+    return None
+
+
+def _posix_root_path(raw: str) -> str | None:
+    """Map a path inside the MSYS/Cygwin root (/home/x, /tmp/x) with that shell's cygpath."""
+    launcher = os.environ.get("PYTEMPLATE_LAUNCHER", "")
+    dll = next((d for suffix, d in _POSIX_RUNTIMES.items() if launcher.endswith(suffix)), None)
+    cygpath = find_cygpath(dll) if dll else None
+    if cygpath is None:
+        return None
+    try:
+        out = subprocess.run(
+            [cygpath, "-w", "--", raw],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if _DRIVE_ABS.match(out) or out.startswith("\\\\"):
+        return _upper_drive(out)
+    return None
 
 
 def native_path(raw: str) -> str:
-    """Map a path typed in a POSIX shell on Windows to a Windows path.
+    """Map a path typed in a POSIX shell on Windows to a Windows path. Elsewhere: unchanged.
 
     MSYS2/Git Bash rewrite such arguments themselves before starting a native program, but
     Cygwin, niubash, busybox-w32 and MSYS2 with MSYS2_ARG_CONV_EXCL=* do not, so the runner
-    can get /c/x, /cygdrive/c/x, C:/x or a path inside the MSYS root. Elsewhere: unchanged.
+    can get /c/x, /cygdrive/c/x, C:/x, //server/share or a path inside the MSYS root. The last
+    kind needs the shell's cygpath (only when PYTEMPLATE_LAUNCHER ends in :msys or :cygwin);
+    without it the path is returned as-is. Relative paths and ~ are returned as-is too.
     """
     if not IS_WINDOWS:
         return raw
-    if re.match(r"[A-Za-z]:[\\/]", raw):
+    if _DRIVE_ABS.match(raw):  # C:/x, c:\x
+        return _upper_drive(os.path.normpath(raw))
+    if raw.startswith(("//", "\\\\")):  # UNC: //server/share, \\server\share
         return os.path.normpath(raw)
-    if not raw.startswith("/") or raw.startswith("//"):
+    if not raw.startswith("/"):
         return raw
-    m = _DRIVE_MOUNT.fullmatch(raw)
+    m = _DRIVE_MOUNT.fullmatch(raw)  # /c/x, /C/x, /cygdrive/c/x
     if m:
-        return m[1].upper() + ":" + (m[2] or "/").replace("/", "\\")
-    launcher = os.environ.get("PYTEMPLATE_LAUNCHER", "")
-    cygpath = shutil.which("cygpath")
-    if launcher.endswith((":msys", ":cygwin")) and cygpath:
-        try:
-            out = subprocess.run(
-                [cygpath, "-w", raw], capture_output=True, text=True, timeout=10, check=True
-            ).stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            return raw
-        if re.match(r"[A-Za-z]:\\", out):
-            return out
-    return raw
+        return os.path.normpath(m[1].upper() + ":\\" + (m[2] or ""))
+    return _posix_root_path(raw) or raw
 
 
 def caller_cwd() -> Path:
-    """Return the directory ./deploy was typed in.
+    """Return the directory ./deploy was typed in (the shell's logical path when known).
 
-    PYTEMPLATE_CALLER_CWD is trusted only while it still names the process cwd: niubash
-    sessions keep stale exports, and `uv run --script` never changes the cwd.
+    The launchers export it in PYTEMPLATE_CALLER_CWD. It is trusted only while it still names
+    the process cwd (`uv run --script` never changes the cwd): niubash sessions keep stale
+    exports, and a relative or vanished value means nothing.
     """
-    cwd = Path.cwd()
+    try:
+        cwd = Path.cwd()
+    except OSError:
+        raise DeployError("the current directory no longer exists") from None
     raw = os.environ.get("PYTEMPLATE_CALLER_CWD", "")
     if raw:
         p = Path(native_path(raw))
         try:
-            if os.path.samefile(p, cwd):
+            if p.is_absolute() and os.path.samefile(p, cwd):
                 return p
         except OSError:
             pass
@@ -133,6 +194,22 @@ def caller_cwd() -> Path:
 
 
 def user_path(raw: str) -> Path:
-    """Return a path argument typed by the user, resolved against the caller's cwd."""
-    p = Path(native_path(raw)).expanduser()
-    return p if p.is_absolute() else caller_cwd() / p
+    """Return a path argument typed by the user, resolved against the caller's cwd.
+
+    Accepts every spelling native_path() knows, ~ and ~/x, and relative paths. On Windows
+    the result is normalized (C:\\a\\..\\b -> C:\\b, as Windows itself would read it).
+    """
+    if not raw.strip():
+        raise DeployError("empty path argument")
+    native = native_path(raw)
+    if IS_WINDOWS and native.startswith("/") and os.environ.get("PYTEMPLATE_LAUNCHER", "").endswith(
+        tuple(_POSIX_RUNTIMES)
+    ):
+        ui.warn(f"{raw}: no cygpath of the calling shell found; read as a path on the current drive")
+    try:
+        p = Path(native).expanduser()
+    except RuntimeError as e:  # ~ without HOME/USERPROFILE
+        raise DeployError(f"{raw}: {e}") from None
+    if not p.is_absolute():
+        p = caller_cwd() / p
+    return Path(os.path.normpath(p)) if IS_WINDOWS else p
