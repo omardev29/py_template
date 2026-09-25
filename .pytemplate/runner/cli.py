@@ -55,7 +55,7 @@ COMMANDS: dict[str, Command] = {
     "pyz-merge": Command("cmd_build", "cmd_pyz_merge", "Merge the .pyz files of each OS (e.g. from CI) into a cross-platform one", "A.pyz B.pyz... --out C.pyz", render=False, group="Distribution"),
     # other
     "tasks": Command("cli", "cmd_tasks", "List the custom tasks in pytemplate.toml [tasks]", render=False, group="Other"),
-    "shell-setup": Command("shells", "cmd_shell_setup", "Print an alias to use `deploy` without ./", "[xonsh|pwsh|bash|zsh|niubash|msys2|fish|nu]", render=False, group="Other"),
+    "shell-setup": Command("shells", "cmd_shell_setup", "Print a `deploy` function/alias for your shell (works from any subfolder)", "[xonsh|pwsh|powershell|bash|zsh|niubash|msys2|fish|nu]", render=False, group="Other"),
     "nvim": Command("cmd_nvim", "cmd_nvim", "Neovim/LazyVim integration: check it, trust .lazy.lua, enable extras, sync plugins", "[doctor|trust|extras|bootstrap|sync]", group="Other"),
     "selftest": Command("cli", "cmd_selftest", "Run the runner's own tests and mypy --strict (.pytemplate)", "[--shells|--nvim|--e2e] [args...]", render=False, group="Other"),
     "help": Command("cli", "cmd_help", "Show this help (or a command's help)", "[COMMAND]", render=False, group="Other"),
