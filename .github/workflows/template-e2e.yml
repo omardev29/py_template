@@ -36,7 +36,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: System libraries for raylib and a virtual display (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libgl1 libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6 libgl1-mesa-dri xvfb

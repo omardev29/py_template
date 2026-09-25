@@ -34,12 +34,9 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      # short work dir outside the checkout (Windows MAX_PATH; no .lazy.lua above it)
-      PT_NVIM_DIR: ${{ runner.temp }}/pt-nvim
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
       - uses: rhysd/action-setup-vim@v1
         with:
           neovim: true
@@ -49,6 +46,10 @@ jobs:
       - name: Runner environment
         run: ./deploy setup
       - name: LazyVim smoke test (script, raylib, flet)
+        env:
+          # short work dir outside the checkout (Windows MAX_PATH; no .lazy.lua above it).
+          # The runner context exists only at step level, not in the job's env.
+          PT_NVIM_DIR: ${{ runner.temp }}/pt-nvim
         run: ./deploy selftest --nvim --require --dir "$PT_NVIM_DIR"
       - name: Logs of the smoke test
         if: failure()

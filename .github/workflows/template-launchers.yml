@@ -38,7 +38,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: Extra shells
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
@@ -73,7 +73,7 @@ jobs:
     steps:
       - run: git config --global core.autocrlf input
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: uv also in %USERPROFILE%\.local\bin (the launchers' fallback discovery, T5)
         shell: pwsh
         run: New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null; Copy-Item (Get-Command uv).Source "$HOME\.local\bin\"
@@ -124,7 +124,7 @@ jobs:
     continue-on-error: true  # optional: WSL setup on hosted runners is slow and sometimes flaky
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
       - uses: Vampire/setup-wsl@v7
         with: {distribution: Ubuntu-24.04, additional-packages: curl dash zsh}
       - shell: wsl-bash {0}

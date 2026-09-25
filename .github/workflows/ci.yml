@@ -31,7 +31,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
       # Only this OS's backends (e.g. raylib publishes no PyPy wheels for macOS arm64);
       # `sync` never re-locks: a stale uv.lock fails here, as it should in CI
       - name: Backend environments
@@ -56,7 +56,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
       - uses: actions/download-artifact@v8
         with:
           path: pyz-parts
