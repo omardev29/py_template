@@ -1,0 +1,67 @@
+# End-to-end test of the TEMPLATE itself: `./deploy selftest --e2e` creates a project from
+# each preset with ./deploy new and sets it up, checks, tests, runs and builds it there.
+# The template- prefix keeps this workflow out of the projects that ./deploy new creates.
+name: template-e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "quick (one build per backend), default (every method but nuitka) or full (+ nuitka and the pypy round trip)"
+        type: choice
+        options: [quick, default, full]
+        default: quick
+  schedule:
+    - cron: "17 4 * * 1" # weekly, Monday 04:17 UTC
+  push:
+    paths:
+      - ".pytemplate/**"
+      - "deploy"
+      - "deploy.cmd"
+      - "deploy.ps1"
+      - ".github/workflows/template-e2e.yml"
+
+jobs:
+  e2e:
+    name: e2e ${{ matrix.preset }} (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        preset: [script, raylib, flet]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: System libraries for raylib and a virtual display (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgl1 libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6 libgl1-mesa-dri xvfb
+      - name: selftest --e2e ${{ matrix.preset }}
+        env:
+          MODE: ${{ inputs.mode || 'quick' }}
+          PRESET: ${{ matrix.preset }}
+        run: |
+          case "$MODE" in
+            quick) size=--quick ;;
+            full) size=--full ;;
+            *) size= ;;
+          esac
+          ./deploy selftest --e2e "$PRESET" $size --json --base "$RUNNER_TEMP/e2e" > "e2e-$PRESET.json"
+      - name: Upload the JSON report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report-${{ matrix.preset }}-${{ matrix.os }}
+          path: e2e-${{ matrix.preset }}.json
+          if-no-files-found: ignore
+      - name: Upload the logs (kept on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-${{ matrix.preset }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/e2e/logs
+          if-no-files-found: ignore
