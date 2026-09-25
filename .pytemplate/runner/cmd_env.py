@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 
-from . import cmd_nvim, envs, mypyc, proc, render, shells, ui
+from . import cmd_nvim, envs, hooks, mypyc, proc, render, shells, ui
 from .cmd_dev import only_flags
 from .config import Config
 from .project import BUILD, DIST, IS_WINDOWS, ROOT, rel
@@ -50,6 +50,7 @@ def cmd_setup(cfg: Config, args: list[str]) -> int:
         ui.step(f"environment {env.key}: {rel(env.dir)} ({env.request})")
         envs.sync(env)
     _fix_exec_bit()
+    hooks.ensure_installed(cfg)
     render.apply(cfg)
     ui.ok("done. Try: ./deploy run  |  ./deploy test  |  ./deploy doctor")
     return 0
@@ -231,6 +232,7 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
     check(r.returncode == 0, "uv.lock up to date", "./deploy lock")
 
     shells.doctor(check)  # launchers and shells
+    hooks.doctor(cfg, check)  # git pre-commit hook
     cmd_nvim.doctor(check)  # Neovim/LazyVim summary (details: ./deploy nvim doctor)
     ui.info("")
     if problems:

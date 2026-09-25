@@ -60,6 +60,9 @@ targets = ["host"]   # e.g. add "cp314-linux-x86_64" to include the Linux raylib
 package = "raylib"   # raylib (GLFW) | raylib_sdl (SDL3) | raylib_software
 version = "6.0.1.0"
 
+[hooks]
+pre_commit = true   # ./deploy setup installs a git pre-commit hook (./deploy hooks run: ruff, format, generated files, lock)
+
 [vscode]
 # Status bar buttons (VS Code extension actboy168.tasks): ./deploy commands or [tasks] names
 buttons = ["run", "bunnymark", "test", "build"]

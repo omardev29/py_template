@@ -82,6 +82,12 @@
       "group": "Environment"
     },
     {
+      "name": "hooks",
+      "usage": "[install|uninstall|run|status]",
+      "summary": "Install or remove the git pre-commit hook, or run its checks on the staged files",
+      "group": "Environment"
+    },
+    {
       "name": "mode",
       "usage": "[BACKEND] [--supports +pypy|-pypy] [--typing off|warn|strict|auto] [--jit on|off] [--editor pylance|basedpyright]",
       "summary": "Show or change the mode (backend, supported, typing, JIT, editor)",
@@ -97,6 +103,12 @@
       "name": "init",
       "usage": "PRESET [--name NAME] [--force]",
       "summary": "Convert this project to a preset (script, raylib, flet)",
+      "group": "Mode"
+    },
+    {
+      "name": "rename",
+      "usage": "NEW_NAME [--force]",
+      "summary": "Rename the app: src/<pkg>, imports, pytemplate.toml, pyproject.toml, uv.lock",
       "group": "Mode"
     },
     {

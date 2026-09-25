@@ -51,6 +51,9 @@ runtime = "bundled"   # bundled: the folder includes the interpreter | system: u
 [deploy.pyz]
 targets = ["host"]    # add keys like "cp314-linux-x86_64" to include native binaries for other OSes
 
+[hooks]
+pre_commit = true   # ./deploy setup installs a git pre-commit hook (./deploy hooks run: ruff, format, generated files, lock)
+
 [vscode]
 # Status bar buttons (VS Code extension actboy168.tasks): ./deploy commands or [tasks] names
 buttons = ["run", "test", "check", "build"]

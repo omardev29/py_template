@@ -37,10 +37,12 @@ COMMANDS: dict[str, Command] = {
     "add": Command("cmd_env", "cmd_add", "Add dependencies (uv add)", "PKG... [--dev|--group G] [--cpython-only]", group="Environment"),
     "remove": Command("cmd_env", "cmd_remove", "Remove dependencies (uv remove)", "PKG... [--dev|--group G]", group="Environment"),
     "clean": Command("cmd_env", "cmd_clean", "Remove .build/ and dist/ (and the environments with --envs)", "[--envs]", render=False, group="Environment"),
+    "hooks": Command("hooks", "cmd_hooks", "Install or remove the git pre-commit hook, or run its checks on the staged files", "[install|uninstall|run|status]", render=False, group="Environment"),
     # mode and template
     "mode": Command("cmd_mode", "cmd_mode", "Show or change the mode (backend, supported, typing, JIT, editor)", "[BACKEND] [--supports +pypy|-pypy] [--typing off|warn|strict|auto] [--jit on|off] [--editor pylance|basedpyright]", group="Mode"),
     "render": Command("cmd_mode", "cmd_render", "Regenerate .mypy.ini, pyrightconfig.json, .ruff.toml and .vscode/", "[--check] [--diff] [--force]", render=False, group="Mode"),
     "init": Command("cmd_mode", "cmd_init", "Convert this project to a preset (script, raylib, flet)", "PRESET [--name NAME] [--force]", group="Mode"),
+    "rename": Command("rename", "cmd_rename", "Rename the app: src/<pkg>, imports, pytemplate.toml, pyproject.toml, uv.lock", "NEW_NAME [--force]", group="Mode"),
     "new": Command("cmd_mode", "cmd_new", "Create a new project from this template", "DIR [--preset P] [--name NAME]", render=False, group="Mode"),
     # development
     "run": Command("cmd_dev", "cmd_run", "Run the app (mypyc: compile first)", "[BACKEND] [app args...]", group="Development"),

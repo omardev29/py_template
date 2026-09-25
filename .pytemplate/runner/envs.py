@@ -109,9 +109,15 @@ def uv_run(
     check: bool = True,
     groups: Sequence[str] = (),
 ) -> subprocess.CompletedProcess[str]:
-    """Run `uv run --locked ...` in the given environment (syncs only when needed)."""
+    """Run `uv run --locked ...` in the given environment (syncs only when needed).
+
+    With a `cwd` other than the root, `--project` pins this project: uv looks for the project
+    from the cwd upwards, and a work dir with its own pyproject.toml (the `flet build` stage)
+    would otherwise become the project ("Unable to find lockfile at uv.lock").
+    """
     group_args = [a for g in groups for a in ("--group", g)]
-    return uv(env, ["run", "--locked", *group_args, *args], cwd=cwd, extra_env=extra_env, check=check)
+    project = ["--project", str(ROOT)] if cwd is not None and cwd.resolve() != ROOT.resolve() else []
+    return uv(env, ["run", "--locked", *project, *group_args, *args], cwd=cwd, extra_env=extra_env, check=check)
 
 
 def sync(env: PyEnv, *, groups: Sequence[str] = ()) -> None:

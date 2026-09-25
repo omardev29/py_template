@@ -53,6 +53,28 @@ def _run_cmd(path: Path) -> subprocess.CompletedProcess[str]:
 # --- 1. the portable smoke test sees lib/ like boot.py --------------------------------------------
 
 
+def test_uv_run_pins_the_project_outside_the_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The `flet build` stage has its own pyproject.toml: without --project, uv took it for
+    # the project and `uv run --locked` failed with "Unable to find lockfile at uv.lock".
+    from runner import proc
+    from runner.project import ROOT
+
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[Any], **_: Any) -> subprocess.CompletedProcess[str]:
+        seen.append([str(a) for a in argv])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(proc, "run", fake_run)
+    env = envs.cpython_env(make({}))
+    envs.uv_run(env, ["flet", "--version"], cwd=tmp_path)
+    envs.uv_run(env, ["ruff", "--version"])
+    envs.uv_run(env, ["ruff", "--version"], cwd=ROOT)
+    elsewhere, default, root = seen
+    assert elsewhere[1:5] == ["run", "--locked", "--project", str(ROOT)]
+    assert "--project" not in default and "--project" not in root
+
+
 def test_portable_smoke_code_puts_lib_on_sys_path(tmp_path: Path) -> None:
     (tmp_path / "app" / "pkg").mkdir(parents=True)
     (tmp_path / "lib").mkdir()

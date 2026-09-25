@@ -67,6 +67,9 @@ target = "host"   # `./deploy build --method flet`: host | windows | macos | lin
 [preset.flet]
 version = "1.0.1"   # flet, flet-desktop and flet-cli always at the same version
 
+[hooks]
+pre_commit = true   # ./deploy setup installs a git pre-commit hook (./deploy hooks run: ruff, format, generated files, lock)
+
 [vscode]
 # Status bar buttons (VS Code extension actboy168.tasks): ./deploy commands or [tasks] names
 buttons = ["dev", "run", "test", "build"]

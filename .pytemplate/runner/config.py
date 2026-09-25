@@ -135,6 +135,11 @@ class TaskConfig:
 
 
 @dataclass
+class HooksConfig:
+    pre_commit: bool = True  # ./deploy setup installs the git pre-commit hook (./deploy hooks run)
+
+
+@dataclass
 class VSCodeConfig:
     settings: dict[str, Any] = field(default_factory=dict)  # merged into .vscode/settings.json
     # Status bar buttons (VS Code extension actboy168.tasks): "<command> [args]" or a [tasks] name
@@ -153,6 +158,7 @@ class Config:
     tasks: dict[str, TaskConfig] = field(default_factory=dict)
     preset: dict[str, dict[str, Any]] = field(default_factory=dict)
     vscode: VSCodeConfig = field(default_factory=VSCodeConfig)
+    hooks: HooksConfig = field(default_factory=HooksConfig)
 
     # --- derived values ----------------------------------------------------------------
 
