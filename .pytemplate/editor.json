@@ -83,7 +83,7 @@
     },
     {
       "name": "hooks",
-      "usage": "[install|uninstall|run|status]",
+      "usage": "[install [--force]|uninstall|run|status]",
       "summary": "Install or remove the git pre-commit hook, or run its checks on the staged files",
       "group": "Environment"
     },

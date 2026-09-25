@@ -8,9 +8,11 @@ Each preset lives in .pytemplate/presets/<name>/:
 
 from __future__ import annotations
 
+import keyword
 import os
 import re
 import shutil
+import sys
 import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -167,6 +169,11 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
     uv refuses a project that depends on itself ("self-dependencies are not permitted"), and
     src/<pkg>/ would shadow the library's own import.
     """
+    pkg = name.replace("-", "_").lower()
+    if keyword.iskeyword(pkg):
+        raise DeployError(f"the package '{pkg}' would be a Python keyword (`import {pkg}` is a syntax error).\n  Choose another name with --name NAME")
+    if pkg in sys.stdlib_module_names:
+        raise DeployError(f"src/{pkg}/ would shadow the standard library module '{pkg}'.\n  Choose another name with --name NAME")
     clash = _norm_name(name)
     if clash in _dependency_names(cfg, preset):
         raise DeployError(
@@ -287,7 +294,11 @@ def new(dest: Path, preset: str, name: str | None) -> None:
         [proc.find_uv(), "run", "--quiet", "--script", dest / ".pytemplate" / "deploy.py", "init", preset, "--name", app_name, "--force"],
         cwd=dest,
     )
-    if shutil.which("git") and not (dest / ".git").exists():
+    # no nested repository when the destination is already inside one (a monorepo)
+    inside = shutil.which("git") and proc.run(
+        ["git", "rev-parse", "--is-inside-work-tree"], cwd=dest.parent, capture=True, check=False, echo=False
+    ).returncode == 0
+    if shutil.which("git") and not inside and not (dest / ".git").exists():
         proc.run(["git", "init", "--quiet"], cwd=dest, check=False)
         proc.run(["git", "add", "--chmod=+x", "deploy", "deploy.ps1"], cwd=dest, check=False)
     ui.ok(f"project created. cd {dest} && ./deploy setup")

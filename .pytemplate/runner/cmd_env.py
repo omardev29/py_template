@@ -61,7 +61,10 @@ def _fix_exec_bit() -> None:
 
     deploy.ps1 needs it for `./deploy.ps1` from pwsh on Linux/macOS.
     """
-    if not (ROOT / ".git").exists() or not shutil.which("git"):
+    # rev-parse, not ROOT/.git: the project may live in a subfolder of a bigger repository
+    if not shutil.which("git"):
+        return
+    if proc.run(["git", "rev-parse", "--is-inside-work-tree"], capture=True, check=False, echo=False).returncode != 0:
         return
     for launcher in ("deploy", "deploy.ps1"):
         r = proc.run(["git", "ls-files", "-s", launcher], capture=True, check=False, echo=False)
