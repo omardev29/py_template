@@ -18,7 +18,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from .. import envs, mypyc, proc, render, ui
+from .. import envs, mypyc, proc, render, ui, upx
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
 from ..project import BUILD, IS_WINDOWS, PYPROJECT, SRC, host_os
@@ -111,8 +111,14 @@ def build(req: BuildRequest) -> Path:
 
     out = dist_path(req, f"-{target}")
     argv: list[str | Path] = ["flet", "build", target, work, "--yes", "--output", out]
+    if cfg.deploy.flet.cleanup:
+        argv += ["--cleanup-app", "--cleanup-packages"]
+    if cfg.deploy.flet.exclude:
+        argv += ["--exclude", *cfg.deploy.flet.exclude]
     argv += cfg.deploy.flet.extra_args + req.extra
     envs.uv_run(envs.tool_env(cfg), argv, cwd=work)  # FLET_* variables pass through (base_env copies os.environ)
     if not out.exists() and not proc.DRY_RUN:
         raise DeployError("flet build finished without producing the output")
+    if target not in MOBILE_WEB and upx.active(cfg):
+        upx.pack_tree(cfg, out)  # most Flutter/CPython DLLs are Control Flow Guard: skipped
     return out

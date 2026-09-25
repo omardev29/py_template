@@ -375,7 +375,7 @@ header rules (with detector tests proving each rule fires).
 | `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL`, `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env`, `run` (echo, `DRY_RUN`, cwd defaults to `ROOT`, UTF-8 capture), `output`, `show` (display quoting only), `vs_installer_dir`, `CommandFailed`. |
-| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `jit_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`), `sync`, `interpreter_info`, `find_jit_interpreter`. |
+| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `jit_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync`, `interpreter_info`, `find_jit_interpreter`. |
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
@@ -393,6 +393,9 @@ header rules (with detector tests proving each rule fires).
 | `cmd_nvim.py` | `./deploy nvim ...` and `doctor(check)` (section 12.2). |
 | `nvimtest.py` | `selftest --nvim` (section 13.1). |
 | `e2e.py` | `selftest --e2e` (section 13.1). |
+| `hooks.py` | `./deploy hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (setup), `doctor`: the native git pre-commit hook (section 5.6). |
+| `rename.py` | `./deploy rename NEW_NAME [--force]`: pure `plan` / `apply_plan` / `rewrite` (tokenizer + context rules), `check_new_name`, `git_changes`, `cmd_rename` (section 5.7). |
+| `upx.py` | Optional UPX packing: pinned download (`VERSION`, `ASSETS` with SHA-256), `find`, `active`, `level_flags`, `env_value`, `excludes`, `candidates`, `pack_file`, `pack_tree`, `MAX_INPUT` (section 10). |
 
 ### 5.2 Call flow
 
@@ -406,7 +409,8 @@ header rules (with detector tests proving each rule fires).
    `Command.render` is true and `--no-render` is not set, then `module.func(cfg, args)`. Names
    in `[tasks]` run `render.auto` and `tasks.run_task(cfg, name, args, dispatch)`.
 4. Commands with `render=False`: `clean`, `render`, `new`, `pyz-merge`, `tasks`,
-   `shell-setup`, `selftest`, `help`.
+   `shell-setup`, `selftest`, `help`, `hooks` (the hook must not rewrite generated files in
+   the middle of a commit).
 5. Commands reject unknown arguments with exit 2 (a typo is never silently ignored):
    argparse commands, `render`/`mode`/`init`/`new` (`cmd_mode._parse`), `lint`, `fmt`,
    `clean`, `setup`, `doctor` (`cmd_dev.only_flags`), `check` and `sync` (extra positionals),
@@ -455,6 +459,10 @@ header rules (with detector tests proving each rule fires).
   `pyproject.toml` and `uv.lock`. `new` checks the destination and the name and prints
   destination, preset and name. `pyz-merge` validates its inputs and prints inputs and output.
 - `nvim trust`, `extras`, `bootstrap` and `sync` print what they would do.
+- `rename` runs the real checks (a dirty git tree is only a warning) and prints the move, each
+  file with its reference count and sample lines, the pytemplate/pyproject lines, the `uv.lock`
+  re-lock and the generated files it would re-render. `hooks install`/`uninstall` only print.
+- `build` with `[deploy.upx]` enabled: `upx.pack_tree` lists what it would pack and stops.
 - `setup` and `lock` report whether the managed parts of `pyproject.toml` would change
   (`render.write_pyproject` writes nothing under `DRY_RUN`; `render.pyproject_message` says
   "would update"); their `uv lock`/`uv sync` are echoed commands, so they are skipped.
@@ -488,6 +496,53 @@ Windows appends `%ProgramFiles(x86)%\Microsoft Visual Studio\Installer` to PATH 
 `vcvarsall.bat` calls `vswhere.exe` by bare name; without it setuptools fails with "Unable to
 find a compatible Visual Studio installation"). Everything else (e.g. `FLET_*`) passes through.
 
+### 5.6 Git pre-commit hook (`hooks.py`)
+
+- `./deploy setup` calls `hooks.ensure_installed(cfg)` when `[hooks] pre_commit` is true (the
+  default): it installs or updates the hook, never fails setup, and is silent outside git.
+  `doctor` shows one "git hook" line (missing = info, not a problem).
+- The hook: `pre-commit` in the folder `git rev-parse --git-path hooks` reports (worktree
+  aware), pure ASCII + LF, a marker comment, and `exec sh <launcher> hooks run` with the POSIX
+  launcher path relative to the repository top (the project may be a subfolder of a bigger
+  repo; non-ASCII folder names are written with `printf` escapes). `sh` explicitly (no
+  dependence on the exec bit); git for Windows runs hooks with its own sh.exe, where the POSIX
+  launcher works. A missing launcher makes the hook exit 0 (other checkouts).
+- Foreign hooks are never overwritten: `install --force` renames it to `pre-commit.local` and
+  ours runs it first; `uninstall` restores it. With `core.hooksPath` set nothing is written:
+  install/status/doctor print the line to add (`sh ./deploy hooks run || exit $?`).
+- `hooks run` checks the STAGED files (`git diff --cached --name-only --diff-filter=ACMR -z`)
+  in ~0.3 s (0.74 s for the whole hook, measured): ruff (active typing profile, `exit_zero`
+  honoured) and `ruff format --check` on staged `.py/.pyi` under the code dirs; generated
+  files up to date (`render.apply(check=True)`) and none unstaged/untracked; managed pyproject
+  parts and `uv lock --check`, and `uv.lock` staged with `pyproject.toml`; `lintc` on staged
+  compiled modules (blocking only under the `mypyc` profile); `shells.launcher_problems` on
+  staged launchers; the language guard in the template repo. Never mypy (the user's choice:
+  `./deploy check` does it). It reads the working-tree version of the staged files.
+- Git hands hooks a relative `GIT_INDEX_FILE` and, in linked worktrees, `GIT_DIR` without
+  `GIT_WORK_TREE`: `hooks` makes them absolute for its own git calls and removes them before
+  starting uv/ruff (they would point git at the wrong repository for a sub-folder project).
+
+### 5.7 Renaming (`rename.py`)
+
+- `./deploy rename NEW_NAME [--force]`: validates the name (format, keyword, standard-library
+  module, dependency clash: the same rules as `presets.check_name_free`, used by `new` and
+  `init` too), refuses a dirty git tree without `--force`, moves `src/<old_pkg>/` first (the
+  step that can fail on a locked file; case-only renames use two moves), rewrites UTF-8 text
+  files in `src/` and `tests/` (line endings and BOM kept, binaries/caches skipped), updates
+  `pytemplate.toml` (`app.name` via `config.set_value`, package references in strings and
+  comments) and `pyproject.toml` (`[project] name` and the preset block only), then
+  `cmd_env.ensure_lock` and `render.apply`.
+- Python code goes through `tokenize`: only real package references change (the first name of
+  `import pkg...`/`from pkg... import`, and `pkg.x` in files that `import pkg` without `as`).
+  When the old name equals the old package but the new name differs from the new package
+  (`alpha` -> `My-Game` / `my_game`), strings/comments/text choose by context: paths, dotted
+  names, `pkg:main`, "package"/"module", `import`/`from`, `-m` and `import_module`-like calls
+  get the package; titles and other prose get the name; `x.pkg` never changes.
+- Invariant (tested for the 3 presets, LF and CRLF, 7 name pairs): renaming the skeleton of
+  name A to B is byte-identical to the skeleton of B, so `presets.pristine` stays true.
+- Common words as names (`app`, `game`, `core`) also rewrite prose: that is why the tree must
+  be clean and `--dry-run` shows sample lines. Top-level docs (README.md) are only listed.
+
 ## 6. Configuration and generated files
 
 ### 6.1 `pytemplate.toml` (`config.py`)
@@ -508,10 +563,15 @@ find a compatible Visual Studio installation"). Everything else (e.g. `FLET_*`) 
 - `[compile]`: `modules`, `exclude`, `forbid_imports` (dotted names checked), `annotate` (every
   mypyc build writes the annotate report, section 9), `opt_level "0".."3"`, `multi_file`,
   `separate`, `strict_dunder_typing`.
-- `[deploy]`: `optimize 0|1|2`, `default {backend: method}`, `[deploy.exe] mode console icon
-  hidden_imports extra_args`, `[deploy.portable] runtime prune archive env` (`env` names must
-  be identifiers), `[deploy.pyz] targets`, `[deploy.wheel] entry`, `[deploy.nuitka] mode
-  extra_args`, `[deploy.flet] target extra_args` (`target` is not validated).
+- `[deploy]`: `optimize 0|1|2`, `default {backend: method}`, `exclude_modules` (dotted names:
+  PyInstaller `--exclude-module`, Nuitka `--nofollow-import-to`; the flet preset sets
+  `["PIL"]`), `[deploy.exe] mode console icon hidden_imports strip extra_args` (`strip`:
+  PyInstaller `--strip`, Linux/macOS only), `[deploy.portable] runtime prune archive env`
+  (`env` names must be identifiers), `[deploy.pyz] targets`, `[deploy.wheel] entry`,
+  `[deploy.nuitka] mode extra_args`, `[deploy.flet] target cleanup exclude extra_args`
+  (`target` is not validated; `cleanup` = `--cleanup-app --cleanup-packages`),
+  `[deploy.upx] enabled level lzma exclude path` (`level` in `1..9|best|brute|ultra-brute`).
+- `[hooks]`: `pre_commit` (setup installs the git hook; section 5.6).
 - Every `*.env` table (`tasks.X.env`, `deploy.portable.env`) takes string values only.
 - `[tasks.<name>]`: `cmd` (argv), `deps`, `env`, `backend`, `uv = true`, `cwd`, `help`,
   `background` (long-running dev server; section 12). Name regex `[a-z][a-z0-9_-]*`; `cmd` or
@@ -591,6 +651,13 @@ Formats:
   PyInstaller, pytest for selftest) runs there.
 - Every tool call is `uv run --locked` (syncs when needed, fails on a stale lock).
   `cmd_env.ensure_lock` runs `uv lock --check` and then `uv lock` if needed.
+- uv finds the project by walking up from the CWD: `envs.uv_run` adds `--project <ROOT>`
+  whenever it runs with another `cwd` (a work dir with its own `pyproject.toml`, like the
+  `flet build` stage, would otherwise become the project). Plain `envs.uv` calls with a `cwd`
+  (nuitka, the stages without a pyproject) rely on the walk reaching `ROOT`.
+- `git clean -fdx` is safe: only envs, `.build/`, `dist/`, caches and `.claude/` go; the next
+  `uv run --locked` recreates `.venv` by itself (verified on a clone: `run`, `test all`, `check
+  all`, `render --check`, `doctor` all pass without `setup`).
 - `environments` in the managed block is bounded to the CPython minor (e.g.
   `cpython and >=3.14,<3.15`), plus `pypy and >=3.11,<3.12` when PyPy is supported. Without the
   bound uv resolves for 3.15+, where raylib has no wheels. Changing `python.cpython` needs
@@ -716,7 +783,8 @@ Formats:
 
 Per method:
 - **exe** (PyInstaller): `--python-option "X utf8"` (dev parity with `PYTHONUTF8`),
-  `--optimize`, `--noupx`, `--clean`, `--log-level=WARN` unless `-v`, `--hidden-import` for
+  `--optimize`, `methods.exe.size_args` (`--noupx`, or UPX below; `--exclude-module` per
+  `deploy.exclude_modules`; `--strip`), `--clean`, `--log-level=WARN` unless `-v`, `--hidden-import` for
   mypyc, `--add-data "<src>:<dest>"` (`:` is PyInstaller's documented separator). The flet
   preset uses `flet pack` instead (`methods/exe._flet_pack`): it runs from its own cwd
   `.build/flet-pack/<b>` because `flet pack -y` wipes `<cwd>/build` and the distpath; onedir
@@ -766,9 +834,16 @@ Per method:
   build env). mypyc -> platform wheel; cpython/pypy -> `py3-none-any`.
 - **nuitka**: `.build/nuitka-stage/<b>`, `uv run --locked --with nuitka==<NUITKA> python -m
   nuitka` with cwd = stage; `--include-package=<pkg>`, `--include-module` for mypyc hidden
-  imports, `--python-flag=no_asserts/no_docstrings` from `optimize`. Output found by file-name
+  imports, `--python-flag=no_asserts/no_docstrings` from `optimize`, `--nofollow-import-to`
+  per `deploy.exclude_modules`, the upx plugin when enabled. Output found by file-name
   prefix (onefile) or `.dist` suffix; none found -> `DeployError`. Builds take minutes (~4-7
-  min measured).
+  min measured). Flet (verified: runs and starts the client): `flet/__init__.py` loads its
+  controls lazily (module `__getattr__` + `importlib`), which Nuitka cannot follow, so the
+  method adds `--include-package=flet --include-package=flet_desktop`; the flet-desktop wheel
+  has NO client, so `nuitka._flet_client_archive` downloads the release archive
+  (`flet_desktop.get_artifact_filename()`, the same URL flet uses) once into
+  `.build/flet-client/<version>/` and bundles it at `flet_desktop/app/<archive>`, where
+  flet_desktop looks for a bundled client. 61 MB with UPX; ~25 min build.
 - **flet** (`flet build`): requires `app.preset == "flet"`. Windows needs Developer Mode
   (Flutter symlinks; checked in the registry by `methods.flet._developer_mode`) and Visual
   Studio C++. The stage `.build/flet-build/<b>` is persistent (Flutter cache); stale
@@ -778,7 +853,33 @@ Per method:
   project `pyproject.toml` (no other table leaks in; `[tool.flet.app]` alone is kept; default
   `app.path = "src"`). Mobile/web targets (`apk aab ipa ios-simulator web`) cannot load
   extensions: a mypyc backend ships the `.py`. Desktop embeds CPython 3.14, so cp314 `.pyd`
-  files work.
+  files work. `cleanup`/`exclude` map to `--cleanup-app --cleanup-packages` / `--exclude`;
+  with UPX the finished folder goes through `upx.pack_tree` (desktop targets only). Verified on
+  Windows (Developer Mode on): Flet 1.0.1 downloads ITS pinned Flutter (3.44.8, ~3 GB in
+  `~/flutter`, ignoring a scoop Flutter) and a Python build (`~/.flet`); first build ~7 min,
+  next ~3 min; 97 MB folder, 78 MB with cleanup + UPX, 38 MB zipped, no unpacking at start.
+  `uv run` MUST get `--project <ROOT>` here (`envs.uv_run` does it when `cwd != ROOT`): the
+  stage has its own `pyproject.toml`, which uv otherwise takes for the project ("Unable to
+  find lockfile at uv.lock").
+- **Size and UPX** (`upx.py`, README "Binary size" has the measurements): exe = PyInstaller's
+  own UPX step (`--upx-dir`, `--upx-exclude` per glob; the level travels in the `UPX`
+  environment variable, which upx reads as default options; PyInstaller always adds `--lzma`,
+  skips Control Flow Guard DLLs and Qt plugins, and `--clean` keeps its binary cache from
+  reusing another level); nuitka = its upx plugin (hard-codes `--best --lzma`, ignores our
+  excludes: it packed `python314.dll` and the app still ran); portable (before the smoke test,
+  so the packed `.pyd` files are what it loads) and flet = `upx.pack_tree` (PE `.exe/.dll/.pyd`
+  on Windows, ELF executables but no `.so` on Linux, in parallel). Never packed: files over
+  `MAX_INPUT` (600 MiB; UPX refuses 768 MiB), `BUILTIN_EXCLUDE` (C runtime, API sets,
+  `python3*.dll`, `libpython3*`, and `flutter_windows.dll`: a packed Flutter engine hangs the
+  app at startup with a 4 MB working set and no window, measured), binaries UPX rejects
+  (`GUARD_CF`: never pass `--force`). UPX 5.2.1 is downloaded once (SHA-256 checked) to
+  `%LOCALAPPDATA%\pytemplate\tools\upx-5.2.1` / `$XDG_CACHE_HOME/pytemplate/tools`; macOS
+  is unsupported (`upx.unsupported_reason`). `flet pack` ships Flet's prebuilt FULL client
+  zipped (40.5 MB, libmpv 28 MB inside) and unpacks it on first start into
+  `~/.flet/client/flet-desktop-full-<version>-<fingerprint>` (97 MB); the "light" flavor
+  exists only for Linux. PyInstaller follows imports inside functions: flet's lazy
+  `from PIL import ...` (RawImage) drags Pillow (13 MB) in, hence the preset's
+  `exclude_modules = ["PIL"]`.
 - Assets at runtime: `resources.assets_dir()` (raylib and flet presets) tries
   `$PYTEMPLATE_ASSETS`, then `sys._MEIPASS/assets`, then `<pkg>/assets` (wheel), then
   `src/assets`. Call it inside functions (module-level `__file__` is broken when compiled).
@@ -1288,6 +1389,12 @@ Editors:
   traceback, "adapter exited with 1").
 
 Code coupling (rename together):
+- `hooks` imports the private `cmd_dev._profile_file` and `shells.launcher_problems`, and loads
+  `.pytemplate/tests/test_no_spanish.py` by path (it needs `offending_lines`, `ALLOWED_PATHS`,
+  `BINARY_SUFFIXES`, and only `pytest.mark` at module level); `rename` calls the private
+  `config._build`, `presets._set_project_name` and `presets._norm_name`.
+- `upx.BUILTIN_EXCLUDE` must keep `flutter_windows.dll`; `nuitka._flet_client_archive` mirrors
+  flet_desktop's download URL and its `flet_desktop/app/` lookup.
 - `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`;
   `e2e.flet_build_reason` imports `methods.flet._developer_mode`; `cmd_nvim.c_compiler`
   imports `cmd_env._msvc` lazily (`cmd_env` imports `cmd_nvim`).

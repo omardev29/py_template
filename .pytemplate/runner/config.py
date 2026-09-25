@@ -75,6 +75,7 @@ class ExeConfig:
     console: str = "auto"  # auto (= not app.gui) | yes | no
     icon: str = ""
     hidden_imports: list[str] = field(default_factory=list)
+    strip: bool = False  # Linux/macOS: strip the symbol tables of the bundled binaries (smaller)
     extra_args: list[str] = field(default_factory=list)
 
 
@@ -105,7 +106,18 @@ class NuitkaConfig:
 @dataclass
 class FletBuildConfig:
     target: str = "host"  # host | windows | macos | linux | apk | aab | ipa | web
+    cleanup: bool = True  # --cleanup-app --cleanup-packages: drop tests, docs... from the bundle
+    exclude: list[str] = field(default_factory=list)  # app files/folders left out (--exclude)
     extra_args: list[str] = field(default_factory=list)
+
+
+@dataclass
+class UpxConfig:
+    enabled: bool = False  # UPX-pack the binaries of the exe, nuitka, portable and flet methods
+    level: str = "best"  # 1..9 | best | brute | ultra-brute
+    lzma: bool = True
+    exclude: list[str] = field(default_factory=list)  # file-name globs never packed
+    path: str = ""  # explicit upx executable (default: PATH, then a pinned download)
 
 
 @dataclass
@@ -120,6 +132,9 @@ class DeployConfig:
     wheel: WheelConfig = field(default_factory=WheelConfig)
     nuitka: NuitkaConfig = field(default_factory=NuitkaConfig)
     flet: FletBuildConfig = field(default_factory=FletBuildConfig)
+    upx: UpxConfig = field(default_factory=UpxConfig)
+    # Modules left out of the exe and nuitka builds even if something imports them (size)
+    exclude_modules: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -338,6 +353,10 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
             raise DeployError(f"pytemplate.toml: deploy.portable.env: invalid environment variable name {key!r}")
     _one_of(cfg.deploy.nuitka.mode, ("standalone", "onefile"), "deploy.nuitka.mode")
+    _one_of(cfg.deploy.upx.level, ("1", "2", "3", "4", "5", "6", "7", "8", "9", "best", "brute", "ultra-brute"), "deploy.upx.level")
+    for m in cfg.deploy.exclude_modules:
+        if not _DOTTED.match(m):
+            raise DeployError(f"pytemplate.toml: invalid module in deploy.exclude_modules: {m!r}")
     for name, task in cfg.tasks.items():
         if not re.fullmatch(r"[a-z][a-z0-9_-]*", name):
             raise DeployError(f"pytemplate.toml: invalid task name: {name!r}")

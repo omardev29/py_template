@@ -39,17 +39,28 @@ opt_level = "3"
 [deploy]
 optimize = 1   # 0 | 1 | 2: bytecode -O level; with >= 1 mypyc also strips asserts
 default = { cpython = "exe", mypyc = "exe", pypy = "portable" }   # ./deploy build method
+exclude_modules = []   # never bundled by exe/nuitka even if imported, e.g. "ssl" without HTTPS
 
 [deploy.exe]
 mode = "onefile"   # onefile | onedir (onedir starts faster and is not unpacked every time)
 console = "auto"   # auto (= not app.gui) | yes | no
 icon = ""          # path to an .ico
+strip = false   # Linux/macOS: strip symbol tables of the bundled binaries (smaller)
 
 [deploy.portable]
 runtime = "bundled"   # bundled: the folder includes the interpreter | system: uses the target's
 
 [deploy.pyz]
 targets = ["host"]    # add keys like "cp314-linux-x86_64" to include native binaries for other OSes
+
+[deploy.upx]
+# UPX packs the exe/dll/pyd (and ELF executables) of the exe, nuitka, portable and flet methods:
+# smaller files; every start unpacks them in memory and some antivirus engines flag them.
+# Binaries over 600 MiB are never packed (UPX's limit is 768 MiB). Downloaded once (pinned).
+enabled = false
+level = "best"   # 1..9 | best | brute | ultra-brute (brute: much slower, a few % smaller)
+lzma = true      # smaller, slower to unpack (PyInstaller and Nuitka always use LZMA)
+exclude = []     # extra file-name globs never packed (C runtime and python3*.dll never are)
 
 [hooks]
 pre_commit = true   # ./deploy setup installs a git pre-commit hook (./deploy hooks run: ruff, format, generated files, lock)

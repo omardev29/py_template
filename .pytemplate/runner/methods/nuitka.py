@@ -9,16 +9,48 @@ mypyc backend, your core modules are already compiled by mypyc (Nuitka includes 
 from __future__ import annotations
 
 import shutil
+import urllib.request
 from pathlib import Path
 
-from .. import envs, mypyc, ui
+from .. import envs, mypyc, proc, ui, upx
 from ..cmd_build import BuildRequest, dist_path
+from ..config import Config
 from ..project import BUILD, IS_WINDOWS, ROOT
 from ..ui import DeployError
 
 # Nuitka is not in uv.lock (`uv run --with`), so it is pinned here to keep builds reproducible:
 # the latest release on PyPI in September 2026. Bump it deliberately.
 NUITKA = "nuitka==4.2.2"
+
+
+def _flet_client_archive(cfg: Config) -> Path:
+    """Return the Flet desktop client archive of the locked flet-desktop (downloaded once).
+
+    Same file and URL as flet_desktop's own first-start download (flet-windows.zip,
+    flet-macos.tar.gz or the glibc-matched Linux tarball), cached in .build/flet-client/.
+    """
+    query = "import flet_desktop, flet_desktop.version as v; print(flet_desktop.get_artifact_filename(), v.version)"
+    out = envs.uv(envs.tool_env(cfg), ["run", "--locked", "python", "-c", query], capture=True, echo=False).stdout.split()
+    if len(out) != 2:
+        raise DeployError(f"could not ask flet_desktop for its client archive: {' '.join(out)!r}")
+    name, version = out
+    archive = BUILD / "flet-client" / version / name
+    if archive.is_file():
+        return archive
+    url = f"https://github.com/flet-dev/flet/releases/download/v{version}/{name}"
+    ui.info(f"  downloading the Flet client for Nuitka: {url}")
+    if proc.DRY_RUN:
+        return archive
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    partial = archive.with_suffix(archive.suffix + ".part")
+    try:
+        with urllib.request.urlopen(url, timeout=300) as r, partial.open("wb") as f:  # noqa: S310 (fixed https URL)
+            shutil.copyfileobj(r, f)
+    except OSError as e:
+        partial.unlink(missing_ok=True)
+        raise DeployError(f"cannot download the Flet client {url}: {e}", 3) from None
+    partial.replace(archive)
+    return archive
 
 
 def build(req: BuildRequest) -> Path:
@@ -56,6 +88,20 @@ def build(req: BuildRequest) -> Path:
         argv.append("--windows-console-mode=disable")
     if cfg.deploy.exe.icon and IS_WINDOWS:
         argv.append(f"--windows-icon-from-ico={ROOT / cfg.deploy.exe.icon}")
+    argv += [f"--nofollow-import-to={m}" for m in cfg.deploy.exclude_modules]
+    if upx.active(cfg):
+        # Nuitka's plugin packs each binary with --best --lzma (deploy.upx.level does not apply)
+        argv += ["--plugin-enable=upx", f"--upx-binary={upx.find(cfg)}"]
+    if cfg.app.preset == "flet":
+        # flet loads its controls lazily (module __getattr__ + importlib), which Nuitka cannot
+        # follow; and the flet-desktop wheel has no Flutter client: bundle the release archive
+        # where flet_desktop looks for one (flet_desktop/app/), as `flet pack` does
+        archive = _flet_client_archive(cfg)
+        argv += [
+            "--include-package=flet",
+            "--include-package=flet_desktop",
+            f"--include-data-files={archive}=flet_desktop/app/{archive.name}",
+        ]
     argv += cfg.deploy.nuitka.extra_args + req.extra
 
     ui.info("  Nuitka compiles everything to C: the first build takes several minutes")

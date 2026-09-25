@@ -13,7 +13,7 @@ import shlex
 import shutil
 from pathlib import Path
 
-from .. import envs, proc, ui
+from .. import envs, proc, ui, upx
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
 from ..project import IS_WINDOWS, TEMPLATES, rel
@@ -214,8 +214,11 @@ def build(req: BuildRequest) -> Path:
                 f"could not precompile {failed} file(s) to .pyc (paths longer than 260 characters?). "
                 "The app still works; it just starts a bit slower the first time."
             )
-        if req.compiled:
-            _smoke_compiled(cfg, console_python, out)
+
+    if upx.active(cfg):
+        upx.pack_tree(cfg, out)  # before the smoke test, so that it loads the packed binaries
+    if python is not None and req.compiled:
+        _smoke_compiled(cfg, python.with_name("python.exe") if IS_WINDOWS else python, out)
 
     if cfg.deploy.portable.archive:
         fmt = "zip" if IS_WINDOWS else "gztar"

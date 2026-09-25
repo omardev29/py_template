@@ -118,7 +118,8 @@ endings and executable bit.
 | `report [--open] [--no-mypy]` | mypyc HTML report: slow lines in red and how to fix them |
 | `build [BACKEND] [--method M] [--no-check]` · `pyz-merge A.pyz B.pyz... --out C.pyz` | Distribution (see below) |
 | `add PKG [--cpython-only]` · `remove` · `lock` · `sync` | Dependencies (uv) |
-| `init PRESET` · `new DIR` · `render` · `clean [--envs]` · `tasks` | Template and utilities |
+| `init PRESET` · `new DIR` · `rename NEW_NAME [--force]` · `render` · `clean [--envs]` · `tasks` | Template and utilities (see [Renaming](#renaming-the-app)) |
+| `hooks [install [--force]\|uninstall\|run\|status]` | The git pre-commit hook (see [below](#git-pre-commit-hook)) |
 | `nvim [doctor\|trust\|extras\|bootstrap\|sync]` | Neovim/LazyVim integration (see [Neovim](#neovim-lazyvim)) |
 | `shell-setup [SHELL]` | Prints a `deploy` function for your shell (see [Shells](#shells)) |
 | `selftest [--shells\|--nvim\|--e2e]` | Tests of the template itself (see below) |
@@ -169,6 +170,38 @@ Run it with `./deploy gen [extra args]`. Placeholders: `{root}` `{src}` `{build}
 `{backend}` `{name}` `{pkg}` `{python}`. `backend = "pypy"` picks the environment, `uv = false`
 runs the program as-is, and `background = true` marks a long-running server (editors start it
 without waiting). Tasks also show up in `./deploy help`, VS Code and Neovim.
+
+### Renaming the app
+
+Changing `app.name` by hand moves nothing: use `./deploy rename NEW_NAME` (try `--dry-run`
+first). It moves `src/<pkg>/`, rewrites the imports and the other references in `src/` and
+`tests/` (package paths get the package, window and table titles get the name), updates
+`pytemplate.toml` (`app.name`, `compile.modules`, the mypy overrides, the wheel entry, task
+commands) and `pyproject.toml` (the project name and the preset tables), re-locks `uv.lock` and
+regenerates the configs. The package is the name in lower case with `_` for `-`
+(`My-Game` -> `src/my_game/`). It refuses a dirty git tree unless `--force` (review the result
+with `git diff`), and names whose package would be a dependency (`flet`, `rich`), a Python
+keyword or a standard-library module (`json`); `./deploy new` and `init` apply the same rules.
+`dist/` keeps the artifacts built with the old name. To choose the name at creation:
+`./deploy new DIR --name NAME`.
+
+### Git pre-commit hook
+
+`./deploy setup` installs a pre-commit hook (`[hooks] pre_commit = true`, the default): a small
+sh script in the repository's hooks folder that runs `./deploy hooks run`. On every commit it
+checks the staged files in about a second: ruff and `ruff format --check` on the staged Python
+files (with the active typing profile), the generated files up to date and staged, `uv.lock` in
+sync with `pyproject.toml`, the mypyc rules on staged compiled modules (blocking only with the
+`mypyc` profile) and the launchers' line endings and modes. It does not run mypy: that is
+`./deploy check`, the editors and CI. It checks the working-tree version of the staged files.
+
+- Skip it once: `git commit --no-verify`. Remove it: `./deploy hooks uninstall` (and
+  `pre_commit = false` so that `setup` does not install it again). State: `./deploy hooks`.
+- An existing hook of yours is never overwritten: `./deploy hooks install --force` keeps it as
+  `pre-commit.local` and runs it first. With `core.hooksPath` set, nothing is written there:
+  add `sh ./deploy hooks run || exit $?` to your own hook.
+- It works from any git client (Git Bash, cmd, PowerShell, xonsh, VS Code, lazygit): git runs
+  hooks with its own `sh`, and the hook calls the POSIX launcher, which finds uv by itself.
 
 ## Configuration: `pytemplate.toml` and `.pytemplate/`
 
@@ -264,12 +297,75 @@ merges the three into a single `.pyz`. For native dependencies of other OSes wit
 `[deploy.pyz] targets = ["cp314-linux-x86_64", ...]`. On Windows, the `.cmd` next to the `.pyz`
 finds a suitable Python or PyPy for you.
 
-Other options in `pytemplate.toml`: `deploy.optimize` (`-O` bytecode; with mypyc it strips
+Other options in `pytemplate.toml` (for the size ones, see [Binary size](#binary-size)):
+`deploy.optimize` (`-O` bytecode; with mypyc it strips
 the `assert`s), `deploy.exe.mode` (`onefile`/`onedir`), `app.gui` (no console),
 `deploy.portable.runtime = "system"` (folder without an interpreter, for the target machine's
 Python), `deploy.portable.env` (variables the portable launchers set: the names must be valid
 variable names and the values strings; the Windows `.cmd` launcher only takes ASCII values with
 no `"` or line breaks).
+
+### Binary size
+
+Measured on Windows 11 with the flet preset (CPython backend, Flet 1.0.1):
+
+| Build | Folder | Zip | First start |
+|---|---|---|---|
+| `exe` (`flet pack`, onedir) with Pillow | 85.5 MB | - | unpacks the Flet client: +97 MB in `~/.flet/client` |
+| `exe` with `exclude_modules = ["PIL"]` (the preset default) | 72 MB | 58 MB | +97 MB |
+| ... plus `[deploy.upx] enabled = true` | 63 MB | 57 MB | +97 MB |
+| `flet` (`flet build`), no options | 97 MB | - | nothing to unpack |
+| `flet` with `cleanup = true` + UPX | 78 MB | **38 MB** | nothing to unpack |
+
+Where it goes: every Flet desktop app carries the Flutter engine (`flutter_windows.dll`, 20 MB)
+and Flet's compiled Dart UI (`app.so`, 15-19 MB); Python adds its runtime (`python314.dll`,
+6 MB, plus the standard library) and your dependencies. `flet pack` (and PyInstaller with
+`flet-desktop`, which is the same thing) ships Flet's prebuilt **full** client, zipped (40 MB),
+with libmpv for audio and video (28 MB) and Rive, and unpacks it on the first start. `flet build`
+compiles a client with only the Flutter packages the app uses: the smallest download and the
+smallest install. It needs Windows Developer Mode, the Visual Studio C++ tools, and it downloads
+the Flutter SDK version Flet pins (3.44.8 for Flet 1.0.1: about 3 GB in `~/flutter`, once); the
+first build takes about 7 minutes, the next ones about 3. For the smallest Flet app:
+`./deploy build --method flet` (or `[deploy] default = { cpython = "flet", ... }`).
+
+For the script preset with mypyc: the onefile `exe` is 13.2 MB (12.3 MB with UPX); the
+`portable` folder is 62 MB, 49 MB with UPX, and its zip 23 MB.
+
+Size settings (each method ignores what does not apply to it):
+
+| Setting | Methods | Effect |
+|---|---|---|
+| `[deploy] exclude_modules = [...]` | exe, nuitka | Modules never bundled even if something imports them (PyInstaller also follows imports inside functions). flet preset: `["PIL"]` (-13 MB; Flet only uses Pillow for `RawImage`). `"ssl"` saves 2 MB more if the app never uses HTTPS (OpenSSL's `libcrypto` stays while `hashlib` needs it). |
+| `[deploy.upx]` `enabled`, `level`, `lzma`, `exclude` | exe, nuitka, portable, flet | UPX packs executables and libraries (below) |
+| `[deploy.exe] mode = "onefile"` | exe | One compressed file (zlib), unpacked to a temp folder on every start |
+| `[deploy.exe] strip = true` | exe (Linux, macOS) | Strips the symbol tables of the bundled binaries |
+| `[deploy.nuitka] mode = "onefile"` | nuitka | One zstd-compressed file |
+| `[deploy.flet] cleanup = true`, `exclude = [...]` | flet | `--cleanup-app --cleanup-packages` (no tests or docs in the bundle); app files left out |
+| `[deploy.portable] prune`, `archive` | portable | Unused parts of the interpreter removed; a zip or tar.gz next to the folder |
+| `[deploy] optimize = 2` | all | `-OO` bytecode (no docstrings) |
+
+**UPX** (`[deploy.upx]`, off by default): `level` is `1`..`9`, `best` (default), `brute` or
+`ultra-brute` (much slower builds for a few % more); `lzma = true` packs smaller and unpacks
+slower; `exclude` adds file-name globs. The exe method uses PyInstaller's own UPX step (every
+binary is packed before bundling, also in onefile mode; PyInstaller always uses LZMA and skips
+Control Flow Guard DLLs), Nuitka its upx plugin (always `--best --lzma`), and the portable and
+flet builds are packed when they are done (the portable smoke test then loads the packed
+modules). Never packed: files over 600 MiB (UPX refuses anything over 768 MiB; the margin is on
+purpose), binaries UPX rejects (Control Flow Guard), the C runtime, `python3*.dll` and
+`flutter_windows.dll` (a packed Flutter engine hangs the app at startup). UPX is downloaded
+once (pinned version, SHA-256 checked) to `%LOCALAPPDATA%\pytemplate\tools`
+(`~/.cache/pytemplate/tools` on Linux) unless `upx` is on PATH or `deploy.upx.path` names one;
+macOS is not supported. The price: every start unpacks the files in memory (slower start, no
+memory shared between processes), and some antivirus engines flag UPX-packed files.
+
+**Compressed binaries**: mypyc builds ordinary C extensions (`.pyd`/`.so`, without debug
+information in release builds); nothing compresses them by default, but UPX packs them to about
+a third. What is always compressed: onefile executables (PyInstaller zlib, Nuitka zstd), the
+`.pyz` (deflate) and the portable archive. **Nuitka with Flet** works: the method includes all
+of `flet` (it loads its controls lazily, which Nuitka cannot follow) and bundles the Flet client
+archive as `flet pack` does. It does not make the app smaller (61 MB standalone with UPX, about
+the same as `flet pack`, because the Flutter client dominates) and the build takes about 25
+minutes (Nuitka compiles all of Flet to C): use it for other reasons (startup, obfuscation).
 
 ## Presets
 
@@ -441,6 +537,17 @@ project needs (`lang.python`, `lang.toml`, `dap.core`, `test.core`, `editor.over
 loads the plugin in `.pytemplate/nvim/`. Whatever depends on the mode comes from
 `.pytemplate/editor.json`, a data file that every `./deploy` command regenerates.
 
+**What gets downloaded, and where.** Nothing has to be added to your own LazyVim config: the
+extras are imported by `.lazy.lua` only while Neovim runs inside the project. lazy.nvim still
+installs their plugins (nvim-dap, neotest, overseer, nvim-lint...) in its usual global plugin
+folder (`stdpath("data")/lazy`, e.g. `%LOCALAPPDATA%\nvim-data\lazy`) the first time, or when you
+run `./deploy nvim sync`. The Python tools do not come from Mason: ruff, mypy and debugpy are
+the project's `.venv` versions (pinned in `uv.lock`); basedpyright comes from `.venv` if you add
+it, else `uv tool run` (cached by uv), else Mason. Mason and nvim-treesitter still install what
+the extras declare (the TOML server taplo, the Python and TOML parsers). Outside pytemplate
+projects those extras are not imported, so a `:Lazy clean` there would remove their plugins
+until the next time: `./deploy nvim extras` (optional) adds them to your `lazyvim.json` for good.
+
 **Per preset.** script: `run` shows its output as it starts. raylib: the `typings/` stubs reach
 the LSP through `pyrightconfig.json`; `bunnymark` and `stubs` are tasks; the game's output only
 opens on failure. flet: `<leader>jd` starts `dev` (hot reload) as a background task; debugging
@@ -473,6 +580,13 @@ opens on failure. flet: `<leader>jd` starts `dev` (hot reload) as a background t
   install uv with one of the printed commands and open a new terminal.
 - **Flet downloads the client or installs packages on its own**: `flet` and `flet-desktop`
   must have the same version (`[preset.flet] version`).
+- **`flet build` on Windows**: it needs Developer Mode (Settings > System > For developers) and
+  the Visual Studio C++ tools; `./deploy build --method flet` says so when Developer Mode is off.
+- **`git clean -fdx` is safe**: it only deletes untracked and ignored files (`.venv*`, `.build/`,
+  `dist/`, caches, `.claude/`); every generated file, `uv.lock` and `.pytemplate/state.json` are
+  committed. Afterwards any command works (uv recreates `.venv` on its own; `./deploy setup`
+  also recreates the PyPy and JIT environments). The git hook lives in `.git/`, so it stays.
+  `git clean -fdx -e .claude` keeps Claude Code's local settings.
 
 ## Layout
 

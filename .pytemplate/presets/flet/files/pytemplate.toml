@@ -46,11 +46,13 @@ opt_level = "3"
 [deploy]
 optimize = 1
 default = { cpython = "exe", mypyc = "exe", pypy = "portable" }
+exclude_modules = ["PIL"]   # flet imports Pillow only for RawImage: -13 MB (remove it if you use it)
 
 [deploy.exe]
 mode = "onedir"   # flet pack: the Flutter client goes inside; onedir starts much faster
 console = "auto"
 icon = ""
+strip = false   # Linux/macOS: strip symbol tables of the bundled binaries (smaller)
 
 [deploy.portable]
 runtime = "bundled"
@@ -63,6 +65,17 @@ entry = "{{pkg}}.ui.app:run"   # command that the wheel installs (uv tool instal
 
 [deploy.flet]
 target = "host"   # `./deploy build --method flet`: host | windows | macos | linux | apk | aab | ipa | web
+cleanup = true   # --cleanup-app --cleanup-packages: no tests, docs... in the bundle
+exclude = []     # app files/folders left out of `flet build` (--exclude)
+
+[deploy.upx]
+# UPX packs the exe/dll/pyd (and ELF executables) of the exe, nuitka, portable and flet methods:
+# smaller files; every start unpacks them in memory and some antivirus engines flag them.
+# Binaries over 600 MiB are never packed (UPX's limit is 768 MiB). Downloaded once (pinned).
+enabled = false
+level = "best"   # 1..9 | best | brute | ultra-brute (brute: much slower, a few % smaller)
+lzma = true      # smaller, slower to unpack (PyInstaller and Nuitka always use LZMA)
+exclude = []     # extra file-name globs never packed (C runtime and python3*.dll never are)
 
 [preset.flet]
 version = "1.0.1"   # flet, flet-desktop and flet-cli always at the same version
