@@ -1,0 +1,134 @@
+# Launcher matrix of the TEMPLATE repository (not rendered, and `./deploy new` does not copy
+# template-*.yml workflows): ./deploy, deploy.cmd and deploy.ps1 through every shell the
+# runners have, with `./deploy selftest --shells` (T1 argv, T2 exit code, T3 cwd, T4 the
+# xonsh-shell-kit route, T5 minimal PATH, T6 stdin, T7 install hints) plus the invocations a
+# user types. The gate job skips everything in repositories made from the template.
+name: template-launchers
+
+on:
+  push:
+    paths: [deploy, deploy.cmd, deploy.ps1, ".pytemplate/**", ".github/workflows/template-launchers.yml"]
+  pull_request:
+    paths: [deploy, deploy.cmd, deploy.ps1, ".pytemplate/**", ".github/workflows/template-launchers.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      template: ${{ steps.marker.outputs.template }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: .pytemplate/template-repo
+          sparse-checkout-cone-mode: false
+      - id: marker
+        run: if [ -f .pytemplate/template-repo ]; then echo "template=true" >> "$GITHUB_OUTPUT"; fi
+
+  posix:
+    needs: gate
+    if: needs.gate.outputs.template == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v10
+      - name: Extra shells
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends dash zsh busybox ksh mksh yash fish
+          else
+            brew install fish
+          fi
+          uv tool install xonsh
+      - name: shellcheck
+        if: runner.os == 'Linux'
+        run: shellcheck -s sh deploy
+      - name: uv also in ~/.local/bin (the launchers' fallback discovery, T5)
+        run: mkdir -p ~/.local/bin && cp "$(command -v uv)" ~/.local/bin/
+      - name: selftest --shells
+        run: ./deploy selftest --shells
+      - name: User-style invocations
+        run: |
+          for s in /bin/sh bash dash zsh; do "$s" ./deploy help >/dev/null && echo "$s ok"; done
+          (cd src && ../deploy help >/dev/null)
+          (cd /tmp && "$GITHUB_WORKSPACE/deploy" help >/dev/null)
+          env -u UV PATH=/usr/bin:/bin ./deploy help >/dev/null
+          if [ "$RUNNER_OS" = Linux ]; then busybox sh ./deploy help >/dev/null; fi
+          if [ "$RUNNER_OS" = macOS ]; then /bin/bash --version | head -n1; /bin/bash ./deploy help >/dev/null; /bin/zsh ./deploy help >/dev/null; fi
+          pwsh -NoProfile -Command './deploy.ps1 help > $null; exit $LASTEXITCODE'
+          set +e; ./deploy no-such-command; test $? -eq 2
+
+  windows:
+    needs: gate
+    if: needs.gate.outputs.template == 'true'
+    runs-on: windows-latest
+    steps:
+      - run: git config --global core.autocrlf input
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v10
+      - name: uv also in %USERPROFILE%\.local\bin (the launchers' fallback discovery, T5)
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null; Copy-Item (Get-Command uv).Source "$HOME\.local\bin\"
+      - id: msys2
+        uses: msys2/setup-msys2@v2
+        with: {msystem: UCRT64, release: false, update: false, path-type: minimal, install: dash}
+      - uses: cygwin/cygwin-install-action@v6
+        with: {install-dir: 'C:\cygwin', packages: dash, add-to-path: false}
+      - name: busybox-w32
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://frippery.org/files/busybox/busybox64u.exe -OutFile "$env:RUNNER_TEMP\busybox.exe"
+          Add-Content $env:GITHUB_PATH $env:RUNNER_TEMP
+      - name: selftest --shells (cmd, PowerShell 5.1 and 7, Git Bash, MSYS2, Cygwin, busybox-w32)
+        shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+          CYGWIN_ROOT: 'C:\cygwin'
+        run: ./deploy.ps1 selftest --shells
+      - shell: cmd
+        run: "call deploy.cmd help >nul || exit /b 1\r\ncd src && call ..\\deploy.cmd help >nul"
+      - shell: pwsh
+        run: "./deploy.ps1 help > $null; Set-Location src; ../deploy.ps1 help > $null"
+      - shell: powershell
+        run: ".\\deploy.ps1 help > $null; exit $LASTEXITCODE"
+      - shell: bash
+        run: "./deploy help >/dev/null && (cd src && ../deploy help >/dev/null) && sh ./deploy help >/dev/null && dash ./deploy help >/dev/null"
+      - name: MSYS2 login shells, minimal PATH (uv not on PATH)
+        shell: msys2 {0}
+        run: |
+          if command -v uv; then echo "uv unexpectedly on PATH"; exit 1; fi
+          for m in MSYS UCRT64 MINGW64 CLANG64; do MSYSTEM=$m bash -lc './deploy help >/dev/null' && echo "$m ok"; done
+          dash ./deploy help >/dev/null
+          (cd src && ../deploy help >/dev/null)
+          rc=0; out=$(env -u UV USERPROFILE=/nonexistent LOCALAPPDATA=/nonexistent PATH=/usr/bin ./deploy help 2>&1 </dev/null) || rc=$?
+          test "$rc" -eq 127; printf '%s' "$out" | grep -q winget; ! printf '%s' "$out" | grep -q curl
+      - name: Cygwin login, no Windows PATH
+        shell: pwsh
+        env: {CHERE_INVOKING: '1', CYGWIN_NOWINPATH: '1'}
+        run: C:\cygwin\bin\bash.exe --login -o igncr -c './deploy help >/dev/null && dash ./deploy help >/dev/null && cd src && ../deploy help >/dev/null'
+      - shell: pwsh
+        run: "busybox sh -c './deploy help >/dev/null && cd src && ../deploy help >/dev/null'"
+
+  wsl:
+    needs: gate
+    if: needs.gate.outputs.template == 'true'
+    runs-on: windows-latest
+    continue-on-error: true  # optional: WSL setup on hosted runners is slow and sometimes flaky
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v10
+      - uses: Vampire/setup-wsl@v7
+        with: {distribution: Ubuntu-24.04, additional-packages: curl dash zsh}
+      - shell: wsl-bash {0}
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh && ./deploy help >/dev/null && dash ./deploy help >/dev/null
+      - name: selftest --shells through wsl.exe
+        shell: pwsh
+        run: ./deploy.ps1 selftest --shells wsl
