@@ -43,6 +43,11 @@ jobs:
           version: stable
       - name: Neovim version
         run: nvim --version
+      # venv-selector (LazyVim's lang.python extra) raises an error on the first Python buffer
+      # without fd, which fails every smoke check that opens one. Ubuntu names it fdfind.
+      - name: fd
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then choco install fd -y --no-progress; else sudo apt-get update && sudo apt-get install -y fd-find; fi
       - name: Runner environment
         run: ./deploy setup
       - name: LazyVim smoke test (script, raylib, flet)

@@ -127,6 +127,20 @@ def test_gui_runs_follow_the_host() -> None:
     assert flet_runs and all(s.skip for s in flet_runs)
 
 
+def test_host_gaps_switch_the_project_off_the_backend() -> None:
+    mac_arm = Host("macos", arch="aarch64")
+    steps = e2e.plan(RAYLIB, Options(full=True), mac_arm)
+    assert names(steps)[:6] == ["new", "verify copy", "render --check", "mode --supports cpython,mypyc", "setup", "doctor"]
+    mode = by_name(steps)["mode --supports cpython,mypyc"]
+    assert mode.args == ("mode", "cpython", "--supports", "cpython,mypyc") and mode.required
+    assert "arm64" in by_name(steps)["pypy (every step)"].skip
+    assert not [s for s in steps if s.backend == "pypy" and not s.skip]
+    assert not [s for s in steps if s.name.startswith("round trip")], "the round trip would re-add pypy"
+    assert builds(steps) == builds(e2e.plan(RAYLIB, Options(full=True, backends=("cpython", "mypyc")), HOST))
+    for info, host in ((RAYLIB, Host("macos", arch="x86_64")), (RAYLIB, HOST), (SCRIPT, mac_arm), (FLET, mac_arm)):
+        assert not [s for s in e2e.plan(info, Options(), host) if s.name.startswith("mode")]
+
+
 def test_flet_build_only_for_the_flet_preset_and_only_when_available() -> None:
     assert ("cpython", "flet") in builds(e2e.plan(FLET, Options(), HOST), skipped=False)
     no_flutter = Host("windows", flet_build="needs Flutter")
@@ -236,6 +250,7 @@ def test_failures_block_what_depends_on_them(tmp_path: Path, monkeypatch: pytest
 def test_detect_host_gui_modes(monkeypatch: pytest.MonkeyPatch) -> None:
     which: dict[str, str] = {"xvfb-run": "/usr/bin/xvfb-run"}
     monkeypatch.setattr(e2e, "host_os", lambda: "linux")
+    monkeypatch.setattr(e2e, "host_arch", lambda: "x86_64")
     monkeypatch.setattr(e2e, "flet_build_reason", lambda os_name: "n/a")
     monkeypatch.setattr(e2e.shutil, "which", lambda name, *a, **k: which.get(name))
     for var in ("DISPLAY", "WAYLAND_DISPLAY", "CI"):
@@ -248,7 +263,7 @@ def test_detect_host_gui_modes(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "xvfb-run" in e2e.detect_host("auto").display
     assert e2e.detect_host("on").display == ""
     monkeypatch.setenv("DISPLAY", ":0")
-    assert e2e.detect_host("auto") == Host("linux", flet_build="n/a")
+    assert e2e.detect_host("auto") == Host("linux", flet_build="n/a", arch="x86_64")
     monkeypatch.setattr(e2e, "host_os", lambda: "windows")
     assert e2e.detect_host("auto").display == ""
     monkeypatch.setenv("CI", "true")

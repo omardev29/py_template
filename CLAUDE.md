@@ -242,6 +242,12 @@ header rules (with detector tests proving each rule fires).
   mangles embedded quotes when calling native programs, so the launcher pre-quotes every
   argument: a `"` is written `""` in 5.1 (Desktop: its quote counter ignores backslashes, so
   `x "y z` split into three arguments) and `\"` in 7.x; trailing backslashes are doubled.
+- Linux/macOS: PowerShell expands wildcards in native arguments that come from a variable
+  (`@argv`: `'*'` reached uv as the file list; `NativeCommandParameterBinder.PossiblyGlobArg`),
+  but only while the current location is in the FileSystem provider. The launcher runs uv
+  from `Push-Location Function:\ -StackName pytemplate` (popped in `finally`); the native
+  process still starts in the FileSystem location, i.e. the caller's folder. `~` and `~/x`
+  are still expanded to the home folder (PowerShell does that outside FileSystem too).
 - uv: `Get-Command uv -CommandType Application`, and on Windows only a real `.exe` (a plain
   `Get-Command uv` can return an alias or function; a `uv.cmd`/`uv.ps1` wrapper would parse the
   arguments again). The registry `Path` is read with `[Environment]::GetEnvironmentVariable`
@@ -788,7 +794,9 @@ Per method:
   mypyc, `--add-data "<src>:<dest>"` (`:` is PyInstaller's documented separator). The flet
   preset uses `flet pack` instead (`methods/exe._flet_pack`): it runs from its own cwd
   `.build/flet-pack/<b>` because `flet pack -y` wipes `<cwd>/build` and the distpath; onedir
-  uses `--contents-directory=.`; it bundles the Flutter client (plain PyInstaller would
+  uses `--contents-directory=.`, except on macOS, where `flet pack` rejects `--onedir` and always
+  builds a `.app` bundle (PyInstaller only logs a deprecation for onefile + `.app`); it bundles
+  the Flutter client (plain PyInstaller would
   download ~40 MB on first start). `flet` and `flet-desktop` must share a version, else Flet
   pip-installs `flet-desktop` at runtime, bypassing `uv.lock`.
 - **portable**: `dist/<n>-<b>-portable-<key>/` (no `-<key>` with `runtime = "system"`, which
@@ -1217,7 +1225,10 @@ short temp tree and unset `NVIM_APPNAME`.
   [--gui auto|on|off] [--keep] [--reuse] [--json] [--base DIR]` (`e2e.selftest`): per preset
   (default script, raylib, flet) `./deploy new <base>/<preset>` from THIS template with app
   name `e2e-<preset>`, a verify step (`deploy` 100755; no `template-repo`, `template-*.yml`
-  or `.claude` copied), `render --check`, `setup`, `doctor`, `check all`, `test all`, `run`
+  or `.claude` copied), `render --check`, `mode` only where the host cannot install a backend
+  (`e2e.HOST_GAPS`: raylib + PyPy on macOS arm64 -> `mode cpython --supports cpython,mypyc`,
+  the pypy rows SKIP, as the generated `ci.yml` drops it), `setup`, `doctor`, `check all`,
+  `test all`, `run`
   per backend, and `build <b> --method <m> --no-check` for every pair `cmd_build.COMPAT`
   allows (non-empty `dist/` output), then smoke runs of the headless artifacts of console
   presets (exe, portable launcher, `python -S <pyz>` with its cache redirected, the wheel in a
@@ -1243,22 +1254,26 @@ short temp tree and unset `NVIM_APPNAME`.
 - `.github/workflows/ci.yml` is generated for every project (`render.ci_workflow` from
   `templates/ci.yml`: placeholders `__HEADER__`, `__MATRIX__`, `__LINUX_DEPS__` (its line must
   exist exactly), `__NAME__`, `__BUILD_BACKEND__`; action majors pinned: bump deliberately;
-  deleting the template disables CI generation). It never runs `setup`: it `sync`s only the
+  `astral-sh/setup-uv` publishes no floating major tags since v8 (`@v10` does not resolve), so
+  it is pinned to an exact release, `v10.2.0`, in every workflow; deleting the template
+  disables CI generation). It never runs `setup`: it `sync`s only the
   matrix backends of each OS (so raylib drops PyPy on macOS), then `check all`, `test` per
   backend, a pyz per OS, and `pyz-merge` into one cross-platform `.pyz`.
 - **[template repo]** `template-launchers.yml` (Linux/macOS shells + shellcheck, Windows with
   MSYS2, Cygwin and busybox-w32, optional WSL job; `selftest --shells` plus user-style
   invocations; a gate job checks the marker file), `template-nvim.yml` (Ubuntu + Windows,
-  Neovim stable, `selftest --nvim --require --dir $RUNNER_TEMP/pt-nvim`, logs on failure),
+  Neovim stable, `fd` (venv-selector from LazyVim's `lang.python` errors on the first Python
+  buffer without it), `selftest --nvim --require --dir $RUNNER_TEMP/pt-nvim` (the `runner`
+  context is not allowed in a job-level `env`, hence the step env), logs on failure),
   `template-e2e.yml` (3 OS x 3 presets, dispatch quick/default/full, weekly, pushes that touch
   `.pytemplate/**` or the launchers; Linux gets the raylib libs, `libgl1-mesa-dri` and
-  `xvfb`; JSON report always uploaded, logs on failure). None of them has run on GitHub yet
-  (only their YAML was parsed).
+  `xvfb`; JSON report always uploaded, logs on failure). First run on GitHub in September 2026
+  (images ubuntu-24.04, macos-26-arm64, windows-2025-vs2026; uv 0.12, Neovim 0.12.5).
 
 ### 13.3 Coverage limits
 
-Verified only on Windows 11: Linux/macOS code paths (launcher branches, `.sh` launchers, xvfb,
-pyz cache in `HOME`, the nvim harness) run only in CI. Not installed locally, CI only: zsh,
+Developed on Windows 11: the Linux/macOS code paths (launcher branches, `.sh` launchers, xvfb,
+pyz cache in `HOME`, the nvim harness) are exercised by the CI workflows. Not installed locally, CI only: zsh,
 ksh, mksh, yash, fish, nu, Cygwin, busybox-w32, WSL, macOS bash 3.2. Untested anywhere so far:
 PowerShell 6.x-7.2, a UNC current folder, uv found only in `ProgramFiles` or chocolatey, a
 PATH entry with quotes in `deploy.cmd`, the interactive install prompt, Neovim 0.11 (only
@@ -1351,11 +1366,13 @@ Behaviour:
 - `config.set_value` only edits single-line entries.
 - `clean --envs` removes every `.venv*`, including the environments in use; there is no
   "unused only" option (`mode` only prints a note about leftovers).
-- raylib + PyPy on macOS arm64: no PyPy wheel for that platform and `no-build-package`, so
-  `./deploy setup` fails to sync `.venv-pypy` on Apple Silicon (likely; not run). The
-  generated `ci.yml` avoids it (it syncs only the matrix backends), but `template-e2e.yml`
-  runs `setup` and should fail for raylib on `macos-latest`. Possible fix: skip PyPy for
-  raylib on macOS aarch64 in `setup`.
+- raylib + PyPy on macOS arm64: no PyPy wheel for that platform (raylib 6.0.1.0 still has
+  none) and `no-build-package`, so `./deploy setup` of a raylib project fails to sync
+  `.venv-pypy` on Apple Silicon (confirmed on `macos-latest`: "marked as `--no-build` but has
+  no binary distribution"). The generated `ci.yml` syncs only the matrix backends and
+  `selftest --e2e` switches the project off PyPy first (`e2e.HOST_GAPS`); users there run
+  `./deploy mode cpython --supports cpython,mypyc`. Possible fix: skip PyPy for raylib on
+  macOS aarch64 in `setup`/`new`.
 - WSL on `/mnt`: `pyrightconfig.json` (`venv: ".venv"`) and the PyPy/JIT/mypyc launch
   configs ignore `ENV_SUFFIX`, so VS Code and pyright inside WSL point at the Windows-side
   environments (the Neovim plugin adds `-wsl` itself). Untested.
