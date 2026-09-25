@@ -21,7 +21,7 @@ jobs:
     outputs:
       template: ${{ steps.marker.outputs.template }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           sparse-checkout: .pytemplate/template-repo
           sparse-checkout-cone-mode: false
@@ -37,7 +37,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10
       - name: Extra shells
         run: |
@@ -72,7 +72,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - run: git config --global core.autocrlf input
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10
       - name: uv also in %USERPROFILE%\.local\bin (the launchers' fallback discovery, T5)
         shell: pwsh
@@ -123,7 +123,7 @@ jobs:
     runs-on: windows-latest
     continue-on-error: true  # optional: WSL setup on hosted runners is slow and sometimes flaky
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10
       - uses: Vampire/setup-wsl@v7
         with: {distribution: Ubuntu-24.04, additional-packages: curl dash zsh}

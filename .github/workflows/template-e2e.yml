@@ -35,8 +35,8 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
       - name: System libraries for raylib and a virtual display (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libgl1 libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6 libgl1-mesa-dri xvfb
@@ -53,14 +53,14 @@ jobs:
           ./deploy selftest --e2e "$PRESET" $size --json --base "$RUNNER_TEMP/e2e" > "e2e-$PRESET.json"
       - name: Upload the JSON report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-report-${{ matrix.preset }}-${{ matrix.os }}
           path: e2e-${{ matrix.preset }}.json
           if-no-files-found: ignore
       - name: Upload the logs (kept on failure)
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-logs-${{ matrix.preset }}-${{ matrix.os }}
           path: ${{ runner.temp }}/e2e/logs

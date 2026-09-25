@@ -25,18 +25,20 @@ __MATRIX__
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
 __LINUX_DEPS__
+      # Only this OS's backends (e.g. raylib publishes no PyPy wheels for macOS arm64);
+      # `sync` never re-locks: a stale uv.lock fails here, as it should in CI
       - name: Backend environments
-        run: ./deploy setup
+        run: for b in ${{ matrix.backends }}; do ./deploy sync "$b" || exit 1; done
       - name: Types and lint (typing profile of each backend)
         run: ./deploy check all
       - name: Tests on every backend
         run: for b in ${{ matrix.backends }}; do ./deploy test "$b" || exit 1; done
       - name: pyz with the compiled core for this OS
         run: ./deploy build __BUILD_BACKEND__ --method pyz --no-check
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: pyz-${{ matrix.os }}
           path: dist/__NAME__-__BUILD_BACKEND__-pyz/__NAME__.pyz
@@ -49,14 +51,14 @@ __LINUX_DEPS__
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - uses: actions/download-artifact@v8
         with:
           path: pyz-parts
       - name: Merge the binaries of every OS into a single .pyz
         run: ./deploy --no-render pyz-merge pyz-parts/*/*.pyz --out dist/__NAME__.pyz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: __NAME__-pyz
           path: dist/__NAME__.pyz
