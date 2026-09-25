@@ -4,103 +4,942 @@
     "tasks": [
         {
             "label": "deploy: run",
-            "type": "process",
-            "command": "${workspaceFolder}/deploy",
-            "windows": {
-                "command": "${workspaceFolder}\\deploy.cmd"
+            "detail": "./deploy run  |  src/main.py on CPython (active backend: cpython)",
+            "icon": {
+                "id": "play"
             },
+            "type": "process",
+            "command": "/bin/sh",
             "args": [
+                "${workspaceFolder}/deploy",
                 "run"
             ],
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "run"
+                ]
+            },
             "options": {
-                "cwd": "${workspaceFolder}"
+                "cwd": "${workspaceFolder}",
+                "statusbar": {
+                    "label": "Run",
+                    "hide": false,
+                    "running": {
+                        "icon": {
+                            "id": "sync~spin"
+                        }
+                    }
+                }
+            },
+            "presentation": {
+                "reveal": "always",
+                "focus": true,
+                "panel": "dedicated",
+                "clear": true,
+                "showReuseMessage": false
+            },
+            "runOptions": {
+                "instanceLimit": 1,
+                "instancePolicy": "terminateOldest"
             },
             "problemMatcher": []
         },
         {
             "label": "deploy: test",
-            "type": "process",
-            "command": "${workspaceFolder}/deploy",
-            "windows": {
-                "command": "${workspaceFolder}\\deploy.cmd"
+            "detail": "./deploy test  |  pytest on cpython (active backend)",
+            "icon": {
+                "id": "beaker"
             },
+            "type": "process",
+            "command": "/bin/sh",
             "args": [
+                "${workspaceFolder}/deploy",
                 "test"
             ],
-            "options": {
-                "cwd": "${workspaceFolder}"
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "test"
+                ]
             },
-            "problemMatcher": [],
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "statusbar": {
+                    "label": "Test",
+                    "hide": false,
+                    "running": {
+                        "icon": {
+                            "id": "sync~spin"
+                        }
+                    }
+                }
+            },
             "group": {
                 "kind": "test",
                 "isDefault": true
-            }
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            },
+            "problemMatcher": [
+                {
+                    "owner": "pytemplate-pytest",
+                    "source": "pytest",
+                    "fileLocation": [
+                        "autoDetect",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "message": 3
+                    }
+                }
+            ]
         },
         {
             "label": "deploy: check",
-            "type": "process",
-            "command": "${workspaceFolder}/deploy",
-            "windows": {
-                "command": "${workspaceFolder}\\deploy.cmd"
+            "detail": "./deploy check  |  ruff with the 'off' typing profile + mypyc rules",
+            "icon": {
+                "id": "checklist"
             },
+            "type": "process",
+            "command": "/bin/sh",
             "args": [
+                "${workspaceFolder}/deploy",
                 "check"
             ],
-            "options": {
-                "cwd": "${workspaceFolder}"
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "check"
+                ]
             },
-            "problemMatcher": []
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "RUFF_OUTPUT_FORMAT": "concise"
+                },
+                "statusbar": {
+                    "label": "Check",
+                    "hide": false,
+                    "running": {
+                        "icon": {
+                            "id": "sync~spin"
+                        }
+                    }
+                }
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false,
+                "revealProblems": "onProblem"
+            },
+            "problemMatcher": [
+                {
+                    "owner": "pytemplate-ruff",
+                    "source": "ruff",
+                    "fileLocation": [
+                        "autoDetect",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:[A-Za-z]:)?[^:\\s][^:]*\\.pyi?):(\\d+):(\\d+): ([A-Z]+[0-9]+|[a-z]+(?:-[a-z]+)+):? (?:\\[\\*\\] )?(.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "code": 4,
+                        "message": 5
+                    }
+                },
+                {
+                    "owner": "pytemplate-rules",
+                    "source": "mypyc rules",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}"
+                    ],
+                    "pattern": {
+                        "regexp": "^(error|warning): ((?:src|tests)/[^:]*\\.pyi?):(\\d+): (.*)$",
+                        "severity": 1,
+                        "file": 2,
+                        "line": 3,
+                        "message": 4
+                    }
+                }
+            ]
         },
         {
             "label": "deploy: build",
-            "type": "process",
-            "command": "${workspaceFolder}/deploy",
-            "windows": {
-                "command": "${workspaceFolder}\\deploy.cmd"
+            "detail": "./deploy build  |  check, then package cpython with the 'exe' method into dist/",
+            "icon": {
+                "id": "package"
             },
+            "type": "process",
+            "command": "/bin/sh",
             "args": [
+                "${workspaceFolder}/deploy",
                 "build"
             ],
-            "options": {
-                "cwd": "${workspaceFolder}"
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "build"
+                ]
             },
-            "problemMatcher": [],
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "RUFF_OUTPUT_FORMAT": "concise"
+                },
+                "statusbar": {
+                    "label": "Build",
+                    "hide": false,
+                    "running": {
+                        "icon": {
+                            "id": "sync~spin"
+                        }
+                    }
+                }
+            },
             "group": {
                 "kind": "build",
                 "isDefault": true
-            }
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            },
+            "problemMatcher": [
+                {
+                    "owner": "pytemplate-ruff",
+                    "source": "ruff",
+                    "fileLocation": [
+                        "autoDetect",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:[A-Za-z]:)?[^:\\s][^:]*\\.pyi?):(\\d+):(\\d+): ([A-Z]+[0-9]+|[a-z]+(?:-[a-z]+)+):? (?:\\[\\*\\] )?(.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "code": 4,
+                        "message": 5
+                    }
+                },
+                {
+                    "owner": "pytemplate-rules",
+                    "source": "mypyc rules",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}"
+                    ],
+                    "pattern": {
+                        "regexp": "^(error|warning): ((?:src|tests)/[^:]*\\.pyi?):(\\d+): (.*)$",
+                        "severity": 1,
+                        "file": 2,
+                        "line": 3,
+                        "message": 4
+                    }
+                }
+            ]
         },
         {
             "label": "deploy: run mypyc",
-            "type": "process",
-            "command": "${workspaceFolder}/deploy",
-            "windows": {
-                "command": "${workspaceFolder}\\deploy.cmd"
+            "detail": "./deploy run mypyc  |  compile with mypyc (dev stage) and run the stage",
+            "icon": {
+                "id": "play"
             },
+            "type": "process",
+            "command": "/bin/sh",
             "args": [
+                "${workspaceFolder}/deploy",
                 "run",
                 "mypyc"
             ],
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "run",
+                    "mypyc"
+                ]
+            },
             "options": {
                 "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "focus": true,
+                "panel": "dedicated",
+                "clear": true,
+                "showReuseMessage": false
+            },
+            "runOptions": {
+                "instanceLimit": 1,
+                "instancePolicy": "terminateOldest"
+            },
+            "problemMatcher": [
+                {
+                    "owner": "pytemplate-mypyc",
+                    "source": "mypyc",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}/src"
+                    ],
+                    "pattern": {
+                        "regexp": "^((?:myapp)(?:[\\\\/][^:]*)?\\.pyi?):(\\d+):(?:(\\d+):)? (error|note): (?!See https?://)(.*?)(?:  \\[([a-z0-9-]+)\\])?$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "severity": 4,
+                        "message": 5,
+                        "code": 6
+                    }
+                }
+            ]
+        },
+        {
+            "label": "deploy: test mypyc",
+            "detail": "./deploy test mypyc  |  pytest on the mypyc-compiled modules (compiles first)",
+            "icon": {
+                "id": "beaker"
+            },
+            "type": "process",
+            "command": "/bin/sh",
+            "args": [
+                "${workspaceFolder}/deploy",
+                "test",
+                "mypyc"
+            ],
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "test",
+                    "mypyc"
+                ]
+            },
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            },
+            "problemMatcher": [
+                {
+                    "owner": "pytemplate-mypyc",
+                    "source": "mypyc",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}/src"
+                    ],
+                    "pattern": {
+                        "regexp": "^((?:myapp)(?:[\\\\/][^:]*)?\\.pyi?):(\\d+):(?:(\\d+):)? (error|note): (?!See https?://)(.*?)(?:  \\[([a-z0-9-]+)\\])?$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "severity": 4,
+                        "message": 5,
+                        "code": 6
+                    }
+                },
+                {
+                    "owner": "pytemplate-pytest",
+                    "source": "pytest",
+                    "fileLocation": [
+                        "autoDetect",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "message": 3
+                    }
+                }
+            ]
+        },
+        {
+            "label": "deploy: test all",
+            "detail": "./deploy test all  |  pytest on every supported backend (cpython, mypyc)",
+            "icon": {
+                "id": "beaker"
+            },
+            "type": "process",
+            "command": "/bin/sh",
+            "args": [
+                "${workspaceFolder}/deploy",
+                "test",
+                "all"
+            ],
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "test",
+                    "all"
+                ]
+            },
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            },
+            "problemMatcher": [
+                {
+                    "owner": "pytemplate-mypyc",
+                    "source": "mypyc",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}/src"
+                    ],
+                    "pattern": {
+                        "regexp": "^((?:myapp)(?:[\\\\/][^:]*)?\\.pyi?):(\\d+):(?:(\\d+):)? (error|note): (?!See https?://)(.*?)(?:  \\[([a-z0-9-]+)\\])?$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "severity": 4,
+                        "message": 5,
+                        "code": 6
+                    }
+                },
+                {
+                    "owner": "pytemplate-pytest",
+                    "source": "pytest",
+                    "fileLocation": [
+                        "autoDetect",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "message": 3
+                    }
+                }
+            ]
+        },
+        {
+            "label": "deploy: check all",
+            "detail": "./deploy check all  |  check every supported backend (typing profiles: off, mypyc)",
+            "icon": {
+                "id": "checklist"
+            },
+            "type": "process",
+            "command": "/bin/sh",
+            "args": [
+                "${workspaceFolder}/deploy",
+                "check",
+                "all"
+            ],
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "check",
+                    "all"
+                ]
+            },
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "RUFF_OUTPUT_FORMAT": "concise"
+                }
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false,
+                "revealProblems": "onProblem"
+            },
+            "problemMatcher": [
+                {
+                    "owner": "pytemplate-ruff",
+                    "source": "ruff",
+                    "fileLocation": [
+                        "autoDetect",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:[A-Za-z]:)?[^:\\s][^:]*\\.pyi?):(\\d+):(\\d+): ([A-Z]+[0-9]+|[a-z]+(?:-[a-z]+)+):? (?:\\[\\*\\] )?(.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "code": 4,
+                        "message": 5
+                    }
+                },
+                {
+                    "owner": "pytemplate-mypy",
+                    "source": "mypy",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:src|tests)[\\\\/][^:]*\\.pyi?):(\\d+):(?:(\\d+):)? error: (.*?)(?:  \\[([a-z0-9-]+)\\])?$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "message": 4,
+                        "code": 5
+                    }
+                },
+                {
+                    "owner": "pytemplate-mypy",
+                    "source": "mypy",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "info",
+                    "pattern": {
+                        "regexp": "^((?:src|tests)[\\\\/][^:]*\\.pyi?):(\\d+):(?:(\\d+):)? note: (?!See https?://)(.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "message": 4
+                    }
+                },
+                {
+                    "owner": "pytemplate-rules",
+                    "source": "mypyc rules",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}"
+                    ],
+                    "pattern": {
+                        "regexp": "^(error|warning): ((?:src|tests)/[^:]*\\.pyi?):(\\d+): (.*)$",
+                        "severity": 1,
+                        "file": 2,
+                        "line": 3,
+                        "message": 4
+                    }
+                }
+            ]
+        },
+        {
+            "label": "deploy: report",
+            "detail": "./deploy report --open  |  mypyc HTML report of slow lines + mypy Any reports, opened in the browser",
+            "icon": {
+                "id": "graph"
+            },
+            "type": "process",
+            "command": "/bin/sh",
+            "args": [
+                "${workspaceFolder}/deploy",
+                "report",
+                "--open"
+            ],
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "report",
+                    "--open"
+                ]
+            },
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            },
+            "problemMatcher": [
+                {
+                    "owner": "pytemplate-mypy",
+                    "source": "mypy",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:src|tests)[\\\\/][^:]*\\.pyi?):(\\d+):(?:(\\d+):)? error: (.*?)(?:  \\[([a-z0-9-]+)\\])?$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "message": 4,
+                        "code": 5
+                    }
+                },
+                {
+                    "owner": "pytemplate-mypy",
+                    "source": "mypy",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "info",
+                    "pattern": {
+                        "regexp": "^((?:src|tests)[\\\\/][^:]*\\.pyi?):(\\d+):(?:(\\d+):)? note: (?!See https?://)(.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "message": 4
+                    }
+                },
+                {
+                    "owner": "pytemplate-mypyc",
+                    "source": "mypyc",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}/src"
+                    ],
+                    "pattern": {
+                        "regexp": "^((?:myapp)(?:[\\\\/][^:]*)?\\.pyi?):(\\d+):(?:(\\d+):)? (error|note): (?!See https?://)(.*?)(?:  \\[([a-z0-9-]+)\\])?$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "severity": 4,
+                        "message": 5,
+                        "code": 6
+                    }
+                }
+            ]
+        },
+        {
+            "label": "deploy: compile",
+            "detail": "./deploy compile  |  mypyc dev stage only (preLaunchTask of the mypyc debug config)",
+            "icon": {
+                "id": "gear"
+            },
+            "hide": true,
+            "type": "process",
+            "command": "/bin/sh",
+            "args": [
+                "${workspaceFolder}/deploy",
+                "compile"
+            ],
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "compile"
+                ]
+            },
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            },
+            "problemMatcher": [
+                {
+                    "owner": "pytemplate-mypyc",
+                    "source": "mypyc",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}/src"
+                    ],
+                    "pattern": {
+                        "regexp": "^((?:myapp)(?:[\\\\/][^:]*)?\\.pyi?):(\\d+):(?:(\\d+):)? (error|note): (?!See https?://)(.*?)(?:  \\[([a-z0-9-]+)\\])?$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "severity": 4,
+                        "message": 5,
+                        "code": 6
+                    }
+                }
+            ]
+        },
+        {
+            "label": "deploy: lint --fix",
+            "detail": "./deploy lint --fix  |  ruff check --fix (rules of the 'off' typing profile)",
+            "icon": {
+                "id": "wand"
+            },
+            "type": "process",
+            "command": "/bin/sh",
+            "args": [
+                "${workspaceFolder}/deploy",
+                "lint",
+                "--fix"
+            ],
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "lint",
+                    "--fix"
+                ]
+            },
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "RUFF_OUTPUT_FORMAT": "concise"
+                }
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            },
+            "problemMatcher": [
+                {
+                    "owner": "pytemplate-ruff",
+                    "source": "ruff",
+                    "fileLocation": [
+                        "autoDetect",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:[A-Za-z]:)?[^:\\s][^:]*\\.pyi?):(\\d+):(\\d+): ([A-Z]+[0-9]+|[a-z]+(?:-[a-z]+)+):? (?:\\[\\*\\] )?(.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "code": 4,
+                        "message": 5
+                    }
+                }
+            ]
+        },
+        {
+            "label": "deploy: fmt",
+            "detail": "./deploy fmt  |  ruff format src/ and tests/",
+            "icon": {
+                "id": "edit"
+            },
+            "type": "process",
+            "command": "/bin/sh",
+            "args": [
+                "${workspaceFolder}/deploy",
+                "fmt"
+            ],
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "fmt"
+                ]
+            },
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
             },
             "problemMatcher": []
         },
         {
-            "label": "deploy: report (mypyc)",
-            "type": "process",
-            "command": "${workspaceFolder}/deploy",
-            "windows": {
-                "command": "${workspaceFolder}\\deploy.cmd"
+            "label": "deploy: doctor",
+            "detail": "./deploy doctor  |  check uv, the compiler, PyPy, the JIT, shells and the generated files",
+            "icon": {
+                "id": "pulse"
             },
+            "type": "process",
+            "command": "/bin/sh",
             "args": [
-                "report",
-                "--open"
+                "${workspaceFolder}/deploy",
+                "doctor"
             ],
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "doctor"
+                ]
+            },
             "options": {
                 "cwd": "${workspaceFolder}"
             },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            },
             "problemMatcher": []
+        },
+        {
+            "label": "deploy: setup",
+            "detail": "./deploy setup  |  install interpreters and environments, lock deps and generate configs",
+            "icon": {
+                "id": "tools"
+            },
+            "type": "process",
+            "command": "/bin/sh",
+            "args": [
+                "${workspaceFolder}/deploy",
+                "setup"
+            ],
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "setup"
+                ]
+            },
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "deploy: ci",
+            "detail": "./deploy ci  |  Same as CI: check and tests on every backend",
+            "icon": {
+                "id": "run-all"
+            },
+            "type": "process",
+            "command": "/bin/sh",
+            "args": [
+                "${workspaceFolder}/deploy",
+                "ci"
+            ],
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "ci"
+                ]
+            },
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "RUFF_OUTPUT_FORMAT": "concise"
+                }
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false,
+                "revealProblems": "onProblem"
+            },
+            "problemMatcher": [
+                {
+                    "owner": "pytemplate-ruff",
+                    "source": "ruff",
+                    "fileLocation": [
+                        "autoDetect",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:[A-Za-z]:)?[^:\\s][^:]*\\.pyi?):(\\d+):(\\d+): ([A-Z]+[0-9]+|[a-z]+(?:-[a-z]+)+):? (?:\\[\\*\\] )?(.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "code": 4,
+                        "message": 5
+                    }
+                },
+                {
+                    "owner": "pytemplate-mypy",
+                    "source": "mypy",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:src|tests)[\\\\/][^:]*\\.pyi?):(\\d+):(?:(\\d+):)? error: (.*?)(?:  \\[([a-z0-9-]+)\\])?$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "message": 4,
+                        "code": 5
+                    }
+                },
+                {
+                    "owner": "pytemplate-mypy",
+                    "source": "mypy",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "info",
+                    "pattern": {
+                        "regexp": "^((?:src|tests)[\\\\/][^:]*\\.pyi?):(\\d+):(?:(\\d+):)? note: (?!See https?://)(.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "message": 4
+                    }
+                },
+                {
+                    "owner": "pytemplate-rules",
+                    "source": "mypyc rules",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}"
+                    ],
+                    "pattern": {
+                        "regexp": "^(error|warning): ((?:src|tests)/[^:]*\\.pyi?):(\\d+): (.*)$",
+                        "severity": 1,
+                        "file": 2,
+                        "line": 3,
+                        "message": 4
+                    }
+                },
+                {
+                    "owner": "pytemplate-mypyc",
+                    "source": "mypyc",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}/src"
+                    ],
+                    "pattern": {
+                        "regexp": "^((?:myapp)(?:[\\\\/][^:]*)?\\.pyi?):(\\d+):(?:(\\d+):)? (error|note): (?!See https?://)(.*?)(?:  \\[([a-z0-9-]+)\\])?$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "severity": 4,
+                        "message": 5,
+                        "code": 6
+                    }
+                },
+                {
+                    "owner": "pytemplate-pytest",
+                    "source": "pytest",
+                    "fileLocation": [
+                        "autoDetect",
+                        "${workspaceFolder}"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "message": 3
+                    }
+                }
+            ]
         }
     ]
 }

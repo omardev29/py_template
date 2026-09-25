@@ -23,5 +23,20 @@
         ".build": true,
         "dist": true,
         "uv.lock": true
-    }
+    },
+    "files.watcherExclude": {
+        "**/.venv*/**": true,
+        "**/.build/**": true,
+        "**/dist/**": true
+    },
+    "terminal.integrated.automationProfile.windows": {
+        "path": "${env:windir}\\System32\\cmd.exe"
+    },
+    "terminal.integrated.automationProfile.linux": {
+        "path": "/bin/sh"
+    },
+    "terminal.integrated.automationProfile.osx": {
+        "path": "/bin/sh"
+    },
+    "tasks.statusbar.default.hide": true
 }

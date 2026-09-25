@@ -7,10 +7,10 @@
     ".pytemplate/editor.json": "46e2b55bcbfd439ce7aed2cf66002f3fc6f84ba9323646c3aa97ef9c0b0d8140",
     ".python-version": "a876e0b10411037a012498b9fe18d9bc1df32ed8b722a13564dc944ddcfd9135",
     ".ruff.toml": "290133bc79b513f71a5796f1c39e51473b26433083785216d8abd051aa6ac5ed",
-    ".vscode/extensions.json": "0376b009d4260da1279b506c0d6412642f2770a000cba9a51c482206efc7f03e",
-    ".vscode/launch.json": "8e3a73249190af5659b4ae34da72e9d67ce2e97f1e76550dae78298f6f7be021",
-    ".vscode/settings.json": "0dfe2ac7ead4f1d77785e18f8cf8a3e0d36e554e11bf4b185d6967762aee951f",
-    ".vscode/tasks.json": "321bfad007a1603cf7cec122692b41ec97bce450c3f61d4b25c4e922fa6296cd",
+    ".vscode/extensions.json": "310fe0db6109e157487cd29f5b95a07200714385774df3efe6c46e7fca351b81",
+    ".vscode/launch.json": "a580bca5a59f0d34ea9c4aab87dd4095ae10b09583812ca9d4678f545f4c4ceb",
+    ".vscode/settings.json": "61d44a9521740a863523b4ec6c2da9b3aebba8bb63b005b3acd08b002edd6a5d",
+    ".vscode/tasks.json": "924370769b2fd6e3e87b383d8e12019a2be4b9b74cfd8316f0b9cfdf681b212a",
     "pyrightconfig.json": "69c2329b283e619babf4a541d72120abc63d97dcc69194626a59a3b679d5b2ae"
   }
 }

@@ -6,6 +6,7 @@
         "ms-python.debugpy",
         "ms-python.mypy-type-checker",
         "charliermarsh.ruff",
-        "tamasfe.even-better-toml"
+        "tamasfe.even-better-toml",
+        "actboy168.tasks"
     ]
 }
