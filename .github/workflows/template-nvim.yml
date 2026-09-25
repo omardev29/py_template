@@ -1,0 +1,59 @@
+# CI of the template repository only (the template- prefix keeps it out of projects made
+# with ./deploy new): the LazyVim integration, headless, in an isolated LazyVim (XDG_* under
+# a temp dir). For each preset it creates a project, trusts its .lazy.lua through Neovim's
+# API, installs the plugins and runs .pytemplate/nvim/tests/smoke.lua.
+name: template-nvim
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".lazy.lua"
+      - ".pytemplate/**"
+      - "deploy*"
+      - "pytemplate.toml"
+      - ".github/workflows/template-nvim.yml"
+  pull_request:
+    paths:
+      - ".lazy.lua"
+      - ".pytemplate/**"
+      - "deploy*"
+      - "pytemplate.toml"
+      - ".github/workflows/template-nvim.yml"
+  workflow_dispatch:
+
+jobs:
+  nvim:
+    name: nvim (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      # short work dir outside the checkout (Windows MAX_PATH; no .lazy.lua above it)
+      PT_NVIM_DIR: ${{ runner.temp }}/pt-nvim
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: stable
+      - name: Neovim version
+        run: nvim --version
+      - name: Runner environment
+        run: ./deploy setup
+      - name: LazyVim smoke test (script, raylib, flet)
+        run: ./deploy selftest --nvim --require --dir "$PT_NVIM_DIR"
+      - name: Logs of the smoke test
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvim-logs-${{ matrix.os }}
+          path: ${{ runner.temp }}/pt-nvim/logs
+          if-no-files-found: ignore
