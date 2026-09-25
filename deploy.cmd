@@ -1,19 +1,110 @@
 @echo off
-rem Launcher for ./deploy in cmd and in xonsh on Windows (xonsh only runs
-rem PATHEXT extensions). It only finds uv and forwards the arguments: all the
-rem logic is in .pytemplate\deploy.py. No ( ) blocks on purpose: PATH
-rem contains "(x86)", which would break them.
-setlocal
-where uv >nul 2>nul && goto run
-if exist "%USERPROFILE%\.local\bin\uv.exe" set "PATH=%USERPROFILE%\.local\bin;%PATH%"
-if exist "%USERPROFILE%\.cargo\bin\uv.exe" set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
-where uv >nul 2>nul && goto run
-echo deploy: uv not found. Install it with one of: 1>&2
-echo   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex" 1>&2
-echo   winget install astral-sh.uv 1>&2
-echo   scoop install uv 1>&2
-exit /b 127
-:run
+rem ./deploy launcher for cmd.exe and for every Windows program that can only
+rem start PATHEXT files: xonsh, nushell, Python's subprocess, VS Code
+rem "process" tasks. It finds the project root and uv and hands every
+rem argument to .pytemplate\deploy.py, where all the logic lives.
+rem Rules (CLAUDE.md, "Launchers"):
+rem   * ASCII only (cmd reads this file in the OEM code page) and CRLF endings
+rem     (labels and goto misbehave with LF).
+rem   * No ( ) blocks: a PATH holding "(x86)" closes them early. No delayed
+rem     expansion: it would eat the "!" of paths and arguments.
+rem   * No percent sign in comments: cmd expands them even on rem lines.
+rem   * The argument list (percent star) only on the uv line: "call" would
+rem     expand it a second time.
+rem   * cmd parses the arguments itself: percent, "!", double quote, caret and
+rem     unquoted ampersand, pipe or angle brackets do not survive. Programs that
+rem     quote argv for CreateProcess (Python, xonsh) cannot protect them either:
+rem     use ./deploy or deploy.ps1 for such values.
+rem   * Ctrl+C: cmd asks "Terminate batch job (Y/N)?" once uv has exited.
+rem   * A UNC current folder is not supported (cmd.exe replaces it).
+rem Exit codes: 2 = no project found, 127 = no uv, anything else = the runner's.
+setlocal EnableExtensions DisableDelayedExpansion
+
+rem --- project root: this file's folder, else walk up from the current one
+rem (the folder of this file is wrong when cmd found it through PATH from a
+rem quoted name).
+set "PT_ROOT=%~dp0"
+if exist "%PT_ROOT%.pytemplate\deploy.py" goto :find_uv
+for %%I in ("%CD%\x") do set "PT_ROOT=%%~dpI"
+:walk_up
+if exist "%PT_ROOT%.pytemplate\deploy.py" goto :find_uv
+for %%I in ("%PT_ROOT%.") do set "PT_PARENT=%%~dpI"
+if /i "%PT_PARENT%"=="%PT_ROOT%" goto :no_root
+set "PT_ROOT=%PT_PARENT%"
+goto :walk_up
+
+:find_uv
+set "PT_PARENT="
+set "PT_UV="
+if defined UV if exist "%UV%" if not exist "%UV%\" set "PT_UV=%UV%"
+if not defined PT_UV for %%I in (uv.exe) do set "PT_UV=%%~$PATH:I"
+if not defined PT_UV call :uv_in_dirs
+if not defined PT_UV call :uv_in_registry
+if not defined PT_UV goto :no_uv
+
 set "PYTEMPLATE_CALLER_CWD=%CD%"
-uv run --quiet --script "%~dp0.pytemplate\deploy.py" %*
+set "PYTEMPLATE_LAUNCHER=cmd"
+rem cmd expands the whole line before running it: the helper variables are
+rem cleared for the runner while uv still gets their values.
+set "PT_ROOT=" & set "PT_UV=" & "%PT_UV%" run --quiet --script "%PT_ROOT%.pytemplate\deploy.py" %*
 exit /b %ERRORLEVEL%
+
+:no_root
+>&2 echo deploy: no .pytemplate\deploy.py next to this launcher, in the current folder or in any parent folder.
+exit /b 2
+
+:no_uv
+>&2 echo deploy: uv not found (https://docs.astral.sh/uv/getting-started/installation/).
+>&2 echo Install it with one of these, then open a new terminal:
+>&2 echo   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+>&2 echo   winget install --id=astral-sh.uv -e
+>&2 echo   scoop install main/uv
+exit /b 127
+
+rem --- helpers (each probe is a no-op once PT_UV is set) ----------------------
+
+:uv_in_dirs
+if defined UV_INSTALL_DIR call :probe "%UV_INSTALL_DIR%"
+if defined UV_INSTALL_DIR call :probe "%UV_INSTALL_DIR%\bin"
+if defined XDG_BIN_HOME call :probe "%XDG_BIN_HOME%"
+if defined XDG_DATA_HOME call :probe "%XDG_DATA_HOME%\..\bin"
+if defined USERPROFILE call :probe "%USERPROFILE%\.local\bin"
+if defined CARGO_HOME call :probe "%CARGO_HOME%\bin"
+if defined USERPROFILE call :probe "%USERPROFILE%\.cargo\bin"
+if not defined LOCALAPPDATA goto :uv_in_dirs_pf
+call :probe "%LOCALAPPDATA%\Microsoft\WinGet\Links"
+for /d %%D in ("%LOCALAPPDATA%\Microsoft\WinGet\Packages\astral-sh.uv_*") do call :probe "%%~D"
+:uv_in_dirs_pf
+if not defined ProgramFiles goto :uv_in_dirs_scoop
+call :probe "%ProgramFiles%\WinGet\Links"
+for /d %%D in ("%ProgramFiles%\WinGet\Packages\astral-sh.uv_*") do call :probe "%%~D"
+:uv_in_dirs_scoop
+if defined SCOOP call :probe "%SCOOP%\shims"
+if defined USERPROFILE call :probe "%USERPROFILE%\scoop\shims"
+if defined SCOOP_GLOBAL call :probe "%SCOOP_GLOBAL%\shims"
+if defined ProgramData call :probe "%ProgramData%\scoop\shims"
+if defined ChocolateyInstall call :probe "%ChocolateyInstall%\bin"
+if defined ProgramData call :probe "%ProgramData%\chocolatey\bin"
+exit /b 0
+
+:uv_in_registry
+rem The PATH stored in the registry: a console opened before uv was installed
+rem still has the old one. "call" expands the variables of REG_EXPAND_SZ values.
+for /f "skip=2 tokens=2,*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do call :uv_in_list "%%B"
+if defined PT_UV goto :uv_in_registry_done
+for /f "skip=2 tokens=2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do call :uv_in_list "%%B"
+:uv_in_registry_done
+set "PT_LIST="
+exit /b 0
+
+:uv_in_list
+set "PT_LIST=%~1"
+if not defined PT_LIST exit /b 0
+for %%P in ("%PT_LIST:;=" "%") do call :probe "%%~P"
+exit /b 0
+
+:probe
+if defined PT_UV exit /b 0
+if "%~1"=="" exit /b 0
+if exist "%~1\uv.exe" set "PT_UV=%~1\uv.exe"
+exit /b 0
