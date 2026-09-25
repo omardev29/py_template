@@ -210,8 +210,19 @@ def copy_template(dest: Path) -> None:
     # template-repo: marker of the template repository itself (enables the language guard test)
     skip_names = {".git", ".build", "dist", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".flet", "template-repo"}
 
+    here_root = ROOT.as_posix()
+    workflows = (ROOT / ".github" / "workflows").as_posix()
+
     def ignore(directory: str, names: list[str]) -> set[str]:
-        return {n for n in names if n in skip_names or n.startswith(".venv")}
+        out = {n for n in names if n in skip_names or n.startswith(".venv")}
+        here = Path(directory).as_posix()
+        if here == here_root:
+            # PyInstaller/Flet leftovers and Claude Code state (settings, agent worktrees)
+            out |= {n for n in names if n in ("build", ".claude")}
+        elif here == workflows:
+            # CI of the template repository itself (template-*.yml), not of the new project
+            out |= {n for n in names if n.startswith("template-")}
+        return out
 
     if dest.exists() and any(dest.iterdir()):
         raise DeployError(f"{dest} already exists and is not empty")

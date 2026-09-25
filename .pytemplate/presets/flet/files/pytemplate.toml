@@ -54,7 +54,6 @@ icon = ""
 
 [deploy.portable]
 runtime = "bundled"
-targets = ["host"]
 
 [deploy.pyz]
 targets = ["host"]
@@ -68,10 +67,15 @@ target = "host"   # `./deploy build --method flet`: host | windows | macos | lin
 [preset.flet]
 version = "1.0.1"   # flet, flet-desktop and flet-cli always at the same version
 
+[vscode]
+# Status bar buttons (VS Code extension actboy168.tasks): ./deploy commands or [tasks] names
+buttons = ["dev", "run", "test", "build"]
+
 [tasks.dev]
 help = "Development with hot reload (flet run -r)"
 cmd = ["flet", "run", "-d", "-r", "src/main.py"]
 backend = "cpython"
+background = true   # hot-reload server: editors run it without waiting for it
 
 [tasks.ci]
 help = "Same as CI: check and tests on every backend"

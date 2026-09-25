@@ -49,13 +49,15 @@ COMMANDS: dict[str, Command] = {
     "fmt": Command("cmd_dev", "cmd_fmt", "ruff format", "[--check]", group="Development"),
     "test": Command("cmd_dev", "cmd_test", "Run pytest on one backend (mypyc: against the .pyd files) or on all of them", "[BACKEND|all] [pytest args...]", group="Development"),
     "report": Command("cmd_dev", "cmd_report", "Generate the mypyc HTML report of slow lines + mypy's Any reports", "[--open] [--no-mypy]", group="Development"),
+    "compile": Command("cmd_dev", "cmd_compile", "Compile the mypyc stage without running it (for debuggers and editors)", "[--release]", group="Development"),
     # distribution
     "build": Command("cmd_build", "cmd_build", "Compile and package into dist/", "[BACKEND] [--method exe|portable|pyz|wheel|nuitka|flet] [--onefile|--onedir] [--target KEY]... [--no-check]", group="Distribution"),
     "pyz-merge": Command("cmd_build", "cmd_pyz_merge", "Merge the .pyz files of each OS (e.g. from CI) into a cross-platform one", "A.pyz B.pyz... --out C.pyz", render=False, group="Distribution"),
     # other
     "tasks": Command("cli", "cmd_tasks", "List the custom tasks in pytemplate.toml [tasks]", render=False, group="Other"),
-    "shell-setup": Command("cmd_env", "cmd_shell_setup", "Print an alias to use `deploy` without ./", "[xonsh|pwsh|bash|zsh]", render=False, group="Other"),
-    "selftest": Command("cli", "cmd_selftest", "Run the runner's own tests and mypy --strict (.pytemplate)", render=False, group="Other"),
+    "shell-setup": Command("shells", "cmd_shell_setup", "Print an alias to use `deploy` without ./", "[xonsh|pwsh|bash|zsh|niubash|msys2|fish|nu]", render=False, group="Other"),
+    "nvim": Command("cmd_nvim", "cmd_nvim", "Neovim/LazyVim integration: check it, trust .lazy.lua, enable extras, sync plugins", "[doctor|trust|extras|bootstrap|sync]", group="Other"),
+    "selftest": Command("cli", "cmd_selftest", "Run the runner's own tests and mypy --strict (.pytemplate)", "[--shells|--nvim|--e2e] [args...]", render=False, group="Other"),
     "help": Command("cli", "cmd_help", "Show this help (or a command's help)", "[COMMAND]", render=False, group="Other"),
 }
 
@@ -69,7 +71,8 @@ Examples:
   ./deploy mode --supports +pypy # add PyPy (3.11 syntax)
   ./deploy build mypyc           # exe with PyInstaller (mypyc's default method)
   ./deploy build pypy            # portable folder with PyPy bundled
-  ./deploy build cpython --method pyz"""
+  ./deploy build cpython --method pyz
+  ./deploy nvim doctor           # check the LazyVim integration (./deploy nvim trust once)"""
 
 
 def cmd_help(cfg: object, args: list[str]) -> int:
@@ -113,11 +116,18 @@ def cmd_tasks(cfg: object, args: list[str]) -> int:
 
 
 def cmd_selftest(cfg: object, args: list[str]) -> int:
-    from . import envs
+    from . import e2e, envs, nvimtest, shells
     from .config import Config
     from .project import TEMPLATE
 
     assert isinstance(cfg, Config)
+    suites: dict[str, Callable[[Config, list[str]], int]] = {
+        "--shells": shells.selftest,  # every launcher through every installed shell
+        "--nvim": nvimtest.selftest,  # the LazyVim integration in an isolated LazyVim
+        "--e2e": e2e.selftest,  # ./deploy new + setup/check/test/build per preset
+    }
+    if args and args[0] in suites:
+        return suites[args[0]](cfg, args[1:])
     tool = envs.tool_env(cfg)
     code = envs.uv_run(tool, ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", TEMPLATE / "tests", *args], check=False).returncode
     typed = envs.uv_run(
@@ -172,6 +182,10 @@ def dispatch(argv: list[str]) -> int:
 
 
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["__probe"]:  # launcher self-test target: no config, no render, not in help
+        from . import shells
+
+        return shells.probe(argv[1:])
     try:
         return dispatch(_parse_globals(argv))
     except DeployError as e:

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import os
 import platform
+import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -74,3 +77,62 @@ def rel(path: Path | str) -> str:
 def code_dirs() -> list[str]:
     """Return the code folders that ruff/mypy check (those that exist)."""
     return [d for d in ("src", "tests") if (ROOT / d).is_dir()]
+
+
+# --- paths typed by the user ------------------------------------------------------------------
+
+_DRIVE_MOUNT = re.compile(r"/(?:cygdrive/)?([A-Za-z])(/.*)?")
+
+
+def native_path(raw: str) -> str:
+    """Map a path typed in a POSIX shell on Windows to a Windows path.
+
+    MSYS2/Git Bash rewrite such arguments themselves before starting a native program, but
+    Cygwin, niubash, busybox-w32 and MSYS2 with MSYS2_ARG_CONV_EXCL=* do not, so the runner
+    can get /c/x, /cygdrive/c/x, C:/x or a path inside the MSYS root. Elsewhere: unchanged.
+    """
+    if not IS_WINDOWS:
+        return raw
+    if re.match(r"[A-Za-z]:[\\/]", raw):
+        return os.path.normpath(raw)
+    if not raw.startswith("/") or raw.startswith("//"):
+        return raw
+    m = _DRIVE_MOUNT.fullmatch(raw)
+    if m:
+        return m[1].upper() + ":" + (m[2] or "/").replace("/", "\\")
+    launcher = os.environ.get("PYTEMPLATE_LAUNCHER", "")
+    cygpath = shutil.which("cygpath")
+    if launcher.endswith((":msys", ":cygwin")) and cygpath:
+        try:
+            out = subprocess.run(
+                [cygpath, "-w", raw], capture_output=True, text=True, timeout=10, check=True
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return raw
+        if re.match(r"[A-Za-z]:\\", out):
+            return out
+    return raw
+
+
+def caller_cwd() -> Path:
+    """Return the directory ./deploy was typed in.
+
+    PYTEMPLATE_CALLER_CWD is trusted only while it still names the process cwd: niubash
+    sessions keep stale exports, and `uv run --script` never changes the cwd.
+    """
+    cwd = Path.cwd()
+    raw = os.environ.get("PYTEMPLATE_CALLER_CWD", "")
+    if raw:
+        p = Path(native_path(raw))
+        try:
+            if os.path.samefile(p, cwd):
+                return p
+        except OSError:
+            pass
+    return cwd
+
+
+def user_path(raw: str) -> Path:
+    """Return a path argument typed by the user, resolved against the caller's cwd."""
+    p = Path(native_path(raw)).expanduser()
+    return p if p.is_absolute() else caller_cwd() / p

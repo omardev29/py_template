@@ -52,7 +52,6 @@ extra_args = ["--exclude-module", "setuptools", "--exclude-module", "pycparser",
 
 [deploy.portable]
 runtime = "bundled"
-targets = ["host"]
 
 [deploy.pyz]
 targets = ["host"]   # e.g. add "cp314-linux-x86_64" to include the Linux raylib
@@ -60,6 +59,10 @@ targets = ["host"]   # e.g. add "cp314-linux-x86_64" to include the Linux raylib
 [preset.raylib]
 package = "raylib"   # raylib (GLFW) | raylib_sdl (SDL3) | raylib_software
 version = "6.0.1.0"
+
+[vscode]
+# Status bar buttons (VS Code extension actboy168.tasks): ./deploy commands or [tasks] names
+buttons = ["run", "bunnymark", "test", "build"]
 
 [tasks.stubs]
 help = "Regenerate typings/raylib (the corrected raylib stub) after changing versions"

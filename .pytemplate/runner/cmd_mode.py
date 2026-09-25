@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 from . import config, envs, presets, proc, render, ui
 from .config import BACKENDS, Config
-from .project import ROOT, code_dirs
+from .project import ROOT, code_dirs, user_path
 from .ui import DeployError
 
 
@@ -179,12 +178,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
     parser.add_argument("--preset", default="script", choices=presets.available())
     parser.add_argument("--name")
     ns = parser.parse_args(args)
-    import os
-
-    base = Path(os.environ.get("PYTEMPLATE_CALLER_CWD") or Path.cwd())
-    dest = Path(ns.dest)
-    if not dest.is_absolute():
-        dest = base / dest
+    dest = user_path(ns.dest)
     if dest.resolve() == ROOT or ROOT in dest.resolve().parents:
         raise DeployError("new: the destination folder cannot be inside this template")
     presets.new(dest, ns.preset, ns.name)

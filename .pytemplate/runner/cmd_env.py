@@ -1,4 +1,4 @@
-"""Environment commands: setup, doctor, sync, lock, add, remove, clean, shell-setup."""
+"""Environment commands: setup, doctor, sync, lock, add, remove, clean."""
 
 from __future__ import annotations
 
@@ -7,11 +7,10 @@ import os
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 
-from . import envs, mypyc, proc, render, ui
+from . import cmd_nvim, envs, mypyc, proc, render, shells, ui
 from .config import Config
-from .project import BUILD, DIST, IS_WINDOWS, IS_WSL, ROOT, rel
+from .project import BUILD, DIST, IS_WINDOWS, ROOT, rel
 from .ui import DeployError
 
 
@@ -220,19 +219,9 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
     check(not render.pyproject_outdated(cfg), "pyproject.toml matches pytemplate.toml", "./deploy lock")
     r = envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, capture=True, echo=False)
     check(r.returncode == 0, "uv.lock up to date", "./deploy lock")
-    launcher = (ROOT / "deploy").read_bytes() if (ROOT / "deploy").is_file() else b""
-    check(launcher.startswith(b"#!/bin/sh") and b"\r\n" not in launcher, "launcher ./deploy: #!/bin/sh with LF line endings")
 
-    ui.step("shell")
-    if IS_WINDOWS:
-        bash = shutil.which("bash") or ""
-        if "system32" in bash.lower():
-            check(None, f"`bash` points to WSL ({bash})", "On Windows use ./deploy from xonsh, pwsh or cmd; in WSL the runner uses separate -wsl environments")
-        policy = _ps_policy()
-        if policy:
-            check(policy not in ("Restricted", "AllSigned"), f"PowerShell: ExecutionPolicy = {policy}", "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned   (or use .\\deploy.cmd)")
-    if IS_WSL:
-        check(None, "WSL on /mnt: .venv*-wsl environments and .build/wsl kept separate from Windows")
+    shells.doctor(check)  # launchers and shells
+    cmd_nvim.doctor(check)  # Neovim/LazyVim summary (details: ./deploy nvim doctor)
     ui.info("")
     if problems:
         ui.error(f"{problems} problem(s)")
@@ -250,81 +239,3 @@ def _long_paths() -> bool:
             return bool(value)
     except OSError:
         return False
-
-
-def _ps_policy() -> str:
-    exe = shutil.which("pwsh") or shutil.which("powershell")
-    if not exe:
-        return ""
-    r = subprocess.run([exe, "-NoProfile", "-Command", "Get-ExecutionPolicy"], capture_output=True, text=True, check=False)
-    return r.stdout.strip()
-
-
-# --- shell-setup ---------------------------------------------------------------------------------
-
-
-XONSH_SNIPPET = r'''
-# --- ./deploy without "./" in any project made from the template (paste into ~/.xonshrc) ---
-from pathlib import Path as _DeployPath
-
-def _deploy_find():
-    for d in (_DeployPath.cwd(), *_DeployPath.cwd().parents):
-        if (d / ".pytemplate" / "deploy.py").is_file():
-            return d / ".pytemplate" / "deploy.py"
-    return None
-
-def _deploy_complete(context):
-    words = "setup doctor mode render sync lock add remove init new run check lint fmt test report build clean tasks shell-setup help cpython pypy mypyc all".split()
-    return {w for w in words if w.startswith(context.prefix)} if hasattr(context, "prefix") else set(words)
-
-@aliases.register("deploy")
-@aliases.return_command
-def _deploy(args):
-    script = _deploy_find()
-    if script is None:
-        return ["echo", "deploy: no .pytemplate/deploy.py in this directory or its parents"]
-    return ["uv", "run", "--quiet", "--script", str(script), *args]
-'''
-
-PWSH_SNIPPET = r"""
-# --- ./deploy without ".\" in any project made from the template (paste into $PROFILE) ---
-function deploy {
-    $d = Get-Item -LiteralPath (Get-Location)
-    while ($d -and -not (Test-Path (Join-Path $d.FullName '.pytemplate/deploy.py'))) { $d = $d.Parent }
-    if (-not $d) { Write-Error 'deploy: no .pytemplate/deploy.py here or in any parent directory'; return }
-    uv run --quiet --script (Join-Path $d.FullName '.pytemplate/deploy.py') @args
-}
-"""
-
-BASH_SNIPPET = r"""
-# --- ./deploy without "./" in any project made from the template (paste into ~/.bashrc or ~/.zshrc) ---
-deploy() {
-    d=$PWD
-    while [ "$d" != "/" ] && [ ! -f "$d/.pytemplate/deploy.py" ]; do d=$(dirname "$d"); done
-    if [ ! -f "$d/.pytemplate/deploy.py" ]; then echo "deploy: no .pytemplate/deploy.py found" >&2; return 1; fi
-    uv run --quiet --script "$d/.pytemplate/deploy.py" "$@"
-}
-"""
-
-
-def cmd_shell_setup(cfg: Config, args: list[str]) -> int:
-    """shell-setup xonsh|pwsh|bash: print a `deploy` alias to use it without ./"""
-    shell = args[0] if args else "xonsh"
-    snippets = {"xonsh": XONSH_SNIPPET, "pwsh": PWSH_SNIPPET, "powershell": PWSH_SNIPPET, "bash": BASH_SNIPPET, "zsh": BASH_SNIPPET}
-    if shell not in snippets:
-        raise DeployError(f"shell-setup: unknown shell '{shell}' (xonsh | pwsh | bash | zsh)")
-    print(snippets[shell].strip("\n"))
-    return 0
-
-
-def uv_version_tuple() -> tuple[int, ...]:
-    out = proc.output([proc.find_uv(), "--version"])
-    parts = out.split()[1].split(".") if len(out.split()) > 1 else []
-    return tuple(int(p) for p in parts if p.isdigit())
-
-
-def managed_python_dir() -> Path | None:
-    try:
-        return Path(proc.output([proc.find_uv(), "python", "dir"]))
-    except DeployError:
-        return None

@@ -48,6 +48,18 @@ def cmd_run(cfg: Config, args: list[str]) -> int:
     return envs.uv_run(env, ["python", SRC / "main.py", *rest], check=False).returncode
 
 
+def cmd_compile(cfg: Config, args: list[str]) -> int:
+    """compile [--release]: build the mypyc stage without running it (debuggers, editors)."""
+    parser = argparse.ArgumentParser(prog="./deploy compile")
+    parser.add_argument("--release", action="store_true", help="the release stage (asserts stripped per deploy.optimize)")
+    ns = parser.parse_args(args)
+    if not cfg.supports("mypyc"):
+        raise DeployError("compile: 'mypyc' is not in backend.supported")
+    stage = mypyc.build(cfg, "release" if ns.release else "dev")
+    ui.ok(f"compiled stage: {rel(stage)}  (run it with: {rel(stage / 'main.py')})")
+    return 0
+
+
 # --- check / lint / fmt --------------------------------------------------------------------------
 
 

@@ -8,6 +8,8 @@
 # (PowerShell 5.1 reads LF just fine).
 deploy     text eol=lf
 deploy.ps1 text eol=lf
+# Neovim trusts .lazy.lua by the hash of its bytes: CRLF on checkout would untrust it
+.lazy.lua  text eol=lf
 # Binaries
 *.png binary
 *.ico binary

@@ -47,10 +47,13 @@ icon = ""          # path to an .ico
 
 [deploy.portable]
 runtime = "bundled"   # bundled: the folder includes the interpreter | system: uses the target's
-targets = ["host"]
 
 [deploy.pyz]
 targets = ["host"]    # add keys like "cp314-linux-x86_64" to include native binaries for other OSes
+
+[vscode]
+# Status bar buttons (VS Code extension actboy168.tasks): ./deploy commands or [tasks] names
+buttons = ["run", "test", "check", "build"]
 
 # Custom Justfile-style recipes: ./deploy <name> [args...]
 [tasks.ci]

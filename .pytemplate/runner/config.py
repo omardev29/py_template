@@ -81,7 +81,6 @@ class PortableConfig:
     runtime: str = "bundled"  # bundled (includes the interpreter) | system (uses the target's own)
     prune: bool = True
     archive: bool = True
-    targets: list[str] = field(default_factory=lambda: ["host"])
     env: dict[str, str] = field(default_factory=dict)
 
 
@@ -130,6 +129,14 @@ class TaskConfig:
     uv: bool = True  # True: runs with `uv run` inside the backend's environment
     cwd: str = ""
     help: str = ""
+    background: bool = False  # long-running (dev server, hot reload): editors start it without waiting
+
+
+@dataclass
+class VSCodeConfig:
+    settings: dict[str, Any] = field(default_factory=dict)  # merged into .vscode/settings.json
+    # Status bar buttons (VS Code extension actboy168.tasks): "<command> [args]" or a [tasks] name
+    buttons: list[str] = field(default_factory=lambda: ["run", "test", "check", "build"])
 
 
 @dataclass
@@ -143,7 +150,7 @@ class Config:
     deploy: DeployConfig = field(default_factory=DeployConfig)
     tasks: dict[str, TaskConfig] = field(default_factory=dict)
     preset: dict[str, dict[str, Any]] = field(default_factory=dict)
-    vscode: dict[str, Any] = field(default_factory=dict)
+    vscode: VSCodeConfig = field(default_factory=VSCodeConfig)
 
     # --- derived values ----------------------------------------------------------------
 
@@ -311,6 +318,13 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
             raise DeployError(f"pytemplate.toml: task '{name}' needs 'cmd' or 'deps'")
         if task.backend:
             _one_of(task.backend, BACKENDS, f"tasks.{name}.backend")
+    if builtin_commands:
+        for button in cfg.vscode.buttons:
+            first = button.split()[0] if button.split() else ""
+            if first not in builtin_commands and first not in cfg.tasks:
+                raise DeployError(
+                    f"pytemplate.toml: vscode.buttons: {button!r} is neither a ./deploy command nor a [tasks] name"
+                )
 
 
 def load(builtin_commands: set[str] | None = None) -> Config:
