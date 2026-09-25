@@ -214,6 +214,8 @@ def ci_workflow(cfg: Config) -> str:
         backends = list(cfg.backend.supported)
         if os_name.startswith("macos") and cfg.app.preset == "raylib" and "pypy" in backends:
             backends.remove("pypy")  # raylib publishes no PyPy wheels for macOS arm64
+        if not backends:
+            continue  # nothing this OS can sync, test or build (raylib with PyPy only, on macOS)
         matrix += [f"          - os: {os_name}", f'            backends: "{" ".join(backends)}"']
     linux = ""
     if cfg.app.preset == "raylib":

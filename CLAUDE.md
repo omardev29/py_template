@@ -242,12 +242,14 @@ header rules (with detector tests proving each rule fires).
   mangles embedded quotes when calling native programs, so the launcher pre-quotes every
   argument: a `"` is written `""` in 5.1 (Desktop: its quote counter ignores backslashes, so
   `x "y z` split into three arguments) and `\"` in 7.x; trailing backslashes are doubled.
-- Linux/macOS: PowerShell expands wildcards in native arguments that come from a variable
-  (`@argv`: `'*'` reached uv as the file list; `NativeCommandParameterBinder.PossiblyGlobArg`),
-  but only while the current location is in the FileSystem provider. The launcher runs uv
-  from `Push-Location Function:\ -StackName pytemplate` (popped in `finally`); the native
-  process still starts in the FileSystem location, i.e. the caller's folder. `~` and `~/x`
-  are still expanded to the home folder (PowerShell does that outside FileSystem too).
+- PowerShell 7 rewrites every native argument that is not a quoted literal, splatted `@argv`
+  included (`NativeCommandParameterBinder.PossiblyGlobArg`): it globs wildcards on Linux/macOS
+  (`'*'` reached uv as the file list) and expands `~`, `~/x` (and `~\x` on Windows, 7.6) to
+  the home folder. On Core the launcher therefore rebuilds the uv call from single-quoted
+  words (`CodeGeneration.EscapeSingleQuotedStringContent`, which keeps the file ASCII) and
+  runs it with `Invoke-Expression`; Windows PowerShell 5.1 does neither and keeps the plain
+  `& $uv ... @argv`. `selftest --shells` T1 passes `~`, `~/x`, `~\x` to PowerShell only
+  (`shells.PS_ARGS`).
 - uv: `Get-Command uv -CommandType Application`, and on Windows only a real `.exe` (a plain
   `Get-Command uv` can return an alias or function; a `uv.cmd`/`uv.ps1` wrapper would parse the
   arguments again). The registry `Path` is read with `[Environment]::GetEnvironmentVariable`
@@ -1256,8 +1258,9 @@ short temp tree and unset `NVIM_APPNAME`.
   exist exactly), `__NAME__`, `__BUILD_BACKEND__`; action majors pinned: bump deliberately;
   `astral-sh/setup-uv` publishes no floating major tags since v8 (`@v10` does not resolve), so
   it is pinned to an exact release, `v10.2.0`, in every workflow; deleting the template
-  disables CI generation). It never runs `setup`: it `sync`s only the
-  matrix backends of each OS (so raylib drops PyPy on macOS), then `check all`, `test` per
+  disables CI generation). It never runs `setup`: it `sync`s only the matrix backends of each
+  OS (so raylib drops PyPy on macOS; an OS left with no backend gets no matrix row), then
+  `check all`, `test` per
   backend, a pyz per OS, and `pyz-merge` into one cross-platform `.pyz`.
 - **[template repo]** `template-launchers.yml` (Linux/macOS shells + shellcheck, Windows with
   MSYS2, Cygwin and busybox-w32, optional WSL job; `selftest --shells` plus user-style

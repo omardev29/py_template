@@ -216,6 +216,11 @@ def test_find_artifact_and_smoke_target(tmp_path: Path) -> None:
     assert e2e.find_artifact(dist, "e2e-script", "pypy", "portable") == portable
     assert e2e.smoke_target(portable, "e2e-script", "portable", True) == portable / "e2e-script.cmd"
     assert e2e.smoke_target(portable, "e2e-script", "portable", False) is None
+    system = dist / "e2e-script-cpython-portable"  # runtime = "system": no platform key
+    system.mkdir()
+    (system / "e2e-script.sh").write_text("x")
+    assert e2e.find_artifact(dist, "e2e-script", "cpython", "portable") == system
+    assert e2e.smoke_target(system, "e2e-script", "portable", False) == system / "e2e-script.sh"
     wheel = dist / "e2e-script-cpython-wheel"
     wheel.mkdir()
     (wheel / "e2e_script-0.1.0-py3-none-any.whl").write_text("x")

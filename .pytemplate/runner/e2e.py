@@ -280,7 +280,9 @@ def scrub_env(environ: Mapping[str, str], drop_dirs: Sequence[str] = ()) -> dict
 def find_artifact(dist: Path, app: str, backend: str, method: str) -> Path | None:
     """Return the non-empty output dir of a build: dist/<app>-<backend>-<method>[-<platform key>]."""
     stem = f"{app}-{backend}-{method}"
-    candidates = sorted(p for p in dist.glob(f"{stem}-*") if p.is_dir()) if method in ("portable", "flet") else [dist / stem]
+    candidates = [dist / stem]
+    if method in ("portable", "flet"):  # portable with runtime = "system" has no -<key> suffix
+        candidates = sorted(p for p in dist.glob(f"{stem}-*") if p.is_dir()) + candidates
     return next((c for c in candidates if c.is_dir() and any(c.iterdir())), None)
 
 

@@ -148,17 +148,22 @@ $code = 1
 try {
     $env:PYTEMPLATE_CALLER_CWD = if ($loc.Provider.Name -eq 'FileSystem') { $loc.ProviderPath } else { [Environment]::CurrentDirectory }
     $env:PYTEMPLATE_LAUNCHER = "ps1:$($PSVersionTable.PSEdition):$($v.Major).$($v.Minor)"
-    # Linux/macOS: PowerShell globs native arguments that come from a variable ('*' would
-    # reach uv as the file list) unless the current location is outside the FileSystem
-    # provider; uv still starts in the caller's folder (the FileSystem location)
-    if ($IsLinux -or $IsMacOS) { Push-Location -LiteralPath 'Function:\' -StackName pytemplate }
-    & $uv run --quiet --script ([IO.Path]::Combine($root, '.pytemplate', 'deploy.py')) @argv
+    $entry = [IO.Path]::Combine($root, '.pytemplate', 'deploy.py')
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        # PowerShell 7 rewrites native arguments that are not quoted literals, splatted ones
+        # included: it globs '*' (Linux/macOS) and expands '~', '~/x' ('~\x' on Windows). Run
+        # the call rebuilt from single-quoted words so argv reaches uv untouched.
+        $q = [Management.Automation.Language.CodeGeneration]
+        $words = foreach ($a in @($uv, 'run', '--quiet', '--script', $entry) + $argv) { "'" + $q::EscapeSingleQuotedStringContent($a) + "'" }
+        Invoke-Expression ('& ' + ($words -join ' '))
+    } else {
+        & $uv run --quiet --script $entry @argv
+    }
     $code = $LASTEXITCODE
 } catch {
     [Console]::Error.WriteLine("deploy: cannot run ${uv}: $_")
     $code = 126
 } finally {
-    if ($IsLinux -or $IsMacOS) { Pop-Location -StackName pytemplate -ErrorAction Ignore }
     # Not SetEnvironmentVariable($n, $null): PowerShell passes $null to a .NET string
     # parameter as '', and PowerShell 7 then keeps an empty variable.
     foreach ($n in $names) {
