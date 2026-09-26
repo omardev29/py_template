@@ -490,7 +490,14 @@ def test_doctor_lines(tmp_path: Path) -> None:
     hooks.install(find(project))
     hooks.doctor(make(), check, project)
     assert lines[-1][0] is True
-    (top / ".git" / "hooks" / hooks.HOOK).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    target = top / ".git" / "hooks" / hooks.HOOK
+    target.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./deploy hooks run\n", encoding="utf-8")
+    hooks.doctor(make(), check, project)  # an older template version's hook: setup updates it
+    assert lines[-1][0] is None and "outdated" in lines[-1][1] and lines[-1][2] == "./deploy hooks install"
+    target.write_text("#!/bin/sh\nnpm test\nsh ./deploy hooks run || exit $?\n", encoding="utf-8")
+    hooks.doctor(make(), check, project)
+    assert lines[-1][0] is True and "runs ./deploy hooks run" in lines[-1][1]
+    target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     hooks.doctor(make(), check, project)
     assert lines[-1][0] is None and "another tool" in lines[-1][1]
     count = len(lines)
