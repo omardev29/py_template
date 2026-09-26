@@ -155,6 +155,10 @@ def test_nuitka_bundles_the_flet_client(build_dirs: Path, monkeypatch: pytest.Mo
     assert archive.read_bytes() == client
     assert "--include-package=flet" in fake.argv and "--include-package=flet_desktop" in fake.argv
     assert f"--include-data-files={archive}=flet_desktop/app/{FakeUv.ARCHIVE}" in fake.argv
+    # ft.Icons reads icons.json through importlib.resources: without it the app died at its
+    # first icon (FileNotFoundError), and Nuitka bundles no package data by default
+    assert "--include-package-data=flet.controls.material:icons.json" in fake.argv
+    assert "--include-package-data=flet.controls.cupertino:cupertino_icons.json" in fake.argv
     # Downloaded once: the next build takes the cached archive
     nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
     assert len(urls) == 1 and fake.queries == 2

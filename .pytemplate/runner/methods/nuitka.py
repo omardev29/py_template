@@ -229,6 +229,10 @@ def _flet_client_archive(cfg: Config) -> Path:
     return archive
 
 
+# The package data a Flet app reads at runtime (flet_cli/__pyinstaller/hook-flet.py collects the same)
+FLET_PACKAGE_DATA = ("flet.controls.material:icons.json", "flet.controls.cupertino:cupertino_icons.json")
+
+
 def build(req: BuildRequest) -> Path:
     cfg = req.cfg
     check_python(cfg, [*cfg.deploy.nuitka.extra_args, *req.extra])
@@ -280,11 +284,15 @@ def build(req: BuildRequest) -> Path:
     if cfg.app.preset == "flet":
         # flet loads its controls lazily (module __getattr__ + importlib), which Nuitka cannot
         # follow; and the flet-desktop wheel has no Flutter client: bundle the release archive
-        # where flet_desktop looks for one (flet_desktop/app/), as `flet pack` does
+        # where flet_desktop looks for one (flet_desktop/app/), as `flet pack` does. Nuitka
+        # bundles no package data by default: ft.Icons and ft.CupertinoIcons read these two
+        # JSON files (flet_cli's own PyInstaller hook adds the same), and without them the app
+        # died with FileNotFoundError at its first icon.
         archive = _flet_client_archive(cfg)
         argv += [
             "--include-package=flet",
             "--include-package=flet_desktop",
+            *(f"--include-package-data={data}" for data in FLET_PACKAGE_DATA),
             f"--include-data-files={archive}=flet_desktop/app/{archive.name}",
         ]
     argv += optimization_args(cfg)  # before extra_args and the command line: a later --lto wins

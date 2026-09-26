@@ -2003,7 +2003,10 @@ Per method:
   prefix (onefile) or `.dist` suffix; none found -> `DeployError`. Builds take minutes (~4-7
   min measured). Flet (verified: runs and starts the client): `flet/__init__.py` loads its
   controls lazily (module `__getattr__` + `importlib`), which Nuitka cannot follow, so the
-  method adds `--include-package=flet --include-package=flet_desktop`; the flet-desktop wheel
+  method adds `--include-package=flet --include-package=flet_desktop` and the package data
+  flet reads at runtime (`nuitka.FLET_PACKAGE_DATA`: `icons.json`, `cupertino_icons.json`;
+  Nuitka bundles no package data by default, and an app using `ft.Icons` died with
+  FileNotFoundError); the flet-desktop wheel
   has NO client, so `nuitka._flet_client_archive` downloads the release archive
   (`flet_desktop.get_artifact_filename()`, the same URL flet uses, or `FLET_CLIENT_URL` when set,
   as flet_desktop does) once into `.build/flet-client/<version>/` and bundles it at
