@@ -1493,6 +1493,17 @@ def test_test_argv_and_the_compiled_proof(fake_tests: FakeTests) -> None:
     assert fake_tests.calls[-1] == ("pypy", ["python", "-m", "pytest", "-q"], {"PYTEMPLATE_BACKEND": "pypy"})
 
 
+def test_the_mypyc_tests_keep_the_projects_other_pythonpath_entries(fake_tests: FakeTests, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wiring of stage_pythonpath: with the project's `pythonpath = ["src", "tests/helpers"]`
+    the mypyc run gets the stage in place of src AND tests/helpers (a plain `pythonpath=<stage>`
+    dropped it: the tests that import a helper failed to collect under mypyc only). The project's
+    own ["src"] cannot tell the two apart."""
+    monkeypatch.setattr(cmd_dev, "pytest_pythonpath", lambda root=ROOT: ["src", "tests/helpers"])
+    cfg = own({"backend": {"supported": ["cpython", "mypyc"]}})
+    assert cmd_dev.test_backend(cfg, "mypyc", []) == 0
+    assert fake_tests.calls[-1][1] == ["python", "-m", "pytest", "-o", "pythonpath=.build/pt-stage tests/helpers"]
+
+
 @pytest.mark.parametrize(
     ("files", "expected"),
     [
