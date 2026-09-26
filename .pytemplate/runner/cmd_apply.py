@@ -236,28 +236,32 @@ def _old_name(cfg: Config, candidates: list[str | None]) -> str | None:
     return None
 
 
-def _other_package(cfg: Config, candidates: list[str | None]) -> str | None:
-    """The name the project really has (the record's, pyproject.toml [project] name) when its
-    package is in src/ next to app.name's own, as ANOTHER folder: app.name was set by hand to the
-    name of another package of the project (src/helpers/), which is not the app."""
+def _other_package(cfg: Config, record: dict[str, Any] | None, project_name: str | None) -> str | None:
+    """The name the project really has when its package is in src/ next to app.name's own, as
+    ANOTHER folder: app.name was set by hand to the name of another package of the project
+    (src/helpers/), which is not the app. The record's name says what the app is; without a
+    record, pyproject.toml [project] name does (then either line may be the edited one). A record
+    named like app.name: app.name was not edited, only pyproject.toml was (apply puts it back)."""
     here = rename.package_dir(_src(), rename.package_of(cfg.app.name))
-    if here is None:
+    old = record["name"] if record is not None else project_name
+    if here is None or not old or old == cfg.app.name or not _APP_NAME.fullmatch(old):
         return None
-    for old in candidates:
-        if not old or old == cfg.app.name or not _APP_NAME.fullmatch(old):
-            continue
-        folder = rename.package_dir(_src(), rename.package_of(old))
-        if folder is not None and not rename.same_file(folder, here):
-            return old
-    return None
+    folder = rename.package_dir(_src(), rename.package_of(old))
+    return old if folder is not None and not rename.same_file(folder, here) else None
 
 
-def _onto_another_package(cfg: Config, old: str) -> str:
-    return (
+def _pyproject_edited_too(cfg: Config) -> str:
+    """Without a record, the pyproject.toml [project] name may be the line edited by hand."""
+    return f"or, if pyproject.toml [project] name is the line edited by hand, put back name = \"{cfg.app.name}\" there"
+
+
+def _onto_another_package(cfg: Config, old: str, record: dict[str, Any] | None) -> str:
+    text = (
         f"app.name: src/{cfg.pkg}/ already exists and is not the app's package (the app is '{old}', in "
         f"src/{rename.package_of(old)}/): the app is not renamed onto another package.\n"
         f"  Put back app.name = \"{old}\" in pytemplate.toml, or move or delete src/{cfg.pkg}/ first, then ./deploy apply"
     )
+    return text if record is not None else f"{text}\n  ({_pyproject_edited_too(cfg)})"
 
 
 def trusted_record(cfg: Config, project_name: str | None) -> dict[str, Any] | None:
@@ -466,9 +470,9 @@ def make_plan(cfg: Config) -> Plan:
         plan.rename_plan = rename.plan(ROOT, applied.renamed_from, cfg.app.name, generated=plan.generated)
         plan.new_cfg = rename.validate_config(plan.rename_plan.config.new)
     elif project.name != cfg.app.name and rename.package_dir(_src(), cfg.pkg) is not None:
-        other = _other_package(cfg, [applied.record["name"] if applied.record else None, project.name])
+        other = _other_package(cfg, applied.record, project.name)
         if other is not None:  # `rename` refuses the same: src/<new>/ exists
-            raise DeployError(_onto_another_package(cfg, other))
+            raise DeployError(_onto_another_package(cfg, other, applied.record))
         rename.check_new_name(cfg, cfg.app.name, who="app.name", retry="another app.name in pytemplate.toml, then ./deploy apply")
         plan.name_text = _project_name_text(cfg, project)
     return plan
@@ -515,7 +519,8 @@ def _hook_state(cfg: Config) -> str | None:
     return hooks.hook_state(repo) if isinstance(repo, hooks.Repo) else None
 
 
-_CHAINED = "runs this project's checks (pre-commit.local) after another project's hook"
+# the other project's hook runs pre-commit.local (this project's copy) first (hooks.hook_script)
+_CHAINED = "runs this project's checks from pre-commit.local, which another project's hook runs first"
 
 
 def _left_alone(state: str, repo: hooks.Repo) -> str | None:
@@ -584,7 +589,7 @@ def _hook_plan(cfg: Config) -> str:
     state, copy = hooks.hook_state(repo), hooks.own_local(repo)
     if not cfg.hooks.pre_commit:
         if state == "chained":
-            return "would remove pre-commit.local, this project's hook after another project's (hooks.pre_commit = false)"
+            return "would remove pre-commit.local, this project's checks that another project's hook runs first (hooks.pre_commit = false)"
         if state in OURS or (copy and state == "missing"):
             return "would remove pytemplate's pre-commit hook (hooks.pre_commit = false)"
         return _left_alone(state, repo) or "not installed (hooks.pre_commit = false)"
@@ -663,11 +668,12 @@ def pending(cfg: Config, *, hook: bool = True) -> list[tuple[str, str]]:
         out.append((f"app.name = '{cfg.app.name}' is not applied: the package is still src/{rename.package_of(old)}/", f"./deploy apply  (renames '{old}' -> '{cfg.app.name}')"))
     elif (missing := missing_package(cfg)) is not None:
         out.append(missing)
-    elif project.name != cfg.app.name and (other := _other_package(cfg, [applied.record["name"] if applied.record else None, project.name])):
+    elif project.name != cfg.app.name and (other := _other_package(cfg, applied.record, project.name)):
+        hint = f"put back app.name = \"{other}\" (or move src/{cfg.pkg}/ away, then ./deploy apply)"
         out.append(
             (
                 f"app.name = '{cfg.app.name}' names src/{cfg.pkg}/, another package: the app is '{other}' (src/{rename.package_of(other)}/)",
-                f"put back app.name = \"{other}\" (or move src/{cfg.pkg}/ away, then ./deploy apply)",
+                hint if applied.record is not None else f"{hint}; {_pyproject_edited_too(cfg)}",
             )
         )
     elif project.name != cfg.app.name:

@@ -975,8 +975,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   no PyPy yet), then the rename plan (`rename.check_new_name`, `rename.plan`,
   `rename.validate_config`) or, when only pyproject `[project] name` differs, its new text
   (`rename.check_new_name` too). An app.name that names ANOTHER package of src/ (the record's
-  or pyproject's name has its own package there: `_other_package`) is refused, as `rename`
-  refuses it (`src/<new>/ already exists`); it used to rewrite only `[project] name`.
+  name, or without a record pyproject's, has its own package there: `_other_package`) is
+  refused, as `rename` refuses it (`src/<new>/ already exists`); it used to rewrite only
+  `[project] name`. A record named like app.name means only pyproject.toml was edited: apply
+  puts its name back. Without a record either line may be the edited one, and the refusal says
+  both ways out.
 - Order of `apply`: dirty-tree check (rename only; `--force` skips it) -> the rename
   (`rename.report`, `tidy_before`, `apply_plan`, then the record under the new name: a later
   failure must not leave it naming the old app, which is no longer trusted) or the `[project]

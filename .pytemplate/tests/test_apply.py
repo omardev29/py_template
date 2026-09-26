@@ -958,6 +958,31 @@ def test_a_name_of_another_package_in_src_is_refused(tmp_path: Path, monkeypatch
     assert cmd_apply.pending(project.cfg()) == []
 
 
+def test_a_pyproject_name_edited_to_another_package_is_put_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """pyproject.toml [project] name set by hand to another package of src/: the record says
+    app.name is the app, so apply puts the pyproject.toml line back (it refused, advising to move
+    the real app away, and the hook blocked every commit)."""
+    project, uv = _project(tmp_path, monkeypatch)
+    assert _run(project) == 0  # the record: alpha
+    engine = project.root / "src" / "engine"
+    engine.mkdir()
+    (engine / "__init__.py").write_text('"""Engine."""\n', encoding="utf-8")
+    path = project.root / "pyproject.toml"
+    path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "engine"', 1), encoding="utf-8", newline="\n")
+    uv.locked = path.read_bytes()
+    assert cmd_apply.pending(project.cfg()) == [("pyproject.toml [project] name = 'engine', but app.name = 'alpha'", "./deploy apply")]
+    assert _run(project) == 0
+    assert project.pyproject()["project"]["name"] == "alpha" and cmd_apply.pending(project.cfg()) == []
+    assert (project.root / "src" / "alpha").is_dir() and engine.is_dir()
+    # without a record either line may be the edited one: refused, and the message says both ways
+    path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "engine"', 1), encoding="utf-8", newline="\n")
+    (project.root / ".pytemplate" / "state.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(DeployError, match="src/alpha/ already exists and is not the app's package") as e:
+        _run(project)
+    assert 'put back name = "alpha" there' in str(e.value)
+    assert 'put back name = "alpha" there' in cmd_apply.pending(project.cfg())[0][1]
+
+
 @pytest.mark.parametrize(("old", "new"), [("script", "flet"), ("flet", "raylib"), ("raylib", "script"), ("flet", "script")])
 def test_a_hand_edited_preset_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old: str, new: str) -> None:
     project, uv = _project(tmp_path, monkeypatch, old)
@@ -1188,13 +1213,15 @@ def test_apply_and_a_chained_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     hooks.install(rp)
     hooks.install(rq, force=True)
     q_hook = target.read_bytes()
-    chained = "runs this project's checks (pre-commit.local) after another project's hook"
+    # q's hook runs pre-commit.local (p's copy) FIRST, then q's own checks (hooks.hook_script)
+    chained = "runs this project's checks from pre-commit.local, which another project's hook runs first"
     assert row(True) == row(False) == chained
     assert target.read_bytes() == q_hook and hooks.own_local(rp)
     assert not [p for p, _ in cmd_apply.pending(project.cfg()) if "hook" in p]
     project.edit("hooks", "pre_commit", False)
     assert cmd_apply.pending(project.cfg())[-1][0].startswith("hooks.pre_commit = false, but pytemplate's")
-    assert row(True).startswith("would remove pre-commit.local") and local.is_file()
+    assert row(True) == "would remove pre-commit.local, this project's checks that another project's hook runs first (hooks.pre_commit = false)"
+    assert local.is_file()
     assert row(False) == "removed (hooks.pre_commit = false)"
     assert not local.exists() and target.read_bytes() == q_hook  # q's own hook is never touched
     assert not [p for p, _ in cmd_apply.pending(project.cfg()) if "hook" in p]
