@@ -567,7 +567,9 @@ package.preload["lazy.core.plugin"] = function()
   return { has_errors = function(p) return p == require("lazy.core.config").plugins.flaky end }
 end
 if vim.env.PT_WITH_LAZY == "1" then
-  vim.api.nvim_create_user_command("Lazy", function() end, { bang = true, nargs = "*" })
+  -- an Ex command, not nvim_create_user_command: that API came with 0.7, and an older Neovim
+  -- (Ubuntu 22.04 ships 0.6.1) must run this test like any other
+  vim.cmd("command! -bang -nargs=* Lazy :")
 end
 """
 
