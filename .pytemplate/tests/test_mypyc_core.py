@@ -1388,3 +1388,183 @@ def test_pyright_config_without_exclude_is_unchanged(pyright_tree: Path) -> None
     whole = render.pyright_config(make({"compile": {"exclude": ["myapp.core.sub"]}}), "mypyc")
     assert "src/myapp/core/sub" not in whole["strict"] and "src/myapp/core/sub/m.py" not in whole["strict"]
 
+
+# --- 12. the wheel method -------------------------------------------------------------------------
+
+
+def _locked(name: str) -> str:
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    return next(str(p["version"]) for p in lock["package"] if p["name"] == name)
+
+
+@pytest.fixture
+def wheel_project(src_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A tmp project for methods.wheel: src/pkg (compiled core + data files), pyproject, uv.lock."""
+    from runner.methods import wheel
+
+    _project(
+        src_tree,
+        {
+            "main.py": "",
+            "pkg/__init__.py": "",
+            "pkg/app.py": "def main() -> None:\n    print('hi')\n",
+            "pkg/py.typed": "",
+            "pkg/data/x.json": "{}",
+            "pkg/native/libfoo.so": b"\x7fELF",  # a vendored native library travels with the package
+            "pkg/core/__init__.py": "",
+            "pkg/core/m.py": "from rich.text import Text\n\n\ndef plain(text: str) -> str:\n    return Text(text).plain\n",
+            "pkg/core/m" + LINUX_EXT: b"stray",  # a stray in-place build: never packaged
+            "pkg/core/m__mypyc" + LINUX_EXT: b"stray",
+            "pkg__mypyc" + LINUX_EXT: b"stray",
+            "pkg/__pycache__/app.cpython-314.pyc": b"",
+            "assets/img.txt": "img",
+        },
+    )
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "pkg"\nversion = "0.1.0"\ndescription = "Say \\"hi\\" \\\\ caf\\u00e9"\n'
+        'requires-python = ">=3.14"\ndependencies = ["rich>=15"]\n',
+        encoding="utf-8",
+    )
+    shutil.copy2(ROOT / "uv.lock", root / "uv.lock")
+    monkeypatch.setattr(wheel, "SRC", src_tree)
+    monkeypatch.setattr(wheel, "BUILD", tmp_path / ".build")
+    monkeypatch.setattr(wheel, "PYPROJECT", root / "pyproject.toml")
+    monkeypatch.setattr(wheel, "dist_path", lambda req, suffix="": tmp_path / "dist" / (req.out_name + suffix))
+    return tmp_path
+
+
+def _wheel_cfg(**extra: Any) -> Config:
+    return make({"app": {"name": "pkg", "assets": "assets", **extra}, "compile": {"modules": ["pkg.core"]}})
+
+
+@pytest.mark.parametrize("backend", ["cpython", "mypyc", "pypy"])
+def test_wheel_builds_in_the_locked_tools_env(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    calls: list[list[str]] = []
+
+    def fake_uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        argv = [str(a) for a in args]
+        calls.append(argv)
+        assert kw.get("extra_env") == {"VSLANG": "1033"}
+        out = Path(argv[argv.index("--out-dir") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "pkg-0.1.0-py3-none-any.whl").write_bytes(b"")
+        return _done(argv)
+
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: calls.append(["sync", str(env.dir)]))
+    monkeypatch.setattr(wheel.envs, "uv", fake_uv)
+    cfg = _wheel_cfg()
+    supported = {"supported": ["cpython", "pypy", "mypyc"]} if backend == "pypy" else {}
+    if supported:
+        cfg = make({"app": {"name": "pkg", "assets": "assets"}, "backend": supported, "compile": {"modules": ["pkg.core"]}})
+    result = wheel.build(BuildRequest(cfg, backend, "wheel", wheel_project / "src"))
+    assert result.name.endswith(".whl")
+    tool = envs.tool_env(cfg)
+    assert calls[0] == ["sync", str(tool.dir)]  # synced before building
+    build = calls[1]
+    assert build[:2] == ["build", "--wheel"] and "--no-build-isolation" in build
+    assert build[build.index("--python") + 1] == str(tool.python)  # never uv's own pick (./.venv, WSL)
+    work = wheel_project / ".build" / "wheel" / backend
+    assert build[-1] == str(work)
+    assert (work / "setup.py").is_file() is (backend == "mypyc") and (work / "mypy.ini").is_file() is (backend == "mypyc")
+
+
+def test_wheel_pyproject_is_exact_and_ships_the_package_data(wheel_project: Path) -> None:
+    from runner.methods import wheel
+
+    for compiled in (False, True):
+        data = tomllib.loads(wheel._pyproject(_wheel_cfg(), compiled))
+        requires = data["build-system"]["requires"]
+        assert requires == [f"setuptools=={_locked('setuptools')}", *([f"mypy=={_locked('mypy')}"] if compiled else [])]
+        assert data["project"]["description"] == 'Say "hi" \\ caf' + chr(0xE9)  # quotes, a backslash, non-ASCII
+        assert data["project"]["dependencies"] == ["rich>=15"]
+        assert data["project"]["scripts"] == {"pkg": "pkg.app:main"} and "gui-scripts" not in data["project"]
+        assert data["tool"]["setuptools"]["package-data"] == {"pkg": ["**/*"]}
+    gui = tomllib.loads(wheel._pyproject(_wheel_cfg(gui=True), False))
+    assert gui["project"]["gui-scripts"] == {"pkg": "pkg.app:main"} and "scripts" not in gui["project"]
+    entry = tomllib.loads(wheel._pyproject(make({"app": {"name": "pkg"}, "deploy": {"wheel": {"entry": "pkg.ui:run"}}}), False))
+    assert entry["project"]["scripts"] == {"pkg": "pkg.ui:run"}
+
+
+def test_wheel_names_a_missing_lock_entry(wheel_project: Path) -> None:
+    from runner.methods import wheel
+
+    lock = wheel.PYPROJECT.parent / "uv.lock"
+    lock.write_text('version = 1\n[[package]]\nname = "mypy"\nversion = "2.3.1"\n', encoding="utf-8")
+    with pytest.raises(DeployError, match=r"setuptools is not in uv.lock.*\./deploy add setuptools --dev --cpython-only"):
+        wheel._pyproject(_wheel_cfg(), False)
+
+
+def test_wheel_copies_the_package_files(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    def fake_uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        out = Path(str(args[args.index("--out-dir") + 1]))
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "pkg-0.1.0-py3-none-any.whl").write_bytes(b"")
+        return _done([])
+
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.envs, "uv", fake_uv)
+    wheel.build(BuildRequest(_wheel_cfg(), "cpython", "wheel", wheel_project / "src"))
+    pkg = wheel_project / ".build" / "wheel" / "cpython" / "src" / "pkg"
+    files = sorted(p.relative_to(pkg).as_posix() for p in pkg.rglob("*") if p.is_file())
+    assert files == [
+        "__init__.py", "app.py", "assets/img.txt", "core/__init__.py", "core/m.py", "data/x.json", "native/libfoo.so", "py.typed",
+    ]  # fmt: skip
+
+
+def _wheel_names(wheel_file: Path) -> list[str]:
+    import zipfile
+
+    with zipfile.ZipFile(wheel_file) as z:
+        return z.namelist()
+
+
+@needs_venv
+def test_real_pure_wheel(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """uv build without isolation in .venv: works offline, ships the data files, gui-scripts."""
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)  # selftest's .venv is synced
+    built = wheel.build(BuildRequest(_wheel_cfg(gui=True), "cpython", "wheel", wheel_project / "src"))
+    assert built.name == "pkg-0.1.0-py3-none-any.whl"
+    names = _wheel_names(built)
+    for name in ("pkg/data/x.json", "pkg/py.typed", "pkg/native/libfoo.so", "pkg/assets/img.txt", "pkg/core/m.py"):
+        assert name in names
+    assert not [n for n in names if n.endswith(LINUX_EXT) or "__pycache__" in n]
+    import zipfile
+
+    with zipfile.ZipFile(built) as z:
+        entry_points = z.read("pkg-0.1.0.dist-info/entry_points.txt").decode()
+    assert "[gui_scripts]" in entry_points and "pkg = pkg.app:main" in entry_points
+
+
+@needs_venv
+@needs_compiler
+def test_real_mypyc_wheel_compiles_code_that_imports_a_dependency(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The compiled core imports rich (a project dependency): the isolated build env had only
+    setuptools + mypy, so mypycify failed with import-not-found."""
+    import zipfile
+
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    built = wheel.build(BuildRequest(_wheel_cfg(), "mypyc", "wheel", wheel_project / "src"))
+    assert "-cp3" in built.name and not built.name.endswith("-none-any.whl")
+    site = wheel_project / "site"
+    with zipfile.ZipFile(built) as z:
+        compiled = [i for i in z.infolist() if i.filename.startswith("pkg/core/m.") and i.filename.endswith((".so", ".pyd"))]
+        assert len(compiled) == 1 and compiled[0].file_size > 1000  # the real build, not the stray file
+        z.extractall(site)
+    out = _import_from(site, "import pkg.core.m as m; print(m.__file__); print(m.plain('hi'))", wheel_project)
+    file, said = out.splitlines()
+    assert file.endswith(tuple(importlib.machinery.EXTENSION_SUFFIXES)) and said == "hi"
+
