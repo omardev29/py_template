@@ -586,10 +586,10 @@ STDLIB_OTHER_VERSIONS = frozenset(
         "imghdr", "imp", "lib2to3", "mailcap", "msilib", "nis", "nntplib", "ossaudiodev", "pipes",
         "smtpd", "sndhdr", "spwd", "sunau", "telnetlib", "uu", "xdrlib",  # removed in 3.12 / 3.13 (PyPy 3.11 has them)
         "sre_compile", "sre_constants", "sre_parse",  # removed in 3.15
-        # PyPy 3.11's own: built-ins (found before sys.path: the app could not import itself),
-        # its sys.stdlib_module_names, and the importable packages of its standard library folder
+        # PyPy 3.11's own sys.stdlib_module_names and built-ins (a built-in is found before
+        # sys.path: an app named pypyjit could not import itself there)
         "cpyext", "ctypes_support", "future_builtins", "greenlet", "identity_dict", "pypyjit",
-        "stackless", "tputil", "cffi", "hpy", "pyrepl",
+        "stackless", "tputil",
     }
 )
 

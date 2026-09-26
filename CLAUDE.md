@@ -2610,10 +2610,11 @@ uv:
   `test_presets.py::test_init_from_a_flet_project_of_another_version_removes_its_pins_first`.
   Goes: never.
 - **uv resolves a dependency of a dependency named like the project to the project itself**
-  (DEFECT): a direct self-dependency is refused ("self-dependencies are not permitted"), but in a
-  project named `mdurl` markdown-it-py's `mdurl~=0.1` was satisfied by the project (0.1.0):
-  uv.lock recorded `mdurl` with `source = { virtual = "." }`, and the real library was missing
-  from the lock, `.venv` and every build (rich's Markdown failed), without an error. Up: none
+  (DEFECT): only a version the project does not have fails ("depends on itself at an
+  incompatible version"); in a project named `mdurl` markdown-it-py's `mdurl~=0.1` was
+  satisfied by the project (0.1.0): uv.lock recorded `mdurl` with `source = { virtual = "." }`,
+  and the real library was missing from the lock, `.venv` and every build (rich's Markdown
+  failed), without an error. Up: none
   found. Fix: `presets.check_name_free` refuses every name of the preset's tested tree
   (`constraints.txt`) and of uv.lock; `init` refuses a resolved uv.lock in which a package
   depends on the project (`presets._self_dependents`) and rolls back (11). Test:
@@ -2708,8 +2709,8 @@ CPython and its standard library:
 - **`sys.stdlib_module_names` knows only the running version** (LIMITATION): a name that is a
   module of PyPy 3.11 or of another CPython passed the check (a project named pypyjit could not
   import itself on PyPy: its built-in wins over sys.path). Fix: `presets.STDLIB_OTHER_VERSIONS`
-  (removed and new CPython modules, PyPy's built-ins, stdlib names and the packages of its
-  standard library folder) in `presets.shadows_stdlib` (5.7). Test:
+  (removed and new CPython modules, PyPy's own stdlib names and built-ins) in
+  `presets.shadows_stdlib` (5.7). Test:
   `test_rename.py::test_stdlib_names_do_not_depend_on_the_runner`,
   `test_presets.py::test_every_pypy_standard_library_module_is_refused` (the pinned PyPy, when
   uv has it). Goes: never (update it per Python release).
