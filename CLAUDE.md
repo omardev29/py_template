@@ -1000,7 +1000,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (`config._statements`: the four string kinds, multi-line arrays and inline tables, comments,
   dotted and quoted keys) finds the value's span, which may cover several lines (taplo, the
   LazyVim TOML formatter, expands long arrays), and replaces only that span: the comment after
-  it, the other lines and the line endings stay. A missing key goes after the table's last key
+  it, the other lines and the line endings stay. A list that replaces a multi-line array with
+  comments inside keeps that layout (`config._array_lines`): an element that stays keeps its
+  line, the comment on it and the comment lines above it, a new one gets a line of its own, and
+  one that goes takes its comments with it (mode dropped them all). An array without comments,
+  or one it cannot lay out (several elements on a line, numbers, nested values), is written on
+  one line. A missing key goes after the table's last key
   (a missing table at the end) with the file's line ending. The result is re-parsed and must
   equal the old data with only that key changed; anything else (the table written as an inline
   table, the key defined as a table) is a `DeployError` asking to edit it by hand.

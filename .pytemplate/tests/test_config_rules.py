@@ -784,6 +784,26 @@ def _in_strings(text: str) -> int:
     return count
 
 
+COMMENTED = '[backend]\nsupported = [\n  "cpython", # c\n  # compiled, when a C compiler exists\n  "mypyc",\n]\n[typing]\n'
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"])
+def test_set_value_keeps_the_comments_inside_a_multi_line_array(eol: str) -> None:
+    """mode rewrote such an array on one line, and the comments inside it were gone (README: mode
+    keeps comments)."""
+    text = COMMENTED.replace("\n", eol)
+    added = _check_edit(text, "backend", "supported", ["cpython", "pypy", "mypyc"])
+    assert added == (
+        '[backend]\nsupported = [\n  "cpython", # c\n  "pypy",\n  # compiled, when a C compiler exists\n  "mypyc",\n]\n[typing]\n'
+    ).replace("\n", eol)
+    assert _check_edit(added, "backend", "supported", ["cpython", "mypyc"]) == text  # and back: byte-identical
+    # an element that goes takes its own comments with it; the others keep theirs
+    assert _check_edit(text, "backend", "supported", ["cpython"]) == '[backend]\nsupported = [\n  "cpython", # c\n]\n[typing]\n'.replace("\n", eol)
+    last = '[backend]\nsupported = [ # the backends\n    "cpython",\n    "mypyc" # no comma\n    # the end\n]\n'
+    out = _check_edit(last, "backend", "supported", ["pypy", "mypyc"])
+    assert out == '[backend]\nsupported = [ # the backends\n    "pypy",\n    "mypyc", # no comma\n    # the end\n]\n'
+
+
 def test_set_value_changes_only_the_value() -> None:
     text = '# head\n[backend]\nactive = "cpython"   # the mode\nsupported = ["cpython"]\n\n[python]\ncpython = "3.14"\n'
     out = set_value(text, "backend", "active", "mypyc")

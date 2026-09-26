@@ -921,15 +921,75 @@ def scan(text: str) -> list[_Stmt] | None:
         return None
 
 
-def _edited(text: str, path: tuple[str, ...], rendered: str) -> str:
-    """`text` with the value at `path` replaced by `rendered` (or the key/table added)."""
+def _array_lines(span: str, value: list[Any]) -> str | None:
+    """`value` in the layout of the old multi-line array `span`, with its comments: an element that
+    stays keeps its line (and the comment on it) and the comment lines just above it, a new one
+    gets a line of its own, one that goes takes its comments with it. None when the old array holds
+    no comment (the caller writes one line) or has a layout this does not handle (several elements
+    on a line, nested arrays or tables, a number: the caller writes one line then too)."""
+    if not (span.startswith("[") and span.endswith("]") and "\n" in span):
+        return None
+    eol = "\r\n" if "\r\n" in span else "\n"
+    pieces = [p.removesuffix("\r") for p in span[1:-1].split("\n")]
+    first, middle, last = pieces[0], pieces[1:-1], pieces[-1]
+    if (first.strip() and not first.strip().startswith("#")) or last.strip():
+        return None
+    commented = first.strip().startswith("#")
+    entries: list[tuple[Any, str, list[str]]] = []  # (element, its line, the lines above it)
+    above: list[str] = []
+    indent: str | None = None
+    for line in middle:
+        body = line.strip()
+        if not body or body.startswith("#"):
+            commented = commented or bool(body)
+            above.append(line)
+            continue
+        lead = len(line) - len(line.lstrip(" \t"))
+        if line[lead] in "[{":
+            return None
+        try:
+            stop = _value_end(line, lead)
+            item = tomllib.loads("v = " + line[lead:stop])["v"]
+        except (_ScanError, tomllib.TOMLDecodeError):
+            return None
+        rest = line[stop:].lstrip(" \t")
+        if rest.startswith(","):
+            rest = rest[1:].lstrip(" \t")
+        else:  # the last element may have no comma: it may not stay the last
+            line = line[:stop] + "," + line[stop:]
+        if rest and not rest.startswith("#"):
+            return None  # another element on the same line
+        commented = commented or bool(rest)
+        indent = line[:lead] if indent is None else indent
+        entries.append((item, line, above))
+        above = []
+    if not commented:
+        return None
+    out = ["[" + first]
+    used: set[int] = set()
+    for v in value:
+        hit = next((i for i, e in enumerate(entries) if i not in used and type(e[0]) is type(v) and e[0] == v), None)
+        if hit is None:
+            out.append(f"{'    ' if indent is None else indent}{toml_value(v)},")
+        else:
+            used.add(hit)
+            out += [*entries[hit][2], entries[hit][1]]
+    out += above  # the comment lines after the last element
+    out.append(last + "]")
+    return eol.join(out)
+
+
+def _edited(text: str, path: tuple[str, ...], rendered: str, value: Any = None) -> str:
+    """`text` with the value at `path` replaced by `rendered` (or the key/table added). A list
+    `value` that replaces a multi-line array with comments inside keeps them (_array_lines)."""
     stmts = _statements(text)
     m = re.search(r"\r?\n", text)
     eol = m.group() if m else "\n"
     hit = next((s for s in stmts if s.kind == "key" and not s.in_array and s.path == path), None)
     if hit:  # only the value changes: a comment after it and the line ending stay
         start, stop = hit.value
-        return text[:start] + rendered + text[stop:]
+        kept = _array_lines(text[start:stop], value) if isinstance(value, list) else None
+        return text[:start] + (rendered if kept is None else kept) + text[stop:]
     line = f"{path[-1]} = {rendered}{eol}"
     header = next((n for n, s in enumerate(stmts) if s.kind == "table" and s.path == path[:-1]), None)
     if header is None:  # a new table at the end, after a blank line
@@ -962,16 +1022,18 @@ def set_value(text: str, table: str, key: str, value: Any) -> str:
         before = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise DeployError(f"pytemplate.toml is not valid TOML: {e}") from None
-    try:
-        new: str | None = _edited(text, path, rendered)
-    except _ScanError:
-        new = None
-    if new is None or not _only_changed(before, new, path, value):
-        raise DeployError(
-            f"pytemplate.toml: could not set {'.'.join(path)} automatically (unusual layout): "
-            f"set it by hand to {key} = {rendered} in [{table}]"
-        )
-    return new
+    # A list first in the layout of the old array (its comments kept), else on one line
+    for layout in ((value, None) if isinstance(value, list) else (None,)):
+        try:
+            new = _edited(text, path, rendered, layout)
+        except _ScanError:
+            continue
+        if _only_changed(before, new, path, value):
+            return new
+    raise DeployError(
+        f"pytemplate.toml: could not set {'.'.join(path)} automatically (unusual layout): "
+        f"set it by hand to {key} = {rendered} in [{table}]"
+    )
 
 
 def _only_changed(before: dict[str, Any], text: str, path: tuple[str, ...], value: Any) -> bool:
