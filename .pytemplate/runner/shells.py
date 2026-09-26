@@ -689,7 +689,9 @@ def wsl_distros(wsl: str) -> list[str]:
 
 
 def _suffix(index: int) -> str:
-    return "" if index == 0 else str(index + 1)
+    """The tag of a second (third...) install: msys2-2-ucrt64, git-2-bash, cygwin-2, so the
+    family NAME (msys2-, git-) still selects them in select()."""
+    return "" if index == 0 else f"-{index + 1}"
 
 
 def _discover_windows(env: Mapping[str, str], which: Callable[[str], str | None], standard: bool, distros: Callable[[str], list[str]]) -> list[Shell]:

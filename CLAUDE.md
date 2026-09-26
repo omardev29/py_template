@@ -471,7 +471,8 @@ header rules (with detector tests proving each rule fires).
   niubash, niubash-shx, git-bash/sh/dash, msys2-<msystem> login shells, msys2-shx, msys2-dash,
   Cygwin, busybox-w32, nu, fish, WSL distros; POSIX: sh, bash, dash, zsh, ksh, mksh, yash,
   busybox, fish, nu, pwsh, xonsh; `MSYS2_ROOT`/`CYGWIN_ROOT` point at non-standard installs).
-  A NAME prefix selects a family (`msys2` = every `msys2-*`). Tests: T1 argv round-trip, T2
+  A NAME prefix selects a family (`msys2` = every `msys2-*`; a second install's shells are
+  `msys2-2-*`, `git-2-*`, `cygwin-2`, so they belong to it too). Tests: T1 argv round-trip, T2
   exit code, T3 cwd (from `src/` and from outside), T4 the xonsh-shell-kit route (niubash /
   MSYS2 non-login script mode; the shell's cwd must not change), T5 minimal PATH, T6 stdin, T7
   install hints with uv hidden. Table with ms per test and the launcher each shell reported;

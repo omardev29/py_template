@@ -227,6 +227,33 @@ def test_discover_windows_with_fake_folders(tmp_path: Path) -> None:
     assert all(s.mixed for s in got if s.family == "posix")
 
 
+def test_a_second_install_keeps_its_family_name(tmp_path: Path) -> None:
+    """Two MSYS2 roots and two Git installs: the second one's shells are msys2-2-*, git-2-*, so
+    the family NAME (`selftest --shells msys2`, `git`) selects them too (msys22-* did not)."""
+    msys_roots = [tmp_path / "msys64", tmp_path / "scoop" / "apps" / "msys2" / "current"]
+    for root in msys_roots:
+        for exe in ("bash.exe", "dash.exe", "msys-2.0.dll"):
+            _touch(root / "usr" / "bin" / exe)
+    git_roots = [tmp_path / "scoop" / "apps" / "git" / "current", tmp_path / "Git"]
+    for root in git_roots:
+        for exe in ("usr/bin/sh.exe", "usr/bin/bash.exe", "bin/bash.exe", "cmd/git.exe"):
+            _touch(root / exe)
+    for cyg in ("cyg1", "cyg2"):
+        _touch(tmp_path / cyg / "bin" / "bash.exe")
+    env = {"MSYS2_ROOT": str(msys_roots[0]), "USERPROFILE": str(tmp_path), "SystemRoot": str(tmp_path / "Windows"), "PATH": ""}
+    found = {"git": str(git_roots[1] / "cmd" / "git.exe")}
+    got = shells.discover(env, windows=True, which=found.get, standard=False, distros=lambda wsl: [])
+    names = [s.name for s in got]
+    assert {"msys2-msys", "msys2-shx", "msys2-2-msys", "msys2-2-shx", "git-bash", "git-2-bash", "git-2-sh"} <= set(names), names
+    msys2 = [s.name for s in shells.select(got, ["msys2"])]
+    assert "msys2-2-msys" in msys2 and "msys2-msys" in msys2
+    assert [s.name for s in shells.select(got, ["git"])] == ["git-bash", "git-sh", "git-2-bash", "git-2-sh"]
+    assert [s.name for s in shells.select(got, ["git-2"])] == ["git-2-bash", "git-2-sh"]
+    # Cygwin: the root is named by CYGWIN_ROOT only (plus C:\cygwin64 and C:\cygwin as standard)
+    cyg = shells.discover({**env, "CYGWIN_ROOT": str(tmp_path / "cyg1")}, windows=True, which=found.get, standard=False, distros=lambda wsl: [])
+    assert "cygwin" in [s.name for s in cyg]
+
+
 def test_discover_posix_with_fake_which(tmp_path: Path) -> None:
     found = {"bash": _touch(tmp_path / "bash"), "zsh": _touch(tmp_path / "zsh"), "busybox": _touch(tmp_path / "busybox")}
     got = {s.name: s for s in shells.discover({}, windows=False, which=found.get)}
