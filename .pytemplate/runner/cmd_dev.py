@@ -16,6 +16,11 @@ from .ui import DeployError
 # is pinned here to keep `check` reproducible: the latest release on PyPI in September 2026.
 # Bump it deliberately.
 BASEDPYRIGHT = "basedpyright==1.40.1"
+# basedpyright always runs on the Node.js of its only dependency, nodejs-wheel-binaries
+# (`>=20.13.1`, never a system Node): pinned too, or every new Node LTS on PyPI would change
+# `check` (and its glibc/macOS floor) on an untouched project. What 1.40.1 resolved to in
+# September 2026; bump both together.
+BASEDPYRIGHT_NODE = "nodejs-wheel-binaries==24.19.0"
 
 
 def only_flags(command: str, args: list[str], allowed: tuple[str, ...]) -> set[str]:
@@ -126,7 +131,7 @@ def run_checks(cfg: Config, backend: str, *, rules: bool = True) -> bool:
         # --with: used without adding it to uv.lock (the VS Code extension ships its own)
         conf = BUILD / "cfg" / f"pyright-{profile}.json"
         conf.write_text(json.dumps(render.pyright_config(cfg, profile, absolute=True), indent=2), encoding="utf-8", newline="\n")
-        r = envs.uv(tool, ["run", "--locked", "--with", BASEDPYRIGHT, "basedpyright", "--project", conf], check=False)
+        r = envs.uv(tool, ["run", "--locked", "--with", BASEDPYRIGHT, "--with", BASEDPYRIGHT_NODE, "basedpyright", "--project", conf], check=False)
         if r.returncode != 0 and blocking:
             ok = False
     return ok
@@ -156,9 +161,12 @@ def cmd_check(cfg: Config, args: list[str]) -> int:
 
 
 def cmd_lint(cfg: Config, args: list[str]) -> int:
-    """lint [--fix]: ruff check with the active profile."""
+    """lint [--fix]: ruff check with the active profile (.ruff.toml); a profile that never
+    blocks (ruff exit_zero, e.g. `warn`) reports the findings with exit 0, like `check` and the
+    pre-commit hook."""
     flags = only_flags("lint", args, ("--fix",))
-    r = envs.uv_run(envs.tool_env(cfg), ["ruff", "check", *sorted(flags), *code_dirs()], check=False)
+    exit_zero = ["--exit-zero"] if render.load_profile(cfg.profile_for()).get("ruff", {}).get("exit_zero") else []
+    r = envs.uv_run(envs.tool_env(cfg), ["ruff", "check", *sorted(flags), *exit_zero, *code_dirs()], check=False)
     return r.returncode
 
 
@@ -191,14 +199,25 @@ def test_backend(cfg: Config, backend: str, pytest_args: list[str]) -> int:
 
 
 def cmd_test(cfg: Config, args: list[str]) -> int:
-    """test [BACKEND|all] [pytest args...]"""
+    """test [BACKEND|all] [pytest args...]: one backend returns pytest's own exit code (5 = no
+    tests collected, 4 = a pytest usage error); `all` tests every supported backend, even after
+    one fails to build (a mypyc error, no C compiler), prints a summary and returns 0 or 1."""
     target, rest = split_backend(cfg, args, allow_all=True)
-    targets = cfg.backend.supported if target == "all" else [target]
-    results = {b: test_backend(cfg, b, rest) for b in targets}
+    if target != "all":
+        return test_backend(cfg, target, rest)
+    results: dict[str, int] = {}
+    reasons: dict[str, str] = {}
+    for b in cfg.backend.supported:
+        try:
+            results[b] = test_backend(cfg, b, rest)
+        except DeployError as e:  # Ctrl+C (a KeyboardInterrupt) still stops everything
+            ui.error(f"test {b}: {e}")
+            results[b] = e.code or 1
+            reasons[b] = str(e).splitlines()[0] if str(e) else f"exit code {results[b]}"
     if len(results) > 1:
         ui.step("test summary")
         for b, code in results.items():
-            ui.check_line(code == 0, b, "" if code == 0 else f"exit code {code}")
+            ui.check_line(code == 0, b, "" if code == 0 else reasons.get(b, f"exit code {code}"))
     return 0 if all(c == 0 for c in results.values()) else 1
 
 

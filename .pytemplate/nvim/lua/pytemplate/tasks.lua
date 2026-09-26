@@ -25,7 +25,6 @@ M.META = {
   add = { refresh = true },
   remove = { refresh = true },
   render = { refresh = true },
-  init = { refresh = true, show = true },
   -- rename rewrites editor.json (name, pkg), uv.lock and the sources: refresh, and show what changed
   rename = { refresh = true, show = true },
   clean = { tag = "CLEAN" },

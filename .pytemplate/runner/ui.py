@@ -9,7 +9,8 @@ import sys
 class DeployError(Exception):
     """Expected error: shown without a traceback, and the runner exits with `code`.
 
-    Codes: 2 = usage/configuration, 3 = a requirement is missing (uv, compiler, interpreter).
+    Codes: 2 = usage/configuration (also a program that cannot be started, a task cwd that is
+    not a folder), 3 = a requirement is missing (uv, compiler, interpreter, a program).
     """
 
     def __init__(self, message: str, code: int = 2) -> None:
@@ -103,6 +104,12 @@ def step(msg: str) -> None:
 def info(msg: str) -> None:
     if not QUIET:
         _out(msg)
+
+
+def report(msg: str) -> None:
+    """The answer the user asked for (a list, a status): shown even with -q, which only hides
+    progress (steps, echoed commands, ok lines, notes)."""
+    _out(msg)
 
 
 def detail(msg: str) -> None:

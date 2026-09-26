@@ -9,7 +9,7 @@ schema = 1
 name = "{{name}}"   # executable name; the Python package is src/{{pkg}}/
 preset = "flet"
 gui = true
-assets = "assets"   # src/assets/: Flet serves it (assets_dir) and it is packaged with the app
+assets = "assets"   # src/assets/: Flet serves it (assets_dir) and it is packaged with the app; "" = none, no other name
 
 [backend]
 # Flet: Flutter draws the UI, and Flet's Python side (diffs, messages) cannot be compiled.
@@ -20,7 +20,6 @@ supported = ["cpython", "mypyc"]   # PyPy: experimental, only for running during
 [python]
 cpython = "3.14"   # `flet build` embeds CPython 3.14: the mypyc .pyd files are compatible
 pypy = "pypy@3.11.15"
-jit = false
 
 [typing]
 profile = "auto"

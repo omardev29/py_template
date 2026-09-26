@@ -44,7 +44,6 @@ VARIANTS: dict[str, dict[str, Any]] = {
     "mypyc-active": {"backend": {"active": "mypyc"}},
     "pypy-supported": {"backend": {"supported": ["cpython", "pypy"]}, "typing": {"relaxed": "warn"}},
     "basedpyright": {"typing": {"editor": "basedpyright", "relaxed": "strict"}},
-    "jit": {"python": {"jit": True}},
 }
 
 
@@ -187,8 +186,6 @@ def test_editor_json_follows_the_mode() -> None:
     assert warn["min_python"] == "3.11"
 
     assert editor("basedpyright")["typing"]["editor"] == "basedpyright"
-    jit = editor("jit")["envs"]
-    assert jit["cpython"] == jit["mypyc"] == ".venv-jit" and jit["tools"] == ".venv"
 
 
 def test_editor_json_lists_every_command_and_method() -> None:

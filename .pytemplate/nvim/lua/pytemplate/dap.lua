@@ -57,7 +57,7 @@ function M.setup()
   local py, source = M.adapter()
   dp.setup(py or "python")
   dp.test_runner = "pytest"
-  -- The program runs on the CPython runtime env (.venv, or .venv-jit with python.jit) unless the
+  -- The program runs on the CPython runtime env (.venv) unless the
   -- configuration names its own python (launch.json's PyPy one). $VIRTUAL_ENV still wins.
   dp.resolve_python = function()
     return pt.python("cpython")

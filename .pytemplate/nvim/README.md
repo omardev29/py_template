@@ -30,7 +30,7 @@ LazyVim's import-order warning and keeps their plugins installed when you work e
 | mypy | nvim-lint runs `.venv`'s mypy from the project root with `.mypy.ini`; off with the `off` typing profile; errors shown with the profile's severity (warn: warnings). With PyPy supported it checks the 3.11 syntax like `./deploy check`. |
 | Tasks | overseer templates `deploy: <command>` for every `./deploy` command and every `pytemplate.toml` `[tasks]` entry (they replace the `tasks.json` ones). Output of check/lint/test/build becomes diagnostics and quickfix items. |
 | Debugging | nvim-dap with the generated `.vscode/launch.json`; the adapter is `.venv`'s debugpy (else Mason's, else an ephemeral `uv run --with debugpy`). |
-| Tests | neotest runs pytest with the active backend's interpreter (`.venv`, `.venv-pypy`, `.venv-jit`); mypyc and "all backends" runs go through `deploy: test`. |
+| Tests | neotest runs pytest with the active backend's interpreter (`.venv`, `.venv-pypy`); mypyc and "all backends" runs go through `deploy: test`. |
 | Health | `:checkhealth pytemplate` |
 
 `./deploy` always runs as `uv run --quiet --script .pytemplate/deploy.py ARGS` (an argument

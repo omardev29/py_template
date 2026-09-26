@@ -24,10 +24,9 @@ DEFAULT_SEVERITY = {"error": "Error", "note": "Information"}
 BOM = "\ufeff"  # an editor may add one: it would change the trusted hash
 
 
-def env_dirs(cfg: Config) -> dict[str, str]:
+def env_dirs() -> dict[str, str]:
     """Return the environment of each role, relative to the root (without the WSL -wsl suffix)."""
-    runtime = ".venv-jit" if cfg.python.jit else ".venv"
-    return {"tools": ".venv", "cpython": runtime, "mypyc": runtime, "pypy": ".venv-pypy"}
+    return {"tools": ".venv", "cpython": ".venv", "mypyc": ".venv", "pypy": ".venv-pypy"}
 
 
 def commands() -> list[dict[str, str]]:
@@ -63,7 +62,7 @@ def editor_data(cfg: Config, profile: str) -> dict[str, Any]:
             # the plugin's uvx language server runs the basedpyright ./deploy check pins
             "basedpyright": BASEDPYRIGHT,
         },
-        "envs": env_dirs(cfg),
+        "envs": env_dirs(),
         "mypyc_stage": ".build/mypyc-dev/stage",
         "tasks": [
             {"name": name, "help": task.help, "background": task.background} for name, task in cfg.tasks.items()
