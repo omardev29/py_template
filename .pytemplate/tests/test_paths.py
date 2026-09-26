@@ -383,9 +383,9 @@ def unchanged(project_copy: Path) -> Iterator[Path]:
     ("args", "expected"),
     [
         (["mode", "mypyc"], '[backend] active = "mypyc"'),
-        (["mode", "--supports", "-mypyc", "--jit", "off", "--typing", "strict"], "[typing] relaxed"),
-        (["init", "raylib"], "+ typings/raylib/__init__.pyi"),
-        (["init", "flet", "--name", "other"], "as 'other'"),
+        (["mode", "--supports", "-mypyc", "--typing", "strict"], "[typing] relaxed"),
+        (["__init", "raylib"], "+ typings/raylib/__init__.pyi"),
+        (["__init", "flet", "--name", "other"], "as 'other'"),
         (["render", "--force"], "generated files up to date"),
     ],
 )
@@ -446,7 +446,7 @@ def dry(monkeypatch: pytest.MonkeyPatch) -> Config:
         ("cmd_mode", ["--supports"], "--supports needs a value"),
         ("cmd_mode", ["--supports="], "--supports needs a value"),
         ("cmd_mode", ["--supports", "-cpython,-mypyc"], "at least one backend"),
-        ("cmd_mode", ["--supports", "+pypy,cpython"], "unknown backend 'cpython'"),
+        ("cmd_mode", ["--supports", "+pypy,cpython"], "mixes changes (+name, -name) with plain names"),
         ("cmd_init", ["raylib", "--bogus"], "unknown argument(s): --bogus"),
         ("cmd_new", ["somewhere", "--bogus"], "unknown argument(s): --bogus"),
     ],

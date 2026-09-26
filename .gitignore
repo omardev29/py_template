@@ -6,7 +6,7 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 
-# Environments (one per backend: .venv, .venv-pypy, .venv-jit, and their -wsl variants)
+# Environments (one per backend: .venv, .venv-pypy, and their -wsl variants)
 .venv*/
 
 # ./deploy outputs (mypyc stage, PyInstaller, runtimes, reports) and artifacts

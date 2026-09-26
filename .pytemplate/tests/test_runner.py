@@ -40,7 +40,7 @@ def test_unknown_key_is_an_error() -> None:
 
 def test_wrong_type_is_an_error() -> None:
     with pytest.raises(DeployError, match="boolean"):
-        make({"python": {"jit": "yes"}})
+        make({"app": {"gui": "yes"}})
 
 
 def test_active_must_be_supported() -> None:
@@ -70,11 +70,11 @@ def test_task_cannot_shadow_builtin() -> None:
 
 
 def test_set_value_keeps_comments() -> None:
-    text = '[backend]\nactive = "cpython"   # the mode\nsupported = ["cpython"]\n\n[python]\njit = false\n'
+    text = '[backend]\nactive = "cpython"   # the mode\nsupported = ["cpython"]\n\n[app]\ngui = false\n'
     out = set_value(text, "backend", "active", "mypyc")
     assert 'active = "mypyc"   # the mode' in out
-    out = set_value(out, "python", "jit", True)
-    assert "jit = true" in out
+    out = set_value(out, "app", "gui", True)
+    assert "gui = true" in out
     out = set_value(out, "typing", "relaxed", "warn")
     assert tomllib.loads(out)["typing"]["relaxed"] == "warn"
 

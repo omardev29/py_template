@@ -367,7 +367,37 @@
                     ],
                     "severity": "error",
                     "pattern": {
-                        "regexp": "^((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "regexp": "^(?!(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]|(?:myapp)(?:[\\\\/][^:]*)?\\.py:)((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "message": 3
+                    }
+                },
+                {
+                    "owner": "pytemplate-pytest",
+                    "source": "pytest",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}/src"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]([^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "message": 3
+                    }
+                },
+                {
+                    "owner": "pytemplate-pytest",
+                    "source": "pytest",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}/src"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:myapp)(?:[\\\\/][^:]*)?\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
                         "file": 1,
                         "line": 2,
                         "message": 3
@@ -432,7 +462,37 @@
                     ],
                     "severity": "error",
                     "pattern": {
-                        "regexp": "^((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "regexp": "^(?!(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]|(?:myapp)(?:[\\\\/][^:]*)?\\.py:)((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "message": 3
+                    }
+                },
+                {
+                    "owner": "pytemplate-pytest",
+                    "source": "pytest",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}/src"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]([^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "message": 3
+                    }
+                },
+                {
+                    "owner": "pytemplate-pytest",
+                    "source": "pytest",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}/src"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:myapp)(?:[\\\\/][^:]*)?\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
                         "file": 1,
                         "line": 2,
                         "message": 3
@@ -754,7 +814,7 @@
         },
         {
             "label": "deploy: doctor",
-            "detail": "./deploy doctor  |  check uv, the compiler, PyPy, the JIT, shells and the generated files",
+            "detail": "./deploy doctor  |  check uv, the compiler, PyPy, shells and the generated files",
             "icon": {
                 "id": "pulse"
             },
@@ -933,7 +993,37 @@
                     ],
                     "severity": "error",
                     "pattern": {
-                        "regexp": "^((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "regexp": "^(?!(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]|(?:myapp)(?:[\\\\/][^:]*)?\\.py:)((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "message": 3
+                    }
+                },
+                {
+                    "owner": "pytemplate-pytest",
+                    "source": "pytest",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}/src"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]([^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "message": 3
+                    }
+                },
+                {
+                    "owner": "pytemplate-pytest",
+                    "source": "pytest",
+                    "fileLocation": [
+                        "relative",
+                        "${workspaceFolder}/src"
+                    ],
+                    "severity": "error",
+                    "pattern": {
+                        "regexp": "^((?:myapp)(?:[\\\\/][^:]*)?\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
                         "file": 1,
                         "line": 2,
                         "message": 3
