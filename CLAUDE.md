@@ -41,7 +41,9 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
 10. QUALITY BAR (set by the owner; never relax it, never argue it away). Bug density = confirmed
     bugs / lines of our code:
     - at most 1 bug per 1000 lines: ACCEPTABLE, the only state in which the work is done;
-    - worse than 1 per 1000 (1 per 500 included): UNACCEPTABLE, fixing it comes first;
+    - worse than 1 per 1000 but better than 1 per 500: TOLERABLE only with a written plan back
+      under 1 per 1000 (every known bug listed with its fix);
+    - 1 per 500 or worse: UNACCEPTABLE, fixing it comes before anything else;
     - worse than 1 per 100: UNRELIABLE software.
     Counted: a reproduced defect of OUR code (the runner, launchers, templates, presets, the
     Neovim plugin, the template's CI) that stops the user from doing something, at one of three
@@ -53,6 +55,8 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
       supported setup, and there is no reasonable workaround;
     - notable: it fails in a supported case but a workaround exists, or it leaves a half-made
       change or a broken state the user must repair by hand.
+    Stability defects (what breaks by itself with time: a moving version, a schedule GitHub
+    disables) count like bugs, at the same severities.
     Not counted, but still fixed when found: minor and cosmetic defects that stop nothing (a
     character printed wrong, an `n` with tilde garbled in a message, an unclear hint, layout).
     Also not counted: the user's code;
@@ -2246,8 +2250,8 @@ only with `./deploy selftest` and `selftest --shells` on Windows.
     77 low; a few are duplicates of each other) and 44 stability defects (breakage that comes
     with time: moving versions, expiring schedules). That hunt's severities are not the three
     of rule 1.10 (some "low" findings stopped every command, e.g. a non-UTF-8 byte in
-    pytemplate.toml), so the counted density lies between 1 per 114 lines (high and medium
-    only: UNACCEPTABLE) and 1 per 63 (every bug: UNRELIABLE). The
+    pytemplate.toml), so the counted density lies between 1 per 91 lines (high and medium
+    bugs and stability defects only) and 1 per 50 (all of them): UNRELIABLE either way. The
     September 2026 overhaul fixed or deliberately closed every one of the 172 bugs (wave 1)
     and took on the CI stability defects (wave 2); the code grew to 14,588 lines.
   - After the overhaul: not measured yet. Until a measurement says otherwise, the project is not
