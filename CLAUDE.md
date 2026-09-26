@@ -385,7 +385,7 @@ header rules (with detector tests proving each rule fires).
 | `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL`, `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env`, `run` (echo, `DRY_RUN`, cwd defaults to `ROOT`, UTF-8 capture), `output`, `show` (display quoting only), `vs_installer_dir`, `CommandFailed`. |
-| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `jit_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync`, `interpreter_info`, `find_jit_interpreter`. |
+| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `jit_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (all groups), `interpreter_info` (with `platform`), `find_jit_interpreter`; `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
@@ -394,7 +394,7 @@ header rules (with detector tests proving each rule fires).
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks; parses bytes (tolerates a BOM). |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`. |
 | `tasks.py` | `[tasks]`: `Placeholders` (lazy `{python}`), `deps`, cycle detection, `run_task`, `list_tasks`. |
-| `cmd_env.py` | `setup`, `doctor`, `sync`, `lock`, `add`, `remove`, `clean`; `ensure_lock`; `_fix_exec_bit`; `_msvc`, `_long_paths`. |
+| `cmd_env.py` | `setup`, `doctor`, `sync`, `lock`, `add`, `remove`, `clean` (`_env_dirs`, `_remove`, `_is_link`); `ensure_lock`; `_fix_exec_bit`; `_c_compiler`, `_msvc(platform)`, `_xcode_problem`, `_long_paths`. |
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `init`, `new`, and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
 | `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`. |
 | `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
@@ -403,7 +403,7 @@ header rules (with detector tests proving each rule fires).
 | `cmd_nvim.py` | `./deploy nvim ...` and `doctor(check)` (section 12.2). |
 | `nvimtest.py` | `selftest --nvim` (section 13.1). |
 | `e2e.py` | `selftest --e2e` (section 13.1). |
-| `hooks.py` | `./deploy hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (setup), `doctor`: the native git pre-commit hook (section 5.6). |
+| `hooks.py` | `./deploy hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (setup), `doctor`: the native git pre-commit hook (section 5.6); `find_repo` (`NotInGit`), `classify`, `hook_script`/`launcher_of`, `checks`. |
 | `rename.py` | `./deploy rename NEW_NAME [--force]`: pure `plan` / `apply_plan` / `rewrite` (tokenizer + context rules), `check_new_name`, `git_changes`, `cmd_rename` (section 5.7). |
 | `upx.py` | Optional UPX packing: pinned download (`VERSION`, `ASSETS` with SHA-256), `find`, `active`, `level_flags`, `env_value`, `excludes`, `candidates`, `pack_file`, `pack_tree`, `MAX_INPUT` (section 10). |
 
@@ -432,8 +432,8 @@ header rules (with detector tests proving each rule fires).
 
 - 0 ok; 1 = check/test failures, doctor problems, any FAIL in a selftest suite, or an internal
   runner error (traceback printed); 2 = usage/config (`DeployError` default, argparse); 3 =
-  missing requirement (uv, compiler, interpreter, Neovim/git with `--require`, a missing
-  `python.jit_interpreter`); 130 = Ctrl+C. `run`, `test BACKEND` and tasks return the child's
+  missing requirement (uv, a uv older than `envs.MIN_UV`, compiler, interpreter, Neovim/git
+  with `--require`, a missing `python.jit_interpreter`); 130 = Ctrl+C. `run`, `test BACKEND` and tasks return the child's
   exit code (`test all`: 0 or 1); `proc.CommandFailed` carries the failed child's code.
 - Runner output goes to stderr through `ui` so the app keeps stdout. Exceptions, printed to
   stdout on purpose: `help`, `__probe`, `shell-setup` snippets, and the `--json` reports of
@@ -455,7 +455,7 @@ header rules (with detector tests proving each rule fires).
   the plain `selftest` only print their commands; in-process work (the `lintc` rules) runs.
 - `render.apply` behaves like `--check` (writes nothing); `render.auto` prints "would update";
   `render` prints `would update: ...`.
-- `clean` prints what it would remove. `build` prints the checks (unless `--no-check`) and
+- `clean` prints `would remove X` per target. `build` prints the checks (unless `--no-check`) and
   `(--dry-run) build B -> M: would output dist/<name>-<b>-<m>*`, then stops. `report` builds
   nothing and never opens the browser.
 - `mode` validates the new `pytemplate.toml` in memory and prints the keys that would change
@@ -475,7 +475,9 @@ header rules (with detector tests proving each rule fires).
 - `build` with `[deploy.upx]` enabled: `upx.pack_tree` lists what it would pack and stops.
 - `setup` and `lock` report whether the managed parts of `pyproject.toml` would change
   (`render.write_pyproject` writes nothing under `DRY_RUN`; `render.pyproject_message` says
-  "would update"); their `uv lock`/`uv sync` are echoed commands, so they are skipped.
+  "would update"); their `uv lock`/`uv sync` are echoed commands, so they are skipped. Then
+  `cmd_env.ensure_lock` echoes `uv lock` without checking (the check would read the old file),
+  and `_fix_exec_bit` echoes `chmod +x` / `git update-index --chmod=+x` without running them.
 - It is not a sandbox: scratch writes under `.build/` (`.build/cfg/*`, the mypyc stage,
   `mypy.ini`, `spec.json`) still happen.
 
@@ -509,28 +511,59 @@ find a compatible Visual Studio installation"). Everything else (e.g. `FLET_*`) 
 ### 5.6 Git pre-commit hook (`hooks.py`)
 
 - `./deploy setup` calls `hooks.ensure_installed(cfg)` when `[hooks] pre_commit` is true (the
-  default): it installs or updates the hook, never fails setup, and is silent outside git.
-  `doctor` shows one "git hook" line (missing = info, not a problem).
+  default): it installs the hook or updates this project's own, never fails setup, and is
+  silent outside git (`hooks.NotInGit`: no git, not a work tree). Any other git failure
+  (dubious ownership...) is shown with git's own message: a warning in setup, an info line in
+  `doctor` (whose "git hook" line is otherwise info too: missing is not a problem). Every git
+  call runs with `LC_ALL=C` (find_repo reads "not a git repository" in English).
 - The hook: `pre-commit` in the folder `git rev-parse --git-path hooks` reports (worktree
-  aware), pure ASCII + LF, a marker comment, and `exec sh <launcher> hooks run` with the POSIX
+  aware), pure ASCII + LF, a marker comment, and `sh <launcher> hooks run` with the POSIX
   launcher path relative to the repository top (the project may be a subfolder of a bigger
-  repo; non-ASCII folder names are written with `printf` escapes). `sh` explicitly (no
-  dependence on the exec bit); git for Windows runs hooks with its own sh.exe, where the POSIX
-  launcher works. A missing launcher makes the hook exit 0 (other checkouts).
-- Foreign hooks are never overwritten: `install --force` renames it to `pre-commit.local` and
-  ours runs it first; `uninstall` restores it. With `core.hooksPath` set nothing is written:
-  install/status/doctor print the line to add (`sh ./deploy hooks run || exit $?`).
-- `hooks run` checks the STAGED files (`git diff --cached --name-only --diff-filter=ACMR -z`)
-  in ~0.3 s (0.74 s for the whole hook, measured): ruff (active typing profile, `exit_zero`
-  honoured) and `ruff format --check` on staged `.py/.pyi` under the code dirs; generated
-  files up to date (`render.apply(check=True)`) and none unstaged/untracked; managed pyproject
-  parts and `uv lock --check`, and `uv.lock` staged with `pyproject.toml`; `lintc` on staged
-  compiled modules (blocking only under the `mypyc` profile); `shells.launcher_problems` on
-  staged launchers; the language guard in the template repo. Never mypy (the user's choice:
-  `./deploy check` does it). It reads the working-tree version of the staged files.
+  repo; non-ASCII folder names are written with `printf` escapes; `hooks.launcher_of` reads it
+  back). `sh` explicitly (no dependence on the exec bit); git for Windows runs hooks with its
+  own sh.exe, where the POSIX launcher works. A missing launcher makes the hook exit 0 (other
+  checkouts); a launcher exit code above 1 (uv not found from a GUI client, a broken
+  pytemplate.toml, an old runner without `hooks run`) also prints `git commit --no-verify` and
+  `./deploy hooks uninstall`. `shellcheck -s sh`-clean (tested when installed). Any change to
+  `hooks.hook_script` makes installed hooks "outdated": setup rewrites them.
+- Never overwritten: a hook without the marker, or any symlink (writing through a dangling
+  link created a file in the work tree). `install --force` renames it to `pre-commit.local` (a
+  link moves as a link; a dangling `.local` counts as existing) and ours runs it first;
+  `uninstall` restores it. A marked hook whose launcher is another live project of the same
+  repository (state "other", a monorepo) is left alone by setup, install and uninstall;
+  `install --force` writes a FRESH copy of it as `pre-commit.local` (the script skips
+  `pre-commit.local` when it is itself that file; older copies would recurse), so both checks
+  run, once each. A project that an enclosing repository ignores (`git check-ignore -q deploy`,
+  which refuses `--literal-pathspecs`) gets no hook unless forced. With `core.hooksPath` set
+  nothing is written: install/status/doctor print the line to add (`sh ./deploy hooks run ||
+  exit $?`); husky 9 (`.husky/_` holding `h` or `husky.sh`) is read through `.husky/pre-commit`.
+- `hooks run` checks what the commit contains: staged files (`git diff --cached --name-only
+  --no-renames --diff-filter=ACMRT -z`) and staged deletions (`D`: a deletion-only commit gets
+  the project-wide checks too). Every git call passes `-c diff.relative=false`
+  (`diff.relative=true` made every path relative to the project folder, and all were dropped).
+  In ~0.3 s: ruff (active typing profile, `exit_zero` honoured) and `ruff format --check` on
+  staged `.py/.pyi` under the code dirs via `uv run --quiet --frozen` (a stale lock is the lock
+  check's finding; an exit code other than 0/1 is "could not run ruff", without a fmt hint). A
+  file with unstaged changes is checked in its STAGED version (`git cat-file --filters
+  :0:<path>`, the checkout form, fed to ruff with `--stdin-filename`); a staged file missing
+  from the working tree fails with `git restore` / `git rm --cached`; the launcher checks
+  (`shells.launcher_problems`) and the template repo's language guard read the staged content
+  too. Project-wide and conservative (they read the working tree, so they may block a commit
+  that touches none of their files): generated files up to date (`render.apply(check=True)`)
+  and none unstaged/untracked; managed pyproject parts and `uv lock --check`; `pytemplate.toml`,
+  `pyproject.toml`, `uv.lock` and the generated files committed together (once any is in the
+  commit, none of the three config files may keep unstaged changes; the hints name the dirty
+  config files with the generated ones, so following them never splits a source from its
+  output). `lintc` on staged compiled modules (blocking only under the `mypyc` profile, reads
+  the working tree). Never mypy (the user's choice: `./deploy check` does it).
+- `hooks._run_bytes` is the one process start outside `proc.run`: raw bytes (proc.run's text
+  mode turns CRLF into LF) and stdin, for `git cat-file` and ruff on stdin.
 - Git hands hooks a relative `GIT_INDEX_FILE` and, in linked worktrees, `GIT_DIR` without
   `GIT_WORK_TREE`: `hooks` makes them absolute for its own git calls and removes them before
   starting uv/ruff (they would point git at the wrong repository for a sub-folder project).
+- `test_hooks.py` runs git with `GIT_CONFIG_GLOBAL` at a missing file and
+  `GIT_CONFIG_NOSYSTEM=1`: a developer's global core.hooksPath, commit.gpgsign,
+  init.templateDir or diff.relative must not change the results.
 
 ### 5.7 Renaming (`rename.py`)
 
@@ -659,8 +692,26 @@ Formats:
 - `runtime_env(backend)`: `pypy` -> `.venv-pypy`; `cpython`/`mypyc` -> `.venv-jit` when
   `python.jit`, else `.venv`. `tool_env` is always `.venv`: every tool (mypy, ruff, mypyc,
   PyInstaller, pytest for selftest) runs there.
-- Every tool call is `uv run --locked` (syncs when needed, fails on a stale lock).
-  `cmd_env.ensure_lock` runs `uv lock --check` and then `uv lock` if needed.
+- Every tool call is `uv run --locked` (syncs when needed, fails on a stale lock; the git
+  hook's ruff uses `--frozen`, section 5.6). `cmd_env.ensure_lock` runs `uv lock --check` and
+  then `uv lock` if needed; under `--dry-run`, when the managed pyproject parts would change, it
+  echoes `uv lock` instead (the check would read the unwritten file and pass).
+- `envs.sync` = `uv sync --locked --all-groups` (setup, sync, mode): every dependency group of
+  `pyproject.toml` is installed, so `./deploy add --group G pkg` survives the next sync and
+  reaches a fresh clone (an exact sync of the default groups removed it); `uv run` syncs
+  inexactly and never removes them. `add`/`remove` take `--dev` or `--group G`, not both.
+- The oldest supported uv is `envs.MIN_UV` = 0.10.12, read from uv's own download metadata:
+  the first uv that downloads `pypy@3.11.15` (0.10.11: "No download found for request");
+  CPython 3.14 final needs 0.9.0 (0.8.x silently installs 3.14.0rc2) and `uv export --format
+  requirements.txt` 0.6.15. `envs.uv` calls `envs.require_min_uv` right before uv would CREATE
+  an environment (its dir does not exist): an older uv exits 3 with `envs.UV_UPDATE`; asked
+  once per process, an unreadable version passes. doctor flags it. Bump it with the pins
+  (`test_min_uv_matches_the_pinned_interpreters`) or a newer uv flag.
+- `./deploy clean` (`cmd_env.cmd_clean`): `.build/` (`.build/wsl` in WSL), `dist/`, and with
+  `--envs` this side's environments (WSL on /mnt: only `.venv*-wsl`; elsewhere every `.venv*`
+  directory but those). A symlink or junction loses only the link; a folder it cannot remove
+  completely (a file in use: the editor's mypy/ruff server runs from `.venv` on Windows) is an
+  error, exit 1, with the others still removed.
 - uv finds the project by walking up from the CWD: `envs.uv_run` adds `--project <ROOT>`
   whenever it runs with another `cwd` (a work dir with its own `pyproject.toml`, like the
   `flet build` stage, would otherwise become the project). Plain `envs.uv` calls with a `cwd`
@@ -689,7 +740,7 @@ Formats:
   overrides. `mode --jit on` finds it before writing anything. `doctor` warns when it is
   scoop's `current` junction (`scoop update` moves it).
 - WSL on `/mnt/*` (`project.IS_WSL`): separate `.venv*-wsl` envs and `.build/wsl`, so the
-  Windows `.venv` is not turned into a Linux one.
+  Windows `.venv` is not turned into a Linux one (and `clean --envs` keeps the other side's).
 - Tools outside `uv.lock` run through `uv run --locked --with <pin>` and are pinned in module
   constants: `cmd_dev.BASEDPYRIGHT = "basedpyright==1.40.1"` (`check` with
   `typing.editor = "basedpyright"`) and `methods.nuitka.NUITKA = "nuitka==4.2.2"`. Bump them
@@ -1188,7 +1239,11 @@ short temp tree and unset `NVIM_APPNAME`.
   runner fixes: portable smoke with `lib/`, lazy `{python}`, pyz `PYTHON_JIT`, binary preset
   files, `compile.annotate`, `sync_tree` ns mtimes, portable launcher quoting and version
   probes, unknown arguments, `app.preset`, pinned tools, flet pyproject, wheel options, JIT
-  path), `test_e2e_plan.py` (the pure planning of `e2e.py`).
+  path), `test_e2e_plan.py` (the pure planning of `e2e.py`), `test_envs_core.py` (the section 7
+  contract, `MIN_UV`, clean, sync/add/remove/lock command lines, `ensure_lock`, exec bits in a
+  throwaway git repository, compiler checks, doctor lines and exit code; real uv only offline
+  in `.venv`), `test_hooks.py` (the hook in throwaway repositories, git runs it for real; the
+  real ruff/uv command lines against `.venv`).
 - **[template repo]** Language guard `test_no_spanish.py`: skipped unless
   `.pytemplate/template-repo` exists. Scans `git ls-files --cached --others --exclude-standard`
   (so new untracked files count) for accented Spanish letters and a list of Spanish words
@@ -1302,7 +1357,8 @@ Runner code:
 - Processes only through `proc.run/output` or `envs.uv/uv_run`, as argv lists, never
   `shell=True`. `proc.run` defaults to cwd = ROOT and `proc.base_env()`. Long-running
   harnesses (`shells`, `nvimtest`, `e2e`) use `subprocess` directly with stdin closed, output
-  to log files and timeouts that kill the process tree.
+  to log files and timeouts that kill the process tree; `hooks._run_bytes` too, for raw bytes
+  and stdin (section 5.6).
 - Text files: `encoding="utf-8", newline="\n"`; write `"\ufeff"`, never a literal BOM; read
   `pytemplate.toml` as `utf-8-sig`; parse Python sources as bytes (`imports.parse`).
   Generated `.cmd` files: ASCII, explicit `\r\n`, written with `newline=""`.
@@ -1354,9 +1410,10 @@ Files and git:
   `deploy`, `deploy.ps1` and `.lazy.lua` LF (the last matching line wins); `*.png *.ico *.pyz`
   binary. With `core.autocrlf=true` most working-tree files are CRLF on Windows: that is fine,
   the runner normalises.
-- `deploy` and `deploy.ps1` are 100755: `cmd_env._fix_exec_bit` repairs both on `setup`
-  (`core.filemode=false` on Windows loses the bit), `presets.new` marks both, `init` chmods
-  both on POSIX. `deploy.cmd` stays 100644.
+- `deploy` and `deploy.ps1` are 100755: `cmd_env._fix_exec_bit` repairs both on `setup`, the
+  files' own exec bit on POSIX (with or without git: with `core.filemode=true` an index-only fix
+  is undone by the next `git add`) and the git mode (`core.filemode=false` on Windows loses
+  it); `presets.new` marks both, `init` chmods both on POSIX. `deploy.cmd` stays 100644.
 - Default app content lives in `presets/script/files/` (section 11).
 
 ## 15. Known issues and fragile points (still open)
@@ -1369,8 +1426,10 @@ Behaviour:
 - Tasks: a task with `backend = "mypyc"` runs interpreted in `.venv` unless it goes through a
   `deps` entry such as `compile` and runs the stage.
 - `config.set_value` only edits single-line entries.
-- `clean --envs` removes every `.venv*`, including the environments in use; there is no
-  "unused only" option (`mode` only prints a note about leftovers).
+- `clean --envs` removes every `.venv*` of this side (WSL on /mnt: only the `-wsl` ones),
+  including the environments in use; there is no "unused only" option (`mode` only prints a
+  note about leftovers). On Windows close the editor first (its mypy/ruff servers run from
+  `.venv`), or clean fails with exit 1.
 - raylib + PyPy on macOS arm64: no PyPy wheel for that platform (raylib 6.0.1.0 still has
   none) and `no-build-package`, so `./deploy setup` of a raylib project fails to sync
   `.venv-pypy` on Apple Silicon (confirmed on `macos-latest`: "marked as `--no-build` but has
@@ -1421,6 +1480,10 @@ Code coupling (rename together):
   `e2e.flet_build_reason` imports `methods.flet._developer_mode`; `cmd_nvim.c_compiler`
   imports `cmd_env._msvc` lazily (`cmd_env` imports `cmd_nvim`).
 - `RULES_RE` / `tasks.parse_line` <-> `ui.error`, `ui.warn`, `str(lintc.Finding)` (5.3).
+- `envs.MIN_UV` <-> the presets' `python.pypy` pin and default `python.cpython`, and the newest
+  uv flag the runner uses (7); `hooks.launcher_of` <-> `hooks.sh_literal`; `cmd_env._msvc`
+  <-> setuptools' `_find_vc2017` component choice (`test_msvc_component_matches_setuptools`);
+  `cmd_nvim.c_compiler` lacks `cmd_env._xcode_problem` (the macOS xcrun shim check).
 - `editor.json` <-> `cli.COMMANDS` (6.2); `cmd_nvim.EXTRAS` <-> the extras list in
   `templates/nvim/lazy.lua`; `vscode.MYPYC_STAGE` / `editor.json` `mypyc_stage` <->
   `mypyc.profile(cfg, "dev").stage`; the CI pyz path <-> `BuildRequest.out_name` (10).

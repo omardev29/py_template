@@ -1244,6 +1244,10 @@ def test_real_ruff_accepts_the_hook_arguments(tmp_path: Path, monkeypatch: pytes
     assert "its staged version" in res["ruff format"].output
     res = run([good], {str(good): b"print(y)\n"})
     assert res["ruff check"].passed is False and "F821" in res["ruff check"].output and "good.py" in res["ruff check"].output
+    # and `uv lock --check` of this project (offline: the lock is resolved from the cache)
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    code, out = hooks.uv_lock_check(cfg)
+    assert code == 0, out
 
 
 @needs_git

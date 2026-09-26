@@ -139,6 +139,26 @@ def test_sync_installs_every_dependency_group(tmp_path: Path, monkeypatch: pytes
     assert calls.argvs == [["uv", "sync", "--locked", "--all-groups"]]
 
 
+def test_a_polluted_uv_environment_still_selects_the_project_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real uv, offline, in this project's .venv: an exported UV_PROJECT_ENVIRONMENT, UV_PYTHON
+    or VIRTUAL_ENV (another project, an activated venv) never reaches uv."""
+    tool = envs.tool_env(make())
+    if not tool.python.is_file():
+        pytest.skip("no .venv (./deploy setup)")
+    try:
+        proc.find_uv()
+    except DeployError:
+        pytest.skip("uv not found")
+    for key, value in {**POLLUTED, "UV_PYTHON": "3.99", "UV_OFFLINE": "1"}.items():
+        monkeypatch.setenv(key, value)
+    code = "import sys; print(sys.prefix)"
+    r = envs.uv(tool, ["run", "--frozen", "python", "-c", code], capture=True, check=False, echo=False)
+    assert r.returncode == 0, r.stderr
+    assert Path(r.stdout.strip()).resolve() == tool.dir.resolve()
+    r = envs.uv(tool, ["lock", "--check"], capture=True, check=False, echo=False)
+    assert r.returncode == 0, r.stderr
+
+
 def test_interpreter_info_of_this_python() -> None:
     info = envs.interpreter_info(sys.executable)
     assert info["impl"] == sys.implementation.name
@@ -545,7 +565,7 @@ def test_c_compiler_rejects_macos_xcode_shims(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(cmd_env, "IS_MACOS", True)
     monkeypatch.delenv("CC", raising=False)
     def which(name: str) -> str | None:  # every compiler name is a /usr/bin shim; "ccache gcc" is no program
-        return None if " " in name else name if os.path.isabs(name) else f"/usr/bin/{name}"
+        return None if " " in name else name if name.startswith("/") else f"/usr/bin/{name}"
 
     monkeypatch.setattr(cmd_env.shutil, "which", which)
     calls: list[list[str]] = []
