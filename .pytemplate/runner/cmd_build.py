@@ -64,6 +64,7 @@ def check_lock(cfg: Config) -> None:
     r = envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, capture=True, echo=False)
     if r.returncode != 0:
         why = envs.uv_error(r.stderr or r.stdout) or f"uv lock --check: exit code {r.returncode}"
+        why = why[len("error:") :].strip() if why.lower().startswith("error:") else why
         raise DeployError(
             f"uv.lock does not match pyproject.toml ({why})\n"
             "  Run ./deploy lock (./deploy apply after a pytemplate.toml edit), then build again"

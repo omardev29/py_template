@@ -3048,7 +3048,8 @@ def test_build_refuses_a_stale_lock_before_any_work(no_build: None, monkeypatch:
     with pytest.raises(DeployError, match="uv.lock does not match pyproject.toml") as e:
         cmd_build.cmd_build(make({}), ["cpython", "--method", method, "--no-check"])
     assert asked == [["lock", "--check"]]
-    assert e.value.code == 2 and "needs to be updated" in str(e.value) and "./deploy lock" in str(e.value)
+    assert e.value.code == 2 and "./deploy lock" in str(e.value)
+    assert "(The lockfile at `uv.lock` needs to be updated" in str(e.value)  # uv's reason, without a second "error:"
 
 
 def test_check_lock_reads_the_real_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
