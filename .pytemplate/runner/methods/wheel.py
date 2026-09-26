@@ -172,12 +172,13 @@ def build(req: BuildRequest) -> Path:
     if req.compiled:
         (work / "mypy.ini").write_text(render.mypy_ini(cfg, "mypyc", for_compile=work), encoding="utf-8", newline="\n")
         (work / "setup.py").write_text(setup_py(cfg), encoding="utf-8", newline="\n")
+    tool = envs.tool_env(cfg)
+    # Synced first (a `--no-check` build never ran `uv run --locked`), before the previous wheel
+    # is removed: a failed sync left no wheel at all. `uv build` ignores UV_PROJECT_ENVIRONMENT
+    # (it would take ./.venv, wrong under WSL), hence --python
+    envs.sync(tool)
     out = dist_path(req)
     common.remove_output(out)
-    tool = envs.tool_env(cfg)
-    # Synced first (a `--no-check` build never ran `uv run --locked`); `uv build` ignores
-    # UV_PROJECT_ENVIRONMENT (it would take ./.venv, wrong under WSL), hence --python
-    envs.sync(tool)
     argv: list[str | Path] = ["build", "--wheel", "--no-build-isolation", "--python", tool.python, "--out-dir", out, work]
     envs.uv(tool, argv, extra_env={"VSLANG": "1033"})
     wheels = sorted(out.glob("*.whl"))

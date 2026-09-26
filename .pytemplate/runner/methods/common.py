@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 import hashlib
+import json
 import os
 import platform
 import re
@@ -329,10 +330,14 @@ def drop_install_junk(dest: Path) -> None:
     or .exe trampoline holds this machine's absolute .venv path (dead elsewhere, and it leaks the
     developer's folder). Other files in bin/ stay: wheels such as ruff or uv ship a native binary
     there and find it at <target>/bin; a real package named bin (with __init__.py) stays too.
+    In each *.dist-info: uv's cache files, and a direct_url.json naming a folder of this machine
+    (a local library, installed for real since --no-editable), taken out of RECORD too.
     """
     for junk in [*dest.glob("_virtualenv*"), dest / ".lock"]:
         if junk.is_file() or junk.is_symlink():
             junk.unlink()
+    for info in dest.glob("*.dist-info"):
+        _drop_build_records(info)
     names = _entry_points(dest)
     for scripts in (dest / "bin", dest / "Scripts"):
         if not scripts.is_dir() or (scripts / "__init__.py").exists():
@@ -342,6 +347,32 @@ def drop_install_junk(dest: Path) -> None:
                 f.unlink()
         if not any(scripts.iterdir()):
             scripts.rmdir()
+
+
+def _drop_build_records(info: Path) -> None:
+    """Delete uv_cache.json, uv_build.json and a file: direct_url.json (PEP 610) of a dist-info,
+    and their RECORD rows. A URL requirement keeps its direct_url.json: it names no machine."""
+    junk = [info / "uv_cache.json", info / "uv_build.json"]
+    direct = info / "direct_url.json"
+    try:
+        data = json.loads(direct.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        data = None
+    if isinstance(data, dict) and str(data.get("url", "")).startswith("file:"):
+        junk.append(direct)
+    gone = {f"{info.name}/{p.name}" for p in junk if p.is_file()}
+    if not gone:
+        return
+    for name in gone:
+        (info.parent / name).unlink()
+    record = info / "RECORD"
+    try:
+        rows = record.read_text(encoding="utf-8").splitlines(keepends=True)
+    except (OSError, UnicodeDecodeError):
+        return
+    kept = [row for row in rows if row.split(",", 1)[0] not in gone]
+    if len(kept) != len(rows):
+        record.write_text("".join(kept), encoding="utf-8", newline="")
 
 
 def _platform_wheel(wheel: Path) -> bool:
@@ -389,15 +420,76 @@ def installed(site: Path) -> frozenset[tuple[str, str]]:
     return frozenset(out)
 
 
-def skipped_requirements(requirements: Path, site: Path) -> list[str]:
-    """Return the locked pins that were NOT installed into `site`: their markers (sys_platform,
-    python_version, implementation_name...) exclude that target's platform or interpreter."""
+_DIRECT_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*@")
+
+
+def _local_key(base: Path, raw: str) -> str:
+    """One spelling of a local source path, relative to `base` or absolute (a file: URL too)."""
+    if raw.startswith("file:"):  # a path outside the project: uv exports it as a URL
+        from urllib.parse import urlparse
+        from urllib.request import url2pathname
+
+        raw = url2pathname(urlparse(raw).path)
+    return os.path.normcase(os.path.normpath(os.path.join(base, raw)))
+
+
+def _local_names(lock: Path) -> dict[str, str]:
+    """The packages of uv.lock that come from a local folder or file (a workspace library, a
+    path dependency), by their path: `uv export --no-editable` writes them as a bare path."""
+    try:
+        data = tomllib.loads(lock.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return {}
+    out: dict[str, str] = {}
+    for package in data.get("package", []):
+        source = package.get("source") if isinstance(package, dict) else None
+        if not isinstance(source, dict) or not isinstance(package.get("name"), str):
+            continue
+        for kind in ("editable", "directory", "path"):
+            if isinstance(source.get(kind), str):
+                out[_local_key(lock.parent, source[kind])] = package["name"]
+    return out
+
+
+def skipped_requirements(requirements: Path, site: Path, *, lock: Path | None = None) -> list[str]:
+    """Return the locked requirements that were NOT installed into `site`: their markers
+    (sys_platform, python_version, implementation_name...) exclude that target's platform or
+    interpreter.
+
+    Pins are compared by name and version. A direct reference (`name @ url`) and a local library
+    (a bare path: `uv export --no-editable`, named through uv.lock) only matter with a marker
+    (without one they are installed everywhere) and are compared by name; a path uv.lock does
+    not name counts as skipped, so the build goes per target instead of claiming to be pure.
+    """
     have = installed(site)
+    names = {name for name, _ in have}
+    lock_file = LOCK if lock is None else lock
+    local: dict[str, str] | None = None
     out: list[str] = []
     for line in requirements.read_text(encoding="utf-8").splitlines():
+        if not line or line[0].isspace() or line.startswith(("#", "-")):
+            continue  # hashes and comments (continuation lines), options
         m = _PIN_RE.match(line)
-        if m and (_norm_name(m[1]), _norm_version(m[2])) not in have:
-            out.append(f"{m[1]}=={m[2]}")
+        if m:
+            if (_norm_name(m[1]), _norm_version(m[2])) not in have:
+                out.append(f"{m[1]}=={m[2]}")
+            continue
+        requirement, marked, _ = line.rstrip("\\").partition(" ;")  # PEP 508: a URL needs a blank before ;
+        requirement = requirement.strip()
+        if not marked:
+            continue
+        direct = _DIRECT_RE.match(requirement)
+        if direct:
+            if _norm_name(direct[1]) not in names:
+                out.append(direct[1])
+            continue
+        if local is None:
+            local = _local_names(lock_file)
+        name = local.get(_local_key(lock_file.parent, requirement))
+        if name is None:
+            out.append(requirement)
+        elif _norm_name(name) not in names:
+            out.append(f"{name} ({requirement})")
     return out
 
 
@@ -415,29 +507,36 @@ def _move(src: Path, dst: Path) -> None:
     os.replace(src, dst)
 
 
-def remove_output(path: Path) -> None:
-    """Remove a previous build output in dist/ (a file or a folder) whole, or not at all.
+def remove_output(path: Path, *also: Path) -> None:
+    """Remove a previous build output in dist/ (files or folders of one folder: portable's folder
+    and its archives) whole, or not at all.
 
-    A folder is first moved aside in the same folder: Windows refuses that while a file inside
-    is in use (the app still running from it, a console in it), and rmtree used to delete half
-    of the folder before it failed with a traceback. What the moved copy still holds (a scanner,
-    an immutable file) is only a warning: the new output has its place.
+    Each is first moved aside into one scratch folder next to them: Windows refuses that while a
+    file is in use (the app still running from the folder, a console in it, an open archive), and
+    rmtree used to delete half of the folder before it failed with a traceback. When one cannot
+    move, the ones already moved come back, so nothing is deleted. What the moved copies still
+    hold (a scanner, an immutable file) is only a warning: the new output has its place.
     """
-    if not path.exists() and not path.is_symlink():
+    present = [p for p in (path, *also) if p.exists() or p.is_symlink()]
+    if not present:
         return
     hint = "\n  Is the app still running? Close it (or the window that uses the folder) and build again"
-    if path.is_file() or path.is_symlink():
+    aside = Path(tempfile.mkdtemp(prefix=f".{present[0].name}.old-", dir=present[0].parent))
+    moved: list[Path] = []
+    for p in present:
         try:
-            path.unlink()
+            _move(p, aside / p.name)
         except OSError as e:
-            raise DeployError(f"cannot replace {rel(path)}: it is in use or read-only ({_why(e)}){hint}", 1) from None
-        return
-    aside = Path(tempfile.mkdtemp(prefix=f".{path.name}.old-", dir=path.parent))
-    try:
-        _move(path, aside / path.name)
-    except OSError as e:
-        aside.rmdir()
-        raise DeployError(f"cannot replace {rel(path)}: a file in it is in use ({_why(e)}){hint}", 1) from None
+            for back in reversed(moved):
+                try:
+                    _move(aside / back.name, back)
+                except OSError as err:
+                    ui.warn(f"could not put {rel(back)} back ({_why(err)}): it is in {rel(aside)}")
+            if not any(aside.iterdir()):
+                aside.rmdir()
+            what = "a file in it is in use" if p.is_dir() and not p.is_symlink() else "it is in use or read-only"
+            raise DeployError(f"cannot replace {rel(p)}: {what} ({_why(e)}){hint}", 1) from None
+        moved.append(p)
     shutil.rmtree(aside, ignore_errors=True)
     if aside.exists():
         ui.warn(f"could not delete all of the previous output, moved to {rel(aside)}: delete it by hand")

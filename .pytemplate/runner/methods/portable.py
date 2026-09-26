@@ -367,13 +367,15 @@ def build(req: BuildRequest) -> Path:
         raise DeployError("portable with a bundled runtime is only built for the host OS; use --method pyz for other OSes")
     host = common.host_target(cfg, req.backend)
     out = dist_path(req, f"-{host.key}" if bundled else "")
-    for suffix in (".zip", ".tar.gz"):  # the previous archive must never sit next to a new or failed folder
-        common.remove_output(Path(f"{out}{suffix}"))
-    common.remove_output(out)  # whole or not at all: the app may still run from it
+    # Before anything is removed: `uv export --locked` refuses a stale uv.lock, which left a
+    # folder holding only app/ where the previous build was
+    requirements = common.export_requirements(cfg)
+    # The folder and its archives go together or not at all (the app may still run from the
+    # folder): the previous archive must never sit next to a new or failed folder
+    common.remove_output(out, *(Path(f"{out}{suffix}") for suffix in (".zip", ".tar.gz")))
     out.mkdir(parents=True)
 
     common.copy_app(req.app_dir, out / "app", extensions=True)
-    requirements = common.export_requirements(cfg)
     common.install_deps(cfg, req.backend, host, out / "lib", requirements)
     if not bundled:
         _warn_host_only(host.key, requirements, out / "lib")

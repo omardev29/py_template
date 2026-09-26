@@ -554,7 +554,7 @@ header rules (with detector tests proving each rule fires).
 | `cmd_apply.py` | `./deploy apply [--force]` / `setup [--force]` (section 5.8): `make_plan` (every refusal before the first write), `apply`, `_print_plan` (--dry-run), the `applied` record (`load_record`, `save_record`, `trusted_record`, `project_record`, `record_of`, `rename_record`), `applied_state` / `_applied_preset` (`_marks`: a preset's traces in pyproject.toml) / `applied_name` / `_other_package`, `dependency_changes` (`DepChanges`, `req_key`), `read_project`, `pending` + `doctor` (changes not applied yet), `reference_problems`, `unused_envs`, `_restore`. |
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `new`, the internal `__init` (`cmd_init`), and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
 | `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`, `stage_pythonpath`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`, `BASEDPYRIGHT_NODE`. |
-| `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
+| `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `check_lock`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
 | `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys (`parse_key`, `check_key`, `targets_for`), `UV_PLATFORMS`/`host_floor`, `ensure_env`, `export_requirements`, `install_deps`, `drop_install_junk`, `has_native`, `skipped_requirements`, `copy_app`, `uses_tkinter`, `windowed`, `tree_bytes`; `nuitka.NUITKA`/`NUITKA_PYTHON`, `check_python`, `check_options`, `optimization_args` (`[deploy.nuitka]` lto/pgo); `pyz.check_parts`, `merge`. |
 | `shells.py` | `__probe`, launcher/shell doctor checks, `shell-setup` snippets, `selftest --shells` (section 4.9). |
 | `cmd_nvim.py` | `./deploy nvim ...` and `doctor(check)` (section 12.2). |
@@ -689,7 +689,8 @@ header rules (with detector tests proving each rule fires).
 - `clean` prints `would remove X` per target. `build` validates its arguments, the pyz target
   keys, the Nuitka pin and PGO rules (`nuitka.check_python`, `check_options`), the flet preset
   and Developer Mode (`flet.check_options`), the portable launchers' env values
-  (`portable.check`) and the UPX binary (`upx.preflight`: a missing `deploy.upx.path` fails) as
+  (`portable.check`), the lock (`cmd_build.check_lock`: a read-only `uv lock --check`, a stale
+  uv.lock fails) and the UPX binary (`upx.preflight`: a missing `deploy.upx.path` fails) as
   a real build does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M:
   would output dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options: --lto=... [--pgo-c ...]
   <extras>`; a method that packs with UPX on this host: `upx: <path>` or `upx: would download
@@ -1591,12 +1592,16 @@ Formats:
   and a leading bare word (`_stray_word`: "unknown backend 'mypy': did you mean mypyc?", "did you
   mean --method pyz?"). Then `nuitka.check_python`, for pyz `common.check_key` on every key,
   `flet.check_options` (the flet preset; Developer Mode on Windows for a windows target, exit
-  3), `portable.check` (the `[deploy.portable] env` values a `.cmd` launcher cannot hold) and
+  3), `portable.check` (the `[deploy.portable] env` values a `.cmd` launcher cannot hold),
+  `check_lock` (a read-only `uv lock --check`: every method stops on a uv.lock that
+  pyproject.toml moved past, but only where it runs `uv ... --locked`, with `--no-check` after
+  the payload, and exe and nuitka after the previous output was removed; exit 2 with uv's
+  reason and `./deploy lock`) and
   `upx.preflight`: when the method packs with UPX on this host (`upx.uses`: exe on Windows,
   nuitka, portable, flet desktop targets) it resolves the upx binary now, downloading it if
-  needed. What a method refuses (a missing `deploy.upx.path`, a failed download included) is
-  refused before the checks, the mypyc compile and the removal of the previous output, and in
-  `--dry-run` too (which only names the upx binary or its download). Default method from
+  needed. What a method refuses (a stale lock, a missing `deploy.upx.path`, a failed download
+  included) is refused before the checks, the mypyc compile and the removal of the previous
+  output, and in `--dry-run` too (which only names the upx binary or its download). Default method from
   `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs `run_checks` unless
   `--no-check` (a failure is exit 1, like `./deploy check`). `payload`: the mypyc release
   stage, or `sync_tree(SRC, .build/payload/<backend>)`. A method whose result is missing or an
@@ -1608,9 +1613,12 @@ Formats:
   with a bundled runtime adds `-<target key>`, flet adds `-<target>`. The CI template hard-codes
   `dist/<NAME>-<BUILD_BACKEND>-pyz/<NAME>.pyz`: it is coupled to `BuildRequest.out_name`. Every
   method but flet build replaces its previous output whole or not at all, before its packager
-  runs (`common.remove_output`: a folder is first moved aside in `dist/`, which Windows refuses
-  while a file in it is in use, the app still running from it: exit 1 naming the file ("Is the
-  app still running?"), nothing deleted; what the moved copy still holds is a warning);
+  runs (`common.remove_output`: every path is first moved aside into one scratch folder in
+  `dist/`, which Windows refuses while a file in it is in use, the app still running from it:
+  exit 1 naming the file ("Is the app still running?"), the paths already moved come back,
+  nothing deleted; what the moved copies still hold is a warning; portable passes its folder
+  and both archives in one call, and exports its requirements first, wheel syncs first, so a
+  failure there leaves the previous output alone);
   `pyz._write_archive` turns a `.pyz` in use into the same error. rmtree used to delete half of
   the folder, then fail with a traceback (for nuitka after minutes of work).
 - Work dirs live under `.build/<name>/<backend>` (`exe-stage`, `pyinstaller`, `flet-pack`,
@@ -1652,7 +1660,10 @@ Formats:
   `drop_install_junk` removes uv's `.lock`, `_virtualenv*` and the console/GUI script wrappers
   of `bin/` / `Scripts/` (names from `*.dist-info/entry_points.txt`; their shebang or `.exe`
   trampoline holds the build machine's `.venv` path), keeping other files there (ruff and uv
-  wheels look up their native binary at `<target>/bin`) and a real `bin` package.
+  wheels look up their native binary at `<target>/bin`) and a real `bin` package; in each
+  `*.dist-info` (`_drop_build_records`) uv's `uv_cache.json` and `uv_build.json`, and a
+  `direct_url.json` whose URL is `file:` (a local library names its source folder on this
+  machine), with their `RECORD` rows (a URL requirement keeps its `direct_url.json`).
 - `common.has_native`: a `*.dist-info/WHEEL` tag with an ABI or platform (also pure-Python
   platform wheels that ship an executable, e.g. imageio-ffmpeg), else a `.pyd/.so/.dll/.dylib`
   or `.so.N` file.
@@ -1706,7 +1717,9 @@ Per method:
   the build folder): `lib/` and `app/` at levels 0 and `deploy.optimize`, the bundled stdlib
   (`runtime_stdlib`: `lib/pythonX.Y`, `lib/pypyX.Y` or `Lib`) only at the launchers' level,
   `-x` skipping PyPy's broken `lib2to3/tests` data: a read-only install never recompiles.
-  The previous `<out>.zip`/`<out>.tar.gz` is deleted first; `archive` writes gztar on POSIX and,
+  The previous `<out>.zip`/`<out>.tar.gz` goes with the previous folder, all or nothing
+  (`common.remove_output`; it was deleted first, and kept deleted when the folder was in use);
+  `archive` writes gztar on POSIX and,
   on Windows, `make_archive`'s zip (`strict_timestamps=False`; `.sh` entries as Unix entries with
   mode 0755: `create_system = 3` is needed too, unzip ignores MS-DOS mode bits).
   - Launchers: `.cmd` = ASCII + CRLF, `start ""` + `pythonw.exe` for GUI apps, env values with
@@ -1726,8 +1739,9 @@ Per method:
     manager's `py`/`python` install the requested version when NO runtime exists at all (its
     `automatic_install` default; the silenced probe hides it, so that first start can take a
     minute): the launchers leave `PYTHON_MANAGER_*` to the user. With native dependencies, or
-    pins a marker left out on this interpreter (`common.skipped_requirements`, as pyz: tzdata on
-    win32, backports-tarfile below 3.12), `portable._warn_host_only` warns that `lib/` only fits
+    requirements a marker left out on this interpreter (`common.skipped_requirements`, as pyz:
+    tzdata on win32, backports-tarfile below 3.12, a local library for win32 only),
+    `portable._warn_host_only` warns that `lib/` only fits
     the host key (the launchers start it on any OS and Python at or above the minimum).
   - Every bundled build starts its interpreter before reporting success (`_smoke_runtime`, after
     UPX, with the launchers' `-s -O` plus `-B`): it must run and its `sys.prefix` (a `PTPREFIX:`
@@ -1775,10 +1789,15 @@ Per method:
   a passwd entry; a read-only home) it extracts into a per-run `tempfile.mkdtemp` folder removed
   at exit (never a predictable shared `/tmp` path: another user could plant code there).
   Layout: `common/lib` only when the build is "pure": every target site installed exactly the
-  locked set (`common.skipped_requirements`: no pin was excluded by a `sys_platform`,
-  `python_version` or `implementation_name` marker), the sites hold the same distributions and
-  nothing is native (`has_native`); otherwise EVERY target gets `targets/<key>/lib` and the build
-  warns which conditional pins restrict it ("runs on: <keys>"). `common/` never holds extensions
+  locked set (`common.skipped_requirements`: no requirement was excluded by a `sys_platform`,
+  `python_version` or `implementation_name` marker; pins count by name and version, a direct
+  URL (`name @ url`) and a local library by name: `--no-editable` exports a local library as a
+  bare path or a `file:` URL, named through uv.lock's sources (`common._local_names`), and a
+  path uv.lock does not name counts as excluded; only name==version lines were read, so a
+  win32-only local library was missing from a pyz that said it ran anywhere), the sites hold
+  the same distributions and nothing is native (`has_native`); otherwise EVERY target gets
+  `targets/<key>/lib` and the build warns which conditional requirements restrict it ("runs on:
+  <keys>"). `common/` never holds extensions
   (`bug:` check). The mypyc overlay `targets/<host>/app` holds only the extension files: the
   bootstrap extracts `common/` and `targets/<key>/` into ONE folder, so each `.pyd/.so` lands
   next to its `.py` and the extension loader wins. `_pyz.json`: `name`, `build_id`, `min_python`,
@@ -3019,12 +3038,15 @@ uv:
   verbatim comparison never matched. Fix: `cmd_apply.req_key` (5.8). Test:
   `test_apply.py::test_req_key_normalizes_like_uv`. Goes: never.
 - **`uv pip install --target` leaves build-machine files** (DEFECT for the `.lock`, LIMITATION
-  for the rest): a `.lock`, `_virtualenv*` and console-script wrappers whose shebang or `.exe`
-  trampoline names this machine's `.venv` shipped in pyz and portable builds. Up: cf.
+  for the rest): a `.lock`, `_virtualenv*`, console-script wrappers whose shebang or `.exe`
+  trampoline names this machine's `.venv`, and for a local library (installed for real since
+  `--no-editable`) a `direct_url.json` naming its source folder on this machine (PEP 610) plus
+  uv's `uv_cache.json`/`uv_build.json` shipped in pyz and portable builds. Up: cf.
   astral-sh/uv#11878 (the `.lock` uv left in a venv; 0.12.19 still leaves an empty one in a
   `--target` folder). Fix: `common.drop_install_junk` (10). Test:
-  `test_build_methods.py::test_install_deps_removes_uv_junk_but_keeps_native_tools`. Goes: the
-  `.lock` part when uv removes it; the rest never.
+  `test_build_methods.py::test_install_deps_removes_uv_junk_but_keeps_native_tools`,
+  `test_install_junk_drops_the_build_machines_path_of_a_local_library`. Goes: the `.lock` part
+  when uv removes it; the rest never.
 - **Wheels for this machine follow this machine** (LIMITATION): uv took the newest tags the
   build machine allows (manylinux_2_34 on Ubuntu 24.04: the pyz failed on Debian 11), its macOS
   default may move with a uv release, and an sdist built for another OS gives host binaries.
@@ -3893,10 +3915,12 @@ Windows:
 - **A running program's files cannot be deleted** (LIMITATION): rebuilding an output while the
   previous build ran from it raised PermissionError in the middle of deleting it (half of the
   folder gone, a runner traceback; for nuitka after minutes of work). Fix:
-  `common.remove_output` moves the old output aside first (whole or not at all) before the
-  packager runs and turns the error into a clear one (exit 1, 10). Test:
+  `common.remove_output` moves the old output aside first (whole or not at all: portable's
+  folder with its archives, those already moved come back) before the packager runs and turns
+  the error into a clear one (exit 1, 10). Test:
   `test_build_methods.py::test_an_output_in_use_is_a_clear_error_before_the_packager_runs`,
-  `test_a_previous_output_in_use_is_left_whole`. Goes: never.
+  `test_a_previous_output_in_use_is_left_whole`,
+  `test_a_previous_portable_output_in_use_is_left_whole_with_its_archives`. Goes: never.
 - **The classic console needs ANSI turned on** (LIMITATION): and the `os.system("")` trick
   started a cmd.exe on every run. Fix: `ui.enable_vt_mode` (`SetConsoleMode`, 5.3). Test:
   `test_paths.py::test_ui_never_spawns_cmd_for_colors`,
