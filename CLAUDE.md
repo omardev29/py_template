@@ -814,9 +814,13 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   that hook and deletes the copy (the checks ran twice). A third project cannot be chained
   (`pre-commit.local` taken: `install --force` refuses): `hooks.chain_hint`/`chain_advice` then
   say so instead of suggesting `--force`. A hook pytemplate does not manage runs the checks
-  ("calls") only with a line that is not a comment and calls THIS project's launcher with
-  `hooks run` (`hooks.runs_checks`: resolved against the top, or absolute; a word with a shell
-  expansion cannot be resolved and counts); another project's line is "foreign". A project that
+  ("calls") only with a command that is not a comment and calls THIS project's launcher with
+  `hooks run` (`hooks.runs_checks`: the script split into commands and words by
+  `hooks._shell_commands`, quotes and `$(...)` kept whole; `./deploy`'s global options may come
+  before `hooks`; a relative launcher is resolved against the top, or the folder a `cd` before it
+  moved to, a subshell's `cd` staying in it; a launcher or `cd` folder with a shell expansion
+  (`"$ROOT"/apps/a/deploy`, `$(git rev-parse --show-toplevel)/...`) cannot be resolved and
+  counts); another project's command, or a quoted string, is "foreign". A project that
   an enclosing repository ignores (`git check-ignore -q deploy`, which refuses
   `--literal-pathspecs`) gets no hook unless forced. With `core.hooksPath` set nothing is
   written: install/status/doctor print the line to add (`sh ./deploy hooks run || exit $?`), and

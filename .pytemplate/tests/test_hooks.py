@@ -684,6 +684,13 @@ def test_calls_means_this_projects_launcher_on_a_live_line(tmp_path: Path, capsy
         "sh ./apps/a/deploy hooks runner",
         "sh ./apps/a/redeploy hooks run",
         "sh ./deploy hooks run",  # the top's launcher: not this project's
+        "cd apps/b && ./deploy hooks run",  # b's, reached through a cd
+        "cd apps/a && ../b/deploy hooks run",
+        "(cd apps/a)\n./deploy hooks run",  # the cd stayed in its subshell
+        "(cd apps/a)\n(./deploy hooks run)",  # ...and the next subshell starts at the top again
+        "sh ./apps/a/deploy -q status hooks run",  # not the hooks command
+        "echo 'sh ./apps/a/deploy hooks run'",  # a string, not a call
+        "sh ./apps/a/deploy hooks run-all",
     ]
     for body in not_ours:
         shared.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
@@ -700,6 +707,24 @@ def test_calls_means_this_projects_launcher_on_a_live_line(tmp_path: Path, capsy
         f'sh "{(a / "deploy").as_posix()}" hooks run',
         'sh "$(git rev-parse --show-toplevel)/apps/a/deploy" hooks run',  # cannot tell: counts
         "sh ./apps/b/deploy hooks run || exit $?\nsh ./apps/a/deploy hooks run || exit $?",
+        # global options go before the command (./deploy -q hooks run)
+        "sh ./apps/a/deploy -q hooks run || exit $?",
+        "sh ./apps/a/deploy --verbose --no-render hooks run",
+        # a word made of an expansion and a path is one word, and it cannot be resolved: counts
+        'sh "$(git rev-parse --show-toplevel)"/apps/a/deploy hooks run',
+        'sh "$ROOT"/apps/a/deploy hooks run',
+        "sh $(git rev-parse --show-toplevel)/apps/a/deploy hooks run",
+        "sh `git rev-parse --show-toplevel`/apps/a/deploy hooks run",
+        # a relative launcher after a cd: resolved from there (git runs hooks from the top)
+        "cd apps/a && ./deploy hooks run",
+        "cd apps\ncd a\nsh deploy hooks run",
+        "cd ./apps/b && cd ../a && sh ./deploy hooks run",
+        '(cd apps/b && ./deploy hooks run)\n./apps/a/deploy hooks run',  # a subshell's cd stays there
+        'cd "$(dirname "$0")/../apps/a" && ./deploy hooks run',  # cannot be resolved: counts
+        "{ cd apps/a; ./deploy hooks run; }",  # a group is no subshell: its cd holds
+        "if cd apps/a; then sh ./deploy -q hooks run; fi",
+        "exec sh ./apps/a/deploy hooks run",
+        "sh ./apps/a/deploy hooks run; status=$?",
     ]
     for body in ours:
         shared.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
