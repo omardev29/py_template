@@ -1804,6 +1804,10 @@ def _copy_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, base: Path, v
 
 CPYTHON_BASE = [
     "bin/python3.14",
+    "bin/python3.14-config",
+    "bin/pip3",  # the base's console scripts: pip, idle, and a tool someone installed into it
+    "bin/idle3.14",
+    "bin/ruff",
     "include/python3.14/Python.h",
     "share/man/man1/python3.1",
     "lib/libpython3.14.so.1.0",
@@ -1833,6 +1837,7 @@ CPYTHON_BASE = [
 CPYTHON_LINKS = {"bin/python3": "python3.14", "bin/python": "python3.14", "lib/libpython3.14.so": "libpython3.14.so.1.0"}
 CPYTHON_KEPT = {
     "bin/python3.14",
+    "bin/python3.14-config",
     "bin/python3",
     "bin/python",
     "lib/libpython3.14.so.1.0",
@@ -1858,6 +1863,7 @@ CPYTHON_TK = {
 PYPY_BASE = [
     "bin/pypy3.11",
     "bin/libpypy3.11-c.so",
+    "bin/mypy",
     "bin/libpypy3.11-c.so.debug",
     "bin/pypy3.11.debug",
     "lib/libsqlite3.so.0",

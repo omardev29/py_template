@@ -38,6 +38,29 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
 9. Calling `./deploy` from an agent on Windows: a Git Bash tool runs `deploy` (sh); a
    PowerShell tool resolves `./deploy` to `deploy.ps1`; in cmd, Claude Code sessions set
    `NoDefaultCurrentDirectoryInExePath=1`, so type `.\deploy.cmd`, never a bare `deploy`.
+10. QUALITY BAR (set by the owner; never relax it, never argue it away). Bug density = confirmed
+    bugs / lines of our code:
+    - at most 1 bug per 1000 lines: ACCEPTABLE, the only state in which the work is done;
+    - worse than 1 per 1000 (1 per 500 included): UNACCEPTABLE, fixing it comes first;
+    - worse than 1 per 100: UNRELIABLE software.
+    Counted: a reproduced defect of OUR code (the runner, launchers, templates, presets, the
+    Neovim plugin, the template's CI) that stops the user from doing something, at one of three
+    severities:
+    - critical: it loses or corrupts data (the user's files, the project, uv.lock), opens a
+      security hole, or gives a silently wrong result (a build without what it should hold, a
+      check that passes when it must fail);
+    - serious: a command, build method or documented feature fails or cannot be used in a
+      supported setup, and there is no reasonable workaround;
+    - notable: it fails in a supported case but a workaround exists, or it leaves a half-made
+      change or a broken state the user must repair by hand.
+    Not counted, but still fixed when found: minor and cosmetic defects that stop nothing (a
+    character printed wrong, an `n` with tilde garbled in a message, an unclear hint, layout).
+    Also not counted: the user's code;
+    a defect of a dependency (uv, PyInstaller, Nuitka, mypyc, flet, PowerShell, a shell...) that
+    something should do and does not, when our workaround is documented in section 15.1
+    (dependency and version, symptom, upstream issue, the workaround by symbol, the test that
+    covers it, when it can go). An undocumented workaround counts as our bug. Lines and the
+    measurements so far: section 13.4.
 
 ## 2. What this is
 
@@ -63,6 +86,9 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
 
 ```
 deploy, deploy.cmd, deploy.ps1    launchers (section 4); all logic is in .pytemplate/
+README.md, LICENSE                [template repo] the template's page and MIT license; a
+                                  project gets its own README.md and keeps these two as
+                                  .pytemplate/README.md and .pytemplate/LICENSE (section 11)
 pytemplate.toml                   single source of truth (section 6.1)
 pyproject.toml, uv.lock           deps; pyproject has managed parts (section 6.3)
 src/main.py                       app entry point, never compiled
@@ -1389,7 +1415,9 @@ Per method:
   bundles no interpreter) with `app/`, `lib/` (`uv pip install --target`), `runtime/` (pruned
   copy of the interpreter's `base_prefix` through `\\?\` extended paths; the `ignore` callback
   strips that prefix before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. The base's
-  `__pycache__` folders are never copied. Prunes `include libs Tools share`, `tcl*` (Windows
+  `__pycache__` folders are never copied. Prunes `include libs Tools share Scripts`, every `bin/` entry but the interpreter (`BIN_KEEP`:
+  `python*`, `pypy*`, `libpypy*`; the base's console scripts, e.g. a 24 MB `ruff` installed into
+  it, carried the build machine's paths), `tcl*` (Windows
   base), stdlib `test idlelib turtledemo ensurepip site-packages`, `test`/`tests` subfolders of
   stdlib packages (PyPy's `unittest/test`, `lib2to3/tests`...), `*.debug` (PyPy's detached debug
   symbols, 16 MB), PyPy `hpy/devel`, and Tk unless `src/` or an installed dependency in `lib/`
@@ -1645,9 +1673,18 @@ Per method:
   another repository, a project never committed), it copies every file; a git failure other
   than "not a git repository" (dubious ownership...) is a warning first (git runs with
   `LC_ALL=C`). Both skip (`presets._skipped`) `.git`, `.build`, `dist`, caches, `.flet`,
-  `.venv*`, `template-repo` at any depth; `build/` and `.claude/` at the root; and
-  `.github/workflows/template-*` (template CI files MUST use that prefix). `new` then runs the
-  copy's own runner with `__init <preset> --name <n> --force` inside the copy, `git init -b
+  `.venv*`, `template-repo` at any depth; `build/`, `.claude/`, `README.md` and `LICENSE` at
+  the root; and `.github/workflows/template-*` (template CI files MUST use that prefix). A
+  project made with `new` is another program, not the template (an owner decision): `new`
+  (`presets._make_own`) writes its own `README.md` (`presets.project_readme`: name, preset
+  description, getting started) and sets `[project] description` to the preset's
+  (`_set_project_string`), and, from the template repository only (the `template-repo`
+  marker), copies the template's `README.md` and `LICENSE` to `.pytemplate/README.md` (the
+  manual of `./deploy`, of that version) and `.pytemplate/LICENSE` (the MIT notice that must
+  travel with the copied runner): `presets.TEMPLATE_DOCS`. A project running `new` passes
+  those two on as tracked files, and its own root `README.md`/`LICENSE` stay behind. `new`
+  then runs the copy's own runner with `__init <preset> --name <n> --force` inside the copy,
+  `git init -b
   main` (the generated CI runs on `main`; git < 2.28: plain `init` + `symbolic-ref HEAD
   refs/heads/main`; nothing inside an existing work tree) and `git add --chmod=+x deploy
   deploy.ps1`. When the copy or `__init` fails (a name uv refuses, no network, Ctrl+C) `new`
@@ -2190,6 +2227,32 @@ September 2026 were developed on Linux (pwsh 7.6 for `deploy.ps1`; niubash simul
 sourcing `deploy` in bash, dash, busybox, ksh, mksh and yash): their Windows paths (Windows PowerShell 5.1, `deploy.cmd`, real niubash and MSYS2) run
 only with `./deploy selftest` and `selftest --shells` on Windows.
 
+### 13.4 Bug density (rule 1.10)
+
+- Lines = non-blank lines that are not only a comment or a docstring, of the product code:
+  `.pytemplate/runner/**/*.py`, `.pytemplate/deploy.py`, `.pytemplate/tools/*.py`, `deploy`,
+  `deploy.cmd`, `deploy.ps1`, `.pytemplate/nvim/**/*.lua` (not its `tests/`),
+  `.pytemplate/templates/**`, the preset skeletons and tools (`.py`, `.pyi`, `.toml`; not
+  `typings/`) and `.github/workflows/template-*.yml`. Tests (`.pytemplate/tests/`,
+  `.pytemplate/nvim/tests/`) are not in the denominator; a test defect counts as a bug only when
+  it breaks `./deploy selftest` for a user or hides a product bug.
+- Measure with a bug hunt on a fixed commit: every finding reproduced and confirmed by an
+  independent verifier, duplicates merged, dependency defects moved to section 15.1. A hunt
+  finds only part of the bugs: the reported density is the confirmed count (a lower bound);
+  to estimate the total, run two independent hunts on the same commit and use capture-recapture
+  (total ~ found by A x found by B / found by both).
+- Measurements:
+  - 2026-09-25, commit fc131b9, 10,837 lines: 172 confirmed bug findings (17 high, 78 medium,
+    77 low; a few are duplicates of each other) and 44 stability defects (breakage that comes
+    with time: moving versions, expiring schedules). That hunt's severities are not the three
+    of rule 1.10 (some "low" findings stopped every command, e.g. a non-UTF-8 byte in
+    pytemplate.toml), so the counted density lies between 1 per 114 lines (high and medium
+    only: UNACCEPTABLE) and 1 per 63 (every bug: UNRELIABLE). The
+    September 2026 overhaul fixed or deliberately closed every one of the 172 bugs (wave 1)
+    and took on the CI stability defects (wave 2); the code grew to 14,588 lines.
+  - After the overhaul: not measured yet. Until a measurement says otherwise, the project is not
+    at the bar.
+
 ## 14. Conventions and recipes
 
 Runner code:
@@ -2276,6 +2339,16 @@ Files and git:
 - Default app content lives in `presets/script/files/` (section 11).
 
 ## 15. Known issues and fragile points (still open)
+
+### 15.1 Upstream defects we work around
+
+A defect of a dependency that we work around is not our bug (rule 1.10) only while it is
+listed here: dependency and version, symptom, upstream issue (or "none filed"), our workaround
+by symbol, the test that covers it, and when the workaround can go.
+
+(Inventory in progress.)
+
+### 15.2 Our open issues and fragile points
 
 Behaviour:
 - `cmd_dev.split_backend` treats a first argument equal to `cpython`, `pypy` or `mypyc` (and

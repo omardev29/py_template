@@ -23,7 +23,13 @@ from ..ui import DeployError
 from . import common
 
 STDLIB_PRUNE = {"test", "idlelib", "turtledemo", "ensurepip", "site-packages"}
-ROOT_PRUNE = {"include", "libs", "Tools", "share"}
+# Scripts: the console scripts of the base (Windows), like bin/ below
+ROOT_PRUNE = {"include", "libs", "Tools", "share", "Scripts"}
+# What bin/ keeps (POSIX): the interpreter and its links, and PyPy's libpypy*-c.so. The rest
+# are console scripts of packages installed into the base (pip, idle3, or a tool someone
+# installed there, such as a 24 MB ruff): their site-packages is pruned, and their shebangs
+# point at the build machine
+BIN_KEEP = ("python", "pypy", "libpypy")
 TK = {"tkinter", "_tkinter", "turtle.py"}
 # Tcl/Tk next to the stdlib, loaded only by _tkinter: uv's CPython on Linux/macOS keeps lib/
 # libtcl9.0.so, libtcl9tk9.0.so, tcl9.0/, tk9.0/, itcl4.3.8/, thread3.0.6/ and
@@ -69,6 +75,8 @@ def copy_runtime(cfg: Config, backend: str, dest: Path, lib: Path | None = None)
         skip |= {n for n in names if n.endswith(".debug")}  # detached debug symbols (PyPy: 16 MB)
         if d == base:
             skip |= {n for n in names if n in ROOT_PRUNE or (not keep_tk and n.lower().startswith("tcl"))}
+        if d == base / "bin":
+            skip |= {n for n in names if not n.startswith(BIN_KEEP)}
         if not keep_tk and d in tk_dirs and d not in stdlib:  # not in stdlib: on Windows lib == Lib
             skip |= {n for n in names if TCL_RE.match(n)}
         if d in stdlib:

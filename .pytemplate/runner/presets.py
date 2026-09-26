@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import proc, ui
 from .config import APP_NAME, BACKENDS, NAME_RULE
-from .project import BUILD, PRESETS, PYPROJECT, ROOT, rel
+from .project import BUILD, PRESETS, PYPROJECT, ROOT, TEMPLATE, rel
 from .ui import DeployError
 
 if TYPE_CHECKING:
@@ -448,22 +448,35 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
 # trailing \r is fine (rename passes CRLF text)
 _PROJECT_HEADER = re.compile(r"[ \t]*\[[ \t]*project[ \t]*\][ \t\r]*(?:#.*)?")
 _TABLE_HEADER = re.compile(r"[ \t]*\[\[?[^\[\]\n]+\]\]?[ \t\r]*(?:#.*)?")
-_NAME_KEY = re.compile(r"""([ \t]*(?:name|"name"|'name')[ \t]*=[ \t]*)(?:"(?:[^"\\\n]|\\.)*"|'[^'\n]*')""")
+def _string_key(key: str) -> re.Pattern[str]:
+    """A `key = "..."` (or '...') line, the key bare or quoted; group 1 is everything before the value."""
+    k = re.escape(key)
+    return re.compile(rf"""([ \t]*(?:{k}|"{k}"|'{k}')[ \t]*=[ \t]*)(?:"(?:[^"\\\n]|\\.)*"|'[^'\n]*')""")
 
 
-def _set_project_name(text: str, name: str) -> str:
-    """`text` with the name of its [project] table set to `name`; any other `name` key (an index,
-    a tool table) is left alone. Unchanged without one: pyproject_after_init checks the result."""
+def _set_project_string(text: str, key: str, value: str) -> str:
+    """`text` with the string `key` of its [project] table set to `value` (a one-line TOML
+    string); the same key of any other table (an index's `name`, a tool's) is left alone.
+    Unchanged without one: callers that need the key check the result."""
+    from .config import toml_value
+
+    pattern = _string_key(key)
     lines = text.split("\n")
     start = next((i for i, ln in enumerate(lines) if _PROJECT_HEADER.fullmatch(ln)), len(lines))
     for i in range(start + 1, len(lines)):
         if _TABLE_HEADER.fullmatch(lines[i]):
             break
-        m = _NAME_KEY.match(lines[i])
+        m = pattern.match(lines[i])
         if m:
-            lines[i] = f'{m.group(1)}"{name}"{lines[i][m.end():]}'
+            lines[i] = f"{m.group(1)}{toml_value(value)}{lines[i][m.end():]}"
             break
     return "\n".join(lines)
+
+
+def _set_project_name(text: str, name: str) -> str:
+    """`text` with the name of its [project] table set to `name` (_set_project_string).
+    Unchanged without one: pyproject_after_init checks the result."""
+    return _set_project_string(text, "name", name)
 
 
 def _extra_bounds(lines: list[str]) -> tuple[int, int] | None:
@@ -836,8 +849,14 @@ def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
 SKIP_ANYWHERE = frozenset(
     {".git", ".build", "dist", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".flet", "template-repo"}
 )
-# PyInstaller/Flet leftovers and Claude Code state (settings, agent worktrees)
-SKIP_AT_ROOT = frozenset({"build", ".claude"})
+# PyInstaller/Flet leftovers, Claude Code state (settings, agent worktrees), and the page and
+# license of the program this is: a project made with `new` is another program (TEMPLATE_DOCS)
+SKIP_AT_ROOT = frozenset({"build", ".claude", "README.md", "LICENSE"})
+# Where a project keeps the template repository's README (the manual of ./deploy, of the
+# version it was made from) and LICENSE (the notice the MIT license asks for, for the copied
+# runner). A project copies them on like any tracked file when it runs `new` itself.
+TEMPLATE_DOCS = {"README.md": ".pytemplate/README.md", "LICENSE": ".pytemplate/LICENSE"}
+TEMPLATE_URL = "https://github.com/omardev29/py_template"
 
 
 def _skipped(rel_path: str) -> bool:
@@ -946,6 +965,46 @@ def _git_init(dest: Path) -> None:
     proc.run([git, "add", "--chmod=+x", "deploy", "deploy.ps1"], cwd=dest, env=env, check=False)
 
 
+def project_readme(name: str, preset: str, *, manual: bool) -> str:
+    """The README.md of a project made with `new` (the template's own is its .pytemplate/README.md)."""
+    description = str(load(preset).get("description", "")).rstrip(".")
+    where = (
+        "The manual of `./deploy` and `pytemplate.toml` is `.pytemplate/README.md`: the py_template\n"
+        "README of the version this project was made from."
+        if manual
+        else f"The manual of `./deploy` and `pytemplate.toml` is the py_template README: {TEMPLATE_URL}"
+    )
+    return (
+        f"# {name}\n\n{description}. Made from [py_template]({TEMPLATE_URL}).\n\n"
+        "## Getting started\n\n"
+        "```sh\n"
+        "./deploy setup    # interpreters, environments, uv.lock, git hook, editor configs\n"
+        "./deploy run      # run the app with the active backend (pytemplate.toml)\n"
+        "./deploy test     # pytest\n"
+        "./deploy build    # package the app into dist/\n"
+        "```\n\n"
+        f"`./deploy help` lists every command. {where}\n"
+    )
+
+
+def _make_own(dest: Path, preset: str, name: str) -> None:
+    """What makes the copy a project of its own, before `__init` runs in it: its README.md and
+    [project] description, and (from the template repository) the template's README and LICENSE
+    under .pytemplate/ (TEMPLATE_DOCS)."""
+    if (TEMPLATE / "template-repo").is_file():
+        for src_name, target in TEMPLATE_DOCS.items():
+            if (ROOT / src_name).is_file():
+                (dest / target).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / src_name, dest / target)
+    manual = (dest / TEMPLATE_DOCS["README.md"]).is_file()
+    (dest / "README.md").write_text(project_readme(name, preset, manual=manual), encoding="utf-8", newline="\n")
+    pyproject = dest / PYPROJECT.name
+    if pyproject.is_file():
+        text = _read_text(pyproject, "pyproject.toml of the copy").replace("\r\n", "\n")
+        description = str(load(preset).get("description", ""))
+        pyproject.write_text(_set_project_string(text, "description", description), encoding="utf-8", newline="\n")
+
+
 def new(dest: Path, preset: str, name: str | None) -> None:
     """`./deploy new`: copy the template to `dest` and run `init` in the copy.
 
@@ -968,6 +1027,7 @@ def new(dest: Path, preset: str, name: str | None) -> None:
     ui.step(f"new project in {dest}")
     try:
         copy_template(dest)
+        _make_own(dest, preset, app_name)
         deploy_py = dest / ".pytemplate" / "deploy.py"
         proc.run([proc.find_uv(), "run", "--quiet", "--script", deploy_py, "__init", preset, "--name", app_name, "--force"], cwd=dest)
     except BaseException as e:
