@@ -3,7 +3,8 @@
 Usage (called by ./deploy): python mypyc_build.py <spec.json>
 
 We call mypycify() instead of `python -m mypyc` because the CLI does not allow
-strip_asserts, group_name or multi_file, and it always writes to ./build.
+strip_asserts, group_name or multi_file, and it always writes to ./build. The C flags of
+extra_cflags() are added to mypyc's own.
 
 Exit codes: 0 ok; MYPYC_REJECTED when mypy/mypyc rejected the code (the errors are printed,
 no C compiler ran); anything else is a failure of the C build (setuptools / the compiler).
@@ -18,6 +19,37 @@ import traceback
 from pathlib import Path
 
 MYPYC_REJECTED = 4  # mirrored by mypyc.MYPYC_REJECTED in the runner
+
+
+def compiler_type() -> str:
+    """The kind of C compiler setuptools builds with ("unix" = gcc/clang, "msvc"), found the way
+    mypycify finds it for its own flags (-O3 or /O2)."""
+    from distutils import ccompiler, sysconfig  # setuptools' copy (mypyc.build imported setuptools)
+
+    compiler = ccompiler.new_compiler()
+    sysconfig.customize_compiler(compiler)
+    return str(compiler.compiler_type)
+
+
+def extra_cflags(compiler: str, platform: str, no_semantic_interposition: bool) -> list[str]:
+    """The C flags added to mypyc's own for every extension (the wheel's setup.py mirrors this).
+
+    gcc/clang (compiler "unix"):
+    - -fno-strict-overflow: Python's own CFLAGS carry it, but a CFLAGS environment variable
+      REPLACES them (setuptools), and without it the wrap-around of i64/i32 arithmetic is
+      undefined behaviour in C. It is kept whatever CFLAGS says; the user's flags stay (a
+      repeated flag is harmless).
+    - Linux, compile.no_semantic_interposition: -fno-semantic-interposition, as CPython itself
+      is built. The functions of a -fPIC shared object are exported symbols that another
+      library could interpose, so gcc never inlines a call between compiled functions, not even
+      inside one module. Not on macOS (Apple clang: not verified) nor MSVC.
+    """
+    if compiler != "unix":
+        return []
+    flags = ["-fno-strict-overflow"]
+    if no_semantic_interposition and platform == "linux":
+        flags.append("-fno-semantic-interposition")
+    return flags
 
 
 def main() -> int:
@@ -51,6 +83,10 @@ def main() -> int:
         return MYPYC_REJECTED
     if not spec.get("compile", True):
         return 0
+    flags = extra_cflags(compiler_type(), sys.platform, spec["no_semantic_interposition"])
+    for ext in extensions:
+        # A new list for each: mypycify hands the SAME list object to every extension
+        ext.extra_compile_args = [*ext.extra_compile_args, *flags]
 
     from setuptools import setup
 

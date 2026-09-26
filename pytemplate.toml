@@ -31,13 +31,16 @@ editor = "pylance"   # pylance | basedpyright (the latter also flags Any in the 
 
 [compile]
 modules = ["myapp.core"]   # what mypyc compiles: packages or modules of src/
-exclude = []                 # modules inside those packages that stay interpreted
+exclude = []                 # modules or subpackages inside those packages that stay interpreted
 forbid_imports = []          # imports forbidden in compiled code (e.g. UI libraries)
 annotate = false             # HTML report of slow lines on every compile (or ./deploy report)
-opt_level = "3"
+# opt_level: mypyc's C optimization. MSVC: 1, 2 and 3 are all /O2
+opt_level = "3"              # 0 (debug only, slower than CPython) | 1 | 2 | 3 (default)
+no_semantic_interposition = true   # Linux gcc/clang: calls between compiled functions may be inlined
 
 [deploy]
-optimize = 1   # 0 | 1 | 2: bytecode -O level; with >= 1 mypyc also strips asserts
+# optimize: Python -O level of every build method (higher = MORE stripped, not faster)
+optimize = 1   # 0 keep asserts | 1 strip asserts | 2 also docstrings
 default = { cpython = "exe", mypyc = "exe", pypy = "portable" }   # ./deploy build method
 exclude_modules = []   # never bundled by exe/nuitka even if imported, e.g. "ssl" without HTTPS
 

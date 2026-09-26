@@ -35,6 +35,10 @@ MYPYC_REJECTED = 4
 COMPILED_STAMP = "compiled-options.json"
 # spec.json keys that do not change the binaries (every other key does, see build())
 _NOT_BINARY = ("annotate", "compile", "files", "force")
+# Environment variables that change the binaries but not the generated C: what setuptools
+# builds with (CC, CFLAGS: it REPLACES Python's own flags, CPPFLAGS, LDSHARED, LDFLAGS), macOS
+# ARCHFLAGS and MSVC's CL/_CL_. Recorded with the options: a change forces a rebuild too.
+COMPILER_ENV = ("CC", "CFLAGS", "CPPFLAGS", "LDSHARED", "LDFLAGS", "ARCHFLAGS", "CL", "_CL_")
 # ABI tag at the start of an extension suffix: cpython-314-x86_64-linux-gnu.so,
 # cpython-314-darwin.so, cp314-win_amd64.pyd (a trailing "t" = free-threaded build)
 _ABI_RE = re.compile(r"(?:cpython-|cp)(\d)(\d+)(t?)(?=[-.])")
@@ -272,6 +276,7 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
         "annotate": str(annotate) if annotate else "",
         "files": [p.relative_to(SRC).as_posix() for p in sources],
         "opt_level": cfg.compile.opt_level,
+        "no_semantic_interposition": cfg.compile.no_semantic_interposition,
         "debug_level": prof.debug_level,
         "strip_asserts": prof.strip_asserts,
         "multi_file": cfg.compile.multi_file,
@@ -285,11 +290,13 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
         "compile": compile_c,
     }
     # setuptools rebuilds an extension only when a source is newer than it: an option that only
-    # reaches the C compiler (opt_level, debug_level) leaves the generated C untouched, so the
-    # old binary would be kept. The options of the last SUCCESSFUL compile are recorded (the
-    # record is deleted before compiling: a failed or interrupted build forces the next one);
-    # any difference forces a full rebuild (build_ext --force).
+    # reaches the C compiler (opt_level, no_semantic_interposition, debug_level, the compiler
+    # variables of the environment) leaves the generated C untouched, so the old binary would
+    # be kept. The options of the last SUCCESSFUL compile are recorded (the record is deleted
+    # before compiling: a failed or interrupted build forces the next one); any difference
+    # forces a full rebuild (build_ext --force).
     options = {k: v for k, v in spec.items() if k not in _NOT_BINARY}
+    options["env"] = {name: os.environ[name] for name in COMPILER_ENV if name in os.environ}
     stamp = prof.dir / COMPILED_STAMP
     spec["force"] = compile_c and _read_json(stamp) != options
     spec_file = prof.dir / "spec.json"

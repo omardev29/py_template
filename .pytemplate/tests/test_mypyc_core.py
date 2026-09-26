@@ -14,12 +14,15 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
 import sysconfig
 import tomllib
 import types
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -566,6 +569,8 @@ def test_parse_error_names_the_runner_python() -> None:
         ({"forbid_imports": ["flet, flet_desktop"]}, "invalid module in compile.forbid_imports"),
         ({"forbid_imports": ["flet\n"]}, "invalid module in compile.forbid_imports"),
         ({"forbid_imports": [""]}, "invalid module in compile.forbid_imports"),
+        ({"no_semantic_interposition": "yes"}, r"'compile\.no_semantic_interposition' must be of type boolean"),
+        ({"no_semantic_interposition": 1}, r"'compile\.no_semantic_interposition' must be of type boolean"),
     ],
 )
 def test_validate_rejects_compile_mistakes(compile_: dict[str, Any], message: str) -> None:
@@ -580,6 +585,7 @@ def test_validate_rejects_compile_mistakes(compile_: dict[str, Any], message: st
         {"modules": ["myapp.core", "myapp.coreutils"]},  # a common prefix is not nesting
         {"modules": ["myapp.core"], "exclude": ["myapp.core.slow", "myapp.core.sub.x"]},
         {"modules": ["a", "b.c"], "exclude": ["b.c.d"], "forbid_imports": ["flet", "a.b_c"]},
+        {"modules": ["myapp.core"], "no_semantic_interposition": False},
     ],
 )
 def test_validate_accepts_compile_settings(compile_: dict[str, Any]) -> None:
@@ -588,8 +594,12 @@ def test_validate_accepts_compile_settings(compile_: dict[str, Any]) -> None:
 
 @pytest.mark.parametrize("preset", PRESET_NAMES)
 def test_shipped_configs_pass_the_compile_rules(preset: str) -> None:
-    _preset_config(preset)
+    cfg = _preset_config(preset)
     config.load()  # the template's own pytemplate.toml
+    # Every project shows the C-flag option, on (the default)
+    raw = tomllib.loads((PRESETS / preset / "files" / "pytemplate.toml").read_text(encoding="utf-8"))
+    assert raw["compile"]["no_semantic_interposition"] is True
+    assert cfg.compile.no_semantic_interposition is True
 
 
 @pytest.fixture
@@ -931,6 +941,7 @@ def test_build_forces_a_rebuild_when_compile_options_change(fake_build: FakeComp
         {"compile": {"multi_file": True}},
         {"compile": {"separate": True}},
         {"compile": {"strict_dunder_typing": True}},
+        {"compile": {"no_semantic_interposition": False}},  # a C flag only: the C files stay the same
     ],
 )
 def test_build_forces_a_rebuild_for_every_binary_option(fake_build: FakeCompiler, change: dict[str, Any]) -> None:
@@ -939,6 +950,35 @@ def test_build_forces_a_rebuild_for_every_binary_option(fake_build: FakeCompiler
     assert not fake_build.force
     mypyc.build(make(change), "release")
     assert fake_build.force
+    mypyc.build(make(change), "release")
+    assert not fake_build.force
+
+
+def test_build_forces_a_rebuild_when_the_compiler_environment_changes(fake_build: FakeCompiler, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CC/CFLAGS/... change the binaries, not the C: like opt_level, a change forces a rebuild."""
+    for name in mypyc.COMPILER_ENV:
+        monkeypatch.delenv(name, raising=False)
+    cfg = make({})
+    mypyc.build(cfg, "dev")
+    mypyc.build(cfg, "dev")
+    assert not fake_build.force
+    monkeypatch.setenv("CFLAGS", "-O2 -march=native")
+    mypyc.build(cfg, "dev")
+    assert fake_build.force
+    mypyc.build(cfg, "dev")
+    assert not fake_build.force
+    record = json.loads((mypyc.profile(cfg, "dev").dir / mypyc.COMPILED_STAMP).read_text(encoding="utf-8"))
+    assert record["env"] == {"CFLAGS": "-O2 -march=native"}
+    assert "env" not in fake_build.specs[-1]  # recorded, not an input of tools/mypyc_build.py
+    monkeypatch.setenv("PT_SOMETHING_ELSE", "1")  # not a compiler variable
+    mypyc.build(cfg, "dev")
+    assert not fake_build.force
+    monkeypatch.setenv("CC", "clang")
+    mypyc.build(cfg, "dev")
+    assert fake_build.force
+    monkeypatch.delenv("CFLAGS")
+    mypyc.build(cfg, "dev")
+    assert fake_build.force  # removed is a change too
 
 
 def test_build_does_not_force_for_annotate_or_new_modules(fake_build: FakeCompiler, src_tree: Path) -> None:
@@ -977,6 +1017,7 @@ def test_build_spec_matches_what_the_tool_reads(fake_build: FakeCompiler) -> Non
     spec = fake_build.specs[-1]
     assert (spec["c_dir"], spec["build_temp"], spec["build_lib"]) == ("../c", "../obj", "../lib")  # short paths (MAX_PATH)
     assert spec["files"] == ["myapp/core/m.py"] and spec["group"] == "myapp"
+    assert spec["no_semantic_interposition"] is True and spec["opt_level"] == "3"  # the defaults
 
 
 def test_build_removes_stale_extensions_before_the_sync(fake_build: FakeCompiler, src_tree: Path) -> None:
@@ -1086,6 +1127,7 @@ def _spec_file(tmp_path: Path, **extra: Any) -> Path:
         "annotate": "",
         "files": ["m.py"],
         "opt_level": "3",
+        "no_semantic_interposition": True,
         "debug_level": "1",
         "strip_asserts": False,
         "multi_file": False,
@@ -1103,22 +1145,48 @@ def _spec_file(tmp_path: Path, **extra: Any) -> Path:
     return path
 
 
-@pytest.mark.parametrize("force", [False, True, None])
-def test_build_script_passes_force_to_build_ext(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force: bool | None) -> None:
-    calls: list[list[str]] = []
-    fake_mypyc = types.ModuleType("mypyc")
+class FakeExtension:
+    """What mypycify returns: setuptools Extensions; only extra_compile_args matters here."""
+
+    def __init__(self, name: str, args: list[str]) -> None:
+        self.name = name
+        self.extra_compile_args = args
+
+
+def _run_build_script(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, compiler: str = "unix", **spec_extra: Any
+) -> tuple[types.ModuleType, list[FakeExtension], list[dict[str, Any]]]:
+    """Run tools/mypyc_build.py main() with a fake mypycify (two extensions that SHARE one list
+    of flags, as mypycify builds them), a fake setup() and the given compiler type."""
+    shared = ["-O3", "-Werror"]
+    extensions = [FakeExtension("g__mypyc", shared), FakeExtension("m", shared)]
+    setups: list[dict[str, Any]] = []
     fake_build_mod = types.ModuleType("mypyc.build")
-    fake_build_mod.mypycify = lambda args, **kw: ["ext"]  # type: ignore[attr-defined]
+    fake_build_mod.mypycify = lambda args, **kw: extensions  # type: ignore[attr-defined]
     fake_setuptools = types.ModuleType("setuptools")
-    fake_setuptools.setup = lambda **kw: calls.append(kw["script_args"])  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "mypyc", fake_mypyc)
+    fake_setuptools.setup = lambda **kw: setups.append(kw)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mypyc", types.ModuleType("mypyc"))
     monkeypatch.setitem(sys.modules, "mypyc.build", fake_build_mod)
     monkeypatch.setitem(sys.modules, "setuptools", fake_setuptools)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["mypyc_build.py", str(_spec_file(tmp_path, **spec_extra))])
+    module = _load_build_script()
+
+    def compiler_type() -> str:
+        if compiler == "none":
+            raise AssertionError("the compiler was looked up although nothing is compiled")
+        return compiler
+
+    monkeypatch.setattr(module, "compiler_type", compiler_type)
+    assert module.main() == 0
+    return module, extensions, setups
+
+
+@pytest.mark.parametrize("force", [False, True, None])
+def test_build_script_passes_force_to_build_ext(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force: bool | None) -> None:
     extra = {} if force is None else {"force": force}  # None: a spec.json written by an older runner
-    monkeypatch.setattr(sys, "argv", ["mypyc_build.py", str(_spec_file(tmp_path, **extra))])
-    assert _load_build_script().main() == 0
-    args = calls[-1]
+    _, _, setups = _run_build_script(tmp_path, monkeypatch, **extra)
+    args = setups[-1]["script_args"]
     assert args[: args.index("build_ext") + 1] == ["--quiet", "build_ext"]
     assert args.count("--force") == (1 if force else 0)
 
@@ -1630,3 +1698,211 @@ def test_real_mypyc_wheel_compiles_code_that_imports_a_dependency(wheel_project:
     file, said = out.splitlines()
     assert file.endswith(tuple(importlib.machinery.EXTENSION_SUFFIXES)) and said == "hi"
 
+
+
+# --- 13. the C flags added to mypyc's own (tools/mypyc_build.py and the wheel's setup.py) --------
+
+CFLAG_CASES = [
+    ("unix", "linux", True, ["-fno-strict-overflow", "-fno-semantic-interposition"]),
+    ("unix", "linux", False, ["-fno-strict-overflow"]),
+    ("unix", "darwin", True, ["-fno-strict-overflow"]),  # Apple clang: semantic interposition not verified
+    ("unix", "cygwin", True, ["-fno-strict-overflow"]),
+    ("msvc", "win32", True, []),
+    ("msvc", "win32", False, []),
+    ("mingw32", "win32", True, []),
+]
+
+
+@pytest.mark.parametrize(("compiler", "platform", "nsi", "flags"), CFLAG_CASES)
+def test_extra_cflags(compiler: str, platform: str, nsi: bool, flags: list[str]) -> None:
+    assert _load_build_script().extra_cflags(compiler, platform, nsi) == flags
+
+
+@pytest.mark.parametrize("nsi", [True, False])
+def test_build_script_adds_the_flags_to_every_extension_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nsi: bool) -> None:
+    """mypycify hands ONE list object to every extension: appending to it would repeat the
+    flags once per extension (and leak into the next build in the same process)."""
+    module, extensions, setups = _run_build_script(tmp_path, monkeypatch, no_semantic_interposition=nsi)
+    flags = module.extra_cflags("unix", sys.platform, nsi)
+    assert "-fno-strict-overflow" in flags and ("-fno-semantic-interposition" in flags) is (nsi and sys.platform == "linux")
+    for ext in extensions:
+        assert ext.extra_compile_args == ["-O3", "-Werror", *flags]  # after mypyc's own, once
+    assert extensions[0].extra_compile_args is not extensions[1].extra_compile_args
+    assert setups[-1]["ext_modules"] is extensions
+
+
+def test_build_script_adds_nothing_for_msvc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, extensions, setups = _run_build_script(tmp_path, monkeypatch, compiler="msvc")
+    assert [e.extra_compile_args for e in extensions] == [["-O3", "-Werror"]] * 2 and setups
+
+
+def test_build_script_without_compile_never_looks_for_a_compiler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """./deploy report (spec compile = false) needs no C compiler: none is looked up."""
+    _, extensions, setups = _run_build_script(tmp_path, monkeypatch, compiler="none", compile=False)
+    assert setups == [] and extensions[0].extra_compile_args == ["-O3", "-Werror"]
+
+
+@needs_venv
+def test_build_script_compiler_type_is_setuptools_own(tmp_path: Path) -> None:
+    """compiler_type() in the tools env (real setuptools): what mypycify reads for its flags."""
+    code = (
+        "import importlib.util, sys\n"
+        "import setuptools\n"  # what mypyc.build imports first
+        f"spec = importlib.util.spec_from_file_location('b', {str(TOOLS / 'mypyc_build.py')!r})\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "print(m.compiler_type())\n"
+    )
+    r = subprocess.run([str(TOOL_PYTHON), "-c", code], cwd=tmp_path, env=proc.base_env(), capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.strip() == ("msvc" if os.name == "nt" else "unix")
+
+
+def _fake_modules(monkeypatch: pytest.MonkeyPatch, compiler: str, extensions: list[FakeExtension], setups: list[dict[str, Any]]) -> None:
+    """mypyc.build, setuptools and distutils (setuptools' copy) as the generated setup.py uses them."""
+    fake_build_mod = types.ModuleType("mypyc.build")
+    fake_build_mod.mypycify = lambda args, **kw: extensions  # type: ignore[attr-defined]
+    fake_setuptools = types.ModuleType("setuptools")
+    fake_setuptools.setup = lambda **kw: setups.append(kw)  # type: ignore[attr-defined]
+    fake_ccompiler = types.ModuleType("distutils.ccompiler")
+    fake_ccompiler.new_compiler = lambda: types.SimpleNamespace(compiler_type=compiler)  # type: ignore[attr-defined]
+    fake_sysconfig = types.ModuleType("distutils.sysconfig")
+    fake_sysconfig.customize_compiler = lambda c: None  # type: ignore[attr-defined]
+    fake_distutils = types.ModuleType("distutils")
+    fake_distutils.ccompiler = fake_ccompiler  # type: ignore[attr-defined]
+    fake_distutils.sysconfig = fake_sysconfig  # type: ignore[attr-defined]
+    for name, module in {
+        "mypyc": types.ModuleType("mypyc"),
+        "mypyc.build": fake_build_mod,
+        "setuptools": fake_setuptools,
+        "distutils": fake_distutils,
+        "distutils.ccompiler": fake_ccompiler,
+        "distutils.sysconfig": fake_sysconfig,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+@pytest.mark.parametrize(("compiler", "platform", "nsi", "flags"), CFLAG_CASES)
+def test_wheel_setup_py_adds_the_same_flags_as_the_stage(
+    wheel_project: Path, monkeypatch: pytest.MonkeyPatch, compiler: str, platform: str, nsi: bool, flags: list[str]
+) -> None:
+    """The wheel's generated setup.py mirrors tools/mypyc_build.py (both compile the same code)."""
+    from runner.methods import wheel
+
+    code = wheel.setup_py(make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "no_semantic_interposition": nsi}}))
+    shared = ["-O3"]
+    extensions = [FakeExtension("pkg__mypyc", shared), FakeExtension("pkg.core.m", shared)]
+    setups: list[dict[str, Any]] = []
+    _fake_modules(monkeypatch, compiler, extensions, setups)
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "platform", platform)
+        exec(compile(code, "setup.py", "exec"), {"__name__": "__main__"})
+    assert flags == _load_build_script().extra_cflags(compiler, platform, nsi)
+    assert [e.extra_compile_args for e in extensions] == [["-O3", *flags]] * 2
+    assert extensions[0].extra_compile_args is not extensions[1].extra_compile_args
+    assert setups == [{"ext_modules": extensions}]
+
+
+INLINE_PROBE = """\
+from mypy_extensions import i64
+
+
+def pt_callee(x: i64) -> i64:
+    return x + 1
+
+
+def pt_caller(n: i64) -> i64:
+    total: i64 = 0
+    i: i64 = 0
+    while i < n:
+        total = pt_callee(total)
+        i += 1
+    return total
+
+
+def pt_wrap(x: i64) -> i64:
+    return x + 1
+"""
+
+
+@pytest.fixture
+def logging_cc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[], list[list[str]]]:
+    """CC = a sh wrapper that logs every command line, and a user CFLAGS (it REPLACES Python's
+    own flags in setuptools). Returns a function that reads (and resets) the compile lines."""
+    if os.name == "nt":
+        pytest.skip("the logging compiler wrapper is a sh script")
+    log = tmp_path / "cc.log"
+    wrapper = tmp_path / "cc.sh"
+    wrapper.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PT_CC_LOG\"\nexec $PT_REAL_CC \"$@\"\n", encoding="utf-8")
+    monkeypatch.setenv("PT_REAL_CC", os.environ.get("CC") or sysconfig.get_config_var("CC") or "cc")
+    monkeypatch.setenv("PT_CC_LOG", str(log))
+    monkeypatch.setenv("CC", f"sh {shlex.quote(str(wrapper))}")
+    monkeypatch.setenv("CFLAGS", "-DPT_USER_CFLAGS=1")
+
+    def compiles() -> list[list[str]]:
+        lines = log.read_text(encoding="utf-8").splitlines() if log.is_file() else []
+        log.unlink(missing_ok=True)
+        return [argv for argv in (ln.split() for ln in lines) if "-c" in argv]
+
+    return compiles
+
+
+def _check_flags(compiles: list[list[str]], nsi: bool) -> None:
+    assert compiles, "no compile command went through the wrapper"
+    for argv in compiles:
+        assert "-DPT_USER_CFLAGS=1" in argv  # the user's CFLAGS stay
+        assert "-fno-strict-overflow" in argv  # although they replaced Python's own
+        assert ("-fno-semantic-interposition" in argv) is (nsi and sys.platform == "linux")
+
+
+def _caller_calls_callee(objdump: str, lib: Path) -> bool:
+    out = subprocess.run([objdump, "-d", "--no-show-raw-insn", str(lib)], capture_output=True, text=True, check=True).stdout
+    block = re.search(r"<CPyDef_\w*pt_caller>:\n(.*?)(?:\n\n|\Z)", out, re.DOTALL)
+    assert block, f"CPyDef_*pt_caller not found in the disassembly of {lib.name}"
+    return "pt_callee" in block.group(1)
+
+
+def _is_gcc(cc: str) -> bool:
+    r = subprocess.run([*shlex.split(cc), "--version"], capture_output=True, text=True, check=False)
+    return "Free Software Foundation" in r.stdout
+
+
+@needs_venv
+@needs_compiler
+def test_real_compile_adds_the_c_flags_and_inlines_compiled_calls(
+    src_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logging_cc: Callable[[], list[list[str]]]
+) -> None:
+    """The flags reach the C compiler next to a user's CFLAGS; compiled i64 arithmetic wraps
+    silently; on Linux, with -fno-semantic-interposition the call between two compiled
+    functions is inlined (gcc then folds the whole loop) and without it gcc keeps a real call
+    through the PLT; switching the option really rebuilds (only a C flag changed)."""
+    _project(src_tree, {"main.py": "", "pkg/__init__.py": "", "pkg/core/__init__.py": "", "pkg/core/m.py": INLINE_PROBE})
+    monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
+    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}})
+    assert cfg.compile.no_semantic_interposition is True  # the default
+    stage = mypyc.build(cfg, "dev")
+    _check_flags(logging_cc(), nsi=True)
+    out = _import_from(stage, "import pkg.core.m as m; print(m.pt_caller(1000)); print(m.pt_wrap(2**63 - 1))", tmp_path)
+    assert out.splitlines() == ["1000", str(-(2**63))]  # interpreted, pt_wrap gives 2**63
+    lib = next(p for p in mypyc.extension_files(stage) if p.name.startswith("pkg__mypyc."))
+    objdump = shutil.which("objdump") if sys.platform == "linux" else None
+    if objdump:
+        assert not _caller_calls_callee(objdump, lib)
+    mypyc.build(make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "no_semantic_interposition": False}}), "dev")
+    _check_flags(logging_cc(), nsi=False)
+    if objdump and _is_gcc(os.environ["PT_REAL_CC"]):
+        # Pins gcc's behaviour: if this fails, gcc inlines these calls by itself and the option is moot
+        assert _caller_calls_callee(objdump, lib)
+
+
+@needs_venv
+@needs_compiler
+def test_real_mypyc_wheel_gets_the_same_c_flags(
+    wheel_project: Path, monkeypatch: pytest.MonkeyPatch, logging_cc: Callable[[], list[list[str]]]
+) -> None:
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    _project(wheel_project / "src", {"pkg/core/m.py": INLINE_PROBE})
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    wheel.build(BuildRequest(_wheel_cfg(), "mypyc", "wheel", wheel_project / "src"))
+    _check_flags(logging_cc(), nsi=True)

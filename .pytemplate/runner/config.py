@@ -64,6 +64,9 @@ class CompileConfig:
     # of slow lines to .build/reports/mypyc-annotate.html (./deploy report does it on demand)
     annotate: bool = False
     opt_level: str = "3"
+    # Linux gcc/clang: -fno-semantic-interposition (as CPython itself is built), so the compiler
+    # may inline calls between compiled functions (tools/mypyc_build.py, extra_cflags)
+    no_semantic_interposition: bool = True
     multi_file: bool = False
     separate: bool = False
     strict_dunder_typing: bool = False
