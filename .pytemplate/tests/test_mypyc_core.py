@@ -1039,6 +1039,24 @@ def test_build_forces_a_rebuild_for_every_binary_option(fake_build: FakeCompiler
     assert not fake_build.force
 
 
+def test_a_forced_build_starts_without_the_cached_ir_and_c(fake_build: FakeCompiler) -> None:
+    """compile.separate = true makes mypyc incremental: it reused its cached IR and the C of the
+    last run, and strip_asserts is no part of mypy's cache key, so deploy.optimize 0 -> 1 kept
+    the asserts in the release binary (verified with a real compile). A forced build removes
+    both first; an unchanged one keeps them (incremental builds stay fast)."""
+    cfg = make({"compile": {"separate": True}, "deploy": {"optimize": 0}})
+    mypyc.build(cfg, "release")
+    cache = mypyc.profile(cfg, "release").dir
+    for sub in ("mypy_cache", "c"):
+        (cache / sub).mkdir(exist_ok=True)
+        (cache / sub / "stale").write_text("from the last run", encoding="utf-8")
+    mypyc.build(cfg, "release")
+    assert not fake_build.force and (cache / "mypy_cache" / "stale").exists() and (cache / "c" / "stale").exists()
+    mypyc.build(make({"compile": {"separate": True}, "deploy": {"optimize": 1}}), "release")
+    assert fake_build.force and fake_build.specs[-1]["strip_asserts"] is True
+    assert not (cache / "mypy_cache").exists() and not (cache / "c").exists()
+
+
 def test_build_forces_a_rebuild_when_the_compiler_environment_changes(fake_build: FakeCompiler, monkeypatch: pytest.MonkeyPatch) -> None:
     """CC/CFLAGS/... change the binaries, not the C: like opt_level, a change forces a rebuild."""
     for name in mypyc.COMPILER_ENV:

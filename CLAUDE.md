@@ -1568,7 +1568,11 @@ Formats:
   `annotate`, `compile`, `files`, `force`, plus `env`: the `COMPILER_ENV` variables that are
   set, `CC CFLAGS CPPFLAGS LDSHARED LDFLAGS ARCHFLAGS CL _CL_`), deletes it
   before compiling (a failed or interrupted build forces the next one) and sets
-  `spec["force"]` when it differs: `mypyc_build.py` then passes `build_ext --force`. `report`
+  `spec["force"]` when it differs: `mypyc_build.py` then passes `build_ext --force`, and
+  `mypyc.build` first deletes the profile's `mypy_cache` and generated `c` (with
+  `compile.separate = true` mypyc is incremental and reused its cached IR and C, and
+  `strip_asserts`/`strict_dunder_typing` are no part of mypy's cache key: `deploy.optimize`
+  0 -> 1 kept the asserts in the release binary). `report`
   (`compile_c=False`) and `--dry-run` neither force nor record. A `.build` from before has no
   record: one full rebuild. mypyc dates a new C file 1 s ahead, so a very fast first build is
   redone once by setuptools itself.
@@ -3497,6 +3501,12 @@ setuptools:
   and `build_ext --force` (9). Test:
   `test_mypyc_core.py::test_build_forces_a_rebuild_for_every_binary_option`,
   `test_build_forces_a_rebuild_when_the_compiler_environment_changes`. Goes: never.
+- **mypyc's incremental cache ignores its own options** (LIMITATION, mypyc 2.3.1): with
+  `compile.separate = true` (incremental) an unchanged module's IR and C came from the cache,
+  so a new `strip_asserts` (`deploy.optimize`) or `strict_dunder_typing` never reached the
+  binary. Fix: a forced build (`mypyc.COMPILED_STAMP`) deletes the profile's `mypy_cache` and
+  `c` first (9). Test: `test_mypyc_core.py::test_a_forced_build_starts_without_the_cached_ir_and_c`
+  (reproduced with a real compile). Goes: when mypyc keys its cache on those options.
 - **A `CFLAGS` environment variable replaces Python's own C flags** (LIMITATION): it drops
   `-fno-strict-overflow` (i64/i32 wrap-around becomes undefined behaviour) and `-DNDEBUG`. Fix:
   `tools/mypyc_build.py` `extra_cflags` always adds `-fno-strict-overflow`; the wheel's

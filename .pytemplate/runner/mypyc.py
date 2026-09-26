@@ -313,6 +313,17 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
         annotate.parent.mkdir(parents=True, exist_ok=True)
     if compile_c and not proc.DRY_RUN:
         stamp.unlink(missing_ok=True)
+    if spec["force"] and not proc.DRY_RUN:
+        # mypyc reuses the IR of its cache (compile.separate: incremental) and the C files of the
+        # last run for a module whose source did not change: strip_asserts and
+        # strict_dunder_typing are no part of mypy's cache key, so deploy.optimize 0 -> 1 kept
+        # the asserts in the release binary. A forced build starts from neither.
+        for cached in (prof.dir / "mypy_cache", prof.dir / "c"):
+            try:
+                if cached.exists():
+                    shutil.rmtree(cached)
+            except OSError as e:
+                raise DeployError(f"cannot remove {rel(cached)} for a clean rebuild: {e.strerror or e} (delete it, or ./deploy clean)") from None
 
     tool = envs.tool_env(cfg)
     # MSVC/setuptools output is only shown on failure (or with -v). VSLANG=1033: compiler
