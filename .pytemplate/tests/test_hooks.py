@@ -515,6 +515,34 @@ def test_doctor_lines(tmp_path: Path) -> None:
     assert len(lines) == count
 
 
+@needs_git
+def test_doctor_notes_a_generated_ci_that_github_never_runs(tmp_path: Path) -> None:
+    """A project moved or cloned into a bigger repository (new warns only when it creates one
+    there): GitHub reads <top>/.github/workflows only, so the project's generated ci.yml never runs."""
+    lines: list[tuple[bool | None, str, str]] = []
+
+    def check(passed: bool | None, label: str, hint: str = "") -> None:
+        lines.append((passed, label, hint))
+
+    top, project = make_repo(tmp_path, "apps/p")
+    hooks.doctor(make(), check, project)
+    assert not [ln for ln in lines if "ci.yml" in ln[1]]  # no generated CI (no templates/ci.yml)
+    (project / ".github" / "workflows").mkdir(parents=True)
+    (project / ".github" / "workflows" / "ci.yml").write_text("on: push\n", encoding="utf-8")
+    hooks.doctor(make(), check, project)
+    [note] = [ln for ln in lines if "ci.yml" in ln[1]]
+    assert note[0] is None  # a note, never a problem: the setup is supported
+    assert "apps/p/.github/workflows/ci.yml" in note[1] and "never runs" in note[1]
+    assert "working-directory" in note[2] and "apps/p" in note[2]
+    lines.clear()
+    (tmp_path / "alone").mkdir()
+    _, own = make_repo(tmp_path / "alone")  # the project is the repository: its CI runs
+    (own / ".github" / "workflows").mkdir(parents=True)
+    (own / ".github" / "workflows" / "ci.yml").write_text("on: push\n", encoding="utf-8")
+    hooks.doctor(make(), check, own)
+    assert not [ln for ln in lines if "ci.yml" in ln[1]]
+
+
 FAKE_LAUNCHER = """#!/bin/sh
 if [ -f .topmark ]; then _w=top; else _w=elsewhere; fi
 printf '%s\\n' "launcher $* from $_w" >> "$PT_HOOK_LOG"

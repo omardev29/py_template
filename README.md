@@ -109,7 +109,8 @@ outside the template:
    stages those two as executable there. It makes no commit. Inside a bigger repository it warns
    that the generated `.github/workflows/ci.yml` will not run: GitHub reads workflows only from
    the repository's own `.github/workflows/`, so CI there needs a workflow of the repository that
-   runs its steps in the project's folder (`defaults.run.working-directory`).
+   runs its steps in the project's folder (`defaults.run.working-directory`). `./deploy doctor`
+   says so too for a project moved or cloned into a bigger repository later.
 
 When a step fails (a name uv refuses, no network, Ctrl+C), `new` removes what it created.
 Dependencies added with `./deploy add` and tracked files of your own (docs, scripts) come along

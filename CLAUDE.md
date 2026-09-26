@@ -788,8 +788,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   somebody else's `pre-commit.local`) and never touches another one (section 5.8). Any other
   git failure (dubious ownership...) is shown with git's own message: a warning in apply, an
   info line in `doctor` (whose "git hook" line is otherwise info too: missing is not a
-  problem). Every git call runs with `LC_ALL=C` (find_repo reads "not a git repository" in
-  English).
+  problem; for a project below the repository's top it adds an info line that the generated
+  `ci.yml` never runs there, section 13.2). Every git call runs with `LC_ALL=C` (find_repo
+  reads "not a git repository" in English).
 - The hook: `pre-commit` in the folder `git rev-parse --git-path hooks` reports (worktree
   aware), pure ASCII + LF, a marker comment, and `sh <launcher> hooks run` with the POSIX
   launcher path relative to the repository top (the project may be a subfolder of a bigger
@@ -2692,7 +2693,8 @@ short temp tree and unset `NVIM_APPNAME`.
   pinned uv cannot download Pythons released after it), and the runner labels stay `-latest`
   (GitHub retires a pinned label about six months after a newer image is GA). It runs only
   when the project is the root of its repository (GitHub reads `<top>/.github/workflows/`):
-  `new` warns when it creates a project inside another work tree (section 15.2).
+  `new` warns when it creates a project inside another work tree, and `./deploy doctor` notes
+  it for a project that sits in one (section 15.2).
 - **[template repo]** `template-selftest.yml` (push to `main`, pull requests, weekly and by
   hand; the gate): `./deploy render --check` first, then `setup` and `./deploy selftest` on
   ubuntu, macos and windows-latest (Windows through `deploy.ps1`, `--basetemp` in
@@ -3969,10 +3971,12 @@ Behaviour:
   the repository top) still gets its generated CI at `<project>/.github/workflows/ci.yml`, which
   GitHub never runs (it reads `<top>/.github/workflows/` only), and whose steps expect the
   project at the checkout root. `new` warns when it creates one there
-  (`cmd_mode._monorepo_note`); a project moved into a repository later gets no warning (render
-  runs no git, doctor does not check it). A fix would generate a relocatable workflow (a
+  (`cmd_mode._monorepo_note`), and `./deploy doctor` notes it (`[--]`, never a problem: the
+  setup is supported) for a project moved or cloned into a repository later (`hooks.doctor`:
+  the repository's top is not the project and the generated `ci.yml` exists); render runs no
+  git, so the other commands say nothing. A fix would generate a relocatable workflow (a
   `PROJECT` folder for `defaults.run.working-directory` and the artifact paths) for the user to
-  place at the top, or a doctor line.
+  place at the top.
 - flet presets: `constraints.txt` gives a new project httpx 0.28.1, but flet 1.0.1 only asks
   for `httpx>=0.28.1`, so `./deploy lock --upgrade` takes httpx 1.x once it is final, and its
   1.0 dev releases drop `AsyncClient`, which `flet.auth` (OAuth; not used by the skeleton)
