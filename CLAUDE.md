@@ -2541,6 +2541,12 @@ uv:
   and `XDG_DATA_HOME`, and uv then started from empty caches. Fix: `nvimtest.nvim_env` keeps
   `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`, `UV_TOOL_DIR` as uv resolved them
   (`nvimtest.uv_dirs`, 13.1). Test: `test_cmd_nvim.py::test_env_isolation`. Goes: never.
+- **uv 0.10.12 (the floor) keeps redundant markers in uv.lock after a preset round trip**
+  (LIMITATION: an older lock writer; the lock resolves the same, and 0.12.19 writes the old
+  bytes): only a byte comparison notices. Fix: the `uv-floor` job of `template-selftest.yml`
+  deselects `test_presets.py::test_init_round_trip_through_every_preset_is_byte_identical`
+  (13.2). Test: `test_workflows.py::test_what_the_selftest_workflow_reads_by_text_exists`.
+  Goes: when `envs.MIN_UV` reaches a uv that writes the same bytes.
 
 CPython and its standard library:
 - **`subprocess.run` kills the child 0.25 s after Ctrl+C** (LIMITATION, 3.7+): an app's cleanup
@@ -2932,6 +2938,13 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   `test_cmd_nvim.py::test_prepare_base_pins_the_starter_and_restores_the_lock`,
   `test_prepare_base_fails_when_a_pin_does_not_hold`. Goes: when one install run honours the
   lock.
+- **The LazyVim starter and the plugins change every day, without releases** (LIMITATION): a
+  smoke test of the latest of everything turned red with no commit of ours. Fix: `selftest
+  --nvim` pins the starter (`cmd_nvim.STARTER_REV`) and the plugins (`nvimtest.LOCK`), and
+  template-nvim.yml pins Neovim; its weekly canary runs without the lock and uploads the next
+  pins (13.1, 13.2). Test:
+  `test_cmd_nvim.py::test_prepare_base_pins_the_starter_and_restores_the_lock`,
+  `test_workflows.py::test_nvim_workflow_pins_neovim_and_runs_a_canary`. Goes: never.
 - **`Lazy! sync` also updates and cleans** (LIMITATION): it rewrote the user's `lazy-lock.json`
   and removed plugins its spec did not name. Fix: `./deploy nvim sync` runs `Lazy! install`
   (12.2). Test: `test_cmd_nvim.py::test_nvim_sync_installs_only`. Goes: never.
@@ -3029,7 +3042,24 @@ GitHub Actions and hosted runners:
 - **setup-uv publishes no floating major tags since v8** (LIMITATION): `@v10` does not resolve.
   Up: astral-sh/setup-uv#830. Fix: the exact release in `templates/ci.yml` and the template
   workflows (13.2). Test:
-  `test_render_core.py::test_ci_workflow_for_every_preset_and_backend_set`. Goes: never.
+  `test_render_core.py::test_ci_workflow_for_every_preset_and_backend_set`,
+  `test_workflows.py::test_actions_are_pinned`. Goes: never.
+- **GitHub disables a scheduled workflow after 60 days without repository activity**
+  (LIMITATION, public repositories): then none of the file's triggers run, pushes included,
+  until someone enables it again. Up: GitHub docs, "Disabling and enabling a workflow"
+  (docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows). Fix:
+  `template-keepalive.yml`, job `keepalive`: every week `gh api --method PUT
+  .../actions/workflows/<file>/enable` for each `template-*.yml` that has a schedule, itself
+  included, with the job's token (`actions: write`); one `disabled_manually` stays so (13.2).
+  Test: `test_workflows.py::test_every_scheduled_workflow_is_kept_alive`. Goes: never.
+- **`shell: bash` steps run with `-e -o pipefail`** (LIMITATION): `cmd | head -n1` kills a
+  writer that is not done yet (SIGPIPE) and fails the step at random. Fix: the template
+  workflows take one line with `sed -n 1p` or `grep -m1` (13.2). Test: untested (a race).
+  Goes: never.
+- **`uv tool install` puts its commands in a folder that is not on PATH on every hosted
+  runner** (LIMITATION, Windows at least): the xonsh tests and probes skipped. Fix: the
+  template workflows append `uv tool dir --bin` to `$GITHUB_PATH` after installing xonsh
+  (13.2). Test: untested (the `-rs` skip list of the CI logs). Goes: never.
 - **The `runner` context is not allowed in a job-level `env`** (LIMITATION): GitHub rejects the
   whole workflow file. Fix: the step env of `template-nvim.yml` (13.2). Test:
   `test_workarounds.py::test_template_workflows_use_contexts_where_actions_allows_them`
@@ -3172,6 +3202,14 @@ xonsh and bash:
   back to an unthreadable function alias (4.9). Test:
   `test_shells.py::test_xonsh_snippet_runs_and_completes`. Goes: when the oldest supported xonsh
   has it.
+- **xonsh changes the name and default of its subprocess raise-error setting** (LIMITATION):
+  0.24 raises `CalledProcessError` from a failing `![...]` unless
+  `$XONSH_SUBPROC_CMD_RAISE_ERROR` is off (0.18 did not raise), so the probe got exit 1 instead
+  of the child's code. Fix: `shells.command_text` turns both current names off; the template
+  workflows install xonsh 0.24.2 for pushes and pull requests, and template-launchers the newest
+  on its weekly run (4.9, 13.2). Test: `selftest --shells` T2 with xonsh (CI);
+  `test_workflows.py::test_selftest_workflow_covers_every_os_and_both_floors` (the pin). Goes:
+  when the probe reads the exit code from `CalledProcessError`, whatever the setting.
 - **bash rejects CRLF in an rc file** (LIMITATION): Fix: `shell-setup` writes LF bytes on every
   OS (4.9). Test: `test_shells.py::test_snippets_are_ascii_and_say_where_to_paste`. Goes: never.
 
@@ -3222,8 +3260,9 @@ Windows:
 - **MAX_PATH (`LongPathsEnabled=0`)** (LIMITATION): deep paths broke MSVC (mypyc), PyPy runtime
   copies, `compileall` and the Flet client extraction. Fix: stage-relative `c_dir`, `build_temp`
   and `build_lib` in `mypyc.build`'s spec; `\\?\` paths in `portable.long_path` and
-  `e2e.rmtree`; short default folders (`nvimtest.default_dir`, `e2e.default_base`); doctor
-  reports the setting (`cmd_env._long_paths`; 1.7, 9, 10). Test:
+  `e2e.rmtree`; short default folders (`nvimtest.default_dir`, `e2e.default_base`, and pytest's
+  `--basetemp` under `RUNNER_TEMP` in template-selftest's Windows job); doctor reports the
+  setting (`cmd_env._long_paths`; 1.7, 9, 10, 13.2). Test:
   `test_mypyc_core.py::test_build_spec_matches_what_the_tool_reads`,
   `test_cmd_nvim.py::test_default_dir_is_short`, `test_e2e_plan.py::test_default_base_is_short`.
   Goes: never.
