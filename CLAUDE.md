@@ -21,9 +21,11 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
    `mypy --strict` clean on linux, darwin and win32. Coding rules: section 14.
 4. Verify with `./deploy selftest` (must pass), `./deploy render --check` and `./deploy doctor`.
    `selftest` needs `.venv`: run `./deploy setup` once.
-5. English only in code, comments, messages, docs, preset UI strings and TOML comments
-   (**[template repo]** enforced by the language guard, section 13.1). Avoid non-ASCII: write
-   `...` and `->`. Launchers and generated `.cmd` files must be pure ASCII.
+5. Everything written into the repository is English: code, comments, messages, docs, preset
+   UI strings, TOML comments, commit messages and PR text (**[template repo]** enforced by the
+   language guard, section 13.1). Avoid non-ASCII: write `...` and `->`. Launchers and
+   generated `.cmd` files must be pure ASCII. Talk to the owner in the language of their
+   prompt (Spanish so far); only the repository content is English.
 6. Git: never edit git config (the machine may have no global identity). Commit with
    `git -c user.name="..." -c user.email="..." commit`, copying the identity of the existing
    commits (`git log -1 --format='%an <%ae>'`). Keep `deploy` AND `deploy.ps1` at mode 100755
