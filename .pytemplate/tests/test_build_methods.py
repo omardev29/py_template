@@ -830,6 +830,66 @@ def test_pyz_prune_never_deletes_a_running_build(tmp_path: Path) -> None:
     assert "build1" in _cached_builds(cache)
 
 
+MAIN_SIGNALS = (
+    "import os, pathlib, time\n"
+    "pathlib.Path(os.environ['PT_STARTED']).write_text('')\n"
+    "while not os.path.exists(os.environ['PT_WAIT']):\n"
+    "    time.sleep(0.05)\n"
+    "import lazymod\n"
+    "print('ok', lazymod.WHERE)\n"
+)
+
+
+def _start_waiting(pyz_file: Path, cache: Path, tmp_path: Path) -> tuple[subprocess.Popen[str], Path]:
+    """Start a pyz whose main waits for a flag file; return once its main runs."""
+    started, flag = tmp_path / f"{pyz_file.stem}.started", tmp_path / f"{pyz_file.stem}.go"
+    proc_ = subprocess.Popen([sys.executable, "-S", str(pyz_file)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=pyz_env(cache, PT_STARTED=str(started), PT_WAIT=str(flag)))
+    deadline = time.time() + 120
+    while not started.exists():
+        assert proc_.poll() is None and time.time() < deadline, proc_.communicate()[1] if proc_.poll() is not None else "timeout"
+        time.sleep(0.05)
+    return proc_, flag
+
+
+def _age(folder: Path, days: float) -> None:
+    old = time.time() - days * 86400
+    os.utime(folder, (old, old))
+
+
+def test_pyz_prune_never_deletes_a_build_running_for_days(tmp_path: Path) -> None:
+    # A server started more than a day ago (its folder's mtime, touched at start, is that old),
+    # then three newer builds started: the prune deleted the running build, whose next lazy
+    # import failed with ModuleNotFoundError
+    cache = tmp_path / "cache"
+    files = {"common/app/main.py": MAIN_SIGNALS, "common/lib/lazymod.py": "WHERE = 'common'\n"}
+    old = fake_pyz(tmp_path / "old.pyz", build_id="old", files=files)
+    running, flag = _start_waiting(old, cache, tmp_path)
+    try:
+        _age(pyz_root(cache) / "old", 2)
+        for n in (1, 2, 3):
+            assert run_pyz(fake_pyz(tmp_path / f"n{n}.pyz", build_id=f"new{n}"), pyz_env(cache)).returncode == 0
+        assert "old" in _cached_builds(cache)
+    finally:
+        flag.write_text("")
+        out, err = running.communicate(timeout=120)
+    assert running.returncode == 0, err
+    assert out.split() == ["ok", "common"]
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="the OS releases a killed process's lock at its own pace on Windows")
+def test_pyz_prune_removes_an_old_build_whose_start_was_killed(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    files = {"common/app/main.py": MAIN_SIGNALS, "common/lib/lazymod.py": "WHERE = 'common'\n"}
+    old = fake_pyz(tmp_path / "old.pyz", build_id="old", files=files)
+    killed, _flag = _start_waiting(old, cache, tmp_path)
+    killed.kill()
+    killed.communicate(timeout=120)
+    _age(pyz_root(cache) / "old", 2)
+    for n in (1, 2, 3):
+        assert run_pyz(fake_pyz(tmp_path / f"n{n}.pyz", build_id=f"new{n}"), pyz_env(cache)).returncode == 0
+    assert _cached_builds(cache) == ["new1", "new2", "new3"]
+
+
 def test_pyz_prune_still_removes_old_unused_builds(tmp_path: Path) -> None:
     cache = tmp_path / "cache"
     for n in (1, 2, 3):

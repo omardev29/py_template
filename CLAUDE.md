@@ -1511,10 +1511,14 @@ Per method:
   (`_executable`: an app's helper script, ruff's `bin/ruff`) gets x bits where it has r bits
   (`open()` made it 0644); `pyz._write_archive` stores each file's mode, and `pyz-merge` passes
   the parts' executable modes through (`modes`, a `common/app` file from any part), since it
-  rewrites every member from a copy. Every start touches its build folder; `_prune_old`
-  deletes only builds beyond the 3 most recently started AND older than a day (`MIN_AGE`: a
-  running build is never deleted), unlinking their `.complete` markers first, and tolerates
-  folders that vanish under it. Without a usable cache (`Path.home()` raises for a UID without
+  rewrites every member from a copy. Every start holds a lock on `<build>/.run-<pid>` for its
+  whole life (`_hold`: `fcntl.flock`, `msvcrt.locking` on Windows; the OS drops it when the
+  process ends, however it ends; removed at exit) and touches its build folder; `_prune_old`
+  deletes only builds beyond the 3 most recently started AND older than a day (`MIN_AGE`) AND
+  not in use (`_in_use`: a run file whose lock another process holds; a free one, left by a
+  killed start, is removed; a file system without locks leaves `MIN_AGE` alone to protect a
+  build: an app started more than a day ago was deleted under it), unlinking their `.complete`
+  markers first, and tolerates folders that vanish under it. Without a usable cache (`Path.home()` raises for a UID without
   a passwd entry; a read-only home) it extracts into a per-run `tempfile.mkdtemp` folder removed
   at exit (never a predictable shared `/tmp` path: another user could plant code there).
   Layout: `common/lib` only when the build is "pure": every target site installed exactly the

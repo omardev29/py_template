@@ -729,8 +729,8 @@ platform key (such as `cp314-linux-x86_64`), the binaries: the mypyc extensions 
 that built it, and the native dependencies. Python cannot import `.pyd`/`.so` files from a zip,
 so the first start extracts it to a cache: `%LOCALAPPDATA%\<name>\pyz` (Windows),
 `~/Library/Caches/<name>/pyz` (macOS) or `$XDG_CACHE_HOME/<name>/pyz` (`~/.cache/<name>/pyz`). It
-keeps the three most recently started builds and any started in the last day; deleting the
-folder is always safe. Without a usable cache (a read-only home) it extracts into a private
+keeps the three most recently started builds, any started in the last day and any that is still
+running; deleting the folder is always safe. Without a usable cache (a read-only home) it extracts into a private
 temporary folder for that run. Executable files (a script of the app, a binary a dependency
 ships) stay executable on Linux and macOS; a pyz built on Windows has no such mode to keep.
 

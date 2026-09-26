@@ -9,12 +9,14 @@ Executables (an app's helper script, a dependency's binary) keep their x bit.
 
 Cache: %LOCALAPPDATA%, ~/Library/Caches, $XDG_CACHE_HOME or ~/.cache, then
 <name>/pyz/<build_id>/<key|pure>/. It keeps the most recently started builds plus every
-build started in the last day (one that is still running is never deleted); deleting the
-folder is always safe. Without a usable cache (no home folder, a read-only one) the .pyz
-extracts into a private temporary folder for this run only.
+build started in the last day, and never deletes a build that is still running (each start
+holds a lock in its build folder until it ends); deleting the folder is always safe. Without a
+usable cache (no home folder, a read-only one) the .pyz extracts into a private temporary
+folder for this run only.
 """
 
 import atexit
+import errno
 import json
 import os
 import platform
@@ -31,7 +33,11 @@ from pathlib import Path
 ARCH = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}
 OS = {"win32": "windows", "linux": "linux", "darwin": "macos"}
 KEEP_BUILDS = 3  # the most recently started builds kept (this one included)...
-MIN_AGE = 86400  # ...plus every build started in the last day: it may still be running
+MIN_AGE = 86400  # ...plus every build started in the last day
+RUN_PREFIX = ".run-"  # <build>/.run-<pid>: locked while that start runs (_hold, _in_use)
+# What a lock held by another process raises: flock EWOULDBLOCK, msvcrt.locking EACCES/EDEADLOCK
+_BUSY = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)}
+_running = {}  # the open, locked run file of this process (kept for its whole life)
 
 
 def _key() -> str:
@@ -103,9 +109,94 @@ def _extract(archive: zipfile.ZipFile, prefixes: list[str], dest: Path) -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _lock(fd: int) -> bool | None:
+    """Lock the first byte of an open file without waiting (the OS releases the lock when its
+    process ends, however it ends): True, False when another process holds it, None when this
+    file system cannot lock."""
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        return False if e.errno in _BUSY else None
+    return True
+
+
+def _hold(build: Path) -> None:
+    """Mark the build as in use for the life of this process: a lock on <build>/.run-<pid>.
+    Best effort: without it the build is only protected for a day (MIN_AGE)."""
+    run = build / f"{RUN_PREFIX}{os.getpid()}"
+    try:
+        fd = os.open(run, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return
+    if not _lock(fd):  # None: no locks here (MIN_AGE still protects it for a day)
+        os.close(fd)
+        return
+    _running.update(fd=fd, path=run, pid=os.getpid())
+    atexit.register(_release)
+
+
+def _release() -> None:
+    """At exit: drop this process's run file (a forked child that exits keeps its parent's)."""
+    if _running.get("pid") != os.getpid():
+        return
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            os.lseek(_running["fd"], 0, os.SEEK_SET)
+            msvcrt.locking(_running["fd"], msvcrt.LK_UNLCK, 1)
+        os.close(_running["fd"])
+        os.unlink(_running["path"])
+    except OSError:
+        pass
+
+
+def _in_use(build: Path) -> bool:
+    """Whether a running start holds the lock of one of the build's run files. A run file whose
+    lock is free was left by a start that was killed: it goes."""
+    try:
+        runs = [p for p in build.iterdir() if p.name.startswith(RUN_PREFIX)]
+    except OSError:
+        return False
+    for run in runs:
+        try:
+            fd = os.open(run, os.O_RDWR)
+        except OSError:
+            continue  # its start just ended and removed it
+        try:
+            locked = _lock(fd)
+            if locked is False:
+                return True
+            if locked is None:
+                continue  # cannot tell: MIN_AGE decides, as for a build without run files
+            if sys.platform == "win32":
+                import msvcrt
+
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+        try:
+            run.unlink()
+        except OSError:
+            pass
+    return False
+
+
 def _prune_old(root: Path, keep: str) -> None:
     """Delete the builds that were started least recently (main touches a build on every start),
-    except `keep`, the newest ones and any build started in the last day."""
+    except `keep`, the newest ones, any build started in the last day and any build a running
+    start holds (_in_use)."""
     try:
         entries = list(root.iterdir())
     except OSError:
@@ -122,7 +213,7 @@ def _prune_old(root: Path, keep: str) -> None:
     builds.sort()
     limit = time.time() - MIN_AGE
     for mtime, old in builds[: max(len(builds) - (KEEP_BUILDS - 1), 0)]:
-        if mtime > limit:
+        if mtime > limit or _in_use(old):
             continue
         # The markers first: an interrupted delete then reads as incomplete and is re-extracted
         for marker in old.glob("*/.complete"):
@@ -174,6 +265,7 @@ def main() -> None:
             dest = root / info["build_id"] / flavour
             _extract(archive, prefixes, dest)
     if cached:
+        _hold(dest.parent)  # while this process runs, no other start deletes its build
         try:
             os.utime(dest.parent)  # started now: the prune removes the least recently started builds
         except OSError:
