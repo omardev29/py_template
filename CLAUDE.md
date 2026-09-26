@@ -43,9 +43,19 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
     - at most 1 bug per 1000 lines: ACCEPTABLE, the only state in which the work is done;
     - worse than 1 per 1000 (1 per 500 included): UNACCEPTABLE, fixing it comes first;
     - worse than 1 per 100: UNRELIABLE software.
-    A bug is a reproduced defect of OUR code (the runner, launchers, templates, presets, the
-    Neovim plugin, the template's CI): it crashes, gives a wrong result, loses or corrupts data,
-    leaves a half-made change, or contradicts its documentation. Not counted: the user's code;
+    Counted: a reproduced defect of OUR code (the runner, launchers, templates, presets, the
+    Neovim plugin, the template's CI) that stops the user from doing something, at one of three
+    severities:
+    - critical: it loses or corrupts data (the user's files, the project, uv.lock), opens a
+      security hole, or gives a silently wrong result (a build without what it should hold, a
+      check that passes when it must fail);
+    - serious: a command, build method or documented feature fails or cannot be used in a
+      supported setup, and there is no reasonable workaround;
+    - notable: it fails in a supported case but a workaround exists, or it leaves a half-made
+      change or a broken state the user must repair by hand.
+    Not counted, but still fixed when found: minor and cosmetic defects that stop nothing (a
+    character printed wrong, an `n` with tilde garbled in a message, an unclear hint, layout).
+    Also not counted: the user's code;
     a defect of a dependency (uv, PyInstaller, Nuitka, mypyc, flet, PowerShell, a shell...) that
     something should do and does not, when our workaround is documented in section 15.1
     (dependency and version, symptom, upstream issue, the workaround by symbol, the test that
@@ -2233,9 +2243,11 @@ only with `./deploy selftest` and `selftest --shells` on Windows.
   (total ~ found by A x found by B / found by both).
 - Measurements:
   - 2026-09-25, commit fc131b9, 10,837 lines: 172 confirmed bug findings (17 high, 78 medium,
-    77 low; a few are duplicates of each other)
-    and 44 stability defects (breakage that comes with time: moving versions, expiring
-    schedules): 1 bug per 63 lines, 1 per 50 with the stability defects. UNRELIABLE. The
+    77 low; a few are duplicates of each other) and 44 stability defects (breakage that comes
+    with time: moving versions, expiring schedules). That hunt's severities are not the three
+    of rule 1.10 (some "low" findings stopped every command, e.g. a non-UTF-8 byte in
+    pytemplate.toml), so the counted density lies between 1 per 114 lines (high and medium
+    only: UNACCEPTABLE) and 1 per 63 (every bug: UNRELIABLE). The
     September 2026 overhaul fixed or deliberately closed every one of the 172 bugs (wave 1)
     and took on the CI stability defects (wave 2); the code grew to 14,588 lines.
   - After the overhaul: not measured yet. Until a measurement says otherwise, the project is not
