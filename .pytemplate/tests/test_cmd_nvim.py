@@ -105,15 +105,37 @@ def test_trust_windows_paths_are_case_insensitive(tmp_path: Path) -> None:
     db.write_text(f"{digest} {real.upper().replace('/', chr(92))}\n", encoding="utf-8")
     assert cmd_nvim.trust_status(db, file, windows=True).state == "trusted"
     if real.upper() != real:
-        assert cmd_nvim.trust_status(db, file, windows=False).state == "untrusted"
+        assert cmd_nvim.trust_status(db, file, windows=False, macos=False).state == "untrusted"
     # an exact entry wins over a case-insensitive one
     db.write_text(f"{'0' * 64} {real.upper()}\n{digest} {real}\n", encoding="utf-8")
     assert cmd_nvim.trust_status(db, file, windows=True).state == "trusted"
 
 
+def test_trust_macos_paths_ignore_case_and_unicode_form(tmp_path: Path) -> None:
+    """macOS volumes are case- and normalization-insensitive by default. Neovim keys the trust
+    database with realpath(3), which returns the on-disk spelling (`MyGame`, NFD accents);
+    Python's os.path.realpath keeps what was typed (`cd ~/projects/mygame`, NFC): a trusted
+    .lazy.lua read as untrusted, and `nvim trust` failed after Neovim reported success."""
+    project = tmp_path / "caf\u00e9 Game"  # typed: NFC, this case
+    project.mkdir()
+    file = project / ".lazy.lua"
+    file.write_bytes(b"return {}\n")
+    digest = hashlib.sha256(b"return {}\n").hexdigest()
+    real = os.path.realpath(file)
+    on_disk = real.replace("caf\u00e9 Game", "CAFE\u0301 GAME")  # Neovim's key: another case, NFD
+    db = tmp_path / "trust"
+    db.write_text(f"{digest} {on_disk}\n", encoding="utf-8")
+    assert cmd_nvim.trust_status(db, file, windows=False, macos=True).state == "trusted"
+    assert cmd_nvim.trust_status(db, file, windows=False, macos=False).state == "untrusted"  # Linux
+    db.write_text(f"! {on_disk}\n", encoding="utf-8")
+    assert cmd_nvim.trust_status(db, file, windows=False, macos=True).state == "denied"
+
+
 def test_same_path() -> None:
     assert cmd_nvim.same_path("C:\\Users\\Me\\p\\.lazy.lua", "c:/users/me/P/.lazy.lua", windows=True)
-    assert not cmd_nvim.same_path("/home/Me/.lazy.lua", "/home/me/.lazy.lua", windows=False)
+    assert not cmd_nvim.same_path("/home/Me/.lazy.lua", "/home/me/.lazy.lua", windows=False, macos=False)
+    assert cmd_nvim.same_path("/Users/Me/Caf\u00e9/.lazy.lua", "/Users/me/cafe\u0301/.lazy.lua", windows=False, macos=True)
+    assert not cmd_nvim.same_path("/Users/me/a/.lazy.lua", "/Users/me/b/.lazy.lua", windows=False, macos=True)
 
 
 # --- lazyvim.json ----------------------------------------------------------------------------------

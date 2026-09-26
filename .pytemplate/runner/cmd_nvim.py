@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -242,16 +243,29 @@ def read_trust_db(db: Path) -> list[tuple[str, str]]:
     return out
 
 
-def same_path(a: str, b: str, *, windows: bool = IS_WINDOWS) -> bool:
-    """Compare two real paths as the OS does (Windows: case-insensitive, / and \\ alike)."""
-    return ntpath.normcase(a) == ntpath.normcase(b) if windows else a == b
+def _fold(path: str) -> str:
+    """A macOS path as its (case- and normalization-insensitive) volume compares it."""
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", path).casefold())
 
 
-def trust_status(db: Path, file: Path, *, windows: bool = IS_WINDOWS) -> Trust:
+def same_path(a: str, b: str, *, windows: bool = IS_WINDOWS, macos: bool = IS_MACOS) -> bool:
+    """Compare two real paths as the OS does (Windows: case-insensitive, / and \\ alike; macOS:
+    case- and Unicode-form-insensitive, like its default APFS/HFS+ volumes)."""
+    if windows:
+        return ntpath.normcase(a) == ntpath.normcase(b)
+    if macos:
+        return _fold(a) == _fold(b)
+    return a == b
+
+
+def trust_status(db: Path, file: Path, *, windows: bool = IS_WINDOWS, macos: bool = IS_MACOS) -> Trust:
     """Return the trust state of `file`: its entry (by real path) compared with its sha256.
 
     Neovim keys the database by vim.uv.fs_realpath() and hashes the raw bytes, so a moved
-    project or an LF/CRLF change means "not trusted" again.
+    project or an LF/CRLF change means "not trusted" again. That key is realpath(3)'s, which on
+    macOS has the on-disk case and Unicode form, while os.path.realpath keeps the typed ones
+    (`cd ~/projects/mygame` for `MyGame`): an exact entry wins, else one that is the same path
+    for the OS.
     """
     real = os.path.realpath(file)
     if not file.is_file():
@@ -259,7 +273,7 @@ def trust_status(db: Path, file: Path, *, windows: bool = IS_WINDOWS) -> Trust:
     digest = hashlib.sha256(file.read_bytes()).hexdigest()
     entries = read_trust_db(db)
     exact = [h for h, p in entries if p == real]
-    loose = [h for h, p in entries if same_path(p, real, windows=windows)]
+    loose = [h for h, p in entries if same_path(p, real, windows=windows, macos=macos)]
     recorded = (exact or loose or [""])[-1]
     if not recorded:
         state = "untrusted"

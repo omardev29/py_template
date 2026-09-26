@@ -2014,7 +2014,10 @@ LazyVim wiring:
   `lazyvim.json`, tools (git, curl, tar required; rg, fd, tree-sitter, python, node, uvx, a C
   compiler optional), and ruff, mypy, debugpy in `.venv` (basedpyright optional).
 - Trust DB `<state>/trust`: lines `<sha256|!> <path>` (CRLF on Windows), path = real path
-  (backslashes on Windows; compared case-insensitively), hash over raw bytes. `trust` calls
+  (backslashes on Windows; `cmd_nvim.same_path`: case-insensitive on Windows, case- and
+  Unicode-form-insensitive on macOS, where Neovim's key comes from realpath(3) with the on-disk
+  spelling while `os.path.realpath` keeps the typed one, e.g. after `cd ~/projects/mygame` for
+  `MyGame`; an exact entry wins), hash over raw bytes. `trust` calls
   `vim.secure.trust({action = "allow", path = ...})` on >= 0.12 (`bufnr` form on 0.11), with
   the file in `$PT_TRUST_FILE`, after creating the state dir (the DB is opened with
   `io.open(..., "w")`), then re-reads the DB to confirm; already trusted -> nothing. Neovim
@@ -3005,11 +3008,15 @@ VS Code, its extensions, pyright and basedpyright:
 
 Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
 - **Neovim trusts a file by the sha256 of its bytes and its real path** (LIMITATION,
-  `vim.secure`): any byte change (CRLF, a BOM, a mode-dependent value) untrusted `.lazy.lua`.
-  Fix: `.lazy.lua` is a static copy (`editors/nvim.py`), `.gitattributes` keeps it LF, all logic
-  lives in `.pytemplate/nvim/` (12.2). Test:
+  `vim.secure`): any byte change (CRLF, a BOM, a mode-dependent value) untrusted `.lazy.lua`;
+  the path is realpath(3)'s, which on macOS has the on-disk case and Unicode form, where
+  Python's realpath keeps the typed ones (a trusted file read as untrusted, and `nvim trust`
+  failed with exit 3). Fix: `.lazy.lua` is a static copy (`editors/nvim.py`), `.gitattributes`
+  keeps it LF, all logic lives in `.pytemplate/nvim/`; `cmd_nvim.trust_status` compares the
+  paths with `cmd_nvim.same_path`, as the volume does (12.2). Test:
   `test_nvim_render.py::test_lazy_lua_is_identical_in_every_mode`,
-  `test_lazy_lua_bytes_are_pinned`, `test_gitattributes_keeps_lazy_lua_lf`. Goes: never.
+  `test_lazy_lua_bytes_are_pinned`, `test_gitattributes_keeps_lazy_lua_lf`,
+  `test_cmd_nvim.py::test_trust_macos_paths_ignore_case_and_unicode_form`. Goes: never.
 - **`vim.secure.trust`** (LIMITATION): the `path` form exists from 0.12 only (0.11 needs a
   buffer), and it writes its database with `io.open(<state>/trust, "w")`, which fails while the
   state folder does not exist. Fix: the trust snippet of `cmd_nvim.trust_file` creates the
