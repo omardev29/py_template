@@ -295,6 +295,39 @@ def _presets() -> list[str]:
     return sorted(p.name for p in PRESETS.iterdir() if (p / "preset.toml").is_file())
 
 
+def _within(name: str, package: str) -> bool:
+    return name == package or name.startswith(package + ".")
+
+
+def _validate_compile(cfg: Config) -> None:
+    """[compile]: the relations between the dotted names (whether they exist is checked when
+    mypyc runs: mypyc.compiled_sources)."""
+    for m in cfg.compile.forbid_imports:
+        if not _DOTTED.fullmatch(m):
+            raise DeployError(f"pytemplate.toml: invalid module in compile.forbid_imports: {m!r}")
+    modules = cfg.compile.modules
+    for i, m in enumerate(modules):
+        for other in modules[:i]:
+            if m == other:
+                raise DeployError(f"pytemplate.toml: compile.modules lists {m!r} twice")
+            if _within(m, other) or _within(other, m):
+                inner, outer = (m, other) if _within(m, other) else (other, m)
+                raise DeployError(
+                    f"pytemplate.toml: compile.modules: {inner!r} is inside {outer!r}, which already compiles it "
+                    f"(mypyc would see the module twice): keep only {outer!r}"
+                )
+    for ex in cfg.compile.exclude:
+        if ex in modules:
+            raise DeployError(
+                f"pytemplate.toml: compile.exclude: {ex!r} is a whole compile.modules entry: remove it from compile.modules instead"
+            )
+        if not any(ex.startswith(m + ".") for m in modules):
+            raise DeployError(
+                f"pytemplate.toml: compile.exclude: {ex!r} is not inside compile.modules {modules}: "
+                "list modules or subpackages of those packages"
+            )
+
+
 def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", cfg.app.name):
         raise DeployError("pytemplate.toml: 'app.name' only allows letters, digits, '-' and '_'")
@@ -340,6 +373,7 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
                 "(mypy would apply it to ALL modules); use specific options instead"
             )
     _one_of(cfg.compile.opt_level, ("0", "1", "2", "3"), "compile.opt_level")
+    _validate_compile(cfg)
     if cfg.deploy.optimize not in (0, 1, 2):
         raise DeployError("pytemplate.toml: 'deploy.optimize' must be 0, 1 or 2")
     for backend, method in cfg.deploy.default.items():

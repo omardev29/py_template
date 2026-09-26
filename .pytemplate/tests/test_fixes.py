@@ -290,14 +290,17 @@ def test_sync_tree_detects_same_size_edits_within_a_second(tmp_path: Path) -> No
     assert (dst / "a.py").stat().st_mtime_ns == f.stat().st_mtime_ns
     assert mypyc.sync_tree(src, dst) == 0
 
-    # Extensions: never copied from src, never deleted from dst
+    # mypyc's extensions (of the modules in `owned`): never copied from src, never deleted from
+    # dst. Any other .so/.pyd is app content (a vendored native library): synced like a file
     (dst / "a.cp314-win_amd64.pyd").write_bytes(b"x")
+    (src / "a.cp314-win_amd64.pyd").write_bytes(b"stray")
     (src / "b.so").write_bytes(b"y")
-    mypyc.sync_tree(src, dst)
-    assert (dst / "a.cp314-win_amd64.pyd").exists() and not (dst / "b.so").exists()
+    mypyc.sync_tree(src, dst, owned=["a"])
+    assert (dst / "a.cp314-win_amd64.pyd").read_bytes() == b"x" and (dst / "b.so").read_bytes() == b"y"
     f.unlink()
-    assert mypyc.sync_tree(src, dst) == 1
-    assert not (dst / "a.py").exists() and (dst / "a.cp314-win_amd64.pyd").exists()
+    (src / "b.so").unlink()
+    assert mypyc.sync_tree(src, dst, owned=["a"]) == 2
+    assert not (dst / "a.py").exists() and not (dst / "b.so").exists() and (dst / "a.cp314-win_amd64.pyd").exists()
 
 
 # --- 7. portable launchers ------------------------------------------------------------------------
