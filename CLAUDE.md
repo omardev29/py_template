@@ -2123,10 +2123,13 @@ short temp tree and unset `NVIM_APPNAME`.
   pinned basedpyright when the uv cache has them), `test_shells.py` (also runs the fish, pwsh
   and xonsh snippets in their shells, nu where installed), `test_vscode.py` (also real
   tool output through each task's matchers and a Node `RegExp` cross-check),
-  `test_nvim_render.py` (also loads the Lua modules in `nvim --headless --clean`: parser,
-  uv lookup, launcher fallback, sanitize round trip, the mypy linter, `tasks.META`, `:Deploy`;
-  the pinned `.lazy.lua` hash), `test_cmd_nvim.py` (`nvim` subcommands with fake Neovims,
-  the `selftest --nvim` harness: pins, base reuse, smoke parsing, tree kill), `test_fixes.py` (regression tests of the
+  `test_nvim_render.py` (also loads the Lua modules in `nvim --headless --clean`: parser (stage
+  paths, terminal escapes, the profile's severities), uv lookup, launcher fallback, sanitize
+  round trip, the mypy linter, `tasks.META`, `unique` on every task, `:Deploy` and its
+  completion; the pinned `.lazy.lua` hash), `test_cmd_nvim.py` (`nvim` subcommands with fake
+  Neovims, `nvim doctor`'s lines, `nvim sync`'s plugin check (also in a real Neovim with a fake
+  lazy.nvim), the query of an old Neovim, the `selftest --nvim` harness: pins, base reuse,
+  smoke parsing, tree kill), `test_fixes.py` (regression tests of the
   runner fixes: portable smoke with `lib/`, lazy `{python}`, the pyz `.cmd` wrapper, binary
   preset files, `compile.annotate`, `sync_tree` ns mtimes, portable launcher quoting and
   version probes, unknown arguments, `app.preset`, pinned tools, flet pyproject, wheel
