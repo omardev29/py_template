@@ -14,7 +14,7 @@ from pathlib import Path
 from . import cmd_nvim, envs, hooks, mypyc, proc, render, shells, ui
 from .cmd_dev import only_flags
 from .config import Config
-from .project import BUILD, DIST, ENV_SUFFIX, IS_MACOS, IS_WINDOWS, ROOT, rel
+from .project import BUILD, DIST, ENV_SUFFIX, IS_MACOS, IS_WINDOWS, PYPROJECT, ROOT, rel
 from .ui import DeployError
 
 LAUNCHERS_X = ("deploy", "deploy.ps1")  # the launchers that must stay executable (100755)
@@ -93,11 +93,47 @@ def cmd_sync(cfg: Config, args: list[str]) -> int:
     return 0
 
 
+# `uv lock` arguments (and the variables uv reads for them) that make it write no uv.lock
+LOCK_READ_ONLY = ("--check", "--locked", "--check-exists", "--frozen", "--dry-run")
+LOCK_READ_ONLY_ENV = ("UV_LOCKED", "UV_FROZEN")
+
+
+def _lock_read_only(args: list[str]) -> str:
+    """The argument or variable that keeps `uv lock` from writing uv.lock, or ""."""
+    for a in args:
+        if a in LOCK_READ_ONLY:
+            return a
+    for name in LOCK_READ_ONLY_ENV:  # uv's boolean variables: 1/true/yes/on
+        if os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on", "y", "t"):
+            return name
+    return ""
+
+
 def cmd_lock(cfg: Config, args: list[str]) -> int:
-    """lock [--upgrade] [--upgrade-package PKG]: apply the managed pyproject parts and `uv lock`."""
-    if render.write_pyproject(cfg):
+    """lock [--upgrade] [--upgrade-package PKG]: apply the managed pyproject parts and `uv lock`.
+
+    pyproject.toml and uv.lock change together or not at all: when `uv lock` fails (offline, no
+    solution, Ctrl+C) or writes no uv.lock (--check, --dry-run...), pyproject.toml gets its old
+    bytes back. Otherwise the two would disagree and every `uv run --locked` would fail.
+    """
+    before = PYPROJECT.read_bytes() if PYPROJECT.is_file() else None
+    changed = render.write_pyproject(cfg)
+    if changed:
         ui.info(render.pyproject_message())
-    envs.uv(envs.tool_env(cfg), ["lock", *args])
+
+    def restore(why: str) -> None:
+        if changed and before is not None and not proc.DRY_RUN and PYPROJECT.read_bytes() != before:
+            PYPROJECT.write_bytes(before)
+            ui.info(f"pyproject.toml: put back as it was ({why})")
+
+    try:
+        envs.uv(envs.tool_env(cfg), ["lock", *args])
+    except BaseException:  # a failed uv lock leaves uv.lock alone; Ctrl+C too
+        restore("uv lock did not update uv.lock")
+        raise
+    read_only = _lock_read_only(args)
+    if read_only:
+        restore(f"uv lock with {read_only} writes no uv.lock")
     render.apply(cfg)
     return 0
 
@@ -108,7 +144,7 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
     where = parser.add_mutually_exclusive_group()
     where.add_argument("--dev", action="store_true", help="development group")
     # setup and sync install every group (envs.sync: --all-groups), so it stays installed
-    where.add_argument("--group", help="dependency group (./deploy setup and sync install every group)")
+    where.add_argument("--group", help="dependency group (add, remove, setup and sync install every group)")
     if verb == "add":
         parser.add_argument(
             "--cpython-only",
@@ -116,7 +152,10 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
             help="only on CPython/mypyc (C-API libraries such as numpy: slow or unavailable on PyPy)",
         )
     ns = parser.parse_args(args)
-    argv: list[str] = [verb]
+    # --no-sync, then envs.sync: uv's own sync after `remove` is EXACT for the default groups
+    # only, so it uninstalled every package of the other groups (`add --group G`); `uv sync
+    # --all-groups` keeps them, as setup and sync do.
+    argv: list[str] = [verb, "--no-sync"]
     if ns.dev:
         argv.append("--dev")
     if ns.group:
@@ -124,7 +163,9 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
     if verb == "add" and ns.cpython_only:
         argv += ["--marker", "implementation_name == 'cpython'"]
     argv += ns.packages
-    envs.uv(envs.tool_env(cfg), argv)
+    tool = envs.tool_env(cfg)
+    envs.uv(tool, argv)
+    envs.sync(tool)
     if verb == "add" and cfg.pypy_enabled and not ns.cpython_only:
         ui.info(
             "PyPy is supported: if the package uses the CPython C-API (numpy, pillow, pydantic-core...) "

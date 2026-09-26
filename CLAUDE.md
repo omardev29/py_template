@@ -1086,7 +1086,11 @@ Formats:
   writing, as a preflight for commands that change other files first.
 - `render.auto` only warns (`pyproject_outdated`); `write_pyproject` runs in `lock`, `mode`,
   `apply`/`setup` and `rename` (via `cmd_env.ensure_lock`) and `__init`, because the change
-  needs re-locking.
+  needs re-locking. `lock` (`cmd_env.cmd_lock`) puts `pyproject.toml`'s old bytes back when its
+  `uv lock` fails (offline, no solution, Ctrl+C) or writes no `uv.lock`
+  (`cmd_env.LOCK_READ_ONLY`: `--check`, `--locked`, `--check-exists`, `--frozen`, `--dry-run`;
+  `UV_LOCKED`/`UV_FROZEN` set): a rewritten pyproject.toml next to the old lock made every
+  `uv run --locked` fail.
 - Not a managed part, but kept in line by `./deploy apply` (section 5.8): the option-driven
   preset requirements in `[project] dependencies` and the dev group (flet's three pins,
   raylib's `{package}=={version}`), through `uv remove/add --frozen` and one `uv lock`.
@@ -1107,10 +1111,12 @@ Formats:
   hook's ruff uses `--frozen`, section 5.6). `cmd_env.ensure_lock` runs `uv lock --check` and
   then `uv lock` if needed; under `--dry-run`, when the managed pyproject parts would change, it
   echoes `uv lock` instead (the check would read the unwritten file and pass).
-- `envs.sync` = `uv sync --locked --all-groups` (apply/setup, sync, mode): every dependency group of
-  `pyproject.toml` is installed, so `./deploy add --group G pkg` survives the next sync and
-  reaches a fresh clone (an exact sync of the default groups removed it); `uv run` syncs
-  inexactly and never removes them. `add`/`remove` take `--dev` or `--group G`, not both.
+- `envs.sync` = `uv sync --locked --all-groups` (apply/setup, sync, mode, add, remove): every
+  dependency group of `pyproject.toml` is installed, so `./deploy add --group G pkg` survives the
+  next sync and reaches a fresh clone (an exact sync of the default groups removed it); `uv run`
+  syncs inexactly and never removes them. `add`/`remove` take `--dev` or `--group G`, not both,
+  and run `uv add|remove --no-sync` (it still re-locks), then `envs.sync` of `.venv`: uv's own
+  sync after `remove` is exact for the default groups and uninstalled every other group.
 - The oldest supported uv is `envs.MIN_UV` = 0.10.12, read from uv's own download metadata:
   the first uv that downloads `pypy@3.11.15` (0.10.11: "No download found for request");
   CPython 3.14 final needs 0.9.0 (0.8.x silently installs 3.14.0rc2) and `uv export --format

@@ -281,19 +281,22 @@ def fake_uv(monkeypatch: pytest.MonkeyPatch, code_for: dict[tuple[str, ...], int
     return calls
 
 
+SYNC_ALL = ["sync", "--locked", "--all-groups"]
+
+
 def test_add_remove_argv(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     calls = fake_uv(monkeypatch)
     cfg, pp = make(), make(PYPY)
     assert cmd_env.cmd_add(cfg, ["x", "--cpython-only"]) == 0
-    assert calls[-1] == ["add", "--marker", "implementation_name == 'cpython'", "x"]
+    assert calls[-2:] == [["add", "--no-sync", "--marker", "implementation_name == 'cpython'", "x"], SYNC_ALL]
     cmd_env.cmd_add(cfg, ["--dev", "x", "y"])
-    assert calls[-1] == ["add", "--dev", "x", "y"]
+    assert calls[-2:] == [["add", "--no-sync", "--dev", "x", "y"], SYNC_ALL]
     cmd_env.cmd_add(cfg, ["--group", "docs", "x"])
-    assert calls[-1] == ["add", "--group", "docs", "x"]
+    assert calls[-2:] == [["add", "--no-sync", "--group", "docs", "x"], SYNC_ALL]
     cmd_env.cmd_remove(cfg, ["--group", "docs", "x"])
-    assert calls[-1] == ["remove", "--group", "docs", "x"]
+    assert calls[-2:] == [["remove", "--no-sync", "--group", "docs", "x"], SYNC_ALL]
     cmd_env.cmd_remove(cfg, ["x"])
-    assert calls[-1] == ["remove", "x"]
+    assert calls[-2:] == [["remove", "--no-sync", "x"], SYNC_ALL]
     count = len(calls)
     for bad in (["--dev", "--group", "g", "x"], [], ["--dev"]):
         with pytest.raises(SystemExit) as e:
@@ -312,6 +315,31 @@ def test_add_remove_argv(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capture
     assert "PyPy" not in capsys.readouterr().err
 
 
+def test_remove_keeps_the_packages_of_every_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`uv remove` syncs EXACTLY for the default groups: `./deploy remove idna` uninstalled six,
+    added with `./deploy add --group docs six`. The environment is synced like setup and sync do
+    (every group), never by uv add/remove themselves."""
+    calls = fake_uv(monkeypatch)
+    cmd_env.cmd_remove(make(), ["idna"])
+    edits = [c for c in calls if c[0] in ("add", "remove")]
+    syncs = [c for c in calls if c[0] == "sync"]
+    assert all("--no-sync" in c for c in edits) and edits
+    assert syncs == [SYNC_ALL] and calls[-1] == SYNC_ALL  # after the edit
+
+
+def test_a_failed_remove_syncs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def failing(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(str(args[0]))
+        raise proc.CommandFailed(["uv", *args], 1)
+
+    monkeypatch.setattr(envs, "uv", failing)
+    with pytest.raises(proc.CommandFailed):
+        cmd_env.cmd_remove(make(), ["not-a-dependency"])
+    assert calls == ["remove"]
+
+
 def test_cmd_lock_applies_pyproject_and_forwards_its_arguments(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     calls = fake_uv(monkeypatch)
     written: list[bool] = []
@@ -320,6 +348,71 @@ def test_cmd_lock_applies_pyproject_and_forwards_its_arguments(monkeypatch: pyte
     assert cmd_env.cmd_lock(make(), ["--upgrade-package", "rich"]) == 0
     assert written == [True] and calls == [["lock", "--upgrade-package", "rich"]]
     assert "pyproject.toml: updated the parts managed by pytemplate" in capsys.readouterr().err
+
+
+@pytest.fixture
+def lock_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A pyproject.toml that render.write_pyproject rewrites (the managed parts changed)."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_bytes(b"[project]\r\nname = 'old'\r\n")
+    monkeypatch.setattr(cmd_env, "PYPROJECT", pyproject)
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    for name in cmd_env.LOCK_READ_ONLY_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+    def write(cfg: Config) -> bool:
+        pyproject.write_text("[project]\nname = 'new'\n", encoding="utf-8", newline="\n")
+        return True
+
+    monkeypatch.setattr(render, "write_pyproject", write)
+    monkeypatch.setattr(render, "apply", lambda cfg, **kw: ([], []))
+    return pyproject
+
+
+def test_a_failed_lock_puts_pyproject_back(lock_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Offline (or no solution): uv lock fails and leaves uv.lock alone. The rewritten
+    pyproject.toml stayed, so pyproject and uv.lock disagreed and every `uv run --locked`
+    (run, test, check...) failed until a successful lock or a `git checkout pyproject.toml`."""
+    failure: BaseException = proc.CommandFailed(["uv", "lock"], 1)
+
+    def failing(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        raise failure
+
+    monkeypatch.setattr(envs, "uv", failing)
+    with pytest.raises(proc.CommandFailed):
+        cmd_env.cmd_lock(make(), [])
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"  # every byte, CRLF included
+    assert "pyproject.toml: put back as it was" in capsys.readouterr().err
+    failure = proc.Interrupted(130)  # Ctrl+C during uv lock
+    with pytest.raises(KeyboardInterrupt):
+        cmd_env.cmd_lock(make(), [])
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
+
+
+@pytest.mark.parametrize("args", [["--check"], ["--locked"], ["--dry-run"], ["--upgrade", "--dry-run"], ["--frozen"], ["--check-exists"]])
+def test_a_read_only_lock_puts_pyproject_back(lock_project: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]) -> None:
+    """`./deploy lock --dry-run` (a preview) rewrote pyproject.toml, uv wrote no uv.lock, and the
+    project was left with a pyproject.toml its uv.lock does not match."""
+    calls = fake_uv(monkeypatch)
+    assert cmd_env.cmd_lock(make(), args) == 0
+    assert calls == [["lock", *args]]
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
+
+
+@pytest.mark.parametrize("name", ["UV_LOCKED", "UV_FROZEN"])
+def test_a_lock_made_read_only_by_the_environment_puts_pyproject_back(lock_project: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    fake_uv(monkeypatch)
+    monkeypatch.setenv(name, "1")
+    cmd_env.cmd_lock(make(), [])
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
+
+
+def test_a_successful_lock_keeps_the_new_pyproject(lock_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    fake_uv(monkeypatch)
+    monkeypatch.setenv("UV_FROZEN", "0")  # a false value is no read-only lock
+    assert cmd_env.cmd_lock(make(), ["--upgrade"]) == 0
+    assert lock_project.read_text(encoding="utf-8") == "[project]\nname = 'new'\n"
+    assert "put back" not in capsys.readouterr().err
 
 
 def test_ensure_lock_dry_run_announces_the_relock(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
