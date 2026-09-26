@@ -114,7 +114,8 @@ typings/                          project stubs (raylib preset: the corrected ra
 .pytemplate/state.json            hashes of the generated files + the `applied` record (committed)
 .pytemplate/template-repo         [template repo] marker, not copied by ./deploy new
 .github/workflows/ci.yml          generated CI of the project
-.github/workflows/template-*.yml  [template repo] launchers, nvim, e2e CI; not copied
+.github/workflows/template-*.yml  [template repo] selftest, launchers, nvim, e2e CI and the
+                                  keepalive of their schedules (section 13.2); not copied
 ignored: .venv*/ .build/ dist/ build/ *.spec *.pyd *.so .flet/ tool caches,
          .claude/worktrees/ .claude/settings.local.json
 ```
@@ -481,7 +482,8 @@ header rules (with detector tests proving each rule fires).
   caller's `UV_PYTHON` (a returned argv cannot change the environment), so the runner's
   version check (section 5.2) is its guard. `test_shells` executes the fish, pwsh and xonsh
   snippets in their shells (argv, exit codes, walk-up, the xonsh completer, pwsh pipeline
-  input); the nu one only where nu is installed (no CI job installs nushell).
+  input); the nu one only where nu is installed (the macOS jobs of template-selftest and
+  template-launchers install nushell).
 - `shells.doctor(check)` (from `./deploy doctor`): step "launchers": the launcher that started
   the run, then `deploy` (`#!/bin/sh`, LF, ASCII, git mode 100755, exec bit on POSIX),
   `deploy.cmd` (CRLF, ASCII) and `deploy.ps1` (LF, ASCII, no BOM; a mode other than 100755 is
@@ -2010,8 +2012,22 @@ short temp tree and unset `NVIM_APPNAME`.
   --no-incremental --python-version 3.11 --config-file .pytemplate/tests/mypy-runner.ini
   .pytemplate/runner .pytemplate/deploy.py`. Both must pass. Needs `.venv` (`./deploy setup`).
   mypy checks the host platform only: add `--platform linux` / `--platform darwin` by hand to
-  check the other branches. The arguments are ADDED after `.pytemplate/tests`: a file path does
-  not narrow the run (pytest still collects the whole folder); select with `-k EXPR`.
+  check the other branches (template-selftest runs it on all three OSes). The exit code is
+  pytest's when it failed, else mypy's (mypy runs either way); `--shells`, `--nvim` and `--e2e`
+  return their suite's own code. The arguments are ADDED after `.pytemplate/tests`: a file path
+  does not narrow the run (pytest still collects the whole folder); select with `-k EXPR`.
+- It must pass in every project made with `./deploy new` too (its CLAUDE.md says so; any
+  preset, name, backend set): tests take the app name, package, preset and backends from the
+  project they run in (`test_apply._preset_requirements`, `test_cli_core.own`, the copies'
+  `pytemplate.toml` in the throwaway-copy tests) or build hermetic fixtures (`src/myapp` in
+  tmp with `SRC` monkeypatched), and skip only what cannot apply there, with the reason: the
+  template repository's own invariants (the `.pytemplate/template-repo` marker: the root is the
+  script preset as `myapp`, the language guard, the workflow tests) and the real builds that
+  import rich (`test_build_methods.needs_rich`: a raylib project locks none). template-selftest's
+  new-project job proves it for a raylib and a flet project (a new project has its own
+  README.md; the template's is `.pytemplate/README.md`). Tests that start what they built with
+  `sys.executable` skip on an interpreter older than the build's Python
+  (`test_build_methods.skip_when_older_than`: the floor job runs the suite on 3.11).
 - `.pytemplate/tests/`: `test_runner.py` (config, render, lintc, imports, target keys),
   `test_no_spanish.py`, `test_launcher_sh.py` (static lint of the `deploy` header rules, `-n`
   syntax checks, `__probe` round-trips per shell found; a caller's `set -eu` in 8 shells,
@@ -2080,7 +2096,12 @@ short temp tree and unset `NVIM_APPNAME`.
   behaviour the fake imitates), `test_rename.py` (the skeleton invariant for 3 presets x 7
   pairs x LF/CRLF, random names and round trips, every rewrite rule, scopes, TOML keys and
   module keys, encodings, git states, rollback, the ruff tidy-up, the command in-process and a
-  real run in a copy).
+  real run in a copy), `test_selftest_harness.py` (the exit codes CI trusts: plain `selftest`
+  with pytest and mypy faked, `--shells` with the probes faked but `_run_all` and the table
+  real, `--nvim` with Neovim, the base and the smoke runs faked: 0, 1 on any FAIL, 2 usage, 3
+  with `--require`), `test_workflows.py` (template repository only: the promises of the
+  template-*.yml workflows, the keepalive covering every scheduled one, the gates, `-latest`
+  labels, pinned actions, and actionlint on every workflow when installed).
 - **[template repo]** Language guard `test_no_spanish.py`: skipped unless
   `.pytemplate/template-repo` exists. Scans `git ls-files --cached --others --exclude-standard`
   (so new untracked files count) for accented Spanish letters and a list of Spanish words
@@ -2197,11 +2218,56 @@ short temp tree and unset `NVIM_APPNAME`.
   silently inside the runner. It never runs `setup`: it `sync`s only the matrix backends of
   each OS (so raylib drops PyPy on macOS; an OS left with no backend gets no matrix row), then
   `check all`, `test` per backend, a pyz per OS, and `pyz-merge` into one cross-platform
-  `.pyz`.
+  `.pyz`, uploaded with the `<name>.cmd` wrapper `pyz-merge` writes next to it (a literal
+  block `path: |`; `pyz.wrapper_path`). Two moving parts on purpose, explained in its header
+  and pinned by `test_ci_workflow_keeps_its_moving_parts_on_purpose`: setup-uv gets no
+  `version:`, so it installs the newest uv that satisfies pyproject's `required-version` (a
+  pinned uv cannot download Pythons released after it), and the runner labels stay `-latest`
+  (GitHub retires a pinned label about six months after a newer image is GA).
+- **[template repo]** `template-selftest.yml` (push to `main`, pull requests, weekly and by
+  hand; the gate): `./deploy render --check` first, then `setup` and `./deploy selftest` on
+  ubuntu, macos and windows-latest (Windows through `deploy.ps1`, `--basetemp` in
+  `RUNNER_TEMP`, git's default CRLF checkout), with what the tests look for: dash, zsh, ksh,
+  mksh, yash, busybox, fish (apt); fish and nushell (brew); MSYS2 with dash and uv copied to
+  `~\.local\bin` (the login-shell test); xonsh 0.24.2 and Neovim v0.12.5 everywhere; actionlint
+  1.7.12 (SHA-256 checked) on Linux; the runner's own pinned UPX (`upx.find`) on Linux and
+  Windows; taplo and the basedpyright pin in the uv cache (their tests run offline). Job
+  `python-floor`: the runner starts on 3.11 (`uv run --python 3.11 --script`), and the suite
+  runs in process on 3.11 (`uv run --no-project --python 3.11 --with pytest==<locked>`: the
+  runner code itself on its floor; the tools the tests start stay in `.venv`). Not on PyPy:
+  uv never starts the runner there, and PyPy only changes harness details (it resets an
+  inherited SIG_IGN of SIGINT, no PEP 538 locale coercion). Job `uv-floor`: setup-uv with
+  `resolution-strategy: lowest` takes the oldest uv the `required-version` accepts, checked
+  against `envs.MIN_UV`, then setup and the suite, minus
+  `test_init_round_trip_through_every_preset_is_byte_identical` (uv 0.10.12 writes redundant
+  markers into uv.lock after a preset round trip: the same lock, other bytes). Job
+  `new-project`: `./deploy new` of a raylib and a flet project named `Pt-<preset>`, then setup
+  and selftest there. About 5 min on Linux, 8 on macOS, 15-20 on Windows (estimates: not run
+  on GitHub yet).
+- **[template repo]** `template-keepalive.yml` (weekly and by hand; the gate): in a public
+  repository GitHub disables a workflow that has a schedule after 60 days without repository
+  activity, and then none of its triggers run, pushes included, until it is enabled again. The
+  job enables, with its `GITHUB_TOKEN` (`actions: write`) and `gh api --method PUT
+  .../actions/workflows/<file>/enable`, every `template-*.yml` whose `on:` has `schedule:`
+  (found by `grep '^  schedule:'`, itself included), skipping one `disabled_manually`; a
+  workflow GitHub cannot return fails the job. That the call restarts the 60-day clock is the
+  technique of liskin/gh-workflow-keepalive, not documented by GitHub. A new scheduled
+  template workflow is covered by itself (`test_every_scheduled_workflow_is_kept_alive`).
+  If the keepalive itself was disabled, enable it in the Actions tab (`gh workflow enable
+  template-keepalive.yml`) and run it once.
+- **[template repo]** `template-launchers.yml` also runs weekly and installs xonsh 0.24.2 on
+  pushes and pull requests but the newest xonsh on the schedule (a red scheduled run with no
+  commit behind it is upstream drift; the shell versions are logged: xonsh, fish, pwsh,
+  busybox, MSYS2 runtime, Cygwin), xonsh on Windows too, and nushell on macOS.
+  `template-nvim.yml` pins Neovim v0.12.5 (Ubuntu, Windows) and v0.11.2
+  (`cmd_nvim.MIN_LAZYVIM`, Ubuntu: passed for the three presets when added) for pushes and
+  pull requests, one log artifact per row; its canary job (weekly and by hand, Ubuntu, Neovim
+  stable) deletes `.pytemplate/nvim/tests/lazy-lock.json` and always uploads the logs with the
+  resolved `lazy-lock.json` and `starter-commit.txt`, the next pins after a green run (13.1).
 - **[template repo]** `template-launchers.yml` (Linux/macOS shells + shellcheck, Windows with
   MSYS2, Cygwin and busybox-w32, optional WSL job; `selftest --shells` plus user-style
   invocations; a gate job checks the marker file), `template-nvim.yml` (Ubuntu + Windows,
-  Neovim stable, `fd` (venv-selector from LazyVim's `lang.python` errors on the first Python
+  Neovim pinned (above), `fd` (venv-selector from LazyVim's `lang.python` errors on the first Python
   buffer without it), `selftest --nvim --require --dir $RUNNER_TEMP/pt-nvim` (the `runner`
   context is not allowed in a job-level `env`, hence the step env), logs on failure),
   `template-e2e.yml` (3 OS x 3 presets, dispatch quick/default/full, weekly, pushes that touch
@@ -2213,19 +2279,22 @@ short temp tree and unset `NVIM_APPNAME`.
 
 Developed on Windows 11: the Linux/macOS code paths (launcher branches, `.sh` launchers, xvfb,
 pyz cache in `HOME`, the nvim harness) are exercised by the CI workflows. Not installed locally, CI only: zsh,
-ksh, mksh, yash, fish, Cygwin, busybox-w32, WSL, macOS bash 3.2. Untested anywhere so far:
-nushell (no CI job installs it: `selftest --shells` and `test_nu_snippet_runs` skip it),
-PowerShell 6.x-7.2, a UNC current folder, uv found only in `ProgramFiles` or chocolatey, a
-quoted registry PATH entry in `deploy.cmd` (`test_cmd_registry_path_with_quoted_entries` is
-Windows-only and has not run yet), the install prompt on Windows (POSIX `deploy` and pwsh
-`deploy.ps1` answer it on a pseudo-terminal), Neovim 0.11 (only 0.12.5), pyright via Mason, VS
+ksh, mksh, yash, fish, Cygwin, busybox-w32, WSL, macOS bash 3.2, and (macOS jobs only)
+nushell. Since September 2026 template-selftest runs every Windows-only test (the deploy.cmd
+and registry tests included) and nushell's on CI, and template-nvim runs Neovim 0.11.2 (it
+passed once on Linux when the row was added); none of these new jobs had run on GitHub when
+they were written. Untested anywhere so far:
+PowerShell 6.x-7.2, a UNC current folder, uv found only in `ProgramFiles` or chocolatey, the
+install prompt on Windows (POSIX `deploy` and pwsh
+`deploy.ps1` answer it on a pseudo-terminal), Neovim 0.11 on Windows, pyright via Mason, VS
 Code itself (buttons, Problems panel: only simulated), `flet build` (Developer Mode is off),
 bundled PyPy portable builds on CI, Ctrl+C handling of the harnesses (nvimtest's tree kill only
 simulated), `[deploy.nuitka]` lto/pgo outside Linux (measured with Nuitka 4.2.2 and gcc 13
 only: PGO with MSVC and an ~800-module LTO link are unmeasured). The launcher changes of
 September 2026 were developed on Linux (pwsh 7.6 for `deploy.ps1`; niubash simulated by
 sourcing `deploy` in bash, dash, busybox, ksh, mksh and yash): their Windows paths (Windows PowerShell 5.1, `deploy.cmd`, real niubash and MSYS2) run
-only with `./deploy selftest` and `selftest --shells` on Windows.
+only with `./deploy selftest` and `selftest --shells` on Windows (template-selftest and
+template-launchers; real niubash only on the maintainer's machine).
 
 ### 13.4 Bug density (rule 1.10)
 
@@ -2437,7 +2506,7 @@ Editors:
   (`pcall(require, ...)`, `type(...) == "table"`, else no extras). `.pytemplate/nvim/**` is
   already trusted with `.lazy.lua`, so later fixes there need no re-trust.
 - The pinned `selftest --nvim` (`nvimtest.LOCK`, `cmd_nvim.STARTER_REV`) stays green while
-  upstream moves: only a run without the lock (a scheduled canary) shows drift coming, and
+  upstream moves: only a run without the lock (template-nvim's weekly canary) shows drift coming, and
   users' LazyVim follows its own `lazy-lock.json`.
 - On Windows the debugger prints harmless noise on disconnect (debugpy's "NoMoreMessages"
   traceback, "adapter exited with 1").
@@ -2476,7 +2545,12 @@ Code coupling (rename together):
   `templates/nvim/lazy.lua` (`test_lazy_lua_extras_match_cmd_nvim`); `vscode.MYPYC_STAGE` /
   `editor.json` `mypyc_stage` / `vscode._STAGE` (the pytest stage matcher) <->
   `mypyc.profile(cfg, ...).stage` (`test_editor_json_stage_matches_the_runner`); the CI pyz path
-  <-> `BuildRequest.out_name` (10; `test_ci_workflow_for_every_preset_and_backend_set`).
+  <-> `BuildRequest.out_name` and the merged upload's `.cmd` <-> `pyz.wrapper_path` (10;
+  `test_ci_workflow_for_every_preset_and_backend_set`).
+- template-selftest.yml reads pins from the code by text: `envs.MIN_UV` (`MIN_UV = "..."`),
+  `cmd_dev.BASEDPYRIGHT`, the taplo pin of `test_render_core.py` and the pytest pin of
+  `uv.lock`; it deselects `test_init_round_trip_through_every_preset_is_byte_identical` by
+  name in the uv-floor job. `test_workflows.py` checks the workflow texts it relies on.
 - `editor.json` `typing.basedpyright` <-> `cmd_dev.BASEDPYRIGHT` (bumping the pin changes a
   generated file: re-render); the Lua whitelists `BACKENDS`, `PROFILES`, `EDITORS`,
   `SEVERITIES` in `nvim/lua/pytemplate/init.lua` <-> the runner's

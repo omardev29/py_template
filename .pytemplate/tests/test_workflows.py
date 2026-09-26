@@ -120,6 +120,25 @@ def test_selftest_workflow_covers_every_os_and_both_floors() -> None:
     assert "preset: [raylib, flet]" in new and "./deploy new" in new and "./deploy selftest" in new
 
 
+def test_what_the_selftest_workflow_reads_by_text_exists() -> None:
+    """The workflow greps pins out of the code and deselects one test by name: a rename must
+    fail here, not turn a CI step into `--from ""` or a deselect that matches nothing."""
+    from runner import cmd_dev
+
+    text = _text("template-selftest.yml")
+    tests, runner = ROOT / ".pytemplate" / "tests", ROOT / ".pytemplate" / "runner"
+    assert "sed -n 's/^MIN_UV = \"\\([0-9.]*\\)\".*/\\1/p' .pytemplate/runner/envs.py" in text
+    assert re.findall(r'(?m)^MIN_UV = "([0-9.]*)"', (runner / "envs.py").read_text(encoding="utf-8")) == [envs.MIN_UV]
+    assert "sed -n 's/^BASEDPYRIGHT = \"\\(.*\\)\".*/\\1/p' .pytemplate/runner/cmd_dev.py" in text
+    assert re.findall(r'(?m)^BASEDPYRIGHT = "(.*)"', (runner / "cmd_dev.py").read_text(encoding="utf-8")) == [cmd_dev.BASEDPYRIGHT]
+    assert "grep -m1 -o 'taplo==[0-9.]*' .pytemplate/tests/test_render_core.py" in text
+    assert re.search(r'"taplo==[0-9.]+"', (tests / "test_render_core.py").read_text(encoding="utf-8"))
+    deselected = re.findall(r"--deselect \.pytemplate/tests/(test_\w+\.py)::(\w+)", text)
+    assert deselected, "the uv-floor job deselects its one test by node id"
+    for file, name in deselected:
+        assert f"\ndef {name}(" in (tests / file).read_text(encoding="utf-8"), (file, name)
+
+
 def test_nvim_workflow_pins_neovim_and_runs_a_canary() -> None:
     text = _text("template-nvim.yml")
     found = jobs(text)
