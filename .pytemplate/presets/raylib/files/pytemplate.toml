@@ -60,14 +60,20 @@ runtime = "bundled"
 [deploy.pyz]
 targets = ["host"]   # e.g. add "cp314-linux-x86_64" to include the Linux raylib
 
+[deploy.nuitka]
+lto = "auto"    # auto | yes | no: link-time optimization (auto: yes up to 250 compiled modules; raylib: ~20)
+pgo = false     # profile-guided C: needs app.gui = false and no assets (the build runs the app once)
+pgo_args = []   # the app's arguments for that profiling run
+
 [deploy.upx]
-# UPX packs the exe/dll/pyd (and ELF executables) of the exe, nuitka, portable and flet methods:
-# smaller files; every start unpacks them in memory and some antivirus engines flag them.
-# Binaries over 600 MiB are never packed (UPX's limit is 768 MiB). Downloaded once (pinned).
+# UPX packs the exe/dll/pyd (and ELF executables) of the nuitka, portable and flet methods, and
+# of exe on Windows only: smaller files; every start unpacks them in memory and some antivirus
+# engines flag them. Binaries over 600 MiB are never packed (UPX's limit is 768 MiB).
 enabled = false
 level = "best"   # 1..9 | best | brute | ultra-brute (brute: much slower, a few % smaller)
 lzma = true      # smaller, slower to unpack (PyInstaller and Nuitka always use LZMA)
 exclude = []     # extra file-name globs never packed (C runtime and python3*.dll never are)
+# path = "tools/upx"   # a UPX binary, relative to the project root (default: PATH, then a pinned download)
 
 [preset.raylib]
 # ./deploy apply replaces the dependency in pyproject.toml with {package}=={version} and re-locks

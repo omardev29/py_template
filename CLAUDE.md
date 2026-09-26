@@ -404,7 +404,7 @@ header rules (with detector tests proving each rule fires).
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `new`, the internal `__init` (`cmd_init`), and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
 | `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`, `BASEDPYRIGHT_NODE`. |
 | `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
-| `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys, `UV_PLATFORMS`, `export_requirements`, `install_deps`, `copy_app`, `uses_tkinter`; `nuitka.NUITKA`. |
+| `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys (`parse_key`, `check_key`, `targets_for`), `UV_PLATFORMS`/`host_floor`, `ensure_env`, `export_requirements`, `install_deps`, `drop_install_junk`, `has_native`, `skipped_requirements`, `copy_app`, `uses_tkinter`, `windowed`, `tree_bytes`; `nuitka.NUITKA`/`NUITKA_PYTHON`, `check_python`, `check_options`, `optimization_args` (`[deploy.nuitka]` lto/pgo); `pyz.check_parts`, `merge`. |
 | `shells.py` | `__probe`, launcher/shell doctor checks, `shell-setup` snippets, `selftest --shells` (section 4.9). |
 | `cmd_nvim.py` | `./deploy nvim ...` and `doctor(check)` (section 12.2). |
 | `nvimtest.py` | `selftest --nvim` (section 13.1). |
@@ -444,7 +444,10 @@ header rules (with detector tests proving each rule fires).
    `clean`, `apply`, `setup` (only `--force`), `doctor`, `tasks` (`cmd_dev.only_flags`), `check` and `sync` (extra
    positionals), `shell-setup`, `help`, a `[tasks]` entry without `cmd`. By design
    (`cli.FORWARDS`): `run`/`test` forward the rest, `build` forwards unknown flags to the
-   packager, `lock` to `uv lock`, plain `selftest` to pytest, tasks with a `cmd` to it.
+   packager of exe, nuitka and flet only (`cmd_build.PASSTHROUGH`; pyz, portable and wheel
+   refuse them, `--onefile/--onedir` apply to exe/nuitka, `--target` to pyz, and a bare word or
+   a global flag such as `--dry-run` after `build` is an error), `lock` to `uv lock`, plain
+   `selftest` to pytest, tasks with a `cmd` to it.
    `test_cli_core.test_every_command_rejects_an_unknown_argument` runs every other command
    with a bogus flag and a bogus positional: a new command fails it until it is classified
    (`MINIMAL` there, or `cli.FORWARDS`).
@@ -506,9 +509,11 @@ header rules (with detector tests proving each rule fires).
   `./deploy` runs themselves, in their own scratch folders.
 - `render.apply` behaves like `--check` (writes nothing); `render.auto` prints "would update";
   `render` prints `would update: ...`.
-- `clean` prints `would remove X` per target. `build` prints the checks (unless `--no-check`) and
-  `(--dry-run) build B -> M: would output dist/<name>-<b>-<m>*`, then stops. `report` builds
-  nothing and never opens the browser.
+- `clean` prints `would remove X` per target. `build` validates its arguments, the pyz target
+  keys, the Nuitka pin and PGO rules (`nuitka.check_python`, `check_options`) as a real build
+  does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M: would output
+  dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options: --lto=... [--pgo-c ...] <extras>`), then
+  stops. `report` builds nothing and never opens the browser.
 - `mode` validates the new `pytemplate.toml` in memory and prints the keys that would change
   (new and current value), whether `pyproject.toml` would be rewritten, `uv.lock` ("would
   re-lock", or a read-only `uv lock --check`), the generated files that would update, the
@@ -519,7 +524,8 @@ header rules (with detector tests proving each rule fires).
   deleted, `+` new or `~` replaced, the dependencies removed and added, and what happens to
   `pyproject.toml` and `uv.lock`. `new` checks the destination and the name and prints
   destination, preset, name and the `__init` step it would run in the copy. `pyz-merge`
-  validates its inputs and prints inputs and output.
+  validates its inputs (`pyz.check_parts`: valid `_pyz.json`, one app, one build) and prints
+  inputs and outputs (the `.pyz` and its `.cmd`).
 - `nvim trust`, `extras`, `bootstrap` and `sync` print what they would do.
 - `rename` runs the real checks (a dirty git tree is only a warning) and prints the move, each
   file with its reference count and sample lines, the pytemplate/pyproject lines, the lines left
@@ -556,6 +562,7 @@ header rules (with detector tests proving each rule fires).
 | `PYTEMPLATE_COMPILED` | `mypyc.runtime_env_vars` | Modules that must load from `.pyd/.so` (conftest) |
 | `PYTEMPLATE_ASSETS` | `portable/boot.py`, `pyz/__main__.py` (setdefault) | Assets dir for `resources.assets_dir()` (raylib, flet) |
 | `VSLANG=1033` | `mypyc.build`, wheel builds | English MSVC messages |
+| `MACOSX_DEPLOYMENT_TARGET` | `methods.common.install_deps` for macOS targets, unless the user set it (`MACOS_FLOOR`, 13.0) | The oldest macOS the pyz/portable wheels must support |
 | `RUFF_OUTPUT_FORMAT=concise` | VS Code tasks with the ruff matcher, Neovim tasks that parse output | One-line ruff output for the parsers |
 | `NO_COLOR` (non-empty), `TERM=dumb` | user | Disable runner colours |
 | `CI` | CI | Disables the install prompt of `deploy` and `deploy.ps1`; `selftest --e2e` skips GUI runs on Windows/macOS CI |
@@ -815,9 +822,13 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   extra_args` (`hidden_imports`: dotted names; `strip`:
   PyInstaller `--strip`, Linux/macOS only), `[deploy.portable] runtime prune archive env`
   (`env` names must be identifiers), `[deploy.pyz] targets`, `[deploy.wheel] entry`,
-  `[deploy.nuitka] mode extra_args`, `[deploy.flet] target cleanup exclude extra_args`
-  (`target` is not validated; `cleanup` = `--cleanup-app --cleanup-packages`),
-  `[deploy.upx] enabled level lzma exclude path` (`level` in `1..9|best|brute|ultra-brute`).
+  `[deploy.nuitka] mode lto pgo pgo_args extra_args` (`lto` in `auto|yes|no`; `config._check_nuitka`
+  refuses `pgo_args` without `pgo`, and `pgo` with `app.gui = true` or a non-empty `app.assets`:
+  Nuitka's profiling run starts the app while building, so the build waited for its window to be
+  closed, and the data files were not in place yet; mypyc and macOS are refused at build time,
+  section 10), `[deploy.flet] target cleanup exclude extra_args` (`target` is not validated;
+  `cleanup` = `--cleanup-app --cleanup-packages`), `[deploy.upx] enabled level lzma exclude
+  path` (`level` in `1..9|best|brute|ultra-brute`; `path` relative to the project root).
 - `[hooks]`: `pre_commit` (apply/setup install the git hook when true and remove pytemplate's
   own when false; section 5.6).
 - Every `*.env` table (`tasks.X.env`, `deploy.portable.env`) takes string values only, and names
@@ -982,7 +993,9 @@ Formats:
   (nuitka, the stages without a pyproject) rely on the walk reaching `ROOT`.
 - `git clean -fdx` is safe: only envs, `.build/`, `dist/`, caches and `.claude/` go; the next
   `uv run --locked` recreates `.venv` by itself (verified on a clone: `run`, `test all`, `check
-  all`, `render --check`, `doctor` all pass without `setup`).
+  all`, `render --check`, `doctor` all pass without `setup`). pyz and portable run an env's
+  python directly (`interpreter_info`, `uv pip install --python`), so they create a missing
+  env first (`methods.common.ensure_env`: `uv sync --locked`); `build ... --no-check` works too.
 - `environments` in the managed block is bounded to the CPython minor (e.g.
   `cpython and >=3.14,<3.15`), plus `pypy and >=3.11,<3.12` (PyPy's own minor,
   `Config.pypy_minor`, never `min_python`) when PyPy is supported. Without the
@@ -1002,7 +1015,8 @@ Formats:
   dependency, `>=20.13.1`: unpinned, every new Node LTS on PyPI changed `check` and its
   glibc/macOS floor; bump both together) (`check` with `typing.editor = "basedpyright"`) and
   `methods.nuitka.NUITKA = "nuitka==4.2.2"` (no dependencies outside extras). Bump them
-  deliberately.
+  deliberately; `NUITKA` together with `methods.nuitka.NUITKA_PYTHON` (the newest CPython minor
+  it supports, `3.14`): raising `python.cpython` past it needs a newer Nuitka pin.
 - `mode --supports -pypy` never deletes the old env: it prints a note that
   `./deploy clean --envs` removes the `.venv*` environments (all of them; `setup` recreates
   the ones in use). `apply` prints the same note for every unused `.venv*` of this side
@@ -1091,17 +1105,45 @@ Formats:
 ## 10. Build methods (`cmd_build.py`, `methods/*`)
 
 - `cmd_build`: backend (`split_backend`), `--method`, `--onefile/--onedir`, repeated
-  `--target`, `--no-check`; unknown flags go to `req.extra` and are appended to the packager
-  argv. Default method from `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs
+  `--target`, `--no-check`; argparse with `allow_abbrev=False`. Unknown flags go to
+  `req.extra` and are appended to the packager argv, for `PASSTHROUGH` methods (exe, nuitka,
+  flet) only; `_check_arguments` refuses (exit 2, before the checks, also in `--dry-run`) extras
+  for pyz/portable/wheel, `--onefile/--onedir` outside `ONEFILE_METHODS`, `--target` outside
+  `TARGET_METHODS` (pyz), `GLOBAL_FLAGS` (`--dry-run`, `--no-render`) typed after the command,
+  and a leading bare word (`_stray_word`: "unknown backend 'mypy': did you mean mypyc?", "did you
+  mean --method pyz?"). Then `nuitka.check_python` and, for pyz, `common.check_key` on every
+  key. Default method from `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs
   `run_checks` unless `--no-check`. `payload`: the mypyc release stage, or `sync_tree(SRC,
-  .build/payload/<backend>)`.
+  .build/payload/<backend>)`. The `done: ... (N MB)` size (`common.tree_bytes`) counts a
+  symlinked file once (a bundled runtime's `bin/python3 -> python3.14`).
 - Output: `dist_path(req, suffix)` = `dist/<app.name>-<backend>-<method><suffix>`; portable
   with a bundled runtime adds `-<target key>`, flet adds `-<target>`. The CI template hard-codes
   `dist/<NAME>-<BUILD_BACKEND>-pyz/<NAME>.pyz`: it is coupled to `BuildRequest.out_name`.
 - Work dirs live under `.build/<name>/<backend>` (`exe-stage`, `pyinstaller`, `flet-pack`,
   `pyz`, `wheel`, `nuitka-stage`, `nuitka`, `flet-build`); portable builds straight into `dist/`.
 - Target keys: `^(cp|pp)(\d)(\d+)-(windows|linux|macos)-(x86_64|aarch64)$`
-  (`methods.common.KEY_RE`), e.g. `cp314-windows-x86_64`.
+  (`methods.common.KEY_RE`), e.g. `cp314-windows-x86_64`. `common.check_key` accepts only what
+  uv.lock can serve: `cp<python.cpython>` on any OS/arch (another CPython minor got the build
+  interpreter's binaries on the same OS, or an empty lib/ elsewhere: the export's markers only
+  cover the locked minors), and a `pp` key only when it is the pypy build's own interpreter on
+  this machine (`config_host_key`; uv installs PyPy wheels only with a real PyPy: CPython and
+  PyPy builds are joined with `pyz-merge`). A pypy build may add `cp<minor>` keys (installed
+  with the tools env).
+- `common.install_deps` (`uv pip install --target --no-deps -r <export>`): a cross target gets
+  `--python-platform UV_PLATFORMS[...] --python-version --only-binary :all:` (an sdist built for
+  another OS would produce host binaries); a HOST target gets the same `--python-platform` floor
+  when this machine can load it (`host_floor`: glibc >= 2.28 x86_64 / 2.35 aarch64, never musl;
+  macOS >= `MACOS_FLOOR` 13.0, pinned through `MACOSX_DEPLOYMENT_TARGET` unless the user sets it),
+  without `--only-binary`, and falls back to the host's own wheels with a warning when a
+  dependency has no wheel for the floor. Without it uv picked the newest the build machine
+  allows (manylinux_2_34 on Ubuntu 24.04: the result failed on Debian 11 / RHEL 8).
+  `drop_install_junk` removes uv's `.lock`, `_virtualenv*` and the console/GUI script wrappers
+  of `bin/` / `Scripts/` (names from `*.dist-info/entry_points.txt`; their shebang or `.exe`
+  trampoline holds the build machine's `.venv` path), keeping other files there (ruff and uv
+  wheels look up their native binary at `<target>/bin`) and a real `bin` package.
+- `common.has_native`: a `*.dist-info/WHEEL` tag with an ABI or platform (also pure-Python
+  platform wheels that ship an executable, e.g. imageio-ffmpeg), else a `.pyd/.so/.dll/.dylib`
+  or `.so.N` file.
 - Both bootstraps (`portable/boot.py`, `pyz/__main__.py`) put `lib/` BEFORE site-packages
   (`_prepend_sitedir`: `site.addsitedir` for the `.pth` files, then moved to the front), so
   the locked dependencies win over packages installed in the running Python.
@@ -1113,56 +1155,139 @@ Per method:
   mypyc, `--add-data "<src>:<dest>"` (`:` is PyInstaller's documented separator). The flet
   preset uses `flet pack` instead (`methods/exe._flet_pack`): it runs from its own cwd
   `.build/flet-pack/<b>` because `flet pack -y` wipes `<cwd>/build` and the distpath; onedir
-  uses `--contents-directory=.`, except on macOS, where `flet pack` rejects `--onedir` and always
-  builds a `.app` bundle (PyInstaller only logs a deprecation for onefile + `.app`); it bundles
+  uses `--contents-directory=.` on Windows only (on Linux the executable `dist/<n>/<n>` would be
+  a FILE where the package folder `<pkg>/` of the mypyc extensions must go when
+  `app.name == pkg`, the default; Linux keeps PyInstaller's `_internal/`); macOS never gets
+  `--onedir` (`flet pack` rejects it and always builds a `.app` bundle; PyInstaller only logs a
+  deprecation for onefile + `.app`). `deploy.exe.console` becomes `--debug-console=true` (flet
+  pack adds `--noconsole` unless that option has a value) and UTF-8 mode goes through
+  `--pyinstaller-build-args=--python-option=X utf8` (one argv item: flet pack forwards each
+  value unchanged). It bundles
   the Flutter client (plain PyInstaller would
   download ~40 MB on first start). `flet` and `flet-desktop` must share a version, else Flet
   pip-installs `flet-desktop` at runtime, bypassing `uv.lock`.
 - **portable**: `dist/<n>-<b>-portable-<key>/` (no `-<key>` with `runtime = "system"`, which
   bundles no interpreter) with `app/`, `lib/` (`uv pip install --target`), `runtime/` (pruned
   copy of the interpreter's `base_prefix` through `\\?\` extended paths; the `ignore` callback
-  strips that prefix before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. Prunes `include libs
-  Tools share`, `tcl*`, stdlib `test idlelib turtledemo ensurepip site-packages`, tkinter/turtle
-  (unless the AST finds them imported), PyPy `hpy/devel`; deletes `EXTERNALLY-MANAGED`; copies
+  strips that prefix before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. The base's
+  `__pycache__` folders are never copied. Prunes `include libs Tools share`, `tcl*` (Windows
+  base), stdlib `test idlelib turtledemo ensurepip site-packages`, `test`/`tests` subfolders of
+  stdlib packages (PyPy's `unittest/test`, `lib2to3/tests`...), `*.debug` (PyPy's detached debug
+  symbols, 16 MB), PyPy `hpy/devel`, and Tk unless `src/` or an installed dependency in `lib/`
+  imports tkinter/turtle (`common.uses_tkinter(lib)`: customtkinter, ttkbootstrap; a bytes
+  pre-filter, then the AST; a file it cannot parse keeps Tk): tkinter, turtle and every Tcl/Tk
+  file `TCL_RE` matches in `lib/` (POSIX: `libtcl9.0.so`, `tcl9.0/`, `tk9.0/`, `itcl*`,
+  `thread*`), `DLLs/` and `lib-dynload/` (`_tkinter.*`). Deletes `EXTERNALLY-MANAGED`; copies
   `vcruntime140*.dll` from the CPython base into PyPy runtimes on Windows (PyPy's zip lacks
-  them). `compileall` runs with the console `python.exe` and also compiles PyPy's stdlib (PyPy
-  ships no `.pyc`).
+  them). `compile_calls` (console `python.exe`, `-B -f`, `--invalidation-mode checked-hash` so
+  the Windows zip's 2-second local times cannot make them stale, `-s <out>` so no `.pyc` embeds
+  the build folder): `lib/` and `app/` at levels 0 and `deploy.optimize`, the bundled stdlib
+  (`runtime_stdlib`: `lib/pythonX.Y`, `lib/pypyX.Y` or `Lib`) only at the launchers' level,
+  `-x` skipping PyPy's broken `lib2to3/tests` data: a read-only install never recompiles.
+  The previous `<out>.zip`/`<out>.tar.gz` is deleted first; `archive` writes gztar on POSIX and,
+  on Windows, `make_archive`'s zip (`strict_timestamps=False`; `.sh` entries as Unix entries with
+  mode 0755: `create_system = 3` is needed too, unzip ignores MS-DOS mode bits).
   - Launchers: `.cmd` = ASCII + CRLF, `start ""` + `pythonw.exe` for GUI apps, env values with
     `%` written `%%` and values it cannot hold (non-ASCII, `"`, line breaks) rejected; `.sh` =
     0755, values through `shlex.quote`, its folder from `${BASH_SOURCE:-$0}` (niubash keeps the
-    caller's `$0`). Both use `-s` plus `-O`/`-OO`, never `-I`/`-E` (Python would ignore
-    `PYTHONUTF8` and the `PYTHON*` values of `deploy.portable.env`), and set `PYTHONUTF8=1`.
+    caller's `$0`) with symlinks resolved (a `readlink` loop, at most 40 links, each relative
+    target joined to the `cd -P`/`pwd -P` folder of its link: a logical `cd`, and ksh93's `cd -P`
+    on a relative path, fold `..` as text) and `CDPATH=''` (an exported CDPATH made `cd` print the
+    folder or pick another one); its `_pt_*` helpers are unset. Both use `-s` plus `-O`/`-OO`,
+    never `-I`/`-E` (Python would ignore `PYTHONUTF8` and the `PYTHON*` values of
+    `deploy.portable.env`), and set `PYTHONUTF8=1`.
   - `runtime = "system"`: each launcher RUNS every candidate interpreter with a minimum-version
-    probe (`.cmd`: `py -X.Y`, `python3`, `python`, exit 9009 when none fits: `py` can exist with
-    no Python registered; `.sh`: `pythonX.Y`, `python3`, `python`, exit 127; PyPy: `pypy3`,
-    `pypy`). With native dependencies it warns that the folder only works on the host key.
-  - mypyc builds are smoke-tested (`_smoke_compiled`, code from `smoke_code`): the same
+    probe (`.cmd`: `py -X.Y`, `python3`, `python`, exit 9009 when none fits: the legacy `py` can
+    exist with no Python registered; `.sh`: `pythonX.Y`, `python3`, `python`, exit 127; PyPy:
+    `pypy3`, `pypy`). With `app.gui` the `.cmd` run lines are `start "" pyw -X.Y`/`pythonw`/
+    `pypyw` (`common.windowed`; the probe keeps the console names). The Python install
+    manager's `py`/`python` install the requested version when NO runtime exists at all (its
+    `automatic_install` default; the silenced probe hides it, so that first start can take a
+    minute): the launchers leave `PYTHON_MANAGER_*` to the user. With native dependencies it warns
+    that the folder only works on the host key.
+  - Every bundled build starts its interpreter before reporting success (`_smoke_runtime`, after
+    UPX, with the launchers' `-s -O` plus `-B`): it must run and its `sys.prefix` (a `PTPREFIX:`
+    line) must be inside the folder's `runtime/`, else `DeployError` (a prune or UPX regression,
+    a python-build-standalone/PyPy layout change, an interpreter that finds the uv base again);
+    a copy without the interpreter file fails before `compileall` (`_check_interpreter`).
+  - mypyc builds are smoke-tested (`_smoke_compiled`, code from `smoke_code`, run with the
+    launchers' `-s -O` plus `-B`): the same
     `sys.path` as `boot.py` (`app/` first, then `lib/`), result read from a `PTSMOKE:` marker
     line because imported packages may print (raylib's banner); a failed import shows the
     traceback and raises `DeployError`.
 - **pyz**: Python cannot import `.pyd/.so` from a zip, so `__main__.py` extracts to a per-build
-  cache (`%LOCALAPPDATA%` / `~/Library/Caches` / `$XDG_CACHE_HOME`, then
-  `<name>/pyz/<build_id>/<key|pure>/`), guarded by a `.complete` marker and an atomic
-  `os.replace`; the 3 newest builds are kept. `common/` never holds extensions (runtime `bug:`
-  check). The mypyc overlay `targets/<host>/app` is the FULL package (`.py` + `.pyd` +
-  `__init__.py`): a partial overlay would be a namespace-package trap where `common`'s `.py`
-  wins. `zipapp compressed=True` = deflate, never zstd: it must open on 3.11 and PyPy.
-  Cross-target deps use `uv pip install --target --python-platform --python-version
-  --only-binary :all:` (an sdist built for another OS would produce host binaries); PyPy
-  targets are host-only; `_virtualenv*` junk is removed. The `<n>.cmd` wrapper runs each
-  candidate interpreter with a minimum-version probe and sets `PYTHONUTF8=1`. `pyz-merge`
-  (>= 2 zip parts, same app name) takes `common/` and `__main__.py` from the first part and
-  `targets/` from all parts, recomputes the `build_id` and prints "no platform (pure Python)"
-  when no part has binaries.
+  cache (`%LOCALAPPDATA%` / `~/Library/Caches` / an absolute `$XDG_CACHE_HOME` or `~/.cache`,
+  then `<name>/pyz/<build_id>/<key|pure>/`), guarded by a `.complete` marker and an atomic
+  `os.replace`; a folder left without its marker (an interrupted prune, a DLL still loaded) is
+  moved aside and re-extracted (`_discard`). Every start touches its build folder; `_prune_old`
+  deletes only builds beyond the 3 most recently started AND older than a day (`MIN_AGE`: a
+  running build is never deleted), unlinking their `.complete` markers first, and tolerates
+  folders that vanish under it. Without a usable cache (`Path.home()` raises for a UID without
+  a passwd entry; a read-only home) it extracts into a per-run `tempfile.mkdtemp` folder removed
+  at exit (never a predictable shared `/tmp` path: another user could plant code there).
+  Layout: `common/lib` only when the build is "pure": every target site installed exactly the
+  locked set (`common.skipped_requirements`: no pin was excluded by a `sys_platform`,
+  `python_version` or `implementation_name` marker), the sites hold the same distributions and
+  nothing is native (`has_native`); otherwise EVERY target gets `targets/<key>/lib` and the build
+  warns which conditional pins restrict it ("runs on: <keys>"). `common/` never holds extensions
+  (`bug:` check). The mypyc overlay `targets/<host>/app` holds only the extension files: the
+  bootstrap extracts `common/` and `targets/<key>/` into ONE folder, so each `.pyd/.so` lands
+  next to its `.py` and the extension loader wins. `_pyz.json`: `name`, `build_id`, `min_python`,
+  `targets`, `pure`, `backend`, `host` (the key that built it), `deps`
+  (`common.requirements_digest`: the pin lines of the export, not its header). The archive is
+  written by `pyz._write_archive` (deflate, never zstd: it must open on 3.11 and PyPy;
+  `strict_timestamps=False`: a payload file older than 1980, e.g. from the Nix store, used to
+  crash `zipapp`; shebang `/usr/bin/env python3`, mode 0755). The `<n>.cmd` wrapper runs each
+  candidate interpreter with a minimum-version probe, sets `PYTHONUTF8=1`;
+  with `app.gui` its run lines are `start "" pyw/pythonw/pypyw` (`common.windowed`). `pyz-merge`
+  (>= 2 parts; `_read_info` refuses a part without a valid `_pyz.json`) requires the same app
+  name, `min_python`, `deps` and app code (`common/app`, CRLF-normalised: Windows CI checkouts);
+  takes `common/app` and `__main__.py` from the first part, every `targets/<key>/lib` from ONE
+  part (the one built on that platform, else the first), refuses two compiled overlays for one
+  key, and when parts differ in purity moves each pure part's `common/lib` to
+  `targets/<its host>/lib` (an older part without `host`: the single overlay key of a mypyc
+  part, else "rebuild it") and keeps no `common/lib`. The merged `targets` come from the
+  folders written; `host` is dropped. It also writes the `<out stem>.cmd` wrapper next to
+  `--out` (`pyz.wrapper_path`; the parts' name and `min_python`, the pypy candidate order only
+  when every part is a pypy build; an `--out` ending in `.cmd` is refused). `pyz.check_parts`
+  runs the part checks in `--dry-run` too.
 - **wheel**: synthetic build project in `.build/wheel/<b>` (`setuptools>=84`; for mypyc
   `mypy==<version locked in uv.lock>` in `build-system.requires`, a `setup.py` using mypycify
   with the same `compile.multi_file`, `separate` and `strict_dunder_typing` as the stage, and a
   compile `mypy.ini`). Assets go into `<pkg>/assets` (package data). Needs network (isolated
   build env). mypyc -> platform wheel; cpython/pypy -> `py3-none-any`.
 - **nuitka**: `.build/nuitka-stage/<b>`, `uv run --locked --with nuitka==<NUITKA> python -m
-  nuitka` with cwd = stage; `--include-package=<pkg>`, `--include-module` for mypyc hidden
-  imports, `--python-flag=no_asserts/no_docstrings` from `optimize`, `--nofollow-import-to`
-  per `deploy.exclude_modules`, the upx plugin when enabled. Output found by file-name
+  nuitka` with cwd = stage; `--include-package=<pkg>`, `--include-module` for the mypyc hidden
+  imports the tools env can locate (`nuitka.includable`: top-level `find_spec` with the stage on
+  `sys.path`, built-ins dropped, compiled modules and extensions always kept; Nuitka stops with
+  FATAL on a module it cannot locate, e.g. a platform-guarded `import winreg`),
+  `--python-flag=no_asserts/no_docstrings` from the shared `deploy.optimize` (an owner
+  decision: no Nuitka-only switch), `--nofollow-import-to` per `deploy.exclude_modules`, the upx
+  plugin when enabled, then `nuitka.optimization_args` BEFORE `deploy.nuitka.extra_args` and the
+  command line (Nuitka takes the last value, so an `--lto` there still wins): always
+  `--lto=<deploy.nuitka.lto>`, default `auto`, which Nuitka 4.2.2 resolves to yes for uv's
+  python-build-standalone on Linux, Windows (MSVC) and macOS, BUT off when more than 250 modules
+  are compiled (the stdlib goes in as bytecode and does not count; the app and the third-party
+  code Nuitka follows or `--include-package`s do): script and raylib stay far below (a raylib
+  app compiles ~18), the flet preset compiles ~794 (pygments 325, flet 280...), so `auto` means
+  NO LTO there; never make `yes` its default (an ~800-module LTO link is unmeasured on MSVC).
+  Measured with gcc 13 on a tiny script: `--lto=yes` built faster (9-10 s vs 22 s), smaller
+  (7.21 vs 7.78 MB) and ran 0-5% faster. `pgo = true` adds `--pgo-c` and, when `pgo_args` is
+  not empty, ONE item `--pgo-args=<shlex.join(pgo_args)>` (Nuitka shlex-splits it on every OS;
+  uv gets an argv list) and prints `PGO_NOTE` (experimental in standalone/onefile per Nuitka;
+  measured gain 10-15% on pure-Python loops only; a dependency with a pure-Python fallback such
+  as msgpack may be profiled on that path). `nuitka.check_options` (from `cmd_build` before the
+  checks, also in `--dry-run`, and from `build`) refuses PGO with the mypyc backend (the
+  profiling run starts before `main.dist` holds the extension modules: ImportError, yet Nuitka
+  reports success) and on macOS (Nuitka 4.2.2 has no clang profdata step); `--dry-run` prints
+  `Nuitka options: ...` (the lto/pgo flags, then the extras). Standalone on Linux/macOS names the
+  binary `<name>.bin` when `app.name.lower() == pkg` (the default): it sits in `main.dist/` next
+  to the package folder `<pkg>/`, and a file with that name made Nuitka fail with
+  NotADirectoryError (case-insensitive on macOS); onefile and Windows keep the plain name.
+  `nuitka.check_python` (called by `cmd_build` before the checks): a `python.cpython` newer
+  than `NUITKA_PYTHON` (the newest minor the pin supports; bump both together) exits 3 naming
+  the pin, unless Nuitka's own `--experimental=python3.X` is passed; a failed Nuitka run also
+  names the pin. Output found by file-name
   prefix (onefile) or `.dist` suffix; none found -> `DeployError`. Builds take minutes (~4-7
   min measured). Flet (verified: runs and starts the client): `flet/__init__.py` loads its
   controls lazily (module `__getattr__` + `importlib`), which Nuitka cannot follow, so the
@@ -1177,10 +1302,14 @@ Per method:
   extensions are deleted from it before this payload's are copied (a desktop `.pyd` must not
   reach a mobile/web build). `flet build` ignores `uv.lock`, so `build_pyproject` pins the
   `uv export --frozen --no-dev` versions and serialises the PARSED `[tool.flet]` of the
-  project `pyproject.toml` (no other table leaks in; `[tool.flet.app]` alone is kept; default
-  `app.path = "src"`). Mobile/web targets (`apk aab ipa ios-simulator web`) cannot load
-  extensions: a mypyc backend ships the `.py`. Desktop embeds CPython 3.14, so cp314 `.pyd`
-  files work. `cleanup`/`exclude` map to `--cleanup-app --cleanup-packages` / `--exclude`;
+  project `pyproject.toml` (no other table leaks in; `[tool.flet.app]` alone is kept) with
+  `app.path` forced to `STAGE_APP` (`src`, where `build` stages the app; another value is
+  ignored with a warning: flet looked for `<work>/<path>/main.py` and aborted after installing
+  Flutter) and `requires-python = "==<python.cpython>.*"` (flet bundles the HIGHEST Python of
+  its manifest matching it: `>=3.13` gave 3.14 and the cp313 mypyc extensions were silently not
+  loaded; a minor its manifest lacks now fails loudly). Mobile/web targets (`apk aab ipa
+  ios-simulator web`) cannot load extensions: a mypyc backend ships the `.py`. Desktop embeds
+  the `python.cpython` minor, so the mypyc `.pyd`/`.so` files work. `cleanup`/`exclude` map to `--cleanup-app --cleanup-packages` / `--exclude`;
   with UPX the finished folder goes through `upx.pack_tree` (desktop targets only). Verified on
   Windows (Developer Mode on): Flet 1.0.1 downloads ITS pinned Flutter (3.44.8, ~3 GB in
   `~/flutter`, ignoring a scoop Flutter) and a Python build (`~/.flet`); first build ~7 min,
@@ -1192,14 +1321,21 @@ Per method:
   own UPX step (`--upx-dir`, `--upx-exclude` per glob; the level travels in the `UPX`
   environment variable, which upx reads as default options; PyInstaller always adds `--lzma`,
   skips Control Flow Guard DLLs and Qt plugins, and `--clean` keeps its binary cache from
-  reusing another level); nuitka = its upx plugin (hard-codes `--best --lzma`, ignores our
+  reusing another level), Windows only: PyInstaller's `configure.get_config` turns UPX off on
+  every other OS (packed `.so` files crash), so there `exe.size_args` passes `--noupx`,
+  downloads nothing and warns that the exe is not packed (never set `PYINSTALLER_FORCE_UPX`);
+  nuitka = its upx plugin (hard-codes `--best --lzma`, ignores our
   excludes: it packed `python314.dll` and the app still ran); portable (before the smoke test,
   so the packed `.pyd` files are what it loads) and flet = `upx.pack_tree` (PE `.exe/.dll/.pyd`
   on Windows, ELF executables but no `.so` on Linux, in parallel). Never packed: files over
   `MAX_INPUT` (600 MiB; UPX refuses 768 MiB), `BUILTIN_EXCLUDE` (C runtime, API sets,
   `python3*.dll`, `libpython3*`, and `flutter_windows.dll`: a packed Flutter engine hangs the
   app at startup with a 4 MB working set and no window, measured), binaries UPX rejects
-  (`GUARD_CF`: never pass `--force`). UPX 5.2.1 is downloaded once (SHA-256 checked) to
+  (`GUARD_CF`: never pass `--force`). `upx.find` order: `deploy.upx.path` (absolute, `~`, or
+  relative to the project root, never the caller's cwd; handed to the tools absolute but not
+  resolved: PyInstaller wants `<upx-dir>/upx`, Nuitka a file named `upx`), `upx` on PATH, the
+  cache, a download: UPX 5.2.1 once (SHA-256 checked, written as `.part` then renamed so an
+  interrupted write never looks cached) to
   `%LOCALAPPDATA%\pytemplate\tools\upx-5.2.1` / `$XDG_CACHE_HOME/pytemplate/tools`; macOS
   is unsupported (`upx.unsupported_reason`). `flet pack` ships Flet's prebuilt FULL client
   zipped (40.5 MB, libmpv 28 MB inside) and unpacks it on first start into
@@ -1539,7 +1675,13 @@ short temp tree and unset `NVIM_APPNAME`.
   runner fixes: portable smoke with `lib/`, lazy `{python}`, the pyz `.cmd` wrapper, binary
   preset files, `compile.annotate`, `sync_tree` ns mtimes, portable launcher quoting and
   version probes, unknown arguments, `app.preset`, pinned tools, flet pyproject, wheel
-  options), `test_e2e_plan.py` (the pure planning of `e2e.py`), `test_removals.py` (no JIT
+  options), `test_e2e_plan.py` (the pure planning of `e2e.py`), `test_build_methods.py` (argv and
+  output discovery of exe, flet pack, Nuitka and flet build with the packager recorded;
+  `cmd_build` argument checks; target keys, `install_deps` floors and junk; the pyz layout,
+  `pyz-merge` and the real bootstrap run in subprocesses with the cache redirected; one REAL
+  host pyz build run with `python -S`, skipped when uv cannot install offline; portable prune,
+  launchers, precompile and the runtime smoke with real interpreters), `test_upx.py` (UPX
+  flags, candidates per OS, the pinned download with fake archives), `test_removals.py` (no JIT
   key, env, launch config or `PYTHON_JIT` left; `./deploy init` exits 2 with its hint; `new`
   and the maintainer route through `__init`, for real in throwaway copies),
   `test_config_rules.py` (every schema field and validate rule with a positive and a negative
@@ -1666,7 +1808,8 @@ PowerShell 6.x-7.2, a UNC current folder, uv found only in `ProgramFiles` or cho
 PATH entry with quotes in `deploy.cmd`, the interactive install prompt, Neovim 0.11 (only
 0.12.5), pyright via Mason, VS Code itself (buttons, Problems panel: only simulated), `flet
 build` (Developer Mode is off), bundled PyPy portable builds on CI, Ctrl+C handling of the
-harnesses.
+harnesses, `[deploy.nuitka]` lto/pgo outside Linux (measured with Nuitka 4.2.2 and gcc 13 only:
+PGO with MSVC and an ~800-module LTO link are unmeasured).
 
 ## 14. Conventions and recipes
 
@@ -1787,8 +1930,13 @@ Behaviour:
   do not reach the runner, so `/home/...`-style paths typed for `new`/`pyz-merge` fall back to
   the current drive with a warning. Fix idea: the launcher exports the Windows path of
   `/usr/bin/cygpath` and `find_cygpath` checks it first.
-- niubash: the generated portable `.sh` launcher leaks its variables into the calling
-  session (niubash runs sh scripts in-process).
+- niubash: the generated portable `.sh` launcher leaks `HERE` and its exported variables into
+  the calling session (niubash runs sh scripts in-process; its `_pt_*` helpers are unset). Its
+  `cd -P`/`pwd -P`/`CDPATH=''` symlink resolution is verified with dash, bash, zsh, ksh, mksh,
+  yash and busybox, not with niubash.
+- Portable: a runtime layout change in python-build-standalone or PyPy (bin/python3 missing, the
+  stdlib renamed) is only caught by `selftest --e2e`; a bundled PyPy portable build is not run
+  on CI.
 - Argument limits by design: `deploy.cmd` (and every CreateProcess caller of it) cannot pass
   `% ! " ^ & | < >`; PowerShell drops a bare `--`; xonsh `-c` exits 1 on any failing command
   (the child's real code is in its `CalledProcessError`).

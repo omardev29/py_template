@@ -8,19 +8,144 @@ mypyc backend, your core modules are already compiled by mypyc (Nuitka includes 
 
 from __future__ import annotations
 
+import json
+import shlex
 import shutil
 import urllib.request
+from collections.abc import Sequence
 from pathlib import Path
 
 from .. import envs, mypyc, proc, ui, upx
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
-from ..project import BUILD, IS_WINDOWS, ROOT
+from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT, rel
 from ..ui import DeployError
 
 # Nuitka is not in uv.lock (`uv run --with`), so it is pinned here to keep builds reproducible:
-# the latest release on PyPI in September 2026. Bump it deliberately.
+# the latest release on PyPI in September 2026. Bump it deliberately, together with NUITKA_PYTHON.
 NUITKA = "nuitka==4.2.2"
+# The newest CPython minor NUITKA supports: 4.2.2 stops with FATAL on 3.15 ("not supported by
+# Nuitka '4.2.2'") and only warns on later minors, then fails obscurely in the C compile.
+NUITKA_PYTHON = "3.14"
+
+
+def _minor(version: str) -> tuple[int, int]:
+    major, minor = version.split(".")[:2]
+    return int(major), int(minor)
+
+
+def check_python(cfg: Config, args: Sequence[str]) -> None:
+    """Refuse a python.cpython newer than the pinned Nuitka supports (cmd_build calls this before
+    the checks and the payload: Nuitka itself would stop after minutes of work). Nuitka's own
+    `--experimental=python3.X` (deploy.nuitka.extra_args or the command line) skips it."""
+    wanted = cfg.python.cpython
+    flag = f"python{wanted}"
+    given = list(args)
+    experimental = f"--experimental={flag}" in given or any(
+        a == "--experimental" and b == flag for a, b in zip(given, given[1:], strict=False)
+    )
+    if _minor(wanted) <= _minor(NUITKA_PYTHON) or experimental:
+        return
+    raise DeployError(
+        f"python.cpython = {wanted!r}, but {NUITKA} only supports CPython up to {NUITKA_PYTHON}.\n"
+        f"  Bump NUITKA and NUITKA_PYTHON in .pytemplate/runner/methods/nuitka.py to a Nuitka release\n"
+        f"  that supports {wanted}, or try the pinned one anyway with --experimental={flag}",
+        3,
+    )
+
+
+PGO_NOTE = (
+    "  note: deploy.nuitka.pgo is experimental in standalone and onefile builds (Nuitka says so itself); "
+    "measured: 10-15% faster pure-Python loops, nothing elsewhere. A dependency with a pure-Python "
+    "fallback (msgpack) may be profiled on that fallback path."
+)
+
+
+def optimization_args(cfg: Config) -> list[str]:
+    """The Nuitka flags of [deploy.nuitka] lto/pgo. build() puts them BEFORE extra_args and the
+    command line, so an --lto given there still wins (Nuitka takes the last value).
+
+    lto: Nuitka's "auto" is yes with uv's CPython (gcc/clang on Linux and macOS, MSVC on Windows)
+    unless more than 250 modules are compiled: the stdlib goes in as bytecode and does not count,
+    the app and the third-party code Nuitka follows or includes do (flet: ~800 modules, no LTO).
+    pgo: --pgo-c runs the app once during the build to profile the C code; pgo_args are the
+    app's arguments for that run, one string that Nuitka splits with shlex on every OS.
+    """
+    nuitka = cfg.deploy.nuitka
+    args = [f"--lto={nuitka.lto}"]
+    if nuitka.pgo:
+        args.append("--pgo-c")
+        if nuitka.pgo_args:
+            args.append(f"--pgo-args={shlex.join(nuitka.pgo_args)}")
+    return args
+
+
+def check_options(cfg: Config, backend: str) -> None:
+    """The PGO rules that depend on the build (config.validate checks the config-only ones:
+    app.gui, app.assets, pgo_args without pgo). cmd_build calls this before any work."""
+    if not cfg.deploy.nuitka.pgo:
+        return
+    if backend == "mypyc":
+        raise DeployError(
+            "deploy.nuitka.pgo does not work with the mypyc backend: Nuitka's profiling run starts the app "
+            "before main.dist holds the compiled extension modules, so they fail to import (ImportError) "
+            "while Nuitka still reports success. Use ./deploy build cpython --method nuitka, or set pgo = false",
+            2,
+        )
+    if IS_MACOS:
+        raise DeployError(
+            "deploy.nuitka.pgo is not available on macOS: Nuitka 4.2.2 has no clang profdata step there. "
+            "Set pgo = false, or build on Linux or Windows",
+            2,
+        )
+
+
+# Runs in the tools environment with the stage first on sys.path and prints the names whose
+# top-level module exists there and is not built in (find_spec of a top-level name imports
+# nothing; Nuitka resolves dotted names such as os.path itself)
+_LOCATE = r"""
+import importlib.util, json, sys
+sys.path.insert(0, sys.argv[1])
+def found(name):
+    top = name.partition(".")[0]
+    if top in sys.builtin_module_names:
+        return False
+    try:
+        return importlib.util.find_spec(top) is not None
+    except (ImportError, ValueError):
+        return False
+print("PTLOCATE" + json.dumps([n for n in sys.argv[2:] if found(n)]))
+"""
+
+
+def _module_of(ext: Path, stage: Path) -> str:
+    """Module name of an extension: myapp/core/bench.cpython-314-x86_64-linux-gnu.so -> myapp.core.bench."""
+    path = ext.relative_to(stage)
+    return ".".join([*path.parent.parts, path.name.split(".")[0]])
+
+
+def includable(cfg: Config, stage: Path, names: Sequence[str]) -> list[str]:
+    """Return the hidden imports Nuitka can take as --include-module.
+
+    Nuitka stops with FATAL on a module it cannot locate, and mypyc.hidden_imports lists every
+    import of the compiled code, also a platform-guarded `import winreg` or an optional
+    `try: import orjson`. The compiled modules and extensions are always kept; the other names
+    only when the build environment finds their top-level module (built-ins are dropped).
+    """
+    compiled = set(mypyc.compiled_modules(cfg)) | {_module_of(p, stage) for p in mypyc.extension_files(stage)}
+    imported = sorted(set(names) - compiled)
+    keep: set[str] = set()
+    if imported:
+        argv: list[str | Path] = ["run", "--locked", "python", "-c", _LOCATE, stage, *imported]
+        out = envs.uv(envs.tool_env(cfg), argv, capture=True, echo=False).stdout
+        line = next((ln for ln in out.splitlines() if ln.startswith("PTLOCATE")), None)
+        if line is None:
+            raise DeployError(f"could not check the imports of the compiled modules: {out.strip()!r}")
+        keep = set(json.loads(line[len("PTLOCATE") :]))
+        dropped = [n for n in imported if n not in keep]
+        if dropped:
+            ui.detail(f"  not passed to Nuitka (not importable here, or built in): {', '.join(dropped)}")
+    return sorted((set(names) & compiled) | keep)
 
 
 def _flet_client_archive(cfg: Config) -> Path:
@@ -55,6 +180,8 @@ def _flet_client_archive(cfg: Config) -> Path:
 
 def build(req: BuildRequest) -> Path:
     cfg = req.cfg
+    check_python(cfg, [*cfg.deploy.nuitka.extra_args, *req.extra])
+    check_options(cfg, req.backend)
     stage = BUILD / "nuitka-stage" / req.backend
     if req.compiled:
         mypyc.exe_stage(cfg, req.app_dir, stage)
@@ -66,17 +193,24 @@ def build(req: BuildRequest) -> Path:
     if work.exists():
         shutil.rmtree(work)
     onefile = req.onefile if req.onefile is not None else cfg.deploy.nuitka.mode == "onefile"
+    exe_name = cfg.app.name + (".exe" if IS_WINDOWS else "")
+    if not IS_WINDOWS and not onefile and cfg.app.name.lower() == cfg.pkg:
+        # standalone puts the binary in main.dist/ next to the package folder <pkg>/ (mypyc
+        # extensions, package data): named like the app it would be a FILE where that folder
+        # must go (NotADirectoryError; case-insensitive on macOS). .bin is Nuitka's own POSIX
+        # suffix for its intermediate binaries.
+        exe_name += ".bin"
 
     argv: list[str | Path] = [
         "python", "-m", "nuitka", stage / "main.py",
         f"--mode={'onefile' if onefile else 'standalone'}",
         f"--output-dir={work}",
-        f"--output-filename={cfg.app.name}{'.exe' if IS_WINDOWS else ''}",
+        f"--output-filename={exe_name}",
         "--assume-yes-for-downloads",
         f"--include-package={cfg.pkg}",
     ]
     if req.compiled:
-        argv += [f"--include-module={m}" for m in mypyc.hidden_imports(cfg, stage)]
+        argv += [f"--include-module={m}" for m in includable(cfg, stage, mypyc.hidden_imports(cfg, stage))]
     if cfg.deploy.optimize >= 1:
         argv.append("--python-flag=no_asserts")
     if cfg.deploy.optimize >= 2:
@@ -102,10 +236,20 @@ def build(req: BuildRequest) -> Path:
             "--include-package=flet_desktop",
             f"--include-data-files={archive}=flet_desktop/app/{archive.name}",
         ]
+    argv += optimization_args(cfg)  # before extra_args and the command line: a later --lto wins
     argv += cfg.deploy.nuitka.extra_args + req.extra
 
     ui.info("  Nuitka compiles everything to C: the first build takes several minutes")
-    envs.uv(envs.tool_env(cfg), ["run", "--locked", "--with", NUITKA, *argv], cwd=stage)
+    if cfg.deploy.nuitka.pgo:
+        ui.info(PGO_NOTE)
+    try:
+        envs.uv(envs.tool_env(cfg), ["run", "--locked", "--with", NUITKA, *argv], cwd=stage)
+    except proc.CommandFailed as e:
+        raise DeployError(
+            f"{e}\n  Nuitka is pinned to {NUITKA} (NUITKA in .pytemplate/runner/methods/nuitka.py): if it says"
+            f" Python {cfg.python.cpython} is not supported, bump it to a release that supports it",
+            e.code,
+        ) from None
 
     out = dist_path(req)
     if out.exists():
@@ -122,4 +266,5 @@ def build(req: BuildRequest) -> Path:
     if dist_dir is None:
         raise DeployError(f"nuitka finished without producing a *.dist folder in {work}")
     shutil.move(str(dist_dir), str(out))
+    ui.info(f"  run: {rel(out / exe_name)}")
     return out

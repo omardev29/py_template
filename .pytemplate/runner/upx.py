@@ -8,13 +8,15 @@
   level     1..9 | best | brute | ultra-brute (brute levels: much slower builds, a few % smaller)
   lzma      LZMA instead of NRV (smaller, slower to unpack)
   exclude   file-name globs never packed, on top of BUILTIN_EXCLUDE
-  path      an explicit upx executable (default: `upx` on PATH, else a pinned download)
+  path      an explicit upx executable, absolute or relative to the project root (default:
+            `upx` on PATH, else the cached pinned download)
 
 How each method uses it:
   - exe (PyInstaller, and flet pack, which runs PyInstaller): PyInstaller's own UPX step
     (--upx-dir): it packs every collected binary before bundling, skips Control Flow Guard
     DLLs and Qt plugins, and always adds --lzma. The level goes in the UPX environment
-    variable, which upx reads as default options.
+    variable, which upx reads as default options. Windows only: PyInstaller disables UPX on
+    every other OS, so there the exe is not packed (exe.size_args warns).
   - nuitka: Nuitka's upx plugin (it always uses --best --lzma).
   - portable and flet: pack_tree() on the finished folder.
 Never used: pyz (the zip is already deflated) and wheel.
@@ -42,7 +44,7 @@ from pathlib import Path
 
 from . import proc, ui
 from .config import Config
-from .project import IS_MACOS, IS_WINDOWS, host_arch, rel
+from .project import IS_MACOS, IS_WINDOWS, ROOT, host_arch, rel
 from .ui import DeployError
 
 VERSION = "5.2.1"  # pinned: bump VERSION and the SHA-256 values together
@@ -133,29 +135,42 @@ def _download(dest: Path) -> Path:
     digest = hashlib.sha256(data).hexdigest()
     if digest != sha256:
         raise DeployError(f"upx: {asset} has SHA-256 {digest}, expected {sha256}: not using it", 3)
-    dest.mkdir(parents=True, exist_ok=True)
-    target = dest / _exe_name()
+    binary: bytes | None = None
     if asset.endswith(".zip"):
         with zipfile.ZipFile(io.BytesIO(data)) as z:
-            member = next(n for n in z.namelist() if n.endswith("/upx.exe"))
-            target.write_bytes(z.read(member))
+            member = next((n for n in z.namelist() if n.endswith("/upx.exe")), None)
+            binary = z.read(member) if member else None
     else:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:xz") as t:
-            info = next(m for m in t.getmembers() if m.name.endswith("/upx") and m.isfile())
-            extracted = t.extractfile(info)
-            if extracted is None:
-                raise DeployError(f"upx: {asset} has no upx binary", 3)
-            target.write_bytes(extracted.read())
-        target.chmod(0o755)
+            info = next((m for m in t.getmembers() if m.name.endswith("/upx") and m.isfile()), None)
+            extracted = t.extractfile(info) if info else None
+            binary = extracted.read() if extracted else None
+    if binary is None:
+        raise DeployError(f"upx: {asset} has no {_exe_name()} binary", 3)
+    dest.mkdir(parents=True, exist_ok=True)
+    target = dest / _exe_name()
+    partial = target.with_name(target.name + ".part")  # an interrupted write must never look cached
+    partial.write_bytes(binary)
+    if not IS_WINDOWS:
+        partial.chmod(0o755)
+    partial.replace(target)
     return target
 
 
 def find(cfg: Config) -> Path:
-    """Return the upx executable: deploy.upx.path, `upx` on PATH, the cache, or a fresh download."""
+    """Return the upx executable: deploy.upx.path, `upx` on PATH, the cache, or a fresh download.
+
+    A relative deploy.upx.path starts at the project root, never the caller's cwd (the tools run
+    with other working folders: flet pack in its stage, Nuitka in its own): it reaches them
+    absolute, and not resolved, because PyInstaller wants <upx-dir>/upx and Nuitka a file named upx.
+    """
     if cfg.deploy.upx.path:
-        path = Path(cfg.deploy.upx.path).expanduser()
+        given = Path(cfg.deploy.upx.path).expanduser()
+        path = given if given.is_absolute() else ROOT / given
         if not path.is_file():
-            raise DeployError(f"deploy.upx.path does not exist: {path}", 3)
+            raise DeployError(
+                f"deploy.upx.path = {cfg.deploy.upx.path!r} does not exist ({path}; a relative path starts at the project root)", 3
+            )
         return path
     on_path = shutil.which("upx", path=proc.base_env().get("PATH"))
     if on_path:

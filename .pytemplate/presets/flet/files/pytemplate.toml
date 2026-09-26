@@ -65,19 +65,25 @@ targets = ["host"]
 [deploy.wheel]
 entry = "{{pkg}}.ui.app:run"   # command that the wheel installs (uv tool install)
 
+[deploy.nuitka]
+lto = "auto"    # auto | yes | no: link-time optimization (auto = NO here: flet compiles ~800 modules, the limit is 250)
+pgo = false     # profile-guided C: needs app.gui = false and no assets (the build runs the app once)
+pgo_args = []   # the app's arguments for that profiling run
+
 [deploy.flet]
 target = "host"   # `./deploy build --method flet`: host | windows | macos | linux | apk | aab | ipa | web
 cleanup = true   # --cleanup-app --cleanup-packages: no tests, docs... in the bundle
 exclude = []     # app files/folders left out of `flet build` (--exclude)
 
 [deploy.upx]
-# UPX packs the exe/dll/pyd (and ELF executables) of the exe, nuitka, portable and flet methods:
-# smaller files; every start unpacks them in memory and some antivirus engines flag them.
-# Binaries over 600 MiB are never packed (UPX's limit is 768 MiB). Downloaded once (pinned).
+# UPX packs the exe/dll/pyd (and ELF executables) of the nuitka, portable and flet methods, and
+# of exe on Windows only: smaller files; every start unpacks them in memory and some antivirus
+# engines flag them. Binaries over 600 MiB are never packed (UPX's limit is 768 MiB).
 enabled = false
 level = "best"   # 1..9 | best | brute | ultra-brute (brute: much slower, a few % smaller)
 lzma = true      # smaller, slower to unpack (PyInstaller and Nuitka always use LZMA)
 exclude = []     # extra file-name globs never packed (C runtime and python3*.dll never are)
+# path = "tools/upx"   # a UPX binary, relative to the project root (default: PATH, then a pinned download)
 
 [preset.flet]
 # ./deploy apply pins flet, flet-desktop and flet-cli to this version in pyproject.toml and re-locks

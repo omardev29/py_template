@@ -2,20 +2,26 @@
 
 from __future__ import annotations
 
+import configparser
+import hashlib
+import os
+import platform
 import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import envs
+from .. import envs, proc, ui
 from ..config import Config
 from ..imports import iter_runtime_nodes, parse
-from ..project import BUILD, EXT_SUFFIXES, SRC, host_arch, host_os
+from ..project import BUILD, EXT_SUFFIXES, SRC, host_arch, host_os, rel
 from ..ui import DeployError
 
 NATIVE_SUFFIXES = (*EXT_SUFFIXES, ".dll", ".dylib")
 KEY_RE = re.compile(r"^(cp|pp)(\d)(\d+)-(windows|linux|macos)-(x86_64|aarch64)$")
-# uv platform (--python-platform) for each (OS, architecture)
+# uv platform (--python-platform) for each (OS, architecture). It is also the floor of every
+# target, cross or host: manylinux_2_28 = glibc 2.28+ (RHEL 8, Debian 10, Ubuntu 20.04) on
+# x86_64, glibc 2.35+ on aarch64; macOS: MACOS_FLOOR; Windows wheels have no OS floor.
 UV_PLATFORMS = {
     ("windows", "x86_64"): "x86_64-pc-windows-msvc",
     ("windows", "aarch64"): "aarch64-pc-windows-msvc",
@@ -24,6 +30,10 @@ UV_PLATFORMS = {
     ("macos", "x86_64"): "x86_64-apple-darwin",
     ("macos", "aarch64"): "aarch64-apple-darwin",
 }
+# The oldest macOS the wheels of a macOS target must support: uv's own default for
+# --python-platform *-apple-darwin in 0.12, pinned (MACOSX_DEPLOYMENT_TARGET, unless the user
+# sets it) so a uv upgrade or a newer build machine cannot move it
+MACOS_FLOOR = "13.0"
 
 
 @dataclass(frozen=True)
@@ -51,28 +61,74 @@ def parse_key(key: str) -> Target:
     m = KEY_RE.match(key)
     if not m:
         raise DeployError(
-            f"invalid platform key: {key!r} (format: cp314-linux-x86_64, pp311-windows-x86_64...)"
+            f"invalid platform key: {key!r} (format: cp314-linux-x86_64, cp314-windows-x86_64...)"
         )
     impl, major, minor, os_name, arch = m.groups()
     return Target(impl, int(major), int(minor), os_name, arch)
 
 
+def ensure_env(env: envs.PyEnv) -> envs.PyEnv:
+    """Create the environment when its interpreter is missing (a fresh clone, `git clean -fdx`).
+
+    The build methods run env.python directly (the interpreter query, `uv pip install
+    --python`), not through `uv run --locked`, which would create it by itself.
+    """
+    if not env.python.is_file():
+        ui.info(f"  {rel(env.dir)} does not exist yet: creating it")
+        envs.sync(env)
+    return env
+
+
 def host_target(cfg: Config, backend: str) -> Target:
-    info = envs.interpreter_info(envs.runtime_env(cfg, backend).python)
+    info = envs.interpreter_info(ensure_env(envs.runtime_env(cfg, backend)).python)
     impl = "pp" if info["impl"] == "pypy" else "cp"
     major, minor, _ = str(info["version"]).split(".")
     return Target(impl, int(major), int(minor), host_os(), host_arch())
 
 
+def config_host_key(cfg: Config, backend: str) -> str:
+    """The key of the interpreter a build of `backend` installs for on this machine, from the
+    config alone (the environments follow python.cpython and python.pypy)."""
+    if backend == "pypy":
+        m = re.search(r"@(\d+)\.(\d+)", cfg.python.pypy)
+        impl, version = "pp", (f"{m[1]}{m[2]}" if m else "")
+    else:
+        impl, version = "cp", cfg.python.cpython.replace(".", "")
+    return f"{impl}{version}-{host_os()}-{host_arch()}"
+
+
+def check_key(cfg: Config, backend: str, key: str) -> Target:
+    """Parse an extra target key and refuse the ones uv.lock cannot serve (before any work).
+
+    uv.lock (the managed `environments`) only resolves CPython python.cpython and the pinned
+    PyPy minor: another CPython minor used to get the build interpreter's binaries (same OS)
+    or an incomplete lib/ (the exported markers exclude it), and uv installs PyPy wheels only
+    with a real PyPy, so a PyPy key is only the pypy build's own interpreter on this machine.
+    """
+    t = parse_key(key)
+    if t.impl == "cp" and t.version != cfg.python.cpython:
+        locked = "cp" + cfg.python.cpython.replace(".", "")
+        raise DeployError(
+            f"{key}: uv.lock only resolves CPython {cfg.python.cpython} (python.cpython): use "
+            f"{locked}-{t.os}-{t.arch}, or change python.cpython and run ./deploy lock",
+            2,
+        )
+    if t.impl == "pp" and t.key != config_host_key(cfg, backend):
+        raise DeployError(
+            f"{key}: PyPy dependencies only come from a pypy build on that machine "
+            "(./deploy build pypy --method pyz): uv cannot resolve PyPy wheels from CPython or for "
+            "another OS. Join the parts with ./deploy pyz-merge",
+            2,
+        )
+    return t
+
+
 def targets_for(cfg: Config, backend: str, keys: list[str]) -> list[Target]:
+    """Return the host target first, then the extra keys (validated, without duplicates)."""
+    extra = [check_key(cfg, backend, k) for k in keys if k != "host"]
     host = host_target(cfg, backend)
     out = [host]
-    for k in keys:
-        if k == "host":
-            continue
-        t = parse_key(k)
-        if t.impl == "pp" and not t.is_host:
-            raise DeployError(f"{k}: uv cannot resolve PyPy wheels for another OS; only the host PyPy")
+    for t in extra:
         if t.key not in {x.key for x in out}:
             out.append(t)
     return out
@@ -89,34 +145,195 @@ def export_requirements(cfg: Config) -> Path:
     return out
 
 
+def _version_tuple(text: str) -> tuple[int, int] | None:
+    parts = text.split(".")
+    try:
+        return int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+    except ValueError:
+        return None
+
+
+def _macos_floor() -> str:
+    return os.environ.get("MACOSX_DEPLOYMENT_TARGET") or MACOS_FLOOR
+
+
+def host_floor(target: Target) -> str | None:
+    """Return the --python-platform of a HOST target: the floor of a cross build, when this
+    machine can load those wheels. None keeps the host's own tags (musl, a glibc or macOS older
+    than the floor, an architecture without a uv platform, Windows)."""
+    plat = UV_PLATFORMS.get((target.os, target.arch))
+    if plat is None:
+        return None
+    if target.os == "linux":
+        m = re.search(r"manylinux_(\d+)_(\d+)$", plat)
+        libc, version = platform.libc_ver()  # the RUNNING glibc (os.confstr)
+        have = _version_tuple(version) if libc == "glibc" else None
+        return plat if m and have and have >= (int(m[1]), int(m[2])) else None
+    if target.os == "macos":
+        have = _version_tuple(platform.mac_ver()[0])
+        floor = _version_tuple(_macos_floor())
+        return plat if have and floor and have >= floor else None
+    return None
+
+
+def _runs_on(target: Target) -> str:
+    if target.os == "linux":
+        return f"glibc {platform.libc_ver()[1]}"
+    return f"macOS {platform.mac_ver()[0]}"
+
+
 def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirements: Path) -> Path:
-    """Install the runtime deps for one target (host or cross) with `uv pip install --target`."""
+    """Install the runtime deps for one target (host or cross) with `uv pip install --target`.
+
+    Cross targets get binary wheels for UV_PLATFORMS (an sdist built here would produce host
+    binaries). The host target gets the same platform floor when this machine can load those
+    wheels (host_floor): without it uv picks the newest the build machine allows, e.g.
+    manylinux_2_34 on Ubuntu 24.04, and the result silently needed that glibc.
+    """
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
     if not requirements.read_text(encoding="utf-8").strip():
         return dest
-    env = envs.runtime_env(cfg, backend) if target.impl == ("pp" if backend == "pypy" else "cp") else envs.tool_env(cfg)
-    argv: list[str | Path] = ["pip", "install", "--quiet", "--target", dest, "--no-deps", "-r", requirements]
-    if target.is_host and env.python.is_file():
-        argv += ["--python", env.python]
-        if target.impl == "cp" and backend == "pypy":
-            raise DeployError("CPython target from a PyPy build: use pp311-... keys")
-    else:
-        argv += [
-            "--python", envs.tool_env(cfg).python,
+    own = "pp" if backend == "pypy" else "cp"
+    env = envs.runtime_env(cfg, backend) if target.impl == own else envs.tool_env(cfg)
+    extra_env = {"MACOSX_DEPLOYMENT_TARGET": _macos_floor()} if target.os == "macos" else {}
+    base: list[str | Path] = ["pip", "install", "--quiet", "--target", dest, "--no-deps", "-r", requirements]
+    if not target.is_host:
+        argv = [
+            *base,
+            "--python", ensure_env(envs.tool_env(cfg)).python,
             "--python-platform", UV_PLATFORMS[(target.os, target.arch)],
             "--python-version", target.version,
             "--only-binary", ":all:",  # building sdists for another OS would produce host binaries
         ]
-    envs.uv(env, argv)
-    for junk in dest.glob("_virtualenv*"):
-        junk.unlink()
+        envs.uv(env, argv, extra_env=extra_env)
+    else:
+        base += ["--python", ensure_env(env).python]
+        floor = host_floor(target)
+        try:
+            # no --only-binary: the host can still build an sdist
+            envs.uv(env, [*base, "--python-platform", floor, "--python-version", target.version] if floor else base, extra_env=extra_env)
+        except proc.CommandFailed:
+            if not floor:
+                raise
+            ui.warn(
+                f"{target.key}: a dependency has no wheel for {floor} (see above); using the wheels this "
+                f"machine prefers, so the build needs {_runs_on(target)} or newer where it runs"
+            )
+            shutil.rmtree(dest)
+            dest.mkdir(parents=True)
+            envs.uv(env, base, extra_env=extra_env)
+    drop_install_junk(dest)
     return dest
 
 
+class _CaseSensitiveParser(configparser.ConfigParser):
+    def optionxform(self, optionstr: str) -> str:
+        return optionstr  # script names keep their case
+
+
+def _entry_points(dest: Path) -> set[str]:
+    """The console and GUI script names the installed distributions declare."""
+    names: set[str] = set()
+    for ep in dest.glob("*.dist-info/entry_points.txt"):
+        parser = _CaseSensitiveParser(delimiters=("=",), interpolation=None, strict=False)
+        try:
+            parser.read(ep, encoding="utf-8")
+        except (configparser.Error, UnicodeDecodeError):
+            continue
+        for section in ("console_scripts", "gui_scripts"):
+            if parser.has_section(section):
+                names.update(parser.options(section))
+    return names
+
+
+def drop_install_junk(dest: Path) -> None:
+    """Remove what `uv pip install --target` leaves that no app needs: its .lock file, the venv
+    hooks (_virtualenv*) and the console/GUI script wrappers in bin/ (Scripts/), whose shebang
+    or .exe trampoline holds this machine's absolute .venv path (dead elsewhere, and it leaks the
+    developer's folder). Other files in bin/ stay: wheels such as ruff or uv ship a native binary
+    there and find it at <target>/bin; a real package named bin (with __init__.py) stays too.
+    """
+    for junk in [*dest.glob("_virtualenv*"), dest / ".lock"]:
+        if junk.is_file() or junk.is_symlink():
+            junk.unlink()
+    names = _entry_points(dest)
+    for scripts in (dest / "bin", dest / "Scripts"):
+        if not scripts.is_dir() or (scripts / "__init__.py").exists():
+            continue
+        for f in scripts.iterdir():
+            if f.is_file() and (f.name in names or (f.suffix.lower() == ".exe" and f.stem in names)):
+                f.unlink()
+        if not any(scripts.iterdir()):
+            scripts.rmdir()
+
+
+def _platform_wheel(wheel: Path) -> bool:
+    """True when a *.dist-info/WHEEL declares an ABI or platform tag (cp314-cp314-..., py3-none-win_amd64)."""
+    try:
+        text = wheel.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        if key.strip().lower() == "tag":
+            parts = value.strip().split("-")
+            if len(parts) == 3 and (parts[1] != "none" or parts[2] != "any"):
+                return True
+    return False
+
+
 def has_native(path: Path) -> bool:
-    return any(p.suffix in NATIVE_SUFFIXES for p in path.rglob("*") if p.is_file())
+    """True when a lib/ is platform-specific: a platform wheel (read from its WHEEL tags, which
+    also catches pure-Python wheels that ship an executable, such as imageio-ffmpeg) or a binary."""
+    if any(_platform_wheel(w) for w in path.glob("*.dist-info/WHEEL")):
+        return True
+    return any(p.suffix in NATIVE_SUFFIXES or ".so." in p.name for p in path.rglob("*") if p.is_file())
+
+
+_PIN_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)")
+
+
+def _norm_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _norm_version(version: str) -> str:
+    """PEP 440 spellings of one release compare equal (1.02 == 1.2; wheel names escape - as _)."""
+    parts = version.strip().lower().replace("_", "-").split(".")
+    return ".".join(str(int(p)) if p.isdigit() else p for p in parts)
+
+
+def installed(site: Path) -> frozenset[tuple[str, str]]:
+    """The (name, version) of every distribution installed in a --target folder."""
+    out: set[tuple[str, str]] = set()
+    for info in site.glob("*.dist-info"):
+        name, _, version = info.name[: -len(".dist-info")].rpartition("-")
+        out.add((_norm_name(name), _norm_version(version)))
+    return frozenset(out)
+
+
+def skipped_requirements(requirements: Path, site: Path) -> list[str]:
+    """Return the locked pins that were NOT installed into `site`: their markers (sys_platform,
+    python_version, implementation_name...) exclude that target's platform or interpreter."""
+    have = installed(site)
+    out: list[str] = []
+    for line in requirements.read_text(encoding="utf-8").splitlines():
+        m = _PIN_RE.match(line)
+        if m and (_norm_name(m[1]), _norm_version(m[2])) not in have:
+            out.append(f"{m[1]}=={m[2]}")
+    return out
+
+
+def requirements_digest(requirements: Path) -> str:
+    """A fingerprint of the locked dependency set: the requirement lines only (the export's
+    header holds this machine's --output-file path, and hashes/comments are continuation lines)."""
+    lines = []
+    for line in requirements.read_text(encoding="utf-8").splitlines():
+        if line and not line[0].isspace() and not line.startswith(("#", "-")):
+            lines.append(line.rstrip("\\").strip())
+    return hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest()[:16]
 
 
 def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:
@@ -133,24 +350,53 @@ def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:
     shutil.copytree(app_dir, dest, ignore=ignore)
 
 
-def uses_tkinter() -> bool:
+def uses_tkinter(*extra: Path) -> bool:
+    """Return True when a .py file in src/ or under `extra` imports tkinter or turtle.
+
+    The portable prune passes the installed lib/: a dependency such as customtkinter or
+    ttkbootstrap needs tkinter even when the app never imports it itself.
+    """
     import ast
 
-    for path in SRC.rglob("*.py"):
-        try:
-            tree = parse(path)
-        except SyntaxError:
-            continue
-        for node in iter_runtime_nodes(tree):
-            names: list[str] = []
-            if isinstance(node, ast.Import):
-                names = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                names = [node.module]
-            if any(n.split(".")[0] in {"tkinter", "turtle"} for n in names):
-                return True
+    for root in (SRC, *extra):
+        for path in root.rglob("*.py"):
+            try:
+                data = path.read_bytes()
+                if b"tkinter" not in data and b"turtle" not in data:
+                    continue  # fast path: lib/ can hold thousands of files
+                tree = parse(path)
+            except OSError:
+                continue
+            except (SyntaxError, ValueError):
+                return True  # mentions tkinter but this Python cannot parse it: keep Tk (safe side)
+            for node in iter_runtime_nodes(tree):
+                names: list[str] = []
+                if isinstance(node, ast.Import):
+                    names = [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module]
+                if any(n.split(".")[0] in {"tkinter", "turtle"} for n in names):
+                    return True
     return False
 
 
+def windowed(cmd: str) -> str:
+    """Return the no-console twin of a Windows interpreter command, for app.gui launchers.
+
+    pyw.exe, pythonw.exe and pypyw.exe ship next to py.exe, python.exe and pypy.exe; there is
+    no python3w.exe or pypy3w.exe (checked in the PyPy Windows zip).
+    """
+    if cmd == "py" or cmd.startswith("py "):
+        return "pyw" + cmd[2:]
+    return "pypyw" if cmd.startswith("pypy") else "pythonw"
+
+
+def tree_bytes(path: Path) -> int:
+    """Bytes of a file or folder; a symlink (runtime/bin/python3 -> python3.14) is not counted again."""
+    if path.is_file():
+        return path.stat().st_size
+    return sum(p.stat().st_size for p in path.rglob("*") if not p.is_symlink() and p.is_file())
+
+
 def dir_size_mb(path: Path) -> float:
-    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file()) / 1_048_576
+    return tree_bytes(path) / 1_048_576
