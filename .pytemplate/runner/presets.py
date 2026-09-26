@@ -57,6 +57,10 @@ RESERVED_PACKAGES = {
 # Windows reserves these names (any case, any extension) for devices: src/aux/ cannot be created
 # there, and git cannot check out a repository that holds it
 WINDOWS_DEVICES = frozenset({"con", "prn", "aux", "nul", *(f"{d}{i}" for d in ("com", "lpt") for i in range(10))})
+# The interpreters the generated Windows launchers call by bare name (pyz._wrapper_cmd,
+# portable.cmd_launcher, common.windowed): cmd.exe looks in the current folder first, so an app
+# called python started its own python.cmd again and again instead of Python
+INTERPRETER_COMMANDS = frozenset({"py", "pyw", "python", "python3", "pythonw", "pypy", "pypy3", "pypyw"})
 # The top-level modules a pinned package (constraints.txt of any preset) installs under another
 # name than its own (normalized, '_' for '-'), read from the wheels' RECORD files; names that
 # cannot be an app package (_pytest, _yaml, cffi-stubs...) are left out. src/<pkg>/ with such a
@@ -468,6 +472,11 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
         raise DeployError(
             f"src/{pkg}/ cannot exist on Windows: '{pkg}' is a reserved device name there (CON, PRN, "
             f"AUX, NUL, COM0-9, LPT0-9) and a repository holding it cannot be checked out.{hint}"
+        )
+    if name.lower() in INTERPRETER_COMMANDS:
+        raise DeployError(
+            f"'{name}' is the name of a Python command: the Windows launchers of the pyz and portable "
+            f"builds ({name}.cmd) call it by name, and cmd.exe would start {name}.cmd itself again and again.{hint}"
         )
     taken = {**_skeleton_src_names(preset), **RESERVED_PACKAGES}
     if pkg in taken:

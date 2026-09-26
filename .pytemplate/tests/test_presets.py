@@ -351,7 +351,6 @@ def test_name_from_folder(folder: str, name: str) -> None:
         ("flet", "flet", "also the name of a dependency of the 'flet' preset (flet"),
         ("script", "Rich", "also the name of a dependency of the 'script' preset (rich"),
         # a module a dependency installs under another name (pytest imports its py shim first)
-        ("script", "py", "src/py/ would shadow the module 'py' of pytest"),
         ("script", "markdown-it", "src/markdown_it/ would shadow the module 'markdown_it' of markdown-it-py"),
         ("raylib", "pyray", "the module 'pyray' of raylib"),
         ("flet", "yaml", "the module 'yaml' of pyyaml"),
@@ -372,6 +371,9 @@ def test_name_from_folder(folder: str, name: str) -> None:
         ("script", "com1", "reserved device name"),
         ("raylib", "LPT9", "reserved device name"),
         ("script", "prn", "reserved device name"),
+        # the Windows launchers call these by name: python.cmd in its own folder started itself
+        *(("script", n, "is the name of a Python command") for n in ("py", "Pyw", "python", "python3", "pythonw", "pypy3", "pypyw")),
+        ("raylib", "Python", "(Python.cmd) call it by name"),
     ],
 )
 def test_check_name_free_refuses(preset: str, name: str, message: str) -> None:
@@ -387,7 +389,7 @@ def test_check_name_free_accepts_near_misses(name: str) -> None:
     presets.check_name_free(_skeleton_config("script", "myapp"), "script", name)
 
 
-@pytest.mark.parametrize(("name", "message"), [("game-", "valid app name|may only contain"), ("g_", "valid app name|may only contain"), ("aux", "Windows"), ("typings", "typings/"), ("py", "module 'py' of pytest")])
+@pytest.mark.parametrize(("name", "message"), [("game-", "valid app name|may only contain"), ("g_", "valid app name|may only contain"), ("aux", "Windows"), ("typings", "typings/"), ("markdown-it", "module 'markdown_it' of markdown-it-py")])
 def test_rename_refuses_the_names_check_name_free_refuses(name: str, message: str) -> None:
     """`./deploy rename` goes through check_name_free: a name uv refuses (game-) used to move
     src/ and rewrite the project before `uv lock` failed on it."""

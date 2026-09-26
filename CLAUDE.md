@@ -1687,7 +1687,10 @@ Per method:
   keep its first line) refuses: a name uv refuses (`config.APP_NAME`: a letter first, a letter
   or digit last, PEP 508), a keyword, a standard-library module of any supported Python
   (`presets.shadows_stdlib`), a backend name (cpython, pypy, mypyc), a Windows device name (`WINDOWS_DEVICES`: `aux`,
-  `con`, `nul`, `com1`...: the folder cannot exist there and git cannot check it out), the
+  `con`, `nul`, `com1`...: the folder cannot exist there and git cannot check it out), a Python
+  command (`INTERPRETER_COMMANDS`: `py`, `python`, `python3`, `pyw`, `pythonw`, `pypy3`...: the
+  pyz and portable `<name>.cmd` launchers call them by name, and cmd.exe, which looks in the
+  current folder first, found `<name>.cmd` itself and restarted it forever), the
   project's own folders and files (`RESERVED_PACKAGES`: tests, typings, build, dist, assets;
   plus the preset's `src/` entries such as `main`), and every package the project will lock:
   the declared requirements (minus the current preset's own), their tree in `uv.lock`
