@@ -3467,6 +3467,12 @@ Editors:
 - The pinned `selftest --nvim` (`nvimtest.LOCK`, `cmd_nvim.STARTER_REV`) stays green while
   upstream moves: only a run without the lock (template-nvim's weekly canary) shows drift coming, and
   users' LazyVim follows its own `lazy-lock.json`.
+- Neovim on Windows: a new lint run cancels the running one of the same linter (LazyVim lints on
+  BufReadPost, InsertLeave and BufWritePost), and nvim-lint then kills only the `cmd.exe`
+  wrapper of the cancelled mypy. In `selftest --nvim` on the Windows runner a mypy run started
+  right before LazyVim's own published no diagnostics within 180 s (flet preset, twice;
+  script and raylib passed); since the smoke check waits for LazyVim's run it passes. Whether
+  users lose diagnostics this way (until the next save) is not verified.
 - On Windows the debugger prints harmless noise on disconnect (debugpy's "NoMoreMessages"
   traceback, "adapter exited with 1").
 
