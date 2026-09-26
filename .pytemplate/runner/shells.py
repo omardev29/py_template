@@ -139,7 +139,7 @@ def _check_launchers(check: Check) -> None:
         check(
             None,
             "this run was started by: unknown (PYTEMPLATE_LAUNCHER is not set)",
-            "An older launcher, a shell-setup function that runs uv directly (xonsh, nu), or uv run by hand",
+            "An older launcher, the shell-setup xonsh alias (it runs uv directly), or uv run by hand",
         )
     labels = {"deploy": "#!/bin/sh, LF, ASCII", "deploy.cmd": "CRLF, ASCII", "deploy.ps1": "LF, ASCII, no BOM"}
     modes = _git_modes(list(labels))
@@ -202,7 +202,7 @@ def doctor(check: Check) -> None:
                 "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned   (or use .\\deploy.cmd)",
             )
     if IS_WSL:
-        check(None, "WSL on /mnt: .venv*-wsl environments and .build/wsl kept separate from Windows", "")
+        check(None, "WSL on a Windows checkout: .venv*-wsl environments and .build/wsl kept separate from Windows", "")
 
 
 # --- shell-setup ---------------------------------------------------------------------------------
@@ -277,8 +277,10 @@ end
 NU_SNIPPET = r"""
 # `deploy` in nushell from any folder of a pytemplate project.
 # Paste into your config.nu (`$nu.config-path` prints where it is), then open a new shell.
-# It runs .pytemplate/deploy.py with uv directly, so uv must be on PATH. UV_PYTHON is
-# emptied for it (uv reads that as unset): the runner runs on the project's Python.
+# It runs .pytemplate/deploy.py with the uv on PATH (on Windows only a real uv.exe: a uv.cmd
+# shim would go through cmd.exe), else the launcher. Like the launchers it keeps your UV_PYTHON,
+# PYTHONHOME, PYTHONPATH and UV_WORKING_DIR away from the runner (uv and Python read an empty
+# value as unset; uv refuses an empty UV_WORKING_DIR).
 def --wrapped deploy [...rest] {
     mut dir = $env.PWD
     while not ($dir | path join '.pytemplate' 'deploy.py' | path exists) {
@@ -288,16 +290,25 @@ def --wrapped deploy [...rest] {
         }
         $dir = $parent
     }
-    let script = ($dir | path join '.pytemplate' 'deploy.py')
-    with-env {PYTEMPLATE_CALLER_CWD: $env.PWD, PYTEMPLATE_LAUNCHER: 'nu', UV_PYTHON: ''} { ^uv run --quiet --script $script ...$rest }
+    let root = $dir
+    let script = ($root | path join '.pytemplate' 'deploy.py')
+    let windows = ($nu.os-info.name == 'windows')
+    let uv = if $windows { 'uv.exe' } else { 'uv' }
+    if (which $uv | is-empty) {
+        # The launcher searches uv's usual install folders and prints how to install it.
+        if $windows { ^($root | path join 'deploy.cmd') ...$rest } else { ^sh ($root | path join 'deploy') ...$rest }
+    } else {
+        with-env {PYTEMPLATE_CALLER_CWD: $env.PWD, PYTEMPLATE_LAUNCHER: 'nu', UV_PYTHON: '', PYTHONHOME: '', PYTHONPATH: '', UV_WORKING_DIR: '.'} { ^$uv run --quiet --script $script ...$rest }
+    }
 }
 """
 
 XONSH_TEMPLATE = r'''
 # `deploy` in xonsh from any folder of a pytemplate project (xonsh 0.14 or later).
 # Paste into ~/.xonshrc, then open a new shell. It runs .pytemplate/deploy.py with uv
-# directly (falling back to the launcher when uv is not on $PATH): on Windows ./deploy goes
-# through deploy.cmd, and cmd.exe cannot pass & | < > ^ % inside arguments. Unlike the
+# directly (on Windows only a real uv.exe: a uv.cmd shim would go through cmd.exe; falling
+# back to the launcher when there is none on $PATH): on Windows ./deploy goes through
+# deploy.cmd, and cmd.exe cannot pass & | < > ^ % inside arguments. Unlike the
 # launchers it keeps a UV_PYTHON you set: the runner then needs it to be 3.11 or newer.
 # The completion words were taken from this project by `./deploy shell-setup xonsh`.
 import os as _pt_os
@@ -309,6 +320,7 @@ from pathlib import Path as _PtPath
 _PT_WORDS = @WORDS@
 _PT_CHOICES = @CHOICES@
 _PT_FLAGS = @FLAGS@
+_PT_GLOBALS = @GLOBALS@
 _PT_MISSING = "deploy: no .pytemplate/deploy.py in this folder or any parent folder"
 
 
@@ -318,7 +330,7 @@ def _pt_deploy_argv(args):
         script = d / ".pytemplate" / "deploy.py"
         if script.is_file():
             path = _pt_os.pathsep.join(str(p) for p in ${...}.get("PATH", []))
-            uv = _pt_shutil.which("uv", path=path)
+            uv = _pt_shutil.which("uv.exe" if _pt_os.name == "nt" else "uv", path=path)
             if uv:
                 return [uv, "run", "--quiet", "--script", str(script), *args]
             return [str(d / ("deploy.cmd" if _pt_os.name == "nt" else "deploy")), *args]
@@ -360,14 +372,19 @@ else:
         """./deploy commands, tasks, backends and options"""
         if not command.args or _PtPath(command.args[0].value).name.lower() not in ("deploy", "deploy.cmd", "deploy.ps1"):
             return None
-        if command.arg_index == 1:
+        at = 1  # the command comes after the global options (deploy -v --dry-run test)
+        while at < command.arg_index and at < len(command.args) and command.args[at].value in _PT_GLOBALS:
+            at += 1
+        if command.arg_index == at:
             words = _PT_WORDS
-        elif command.arg_index >= 2 and len(command.args) > 1:
-            name = command.args[1].value
+        elif command.arg_index > at and len(command.args) > at:
+            name = command.args[at].value
+            if name in ("-h", "--help"):
+                name = "help"
             if command.prefix.startswith("-"):
                 words = _PT_FLAGS.get(name, [])
             else:
-                words = _PT_CHOICES.get(name, []) if command.arg_index == 2 else []
+                words = _PT_CHOICES.get(name, []) if command.arg_index == at + 1 else []
         else:
             return None
         return {w for w in words if w.startswith(command.prefix)} or None
@@ -376,20 +393,43 @@ else:
 '''
 
 
+# The global options of cli._parse_globals (before the command): the completer skips them.
+GLOBAL_OPTIONS = ("-v", "--verbose", "-q", "--quiet", "--dry-run", "--no-render", "-h", "--help")
+
+
+def _first_group(usage: str) -> str | None:
+    """The leading [...] group of a usage line without its nested groups:
+    `[install [--force]|uninstall|run|status]` -> `install |uninstall|run|status`."""
+    if not usage.startswith("["):
+        return None
+    depth = 0
+    for end, ch in enumerate(usage):
+        depth += {"[": 1, "]": -1}.get(ch, 0)
+        if depth == 0:
+            break
+    else:
+        return None  # unbalanced
+    inner = usage[1:end]
+    while (flat := re.sub(r"\[[^\[\]]*\]", "", inner)) != inner:
+        inner = flat
+    return inner
+
+
 def completion_words(cfg: Config | None) -> tuple[list[str], dict[str, list[str]], dict[str, list[str]]]:
     """Return (first words, choices of the 2nd word, --options) per command, from cli.COMMANDS."""
     from .cli import COMMANDS
 
     tasks = sorted(cfg.tasks) if cfg is not None else []
-    first = sorted(COMMANDS) + [t for t in tasks if t not in COMMANDS] + ["-v", "-q", "--dry-run", "--no-render"]
+    names = sorted(COMMANDS) + [t for t in tasks if t not in COMMANDS]
+    first = names + ["-v", "-q", "--dry-run", "--no-render"]
     choices: dict[str, list[str]] = {}
     flags: dict[str, list[str]] = {}
     for name, command in COMMANDS.items():
-        group = re.match(r"\[([^\]]+)\]", command.usage)
-        if group and " " not in group[1]:
+        group = _first_group(command.usage)
+        if group is not None:
             words: list[str] = []
-            for word in group[1].split("|"):
-                words += list(BACKENDS) if word == "BACKEND" else [word]
+            for word in (w.strip() for w in group.split("|")):
+                words += list(BACKENDS) if word == "BACKEND" else names if word == "COMMAND" else [word]
             choices[name] = list(dict.fromkeys(w for w in words if re.fullmatch(r"-{0,2}[a-z][a-z0-9-]*", w)))
         options = list(dict.fromkeys(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", command.usage)))
         if options:
@@ -424,13 +464,18 @@ def xonsh_snippet(cfg: Config | None) -> str:
         XONSH_TEMPLATE.replace("@WORDS@", _py_words(first))
         .replace("@CHOICES@", _py_word_map(choices))
         .replace("@FLAGS@", _py_word_map(flags))
+        .replace("@GLOBALS@", repr(GLOBAL_OPTIONS))
     )
 
 
+# The snippets are ASCII (they are appended to rc files): a path of the user's that is not
+# (C:\Users\Jos<e-acute>) is named by its generic form instead.
 def _msys2_bashrc() -> str:
     user = os.environ.get("USERNAME") or os.environ.get("USER") or "<you>"
     for root in _msys2_roots(dict(os.environ), standard=True):
-        return str(root / "home" / user / ".bashrc")
+        path = str(root / "home" / user / ".bashrc")
+        if path.isascii():
+            return path
     return "<MSYS2 root>\\home\\<you>\\.bashrc"
 
 
@@ -441,6 +486,8 @@ def _posix_header(shell: str) -> str:
         return "# `deploy` in zsh from any folder of a pytemplate project.\n# Paste into ~/.zshrc, then open a new shell."
     if shell == "niubash":
         niu_env = os.environ.get("NIU_ENV") or "(unset: set NIU_ENV to a file first)"
+        if not niu_env.isascii():
+            niu_env = "$NIU_ENV"  # `echo $NIU_ENV` in niubash names it
         return (
             "# `deploy` in niubash from any folder of a pytemplate project.\n"
             "# Paste it into BOTH of these files, then open a new shell:\n"
@@ -475,20 +522,23 @@ def snippet(shell: str, cfg: Config | None = None) -> str:
 def guess_shell(env: Mapping[str, str]) -> str | None:
     """Guess the calling shell from PYTEMPLATE_LAUNCHER, XONSH_VERSION and SHELL.
 
-    ps1: and sh:niubash name the caller (niubash runs the launcher in-process). sh:bash/sh:zsh
-    only name the interpreter of `#!/bin/sh` (bash on macOS, Fedora, Arch), not the user's
-    shell: they are the last resort after XONSH_VERSION and $SHELL (Git Bash/MSYS2 without it).
+    ps1:, nu (the shell-setup nu function) and sh:niubash name the caller (niubash runs the
+    launcher in-process). sh:bash/sh:zsh only name the interpreter of `#!/bin/sh` (bash on
+    macOS, Fedora, Arch), not the user's shell: they are the last resort after XONSH_VERSION
+    and $SHELL (Git Bash/MSYS2 without it).
     """
     launcher = env.get("PYTEMPLATE_LAUNCHER", "")
     if launcher.startswith("ps1:"):
         return "pwsh"
+    if launcher == "nu":
+        return "nu"
     if launcher.startswith("sh:niubash"):
         return "niubash"
     if env.get("XONSH_VERSION"):
         return "xonsh"
     name = re.split(r"[\\/]", env.get("SHELL", ""))[-1].lower()  # C:\x\zsh.exe on any host
     name = name[:-4] if name.endswith(".exe") else name
-    if name in ("bash", "zsh", "fish", "nu"):
+    if name in ("bash", "zsh", "fish", "nu", "pwsh"):
         return name
     for prefix, shell in (("sh:zsh", "zsh"), ("sh:bash", "bash")):
         if launcher.startswith(prefix):
@@ -639,7 +689,9 @@ def wsl_distros(wsl: str) -> list[str]:
 
 
 def _suffix(index: int) -> str:
-    return "" if index == 0 else str(index + 1)
+    """The tag of a second (third...) install: msys2-2-ucrt64, git-2-bash, cygwin-2, so the
+    family NAME (msys2-, git-) still selects them in select()."""
+    return "" if index == 0 else f"-{index + 1}"
 
 
 def _discover_windows(env: Mapping[str, str], which: Callable[[str], str | None], standard: bool, distros: Callable[[str], list[str]]) -> list[Shell]:
@@ -1382,9 +1434,9 @@ def _list_shells(shells: Sequence[Shell], as_json: bool) -> None:
         return
     ui.step(f"{len(shells)} shells found")
     width = max([len(s.name) for s in shells] + [5]) + 2
-    for s in shells:
-        ui.info(f"  {s.name.ljust(width)}{s.argv[0]}")
-        ui.info(f"  {''.ljust(width)}{s.describe()}")
+    for s in shells:  # what --list was asked for: shown even with -q
+        ui.report(f"  {s.name.ljust(width)}{s.argv[0]}")
+        ui.report(f"  {''.ljust(width)}{s.describe()}")
 
 
 def _run_all(ctx: Context, shells: Sequence[Shell], tests: Sequence[str], jobs: int) -> list[Result]:
@@ -1449,16 +1501,17 @@ def selftest(cfg: Config, args: list[str]) -> int:
             shutil.rmtree(tmp, ignore_errors=True)
     seconds = time.perf_counter() - started
 
+    # The table and why each test failed or was skipped are the answer: shown even with -q.
     ui.info("")
     for line in table(shells, results, opts.tests):
-        ui.info(line)
+        ui.report(line)
     fails = [r for r in results if r.status == "fail"]
     skips = [r for r in results if r.status == "skip"]
     for title, group in (("failures", fails), ("skipped", skips)):
         if group:
-            ui.info(f"\n{title}:")
+            ui.report(f"\n{title}:")
             for r in group:
-                ui.info(f"  {r.shell} {r.test} {TESTS[r.test]}: {r.detail}")
+                ui.report(f"  {r.shell} {r.test} {TESTS[r.test]}: {r.detail}")
     if opts.as_json:
         print(json.dumps(report_json(project, shells, results, seconds), indent=2))
     passed = sum(1 for r in results if r.status == "pass")

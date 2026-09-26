@@ -1136,8 +1136,10 @@ is typed the same way everywhere:
 | PowerShell 7 / Windows PowerShell 5.1 on Windows | `deploy.ps1` | `./deploy` resolves to `deploy.ps1`. If the execution policy blocks it: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (a copy from a downloaded zip also needs `Unblock-File .\deploy.ps1`), or use `.\deploy.cmd` |
 
 Editors do not depend on the shell: VS Code tasks run `/bin/sh deploy` (`deploy.cmd` on
-Windows) and Neovim runs uv directly. The launchers ignore a `UV_PYTHON` you export: the runner
-always runs on the project's `python.cpython`. `./deploy` works under a caller's `set -eu`.
+Windows) and Neovim runs uv directly. The launchers ignore a `UV_PYTHON`, `PYTHONHOME`,
+`PYTHONPATH` or `UV_WORKING_DIR` you export: the runner always runs on the project's
+`python.cpython`, in the folder where the command was typed (the xonsh alias of `shell-setup`
+keeps them: it can only hand uv an argument list). `./deploy` works under a caller's `set -eu`.
 `./deploy doctor` shows which launcher started it and checks that the launchers kept their line
 endings and executable bit.
 
@@ -1154,7 +1156,8 @@ relative to the project root
 the enclosing project from any subfolder, with a comment saying where to paste it. Shells:
 `bash`, `zsh`, `niubash`, `msys2`, `fish`, `nu`, `xonsh` (with completion of the commands and
 tasks), `pwsh`, `powershell`; without a name it guesses the shell. The xonsh alias and the nu
-function run uv directly (no `deploy.cmd` and its argument limits); the pwsh function passes
+function run uv directly (no `deploy.cmd` and its argument limits; on Windows only a real
+`uv.exe`, never a `uv.cmd` shim); the pwsh function passes
 pipeline input on. Print the xonsh snippet again to complete commands added later.
 
 ```sh
@@ -1173,8 +1176,9 @@ pipeline input on. Print the xonsh snippet again to complete commands added late
 - PowerShell removes a bare `--` before any script sees it (5.1 and 7 alike): quote it (`'--'`)
   or use `.\deploy.cmd`. `./deploy` itself never needs `--`: everything after `run` or `test`
   already goes to the app or to pytest.
-- Inside PowerShell, a typed `-X:utf8` stays one argument (but `-X: v`, with a space, arrives as
-  `-X:v`), `--%` passes through literally, and pipeline input reaches the app
+- Inside PowerShell, a typed list (`--supports cpython,mypyc`) and a typed `-X:utf8` stay one
+  argument each, as for any native program (but `-X: v`, with a space, arrives as `-X:v`), `--%`
+  passes through literally, and pipeline input reaches the app
   (`Get-Content data.txt | ./deploy run`). `pwsh -File deploy.ps1 ...`, and `./deploy.ps1` typed
   in bash or zsh, split every argument that starts with `-` at its first colon (PowerShell's own
   parsing): from POSIX shells use `./deploy`.
@@ -1264,8 +1268,9 @@ only deletes files is checked too).
 - **Paths longer than 260 characters** (Windows): shorten the project path or enable
   `LongPathsEnabled`: MSVC (mypyc), PyPy and the Flet client have long internal paths.
 - **`bash` opens WSL** (Windows): the `bash` on PATH may be WSL's launcher. Use Git Bash or MSYS2
-  (their own `bash.exe`), xonsh, PowerShell or cmd. From WSL on a `/mnt/...` checkout the runner
-  keeps separate environments (`.venv-wsl`, `.build/wsl`), so the Windows ones stay intact.
+  (their own `bash.exe`), xonsh, PowerShell or cmd. From WSL on a Windows checkout (`/mnt/c/...`,
+  or any drive mounted with drvfs) the runner keeps separate environments (`.venv-wsl`,
+  `.build/wsl`), so the Windows ones stay intact, also under `sudo`, ssh or cron.
 - **raylib: `setup` fails with "marked as `--no-build` but has no binary distribution"** (Apple
   Silicon, Linux ARM64): raylib publishes no PyPy wheel there. Run
   `./deploy mode cpython --supports cpython,mypyc`, then `./deploy setup`. The generated CI already

@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from . import ui
@@ -26,13 +27,56 @@ STATE_FILE = TEMPLATE / "state.json"
 
 IS_WINDOWS = os.name == "nt"
 IS_MACOS = sys.platform == "darwin"
+
+WSL_INTEROP = "/proc/sys/fs/binfmt_misc/WSLInterop"
+_WINDOWS_SOURCE = re.compile(r"[A-Za-z]:|\\\\")  # C:\ (drvfs, 9p) or \\server\share
+
+
+def wsl_kernel(environ: Mapping[str, str] = os.environ, release: str | None = None, interop: str = WSL_INTEROP) -> bool:
+    """Whether this Linux runs under WSL, from the kernel: WSL sets WSL_DISTRO_NAME only for what
+    wsl.exe starts, not under sudo, sshd, cron or a systemd unit."""
+    if release is None:
+        release = platform.release()  # 5.15.x-microsoft-standard-WSL2, 4.4.0-19041-Microsoft
+    return "WSL_DISTRO_NAME" in environ or "microsoft" in release.lower() or os.path.exists(interop)
+
+
+def _mount_field(text: str) -> str:
+    """/proc/self/mounts writes a blank, tab, newline and backslash as \\040 \\011 \\012 \\134."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), text)
+
+
+def windows_checkout(root: Path, mounts: str | None) -> bool:
+    """Whether `root` lies on a Windows drive mounted into WSL. `mounts` is /proc/self/mounts:
+    the deepest mount above `root` decides (drvfs in WSL 1, 9p with aname=drvfs in WSL 2, or a
+    source that is a drive or a UNC share: `mount -t drvfs D: /d`, automount root = /).
+    Without it (unreadable), a checkout under /mnt/ counts, where WSL mounts the drives."""
+    target = str(root)
+    best: tuple[int, bool] | None = None
+    for line in (mounts or "").splitlines():
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        source, point, fstype, options = (_mount_field(f) for f in fields[:4])
+        if target != point and not target.startswith(point.rstrip("/") + "/"):
+            continue
+        windows = fstype == "drvfs" or "aname=drvfs" in options or bool(_WINDOWS_SOURCE.match(source))
+        if best is None or len(point) >= best[0]:  # the later of two equal mounts is on top
+            best = (len(point), windows)
+    if best is None:
+        return target.startswith("/mnt/")
+    return best[1]
+
+
+def _read_mounts() -> str | None:
+    try:
+        return Path("/proc/self/mounts").read_text(encoding="utf-8", errors="surrogateescape")
+    except OSError:
+        return None
+
+
 # WSL on a Windows checkout (/mnt/c/...): separate environments and builds, so the
-# Windows .venv is not turned into a Linux one.
-IS_WSL = (
-    sys.platform == "linux"
-    and "WSL_DISTRO_NAME" in os.environ
-    and str(ROOT).startswith("/mnt/")
-)
+# Windows .venv is not turned into a Linux one (the Neovim plugin mirrors this test).
+IS_WSL = sys.platform == "linux" and wsl_kernel() and windows_checkout(ROOT, _read_mounts())
 ENV_SUFFIX = "-wsl" if IS_WSL else ""
 BUILD = ROOT / ".build" / "wsl" if IS_WSL else ROOT / ".build"
 

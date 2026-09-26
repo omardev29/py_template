@@ -116,13 +116,29 @@ _pt_winpath() {
             _pt_p=$_pt_r:${_pt_t:-/} ;;
         //*) ;;
         /*)
-            # Inside the MSYS2/Cygwin root: only cygpath knows the mounts.
-            if command -v cygpath >/dev/null 2>&1; then
-                _pt_t=$(cygpath -m -- "$_pt_p" 2>/dev/null) || _pt_t=
-                case $_pt_t in
-                    [A-Za-z]:/*) _pt_p=$_pt_t ;;
-                esac
-            fi ;;
+            # Inside the MSYS2/Cygwin root: only cygpath knows the mounts. The
+            # root's own first: a non-login shell may have no /usr/bin on PATH,
+            # or WinuxCmd's cygpath (niubash, xonsh-shell-kit) there.
+            _pt_t=
+            if [ -x /usr/bin/cygpath ]; then
+                _pt_t=$(/usr/bin/cygpath -m -- "$_pt_p" 2>/dev/null) || _pt_t=
+            fi
+            case $_pt_t in
+                [A-Za-z]:/*) ;;
+                *)
+                    _pt_t=
+                    if command -v cygpath >/dev/null 2>&1; then
+                        _pt_t=$(cygpath -m -- "$_pt_p" 2>/dev/null) || _pt_t=
+                    fi ;;
+            esac
+            case $_pt_t in
+                [A-Za-z]:/*) _pt_p=$_pt_t ;;
+                *)
+                    # Keep the POSIX path: MSYS converts it for uv.exe itself,
+                    # while \home\x would name a folder on the current drive.
+                    _pt_r=$_pt_p
+                    return 0 ;;
+            esac ;;
     esac
     _pt_backslashes "$_pt_p"
 }
@@ -477,12 +493,17 @@ if [ "$#" -eq 1 ]; then
     # An error above (no project, no uv): $1 is its exit code.
     exit "$1"
 fi
-# The runner runs on the project's Python (.python-version next to it): a
-# UV_PYTHON of the caller must not choose it (the runner's tools never use it).
+# The runner runs on the project's Python (.python-version next to it), in the
+# caller's folder: a UV_PYTHON of the caller must not choose that Python, a
+# PYTHONHOME or PYTHONPATH must not break it, a UV_WORKING_DIR must not move it
+# (the runner's own tools never get them either).
 if [ -n "${__RUBASH_SHELL_NAME:-}" ]; then
     # niubash runs this file inside the calling shell and `exec` only ends the
     # file: run uv, then drop the two exports so the session keeps no stale copy.
-    if UV_PYTHON='' "$@"; then
+    # The session keeps its own values: uv reads an empty UV_PYTHON as unset,
+    # Python an empty PYTHONHOME/PYTHONPATH, and uv refuses an empty
+    # UV_WORKING_DIR (. is the caller's folder).
+    if UV_PYTHON='' PYTHONHOME='' PYTHONPATH='' UV_WORKING_DIR=. "$@"; then
         set -- 0
     else
         set -- "$?"
@@ -490,5 +511,5 @@ if [ -n "${__RUBASH_SHELL_NAME:-}" ]; then
     unset PYTEMPLATE_CALLER_CWD PYTEMPLATE_LAUNCHER
     exit "$1"
 fi
-unset UV_PYTHON
+unset UV_PYTHON PYTHONHOME PYTHONPATH UV_WORKING_DIR
 exec "$@"

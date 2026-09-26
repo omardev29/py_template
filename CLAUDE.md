@@ -138,13 +138,18 @@ implement the same contract: change them together. The `nu` and `xonsh` snippets
 3. Export `PYTEMPLATE_CALLER_CWD` (the caller's cwd; `C:\...` form with an upper-case drive on
    Windows) and `PYTEMPLATE_LAUNCHER`.
 4. Run `uv run --quiet --script <root>/.pytemplate/deploy.py ARGS...` with argv untouched and
-   propagate its exit code, with the caller's `UV_PYTHON` removed for uv only (`deploy`:
-   `unset` before `exec`, `UV_PYTHON=''` for niubash; `deploy.cmd`: `set "UV_PYTHON="` under
-   `setlocal`; `deploy.ps1`: removed and restored like the `PYTEMPLATE_*` pair; plugin and nu
-   snippet: an empty value, which uv reads as unset). The runner then always runs on the
-   project's Python (section 5.2); its own tools never used the caller's `UV_PYTHON` anyway
-   (`proc.base_env`). Launchers never `cd`; besides the uv search and the install hints they
-   contain no logic.
+   propagate its exit code, with the caller's `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and
+   `UV_WORKING_DIR` removed for uv only (`deploy`: `unset` before `exec`, prefix assignments
+   for niubash; `deploy.cmd`: `set "X="` under `setlocal`; `deploy.ps1`: removed and restored
+   like the `PYTEMPLATE_*` pair; plugin and nu snippet: values in the job's environment). Where
+   a value must stand in for "unset" (niubash, plugin, nu), the first three are empty (uv reads
+   an empty `UV_PYTHON` as unset, CPython an empty `PYTHONHOME`/`PYTHONPATH`) and
+   `UV_WORKING_DIR` is `.` (uv refuses an empty one: "a value is required for '--directory'").
+   The runner then always runs on the project's Python, started cleanly (a `PYTHONHOME` made
+   every command die with `Failed to import encodings module`, a `PYTHONPATH` could shadow the
+   stdlib), in the caller's folder (`UV_WORKING_DIR` moved it, and `new DIR` or `pyz-merge`
+   paths with it) (section 5.2); its own tools never used them anyway (`proc.base_env`).
+   Launchers never `cd`; besides the uv search and the install hints they contain no logic.
 
 Launcher exit codes: 2 = no project found, 127 = uv not found (after the install hints),
 126 = `deploy.ps1` could not start uv, or PowerShell runs it in ConstrainedLanguage mode;
@@ -180,7 +185,7 @@ then `shutil.which("uv")`, else `DeployError(..., 3)`.
 `sh:msys` for dash under MSYS2); `cmd`; `ps1:<PSEdition>:<major>.<minor>` (`ps1:Core:7.6`,
 `ps1:Desktop:5.1`); `nvim`; `nu` (shell-setup snippet). The xonsh snippet sets none.
 `project.native_path` reads the `:msys`/`:cygwin` suffix, `shells.guess_shell` the prefix (only
-`ps1:` and `sh:niubash` first: `sh:bash`/`sh:zsh` name the interpreter of `#!/bin/sh`, bash on
+`ps1:`, `nu` and `sh:niubash` first: `sh:bash`/`sh:zsh` name the interpreter of `#!/bin/sh`, bash on
 macOS, Fedora and Arch, so `$SHELL` wins over them), and `./deploy doctor` prints the value
 ("unknown" when unset).
 
@@ -229,10 +234,11 @@ header rules (with detector tests proving each rule fires).
   bodies (`return` is fine anywhere); no comment on a `name() {` line; never write
   `"...$(cmd "$x")..."`: assign the substitution to a variable first.
 - niubash is detected by `__RUBASH_SHELL_NAME`. There uv runs WITHOUT `exec` (exec would only
-  end the in-process script) as `if UV_PYTHON='' "$@"` (errexit-proof; the session keeps its
-  own `UV_PYTHON`), then the launcher unsets `PYTEMPLATE_CALLER_CWD` and `PYTEMPLATE_LAUNCHER`
-  and exits with uv's code, so nothing leaks into the calling session. Elsewhere it runs
-  `unset UV_PYTHON` and `exec "$@"`.
+  end the in-process script) as `if UV_PYTHON='' PYTHONHOME='' PYTHONPATH='' UV_WORKING_DIR=.
+  "$@"` (errexit-proof; the session keeps its own values), then the launcher unsets
+  `PYTEMPLATE_CALLER_CWD` and `PYTEMPLATE_LAUNCHER` and exits with uv's code, so nothing leaks
+  into the calling session. Elsewhere it runs `unset UV_PYTHON PYTHONHOME PYTHONPATH
+  UV_WORKING_DIR` and `exec "$@"`.
 - Root discovery: `$BASH_SOURCE` -> zsh `${(%):-%x}` (read through `eval` so dash never parses
   it) -> `$0` -> walk up from `$PWD`. The walk stops at `/`, `C:` and `C:/`; relative
   candidates (`./`, `../`) are folded against `$PWD`, but the folded path is used only when it
@@ -247,8 +253,12 @@ header rules (with detector tests proving each rule fires).
   only there: on POSIX a backslash is part of a file name (`/data/a\b/proj` works).
 - On Windows the script path and `PYTEMPLATE_CALLER_CWD` are handed over as `C:\...`: `/c/x`
   and `/cygdrive/c/x` are converted in pure sh (drive letter upper-cased); `cygpath -m` runs
-  only for paths inside the MSYS/Cygwin root such as `/home` or `/tmp`, and only an `X:/...`
-  answer is accepted.
+  only for paths inside the MSYS/Cygwin root such as `/home` or `/tmp` (the root's own
+  `/usr/bin/cygpath` first, then the first one on PATH: a non-login MSYS2 shell has no
+  `/usr/bin` on PATH, and WinuxCmd's copy may be there), and only an `X:/...` answer is
+  accepted. Without one the POSIX path is handed over unchanged: MSYS converts it for uv.exe
+  itself, while the old `\home\x` named a folder on the current drive and every command
+  failed (`test_winpath_inside_the_msys_root`).
 - `%NAME%` in registry values is expanded from the environment, retrying the upper-case name
   (MSYS2/Cygwin upper-case `SYSTEMROOT`, `PROGRAMFILES`...). Quoted entries
   (`"C:\Program Files\x"`, written by some installers) lose their quotes first.
@@ -298,10 +308,14 @@ header rules (with detector tests proving each rule fires).
   its shebang `#!/usr/bin/env pwsh`, and Windows PowerShell 5.1 reads BOM-less files as ANSI.
   Git mode 100755 so `./deploy.ps1` works from bash/zsh on Linux/macOS (`shells.doctor` only
   notes a wrong mode: PowerShell itself runs it without the x bit).
-- No `param()` block: it would turn `-v`, `-h`, `-q` into PowerShell parameters. `a,b` arrays
-  in `$args` are flattened.
+- No `param()` block: it would turn `-v`, `-h`, `-q` into PowerShell parameters. A typed list
+  (`--supports cpython,mypyc`, `--tests T1,T2`) reaches the script as ONE array element: the
+  launcher joins its items with commas again, as PowerShell does for a native program (a
+  splatted array variable is indistinguishable and is joined too)
+  (`test_ps1_keeps_typed_comma_lists_whole`, also through the `shell-setup pwsh` function).
 - A `.ps1` runs inside the caller's session: never assign `$env:PATH`. The two `PYTEMPLATE_*`
-  variables and the removed `UV_PYTHON` (the `$names` list) are restored in `finally`; a
+  variables and the removed `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` (the
+  `$names` list) are restored in `finally`; a
   variable that did not exist before is removed with
   `Remove-Item Env:NAME`, never `[Environment]::SetEnvironmentVariable($n, $null)`: PowerShell
   passes `$null` to a .NET string parameter as `''`, and PowerShell 7 then keeps an empty
@@ -361,6 +375,9 @@ header rules (with detector tests proving each rule fires).
   plain `Get-Command uv` can return an alias or function; a `uv.cmd`/`uv.ps1` wrapper would
   parse the arguments again). The registry `Path` is read with
   `[Environment]::GetEnvironmentVariable` (expands `%VARS%`). `Read-Host` is wrapped in `try`.
+  A uv that cannot start (a broken download with its x bit) gives exit 126 and ONE line with
+  the innermost exception's message: the outer message (and the error record) carry the
+  position of the Invoke-Expression call (`test_ps1_uv_that_cannot_start_gives_one_line`).
 - Tests: every deploy.ps1 behaviour test runs wherever pwsh is installed (Linux and macOS
   too: the same Core hand-over), plus Windows PowerShell 5.1 on Windows; only the registry
   and cmd tests are Windows-only.
@@ -454,7 +471,8 @@ header rules (with detector tests proving each rule fires).
   niubash, niubash-shx, git-bash/sh/dash, msys2-<msystem> login shells, msys2-shx, msys2-dash,
   Cygwin, busybox-w32, nu, fish, WSL distros; POSIX: sh, bash, dash, zsh, ksh, mksh, yash,
   busybox, fish, nu, pwsh, xonsh; `MSYS2_ROOT`/`CYGWIN_ROOT` point at non-standard installs).
-  A NAME prefix selects a family (`msys2` = every `msys2-*`). Tests: T1 argv round-trip, T2
+  A NAME prefix selects a family (`msys2` = every `msys2-*`; a second install's shells are
+  `msys2-2-*`, `git-2-*`, `cygwin-2`, so they belong to it too). Tests: T1 argv round-trip, T2
   exit code, T3 cwd (from `src/` and from outside), T4 the xonsh-shell-kit route (niubash /
   MSYS2 non-login script mode; the shell's cwd must not change), T5 minimal PATH, T6 stdin, T7
   install hints with uv hidden. Table with ms per test and the launcher each shell reported;
@@ -469,29 +487,40 @@ header rules (with detector tests proving each rule fires).
   candidates before they land).
 - `./deploy shell-setup [xonsh|pwsh|powershell|bash|zsh|niubash|msys2|fish|nu]`
   (`shells.cmd_shell_setup`; no argument guesses the shell (`shells.guess_shell`): the
-  `ps1:`/`sh:niubash` prefix of `PYTEMPLATE_LAUNCHER`, then `XONSH_VERSION`, then the basename
-  of `SHELL` (bash, zsh, fish, nu), and only then the `sh:zsh`/`sh:bash` prefix, which names
-  the interpreter of `#!/bin/sh` (Git Bash/MSYS2 without `SHELL`); unknown shell exits 2):
-  prints a `deploy` function/alias that works
-  from any subfolder, plus where to paste it. Output is ASCII with LF even on Windows (written
-  to `stdout.buffer`: it is appended to rc files). bash, zsh, niubash and msys2 share one POSIX
+  `ps1:`/`sh:niubash` prefix or the `nu` of `PYTEMPLATE_LAUNCHER`, then `XONSH_VERSION`, then
+  the basename of `SHELL` (bash, zsh, fish, nu, pwsh), and only then the `sh:zsh`/`sh:bash`
+  prefix, which names the interpreter of `#!/bin/sh` (Git Bash/MSYS2 without `SHELL`); unknown
+  shell exits 2): prints a `deploy` function/alias that works from any subfolder, plus where
+  to paste it. Output is ASCII with LF even on Windows (written
+  to `stdout.buffer`: it is appended to rc files); a user's file named in a header that is not
+  ASCII (a `NIU_ENV` or MSYS2 home with an accent) is written `$NIU_ENV` or
+  `<MSYS2 root>\home\<you>\.bashrc` instead. bash, zsh, niubash and msys2 share one POSIX
   function whose walk-up stops at `/`, `C:`, `C:/` and at a backslash `PWD` (the old `dirname`
   loop never ended on niubash's `C:/...` paths); niubash: paste it into `~/.niubashrc` AND the
   `$NIU_ENV` file; msys2: above the interactive guard of `.bashrc` (`!m` lines also need
   `BASH_ENV`). pwsh/powershell: a function that walks up and calls `deploy.ps1` (it forwards
   pipeline input with `$input` when `$MyInvocation.ExpectingInput`: fine in a profile
   function, never in deploy.ps1). nu: a `def --wrapped` that runs uv directly with
-  `PYTEMPLATE_LAUNCHER=nu` and `UV_PYTHON` emptied. xonsh: an alias that runs uv directly
-  (falls back to the launcher without uv; `@aliases.return_command` when the xonsh has it,
-  else an unthreadable function alias) plus a registered completer whose words come from
+  `PYTEMPLATE_LAUNCHER=nu`, `UV_PYTHON`, `PYTHONHOME` and `PYTHONPATH` emptied and
+  `UV_WORKING_DIR=.` (section 4.1). xonsh: an alias that runs uv directly
+  (`@aliases.return_command` when the xonsh has it, else an unthreadable function alias). Both
+  take the uv on PATH, on Windows only a real `uv.exe` (`shutil.which("uv")` and nu's `^uv`
+  try every PATHEXT per folder, so a `uv.cmd` shim of an earlier folder won and cmd.exe parsed
+  the arguments again), and fall back to the launcher without one (it searches the install
+  folders and prints the hints). The xonsh snippet also registers a completer whose words come from
   `cli.COMMANDS` and the project's `[tasks]` at print time (a new command appears once it is
   in `COMMANDS`, `cli.INTERNAL` routes never: `test_xonsh_completion_follows_cli_commands`;
-  users print the snippet again to get it); unlike the launchers it keeps the
-  caller's `UV_PYTHON` (a returned argv cannot change the environment), so the runner's
-  version check (section 5.2) is its guard. `test_shells` executes the fish, pwsh and xonsh
-  snippets in their shells (argv, exit codes, walk-up, the xonsh completer, pwsh pipeline
-  input); the nu one only where nu is installed (the macOS jobs of template-selftest and
-  template-launchers install nushell).
+  users print the snippet again to get it). The 2nd word's choices come from the leading
+  `[a|b]` group of each usage with nested groups dropped (`shells.completion_words`: hooks'
+  `[install [--force]|...]`, `COMMAND` = the command and task names for `help`), and the
+  completer skips the global options before the command (`shells.GLOBAL_OPTIONS`, those of
+  `cli._parse_globals`: `test_xonsh_completer_after_hooks_help_and_global_flags`, offline
+  with xonsh stubbed). Unlike the launchers it keeps the caller's `UV_PYTHON`, `PYTHONHOME`,
+  `PYTHONPATH` and `UV_WORKING_DIR` (a returned argv cannot change the environment), so the
+  runner's version check (section 5.2) is its guard. `test_shells` executes the fish, pwsh,
+  xonsh and nu snippets in their shells (argv, exit codes, walk-up, the xonsh completer, pwsh
+  pipeline input, the nu fallback to the launcher); the nu one only where nu is installed (the
+  macOS jobs of template-selftest and template-launchers install nushell).
 - `shells.doctor(check)` (from `./deploy doctor`): step "launchers": the launcher that started
   the run, then `deploy` (`#!/bin/sh`, LF, ASCII, git mode 100755, exec bit on POSIX),
   `deploy.cmd` (CRLF, ASCII) and `deploy.ps1` (LF, ASCII, no BOM; a mode other than 100755 is
@@ -507,7 +536,7 @@ header rules (with detector tests proving each rule fires).
 | `deploy.py` (one level up) | Stops with exit 3 and one `error:` line (no traceback) when uv started it on Python < 3.11 (a `uv run` by hand with an old `UV_PYTHON`), BEFORE importing the runner; reconfigures stdout/stderr to UTF-8, puts its own dir on `sys.path`, calls `runner.cli.main`. |
 | `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `FORWARDS` / `HELP_PASSES_THROUGH` (section 5.2); `INTERNAL` (routes listed nowhere: `__init`). `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main`/`_main` (exception -> exit code, closed stdout), `cmd_help` (commands and `[tasks]` entries), `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
 | `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file` (section 6.1), `toml_value`. |
-| `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL`, `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
+| `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL` (`wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`. |
 | `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (all groups), `interpreter_info` (with `platform`); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
@@ -535,10 +564,11 @@ header rules (with detector tests proving each rule fires).
 
 ### 5.2 Call flow
 
-1. Launcher -> `uv run --quiet --script .pytemplate/deploy.py ARGS` (the caller's `UV_PYTHON`
-   removed, section 4.1). uv reads the `.python-version` found from the script's folder upward
-   (the project's, i.e. `python.cpython`) and the managed `python-preference`, so the runner
-   runs on the project's managed CPython (in a cached ephemeral env, maybe downloaded first)
+1. Launcher -> `uv run --quiet --script .pytemplate/deploy.py ARGS` (the caller's `UV_PYTHON`,
+   `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` removed, section 4.1). uv reads the
+   `.python-version` found from the script's folder upward (the project's, i.e.
+   `python.cpython`) and the managed `python-preference`, so the runner runs on the project's
+   managed CPython (in a cached ephemeral env, maybe downloaded first)
    whatever the caller's cwd or a `.python-version` there says (measured with uv 0.8 and
    0.12; `test_launcher_sh.test_runner_runs_on_python_cpython_whatever_the_caller_pins`), and
    uv exports `UV`. Changing `python.cpython` changes the runner's Python too: the runner must
@@ -611,7 +641,8 @@ header rules (with detector tests proving each rule fires).
   stdout on purpose: `help`, `__probe`, `shell-setup` snippets, and the `--json` reports of
   `selftest --shells` (also with `--list`) and `selftest --e2e`.
 - `-q` hides progress (`ui.step`, `ui.command`, `ui.ok`, `ui.info`), never what was asked for:
-  `ui.report` (the `tasks` list, the stderr of a failed query), warnings, errors and
+  `ui.report` (the `tasks` list, the stderr of a failed query, the `selftest --shells` list,
+  result table and failure/skip lines), warnings, errors and
   `check_line` always print, and a dry run ignores `-q` (its output is the plan). Still
   `ui.info` (hidden by `-q`): the `mode` display (`cmd_mode._describe`) and `render
   --check/--diff` lists (`cmd_mode.cmd_render`, `render.apply`).
@@ -1148,8 +1179,15 @@ Formats:
 - Dev group (`pyproject.toml [dependency-groups] dev`): `debugpy`, `mypy` (needs the Rust
   `ast-serialize`: no PyPy wheels), `pyinstaller`, `ruff` and `setuptools` carry
   `implementation_name == 'cpython'`; `.venv-pypy` only gets the app deps plus pytest.
-- WSL on `/mnt/*` (`project.IS_WSL`): separate `.venv*-wsl` envs and `.build/wsl`, so the
-  Windows `.venv` is not turned into a Linux one (and `clean --envs` keeps the other side's).
+- WSL on a Windows checkout (`project.IS_WSL`): separate `.venv*-wsl` envs and `.build/wsl`, so
+  the Windows `.venv` is not turned into a Linux one (and `clean --envs` keeps the other side's).
+  WSL is read from the kernel (`project.wsl_kernel`: a `microsoft` release or WSL's
+  `binfmt_misc/WSLInterop`; `WSL_DISTRO_NAME` alone missed sudo, sshd, cron and systemd units,
+  and uv then replaced the Windows `.venv`), the checkout from the deepest mount above `ROOT`
+  in `/proc/self/mounts` (`project.windows_checkout`: drvfs, 9p with `aname=drvfs`, or a drive
+  or UNC share as its source, so `/d/...` of `mount -t drvfs D: /d` or `automount root = /`
+  counts; unreadable: a path under `/mnt/`). The Neovim plugin mirrors both
+  (`init.windows_checkout`, `test_lua_windows_checkout_matches_the_runner`).
 - Tools outside `uv.lock` run through `uv run --locked --with <pin>` and are pinned in module
   constants: `cmd_dev.BASEDPYRIGHT = "basedpyright==1.40.1"` plus its Node.js runtime
   `cmd_dev.BASEDPYRIGHT_NODE = "nodejs-wheel-binaries==24.19.0"` (basedpyright's only
@@ -1911,9 +1949,10 @@ Files:
 
 Runner contract from Lua (the fourth caller of section 4.1): argv `{<absolute uv>, "run",
 "--quiet", "--script", <root>/.pytemplate/deploy.py, ...}` (`init.deploy_cmd`) through overseer
-/ `jobstart` with a LIST, env `PYTEMPLATE_CALLER_CWD=<cwd>`, `PYTEMPLATE_LAUNCHER=nvim` and
-`UV_PYTHON=""` (`init.deploy_env`; uv reads an empty value as unset, so the runner runs on the
-project's Python like with the launchers). Never a string command (it would go through
+/ `jobstart` with a LIST, env `PYTEMPLATE_CALLER_CWD=<cwd>`, `PYTEMPLATE_LAUNCHER=nvim`,
+`UV_PYTHON=""`, `PYTHONHOME=""`, `PYTHONPATH=""` and `UV_WORKING_DIR=.` (`init.deploy_env`; uv
+and CPython read those empty values as unset, `.` is the job's folder, so the runner runs on
+the project's Python like with the launchers). Never a string command (it would go through
 `'shell'`, which may be xonsh or niubash) and never `deploy.cmd`/`deploy` unless uv is nowhere
 (the launcher prints the install hints; on POSIX it runs as `/bin/sh <root>/deploy`, like the
 VS Code tasks and the git hook, so a checkout without the exec bit still gets them). The uv
@@ -2061,14 +2100,17 @@ short temp tree and unset `NVIM_APPNAME`.
   `test_no_spanish.py`, `test_launcher_sh.py` (static lint of the `deploy` header rules, `-n`
   syntax checks, `__probe` round-trips per shell found; a caller's `set -eu` in 8 shells,
   symlinked subfolders, backslashes in POSIX paths, niubash's in-process run simulated by
-  sourcing (no `_pt_` name left on any exit path), `UV_PYTHON` and the runner's Python, the
+  sourcing (no `_pt_` name left on any exit path), `UV_PYTHON` and the runner's Python, a
+  caller's `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR`, the
   Windows-only sh helpers and a fake `reg.exe` in every POSIX shell, the uv search order with
   fake uvs for `deploy` and `deploy.ps1`, the install prompt on a pseudo-terminal),
   `test_launcher_win.py` (static rules on every OS, a PowerShell parser check; the deploy.ps1
   behaviour tests run wherever pwsh exists: injection safety of the Core hand-over, `--%`,
-  `-X:v`, pipeline input and raw stdin, `UV_PYTHON`, ConstrainedLanguage, the x bit; cmd and
+  `-X:v`, typed comma lists, pipeline input and raw stdin, `UV_PYTHON` and the other cleared
+  variables, ConstrainedLanguage, the x bit; cmd and
   the registry only on Windows),
-  `test_paths.py` (path spellings, colours in a hidden console, dry runs in a throwaway copy),
+  `test_paths.py` (path spellings, WSL detection, colours in a hidden console, dry runs in a
+  throwaway copy),
   `test_render_core.py` (`render.apply`/`auto` and `state.json` in a sandbox, the render
   command's exit codes, the managed pyproject parts for every preset and backend set, typing
   profiles, the generated CI for 36 preset/backend combinations through a strict YAML reader and
@@ -2545,6 +2587,20 @@ uv:
   `test_launcher_sh.py::test_launcher_clears_the_callers_uv_python`,
   `test_user_uv_python_older_than_3_11`, `test_entry_refuses_python_older_than_3_11`,
   `test_launcher_win.py::test_ps1_clears_the_callers_uv_python_and_restores_it`. Goes: never.
+- **`uv run --script` hands the runner the caller's `PYTHONHOME`, `PYTHONPATH` and
+  `UV_WORKING_DIR`** (LIMITATION): every command died with `Fatal Python error: Failed to import
+  encodings module` under a `PYTHONHOME`, a `PYTHONPATH` module could shadow the stdlib the
+  runner imports, and `UV_WORKING_DIR` started the runner in another folder (the paths of `new
+  DIR` and `pyz-merge` resolved there); uv refuses an empty `UV_WORKING_DIR`. Fix: the
+  launchers remove the three for uv; niubash, the Neovim plugin (`init.deploy_env`) and the nu
+  snippet pass `PYTHONHOME` and `PYTHONPATH` empty (CPython reads "" as unset) and
+  `UV_WORKING_DIR=.` (4.1). Test:
+  `test_launcher_sh.py::test_launcher_ignores_the_callers_python_home_path_and_uv_working_dir`,
+  `test_in_process_run_leaves_no_name_behind`,
+  `test_launcher_win.py::test_ps1_clears_the_callers_uv_python_and_restores_it`,
+  `test_cmd_clears_the_callers_uv_python` (Windows),
+  `test_shells.py::test_snippets_keep_the_launcher_contract`, `test_nu_snippet_runs`,
+  `test_nvim_render.py::test_lua_modules_in_headless_neovim`. Goes: never.
 - **The project is found from the cwd** (LIMITATION): a work folder with its own
   `pyproject.toml` (the `flet build` stage) became the project ("Unable to find lockfile"). Fix:
   `envs.uv_run` adds `--project <ROOT>` (7). Test:
@@ -3198,9 +3254,13 @@ PowerShell (details: section 4.5):
   `test_launcher_win.py::test_ps1_constrained_language_gives_one_clear_error`. Goes: never.
 - **`Get-Command uv` may return an alias, a function or a `uv.cmd`/`uv.ps1` wrapper**
   (LIMITATION): a wrapper parses the arguments again. Fix: `-CommandType Application -All` and
-  only a real `uv.exe` on Windows (the plugin: `exepath('uv.exe')`; 4.1). Test:
+  only a real `uv.exe` on Windows (the plugin: `exepath('uv.exe')`; the xonsh and nu snippets
+  of `shell-setup` look up `uv.exe` too, since Python's `shutil.which("uv")` and nu's `^uv`
+  take a `uv.cmd` of an earlier PATH folder; 4.1, 4.9). Test:
   `test_launcher_sh.py::test_uv_search_order`,
-  `test_nvim_render.py::test_lua_modules_in_headless_neovim`. Goes: never.
+  `test_nvim_render.py::test_lua_modules_in_headless_neovim`,
+  `test_shells.py::test_xonsh_snippet_takes_only_a_real_uv_exe_on_windows`,
+  `test_snippets_keep_the_launcher_contract`. Goes: never.
 - **`[IO.File]::GetUnixFileMode` needs .NET 7 (PowerShell 7.3+)** (LIMITATION): Fix: older
   versions skip the x-bit check of a uv candidate (4.1). Test:
   `test_launcher_win.py::test_ps1_skips_a_uv_without_exec_bit`. Goes: once 7.3 is the minimum.
@@ -3268,8 +3328,11 @@ niubash (1.1.4) and WinuxCmd (details: section 4.6):
   `test_shells.py::test_snippets_are_ascii_and_say_where_to_paste`. Goes: never.
 - **WinuxCmd's `cygpath.exe` knows no MSYS root** (DEFECT): it turns `/tmp/x` into `\tmp\x`. Up:
   none found. Fix: `project.find_cygpath` takes only a cygpath next to `msys-2.0.dll` or
-  `cygwin1.dll`; `deploy` accepts only an `X:/...` answer (4.3, 4.8). Test:
-  `test_paths.py::test_cygpath_without_the_msys_runtime_is_ignored`. Goes: never.
+  `cygwin1.dll`; `deploy` asks the root's `/usr/bin/cygpath` first, accepts only an `X:/...`
+  answer and otherwise keeps the POSIX path (4.3, 4.8). Test:
+  `test_paths.py::test_cygpath_without_the_msys_runtime_is_ignored`,
+  `test_launcher_sh.py::test_winpath_inside_the_msys_root`,
+  `test_winpath_asks_the_roots_own_cygpath_first`. Goes: never.
 
 xonsh and bash:
 - **xonsh on Windows maps `#!/usr/bin/env bash` to `bash`** (LIMITATION): that can be the WSL
@@ -3371,10 +3434,12 @@ Windows:
   and `Lib/` also matches `lib/`. Fix: `rename.apply_plan`; `portable.runtime_stdlib` looks for
   `lib/pythonX.Y` first (5.7, 10). Test:
   `test_rename.py::test_case_only_folder_fix_on_a_case_insensitive_file_system`. Goes: never.
-- **A venv is specific to its OS** (LIMITATION, WSL on `/mnt`): Fix: `.venv*-wsl` and
-  `.build/wsl` (`project.ENV_SUFFIX`, 7). Test:
-  `test_envs_core.py::test_runtime_and_tool_environments`, `test_clean_envs_on_the_wsl_side`.
-  Goes: never.
+- **A venv is specific to its OS** (LIMITATION, WSL on a Windows checkout): Fix: `.venv*-wsl`
+  and `.build/wsl` (`project.ENV_SUFFIX`), WSL read from the kernel and the checkout from its
+  mount (`project.wsl_kernel`, `project.windows_checkout`; 7). Test:
+  `test_envs_core.py::test_runtime_and_tool_environments`, `test_clean_envs_on_the_wsl_side`,
+  `test_paths.py::test_windows_checkout_follows_the_mount_of_the_root`,
+  `test_wsl_kernel_needs_no_wsl_distro_name`. Goes: never.
 - **`wsl -l -q` prints UTF-16** (LIMITATION): Fix: `shells.wsl_distros` decodes it. Test:
   `test_workarounds.py::test_wsl_distros_are_read_as_utf16`. Goes: never.
 

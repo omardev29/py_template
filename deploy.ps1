@@ -149,16 +149,19 @@ if (-not $uv) {
     }
 }
 
-# --- arguments: flatten `a,b` arrays, keep a typed -X:v whole, pre-quote for legacy passing.
-# PowerShell hands a script a typed -X:v as two elements: '-X:' (marked with the parameter
-# name) and v. Join them again, as PowerShell does for a native program.
+# --- arguments: keep typed a,b lists and -X:v whole, pre-quote for legacy passing.
+# PowerShell hands a script a typed list (cpython,mypyc) as one array, and a typed -X:v as two
+# elements: '-X:' (marked with the parameter name) and v. Join them again, as PowerShell does
+# for a native program (a list becomes one argument, its items joined with commas).
 $argv = @(for ($i = 0; $i -lt $args.Count; $i++) {
     $a = $args[$i]
     if ($a -is [string] -and $a.EndsWith(':') -and $a.PSObject.Properties['<CommandParameterName>'] -and $i + 1 -lt $args.Count) {
         $i++
         $a + ((@($args[$i]) | ForEach-Object { [string]$_ }) -join ',')
+    } elseif ($a -is [array]) {
+        (@($a) | ForEach-Object { [string]$_ }) -join ','
     } else {
-        foreach ($x in @($a)) { [string]$x }
+        [string]$a
     }
 })
 $v = $PSVersionTable.PSVersion
@@ -183,16 +186,17 @@ if ($fromPipe) { $pipeIn = $ExecutionContext.SessionState.PSVariable.GetValue('i
 
 # --- hand over, restoring the caller's environment afterwards
 $loc = Get-Location
-$names = 'PYTEMPLATE_CALLER_CWD', 'PYTEMPLATE_LAUNCHER', 'UV_PYTHON'
+$names = 'PYTEMPLATE_CALLER_CWD', 'PYTEMPLATE_LAUNCHER', 'UV_PYTHON', 'PYTHONHOME', 'PYTHONPATH', 'UV_WORKING_DIR'
 $saved = @{}
 foreach ($n in $names) { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
 $code = 1
 try {
     $env:PYTEMPLATE_CALLER_CWD = if ($loc.Provider.Name -eq 'FileSystem') { $loc.ProviderPath } else { [Environment]::CurrentDirectory }
     $env:PYTEMPLATE_LAUNCHER = "ps1:$($PSVersionTable.PSEdition):$($v.Major).$($v.Minor)"
-    # The runner runs on the project's Python (.python-version next to it): a UV_PYTHON of
-    # the caller must not choose it (the runner never passes it on to its own tools either).
-    Remove-Item -LiteralPath Env:UV_PYTHON -ErrorAction Ignore
+    # The runner runs on the project's Python (.python-version next to it), in the caller's
+    # folder: a UV_PYTHON of the caller must not choose that Python, a PYTHONHOME or PYTHONPATH
+    # must not break it, a UV_WORKING_DIR must not move it (its own tools never get them either).
+    Remove-Item -LiteralPath Env:UV_PYTHON, Env:PYTHONHOME, Env:PYTHONPATH, Env:UV_WORKING_DIR -ErrorAction Ignore
     $entry = [IO.Path]::Combine($root, '.pytemplate', 'deploy.py')
     if ($PSVersionTable.PSEdition -eq 'Core') {
         # PowerShell 7 rewrites native arguments that are not quoted literals, splatted ones
@@ -210,7 +214,11 @@ try {
     }
     $code = $LASTEXITCODE
 } catch {
-    [Console]::Error.WriteLine("deploy: cannot run ${uv}: $_")
+    # The innermost exception's message on one line: the outer one (and the error record) add
+    # the position of the generated Invoke-Expression call (At line:1 char:1, + & '...').
+    $e = $_.Exception
+    while ($e.InnerException) { $e = $e.InnerException }
+    [Console]::Error.WriteLine("deploy: cannot run ${uv}: " + ($e.Message -replace '\s*[\r\n]+\s*', ' '))
     $code = 126
 } finally {
     # Not SetEnvironmentVariable($n, $null): PowerShell passes $null to a .NET string
