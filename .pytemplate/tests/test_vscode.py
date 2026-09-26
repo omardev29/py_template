@@ -534,9 +534,17 @@ def test_a_package_named_like_a_code_folder_is_refused(name: str) -> None:
 def test_mypy_roots_only_list_existing_folders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "src").mkdir()
     monkeypatch.setattr(vscode, "ROOT", tmp_path)
+    monkeypatch.setattr(render, "ROOT", tmp_path)
     assert vscode._mypy_re("error").startswith(r"^((?:src)[\\/]")
+    # folders that hold no code (an emptied typings/, a tests/ left holding only __pycache__) do
+    # not exist in a fresh clone: listed, tasks.json differed from CI's (`render --check` failed)
     (tmp_path / "typings").mkdir()
-    assert vscode._mypy_re("note").startswith(r"^((?:src|typings)[\\/]")
+    (tmp_path / "tests" / "__pycache__").mkdir(parents=True)
+    (tmp_path / "tests" / "__pycache__" / "test_x.cpython-314.pyc").write_bytes(b"")
+    assert vscode._mypy_re("error").startswith(r"^((?:src)[\\/]")
+    (tmp_path / "typings" / "lib.pyi").write_text("", encoding="utf-8")
+    (tmp_path / "tests" / "test_x.py").write_text("", encoding="utf-8")
+    assert vscode._mypy_re("note").startswith(r"^((?:src|tests|typings)[\\/]")
 
 
 def test_mypyc_packages_come_from_compile_modules() -> None:

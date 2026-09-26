@@ -84,9 +84,10 @@ def _check_profile(path: Path, data: dict[str, Any]) -> None:
 
 
 def typings_dir() -> Path | None:
-    """Return the project's own stubs (e.g. the raylib ones fixed by the preset), if any."""
+    """Return the project's own stubs (e.g. the raylib ones fixed by the preset), if any: a
+    typings/ folder that holds no stub is not in a fresh clone (_holds_python)."""
     path = ROOT / "typings"
-    return path if path.is_dir() else None
+    return path if _holds_python(path) else None
 
 
 def _holds_python(folder: Path, _seen: frozenset[str] = frozenset()) -> bool:

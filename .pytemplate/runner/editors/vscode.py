@@ -91,8 +91,10 @@ _STAGE = r"(?:(?:[A-Za-z]:)?[^:\s][^:]*[\\/])?\.build[\\/](?:wsl[\\/])?mypyc-(?:
 
 
 def _roots() -> str:
-    """Return the regexp alternatives of the code folders mypy reports (only those that exist)."""
-    return "|".join(r for r in ("src", "tests", "typings") if (ROOT / r).is_dir()) or "src"
+    """Return the regexp alternatives of the code folders mypy reports: src, and tests and typings
+    when they hold code (a folder left holding only __pycache__ is not in a fresh clone:
+    render._holds_python, as .mypy.ini `files` and pyright's `include` decide it)."""
+    return "|".join(["src", *(r for r in ("tests", "typings") if render._holds_python(ROOT / r))])
 
 
 def _packages(cfg: Config) -> str:

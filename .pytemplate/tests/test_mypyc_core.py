@@ -1819,6 +1819,19 @@ def test_a_tests_folder_without_python_is_no_code_folder(pyright_tree: Path) -> 
     assert render.pyright_config(make({}), "strict")["include"] == ["src", "tests"]
 
 
+def test_a_typings_folder_without_stubs_is_no_stub_folder(pyright_tree: Path) -> None:
+    """typings/ emptied by hand (`rm -r typings/raylib`: git removes no folder it did not
+    delete) is not in a fresh clone: mypy_path and stubPath must not name it."""
+    before = (render.mypy_ini(make({}), "strict"), render.pyright_config(make({}), "strict"))
+    (pyright_tree / "typings" / "raylib").mkdir(parents=True)
+    assert render.typings_dir() is None
+    assert (render.mypy_ini(make({}), "strict"), render.pyright_config(make({}), "strict")) == before
+    _project(pyright_tree, {"typings/raylib/__init__.pyi": ""})
+    assert render.typings_dir() == pyright_tree / "typings"
+    assert "\nmypy_path = src, typings\n" in render.mypy_ini(make({}), "strict")
+    assert render.pyright_config(make({}), "strict")["stubPath"] == "typings"
+
+
 def test_pyright_config_without_exclude_is_unchanged(pyright_tree: Path) -> None:
     conf = render.pyright_config(make({"typing": {"editor": "basedpyright"}}), "mypyc")
     assert conf["strict"] == ["src/myapp/core"]
