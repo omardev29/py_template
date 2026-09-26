@@ -1664,9 +1664,115 @@ def test_build_forwards_extras_to_the_packagers(monkeypatch: pytest.MonkeyPatch,
     assert seen[-1].targets == [WIN] and seen[-1].extra == []
     assert cmd_build.cmd_build(cfg, ["pypy", "--method", "pyz", "--no-check", "--target", "pp311-linux-x86_64", "--target", WIN]) == 0
     assert seen[-1].targets == ["pp311-linux-x86_64", WIN]
+    from runner.methods import flet
+
+    monkeypatch.setattr(flet, "IS_WINDOWS", False)  # no Developer Mode check on a Windows runner
     flet_cfg = make({"app": {"preset": "flet"}})
     assert cmd_build.cmd_build(flet_cfg, ["--method", "flet", "--no-check", "--build-number", "3"]) == 0
     assert seen[-1].extra == ["--build-number", "3"]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_flet_method_refuses_before_any_work(no_build: None, monkeypatch: pytest.MonkeyPatch, dry_run: bool) -> None:
+    # Both refusals lived in flet.build: `--dry-run build --method flet` printed a plan for a
+    # build that must fail, and the real one ran check and the mypyc compile first
+    from runner.methods import flet
+
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    monkeypatch.setattr(flet, "IS_WINDOWS", False)
+    with pytest.raises(DeployError, match="for the flet preset") as e:
+        cmd_build.cmd_build(make({}), ["cpython", "--method", "flet"])
+    assert e.value.code == 2
+    monkeypatch.setattr(flet, "IS_WINDOWS", True)
+    monkeypatch.setattr(flet, "host_os", lambda: "windows")
+    monkeypatch.setattr(flet, "_developer_mode", lambda: False)
+    with pytest.raises(DeployError, match="Developer Mode") as e:
+        cmd_build.cmd_build(_flet_cfg(), ["cpython", "--method", "flet"])
+    assert e.value.code == 3
+    # A web build needs no Developer Mode, nor does a machine that has it on: they go on
+    for cfg in (_flet_cfg(deploy={"flet": {"target": "web"}}), _flet_cfg()):
+        monkeypatch.setattr(flet, "_developer_mode", lambda: cfg.deploy.flet.target == "host")
+        if dry_run:
+            assert cmd_build.cmd_build(cfg, ["cpython", "--method", "flet", "--no-check"]) == 0
+        else:
+            with pytest.raises(AssertionError, match="went past"):
+                cmd_build.cmd_build(cfg, ["cpython", "--method", "flet"])
+
+
+UPX_MISSING = {"deploy": {"upx": {"enabled": True, "path": "tools/upx-missing"}}}
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    ("method", "cfg_data", "windows", "packs"),
+    [
+        ("portable", {}, False, True),
+        ("nuitka", {}, False, True),
+        ("exe", {}, True, True),
+        ("exe", {}, False, False),  # PyInstaller packs only on Windows
+        ("flet", {"app": {"preset": "flet"}}, False, True),
+        ("flet", {"app": {"preset": "flet"}, "deploy": {"flet": {"target": "web"}}}, False, False),  # web ships no binary
+        ("pyz", {}, False, False),
+        ("wheel", {}, False, False),
+    ],
+)
+def test_upx_is_resolved_before_any_work(
+    no_build: None, monkeypatch: pytest.MonkeyPatch, method: str, cfg_data: dict[str, Any], windows: bool, packs: bool, dry_run: bool
+) -> None:
+    # upx.find ran at the END of the build (after compileall and the runtime copy, after the
+    # whole `flet build`): a deploy.upx.path that does not exist, or a failed download, failed
+    # the build after the work, and the dry run said nothing about UPX at all
+    from runner.methods import flet
+
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
+    monkeypatch.setattr(upx, "IS_WINDOWS", windows)
+    monkeypatch.setattr(flet, "IS_WINDOWS", False)
+    deploy = {**UPX_MISSING["deploy"], **cfg_data.get("deploy", {})}
+    cfg = make({**cfg_data, "deploy": deploy})
+    if packs:
+        with pytest.raises(DeployError, match="deploy.upx.path = 'tools/upx-missing' does not exist") as e:
+            cmd_build.cmd_build(cfg, ["cpython", "--method", method])
+        assert e.value.code == 3
+    elif dry_run:
+        assert cmd_build.cmd_build(cfg, ["cpython", "--method", method, "--no-check"]) == 0
+    else:
+        with pytest.raises(AssertionError, match="went past"):
+            cmd_build.cmd_build(cfg, ["cpython", "--method", method])
+
+
+def test_upx_download_happens_before_the_work_and_never_in_a_dry_run(
+    no_build: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    downloads: list[Path] = []
+
+    def download(dest: Path) -> Path:
+        downloads.append(dest)
+        raise DeployError("upx: cannot download it (offline)", 3)
+
+    monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
+    monkeypatch.setattr(upx, "_cache_dir", lambda: tmp_path / "cache")
+    monkeypatch.setattr(upx, "_download", download)
+    monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(tmp_path / "empty")})
+    cfg = make({"deploy": {"upx": {"enabled": True}}})
+    # Real build: the download fails before the checks and the payload
+    with pytest.raises(DeployError, match="offline"):
+        cmd_build.cmd_build(cfg, ["cpython", "--method", "portable"])
+    assert downloads == [tmp_path / "cache"]
+    # Dry run: it names the download instead of doing it
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert cmd_build.cmd_build(cfg, ["cpython", "--method", "portable", "--no-check"]) == 0
+    err = capsys.readouterr().err
+    assert len(downloads) == 1 and "upx: would download https://github.com/upx/upx/releases/" in err
+    # With upx on PATH the dry run names it
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    tool = bindir / ("upx.exe" if IS_WINDOWS else "upx")
+    tool.write_bytes(b"")
+    tool.chmod(0o755)
+    monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(bindir)})
+    assert cmd_build.cmd_build(cfg, ["cpython", "--method", "portable", "--no-check"]) == 0
+    assert f"upx: {tool}" in capsys.readouterr().err and len(downloads) == 1
 
 
 def test_build_dry_run_stops_after_the_argument_checks(no_build: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

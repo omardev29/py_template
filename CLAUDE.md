@@ -531,7 +531,7 @@ header rules (with detector tests proving each rule fires).
 | `e2e.py` | `selftest --e2e` (section 13.1). |
 | `hooks.py` | `./deploy hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (apply/setup), `doctor`: the native git pre-commit hook (section 5.6); `find_repo` (`NotInGit`), `classify`, `hook_script`/`launcher_of`, `install`/`uninstall` (apply removes the hook when `hooks.pre_commit = false`), `checks`. |
 | `rename.py` | `./deploy rename NEW_NAME [--force]` and the rename step of apply: pure `plan` / `apply_plan` (undoes itself when a write fails) / `rewrite` (tokenizer + `ast` scopes + context rules, `MODULE_KEYS`), `check_new_name` (`locked_names`), `git_changes`, `dirty_tree_message`, `validate_config`, `tidy_before`/`tidy_after` (ruff, `Tidy`), `report`, `cmd_rename` (section 5.7). |
-| `upx.py` | Optional UPX packing: pinned download (`VERSION`, `ASSETS` with SHA-256), `find`, `active`, `level_flags`, `env_value`, `excludes`, `candidates`, `pack_file`, `pack_tree`, `MAX_INPUT` (section 10). |
+| `upx.py` | Optional UPX packing: pinned download (`VERSION`, `ASSETS` with SHA-256), `locate`, `find`, `uses`, `preflight` (from `cmd_build`, before any work), `active`, `level_flags`, `env_value`, `excludes`, `candidates`, `pack_file`, `pack_tree`, `MAX_INPUT` (section 10). |
 
 ### 5.2 Call flow
 
@@ -637,10 +637,13 @@ header rules (with detector tests proving each rule fires).
 - `render.apply` behaves like `--check` (writes nothing); `render.auto` prints "would update";
   `render` prints `would update: ...`.
 - `clean` prints `would remove X` per target. `build` validates its arguments, the pyz target
-  keys, the Nuitka pin and PGO rules (`nuitka.check_python`, `check_options`) as a real build
-  does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M: would output
-  dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options: --lto=... [--pgo-c ...] <extras>`), then
-  stops. `report` builds nothing and never opens the browser.
+  keys, the Nuitka pin and PGO rules (`nuitka.check_python`, `check_options`), the flet
+  refusals (`flet.check_options`) and the UPX binary (`upx.preflight`: a missing
+  `deploy.upx.path` fails) as a real build does, prints the checks (unless `--no-check`) and
+  `(--dry-run) build B -> M: would output dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options:
+  --lto=... [--pgo-c ...] <extras>`; a method that packs with UPX on this host: `upx: <path>` or
+  `upx: would download <url> into <cache>`, never the download), then stops. `report` builds
+  nothing and never opens the browser.
 - `mode` validates the new `pytemplate.toml` in memory and prints the keys that would change
   (new and current value), whether `pyproject.toml` would be rewritten, `uv.lock` ("would
   re-lock", or a read-only `uv lock --check`), the generated files that would update, the
@@ -668,7 +671,6 @@ header rules (with detector tests proving each rule fires).
   it), app.preset, `[preset.<name>]` (the `uv remove/add` it would run), pyproject.toml,
   uv.lock ("would re-lock", or a read-only `uv lock --check`), environments, git hook,
   generated files, then the unused-environment note and the reference warnings.
-- `build` with `[deploy.upx]` enabled: `upx.pack_tree` lists what it would pack and stops.
 - `lock` reports whether the managed parts of `pyproject.toml` would change
   (`render.write_pyproject` writes nothing under `DRY_RUN`; `render.pyproject_message` says
   "would update"); its `uv lock` is an echoed command, so it is skipped. `cmd_env.ensure_lock`
@@ -1367,8 +1369,13 @@ Formats:
   for pyz/portable/wheel, `--onefile/--onedir` outside `ONEFILE_METHODS`, `--target` outside
   `TARGET_METHODS` (pyz), `GLOBAL_FLAGS` (`--dry-run`, `--no-render`) typed after the command,
   and a leading bare word (`_stray_word`: "unknown backend 'mypy': did you mean mypyc?", "did you
-  mean --method pyz?"). Then `nuitka.check_python` and, for pyz, `common.check_key` on every
-  key. Default method from `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs
+  mean --method pyz?"). Then `nuitka.check_python`, for pyz `common.check_key` on every key,
+  for flet `flet.check_options` (the flet preset; Developer Mode on Windows for a windows
+  target), and `upx.preflight`: when the method packs with UPX on this host (`upx.uses`: exe on
+  Windows, nuitka, portable, flet desktop targets) it resolves the upx binary now, downloading
+  it if needed, so a missing `deploy.upx.path` or a failed download stops the build before the
+  work instead of after the runtime copy or the whole `flet build` (a dry run only names it).
+  Default method from `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs
   `run_checks` unless `--no-check`. `payload`: the mypyc release stage, or `sync_tree(SRC,
   .build/payload/<backend>)`. The `done: ... (N MB)` size (`common.tree_bytes`) counts a
   symlinked file once (a bundled runtime's `bin/python3 -> python3.14`).
@@ -1591,7 +1598,8 @@ Per method:
   at every build and downloaded anew when damaged. 61 MB with UPX; ~25 min build.
 - **flet** (`flet build`): requires `app.preset == "flet"`. Windows needs Developer Mode
   (Flutter symlinks; checked in the registry by `methods.flet._developer_mode`) and Visual
-  Studio C++. The stage `.build/flet-build/<b>` is persistent (Flutter cache); stale
+  Studio C++; `flet.check_options` refuses both from `cmd_build`, before the checks and the
+  payload and also in `--dry-run`, and again in `build`. The stage `.build/flet-build/<b>` is persistent (Flutter cache); stale
   extensions are deleted from it before this payload's are copied (a desktop `.pyd` must not
   reach a mobile/web build). `flet build` ignores `uv.lock`, so `build_pyproject` pins the
   `uv export --frozen --no-dev` versions and serialises the PARSED `[tool.flet]` of the
@@ -2903,10 +2911,12 @@ Flet (flet, flet-desktop, flet pack, flet build):
   `methods.flet.STAGE_APP` with a warning (10). Test:
   `test_build_methods.py::test_flet_build_pyproject_points_at_the_staged_app`. Goes: never.
 - **Flutter needs Developer Mode on Windows (symlinks), and mobile and web targets load no
-  extension** (LIMITATION): Fix: `methods.flet._developer_mode` is checked first; mobile and web
-  builds ship the `.py` (10). Test:
+  extension** (LIMITATION): Fix: `methods.flet._developer_mode` is checked by
+  `methods.flet.check_options` before the checks and the payload (also in `--dry-run`); mobile
+  and web builds ship the `.py` (10). Test:
   `test_build_methods.py::test_flet_build_needs_developer_mode_on_windows`,
-  `test_flet_build_mobile_and_web_ship_the_py_code`. Goes: never.
+  `test_flet_method_refuses_before_any_work`, `test_flet_build_mobile_and_web_ship_the_py_code`.
+  Goes: never.
 
 cffi and raylib:
 - **The raylib stub does not match the runtime** (DEFECT, raylib 6.0.1.0): returns, fields and

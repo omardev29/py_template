@@ -87,20 +87,30 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def build(req: BuildRequest) -> Path:
-    cfg = req.cfg
+def build_target(cfg: Config) -> str:
+    """The `flet build` target: [deploy.flet] target, with "host" as this OS."""
+    target = cfg.deploy.flet.target
+    return host_os() if target == "host" else target
+
+
+def check_options(cfg: Config) -> None:
+    """Refuse a flet build that cannot work, before any work: cmd_build calls this before the
+    checks and the payload (also in --dry-run), build() again."""
     if cfg.app.preset != "flet":
         raise DeployError("--method flet is for the flet preset (pytemplate.toml app.preset)")
-    target = cfg.deploy.flet.target
-    if target == "host":
-        target = host_os()
-    if IS_WINDOWS and target == "windows" and not _developer_mode():
+    if IS_WINDOWS and build_target(cfg) == "windows" and not _developer_mode():
         raise DeployError(
             "flet build on Windows needs Developer Mode (Flutter uses symlinks):\n"
             "  Settings > System > For developers > Developer Mode. Meanwhile, use\n"
             "  `./deploy build` (flet pack), which does not need it.",
             3,
         )
+
+
+def build(req: BuildRequest) -> Path:
+    cfg = req.cfg
+    check_options(cfg)
+    target = build_target(cfg)
 
     app_dir = req.app_dir
     if req.compiled and target in MOBILE_WEB:

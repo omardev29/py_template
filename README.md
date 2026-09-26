@@ -663,9 +663,13 @@ and nuitka only); `--target KEY` (repeatable) adds platforms to a pyz; other fla
 packager of exe (PyInstaller or `flet pack`), nuitka and flet (`flet build`), while pyz,
 portable and wheel refuse them (exit 2). Options are not abbreviated (`--meth` is not
 `--method`), and a bare word is an error with a hint ("unknown backend 'mypy': did you mean
-mypyc?", "did you mean --method pyz?"). `./deploy --dry-run build ...` checks the arguments and
-the configuration as a real build does and prints the output name (for nuitka also its
-options), without building.
+mypyc?", "did you mean --method pyz?"). What can refuse a build without building refuses it
+before `check` and the payload: the arguments, the pyz target keys, the Nuitka pin and PGO
+rules, `--method flet` outside the flet preset or on Windows without Developer Mode, and the
+UPX binary of a method that packs (a missing `deploy.upx.path`, or a failed download).
+`./deploy --dry-run build ...` runs the same refusals and prints the output name (for nuitka
+also its options, with UPX the `upx` it would use or download), without building or
+downloading.
 
 ### exe
 
@@ -871,9 +875,10 @@ done (the portable smoke test then loads the packed modules). Never packed: file
 startup). UPX 5.2.1 is downloaded once (SHA-256 checked) to `%LOCALAPPDATA%\pytemplate\tools`
 (`$XDG_CACHE_HOME/pytemplate/tools` or `~/.cache/pytemplate/tools` elsewhere), unless `upx` is on
 PATH or `deploy.upx.path` names one (absolute, `~`, or relative to the project root; the file is
-named `upx` or `upx.exe`). macOS is not supported. The price: every start unpacks the files in
-memory (a slower start, no memory shared between processes), and some antivirus engines flag
-UPX-packed files.
+named `upx` or `upx.exe`); `build` finds (or downloads) it before any other work, so a wrong
+path or no network fails at once. macOS is not supported. The price: every start unpacks the
+files in memory (a slower start, no memory shared between processes), and some antivirus engines
+flag UPX-packed files.
 
 **Compressed binaries**: mypyc builds ordinary C extensions (`.pyd`/`.so`, without debug
 information in release builds); nothing compresses them by default, but UPX packs them to about a

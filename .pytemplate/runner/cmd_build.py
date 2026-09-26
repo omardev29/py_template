@@ -122,11 +122,20 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
         for key in [*cfg.deploy.pyz.targets, *ns.target]:  # a bad key fails now, also in --dry-run
             if key != "host":
                 common.check_key(cfg, backend, key)
+    if method == "flet":
+        from .methods import flet
+
+        flet.check_options(cfg)  # the preset and Windows Developer Mode, before minutes of work
+    from . import upx
+
+    upx_line = upx.preflight(cfg, method)  # a bad deploy.upx.path or a failed download fails now
 
     if not ns.no_check and not run_checks(cfg, backend):
         raise DeployError("check failed: fix it or use --no-check")
     if proc.DRY_RUN:
         ui.info(f"(--dry-run) build {backend} -> {method}: would output {rel(DIST)}/{cfg.app.name}-{backend}-{method}*")
+        if upx_line:
+            ui.info(f"  {upx_line}")
         if method == "nuitka":
             from .methods import nuitka as nuitka_method  # [deploy.nuitka] lto/pgo, then the extras
 
