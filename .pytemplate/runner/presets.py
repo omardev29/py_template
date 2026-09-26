@@ -221,11 +221,12 @@ def pristine(cfg: Config) -> bool:
 
 
 def name_from_folder(folder: str) -> str:
-    """The app name `./deploy new DIR` derives from the folder name: accents dropped (NFKD ->
-    ASCII, so an accented e becomes e), every run of other characters -> '-' (no '--'), and no
-    '-' or '_' at either end (uv refuses a name that does not end with a letter or digit)."""
-    ascii_name = unicodedata.normalize("NFKD", folder).encode("ascii", "ignore").decode("ascii")
-    return re.sub(r"-{2,}", "-", re.sub(r"[^A-Za-z0-9_-]+", "-", ascii_name)).strip("-_")
+    """The app name `./deploy new DIR` derives from the folder name: accents dropped (NFKD, then
+    the combining marks: an accented e becomes e), every run of other characters, letters
+    without an ASCII form included (a sharp s, an o with stroke), -> '-' (no '--'), and no '-'
+    or '_' at either end (uv refuses a name that does not end with a letter or digit)."""
+    plain = "".join(c for c in unicodedata.normalize("NFKD", folder) if not unicodedata.combining(c))
+    return re.sub(r"-{2,}", "-", re.sub(r"[^A-Za-z0-9_-]+", "-", plain)).strip("-_")
 
 
 def _norm_name(req: str) -> str:

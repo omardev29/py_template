@@ -1706,8 +1706,9 @@ Per method:
   markdown-it-py's `markdown_it`, raylib's `pyray`, pyyaml's `yaml`, pillow's `PIL` in lower
   case...; `test_import_names_follow_the_installed_packages` checks it against what `.venv`
   installs). Only the presets' pinned packages are mapped (15.2).
-  `new` derives the name from the folder with `name_from_folder` (NFKD -> ASCII, other runs ->
-  `-`, no `-`/`_` at the ends) and checks it before copying, so `./deploy new ../flet --preset
+  `new` derives the name from the folder with `name_from_folder` (NFKD without the combining
+  marks, every run of other characters, letters without an ASCII form included, -> `-`, no
+  `-`/`_` at the ends) and checks it before copying, so `./deploy new ../flet --preset
   flet` fails with a hint to use `--name`.
 - **[template repo]** Root `src/`, `tests/` and `pytemplate.toml` must equal
   `presets/script/files` rendered with `name = "myapp"` (`test_presets.py` checks it, and

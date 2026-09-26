@@ -328,6 +328,11 @@ def test_app_name_rule_refuses(name: str) -> None:
         ("__x__", "x"),
         (CJK, ""),  # nothing left: `new` asks for --name
         ("2game", "2game"),  # kept, then refused by APP_NAME
+        # letters without an ASCII form become '-', like any other character (they were dropped)
+        ("Stra\N{LATIN SMALL LETTER SHARP S}e", "Stra-e"),
+        ("my\N{LATIN SMALL LETTER O WITH STROKE}game", "my-game"),
+        (CJK + "app", "app"),
+        ("\N{LATIN SMALL LIGATURE FI}le", "file"),  # a compatibility form has an ASCII one
     ],
 )
 def test_name_from_folder(folder: str, name: str) -> None:
