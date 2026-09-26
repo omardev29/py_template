@@ -57,6 +57,25 @@ RESERVED_PACKAGES = {
 # Windows reserves these names (any case, any extension) for devices: src/aux/ cannot be created
 # there, and git cannot check out a repository that holds it
 WINDOWS_DEVICES = frozenset({"con", "prn", "aux", "nul", *(f"{d}{i}" for d in ("com", "lpt") for i in range(10))})
+# The top-level modules a pinned package (constraints.txt of any preset) installs under another
+# name than its own (normalized, '_' for '-'), read from the wheels' RECORD files; names that
+# cannot be an app package (_pytest, _yaml, cffi-stubs...) are left out. src/<pkg>/ with such a
+# name shadows the library: a project named py failed ./deploy test at once (pytest imports its
+# `py` shim), one named markdown-it broke rich.markdown. Compared in lower case (PIL and src/pil/
+# merge on a case-insensitive file system). test_import_names_follow_the_installed_packages
+# checks it against what .venv installs.
+IMPORT_NAMES: dict[str, tuple[str, ...]] = {
+    "markdown-it-py": ("markdown_it",),
+    "mypy": ("mypyc",),
+    "pefile": ("ordlookup", "peutils"),
+    "pillow": ("PIL",),
+    "pytest": ("py",),
+    "python-dateutil": ("dateutil",),
+    "python-slugify": ("slugify",),
+    "pywin32-ctypes": ("win32ctypes",),
+    "pyyaml": ("yaml",),
+    "raylib": ("pyray",),
+}
 
 
 def available() -> list[str]:
@@ -430,9 +449,10 @@ def _dependency_names(cfg: Config | None, preset: str) -> set[str]:
 def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
     """Reject an app name that would break the project: one uv refuses (APP_NAME), a package
     src/<pkg>/ that is a Python keyword, a standard library module (of any supported Python), a
-    backend name, a Windows device name, one of the project's own folders or files, or a
-    package the project depends on, directly or not
-    (uv refuses a project that depends on itself, and src/<pkg>/ would shadow the library).
+    backend name, a Windows device name, one of the project's own folders or files, a package
+    the project depends on, directly or not (uv refuses a project that depends on itself, and
+    src/<pkg>/ would shadow the library), or a module such a package installs under another
+    name (IMPORT_NAMES: pytest's py, raylib's pyray).
     new, init, their dry runs and rename (which keeps the first line) call it."""
     pkg = name.replace("-", "_").lower()
     hint = "\n  Choose another name with --name NAME"
@@ -453,12 +473,20 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
     if pkg in taken:
         raise DeployError(f"src/{pkg}/ would collide with the project's own {taken[pkg]}.{hint}")
     clash = _norm_name(name)
-    if clash in _dependency_names(cfg, preset):
+    names = _dependency_names(cfg, preset)
+    if clash in names:
         raise DeployError(
             f"the app name '{name}' is also the name of a dependency of the '{preset}' preset "
             f"({clash}, direct or indirect): uv would refuse the project and src/{pkg}/ would "
             f"shadow the library.{hint}"
         )
+    for dist in sorted(names & IMPORT_NAMES.keys()):
+        module = next((m for m in IMPORT_NAMES[dist] if m.lower() == pkg), None)
+        if module is not None:
+            raise DeployError(
+                f"src/{pkg}/ would shadow the module '{module}' of {dist}, a dependency of the "
+                f"'{preset}' preset (direct or indirect): `import {module}` would find the app.{hint}"
+            )
 
 
 # --- pyproject ---------------------------------------------------------------------------------

@@ -1695,7 +1695,12 @@ Per method:
   project's own entry excluded) and the preset's pins (`constraints.txt`: the preset's whole
   tested tree, so a raylib project, whose `uv.lock` has no rich, still refuses `new --preset
   script --name mdurl`). When a preset adds packages the lock does not have, uv may resolve
-  them against this lock's versions, so every locked name counts too (conservative).
+  them against this lock's versions, so every locked name counts too (conservative). Also a
+  module one of those packages installs under another name (`presets.IMPORT_NAMES`, read from
+  the pinned wheels' RECORD files: pytest's `py`, which pytest imports before the app,
+  markdown-it-py's `markdown_it`, raylib's `pyray`, pyyaml's `yaml`, pillow's `PIL` in lower
+  case...; `test_import_names_follow_the_installed_packages` checks it against what `.venv`
+  installs). Only the presets' pinned packages are mapped (15.2).
   `new` derives the name from the folder with `name_from_folder` (NFKD -> ASCII, other runs ->
   `-`, no `-`/`_` at the ends) and checks it before copying, so `./deploy new ../flet --preset
   flet` fails with a hint to use `--name`.
@@ -3476,6 +3481,10 @@ Behaviour:
   extensions out of `common/`, and a cpython/pypy wheel stays tagged `py3-none-any`.
 - `sync_tree` does not detect a case-only rename (`Data.py` -> `data.py`) on a
   case-insensitive file system: the stage keeps the old spelling until `./deploy clean`.
+- The name check (`presets.check_name_free`) knows the import names only of the packages the
+  presets pin (`presets.IMPORT_NAMES`): a dependency the user adds is compared by its
+  distribution name (`beautifulsoup4` refuses `beautifulsoup4`, not `bs4`). Reading them needs
+  the installed wheels (an environment of the project, never there for `new`'s next preset).
 
 Editors:
 - VS Code problem matchers and the Neovim parser depend on tool output formats (ruff, mypy,

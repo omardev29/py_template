@@ -350,6 +350,14 @@ def test_name_from_folder(folder: str, name: str) -> None:
         ("flet", "main", "src/main.py"),
         ("flet", "flet", "also the name of a dependency of the 'flet' preset (flet"),
         ("script", "Rich", "also the name of a dependency of the 'script' preset (rich"),
+        # a module a dependency installs under another name (pytest imports its py shim first)
+        ("script", "py", "src/py/ would shadow the module 'py' of pytest"),
+        ("script", "markdown-it", "src/markdown_it/ would shadow the module 'markdown_it' of markdown-it-py"),
+        ("raylib", "pyray", "the module 'pyray' of raylib"),
+        ("flet", "yaml", "the module 'yaml' of pyyaml"),
+        ("flet", "dateutil", "the module 'dateutil' of python-dateutil"),
+        ("flet", "Slugify", "src/slugify/ would shadow the module 'slugify' of python-slugify"),
+        ("flet", "pil", "the module 'PIL' of pillow"),
         # uv refuses these (PEP 508): rename relies on this check too
         ("script", "app-", "'app-' is not a valid app name"),
         ("script", "app_", "ending with a letter or digit"),
@@ -379,7 +387,7 @@ def test_check_name_free_accepts_near_misses(name: str) -> None:
     presets.check_name_free(_skeleton_config("script", "myapp"), "script", name)
 
 
-@pytest.mark.parametrize(("name", "message"), [("game-", "valid app name|may only contain"), ("g_", "valid app name|may only contain"), ("aux", "Windows"), ("typings", "typings/")])
+@pytest.mark.parametrize(("name", "message"), [("game-", "valid app name|may only contain"), ("g_", "valid app name|may only contain"), ("aux", "Windows"), ("typings", "typings/"), ("py", "module 'py' of pytest")])
 def test_rename_refuses_the_names_check_name_free_refuses(name: str, message: str) -> None:
     """`./deploy rename` goes through check_name_free: a name uv refuses (game-) used to move
     src/ and rewrite the project before `uv lock` failed on it."""
@@ -388,6 +396,28 @@ def test_rename_refuses_the_names_check_name_free_refuses(name: str, message: st
     with pytest.raises(DeployError, match=message) as e:
         rename.check_new_name(config.load(set(cli.COMMANDS)), name)
     assert e.value.code == 2
+
+
+def test_import_names_follow_the_installed_packages() -> None:
+    """presets.IMPORT_NAMES must know every module a pinned package installs under another name
+    (the ones installed in this environment: .venv of the project, so every preset is covered
+    by a project of it), or an app package with that name shadows the library unnoticed."""
+    import importlib.metadata
+
+    pinned: set[str] = set()
+    for preset in PRESETS:
+        pinned |= set(presets.constraints(preset))
+    found: dict[str, set[str]] = {}
+    for module, dists in importlib.metadata.packages_distributions().items():
+        if not module.isidentifier() or module.startswith("_"):
+            continue  # never an app package
+        for dist in dists:
+            name = presets._norm_name(dist)
+            if name in pinned and module.lower() != name.replace("-", "_"):
+                found.setdefault(name, set()).add(module)
+    missing = {n: sorted(m - set(presets.IMPORT_NAMES.get(n, ()))) for n, m in found.items()}
+    assert not {n: m for n, m in missing.items() if m}, "add them to presets.IMPORT_NAMES"
+    assert set(presets.IMPORT_NAMES) <= pinned  # only pinned packages (their pins name them)
 
 
 def test_every_locked_package_name_is_refused() -> None:

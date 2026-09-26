@@ -116,7 +116,8 @@ become `-`). It is the executable's name; the Python package is the name in lowe
 for `-` (`My-Game` -> `src/my_game/`). A name has letters, digits, `-` and `_`, starts with a
 letter and ends with a letter or digit, and must not be a Python keyword, a standard-library
 module, a backend (`cpython`, `pypy`, `mypyc`), a package the project locks (directly or not:
-`flet`, `rich`, `pygments`...), one of the project's own names (`tests`, `typings`, `build`,
+`flet`, `rich`, `pygments`...) or a module one of them installs under another name (`py`,
+`markdown_it`, `pyray`, `yaml`...), one of the project's own names (`tests`, `typings`, `build`,
 `dist`, `assets`, `main`) or a Windows device name (`con`, `aux`, `nul`, `com1`...). So
 `./deploy new ../flet --preset flet` fails: add `--name`.
 
