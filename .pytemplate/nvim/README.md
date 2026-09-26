@@ -27,7 +27,7 @@ LazyVim's import-order warning and keeps their plugins installed when you work e
 |---|---|
 | Language server | basedpyright (no Node.js): `.venv`, else `uvx` with the version `./deploy check` pins (`typing.basedpyright` in `.pytemplate/editor.json`), else Mason. It reads the generated `pyrightconfig.json` (typing profile, `.venv`, `typings/` stubs). `vim.g.pytemplate_python_lsp = "pyright"` switches to pyright (Mason, needs Node.js). |
 | ruff | The language server from `.venv`: the same version as `./deploy check`. |
-| mypy | nvim-lint runs `.venv`'s mypy from the project root with `.mypy.ini`; off with the `off` typing profile; errors shown with the profile's severity (warn: warnings). With PyPy supported it checks the 3.11 syntax like `./deploy check`. |
+| mypy | nvim-lint runs `.venv`'s mypy from the project root with `.mypy.ini`; off with the `off` typing profile, the default on cpython and pypy (`typing.relaxed = "off"`): `./deploy mode --typing warn` (or `strict`) turns it on; errors shown with the profile's severity (warn: warnings). With PyPy supported it checks the 3.11 syntax like `./deploy check`. |
 | Tasks | overseer templates `deploy: <command>` for every `./deploy` command and every `pytemplate.toml` `[tasks]` entry (they replace the `tasks.json` ones). Output of check/lint/test/build becomes diagnostics and quickfix items. |
 | Debugging | nvim-dap with the generated `.vscode/launch.json`; the adapter is `.venv`'s debugpy (else Mason's, else an ephemeral `uv run --with debugpy`). |
 | Tests | neotest runs pytest with the active backend's interpreter (`.venv`, `.venv-pypy`); mypyc and "all backends" runs go through `deploy: test`. |

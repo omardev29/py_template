@@ -2244,10 +2244,11 @@ PowerShell 6.x-7.2, a UNC current folder, uv found only in `ProgramFiles` or cho
 quoted registry PATH entry in `deploy.cmd` (`test_cmd_registry_path_with_quoted_entries` is
 Windows-only and has not run yet), the install prompt on Windows (POSIX `deploy` and pwsh
 `deploy.ps1` answer it on a pseudo-terminal), Neovim 0.11 (only 0.12.5), pyright via Mason, VS
-Code itself (buttons, Problems panel: only simulated), `flet build` (Developer Mode is off),
-bundled PyPy portable builds on CI, Ctrl+C handling of the harnesses (nvimtest's tree kill only
-simulated), `[deploy.nuitka]` lto/pgo outside Linux (measured with Nuitka 4.2.2 and gcc 13
-only: PGO with MSVC and an ~800-module LTO link are unmeasured). The launcher changes of
+Code itself (buttons, Problems panel: only simulated), `flet build` outside Windows (verified by
+hand there, section 10; no CI job installs Flutter), bundled PyPy portable builds on CI, Ctrl+C
+handling of the harnesses (nvimtest's tree kill only simulated), `[deploy.nuitka]` lto/pgo
+outside Linux (measured with Nuitka 4.2.2 and gcc 13 only: PGO with MSVC and an ~800-module
+LTO link are unmeasured). The launcher changes of
 September 2026 were developed on Linux (pwsh 7.6 for `deploy.ps1`; niubash simulated by
 sourcing `deploy` in bash, dash, busybox, ksh, mksh and yash): their Windows paths (Windows PowerShell 5.1, `deploy.cmd`, real niubash and MSYS2) run
 only with `./deploy selftest` and `selftest --shells` on Windows.
