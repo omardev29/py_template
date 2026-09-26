@@ -182,12 +182,11 @@ def record_of(cfg: Config) -> dict[str, Any]:
     return {"name": cfg.app.name, "preset": cfg.app.preset, "dependencies": deps, "dev": dev}
 
 
-def rename_record(name: str) -> None:
-    """After `./deploy rename`: the record keeps its preset and requirements, with the new name."""
-    record = load_record()
+def rename_record(name: str, record: dict[str, Any] | None) -> None:
+    """After `./deploy rename`: the record read before it keeps its preset and requirements
+    (rename applies neither), with the new name. No record: nothing to update."""
     if record is not None and record["name"] != name:
-        record["name"] = name
-        save_record(record)
+        save_record({**record, "name": name})
 
 
 def _state_file() -> Path:
@@ -314,13 +313,16 @@ def preset_message(cfg: Config, applied: str) -> str:
     )
 
 
-def _missing_package(cfg: Config, project: Project) -> str:
-    here = sorted(p.name for p in _src().iterdir() if p.is_dir() and (p / "__init__.py").is_file()) if _src().is_dir() else []
-    found = f" (src/ has: {', '.join(p + '/' for p in here)})" if here else ""
+def missing_package(cfg: Config) -> tuple[str, str] | None:
+    """(problem, hint) when src/<pkg>/ does not exist and no package of an older name was found."""
+    src = _src()
+    if rename.package_dir(src, cfg.pkg) is not None:
+        return None
+    here = sorted(p.name for p in src.iterdir() if p.is_dir() and (p / "__init__.py").is_file()) if src.is_dir() else []
+    found = f"; src/ has {', '.join(p + '/' for p in here)}" if here else ""
     return (
-        f"src/{cfg.pkg}/ does not exist (app.name = '{cfg.app.name}'){found}.\n"
-        "  If app.name was changed by hand, put the old name back in pytemplate.toml, run ./deploy apply, then set\n"
-        "  the new name and run ./deploy apply again (or use ./deploy rename NEW_NAME)"
+        f"src/{cfg.pkg}/ does not exist (app.name = '{cfg.app.name}'{found}): run, test and build need the app package",
+        "if app.name was changed by hand, put the old name back and run ./deploy rename NEW_NAME",
     )
 
 
@@ -425,12 +427,13 @@ def reference_problems(cfg: Config, *, package: bool = True) -> list[str]:
     """Paths pytemplate.toml refers to that do not exist (each makes some command fail later)."""
     src = _src()
     out: list[str] = []
-    if package and rename.package_dir(src, cfg.pkg) is None:
-        out.append(f"src/{cfg.pkg}/ does not exist (app.name = '{cfg.app.name}'): run, test and build need the app package")
+    missing = missing_package(cfg) if package else None
+    if missing is not None:
+        out.append(f"{missing[0]}\n  {missing[1]}")
     if cfg.supports("mypyc"):
-        missing = [m for m in cfg.compile.modules if not _module_exists(src, m)]
-        if missing:
-            out.append(f"compile.modules: {', '.join(missing)} not found in src/ (mypyc builds and `test mypyc` will fail)")
+        modules = [m for m in cfg.compile.modules if not _module_exists(src, m)]
+        if modules:
+            out.append(f"compile.modules: {', '.join(modules)} not found in src/ (mypyc builds and `test mypyc` will fail)")
     if cfg.app.assets and not (src / cfg.app.assets).is_dir():
         out.append(f"app.assets = '{cfg.app.assets}': src/{cfg.app.assets}/ does not exist (nothing is packaged with the app)")
     if cfg.deploy.exe.icon and not (ROOT / cfg.deploy.exe.icon).is_file():
@@ -463,8 +466,8 @@ def pending(cfg: Config) -> list[tuple[str, str]]:
     if applied.renamed_from is not None:
         old = applied.renamed_from
         out.append((f"app.name = '{cfg.app.name}' is not applied: the package is still src/{rename.package_of(old)}/", f"./deploy apply  (renames '{old}' -> '{cfg.app.name}')"))
-    elif rename.package_dir(_src(), cfg.pkg) is None:
-        out.append((f"src/{cfg.pkg}/ does not exist (app.name = '{cfg.app.name}')", "if app.name was changed by hand, put the old name back and use ./deploy rename NEW_NAME"))
+    elif (missing := missing_package(cfg)) is not None:
+        out.append(missing)
     elif project.name != cfg.app.name:
         out.append((f"pyproject.toml [project] name = '{project.name}', but app.name = '{cfg.app.name}'", "./deploy apply"))
     try:
@@ -527,10 +530,11 @@ def _set_project_name(cfg: Config, project: Project) -> None:
     path.write_text(presets.set_project_name(text, cfg.app.name), encoding="utf-8", newline="\n")
 
 
-def _print_plan(plan: Plan, command: str) -> None:
+def _print_plan(plan: Plan, command: str, force: bool) -> None:
     """--dry-run: what apply would do, without writing, syncing or locking anything."""
     cfg = plan.new_cfg or plan.cfg
     ui.step(f"{command} {_DRY}")
+    _dirty(plan, command, force)
     if plan.pypy_new:
         cmd_mode_precheck(plan.cfg)  # read-only under --dry-run
     rows: list[tuple[str, str]] = []
@@ -543,9 +547,17 @@ def _print_plan(plan: Plan, command: str) -> None:
         rows.append(("app.name", f"'{cfg.app.name}' (src/{cfg.pkg}/): unchanged"))
     rows.append(("app.preset", f"{cfg.app.preset}: unchanged"))
     rows.append((f"[preset.{cfg.app.preset}]", f"would {plan.deps.describe()}" if plan.deps else "dependencies unchanged"))
-    pyproject = render.pyproject_outdated(cfg) or plan.set_name or plan.rename_plan is not None
-    rows.append(("pyproject.toml", "would rewrite the managed parts / [project] name" if pyproject else "unchanged"))
-    if pyproject or plan.deps:
+    parts = [
+        text
+        for text, due in (
+            ("the managed parts", render.pyproject_outdated(cfg)),
+            ("[project] name", plan.set_name or plan.rename_plan is not None),
+            ("dependencies", bool(plan.deps)),
+        )
+        if due
+    ]
+    rows.append(("pyproject.toml", f"would rewrite {', '.join(parts)}" if parts else "unchanged"))
+    if parts:
         lock = "would re-lock (uv lock)"
     else:
         r = envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, capture=True, echo=False)
@@ -587,8 +599,7 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
     force = "--force" in only_flags(command, args, ("--force",))
     plan = make_plan(cfg)
     if proc.DRY_RUN:
-        _dirty(plan, command, force)
-        _print_plan(plan, command)
+        _print_plan(plan, command, force)
         return 0
 
     ui.step(command)

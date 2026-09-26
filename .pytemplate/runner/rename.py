@@ -45,6 +45,8 @@ from __future__ import annotations
 import argparse
 import ast
 import bisect
+import dataclasses
+import functools
 import io
 import keyword
 import os
@@ -60,6 +62,7 @@ from typing import Literal
 from . import config, envs, presets, proc, render, ui
 from .config import Config
 from .project import DIST, ROOT
+from .project import ROOT as _RUNNER_CWD  # where the tools run (tests move ROOT, never this)
 from .ui import DeployError
 
 Kind = Literal["pkg", "name", "keep", "skip"]
@@ -527,6 +530,31 @@ def _toml_key(text: str, start: int, end: int) -> bool:
     return bool(_TOML_KEY_BEFORE.fullmatch(text, line_start, start) and _TOML_KEY_AFTER.match(text, end))
 
 
+@functools.cache
+def _config_keys() -> dict[str, frozenset[str]]:
+    """table -> its keys in the pytemplate.toml schema (app -> name, preset, gui...)."""
+    out: dict[str, frozenset[str]] = {}
+
+    def walk(cls: type[object], prefix: str) -> None:
+        fields = dataclasses.fields(cls)  # type: ignore[arg-type]
+        out[prefix] = frozenset(f.name for f in fields)
+        for f in fields:
+            default = f.default_factory() if f.default_factory is not dataclasses.MISSING else f.default
+            if dataclasses.is_dataclass(default):
+                walk(type(default), f"{prefix}.{f.name}".lstrip("."))
+
+    walk(Config, "")
+    out["preset"] = frozenset(presets.available())
+    return out
+
+
+def _config_path(text: str, end: int, word: str) -> bool:
+    """Whether `word` starts a pytemplate.toml key path here (`app.gui`, `deploy.exe.mode`): an app
+    named like a table must keep the comments that talk about its keys."""
+    m = re.match(r"\.([A-Za-z_][A-Za-z0-9_]*)", text[end : end + 64])
+    return m is not None and m.group(1) in _config_keys().get(word, frozenset())
+
+
 def module_value_lines(text: str, keys: Iterable[str] = MODULE_KEYS) -> set[int]:
     """Line numbers (1-based) holding the value of one of `keys` ("table.key", multi-line
     arrays included) in a TOML text: the current table header and key are tracked line by line."""
@@ -577,15 +605,17 @@ def rewrite(
         kind = _classify(text, start, end, word, names, code, contextual=only_pkg)
         if kind == "skip":
             continue
+        module_line = bool(module_lines) and bisect.bisect_right(line_starts, start) in module_lines
         if (
             kind == "name"
-            and module_lines
+            and module_line
             and word == names.old_pkg
             and text[start - 1 : start] in ("'", '"')
             and text[end : end + 1] == text[start - 1 : start]
-            and bisect.bisect_right(line_starts, start) in module_lines
         ):
             kind = "pkg"  # modules = ["alpha"]
+        elif kind == "pkg" and toml and not module_line and _config_path(text, end, word):
+            kind = "keep"  # "# auto (= not app.gui)" in a project named app
         if kind == "keep" or (only_pkg and kind == "name"):
             kept_at.append(start)
             continue
@@ -1021,41 +1051,51 @@ def _batches(files: Sequence[str], size: int = 100) -> Iterator[list[str]]:
         yield list(files[i : i + size])
 
 
-def _ruff(cfg: Config, args: Sequence[str | Path], files: Sequence[str]) -> tuple[int, str]:
+def _same_path(path: str | Path) -> str:
+    """A path as ruff prints it (relative to its cwd when inside it) -> a comparable form."""
+    return os.path.normcase(os.path.abspath(_RUNNER_CWD / path))
+
+
+def _ruff(cfg: Config, args: Sequence[str | Path], files: Sequence[Path]) -> tuple[int, str]:
+    """`uv run ruff ARGS FILES` in the tools environment (absolute paths, in batches)."""
     code, out = 0, []
-    for batch in _batches(files):
-        r = envs.uv(envs.tool_env(cfg), ["run", "--quiet", "--locked", "ruff", *args, *batch], check=False, capture=True, echo=False)
+    for batch in _batches([str(f) for f in files]):
+        argv: list[str | Path] = ["run", "--quiet", "--locked", "ruff", *args, *batch]
+        r = envs.uv(envs.tool_env(cfg), argv, cwd=_RUNNER_CWD, check=False, capture=True, echo=False)
         code = max(code, r.returncode)
         out.append(r.stdout + r.stderr)
     return code, "\n".join(out)
 
 
-def tidy_before(cfg: Config, plan_: Plan) -> set[str] | None:
+def tidy_before(cfg: Config, plan_: Plan, root: Path | None = None) -> set[str] | None:
     """Before the rename: which rewritten Python files `ruff format` accepts as they are (only those
     are re-formatted afterwards: a file you keep unformatted stays so). None: ruff cannot run."""
     from .cmd_dev import _profile_file
 
+    root = root or ROOT
     files = [f.path for f in _python_edits(plan_)]
     if not files or proc.DRY_RUN or not envs.tool_env(cfg).python.is_file():
         return None
     try:
         config_file = _profile_file(cfg, cfg.profile_for(), "ruff")
-        code, out = _ruff(cfg, ["format", "--check", "--config", config_file, "--force-exclude", "--output-format", "concise"], files)
+        args: list[str | Path] = ["format", "--check", "--config", config_file, "--force-exclude", "--output-format", "concise"]
+        code, out = _ruff(cfg, args, [root / f for f in files])
     except (DeployError, OSError):
         return None
     if code == 0:
         return set(files)
-    bad = {Path(m.group("old") or m.group("path")).as_posix() for m in _UNFORMATTED.finditer(out)}
+    bad = {_same_path(m.group("old") or m.group("path")) for m in _UNFORMATTED.finditer(out)}
     if code != 1 or not bad:
         return None  # ruff failed, or an output format this runner does not know: format nothing
-    return {f for f in files if f not in bad}
+    return {f for f in files if _same_path(root / f) not in bad}
 
 
-def tidy_after(cfg: Config, plan_: Plan, clean: set[str] | None, root: Path = ROOT) -> None:
+def tidy_after(cfg: Config, plan_: Plan, clean: set[str] | None, root: Path | None = None) -> None:
     """After the rename: sort the imports the new name moved (only when the typing profile selects
     ruff's I rules) and re-format the files that were formatted before. Best effort: it never fails."""
     from .cmd_dev import _profile_file
 
+    root = root or ROOT
     edits = _python_edits(plan_)
     if not edits:
         return
@@ -1063,9 +1103,9 @@ def tidy_after(cfg: Config, plan_: Plan, clean: set[str] | None, root: Path = RO
     if clean is None:
         ui.info(f"  note: {hint}")
         return
-    targets = [f.target for f in edits]
-    formatted = [f.target for f in edits if f.path in clean]
-    before = {t: (root / t).read_bytes() for t in targets if (root / t).is_file()}
+    targets = [root / f.target for f in edits]
+    formatted = [root / f.target for f in edits if f.path in clean]
+    before = {t: t.read_bytes() for t in targets if t.is_file()}
     try:
         config_file = _profile_file(cfg, cfg.profile_for(), "ruff")
         _ruff(cfg, ["check", "--config", config_file, "--force-exclude", "--fix-only", "--fixable", "I001", "--quiet"], targets)
@@ -1074,7 +1114,7 @@ def tidy_after(cfg: Config, plan_: Plan, clean: set[str] | None, root: Path = RO
     except (DeployError, OSError) as e:
         ui.warn(f"ruff could not tidy the renamed files ({e}): {hint}")
         return
-    touched = [t for t, data in before.items() if (root / t).is_file() and (root / t).read_bytes() != data]
+    touched = [t.relative_to(root).as_posix() for t, data in before.items() if t.is_file() and t.read_bytes() != data]
     if touched:
         ui.info(f"  ruff: import order / formatting fixed in {', '.join(touched)}")
 
@@ -1193,6 +1233,7 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
 
     from .cmd_env import ensure_lock
 
+    record = cmd_apply.load_record()  # read first: re-rendering rewrites state.json
     clean = tidy_before(cfg, planned)
     apply_plan(ROOT, planned)  # new_cfg: the renamed pytemplate.toml, validated before anything was written
     try:
@@ -1205,7 +1246,7 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
     if edited:
         ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./deploy render --force)")
     tidy_after(new_cfg, planned, clean)
-    cmd_apply.rename_record(new_name)
+    cmd_apply.rename_record(new_name, record)
     ui.ok(f"renamed '{old_name}' -> '{new_name}' (package src/{new_cfg.pkg}/)")
     ui.info("  Next: ./deploy test all, and review the changes with git diff")
     if DIST.is_dir() and any(DIST.iterdir()):

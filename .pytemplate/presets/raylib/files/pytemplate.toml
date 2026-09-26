@@ -1,8 +1,11 @@
 # pytemplate.toml: project configuration and working "mode" (raylib preset).
 #
-# Change a value and run any ./deploy command: the generated files (.mypy.ini,
-# pyrightconfig.json, .ruff.toml, .vscode/) update themselves. Whatever affects
-# uv.lock (backend.supported, [python], [preset.raylib]) is applied with `./deploy lock`.
+# After editing it, run ./deploy apply: it brings the whole project in line (app.name
+# renames src/<pkg>/ and its imports, [preset.raylib] replaces the raylib dependency,
+# [backend] and [python] re-lock uv.lock and sync the environments, [hooks] installs or
+# removes the git hook, and .mypy.ini, pyrightconfig.json, .ruff.toml and .vscode/ are
+# regenerated: those also update by themselves on any ./deploy command). ./deploy mode edits
+# this file for you. app.preset cannot change in place: ./deploy new DIR --preset P.
 schema = 1
 
 [app]
@@ -68,11 +71,14 @@ lzma = true      # smaller, slower to unpack (PyInstaller and Nuitka always use 
 exclude = []     # extra file-name globs never packed (C runtime and python3*.dll never are)
 
 [preset.raylib]
+# ./deploy apply replaces the dependency in pyproject.toml with {package}=={version} and re-locks
 package = "raylib"   # raylib (GLFW) | raylib_sdl (SDL3) | raylib_software
 version = "6.0.1.0"
 
 [hooks]
-pre_commit = true   # ./deploy setup installs a git pre-commit hook (./deploy hooks run: ruff, format, generated files, lock)
+# true: ./deploy apply (and setup) installs a git pre-commit hook that runs ./deploy hooks run
+# (ruff, format, generated files, lock); false: ./deploy apply removes pytemplate's hook
+pre_commit = true
 
 [vscode]
 # Status bar buttons (VS Code extension actboy168.tasks): ./deploy commands or [tasks] names

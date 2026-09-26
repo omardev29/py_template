@@ -12,5 +12,11 @@
     ".vscode/settings.json": "61d44a9521740a863523b4ec6c2da9b3aebba8bb63b005b3acd08b002edd6a5d",
     ".vscode/tasks.json": "924370769b2fd6e3e87b383d8e12019a2be4b9b74cfd8316f0b9cfdf681b212a",
     "pyrightconfig.json": "69c2329b283e619babf4a541d72120abc63d97dcc69194626a59a3b679d5b2ae"
+  },
+  "applied": {
+    "name": "myapp",
+    "preset": "script",
+    "dependencies": [],
+    "dev": []
   }
 }

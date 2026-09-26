@@ -1,8 +1,11 @@
 # pytemplate.toml: project configuration and working "mode" (flet preset).
 #
-# Change a value and run any ./deploy command: the generated files (.mypy.ini,
-# pyrightconfig.json, .ruff.toml, .vscode/) update themselves. Whatever affects
-# uv.lock (backend.supported, [python], [preset.flet]) is applied with `./deploy lock`.
+# After editing it, run ./deploy apply: it brings the whole project in line (app.name
+# renames src/<pkg>/ and its imports, [preset.flet] re-pins flet, flet-desktop and flet-cli,
+# [backend] and [python] re-lock uv.lock and sync the environments, [hooks] installs or
+# removes the git hook, and .mypy.ini, pyrightconfig.json, .ruff.toml and .vscode/ are
+# regenerated: those also update by themselves on any ./deploy command). ./deploy mode edits
+# this file for you. app.preset cannot change in place: ./deploy new DIR --preset P.
 schema = 1
 
 [app]
@@ -78,10 +81,13 @@ lzma = true      # smaller, slower to unpack (PyInstaller and Nuitka always use 
 exclude = []     # extra file-name globs never packed (C runtime and python3*.dll never are)
 
 [preset.flet]
+# ./deploy apply pins flet, flet-desktop and flet-cli to this version in pyproject.toml and re-locks
 version = "1.0.1"   # flet, flet-desktop and flet-cli always at the same version
 
 [hooks]
-pre_commit = true   # ./deploy setup installs a git pre-commit hook (./deploy hooks run: ruff, format, generated files, lock)
+# true: ./deploy apply (and setup) installs a git pre-commit hook that runs ./deploy hooks run
+# (ruff, format, generated files, lock); false: ./deploy apply removes pytemplate's hook
+pre_commit = true
 
 [vscode]
 # Status bar buttons (VS Code extension actboy168.tasks): ./deploy commands or [tasks] names
