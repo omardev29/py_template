@@ -55,10 +55,15 @@ LAZY_LUA = ROOT / ".lazy.lua"
 MARK = "PTNVIM"  # prefix of the JSON line the headless snippets print
 
 # `-c` snippets: one line each, no double quotes (they go through the Windows command line).
+# QUERY_LUA must work on ANY Neovim, so an old one is reported as too old (doctor) or skipped
+# (selftest --nvim): vim.version() is a plain table before 0.10 (tostring gives "table: 0x..."),
+# and stdpath('state') is an error before 0.8 (the data dir held the shada then).
 QUERY_LUA = (
-    "lua io.stdout:write('" + MARK + "' .. vim.json.encode({"
-    "config = vim.fn.stdpath('config'), data = vim.fn.stdpath('data'), state = vim.fn.stdpath('state'), "
-    "cache = vim.fn.stdpath('cache'), version = tostring(vim.version()), progpath = vim.v.progpath"
+    "lua local v = vim.version(); local has_state, state = pcall(vim.fn.stdpath, 'state'); "
+    "io.stdout:write('" + MARK + "' .. vim.json.encode({"
+    "config = vim.fn.stdpath('config'), data = vim.fn.stdpath('data'), "
+    "state = has_state and state or vim.fn.stdpath('data'), cache = vim.fn.stdpath('cache'), "
+    "version = v.major .. '.' .. v.minor .. '.' .. v.patch, progpath = vim.v.progpath"
     "}) .. '\\n')"
 )
 # The file comes in $PT_TRUST_FILE (no quoting problems). The trust DB is written with

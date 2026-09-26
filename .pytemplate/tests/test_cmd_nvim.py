@@ -345,9 +345,11 @@ def test_prepare_dir_refuses_foreign_dirs(tmp_path: Path) -> None:
 def test_real_nvim_query_and_trust(tmp_path: Path) -> None:
     layout = nvimtest.Layout(tmp_path / "w")
     env = nvimtest.nvim_env(layout, dict(os.environ))
-    nv = cmd_nvim.query(shutil.which("nvim"), env=env)
-    assert nv is not None and nv.version >= (0, 9, 0)
+    nv = cmd_nvim.query(shutil.which("nvim"), env=env)  # any Neovim: an old one is reported as such
+    assert nv is not None
     nvimtest._check_isolated(nv, layout)  # config/data/state/cache all inside the throwaway tree
+    if nv.version < (0, 9, 0):
+        pytest.skip(f"Neovim {nv.version_text}: vim.secure (the trust database) came with 0.9")
     file, real, digest = _lazy_lua(tmp_path)
     assert cmd_nvim.trust_status(nv.trust_db, file).state == "untrusted"
     data = cmd_nvim.trust_file(nv.exe, file, env=env, cwd=file.parent)  # path form on 0.12+, buffer before
@@ -355,6 +357,34 @@ def test_real_nvim_query_and_trust(tmp_path: Path) -> None:
     status = cmd_nvim.trust_status(nv.trust_db, file)
     assert (status.state, status.sha256, status.path) == ("trusted", digest, real)
     assert not (file.parent / "nvim.log").exists() and not Path("nvim.log").exists()
+
+
+# What older Neovims answer, on the Neovim at hand: before 0.10 vim.version() is a plain table
+# (tostring gives "table: 0x..."), before 0.8 stdpath('state') is an error (E6100).
+OLD_API = {
+    "0.9.5": "vim.version = function() return { major = 0, minor = 9, patch = 5, api_level = 11, api_prerelease = false } end",
+    "0.7.2": "vim.version = function() return { major = 0, minor = 7, patch = 2, api_level = 9, api_prerelease = false } end; "
+    "local sp = vim.fn.stdpath; vim.fn.stdpath = function(what) if what == 'state' then error('E6100: state is not a valid stdpath') end return sp(what) end",
+}
+
+
+@pytest.mark.skipif(shutil.which("nvim") is None, reason="nvim not in PATH")
+@pytest.mark.parametrize("old", sorted(OLD_API))
+def test_query_reports_an_old_neovim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old: str) -> None:
+    """An old distro Neovim on PATH (Ubuntu 24.04: 0.9.5, Debian 12: 0.7.2) must be reported as too
+    old by nvim doctor and skipped by selftest --nvim, not break the query (exit 3)."""
+    monkeypatch.setattr(cmd_nvim, "QUERY_LUA", "lua " + OLD_API[old] + "; " + cmd_nvim.QUERY_LUA.removeprefix("lua "))
+    layout = nvimtest.Layout(tmp_path / "w")
+    nv = cmd_nvim.query(shutil.which("nvim"), env=nvimtest.nvim_env(layout, dict(os.environ)))
+    assert nv is not None and nv.version_text == old and nv.version < cmd_nvim.MIN_LAZYVIM
+    nvimtest._check_isolated(nv, layout)
+    if old == "0.7.2":
+        assert nv.state == nv.data, "no state dir before 0.8: the data dir held what it holds now"
+
+
+def test_query_lua_needs_no_new_api() -> None:
+    assert "tostring(vim.version())" not in cmd_nvim.QUERY_LUA and "pcall(vim.fn.stdpath, 'state')" in cmd_nvim.QUERY_LUA
+    assert '"' not in cmd_nvim.QUERY_LUA, "the -c snippet crosses the Windows command line"
 
 
 # --- timeouts kill the whole tree -----------------------------------------------------------------

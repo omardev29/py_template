@@ -2008,7 +2008,13 @@ LazyVim wiring:
   `nvim --headless --clean -n -i NONE -c "lua ..." -c qa!`, which prints one `PTNVIM{json}`
   line; the `-c` snippets are one line without double quotes because they cross the Windows
   command line; respects `NVIM_APPNAME` and `XDG_*`). On Windows `XDG_CONFIG_HOME=X` gives
-  `X\nvim` and `XDG_DATA_HOME`/`XDG_STATE_HOME=X` give `X\nvim-data`.
+  `X\nvim` and `XDG_DATA_HOME`/`XDG_STATE_HOME=X` give `X\nvim-data`. `cmd_nvim.QUERY_LUA`
+  works on ANY Neovim, so an old distro one (Ubuntu 24.04: 0.9.5, Debian 12: 0.7.2) is reported
+  as too old by `doctor` and skipped by `selftest --nvim`: the version comes from
+  `vim.version()`'s fields (a plain table before 0.10: `tostring` gave `table: 0x...`, exit 3)
+  and `stdpath('state')` runs under `pcall` (an error before 0.8: the data dir then)
+  (`test_query_reports_an_old_neovim`, which fakes the old API on the Neovim at hand; the real
+  trust test skips below 0.9, which brought `vim.secure`).
 - `doctor` (default; exit 1 on real problems): Neovim >= 0.11.2 (`MIN_LAZYVIM`), LazyVim
   installed, no `local_spec = false`, the trust of `.lazy.lua`, missing extras in
   `lazyvim.json`, tools (git, curl, tar required; rg, fd, tree-sitter, python, node, uvx, a C
