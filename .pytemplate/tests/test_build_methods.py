@@ -666,6 +666,12 @@ def pyz_env(cache: Path, **extra: str) -> dict[str, str]:
     return env
 
 
+def pyz_root(cache: Path) -> Path:
+    """Where the bootstrap keeps the builds of the app "demo" under `pyz_env(cache)`: macOS has
+    no XDG cache, its user cache is ~/Library/Caches (the bootstrap's `_cache_root`)."""
+    return (cache / "Library" / "Caches" if sys.platform == "darwin" else cache) / "demo" / "pyz"
+
+
 def run_pyz(pyz_file: Path, env: dict[str, str], *args: str, prelude: str = "") -> subprocess.CompletedProcess[str]:
     """`python -S app.pyz ARGS` (no site-packages: the .pyz must bring its own dependencies)."""
     if prelude:
@@ -688,12 +694,12 @@ def test_pyz_bootstrap_picks_the_flavour(tmp_path: Path) -> None:
     own = fake_pyz(tmp_path / "own.pyz", build_id="own", targets=[key], pure=False, files=files)
     r = run_pyz(own, pyz_env(cache), "a b", "")
     assert r.returncode == 0, r.stderr
-    root = cache / "demo" / "pyz" / "own" / key
+    root = pyz_root(cache) / "own" / key
     assert r.stdout.split() == ["ok", "target", str(root / "app" / "assets"), str(root / "app" / "main.py"), "a", "b"]
     pure = fake_pyz(tmp_path / "pure.pyz", build_id="pure", targets=["cp399-nowhere-x86_64"], pure=True)
     r = run_pyz(pure, pyz_env(cache))
     assert r.returncode == 0 and r.stdout.split()[:2] == ["ok", "common"], r.stderr
-    assert (cache / "demo" / "pyz" / "pure" / "pure" / ".complete").is_file()
+    assert (pyz_root(cache) / "pure" / "pure" / ".complete").is_file()
     other = fake_pyz(tmp_path / "other.pyz", build_id="other", targets=["cp399-nowhere-x86_64"], pure=False)
     r = run_pyz(other, pyz_env(cache))
     assert r.returncode == 1
@@ -747,7 +753,7 @@ def test_pyz_concurrent_first_starts_extract_once(tmp_path: Path) -> None:
         out, err = p.communicate(timeout=120)
         assert p.returncode == 0, err
         assert out.split()[:2] == ["ok", "common"]
-    build = cache / "demo" / "pyz" / "b1"
+    build = pyz_root(cache) / "b1"
     assert sorted(p.name for p in build.iterdir()) == ["pure"]  # no .tmp-* or .stale-* left behind
     assert (build / "pure" / ".complete").is_file()
 
@@ -759,7 +765,7 @@ def test_pyz_repairs_an_incomplete_cache(tmp_path: Path, damage: str) -> None:
     pyz_file = fake_pyz(tmp_path / "t.pyz")
     cache = tmp_path / "cache"
     assert run_pyz(pyz_file, pyz_env(cache)).returncode == 0
-    dest = cache / "demo" / "pyz" / "b1" / "pure"
+    dest = pyz_root(cache) / "b1" / "pure"
     (dest / ".complete").unlink()
     if damage == "marker+file":
         (dest / "lib" / "lazymod.py").unlink()
@@ -772,7 +778,7 @@ def test_pyz_repairs_an_incomplete_cache(tmp_path: Path, damage: str) -> None:
 
 
 def _cached_builds(cache: Path) -> list[str]:
-    return sorted(p.name for p in (cache / "demo" / "pyz").iterdir())
+    return sorted(p.name for p in pyz_root(cache).iterdir())
 
 
 def test_pyz_prune_never_deletes_a_running_build(tmp_path: Path) -> None:
@@ -801,7 +807,7 @@ def test_pyz_prune_still_removes_old_unused_builds(tmp_path: Path) -> None:
         assert run_pyz(fake_pyz(tmp_path / f"b{n}.pyz", build_id=f"build{n}"), pyz_env(cache)).returncode == 0
     old = time.time() - 3 * 86400
     for n, name in enumerate(("build1", "build2", "build3")):
-        os.utime(cache / "demo" / "pyz" / name, (old + n, old + n))
+        os.utime(pyz_root(cache) / name, (old + n, old + n))
     assert run_pyz(fake_pyz(tmp_path / "b4.pyz", build_id="build4"), pyz_env(cache)).returncode == 0
     assert _cached_builds(cache) == ["build2", "build3", "build4"]  # the 3 most recently started
 
@@ -810,7 +816,7 @@ def test_pyz_rerun_marks_a_build_as_recently_used(tmp_path: Path) -> None:
     cache = tmp_path / "cache"
     pyz_file = fake_pyz(tmp_path / "t.pyz")
     assert run_pyz(pyz_file, pyz_env(cache)).returncode == 0
-    build = cache / "demo" / "pyz" / "b1"
+    build = pyz_root(cache) / "b1"
     os.utime(build, (1_000_000_000, 1_000_000_000))
     assert run_pyz(pyz_file, pyz_env(cache)).returncode == 0
     assert build.stat().st_mtime > time.time() - 3600
@@ -1756,7 +1762,8 @@ def test_portable_sh_launcher_is_posix_and_leaks_nothing() -> None:
         assert '"$(' not in text  # niubash keeps the inner quotes of "...$(cmd "$x")..."
         for shell in ("dash", "bash", "mksh", "yash"):
             if shutil.which(shell):
-                r = subprocess.run([shell, "-n"], input=text, capture_output=True, text=True, timeout=60, check=False)
+                # bytes: a text-mode stdin would hand the shell CRLF on Windows
+                r = subprocess.run([shell, "-n"], input=text.encode("ascii"), capture_output=True, timeout=60, check=False)
                 assert r.returncode == 0, (shell, r.stderr)
 
 

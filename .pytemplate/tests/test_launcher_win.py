@@ -548,15 +548,30 @@ def test_ps1_forwards_pipeline_input_and_keeps_raw_stdin(name: str) -> None:
     the process stdin; @() gives it EOF. Exit codes still come through."""
     exe = _ps_exe(name)
     ps1 = _ps_literal(str(PS1))
+    uv = os.environ.get("UV") or shutil.which("uv")
+    assert uv
+    direct = f"& {_ps_literal(uv)} run --quiet --script {_ps_literal(str(ROOT / '.pytemplate' / 'deploy.py'))}"
     body = "\n".join([
+        # PowerShell encodes pipeline text for a native program with $OutputEncoding (5.1 on
+        # GitHub's Windows runners: UTF-8 WITH a BOM, which it writes even for an empty pipeline);
+        # pinned here so the expected text holds on every machine
+        "$OutputEncoding = New-Object System.Text.UTF8Encoding $false",
         f"& {ps1} __probe 0 1",
         f"'ping','two' | & {ps1} __probe 3 1",
         "'RC=' + $LASTEXITCODE",
         f"@() | & {ps1} __probe 0 1",
+        # the same pipelines straight into uv: the launcher must hand over exactly these bytes
+        "$OutputEncoding = New-Object System.Text.UTF8Encoding $true",
+        f"'ping','two' | & {ps1} __probe 0 1",
+        f"'ping','two' | {direct} __probe 0 1",
+        f"@() | & {ps1} __probe 0 1",
+        f"@() | {direct} __probe 0 1",
         "exit 0",
     ])  # fmt: skip
     r = _session(exe, body, stdin="WRONG\n")
-    assert [p["stdin"] for p in _probes(r)] == ["WRONG", "ping", ""], r.stdout + r.stderr
+    got = [p["stdin"] for p in _probes(r)]
+    assert got[:3] == ["WRONG", "ping", ""], r.stdout + r.stderr
+    assert got[3:] == [got[4], got[4], got[6], got[6]], r.stdout + r.stderr  # like a direct native call
     assert "RC=3" in r.stdout
     if name != "pwsh":
         return  # how Windows PowerShell 5.1 -File treats a redirected stdin is not asserted here

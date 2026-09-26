@@ -474,7 +474,7 @@ def _project(root: Path, files: dict[str, str | bytes]) -> Path:
         if isinstance(content, bytes):
             path.write_bytes(content)
         else:
-            path.write_text(content, encoding="utf-8")
+            path.write_text(content, encoding="utf-8", newline="\n")  # the same bytes on every OS
     return root
 
 
@@ -1310,7 +1310,7 @@ def test_hidden_imports_keep_everything_when_the_check_cannot_run(
 
 def test_hidden_imports_of_an_unparsable_file_is_a_deploy_error(src_tree: Path, tmp_path: Path) -> None:
     _project(src_tree, {"myapp/__init__.py": "", "myapp/core/__init__.py": "", "myapp/core/m.py": b"import json\n\ndef f(:\n"})
-    with pytest.raises(DeployError, match=r"src/myapp/core/m\.py:3: cannot parse it with the runner's Python") as err:
+    with pytest.raises(DeployError, match=r"src[/\\]myapp[/\\]core[/\\]m\.py:3: cannot parse it with the runner's Python") as err:
         mypyc.hidden_imports(make({}), tmp_path / "stage")
     assert err.value.code == 2
 

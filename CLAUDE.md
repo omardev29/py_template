@@ -331,7 +331,10 @@ header rules (with detector tests proving each rule fires).
   becomes LF). It reads the variable by name
   (`$ExecutionContext.SessionState.PSVariable.GetValue('input')`) when
   `$MyInvocation.ExpectingInput`; Core prefixes the Invoke-Expression call with
-  `$pipeIn | `. Windows PowerShell 5.1 encodes pipeline text with its ASCII `$OutputEncoding`.
+  `$pipeIn | `. PowerShell encodes pipeline text with `$OutputEncoding`, as for any native call
+  (5.1: ASCII by default; a UTF-8 one with a BOM, seen on GitHub's Windows runners, writes the
+  BOM even for an empty pipeline): `test_ps1_forwards_pipeline_input_and_keeps_raw_stdin` pins
+  it and compares the launcher with a direct uv call.
 - ConstrainedLanguage mode (AppLocker/WDAC policies run unsigned scripts in it) blocks every
   .NET call, `[Console]` included: the launcher checks
   `$ExecutionContext.SessionState.LanguageMode` first and stops with one `Write-Error` naming
@@ -3365,8 +3368,9 @@ Windows:
 
 macOS:
 - **`/usr/bin/cc`, `gcc` and `clang` exist without the developer tools** (LIMITATION, xcrun
-  shims that open an install dialog): Fix: `cmd_env._xcode_problem`, `cmd_nvim.c_compiler` (7,
-  12.2). Test: `test_envs_core.py::test_c_compiler_rejects_macos_xcode_shims`,
+  shims that open an install dialog): Fix: `cmd_env._xcode_problem` (the active developer
+  folder must hold a clang: `cmd_env.XCODE_CLANG`, the Command Line Tools or an Xcode.app
+  toolchain), `cmd_nvim.c_compiler` (7, 12.2). Test: `test_envs_core.py::test_c_compiler_rejects_macos_xcode_shims`,
   `test_cmd_nvim.py::test_c_compiler_skips_the_macos_shims_without_developer_tools`. Goes:
   never.
 

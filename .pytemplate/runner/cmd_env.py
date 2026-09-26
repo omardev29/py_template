@@ -256,12 +256,18 @@ def _msvc(platform: str = "win-amd64") -> tuple[bool, str]:
     return True, path
 
 
+# Where the active developer folder (`xcode-select -p`) keeps the clang the /usr/bin shims run:
+# the Command Line Tools (/Library/Developer/CommandLineTools/usr/bin/clang) or an Xcode.app's
+# default toolchain (Xcode 26's Contents/Developer has no usr/bin/xcrun, so that was no test)
+XCODE_CLANG = (("usr", "bin", "clang"), ("Toolchains", "XcodeDefault.xctoolchain", "usr", "bin", "clang"))
+
+
 def _xcode_problem() -> str | None:
     """macOS: why the /usr/bin compiler shims cannot compile, or None.
 
     /usr/bin/cc, gcc and clang exist on every Mac, even without the developer tools: they run
-    <developer dir>/usr/bin/xcrun. The shims themselves never run here (on a fresh Mac they open
-    the install dialog)."""
+    the clang of the active developer folder. The shims themselves never run here (on a fresh
+    Mac they open the install dialog)."""
     try:
         r = proc.run(["/usr/bin/xcode-select", "-p"], capture=True, check=False, echo=False)
     except DeployError:
@@ -269,8 +275,8 @@ def _xcode_problem() -> str | None:
     dev = r.stdout.strip()
     if r.returncode != 0 or not dev:
         return "no Xcode Command Line Tools"
-    if not os.path.isfile(os.path.join(dev, "usr", "bin", "xcrun")):
-        return f"the developer folder {dev} has no usr/bin/xcrun (usual after a macOS upgrade)"
+    if not any(os.path.isfile(os.path.join(dev, *parts)) for parts in XCODE_CLANG):
+        return f"the developer folder {dev} has no clang (usual after a macOS upgrade)"
     return None
 
 

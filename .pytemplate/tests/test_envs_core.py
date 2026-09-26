@@ -580,11 +580,18 @@ def test_c_compiler_rejects_macos_xcode_shims(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(cmd_env.proc, "run", fake_run)
     found, where = cmd_env._c_compiler()  # fresh Mac
     assert found is False and "Xcode" in where and calls[0] == ["/usr/bin/xcode-select", "-p"]
-    answer.update(rc=0, out=f"{tmp_path}\n")  # after an upgrade: no usr/bin/xcrun
+    answer.update(rc=0, out=f"{tmp_path}\n")  # after an upgrade: the folder lost its clang
     found, where = cmd_env._c_compiler()
-    assert found is False and "usr/bin/xcrun" in where
-    (tmp_path / "usr" / "bin").mkdir(parents=True)
-    (tmp_path / "usr" / "bin" / "xcrun").write_text("", encoding="utf-8")
+    assert found is False and "has no clang" in where
+    # Xcode.app (the macOS runners' Xcode 26 has no Contents/Developer/usr/bin/xcrun): the
+    # default toolchain's clang
+    xcode = tmp_path / "Toolchains" / "XcodeDefault.xctoolchain" / "usr" / "bin"
+    xcode.mkdir(parents=True)
+    (xcode / "clang").write_text("", encoding="utf-8")
+    assert cmd_env._c_compiler() == (True, "/usr/bin/cc")
+    (xcode / "clang").unlink()
+    (tmp_path / "usr" / "bin").mkdir(parents=True)  # the Command Line Tools layout
+    (tmp_path / "usr" / "bin" / "clang").write_text("", encoding="utf-8")
     assert cmd_env._c_compiler() == (True, "/usr/bin/cc")  # working tools
     answer.update(missing=True)
     assert cmd_env._c_compiler()[0] is False  # no xcode-select at all

@@ -977,7 +977,8 @@ def ci_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_ci_template_bom_and_crlf_do_not_reach_the_workflow(ci_template: Path) -> None:
     expected = render.ci_workflow(CFG)
-    ci_template.write_bytes(b"\xef\xbb\xbf" + ci_template.read_bytes().replace(b"\n", b"\r\n"))
+    lf = ci_template.read_bytes().replace(b"\r\n", b"\n")  # already CRLF in a Windows checkout
+    ci_template.write_bytes(b"\xef\xbb\xbf" + lf.replace(b"\n", b"\r\n"))
     assert render.ci_workflow(CFG) == expected
 
 

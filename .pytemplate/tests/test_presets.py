@@ -57,14 +57,18 @@ def _write(root: Path, files: dict[str, bytes]) -> None:
         path.write_bytes(data)
 
 
-def _snapshot(root: Path) -> dict[str, str]:
-    """Every file (sha256) and folder under root, without .build/ (scratch) and caches."""
+def _snapshot(root: Path, lf: bool = False) -> dict[str, str]:
+    """Every file (sha256) and folder under root, without .build/ (scratch) and caches; `lf`
+    reads CRLF as LF (a Windows checkout with core.autocrlf, which the runner writes back as LF)."""
     out: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root)
         if rel.parts[0] == ".build" or "__pycache__" in rel.parts:
             continue
-        out[rel.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "<dir>"
+        data = path.read_bytes() if path.is_file() else None
+        if data is not None and lf:
+            data = data.replace(b"\r\n", b"\n")
+        out[rel.as_posix()] = "<dir>" if data is None else hashlib.sha256(data).hexdigest()
     return out
 
 
@@ -1681,11 +1685,11 @@ def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, 
     env = _child_env(tmp_path)
     copy_root = tmp_path / "copy"
     presets.copy_template(copy_root)
-    before = _snapshot(copy_root)
+    before = _snapshot(copy_root, lf=True)
     for preset in [*(p for p in PRESETS if p != cfg.app.preset), cfg.app.preset]:
         r = _deploy(copy_root, "__init", preset, "--force", cwd=copy_root, env=env)
         assert r.returncode == 0, f"init {preset}:\n{r.stderr[-4000:]}"
-    after = _snapshot(copy_root)
+    after = _snapshot(copy_root, lf=True)
     assert sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k)) == []
 
 
