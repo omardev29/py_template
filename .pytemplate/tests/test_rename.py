@@ -9,6 +9,7 @@ safety checks and the command itself (dry run and a real run in a throwaway copy
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import random
 import shutil
@@ -884,6 +885,20 @@ def test_rename_after_a_hand_edit_finishes_it(command_project: Path, capsys: pyt
     assert (root / "src" / "beta").is_dir() and not (root / "src" / "alpha").exists()
     tree, skeleton = _tree(root), presets.skeleton("script", "beta")
     assert {k: tree.get(k) for k in skeleton} == skeleton  # the skeleton of the new name, pytemplate.toml included
+
+
+def test_rename_updates_only_the_projects_own_record(command_project: Path) -> None:
+    from runner import cmd_apply
+
+    state = command_project / ".pytemplate" / "state.json"
+    data = json.loads(state.read_text(encoding="utf-8"))
+    foreign = {"name": "myapp", "preset": "script", "dependencies": [], "dev": []}  # the template's, copied by new
+    state.write_text(json.dumps({**data, "applied": foreign}), encoding="utf-8")
+    assert rename.cmd_rename(_load(command_project), ["beta"]) == 0
+    assert cmd_apply.load_record() == foreign  # not adopted
+    state.write_text(json.dumps({**json.loads(state.read_text(encoding="utf-8")), "applied": {**foreign, "name": "beta"}}), encoding="utf-8")
+    assert rename.cmd_rename(_load(command_project), ["gamma"]) == 0
+    assert cmd_apply.load_record() == {**foreign, "name": "gamma"}  # the project's own: follows the rename
 
 
 def test_rename_to_a_third_name_after_a_hand_edit(command_project: Path) -> None:

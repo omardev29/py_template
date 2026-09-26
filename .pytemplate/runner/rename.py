@@ -1275,7 +1275,7 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
 
     from .cmd_env import ensure_lock
 
-    record = cmd_apply.load_record()  # read first: re-rendering rewrites state.json
+    record = cmd_apply.project_record(cfg)  # before the rename: its name is still the old one
     clean = tidy_before(cfg, planned)
     apply_plan(ROOT, planned)  # new_cfg: the renamed pytemplate.toml, validated before anything was written
     try:

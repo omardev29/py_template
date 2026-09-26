@@ -356,6 +356,23 @@ def test_rename_record_changes_only_the_name(tmp_path: Path, monkeypatch: pytest
     assert cmd_apply.load_record() == {**RECORD, "name": "beta"}
 
 
+def test_a_foreign_record_is_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`./deploy new` copies the template's state.json: its record (myapp, script) does not describe
+    the new project and must not steer apply (only a record named like the project counts)."""
+    project, uv = _project(tmp_path, monkeypatch, "flet")
+    state = project.root / ".pytemplate" / "state.json"
+    foreign = {"name": "myapp", "preset": "flet", "dependencies": ["flet==0.9.0", "flet-desktop==0.9.0"], "dev": ["flet-cli==0.9.0"]}
+    state.write_text(json.dumps({"files": {}, "applied": foreign}), encoding="utf-8")
+    cfg = project.cfg()
+    assert cmd_apply.trusted_record(cfg, "alpha") is None and cmd_apply.project_record(cfg) is None
+    assert cmd_apply.trusted_record(cfg, "myapp") == foreign  # pyproject.toml still says myapp: it is ours
+    applied = cmd_apply.applied_state(cfg, cmd_apply.read_project())
+    assert (applied.record, applied.dependencies, applied.renamed_from) == (None, FLET_DEPS, None)
+    assert _run(project) == 0
+    assert [c for c in uv.changing() if c[0] in ("add", "remove")] == []  # nothing to change
+    assert cmd_apply.load_record() == cmd_apply.record_of(cfg)  # replaced by the project's own
+
+
 # --- which preset the project was made with ------------------------------------------------------------
 
 

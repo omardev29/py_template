@@ -7,14 +7,17 @@ installing or removing the git hook. `apply` does all of it, and only what is ne
 run changes nothing and runs no uv add/remove/lock. `setup` is the same operation under its
 first-time name (a fresh clone): one implementation, `apply()`.
 
-Steps (every check happens before the first write; --dry-run prints the plan and stops):
+Steps (every check and refusal happens before the first write, in make_plan; --dry-run
+prints the plan and stops):
   1. What the project really is ("applied"): the app name whose package is in src/, the preset,
      the option-driven requirements (flet==V, raylib's {package}=={version}) applied last time.
-     The record `applied` in .pytemplate/state.json says what the last apply/rename wrote; the
-     project itself (pyproject.toml, src/) confirms or replaces it, so a missing, stale or
-     foreign record (a new project copies the template's) is harmless.
+     The record `applied` in .pytemplate/state.json says what the last apply/rename wrote; it
+     counts only when its name is app.name or pyproject.toml [project] name (a new project
+     copies the template's record: ignored), and the project itself (pyproject.toml, src/)
+     confirms or replaces it, so a missing or stale record is harmless.
   2. app.preset changed by hand: refused (exit 2). A preset decides src/, tests/, the
      dependencies and pyproject.toml: it cannot be switched in place (./deploy new DIR --preset P).
+     The managed pyproject parts must be rewritable (render.check_pyproject).
   3. PyPy newly supported (tool.uv environments has no PyPy yet): the Python 3.11 precheck of
      `mode --supports +pypy` (it runs `uv run --locked`, so before anything changes the lock).
   4. app.name changed by hand: the rename flow (rename.plan/apply_plan) from the applied name,
@@ -24,11 +27,11 @@ Steps (every check happens before the first write; --dry-run prints the plan and
      requirements (dev group too; --frozen because flet-cli==V pins flet==V, so a resolving add
      of one group alone has no solution), then cmd_env.ensure_lock (managed pyproject parts and
      one `uv lock`). If they fail, pyproject.toml is restored: nothing half-applied.
-  6. `uv sync --locked` of every supported backend's environment, a note for an unused one, the
-     exec bit of the launchers, the git hook (installed when hooks.pre_commit, pytemplate's own
-     hook removed when false), render.apply, ruff tidy-up of renamed files, the record.
-  7. Warnings for references that do not exist (src/<pkg>/, compile.modules, app.assets,
-     deploy.exe.icon, deploy.upx.path) and a summary.
+  6. `uv sync --locked --all-groups` of every supported backend's environment, the exec bit of
+     the launchers, the git hook (installed when hooks.pre_commit, pytemplate's own hook removed
+     when false), render.apply, ruff tidy-up of renamed files, the record.
+  7. A note for every unused .venv* (never deleted), warnings for references that do not exist
+     (src/<pkg>/, compile.modules, app.assets, deploy.exe.icon, deploy.upx.path), a summary.
 """
 
 from __future__ import annotations
@@ -225,13 +228,32 @@ def _old_name(cfg: Config, candidates: list[str | None]) -> str | None:
     return None
 
 
+def trusted_record(cfg: Config, project_name: str | None) -> dict[str, Any] | None:
+    """The `applied` record, when it describes this project: its name is app.name or pyproject.toml
+    [project] name (a hand edit changes only one of them). Anything else is foreign, e.g. the
+    template's own record in a project that `./deploy new` just made: ignored."""
+    record = load_record()
+    if record is None or record["name"] not in (cfg.app.name, project_name):
+        return None
+    return record
+
+
+def _project_name() -> str | None:
+    try:
+        return read_project().name
+    except DeployError:
+        return None
+
+
+def project_record(cfg: Config) -> dict[str, Any] | None:
+    """trusted_record(), reading pyproject.toml [project] name itself (rename: before it moves)."""
+    return trusted_record(cfg, _project_name())
+
+
 def applied_name(cfg: Config) -> str | None:
     """The name the project really has when app.name was changed by hand (None: no such case)."""
-    record = load_record()
-    try:
-        project_name = read_project().name
-    except DeployError:
-        project_name = None
+    project_name = _project_name()
+    record = trusted_record(cfg, project_name)
     return _old_name(cfg, [record["name"] if record else None, project_name])
 
 
@@ -271,7 +293,7 @@ def _applied_preset(cfg: Config, project: Project, record: dict[str, Any] | None
 
 
 def applied_state(cfg: Config, project: Project) -> Applied:
-    record = load_record()
+    record = trusted_record(cfg, project.name)
     preset = _applied_preset(cfg, project, record)
     if record is not None and record["preset"] == preset:
         deps, dev = list(record["dependencies"]), list(record["dev"])
