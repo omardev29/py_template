@@ -63,7 +63,8 @@ What a user of the finished program needs depends on the build method. An `exe`,
 OS and CPU it was built on (Linux `exe` and `nuitka` builds also need a glibc at least as new as
 the build machine's). A `.pyz`, a wheel or a `runtime = "system"` portable folder needs an
 installed CPython (or PyPy, when the project supports it) at or above the project's minimum
-Python: `python.cpython` (3.14 by default), or 3.11 when PyPy is supported.
+Python: `python.cpython` (3.14 by default), or 3.11 when PyPy is supported; a pyz with native
+dependencies needs the exact Python minor it was built for ([pyz](#pyz)).
 
 ## Getting started
 
@@ -591,10 +592,17 @@ creates `.venv-pypy`. `./deploy apply` runs the same check when `backend.support
 
 - While PyPy is supported, the code must be Python 3.11 in syntax and API: no `class C[T]` generics
   (PEP 695), and `from typing_extensions import override`, not `from typing import override`.
-- PyPy is pinned exactly (`python.pypy = "pypy@3.11.15"`): a loose request picks the newest
-  PyPy, and PyPy 8.0 (the `pypy@3.11.16` builds and later) changed the extension ABI to pp80, for
-  which, as of September 2026, raylib, numpy and cffi publish no wheels. Move the pin once your
-  dependencies ship wheels for the new ABI, then run `./deploy apply`.
+- PyPy is pinned exactly: `python.pypy = "pypy@3.11.15"` is a PyPy 7.3. PyPy 8.0.0 (released on
+  2026-09-19, with Python 3.11.16 and a beta of Python 3.12) changed the C-extension ABI to pp80:
+  wheels built for PyPy 7.3 do not load on it, and as of September 2026 raylib, numpy and cffi
+  publish none for it. A loose request (`pypy@3.11`) would pick PyPy 8. Its release notes say that,
+  barring security issues, it is the last release to support Python 3.11
+  (<https://pypy.org/posts/2026/09/pypy-v800-release.html>). The plan: move to `pypy@3.12.x` once
+  raylib and the project's other native dependencies publish wheels for PyPy 8, then run
+  `./deploy apply`.
+- PyPy has no single-file executable (PyInstaller, Nuitka and `flet build` do not support it):
+  `portable`, a folder with PyPy inside (optionally archived), is the only way to ship a PyPy
+  build to someone who has no PyPy.
 - uv resolves the pin from the downloads it knows: with uv 0.12, `pypy@3.11.15` installs PyPy
   7.3.23 (uv takes the newest PyPy build of that Python version). A later uv may stop offering
   it (uv 0.12 no longer offers 3.11.11 and 3.11.13): see [Troubleshooting](#troubleshooting).
@@ -606,10 +614,11 @@ creates `.venv-pypy`. `./deploy apply` runs the same check when `backend.support
 - The JIT needs about 1 s to warm up: very short scripts run slower than on CPython.
 - While PyPy is supported, mypy checks the code as Python 3.11 (`--python-version`). mypy has
   dropped a target version 6 to 9 months after that Python's end of life (3.8, 3.9); 3.11
-  reaches its end of life in October 2027. `uv.lock` pins mypy, so nothing changes until mypy is
-  upgraded. If an upgraded mypy says that 3.11 is not supported: move `python.pypy` to a newer
-  PyPy once the dependencies have wheels for it, keep mypy at the last version that accepts
-  3.11, or drop PyPy (`./deploy mode --supports -pypy`).
+  reaches its end of life in October 2027, so expect it around mid-2028. `uv.lock` pins mypy, so
+  nothing changes until mypy is upgraded. After an upgrade that refuses 3.11, `./deploy check`
+  and the PyPy check of `mode`/`apply` fail with mypy's message. Then move to PyPy 3.12 (above),
+  keep mypy at the last version that accepts 3.11, or drop PyPy for that project
+  (`./deploy mode --supports -pypy`).
 - raylib publishes PyPy wheels only for Linux x86_64, Windows x86_64 and macOS x86_64: on Apple
   Silicon and Linux ARM64 a raylib project needs `./deploy mode cpython --supports cpython,mypyc`.
 
@@ -622,7 +631,7 @@ it), then packages the app into `dist/`:
 |---|---|---|---|---|
 | `exe` | yes | yes | no | a PyInstaller executable (flet preset: `flet pack`, with the Flutter client inside) |
 | `portable` | yes | yes | yes | a folder with the interpreter and a launcher: the standalone build for PyPy |
-| `pyz` | yes | yes | yes | one zip file for every platform with an installed CPython or PyPy |
+| `pyz` | yes | yes | yes | one zip file run by an installed CPython or PyPy: every platform when pure |
 | `wheel` | yes | yes | yes | an installable package (`uv tool install`); mypyc: a platform wheel |
 | `nuitka` | yes | yes | no | a Nuitka executable (it compiles the dependencies to C too; slow builds) |
 | `flet` | yes | yes | no | `flet build` (flet preset only): desktop apps, Android, iOS and web |
@@ -639,6 +648,15 @@ keeps its default). Each build replaces the previous output of the same backend 
 | `wheel` | `dist/<name>-<backend>-wheel/<file>.whl` | `uv tool install <file>.whl`, then `<name>` |
 | `nuitka` | `dist/<name>-<backend>-nuitka/` | `<name>` (`<name>.exe` on Windows; `<name>.bin` in a standalone build on Linux or macOS when the app name has no `-`) |
 | `flet` | `dist/<name>-<backend>-flet-<target>/` | the platform's app |
+
+Which one to ship: `exe`, `nuitka`, `flet` and a bundled `portable` folder need nothing installed on
+the user's machine, but each build serves the OS and CPU it was built on (build on each OS). A `pyz`
+needs an installed Python and can serve every platform with one file: a pure one runs wherever a
+compatible Python does; one with native dependencies runs only where it has binaries, which for a
+local build is the platform that built it until target keys are added or the per-OS builds of the
+generated CI are merged ([pyz](#pyz)). A wheel suits users who install Python tools
+(`uv tool install`). PyPy has no single-file executable: a PyPy build ships as `portable` (PyPy
+inside), or as a pyz or a wheel for users who have PyPy.
 
 Arguments: `--onefile` and `--onedir` override `deploy.exe.mode` and `deploy.nuitka.mode` (exe
 and nuitka only); `--target KEY` (repeatable) adds platforms to a pyz; other flags go to the
@@ -701,34 +719,45 @@ the first start silently downloads one (the install manager's default); set
 
 ### pyz
 
-exe, nuitka and a bundled portable folder carry an interpreter, so each build serves one OS and
-CPU. A pyz carries none: one file serves every platform where a compatible Python is installed
-(the limits are below). It holds the app as `.py`, the dependencies, and, for each platform, the
-binaries (the mypyc extensions of the machine that built it, and native dependencies). Python
-cannot import `.pyd`/`.so` files from a zip, so the first start extracts it to a cache:
-`%LOCALAPPDATA%\<name>\pyz` (Windows), `~/Library/Caches/<name>/pyz` (macOS) or
-`$XDG_CACHE_HOME/<name>/pyz` (`~/.cache/<name>/pyz`). It keeps the three most recently started
-builds and any started in the last day; deleting the folder is always safe. Without a usable
-cache (a read-only home) it extracts into a private temporary folder for that run.
+exe, nuitka and a bundled portable folder carry an interpreter, so each build serves one OS, one
+CPU and, on Linux, one C library floor. A pyz carries none: one file can serve every platform
+where a compatible Python is installed. It holds the app as `.py`, the dependencies, and, per
+platform key (such as `cp314-linux-x86_64`), the binaries: the mypyc extensions of the machine
+that built it, and the native dependencies. Python cannot import `.pyd`/`.so` files from a zip,
+so the first start extracts it to a cache: `%LOCALAPPDATA%\<name>\pyz` (Windows),
+`~/Library/Caches/<name>/pyz` (macOS) or `$XDG_CACHE_HOME/<name>/pyz` (`~/.cache/<name>/pyz`). It
+keeps the three most recently started builds and any started in the last day; deleting the
+folder is always safe. Without a usable cache (a read-only home) it extracts into a private
+temporary folder for that run.
 
-- It runs on a CPython or PyPy at or above the project's minimum Python (`python.cpython`, 3.14
-  by default; 3.11 when PyPy is supported); an older one gets `<name>: needs Python X.Y or newer`.
-  On the maintainer's machine, a 1.7 MB pyz of a project with PyPy supported used the compiled
-  core on CPython 3.14 and ran the `.py` on PyPy and on CPython 3.13.
-- A build is "pure" when every target got the whole locked set of dependencies and none of them is
-  native: it then runs on any OS, CPU and C library with such a Python (a platform without a target
-  of its own uses the common part). Otherwise it carries the dependencies of each target, prints
-  `runs on: <keys>`, and stops elsewhere with
-  `this .pyz has no build for this interpreter and platform`. `[deploy.pyz] targets` (or `--target`)
-  adds platforms, such as `"cp314-linux-x86_64"`: the locked CPython minor (`cp314` wheels load only
-  in 3.14) on Windows, Linux or macOS, x86_64 or aarch64; there are no musl or Android targets. PyPy
-  targets come only from a PyPy build on that platform.
-- mypyc compiles only for the machine it runs on: its extensions are used on the platform that
-  built them, and on every other platform the same code runs as `.py` (slower, same result).
-  The generated CI builds a pyz on Windows, Linux and macOS and merges them:
-  `./deploy pyz-merge A.pyz B.pyz... --out all.pyz` takes parts of one build (the same app,
-  minimum Python, locked dependencies and code), keeps every platform's binaries, and also
-  writes `all.cmd` next to it.
+How far a pyz reaches depends on its dependencies; the build prints which case it is:
+
+- **Pure** (`pure: ...`): every locked dependency is pure Python and none is limited to some
+  platforms or Python versions by a marker. Such a pyz has no platform-specific file but the mypyc
+  extensions, and runs on any CPython or PyPy at or above the project's minimum Python
+  (`python.cpython`, 3.14 by default; 3.11 when PyPy is supported); an older one gets
+  `<name>: needs Python X.Y or newer`. It is tested on Windows, macOS and Linux with glibc; Linux
+  with musl (Alpine), Android through Termux (`python <name>.pyz`, or `./<name>.pyz` through
+  termux-exec), the BSDs and other CPUs are expected to work but untested (the bootstrap needs only
+  the standard library and a writable cache). On the maintainer's machine, a 1.7 MB pure pyz of a
+  project with PyPy supported used the compiled core on CPython 3.14 and ran the `.py` on PyPy and
+  on CPython 3.13.
+- **Not pure** (`runs on: <keys>`): native dependencies (raylib, flet, any platform wheel), or a pin
+  that a marker leaves out on some target. It carries the dependencies of each target key and runs
+  only there: the exact CPython minor of the lock (`cp314` wheels load only in 3.14, so a Python
+  3.13 or 3.15 gets `this .pyz has no build for this interpreter and platform`), on Windows, Linux
+  or macOS, x86_64 or aarch64 (Linux: glibc 2.28 on x86_64 or 2.35 on aarch64, or newer; macOS 13 or
+  newer). There are no musl or Android targets.
+- `[deploy.pyz] targets` is `["host"]` by default, so a local build that is not pure runs only on
+  the platform that built it. For one file that serves several platforms, add target keys
+  (`targets = ["host", "cp314-windows-x86_64"]`, or `--target KEY`: the locked CPython minor on
+  any of those systems and CPUs; PyPy keys come only from a PyPy build on that platform), or use
+  the generated CI, which builds a pyz on Windows, Linux and macOS and merges them on every run.
+- mypyc compiles only for the machine it runs on: its extensions are used for the key that built
+  them, and everywhere else the same code runs as `.py` (slower, same result).
+  `./deploy pyz-merge A.pyz B.pyz... --out all.pyz` joins pyz files built on several machines from
+  one commit (the same app, minimum Python, locked dependencies and code) into one file with every
+  platform's binaries, and also writes `all.cmd` next to it.
 - On Linux the dependencies of pyz and portable builds target glibc 2.28 (x86_64) or 2.35
   (aarch64) when the build machine can use those wheels (else its own, with a warning); on macOS,
   macOS 13 or newer (`MACOSX_DEPLOYMENT_TARGET` changes it).
@@ -881,6 +910,13 @@ A 2D game with raylib's cffi binding (the `raylib` package). PyPy is the default
   build).
 - There is no PyPy wheel for Apple Silicon or Linux ARM64 ([PyPy](#pypy)), and on Linux the game
   needs the GL/X11 libraries ([Troubleshooting](#troubleshooting)).
+- Wayland or X11 on Linux, per the release notes of raylib-python-cffi 6.0.1.0, the version the
+  preset pins (<https://github.com/electronstudio/raylib-python-cffi/releases>): `raylib` (GLFW, the
+  default package) opens a native Wayland window and falls back to X11 when there is no Wayland;
+  `pyray.glfw_init_hint(pyray.GLFW_PLATFORM, pyray.GLFW_PLATFORM_X11)`, called before the window is
+  created (in interpreted code), forces XWayland. `raylib_sdl` (SDL3) uses X11 (XWayland on a
+  Wayland desktop). On Wayland, GLFW cannot place a window: `SetWindowPosition` does nothing there.
+  The template's CI and e2e runs test X11 only (xvfb): the native Wayland path is untested.
 
 ### flet
 
