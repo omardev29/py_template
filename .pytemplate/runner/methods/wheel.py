@@ -146,7 +146,7 @@ def build(req: BuildRequest) -> Path:
         shutil.copytree(SRC / assets, work / "src" / cfg.pkg / "assets", ignore=_skip, dirs_exist_ok=True)
     (work / "pyproject.toml").write_text(_pyproject(cfg, req.compiled), encoding="utf-8", newline="\n")
     if req.compiled:
-        (work / "mypy.ini").write_text(render.mypy_ini(cfg, "mypyc", for_compile=True), encoding="utf-8", newline="\n")
+        (work / "mypy.ini").write_text(render.mypy_ini(cfg, "mypyc", for_compile=work), encoding="utf-8", newline="\n")
         (work / "setup.py").write_text(setup_py(cfg), encoding="utf-8", newline="\n")
     out = dist_path(req)
     if out.exists():

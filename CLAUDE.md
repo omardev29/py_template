@@ -1062,8 +1062,11 @@ Formats:
 - Path styles differ per tool: `.build/cfg/mypy-*.ini` uses relative `mypy_path = src` /
   `files = src, tests`, so mypy must run with cwd = ROOT (the `proc.run` default); the ruff and
   pyright copies under `.build/cfg` use absolute paths (`absolute=True`) because those tools
-  resolve paths relative to the config file; the compile-time `mypy.ini` only carries an
-  absolute `typings` path because mypyc runs with cwd = stage.
+  resolve paths relative to the config file; the compile-time `mypy.ini` (`render.mypy_ini`
+  with `for_compile=` the folder it is written to: the mypyc profile dir, the wheel's work dir)
+  only carries `mypy_path = $MYPY_CONFIG_FILE_DIR/<relative path to typings>`, because mypyc
+  runs with cwd = stage and mypy splits `mypy_path` on `,` and `:` before expanding variables (an
+  absolute path in a project folder with a comma lost typings/).
 
 ### 6.3 `pyproject.toml` managed parts
 
@@ -2784,6 +2787,12 @@ mypy and mypyc:
   refuses `strict` (6.1, 8). Test:
   `test_mypyc_core.py::test_mypy_ini_merges_overrides_with_the_generated_sections`,
   `test_config_rules.py::test_mypy_overrides_invalid`. Goes: never.
+- **mypy splits `mypy_path` on `,` and `:` before it expands variables** (LIMITATION): the
+  absolute typings path of the compile-time mypy.ini fell apart in a project folder with a
+  comma (or a colon), so mypyc lost the project's stubs (the raylib preset's) and refused the
+  skeleton. Fix: `render.mypy_ini` writes it relative to the ini as
+  `$MYPY_CONFIG_FILE_DIR/<relative path>` (6.2). Test:
+  `test_mypyc_core.py::test_compile_mypy_ini_finds_typings_in_any_project_folder`. Goes: never.
 
 setuptools:
 - **An extension is rebuilt only when a source is newer** (LIMITATION): a new `opt_level`, C

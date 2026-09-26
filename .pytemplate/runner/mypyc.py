@@ -271,7 +271,7 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
     ui.detail(f"  stage: {changed} file(s) updated in {rel(prof.stage)}")
 
     config_file = prof.dir / "mypy.ini"
-    config_file.write_text(render.mypy_ini(cfg, "mypyc", for_compile=True), encoding="utf-8", newline="\n")
+    config_file.write_text(render.mypy_ini(cfg, "mypyc", for_compile=prof.dir), encoding="utf-8", newline="\n")
     spec: dict[str, object] = {
         "stage": str(prof.stage),
         "config": str(config_file),

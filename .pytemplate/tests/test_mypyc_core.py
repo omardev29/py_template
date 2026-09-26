@@ -1455,12 +1455,37 @@ COMPILED_KEYS = list(render.load_profile("mypyc")["mypy_compiled"])
 
 
 @pytest.mark.parametrize("for_compile", [False, True])
-def test_mypy_ini_relaxes_compile_exclude(for_compile: bool) -> None:
+def test_mypy_ini_relaxes_compile_exclude(for_compile: bool, tmp_path: Path) -> None:
     cfg = make({"compile": {"modules": ["myapp.core"], "exclude": ["myapp.core.loose", "myapp.core.sub"]}})
-    ini = _ini(render.mypy_ini(cfg, "mypyc", for_compile=for_compile))
+    ini = _ini(render.mypy_ini(cfg, "mypyc", for_compile=tmp_path if for_compile else None))
     assert COMPILED_KEYS and all(ini.getboolean("mypy-myapp.core.*", key) for key in COMPILED_KEYS)
     for section in ("mypy-myapp.core.loose.*", "mypy-myapp.core.sub.*"):  # x.* covers x itself too
         assert all(ini.getboolean(section, key) is False for key in COMPILED_KEYS)
+
+
+PROJECT_FOLDERS = ["a,b"] + ([] if os.name == "nt" else ["a:b"])  # mypy splits mypy_path on both
+
+
+@needs_venv
+@pytest.mark.parametrize("folder", PROJECT_FOLDERS)
+def test_compile_mypy_ini_finds_typings_in_any_project_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, folder: str) -> None:
+    """The compile-time mypy.ini held typings/ as an absolute path, which mypy splits on ',' and
+    ':': from a project folder with a comma mypyc lost the project's stubs (the raylib preset's)."""
+    root = _project(
+        tmp_path / folder / "proj",
+        {
+            "typings/fastlib/__init__.pyi": "def f(x: int) -> int: ...\n",
+            ".build/mypyc-dev/stage/usefast.py": "import fastlib\n\n\ndef g(x: int) -> int:\n    return fastlib.f(x)\n",
+        },
+    )
+    monkeypatch.setattr(render, "ROOT", root)
+    ini_dir = root / ".build" / "mypyc-dev"
+    text = render.mypy_ini(make({}), "mypyc", for_compile=ini_dir)
+    assert "mypy_path = $MYPY_CONFIG_FILE_DIR/../../typings\n" in text
+    (ini_dir / "mypy.ini").write_text(text, encoding="utf-8")
+    argv = [str(TOOL_PYTHON), "-m", "mypy", "--config-file", str(ini_dir / "mypy.ini"), "--no-incremental", "usefast.py"]
+    r = subprocess.run(argv, cwd=ini_dir / "stage", env=proc.base_env(), capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stdout + r.stderr  # mypyc runs mypy the same way: from the stage
 
 
 def test_mypy_ini_without_compiled_rules_has_no_exclude_sections() -> None:

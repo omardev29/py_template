@@ -19,6 +19,7 @@ import copy
 import difflib
 import hashlib
 import json
+import os
 import re
 import tomllib
 from pathlib import Path
@@ -108,14 +109,19 @@ def _ini_section(name: str, options: dict[str, Any]) -> list[str]:
     return [*lines, ""]
 
 
-def mypy_ini(cfg: Config, profile: str, *, for_compile: bool = False) -> str:
-    """Return the mypy config. `for_compile`: the one mypyc uses from the stage (absolute paths)."""
+def mypy_ini(cfg: Config, profile: str, *, for_compile: Path | None = None) -> str:
+    """Return the mypy config. `for_compile`: the folder of the mypy.ini that mypyc reads while it
+    runs in its stage (the mypyc profile dir, the wheel's work dir), which typings/ is found from."""
     data = load_profile(profile)
     head: dict[str, Any] = {}
     typings = typings_dir()
-    if for_compile:
+    if for_compile is not None:
         if typings:
-            head["mypy_path"] = typings.as_posix()
+            # Relative to the ini itself, never absolute: mypy splits mypy_path on ',' and ':'
+            # BEFORE expanding variables, so a project folder with a comma (or a colon, or a
+            # Windows drive) lost typings/; $MYPY_CONFIG_FILE_DIR is expanded after the split
+            relative = Path(os.path.relpath(typings, for_compile)).as_posix()
+            head["mypy_path"] = f"$MYPY_CONFIG_FILE_DIR/{relative}"
     else:
         head["mypy_path"] = ["src", "typings"] if typings else "src"
         head["files"] = ["src", "tests"] if (ROOT / "tests").is_dir() else "src"
