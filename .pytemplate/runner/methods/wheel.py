@@ -24,6 +24,7 @@ from ..cmd_build import BuildRequest, dist_path
 from ..config import Config, compiled_paths
 from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, SRC, rel
 from ..ui import DeployError
+from . import common
 
 
 def _locked_version(package: str) -> str:
@@ -171,8 +172,7 @@ def build(req: BuildRequest) -> Path:
         (work / "mypy.ini").write_text(render.mypy_ini(cfg, "mypyc", for_compile=True), encoding="utf-8", newline="\n")
         (work / "setup.py").write_text(setup_py(cfg), encoding="utf-8", newline="\n")
     out = dist_path(req)
-    if out.exists():
-        shutil.rmtree(out)
+    common.remove_output(out)
     tool = envs.tool_env(cfg)
     # Synced first (a `--no-check` build never ran `uv run --locked`); `uv build` ignores
     # UV_PROJECT_ENVIRONMENT (it would take ./.venv, wrong under WSL), hence --python

@@ -368,9 +368,8 @@ def build(req: BuildRequest) -> Path:
     host = common.host_target(cfg, req.backend)
     out = dist_path(req, f"-{host.key}" if bundled else "")
     for suffix in (".zip", ".tar.gz"):  # the previous archive must never sit next to a new or failed folder
-        Path(f"{out}{suffix}").unlink(missing_ok=True)
-    if out.exists():
-        shutil.rmtree(out)
+        common.remove_output(Path(f"{out}{suffix}"))
+    common.remove_output(out)  # whole or not at all: the app may still run from it
     out.mkdir(parents=True)
 
     common.copy_app(req.app_dir, out / "app", extensions=True)

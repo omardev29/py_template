@@ -2572,6 +2572,46 @@ def test_portable_system_warns_about_pins_other_platforms_need(
         assert warning in err and "cp314-linux-x86_64" in err and "warning:" in err
 
 
+def _old_output(dist: Path) -> Path:
+    out = dist / "x-cpython-pyz"
+    out.mkdir(parents=True)
+    (out / "x.pyz").write_bytes(b"old")
+    (out / "x.cmd").write_text("old", encoding="utf-8")
+    return out
+
+
+def test_a_previous_output_in_use_is_left_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows: the previous app still runs from dist/ (or a console sits in it). rmtree deleted
+    # half of the folder, then PermissionError: a traceback and "internal runner error"
+    out = _old_output(tmp_path / "dist")
+
+    def in_use(src: Any, dst: Any) -> None:
+        raise PermissionError(13, "The process cannot access the file because it is being used by another process", str(src))
+
+    monkeypatch.setattr(common, "_move", in_use)
+    with pytest.raises(DeployError, match="in use") as e:
+        common.remove_output(out)
+    assert e.value.code == 1 and "x-cpython-pyz" in str(e.value)
+    assert sorted(p.name for p in out.iterdir()) == ["x.cmd", "x.pyz"]  # nothing deleted
+    assert [p.name for p in out.parent.iterdir()] == ["x-cpython-pyz"]  # no scratch folder left
+
+
+def test_a_previous_output_that_cannot_be_deleted_is_moved_aside(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # A file the moved folder still holds (an immutable file, a scanner): the build goes on
+    out = _old_output(tmp_path / "dist")
+    monkeypatch.setattr(common.shutil, "rmtree", lambda path, *a, **k: None)
+    common.remove_output(out)
+    assert not out.exists()
+    left = [p for p in out.parent.iterdir()]
+    assert len(left) == 1 and left[0].name.startswith(".x-cpython-pyz.old-")
+    assert "could not delete" in capsys.readouterr().err
+    archive = tmp_path / "dist" / "a.zip"
+    archive.write_bytes(b"zip")
+    common.remove_output(archive)  # a file goes as it is
+    assert not archive.exists()
+    common.remove_output(archive)  # a missing one is fine
+
+
 @pytest.mark.parametrize("fail", [False, True])
 def test_portable_build_removes_the_previous_archive(sandbox: Path, monkeypatch: pytest.MonkeyPatch, fail: bool) -> None:
     # archive = false (or a failed rebuild) left the old dist/<n>...tar.gz next to the new folder:

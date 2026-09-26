@@ -73,7 +73,11 @@ def _write_archive(root: Path, out: Path, modes: Mapping[str, int] | None = None
                         shutil.copyfileobj(src, dst)
                 else:
                     z.write(path, name)
-    tmp.replace(out)
+    try:
+        tmp.replace(out)
+    except OSError as e:  # Windows: the previous .pyz is in use
+        tmp.unlink(missing_ok=True)
+        raise DeployError(f"cannot replace {rel(out)}: it is in use ({e.strerror or e}): close the app that uses it and try again", 1) from None
     if not IS_WINDOWS:
         out.chmod(0o755)
 
@@ -184,8 +188,7 @@ def build(req: BuildRequest) -> Path:
         raise DeployError("bug: the pyz has compiled extensions in common/")
 
     out_dir = dist_path(req)
-    if out_dir.exists():
-        shutil.rmtree(out_dir)
+    common.remove_output(out_dir)
     out_dir.mkdir(parents=True)
     pyz = out_dir / f"{cfg.app.name}.pyz"
     _write_archive(root, pyz)

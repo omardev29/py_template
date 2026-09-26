@@ -10,6 +10,7 @@ import re
 import shutil
 import sys
 import sysconfig
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -407,6 +408,38 @@ def requirements_digest(requirements: Path) -> str:
         if line and not line[0].isspace() and not line.startswith(("#", "-")):
             lines.append(line.rstrip("\\").strip())
     return hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest()[:16]
+
+
+def _move(src: Path, dst: Path) -> None:
+    os.replace(src, dst)
+
+
+def remove_output(path: Path) -> None:
+    """Remove a previous build output in dist/ (a file or a folder) whole, or not at all.
+
+    A folder is first moved aside in the same folder: Windows refuses that while a file inside
+    is in use (the app still running from it, a console in it), and rmtree used to delete half
+    of the folder before it failed with a traceback. What the moved copy still holds (a scanner,
+    an immutable file) is only a warning: the new output has its place.
+    """
+    if not path.exists() and not path.is_symlink():
+        return
+    hint = "close the app or window that uses it and build again"
+    if path.is_file() or path.is_symlink():
+        try:
+            path.unlink()
+        except OSError as e:
+            raise DeployError(f"cannot replace {rel(path)}: it is in use or read-only ({e.strerror or e}): {hint}", 1) from None
+        return
+    aside = Path(tempfile.mkdtemp(prefix=f".{path.name}.old-", dir=path.parent))
+    try:
+        _move(path, aside / path.name)
+    except OSError as e:
+        aside.rmdir()
+        raise DeployError(f"cannot replace {rel(path)}: a file in it is in use ({e.strerror or e}): {hint}", 1) from None
+    shutil.rmtree(aside, ignore_errors=True)
+    if aside.exists():
+        ui.warn(f"could not delete all of the previous output, moved to {rel(aside)}: delete it by hand")
 
 
 def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:

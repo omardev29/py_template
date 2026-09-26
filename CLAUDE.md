@@ -1381,7 +1381,12 @@ Formats:
   symlinked file once (a bundled runtime's `bin/python3 -> python3.14`).
 - Output: `dist_path(req, suffix)` = `dist/<app.name>-<backend>-<method><suffix>`; portable
   with a bundled runtime adds `-<target key>`, flet adds `-<target>`. The CI template hard-codes
-  `dist/<NAME>-<BUILD_BACKEND>-pyz/<NAME>.pyz`: it is coupled to `BuildRequest.out_name`.
+  `dist/<NAME>-<BUILD_BACKEND>-pyz/<NAME>.pyz`: it is coupled to `BuildRequest.out_name`. pyz,
+  portable and wheel replace their previous output whole or not at all
+  (`common.remove_output`: a folder is first moved aside in `dist/`, which Windows refuses while
+  a file in it is in use, the app still running from it: exit 1 naming it, nothing deleted; what
+  the moved copy still holds is a warning); `pyz._write_archive` turns a `.pyz` in use into the
+  same error. rmtree used to delete half of the folder, then fail with a traceback.
 - Work dirs live under `.build/<name>/<backend>` (`exe-stage`, `pyinstaller`, `flet-pack`,
   `pyz`, `wheel`, `nuitka-stage`, `nuitka`, `flet-build`); portable builds straight into `dist/`.
 - Target keys: `^(cp|pp)(\d)(\d+)-(windows|linux|macos)-(x86_64|aarch64)$`
@@ -3507,6 +3512,9 @@ Behaviour:
   extensions out of `common/`, and a cpython/pypy wheel stays tagged `py3-none-any`.
 - `sync_tree` does not detect a case-only rename (`Data.py` -> `data.py`) on a
   case-insensitive file system: the stage keeps the old spelling until `./deploy clean`.
+- exe and nuitka still remove their previous `dist/` output with rmtree: on Windows, with the
+  app running from it, half of it goes before a traceback. `common.remove_output` is the fix
+  pyz, portable and wheel use; `exe.build` and `nuitka.build` do not call it yet.
 - A pyz built on Windows stores no x bit (Windows files have no Unix mode), so the executables of
   its Linux or macOS targets (`--target`), or of a script in `src/`, are not runnable where it is
   extracted; the generated CI builds each OS's part on that OS, and `pyz-merge` keeps the parts'
