@@ -4,8 +4,8 @@ Each preset lives in .pytemplate/presets/<name>/:
   preset.toml      description, dependencies, extra [tool.uv] keys and extra pyproject tables
   files/           skeleton copied to the root. `__pkg__` in a path is replaced with the app
                    package, and `{{name}}`/`{{pkg}}` in text with the name and the package.
-  constraints.txt  optional: the versions the template was tested with for every package the
-                   preset adds to the template's own uv.lock (see `constraints`).
+  constraints.txt  optional: the versions the template was tested with for every package a
+                   project of the preset locks, its whole tested tree (see `constraints`).
 
 `./deploy new` copies the template (`copy_template`) and runs `init` in the copy: `init` is its
 internal step (and how the template maintainer regenerates the template root).
