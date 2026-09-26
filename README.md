@@ -1185,8 +1185,9 @@ only deletes files is checked too).
 - It works from any git client (Git Bash, cmd, PowerShell, xonsh, VS Code, lazygit): git runs
   hooks with its own `sh`, and the hook calls the POSIX launcher, which finds uv by itself. When
   the launcher cannot check the commit (uv not found from a GUI client, a broken
-  `pytemplate.toml`), the hook says so and names `git commit --no-verify` and
-  `./deploy hooks uninstall`. A checkout without `./deploy` (another branch) skips the checks.
+  `pytemplate.toml`, a branch whose older `./deploy` has no `hooks run`), the hook says so and
+  names `git commit --no-verify` and `./deploy hooks uninstall`. A checkout without `./deploy`
+  (another branch) skips the checks.
 - After the runner changes, `./deploy hooks` shows the hook as outdated until `./deploy apply` or
   `./deploy hooks install` rewrites it.
 
@@ -1302,11 +1303,14 @@ Pinned, and moved on purpose:
 | GitHub actions | `.pytemplate/templates/ci.yml` and `.github/workflows/template-*.yml` | edit the template, then `./deploy render`; never edit the generated `ci.yml` |
 | the Neovim test | `cmd_nvim.STARTER_REV` and `.pytemplate/nvim/tests/lazy-lock.json` | from one green run without the lock (CLAUDE.md, section 13.1) |
 
-Not pinned: uv itself (the generated CI takes the latest, never older than the floor), the
-GitHub runner images (`*-latest`), and the Neovim plugins of a user's own config. Known dates:
-Python 3.11 reaches its end of life in October 2027, and mypy has dropped a target version 6 to 9
-months after that ([PyPy](#pypy)); Node 24, the runtime of the GitHub actions used here, reaches
-its end of life on 2028-04-30, so move the action versions before then.
+Not pinned: uv itself (the generated CI takes the latest, never older than the floor) and the GitHub
+runner images (`*-latest`), on purpose: CI runs what users run; nor the Neovim plugins of a user's
+own config. Known good in September 2026: uv 0.12.19, CPython 3.14.7, PyPy 7.3.23 (`pypy@3.11.15`),
+mypyc 2.3.1, Flet 1.0.1 and Neovim 0.12.5; the template's CI first ran on the GitHub images
+ubuntu-24.04, macos-26-arm64 and windows-2025-vs2026. Known dates: Python 3.11 reaches its end of
+life in October 2027, and mypy has dropped a target version 6 to 9 months after that
+([PyPy](#pypy)); Node 24, the runtime of the GitHub actions used here, reaches its end of life on
+2028-04-30, so move the action versions before then.
 
 The template's root `src/`, `tests/` and `pytemplate.toml` are the script preset's skeleton
 rendered with the name `myapp`: change the preset in `.pytemplate/presets/script/files/` and
