@@ -80,7 +80,8 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
       `pytemplate.toml`, their code (`src/`, `tests/`) and their dependencies (`[project]`
       dependencies and dependency groups of `pyproject.toml`, `uv.lock` for the versions),
       without editing any of them.
-    Known violation, to fix: the JIT keys (section 15.2).
+    The contract starts with the keys and values of September 2026: the template had no users
+    before, so the CPython JIT keys removed then stay unknown keys (owner decision).
 
 ## 2. What this is
 
@@ -1140,8 +1141,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `pypy` (`pypy@[0-9]+\.[0-9]+\.[0-9]+`, exact: a loose request picks the newest PyPy, and PyPy
   8.0 changed the extension ABI to pp80; in September 2026 raylib, numpy and cffi published no
   pp80 wheels. Bump the pin only once the dependencies ship wheels for the new ABI, then
-  `./deploy lock`). The removed CPython JIT keys (`jit`, `jit_interpreter`) still fail like any
-  unknown key, which breaks rule 1.11 (section 15.2). `Config.min_python`
+  `./deploy lock`). The removed CPython JIT keys (`jit`, `jit_interpreter`) fail like any
+  unknown key: they went before the template had users, so rule 1.11 does not cover them.
+  `Config.min_python`
   is the lowest minor in use (CPython always, PyPy's `Config.pypy_minor` while supported),
   compared as numbers.
 - `[typing]`: `profile = auto|mypyc|strict|warn|off`, `relaxed = off|warn|strict` (what `auto`
@@ -4176,12 +4178,6 @@ macOS:
 ### 15.2 Our open issues and fragile points
 
 Behaviour:
-- Rule 1.11 is broken by the keys of the removed CPython JIT (`python.jit`,
-  `python.jit_interpreter`): every `pytemplate.toml` the template shipped before September 2026
-  has `jit = false`, so such a project that takes the new runner stops with `unknown key
-  'python.jit'` (exit 2) on every command. The fix: `config` recognises the retired keys, warns
-  (the JIT is gone; delete the line) and ignores them; `test_removals.py` then expects the
-  warning instead of the error.
 - `cmd_dev.split_backend` treats a first argument equal to `cpython`, `pypy` or `mypyc` (and
   `all` for `test`/`check`) as the backend: an app argument with that value must be preceded
   by an explicit backend (`./deploy run cpython mypyc`). By design: the usual fix, `--`, is
