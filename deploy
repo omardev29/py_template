@@ -116,13 +116,29 @@ _pt_winpath() {
             _pt_p=$_pt_r:${_pt_t:-/} ;;
         //*) ;;
         /*)
-            # Inside the MSYS2/Cygwin root: only cygpath knows the mounts.
-            if command -v cygpath >/dev/null 2>&1; then
-                _pt_t=$(cygpath -m -- "$_pt_p" 2>/dev/null) || _pt_t=
-                case $_pt_t in
-                    [A-Za-z]:/*) _pt_p=$_pt_t ;;
-                esac
-            fi ;;
+            # Inside the MSYS2/Cygwin root: only cygpath knows the mounts. The
+            # root's own first: a non-login shell may have no /usr/bin on PATH,
+            # or WinuxCmd's cygpath (niubash, xonsh-shell-kit) there.
+            _pt_t=
+            if [ -x /usr/bin/cygpath ]; then
+                _pt_t=$(/usr/bin/cygpath -m -- "$_pt_p" 2>/dev/null) || _pt_t=
+            fi
+            case $_pt_t in
+                [A-Za-z]:/*) ;;
+                *)
+                    _pt_t=
+                    if command -v cygpath >/dev/null 2>&1; then
+                        _pt_t=$(cygpath -m -- "$_pt_p" 2>/dev/null) || _pt_t=
+                    fi ;;
+            esac
+            case $_pt_t in
+                [A-Za-z]:/*) _pt_p=$_pt_t ;;
+                *)
+                    # Keep the POSIX path: MSYS converts it for uv.exe itself,
+                    # while \home\x would name a folder on the current drive.
+                    _pt_r=$_pt_p
+                    return 0 ;;
+            esac ;;
     esac
     _pt_backslashes "$_pt_p"
 }

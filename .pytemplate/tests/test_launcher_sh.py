@@ -815,6 +815,35 @@ def test_windows_helpers_in_posix_shells(name: str) -> None:
 
 @needs_posix
 @pytest.mark.parametrize("name", ["sh", "dash", "bash", "busybox", "ksh", "mksh", "yash", "zsh"])
+def test_winpath_inside_the_msys_root(name: str, tmp_path: Path) -> None:
+    """A path inside the MSYS2/Cygwin root (/home/me/p) needs that root's cygpath. A non-login MSYS2
+    shell has no /usr/bin on PATH (or WinuxCmd's cygpath, which answers \\home\\me\\p): then the
+    POSIX path is kept, which MSYS converts for uv.exe itself, never turned into \\home\\me\\p
+    (a folder on the current drive: every command failed)."""
+    if Path("/usr/bin/cygpath").exists():
+        pytest.skip("a real /usr/bin/cygpath here")
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    env = _clean_env(PATH=f"{fake}:/usr/bin:/bin")
+    calls = "_pt_winpath /home/me/p\nprintf 'W:%s\\n' \"$_pt_r\"\n_pt_winpath '/tmp/a b'\nprintf 'W:%s\\n' \"$_pt_r\"\n"
+    assert _run_helpers(name, calls, env) == ["W:/home/me/p", "W:/tmp/a b"]  # no cygpath at all
+    cygpath = fake / "cygpath"
+    cygpath.write_text('#!/bin/sh\n[ "$1 $2" = "-m --" ] && printf \'%s\\n\' "C:/msys64$3"\n', encoding="ascii", newline="\n")
+    cygpath.chmod(0o755)
+    assert _run_helpers(name, calls, env) == ["W:C:\\msys64\\home\\me\\p", "W:C:\\msys64\\tmp\\a b"]
+    cygpath.write_text("#!/bin/sh\nprintf '%s\\n' '\\home\\me\\p'\n", encoding="ascii", newline="\n")  # WinuxCmd's
+    assert _run_helpers(name, calls, env) == ["W:/home/me/p", "W:/tmp/a b"]
+
+
+def test_winpath_asks_the_roots_own_cygpath_first() -> None:
+    """The MSYS/Cygwin root's /usr/bin/cygpath comes before the first cygpath on PATH (WinuxCmd's
+    copy from niubash or xonsh-shell-kit, which knows no mounts)."""
+    body = _launcher_functions("_pt_winpath")
+    assert 0 <= body.index("/usr/bin/cygpath -m") < body.index("command -v cygpath"), body
+
+
+@needs_posix
+@pytest.mark.parametrize("name", ["sh", "dash", "bash", "busybox", "ksh", "mksh", "yash", "zsh"])
 def test_registry_path_quoted_entries(name: str, tmp_path: Path) -> None:
     """Quoted PATH entries ("C:\\Program Files\\x"), as some installers write them, are found."""
     uvdir = tmp_path / "q dir"

@@ -253,8 +253,12 @@ header rules (with detector tests proving each rule fires).
   only there: on POSIX a backslash is part of a file name (`/data/a\b/proj` works).
 - On Windows the script path and `PYTEMPLATE_CALLER_CWD` are handed over as `C:\...`: `/c/x`
   and `/cygdrive/c/x` are converted in pure sh (drive letter upper-cased); `cygpath -m` runs
-  only for paths inside the MSYS/Cygwin root such as `/home` or `/tmp`, and only an `X:/...`
-  answer is accepted.
+  only for paths inside the MSYS/Cygwin root such as `/home` or `/tmp` (the root's own
+  `/usr/bin/cygpath` first, then the first one on PATH: a non-login MSYS2 shell has no
+  `/usr/bin` on PATH, and WinuxCmd's copy may be there), and only an `X:/...` answer is
+  accepted. Without one the POSIX path is handed over unchanged: MSYS converts it for uv.exe
+  itself, while the old `\home\x` named a folder on the current drive and every command
+  failed (`test_winpath_inside_the_msys_root`).
 - `%NAME%` in registry values is expanded from the environment, retrying the upper-case name
   (MSYS2/Cygwin upper-case `SYSTEMROOT`, `PROGRAMFILES`...). Quoted entries
   (`"C:\Program Files\x"`, written by some installers) lose their quotes first.
@@ -3304,8 +3308,11 @@ niubash (1.1.4) and WinuxCmd (details: section 4.6):
   `test_shells.py::test_snippets_are_ascii_and_say_where_to_paste`. Goes: never.
 - **WinuxCmd's `cygpath.exe` knows no MSYS root** (DEFECT): it turns `/tmp/x` into `\tmp\x`. Up:
   none found. Fix: `project.find_cygpath` takes only a cygpath next to `msys-2.0.dll` or
-  `cygwin1.dll`; `deploy` accepts only an `X:/...` answer (4.3, 4.8). Test:
-  `test_paths.py::test_cygpath_without_the_msys_runtime_is_ignored`. Goes: never.
+  `cygwin1.dll`; `deploy` asks the root's `/usr/bin/cygpath` first, accepts only an `X:/...`
+  answer and otherwise keeps the POSIX path (4.3, 4.8). Test:
+  `test_paths.py::test_cygpath_without_the_msys_runtime_is_ignored`,
+  `test_launcher_sh.py::test_winpath_inside_the_msys_root`,
+  `test_winpath_asks_the_roots_own_cygpath_first`. Goes: never.
 
 xonsh and bash:
 - **xonsh on Windows maps `#!/usr/bin/env bash` to `bash`** (LIMITATION): that can be the WSL
