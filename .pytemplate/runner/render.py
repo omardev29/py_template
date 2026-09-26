@@ -768,14 +768,19 @@ def _verify(cfg: Config, text: str, new: str) -> None:
     try:
         old = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        # The block and the project's own list of an additive key clash (the project added it
-        # while the block had it too): fine when the rest reads, since the block now leaves it out
-        try:
-            if bounds is None:
-                raise
-            old = tomllib.loads("\n".join(_outside_block(lines, bounds)))
-        except tomllib.TOMLDecodeError:
+        # Only one clash is repaired: the project's own list of an additive key next to the
+        # block's (it added it while the block had it too), when both halves read on their own;
+        # the rewrite leaves the key to the project. Anything else broken is the user's to fix.
+        rest: dict[str, Any] | None = None
+        if bounds is not None and _adopted(cfg, lines, bounds):
+            try:
+                tomllib.loads("\n".join(lines[bounds[0] : bounds[1] + 1]))
+                rest = tomllib.loads("\n".join(_outside_block(lines, bounds)))
+            except tomllib.TOMLDecodeError:
+                rest = None
+        if rest is None:
             raise DeployError(f"pyproject.toml is not valid TOML ({e}).\n  Fix it, then run ./deploy lock") from None
+        old = rest
     else:
         if bounds:
             try:

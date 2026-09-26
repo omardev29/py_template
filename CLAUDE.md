@@ -1123,7 +1123,8 @@ Formats:
   missing ones and why (`render._WHY`). Before, the block owned the whole key: a project that
   kept its own overrides could not enable PyPy (a repeated key), and a raylib project could not
   add a `no-build-package`. A file that already repeats such a key (the project added its list
-  while the block had one) is repaired by the next rewrite, since the rest of it still reads.
+  while the block had one) is repaired by the next rewrite when the block and the rest each read
+  on their own; any other invalid TOML stays an error.
   Entries typed INSIDE the markers are still replaced (the block is generated). `pyproject_outdated` never raises (an unusable file counts as outdated, and
   `./deploy lock` then explains); `render.check_pyproject(cfg)` runs the same checks without
   writing, as a preflight for commands that change other files first.

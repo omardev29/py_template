@@ -744,6 +744,12 @@ def test_a_repeated_additive_key_is_repaired(pyproject: Path) -> None:
     assert render.write_pyproject(PYPY_CFG) is True
     uv = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["uv"]
     assert uv["override-dependencies"] == [CFFI, "rich<16"]
+    # only that clash: a block broken some other way is the user's to fix, never rewritten
+    broken = pyproject_text(PYPY_CFG).replace("required-version = ", "required-version = = ")
+    _write(pyproject, broken)
+    with pytest.raises(DeployError, match="not valid TOML"):
+        render.write_pyproject(PYPY_CFG)
+    assert pyproject.read_text(encoding="utf-8") == broken
 
 
 @pytest.mark.parametrize("package", ["raylib", "raylib_sdl"])
