@@ -190,13 +190,17 @@ Exit codes:
 - 0: success.
 - 1: check, test or doctor failures, or an internal runner error (a traceback is printed).
 - 2: a usage or configuration error (also a program without its executable bit or `#!` line, a
-  working folder that does not exist, a bad `[tasks]` entry).
+  working folder that does not exist, a bad `[tasks]` entry, a `.build/` or `dist/` that another
+  user left behind with `sudo ./deploy ...`).
 - 3: a missing requirement: uv, a uv older than 0.10.12, a program, a compiler, an interpreter,
   Neovim or git for `selftest --nvim --require`, or the runner started on a Python older than
   3.11.
 - 130: Ctrl+C. The runner waits for the app to finish its own cleanup, then stops without
   running the next step; it exits with the app's code, or 130 when the app exited with 0.
 - 141: the reader of stdout went away (`./deploy help | head -1`; Linux and macOS).
+- 143 (129): the runner got a SIGTERM (a SIGHUP) of its own, from `kill`, a supervisor or
+  `docker stop` (Linux and macOS). It passes the signal on to the app, waits for it and stops
+  like after Ctrl+C: the app's code, or 143 (129) when the app exited with 0.
 - 128 + N: a program killed by signal N.
 - `run`, `test BACKEND` and tasks return their program's exit code (pytest: 5 when no test was
   collected, 4 for a usage error). `test all` tests every backend, even after a failure, and

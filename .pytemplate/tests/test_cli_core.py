@@ -151,6 +151,10 @@ def test_quiet_without_a_dry_run() -> None:
         (proc.Interrupted(0), 130, "error: interrupted"),  # an interrupted command never reports success
         (proc.Interrupted(130), 130, "error: interrupted"),
         (proc.Interrupted(proc.STATUS_CONTROL_C_EXIT), 130, "error: interrupted"),
+        (proc.Interrupted(0, signal.SIGTERM), 143, "error: terminated (SIGTERM)"),  # passed on, the child exited 0
+        (proc.Interrupted(4, signal.SIGTERM), 4, "error: terminated (SIGTERM)"),
+        (proc.Interrupted(143, signal.SIGTERM), 143, "error: terminated (SIGTERM)"),
+        (proc.Interrupted(0, 1), 129, "error: terminated ("),  # SIGHUP (POSIX only)
         (SystemExit(0), 0, ""),  # argparse -h
         (SystemExit(2), 2, ""),  # argparse usage error
         (SystemExit(None), 0, ""),
@@ -169,6 +173,49 @@ def test_main_maps_every_outcome_to_its_exit_code(
     err = capsys.readouterr().err
     assert stderr in err
     assert ("Traceback" in err) == isinstance(raised, RuntimeError)
+
+
+@pytest.mark.parametrize(
+    ("filename", "code", "stderr"),
+    [
+        (BUILD / "cfg" / "ruff-off.toml", 2, "error: cannot write .build/cfg/ruff-off.toml: Permission denied"),
+        (BUILD / "mypyc-dev" / "stage" / "main.py", 2, "error: cannot write .build/mypyc-dev/stage/main.py"),
+        (DIST / "app-cpython-pyz", 2, "error: cannot write dist/app-cpython-pyz"),
+        (ROOT / "src" / "main.py", 1, "internal runner error"),  # not a scratch folder: a bug to see
+    ],
+)
+def test_a_scratch_folder_another_user_left_is_a_clear_error(
+    filename: Path, code: int, stderr: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`sudo ./deploy check` leaves .build/cfg owned by root: the next `./deploy check` crashed
+    with a PermissionError traceback and "internal runner error"."""
+
+    def dispatch(_argv: list[str]) -> int:
+        raise PermissionError(13, "Permission denied", str(filename))
+
+    monkeypatch.setattr(cli, "dispatch", dispatch)
+    assert cli.main(["check"]) == code
+    err = capsys.readouterr().err
+    assert stderr in err
+    assert ("Traceback" in err) is (code == 1)
+    if code == 2:
+        assert "./deploy clean" in err and "sudo" in err
+
+
+@posix
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root writes into a read-only folder")
+def test_check_into_an_unwritable_build_folder_is_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    build = tmp_path / ".build"
+    (build / "cfg").mkdir(parents=True)
+    (build / "cfg").chmod(0o555)
+    monkeypatch.setattr(cmd_dev, "BUILD", build)
+    monkeypatch.setattr(cli, "BUILD", build)
+    monkeypatch.setattr(cli, "dispatch", lambda _argv: cmd_dev._profile_file(make({}), "off", "ruff") and 0)
+    try:
+        assert cli.main(["check"]) == 2
+    finally:
+        (build / "cfg").chmod(0o755)
+    assert "error: cannot write" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(("returned", "code"), [(0, 0), (1, 1), (5, 5), (-9, 137), (-15, 143)])
@@ -507,6 +554,28 @@ def test_a_program_that_cannot_start_is_a_clear_error(tmp_path: Path) -> None:
         assert "cannot run" in str(e.value) and program.name in str(e.value)
 
 
+@posix
+def test_a_script_whose_interpreter_is_missing_names_it(tmp_path: Path) -> None:
+    """exec reports a missing #! interpreter as ENOENT: `program not found: tools/bad.sh` sent
+    the user looking for a script that is right there."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    bad = tools / "bad.sh"
+    bad.write_text("#!/nonexistent/interp -x\necho hi\n", encoding="utf-8")
+    bad.chmod(0o755)
+    for argv, cwd in (([str(bad)], None), (["tools/bad.sh"], tmp_path)):  # absolute, and relative to cwd
+        with pytest.raises(DeployError) as e:
+            proc.run(argv, cwd=cwd, echo=False)
+        assert e.value.code == 3
+        assert "the interpreter of its #! line was not found: /nonexistent/interp" in str(e.value)
+    env = proc.base_env()
+    env["PATH"] = f"{tools}{os.pathsep}{env['PATH']}"
+    with pytest.raises(DeployError, match=r"cannot run bad\.sh: the interpreter of its #! line was not found"):
+        proc.run(["bad.sh"], env=env, echo=False)  # found on the child's PATH
+    with pytest.raises(DeployError, match="program not found: no-such-tool"):
+        proc.run(["no-such-tool"], env=env, echo=False)
+
+
 @pytest.mark.parametrize(("name", "message"), [("missing", "folder not found"), ("a-file", "not a folder")])
 def test_a_bad_working_folder_is_named(name: str, message: str, tmp_path: Path) -> None:
     (tmp_path / "a-file").write_text("x", encoding="utf-8")
@@ -631,6 +700,9 @@ if mode == "second":
 got = []
 if mode.startswith("trap"):
     signal.signal(signal.SIGINT, lambda *_: got.append(1))
+if mode.startswith("term"):  # the SIGTERM/SIGHUP the runner passes on (a supervisor, kill PID)
+    signal.signal(signal.SIGTERM, lambda *_: got.append(1))
+    signal.signal(signal.SIGHUP, lambda *_: got.append(1))
 print("CHILD-" + "READY", flush=True)
 deadline = time.monotonic() + 30
 while not got and time.monotonic() < deadline:
@@ -657,9 +729,10 @@ raise SystemExit(cli.main(["x"]))
 """
 
 
-def _interrupt(tmp_path: Path, *modes: str) -> tuple[int, bool, str]:
+def _interrupt(tmp_path: Path, *modes: str, sig: int = signal.SIGINT, group: bool = True) -> tuple[int, bool, str]:
     """Run DRIVER in its own session, press Ctrl+C (SIGINT to the process group, as a terminal
-    does) once the child is ready; return (exit code, marker written before the exit, log)."""
+    does) once the child is ready; return (exit code, marker written before the exit, log).
+    `sig`/`group`: another signal, sent to the driver alone (kill PID) when `group` is False."""
     child = tmp_path / "child.py"
     child.write_text(CHILD, encoding="utf-8")
     marker = tmp_path / "marker"
@@ -679,7 +752,10 @@ def _interrupt(tmp_path: Path, *modes: str) -> tuple[int, bool, str]:
             if p.poll() is not None or time.monotonic() > deadline:
                 pytest.fail(f"the child never got ready: {log.read_text(encoding='utf-8', errors='replace')}")
             time.sleep(0.02)
-        os.killpg(p.pid, signal.SIGINT)
+        if group:
+            os.killpg(p.pid, sig)
+        else:
+            os.kill(p.pid, sig)
         code = p.wait(timeout=60)
         written = marker.exists()  # at the moment the driver returned
     finally:
@@ -715,6 +791,45 @@ def test_ctrl_c_stops_the_remaining_steps(tmp_path: Path) -> None:
     code, written, log = _interrupt(tmp_path, "trap", "second")
     assert (code, written) == (130, True), log
     assert not (tmp_path / "marker.second").exists(), "a step ran after Ctrl+C"
+
+
+@posix
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP] if hasattr(signal, "SIGHUP") else [])
+def test_a_sigterm_to_the_runner_is_passed_on_and_waited_for(tmp_path: Path, sig: int) -> None:
+    """kill PID, a supervisor, docker stop, Popen.terminate(): the signal reaches the runner
+    alone. Its default action killed the runner at once (exit 143) and left uv and the app
+    running as orphans that never got the signal."""
+    code, written, log = _interrupt(tmp_path, "term", "second", sig=sig, group=False)
+    assert written, f"the child did not get the signal, or was not waited for: {log}"
+    assert code == 128 + sig, log  # the child exited 0 after its cleanup: never a success
+    assert f"error: terminated ({signal.Signals(sig).name})" in log
+    assert not (tmp_path / "marker.second").exists(), "a step ran after the SIGTERM"
+
+
+@posix
+def test_a_sigterm_passed_on_reports_the_childs_own_code(tmp_path: Path) -> None:
+    code, written, log = _interrupt(tmp_path, "term5", sig=signal.SIGTERM, group=False)
+    assert (code, written) == (5, True), log
+
+
+@posix
+def test_a_child_that_dies_of_the_sigterm_passed_on_leaves_no_orphan(tmp_path: Path) -> None:
+    code, written, log = _interrupt(tmp_path, "default", sig=signal.SIGTERM, group=False)
+    assert (code, written) == (143, False), log  # the child died of it: 128 + 15
+
+
+@posix
+def test_an_ignored_sigterm_is_passed_on_to_the_child() -> None:
+    # nohup and supervisors that ignore SIGHUP/SIGTERM: the children keep inheriting SIG_IGN
+    code = (
+        "import signal, sys; signal.signal(signal.SIGTERM, signal.SIG_IGN); sys.path.insert(0, sys.argv[1]); "
+        "from runner import proc; "
+        "probe = 'import signal; print(signal.getsignal(signal.SIGTERM) == signal.SIG_IGN, signal.getsignal(signal.SIGHUP) == signal.SIG_DFL)'; "
+        "print(proc.run([sys.executable, '-c', probe], capture=True, echo=False).stdout.strip()); "
+        "print(signal.getsignal(signal.SIGTERM) == signal.SIG_IGN, signal.getsignal(signal.SIGHUP) == signal.SIG_DFL)"
+    )
+    r = subprocess.run([sys.executable, "-c", code, str(TEMPLATE_DIR)], capture_output=True, text=True, env=child_env(), timeout=60, check=False)
+    assert r.stdout.split() == ["True", "True", "True", "True"], r.stderr  # the child's, then the runner's afterwards
 
 
 @posix

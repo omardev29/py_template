@@ -427,6 +427,7 @@ def test_ensure_lock_dry_run_announces_the_relock(monkeypatch: pytest.MonkeyPatc
         raise AssertionError("no process may start under --dry-run")
 
     monkeypatch.setattr(subprocess, "run", no_process)
+    monkeypatch.setattr(subprocess, "Popen", no_process)  # proc.run starts its children with Popen
     cmd_env.ensure_lock(make())
     err = capsys.readouterr().err
     assert "pyproject.toml: would update" in err

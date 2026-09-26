@@ -587,9 +587,12 @@ header rules (with detector tests proving each rule fires).
 - 0 ok; 1 = check/test failures, doctor problems, any FAIL in a selftest suite, or an internal
   runner error (traceback printed); 2 = usage/config (`DeployError` default, argparse; also a
   program that cannot be started: no exec bit, no `#!` line, a folder; a working folder that
-  does not exist; bad `[tasks]` entries); 3 = missing requirement (uv, a uv older than
-  `envs.MIN_UV`, a program, compiler, interpreter, Neovim/git with `--require`, the runner
-  itself started on Python < 3.11 by `deploy.py`'s check); 130 = Ctrl+C;
+  does not exist; bad `[tasks]` entries; a file under `.build/` or `dist/` it may not write, left
+  by another user: `cli._scratch_denied`); 3 = missing requirement (uv, a uv older than
+  `envs.MIN_UV`, a program (or the interpreter a script's `#!` line names: `proc._not_found`),
+  a C compiler mypyc cannot start, an interpreter, Neovim/git with `--require`, the runner
+  itself started on Python < 3.11 by `deploy.py`'s check); 130 = Ctrl+C; 143/129 = a SIGTERM/
+  SIGHUP sent to the runner (POSIX);
   141 = the reader of stdout went away (`./deploy help | head -1`: quiet, no traceback; POSIX
   only, Windows reports a closed pipe as `OSError` EINVAL, unhandled). `run`, `test BACKEND`
   (pytest's own code: 5 = no tests collected, 4 = usage error) and tasks return the child's
@@ -597,16 +600,26 @@ header rules (with detector tests proving each rule fires).
   `proc.CommandFailed` carries the failed child's code. A child killed by signal N gives
   128 + N (`proc.exit_code`, like sh and uv; `cli.main` also maps a negative code a command
   returns), never 256 - N.
-- Ctrl+C (`proc._wait_through_ctrl_c`): the child got the same Ctrl+C (terminal process group,
-  console), so `proc.run` waits for it instead of letting `subprocess.run` SIGKILL it 0.25 s
-  later (an app's cleanup was cut short; under `uv run` the app kept running as an orphan). A
-  no-op Python handler records the Ctrl+C, only in the main thread and only while SIGINT has
-  its default handler (a runner started with SIGINT ignored keeps passing SIG_IGN on). Then
-  `proc.Interrupted` (a KeyboardInterrupt) stops the command, so `check`, `test all` and task
-  deps never go on to the next step; `cli.main` prints `error: interrupted` and exits with the
-  child's code, or 130 when it exited 0 (an interrupted command never reports success) or died
-  of the Ctrl+C (`STATUS_CONTROL_C_EXIT` on Windows). A child that ignores SIGINT is waited
-  for, like `uv run` does. Ctrl+C in the runner's own Python code: KeyboardInterrupt, 130.
+- Ctrl+C (`proc._wait_through_signals`): the child got the same Ctrl+C (terminal process group,
+  console), so `proc.run` (a `subprocess.Popen` it waits for itself) waits for it instead of
+  letting `subprocess.run` SIGKILL it 0.25 s later (an app's cleanup was cut short; under `uv
+  run` the app kept running as an orphan). A no-op Python handler records the Ctrl+C, only in
+  the main thread and only while SIGINT has its default handler (a runner started with SIGINT
+  ignored keeps passing SIG_IGN on). Then `proc.Interrupted` (a KeyboardInterrupt) stops the
+  command, so `check`, `test all` and task deps never go on to the next step; `cli.main` prints
+  `error: interrupted` and exits with the child's code, or 130 when it exited 0 (an
+  interrupted command never reports success) or died of the Ctrl+C (`STATUS_CONTROL_C_EXIT` on
+  Windows). A child that ignores SIGINT is waited for, like `uv run` does. Ctrl+C in the
+  runner's own Python code: KeyboardInterrupt, 130.
+- SIGTERM and SIGHUP (POSIX; `proc._Waiter.forward`): usually sent to the runner alone (`kill
+  PID`, a supervisor, `docker stop`, `Popen.terminate()`, which `uv run --script` passes on to
+  the runner). Their default action killed the runner at once and left uv and the app running
+  as orphans that never got the signal. While a child runs they are passed on to it, like `uv
+  run` does, and the child is waited for; then `proc.Interrupted(code, signum)` stops the
+  command like Ctrl+C: `error: terminated (SIGTERM)`, the child's code, or 128 + N when it
+  exited 0. Same conditions (main thread, default handler: `nohup` keeps SIG_IGN). A signal
+  sent to the whole process group reaches the child twice, as with uv itself. Outside a child
+  (in-process work) the default action still ends the runner.
 - Runner output goes to stderr through `ui` so the app keeps stdout. Exceptions, printed to
   stdout on purpose: `help`, `__probe`, `shell-setup` snippets, and the `--json` reports of
   `selftest --shells` (also with `--list`) and `selftest --e2e`.
@@ -2626,7 +2639,7 @@ uv:
 CPython and its standard library:
 - **`subprocess.run` kills the child 0.25 s after Ctrl+C** (LIMITATION, 3.7+): an app's cleanup
   was cut short; under `uv run` the app kept running as an orphan. Up: python/cpython#70130
-  (bpo-25942, where the grace period came from). Fix: `proc._wait_through_ctrl_c` (5.3). Test:
+  (bpo-25942, where the grace period came from). Fix: `proc._wait_through_signals` (5.3). Test:
   `test_cli_core.py::test_ctrl_c_waits_for_a_child_that_cleans_up` and the other
   `test_ctrl_c_*`. Goes: never.
 - **`Path.rglob` does not enter symlinked folders** (LIMITATION; `recurse_symlinks` from 3.13):
@@ -3402,9 +3415,9 @@ Behaviour:
 - Tasks: a task with `backend = "mypyc"` runs interpreted in `.venv` unless it goes through a
   `deps` entry such as `compile` and runs the stage.
 - Ctrl+C waits for the running child (section 5.3): a child that ignores SIGINT keeps the
-  runner waiting (Ctrl+\ or closing the terminal ends both), as with `uv run`. Windows: a
-  closed stdout pipe is `OSError` EINVAL there, so `./deploy help | more` quitting early still
-  prints a traceback (untested).
+  runner waiting (Ctrl+\ ends both; closing the terminal passes SIGHUP on), as with `uv run`.
+  Windows: a closed stdout pipe is `OSError` EINVAL there, so `./deploy help | more` quitting
+  early still prints a traceback (untested).
 - `clean --envs` removes every `.venv*` of this side (WSL on /mnt: only the `-wsl` ones),
   including the environments in use; there is no "unused only" option (`mode` and `apply`
   only print a note about leftovers). On Windows close the editor first (its mypy/ruff servers run from
