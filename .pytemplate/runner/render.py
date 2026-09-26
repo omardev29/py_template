@@ -347,7 +347,7 @@ def managed_block(cfg: Config) -> str:
         f"    \"implementation_name == 'cpython' and {minor_range(cfg.python.cpython)}\",",
     ]
     if cfg.pypy_enabled:
-        lines.append(f"    \"implementation_name == 'pypy' and {minor_range(cfg.min_python)}\",")
+        lines.append(f"    \"implementation_name == 'pypy' and {minor_range(cfg.pypy_minor)}\",")
     lines.append("]")
     if cfg.pypy_enabled:
         lines += [
