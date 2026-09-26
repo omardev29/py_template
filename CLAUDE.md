@@ -1387,7 +1387,12 @@ Formats:
   2. `ruff check --config ...` (`--exit-zero` when the profile says so).
   3. mypy unless `skip_mypy`; with PyPy supported `render.mypy_cli_args` adds
      `--python-version <min_python> --python-executable <tool python>`. Exit 1 is only a
-     warning when the profile is not `blocking`.
+     warning when the profile is not `blocking`. The same `python_version = <min_python>` is in
+     the `[mypy]` section of `.mypy.ini` and the `.build/cfg` copies (`render.mypy_ini`; never
+     the compile-time `mypy.ini`: mypyc compiles for the Python it runs on), so a mypy started
+     with no arguments (VS Code's mypy extension) checks as 3.11 too: mypy's
+     `python_executable` defaults to its own interpreter, so a config `python_version` never
+     makes it look for a `python3.11` (`test_mypy_reading_the_generated_ini_alone_flags_what_pypy_lacks`).
   4. `lintc` rules on the compiled sources (when mypyc is supported and `rules`): errors only
      under the `mypyc` profile, warnings otherwise. A file the runner cannot parse is one
      finding (`imports.parse_error`: a syntax error, or syntax newer than the runner's own
@@ -3997,17 +4002,6 @@ Editors:
   are missed); for multi-line basedpyright messages only the first line is used (the rule code
   is lost); MSVC/gcc errors are not matched.
 - `actboy168.tasks` is a small third-party extension (disabled in Restricted Mode).
-- With PyPy supported, VS Code's mypy extension (mypy-type-checker) checks as the `.venv`
-  Python, not as `min_python`: an API that 3.11 lacks (`typing.override`) passes there while
-  `./deploy check` (`render.mypy_cli_args`), the Neovim linter and Pylance/basedpyright
-  (`pythonVersion`) flag it. `python_version` cannot go into `.mypy.ini`: without
-  `--python-executable` mypy then looks for a `python3.11` (`py -3.11` on Windows) for the
-  site-packages and stops without one, or reads another environment's packages with one; the
-  extension passes no `--python-executable` (it substitutes `${interpreter}` only in
-  `mypy-type-checker.path`), and a per-OS `.venv` path cannot go into a file committed for every
-  OS. Not fixed (unverifiable here: VS Code itself is untested, section 13.3); a candidate is a
-  generated `mypy-type-checker.path` of `${interpreter} -m mypy --python-version X
-  --python-executable ${interpreter}`, once verified in VS Code.
 - Stopping the flet `dev` task (hot reload) on Windows, from VS Code or Neovim, relies on
   ConPTY closing and uv's job object killing `flet.exe`: not verified.
 - Extras imported from `.lazy.lua` show as "not managed" in `:LazyExtras` and change

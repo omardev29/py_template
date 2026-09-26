@@ -1646,6 +1646,37 @@ def test_compile_mypy_ini_finds_typings_in_any_project_folder(tmp_path: Path, mo
     assert r.returncode == 0, r.stdout + r.stderr  # mypyc runs mypy the same way: from the stage
 
 
+@pytest.mark.parametrize("supported", [["cpython", "mypyc"], ["cpython", "pypy", "mypyc"]])
+def test_mypy_ini_checks_as_min_python_while_pypy_is_supported(supported: list[str], tmp_path: Path) -> None:
+    """VS Code's mypy extension reads .mypy.ini and passes no --python-version: without
+    python_version there it checked as the .venv's Python and missed the 3.11 API errors that
+    `./deploy check` (render.mypy_cli_args) and the Neovim linter report."""
+    cfg = make({"backend": {"supported": supported}})
+    expected = cfg.min_python if cfg.pypy_enabled else None
+    assert (expected == "3.11") is ("pypy" in supported)
+    for profile in ("strict", "mypyc", "warn", "off"):
+        assert _ini(render.mypy_ini(cfg, profile)).get("mypy", "python_version", fallback=None) == expected
+    # mypyc compiles for the interpreter it runs on: the compile-time ini never pins another one
+    assert _ini(render.mypy_ini(cfg, "mypyc", for_compile=tmp_path)).get("mypy", "python_version", fallback=None) is None
+
+
+@needs_venv
+def test_mypy_reading_the_generated_ini_alone_flags_what_pypy_lacks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the extension runs: mypy from the project folder, the .venv's interpreter, no
+    arguments. It must find the 3.12+ API, with no python3.11 on PATH and the .venv's packages."""
+    root = _project(
+        tmp_path,
+        {"src/myapp/__init__.py": "", "src/myapp/ov.py": "import pytest\nfrom typing import override\n", "tests/__init__.py": ""},
+    )
+    monkeypatch.setattr(render, "ROOT", root)
+    (root / ".mypy.ini").write_text(render.mypy_ini(make({"backend": {"supported": ["cpython", "pypy"]}}), "strict"), encoding="utf-8")
+    (tmp_path / "empty").mkdir()
+    env = {**proc.base_env(), "PATH": str(tmp_path / "empty")}
+    r = subprocess.run([str(TOOL_PYTHON), "-m", "mypy", "--no-incremental"], cwd=root, env=env, capture_output=True, text=True, check=False)
+    assert r.returncode == 1 and 'Module "typing" has no attribute "override"' in r.stdout, r.stdout + r.stderr
+    assert "pytest" not in r.stdout  # the .venv's packages, not another environment's
+
+
 def test_mypy_ini_without_compiled_rules_has_no_exclude_sections() -> None:
     cfg = make({"compile": {"exclude": ["myapp.core.loose"]}})
     assert [s for s in _ini(render.mypy_ini(cfg, "strict")).sections() if s != "mypy"] == []

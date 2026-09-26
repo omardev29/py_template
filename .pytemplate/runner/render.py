@@ -153,6 +153,10 @@ def mypy_ini(cfg: Config, profile: str, *, for_compile: Path | None = None) -> s
     else:
         head["mypy_path"] = ["src", "typings"] if typings else "src"
         head["files"] = ["src", "tests"] if _has_tests() else "src"
+        if cfg.pypy_enabled:
+            # what mypy_cli_args passes to check, for a mypy run with no arguments (VS Code's mypy
+            # extension): mypy still reads the packages of the Python it runs on (sys.executable)
+            head["python_version"] = cfg.min_python
     lines = [f"# {HEADER}", f"# Typing profile: {profile} ({data.get('description', '')})", ""]
     lines += _ini_section("mypy", {**head, **data.get("mypy", {})})
     # One section per module pattern, later options winning: mypy refuses a repeated section
