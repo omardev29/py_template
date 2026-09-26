@@ -256,11 +256,15 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
                 2,
             )
     else:
-        base += ["--python", ensure_env(env).python]
+        python = ensure_env(env).python
+        base += ["--python", python]
         floor = host_floor(target)
+        # The interpreter's full version: uv reads 3.14 as 3.14.0, and a requirement marked
+        # python_full_version >= '3.14.1' was left out of the build for this very interpreter
+        version = str(envs.interpreter_info(python)["version"])
         try:
             # no --only-binary: the host can still build an sdist
-            envs.uv(env, [*base, "--python-platform", floor, "--python-version", target.version] if floor else base, extra_env=extra_env)
+            envs.uv(env, [*base, "--python-platform", floor, "--python-version", version] if floor else base, extra_env=extra_env)
         except proc.CommandFailed:
             if not floor:
                 raise

@@ -1607,6 +1607,10 @@ def _install_recorder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, fail_f
         env.python.write_text("", encoding="utf-8")
         monkeypatch.setattr(envs, f"{name}_env", lambda cfg, env=env: env)
     monkeypatch.setattr(envs, "uv", fake_uv)
+    def info(python: Any) -> dict[str, object]:
+        return {"impl": "pypy", "version": "3.11.15"} if "pypy" in str(python) else {"impl": "cpython", "version": "3.14.7"}
+
+    monkeypatch.setattr(envs, "interpreter_info", info)
     monkeypatch.setattr(common, "host_os", lambda: "linux")
     monkeypatch.setattr(common, "host_arch", lambda: "x86_64")
     return calls
@@ -1627,7 +1631,9 @@ def test_host_linux_target_gets_the_platform_floor(tmp_path: Path, monkeypatch: 
     ((key, args, _),) = calls
     assert key == "cpython" and _flag(args, "--python") == str(envs.cpython_env(make({})).python)
     assert _flag(args, "--python-platform") == floor
-    assert _flag(args, "--python-version") == ("3.14" if floor else None)
+    # the interpreter's full version: uv read 3.14 as 3.14.0 and dropped a requirement marked
+    # python_full_version >= '3.14.1' from the build for this very 3.14.7 interpreter
+    assert _flag(args, "--python-version") == ("3.14.7" if floor else None)
     assert "--only-binary" not in args  # the host may still build an sdist
 
 
@@ -1761,7 +1767,7 @@ def test_pypy_build_installs_cpython_keys_with_the_tools_env(tmp_path: Path, mon
     common.install_deps(cfg, "pypy", common.parse_key("pp311-linux-x86_64"), tmp_path / "b", req)
     assert calls[0][0] == "cpython" and _flag(calls[0][1], "--python") == str(envs.cpython_env(cfg).python)
     assert calls[1][0] == "pypy" and _flag(calls[1][1], "--python") == str(envs.pypy_env(cfg).python)
-    assert _flag(calls[1][1], "--python-version") == "3.11"
+    assert _flag(calls[1][1], "--python-version") == "3.11.15"  # the interpreter's full version
 
 
 def test_install_deps_removes_uv_junk_but_keeps_native_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1771,7 +1771,9 @@ Formats:
   the later option wins for that package), which is built here and must come out pure
   (`_built_native`: a platform wheel is a DeployError naming it, build that key on its platform
   and `pyz-merge`); before, every cross target failed for such a package. A HOST target gets
-  the same `--python-platform` floor
+  the same `--python-platform` floor, with the interpreter's full `--python-version X.Y.Z` (uv
+  reads X.Y as X.Y.0: a requirement marked `python_full_version >= 'X.Y.1'` was left out of
+  the build for that very interpreter),
   when this machine can load it (`host_floor`: glibc >= 2.28 x86_64 / 2.35 aarch64, never musl;
   macOS >= `MACOS_FLOOR` 13.0, pinned through `MACOSX_DEPLOYMENT_TARGET` unless the user sets it),
   without `--only-binary`, and falls back to the host's own wheels with a warning when a
