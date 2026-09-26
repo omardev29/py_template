@@ -518,7 +518,7 @@ header rules (with detector tests proving each rule fires).
 | `deploy.py` (one level up) | Stops with exit 3 and one `error:` line (no traceback) when uv started it on Python < 3.11 (a `uv run` by hand with an old `UV_PYTHON`), BEFORE importing the runner; reconfigures stdout/stderr to UTF-8, puts its own dir on `sys.path`, calls `runner.cli.main`. |
 | `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `FORWARDS` / `HELP_PASSES_THROUGH` (section 5.2); `INTERNAL` (routes listed nowhere: `__init`). `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main`/`_main` (exception -> exit code, closed stdout), `cmd_help` (commands and `[tasks]` entries), `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
 | `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file` (section 6.1), `toml_value`. |
-| `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL`, `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
+| `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL` (`wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`. |
 | `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (all groups), `interpreter_info` (with `platform`); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
@@ -1159,8 +1159,15 @@ Formats:
 - Dev group (`pyproject.toml [dependency-groups] dev`): `debugpy`, `mypy` (needs the Rust
   `ast-serialize`: no PyPy wheels), `pyinstaller`, `ruff` and `setuptools` carry
   `implementation_name == 'cpython'`; `.venv-pypy` only gets the app deps plus pytest.
-- WSL on `/mnt/*` (`project.IS_WSL`): separate `.venv*-wsl` envs and `.build/wsl`, so the
-  Windows `.venv` is not turned into a Linux one (and `clean --envs` keeps the other side's).
+- WSL on a Windows checkout (`project.IS_WSL`): separate `.venv*-wsl` envs and `.build/wsl`, so
+  the Windows `.venv` is not turned into a Linux one (and `clean --envs` keeps the other side's).
+  WSL is read from the kernel (`project.wsl_kernel`: a `microsoft` release or WSL's
+  `binfmt_misc/WSLInterop`; `WSL_DISTRO_NAME` alone missed sudo, sshd, cron and systemd units,
+  and uv then replaced the Windows `.venv`), the checkout from the deepest mount above `ROOT`
+  in `/proc/self/mounts` (`project.windows_checkout`: drvfs, 9p with `aname=drvfs`, or a drive
+  or UNC share as its source, so `/d/...` of `mount -t drvfs D: /d` or `automount root = /`
+  counts; unreadable: a path under `/mnt/`). The Neovim plugin mirrors both
+  (`init.windows_checkout`, `test_lua_windows_checkout_matches_the_runner`).
 - Tools outside `uv.lock` run through `uv run --locked --with <pin>` and are pinned in module
   constants: `cmd_dev.BASEDPYRIGHT = "basedpyright==1.40.1"` plus its Node.js runtime
   `cmd_dev.BASEDPYRIGHT_NODE = "nodejs-wheel-binaries==24.19.0"` (basedpyright's only
@@ -2082,7 +2089,8 @@ short temp tree and unset `NVIM_APPNAME`.
   `-X:v`, typed comma lists, pipeline input and raw stdin, `UV_PYTHON` and the other cleared
   variables, ConstrainedLanguage, the x bit; cmd and
   the registry only on Windows),
-  `test_paths.py` (path spellings, colours in a hidden console, dry runs in a throwaway copy),
+  `test_paths.py` (path spellings, WSL detection, colours in a hidden console, dry runs in a
+  throwaway copy),
   `test_render_core.py` (`render.apply`/`auto` and `state.json` in a sandbox, the render
   command's exit codes, the managed pyproject parts for every preset and backend set, typing
   profiles, the generated CI for 36 preset/backend combinations through a strict YAML reader and
@@ -3399,10 +3407,12 @@ Windows:
   and `Lib/` also matches `lib/`. Fix: `rename.apply_plan`; `portable.runtime_stdlib` looks for
   `lib/pythonX.Y` first (5.7, 10). Test:
   `test_rename.py::test_case_only_folder_fix_on_a_case_insensitive_file_system`. Goes: never.
-- **A venv is specific to its OS** (LIMITATION, WSL on `/mnt`): Fix: `.venv*-wsl` and
-  `.build/wsl` (`project.ENV_SUFFIX`, 7). Test:
-  `test_envs_core.py::test_runtime_and_tool_environments`, `test_clean_envs_on_the_wsl_side`.
-  Goes: never.
+- **A venv is specific to its OS** (LIMITATION, WSL on a Windows checkout): Fix: `.venv*-wsl`
+  and `.build/wsl` (`project.ENV_SUFFIX`), WSL read from the kernel and the checkout from its
+  mount (`project.wsl_kernel`, `project.windows_checkout`; 7). Test:
+  `test_envs_core.py::test_runtime_and_tool_environments`, `test_clean_envs_on_the_wsl_side`,
+  `test_paths.py::test_windows_checkout_follows_the_mount_of_the_root`,
+  `test_wsl_kernel_needs_no_wsl_distro_name`. Goes: never.
 - **`wsl -l -q` prints UTF-16** (LIMITATION): Fix: `shells.wsl_distros` decodes it. Test:
   `test_workarounds.py::test_wsl_distros_are_read_as_utf16`. Goes: never.
 

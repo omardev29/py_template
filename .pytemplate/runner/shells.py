@@ -202,7 +202,7 @@ def doctor(check: Check) -> None:
                 "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned   (or use .\\deploy.cmd)",
             )
     if IS_WSL:
-        check(None, "WSL on /mnt: .venv*-wsl environments and .build/wsl kept separate from Windows", "")
+        check(None, "WSL on a Windows checkout: .venv*-wsl environments and .build/wsl kept separate from Windows", "")
 
 
 # --- shell-setup ---------------------------------------------------------------------------------

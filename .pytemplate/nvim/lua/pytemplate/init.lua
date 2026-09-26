@@ -197,9 +197,62 @@ end
 
 -- --- project environments --------------------------------------------------------------------
 
--- Same layout as .pytemplate/runner/envs.py; WSL on a /mnt/ checkout uses the -wsl envs.
+local function mount_field(s)
+  return (s:gsub("\\([0-7][0-7][0-7])", function(o)
+    return string.char(tonumber(o, 8))
+  end))
+end
+
+---Whether `root` lies on a Windows drive mounted into WSL, like project.windows_checkout: the
+---deepest mount above it in `mounts` (/proc/self/mounts) is drvfs, 9p with aname=drvfs, or has a
+---drive or UNC share as its source; without `mounts` (unreadable) a path under /mnt/ counts.
+function M.windows_checkout(root, mounts)
+  local best_len, best
+  for line in (mounts or ""):gmatch("[^\n]+") do
+    local source, point, fstype, options = line:match("^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)")
+    if source then
+      source, point, options = mount_field(source), mount_field(point), mount_field(options)
+      local base = (point:gsub("/+$", ""))
+      if (root == point or root:sub(1, #base + 1) == base .. "/") and (not best_len or #point >= best_len) then
+        best_len = #point
+        best = fstype == "drvfs"
+          or options:find("aname=drvfs", 1, true) ~= nil
+          or source:match("^%a:") ~= nil
+          or source:sub(1, 2) == "\\\\"
+      end
+    end
+  end
+  if not best_len then
+    return root:sub(1, 5) == "/mnt/"
+  end
+  return best
+end
+
+-- Same layout as .pytemplate/runner/envs.py: WSL on a Windows checkout uses the -wsl envs
+-- (project.IS_WSL: the kernel says WSL, since sudo, sshd or cron have no WSL_DISTRO_NAME, and
+-- the root is on a Windows drive).
+local wsl_suffix = {}
 local function env_suffix(root)
-  return (not M.is_win and vim.env.WSL_DISTRO_NAME and root:sub(1, 5) == "/mnt/") and "-wsl" or ""
+  if M.is_win then
+    return ""
+  end
+  if wsl_suffix[root] == nil then
+    local release = (uv.os_uname() or {}).release or ""
+    local kernel = vim.env.WSL_DISTRO_NAME ~= nil
+      or release:lower():find("microsoft", 1, true) ~= nil
+      or uv.fs_stat("/proc/sys/fs/binfmt_misc/WSLInterop") ~= nil
+    local drive = false
+    if kernel then
+      local fd = io.open("/proc/self/mounts", "rb")
+      local mounts = fd and fd:read("*a") or nil
+      if fd then
+        fd:close()
+      end
+      drive = M.windows_checkout(uv.fs_realpath(root) or root, mounts)
+    end
+    wsl_suffix[root] = drive and "-wsl" or ""
+  end
+  return wsl_suffix[root]
 end
 
 ---Absolute path of an executable inside a project environment (it may not exist).

@@ -1267,8 +1267,9 @@ only deletes files is checked too).
 - **Paths longer than 260 characters** (Windows): shorten the project path or enable
   `LongPathsEnabled`: MSVC (mypyc), PyPy and the Flet client have long internal paths.
 - **`bash` opens WSL** (Windows): the `bash` on PATH may be WSL's launcher. Use Git Bash or MSYS2
-  (their own `bash.exe`), xonsh, PowerShell or cmd. From WSL on a `/mnt/...` checkout the runner
-  keeps separate environments (`.venv-wsl`, `.build/wsl`), so the Windows ones stay intact.
+  (their own `bash.exe`), xonsh, PowerShell or cmd. From WSL on a Windows checkout (`/mnt/c/...`,
+  or any drive mounted with drvfs) the runner keeps separate environments (`.venv-wsl`,
+  `.build/wsl`), so the Windows ones stay intact, also under `sudo`, ssh or cron.
 - **raylib: `setup` fails with "marked as `--no-build` but has no binary distribution"** (Apple
   Silicon, Linux ARM64): raylib publishes no PyPy wheel there. Run
   `./deploy mode cpython --supports cpython,mypyc`, then `./deploy setup`. The generated CI already

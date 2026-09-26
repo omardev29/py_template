@@ -20,7 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cli, cmd_dev, cmd_nvim, config, mypyc, render  # noqa: E402
+from runner import cli, cmd_dev, cmd_nvim, config, mypyc, project, render  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.editors import nvim, vscode  # noqa: E402
 
@@ -410,6 +410,41 @@ def _headless_lua(tmp_path: Path, lua: str, test_root: Path) -> subprocess.Compl
         [exe, "--headless", "--clean", "-n", "-i", "NONE", "-c", f"luafile {script.as_posix()}"],
         cwd=tmp_path, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
     )  # fmt: skip
+
+
+WSL_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+local pt = require("pytemplate")
+local cases = vim.json.decode(table.concat(vim.fn.readfile(vim.env.PT_TMP .. "/wsl.json"), "\n"))
+local got = {}
+for i, c in ipairs(cases) do
+  got[i] = pt.windows_checkout(c.root, c.mounts ~= vim.NIL and c.mounts or nil)
+end
+io.stdout:write("PTWSL" .. vim.json.encode(got) .. "\n")
+vim.cmd("qa!")
+"""
+
+# /proc/self/mounts of WSL 2 and WSL 1 (a backslash is written \134, a blank \040)
+WSL_MOUNTS = [
+    "none /mnt/wsl tmpfs rw 0 0\n/dev/sdc / ext4 rw 0 0\n"
+    "C:\\134 /mnt/c 9p rw,noatime,aname=drvfs;path=C:\\134;uid=1000 0 0\nD: /d 9p rw,aname=drvfs;path=D: 0 0\n"
+    "\\134\\134nas\\134s /mnt/my\\040share 9p rw 0 0\ntmpfs /mnt/c/Users/me/tmp tmpfs rw 0 0\n",
+    "rootfs / lxfs rw,noatime 0 0\nC:\\134 /mnt/c drvfs rw,noatime,uid=1000 0 0\n",
+    None,
+]
+WSL_ROOTS = ["/mnt/c/Users/me/p", "/mnt/c", "/d/w/p", "/mnt/my share/p", "/home/me/p", "/mnt/cx/p", "/mnt/c/Users/me/tmp/p", "/mnt/wsl/p"]
+
+
+def test_lua_windows_checkout_matches_the_runner(tmp_path: Path) -> None:
+    """The plugin finds the -wsl environments exactly where the runner does (project.IS_WSL)."""
+    cases = [{"root": r, "mounts": m} for m in WSL_MOUNTS for r in WSL_ROOTS]
+    (tmp_path / "wsl.json").write_text(json.dumps(cases), encoding="utf-8")
+    r = _headless_lua(tmp_path, WSL_CHECK, ROOT)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTWSL")), None)
+    assert line is not None, r.stdout + r.stderr
+    expected = [project.windows_checkout(Path(str(c["root"])), c["mounts"]) for c in cases]
+    assert json.loads(line[len("PTWSL") :]) == expected
+    assert True in expected and False in expected
 
 
 SANITIZE_CHECK = r"""

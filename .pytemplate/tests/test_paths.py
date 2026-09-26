@@ -44,6 +44,53 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
+# --- WSL on a Windows checkout (project.IS_WSL) ------------------------------------------------------
+
+# /proc/self/mounts as WSL writes it (a backslash is \134, a blank \040).
+WSL2_MOUNTS = (
+    "none /mnt/wsl tmpfs rw,relatime 0 0\n"
+    "drivers /usr/lib/wsl/drivers 9p ro,nosuid,nodev,noatime,dirsync,aname=drivers;fmask=222;dmask=222,mmap,access=client 0 0\n"
+    "/dev/sdc / ext4 rw,relatime,discard,errors=remount-ro,data=ordered 0 0\n"
+    "C:\\134 /mnt/c 9p rw,noatime,dirsync,aname=drvfs;path=C:\\134;uid=1000;gid=1000;symlinkroot=/mnt/,mmap,access=client 0 0\n"
+    "D: /d 9p rw,noatime,dirsync,aname=drvfs;path=D:;uid=1000;gid=1000 0 0\n"
+    "\\134\\134nas\\134share /mnt/my\\040share 9p rw,noatime,aname=drvfs;path=UNC\\134nas\\134share 0 0\n"
+    "tmpfs /mnt/c/Users/me/scratch tmpfs rw 0 0\n"
+)
+WSL1_MOUNTS = "rootfs / lxfs rw,noatime 0 0\nC:\\134 /mnt/c drvfs rw,noatime,uid=1000,gid=1000,case=off 0 0\n"
+
+
+@pytest.mark.parametrize(
+    ("root", "mounts", "expected"),
+    [
+        ("/mnt/c/Users/me/p", WSL2_MOUNTS, True),
+        ("/mnt/c", WSL2_MOUNTS, True),
+        ("/d/work/p", WSL2_MOUNTS, True),  # mount -t drvfs D: /d, or automount root = /
+        ("/mnt/my share/p", WSL2_MOUNTS, True),  # a network share, blanks escaped
+        ("/home/me/p", WSL2_MOUNTS, False),  # the distro's own ext4: its .venv is Linux-only
+        ("/mnt/cx/p", WSL2_MOUNTS, False),  # /mnt/c is not a prefix of /mnt/cx
+        ("/mnt/c/Users/me/scratch/p", WSL2_MOUNTS, False),  # the deepest mount decides
+        ("/mnt/c/p", WSL1_MOUNTS, True),
+        ("/home/me/p", WSL1_MOUNTS, False),
+        ("/mnt/c/p", None, True),  # /proc/self/mounts unreadable: WSL's default automount
+        ("/home/me/p", None, False),
+    ],
+)
+def test_windows_checkout_follows_the_mount_of_the_root(root: str, mounts: str | None, expected: bool) -> None:
+    assert project.windows_checkout(Path(root), mounts) is expected
+
+
+def test_wsl_kernel_needs_no_wsl_distro_name(tmp_path: Path) -> None:
+    """sudo, sshd, cron and systemd units run without WSL_DISTRO_NAME: the kernel says WSL."""
+    missing = str(tmp_path / "WSLInterop")
+    assert project.wsl_kernel({}, "5.15.167.4-microsoft-standard-WSL2", missing)
+    assert project.wsl_kernel({}, "4.4.0-19041-Microsoft", missing)
+    assert project.wsl_kernel({"WSL_DISTRO_NAME": "Ubuntu"}, "6.8.0-generic", missing)
+    (tmp_path / "WSLInterop").write_text("enabled\n", encoding="ascii")
+    assert project.wsl_kernel({}, "6.6.87-custom", missing)  # interop registered: a custom WSL kernel
+    assert not project.wsl_kernel({}, "6.8.0-45-generic", str(tmp_path / "none"))
+    assert not project.wsl_kernel({}, "5.15.0-1057-azure", str(tmp_path / "none"))
+
+
 # --- native_path ---------------------------------------------------------------------------------
 
 
