@@ -7,7 +7,8 @@
 - Mobile and web (apk, aab, ipa, web): they cannot load custom extensions, so your
   code is packaged as .py (interpreted), even if the backend is mypyc.
 - `flet build` ignores uv.lock: the project it builds carries the EXACT versions
-  exported from uv.lock. It downloads the Flutter SDK the first time (~1 GB).
+  exported from uv.lock. It installs the Flutter SDK Flet pins the first time (~3 GB in
+  ~/flutter).
 - On Windows it needs Visual Studio (C++) and Developer Mode turned on.
 """
 
@@ -23,7 +24,7 @@ from typing import Any
 
 from .. import envs, mypyc, proc, render, ui, upx
 from ..cmd_build import BuildRequest, dist_path
-from ..config import Config
+from ..config import Config, toml_value
 from ..project import BUILD, IS_WINDOWS, PYPROJECT, SRC, host_os
 from ..ui import DeployError
 
@@ -62,7 +63,10 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     [tool.flet.app] path is always the staged app folder (flet looks for <work>/<path>/<module>.py
     and aborts, after installing Flutter, when it is elsewhere); every other key is kept.
     requires-python pins the minor of uv.lock and the mypyc build: with ">=3.13" flet bundled
-    its newest Python (3.14), which silently ignored the cp313 extensions.
+    its newest Python (3.14), which silently ignored the cp313 extensions. [project] description
+    is kept (flet puts it in the app's metadata). With [deploy.flet] cleanup = false,
+    [tool.flet.cleanup] app and packages default to false: flet cleans the packages unless told
+    not to, and its --cleanup-* flags have no negative form.
     """
     project = data["project"]
     tool_flet = copy.deepcopy(data.get("tool", {}).get("flet") or {})
@@ -72,10 +76,18 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     if app.get("path", STAGE_APP) != STAGE_APP:
         ui.warn(f"[tool.flet.app] path = {app['path']!r} is ignored: ./deploy build stages the app in {STAGE_APP}/")
     app["path"] = STAGE_APP
+    if not cfg.deploy.flet.cleanup:
+        cleanup = tool_flet.setdefault("cleanup", {})
+        if not isinstance(cleanup, dict):
+            raise DeployError("pyproject.toml: [tool.flet] cleanup must be a table ([tool.flet.cleanup])")
+        cleanup.setdefault("app", False)
+        cleanup.setdefault("packages", False)
+    description = project.get("description")
     lines = [
         "[project]",
         f"name = {json.dumps(project['name'])}",
         f"version = {json.dumps(project['version'])}",
+        *([f"description = {toml_value(description)}"] if isinstance(description, str) else []),
         f'requires-python = "=={cfg.python.cpython}.*"',
         "dependencies = [",
         *[f"    {json.dumps(p)}," for p in pins],
@@ -87,27 +99,30 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def check(cfg: Config) -> str:
-    """Refuse what flet build cannot do, and return the target (cmd_build calls it before the
-    checks and the payload, also in --dry-run)."""
+def build_target(cfg: Config) -> str:
+    """The `flet build` target: [deploy.flet] target, with "host" as this OS."""
+    target = cfg.deploy.flet.target
+    return host_os() if target == "host" else target
+
+
+def check_options(cfg: Config) -> None:
+    """Refuse a flet build that cannot work, before any work: cmd_build calls this before the
+    checks and the payload (also in --dry-run), build() again."""
     if cfg.app.preset != "flet":
         raise DeployError("--method flet is for the flet preset (pytemplate.toml app.preset)")
-    target = cfg.deploy.flet.target
-    if target == "host":
-        target = host_os()
-    if IS_WINDOWS and target == "windows" and not _developer_mode():
+    if IS_WINDOWS and build_target(cfg) == "windows" and not _developer_mode():
         raise DeployError(
             "flet build on Windows needs Developer Mode (Flutter uses symlinks):\n"
             "  Settings > System > For developers > Developer Mode. Meanwhile, use\n"
             "  `./deploy build` (flet pack), which does not need it.",
             3,
         )
-    return target
 
 
 def build(req: BuildRequest) -> Path:
     cfg = req.cfg
-    target = check(cfg)
+    check_options(cfg)
+    target = build_target(cfg)
 
     app_dir = req.app_dir
     if req.compiled and target in MOBILE_WEB:

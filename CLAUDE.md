@@ -561,7 +561,7 @@ header rules (with detector tests proving each rule fires).
 | `e2e.py` | `selftest --e2e` (section 13.1). |
 | `hooks.py` | `./deploy hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (apply/setup), `doctor`: the native git pre-commit hook (section 5.6); `find_repo` (`NotInGit`), `classify` (`runs_checks`), `hook_state`/`own_local` (a copy chained after another project's hook), `hook_script`/`launcher_of`, `install`/`uninstall` (apply removes the hook when `hooks.pre_commit = false`), `chain_hint`/`chain_advice`, `hooks_path_runner`, `checks`. |
 | `rename.py` | `./deploy rename NEW_NAME [--force]` and the rename step of apply: pure `plan` / `apply_plan` (undoes itself when a write fails) / `rewrite` (tokenizer + `ast` scopes + context rules, `MODULE_KEYS`), `check_new_name` (`locked_names`), `git_changes`, `dirty_tree_message`, `validate_config`, `tidy_before`/`tidy_after` (ruff, `Tidy`), `report`, `cmd_rename` (section 5.7). |
-| `upx.py` | Optional UPX packing: pinned download (`VERSION`, `ASSETS` with SHA-256), `find`, `active`, `level_flags`, `env_value`, `excludes`, `candidates`, `pack_file`, `pack_tree`, `MAX_INPUT` (section 10). |
+| `upx.py` | Optional UPX packing: pinned download (`VERSION`, `ASSETS` with SHA-256), `locate`, `find`, `uses`, `preflight` (from `cmd_build`, before any work), `active`, `level_flags`, `env_value`, `excludes`, `candidates`, `pack_file`, `pack_tree`, `MAX_INPUT` (section 10). |
 
 ### 5.2 Call flow
 
@@ -687,12 +687,15 @@ header rules (with detector tests proving each rule fires).
   `render` prints `would update: ...`.
 - `clean` prints `would remove X` per target. `build` validates its arguments, the pyz target
   keys, the Nuitka pin and PGO rules (`nuitka.check_python`, `check_options`), the flet preset
-  and Developer Mode (`flet.check`) and the portable launchers' env values (`portable.check`)
-  as a real build does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M: would output
-  dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options: --lto=... [--pgo-c ...] <extras>`), then
-  stops. `report` builds nothing and never opens the browser. No success line for a skipped
-  step: `compile`, `report` and `check` print `(--dry-run) would ...`/`were not run` instead of
-  their `ok` lines, and `test all` no summary of `[ok]` rows.
+  and Developer Mode (`flet.check_options`), the portable launchers' env values
+  (`portable.check`) and the UPX binary (`upx.preflight`: a missing `deploy.upx.path` fails) as
+  a real build does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M:
+  would output dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options: --lto=... [--pgo-c ...]
+  <extras>`; a method that packs with UPX on this host: `upx: <path>` or `upx: would download
+  <url> into <cache>`, never the download), then stops. `report` builds nothing and never opens
+  the browser. No success line for a skipped step: `compile`, `report` and `check` print
+  `(--dry-run) would ...`/`were not run` instead of their `ok` lines, and `test all` no summary
+  of `[ok]` rows.
 - `mode` validates the new `pytemplate.toml` in memory and prints the keys that would change
   (new and current value), whether `pyproject.toml` would be rewritten, `uv.lock` ("would
   re-lock", or a read-only `uv lock --check`), the generated files that would update, the
@@ -729,7 +732,6 @@ header rules (with detector tests proving each rule fires).
   only when its normalized form changes), environments, git hook, generated files, then the
   unused-environment note and the reference warnings (for a rename, checked where the files
   are before the move).
-- `build` with `[deploy.upx]` enabled: `upx.pack_tree` lists what it would pack and stops.
 - `lock` reports whether the managed parts of `pyproject.toml` would change
   (`render.write_pyproject` writes nothing under `DRY_RUN`; `render.pyproject_message` says
   "would update"); its `uv lock` is an echoed command, so it is skipped. `cmd_env.ensure_lock`
@@ -1094,7 +1096,7 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   Nuitka's profiling run starts the app while building, so the build waited for its window to be
   closed, and the data files were not in place yet; mypyc and macOS are refused at build time,
   section 10), `[deploy.flet] target cleanup exclude extra_args` (`target` is not validated;
-  `cleanup` = `--cleanup-app --cleanup-packages`), `[deploy.upx] enabled level lzma exclude
+  `cleanup` = `--cleanup-app --cleanup-packages`, `false` = neither), `[deploy.upx] enabled level lzma exclude
   path` (`level` in `1..9|best|brute|ultra-brute`; `path` relative to the project root).
 - `[hooks]`: `pre_commit` (apply/setup install the git hook when true and remove pytemplate's
   own when false; section 5.6).
@@ -1577,25 +1579,30 @@ Formats:
   for pyz/portable/wheel, `--onefile/--onedir` outside `ONEFILE_METHODS`, `--target` outside
   `TARGET_METHODS` (pyz), `GLOBAL_FLAGS` (`--dry-run`, `--no-render`) typed after the command,
   and a leading bare word (`_stray_word`: "unknown backend 'mypy': did you mean mypyc?", "did you
-  mean --method pyz?"). Then `nuitka.check_python` and, for pyz, `common.check_key` on every
-  key, `flet.check` (the flet preset; Developer Mode on Windows, exit 3) and `portable.check`
-  (the `[deploy.portable] env` values a `.cmd` launcher cannot hold): what a method refuses is
+  mean --method pyz?"). Then `nuitka.check_python`, for pyz `common.check_key` on every key,
+  `flet.check_options` (the flet preset; Developer Mode on Windows for a windows target, exit
+  3), `portable.check` (the `[deploy.portable] env` values a `.cmd` launcher cannot hold) and
+  `upx.preflight`: when the method packs with UPX on this host (`upx.uses`: exe on Windows,
+  nuitka, portable, flet desktop targets) it resolves the upx binary now, downloading it if
+  needed. What a method refuses (a missing `deploy.upx.path`, a failed download included) is
   refused before the checks, the mypyc compile and the removal of the previous output, and in
-  `--dry-run` too. Default method from `deploy.default`; `COMPAT` rejects exe/nuitka/flet with
-  pypy. Runs `run_checks` unless `--no-check` (a failure is exit 1, like `./deploy check`).
-  `payload`: the mypyc release stage, or `sync_tree(SRC, .build/payload/<backend>)`. A method
-  whose result is missing or an empty folder is a DeployError, never `ok done` (`build -v`:
-  PyInstaller took `-v` for `--version`; the message says that `./deploy`'s `-v`/`-q` go before
-  the command). The `done: ... (N MB)` size (`common.tree_bytes`) counts a
-  symlinked file once (a bundled runtime's `bin/python3 -> python3.14`).
+  `--dry-run` too (which only names the upx binary or its download). Default method from
+  `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs `run_checks` unless
+  `--no-check` (a failure is exit 1, like `./deploy check`). `payload`: the mypyc release
+  stage, or `sync_tree(SRC, .build/payload/<backend>)`. A method whose result is missing or an
+  empty folder is a DeployError, never `ok done` (`build -v`: PyInstaller took `-v` for
+  `--version`; the message says that `./deploy`'s `-v`/`-q` go before the command). The `done:
+  ... (N MB)` size (`common.tree_bytes`) counts a symlinked file once (a bundled runtime's
+  `bin/python3 -> python3.14`).
 - Output: `dist_path(req, suffix)` = `dist/<app.name>-<backend>-<method><suffix>`; portable
   with a bundled runtime adds `-<target key>`, flet adds `-<target>`. The CI template hard-codes
-  `dist/<NAME>-<BUILD_BACKEND>-pyz/<NAME>.pyz`: it is coupled to `BuildRequest.out_name`. pyz,
-  portable and wheel replace their previous output whole or not at all
-  (`common.remove_output`: a folder is first moved aside in `dist/`, which Windows refuses while
-  a file in it is in use, the app still running from it: exit 1 naming it, nothing deleted; what
-  the moved copy still holds is a warning); `pyz._write_archive` turns a `.pyz` in use into the
-  same error. rmtree used to delete half of the folder, then fail with a traceback.
+  `dist/<NAME>-<BUILD_BACKEND>-pyz/<NAME>.pyz`: it is coupled to `BuildRequest.out_name`. Every
+  method but flet build replaces its previous output whole or not at all, before its packager
+  runs (`common.remove_output`: a folder is first moved aside in `dist/`, which Windows refuses
+  while a file in it is in use, the app still running from it: exit 1 naming the file ("Is the
+  app still running?"), nothing deleted; what the moved copy still holds is a warning);
+  `pyz._write_archive` turns a `.pyz` in use into the same error. rmtree used to delete half of
+  the folder, then fail with a traceback (for nuitka after minutes of work).
 - Work dirs live under `.build/<name>/<backend>` (`exe-stage`, `pyinstaller`, `flet-pack`,
   `pyz`, `wheel`, `nuitka-stage`, `nuitka`, `flet-build`); portable builds straight into `dist/`.
 - Target keys: `^(cp|pp)(\d)(\d+)-(windows|linux|macos)-(x86_64|aarch64)$`
@@ -1649,7 +1656,11 @@ Per method:
   `deploy.exclude_modules`; `--strip`), `--clean`, `--log-level=WARN` unless `-v`, `--hidden-import` for
   mypyc, `--add-data "<src>:<dest>"` (`:` is PyInstaller's documented separator). The flet
   preset uses `flet pack` instead (`methods/exe._flet_pack`): it runs from its own cwd
-  `.build/flet-pack/<b>` because `flet pack -y` wipes `<cwd>/build` and the distpath; onedir
+  `.build/flet-pack/<b>` because `flet pack -y` wipes `<cwd>/build` and the distpath, which is
+  the final `dist/<n>-<b>-exe` itself (on Linux flet pack writes `<n>.desktop` after PyInstaller,
+  its absolute `Exec` built from `--distpath`: a build in `.build` moved to `dist/` shipped an
+  entry that launched nothing); PyInstaller gets `--clean` through
+  `--pyinstaller-build-args` as in the plain build (the UPX level, below); onedir
   uses `--contents-directory=.` on Windows only (on Linux the executable `dist/<n>/<n>` would be
   a FILE where the package folder `<pkg>/` of the mypyc extensions must go when
   `app.name == pkg`, the default; Linux keeps PyInstaller's `_internal/`); macOS never gets
@@ -1838,24 +1849,33 @@ Per method:
   controls lazily (module `__getattr__` + `importlib`), which Nuitka cannot follow, so the
   method adds `--include-package=flet --include-package=flet_desktop`; the flet-desktop wheel
   has NO client, so `nuitka._flet_client_archive` downloads the release archive
-  (`flet_desktop.get_artifact_filename()`, the same URL flet uses) once into
-  `.build/flet-client/<version>/` and bundles it at `flet_desktop/app/<archive>`, where
-  flet_desktop looks for a bundled client. 61 MB with UPX; ~25 min build.
+  (`flet_desktop.get_artifact_filename()`, the same URL flet uses, or `FLET_CLIENT_URL` when set,
+  as flet_desktop does) once into `.build/flet-client/<version>/` and bundles it at
+  `flet_desktop/app/<archive>`, where flet_desktop looks for a bundled client (and never
+  downloads one: a damaged archive would break the shipped app at its first start). So a
+  download is cached only when it delivered every byte the server announced (Content-Length)
+  and the archive reads to its end the way flet_desktop extracts it (`nuitka.archive_problem`:
+  zipfile CRCs, or tarfile over gzip and the gzip trailer); a cached archive is checked again
+  at every build and downloaded anew when damaged. 61 MB with UPX; ~25 min build.
 - **flet** (`flet build`): requires `app.preset == "flet"`. Windows needs Developer Mode
-  (Flutter symlinks; checked in the registry by `methods.flet._developer_mode`, through
-  `flet.check`, which `cmd_build` runs before any work) and Visual
-  Studio C++. The stage `.build/flet-build/<b>` is persistent (Flutter cache); stale
-  extensions are deleted from it before this payload's are copied (a desktop `.pyd` must not
-  reach a mobile/web build). `flet build` ignores `uv.lock`, so `build_pyproject` pins the
+  (Flutter symlinks; checked in the registry by `methods.flet._developer_mode`) and Visual
+  Studio C++; `flet.check_options` refuses both from `cmd_build`, before the checks and the
+  payload and also in `--dry-run`, and again in `build`. The stage `.build/flet-build/<b>` is
+  persistent (Flutter cache); stale extensions are deleted from it before this payload's are
+  copied (a desktop `.pyd` must not reach a mobile/web build). `flet build` ignores `uv.lock`, so `build_pyproject` pins the
   `uv export --frozen --no-dev` versions and serialises the PARSED `[tool.flet]` of the
   project `pyproject.toml` (no other table leaks in; `[tool.flet.app]` alone is kept) with
   `app.path` forced to `STAGE_APP` (`src`, where `build` stages the app; another value is
   ignored with a warning: flet looked for `<work>/<path>/main.py` and aborted after installing
   Flutter) and `requires-python = "==<python.cpython>.*"` (flet bundles the HIGHEST Python of
   its manifest matching it: `>=3.13` gave 3.14 and the cp313 mypyc extensions were silently not
-  loaded; a minor its manifest lacks now fails loudly). Mobile/web targets (`apk aab ipa
+  loaded; a minor its manifest lacks now fails loudly), plus `[project] description` (flet puts
+  it in the app's metadata; `config.toml_value` writes it). Mobile/web targets (`apk aab ipa
   ios-simulator web`) cannot load extensions: a mypyc backend ships the `.py`. Desktop embeds
-  the `python.cpython` minor, so the mypyc `.pyd`/`.so` files work. `cleanup`/`exclude` map to `--cleanup-app --cleanup-packages` / `--exclude`;
+  the `python.cpython` minor, so the mypyc `.pyd`/`.so` files work. `cleanup = true` passes
+  `--cleanup-app --cleanup-packages`; `cleanup = false` writes `app = false` and `packages =
+  false` into the build's `[tool.flet.cleanup]` unless the project sets them (flet_cli cleans
+  the packages by default and its flags have no negative form); `exclude` maps to `--exclude`;
   with UPX the finished folder goes through `upx.pack_tree` (desktop targets only). Verified on
   Windows (Developer Mode on): Flet 1.0.1 downloads ITS pinned Flutter (3.44.8, ~3 GB in
   `~/flutter`, ignoring a scoop Flutter) and a Python build (`~/.flet`); first build ~7 min,
@@ -2663,8 +2683,10 @@ short temp tree and unset `NVIM_APPNAME`.
   the workflow), the default depth weekly (Monday cron), `--full` monthly (day-1 cron, named by
   its string in the `MODE` expression), any depth on dispatch; job timeout 120 min, 300 for
   full; Linux gets the raylib libs, `libgl1-mesa-dri` and `xvfb`; the JSON report is always
-  uploaded and the logs on failure, one artifact name per matrix row;
-  `test_e2e_plan.test_e2e_workflow_*` pin the depths and triggers). First run on GitHub in
+  uploaded and the logs on failure or cancellation (`failure() || cancelled()`: a job over its
+  timeout-minutes is cancelled, not failed, and those are the logs that matter), one artifact
+  name per matrix row; `test_e2e_plan.test_e2e_workflow_*` pin the depths, triggers and the
+  logs condition). First run on GitHub in
   September 2026 (images ubuntu-24.04, macos-26-arm64, windows-2025-vs2026; uv 0.12, Neovim
   0.12.5).
 
@@ -3059,6 +3081,18 @@ CPython and its standard library:
 - **A missing cwd is blamed on the program** (LIMITATION): subprocess raised FileNotFoundError
   naming the program (POSIX) or NotADirectoryError (Windows). Fix: `proc.run` checks the cwd
   first (5.3). Test: `test_cli_core.py::test_a_bad_working_folder_is_named`. Goes: never.
+- **An HTTP body cut short can end like a whole one** (LIMITATION, http.client): a read of a
+  response that announced its Content-Length returns an empty chunk when the connection closes
+  early (a ragged TLS end reads the same) instead of raising IncompleteRead (kept for
+  compatibility, says CPython's own comment), and a chunked one raises IncompleteRead, which is
+  no OSError: a Flet client cut short was cached and bundled into every later Nuitka build (the
+  app failed at its first start), and a cut UPX download ended in a runner traceback. Fix:
+  `nuitka._flet_client_archive` counts the bytes against Content-Length, reads the archive to
+  its end (`nuitka.archive_problem`, also for a cached one) and catches HTTPException;
+  `upx._download` catches it too and checks the SHA-256 (10). Test:
+  `test_workarounds.py::test_a_flet_client_download_cut_short_is_never_cached`,
+  `test_a_damaged_cached_flet_client_is_downloaded_again`,
+  `test_upx.py::test_download_failures_are_clear_and_leave_nothing`. Goes: never.
 
 PyPy:
 - **PyPy 8.0 changed the extension ABI to pp80** (LIMITATION): a loose request picked the newest
@@ -3186,9 +3220,11 @@ PyInstaller:
   `.so` files crash). Fix: `exe.size_args` passes `--noupx`, downloads nothing and warns (10).
   Test: `test_build_methods.py::test_exe_size_args_skip_upx_off_windows`. Goes: never.
 - **Its UPX step takes no level** (LIMITATION): PyInstaller always adds `--lzma`, and its binary
-  cache reused another level's output. Fix: the level in the `UPX` variable (`upx.env_value`),
-  `--clean` (10). Test: `test_upx.py::test_level_flags_and_pyinstaller_env`,
-  `test_build_methods.py::test_exe_size_args_use_upx_on_windows`. Goes: never.
+  cache (global, keyed without the level) reused another level's output. Fix: the level in the
+  `UPX` variable (`upx.env_value`), `--clean` (`exe.build`, and `exe._flet_pack` through
+  `--pyinstaller-build-args`) (10). Test: `test_upx.py::test_level_flags_and_pyinstaller_env`,
+  `test_build_methods.py::test_exe_size_args_use_upx_on_windows`,
+  `test_flet_pack_cleans_pyinstallers_cache`. Goes: never.
 - **No PyPy** (LIMITATION, PyInstaller and Nuitka): Fix: `cmd_build.COMPAT` refuses exe, nuitka
   and flet with pypy; portable is PyPy's standalone route (10). Test:
   `test_build_methods.py::test_build_refuses_methods_without_pypy`,
@@ -3232,20 +3268,24 @@ Flet (flet, flet-desktop, flet pack, flet build):
   flet-desktop of another version is pip-installed at runtime, bypassing uv.lock. Fix: one
   `[preset.flet] version` for flet, flet-desktop and flet-cli (5.8); exe through `flet pack`
   (`exe._flet_pack`); `nuitka._flet_client_archive` bundles flet_desktop's own release archive
-  at `flet_desktop/app/` (10). Test:
-  `test_apply.py::test_flet_version_change_replaces_the_three_pins`,
-  `test_workarounds.py::test_nuitka_bundles_the_flet_client`. Goes: never.
+  at `flet_desktop/app/`, from the same URL (or its `FLET_CLIENT_URL` override, a mirror) (10).
+  Test: `test_apply.py::test_flet_version_change_replaces_the_three_pins`,
+  `test_workarounds.py::test_nuitka_bundles_the_flet_client`,
+  `test_the_flet_client_follows_flet_client_url`. Goes: never.
 - **flet loads its controls lazily** (LIMITATION): module `__getattr__` + `importlib`, which
   Nuitka cannot follow. Fix: `--include-package=flet --include-package=flet_desktop` in
   `nuitka.build` (10). Test: `test_workarounds.py::test_nuitka_bundles_the_flet_client`. Goes:
   never.
 - **`flet pack` options** (LIMITATION): `-y` wipes `<cwd>/build` and the distpath, `--onedir` is
   refused on macOS (always a `.app`), it adds `--noconsole` unless `--debug-console` has a
-  value, and each `--pyinstaller-build-args` value is one argument. Fix: `exe._flet_pack` runs
-  in `.build/flet-pack/<b>`, never passes `--onedir` on macOS, maps `deploy.exe.console` to
+  value, each `--pyinstaller-build-args` value is one argument, and on Linux it writes a
+  desktop entry whose `Exec` is the absolute executable path under `--distpath`. Fix:
+  `exe._flet_pack` runs in `.build/flet-pack/<b>` with the final `dist/` folder as
+  `--distpath`, never passes `--onedir` on macOS, maps `deploy.exe.console` to
   `--debug-console=true`, passes `--python-option=X utf8` as one item (10). Test:
   `test_build_methods.py::test_flet_pack_macos_is_never_onedir`,
-  `test_flet_pack_console_and_utf8` (every `_flet_pack` test checks the cwd). Goes: never.
+  `test_flet_pack_console_and_utf8` (every `_flet_pack` test checks the cwd),
+  `test_flet_pack_desktop_entry_names_the_shipped_executable`. Goes: never.
 - **PyInstaller's flat onedir puts the executable where the package folder goes** (LIMITATION):
   with `--contents-directory=.` on Linux, `dist/<n>/<n>` is a FILE where the folder `<pkg>/`
   must go when `app.name == pkg` (the default). Fix: flat only on Windows (`exe._flet_pack`,
@@ -3260,11 +3300,19 @@ Flet (flet, flet-desktop, flet pack, flet build):
   path` aborted after installing Flutter. Fix: `methods.flet.build_pyproject` forces
   `methods.flet.STAGE_APP` with a warning (10). Test:
   `test_build_methods.py::test_flet_build_pyproject_points_at_the_staged_app`. Goes: never.
+- **`flet build` cleans the packages unless told not to** (LIMITATION): its packages setting of
+  `[tool.flet.cleanup]` defaults to true and `--cleanup-packages` has no negative form, so
+  `[deploy.flet] cleanup = false` (no flags) still cleaned them. Fix: `methods.flet.build_pyproject` writes `app` and
+  `packages` false into the build's `[tool.flet.cleanup]` unless the project sets them (10).
+  Test: `test_build_methods.py::test_flet_build_cleanup_false_turns_flets_own_cleanup_off`.
+  Goes: never.
 - **Flutter needs Developer Mode on Windows (symlinks), and mobile and web targets load no
-  extension** (LIMITATION): Fix: `methods.flet._developer_mode` is checked first; mobile and web
-  builds ship the `.py` (10). Test:
+  extension** (LIMITATION): Fix: `methods.flet._developer_mode` is checked by
+  `methods.flet.check_options` before the checks and the payload (also in `--dry-run`); mobile
+  and web builds ship the `.py` (10). Test:
   `test_build_methods.py::test_flet_build_needs_developer_mode_on_windows`,
-  `test_flet_build_mobile_and_web_ship_the_py_code`. Goes: never.
+  `test_flet_method_refuses_before_any_work`, `test_flet_build_mobile_and_web_ship_the_py_code`.
+  Goes: never.
 
 cffi and raylib:
 - **The raylib stub does not match the runtime** (DEFECT, raylib 6.0.1.0): returns, fields and
@@ -3301,9 +3349,11 @@ UPX:
   `test_upx_messages_are_classified`. Goes: never.
 - **No macOS support, no Windows arm64 release** (LIMITATION): UPX cannot pack current macOS
   binaries (and packing breaks their signature). Fix: `upx.unsupported_reason` turns UPX off on
-  macOS with a warning; `upx.ASSETS` gives Windows arm64 the x64 build (emulated) (10). Test:
-  `test_workarounds.py::test_upx_is_off_on_macos_and_windows_arm64_runs_the_x64_build`. Goes:
-  per case, when UPX supports it.
+  macOS with a warning (`upx.active`, and `exe.size_args` with the same reason);
+  `upx.ASSETS` gives Windows arm64 the x64 build (emulated) (10). Test:
+  `test_workarounds.py::test_upx_is_off_on_macos_and_windows_arm64_runs_the_x64_build`,
+  `test_build_methods.py::test_exe_size_args_say_why_upx_is_off_on_macos`. Goes: per case, when
+  UPX supports it.
 - **The packagers look for UPX differently** (LIMITATION): PyInstaller wants `<upx-dir>/upx`,
   Nuitka a file named `upx`. Fix: `upx.find` hands them an absolute, unresolved path (10). Test:
   `test_upx.py::test_relative_upx_path_resolves_against_the_project_root`. Goes: never.
@@ -3750,6 +3800,13 @@ Windows:
   13.1). Test: `test_build_methods.py::test_pyz_repairs_an_incomplete_cache`,
   `test_e2e_run.py::test_move_retries_a_locked_folder`,
   `test_e2e_run.py::test_run_logged_timeout_kills_the_whole_tree`. Goes: never.
+- **A running program's files cannot be deleted** (LIMITATION): rebuilding an output while the
+  previous build ran from it raised PermissionError in the middle of deleting it (half of the
+  folder gone, a runner traceback; for nuitka after minutes of work). Fix:
+  `common.remove_output` moves the old output aside first (whole or not at all) before the
+  packager runs and turns the error into a clear one (exit 1, 10). Test:
+  `test_build_methods.py::test_an_output_in_use_is_a_clear_error_before_the_packager_runs`,
+  `test_a_previous_output_in_use_is_left_whole`. Goes: never.
 - **The classic console needs ANSI turned on** (LIMITATION): and the `os.system("")` trick
   started a cmd.exe on every run. Fix: `ui.enable_vt_mode` (`SetConsoleMode`, 5.3). Test:
   `test_paths.py::test_ui_never_spawns_cmd_for_colors`,
@@ -3859,9 +3916,6 @@ Behaviour:
   presets pin (`presets.IMPORT_NAMES`): a dependency the user adds is compared by its
   distribution name (`beautifulsoup4` refuses `beautifulsoup4`, not `bs4`). Reading them needs
   the installed wheels (an environment of the project, never there for `new`'s next preset).
-- exe and nuitka still remove their previous `dist/` output with rmtree: on Windows, with the
-  app running from it, half of it goes before a traceback. `common.remove_output` is the fix
-  pyz, portable and wheel use; `exe.build` and `nuitka.build` do not call it yet.
 - A pyz built on Windows stores no x bit (Windows files have no Unix mode), so the executables of
   its Linux or macOS targets (`--target`), or of a script in `src/`, are not runnable where it is
   extracted; the generated CI builds each OS's part on that OS, and `pyz-merge` keeps the parts'
@@ -3925,7 +3979,8 @@ Code coupling (rename together):
   `rename._plan_pyproject`; `rename` and `cmd_env` import `cmd_apply` lazily (it imports both
   at module level).
 - `upx.BUILTIN_EXCLUDE` must keep `flutter_windows.dll`; `nuitka._flet_client_archive` mirrors
-  flet_desktop's download URL and its `flet_desktop/app/` lookup.
+  flet_desktop's download URL, its `FLET_CLIENT_URL` override and its `flet_desktop/app/`
+  lookup, and `nuitka.archive_problem` the way `ensure_client_cached` extracts the archive.
 - `config._check_default_methods` imports `cmd_build.COMPAT` lazily (`cmd_build` imports
   `config`); `config._check_preset_tables` reads `preset.toml` `[options]` itself, like
   `config._presets` mirrors `presets.available`; `render.managed_block` needs `pypy_minor`
@@ -3933,8 +3988,11 @@ Code coupling (rename together):
 - `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`;
   `cmd_mode._work_tree_top` calls the private `presets._git_env` (the same git environment as
   `presets._git_init`, whose "inside a work tree" rule it mirrors for `new`);
-  `e2e.flet_build_reason` imports `methods.flet._developer_mode`; `cmd_nvim.c_compiler`
-  imports `cmd_env._msvc` and `_xcode_problem` lazily (`cmd_env` imports `cmd_nvim`).
+  `e2e.flet_build_reason` imports `methods.flet._developer_mode`, and its Flutter size and the
+  flet method's docstring follow the manual (`test_docs.test_the_runner_gives_the_manuals_flutter_size`);
+  `upx.uses` imports `methods.flet.MOBILE_WEB` lazily (`methods.flet` imports `upx`);
+  `cmd_nvim.c_compiler` imports `cmd_env._msvc` and `_xcode_problem` lazily (`cmd_env` imports
+  `cmd_nvim`).
 - `RULES_RE` / `tasks.parse_line` <-> `ui.error`, `ui.warn`, `str(lintc.Finding)` (5.3).
 - mypyc internals mirrored by the runner (checked by `test_mypyc_core` against the locked
   mypy): `lintc.NATIVE_CLASS_DECORATORS` <-> mypyc's native decorators;

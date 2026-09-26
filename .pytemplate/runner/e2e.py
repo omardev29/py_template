@@ -633,7 +633,7 @@ def preset_info(name: str) -> PresetInfo:
 def flet_build_reason(os_name: str) -> str:
     flutter = shutil.which("flutter") or next(iter(sorted(Path.home().glob("flutter/*/bin/flutter*"))), None)
     if not flutter:
-        return "needs the Flutter SDK (flet build fetches ~1 GB): not in PATH or ~/flutter"
+        return "needs the Flutter SDK (flet build installs ~3 GB): not in PATH or ~/flutter"
     if os_name == "windows":
         from .methods.flet import _developer_mode
 

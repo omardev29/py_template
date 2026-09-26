@@ -425,22 +425,27 @@ def remove_output(path: Path) -> None:
     """
     if not path.exists() and not path.is_symlink():
         return
-    hint = "close the app or window that uses it and build again"
+    hint = "\n  Is the app still running? Close it (or the window that uses the folder) and build again"
     if path.is_file() or path.is_symlink():
         try:
             path.unlink()
         except OSError as e:
-            raise DeployError(f"cannot replace {rel(path)}: it is in use or read-only ({e.strerror or e}): {hint}", 1) from None
+            raise DeployError(f"cannot replace {rel(path)}: it is in use or read-only ({_why(e)}){hint}", 1) from None
         return
     aside = Path(tempfile.mkdtemp(prefix=f".{path.name}.old-", dir=path.parent))
     try:
         _move(path, aside / path.name)
     except OSError as e:
         aside.rmdir()
-        raise DeployError(f"cannot replace {rel(path)}: a file in it is in use ({e.strerror or e}): {hint}", 1) from None
+        raise DeployError(f"cannot replace {rel(path)}: a file in it is in use ({_why(e)}){hint}", 1) from None
     shutil.rmtree(aside, ignore_errors=True)
     if aside.exists():
         ui.warn(f"could not delete all of the previous output, moved to {rel(aside)}: delete it by hand")
+
+
+def _why(e: OSError) -> str:
+    """The OS error and, when it names one, the file (the one a running app keeps open)."""
+    return f"{e.strerror or e}: {e.filename}" if e.filename else str(e.strerror or e)
 
 
 def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:

@@ -115,7 +115,8 @@ jobs:
           path: e2e-${{ matrix.preset }}.json
           if-no-files-found: ignore
       - name: Upload the logs (kept on failure)
-        if: failure()
+        # a job over timeout-minutes is cancelled, not failed: its logs are the ones that matter
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: e2e-logs-${{ matrix.preset }}-${{ matrix.os }}

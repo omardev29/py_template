@@ -333,6 +333,22 @@ def test_pinned_versions_match_the_runner() -> None:
     assert f'`"{PythonConfig.cpython}"`' in text and PythonConfig.pypy in text
 
 
+def test_the_runner_gives_the_manuals_flutter_size(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The runner said ~1 GB (the flet method's docstring, the e2e SKIP reason) where the manual
+    # measured about 3 GB in ~/flutter
+    from runner import e2e
+    from runner.methods import flet
+
+    sizes = set(re.findall(r"about (\d+) GB", _text()))
+    assert len(sizes) == 1, f"the manual gives several Flutter sizes: {sizes}"
+    size = f"~{sizes.pop()} GB"
+    monkeypatch.setattr(e2e.shutil, "which", lambda *a, **k: None)
+    monkeypatch.setattr(e2e.Path, "home", lambda: tmp_path)  # no ~/flutter
+    assert size in e2e.flet_build_reason("linux")
+    assert flet.__doc__ is not None and size in flet.__doc__
+    assert not re.search(r"~\d+ GB", (flet.__doc__ or "").replace(size, "")), "another size in the flet method's docstring"
+
+
 # --- links and style -----------------------------------------------------------------------------
 
 

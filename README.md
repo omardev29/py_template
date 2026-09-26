@@ -447,7 +447,7 @@ file must be UTF-8 (a BOM is fine); `schema = 1` is the layout this runner reads
 | `deploy.nuitka.pgo_args` | `[]` | the app's arguments for the profiling run |
 | `deploy.nuitka.extra_args` | `[]` | appended to the Nuitka command |
 | `deploy.flet.target` | `"host"` | `host`, `windows`, `macos`, `linux`, `apk`, `aab`, `ipa` or `web` |
-| `deploy.flet.cleanup` | `true` | `--cleanup-app --cleanup-packages`: no tests or docs in the bundle |
+| `deploy.flet.cleanup` | `true` | `--cleanup-app --cleanup-packages`: no tests or docs in the bundle (`false` keeps them) |
 | `deploy.flet.exclude` | `[]` | app files or folders `flet build` leaves out |
 | `deploy.flet.extra_args` | `[]` | appended to the `flet build` command |
 | `deploy.upx.enabled` | `false` | pack the binaries with UPX ([Binary size](#binary-size)) |
@@ -703,9 +703,13 @@ and nuitka only); `--target KEY` (repeatable) adds platforms to a pyz; other fla
 packager of exe (PyInstaller or `flet pack`), nuitka and flet (`flet build`), while pyz,
 portable and wheel refuse them (exit 2). Options are not abbreviated (`--meth` is not
 `--method`), and a bare word is an error with a hint ("unknown backend 'mypy': did you mean
-mypyc?", "did you mean --method pyz?"). `./deploy --dry-run build ...` checks the arguments and
-the configuration as a real build does and prints the output name (for nuitka also its
-options), without building.
+mypyc?", "did you mean --method pyz?"). What can refuse a build without building refuses it
+before `check` and the payload: the arguments, the pyz target keys, the Nuitka pin and PGO
+rules, `--method flet` outside the flet preset or on Windows without Developer Mode, and the
+UPX binary of a method that packs (a missing `deploy.upx.path`, or a failed download).
+`./deploy --dry-run build ...` runs the same refusals and prints the output name (for nuitka
+also its options, with UPX the `upx` it would use or download), without building or
+downloading.
 
 ### exe
 
@@ -718,7 +722,13 @@ folder on every start; `onedir` starts faster.
 The flet preset uses `flet pack` instead: PyInstaller plus Flet's Flutter client inside the
 executable (with plain PyInstaller the app would download about 40 MB at first start). Its
 onedir build is a flat folder on Windows (`<name>.exe` next to its files) and keeps
-PyInstaller's `_internal/` on Linux; on macOS `flet pack` always builds an `.app`.
+PyInstaller's `_internal/` on Linux; on macOS `flet pack` always builds an `.app`. On Linux it
+also writes `<name>.desktop` into `dist/<name>-<backend>-exe/`, a desktop entry whose `Exec` is
+the absolute path of the executable there: copy it to `~/.local/share/applications/` to get a
+launcher (edit `Exec` if you move the folder).
+
+A rebuild first deletes the previous `dist/<name>-<backend>-exe/` (or `-nuitka/`); while that
+app still runs, Windows refuses, and the build stops at once with that message (exit 1).
 
 ### portable
 
@@ -845,7 +855,10 @@ unless Nuitka's own `--experimental=python3.X` is passed.
   docstrings follow `deploy.optimize`.
 - Imports Nuitka cannot find (a platform-guarded `import winreg`) are skipped. Flet works: all of
   `flet` is included (it loads its controls lazily, which Nuitka cannot follow) and the Flet
-  client archive is bundled, as `flet pack` does.
+  client archive is bundled, as `flet pack` does. The first build downloads it once into
+  `.build/flet-client/` from GitHub, or from `FLET_CLIENT_URL` when you set it (Flet's own
+  variable, for a mirror). A download cut short is refused, never cached, and a damaged cached
+  archive is downloaded again.
 
 ### flet build
 
@@ -859,10 +872,13 @@ about 7 minutes, the next ones about 3.
 - It embeds exactly the `python.cpython` minor, so the mypyc extensions work in desktop apps.
   Mobile and web apps cannot load extensions: with the mypyc backend they get the `.py`.
 - `flet build` ignores `uv.lock`: the runner pins the locked versions in its build project. It
-  reads `[tool.flet]` of `pyproject.toml`, where `org`, `company` and `copyright` are
-  placeholders that end up in the app; `[tool.flet.app] path` is always `src`.
-- `cleanup` (default `true`): `--cleanup-app --cleanup-packages`; `exclude`: app files left out;
-  `extra_args` go to `flet build`.
+  reads `[tool.flet]` and the `[project] description` of `pyproject.toml`, where `org`,
+  `company` and `copyright` are placeholders that end up in the app; `[tool.flet.app] path` is
+  always `src`.
+- `cleanup` (default `true`): `--cleanup-app --cleanup-packages`. `false` turns both off: Flet
+  cleans the packages unless told not to, so the build project gets `app = false` and
+  `packages = false` in `[tool.flet.cleanup]` (values your own `[tool.flet.cleanup]` sets stay).
+  `exclude`: app files left out; `extra_args` go to `flet build`.
 
 ### Binary size
 
@@ -915,9 +931,10 @@ done (the portable smoke test then loads the packed modules). Never packed: file
 startup). UPX 5.2.1 is downloaded once (SHA-256 checked) to `%LOCALAPPDATA%\pytemplate\tools`
 (`$XDG_CACHE_HOME/pytemplate/tools` or `~/.cache/pytemplate/tools` elsewhere), unless `upx` is on
 PATH or `deploy.upx.path` names one (absolute, `~`, or relative to the project root; the file is
-named `upx` or `upx.exe`). macOS is not supported. The price: every start unpacks the files in
-memory (a slower start, no memory shared between processes), and some antivirus engines flag
-UPX-packed files.
+named `upx` or `upx.exe`); `build` finds (or downloads) it before any other work, so a wrong
+path or no network fails at once. macOS is not supported. The price: every start unpacks the
+files in memory (a slower start, no memory shared between processes), and some antivirus engines
+flag UPX-packed files.
 
 **Compressed binaries**: mypyc builds ordinary C extensions (`.pyd`/`.so`, without debug
 information in release builds); nothing compresses them by default, but UPX packs them to about a

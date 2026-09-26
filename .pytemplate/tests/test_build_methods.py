@@ -198,6 +198,20 @@ def test_exe_size_args_skip_upx_off_windows(monkeypatch: pytest.MonkeyPatch, cap
     assert "--noupx" in args and capsys.readouterr().err == ""
 
 
+def test_exe_size_args_say_why_upx_is_off_on_macos(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # On macOS neither warning fired (the Windows-only one skipped hosts UPX does not support,
+    # and upx.active, which names them, was never called): UPX was dropped without a word
+    monkeypatch.setattr(exe, "IS_WINDOWS", False)
+    monkeypatch.setattr(upx, "IS_MACOS", True)
+    monkeypatch.setattr(upx, "find", lambda cfg: pytest.fail("upx.find must not run"))
+    args, env = exe.size_args(make({"deploy": {"upx": {"enabled": True}}}))
+    assert "--noupx" in args and env == {}
+    err = capsys.readouterr().err
+    assert "UPX cannot pack current macOS binaries" in err and "not UPX-packed" in err
+    exe.size_args(make({}))
+    assert capsys.readouterr().err == ""
+
+
 def test_exe_size_args_use_upx_on_windows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(exe, "IS_WINDOWS", True)
     monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
@@ -226,8 +240,15 @@ def _flet_pack(sandbox: Path, monkeypatch: pytest.MonkeyPatch, cfg: Config, back
     app = fake_app(sandbox / "payload", cfg.pkg)
 
     def effect(args: list[str], cwd: Path | None) -> None:
+        # What flet pack 1.0.1 writes: PyInstaller's output into <cwd>/<--distpath>, then (Linux)
+        # a desktop entry next to it whose Exec is the absolute path of the executable
         assert cwd is not None
-        (cwd / "dist" / cfg.app.name).mkdir(parents=True)  # what flet pack writes into its cwd
+        dist = cwd / args[args.index("--distpath") + 1]
+        name = cfg.app.name
+        (dist / name).mkdir(parents=True)
+        (dist / name / name).write_bytes(b"\x7fELF")
+        if not windows and not macos:
+            (dist / f"{name}.desktop").write_text(f'[Desktop Entry]\nType=Application\nExec="{dist / name / name}"\n', encoding="utf-8")
 
     rec = Recorder(effect)
     monkeypatch.setattr(exe, "IS_WINDOWS", windows)
@@ -261,6 +282,53 @@ def test_flet_pack_onedir_windows_is_flat(sandbox: Path, monkeypatch: pytest.Mon
 def test_flet_pack_macos_is_never_onedir(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     argv = _flet_pack(sandbox, monkeypatch, _flet_cfg(), "cpython", windows=False, macos=True).argv
     assert "--onedir" not in argv and not [a for a in argv if "--contents-directory" in a]
+
+
+def test_flet_pack_desktop_entry_names_the_shipped_executable(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # flet pack writes the Linux desktop entry after PyInstaller, with an absolute Exec built from
+    # --distpath: that pointed into .build/flet-pack/<b>/dist, which the build then moved to
+    # dist/ (the entry launched nothing). The output folder itself is the distpath now.
+    cfg = _flet_cfg()
+    _flet_pack(sandbox, monkeypatch, cfg, "cpython", windows=False, macos=False)
+    out = sandbox / "dist" / "fletdemo-cpython-exe"
+    entry = (out / "fletdemo.desktop").read_text(encoding="utf-8")
+    executable = Path(re.search(r'^Exec="(.*)"$', entry, re.MULTILINE).group(1))  # type: ignore[union-attr]
+    assert executable.is_file() and executable.parent.parent == out
+
+
+def test_flet_pack_cleans_pyinstallers_cache(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # PyInstaller's binary cache (global, keyed without the UPX level) handed back binaries
+    # packed at another deploy.upx.level: the plain exe build passes --clean, flet pack did not
+    argv = _flet_pack(sandbox, monkeypatch, _flet_cfg(), "cpython", windows=True, macos=False).argv
+    assert "--pyinstaller-build-args=--clean" in argv
+
+
+@pytest.mark.parametrize("method", ["exe", "flet pack", "nuitka"])
+def test_an_output_in_use_is_a_clear_error_before_the_packager_runs(sandbox: Path, monkeypatch: pytest.MonkeyPatch, method: str) -> None:
+    # Windows refuses to delete a running exe or a loaded DLL: rebuilding while the previous
+    # build ran gave an "internal runner error" traceback (after Nuitka's minutes of work)
+    cfg = _flet_cfg() if method == "flet pack" else make({})
+    name = {"exe": "myapp-cpython-exe", "flet pack": "fletdemo-cpython-exe", "nuitka": "myapp-cpython-nuitka"}[method]
+    out = sandbox / "dist" / name
+    (out / "sub").mkdir(parents=True)
+    (out / "sub" / "app.exe").write_bytes(b"MZ")
+
+    def locked(src: Any, dst: Any) -> None:  # Windows: a folder whose exe runs cannot be moved
+        raise PermissionError(13, "The process cannot access the file because it is being used by another process", str(out / "sub" / "app.exe"))
+
+    monkeypatch.setattr(common, "_move", locked)
+    started: list[list[str]] = []
+    monkeypatch.setattr(envs, "uv_run", lambda env, argv, **k: started.append([str(a) for a in argv]))
+    monkeypatch.setattr(envs, "uv", lambda env, argv, **k: started.append([str(a) for a in argv]))
+    monkeypatch.setattr(exe, "IS_WINDOWS", True)
+    monkeypatch.setattr(nuitka, "IS_WINDOWS", True)
+    app = fake_app(sandbox / "payload", cfg.pkg)
+    module = nuitka if method == "nuitka" else exe
+    with pytest.raises(DeployError) as e:
+        module.build(BuildRequest(cfg, "cpython", "nuitka" if method == "nuitka" else "exe", app))
+    assert f"dist{os.sep}{name}" in str(e.value) or f"dist/{name}" in str(e.value)
+    assert "still running" in str(e.value) and "app.exe" in str(e.value)
+    assert started == []  # refused before the packager ran
 
 
 @pytest.mark.parametrize(("console", "expected"), [("auto", False), ("yes", True), ("no", False)])
@@ -1968,10 +2036,10 @@ def test_build_forwards_extras_to_the_packagers(monkeypatch: pytest.MonkeyPatch,
     assert seen[-1].targets == [WIN] and seen[-1].extra == []
     assert cmd_build.cmd_build(cfg, ["pypy", "--method", "pyz", "--no-check", "--target", "pp311-linux-x86_64", "--target", WIN]) == 0
     assert seen[-1].targets == ["pp311-linux-x86_64", WIN]
-    flet_cfg = make({"app": {"preset": "flet"}})
     from runner.methods import flet
 
-    monkeypatch.setattr(flet, "_developer_mode", lambda: True)  # cmd_build checks it first on Windows
+    monkeypatch.setattr(flet, "IS_WINDOWS", False)  # no Developer Mode check on a Windows runner
+    flet_cfg = make({"app": {"preset": "flet"}})
     assert cmd_build.cmd_build(flet_cfg, ["--method", "flet", "--no-check", "--build-number", "3"]) == 0
     assert seen[-1].extra == ["--build-number", "3"]
 
@@ -2035,6 +2103,109 @@ def test_build_without_output_never_reports_done(monkeypatch: pytest.MonkeyPatch
         cmd_build.cmd_build(make({}), ["--method", "exe", "--no-check", *extra])
     assert ("before the command" in str(e.value)) is bool(extra)
     assert "done:" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_flet_method_refuses_before_any_work(no_build: None, monkeypatch: pytest.MonkeyPatch, dry_run: bool) -> None:
+    # Both refusals lived in flet.build: `--dry-run build --method flet` printed a plan for a
+    # build that must fail, and the real one ran check and the mypyc compile first
+    from runner.methods import flet
+
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    monkeypatch.setattr(flet, "IS_WINDOWS", False)
+    with pytest.raises(DeployError, match="for the flet preset") as e:
+        cmd_build.cmd_build(make({}), ["cpython", "--method", "flet"])
+    assert e.value.code == 2
+    monkeypatch.setattr(flet, "IS_WINDOWS", True)
+    monkeypatch.setattr(flet, "host_os", lambda: "windows")
+    monkeypatch.setattr(flet, "_developer_mode", lambda: False)
+    with pytest.raises(DeployError, match="Developer Mode") as e:
+        cmd_build.cmd_build(_flet_cfg(), ["cpython", "--method", "flet"])
+    assert e.value.code == 3
+    # A web build needs no Developer Mode, nor does a machine that has it on: they go on
+    for cfg in (_flet_cfg(deploy={"flet": {"target": "web"}}), _flet_cfg()):
+        monkeypatch.setattr(flet, "_developer_mode", lambda: cfg.deploy.flet.target == "host")
+        if dry_run:
+            assert cmd_build.cmd_build(cfg, ["cpython", "--method", "flet", "--no-check"]) == 0
+        else:
+            with pytest.raises(AssertionError, match="went past"):
+                cmd_build.cmd_build(cfg, ["cpython", "--method", "flet"])
+
+
+UPX_MISSING = {"deploy": {"upx": {"enabled": True, "path": "tools/upx-missing"}}}
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    ("method", "cfg_data", "windows", "packs"),
+    [
+        ("portable", {}, False, True),
+        ("nuitka", {}, False, True),
+        ("exe", {}, True, True),
+        ("exe", {}, False, False),  # PyInstaller packs only on Windows
+        ("flet", {"app": {"preset": "flet"}}, False, True),
+        ("flet", {"app": {"preset": "flet"}, "deploy": {"flet": {"target": "web"}}}, False, False),  # web ships no binary
+        ("pyz", {}, False, False),
+        ("wheel", {}, False, False),
+    ],
+)
+def test_upx_is_resolved_before_any_work(
+    no_build: None, monkeypatch: pytest.MonkeyPatch, method: str, cfg_data: dict[str, Any], windows: bool, packs: bool, dry_run: bool
+) -> None:
+    # upx.find ran at the END of the build (after compileall and the runtime copy, after the
+    # whole `flet build`): a deploy.upx.path that does not exist, or a failed download, failed
+    # the build after the work, and the dry run said nothing about UPX at all
+    from runner.methods import flet
+
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
+    monkeypatch.setattr(upx, "IS_WINDOWS", windows)
+    monkeypatch.setattr(flet, "IS_WINDOWS", False)
+    deploy = {**UPX_MISSING["deploy"], **cfg_data.get("deploy", {})}
+    cfg = make({**cfg_data, "deploy": deploy})
+    if packs:
+        with pytest.raises(DeployError, match="deploy.upx.path = 'tools/upx-missing' does not exist") as e:
+            cmd_build.cmd_build(cfg, ["cpython", "--method", method])
+        assert e.value.code == 3
+    elif dry_run:
+        assert cmd_build.cmd_build(cfg, ["cpython", "--method", method, "--no-check"]) == 0
+    else:
+        with pytest.raises(AssertionError, match="went past"):
+            cmd_build.cmd_build(cfg, ["cpython", "--method", method])
+
+
+def test_upx_download_happens_before_the_work_and_never_in_a_dry_run(
+    no_build: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    downloads: list[Path] = []
+
+    def download(dest: Path) -> Path:
+        downloads.append(dest)
+        raise DeployError("upx: cannot download it (offline)", 3)
+
+    monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
+    monkeypatch.setattr(upx, "_cache_dir", lambda: tmp_path / "cache")
+    monkeypatch.setattr(upx, "_download", download)
+    monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(tmp_path / "empty")})
+    cfg = make({"deploy": {"upx": {"enabled": True}}})
+    # Real build: the download fails before the checks and the payload
+    with pytest.raises(DeployError, match="offline"):
+        cmd_build.cmd_build(cfg, ["cpython", "--method", "portable"])
+    assert downloads == [tmp_path / "cache"]
+    # Dry run: it names the download instead of doing it
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert cmd_build.cmd_build(cfg, ["cpython", "--method", "portable", "--no-check"]) == 0
+    err = capsys.readouterr().err
+    assert len(downloads) == 1 and "upx: would download https://github.com/upx/upx/releases/" in err
+    # With upx on PATH the dry run names it
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    tool = bindir / ("upx.exe" if IS_WINDOWS else "upx")
+    tool.write_bytes(b"")
+    tool.chmod(0o755)
+    monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(bindir)})
+    assert cmd_build.cmd_build(cfg, ["cpython", "--method", "portable", "--no-check"]) == 0
+    assert f"upx: {tool}" in capsys.readouterr().err and len(downloads) == 1
 
 
 def test_build_dry_run_stops_after_the_argument_checks(no_build: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -2814,6 +2985,42 @@ def test_flet_build_argv_stage_and_pyproject(sandbox: Path, monkeypatch: pytest.
     assert data["project"]["requires-python"] == "==3.14.*"
     assert data["project"]["dependencies"] == ["flet==1.0.1", "msgpack==1.1.0"]
     assert data["tool"]["flet"] == {"org": "com.example", "app": {"path": "src", "module": "main"}}
+
+
+def test_flet_build_cleanup_false_turns_flets_own_cleanup_off(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # flet_cli 1.0.1 cleans the packages by default (cleanup.packages defaults to true, and
+    # --cleanup-packages has no negative form): cleanup = false only dropped --cleanup-app
+    import tomllib
+
+    from runner.methods import flet
+
+    _, rec = _flet_build(sandbox, monkeypatch, cleanup=False)
+    argv = rec.calls[-1][0]
+    assert "--cleanup-app" not in argv and "--cleanup-packages" not in argv
+    work = sandbox / "build" / "flet-build" / "cpython"
+    tool = tomllib.loads((work / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["flet"]
+    assert tool["cleanup"] == {"app": False, "packages": False} and tool["org"] == "com.example"
+    # What the project's own [tool.flet.cleanup] says stays (flet reads it after the flags)
+    off = make({"deploy": {"flet": {"cleanup": False}}})
+    data = tomllib.loads('[project]\nname = "a"\nversion = "1"\n\n[tool.flet.cleanup]\npackages = true\n')
+    assert tomllib.loads(flet.build_pyproject(off, data, []))["tool"]["flet"]["cleanup"] == {"packages": True, "app": False}
+    with pytest.raises(DeployError, match=r"\[tool.flet.cleanup\]"):
+        flet.build_pyproject(off, tomllib.loads('[project]\nname = "a"\nversion = "1"\n\n[tool.flet]\ncleanup = true\n'), [])
+    # cleanup = true (the default) passes the flags and adds no table
+    assert "cleanup" not in tomllib.loads(flet.build_pyproject(make({}), data | {"tool": {}}, []))["tool"]["flet"]
+
+
+def test_flet_build_keeps_the_project_description() -> None:
+    # flet build takes the app's description from [project] description: it was dropped, so
+    # the built app described itself as ""
+    import tomllib
+
+    from runner.methods import flet
+
+    text = 'Desktop app: "quoted", \\\\ back, caf\u00e9 \U0001f600 and DEL \u007f'
+    data = {"project": {"name": "a", "version": "1", "description": text}}
+    assert tomllib.loads(flet.build_pyproject(make({}), data, []))["project"]["description"] == text
+    assert "description" not in tomllib.loads(flet.build_pyproject(make({}), {"project": {"name": "a", "version": "1"}}, []))["project"]
 
 
 def test_flet_build_pins_the_python_minor() -> None:

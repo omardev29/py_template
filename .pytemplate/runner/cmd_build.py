@@ -125,16 +125,21 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
     if method == "flet":
         from .methods import flet
 
-        flet.check(cfg)  # the flet preset, Developer Mode on Windows
+        flet.check_options(cfg)  # the preset and Windows Developer Mode, before minutes of work
     if method == "portable":
         from .methods import portable
 
         portable.check(cfg)  # [deploy.portable] env values the .cmd launcher cannot hold
+    from . import upx
+
+    upx_line = upx.preflight(cfg, method)  # a bad deploy.upx.path or a failed download fails now
 
     if not ns.no_check and not run_checks(cfg, backend):
         raise DeployError("check failed: fix it or use --no-check", 1)  # like ./deploy check
     if proc.DRY_RUN:
         ui.info(f"(--dry-run) build {backend} -> {method}: would output {rel(DIST)}/{cfg.app.name}-{backend}-{method}*")
+        if upx_line:
+            ui.info(f"  {upx_line}")
         if method == "nuitka":
             from .methods import nuitka as nuitka_method  # [deploy.nuitka] lto/pgo, then the extras
 
