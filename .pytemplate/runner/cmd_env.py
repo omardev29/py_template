@@ -20,11 +20,9 @@ def _envs_for(cfg: Config, target: str) -> list[envs.PyEnv]:
         out = [envs.cpython_env(cfg)]
         if cfg.pypy_enabled:
             out.append(envs.pypy_env(cfg))
-        if cfg.python.jit:
-            out.append(envs.jit_env(cfg))
         return out
     if target in ("cpython", "mypyc"):
-        return [envs.runtime_env(cfg, target), envs.tool_env(cfg)] if cfg.python.jit else [envs.cpython_env(cfg)]
+        return [envs.cpython_env(cfg)]
     if target == "pypy":
         envs.ensure_supported(cfg, "pypy")
         return [envs.pypy_env(cfg)]
@@ -192,7 +190,7 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
     cp = envs.cpython_env(cfg)
     if cp.python.is_file():
         info = envs.interpreter_info(cp.python)
-        check(True, f"CPython {info['version']} in {rel(cp.dir)}  (JIT available: {'yes' if info['jit'] else 'no'})")
+        check(True, f"CPython {info['version']} in {rel(cp.dir)}")
     else:
         check(False, f"environment {rel(cp.dir)} is missing", "./deploy setup")
     if cfg.pypy_enabled:
@@ -202,18 +200,6 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
             check(info["impl"] == "pypy", f"PyPy ({info['version']}) in {rel(pp.dir)}")
         else:
             check(False, f"environment {rel(pp.dir)} is missing ({cfg.python.pypy})", "./deploy setup   (or ./deploy sync pypy)")
-    if cfg.python.jit:
-        try:
-            jit_python = envs.find_jit_interpreter(cfg)
-            check(True, f"JIT: {jit_python}")
-            if "scoop" in jit_python.lower() and "\\current\\" in jit_python.lower():
-                check(
-                    None,
-                    "the JIT Python is the scoop `current` link: `scoop update` will switch it to another version",
-                    f"Pin it: scoop install versions/python{cfg.python.cpython.replace('.', '')} and put its path in python.jit_interpreter",
-                )
-        except DeployError as e:
-            check(False, "JIT: no CPython with JIT", str(e))
     if cfg.supports("mypyc"):
         found, where = _c_compiler()
         check(found, f"C compiler for mypyc: {where}", mypyc.has_compiler_hint())

@@ -33,7 +33,7 @@ WS = "${workspaceFolder}"
 # mypyc.profile(cfg, "dev").stage relative to the root. launch.json is committed and shared by
 # every OS, so it cannot follow the runner's WSL layout (.build/wsl, .venv*-wsl): under
 # Remote-WSL on a /mnt/* checkout only the CPython and pytest configs (which use the selected
-# interpreter) work; the PyPy, JIT and mypyc ones point at the Windows-side paths.
+# interpreter) work; the PyPy and mypyc ones point at the Windows-side paths.
 MYPYC_STAGE = ".build/mypyc-dev/stage"
 COMPILE_LABEL = "deploy: compile"
 
@@ -237,9 +237,9 @@ class Entry:
         return "deploy: " + " ".join(a for a in self.args if a != "--open")
 
 
-def _what_runs(cfg: Config, backend: str) -> str:
+def _what_runs(backend: str) -> str:
     return {
-        "cpython": "src/main.py on CPython" + (" with the JIT" if cfg.python.jit else ""),
+        "cpython": "src/main.py on CPython",
         "pypy": "src/main.py on PyPy",
         "mypyc": "compile with mypyc (dev stage) and run the stage",
     }[backend]
@@ -266,8 +266,8 @@ def catalog(cfg: Config) -> list[Entry]:
     active = cfg.backend.active
     others = [b for b in cfg.backend.supported if b != active]
     many = len(cfg.backend.supported) > 1
-    out = [Entry(("run",), f"{_what_runs(cfg, active)} (active backend: {active})", ICONS["run"])]
-    out += [Entry(("run", b), _what_runs(cfg, b), ICONS["run"]) for b in others]
+    out = [Entry(("run",), f"{_what_runs(active)} (active backend: {active})", ICONS["run"])]
+    out += [Entry(("run", b), _what_runs(b), ICONS["run"]) for b in others]
     tested = "the mypyc-compiled modules" if active == "mypyc" else active
     out.append(Entry(("test",), f"pytest on {tested} (active backend)", ICONS["test"], {"kind": "test", "isDefault": True}))
     for b in others:
@@ -287,7 +287,7 @@ def catalog(cfg: Config) -> list[Entry]:
         out.append(Entry(("compile",), "mypyc dev stage only (preLaunchTask of the mypyc debug config)", ICONS["compile"], hide=True))
     out.append(Entry(("lint", "--fix"), f"ruff check --fix (rules of the '{cfg.profile_for()}' typing profile)", ICONS["lint"]))
     out.append(Entry(("fmt",), "ruff format src/ and tests/", ICONS["fmt"]))
-    out.append(Entry(("doctor",), "check uv, the compiler, PyPy, the JIT, shells and the generated files", ICONS["doctor"]))
+    out.append(Entry(("doctor",), "check uv, the compiler, PyPy, shells and the generated files", ICONS["doctor"]))
     out.append(Entry(("setup",), "install interpreters and environments, lock deps and generate configs", ICONS["setup"]))
     out += [Entry((name,), _custom_summary(cfg, name), CUSTOM_ICON) for name in cfg.tasks]
     return out
@@ -390,23 +390,20 @@ def launch(cfg: Config) -> dict[str, Any]:
     # CPython first and on the selected interpreter (so it also works in WSL, where the
     # environment is .venv-wsl): F5 is for interpreted debugging; the backends run as tasks.
     configs = [_debug("src/main.py (CPython, interpreted)", "src/main.py")]
-    if cfg.python.jit:
-        configs.append(_debug("src/main.py (CPython JIT)", "src/main.py", ".venv-jit", env={"PYTHON_JIT": "1"}))
     if cfg.pypy_enabled:
         name = "src/main.py (PyPy, experimental: the debugger is unreliable on PyPy)"
         configs.append(_debug(name, "src/main.py", ".venv-pypy"))
     if cfg.supports("mypyc"):
         # Breakpoints bind in src/main.py and in the interpreted modules (pathMappings maps
         # their stage copies back to src/); the compiled modules are C and never stop.
-        env = {"PYTEMPLATE_BACKEND": "mypyc", **({"PYTHON_JIT": "1"} if cfg.python.jit else {})}
         configs.append(
             _debug(
                 "Run mypyc stage (compiled modules cannot be stepped into)",
                 f"{MYPYC_STAGE}/main.py",
-                ".venv-jit" if cfg.python.jit else ".venv",  # envs.runtime_env
+                ".venv",  # envs.runtime_env
                 preLaunchTask=COMPILE_LABEL,
                 pathMappings=[{"localRoot": f"{WS}/src", "remoteRoot": f"{WS}/{MYPYC_STAGE}"}],
-                env=env,
+                env={"PYTEMPLATE_BACKEND": "mypyc"},
             )
         )
     configs.append(

@@ -754,7 +754,7 @@
         },
         {
             "label": "deploy: doctor",
-            "detail": "./deploy doctor  |  check uv, the compiler, PyPy, the JIT, shells and the generated files",
+            "detail": "./deploy doctor  |  check uv, the compiler, PyPy, shells and the generated files",
             "icon": {
                 "id": "pulse"
             },

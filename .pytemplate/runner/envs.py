@@ -2,8 +2,6 @@
 
 - cpython / mypyc -> .venv       (uv-managed CPython; ALL the tools run here)
 - pypy            -> .venv-pypy  (PyPy pinned exactly)
-- python.jit      -> .venv-jit   (a system python.org 3.14: uv's CPython builds for
-                                  Windows do not ship the JIT)
 
 uv needs UV_PROJECT_ENVIRONMENT and UV_PYTHON *together*: with only one of them it
 silently recreates the environment with the wrong interpreter.
@@ -19,13 +17,13 @@ from pathlib import Path
 
 from . import proc
 from .config import Config
-from .project import ENV_SUFFIX, IS_WINDOWS, ROOT, venv_python
+from .project import ENV_SUFFIX, ROOT, venv_python
 from .ui import DeployError
 
 
 @dataclass(frozen=True)
 class PyEnv:
-    key: str  # cpython | pypy | jit
+    key: str  # cpython | pypy
     dir: Path
     request: str  # value of UV_PYTHON
     preference: str  # value of UV_PYTHON_PREFERENCE
@@ -43,10 +41,6 @@ def pypy_env(cfg: Config) -> PyEnv:
     return PyEnv("pypy", ROOT / f".venv-pypy{ENV_SUFFIX}", cfg.python.pypy, "only-managed")
 
 
-def jit_env(cfg: Config) -> PyEnv:
-    return PyEnv("jit", ROOT / f".venv-jit{ENV_SUFFIX}", find_jit_interpreter(cfg), "only-system")
-
-
 def tool_env(cfg: Config) -> PyEnv:
     """Return the tools environment (mypy, ruff, mypyc, PyInstaller...): always CPython."""
     return cpython_env(cfg)
@@ -56,7 +50,7 @@ def runtime_env(cfg: Config, backend: str) -> PyEnv:
     """Return the environment that RUNS the app or the tests of a backend."""
     if backend == "pypy":
         return pypy_env(cfg)
-    return jit_env(cfg) if cfg.python.jit else cpython_env(cfg)
+    return cpython_env(cfg)
 
 
 def ensure_supported(cfg: Config, backend: str) -> None:
@@ -73,8 +67,6 @@ def env_vars(env: PyEnv, extra: Mapping[str, str] | None = None) -> dict[str, st
     e["UV_PROJECT_ENVIRONMENT"] = str(env.dir)
     e["UV_PYTHON"] = env.request
     e["UV_PYTHON_PREFERENCE"] = env.preference
-    # PYTHON_JIT is read by its first character: "false" would ENABLE it. Always "0" or "1".
-    e["PYTHON_JIT"] = "1" if env.key == "jit" else "0"
     if extra:
         e.update(extra)
     return e
@@ -126,57 +118,13 @@ def sync(env: PyEnv, *, groups: Sequence[str] = ()) -> None:
 
 
 def interpreter_info(python: str | Path) -> dict[str, object]:
-    """Return interpreter data (impl, version, JIT) without importing anything from the project."""
+    """Return interpreter data (impl, version, prefix) without importing anything from the project."""
     code = (
         "import json,sys,sysconfig;"
-        "j=getattr(sys,'_jit',None);"
         "print(json.dumps({'impl':sys.implementation.name,'version':'%d.%d.%d'%sys.version_info[:3],"
         "'executable':sys.executable,'base_prefix':sys.base_prefix,"
-        "'jit':bool(j and j.is_available()),"
         "'gil_disabled':bool(sysconfig.get_config_var('Py_GIL_DISABLED'))}))"
     )
     out = proc.output([str(python), "-I", "-c", code])
     data: dict[str, object] = json.loads(out)
     return data
-
-
-def find_jit_interpreter(cfg: Config) -> str:
-    """Find a system CPython (python.org) with the JIT available."""
-    if cfg.python.jit_interpreter:
-        given = Path(cfg.python.jit_interpreter).expanduser()
-        path = given if given.is_absolute() else ROOT / given  # relative to the project, never the cwd
-        if not path.is_file():
-            raise DeployError(
-                f"python.jit_interpreter = {cfg.python.jit_interpreter!r} does not exist "
-                "(it must be the path to python.exe / bin/python3 of a CPython with the JIT)",
-                3,
-            )
-        return str(path)
-    env = proc.base_env()
-    env["UV_PYTHON_PREFERENCE"] = "only-system"
-    queries: list[list[str | Path]] = [[proc.find_uv(), "python", "find", cfg.python.cpython]]
-    if IS_WINDOWS:
-        queries.append(["py", f"-{cfg.python.cpython}", "-c", "import sys;print(sys.executable)"])
-    candidates: list[str] = []
-    for argv in queries:
-        # Quiet: a missing candidate is expected (`py` prints "No suitable Python runtime found")
-        try:
-            r = proc.run(argv, env=env, capture=True, check=False, echo=False)
-        except DeployError:  # program not found
-            continue
-        if r.returncode == 0 and r.stdout.strip():
-            candidates.append(r.stdout.strip())
-    for c in candidates:
-        try:
-            if interpreter_info(c).get("jit"):
-                return c
-        except (DeployError, json.JSONDecodeError):
-            continue
-    raise DeployError(
-        f"python.jit = true but there is no system CPython {cfg.python.cpython} with the JIT.\n"
-        "  The CPython builds uv downloads for Windows do not ship it. Install a pinned one from python.org:\n"
-        f"    py install {cfg.python.cpython}      (official Python install manager for Windows)\n"
-        f"    scoop install versions/python{cfg.python.cpython.replace('.', '')}\n"
-        "  or set its path in python.jit_interpreter.",
-        3,
-    )

@@ -58,7 +58,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "mypyc-active": {"backend": {"active": "mypyc"}},
     "pypy": {"backend": {"supported": ["cpython", "pypy", "mypyc"]}},
     "basedpyright": {"typing": {"editor": "basedpyright", "relaxed": "warn"}},
-    "jit": {"python": {"jit": True}, "typing": {"relaxed": "strict"}},
+    "strict": {"typing": {"relaxed": "strict"}},
     "cpython-only": {"backend": {"supported": ["cpython"]}},
     "extra-buttons": {"vscode": {"buttons": ["build --method pyz", "lint", "report", "ci", "run  mypyc"]}},
 }
@@ -250,7 +250,7 @@ def test_severity_follows_the_typing_profile() -> None:
     warn = by_label(make("basedpyright"))  # relaxed 'warn': ruff exit_zero, mypy non-blocking
     assert severities(warn["deploy: check"]) == {"ruff": "warning", "mypy": "warning", "rules": "*", "pyright": "*"}
     assert severities(warn["deploy: check all"])["mypy"] == "error"
-    strict = by_label(make("jit"))
+    strict = by_label(make("strict"))
     assert severities(strict["deploy: check"])["mypy"] == "error"
     assert severities(by_label(make("mypyc-active"))["deploy: check"])["mypy"] == "error"
     assert severities(script["deploy: report"]) == {"mypy": "error", "mypyc": "*"}
@@ -293,13 +293,6 @@ def test_launch_configs() -> None:
     pypy = configs_of("pypy")
     (name,) = [n for n in pypy if "PyPy" in n]
     assert pypy[name]["windows"]["python"] == f"{WS}/.venv-pypy/Scripts/python.exe"
-
-    jit = configs_of("jit")
-    assert jit["src/main.py (CPython JIT)"]["env"] == {"PYTHON_JIT": "1"}
-    assert jit["src/main.py (CPython JIT)"]["python"] == f"{WS}/.venv-jit/bin/python"
-    jit_stage = jit["Run mypyc stage (compiled modules cannot be stepped into)"]
-    assert jit_stage["windows"]["python"] == f"{WS}/.venv-jit/Scripts/python.exe"
-    assert jit_stage["env"]["PYTHON_JIT"] == "1"
 
     assert not any("mypyc" in n for n in configs_of("cpython-only"))
 

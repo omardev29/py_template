@@ -43,8 +43,6 @@ class BackendConfig:
 class PythonConfig:
     cpython: str = "3.14"
     pypy: str = "pypy@3.11.15"
-    jit: bool = False
-    jit_interpreter: str = ""  # path to a python.org 3.14 build with JIT (empty = search for it)
 
 
 @dataclass
@@ -301,7 +299,7 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     if not re.fullmatch(r"[a-z][a-z0-9_-]*", cfg.app.preset) or not (PRESETS / cfg.app.preset / "preset.toml").is_file():
         raise DeployError(
             f"pytemplate.toml: app.preset = {cfg.app.preset!r} is not a preset of this template "
-            f"(available: {', '.join(_presets()) or 'none'}). To switch presets: ./deploy init <preset>"
+            f"(available: {', '.join(_presets()) or 'none'}). To start from another preset: ./deploy new DIR --preset P"
         )
     for b in cfg.backend.supported:
         _one_of(b, BACKENDS, "backend.supported")

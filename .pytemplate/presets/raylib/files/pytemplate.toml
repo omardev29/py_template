@@ -20,7 +20,6 @@ supported = ["cpython", "pypy", "mypyc"]   # with PyPy: Python 3.11 syntax
 [python]
 cpython = "3.14"
 pypy = "pypy@3.11.15"   # EXACT: PyPy 8.0 changed the ABI (pp80) and there are no wheels for it yet
-jit = false
 
 [typing]
 profile = "auto"      # "mypyc" with the mypyc backend; with cpython/pypy, whatever `relaxed` says

@@ -1,4 +1,4 @@
-"""Mode and template commands: mode, render, init, new.
+"""Mode and template commands: mode, render, new, and the internal init step (./deploy __init).
 
 Under --dry-run each of them prints what it would do and writes nothing: no pytemplate.toml,
 pyproject.toml, uv.lock or generated file, no environment synced, no project copied.
@@ -15,7 +15,7 @@ from typing import Any
 
 from . import config, envs, presets, proc, render, ui
 from .config import BACKENDS, Config
-from .project import CONFIG_FILE, ENV_SUFFIX, PYPROJECT, ROOT, code_dirs, rel, user_path
+from .project import CONFIG_FILE, PYPROJECT, ROOT, code_dirs, rel, user_path
 from .ui import DeployError
 
 _APP_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
@@ -31,7 +31,6 @@ def _describe(cfg: Config, title: str = "current mode") -> None:
         ui.info(f"  {'typing ' + b:<14} {cfg.profile_for(b)}")
     ui.info(f"  editor         {cfg.typing.editor}")
     ui.info(f"  mypyc compiles {', '.join(cfg.compile.modules)}")
-    ui.info(f"  CPython JIT    {'yes' if cfg.python.jit else 'no'}")
 
 
 def _parse(parser: argparse.ArgumentParser, args: list[str]) -> argparse.Namespace:
@@ -135,8 +134,6 @@ def _leftover_envs(cfg: Config, new_cfg: Config) -> None:
     left: list[Path] = []
     if cfg.pypy_enabled and not new_cfg.pypy_enabled:
         left.append(envs.pypy_env(new_cfg).dir)
-    if cfg.python.jit and not new_cfg.python.jit:
-        left.append(ROOT / f".venv-jit{ENV_SUFFIX}")  # envs.jit_env would look for the interpreter
     names = [rel(d) for d in left if d.is_dir()]
     if names:
         ui.info(
@@ -178,12 +175,11 @@ def _plan_mode(cfg: Config, new_cfg: Config, changes: list[tuple[str, str, objec
 
 
 def cmd_mode(cfg: Config, args: list[str]) -> int:
-    """mode [BACKEND] [--supports +pypy|-pypy|a,b] [--typing off|warn|strict|auto] [--jit on|off] [--editor pylance|basedpyright]"""
+    """mode [BACKEND] [--supports +pypy|-pypy|a,b] [--typing off|warn|strict|auto] [--editor pylance|basedpyright]"""
     parser = argparse.ArgumentParser(prog="./deploy mode")
     parser.add_argument("backend", nargs="?", choices=BACKENDS)
     parser.add_argument("--supports", help="+pypy, -pypy or a full list (cpython,mypyc)")
     parser.add_argument("--typing", choices=("auto", "off", "warn", "strict", "mypyc"))
-    parser.add_argument("--jit", choices=("on", "off"))
     parser.add_argument("--editor", choices=config.EDITORS)
     # `--supports -pypy`: argparse would take "-pypy" for an option; join it as --supports=-pypy
     fixed: list[str] = []
@@ -193,7 +189,7 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
     ns = _parse(parser, fixed)
     if ns.supports is not None and not ns.supports.strip():
         raise DeployError("mode --supports needs a value: +pypy, -pypy or a list such as cpython,mypyc")
-    if not any((ns.backend, ns.supports, ns.typing, ns.jit, ns.editor)):
+    if not any((ns.backend, ns.supports, ns.typing, ns.editor)):
         _describe(cfg)
         return 0
 
@@ -213,8 +209,6 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
             changes += [("typing", "profile", "auto"), ("typing", "relaxed", ns.typing)]
         else:
             changes.append(("typing", "profile", ns.typing))
-    if ns.jit:
-        changes.append(("python", "jit", ns.jit == "on"))
     if ns.editor:
         changes.append(("typing", "editor", ns.editor))
 
@@ -228,8 +222,6 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
     syncs: list[envs.PyEnv] = []
     if adding_pypy:
         syncs.append(envs.pypy_env(planned))
-    if ns.jit == "on":
-        syncs.append(envs.jit_env(planned))  # finds the JIT interpreter now: fail before writing
     if adding_pypy:
         _precheck_py311(cfg)
 
@@ -312,7 +304,7 @@ def _plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> No
     if not force and not presets.pristine(cfg):
         raise DeployError(
             "src/, tests/ or typings/ have changes compared to the skeleton of the current preset "
-            f"('{cfg.app.preset}'). init would replace them.\n  If you are sure: ./deploy init {preset} --force"
+            f"('{cfg.app.preset}'). init would replace them.\n  If you are sure: ./deploy __init {preset} --force"
         )
     files = presets.skeleton(preset, new_name)
     owned = _owned_now()
@@ -346,8 +338,8 @@ def _plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> No
 
 
 def cmd_init(cfg: Config, args: list[str]) -> int:
-    """init PRESET [--name NAME] [--force]: convert this project to the preset."""
-    parser = argparse.ArgumentParser(prog="./deploy init")
+    """__init PRESET [--name NAME] [--force]: convert this project to the preset (internal: ./deploy new)."""
+    parser = argparse.ArgumentParser(prog="./deploy __init")
     parser.add_argument("preset", choices=presets.available())
     parser.add_argument("--name")
     parser.add_argument("--force", action="store_true")
@@ -389,7 +381,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         ui.info(f"  name    {name}  (package src/{name.replace('-', '_').lower()}/)")
         ui.info(
             f"  would copy this template there (without .git, environments, builds or caches), "
-            f"run `./deploy init {ns.preset} --name {name} --force` in it and `git init`"
+            f"run `./deploy __init {ns.preset} --name {name} --force` in it and `git init`"
         )
         return 0
     presets.new(dest, ns.preset, name)

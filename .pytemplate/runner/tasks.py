@@ -28,8 +28,7 @@ Dispatcher = Callable[[list[str]], int]
 
 
 class Placeholders(dict[str, str]):
-    """The placeholder values. {python} is resolved only when a task uses it: with
-    python.jit = true that means looking for the JIT interpreter, which may not exist."""
+    """The placeholder values. {python} (the backend's interpreter) is resolved only when a task uses it."""
 
     def __init__(self, cfg: Config, backend: str) -> None:
         super().__init__(

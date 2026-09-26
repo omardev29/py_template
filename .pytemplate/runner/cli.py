@@ -31,7 +31,7 @@ class Command:
 COMMANDS: dict[str, Command] = {
     # environment
     "setup": Command("cmd_env", "cmd_setup", "Install interpreters and backend environments, lock deps and generate configs", group="Environment"),
-    "doctor": Command("cmd_env", "cmd_doctor", "Check uv, compiler, PyPy, JIT, shells and generated files", group="Environment"),
+    "doctor": Command("cmd_env", "cmd_doctor", "Check uv, compiler, PyPy, shells and generated files", group="Environment"),
     "sync": Command("cmd_env", "cmd_sync", "Run uv sync --locked on one or all environments", "[cpython|pypy|mypyc|all]", group="Environment"),
     "lock": Command("cmd_env", "cmd_lock", "Apply the managed parts of pyproject and re-lock uv.lock", "[--upgrade] [--upgrade-package PKG]", group="Environment"),
     "add": Command("cmd_env", "cmd_add", "Add dependencies (uv add)", "PKG... [--dev|--group G] [--cpython-only]", group="Environment"),
@@ -39,9 +39,8 @@ COMMANDS: dict[str, Command] = {
     "clean": Command("cmd_env", "cmd_clean", "Remove .build/ and dist/ (and the environments with --envs)", "[--envs]", render=False, group="Environment"),
     "hooks": Command("hooks", "cmd_hooks", "Install or remove the git pre-commit hook, or run its checks on the staged files", "[install [--force]|uninstall|run|status]", render=False, group="Environment"),
     # mode and template
-    "mode": Command("cmd_mode", "cmd_mode", "Show or change the mode (backend, supported, typing, JIT, editor)", "[BACKEND] [--supports +pypy|-pypy] [--typing off|warn|strict|auto] [--jit on|off] [--editor pylance|basedpyright]", group="Mode"),
+    "mode": Command("cmd_mode", "cmd_mode", "Show or change the mode (backend, supported, typing, editor)", "[BACKEND] [--supports +pypy|-pypy] [--typing off|warn|strict|auto] [--editor pylance|basedpyright]", group="Mode"),
     "render": Command("cmd_mode", "cmd_render", "Regenerate .mypy.ini, pyrightconfig.json, .ruff.toml and .vscode/", "[--check] [--diff] [--force]", render=False, group="Mode"),
-    "init": Command("cmd_mode", "cmd_init", "Convert this project to a preset (script, raylib, flet)", "PRESET [--name NAME] [--force]", group="Mode"),
     "rename": Command("rename", "cmd_rename", "Rename the app: src/<pkg>, imports, pytemplate.toml, pyproject.toml, uv.lock", "NEW_NAME [--force]", group="Mode"),
     "new": Command("cmd_mode", "cmd_new", "Create a new project from this template", "DIR [--preset P] [--name NAME]", render=False, group="Mode"),
     # development
@@ -61,6 +60,14 @@ COMMANDS: dict[str, Command] = {
     "nvim": Command("cmd_nvim", "cmd_nvim", "Neovim/LazyVim integration: check it, trust .lazy.lua, enable extras, sync plugins", "[doctor|trust|extras|bootstrap|sync]", group="Other"),
     "selftest": Command("cli", "cmd_selftest", "Run the runner's own tests and mypy --strict (.pytemplate)", "[--shells|--nvim|--e2e] [args...]", render=False, group="Other"),
     "help": Command("cli", "cmd_help", "Show this help (or a command's help)", "[COMMAND]", render=False, group="Other"),
+}
+
+# Internal routes: dispatched like COMMANDS but never listed (help, editor.json, the editors'
+# task lists and the shell completion read COMMANDS only). Task names cannot start with "_".
+INTERNAL: dict[str, Command] = {
+    # `./deploy new` runs it in the fresh copy; the template maintainer regenerates the template
+    # root with it (./deploy __init script --name myapp --force). Users pick a preset with `new`.
+    "__init": Command("cmd_mode", "cmd_init", "Replace src/, tests/, typings/ and pytemplate.toml with a preset's skeleton", "PRESET [--name NAME] [--force]"),
 }
 
 EXAMPLES = """\
@@ -169,12 +176,14 @@ def dispatch(argv: list[str]) -> int:
         return cmd_help(None, argv[1:])
     name, args = argv[0], argv[1:]
     cfg = config.load(set(COMMANDS))
-    command = COMMANDS.get(name)
+    command = COMMANDS.get(name) or INTERNAL.get(name)
     if command is None:
         if name in cfg.tasks:
             if not _OPTS["no_render"]:
                 render.auto(cfg)
             return tasks.run_task(cfg, name, args, dispatch)
+        if name == "init":  # no longer public (it is INTERNAL["__init"]): the preset is chosen by `new`
+            raise DeployError("init is no longer a ./deploy command. To start from another preset: ./deploy new DIR --preset P")
         raise DeployError(f"unknown command: {name}  (./deploy help)")
     if command.render and not _OPTS["no_render"]:
         render.auto(cfg)

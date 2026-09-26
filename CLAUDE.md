@@ -47,8 +47,9 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
     3.11 syntax and API while PyPy is supported.
   - `mypyc`: AOT compilation of `compile.modules` (default `<pkg>.core`); runs on the `.venv`
     CPython. Needs a C compiler (MSVC Build Tools on Windows).
-  - Optional CPython JIT (`python.jit`): `.venv-jit` on a system python.org build.
-- Presets `script`, `raylib`, `flet` (`.pytemplate/presets/*`): skeleton + deps + config.
+- Presets `script`, `raylib`, `flet` (`.pytemplate/presets/*`): skeleton + deps + config. The
+  preset is chosen when the project is created (`./deploy new DIR --preset P`); there is no
+  public `init` (section 11).
 - Six build methods: `exe` (PyInstaller / `flet pack`), `portable`, `pyz`, `wheel`, `nuitka`,
   `flet` (`flet build`).
 - `./deploy` is a Justfile-like runner. The only hard requirement is uv.
@@ -380,22 +381,22 @@ header rules (with detector tests proving each rule fires).
 | Module | Responsibility |
 |---|---|
 | `deploy.py` (one level up) | Reconfigures stdout/stderr to UTF-8, puts its own dir on `sys.path`, calls `runner.cli.main`. |
-| `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily. `_parse_globals`, `dispatch`, `main` (exception -> exit code), `cmd_help`, `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
+| `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `INTERNAL` (routes listed nowhere: `__init`). `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main` (exception -> exit code), `cmd_help`, `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
 | `config.py` | Dataclass schema, strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file`, `toml_value`. |
 | `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL`, `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env`, `run` (echo, `DRY_RUN`, cwd defaults to `ROOT`, UTF-8 capture), `output`, `show` (display quoting only), `vs_installer_dir`, `CommandFailed`. |
-| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `jit_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync`, `interpreter_info`, `find_jit_interpreter`. |
+| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync`, `interpreter_info`. |
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
-| `presets.py` | Preset discovery/loading, option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, `check_name_free`, `init`, `copy_template`, `new`. |
+| `presets.py` | Preset discovery/loading, option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, `check_name_free`, `init` (run by `./deploy __init`), `copy_template`, `new`. |
 | `mypyc.py` | Incremental stage (`sync_tree`), `spec.json`, spawning `tools/mypyc_build.py`, `ANNOTATE_HTML`, `hidden_imports`, `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks; parses bytes (tolerates a BOM). |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`. |
 | `tasks.py` | `[tasks]`: `Placeholders` (lazy `{python}`), `deps`, cycle detection, `run_task`, `list_tasks`. |
 | `cmd_env.py` | `setup`, `doctor`, `sync`, `lock`, `add`, `remove`, `clean`; `ensure_lock`; `_fix_exec_bit`; `_msvc`, `_long_paths`. |
-| `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `init`, `new`, and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
+| `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `new`, the internal `__init` (`cmd_init`), and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
 | `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`. |
 | `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
 | `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys, `UV_PLATFORMS`, `export_requirements`, `install_deps`, `copy_app`, `uses_tkinter`; `nuitka.NUITKA`. |
@@ -418,11 +419,15 @@ header rules (with detector tests proving each rule fires).
    task names may not shadow builtins). Builtins run `render.auto(cfg)` first when
    `Command.render` is true and `--no-render` is not set, then `module.func(cfg, args)`. Names
    in `[tasks]` run `render.auto` and `tasks.run_task(cfg, name, args, dispatch)`.
+   `cli.INTERNAL` routes (`__init`) dispatch like builtins but are listed nowhere (help,
+   `editor.json`, the editors' task lists and the shell completion read `COMMANDS` only). `init`
+   is no longer a command: unless a `[tasks]` entry took the name, it exits 2 with the hint
+   `./deploy new DIR --preset P`.
 4. Commands with `render=False`: `clean`, `render`, `new`, `pyz-merge`, `tasks`,
    `shell-setup`, `selftest`, `help`, `hooks` (the hook must not rewrite generated files in
    the middle of a commit).
 5. Commands reject unknown arguments with exit 2 (a typo is never silently ignored):
-   argparse commands, `render`/`mode`/`init`/`new` (`cmd_mode._parse`), `lint`, `fmt`,
+   argparse commands, `render`/`mode`/`__init`/`new` (`cmd_mode._parse`), `lint`, `fmt`,
    `clean`, `setup`, `doctor` (`cmd_dev.only_flags`), `check` and `sync` (extra positionals),
    `shell-setup`. By design: `run`/`test`/tasks forward the rest, `build` forwards unknown
    flags to the packager, `lock` to `uv lock`, plain `selftest` to pytest; `help` and `tasks`
@@ -432,9 +437,9 @@ header rules (with detector tests proving each rule fires).
 
 - 0 ok; 1 = check/test failures, doctor problems, any FAIL in a selftest suite, or an internal
   runner error (traceback printed); 2 = usage/config (`DeployError` default, argparse); 3 =
-  missing requirement (uv, compiler, interpreter, Neovim/git with `--require`, a missing
-  `python.jit_interpreter`); 130 = Ctrl+C. `run`, `test BACKEND` and tasks return the child's
-  exit code (`test all`: 0 or 1); `proc.CommandFailed` carries the failed child's code.
+  missing requirement (uv, compiler, interpreter, Neovim/git with `--require`); 130 = Ctrl+C.
+  `run`, `test BACKEND` and tasks return the child's exit code (`test all`: 0 or 1);
+  `proc.CommandFailed` carries the failed child's code.
 - Runner output goes to stderr through `ui` so the app keeps stdout. Exceptions, printed to
   stdout on purpose: `help`, `__probe`, `shell-setup` snippets, and the `--json` reports of
   `selftest --shells` (also with `--list`) and `selftest --e2e`.
@@ -461,13 +466,14 @@ header rules (with detector tests proving each rule fires).
 - `mode` validates the new `pytemplate.toml` in memory and prints the keys that would change
   (new and current value), whether `pyproject.toml` would be rewritten, `uv.lock` ("would
   re-lock", or a read-only `uv lock --check`), the generated files that would update, the
-  environments it would sync and the leftover-environment note. `--jit on` still looks for the
-  JIT interpreter. The PyPy 3.11 precheck runs read-only (`uv run --locked --no-sync`) and is
-  skipped when `.venv` does not exist (`uv run --no-sync` would create it).
-- `init` runs the real checks (name, `check_name_free`, pristine) and lists each file as `-`
+  environments it would sync and the leftover-environment note. The PyPy 3.11 precheck runs
+  read-only (`uv run --locked --no-sync`) and is skipped when `.venv` does not exist (`uv run
+  --no-sync` would create it).
+- `__init` runs the real checks (name, `check_name_free`, pristine) and lists each file as `-`
   deleted, `+` new or `~` replaced, the dependencies removed and added, and what happens to
   `pyproject.toml` and `uv.lock`. `new` checks the destination and the name and prints
-  destination, preset and name. `pyz-merge` validates its inputs and prints inputs and output.
+  destination, preset, name and the `__init` step it would run in the copy. `pyz-merge`
+  validates its inputs and prints inputs and output.
 - `nvim trust`, `extras`, `bootstrap` and `sync` print what they would do.
 - `rename` runs the real checks (a dirty git tree is only a warning) and prints the move, each
   file with its reference count and sample lines, the pytemplate/pyproject lines, the `uv.lock`
@@ -487,7 +493,6 @@ header rules (with detector tests proving each rule fires).
 | `PYTEMPLATE_LAUNCHER` | launchers, Neovim plugin (`nvim`), nu snippet (`nu`) | Which launcher/shell ran (section 4.1) |
 | `UV` | uv | uv's own path; `proc.find_uv` and the launchers use it |
 | `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PYTHON_PREFERENCE` | `envs.env_vars` | Environment selection (section 7) |
-| `PYTHON_JIT` | `envs.env_vars`, portable launchers, pyz `.cmd` wrapper, JIT and mypyc launch configs | Always exactly `0` or `1` |
 | `PYTHONUTF8=1` | `proc.base_env`, portable launchers, pyz `.cmd` wrapper, the Neovim mypy linter | mypy/mypyc otherwise read files as cp1252 |
 | `PYTEMPLATE_BACKEND` | `cmd_dev.test_backend`, `mypyc.runtime_env_vars`, mypyc launch config | Backend under test (conftest) |
 | `PYTEMPLATE_COMPILED` | `mypyc.runtime_env_vars` | Modules that must load from `.pyd/.so` (conftest) |
@@ -536,7 +541,7 @@ find a compatible Visual Studio installation"). Everything else (e.g. `FLET_*`) 
 
 - `./deploy rename NEW_NAME [--force]`: validates the name (format, keyword, standard-library
   module, dependency clash: the same rules as `presets.check_name_free`, used by `new` and
-  `init` too), refuses a dirty git tree without `--force`, moves `src/<old_pkg>/` first (the
+  `__init` too), refuses a dirty git tree without `--force`, moves `src/<old_pkg>/` first (the
   step that can fail on a locked file; case-only renames use two moves), rewrites UTF-8 text
   files in `src/` and `tests/` (line endings and BOM kept, binaries/caches skipped), updates
   `pytemplate.toml` (`app.name` via `config.set_value`, package references in strings and
@@ -564,8 +569,9 @@ find a compatible Visual Studio installation"). Everything else (e.g. `FLET_*`) 
 - `[backend]`: `active`, `supported` (non-empty subset of `cpython, pypy, mypyc`, contains
   `active`).
 - `[python]`: `cpython` (`^\d+\.\d+$`), `pypy` (`^pypy@\d+\.\d+\.\d+$`, exact: a loose request
-  can resolve to PyPy 8.0 / pp80, which has no wheels), `jit`, `jit_interpreter` (must exist,
-  relative paths resolve against the project root, else exit 3).
+  can resolve to PyPy 8.0 / pp80, which has no wheels). The removed CPython JIT keys (`jit`,
+  `jit_interpreter`) fail like any unknown key (no compatibility shim: each project carries its
+  own runner).
 - `[typing]`: `profile = auto|mypyc|strict|warn|off`, `relaxed = off|warn|strict` (what `auto`
   means on cpython/pypy), `editor = pylance|basedpyright`, `[[typing.mypy_overrides]]`
   (`module` required, `strict` forbidden: mypy would apply it to ALL modules; `{pkg}` token in
@@ -599,7 +605,7 @@ Generated (committed, never hand-edited): `.python-version`, `.mypy.ini`, `.ruff
 `pyrightconfig.json`, `.vscode/{settings,extensions,launch,tasks}.json`, `.lazy.lua`,
 `.pytemplate/editor.json`, `.github/workflows/ci.yml` (only while `templates/ci.yml` exists),
 `.pytemplate/state.json`. Also managed: parts of `pyproject.toml` (6.3), `uv.lock` (only via
-`./deploy lock|add|remove|setup|mode|init`), `typings/raylib/__init__.pyi` (raylib task
+`./deploy lock|add|remove|setup|mode|__init`), `typings/raylib/__init__.pyi` (raylib task
 `stubs`).
 
 `editor.json` lists `cli.COMMANDS` (name, usage, summary, group): adding or rewording a command
@@ -643,7 +649,7 @@ Formats:
   detach it; `test_managed_block_bounds_cpython_minor` asserts it. Without markers the block is
   inserted right after `[tool.uv]`.
 - `render.auto` only warns (`pyproject_outdated`); `write_pyproject` runs in `lock`, `mode`,
-  `setup` (via `cmd_env.ensure_lock`) and `init`, because the change needs re-locking.
+  `setup` (via `cmd_env.ensure_lock`) and `__init`, because the change needs re-locking.
 - Preset tables go between `# >>> pytemplate-preset` and `# <<< pytemplate-preset`
   (`presets.EXTRA_BEGIN/EXTRA_END`).
 - Never add `[build-system]` to the project's `pyproject.toml`: the project is an app (uv would
@@ -654,11 +660,9 @@ Formats:
 - `UV_PROJECT_ENVIRONMENT` and `UV_PYTHON` must ALWAYS be set together (`envs.env_vars`): with
   only one of them uv silently recreates the env with the wrong interpreter.
 - `UV_PYTHON_PREFERENCE=only-managed` for `.venv` and `.venv-pypy` (also
-  `python-preference = "only-managed"` in the managed block); `.venv-jit` uses `only-system`
-  with `UV_PYTHON=<absolute path>`.
-- `runtime_env(backend)`: `pypy` -> `.venv-pypy`; `cpython`/`mypyc` -> `.venv-jit` when
-  `python.jit`, else `.venv`. `tool_env` is always `.venv`: every tool (mypy, ruff, mypyc,
-  PyInstaller, pytest for selftest) runs there.
+  `python-preference = "only-managed"` in the managed block).
+- `runtime_env(backend)`: `pypy` -> `.venv-pypy`; `cpython`/`mypyc` -> `.venv`. `tool_env` is
+  always `.venv`: every tool (mypy, ruff, mypyc, PyInstaller, pytest for selftest) runs there.
 - Every tool call is `uv run --locked` (syncs when needed, fails on a stale lock).
   `cmd_env.ensure_lock` runs `uv lock --check` and then `uv lock` if needed.
 - uv finds the project by walking up from the CWD: `envs.uv_run` adds `--project <ROOT>`
@@ -678,23 +682,13 @@ Formats:
 - Dev group (`pyproject.toml [dependency-groups] dev`): `debugpy`, `mypy` (needs the Rust
   `ast-serialize`: no PyPy wheels), `pyinstaller`, `ruff` and `setuptools` carry
   `implementation_name == 'cpython'`; `.venv-pypy` only gets the app deps plus pytest.
-- `PYTHON_JIT` is always exactly `"0"` or `"1"`: CPython only reads the first character
-  (`enabled = *env != '0'`), so `false` would ENABLE it. `-E`/`-I` make Python ignore
-  `PYTHON*` variables, so launchers that must honour `PYTHON_JIT` use `-s` only.
-  `envs.interpreter_info` runs with `-I`: it reports JIT availability, not whether it is on.
-  A `.pyz` started directly (`python app.pyz`, shebang) cannot set it: only its `.cmd` does.
-- JIT interpreter: uv's Windows CPython builds lack the JIT, so `envs.find_jit_interpreter`
-  tries `uv python find` with `only-system`, then `py -X.Y` (both quietly: `py` prints "No
-  suitable Python runtime found" when nothing is registered); `python.jit_interpreter`
-  overrides. `mode --jit on` finds it before writing anything. `doctor` warns when it is
-  scoop's `current` junction (`scoop update` moves it).
 - WSL on `/mnt/*` (`project.IS_WSL`): separate `.venv*-wsl` envs and `.build/wsl`, so the
   Windows `.venv` is not turned into a Linux one.
 - Tools outside `uv.lock` run through `uv run --locked --with <pin>` and are pinned in module
   constants: `cmd_dev.BASEDPYRIGHT = "basedpyright==1.40.1"` (`check` with
   `typing.editor = "basedpyright"`) and `methods.nuitka.NUITKA = "nuitka==4.2.2"`. Bump them
   deliberately.
-- `mode --jit off` / `--supports -pypy` never delete the old env: they print a note that
+- `mode --supports -pypy` never deletes the old env: it prints a note that
   `./deploy clean --envs` removes the `.venv*` environments (all of them; `setup` recreates
   the ones in use).
 
@@ -815,8 +809,8 @@ Per method:
   - Launchers: `.cmd` = ASCII + CRLF, `start ""` + `pythonw.exe` for GUI apps, env values with
     `%` written `%%` and values it cannot hold (non-ASCII, `"`, line breaks) rejected; `.sh` =
     0755, values through `shlex.quote`, its folder from `${BASH_SOURCE:-$0}` (niubash keeps the
-    caller's `$0`). Both use `-s` plus `-O`/`-OO`, never `-I`/`-E`, and set `PYTHONUTF8=1` and
-    `PYTHON_JIT`.
+    caller's `$0`). Both use `-s` plus `-O`/`-OO`, never `-I`/`-E` (Python would ignore
+    `PYTHONUTF8` and the `PYTHON*` values of `deploy.portable.env`), and set `PYTHONUTF8=1`.
   - `runtime = "system"`: each launcher RUNS every candidate interpreter with a minimum-version
     probe (`.cmd`: `py -X.Y`, `python3`, `python`, exit 9009 when none fits: `py` can exist with
     no Python registered; `.sh`: `pythonX.Y`, `python3`, `python`, exit 127; PyPy: `pypy3`,
@@ -835,10 +829,10 @@ Per method:
   Cross-target deps use `uv pip install --target --python-platform --python-version
   --only-binary :all:` (an sdist built for another OS would produce host binaries); PyPy
   targets are host-only; `_virtualenv*` junk is removed. The `<n>.cmd` wrapper runs each
-  candidate interpreter with a minimum-version probe, sets `PYTHONUTF8=1` and
-  `PYTHON_JIT=0|1`. `pyz-merge` (>= 2 zip parts, same app name) takes `common/` and
-  `__main__.py` from the first part and `targets/` from all parts, recomputes the `build_id`
-  and prints "no platform (pure Python)" when no part has binaries.
+  candidate interpreter with a minimum-version probe and sets `PYTHONUTF8=1`. `pyz-merge`
+  (>= 2 zip parts, same app name) takes `common/` and `__main__.py` from the first part and
+  `targets/` from all parts, recomputes the `build_id` and prints "no platform (pure Python)"
+  when no part has binaries.
 - **wheel**: synthetic build project in `.build/wheel/<b>` (`setuptools>=84`; for mypyc
   `mypy==<version locked in uv.lock>` in `build-system.requires`, a `setup.py` using mypycify
   with the same `compile.multi_file`, `separate` and `strict_dunder_typing` as the stage, and a
@@ -901,7 +895,7 @@ Per method:
 - `preset.toml`: `description`, `dependencies` / `dev_dependencies` (with `{option}`),
   `[options]` (defaults of `[preset.<p>]`), optional `[uv]` (extra managed `[tool.uv]` keys),
   optional `pyproject` string (extra tables, with `{{name}}`/`{{pkg}}`).
-- `files/`: complete skeleton, including a full `pytemplate.toml` (`init` overwrites the root
+- `files/`: complete skeleton, including a full `pytemplate.toml` (`__init` overwrites the root
   one), `src/main.py`, `src/__pkg__/core/` (compiled) + a boundary, `tests/conftest.py`
   (identical in every preset), optional `typings/` and tools.
 - Four templating syntaxes coexist: `__pkg__` in paths and `{{name}}`/`{{pkg}}` in text (plain
@@ -912,25 +906,29 @@ Per method:
   `presets.TEXT_SUFFIXES` or it has none, it holds no NUL byte and it decodes as UTF-8;
   anything else is copied byte for byte, and `pristine` never rewrites CRLF inside binaries.
 - `pristine(cfg)`: `src/`, `tests/`, `typings/` equal the current preset skeleton rendered
-  with the current name (CRLF-normalised). `init` refuses otherwise (use `--force`). `init`
+  with the current name (CRLF-normalised). `presets.init` refuses otherwise (use `--force`); it
   deletes `src/ tests/ typings/`, writes every skeleton file (including root
   `pytemplate.toml`, not covered by the pristine check), chmods `deploy` and `deploy.ps1` on
   POSIX, sets `project.name`, replaces the preset tables, `write_pyproject`, `uv remove/add
   --no-sync` for the dependency diff, `uv lock`, `render.apply(force=True)`.
-- `presets.check_name_free` (in `new`, `init` and their dry runs): the app name may not equal
+- `presets.check_name_free` (in `new`, `__init` and their dry runs): the app name may not equal
   (normalised) a dependency of the resulting project: uv refuses self-dependencies and
   `src/<pkg>/` would shadow the library. `new` names the app after the folder, so
   `./deploy new ../flet --preset flet` fails with a hint to use `--name`. `new` also checks the
   name format before copying (no half-made project).
 - **[template repo]** Root `src/`, `tests/` and `pytemplate.toml` must equal
   `presets/script/files` rendered with `name = "myapp"` (verified: `presets.pristine` is
-  true). Edit the preset, then regenerate the root with `./deploy init script --name myapp
-  --force`, or mirror the edit byte for byte.
+  true). Edit the preset, then regenerate the root with `./deploy __init script --name myapp
+  --force` (changes no byte when they already match: `test_removals` checks it), or mirror the
+  edit byte for byte.
 - `copy_template(dest)` (used by `new`) skips `.git`, `.build`, `dist`, caches, `.flet`,
   `.venv*`, `template-repo` at any depth; `build/` and `.claude/` at the root; and
   `.github/workflows/template-*` (template CI files MUST use that prefix). `new` then runs
-  `init <preset> --name <n> --force` inside the copy, `git init` and
-  `git add --chmod=+x deploy deploy.ps1`.
+  the copy's own runner with `__init <preset> --name <n> --force` inside the copy, `git init`
+  and `git add --chmod=+x deploy deploy.ps1`.
+- `init` is internal only: `cli.INTERNAL["__init"]` (`cmd_mode.cmd_init`), reached by `new` and
+  by the template maintainer, listed nowhere. `./deploy init` exits 2 with the hint `./deploy
+  new DIR --preset P`: a project's preset is chosen when it is created.
 - Hard-coded preset names in the runner: `render.ci_workflow` (raylib: apt GL/X11 libs, no
   PyPy on macOS), `methods/exe.build` (flet -> `flet pack`), `methods/flet.build` (flet only),
   `e2e.SMOKE` / `e2e.COMPILED_MARK` (expected app output per preset). A new preset that needs
@@ -1011,11 +1009,10 @@ instead. Neovim opens its output on start and replaces a running instance (`uniq
   tasks come FIRST, in the configured order; a button that names no catalog task (e.g.
   `build --method pyz`) gets its own task. Without the extension the extra keys are ignored.
 - `launch.json`: "src/main.py (CPython, interpreted)" first, with no `python` key (VS Code's
-  selected interpreter; works under WSL); "src/main.py (CPython JIT)" (`.venv-jit`,
-  `PYTHON_JIT=1`) when `python.jit`; PyPy (only when supported; per-OS `python`; the debugger
-  is unreliable on PyPy); "Run mypyc stage (compiled modules cannot be stepped into)" when mypyc
-  is supported (program `.build/mypyc-dev/stage/main.py`, `.venv` or `.venv-jit` python per
-  OS through a `windows` block, `preLaunchTask: "deploy: compile"`, `pathMappings` src <->
+  selected interpreter; works under WSL); PyPy (only when supported; per-OS `python`; the
+  debugger is unreliable on PyPy); "Run mypyc stage (compiled modules cannot be stepped into)"
+  when mypyc is supported (program `.build/mypyc-dev/stage/main.py`, `.venv` python per OS
+  through a `windows` block, `preLaunchTask: "deploy: compile"`, `pathMappings` src <->
   stage, `PYTEMPLATE_BACKEND=mypyc`; breakpoints bind in `main.py` and the interpreted modules,
   never in compiled ones: verified with a headless DAP client); "Tests (pytest)". nvim-dap
   reads these configs: keep names stable.
@@ -1025,7 +1022,7 @@ instead. Neovim opens its output on start and replaces a running instance (`uniq
   syntax, so F5 breaks. It applies only in trusted workspaces; `[vscode] settings` can
   override it.
 - Limits: Ctrl+C in a Windows task triggers cmd's "Terminate batch job (Y/N)?" (use Terminate
-  Task); under Remote-WSL on a Windows checkout the PyPy, JIT and mypyc launch configs point at
+  Task); under Remote-WSL on a Windows checkout the PyPy and mypyc launch configs point at
   the Windows-side paths (`.venv-pypy`, `.build/mypyc-dev`: no `-wsl` suffix, no `.build/wsl`);
   `\\wsl$` UNC paths do not work with `deploy.cmd`.
 
@@ -1035,7 +1032,7 @@ Files:
 - `.lazy.lua` (generated from `.pytemplate/templates/nvim/lazy.lua`): lazy.nvim's `local_spec`
   loads the first `.lazy.lua` found upward from Neovim's cwd, through `vim.secure.read` +
   `loadstring`. It MUST stay static (identical bytes in every mode and preset;
-  `test_nvim_render.py` checks 7 configs): Neovim trusts it by the sha256 of its raw bytes,
+  `test_nvim_render.py` checks 6 configs): Neovim trusts it by the sha256 of its raw bytes,
   keyed by its real path, in `stdpath('state')/trust`. Any byte change (CRLF, a BOM, an edit)
   or moving the folder = untrusted again. Hence `.gitattributes` `.lazy.lua text eol=lf` and
   all logic in the plugin. Editing the template forces every user to re-trust: avoid it.
@@ -1050,7 +1047,7 @@ Files:
   paths only, no comments. Keys: `schema`, `generated`, `name`, `pkg`, `preset`, `gui`,
   `min_python`, `pypy_enabled`, `backend{active, supported}`, `typing{profile, editor, mypy,
   mypy_severity, python_version}`, `envs{tools, cpython, mypyc, pypy}` (without the `-wsl`
-  suffix, which the plugin adds itself; `.venv-jit` for cpython/mypyc when `python.jit`),
+  suffix, which the plugin adds itself),
   `mypyc_stage`, `tasks[{name, help, background}]`, `commands[{name, usage, summary, group}]`
   (from `cli.COMMANDS`), `build{methods, default}`. The Lua side (`init.sanitize`) validates
   every value (whitelists, patterns) and never runs a program named in it. `init.info` re-reads
@@ -1115,7 +1112,7 @@ LazyVim wiring:
   (`disable_template_modules = {"overseer.template.vscode"}`), otherwise labels would be
   duplicated and tasks would go through `deploy.cmd`. overseer runs `"type": "shell"` tasks
   through `'shell'`: another reason to keep VS Code tasks `process`. Commands that can change
-  the mode (`mode`, `setup`, `sync`, `lock`, `add`, `remove`, `render`, `init`) get the
+  the mode (`mode`, `setup`, `sync`, `lock`, `add`, `remove`, `render`) get the
   `pytemplate.refresh` component (re-read `editor.json`, LSP `didChangeConfiguration`, rebuild
   the mypy linter). Without overseer, tasks run in a terminal split.
 - Output parser `tasks.parse_line` (overseer `on_output_parse` -> diagnostics + quickfix):
@@ -1185,10 +1182,12 @@ short temp tree and unset `NVIM_APPNAME`.
   `test_paths.py` (path spellings, colours in a hidden console, dry runs in a throwaway copy),
   `test_shells.py`, `test_vscode.py`, `test_nvim_render.py` (also loads the Lua modules in
   `nvim --headless --clean`), `test_cmd_nvim.py`, `test_fixes.py` (regression tests of the
-  runner fixes: portable smoke with `lib/`, lazy `{python}`, pyz `PYTHON_JIT`, binary preset
-  files, `compile.annotate`, `sync_tree` ns mtimes, portable launcher quoting and version
-  probes, unknown arguments, `app.preset`, pinned tools, flet pyproject, wheel options, JIT
-  path), `test_e2e_plan.py` (the pure planning of `e2e.py`).
+  runner fixes: portable smoke with `lib/`, lazy `{python}`, the pyz `.cmd` wrapper, binary
+  preset files, `compile.annotate`, `sync_tree` ns mtimes, portable launcher quoting and
+  version probes, unknown arguments, `app.preset`, pinned tools, flet pyproject, wheel
+  options), `test_e2e_plan.py` (the pure planning of `e2e.py`), `test_removals.py` (no JIT
+  key, env, launch config or `PYTHON_JIT` left; `./deploy init` exits 2 with its hint; `new`
+  and the maintainer route through `__init`, for real in throwaway copies).
 - **[template repo]** Language guard `test_no_spanish.py`: skipped unless
   `.pytemplate/template-repo` exists. Scans `git ls-files --cached --others --exclude-standard`
   (so new untracked files count) for accented Spanish letters and a list of Spanish words
@@ -1315,7 +1314,8 @@ Runner code:
 
 Adding a command:
 1. `Command(module, func, summary, usage, render, group)` in `cli.COMMANDS`; `render=False` if
-   it must work without (or before) rendering.
+   it must work without (or before) rendering. An internal step that must stay out of help,
+   `editor.json`, the editors and completion goes to `cli.INTERNAL` instead (name `__x`).
 2. `def cmd_x(cfg: Config, args: list[str]) -> int` in a `cmd_*.py`, argparse with
    `prog="./deploy x"`; reject unknown arguments (`cmd_dev.only_flags` for flag-only commands).
 3. `./deploy render` and commit `.pytemplate/editor.json` + `state.json` (section 6.2).
@@ -1355,8 +1355,8 @@ Files and git:
   binary. With `core.autocrlf=true` most working-tree files are CRLF on Windows: that is fine,
   the runner normalises.
 - `deploy` and `deploy.ps1` are 100755: `cmd_env._fix_exec_bit` repairs both on `setup`
-  (`core.filemode=false` on Windows loses the bit), `presets.new` marks both, `init` chmods
-  both on POSIX. `deploy.cmd` stays 100644.
+  (`core.filemode=false` on Windows loses the bit), `presets.new` marks both, `presets.init`
+  chmods both on POSIX. `deploy.cmd` stays 100644.
 - Default app content lives in `presets/script/files/` (section 11).
 
 ## 15. Known issues and fragile points (still open)
@@ -1378,7 +1378,7 @@ Behaviour:
   `selftest --e2e` switches the project off PyPy first (`e2e.HOST_GAPS`); users there run
   `./deploy mode cpython --supports cpython,mypyc`. Possible fix: skip PyPy for raylib on
   macOS aarch64 in `setup`/`new`.
-- WSL on `/mnt`: `pyrightconfig.json` (`venv: ".venv"`) and the PyPy/JIT/mypyc launch
+- WSL on `/mnt`: `pyrightconfig.json` (`venv: ".venv"`) and the PyPy/mypyc launch
   configs ignore `ENV_SUFFIX`, so VS Code and pyright inside WSL point at the Windows-side
   environments (the Neovim plugin adds `-wsl` itself). Untested.
 - MSYS2 without a login shell (the xonsh `!m` route): `MSYSTEM_PREFIX`, `EXEPATH` and `SHELL`
