@@ -186,9 +186,10 @@ then `shutil.which("uv")`, else `DeployError(..., 3)`.
 `ps1:Desktop:5.1`); `nvim`; `nu` (shell-setup snippet). The xonsh snippet sets none.
 `project.native_path` reads the `:msys`/`:cygwin` suffix, `shells.guess_shell` the prefix (only
 `ps1:`, `nu` and `sh:niubash` first: `sh:bash`/`sh:zsh` name the interpreter of `#!/bin/sh`, bash on
-macOS, Fedora and Arch, so `$SHELL` wins over them), `presets.next_steps` the `cmd`/`ps1:`
-prefix (how the hint after `new` quotes the folder), and `./deploy doctor` prints the value
-("unknown" when unset).
+macOS, Fedora and Arch, so `$SHELL` wins over them), `presets.next_steps` the `cmd`/`ps1:`/`nu`
+prefix (how the hint after `new` quotes the folder; behind `cmd`, which xonsh and nushell on
+Windows start too, `XONSH_VERSION` and `NU_VERSION` name those shells), and `./deploy doctor`
+prints the value ("unknown" when unset).
 
 ### 4.2 Which launcher runs
 
@@ -544,7 +545,7 @@ header rules (with detector tests proving each rule fires).
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
-| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `DeployError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./deploy __init`; with rollback), `copy_template`, `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
+| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `DeployError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `_installed_import_names`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./deploy __init`; with rollback), `copy_template`, `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
 | `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`, `COMPILER_MISSING`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
@@ -1952,8 +1953,8 @@ Per method:
   resolution) for the old preset's requirements and every declared one the new preset adds in
   another form (`presets._dropped`: a `flet-cli==1.0.0` left in the dev group of a flet project
   with `[preset.flet] version = "1.0.0"` made the resolving `uv add flet==1.0.1` fail), `uv add
-  --no-sync [--constraints]` for the
-  new ones and `uv lock`: the only step that needs the network; a resolved `uv.lock` in which a
+  --no-sync [--constraints]` for the new ones (the pins file relative to the root: uv splits a
+  `--constraints` value at spaces, section 15.1) and `uv lock`: the only step that needs the network; a resolved `uv.lock` in which a
   package depends on the project itself (`presets._self_dependents`, section 15.1) is refused
   there, before any file of the skeleton is written; (2) renames `src/ tests/
   typings/` into `.pytemplate-init-*` (all or nothing: a locked file fails the rename before
@@ -1973,7 +1974,8 @@ Per method:
   read the same: the VS Code matchers, rename), tests, typings, build, dist, assets; plus the
   preset's `src/` entries such as `main`), and every package the project will lock:
   the declared requirements (minus the current preset's own), their tree in `uv.lock`
-  (`locked_names`, markers ignored because uv refuses a self-dependency on any platform; the
+  (`locked_names`, markers ignored because uv treats the project's own name alike on any
+  platform: it refuses the project, or resolves the dependency to the project itself, 15.1; the
   project's own entry excluded) and the preset's pins (`constraints.txt`: the preset's whole
   tested tree, so a raylib project, whose `uv.lock` has no rich, still refuses `new --preset
   script --name mdurl`). When a preset adds packages the lock does not have, uv may resolve
@@ -1982,7 +1984,10 @@ Per method:
   the pinned wheels' RECORD files: pytest's `py`, which pytest imports before the app,
   markdown-it-py's `markdown_it`, raylib's `pyray`, pyyaml's `yaml`, pillow's `PIL` in lower
   case...; `test_import_names_follow_the_installed_packages` checks it against what `.venv`
-  installs). Only the presets' pinned packages are mapped (15.2).
+  installs), and for any other package of those names what the project's environments
+  installed (`presets._installed_import_names`: the RECORD of every `*.dist-info` in `.venv*`,
+  either layout: beautifulsoup4's `bs4` once `./deploy add` synced it; `new` reads the source
+  project's). Without an environment only the pinned packages are mapped (15.2).
   `new` derives the name from the folder with `name_from_folder` (NFKD without the combining
   marks, every run of other characters, letters without an ASCII form included, -> `-`, no
   `-`/`_` at the ends) and checks it before copying, so `./deploy new ../flet --preset
@@ -2028,8 +2033,15 @@ Per method:
   empty folder it was given) and says so; a folder with content is refused before anything
   is written. On success it prints one hint (init prints none: it runs in the copy), `cd
   <dest>` and `./deploy setup` on lines of their own, for the shell of the launcher
-  (`presets.next_steps` reads the `PYTEMPLATE_LAUNCHER` prefix: cmd `cd /d "..."` and
-  `.\deploy`, PowerShell single quotes, else `shlex.quote`).
+  (`presets.next_steps`, in the order of `shells.guess_shell`: the `PYTEMPLATE_LAUNCHER`
+  prefix `ps1:` (PowerShell single quotes) or `nu` (a raw single-quoted nushell string, a
+  double-quoted one for a path with `'`; `deploy setup`, the shell-setup function), then
+  `XONSH_VERSION` (a Python string literal: xonsh reads quoted arguments so), then
+  `NU_VERSION` behind `cmd` (nushell exports it; deploy.cmd serves xonsh and nushell on
+  Windows too; `./deploy.cmd setup`), then cmd `cd /d "..."` and `.\deploy`, else
+  `shlex.quote`). Behind deploy.cmd a shell that exports neither variable (a nushell that
+  stops exporting `NU_VERSION`, nushell/nushell#15533) gets cmd's syntax: only the hint is
+  wrong.
 - `init` is internal only: `cli.INTERNAL["__init"]` (`cmd_mode.cmd_init`), reached by `new` and
   by the template maintainer, listed nowhere. `./deploy init` exits 2 with the hint `./deploy
   new DIR --preset P`: a project's preset is chosen when it is created.
@@ -2986,6 +2998,14 @@ uv:
   `test_presets.py::test_new_from_a_project_without_the_presets_tree_refuses_its_names`,
   `test_init_refuses_a_lock_that_resolves_a_dependency_to_the_project`, `test_self_dependents`.
   Goes: when uv refuses it (the name check stays: src/<pkg>/ would shadow the library).
+- **uv splits a `--constraints` value at every space** (DEFECT): `uv add --constraints "/a
+  b/c.txt"` looked for `/a` ("File not found"), so `new` into a folder with a space failed
+  (and cleaned up) whenever it passed the tested pins, e.g. `new "../my game" --preset script`
+  from a raylib project. Up: astral-sh/uv#12639 (open). Fix: `presets._swap_dependencies`
+  passes the pins file relative to the project root, uv's working folder (11). Test:
+  `test_presets.py::test_init_passes_the_pins_by_a_path_without_spaces`,
+  `test_init_pins_steer_the_resolution`. Goes: when uv takes the value whole (the relative
+  path can stay).
 - **uv writes normalized names** (LIMITATION, PEP 503): `raylib_sdl` became `raylib-sdl`, and a
   verbatim comparison never matched. Fix: `cmd_apply.req_key` (5.8). Test:
   `test_apply.py::test_req_key_normalizes_like_uv`. Goes: never.
@@ -3973,10 +3993,11 @@ Behaviour:
   extensions out of `common/`, and a cpython/pypy wheel stays tagged `py3-none-any`.
 - `sync_tree` does not detect a case-only rename (`Data.py` -> `data.py`) on a
   case-insensitive file system: the stage keeps the old spelling until `./deploy clean`.
-- The name check (`presets.check_name_free`) knows the import names only of the packages the
-  presets pin (`presets.IMPORT_NAMES`): a dependency the user adds is compared by its
-  distribution name (`beautifulsoup4` refuses `beautifulsoup4`, not `bs4`). Reading them needs
-  the installed wheels (an environment of the project, never there for `new`'s next preset).
+- The name check (`presets.check_name_free`) knows the import names of a dependency the user
+  added (not pinned by a preset, so not in `presets.IMPORT_NAMES`) only while an environment
+  of the project has it installed (`presets._installed_import_names`): in a clone without
+  `.venv`, `./deploy rename bs4` after the dependency beautifulsoup4 still passes (its
+  distribution name is refused). `./deploy add` syncs `.venv`, so the usual order is covered.
 - A pyz built on Windows stores no x bit (Windows files have no Unix mode), so the executables of
   its Linux or macOS targets (`--target`), or of a script in `src/`, are not runnable where it is
   extracted; the generated CI builds each OS's part on that OS, and `pyz-merge` keeps the parts'

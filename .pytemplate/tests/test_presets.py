@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import functools
 import hashlib
@@ -429,6 +430,39 @@ def test_every_pypy_standard_library_module_is_refused() -> None:
     assert not missing, "add them to presets.STDLIB_OTHER_VERSIONS"
 
 
+def _other_import_names(installed: dict[str, list[str]], pinned: set[str]) -> dict[str, set[str]]:
+    """The modules a pinned distribution installs under another name than its own, from
+    importlib.metadata.packages_distributions(): {distribution: {module, ...}}. Left out: what
+    is never an app package (private modules, non-identifiers) and mypyc's runtime libraries
+    (`<20 hex digits>__mypyc`, a new hash per release of a mypyc-compiled wheel: mypy,
+    charset-normalizer, pytokens)."""
+    found: dict[str, set[str]] = {}
+    for module, dists in installed.items():
+        if not module.isidentifier() or module.startswith("_") or module.endswith("__mypyc"):
+            continue
+        for dist in dists:
+            name = presets._norm_name(dist)
+            if name in pinned and module.lower() != name.replace("-", "_"):
+                found.setdefault(name, set()).add(module)
+    return found
+
+
+def test_other_import_names_skip_mypycs_runtime_libraries() -> None:
+    """mypy 2.3.1 ships 08ae81f72d5a2b5fa9e0__mypyc (a digit first: skipped as no identifier),
+    but the hash changes with every release and may start with a letter (pytokens 0.4.1:
+    fd7dcdb10166ebd4db98__mypyc): after `./deploy lock --upgrade` the test below asked to add
+    it to IMPORT_NAMES and ./deploy selftest failed in every project."""
+    installed = {
+        "e3b0c44298fc1c149afb__mypyc": ["mypy"],
+        "08ae81f72d5a2b5fa9e0__mypyc": ["mypy"],
+        "mypyc": ["mypy"],
+        "_pytest": ["pytest"],
+        "py": ["pytest"],
+        "yaml": ["PyYAML"],
+    }
+    assert _other_import_names(installed, {"mypy", "pytest", "pyyaml"}) == {"mypy": {"mypyc"}, "pytest": {"py"}, "pyyaml": {"yaml"}}
+
+
 def test_import_names_follow_the_installed_packages() -> None:
     """presets.IMPORT_NAMES must know every module a pinned package installs under another name
     (the ones installed in this environment: .venv of the project, so every preset is covered
@@ -438,22 +472,16 @@ def test_import_names_follow_the_installed_packages() -> None:
     pinned: set[str] = set()
     for preset in PRESETS:
         pinned |= set(presets.constraints(preset))
-    found: dict[str, set[str]] = {}
-    for module, dists in importlib.metadata.packages_distributions().items():
-        if not module.isidentifier() or module.startswith("_"):
-            continue  # never an app package
-        for dist in dists:
-            name = presets._norm_name(dist)
-            if name in pinned and module.lower() != name.replace("-", "_"):
-                found.setdefault(name, set()).add(module)
+    found = _other_import_names(importlib.metadata.packages_distributions(), pinned)
     missing = {n: sorted(m - set(presets.IMPORT_NAMES.get(n, ()))) for n, m in found.items()}
     assert not {n: m for n, m in missing.items() if m}, "add them to presets.IMPORT_NAMES"
     assert set(presets.IMPORT_NAMES) <= pinned  # only pinned packages (their pins name them)
 
 
 def test_every_locked_package_name_is_refused() -> None:
-    """uv refuses a project that depends on itself, also through a dependency of a dependency
-    (rich -> pygments), and on any platform (colorama is win32 only): every name in uv.lock."""
+    """uv refuses a project that depends on itself, or resolves the dependency to the project
+    (section 15.1), also through a dependency of a dependency (rich -> pygments), and on any
+    platform (colorama is win32 only): every name in uv.lock."""
     cfg = config.load(set(cli.COMMANDS))
     locked = presets.locked_names()
     assert locked, "uv.lock is missing or empty"
@@ -1046,25 +1074,75 @@ def test_quiet_init_quiets_uv_too(fake: Fake, monkeypatch: pytest.MonkeyPatch) -
     assert fake.calls and not any("--quiet" in c for c in fake.calls)
 
 
+MY_PROJ = str(Path("/p/my proj"))  # \p\my proj on Windows: the hint names the native path
+
+
 @pytest.mark.parametrize(
     ("launcher", "expected"),
     [
-        ("sh:bash", ["cd '/p/my proj'", "./deploy setup"]),
-        ("", ["cd '/p/my proj'", "./deploy setup"]),
-        ("cmd", ['cd /d "/p/my proj"', ".\\deploy setup"]),
-        ("ps1:Desktop:5.1", ["cd '/p/my proj'", "./deploy setup"]),
+        ("sh:bash", [f"cd {shlex.quote(MY_PROJ)}", "./deploy setup"]),
+        ("", [f"cd {shlex.quote(MY_PROJ)}", "./deploy setup"]),
+        ("cmd", [f'cd /d "{MY_PROJ}"', ".\\deploy setup"]),
+        ("ps1:Desktop:5.1", [f"cd '{MY_PROJ}'", "./deploy setup"]),
     ],
 )
 def test_new_says_what_comes_next_for_the_callers_shell(monkeypatch: pytest.MonkeyPatch, launcher: str, expected: list[str]) -> None:
     """One hint, each command on its own line (cmd and Windows PowerShell 5.1 have no `&&`), the
-    folder quoted (a space broke `cd <dest> && ./deploy setup`), `.\\deploy` in cmd."""
+    folder quoted (a space broke `cd <dest> && ./deploy setup`), `.\\deploy` in cmd. The
+    expected paths are the native ones: the test failed on Windows with POSIX literals."""
+    monkeypatch.delenv("XONSH_VERSION", raising=False)
+    monkeypatch.delenv("NU_VERSION", raising=False)
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
     assert presets.next_steps(Path("/p/my proj")) == expected
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "ps1:Core:7.6")
     quote = "\N{RIGHT SINGLE QUOTATION MARK}"
-    assert presets.next_steps(Path(f"/p/it's{quote}s"))[0] == f"cd '/p/it''s{quote}{quote}s'"
+    typographic = str(Path(f"/p/it's{quote}s"))
+    doubled = typographic.replace("'", "''").replace(quote, quote * 2)
+    assert presets.next_steps(Path(typographic))[0] == f"cd '{doubled}'"
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh")
-    assert presets.next_steps(Path("/p/it's"))[0] == "cd '/p/it'\"'\"'s'"
+    apostrophe = str(Path("/p/it's"))
+    assert presets.next_steps(Path(apostrophe))[0] == f"cd {shlex.quote(apostrophe)}"
+    assert shlex.split(presets.next_steps(Path(apostrophe))[0]) == ["cd", apostrophe]
+
+
+@pytest.mark.parametrize("launcher", ["cmd", ""])
+def test_new_says_what_comes_next_in_xonsh(monkeypatch: pytest.MonkeyPatch, launcher: str) -> None:
+    """xonsh on Windows runs deploy.cmd (PYTEMPLATE_LAUNCHER=cmd; its shell-setup alias sets
+    none) and got cmd's `cd /d "..."`, which it rejects. It reads a quoted argument as a Python
+    string (backslashes are escapes: `C:\\Users` needs them doubled)."""
+    monkeypatch.delenv("NU_VERSION", raising=False)
+    monkeypatch.setenv("XONSH_VERSION", "0.24.2")
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
+    for raw in ("/p/my proj", "/p/it's", "/p/a\\Ub"):
+        path = str(Path(raw))
+        cd, setup = presets.next_steps(Path(path))
+        assert cd.startswith("cd ") and ast.literal_eval(cd[3:]) == path
+        assert setup == "./deploy setup"
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh:niubash")  # niubash's own launcher value wins
+    assert presets.next_steps(Path("/p/my proj"))[0] == f"cd {shlex.quote(MY_PROJ)}"
+
+
+@pytest.mark.parametrize(
+    ("launcher", "nu_version", "setup"), [("cmd", "0.106.1", "./deploy.cmd setup"), ("nu", "", "deploy setup")]
+)
+def test_new_says_what_comes_next_in_nushell(monkeypatch: pytest.MonkeyPatch, launcher: str, nu_version: str, setup: str) -> None:
+    """nushell on Windows runs deploy.cmd too, typed `./deploy.cmd` (the shell-setup nu function
+    `deploy` sets `nu`): cmd's `cd /d "..."` is two arguments there. A single-quoted nushell
+    string is raw; a path with a quote goes in a double-quoted one, whose escapes are
+    backslash-backslash and backslash-quote."""
+    monkeypatch.delenv("XONSH_VERSION", raising=False)
+    if nu_version:
+        monkeypatch.setenv("NU_VERSION", nu_version)
+    else:
+        monkeypatch.delenv("NU_VERSION", raising=False)
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
+    assert presets.next_steps(Path("/p/my proj")) == [f"cd '{MY_PROJ}'", setup]
+    apostrophe = str(Path("/p/a\\b it's"))
+    escaped = apostrophe.replace("\\", "\\\\")
+    assert presets.next_steps(Path(apostrophe))[0] == f'cd "{escaped}"'
+    if launcher == "nu":  # the launcher value names the shell, before an inherited XONSH_VERSION
+        monkeypatch.setenv("XONSH_VERSION", "0.24.2")
+        assert presets.next_steps(Path("/p/my proj"))[0] == f"cd '{MY_PROJ}'"
 
 
 def test_new_prints_one_next_step_hint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fake: Fake) -> None:
@@ -1232,11 +1310,12 @@ def test_git_init_makes_a_main_branch(tmp_path: Path, git_env: None) -> None:
 
 
 @needs_git
-@pytest.mark.parametrize("filemode", ["false", "true"])
+@pytest.mark.parametrize("filemode", ["false", "true", "off", "no", "0", "yes"])
 def test_git_init_in_a_monorepo_stages_the_launchers_executable(tmp_path: Path, git_env: None, filemode: str) -> None:
     """new inside a repository with core.filemode = false (Git for Windows): `git add` recorded
     deploy as 100644 and the pre-commit hook refused the first commit. Staged 100755 there;
-    elsewhere (core.filemode = true) nothing is staged: the files' own x bit is recorded."""
+    elsewhere (core.filemode = true) nothing is staged: the files' own x bit is recorded. Every
+    spelling git reads as false counts (off, no, 0: only "false" did)."""
     mono = tmp_path / "mono"
     mono.mkdir()
     _git(mono, "init", "--quiet")
@@ -1249,7 +1328,8 @@ def test_git_init_in_a_monorepo_stages_the_launchers_executable(tmp_path: Path, 
     presets._git_init(dest)
     assert not (dest / ".git").exists()  # no nested repository
     modes = {line.split()[3]: line.split()[0] for line in _git(mono, "ls-files", "-s").splitlines()}
-    assert modes == ({"apps/game/deploy": "100755", "apps/game/deploy.ps1": "100755"} if filemode == "false" else {})
+    executable = {"apps/game/deploy": "100755", "apps/game/deploy.ps1": "100755"}
+    assert modes == (executable if filemode in ("false", "off", "no", "0") else {})
 
 
 @needs_git
@@ -1428,7 +1508,7 @@ def test_init_converts_the_project(fake: Fake, preset: str) -> None:
     if pins:
         adds = [c for c in uv if c[0] == "add"]
         assert adds and all("--constraints" in c for c in adds)
-        pinned = Path(adds[0][adds[0].index("--constraints") + 1])
+        pinned = fake.root / adds[0][adds[0].index("--constraints") + 1]  # relative to the root
         assert pinned.read_text(encoding="utf-8").splitlines() == [f"{n}=={v}" for n, v in sorted(pins.items())]
 
 
@@ -1807,7 +1887,37 @@ def test_new_from_a_project_without_the_presets_tree_refuses_its_names(fake: Fak
     with pytest.raises(DeployError, match="also the name of a dependency") as e:
         presets.check_name_free(cfg, preset, name)
     assert e.value.code == 2
+    # the reason as uv behaves (15.1): it does not always refuse, it may take the project for it
+    assert "uv would refuse the project or resolve that dependency to the project itself" in str(e.value)
     presets.check_name_free(cfg, preset, "demo")
+
+
+def _install(site: Path, dist_info: str, *paths: str) -> None:
+    """A distribution as uv installs it: its dist-info folder with a RECORD."""
+    info = site / dist_info
+    info.mkdir(parents=True)
+    rows = [*paths, f"{dist_info}/METADATA,sha256=x,1", f"{dist_info}/RECORD,,"]
+    (info / "RECORD").write_text("".join(f"{r}\n" if "," in r else f"{r},sha256=x,1\n" for r in rows), encoding="utf-8")
+
+
+def test_name_check_reads_the_import_names_of_installed_dependencies(fake: Fake) -> None:
+    """IMPORT_NAMES only knows the presets' pins: after `./deploy add beautifulsoup4`,
+    `./deploy rename bs4` passed, and src/bs4/ shadowed the library. The environments of the
+    project (either layout: lib/pythonX.Y or Windows' Lib) name what each package installs."""
+    text = FAKE_PYPROJECT.replace('"rich>=15.0.0",', '"rich>=15.0.0",\n    "beautifulsoup4>=4.13",\n    "python-dateutil",')
+    (fake.root / "pyproject.toml").write_text(text, encoding="utf-8")
+    site = fake.root / ".venv" / "lib" / "python3.14" / "site-packages"
+    _install(site, "beautifulsoup4-4.13.4.dist-info", "bs4/__init__.py", "bs4/builder/__init__.py")
+    _install(site, "unrelated_tool-1.0.dist-info", "othermod.py", "../../../bin/othertool")
+    _install(site, "compiled-2.0.dist-info", "fastmod.cpython-314-x86_64-linux-gnu.so", "compiled.pth")
+    _install(fake.root / ".venv-pypy" / "Lib" / "site-packages", "python_dateutil-2.9.0.post0.dist-info", "dateutil/__init__.py")
+    for name, module, dist in (("bs4", "bs4", "beautifulsoup4"), ("BS4", "bs4", "beautifulsoup4"), ("dateutil", "dateutil", "python-dateutil")):
+        with pytest.raises(DeployError, match=f"would shadow the module '{module}' of {dist}") as e:
+            presets.check_name_free(fake.cfg, "script", name)
+        assert e.value.code == 2
+    for name in ("othermod", "fastmod", "compiled", "bin", "demo"):  # not a dependency of the project, or no module
+        presets.check_name_free(fake.cfg, "script", name)
+    assert presets._installed_import_names()["compiled"] == {"fastmod"}
 
 
 def test_new_from_another_project_gets_the_tested_versions(fake: Fake) -> None:
@@ -1822,6 +1932,28 @@ def test_new_from_another_project_gets_the_tested_versions(fake: Fake) -> None:
     presets.init(cfg, "script", "demo", force=True)
     adds = [c for c in fake.calls if c[1] == "add"]
     assert adds and all("--constraints" in c for c in adds)
+
+
+def test_init_passes_the_pins_by_a_path_without_spaces(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
+    """uv splits a --constraints value at every space (astral-sh/uv#12639): `new "../my game"
+    --preset script` from a raylib project failed with "File not found: .../my". The pins go by
+    their path relative to the root, which is uv's working folder."""
+    cfg = _as_raylib_project(fake)
+    seen: list[tuple[list[str], Path | None]] = []
+
+    def run(argv: list[Any], cwd: Path | None = None, **_: Any) -> subprocess.CompletedProcess[str]:
+        seen.append(([str(a) for a in argv], cwd))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(proc, "run", run)
+    presets.init(cfg, "script", "demo", force=True)
+    adds = [(argv, cwd) for argv, cwd in seen if argv[1] == "add"]
+    assert adds
+    for argv, cwd in adds:
+        value = argv[argv.index("--constraints") + 1]
+        assert not Path(value).is_absolute() and " " not in value
+        assert cwd == fake.root
+        assert "rich==" in (cwd / value).read_text(encoding="utf-8")
 
 
 def _self_dependent_lock(name: str) -> str:
@@ -2208,12 +2340,13 @@ def test_new_into_a_folder_with_a_space_and_an_accent(tmp_path: Path, network: N
 
 
 def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: None) -> None:
-    """An older pinned version wins over the newest one: the pins are really used."""
+    """An older pinned version wins over the newest one: the pins are really used, also in a
+    project folder with a space (uv splits a --constraints value at spaces: astral-sh/uv#12639)."""
     pins = presets.constraints("raylib")
     if pins.get("pycparser") != "3.0":
         pytest.skip("this check expects the raylib preset to pin pycparser 3.0")
     env = _child_env(tmp_path)
-    copy_root = tmp_path / "copy"
+    copy_root = tmp_path / "my copy"
     presets.copy_template(copy_root)
     if config.load(set(cli.COMMANDS)).app.preset == "raylib":  # a raylib project: from another preset first
         r = _deploy(copy_root, "__init", "script", "--force", cwd=copy_root, env=env)

@@ -4,8 +4,8 @@ Each preset lives in .pytemplate/presets/<name>/:
   preset.toml      description, dependencies, extra [tool.uv] keys and extra pyproject tables
   files/           skeleton copied to the root. `__pkg__` in a path is replaced with the app
                    package, and `{{name}}`/`{{pkg}}` in text with the name and the package.
-  constraints.txt  optional: the versions the template was tested with for every package the
-                   preset adds to the template's own uv.lock (see `constraints`).
+  constraints.txt  optional: the versions the template was tested with for every package a
+                   project of the preset locks, its whole tested tree (see `constraints`).
 
 `./deploy new` copies the template (`copy_template`) and runs `init` in the copy: `init` is its
 internal step (and how the template maintainer regenerates the template root).
@@ -13,6 +13,7 @@ internal step (and how the template maintainer regenerates the template root).
 
 from __future__ import annotations
 
+import csv
 import keyword
 import os
 import re
@@ -352,8 +353,9 @@ def _closure(graph: dict[str, set[str]], roots: set[str]) -> set[str]:
 
 def locked_names(roots: set[str] | None = None, lock: Path | None = None) -> set[str]:
     """Normalized names of the packages in uv.lock, the project itself excluded. With `roots`,
-    only the ones they need (dependencies of dependencies included, markers ignored: uv refuses
-    a project that depends on itself on every platform)."""
+    only the ones they need (dependencies of dependencies included, markers ignored: uv resolves
+    the project's own name the same way on every platform, refusing the project or taking it
+    for the dependency)."""
     graph = _lock_graph(lock)
     return set(graph) if roots is None else _closure(graph, roots)
 
@@ -453,13 +455,50 @@ def _dependency_names(cfg: Config | None, preset: str) -> set[str]:
     return names
 
 
+def _record_modules(info: Path) -> set[str]:
+    """The top-level modules a distribution installed (its `*.dist-info` folder): the first part
+    of every path of its RECORD (a package folder, `mod.py`, `mod.<abi>.so`), without the
+    metadata, the scripts outside site-packages and anything that is no identifier."""
+    try:
+        rows = list(csv.reader((info / "RECORD").read_text(encoding="utf-8").splitlines()))
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return set()
+    out: set[str] = set()
+    for row in rows:
+        parts = row[0].replace("\\", "/").split("/") if row else []
+        if not parts or parts[0].endswith((".dist-info", ".data")):
+            continue
+        head = parts[0] if len(parts) > 1 else parts[0].split(".")[0]
+        if len(parts) == 1 and not parts[0].endswith((".py", ".so", ".pyd")):
+            continue  # a .pth file and the like
+        if head.isidentifier() and head != "__pycache__":
+            out.add(head)
+    return out
+
+
+def _installed_import_names() -> dict[str, set[str]]:
+    """The top-level modules of every distribution installed in an environment of the project
+    (`.venv*`, either layout), by normalized distribution name: what a dependency the user
+    added installs under another name (beautifulsoup4's bs4), which IMPORT_NAMES cannot know.
+    Empty without an environment (a fresh clone, the copy `new` makes: its source checked it)."""
+    out: dict[str, set[str]] = {}
+    for env in sorted(p for p in ROOT.glob(".venv*") if p.is_dir()):
+        for site in (*env.glob("lib/*/site-packages"), env / "Lib" / "site-packages"):
+            for info in sorted(site.glob("*.dist-info")) if site.is_dir() else ():
+                dist = _norm_name(info.name[: -len(".dist-info")].rsplit("-", 1)[0])
+                out.setdefault(dist, set()).update(_record_modules(info))
+    return out
+
+
 def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
     """Reject an app name that would break the project: one uv refuses (APP_NAME), a package
     src/<pkg>/ that is a Python keyword, a standard library module (of any supported Python), a
     backend name, a Windows device name, one of the project's own folders or files, a package
-    the project depends on, directly or not (uv refuses a project that depends on itself, and
+    the project depends on, directly or not (uv refuses the project, or resolves a dependency
+    of a dependency to the project itself when its version fits, section 15.1 of CLAUDE.md; and
     src/<pkg>/ would shadow the library), or a module such a package installs under another
-    name (IMPORT_NAMES: pytest's py, raylib's pyray).
+    name (IMPORT_NAMES for the presets' pins: pytest's py, raylib's pyray; the environments of
+    the project for the rest: beautifulsoup4's bs4 once `./deploy add` installed it).
     new, init, their dry runs and rename (which keeps the first line) call it."""
     pkg = name.replace("-", "_").lower()
     hint = "\n  Choose another name with --name NAME"
@@ -489,11 +528,13 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
     if clash in names:
         raise DeployError(
             f"the app name '{name}' is also the name of a dependency of the '{preset}' preset "
-            f"({clash}, direct or indirect): uv would refuse the project and src/{pkg}/ would "
-            f"shadow the library.{hint}"
+            f"({clash}, direct or indirect): uv would refuse the project or resolve that dependency "
+            f"to the project itself, and src/{pkg}/ would shadow the library.{hint}"
         )
-    for dist in sorted(names & IMPORT_NAMES.keys()):
-        module = next((m for m in IMPORT_NAMES[dist] if m.lower() == pkg), None)
+    installed = _installed_import_names()
+    for dist in sorted(names & (IMPORT_NAMES.keys() | installed.keys())):
+        modules = sorted({*IMPORT_NAMES.get(dist, ()), *installed.get(dist, ())})
+        module = next((m for m in modules if m.lower() == pkg), None)
         if module is not None:
             raise DeployError(
                 f"src/{pkg}/ would shadow the module '{module}' of {dist}, a dependency of the "
@@ -857,11 +898,13 @@ def _swap_dependencies(plan: InitPlan, undo: _Undo) -> None:
         path = BUILD / "init" / CONSTRAINTS
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("".join(f"{n}=={v}\n" for n, v in sorted(plan.pins.items())), encoding="utf-8", newline="\n")
-        pins = ["--constraints", str(path)]
+        # Relative to the root, uv's working folder: uv splits a --constraints value at every
+        # space (astral-sh/uv#12639), and the project's own folder may hold one
+        pins = ["--constraints", path.relative_to(ROOT).as_posix()]
     if plan.add:
-        proc.run([uv, "add", *q, "--no-sync", *pins, *plan.add], env=env)
+        proc.run([uv, "add", *q, "--no-sync", *pins, *plan.add], cwd=ROOT, env=env)
     if plan.add_dev:
-        proc.run([uv, "add", *q, "--no-sync", "--dev", *pins, *plan.add_dev], env=env)
+        proc.run([uv, "add", *q, "--no-sync", "--dev", *pins, *plan.add_dev], cwd=ROOT, env=env)
     proc.run([uv, "lock", *q], env=env)
     # The name check knows the tested tree (constraints.txt); this catches what it cannot know
     needs = _self_dependents(plan.name)
@@ -1068,8 +1111,9 @@ def _git_init(dest: Path) -> None:
         [git, "rev-parse", "--is-inside-work-tree"], cwd=dest.parent, env=env, capture=True, check=False, echo=False
     )
     if inside.returncode == 0 and inside.stdout.strip() == "true":
-        filemode = proc.run([git, "config", "--get", "core.filemode"], cwd=dest, env=env, capture=True, check=False, echo=False)
-        if filemode.stdout.strip().lower() == "false":  # an ignored folder: git refuses, and that is fine
+        # --bool: git's own reading of the value (off, no and 0 are false too); every git has it
+        filemode = proc.run([git, "config", "--bool", "--get", "core.filemode"], cwd=dest, env=env, capture=True, check=False, echo=False)
+        if filemode.stdout.strip() == "false":  # an ignored folder: git refuses, and that is fine
             proc.run([git, "add", "--chmod=+x", "--", "deploy", "deploy.ps1"], cwd=dest, env=env, capture=True, check=False)
         return
     if (dest / ".git").exists():
@@ -1191,12 +1235,25 @@ def new(dest: Path, preset: str, name: str | None) -> None:
 
 def next_steps(dest: Path) -> list[str]:
     """The commands to type after `new`, each on its own line (cmd and Windows PowerShell 5.1
-    have no `&&`), quoted for the shell whose launcher started this run (PYTEMPLATE_LAUNCHER)."""
+    have no `&&`), quoted for the calling shell, told as shells.guess_shell tells it: the
+    launcher (PYTEMPLATE_LAUNCHER: ps1:, nu, sh:niubash), then XONSH_VERSION. deploy.cmd also
+    serves xonsh and nushell on Windows: behind it NU_VERSION (nushell exports it) names
+    nushell, and cmd's syntax is for the rest (cmd, a Python subprocess, a VS Code task)."""
     launcher = os.environ.get("PYTEMPLATE_LAUNCHER", "")
     path = str(dest)
-    if launcher.startswith("cmd"):
-        return [f'cd /d "{path}"', r".\deploy setup"]  # a Windows path never holds a double quote
     if launcher.startswith("ps1"):
         # PowerShell reads the typographic single quotes as quotes too: each is doubled
         return ["cd '" + re.sub("['\u2018-\u201b]", lambda m: m.group() * 2, path) + "'", "./deploy setup"]
+    cmd = launcher.startswith("cmd")
+    nushell = launcher == "nu"
+    if not nushell and not launcher.startswith("sh:niubash") and os.environ.get("XONSH_VERSION"):
+        return [f"cd {path!r}", "./deploy setup"]  # xonsh reads a quoted argument as a Python string
+    if nushell or (cmd and os.environ.get("NU_VERSION")):
+        # nushell: a single-quoted string is raw, a double-quoted one has the escapes \\ and \";
+        # the launcher value nu is the shell-setup function `deploy`, else Windows' deploy.cmd
+        escaped = path.replace("\\", "\\\\").replace('"', '\\"')
+        cd = f"cd '{path}'" if "'" not in path else f'cd "{escaped}"'
+        return [cd, "deploy setup" if nushell else "./deploy.cmd setup"]
+    if cmd:
+        return [f'cd /d "{path}"', r".\deploy setup"]  # a Windows path never holds a double quote
     return [f"cd {shlex.quote(path)}", "./deploy setup"]
