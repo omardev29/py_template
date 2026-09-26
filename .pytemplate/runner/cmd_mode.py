@@ -280,6 +280,9 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
     for table, key, value in changes:
         text = config.set_value(text, table, key, value)
     planned = _config_from_text(text, "mode: the new pytemplate.toml")
+    # The managed parts of pyproject.toml must be rewritable for it (damaged markers, a managed
+    # key repeated outside them...): refused here, before pytemplate.toml changes
+    render.check_pyproject(planned)
     if dropped_active:
         ui.info(f"note: {cfg.backend.active} is no longer supported: the active backend becomes {active}")
 

@@ -31,7 +31,7 @@ from typing import Any
 
 from . import envs, proc, ui
 from .config import Config
-from .project import IS_WINDOWS, ROOT
+from .project import IS_MACOS, IS_WINDOWS, ROOT
 from .ui import DeployError
 
 Check = Callable[[bool | None, str, str], None]
@@ -395,10 +395,18 @@ def remove_tree(path: Path) -> None:
 
 
 def c_compiler() -> str | None:
-    """Return the C compiler nvim-treesitter's tree-sitter CLI would use (CC, gcc, cc, clang, MSVC)."""
+    """Return the C compiler nvim-treesitter's tree-sitter CLI would use (CC, gcc, cc, clang, MSVC).
+
+    macOS: /usr/bin/cc, gcc and clang exist on every Mac, even without the developer tools
+    (xcrun shims): they only count when cmd_env._xcode_problem finds none (as doctor does)."""
     for name in (os.environ.get("CC"), "gcc", "cc", "clang"):
         found = which(name) if name else None
         if found:
+            if IS_MACOS and os.path.dirname(found) == "/usr/bin":
+                from .cmd_env import _xcode_problem  # cmd_env imports this module: import it lazily
+
+                if _xcode_problem():
+                    continue  # a shim without the developer tools: maybe a later name is real
             return found
     if IS_WINDOWS:
         from .cmd_env import _msvc  # cmd_env imports this module: import it lazily

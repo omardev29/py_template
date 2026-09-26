@@ -421,11 +421,14 @@ def exe_stage(cfg: Config, stage: Path, dest: Path) -> Path:
     return dest
 
 
-def has_compiler_hint() -> str:
+def has_compiler_hint(platform: str = "win-amd64") -> str:
+    """How to get a C compiler. `platform`: sysconfig.get_platform() of the .venv Python, whose
+    MSVC tools setuptools looks for (cmd_env._msvc): ARM64 ones for a win-arm64 Python."""
     if os.name == "nt":
+        tools = "VC.Tools.ARM64" if platform == "win-arm64" else "VC.Tools.x86.x64"
         return (
             "mypyc needs MSVC (Visual Studio Build Tools) with the Windows SDK:\n"
             'winget install -e --id Microsoft.VisualStudio.BuildTools --override "--wait --passive '
-            '--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.26100"'
+            f'--add Microsoft.VisualStudio.Component.{tools} --add Microsoft.VisualStudio.Component.Windows11SDK.26100"'
         )
     return "mypyc needs a C compiler (gcc/clang; on macOS: xcode-select --install)"

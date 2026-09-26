@@ -1273,6 +1273,23 @@ def test_target_keys_the_lock_cannot_serve_are_refused(monkeypatch: pytest.Monke
     assert e.value.code == 2
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "cp314-linux-x86_64\n",  # `$` let a trailing newline through
+        "cp3\u0661\u0664-linux-x86_64",  # Arabic-Indic digits: `\d` matched them, int() read 314
+        " cp314-linux-x86_64",
+        "cp314-linux-x86_64-extra",
+        "CP314-linux-x86_64",
+    ],
+)
+def test_parse_key_takes_exactly_the_documented_form(key: str) -> None:
+    with pytest.raises(DeployError, match="invalid platform key") as e:
+        common.parse_key(key)
+    assert e.value.code == 2
+    assert common.parse_key("cp314-linux-x86_64") == common.Target("cp", 3, 14, "linux", "x86_64")
+
+
 def test_target_keys_of_the_locked_minor_work_everywhere(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(common, "host_os", lambda: "linux")
     monkeypatch.setattr(common, "host_arch", lambda: "x86_64")

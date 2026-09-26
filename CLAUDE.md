@@ -1082,7 +1082,9 @@ Formats:
   once per process, an unreadable version passes. doctor flags it. The managed `[tool.uv]` block
   also carries `required-version = ">=<MIN_UV>"`, so uv itself (>= 0.5.14) refuses every project
   command, the launcher's `uv run --script` included, with "Required uv version ... does not
-  match" and `uv self update`. Bump it with the pins
+  match" and `uv self update`. uv reads that setting from the project it finds from the cwd:
+  run from a folder outside the project (`/path/to/deploy ...`), an old uv starts the runner
+  and `envs.require_min_uv` is the guard. Bump it with the pins
   (`test_min_uv_matches_the_pinned_interpreters`) or a newer uv flag.
 - `./deploy clean` (`cmd_env.cmd_clean`): `.build/` (`.build/wsl` in WSL), `dist/`, and with
   `--envs` this side's environments (WSL on /mnt: only `.venv*-wsl`; elsewhere every `.venv*`
@@ -2383,7 +2385,7 @@ Code coupling (rename together):
   (PyPy's environment) and `min_python` (requires-python) to stay distinct.
 - `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`;
   `e2e.flet_build_reason` imports `methods.flet._developer_mode`; `cmd_nvim.c_compiler`
-  imports `cmd_env._msvc` lazily (`cmd_env` imports `cmd_nvim`).
+  imports `cmd_env._msvc` and `_xcode_problem` lazily (`cmd_env` imports `cmd_nvim`).
 - `RULES_RE` / `tasks.parse_line` <-> `ui.error`, `ui.warn`, `str(lintc.Finding)` (5.3).
 - mypyc internals mirrored by the runner (checked by `test_mypyc_core` against the locked
   mypy): `lintc.NATIVE_CLASS_DECORATORS` <-> mypyc's native decorators;
@@ -2395,8 +2397,8 @@ Code coupling (rename together):
   variables setuptools' `configure_system` reads.
 - `envs.MIN_UV` <-> the presets' `python.pypy` pin and default `python.cpython`, and the newest
   uv flag the runner uses (7); `hooks.launcher_of` <-> `hooks.sh_literal`; `cmd_env._msvc`
-  <-> setuptools' `_find_vc2017` component choice (`test_msvc_component_matches_setuptools`);
-  `cmd_nvim.c_compiler` lacks `cmd_env._xcode_problem` (the macOS xcrun shim check).
+  <-> setuptools' `_find_vc2017` component choice (`test_msvc_component_matches_setuptools`)
+  and `mypyc.has_compiler_hint(platform)` (the winget `--add` component).
 - `editor.json` <-> `cli.COMMANDS` (6.2); `cmd_nvim.EXTRAS` <-> the extras list in
   `templates/nvim/lazy.lua` (`test_lazy_lua_extras_match_cmd_nvim`); `vscode.MYPYC_STAGE` /
   `editor.json` `mypyc_stage` / `vscode._STAGE` (the pytest stage matcher) <->

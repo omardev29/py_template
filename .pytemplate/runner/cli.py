@@ -164,8 +164,8 @@ def cmd_help(cfg: object, args: list[str]) -> int:
             for name, task in loaded.tasks.items():
                 print(f"  {name:<12} {tasks.describe(task)}")
             print()
-    except DeployError:
-        pass
+    except DeployError as e:  # help still prints (stdout); say why the tasks are missing (stderr)
+        ui.warn(f"{e}\n  (so the custom tasks of pytemplate.toml are not listed)")
     print("BACKEND = cpython | pypy | mypyc (default: backend.active from pytemplate.toml)\n")
     print(EXAMPLES)
     return 0

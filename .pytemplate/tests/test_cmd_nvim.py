@@ -704,3 +704,22 @@ def test_run_preset_fails_when_the_extras_miss_their_pins(tmp_path: Path, monkey
     base, row = _preset_run(tmp_path, monkeypatch, stuck={"overseer.nvim"})
     assert not row.ok and row.smoke is None, row
     assert "overseer.nvim at ffffffffffff, pinned bbbbbbbbbbbb" in row.error and "lazy-install.log" in row.error
+
+
+def test_c_compiler_skips_the_macos_shims_without_developer_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    from runner import cmd_env
+
+    paths = {"gcc": "/usr/bin/gcc", "cc": "/usr/bin/cc", "clang": "/opt/homebrew/opt/llvm/bin/clang"}
+    monkeypatch.delenv("CC", raising=False)
+    monkeypatch.setattr(cmd_nvim, "which", lambda name: paths.get(name))
+    monkeypatch.setattr(cmd_nvim, "IS_WINDOWS", False)
+    monkeypatch.setattr(cmd_nvim, "IS_MACOS", True)
+    monkeypatch.setattr(cmd_env, "_xcode_problem", lambda: "no developer tools (xcode-select -p fails)")
+    assert cmd_nvim.c_compiler() == "/opt/homebrew/opt/llvm/bin/clang"  # the shims are skipped
+    del paths["clang"]
+    assert cmd_nvim.c_compiler() is None
+    monkeypatch.setattr(cmd_env, "_xcode_problem", lambda: None)  # developer tools installed
+    assert cmd_nvim.c_compiler() == "/usr/bin/gcc"
+    monkeypatch.setattr(cmd_nvim, "IS_MACOS", False)  # Linux: /usr/bin is a real compiler
+    monkeypatch.setattr(cmd_env, "_xcode_problem", lambda: "never asked")
+    assert cmd_nvim.c_compiler() == "/usr/bin/gcc"

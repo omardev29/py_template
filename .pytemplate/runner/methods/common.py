@@ -18,7 +18,9 @@ from ..project import BUILD, EXT_SUFFIXES, SRC, host_arch, host_os, rel
 from ..ui import DeployError
 
 NATIVE_SUFFIXES = (*EXT_SUFFIXES, ".dll", ".dylib")
-KEY_RE = re.compile(r"^(cp|pp)(\d)(\d+)-(windows|linux|macos)-(x86_64|aarch64)$")
+# ASCII digits only (\d also matches other scripts' digits) and no trailing newline ($ allows one):
+# parse_key uses fullmatch
+KEY_RE = re.compile(r"(cp|pp)([0-9])([0-9]+)-(windows|linux|macos)-(x86_64|aarch64)")
 # uv platform (--python-platform) for each (OS, architecture). It is also the floor of every
 # target, cross or host: manylinux_2_28 = glibc 2.28+ (RHEL 8, Debian 10, Ubuntu 20.04) on
 # x86_64, glibc 2.35+ on aarch64; macOS: MACOS_FLOOR; Windows wheels have no OS floor.
@@ -58,7 +60,7 @@ class Target:
 
 
 def parse_key(key: str) -> Target:
-    m = KEY_RE.match(key)
+    m = KEY_RE.fullmatch(key)
     if not m:
         raise DeployError(
             f"invalid platform key: {key!r} (format: cp314-linux-x86_64, cp314-windows-x86_64...)"

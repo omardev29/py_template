@@ -898,6 +898,7 @@ def test_help_and_doctor_with_a_utf16_config(cfg_file: Path, capsys: pytest.Capt
     assert cli.main(["help"]) == 0  # help still works (without the custom tasks)
     out = capsys.readouterr()
     assert "BACKEND = cpython" in out.out
+    assert "is UTF-16 text" in out.err and "custom tasks of pytemplate.toml are not listed" in out.err
     assert cli.main(["doctor"]) == 2
     err = capsys.readouterr().err
     assert "is UTF-16 text" in err and "internal runner error" not in err and "Traceback" not in err
@@ -1123,6 +1124,19 @@ def test_mode_keeps_a_bom_and_crlf(project: Path) -> None:
     data = path.read_bytes()
     assert data.startswith(b"\xef\xbb\xbf") and b"\n" not in data.replace(b"\r\n", b"")
     assert tomllib.loads(data.decode("utf-8-sig"))["typing"]["editor"] == editor
+
+
+def test_mode_refuses_a_damaged_pyproject_before_writing(project: Path) -> None:
+    # mode used to write pytemplate.toml first and fail on pyproject.toml afterwards: a half-made change
+    path = project / "pyproject.toml"
+    text = path.read_bytes().replace(b"\r\n", b"\n").decode("utf-8")
+    assert text.count("  # <<< pytemplate\n") == 1
+    path.write_text(text.replace("  # <<< pytemplate\n", "\n"), encoding="utf-8", newline="\n")
+    original = (project / "pytemplate.toml").read_bytes()
+    editor = "basedpyright" if _toml(project)["typing"].get("editor", "pylance") == "pylance" else "pylance"
+    r = _deploy(project, "mode", "--editor", editor)
+    assert r.returncode == 2 and "pytemplate" in r.stderr, r.stderr
+    assert (project / "pytemplate.toml").read_bytes() == original
 
 
 @needs_uv

@@ -1077,6 +1077,16 @@ def test_build_fails_when_an_extension_is_missing(fake_build: FakeCompiler, src_
     assert not stamp.exists()  # the next build is forced
 
 
+def test_compiler_hint_names_the_msvc_tools_of_the_venv_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mypyc.os, "name", "nt")
+    assert "Component.VC.Tools.x86.x64 " in mypyc.has_compiler_hint()
+    assert "Component.VC.Tools.x86.x64 " in mypyc.has_compiler_hint("win-amd64")
+    arm = mypyc.has_compiler_hint("win-arm64")
+    assert "Component.VC.Tools.ARM64 " in arm and "x86.x64" not in arm
+    monkeypatch.setattr(mypyc.os, "name", "posix")
+    assert "gcc/clang" in mypyc.has_compiler_hint("win-arm64")
+
+
 @pytest.mark.parametrize(
     ("code", "stdout", "stderr", "verbose", "hint"),
     [

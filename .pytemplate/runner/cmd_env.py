@@ -343,7 +343,7 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
             check(False, f"environment {rel(pp.dir)} is missing ({cfg.python.pypy})", "./deploy setup   (or ./deploy sync pypy)")
     if cfg.supports("mypyc"):
         found, where = _c_compiler(platform)
-        check(found, f"C compiler for mypyc: {where}", mypyc.has_compiler_hint())
+        check(found, f"C compiler for mypyc: {where}", mypyc.has_compiler_hint(platform or "win-amd64"))
     if IS_WINDOWS and cfg.supports("mypyc"):
         long_paths = _long_paths()
         check(
