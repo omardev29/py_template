@@ -1383,10 +1383,12 @@ Formats:
   `lintc` does not import `presets` or `mypyc`.
 - With PyPy supported user code must be 3.11 syntax and API (no PEP 695;
   `typing_extensions.override`, not `typing.override`). `mode --supports +pypy` prechecks it
-  (`cmd_mode._precheck_py311`): it syncs the tools env first (a stale `uv.lock` fails in uv's
-  own step; not under `--dry-run`), then ruff `--target-version py311` syntax rules (exit 1 =
-  findings; any other code = "could not run ruff"), then the mypy errors that appear only as
-  3.11 (`PRECHECK_MYPY_FLAGS`: `--config-file=` so the project's `.mypy.ini` is never read,
+  (`cmd_mode._precheck_py311`, named after the default pin: it checks `Config.pypy_minor`, the
+  Python of `python.pypy`, so a project pinned to `pypy@3.12.x` may use 3.12 code): it syncs the
+  tools env first (a stale `uv.lock` fails in uv's own step; not under `--dry-run`), then ruff
+  `--target-version py3XX` syntax rules (exit 1 = findings; any other code = "could not run
+  ruff"), then the mypy errors that appear only as that version and not as `python.cpython`
+  (`PRECHECK_MYPY_FLAGS`: `--config-file=` so the project's `.mypy.ini` is never read,
   where the default `off` profile sets `ignore_errors`, and `--check-untyped-defs`); a mypy
   abort (exit 2) is a `DeployError` with mypy's output, never a silent pass.
 

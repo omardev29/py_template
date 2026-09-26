@@ -116,25 +116,27 @@ PRECHECK_MYPY_FLAGS = (
 
 
 def _precheck_py311(cfg: Config) -> None:
-    """Check that the code is valid on Python 3.11 before adding PyPy support.
+    """Check that the code is valid on the pinned PyPy's Python (python.pypy: 3.11 by default,
+    hence the name) before adding PyPy support.
 
-    Two checks, both independent of the typing profile: ruff's syntax rules for 3.11, then the
-    mypy errors that appear only when checking as 3.11 (an API that 3.11 lacks, e.g.
-    typing.override). A tool that cannot run (a stale uv.lock, a failed install, mypy aborting)
-    is reported as such: it is never blamed on the code and never passes silently.
+    Two checks, both independent of the typing profile: ruff's syntax rules for that version,
+    then the mypy errors that appear only when checking as it (an API it lacks, e.g.
+    typing.override on 3.11). A tool that cannot run (a stale uv.lock, a failed install, mypy
+    aborting) is reported as such: it is never blamed on the code and never passes silently.
 
     The tools environment is synced first; both tools then run with `uv run --no-sync`, so a
     failure of uv shows up in uv's own step. Under --dry-run nothing is synced: the checks run
     read-only, and are skipped when the environment does not exist yet.
     """
-    ui.step("checking that the code is valid on Python 3.11 (required by PyPy)")
+    version = cfg.pypy_minor
+    ui.step(f"checking that the code is valid on Python {version} (required by PyPy)")
     tool = envs.tool_env(cfg)
     dry = proc.DRY_RUN
     if dry and not tool.python.is_file():
         ui.info(f"  (--dry-run) skipped: {rel(tool.dir)} does not exist yet (./deploy setup), and creating it is a side effect")
         return
     if dry:
-        ui.info("  (--dry-run) running the read-only checks: ruff and mypy as Python 3.11, with uv run --no-sync")
+        ui.info(f"  (--dry-run) running the read-only checks: ruff and mypy as Python {version}, with uv run --no-sync")
     else:
         envs.sync(tool)  # a stale uv.lock or a failed install fails HERE, with uv's own message
     run = ["run", "--locked", "--no-sync"]
@@ -142,16 +144,16 @@ def _precheck_py311(cfg: Config) -> None:
     # 1) syntax: ruff reports syntax that does not exist in the target version as an error
     r = envs.uv(
         tool,
-        [*run, "ruff", "check", "--no-cache", "--isolated", "--target-version", "py311", "--select", "E9,F63,F7,F82", *dirs],
+        [*run, "ruff", "check", "--no-cache", "--isolated", "--target-version", "py" + version.replace(".", ""), "--select", "E9,F63,F7,F82", *dirs],
         check=False,
         echo=not dry,  # proc.run skips echoed commands under --dry-run
     )
     if r.returncode == 1:  # ruff: 1 = findings
-        raise DeployError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
+        raise DeployError(f"the code uses syntax that does not exist in Python {version} (see above); fix it before enabling PyPy")
     if r.returncode != 0:  # 2 = ruff (or uv starting it) failed: nothing was checked
-        raise DeployError(f"could not run ruff for the Python 3.11 check (exit code {r.returncode}, see above)")
+        raise DeployError(f"could not run ruff for the Python {version} check (exit code {r.returncode}, see above)")
 
-    # 2) APIs: mypy errors that appear ONLY when checking as 3.11 (e.g. typing.override)
+    # 2) APIs: mypy errors that appear ONLY when checking as that version (e.g. typing.override)
     def mypy_errors(version: str) -> set[str]:
         argv = [
             *run, "mypy", *PRECHECK_MYPY_FLAGS,
@@ -163,15 +165,15 @@ def _precheck_py311(cfg: Config) -> None:
             raise DeployError(f"mypy could not check the code as Python {version} (exit code {r.returncode}, see above)")
         return {ln.strip() for ln in (r.stdout or "").splitlines() if ": error:" in ln}
 
-    new = sorted(mypy_errors("3.11") - mypy_errors(cfg.python.cpython))
+    new = sorted(mypy_errors(version) - mypy_errors(cfg.python.cpython))
     if new:
         for line in new:
             ui.error(line)
         raise DeployError(
-            "the code uses APIs that do not exist in Python 3.11 (above). Fix it before enabling PyPy "
+            f"the code uses APIs that do not exist in Python {version} (above). Fix it before enabling PyPy "
             "(e.g. typing.override -> typing_extensions.override)"
         )
-    ui.ok("the code is valid on Python 3.11")
+    ui.ok(f"the code is valid on Python {version}")
 
 
 def _read_bytes(path: Path) -> bytes | None:

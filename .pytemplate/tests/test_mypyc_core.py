@@ -140,6 +140,23 @@ def test_precheck_syncs_first_and_never_reads_the_project_mypy_ini(monkeypatch: 
         assert not any(a.endswith((".ini", ".toml")) for a in argv)
 
 
+def test_precheck_checks_the_python_of_the_pinned_pypy(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """It hard-coded 3.11: a project that moved to pypy@3.12.x (README's plan once raylib ships PyPy
+    8 wheels) could not enable PyPy with 3.12 code (PEP 695 generics)."""
+    tools = FakeTools().install(monkeypatch)
+    cfg = make({"python": {"pypy": "pypy@3.12.14"}})
+    cmd_mode._precheck_py311(cfg)
+    ruff = next(c for c in tools.calls if "ruff" in c)
+    assert ruff[ruff.index("--target-version") + 1] == "py312"
+    mypy = [c for c in tools.calls if "mypy" in c]
+    assert [c[c.index("--python-version") + 1] for c in mypy] == ["3.12", cfg.python.cpython]
+    err = capsys.readouterr().err
+    assert "valid on Python 3.12 (required by PyPy)" in err and "ok the code is valid on Python 3.12" in err
+    FakeTools(ruff=1).install(monkeypatch)
+    with pytest.raises(DeployError, match=r"syntax that does not exist in Python 3\.12"):
+        cmd_mode._precheck_py311(cfg)
+
+
 def test_precheck_dry_run_never_syncs(monkeypatch: pytest.MonkeyPatch, fake_venv: Path) -> None:
     tools = FakeTools().install(monkeypatch)
     monkeypatch.setattr(proc, "DRY_RUN", True)
