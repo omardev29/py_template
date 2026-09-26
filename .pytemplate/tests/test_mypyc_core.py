@@ -1661,6 +1661,85 @@ def test_wheel_copies_the_package_files(wheel_project: Path, monkeypatch: pytest
     ]  # fmt: skip
 
 
+def _top_level_cfg() -> Config:
+    """compile.modules naming a lone top-level module and another top-level package of src/."""
+    return make({"app": {"name": "pkg", "assets": "assets"}, "compile": {"modules": ["pkg.core", "fastbench", "other.core"]}})
+
+
+def _add_top_level_modules(src: Path) -> None:
+    _project(
+        src,
+        {
+            "fastbench.py": "def twice(n: int) -> int:\n    return 2 * n\n",
+            "other/__init__.py": "",
+            "other/core/__init__.py": "",
+            "other/core/calc.py": "def add(a: int, b: int) -> int:\n    return a + b\n",
+            "other/core/calc" + LINUX_EXT: b"stray",  # a stray in-place build: never packaged
+        },
+    )
+
+
+@pytest.mark.parametrize("backend", ["cpython", "mypyc"])
+def test_wheel_carries_compiled_modules_outside_the_package(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    # compile.modules = ["fastbench"] (a module of src/): the build project held only src/pkg/, so
+    # mypycify stopped with "Cannot read file 'src/fastbench.py'" and a cpython wheel left it out
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    def fake_uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        out = Path(str(args[args.index("--out-dir") + 1]))
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "pkg-0.1.0-py3-none-any.whl").write_bytes(b"")
+        return _done([])
+
+    _add_top_level_modules(wheel_project / "src")
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.envs, "uv", fake_uv)
+    cfg = _top_level_cfg()
+    wheel.build(BuildRequest(cfg, backend, "wheel", wheel_project / "src"))
+    work = wheel_project / ".build" / "wheel" / backend
+    files = sorted(p.relative_to(work / "src").as_posix() for p in (work / "src").rglob("*") if p.is_file() and not p.is_relative_to(work / "src" / "pkg"))
+    assert files == ["fastbench.py", "other/__init__.py", "other/core/__init__.py", "other/core/calc.py"]
+    data = tomllib.loads((work / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["tool"]["setuptools"]["py-modules"] == ["fastbench"]
+    assert data["tool"]["setuptools"]["package-data"] == {"pkg": ["**/*"], "other": ["**/*"]}
+    if backend == "mypyc":  # every file mypycify gets exists in the build project
+        listed = re.findall(r"'(src/[^']+\.py)'", (work / "setup.py").read_text(encoding="utf-8"))
+        assert "src/fastbench.py" in listed and all((work / f).is_file() for f in listed)
+
+
+@needs_venv
+def test_real_pure_wheel_holds_a_top_level_module(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    _add_top_level_modules(wheel_project / "src")
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    names = _wheel_names(wheel.build(BuildRequest(_top_level_cfg(), "cpython", "wheel", wheel_project / "src")))
+    assert {"fastbench.py", "other/__init__.py", "other/core/calc.py", "pkg/app.py"} <= set(names)
+    assert not [n for n in names if n.endswith(LINUX_EXT)]
+
+
+@needs_venv
+@needs_compiler
+def test_real_mypyc_wheel_compiles_a_top_level_module(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import zipfile
+
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    _add_top_level_modules(wheel_project / "src")
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["fastbench", "other.core"]}})
+    built = wheel.build(BuildRequest(cfg, "mypyc", "wheel", wheel_project / "src"))
+    site = wheel_project / "site"
+    with zipfile.ZipFile(built) as z:
+        z.extractall(site)
+    out = _import_from(site, "import fastbench, other.core.calc as c; print(fastbench.__file__); print(fastbench.twice(c.add(1, 2)))", wheel_project)
+    file, result = out.splitlines()
+    assert file.endswith(tuple(importlib.machinery.EXTENSION_SUFFIXES)) and result == "6"
+
+
 def _wheel_names(wheel_file: Path) -> list[str]:
     import zipfile
 

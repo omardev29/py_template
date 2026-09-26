@@ -1567,7 +1567,11 @@ Per method:
   exact locked versions (`wheel._locked_version`: a clear error when missing). Package data =
   every file of the package (`"**/*"`: data files, `py.typed`, vendored native libraries; the
   copy skips caches and stray build outputs: an extension next to its `.py`, `*__mypyc`);
-  assets go into `<pkg>/assets`. `app.gui` -> `[project.gui-scripts]` (no console window on
+  assets go into `<pkg>/assets`. The top-level entries of `src/` that `compile.modules` names
+  besides the package (`wheel._outside_package`: a lone module becomes `[tool.setuptools]
+  py-modules`, another package gets its package data) are copied too, for every backend: only
+  `src/<pkg>/` was, so mypycify stopped with "Cannot read file 'src/fastbench.py'" and a
+  cpython wheel left the module out. `app.gui` -> `[project.gui-scripts]` (no console window on
   Windows), else `[project.scripts]`. mypyc -> platform wheel; cpython/pypy -> `py3-none-any`
   (even with a vendored native library: the wheel is not retagged).
 - **nuitka**: `.build/nuitka-stage/<b>`, `uv run --locked --with nuitka==<NUITKA> python -m
