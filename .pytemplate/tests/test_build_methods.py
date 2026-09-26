@@ -2208,6 +2208,52 @@ def test_upx_download_happens_before_the_work_and_never_in_a_dry_run(
     assert f"upx: {tool}" in capsys.readouterr().err and len(downloads) == 1
 
 
+@pytest.mark.parametrize("windows", [False, True])
+def test_a_system_runtime_portable_downloads_upx_only_for_a_binary_to_pack(
+    no_build: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], windows: bool
+) -> None:
+    # runtime = "system" bundles no interpreter: a pure-Python app has nothing UPX packs, yet the
+    # preflight downloaded UPX for it, and offline the build that used to succeed exited 3
+    downloads: list[Path] = []
+
+    def download(dest: Path) -> Path:
+        downloads.append(dest)
+        raise DeployError("upx: cannot download it (offline)", 3)
+
+    monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
+    monkeypatch.setattr(upx, "IS_WINDOWS", windows)
+    monkeypatch.setattr(upx, "_cache_dir", lambda: tmp_path / "cache")
+    monkeypatch.setattr(upx, "_download", download)
+    monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(tmp_path / "empty")})
+    cfg = make({"deploy": {"upx": {"enabled": True}, "portable": {"runtime": "system"}}})
+    with pytest.raises(AssertionError, match="went past"):  # on to the build, nothing downloaded
+        cmd_build.cmd_build(cfg, ["cpython", "--method", "portable"])
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert cmd_build.cmd_build(cfg, ["cpython", "--method", "portable", "--no-check"]) == 0
+    assert "upx: would download https://github.com/upx/upx/releases/" in capsys.readouterr().err
+    assert downloads == []
+    # The build itself downloads it only when the folder holds a binary to pack
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    out = tmp_path / "out"
+    (out / "app").mkdir(parents=True)
+    (out / "app" / "main.py").write_text("print(1)\n", encoding="utf-8")
+    (out / "myapp.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (out / "myapp.sh").chmod(0o755)
+    assert upx.pack_tree(cfg, out) == [] and downloads == []
+    (out / "lib").mkdir()
+    (out / "lib" / ("tool.pyd" if windows else "tool")).write_bytes(b"\x7fELF" + b"\0" * 60)
+    (out / "lib" / ("tool.pyd" if windows else "tool")).chmod(0o755)
+    with pytest.raises(DeployError, match="offline"):
+        upx.pack_tree(cfg, out)
+    assert downloads == [tmp_path / "cache"]
+    # A deploy.upx.path that does not exist is a config error whatever the build holds
+    downloads.clear()
+    cfg = make({"deploy": {"upx": {"enabled": True, "path": "tools/upx-missing"}, "portable": {"runtime": "system"}}})
+    with pytest.raises(DeployError, match="does not exist") as e:
+        cmd_build.cmd_build(cfg, ["cpython", "--method", "portable"])
+    assert e.value.code == 3 and downloads == []
+
+
 def test_build_dry_run_stops_after_the_argument_checks(no_build: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(proc, "DRY_RUN", True)
     assert cmd_build.cmd_build(make({}), ["--method", "pyz", "--no-check", "--target", WIN]) == 0

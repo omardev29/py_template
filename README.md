@@ -935,7 +935,10 @@ startup). UPX 5.2.1 is downloaded once (SHA-256 checked) to `%LOCALAPPDATA%\pyte
 (`$XDG_CACHE_HOME/pytemplate/tools` or `~/.cache/pytemplate/tools` elsewhere), unless `upx` is on
 PATH or `deploy.upx.path` names one (absolute, `~`, or relative to the project root; the file is
 named `upx` or `upx.exe`); `build` finds (or downloads) it before any other work, so a wrong
-path or no network fails at once. macOS is not supported. The price: every start unpacks the
+path or no network fails at once. A portable build with `runtime = "system"` bundles no
+interpreter, so it downloads UPX only when its folder holds a binary to pack (a native
+dependency, a mypyc extension on Windows): a pure-Python one builds offline. macOS is not
+supported. The price: every start unpacks the
 files in memory (a slower start, no memory shared between processes), and some antivirus engines
 flag UPX-packed files.
 

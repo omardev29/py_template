@@ -692,7 +692,8 @@ header rules (with detector tests proving each rule fires).
   a real build does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M:
   would output dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options: --lto=... [--pgo-c ...]
   <extras>`; a method that packs with UPX on this host: `upx: <path>` or `upx: would download
-  <url> into <cache>`, never the download), then stops. `report` builds nothing and never opens
+  <url> into <cache>` (`... if the build holds a binary to pack` for a `runtime = "system"`
+  portable build), never the download), then stops. `report` builds nothing and never opens
   the browser. No success line for a skipped step: `compile`, `report` and `check` print
   `(--dry-run) would ...`/`were not run` instead of their `ok` lines, and `test all` no summary
   of `[ok]` rows.
@@ -1586,7 +1587,9 @@ Formats:
   3), `portable.check` (the `[deploy.portable] env` values a `.cmd` launcher cannot hold) and
   `upx.preflight`: when the method packs with UPX on this host (`upx.uses`: exe on Windows,
   nuitka, portable, flet desktop targets) it resolves the upx binary now, downloading it if
-  needed. What a method refuses (a missing `deploy.upx.path`, a failed download included) is
+  needed; a portable build with `runtime = "system"` (no interpreter: `upx._always_packs`) only
+  checks `deploy.upx.path` and leaves the download to `upx.pack_tree`, which asks for upx only
+  when the folder holds a candidate (a pure-Python one built offline before and must still). What a method refuses (a missing `deploy.upx.path`, a failed download included) is
   refused before the checks, the mypyc compile and the removal of the previous output, and in
   `--dry-run` too (which only names the upx binary or its download). Default method from
   `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs `run_checks` unless

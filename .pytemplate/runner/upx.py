@@ -204,20 +204,34 @@ def uses(cfg: Config, method: str) -> bool:
     return method in ("nuitka", "portable")
 
 
+def _always_packs(cfg: Config, method: str) -> bool:
+    """Whether a build that uses UPX always holds a binary to pack: the exe, Nuitka's binary, a
+    bundled interpreter, the flet desktop runner. A portable build with runtime = "system"
+    bundles no interpreter: only a native dependency or a mypyc extension in app/ or lib/ gives
+    upx something to do (a pure-Python app on Linux has nothing: .so files are never packed)."""
+    return not (method == "portable" and cfg.deploy.portable.runtime == "system")
+
+
 def preflight(cfg: Config, method: str) -> str:
     """Resolve the upx executable before a build that packs with it does any work, and return
     what it will use ("" when the build packs nothing).
 
     cmd_build calls this before the checks and the payload, also in --dry-run: a deploy.upx.path
     that does not exist, or a download that fails, stops the build now, not after the runtime
-    copy or the whole `flet build`. A dry run names the download instead of doing it.
+    copy or the whole `flet build`. A dry run names the download instead of doing it. A build
+    that may hold nothing to pack (_always_packs) checks deploy.upx.path now but leaves the
+    download to pack_tree, which asks for upx only when it has a candidate: a pure-Python
+    runtime = "system" portable build must not need the network for a tool it never runs.
     """
     if not uses(cfg, method):
         return ""
-    found = locate(cfg)
+    found = locate(cfg)  # a deploy.upx.path that does not exist fails here, whatever the build holds
     if found is None:
+        url = f"{_asset()[2]} into {_cache_dir()}"
+        if not _always_packs(cfg, method):
+            return f"upx: would download {url} if the build holds a binary to pack" if proc.DRY_RUN else ""
         if proc.DRY_RUN:
-            return f"upx: would download {_asset()[2]} into {_cache_dir()}"
+            return f"upx: would download {url}"
         found = _download(_cache_dir())
     return f"upx: {found}"
 
@@ -294,7 +308,7 @@ def pack_tree(cfg: Config, root: Path) -> list[Result]:
     ui.step(f"upx {' '.join(flags)}: {len(files)} binaries in {rel(root)}")
     if proc.DRY_RUN:  # never reached from ./deploy build (a dry run stops before any method builds)
         return []
-    upx = find(cfg)  # already resolved by preflight() before the build: no download here
+    upx = find(cfg)  # resolved by preflight() before the build, except for a runtime = "system" portable build
     with ThreadPoolExecutor(max_workers=max(1, (os.cpu_count() or 2))) as pool:
         results = list(pool.map(lambda p: pack_file(upx, p, flags), files))
     packed = [r for r in results if r.status == "packed"]
