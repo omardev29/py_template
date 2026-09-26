@@ -212,16 +212,26 @@ def pyright_config(cfg: Config, profile: str, *, absolute: bool = False) -> dict
     # for compiled code: pyright has no exclusion inside `strict`, so a compiled package that
     # holds an excluded module is listed by its other files and folders
     excluded = {rel for m in cfg.compile.exclude for rel in _module_paths(m)}
-    compiled = [p for top in compiled_paths(cfg) for p in _paths_without(f"src/{top}", excluded)]
+    # an entry whose folder holds no code (a module deleted, its __pycache__ left behind) is
+    # written as a fresh clone, which has no such folder, writes it: the module file
+    tops = [t if t.endswith(".py") or _has_code(f"src/{t}") else f"{t}.py" for t in compiled_paths(cfg)]
+    compiled = [p for top in tops for p in _paths_without(f"src/{top}", excluded)]
     if data.get("pyright_compiled", {}).get("strict"):
         conf["strict"] = [path(p) for p in compiled]
     based = data.get("basedpyright_compiled")
     if cfg.typing.editor == "basedpyright" and based:
         # The first environment that matches a file wins: the excluded ones come first, without the Any rules
         conf["executionEnvironments"] = [
-            {"root": path(p), "extraPaths": [path("src")]} for p in sorted(excluded) if (ROOT / p).exists()
-        ] + [{"root": path(p), "extraPaths": [path("src")], **based} for p in compiled if (ROOT / p).exists()]
+            {"root": path(p), "extraPaths": [path("src")]} for p in sorted(excluded) if _has_code(p)
+        ] + [{"root": path(p), "extraPaths": [path("src")], **based} for p in compiled if _has_code(p)]
     return conf
+
+
+def _has_code(rel: str) -> bool:
+    """Whether `rel` (relative to ROOT) is a .py/.pyi file or a folder that holds one: what a
+    fresh clone has too (a folder left holding only __pycache__ is not)."""
+    p = ROOT / rel
+    return p.is_file() if p.suffix in (".py", ".pyi") else _holds_python(p)
 
 
 def _module_paths(module: str) -> tuple[str, str]:

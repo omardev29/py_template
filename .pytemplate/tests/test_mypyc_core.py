@@ -1756,6 +1756,27 @@ def test_pyright_strict_list_never_names_a_folder_without_python(pyright_tree: P
     assert "src/myapp/core/old" in render.pyright_config(cfg, "mypyc")["strict"]
 
 
+def test_pyright_environments_never_name_a_leftover_folder(pyright_tree: Path) -> None:
+    """The excluded module loose.py and the compiled module bench.py each next to a folder left
+    holding only __pycache__ (a package turned into a module): basedpyright's
+    executionEnvironments and the strict list stay what a fresh clone renders."""
+    for modules, exclude in ((["myapp.core"], ["myapp.core.loose"]), (["myapp.core.bench"], [])):
+        cfg = make({"typing": {"editor": "basedpyright"}, "compile": {"modules": modules, "exclude": exclude}})
+        before = render.pyright_config(cfg, "mypyc")
+        for leftover in ("loose", "bench"):
+            _project(pyright_tree, {f"src/myapp/core/{leftover}/__pycache__/x.cpython-314.pyc": b""})
+        after = render.pyright_config(cfg, "mypyc")
+        assert after["executionEnvironments"] == before["executionEnvironments"]
+        assert after["strict"] == before["strict"]
+        for leftover in ("loose", "bench"):
+            shutil.rmtree(pyright_tree / "src/myapp/core" / leftover)
+    # a compiled module that is gone, its folder left behind: what a clone without the folder renders
+    cfg = make({"typing": {"editor": "basedpyright"}, "compile": {"modules": ["myapp.core.gone"]}})
+    clone = render.pyright_config(cfg, "mypyc")
+    _project(pyright_tree, {"src/myapp/core/gone/__pycache__/x.cpython-314.pyc": b""})
+    assert render.pyright_config(cfg, "mypyc") == clone
+
+
 def test_a_tests_folder_without_python_is_no_code_folder(pyright_tree: Path) -> None:
     """The same for a tests/ folder left holding only __pycache__ (.mypy.ini files, pyright include)."""
     shutil.rmtree(pyright_tree / "tests")

@@ -1373,12 +1373,14 @@ Formats:
   so a compiled package that holds an excluded path is listed by its other files and folders
   (`render._paths_without`, only then does the list depend on the files in `src/`); a folder
   counts only when it holds a `.py`/`.pyi` file (`render._holds_python`, also for `tests/` in
-  `.mypy.ini` and pyright's `include`): a folder left holding only `__pycache__` (a subpackage
-  deleted with `git rm -r`) made the committed file differ from a fresh clone's, and CI's
-  `render --check` failed. An untracked `.py` file does count, like any source file: commit it
-  with the regenerated `pyrightconfig.json`; with
-  basedpyright the excluded paths come first in `executionEnvironments` (the first match wins)
-  without the Any rules. The same sections reach the stage's compile-time `mypy.ini`.
+  `.mypy.ini` and pyright's `include`, for the roots of basedpyright's `executionEnvironments`
+  (`render._has_code`), and for a `compile.modules` entry, written as its `.py` file when its
+  folder holds no code): a folder left holding only `__pycache__` (a subpackage deleted with
+  `git rm -r`, a package turned into a module) made the committed file differ from a fresh
+  clone's, and CI's `render --check` failed. An untracked `.py` file does count, like any
+  source file: commit it with the regenerated `pyrightconfig.json`; with basedpyright the
+  excluded paths come first in `executionEnvironments` (the first match wins) without the Any
+  rules. The same sections reach the stage's compile-time `mypy.ini`.
 - `cmd_dev.run_checks(cfg, backend, rules=True)`:
   1. `_profile_file` writes `.build/cfg/ruff-<profile>.toml` and `.build/cfg/mypy-<profile>.ini`
      (the profile of THAT backend, which may differ from the editor's active one).
