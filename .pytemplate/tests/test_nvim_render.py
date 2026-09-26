@@ -570,6 +570,26 @@ done()
 """
 
 
+ESCAPES_CHECK = LUA_PRELUDE + r"""
+-- ruff links its codes (OSC 8) in terminals it knows (VTE_VERSION, WT_SESSION, iTerm...): the
+-- sequences end in ST (ESC \), not BEL, and overseer's own cleanup keeps them
+local link = "\27]8;;https://docs.astral.sh/ruff/rules/undefined-name\27\\F821\27]8;;\27\\"
+local m = p("src/a/x.py:1:9: " .. link .. " Undefined name `x`")
+check("OSC 8 with ST", m and m.type == "W" and m.text == "F821 Undefined name `x`", vim.inspect(m))
+local bel = "\27]8;;https://docs.astral.sh/ruff/rules/unused-import\7F401\27]8;;\7"
+m = p("src/a/x.py:1:8: " .. bel .. " [*] `os` imported but unused")
+check("OSC 8 with BEL", m and m.type == "W" and m.text == "F401 [*] `os` imported but unused", vim.inspect(m))
+m = p("\27[1m\27[31merror:\27[0m src/a/x.py:2: \27]8;;u\27\\a\27]8;;\7 b")
+check("CSI and mixed terminators", m and m.type == "E" and m.text == "a b", vim.inspect(m))
+done()
+"""
+
+
+def test_parser_strips_every_terminal_escape(tmp_path: Path) -> None:
+    r = _headless_lua(tmp_path, ESCAPES_CHECK, _project(tmp_path))
+    assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
 def test_every_task_replaces_its_previous_run(tmp_path: Path) -> None:
     """overseer keys a task's diagnostics by its name and keeps a finished task (and its
     diagnostics) until it disposes it: without `unique`, the problems of a fixed file stayed

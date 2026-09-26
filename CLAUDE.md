@@ -1986,7 +1986,10 @@ LazyVim wiring:
   (`test_every_task_replaces_its_previous_run`). Without overseer, tasks run in a terminal
   split.
 - Output parser `tasks.parse_line` (overseer `on_output_parse` -> diagnostics + quickfix):
-  strips ANSI, honours the `error: `/`warning: ` prefixes, reads basedpyright
+  strips ANSI (CSI, and OSC ended by BEL or by ST `ESC \`: ruff links its rule codes with OSC 8
+  in terminals it recognises, `VTE_VERSION`, `WT_SESSION`, iTerm..., and overseer's own cleanup
+  keeps them; `test_parser_strips_every_terminal_escape`), honours the `error: `/`warning: `
+  prefixes, reads basedpyright
   `  path:l:c - sev: msg` and `path:l[:c]: [sev: ]msg` (mypy, ruff concise, pytest crash
   lines); skips notes, `site-packages` and `in <func>` frames. Relative paths resolve against
   the root; mypyc prints them relative to its stage (a copy of `src/`: `<pkg>/core/x.py`), so

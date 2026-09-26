@@ -62,8 +62,10 @@ end
 
 local SEV = { error = "E", warning = "W", note = "N", information = "I" }
 
+-- CSI (colours), then OSC (ruff's OSC 8 links in terminals it knows) ended by BEL or by ST
+-- (ESC \): a payload never holds ESC or BEL, so one sequence never swallows the text after it.
 local function strip(line)
-  return (line:gsub("\27%[[%d;?]*[%a@]", ""):gsub("\27%].-\7", ""):gsub("\r", ""))
+  return (line:gsub("\27%[[%d;?]*[%a@]", ""):gsub("\27%][^\7\27]*\7", ""):gsub("\27%][^\7\27]*\27\\", ""):gsub("\r", ""))
 end
 
 -- The mypyc stage (.build[/wsl]/mypyc-{dev,release}/stage/, relative or absolute) is a throwaway
