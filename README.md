@@ -105,7 +105,8 @@ outside the template:
    template was tested with (`.pytemplate/presets/<preset>/constraints.txt`, the preset's whole
    tested tree), once: `./deploy lock --upgrade` moves on.
 4. It runs `git init -b main` (unless `DIR` is inside a git work tree) with `deploy` and
-   `deploy.ps1` executable. It makes no commit.
+   `deploy.ps1` executable. Inside a work tree with `core.filemode = false` (Git for Windows) it
+   stages those two as executable there. It makes no commit.
 
 When a step fails (a name uv refuses, no network, Ctrl+C), `new` removes what it created.
 Dependencies added with `./deploy add` and tracked files of your own (docs, scripts) come along

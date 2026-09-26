@@ -1107,6 +1107,41 @@ def test_git_init_makes_a_main_branch(tmp_path: Path, git_env: None) -> None:
     assert not (inner / ".git").exists()
 
 
+@needs_git
+@pytest.mark.parametrize("filemode", ["false", "true"])
+def test_git_init_in_a_monorepo_stages_the_launchers_executable(tmp_path: Path, git_env: None, filemode: str) -> None:
+    """new inside a repository with core.filemode = false (Git for Windows): `git add` recorded
+    deploy as 100644 and the pre-commit hook refused the first commit. Staged 100755 there;
+    elsewhere (core.filemode = true) nothing is staged: the files' own x bit is recorded."""
+    mono = tmp_path / "mono"
+    mono.mkdir()
+    _git(mono, "init", "--quiet")
+    _git(mono, "config", "core.filemode", filemode)  # the throwaway repository's own config
+    dest = mono / "apps" / "game"
+    dest.mkdir(parents=True)
+    for script in ("deploy", "deploy.ps1", "deploy.cmd"):
+        (dest / script).write_text("#!/bin/sh\n", encoding="utf-8")
+        (dest / script).chmod(0o644)
+    presets._git_init(dest)
+    assert not (dest / ".git").exists()  # no nested repository
+    modes = {line.split()[3]: line.split()[0] for line in _git(mono, "ls-files", "-s").splitlines()}
+    assert modes == ({"apps/game/deploy": "100755", "apps/game/deploy.ps1": "100755"} if filemode == "false" else {})
+
+
+@needs_git
+def test_git_init_in_a_monorepo_that_ignores_the_project(tmp_path: Path, git_env: None) -> None:
+    mono = tmp_path / "mono"
+    mono.mkdir()
+    _git(mono, "init", "--quiet")
+    _git(mono, "config", "core.filemode", "false")
+    (mono / ".gitignore").write_text("apps/\n", encoding="utf-8")
+    dest = mono / "apps" / "game"
+    dest.mkdir(parents=True)
+    (dest / "deploy").write_text("#!/bin/sh\n", encoding="utf-8")
+    presets._git_init(dest)  # git refuses to add an ignored path: nothing staged, no error
+    assert _git(mono, "ls-files", "-s") == ""
+
+
 def test_git_init_falls_back_without_b(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """git < 2.28 has no `init -b`: a plain init, then HEAD -> refs/heads/main."""
     calls: list[list[str]] = []

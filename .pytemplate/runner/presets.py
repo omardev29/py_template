@@ -1020,7 +1020,9 @@ def _outermost_missing(path: Path) -> Path | None:
 
 def _git_init(dest: Path) -> None:
     """A git repository on branch main (the branch the generated CI runs on), with deploy and
-    deploy.ps1 executable. Nothing when dest is already inside a work tree (a monorepo)."""
+    deploy.ps1 executable. Inside a work tree (a monorepo) no repository; only where that one
+    has core.filemode = false (Git for Windows) the two launchers are staged executable: a
+    later `git add` would record them as 100644, and the pre-commit hook refuses that."""
     git = shutil.which("git")
     if git is None:
         ui.info("  git not found: the project is not a git repository (later: git init -b main)")
@@ -1029,7 +1031,12 @@ def _git_init(dest: Path) -> None:
     inside = proc.run(
         [git, "rev-parse", "--is-inside-work-tree"], cwd=dest.parent, env=env, capture=True, check=False, echo=False
     )
-    if (inside.returncode == 0 and inside.stdout.strip() == "true") or (dest / ".git").exists():
+    if inside.returncode == 0 and inside.stdout.strip() == "true":
+        filemode = proc.run([git, "config", "--get", "core.filemode"], cwd=dest, env=env, capture=True, check=False, echo=False)
+        if filemode.stdout.strip().lower() == "false":  # an ignored folder: git refuses, and that is fine
+            proc.run([git, "add", "--chmod=+x", "--", "deploy", "deploy.ps1"], cwd=dest, env=env, capture=True, check=False)
+        return
+    if (dest / ".git").exists():
         return
     r = proc.run([git, "init", "--quiet", "-b", "main"], cwd=dest, env=env, capture=True, check=False)
     if r.returncode != 0:  # git < 2.28 has no -b: a plain init, then HEAD -> main

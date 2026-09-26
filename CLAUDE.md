@@ -1732,8 +1732,10 @@ Per method:
   then runs the copy's own runner with `__init <preset> --name <n> --force` inside the copy,
   `git init -b
   main` (the generated CI runs on `main`; git < 2.28: plain `init` + `symbolic-ref HEAD
-  refs/heads/main`; nothing inside an existing work tree) and `git add --chmod=+x deploy
-  deploy.ps1`. When the copy or `__init` fails (a name uv refuses, no network, Ctrl+C) `new`
+  refs/heads/main`; no repository inside an existing work tree) and `git add --chmod=+x deploy
+  deploy.ps1` (inside an existing work tree only where it has `core.filemode = false`, Git for
+  Windows: a later `git add` records a new file as 100644 there, `_fix_exec_bit` skips untracked
+  files and the hook refused the first commit; a path it ignores is left alone). When the copy or `__init` fails (a name uv refuses, no network, Ctrl+C) `new`
   removes what it created (the folder and the parents it made, or only the content of the
   empty folder it was given) and says so; a folder with content is refused before anything
   is written.
@@ -3131,9 +3133,11 @@ git and husky:
 - **The exec bit gets lost** (LIMITATION): `core.filemode=false` (Windows), zip downloads and
   copies drop it, and with `core.filemode=true` an index-only fix is undone by the next `git
   add`; Git for Windows runs hooks with its own sh. Fix: `cmd_env._fix_exec_bit` (the files and
-  the index); `sh <launcher>` in the hook; `/bin/sh <root>/deploy` in VS Code tasks and the
-  Neovim fallback (5.6, 12, 14). Test:
+  the index); `presets._git_init` stages both launchers executable (a new repository, or an
+  enclosing one with `core.filemode=false`); `sh <launcher>` in the hook; `/bin/sh
+  <root>/deploy` in VS Code tasks and the Neovim fallback (5.6, 11, 12, 14). Test:
   `test_envs_core.py::test_fix_exec_bit_repairs_the_index_and_the_files`,
+  `test_presets.py::test_git_init_in_a_monorepo_stages_the_launchers_executable`,
   `test_hooks.py::test_git_runs_the_hook`,
   `test_vscode.py::test_every_task_runs_the_launcher_as_a_process`. Goes: never.
 - **CRLF checkouts** (LIMITATION): `* text=auto eol=native` with `core.autocrlf=true` checks
