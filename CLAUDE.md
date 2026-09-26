@@ -1783,7 +1783,9 @@ Per method:
 - flet: measured with Flet 1.0.1 + mypyc 2.3.1 in compiled code: `async` handlers get no event,
   generator handlers never run, `@ft.component` fails at import, `@ft.control` loses its event
   types; hence `forbid_imports = flet, flet_desktop, flet_cli`. Heavy work runs in a
-  `ProcessPoolExecutor` (compiled code does not release the GIL). mypy overrides relax
+  `ProcessPoolExecutor` (compiled code does not release the GIL), in the event loop where no
+  process can start (`flet build` for the web, Android, iOS: section 15.1), and the button
+  comes back in a `finally`. mypy overrides relax
   `{pkg}.ui.*`. Wheel entry `{pkg}.ui.app:run`. Task `dev` (`flet run -d -r`) has
   `background = true`. `[tool.flet]` (read by `flet build` only, which embeds `copyright` in
   the app metadata): `org`, `company` and `copyright = "Copyright (C) {{name}}"` are
@@ -2719,6 +2721,14 @@ CPython and its standard library:
   and many tokens from 3.12 (t-strings from 3.14). Fix: `rename` handles both (5.7). Test:
   `test_rename.py::test_fstring_fields_as_one_token`, `test_tokenizer_canary`. Goes: the 3.11
   form once the runner needs 3.12.
+- **No processes on WebAssembly, Android and iOS** (LIMITATION, documented: `multiprocessing` and
+  the process pools are "not Emscripten, not WASI, not Android, not iOS"): in a `flet build`
+  web or mobile app the flet skeleton's Draw handler died on `ProcessPoolExecutor` and left the
+  button disabled on "Computing...". Fix: the flet skeleton's `ui/app.py` runs the work in the
+  event loop there (its `NO_PROCESSES` platforms, or a pool that raises NotImplementedError)
+  and gives the button back in a `finally` (11). Test:
+  `test_presets.py::test_flet_skeleton_draws_where_no_process_can_start`,
+  `test_flet_skeleton_gives_the_button_back_when_drawing_fails`. Goes: never.
 - **No extension module loads from a zip** (LIMITATION, zipimport): Fix: the pyz bootstrap
   (`templates/pyz/__main__.py`) extracts to a per-build cache (10). Test:
   `test_build_methods.py::test_pyz_bootstrap_picks_the_flavour` and the other bootstrap tests.

@@ -1780,6 +1780,99 @@ def test_remove_deletes_read_only_entries(tmp_path: Path) -> None:
     assert presets._remove(tmp_path / "missing")
 
 
+# --- the skeletons' own code ---------------------------------------------------------------------------
+
+
+class _Control:
+    """A stand-in for every Flet control the flet skeleton creates."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.args = args
+        self.disabled = False
+        self.__dict__.update(kwargs)
+
+
+class _Page:
+    def __init__(self) -> None:
+        self.added: list[Any] = []
+
+    def add(self, *controls: Any) -> None:
+        self.added += controls
+
+    def update(self) -> None:
+        pass
+
+
+def _skeleton_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preset: str, module: str) -> Any:
+    """Import a module of the preset's skeleton rendered as `demo` (its third-party imports faked)."""
+    for rel_path, data in presets.skeleton(preset, "demo").items():
+        if rel_path.startswith("src/"):
+            (tmp_path / rel_path).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel_path).write_bytes(data)
+    flet = type(sys)("flet")
+    flet.Slider = flet.Image = flet.Text = flet.Button = flet.Row = _Control  # type: ignore[attr-defined]
+    flet.ThemeMode = type("ThemeMode", (), {"DARK": "dark"})  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "flet", flet)
+    for name in [m for m in sys.modules if m == "demo" or m.startswith("demo.")]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.syspath_prepend(str(tmp_path / "src"))
+    return importlib.import_module(module)
+
+
+def _flet_draw(app: Any) -> tuple[Any, Any, Any, Any]:
+    import asyncio
+
+    page = _Page()
+    asyncio.run(app.main(page))
+    row, image, status = page.added
+    button = row.args[0][1]
+    return page, button, image, status
+
+
+def test_flet_skeleton_draws_where_no_process_can_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """flet build for the web (Pyodide), Android and iOS: ProcessPoolExecutor raises there, and
+    the Draw handler died with the button disabled on 'Computing...'. It draws in-process."""
+    import asyncio
+
+    if "flet" not in PRESETS:
+        pytest.skip("no flet preset")
+    app = _skeleton_package(tmp_path, monkeypatch, "flet", "demo.ui.app")
+
+    def no_processes(*_: Any, **__: Any) -> Any:
+        raise NotImplementedError("This Python build lacks multiprocessing.synchronize")
+
+    monkeypatch.setattr(app, "ProcessPoolExecutor", no_processes)
+    app._executor.cache_clear()
+    _, button, image, status = _flet_draw(app)
+    before = image.src
+    asyncio.run(button.on_click(None))
+    assert not button.disabled and image.src != before and image.src.startswith(b"\x89PNG")
+    assert "iterations in" in status.value
+    for platform in app.NO_PROCESSES:  # never even tried there
+        monkeypatch.setattr(sys, "platform", platform)
+        app._executor.cache_clear()
+        assert app._executor() is None
+    app._executor.cache_clear()
+
+
+def test_flet_skeleton_gives_the_button_back_when_drawing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    if "flet" not in PRESETS:
+        pytest.skip("no flet preset")
+    app = _skeleton_package(tmp_path, monkeypatch, "flet", "demo.ui.app")
+    monkeypatch.setattr(app, "_executor", lambda: None)
+
+    def broken(*_: Any) -> bytes:
+        raise ValueError("boom")
+
+    _, button, _, status = _flet_draw(app)
+    monkeypatch.setattr(app.fractal, "render_png", broken)
+    with pytest.raises(ValueError, match="boom"):
+        asyncio.run(button.on_click(None))
+    assert not button.disabled and status.value == "Draw failed (see the console)"
+
+
 # --- the raylib stub generator ----------------------------------------------------------------------
 
 FAKE_RAYLIB = '''\

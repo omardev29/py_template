@@ -936,7 +936,8 @@ Tested with Flet 1.0.1 and mypyc 2.3.1, with Flet in a compiled module:
 So compiled code has `compile.forbid_imports = ["flet", "flet_desktop", "flet_cli"]`. The pattern:
 the interpreted handler converts Flet values to simple types and calls the core in another
 process (`ProcessPoolExecutor`: compiled code does not release the GIL, so a thread would freeze
-the UI).
+the UI). Web and mobile apps (`flet build` for `web`, `apk`, `aab`, `ipa`) cannot start processes:
+there the skeleton runs the work in the event loop, and the UI waits for it.
 
 - `./deploy dev`: hot reload (`flet run -d -r`; the editors start it without waiting).
 - `./deploy build` uses `flet pack`; `./deploy build --method flet` uses `flet build`
