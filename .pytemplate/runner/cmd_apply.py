@@ -419,7 +419,9 @@ def _dirty(plan: Plan, command: str, force: bool) -> None:
 # --- hook, references ------------------------------------------------------------------------------
 
 
-OURS = ("installed", "outdated")  # hooks.classify: pytemplate's hook of this project
+# hooks.hook_state: pytemplate's hook of this project ("chained": as the pre-commit.local that
+# another project's hook runs first)
+OURS = ("installed", "outdated", "chained")
 
 
 def _repo() -> hooks.Repo | str | None:
@@ -434,18 +436,32 @@ def _repo() -> hooks.Repo | str | None:
 
 
 def _hook_state(cfg: Config) -> str | None:
-    """classify() of the pre-commit hook in the default hooks folder (None: not in git, or git
-    refuses the repository)."""
+    """hooks.hook_state() of the default hooks folder (None: not in git, or git refuses the
+    repository)."""
     repo = _repo()
-    return hooks.classify(repo.default_dir / hooks.HOOK, repo) if isinstance(repo, hooks.Repo) else None
+    return hooks.hook_state(repo) if isinstance(repo, hooks.Repo) else None
 
 
-# What is in the hooks folder when apply leaves it alone (summary and --dry-run)
-_LEFT_ALONE = {
-    "foreign": "another tool's hook: left alone (./deploy hooks install --force chains both)",
-    "calls": "a hook that runs ./deploy hooks run: left alone",
-    "other": "another project's hook of this repository: left alone (./deploy hooks install --force runs both)",
-}
+_CHAINED = "runs this project's checks (pre-commit.local) after another project's hook"
+
+
+def _left_alone(state: str, repo: hooks.Repo) -> str | None:
+    """What is in the hooks folder when apply leaves it alone (summary and --dry-run)."""
+    if state == "foreign":
+        return f"another tool's hook: left alone ({hooks.chain_advice(repo)})"
+    if state == "calls":
+        return "a hook that runs ./deploy hooks run: left alone"
+    if state == "other":
+        return f"another project's hook of this repository: left alone ({hooks.chain_advice(repo)})"
+    return None
+
+
+def _hooks_path_summary(repo: hooks.Repo) -> str:
+    """hooks.pre_commit with core.hooksPath set: nothing is installed; does that hook run the checks?"""
+    runner = hooks.hooks_path_runner(repo)
+    if runner is not None:
+        return f"core.hooksPath is set: {runner} runs ./deploy hooks run"
+    return "core.hooksPath is set: nothing installed (./deploy hooks status says what to add)"
 
 
 def _apply_hook(cfg: Config) -> str:
@@ -457,25 +473,28 @@ def _apply_hook(cfg: Config) -> str:
     if isinstance(repo, str):
         ui.warn(f"git pre-commit hook not checked: {repo}")
         return "not checked: git refuses the repository (see above)"
-    target = repo.default_dir / hooks.HOOK
-    before = hooks.classify(target, repo)
+    before, copy_before = hooks.hook_state(repo), hooks.own_local(repo)
     if cfg.hooks.pre_commit:
         hooks.ensure_installed(cfg, ROOT)
-    elif before in OURS:
+    elif before in OURS or copy_before:
         try:
             ui.ok(hooks.uninstall(repo))
         except OSError as e:
             ui.warn(f"could not remove the git pre-commit hook: {e} (./deploy hooks uninstall)")
             return "not removed (see above)"
-    after = hooks.classify(target, repo)
-    if after == "installed" and before != "installed":
-        return "updated" if before == "outdated" else "installed"
-    if before in OURS and after not in OURS:
+    after = hooks.hook_state(repo)
+    dropped = " (and removed pre-commit.local, a copy of this project's hook)" if copy_before and not hooks.own_local(repo) else ""
+    if after == "installed" and (before != "installed" or dropped):
+        return ("updated" if before in ("outdated", "installed") else "installed") + dropped
+    if (before in OURS or copy_before) and after not in OURS:
         return "removed (hooks.pre_commit = false)"
-    if after in _LEFT_ALONE:
-        return _LEFT_ALONE[after]
     if repo.custom_hooks_path and cfg.hooks.pre_commit:
-        return "core.hooksPath is set: nothing installed (./deploy hooks status says what to add)"
+        return _hooks_path_summary(repo)
+    if after == "chained":
+        return _CHAINED
+    left = _left_alone(after, repo)
+    if left is not None:
+        return left
     if after == "missing":
         return "not installed (hooks.pre_commit = false)" if not cfg.hooks.pre_commit else "not installed (see above)"
     return "already installed" if after == "installed" else "unchanged"
@@ -488,18 +507,23 @@ def _hook_plan(cfg: Config) -> str:
         return "not a git work tree: nothing to do"
     if isinstance(repo, str):
         return f"not checked: git refuses the repository ({repo})"
-    state = hooks.classify(repo.default_dir / hooks.HOOK, repo)
+    state, copy = hooks.hook_state(repo), hooks.own_local(repo)
     if not cfg.hooks.pre_commit:
-        if state in OURS:
+        if state == "chained":
+            return "would remove pre-commit.local, this project's hook after another project's (hooks.pre_commit = false)"
+        if state in OURS or copy:
             return "would remove pytemplate's pre-commit hook (hooks.pre_commit = false)"
-        return _LEFT_ALONE.get(state, "not installed (hooks.pre_commit = false)")
+        return _left_alone(state, repo) or "not installed (hooks.pre_commit = false)"
     if repo.custom_hooks_path:
-        return "core.hooksPath is set: nothing installed (./deploy hooks status says what to add)"
-    if state in _LEFT_ALONE:
-        return _LEFT_ALONE[state]
+        return _hooks_path_summary(repo)
+    if state == "chained":
+        return _CHAINED
+    left = _left_alone(state, repo)
+    if left is not None:
+        return left
     if state == "installed":
-        return "installed"
-    if state == "missing" and repo.ignored():
+        return "would remove pre-commit.local, a copy of this project's hook (the checks run twice)" if copy else "installed"
+    if state == "missing" and not copy and repo.ignored():
         return "not installed: the enclosing git repository ignores this project (./deploy hooks status)"
     return "would update the pre-commit hook" if state == "outdated" else "would install the pre-commit hook"
 

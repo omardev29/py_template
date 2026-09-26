@@ -331,10 +331,18 @@ def test_symlinked_hook_is_never_written_through(tmp_path: Path, capsys: pytest.
     # a live link to a script that runs `hooks run` (even one with the MARKER) is never rewritten
     (top / "tools" / "hooks").mkdir(parents=True)
     shared = top / "tools" / "hooks" / "pre-commit"
-    shared.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./old/deploy hooks run\n", encoding="utf-8")
+    shared.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./deploy hooks run\n", encoding="utf-8")
     before = shared.read_bytes()
     assert hooks.classify(target, repo) == "calls"
     hooks.install(repo)
+    hooks.ensure_installed(make(), project)
+    assert shared.read_bytes() == before and target.is_symlink()
+    # ...nor one that runs another launcher's checks: not this project's, and still not written through
+    shared.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./old/deploy hooks run\n", encoding="utf-8")
+    before = shared.read_bytes()
+    assert hooks.classify(target, repo) == "foreign"
+    with pytest.raises(DeployError, match="--force"):
+        hooks.install(repo)
     hooks.ensure_installed(make(), project)
     assert shared.read_bytes() == before and target.is_symlink()
 
@@ -567,6 +575,164 @@ def test_second_project_does_not_steal_the_hook(tmp_path: Path, capsys: pytest.C
     shutil.rmtree(p)
     assert hooks.classify(target, rq) == "outdated"
     assert "updated" in hooks.install(rq)
+
+
+def _commit_log(top: Path, tmp_path: Path, name: str) -> list[str]:
+    """Commit a new file through the hooks; return what the launchers logged."""
+    log = tmp_path / "hook.log"
+    log.unlink(missing_ok=True)
+    env = dict(git_env(), PT_HOOK_LOG=log.as_posix())
+    (top / name).write_text("x\n", encoding="utf-8")
+    git(top, "add", "-A", env=env)
+    assert git(top, "commit", "-q", "-m", name, env=env, check=False, timeout=120).returncode == 0
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+@needs_git
+def test_a_chained_hook_stays_this_projects(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """q's `install --force` chains p's hook as pre-commit.local: that copy is still p's. p's
+    uninstall (and apply with hooks.pre_commit = false) removes it; once q's hook goes, p's
+    install drops the copy instead of running p's checks twice."""
+    top, p = make_repo(tmp_path, "apps/p")
+    q = top / "apps" / "q"
+    q.mkdir(parents=True)
+    for project in (p, q):
+        (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+    rp, rq = find(p, top), find(q, top)
+    target, local = rp.default_dir / hooks.HOOK, rp.default_dir / hooks.LOCAL
+    hooks.install(rp)
+    hooks.install(rq, force=True)
+    q_hook = target.read_bytes()
+    assert (hooks.hook_state(rp), hooks.own_local(rp)) == ("chained", True)
+    assert (hooks.hook_state(rq), hooks.own_local(rq)) == ("installed", False)
+    # p's checks already run: install says so, with or without --force (never "merge them by hand")
+    for force in (False, True):
+        assert "already runs this project's checks" in hooks.install(rp, force=force)
+    assert target.read_bytes() == q_hook and hooks.own_local(rp)
+    # p's uninstall removes p's copy and leaves q's hook alone
+    msg = hooks.uninstall(rp)
+    assert "removed" in msg and hooks.LOCAL in msg and "left alone" in msg
+    assert not local.exists() and target.read_bytes() == q_hook
+    assert _commit_log(top, tmp_path, "one.txt") == ["./apps/q/deploy hooks run"]
+    # chained again, then q goes away: p's install replaces q's stale hook and drops the copy
+    hooks.uninstall(rq)
+    hooks.install(rp)
+    hooks.install(rq, force=True)
+    assert hooks.hook_state(rp) == "chained"
+    shutil.rmtree(q)
+    assert hooks.classify(target, rp) == "outdated"
+    capsys.readouterr()
+    hooks.ensure_installed(make(), p)
+    assert "a copy of this project's hook" in capsys.readouterr().err
+    assert target.read_bytes() == hooks.hook_script("./apps/p/deploy").encode("ascii") and not local.exists()
+    assert _commit_log(top, tmp_path, "two.txt") == ["./apps/p/deploy hooks run"]  # once, not twice
+    # a project left in that state by an older runner: status says so, install and setup repair it
+    local.write_bytes(hooks.hook_script("./apps/p/deploy").encode("ascii"))
+    passed, label, hint = hooks._status_line(make(), rp)
+    assert passed is None and "run twice" in label and hint == "./deploy hooks install"
+    hooks.ensure_installed(make(), p)
+    assert not local.exists() and hooks._status_line(make(), rp)[0] is True
+    # uninstall never restores this project's own copy as pre-commit (it would run with pre_commit = false)
+    local.write_bytes(hooks.hook_script("./apps/p/deploy").encode("ascii"))
+    assert "a copy of this project's hook" in hooks.uninstall(rp)
+    assert not target.exists() and not local.exists()
+
+
+@needs_git
+def test_a_third_project_is_not_told_to_force(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """pre-commit and pre-commit.local both taken: install --force would fail ("merge them by
+    hand"), so no message suggests it."""
+    top, p = make_repo(tmp_path, "apps/p")
+    others = [top / "apps" / n for n in ("q", "r")]
+    for project in (p, *others):
+        project.mkdir(parents=True, exist_ok=True)
+        (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+    rp, rq, rr = find(p, top), *(find(o, top) for o in others)
+    hooks.install(rq)
+    hooks.install(rr, force=True)  # r on top, q's copy as pre-commit.local
+    passed, label, hint = hooks._status_line(make(), rp)
+    assert passed is None and "./apps/r/deploy" in label
+    assert "exists as well" in hint and "merge the two by hand" in hint
+    with pytest.raises(DeployError, match="exists as well") as e:
+        hooks.install(rp)
+    assert "keeps it as" not in str(e.value)
+    with pytest.raises(DeployError, match="merge them by hand"):
+        hooks.install(rp, force=True)
+    hooks.ensure_installed(make(), p)
+    err = capsys.readouterr().err
+    assert "left alone" in err and "is taken too" in err and "--force runs both" not in err
+
+
+@needs_git
+def test_calls_means_this_projects_launcher_on_a_live_line(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A hook pytemplate does not manage runs this project's checks only with a line that is not
+    a comment and names this project's launcher: another project's line, or a commented-out one,
+    leaves the checks out (status, doctor and install say so)."""
+    top, a = make_repo(tmp_path, "apps/a")
+    b = top / "apps" / "b"
+    b.mkdir(parents=True)
+    for project in (a, b):
+        (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+    git(top, "config", "core.hooksPath", "hk")
+    (top / "hk").mkdir()
+    shared = top / "hk" / hooks.HOOK
+    ra = find(a, top)
+    not_ours = [
+        "sh ./apps/b/deploy hooks run || exit $?",
+        "# sh ./apps/a/deploy hooks run || exit $?\nexit 0",
+        "  # TODO: sh ./apps/a/deploy hooks run",
+        "sh ./apps/a/deploy hooks runner",
+        "sh ./apps/a/redeploy hooks run",
+        "sh ./deploy hooks run",  # the top's launcher: not this project's
+    ]
+    for body in not_ours:
+        shared.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        assert hooks.classify(shared, ra) == "foreign", body
+        passed, label, hint = hooks._status_line(make(), ra)
+        assert passed is None and "not in" in label and "sh ./apps/a/deploy hooks run || exit $?" in hint, body
+        with pytest.raises(DeployError, match="core.hooksPath"):
+            hooks.install(ra)
+    ours = [
+        hooks.run_line(ra),
+        "npm test && sh ./apps/a/deploy hooks run",
+        'sh "./apps/a/deploy" hooks run',
+        "sh apps/a/deploy hooks run",
+        f'sh "{(a / "deploy").as_posix()}" hooks run',
+        'sh "$(git rev-parse --show-toplevel)/apps/a/deploy" hooks run',  # cannot tell: counts
+        "sh ./apps/b/deploy hooks run || exit $?\nsh ./apps/a/deploy hooks run || exit $?",
+    ]
+    for body in ours:
+        shared.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        assert hooks.classify(shared, ra) == "calls", body
+        assert hooks._status_line(make(), ra)[0] is True, body
+        assert "already runs" in hooks.install(ra)
+    # the same rule in the default hooks folder: another project's line is somebody else's hook
+    git(top, "config", "--unset", "core.hooksPath")
+    ra = find(a, top)
+    target = ra.default_dir / hooks.HOOK
+    target.write_text("#!/bin/sh\nsh ./apps/b/deploy hooks run || exit $?\n", encoding="utf-8")
+    if not IS_WINDOWS:
+        target.chmod(0o755)  # a hook of the user's is executable
+    assert hooks.classify(target, ra) == "foreign"
+    hooks.install(ra, force=True)  # chained: both run
+    assert hooks.classify(target, ra) == "installed" and (ra.default_dir / hooks.LOCAL).is_file()
+    assert _commit_log(top, tmp_path, "c.txt") == ["./apps/b/deploy hooks run", "./apps/a/deploy hooks run"]
+
+
+@needs_git
+def test_calls_with_a_project_folder_that_needs_quotes(tmp_path: Path) -> None:
+    top, project = make_repo(tmp_path, "my app")
+    (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+    git(top, "config", "core.hooksPath", "hk")
+    (top / "hk").mkdir()
+    shared = top / "hk" / hooks.HOOK
+    repo = find(project, top)
+    line = hooks.run_line(repo)
+    assert line == "sh './my app/deploy' hooks run || exit $?"
+    shared.write_text(f"#!/bin/sh\n{line}\n", encoding="utf-8")
+    assert hooks.classify(shared, repo) == "calls"
+    shared.write_text('#!/bin/sh\nsh "./my app/deploy" hooks run\n', encoding="utf-8")
+    assert hooks.classify(shared, repo) == "calls"
 
 
 def test_cmd_hooks_rejects_bad_arguments() -> None:

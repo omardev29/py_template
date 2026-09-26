@@ -916,6 +916,61 @@ def test_every_hook_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsy
     _git(project.root, "config", "core.hooksPath", ".githooks")
     assert run(True).startswith("core.hooksPath is set: nothing installed")
     assert run(False).startswith("core.hooksPath is set: nothing installed") and not hook.exists()
+    # that folder's hook already runs the checks: said so, not "nothing installed"
+    (project.root / ".githooks").mkdir()
+    (project.root / ".githooks" / "pre-commit").write_text("#!/bin/sh\nsh ./deploy hooks run || exit $?\n", encoding="utf-8")
+    assert run(True) == run(False) == "core.hooksPath is set: .githooks/pre-commit runs ./deploy hooks run"
+
+
+@needs_git
+def test_apply_and_a_chained_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Two projects in one repository: q's `hooks install --force` chained p's hook as
+    pre-commit.local. apply in p says p's checks run (no --force advice, which would fail),
+    removes that copy with hooks.pre_commit = false, and drops it once q's hook is gone (p's
+    checks never run twice)."""
+    project, _ = _project(tmp_path, monkeypatch)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))  # the repository is tmp_path itself
+    _git(tmp_path, "init", "-q")
+    q = tmp_path / "q"
+    q.mkdir()
+    for folder in (project.root, q):  # live projects: their launchers exist
+        (folder / "deploy").write_text("#!/bin/sh\n", encoding="utf-8")
+    rp, rq = (hooks.find_repo(d, environ={}, cwd=tmp_path) for d in (project.root, q))
+    target, local = tmp_path / ".git" / "hooks" / "pre-commit", tmp_path / ".git" / "hooks" / "pre-commit.local"
+
+    def row(dry: bool) -> str:
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        capsys.readouterr()
+        assert _run(project) == 0
+        out = capsys.readouterr().err
+        return next(line for line in out.splitlines() if line.startswith("  git hook ")).split(None, 2)[2]
+
+    hooks.install(rp)
+    hooks.install(rq, force=True)
+    q_hook = target.read_bytes()
+    chained = "runs this project's checks (pre-commit.local) after another project's hook"
+    assert row(True) == row(False) == chained
+    assert target.read_bytes() == q_hook and hooks.own_local(rp)
+    assert not [p for p, _ in cmd_apply.pending(project.cfg()) if "hook" in p]
+    project.edit("hooks", "pre_commit", False)
+    assert cmd_apply.pending(project.cfg())[-1][0].startswith("hooks.pre_commit = false, but pytemplate's")
+    assert row(True).startswith("would remove pre-commit.local") and local.is_file()
+    assert row(False) == "removed (hooks.pre_commit = false)"
+    assert not local.exists() and target.read_bytes() == q_hook  # q's own hook is never touched
+    assert not [p for p, _ in cmd_apply.pending(project.cfg()) if "hook" in p]
+    project.edit("hooks", "pre_commit", True)
+    assert row(False) == "another project's hook of this repository: left alone (./deploy hooks install --force runs both)"
+    local.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")  # a third hook there: --force would fail
+    assert row(False) == "another project's hook of this repository: left alone (pre-commit.local is taken too: ./deploy hooks status says what to do)"
+    local.unlink()
+    # chained again, then q goes away: its stale hook is replaced by p's, and p's copy goes
+    hooks.uninstall(rq)
+    hooks.install(rp)
+    hooks.install(rq, force=True)
+    shutil.rmtree(q)
+    assert row(True) == "would update the pre-commit hook"
+    assert row(False) == "updated (and removed pre-commit.local, a copy of this project's hook)"
+    assert target.read_bytes() == hooks.hook_script(rp.launcher).encode("ascii") and not local.exists()
 
 
 @needs_git

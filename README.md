@@ -1216,8 +1216,12 @@ only deletes files is checked too).
   (husky 9: `.husky/pre-commit`).
 - A project in a subfolder of a bigger repository: the hook goes into that repository's hooks
   folder and checks the project's staged files. Two projects in one repository: `apply` leaves
-  the other project's hook alone, and `./deploy hooks install --force` runs both. A project that
-  the enclosing repository ignores gets no hook. Linked worktrees share the hook.
+  the other project's hook alone, and `./deploy hooks install --force` runs both (the first
+  project's hook becomes `pre-commit.local`: that project's `hooks uninstall`, or its
+  `pre_commit = false`, removes it). A third project cannot be chained that way. A project that
+  the enclosing repository ignores gets no hook. Linked worktrees share the hook. A hook of your
+  own counts as running the checks only when a line that is not a comment calls this project's
+  `deploy` with `hooks run`.
 - It works from any git client (Git Bash, cmd, PowerShell, xonsh, VS Code, lazygit): git runs
   hooks with its own `sh`, and the hook calls the POSIX launcher, which finds uv by itself. When
   the launcher cannot check the commit (uv not found from a GUI client, a broken

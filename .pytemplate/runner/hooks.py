@@ -16,7 +16,12 @@ is true in pytemplate.toml (the default).
   first; `uninstall` removes only pytemplate's hook and puts the old one back.
 - Another pytemplate project of the same repository (a monorepo with apps/p and apps/q) is
   "other": setup leaves its hook alone; `install --force` chains it the same way (a fresh copy
-  of its hook becomes `pre-commit.local`, which never chains itself), so both checks run.
+  of its hook becomes `pre-commit.local`, which never chains itself), so both checks run. That
+  copy stays p's own ("chained"): `uninstall` in p (and apply with hooks.pre_commit = false)
+  deletes it, never restores it, and `install` in p drops it once p's hook is back in
+  `pre-commit` (q's went away), so p's checks never run twice.
+- A hook pytemplate does not manage "calls" the checks only with a line that is not a comment
+  and runs THIS project's launcher with `hooks run` (another project's line does not count).
 - A project the enclosing repository ignores (`git check-ignore deploy`) gets no hook unless
   forced: that repository's commits never contain it.
 - With `core.hooksPath` set (husky, a shared hooks folder...) git ignores `.git/hooks`: the
@@ -319,16 +324,50 @@ def _other_project(repo: Repo, launcher: str) -> bool:
         return True
 
 
+def _is_this_launcher(word: str, repo: Repo) -> bool:
+    """Whether `word` (a launcher as a hook line spells it: relative to the top of the work tree,
+    where git runs hooks, or absolute) is this project's launcher. A word with a shell expansion
+    ("$ROOT/deploy", husky's "$(dirname ...)") cannot be resolved: it counts as this project's."""
+    if any(c in word for c in "$`") or word.startswith("~"):
+        return True
+    path = Path(native_path(word))
+    if path.name not in LAUNCHERS:
+        return False
+    folder = (path if path.is_absolute() else repo.top / path).parent
+    try:
+        return os.path.samefile(folder, repo.project)
+    except OSError:
+        return _same(folder, repo.project)
+
+
+# A launcher called with `hooks run`: `sh ./apps/p/deploy hooks run`, `sh 'my app/deploy' hooks run`...
+_RUN_CALL = re.compile(r"""(?:"([^"]+)"|'([^']+)'|([^\s"';&|<>()]+))\s+hooks\s+run(?![\w-])""")
+
+
+def runs_checks(text: str, repo: Repo) -> bool:
+    """Whether a hook script runs THIS project's checks: pytemplate's own hook for this launcher,
+    or a line that is not a comment and calls this project's launcher with `hooks run` (a line
+    of another project of the repository, or a commented-out one, does not count)."""
+    if MARKER in text and (launcher := launcher_of(text)) is not None:
+        return _is_this_launcher(launcher, repo)
+    for line in text.splitlines():
+        code = line.strip()
+        if not code or code.startswith("#"):
+            continue
+        if any(_is_this_launcher(m.group(1) or m.group(2) or m.group(3), repo) for m in _RUN_CALL.finditer(code)):
+            return True
+    return False
+
+
 def classify(path: Path, repo: Repo) -> str:
     """missing | installed | outdated (this project's, other content) | other (another
     pytemplate project of this repository: its launcher exists) | calls (another hook that runs
-    `hooks run`) | foreign.
+    this project's `hooks run`) | foreign.
 
     A symlink is never pytemplate's (install writes a regular file): writing through it,
     dangling or not, would create or change its target, often a file of the work tree."""
     if path.is_symlink():
-        text = _read(path)
-        return "calls" if "deploy" in text and "hooks run" in text else "foreign"
+        return "calls" if runs_checks(_read(path), repo) else "foreign"
     if not path.is_file():
         return "missing"
     text = _read(path)
@@ -337,9 +376,32 @@ def classify(path: Path, repo: Repo) -> str:
             return "installed"
         other = launcher_of(text)
         return "other" if other is not None and _other_project(repo, other) else "outdated"
-    if "deploy" in text and "hooks run" in text:
-        return "calls"
-    return "foreign"
+    return "calls" if runs_checks(text, repo) else "foreign"
+
+
+def own_local(repo: Repo) -> bool:
+    """Whether pre-commit.local is this project's own hook: the copy another project's
+    `install --force` chained after its hook (a regular file whose launcher is this one)."""
+    local = repo.default_dir / LOCAL
+    if local.is_symlink() or not local.is_file():
+        return False
+    text = _read(local)
+    launcher = launcher_of(text) if MARKER in text else None
+    return launcher is not None and _is_this_launcher(launcher, repo)
+
+
+def hook_state(repo: Repo) -> str:
+    """classify() of pre-commit in the default hooks folder, or "chained": that is another
+    project's hook, and it runs this project's own from pre-commit.local."""
+    state = classify(repo.default_dir / HOOK, repo)
+    return "chained" if state == "other" and own_local(repo) else state
+
+
+def hooks_path_runner(repo: Repo) -> str | None:
+    """With core.hooksPath: the hook git runs there (as shown to the user) when it already runs
+    this project's checks, else None."""
+    hook = _hooks_path_file(repo)
+    return _show(hook, repo) if classify(hook, repo) in ("installed", "calls") else None
 
 
 def _show(path: Path, repo: Repo) -> str:
@@ -396,6 +458,11 @@ def install(repo: Repo, *, force: bool = False) -> str:
     if state == "missing" and not force and repo.ignored():
         raise DeployError(f"{_ignored_message(repo)} (or: ./deploy hooks install --force)")
     other = launcher_of(_read(target)) if state == "other" else None
+    if other is not None and own_local(repo):
+        return f"{_show(target, repo)} ({other}) already runs this project's checks from {_show(local, repo)}"
+    # this project's own copy as pre-commit.local (its chain's first hook went away): with this
+    # project's hook back in pre-commit, it would run the checks twice
+    drop = state in ("missing", "outdated", "installed") and own_local(repo)
     moved = False
     if state in ("foreign", "calls", "other"):
         if state == "calls" and not force:
@@ -404,16 +471,13 @@ def install(repo: Repo, *, force: bool = False) -> str:
             if other is not None:
                 raise DeployError(
                     f"{_show(target, repo)} runs the checks of another project of this repository ({other}): left alone.\n"
-                    f"  ./deploy hooks install --force keeps it as {LOCAL} (it runs first) and adds this project's checks"
+                    f"  {chain_hint(repo)}"
                 )
-            raise DeployError(
-                f"{_show(target, repo)} already exists and is not pytemplate's hook: left alone.\n"
-                f"  ./deploy hooks install --force keeps it as {LOCAL} and runs it before the checks"
-            )
+            raise DeployError(f"{_show(target, repo)} already exists and is not pytemplate's hook: left alone.\n  {chain_hint(repo)}")
         if os.path.lexists(local):  # lexists: a dangling link there is somebody's too
             raise DeployError(f"both {_show(target, repo)} and {_show(local, repo)} exist: merge them by hand, then ./deploy hooks install")
         moved = True
-    elif state == "installed":
+    elif state == "installed" and not drop:
         return f"pre-commit hook already installed: {_show(target, repo)}"
     dry = proc.DRY_RUN
     if not dry:
@@ -424,24 +488,36 @@ def install(repo: Repo, *, force: bool = False) -> str:
                 # A current copy of the other project's hook: as pre-commit.local it must not run
                 # pre-commit.local (itself), which hooks written before that guard would do.
                 _write_hook(local, hook_script(other))
+        if drop:
+            local.unlink()
         _write_hook(target, script)
-    verb = {"missing": "installed", "outdated": "updated"}.get(state, "installed")
-    msg = f"pre-commit hook {'would be ' + verb if dry else verb}: {_show(target, repo)} -> sh {repo.launcher} hooks run"
+    verb = {"missing": "installed", "outdated": "updated", "installed": "already installed"}.get(state, "installed")
+    msg = f"pre-commit hook {'would be ' + verb if dry and state != 'installed' else verb}: {_show(target, repo)} -> sh {repo.launcher} hooks run"
     if moved:
         msg += f"\n  the previous hook {'would be' if dry else 'was'} kept as {_show(local, repo)} and runs first"
+    elif drop:
+        msg += f"\n  {'would remove' if dry else 'removed'} {_show(local, repo)}: a copy of this project's hook (the checks would run twice)"
     elif local.is_file():
         msg += f"\n  it runs {_show(local, repo)} first"
     return msg
 
 
 def uninstall(repo: Repo) -> str:
-    """Remove this project's hook (never another one) and restore the hook it had moved aside."""
+    """Remove this project's hook (never another one) and restore the hook it had moved aside.
+    This project's hook chained as pre-commit.local after another project's is removed too
+    (never restored: it would run twice, or run with hooks.pre_commit = false)."""
     target = repo.default_dir / HOOK
     local = repo.default_dir / LOCAL
     state = classify(target, repo)
     dry = proc.DRY_RUN
+    own_copy = own_local(repo)
     if state == "other":
-        return f"{_show(target, repo)} runs the checks of another project ({launcher_of(_read(target))}): left alone"
+        other = launcher_of(_read(target))
+        if own_copy:
+            if not dry:
+                local.unlink()
+            return f"{'would remove' if dry else 'removed'} {_show(local, repo)} (this project's checks); {_show(target, repo)} runs those of {other}: left alone"
+        return f"{_show(target, repo)} runs the checks of another project ({other}): left alone"
     if state in ("foreign", "calls"):
         return f"{_show(target, repo)} is not pytemplate's hook: left alone"
     parts: list[str] = []
@@ -449,7 +525,11 @@ def uninstall(repo: Repo) -> str:
         if not dry:
             target.unlink()
         parts.append(f"{'would remove' if dry else 'removed'} {_show(target, repo)}")
-    if local.is_file() or local.is_symlink():  # a link moved aside by --force comes back as a link
+    if own_copy:
+        if not dry:
+            local.unlink()
+        parts.append(f"{'would remove' if dry else 'removed'} {_show(local, repo)} (a copy of this project's hook)")
+    elif local.is_file() or local.is_symlink():  # a link moved aside by --force comes back as a link
         if not dry:
             os.replace(local, target)
         parts.append(f"{'would restore' if dry else 'restored'} the previous hook ({_show(local, repo)} -> {HOOK})")
@@ -472,6 +552,8 @@ def _status_line(cfg: Config, repo: Repo) -> tuple[bool | None, str, str]:
     local = repo.default_dir / LOCAL
     state = classify(target, repo)
     chained = local.is_file()
+    if state == "installed" and own_local(repo):
+        return None, f"git pre-commit hook installed, but {LOCAL} is a copy of it: the checks run twice", "./deploy hooks install"
     if state == "installed":
         extra = f" (runs {LOCAL} first)" if chained else ""
         return True, f"git pre-commit hook installed: {_show(target, repo)} -> sh {repo.launcher} hooks run{extra}", ""
@@ -480,22 +562,33 @@ def _status_line(cfg: Config, repo: Repo) -> tuple[bool | None, str, str]:
     if state == "calls":
         return True, f"git pre-commit hook: {_show(target, repo)} runs ./deploy hooks run", ""
     other = launcher_of(_read(target)) if state == "other" else None
-    if other is not None and chained and classify(local, repo) in ("installed", "outdated"):
+    if other is not None and own_local(repo):
         return True, f"git pre-commit hook: {_show(target, repo)} runs this project's checks ({LOCAL}), then those of {other}", ""
     if repo.ignored():  # missing, foreign or another project's: none of ours, and this is why
         return None, f"git pre-commit hook not installed: the repository at {repo.top} ignores this project", (
             "git init the project to give it its own repository (or ./deploy hooks install --force)"
         )
     if other is not None:
-        return None, f"git pre-commit hook: {_show(target, repo)} runs the checks of another project ({other}), not this one's", (
-            f"./deploy hooks install --force keeps it as {LOCAL} (it runs first) and adds this project's checks"
-        )
+        return None, f"git pre-commit hook: {_show(target, repo)} runs the checks of another project ({other}), not this one's", chain_hint(repo)
     if state == "foreign":
-        return None, f"git pre-commit hook: {_show(target, repo)} is another tool's hook", (
-            f"./deploy hooks install --force keeps it as {LOCAL}, runs it first, then pytemplate's checks"
-        )
+        return None, f"git pre-commit hook: {_show(target, repo)} is another tool's hook", chain_hint(repo)
     off = "" if cfg.hooks.pre_commit else "   (hooks.pre_commit = false: ./deploy setup does not install it)"
     return None, "git pre-commit hook not installed", "./deploy hooks install" + off
+
+
+def chain_hint(repo: Repo) -> str:
+    """How to add this project's checks to a pre-commit hook that is not its own."""
+    local = repo.default_dir / LOCAL
+    if os.path.lexists(local):  # install --force would refuse: it chains one hook only
+        return f"{_show(local, repo)} exists as well, so ./deploy hooks install --force cannot chain it: merge the two by hand, then ./deploy hooks install --force"
+    return f"./deploy hooks install --force keeps it as {LOCAL} (it runs first) and adds this project's checks"
+
+
+def chain_advice(repo: Repo) -> str:
+    """chain_hint in a few words, for the one-line messages of apply and setup."""
+    if os.path.lexists(repo.default_dir / LOCAL):
+        return f"{LOCAL} is taken too: ./deploy hooks status says what to do"
+    return "./deploy hooks install --force runs both"
 
 
 def show_status(cfg: Config, project: Path = ROOT) -> int:
@@ -531,16 +624,18 @@ def ensure_installed(cfg: Config, project: Path = ROOT) -> None:
             return
         target = repo.default_dir / HOOK
         state = classify(target, repo)
-        if state in ("missing", "foreign", "other") and repo.ignored():  # nothing of ours there: why
+        own_copy = own_local(repo)
+        if state in ("missing", "foreign", "other") and not own_copy and repo.ignored():  # nothing of ours there: why
             ui.info(f"git pre-commit hook: not installed: {_ignored_message(repo)} (or: ./deploy hooks install --force)")
-        elif state in ("missing", "outdated"):
-            ui.ok(install(repo).splitlines()[0])
+        elif state in ("missing", "outdated") or (state == "installed" and own_copy):
+            lines = install(repo).splitlines()
+            ui.ok("\n".join(lines if own_copy else lines[:1]))  # the removed copy is news
         elif state == "foreign":
-            ui.info("git pre-commit hook: another tool's hook is installed, left alone (./deploy hooks install --force chains both)")
-        elif state == "other" and classify(repo.default_dir / LOCAL, repo) not in ("installed", "outdated"):
+            ui.info(f"git pre-commit hook: another tool's hook is installed, left alone ({chain_advice(repo)})")
+        elif state == "other" and not own_copy:
             ui.info(
                 f"git pre-commit hook: it runs the checks of another project of this repository "
-                f"({launcher_of(_read(target))}), left alone (./deploy hooks install --force runs both)"
+                f"({launcher_of(_read(target))}), left alone ({chain_advice(repo)})"
             )
     except (DeployError, OSError) as e:
         ui.warn(f"git pre-commit hook not installed: {e}")

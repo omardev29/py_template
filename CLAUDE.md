@@ -721,11 +721,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 - `./deploy apply` (and `setup`) calls `hooks.ensure_installed(cfg)` when `[hooks] pre_commit`
   is true (the default): it installs the hook or updates this project's own, never fails the
   command, and is silent outside git (`hooks.NotInGit`: no git, not a work tree). When
-  `pre_commit` is false, apply removes pytemplate's own hook (`hooks.uninstall`, which restores a
-  `pre-commit.local`) and never touches another one (section 5.8). Any other git failure
-  (dubious ownership...) is shown with git's own message: a warning in apply, an info line in
-  `doctor` (whose "git hook" line is otherwise info too: missing is not a problem). Every git
-  call runs with `LC_ALL=C` (find_repo reads "not a git repository" in English).
+  `pre_commit` is false, apply removes pytemplate's own hook (`hooks.uninstall`, which restores
+  somebody else's `pre-commit.local`) and never touches another one (section 5.8). Any other
+  git failure (dubious ownership...) is shown with git's own message: a warning in apply, an
+  info line in `doctor` (whose "git hook" line is otherwise info too: missing is not a
+  problem). Every git call runs with `LC_ALL=C` (find_repo reads "not a git repository" in
+  English).
 - The hook: `pre-commit` in the folder `git rev-parse --git-path hooks` reports (worktree
   aware), pure ASCII + LF, a marker comment, and `sh <launcher> hooks run` with the POSIX
   launcher path relative to the repository top (the project may be a subfolder of a bigger
@@ -743,10 +744,21 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   repository (state "other", a monorepo) is left alone by apply, install and uninstall;
   `install --force` writes a FRESH copy of it as `pre-commit.local` (the script skips
   `pre-commit.local` when it is itself that file; older copies would recurse), so both checks
-  run, once each. A project that an enclosing repository ignores (`git check-ignore -q deploy`,
-  which refuses `--literal-pathspecs`) gets no hook unless forced. With `core.hooksPath` set
-  nothing is written: install/status/doctor print the line to add (`sh ./deploy hooks run ||
-  exit $?`); husky 9 (`.husky/_` holding `h` or `husky.sh`) is read through `.husky/pre-commit`.
+  run, once each. That copy stays the chained project's own (`hooks.own_local`; state
+  "chained" of `hooks.hook_state`): its `uninstall`, and its apply with `pre_commit = false`,
+  delete it (never restore it as `pre-commit`), doctor/`pending` count it, `install` there says
+  the checks already run, and once the other project's hook goes stale its `install` replaces
+  that hook and deletes the copy (the checks ran twice). A third project cannot be chained
+  (`pre-commit.local` taken: `install --force` refuses): `hooks.chain_hint`/`chain_advice` then
+  say so instead of suggesting `--force`. A hook pytemplate does not manage runs the checks
+  ("calls") only with a line that is not a comment and calls THIS project's launcher with
+  `hooks run` (`hooks.runs_checks`: resolved against the top, or absolute; a word with a shell
+  expansion cannot be resolved and counts); another project's line is "foreign". A project that
+  an enclosing repository ignores (`git check-ignore -q deploy`, which refuses
+  `--literal-pathspecs`) gets no hook unless forced. With `core.hooksPath` set nothing is
+  written: install/status/doctor print the line to add (`sh ./deploy hooks run || exit $?`), and
+  apply's summary says whether that hook already runs it (`hooks.hooks_path_runner`); husky 9
+  (`.husky/_` holding `h` or `husky.sh`) is read through `.husky/pre-commit`.
 - `hooks run` checks what the commit contains: staged files (`git diff --cached --name-only
   --no-renames --diff-filter=ACMRT -z`) and staged deletions (`D`: a deletion-only commit gets
   the project-wide checks too). Every git call passes `-c diff.relative=false`
@@ -870,9 +882,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `uv remove --frozen` / `uv add --frozen` of the option-driven requirements (dev group with
   `--dev`) -> `cmd_env.ensure_lock` -> `envs.sync` of `cmd_env._envs_for(cfg, "all")` ->
   `cmd_env._fix_exec_bit` -> the hook (`ensure_installed` when `hooks.pre_commit`,
-  `hooks.uninstall` of pytemplate's own hook when false; another tool's, another project's or a
-  core.hooksPath setup is left alone) -> `render.apply` -> `rename.tidy_after` -> `save_record`
-  -> the unused-environment note (`unused_envs`: every `.venv*` of this side no supported
+  `hooks.uninstall` of pytemplate's own hook when false, the copy chained after another
+  project's hook included; another tool's, another project's or a core.hooksPath setup is left
+  alone; the summary line follows `hooks.hook_state`) -> `render.apply` -> `rename.tidy_after`
+  -> `save_record` -> the unused-environment note (`unused_envs`: every `.venv*` of this side no supported
   backend uses, `.venv-jit` of older templates included; never deleted) -> warnings for missing
   references (`reference_problems`: src/<pkg>/, compile.modules, app.assets, deploy.exe.icon,
   deploy.upx.path) -> a summary.
