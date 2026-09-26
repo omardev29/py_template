@@ -277,9 +277,10 @@ end
 NU_SNIPPET = r"""
 # `deploy` in nushell from any folder of a pytemplate project.
 # Paste into your config.nu (`$nu.config-path` prints where it is), then open a new shell.
-# It runs .pytemplate/deploy.py with uv directly, so uv must be on PATH. Like the launchers
-# it keeps your UV_PYTHON, PYTHONHOME, PYTHONPATH and UV_WORKING_DIR away from the runner
-# (uv and Python read an empty value as unset; uv refuses an empty UV_WORKING_DIR).
+# It runs .pytemplate/deploy.py with the uv on PATH (on Windows only a real uv.exe: a uv.cmd
+# shim would go through cmd.exe), else the launcher. Like the launchers it keeps your UV_PYTHON,
+# PYTHONHOME, PYTHONPATH and UV_WORKING_DIR away from the runner (uv and Python read an empty
+# value as unset; uv refuses an empty UV_WORKING_DIR).
 def --wrapped deploy [...rest] {
     mut dir = $env.PWD
     while not ($dir | path join '.pytemplate' 'deploy.py' | path exists) {
@@ -289,16 +290,25 @@ def --wrapped deploy [...rest] {
         }
         $dir = $parent
     }
-    let script = ($dir | path join '.pytemplate' 'deploy.py')
-    with-env {PYTEMPLATE_CALLER_CWD: $env.PWD, PYTEMPLATE_LAUNCHER: 'nu', UV_PYTHON: '', PYTHONHOME: '', PYTHONPATH: '', UV_WORKING_DIR: '.'} { ^uv run --quiet --script $script ...$rest }
+    let root = $dir
+    let script = ($root | path join '.pytemplate' 'deploy.py')
+    let windows = ($nu.os-info.name == 'windows')
+    let uv = if $windows { 'uv.exe' } else { 'uv' }
+    if (which $uv | is-empty) {
+        # The launcher searches uv's usual install folders and prints how to install it.
+        if $windows { ^($root | path join 'deploy.cmd') ...$rest } else { ^sh ($root | path join 'deploy') ...$rest }
+    } else {
+        with-env {PYTEMPLATE_CALLER_CWD: $env.PWD, PYTEMPLATE_LAUNCHER: 'nu', UV_PYTHON: '', PYTHONHOME: '', PYTHONPATH: '', UV_WORKING_DIR: '.'} { ^$uv run --quiet --script $script ...$rest }
+    }
 }
 """
 
 XONSH_TEMPLATE = r'''
 # `deploy` in xonsh from any folder of a pytemplate project (xonsh 0.14 or later).
 # Paste into ~/.xonshrc, then open a new shell. It runs .pytemplate/deploy.py with uv
-# directly (falling back to the launcher when uv is not on $PATH): on Windows ./deploy goes
-# through deploy.cmd, and cmd.exe cannot pass & | < > ^ % inside arguments. Unlike the
+# directly (on Windows only a real uv.exe: a uv.cmd shim would go through cmd.exe; falling
+# back to the launcher when there is none on $PATH): on Windows ./deploy goes through
+# deploy.cmd, and cmd.exe cannot pass & | < > ^ % inside arguments. Unlike the
 # launchers it keeps a UV_PYTHON you set: the runner then needs it to be 3.11 or newer.
 # The completion words were taken from this project by `./deploy shell-setup xonsh`.
 import os as _pt_os
@@ -319,7 +329,7 @@ def _pt_deploy_argv(args):
         script = d / ".pytemplate" / "deploy.py"
         if script.is_file():
             path = _pt_os.pathsep.join(str(p) for p in ${...}.get("PATH", []))
-            uv = _pt_shutil.which("uv", path=path)
+            uv = _pt_shutil.which("uv.exe" if _pt_os.name == "nt" else "uv", path=path)
             if uv:
                 return [uv, "run", "--quiet", "--script", str(script), *args]
             return [str(d / ("deploy.cmd" if _pt_os.name == "nt" else "deploy")), *args]

@@ -1156,7 +1156,8 @@ relative to the project root
 the enclosing project from any subfolder, with a comment saying where to paste it. Shells:
 `bash`, `zsh`, `niubash`, `msys2`, `fish`, `nu`, `xonsh` (with completion of the commands and
 tasks), `pwsh`, `powershell`; without a name it guesses the shell. The xonsh alias and the nu
-function run uv directly (no `deploy.cmd` and its argument limits); the pwsh function passes
+function run uv directly (no `deploy.cmd` and its argument limits; on Windows only a real
+`uv.exe`, never a `uv.cmd` shim); the pwsh function passes
 pipeline input on. Print the xonsh snippet again to complete commands added later.
 
 ```sh

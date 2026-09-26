@@ -497,8 +497,11 @@ header rules (with detector tests proving each rule fires).
   function, never in deploy.ps1). nu: a `def --wrapped` that runs uv directly with
   `PYTEMPLATE_LAUNCHER=nu`, `UV_PYTHON`, `PYTHONHOME` and `PYTHONPATH` emptied and
   `UV_WORKING_DIR=.` (section 4.1). xonsh: an alias that runs uv directly
-  (falls back to the launcher without uv; `@aliases.return_command` when the xonsh has it,
-  else an unthreadable function alias) plus a registered completer whose words come from
+  (`@aliases.return_command` when the xonsh has it, else an unthreadable function alias). Both
+  take the uv on PATH, on Windows only a real `uv.exe` (`shutil.which("uv")` and nu's `^uv`
+  try every PATHEXT per folder, so a `uv.cmd` shim of an earlier folder won and cmd.exe parsed
+  the arguments again), and fall back to the launcher without one (it searches the install
+  folders and prints the hints). The xonsh snippet also registers a completer whose words come from
   `cli.COMMANDS` and the project's `[tasks]` at print time (a new command appears once it is
   in `COMMANDS`, `cli.INTERNAL` routes never: `test_xonsh_completion_follows_cli_commands`;
   users print the snippet again to get it); unlike the launchers it keeps the
@@ -3239,9 +3242,13 @@ PowerShell (details: section 4.5):
   `test_launcher_win.py::test_ps1_constrained_language_gives_one_clear_error`. Goes: never.
 - **`Get-Command uv` may return an alias, a function or a `uv.cmd`/`uv.ps1` wrapper**
   (LIMITATION): a wrapper parses the arguments again. Fix: `-CommandType Application -All` and
-  only a real `uv.exe` on Windows (the plugin: `exepath('uv.exe')`; 4.1). Test:
+  only a real `uv.exe` on Windows (the plugin: `exepath('uv.exe')`; the xonsh and nu snippets
+  of `shell-setup` look up `uv.exe` too, since Python's `shutil.which("uv")` and nu's `^uv`
+  take a `uv.cmd` of an earlier PATH folder; 4.1, 4.9). Test:
   `test_launcher_sh.py::test_uv_search_order`,
-  `test_nvim_render.py::test_lua_modules_in_headless_neovim`. Goes: never.
+  `test_nvim_render.py::test_lua_modules_in_headless_neovim`,
+  `test_shells.py::test_xonsh_snippet_takes_only_a_real_uv_exe_on_windows`,
+  `test_snippets_keep_the_launcher_contract`. Goes: never.
 - **`[IO.File]::GetUnixFileMode` needs .NET 7 (PowerShell 7.3+)** (LIMITATION): Fix: older
   versions skip the x-bit check of a uv candidate (4.1). Test:
   `test_launcher_win.py::test_ps1_skips_a_uv_without_exec_bit`. Goes: once 7.3 is the minimum.

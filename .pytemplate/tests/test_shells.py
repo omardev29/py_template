@@ -354,9 +354,40 @@ def test_snippets_keep_the_launcher_contract() -> None:
     nu = shells.snippet("nu")
     assert "PYTEMPLATE_LAUNCHER: 'nu'" in nu and "UV_PYTHON: ''" in nu
     assert "PYTHONHOME: ''" in nu and "PYTHONPATH: ''" in nu and "UV_WORKING_DIR: '.'" in nu
-    assert "^uv run --quiet --script $script ...$rest" in nu
+    assert "^$uv run --quiet --script $script ...$rest" in nu
+    # Windows: only a real uv.exe (a uv.cmd/uv.bat shim would go through cmd.exe), else the launcher
+    assert "let uv = if $windows { 'uv.exe' } else { 'uv' }" in nu and "deploy.cmd" in nu
     xonsh = shells.snippet("xonsh")
     assert '[uv, "run", "--quiet", "--script", str(script), *args]' in xonsh
+
+
+@pytest.mark.parametrize("windows", [True, False])
+def test_xonsh_snippet_takes_only_a_real_uv_exe_on_windows(windows: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows shutil.which('uv') tries every PATHEXT in each folder, so a uv.cmd shim in an
+    earlier folder won and cmd.exe parsed the arguments again: the alias asks for uv.exe (like
+    the launchers and the Neovim plugin) and falls back to deploy.cmd without one."""
+    import types
+
+    text = shells.snippet("xonsh").split("\n\nif hasattr(aliases")[0].replace("${...}", "_PT_ENV")
+    asked: list[str] = []
+
+    def which(name: str, path: str | None = None) -> str | None:
+        asked.append(name)
+        return None if found is None else found
+
+    namespace: dict[str, object] = {"_PT_ENV": {"PATH": ["C:\\shims", "C:\\bin"]}}
+    exec(compile(text, "snippet", "exec"), namespace)
+    namespace["_pt_os"] = types.SimpleNamespace(name="nt" if windows else "posix", pathsep=";" if windows else ":")
+    namespace["_pt_shutil"] = types.SimpleNamespace(which=which)
+    monkeypatch.chdir(ROOT)
+    argv_of = namespace["_pt_deploy_argv"]
+    assert callable(argv_of)
+    found: str | None = "C:\\bin\\uv.exe" if windows else "/usr/bin/uv"
+    argv = argv_of(["x"])
+    assert asked == ["uv.exe" if windows else "uv"] and argv[:2] == [found, "run"], (asked, argv)
+    found = None
+    argv = argv_of(["x"])
+    assert argv == [str(ROOT / ("deploy.cmd" if windows else "deploy")), "x"], argv
 
 
 # --- the snippets, executed in their own shells (skipped where a shell is missing) -----------------
@@ -505,6 +536,14 @@ def test_nu_snippet_runs(tmp_path: Path) -> None:
     assert probes[0]["launcher"] == "nu"
     r = _snippet_run([nu, "--no-config-file", "-c", f"source {shells.nu_quote(str(snip))}; cd {shells.nu_quote(str(_away(tmp_path)))}; deploy x"], tmp_path)
     assert r.returncode != 0 and "no .pytemplate" in r.stdout + r.stderr, r.stdout + r.stderr
+    if IS_WINDOWS or any(Path(d, "uv").exists() for d in ("/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin")):
+        return  # uv cannot be hidden from the launcher here
+    # no uv on PATH: the launcher (it searches the install folders, then prints how to install uv)
+    home = tmp_path / "home"
+    home.mkdir()
+    code = f"source {shells.nu_quote(str(snip))}; cd {shells.nu_quote(str(sub))}; deploy __probe 3 0 x"
+    r = subprocess.run([nu, "--no-config-file", "-c", code], env={"PATH": "/usr/bin:/bin", "HOME": str(home), "CI": "1"}, capture_output=True, text=True, timeout=180, check=False)
+    assert r.returncode == 127 and "uv not found" in r.stderr, r.stdout + r.stderr
 
 
 @pytest.mark.parametrize("pwd", ["C:/no/such/place", "C:", "C:/", "C:\\no\\such", "/", "//srv/share/x", "/no/such/place"])
