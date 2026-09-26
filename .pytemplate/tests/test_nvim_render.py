@@ -700,7 +700,13 @@ def test_deploy_completion_follows_the_command(tmp_path: Path) -> None:
     """:Deploy offered the backends, `all` and six --method= values after every command (`help
     cpython` exits 2, `test --method=pyz` goes to pytest): the words now come from the command's
     usage in editor.json and tasks.META."""
-    r = _headless_lua(tmp_path, COMPLETE_CHECK, _project(tmp_path))
+    project = _project(tmp_path)
+    editor_json = project / ".pytemplate" / "editor.json"
+    data = json.loads(editor_json.read_text(encoding="utf-8"))  # the same in every project
+    data["backend"] = {"active": "cpython", "supported": ["cpython", "mypyc"]}
+    data["tasks"] = [{"name": "ci", "help": "", "background": False}]
+    editor_json.write_text(json.dumps(data), encoding="utf-8")
+    r = _headless_lua(tmp_path, COMPLETE_CHECK, project)
     assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
 
 
