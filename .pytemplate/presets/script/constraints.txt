@@ -1,30 +1,28 @@
-# Versions the template was tested with for every package a project of the raylib preset
+# Versions the template was tested with for every package a project of the script preset
 # locks. `./deploy new` hands the ones the source project does not lock yet to `uv add
 # --constraints` (a one-off: pyproject.toml keeps plain bounds), and the name check refuses
 # them all. Regenerate it, never edit it: CLAUDE.md section 11.
 altgraph==0.17.5
 ast-serialize==0.11.2
-cffi==2.1.1
 colorama==0.4.6
 debugpy==1.8.22
 iniconfig==2.3.0
 librt==0.15.0
 macholib==1.16.4
+markdown-it-py==4.2.0
+mdurl==0.1.2
 mypy==2.3.1
 mypy-extensions==1.1.0
 packaging==26.3
 pathspec==1.1.1
 pefile==2024.8.26
 pluggy==1.6.0
-pycparser==3.0
 pygments==2.21.0
 pyinstaller==6.22.3
 pyinstaller-hooks-contrib==2026.7
 pytest==9.1.1
 pywin32-ctypes==0.2.3
-raylib==6.0.1.0
+rich==15.0.0
 ruff==0.16.9
 setuptools==84.0.0
-types-cffi==2.1.0.20260827
-types-setuptools==84.0.0.20260812
 typing-extensions==4.16.0

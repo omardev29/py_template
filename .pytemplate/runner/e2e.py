@@ -532,8 +532,8 @@ def lock_problems(lock: Path, pins: Mapping[str, str], template_lock: Path | Non
 
     A package the template's own uv.lock holds at one version keeps that version (`__init`
     re-locks the copied lock, and uv keeps what a lock has); every other pin of the preset
-    (constraints.txt: the packages the template's lock lacks, handed to `uv add
-    --constraints`) must be locked at its version.
+    (constraints.txt: every package a project of the preset locks; the ones the template's lock
+    lacks are handed to `uv add --constraints`) must be locked at its version.
     """
     locked = lock_versions(lock)
     if locked is None:

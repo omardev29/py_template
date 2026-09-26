@@ -298,6 +298,17 @@ def _lock_graph(lock: Path | None = None) -> dict[str, set[str]]:
     return graph
 
 
+def _self_dependents(name: str, lock: Path | None = None) -> list[str]:
+    """The packages of uv.lock that depend on a package called `name`, when that package is
+    the project itself: uv (0.12) resolves such a dependency to the project (markdown-it-py's
+    mdurl -> a project named mdurl) instead of refusing it, and the library is then missing."""
+    wanted = _norm_name(name)
+    entries = _lock_entries(lock)
+    if not any(_is_project(e) and _norm_name(e["name"]) == wanted for e in entries):
+        return []
+    return sorted({e["name"] for e in entries if not _is_project(e) and wanted in _requires(e)})
+
+
 def _closure(graph: dict[str, set[str]], roots: set[str]) -> set[str]:
     seen: set[str] = set()
     todo = [r for r in roots if r in graph]
@@ -325,10 +336,13 @@ def constraints(preset: str) -> dict[str, str]:
     """{normalized name: version} from PRESETS/<preset>/constraints.txt ({} without the file).
 
     The file pins, one `name==version` per line, every package a project of this preset locks
-    that the template's own uv.lock does not (the preset's dependencies and what they pull in),
-    at the versions the template was tested with. `init` hands the ones the project does not
-    lock yet to `uv add --constraints`: a one-off, nothing is written into pyproject.toml, and
-    `./deploy lock --upgrade` moves on later. How to regenerate it: CLAUDE.md section 11.
+    (the template's own packages it keeps, the preset's dependencies and what they pull in), at
+    the versions the template was tested with. `init` hands the ones the project does not lock
+    yet to `uv add --constraints`: a one-off, nothing is written into pyproject.toml, and
+    `./deploy lock --upgrade` moves on later. The name check reads it too: from a project whose
+    uv.lock lacks the preset's tree, it is the only place that names that tree (a project named
+    mdurl made from a raylib project got markdown-it-py's mdurl resolved to itself). How to
+    regenerate it: CLAUDE.md section 11.
     """
     path = constraints_path(preset)
     if not path.is_file():
@@ -351,20 +365,20 @@ def constraints(preset: str) -> dict[str, str]:
     return pins
 
 
-def constraints_text(preset: str, project_lock: Path, template_lock: Path | None = None) -> str:
+def constraints_text(preset: str, project_lock: Path) -> str:
     """The constraints.txt of `preset`, made from the uv.lock of a project just created with it
-    (without constraints): every package it locks that the template's uv.lock does not. A
-    package locked at two versions (a fork by platform) cannot be pinned and is left out."""
-    base = locked_names(lock=template_lock)
+    from the template: every package it locks (the project itself excluded). A package locked
+    at two versions (a fork by platform) cannot be pinned and is left out (init's check of the
+    resolved uv.lock, `_self_dependents`, still covers its name)."""
     versions: dict[str, set[str]] = {}
     for entry in _lock_entries(project_lock):
-        name = _norm_name(entry["name"])
-        if not _is_project(entry) and name not in base:
-            versions.setdefault(name, set()).add(str(entry.get("version", "")))
+        if not _is_project(entry):
+            versions.setdefault(_norm_name(entry["name"]), set()).add(str(entry.get("version", "")))
     lines = [
-        f"# Versions the template was tested with for the packages the {preset} preset adds to the",
-        "# template's uv.lock. `./deploy new` hands them to `uv add --constraints` (a one-off:",
-        "# pyproject.toml keeps plain bounds). Regenerate it, never edit it: CLAUDE.md section 11.",
+        f"# Versions the template was tested with for every package a project of the {preset} preset",
+        "# locks. `./deploy new` hands the ones the source project does not lock yet to `uv add",
+        "# --constraints` (a one-off: pyproject.toml keeps plain bounds), and the name check refuses",
+        "# them all. Regenerate it, never edit it: CLAUDE.md section 11.",
         *(f"{name}=={next(iter(v))}" for name, v in sorted(versions.items()) if len(v) == 1 and "" not in v),
     ]
     return "\n".join(lines) + "\n"
@@ -386,7 +400,8 @@ def _skeleton_src_names(preset: str) -> dict[str, str]:
 def _dependency_names(cfg: Config | None, preset: str) -> set[str]:
     """Normalized names of every package the project has after `init preset`: what pyproject
     declares (without the current preset's own dependencies, which init removes), the preset's
-    dependencies, and what they pull in (from uv.lock and the preset's constraints)."""
+    dependencies, and what they pull in (from uv.lock and the preset's constraints, which name
+    the preset's whole tested tree even when uv.lock lacks it)."""
     target = load(preset)
     opts: dict[str, Any] = dict(target.get("options", {}))
     if cfg is not None and preset == cfg.app.preset:
@@ -401,8 +416,9 @@ def _dependency_names(cfg: Config | None, preset: str) -> set[str]:
     graph = _lock_graph()
     names = kept | _closure(graph, kept) | pins
     if pins - set(graph):
-        # The preset brings packages uv.lock does not have: only their names are known, not what
-        # they need, which may be any package already locked (flet-cli -> rich -> mdurl)
+        # The preset brings packages uv.lock does not have: the pins name what they needed when
+        # the template was tested, but uv may resolve them against the versions this lock holds,
+        # which may need any package already locked (conservative)
         names |= set(graph)
     return names
 
@@ -782,6 +798,15 @@ def _swap_dependencies(plan: InitPlan, undo: _Undo) -> None:
     if plan.add_dev:
         proc.run([uv, "add", "--no-sync", "--dev", *pins, *plan.add_dev], env=env)
     proc.run([uv, "lock"], env=env)
+    # The name check knows the tested tree (constraints.txt); this catches what it cannot know
+    needs = _self_dependents(plan.name)
+    if needs:
+        raise DeployError(
+            f"the app name '{plan.name}' is also the name of a package the '{plan.preset}' preset needs "
+            f"({', '.join(needs)} depend{'s' if len(needs) == 1 else ''} on {_norm_name(plan.name)}): uv "
+            "resolved it to the project itself, so the library would be missing.\n"
+            "  Choose another name with --name NAME"
+        )
 
 
 def _swap_files(plan: InitPlan, undo: _Undo) -> None:

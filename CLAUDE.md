@@ -1671,7 +1671,9 @@ Per method:
   line break). `--dry-run __init` prints the plan (`cmd_mode._plan_init`).
   `presets.init` then (1) writes `pyproject.toml` and runs `uv remove --frozen` (no
   resolution) for the old preset's requirements, `uv add --no-sync [--constraints]` for the
-  new ones and `uv lock`: the only step that needs the network; (2) renames `src/ tests/
+  new ones and `uv lock`: the only step that needs the network; a resolved `uv.lock` in which a
+  package depends on the project itself (`presets._self_dependents`, section 15.1) is refused
+  there, before any file of the skeleton is written; (2) renames `src/ tests/
   typings/` into `.pytemplate-init-*` (all or nothing: a locked file fails the rename before
   anything changed), writes every skeleton file (root `pytemplate.toml` included) and chmods
   `deploy`/`deploy.ps1` on POSIX. Any failure or Ctrl+C in (1) or (2) puts every file back
@@ -1686,8 +1688,10 @@ Per method:
   plus the preset's `src/` entries such as `main`), and every package the project will lock:
   the declared requirements (minus the current preset's own), their tree in `uv.lock`
   (`locked_names`, markers ignored because uv refuses a self-dependency on any platform; the
-  project's own entry excluded) and the preset's pins. When a preset adds packages the lock
-  does not have, their dependencies are unknown, so every locked name counts (conservative).
+  project's own entry excluded) and the preset's pins (`constraints.txt`: the preset's whole
+  tested tree, so a raylib project, whose `uv.lock` has no rich, still refuses `new --preset
+  script --name mdurl`). When a preset adds packages the lock does not have, uv may resolve
+  them against this lock's versions, so every locked name counts too (conservative).
   `new` derives the name from the folder with `name_from_folder` (NFKD -> ASCII, other runs ->
   `-`, no `-`/`_` at the ends) and checks it before copying, so `./deploy new ../flet --preset
   flet` fails with a hint to use `--name`.
@@ -1726,14 +1730,18 @@ Per method:
   by the template maintainer, listed nowhere. `./deploy init` exits 2 with the hint `./deploy
   new DIR --preset P`: a project's preset is chosen when it is created.
 - Tested pins: `presets/<p>/constraints.txt` (`name==version`, sorted, generated, never
-  hand-edited) lists every package a project of the preset locks that the template's
-  `uv.lock` does not (flet 32, raylib 5; script needs none: the root lock is its tested set).
-  `init` hands the ones the project does not lock yet to `uv add --constraints`: a one-off
+  hand-edited) lists every package a project of the preset locks (script 24: the template's
+  own `uv.lock`; raylib 26; flet 56), the ones the template's `uv.lock` also holds at its
+  versions (a package locked at two versions, a fork by platform, cannot be pinned: none so
+  far). `init` hands the ones the project does not lock yet to `uv add --constraints`: a one-off
   (nothing in `pyproject.toml` or the lock manifest, `uv lock --check` passes, `./deploy lock
   --upgrade` moves on), so a new project gets the versions CI tested instead of the newest of
-  the day, and packages the source project already locks keep their versions. Regenerate
-  after changing a preset's pins or the root `uv.lock` (`test_presets.py` fails, offline,
-  when the file is stale): delete it, `./deploy new <tmp>/p --preset <p>`, then write
+  the day, also when `new` runs from a project of another preset (a raylib project has no
+  rich), and packages the source project already locks keep their versions. The name check
+  reads the whole list. Regenerate after changing a preset's pins or the root `uv.lock`
+  (`test_presets.py::test_preset_pins_hold_the_whole_tested_tree` fails, offline, when the file
+  is stale): `./deploy new <tmp>/p --preset <p>` from the template (delete the file first to
+  take the newest versions of the packages the template's lock lacks), then write
   `presets.constraints_text(p, <tmp>/p/uv.lock)` to `presets.constraints_path(p)` (a
   `python -c` in `.venv` with `.pytemplate` on `sys.path`) and `git add` it. Rejected:
   `exclude-newer` (recorded in the lock: the next `uv lock --check` fails) and `==`
@@ -2475,8 +2483,8 @@ Adding a preset:
 1. `presets/<p>/preset.toml` and `files/` (section 11), including `[vscode] buttons` and
    `[tasks]` (`background = true` for dev servers) in its `pytemplate.toml`.
 2. Copy `tests/conftest.py` verbatim. Check the hard-coded preset branches (section 11).
-3. Generate its `constraints.txt` if it adds packages to the template's `uv.lock` (section 11)
-   and `git add` everything (`new` only copies tracked files).
+3. Generate its `constraints.txt` (section 11: the name check and `new` from other projects need
+   its whole tested tree) and `git add` everything (`new` only copies tracked files).
 4. It must pass `./deploy selftest` (`test_presets.py`: ruff-clean skeleton, valid config,
    pins), `./deploy selftest --e2e <p>` and `./deploy selftest --nvim <p>`.
 
@@ -2572,6 +2580,17 @@ uv:
   (`cmd_apply.apply`; `presets.init` removes the old preset's with `--frozen`; 5.8, 11). Test:
   `test_apply.py::test_uv_frozen_edits_only_pyproject`, `test_apply_flet_version_change`. Goes:
   never.
+- **uv resolves a dependency of a dependency named like the project to the project itself**
+  (DEFECT): a direct self-dependency is refused ("self-dependencies are not permitted"), but in a
+  project named `mdurl` markdown-it-py's `mdurl~=0.1` was satisfied by the project (0.1.0):
+  uv.lock recorded `mdurl` with `source = { virtual = "." }`, and the real library was missing
+  from the lock, `.venv` and every build (rich's Markdown failed), without an error. Up: none
+  found. Fix: `presets.check_name_free` refuses every name of the preset's tested tree
+  (`constraints.txt`) and of uv.lock; `init` refuses a resolved uv.lock in which a package
+  depends on the project (`presets._self_dependents`) and rolls back (11). Test:
+  `test_presets.py::test_new_from_a_project_without_the_presets_tree_refuses_its_names`,
+  `test_init_refuses_a_lock_that_resolves_a_dependency_to_the_project`, `test_self_dependents`.
+  Goes: when uv refuses it (the name check stays: src/<pkg>/ would shadow the library).
 - **uv writes normalized names** (LIMITATION, PEP 503): `raylib_sdl` became `raylib-sdl`, and a
   verbatim comparison never matched. Fix: `cmd_apply.req_key` (5.8). Test:
   `test_apply.py::test_req_key_normalizes_like_uv`. Goes: never.

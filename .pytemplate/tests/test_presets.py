@@ -551,9 +551,7 @@ def test_constraints_parser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert e.value.code == 2
 
 
-def test_constraints_text_lists_what_the_template_lock_lacks(tmp_path: Path) -> None:
-    template = tmp_path / "template.lock"
-    template.write_text(FAKE_LOCK, encoding="utf-8")
+def test_constraints_text_lists_every_locked_package(tmp_path: Path) -> None:
     project = tmp_path / "project.lock"
     project.write_text(
         FAKE_LOCK.replace('name = "myapp"', 'name = "demo"')
@@ -563,10 +561,14 @@ def test_constraints_text_lists_what_the_template_lock_lacks(tmp_path: Path) -> 
         + '\n[[package]]\nname = "forked"\nversion = "2.0"\nsource = { registry = "https://pypi.org/simple" }\n',
         encoding="utf-8",
     )
-    text = presets.constraints_text("demo", project, template)
+    text = presets.constraints_text("demo", project)
     pins = [line for line in text.splitlines() if line and not line.startswith("#")]
-    assert pins == ["alpha==1.0", "zeta-pkg==2.0"]  # sorted; the fork cannot be pinned; no project entry
-    assert "CLAUDE.md" in text
+    # sorted; the template's packages too (rich, pytest...); the fork cannot be pinned; no project entry
+    assert pins == [
+        "alpha==1.0", "colorama==0.4.6", "linkify-it-py==2.0.0", "markdown-it-py==4.2.0", "mdurl==0.1.2",
+        "orphan==1.0", "pygments==2.21.0", "pytest==9.1.1", "rich==15.0.0", "zeta-pkg==2.0",
+    ]  # fmt: skip
+    assert "CLAUDE.md" in text and text.isascii()
 
 
 @pytest.mark.parametrize("preset", PRESETS)
@@ -589,15 +591,26 @@ def test_preset_pins_agree_with_the_preset(preset: str) -> None:
 
 @template_repo
 @pytest.mark.parametrize("preset", PRESETS)
-def test_preset_pins_only_list_what_the_template_lock_lacks(preset: str) -> None:
-    """A pinned package that the template's uv.lock also has would be forced to another version
-    than the template tested: regenerate constraints.txt after changing the template's lock."""
-    shared = sorted(set(presets.constraints(preset)) & presets.locked_names())
-    assert not shared, f"{preset}: {shared} are in the template's uv.lock too: regenerate (CLAUDE.md 11)"
+def test_preset_pins_hold_the_whole_tested_tree(preset: str) -> None:
+    """constraints.txt pins every package a project of the preset locks, at the versions the
+    template tested: the name check reads it (from a project whose uv.lock lacks the preset's
+    tree, it is the only place that names it), and `new` from such a project gets those
+    versions. A package the template's uv.lock also has must carry the lock's version, and every
+    locked package the new project keeps or needs must be there: regenerate constraints.txt
+    after changing the template's lock or the preset (CLAUDE.md 11)."""
+    pins = presets.constraints(preset)
+    template = {presets._norm_name(e["name"]): str(e.get("version")) for e in presets._lock_entries() if not presets._is_project(e)}
+    moved = sorted(f"{n}: {pins[n]} (uv.lock: {v})" for n, v in template.items() if n in pins and pins[n] != v)
+    assert not moved, f"{preset}: {moved}: regenerate constraints.txt (CLAUDE.md 11)"
+    cfg = config.load(set(cli.COMMANDS))
+    old_deps, old_dev = presets.dependencies(cfg)
     deps, dev = presets.dependencies(_skeleton_config(preset, "myapp"), preset)
-    needed = {presets._norm_name(r) for r in (*deps, *dev)}
-    missing = sorted(needed - presets.locked_names() - set(presets.constraints(preset)))
-    assert not missing, f"{preset}: {missing} would be resolved fresh at ./deploy new: add a constraints.txt (CLAUDE.md 11)"
+    new = {presets._norm_name(r) for r in (*deps, *dev)}
+    kept = (presets._declared_anywhere() - {presets._norm_name(r) for r in (*old_deps, *old_dev)}) | new
+    missing = sorted((presets.locked_names(kept) | new) - set(pins))
+    assert not missing, f"{preset}: {missing} are not pinned: regenerate constraints.txt (CLAUDE.md 11)"
+    if preset == cfg.app.preset:  # the template is a project of this preset: its lock is the tested set
+        assert set(pins) == set(template)
 
 
 # --- copy_template ---------------------------------------------------------------------------
@@ -1162,8 +1175,9 @@ def test_init_converts_the_project(fake: Fake, preset: str) -> None:
     assert uv[-1] == ["lock"]
     assert all("--frozen" in c for c in uv if c[0] == "remove")
     assert all("--no-sync" in c for c in uv if c[0] == "add")
-    pins = presets.constraints(preset)
-    if pins and preset != "script":
+    # the pins of the packages uv.lock does not have yet (the ones it has keep their versions)
+    pins = {n: v for n, v in presets.constraints(preset).items() if n not in presets.locked_names(lock=presets.LOCK)}
+    if pins:
         adds = [c for c in uv if c[0] == "add"]
         assert adds and all("--constraints" in c for c in adds)
         pinned = Path(adds[0][adds[0].index("--constraints") + 1])
@@ -1430,14 +1444,136 @@ def test_init_refuses_names_uv_refuses(fake: Fake, name: str) -> None:
 def test_init_pins_only_what_the_lock_does_not_have(fake: Fake) -> None:
     """A package the project already locks keeps its version (a project made from another
     project); the preset's pins only decide the packages new to uv.lock."""
-    pins = presets.constraints("raylib")
+    pins = {n: v for n, v in presets.constraints("raylib").items() if n not in presets.locked_names()}
     if not pins:
-        pytest.skip("the raylib preset has no pins")
+        pytest.skip("the raylib preset has no pins beyond this uv.lock")
     first = sorted(pins)[0]
     lock = fake.root / "uv.lock"
     lock.write_text(lock.read_text(encoding="utf-8") + f'\n[[package]]\nname = "{first}"\nversion = "0.0.1"\nsource = {{ registry = "https://pypi.org/simple" }}\n', encoding="utf-8")
     plan = presets.plan_init(fake.cfg, "raylib", None, force=False)
     assert plan.pins == {n: v for n, v in pins.items() if n != first}
+    assert not set(plan.pins) & presets.locked_names()  # rich, pytest... (FAKE_LOCK) keep theirs too
+
+
+# A raylib project's pyproject.toml and uv.lock: none of the script preset's tree (rich,
+# markdown-it-py, mdurl), which the flet preset needs too (flet-cli -> rich)
+RAYLIB_PYPROJECT = FAKE_PYPROJECT.replace('"rich>=15.0.0"', '"raylib==6.0.1.0"').replace('"pytest>=9.0.0",', '"pytest>=9.0.0",\n    "types-cffi",')
+RAYLIB_LOCK = """\
+version = 1
+requires-python = ">=3.14"
+
+[[package]]
+name = "myapp"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [{ name = "raylib" }]
+
+[package.dev-dependencies]
+dev = [{ name = "pytest" }, { name = "types-cffi" }]
+
+[[package]]
+name = "raylib"
+version = "6.0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "cffi" }]
+
+[[package]]
+name = "cffi"
+version = "2.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "pycparser" }]
+
+[[package]]
+name = "pycparser"
+version = "3.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "types-cffi"
+version = "2.1.0.20260827"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "pytest"
+version = "9.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "pygments" }]
+
+[[package]]
+name = "pygments"
+version = "2.21.0"
+source = { registry = "https://pypi.org/simple" }
+"""
+
+
+def _as_raylib_project(fake: Fake) -> Config:
+    (fake.root / "pyproject.toml").write_text(RAYLIB_PYPROJECT, encoding="utf-8")
+    (fake.root / "uv.lock").write_text(RAYLIB_LOCK, encoding="utf-8")
+    return _skeleton_config("raylib", "myapp")
+
+
+@pytest.mark.parametrize(("preset", "name"), [("script", "mdurl"), ("script", "Markdown-It-Py"), ("script", "rich"), ("flet", "mdurl"), ("flet", "rich")])
+def test_new_from_a_project_without_the_presets_tree_refuses_its_names(fake: Fake, preset: str, name: str) -> None:
+    """From a raylib project (its uv.lock has no rich), `new --preset script --name mdurl` was
+    accepted: uv then resolved markdown-it-py's mdurl to the project itself, and the library was
+    missing from uv.lock, .venv and every build. The pins name the preset's whole tested tree."""
+    cfg = _as_raylib_project(fake)
+    with pytest.raises(DeployError, match="also the name of a dependency") as e:
+        presets.check_name_free(cfg, preset, name)
+    assert e.value.code == 2
+    presets.check_name_free(cfg, preset, "demo")
+
+
+def test_new_from_another_project_gets_the_tested_versions(fake: Fake) -> None:
+    """`new --preset script` from a raylib project resolved rich, markdown-it-py and mdurl to
+    the newest release of the day: the pins must reach every package the source lock lacks."""
+    cfg = _as_raylib_project(fake)
+    plan = presets.plan_init(cfg, "script", "demo", force=True)
+    tested = presets.constraints("script")
+    assert {"rich", "markdown-it-py", "mdurl"} <= set(plan.pins)
+    assert plan.pins == {n: v for n, v in tested.items() if n not in presets.locked_names()}
+    assert "pytest" not in plan.pins  # the source project's own version stays
+    presets.init(cfg, "script", "demo", force=True)
+    adds = [c for c in fake.calls if c[1] == "add"]
+    assert adds and all("--constraints" in c for c in adds)
+
+
+def _self_dependent_lock(name: str) -> str:
+    """The uv.lock uv (0.12) writes when a dependency of a dependency has the project's name."""
+    return (
+        f'version = 1\n\n[[package]]\nname = "markdown-it-py"\nversion = "4.2.0"\nsource = {{ registry = "https://pypi.org/simple" }}\n'
+        f'dependencies = [{{ name = "{name}" }}]\n\n[[package]]\nname = "{name}"\nversion = "0.1.0"\nsource = {{ virtual = "." }}\n'
+        'dependencies = [{ name = "markdown-it-py" }]\n'
+    )
+
+
+def test_self_dependents(tmp_path: Path) -> None:
+    lock = tmp_path / "uv.lock"
+    lock.write_text(_self_dependent_lock("mdurl"), encoding="utf-8")
+    assert presets._self_dependents("mdurl", lock) == ["markdown-it-py"]
+    assert presets._self_dependents("MDURL", lock) == ["markdown-it-py"]
+    assert presets._self_dependents("other", lock) == []  # not the project's name
+    lock.write_text(FAKE_LOCK, encoding="utf-8")
+    assert presets._self_dependents("myapp", lock) == []
+    assert presets._self_dependents("mdurl", lock) == []  # the real library, not the project
+
+
+def test_init_refuses_a_lock_that_resolves_a_dependency_to_the_project(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The last guard, for what the name check cannot know (a fork left out of the pins, a
+    source lock with other versions): uv resolved a dependency to the project and said nothing."""
+    before = _snapshot(fake.root)
+
+    def run(argv: list[Any], **_: Any) -> subprocess.CompletedProcess[str]:
+        if str(argv[1]) == "lock":
+            (fake.root / "uv.lock").write_text(_self_dependent_lock("Demo"), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(proc, "run", run)
+    monkeypatch.setattr(presets, "check_name_free", lambda *a: None)
+    with pytest.raises(DeployError, match=r"(?s)'Demo' is also the name of a package .*markdown-it-py depends on demo.*--name NAME") as e:
+        presets.init(fake.cfg, "script", "Demo", force=True)
+    assert e.value.code == 2
+    assert _snapshot(fake.root) == before and not fake.rendered and not _left_aside(fake.root)
 
 
 def test_plan_init_writes_nothing_and_the_dry_run_prints_it(fake: Fake, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1618,7 +1754,10 @@ def test_new_creates_a_working_project(preset: str, tmp_path: Path, network: Non
     assert "constraint-dependencies" not in project["tool"]["uv"]  # the pins were a one-off
     locked = {presets._norm_name(e["name"]): e["version"] for e in presets._lock_entries(dest / "uv.lock") if not presets._is_project(e)}
     pins = presets.constraints(preset)
-    assert {n: locked.get(n) for n in pins} == pins, "the new project does not lock the tested versions"
+    # what this project locks keeps its version (init pins only the packages it lacks)
+    source = {presets._norm_name(e["name"]): e["version"] for e in presets._lock_entries() if not presets._is_project(e)}
+    expected = {n: source.get(n, v) for n, v in pins.items()}
+    assert {n: locked.get(n) for n in pins} == expected, "the new project does not lock the tested versions"
     if TEMPLATE_REPO:
         fresh = sorted(set(locked) - presets.locked_names() - set(pins))
         assert not fresh, (

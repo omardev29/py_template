@@ -101,8 +101,9 @@ outside the template:
    commands) and `[project] description` in `pyproject.toml`.
 3. It runs the preset step in the copy: `src/`, `tests/`, `typings/` and `pytemplate.toml` from
    the preset's skeleton, the preset's dependencies in `pyproject.toml` and `uv lock`, which
-   needs the network. raylib and flet projects get the versions the template was tested with
-   (`.pytemplate/presets/<preset>/constraints.txt`), once: `./deploy lock --upgrade` moves on.
+   needs the network. The packages the source project does not lock yet get the versions the
+   template was tested with (`.pytemplate/presets/<preset>/constraints.txt`, the preset's whole
+   tested tree), once: `./deploy lock --upgrade` moves on.
 4. It runs `git init -b main` (unless `DIR` is inside a git work tree) with `deploy` and
    `deploy.ps1` executable. It makes no commit.
 
@@ -1330,7 +1331,7 @@ Pinned, and moved on purpose:
 
 | What | Where | How |
 |---|---|---|
-| dependencies | `uv.lock`; the presets' `constraints.txt` | `./deploy lock --upgrade` (or `--upgrade-package NAME`), then the tests below; regenerate the constraints of a preset whose versions moved (CLAUDE.md, section 11) |
+| dependencies | `uv.lock`; the presets' `constraints.txt` | `./deploy lock --upgrade` (or `--upgrade-package NAME`), then the tests below; regenerate the presets' constraints (each lists its preset's whole tested tree: CLAUDE.md, section 11) |
 | CPython, PyPy | `python.cpython`, `python.pypy` in the root and preset `pytemplate.toml` files | edit, `./deploy apply`; native dependencies must publish wheels for the new version |
 | the uv floor | `envs.MIN_UV` (0.10.12), written as `required-version` | with the Python pins: the first uv that downloads them |
 | basedpyright | `cmd_dev.BASEDPYRIGHT` and `cmd_dev.BASEDPYRIGHT_NODE` | together, then `./deploy render` (`editor.json` carries the version) |
