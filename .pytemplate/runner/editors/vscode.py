@@ -20,6 +20,7 @@ Status bar buttons come from the actboy168.tasks extension, which reads
 from __future__ import annotations
 
 import json
+import math
 import re
 import shlex
 from dataclasses import dataclass
@@ -27,7 +28,8 @@ from typing import Any
 
 from .. import render
 from ..config import BACKENDS, Config, compiled_paths
-from ..project import ROOT, TEMPLATES
+from ..project import ROOT, TEMPLATES, rel
+from ..ui import DeployError
 
 WS = "${workspaceFolder}"
 # mypyc.profile(cfg, "dev").stage relative to the root. launch.json is committed and shared by
@@ -78,10 +80,13 @@ RULES_RE = r"^(error|warning): ((?:src|tests)/[^:]*\.pyi?):(\d+): (.*)$"
 PYRIGHT_RE = r"^\s+((?:[A-Za-z]:)?[^:]+?):(\d+):(\d+) - (error|warning|info)(?:rmation)?: (.*?)(?: \((report[A-Za-z]+)\))?$"
 # pytest crash lines: `tests\test_x.py:15: AssertionError` (long tracebacks) or
 # `C:\p\tests\test_x.py:15: assert 1 == 2` (--tb=line). Intermediate frames end in "" or "in f".
-PYTEST_RE = (
-    r"^((?:[A-Za-z]:)?[^:\s][^:]*\.py):(\d+): "
-    r"((?:(?:[A-Z]\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\b.*)$"
-)
+_PYTEST_TAIL = r":(\d+): ((?:(?:[A-Z]\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\b.*)$"
+PYTEST_RE = r"^((?:[A-Za-z]:)?[^:\s][^:]*\.py)" + _PYTEST_TAIL
+# Under the mypyc backend pytest imports the stage (-o pythonpath=<stage>): an interpreted module
+# prints as `.build/mypyc-dev/stage/<pkg>/x.py` (relative or absolute; `.build/wsl/...` under WSL)
+# and a compiled one as the stage-relative path mypyc recorded, `<pkg>/core/x.py`. Both map back
+# to src/: the stage copy is overwritten on the next run, and `<root>/<pkg>/...` does not exist.
+_STAGE = r"(?:(?:[A-Za-z]:)?[^:\s][^:]*[\\/])?\.build[\\/](?:wsl[\\/])?mypyc-(?:dev|release)[\\/]stage[\\/]"
 
 
 def _roots() -> str:
@@ -111,6 +116,7 @@ def _mypyc_re(cfg: Config) -> str:
 
 RELATIVE = ["relative", WS]
 AUTODETECT = ["autoDetect", WS]  # relative to the root first, then absolute
+SRC_RELATIVE = ["relative", f"{WS}/src"]  # paths in the mypyc stage, a copy of src/
 
 
 def _matcher(owner: str, source: str, where: list[str], severity: str | None, pattern: dict[str, Any]) -> dict[str, Any]:
@@ -146,12 +152,21 @@ def problem_matchers(cfg: Config, kinds: set[str], profiles: list[str]) -> list[
     if "pyright" in kinds and cfg.typing.editor == "basedpyright":
         pattern = {"regexp": PYRIGHT_RE, "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5, "code": 6}
         out.append(_matcher("pyright", "basedpyright", AUTODETECT, None, pattern))
-    if "mypyc" in kinds and cfg.supports("mypyc"):
+    compiled = _packages(cfg) if "mypyc" in kinds and cfg.supports("mypyc") else ""
+    if compiled:
         pattern = {"regexp": _mypyc_re(cfg), "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5, "code": 6}
-        out.append(_matcher("mypyc", "mypyc", ["relative", f"{WS}/src"], None, pattern))
+        out.append(_matcher("mypyc", "mypyc", SRC_RELATIVE, None, pattern))
     if "pytest" in kinds:
-        pattern = {"regexp": PYTEST_RE, "file": 1, "line": 2, "message": 3}
-        out.append(_matcher("pytest", "pytest", AUTODETECT, "error", pattern))
+        regexp = PYTEST_RE
+        staged: list[str] = []
+        if compiled:
+            module = r"(?:" + compiled + r")(?:[\\/][^:]*)?\.py"
+            staged = [r"^" + _STAGE + r"([^:\s][^:]*\.py)" + _PYTEST_TAIL, r"^(" + module + r")" + _PYTEST_TAIL]
+            # exactly one matcher per line: VS Code's result must not depend on their order
+            regexp = r"^(?!" + _STAGE + r"|" + module + r":)" + PYTEST_RE[1:]
+        out.append(_matcher("pytest", "pytest", AUTODETECT, "error", {"regexp": regexp, "file": 1, "line": 2, "message": 3}))
+        for rx in staged:
+            out.append(_matcher("pytest", "pytest", SRC_RELATIVE, "error", {"regexp": rx, "file": 1, "line": 2, "message": 3}))
     return out
 
 
@@ -234,7 +249,10 @@ class Entry:
 
     @property
     def label(self) -> str:
-        return "deploy: " + " ".join(a for a in self.args if a != "--open")
+        # The catalog's `report --open` reads "deploy: report"; any other argument stays visible
+        # (`run --open` passes --open to the app: it is not the catalog's "deploy: run").
+        args = self.args[:1] if self.args == ("report", "--open") else self.args
+        return "deploy: " + " ".join(args)
 
 
 def _what_runs(cfg: Config, backend: str) -> str:
@@ -365,6 +383,8 @@ def tasks(cfg: Config) -> dict[str, Any]:
             match = _button_entry(cfg, tuple(raw.split()))
         else:
             entries.remove(match)
+        if any(b.label == match.label for b in buttons):
+            continue  # "report" and "report --open" name the same task: one task, one button
         buttons.append(match)
     out = [_task(cfg, e, _button_text(e)) for e in buttons]
     out += [_task(cfg, e, None) for e in entries]
@@ -373,16 +393,22 @@ def tasks(cfg: Config) -> dict[str, Any]:
 
 # --- launch.json -----------------------------------------------------------------------------
 
+# UTF-8 mode in every debug session, as under ./deploy run/test (proc.base_env) and in the builds:
+# without it open() without an encoding reads cp1252 on Windows (Python < 3.15), only under F5.
+DEBUG_ENV = {"PYTHONUTF8": "1"}
+
 
 def _debug(name: str, program: str, env_dir: str | None = None, **extra: Any) -> dict[str, Any]:
     """A debugpy launch config. `env_dir`: an explicit interpreter for both OS layouts
-    (bin/python vs Scripts/python.exe); None keeps VS Code's selected interpreter."""
+    (bin/python vs Scripts/python.exe); None keeps VS Code's selected interpreter. An `env` in
+    `extra` is added to DEBUG_ENV."""
     conf: dict[str, Any] = {"name": name, "type": "debugpy", "request": "launch", "program": f"{WS}/{program}"}
     if env_dir:
         conf["python"] = f"{WS}/{env_dir}/bin/python"
         conf["windows"] = {"python": f"{WS}/{env_dir}/Scripts/python.exe"}
     conf.update({"cwd": WS, "console": "integratedTerminal", "justMyCode": True})
     conf.update(extra)
+    conf["env"] = {**DEBUG_ENV, **extra.get("env", {})}
     return conf
 
 
@@ -418,6 +444,7 @@ def launch(cfg: Config) -> dict[str, Any]:
             "cwd": WS,
             "console": "integratedTerminal",
             "justMyCode": False,
+            "env": dict(DEBUG_ENV),
         }
     )
     return {"version": "0.2.0", "configurations": configs}
@@ -425,10 +452,75 @@ def launch(cfg: Config) -> dict[str, Any]:
 
 # --- settings.json / extensions.json ---------------------------------------------------------
 
+# With typing.editor = "basedpyright" the basedpyright extension checks these at every start. When
+# they are not set it asks to change them and writes the answer into the workspace settings, i.e.
+# this generated file, which then counts as hand-edited: the Python extension's own language server
+# conflicts with basedpyright's, and Pylance's type checking would duplicate its diagnostics.
+# `[vscode] settings` can still override them.
+BASEDPYRIGHT_SETTINGS = {"python.languageServer": "None", "python.analysis.typeCheckingMode": "off"}
+
+
+def _key(key: str) -> str:
+    return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else json.dumps(key)
+
+
+def _json_problem(value: Any, where: str) -> str | None:
+    """Why `value` cannot go into a JSON file (None when it can): TOML also has dates and times,
+    and json.dumps would write nan/inf, which is not JSON."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            problem = _json_problem(v, f"{where}.{_key(str(k))}")
+            if problem:
+                return problem
+        return None
+    if isinstance(value, list):
+        for i, v in enumerate(value):
+            problem = _json_problem(v, f"{where}[{i}]")
+            if problem:
+                return problem
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return f"{where} = {value}: JSON has no nan or inf"
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return None
+    kind = type(value).__name__.replace("datetime", "date-time")
+    return f"{where} = {value} is a {kind}: VS Code settings take strings, numbers, booleans, arrays and tables"
+
+
+def _settings_template() -> dict[str, Any]:
+    path = TEMPLATES / "vscode" / "settings.json"
+    try:
+        data: object = json.loads(path.read_text(encoding="utf-8-sig"))  # an editor may add a BOM
+    except OSError as e:
+        raise DeployError(f"cannot read {rel(path)}: {e.strerror or e}") from None
+    except UnicodeDecodeError:
+        raise DeployError(f"{rel(path)} is not UTF-8 text: save it as UTF-8") from None
+    except json.JSONDecodeError as e:
+        raise DeployError(
+            f"{rel(path)}: invalid JSON at line {e.lineno}: {e.msg} (plain JSON: no comments, no trailing commas)"
+        ) from None
+    if not isinstance(data, dict):
+        raise DeployError(f"{rel(path)} must hold a JSON object ({{ ... }})")
+    problem = _json_problem(data, "settings")
+    if problem:
+        raise DeployError(f"{rel(path)}: {problem}")
+    return data
+
 
 def settings(cfg: Config, profile: str) -> dict[str, Any]:
-    base: dict[str, Any] = json.loads((TEMPLATES / "vscode" / "settings.json").read_text("utf-8"))
-    base.update(render.load_profile(profile).get("vscode", {}))
+    """The template, then the typing profile's [vscode], then the basedpyright answers, then
+    pytemplate.toml [vscode] settings: later ones win."""
+    base = _settings_template()
+    from_profile = render.load_profile(profile).get("vscode", {})
+    problem = _json_problem(from_profile, "[vscode]")
+    if problem:
+        raise DeployError(f"typing profile '{profile}': {problem}")
+    base.update(from_profile)
+    if cfg.typing.editor == "basedpyright":
+        base.update(BASEDPYRIGHT_SETTINGS)
+    problem = _json_problem(cfg.vscode.settings, "vscode.settings")
+    if problem:
+        raise DeployError(f"pytemplate.toml: {problem}")
     base.update(cfg.vscode.settings)
     return base
 
