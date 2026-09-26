@@ -9,7 +9,7 @@ schema = 1
 name = "{{name}}"   # executable name; the Python package is src/{{pkg}}/
 preset = "flet"
 gui = true
-assets = "assets"   # src/assets/: Flet serves it (assets_dir) and it is packaged with the app
+assets = "assets"   # src/assets/: Flet serves it (assets_dir) and it is packaged with the app; "" = none, no other name
 
 [backend]
 # Flet: Flutter draws the UI, and Flet's Python side (diffs, messages) cannot be compiled.

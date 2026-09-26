@@ -10,7 +10,7 @@ schema = 1
 name = "{{name}}"   # executable name; the Python package is src/{{pkg}}/
 preset = "script"   # script | raylib | flet   (to switch: ./deploy init <preset>)
 gui = false         # true: executable without a console and launchers with pythonw/pypyw
-assets = ""         # folder inside src/ that is packaged with the app ("" = none)
+assets = ""         # "assets": bundle src/assets/ with the app; "" = none (no other folder name works)
 
 [backend]
 # cpython: the usual interpreter. No typing requirements.
@@ -21,7 +21,7 @@ supported = ["cpython", "mypyc"]   # to add PyPy: ./deploy mode --supports +pypy
 
 [python]
 cpython = "3.14"        # minor version; uv manages the patch
-pypy = "pypy@3.11.15"   # EXACT: PyPy 8.0 changed the ABI (pp80) and there are no wheels for it yet
+pypy = "pypy@3.11.15"   # EXACT: a newer PyPy can change the extension ABI (8.0: pp80); bump it once your deps ship wheels for it
 jit = false             # experimental CPython JIT (run/test/portable only; needs python.org)
 
 [typing]

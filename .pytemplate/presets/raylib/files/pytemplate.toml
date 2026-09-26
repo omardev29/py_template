@@ -9,7 +9,7 @@ schema = 1
 name = "{{name}}"   # executable name; the Python package is src/{{pkg}}/
 preset = "raylib"
 gui = true          # executable without a console; portable launchers use pythonw/pypyw
-assets = "assets"   # src/assets/ is bundled with the app (access: {{pkg}}.resources.asset())
+assets = "assets"   # src/assets/ is bundled with the app (access: {{pkg}}.resources.asset()); "" = none, no other name
 
 [backend]
 # PyPy by default: its JIT speeds up your logic AND the cffi calls into raylib (measured on a
@@ -19,7 +19,7 @@ supported = ["cpython", "pypy", "mypyc"]   # with PyPy: Python 3.11 syntax
 
 [python]
 cpython = "3.14"
-pypy = "pypy@3.11.15"   # EXACT: PyPy 8.0 changed the ABI (pp80) and there are no wheels for it yet
+pypy = "pypy@3.11.15"   # EXACT: a newer PyPy can change the extension ABI (8.0: pp80); bump it once your deps ship wheels for it
 jit = false
 
 [typing]

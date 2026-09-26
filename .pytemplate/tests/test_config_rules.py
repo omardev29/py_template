@@ -1088,6 +1088,9 @@ def test_mode_supports_round_trip(project: Path) -> None:
         pytest.skip("the round trip removes and adds back mypyc")
     files = ["pytemplate.toml", "pyproject.toml", "uv.lock"]
     original, generated = {f: (project / f).read_bytes() for f in files}, _generated(project)
+    active = cfg["backend"]["active"]
+    stderr = _ok(project, "--dry-run", "mode", "--supports", f"-{active}")  # writes nothing (checked below)
+    assert f"note: {active} is no longer supported: the active backend becomes" in stderr
     _ok(project, "mode", "--supports", "-mypyc")
     assert "mypyc" not in _toml(project)["backend"]["supported"]
     assert "mypyc" not in _editor_json(project)["backend"]["supported"]

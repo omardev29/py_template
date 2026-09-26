@@ -240,9 +240,9 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
     if supported != cfg.backend.supported:
         changes.append(("backend", "supported", supported))
     active = ns.backend or cfg.backend.active
-    if active not in supported:
+    dropped_active = active not in supported  # `--supports -cpython` while cpython is active
+    if dropped_active:
         active = supported[0]
-        ui.info(f"note: {cfg.backend.active} is no longer supported: the active backend becomes {active}")
     if active != cfg.backend.active:
         changes.append(("backend", "active", active))
     if ns.typing:
@@ -262,6 +262,8 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
     for table, key, value in changes:
         text = config.set_value(text, table, key, value)
     planned = _config_from_text(text, "mode: the new pytemplate.toml")
+    if dropped_active:
+        ui.info(f"note: {cfg.backend.active} is no longer supported: the active backend becomes {active}")
 
     adding_pypy = planned.pypy_enabled and not cfg.pypy_enabled
     syncs: list[envs.PyEnv] = []
