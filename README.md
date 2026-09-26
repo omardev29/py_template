@@ -121,7 +121,8 @@ for `-` (`My-Game` -> `src/my_game/`). A name has letters, digits, `-` and `_`, 
 letter and ends with a letter or digit, and must not be a Python keyword, a standard-library
 module, a backend (`cpython`, `pypy`, `mypyc`), a package the project locks (directly or not:
 `flet`, `rich`, `pygments`...) or a module one of them installs under another name (`py`,
-`markdown_it`, `pyray`, `yaml`...), one of the project's own names (`src`, `tests`, `typings`,
+`markdown_it`, `pyray`, `yaml`...; for a package you added, such as beautifulsoup4's `bs4`, once
+it is installed in `.venv`), one of the project's own names (`src`, `tests`, `typings`,
 `build`, `dist`, `assets`, `main`), a Python command (`py`, `python`, `python3`, `pythonw`,
 `pypy3`...: the Windows `.cmd` launchers call them) or a Windows device name (`con`, `aux`,
 `nul`, `com1`...). So

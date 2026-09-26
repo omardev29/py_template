@@ -545,7 +545,7 @@ header rules (with detector tests proving each rule fires).
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
-| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `DeployError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./deploy __init`; with rollback), `copy_template`, `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
+| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `DeployError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `_installed_import_names`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./deploy __init`; with rollback), `copy_template`, `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
 | `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`, `COMPILER_MISSING`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
@@ -1983,7 +1983,10 @@ Per method:
   the pinned wheels' RECORD files: pytest's `py`, which pytest imports before the app,
   markdown-it-py's `markdown_it`, raylib's `pyray`, pyyaml's `yaml`, pillow's `PIL` in lower
   case...; `test_import_names_follow_the_installed_packages` checks it against what `.venv`
-  installs). Only the presets' pinned packages are mapped (15.2).
+  installs), and for any other package of those names what the project's environments
+  installed (`presets._installed_import_names`: the RECORD of every `*.dist-info` in `.venv*`,
+  either layout: beautifulsoup4's `bs4` once `./deploy add` synced it; `new` reads the source
+  project's). Without an environment only the pinned packages are mapped (15.2).
   `new` derives the name from the folder with `name_from_folder` (NFKD without the combining
   marks, every run of other characters, letters without an ASCII form included, -> `-`, no
   `-`/`_` at the ends) and checks it before copying, so `./deploy new ../flet --preset
@@ -3989,10 +3992,11 @@ Behaviour:
   extensions out of `common/`, and a cpython/pypy wheel stays tagged `py3-none-any`.
 - `sync_tree` does not detect a case-only rename (`Data.py` -> `data.py`) on a
   case-insensitive file system: the stage keeps the old spelling until `./deploy clean`.
-- The name check (`presets.check_name_free`) knows the import names only of the packages the
-  presets pin (`presets.IMPORT_NAMES`): a dependency the user adds is compared by its
-  distribution name (`beautifulsoup4` refuses `beautifulsoup4`, not `bs4`). Reading them needs
-  the installed wheels (an environment of the project, never there for `new`'s next preset).
+- The name check (`presets.check_name_free`) knows the import names of a dependency the user
+  added (not pinned by a preset, so not in `presets.IMPORT_NAMES`) only while an environment
+  of the project has it installed (`presets._installed_import_names`): in a clone without
+  `.venv`, `./deploy rename bs4` after the dependency beautifulsoup4 still passes (its
+  distribution name is refused). `./deploy add` syncs `.venv`, so the usual order is covered.
 - A pyz built on Windows stores no x bit (Windows files have no Unix mode), so the executables of
   its Linux or macOS targets (`--target`), or of a script in `src/`, are not runnable where it is
   extracted; the generated CI builds each OS's part on that OS, and `pyz-merge` keeps the parts'

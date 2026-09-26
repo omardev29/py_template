@@ -1887,6 +1887,34 @@ def test_new_from_a_project_without_the_presets_tree_refuses_its_names(fake: Fak
     presets.check_name_free(cfg, preset, "demo")
 
 
+def _install(site: Path, dist_info: str, *paths: str) -> None:
+    """A distribution as uv installs it: its dist-info folder with a RECORD."""
+    info = site / dist_info
+    info.mkdir(parents=True)
+    rows = [*paths, f"{dist_info}/METADATA,sha256=x,1", f"{dist_info}/RECORD,,"]
+    (info / "RECORD").write_text("".join(f"{r}\n" if "," in r else f"{r},sha256=x,1\n" for r in rows), encoding="utf-8")
+
+
+def test_name_check_reads_the_import_names_of_installed_dependencies(fake: Fake) -> None:
+    """IMPORT_NAMES only knows the presets' pins: after `./deploy add beautifulsoup4`,
+    `./deploy rename bs4` passed, and src/bs4/ shadowed the library. The environments of the
+    project (either layout: lib/pythonX.Y or Windows' Lib) name what each package installs."""
+    text = FAKE_PYPROJECT.replace('"rich>=15.0.0",', '"rich>=15.0.0",\n    "beautifulsoup4>=4.13",\n    "python-dateutil",')
+    (fake.root / "pyproject.toml").write_text(text, encoding="utf-8")
+    site = fake.root / ".venv" / "lib" / "python3.14" / "site-packages"
+    _install(site, "beautifulsoup4-4.13.4.dist-info", "bs4/__init__.py", "bs4/builder/__init__.py")
+    _install(site, "unrelated_tool-1.0.dist-info", "othermod.py", "../../../bin/othertool")
+    _install(site, "compiled-2.0.dist-info", "fastmod.cpython-314-x86_64-linux-gnu.so", "compiled.pth")
+    _install(fake.root / ".venv-pypy" / "Lib" / "site-packages", "python_dateutil-2.9.0.post0.dist-info", "dateutil/__init__.py")
+    for name, module, dist in (("bs4", "bs4", "beautifulsoup4"), ("BS4", "bs4", "beautifulsoup4"), ("dateutil", "dateutil", "python-dateutil")):
+        with pytest.raises(DeployError, match=f"would shadow the module '{module}' of {dist}") as e:
+            presets.check_name_free(fake.cfg, "script", name)
+        assert e.value.code == 2
+    for name in ("othermod", "fastmod", "compiled", "bin", "demo"):  # not a dependency of the project, or no module
+        presets.check_name_free(fake.cfg, "script", name)
+    assert presets._installed_import_names()["compiled"] == {"fastmod"}
+
+
 def test_new_from_another_project_gets_the_tested_versions(fake: Fake) -> None:
     """`new --preset script` from a raylib project resolved rich, markdown-it-py and mdurl to
     the newest release of the day: the pins must reach every package the source lock lacks."""

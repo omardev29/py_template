@@ -13,6 +13,7 @@ internal step (and how the template maintainer regenerates the template root).
 
 from __future__ import annotations
 
+import csv
 import keyword
 import os
 import re
@@ -453,13 +454,49 @@ def _dependency_names(cfg: Config | None, preset: str) -> set[str]:
     return names
 
 
+def _record_modules(info: Path) -> set[str]:
+    """The top-level modules a distribution installed (its `*.dist-info` folder): the first part
+    of every path of its RECORD (a package folder, `mod.py`, `mod.<abi>.so`), without the
+    metadata, the scripts outside site-packages and anything that is no identifier."""
+    try:
+        rows = list(csv.reader((info / "RECORD").read_text(encoding="utf-8").splitlines()))
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return set()
+    out: set[str] = set()
+    for row in rows:
+        parts = row[0].replace("\\", "/").split("/") if row else []
+        if not parts or parts[0].endswith((".dist-info", ".data")):
+            continue
+        head = parts[0] if len(parts) > 1 else parts[0].split(".")[0]
+        if len(parts) == 1 and not parts[0].endswith((".py", ".so", ".pyd")):
+            continue  # a .pth file and the like
+        if head.isidentifier() and head != "__pycache__":
+            out.add(head)
+    return out
+
+
+def _installed_import_names() -> dict[str, set[str]]:
+    """The top-level modules of every distribution installed in an environment of the project
+    (`.venv*`, either layout), by normalized distribution name: what a dependency the user
+    added installs under another name (beautifulsoup4's bs4), which IMPORT_NAMES cannot know.
+    Empty without an environment (a fresh clone, the copy `new` makes: its source checked it)."""
+    out: dict[str, set[str]] = {}
+    for env in sorted(p for p in ROOT.glob(".venv*") if p.is_dir()):
+        for site in (*env.glob("lib/*/site-packages"), env / "Lib" / "site-packages"):
+            for info in sorted(site.glob("*.dist-info")) if site.is_dir() else ():
+                dist = _norm_name(info.name[: -len(".dist-info")].rsplit("-", 1)[0])
+                out.setdefault(dist, set()).update(_record_modules(info))
+    return out
+
+
 def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
     """Reject an app name that would break the project: one uv refuses (APP_NAME), a package
     src/<pkg>/ that is a Python keyword, a standard library module (of any supported Python), a
     backend name, a Windows device name, one of the project's own folders or files, a package
     the project depends on, directly or not (uv refuses a project that depends on itself, and
     src/<pkg>/ would shadow the library), or a module such a package installs under another
-    name (IMPORT_NAMES: pytest's py, raylib's pyray).
+    name (IMPORT_NAMES for the presets' pins: pytest's py, raylib's pyray; the environments of
+    the project for the rest: beautifulsoup4's bs4 once `./deploy add` installed it).
     new, init, their dry runs and rename (which keeps the first line) call it."""
     pkg = name.replace("-", "_").lower()
     hint = "\n  Choose another name with --name NAME"
@@ -492,8 +529,10 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
             f"({clash}, direct or indirect): uv would refuse the project and src/{pkg}/ would "
             f"shadow the library.{hint}"
         )
-    for dist in sorted(names & IMPORT_NAMES.keys()):
-        module = next((m for m in IMPORT_NAMES[dist] if m.lower() == pkg), None)
+    installed = _installed_import_names()
+    for dist in sorted(names & (IMPORT_NAMES.keys() | installed.keys())):
+        modules = sorted({*IMPORT_NAMES.get(dist, ()), *installed.get(dist, ())})
+        module = next((m for m in modules if m.lower() == pkg), None)
         if module is not None:
             raise DeployError(
                 f"src/{pkg}/ would shadow the module '{module}' of {dist}, a dependency of the "
