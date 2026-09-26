@@ -5,7 +5,14 @@
 # supports (./deploy sync, never setup), runs ./deploy check all and ./deploy test per backend,
 # and builds one .pyz per OS. mypyc does not compile for other OSes, so each runner contributes
 # its binaries and the "pyz" job merges them into a single .pyz that uses the binary for each OS
-# (and the .py on any other interpreter).
+# (and the .py on any other interpreter), uploaded with the .cmd wrapper that starts it on
+# Windows.
+#
+# Moving parts on purpose: setup-uv installs the newest uv that satisfies required-version in
+# pyproject.toml (the floor ./deploy needs; a pinned uv cannot download Pythons released after
+# it), and the runner labels are -latest (GitHub keeps two GA images per OS and retires the
+# oldest label about six months after a newer one is GA, so a pinned label stops working for
+# certain; -latest only moves, and this workflow needs little more than bash, git and uv).
 name: ci
 
 on:
@@ -71,4 +78,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: myapp-pyz
-          path: dist/myapp.pyz
+          # pyz-merge writes the .cmd wrapper next to the merged .pyz
+          path: |
+            dist/myapp.pyz
+            dist/myapp.cmd
