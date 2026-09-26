@@ -16,8 +16,16 @@ curl_ca() {  # curl with the builder's CA bundle, when it passed one
     if [ -n "$ca" ]; then curl --cacert "$ca" "$@"; else curl "$@"; fi
 }
 
+# The snapshot's toolchain needs the base's libc6 at the same version: a snapshot older than the
+# base fails with unmet dependencies. Say so instead (pins.py).
+serial=$(sed -n 's/^serial: *\([0-9]\{8\}\).*/\1/p' /etc/cloud/build.info 2>/dev/null) || serial=
+if [ -n "$serial" ] && [ "${APT_SNAPSHOT%%T*}" -le "$serial" ]; then
+    echo "system: APT_SNAPSHOT $APT_SNAPSHOT is not later than the base image (serial $serial): move it past the base's date in pins.py" >&2
+    exit 1
+fi
 # The base has no CA certificates, and the snapshot is served over https only: the certificates
-# come first, from the live archive over http (apt checks the signed Release files).
+# come first, from the live archive over http (apt checks the signed Release files); they and
+# openssl are the build day's versions, not the snapshot's.
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates
 # Everything else from the snapshot: every apt call below reads the same lists

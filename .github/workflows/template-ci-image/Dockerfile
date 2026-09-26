@@ -19,7 +19,7 @@ ENV HOME=/home/runner \
     CI_IMAGE_INPUTS=/opt/ci/inputs.txt \
     PATH=/opt/ci/uv/bin:/opt/ci/nvim/default/bin:/home/runner/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WORKDIR /home/runner
-# One layer per step: the layers of a pull download and unpack in parallel
+# One layer per step: a pull downloads the layers in parallel
 RUN --mount=type=bind,source=.,target=/src --mount=type=secret,id=ca,mode=0444 sh /opt/ci/warm template
 RUN --mount=type=bind,source=.,target=/src --mount=type=secret,id=ca,mode=0444 sh /opt/ci/warm presets
 CMD ["sleep", "infinity"]

@@ -2661,7 +2661,8 @@ short temp tree and unset `NVIM_APPNAME`.
 - Test rules: tests that need a missing tool or shell must skip cleanly (they also run on
   Linux/macOS CI), and so must tests that need the network: the real runs in `test_rename.py`
   and `test_apply.py` re-lock with `uv lock` and SKIP with "needs PyPI" when uv cannot reach
-  the index (`rename.needs_pypi`); everything else in `./deploy selftest` works offline once
+  the index (`rename.needs_pypi`), and so do the real `new` runs (`test_presets`' `network`
+  fixture, `test_removals`); everything else in `./deploy selftest` works offline once
   `./deploy setup` has run. Tests that spawn `./deploy` must scrub `UV`, `VIRTUAL_ENV`,
   `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON` and `PYTEMPLATE_*` from the child env (pytest itself
   runs under `uv run`). Keep them fast: a runner start costs ~0.3 s, and the Windows launcher
@@ -2829,8 +2830,9 @@ short temp tree and unset `NVIM_APPNAME`.
   `RUNNER_TEMP`, git's default CRLF checkout), with what the tests look for: dash, zsh, ksh,
   mksh, yash, busybox, fish (apt); fish and nushell (brew); MSYS2 with dash and uv copied to
   `~\.local\bin` (the login-shell test); xonsh 0.24.2 and Neovim v0.12.5 everywhere; actionlint
-  1.7.12 (SHA-256 checked) on Linux; the runner's own pinned UPX (`upx.find`) on Linux and
-  Windows; taplo and the basedpyright pin in the uv cache (their tests run offline). Job
+  1.7.12 (SHA-256 checked) on Linux; the UPX `upx.find` finds (apt's `/usr/bin/upx` of the
+  Linux runner image, the pinned download on Windows); taplo and the basedpyright pins in the uv
+  cache (their tests run offline). Job
   `python-floor`: the runner starts on 3.11 (`uv run --python 3.11 --script`), and the suite
   runs in process on 3.11 (`uv run --no-project --python 3.11 --with pytest==<locked>`: the
   runner code itself on its floor; the tools the tests start stay in `.venv`). Not on PyPy:
@@ -2861,28 +2863,40 @@ short temp tree and unset `NVIM_APPNAME`.
   PowerShell and actionlint from their releases, SHA-256 checked, uv outside the folders the
   no-uv tests hide; xonsh) and what they download, in the runner user's default folders (`warm`,
   which runs what those jobs run: CPython 3.14 and 3.11, PyPy, the wheels of the template's lock
-  and of a new raylib and flet project, taplo, basedpyright, the pinned UPX). `pins.py` holds
+  and of a new raylib and flet project, taplo, basedpyright with its Node pin, and the pinned UPX:
+  the image has no system upx, the Linux runner image has apt's). `pins.py` holds
   the image's own pins and reads the others from their files by text (`.python-version`,
-  `cmd_nvim.MIN_LAZYVIM`, `cmd_dev.BASEDPYRIGHT`, the taplo pin of `test_render_core.py`,
-  `upx.VERSION`, the floor of `.pytemplate/deploy.py`). The tag is the first 16 hex digits of
+  `cmd_nvim.MIN_LAZYVIM`, `cmd_dev.BASEDPYRIGHT` and `BASEDPYRIGHT_NODE`, the taplo pin of
+  `test_render_core.py`, `upx.VERSION`, the floor of `.pytemplate/deploy.py`). `APT_SNAPSHOT`
+  must be later than the base's build date (`system` refuses the other order: the snapshot's
+  toolchain needs the base's libc6 at the same version). The tag is the first 16 hex digits of
   the sha256 of `pins.py canonical`: every pin, the image's files and the files that decide its
   downloads (`uv.lock`, `pyproject.toml`, `pytemplate.toml`, `.python-version`, each preset's
   `preset.toml`, `constraints.txt` and `pytemplate.toml`; a BOM and CRLF do not count); the image
-  is `ghcr.io/<owner>/<repo>-ci:<tag>`. The `image` job builds it (`build`: the tracked files as
+  is `ghcr.io/<owner>/<repo>-ci:<tag>`. Not named by the tag: ca-certificates and openssl (from
+  the live archive, before the snapshot: the base has no CA certificates and the snapshot is
+  https only) and the unpinned dependencies of the pinned tools (xonsh's), taken on build day.
+  The `image` job builds it (`build`: the tracked files as
   the context) when the tag is not published, and weekly from scratch (`--no-cache --pull`: red
   with no commit behind it means a pinned download is gone, or an unpinned dependency of a pin
   moved), checks that its `/opt/ci/inputs.txt` equals this checkout's canonical text, prints the
-  tool versions, and pushes a missing tag only, from this repository only (a fork's pull request
-  gets a token that cannot push). A tag is never rebuilt over. Stage 1 (now): its other jobs run
+  tool versions, and pushes a tag only when the registry says it is missing ("manifest unknown",
+  "denied"; any other answer fails the job, and the push step asks again first; two runs that
+  build one new tag at once may both push it, from the same inputs), and only from this
+  repository (a fork's pull request gets a token that cannot push). Stage 1 (now): its other jobs run
   template-selftest's Linux selftest, python-floor and new-project, template-launchers' Linux
   posix job and template-nvim's two Linux rows in the image, as GitHub container jobs, whenever
   the image is usable (published, or pushed by this run); they are not gates. `options: --init
-  --user 1001` (the runner's uid owns the checkout; an init reaps orphaned processes),
-  `HOME: /home/runner` (where the caches are), and the nvim job's `--dir /tmp/pt-nvim` (in a
-  container job the `runner.temp` context names the host's path). The package is private when
-  first pushed: the jobs pull with the job token (`packages: read`). Stage 2, once their `-rs`
-  skip lists and times match the bare jobs: the Linux jobs move into the image, and uv-floor,
-  the e2e rows, the nvim canary and every Windows and macOS job stay on bare runners.
+  --user 1001` (the uid of the image's `USER runner`, the runner's uid, which owns the checkout;
+  an init reaps orphaned processes), `HOME: /home/runner` (where the caches are), and the nvim
+  job's `--dir /tmp/pt-nvim` (`${{ runner.temp }}` is a host path, translated only in step
+  inputs and environment values). The package is private when first pushed: the jobs pull with
+  the job token (`packages: read`). Stage 2, once every test that runs in a bare Linux job also
+  runs in its image job (the image's skips are a subset of the bare job's: python-floor and
+  new-project run more there, having Neovim, the shells, xonsh, actionlint, taplo and
+  basedpyright), those pass, and the image jobs are no slower: the Linux jobs move into the
+  image, and uv-floor, the e2e rows, the nvim canary and every Windows and macOS job stay on bare
+  runners.
 - **[template repo]** `template-launchers.yml` also runs weekly and installs xonsh 0.24.2 on
   pushes and pull requests but the newest xonsh on the schedule (a red scheduled run with no
   commit behind it is upstream drift; the shell versions are logged: xonsh, fish, pwsh,
@@ -2919,7 +2933,11 @@ ksh, mksh, yash, fish, Cygwin, busybox-w32, WSL, macOS bash 3.2, and (macOS jobs
 nushell. Since September 2026 template-selftest runs every Windows-only test (the deploy.cmd
 and registry tests included) and nushell's on CI, and template-nvim runs Neovim 0.11.2 (it
 passed once on Linux when the row was added); none of these new jobs had run on GitHub when
-they were written. Untested anywhere so far:
+they were written. Nor had template-ci-image.yml (stage 1): its seven jobs passed locally,
+in a local build of the image, as `docker run --init --user 1001` with the checkout mounted
+(September 2026, behind a TLS-intercepting proxy: the image's `ca` secret path runs only in
+such a local build, CI passes no secret), with the skip list of the hosted Ubuntu selftest
+minus its PyPy test. Untested anywhere so far:
 PowerShell 6.x-7.2, a UNC current folder, uv found only in `ProgramFiles` or chocolatey, the
 install prompt on Windows (POSIX `deploy` and pwsh
 `deploy.ps1` answer it on a pseudo-terminal), Neovim 0.11 on Windows, pyright via Mason, VS
@@ -3833,14 +3851,16 @@ GitHub Actions and hosted runners:
 - **WSL setup on hosted runners is slow and sometimes fails** (LIMITATION): Fix: the WSL job of
   `template-launchers.yml` is `continue-on-error`. Test: untested (CI only). Goes: when it is
   reliable.
-- **A container job runs as root, with `tail -f /dev/null` as PID 1 and `HOME=/github/home`, and
-  its `runner.temp` context names the host's path** (LIMITATION): as root, git sees the
-  runner's (uid 1001) checkout as dubious ownership and the read-only-folder tests skip; nothing
-  reaps orphaned processes (the nvim harness counts them as alive); the image's caches under
-  `/home/runner` are not found; an upload of `${{ runner.temp }}/...` finds nothing. Up:
-  actions/runner#2058 (`runner.temp`). Fix: the jobs of template-ci-image.yml pass `options:
-  --init --user 1001` and `HOME: /home/runner`, and its nvim job uses `/tmp/pt-nvim` (13.2).
-  Test: `test_workflows.py::test_ci_image_workflow_builds_publishes_and_runs_the_linux_jobs`.
+- **A container job runs as the image's USER (root for most images: the runner passes no
+  `--user`), with `tail -f /dev/null` as PID 1 and `HOME=/github/home`, and `${{ runner.temp }}`
+  is a host path, translated only in step inputs and environment values** (LIMITATION): as
+  root, git would see the runner's (uid 1001) checkout as dubious ownership and the
+  read-only-folder tests would skip; nothing reaps orphaned processes (the nvim harness counts
+  them as alive); the image's caches under `/home/runner` are not found. Fix: the image's
+  `system` creates `runner` with uid `pins.CI_UID` (1001) and the Dockerfile ends with `USER
+  runner`; the jobs of template-ci-image.yml also pass `options: --init --user 1001` (the uid
+  stays right if USER changes) and `HOME: /home/runner`, and its nvim job uses `/tmp/pt-nvim`
+  (13.2). Test: `test_workflows.py::test_ci_image_workflow_builds_publishes_and_runs_the_linux_jobs`.
   Goes: never.
 - **A GHCR package pushed with the job token is private, and a fork's pull request token cannot
   push** (LIMITATION): Fix: the container jobs pull with the job token (`packages: read`), the
@@ -3856,8 +3876,8 @@ Ubuntu and apt (the CI image, 13.2):
   the image build of template-ci-image.yml. Goes: never.
 - **apt downloads as the `_apt` user, and a BuildKit secret is readable by root only** (LIMITATION):
   a builder's CA bundle (a TLS-intercepting proxy) could not be read by apt. Fix: the
-  Dockerfile mounts the `ca` secret with `mode=0444`. Test: a local build through such a proxy
-  (13.3). Goes: never.
+  Dockerfile mounts the `ca` secret with `mode=0444`. Test: untested on CI (template-ci-image.yml
+  passes no secret); a local build behind such a proxy, September 2026 (13.3). Goes: never.
 
 PowerShell (details: section 4.5):
 - **A `.ps1` runs inside the caller's session** (LIMITATION): what it sets stays there, and the
@@ -4228,10 +4248,11 @@ Behaviour:
 - **[template repo]** The CI image (13.2) freezes the Linux tool versions of its jobs per tag (uv
   0.12.19, xonsh, noble's shells, git 2.43 and Node 18, PowerShell 7.6.6): the newest ones show
   up in the jobs on bare runners (Windows, macOS, the e2e rows, the nvim canary, and until stage
-  2 the Linux jobs that still run bare). Its jobs still reach PyPI (the resolution of `./deploy
-  new`, test_presets' `uv pip compile --no-cache`) and GitHub (the LazyVim starter and plugins
-  of `selftest --nvim`). A fork's pull request that changes one of its inputs skips the jobs in
-  the image. Old tags pile up in GHCR: nothing prunes them.
+  2 the Linux jobs that still run bare); its Ubuntu stays 24.04 when ubuntu-latest moves. Its
+  jobs still reach PyPI (the resolution of `./deploy new`, test_presets' `uv pip compile
+  --no-cache`) and GitHub (the LazyVim starter and plugins of `selftest --nvim`), and the pull
+  of the image counts toward each job's timeout. A fork's pull request that changes one of its
+  inputs skips the jobs in the image. Old tags pile up in GHCR: nothing prunes them.
 - A pyz built on Windows stores no x bit (Windows files have no Unix mode), so the executables of
   its Linux or macOS targets (`--target`), or of a script in `src/`, are not runnable where it is
   extracted; the generated CI builds each OS's part on that OS, and `pyz-merge` keeps the parts'
@@ -4327,11 +4348,12 @@ Code coupling (rename together):
   <-> `BuildRequest.out_name` and the merged upload's `.cmd` <-> `pyz.wrapper_path` (10;
   `test_ci_workflow_for_every_preset_and_backend_set`).
 - **[template repo]** `template-ci-image/pins.py` reads pins from the code by text:
-  `.python-version`, the `MIN_LAZYVIM = (...)` line of `cmd_nvim.py`, `BASEDPYRIGHT = "..."` of
-  `cmd_dev.py`, `VERSION = "..."` of `upx.py`, the one `"taplo==X"` of `test_render_core.py` and
+  `.python-version`, the `MIN_LAZYVIM = (...)` line of `cmd_nvim.py`, `BASEDPYRIGHT = "..."` and
+  `BASEDPYRIGHT_NODE = "..."` of `cmd_dev.py`, `VERSION = "..."` of `upx.py`, the one `"taplo==X"` of `test_render_core.py` and
   the `# requires-python` line of `.pytemplate/deploy.py` (`test_ci_image_pins_come_from_the_code`);
-  the nvim matrix of template-ci-image.yml and the xonsh, Neovim and actionlint literals of the
-  other template workflows repeat its pins (`test_workflow_literals_follow_the_ci_image_pins`).
+  the nvim matrix of template-ci-image.yml (`test_ci_image_workflow_builds_publishes_and_runs_the_linux_jobs`)
+  and the xonsh, Neovim and actionlint literals of the other template workflows
+  (`test_workflow_literals_follow_the_ci_image_pins`) repeat its pins.
 - template-selftest.yml reads pins from the code by text: `envs.MIN_UV` (`MIN_UV = "..."`),
   `cmd_dev.BASEDPYRIGHT`, the taplo pin of `test_render_core.py` and the pytest pin of
   `uv.lock`; it deselects `test_init_round_trip_through_every_preset_is_byte_identical` by

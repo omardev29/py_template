@@ -524,6 +524,7 @@ def test_nuitka_python_newer_than_the_pin_is_refused_before_any_work(monkeypatch
 
     monkeypatch.setattr(cmd_build, "run_checks", must_not_run)
     monkeypatch.setattr(cmd_build, "payload", must_not_run)
+    monkeypatch.setattr(cmd_build, "check_lock", lambda cfg: None)  # uv would download a CPython 3.15
     cfg = make({"python": {"cpython": "3.15"}})
     if not extra:
         with pytest.raises(DeployError) as e:

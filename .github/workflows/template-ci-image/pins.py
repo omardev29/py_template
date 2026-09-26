@@ -4,8 +4,10 @@ Template repository only: `./deploy new` never copies `.github/workflows/templat
 is the only home of the pins that exist for the image alone (the base, the apt snapshot, uv,
 Neovim, PowerShell, actionlint, xonsh, the user id); the pins the project already owns are read
 from their files by text, as the workflows read them, never copied. The tag is a hash of every
-input (`canonical`): a new pin, a changed lock or preset gives a new image, and an image never
-holds anything else than what its tag names.
+pin and every file that decides what the image holds (`canonical`, written into the image as
+/opt/ci/inputs.txt): a new pin, a changed lock or preset gives a new tag. Taken on the day of
+the build, not named by the tag: ca-certificates and openssl (from the live archive, before the
+snapshot: see `system`) and the unpinned dependencies of the pinned tools (xonsh's).
 
 Usage (any Python >= 3.11, stdlib only):
   python3 pins.py env          KEY=VALUE lines, sourced by the image's `system` and `warm`
@@ -26,8 +28,11 @@ ROOT = HERE.parents[2]
 
 # The image's own pins. Bump one deliberately: the next push builds and publishes a new tag, and
 # the weekly rebuild from scratch proves that every one of them still downloads.
-BASE = "ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3"
-APT_SNAPSHOT = "20260920T000000Z"  # snapshot.ubuntu.com: the same packages on every rebuild
+# APT_SNAPSHOT must be later than the base's build date (`serial` in its /etc/cloud/build.info):
+# the snapshot's toolchain needs the base's libc6 at the same version. A BASE bump usually needs
+# an APT_SNAPSHOT bump in the same commit (`system` refuses the other order).
+BASE = "ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3"  # serial 20260911
+APT_SNAPSHOT = "20260920T000000Z"  # snapshot.ubuntu.com: every apt package but the first ones (system)
 UV = "0.12.19"
 UV_SHA256 = "23bf5552d220e0842b65c862097b2ebaeba0064b74eda5e565e77fd25969d8c8"
 NVIM = "v0.12.5"
@@ -69,6 +74,7 @@ def from_code() -> dict[str, str]:
         "NVIM_MIN": f"v{major}.{minor}.{patch}",
         "TAPLO": _one(r'"(taplo==[0-9.]+)"', ".pytemplate/tests/test_render_core.py"),
         "BASEDPYRIGHT": _one(r'^BASEDPYRIGHT = "(.*)"', ".pytemplate/runner/cmd_dev.py"),
+        "BASEDPYRIGHT_NODE": _one(r'^BASEDPYRIGHT_NODE = "(.*)"', ".pytemplate/runner/cmd_dev.py"),
         "UPX": _one(r'^VERSION = "([0-9.]+)"', ".pytemplate/runner/upx.py"),
     }
 

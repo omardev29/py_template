@@ -916,7 +916,8 @@ def test_profile_rule_names_are_known_to_the_pinned_basedpyright(tmp_path: Path)
     (tmp_path / "src" / "a.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "pyrightconfig.json").write_text(json.dumps({"include": ["src"], **keys}), encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if not k.startswith(("UV_PROJECT", "UV_PYTHON", "VIRTUAL_ENV", "PYTEMPLATE_"))}
-    argv = [uv, "tool", "run", "--offline", "--from", cmd_dev.BASEDPYRIGHT, "basedpyright", "--project", str(tmp_path / "pyrightconfig.json")]
+    argv = [uv, "tool", "run", "--offline", "--from", cmd_dev.BASEDPYRIGHT, "--with", cmd_dev.BASEDPYRIGHT_NODE]
+    argv += ["basedpyright", "--project", str(tmp_path / "pyrightconfig.json")]
     r = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, text=True, encoding="utf-8", timeout=300, check=False)
     out = r.stdout + r.stderr
     if "0 errors" not in out and "unrecognized" not in out:

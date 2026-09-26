@@ -97,7 +97,8 @@ jobs:
           if [ "$RUNNER_OS" != Windows ]; then fish --version || true; fi
           if [ "$RUNNER_OS" = macOS ]; then nu --version; fi
           if [ "$RUNNER_OS" = Linux ]; then actionlint --version | sed -n 1p; shellcheck --version | sed -n 2p; fi
-      # test_upx's real run takes the pinned UPX of the runner's own download (upx.find: SHA-256)
+      # test_upx's real run takes the UPX upx.find finds: apt's /usr/bin/upx on the Linux runner
+      # image, the pinned download (SHA-256 checked) on Windows (the CI image: the pinned one too)
       - name: The pinned UPX in the runner's cache (Linux, Windows)
         if: runner.os != 'macOS'
         run: |
@@ -108,7 +109,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           uv tool run --from "$(grep -m1 -o 'taplo==[0-9.]*' .pytemplate/tests/test_render_core.py)" taplo --version
-          uv tool run --from "$(sed -n 's/^BASEDPYRIGHT = "\(.*\)".*/\1/p' .pytemplate/runner/cmd_dev.py)" basedpyright --version
+          uv tool run --from "$(sed -n 's/^BASEDPYRIGHT = "\(.*\)".*/\1/p' .pytemplate/runner/cmd_dev.py)" \
+            --with "$(sed -n 's/^BASEDPYRIGHT_NODE = "\(.*\)".*/\1/p' .pytemplate/runner/cmd_dev.py)" basedpyright --version
       - name: selftest (POSIX)
         if: runner.os != 'Windows'
         run: ./deploy selftest -rs

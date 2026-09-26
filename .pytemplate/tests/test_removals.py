@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cli, cmd_mode, config, envs, presets, proc, render, shells, tasks, ui  # noqa: E402
+from runner import cli, cmd_mode, config, envs, presets, proc, rename, render, shells, tasks, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.editors import nvim, vscode  # noqa: E402
 from runner.methods import portable, pyz  # noqa: E402
@@ -357,6 +357,8 @@ def test_preset_hint_in_validate_names_new() -> None:
 def test_new_creates_a_project_through_the_internal_route(tmp_path: Path) -> None:
     dest = tmp_path / "demo"
     r = deploy(ROOT, "new", str(dest), "--preset", "script", cwd=tmp_path, env=child_env(GIT_CEILING_DIRECTORIES=str(tmp_path)))
+    if r.returncode != 0 and any(marker in r.stderr for marker in rename.PYPI_UNREACHABLE):
+        pytest.skip("needs PyPI: `new` adds the preset's requirements with uv")
     assert r.returncode == 0, r.stderr
     assert re.search(r"deploy\.py __init script --name demo --force", r.stderr), r.stderr
     assert (dest / "src" / "demo" / "__init__.py").is_file() and not (dest / "src" / "myapp").exists()

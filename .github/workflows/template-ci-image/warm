@@ -1,8 +1,9 @@
 #!/bin/sh
 # User part of the Linux CI image (template-ci-image.yml), run as the runner user by the
 # Dockerfile: what the Linux jobs download on a bare runner (managed Pythons, the wheels of the
-# locks, the uv tools, the pinned UPX) goes into uv's and the runner's DEFAULT folders under
-# HOME, as on the hosted runner, by running what those jobs run with the image's uv.
+# locks, the uv tools) goes into uv's and the runner's DEFAULT folders under HOME, as on the
+# hosted runner, by running what those jobs run with the image's uv. The image has no system
+# upx (the hosted runner has apt's), so upx.find caches the pinned one and test_upx packs with it.
 #   warm template   the template's own environment, the floor Python, UPX, xonsh, taplo, basedpyright
 #   warm presets    a new raylib and flet project each, set up (PyPy and their wheels)
 # /src is the build context (the template's tracked files), mounted read-only for the step.
@@ -30,7 +31,7 @@ template)
     uv tool install --python "$CPYTHON" "$XONSH"
     # the tests that run a pinned tool offline (test_render_core)
     uv tool run --from "$TAPLO" taplo --version
-    uv tool run --from "$BASEDPYRIGHT" basedpyright --version
+    uv tool run --from "$BASEDPYRIGHT" --with "$BASEDPYRIGHT_NODE" basedpyright --version
     ;;
 presets)
     # what template-selftest's new-project job does (its names too), so its wheels are cached

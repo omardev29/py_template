@@ -1456,10 +1456,11 @@ Pinned, and moved on purpose:
 | UPX | `upx.VERSION` and the SHA-256 values of `upx.ASSETS` | together |
 | GitHub actions | `.pytemplate/templates/ci.yml` and `.github/workflows/template-*.yml` | edit the template, then `./deploy render`; never edit the generated `ci.yml` |
 | the Neovim test | `cmd_nvim.STARTER_REV` and `.pytemplate/nvim/tests/lazy-lock.json` | from one green run without the lock (CLAUDE.md, section 13.1) |
-| the Linux CI image | `.github/workflows/template-ci-image/pins.py`: its base, apt snapshot, uv, Neovim, PowerShell, actionlint, xonsh (the other versions it reads from the files above) | edit the pin and its SHA-256; the next push builds and publishes an image with a new tag |
+| the Linux CI image | `.github/workflows/template-ci-image/pins.py`: its base, apt snapshot, uv, Neovim, PowerShell, actionlint, xonsh (the other versions it reads from the files above) | edit the pin (and its SHA-256 where it has one; a new base needs a later apt snapshot too); a new Neovim, xonsh or actionlint also goes into the other `template-*.yml` workflows, a new Neovim into the image workflow's `nvim:` matrix (the workflow tests check both); the next push to `main` or pull request builds and publishes the new tag |
 
-Not pinned: uv itself (the generated CI takes the latest, never older than the floor) and the GitHub
-runner images (`*-latest`), on purpose: CI runs what users run; nor the Neovim plugins of a user's
+Not pinned: uv itself (the generated CI and the template's jobs on bare runners take the latest,
+never older than the floor; only the template's Linux CI image pins it) and the GitHub runner
+images (`*-latest`), on purpose: CI runs what users run; nor the Neovim plugins of a user's
 own config. Known good in September 2026: uv 0.12.19, CPython 3.14.7, PyPy 7.3.23 (`pypy@3.11.15`),
 mypyc 2.3.1, Flet 1.0.1 and Neovim 0.12.5; the template's CI first ran on the GitHub images
 ubuntu-24.04, macos-26-arm64 and windows-2025-vs2026. Known dates: Python 3.11 reaches its end of
@@ -1481,8 +1482,8 @@ regenerate the root (CLAUDE.md, section 11).
 ```
 
 - `selftest` needs `.venv` (`./deploy setup` once). Its arguments are added to the whole suite
-  (select tests with `-k EXPR`). It needs the network only for two tests that re-lock a copy;
-  they are skipped offline.
+  (select tests with `-k EXPR`). The tests that need the network (re-locks and real
+  `./deploy new` runs of a copy, a few real builds) are skipped when it is unreachable.
 - `--shells [NAME,...] [--list] [--json] [--keep]`
   `[--project DIR] [--tests T1,...] [--jobs N] [--timeout S]`: seven probes per shell (arguments,
   exit code, folders, a temporary script like xonsh-shell-kit's `!` lines, a minimal PATH, stdin, uv
@@ -1517,8 +1518,10 @@ copied into projects):
   on pushes and pull requests, the default depth weekly, `--full` monthly).
 - `template-ci-image.yml` builds the Linux CI image (Ubuntu with every tool the Linux jobs
   install, pinned, and their downloads already cached: `template-ci-image/pins.py`), publishes it
-  to `ghcr.io/<owner>/<repo>-ci` under a tag that is a hash of its inputs, and runs the Linux jobs
-  of the three workflows above in it, next to them; weekly it rebuilds the image from scratch.
+  to `ghcr.io/<owner>/<repo>-ci` under a tag that is a hash of its inputs, and runs
+  template-selftest's Linux selftest, python-floor and new-project jobs, template-launchers'
+  Linux job and template-nvim's two Linux rows in it, next to them (uv-floor, the nvim canary and
+  the e2e rows stay on bare runners); weekly it rebuilds the image from scratch.
 - `template-keepalive.yml` re-enables the scheduled ones every week: GitHub disables a scheduled
   workflow after 60 days without activity in the repository.
 

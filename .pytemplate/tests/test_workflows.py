@@ -155,6 +155,8 @@ def test_what_the_selftest_workflow_reads_by_text_exists() -> None:
     assert re.findall(r'(?m)^MIN_UV = "([0-9.]*)"', (runner / "envs.py").read_text(encoding="utf-8")) == [envs.MIN_UV]
     assert "sed -n 's/^BASEDPYRIGHT = \"\\(.*\\)\".*/\\1/p' .pytemplate/runner/cmd_dev.py" in text
     assert re.findall(r'(?m)^BASEDPYRIGHT = "(.*)"', (runner / "cmd_dev.py").read_text(encoding="utf-8")) == [cmd_dev.BASEDPYRIGHT]
+    assert "sed -n 's/^BASEDPYRIGHT_NODE = \"\\(.*\\)\".*/\\1/p' .pytemplate/runner/cmd_dev.py" in text
+    assert re.findall(r'(?m)^BASEDPYRIGHT_NODE = "(.*)"', (runner / "cmd_dev.py").read_text(encoding="utf-8")) == [cmd_dev.BASEDPYRIGHT_NODE]
     assert "grep -m1 -o 'taplo==[0-9.]*' .pytemplate/tests/test_render_core.py" in text
     assert re.search(r'"taplo==[0-9.]+"', (tests / "test_render_core.py").read_text(encoding="utf-8"))
     deselected = re.findall(r"--deselect \.pytemplate/tests/(test_\w+\.py)::(\w+)", text)
@@ -227,7 +229,8 @@ def test_ci_image_pins_come_from_the_code() -> None:
     assert code["PYTHON_FLOOR"] == "3.11"
     assert code["NVIM_MIN"] == "v" + cmd_nvim.version_str(cmd_nvim.MIN_LAZYVIM)
     assert f'"{code["TAPLO"]}"' in (ROOT / ".pytemplate" / "tests" / "test_render_core.py").read_text(encoding="utf-8")
-    assert code["BASEDPYRIGHT"] == cmd_dev.BASEDPYRIGHT and code["UPX"] == upx.VERSION
+    assert code["BASEDPYRIGHT"] == cmd_dev.BASEDPYRIGHT and code["BASEDPYRIGHT_NODE"] == cmd_dev.BASEDPYRIGHT_NODE
+    assert code["UPX"] == upx.VERSION
     values = pins.values()
     assert envs.uv_version(f"uv {values['UV']}") >= envs.uv_version(f"uv {envs.MIN_UV}")  # type: ignore[operator]
     assert re.fullmatch(r"ubuntu:\d+\.\d+@sha256:[0-9a-f]{64}", pins.BASE)
@@ -239,7 +242,7 @@ def test_ci_image_pins_come_from_the_code() -> None:
 def test_ci_image_reads_only_its_pins() -> None:
     """Every $NAME the image's scripts read comes from pins.env (or is their own)."""
     keys = set(_pins().values())
-    own = {"ca", "tmp", "work", "pytest", "preset", "here", "root", "python", "ref", "source", "ctx", "image", "base"}
+    own = {"ca", "tmp", "work", "pytest", "preset", "serial", "here", "root", "python", "ref", "source", "ctx", "image", "base"}
     for name in ("system", "warm"):
         text = (IMAGE / name).read_text(encoding="utf-8")
         used = set(re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", text)) - {"HOME", "PATH", "PYTHON"}
@@ -274,7 +277,9 @@ def test_ci_image_tag_follows_its_inputs(tmp_path: Path) -> None:
     ref = copy.ref("Owner/Repo")
     assert re.fullmatch(r"ghcr\.io/owner/repo-ci:[0-9a-f]{16}", ref) and ref == pins.ref("owner/repo")
     lock = tmp_path / "uv.lock"
-    lock.write_bytes(b"\xef\xbb\xbf" + lock.read_bytes().replace(b"\n", b"\r\n"))
+    lf = (ROOT / "uv.lock").read_bytes().replace(b"\r\n", b"\n")  # this checkout may be CRLF already
+    lock.write_bytes(b"\xef\xbb\xbf" + lf.replace(b"\n", b"\r\n"))
+    assert b"\r\r\n" not in lock.read_bytes()
     assert copy.ref("owner/repo") == ref
     lock.write_bytes(lock.read_bytes() + b"# another lock\r\n")
     assert copy.ref("owner/repo") != ref
@@ -337,13 +342,19 @@ def test_ci_image_scripts_pass_shellcheck() -> None:
     assert r.returncode == 0, r.stdout + r.stderr
 
 
-def test_ci_image_pins_pass_mypy_strict() -> None:
-    """pins.py is product code (CLAUDE.md 13.4) that the selftest's mypy run does not cover."""
+def test_ci_image_pins_pass_mypy_strict(tmp_path: Path) -> None:
+    """pins.py is product code (CLAUDE.md 13.4) that the selftest's mypy run does not cover. The
+    runner's own mypy config, never the project's .mypy.ini (the default typing profile sets
+    ignore_errors there): a scratch copy with a type error must fail."""
     if importlib.util.find_spec("mypy") is None:
         pytest.skip("mypy is not installed in this interpreter")
-    argv = [sys.executable, "-m", "mypy", "--strict", "--no-incremental", "--python-version", "3.11", str(IMAGE / "pins.py")]
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=300, check=False, cwd=ROOT)
-    assert r.returncode == 0, r.stdout + r.stderr
+    config_file = ROOT / ".pytemplate" / "tests" / "mypy-runner.ini"
+    broken = tmp_path / "pins.py"
+    broken.write_text((IMAGE / "pins.py").read_text(encoding="utf-8") + '\nBAD: int = "x"\n', encoding="utf-8")
+    for path, code in ((IMAGE / "pins.py", 0), (broken, 1)):
+        argv = [sys.executable, "-m", "mypy", "--config-file", str(config_file), "--no-incremental", "--python-version", "3.11", str(path)]
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=300, check=False, cwd=ROOT)
+        assert r.returncode == code, (path, r.stdout + r.stderr)
 
 
 @pytest.mark.skipif(not os.environ.get("CI_IMAGE_INPUTS"), reason="runs inside the CI image only")
