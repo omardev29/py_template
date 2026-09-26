@@ -904,8 +904,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 - `hooks._run_bytes` is the module's only process start outside `proc.run`: raw bytes
   (proc.run's text mode turns CRLF into LF) and stdin, for `git cat-file` and ruff on stdin.
 - Git hands hooks a relative `GIT_INDEX_FILE` and, in linked worktrees, `GIT_DIR` without
-  `GIT_WORK_TREE`: `hooks` makes them absolute for its own git calls and removes them before
-  starting uv/ruff (they would point git at the wrong repository for a sub-folder project).
+  `GIT_WORK_TREE`. Without `GIT_DIR`, git reads a relative `GIT_INDEX_FILE` from the top of the
+  work tree wherever it runs, so `hooks.git_env` leaves it as it is (joined to the cwd, a user's
+  hook that runs `cd apps/a && ./deploy hooks run` read a missing index: a first commit passed
+  unchecked); with `GIT_DIR` it makes them absolute against the hook's cwd for its own git calls.
+  `hooks` removes them before starting uv/ruff (they would point git at the wrong repository for
+  a sub-folder project).
 - `test_hooks.py` runs git with `GIT_CONFIG_GLOBAL` at a missing file and
   `GIT_CONFIG_NOSYSTEM=1`: a developer's global core.hooksPath, commit.gpgsign,
   init.templateDir or diff.relative must not change the results.
@@ -3803,10 +3807,11 @@ git and husky:
   dropped every staged path. Fix: `-c diff.relative=false` on every git call of `hooks` (5.6).
   Test: `test_hooks.py::test_staged_and_unstaged_files_ignore_diff_relative`. Goes: never.
 - **The hook's environment** (LIMITATION): git exports a relative `GIT_INDEX_FILE` and, in a
-  linked worktree, `GIT_DIR` without `GIT_WORK_TREE`. Fix: `hooks.git_env` makes them absolute;
+  linked worktree, `GIT_DIR` without `GIT_WORK_TREE`. Fix: `hooks.git_env` makes them absolute
+  when `GIT_DIR` is set and leaves a relative index alone otherwise (git reads it from the top);
   `hooks.run` removes them for uv and ruff (5.6). Test:
-  `test_hooks.py::test_git_env_pins_relative_paths`, `test_install_in_a_linked_worktree`. Goes:
-  never.
+  `test_hooks.py::test_git_env_pins_relative_paths`, `test_install_in_a_linked_worktree`,
+  `test_a_hook_that_cds_into_the_project_reads_the_real_index`. Goes: never.
 - **`git check-ignore` refuses `--literal-pathspecs`** (LIMITATION): Fix: `hooks._git(...,
   literal=False)` for it (5.6). Test:
   `test_hooks.py::test_ensure_installed_skips_an_ignored_project`. Goes: never.

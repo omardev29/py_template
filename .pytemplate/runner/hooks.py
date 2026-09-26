@@ -108,16 +108,23 @@ class NotInGit(DeployError):
 
 
 def git_env(environ: Mapping[str, str], cwd: Path) -> dict[str, str]:
-    """Return git's repository variables made absolute (relative ones are relative to `cwd`).
+    """Return git's repository variables, made absolute where git reads them from `cwd`.
 
-    GIT_DIR without GIT_WORK_TREE means "cwd is the top of the work tree", so GIT_WORK_TREE is
-    pinned to `cwd` then: git calls from another folder (the project root) stay correct.
+    Without GIT_DIR git finds the repository itself and reads a relative GIT_INDEX_FILE (or
+    object directory) from the top of the work tree, wherever it runs: those stay as they are.
+    git hands a plain commit's hook GIT_INDEX_FILE=.git/index, and a user's hook that runs `cd
+    apps/a && ./deploy hooks run` joined it to apps/a: every git call read a missing, empty
+    index, and a first commit passed unchecked. GIT_DIR (a linked worktree) is read from the
+    cwd, and GIT_DIR without GIT_WORK_TREE means "cwd is the top of the work tree": then the
+    relative values are joined to `cwd` and GIT_WORK_TREE is pinned to it, so git calls from
+    another folder (the project root) stay correct.
     """
     out: dict[str, str] = {}
+    from_cwd = bool(native_path(environ.get("GIT_DIR", "")))
     for key in GIT_LOCATION_VARS:
         value = native_path(environ.get(key, ""))
         if value:
-            out[key] = value if os.path.isabs(value) else os.path.normpath(os.path.join(cwd, value))
+            out[key] = value if os.path.isabs(value) or not from_cwd else os.path.normpath(os.path.join(cwd, value))
     if "GIT_DIR" in out and "GIT_WORK_TREE" not in out:
         out["GIT_WORK_TREE"] = str(cwd)
     return out

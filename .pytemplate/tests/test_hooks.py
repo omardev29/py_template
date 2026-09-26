@@ -896,7 +896,7 @@ def test_the_user_git_config_does_not_reach_the_tests(tmp_path: Path, monkeypatc
 def test_git_env_pins_relative_paths(tmp_path: Path) -> None:
     top = tmp_path / "top"
     env = hooks.git_env({"GIT_INDEX_FILE": ".git/index", "GIT_AUTHOR_NAME": "x"}, top)
-    assert env == {"GIT_INDEX_FILE": os.path.normpath(top / ".git" / "index")}
+    assert env == {"GIT_INDEX_FILE": ".git/index"}  # without GIT_DIR git reads it from the top
     absolute = str(tmp_path / "wt" / "index")
     env = hooks.git_env({"GIT_DIR": ".git", "GIT_INDEX_FILE": absolute}, top)
     assert env["GIT_DIR"] == os.path.normpath(top / ".git")
@@ -904,6 +904,18 @@ def test_git_env_pins_relative_paths(tmp_path: Path) -> None:
     assert env["GIT_WORK_TREE"] == str(top)  # GIT_DIR alone means: the cwd is the top
     assert hooks.git_env({"GIT_DIR": ".git", "GIT_WORK_TREE": "w"}, top)["GIT_WORK_TREE"] == os.path.normpath(top / "w")
     assert hooks.git_env({}, top) == {}
+
+
+def test_a_hook_that_cds_into_the_project_reads_the_real_index(tmp_path: Path) -> None:
+    """README's monorepo form, `cd apps/a && sh ./deploy hooks run`: git hands the hook
+    GIT_INDEX_FILE=.git/index (relative to the top) and it was joined to apps/a, a missing
+    index. The staged files read as none (a first commit passed unchecked) or all deleted."""
+    top, project = make_repo(tmp_path, "apps/a")
+    (project / "x.py").write_text("x = 1\n", encoding="utf-8")
+    git(top, "add", "apps/a/x.py")
+    repo = find(project, top=project, environ={"GIT_INDEX_FILE": ".git/index"})  # the hook's cwd after its cd
+    assert hooks.staged_files(repo) == ["x.py"]
+    assert hooks.staged_files(repo, "D") == []
 
 
 def test_git_calls_are_pinned_against_user_config(monkeypatch: pytest.MonkeyPatch) -> None:
