@@ -79,9 +79,11 @@ def test_upx_messages_are_classified(output: str, reason: str) -> None:
 def test_pyinstaller_size_args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     args, env = exe.size_args(make({"exclude_modules": ["PIL"]}))
     assert "--noupx" in args and "--exclude-module=PIL" in args and env == {}
-    if upx.unsupported_reason():
-        return
-    fake = tmp_path / ("upx.exe" if WINDOWS else "upx")
+    # PyInstaller packs with UPX only on Windows (test_build_methods covers the other OSes):
+    # the Windows branch is exercised on every OS
+    monkeypatch.setattr(exe, "IS_WINDOWS", True)
+    monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
+    fake = tmp_path / "upx.exe"
     fake.write_bytes(b"")
     monkeypatch.setattr(upx, "find", lambda cfg: fake)
     args, env = exe.size_args(make({"upx": {"enabled": True, "level": "7", "exclude": ["flutter*.dll"]}}))

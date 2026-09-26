@@ -58,15 +58,19 @@ def size_args(cfg: Config) -> tuple[list[str], dict[str, str]]:
 
     UPX goes through PyInstaller's own step (--upx-dir): it packs each collected binary before
     bundling (also in onefile mode), skips Control Flow Guard DLLs, and reads the level from
-    the UPX environment variable (it always adds --lzma).
+    the UPX environment variable (it always adds --lzma). Windows only: PyInstaller's
+    configure.get_config turns UPX off on every other OS (packed .so files crash when loaded),
+    so elsewhere nothing is downloaded and the build says the exe is not packed.
     """
     args: list[str] = []
     env: dict[str, str] = {}
-    if upx.active(cfg):
+    if IS_WINDOWS and upx.active(cfg):
         args.append(f"--upx-dir={upx.find(cfg).parent}")
         args += [f"--upx-exclude={p}" for p in upx.excludes(cfg)]
         env["UPX"] = upx.env_value(cfg)
     else:
+        if cfg.deploy.upx.enabled and not upx.unsupported_reason():
+            ui.warn("deploy.upx: PyInstaller packs with UPX only on Windows: this exe is not UPX-packed")
         args.append("--noupx")
     args += [f"--exclude-module={m}" for m in cfg.deploy.exclude_modules]
     if cfg.deploy.exe.strip and not IS_WINDOWS:
@@ -129,6 +133,9 @@ def _flet_pack(req: BuildRequest) -> Path:
     ]
     if onedir:
         argv.append("--onedir")
+    if _console(req):
+        # flet pack always passes --noconsole unless --debug-console has a (truthy) value
+        argv.append("--debug-console=true")
     for h in _hidden(req, stage):
         argv += ["--hidden-import", h]
     assets = cfg.app.assets
@@ -138,8 +145,14 @@ def _flet_pack(req: BuildRequest) -> Path:
         argv += ["--icon", str(ROOT / cfg.deploy.exe.icon)]
     size, size_env = size_args(cfg)
     argv += [f"--pyinstaller-build-args=--optimize={cfg.deploy.optimize}"]
+    # UTF-8 as in development, like the plain PyInstaller build (one argv item: flet pack
+    # hands each --pyinstaller-build-args value to PyInstaller unchanged)
+    argv.append("--pyinstaller-build-args=--python-option=X utf8")
     argv += [f"--pyinstaller-build-args={a}" for a in size]
-    if onedir:
+    if onedir and IS_WINDOWS:
+        # A flat folder only on Windows (<name>.exe): on Linux the executable dist/<name>/<name>
+        # would be a FILE where the package folder dist/<name>/<pkg>/ (mypyc extensions, data)
+        # must go when app.name == pkg, the default. Linux keeps PyInstaller's _internal/.
         argv.append("--pyinstaller-build-args=--contents-directory=.")
     argv += cfg.deploy.exe.extra_args + req.extra
     envs.uv_run(envs.tool_env(cfg), argv, cwd=work, extra_env=size_env)

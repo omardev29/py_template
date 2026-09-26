@@ -14,7 +14,8 @@ How each method uses it:
   - exe (PyInstaller, and flet pack, which runs PyInstaller): PyInstaller's own UPX step
     (--upx-dir): it packs every collected binary before bundling, skips Control Flow Guard
     DLLs and Qt plugins, and always adds --lzma. The level goes in the UPX environment
-    variable, which upx reads as default options.
+    variable, which upx reads as default options. Windows only: PyInstaller disables UPX on
+    every other OS, so there the exe is not packed (exe.size_args warns).
   - nuitka: Nuitka's upx plugin (it always uses --best --lzma).
   - portable and flet: pack_tree() on the finished folder.
 Never used: pyz (the zip is already deflated) and wheel.

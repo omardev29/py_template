@@ -798,8 +798,14 @@ Per method:
   mypyc, `--add-data "<src>:<dest>"` (`:` is PyInstaller's documented separator). The flet
   preset uses `flet pack` instead (`methods/exe._flet_pack`): it runs from its own cwd
   `.build/flet-pack/<b>` because `flet pack -y` wipes `<cwd>/build` and the distpath; onedir
-  uses `--contents-directory=.`, except on macOS, where `flet pack` rejects `--onedir` and always
-  builds a `.app` bundle (PyInstaller only logs a deprecation for onefile + `.app`); it bundles
+  uses `--contents-directory=.` on Windows only (on Linux the executable `dist/<n>/<n>` would be
+  a FILE where the package folder `<pkg>/` of the mypyc extensions must go when
+  `app.name == pkg`, the default; Linux keeps PyInstaller's `_internal/`); macOS never gets
+  `--onedir` (`flet pack` rejects it and always builds a `.app` bundle; PyInstaller only logs a
+  deprecation for onefile + `.app`). `deploy.exe.console` becomes `--debug-console=true` (flet
+  pack adds `--noconsole` unless that option has a value) and UTF-8 mode goes through
+  `--pyinstaller-build-args=--python-option=X utf8` (one argv item: flet pack forwards each
+  value unchanged). It bundles
   the Flutter client (plain PyInstaller would
   download ~40 MB on first start). `flet` and `flet-desktop` must share a version, else Flet
   pip-installs `flet-desktop` at runtime, bypassing `uv.lock`.
@@ -877,7 +883,10 @@ Per method:
   own UPX step (`--upx-dir`, `--upx-exclude` per glob; the level travels in the `UPX`
   environment variable, which upx reads as default options; PyInstaller always adds `--lzma`,
   skips Control Flow Guard DLLs and Qt plugins, and `--clean` keeps its binary cache from
-  reusing another level); nuitka = its upx plugin (hard-codes `--best --lzma`, ignores our
+  reusing another level), Windows only: PyInstaller's `configure.get_config` turns UPX off on
+  every other OS (packed `.so` files crash), so there `exe.size_args` passes `--noupx`,
+  downloads nothing and warns that the exe is not packed (never set `PYINSTALLER_FORCE_UPX`);
+  nuitka = its upx plugin (hard-codes `--best --lzma`, ignores our
   excludes: it packed `python314.dll` and the app still ran); portable (before the smoke test,
   so the packed `.pyd` files are what it loads) and flet = `upx.pack_tree` (PE `.exe/.dll/.pyd`
   on Windows, ELF executables but no `.so` on Linux, in parallel). Never packed: files over
