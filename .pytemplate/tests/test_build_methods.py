@@ -3493,3 +3493,46 @@ def test_portable_sh_launcher_exit_code_and_environment(tmp_path: Path) -> None:
     r = subprocess.run([str(launcher)], capture_output=True, text=True, env=env, timeout=120, check=False)
     assert r.returncode == 7, r.stderr  # the app's exit code
     assert r.stdout.split() == ["None", "None", "1", "1"]  # caller's PYTHONPATH cleared, UTF-8 on, -O
+
+
+# --- wheel: where the dependencies come from ------------------------------------------------------
+
+
+def test_wheel_declares_git_and_url_sources_as_direct_references() -> None:
+    from runner.methods import wheel
+
+    data = {
+        "project": {"dependencies": ["rich>=15", "Tool_Kit[fast] ; sys_platform == 'linux'", "blob"]},
+        "tool": {"uv": {"sources": {
+            "tool-kit": {"git": "https://github.com/org/toolkit", "tag": "v1.2", "subdirectory": "python"},
+            "blob": {"url": "https://example.com/blob-1.0-py3-none-any.whl"},
+        }}},
+    }
+    assert wheel.dependencies(data) == [
+        "rich>=15",
+        "Tool_Kit[fast] @ git+https://github.com/org/toolkit@v1.2#subdirectory=python ; sys_platform == 'linux'",
+        "blob @ https://example.com/blob-1.0-py3-none-any.whl",
+    ]
+    assert wheel.dependencies({"project": {"dependencies": ["rich"]}}) == ["rich"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [{"workspace": True}, {"path": "libs/b08lib", "editable": True}, {"index": "internal"},
+     {"git": "https://github.com/org/b08lib", "marker": "sys_platform == 'linux'"}, [{"path": "a"}, {"path": "b"}]],
+)
+def test_wheel_refuses_a_source_it_cannot_declare(source: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`./deploy add ./libs/b08lib` puts b08lib in [project] dependencies and its path in
+    [tool.uv.sources]: the wheel's metadata said `Requires-Dist: b08lib`, a PyPI name, so
+    installing it failed or took an unrelated PyPI package of that name (dependency confusion)."""
+    from runner.methods import wheel
+
+    data = {"project": {"dependencies": ["rich", "b08lib"]}, "tool": {"uv": {"sources": {"b08lib": source}}}}
+    with pytest.raises(DeployError, match=r"wheel cannot declare .*b08lib .*--method pyz or portable") as e:
+        wheel.dependencies(data)
+    assert e.value.code == 2
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "p"\ndependencies = ["b08lib"]\n[tool.uv.sources]\nb08lib = { workspace = true }\n', encoding="utf-8")
+    monkeypatch.setattr(wheel, "PYPROJECT", pyproject)
+    with pytest.raises(DeployError, match="b08lib"):
+        wheel.check(make({}))  # cmd_build calls it before the checks and the payload

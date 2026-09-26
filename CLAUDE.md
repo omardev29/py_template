@@ -1944,7 +1944,12 @@ Per method:
   `% ! " ^ & | < >`; the wrapper text is made before the `.pyz` is written). A part's `name` must be an app name
   (`config.APP_NAME`: the wrapper echoes it unquoted). `pyz.check_parts` runs the part and name
   checks in `--dry-run` too.
-- **wheel**: synthetic build project in `.build/wheel/<b>` (for mypyc a `setup.py` using
+- **wheel**: its `[project] dependencies` go through `wheel.dependencies`: a `[tool.uv.sources]`
+  git or URL source becomes a direct reference (`name @ git+URL@REV`); a path, workspace or
+  editable source, a named index, a marker or several sources is refused before the checks
+  and the payload (`wheel.check`, from `cmd_build`, also in `--dry-run`): copied as a plain
+  name, a local library became a PyPI requirement (an unrelated PyPI package of that name got
+  installed). Synthetic build project in `.build/wheel/<b>` (for mypyc a `setup.py` using
   mypycify with the same `compile.multi_file`, `separate`, `strict_dunder_typing` and extra C
   flags (`no_semantic_interposition`, section 9) as the stage, and a compile `mypy.ini`), built
   with `uv build --wheel --no-build-isolation --python <.venv python>` after

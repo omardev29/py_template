@@ -151,6 +151,10 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
         from .methods import portable
 
         portable.check(cfg)  # [deploy.portable] env values the .cmd launcher cannot hold
+    if method == "wheel":
+        from .methods import wheel
+
+        wheel.check(cfg)  # a dependency source a wheel cannot declare (a local library)
     check_lock(cfg)  # a stale uv.lock fails now, also in --dry-run
     from . import upx
 

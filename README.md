@@ -713,6 +713,10 @@ its archive):
 | `nuitka` | `dist/<name>-<backend>-nuitka/` | `<name>` (`<name>.exe` on Windows; `<name>.bin` in a standalone build on Linux or macOS when the app name has no `-`) |
 | `flet` | `dist/<name>-<backend>-flet-<target>/` | the platform's app |
 
+A `wheel` names its dependencies for the installer: a git or URL source of `[tool.uv.sources]`
+becomes a direct reference, and one from a local folder, a workspace or a private index
+cannot be named, so the build refuses it (`pyz` and `portable` carry such libraries).
+
 Which one to ship: `exe`, `nuitka`, `flet` and a bundled `portable` folder need nothing installed on
 the user's machine, but each build serves the OS and CPU it was built on (build on each OS). A `pyz`
 needs an installed Python and can serve every platform with one file: a pure one runs wherever a

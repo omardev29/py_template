@@ -15,9 +15,11 @@ and mypycify there could not see the project's dependencies.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tomllib
 from pathlib import Path
+from typing import Any
 
 from .. import envs, mypyc, render, ui
 from ..cmd_build import BuildRequest, dist_path
@@ -52,8 +54,65 @@ def _outside_package(cfg: Config) -> list[str]:
     return tops
 
 
+_REQ_HEAD = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?")
+
+
+def _norm(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def dependencies(data: dict[str, Any]) -> list[str]:
+    """[project] dependencies as a wheel's metadata can declare them.
+
+    [tool.uv.sources] says where uv takes a dependency from; a wheel only knows index names
+    and direct references. Copied as they were, a local library became a PyPI requirement of
+    that name (an unrelated package when PyPI has one, installed without a word). A git or URL
+    source becomes a direct reference (`name @ git+URL@REV`); a path, workspace or editable
+    source, a named index, a marker or several sources cannot be declared: DeployError (2).
+    """
+    deps = [str(d) for d in data.get("project", {}).get("dependencies", [])]
+    sources = {_norm(k): v for k, v in data.get("tool", {}).get("uv", {}).get("sources", {}).items()}
+    out: list[str] = []
+    refused: list[str] = []
+    for dep in deps:
+        m = _REQ_HEAD.match(dep)
+        source = sources.get(_norm(m[1])) if m else None
+        if m is None or source is None:
+            out.append(dep)
+            continue
+        name, extras = m[1], m[2] or ""
+        marker = dep.split(";", 1)[1].strip() if ";" in dep else ""
+        where = ""
+        if isinstance(source, dict) and "marker" not in source:
+            if isinstance(source.get("git"), str):
+                url = source["git"] if source["git"].startswith("git+") else f"git+{source['git']}"
+                ref = next((source[k] for k in ("rev", "tag", "branch") if isinstance(source.get(k), str)), "")
+                where = url + (f"@{ref}" if ref else "") + (f"#subdirectory={source['subdirectory']}" if source.get("subdirectory") else "")
+            elif isinstance(source.get("url"), str):
+                where = source["url"]
+        if not where:
+            refused.append(f"{name} ({json.dumps(source, ensure_ascii=False)})")
+            continue
+        out.append(f"{name}{extras} @ {where}" + (f" ; {marker}" if marker else ""))
+    if refused:
+        raise DeployError(
+            "wheel: these dependencies come from a source a wheel cannot declare ([tool.uv.sources]): "
+            + ", ".join(refused)
+            + ". The wheel would name them as PyPI packages. Publish them to an index and depend on them by "
+            "name, or build with --method pyz or portable, which carry them",
+            2,
+        )
+    return out
+
+
+def check(cfg: Config) -> None:
+    """What the wheel cannot build, refused before the checks and the payload (also --dry-run)."""
+    dependencies(tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig")))
+
+
 def _pyproject(cfg: Config, compiled: bool) -> str:
-    project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))["project"]
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))
+    project = data["project"]
     outside = _outside_package(cfg)
     modules = [top.removesuffix(".py") for top in outside if top.endswith(".py")]
     packages = [cfg.pkg, *(top for top in outside if not top.endswith(".py"))]
@@ -70,7 +129,7 @@ def _pyproject(cfg: Config, compiled: bool) -> str:
         f"version = {json.dumps(project['version'])}",
         f"description = {json.dumps(project.get('description', ''), ensure_ascii=False)}",
         f"requires-python = {json.dumps(project.get('requires-python', '>=3.11'))}",
-        f"dependencies = {json.dumps(project.get('dependencies', []))}",
+        f"dependencies = {json.dumps(dependencies(data))}",
         "",
         # A GUI app gets a launcher without a console window on Windows (like exe's console = auto)
         "[project.gui-scripts]" if cfg.app.gui else "[project.scripts]",
