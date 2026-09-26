@@ -8,13 +8,15 @@ import os
 import platform
 import re
 import shutil
+import sys
+import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
 
 from .. import envs, proc, ui
 from ..config import Config
 from ..imports import iter_runtime_nodes, parse
-from ..project import BUILD, EXT_SUFFIXES, SRC, host_arch, host_os, rel
+from ..project import BUILD, EXT_SUFFIXES, SRC, host_os, rel
 from ..ui import DeployError
 
 NATIVE_SUFFIXES = (*EXT_SUFFIXES, ".dll", ".dylib")
@@ -36,6 +38,24 @@ UV_PLATFORMS = {
 # --python-platform *-apple-darwin in 0.12, pinned (MACOSX_DEPLOYMENT_TARGET, unless the user
 # sets it) so a uv upgrade or a newer build machine cannot move it
 MACOS_FLOOR = "13.0"
+# uv's names of an architecture: platform.machine() spellings, sysconfig's on Windows, and a
+# 32-bit interpreter on a 64-bit kernel. templates/pyz/__main__.py (_arch) mirrors host_arch
+ARCH_NAMES = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64", "x86": "x86", "i386": "x86", "i686": "x86"}
+WINDOWS_ARCH = {"win-amd64": "x86_64", "win-arm64": "aarch64", "win32": "x86"}
+ARCH_32BIT = {"x86_64": "x86", "aarch64": "armv7l"}
+
+
+def host_arch() -> str:
+    """The architecture of the interpreter the build installs for (x86_64 | aarch64 | x86...):
+    the runner's, which is uv's managed python.cpython like .venv's. Not the machine's CPU: on
+    Windows platform.machine() asks WMI for the native CPU, so an x64 Python on Windows on ARM
+    labelled its x64 wheels aarch64; a 32-bit Python on a 64-bit kernel likewise. The pyz
+    bootstrap computes the same name for the interpreter that runs it."""
+    if sys.platform == "win32" and sysconfig.get_platform() in WINDOWS_ARCH:
+        return WINDOWS_ARCH[sysconfig.get_platform()]
+    machine = platform.machine().lower()
+    arch = ARCH_NAMES.get(machine, machine)
+    return ARCH_32BIT.get(arch, arch) if sys.maxsize <= 2**32 else arch
 
 
 @dataclass(frozen=True)

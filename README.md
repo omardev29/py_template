@@ -751,7 +751,8 @@ How far a pyz reaches depends on its dependencies; the build prints which case i
   only there: the exact CPython minor of the lock (`cp314` wheels load only in 3.14, so a Python
   3.13 or 3.15 gets `this .pyz has no build for this interpreter and platform`), on Windows, Linux
   or macOS, x86_64 or aarch64 (Linux: glibc 2.28 on x86_64 or 2.35 on aarch64, or newer; macOS 13 or
-  newer). There are no musl or Android targets.
+  newer). There are no musl or Android targets. The architecture is the Python's, not the
+  machine's: an x64 Python on Windows on ARM uses the `windows-x86_64` binaries.
 - `[deploy.pyz] targets` is `["host"]` by default, so a local build that is not pure runs only on
   the platform that built it. For one file that serves several platforms, add target keys
   (`targets = ["host", "cp314-windows-x86_64"]`, or `--target KEY`: the locked CPython minor on

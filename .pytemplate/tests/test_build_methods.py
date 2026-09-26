@@ -7,7 +7,6 @@ import hashlib
 import importlib.machinery
 import json
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -622,12 +621,8 @@ def test_nuitka_keys_of_every_preset_load() -> None:
 
 def _host_key() -> str:
     """The key the bootstrap computes for THIS interpreter (templates/pyz/__main__.py _key)."""
-    impl = {"cpython": "cp", "pypy": "pp"}.get(sys.implementation.name, sys.implementation.name)
-    arch = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}.get(
-        platform.machine().lower(), platform.machine().lower()
-    )
-    os_name = {"win32": "windows", "linux": "linux", "darwin": "macos"}.get(sys.platform, sys.platform)
-    return f"{impl}{sys.version_info[0]}{sys.version_info[1]}-{os_name}-{arch}"
+    key: str = _bootstrap_namespace()["_key"]()
+    return key
 
 
 MAIN_WAITS = (
@@ -918,6 +913,40 @@ def _bootstrap_namespace() -> dict[str, Any]:
     namespace: dict[str, Any] = {"__name__": "pt_bootstrap"}
     exec(compile(source.rstrip()[: -len("main()")], "__main__.py", "exec"), namespace)  # noqa: S102
     return namespace
+
+
+@pytest.mark.parametrize(
+    ("plat", "sys_platform", "machine", "maxsize", "arch"),
+    [
+        ("win32", "win-amd64", "ARM64", 2**63 - 1, "x86_64"),  # an x64 Python on Windows on ARM (WMI names the CPU)
+        ("win32", "win-arm64", "ARM64", 2**63 - 1, "aarch64"),
+        ("win32", "win-amd64", "AMD64", 2**63 - 1, "x86_64"),
+        ("win32", "win32", "AMD64", 2**31 - 1, "x86"),  # a 32-bit Python on 64-bit Windows
+        ("linux", "linux-x86_64", "x86_64", 2**63 - 1, "x86_64"),
+        ("linux", "linux-aarch64", "aarch64", 2**63 - 1, "aarch64"),
+        ("linux", "linux-i686", "i686", 2**31 - 1, "x86"),  # the builder said x86, the bootstrap i686
+        ("linux", "linux-armv7l", "aarch64", 2**31 - 1, "armv7l"),  # Raspberry Pi OS 32-bit on a 64-bit kernel
+        ("linux", "linux-armv7l", "armv7l", 2**31 - 1, "armv7l"),
+        ("darwin", "macosx-11.0-arm64", "arm64", 2**63 - 1, "aarch64"),
+        ("darwin", "macosx-10.13-x86_64", "x86_64", 2**63 - 1, "x86_64"),  # Rosetta: uname names the process
+    ],
+)
+def test_pyz_key_names_the_interpreter_not_the_machine(monkeypatch: pytest.MonkeyPatch, plat: str, sys_platform: str, machine: str, maxsize: int, arch: str) -> None:
+    # platform.machine() on Windows asks WMI for the native CPU: an x64 Python on Windows on ARM got
+    # the aarch64 key and refused a pyz with a windows-x86_64 target; 32-bit x86 was "x86" for the
+    # builder and "i686" for the bootstrap, so a pyz never found the target it was built for
+    import types
+
+    fake_sys = types.SimpleNamespace(platform=plat, maxsize=maxsize, implementation=sys.implementation, version_info=sys.version_info)
+    fake_platform = types.SimpleNamespace(machine=lambda: machine)
+    fake_sysconfig = types.SimpleNamespace(get_platform=lambda: sys_platform)
+    namespace = _bootstrap_namespace()
+    namespace.update(sys=fake_sys, platform=fake_platform, sysconfig=fake_sysconfig)
+    assert namespace["_key"]().rsplit("-", 1)[1] == arch
+    monkeypatch.setattr(common, "sys", fake_sys)
+    monkeypatch.setattr(common, "platform", fake_platform)
+    monkeypatch.setattr(common, "sysconfig", fake_sysconfig)
+    assert common.host_arch() == arch  # the build's host key: the same name
 
 
 def test_pyz_prune_tolerates_vanishing_folders(tmp_path: Path) -> None:

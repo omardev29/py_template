@@ -25,12 +25,17 @@ import shutil
 import site
 import stat
 import sys
+import sysconfig
 import tempfile
 import time
 import zipfile
 from pathlib import Path
 
-ARCH = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}
+# The architecture of THIS interpreter in uv's names, as methods/common.py host_arch names the
+# build's host key: platform.machine() spellings, sysconfig's on Windows, a 32-bit interpreter
+ARCH = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64", "x86": "x86", "i386": "x86", "i686": "x86"}
+WINDOWS_ARCH = {"win-amd64": "x86_64", "win-arm64": "aarch64", "win32": "x86"}
+ARCH_32BIT = {"x86_64": "x86", "aarch64": "armv7l"}
 OS = {"win32": "windows", "linux": "linux", "darwin": "macos"}
 KEEP_BUILDS = 3  # the most recently started builds kept (this one included)...
 MIN_AGE = 86400  # ...plus every build started in the last day
@@ -40,10 +45,20 @@ _BUSY = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES, getattr(errno, "EDEADLOC
 _running = {}  # the open, locked run file of this process (kept for its whole life)
 
 
+def _arch() -> str:
+    """The interpreter's architecture, not the machine's: on Windows platform.machine() asks WMI
+    for the native CPU (an x64 Python on Windows on ARM said aarch64 and missed its x86_64 wheels),
+    and a 32-bit Python on a 64-bit kernel (Raspberry Pi OS 32-bit) got the 64-bit name."""
+    if sys.platform == "win32" and sysconfig.get_platform() in WINDOWS_ARCH:
+        return WINDOWS_ARCH[sysconfig.get_platform()]
+    machine = platform.machine().lower()
+    arch = ARCH.get(machine, machine)
+    return ARCH_32BIT.get(arch, arch) if sys.maxsize <= 2**32 else arch
+
+
 def _key() -> str:
     impl = {"cpython": "cp", "pypy": "pp"}.get(sys.implementation.name, sys.implementation.name)
-    arch = ARCH.get(platform.machine().lower(), platform.machine().lower())
-    return f"{impl}{sys.version_info[0]}{sys.version_info[1]}-{OS.get(sys.platform, sys.platform)}-{arch}"
+    return f"{impl}{sys.version_info[0]}{sys.version_info[1]}-{OS.get(sys.platform, sys.platform)}-{_arch()}"
 
 
 def _cache_root(name: str) -> Path:

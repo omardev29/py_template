@@ -1384,7 +1384,12 @@ Formats:
   cover the locked minors), and a `pp` key only when it is the pypy build's own interpreter on
   this machine (`config_host_key`; uv installs PyPy wheels only with a real PyPy: CPython and
   PyPy builds are joined with `pyz-merge`). A pypy build may add `cp<minor>` keys (installed
-  with the tools env).
+  with the tools env). The host key's architecture is the INTERPRETER's (`common.host_arch`,
+  the runner's, which is uv's managed `python.cpython` like `.venv`'s; not `project.host_arch`,
+  the machine's, which upx and e2e use): `sysconfig.get_platform()` on Windows, where
+  `platform.machine()` asks WMI for the native CPU (an x64 Python on Windows on ARM labelled its
+  x64 wheels `aarch64`), and `x86`/`armv7l` for a 32-bit interpreter on a 64-bit kernel. The pyz
+  bootstrap's `_arch` computes the same name (it said `i686` where the builder said `x86`).
 - `common.export_requirements` (pyz, portable): `uv export --locked --no-dev --no-editable
   --no-emit-project` into `.build/deploy/requirements.txt`. `--locked`: a `uv.lock` that
   `pyproject.toml` moved past fails like every `uv run --locked` (with `--frozen` a `--no-check`
@@ -2710,6 +2715,13 @@ CPython and its standard library:
 - **`Path.home()` raises for a UID without a passwd entry** (LIMITATION): the pyz crashed in a
   container with a random UID. Fix: the pyz bootstrap falls back to a `tempfile.mkdtemp` folder
   (10). Test: `test_build_methods.py::test_pyz_runs_without_a_usable_cache`. Goes: never.
+- **`platform`'s `machine()` names the machine, not the interpreter** (LIMITATION: on Windows
+  CPython 3.12+ asks WMI for the native CPU, elsewhere it is the kernel's `uname -m`): an x64
+  Python on Windows on ARM labelled its x64 wheels `aarch64`, and a pyz with a `windows-x86_64`
+  target refused to run there; a 32-bit Python on a 64-bit kernel took the 64-bit name. Fix:
+  `common.host_arch` and the pyz bootstrap's `_arch` read `sysconfig.get_platform()` on Windows
+  and the pointer size elsewhere (10). Test:
+  `test_build_methods.py::test_pyz_key_names_the_interpreter_not_the_machine`. Goes: never.
 - **A missing cwd is blamed on the program** (LIMITATION): subprocess raised FileNotFoundError
   naming the program (POSIX) or NotADirectoryError (Windows). Fix: `proc.run` checks the cwd
   first (5.3). Test: `test_cli_core.py::test_a_bad_working_folder_is_named`. Goes: never.
