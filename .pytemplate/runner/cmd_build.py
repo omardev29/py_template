@@ -115,6 +115,7 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
         from .methods import nuitka
 
         nuitka.check_python(cfg, [*cfg.deploy.nuitka.extra_args, *extra])  # before minutes of checks and compiling
+        nuitka.check_options(cfg, backend)
     if method == "pyz":
         from .methods import common
 
@@ -126,6 +127,13 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
         raise DeployError("check failed: fix it or use --no-check")
     if proc.DRY_RUN:
         ui.info(f"(--dry-run) build {backend} -> {method}: would output {rel(DIST)}/{cfg.app.name}-{backend}-{method}*")
+        if method == "nuitka":
+            from .methods import nuitka as nuitka_method  # [deploy.nuitka] lto/pgo, then the extras
+
+            options = [*nuitka_method.optimization_args(cfg), *cfg.deploy.nuitka.extra_args, *extra]
+            ui.info(f"  Nuitka options: {proc.show(options)}")
+            if cfg.deploy.nuitka.pgo:
+                ui.info(nuitka_method.PGO_NOTE)
         return 0
 
     app_dir = payload(cfg, backend)

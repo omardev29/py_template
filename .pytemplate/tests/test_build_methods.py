@@ -455,6 +455,140 @@ def test_nuitka_failure_names_the_pin(sandbox: Path, monkeypatch: pytest.MonkeyP
     assert e.value.code == 1 and nuitka.NUITKA in str(e.value) and "methods/nuitka.py" in str(e.value)
 
 
+# --- nuitka: [deploy.nuitka] lto and pgo -----------------------------------------------------------
+
+CONSOLE_APP = {"app": {"gui": False, "assets": ""}}  # what PGO needs (its profiling run starts the app)
+PGO_ARGS = ["--frames", "10", "two words", "", "C:\\data\\in.txt", "it's"]
+
+
+def _nuitka_argv(sandbox: Path, monkeypatch: pytest.MonkeyPatch, cfg: Config, backend: str = "cpython", extra: list[str] | None = None) -> list[str]:
+    app = _nuitka_app(sandbox / f"payload-{len(list(sandbox.glob('payload-*')))}", cfg.pkg)
+    fake = FakeNuitka(cfg.pkg)
+    monkeypatch.setattr(nuitka, "IS_MACOS", False)
+    monkeypatch.setattr(envs, "uv", fake)
+    nuitka.build(BuildRequest(cfg, backend, "nuitka", app, extra=extra or []))
+    return fake.argv
+
+
+def test_nuitka_optimization_defaults() -> None:
+    cfg = make({})
+    assert (cfg.deploy.nuitka.lto, cfg.deploy.nuitka.pgo, cfg.deploy.nuitka.pgo_args) == ("auto", False, [])
+    assert nuitka.optimization_args(cfg) == ["--lto=auto"]  # always passed: the build says what it asked for
+
+
+@pytest.mark.parametrize("lto", ["auto", "yes", "no"])
+def test_nuitka_lto_goes_before_extra_args_and_the_command_line(sandbox: Path, monkeypatch: pytest.MonkeyPatch, lto: str) -> None:
+    cfg = make({"deploy": {"nuitka": {"lto": lto}}})
+    argv = _nuitka_argv(sandbox, monkeypatch, cfg)
+    assert [a for a in argv if a.startswith("--lto")] == [f"--lto={lto}"]
+    # A later --lto wins in Nuitka: extra_args, then the command line, can still override it
+    both = make({"deploy": {"nuitka": {"lto": lto, "extra_args": ["--lto=no", "--show-scons"]}}})
+    argv = _nuitka_argv(sandbox, monkeypatch, both, extra=["--lto=yes"])
+    assert [a for a in argv if a.startswith("--lto")] == [f"--lto={lto}", "--lto=no", "--lto=yes"]
+    assert argv[-3:] == ["--lto=no", "--show-scons", "--lto=yes"]
+    assert argv.index(f"--lto={lto}") > argv.index(f"--include-package={cfg.pkg}")
+
+
+def test_nuitka_pgo_flags(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import shlex
+
+    cfg = make({**CONSOLE_APP, "deploy": {"nuitka": {"pgo": True, "pgo_args": PGO_ARGS, "extra_args": ["--report=r.xml"]}}})
+    argv = _nuitka_argv(sandbox, monkeypatch, cfg)
+    assert argv[-4:] == ["--lto=auto", "--pgo-c", f"--pgo-args={shlex.join(PGO_ARGS)}", "--report=r.xml"]
+    # ONE argv item (uv gets a list), which Nuitka splits with shlex on every OS: a round trip
+    value = next(a for a in argv if a.startswith("--pgo-args=")).split("=", 1)[1]
+    assert shlex.split(value) == PGO_ARGS
+    err = capsys.readouterr().err
+    assert "experimental" in err and "10-15%" in err and "msgpack" in err  # the note
+    # pgo without arguments: the profiling run starts the app with none
+    bare = _nuitka_argv(sandbox, monkeypatch, make({**CONSOLE_APP, "deploy": {"nuitka": {"pgo": True}}}))
+    assert "--pgo-c" in bare and not [a for a in bare if a.startswith("--pgo-args")]
+    # pgo off: neither flag, and no note
+    capsys.readouterr()
+    off = _nuitka_argv(sandbox, monkeypatch, make({}))
+    assert not [a for a in off if a.startswith("--pgo")] and "experimental" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        ({"deploy": {"nuitka": {"lto": "maybe"}}}, "'deploy.nuitka.lto' = 'maybe' is not valid (auto | yes | no)"),
+        ({"deploy": {"nuitka": {"lto": "Yes"}}}, "'deploy.nuitka.lto' = 'Yes' is not valid"),
+        ({**CONSOLE_APP, "deploy": {"nuitka": {"pgo_args": ["--bench"]}}}, "pgo_args is set but deploy.nuitka.pgo is false"),
+        ({"app": {"gui": True, "assets": ""}, "deploy": {"nuitka": {"pgo": True}}}, "needs app.gui = false"),
+        ({"app": {"gui": True, "assets": ""}, "deploy": {"nuitka": {"pgo": True}}}, "until its window is closed"),
+        ({"app": {"gui": False, "assets": "assets"}, "deploy": {"nuitka": {"pgo": True}}}, "needs app.assets = \"\""),
+        ({"app": {"gui": False, "assets": "assets"}, "deploy": {"nuitka": {"pgo": True}}}, "FileNotFoundError"),
+        ({"deploy": {"nuitka": {"pgo": "yes"}}}, "'deploy.nuitka.pgo' must be of type boolean"),
+        ({"deploy": {"nuitka": {"pgo_args": "--bench"}}}, "'deploy.nuitka.pgo_args' must be of type list"),
+        ({"deploy": {"nuitka": {"pgo_args": [1]}}}, "'deploy.nuitka.pgo_args[0]' must be of type string"),
+    ],
+)
+def test_nuitka_options_config_rules(data: dict[str, Any], message: str) -> None:
+    with pytest.raises(DeployError) as e:
+        make(data)
+    assert message in str(e.value) and e.value.code == 2
+
+
+def test_nuitka_options_config_accepts_what_pgo_needs() -> None:
+    cfg = make({**CONSOLE_APP, "deploy": {"nuitka": {"lto": "yes", "pgo": True, "pgo_args": PGO_ARGS}}})
+    assert (cfg.deploy.nuitka.lto, cfg.deploy.nuitka.pgo, cfg.deploy.nuitka.pgo_args) == ("yes", True, PGO_ARGS)
+    assert make({"app": {"gui": True}, "deploy": {"nuitka": {"lto": "no"}}}).deploy.nuitka.lto == "no"  # lto has no rule
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_nuitka_pgo_refuses_mypyc_and_macos_before_any_work(no_build: None, monkeypatch: pytest.MonkeyPatch, dry_run: bool) -> None:
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    monkeypatch.setattr(nuitka, "IS_MACOS", False)
+    cfg = make({**CONSOLE_APP, "deploy": {"nuitka": {"pgo": True}}})
+    with pytest.raises(DeployError) as e:
+        cmd_build.cmd_build(cfg, ["mypyc", "--method", "nuitka"])
+    assert e.value.code == 2 and "mypyc backend" in str(e.value) and "ImportError" in str(e.value) and "reports success" in str(e.value)
+    monkeypatch.setattr(nuitka, "IS_MACOS", True)
+    with pytest.raises(DeployError) as e:
+        cmd_build.cmd_build(cfg, ["cpython", "--method", "nuitka"])
+    assert e.value.code == 2 and "macOS" in str(e.value) and "profdata" in str(e.value)
+    # Without pgo neither rule applies (the stand-in stops at the checks)
+    with pytest.raises(AssertionError, match="went past"):
+        cmd_build.cmd_build(make(CONSOLE_APP), ["mypyc", "--method", "nuitka"])
+
+
+def test_nuitka_build_itself_refuses_pgo_with_mypyc(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # nuitka.build checks too (the method can be called without cmd_build, as the tests do)
+    cfg = make({**CONSOLE_APP, "deploy": {"nuitka": {"pgo": True}}})
+    with pytest.raises(DeployError, match="mypyc backend"):
+        _nuitka_argv(sandbox, monkeypatch, cfg, backend="mypyc")
+    monkeypatch.setattr(nuitka, "IS_MACOS", True)
+    app = _nuitka_app(sandbox / "payload2", cfg.pkg)
+    with pytest.raises(DeployError, match="not available on macOS"):
+        nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
+
+
+def test_nuitka_dry_run_shows_the_flags(no_build: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    monkeypatch.setattr(nuitka, "IS_MACOS", False)
+    assert cmd_build.cmd_build(make({}), ["--method", "nuitka", "--no-check", "--report=r.xml"]) == 0
+    err = capsys.readouterr().err
+    assert "would output dist/myapp-cpython-nuitka*" in err and "  Nuitka options: --lto=auto --report=r.xml" in err
+    assert "experimental" not in err
+    cfg = make({**CONSOLE_APP, "deploy": {"nuitka": {"lto": "yes", "pgo": True, "pgo_args": ["--frames", "10", "a b"]}}})
+    assert cmd_build.cmd_build(cfg, ["--method", "nuitka", "--no-check"]) == 0
+    err = capsys.readouterr().err
+    assert "  Nuitka options: --lto=yes --pgo-c '--pgo-args=--frames 10 '\"'\"'a b'\"'\"''" in err
+    assert "experimental" in err
+
+
+def test_nuitka_keys_of_every_preset_load() -> None:
+    # The [deploy.nuitka] lines of the four pytemplate.toml files are valid (defaults: auto, no PGO)
+    import tomllib
+
+    for path in (config.CONFIG_FILE, *sorted(config.PRESETS.glob("*/files/pytemplate.toml"))):
+        table = tomllib.loads(path.read_text(encoding="utf-8").replace("{{name}}", "demo").replace("{{pkg}}", "demo"))["deploy"]["nuitka"]
+        assert table == {"lto": "auto", "pgo": False, "pgo_args": []}, path
+        cfg: Config = config._build(Config, {"deploy": {"nuitka": table}}, "")
+        assert nuitka.optimization_args(cfg) == ["--lto=auto"]
+
+
 # --- pyz: the bootstrap (templates/pyz/__main__.py), run for real ---------------------------------
 
 

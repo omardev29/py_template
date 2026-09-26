@@ -108,6 +108,11 @@ class WheelConfig:
 @dataclass
 class NuitkaConfig:
     mode: str = "standalone"  # standalone | onefile
+    # --lto: auto | yes | no. Nuitka's auto is "yes" with uv's CPython (gcc/clang, MSVC) until
+    # more than 250 modules are compiled (the flet preset compiles ~800: no LTO there)
+    lto: str = "auto"
+    pgo: bool = False  # --pgo-c: profile-guided C optimization (Nuitka runs the app once while building)
+    pgo_args: list[str] = field(default_factory=list)  # the app's arguments for that profiling run
     extra_args: list[str] = field(default_factory=list)
 
 
@@ -121,11 +126,12 @@ class FletBuildConfig:
 
 @dataclass
 class UpxConfig:
-    enabled: bool = False  # UPX-pack the binaries of the exe, nuitka, portable and flet methods
+    enabled: bool = False  # UPX-pack the binaries of the exe (Windows only), nuitka, portable and flet methods
     level: str = "best"  # 1..9 | best | brute | ultra-brute
     lzma: bool = True
     exclude: list[str] = field(default_factory=list)  # file-name globs never packed
-    path: str = ""  # explicit upx executable (default: PATH, then a pinned download)
+    # explicit upx executable, absolute or relative to the project root (default: PATH, then a pinned download)
+    path: str = ""
 
 
 @dataclass
@@ -505,6 +511,7 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
             raise DeployError(f"pytemplate.toml: deploy.portable.env: invalid environment variable name {key!r}")
     _one_of(cfg.deploy.nuitka.mode, ("standalone", "onefile"), "deploy.nuitka.mode")
+    _check_nuitka(cfg)
     _one_of(cfg.deploy.upx.level, ("1", "2", "3", "4", "5", "6", "7", "8", "9", "best", "brute", "ultra-brute"), "deploy.upx.level")
     for where, names in (("deploy.exclude_modules", cfg.deploy.exclude_modules), ("deploy.exe.hidden_imports", cfg.deploy.exe.hidden_imports)):
         for m in names:
@@ -555,6 +562,28 @@ def _check_override(override: dict[str, Any], where: str) -> None:
                     f"pytemplate.toml: '{_join(where, key)}' must be a boolean, a number, a one-line "
                     "string or a list of them (it becomes one line of .mypy.ini)"
                 )
+
+
+def _check_nuitka(cfg: Config) -> None:
+    """[deploy.nuitka] lto and pgo. The PGO rules the config alone decides are checked here; the
+    backend and the build machine (mypyc, macOS) are checked by nuitka.check_options at build time."""
+    nuitka = cfg.deploy.nuitka
+    _one_of(nuitka.lto, ("auto", "yes", "no"), "deploy.nuitka.lto")
+    if nuitka.pgo_args and not nuitka.pgo:
+        raise DeployError(
+            "pytemplate.toml: deploy.nuitka.pgo_args is set but deploy.nuitka.pgo is false: they are the "
+            "app's arguments for the PGO profiling run (set pgo = true, or remove pgo_args)"
+        )
+    if nuitka.pgo and cfg.app.gui:
+        raise DeployError(
+            "pytemplate.toml: deploy.nuitka.pgo needs app.gui = false: Nuitka's profiling run starts the "
+            "app while building, and the build waits, with no timeout, until its window is closed"
+        )
+    if nuitka.pgo and cfg.app.assets:
+        raise DeployError(
+            f"pytemplate.toml: deploy.nuitka.pgo needs app.assets = \"\": Nuitka's profiling run starts the "
+            f"app before its data files are in place, so reading src/{cfg.app.assets}/ fails (FileNotFoundError)"
+        )
 
 
 def _check_default_methods(cfg: Config) -> None:

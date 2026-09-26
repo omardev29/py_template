@@ -9,6 +9,7 @@ mypyc backend, your core modules are already compiled by mypyc (Nuitka includes 
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import urllib.request
 from collections.abc import Sequence
@@ -17,7 +18,7 @@ from pathlib import Path
 from .. import envs, mypyc, proc, ui, upx
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
-from ..project import BUILD, IS_WINDOWS, ROOT, rel
+from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT, rel
 from ..ui import DeployError
 
 # Nuitka is not in uv.lock (`uv run --with`), so it is pinned here to keep builds reproducible:
@@ -51,6 +52,52 @@ def check_python(cfg: Config, args: Sequence[str]) -> None:
         f"  that supports {wanted}, or try the pinned one anyway with --experimental={flag}",
         3,
     )
+
+
+PGO_NOTE = (
+    "  note: deploy.nuitka.pgo is experimental in standalone and onefile builds (Nuitka says so itself); "
+    "measured: 10-15% faster pure-Python loops, nothing elsewhere. A dependency with a pure-Python "
+    "fallback (msgpack) may be profiled on that fallback path."
+)
+
+
+def optimization_args(cfg: Config) -> list[str]:
+    """The Nuitka flags of [deploy.nuitka] lto/pgo. build() puts them BEFORE extra_args and the
+    command line, so an --lto given there still wins (Nuitka takes the last value).
+
+    lto: Nuitka's "auto" is yes with uv's CPython (gcc/clang on Linux and macOS, MSVC on Windows)
+    unless more than 250 modules are compiled: the stdlib goes in as bytecode and does not count,
+    the app and the third-party code Nuitka follows or includes do (flet: ~800 modules, no LTO).
+    pgo: --pgo-c runs the app once during the build to profile the C code; pgo_args are the
+    app's arguments for that run, one string that Nuitka splits with shlex on every OS.
+    """
+    nuitka = cfg.deploy.nuitka
+    args = [f"--lto={nuitka.lto}"]
+    if nuitka.pgo:
+        args.append("--pgo-c")
+        if nuitka.pgo_args:
+            args.append(f"--pgo-args={shlex.join(nuitka.pgo_args)}")
+    return args
+
+
+def check_options(cfg: Config, backend: str) -> None:
+    """The PGO rules that depend on the build (config.validate checks the config-only ones:
+    app.gui, app.assets, pgo_args without pgo). cmd_build calls this before any work."""
+    if not cfg.deploy.nuitka.pgo:
+        return
+    if backend == "mypyc":
+        raise DeployError(
+            "deploy.nuitka.pgo does not work with the mypyc backend: Nuitka's profiling run starts the app "
+            "before main.dist holds the compiled extension modules, so they fail to import (ImportError) "
+            "while Nuitka still reports success. Use ./deploy build cpython --method nuitka, or set pgo = false",
+            2,
+        )
+    if IS_MACOS:
+        raise DeployError(
+            "deploy.nuitka.pgo is not available on macOS: Nuitka 4.2.2 has no clang profdata step there. "
+            "Set pgo = false, or build on Linux or Windows",
+            2,
+        )
 
 
 # Runs in the tools environment with the stage first on sys.path and prints the names whose
@@ -134,6 +181,7 @@ def _flet_client_archive(cfg: Config) -> Path:
 def build(req: BuildRequest) -> Path:
     cfg = req.cfg
     check_python(cfg, [*cfg.deploy.nuitka.extra_args, *req.extra])
+    check_options(cfg, req.backend)
     stage = BUILD / "nuitka-stage" / req.backend
     if req.compiled:
         mypyc.exe_stage(cfg, req.app_dir, stage)
@@ -188,9 +236,12 @@ def build(req: BuildRequest) -> Path:
             "--include-package=flet_desktop",
             f"--include-data-files={archive}=flet_desktop/app/{archive.name}",
         ]
+    argv += optimization_args(cfg)  # before extra_args and the command line: a later --lto wins
     argv += cfg.deploy.nuitka.extra_args + req.extra
 
     ui.info("  Nuitka compiles everything to C: the first build takes several minutes")
+    if cfg.deploy.nuitka.pgo:
+        ui.info(PGO_NOTE)
     try:
         envs.uv(envs.tool_env(cfg), ["run", "--locked", "--with", NUITKA, *argv], cwd=stage)
     except proc.CommandFailed as e:

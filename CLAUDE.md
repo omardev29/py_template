@@ -401,7 +401,7 @@ header rules (with detector tests proving each rule fires).
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `new`, the internal `__init` (`cmd_init`), and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
 | `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`, `BASEDPYRIGHT_NODE`. |
 | `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
-| `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys (`parse_key`, `check_key`, `targets_for`), `UV_PLATFORMS`/`host_floor`, `ensure_env`, `export_requirements`, `install_deps`, `drop_install_junk`, `has_native`, `skipped_requirements`, `copy_app`, `uses_tkinter`, `windowed`, `tree_bytes`; `nuitka.NUITKA`/`NUITKA_PYTHON`. |
+| `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys (`parse_key`, `check_key`, `targets_for`), `UV_PLATFORMS`/`host_floor`, `ensure_env`, `export_requirements`, `install_deps`, `drop_install_junk`, `has_native`, `skipped_requirements`, `copy_app`, `uses_tkinter`, `windowed`, `tree_bytes`; `nuitka.NUITKA`/`NUITKA_PYTHON`, `check_python`, `check_options`, `optimization_args` (`[deploy.nuitka]` lto/pgo); `pyz.check_parts`, `merge`. |
 | `shells.py` | `__probe`, launcher/shell doctor checks, `shell-setup` snippets, `selftest --shells` (section 4.9). |
 | `cmd_nvim.py` | `./deploy nvim ...` and `doctor(check)` (section 12.2). |
 | `nvimtest.py` | `selftest --nvim` (section 13.1). |
@@ -504,8 +504,9 @@ header rules (with detector tests proving each rule fires).
 - `render.apply` behaves like `--check` (writes nothing); `render.auto` prints "would update";
   `render` prints `would update: ...`.
 - `clean` prints `would remove X` per target. `build` validates its arguments, the pyz target
-  keys and the Nuitka pin (`nuitka.check_python`) as a real build does, prints the checks
-  (unless `--no-check`) and `(--dry-run) build B -> M: would output dist/<name>-<b>-<m>*`, then
+  keys, the Nuitka pin and PGO rules (`nuitka.check_python`, `check_options`) as a real build
+  does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M: would output
+  dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options: --lto=... [--pgo-c ...] <extras>`), then
   stops. `report` builds nothing and never opens the browser.
 - `mode` validates the new `pytemplate.toml` in memory and prints the keys that would change
   (new and current value), whether `pyproject.toml` would be rewritten, `uv.lock` ("would
@@ -697,9 +698,13 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   extra_args` (`hidden_imports`: dotted names; `strip`:
   PyInstaller `--strip`, Linux/macOS only), `[deploy.portable] runtime prune archive env`
   (`env` names must be identifiers), `[deploy.pyz] targets`, `[deploy.wheel] entry`,
-  `[deploy.nuitka] mode extra_args`, `[deploy.flet] target cleanup exclude extra_args`
-  (`target` is not validated; `cleanup` = `--cleanup-app --cleanup-packages`),
-  `[deploy.upx] enabled level lzma exclude path` (`level` in `1..9|best|brute|ultra-brute`).
+  `[deploy.nuitka] mode lto pgo pgo_args extra_args` (`lto` in `auto|yes|no`; `config._check_nuitka`
+  refuses `pgo_args` without `pgo`, and `pgo` with `app.gui = true` or a non-empty `app.assets`:
+  Nuitka's profiling run starts the app while building, so the build waited for its window to be
+  closed, and the data files were not in place yet; mypyc and macOS are refused at build time,
+  section 10), `[deploy.flet] target cleanup exclude extra_args` (`target` is not validated;
+  `cleanup` = `--cleanup-app --cleanup-packages`), `[deploy.upx] enabled level lzma exclude
+  path` (`level` in `1..9|best|brute|ultra-brute`; `path` relative to the project root).
 - `[hooks]`: `pre_commit` (setup installs the git hook; section 5.6).
 - Every `*.env` table (`tasks.X.env`, `deploy.portable.env`) takes string values only, and names
   a process environment can hold (not empty, no `=` or NUL; checked by the loader).
@@ -1124,8 +1129,26 @@ Per method:
   imports the tools env can locate (`nuitka.includable`: top-level `find_spec` with the stage on
   `sys.path`, built-ins dropped, compiled modules and extensions always kept; Nuitka stops with
   FATAL on a module it cannot locate, e.g. a platform-guarded `import winreg`),
-  `--python-flag=no_asserts/no_docstrings` from `optimize`, `--nofollow-import-to`
-  per `deploy.exclude_modules`, the upx plugin when enabled. Standalone on Linux/macOS names the
+  `--python-flag=no_asserts/no_docstrings` from the shared `deploy.optimize` (an owner
+  decision: no Nuitka-only switch), `--nofollow-import-to` per `deploy.exclude_modules`, the upx
+  plugin when enabled, then `nuitka.optimization_args` BEFORE `deploy.nuitka.extra_args` and the
+  command line (Nuitka takes the last value, so an `--lto` there still wins): always
+  `--lto=<deploy.nuitka.lto>`, default `auto`, which Nuitka 4.2.2 resolves to yes for uv's
+  python-build-standalone on Linux, Windows (MSVC) and macOS, BUT off when more than 250 modules
+  are compiled (the stdlib goes in as bytecode and does not count; the app and the third-party
+  code Nuitka follows or `--include-package`s do): script and raylib stay far below (a raylib
+  app compiles ~18), the flet preset compiles ~794 (pygments 325, flet 280...), so `auto` means
+  NO LTO there; never make `yes` its default (an ~800-module LTO link is unmeasured on MSVC).
+  Measured with gcc 13 on a tiny script: `--lto=yes` built faster (9-10 s vs 22 s), smaller
+  (7.21 vs 7.78 MB) and ran 0-5% faster. `pgo = true` adds `--pgo-c` and, when `pgo_args` is
+  not empty, ONE item `--pgo-args=<shlex.join(pgo_args)>` (Nuitka shlex-splits it on every OS;
+  uv gets an argv list) and prints `PGO_NOTE` (experimental in standalone/onefile per Nuitka;
+  measured gain 10-15% on pure-Python loops only; a dependency with a pure-Python fallback such
+  as msgpack may be profiled on that path). `nuitka.check_options` (from `cmd_build` before the
+  checks, also in `--dry-run`, and from `build`) refuses PGO with the mypyc backend (the
+  profiling run starts before `main.dist` holds the extension modules: ImportError, yet Nuitka
+  reports success) and on macOS (Nuitka 4.2.2 has no clang profdata step); `--dry-run` prints
+  `Nuitka options: ...` (the lto/pgo flags, then the extras). Standalone on Linux/macOS names the
   binary `<name>.bin` when `app.name.lower() == pkg` (the default): it sits in `main.dist/` next
   to the package folder `<pkg>/`, and a file with that name made Nuitka fail with
   NotADirectoryError (case-insensitive on macOS); onefile and Windows keep the plain name.
