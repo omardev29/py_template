@@ -218,9 +218,10 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
     """Install the runtime deps for one target (host or cross) with `uv pip install --target`.
 
     Cross targets get binary wheels for UV_PLATFORMS (an sdist built here would produce host
-    binaries). The host target gets the same platform floor when this machine can load those
-    wheels (host_floor): without it uv picks the newest the build machine allows, e.g.
-    manylinux_2_34 on Ubuntu 24.04, and the result silently needed that glibc.
+    binaries), except the packages that publish no wheel at all (source_only): those are built
+    here, and a native result is refused. The host target gets the same platform floor when this
+    machine can load those wheels (host_floor): without it uv picks the newest the build machine
+    allows, e.g. manylinux_2_34 on Ubuntu 24.04, and the result silently needed that glibc.
     """
     if dest.exists():
         shutil.rmtree(dest)

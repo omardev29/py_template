@@ -1835,7 +1835,7 @@ def test_export_ships_path_dependencies_and_refuses_a_stale_lock(tmp_path: Path,
     monkeypatch.setattr(common, "BUILD", tmp_path / "build")
     monkeypatch.setenv("UV_OFFLINE", "1")  # an up-to-date lock is checked without the network
     lines = common.export_requirements(make({})).read_text(encoding="utf-8").splitlines()
-    assert "./libs/mylib" in [ln.split(";")[0].strip() for ln in lines]
+    assert "./libs/mylib" in [ln.split(";")[0].strip().replace("\\", "/") for ln in lines]
     assert not [ln for ln in lines if ln.startswith("-e")]
     digest = common.requirements_digest(tmp_path / "build" / "deploy" / "requirements.txt")
     assert digest != hashlib.sha256(b"").hexdigest()[:16]  # the path line is part of the fingerprint
