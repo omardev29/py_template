@@ -167,6 +167,7 @@ class FakeUv:
         check: bool = True,
         capture: bool = False,
         echo: bool = True,
+        quiet: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         argv = [str(a) for a in args]
         self.calls.append(argv)
