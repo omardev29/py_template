@@ -550,6 +550,8 @@ def _text_kind(
         return "keep"  # x.alpha: a submodule or an attribute, never the top-level package
     if prev in ("/", "\\") and _inside_package(text, start, names.old_pkg):
         return "keep"  # src/alpha/alpha: a submodule of the package, like alpha.alpha
+    if names.old_pkg == "src" and text[end : end + 1] in ("/", "\\") and not _after_src(text, start):
+        return "skip"  # an app named src (made by hand: new refuses it): src/src/x is the folder, then the package
     if names.old_name != names.old_pkg:
         return "pkg" if word == names.old_pkg else "name"
     if names.new_name == names.new_pkg and not contextual:

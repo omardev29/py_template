@@ -405,6 +405,19 @@ def test_pytemplate_toml_comments_of_an_app_named_like_a_path_word(tmp_path: Pat
     assert planned.config.new == presets.skeleton(preset, "beta")["pytemplate.toml"].decode("utf-8")
 
 
+@pytest.mark.parametrize(
+    ("python", "text", "expected"),
+    [
+        (True, 'DATA = Path("src/src/data.json")\n# see src/src/core.py\n', 'DATA = Path("src/beta/data.json")\n# see src/beta/core.py\n'),
+        (False, "see src/src/core.py, src\\src\\x and src/src/src/y\n", "see src/beta/core.py, src\\beta\\x and src/beta/src/y\n"),
+    ],
+)
+def test_code_of_an_app_named_src_keeps_the_project_folder(python: bool, text: str, expected: str) -> None:
+    """`new` refuses the name src, but a project made by hand can have it: in src/src/x the first
+    src is the project's own folder and the second the package (it once became beta/beta/x)."""
+    assert rewrite(text, Names("src", "beta"), python=python).text == expected
+
+
 def test_root_files_that_mention_the_name_are_reported(tmp_path: Path) -> None:
     _write_project(tmp_path, "script", "alpha")
     (tmp_path / "README.md").write_text("# alpha\n", encoding="utf-8")

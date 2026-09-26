@@ -904,10 +904,13 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     same for TOML basic and literal strings (`_toml_strings`); comments and plain text files
     have no escapes. A one-letter occurrence that ends a format directive in a string (`"%d"`,
     `"%(k)-s"`, `"{:d}"`, `"{0:,d}"`, `"{!r}"`: `_directive`) is kept and reported too (whether
-    the string is ever formatted is unknown). Names of one or two letters are legal, and the flet skeleton's PNG
-    signature `b"\x89PNG\r\n..."` once changed silently for `r` and `n`.
+    the string is ever formatted is unknown). Names of one or two letters are legal, and the
+    flet skeleton's PNG signature `b"\x89PNG\r\n..."` once changed silently for `r` and `n`.
   - Text (strings, comments, other files): every occurrence except `x.pkg` and a path segment
-    right after the package itself (`src/pkg/pkg`, `src\pkg\pkg`: a submodule). When the
+    right after the package itself (`src/pkg/pkg`, `src\pkg\pkg`: a submodule). For a package
+    named `src` (a project made by hand: `new` and `rename` refuse the name) a `src/` segment
+    that is not right inside another `src/` is the project's own folder and never changes
+    (`src/src/x` -> `src/beta/x`; it once became `beta/beta/x`). When the
     old name equals the old package but the new name differs from the new package (`alpha` ->
     `My-Game` / `my_game`): paths, dotted names, `pkg:main`, "package"/"module",
     `import`/`from`, `-m` and the module-name arguments of loader calls get the package
