@@ -729,6 +729,14 @@ raise SystemExit(cli.main(["x"]))
 """
 
 
+def _terminal_signals() -> None:
+    """In the driver before exec: the signals as a terminal session has them. A suite started
+    in the background (`./deploy selftest &` in a script, nohup) ignores SIGINT (SIGHUP), the
+    runner rightly keeps an inherited SIG_IGN, and these tests are about the terminal case."""
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(s, signal.SIG_DFL)
+
+
 def _interrupt(tmp_path: Path, *modes: str, sig: int = signal.SIGINT, group: bool = True) -> tuple[int, bool, str]:
     """Run DRIVER in its own session, press Ctrl+C (SIGINT to the process group, as a terminal
     does) once the child is ready; return (exit code, marker written before the exit, log).
@@ -745,6 +753,7 @@ def _interrupt(tmp_path: Path, *modes: str, sig: int = signal.SIGINT, group: boo
             stderr=subprocess.STDOUT,
             env=child_env(),
             start_new_session=True,
+            preexec_fn=_terminal_signals,  # noqa: PLW1509 (no threads here)
         )
     try:
         deadline = time.monotonic() + 60
