@@ -363,12 +363,17 @@ def uses_tkinter(*extra: Path) -> bool:
     """Return True when a .py file in src/ or under `extra` imports tkinter or turtle.
 
     The portable prune passes the installed lib/: a dependency such as customtkinter or
-    ttkbootstrap needs tkinter even when the app never imports it itself.
+    ttkbootstrap needs tkinter even when the app never imports it itself. The walk follows
+    symlinked folders (mypyc.walk, like the payload's sync_tree): Path.rglob skips them.
     """
     import ast
 
+    from ..mypyc import walk
+
     for root in (SRC, *extra):
-        for path in root.rglob("*.py"):
+        for path in walk(root):
+            if path.suffix != ".py" or not path.is_file():
+                continue
             try:
                 data = path.read_bytes()
                 if b"tkinter" not in data and b"turtle" not in data:

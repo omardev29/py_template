@@ -1223,10 +1223,10 @@ Formats:
   (build, `compile --release`) strips asserts when `deploy.optimize >= 1`, `debug_level "0"`.
 - `compiled_sources`: the `.py` files of `compile.modules` (never `__init__.py`), minus
   `compile.exclude` (exact module or package prefix; an entry naming nothing -> `DeployError`),
-  deduplicated. Walks with `mypyc._walk`, like `sync_tree`.
+  deduplicated. Walks with `mypyc.walk`, like `sync_tree` and `common.uses_tkinter`.
 - `sync_tree(src, dst, owned=())` copies changed files only and deletes removed ones. Change
   detection is size + `st_mtime_ns` (`copy2` preserves the exact mtime), so a same-size edit
-  within one second is detected. `_walk` follows symlinked folders (`Path.rglob` does not
+  within one second is detected. `walk` follows symlinked folders (`Path.rglob` does not
   descend into them: a linked `src/assets` arrived empty), skipping a link back to a folder on
   the current path (cycles; two links to one folder are both copied) and never entering
   `SKIP_DIRS`; a broken symlink is a warning. A path that turned from file to folder (or back)
@@ -1442,8 +1442,9 @@ Per method:
   base), stdlib `test idlelib turtledemo ensurepip site-packages`, `test`/`tests` subfolders of
   stdlib packages (PyPy's `unittest/test`, `lib2to3/tests`...), `*.debug` (PyPy's detached debug
   symbols, 16 MB), PyPy `hpy/devel`, and Tk unless `src/` or an installed dependency in `lib/`
-  imports tkinter/turtle (`common.uses_tkinter(lib)`: customtkinter, ttkbootstrap; a bytes
-  pre-filter, then the AST; a file it cannot parse keeps Tk): tkinter, turtle and every Tcl/Tk
+  imports tkinter/turtle (`common.uses_tkinter(lib)`: customtkinter, ttkbootstrap; `mypyc.walk`,
+  so a symlinked folder of `src/` counts; a bytes pre-filter, then the AST; a file it cannot
+  parse keeps Tk): tkinter, turtle and every Tcl/Tk
   file `TCL_RE` matches in `lib/` (POSIX: `libtcl9.0.so`, `tcl9.0/`, `tk9.0/`, `itcl*`,
   `thread*`), `DLLs/` and `lib-dynload/` (`_tkinter.*`). Deletes `EXTERNALLY-MANAGED`; copies
   `vcruntime140*.dll` from the CPython base into PyPy runtimes on Windows (PyPy's zip lacks
@@ -1471,8 +1472,10 @@ Per method:
     `pypyw` (`common.windowed`; the probe keeps the console names). The Python install
     manager's `py`/`python` install the requested version when NO runtime exists at all (its
     `automatic_install` default; the silenced probe hides it, so that first start can take a
-    minute): the launchers leave `PYTHON_MANAGER_*` to the user. With native dependencies it warns
-    that the folder only works on the host key.
+    minute): the launchers leave `PYTHON_MANAGER_*` to the user. With native dependencies, or
+    pins a marker left out on this interpreter (`common.skipped_requirements`, as pyz: tzdata on
+    win32, backports-tarfile below 3.12), `portable._warn_host_only` warns that `lib/` only fits
+    the host key (the launchers start it on any OS and Python at or above the minimum).
   - Every bundled build starts its interpreter before reporting success (`_smoke_runtime`, after
     UPX, with the launchers' `-s -O` plus `-B`): it must run and its `sys.prefix` (a `PTPREFIX:`
     line) must be inside the folder's `runtime/`, else `DeployError` (a prune or UPX regression,
@@ -2631,10 +2634,13 @@ CPython and its standard library:
   `test_cli_core.py::test_ctrl_c_waits_for_a_child_that_cleans_up` and the other
   `test_ctrl_c_*`. Goes: never.
 - **`Path.rglob` does not enter symlinked folders** (LIMITATION; `recurse_symlinks` from 3.13):
-  a linked `src/assets` reached the mypyc stage empty. Up: python/cpython#77609. Fix:
-  `mypyc._walk` (9). Test: `test_mypyc_core.py::test_sync_tree_follows_symlinked_dirs`,
-  `test_compiled_sources_follow_a_symlinked_subpackage`. Goes: maybe once the runner needs 3.13
-  (the cycle check stays ours).
+  a linked `src/assets` reached the mypyc stage empty, and the portable prune removed Tk for a
+  `tkinter` import in a linked folder of `src/`. Up: python/cpython#77609. Fix: `mypyc.walk` in
+  `mypyc.sync_tree`, `mypyc.compiled_sources` and `common.uses_tkinter` (9, 10). Test:
+  `test_mypyc_core.py::test_sync_tree_follows_symlinked_dirs`,
+  `test_compiled_sources_follow_a_symlinked_subpackage`,
+  `test_build_methods.py::test_portable_keeps_tkinter_imported_in_a_symlinked_src_folder`. Goes:
+  maybe once the runner needs 3.13 (the cycle check stays ours).
 - **ZIP stores no date before 1980, and `zipapp` cannot relax it** (LIMITATION): a payload file
   from the Nix store (mtime 1) crashed the pyz and the portable zip with ValueError. Up: cf.
   python/cpython#78278 (zipfile's `strict_timestamps`); none found for `zipapp`. Fix:

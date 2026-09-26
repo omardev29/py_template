@@ -69,7 +69,7 @@ def group_name(cfg: Config) -> str:
     return cfg.pkg
 
 
-def _walk(root: Path) -> Iterator[Path]:
+def walk(root: Path) -> Iterator[Path]:
     """Every entry below `root`, each folder before its contents, following symlinked folders.
 
     Path.rglob does not descend into a symlinked folder (3.11-3.14): a linked src/assets or
@@ -103,7 +103,7 @@ def compiled_sources(cfg: Config) -> list[Path]:
     for rel_path in compiled_paths(cfg):
         path = SRC / rel_path
         if path.is_dir():
-            candidates = sorted(p for p in _walk(path) if p.suffix == ".py" and p.name != "__init__.py" and p.is_file())
+            candidates = sorted(p for p in walk(path) if p.suffix == ".py" and p.name != "__init__.py" and p.is_file())
         elif path.is_file():
             candidates = [path]
         else:
@@ -161,7 +161,7 @@ def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
     changed = 0
     dst.mkdir(parents=True, exist_ok=True)
     seen: set[Path] = set()
-    for path in _walk(src):
+    for path in walk(src):
         if _mypyc_output(path, src, owned):
             continue
         target = dst / path.relative_to(src)

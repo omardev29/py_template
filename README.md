@@ -714,8 +714,9 @@ read-only install starts fast, and it starts the copied interpreter before it re
 both launchers). The launcher runs each candidate (`py -X.Y`, `python3`, `python` on Windows;
 `pythonX.Y`, `python3`, `python` elsewhere; `pypy3`, `pypy` for PyPy) and uses the first that is at
 least the project's minimum Python. None: it prints `<name>: needs Python X.Y or newer in PATH` and
-exits with 9009 (`.cmd`) or 127 (`.sh`). With native dependencies such a folder only works on the OS
-it was built on (the build warns). On Windows with the Python install manager and no Python at all,
+exits with 9009 (`.cmd`) or 127 (`.sh`). With native dependencies, or a dependency that a marker
+limits to some platforms or Python versions (`tzdata` on Windows only, `backports-tarfile` below
+3.12), such a folder only works on the platform and Python minor that built it (the build warns). On Windows with the Python install manager and no Python at all,
 the first start silently downloads one (the install manager's default); set
 `PYTHON_MANAGER_AUTOMATIC_INSTALL=false` or run `py install 3.X` to control that.
 

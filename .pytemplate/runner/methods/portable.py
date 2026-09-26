@@ -4,7 +4,8 @@ The only standalone option for PyPy (PyInstaller and Nuitka only support CPython
 - runtime = "bundled": copies the backend's interpreter (managed by uv, relocatable) and
   prunes it. Host OS only.
 - runtime = "system": no interpreter; the launchers use the Python/PyPy of the target machine.
-  With pure dependencies, that folder works on any OS.
+  With pure dependencies that no marker limits to some platforms or Python versions, that folder
+  works on any OS; otherwise the build warns that it only fits the machine that built it.
 """
 
 from __future__ import annotations
@@ -368,8 +369,8 @@ def build(req: BuildRequest) -> Path:
     common.copy_app(req.app_dir, out / "app", extensions=True)
     requirements = common.export_requirements(cfg)
     common.install_deps(cfg, req.backend, host, out / "lib", requirements)
-    if not bundled and common.has_native(out / "lib"):
-        ui.warn("runtime = \"system\" with native dependencies: it will only work on " + host.key)
+    if not bundled:
+        _warn_host_only(host.key, requirements, out / "lib")
     python = copy_runtime(cfg, req.backend, out / "runtime", out / "lib") if bundled else None
     shutil.copy2(TEMPLATES / "portable" / "boot.py", out / "boot.py")
     launchers = write_launchers(cfg, req.backend, out, python)
@@ -401,6 +402,22 @@ def build(req: BuildRequest) -> Path:
         ui.info(f"  archive: {rel(archive)}")
     ui.info(f"  run: {', '.join(rel(p) for p in launchers)}  ({common.dir_size_mb(out):.0f} MB)")
     return out
+
+
+def _warn_host_only(key: str, requirements: Path, lib: Path) -> None:
+    """runtime = "system": lib/ was installed for this machine's interpreter, but both launchers
+    start the app with any Python at or above the minimum, on any OS. Native wheels, and pins that
+    a marker left out here (tzdata on win32, backports-tarfile below 3.12), make it host-only."""
+    skipped = common.skipped_requirements(requirements, lib)
+    reasons = ["native dependencies"] if common.has_native(lib) else []
+    if skipped:
+        reasons.append(f"dependencies for other platforms or Python versions ({', '.join(skipped)})")
+    if reasons:
+        ui.warn(
+            f'runtime = "system" with {" and ".join(reasons)}: lib/ only fits {key}, and the launchers '
+            "start it on any OS and Python version. Build the folder on each platform, or use "
+            "--method pyz with [deploy.pyz] targets"
+        )
 
 
 SMOKE_MARK = "PTSMOKE:"

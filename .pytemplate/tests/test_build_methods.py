@@ -2091,6 +2091,24 @@ def test_portable_prunes_tkinter_when_nothing_imports_it(tmp_path: Path, monkeyp
     assert common.uses_tkinter(lib) is True  # the app's own import still counts
 
 
+def test_portable_keeps_tkinter_imported_in_a_symlinked_src_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # src/myapp/gui -> ../../shared_gui: Path.rglob does not enter a symlinked folder, so the prune
+    # removed Tk although the payload (sync_tree follows the link) imports tkinter
+    shared = tmp_path / "shared_gui"
+    shared.mkdir()
+    (shared / "win.py").write_text("import tkinter\n", encoding="utf-8")
+    src = tmp_path / "src"
+    (src / "myapp").mkdir(parents=True)
+    (src / "myapp" / "__init__.py").write_text("", encoding="utf-8")
+    try:
+        (src / "myapp" / "gui").symlink_to(shared, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    (src / "myapp" / "loop").symlink_to(src / "myapp", target_is_directory=True)  # a cycle must not hang it
+    monkeypatch.setattr(common, "SRC", src)
+    assert common.uses_tkinter(tmp_path / "no-lib") is True
+
+
 # --- portable: precompile, archive, stale files ------------------------------------------------------
 
 
@@ -2205,6 +2223,40 @@ def _system_portable(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, fail: bo
     monkeypatch.setattr(common, "install_deps", install)
     app = fake_app(sandbox / "payload", "x")
     return portable.build(BuildRequest(cfg, "cpython", "portable", app))
+
+
+@pytest.mark.parametrize(
+    ("installed", "pins", "warning"),
+    [
+        # tzdata only on win32: the Linux build left it out without a word, and the folder's .cmd
+        # started the app on Windows, where zoneinfo then failed
+        ({"tzlocal": "5.4.4"}, ["tzlocal==5.4.4", "tzdata==2026.4 ; sys_platform == 'win32'"], "tzdata==2026.4"),
+        # backports-tarfile only below 3.12: the launcher accepts a Python 3.11 when PyPy is supported
+        ({"jaraco-context": "6.1.2"}, ["jaraco-context==6.1.2", "backports-tarfile==1.2.0 ; python_full_version < '3.12'"], "backports-tarfile==1.2.0"),
+        ({"rich": "15.0.0"}, ["rich==15.0.0 ; implementation_name == 'cpython'"], None),  # the same everywhere: no warning
+    ],
+)
+def test_portable_system_warns_about_pins_other_platforms_need(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], installed: dict[str, str], pins: list[str], warning: str | None
+) -> None:
+    from runner.methods import portable
+
+    cfg = make({"app": {"name": "x"}, "deploy": {"portable": {"runtime": "system", "archive": False}}})
+    monkeypatch.setattr(common, "host_target", lambda c, b: common.Target("cp", 3, 14, "linux", "x86_64"))
+    monkeypatch.setattr(common, "export_requirements", lambda c: _requirements(sandbox, *pins))
+
+    def install(c: Config, b: str, t: common.Target, dest: Path, req: Path) -> Path:
+        for name, version in installed.items():
+            _wheel(dest, name, version)
+        return dest
+
+    monkeypatch.setattr(common, "install_deps", install)
+    portable.build(BuildRequest(cfg, "cpython", "portable", fake_app(sandbox / "payload", "x")))
+    err = capsys.readouterr().err
+    if warning is None:
+        assert "warning:" not in err
+    else:
+        assert warning in err and "cp314-linux-x86_64" in err and "warning:" in err
 
 
 @pytest.mark.parametrize("fail", [False, True])
