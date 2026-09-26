@@ -82,16 +82,27 @@ def mypy_ini(cfg: Config, profile: str, *, for_compile: bool = False) -> str:
         head["files"] = ["src", "tests"] if (ROOT / "tests").is_dir() else "src"
     lines = [f"# {HEADER}", f"# Typing profile: {profile} ({data.get('description', '')})", ""]
     lines += _ini_section("mypy", {**head, **data.get("mypy", {})})
+    # One section per module pattern, later options winning: mypy refuses a repeated section
+    # name, and a pattern repeated in another section REPLACES the earlier options (an override
+    # of "{pkg}.core.*" would have dropped the compiled rules).
+    sections: dict[str, dict[str, Any]] = {}
     compiled = data.get("mypy_compiled")
     if compiled:
         for pattern in compiled_patterns(cfg):
-            lines += _ini_section(f"mypy-{pattern}", compiled)
+            sections.setdefault(pattern, {}).update(compiled)
+        # compile.exclude stays interpreted: back to the global value (a module or a whole
+        # subpackage: `x.*` covers x itself, and mypy prefers the longer pattern)
+        relaxed = {key: data.get("mypy", {}).get(key, False) for key in compiled}
+        for module in cfg.compile.exclude:
+            sections.setdefault(f"{module}.*", {}).update(relaxed)
     for override in cfg.typing.mypy_overrides:
         modules = override["module"]
         names = modules if isinstance(modules, list) else [modules]
         opts = {k: v for k, v in override.items() if k != "module"}
-        section = ",".join(n.replace("{pkg}", cfg.pkg) for n in names)
-        lines += _ini_section(f"mypy-{section}", opts)
+        for name in names:
+            sections.setdefault(name.replace("{pkg}", cfg.pkg), {}).update(opts)
+    for name, opts in sections.items():
+        lines += _ini_section(f"mypy-{name}", opts)
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
@@ -124,15 +135,40 @@ def pyright_config(cfg: Config, profile: str, *, absolute: bool = False) -> dict
     if typings_dir():
         conf["stubPath"] = path("typings")
     conf.update(data.get("pyright", {}))
-    paths = [path(f"src/{p}") for p in compiled_paths(cfg)]
+    # compile.exclude (modules and subpackages that stay interpreted) is left out of the rules
+    # for compiled code: pyright has no exclusion inside `strict`, so a compiled package that
+    # holds an excluded module is listed by its other files and folders
+    excluded = {rel for m in cfg.compile.exclude for rel in _module_paths(m)}
+    compiled = [p for top in compiled_paths(cfg) for p in _paths_without(f"src/{top}", excluded)]
     if data.get("pyright_compiled", {}).get("strict"):
-        conf["strict"] = paths
+        conf["strict"] = [path(p) for p in compiled]
     based = data.get("basedpyright_compiled")
     if cfg.typing.editor == "basedpyright" and based:
+        # The first environment that matches a file wins: the excluded ones come first, without the Any rules
         conf["executionEnvironments"] = [
-            {"root": p, "extraPaths": [path("src")], **based} for p in paths if (ROOT / p).is_dir()
-        ]
+            {"root": path(p), "extraPaths": [path("src")]} for p in sorted(excluded) if (ROOT / p).exists()
+        ] + [{"root": path(p), "extraPaths": [path("src")], **based} for p in compiled if (ROOT / p).exists()]
     return conf
+
+
+def _module_paths(module: str) -> tuple[str, str]:
+    """The two paths (relative to ROOT) a dotted module can have: a .py file or a package folder."""
+    base = "src/" + module.replace(".", "/")
+    return f"{base}.py", base
+
+
+def _paths_without(top: str, excluded: set[str]) -> list[str]:
+    """`top` (a path relative to ROOT) as the fewest files and folders that leave `excluded` out."""
+    if top in excluded:
+        return []
+    if not any(e.startswith(top + "/") for e in excluded) or not (ROOT / top).is_dir():
+        return [top]
+    out: list[str] = []
+    for child in sorted((ROOT / top).iterdir(), key=lambda p: p.name):
+        if child.name.startswith((".", "__pycache__")) or not (child.is_dir() or child.suffix in (".py", ".pyi")):
+            continue
+        out += _paths_without(f"{top}/{child.name}", excluded)
+    return out
 
 
 # --- ruff ----------------------------------------------------------------------------------------

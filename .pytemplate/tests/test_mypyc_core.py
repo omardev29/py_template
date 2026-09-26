@@ -9,6 +9,7 @@ real tools (mypy, mypyc and a C compiler in .venv) skip cleanly without them.
 from __future__ import annotations
 
 import ast
+import configparser
 import importlib.machinery
 import importlib.util
 import json
@@ -26,7 +27,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_mode, config, envs, imports, lintc, mypyc, proc, ui  # noqa: E402
+from runner import cmd_mode, config, envs, imports, lintc, mypyc, proc, render, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import ENV_SUFFIX, PRESETS, ROOT, TOOLS, venv_python  # noqa: E402
 from runner.ui import DeployError  # noqa: E402
@@ -1268,3 +1269,122 @@ def test_real_compile_single_top_level_module_sees_a_relative_file(src_tree: Pat
     here, inside = _import_from(stage, "import solo; print(solo.HERE); print(solo.inside())", tmp_path).splitlines()
     assert not os.path.isabs(here) and here.startswith("solo.")
     assert os.path.isabs(inside) and Path(inside).parent == stage
+
+
+# --- 11. the compiled-module sections of the type-checker configs --------------------------------
+
+
+def _ini(text: str) -> configparser.RawConfigParser:
+    parser = configparser.RawConfigParser()  # what mypy uses: it refuses a repeated section
+    parser.read_string(text)
+    return parser
+
+
+COMPILED_KEYS = list(render.load_profile("mypyc")["mypy_compiled"])
+
+
+@pytest.mark.parametrize("for_compile", [False, True])
+def test_mypy_ini_relaxes_compile_exclude(for_compile: bool) -> None:
+    cfg = make({"compile": {"modules": ["myapp.core"], "exclude": ["myapp.core.loose", "myapp.core.sub"]}})
+    ini = _ini(render.mypy_ini(cfg, "mypyc", for_compile=for_compile))
+    assert COMPILED_KEYS and all(ini.getboolean("mypy-myapp.core.*", key) for key in COMPILED_KEYS)
+    for section in ("mypy-myapp.core.loose.*", "mypy-myapp.core.sub.*"):  # x.* covers x itself too
+        assert all(ini.getboolean(section, key) is False for key in COMPILED_KEYS)
+
+
+def test_mypy_ini_without_compiled_rules_has_no_exclude_sections() -> None:
+    cfg = make({"compile": {"exclude": ["myapp.core.loose"]}})
+    assert [s for s in _ini(render.mypy_ini(cfg, "strict")).sections() if s != "mypy"] == []
+
+
+def test_mypy_ini_merges_overrides_with_the_generated_sections() -> None:
+    cfg = make(
+        {
+            "compile": {"modules": ["myapp.core"], "exclude": ["myapp.core.loose"]},
+            "typing": {
+                "mypy_overrides": [
+                    {"module": "{pkg}.core.*", "warn_return_any": False},
+                    {"module": ["{pkg}.core.loose.*", "raylib", "raylib.*"], "ignore_missing_imports": True},
+                ]
+            },
+        }
+    )
+    ini = _ini(render.mypy_ini(cfg, "mypyc"))  # a repeated section made mypy abort
+    core = ini["mypy-myapp.core.*"]
+    assert core.getboolean("disallow_any_expr") is True and core.getboolean("warn_return_any") is False
+    loose = ini["mypy-myapp.core.loose.*"]
+    assert loose.getboolean("ignore_missing_imports") is True and loose.getboolean("disallow_any_explicit") is False
+    for name in ("mypy-raylib", "mypy-raylib.*"):  # a list: one section per pattern, same options
+        assert dict(ini[name]) == {"ignore_missing_imports": "True"}
+
+
+@needs_venv
+def test_mypy_with_the_generated_ini_accepts_any_in_an_excluded_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _project(
+        tmp_path,
+        {
+            "src/myapp/__init__.py": "",
+            "src/myapp/core/__init__.py": "",
+            "src/myapp/core/loose.py": "from typing import Any\n\n\ndef g(x: Any) -> Any:\n    return x\n",
+            "src/myapp/core/uses.py": "from myapp.core.loose import g\n\n\ndef h(n: int) -> int:\n    return n\n",
+            "tests/__init__.py": "",
+        },
+    )
+    monkeypatch.setattr(render, "ROOT", root)
+    ini = root / "mypy.ini"
+    ini.write_text(render.mypy_ini(make({"compile": {"exclude": ["myapp.core.loose"]}}), "mypyc"), encoding="utf-8")
+
+    def mypy() -> subprocess.CompletedProcess[str]:
+        argv = [str(TOOL_PYTHON), "-m", "mypy", "--config-file", str(ini), "--no-incremental"]
+        return subprocess.run(argv, cwd=root, env=proc.base_env(), capture_output=True, text=True, check=False)
+
+    r = mypy()
+    assert r.returncode == 0, r.stdout + r.stderr
+    (root / "src/myapp/core/uses.py").write_text("from myapp.core.loose import g\n\n\ndef h(n: int) -> int:\n    return int(g(n))\n", encoding="utf-8")
+    r = mypy()  # the compiled modules stay strict
+    assert r.returncode == 1 and 'uses.py:5: error: Expression has type "Any"' in r.stdout, r.stdout
+
+
+@pytest.fixture
+def pyright_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = _project(
+        tmp_path,
+        {
+            "src/myapp/__init__.py": "",
+            "src/myapp/core/__init__.py": "",
+            "src/myapp/core/bench.py": "",
+            "src/myapp/core/loose.py": "",
+            "src/myapp/core/notes.txt": "",
+            "src/myapp/core/sub/__init__.py": "",
+            "src/myapp/core/sub/m.py": "",
+            "src/myapp/core/other/__init__.py": "",
+            "src/myapp/core/__pycache__/bench.cpython-314.pyc": "",
+            "tests/__init__.py": "",
+        },
+    )
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(config, "SRC", root / "src")
+    return root
+
+
+def test_pyright_config_leaves_compile_exclude_out_of_the_compiled_rules(pyright_tree: Path) -> None:
+    cfg = make({"typing": {"editor": "basedpyright"}, "compile": {"exclude": ["myapp.core.loose", "myapp.core.sub.m"]}})
+    conf = render.pyright_config(cfg, "mypyc")
+    assert conf["strict"] == [
+        "src/myapp/core/__init__.py", "src/myapp/core/bench.py", "src/myapp/core/other", "src/myapp/core/sub/__init__.py",
+    ]  # fmt: skip
+    # basedpyright: the first environment that matches wins, so the excluded files come first
+    envs_ = conf["executionEnvironments"]
+    assert [e["root"] for e in envs_] == ["src/myapp/core/loose.py", "src/myapp/core/sub/m.py", *conf["strict"]]
+    assert all("reportAny" not in e for e in envs_[:2]) and all(e.get("reportAny") == "error" for e in envs_[2:])
+    absolute = render.pyright_config(cfg, "mypyc", absolute=True)
+    assert absolute["strict"][0] == (pyright_tree / "src/myapp/core/__init__.py").as_posix()
+
+
+def test_pyright_config_without_exclude_is_unchanged(pyright_tree: Path) -> None:
+    conf = render.pyright_config(make({"typing": {"editor": "basedpyright"}}), "mypyc")
+    assert conf["strict"] == ["src/myapp/core"]
+    assert [e["root"] for e in conf["executionEnvironments"]] == ["src/myapp/core"]
+    whole = render.pyright_config(make({"compile": {"exclude": ["myapp.core.sub"]}}), "mypyc")
+    assert "src/myapp/core/sub" not in whole["strict"] and "src/myapp/core/sub/m.py" not in whole["strict"]
+
