@@ -815,7 +815,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     own; they are reported, not changed). Keyword arguments (`f(pkg=1)`) and attributes never
     change; `f"{pkg=}"` is a use. When `ast` cannot parse the file (syntax newer than the
     runner's Python) the token rule is the fallback. String tokens are recognised by their
-    `*STRING_START`/`*STRING_END` suffix (f-strings 3.12, t-strings 3.14, any later family).
+    `*STRING_START`/`*STRING_END` suffix (f-strings 3.12, t-strings 3.14, any later family). A
+    lone CR is a line break, as for the compiler (`_python_code` reads it as LF, one character
+    for one: classic Mac line endings once ended in an internal error).
   - Strings are syntax first (`_classify`, `_escaped`): a string prefix (`f`, `r`, `b`, `rb`...:
     before the opening quote) is never the name, and an occurrence right after an odd number of
     backslashes is an escape when the string is not raw and its first letter makes one (`\n`,

@@ -148,6 +148,19 @@ def test_crlf_and_bom_are_kept() -> None:
     assert [n for n, _, _ in out.changes] == [1, 2, 3]
 
 
+def test_cr_only_line_endings_are_line_breaks(tmp_path: Path) -> None:
+    """Python runs a file with classic Mac line endings: ast counted the lines, the offsets did not
+    (IndexError, an internal-error traceback)."""
+    text = "import alpha.core\rX = alpha.core.run()\rdef f(alpha):\r    return alpha\r"
+    out = rewrite(text, Names("alpha", "beta"), python=True)
+    assert out.text == "import beta.core\rX = beta.core.run()\rdef f(alpha):\r    return alpha\r"
+    assert not out.note  # tokenized as Python, not as plain text
+    _write_project(tmp_path, "script", "alpha")
+    (tmp_path / "tests" / "limits.py").write_bytes(b"import alpha.core.bench\rLIMIT = alpha.core.bench.SIEVE_LIMIT\r")
+    _rename(tmp_path, "alpha", "beta")
+    assert (tmp_path / "tests" / "limits.py").read_bytes() == b"import beta.core.bench\rLIMIT = beta.core.bench.SIEVE_LIMIT\r"
+
+
 def test_code_changes_only_real_package_references() -> None:
     src = (
         "import myapp.core\n"
@@ -227,7 +240,7 @@ def test_fstring_fields_as_one_token() -> None:
         ("myapp", 'x = "src\\myapp"\n', 'x = "src\\myapp"\n', 1),  # an invalid escape: the new name could make it a real one
     ],
 )
-@pytest.mark.filterwarnings("ignore::SyntaxWarning")  # "\m" is an invalid escape on purpose
+@pytest.mark.filterwarnings("ignore::SyntaxWarning", "ignore::DeprecationWarning")  # "\m" is an invalid escape on purpose (3.11: a DeprecationWarning)
 def test_string_prefixes_and_escapes_are_never_the_name(old: str, text: str, expected: str, kept: int) -> None:
     out = rewrite(text, Names(old, "tool"), python=True)
     assert out.text == expected and len(out.kept) == kept

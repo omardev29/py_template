@@ -320,7 +320,9 @@ def _python_code(text: str, pkg: str) -> _Code | None:
     Return None if the tokenizer rejects it (the caller then treats it as plain text).
     """
     shift = 1 if text.startswith("\ufeff") else 0
-    body = text[shift:]
+    # A lone CR ends a line for the compiler (ast counts it): read it as LF, one character for
+    # one, so every offset stays the same
+    body = re.sub(r"\r(?!\n)", "\n", text[shift:])
     line_starts = [0, *(m.end() for m in re.finditer("\n", body))]
 
     def offset(pos: tuple[int, int]) -> int:
