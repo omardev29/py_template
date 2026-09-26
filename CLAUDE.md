@@ -549,7 +549,7 @@ header rules (with detector tests proving each rule fires).
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
 | `tasks.py` | `[tasks]`: `Placeholders` (lazy `{python}`), `deps` (each once per invocation), cycle detection, `run_task`, `describe`, `list_tasks`. |
 | `cmd_env.py` | `setup` (= `cmd_apply.apply(command="setup")`), `doctor` (calls `cmd_apply.doctor`), `sync`, `lock`, `add`, `remove`, `clean` (`_env_dirs`, `_remove`, `_is_link`); `ensure_lock`; `_fix_exec_bit`; `_c_compiler` (the one setuptools runs: `$CC`, else the `.venv` Python's sysconfig CC), `_msvc(platform)`, `_xcode_problem`, `_long_paths`. |
-| `cmd_apply.py` | `./deploy apply [--force]` / `setup [--force]` (section 5.8): `make_plan` (every refusal before the first write), `apply`, `_print_plan` (--dry-run), the `applied` record (`load_record`, `save_record`, `trusted_record`, `project_record`, `record_of`, `rename_record`), `applied_state` / `_applied_preset` / `applied_name`, `dependency_changes` (`DepChanges`, `req_key`), `read_project`, `pending` + `doctor` (changes not applied yet), `reference_problems`, `unused_envs`. |
+| `cmd_apply.py` | `./deploy apply [--force]` / `setup [--force]` (section 5.8): `make_plan` (every refusal before the first write), `apply`, `_print_plan` (--dry-run), the `applied` record (`load_record`, `save_record`, `trusted_record`, `project_record`, `record_of`, `rename_record`), `applied_state` / `_applied_preset` (`_marks`: a preset's traces in pyproject.toml) / `applied_name` / `_other_package`, `dependency_changes` (`DepChanges`, `req_key`), `read_project`, `pending` + `doctor` (changes not applied yet), `reference_problems`, `unused_envs`, `_restore`. |
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `new`, the internal `__init` (`cmd_init`), and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
 | `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`, `stage_pythonpath`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`, `BASEDPYRIGHT_NODE`. |
 | `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
@@ -558,7 +558,7 @@ header rules (with detector tests proving each rule fires).
 | `cmd_nvim.py` | `./deploy nvim ...` and `doctor(check)` (section 12.2). |
 | `nvimtest.py` | `selftest --nvim` (section 13.1). |
 | `e2e.py` | `selftest --e2e` (section 13.1). |
-| `hooks.py` | `./deploy hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (apply/setup), `doctor`: the native git pre-commit hook (section 5.6); `find_repo` (`NotInGit`), `classify`, `hook_script`/`launcher_of`, `install`/`uninstall` (apply removes the hook when `hooks.pre_commit = false`), `checks`. |
+| `hooks.py` | `./deploy hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (apply/setup), `doctor`: the native git pre-commit hook (section 5.6); `find_repo` (`NotInGit`), `classify` (`runs_checks`), `hook_state`/`own_local` (a copy chained after another project's hook), `hook_script`/`launcher_of`, `install`/`uninstall` (apply removes the hook when `hooks.pre_commit = false`), `chain_hint`/`chain_advice`, `hooks_path_runner`, `checks`. |
 | `rename.py` | `./deploy rename NEW_NAME [--force]` and the rename step of apply: pure `plan` / `apply_plan` (undoes itself when a write fails) / `rewrite` (tokenizer + `ast` scopes + context rules, `MODULE_KEYS`), `check_new_name` (`locked_names`), `git_changes`, `dirty_tree_message`, `validate_config`, `tidy_before`/`tidy_after` (ruff, `Tidy`), `report`, `cmd_rename` (section 5.7). |
 | `upx.py` | Optional UPX packing: pinned download (`VERSION`, `ASSETS` with SHA-256), `find`, `active`, `level_flags`, `env_value`, `excludes`, `candidates`, `pack_file`, `pack_tree`, `MAX_INPUT` (section 10). |
 
@@ -715,11 +715,14 @@ header rules (with detector tests proving each rule fires).
   writes). `hooks install`/`uninstall` only print.
 - `apply` and `setup` run every check and refusal of the real run (`cmd_apply.make_plan`: a
   hand-edited preset, `render.check_pyproject`, the new name, the renamed pytemplate.toml; the
-  dirty tree is only a warning; the PyPy 3.11 precheck runs read-only) and print one row per
-  step (`cmd_apply._print_plan`): app.name (then the rename plan, as `rename --dry-run` prints
-  it), app.preset, `[preset.<name>]` (the `uv remove/add` it would run), pyproject.toml,
-  uv.lock ("would re-lock", or a read-only `uv lock --check`), environments, git hook,
-  generated files, then the unused-environment note and the reference warnings.
+  dirty tree is only a warning; the PyPy 3.11 precheck runs read-only while `uv lock --check`
+  passes, else a note says it waits for the re-lock) and print one row per step
+  (`cmd_apply._print_plan`): app.name (then the rename plan, as `rename --dry-run` prints it),
+  app.preset, `[preset.<name>]` (the `uv remove/add` it would run), pyproject.toml, uv.lock
+  ("would re-lock", or up to date by a read-only `uv lock --check`; a new project name re-locks
+  only when its normalized form changes), environments, git hook, generated files, then the
+  unused-environment note and the reference warnings (for a rename, checked where the files
+  are before the move).
 - `build` with `[deploy.upx]` enabled: `upx.pack_tree` lists what it would pack and stops.
 - `lock` reports whether the managed parts of `pyproject.toml` would change
   (`render.write_pyproject` writes nothing under `DRY_RUN`; `render.pyproject_message` says
@@ -773,11 +776,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 - `./deploy apply` (and `setup`) calls `hooks.ensure_installed(cfg)` when `[hooks] pre_commit`
   is true (the default): it installs the hook or updates this project's own, never fails the
   command, and is silent outside git (`hooks.NotInGit`: no git, not a work tree). When
-  `pre_commit` is false, apply removes pytemplate's own hook (`hooks.uninstall`, which restores a
-  `pre-commit.local`) and never touches another one (section 5.8). Any other git failure
-  (dubious ownership...) is shown with git's own message: a warning in apply, an info line in
-  `doctor` (whose "git hook" line is otherwise info too: missing is not a problem). Every git
-  call runs with `LC_ALL=C` (find_repo reads "not a git repository" in English).
+  `pre_commit` is false, apply removes pytemplate's own hook (`hooks.uninstall`, which restores
+  somebody else's `pre-commit.local`) and never touches another one (section 5.8). Any other
+  git failure (dubious ownership...) is shown with git's own message: a warning in apply, an
+  info line in `doctor` (whose "git hook" line is otherwise info too: missing is not a
+  problem). Every git call runs with `LC_ALL=C` (find_repo reads "not a git repository" in
+  English).
 - The hook: `pre-commit` in the folder `git rev-parse --git-path hooks` reports (worktree
   aware), pure ASCII + LF, a marker comment, and `sh <launcher> hooks run` with the POSIX
   launcher path relative to the repository top (the project may be a subfolder of a bigger
@@ -795,10 +799,21 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   repository (state "other", a monorepo) is left alone by apply, install and uninstall;
   `install --force` writes a FRESH copy of it as `pre-commit.local` (the script skips
   `pre-commit.local` when it is itself that file; older copies would recurse), so both checks
-  run, once each. A project that an enclosing repository ignores (`git check-ignore -q deploy`,
-  which refuses `--literal-pathspecs`) gets no hook unless forced. With `core.hooksPath` set
-  nothing is written: install/status/doctor print the line to add (`sh ./deploy hooks run ||
-  exit $?`); husky 9 (`.husky/_` holding `h` or `husky.sh`) is read through `.husky/pre-commit`.
+  run, once each. That copy stays the chained project's own (`hooks.own_local`; state
+  "chained" of `hooks.hook_state`): its `uninstall`, and its apply with `pre_commit = false`,
+  delete it (never restore it as `pre-commit`), doctor/`pending` count it, `install` there says
+  the checks already run, and once the other project's hook goes stale its `install` replaces
+  that hook and deletes the copy (the checks ran twice). A third project cannot be chained
+  (`pre-commit.local` taken: `install --force` refuses): `hooks.chain_hint`/`chain_advice` then
+  say so instead of suggesting `--force`. A hook pytemplate does not manage runs the checks
+  ("calls") only with a line that is not a comment and calls THIS project's launcher with
+  `hooks run` (`hooks.runs_checks`: resolved against the top, or absolute; a word with a shell
+  expansion cannot be resolved and counts); another project's line is "foreign". A project that
+  an enclosing repository ignores (`git check-ignore -q deploy`, which refuses
+  `--literal-pathspecs`) gets no hook unless forced. With `core.hooksPath` set nothing is
+  written: install/status/doctor print the line to add (`sh ./deploy hooks run || exit $?`), and
+  apply's summary says whether that hook already runs it (`hooks.hooks_path_runner`); husky 9
+  (`.husky/_` holding `h` or `husky.sh`) is read through `.husky/pre-commit`.
 - `hooks run` checks what the commit contains: staged files (`git diff --cached --name-only
   --no-renames --diff-filter=ACMRT -z`) and staged deletions (`D`: a deletion-only commit gets
   the project-wide checks too). Every git call passes `-c diff.relative=false`
@@ -915,23 +930,38 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   it cannot switch in place: put it back, `./deploy new DIR --preset P`),
   `render.check_pyproject`, `dependency_changes`, whether PyPy is new (tool.uv environments has
   no PyPy yet), then the rename plan (`rename.check_new_name`, `rename.plan`,
-  `rename.validate_config`) or, when only pyproject `[project] name` differs, its new text.
-- Order of `apply`: dirty-tree check (rename only; `--force` skips it) -> PyPy newly supported:
-  `cmd_mode._precheck_py311` (it runs `uv run --locked`, before anything changes the lock) ->
-  the rename (`rename.report`, `tidy_before`, `apply_plan`) or the `[project] name` line ->
-  `uv remove --frozen` / `uv add --frozen` of the option-driven requirements (dev group with
-  `--dev`) -> `cmd_env.ensure_lock` -> `envs.sync` of `cmd_env._envs_for(cfg, "all")` ->
+  `rename.validate_config`) or, when only pyproject `[project] name` differs, its new text
+  (`rename.check_new_name` too). An app.name that names ANOTHER package of src/ (the record's
+  or pyproject's name has its own package there: `_other_package`) is refused, as `rename`
+  refuses it (`src/<new>/ already exists`); it used to rewrite only `[project] name`.
+- Order of `apply`: dirty-tree check (rename only; `--force` skips it) -> the rename
+  (`rename.report`, `tidy_before`, `apply_plan`, then the record under the new name: a later
+  failure must not leave it naming the old app, which is no longer trusted) or the `[project]
+  name` line -> `uv remove --frozen` / `uv add --frozen` of the option-driven requirements (dev
+  group with `--dev`) -> `cmd_env.ensure_lock` -> PyPy newly supported:
+  `cmd_mode._precheck_py311` (it syncs the tools environment with THIS configuration, `uv sync
+  --locked`, so only once pyproject.toml and uv.lock follow it: with a python.cpython change in
+  the same edit uv refused the old lock) -> `save_record` (everything after it can still fail:
+  a record written only at the end kept the old options after a failed sync, and a revert then
+  kept both raylib packages) -> `envs.sync` of `cmd_env._envs_for(cfg, "all")` ->
   `cmd_env._fix_exec_bit` -> the hook (`ensure_installed` when `hooks.pre_commit`,
-  `hooks.uninstall` of pytemplate's own hook when false; another tool's, another project's or a
-  core.hooksPath setup is left alone) -> `render.apply` -> `rename.tidy_after` -> `save_record`
-  -> the unused-environment note (`unused_envs`: every `.venv*` of this side no supported
-  backend uses, `.venv-jit` of older templates included; never deleted) -> warnings for missing
+  `hooks.uninstall` of pytemplate's own hook when false, the copy chained after another
+  project's hook included; another tool's, another project's or a core.hooksPath setup is left
+  alone; the summary line follows `hooks.hook_state`) -> `render.apply` -> `rename.tidy_after`
+  -> the unused-environment note (`unused_envs`: every `.venv*` of this side no supported backend
+  uses, `.venv-jit` of older templates included; never deleted) -> warnings for missing
   references (`reference_problems`: src/<pkg>/, compile.modules, app.assets, deploy.exe.icon,
-  deploy.upx.path) -> a summary.
+  deploy.upx.path; the `--dry-run` of a rename looks for them where they are before the move)
+  -> a summary. A state.json or pyproject.toml that cannot be written is a `DeployError`
+  naming it.
 - `--frozen`, never `--no-sync`: `flet-cli==V` pins `flet==V`, so a resolving `uv add` of one
   group alone has no solution; `--frozen` only edits pyproject.toml and one `uv lock` follows.
-  When the edits or the lock fail, pyproject.toml gets its old bytes back and the record is not
-  written: nothing half-applied, the next apply retries.
+  When the edits, the lock or the PyPy precheck fail, pyproject.toml and uv.lock get their old
+  bytes back (`_restore`) and the record is not written: nothing half-applied, the next apply
+  retries. `--dry-run` runs the precheck read-only only while `uv lock --check` passes (its
+  `uv run --locked` would fail on a stale lock alone) and says so otherwise; its uv.lock row
+  says "would re-lock" for the managed parts, the dependencies, a stale lock, or a project name
+  whose NORMALIZED form changes (`p` -> `P` re-locks nothing).
 - Option-driven requirements: the preset.toml entries with an `{option}`
   (`presets.option_dependencies`: flet's `flet`, `flet-desktop`, dev `flet-cli` `=={version}`;
   raylib's `{package}=={version}`), compared with pyproject by normalized name and version
@@ -940,16 +970,21 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   An old value is removed only when the last applied options produced it (a `raylib` the user
   added next to `raylib_sdl` stays). `[preset.<name>]` wins over a hand `./deploy add flet==X`.
 - The `applied` record (top-level key of `.pytemplate/state.json`, committed; `render._save_state`
-  keeps it): `{name, preset, dependencies, dev}`, written at the end of each apply (its name by
-  rename). It counts only when its name is `app.name` or pyproject `[project] name`
-  (`trusted_record`): the template's own record, copied by `./deploy new`, is ignored. Without
-  a record: the preset is the one whose option-driven dependencies pyproject declares
-  (`_applied_preset`; script leaves no trace, so `app.preset` counts), the applied requirements
-  are the preset.toml defaults (what `__init` wrote), the old name is pyproject `[project] name`
-  when its package is in src/.
+  keeps it): `{name, preset, dependencies, dev}`, written by each apply once the lock follows
+  the options (its name by rename). It counts only when its name is `app.name` or pyproject
+  `[project] name` (`trusted_record`): the template's own record, copied by `./deploy new`, is
+  ignored. The preset (`_applied_preset`) is `app.preset` when pyproject.toml holds its traces
+  (its option-driven dependencies by name, with the default, current and recorded options; its
+  keys of the managed `[tool.uv]` block, raylib's `no-build-package` whatever its value; its
+  extra tables, flet's `[tool.flet]`) or when the trusted record names it (a script project may
+  `./deploy add raylib` or flet); else a preset whose traces are there (a hand switch); else,
+  with no trace of any preset, the preset without traces (script: `app.preset` names a preset
+  that left none). Without a record the applied requirements are the preset.toml defaults (what
+  `__init` wrote) and the old name is pyproject `[project] name` when its package is in src/.
 - `pending` / `doctor` (one call from `cmd_env.cmd_doctor`): an `[XX]` line per change not
-  applied yet (hand-edited app.name or app.preset, `[preset.*]` vs pyproject.toml,
-  `hooks.pre_commit = false` with pytemplate's hook installed), else `[ok] pytemplate.toml
+  applied yet (hand-edited app.name or app.preset, an app.name that names another package,
+  `[preset.*]` vs pyproject.toml, `hooks.pre_commit = false` with pytemplate's hook installed,
+  chained copy included), else `[ok] pytemplate.toml
   applied`; missing references are `[--]` notes; a broken pyproject.toml is a line, never a
   traceback.
 - Every hint for a pyproject.toml that does not match pytemplate.toml (`render.auto`, doctor,
@@ -2260,8 +2295,10 @@ short temp tree and unset `NVIM_APPNAME`.
   repositories, git runs it for real; the real ruff/uv command lines against `.venv`),
   `test_apply.py` (`./deploy apply`/`setup` in throwaway projects with a fake uv that edits
   pyproject.toml like `uv add/remove --frozen`: the per-key matrix, `[preset.*]` changes, the
-  record, preset detection, hand-edited name/preset, refusals before any write, dry runs,
-  idempotence, every hook state with real git, doctor lines, hints; real `./deploy` runs in a
+  record (and when it is written: failed steps after the lock, a rename whose lock fails),
+  preset detection by every trace, hand-edited name/preset, refusals before any write, the
+  PyPy precheck after the lock (restored on failure), dry runs, idempotence, every hook state
+  with real git (a monorepo chain too), doctor lines, hints; real `./deploy` runs in a
   copy of the template, and `test_uv_frozen_edits_only_pyproject` checks offline the uv
   behaviour the fake imitates), `test_rename.py` (the skeleton invariant for 3 presets x 7
   pairs x LF/CRLF, random names and round trips, every rewrite rule, scopes, TOML keys and
@@ -3591,6 +3628,12 @@ Behaviour:
   `./deploy apply` runs (every mismatch hint names apply). A `[preset.flet] version` edit that
   is not applied yet shows only in `doctor` (`cmd_apply.pending`): `render.auto` and the
   pre-commit hook compare the managed block, where flet leaves no trace.
+- Without a trusted `applied` record (a `state.json` merge conflict resolved with `./deploy
+  render`, which rewrites the unparsable file without it), apply knows only the preset.toml
+  defaults as the options applied last: a `[preset.raylib] package` switch away from a
+  non-default value (raylib_sdl -> raylib_software) adds the new package and keeps the old one
+  (`./deploy remove raylib-sdl`). Fix idea: keep the record when render rewrites a conflicted
+  state.json, or read the last applied package back from the managed `no-build-package`.
 - A hand-edited `app.name` is rendered into `editor.json` and `ci.yml` by the next command's
   `render.auto` before `apply` renames the package (harmless: apply's dirty-tree check ignores
   generated files, and a run in between still uses src/<old_pkg>/).
