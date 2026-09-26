@@ -1716,8 +1716,9 @@ Per method:
     manager's `py`/`python` install the requested version when NO runtime exists at all (its
     `automatic_install` default; the silenced probe hides it, so that first start can take a
     minute): the launchers leave `PYTHON_MANAGER_*` to the user. With native dependencies, or
-    pins a marker left out on this interpreter (`common.skipped_requirements`, as pyz: tzdata on
-    win32, backports-tarfile below 3.12), `portable._warn_host_only` warns that `lib/` only fits
+    requirements a marker left out on this interpreter (`common.skipped_requirements`, as pyz:
+    tzdata on win32, backports-tarfile below 3.12, a local library for win32 only),
+    `portable._warn_host_only` warns that `lib/` only fits
     the host key (the launchers start it on any OS and Python at or above the minimum).
   - Every bundled build starts its interpreter before reporting success (`_smoke_runtime`, after
     UPX, with the launchers' `-s -O` plus `-B`): it must run and its `sys.prefix` (a `PTPREFIX:`
@@ -1765,10 +1766,15 @@ Per method:
   a passwd entry; a read-only home) it extracts into a per-run `tempfile.mkdtemp` folder removed
   at exit (never a predictable shared `/tmp` path: another user could plant code there).
   Layout: `common/lib` only when the build is "pure": every target site installed exactly the
-  locked set (`common.skipped_requirements`: no pin was excluded by a `sys_platform`,
-  `python_version` or `implementation_name` marker), the sites hold the same distributions and
-  nothing is native (`has_native`); otherwise EVERY target gets `targets/<key>/lib` and the build
-  warns which conditional pins restrict it ("runs on: <keys>"). `common/` never holds extensions
+  locked set (`common.skipped_requirements`: no requirement was excluded by a `sys_platform`,
+  `python_version` or `implementation_name` marker; pins count by name and version, a direct
+  URL (`name @ url`) and a local library by name: `--no-editable` exports a local library as a
+  bare path or a `file:` URL, named through uv.lock's sources (`common._local_names`), and a
+  path uv.lock does not name counts as excluded; only name==version lines were read, so a
+  win32-only local library was missing from a pyz that said it ran anywhere), the sites hold
+  the same distributions and nothing is native (`has_native`); otherwise EVERY target gets
+  `targets/<key>/lib` and the build warns which conditional requirements restrict it ("runs on:
+  <keys>"). `common/` never holds extensions
   (`bug:` check). The mypyc overlay `targets/<host>/app` holds only the extension files: the
   bootstrap extracts `common/` and `targets/<key>/` into ONE folder, so each `.pyd/.so` lands
   next to its `.py` and the extension loader wins. `_pyz.json`: `name`, `build_id`, `min_python`,

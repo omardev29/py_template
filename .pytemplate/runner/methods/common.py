@@ -389,15 +389,76 @@ def installed(site: Path) -> frozenset[tuple[str, str]]:
     return frozenset(out)
 
 
-def skipped_requirements(requirements: Path, site: Path) -> list[str]:
-    """Return the locked pins that were NOT installed into `site`: their markers (sys_platform,
-    python_version, implementation_name...) exclude that target's platform or interpreter."""
+_DIRECT_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*@")
+
+
+def _local_key(base: Path, raw: str) -> str:
+    """One spelling of a local source path, relative to `base` or absolute (a file: URL too)."""
+    if raw.startswith("file:"):  # a path outside the project: uv exports it as a URL
+        from urllib.parse import urlparse
+        from urllib.request import url2pathname
+
+        raw = url2pathname(urlparse(raw).path)
+    return os.path.normcase(os.path.normpath(os.path.join(base, raw)))
+
+
+def _local_names(lock: Path) -> dict[str, str]:
+    """The packages of uv.lock that come from a local folder or file (a workspace library, a
+    path dependency), by their path: `uv export --no-editable` writes them as a bare path."""
+    try:
+        data = tomllib.loads(lock.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return {}
+    out: dict[str, str] = {}
+    for package in data.get("package", []):
+        source = package.get("source") if isinstance(package, dict) else None
+        if not isinstance(source, dict) or not isinstance(package.get("name"), str):
+            continue
+        for kind in ("editable", "directory", "path"):
+            if isinstance(source.get(kind), str):
+                out[_local_key(lock.parent, source[kind])] = package["name"]
+    return out
+
+
+def skipped_requirements(requirements: Path, site: Path, *, lock: Path | None = None) -> list[str]:
+    """Return the locked requirements that were NOT installed into `site`: their markers
+    (sys_platform, python_version, implementation_name...) exclude that target's platform or
+    interpreter.
+
+    Pins are compared by name and version. A direct reference (`name @ url`) and a local library
+    (a bare path: `uv export --no-editable`, named through uv.lock) only matter with a marker
+    (without one they are installed everywhere) and are compared by name; a path uv.lock does
+    not name counts as skipped, so the build goes per target instead of claiming to be pure.
+    """
     have = installed(site)
+    names = {name for name, _ in have}
+    lock_file = LOCK if lock is None else lock
+    local: dict[str, str] | None = None
     out: list[str] = []
     for line in requirements.read_text(encoding="utf-8").splitlines():
+        if not line or line[0].isspace() or line.startswith(("#", "-")):
+            continue  # hashes and comments (continuation lines), options
         m = _PIN_RE.match(line)
-        if m and (_norm_name(m[1]), _norm_version(m[2])) not in have:
-            out.append(f"{m[1]}=={m[2]}")
+        if m:
+            if (_norm_name(m[1]), _norm_version(m[2])) not in have:
+                out.append(f"{m[1]}=={m[2]}")
+            continue
+        requirement, marked, _ = line.rstrip("\\").partition(" ;")  # PEP 508: a URL needs a blank before ;
+        requirement = requirement.strip()
+        if not marked:
+            continue
+        direct = _DIRECT_RE.match(requirement)
+        if direct:
+            if _norm_name(direct[1]) not in names:
+                out.append(direct[1])
+            continue
+        if local is None:
+            local = _local_names(lock_file)
+        name = local.get(_local_key(lock_file.parent, requirement))
+        if name is None:
+            out.append(requirement)
+        elif _norm_name(name) not in names:
+            out.append(f"{name} ({requirement})")
     return out
 
 

@@ -794,8 +794,8 @@ How far a pyz reaches depends on its dependencies; the build prints which case i
   the standard library and a writable cache). On the maintainer's machine, a 1.7 MB pure pyz of a
   project with PyPy supported used the compiled core on CPython 3.14 and ran the `.py` on PyPy and
   on CPython 3.13.
-- **Not pure** (`runs on: <keys>`): native dependencies (raylib, flet, any platform wheel), or a pin
-  that a marker leaves out on some target. It carries the dependencies of each target key and runs
+- **Not pure** (`runs on: <keys>`): native dependencies (raylib, flet, any platform wheel), or a
+  dependency (a pin, a local library, a URL) that a marker leaves out on some target. It carries the dependencies of each target key and runs
   only there: the exact CPython minor of the lock (`cp314` wheels load only in 3.14, so a Python
   3.13 or 3.15 gets `this .pyz has no build for this interpreter and platform`), on Windows, Linux
   or macOS, x86_64 or aarch64 (Linux: glibc 2.28 on x86_64 or 2.35 on aarch64, or newer; macOS 13 or
