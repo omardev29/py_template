@@ -259,6 +259,174 @@ a literal brace is written twice (`"d = {{}}"`). Task names are lower-case lette
 and `_`, start with a letter, and are never a `./deploy` command. Tasks also show up in
 `./deploy help`, in VS Code and in Neovim.
 
+## Configuration
+
+`pytemplate.toml` is the single source of truth: backends, Python versions, typing, compiled
+modules, build options, tasks, editor buttons and the git hook. Every other configuration file
+is generated from it or managed by `./deploy`.
+
+### After editing `pytemplate.toml`
+
+Run `./deploy apply` (preview it with `./deploy --dry-run apply`). It brings the whole project in
+line with `pytemplate.toml`, and only does what is needed: a second run changes no file.
+`./deploy setup` is the same operation under its first-time name, for a fresh clone.
+`./deploy mode` edits the common keys for you (it keeps comments, CRLF line endings and a BOM)
+and applies them.
+
+| You edited | What `./deploy apply` does |
+|---|---|
+| `app.name` | Renames the app the way `./deploy rename` does ([Renaming the app](#renaming-the-app)): moves `src/<pkg>/`, rewrites the references, updates `pyproject.toml`, re-locks and regenerates. It refuses when git has uncommitted changes (`--force` skips that check) and when the name is not valid (the rules of [New projects](#new-projects)). |
+| `app.preset` | Refuses (exit 2) and writes nothing: a project cannot switch presets in place. Put the old value back; for another preset, create a project with `./deploy new DIR --preset P` and move the code. |
+| `[preset.flet] version` | Pins `flet`, `flet-desktop` and `flet-cli` to that version, re-locks `uv.lock` and syncs the environments. |
+| `[preset.raylib] package`, `version` | Removes the old raylib package, adds `{package}=={version}`, moves `no-build-package` to it, re-locks and syncs. |
+| `backend.supported` | Rewrites the managed parts of `pyproject.toml`, re-locks and syncs every supported environment. When PyPy is new it first checks that the code is valid Python 3.11. Environments no longer used are only listed (`./deploy clean --envs` removes them). |
+| `python.cpython`, `python.pypy` | Rewrites the managed parts of `pyproject.toml`, re-locks when needed and syncs the environments on the new interpreters. |
+| `hooks.pre_commit` | `true`: installs or updates the git hook. `false`: removes pytemplate's own hook (another tool's hook is never touched). |
+| `backend.active`, `[typing]`, `[compile]`, `[vscode]`, `[tasks]`, `app.gui`, `app.assets` | Regenerates the generated files (most commands do it too). It warns when `compile.modules` or `app.assets` names something that does not exist. |
+| `[deploy]` and its tables | Nothing: `build` reads them. It warns when `deploy.exe.icon` or `deploy.upx.path` names a missing file. |
+
+Every check and refusal happens before the first write. When a dependency edit or the re-lock
+fails, `pyproject.toml` gets its old content back and nothing is recorded: fix the problem and run
+`apply` again. `--force` only skips the uncommitted-changes check of a rename. The summary ends
+with `ok pytemplate.toml applied` (`setup`: `ok done. Try: ./deploy run ...`).
+
+Until `apply` runs, such an edit is only partly in effect. The commands that regenerate files
+warn `pyproject.toml does not match pytemplate.toml ... ./deploy apply` after an edit of
+`backend.supported` or `[python]`, and `./deploy doctor` lists every pending change:
+
+```
+  [XX] app.name = 'NEW' is not applied: the package is still src/OLD/
+  [XX] [preset.flet] is not applied to pyproject.toml (add flet==1.0.0, ...)
+  [XX] hooks.pre_commit = false, but pytemplate's git pre-commit hook is installed
+  [ok] pytemplate.toml applied (app.name, app.preset, [preset.*], hooks.pre_commit)
+```
+
+`./deploy lock` alone re-locks with the managed parts of `pyproject.toml` but does not apply
+`[preset.*]`: after a `[preset.*]` edit, use `apply`. `./deploy add flet==X` does not change the
+Flet version either: it fails against the pinned `flet-cli`, and `apply` would put
+`[preset.flet] version` back.
+
+### Renaming the app
+
+`./deploy rename NEW_NAME [--force]` renames the app; preview it with `./deploy --dry-run rename
+NEW_NAME`, which lists the folder move and every file with sample lines. An `app.name` edited by
+hand is finished by `./deploy apply` (or by `./deploy rename` with that name). What changes:
+
+- `src/<pkg>/` moves to the new package (the name in lower case, `_` for `-`).
+- The Python files of `src/` and `tests/`: the imports of the package and the names bound to
+  them (a local variable of the same name is left alone and reported). Strings, comments and
+  other text files there: package paths, dotted names, `-m` arguments and `pkg:function`
+  references get the package; titles and other prose get the name.
+- `pytemplate.toml`: `app.name` and every package reference (`compile.modules`, `exclude`,
+  `forbid_imports`, the mypy overrides, `hidden_imports`, `exclude_modules`, the wheel entry);
+  other mentions are reported. `pyproject.toml`: `[project] name` and the preset tables.
+- `uv.lock` is re-locked, the generated files are regenerated, and the files that ruff accepted
+  before get their import order and formatting fixed.
+
+Other files (README.md, `docs/`, scripts, your own workflows) are only listed when they mention
+the old name; `dist/` and `.build/` keep the old name until the next build (`./deploy clean`). It refuses uncommitted changes
+without `--force` (a project fresh from `./deploy new` has no commit yet: commit first), and
+the names `new` refuses. A write that fails puts every file back. When the old name is a
+common word (`app`, `game`, `core`), matching words in comments and strings change too: review
+`git diff`.
+
+### Generated files
+
+These files are generated from `pytemplate.toml` and `.pytemplate/templates/`, and committed:
+`.python-version`, `.mypy.ini`, `.ruff.toml`, `pyrightconfig.json`, `.vscode/settings.json`,
+`.vscode/extensions.json`, `.vscode/launch.json`, `.vscode/tasks.json`, `.lazy.lua`,
+`.pytemplate/editor.json`, `.github/workflows/ci.yml` and `.pytemplate/state.json`. Most
+commands regenerate them first and say which changed; `./deploy render` does only that.
+
+- Never edit them by hand. `./deploy` notices an edit (by the hashes in `.pytemplate/state.json`),
+  leaves the file alone and warns; `./deploy render --diff` shows the difference and
+  `./deploy render --force` overwrites it. Change `pytemplate.toml`, or the sources in
+  `.pytemplate/templates/` (a typing profile is `.pytemplate/templates/typing/<profile>.toml`).
+  CRLF line endings and a BOM (Windows checkouts, editors) do not count as edits.
+- After a merge conflict in `state.json` or `editor.json`, run `./deploy render` and commit both.
+- The project's CI, `.github/workflows/ci.yml`, is generated from `.pytemplate/templates/ci.yml`:
+  edit that file. Deleting it stops the generation (deleting only `ci.yml` is undone by the next
+  command).
+- `pyproject.toml` has two managed parts: `requires-python` (`>=` the oldest Python in use: 3.11
+  with PyPy, else `python.cpython`) and the `[tool.uv]` block between `# >>> pytemplate` and
+  `# <<< pytemplate` (the Python versions `uv.lock` resolves for, the uv version floor,
+  uv-managed interpreters only, and preset keys such as raylib's `no-build-package`). A TOML
+  formatter may reformat them (only the meaning is compared), but the markers must stay; broken
+  markers are an error that says how to fix them. The rest of `pyproject.toml` is yours. Never add
+  `[build-system]`: the project is an application (the wheel method writes its own).
+
+Three tools run outside `uv.lock`, at versions pinned in the runner: `check` with
+`typing.editor = "basedpyright"` runs `basedpyright==1.40.1` with the Node.js runtime
+`nodejs-wheel-binaries==24.19.0`, the nuitka method runs `nuitka==4.2.2`, and UPX 5.2.1 is
+downloaded for `[deploy.upx]` ([Maintaining the template](#maintaining-the-template) says how to
+move them).
+
+### `pytemplate.toml` reference
+
+Every key, with its value in the script preset (and where raylib or flet differ). An unknown key
+or a value of the wrong type stops every command with an error that names the key (exit 2). The
+file must be UTF-8 (a BOM is fine); `schema = 1` is the layout this runner reads.
+
+| Key | Script preset | Meaning |
+|---|---|---|
+| `app.name` | the folder name | the executable's and `dist/` name; the package `src/<pkg>/` is its snake_case form |
+| `app.preset` | `"script"` | `script`, `raylib` or `flet`: fixed when the project is created |
+| `app.gui` | `false` (raylib, flet: `true`) | `true`: no console window (exe, nuitka, wheel); launchers use `pythonw`/`pypyw` |
+| `app.assets` | `""` (raylib, flet: `"assets"`) | `"assets"` bundles `src/assets/` with the app, `""` bundles nothing (no other name) |
+| `backend.active` | `"cpython"` (raylib: `"pypy"`) | the backend of `run`, `test`, `check` and `build` when none is given |
+| `backend.supported` | `["cpython", "mypyc"]` (raylib: all three) | the environments, `uv.lock` and the CI matrix |
+| `python.cpython` | `"3.14"` | the CPython minor version (uv picks the patch); the runner runs on it too |
+| `python.pypy` | `"pypy@3.11.15"` | the exact PyPy version ([PyPy](#pypy)) |
+| `typing.profile` | `"auto"` | `auto` (`mypyc` on the mypyc backend, else `typing.relaxed`), `mypyc`, `strict`, `warn` or `off` |
+| `typing.relaxed` | `"off"` | what `auto` means on cpython and pypy: `off`, `warn` or `strict` |
+| `typing.editor` | `"pylance"` | `pylance` or `basedpyright`: the VS Code extension, the rules of `pyrightconfig.json`, and `check` also runs basedpyright |
+| `typing.mypy_overrides` | none (raylib, flet: one) | `[[typing.mypy_overrides]]` tables: `module` (a name, a pattern or a list; `{pkg}` works) and mypy options other than `strict`, one `.mypy.ini` section each |
+| `compile.modules` | `["<pkg>.core"]` | what mypyc compiles: packages or modules of `src/`, none inside another |
+| `compile.exclude` | `[]` | modules or subpackages inside them that stay interpreted |
+| `compile.forbid_imports` | `[]` (raylib: `["pyray"]`; flet: `["flet", "flet_desktop", "flet_cli"]`) | imports `./deploy check` refuses in compiled code |
+| `compile.annotate` | `false` | every mypyc build also writes the report of slow lines |
+| `compile.opt_level` | `"3"` | mypyc's C optimisation, `"0"` to `"3"` ([C compiler options](#c-compiler-options-and-rebuilds)) |
+| `compile.no_semantic_interposition` | `true` | Linux gcc/clang: calls between compiled functions may be inlined |
+| `compile.multi_file` | `false` | mypyc's `multi_file`: one C file per module |
+| `compile.separate` | `false` | one shared library per compiled module instead of one per package |
+| `compile.strict_dunder_typing` | `false` | mypyc's `strict_dunder_typing` |
+| `deploy.optimize` | `1` | Python's `-O` level of the exe, nuitka and portable builds: `0`, `1` (no asserts) or `2` (no docstrings either) |
+| `deploy.default` | `{ cpython = "exe", mypyc = "exe", pypy = "portable" }` | the `build` method of each backend (one left out keeps its default) |
+| `deploy.exclude_modules` | `[]` (flet: `["PIL"]`) | modules the exe and nuitka builds never bundle, even when something imports them |
+| `deploy.exe.mode` | `"onefile"` (raylib, flet: `"onedir"`) | `onefile` or `onedir` |
+| `deploy.exe.console` | `"auto"` | `auto` (the opposite of `app.gui`), `yes` or `no` |
+| `deploy.exe.icon` | `""` | an icon, relative to the project: `.ico` on Windows (exe, nuitka), `.icns` for a macOS `.app` (`app.gui = true`); PyInstaller ignores it on Linux |
+| `deploy.exe.hidden_imports` | `[]` | extra modules PyInstaller (and `flet pack`) must bundle |
+| `deploy.exe.strip` | `false` | Linux, macOS: strip the symbol tables of the bundled binaries |
+| `deploy.exe.extra_args` | `[]` (raylib: three `--exclude-module`) | appended to the PyInstaller or `flet pack` command |
+| `deploy.portable.runtime` | `"bundled"` | `bundled` (the interpreter inside) or `system` (the target's own Python) |
+| `deploy.portable.prune` | `true` | leave the parts of the interpreter the app does not use out |
+| `deploy.portable.archive` | `true` | also a `.zip` (Windows) or `.tar.gz` of the folder |
+| `deploy.portable.env` | `{}` | environment variables the launchers set (literal values) |
+| `deploy.pyz.targets` | `["host"]` | extra platforms, such as `"cp314-linux-x86_64"` |
+| `deploy.wheel.entry` | `""` (flet: `"<pkg>.ui.app:run"`) | the installed command, `"package.module:function"`; empty: `<pkg>.app:main` |
+| `deploy.nuitka.mode` | `"standalone"` | `standalone` or `onefile` |
+| `deploy.nuitka.lto` | `"auto"` | `auto`, `yes` or `no` |
+| `deploy.nuitka.pgo` | `false` | profile-guided C optimisation (experimental) |
+| `deploy.nuitka.pgo_args` | `[]` | the app's arguments for the profiling run |
+| `deploy.nuitka.extra_args` | `[]` | appended to the Nuitka command |
+| `deploy.flet.target` | `"host"` | `host`, `windows`, `macos`, `linux`, `apk`, `aab`, `ipa` or `web` |
+| `deploy.flet.cleanup` | `true` | `--cleanup-app --cleanup-packages`: no tests or docs in the bundle |
+| `deploy.flet.exclude` | `[]` | app files or folders `flet build` leaves out |
+| `deploy.flet.extra_args` | `[]` | appended to the `flet build` command |
+| `deploy.upx.enabled` | `false` | pack the binaries with UPX ([Binary size](#binary-size)) |
+| `deploy.upx.level` | `"best"` | `1` to `9`, `best`, `brute` or `ultra-brute` |
+| `deploy.upx.lzma` | `true` | LZMA: smaller, slower to unpack |
+| `deploy.upx.exclude` | `[]` | extra file-name globs that are never packed |
+| `deploy.upx.path` | `""` | a UPX binary: absolute, `~`, or relative to the project root |
+| `tasks.<name>` | `ci` | custom tasks ([Custom tasks](#custom-tasks)) |
+| `preset.raylib.package` | (raylib: `"raylib"`) | `raylib` (GLFW), `raylib_sdl` (SDL3) or `raylib_software` |
+| `preset.raylib.version` | (raylib: `"6.0.1.0"`) | the raylib version |
+| `preset.flet.version` | (flet: `"1.0.1"`) | the version of `flet`, `flet-desktop` and `flet-cli` |
+| `vscode.settings` | `{}` | merged into `.vscode/settings.json` (JSON values only) |
+| `vscode.buttons` | `["run", "test", "check", "build"]` | status bar buttons: commands or task names ([VS Code](#vs-code)) |
+| `hooks.pre_commit` | `true` | the git pre-commit hook ([Git pre-commit hook](#git-pre-commit-hook)) |
+
 ## Shells
 
 The logic lives in `.pytemplate/deploy.py` (standard library only, run by uv). Three thin
@@ -314,20 +482,6 @@ the enclosing project from any subfolder, with a comment saying where to paste i
 `./deploy doctor` shows which launcher started it and checks that the launchers kept their line
 endings and executable bit.
 
-### Renaming the app
-
-Changing `app.name` by hand moves nothing: use `./deploy rename NEW_NAME` (try `--dry-run`
-first). It moves `src/<pkg>/`, rewrites the imports and the other references in `src/` and
-`tests/` (package paths get the package, window and table titles get the name), updates
-`pytemplate.toml` (`app.name`, `compile.modules`, the mypy overrides, the wheel entry, task
-commands) and `pyproject.toml` (the project name and the preset tables), re-locks `uv.lock` and
-regenerates the configs. The package is the name in lower case with `_` for `-`
-(`My-Game` -> `src/my_game/`). It refuses a dirty git tree unless `--force` (review the result
-with `git diff`), and names whose package would be a dependency (`flet`, `rich`), a Python
-keyword or a standard-library module (`json`); `./deploy new` and `init` apply the same rules.
-`dist/` keeps the artifacts built with the old name. To choose the name at creation:
-`./deploy new DIR --name NAME`.
-
 ### Git pre-commit hook
 
 `./deploy setup` installs a pre-commit hook (`[hooks] pre_commit = true`, the default): a small
@@ -345,28 +499,6 @@ sync with `pyproject.toml`, the mypyc rules on staged compiled modules (blocking
   add `sh ./deploy hooks run || exit $?` to your own hook.
 - It works from any git client (Git Bash, cmd, PowerShell, xonsh, VS Code, lazygit): git runs
   hooks with its own `sh`, and the hook calls the POSIX launcher, which finds uv by itself.
-
-## Configuration: `pytemplate.toml` and `.pytemplate/`
-
-`pytemplate.toml` is the single source of truth: active backend, supported backends,
-typing profile, modules to compile and deploy options. Change it and run any
-`./deploy` command: these files regenerate themselves from the variants in `.pytemplate/templates/`:
-
-- `.mypy.ini`, `pyrightconfig.json` (Pylance, pyright, basedpyright), `.ruff.toml`
-- `.vscode/settings.json`, `launch.json`, `tasks.json`, `extensions.json`
-- `.lazy.lua`, `.pytemplate/editor.json` (Neovim)
-- `.python-version`, `.github/workflows/ci.yml`
-
-**Do not edit them by hand**: `./deploy` detects the edit and does not overwrite it
-(`./deploy render --force` to force it). Edit `pytemplate.toml`, or the variants in
-`.pytemplate/templates/typing/` to change a profile. In `pyproject.toml`, `requires-python`
-and the block between the markers in `[tool.uv]` are managed too; since they affect `uv.lock`,
-they only change with `./deploy mode`, `./deploy lock` or `./deploy setup`.
-
-**Pinned tools outside `uv.lock`.** basedpyright (used by `check` when
-`typing.editor = "basedpyright"`) and Nuitka are not in `uv.lock`: they run with
-`uv run --with`, pinned in `cmd_dev.BASEDPYRIGHT` (1.40.1) and `methods.nuitka.NUITKA` (4.2.2)
-under `.pytemplate/runner/`. Bump them there.
 
 ### Typing by backend
 
