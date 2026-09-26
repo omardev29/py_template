@@ -1846,6 +1846,26 @@ def test_wheel_builds_in_the_locked_tools_env(wheel_project: Path, monkeypatch: 
     assert (work / "setup.py").is_file() is (backend == "mypyc") and (work / "mypy.ini").is_file() is (backend == "mypyc")
 
 
+def test_wheel_keeps_the_previous_wheel_when_the_sync_fails(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The previous dist/ folder went first, then `uv sync --locked` failed (a stale uv.lock, a
+    # package not in the cache offline): no wheel at all was left
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    previous = wheel_project / "dist" / "pkg-cpython-wheel"
+    previous.mkdir(parents=True)
+    (previous / "pkg-0.1.0-py3-none-any.whl").write_bytes(b"old wheel")
+
+    def sync(env: envs.PyEnv, **kw: Any) -> None:
+        raise proc.CommandFailed(["uv", "sync", "--locked"], 1)
+
+    monkeypatch.setattr(wheel.envs, "sync", sync)
+    monkeypatch.setattr(wheel.envs, "uv", lambda *a, **k: pytest.fail("no uv build after a failed sync"))
+    with pytest.raises(proc.CommandFailed):
+        wheel.build(BuildRequest(_wheel_cfg(), "cpython", "wheel", wheel_project / "src"))
+    assert (previous / "pkg-0.1.0-py3-none-any.whl").read_bytes() == b"old wheel"
+
+
 def test_wheel_pyproject_is_exact_and_ships_the_package_data(wheel_project: Path) -> None:
     from runner.methods import wheel
 

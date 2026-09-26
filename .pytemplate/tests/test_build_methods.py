@@ -2919,6 +2919,118 @@ def test_a_previous_output_that_cannot_be_deleted_is_moved_aside(tmp_path: Path,
     common.remove_output(archive)  # a missing one is fine
 
 
+def _previous_portable(dist: Path) -> dict[str, bytes]:
+    """A previous runtime = "system" build of app x: the folder and both archives."""
+    out = dist / "x-cpython-portable"
+    (out / "app").mkdir(parents=True)
+    (out / "lib").mkdir()
+    (out / "x.sh").write_text("old launcher", encoding="utf-8")
+    for suffix in (".zip", ".tar.gz"):
+        (dist / f"x-cpython-portable{suffix}").write_text("old build", encoding="utf-8")
+    return _tree_bytes(dist)
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {p.relative_to(root).as_posix(): p.read_bytes() if p.is_file() else b"<dir>" for p in sorted(root.rglob("*"))}
+
+
+@pytest.mark.parametrize("fails", ["x-cpython-portable", "x-cpython-portable.zip", "x-cpython-portable.tar.gz"])
+def test_a_previous_portable_output_in_use_is_left_whole_with_its_archives(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch, fails: str
+) -> None:
+    # The archives were deleted first, then the folder could not be moved (the app still running
+    # from it): the build failed with "nothing deleted" and the .tar.gz was gone. The folder and
+    # both archives now go together or not at all: those already moved come back.
+    dist = sandbox / "dist"
+    before = _previous_portable(dist)
+    real_move = common._move
+
+    def move(src: Path, dst: Path) -> None:
+        if src == dist / fails:  # Windows: a file inside is in use (or the archive is open)
+            raise PermissionError(13, "The process cannot access the file because it is being used by another process", str(src))
+        real_move(src, dst)
+
+    monkeypatch.setattr(common, "_move", move)
+    with pytest.raises(DeployError, match="in use") as e:
+        _system_portable(sandbox, monkeypatch)
+    assert e.value.code == 1 and fails in str(e.value)
+    assert _tree_bytes(dist) == before  # every previous file where it was, no scratch folder left
+
+
+def test_remove_output_names_what_it_could_not_put_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    folder = tmp_path / "x-cpython-portable"
+    folder.mkdir()
+    archive = tmp_path / "x-cpython-portable.tar.gz"
+    archive.write_bytes(b"old")
+    real_move = common._move
+
+    def move(src: Path, dst: Path) -> None:
+        if src == archive or dst == folder:  # the archive is open, and the folder cannot go back
+            raise PermissionError(13, "Access is denied", str(src))
+        real_move(src, dst)
+
+    monkeypatch.setattr(common, "_move", move)
+    with pytest.raises(DeployError, match="x-cpython-portable.tar.gz: it is in use or read-only"):
+        common.remove_output(folder, archive)
+    aside = [p for p in tmp_path.iterdir() if p.name.startswith(".x-cpython-portable.old-")]
+    assert len(aside) == 1 and (aside[0] / folder.name).is_dir() and archive.read_bytes() == b"old"
+    assert f"could not put {folder.name} back" in capsys.readouterr().err.replace(str(tmp_path) + os.sep, "")
+
+
+def test_a_stale_lock_leaves_the_previous_portable_output_alone(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `uv export --locked` refused a stale uv.lock only after the previous folder and its archives
+    # were deleted: dist/ kept a folder holding only app/
+    from runner.methods import portable
+
+    dist = sandbox / "dist"
+    before = _previous_portable(dist)
+    cfg = make({"app": {"name": "x"}, "deploy": {"portable": {"runtime": "system", "archive": False}}})
+    monkeypatch.setattr(common, "host_target", lambda c, b: common.Target("cp", 3, 14, "linux", "x86_64"))
+
+    def stale(c: Config) -> Path:
+        raise proc.CommandFailed(["uv", "export", "--locked"], 1)
+
+    monkeypatch.setattr(common, "export_requirements", stale)
+    with pytest.raises(proc.CommandFailed):
+        portable.build(BuildRequest(cfg, "cpython", "portable", fake_app(sandbox / "payload", "x")))
+    assert _tree_bytes(dist) == before
+
+
+STALE_LOCK = "error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided. To update the lockfile, run `uv lock`."
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("method", ["exe", "portable", "pyz", "wheel", "nuitka"])
+def test_build_refuses_a_stale_lock_before_any_work(no_build: None, monkeypatch: pytest.MonkeyPatch, method: str, dry_run: bool) -> None:
+    # Every method stops on a uv.lock that pyproject.toml moved past, but only where it runs uv
+    # --locked: with --no-check after the payload, and exe, nuitka and portable after deleting
+    # the previous output; --dry-run said "would output"
+    asked: list[list[str]] = []
+
+    def uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        asked.append([str(a) for a in args])
+        assert kw.get("echo") is False and kw.get("check") is False  # a read-only query, also in a dry run
+        return subprocess.CompletedProcess(args, 1, "", STALE_LOCK + "\n")
+
+    monkeypatch.setattr(envs, "uv", uv)
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    with pytest.raises(DeployError, match="uv.lock does not match pyproject.toml") as e:
+        cmd_build.cmd_build(make({}), ["cpython", "--method", method, "--no-check"])
+    assert asked == [["lock", "--check"]]
+    assert e.value.code == 2 and "needs to be updated" in str(e.value) and "./deploy lock" in str(e.value)
+
+
+def test_check_lock_reads_the_real_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = _workspace_project(tmp_path / "proj")
+    monkeypatch.setattr(proc, "ROOT", project)
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    cmd_build.check_lock(make({}))  # up to date: nothing to say
+    text = (project / "pyproject.toml").read_text(encoding="utf-8")
+    (project / "pyproject.toml").write_text(text.replace('["mylib"]', '["mylib", "six>=1.16"]'), encoding="utf-8")
+    with pytest.raises(DeployError, match="uv.lock does not match pyproject.toml"):
+        cmd_build.check_lock(make({}))
+
+
 @pytest.mark.parametrize("fail", [False, True])
 def test_portable_build_removes_the_previous_archive(sandbox: Path, monkeypatch: pytest.MonkeyPatch, fail: bool) -> None:
     # archive = false (or a failed rebuild) left the old dist/<n>...tar.gz next to the new folder:

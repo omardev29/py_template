@@ -553,7 +553,7 @@ header rules (with detector tests proving each rule fires).
 | `cmd_apply.py` | `./deploy apply [--force]` / `setup [--force]` (section 5.8): `make_plan` (every refusal before the first write), `apply`, `_print_plan` (--dry-run), the `applied` record (`load_record`, `save_record`, `trusted_record`, `project_record`, `record_of`, `rename_record`), `applied_state` / `_applied_preset` (`_marks`: a preset's traces in pyproject.toml) / `applied_name` / `_other_package`, `dependency_changes` (`DepChanges`, `req_key`), `read_project`, `pending` + `doctor` (changes not applied yet), `reference_problems`, `unused_envs`, `_restore`. |
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `new`, the internal `__init` (`cmd_init`), and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
 | `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`, `stage_pythonpath`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`, `BASEDPYRIGHT_NODE`. |
-| `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
+| `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `check_lock`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
 | `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys (`parse_key`, `check_key`, `targets_for`), `UV_PLATFORMS`/`host_floor`, `ensure_env`, `export_requirements`, `install_deps`, `drop_install_junk`, `has_native`, `skipped_requirements`, `copy_app`, `uses_tkinter`, `windowed`, `tree_bytes`; `nuitka.NUITKA`/`NUITKA_PYTHON`, `check_python`, `check_options`, `optimization_args` (`[deploy.nuitka]` lto/pgo); `pyz.check_parts`, `merge`. |
 | `shells.py` | `__probe`, launcher/shell doctor checks, `shell-setup` snippets, `selftest --shells` (section 4.9). |
 | `cmd_nvim.py` | `./deploy nvim ...` and `doctor(check)` (section 12.2). |
@@ -688,7 +688,8 @@ header rules (with detector tests proving each rule fires).
 - `clean` prints `would remove X` per target. `build` validates its arguments, the pyz target
   keys, the Nuitka pin and PGO rules (`nuitka.check_python`, `check_options`), the flet preset
   and Developer Mode (`flet.check_options`), the portable launchers' env values
-  (`portable.check`) and the UPX binary (`upx.preflight`: a missing `deploy.upx.path` fails) as
+  (`portable.check`), the lock (`cmd_build.check_lock`: a read-only `uv lock --check`, a stale
+  uv.lock fails) and the UPX binary (`upx.preflight`: a missing `deploy.upx.path` fails) as
   a real build does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M:
   would output dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options: --lto=... [--pgo-c ...]
   <extras>`; a method that packs with UPX on this host: `upx: <path>` or `upx: would download
@@ -1581,12 +1582,16 @@ Formats:
   and a leading bare word (`_stray_word`: "unknown backend 'mypy': did you mean mypyc?", "did you
   mean --method pyz?"). Then `nuitka.check_python`, for pyz `common.check_key` on every key,
   `flet.check_options` (the flet preset; Developer Mode on Windows for a windows target, exit
-  3), `portable.check` (the `[deploy.portable] env` values a `.cmd` launcher cannot hold) and
+  3), `portable.check` (the `[deploy.portable] env` values a `.cmd` launcher cannot hold),
+  `check_lock` (a read-only `uv lock --check`: every method stops on a uv.lock that
+  pyproject.toml moved past, but only where it runs `uv ... --locked`, with `--no-check` after
+  the payload, and exe and nuitka after the previous output was removed; exit 2 with uv's
+  reason and `./deploy lock`) and
   `upx.preflight`: when the method packs with UPX on this host (`upx.uses`: exe on Windows,
   nuitka, portable, flet desktop targets) it resolves the upx binary now, downloading it if
-  needed. What a method refuses (a missing `deploy.upx.path`, a failed download included) is
-  refused before the checks, the mypyc compile and the removal of the previous output, and in
-  `--dry-run` too (which only names the upx binary or its download). Default method from
+  needed. What a method refuses (a stale lock, a missing `deploy.upx.path`, a failed download
+  included) is refused before the checks, the mypyc compile and the removal of the previous
+  output, and in `--dry-run` too (which only names the upx binary or its download). Default method from
   `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs `run_checks` unless
   `--no-check` (a failure is exit 1, like `./deploy check`). `payload`: the mypyc release
   stage, or `sync_tree(SRC, .build/payload/<backend>)`. A method whose result is missing or an
@@ -1598,9 +1603,12 @@ Formats:
   with a bundled runtime adds `-<target key>`, flet adds `-<target>`. The CI template hard-codes
   `dist/<NAME>-<BUILD_BACKEND>-pyz/<NAME>.pyz`: it is coupled to `BuildRequest.out_name`. Every
   method but flet build replaces its previous output whole or not at all, before its packager
-  runs (`common.remove_output`: a folder is first moved aside in `dist/`, which Windows refuses
-  while a file in it is in use, the app still running from it: exit 1 naming the file ("Is the
-  app still running?"), nothing deleted; what the moved copy still holds is a warning);
+  runs (`common.remove_output`: every path is first moved aside into one scratch folder in
+  `dist/`, which Windows refuses while a file in it is in use, the app still running from it:
+  exit 1 naming the file ("Is the app still running?"), the paths already moved come back,
+  nothing deleted; what the moved copies still hold is a warning; portable passes its folder
+  and both archives in one call, and exports its requirements first, wheel syncs first, so a
+  failure there leaves the previous output alone);
   `pyz._write_archive` turns a `.pyz` in use into the same error. rmtree used to delete half of
   the folder, then fail with a traceback (for nuitka after minutes of work).
 - Work dirs live under `.build/<name>/<backend>` (`exe-stage`, `pyinstaller`, `flet-pack`,
@@ -1696,7 +1704,9 @@ Per method:
   the build folder): `lib/` and `app/` at levels 0 and `deploy.optimize`, the bundled stdlib
   (`runtime_stdlib`: `lib/pythonX.Y`, `lib/pypyX.Y` or `Lib`) only at the launchers' level,
   `-x` skipping PyPy's broken `lib2to3/tests` data: a read-only install never recompiles.
-  The previous `<out>.zip`/`<out>.tar.gz` is deleted first; `archive` writes gztar on POSIX and,
+  The previous `<out>.zip`/`<out>.tar.gz` goes with the previous folder, all or nothing
+  (`common.remove_output`; it was deleted first, and kept deleted when the folder was in use);
+  `archive` writes gztar on POSIX and,
   on Windows, `make_archive`'s zip (`strict_timestamps=False`; `.sh` entries as Unix entries with
   mode 0755: `create_system = 3` is needed too, unzip ignores MS-DOS mode bits).
   - Launchers: `.cmd` = ASCII + CRLF, `start ""` + `pythonw.exe` for GUI apps, env values with
@@ -3870,10 +3880,12 @@ Windows:
 - **A running program's files cannot be deleted** (LIMITATION): rebuilding an output while the
   previous build ran from it raised PermissionError in the middle of deleting it (half of the
   folder gone, a runner traceback; for nuitka after minutes of work). Fix:
-  `common.remove_output` moves the old output aside first (whole or not at all) before the
-  packager runs and turns the error into a clear one (exit 1, 10). Test:
+  `common.remove_output` moves the old output aside first (whole or not at all: portable's
+  folder with its archives, those already moved come back) before the packager runs and turns
+  the error into a clear one (exit 1, 10). Test:
   `test_build_methods.py::test_an_output_in_use_is_a_clear_error_before_the_packager_runs`,
-  `test_a_previous_output_in_use_is_left_whole`. Goes: never.
+  `test_a_previous_output_in_use_is_left_whole`,
+  `test_a_previous_portable_output_in_use_is_left_whole_with_its_archives`. Goes: never.
 - **The classic console needs ANSI turned on** (LIMITATION): and the `os.system("")` trick
   started a cmd.exe on every run. Fix: `ui.enable_vt_mode` (`SetConsoleMode`, 5.3). Test:
   `test_paths.py::test_ui_never_spawns_cmd_for_colors`,

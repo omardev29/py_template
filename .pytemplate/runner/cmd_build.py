@@ -52,6 +52,24 @@ class BuildRequest:
         return self.backend == "mypyc"
 
 
+def check_lock(cfg: Config) -> None:
+    """Refuse a uv.lock that pyproject.toml moved past (read-only), before any work.
+
+    Every method stops on it (`uv run --locked`, `uv sync --locked`, `uv export --locked`), but
+    only where it gets there: with --no-check after the payload and the mypyc compile, and exe
+    and nuitka after the previous output was removed; a --dry-run said "would output".
+    """
+    from . import envs
+
+    r = envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, capture=True, echo=False)
+    if r.returncode != 0:
+        why = envs.uv_error(r.stderr or r.stdout) or f"uv lock --check: exit code {r.returncode}"
+        raise DeployError(
+            f"uv.lock does not match pyproject.toml ({why})\n"
+            "  Run ./deploy lock (./deploy apply after a pytemplate.toml edit), then build again"
+        )
+
+
 def payload(cfg: Config, backend: str) -> Path:
     """Return the app code ready to package: src/ as-is, or the mypyc release stage."""
     if backend == "mypyc":
@@ -130,6 +148,7 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
         from .methods import portable
 
         portable.check(cfg)  # [deploy.portable] env values the .cmd launcher cannot hold
+    check_lock(cfg)  # a stale uv.lock fails now, also in --dry-run
     from . import upx
 
     upx_line = upx.preflight(cfg, method)  # a bad deploy.upx.path or a failed download fails now

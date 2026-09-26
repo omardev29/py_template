@@ -476,29 +476,36 @@ def _move(src: Path, dst: Path) -> None:
     os.replace(src, dst)
 
 
-def remove_output(path: Path) -> None:
-    """Remove a previous build output in dist/ (a file or a folder) whole, or not at all.
+def remove_output(path: Path, *also: Path) -> None:
+    """Remove a previous build output in dist/ (files or folders of one folder: portable's folder
+    and its archives) whole, or not at all.
 
-    A folder is first moved aside in the same folder: Windows refuses that while a file inside
-    is in use (the app still running from it, a console in it), and rmtree used to delete half
-    of the folder before it failed with a traceback. What the moved copy still holds (a scanner,
-    an immutable file) is only a warning: the new output has its place.
+    Each is first moved aside into one scratch folder next to them: Windows refuses that while a
+    file is in use (the app still running from the folder, a console in it, an open archive), and
+    rmtree used to delete half of the folder before it failed with a traceback. When one cannot
+    move, the ones already moved come back, so nothing is deleted. What the moved copies still
+    hold (a scanner, an immutable file) is only a warning: the new output has its place.
     """
-    if not path.exists() and not path.is_symlink():
+    present = [p for p in (path, *also) if p.exists() or p.is_symlink()]
+    if not present:
         return
     hint = "\n  Is the app still running? Close it (or the window that uses the folder) and build again"
-    if path.is_file() or path.is_symlink():
+    aside = Path(tempfile.mkdtemp(prefix=f".{present[0].name}.old-", dir=present[0].parent))
+    moved: list[Path] = []
+    for p in present:
         try:
-            path.unlink()
+            _move(p, aside / p.name)
         except OSError as e:
-            raise DeployError(f"cannot replace {rel(path)}: it is in use or read-only ({_why(e)}){hint}", 1) from None
-        return
-    aside = Path(tempfile.mkdtemp(prefix=f".{path.name}.old-", dir=path.parent))
-    try:
-        _move(path, aside / path.name)
-    except OSError as e:
-        aside.rmdir()
-        raise DeployError(f"cannot replace {rel(path)}: a file in it is in use ({_why(e)}){hint}", 1) from None
+            for back in reversed(moved):
+                try:
+                    _move(aside / back.name, back)
+                except OSError as err:
+                    ui.warn(f"could not put {rel(back)} back ({_why(err)}): it is in {rel(aside)}")
+            if not any(aside.iterdir()):
+                aside.rmdir()
+            what = "a file in it is in use" if p.is_dir() and not p.is_symlink() else "it is in use or read-only"
+            raise DeployError(f"cannot replace {rel(p)}: {what} ({_why(e)}){hint}", 1) from None
+        moved.append(p)
     shutil.rmtree(aside, ignore_errors=True)
     if aside.exists():
         ui.warn(f"could not delete all of the previous output, moved to {rel(aside)}: delete it by hand")

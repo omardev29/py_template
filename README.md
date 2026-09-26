@@ -678,7 +678,8 @@ PyInstaller, Nuitka and `flet build` do not support PyPy. The default method is 
 cpython and mypyc and `portable` for pypy (`[deploy] default`; a backend left out of that table
 keeps its default). Every method, with `--no-check` too, refuses a `uv.lock` that
 `pyproject.toml` has moved past (`./deploy lock` updates it). Each build replaces the previous
-output of the same backend and method:
+output of the same backend and method, whole or not at all (a portable folder together with
+its archive):
 
 | Method | Output | Start it with |
 |---|---|---|
@@ -705,8 +706,9 @@ portable and wheel refuse them (exit 2). Options are not abbreviated (`--meth` i
 `--method`), and a bare word is an error with a hint ("unknown backend 'mypy': did you mean
 mypyc?", "did you mean --method pyz?"). What can refuse a build without building refuses it
 before `check` and the payload: the arguments, the pyz target keys, the Nuitka pin and PGO
-rules, `--method flet` outside the flet preset or on Windows without Developer Mode, and the
-UPX binary of a method that packs (a missing `deploy.upx.path`, or a failed download).
+rules, `--method flet` outside the flet preset or on Windows without Developer Mode, a stale
+`uv.lock`, and the UPX binary of a method that packs (a missing `deploy.upx.path`, or a failed
+download).
 `./deploy --dry-run build ...` runs the same refusals and prints the output name (for nuitka
 also its options, with UPX the `upx` it would use or download), without building or
 downloading.
