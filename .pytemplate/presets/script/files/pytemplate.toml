@@ -40,7 +40,8 @@ opt_level = "3"              # 0 (debug only, slower than CPython) | 1 | 2 | 3 (
 no_semantic_interposition = true   # Linux gcc/clang: calls between compiled functions may be inlined
 
 [deploy]
-# optimize: Python -O level of every build method (higher = MORE stripped, not faster)
+# optimize: Python's -O level of the exe, nuitka and portable builds (higher = MORE stripped,
+# not faster); with mypyc, 1 and 2 also strip the compiled modules' asserts in every method
 optimize = 1   # 0 keep asserts | 1 strip asserts | 2 also docstrings
 default = { cpython = "exe", mypyc = "exe", pypy = "portable" }   # ./deploy build method
 exclude_modules = []   # never bundled by exe/nuitka even if imported, e.g. "ssl" without HTTPS
@@ -48,7 +49,7 @@ exclude_modules = []   # never bundled by exe/nuitka even if imported, e.g. "ssl
 [deploy.exe]
 mode = "onefile"   # onefile | onedir (onedir starts faster and is not unpacked every time)
 console = "auto"   # auto (= not app.gui) | yes | no
-icon = ""          # path to an .ico
+icon = ""          # .ico (Windows: exe, nuitka) or .icns (a macOS .app: exe); ignored on Linux
 strip = false   # Linux/macOS: strip symbol tables of the bundled binaries (smaller)
 
 [deploy.portable]

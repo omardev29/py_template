@@ -174,7 +174,7 @@ def build(req: BuildRequest) -> Path:
     if req.compiled:
         ui.info(f"  compiled (mypyc) for {host.key}; everywhere else the .py is used")
     if pure:
-        ui.info(f"  pure: works with CPython or PyPy >= {cfg.min_python} on any OS")
+        ui.info(f"  pure: works with {'CPython or PyPy' if cfg.pypy_enabled else 'CPython'} >= {cfg.min_python} on any OS")
     else:
         ui.info(f"  runs on: {', '.join(target_keys)}")
         conditional = sorted({pin for pins in skipped.values() for pin in pins})

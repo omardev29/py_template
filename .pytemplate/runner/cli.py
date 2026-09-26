@@ -46,7 +46,7 @@ COMMANDS: dict[str, Command] = {
     "hooks": Command("hooks", "cmd_hooks", "Install or remove the git pre-commit hook, or run its checks on the staged files", "[install [--force]|uninstall|run|status]", render=False, group="Environment"),
     # mode and template
     "mode": Command("cmd_mode", "cmd_mode", "Show or change the mode (backend, supported, typing, editor)", "[BACKEND] [--supports +B|-B|B,B...] [--typing auto|off|warn|strict|mypyc] [--editor pylance|basedpyright]", group="Mode"),
-    "render": Command("cmd_mode", "cmd_render", "Regenerate .mypy.ini, pyrightconfig.json, .ruff.toml and .vscode/", "[--check] [--diff] [--force]", render=False, group="Mode"),
+    "render": Command("cmd_mode", "cmd_render", "Regenerate the files derived from pytemplate.toml (.mypy.ini, .ruff.toml, pyrightconfig.json, .vscode/, .lazy.lua, editor.json, ci.yml)", "[--check] [--diff] [--force]", render=False, group="Mode"),
     "rename": Command("rename", "cmd_rename", "Rename the app: src/<pkg>, imports, pytemplate.toml, pyproject.toml, uv.lock", "NEW_NAME [--force]", render=False, group="Mode"),
     "new": Command("cmd_mode", "cmd_new", "Create a new project from this template", "DIR [--preset P] [--name NAME]", render=False, group="Mode"),
     # development

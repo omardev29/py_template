@@ -48,7 +48,8 @@ opt_level = "3"   # 0 (debug only, slower than CPython) | 1 | 2 | 3 (default)
 no_semantic_interposition = true   # Linux gcc/clang: calls between compiled functions may be inlined
 
 [deploy]
-# optimize: Python -O level of every build method (higher = MORE stripped, not faster)
+# optimize: Python's -O level of the exe, nuitka and portable builds (higher = MORE stripped,
+# not faster); with mypyc, 1 and 2 also strip the compiled modules' asserts in every method
 optimize = 1   # 0 keep asserts | 1 strip asserts | 2 also docstrings
 default = { cpython = "exe", mypyc = "exe", pypy = "portable" }
 exclude_modules = ["PIL"]   # flet imports Pillow only for RawImage: -13 MB (remove it if you use it)
@@ -56,7 +57,7 @@ exclude_modules = ["PIL"]   # flet imports Pillow only for RawImage: -13 MB (rem
 [deploy.exe]
 mode = "onedir"   # flet pack: the Flutter client goes inside; onedir starts much faster
 console = "auto"
-icon = ""
+icon = ""   # .ico (Windows: exe, nuitka) or .icns (a macOS .app: exe); ignored on Linux
 strip = false   # Linux/macOS: strip symbol tables of the bundled binaries (smaller)
 
 [deploy.portable]

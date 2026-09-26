@@ -1374,17 +1374,21 @@ regenerate the root (CLAUDE.md, section 11).
   reinstalls that LazyVim; `--require` fails instead of skipping when nvim or git is missing.
 - `--e2e [PRESET ...] [--backends B,..] [--methods M,..] [--quick|--full]`
   `[--gui auto|on|off] [--keep] [--reuse] [--json] [--base DIR]`: creates a project of each preset
-  with `./deploy new` in a short temporary folder, then runs setup, doctor, check, test, run and
-  every build the backends allow, and starts the headless builds. It prints a PASS/FAIL/SKIP table
-  (`--json` for CI). `--quick` builds only each backend's default method; `--full` adds Nuitka and a
-  PyPy round trip.
+  with `./deploy new` in a short temporary folder and checks what it got, then works in it like a
+  user: setup, doctor, the first commit through the git hook, check, test, run and every build the
+  backends allow but nuitka, and starts the headless builds (a portable folder from another path).
+  The default depth also runs `./deploy selftest` in the project, a usage error and a rename there
+  and back; `--quick` builds only each backend's default method and skips those three; `--full`
+  adds Nuitka, a PyPy round trip and a `[preset.*]` edit applied with `./deploy apply`. It prints a
+  PASS/FAIL/SKIP table (`--json` for CI) and exits 1 on any FAIL.
 - `./deploy render --check` and `./deploy doctor` must pass too.
 
 **(template repository)** The template's own CI, in `.github/workflows/template-*.yml` (not
 copied into projects): `template-selftest.yml` runs `./deploy selftest` on Linux, macOS and
 Windows; `template-launchers.yml` runs `selftest --shells` and `shellcheck`;
 `template-nvim.yml` runs `selftest --nvim`; `template-e2e.yml` runs `selftest --e2e` for the three
-presets on the three systems. The Tests and E2E badges at the top show the state of
+presets on the three systems (`--quick` on pushes and pull requests, the default depth weekly,
+`--full` monthly). The Tests and E2E badges at the top show the state of
 `template-selftest.yml` and `template-e2e.yml`.
 
 ## Quality bar

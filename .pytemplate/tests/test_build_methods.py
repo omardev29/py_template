@@ -896,7 +896,7 @@ def test_pyz_pure_build_layout(sandbox: Path, monkeypatch: pytest.MonkeyPatch, c
     assert {"common/lib/rich/__init__.py", "common/app/main.py", "common/app/assets/logo.txt", "__main__.py", "_pyz.json"} <= names
     assert not [n for n in names if n.startswith("targets/")]
     assert len(info["deps"]) == 16 and info["build_id"]
-    assert "pure: works with CPython or PyPy >= 3.14 on any OS" in capsys.readouterr().err
+    assert "pure: works with CPython >= 3.14 on any OS" in capsys.readouterr().err  # PyPy only when supported
     assert out.read_bytes().startswith(b"#!/usr/bin/env python3\n")
     if not IS_WINDOWS:
         assert os.stat(out).st_mode & 0o111
