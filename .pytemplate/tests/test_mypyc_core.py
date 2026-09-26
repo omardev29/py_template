@@ -653,8 +653,37 @@ def test_compiled_sources_of_modules_files_and_missing_entries(src_tree: Path) -
     _project(src_tree, {**CORE_TREE, "solo.py": "X = 1\n"})
     cfg = make({"compile": {"modules": ["myapp.core.sub", "solo", "myapp.core.a"]}})
     assert mypyc.compiled_modules(cfg) == ["myapp.core.sub.m", "myapp.core.sub.n", "solo", "myapp.core.a"]
-    with pytest.raises(DeployError, match="compile.modules: src/myapp/nope.py does not exist"):
+    with pytest.raises(DeployError, match="compile.modules: neither src/myapp/nope.py nor src/myapp/nope/ exists"):
         mypyc.compiled_sources(make({"compile": {"modules": ["myapp.nope"]}}))
+
+
+def test_a_module_file_wins_over_a_folder_that_is_no_package(src_tree: Path) -> None:
+    """Python imports bench.py when bench/ has no __init__.py (a package turned into a module
+    leaves bench/__pycache__/ behind): mypyc compiles that file, never the empty folder."""
+    _project(
+        src_tree,
+        {
+            **CORE_TREE,
+            "myapp/core/bench.py": "X = 1\n",
+            "myapp/core/bench/__pycache__/old.cpython-314.pyc": b"",
+            "myapp/core/data/notes.txt": "",
+        },
+    )
+    cfg = make({"compile": {"modules": ["myapp.core.bench", "myapp.core.a"]}})
+    assert config.compiled_paths(cfg) == ["myapp/core/bench.py", "myapp/core/a.py"]
+    assert mypyc.compiled_modules(cfg) == ["myapp.core.bench", "myapp.core.a"]
+    # a real package (with __init__.py) still wins over a module file of the same name, as in Python
+    _project(src_tree, {"myapp/core/bench/__init__.py": "", "myapp/core/bench/k.py": "X = 1\n"})
+    assert config.compiled_paths(cfg) == ["myapp/core/bench", "myapp/core/a.py"]
+    assert mypyc.compiled_modules(cfg) == ["myapp.core.bench.k", "myapp.core.a"]
+    # a namespace package (a folder of modules, no __init__.py and no bench.py) is a folder
+    (src_tree / "myapp/core/bench.py").unlink()
+    (src_tree / "myapp/core/bench/__init__.py").unlink()
+    assert config.compiled_paths(cfg) == ["myapp/core/bench", "myapp/core/a.py"]
+    assert mypyc.compiled_modules(cfg) == ["myapp.core.bench.k", "myapp.core.a"]
+    # a folder that holds no module and no bench.py: nothing to compile, said as such
+    with pytest.raises(DeployError, match="neither src/myapp/core/data.py nor src/myapp/core/data/ holds a module to compile"):
+        mypyc.compiled_sources(make({"compile": {"modules": ["myapp.core.data"]}}))
 
 
 def test_compiled_sources_follow_a_symlinked_subpackage(src_tree: Path, tmp_path: Path) -> None:

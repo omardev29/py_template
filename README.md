@@ -469,7 +469,10 @@ again.
 
 - **Layout**: `src/<pkg>/core/` is compiled; the boundary (`app.py`, `ui/`, `gfx.py`,
   `resources.py`) is not. `src/main.py` starts the app and is never compiled (a compiled module
-  cannot be `__main__`). `compile.exclude` keeps modules or subpackages of `compile.modules`
+  cannot be `__main__`). Each `compile.modules` entry is what Python imports under that name: a
+  regular package folder, else `<name>.py`, else a namespace folder of modules (a folder left
+  holding only `__pycache__` never hides the module file); an entry that does not exist or holds
+  no module is an error. `compile.exclude` keeps modules or subpackages of `compile.modules`
   interpreted; an entry that names nothing is an error.
 - **Constants with `Final`**: a global without `Final` is looked up in a dictionary on every
   access.

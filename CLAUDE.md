@@ -950,8 +950,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `multi_file`, `separate`, `strict_dunder_typing`. `config._validate_compile` checks the names
   against each other: no entry of `modules` inside another (or repeated: mypyc aborted with
   "Duplicate module"), every `exclude` strictly inside a `modules` entry (a module or a
-  subpackage: it excludes everything below it). Whether they exist is checked by
-  `mypyc.compiled_sources` (an `exclude` that names nothing is an error, not a silent no-op).
+  subpackage: it excludes everything below it). Each `modules` entry is the path Python imports
+  (`config.compiled_paths`: a folder with `__init__.py`, else `<name>.py`, else a namespace
+  folder; a folder left holding only `__pycache__` never hides the module file, and the pyright
+  strict list follows it too). Whether they exist is checked by `mypyc.compiled_sources`: an
+  entry that does not exist or holds no module, or an `exclude` that names nothing, is an error
+  naming the candidates, never a silent no-op.
 - `[deploy]`: `optimize 0|1|2`, `default {backend: method}` (merged over
   `config.DEFAULT_METHODS` in `DeployConfig.__post_init__`: a backend left out keeps its method,
   cpython/mypyc `exe`, pypy `portable`; each method must be allowed by `cmd_build.COMPAT` for its
@@ -1221,9 +1225,10 @@ Formats:
   (the extension loader wins) so pyz/portable can fall back to the `.py` on another interpreter.
 - Profiles: `dev` (run, test, compile, report) keeps asserts, `debug_level "1"`; `release`
   (build, `compile --release`) strips asserts when `deploy.optimize >= 1`, `debug_level "0"`.
-- `compiled_sources`: the `.py` files of `compile.modules` (never `__init__.py`), minus
-  `compile.exclude` (exact module or package prefix; an entry naming nothing -> `DeployError`),
-  deduplicated. Walks with `mypyc._walk`, like `sync_tree`.
+- `compiled_sources`: the `.py` files of `compile.modules` (never `__init__.py`; each entry
+  resolved like Python's import by `config.compiled_paths`, section 6.1; an entry that does not
+  exist or holds no module -> `DeployError`), minus `compile.exclude` (exact module or package
+  prefix; an entry naming nothing -> `DeployError`), deduplicated. Walks with `mypyc._walk`, like `sync_tree`.
 - `sync_tree(src, dst, owned=())` copies changed files only and deletes removed ones. Change
   detection is size + `st_mtime_ns` (`copy2` preserves the exact mtime), so a same-size edit
   within one second is detected. `_walk` follows symlinked folders (`Path.rglob` does not

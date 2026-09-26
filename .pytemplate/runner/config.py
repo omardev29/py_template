@@ -726,11 +726,18 @@ def load(builtin_commands: set[str] | None = None) -> Config:
 
 
 def compiled_paths(cfg: Config) -> list[str]:
-    """Return the paths (relative to src/) of the modules/packages in compile.modules."""
+    """Return the paths (relative to src/) of the modules/packages in compile.modules.
+
+    The one Python imports: a folder with __init__.py (a package) wins over <name>.py, and
+    <name>.py wins over a folder without __init__.py (a package turned into a module leaves its
+    __pycache__ folder behind); a folder alone is a namespace package.
+    """
     out: list[str] = []
     for m in cfg.compile.modules:
         base = m.replace(".", "/")
-        out.append(base if (SRC / base).is_dir() else base + ".py")
+        folder = SRC / base
+        package = (folder / "__init__.py").is_file() or not (SRC / f"{base}.py").is_file()
+        out.append(base if package and folder.is_dir() else base + ".py")
     return out
 
 
