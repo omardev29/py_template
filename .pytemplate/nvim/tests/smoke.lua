@@ -371,11 +371,29 @@ check("mypy diagnostics (profile " .. info.typing.profile .. ")", function()
   local ok, err = pcall(function()
     vim.cmd.edit(file)
     local buf = vim.api.nvim_get_current_buf()
+    -- LazyVim lints on BufReadPost after a 100 ms debounce, and a new run of a linter cancels the
+    -- running one (on Windows only its cmd.exe wrapper): let that run start and end first
+    vim.wait(500)
+    wait(120000, function()
+      return #lint.get_running(buf) == 0
+    end, "the automatic lint run")
     lint.try_lint("mypy")
     local ns = lint.get_namespace("mypy")
-    wait(180000, function()
+    if not vim.wait(180000, function()
       return #vim.diagnostic.get(buf, { namespace = ns }) > 0
-    end, "mypy diagnostics")
+    end, 50) then
+      -- the same command by hand: its exit code, time and output say why nothing came
+      local cmd = type(linter.cmd) == "function" and linter.cmd() or linter.cmd
+      local argv = vim.list_extend({ cmd }, vim.deepcopy(linter.args or {}))
+      argv[#argv + 1] = file
+      if pt.is_win then
+        argv = vim.list_extend({ "cmd.exe", "/C" }, argv)
+      end
+      local started = uv.hrtime()
+      local r = vim.system(argv, { cwd = linter.cwd, env = linter.env, clear_env = linter.env ~= nil, text = true }):wait(120000)
+      error(("no mypy diagnostics after 180 s (linters still running: %s); by hand: exit %s after %.1f s\n%s%s"):format(
+        table.concat(lint.get_running(buf), ", "), tostring(r.code), (uv.hrtime() - started) / 1e9, r.stdout or "", r.stderr or ""))
+    end
     local d = vim.diagnostic.get(buf, { namespace = ns })[1]
     assert(d.message:find("Incompatible types", 1, true), d.message)
     local S = vim.diagnostic.severity
