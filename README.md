@@ -319,7 +319,10 @@ name). What changes:
 - The Python files of `src/` and `tests/`: the imports of the package and the names bound to
   them (a local variable of the same name is left alone and reported). Strings, comments and
   other text files there: package paths, dotted names, `-m` arguments and `pkg:function`
-  references get the package; titles and other prose get the name.
+  references get the package; titles and other prose get the name. String prefixes and escapes
+  are never the name (an app named `f`, `n` or `r` keeps `f"..."`, `"\n"` and `b"\r"`); a name
+  right after a backslash in a raw string or a path (`r"\d"`, `r"src\alpha"`) is reported, not
+  changed.
 - `pytemplate.toml`: `app.name` and every package reference (`compile.modules`, `exclude`,
   `forbid_imports`, the mypy overrides, `hidden_imports`, `exclude_modules`, the wheel entry);
   other mentions are reported. `pyproject.toml`: `[project] name` and the preset tables.
@@ -329,7 +332,9 @@ name). What changes:
 Other files (README.md, `docs/`, scripts, your own workflows) are only listed when they mention
 the old name; `dist/` and `.build/` keep the old name until the next build (`./deploy clean`).
 It refuses uncommitted changes without `--force` (a project fresh from `./deploy new` has no
-commit yet: commit first), and the names `new` refuses. A write that fails puts every file back.
+commit yet: commit first), and the names `new` refuses. A write that fails puts every file back
+(each file is written to a temporary file first, so a full disk never leaves one half-written),
+and says so when it could not.
 When the old name is a common word (`app`, `game`, `core`), matching words in comments and
 strings change too: review `git diff`.
 

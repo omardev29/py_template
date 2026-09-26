@@ -8,6 +8,7 @@ safety checks and the command itself (dry run and a real run in a throwaway copy
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -207,6 +208,76 @@ def test_fstring_fields_as_one_token() -> None:
     region = rename._Region(0, len(text), fstring=True)
     positions = [i for i in range(len(text)) if text.startswith("myapp", i)]
     assert [rename._in_fstring_field(text, region, p) for p in positions] == [True, False, False]
+
+
+@pytest.mark.parametrize(
+    ("old", "text", "expected", "kept"),
+    [
+        ("f", 'x = f"{1}"\n', 'x = f"{1}"\n', 0),  # a string prefix is syntax, never the name
+        ("b", "x = b'b'\n", "x = b'tool'\n", 0),  # ... but the text after the quote is
+        ("rb", 'x = rb"\\d"\n', 'x = rb"\\d"\n', 0),
+        ("u", "x = u'u'\n", "x = u'tool'\n", 0),
+        ("fr", 'x = fr"{1}"\n', 'x = fr"{1}"\n', 0),
+        ("n", 'x = "a\\nb".split("\\n")\n', 'x = "a\\nb".split("\\n")\n', 0),  # an escape: not the name
+        ("r", 'SIG = b"\\x89PNG\\r\\n\\x1a\\n"\n', 'SIG = b"\\x89PNG\\r\\n\\x1a\\n"\n', 0),
+        ("x", 'SIG = b"\\x89PNG"\n', 'SIG = b"\\x89PNG"\n', 0),
+        ("alpha", 'x = "src\\alpha"\n', 'x = "src\\alpha"\n', 0),  # \a is BEL: "lpha" follows it
+        ("d", 'x = re.compile(r"\\d+")\n', 'x = re.compile(r"\\d+")\n', 1),  # raw: a regex escape or a path, reported
+        ("alpha", 'x = r"src\\alpha"\n', 'x = r"src\\alpha"\n', 1),
+        ("myapp", 'x = "src\\myapp"\n', 'x = "src\\myapp"\n', 1),  # an invalid escape: the new name could make it a real one
+    ],
+)
+@pytest.mark.filterwarnings("ignore::SyntaxWarning")  # "\m" is an invalid escape on purpose
+def test_string_prefixes_and_escapes_are_never_the_name(old: str, text: str, expected: str, kept: int) -> None:
+    out = rewrite(text, Names(old, "tool"), python=True)
+    assert out.text == expected and len(out.kept) == kept
+    compile(out.text, "t.py", "exec")
+
+
+@pytest.mark.parametrize(
+    ("old", "text", "expected"),
+    [
+        ("n", 'x = "a\\\\n"\n', 'x = "a\\\\tool"\n'),  # an escaped backslash: the name follows a real one
+        ("alpha", 'x = "src\\\\alpha"\n', 'x = "src\\\\tool"\n'),
+        ("f", "# f is the app\n", "# tool is the app\n"),  # comments have no escapes
+    ],
+)
+def test_backslash_pairs_and_comments_are_plain_text(old: str, text: str, expected: str) -> None:
+    assert rewrite(text, Names(old, "tool"), python=True).text == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "kept"),
+    [
+        ('[tasks.a]\ncmd = ["x", "\\n", "n"]\n', '[tasks.a]\ncmd = ["x", "\\n", "tool"]\n', 0),  # a basic string escape
+        ("[tasks.a]\ncmd = ['x', '\\n']\n", "[tasks.a]\ncmd = ['x', '\\n']\n", 1),  # a literal string: kept, reported
+    ],
+)
+def test_toml_escapes_are_never_the_name(text: str, expected: str, kept: int) -> None:
+    out = rewrite(text, Names("n", "tool"), toml=True)
+    assert out.text == expected and len(out.kept) == kept
+
+
+@pytest.mark.parametrize("preset", ["script", "raylib", "flet"])
+@pytest.mark.parametrize("old", ["b", "f", "r", "rb", "fr", "u"])
+def test_names_that_are_string_prefixes_or_escapes_keep_the_code_intact(tmp_path: Path, preset: str, old: str) -> None:
+    _write_project(tmp_path, preset, old)
+    _rename(tmp_path, old, "tool")
+    expected = presets.skeleton(preset, "tool")
+    for rel_path, data in _tree(tmp_path).items():
+        if rel_path.endswith(".py"):
+            compile(data, rel_path, "exec")
+            assert data == expected[rel_path], rel_path
+
+
+def test_the_png_signature_survives_a_rename_from_n(tmp_path: Path) -> None:
+    """The flet skeleton renamed from 'n' or 'r' got a silently wrong PNG signature."""
+    for old in ("n", "r"):
+        root = tmp_path / old
+        root.mkdir()
+        _write_project(root, "flet", old)
+        _rename(root, old, "tool")
+        assert b'PNG_SIGNATURE: Final = b"\\x89PNG\\r\\n\\x1a\\n"' in (root / "src" / "tool" / "core" / "fractal.py").read_bytes()
 
 
 def test_unparseable_python_falls_back_to_plain_text() -> None:
@@ -1043,8 +1114,95 @@ def test_a_failed_write_undoes_the_rename(tmp_path: Path, monkeypatch: pytest.Mo
         rename.apply_plan(tmp_path, planned)
     monkeypatch.setattr(Path, "write_bytes", real)
     assert e.value.code == 2
-    assert _everything(tmp_path) == before  # byte for byte, CRLF included
-    assert calls[target].name in {"pyproject.toml", "pytemplate.toml"} or fail_at != "last"
+    assert _everything(tmp_path) == before  # byte for byte, CRLF included (no temporary file left either)
+    assert calls[target].name.startswith((".pyproject.toml.", ".pytemplate.toml.")) or fail_at != "last"
+
+
+def test_a_write_that_fails_midway_leaves_the_file_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disk full, a quota: the OS had written part of the new bytes when it gave up. That file must
+    keep its old bytes too (the rename writes to a temporary file first), not only the ones before."""
+    _write_project(tmp_path, "script", "alpha")
+    (tmp_path / "tests" / "report.txt").write_text("row: alpha\n" * 2000, encoding="utf-8")
+    before = _everything(tmp_path)
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    real = Path.write_bytes
+
+    def disk_full(self: Path, data: Any) -> int:
+        if "report.txt" in self.name:
+            with open(self, "wb") as f:
+                f.write(data[:100])  # what reached the disk
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", disk_full)
+    with pytest.raises(DeployError, match=r"could not write tests/report.txt: No space left on device\. The rename was undone"):
+        rename.apply_plan(tmp_path, planned)
+    monkeypatch.setattr(Path, "write_bytes", real)
+    assert _everything(tmp_path) == before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX file size limit (ulimit -f)")
+def test_a_write_cut_short_by_the_file_size_limit_leaves_the_file_whole(tmp_path: Path) -> None:
+    """The verifier's reproduction: `ulimit -f` stops the write of a big file in the middle."""
+    _write_project(tmp_path, "script", "alpha")
+    (tmp_path / "tests" / "report.txt").write_text("row: alpha\n" * 20000, encoding="utf-8")  # 220 KB > the limit
+    before = _everything(tmp_path)
+    code = (
+        "import resource, signal, sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(TEMPLATE_DIR)!r})\n"
+        "from runner import rename\n"
+        "from runner.ui import DeployError\n"
+        "root = Path(sys.argv[1])\n"
+        "planned = rename.plan(root, 'alpha', 'beta')\n"
+        "signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\n"
+        "resource.setrlimit(resource.RLIMIT_FSIZE, (65536, 65536))\n"
+        "try:\n"
+        "    rename.apply_plan(root, planned)\n"
+        "except DeployError as e:\n"
+        "    print(e)\n"
+    )
+    r = subprocess.run([sys.executable, "-c", code, str(tmp_path)], capture_output=True, text=True, timeout=120, check=False)
+    assert "could not write tests/report.txt" in r.stdout and "The rename was undone" in r.stdout, r.stdout + r.stderr
+    assert _everything(tmp_path) == before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes and symlinks")
+def test_rewritten_files_keep_their_mode_and_links(tmp_path: Path) -> None:
+    root = tmp_path / "p"
+    root.mkdir()
+    _write_project(root, "script", "alpha")
+    script = root / "tests" / "run.sh"
+    script.write_text("#!/bin/sh\npython -m alpha\n", encoding="utf-8")
+    script.chmod(0o755)
+    shared = tmp_path / "shared.toml"  # pytemplate.toml kept elsewhere and linked into the project
+    (root / "pytemplate.toml").rename(shared)
+    (root / "pytemplate.toml").symlink_to(shared)
+    _rename(root, "alpha", "beta")
+    assert script.read_text(encoding="utf-8") == "#!/bin/sh\npython -m beta\n" and script.stat().st_mode & 0o777 == 0o755
+    assert (root / "pytemplate.toml").is_symlink() and 'name = "beta"' in shared.read_text(encoding="utf-8")
+
+
+def test_a_restore_that_fails_is_never_called_undone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    real = rename._replace_bytes
+    calls: list[Path] = []
+
+    def flaky(path: Path, data: bytes) -> None:
+        calls.append(path)
+        if len(calls) in (2, 3):  # the second write fails, then restoring the first one fails too
+            raise PermissionError(13, "Permission denied")
+        real(path, data)
+
+    monkeypatch.setattr(rename, "_replace_bytes", flaky)
+    with pytest.raises(DeployError) as e:
+        rename.apply_plan(tmp_path, planned)
+    first = calls[0].relative_to(tmp_path).as_posix().replace("src/beta/", "src/alpha/", 1)  # where it is now
+    message = str(e.value)
+    assert "The rename was undone" not in message and "NOT fully undone" in message
+    assert f"{first} could not be restored" in message
+    assert (tmp_path / "src" / "alpha").is_dir()  # the folder moved back all the same
 
 
 def test_a_broken_pyproject_is_a_clear_error_not_a_traceback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

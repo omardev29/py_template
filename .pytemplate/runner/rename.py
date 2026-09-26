@@ -19,7 +19,10 @@ Which occurrences change (whole words only: `myapp_extra` and `my-app-2` never m
   not changed. Attributes (`obj.myapp`) and keyword arguments (`f(myapp=1)`) never change.
 - Strings, comments, docstrings and other text files: every occurrence except right after a
   dot (`x.myapp` is a submodule or an attribute, never the top-level package) and a path
-  segment right after the package itself (`src/myapp/myapp` is a submodule of it).
+  segment right after the package itself (`src/myapp/myapp` is a submodule of it). In Python
+  and TOML strings the prefix (`f`, `rb`...) and escapes (`\\n`, `\\x89`) are never the name,
+  and a name right after a backslash in a raw string or a path (`r"\\d"`) is reported, not
+  changed: an app may be called `f`, `n` or `r`.
 - When the old name is also the old package but the new name is not a package name
   (`alpha` -> `My-Game`, package `my_game`), each text occurrence is either the package or the
   name. Package: path-like (`src/alpha/`, `alpha\\core`), dotted (`alpha.core`, `alpha.*`,
@@ -47,11 +50,14 @@ import ast
 import bisect
 import contextlib
 import dataclasses
+import errno
 import functools
 import io
 import keyword
 import os
 import re
+import stat
+import tempfile
 import tokenize
 import tomllib
 import warnings
@@ -109,6 +115,11 @@ _TOML_KEY_BEFORE = re.compile(r"[ \t]*(?:\[\[?[ \t]*)?(?:[A-Za-z0-9_-]+[ \t]*\.[
 _TOML_KEY_AFTER = re.compile(r"[ \t]*[.=\]]")
 _TOML_TABLE = re.compile(r"[ \t]*\[\[?[ \t]*([A-Za-z0-9_.\- \t]+?)[ \t]*\]\]?[ \t]*(?:#.*)?$")
 _TOML_ASSIGN = re.compile(r"[ \t]*([A-Za-z0-9_-]+(?:[ \t]*\.[ \t]*[A-Za-z0-9_-]+)*)[ \t]*=")
+# Strings: the prefix before the opening quote, and the letters a backslash turns into an escape
+_STRING_PREFIX = re.compile(r"[A-Za-z]*(?=['\"])")
+_PY_ESCAPES = frozenset("abfnrtvxNuU01234567")
+_BYTES_ESCAPES = frozenset("abfnrtvx01234567")
+_TOML_ESCAPES = frozenset("btnfruUex")  # TOML 1.0, plus \e and \x of TOML 1.1
 # ruff format --check --output-format concise: "path:1:2: unformatted: ..." (older: "Would reformat: path")
 _UNFORMATTED = re.compile(r"^(?:Would reformat: (?P<old>.+)|(?P<path>.+?):\d+:\d+: unformatted\b)", re.MULTILINE)
 # ruff check --output-format concise: "path:1:1: I001 [*] Import block is un-sorted or un-formatted"
@@ -505,6 +516,25 @@ def _text_kind(text: str, start: int, end: int, word: str, names: Names, *, cont
     return "name"
 
 
+def _escaped(text: str, start: int, floor: int, *, raw: bool, escapes: frozenset[str]) -> Kind | None:
+    """An occurrence right after an odd number of backslashes inside a string (which starts at
+    `floor`): "skip" when that backslash makes its first letter an escape (`\\n`, `\\x41`: not the
+    name at all), else "keep" (a raw string's `\\d`, a path like `src\\alpha`: rewritten, it could
+    become another escape or regex; reported, never changed). None: no backslash before it."""
+    i = start
+    while i > floor and text[i - 1] == "\\":
+        i -= 1
+    if (start - i) % 2 == 0:
+        return None
+    return "skip" if not raw and text[start] in escapes else "keep"
+
+
+def _string_quote(text: str, region: _Region) -> tuple[int, str] | None:
+    """(offset of the opening quote, prefix) of a string region (`rb"..."`); None for a comment."""
+    m = _STRING_PREFIX.match(text, region.start)
+    return None if m is None else (m.end(), m.group().lower())
+
+
 def _classify(text: str, start: int, end: int, word: str, names: Names, code: _Code | None, *, contextual: bool = False) -> Kind:
     if code is None:
         return _text_kind(text, start, end, word, names, contextual=contextual) if _whole_word(text, start, end) else "skip"
@@ -516,14 +546,44 @@ def _classify(text: str, start: int, end: int, word: str, names: Names, code: _C
     region = code.region_at(start)
     if region is None:
         return "skip"
+    quote = _string_quote(text, region)
+    if quote is not None and start < quote[0]:
+        return "skip"  # the string prefix (f, r, b, rb...): syntax, never the name
     if region.fstring and _in_fstring_field(text, region, start):  # code inside a 3.11 f-string
         if code.scoped:
             return "pkg" if start in code.refs else "keep"
         return "pkg" if word == names.old_pkg and code.bound and text[start - 1 : start] != "." else "keep"
+    if quote is not None:
+        prefix = quote[1]
+        escaped = _escaped(text, start, quote[0], raw="r" in prefix, escapes=_BYTES_ESCAPES if "b" in prefix else _PY_ESCAPES)
+        if escaped is not None:
+            return escaped
     if not _whole_word(text, start, end):
         return "skip"
     kind = _text_kind(text, start, end, word, names)
     return "pkg" if region.forced and kind == "name" else kind
+
+
+def _toml_strings(text: str) -> list[tuple[int, int, bool]]:
+    """(start, end, literal) of every string of a TOML text, in order (a text it cannot scan:
+    the strings found up to there)."""
+    out: list[tuple[int, int, bool]] = []
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char == "#":  # a comment: its quotes and backslashes are plain text
+            nl = text.find("\n", i)
+            i = len(text) if nl < 0 else nl
+        elif char in "\"'":
+            try:
+                end = config._string_end(text, i)
+            except config._ScanError:
+                break
+            out.append((i, end, char == "'"))
+            i = end
+        else:
+            i += 1
+    return out
 
 
 def _toml_key(text: str, start: int, end: int) -> bool:
@@ -595,6 +655,8 @@ def rewrite(
     code = _python_code(text, names.old_pkg) if python else None
     module_lines = module_value_lines(text, module_keys) if module_keys else set()
     line_starts = [0, *(m.end() for m in re.finditer("\n", text))]
+    strings = _toml_strings(text) if toml else []
+    string_starts = [s[0] for s in strings]
     pieces: list[str] = []
     last = 0
     count = 0
@@ -604,6 +666,14 @@ def rewrite(
         word = m.group()
         if toml and _toml_key(text, start, end):
             continue
+        i = bisect.bisect_right(string_starts, start) - 1
+        if i >= 0 and start < strings[i][1]:  # inside a TOML string: its escapes are never the name
+            escaped = _escaped(text, start, strings[i][0], raw=strings[i][2], escapes=_TOML_ESCAPES)
+            if escaped == "skip":
+                continue
+            if escaped == "keep":
+                kept_at.append(start)
+                continue
         kind = _classify(text, start, end, word, names, code, contextual=only_pkg)
         if kind == "skip":
             continue
@@ -914,11 +984,34 @@ def _move_dir(root: Path, old_rel: str, new_rel: str) -> None:
         ) from None
 
 
+def _replace_bytes(path: Path, data: bytes) -> None:
+    """Write `data` to `path` so that it is never left half-written: the bytes go to a temporary
+    file next to it, which then replaces it (os.replace is atomic). A write that fails midway (disk
+    full, a quota, a file size limit) leaves `path` as it was. The file keeps its permissions, a
+    symlink stays a link, and a read-only file is an error, as with a plain write."""
+    real = Path(os.path.realpath(path))
+    mode = stat.S_IMODE(real.stat().st_mode)
+    if not os.access(real, os.W_OK):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
+    fd, name = tempfile.mkstemp(prefix=f".{real.name}.", suffix=".pt-rename", dir=real.parent)
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        tmp.write_bytes(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, real)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
 def apply_plan(root: Path, plan_: Plan) -> None:
     """Write a plan: move src/<pkg>/ first (the step that can fail on a locked file), then the files.
 
-    A file that cannot be written (read-only, locked by another program) undoes what was already
-    done: the files written so far get their old bytes back and the folder moves back."""
+    A file that cannot be written (read-only, locked by another program, a full disk) undoes what
+    was already done: that file is never touched (`_replace_bytes`), the files written so far get
+    their old bytes back and the folder moves back. The error says what could not be undone."""
     if plan_.move is not None:
         _move_dir(root, *plan_.move)
     writes: list[tuple[Path, bytes]] = [(root / f.target, f.new) for f in plan_.changed_files]
@@ -929,20 +1022,32 @@ def apply_plan(root: Path, plan_: Plan) -> None:
     for path, data in writes:
         try:
             old = path.read_bytes()
-            path.write_bytes(data)
+            _replace_bytes(path, data)
         except OSError as e:
+            lost = []
             for written, previous in reversed(done):
-                with contextlib.suppress(OSError):
-                    written.write_bytes(previous)
-            undone = "the files written so far were restored"
+                try:
+                    _replace_bytes(written, previous)
+                except OSError:
+                    lost.append(written.relative_to(root).as_posix())
+            moved_back = plan_.move is None
             if plan_.move is not None:
                 try:
                     _move_dir(root, plan_.move[1], plan_.move[0])
+                    moved_back = True
                 except DeployError:
-                    undone += f", but {plan_.move[1]}/ could not be moved back to {plan_.move[0]}/ (move it by hand)"
+                    pass
+            problems = [f"{_target(p, (plan_.move[1], plan_.move[0])) if plan_.move and moved_back else p} could not be restored" for p in reversed(lost)]
+            if not moved_back and plan_.move is not None:
+                problems.append(f"{plan_.move[1]}/ could not be moved back to {plan_.move[0]}/")
+            undone = (
+                f"The rename was NOT fully undone: {'; '.join(problems)} (fix it by hand: git status shows what changed)"
+                if problems
+                else "The rename was undone (the files written so far were restored)"
+            )
             raise DeployError(
-                f"rename: could not write {path.relative_to(root).as_posix()}: {e.strerror or e}. The rename was undone "
-                f"({undone}).\n  Close the programs that use it (or make it writable) and try again"
+                f"rename: could not write {path.relative_to(root).as_posix()}: {e.strerror or e}. {undone}.\n"
+                "  Close the programs that use it (or make it writable, or free some disk space) and try again"
             ) from None
         done.append((path, old))
 

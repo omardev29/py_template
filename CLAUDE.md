@@ -794,8 +794,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   hand edit, `pytemplate.toml`) refuses without `--force` (a warning under `--dry-run`); git
   failing for another reason (dubious ownership) is refused the same way, never read as "no
   git". Then: move `src/<old_pkg>/` first (the step that can fail on a locked file; case-only
-  renames use two moves), write the files (`apply_plan`: a write that fails undoes everything,
-  old bytes back and the folder moved back), `cmd_env.ensure_lock` (a failure there says "the
+  renames use two moves), write the files (`apply_plan`: each through a temporary file next to
+  it and `os.replace` (`_replace_bytes`: mode kept, a symlink stays a link, a read-only file is
+  an error), so a write cut short (disk full, a quota, `ulimit -f`) never leaves one
+  half-written; a write that fails undoes everything, old bytes back and the folder moved back,
+  and the error names whatever it could not undo), `cmd_env.ensure_lock` (a failure there says "the
   files are already renamed ... ./deploy apply"), `render.apply`, the ruff tidy-up, and the name
   of the `applied` record (`cmd_apply.rename_record`, only the project's own record).
 - After a hand edit of `app.name` (src/<pkg>/ missing), rename starts from the name the project
@@ -813,6 +816,14 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     change; `f"{pkg=}"` is a use. When `ast` cannot parse the file (syntax newer than the
     runner's Python) the token rule is the fallback. String tokens are recognised by their
     `*STRING_START`/`*STRING_END` suffix (f-strings 3.12, t-strings 3.14, any later family).
+  - Strings are syntax first (`_classify`, `_escaped`): a string prefix (`f`, `r`, `b`, `rb`...:
+    before the opening quote) is never the name, and an occurrence right after an odd number of
+    backslashes is an escape when the string is not raw and its first letter makes one (`\n`,
+    `\x89`, `\a`...: skipped) and else (`r"\d"`, `r"src\alpha"`, an invalid `"\myapp"`) kept and
+    reported, never changed (a new name could turn it into an escape or another regex). The
+    same for TOML basic and literal strings (`_toml_strings`); comments and plain text files
+    have no escapes. Names of one or two letters are legal, and the flet skeleton's PNG
+    signature `b"\x89PNG\r\n..."` once changed silently for `r` and `n`.
   - Text (strings, comments, other files): every occurrence except `x.pkg` and a path segment
     right after the package itself (`src/pkg/pkg`, `src\pkg\pkg`: a submodule). When the
     old name equals the old package but the new name differs from the new package (`alpha` ->
