@@ -864,9 +864,13 @@ def command_text(sh: Shell, project: Path, where: str, args: Sequence[str], mini
         return f"$ProgressPreference = 'SilentlyContinue'\n{call}\nexit $LASTEXITCODE\n"
     if sh.family == "xonsh":
         word = {"root": "./deploy", "sub": "../deploy", "abs": f"@({ascii(str(launcher))})"}[where]
+        # The child's exit code whatever xonsh's raise-error setting says: its name and default
+        # changed between releases (0.18 returned the code, 0.24 raises CalledProcessError)
         return (
-            "$XONSH_SUBPROC_CMD_RAISE_ERROR = False\n$XONSH_SUBPROC_RAISE_ERROR = False\n"
-            f"_pt_r = ![{word} @({ascii(list(args))})]\nimport sys\nsys.exit(_pt_r.returncode)\n"
+            "import subprocess, sys\ntry:\n"
+            f"    _pt_rc = ![{word} @({ascii(list(args))})].returncode\n"
+            "except subprocess.CalledProcessError as _pt_e:\n    _pt_rc = _pt_e.returncode\n"
+            "sys.exit(_pt_rc)\n"
         )
     if sh.family == "fish":
         word = {"root": "./deploy", "sub": "../deploy", "abs": fish_quote(_mixed(launcher) if sh.mixed else str(launcher))}[where]

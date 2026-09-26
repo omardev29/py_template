@@ -105,11 +105,33 @@ def test_command_text_per_family(tmp_path: Path) -> None:
 
     xonsh = shells.Shell("xonsh", "xonsh", ("xonsh", "--no-rc"))
     text = shells.command_text(xonsh, project, "root", ["\u00fcn", 'q"x'])
-    assert "![./deploy @(['\\xfcn', 'q\"x'])]" in text and "sys.exit(_pt_r.returncode)" in text
+    assert "![./deploy @(['\\xfcn', 'q\"x'])]" in text and "except subprocess.CalledProcessError" in text
+    assert "XONSH_SUBPROC" not in text and "RAISE" not in text  # no setting whose name xonsh changes
     assert text.isascii()
 
     wsl = shells.Shell("wsl-u", "wsl", ("wsl.exe", "-d", "U"))
     assert "$(wslpath -u " in shells.command_text(wsl, project, "abs", [])
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="a POSIX stand-in launcher")
+def test_xonsh_probe_exit_code_ignores_raise_settings(tmp_path: Path) -> None:
+    """The probe returns the child's code with every raise-error setting of any xonsh turned on
+    (0.24 raises CalledProcessError from a failing ![...]; 0.18 did not): reading the setting's
+    name was what broke when xonsh renamed it."""
+    xonsh = shutil.which("xonsh")
+    if not xonsh:
+        pytest.skip("xonsh not installed")
+    project = tmp_path / "proj"
+    project.mkdir()
+    launcher = project / "deploy"
+    launcher.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8", newline="\n")
+    launcher.chmod(0o755)
+    body = shells.command_text(shells.Shell("xonsh", "xonsh", (xonsh,)), project, "abs", [])
+    # as if xonsh renamed its settings again: a `$NAME = ...` line of the probe would set nothing
+    body = "".join(line for line in body.splitlines(keepends=True) if not line.startswith("$"))
+    forced = "$XONSH_SUBPROC_CMD_RAISE_ERROR = True\n$XONSH_SUBPROC_RAISE_ERROR = True\n$RAISE_SUBPROC_ERROR = True\n"
+    r = subprocess.run([xonsh, "--no-rc", "-c", forced + body], cwd=project, capture_output=True, text=True, timeout=120, check=False)
+    assert r.returncode == 7, r.stdout + r.stderr
 
 
 def test_invocation(tmp_path: Path) -> None:

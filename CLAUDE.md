@@ -3266,12 +3266,13 @@ xonsh and bash:
   has it.
 - **xonsh changes the name and default of its subprocess raise-error setting** (LIMITATION):
   0.24 raises `CalledProcessError` from a failing `![...]` unless
-  `$XONSH_SUBPROC_CMD_RAISE_ERROR` is off (0.18 did not raise), so the probe got exit 1 instead
-  of the child's code. Fix: `shells.command_text` turns both current names off; the template
-  workflows install xonsh 0.24.2 for pushes and pull requests, and template-launchers the newest
-  on its weekly run (4.9, 13.2). Test: `selftest --shells` T2 with xonsh (CI);
-  `test_workflows.py::test_selftest_workflow_covers_every_os_and_both_floors` (the pin). Goes:
-  when the probe reads the exit code from `CalledProcessError`, whatever the setting.
+  `$XONSH_SUBPROC_CMD_RAISE_ERROR` is off (0.18 did not raise), so a probe that relied on one
+  setting's name got exit 1 instead of the child's code. Fix: the xonsh probe of
+  `shells.command_text` names no setting and takes the code from `CalledProcessError` too (4.9).
+  The template workflows still install xonsh 0.24.2 for pushes and pull requests and
+  template-launchers the newest on its weekly run (13.2): a stable signal, and drift that
+  shows. Test: `test_shells.py::test_xonsh_probe_exit_code_ignores_raise_settings` (every
+  setting forced on), `test_command_text_per_family`. Goes: never.
 - **bash rejects CRLF in an rc file** (LIMITATION): Fix: `shell-setup` writes LF bytes on every
   OS (4.9). Test: `test_shells.py::test_snippets_are_ascii_and_say_where_to_paste`. Goes: never.
 
