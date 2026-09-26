@@ -19,12 +19,14 @@ M.META = {
   build = { tag = "BUILD", backend = "optional", method = true, parse = true },
   mode = { refresh = true, show = true },
   setup = { refresh = true, show = true },
+  apply = { refresh = true, show = true },
   sync = { backend = "all", refresh = true },
   lock = { refresh = true, show = true },
   add = { refresh = true },
   remove = { refresh = true },
   render = { refresh = true },
-  init = { refresh = true, show = true },
+  -- rename rewrites editor.json (name, pkg), uv.lock and the sources: refresh, and show what changed
+  rename = { refresh = true, show = true },
   clean = { tag = "CLEAN" },
   doctor = { show = true },
   help = { show = true },
@@ -59,28 +61,68 @@ end
 -- --- output parser ------------------------------------------------------------------------------
 
 local SEV = { error = "E", warning = "W", note = "N", information = "I" }
+local DEFAULT_SEVERITY = { mypy = "E", ruff = "W" }
 
+-- CSI (colours), then OSC (ruff's OSC 8 links in terminals it knows) ended by BEL or by ST
+-- (ESC \): a payload never holds ESC or BEL, so one sequence never swallows the text after it.
 local function strip(line)
-  return (line:gsub("\27%[[%d;?]*[%a@]", ""):gsub("\27%].-\7", ""):gsub("\r", ""))
+  return (line:gsub("\27%[[%d;?]*[%a@]", ""):gsub("\27%][^\7\27]*\7", ""):gsub("\27%][^\7\27]*\27\\", ""):gsub("\r", ""))
+end
+
+-- The mypyc stage (.build[/wsl]/mypyc-{dev,release}/stage/, relative or absolute) is a throwaway
+-- copy of src/ (pytest under `test mypyc` imports it): the rest of such a path, or nil.
+local STAGE = { "^(.-)%.build/mypyc%-%l+/stage/(.+)$", "^(.-)%.build/wsl/mypyc%-%l+/stage/(.+)$" }
+local function in_stage(file)
+  for _, pattern in ipairs(STAGE) do
+    local prefix, rest = file:match(pattern)
+    if prefix and (prefix == "" or prefix:sub(-1) == "/") then
+      return rest
+    end
+  end
 end
 
 local function absolute(file)
   file = file:gsub("\\", "/")
+  local root = pt.root()
+  local staged = root and in_stage(file)
+  if staged then
+    -- land on the src/ file: an edit made in the stage copy is overwritten by the next sync
+    local src = vim.fs.normalize(root .. "/src/" .. staged)
+    if vim.uv.fs_stat(src) then
+      return src
+    end
+  end
   if file:match("^%a:/") or file:sub(1, 1) == "/" then
     return vim.fs.normalize(file)
   end
-  local root = pt.root()
-  return root and vim.fs.normalize(root .. "/" .. file) or file
+  if not root then
+    return file
+  end
+  local path = vim.fs.normalize(root .. "/" .. file)
+  -- mypyc runs in its stage (a copy of src/) and prints stage-relative paths: map them to src/
+  if not vim.uv.fs_stat(path) then
+    local src = vim.fs.normalize(root .. "/src/" .. file)
+    if vim.uv.fs_stat(src) then
+      return src
+    end
+  end
+  return path
 end
 
 ---Parse one output line of ./deploy into a quickfix item, or nil. Understands
 --- mypy       src/pkg/x.py:12: error: Incompatible types  [assignment]   (and :12:5:)
 --- ruff       src\pkg\x.py:3:8: F401 [*] `os` imported but unused           (concise format)
 --- pytest     tests/test_x.py:14: AssertionError                             (not "in func" frames)
---- mypyc      warning: src/pkg/core/x.py:7: <message>                        (runner warnings/errors)
+--- mypyc      pkg/core/x.py:7: error: <message>                              (relative to its stage)
+--- runner     warning: src/pkg/core/x.py:7: <message>                        (runner warnings/errors)
 --- basedpyright  C:\p\src\x.py:3:5 - error: <message>
----Relative paths are relative to the project root (the runner runs every tool there).
-function M.parse_line(line)
+---Relative paths are relative to the project root (the runner runs the tools there); mypyc's,
+---relative to its stage (a copy of src/), resolve to src/ when the root has no such file; paths
+---into the stage itself (pytest under mypyc: .build/mypyc-dev/stage/pkg/x.py) land on src/ too.
+---`sev` ({ mypy = "E"|"W", ruff = "E"|"W"}, from M.severity) types mypy's `error:` lines and ruff's
+---findings as the task's typing profile does (default: E and W).
+function M.parse_line(line, sev)
+  sev = sev or DEFAULT_SEVERITY
   line = strip(line)
   local forced
   local rest = line:match("^warning: (.*)$")
@@ -92,9 +134,9 @@ function M.parse_line(line)
       forced, line = "E", rest
     end
   end
-  local file, lnum, col, sev, msg = line:match("^%s+(%S.-%.pyi?):(%d+):(%d+) %- (%a+): (.*)$")
+  local file, lnum, col, level, msg = line:match("^%s+(%S.-%.pyi?):(%d+):(%d+) %- (%a+): (.*)$")
   if file then
-    local k = SEV[sev:lower()] or "E"
+    local k = SEV[level:lower()] or "E"
     if k == "N" then
       return nil
     end
@@ -104,12 +146,14 @@ function M.parse_line(line)
   if not file or file:find("site-packages", 1, true) or rest:match("^in ") or rest == "" then
     return nil
   end
-  sev, msg = rest:match("^(%a+): (.*)$")
-  local k = SEV[(sev or ""):lower()]
+  local word
+  word, msg = rest:match("^(%a+): (.*)$")
+  local k = SEV[(word or ""):lower()]
   if k == "N" then
     return nil
   end
-  local kind = forced or k or (rest:match("^%u+%d+") and "W" or "E")
+  -- mypy (and mypyc, always under the blocking mypyc profile) `error:` lines, and ruff codes
+  local kind = forced or (k == "E" and sev.mypy) or k or (rest:match("^%u+%d+") and sev.ruff or "E")
   return {
     filename = absolute(file),
     lnum = tonumber(lnum),
@@ -121,14 +165,51 @@ end
 
 -- --- task definitions ---------------------------------------------------------------------------
 
----overseer components for a ./deploy task.
+---The backends whose typing profiles `./deploy ARGS` checks with (like vscode.scan).
+function M.task_backends(args)
+  local info = pt.info()
+  local name, first = args[1], args[2]
+  local meta = M.META[name] or {}
+  if M.project_task(name) then
+    return info.backend.supported -- a [tasks] entry: its deps are not in editor.json (ci: check all)
+  elseif name == "compile" or name == "report" then
+    return { "mypyc" }
+  elseif meta.backend == "all" and first == "all" then
+    return info.backend.supported
+  elseif meta.backend and vim.tbl_contains(info.backend.supported, first) then
+    return { first }
+  end
+  return { info.backend.active }
+end
+
+---{ mypy = "E"|"W", ruff = "E"|"W" } for the output of `./deploy ARGS`: the strictest of its
+---backends' typing profiles (editor.json typing.task_severity), as in the VS Code matchers.
+function M.severity(args)
+  local levels = pt.info().typing.task_severity
+  local out, known = { mypy = "W", ruff = "W" }, false
+  for _, b in ipairs(M.task_backends(args)) do
+    local l = levels[b]
+    if l then
+      known = true
+      out.mypy = (out.mypy == "E" or l.mypy == "error") and "E" or "W"
+      out.ruff = (out.ruff == "E" or l.ruff == "error") and "E" or "W"
+    end
+  end
+  return known and out or vim.deepcopy(DEFAULT_SEVERITY)
+end
+
+---overseer components for a ./deploy task (o.severity: M.severity of its arguments).
 function M.components(name, o)
   local info = pt.info()
   local meta = M.META[name] or {}
   o = vim.tbl_extend("keep", o or {}, meta)
   local c = {}
   if o.parse then
-    c[#c + 1] = { "on_output_parse", parser = M.parse_line, relative_file_root = pt.root() }
+    local sev = o.severity
+    local parser = sev and function(line)
+      return M.parse_line(line, sev)
+    end or M.parse_line
+    c[#c + 1] = { "on_output_parse", parser = parser, relative_file_root = pt.root() }
     c[#c + 1] = { "on_result_diagnostics", remove_on_restart = true }
     c[#c + 1] = { "on_result_diagnostics_quickfix", open = false }
   end
@@ -136,7 +217,12 @@ function M.components(name, o)
   local show = o.show or o.background or (name == "run" and not info.gui)
   c[#c + 1] = { "open_output", direction = "dock", on_start = show and "always" or "never", on_complete = "failure" }
   if name == "run" or o.background then
-    c[#c + 1] = { "unique", replace = true }
+    c[#c + 1] = { "unique", replace = true } -- a new run restarts the app or the dev server
+  else
+    -- a re-run disposes the finished previous run of the same command (tasks are compared by
+    -- name): its diagnostics share the namespace and would otherwise stay until overseer
+    -- disposes it (never for a run nobody opened). soft: a running one is never stopped.
+    c[#c + 1] = { "unique", soft = true }
   end
   if o.refresh then
     c[#c + 1] = "pytemplate.refresh"
@@ -168,6 +254,9 @@ function M.definition(args, o)
   end
   local meta = M.META[args[1]] or {}
   local parse = o.parse or meta.parse
+  if parse and o.severity == nil then
+    o.severity = M.severity(args)
+  end
   return {
     name = "deploy " .. table.concat(args, " "),
     cmd = pt.deploy_cmd(args),
@@ -317,25 +406,69 @@ function M.pick()
   end
 end
 
----Completion for :Deploy.
-function M.complete(lead, line)
+local function names()
+  local out = vim.tbl_map(function(c)
+    return c.name
+  end, M.commands())
+  for _, t in ipairs(pt.info().tasks) do
+    out[#out + 1] = t.name
+  end
+  return out
+end
+
+---The words argument `argn` (1 = the first) of `./deploy NAME` can take, from the command's
+---usage in editor.json (and tasks.META): BACKEND (+ `all`), a first choice group such as
+---`[doctor|trust|...]`, and the flags anywhere (`--flag a|b` as `--flag=a`, `--flag=b`).
+---A [tasks] entry forwards its arguments: nothing to offer.
+function M.argument_words(name, argn)
   local info = pt.info()
-  local words = {}
-  local nargs = #vim.split(vim.trim(line), "%s+") - (line:match("%s$") and 0 or 1)
-  if nargs <= 1 then
-    for _, c in ipairs(M.commands()) do
-      words[#words + 1] = c.name
-    end
-    for _, t in ipairs(info.tasks) do
-      words[#words + 1] = t.name
-    end
-  else
-    vim.list_extend(words, info.backend.supported)
-    words[#words + 1] = "all"
-    for _, m in ipairs(info.build.methods) do
-      words[#words + 1] = "--method=" .. m
+  if name == "help" then
+    return argn == 1 and names() or {}
+  end
+  local cmd = vim.tbl_filter(function(c)
+    return c.name == name
+  end, M.commands())[1]
+  if not cmd then
+    return {}
+  end
+  local meta, usage, out = M.META[name] or {}, cmd.usage, {}
+  if argn == 1 then
+    if meta.backend or usage:match("BACKEND") then
+      vim.list_extend(out, info.backend.supported)
+      if (meta.backend == "all" or usage:match("BACKEND|all")) and #info.backend.supported > 1 then
+        out[#out + 1] = "all"
+      end
+    else
+      -- "[install [--force]|uninstall|run|status]" -> install|uninstall|run|status
+      local group = (usage:match("^(%b[])") or ""):sub(2, -2):gsub("%s*%b[]", "")
+      if group:match("^%l[%l%d|%-]*$") then
+        vim.list_extend(out, vim.split(group, "|", { plain = true }))
+      end
     end
   end
+  for flag, pos in usage:gmatch("(%-%-%w[%w%-]*)()") do
+    local values = usage:sub(pos):match("^ (%l[%l%d%-]*|[%l%d|%-]+)")
+    if values then
+      for _, v in ipairs(vim.split(values, "|", { plain = true })) do
+        out[#out + 1] = flag .. "=" .. v
+      end
+    else
+      out[#out + 1] = flag
+    end
+  end
+  local seen = {}
+  return vim.tbl_filter(function(w)
+    local new = not seen[w]
+    seen[w] = true
+    return new
+  end, out)
+end
+
+---Completion for :Deploy: command and [tasks] names, then what that command takes.
+function M.complete(lead, line)
+  local typed = vim.split(vim.trim(line), "%s+")
+  local nargs = #typed - (line:match("%s$") and 0 or 1)
+  local words = nargs <= 1 and names() or M.argument_words(typed[2], nargs - 1)
   return vim.tbl_filter(function(w)
     return vim.startswith(w, lead)
   end, words)
@@ -379,7 +512,9 @@ function M.setup(cfg)
     vim.keymap.set("n", prefix .. k[1], rhs, { desc = k[3] })
   end
   vim.api.nvim_create_user_command("Deploy", function(a)
-    M.run(#a.fargs > 0 and a.fargs or { "help" }, { show = true })
+    -- quotes group words ("a b" is one argument), like the <leader>jR prompt
+    local args = M.split_args(a.args)
+    M.run(#args > 0 and args or { "help" }, { show = true })
   end, { nargs = "*", complete = M.complete, desc = "./deploy ARGS (through uv, never 'shell')" })
   local group = vim.api.nvim_create_augroup("pytemplate", { clear = true })
   if cfg.render_on_save then

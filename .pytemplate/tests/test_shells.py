@@ -7,11 +7,15 @@ The full shell x test matrix is `./deploy selftest --shells`, not pytest.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -103,11 +107,33 @@ def test_command_text_per_family(tmp_path: Path) -> None:
 
     xonsh = shells.Shell("xonsh", "xonsh", ("xonsh", "--no-rc"))
     text = shells.command_text(xonsh, project, "root", ["\u00fcn", 'q"x'])
-    assert "![./deploy @(['\\xfcn', 'q\"x'])]" in text and "sys.exit(_pt_r.returncode)" in text
+    assert "![./deploy @(['\\xfcn', 'q\"x'])]" in text and "except subprocess.CalledProcessError" in text
+    assert "XONSH_SUBPROC" not in text and "RAISE" not in text  # no setting whose name xonsh changes
     assert text.isascii()
 
     wsl = shells.Shell("wsl-u", "wsl", ("wsl.exe", "-d", "U"))
     assert "$(wslpath -u " in shells.command_text(wsl, project, "abs", [])
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="a POSIX stand-in launcher")
+def test_xonsh_probe_exit_code_ignores_raise_settings(tmp_path: Path) -> None:
+    """The probe returns the child's code with every raise-error setting of any xonsh turned on
+    (0.24 raises CalledProcessError from a failing ![...]; 0.18 did not): reading the setting's
+    name was what broke when xonsh renamed it."""
+    xonsh = shutil.which("xonsh")
+    if not xonsh:
+        pytest.skip("xonsh not installed")
+    project = tmp_path / "proj"
+    project.mkdir()
+    launcher = project / "deploy"
+    launcher.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8", newline="\n")
+    launcher.chmod(0o755)
+    body = shells.command_text(shells.Shell("xonsh", "xonsh", (xonsh,)), project, "abs", [])
+    # as if xonsh renamed its settings again: a `$NAME = ...` line of the probe would set nothing
+    body = "".join(line for line in body.splitlines(keepends=True) if not line.startswith("$"))
+    forced = "$XONSH_SUBPROC_CMD_RAISE_ERROR = True\n$XONSH_SUBPROC_RAISE_ERROR = True\n$RAISE_SUBPROC_ERROR = True\n"
+    r = subprocess.run([xonsh, "--no-rc", "-c", forced + body], cwd=project, capture_output=True, text=True, timeout=120, check=False)
+    assert r.returncode == 7, r.stdout + r.stderr
 
 
 def test_invocation(tmp_path: Path) -> None:
@@ -202,6 +228,33 @@ def test_discover_windows_with_fake_folders(tmp_path: Path) -> None:
     assert all(s.mixed for s in got if s.family == "posix")
 
 
+def test_a_second_install_keeps_its_family_name(tmp_path: Path) -> None:
+    """Two MSYS2 roots and two Git installs: the second one's shells are msys2-2-*, git-2-*, so
+    the family NAME (`selftest --shells msys2`, `git`) selects them too (msys22-* did not)."""
+    msys_roots = [tmp_path / "msys64", tmp_path / "scoop" / "apps" / "msys2" / "current"]
+    for root in msys_roots:
+        for exe in ("bash.exe", "dash.exe", "msys-2.0.dll"):
+            _touch(root / "usr" / "bin" / exe)
+    git_roots = [tmp_path / "scoop" / "apps" / "git" / "current", tmp_path / "Git"]
+    for root in git_roots:
+        for exe in ("usr/bin/sh.exe", "usr/bin/bash.exe", "bin/bash.exe", "cmd/git.exe"):
+            _touch(root / exe)
+    for cyg in ("cyg1", "cyg2"):
+        _touch(tmp_path / cyg / "bin" / "bash.exe")
+    env = {"MSYS2_ROOT": str(msys_roots[0]), "USERPROFILE": str(tmp_path), "SystemRoot": str(tmp_path / "Windows"), "PATH": ""}
+    found = {"git": str(git_roots[1] / "cmd" / "git.exe")}
+    got = shells.discover(env, windows=True, which=found.get, standard=False, distros=lambda wsl: [])
+    names = [s.name for s in got]
+    assert {"msys2-msys", "msys2-shx", "msys2-2-msys", "msys2-2-shx", "git-bash", "git-2-bash", "git-2-sh"} <= set(names), names
+    msys2 = [s.name for s in shells.select(got, ["msys2"])]
+    assert "msys2-2-msys" in msys2 and "msys2-msys" in msys2
+    assert [s.name for s in shells.select(got, ["git"])] == ["git-bash", "git-sh", "git-2-bash", "git-2-sh"]
+    assert [s.name for s in shells.select(got, ["git-2"])] == ["git-2-bash", "git-2-sh"]
+    # Cygwin: the root is named by CYGWIN_ROOT only (plus C:\cygwin64 and C:\cygwin as standard)
+    cyg = shells.discover({**env, "CYGWIN_ROOT": str(tmp_path / "cyg1")}, windows=True, which=found.get, standard=False, distros=lambda wsl: [])
+    assert "cygwin" in [s.name for s in cyg]
+
+
 def test_discover_posix_with_fake_which(tmp_path: Path) -> None:
     found = {"bash": _touch(tmp_path / "bash"), "zsh": _touch(tmp_path / "zsh"), "busybox": _touch(tmp_path / "busybox")}
     got = {s.name: s for s in shells.discover({}, windows=False, which=found.get)}
@@ -250,6 +303,24 @@ def test_snippets_are_ascii_and_say_where_to_paste(monkeypatch: pytest.MonkeyPat
         shells.snippet("tcsh")
 
 
+def test_snippets_stay_ascii_with_non_ascii_user_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The niubash and msys2 headers name the user's files: a NIU_ENV or user name with an accent
+    must not put non-ASCII bytes into the snippet (it is appended to rc files)."""
+    root = tmp_path / "msys64"
+    (root / "usr" / "bin").mkdir(parents=True)
+    for name in ("bash.exe", "msys-2.0.dll"):
+        (root / "usr" / "bin" / name).write_bytes(b"")
+    user = "Jos\u00e9"
+    for key, value in (("NIU_ENV", f"/home/{user}/niu.env"), ("USERNAME", user), ("MSYS2_ROOT", str(root)), ("SCOOP", "")):
+        monkeypatch.setenv(key, value)
+    for shell in ("niubash", "msys2"):
+        text = shells.snippet(shell)
+        assert text.isascii(), text
+    assert "$NIU_ENV" in shells.snippet("niubash")
+    monkeypatch.setenv("USERNAME", "me")  # an ASCII path is still named in full
+    assert str(root / "home" / "me" / ".bashrc") in shells.snippet("msys2")
+
+
 def test_xonsh_snippet_words_and_syntax() -> None:
     cfg = make({"tasks": {"gen": {"cmd": ["python", "gen.py"]}}})
     text = shells.snippet("xonsh", cfg)
@@ -268,6 +339,92 @@ def test_xonsh_snippet_words_and_syntax() -> None:
     assert "add_one_completer" in text and 'aliases["deploy"]' in text
 
 
+def _xonsh_words(cfg: Config | None) -> list[object]:
+    text = shells.snippet("xonsh", cfg)
+    namespace: dict[str, object] = {}
+    exec(compile(text.split("\n\nif hasattr(aliases")[0].replace("${...}", "{}"), "snippet", "exec"), namespace)
+    words = namespace["_PT_WORDS"]
+    assert isinstance(words, list)
+    return words
+
+
+def _xonsh_completer(monkeypatch: pytest.MonkeyPatch, cfg: Config | None = None) -> Any:
+    """The snippet's completer, run as plain Python: xonsh's completer modules, `aliases` and
+    ${...} are stubbed, the rest of the snippet is the real one."""
+    import types
+
+    registered: dict[str, Any] = {}
+    completer_mod = types.ModuleType("xonsh.completers.completer")
+    completer_mod.add_one_completer = lambda name, func, loc: registered.update({name: func})  # type: ignore[attr-defined]
+    tools_mod = types.ModuleType("xonsh.completers.tools")
+    tools_mod.contextual_command_completer = lambda func: func  # type: ignore[attr-defined]
+    for name, module in (("xonsh", types.ModuleType("xonsh")), ("xonsh.completers", types.ModuleType("xonsh.completers")),
+                         ("xonsh.completers.completer", completer_mod), ("xonsh.completers.tools", tools_mod)):  # fmt: skip
+        monkeypatch.setitem(sys.modules, name, module)
+
+    class Aliases(dict[str, Any]):
+        @staticmethod
+        def return_command(func: Any) -> Any:
+            return func
+
+    text = shells.snippet("xonsh", cfg).replace("${...}", "{}")
+    exec(compile(text, "snippet", "exec"), {"aliases": Aliases()})
+    return registered["deploy"]
+
+
+def _complete(completer: Any, line: str) -> list[str]:
+    import types
+
+    words = line.split(" ")
+    command = types.SimpleNamespace(
+        args=[types.SimpleNamespace(value=w) for w in words[:-1]], arg_index=len(words) - 1, prefix=words[-1]
+    )
+    return sorted(completer(command) or [])
+
+
+def test_xonsh_completer_after_hooks_help_and_global_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """hooks' subcommands (a nested [--force] in its usage), command names after `help` or `-h`,
+    and the command after global flags (`deploy -v --dry-run test <TAB>`)."""
+    cfg = make({"tasks": {"gen": {"cmd": ["python", "gen.py"]}, "gen_docs": {"cmd": ["python", "docs.py"]}}})
+    first, choices, _ = shells.completion_words(cfg)
+    assert choices["hooks"] == ["install", "uninstall", "run", "status"]
+    assert {"build", "test", "gen", "gen_docs"} <= set(choices["help"])  # task names may hold "_"
+    assert set(first) - {"-v", "-q", "--dry-run", "--no-render"} <= set(choices["help"])
+    complete = _xonsh_completer(monkeypatch, cfg)
+    assert _complete(complete, "deploy hooks ") == ["install", "run", "status", "uninstall"]
+    assert _complete(complete, "deploy hooks install --") == ["--force"]
+    assert "build" in _complete(complete, "deploy help ") and _complete(complete, "deploy help g") == ["gen", "gen_docs"]
+    assert "build" in _complete(complete, "deploy -h b")
+    assert _complete(complete, "deploy -v --dry-run te") == ["test"]
+    assert {"all", "cpython"} <= set(_complete(complete, "deploy -q test "))
+    assert _complete(complete, "deploy --no-render build --me") == ["--method"]
+    assert "test" in _complete(complete, "deploy te") and _complete(complete, "deploy test cpython x") == []
+    # the skipped options are exactly the global options the runner takes before a command
+    from runner import cli, proc, ui
+
+    for module, attr in ((ui, "VERBOSE"), (ui, "QUIET"), (proc, "DRY_RUN")):
+        monkeypatch.setattr(module, attr, getattr(module, attr))  # restored afterwards
+    monkeypatch.setitem(cli._OPTS, "no_render", False)
+    for flag in shells.GLOBAL_OPTIONS:
+        assert cli._parse_globals([flag, "x"])[-1] == "x", flag
+    with pytest.raises(DeployError):
+        cli._parse_globals(["--nope", "x"])
+
+
+def test_xonsh_completion_follows_cli_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The completion words come from cli.COMMANDS when the snippet is printed: a new command
+    (`apply`, the same operation as `setup`) is offered without touching shells.py."""
+    from runner import cli
+
+    words = _xonsh_words(None)
+    assert set(cli.COMMANDS) <= set(words), set(cli.COMMANDS) - set(words)
+    assert not [w for w in words if isinstance(w, str) and w.startswith("__")], "internal routes are never offered"
+    commands = dict(cli.COMMANDS)
+    commands["apply"] = dataclasses.replace(cli.COMMANDS["setup"], summary="Apply every pytemplate.toml change")
+    monkeypatch.setattr(cli, "COMMANDS", commands)
+    assert "apply" in _xonsh_words(make({})) and "setup" in _xonsh_words(make({}))
+
+
 def test_guess_shell() -> None:
     assert shells.guess_shell({"PYTEMPLATE_LAUNCHER": "ps1:Core:7.6"}) == "pwsh"
     assert shells.guess_shell({"PYTEMPLATE_LAUNCHER": "sh:niubash"}) == "niubash"
@@ -275,6 +432,244 @@ def test_guess_shell() -> None:
     assert shells.guess_shell({"PYTEMPLATE_LAUNCHER": "cmd", "XONSH_VERSION": "0.24"}) == "xonsh"
     assert shells.guess_shell({"SHELL": "/usr/bin/fish"}) == "fish"
     assert shells.guess_shell({"PYTEMPLATE_LAUNCHER": "cmd"}) is None
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"PYTEMPLATE_LAUNCHER": "sh:bash", "SHELL": "/bin/zsh"}, "zsh"),  # macOS: /bin/sh is bash, zsh logs in
+        ({"PYTEMPLATE_LAUNCHER": "sh:bash", "SHELL": "/opt/homebrew/bin/fish"}, "fish"),
+        ({"PYTEMPLATE_LAUNCHER": "sh:bash", "SHELL": "/usr/bin/nu"}, "nu"),
+        ({"PYTEMPLATE_LAUNCHER": "sh:bash", "SHELL": "/bin/bash"}, "bash"),
+        ({"PYTEMPLATE_LAUNCHER": "sh:bash", "XONSH_VERSION": "0.19", "SHELL": "/bin/bash"}, "xonsh"),
+        ({"PYTEMPLATE_LAUNCHER": "sh:zsh", "SHELL": "/usr/bin/fish"}, "fish"),
+        ({"PYTEMPLATE_LAUNCHER": "sh:bash:msys", "SHELL": "/usr/bin/zsh"}, "zsh"),
+        ({"PYTEMPLATE_LAUNCHER": "sh:bash"}, "bash"),  # Git Bash/MSYS2 without SHELL
+        ({"PYTEMPLATE_LAUNCHER": "sh:zsh"}, "zsh"),
+        ({"PYTEMPLATE_LAUNCHER": "sh:bash", "SHELL": "/usr/local/bin/pwsh"}, "pwsh"),  # pwsh logs in (macOS, Fedora)
+        ({"PYTEMPLATE_LAUNCHER": "sh", "SHELL": "C:\\Program Files\\PowerShell\\7\\pwsh.exe"}, "pwsh"),
+        ({"PYTEMPLATE_LAUNCHER": "nu"}, "nu"),  # the shell-setup nu function called the runner
+        ({"PYTEMPLATE_LAUNCHER": "nu", "SHELL": "/bin/bash"}, "nu"),
+        ({"PYTEMPLATE_LAUNCHER": "sh:bash", "SHELL": "C:\\msys64\\usr\\bin\\zsh.exe"}, "zsh"),
+        ({"PYTEMPLATE_LAUNCHER": "sh:niubash", "SHELL": "/bin/zsh"}, "niubash"),  # niubash runs it in-process
+        ({"PYTEMPLATE_LAUNCHER": "ps1:Core:7.6", "SHELL": "/bin/zsh"}, "pwsh"),
+        ({}, None),
+    ],
+)
+def test_guess_shell_prefers_the_login_shell_over_the_sh_interpreter(env: dict[str, str], expected: str | None) -> None:
+    """sh:bash/sh:zsh only name what runs #!/bin/sh (bash on macOS, Fedora, Arch), not the user's shell."""
+    assert shells.guess_shell(env) == expected
+
+
+def test_snippets_keep_the_launcher_contract() -> None:
+    pwsh = shells.snippet("pwsh")
+    assert "if ($MyInvocation.ExpectingInput) { $input | & $ps1 @args } else { & $ps1 @args }" in pwsh
+    nu = shells.snippet("nu")
+    assert "PYTEMPLATE_LAUNCHER: 'nu'" in nu and "UV_PYTHON: ''" in nu
+    assert "PYTHONHOME: ''" in nu and "PYTHONPATH: ''" in nu and "UV_WORKING_DIR: '.'" in nu
+    assert "^$uv run --quiet --script $script ...$rest" in nu
+    # Windows: only a real uv.exe (a uv.cmd/uv.bat shim would go through cmd.exe), else the launcher
+    assert "let uv = if $windows { 'uv.exe' } else { 'uv' }" in nu and "deploy.cmd" in nu
+    xonsh = shells.snippet("xonsh")
+    assert '[uv, "run", "--quiet", "--script", str(script), *args]' in xonsh
+
+
+def test_xonsh_snippet_says_which_variables_it_keeps() -> None:
+    """The xonsh alias hands uv only an argument list, so it keeps the four variables the
+    launchers remove: its header names every one (a PYTHONHOME stops Python before the runner's
+    own version check), and the manual says the alias is the exception."""
+    header = " ".join(line[1:].strip() for line in shells.snippet("xonsh").splitlines() if line.startswith("#"))
+    for name in ("UV_PYTHON", "PYTHONHOME", "PYTHONPATH", "UV_WORKING_DIR"):
+        assert name in header, name
+    manual = (ROOT / "README.md").read_text(encoding="utf-8") if (ROOT / "README.md").is_file() else ""
+    if "The runner ignores an activated virtual environment" in manual:
+        paragraph = manual.split("The runner ignores an activated virtual environment", 1)[1].split("\n\n", 1)[0]
+        assert "xonsh alias" in paragraph, paragraph
+
+
+@pytest.mark.parametrize("windows", [True, False])
+def test_xonsh_snippet_takes_only_a_real_uv_exe_on_windows(windows: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows shutil.which('uv') tries every PATHEXT in each folder, so a uv.cmd shim in an
+    earlier folder won and cmd.exe parsed the arguments again: the alias asks for uv.exe (like
+    the launchers and the Neovim plugin) and falls back to deploy.cmd without one."""
+    import types
+
+    text = shells.snippet("xonsh").split("\n\nif hasattr(aliases")[0].replace("${...}", "_PT_ENV")
+    asked: list[str] = []
+
+    def which(name: str, path: str | None = None) -> str | None:
+        asked.append(name)
+        return None if found is None else found
+
+    namespace: dict[str, object] = {"_PT_ENV": {"PATH": ["C:\\shims", "C:\\bin"]}}
+    exec(compile(text, "snippet", "exec"), namespace)
+    namespace["_pt_os"] = types.SimpleNamespace(name="nt" if windows else "posix", pathsep=";" if windows else ":")
+    namespace["_pt_shutil"] = types.SimpleNamespace(which=which)
+    monkeypatch.chdir(ROOT)
+    argv_of = namespace["_pt_deploy_argv"]
+    assert callable(argv_of)
+    found: str | None = "C:\\bin\\uv.exe" if windows else "/usr/bin/uv"
+    argv = argv_of(["x"])
+    assert asked == ["uv.exe" if windows else "uv"] and argv[:2] == [found, "run"], (asked, argv)
+    found = None
+    argv = argv_of(["x"])
+    assert argv == [str(ROOT / ("deploy.cmd" if windows else "deploy")), "x"], argv
+
+
+# --- the snippets, executed in their own shells (skipped where a shell is missing) -----------------
+
+
+def _snippet_file(tmp_path: Path, shell: str, suffix: str) -> Path:
+    path = tmp_path / f"snippet{suffix}"
+    path.write_bytes(shells.snippet(shell).encode("ascii"))
+    return path
+
+
+def _snippet_run(argv: list[str], cwd: Path, extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        argv, cwd=cwd, env={**shells.child_env(), **(extra or {})}, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=180, stdin=subprocess.DEVNULL, check=False,
+    )  # fmt: skip
+
+
+def _python_traps(tmp: Path) -> dict[str, str]:
+    """A caller's PYTHONHOME without a stdlib, a PYTHONPATH that shadows tomllib and a
+    UV_WORKING_DIR elsewhere: the functions that run uv directly (nu) keep them from the runner
+    like the launchers do."""
+    shadow = tmp / "shadow"
+    shadow.mkdir(exist_ok=True)
+    (shadow / "tomllib.py").write_text('raise SystemExit("shadowed tomllib")\n', encoding="utf-8")
+    (tmp / "elsewhere").mkdir(exist_ok=True)
+    return {"PYTHONHOME": str(tmp / "no-home"), "PYTHONPATH": str(shadow), "UV_WORKING_DIR": str(tmp / "elsewhere")}
+
+
+def _probe_lines(stdout: str) -> list[dict[str, object]]:
+    found: list[dict[str, object]] = []
+    for line in stdout.splitlines():
+        data = shells.parse_probe(line)
+        if data is not None:
+            found.append(data)
+    return found
+
+
+def _sub() -> Path:
+    return ROOT / "src" if (ROOT / "src").is_dir() else ROOT / ".pytemplate"
+
+
+def _assert_probe(p: dict[str, object], argv: list[str], cwd: Path) -> None:
+    assert p["argv"] == argv, p
+    assert shells.same_path(p["root"], ROOT), p
+    assert shells.same_path(p["caller_cwd"], cwd), p
+
+
+def _away(tmp_path: Path) -> Path:
+    away = tmp_path / "away"
+    away.mkdir(exist_ok=True)
+    return away
+
+
+def test_fish_snippet_runs(tmp_path: Path) -> None:
+    fish = shutil.which("fish")
+    if not fish or IS_WINDOWS:
+        pytest.skip("fish not installed")
+    snip = _snippet_file(tmp_path, "fish", ".fish")
+    sub = _sub()
+    q = shells.fish_quote
+    code = (
+        f"source {q(str(snip))}; cd {q(str(sub))}; deploy __probe 7 0 'a b' '' '$HOME'; echo RC=$status; "
+        f"cd {q(str(_away(tmp_path)))}; deploy x; echo RC2=$status"
+    )
+    r = _snippet_run([fish, "--no-config", "-c", code], tmp_path)
+    probes = _probe_lines(r.stdout)
+    assert len(probes) == 1, r.stdout + r.stderr
+    _assert_probe(probes[0], ["a b", "", "$HOME"], sub)
+    assert "RC=7" in r.stdout and "RC2=2" in r.stdout and "no .pytemplate" in r.stderr, r.stdout + r.stderr
+
+
+def test_pwsh_snippet_runs(tmp_path: Path) -> None:
+    pwsh = shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("pwsh not installed")
+    snip = tmp_path / "snippet.ps1"  # dot-sourcing needs the .ps1 extension
+    snip.write_bytes(shells.snippet("pwsh").encode("ascii"))
+    sub = _sub()
+    code = "\n".join([
+        f". {shells.ps_quote(str(snip))}",
+        f"Set-Location -LiteralPath {shells.ps_quote(str(sub))}",
+        "deploy __probe 7 0 'a b' '' '*' -X:utf8",
+        "'RC=' + $LASTEXITCODE",
+        "'ping', 'two' | deploy __probe 0 1 piped",
+        f"Set-Location -LiteralPath {shells.ps_quote(str(_away(tmp_path)))}",
+        "deploy x",
+        "'RC2=' + $LASTEXITCODE",
+        "exit 0",
+    ])  # fmt: skip
+    r = _snippet_run([pwsh, "-NoProfile", "-NonInteractive", "-EncodedCommand", shells.ps_encoded(code)], tmp_path, _python_traps(tmp_path))
+    probes = _probe_lines(r.stdout)
+    assert len(probes) == 2, r.stdout + r.stderr
+    _assert_probe(probes[0], ["a b", "", "*", "-X:utf8"], sub)
+    _assert_probe(probes[1], ["piped"], sub)
+    assert probes[1]["stdin"] == "ping", probes[1]
+    assert "RC=7" in r.stdout and "RC2=2" in r.stdout, r.stdout + r.stderr
+
+
+def test_xonsh_snippet_runs_and_completes(tmp_path: Path) -> None:
+    xonsh = shutil.which("xonsh")
+    if not xonsh:
+        pytest.skip("xonsh not installed")
+    cfg = make({"tasks": {"gen": {"cmd": ["python", "gen.py"]}}})
+    snip = tmp_path / "snippet.xsh"
+    snip.write_bytes(shells.snippet("xonsh", cfg).encode("ascii"))
+    sub = _sub()
+    code = "\n".join([
+        "$XONSH_SUBPROC_CMD_RAISE_ERROR = False",
+        "$XONSH_SUBPROC_RAISE_ERROR = False",
+        f"source {ascii(str(snip))}",
+        f"cd {ascii(str(sub))}",
+        "_pt_r = ![deploy __probe 7 0 'a b' '']",
+        "print('RC=' + str(_pt_r.returncode))",
+        "from xonsh.completer import Completer",
+        "for _pt_line in ('deploy te', 'deploy test ', 'deploy build --'):",
+        "    _pt_c, _ = Completer().complete(_pt_line.split(' ')[-1], _pt_line, len(_pt_line) - len(_pt_line.split(' ')[-1]), len(_pt_line), {}, multiline_text=_pt_line, cursor_index=len(_pt_line))",
+        "    print('COMP ' + _pt_line + ' => ' + ' '.join(sorted(str(c) for c in _pt_c)))",
+        f"cd {ascii(str(_away(tmp_path)))}",
+        "_pt_r = ![deploy x]",
+        "print('RC2=' + str(_pt_r.returncode))",
+    ])  # fmt: skip
+    r = _snippet_run([xonsh, "--no-rc", "-c", code], tmp_path)
+    probes = _probe_lines(r.stdout)
+    assert len(probes) == 1, r.stdout + r.stderr
+    _assert_probe(probes[0], ["a b", ""], sub)
+    assert "RC=7" in r.stdout and "RC2=2" in r.stdout, r.stdout + r.stderr
+    comps = {line.split(" => ")[0][5:]: line.split(" => ")[1].split() for line in r.stdout.splitlines() if line.startswith("COMP ")}
+    assert "test" in comps["deploy te"] and "gen" not in comps["deploy te"], comps
+    assert {"all", "cpython", "mypyc", "pypy"} <= set(comps["deploy test "]), comps
+    assert "--method" in comps["deploy build --"], comps
+
+
+def test_nu_snippet_runs(tmp_path: Path) -> None:
+    """Not run on the machines the template was developed on (no nushell): skipped without nu."""
+    nu = shutil.which("nu")
+    if not nu:
+        pytest.skip("nu not installed")
+    snip = _snippet_file(tmp_path, "nu", ".nu")
+    sub = _sub()
+    run = [nu, "--no-config-file", "-c", f"source {shells.nu_quote(str(snip))}; cd {shells.nu_quote(str(sub))}; deploy __probe 7 0 'a b' ''"]
+    r = _snippet_run(run, tmp_path, _python_traps(tmp_path))
+    probes = _probe_lines(r.stdout)
+    assert len(probes) == 1 and r.returncode == 7, r.stdout + r.stderr
+    _assert_probe(probes[0], ["a b", ""], sub)
+    assert probes[0]["launcher"] == "nu"
+    r = _snippet_run([nu, "--no-config-file", "-c", f"source {shells.nu_quote(str(snip))}; cd {shells.nu_quote(str(_away(tmp_path)))}; deploy x"], tmp_path)
+    assert r.returncode != 0 and "no .pytemplate" in r.stdout + r.stderr, r.stdout + r.stderr
+    if IS_WINDOWS or any(Path(d, "uv").exists() for d in ("/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin")):
+        return  # uv cannot be hidden from the launcher here
+    # no uv on PATH: the launcher (it searches the install folders, then prints how to install uv)
+    home = tmp_path / "home"
+    home.mkdir()
+    code = f"source {shells.nu_quote(str(snip))}; cd {shells.nu_quote(str(sub))}; deploy __probe 3 0 x"
+    r = subprocess.run([nu, "--no-config-file", "-c", code], env={"PATH": "/usr/bin:/bin", "HOME": str(home), "CI": "1"}, capture_output=True, text=True, timeout=180, check=False)
+    assert r.returncode == 127 and "uv not found" in r.stderr, r.stdout + r.stderr
 
 
 @pytest.mark.parametrize("pwd", ["C:/no/such/place", "C:", "C:/", "C:\\no\\such", "/", "//srv/share/x", "/no/such/place"])
@@ -304,6 +699,21 @@ def test_posix_function_runs_the_enclosing_launcher(tmp_path: Path) -> None:
 
 
 # --- doctor ------------------------------------------------------------------------------------------
+
+
+def test_doctor_names_who_runs_the_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first launcher line: the value, or who leaves it unset (the xonsh alias, uv by hand;
+    never the nu function, which sets PYTEMPLATE_LAUNCHER=nu)."""
+    lines: list[tuple[bool | None, str, str]] = []
+    monkeypatch.setattr(shells, "_git_modes", lambda names: {})
+    monkeypatch.delenv("PYTEMPLATE_LAUNCHER", raising=False)
+    shells._check_launchers(lambda ok, label, hint: lines.append((ok, label, hint)))
+    ok, label, hint = lines[0]
+    assert ok is None and "unknown" in label and "xonsh" in hint and not re.search(r"\bnu\b", hint), hint
+    lines.clear()
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "nu")
+    shells._check_launchers(lambda ok, label, hint: lines.append((ok, label, hint)))
+    assert lines[0][1] == "this run was started by: nu"
 
 
 def test_launcher_problems() -> None:
@@ -388,3 +798,24 @@ def test_real_probe_argv_through_sh(tmp_path: Path) -> None:
 def test_real_probe_exit_code_through_cmd(tmp_path: Path) -> None:
     result = shells.run_test(_context(tmp_path), _real_shell(("cmd",)), "T2")
     assert result.status == "pass", result.detail
+
+
+@pytest.mark.parametrize("test", ["T1", "T6"])
+def test_real_probe_through_pwsh(tmp_path: Path, test: str) -> None:
+    """T1 carries PS_ARGS (~, typographic quotes with a payload) through the Core hand-over."""
+    assert "‘q’" in shells.PS_ARGS
+    result = shells.run_test(_context(tmp_path), _real_shell(("pwsh",)), test)
+    assert result.status == "pass", result.detail
+
+
+def test_probe_reads_stdin_bytes(tmp_path: Path) -> None:
+    """A byte that is not UTF-8 arrives as \\udcXX (raw), whatever the locale: PowerShell's text
+    re-encoding (U+FFFD) is then told apart from a byte-exact stdin."""
+    code = "import sys; sys.path.insert(0, sys.argv[1]); from runner import shells; raise SystemExit(shells.probe(['0', '1']))"
+    # A strict text stdin (macOS en_US.UTF-8, Windows code pages) would raise on \xe9.
+    r = subprocess.run(
+        [sys.executable, "-c", code, str(ROOT / ".pytemplate")], input=b"caf\xe9\r\nnext\n",
+        capture_output=True, timeout=60, check=False, env={**shells.child_env(), "PYTHONIOENCODING": "utf-8:strict"},
+    )  # fmt: skip
+    data = shells.parse_probe(r.stdout.decode("ascii"))
+    assert data is not None and data["stdin"] == "caf\udce9", (r.stdout, r.stderr)

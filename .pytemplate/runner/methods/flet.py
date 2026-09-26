@@ -1,16 +1,20 @@
 """flet: `flet build` (Flutter) -> native desktop, mobile or web app.
 
-- Desktop (windows/macos/linux): embeds CPython 3.14, so the core compiled
-  by mypyc (.pyd/.so cp314) works. It can only be built for the host OS.
+- Desktop (windows/macos/linux): embeds the CPython minor of python.cpython (the generated
+  pyproject pins requires-python = "==X.Y.*": flet build bundles the HIGHEST Python its manifest
+  has for the specifier, and fails when it has none for that minor), so the core compiled by
+  mypyc (.pyd/.so for that minor) works. It can only be built for the host OS.
 - Mobile and web (apk, aab, ipa, web): they cannot load custom extensions, so your
   code is packaged as .py (interpreted), even if the backend is mypyc.
 - `flet build` ignores uv.lock: the project it builds carries the EXACT versions
-  exported from uv.lock. It downloads the Flutter SDK the first time (~1 GB).
+  exported from uv.lock. It installs the Flutter SDK Flet pins the first time (~3 GB in
+  ~/flutter).
 - On Windows it needs Visual Studio (C++) and Developer Mode turned on.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 import sys
@@ -20,11 +24,12 @@ from typing import Any
 
 from .. import envs, mypyc, proc, render, ui, upx
 from ..cmd_build import BuildRequest, dist_path
-from ..config import Config
+from ..config import Config, toml_value
 from ..project import BUILD, IS_WINDOWS, PYPROJECT, SRC, host_os
 from ..ui import DeployError
 
 MOBILE_WEB = {"apk", "aab", "ipa", "ios-simulator", "web"}
+STAGE_APP = "src"  # build() stages the app in <work>/src: [tool.flet.app] path must point there
 
 
 def _developer_mode() -> bool:
@@ -53,14 +58,37 @@ def _pinned_requirements(cfg_tool: envs.PyEnv) -> list[str]:
 
 def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     """Return the pyproject.toml that `flet build` reads: the exact versions of uv.lock plus the
-    project's whole [tool.flet] (parsed, so no other table of pyproject.toml leaks into it)."""
+    project's whole [tool.flet] (parsed, so no other table of pyproject.toml leaks into it).
+
+    [tool.flet.app] path is always the staged app folder (flet looks for <work>/<path>/<module>.py
+    and aborts, after installing Flutter, when it is elsewhere); every other key is kept.
+    requires-python pins the minor of uv.lock and the mypyc build: with ">=3.13" flet bundled
+    its newest Python (3.14), which silently ignored the cp313 extensions. [project] description
+    is kept (flet puts it in the app's metadata). With [deploy.flet] cleanup = false,
+    [tool.flet.cleanup] app and packages default to false: flet cleans the packages unless told
+    not to, and its --cleanup-* flags have no negative form.
+    """
     project = data["project"]
-    tool_flet = data.get("tool", {}).get("flet") or {"app": {"path": "src"}}
+    tool_flet = copy.deepcopy(data.get("tool", {}).get("flet") or {})
+    app = tool_flet.setdefault("app", {})
+    if not isinstance(app, dict):
+        raise DeployError("pyproject.toml: [tool.flet] app must be a table ([tool.flet.app])")
+    if app.get("path", STAGE_APP) != STAGE_APP:
+        ui.warn(f"[tool.flet.app] path = {app['path']!r} is ignored: ./deploy build stages the app in {STAGE_APP}/")
+    app["path"] = STAGE_APP
+    if not cfg.deploy.flet.cleanup:
+        cleanup = tool_flet.setdefault("cleanup", {})
+        if not isinstance(cleanup, dict):
+            raise DeployError("pyproject.toml: [tool.flet] cleanup must be a table ([tool.flet.cleanup])")
+        cleanup.setdefault("app", False)
+        cleanup.setdefault("packages", False)
+    description = project.get("description")
     lines = [
         "[project]",
         f"name = {json.dumps(project['name'])}",
         f"version = {json.dumps(project['version'])}",
-        f'requires-python = ">={cfg.python.cpython}"',
+        *([f"description = {toml_value(description)}"] if isinstance(description, str) else []),
+        f'requires-python = "=={cfg.python.cpython}.*"',
         "dependencies = [",
         *[f"    {json.dumps(p)}," for p in pins],
         "]",
@@ -71,20 +99,30 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def build(req: BuildRequest) -> Path:
-    cfg = req.cfg
+def build_target(cfg: Config) -> str:
+    """The `flet build` target: [deploy.flet] target, with "host" as this OS."""
+    target = cfg.deploy.flet.target
+    return host_os() if target == "host" else target
+
+
+def check_options(cfg: Config) -> None:
+    """Refuse a flet build that cannot work, before any work: cmd_build calls this before the
+    checks and the payload (also in --dry-run), build() again."""
     if cfg.app.preset != "flet":
         raise DeployError("--method flet is for the flet preset (pytemplate.toml app.preset)")
-    target = cfg.deploy.flet.target
-    if target == "host":
-        target = host_os()
-    if IS_WINDOWS and target == "windows" and not _developer_mode():
+    if IS_WINDOWS and build_target(cfg) == "windows" and not _developer_mode():
         raise DeployError(
             "flet build on Windows needs Developer Mode (Flutter uses symlinks):\n"
             "  Settings > System > For developers > Developer Mode. Meanwhile, use\n"
             "  `./deploy build` (flet pack), which does not need it.",
             3,
         )
+
+
+def build(req: BuildRequest) -> Path:
+    cfg = req.cfg
+    check_options(cfg)
+    target = build_target(cfg)
 
     app_dir = req.app_dir
     if req.compiled and target in MOBILE_WEB:
@@ -95,17 +133,17 @@ def build(req: BuildRequest) -> Path:
     # Persistent stage: `flet build` keeps its Flutter cache in <stage>/build
     work = BUILD / "flet-build" / req.backend
     work.mkdir(parents=True, exist_ok=True)
-    mypyc.sync_tree(app_dir, work / "src")
+    mypyc.sync_tree(app_dir, work / STAGE_APP)
     # sync_tree keeps extensions: drop those of a previous build (a desktop build's .pyd must
     # not reach a mobile/web one), then copy this payload's binaries
-    for stale in mypyc.extension_files(work / "src"):
+    for stale in mypyc.extension_files(work / STAGE_APP):
         stale.unlink()
     for ext in mypyc.extension_files(app_dir):
-        target_ext = work / "src" / ext.relative_to(app_dir)
+        target_ext = work / STAGE_APP / ext.relative_to(app_dir)
         target_ext.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ext, target_ext)
 
-    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))  # an editor or PS 5.1 may add a BOM
     text = build_pyproject(cfg, data, _pinned_requirements(envs.tool_env(cfg)))
     (work / "pyproject.toml").write_text(text, encoding="utf-8", newline="\n")
 

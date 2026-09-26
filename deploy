@@ -8,10 +8,13 @@
 # on Windows. CLAUDE.md ("Launchers") explains each rule:
 #   * POSIX sh only: no arrays, [[ ]], ${v//a/b}, local, $'..', set -e/-u.
 #     printf '%s\n', never echo, for anything that may hold a backslash.
+#   * A caller's set -e / set -u must not stop it (sh -eu deploy, niubash with
+#     errexit): ${v:-} for variables that may be unset, and every command that
+#     may fail sits in a condition or ends in `|| :` / `|| _pt_x=`.
 #   * niubash runs this file inside the calling shell: $0 is the caller's,
 #     variables, functions and cd leak into it and its aliases expand here.
-#     So: $BASH_SOURCE before $0, every name starts with _pt_, no cd, and the
-#     helpers are unset before exec.
+#     So: $BASH_SOURCE before $0, every name starts with _pt_, no cd, and
+#     every name is unset before the one exit/exec at the end (errors too).
 #   * niubash ignores `exit` inside `a || b`, `a && b` and `{ ..; }`: exit
 #     only at top level or inside if/case bodies (`return` is fine anywhere).
 #   * niubash rejects a comment on a `name() {` line: comment above it.
@@ -20,7 +23,8 @@
 #     CYGWIN_NOWINPATH): uv is also searched in the usual install folders and,
 #     as a last resort, in the user and machine PATH stored in the registry.
 #   * Windows means OS=Windows_NT without WSL_DISTRO_NAME; never trust uname,
-#     cygpath or OSTYPE output formats (niubash fakes them).
+#     cygpath or OSTYPE output formats (niubash fakes them). Backslashes are
+#     separators only there: on POSIX they are part of a file name.
 
 _pt_self=
 if [ -n "${ZSH_VERSION:-}" ]; then
@@ -30,10 +34,29 @@ if [ -n "${ZSH_VERSION:-}" ]; then
     emulate sh
 fi
 
+# Windows: OS=Windows_NT without WSL_DISTRO_NAME (uname only when OS is unset).
+_pt_win=
+case ${OS:-} in
+    Windows_NT)
+        if [ -z "${WSL_DISTRO_NAME:-}" ]; then
+            _pt_win=1
+        fi ;;
+    *)
+        _pt_t=$(uname -s 2>/dev/null) || _pt_t=
+        case $_pt_t in
+            CYGWIN* | MINGW* | MSYS* | *_NT* | Windows*) _pt_win=1 ;;
+        esac ;;
+esac
+
 # --- path helpers (result in $_pt_r) -----------------------------------------
 
-# C:\a\b -> C:/a/b
+# C:\a\b -> C:/a/b on Windows. Elsewhere unchanged: a backslash is part of a
+# POSIX file name.
 _pt_slashes() {
+    _pt_r=$1
+    if [ -z "$_pt_win" ]; then
+        return 0
+    fi
     _pt_r=
     _pt_s=$1
     while :; do
@@ -93,13 +116,29 @@ _pt_winpath() {
             _pt_p=$_pt_r:${_pt_t:-/} ;;
         //*) ;;
         /*)
-            # Inside the MSYS2/Cygwin root: only cygpath knows the mounts.
-            if command -v cygpath >/dev/null 2>&1; then
-                _pt_t=$(cygpath -m -- "$_pt_p" 2>/dev/null)
-                case $_pt_t in
-                    [A-Za-z]:/*) _pt_p=$_pt_t ;;
-                esac
-            fi ;;
+            # Inside the MSYS2/Cygwin root: only cygpath knows the mounts. The
+            # root's own first: a non-login shell may have no /usr/bin on PATH,
+            # or WinuxCmd's cygpath (niubash, xonsh-shell-kit) there.
+            _pt_t=
+            if [ -x /usr/bin/cygpath ]; then
+                _pt_t=$(/usr/bin/cygpath -m -- "$_pt_p" 2>/dev/null) || _pt_t=
+            fi
+            case $_pt_t in
+                [A-Za-z]:/*) ;;
+                *)
+                    _pt_t=
+                    if command -v cygpath >/dev/null 2>&1; then
+                        _pt_t=$(cygpath -m -- "$_pt_p" 2>/dev/null) || _pt_t=
+                    fi ;;
+            esac
+            case $_pt_t in
+                [A-Za-z]:/*) _pt_p=$_pt_t ;;
+                *)
+                    # Keep the POSIX path: MSYS converts it for uv.exe itself,
+                    # while \home\x would name a folder on the current drive.
+                    _pt_r=$_pt_p
+                    return 0 ;;
+            esac ;;
     esac
     _pt_backslashes "$_pt_p"
 }
@@ -127,7 +166,7 @@ _pt_from_launcher() {
 
 _pt_pwd=${PWD:-}
 if [ -z "$_pt_pwd" ]; then
-    _pt_pwd=$(pwd)
+    _pt_pwd=$(pwd 2>/dev/null) || _pt_pwd=
 fi
 _pt_slashes "$_pt_pwd"
 _pt_pwd=$_pt_r
@@ -160,12 +199,8 @@ else
     done
 fi
 
-if [ -z "$_pt_root" ]; then
-    printf '%s\n' "deploy: no .pytemplate/deploy.py next to this launcher, in $_pt_pwd or in any parent directory." >&2
-    exit 2
-fi
 case $_pt_root in
-    /* | [A-Za-z]:/*) ;;
+    '' | /* | [A-Za-z]:/*) ;;
     *)
         # Relative (./deploy, ../deploy, deploy): resolve against $PWD.
         _pt_d=${_pt_pwd%/}
@@ -179,27 +214,21 @@ case $_pt_root in
                 *) break ;;
             esac
         done
-        _pt_root=$_pt_d${_pt_c:+/$_pt_c}
-        case $_pt_root in
-            '') _pt_root=/ ;;
-            [A-Za-z]:) _pt_root=$_pt_root/ ;;
-        esac ;;
+        _pt_t=$_pt_d${_pt_c:+/$_pt_c}
+        case $_pt_t in
+            '') _pt_t=/ ;;
+            [A-Za-z]:) _pt_t=$_pt_t/ ;;
+        esac
+        # $PWD is logical: below a symlink its '..' is not the folder the
+        # kernel found this file in. Then keep the relative path, which uv
+        # resolves the way the kernel did (the launcher never changes folder).
+        if [ -f "${_pt_t%/}/.pytemplate/deploy.py" ]; then
+            _pt_root=$_pt_t
+        fi ;;
 esac
 
 # --- uv --------------------------------------------------------------------------
 
-_pt_win=
-case ${OS:-} in
-    Windows_NT)
-        if [ -z "${WSL_DISTRO_NAME:-}" ]; then
-            _pt_win=1
-        fi ;;
-    *)
-        _pt_t=$(uname -s 2>/dev/null)
-        case $_pt_t in
-            CYGWIN* | MINGW* | MSYS* | *_NT* | Windows*) _pt_win=1 ;;
-        esac ;;
-esac
 _pt_exe=uv
 if [ -n "$_pt_win" ]; then
     _pt_exe=uv.exe
@@ -293,8 +322,11 @@ _pt_expand() {
             *)
                 eval "_pt_v=\${$_pt_n-}"
                 if [ -z "$_pt_v" ] && command -v tr >/dev/null 2>&1; then
-                    _pt_n=$(printf '%s' "$_pt_n" | tr '[:lower:]' '[:upper:]')
-                    eval "_pt_v=\${$_pt_n-}"
+                    _pt_n=$(printf '%s' "$_pt_n" | tr '[:lower:]' '[:upper:]') || _pt_n=
+                    case $_pt_n in
+                        '' | [0-9]* | *[!A-Za-z0-9_]*) ;;
+                        *) eval "_pt_v=\${$_pt_n-}" ;;
+                    esac
                 fi ;;
         esac
         if [ -z "$_pt_v" ]; then
@@ -304,7 +336,7 @@ _pt_expand() {
     done
 }
 
-# $1 = a Windows PATH value (C:\a;%USERPROFILE%\b;...)
+# $1 = a Windows PATH value (C:\a;%USERPROFILE%\b;"C:\c d";...)
 _pt_uv_in_list() {
     _pt_rest=$1
     while [ -n "$_pt_rest" ]; do
@@ -313,6 +345,9 @@ _pt_uv_in_list() {
             *\;*) _pt_rest=${_pt_rest#*\;} ;;
             *) _pt_rest= ;;
         esac
+        # Some installers write quoted entries ("C:\Program Files\x").
+        _pt_e=${_pt_e#\"}
+        _pt_e=${_pt_e%\"}
         if _pt_expand "$_pt_e"; then
             _pt_try_dir "$_pt_r" "" && return 0
         fi
@@ -323,9 +358,9 @@ _pt_uv_in_list() {
 # The user and machine PATH from the registry. Slow (two reg.exe runs): only
 # when everything else failed. No /v switch: MSYS2 rewrites "/v" into "V:/".
 _pt_uv_from_registry() {
-    _pt_cr=$(printf '\r')
+    _pt_cr=$(printf '\r') || _pt_cr=
     for _pt_k in 'HKCU\Environment' 'HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'; do
-        _pt_o=$(reg.exe query "$_pt_k" 2>/dev/null)
+        _pt_o=$(reg.exe query "$_pt_k" 2>/dev/null) || _pt_o=
         while IFS= read -r _pt_l; do
             _pt_l=${_pt_l%"$_pt_cr"}
             _pt_v=
@@ -346,109 +381,135 @@ EOF
     return 1
 }
 
+# Errors only set _pt_rc: the one exit at the end runs after the cleanup.
+_pt_rc=
 _pt_uv=
-if [ -n "${UV:-}" ]; then
-    # uv exports its own path to everything `uv run` starts.
-    _pt_slashes "$UV"
-    _pt_try_uv "$_pt_r"
-fi
-if [ -z "$_pt_uv" ]; then
-    _pt_t=$(command -v uv 2>/dev/null)
-    case $_pt_t in
-        */* | *\\*)
-            _pt_slashes "$_pt_t"
-            _pt_try_uv "$_pt_r" ;;
-    esac
-fi
-if [ -z "$_pt_uv" ]; then
-    _pt_find_uv_dirs
-fi
-if [ -z "$_pt_uv" ] && [ -n "$_pt_win" ]; then
-    _pt_uv_from_registry
-fi
-
-if [ -z "$_pt_uv" ]; then
-    printf '%s\n' "deploy: uv not found (https://docs.astral.sh/uv/getting-started/installation/)." >&2
-    if [ -t 0 ] && [ -t 2 ] && [ -z "${CI:-}" ]; then
-        printf '%s' "Install it now with the official installer? [y/N] " >&2
-        _pt_t=
-        read -r _pt_t
+if [ -z "$_pt_root" ]; then
+    printf '%s\n' "deploy: no .pytemplate/deploy.py next to this launcher, in $_pt_pwd or in any parent directory." >&2
+    _pt_rc=2
+else
+    if [ -n "${UV:-}" ]; then
+        # uv exports its own path to everything `uv run` starts.
+        _pt_slashes "$UV"
+        _pt_try_uv "$_pt_r" || :
+    fi
+    if [ -z "$_pt_uv" ]; then
+        _pt_t=$(command -v uv 2>/dev/null) || _pt_t=
         case $_pt_t in
-            y | Y | yes | Yes | YES)
-                if [ -n "$_pt_win" ]; then
-                    _pt_t=powershell.exe
-                    if ! command -v powershell.exe >/dev/null 2>&1; then
-                        _pt_slashes "${SYSTEMROOT:-${SystemRoot:-C:/Windows}}"
-                        _pt_t=$_pt_r/System32/WindowsPowerShell/v1.0/powershell.exe
-                    fi
-                    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$_pt_t" -NoProfile -ExecutionPolicy Bypass -Command 'irm https://astral.sh/uv/install.ps1 | iex'
-                elif command -v curl >/dev/null 2>&1; then
-                    curl -LsSf https://astral.sh/uv/install.sh | sh
-                else
-                    wget -qO- https://astral.sh/uv/install.sh | sh
-                fi
-                _pt_find_uv_dirs ;;
+            */* | *\\*)
+                _pt_slashes "$_pt_t"
+                _pt_try_uv "$_pt_r" || : ;;
         esac
     fi
-fi
-if [ -z "$_pt_uv" ]; then
-    if [ -n "$_pt_win" ]; then
-        printf '%s\n' \
-            "Install it with one of these, then open a new terminal:" \
-            "  powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\"" \
-            "  winget install --id=astral-sh.uv -e" \
-            "  scoop install main/uv" >&2
-    else
-        printf '%s\n' \
-            "Install it with one of these, then open a new terminal:" \
-            "  curl -LsSf https://astral.sh/uv/install.sh | sh" \
-            "  brew install uv" \
-            "  pipx install uv" >&2
+    if [ -z "$_pt_uv" ]; then
+        _pt_find_uv_dirs || :
     fi
-    exit 127
+    if [ -z "$_pt_uv" ] && [ -n "$_pt_win" ]; then
+        _pt_uv_from_registry || :
+    fi
+
+    if [ -z "$_pt_uv" ]; then
+        printf '%s\n' "deploy: uv not found (https://docs.astral.sh/uv/getting-started/installation/)." >&2
+        if [ -t 0 ] && [ -t 2 ] && [ -z "${CI:-}" ]; then
+            printf '%s' "Install it now with the official installer? [y/N] " >&2
+            _pt_t=
+            read -r _pt_t || :
+            case $_pt_t in
+                y | Y | yes | Yes | YES)
+                    if [ -n "$_pt_win" ]; then
+                        _pt_t=powershell.exe
+                        if ! command -v powershell.exe >/dev/null 2>&1; then
+                            _pt_slashes "${SYSTEMROOT:-${SystemRoot:-C:/Windows}}"
+                            _pt_t=$_pt_r/System32/WindowsPowerShell/v1.0/powershell.exe
+                        fi
+                        MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$_pt_t" -NoProfile -ExecutionPolicy Bypass -Command 'irm https://astral.sh/uv/install.ps1 | iex' || :
+                    elif command -v curl >/dev/null 2>&1; then
+                        curl -LsSf https://astral.sh/uv/install.sh | sh || :
+                    else
+                        wget -qO- https://astral.sh/uv/install.sh | sh || :
+                    fi
+                    _pt_find_uv_dirs || : ;;
+            esac
+        fi
+    fi
+    if [ -z "$_pt_uv" ]; then
+        if [ -n "$_pt_win" ]; then
+            printf '%s\n' \
+                "Install it with one of these, then open a new terminal:" \
+                "  powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\"" \
+                "  winget install --id=astral-sh.uv -e" \
+                "  scoop install main/uv" >&2
+        else
+            printf '%s\n' \
+                "Install it with one of these, then open a new terminal:" \
+                "  curl -LsSf https://astral.sh/uv/install.sh | sh" \
+                "  brew install uv" \
+                "  pipx install uv" >&2
+        fi
+        _pt_rc=127
+    fi
 fi
 
 # --- hand over -------------------------------------------------------------------
 
-_pt_launcher='sh'
-if [ -n "${__RUBASH_SHELL_NAME:-}" ]; then
-    _pt_launcher=sh:niubash
-elif [ -n "${ZSH_VERSION:-}" ]; then
-    _pt_launcher=sh:zsh
-elif [ -n "${BASH_VERSION:-}" ]; then
-    _pt_launcher=sh:bash
-fi
-if [ -f /usr/bin/msys-2.0.dll ]; then
-    _pt_launcher=$_pt_launcher:msys
-elif [ -f /usr/bin/cygwin1.dll ] || [ -f /bin/cygwin1.dll ]; then
-    _pt_launcher=$_pt_launcher:cygwin
-fi
+if [ -n "$_pt_rc" ]; then
+    set -- "$_pt_rc"
+else
+    _pt_launcher='sh'
+    if [ -n "${__RUBASH_SHELL_NAME:-}" ]; then
+        _pt_launcher=sh:niubash
+    elif [ -n "${ZSH_VERSION:-}" ]; then
+        _pt_launcher=sh:zsh
+    elif [ -n "${BASH_VERSION:-}" ]; then
+        _pt_launcher=sh:bash
+    fi
+    if [ -f /usr/bin/msys-2.0.dll ]; then
+        _pt_launcher=$_pt_launcher:msys
+    elif [ -f /usr/bin/cygwin1.dll ] || [ -f /bin/cygwin1.dll ]; then
+        _pt_launcher=$_pt_launcher:cygwin
+    fi
 
-_pt_script=${_pt_root%/}/.pytemplate/deploy.py
-_pt_cwd=$_pt_pwd
-if [ -n "$_pt_win" ]; then
-    _pt_winpath "$_pt_script"
-    _pt_script=$_pt_r
-    _pt_winpath "$_pt_cwd"
-    _pt_cwd=$_pt_r
+    _pt_script=${_pt_root%/}/.pytemplate/deploy.py
+    _pt_cwd=$_pt_pwd
+    if [ -n "$_pt_win" ]; then
+        _pt_winpath "$_pt_script"
+        _pt_script=$_pt_r
+        _pt_winpath "$_pt_cwd"
+        _pt_cwd=$_pt_r
+    fi
+    PYTEMPLATE_CALLER_CWD=$_pt_cwd
+    PYTEMPLATE_LAUNCHER=$_pt_launcher
+    export PYTEMPLATE_CALLER_CWD PYTEMPLATE_LAUNCHER
+    set -- "$_pt_uv" run --quiet --script "$_pt_script" "$@"
 fi
-PYTEMPLATE_CALLER_CWD=$_pt_cwd
-PYTEMPLATE_LAUNCHER=$_pt_launcher
-export PYTEMPLATE_CALLER_CWD PYTEMPLATE_LAUNCHER
-set -- "$_pt_uv" run --quiet --script "$_pt_script" "$@"
 
 unset -f _pt_slashes _pt_backslashes _pt_drive _pt_winpath _pt_from_launcher \
     _pt_try_uv _pt_try_dir _pt_find_uv_dirs _pt_expand _pt_uv_in_list \
     _pt_uv_from_registry
 unset _pt_self _pt_r _pt_s _pt_p _pt_t _pt_d _pt_c _pt_n _pt_pwd _pt_root _pt_win \
     _pt_exe _pt_uv _pt_h _pt_l _pt_f _pt_a _pt_g _pt_v _pt_rest _pt_e _pt_cr _pt_k \
-    _pt_o _pt_launcher _pt_script _pt_cwd
+    _pt_o _pt_launcher _pt_script _pt_cwd _pt_rc
+if [ "$#" -eq 1 ]; then
+    # An error above (no project, no uv): $1 is its exit code.
+    exit "$1"
+fi
+# The runner runs on the project's Python (.python-version next to it), in the
+# caller's folder: a UV_PYTHON of the caller must not choose that Python, a
+# PYTHONHOME or PYTHONPATH must not break it, a UV_WORKING_DIR must not move it
+# (the runner's own tools never get them either).
 if [ -n "${__RUBASH_SHELL_NAME:-}" ]; then
     # niubash runs this file inside the calling shell and `exec` only ends the
     # file: run uv, then drop the two exports so the session keeps no stale copy.
-    "$@"
-    set -- "$?"
+    # The session keeps its own values: uv reads an empty UV_PYTHON as unset,
+    # Python an empty PYTHONHOME/PYTHONPATH, and uv refuses an empty
+    # UV_WORKING_DIR (. is the caller's folder).
+    if UV_PYTHON='' PYTHONHOME='' PYTHONPATH='' UV_WORKING_DIR=. "$@"; then
+        set -- 0
+    else
+        set -- "$?"
+    fi
     unset PYTEMPLATE_CALLER_CWD PYTEMPLATE_LAUNCHER
     exit "$1"
 fi
+unset UV_PYTHON PYTHONHOME PYTHONPATH UV_WORKING_DIR
 exec "$@"

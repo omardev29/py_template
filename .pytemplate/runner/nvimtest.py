@@ -1,24 +1,36 @@
 """selftest --nvim: headless smoke test of the LazyVim integration in an isolated LazyVim.
 
 Installs the LazyVim starter under a throwaway XDG_* tree (never the user's config), trusts
-each scratch project's .lazy.lua through Neovim's API, syncs the plugins and runs
+each scratch project's .lazy.lua through Neovim's API, installs the plugins and runs
 .pytemplate/nvim/tests/smoke.lua in a project made from each preset.
+
+Pinned, so a red run means a regression and not upstream drift: the starter is checked out at
+cmd_nvim.STARTER_REV and the plugins at the commits of LOCK (a lazy-lock.json of a green run,
+applied by a `Lazy! restore` once everything is installed, and by the startup install of each
+project's plugins; any plugin left elsewhere fails the run). Without LOCK it takes the latest of
+everything (starter HEAD, `Lazy! sync`, never a base kept from an earlier run): a run without it
+shows upstream changes coming. Each run copies the resolved lazy-lock.json and the starter
+commit to <dir>/logs/ (the new pins after a green run without LOCK).
 
 Layout of the work directory (short on purpose: Windows MAX_PATH, deep plugin trees):
 
     <dir>/x/{config,data,state,cache}   XDG_*_HOME of every Neovim call (LazyVim + plugins)
-    <dir>/base.json                     marker: the base above is complete and reusable
+    <dir>/base.json                     marker: the base above is complete (reused while pinned)
     <dir>/p/<preset>                    scratch projects (./deploy new), removed unless --keep
-    <dir>/logs/                         output of every step of the last run
+    <dir>/logs/                         output of every step of the last run (+ the resolved pins)
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -32,11 +44,16 @@ from .ui import DeployError
 
 DEFAULT_PRESETS = ("script", "raylib", "flet")
 SMOKE = ".pytemplate/nvim/tests/smoke.lua"  # relative to the project (the cwd of the smoke run)
+LOCK = ROOT / ".pytemplate" / "nvim" / "tests" / "lazy-lock.json"  # plugin commits of a green run
 DIR_MARKER = ".pytemplate-nvim-test"  # only directories with this file are ever deleted from
 CLONE_TIMEOUT = 300.0
 BASE_SYNC_TIMEOUT = 1800.0
 STEP_TIMEOUT = 900.0
+KILL_GRACE = 5.0  # seconds between SIGTERM (Neovim stops its jobs) and SIGKILL of a timed-out tree
+FAILED = 1  # exit code of a step that failed (a FAIL of the suite; 2 is a usage error)
 PHASES = ("new+sync", "trust+lazy", "smoke")
+# The smoke's mypy check needs a typing profile: every preset defaults to typing.relaxed = off.
+SMOKE_TYPING = "strict"
 
 # The inner ./deploy runs as if typed in a fresh shell: nothing from this runner's own
 # `uv run --script` environment, nor from a shell's stale PYTEMPLATE_* exports.
@@ -126,6 +143,7 @@ def uv_dirs(env: Mapping[str, str]) -> dict[str, str]:
 
 
 _RESULT = re.compile(r"^(ok|FAIL|SKIP)\s+(\S.*?)\s*$")
+_DONE = re.compile(r"^DONE (\d+)\s*$")
 
 
 @dataclass
@@ -134,14 +152,20 @@ class Smoke:
     failed: list[tuple[str, str]] = field(default_factory=list)  # (name, detail lines)
     skipped: list[str] = field(default_factory=list)
     other: list[str] = field(default_factory=list)
+    expected: int | None = None  # smoke.lua's own count (its last line, `DONE n`)
 
     @property
     def total(self) -> int:
         return len(self.passed) + len(self.failed) + len(self.skipped)
 
+    @property
+    def complete(self) -> bool:
+        """Every result smoke.lua reported was parsed: none got lost in leaked output."""
+        return self.expected is not None and self.expected == self.total
+
 
 def parse_smoke(text: str) -> Smoke:
-    """Parse smoke.lua's `ok   NAME` / `FAIL NAME` / `SKIP NAME` lines.
+    """Parse smoke.lua's `ok   NAME` / `FAIL NAME` / `SKIP NAME` lines and its final `DONE n`.
 
     Lines after a FAIL that are not results (its traceback) become that failure's detail.
     """
@@ -149,6 +173,10 @@ def parse_smoke(text: str) -> Smoke:
     detail: list[str] | None = None
     for raw in text.splitlines():
         line = raw.rstrip("\r")
+        done = _DONE.match(line)
+        if done:
+            out.expected, detail = int(done[1]), None
+            continue
         m = _RESULT.match(line)
         if m:
             kind, name = m[1], m[2]
@@ -173,6 +201,47 @@ def parse_smoke(text: str) -> Smoke:
 # --- running things -----------------------------------------------------------------------------------
 
 
+def kill_tree(p: subprocess.Popen[bytes], grace: float = KILL_GRACE) -> None:
+    """Kill `p` and everything it started (git, Mason, uv, debugpy, language servers).
+
+    Windows: taskkill /T follows the parent links. POSIX: `p` runs in its own session, so its
+    process group gets SIGTERM first (Neovim then stops its jobstart jobs, which sit in their
+    own sessions), and SIGKILL after `grace` seconds.
+    """
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True, check=False)
+    else:
+        try:
+            os.killpg(p.pid, signal.SIGTERM)
+        except OSError:
+            p.kill()
+        try:
+            p.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        p.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _wait(p: subprocess.Popen[bytes], timeout: float) -> int | None:
+    """p's exit code, or None after a timeout; the whole tree dies on a timeout or on Ctrl+C
+    (which no longer reaches a child in its own session)."""
+    try:
+        return p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_tree(p)
+        return None
+    except BaseException:
+        kill_tree(p)
+        raise
+
+
 def _run_logged(
     argv: Sequence[str | Path],
     *,
@@ -191,22 +260,20 @@ def _run_logged(
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("w", encoding="utf-8", errors="replace") as out:
         try:
-            p = subprocess.Popen(args, cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
+            p = subprocess.Popen(
+                args, cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                start_new_session=not IS_WINDOWS,
+            )  # fmt: skip
         except FileNotFoundError:
             raise DeployError(f"program not found: {args[0]}", 3) from None
-        try:
-            return p.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            p.kill()
-            p.wait()
-            return None
+        return _wait(p, timeout)
 
 
 def _remove(path: Path) -> None:
     try:
         cmd_nvim.remove_tree(path)
     except OSError as e:
-        raise DeployError(f"cannot remove {path}: {e}\n  Is a Neovim (or git/tar/curl) process still using it?") from None
+        raise DeployError(f"cannot remove {path}: {e}\n  Is a Neovim (or git/tar/curl) process still using it?", FAILED) from None
 
 
 def _tail(log: Path, lines: int = 15) -> str:
@@ -217,12 +284,17 @@ def _tail(log: Path, lines: int = 15) -> str:
     return "\n".join(text.rstrip().splitlines()[-lines:])
 
 
+def _failed(message: str, log: Path) -> DeployError:
+    """A step of the suite that failed: exit 1 (a FAIL), with the end of its log."""
+    tail = _tail(log)
+    return DeployError(f"{message} (log: {log})" + (f"\n{tail}" if tail else ""), FAILED)
+
+
 def _step(argv: Sequence[str | Path], *, cwd: Path, env: Mapping[str, str], log: Path, timeout: float, what: str) -> None:
     code = _run_logged(argv, cwd=cwd, env=env, log=log, timeout=timeout)
     if code != 0:
         why = f"timed out after {timeout:.0f} s" if code is None else f"exit code {code}"
-        tail = _tail(log)
-        raise DeployError(f"{what}: {why} (log: {log})" + (f"\n{tail}" if tail else ""))
+        raise _failed(f"{what}: {why}", log)
 
 
 def _check_isolated(nv: cmd_nvim.Nvim, layout: Layout) -> None:
@@ -238,10 +310,69 @@ def _prepare_dir(layout: Layout) -> None:
     resolved = base.resolve()
     if resolved == ROOT or ROOT in resolved.parents:
         raise DeployError(f"--dir must be outside the template ({base}): Neovim would find its .lazy.lua")
+    if base.exists() and not base.is_dir():
+        raise DeployError(f"--dir {base} is not a folder: pick another --dir")
     if base.exists() and any(base.iterdir()) and not (base / DIR_MARKER).is_file():
         raise DeployError(f"{base} is not empty and was not created by selftest --nvim: pick another --dir")
-    base.mkdir(parents=True, exist_ok=True)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError as e:  # a parent that is a file, no permission
+        raise DeployError(f"cannot create --dir {base}: {e.strerror or e}") from None
     (base / DIR_MARKER).write_text("work directory of ./deploy selftest --nvim (safe to delete)\n", encoding="utf-8", newline="\n")
+
+
+def base_info(nv: cmd_nvim.Nvim, lock: Path | None) -> dict[str, str]:
+    """What the isolated LazyVim is made of; a base.json that differs means: install it again."""
+    return {
+        "starter": cmd_nvim.STARTER,
+        "rev": cmd_nvim.STARTER_REV if lock else "HEAD",
+        "lock": hashlib.sha256(lock.read_bytes()).hexdigest() if lock else "",
+        "nvim": nv.version_text,
+    }
+
+
+def _read_marker(path: Path) -> dict[str, object]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def use_lock(nv: cmd_nvim.Nvim, lock: Path | None) -> None:
+    """Put the pinned lazy-lock.json in the isolated config. lazy.nvim rewrites it after each run
+    and drops the plugins its spec did not name, so it goes back before every Neovim run that
+    installs plugins: the startup install then checks them out at the locked commits."""
+    if lock:
+        shutil.copyfile(lock, nv.config / "lazy-lock.json")
+
+
+def lock_drift(lock: Path, resolved: Path) -> list[str]:
+    """Plugins that lazy.nvim left at another commit than the pinned lock ('name at X, pinned
+    Y'), among those both files name; a file that is not a lazy-lock.json is drift too."""
+    try:
+        want = json.loads(lock.read_text(encoding="utf-8"))
+        have = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return [f"cannot compare {resolved} with {lock}: {e}"]
+    if not isinstance(want, dict) or not isinstance(have, dict):
+        return [f"{lock if not isinstance(want, dict) else resolved} is not a lazy-lock.json"]
+
+    def commit(entry: object) -> str:
+        return str(entry.get("commit", "")) if isinstance(entry, dict) else ""
+
+    return [f"{name} at {commit(have[name])[:12] or '?'}, pinned {commit(want[name])[:12] or '?'}" for name in sorted(set(want) & set(have)) if commit(want[name]) != commit(have[name])]
+
+
+def _check_pins(lock: Path | None, nv: cmd_nvim.Nvim, what: str, log: Path) -> None:
+    if lock:
+        drift = lock_drift(lock, nv.config / "lazy-lock.json")
+        if drift:
+            raise DeployError(
+                f"{what} left plugins off the pinned commits of {rel_lock()}: {'; '.join(drift)} "
+                f"(log: {log}; --fresh reinstalls the isolated LazyVim)",
+                FAILED,
+            )
 
 
 def prepare_base(layout: Layout, exe: str, env: Mapping[str, str], *, fresh: bool) -> tuple[cmd_nvim.Nvim, float | None]:
@@ -254,35 +385,105 @@ def prepare_base(layout: Layout, exe: str, env: Mapping[str, str], *, fresh: boo
     nv = cmd_nvim.query(exe, env=env)
     assert nv is not None
     _check_isolated(nv, layout)
-    if layout.marker.is_file() and nv.lazyvim_installed():
+    lock = LOCK if LOCK.is_file() else None
+    want = base_info(nv, lock)
+    have = _read_marker(layout.marker)
+    # Only a pinned base is reused: without LOCK the run takes the latest of everything, and a
+    # base from an earlier run holds the starter and plugin commits of that day (record_pins
+    # would report them as the new pins).
+    if lock and have and all(have.get(k) == v for k, v in want.items()) and nv.lazyvim_installed():
         ui.info(f"reusing the isolated LazyVim in {layout.xdg}   (--fresh reinstalls it)")
         return nv, None
-    ui.step(f"isolated LazyVim in {layout.xdg} (first run: this takes a few minutes)")
+    if have and not lock:
+        ui.info(f"no {rel_lock()}: reinstalling the isolated LazyVim to take the latest of everything")
+    elif have:
+        changed = ", ".join(f"{k} {have.get(k)} -> {v}" for k, v in want.items() if have.get(k) != v)
+        ui.info(f"the isolated LazyVim was made for something else ({changed or 'incomplete'}): reinstalling it")
+    ui.step(f"isolated LazyVim in {layout.xdg} (this takes a few minutes)")
     start = time.perf_counter()
     _remove(layout.xdg)
     for key in XDG_HOMES:
         layout.home(key).mkdir(parents=True, exist_ok=True)
     git = cmd_nvim.which("git") or "git"
-    ui.command(f"git clone --depth 1 {cmd_nvim.STARTER} {nv.config}")
-    _step(
-        [git, "clone", "--depth", "1", cmd_nvim.STARTER, nv.config],
-        cwd=layout.base, env=env, log=layout.logs / "clone.log", timeout=CLONE_TIMEOUT, what="clone the LazyVim starter",
-    )
+    clone_log = layout.logs / "clone.log"
+    if lock:
+        # the pinned starter commit: a full clone (the repository is tiny), then a checkout
+        ui.command(f"git clone {cmd_nvim.STARTER} {nv.config} && git checkout {cmd_nvim.STARTER_REV}")
+        _step([git, "clone", cmd_nvim.STARTER, nv.config], cwd=layout.base, env=env, log=clone_log, timeout=CLONE_TIMEOUT, what="clone the LazyVim starter")
+        _step(
+            [git, "-C", nv.config, "-c", "advice.detachedHead=false", "checkout", cmd_nvim.STARTER_REV],
+            cwd=layout.base, env=env, log=layout.logs / "checkout.log", timeout=CLONE_TIMEOUT, what=f"check out the LazyVim starter at {cmd_nvim.STARTER_REV}",
+        )  # fmt: skip
+    else:
+        ui.command(f"git clone --depth 1 {cmd_nvim.STARTER} {nv.config}   (no {rel_lock()}: the latest)")
+        _step([git, "clone", "--depth", "1", cmd_nvim.STARTER, nv.config], cwd=layout.base, env=env, log=clone_log, timeout=CLONE_TIMEOUT, what="clone the LazyVim starter")
+    commit = _starter_commit(git, nv, layout, env)
     _remove(nv.config / ".git")
-    # From the work dir: there is no .lazy.lua above it, so only LazyVim's own plugins
-    ui.command(f'nvim --headless "+Lazy! sync" +qa   (in {layout.base})')
+    use_lock(nv, lock)
+    # From the work dir: there is no .lazy.lua above it, so only LazyVim's own plugins. Pinned:
+    # install them (restore follows); else sync = the newest of everything.
+    action = "install" if lock else "sync"
+    ui.command(f'nvim --headless "+Lazy! {action}" +qa   (in {layout.base})')
     sync_log = layout.logs / "base-sync.log"
     _step(
-        [nv.exe, "--headless", "+Lazy! sync", "+qa"],
-        cwd=layout.base, env=env, log=sync_log, timeout=BASE_SYNC_TIMEOUT, what="Lazy! sync",
+        [nv.exe, "--headless", f"+Lazy! {action}", "+qa"],
+        cwd=layout.base, env=env, log=sync_log, timeout=BASE_SYNC_TIMEOUT, what=f"Lazy! {action}",
     )
     if not (nv.data / "lazy" / "LazyVim").is_dir():
-        raise DeployError(f"LazyVim was not installed in {nv.data} (log: {sync_log})\n{_tail(sync_log)}")
+        raise _failed(f"LazyVim was not installed in {nv.data}", sync_log)
+    if lock:
+        # A fresh config installs in two rounds: LazyVim first, then the plugins its specs name.
+        # After the first round lazy.nvim rewrites the lock, on disk and in memory, with the
+        # plugins named so far, so the second round (and a restore in that same run) takes the
+        # newest commits. The second run starts with everything installed and restores the lock.
+        use_lock(nv, lock)
+        restore_log = layout.logs / "base-restore.log"
+        ui.command(f'nvim --headless "+Lazy! restore" +qa   (in {layout.base}; everything installed now)')
+        _step(
+            [nv.exe, "--headless", "+Lazy! restore", "+qa"],
+            cwd=layout.base, env=env, log=restore_log, timeout=BASE_SYNC_TIMEOUT, what="Lazy! restore",
+        )
+        _check_pins(lock, nv, "Lazy! restore", restore_log)
     seconds = time.perf_counter() - start
-    info = {"starter": cmd_nvim.STARTER, "nvim": nv.version_text, "created": time.strftime("%Y-%m-%d %H:%M:%S"), "seconds": round(seconds)}
+    info = {**want, "commit": commit, "created": time.strftime("%Y-%m-%d %H:%M:%S"), "seconds": round(seconds)}
     layout.marker.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8", newline="\n")
     ui.ok(f"isolated LazyVim ready in {seconds:.0f} s")
     return nv, seconds
+
+
+_SHA = re.compile(r"(?m)^([0-9a-f]{40})\s*$")
+
+
+def _starter_commit(git: str, nv: cmd_nvim.Nvim, layout: Layout, env: Mapping[str, str]) -> str:
+    """The commit the starter clone holds, read before its .git goes ('' if git cannot tell).
+    Without LOCK it is the newest one: a green run makes it the next cmd_nvim.STARTER_REV."""
+    log = layout.logs / "starter-commit.log"
+    _step([git, "-C", nv.config, "rev-parse", "HEAD"], cwd=layout.base, env=env, log=log, timeout=CLONE_TIMEOUT, what="read the LazyVim starter commit")
+    m = _SHA.search(log.read_text(encoding="utf-8", errors="replace")) if log.is_file() else None
+    return m[1] if m else ""
+
+
+def record_pins(layout: Layout, nv: cmd_nvim.Nvim) -> str:
+    """Copy what this run used into the logs (the CI artifact): the lazy-lock.json lazy.nvim
+    resolved and the starter commit. After a green run without LOCK they are the new pins
+    (LOCK and cmd_nvim.STARTER_REV). Returns the summary line's text."""
+    resolved = nv.config / "lazy-lock.json"
+    if resolved.is_file():
+        shutil.copyfile(resolved, layout.logs / "lazy-lock.json")
+    commit = str(_read_marker(layout.marker).get("commit") or "")
+    commit = commit if re.fullmatch(r"[0-9a-f]{40}", commit) else ""
+    if commit:
+        (layout.logs / "starter-commit.txt").write_text(commit + "\n", encoding="ascii", newline="\n")
+    if LOCK.is_file():
+        return f"starter {cmd_nvim.STARTER_REV[:12]}, plugins of {rel_lock()}"
+    return f"the latest (no {rel_lock()}): starter {commit or 'commit unknown'}, plugins in {layout.logs / 'lazy-lock.json'}"
+
+
+def rel_lock() -> str:
+    try:
+        return LOCK.relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(LOCK)
 
 
 # --- one preset ------------------------------------------------------------------------------------------
@@ -299,7 +500,33 @@ class Row:
 
     @property
     def ok(self) -> bool:
-        return not self.error and self.code == 0 and self.smoke is not None and not self.smoke.failed and self.smoke.total > 0
+        s = self.smoke
+        return not self.error and self.code == 0 and s is not None and not s.failed and s.total > 0 and s.complete
+
+
+def run_smoke(nv: cmd_nvim.Nvim, proj: Path, env: Mapping[str, str], log: Path, err_log: Path, timeout: float) -> int | None:
+    """nvim --headless -c "doautocmd UIEnter" -c "luafile smoke.lua" in `proj`: stdout alone in
+    `log` (smoke.lua's result lines), stderr in `err_log`; the exit code, None on a timeout."""
+    log.parent.mkdir(parents=True, exist_ok=True)
+    argv = [nv.exe, "--headless", "-c", "doautocmd UIEnter", "-c", f"luafile {SMOKE}"]
+    ui.detail(f"$ {proc.show(argv)}   (in {proj})")
+    with log.open("w", encoding="utf-8", errors="replace") as out, err_log.open("w", encoding="utf-8", errors="replace") as err:
+        p = subprocess.Popen(argv, cwd=proj, env=dict(env), stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=not IS_WINDOWS)
+        return _wait(p, timeout)
+
+
+def smoke_problem(s: Smoke) -> str:
+    """What makes a smoke run incomplete although nothing FAILed ('' when nothing does)."""
+    if s.expected is None:
+        return "smoke.lua did not reach its end (no DONE line)"
+    if s.expected != s.total:
+        leaked = "; ".join(s.other[:5])
+        return f"smoke.lua ran {s.expected} checks but {s.total} result lines were parsed" + (f" (other output: {leaked})" if leaked else "")
+    names = [*s.passed, *(n for n, _ in s.failed), *s.skipped]
+    mypy = [n for n in names if n.startswith("mypy diagnostics")]
+    if not mypy or mypy[0].endswith("(profile off)"):
+        return f"the mypy diagnostics check did not run with a typing profile (./deploy mode --typing {SMOKE_TYPING})"
+    return ""
 
 
 def run_preset(
@@ -336,6 +563,8 @@ def run_preset(
         # from THIS template; not named after the preset: a project "flet" cannot depend on flet
         deploy(ROOT, layout.base, "new", proj, "--preset", preset, "--name", f"pt-{preset}")
         deploy(proj, proj, "sync", "cpython")  # .venv: ruff, mypy, debugpy for the editor
+        # every preset ships typing.relaxed = off: the mypy linter would never run
+        deploy(proj, proj, "mode", "--typing", SMOKE_TYPING)
 
     def lazy() -> None:
         lazy_lua = proj / ".lazy.lua"
@@ -344,37 +573,32 @@ def run_preset(
         state = cmd_nvim.trust_status(nv.trust_db, lazy_lua)
         if state.state != "trusted":
             raise DeployError(f"{lazy_lua} is {state.state} after vim.secure.trust")
-        # install, not sync: only what .lazy.lua adds (the base was synced once; no update churn)
+        # install, not sync: only what .lazy.lua adds (never an update), at the locked commits
+        # (one round: LazyVim is installed, so the startup install knows every plugin at once)
+        lock = LOCK if LOCK.is_file() else None
+        use_lock(nv, lock)
         ui.command('nvim --headless "+Lazy! install" +qa')
+        install_log = logs / "lazy-install.log"
         _step(
             [nv.exe, "--headless", "+Lazy! install", "+qa"],
-            cwd=proj, env=venv, log=logs / "lazy-install.log", timeout=STEP_TIMEOUT, what=f"Lazy! install ({preset})",
+            cwd=proj, env=venv, log=install_log, timeout=STEP_TIMEOUT, what=f"Lazy! install ({preset})",
         )
+        _check_pins(lock, nv, f"Lazy! install ({preset})", install_log)
 
     def smoke() -> None:
         log = logs / "smoke.log"
+        err_log = logs / "smoke-stderr.log"
         row.log = log
         ui.command(f'nvim --headless -c "doautocmd UIEnter" -c "luafile {SMOKE}"')
-        env = {**venv, "PT_ROOT": str(proj)}
-        # stdout alone in the log file: smoke.lua writes its result lines there
-        err_log = logs / "smoke-stderr.log"
-        logs.mkdir(parents=True, exist_ok=True)
-        with log.open("w", encoding="utf-8", errors="replace") as out, err_log.open("w", encoding="utf-8", errors="replace") as err:
-            argv = [nv.exe, "--headless", "-c", "doautocmd UIEnter", "-c", f"luafile {SMOKE}"]
-            ui.detail(f"$ {proc.show(argv)}   (in {proj})")
-            p = subprocess.Popen(argv, cwd=proj, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err)
-            try:
-                row.code = p.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                p.kill()
-                p.wait()
-                row.code = None
+        row.code = run_smoke(nv, proj, {**venv, "PT_ROOT": str(proj)}, log, err_log, timeout)
         row.smoke = parse_smoke(log.read_text(encoding="utf-8", errors="replace"))
         if row.code is None:
             row.error = f"smoke.lua timed out after {timeout:.0f} s"
         elif row.smoke.total == 0:
             tail = _tail(err_log)
             row.error = "smoke.lua printed no ok/FAIL/SKIP line" + (f"\n{tail}" if tail else "")
+        else:
+            row.error = smoke_problem(row.smoke)
 
     ui.step(f"preset {preset}")
     try:
@@ -387,7 +611,7 @@ def run_preset(
 
 def _table(rows: Sequence[Row], base_seconds: float | None) -> None:
     ui.step("selftest --nvim results")
-    base = "reused (cached)" if base_seconds is None else f"installed in {base_seconds:.0f} s (first run)"
+    base = "reused (cached)" if base_seconds is None else f"installed in {base_seconds:.0f} s"
     ui.info(f"  isolated LazyVim: {base}")
     ui.info(f"  {'preset':<8} {'result':<6} {'ok':>3} {'fail':>4} {'skip':>4} {'exit':>4} {'new+sync':>9} {'trust+lazy':>10} {'smoke':>6} {'total':>6}")
     for r in rows:
@@ -416,7 +640,7 @@ def _parse_args(args: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="./deploy selftest --nvim")
     parser.add_argument("presets", nargs="?", default=",".join(DEFAULT_PRESETS), help="comma-separated presets (default: script,raylib,flet)")
     parser.add_argument("--keep", action="store_true", help="keep the scratch projects")
-    parser.add_argument("--fresh", action="store_true", help="reinstall the isolated LazyVim (clone + Lazy! sync)")
+    parser.add_argument("--fresh", action="store_true", help="reinstall the isolated LazyVim (clone the starter, install and restore the pinned plugins)")
     parser.add_argument("--require", action="store_true", help="fail instead of skipping when nvim or git is missing (CI)")
     parser.add_argument("--timeout", type=float, default=600.0, help="seconds for each smoke.lua run (default 600)")
     parser.add_argument("--dir", help=f"work directory (default {default_dir()})")
@@ -462,7 +686,11 @@ def selftest(cfg: Config, args: list[str]) -> int:
                 cmd_nvim.remove_tree(layout.projects / p)
             except OSError as e:
                 ui.warn(f"could not remove {layout.projects / p}: {e}")
+    # the starter and plugin commits this run used (the uploaded CI logs; new pins after a green
+    # run without LOCK)
+    pins = record_pins(layout, nv)
     _table(rows, base_seconds)
+    ui.info(f"  pinned to: {pins}")
     ui.info(f"  logs: {layout.logs}" + (f"   projects: {layout.projects}" if ns.keep else "   (--keep keeps the projects)"))
     if all(r.ok for r in rows):
         ui.ok(f"selftest --nvim: {len(rows)} preset(s) passed")

@@ -4,25 +4,46 @@ The only standalone option for PyPy (PyInstaller and Nuitka only support CPython
 - runtime = "bundled": copies the backend's interpreter (managed by uv, relocatable) and
   prunes it. Host OS only.
 - runtime = "system": no interpreter; the launchers use the Python/PyPy of the target machine.
-  With pure dependencies, that folder works on any OS.
+  With pure dependencies that no marker limits to some platforms or Python versions, that folder
+  works on any OS; otherwise the build warns that it only fits the machine that built it.
 """
 
 from __future__ import annotations
 
+import re
 import shlex
 import shutil
+import struct
+import zipfile
 from pathlib import Path
 
 from .. import envs, proc, ui, upx
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
-from ..project import IS_WINDOWS, TEMPLATES, rel
+from ..project import IS_WINDOWS, TEMPLATES, host_os, rel
 from ..ui import DeployError
 from . import common
 
 STDLIB_PRUNE = {"test", "idlelib", "turtledemo", "ensurepip", "site-packages"}
-ROOT_PRUNE = {"include", "libs", "Tools", "share"}
+# Scripts: the console scripts of the base (Windows), like bin/ below
+ROOT_PRUNE = {"include", "libs", "Tools", "share", "Scripts"}
+# What bin/ keeps (POSIX): the interpreter and its links, and PyPy's libpypy*-c.so. The rest
+# are console scripts of packages installed into the base (pip, idle3, or a tool someone
+# installed there, such as a 24 MB ruff): their site-packages is pruned, and their shebangs
+# point at the build machine
+BIN_KEEP = ("python", "pypy", "libpypy")
 TK = {"tkinter", "_tkinter", "turtle.py"}
+# Tcl/Tk next to the stdlib, loaded only by _tkinter: uv's CPython on Linux/macOS keeps lib/
+# libtcl9.0.so, libtcl9tk9.0.so, tcl9.0/, tk9.0/, itcl4.3.8/, thread3.0.6/ and
+# lib-dynload/_tkinter.*.so; PyPy lib/libtcl8.6.so, tk8.6/...; Windows DLLs/tcl86t.dll, _tkinter.pyd
+TCL_RE = re.compile(r"(lib)?(tcl|tk|itcl|thread)\d|_tkinter\.", re.IGNORECASE)
+# The shared libpython next to a statically linked interpreter (Linux, python-build-standalone:
+# bin/python3.X holds the whole interpreter, 31 MB, and lib/libpython3.X.so.1.0 is another 33 MB
+# copy for programs that embed Python). Pruned only when the interpreter does not need it (its
+# ELF DT_NEEDED entries, _elf_needed): extension modules never link libpython on Linux (3.8+)
+LIBPYTHON_RE = re.compile(r"libpython3[.0-9]*[a-z]*\.so(\.[.0-9]+)?")
+# PyPy still ships lib2to3's deliberately broken test data: it never compiles
+COMPILE_EXCLUDE = r"[/\\]lib2to3[/\\]tests[/\\]"
 LONG_PREFIX = "\\\\?\\"
 
 
@@ -32,28 +53,105 @@ def long_path(path: Path) -> str:
     return LONG_PREFIX + resolved if IS_WINDOWS and not resolved.startswith(LONG_PREFIX) else resolved
 
 
+def _elf_needed(path: Path) -> list[str] | None:
+    """The DT_NEEDED entries (shared libraries) of an ELF executable; None when `path` is not an
+    ELF file this can read (then the caller keeps what it would have pruned)."""
+    try:
+        with path.open("rb") as f:
+            ident = f.read(16)
+            if len(ident) < 16 or ident[:4] != b"\x7fELF" or ident[4] not in (1, 2) or ident[5] not in (1, 2):
+                return None
+            wide, end = ident[4] == 2, "<" if ident[5] == 1 else ">"
+            head = struct.unpack(end + ("HHIQQQIHHHHHH" if wide else "HHIIIIIHHHHHH"), f.read(48 if wide else 36))
+            phoff, phentsize, phnum = head[4], head[8], head[9]
+            loads: list[tuple[int, int, int]] = []  # (vaddr, filesz, offset) of each PT_LOAD
+            dynamic: tuple[int, int] | None = None  # (offset, size) of PT_DYNAMIC
+            for i in range(phnum):
+                f.seek(phoff + i * phentsize)
+                if wide:
+                    p_type, _flags, p_offset, p_vaddr, _paddr, p_filesz = struct.unpack(end + "IIQQQQ", f.read(40))
+                else:
+                    p_type, p_offset, p_vaddr, _paddr, p_filesz = struct.unpack(end + "IIIII", f.read(20))
+                if p_type == 1:
+                    loads.append((p_vaddr, p_filesz, p_offset))
+                elif p_type == 2:
+                    dynamic = (p_offset, p_filesz)
+            if dynamic is None:
+                return []  # fully static: needs no shared library at all
+            f.seek(dynamic[0])
+            raw = f.read(dynamic[1])
+            size = 16 if wide else 8
+            needed: list[int] = []
+            strtab = strsz = 0
+            for i in range(0, len(raw) - size + 1, size):
+                tag, value = struct.unpack(end + ("qQ" if wide else "iI"), raw[i : i + size])
+                if tag == 0:
+                    break
+                if tag == 1:
+                    needed.append(value)
+                elif tag == 5:
+                    strtab = value
+                elif tag == 10:
+                    strsz = value
+            start = next((strtab - v + off for v, n, off in loads if v <= strtab < v + n), None)
+            if start is None or not strsz:
+                return None
+            f.seek(start)
+            table = f.read(strsz)
+    except (OSError, struct.error):
+        return None
+    return [table[i : table.find(b"\0", i)].decode("utf-8", "replace") for i in needed if i < len(table)]
+
+
+def _keeps_libpython(base: Path, version: str) -> bool:
+    """Whether the copied runtime must keep lib/libpython3.X.so*: everywhere but Linux, and on
+    Linux when the interpreter itself needs it (a shared build) or cannot be read as ELF."""
+    if host_os() != "linux":
+        return True
+    needed = _elf_needed((base / "bin" / f"python{version}").resolve())
+    return needed is None or any(LIBPYTHON_RE.fullmatch(n) for n in needed)
+
+
 def _stdlib_dirs(base: Path, version: str) -> set[Path]:
     return {base / "Lib", base / "lib" / f"python{version}", base / "lib" / f"pypy{version}"}
 
 
-def copy_runtime(cfg: Config, backend: str, dest: Path) -> Path:
-    """Copy the (pruned) interpreter and return the path of its executable inside `dest`."""
-    info = envs.interpreter_info(envs.runtime_env(cfg, backend).python)
+def copy_runtime(cfg: Config, backend: str, dest: Path, lib: Path | None = None) -> Path:
+    """Copy the (pruned) interpreter and return the path of its executable inside `dest`.
+
+    Tk stays when src/ or the installed dependencies in `lib` (default: the lib/ next to `dest`)
+    import tkinter or turtle: customtkinter or ttkbootstrap need it even when the app never
+    imports it itself.
+    """
+    info = envs.interpreter_info(common.ensure_env(envs.runtime_env(cfg, backend)).python)
     base = Path(str(info["base_prefix"])).resolve()
     version = ".".join(str(info["version"]).split(".")[:2])
     prune = cfg.deploy.portable.prune
-    keep_tk = common.uses_tkinter()
+    keep_tk = common.uses_tkinter(lib if lib is not None else dest.parent / "lib")
+    keep_libpython = info["impl"] != "cpython" or _keeps_libpython(base, version)
     stdlib = _stdlib_dirs(base, version)
+    tk_dirs = {base / "lib", base / "DLLs"} | {s / "lib-dynload" for s in stdlib}
 
     def ignore(directory: str, names: list[str]) -> set[str]:
         d = Path(directory.removeprefix(LONG_PREFIX)).resolve()
-        skip = {n for n in names if n == "__pycache__" and d not in stdlib}
+        # The base's bytecode caches are partial and mostly at the wrong -O level: build()
+        # compiles the stdlib at the launchers' level instead
+        skip = {n for n in names if n == "__pycache__"}
         if not prune:
             return skip
+        skip |= {n for n in names if n.endswith(".debug")}  # detached debug symbols (PyPy: 16 MB)
         if d == base:
             skip |= {n for n in names if n in ROOT_PRUNE or (not keep_tk and n.lower().startswith("tcl"))}
+        if d == base / "bin":
+            skip |= {n for n in names if not n.startswith(BIN_KEEP)}
+        if d == base / "lib" and not keep_libpython:
+            skip |= {n for n in names if LIBPYTHON_RE.fullmatch(n)}
+        if not keep_tk and d in tk_dirs and d not in stdlib:  # not in stdlib: on Windows lib == Lib
+            skip |= {n for n in names if TCL_RE.match(n)}
         if d in stdlib:
             skip |= {n for n in names if n in STDLIB_PRUNE or (not keep_tk and n in TK)}
+        if d.parent in stdlib:
+            skip |= {n for n in names if n in {"test", "tests"}}  # PyPy: unittest/test, lib2to3/tests...
         if d.name == "hpy" and d.parent in stdlib:
             skip |= {"devel"}  # HPy C headers (PyPy): only needed to compile extensions
         return skip
@@ -71,7 +169,7 @@ def copy_runtime(cfg: Config, backend: str, dest: Path) -> Path:
         marker.unlink()
     if IS_WINDOWS and info["impl"] == "pypy":
         # The PyPy zip does not ship the VC++ runtime (uv's CPython does)
-        cp_base = Path(str(envs.interpreter_info(envs.cpython_env(cfg).python)["base_prefix"])).resolve()
+        cp_base = Path(str(envs.interpreter_info(common.ensure_env(envs.cpython_env(cfg)).python)["base_prefix"])).resolve()
         for dll in ("vcruntime140.dll", "vcruntime140_1.dll"):
             if (cp_base / dll).is_file() and not (dest / dll).exists():
                 shutil.copy2(cp_base / dll, dest / dll)
@@ -90,9 +188,15 @@ def _cmd_value(key: str, value: str) -> str:
     return value.replace("%", "%%")
 
 
+def check(cfg: Config) -> None:
+    """Refuse what the launchers cannot hold (cmd_build calls it before the checks and the
+    payload, also in --dry-run): a .cmd is written on Windows and for runtime = "system"."""
+    if IS_WINDOWS or cfg.deploy.portable.runtime != "bundled":
+        _env_lines(cfg, windows=True)
+
+
 def _env_lines(cfg: Config, windows: bool) -> list[str]:
-    # PYTHON_JIT is read by its first character ("false" would ENABLE it): always "0" or "1"
-    env = {"PYTHONUTF8": "1", "PYTHON_JIT": "1" if cfg.python.jit else "0", **cfg.deploy.portable.env}
+    env = {"PYTHONUTF8": "1", **cfg.deploy.portable.env}
     if windows:
         return ['set "PYTHONHOME="', 'set "PYTHONPATH="', *(f'set "{k}={_cmd_value(k, v)}"' for k, v in env.items())]
     return ["unset PYTHONHOME PYTHONPATH", *(f"export {k}={shlex.quote(v)}" for k, v in env.items())]
@@ -134,7 +238,10 @@ def cmd_launcher(cfg: Config, backend: str, out: Path, python: Path | None) -> s
         need = "PyPy" if backend == "pypy" else "Python"
         body += [f"echo {name}: needs {need} {cfg.min_python} or newer in PATH 1>&2", "exit /b 9009"]
         for i, cmd in enumerate(order):
-            body += [f":run{i}", f'{cmd} {flags} "%~dp0boot.py" %*', "exit /b %ERRORLEVEL%"]
+            # app.gui: the windowed twin (pyw/pythonw/pypyw) without a console window, like the
+            # bundled branch; the probe above keeps the console names (it needs the exit code)
+            run = f'start "" {common.windowed(cmd)}' if cfg.app.gui else cmd
+            body += [f":run{i}", f'{run} {flags} "%~dp0boot.py" %*', "exit /b %ERRORLEVEL%"]
     lines = ["@echo off", f"rem Launcher for {name} (portable folder generated by ./deploy)", "setlocal", *_env_lines(cfg, True), *body]
     return "\r\n".join(lines) + "\r\n"
 
@@ -146,8 +253,25 @@ def sh_launcher(cfg: Config, backend: str, out: Path, python: Path | None) -> st
     lines = [
         "#!/bin/sh",
         f"# Launcher for {name} (portable folder generated by ./deploy)",
-        # BASH_SOURCE first: shells that run sh scripts in-process (niubash) keep the caller's $0
-        'HERE=$(cd "$(dirname "${BASH_SOURCE:-$0}")" && pwd)',
+        # The folder of this script. BASH_SOURCE first: shells that run sh scripts in-process
+        # (niubash) keep the caller's $0. Symlinks are followed (a link in ~/.local/bin), each
+        # relative target joined to the PHYSICAL folder of its link; CDPATH='' because an
+        # exported CDPATH made cd print the folder (HERE got two lines) or pick another one.
+        "_pt_self=${BASH_SOURCE:-$0}",
+        "_pt_n=0",
+        'while [ -h "$_pt_self" ] && [ "$_pt_n" -lt 40 ]; do',
+        "    _pt_n=$((_pt_n + 1))",
+        '    _pt_dir=$(dirname "$_pt_self")',
+        "    _pt_dir=$(CDPATH='' cd -P -- \"$_pt_dir\" && pwd -P)",
+        '    _pt_link=$(readlink "$_pt_self")',
+        "    case $_pt_link in",
+        "        /*) _pt_self=$_pt_link ;;",
+        "        *) _pt_self=$_pt_dir/$_pt_link ;;",
+        "    esac",
+        "done",
+        '_pt_dir=$(dirname "$_pt_self")',
+        "HERE=$(CDPATH='' cd -P -- \"$_pt_dir\" && pwd -P)",
+        "unset _pt_self _pt_dir _pt_link _pt_n",
         *_env_lines(cfg, False),
     ]
     if python is not None:
@@ -167,7 +291,7 @@ def sh_launcher(cfg: Config, backend: str, out: Path, python: Path | None) -> st
 
 
 def write_launchers(cfg: Config, backend: str, out: Path, python: Path | None) -> list[Path]:
-    """Write <name>.cmd (Windows) and/or <name>.sh (POSIX). Never -I/-E: they would disable PYTHON_JIT."""
+    """Write <name>.cmd (Windows) and/or <name>.sh (POSIX). Never -I/-E: they would ignore PYTHONUTF8."""
     written: list[Path] = []
     if python is None or IS_WINDOWS:
         path = out / f"{cfg.app.name}.cmd"
@@ -181,54 +305,161 @@ def write_launchers(cfg: Config, backend: str, out: Path, python: Path | None) -
     return written
 
 
+def runtime_stdlib(runtime: Path, version: str) -> Path | None:
+    """Return the stdlib folder of a copied runtime (lib/pythonX.Y or lib/pypyX.Y before Lib/:
+    macOS folder names ignore case, so Lib/ would also match lib/)."""
+    for d in (runtime / "lib" / f"python{version}", runtime / "lib" / f"pypy{version}", runtime / "Lib"):
+        if d.is_dir():
+            return d
+    return None
+
+
+def compile_calls(cfg: Config, python: Path, out: Path, version: str) -> list[list[str | Path]]:
+    """Return the compileall runs of a bundled folder.
+
+    - lib/ and app/ at levels 0 and deploy.optimize; the bundled stdlib only at the launchers'
+      -O level, the one they import (a read-only install used to recompile the stdlib at every
+      start, a writable one wrote .pyc into runtime/).
+    - checked-hash .pyc (PEP 552): timestamp ones went stale after the Windows zip (2-second
+      local DOS times) or an extractor that drops mtimes; -f rewrites any that uv wrote.
+    - -s <out>: the .pyc do not embed this machine's folder (Python fixes co_filename on load).
+    - -B: compileall's own imports leave no stray level-0 .pyc in runtime/.
+    """
+    base: list[str | Path] = [python, "-B", "-m", "compileall", "-q", "-f", "-j", "0", "--invalidation-mode", "checked-hash", "-s", out]
+    levels = ["-o", "0"] + (["-o", str(cfg.deploy.optimize)] if cfg.deploy.optimize else [])
+    calls: list[list[str | Path]] = [[*base, *levels, out / "lib", out / "app"]]
+    stdlib = runtime_stdlib(out / "runtime", version)
+    if stdlib is not None:
+        calls.append([*base, "-x", COMPILE_EXCLUDE, "-o", str(cfg.deploy.optimize), stdlib])
+    return calls
+
+
+def make_archive(out: Path, fmt: str) -> Path:
+    """Archive the folder `out` next to it and return the archive (gztar keeps modes and mtimes).
+
+    The zip (Windows) is written here: os.stat reports 0o666 for a .sh on Windows and ZipInfo
+    records MS-DOS entries, so unzip and bsdtar extracted <name>.sh without its x bit. The .sh
+    entries are written as Unix entries with mode 0755 (create_system 3 is needed too: unzip
+    ignores the mode bits of MS-DOS entries). strict_timestamps=False: a file older than 1980
+    (a copy from the Nix store) made zipfile raise ValueError.
+    """
+    if fmt != "zip":
+        return Path(shutil.make_archive(str(out), fmt, root_dir=out.parent, base_dir=out.name))
+    archive = out.with_name(out.name + ".zip")
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, strict_timestamps=False) as zf:
+        for path in [out, *sorted(out.rglob("*"))]:
+            name = path.relative_to(out.parent).as_posix()
+            if path.suffix == ".sh" and path.is_file():
+                info = zipfile.ZipInfo.from_file(path, name, strict_timestamps=False)
+                info.create_system = 3
+                info.external_attr = 0o100755 << 16
+                info.compress_type = zipfile.ZIP_DEFLATED
+                zf.writestr(info, path.read_bytes())
+            else:
+                zf.write(path, name)
+    return archive
+
+
 def build(req: BuildRequest) -> Path:
     cfg = req.cfg
     bundled = cfg.deploy.portable.runtime == "bundled"
-    host = common.host_target(cfg, req.backend)
-    if req.targets and bundled:
+    if req.targets and bundled:  # cmd_build refuses --target first (pyz only)
         raise DeployError("portable with a bundled runtime is only built for the host OS; use --method pyz for other OSes")
+    host = common.host_target(cfg, req.backend)
     out = dist_path(req, f"-{host.key}" if bundled else "")
-    if out.exists():
-        shutil.rmtree(out)
+    # Before anything is removed: `uv export --locked` refuses a stale uv.lock, which left a
+    # folder holding only app/ where the previous build was
+    requirements = common.export_requirements(cfg)
+    # The folder and its archives go together or not at all (the app may still run from the
+    # folder): the previous archive must never sit next to a new or failed folder
+    common.remove_output(out, *(Path(f"{out}{suffix}") for suffix in (".zip", ".tar.gz")))
     out.mkdir(parents=True)
 
     common.copy_app(req.app_dir, out / "app", extensions=True)
-    requirements = common.export_requirements(cfg)
     common.install_deps(cfg, req.backend, host, out / "lib", requirements)
-    if not bundled and common.has_native(out / "lib"):
-        ui.warn("runtime = \"system\" with native dependencies: it will only work on " + host.key)
-    python = copy_runtime(cfg, req.backend, out / "runtime") if bundled else None
+    if not bundled:
+        _warn_host_only(host.key, requirements, out / "lib")
+    python = copy_runtime(cfg, req.backend, out / "runtime", out / "lib") if bundled else None
     shutil.copy2(TEMPLATES / "portable" / "boot.py", out / "boot.py")
     launchers = write_launchers(cfg, req.backend, out, python)
+    # The console interpreter runs the build's own steps (pythonw.exe has no stdout)
+    console_python = None if python is None else python.with_name("python.exe") if IS_WINDOWS else python
 
-    if python is not None:
-        console_python = python.with_name("python.exe") if IS_WINDOWS else python
-        dirs: list[Path] = [out / "lib", out / "app"]
-        if (out / "runtime" / "Lib").is_dir() and not any((out / "runtime" / "Lib").rglob("*.pyc")):
-            dirs.append(out / "runtime" / "Lib")  # PyPy ships no .pyc: without this it recompiles the stdlib on every startup
-        levels = ["-o", "0"] + (["-o", str(cfg.deploy.optimize)] if cfg.deploy.optimize else [])
-        compiled = proc.run([console_python, "-m", "compileall", "-q", "-j", "0", *levels, *dirs], check=False, capture=True)
-        if compiled.returncode != 0:
-            failed = compiled.stdout.count("*** Error compiling")
+    if console_python is not None:
+        _check_interpreter(console_python)
+        failed = 0
+        for argv in compile_calls(cfg, console_python, out, host.version):
+            compiled = proc.run(argv, check=False, capture=True)
+            if compiled.returncode != 0:
+                failed += max(1, compiled.stdout.count("*** Error compiling"))
+        if failed:
             ui.warn(
                 f"could not precompile {failed} file(s) to .pyc (paths longer than 260 characters?). "
                 "The app still works; it just starts a bit slower the first time."
             )
 
     if upx.active(cfg):
-        upx.pack_tree(cfg, out)  # before the smoke test, so that it loads the packed binaries
-    if python is not None and req.compiled:
-        _smoke_compiled(cfg, python.with_name("python.exe") if IS_WINDOWS else python, out)
+        upx.pack_tree(cfg, out)  # before the smoke tests, so that they load the packed binaries
+    if console_python is not None:
+        _smoke_runtime(cfg, console_python, out)
+        if req.compiled:
+            _smoke_compiled(cfg, console_python, out)
 
     if cfg.deploy.portable.archive:
-        fmt = "zip" if IS_WINDOWS else "gztar"
-        archive = shutil.make_archive(str(out), fmt, root_dir=out.parent, base_dir=out.name)
-        ui.info(f"  archive: {rel(Path(archive))}")
+        archive = make_archive(out, "zip" if IS_WINDOWS else "gztar")
+        ui.info(f"  archive: {rel(archive)}")
     ui.info(f"  run: {', '.join(rel(p) for p in launchers)}  ({common.dir_size_mb(out):.0f} MB)")
     return out
 
 
+def _warn_host_only(key: str, requirements: Path, lib: Path) -> None:
+    """runtime = "system": lib/ was installed for this machine's interpreter, but both launchers
+    start the app with any Python at or above the minimum, on any OS. Native wheels, and pins that
+    a marker left out here (tzdata on win32, backports-tarfile below 3.12), make it host-only."""
+    skipped = common.skipped_requirements(requirements, lib)
+    reasons = ["native dependencies"] if common.has_native(lib) else []
+    if skipped:
+        reasons.append(f"dependencies for other platforms or Python versions ({', '.join(skipped)})")
+    if reasons:
+        ui.warn(
+            f'runtime = "system" with {" and ".join(reasons)}: lib/ only fits {key}, and the launchers '
+            "start it on any OS and Python version. Build the folder on each platform, or use "
+            "--method pyz with [deploy.pyz] targets"
+        )
+
+
 SMOKE_MARK = "PTSMOKE:"
+PREFIX_MARK = "PTPREFIX:"
+
+
+def _check_interpreter(python: Path) -> None:
+    if not python.is_file():
+        raise DeployError(f"the copied runtime has no {rel(python)}: did the interpreter's layout change?")
+
+
+def _smoke_runtime(cfg: Config, python: Path, out: Path) -> None:
+    """Start the bundled interpreter as the launchers do: it must run on its OWN runtime/.
+
+    A prune rule that removes something the interpreter needs, a binary UPX broke, or a layout
+    change of python-build-standalone or PyPy (bin/python3 missing, an interpreter that finds
+    the uv base again) would otherwise ship as "done" and only fail on another machine.
+    """
+    _check_interpreter(python)
+    code = f"import sys; print({PREFIX_MARK!r} + sys.prefix)"
+    argv: list[str | Path] = [python, "-s", *_opt_flag(cfg).split(), "-B", "-c", code]
+    result = proc.run(argv, cwd=out, capture=True, check=False, echo=False)
+    marks = [ln for ln in result.stdout.splitlines() if ln.startswith(PREFIX_MARK)]
+    if result.returncode != 0 or not marks:
+        if result.stderr:
+            ui.info(result.stderr.rstrip())
+        raise DeployError(f"the bundled interpreter {rel(python)} does not start (exit code {result.returncode})")
+    prefix = Path(marks[-1].removeprefix(PREFIX_MARK))
+    runtime = (out / "runtime").resolve()
+    if not prefix.resolve().is_relative_to(runtime):
+        raise DeployError(
+            f"the bundled interpreter runs on {prefix}, not on its own {rel(out / 'runtime')}: "
+            "the folder would only work on this machine"
+        )
 
 
 def smoke_code(modules: list[str]) -> str:
@@ -248,7 +479,9 @@ def _smoke_compiled(cfg: Config, python: Path, out: Path) -> None:
     from .. import mypyc
 
     code = smoke_code(mypyc.compiled_modules(cfg))
-    result = proc.run([python, "-s", "-c", code], cwd=out, capture=True, check=False, echo=False)
+    # The launchers' flags (-s plus -O/-OO), and -B: the smoke run must not write .pyc into the folder
+    argv: list[str | Path] = [python, "-s", *_opt_flag(cfg).split(), "-B", "-c", code]
+    result = proc.run(argv, cwd=out, capture=True, check=False, echo=False)
     marks = [ln for ln in result.stdout.splitlines() if ln.startswith(SMOKE_MARK)]
     if result.returncode != 0 or not marks:
         if result.stderr:

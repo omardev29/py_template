@@ -1,4 +1,4 @@
-"""Mode and template commands: mode, render, init, new.
+"""Mode and template commands: mode, render, new, and the internal init step (./deploy __init).
 
 Under --dry-run each of them prints what it would do and writes nothing: no pytemplate.toml,
 pyproject.toml, uv.lock or generated file, no environment synced, no project copied.
@@ -8,30 +8,29 @@ Read-only checks (the Python 3.11 precheck, `uv lock --check`) still run.
 from __future__ import annotations
 
 import argparse
-import re
+import os
+import shutil
 import tomllib
 from pathlib import Path
 from typing import Any
 
 from . import config, envs, presets, proc, render, ui
 from .config import BACKENDS, Config
-from .project import CONFIG_FILE, ENV_SUFFIX, PYPROJECT, ROOT, code_dirs, rel, user_path
+from .project import CONFIG_FILE, PYPROJECT, ROOT, code_dirs, native_path, rel, user_path
 from .ui import DeployError
 
-_APP_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 _DRY = "(--dry-run: nothing is written)"
 
 
 def _describe(cfg: Config, title: str = "current mode") -> None:
     ui.step(title)
-    ui.info(f"  app            {cfg.app.name}  (preset {cfg.app.preset}, package src/{cfg.pkg}/)")
-    ui.info(f"  active backend {cfg.backend.active}")
-    ui.info(f"  supported      {', '.join(cfg.backend.supported)}  (Python {cfg.min_python}+ syntax)")
+    ui.report(f"  app            {cfg.app.name}  (preset {cfg.app.preset}, package src/{cfg.pkg}/)")
+    ui.report(f"  active backend {cfg.backend.active}")
+    ui.report(f"  supported      {', '.join(cfg.backend.supported)}  (Python {cfg.min_python}+ syntax)")
     for b in cfg.backend.supported:
-        ui.info(f"  {'typing ' + b:<14} {cfg.profile_for(b)}")
-    ui.info(f"  editor         {cfg.typing.editor}")
-    ui.info(f"  mypyc compiles {', '.join(cfg.compile.modules)}")
-    ui.info(f"  CPython JIT    {'yes' if cfg.python.jit else 'no'}")
+        ui.report(f"  {'typing ' + b:<14} {cfg.profile_for(b)}")
+    ui.report(f"  editor         {cfg.typing.editor}")
+    ui.report(f"  mypyc compiles {', '.join(cfg.compile.modules)}")
 
 
 def _parse(parser: argparse.ArgumentParser, args: list[str]) -> argparse.Namespace:
@@ -56,74 +55,148 @@ def _config_from_text(text: str, where: str) -> Config:
 # --- mode ----------------------------------------------------------------------------------------
 
 
-def _supports_after(cfg: Config, spec: str) -> list[str]:
-    current = list(cfg.backend.supported)
-    if spec.startswith(("+", "-")):
-        for token in (t.strip() for t in spec.split(",")):
-            sign, name = token[:1], token[1:]
-            if sign not in ("+", "-") or name not in BACKENDS:
-                raise DeployError(f"mode --supports: unknown backend '{token}' (use +name or -name)")
-            if sign == "+" and name not in current:
-                current.append(name)
-            elif sign == "-" and name in current:
-                current.remove(name)
-        out = [b for b in BACKENDS if b in current]
+_NEEDS_VALUE = "mode --supports needs a value: +pypy, -pypy or a list such as cpython,mypyc"
+
+
+def _supports_after(cfg: Config, spec: str, backend: str | None = None) -> list[str]:
+    """backend.supported after `--supports SPEC`: +name/-name changes, or the full list.
+
+    `backend` (the BACKEND argument of `mode`) is added as `mode BACKEND` alone would, unless
+    SPEC removes it or leaves it out of a full list: that contradiction is an error.
+    """
+    tokens = [t.strip() for t in spec.split(",") if t.strip()]  # "+pypy," and " +pypy" are fine
+    if not tokens:
+        raise DeployError(_NEEDS_VALUE)
+    signed = [t[:1] in ("+", "-") for t in tokens]
+    if any(signed) and not all(signed):
+        raise DeployError(
+            f"mode --supports {spec}: mixes changes (+name, -name) with plain names; give every "
+            "change its sign (+pypy,-mypyc) or the full list (cpython,pypy,mypyc)"
+        )
+    known = " | ".join(BACKENDS)
+    if all(signed):
+        signs: dict[str, str] = {}
+        for token in tokens:
+            sign, name = token[0], token[1:].strip()
+            if name not in BACKENDS:
+                raise DeployError(f"mode --supports: unknown backend '{name}' in '{token}' ({known})")
+            if signs.setdefault(name, sign) != sign:
+                raise DeployError(f"mode --supports {spec}: {name} is both added and removed")
+        dropped = {n for n, s in signs.items() if s == "-"}
+        wanted = {*cfg.backend.supported, *(n for n, s in signs.items() if s == "+")} - dropped
     else:
-        names = [n.strip() for n in spec.split(",") if n.strip()]
-        for n in names:
-            if n not in BACKENDS:
-                raise DeployError(f"mode --supports: unknown backend '{n}'")
-        out = [b for b in BACKENDS if b in names]
+        for name in tokens:
+            if name not in BACKENDS:
+                raise DeployError(f"mode --supports: unknown backend '{name}' ({known})")
+        dropped = set(BACKENDS) - set(tokens)
+        wanted = set(tokens)
+    if backend:
+        if backend in dropped:
+            how = "removes it" if all(signed) else "leaves it out of the list"
+            raise DeployError(
+                f"mode {backend} --supports {spec}: {backend} would be the active backend, but --supports {how}"
+            )
+        wanted.add(backend)
+    out = [b for b in BACKENDS if b in wanted]
     if not out:
         raise DeployError(f"mode --supports {spec}: at least one backend must stay supported")
     return out
 
 
-def _precheck_py311(cfg: Config) -> None:
-    """Check that the code is valid on Python 3.11 before adding PyPy support.
+# mypy flags of the 3.11 API check: never the project's .mypy.ini (the default typing profile
+# "off" sets ignore_errors = True there, which hid every error), and the bodies of unannotated
+# functions are checked too. Only the errors that appear as 3.11 and not as python.cpython count.
+PRECHECK_MYPY_FLAGS = (
+    "--config-file=",  # an empty value: no config file at all
+    "--check-untyped-defs",
+    "--no-incremental",
+    "--ignore-missing-imports",
+    "--follow-imports", "silent",
+    "--no-error-summary",
+    "--hide-error-context",
+)
 
-    Under --dry-run both checks still run, but with `uv run --no-sync` so the environment is
-    never installed or updated (and they are skipped when it does not exist yet).
+
+def _precheck_py311(cfg: Config) -> None:
+    """Check that the code is valid on the pinned PyPy's Python (python.pypy: 3.11 by default,
+    hence the name) before adding PyPy support.
+
+    Two checks, both independent of the typing profile: ruff's syntax rules for that version,
+    then the mypy errors that appear only when checking as it (an API it lacks, e.g.
+    typing.override on 3.11). A tool that cannot run (a stale uv.lock, a failed install, mypy
+    aborting) is reported as such: it is never blamed on the code and never passes silently.
+
+    The tools environment is synced first; both tools then run with `uv run --no-sync`, so a
+    failure of uv shows up in uv's own step. Under --dry-run nothing is synced: the checks run
+    read-only, and are skipped when the environment does not exist yet.
     """
-    ui.step("checking that the code is valid on Python 3.11 (required by PyPy)")
+    version = cfg.pypy_minor
+    ui.step(f"checking that the code is valid on Python {version} (required by PyPy)")
     tool = envs.tool_env(cfg)
     dry = proc.DRY_RUN
     if dry and not tool.python.is_file():
         ui.info(f"  (--dry-run) skipped: {rel(tool.dir)} does not exist yet (./deploy setup), and creating it is a side effect")
         return
-    run = ["run", "--locked", "--no-sync"] if dry else ["run", "--locked"]
-    dirs = code_dirs()
     if dry:
-        ui.info("  (--dry-run) running the read-only checks: ruff and mypy as Python 3.11, with uv run --no-sync")
+        ui.info(f"  (--dry-run) running the read-only checks: ruff and mypy as Python {version}, with uv run --no-sync")
+    else:
+        envs.sync(tool)  # a stale uv.lock or a failed install fails HERE, with uv's own message
+    run = ["run", "--locked", "--no-sync"]
+    dirs = code_dirs()
     # 1) syntax: ruff reports syntax that does not exist in the target version as an error
     r = envs.uv(
         tool,
-        [*run, "ruff", "check", "--no-cache", "--isolated", "--target-version", "py311", "--select", "E9,F63,F7,F82", *dirs],
+        [*run, "ruff", "check", "--no-cache", "--isolated", "--target-version", "py" + version.replace(".", ""), "--select", "E9,F63,F7,F82", *dirs],
         check=False,
         echo=not dry,  # proc.run skips echoed commands under --dry-run
     )
-    if r.returncode != 0:
-        raise DeployError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
+    if r.returncode == 1:  # ruff: 1 = findings
+        raise DeployError(f"the code uses syntax that does not exist in Python {version} (see above); fix it before enabling PyPy")
+    if r.returncode != 0:  # 2 = ruff (or uv starting it) failed: nothing was checked
+        raise DeployError(f"could not run ruff for the Python {version} check (exit code {r.returncode}, see above)")
 
-    # 2) APIs: mypy errors that appear ONLY when checking as 3.11 (e.g. typing.override)
+    # 2) APIs: mypy errors that appear ONLY when checking as that version (e.g. typing.override)
     def mypy_errors(version: str) -> set[str]:
         argv = [
-            *run, "mypy", "--no-incremental", "--ignore-missing-imports",
-            "--follow-imports", "silent", "--no-error-summary", "--hide-error-context",
+            *run, "mypy", *PRECHECK_MYPY_FLAGS,
             "--python-version", version, "--python-executable", str(tool.python), *dirs,
         ]
-        out = envs.uv(tool, argv, capture=True, check=False, echo=False).stdout
-        return {ln.strip() for ln in out.splitlines() if ": error:" in ln}
+        r = envs.uv(tool, argv, capture=True, check=False, echo=False)
+        if r.returncode not in (0, 1):  # 2 = mypy (or uv starting it) aborted: nothing was checked
+            ui.info(((r.stdout or "") + (r.stderr or "")).rstrip())
+            raise DeployError(f"mypy could not check the code as Python {version} (exit code {r.returncode}, see above)")
+        return {ln.strip() for ln in (r.stdout or "").splitlines() if ": error:" in ln}
 
-    new = sorted(mypy_errors("3.11") - mypy_errors(cfg.python.cpython))
+    new = sorted(mypy_errors(version) - mypy_errors(cfg.python.cpython))
     if new:
         for line in new:
             ui.error(line)
         raise DeployError(
-            "the code uses APIs that do not exist in Python 3.11 (above). Fix it before enabling PyPy "
+            f"the code uses APIs that do not exist in Python {version} (above). Fix it before enabling PyPy "
             "(e.g. typing.override -> typing_extensions.override)"
         )
-    ui.ok("the code is valid on Python 3.11")
+    ui.ok(f"the code is valid on Python {version}")
+
+
+def _read_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _restore(before: dict[Path, bytes | None]) -> list[str]:
+    """Put back the bytes (or the absence) of each file; return the names of those that changed."""
+    restored: list[str] = []
+    for path, data in before.items():
+        if _read_bytes(path) == data:
+            continue
+        if data is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(data)
+        restored.append(path.name)
+    return restored
 
 
 def _current(cfg: Config, table: str, key: str) -> Any:
@@ -135,8 +208,6 @@ def _leftover_envs(cfg: Config, new_cfg: Config) -> None:
     left: list[Path] = []
     if cfg.pypy_enabled and not new_cfg.pypy_enabled:
         left.append(envs.pypy_env(new_cfg).dir)
-    if cfg.python.jit and not new_cfg.python.jit:
-        left.append(ROOT / f".venv-jit{ENV_SUFFIX}")  # envs.jit_env would look for the interpreter
     names = [rel(d) for d in left if d.is_dir()]
     if names:
         ui.info(
@@ -178,33 +249,44 @@ def _plan_mode(cfg: Config, new_cfg: Config, changes: list[tuple[str, str, objec
 
 
 def cmd_mode(cfg: Config, args: list[str]) -> int:
-    """mode [BACKEND] [--supports +pypy|-pypy|a,b] [--typing off|warn|strict|auto] [--jit on|off] [--editor pylance|basedpyright]"""
-    parser = argparse.ArgumentParser(prog="./deploy mode")
+    """mode [BACKEND] [--supports +pypy|-pypy|a,b] [--typing off|warn|strict|auto] [--editor pylance|basedpyright]"""
+    # allow_abbrev=False: `--typ` is an unknown argument, never a silent alias of --typing
+    parser = argparse.ArgumentParser(prog="./deploy mode", allow_abbrev=False)
     parser.add_argument("backend", nargs="?", choices=BACKENDS)
     parser.add_argument("--supports", help="+pypy, -pypy or a full list (cpython,mypyc)")
     parser.add_argument("--typing", choices=("auto", "off", "warn", "strict", "mypyc"))
-    parser.add_argument("--jit", choices=("on", "off"))
     parser.add_argument("--editor", choices=config.EDITORS)
     # `--supports -pypy`: argparse would take "-pypy" for an option; join it as --supports=-pypy
     fixed: list[str] = []
     it = iter(args)
     for a in it:
-        fixed.append(f"--supports={next(it, '')}" if a == "--supports" else a)
+        if a == "--supports":
+            spec = next(it, "")
+            if spec.startswith("--"):  # `--supports --typing strict`: the value is missing
+                raise DeployError(_NEEDS_VALUE)
+            fixed.append(f"--supports={spec}")
+        else:
+            fixed.append(a)
+    options = [a.split("=", 1)[0] for a in fixed if a.startswith("--")]
+    repeated = sorted({o for o in options if options.count(o) > 1})
+    if repeated:  # argparse would silently keep the last one
+        raise DeployError(f"mode: {', '.join(repeated)} given more than once; give each option once")
     ns = _parse(parser, fixed)
     if ns.supports is not None and not ns.supports.strip():
         raise DeployError("mode --supports needs a value: +pypy, -pypy or a list such as cpython,mypyc")
-    if not any((ns.backend, ns.supports, ns.typing, ns.jit, ns.editor)):
+    if not any((ns.backend, ns.supports, ns.typing, ns.editor)):
         _describe(cfg)
         return 0
 
     changes: list[tuple[str, str, object]] = []
-    supported = _supports_after(cfg, ns.supports) if ns.supports else list(cfg.backend.supported)
-    if ns.backend and ns.backend not in supported:
+    supported = _supports_after(cfg, ns.supports, ns.backend) if ns.supports else list(cfg.backend.supported)
+    if ns.backend and ns.backend not in supported:  # `mode pypy` alone also adds PyPy support
         supported = [b for b in BACKENDS if b in {*supported, ns.backend}]
     if supported != cfg.backend.supported:
         changes.append(("backend", "supported", supported))
     active = ns.backend or cfg.backend.active
-    if active not in supported:
+    dropped_active = active not in supported  # `--supports -cpython` while cpython is active
+    if dropped_active:
         active = supported[0]
     if active != cfg.backend.active:
         changes.append(("backend", "active", active))
@@ -213,24 +295,26 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
             changes += [("typing", "profile", "auto"), ("typing", "relaxed", ns.typing)]
         else:
             changes.append(("typing", "profile", ns.typing))
-    if ns.jit:
-        changes.append(("python", "jit", ns.jit == "on"))
     if ns.editor:
         changes.append(("typing", "editor", ns.editor))
+    # Only real changes: a value that is already set is not rewritten (its spelling stays)
+    changes = [(t, k, v) for t, k, v in changes if _current(cfg, t, k) != v]
 
     # The new configuration, validated in memory BEFORE anything is written
-    text = CONFIG_FILE.read_text(encoding="utf-8-sig")
+    text = config.read_text()
     for table, key, value in changes:
         text = config.set_value(text, table, key, value)
     planned = _config_from_text(text, "mode: the new pytemplate.toml")
+    # The managed parts of pyproject.toml must be rewritable for it (damaged markers, a managed
+    # key repeated outside them...): refused here, before pytemplate.toml changes
+    render.check_pyproject(planned)
+    if dropped_active:
+        ui.info(f"note: {cfg.backend.active} is no longer supported: the active backend becomes {active}")
 
     adding_pypy = planned.pypy_enabled and not cfg.pypy_enabled
     syncs: list[envs.PyEnv] = []
     if adding_pypy:
         syncs.append(envs.pypy_env(planned))
-    if ns.jit == "on":
-        syncs.append(envs.jit_env(planned))  # finds the JIT interpreter now: fail before writing
-    if adding_pypy:
         _precheck_py311(cfg)
 
     if proc.DRY_RUN:
@@ -239,18 +323,30 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
         _describe(planned, "mode after the change (not applied: --dry-run)")
         return 0
 
-    config.update_file(changes)
-    new_cfg = config.load()
-    heavy = supported != cfg.backend.supported
-    if heavy or render.pyproject_outdated(new_cfg):
-        from .cmd_env import ensure_lock
+    # Nothing half-applied: when the re-lock or a new environment fails (no solution for the new
+    # interpreter, no network, Ctrl+C), the three files get their old bytes back. The generated
+    # files are rendered only after that, so they never describe a mode that did not happen.
+    before = {path: _read_bytes(path) for path in (CONFIG_FILE, PYPROJECT, PYPROJECT.with_name("uv.lock"))}
+    try:
+        config.update_file(changes)
+        new_cfg = config.load()
+        heavy = supported != cfg.backend.supported
+        if heavy or render.pyproject_outdated(new_cfg):
+            from .cmd_env import ensure_lock
 
-        ensure_lock(new_cfg)
+            ensure_lock(new_cfg)
+        for env in syncs:
+            envs.sync(env)
+    except BaseException as e:
+        restored = _restore(before)
+        done = f"{', '.join(restored)} restored: the mode did not change" if restored else "the mode did not change"
+        if not isinstance(e, DeployError):
+            ui.warn(done)
+            raise
+        raise DeployError(f"{e}\n  {done}; fix the problem above and run the command again", e.code) from None
     changed, _ = render.apply(new_cfg)
     if changed:
         ui.info(f"render: updated {', '.join(changed)}")
-    for env in syncs:
-        envs.sync(env)
     _leftover_envs(cfg, new_cfg)
     _describe(new_cfg)
     return 0
@@ -269,11 +365,11 @@ def cmd_render(cfg: Config, args: list[str]) -> int:
     changed, edited = render.apply(cfg, force=ns.force, check=ns.check, show_diff=ns.diff)
     prefix = "outdated: " if ns.check else "would update: " if proc.DRY_RUN else "updated: "
     for path in changed:
-        ui.info(prefix + path)
+        ui.report(prefix + path)  # the answer to --check: shown even with -q
     for path in edited:
         ui.warn(f"hand-edited (left untouched without --force): {path}")
     if render.pyproject_outdated(cfg):
-        ui.warn("pyproject.toml does not match pytemplate.toml: ./deploy lock")
+        ui.warn("pyproject.toml does not match pytemplate.toml: ./deploy apply")
         if ns.check:
             return 1
     if ns.check and (changed or edited):
@@ -284,11 +380,6 @@ def cmd_render(cfg: Config, args: list[str]) -> int:
 
 
 # --- init / new ----------------------------------------------------------------------------------
-
-
-def _req_name(requirement: str) -> str:
-    m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", requirement)
-    return re.sub(r"[-_.]+", "-", m.group(1)).lower() if m else requirement
 
 
 def _owned_now() -> dict[str, bytes]:
@@ -304,60 +395,72 @@ def _owned_now() -> dict[str, bytes]:
 
 
 def _plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
-    """--dry-run: print what `init` would replace (same checks as presets.init, no writes)."""
-    new_name = name or cfg.app.name
-    if not _APP_NAME.fullmatch(new_name):
-        raise DeployError("the name may only contain letters, digits, '-' and '_' (and must start with a letter)")
-    target = presets.load(preset)
-    if not force and not presets.pristine(cfg):
-        raise DeployError(
-            "src/, tests/ or typings/ have changes compared to the skeleton of the current preset "
-            f"('{cfg.app.preset}'). init would replace them.\n  If you are sure: ./deploy init {preset} --force"
-        )
-    files = presets.skeleton(preset, new_name)
+    """--dry-run: print what `init` would do (presets.plan_init: the same checks, no writes)."""
+    plan = presets.plan_init(cfg, preset, name, force=force)
     owned = _owned_now()
-    ui.step(f"init {preset} ({target.get('description', '')}) as '{new_name}' {_DRY}")
+    ui.step(f"init {preset} ({plan.description}) as '{plan.name}' {_DRY}")
     marks: list[str] = []
     same = 0
-    for path in sorted({*files, *owned}):
+    for path in sorted({*plan.files, *owned}):
         target_file = ROOT / path
-        if path not in files:
+        if path not in plan.files:
             marks.append(f"    - {path}")
         elif not target_file.is_file():
             marks.append(f"    + {path}")
-        elif target_file.read_bytes().replace(b"\r\n", b"\n") != files[path]:
+        elif target_file.read_bytes().replace(b"\r\n", b"\n") != plan.files[path]:
             marks.append(f"    ~ {path}")
         else:
             same += 1
     ui.info(f"  files (- deleted, + new, ~ replaced; {same} identical):")
     for line in marks:
         ui.info(line)
-
-    config_text = files.get(CONFIG_FILE.name, b"").decode("utf-8")
-    new_cfg = _config_from_text(config_text, f"preset {preset}: pytemplate.toml") if config_text else cfg
-    old_deps, old_dev = presets.dependencies(cfg)
-    new_deps, new_dev = presets.dependencies(new_cfg, preset)
-    for label, old, new in (("dependencies", old_deps, new_deps), ("dev group", old_dev, new_dev)):
-        keep = {_req_name(r) for r in new}
-        drop = [r for r in old if _req_name(r) not in keep]
-        ui.info(f"  {label + ':':<14} remove {', '.join(drop) or '-'}; add {', '.join(new) or '-'}")
-    ui.info(f"  {PYPROJECT.name}: name = \"{new_name}\", the preset's extra tables and the managed [tool.uv] block")
+    for label, drop, add in (("dependencies", plan.drop, plan.add), ("dev group", plan.drop_dev, plan.add_dev)):
+        ui.info(f"  {label + ':':<14} remove {', '.join(drop) or '-'}; add {', '.join(add) or '-'}")
+    if plan.pins:
+        source = rel(presets.constraints_path(preset))
+        ui.info(f"  {'versions:':<14} {len(plan.pins)} packages new to uv.lock at the versions the template tested ({source})")
+    ui.info(f"  {PYPROJECT.name}: name = \"{plan.name}\", the preset's extra tables and the managed [tool.uv] block")
     ui.info("  uv.lock: re-locked (uv lock); generated files: re-rendered with --force")
 
 
 def cmd_init(cfg: Config, args: list[str]) -> int:
-    """init PRESET [--name NAME] [--force]: convert this project to the preset."""
-    parser = argparse.ArgumentParser(prog="./deploy init")
+    """__init PRESET [--name NAME] [--force]: convert this project to the preset (internal: ./deploy new)."""
+    parser = argparse.ArgumentParser(prog="./deploy __init")
     parser.add_argument("preset", choices=presets.available())
     parser.add_argument("--name")
     parser.add_argument("--force", action="store_true")
     ns = _parse(parser, args)
     if proc.DRY_RUN:
-        presets.check_name_free(cfg, ns.preset, ns.name or cfg.app.name)
         _plan_init(cfg, ns.preset, ns.name, force=ns.force)
         return 0
     presets.init(cfg, ns.preset, ns.name, force=ns.force)
     return 0
+
+
+def _work_tree_top(folder: Path) -> Path | None:
+    """The top of the git work tree `folder` would be in (its nearest existing parent is asked:
+    new creates the folder), or None: no work tree there, or no git."""
+    git = shutil.which("git")
+    if git is None:
+        return None
+    probe = folder
+    while not probe.is_dir() and probe != probe.parent:
+        probe = probe.parent
+    r = proc.run([git, "rev-parse", "--show-toplevel"], cwd=probe, env=presets._git_env(), capture=True, check=False, echo=False)
+    top = r.stdout.strip() if r.returncode == 0 else ""
+    return Path(native_path(top)) if top else None  # MSYS2's own git prints /c/...
+
+
+def _monorepo_note(dest: Path, top: Path) -> None:
+    """A project inside a bigger repository: new runs no git init there, and GitHub reads workflows
+    only from the repository's own .github/workflows, so the generated CI never runs as it is."""
+    sub = Path(os.path.relpath(dest.resolve(), top.resolve())).as_posix()
+    ui.warn(
+        f"{dest} is inside the git work tree of {top}: GitHub runs only {top.name}/.github/workflows/*.yml,\n"
+        f"  so the project's generated .github/workflows/ci.yml does not run from {sub}/. For CI, add a\n"
+        f"  workflow to the repository that runs its steps in {sub} (defaults.run.working-directory) and\n"
+        f"  takes the artifacts from {sub}/dist/"
+    )
 
 
 def cmd_new(cfg: Config, args: list[str]) -> int:
@@ -375,22 +478,38 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         raise DeployError(f"new: {dest} exists and is not a folder")
     if dest.is_dir() and any(dest.iterdir()):
         raise DeployError(f"new: {dest} already exists and is not empty")
-    # Checked here, before copying: `init` in the copy would reject it with a half-made project
-    name = ns.name or re.sub(r"[^A-Za-z0-9_-]", "-", resolved.name)
-    if not _APP_NAME.fullmatch(name):
+    # Checked here, before copying (and under --dry-run): a copy whose `init` fails is removed
+    name = ns.name or presets.name_from_folder(resolved.name)
+    if not config.APP_NAME.fullmatch(name):
         raise DeployError(
-            f"new: '{name}' is not a valid app name (letters, digits, '-' and '_', starting with a letter). "
+            f"new: '{name}' is not a valid app name (it may only contain {config.NAME_RULE}). "
             "Choose one with --name NAME"
         )
     presets.check_name_free(cfg, ns.preset, name)
+    top = _work_tree_top(dest)
     if proc.DRY_RUN:
         ui.step(f"new project in {dest} {_DRY}")
         ui.info(f"  preset  {ns.preset}")
         ui.info(f"  name    {name}  (package src/{name.replace('-', '_').lower()}/)")
+        # what __init pins in the copy: the packages its uv.lock (this one) does not have yet
+        locked = presets.locked_names()
+        pins = [n for n in presets.constraints(ns.preset) if n not in locked]
+        if pins:
+            ui.info(f"  pins    {len(pins)} packages new to uv.lock at the versions the template tested (constraints.txt of the preset)")
+        if top is not None:
+            git = f"(inside the git work tree of {top}: no git init)"
+        elif shutil.which("git") is None:
+            git = "(git not found: no git init)"
+        else:
+            git = "and `git init -b main`"
         ui.info(
-            f"  would copy this template there (without .git, environments, builds or caches), "
-            f"run `./deploy init {ns.preset} --name {name} --force` in it and `git init`"
+            "  would copy this template there (the files git tracks; no .git, environments, builds or "
+            f"caches), run `./deploy __init {ns.preset} --name {name} --force` in it {git}"
         )
+        if top is not None:
+            _monorepo_note(dest, top)
         return 0
     presets.new(dest, ns.preset, name)
+    if top is not None:
+        _monorepo_note(dest, top)
     return 0

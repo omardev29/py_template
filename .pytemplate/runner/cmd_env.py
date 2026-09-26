@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
+import shlex
 import shutil
+import stat
 import subprocess
 import sys
+from pathlib import Path
 
 from . import cmd_nvim, envs, hooks, mypyc, proc, render, shells, ui
 from .cmd_dev import only_flags
 from .config import Config
-from .project import BUILD, DIST, IS_WINDOWS, ROOT, rel
+from .project import BUILD, DIST, ENV_SUFFIX, IS_MACOS, IS_WINDOWS, PYPROJECT, ROOT, rel
 from .ui import DeployError
+
+LAUNCHERS_X = ("deploy", "deploy.ps1")  # the launchers that must stay executable (100755)
 
 
 def _envs_for(cfg: Config, target: str) -> list[envs.PyEnv]:
@@ -20,11 +26,9 @@ def _envs_for(cfg: Config, target: str) -> list[envs.PyEnv]:
         out = [envs.cpython_env(cfg)]
         if cfg.pypy_enabled:
             out.append(envs.pypy_env(cfg))
-        if cfg.python.jit:
-            out.append(envs.jit_env(cfg))
         return out
     if target in ("cpython", "mypyc"):
-        return [envs.runtime_env(cfg, target), envs.tool_env(cfg)] if cfg.python.jit else [envs.cpython_env(cfg)]
+        return [envs.cpython_env(cfg)]
     if target == "pypy":
         envs.ensure_supported(cfg, "pypy")
         return [envs.pypy_env(cfg)]
@@ -36,37 +40,50 @@ def ensure_lock(cfg: Config) -> None:
     tool = envs.tool_env(cfg)
     if render.write_pyproject(cfg):
         ui.info(render.pyproject_message())
+        if proc.DRY_RUN:
+            # Nothing was written, so `uv lock --check` would read the old pyproject.toml and
+            # pass: show the re-lock the real run makes (echoed, skipped under --dry-run).
+            envs.uv(tool, ["lock"])
+            return
     r = envs.uv(tool, ["lock", "--check"], check=False, capture=True, echo=False)
     if r.returncode != 0:
         envs.uv(tool, ["lock"])
 
 
 def cmd_setup(cfg: Config, args: list[str]) -> int:
-    """setup: interpreters, uv.lock and the environments of every supported backend."""
-    only_flags("setup", args, ())
-    ui.step("setup")
-    ensure_lock(cfg)
-    for env in _envs_for(cfg, "all"):
-        ui.step(f"environment {env.key}: {rel(env.dir)} ({env.request})")
-        envs.sync(env)
-    _fix_exec_bit()
-    hooks.ensure_installed(cfg)
-    render.apply(cfg)
-    ui.ok("done. Try: ./deploy run  |  ./deploy test  |  ./deploy doctor")
-    return 0
+    """setup [--force]: the first-time name of ./deploy apply (one implementation: cmd_apply.apply)."""
+    from . import cmd_apply  # cmd_apply imports this module
+
+    return cmd_apply.apply(cfg, args, command="setup")
 
 
 def _fix_exec_bit() -> None:
-    """Keep `deploy` and `deploy.ps1` executable in git (core.filemode=false on Windows).
+    """Keep `deploy` and `deploy.ps1` executable: the files themselves (POSIX) and their git
+    mode 100755 (core.filemode=false on Windows loses it).
 
     deploy.ps1 needs it for `./deploy.ps1` from pwsh on Linux/macOS.
     """
+    # The files first, with or without git: a copy or an archive that dropped the mode leaves
+    # ./deploy unusable, and with core.filemode=true an index-only fix is undone by the next
+    # `git add` (it records the file's 100644 again).
+    if not IS_WINDOWS:
+        for launcher in LAUNCHERS_X:
+            path = ROOT / launcher
+            if path.is_file() and not os.access(path, os.X_OK):
+                ui.command(f"chmod +x {launcher}")
+                if not proc.DRY_RUN:
+                    try:
+                        path.chmod(path.stat().st_mode | 0o111)
+                    except OSError as e:  # another user's file (a shared checkout), a read-only mount
+                        # a warning, never a stop: setup/apply still install the hook, render and
+                        # record; `sh ./deploy` works without the bit
+                        ui.warn(f"cannot make {launcher} executable: {e.strerror or e}. Its owner can: chmod +x {launcher}")
     # rev-parse, not ROOT/.git: the project may live in a subfolder of a bigger repository
     if not shutil.which("git"):
         return
     if proc.run(["git", "rev-parse", "--is-inside-work-tree"], capture=True, check=False, echo=False).returncode != 0:
         return
-    for launcher in ("deploy", "deploy.ps1"):
+    for launcher in LAUNCHERS_X:
         r = proc.run(["git", "ls-files", "-s", launcher], capture=True, check=False, echo=False)
         if r.stdout.startswith("100644"):
             proc.run(["git", "update-index", "--chmod=+x", launcher], check=False)
@@ -82,11 +99,47 @@ def cmd_sync(cfg: Config, args: list[str]) -> int:
     return 0
 
 
+# `uv lock` arguments (and the variables uv reads for them) that make it write no uv.lock
+LOCK_READ_ONLY = ("--check", "--locked", "--check-exists", "--frozen", "--dry-run")
+LOCK_READ_ONLY_ENV = ("UV_LOCKED", "UV_FROZEN")
+
+
+def _lock_read_only(args: list[str]) -> str:
+    """The argument or variable that keeps `uv lock` from writing uv.lock, or ""."""
+    for a in args:
+        if a in LOCK_READ_ONLY:
+            return a
+    for name in LOCK_READ_ONLY_ENV:  # uv's boolean variables: 1/true/yes/on
+        if os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on", "y", "t"):
+            return name
+    return ""
+
+
 def cmd_lock(cfg: Config, args: list[str]) -> int:
-    """lock [--upgrade] [--upgrade-package PKG]: apply the managed pyproject parts and `uv lock`."""
-    if render.write_pyproject(cfg):
+    """lock [--upgrade] [--upgrade-package PKG]: apply the managed pyproject parts and `uv lock`.
+
+    pyproject.toml and uv.lock change together or not at all: when `uv lock` fails (offline, no
+    solution, Ctrl+C) or writes no uv.lock (--check, --dry-run...), pyproject.toml gets its old
+    bytes back. Otherwise the two would disagree and every `uv run --locked` would fail.
+    """
+    before = PYPROJECT.read_bytes() if PYPROJECT.is_file() else None
+    changed = render.write_pyproject(cfg)
+    if changed:
         ui.info(render.pyproject_message())
-    envs.uv(envs.tool_env(cfg), ["lock", *args])
+
+    def restore(why: str) -> None:
+        if changed and before is not None and not proc.DRY_RUN and PYPROJECT.read_bytes() != before:
+            PYPROJECT.write_bytes(before)
+            ui.info(f"pyproject.toml: put back as it was ({why})")
+
+    try:
+        envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False)  # -q keeps its summary and warnings
+    except BaseException:  # a failed uv lock leaves uv.lock alone; Ctrl+C too
+        restore("uv lock did not update uv.lock")
+        raise
+    read_only = _lock_read_only(args)
+    if read_only:
+        restore(f"uv lock with {read_only} writes no uv.lock")
     render.apply(cfg)
     return 0
 
@@ -94,8 +147,10 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
 def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
     parser = argparse.ArgumentParser(prog=f"./deploy {verb}")
     parser.add_argument("packages", nargs="+")
-    parser.add_argument("--dev", action="store_true", help="development group")
-    parser.add_argument("--group", help="dependency group")
+    where = parser.add_mutually_exclusive_group()
+    where.add_argument("--dev", action="store_true", help="development group")
+    # setup and sync install every group (envs.sync: --all-groups), so it stays installed
+    where.add_argument("--group", help="dependency group (add, remove, setup and sync install every group)")
     if verb == "add":
         parser.add_argument(
             "--cpython-only",
@@ -103,7 +158,13 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
             help="only on CPython/mypyc (C-API libraries such as numpy: slow or unavailable on PyPy)",
         )
     ns = parser.parse_args(args)
-    argv: list[str] = [verb]
+    # --no-sync, then envs.sync: uv's own sync after `remove` is EXACT for the default groups
+    # only, so it uninstalled every package of the other groups (`add --group G`); `uv sync
+    # --all-groups` keeps them, as setup and sync do. uv has written pyproject.toml and uv.lock
+    # by then: when the sync fails (a package that locks but cannot be built) or is
+    # interrupted, both get their old bytes back, as a plain `uv add` does when its own sync
+    # fails. Otherwise every `uv run --locked` tried to build that package again.
+    argv: list[str] = [verb, "--no-sync"]
     if ns.dev:
         argv.append("--dev")
     if ns.group:
@@ -111,13 +172,60 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
     if verb == "add" and ns.cpython_only:
         argv += ["--marker", "implementation_name == 'cpython'"]
     argv += ns.packages
-    envs.uv(envs.tool_env(cfg), argv)
+    tool = envs.tool_env(cfg)
+    before = _snapshot((PYPROJECT, PYPROJECT.with_name("uv.lock")))
+    try:
+        envs.uv(tool, argv, quiet=False)  # -q keeps uv's warnings about the packages typed
+        envs.sync(tool)
+    except BaseException:  # a failed or interrupted sync (uv add/remove revert their own failures)
+        restored = _put_back(before)
+        if restored:
+            they = "they were" if len(restored) > 1 else "it was"
+            ui.info(f"{', '.join(restored)}: put back as {they} (./deploy {verb} did not finish)")
+        raise
     if verb == "add" and cfg.pypy_enabled and not ns.cpython_only:
         ui.info(
             "PyPy is supported: if the package uses the CPython C-API (numpy, pillow, pydantic-core...) "
             "it will be slow on PyPy; consider `--cpython-only`. Check with: ./deploy sync pypy"
         )
     return 0
+
+
+def _snapshot(paths: tuple[Path, ...]) -> dict[Path, bytes | None]:
+    """The bytes of each file, None for a missing one; an unreadable file is left out (never
+    touched by _put_back)."""
+    before: dict[Path, bytes | None] = {}
+    for path in paths:
+        try:
+            before[path] = path.read_bytes()
+        except FileNotFoundError:
+            before[path] = None
+        except OSError:
+            pass
+    return before
+
+
+def _put_back(before: dict[Path, bytes | None]) -> list[str]:
+    """Give each file its old bytes back (a file that did not exist is removed); return the names
+    of those that changed."""
+    restored: list[str] = []
+    for path, data in before.items():
+        try:
+            now: bytes | None = path.read_bytes()
+        except OSError:
+            now = None
+        if now == data:
+            continue
+        try:
+            if data is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(data)
+        except OSError as e:
+            ui.warn(f"could not put {path.name} back: {e.strerror or e}")
+            continue
+        restored.append(path.name)
+    return restored
 
 
 def cmd_add(cfg: Config, args: list[str]) -> int:
@@ -130,46 +238,172 @@ def cmd_remove(cfg: Config, args: list[str]) -> int:
     return _add_remove(cfg, "remove", args)
 
 
+_JUNCTION = 0xA0000003  # IO_REPARSE_TAG_MOUNT_POINT: a Windows junction (Path.is_symlink() is False)
+
+
+def _is_link(path: Path) -> bool:
+    """A symlink or a Windows junction: clean removes the link itself, never what it points to."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    tag: int = getattr(st, "st_reparse_tag", 0)
+    return stat.S_ISLNK(st.st_mode) or tag == _JUNCTION
+
+
+def _env_dirs() -> list[Path]:
+    """The .venv* environments of this side. WSL on a Windows checkout (/mnt/...) keeps its own
+    `.venv*-wsl` next to the Windows ones (project.ENV_SUFFIX): each side removes only its own."""
+    wsl = bool(ENV_SUFFIX)
+    found = [
+        p
+        for p in ROOT.glob(".venv*")
+        if p.name.endswith("-wsl") == wsl and (p.is_dir() or (_is_link(p) and not p.exists()))  # never a file
+    ]
+    return sorted(found)
+
+
+def _make_writable(root: Path) -> None:
+    """Clear read-only flags of `root` and below it (links are neither followed nor changed).
+    `root` itself too: its entries cannot be deleted while it is read-only."""
+    with contextlib.suppress(OSError):
+        mode = os.lstat(root).st_mode
+        if stat.S_ISDIR(mode):
+            os.chmod(root, mode | stat.S_IRWXU)
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not _is_link(Path(dirpath, d))]
+        for name in (*dirnames, *filenames):
+            path = os.path.join(dirpath, name)
+            with contextlib.suppress(OSError):
+                mode = os.lstat(path).st_mode
+                if not stat.S_ISLNK(mode):
+                    os.chmod(path, mode | stat.S_IWRITE | (stat.S_IRWXU if stat.S_ISDIR(mode) else 0))
+
+
+def _remove(path: Path) -> bool:
+    """Remove a folder, or only the link when it is a symlink/junction; return whether it is gone."""
+    if _is_link(path):
+        with contextlib.suppress(OSError):
+            os.unlink(path)  # on Windows this also removes a directory symlink or a junction
+        return not os.path.lexists(path)
+    # ignore_errors, then check: onerror is deprecated since 3.12 and onexc does not exist in 3.11
+    shutil.rmtree(path, ignore_errors=True)
+    if os.path.lexists(path):  # read-only files (Windows) or folders (POSIX): once more, writable
+        _make_writable(path)
+        shutil.rmtree(path, ignore_errors=True)
+    return not os.path.lexists(path)
+
+
+def _shown(path: Path) -> str:
+    """The path relative to the root, without resolving links (rel() would show a link's target)."""
+    try:
+        return path.relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def cmd_clean(cfg: Config, args: list[str]) -> int:
-    """clean [--envs]: remove .build/ and dist/ (and the .venv* environments with --envs)."""
+    """clean [--envs]: remove .build/ and dist/ (and this side's .venv* environments with --envs).
+
+    A folder that cannot be removed completely (a file in use on Windows: the editor's mypy or
+    ruff server runs from .venv) is an error (exit 1): a half-deleted .venv breaks every command.
+    """
     flags = only_flags("clean", args, ("--envs",))
     targets = [BUILD, DIST]
     if "--envs" in flags:
-        targets += sorted(p for p in ROOT.glob(".venv*") if p.is_dir())
+        targets += _env_dirs()
+    failed: list[str] = []
     for t in targets:
-        if t.exists():
-            ui.info(f"removing {rel(t)}")
-            if not proc.DRY_RUN:
-                shutil.rmtree(t, ignore_errors=True)
+        if not os.path.lexists(t):
+            continue
+        if proc.DRY_RUN:
+            ui.info(f"would remove {_shown(t)}")
+            continue
+        ui.info(f"removing {_shown(t)}")
+        if not _remove(t):
+            failed.append(_shown(t))
+    if failed:
+        again = "./deploy clean --envs" if "--envs" in flags else "./deploy clean"
+        ui.error(
+            f"could not remove {', '.join(failed)} completely: a file in it is in use or not writable.\n"
+            "  Close what uses it (editors and their language servers, debuggers, the running app), "
+            f"then run {again} again"
+        )
+        return 1
     return 0
 
 
 # --- doctor --------------------------------------------------------------------------------------
 
 
-def _msvc() -> tuple[bool, str]:
+def _msvc(platform: str = "win-amd64") -> tuple[bool, str]:
+    """Visual Studio's C++ tools for `platform`, the sysconfig.get_platform() of the Python that
+    runs mypyc (.venv): the same vswhere query setuptools makes (win-arm64 -> VC.Tools.arm64,
+    anything else -> VC.Tools.x86.x64; uv installs x86_64 CPython even on Windows on ARM)."""
     vs = proc.vs_installer_dir()
     if not vs:
         return False, "no Visual Studio / Build Tools (vswhere.exe not found)"
-    r = subprocess.run(
-        [str(vs / "vswhere.exe"), "-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    component = "VC.Tools.arm64" if platform == "win-arm64" else "VC.Tools.x86.x64"
+    argv = [str(vs / "vswhere.exe"), "-latest", "-prerelease", "-products", "*"]
+    argv += ["-requires", f"Microsoft.VisualStudio.Component.{component}", "-property", "installationPath"]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, check=False)
+    except OSError as e:
+        return False, f"vswhere.exe does not run: {e}"
     path = r.stdout.strip()
     if not path:
-        return False, "Visual Studio found, but without the C++ tools (VC.Tools.x86.x64)"
+        return False, f"Visual Studio found, but without the C++ tools for {platform} ({component})"
     return True, path
 
 
-def _c_compiler() -> tuple[bool, str]:
+# Where the active developer folder (`xcode-select -p`) keeps the clang the /usr/bin shims run:
+# the Command Line Tools (/Library/Developer/CommandLineTools/usr/bin/clang) or an Xcode.app's
+# default toolchain (Xcode 26's Contents/Developer has no usr/bin/xcrun, so that was no test)
+XCODE_CLANG = (("usr", "bin", "clang"), ("Toolchains", "XcodeDefault.xctoolchain", "usr", "bin", "clang"))
+
+
+def _xcode_problem() -> str | None:
+    """macOS: why the /usr/bin compiler shims cannot compile, or None.
+
+    /usr/bin/cc, gcc and clang exist on every Mac, even without the developer tools: they run
+    the clang of the active developer folder. The shims themselves never run here (on a fresh
+    Mac they open the install dialog)."""
+    try:
+        r = proc.run(["/usr/bin/xcode-select", "-p"], capture=True, check=False, echo=False)
+    except DeployError:
+        return "no xcode-select"
+    dev = r.stdout.strip()
+    if r.returncode != 0 or not dev:
+        return "no Xcode Command Line Tools"
+    if not any(os.path.isfile(os.path.join(dev, *parts)) for parts in XCODE_CLANG):
+        return f"the developer folder {dev} has no clang (usual after a macOS upgrade)"
+    return None
+
+
+def _c_compiler(platform: str = "", cc: str = "") -> tuple[bool, str]:
+    """The C compiler mypyc would use. Windows: MSVC for `platform` (the .venv Python's sysconfig
+    platform). Elsewhere what setuptools runs, nothing else: $CC when it is set, else `cc`, the
+    CC of the .venv Python's sysconfig ("cc -pthread"; "cc" when unknown). A gcc or clang next to
+    a missing `cc`, or a CC naming a missing program, is no compiler: the build would fail."""
     if IS_WINDOWS:
-        return _msvc()
-    for cc in (os.environ.get("CC"), "cc", "gcc", "clang"):
-        if cc and shutil.which(cc):
-            return True, shutil.which(cc) or cc
-    return False, "no C compiler"
+        return _msvc(platform or "win-amd64")
+    user = "CC" in os.environ
+    command = os.environ["CC"] if user else cc or "cc"
+    source = f"CC={command!r}" if user else f"the CC of the .venv Python: {command!r}"
+    try:
+        words = shlex.split(command)
+    except ValueError:  # unbalanced quotes
+        words = []
+    if not words:
+        return False, f"no C compiler ({source})"
+    found = shutil.which(words[0])  # "ccache gcc" runs ccache
+    if not found:
+        return False, f"{words[0]} not found ({source})"
+    if IS_MACOS and os.path.dirname(found) == "/usr/bin":
+        problem = _xcode_problem()
+        if problem:
+            return False, f"{found} is an Xcode shim: {problem}"
+    return True, found
 
 
 def cmd_doctor(cfg: Config, args: list[str]) -> int:
@@ -183,40 +417,52 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
             problems += 1
         ui.check_line(passed, label, hint)
 
+    def env_info(env: envs.PyEnv) -> dict[str, object] | None:
+        # A python that exists but cannot start (Windows: its base Python was uninstalled and the
+        # venv launcher exits 103 "No Python at ..."; no exec bit; garbage output) is a problem
+        # to report, not a crash: every later check still runs.
+        try:
+            return envs.interpreter_info(env.python)
+        except (DeployError, OSError, ValueError):  # ValueError: json.JSONDecodeError
+            check(
+                False,
+                f"environment {rel(env.dir)} is broken (its Python does not start)",
+                "./deploy setup   (if it still fails: ./deploy clean --envs, then ./deploy setup)",
+            )
+            return None
+
     ui.step("tools")
     uv_version = proc.output([proc.find_uv(), "--version"])
-    check(True, f"uv: {uv_version}")
+    too_old = envs.uv_problem(uv_version)
+    if too_old:
+        check(False, f"uv: {uv_version}", f"{too_old}\nUpdate it: {envs.UV_UPDATE}")
+    elif envs.uv_version(uv_version) is None:
+        check(None, f"uv: {uv_version} (version not recognised; this project needs uv {envs.MIN_UV} or newer)")
+    else:
+        check(True, f"uv: {uv_version}")
     check(True, f"runner: Python {sys.version.split()[0]} ({sys.executable})")
 
     ui.step(f"backends (active: {cfg.backend.active}; supported: {', '.join(cfg.backend.supported)})")
     cp = envs.cpython_env(cfg)
+    platform = ""  # the .venv Python's sysconfig platform: which MSVC tools mypyc needs
+    cc = ""  # and its sysconfig CC: the compiler setuptools runs when $CC is not set
     if cp.python.is_file():
-        info = envs.interpreter_info(cp.python)
-        check(True, f"CPython {info['version']} in {rel(cp.dir)}  (JIT available: {'yes' if info['jit'] else 'no'})")
+        if (info := env_info(cp)) is not None:
+            platform = str(info.get("platform", ""))
+            cc = str(info.get("cc") or "")
+            check(True, f"CPython {info['version']} in {rel(cp.dir)}")
     else:
         check(False, f"environment {rel(cp.dir)} is missing", "./deploy setup")
     if cfg.pypy_enabled:
         pp = envs.pypy_env(cfg)
         if pp.python.is_file():
-            info = envs.interpreter_info(pp.python)
-            check(info["impl"] == "pypy", f"PyPy ({info['version']}) in {rel(pp.dir)}")
+            if (info := env_info(pp)) is not None:
+                check(info["impl"] == "pypy", f"PyPy ({info['version']}) in {rel(pp.dir)}")
         else:
             check(False, f"environment {rel(pp.dir)} is missing ({cfg.python.pypy})", "./deploy setup   (or ./deploy sync pypy)")
-    if cfg.python.jit:
-        try:
-            jit_python = envs.find_jit_interpreter(cfg)
-            check(True, f"JIT: {jit_python}")
-            if "scoop" in jit_python.lower() and "\\current\\" in jit_python.lower():
-                check(
-                    None,
-                    "the JIT Python is the scoop `current` link: `scoop update` will switch it to another version",
-                    f"Pin it: scoop install versions/python{cfg.python.cpython.replace('.', '')} and put its path in python.jit_interpreter",
-                )
-        except DeployError as e:
-            check(False, "JIT: no CPython with JIT", str(e))
     if cfg.supports("mypyc"):
-        found, where = _c_compiler()
-        check(found, f"C compiler for mypyc: {where}", mypyc.has_compiler_hint())
+        found, where = _c_compiler(platform, cc=cc)
+        check(found, f"C compiler for mypyc: {where}", mypyc.has_compiler_hint(platform or "win-amd64"))
     if IS_WINDOWS and cfg.supports("mypyc"):
         long_paths = _long_paths()
         check(
@@ -227,12 +473,24 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
 
     ui.step("project")
     changed, edited = render.apply(cfg, check=True)
-    check(not changed and not edited, "generated files up to date", "They update with any command (or ./deploy render)")
+    if changed or not edited:  # each hand-edited file gets its own line below: count every problem once
+        check(not changed, "generated files up to date", f"outdated: {', '.join(changed)}\nThey update with any command (or ./deploy render)")
     for path in edited:
-        check(False, f"{path} hand-edited", "Edit pytemplate.toml or .pytemplate/templates, or ./deploy render --force")
-    check(not render.pyproject_outdated(cfg), "pyproject.toml matches pytemplate.toml", "./deploy lock")
-    r = envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, capture=True, echo=False)
-    check(r.returncode == 0, "uv.lock up to date", "./deploy lock")
+        check(
+            False,
+            f"{path} hand-edited",
+            "Move the change into pytemplate.toml (e.g. [vscode] settings) or .pytemplate/templates\n"
+            "(./deploy render --diff shows it), or drop it: ./deploy render --force",
+        )
+    check(not render.pyproject_outdated(cfg), "pyproject.toml matches pytemplate.toml", "./deploy apply")
+    from . import cmd_apply  # lazy: cmd_apply imports this module
+
+    cmd_apply.doctor(cfg, check)  # app.name, app.preset, [preset.*], hooks.pre_commit edited but not applied
+    try:
+        r = envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, capture=True, echo=False)
+        check(r.returncode == 0, "uv.lock up to date", "\n".join(filter(None, [envs.uv_error(r.stderr or r.stdout), "./deploy lock"])))
+    except DeployError as e:  # uv too old to create .venv, or it does not start
+        check(False, "uv.lock up to date: uv lock --check did not run", str(e))
 
     shells.doctor(check)  # launchers and shells
     hooks.doctor(cfg, check)  # git pre-commit hook

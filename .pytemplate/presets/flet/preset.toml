@@ -11,7 +11,7 @@ pyproject = """
 org = "com.example"
 product = "{{name}}"
 company = "{{name}}"
-copyright = "Copyright (C) 2026"
+copyright = "Copyright (C) {{name}}"
 
 [tool.flet.app]
 path = "src"

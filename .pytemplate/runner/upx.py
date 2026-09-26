@@ -8,13 +8,15 @@
   level     1..9 | best | brute | ultra-brute (brute levels: much slower builds, a few % smaller)
   lzma      LZMA instead of NRV (smaller, slower to unpack)
   exclude   file-name globs never packed, on top of BUILTIN_EXCLUDE
-  path      an explicit upx executable (default: `upx` on PATH, else a pinned download)
+  path      an explicit upx executable, absolute or relative to the project root (default:
+            `upx` on PATH, else the cached pinned download)
 
 How each method uses it:
   - exe (PyInstaller, and flet pack, which runs PyInstaller): PyInstaller's own UPX step
     (--upx-dir): it packs every collected binary before bundling, skips Control Flow Guard
     DLLs and Qt plugins, and always adds --lzma. The level goes in the UPX environment
-    variable, which upx reads as default options.
+    variable, which upx reads as default options. Windows only: PyInstaller disables UPX on
+    every other OS, so there the exe is not packed (exe.size_args warns).
   - nuitka: Nuitka's upx plugin (it always uses --best --lzma).
   - portable and flet: pack_tree() on the finished folder.
 Never used: pyz (the zip is already deflated) and wheel.
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import http.client
 import io
 import os
 import shutil
@@ -42,7 +45,7 @@ from pathlib import Path
 
 from . import proc, ui
 from .config import Config
-from .project import IS_MACOS, IS_WINDOWS, host_arch, rel
+from .project import IS_MACOS, IS_WINDOWS, ROOT, host_arch, rel
 from .ui import DeployError
 
 VERSION = "5.2.1"  # pinned: bump VERSION and the SHA-256 values together
@@ -120,50 +123,117 @@ def _exe_name() -> str:
     return "upx.exe" if IS_WINDOWS else "upx"
 
 
+def _asset() -> tuple[str, str, str]:
+    """This host's pinned release asset: (file name, sha256, URL)."""
+    asset, sha256 = ASSETS[("windows" if IS_WINDOWS else "linux", host_arch())]
+    return asset, sha256, URL.format(version=VERSION, asset=asset)
+
+
 def _download(dest: Path) -> Path:
-    key = ("windows" if IS_WINDOWS else "linux", host_arch())
-    asset, sha256 = ASSETS[key]
-    url = URL.format(version=VERSION, asset=asset)
+    asset, sha256, url = _asset()
     ui.info(f"upx: downloading {url}")
     try:
         with urllib.request.urlopen(url, timeout=120) as r:  # noqa: S310 (fixed https URL)
             data = r.read()
-    except OSError as e:
+    except (OSError, http.client.HTTPException) as e:  # a connection closed halfway: IncompleteRead, no OSError
         raise DeployError(f"upx: cannot download {url}: {e}\n  Install it yourself (scoop/winget/apt) or set deploy.upx.path", 3) from None
     digest = hashlib.sha256(data).hexdigest()
     if digest != sha256:
         raise DeployError(f"upx: {asset} has SHA-256 {digest}, expected {sha256}: not using it", 3)
-    dest.mkdir(parents=True, exist_ok=True)
-    target = dest / _exe_name()
+    binary: bytes | None = None
     if asset.endswith(".zip"):
         with zipfile.ZipFile(io.BytesIO(data)) as z:
-            member = next(n for n in z.namelist() if n.endswith("/upx.exe"))
-            target.write_bytes(z.read(member))
+            member = next((n for n in z.namelist() if n.endswith("/upx.exe")), None)
+            binary = z.read(member) if member else None
     else:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:xz") as t:
-            info = next(m for m in t.getmembers() if m.name.endswith("/upx") and m.isfile())
-            extracted = t.extractfile(info)
-            if extracted is None:
-                raise DeployError(f"upx: {asset} has no upx binary", 3)
-            target.write_bytes(extracted.read())
-        target.chmod(0o755)
+            info = next((m for m in t.getmembers() if m.name.endswith("/upx") and m.isfile()), None)
+            extracted = t.extractfile(info) if info else None
+            binary = extracted.read() if extracted else None
+    if binary is None:
+        raise DeployError(f"upx: {asset} has no {_exe_name()} binary", 3)
+    dest.mkdir(parents=True, exist_ok=True)
+    target = dest / _exe_name()
+    partial = target.with_name(target.name + ".part")  # an interrupted write must never look cached
+    partial.write_bytes(binary)
+    if not IS_WINDOWS:
+        partial.chmod(0o755)
+    partial.replace(target)
     return target
 
 
-def find(cfg: Config) -> Path:
-    """Return the upx executable: deploy.upx.path, `upx` on PATH, the cache, or a fresh download."""
+def locate(cfg: Config) -> Path | None:
+    """Return the upx executable find() would use without downloading one (None: it would).
+
+    A relative deploy.upx.path starts at the project root, never the caller's cwd (the tools run
+    with other working folders: flet pack in its stage, Nuitka in its own): it reaches them
+    absolute, and not resolved, because PyInstaller wants <upx-dir>/upx and Nuitka a file named upx.
+    """
     if cfg.deploy.upx.path:
-        path = Path(cfg.deploy.upx.path).expanduser()
+        given = Path(cfg.deploy.upx.path).expanduser()
+        path = given if given.is_absolute() else ROOT / given
         if not path.is_file():
-            raise DeployError(f"deploy.upx.path does not exist: {path}", 3)
+            raise DeployError(
+                f"deploy.upx.path = {cfg.deploy.upx.path!r} does not exist ({path}; a relative path starts at the project root)", 3
+            )
         return path
     on_path = shutil.which("upx", path=proc.base_env().get("PATH"))
     if on_path:
         return Path(on_path)
     cached = _cache_dir() / _exe_name()
-    if cached.is_file():
-        return cached
-    return _download(_cache_dir())
+    return cached if cached.is_file() else None
+
+
+def find(cfg: Config) -> Path:
+    """Return the upx executable: deploy.upx.path, `upx` on PATH, the cache, or a fresh download."""
+    return locate(cfg) or _download(_cache_dir())
+
+
+def uses(cfg: Config, method: str) -> bool:
+    """Whether a build with this method packs with UPX on this host (no warning: active() gives
+    it during the build). exe (PyInstaller, flet pack) packs on Windows only; flet only desktop
+    targets (mobile and web builds ship no binary of ours); pyz and wheel never."""
+    if not cfg.deploy.upx.enabled or unsupported_reason():
+        return False
+    if method == "exe":
+        return IS_WINDOWS
+    if method == "flet":
+        from .methods.flet import MOBILE_WEB  # lazily: methods.flet imports this module
+
+        return cfg.deploy.flet.target not in MOBILE_WEB
+    return method in ("nuitka", "portable")
+
+
+def _always_packs(cfg: Config, method: str) -> bool:
+    """Whether a build that uses UPX always holds a binary to pack: the exe, Nuitka's binary, a
+    bundled interpreter, the flet desktop runner. A portable build with runtime = "system"
+    bundles no interpreter: only a native dependency or a mypyc extension in app/ or lib/ gives
+    upx something to do (a pure-Python app on Linux has nothing: .so files are never packed)."""
+    return not (method == "portable" and cfg.deploy.portable.runtime == "system")
+
+
+def preflight(cfg: Config, method: str) -> str:
+    """Resolve the upx executable before a build that packs with it does any work, and return
+    what it will use ("" when the build packs nothing).
+
+    cmd_build calls this before the checks and the payload, also in --dry-run: a deploy.upx.path
+    that does not exist, or a download that fails, stops the build now, not after the runtime
+    copy or the whole `flet build`. A dry run names the download instead of doing it. A build
+    that may hold nothing to pack (_always_packs) checks deploy.upx.path now but leaves the
+    download to pack_tree, which asks for upx only when it has a candidate: a pure-Python
+    runtime = "system" portable build must not need the network for a tool it never runs.
+    """
+    if not uses(cfg, method):
+        return ""
+    found = locate(cfg)  # a deploy.upx.path that does not exist fails here, whatever the build holds
+    if found is None:
+        url = f"{_asset()[2]} into {_cache_dir()}"
+        if not _always_packs(cfg, method):
+            return f"upx: would download {url} if the build holds a binary to pack" if proc.DRY_RUN else ""
+        if proc.DRY_RUN:
+            return f"upx: would download {url}"
+        found = _download(_cache_dir())
+    return f"upx: {found}"
 
 
 @dataclass
@@ -234,11 +304,11 @@ def pack_tree(cfg: Config, root: Path) -> list[Result]:
     files = candidates(root, cfg)
     if not files:
         return []
-    upx = find(cfg)
     flags = level_flags(cfg)
     ui.step(f"upx {' '.join(flags)}: {len(files)} binaries in {rel(root)}")
-    if proc.DRY_RUN:
+    if proc.DRY_RUN:  # never reached from ./deploy build (a dry run stops before any method builds)
         return []
+    upx = find(cfg)  # resolved by preflight() before the build, except for a runtime = "system" portable build
     with ThreadPoolExecutor(max_workers=max(1, (os.cpu_count() or 2))) as pool:
         results = list(pool.map(lambda p: pack_file(upx, p, flags), files))
     packed = [r for r in results if r.status == "packed"]

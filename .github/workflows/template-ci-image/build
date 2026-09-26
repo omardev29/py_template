@@ -1,0 +1,27 @@
+#!/bin/sh
+# Builds the Linux CI image of the TEMPLATE repository (template-ci-image.yml):
+#   sh build REF SOURCE_URL [docker build options...]
+# REF is `python3 pins.py ref OWNER/REPO`, SOURCE_URL the repository's page (the image's label
+# links the GHCR package to it). The context is the template's tracked files with their
+# working-tree content, as `./deploy new` copies them, plus pins.env and inputs.txt from
+# pins.py. A builder behind a TLS-intercepting proxy adds `--secret id=ca,src=<CA bundle>`
+# (and its proxy variables as --build-arg).
+set -eu
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$here/../../.." && pwd)
+python=${PYTHON:-python3}
+if [ $# -lt 2 ]; then
+    echo "usage: sh build REF SOURCE_URL [docker build options...]" >&2
+    exit 2
+fi
+ref=$1
+source=$2
+shift 2
+ctx=$(mktemp -d)
+trap 'rm -rf "$ctx"' EXIT
+git -C "$root" ls-files -z | (cd "$root" && tar --null -T - -cf -) | tar -xf - -C "$ctx"
+image="$ctx/.github/workflows/template-ci-image"
+"$python" "$here/pins.py" env > "$image/pins.env"
+"$python" "$here/pins.py" canonical > "$image/inputs.txt"
+base=$("$python" "$here/pins.py" base)
+docker build --build-arg "BASE=$base" --build-arg "SOURCE_URL=$source" -f "$image/Dockerfile" -t "$ref" "$@" "$ctx"

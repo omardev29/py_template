@@ -8,10 +8,13 @@ tools environment (ruff, mypy, pytest) are also run for real on a scratch tree.
 from __future__ import annotations
 
 import copy
+import datetime
 import importlib.util
 import json
 import os
+import posixpath
 import re
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -22,10 +25,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cli, config, lintc, ui  # noqa: E402
+from runner import cli, config, lintc, presets, render, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.editors import vscode  # noqa: E402
-from runner.project import PRESETS, SRC  # noqa: E402
+from runner.project import PRESETS, SRC, TEMPLATES  # noqa: E402
+from runner.ui import DeployError  # noqa: E402
 
 WS = "${workspaceFolder}"
 COMMANDS = set(cli.COMMANDS)
@@ -58,7 +62,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "mypyc-active": {"backend": {"active": "mypyc"}},
     "pypy": {"backend": {"supported": ["cpython", "pypy", "mypyc"]}},
     "basedpyright": {"typing": {"editor": "basedpyright", "relaxed": "warn"}},
-    "jit": {"python": {"jit": True}, "typing": {"relaxed": "strict"}},
+    "strict": {"typing": {"relaxed": "strict"}},
     "cpython-only": {"backend": {"supported": ["cpython"]}},
     "extra-buttons": {"vscode": {"buttons": ["build --method pyz", "lint", "report", "ci", "run  mypyc"]}},
 }
@@ -162,6 +166,7 @@ def test_catalog_script() -> None:
         "deploy: lint --fix",
         "deploy: fmt",
         "deploy: doctor",
+        "deploy: apply",
         "deploy: setup",
         "deploy: ci",
     ]
@@ -182,7 +187,8 @@ def test_catalog_follows_the_backends() -> None:
     assert "mypyc" not in owners(raylib["deploy: run"]) and "mypyc" in owners(raylib["deploy: run mypyc"])
     mypyc = by_label(make("mypyc-active"))
     assert owners(mypyc["deploy: run"]) == ["mypyc"]
-    assert owners(mypyc["deploy: test"]) == ["mypyc", "pytest"]
+    # pytest: the main matcher, then the stage copy and the compiled modules (both mapped to src/)
+    assert owners(mypyc["deploy: test"]) == ["mypyc", "pytest", "pytest", "pytest"]
     assert "mypyc" in owners(mypyc["deploy: build"])
 
 
@@ -229,6 +235,63 @@ def test_buttons_without_a_catalog_task_get_their_own() -> None:
     assert "deploy: build --method pyz" not in [t["label"] for t in tasks[5:]]
 
 
+def test_button_arguments_are_split_like_task_deps() -> None:
+    """Quotes group words, as in [tasks] deps: a quoted argument reaches the command as
+    one argument, without the quote characters, on every OS."""
+    buttons = ["run", 'run cpython "hello world"', "run cpython hello world", "run  cpython  'hello world'", "test 'x"]
+    tasks = task_list(preset("script", {"vscode": {"buttons": buttons}}))
+    shown = [t for t in tasks if "statusbar" in t["options"]]
+    assert [t["label"] for t in shown] == [
+        "deploy: run",
+        "deploy: run cpython 'hello world'",  # the same button twice: one task
+        "deploy: run cpython hello world",
+        "deploy: test ''\"'\"'x'",  # unbalanced quotes: plain words, as for deps
+    ]
+    quoted = shown[1]
+    assert quoted["args"][1:] == quoted["windows"]["args"] == ["run", "cpython", "hello world"]
+    assert quoted["detail"].startswith("./deploy run cpython 'hello world'  |  ")
+    assert quoted["options"]["statusbar"]["label"] == "Run cpython 'hello world'"
+    assert "runOptions" in quoted, "a run task: restarted, not stacked"
+    assert shown[2]["args"][1:] == ["run", "cpython", "hello", "world"]
+    assert shown[3]["args"][1:] == ["test", "'x"]
+    labels = [t["label"] for t in tasks]
+    assert len(labels) == len(set(labels)), labels
+
+
+def test_a_backslash_in_a_button_is_a_plain_character() -> None:
+    """A Windows path reaches the app as typed: POSIX shlex took the backslashes for escapes
+    and passed C:datain.txt. Quotes still group words; a quote inside needs the other kind."""
+    buttons = ["run", r"run cpython C:\data\in.txt", r'run cpython "C:\My Data\in.txt" a\b', r"test 'say \"hi\"'"]
+    tasks = task_list(preset("script", {"vscode": {"buttons": buttons}}))
+    shown = [t for t in tasks if "statusbar" in t["options"]]
+    assert [t["args"][1:] for t in shown] == [
+        ["run"],
+        ["run", "cpython", r"C:\data\in.txt"],
+        ["run", "cpython", r"C:\My Data\in.txt", "a\\b"],
+        ["test", r"say \"hi\""],
+    ]
+    for t in shown:
+        assert t["windows"]["args"] == t["args"][1:]
+    assert shown[1]["label"] == r"deploy: run cpython C:\data\in.txt"
+    assert shown[1]["options"]["statusbar"]["label"] == r"Run cpython C:\data\in.txt"
+    assert shown[1]["detail"].startswith(r"./deploy run cpython C:\data\in.txt  |  ")
+
+
+def test_labels_quote_only_what_would_not_read_back_as_one_word() -> None:
+    """A non-ASCII letter is no reason to quote (shlex.join quoted `--title=cafe` with an
+    accent); a blank, a quote or an empty argument is."""
+    buttons = ["run --title=caf\u00e9", "run cpython ''", "run cpython \"it's\""]
+    tasks = task_list(preset("script", {"vscode": {"buttons": buttons}}))
+    shown = [t for t in tasks if "statusbar" in t["options"]]
+    assert shown[0]["label"] == "deploy: run --title=caf\u00e9"
+    assert shown[0]["options"]["statusbar"]["label"] == "Run --title=caf\u00e9"
+    assert shown[0]["detail"].startswith("./deploy run --title=caf\u00e9  |  ")
+    assert shown[1]["args"][1:] == ["run", "cpython", ""]
+    assert shown[2]["args"][1:] == ["run", "cpython", "it's"]
+    for t in shown:  # every label reads back as the task's own arguments
+        assert vscode.split_words(t["label"].removeprefix("deploy: ")) == t["args"][1:]
+
+
 def test_task_cycles_and_bad_deps_do_not_break_rendering() -> None:
     cfg = preset("script", {"tasks": {"a": {"deps": ["b"]}, "b": {"deps": ["a", "check"]}, "q": {"deps": ["test 'x"]}}})
     assert vscode.scan(cfg, ["a"]).kinds == vscode.CHECK_KINDS
@@ -250,7 +313,7 @@ def test_severity_follows_the_typing_profile() -> None:
     warn = by_label(make("basedpyright"))  # relaxed 'warn': ruff exit_zero, mypy non-blocking
     assert severities(warn["deploy: check"]) == {"ruff": "warning", "mypy": "warning", "rules": "*", "pyright": "*"}
     assert severities(warn["deploy: check all"])["mypy"] == "error"
-    strict = by_label(make("jit"))
+    strict = by_label(make("strict"))
     assert severities(strict["deploy: check"])["mypy"] == "error"
     assert severities(by_label(make("mypyc-active"))["deploy: check"])["mypy"] == "error"
     assert severities(script["deploy: report"]) == {"mypy": "error", "mypyc": "*"}
@@ -285,7 +348,7 @@ def test_launch_configs() -> None:
     assert stage["python"] == f"{WS}/.venv/bin/python"
     assert stage["windows"] == {"python": f"{WS}/.venv/Scripts/python.exe"}
     assert stage["pathMappings"] == [{"localRoot": f"{WS}/src", "remoteRoot": f"{WS}/.build/mypyc-dev/stage"}]
-    assert stage["env"] == {"PYTEMPLATE_BACKEND": "mypyc"}
+    assert stage["env"] == {"PYTHONUTF8": "1", "PYTEMPLATE_BACKEND": "mypyc"}
     compile_task = by_label(make("script"))[stage["preLaunchTask"]]
     assert compile_task["args"][1:] == ["compile"] and compile_task["hide"] is True
     assert list(script)[-1] == "Tests (pytest)"
@@ -293,13 +356,6 @@ def test_launch_configs() -> None:
     pypy = configs_of("pypy")
     (name,) = [n for n in pypy if "PyPy" in n]
     assert pypy[name]["windows"]["python"] == f"{WS}/.venv-pypy/Scripts/python.exe"
-
-    jit = configs_of("jit")
-    assert jit["src/main.py (CPython JIT)"]["env"] == {"PYTHON_JIT": "1"}
-    assert jit["src/main.py (CPython JIT)"]["python"] == f"{WS}/.venv-jit/bin/python"
-    jit_stage = jit["Run mypyc stage (compiled modules cannot be stepped into)"]
-    assert jit_stage["windows"]["python"] == f"{WS}/.venv-jit/Scripts/python.exe"
-    assert jit_stage["env"]["PYTHON_JIT"] == "1"
 
     assert not any("mypyc" in n for n in configs_of("cpython-only"))
 
@@ -360,13 +416,24 @@ def test_matcher_regexps_are_portable() -> None:
         assert m.get("severity", "error") in ("error", "warning", "info")
 
 
+def kind_of(m: dict[str, Any]) -> str:
+    """The matcher's owner, plus -note for mypy notes and -stage / -compiled for the two pytest
+    matchers of the mypyc stage (both relative to src/)."""
+    kind = m["owner"].removeprefix("pytemplate-")
+    if m.get("severity") == "info":
+        return kind + "-note"
+    if kind == "pytest" and m["fileLocation"] == ["relative", f"{WS}/src"]:
+        return kind + ("-stage" if "mypyc-" in m["pattern"]["regexp"] else "-compiled")
+    return kind
+
+
 def matchers_by_kind() -> dict[str, dict[str, Any]]:
     """Every matcher, from a config that has all of them (package myapp, mypy errors blocking)."""
     cfg = make("basedpyright")
     out: dict[str, dict[str, Any]] = {}
     for m in vscode.problem_matchers(cfg, {"ruff", "mypy", "rules", "pyright", "mypyc", "pytest"}, ["mypyc"]):
-        kind = m["owner"].removeprefix("pytemplate-")
-        out[kind + ("-note" if m.get("severity") == "info" else "")] = m
+        assert kind_of(m) not in out, kind_of(m)
+        out[kind_of(m)] = m
     return out
 
 
@@ -436,6 +503,18 @@ SAMPLES: list[tuple[str, str | None, dict[str, str | None]]] = [
      {"file": "C:\\Users\\John Smith\\proj\\tests\\test_x.py", "message": "assert (1 + 1) == 3"}),
     ("tests\\test_core.py:19: ", None, {}),
     ("src/demo/core/bench.py:30: in count_primes", None, {}),
+    # pytest under the mypyc backend: a compiled module prints the stage-relative path mypyc
+    # recorded, an interpreted one its stage copy (relative, absolute, WSL layout); both -> src/
+    ("myapp/core/bench.py:56: ZeroDivisionError", "pytest-compiled", {"file": "myapp/core/bench.py", "line": "56"}),
+    ("myapp\\core\\bench.py:56: ZeroDivisionError", "pytest-compiled", {"file": "myapp\\core\\bench.py"}),
+    (".build/mypyc-dev/stage/myapp/app.py:45: ValueError", "pytest-stage", {"file": "myapp/app.py", "line": "45"}),
+    (".build\\wsl\\mypyc-dev\\stage\\myapp\\app.py:45: ValueError", "pytest-stage", {"file": "myapp\\app.py"}),
+    ("/home/dev/p1/.build/mypyc-dev/stage/myapp/app.py:3: assert 0", "pytest-stage", {"file": "myapp/app.py", "message": "assert 0"}),
+    ("C:\\Users\\John Smith\\p1\\.build\\mypyc-release\\stage\\main.py:7: KeyError", "pytest-stage", {"file": "main.py"}),
+    ("myapp/core/bench.py:30: in count_primes", None, {}),
+    (".build/mypyc-dev/stage/myapp/app.py:44: ", None, {}),
+    ("myapp_extra/x.py:3: ValueError", "pytest", {"file": "myapp_extra/x.py"}),
+    ("src/myapp/app.py:45: ValueError", "pytest", {"file": "src/myapp/app.py"}),
     ("E       assert (1 + 1) == 3", None, {}),
     ("FAILED tests/test_core.py::test_fails_assert - assert (1 + 1) == 3", None, {}),
     ("tests\\test_core.py ..FF                                                  [100%]", None, {}),
@@ -468,12 +547,37 @@ def test_matcher_samples(line: str, kind: str | None, expected: dict[str, str | 
             assert got[key] == value, (line, key, got)
 
 
+@pytest.mark.parametrize("name", ["src", "Src", "tests", "typings"])
+def test_a_package_named_like_a_code_folder_is_refused(name: str) -> None:
+    """mypy prints paths relative to the root (src/<pkg>/x.py), mypyc relative to its stage
+    (<pkg>/x.py). For a package named src the mypy and mypyc matchers of `report` and `ci` both
+    matched every line, one of them pointing at a file that does not exist: the name rules
+    refuse every code folder as a package name, so the two can never read the same line."""
+    pkg = name.lower()
+    with pytest.raises(DeployError, match=re.escape(f"src/{pkg}/ would collide with the project's own {pkg}/")) as e:
+        presets.check_name_free(None, "script", name)
+    assert e.value.code == 2
+    cfg = make("script")
+    matchers = vscode.problem_matchers(cfg, {"mypy", "mypyc"}, ["mypyc"])
+    for line, owner in (("src/myapp/core/bench.py:3: error: x  [assignment]", "mypy"), ("myapp/core/bench.py:3: error: x  [assignment]", "mypyc")):
+        hits = [m["owner"] for m in matchers if re.search(m["pattern"]["regexp"], line)]
+        assert hits == [f"pytemplate-{owner}"], (line, hits)
+
+
 def test_mypy_roots_only_list_existing_folders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "src").mkdir()
     monkeypatch.setattr(vscode, "ROOT", tmp_path)
+    monkeypatch.setattr(render, "ROOT", tmp_path)
     assert vscode._mypy_re("error").startswith(r"^((?:src)[\\/]")
+    # folders that hold no code (an emptied typings/, a tests/ left holding only __pycache__) do
+    # not exist in a fresh clone: listed, tasks.json differed from CI's (`render --check` failed)
     (tmp_path / "typings").mkdir()
-    assert vscode._mypy_re("note").startswith(r"^((?:src|typings)[\\/]")
+    (tmp_path / "tests" / "__pycache__").mkdir(parents=True)
+    (tmp_path / "tests" / "__pycache__" / "test_x.cpython-314.pyc").write_bytes(b"")
+    assert vscode._mypy_re("error").startswith(r"^((?:src)[\\/]")
+    (tmp_path / "typings" / "lib.pyi").write_text("", encoding="utf-8")
+    (tmp_path / "tests" / "test_x.py").write_text("", encoding="utf-8")
+    assert vscode._mypy_re("note").startswith(r"^((?:src|tests|typings)[\\/]")
 
 
 def test_mypyc_packages_come_from_compile_modules() -> None:
@@ -558,3 +662,365 @@ def test_real_pytest(scratch: Path) -> None:
     found = _classify(_run(argv, scratch))
     assert found.get("pytest") and len(found["pytest"]) == 2, found
     assert found["pytest"][0].endswith(": AssertionError") and found["pytest"][1].endswith(": KeyError"), found
+
+
+# --- where a problem lands: VS Code's path resolution ---------------------------------------------
+
+
+def resolve(matcher: dict[str, Any], filename: str, root: Path) -> Path:
+    """VS Code's getResource (problemMatcher.ts): `relative` joins the prefix; `autoDetect` takes the
+    relative path when that file exists, else the captured text as an absolute path, which for a
+    relative capture is `/<file>`: a problem pointing at a file that cannot be opened."""
+    kind, *prefix = matcher["fileLocation"]
+    name = filename.replace("\\", "/")
+    if kind == "autoDetect":
+        relative = resolve({"fileLocation": ["relative", *prefix]}, filename, root)
+        if relative.exists():
+            return relative
+        kind = "absolute"
+    joined = posixpath.join(prefix[0].replace(WS, root.as_posix()), name) if kind == "relative" else name
+    full = posixpath.normpath(joined)
+    return Path(full if re.match(r"[A-Za-z]:/", full) or full.startswith("/") else "/" + full)
+
+
+# The crash lines pytest prints under the mypyc backend, and the file each one must open
+STAGE_LINES = {
+    "myapp/core/bench.py:56: ZeroDivisionError": "src/myapp/core/bench.py",
+    "myapp\\core\\bench.py:56: ZeroDivisionError": "src/myapp/core/bench.py",
+    ".build/mypyc-dev/stage/myapp/app.py:45: ValueError": "src/myapp/app.py",
+    ".build\\wsl\\mypyc-dev\\stage\\myapp\\app.py:45: ValueError": "src/myapp/app.py",
+    "tests/test_core.py:25: AssertionError": "tests/test_core.py",
+    "src/myapp/app.py:45: ValueError": "src/myapp/app.py",
+}
+
+
+@pytest.mark.parametrize(
+    ("name", "label"),
+    [("script", "deploy: test mypyc"), ("script", "deploy: test all"), ("mypyc-active", "deploy: test"), ("raylib", "deploy: ci")],
+)
+def test_pytest_under_mypyc_points_at_src(name: str, label: str, tmp_path: Path) -> None:
+    for target in set(STAGE_LINES.values()):
+        (tmp_path / target).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / target).write_text("", encoding="utf-8")
+    matchers = by_label(make(name))[label]["problemMatcher"]
+    for line, expected in STAGE_LINES.items():
+        hits = [m for m in matchers if re.search(m["pattern"]["regexp"], line)]
+        assert len(hits) == 1, (line, [kind_of(m) for m in hits])  # the result never depends on VS Code's order
+        found = re.search(hits[0]["pattern"]["regexp"], line)
+        assert found is not None
+        where = resolve(hits[0], found.group(hits[0]["pattern"]["file"]), tmp_path)
+        assert where == tmp_path / expected, (line, where)
+
+
+def test_pytest_without_mypyc_keeps_one_plain_matcher() -> None:
+    for name, label in (("script", "deploy: test"), ("cpython-only", "deploy: test"), ("raylib", "deploy: test cpython")):
+        pytest_matchers = [m for m in by_label(make(name))[label]["problemMatcher"] if kind_of(m).startswith("pytest")]
+        assert [m["pattern"]["regexp"] for m in pytest_matchers] == [vscode.PYTEST_RE], (name, label)
+
+
+def test_no_compiled_module_means_no_stage_matchers() -> None:
+    cfg = preset("script", {"compile": {"modules": []}})
+    kinds = [kind_of(m) for m in vscode.problem_matchers(cfg, {"mypyc", "pytest"}, [])]
+    assert kinds == ["pytest"]  # an empty alternative would claim every absolute path
+
+
+# --- settings.json -----------------------------------------------------------------------------
+
+
+def test_basedpyright_settings_prevent_the_conflict_prompts() -> None:
+    settings = generated(make("basedpyright"))[".vscode/settings.json"]
+    assert settings["python.languageServer"] == "None"
+    assert settings["python.analysis.typeCheckingMode"] == "off"
+    for name in ("script", "raylib", "flet"):
+        plain = generated(make(name))[".vscode/settings.json"]
+        assert "python.languageServer" not in plain and "python.analysis.typeCheckingMode" not in plain, name
+    user = preset("script", {"typing": {"editor": "basedpyright"}, "vscode": {"settings": {"python.languageServer": "Pylance"}}})
+    assert generated(user)[".vscode/settings.json"]["python.languageServer"] == "Pylance"  # [vscode] settings wins
+
+
+@pytest.fixture
+def templates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A private copy of the settings template and the typing profiles."""
+    shutil.copytree(TEMPLATES / "vscode", tmp_path / "vscode")
+    shutil.copytree(TEMPLATES / "typing", tmp_path / "typing")
+    monkeypatch.setattr(vscode, "TEMPLATES", tmp_path)
+    monkeypatch.setattr(render, "TEMPLATES", tmp_path)
+    return tmp_path
+
+
+def test_settings_template_tolerates_a_bom_and_crlf(templates: Path) -> None:
+    cfg = make("script")
+    expected = vscode.settings(cfg, "off")
+    path = templates / "vscode" / "settings.json"
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes().replace(b"\n", b"\r\n"))
+    assert vscode.settings(cfg, "off") == expected
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        (b'{\n    // mine\n    "a": 1\n}\n', "invalid JSON at line 2"),
+        (b'{"a": 1,}\n', "no trailing commas"),
+        (b"[1, 2]\n", "must hold a JSON object"),
+        (b'{"a": NaN}\n', "nan"),
+        (b"\xff\xfe{\x00}\x00", "not UTF-8"),
+    ],
+    ids=["comment", "trailing-comma", "array", "nan", "utf16"],
+)
+def test_settings_template_errors_name_the_file(templates: Path, content: bytes, message: str) -> None:
+    (templates / "vscode" / "settings.json").write_bytes(content)
+    with pytest.raises(DeployError) as e:
+        vscode.settings(make("script"), "off")
+    assert e.value.code == 2 and "settings.json" in str(e.value) and message in str(e.value), str(e.value)
+
+
+def test_settings_template_missing_is_a_clear_error(templates: Path) -> None:
+    (templates / "vscode" / "settings.json").unlink()
+    with pytest.raises(DeployError, match="cannot read .*settings.json"):
+        vscode.settings(make("script"), "off")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        datetime.date(2026, 1, 1),
+        datetime.datetime(2026, 1, 1, 12, 0),
+        datetime.time(12, 0),
+        [1, datetime.date(2026, 1, 1)],
+        {"inner": datetime.time(1, 2)},
+        float("nan"),
+        float("inf"),
+        -float("inf"),
+    ],
+    ids=["date", "datetime", "time", "in-array", "in-table", "nan", "inf", "-inf"],
+)
+def test_vscode_settings_must_be_json_values(value: object) -> None:
+    # A clear config error (from config.validate or from the generator), never a TypeError from
+    # json.dumps, nor a settings.json holding NaN, which is not JSON
+    with pytest.raises(DeployError) as e:
+        cfg = preset("script", {"vscode": {"settings": {"x.when": value}}})
+        render.outputs(cfg)
+    assert "vscode" in str(e.value) and "x.when" in str(e.value), str(e.value)
+
+
+def test_vscode_settings_json_values_render() -> None:
+    values = {"a": "s", "b": 1, "c": 1.5, "d": True, "e": [1, "x", [False]], "[python]": {"f": False, "g": {"h": 0}}}
+    settings = generated(preset("script", {"vscode": {"settings": values}}))[".vscode/settings.json"]
+    assert {k: settings[k] for k in values} == values
+
+
+def test_profile_vscode_table_must_be_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = render.load_profile
+    monkeypatch.setattr(render, "load_profile", lambda name: {**real(name), "vscode": {"x": datetime.date(2026, 1, 1)}})
+    with pytest.raises(DeployError, match=r"typing profile 'off'.*\[vscode\]\.x"):
+        vscode.settings(make("script"), "off")
+
+
+# --- buttons and labels ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "buttons",
+    [
+        ["report", "report --open"],
+        ["report --open", "report"],
+        ["run --open"],
+        ["test --open", "run", "report"],
+        ["lint", "lint --fix", "lint  --fix"],
+        ["run", "run cpython", "run mypyc", "test all", "check all", "build", "fmt", "doctor", "setup", "compile", "ci"],
+    ],
+)
+@pytest.mark.parametrize("supported", [["cpython", "mypyc"], ["cpython"]])
+def test_labels_stay_unique_for_any_buttons(buttons: list[str], supported: list[str]) -> None:
+    cfg = preset("script", {"vscode": {"buttons": buttons}, "backend": {"supported": supported}})
+    tasks = task_list(cfg)
+    labels = [t["label"] for t in tasks]
+    assert len(labels) == len(set(labels)), labels
+    for t in tasks:  # a label never hides an argument, except the catalog's `report --open`
+        args = t["args"][1:]
+        assert vscode.split_words(t["label"].removeprefix("deploy: ")) == (["report"] if args == ["report", "--open"] else args)
+    bars = [t["options"]["statusbar"]["label"] for t in tasks if "statusbar" in t["options"]]
+    assert len(bars) == len(set(bars)), bars
+
+
+# --- launch.json -------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_launch_configs_run_in_utf8_mode(name: str) -> None:
+    for conf in vscode.launch(make(name))["configurations"]:
+        assert conf["env"]["PYTHONUTF8"] == "1", conf["name"]  # as under ./deploy run / test
+        assert set(conf["env"]) <= {"PYTHONUTF8", "PYTEMPLATE_BACKEND"}, conf["name"]
+
+
+# --- real tool output through the generated tasks' matchers ---------------------------------------
+
+APP_PY = """import os
+
+
+def boundary_fail() -> None:
+    raise ValueError("boundary")
+
+
+def wrong_type(x: int) -> str:
+    return x + 1
+
+
+def unused() -> None:
+    print(undefined_name)
+"""
+BENCH_PY = '''"""Compiled by mypyc (in the stage)."""
+
+
+def divide(a: int, b: int) -> float:
+    return a / b
+'''
+BROKEN_PY = "def wrong() -> str:\n    return 1\n"
+TEST_CORE_PY = """from myapp import app
+from myapp.core import bench
+
+
+def test_assert() -> None:
+    assert 1 + 1 == 3
+
+
+def test_zero() -> None:
+    bench.divide(1, 0)
+
+
+def test_boundary() -> None:
+    app.boundary_fail()
+"""
+STAGE = ".build/mypyc-dev/stage"
+# What each task must put in the Problems panel: (file, line, matcher)
+CHECK_PROBLEMS = {
+    ("src/myapp/app.py", 1, "ruff"),  # F401 os
+    ("src/myapp/app.py", 13, "ruff"),  # F821 undefined_name
+    ("src/myapp/app.py", 9, "mypy"),  # return-value
+    ("src/myapp/app.py", 13, "mypy"),  # name-defined
+    ("src/myapp/core/broken.py", 2, "mypy"),
+}
+COMPILE_PROBLEMS = {("src/myapp/core/broken.py", 2, "mypyc")}
+TEST_PROBLEMS = {("tests/test_core.py", 6, "pytest"), ("src/myapp/core/bench.py", 5, "pytest"), ("src/myapp/app.py", 5, "pytest")}
+
+
+@pytest.fixture(scope="module")
+def defects(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A project with one known defect per tool, laid out as ./deploy lays it out."""
+    root = tmp_path_factory.mktemp("defects")
+    files = {
+        "src/myapp/__init__.py": "",
+        "src/myapp/app.py": APP_PY,
+        "src/myapp/core/__init__.py": "",
+        "src/myapp/core/bench.py": BENCH_PY,
+        "src/myapp/core/broken.py": BROKEN_PY,
+        "tests/test_core.py": TEST_CORE_PY,
+        "pyproject.toml": '[tool.pytest.ini_options]\ntestpaths = ["tests"]\npythonpath = ["src"]\n',
+        "mypy.ini": "[mypy]\nmypy_path = src\nfiles = src, tests\n",
+        "stage-mypy.ini": "[mypy]\n",
+    }
+    for rel_path, text in files.items():
+        (root / rel_path).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel_path).write_text(text, encoding="utf-8", newline="\n")
+    return root
+
+
+def _stage(root: Path, compiled: str) -> None:
+    """The mypyc dev stage: a copy of src/ whose myapp.core.bench is compiled for real, or stands in
+    for it with code objects that carry the stage-relative path mypyc records (CPy_AddTraceback)."""
+    stage = root / STAGE
+    shutil.rmtree(stage, ignore_errors=True)
+    shutil.copytree(root / "src", stage)
+    if compiled == "simulated":
+        (stage / "myapp" / "core" / "bench.py").write_text(
+            f"exec(compile({BENCH_PY!r}, 'myapp/core/bench.py', 'exec'), globals())\n", encoding="utf-8"
+        )
+        return
+    for module in ("mypyc", "setuptools"):
+        _needs(module)
+    code = (
+        "from mypyc.build import mypycify\nfrom setuptools import setup\n"
+        "setup(name='t', ext_modules=mypycify(['myapp/core/bench.py']), script_args=['--quiet', 'build_ext', '--inplace'])\n"
+    )
+    r = subprocess.run([sys.executable, "-c", code], cwd=stage, capture_output=True, text=True, timeout=600, check=False)
+    if r.returncode != 0:
+        pytest.skip(f"mypyc could not compile here (no C compiler?): {(r.stdout + r.stderr)[-300:]}")
+
+
+def _problems(lines: list[str], task: dict[str, Any], root: Path) -> set[tuple[str, int, str]]:
+    """Apply one task's matchers to a tool's output, resolve each problem as VS Code does, and check
+    that it opens a real file of the project (src/ or tests/, never the stage copy)."""
+    out: set[tuple[str, int, str]] = set()
+    for line in lines:
+        hits = [m for m in task["problemMatcher"] if re.search(m["pattern"]["regexp"], line)]
+        assert len(hits) <= 1, (line, [kind_of(m) for m in hits])
+        if not hits:
+            continue
+        found = re.search(hits[0]["pattern"]["regexp"], line)
+        assert found is not None
+        where = resolve(hits[0], found.group(hits[0]["pattern"]["file"]), root)
+        assert where.is_file(), (line, where)
+        rel_path = where.relative_to(root).as_posix()
+        assert rel_path.startswith(("src/", "tests/")), (line, rel_path)
+        out.add((rel_path, int(found.group(hits[0]["pattern"]["line"])), kind_of(hits[0]).split("-")[0]))
+    return out
+
+
+def test_real_check_and_compile_output_lands_in_src(defects: Path) -> None:
+    for module in ("ruff", "mypy"):
+        _needs(module)
+    tasks = by_label(make("script"))
+    ruff_argv = [sys.executable, "-m", "ruff", "check", "--isolated", "--no-cache", "--select", "F401,F821", "src", "tests"]
+    ruff = _run(ruff_argv, defects, RUFF_OUTPUT_FORMAT="concise")
+    mypy = _run([sys.executable, "-m", "mypy", "--no-incremental", "--cache-dir", os.devnull, "--config-file", "mypy.ini"], defects)
+    assert _problems(ruff + mypy, tasks["deploy: check all"], defects) == CHECK_PROBLEMS, ruff + mypy
+    # mypyc reports its type errors from the stage, where mypyc_build.py runs
+    _stage(defects, "simulated")
+    config_file = str(defects / "stage-mypy.ini")
+    stage_mypy = [sys.executable, "-m", "mypy", "--no-incremental", "--cache-dir", os.devnull, "--config-file", config_file, "myapp/core/broken.py"]
+    mypyc = _run(stage_mypy, defects / STAGE)
+    assert _problems(mypyc, tasks["deploy: compile"], defects) == COMPILE_PROBLEMS, mypyc
+
+
+@pytest.mark.parametrize("compiled", ["simulated", "mypyc"])
+def test_real_pytest_under_mypyc_lands_in_src(defects: Path, compiled: str) -> None:
+    _stage(defects, compiled)
+    lines = _run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", f"pythonpath={STAGE}"], defects)
+    stage_copy = re.compile(r"\.build[\\/]mypyc-dev[\\/]stage[\\/]myapp[\\/]app\.py:5: ValueError")
+    assert any(stage_copy.match(ln) for ln in lines), lines  # the interpreted module, from the stage
+    assert any(re.match(r"myapp[\\/]core[\\/]bench\.py:5: ZeroDivisionError", ln) for ln in lines), lines  # mypyc's path
+    for label in ("deploy: test mypyc", "deploy: test all"):
+        assert _problems(lines, by_label(make("script"))[label], defects) == TEST_PROBLEMS, (label, lines)
+
+
+def test_real_pytest_on_cpython_lands_in_src(defects: Path) -> None:
+    lines = _run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], defects)
+    assert _problems(lines, by_label(make("script"))["deploy: test"], defects) == TEST_PROBLEMS, lines
+
+
+# --- the regexps in JavaScript (VS Code runs `new RegExp(regexp).exec(line)`) ---------------------
+
+JS_EXEC = """
+const data = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+const out = data.regexps.map((rx) => data.lines.map((line) => {
+  const m = new RegExp(rx).exec(line);
+  return m === null ? null : Array.from(m, (g) => (g === undefined ? null : g));
+}));
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_matchers_agree_in_javascript(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    regexps = sorted({m["pattern"]["regexp"] for m in all_matchers()})
+    lines = [s[0] for s in SAMPLES] + list(STAGE_LINES)
+    data = tmp_path / "data.json"
+    data.write_text(json.dumps({"regexps": regexps, "lines": lines}), encoding="utf-8")
+    r = subprocess.run([node, "-e", JS_EXEC, str(data)], capture_output=True, text=True, encoding="utf-8", timeout=120, check=False)
+    assert r.returncode == 0, r.stderr
+    for rx, results in zip(regexps, json.loads(r.stdout), strict=True):
+        for line, got in zip(lines, results, strict=True):
+            m = re.search(rx, line)
+            assert got == (None if m is None else [m.group(0), *m.groups()]), (rx, line)

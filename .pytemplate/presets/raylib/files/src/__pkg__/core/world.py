@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Final, final
 
 SPRITE: Final = 32
-GRAVITY: Final = 900.0  # px/s²
+GRAVITY: Final = 900.0  # px/s^2
 BOUNCE: Final = 0.85
 MAX_SPEED: Final = 600.0
 

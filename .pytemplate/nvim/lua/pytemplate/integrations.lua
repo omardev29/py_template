@@ -44,8 +44,15 @@ function M.lsp_cmd(name)
   end
   local uvbin = pt.uv()
   if name == "basedpyright" and uvbin then
-    -- uvx: a cached, isolated basedpyright (bundles its own Node.js); never touches the project
-    return { uvbin, "tool", "run", "--from", "basedpyright", "basedpyright-langserver", "--stdio" }, "uvx"
+    -- uvx: a cached, isolated basedpyright (bundles its own Node.js); never touches the project.
+    -- The versions ./deploy check pins (editor.json), basedpyright's Node.js wheel included:
+    -- an unpinned request re-resolves to the newest (a new Node can raise the glibc/macOS floor).
+    local typing = pt.info().typing
+    local argv = { uvbin, "tool", "run", "--from", typing.basedpyright or "basedpyright" }
+    if typing.basedpyright_node then
+      vim.list_extend(argv, { "--with", typing.basedpyright_node })
+    end
+    return vim.list_extend(argv, { "basedpyright-langserver", "--stdio" }), "uvx"
   end
   return nil, "mason"
 end
@@ -98,7 +105,8 @@ local function mypy_env()
   local env = vim.fn.environ()
   env.PYTHONUTF8 = "1" -- like the runner (proc.base_env)
   env.VIRTUAL_ENV = nil
-  local mypy = pt.tool("mypy")
+  -- the path even before .venv exists: the linter is built once, ./deploy setup may come later
+  local mypy = pt.venv_exe(pt.info().envs.tools, "mypy")
   if pt.is_win and mypy then
     -- nvim-lint runs `cmd.exe /C <cmd> ...` on Windows: a quoted absolute path breaks cmd's
     -- quote rules (spaces, & ^ %), so run the bare name with .venv\Scripts first on PATH.
@@ -119,7 +127,10 @@ function M.mypy_linter()
   local on_error = SEVERITY[info.typing.mypy_severity.error] or S.ERROR
   local on_note = SEVERITY[info.typing.mypy_severity.note] or S.INFO
   return {
-    cmd = pt.is_win and "mypy" or (pt.tool("mypy") or "mypy"),
+    -- resolved at every run, like `condition`: .venv may appear after the linter was built
+    cmd = function()
+      return pt.is_win and "mypy" or (pt.tool("mypy") or "mypy")
+    end,
     args = M.mypy_args(),
     stdin = false,
     append_fname = true,

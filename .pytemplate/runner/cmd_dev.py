@@ -3,19 +3,29 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import json
+import os
+import shlex
+import tomllib
 import webbrowser
 from pathlib import Path
+from typing import Any
 
 from . import envs, lintc, mypyc, proc, render, ui
 from .config import BACKENDS, Config
-from .project import BUILD, SRC, code_dirs, rel
+from .project import BUILD, ROOT, SRC, code_dirs, rel
 from .ui import DeployError
 
 # basedpyright is not in uv.lock (`uv run --with`; the VS Code extension ships its own), so it
 # is pinned here to keep `check` reproducible: the latest release on PyPI in September 2026.
 # Bump it deliberately.
 BASEDPYRIGHT = "basedpyright==1.40.1"
+# basedpyright always runs on the Node.js of its only dependency, nodejs-wheel-binaries
+# (`>=20.13.1`, never a system Node): pinned too, or every new Node LTS on PyPI would change
+# `check` (and its glibc/macOS floor) on an untouched project. What 1.40.1 resolved to in
+# September 2026; bump both together.
+BASEDPYRIGHT_NODE = "nodejs-wheel-binaries==24.19.0"
 
 
 def only_flags(command: str, args: list[str], allowed: tuple[str, ...]) -> set[str]:
@@ -70,7 +80,10 @@ def cmd_compile(cfg: Config, args: list[str]) -> int:
     if not cfg.supports("mypyc"):
         raise DeployError("compile: 'mypyc' is not in backend.supported")
     stage = mypyc.build(cfg, "release" if ns.release else "dev")
-    ui.ok(f"compiled stage: {rel(stage)}  (run it with: {rel(stage / 'main.py')})")
+    if proc.DRY_RUN:
+        ui.info(f"(--dry-run) would compile the stage: {rel(stage)}")
+    else:
+        ui.ok(f"compiled stage: {rel(stage)}  (run it with: {rel(stage / 'main.py')})")
     return 0
 
 
@@ -126,10 +139,35 @@ def run_checks(cfg: Config, backend: str, *, rules: bool = True) -> bool:
         # --with: used without adding it to uv.lock (the VS Code extension ships its own)
         conf = BUILD / "cfg" / f"pyright-{profile}.json"
         conf.write_text(json.dumps(render.pyright_config(cfg, profile, absolute=True), indent=2), encoding="utf-8", newline="\n")
-        r = envs.uv(tool, ["run", "--locked", "--with", BASEDPYRIGHT, "basedpyright", "--project", conf], check=False)
-        if r.returncode != 0 and blocking:
-            ok = False
+        ok = _run_basedpyright(cfg, profile, blocking, conf) and ok
     return ok
+
+
+def _run_basedpyright(cfg: Config, profile: str, blocking: bool, conf: Path) -> bool:
+    """basedpyright with the pinned versions. Its exit 1 (findings) is only a warning under a
+    profile that is not blocking; basedpyright that cannot run is always a failure. uv exits 1
+    too when it cannot install the pins (offline, a cold cache): that is asked first, without a
+    command line (the environment it resolves is cached for the real run), so it is never taken
+    for findings under a non-blocking profile and followed by `ok check: no errors`. Not
+    captured: on a cold cache that step downloads basedpyright and Node.js (tens of MB), and
+    uv's progress shows it (nothing prints once they are cached; -q hides it); uv prints its own
+    error too."""
+    tool = envs.tool_env(cfg)
+    with_pins = ["run", "--locked", "--with", BASEDPYRIGHT, "--with", BASEDPYRIGHT_NODE]
+    if not proc.DRY_RUN:  # a dry run never installs anything
+        ready = envs.uv(tool, [*with_pins, "python", "-c", ""], check=False, echo=False)
+        if ready.returncode != 0:  # uv's reason is above
+            ui.error(f"basedpyright could not run: uv could not install {BASEDPYRIGHT} (exit code {ready.returncode})")
+            return False
+    r = envs.uv(tool, [*with_pins, "basedpyright", "--project", conf], check=False)
+    if r.returncode == 0:
+        return True
+    if r.returncode == 1 and not blocking:
+        ui.warn(f"basedpyright: type warnings (profile '{profile}', non-blocking)")
+        return True
+    if r.returncode != 1:  # 2: a fatal error, 3: its config, 4: its command line
+        ui.error(f"basedpyright stopped (exit code {r.returncode}): fix the problem above")
+    return False
 
 
 def cmd_check(cfg: Config, args: list[str]) -> int:
@@ -148,6 +186,9 @@ def cmd_check(cfg: Config, args: list[str]) -> int:
     ok = True
     for profile, b in chosen.items():
         ok = run_checks(cfg, b, rules=profile == rules_profile) and ok
+    if ok and proc.DRY_RUN:
+        ui.info("(--dry-run) check: ruff, mypy and basedpyright were not run (the mypyc rules were)")
+        return 0
     if ok:
         ui.ok("check: no errors")
         return 0
@@ -156,9 +197,12 @@ def cmd_check(cfg: Config, args: list[str]) -> int:
 
 
 def cmd_lint(cfg: Config, args: list[str]) -> int:
-    """lint [--fix]: ruff check with the active profile."""
+    """lint [--fix]: ruff check with the active profile (.ruff.toml); a profile that never
+    blocks (ruff exit_zero, e.g. `warn`) reports the findings with exit 0, like `check` and the
+    pre-commit hook."""
     flags = only_flags("lint", args, ("--fix",))
-    r = envs.uv_run(envs.tool_env(cfg), ["ruff", "check", *sorted(flags), *code_dirs()], check=False)
+    exit_zero = ["--exit-zero"] if render.load_profile(cfg.profile_for()).get("ruff", {}).get("exit_zero") else []
+    r = envs.uv_run(envs.tool_env(cfg), ["ruff", "check", *sorted(flags), *exit_zero, *code_dirs()], check=False)
     return r.returncode
 
 
@@ -172,6 +216,78 @@ def cmd_fmt(cfg: Config, args: list[str]) -> int:
 # --- test ----------------------------------------------------------------------------------------
 
 
+# pytest's configuration files, in the order pytest looks for them in a folder: (name, kind)
+PYTEST_CONFIGS = (
+    ("pytest.toml", "toml"),
+    (".pytest.toml", "toml"),
+    ("pytest.ini", "ini"),
+    (".pytest.ini", "ini"),
+    ("pyproject.toml", "pyproject"),
+    ("tox.ini", "tox"),
+    ("setup.cfg", "cfg"),
+)
+
+
+def _pytest_table(path: Path, kind: str) -> dict[str, Any] | None:
+    """The pytest settings of one configuration file, or None when pytest would not use it."""
+    text = path.read_text(encoding="utf-8-sig")
+    if kind in ("toml", "pyproject"):
+        data = tomllib.loads(text)
+        if kind == "toml":  # pytest.toml is always the configuration, even without [pytest]
+            table = data.get("pytest", {})
+            return table if isinstance(table, dict) else {}
+        tool = data.get("tool", {}).get("pytest")
+        if not isinstance(tool, dict):
+            return None
+        native = {k: v for k, v in tool.items() if k != "ini_options"}  # [tool.pytest] (pytest 9)
+        if native:
+            return native
+        ini = tool.get("ini_options")
+        return ini if isinstance(ini, dict) else None
+    parser = configparser.RawConfigParser()
+    parser.read_string(text, str(path))
+    section = "tool:pytest" if kind == "cfg" else "pytest"
+    if parser.has_section(section):
+        return dict(parser.items(section))
+    return {} if kind == "ini" else None  # pytest.ini is always the configuration, even empty
+
+
+def pytest_pythonpath(root: Path = ROOT) -> list[str]:
+    """The `pythonpath` entries of the project's pytest configuration (relative to `root`), read
+    from the first file pytest itself uses in the project folder; [] when there is none."""
+    for name, kind in PYTEST_CONFIGS:
+        path = root / name
+        if not path.is_file():
+            continue
+        try:
+            table = _pytest_table(path, kind)
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, configparser.Error):
+            return []  # pytest itself reports the broken file
+        if table is None:
+            continue
+        value = table.get("pythonpath", [])
+        if isinstance(value, str):
+            return shlex.split(value)
+        return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
+    return []
+
+
+def stage_pythonpath(stage: Path, root: Path = ROOT, src: Path = SRC) -> str:
+    """The value of `-o pythonpath=` for the mypyc tests: the project's own entries with the
+    `src` one replaced by the stage (tests/helpers and the like stay), the stage first when none
+    is `src`. An -o value replaces the whole setting, so the other entries must be repeated."""
+
+    def is_src(entry: str) -> bool:
+        path = Path(entry) if os.path.isabs(entry) else root / entry
+        return os.path.normcase(str(path.resolve())) == os.path.normcase(str(src.resolve()))
+
+    staged = rel(stage)
+    entries = [staged if is_src(e) else e for e in pytest_pythonpath(root)]
+    if staged not in entries:
+        entries.insert(0, staged)
+    return shlex.join(entries)
+
+
 def test_backend(cfg: Config, backend: str, pytest_args: list[str]) -> int:
     envs.ensure_supported(cfg, backend)
     env = envs.runtime_env(cfg, backend)
@@ -180,7 +296,7 @@ def test_backend(cfg: Config, backend: str, pytest_args: list[str]) -> int:
         ui.step("pytest against the compiled modules (mypyc)")
         return envs.uv_run(
             env,
-            ["python", "-m", "pytest", "-o", f"pythonpath={rel(stage)}", *pytest_args],
+            ["python", "-m", "pytest", "-o", f"pythonpath={stage_pythonpath(stage)}", *pytest_args],
             check=False,
             extra_env=mypyc.runtime_env_vars(cfg),
         ).returncode
@@ -191,15 +307,31 @@ def test_backend(cfg: Config, backend: str, pytest_args: list[str]) -> int:
 
 
 def cmd_test(cfg: Config, args: list[str]) -> int:
-    """test [BACKEND|all] [pytest args...]"""
+    """test [BACKEND|all] [pytest args...]: one backend returns pytest's own exit code (5 = no
+    tests collected, 4 = a pytest usage error); `all` tests every supported backend, even after
+    one fails to build (a mypyc error, no C compiler), prints a summary and returns 0 or 1."""
     target, rest = split_backend(cfg, args, allow_all=True)
-    targets = cfg.backend.supported if target == "all" else [target]
-    results = {b: test_backend(cfg, b, rest) for b in targets}
-    if len(results) > 1:
+    if target != "all":
+        return test_backend(cfg, target, rest)
+    results: dict[str, int] = {}
+    reasons: dict[str, str] = {}
+    for b in cfg.backend.supported:
+        try:
+            results[b] = test_backend(cfg, b, rest)
+        except DeployError as e:  # Ctrl+C (a KeyboardInterrupt) still stops everything
+            ui.error(f"test {b}: {e}")
+            results[b] = e.code or 1
+            reasons[b] = str(e).splitlines()[0] if str(e) else f"exit code {results[b]}"
+    failed = [b for b, code in results.items() if code != 0]
+    # --dry-run: pytest never ran, so no [ok] row; a backend whose checks failed (a compile.exclude
+    # naming nothing) is still listed, and the exit code is 1 as in a real run
+    if len(results) > 1 and (failed or not proc.DRY_RUN):
         ui.step("test summary")
         for b, code in results.items():
-            ui.check_line(code == 0, b, "" if code == 0 else f"exit code {code}")
-    return 0 if all(c == 0 for c in results.values()) else 1
+            if code == 0 and proc.DRY_RUN:
+                continue
+            ui.check_line(code == 0, b, "" if code == 0 else reasons.get(b, f"exit code {code}"))
+    return 1 if failed else 0
 
 
 # --- report --------------------------------------------------------------------------------------
@@ -217,16 +349,27 @@ def cmd_report(cfg: Config, args: list[str]) -> int:
     reports = html.parent
     # The report is generated before compiling C: no compiler needed
     mypyc.build(cfg, "dev", annotate=html, compile_c=False)
-    ui.ok(f"mypyc report: {rel(html)}  (in red: generic/slow operations and how to avoid them)")
+    if proc.DRY_RUN:
+        ui.info(f"(--dry-run) would write the mypyc report: {rel(html)}")
+    else:
+        ui.ok(f"mypyc report: {rel(html)}  (in red: generic/slow operations and how to avoid them)")
+    code = 0
     if not ns.no_mypy:
         tool = envs.tool_env(cfg)
         config_file = _profile_file(cfg, "mypyc", "mypy")
-        envs.uv_run(
+        any_report = reports / "any" / "any-exprs.txt"
+        r = envs.uv_run(
             tool,
             ["mypy", "--config-file", config_file, "--any-exprs-report", reports / "any", "--lineprecision-report", reports / "precision"],
             check=False,
         )
-        ui.ok(f"Any expressions per module: {rel(reports / 'any' / 'any-exprs.txt')}")
+        if proc.DRY_RUN:
+            ui.info(f"(--dry-run) would write the Any reports: {rel(any_report)}")
+        elif r.returncode in (0, 1):  # 1: type errors (above); the reports cover the whole code
+            ui.ok(f"Any expressions per module: {rel(any_report)}")
+        else:  # 2: mypy stopped (a syntax error, a bad config): the reports are empty or stale
+            ui.error(f"mypy stopped (exit code {r.returncode}) before its Any reports: fix the errors above")
+            code = 1
     if ns.open and not proc.DRY_RUN:
         webbrowser.open(html.resolve().as_uri())
-    return 0
+    return code

@@ -44,6 +44,14 @@ if not defined PT_UV goto :no_uv
 
 set "PYTEMPLATE_CALLER_CWD=%CD%"
 set "PYTEMPLATE_LAUNCHER=cmd"
+rem The runner runs on the project's Python (.python-version next to it), in
+rem the caller's folder: a UV_PYTHON of the caller must not choose that Python,
+rem a PYTHONHOME or PYTHONPATH must not break it, a UV_WORKING_DIR must not
+rem move it (setlocal keeps this local).
+set "UV_PYTHON="
+set "PYTHONHOME="
+set "PYTHONPATH="
+set "UV_WORKING_DIR="
 rem cmd expands the whole line before running it: the helper variables are
 rem cleared for the runner while uv still gets their values.
 set "PT_ROOT=" & set "PT_UV=" & "%PT_UV%" run --quiet --script "%PT_ROOT%.pytemplate\deploy.py" %*
@@ -89,17 +97,26 @@ exit /b 0
 
 :uv_in_registry
 rem The PATH stored in the registry: a console opened before uv was installed
-rem still has the old one. "call" expands the variables of REG_EXPAND_SZ values.
-for /f "skip=2 tokens=2,*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do call :uv_in_list "%%B"
+rem still has the old one. The value stays in a variable, never in call
+rem arguments: a quoted entry ("C:\Program Files\x") would split it there.
+set "PT_LIST="
+for /f "skip=2 tokens=2,*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "PT_LIST=%%B"
+call :uv_in_list
 if defined PT_UV goto :uv_in_registry_done
-for /f "skip=2 tokens=2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do call :uv_in_list "%%B"
+set "PT_LIST="
+for /f "skip=2 tokens=2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do set "PT_LIST=%%B"
+call :uv_in_list
 :uv_in_registry_done
 set "PT_LIST="
 exit /b 0
 
 :uv_in_list
-set "PT_LIST=%~1"
 if not defined PT_LIST exit /b 0
+rem Drop the quotes of quoted entries first (the list is split on the
+rem semicolons into quoted words below), then "call set" expands the
+rem variables of REG_EXPAND_SZ values.
+set "PT_LIST=%PT_LIST:"=%"
+call set "PT_LIST=%PT_LIST%"
 for %%P in ("%PT_LIST:;=" "%") do call :probe "%%~P"
 exit /b 0
 

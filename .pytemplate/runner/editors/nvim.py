@@ -14,7 +14,8 @@ from typing import Any
 
 from .. import render
 from ..config import METHODS, Config
-from ..project import TEMPLATES
+from ..project import TEMPLATES, rel
+from ..ui import DeployError
 
 LAZY_TEMPLATE = TEMPLATES / "nvim" / "lazy.lua"
 LAZY_LUA = ".lazy.lua"
@@ -24,10 +25,23 @@ DEFAULT_SEVERITY = {"error": "Error", "note": "Information"}
 BOM = "\ufeff"  # an editor may add one: it would change the trusted hash
 
 
-def env_dirs(cfg: Config) -> dict[str, str]:
+def env_dirs() -> dict[str, str]:
     """Return the environment of each role, relative to the root (without the WSL -wsl suffix)."""
-    runtime = ".venv-jit" if cfg.python.jit else ".venv"
-    return {"tools": ".venv", "cpython": runtime, "mypyc": runtime, "pypy": ".venv-pypy"}
+    return {"tools": ".venv", "cpython": ".venv", "mypyc": ".venv", "pypy": ".venv-pypy"}
+
+
+def task_severity(cfg: Config) -> dict[str, dict[str, str]]:
+    """Per supported backend, the severity of mypy errors and ruff findings in a task's output:
+    its typing profile decides, as for the VS Code problem matchers (vscode.problem_matchers:
+    mypy errors are errors only when the profile is blocking, ruff findings unless exit_zero)."""
+    out: dict[str, dict[str, str]] = {}
+    for backend in cfg.backend.supported:
+        data = render.load_profile(cfg.profile_for(backend))
+        out[backend] = {
+            "mypy": "error" if data.get("blocking") else "warning",
+            "ruff": "warning" if data.get("ruff", {}).get("exit_zero") else "error",
+        }
+    return out
 
 
 def commands() -> list[dict[str, str]]:
@@ -39,6 +53,8 @@ def commands() -> list[dict[str, str]]:
 
 def editor_data(cfg: Config, profile: str) -> dict[str, Any]:
     """Return the content of .pytemplate/editor.json (schema 1)."""
+    from ..cmd_dev import BASEDPYRIGHT, BASEDPYRIGHT_NODE  # lazily, like commands(): render imports this module
+
     data = render.load_profile(profile)
     severity = data.get("vscode", {}).get("mypy-type-checker.severity", DEFAULT_SEVERITY)
     return {
@@ -58,8 +74,14 @@ def editor_data(cfg: Config, profile: str) -> dict[str, Any]:
             "mypy_severity": severity,
             # Same as render.mypy_cli_args: with PyPy supported mypy checks the 3.11 syntax
             "python_version": cfg.min_python if cfg.pypy_enabled else None,
+            # the plugin's uvx language server runs the basedpyright ./deploy check pins, on the
+            # same Node.js (basedpyright asks for nodejs-wheel-binaries>=20.13.1: it floats)
+            "basedpyright": BASEDPYRIGHT,
+            "basedpyright_node": BASEDPYRIGHT_NODE,
+            # the parser of the tasks' output (tasks.severity): strictest of the task's backends
+            "task_severity": task_severity(cfg),
         },
-        "envs": env_dirs(cfg),
+        "envs": env_dirs(),
         "mypyc_stage": ".build/mypyc-dev/stage",
         "tasks": [
             {"name": name, "help": task.help, "background": task.background} for name, task in cfg.tasks.items()
@@ -73,5 +95,16 @@ def outputs(cfg: Config, profile: str) -> dict[str, str]:
     """Return the generated Neovim files: {path relative to the root: content}."""
     files = {EDITOR_JSON: json.dumps(editor_data(cfg, profile), indent=2, ensure_ascii=True) + "\n"}
     if LAZY_TEMPLATE.is_file():
-        files[LAZY_LUA] = LAZY_TEMPLATE.read_text(encoding="utf-8").lstrip(BOM).replace("\r\n", "\n")
+        files[LAZY_LUA] = lazy_lua()
     return files
+
+
+def lazy_lua() -> str:
+    """Return .lazy.lua: the template without a BOM, with LF (the bytes Neovim trusts)."""
+    try:
+        text = LAZY_TEMPLATE.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        raise DeployError(f"{rel(LAZY_TEMPLATE)} is not UTF-8 text: save it as UTF-8") from None
+    except OSError as e:
+        raise DeployError(f"cannot read {rel(LAZY_TEMPLATE)}: {e.strerror or e}") from None
+    return text.lstrip(BOM).replace("\r\n", "\n")

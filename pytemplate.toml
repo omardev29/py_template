@@ -1,16 +1,18 @@
 # pytemplate.toml: project configuration and working "mode".
 #
-# Change a value and run any ./deploy command: the generated files (.mypy.ini,
-# pyrightconfig.json, .ruff.toml, .vscode/) update themselves. Whatever affects
-# uv.lock (backend.supported, [python]) is applied with `./deploy lock`, or change it
-# directly with `./deploy mode`.
+# After editing it, run ./deploy apply: it brings the whole project in line (app.name
+# renames src/<pkg>/ and its imports, [backend] and [python] re-lock uv.lock and sync the
+# environments, [hooks] installs or removes the git hook, and .mypy.ini, pyrightconfig.json,
+# .ruff.toml and .vscode/ are regenerated: those also update by themselves on any ./deploy
+# command). ./deploy mode edits this file for you. app.preset cannot change in place:
+# create another project with ./deploy new DIR --preset P.
 schema = 1
 
 [app]
 name = "myapp"   # executable name; the Python package is src/myapp/
-preset = "script"   # script | raylib | flet   (to switch: ./deploy init <preset>)
+preset = "script"   # script | raylib | flet   (another preset: ./deploy new DIR --preset P)
 gui = false         # true: executable without a console and launchers with pythonw/pypyw
-assets = ""         # folder inside src/ that is packaged with the app ("" = none)
+assets = ""         # "assets": bundle src/assets/ with the app; "" = none (no other folder name works)
 
 [backend]
 # cpython: the usual interpreter. No typing requirements.
@@ -21,8 +23,7 @@ supported = ["cpython", "mypyc"]   # to add PyPy: ./deploy mode --supports +pypy
 
 [python]
 cpython = "3.14"        # minor version; uv manages the patch
-pypy = "pypy@3.11.15"   # EXACT: PyPy 8.0 changed the ABI (pp80) and there are no wheels for it yet
-jit = false             # experimental CPython JIT (run/test/portable only; needs python.org)
+pypy = "pypy@3.11.15"   # EXACT: a newer PyPy can change the extension ABI (8.0: pp80); bump it once your deps ship wheels for it
 
 [typing]
 profile = "auto"     # auto: "mypyc" on the mypyc backend; on cpython/pypy, whatever `relaxed` says
@@ -31,20 +32,24 @@ editor = "pylance"   # pylance | basedpyright (the latter also flags Any in the 
 
 [compile]
 modules = ["myapp.core"]   # what mypyc compiles: packages or modules of src/
-exclude = []                 # modules inside those packages that stay interpreted
+exclude = []                 # modules or subpackages inside those packages that stay interpreted
 forbid_imports = []          # imports forbidden in compiled code (e.g. UI libraries)
 annotate = false             # HTML report of slow lines on every compile (or ./deploy report)
-opt_level = "3"
+# opt_level: mypyc's C optimization. MSVC: 1, 2 and 3 are all /O2
+opt_level = "3"              # 0 (debug only, slower than CPython) | 1 | 2 | 3 (default)
+no_semantic_interposition = true   # Linux gcc/clang: calls between compiled functions may be inlined
 
 [deploy]
-optimize = 1   # 0 | 1 | 2: bytecode -O level; with >= 1 mypyc also strips asserts
+# optimize: Python's -O level of the exe, nuitka and portable builds (higher = MORE stripped,
+# not faster); with mypyc, 1 and 2 also strip the compiled modules' asserts in every method
+optimize = 1   # 0 keep asserts | 1 strip asserts | 2 also docstrings
 default = { cpython = "exe", mypyc = "exe", pypy = "portable" }   # ./deploy build method
 exclude_modules = []   # never bundled by exe/nuitka even if imported, e.g. "ssl" without HTTPS
 
 [deploy.exe]
 mode = "onefile"   # onefile | onedir (onedir starts faster and is not unpacked every time)
 console = "auto"   # auto (= not app.gui) | yes | no
-icon = ""          # path to an .ico
+icon = ""          # .ico (Windows: exe, nuitka) or .icns (a macOS .app: exe); ignored on Linux
 strip = false   # Linux/macOS: strip symbol tables of the bundled binaries (smaller)
 
 [deploy.portable]
@@ -53,17 +58,25 @@ runtime = "bundled"   # bundled: the folder includes the interpreter | system: u
 [deploy.pyz]
 targets = ["host"]    # add keys like "cp314-linux-x86_64" to include native binaries for other OSes
 
+[deploy.nuitka]
+lto = "auto"    # auto | yes | no: link-time optimization (auto: yes up to 250 compiled modules)
+pgo = false     # profile-guided C (experimental; the build runs the app once): no GUI, assets or mypyc
+pgo_args = []   # the app's arguments for that profiling run, e.g. ["--bench"]
+
 [deploy.upx]
-# UPX packs the exe/dll/pyd (and ELF executables) of the exe, nuitka, portable and flet methods:
-# smaller files; every start unpacks them in memory and some antivirus engines flag them.
-# Binaries over 600 MiB are never packed (UPX's limit is 768 MiB). Downloaded once (pinned).
+# UPX packs the exe/dll/pyd (and ELF executables) of the nuitka, portable and flet methods, and
+# of exe on Windows only: smaller files; every start unpacks them in memory and some antivirus
+# engines flag them. Binaries over 600 MiB are never packed (UPX's limit is 768 MiB).
 enabled = false
 level = "best"   # 1..9 | best | brute | ultra-brute (brute: much slower, a few % smaller)
 lzma = true      # smaller, slower to unpack (PyInstaller and Nuitka always use LZMA)
 exclude = []     # extra file-name globs never packed (C runtime and python3*.dll never are)
+# path = "tools/upx"   # a UPX binary, relative to the project root (default: PATH, then a pinned download)
 
 [hooks]
-pre_commit = true   # ./deploy setup installs a git pre-commit hook (./deploy hooks run: ruff, format, generated files, lock)
+# true: ./deploy apply (and setup) installs a git pre-commit hook that runs ./deploy hooks run
+# (ruff, format, generated files, lock); false: ./deploy apply removes pytemplate's hook
+pre_commit = true
 
 [vscode]
 # Status bar buttons (VS Code extension actboy168.tasks): ./deploy commands or [tasks] names

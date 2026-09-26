@@ -16,9 +16,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 import zipapp
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -40,6 +42,147 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """No launcher variables leak in from the shell that started the selftest."""
     for name in _LAUNCHER_VARS:
         monkeypatch.delenv(name, raising=False)
+
+
+# --- WSL on a Windows checkout (project.IS_WSL) ------------------------------------------------------
+
+# /proc/self/mounts as WSL writes it (a backslash is \134, a blank \040).
+WSL2_MOUNTS = (
+    "none /mnt/wsl tmpfs rw,relatime 0 0\n"
+    "drivers /usr/lib/wsl/drivers 9p ro,nosuid,nodev,noatime,dirsync,aname=drivers;fmask=222;dmask=222,mmap,access=client 0 0\n"
+    "/dev/sdc / ext4 rw,relatime,discard,errors=remount-ro,data=ordered 0 0\n"
+    "C:\\134 /mnt/c 9p rw,noatime,dirsync,aname=drvfs;path=C:\\134;uid=1000;gid=1000;symlinkroot=/mnt/,mmap,access=client 0 0\n"
+    "D: /d 9p rw,noatime,dirsync,aname=drvfs;path=D:;uid=1000;gid=1000 0 0\n"
+    "\\134\\134nas\\134share /mnt/my\\040share 9p rw,noatime,aname=drvfs;path=UNC\\134nas\\134share 0 0\n"
+    "tmpfs /mnt/c/Users/me/scratch tmpfs rw 0 0\n"
+)
+WSL1_MOUNTS = "rootfs / lxfs rw,noatime 0 0\nC:\\134 /mnt/c drvfs rw,noatime,uid=1000,gid=1000,case=off 0 0\n"
+
+
+@pytest.mark.parametrize(
+    ("root", "mounts", "expected"),
+    [
+        ("/mnt/c/Users/me/p", WSL2_MOUNTS, True),
+        ("/mnt/c", WSL2_MOUNTS, True),
+        ("/d/work/p", WSL2_MOUNTS, True),  # mount -t drvfs D: /d, or automount root = /
+        ("/mnt/my share/p", WSL2_MOUNTS, True),  # a network share, blanks escaped
+        ("/home/me/p", WSL2_MOUNTS, False),  # the distro's own ext4: its .venv is Linux-only
+        ("/mnt/cx/p", WSL2_MOUNTS, False),  # /mnt/c is not a prefix of /mnt/cx
+        ("/mnt/c/Users/me/scratch/p", WSL2_MOUNTS, False),  # the deepest mount decides
+        ("/mnt/c/p", WSL1_MOUNTS, True),
+        ("/home/me/p", WSL1_MOUNTS, False),
+        ("/mnt/c/p", None, True),  # /proc/self/mounts unreadable: WSL's default automount
+        ("/home/me/p", None, False),
+    ],
+)
+def test_windows_checkout_follows_the_mount_of_the_root(root: str, mounts: str | None, expected: bool) -> None:
+    assert project.windows_checkout(Path(root), mounts) is expected
+
+
+def test_windows_checkout_reads_the_root_as_a_posix_path() -> None:
+    """The suite runs on Windows too: str() of the WindowsPath of /mnt/c/p is \\mnt\\c\\p, which
+    matched no mount point, and 10 tests (the Lua comparison too) failed there."""
+    from pathlib import PureWindowsPath
+
+    assert project.windows_checkout(PureWindowsPath("/mnt/c/Users/me/p"), WSL2_MOUNTS) is True
+    assert project.windows_checkout(PureWindowsPath("/home/me/p"), WSL2_MOUNTS) is False
+
+
+def test_wsl_kernel_needs_no_wsl_distro_name(tmp_path: Path) -> None:
+    """sudo, sshd, cron and systemd units run without WSL_DISTRO_NAME: the kernel says WSL."""
+    missing = str(tmp_path / "WSLInterop")
+    assert project.wsl_kernel({}, "5.15.167.4-microsoft-standard-WSL2", missing)
+    assert project.wsl_kernel({}, "4.4.0-19041-Microsoft", missing)
+    assert project.wsl_kernel({"WSL_DISTRO_NAME": "Ubuntu"}, "6.8.0-generic", missing)
+    (tmp_path / "WSLInterop").write_text("enabled\n", encoding="ascii")
+    assert project.wsl_kernel({}, "6.6.87-custom", missing)  # interop registered: a custom WSL kernel
+    assert not project.wsl_kernel({}, "6.8.0-45-generic", str(tmp_path / "none"))
+    assert not project.wsl_kernel({}, "5.15.0-1057-azure", str(tmp_path / "none"))
+
+
+WSL_RELEASE = "5.15.167.4-microsoft-standard-WSL2"
+# (root, WSL_DISTRO_NAME, kernel release, WSLInterop registered, /proc/self/mounts, IS_WSL)
+WSL_CASES = [
+    ("/mnt/c/Users/me/p", None, WSL_RELEASE, False, WSL2_MOUNTS, True),  # sudo, sshd, cron: no WSL_DISTRO_NAME
+    ("/d/work/p", None, "6.6.87-custom", True, WSL2_MOUNTS, True),  # a custom WSL kernel, automount root = /
+    ("/mnt/c/p", "Ubuntu", "6.8.0-generic", False, WSL1_MOUNTS, True),
+    ("/mnt/c/x", None, WSL_RELEASE, False, None, True),  # mounts unreadable: WSL's default automount
+    ("/home/me/p", "Ubuntu", WSL_RELEASE, True, WSL2_MOUNTS, False),  # the distro's own ext4
+    ("/srv/p", None, WSL_RELEASE, False, None, False),
+    ("/mnt/c/p", None, "6.8.0-45-generic", False, WSL2_MOUNTS, False),  # plain Linux, a drvfs-like mount
+]
+
+
+@pytest.mark.parametrize(("root", "distro", "release", "interop", "mounts", "expected"), WSL_CASES)
+def test_is_wsl_needs_a_wsl_kernel_and_a_windows_checkout(
+    tmp_path: Path, root: str, distro: str | None, release: str, interop: bool, mounts: str | None, expected: bool
+) -> None:
+    environ = {"WSL_DISTRO_NAME": distro} if distro else {}
+    marker = tmp_path / "WSLInterop"
+    if interop:
+        marker.write_text("enabled\n", encoding="ascii")
+    got = project.detect_wsl(Path(root), system="linux", environ=environ, release=release, interop=str(marker), read_mounts=lambda: mounts)
+    assert got is expected
+    windows = project.detect_wsl(Path(root), system="win32", environ=environ, release=release, interop=str(marker), read_mounts=lambda: mounts)
+    assert windows is False
+
+
+def test_is_wsl_reads_the_mounts_only_under_a_wsl_kernel(tmp_path: Path) -> None:
+    def unread() -> str | None:
+        raise AssertionError("/proc/self/mounts read outside WSL")
+
+    assert not project.detect_wsl(Path("/mnt/c/p"), system="linux", environ={}, release="6.8.0-generic", interop=str(tmp_path / "x"), read_mounts=unread)
+
+
+_IMPORT_PROJECT = r"""
+import json, os, pathlib, platform, sys
+case = json.loads(os.environ["PT_CASE"])
+real_read = pathlib.Path.read_text
+def read_text(self, *args, **kwargs):
+    if str(self) == "/proc/self/mounts":
+        if case["mounts"] is None:
+            raise PermissionError(str(self))
+        return case["mounts"]
+    return real_read(self, *args, **kwargs)
+pathlib.Path.read_text = read_text
+real_exists = os.path.exists
+os.path.exists = lambda p: case["interop"] if str(p) == "/proc/sys/fs/binfmt_misc/WSLInterop" else real_exists(p)
+platform.release = lambda: case["release"]
+os.environ.pop("WSL_DISTRO_NAME", None)
+if case["distro"]:
+    os.environ["WSL_DISTRO_NAME"] = case["distro"]
+sys.path.insert(0, case["template"])
+from runner import project
+print("PTWSL" + json.dumps([project.IS_WSL, project.ENV_SUFFIX, project.BUILD.relative_to(project.ROOT).as_posix()]))
+"""
+
+
+def _own_mounts(windows: bool) -> str:
+    """A WSL 2 mount table whose Windows drive (or the distro's ext4) holds this project's root."""
+    point = str(project.ROOT).replace("\\", "\\134").replace(" ", "\\040").replace("\t", "\\011")
+    drive = f"C:\\134 {point} 9p rw,noatime,aname=drvfs;path=C:\\134;uid=1000 0 0\n" if windows else ""
+    return "none /mnt/wsl tmpfs rw 0 0\n/dev/sdc / ext4 rw,relatime 0 0\n" + drive
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="IS_WSL is only ever true on Linux")
+@pytest.mark.parametrize(
+    ("distro", "release", "windows", "expected"),
+    [
+        (None, WSL_RELEASE, True, True),  # sudo, sshd, cron, systemd: no WSL_DISTRO_NAME
+        ("Ubuntu", "6.8.0-generic", True, True),
+        (None, WSL_RELEASE, False, False),  # the distro's own ext4
+        (None, "6.8.0-45-generic", True, False),  # no WSL kernel
+    ],
+)
+def test_is_wsl_at_import_follows_the_kernel_and_the_mount_of_the_root(distro: str | None, release: str, windows: bool, expected: bool) -> None:
+    """project.IS_WSL, ENV_SUFFIX and BUILD as a fresh runner computes them at import, with the
+    kernel release, WSL_DISTRO_NAME and /proc/self/mounts faked around THIS project's root."""
+    data = {"distro": distro, "release": release, "interop": False, "mounts": _own_mounts(windows), "template": str(TEMPLATE_DIR)}
+    env = {**os.environ, "PT_CASE": json.dumps(data)}
+    r = subprocess.run([sys.executable, "-c", _IMPORT_PROJECT], env=env, capture_output=True, text=True, timeout=60, check=False)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTWSL")), None)
+    assert line is not None, r.stdout + r.stderr
+    assert json.loads(line[len("PTWSL") :]) == ([True, "-wsl", ".build/wsl"] if expected else [False, "", ".build"])
 
 
 # --- native_path ---------------------------------------------------------------------------------
@@ -369,6 +512,11 @@ def _deploy(root: Path, *args: str, cwd: Path | None = None) -> subprocess.Compl
     )
 
 
+def _copy_config(root: Path) -> dict[str, Any]:
+    """The copy's pytemplate.toml: a project made with ./deploy new has its own preset and backends."""
+    return tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8-sig"))
+
+
 @pytest.fixture
 def unchanged(project_copy: Path) -> Iterator[Path]:
     before = _snapshot(project_copy)
@@ -383,13 +531,15 @@ def unchanged(project_copy: Path) -> Iterator[Path]:
     ("args", "expected"),
     [
         (["mode", "mypyc"], '[backend] active = "mypyc"'),
-        (["mode", "--supports", "-mypyc", "--jit", "off", "--typing", "strict"], "[typing] relaxed"),
-        (["init", "raylib"], "+ typings/raylib/__init__.pyi"),
-        (["init", "flet", "--name", "other"], "as 'other'"),
+        (["mode", "--supports", "-mypyc", "--typing", "strict"], "[typing] relaxed"),
+        (["__init", "raylib"], "+ typings/raylib/__init__.pyi"),
+        (["__init", "flet", "--name", "other"], "as 'other'"),
         (["render", "--force"], "generated files up to date"),
     ],
 )
 def test_dry_run_writes_nothing(unchanged: Path, args: list[str], expected: str) -> None:
+    if args == ["__init", "raylib"] and _copy_config(unchanged)["app"]["preset"] == "raylib":
+        args, expected = ["__init", "script"], "- typings/raylib/__init__.pyi"  # a raylib project: the other way
     r = _deploy(unchanged, "--dry-run", *args)
     assert r.returncode == 0, r.stderr
     assert expected in r.stderr, r.stderr
@@ -397,6 +547,8 @@ def test_dry_run_writes_nothing(unchanged: Path, args: list[str], expected: str)
 
 @needs_uv
 def test_dry_run_mode_supports_pypy(unchanged: Path) -> None:
+    if "pypy" in _copy_config(unchanged)["backend"]["supported"]:
+        pytest.skip("this project already supports PyPy (the raylib preset): +pypy changes nothing")
     r = _deploy(unchanged, "--dry-run", "mode", "--supports", "+pypy")
     assert r.returncode == 0, r.stderr
     assert "pyproject.toml   would rewrite the managed parts" in r.stderr
@@ -445,8 +597,8 @@ def dry(monkeypatch: pytest.MonkeyPatch) -> Config:
         ("cmd_mode", ["mypyc", "--bogus"], "unknown argument(s): --bogus"),
         ("cmd_mode", ["--supports"], "--supports needs a value"),
         ("cmd_mode", ["--supports="], "--supports needs a value"),
-        ("cmd_mode", ["--supports", "-cpython,-mypyc"], "at least one backend"),
-        ("cmd_mode", ["--supports", "+pypy,cpython"], "unknown backend 'cpython'"),
+        ("cmd_mode", ["--supports", "-cpython,-pypy,-mypyc"], "at least one backend"),  # every preset's backends
+        ("cmd_mode", ["--supports", "+pypy,cpython"], "mixes changes (+name, -name) with plain names"),
         ("cmd_init", ["raylib", "--bogus"], "unknown argument(s): --bogus"),
         ("cmd_new", ["somewhere", "--bogus"], "unknown argument(s): --bogus"),
     ],
@@ -477,9 +629,9 @@ def test_dry_run_pyz_merge(dry: Config, tmp_path: Path, monkeypatch: pytest.Monk
     assert cmd_build.cmd_pyz_merge(dry, ["../in/a.pyz", "../in/b.pyz", "--out", "out/c.pyz"]) == 0
     err = capsys.readouterr().err
     shown = [line.split(maxsplit=1) for line in err.splitlines() if line.startswith(("  in ", "  out "))]
-    assert [kind for kind, _ in shown] == ["in", "in", "out"], err
+    assert [kind for kind, _ in shown] == ["in", "in", "out", "out"], err
     # Compared resolved: on POSIX user_path keeps `..` for the OS to resolve (symlinked folders)
-    assert [Path(p).resolve() for _, p in shown] == [p.resolve() for p in (*parts, work / "out" / "c.pyz")]
+    assert [Path(p).resolve() for _, p in shown] == [p.resolve() for p in (*parts, work / "out" / "c.pyz", work / "out" / "c.cmd")]
     assert not (work / "out").exists()
 
 

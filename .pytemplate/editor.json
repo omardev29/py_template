@@ -22,7 +22,19 @@
       "error": "Error",
       "note": "Information"
     },
-    "python_version": null
+    "python_version": null,
+    "basedpyright": "basedpyright==1.40.1",
+    "basedpyright_node": "nodejs-wheel-binaries==24.19.0",
+    "task_severity": {
+      "cpython": {
+        "mypy": "warning",
+        "ruff": "error"
+      },
+      "mypyc": {
+        "mypy": "error",
+        "ruff": "error"
+      }
+    }
   },
   "envs": {
     "tools": ".venv",
@@ -41,14 +53,20 @@
   "commands": [
     {
       "name": "setup",
-      "usage": "",
-      "summary": "Install interpreters and backend environments, lock deps and generate configs",
+      "usage": "[--force]",
+      "summary": "First time on a clone: the same as apply (interpreters, environments, uv.lock, hook)",
+      "group": "Environment"
+    },
+    {
+      "name": "apply",
+      "usage": "[--force]",
+      "summary": "Apply every pytemplate.toml change (rename, dependencies, uv.lock, envs, hook, configs)",
       "group": "Environment"
     },
     {
       "name": "doctor",
       "usage": "",
-      "summary": "Check uv, compiler, PyPy, JIT, shells and generated files",
+      "summary": "Check uv, compiler, PyPy, shells and generated files",
       "group": "Environment"
     },
     {
@@ -89,20 +107,14 @@
     },
     {
       "name": "mode",
-      "usage": "[BACKEND] [--supports +pypy|-pypy] [--typing off|warn|strict|auto] [--jit on|off] [--editor pylance|basedpyright]",
-      "summary": "Show or change the mode (backend, supported, typing, JIT, editor)",
+      "usage": "[BACKEND] [--supports +B|-B|B,B...] [--typing auto|off|warn|strict|mypyc] [--editor pylance|basedpyright]",
+      "summary": "Show or change the mode (backend, supported, typing, editor)",
       "group": "Mode"
     },
     {
       "name": "render",
       "usage": "[--check] [--diff] [--force]",
-      "summary": "Regenerate .mypy.ini, pyrightconfig.json, .ruff.toml and .vscode/",
-      "group": "Mode"
-    },
-    {
-      "name": "init",
-      "usage": "PRESET [--name NAME] [--force]",
-      "summary": "Convert this project to a preset (script, raylib, flet)",
+      "summary": "Regenerate the files derived from pytemplate.toml (.mypy.ini, .ruff.toml, pyrightconfig.json, .vscode/, .lazy.lua, editor.json, ci.yml)",
       "group": "Mode"
     },
     {

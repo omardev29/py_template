@@ -1,15 +1,18 @@
 # pytemplate.toml: project configuration and working "mode" (flet preset).
 #
-# Change a value and run any ./deploy command: the generated files (.mypy.ini,
-# pyrightconfig.json, .ruff.toml, .vscode/) update themselves. Whatever affects
-# uv.lock (backend.supported, [python], [preset.flet]) is applied with `./deploy lock`.
+# After editing it, run ./deploy apply: it brings the whole project in line (app.name
+# renames src/<pkg>/ and its imports, [preset.flet] re-pins flet, flet-desktop and flet-cli,
+# [backend] and [python] re-lock uv.lock and sync the environments, [hooks] installs or
+# removes the git hook, and .mypy.ini, pyrightconfig.json, .ruff.toml and .vscode/ are
+# regenerated: those also update by themselves on any ./deploy command). ./deploy mode edits
+# this file for you. app.preset cannot change in place: ./deploy new DIR --preset P.
 schema = 1
 
 [app]
 name = "{{name}}"   # executable name; the Python package is src/{{pkg}}/
 preset = "flet"
 gui = true
-assets = "assets"   # src/assets/: Flet serves it (assets_dir) and it is packaged with the app
+assets = "assets"   # src/assets/: Flet serves it (assets_dir) and it is packaged with the app; "" = none, no other name
 
 [backend]
 # Flet: Flutter draws the UI, and Flet's Python side (diffs, messages) cannot be compiled.
@@ -20,7 +23,6 @@ supported = ["cpython", "mypyc"]   # PyPy: experimental, only for running during
 [python]
 cpython = "3.14"   # `flet build` embeds CPython 3.14: the mypyc .pyd files are compatible
 pypy = "pypy@3.11.15"
-jit = false
 
 [typing]
 profile = "auto"
@@ -41,17 +43,21 @@ exclude = []
 # and @ft.control loses the types of its events.
 forbid_imports = ["flet", "flet_desktop", "flet_cli"]
 annotate = false
-opt_level = "3"
+# opt_level: mypyc's C optimization. MSVC: 1, 2 and 3 are all /O2
+opt_level = "3"   # 0 (debug only, slower than CPython) | 1 | 2 | 3 (default)
+no_semantic_interposition = true   # Linux gcc/clang: calls between compiled functions may be inlined
 
 [deploy]
-optimize = 1
+# optimize: Python's -O level of the exe, nuitka and portable builds (higher = MORE stripped,
+# not faster); with mypyc, 1 and 2 also strip the compiled modules' asserts in every method
+optimize = 1   # 0 keep asserts | 1 strip asserts | 2 also docstrings
 default = { cpython = "exe", mypyc = "exe", pypy = "portable" }
 exclude_modules = ["PIL"]   # flet imports Pillow only for RawImage: -13 MB (remove it if you use it)
 
 [deploy.exe]
 mode = "onedir"   # flet pack: the Flutter client goes inside; onedir starts much faster
 console = "auto"
-icon = ""
+icon = ""   # .ico (Windows: exe, nuitka) or .icns (a macOS .app: exe); ignored on Linux
 strip = false   # Linux/macOS: strip symbol tables of the bundled binaries (smaller)
 
 [deploy.portable]
@@ -63,25 +69,34 @@ targets = ["host"]
 [deploy.wheel]
 entry = "{{pkg}}.ui.app:run"   # command that the wheel installs (uv tool install)
 
+[deploy.nuitka]
+lto = "auto"    # auto | yes | no: link-time optimization (auto = NO here: flet compiles ~800 modules, the limit is 250)
+pgo = false     # profile-guided C: needs app.gui = false and no assets (the build runs the app once)
+pgo_args = []   # the app's arguments for that profiling run
+
 [deploy.flet]
 target = "host"   # `./deploy build --method flet`: host | windows | macos | linux | apk | aab | ipa | web
 cleanup = true   # --cleanup-app --cleanup-packages: no tests, docs... in the bundle
 exclude = []     # app files/folders left out of `flet build` (--exclude)
 
 [deploy.upx]
-# UPX packs the exe/dll/pyd (and ELF executables) of the exe, nuitka, portable and flet methods:
-# smaller files; every start unpacks them in memory and some antivirus engines flag them.
-# Binaries over 600 MiB are never packed (UPX's limit is 768 MiB). Downloaded once (pinned).
+# UPX packs the exe/dll/pyd (and ELF executables) of the nuitka, portable and flet methods, and
+# of exe on Windows only: smaller files; every start unpacks them in memory and some antivirus
+# engines flag them. Binaries over 600 MiB are never packed (UPX's limit is 768 MiB).
 enabled = false
 level = "best"   # 1..9 | best | brute | ultra-brute (brute: much slower, a few % smaller)
 lzma = true      # smaller, slower to unpack (PyInstaller and Nuitka always use LZMA)
 exclude = []     # extra file-name globs never packed (C runtime and python3*.dll never are)
+# path = "tools/upx"   # a UPX binary, relative to the project root (default: PATH, then a pinned download)
 
 [preset.flet]
+# ./deploy apply pins flet, flet-desktop and flet-cli to this version in pyproject.toml and re-locks
 version = "1.0.1"   # flet, flet-desktop and flet-cli always at the same version
 
 [hooks]
-pre_commit = true   # ./deploy setup installs a git pre-commit hook (./deploy hooks run: ruff, format, generated files, lock)
+# true: ./deploy apply (and setup) installs a git pre-commit hook that runs ./deploy hooks run
+# (ruff, format, generated files, lock); false: ./deploy apply removes pytemplate's hook
+pre_commit = true
 
 [vscode]
 # Status bar buttons (VS Code extension actboy168.tasks): ./deploy commands or [tasks] names

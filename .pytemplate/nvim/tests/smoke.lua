@@ -4,14 +4,21 @@
 --   nvim --headless -c "doautocmd UIEnter" -c "luafile .pytemplate/nvim/tests/smoke.lua"
 -- PT_ROOT (optional): the project root the caller expects. Output on stdout, one line per check:
 --   "ok   NAME"  |  "FAIL NAME" followed by the error, indented  |  "SKIP NAME (reason)"
+-- and last "DONE <number of checks>". Each result starts on a fresh line: stdout is shared with
+-- anything that leaks there (a pty, a banner), and text without a newline would hide it.
 -- Exit code 0 when nothing failed (:qa!), 1 otherwise (:cq!). SKIP is only used for things that
--- need a network install (a language server via uvx/Mason, a treesitter parser).
+-- need a network install (a language server via uvx/Mason, a treesitter parser) or a missing
+-- C compiler (the mypyc debug configuration).
 local uv = vim.uv or vim.loop
-local failed = 0
+local failed, total = 0, 0
 
 local function emit(line)
   io.stdout:write(line, "\n")
   io.stdout:flush()
+end
+
+local function result(line)
+  emit("\n" .. line)
 end
 
 local Skip = {}
@@ -20,6 +27,7 @@ local function skip(reason)
 end
 
 local function check(name, fn)
+  total = total + 1
   local ok, err = xpcall(fn, function(e)
     if getmetatable(e) == Skip then
       return e
@@ -27,12 +35,12 @@ local function check(name, fn)
     return debug.traceback(tostring(e), 2)
   end)
   if ok then
-    emit("ok   " .. name)
+    result("ok   " .. name)
   elseif getmetatable(err) == Skip then
-    emit("SKIP " .. name .. " (" .. err.reason .. ")")
+    result("SKIP " .. name .. " (" .. err.reason .. ")")
   else
     failed = failed + 1
-    emit("FAIL " .. name)
+    result("FAIL " .. name)
     for _, line in ipairs(vim.split(tostring(err), "\n", { plain = true })) do
       emit("     " .. line)
     end
@@ -47,12 +55,13 @@ local function wait(ms, cond, what)
 end
 
 local function finish()
+  result("DONE " .. total) -- the caller counts the result lines it parsed against this
   vim.cmd(failed == 0 and "qa!" or "cq!")
 end
 
 -- A hung check must not hang the caller.
 vim.defer_fn(function()
-  emit("FAIL watchdog (the smoke test took more than 20 minutes)")
+  result("FAIL watchdog (the smoke test took more than 20 minutes)")
   vim.cmd("cq!")
 end, 20 * 60 * 1000)
 
@@ -180,9 +189,21 @@ check("launcher fallback without uv", function()
   pt._uv = false
   local cmd = pt.deploy_cmd({ "help" })
   pt._uv = saved
-  assert(#cmd == 2 and cmd[1] == pt.launcher(), vim.inspect(cmd))
-  assert(cmd[1]:match(pt.is_win and "deploy%.cmd$" or "/deploy$"), cmd[1])
-  local r = vim.system(cmd, { cwd = pt.caller_cwd(), env = pt.deploy_env(), text = true }):wait(120000)
+  -- POSIX: through /bin/sh, like the VS Code tasks and the git hook (no exec bit needed)
+  assert(#cmd == (pt.is_win and 2 or 3) and cmd[#cmd - 1] == pt.launcher(), vim.inspect(cmd))
+  assert(cmd[#cmd - 1]:match(pt.is_win and "deploy%.cmd$" or "/deploy$"), vim.inspect(cmd))
+  assert(pt.is_win or cmd[1] == "/bin/sh", vim.inspect(cmd))
+  local mode = not pt.is_win and uv.fs_stat(pt.launcher()).mode % 4096 or nil -- permission bits
+  if mode then
+    uv.fs_chmod(pt.launcher(), 420) -- 0644: a checkout that lost the exec bit
+  end
+  local ok, r = pcall(function()
+    return vim.system(cmd, { cwd = pt.caller_cwd(), env = pt.deploy_env(), text = true }):wait(120000)
+  end)
+  if mode then
+    uv.fs_chmod(pt.launcher(), mode)
+  end
+  assert(ok, r)
   assert(r.code == 0 and r.stdout:find("Development:", 1, true), "launcher exit " .. tostring(r.code) .. "\n" .. (r.stderr or ""))
 end)
 
@@ -262,6 +283,12 @@ check("output parser", function()
   assert(m and m.type == "W" and m.lnum == 7, vim.inspect(m))
   m = p("  C:\\p\\src\\x.py:3:5 - error: Type of \"y\" is unknown")
   assert(m and m.type == "E" and m.col == 5, vim.inspect(m))
+  -- mypyc prints paths relative to its stage (a copy of src/): they land on src/
+  local core = "/src/" .. info.pkg .. "/core/__init__.py"
+  m = p(info.pkg .. "/core/__init__.py:2: error: Incompatible types in assignment  [assignment]")
+  assert(m and m.type == "E" and pt.same_path(m.filename, root .. core), vim.inspect(m))
+  m = p("src/" .. info.pkg .. "/core/__init__.py:2: error: x  [misc]")
+  assert(m and pt.same_path(m.filename, root .. core), vim.inspect(m))
   for _, line in ipairs({
     "src/x.py:5: note: See https://mypy.rtfd.io",
     "Found 3 errors in 1 file (checked 4 source files)",
@@ -344,11 +371,29 @@ check("mypy diagnostics (profile " .. info.typing.profile .. ")", function()
   local ok, err = pcall(function()
     vim.cmd.edit(file)
     local buf = vim.api.nvim_get_current_buf()
+    -- LazyVim lints on BufReadPost after a 100 ms debounce, and a new run of a linter cancels the
+    -- running one (on Windows only its cmd.exe wrapper): let that run start and end first
+    vim.wait(500)
+    wait(120000, function()
+      return #lint.get_running(buf) == 0
+    end, "the automatic lint run")
     lint.try_lint("mypy")
     local ns = lint.get_namespace("mypy")
-    wait(180000, function()
+    if not vim.wait(180000, function()
       return #vim.diagnostic.get(buf, { namespace = ns }) > 0
-    end, "mypy diagnostics")
+    end, 50) then
+      -- the same command by hand: its exit code, time and output say why nothing came
+      local cmd = type(linter.cmd) == "function" and linter.cmd() or linter.cmd
+      local argv = vim.list_extend({ cmd }, vim.deepcopy(linter.args or {}))
+      argv[#argv + 1] = file
+      if pt.is_win then
+        argv = vim.list_extend({ "cmd.exe", "/C" }, argv)
+      end
+      local started = uv.hrtime()
+      local r = vim.system(argv, { cwd = linter.cwd, env = linter.env, clear_env = linter.env ~= nil, text = true }):wait(120000)
+      error(("no mypy diagnostics after 180 s (linters still running: %s); by hand: exit %s after %.1f s\n%s%s"):format(
+        table.concat(lint.get_running(buf), ", "), tostring(r.code), (uv.hrtime() - started) / 1e9, r.stdout or "", r.stderr or ""))
+    end
     local d = vim.diagnostic.get(buf, { namespace = ns })[1]
     assert(d.message:find("Incompatible types", 1, true), d.message)
     local S = vim.diagnostic.severity
@@ -466,6 +511,68 @@ check("debugger stops at a breakpoint (launch.json)", function()
     assert(frame.line == line, "stopped at line " .. tostring(frame.line) .. " instead of " .. line)
   end)
   dap.listeners.after.event_stopped.pt_smoke = nil
+  if dap.session() then
+    dap.disconnect({ terminateDebuggee = true })
+    vim.wait(30000, function()
+      return dap.session() == nil
+    end, 100)
+  end
+  require("dap.breakpoints").clear()
+  assert(ok, err)
+end)
+
+local function has_c_compiler()
+  for _, cc in ipairs({ vim.env.CC or "cc", "cc", "gcc", "clang", "cl" }) do
+    if vim.fn.executable(cc) == 1 then
+      return true
+    end
+  end
+  local x86 = vim.env["ProgramFiles(x86)"]
+  return pt.is_win and x86 ~= nil and uv.fs_stat(x86 .. "/Microsoft Visual Studio/Installer/vswhere.exe") ~= nil
+end
+
+-- The mypyc configuration: overseer runs its preLaunchTask "deploy: compile" (our provider, the
+-- only one defining it), then debugpy runs the stage's main.py with src <-> stage pathMappings.
+check("mypyc launch config: deploy: compile, then a breakpoint in src/main.py", function()
+  if not supported("mypyc") then
+    skip("mypyc is not in backend.supported")
+  end
+  if not has_c_compiler() then
+    skip("no C compiler: mypyc cannot build the stage")
+  end
+  local dap = require("dap")
+  local config
+  for _, c in ipairs(require("dap.ext.vscode").getconfigs(root .. "/.vscode/launch.json")) do
+    if c.name:find("mypyc", 1, true) then
+      config = vim.deepcopy(c)
+    end
+  end
+  assert(config, "no mypyc configuration in launch.json")
+  assert(config.preLaunchTask == "deploy: compile", vim.inspect(config.preLaunchTask))
+  config.console = "internalConsole"
+  local main = root .. "/src/main.py"
+  vim.cmd.edit(main)
+  local line = vim.fn.search([[^if __name__ == "__main__":]], "nw")
+  assert(line > 0, "no __main__ guard in src/main.py")
+  require("dap.breakpoints").set({}, vim.api.nvim_get_current_buf(), line)
+  local stopped
+  dap.listeners.after.event_stopped.pt_smoke_mypyc = function(_, body)
+    stopped = body
+  end
+  local ok, err = pcall(function()
+    dap.run(config)
+    wait(420000, function()
+      return stopped ~= nil
+    end, "deploy: compile, then the breakpoint")
+    assert(stopped.reason == "breakpoint", vim.inspect(stopped))
+    wait(30000, function()
+      return dap.session() ~= nil and dap.session().current_frame ~= nil
+    end, "stack trace")
+    local frame = dap.session().current_frame
+    assert(frame.line == line, "stopped at line " .. tostring(frame.line) .. " instead of " .. line)
+    assert(uv.fs_stat(root .. "/" .. info.mypyc_stage .. "/main.py"), "no stage: the preLaunchTask did not compile")
+  end)
+  dap.listeners.after.event_stopped.pt_smoke_mypyc = nil
   if dap.session() then
     dap.disconnect({ terminateDebuggee = true })
     vim.wait(30000, function()
