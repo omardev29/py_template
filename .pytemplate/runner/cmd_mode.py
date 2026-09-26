@@ -8,7 +8,6 @@ Read-only checks (the Python 3.11 precheck, `uv lock --check`) still run.
 from __future__ import annotations
 
 import argparse
-import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -18,7 +17,6 @@ from .config import BACKENDS, Config
 from .project import CONFIG_FILE, PYPROJECT, ROOT, code_dirs, rel, user_path
 from .ui import DeployError
 
-_APP_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 _DRY = "(--dry-run: nothing is written)"
 
 
@@ -318,11 +316,6 @@ def cmd_render(cfg: Config, args: list[str]) -> int:
 # --- init / new ----------------------------------------------------------------------------------
 
 
-def _req_name(requirement: str) -> str:
-    m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", requirement)
-    return re.sub(r"[-_.]+", "-", m.group(1)).lower() if m else requirement
-
-
 def _owned_now() -> dict[str, bytes]:
     """The files of src/, tests/ and typings/ (what init replaces), CRLF-normalized."""
     out: dict[str, bytes] = {}
@@ -336,44 +329,31 @@ def _owned_now() -> dict[str, bytes]:
 
 
 def _plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
-    """--dry-run: print what `init` would replace (same checks as presets.init, no writes)."""
-    new_name = name or cfg.app.name
-    if not _APP_NAME.fullmatch(new_name):
-        raise DeployError("the name may only contain letters, digits, '-' and '_' (and must start with a letter)")
-    target = presets.load(preset)
-    if not force and not presets.pristine(cfg):
-        raise DeployError(
-            "src/, tests/ or typings/ have changes compared to the skeleton of the current preset "
-            f"('{cfg.app.preset}'). init would replace them.\n  If you are sure: ./deploy __init {preset} --force"
-        )
-    files = presets.skeleton(preset, new_name)
+    """--dry-run: print what `init` would do (presets.plan_init: the same checks, no writes)."""
+    plan = presets.plan_init(cfg, preset, name, force=force)
     owned = _owned_now()
-    ui.step(f"init {preset} ({target.get('description', '')}) as '{new_name}' {_DRY}")
+    ui.step(f"init {preset} ({plan.description}) as '{plan.name}' {_DRY}")
     marks: list[str] = []
     same = 0
-    for path in sorted({*files, *owned}):
+    for path in sorted({*plan.files, *owned}):
         target_file = ROOT / path
-        if path not in files:
+        if path not in plan.files:
             marks.append(f"    - {path}")
         elif not target_file.is_file():
             marks.append(f"    + {path}")
-        elif target_file.read_bytes().replace(b"\r\n", b"\n") != files[path]:
+        elif target_file.read_bytes().replace(b"\r\n", b"\n") != plan.files[path]:
             marks.append(f"    ~ {path}")
         else:
             same += 1
     ui.info(f"  files (- deleted, + new, ~ replaced; {same} identical):")
     for line in marks:
         ui.info(line)
-
-    config_text = files.get(CONFIG_FILE.name, b"").decode("utf-8")
-    new_cfg = _config_from_text(config_text, f"preset {preset}: pytemplate.toml") if config_text else cfg
-    old_deps, old_dev = presets.dependencies(cfg)
-    new_deps, new_dev = presets.dependencies(new_cfg, preset)
-    for label, old, new in (("dependencies", old_deps, new_deps), ("dev group", old_dev, new_dev)):
-        keep = {_req_name(r) for r in new}
-        drop = [r for r in old if _req_name(r) not in keep]
-        ui.info(f"  {label + ':':<14} remove {', '.join(drop) or '-'}; add {', '.join(new) or '-'}")
-    ui.info(f"  {PYPROJECT.name}: name = \"{new_name}\", the preset's extra tables and the managed [tool.uv] block")
+    for label, drop, add in (("dependencies", plan.drop, plan.add), ("dev group", plan.drop_dev, plan.add_dev)):
+        ui.info(f"  {label + ':':<14} remove {', '.join(drop) or '-'}; add {', '.join(add) or '-'}")
+    if plan.pins:
+        source = rel(presets.constraints_path(preset))
+        ui.info(f"  {'versions:':<14} {len(plan.pins)} packages new to uv.lock at the versions the template tested ({source})")
+    ui.info(f"  {PYPROJECT.name}: name = \"{plan.name}\", the preset's extra tables and the managed [tool.uv] block")
     ui.info("  uv.lock: re-locked (uv lock); generated files: re-rendered with --force")
 
 
@@ -385,7 +365,6 @@ def cmd_init(cfg: Config, args: list[str]) -> int:
     parser.add_argument("--force", action="store_true")
     ns = _parse(parser, args)
     if proc.DRY_RUN:
-        presets.check_name_free(cfg, ns.preset, ns.name or cfg.app.name)
         _plan_init(cfg, ns.preset, ns.name, force=ns.force)
         return 0
     presets.init(cfg, ns.preset, ns.name, force=ns.force)
@@ -407,11 +386,11 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         raise DeployError(f"new: {dest} exists and is not a folder")
     if dest.is_dir() and any(dest.iterdir()):
         raise DeployError(f"new: {dest} already exists and is not empty")
-    # Checked here, before copying: `init` in the copy would reject it with a half-made project
-    name = ns.name or re.sub(r"[^A-Za-z0-9_-]", "-", resolved.name)
-    if not _APP_NAME.fullmatch(name):
+    # Checked here, before copying (and under --dry-run): a copy whose `init` fails is removed
+    name = ns.name or presets.name_from_folder(resolved.name)
+    if not presets.APP_NAME.fullmatch(name):
         raise DeployError(
-            f"new: '{name}' is not a valid app name (letters, digits, '-' and '_', starting with a letter). "
+            f"new: '{name}' is not a valid app name (it may only contain {presets.NAME_RULE}). "
             "Choose one with --name NAME"
         )
     presets.check_name_free(cfg, ns.preset, name)
@@ -419,9 +398,12 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         ui.step(f"new project in {dest} {_DRY}")
         ui.info(f"  preset  {ns.preset}")
         ui.info(f"  name    {name}  (package src/{name.replace('-', '_').lower()}/)")
+        pins = presets.constraints(ns.preset)
+        if pins:
+            ui.info(f"  pins    {len(pins)} packages at the versions the template tested (constraints.txt of the preset)")
         ui.info(
-            f"  would copy this template there (without .git, environments, builds or caches), "
-            f"run `./deploy __init {ns.preset} --name {name} --force` in it and `git init`"
+            "  would copy this template there (the files git tracks; no .git, environments, builds or "
+            f"caches), run `./deploy __init {ns.preset} --name {name} --force` in it and `git init -b main`"
         )
         return 0
     presets.new(dest, ns.preset, name)

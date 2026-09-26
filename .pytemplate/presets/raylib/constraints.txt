@@ -1,0 +1,8 @@
+# Versions the template was tested with for the packages the raylib preset adds to the
+# template's uv.lock. `./deploy new` hands them to `uv add --constraints` (a one-off:
+# pyproject.toml keeps plain bounds). Regenerate it, never edit it: CLAUDE.md section 11.
+cffi==2.1.1
+pycparser==3.0
+raylib==6.0.1.0
+types-cffi==2.1.0.20260827
+types-setuptools==84.0.0.20260812
