@@ -731,7 +731,6 @@ def _restore(path: Path, before: bytes | None) -> bool:
     return True
 
 
-
 def _print_plan(plan: Plan, command: str, force: bool) -> None:
     """--dry-run: what apply would do, without writing, syncing or locking anything."""
     cfg = plan.new_cfg or plan.cfg
