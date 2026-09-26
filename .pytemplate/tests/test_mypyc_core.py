@@ -1120,6 +1120,17 @@ def test_build_compiler_hint_only_when_the_c_step_failed(
         assert stdout in capsys.readouterr().err  # the captured output is shown
 
 
+def test_build_a_compiler_that_cannot_start_is_a_missing_requirement(fake_build: FakeCompiler) -> None:
+    """README and CLAUDE.md 5.3: a missing compiler exits 3. `./deploy compile` without `cc`
+    (or with CC naming a missing program) exited 1, like a failed compile."""
+    fake_build.code = mypyc.COMPILER_MISSING
+    with pytest.raises(DeployError) as err:
+        mypyc.build(make({}), "dev")
+    assert err.value.code == 3
+    assert "the C compiler cannot start" in str(err.value) and mypyc.has_compiler_hint() in str(err.value)
+    assert not (mypyc.profile(make({}), "dev").dir / mypyc.COMPILED_STAMP).exists()  # the next build is forced
+
+
 # --- 8. tools/mypyc_build.py -----------------------------------------------------------------------
 
 
@@ -1221,6 +1232,51 @@ def test_build_script_reports_rejected_code_with_its_own_exit_code(
     module = _load_build_script()
     assert module.main() == module.MYPYC_REJECTED == mypyc.MYPYC_REJECTED
     assert stderr in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("problem", ["the C compiler command 'clang-99 -fPIC' cannot start: clang-99 was not found", None])
+def test_build_script_tells_a_missing_compiler_from_a_failed_compile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], problem: str | None
+) -> None:
+    """setuptools turns every failure into SystemExit("error: ..."): only when the compiler
+    cannot start does the script exit COMPILER_MISSING; a real compile error stays setuptools'."""
+    module, _, _ = _run_build_script(tmp_path, monkeypatch)
+    failure = SystemExit("error: [Errno 2] No such file or directory: 'clang-99'")
+
+    def failing_setup(**kw: Any) -> None:
+        raise failure
+
+    sys.modules["setuptools"].setup = failing_setup  # type: ignore[attr-defined]
+    monkeypatch.setattr(module, "missing_compiler", lambda: problem)
+    if problem is None:
+        with pytest.raises(SystemExit) as e:
+            module.main()
+        assert e.value is failure
+        return
+    assert module.main() == module.COMPILER_MISSING == mypyc.COMPILER_MISSING
+    err = capsys.readouterr().err
+    assert "No such file or directory: 'clang-99'" in err and f"error: {problem}" in err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="CC is for gcc/clang: MSVC is found by vswhere")
+@pytest.mark.parametrize("cc", ["/nonexistent/clang-99", "ccache-that-is-not-there gcc"])
+def test_build_script_finds_a_cc_that_does_not_exist(monkeypatch: pytest.MonkeyPatch, cc: str) -> None:
+    pytest.importorskip("setuptools")  # the script runs where mypyc imported setuptools (.venv)
+    monkeypatch.setenv("CC", cc)
+    problem = _load_build_script().missing_compiler()
+    assert problem is not None and cc.split()[0] in problem
+
+
+@needs_venv
+@pytest.mark.skipif(not _has_mypyc() or os.name == "nt", reason="needs mypyc (run through ./deploy selftest); CC is not MSVC")
+def test_real_compile_with_a_missing_cc_is_a_missing_requirement(src_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The measured case: CC=clang-99 -> `No such file or directory: 'clang-99'` and exit 1."""
+    _project(src_tree, {"main.py": "", "pkg/__init__.py": "", "pkg/core/__init__.py": "", "pkg/core/m.py": "X = 1\n"})
+    monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
+    monkeypatch.setenv("CC", "/nonexistent/clang-99")
+    with pytest.raises(DeployError) as err:
+        mypyc.build(make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}}), "dev")
+    assert err.value.code == 3 and "the C compiler cannot start" in str(err.value)
 
 
 @pytest.mark.skipif(not _has_mypyc(), reason="needs mypyc (run through ./deploy selftest)")

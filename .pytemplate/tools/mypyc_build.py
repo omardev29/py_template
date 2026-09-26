@@ -7,18 +7,24 @@ strip_asserts, group_name or multi_file, and it always writes to ./build. The C 
 extra_cflags() are added to mypyc's own.
 
 Exit codes: 0 ok; MYPYC_REJECTED when mypy/mypyc rejected the code (the errors are printed,
-no C compiler ran); anything else is a failure of the C build (setuptools / the compiler).
+no C compiler ran); COMPILER_MISSING when the C build failed because setuptools cannot start
+the C compiler (CC names a missing program, no `cc`, no MSVC); anything else is a failure of
+the C build (setuptools / the compiler).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import traceback
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 MYPYC_REJECTED = 4  # mirrored by mypyc.MYPYC_REJECTED in the runner
+COMPILER_MISSING = 5  # mirrored by mypyc.COMPILER_MISSING in the runner
 
 
 def compiler_type() -> str:
@@ -29,6 +35,26 @@ def compiler_type() -> str:
     compiler = ccompiler.new_compiler()
     sysconfig.customize_compiler(compiler)
     return str(compiler.compiler_type)
+
+
+def missing_compiler() -> str | None:
+    """Why setuptools cannot start the C compiler, or None. Asked only after a failed C build
+    (MSVC's check runs vcvarsall.bat): gcc/clang = the programs of the compiler and linker
+    commands (CC, LDSHARED or Python's own) exist; MSVC = setuptools can set it up."""
+    from distutils import ccompiler, sysconfig  # setuptools' copy (mypyc.build imported setuptools)
+
+    compiler = ccompiler.new_compiler()
+    sysconfig.customize_compiler(compiler)
+    if compiler.compiler_type == "msvc":
+        try:
+            compiler.initialize()
+        except Exception as e:  # PlatformError; its class moved between setuptools versions
+            return f"MSVC cannot be used: {e}"
+        return None
+    for command in (getattr(compiler, "compiler_so", None), getattr(compiler, "linker_so", None)):
+        if command and shutil.which(command[0]) is None:
+            return f"the C compiler command {' '.join(command)!r} cannot start: {command[0]} was not found"
+    return None
 
 
 def extra_cflags(compiler: str, platform: str, no_semantic_interposition: bool) -> list[str]:
@@ -90,6 +116,21 @@ def main() -> int:
 
     from setuptools import setup
 
+    try:
+        build_ext(setup, spec, extensions)
+    except SystemExit as exc:  # setuptools reports every failure as SystemExit("error: ...")
+        problem = None if exc.code in (None, 0) else missing_compiler()
+        if problem is None:
+            raise
+        if isinstance(exc.code, str):
+            print(exc.code, file=sys.stderr)
+        print(f"error: {problem}", file=sys.stderr)
+        return COMPILER_MISSING
+    return 0
+
+
+def build_ext(setup: Callable[..., object], spec: dict[str, Any], extensions: list[Any]) -> None:
+    """setuptools' `build_ext --inplace` of the extensions mypycify made."""
     setup(
         name=spec["group"],
         ext_modules=extensions,
@@ -108,7 +149,6 @@ def main() -> int:
             str(os.cpu_count() or 1),
         ],
     )
-    return 0
 
 
 if __name__ == "__main__":

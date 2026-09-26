@@ -192,11 +192,12 @@ def sync(env: PyEnv) -> None:
 
 def interpreter_info(python: str | Path) -> dict[str, object]:
     """Return interpreter data (impl, version, platform, prefix) without importing anything from
-    the project. `platform` is sysconfig.get_platform(): setuptools picks the MSVC tools by it."""
+    the project. `platform` is sysconfig.get_platform(): setuptools picks the MSVC tools by it;
+    `cc` the C compiler command it runs without $CC (None on Windows)."""
     code = (
         "import json,sys,sysconfig;"
         "print(json.dumps({'impl':sys.implementation.name,'version':'%d.%d.%d'%sys.version_info[:3],"
-        "'platform':sysconfig.get_platform(),"
+        "'platform':sysconfig.get_platform(),'cc':sysconfig.get_config_var('CC'),"
         "'executable':sys.executable,'base_prefix':sys.base_prefix,"
         "'gil_disabled':bool(sysconfig.get_config_var('Py_GIL_DISABLED'))}))"
     )

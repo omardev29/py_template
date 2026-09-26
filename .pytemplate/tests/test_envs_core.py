@@ -164,6 +164,7 @@ def test_interpreter_info_of_this_python() -> None:
     assert info["impl"] == sys.implementation.name
     assert info["version"] == "%d.%d.%d" % sys.version_info[:3]
     assert info["platform"] == sysconfig.get_platform()  # what setuptools picks the MSVC tools by
+    assert info["cc"] == sysconfig.get_config_var("CC")  # the compiler it runs without $CC
 
 
 # --- the oldest uv ---------------------------------------------------------------------------------
@@ -692,9 +693,38 @@ def test_c_compiler_rejects_macos_xcode_shims(tmp_path: Path, monkeypatch: pytes
     calls.clear()
     monkeypatch.setenv("CC", "/opt/llvm/bin/clang")  # Homebrew llvm, zig cc: never the shim check
     assert cmd_env._c_compiler() == (True, "/opt/llvm/bin/clang") and calls == []
-    monkeypatch.setenv("CC", "ccache gcc")  # not a path: the next candidate
-    monkeypatch.setattr(cmd_env, "IS_MACOS", False)  # Linux: /usr/bin/cc is a real compiler
-    assert cmd_env._c_compiler() == (True, "/usr/bin/cc") and calls == []
+    monkeypatch.setenv("CC", "ccache gcc")  # setuptools runs ccache
+    monkeypatch.setattr(cmd_env, "IS_MACOS", False)  # Linux: /usr/bin/* are real programs
+    assert cmd_env._c_compiler() == (True, "/usr/bin/ccache") and calls == []
+
+
+@pytest.mark.parametrize(
+    ("cc_env", "venv_cc", "programs", "expected"),
+    [
+        (None, "cc -pthread", {"cc"}, (True, "/bin/cc")),
+        (None, "", {"cc"}, (True, "/bin/cc")),  # no .venv yet: setuptools' usual `cc`
+        (None, "clang", {"clang"}, (True, "/bin/clang")),  # macOS builds of CPython
+        # gcc or clang installed, but not the `cc` setuptools runs: the build fails
+        (None, "cc -pthread", {"gcc", "clang"}, (False, "cc not found (the CC of the .venv Python: 'cc -pthread')")),
+        # the user's CC wins, even when it names a program that does not exist
+        ("clang-99", "cc -pthread", {"cc", "gcc"}, (False, "clang-99 not found (CC='clang-99')")),
+        ("gcc-14 -m64", "cc -pthread", {"gcc-14"}, (True, "/bin/gcc-14")),
+        ("", "cc -pthread", {"cc"}, (False, "no C compiler (CC='')")),  # an empty CC is what setuptools gets
+    ],
+)
+def test_c_compiler_is_the_one_setuptools_runs(
+    monkeypatch: pytest.MonkeyPatch, cc_env: str | None, venv_cc: str, programs: set[str], expected: tuple[bool, str]
+) -> None:
+    """doctor said `[ok] C compiler for mypyc: /usr/bin/cc` with CC=clang-99 (setuptools then
+    failed: No such file or directory: 'clang-99'), and `[ok] .../gcc` where no `cc` existed."""
+    monkeypatch.setattr(cmd_env, "IS_WINDOWS", False)
+    monkeypatch.setattr(cmd_env, "IS_MACOS", False)
+    if cc_env is None:
+        monkeypatch.delenv("CC", raising=False)
+    else:
+        monkeypatch.setenv("CC", cc_env)
+    monkeypatch.setattr(cmd_env.shutil, "which", lambda name: f"/bin/{name}" if name in programs else None)
+    assert cmd_env._c_compiler("", cc=venv_cc) == expected
 
 
 @pytest.mark.parametrize(("platform", "component"), [("win-amd64", "VC.Tools.x86.x64"), ("win-arm64", "VC.Tools.arm64"), ("win32", "VC.Tools.x86.x64")])
@@ -764,6 +794,7 @@ class Doctor:
             "pypy": {"impl": "pypy", "version": "3.11.15", "jit": False, "platform": "linux-x86_64"},
         }
         self.compiler_platforms: list[str] = []
+        self.compiler_ccs: list[str] = []
         self.cp = envs.PyEnv("cpython", tmp_path / ".venv", "3.14", "only-managed")
         self.pp = envs.PyEnv("pypy", tmp_path / ".venv-pypy", "pypy@3.11.15", "only-managed")
         for env in (self.cp, self.pp):
@@ -801,8 +832,9 @@ class Doctor:
         err = "error: The lockfile at `uv.lock` needs to be updated, but `--check` was\n       provided.\n" if self.lock else ""
         return done(args, self.lock, "", err)
 
-    def _compiler(self, platform: str = "") -> tuple[bool, str]:
+    def _compiler(self, platform: str = "", cc: str = "") -> tuple[bool, str]:
         self.compiler_platforms.append(platform)
+        self.compiler_ccs.append(cc)
         return True, "/usr/bin/cc"
 
     def problems(self) -> list[tuple[bool | None, str, str]]:
@@ -898,6 +930,9 @@ def test_doctor_passes_the_venv_platform_to_the_compiler_check(doctor: Doctor) -
     assert isinstance(info, dict)
     info["platform"] = "win-arm64"
     cmd_env.cmd_doctor(make(), [])
+    info["cc"] = "clang -pthread"
+    cmd_env.cmd_doctor(make(), [])
     doctor.cp.python.unlink()  # no .venv yet: the check uses uv's default (x86_64 CPython)
     cmd_env.cmd_doctor(make(), [])
-    assert doctor.compiler_platforms == ["win-arm64", ""]
+    assert doctor.compiler_platforms == ["win-arm64", "win-arm64", ""]
+    assert doctor.compiler_ccs == ["", "clang -pthread", ""]  # the .venv Python's sysconfig CC

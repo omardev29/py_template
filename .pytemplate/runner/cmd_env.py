@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -321,19 +322,30 @@ def _xcode_problem() -> str | None:
     return None
 
 
-def _c_compiler(platform: str = "") -> tuple[bool, str]:
-    """The C compiler mypyc would use; `platform`: the .venv Python's sysconfig platform."""
+def _c_compiler(platform: str = "", cc: str = "") -> tuple[bool, str]:
+    """The C compiler mypyc would use. Windows: MSVC for `platform` (the .venv Python's sysconfig
+    platform). Elsewhere what setuptools runs, nothing else: $CC when it is set, else `cc`, the
+    CC of the .venv Python's sysconfig ("cc -pthread"; "cc" when unknown). A gcc or clang next to
+    a missing `cc`, or a CC naming a missing program, is no compiler: the build would fail."""
     if IS_WINDOWS:
         return _msvc(platform or "win-amd64")
-    for cc in (os.environ.get("CC"), "cc", "gcc", "clang"):
-        found = shutil.which(cc) if cc else None
-        if found:
-            if IS_MACOS and os.path.dirname(found) == "/usr/bin":
-                problem = _xcode_problem()
-                if problem:
-                    return False, f"{found} is an Xcode shim: {problem}"
-            return True, found
-    return False, "no C compiler"
+    user = "CC" in os.environ
+    command = os.environ["CC"] if user else cc or "cc"
+    source = f"CC={command!r}" if user else f"the CC of the .venv Python: {command!r}"
+    try:
+        words = shlex.split(command)
+    except ValueError:  # unbalanced quotes
+        words = []
+    if not words:
+        return False, f"no C compiler ({source})"
+    found = shutil.which(words[0])  # "ccache gcc" runs ccache
+    if not found:
+        return False, f"{words[0]} not found ({source})"
+    if IS_MACOS and os.path.dirname(found) == "/usr/bin":
+        problem = _xcode_problem()
+        if problem:
+            return False, f"{found} is an Xcode shim: {problem}"
+    return True, found
 
 
 def cmd_doctor(cfg: Config, args: list[str]) -> int:
@@ -375,9 +387,11 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
     ui.step(f"backends (active: {cfg.backend.active}; supported: {', '.join(cfg.backend.supported)})")
     cp = envs.cpython_env(cfg)
     platform = ""  # the .venv Python's sysconfig platform: which MSVC tools mypyc needs
+    cc = ""  # and its sysconfig CC: the compiler setuptools runs when $CC is not set
     if cp.python.is_file():
         if (info := env_info(cp)) is not None:
             platform = str(info.get("platform", ""))
+            cc = str(info.get("cc") or "")
             check(True, f"CPython {info['version']} in {rel(cp.dir)}")
     else:
         check(False, f"environment {rel(cp.dir)} is missing", "./deploy setup")
@@ -389,7 +403,7 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
         else:
             check(False, f"environment {rel(pp.dir)} is missing ({cfg.python.pypy})", "./deploy setup   (or ./deploy sync pypy)")
     if cfg.supports("mypyc"):
-        found, where = _c_compiler(platform)
+        found, where = _c_compiler(platform, cc=cc)
         check(found, f"C compiler for mypyc: {where}", mypyc.has_compiler_hint(platform or "win-amd64"))
     if IS_WINDOWS and cfg.supports("mypyc"):
         long_paths = _long_paths()
