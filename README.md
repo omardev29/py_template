@@ -1247,7 +1247,10 @@ endings and executable bit.
 
 **From subfolders.** The launchers find the project from their own location and, when that
 fails, walk up from the current folder: `../deploy test` from `src/`, or the full path of the
-launcher from anywhere, works (from a symlinked folder too). Paths given to the runner itself
+launcher from anywhere, works (from a symlinked folder too). A project found by walking up must
+be yours: one another user owns (anyone may create `/tmp/.pytemplate`) is never run, and on
+Windows a drive root never counts; run such a project's launcher by its path if you trust it.
+The `shell-setup` functions below follow the same rule. Paths given to the runner itself
 (`./deploy new ../game`, `./deploy pyz-merge a.pyz b.pyz --out all.pyz`) are relative to the
 folder where the command was typed; `~` works everywhere, and on Windows `/c/Users/...`,
 `/cygdrive/c/...` and `C:/...` are accepted too. Arguments passed on to the app or to pytest are

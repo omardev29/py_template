@@ -153,7 +153,15 @@ implement the same contract: change them together. The `nu` and `xonsh` snippets
 `shell-setup` (section 4.9) also call uv directly.
 
 1. Find the project root: the directory that holds `.pytemplate/deploy.py`, first from the
-   launcher's own location, else by walking up from the current directory.
+   launcher's own location, else by walking up from the current directory. A walked-up root
+   must be the user's: on POSIX its `.pytemplate/deploy.py` passes `test -O` (anyone may create
+   `/tmp/.pytemplate/deploy.py`, and it ran as the caller); on Windows, whose owners are not read
+   (an Administrators-owned checkout would fail), a drive root is never taken. Otherwise exit 2
+   naming it (`deploy` `_pt_foreign`, `deploy.ps1` through `/bin/sh -c '[ -O $1 ]'`, `deploy.cmd`
+   stops before the drive root; the `shell-setup` snippets do the same, section 4.9;
+   `test_launcher_sh.test_a_launcher_outside_a_project_never_runs_another_users_one`,
+   `test_the_walk_up_never_takes_a_drive_root_on_windows`,
+   `test_shells.test_snippets_never_run_another_users_project`).
 2. Find uv (order below).
 3. Export `PYTEMPLATE_CALLER_CWD` (the caller's cwd; `C:\...` form with an upper-case drive on
    Windows) and `PYTEMPLATE_LAUNCHER`.

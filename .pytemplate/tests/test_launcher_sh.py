@@ -1047,3 +1047,46 @@ def test_install_prompt_through_a_terminal(launcher: str, answer: str, tmp_path:
     else:
         assert rc == 127 and "installer ran" not in out and "curl -LsSf" in out and "brew install uv" in out, out
         assert ("[y/N]" in out) == (answer == "n"), out
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not hasattr(os, "geteuid") or os.geteuid() != 0, reason="needs root to make files another user owns")
+def test_a_launcher_outside_a_project_never_runs_another_users_one(tmp_path: Path) -> None:
+    """A copy of the launcher outside any project walks up from $PWD: it ran the
+    .pytemplate/deploy.py another user had planted in /tmp, as this user. Refused now, with
+    how to run it on purpose; nothing of it runs (uv is never even looked for)."""
+    import pwd
+
+    nobody = pwd.getpwnam("nobody")
+    shared = tmp_path / "shared"
+    (shared / ".pytemplate").mkdir(parents=True)
+    (shared / ".pytemplate" / "deploy.py").write_text("print('PWNED')\n", encoding="utf-8")
+    for path in (shared, shared / ".pytemplate", shared / ".pytemplate" / "deploy.py"):
+        os.chown(path, nobody.pw_uid, nobody.pw_gid)
+    shared.chmod(0o777)
+    (shared / "victim").mkdir()
+    copy = tmp_path / "bin" / "deploy"
+    copy.parent.mkdir()
+    shutil.copy(LAUNCHER, copy)
+    for shell in ("sh", "dash", "bash"):
+        if not shutil.which(shell):
+            continue
+        r = subprocess.run([shell, str(copy), "help"], cwd=shared / "victim", capture_output=True, text=True, timeout=60, check=False,
+                           env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)})  # fmt: skip
+        assert r.returncode == 2 and "is not yours" in r.stderr and "PWNED" not in r.stdout + r.stderr, (shell, r.stdout, r.stderr)
+
+
+def test_the_walk_up_never_takes_a_drive_root_on_windows() -> None:
+    """On Windows, whose owners the sh launcher does not read, any user may create folders
+    at C:\\: a C:\\.pytemplate\\deploy.py is never the project a walk-up finds."""
+    text = LAUNCHER.read_text(encoding="ascii")
+    body = re.search(r"^_pt_foreign\(\) \{\n.*?^\}\n", text, re.S | re.M)
+    assert body, "no _pt_foreign in deploy"
+    code = "_pt_win=1\n" + body.group(0) + "\n".join(
+        f'if _pt_foreign "{d}"; then echo "{d} refused"; else echo "{d} taken"; fi' for d in ("C:/", "C:", "/c", "/cygdrive/d", "/", "C:/Users/x", "/c/Users/x")
+    ) + "\n"
+    for shell in ("sh", "dash", "bash", "busybox"):
+        if not shutil.which(shell):
+            continue
+        argv = [shell, "sh", "-c", code] if shell == "busybox" else [shell, "-c", code]
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False).stdout.splitlines()
+        assert out == ["C:/ refused", "C: refused", "/c refused", "/cygdrive/d refused", "/ refused", "C:/Users/x taken", "/c/Users/x taken"], (shell, out)

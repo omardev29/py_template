@@ -26,10 +26,12 @@ rem quoted name).
 set "PT_ROOT=%~dp0"
 if exist "%PT_ROOT%.pytemplate\deploy.py" goto :find_uv
 for %%I in ("%CD%\x") do set "PT_ROOT=%%~dpI"
+rem A drive root is never the project found this way: any user may create
+rem folders there, so its .pytemplate\deploy.py could be anybody's.
 :walk_up
-if exist "%PT_ROOT%.pytemplate\deploy.py" goto :find_uv
 for %%I in ("%PT_ROOT%.") do set "PT_PARENT=%%~dpI"
 if /i "%PT_PARENT%"=="%PT_ROOT%" goto :no_root
+if exist "%PT_ROOT%.pytemplate\deploy.py" goto :find_uv
 set "PT_ROOT=%PT_PARENT%"
 goto :walk_up
 

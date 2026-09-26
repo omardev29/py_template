@@ -228,6 +228,19 @@ deploy() {
         fi
         _pt_d=$_pt_n
     done
+    # Its code is not run when another user owns it (anyone may create /tmp/.pytemplate);
+    # on Windows, whose owners are not read here, never at a drive root.
+    _pt_n=
+    if [ "${OS:-}" = Windows_NT ] && [ -z "${WSL_DISTRO_NAME:-}" ]; then
+        case $_pt_d in / | [A-Za-z]: | [A-Za-z]:/ | /[A-Za-z] | /cygdrive/[A-Za-z]) _pt_n=1 ;; esac
+    elif [ ! -O "${_pt_d%/}/.pytemplate/deploy.py" ]; then
+        _pt_n=1
+    fi
+    if [ -n "$_pt_n" ]; then
+        printf '%s\n' "deploy: ${_pt_d%/}/.pytemplate/deploy.py is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run ${_pt_d%/}/deploy yourself." >&2
+        unset _pt_d _pt_n
+        return 2
+    fi
     set -- "${_pt_d%/}/deploy" "$@"
     unset _pt_d _pt_n
     "$@"
@@ -252,6 +265,15 @@ function deploy {
         return
     }
     $ps1 = [IO.Path]::Combine($dir, 'deploy.ps1')
+    # Its code is not run when another user owns it (anyone may create /tmp/.pytemplate);
+    # on Windows, whose owners are not read here, never at a drive root.
+    $script = [IO.Path]::Combine($dir, '.pytemplate', 'deploy.py')
+    $foreign = if ($env:OS -eq 'Windows_NT') { [IO.Path]::GetPathRoot($dir) -eq $dir } else { & /bin/sh -c 'set -f; IFS=; [ -O $1 ]' sh $script; $LASTEXITCODE -ne 0 }
+    if ($foreign) {
+        [Console]::Error.WriteLine("deploy: $script is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run $ps1 yourself.")
+        $global:LASTEXITCODE = 2
+        return
+    }
     # Pipeline input ('x' | deploy run) goes on to the runner, like a native call.
     if ($MyInvocation.ExpectingInput) { $input | & $ps1 @args } else { & $ps1 @args }
 }
@@ -269,6 +291,18 @@ function deploy --description 'Run ./deploy of the enclosing pytemplate project'
             return 2
         end
         set dir $parent
+    end
+    # Its code is not run when another user owns it (anyone may create /tmp/.pytemplate);
+    # on Windows, whose owners are not read here, never at a drive root.
+    set -l foreign 0
+    if test "$OS" = Windows_NT; and test -z "$WSL_DISTRO_NAME"
+        string match -qr '^(/|[A-Za-z]:/?|/[A-Za-z]|/cygdrive/[A-Za-z])$' -- $dir; and set foreign 1
+    else if not test -O "$dir/.pytemplate/deploy.py"
+        set foreign 1
+    end
+    if test $foreign = 1
+        echo "deploy: $dir/.pytemplate/deploy.py is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run $dir/deploy yourself." >&2
+        return 2
     end
     "$dir/deploy" $argv
 end
@@ -293,6 +327,12 @@ def --wrapped deploy [...rest] {
     let root = $dir
     let script = ($root | path join '.pytemplate' 'deploy.py')
     let windows = ($nu.os-info.name == 'windows')
+    # Its code is not run when another user owns it (anyone may create /tmp/.pytemplate);
+    # on Windows, whose owners are not read here, never at a drive root.
+    let foreign = if $windows { ($root | path dirname) == $root } else { (^/bin/sh -c '[ -O "$1" ]' sh $script | complete).exit_code != 0 }
+    if $foreign {
+        error make {msg: $"deploy: ($script) is not yours, another user owns it or it is at a drive root: not run. If you trust it, run ($root | path join 'deploy') yourself."}
+    }
     let uv = if $windows { 'uv.exe' } else { 'uv' }
     if (which $uv | is-empty) {
         # The launcher searches uv's usual install folders and prints how to install it.
@@ -325,28 +365,35 @@ _PT_CHOICES = @CHOICES@
 _PT_FLAGS = @FLAGS@
 _PT_GLOBALS = @GLOBALS@
 _PT_MISSING = "deploy: no .pytemplate/deploy.py in this folder or any parent folder"
+_PT_FOREIGN = "deploy: {} is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run {} yourself."
 
 
 def _pt_deploy_argv(args):
+    """(argv, "") or (None, why not)."""
     here = _PtPath.cwd()
     for d in (here, *here.parents):
         script = d / ".pytemplate" / "deploy.py"
         if script.is_file():
+            launcher = d / ("deploy.cmd" if _pt_os.name == "nt" else "deploy")
+            # Its code is not run when another user owns it (anyone may create /tmp/.pytemplate);
+            # on Windows, whose owners are not read here, never at a drive root.
+            if d == _PtPath(d.anchor) if _pt_os.name == "nt" else script.stat().st_uid != _pt_os.getuid():
+                return None, _PT_FOREIGN.format(script, launcher)
             path = _pt_os.pathsep.join(str(p) for p in ${...}.get("PATH", []))
             uv = _pt_shutil.which("uv.exe" if _pt_os.name == "nt" else "uv", path=path)
             if uv:
-                return [uv, "run", "--quiet", "--script", str(script), *args]
-            return [str(d / ("deploy.cmd" if _pt_os.name == "nt" else "deploy")), *args]
-    return None
+                return [uv, "run", "--quiet", "--script", str(script), *args], ""
+            return [str(launcher), *args], ""
+    return None, _PT_MISSING
 
 
 if hasattr(aliases, "return_command"):
     # Newer xonsh: the alias becomes a real command (pipes, redirects and $(...) work).
     @aliases.return_command
     def _pt_deploy(args, **_):
-        argv = _pt_deploy_argv(args)
+        argv, why = _pt_deploy_argv(args)
         if argv is None:
-            return [_pt_sys.executable, "-c", "import sys; print(%r, file=sys.stderr); sys.exit(2)" % _PT_MISSING]
+            return [_pt_sys.executable, "-c", "import sys; print(%r, file=sys.stderr); sys.exit(2)" % why]
         return argv
 
 else:
@@ -354,9 +401,9 @@ else:
 
     @_pt_unthreadable
     def _pt_deploy(args, stdin=None):
-        argv = _pt_deploy_argv(args)
+        argv, why = _pt_deploy_argv(args)
         if argv is None:
-            print(_PT_MISSING, file=_pt_sys.stderr)
+            print(why, file=_pt_sys.stderr)
             return 2
         return _pt_subprocess.call(argv)
 

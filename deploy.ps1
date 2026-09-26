@@ -109,11 +109,25 @@ if (-not ($root -and [IO.File]::Exists([IO.Path]::Combine($root, '.pytemplate', 
     $root = $null
     $loc = Get-Location
     $dir = if ($loc.Provider.Name -eq 'FileSystem') { $loc.ProviderPath } else { [Environment]::CurrentDirectory }
+    $other = $null
     while ($dir) {
-        if ([IO.File]::Exists([IO.Path]::Combine($dir, '.pytemplate', 'deploy.py'))) { $root = $dir; break }
         $parent = [IO.Path]::GetDirectoryName($dir)
-        if (-not $parent -or $parent -eq $dir) { break }
+        $top = -not $parent -or $parent -eq $dir
+        $candidate = [IO.Path]::Combine($dir, '.pytemplate', 'deploy.py')
+        if ([IO.File]::Exists($candidate)) {
+            # Its code is not run when another user owns it: anyone may create
+            # /tmp/.pytemplate/deploy.py (on Windows, whose owners are not read here: a drive
+            # root, where any user may create folders).
+            $foreign = if ($onWindows) { $top } else { & /bin/sh -c 'set -f; IFS=; [ -O $1 ]' sh $candidate; $LASTEXITCODE -ne 0 }
+            if ($foreign) { $other = $dir } else { $root = $dir }
+            break
+        }
+        if ($top) { break }
         $dir = $parent
+    }
+    if ($other) {
+        [Console]::Error.WriteLine("deploy: $([IO.Path]::Combine($other, '.pytemplate', 'deploy.py')) is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run $([IO.Path]::Combine($other, 'deploy.ps1')) yourself.")
+        exit 2
     }
     if (-not $root) {
         [Console]::Error.WriteLine('deploy: no .pytemplate/deploy.py next to this launcher, in the current folder or in any parent folder.')

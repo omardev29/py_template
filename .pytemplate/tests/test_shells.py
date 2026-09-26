@@ -11,6 +11,7 @@ import dataclasses
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -503,16 +504,17 @@ def test_xonsh_snippet_takes_only_a_real_uv_exe_on_windows(windows: bool, monkey
 
     namespace: dict[str, object] = {"_PT_ENV": {"PATH": ["C:\\shims", "C:\\bin"]}}
     exec(compile(text, "snippet", "exec"), namespace)
-    namespace["_pt_os"] = types.SimpleNamespace(name="nt" if windows else "posix", pathsep=";" if windows else ":")
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    namespace["_pt_os"] = types.SimpleNamespace(name="nt" if windows else "posix", pathsep=";" if windows else ":", getuid=lambda: uid)
     namespace["_pt_shutil"] = types.SimpleNamespace(which=which)
     monkeypatch.chdir(ROOT)
     argv_of = namespace["_pt_deploy_argv"]
     assert callable(argv_of)
     found: str | None = "C:\\bin\\uv.exe" if windows else "/usr/bin/uv"
-    argv = argv_of(["x"])
-    assert asked == ["uv.exe" if windows else "uv"] and argv[:2] == [found, "run"], (asked, argv)
+    argv, why = argv_of(["x"])
+    assert asked == ["uv.exe" if windows else "uv"] and argv[:2] == [found, "run"] and not why, (asked, argv)
     found = None
-    argv = argv_of(["x"])
+    argv, why = argv_of(["x"])
     assert argv == [str(ROOT / ("deploy.cmd" if windows else "deploy")), "x"], argv
 
 
@@ -819,3 +821,47 @@ def test_probe_reads_stdin_bytes(tmp_path: Path) -> None:
     )  # fmt: skip
     data = shells.parse_probe(r.stdout.decode("ascii"))
     assert data is not None and data["stdin"] == "caf\udce9", (r.stdout, r.stderr)
+
+
+def _planted_project(tmp_path: Path) -> Path:
+    """A folder another user (nobody) owns and everybody can write, holding their own
+    .pytemplate/deploy.py and launchers: what anyone can make of /tmp/.pytemplate."""
+    import pwd
+
+    nobody = pwd.getpwnam("nobody")
+    shared = tmp_path / "shared"
+    (shared / ".pytemplate").mkdir(parents=True)
+    (shared / ".pytemplate" / "deploy.py").write_text("print('PWNED by the planted deploy.py')\n", encoding="utf-8")
+    (shared / "deploy").write_text("#!/bin/sh\necho 'PWNED by the planted deploy'\n", encoding="utf-8")
+    (shared / "deploy.ps1").write_text("Write-Output 'PWNED by the planted deploy.ps1'\n", encoding="utf-8")
+    for path in (shared, shared / ".pytemplate", *shared.rglob("*")):
+        os.chown(path, nobody.pw_uid, nobody.pw_gid)
+    shared.chmod(0o777)
+    victim = shared / "victim"  # the user's own folder below it
+    victim.mkdir()
+    return victim
+
+
+@pytest.mark.skipif(IS_WINDOWS or not hasattr(os, "geteuid") or os.geteuid() != 0, reason="needs root to make files another user owns")
+def test_snippets_never_run_another_users_project(tmp_path: Path) -> None:
+    """The shell-setup functions walk up from the current folder: from a folder of the user's
+    own below /tmp they ran the /tmp/.pytemplate/deploy.py (or ./deploy) another user had
+    planted there, as this user. A project another user owns is refused, with how to run it."""
+    victim = _planted_project(tmp_path)
+    runs: dict[str, list[str]] = {}
+    for shell in ("bash", "zsh", "dash"):
+        if shutil.which(shell):
+            snip = _snippet_file(tmp_path, "bash", ".sh")
+            runs[shell] = [shell, "-c", f". {shlex.quote(str(snip))}; deploy x; echo RC=$?"]
+    if shutil.which("fish"):
+        snip = _snippet_file(tmp_path, "fish", ".fish")
+        runs["fish"] = ["fish", "--no-config", "-c", f"source {shells.fish_quote(str(snip))}; deploy x; echo RC=$status"]
+    if shutil.which("pwsh"):
+        snip = tmp_path / "snippet.ps1"
+        snip.write_bytes(shells.snippet("pwsh").encode("ascii"))
+        runs["pwsh"] = ["pwsh", "-NoProfile", "-NonInteractive", "-Command", f". {shells.ps_quote(str(snip))}; deploy x; 'RC=' + $LASTEXITCODE"]
+    assert runs
+    for shell, argv in runs.items():
+        r = _snippet_run(argv, victim)
+        out = r.stdout + r.stderr
+        assert "PWNED" not in out and "RC=2" in r.stdout and "is not yours" in r.stderr, (shell, out)
