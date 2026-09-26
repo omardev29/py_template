@@ -686,6 +686,18 @@ def test_e2e_workflow_triggers_on_what_new_copies() -> None:
 
 
 @pytest.mark.skipif(not TEMPLATE_REPO, reason="template repository only")
+def test_e2e_workflow_uploads_the_logs_of_a_timed_out_run() -> None:
+    # A job over its timeout-minutes is concluded "cancelled", not "failed": `if: failure()`
+    # skipped the logs of exactly the runs that hung, when they are needed most
+    text = WORKFLOW.read_text(encoding="utf-8")
+    step = text[text.index("- name: Upload the logs") :]
+    condition = re.search(r"^\s+if: (.+)$", step, re.M)
+    assert condition, "the logs step has no condition"
+    assert "failure()" in condition.group(1) and "cancelled()" in condition.group(1)
+    assert "timeout-minutes:" in text
+
+
+@pytest.mark.skipif(not TEMPLATE_REPO, reason="template repository only")
 @pytest.mark.skipif(shutil.which("actionlint") is None, reason="actionlint not installed")
 def test_e2e_workflow_passes_actionlint() -> None:
     r = subprocess.run(["actionlint", str(WORKFLOW)], capture_output=True, text=True, check=False)

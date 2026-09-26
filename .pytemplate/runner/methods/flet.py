@@ -7,7 +7,8 @@
 - Mobile and web (apk, aab, ipa, web): they cannot load custom extensions, so your
   code is packaged as .py (interpreted), even if the backend is mypyc.
 - `flet build` ignores uv.lock: the project it builds carries the EXACT versions
-  exported from uv.lock. It downloads the Flutter SDK the first time (~1 GB).
+  exported from uv.lock. It installs the Flutter SDK Flet pins the first time (~3 GB in
+  ~/flutter).
 - On Windows it needs Visual Studio (C++) and Developer Mode turned on.
 """
 

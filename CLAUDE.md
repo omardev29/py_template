@@ -2375,8 +2375,10 @@ short temp tree and unset `NVIM_APPNAME`.
   the workflow), the default depth weekly (Monday cron), `--full` monthly (day-1 cron, named by
   its string in the `MODE` expression), any depth on dispatch; job timeout 120 min, 300 for
   full; Linux gets the raylib libs, `libgl1-mesa-dri` and `xvfb`; the JSON report is always
-  uploaded and the logs on failure, one artifact name per matrix row;
-  `test_e2e_plan.test_e2e_workflow_*` pin the depths and triggers). First run on GitHub in
+  uploaded and the logs on failure or cancellation (`failure() || cancelled()`: a job over its
+  timeout-minutes is cancelled, not failed, and those are the logs that matter), one artifact
+  name per matrix row; `test_e2e_plan.test_e2e_workflow_*` pin the depths, triggers and the
+  logs condition). First run on GitHub in
   September 2026 (images ubuntu-24.04, macos-26-arm64, windows-2025-vs2026; uv 0.12, Neovim
   0.12.5).
 
@@ -3561,8 +3563,11 @@ Code coupling (rename together):
   `config._presets` mirrors `presets.available`; `render.managed_block` needs `pypy_minor`
   (PyPy's environment) and `min_python` (requires-python) to stay distinct.
 - `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`;
-  `e2e.flet_build_reason` imports `methods.flet._developer_mode`; `cmd_nvim.c_compiler`
-  imports `cmd_env._msvc` and `_xcode_problem` lazily (`cmd_env` imports `cmd_nvim`).
+  `e2e.flet_build_reason` imports `methods.flet._developer_mode`, and its Flutter size and the
+  flet method's docstring follow the manual (`test_docs.test_the_runner_gives_the_manuals_flutter_size`);
+  `upx.uses` imports `methods.flet.MOBILE_WEB` lazily (`methods.flet` imports `upx`);
+  `cmd_nvim.c_compiler` imports `cmd_env._msvc` and `_xcode_problem` lazily (`cmd_env` imports
+  `cmd_nvim`).
 - `RULES_RE` / `tasks.parse_line` <-> `ui.error`, `ui.warn`, `str(lintc.Finding)` (5.3).
 - mypyc internals mirrored by the runner (checked by `test_mypyc_core` against the locked
   mypy): `lintc.NATIVE_CLASS_DECORATORS` <-> mypyc's native decorators;
