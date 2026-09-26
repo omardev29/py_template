@@ -581,7 +581,8 @@ cpython and pypy test runs cannot catch a wrap-around.
   docstrings): higher strips more, it is not faster. With the mypyc backend, 1 and 2 also strip
   the asserts of the compiled modules in every build method.
 - The C compiler's install hint appears only when the C step failed (a type error that mypyc
-  rejects is shown as such).
+  rejects is shown as such, and so is uv's own error, such as a `uv.lock` that needs updating);
+  on Windows it names the MSVC tools of the environment's Python (ARM64 or x64).
 
 ### PyPy
 

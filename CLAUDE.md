@@ -1268,7 +1268,9 @@ Formats:
   --parallel N)`. It uses the mypycify API because `python -m mypyc` cannot set
   `strip_asserts`, `group_name` or `multi_file` and always writes to `./build`. When mypycify
   exits or raises (mypy/mypyc rejected the code; the errors are printed) it returns
-  `MYPYC_REJECTED` (4, mirrored in `mypyc.py`); a C build failure exits with setuptools' code.
+  `MYPYC_REJECTED` (4, mirrored in `mypyc.py`); when setuptools or the compiler fails
+  (setuptools' `SystemExit("error: ...")`, a crash of the C step) it prints the error and
+  returns `C_BUILD_FAILED` (5, mirrored too): setuptools' own exit 1 was also uv's.
   Every spec key it reads must be written by `mypyc.build` (a test parses the script).
 - Extra C flags (`mypyc_build.extra_cflags`, appended to mypyc's own `extra_compile_args` of
   every extension, as a NEW list each: mypycify hands one shared list to all of them; the
@@ -1297,9 +1299,12 @@ Formats:
   `opt_level "0"` (unoptimised C, C asserts on) is 1.8x SLOWER than the interpreter: for
   debugging only. MSVC has no levels: `"1"`-`"3"` are all `/O2`, `"0"` is `/Od`.
 - Output is captured unless `-v`; on failure it is printed. The compiler-install hint
-  (`has_compiler_hint`) is added only when the exit code is not `MYPYC_REJECTED` (with `-v`
-  the output was not captured, and every type error used to get the hint); the runner's own
-  code stays 1 (`mypyc failed (exit code 1)`).
+  (`has_compiler_hint`, with the MSVC tools of the `.venv` Python's platform: `_venv_platform`,
+  Windows only) is added only when the exit code is `C_BUILD_FAILED` (with `-v` the output was
+  not captured, and every type error used to get the hint; a stale `uv.lock` failed in
+  `uv run --locked` with exit 1 and got "mypyc needs a C compiler" too). For both script codes
+  the runner's own code is 1 (`mypyc failed (exit code 1)`); any other code is uv's or
+  Python's (`mypyc failed (exit code N): see the error above`, exit N).
 - After the build every compiled module must have an extension, else `DeployError` (and no
   record is written, so the next build is forced).
 - `compile.annotate = true`: every mypyc build (`run`, `test`, `compile`, `build`) also writes
@@ -2865,8 +2870,8 @@ MSVC and Visual Studio:
   Python's `sysconfig.get_platform()`, as setuptools' vswhere query does (7). Test:
   `test_envs_core.py::test_msvc_component_follows_the_venv_platform`,
   `test_msvc_component_matches_setuptools`,
-  `test_mypyc_core.py::test_compiler_hint_names_the_msvc_tools_of_the_venv_platform`. Goes:
-  never.
+  `test_mypyc_core.py::test_compiler_hint_names_the_msvc_tools_of_the_venv_platform`,
+  `test_build_compiler_hint_names_the_tools_of_the_venv_platform`. Goes: never.
 
 PyInstaller:
 - **UPX only on Windows** (LIMITATION): `configure.get_config` turns UPX off elsewhere (packed
@@ -3578,8 +3583,8 @@ Code coupling (rename together):
 - mypyc internals mirrored by the runner (checked by `test_mypyc_core` against the locked
   mypy): `lintc.NATIVE_CLASS_DECORATORS` <-> mypyc's native decorators;
   `lintc.relative_file_at_import` <-> when mypyc builds no shared lib; `mypyc.remove_stale_extensions`
-  <-> mypyc's lib names (`<group>__mypyc`, `<module>__mypyc`). `mypyc.MYPYC_REJECTED` <->
-  `tools/mypyc_build.py`; the spec keys the script reads <-> `mypyc.build`;
+  <-> mypyc's lib names (`<group>__mypyc`, `<module>__mypyc`). `mypyc.MYPYC_REJECTED` and
+  `C_BUILD_FAILED` <-> `tools/mypyc_build.py`; the spec keys the script reads <-> `mypyc.build`;
   `mypyc_build.extra_cflags`/`compiler_type` <-> the wheel's `SETUP_PY`
   (`test_wheel_setup_py_adds_the_same_flags_as_the_stage`); `mypyc.COMPILER_ENV` <-> the
   variables setuptools' `configure_system` reads.

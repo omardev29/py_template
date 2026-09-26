@@ -7,7 +7,8 @@ strip_asserts, group_name or multi_file, and it always writes to ./build. The C 
 extra_cflags() are added to mypyc's own.
 
 Exit codes: 0 ok; MYPYC_REJECTED when mypy/mypyc rejected the code (the errors are printed,
-no C compiler ran); anything else is a failure of the C build (setuptools / the compiler).
+no C compiler ran); C_BUILD_FAILED when setuptools or the C compiler failed. Anything else
+comes from uv (a stale uv.lock) or Python before this script ran: no compiler involved.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import traceback
 from pathlib import Path
 
 MYPYC_REJECTED = 4  # mirrored by mypyc.MYPYC_REJECTED in the runner
+C_BUILD_FAILED = 5  # mirrored by mypyc.C_BUILD_FAILED: only this one gets the compiler hint
 
 
 def compiler_type() -> str:
@@ -83,31 +85,41 @@ def main() -> int:
         return MYPYC_REJECTED
     if not spec.get("compile", True):
         return 0
-    flags = extra_cflags(compiler_type(), sys.platform, spec["no_semantic_interposition"])
-    for ext in extensions:
-        # A new list for each: mypycify hands the SAME list object to every extension
-        ext.extra_compile_args = [*ext.extra_compile_args, *flags]
 
     from setuptools import setup
 
-    setup(
-        name=spec["group"],
-        ext_modules=extensions,
-        script_args=[
-            "--quiet",
-            "build_ext",
-            # Options that only reach the C compiler (opt_level) leave the C files unchanged, and
-            # setuptools skips an extension that is newer than its sources: the runner forces it
-            *(["--force"] if spec.get("force") else []),
-            "--inplace",
-            "--build-temp",
-            spec["build_temp"],
-            "--build-lib",
-            spec["build_lib"],
-            "--parallel",
-            str(os.cpu_count() or 1),
-        ],
-    )
+    try:
+        flags = extra_cflags(compiler_type(), sys.platform, spec["no_semantic_interposition"])
+        for ext in extensions:
+            # A new list for each: mypycify hands the SAME list object to every extension
+            ext.extra_compile_args = [*ext.extra_compile_args, *flags]
+        setup(
+            name=spec["group"],
+            ext_modules=extensions,
+            script_args=[
+                "--quiet",
+                "build_ext",
+                # Options that only reach the C compiler (opt_level) leave the C files unchanged,
+                # and setuptools skips an extension newer than its sources: the runner forces it
+                *(["--force"] if spec.get("force") else []),
+                "--inplace",
+                "--build-temp",
+                spec["build_temp"],
+                "--build-lib",
+                spec["build_lib"],
+                "--parallel",
+                str(os.cpu_count() or 1),
+            ],
+        )
+    except SystemExit as exc:  # setuptools: SystemExit("error: command 'gcc' failed ...")
+        if exc.code in (None, 0):
+            return 0
+        if isinstance(exc.code, str):
+            print(exc.code, file=sys.stderr)
+        return C_BUILD_FAILED
+    except Exception:  # a crash in setuptools or the compiler driver
+        traceback.print_exc()
+        return C_BUILD_FAILED
     return 0
 
 

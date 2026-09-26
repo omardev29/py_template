@@ -23,14 +23,17 @@ from pathlib import Path
 from . import envs, proc, render, ui
 from .config import Config, compiled_paths
 from .imports import imports_of, is_local, local_module, module_name, parse_error
-from .project import BUILD, EXT_SUFFIXES, SRC, TOOLS, rel
+from .project import BUILD, EXT_SUFFIXES, IS_WINDOWS, SRC, TOOLS, rel
 from .ui import DeployError
 
 SKIP_DIRS = {"__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 # The annotated HTML report (slow lines): ./deploy report, and every build with compile.annotate
 ANNOTATE_HTML = BUILD / "reports" / "mypyc-annotate.html"
-# Exit code of tools/mypyc_build.py when mypy/mypyc rejected the code (no C compiler ran yet)
+# Exit codes of tools/mypyc_build.py: mypy/mypyc rejected the code (no C compiler ran yet), and
+# setuptools or the C compiler failed (the only case the compiler hint is for: a code 1 or 2
+# comes from uv, e.g. a stale uv.lock, before the script ran)
 MYPYC_REJECTED = 4
+C_BUILD_FAILED = 5
 # The options of the last SUCCESSFUL compile of a profile (in its folder): see build()
 COMPILED_STAMP = "compiled-options.json"
 # spec.json keys that do not change the binaries (every other key does, see build())
@@ -317,7 +320,10 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
             ui.info((result.stdout or "") + (result.stderr or ""))
         if result.returncode == MYPYC_REJECTED:  # mypy/mypyc rejected the code: no compiler involved
             raise DeployError("mypyc failed (exit code 1): fix the errors above", 1)
-        raise DeployError(f"mypyc failed (exit code {result.returncode})\n{has_compiler_hint()}", result.returncode)
+        if result.returncode == C_BUILD_FAILED:
+            raise DeployError(f"mypyc failed (exit code 1)\n{has_compiler_hint(_venv_platform(tool))}", 1)
+        # uv, or Python before the script ran (a stale uv.lock: uv's error is above)
+        raise DeployError(f"mypyc failed (exit code {result.returncode}): see the error above", result.returncode)
     if annotate and result.stdout:
         ui.detail(result.stdout)
     if from_config and annotate and not proc.DRY_RUN:
@@ -419,6 +425,17 @@ def exe_stage(cfg: Config, stage: Path, dest: Path) -> Path:
         if target.exists():
             target.unlink()
     return dest
+
+
+def _venv_platform(tool: envs.PyEnv) -> str:
+    """sysconfig.get_platform() of the .venv Python, whose MSVC tools the hint names (Windows
+    only: elsewhere the hint does not depend on it)."""
+    if not IS_WINDOWS:
+        return ""
+    try:
+        return str(envs.interpreter_info(tool.python)["platform"])
+    except (OSError, ValueError, KeyError, proc.CommandFailed, DeployError):
+        return ""
 
 
 def has_compiler_hint(platform: str = "win-amd64") -> str:

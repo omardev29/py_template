@@ -1089,14 +1089,21 @@ def test_compiler_hint_names_the_msvc_tools_of_the_venv_platform(monkeypatch: py
     assert "gcc/clang" in mypyc.has_compiler_hint("win-arm64")
 
 
+STALE_LOCK = "error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided."
+
+
 @pytest.mark.parametrize(
-    ("code", "stdout", "stderr", "verbose", "hint"),
+    ("code", "stdout", "stderr", "verbose", "hint", "exit_code"),
     [
-        (mypyc.MYPYC_REJECTED, "myapp/core/m.py:1: error: bad", "", False, False),
-        (mypyc.MYPYC_REJECTED, None, None, True, False),  # -v: nothing captured, still no hint
-        (1, "", "error: command 'gcc' failed: No such file or directory", False, True),
-        (1, None, None, True, True),
-        (1, "myapp/core/m.py:1: error: this text no longer decides", "", False, True),
+        (mypyc.MYPYC_REJECTED, "myapp/core/m.py:1: error: bad", "", False, False, 1),
+        (mypyc.MYPYC_REJECTED, None, None, True, False, 1),  # -v: nothing captured, still no hint
+        (mypyc.C_BUILD_FAILED, "", "error: command 'gcc' failed: No such file or directory", False, True, 1),
+        (mypyc.C_BUILD_FAILED, None, None, True, True, 1),
+        (mypyc.C_BUILD_FAILED, "myapp/core/m.py:1: error: this text no longer decides", "", False, True, 1),
+        # uv failed before mypyc ran (a stale uv.lock): it got "mypyc needs a C compiler" on a
+        # machine with gcc
+        (1, "", STALE_LOCK, False, False, 1),
+        (2, "", "error: No interpreter found", False, False, 2),
     ],
 )
 def test_build_compiler_hint_only_when_the_c_step_failed(
@@ -1108,6 +1115,7 @@ def test_build_compiler_hint_only_when_the_c_step_failed(
     stderr: str | None,
     verbose: bool,
     hint: bool,
+    exit_code: int,
 ) -> None:
     monkeypatch.setattr(ui, "VERBOSE", verbose)
     fake_build.code, fake_build.stdout, fake_build.stderr = code, stdout, stderr
@@ -1115,9 +1123,21 @@ def test_build_compiler_hint_only_when_the_c_step_failed(
         mypyc.build(make({}), "dev")
     assert fake_build.captures[-1] is not verbose
     assert (mypyc.has_compiler_hint() in str(err.value)) is hint
-    assert str(err.value).startswith("mypyc failed (exit code 1)") and err.value.code == 1
+    assert str(err.value).startswith(f"mypyc failed (exit code {exit_code})") and err.value.code == exit_code
     if not verbose and stdout:
         assert stdout in capsys.readouterr().err  # the captured output is shown
+
+
+def test_build_compiler_hint_names_the_tools_of_the_venv_platform(fake_build: FakeCompiler, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A win-arm64 .venv got the x86/x64 MSVC tools in the hint: build called has_compiler_hint()
+    platforms: list[str] = []
+    monkeypatch.setattr(mypyc, "IS_WINDOWS", True)
+    monkeypatch.setattr(mypyc.envs, "interpreter_info", lambda python: {"platform": "win-arm64"})
+    monkeypatch.setattr(mypyc, "has_compiler_hint", lambda platform="win-amd64": platforms.append(platform) or "HINT")
+    fake_build.code = mypyc.C_BUILD_FAILED
+    with pytest.raises(DeployError, match="HINT"):
+        mypyc.build(make({}), "dev")
+    assert platforms == ["win-arm64"]
 
 
 # --- 8. tools/mypyc_build.py -----------------------------------------------------------------------
@@ -1220,6 +1240,33 @@ def test_build_script_reports_rejected_code_with_its_own_exit_code(
     monkeypatch.setattr(sys, "argv", ["mypyc_build.py", str(_spec_file(tmp_path))])
     module = _load_build_script()
     assert module.main() == module.MYPYC_REJECTED == mypyc.MYPYC_REJECTED
+    assert stderr in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("raised", "stderr"), [(SystemExit("error: command 'gcc' failed: No such file or directory"), "command 'gcc' failed"), (RuntimeError("boom"), "boom")]
+)
+def test_build_script_reports_a_failed_c_build_with_its_own_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], raised: BaseException, stderr: str
+) -> None:
+    # setuptools' SystemExit("error: ...") left the script with exit 1, the code `uv run --locked`
+    # itself fails with (a stale uv.lock): both got "mypyc needs a C compiler"
+    def setup(**kw: Any) -> None:
+        raise raised
+
+    fake_build_mod = types.ModuleType("mypyc.build")
+    fake_build_mod.mypycify = lambda args, **kw: [FakeExtension("m", [])]  # type: ignore[attr-defined]
+    fake_setuptools = types.ModuleType("setuptools")
+    fake_setuptools.setup = setup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mypyc", types.ModuleType("mypyc"))
+    monkeypatch.setitem(sys.modules, "mypyc.build", fake_build_mod)
+    monkeypatch.setitem(sys.modules, "setuptools", fake_setuptools)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["mypyc_build.py", str(_spec_file(tmp_path))])
+    module = _load_build_script()
+    monkeypatch.setattr(module, "compiler_type", lambda: "unix")
+    assert module.main() == module.C_BUILD_FAILED == mypyc.C_BUILD_FAILED
+    assert module.C_BUILD_FAILED not in (0, 1, 2, module.MYPYC_REJECTED)  # never a code uv or Python uses
     assert stderr in capsys.readouterr().err
 
 
