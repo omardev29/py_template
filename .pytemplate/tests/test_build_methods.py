@@ -2340,6 +2340,7 @@ def test_upx_download_happens_before_the_work_and_never_in_a_dry_run(
     monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
     monkeypatch.setattr(upx, "_cache_dir", lambda: tmp_path / "cache")
     monkeypatch.setattr(upx, "_download", download)
+    monkeypatch.setattr(cmd_build, "check_lock", lambda cfg: None)  # real uv under the fake PATH below
     monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(tmp_path / "empty")})
     cfg = make({"deploy": {"upx": {"enabled": True}}})
     # Real build: the download fails before the checks and the payload
@@ -2378,6 +2379,7 @@ def test_a_system_runtime_portable_downloads_upx_only_for_a_binary_to_pack(
     monkeypatch.setattr(upx, "IS_WINDOWS", windows)
     monkeypatch.setattr(upx, "_cache_dir", lambda: tmp_path / "cache")
     monkeypatch.setattr(upx, "_download", download)
+    monkeypatch.setattr(cmd_build, "check_lock", lambda cfg: None)  # real uv under the fake PATH below
     monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(tmp_path / "empty")})
     cfg = make({"deploy": {"upx": {"enabled": True}, "portable": {"runtime": "system"}}})
     with pytest.raises(AssertionError, match="went past"):  # on to the build, nothing downloaded
@@ -3096,6 +3098,16 @@ def test_build_refuses_a_stale_lock_before_any_work(no_build: None, monkeypatch:
     assert asked == [["lock", "--check"]]
     assert e.value.code == 2 and "./deploy lock" in str(e.value)
     assert "(The lockfile at `uv.lock` needs to be updated" in str(e.value)  # uv's reason, without a second "error:"
+
+
+def test_a_lock_uv_cannot_check_is_not_called_stale(no_build: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """uv lock --check without an answer (offline, no interpreter to download: the Windows runner's
+    DNS failed) said "uv.lock does not match pyproject.toml" and advised ./deploy lock."""
+    offline = "error: Request failed after 3 retries\n  Caused by: dns error"
+    monkeypatch.setattr(envs, "uv", lambda env, args, **kw: subprocess.CompletedProcess(args, 2, "", offline + "\n"))
+    with pytest.raises(DeployError, match="cannot check uv.lock against pyproject.toml: Request failed") as e:
+        cmd_build.cmd_build(make({}), ["cpython", "--method", "pyz", "--no-check"])
+    assert e.value.code == 3 and "does not match" not in str(e.value) and "./deploy lock" not in str(e.value)
 
 
 def test_check_lock_reads_the_real_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
