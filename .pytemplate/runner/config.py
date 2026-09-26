@@ -486,9 +486,11 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     if not APP_NAME.fullmatch(cfg.app.name):
         raise DeployError(f"pytemplate.toml: 'app.name' only allows {NAME_RULE}")
     if not re.fullmatch(r"[a-z][a-z0-9_-]*", cfg.app.preset) or not (PRESETS / cfg.app.preset / "preset.toml").is_file():
-        raise DeployError(
+        raise DeployError(  # every command validates first: the hint is an edit of the file
             f"pytemplate.toml: app.preset = {cfg.app.preset!r} is not a preset of this template "
-            f"(available: {', '.join(_presets()) or 'none'}). To start from another preset: ./deploy new DIR --preset P"
+            f"(available: {', '.join(_presets()) or 'none'}): set app.preset in pytemplate.toml back to "
+            "the preset this project was made from (a project cannot switch presets; for another one, "
+            "./deploy new DIR --preset P works again once this file loads)"
         )
 
     _check_schema(cfg.schema)
@@ -507,9 +509,10 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
         raise DeployError(f"pytemplate.toml: 'backend.supported' lists {', '.join(twice)} more than once")
     _one_of(cfg.backend.active, BACKENDS, "backend.active")
     if cfg.backend.active not in cfg.backend.supported:
-        raise DeployError(
+        raise DeployError(  # `./deploy mode` loads this file first: the hint is an edit of the file
             f"pytemplate.toml: backend.active = {cfg.backend.active!r} is not in backend.supported "
-            f"{cfg.backend.supported}. Use: ./deploy mode {cfg.backend.active} --supports +{cfg.backend.active}"
+            f"{cfg.backend.supported}: add it to backend.supported, or set backend.active to one of them, "
+            "in pytemplate.toml (then ./deploy apply)"
         )
     # [0-9], never \d: \d also matches other scripts' digits ("\u0663.\u0661\u0664")
     if not re.fullmatch(r"[0-9]+\.[0-9]+", cfg.python.cpython):

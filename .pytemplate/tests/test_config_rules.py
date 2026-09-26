@@ -248,7 +248,9 @@ def test_app_name_invalid(name: str) -> None:
 
 def test_app_preset() -> None:
     assert make({"app": {"preset": "flet"}}).app.preset == "flet"
-    fails({"app": {"preset": "nope"}}, "is not a preset of this template")
+    err = fails({"app": {"preset": "nope"}}, "is not a preset of this template")
+    # every command (new included) stops on this error: the hint is an edit of the file
+    assert "set app.preset in pytemplate.toml back to" in str(err) and "Use: ./deploy" not in str(err)
 
 
 @pytest.mark.parametrize("assets", ["", "assets"])
@@ -273,7 +275,10 @@ def test_backend_supported() -> None:
 def test_backend_active() -> None:
     assert make({"backend": {"active": "mypyc"}}).backend.active == "mypyc"
     fails({"backend": {"active": "jython"}}, "'backend.active' = 'jython' is not valid")
-    fails({"backend": {"active": "pypy", "supported": ["cpython"]}}, "is not in backend.supported")
+    err = fails({"backend": {"active": "pypy", "supported": ["cpython"]}}, "is not in backend.supported")
+    # `./deploy mode` loads the same file first and stops with the same error: never suggest it
+    assert "./deploy mode" not in str(err)
+    assert "add it to backend.supported, or set backend.active to one of them, in pytemplate.toml" in str(err)
 
 
 @pytest.mark.parametrize("version", ["3.14", "3.9", "3.100", "4.0"])
