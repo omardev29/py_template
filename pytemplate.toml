@@ -1,9 +1,11 @@
 # pytemplate.toml: project configuration and working "mode".
 #
-# Change a value and run any ./deploy command: the generated files (.mypy.ini,
-# pyrightconfig.json, .ruff.toml, .vscode/) update themselves. Whatever affects
-# uv.lock (backend.supported, [python]) is applied with `./deploy lock`, or change it
-# directly with `./deploy mode`.
+# After editing it, run ./deploy apply: it brings the whole project in line (app.name
+# renames src/<pkg>/ and its imports, [backend] and [python] re-lock uv.lock and sync the
+# environments, [hooks] installs or removes the git hook, and .mypy.ini, pyrightconfig.json,
+# .ruff.toml and .vscode/ are regenerated: those also update by themselves on any ./deploy
+# command). ./deploy mode edits this file for you. app.preset cannot change in place:
+# create another project with ./deploy new DIR --preset P.
 schema = 1
 
 [app]
@@ -71,7 +73,9 @@ exclude = []     # extra file-name globs never packed (C runtime and python3*.dl
 # path = "tools/upx"   # a UPX binary, relative to the project root (default: PATH, then a pinned download)
 
 [hooks]
-pre_commit = true   # ./deploy setup installs a git pre-commit hook (./deploy hooks run: ruff, format, generated files, lock)
+# true: ./deploy apply (and setup) installs a git pre-commit hook that runs ./deploy hooks run
+# (ruff, format, generated files, lock); false: ./deploy apply removes pytemplate's hook
+pre_commit = true
 
 [vscode]
 # Status bar buttons (VS Code extension actboy168.tasks): ./deploy commands or [tasks] names

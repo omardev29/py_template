@@ -53,7 +53,9 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
 - Six build methods: `exe` (PyInstaller / `flet pack`), `portable`, `pyz`, `wheel`, `nuitka`,
   `flet` (`flet build`).
 - `./deploy` is a Justfile-like runner. The only hard requirement is uv.
-- `pytemplate.toml` is the single source of truth; every derived config is generated.
+- `pytemplate.toml` is the single source of truth; every derived config is generated. After
+  editing it, `./deploy apply` brings the whole project in line (section 5.8); `./deploy setup`
+  is the same operation under its first-time name.
 - Editor integrations are generated too: VS Code (`.vscode/*.json`) and LazyVim (`.lazy.lua`,
   `.pytemplate/editor.json`, local plugin `.pytemplate/nvim/`).
 
@@ -83,7 +85,7 @@ typings/                          project stubs (raylib preset: the corrected ra
                                   README.md: setup, keymaps, options)
 .pytemplate/tests/                runner tests (pytest) + mypy-runner.ini
 .pytemplate/editor.json           generated data file for the Neovim plugin
-.pytemplate/state.json            hashes of the generated files (committed)
+.pytemplate/state.json            hashes of the generated files + the `applied` record (committed)
 .pytemplate/template-repo         [template repo] marker, not copied by ./deploy new
 .github/workflows/ci.yml          generated CI of the project
 .github/workflows/template-*.yml  [template repo] launchers, nvim, e2e CI; not copied
@@ -476,12 +478,13 @@ header rules (with detector tests proving each rule fires).
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
-| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `DeployError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME`, `name_from_folder`, `check_name_free`, `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./deploy __init`; with rollback), `copy_template`, `new`. |
+| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `DeployError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME`, `name_from_folder`, `check_name_free`, `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./deploy __init`; with rollback), `copy_template`, `new`; for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
 | `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
 | `tasks.py` | `[tasks]`: `Placeholders` (lazy `{python}`), `deps` (each once per invocation), cycle detection, `run_task`, `describe`, `list_tasks`. |
-| `cmd_env.py` | `setup`, `doctor`, `sync`, `lock`, `add`, `remove`, `clean` (`_env_dirs`, `_remove`, `_is_link`); `ensure_lock`; `_fix_exec_bit`; `_c_compiler`, `_msvc(platform)`, `_xcode_problem`, `_long_paths`. |
+| `cmd_env.py` | `setup` (= `cmd_apply.apply(command="setup")`), `doctor` (calls `cmd_apply.doctor`), `sync`, `lock`, `add`, `remove`, `clean` (`_env_dirs`, `_remove`, `_is_link`); `ensure_lock`; `_fix_exec_bit`; `_c_compiler`, `_msvc(platform)`, `_xcode_problem`, `_long_paths`. |
+| `cmd_apply.py` | `./deploy apply [--force]` / `setup [--force]` (section 5.8): `make_plan` (every refusal before the first write), `apply`, `_print_plan` (--dry-run), the `applied` record (`load_record`, `save_record`, `trusted_record`, `project_record`, `record_of`, `rename_record`), `applied_state` / `_applied_preset` / `applied_name`, `dependency_changes` (`DepChanges`, `req_key`), `read_project`, `pending` + `doctor` (changes not applied yet), `reference_problems`, `unused_envs`. |
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `new`, the internal `__init` (`cmd_init`), and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
 | `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`, `BASEDPYRIGHT_NODE`. |
 | `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
@@ -490,8 +493,8 @@ header rules (with detector tests proving each rule fires).
 | `cmd_nvim.py` | `./deploy nvim ...` and `doctor(check)` (section 12.2). |
 | `nvimtest.py` | `selftest --nvim` (section 13.1). |
 | `e2e.py` | `selftest --e2e` (section 13.1). |
-| `hooks.py` | `./deploy hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (setup), `doctor`: the native git pre-commit hook (section 5.6); `find_repo` (`NotInGit`), `classify`, `hook_script`/`launcher_of`, `checks`. |
-| `rename.py` | `./deploy rename NEW_NAME [--force]`: pure `plan` / `apply_plan` / `rewrite` (tokenizer + context rules), `check_new_name`, `git_changes`, `cmd_rename` (section 5.7). |
+| `hooks.py` | `./deploy hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (apply/setup), `doctor`: the native git pre-commit hook (section 5.6); `find_repo` (`NotInGit`), `classify`, `hook_script`/`launcher_of`, `install`/`uninstall` (apply removes the hook when `hooks.pre_commit = false`), `checks`. |
+| `rename.py` | `./deploy rename NEW_NAME [--force]` and the rename step of apply: pure `plan` / `apply_plan` (undoes itself when a write fails) / `rewrite` (tokenizer + `ast` scopes + context rules, `MODULE_KEYS`), `check_new_name` (`locked_names`), `git_changes`, `dirty_tree_message`, `validate_config`, `tidy_before`/`tidy_after` (ruff, `Tidy`), `report`, `cmd_rename` (section 5.7). |
 | `upx.py` | Optional UPX packing: pinned download (`VERSION`, `ASSETS` with SHA-256), `find`, `active`, `level_flags`, `env_value`, `excludes`, `candidates`, `pack_file`, `pack_tree`, `MAX_INPUT` (section 10). |
 
 ### 5.2 Call flow
@@ -522,10 +525,13 @@ header rules (with detector tests proving each rule fires).
    exits 2 with the hint `./deploy new DIR --preset P`.
 4. Commands with `render=False`: `clean`, `render`, `new`, `pyz-merge`, `tasks`,
    `shell-setup`, `selftest`, `help`, `hooks` (the hook must not rewrite generated files in
-   the middle of a commit). `test_cli_core.NEVER_RENDER` pins this list.
+   the middle of a commit), `apply` and `setup` (they render at the end: a refused apply, e.g.
+   a hand-edited `app.preset`, writes nothing), `rename` (renders after its checks, never with
+   a hand-edited `app.name` before the dirty-tree check). `test_cli_core.NEVER_RENDER` pins
+   this list.
 5. Commands reject unknown arguments with exit 2 (a typo is never silently ignored):
    argparse commands, `render`/`mode`/`__init`/`new` (`cmd_mode._parse`), `lint`, `fmt`,
-   `clean`, `setup`, `doctor`, `tasks` (`cmd_dev.only_flags`), `check` and `sync` (extra
+   `clean`, `apply`, `setup` (only `--force`), `doctor`, `tasks` (`cmd_dev.only_flags`), `check` and `sync` (extra
    positionals), `shell-setup`, `help`, a `[tasks]` entry without `cmd`. By design
    (`cli.FORWARDS`): `run`/`test` forward the rest, `build` forwards unknown flags to the
    packager of exe, nuitka and flet only (`cmd_build.PASSTHROUGH`; pyz, portable and wheel
@@ -615,14 +621,24 @@ header rules (with detector tests proving each rule fires).
   `.cmd`).
 - `nvim trust`, `extras`, `bootstrap` and `sync` print what they would do.
 - `rename` runs the real checks (a dirty git tree is only a warning) and prints the move, each
-  file with its reference count and sample lines, the pytemplate/pyproject lines, the `uv.lock`
-  re-lock and the generated files it would re-render. `hooks install`/`uninstall` only print.
+  file with its reference count and sample lines, the pytemplate/pyproject lines, the lines left
+  unchanged, the other files that mention the old name, the `uv.lock` re-lock and the generated
+  files it would re-render (`render.apply(new_cfg)` in check mode: exactly what the real run
+  writes). `hooks install`/`uninstall` only print.
+- `apply` and `setup` run every check and refusal of the real run (`cmd_apply.make_plan`: a
+  hand-edited preset, `render.check_pyproject`, the new name, the renamed pytemplate.toml; the
+  dirty tree is only a warning; the PyPy 3.11 precheck runs read-only) and print one row per
+  step (`cmd_apply._print_plan`): app.name (then the rename plan, as `rename --dry-run` prints
+  it), app.preset, `[preset.<name>]` (the `uv remove/add` it would run), pyproject.toml,
+  uv.lock ("would re-lock", or a read-only `uv lock --check`), environments, git hook,
+  generated files, then the unused-environment note and the reference warnings.
 - `build` with `[deploy.upx]` enabled: `upx.pack_tree` lists what it would pack and stops.
-- `setup` and `lock` report whether the managed parts of `pyproject.toml` would change
+- `lock` reports whether the managed parts of `pyproject.toml` would change
   (`render.write_pyproject` writes nothing under `DRY_RUN`; `render.pyproject_message` says
-  "would update"); their `uv lock`/`uv sync` are echoed commands, so they are skipped. Then
-  `cmd_env.ensure_lock` echoes `uv lock` without checking (the check would read the old file),
-  and `_fix_exec_bit` echoes `chmod +x` / `git update-index --chmod=+x` without running them.
+  "would update"); its `uv lock` is an echoed command, so it is skipped. `cmd_env.ensure_lock`
+  (used by `mode` and `rename`) echoes `uv lock` without checking (the check would read the old
+  file), and `_fix_exec_bit` echoes `chmod +x` / `git update-index --chmod=+x` without running
+  them.
 - It is not a sandbox: scratch writes under `.build/` (`.build/cfg/*`, the mypyc stage,
   `mypy.ini`, `spec.json`) still happen.
 
@@ -666,10 +682,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 
 ### 5.6 Git pre-commit hook (`hooks.py`)
 
-- `./deploy setup` calls `hooks.ensure_installed(cfg)` when `[hooks] pre_commit` is true (the
-  default): it installs the hook or updates this project's own, never fails setup, and is
-  silent outside git (`hooks.NotInGit`: no git, not a work tree). Any other git failure
-  (dubious ownership...) is shown with git's own message: a warning in setup, an info line in
+- `./deploy apply` (and `setup`) calls `hooks.ensure_installed(cfg)` when `[hooks] pre_commit`
+  is true (the default): it installs the hook or updates this project's own, never fails the
+  command, and is silent outside git (`hooks.NotInGit`: no git, not a work tree). When
+  `pre_commit` is false, apply removes pytemplate's own hook (`hooks.uninstall`, which restores a
+  `pre-commit.local`) and never touches another one (section 5.8). Any other git failure
+  (dubious ownership...) is shown with git's own message: a warning in apply, an info line in
   `doctor` (whose "git hook" line is otherwise info too: missing is not a problem). Every git
   call runs with `LC_ALL=C` (find_repo reads "not a git repository" in English).
 - The hook: `pre-commit` in the folder `git rev-parse --git-path hooks` reports (worktree
@@ -681,12 +699,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   checkouts); a launcher exit code above 1 (uv not found from a GUI client, a broken
   pytemplate.toml, an old runner without `hooks run`) also prints `git commit --no-verify` and
   `./deploy hooks uninstall`. `shellcheck -s sh`-clean (tested when installed). Any change to
-  `hooks.hook_script` makes installed hooks "outdated": setup rewrites them.
+  `hooks.hook_script` makes installed hooks "outdated": apply/setup rewrite them.
 - Never overwritten: a hook without the marker, or any symlink (writing through a dangling
   link created a file in the work tree). `install --force` renames it to `pre-commit.local` (a
   link moves as a link; a dangling `.local` counts as existing) and ours runs it first;
   `uninstall` restores it. A marked hook whose launcher is another live project of the same
-  repository (state "other", a monorepo) is left alone by setup, install and uninstall;
+  repository (state "other", a monorepo) is left alone by apply, install and uninstall;
   `install --force` writes a FRESH copy of it as `pre-commit.local` (the script skips
   `pre-commit.local` when it is itself that file; older copies would recurse), so both checks
   run, once each. A project that an enclosing repository ignores (`git check-ignore -q deploy`,
@@ -723,24 +741,130 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 
 ### 5.7 Renaming (`rename.py`)
 
-- `./deploy rename NEW_NAME [--force]`: validates the name (format, keyword, standard-library
-  module, dependency clash: the same rules as `presets.check_name_free`, used by `new` and
-  `__init` too), refuses a dirty git tree without `--force`, moves `src/<old_pkg>/` first (the
-  step that can fail on a locked file; case-only renames use two moves), rewrites UTF-8 text
-  files in `src/` and `tests/` (line endings and BOM kept, binaries/caches skipped), updates
-  `pytemplate.toml` (`app.name` via `config.set_value`, package references in strings and
-  comments) and `pyproject.toml` (`[project] name` and the preset block only), then
-  `cmd_env.ensure_lock` and `render.apply`.
-- Python code goes through `tokenize`: only real package references change (the first name of
-  `import pkg...`/`from pkg... import`, and `pkg.x` in files that `import pkg` without `as`).
-  When the old name equals the old package but the new name differs from the new package
-  (`alpha` -> `My-Game` / `my_game`), strings/comments/text choose by context: paths, dotted
-  names, `pkg:main`, "package"/"module", `import`/`from`, `-m` and `import_module`-like calls
-  get the package; titles and other prose get the name; `x.pkg` never changes.
-- Invariant (tested for the 3 presets, LF and CRLF, 7 name pairs): renaming the skeleton of
-  name A to B is byte-identical to the skeleton of B, so `presets.pristine` stays true.
-- Common words as names (`app`, `game`, `core`) also rewrite prose: that is why the tree must
-  be clean and `--dry-run` shows sample lines. Top-level docs (README.md) are only listed.
+- `./deploy rename NEW_NAME [--force]`: `check_new_name` refuses a bad format, a keyword, a
+  standard-library module of ANY Python the project can run on (`presets.shadows_stdlib`: the
+  runner's `sys.stdlib_module_names` plus `STDLIB_OTHER_VERSIONS`; uv keeps whatever Python ran
+  `./deploy` first, 3.11 on one machine and 3.15 on another), a dependency
+  (`presets.check_name_free`, also used by `new` and `__init`) and any package of `uv.lock`
+  (`locked_names`: indirect ones too, pygments via rich; the project's own entry excluded) and
+  a backend name (`config.BACKENDS`: `src/mypyc/` would shadow mypy's compiler in the stage,
+  and a later rename would rewrite conftest's backend strings); a broken pyproject.toml is a
+  DeployError, never a traceback. The dirty-tree check
+  (`git_changes`: `git status --porcelain -z -uall` with `LC_ALL=C`, paths relative to the
+  project; the generated files and `state.json` (`derived_paths`) never count, nor, after a
+  hand edit, `pytemplate.toml`) refuses without `--force` (a warning under `--dry-run`); git
+  failing for another reason (dubious ownership) is refused the same way, never read as "no
+  git". Then: move `src/<old_pkg>/` first (the step that can fail on a locked file; case-only
+  renames use two moves), write the files (`apply_plan`: a write that fails undoes everything,
+  old bytes back and the folder moved back), `cmd_env.ensure_lock` (a failure there says "the
+  files are already renamed ... ./deploy apply"), `render.apply`, the ruff tidy-up, and the name
+  of the `applied` record (`cmd_apply.rename_record`, only the project's own record).
+- After a hand edit of `app.name` (src/<pkg>/ missing), rename starts from the name the project
+  really has (`cmd_apply.applied_name`: the trusted record, else pyproject `[project] name`,
+  whose package is in src/): `rename <the edited name>` finishes the job, `rename OTHER` goes
+  from the real name to OTHER; with no such name it exits 2 ("put the old name back"). It never
+  says "nothing to do" while src/<pkg>/ is missing.
+- What changes (`rewrite`, whole words only; `myapp_extra` and `my-app-2` never match):
+  - Python code (`tokenize`): the first name of `import pkg...`/`from pkg... import`, and, in a
+    file that binds the package with `import pkg[.x]` (no `as`), every name that resolves to that
+    import (`_package_uses`, an iterative `ast` scope pass: a function, class body or
+    comprehension that binds `pkg` another way (assignment, parameter, loop/with/except target,
+    global/nonlocal, walrus) keeps every `pkg` in it; a module that rebinds it keeps all of its
+    own; they are reported, not changed). Keyword arguments (`f(pkg=1)`) and attributes never
+    change; `f"{pkg=}"` is a use. When `ast` cannot parse the file (syntax newer than the
+    runner's Python) the token rule is the fallback. String tokens are recognised by their
+    `*STRING_START`/`*STRING_END` suffix (f-strings 3.12, t-strings 3.14, any later family).
+  - Text (strings, comments, other files): every occurrence except `x.pkg` and a path segment
+    right after the package itself (`src/pkg/pkg`, `src\pkg\pkg`: a submodule). When the
+    old name equals the old package but the new name differs from the new package (`alpha` ->
+    `My-Game` / `my_game`): paths, dotted names, `pkg:main`, "package"/"module",
+    `import`/`from`, `-m` and `import_module`-like calls get the package; titles, other prose
+    and artifact names (`alpha.exe`, `alpha-cpython-exe`) get the name.
+  - `pytemplate.toml`: always by context (`contextual`, even when the new name is a package
+    name), never a TOML key or table header (`_toml_key`: an app named `app`, `editor`,
+    `console` or `bunnymark` keeps `[app]`, `editor =` and its buttons), never a key path in a
+    comment (`app.gui` for an app named `app`: `_config_path`). The values of `MODULE_KEYS`
+    (compile.modules/exclude/forbid_imports, `[[typing.mypy_overrides]] module`,
+    deploy.exe.hidden_imports, deploy.exclude_modules, deploy.wheel.entry; table-aware and
+    multi-line arrays included: `module_value_lines`) are package references even when bare
+    (`modules = ["alpha"]`). Any other mention is reported, not changed ([tasks] can use
+    `{name}` and `{pkg}`). `validate_config` validates the result in memory ("the renamed
+    pytemplate.toml would be invalid ...; nothing was changed"). Decoded with `config._decode`
+    (UTF-16/ANSI is a clear error) and written back with its own BOM and line endings.
+  - `pyproject.toml`: `[project] name` (`presets.set_project_name`: the `[project]` table only,
+    either quote style, any indentation; a table it cannot edit stops the plan) and the preset
+    block; mentions in other tables are reported. Read as `utf-8-sig` (the BOM is not written
+    back).
+  - A Python file with a PEP 263 cookie is rewritten in its own encoding; other files that are
+    not UTF-8 text but mention the old name are a warning (`Plan.unreadable`); binaries show
+    only with `-v`. Files outside src/ and tests/ (README.md, scripts/, docs/, your own
+    workflows) are only listed (`_mentions`: skips caches, environments, `.build`, `dist`,
+    `.pytemplate`, `.claude`, the generated files and files over 2 MiB).
+- ruff tidy-up (`tidy_before`/`tidy_after`; best effort, never fails the rename): the new name
+  has another length and sort position, so `ruff check --fix-only --fixable I001` (acts only when
+  the active typing profile selects I) and `ruff format` run on the rewritten Python files, each
+  only on the files ruff accepted BEFORE the rename (`Tidy`: a file kept unformatted or unsorted
+  stays so), with the active profile's `.build/cfg/ruff-*.toml` (`cmd_dev._profile_file`), like
+  the hook.
+- Invariant (tested for the 3 presets, LF and CRLF, 7 name pairs, random names and the round
+  trip A -> B -> A): renaming the skeleton of name A to B is byte-identical to the skeleton of B,
+  so `presets.pristine` stays true.
+- Common words as names (`app`, `game`, `core`) also rewrite prose in src/ and tests/: that is
+  why the tree must be clean and `--dry-run` shows sample lines.
+
+### 5.8 Applying `pytemplate.toml` (`cmd_apply.py`)
+
+- `./deploy apply [--force]` brings the whole project in line with pytemplate.toml; `./deploy
+  setup [--force]` is the same operation under its first-time name (`cmd_env.cmd_setup` calls
+  `cmd_apply.apply(command="setup")`; only the header and the last line differ). Idempotent: a
+  second run syncs the environments and changes no file (no uv add/remove/lock).
+- `make_plan` computes everything and makes every refusal before the first write:
+  `read_project` (a BOM is fine, broken TOML is exit 2), `applied_state`, a hand-edited
+  `app.preset` (exit 2: a preset decides src/, tests/, the dependencies and pyproject.toml, so
+  it cannot switch in place: put it back, `./deploy new DIR --preset P`),
+  `render.check_pyproject`, `dependency_changes`, whether PyPy is new (tool.uv environments has
+  no PyPy yet), then the rename plan (`rename.check_new_name`, `rename.plan`,
+  `rename.validate_config`) or, when only pyproject `[project] name` differs, its new text.
+- Order of `apply`: dirty-tree check (rename only; `--force` skips it) -> PyPy newly supported:
+  `cmd_mode._precheck_py311` (it runs `uv run --locked`, before anything changes the lock) ->
+  the rename (`rename.report`, `tidy_before`, `apply_plan`) or the `[project] name` line ->
+  `uv remove --frozen` / `uv add --frozen` of the option-driven requirements (dev group with
+  `--dev`) -> `cmd_env.ensure_lock` -> `envs.sync` of `cmd_env._envs_for(cfg, "all")` ->
+  `cmd_env._fix_exec_bit` -> the hook (`ensure_installed` when `hooks.pre_commit`,
+  `hooks.uninstall` of pytemplate's own hook when false; another tool's, another project's or a
+  core.hooksPath setup is left alone) -> `render.apply` -> `rename.tidy_after` -> `save_record`
+  -> the unused-environment note (`unused_envs`: every `.venv*` of this side no supported
+  backend uses, `.venv-jit` of older templates included; never deleted) -> warnings for missing
+  references (`reference_problems`: src/<pkg>/, compile.modules, app.assets, deploy.exe.icon,
+  deploy.upx.path) -> a summary.
+- `--frozen`, never `--no-sync`: `flet-cli==V` pins `flet==V`, so a resolving `uv add` of one
+  group alone has no solution; `--frozen` only edits pyproject.toml and one `uv lock` follows.
+  When the edits or the lock fail, pyproject.toml gets its old bytes back and the record is not
+  written: nothing half-applied, the next apply retries.
+- Option-driven requirements: the preset.toml entries with an `{option}`
+  (`presets.option_dependencies`: flet's `flet`, `flet-desktop`, dev `flet-cli` `=={version}`;
+  raylib's `{package}=={version}`), compared with pyproject by normalized name and version
+  (`req_key`: uv writes `raylib_sdl` as `raylib-sdl`; extras and markers ignored), never
+  verbatim. Plain preset dependencies (`rich`, `types-cffi`) belong to the project after `new`.
+  An old value is removed only when the last applied options produced it (a `raylib` the user
+  added next to `raylib_sdl` stays). `[preset.<name>]` wins over a hand `./deploy add flet==X`.
+- The `applied` record (top-level key of `.pytemplate/state.json`, committed; `render._save_state`
+  keeps it): `{name, preset, dependencies, dev}`, written at the end of each apply (its name by
+  rename). It counts only when its name is `app.name` or pyproject `[project] name`
+  (`trusted_record`): the template's own record, copied by `./deploy new`, is ignored. Without
+  a record: the preset is the one whose option-driven dependencies pyproject declares
+  (`_applied_preset`; script leaves no trace, so `app.preset` counts), the applied requirements
+  are the preset.toml defaults (what `__init` wrote), the old name is pyproject `[project] name`
+  when its package is in src/.
+- `pending` / `doctor` (one call from `cmd_env.cmd_doctor`): an `[XX]` line per change not
+  applied yet (hand-edited app.name or app.preset, `[preset.*]` vs pyproject.toml,
+  `hooks.pre_commit = false` with pytemplate's hook installed), else `[ok] pytemplate.toml
+  applied`; missing references are `[--]` notes; a broken pyproject.toml is a line, never a
+  traceback.
+- Every hint for a pyproject.toml that does not match pytemplate.toml (`render.auto`, doctor,
+  `render --check`, the pre-commit hook) names `./deploy apply`: `./deploy lock` applies only
+  the managed block, so after a `[preset.raylib] package` switch it moved no-build-package to
+  the new name and kept the old dependency.
 
 ## 6. Configuration and generated files
 
@@ -804,7 +928,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   section 10), `[deploy.flet] target cleanup exclude extra_args` (`target` is not validated;
   `cleanup` = `--cleanup-app --cleanup-packages`), `[deploy.upx] enabled level lzma exclude
   path` (`level` in `1..9|best|brute|ultra-brute`; `path` relative to the project root).
-- `[hooks]`: `pre_commit` (setup installs the git hook; section 5.6).
+- `[hooks]`: `pre_commit` (apply/setup install the git hook when true and remove pytemplate's
+  own when false; section 5.6).
 - Every `*.env` table (`tasks.X.env`, `deploy.portable.env`) takes string values only, and names
   a process environment can hold (not empty, no `=` or NUL; checked by the loader).
 - `[tasks.<name>]`: `cmd` (argv), `deps`, `env`, `backend`, `uv = true`, `cwd`, `help`,
@@ -819,6 +944,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 - `[preset.<name>]`: option overrides (`config._check_preset_tables`): `<name>` must be a preset
   of this template, and each key and its value type must match that preset's `preset.toml`
   `[options]`, read with `tomllib` (no `presets` import); the script preset has none.
+  `./deploy apply` applies them to the dependencies (section 5.8): raylib `package`/`version`,
+  flet `version`.
 - `[vscode]`: `settings` (merged into `.vscode/settings.json`; keys NOT validated, values must be
   JSON values: a TOML date/time, nan/inf or NUL is a config error naming the key, from the loader
   (`config._check_free`) and again from `vscode.settings`), `buttons` (each first word must be a
@@ -842,8 +969,8 @@ Generated (committed, never hand-edited): `.python-version`, `.mypy.ini`, `.ruff
 `pyrightconfig.json`, `.vscode/{settings,extensions,launch,tasks}.json`, `.lazy.lua`,
 `.pytemplate/editor.json`, `.github/workflows/ci.yml` (only while `templates/ci.yml` exists),
 `.pytemplate/state.json`. Also managed: parts of `pyproject.toml` (6.3), `uv.lock` (only via
-`./deploy lock|add|remove|setup|mode|__init`), `typings/raylib/__init__.pyi` (raylib task
-`stubs`).
+`./deploy apply|setup|lock|add|remove|mode|rename|__init`), `typings/raylib/__init__.pyi` (raylib
+task `stubs`). `state.json` also holds the `applied` record of `./deploy apply` (section 5.8).
 
 `editor.json` lists `cli.COMMANDS` (name, usage, summary, group): adding or rewording a command
 changes a generated file, so run `./deploy render` and commit `editor.json` + `state.json`
@@ -866,7 +993,7 @@ re-rendering.
 - `--check` and `--dry-run` write nothing. A folder in the way, or a read/write error, is a
   DeployError naming the file.
 - `render.auto` runs before most commands and prints one line when something changed; it also
-  warns when `pyproject_outdated`.
+  warns when `pyproject_outdated` (the hint names `./deploy apply`).
 - Changing `render.HEADER` rewrites every generated file (fine: only files whose current hash
   differs from the recorded one are protected).
 - Templates are read as `utf-8-sig` (a BOM is fine); errors are DeployErrors naming the file:
@@ -918,7 +1045,11 @@ Formats:
   `./deploy lock` then explains); `render.check_pyproject(cfg)` runs the same checks without
   writing, as a preflight for commands that change other files first.
 - `render.auto` only warns (`pyproject_outdated`); `write_pyproject` runs in `lock`, `mode`,
-  `setup` (via `cmd_env.ensure_lock`) and `__init`, because the change needs re-locking.
+  `apply`/`setup` and `rename` (via `cmd_env.ensure_lock`) and `__init`, because the change
+  needs re-locking.
+- Not a managed part, but kept in line by `./deploy apply` (section 5.8): the option-driven
+  preset requirements in `[project] dependencies` and the dev group (flet's three pins,
+  raylib's `{package}=={version}`), through `uv remove/add --frozen` and one `uv lock`.
 - Preset tables go between `# >>> pytemplate-preset` and `# <<< pytemplate-preset`
   (`presets.EXTRA_BEGIN/EXTRA_END`).
 - Never add `[build-system]` to the project's `pyproject.toml`: the project is an app (uv would
@@ -936,7 +1067,7 @@ Formats:
   hook's ruff uses `--frozen`, section 5.6). `cmd_env.ensure_lock` runs `uv lock --check` and
   then `uv lock` if needed; under `--dry-run`, when the managed pyproject parts would change, it
   echoes `uv lock` instead (the check would read the unwritten file and pass).
-- `envs.sync` = `uv sync --locked --all-groups` (setup, sync, mode): every dependency group of
+- `envs.sync` = `uv sync --locked --all-groups` (apply/setup, sync, mode): every dependency group of
   `pyproject.toml` is installed, so `./deploy add --group G pkg` survives the next sync and
   reaches a fresh clone (an exact sync of the default groups removed it); `uv run` syncs
   inexactly and never removes them. `add`/`remove` take `--dev` or `--group G`, not both.
@@ -987,7 +1118,8 @@ Formats:
   it supports, `3.14`): raising `python.cpython` past it needs a newer Nuitka pin.
 - `mode --supports -pypy` never deletes the old env: it prints a note that
   `./deploy clean --envs` removes the `.venv*` environments (all of them; `setup` recreates
-  the ones in use).
+  the ones in use). `apply` prints the same note for every unused `.venv*` of this side
+  (`cmd_apply.unused_envs`), `.venv-jit` of older templates included.
 
 ## 8. Typing profiles and `check`
 
@@ -1442,8 +1574,9 @@ Per method:
 
 ## 11. Presets (`presets.py`, `.pytemplate/presets/<p>/`)
 
-- `preset.toml`: `description`, `dependencies` / `dev_dependencies` (with `{option}`),
-  `[options]` (defaults of `[preset.<p>]`), optional `[uv]` (extra managed `[tool.uv]` keys),
+- `preset.toml`: `description`, `dependencies` / `dev_dependencies` (with `{option}`: those
+  entries follow `[preset.<p>]` through `./deploy apply` (`presets.option_dependencies`); the
+  plain ones belong to the project after `new`), `[options]` (defaults of `[preset.<p>]`), optional `[uv]` (extra managed `[tool.uv]` keys),
   optional `pyproject` string (extra tables, with `{{name}}`/`{{pkg}}`: `extra_tables`).
   Optional `constraints.txt` next to it: the tested pins (below). `presets.load` reads it as
   `utf-8-sig` and refuses (`DeployError` naming the file) invalid TOML or UTF-8, an unknown key
@@ -1480,9 +1613,10 @@ Per method:
   `deploy`/`deploy.ps1` on POSIX. Any failure or Ctrl+C in (1) or (2) puts every file back
   (`presets._Undo`, prints "every file is back as it was") and is raised. (3) Deletes the
   aside folder and runs `render.apply(force=True)`.
-- `presets.check_name_free` (in `new`, `__init`, their dry runs and `rename`, which keeps its
-  first line) refuses: a name uv refuses (`presets.APP_NAME`: a letter first, a letter or digit
-  last, PEP 508), a keyword, a stdlib module, a Windows device name (`WINDOWS_DEVICES`: `aux`,
+- `presets.check_name_free` (in `new`, `__init`, their dry runs, and `rename`/`apply`, which
+  keep its first line) refuses: a name uv refuses (`presets.APP_NAME`: a letter first, a letter
+  or digit last, PEP 508), a keyword, a standard-library module of any supported Python
+  (`presets.shadows_stdlib`), a backend name (cpython, pypy, mypyc), a Windows device name (`WINDOWS_DEVICES`: `aux`,
   `con`, `nul`, `com1`...: the folder cannot exist there and git cannot check it out), the
   project's own folders and files (`RESERVED_PACKAGES`: tests, typings, build, dist, assets;
   plus the preset's `src/` entries such as `main`), and every package the project will lock:
@@ -1895,14 +2029,26 @@ short temp tree and unset `NVIM_APPNAME`.
   throwaway copy), `test_envs_core.py` (the section 7 contract, `MIN_UV`, clean, sync/add/remove/lock
   command lines, `ensure_lock`, exec bits in a throwaway git repository, compiler checks, doctor
   lines and exit code; real uv only offline in `.venv`), `test_hooks.py` (the hook in throwaway
-  repositories, git runs it for real; the real ruff/uv command lines against `.venv`).
+  repositories, git runs it for real; the real ruff/uv command lines against `.venv`),
+  `test_apply.py` (`./deploy apply`/`setup` in throwaway projects with a fake uv that edits
+  pyproject.toml like `uv add/remove --frozen`: the per-key matrix, `[preset.*]` changes, the
+  record, preset detection, hand-edited name/preset, refusals before any write, dry runs,
+  idempotence, every hook state with real git, doctor lines, hints; real `./deploy` runs in a
+  copy of the template, and `test_uv_frozen_edits_only_pyproject` checks offline the uv
+  behaviour the fake imitates), `test_rename.py` (the skeleton invariant for 3 presets x 7
+  pairs x LF/CRLF, random names and round trips, every rewrite rule, scopes, TOML keys and
+  module keys, encodings, git states, rollback, the ruff tidy-up, the command in-process and a
+  real run in a copy).
 - **[template repo]** Language guard `test_no_spanish.py`: skipped unless
   `.pytemplate/template-repo` exists. Scans `git ls-files --cached --others --exclude-standard`
   (so new untracked files count) for accented Spanish letters and a list of Spanish words
   (including the template's former default app name). Add `lang: allow` to a line to allow it
   on purpose.
 - Test rules: tests that need a missing tool or shell must skip cleanly (they also run on
-  Linux/macOS CI). Tests that spawn `./deploy` must scrub `UV`, `VIRTUAL_ENV`,
+  Linux/macOS CI), and so must tests that need the network: the real runs in `test_rename.py`
+  and `test_apply.py` re-lock with `uv lock` and SKIP with "needs PyPI" when uv cannot reach
+  the index (`rename.needs_pypi`); everything else in `./deploy selftest` works offline once
+  `./deploy setup` has run. Tests that spawn `./deploy` must scrub `UV`, `VIRTUAL_ENV`,
   `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON` and `PYTEMPLATE_*` from the child env (pytest itself
   runs under `uv run`). Keep them fast: a runner start costs ~0.3 s, and the Windows launcher
   and path tests already take 10-40 s under load.
@@ -2138,8 +2284,8 @@ Behaviour:
   closed stdout pipe is `OSError` EINVAL there, so `./deploy help | more` quitting early still
   prints a traceback (untested).
 - `clean --envs` removes every `.venv*` of this side (WSL on /mnt: only the `-wsl` ones),
-  including the environments in use; there is no "unused only" option (`mode` only prints a
-  note about leftovers). On Windows close the editor first (its mypy/ruff servers run from
+  including the environments in use; there is no "unused only" option (`mode` and `apply`
+  only print a note about leftovers). On Windows close the editor first (its mypy/ruff servers run from
   `.venv`), or clean fails with exit 1.
 - raylib + PyPy on macOS arm64: no PyPy wheel for that platform (raylib 6.0.1.0 still has
   none) and `no-build-package`, so `./deploy setup` of a raylib project fails to sync
@@ -2147,7 +2293,15 @@ Behaviour:
   no binary distribution"). The generated `ci.yml` syncs only the matrix backends and
   `selftest --e2e` switches the project off PyPy first (`e2e.HOST_GAPS`); users there run
   `./deploy mode cpython --supports cpython,mypyc`. Possible fix: skip PyPy for raylib on
-  macOS aarch64 in `setup`/`new`.
+  macOS aarch64 in `apply`/`new`.
+- `./deploy lock` re-locks without applying `[preset.*]`: after a `[preset.raylib] package`
+  switch it moves `no-build-package` to the new name and keeps the old dependency until
+  `./deploy apply` runs (every mismatch hint names apply). A `[preset.flet] version` edit that
+  is not applied yet shows only in `doctor` (`cmd_apply.pending`): `render.auto` and the
+  pre-commit hook compare the managed block, where flet leaves no trace.
+- A hand-edited `app.name` is rendered into `editor.json` and `ci.yml` by the next command's
+  `render.auto` before `apply` renames the package (harmless: apply's dirty-tree check ignores
+  generated files, and a run in between still uses src/<old_pkg>/).
 - WSL on `/mnt`: `pyrightconfig.json` (`venv: ".venv"`) and the PyPy/mypyc launch
   configs ignore `ENV_SUFFIX`, so VS Code and pyright inside WSL point at the Windows-side
   environments (the Neovim plugin adds `-wsl` itself). Untested.
@@ -2214,7 +2368,10 @@ Code coupling (rename together):
 - `hooks` imports the private `cmd_dev._profile_file` and `shells.launcher_problems`, and loads
   `.pytemplate/tests/test_no_spanish.py` by path (it needs `offending_lines`, `ALLOWED_PATHS`,
   `BINARY_SUFFIXES`, and only `pytest.mark` at module level); `rename` calls the private
-  `config._build`, `presets._set_project_name` and `presets._norm_name`.
+  `config._build`, `config._decode` and `presets._norm_name`; `cmd_apply` calls the private
+  `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311` and
+  `rename._plan_pyproject`; `rename` and `cmd_env` import `cmd_apply` lazily (it imports both
+  at module level).
 - `upx.BUILTIN_EXCLUDE` must keep `flutter_windows.dll`; `nuitka._flet_client_archive` mirrors
   flet_desktop's download URL and its `flet_desktop/app/` lookup.
 - `config._check_default_methods` imports `cmd_build.COMPAT` lazily (`cmd_build` imports

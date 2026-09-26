@@ -445,7 +445,7 @@ def auto(cfg: Config, *, force: bool = False) -> None:
     if pyproject_outdated(cfg):
         ui.warn(
             "pyproject.toml does not match pytemplate.toml (backend.supported / python / preset).\n"
-            "  Apply it and re-lock with: ./deploy lock"
+            "  Apply your pytemplate.toml changes with: ./deploy apply"
         )
 
 

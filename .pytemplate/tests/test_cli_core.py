@@ -191,7 +191,9 @@ def test_probe_needs_no_config(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
 
 # Builtins that never render first (CLAUDE.md 5.2). A new command with render=False fails here
 # until it is added (and documented).
-NEVER_RENDER = {"clean", "render", "new", "pyz-merge", "tasks", "shell-setup", "selftest", "help", "hooks"}
+# apply/setup render themselves at the end (a refused apply writes nothing); rename renders only
+# after its checks, never with a hand-edited app.name before the dirty-tree check
+NEVER_RENDER = {"clean", "render", "new", "pyz-merge", "tasks", "shell-setup", "selftest", "help", "hooks", "setup", "apply", "rename"}
 
 
 def test_commands_that_never_render() -> None:
@@ -351,6 +353,7 @@ def test_help_of_help(capsys: pytest.CaptureFixture[str]) -> None:
 # A new command fails test_every_command_is_classified until it is added here.
 MINIMAL: dict[str, tuple[list[str], bool]] = {
     "setup": ([], False),
+    "apply": ([], False),
     "doctor": ([], False),
     "sync": (["cpython"], False),
     "add": (["somepkg"], True),

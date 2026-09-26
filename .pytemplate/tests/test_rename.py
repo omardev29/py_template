@@ -9,19 +9,23 @@ safety checks and the command itself (dry run and a real run in a throwaway copy
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import random
 import shutil
 import subprocess
 import sys
+import tokenize
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEMPLATE_DIR))
 
-from runner import config, presets, rename  # noqa: E402
+from runner import cli, cmd_dev, cmd_env, config, envs, presets, proc, render, rename  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import ROOT  # noqa: E402
 from runner.rename import Names, package_of, rewrite  # noqa: E402
@@ -367,6 +371,11 @@ def test_command_dry_run_then_real_run(project_copy: Path) -> None:
     assert r.returncode == 2 and "unknown argument(s): --bogus" in r.stderr
 
     r = _deploy(root, "rename", "My-Game")
+    if r.returncode != 0 and rename.needs_pypi(r.stderr):
+        # The rename itself happened; only the re-lock needs the package index
+        assert (root / "src" / "my_game" / "app.py").is_file() and not (root / "src" / "myapp").exists()
+        assert "The files are already renamed" in r.stderr and "./deploy apply" in r.stderr, r.stderr
+        pytest.skip("needs PyPI: uv lock could not reach the package index (offline, blocked proxy, or UV_OFFLINE with a cold cache)")
     assert r.returncode == 0, r.stderr
     assert not (root / "src" / "myapp").exists()
     assert (root / "src" / "my_game" / "app.py").is_file()
@@ -379,3 +388,758 @@ def test_command_dry_run_then_real_run(project_copy: Path) -> None:
 
     r = _deploy(root, "rename", "My-Game")
     assert r.returncode == 0 and "nothing to do" in r.stderr
+
+
+@needs_uv
+def test_real_run_skips_without_the_index(tmp_path: Path) -> None:
+    """Offline with a cold uv cache the real rename SKIPs instead of failing the suite."""
+    drop = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "PYTEMPLATE_CALLER_CWD", "PYTEMPLATE_LAUNCHER")
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env.update(UV_OFFLINE="1", UV_CACHE_DIR=str(tmp_path / "cache"), PYTHONDONTWRITEBYTECODE="1")
+    node = f"{Path(__file__).resolve()}::test_command_dry_run_then_real_run"
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider", "--basetemp", str(tmp_path / "t"), node],
+        env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, check=False,
+    )
+    assert r.returncode == 0 and "1 skipped" in r.stdout and "needs PyPI" in r.stdout, r.stdout + r.stderr
+
+
+# --- pytemplate.toml: module values, TOML keys, words of the schema ----------------------------------------
+
+
+def _flat(data: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            out.update(_flat(value, f"{prefix}{key}."))
+        else:
+            out[f"{prefix}{key}"] = value
+    return out
+
+
+@pytest.mark.parametrize("new", ["beta", "Beta", "My-Game"])
+def test_module_name_keys_follow_the_package(tmp_path: Path, new: str) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    cfg_file = tmp_path / "pytemplate.toml"
+    text = cfg_file.read_text(encoding="utf-8")
+    text = text.replace('modules = ["alpha.core"]', 'modules = [\n    "alpha",\n]')  # a multi-line array
+    text = text.replace("[compile]", '[[typing.mypy_overrides]]\nmodule = ["alpha", "alpha.*"]\ndisallow_any_explicit = false\n\n[compile]')
+    text = text.replace("[deploy.exe]", '[deploy.exe]\nhidden_imports = ["alpha"]')
+    text = text.replace("[deploy.upx]", '[deploy.wheel]\nentry = "alpha:main"\n\n[deploy.upx]')
+    text = text.replace("exclude = []     # extra file-name globs", 'exclude = ["alpha"]     # extra file-name globs')  # [deploy.upx]
+    text += '\n[tasks.pack]\ncmd = ["echo", "alpha"]\n'
+    cfg_file.write_text(text, encoding="utf-8", newline="\n")
+    planned = _rename(tmp_path, "alpha", new)
+    pkg = package_of(new)
+    data = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
+    assert data["compile"]["modules"] == [pkg]
+    assert data["typing"]["mypy_overrides"][0]["module"] == [pkg, f"{pkg}.*"]
+    assert data["deploy"]["exe"]["hidden_imports"] == [pkg]
+    assert data["deploy"]["wheel"]["entry"] == f"{pkg}:main"
+    assert data["deploy"]["upx"]["exclude"] == ["alpha"]  # file-name globs: another table's `exclude`
+    assert data["tasks"]["pack"]["cmd"] == ["echo", "alpha"]  # task arguments are reported, not changed
+    assert [line.split(" =")[0] for _, line in planned.config.kept] == ["exclude", "cmd"]
+
+
+def test_module_value_lines_follow_tables_and_arrays() -> None:
+    text = (
+        '[compile]\nmodules = [\n  "a",  # x\n  "b",\n]\nexclude = ["c"]\nannotate = false\n'
+        '[deploy.upx]\nexclude = ["d"]\n[deploy]\nexe.hidden_imports = ["e"]\n[[typing.mypy_overrides]]\nmodule = "f"\n'
+    )
+    assert rename.module_value_lines(text) == {2, 3, 4, 5, 6, 11, 13}
+
+
+@pytest.mark.parametrize("new", ["beta", "My-Game"])
+def test_bare_package_values_of_module_keys_are_renamed(new: str) -> None:
+    text = (
+        '[compile]\nmodules = [\n  "alpha",\n]\nexclude = ["alpha.slow"]\n[[typing.mypy_overrides]]\nmodule = "alpha"\n'
+        '[deploy.exe]\nhidden_imports = ["alpha"]\n[vscode]\nbuttons = ["alpha"]\n[tasks.alpha]\ncmd = ["echo", "alpha"]\n'
+    )
+    pkg = package_of(new)
+    data = tomllib.loads(rewrite(text, Names("alpha", new), only_pkg=True, toml=True, module_keys=rename.MODULE_KEYS).text)
+    assert data["compile"]["modules"] == [pkg] and data["compile"]["exclude"] == [f"{pkg}.slow"]
+    assert data["typing"]["mypy_overrides"][0]["module"] == pkg and data["deploy"]["exe"]["hidden_imports"] == [pkg]
+    assert data["vscode"]["buttons"] == ["alpha"] and data["tasks"]["alpha"]["cmd"] == ["echo", "alpha"]
+
+
+def test_toml_keys_and_headers_never_change() -> None:
+    text = '[app]\napp = 1\n[tasks.app]\nx.app.y = 2\n[[app.x]]\nv = "src/app/core"\n'
+    out = rewrite(text, Names("app", "beta"), only_pkg=True, toml=True)
+    assert out.text == text.replace("src/app/core", "src/beta/core")
+
+
+@pytest.mark.parametrize(
+    ("preset", "old"),
+    [("script", "app"), ("script", "editor"), ("script", "console"), ("script", "exe"), ("script", "check"), ("script", "hooks"),
+     ("script", "compile"), ("script", "tasks"), ("script", "mode"), ("raylib", "bunnymark"), ("raylib", "python"), ("flet", "dev"), ("flet", "app")],
+)
+@pytest.mark.parametrize("new", ["beta", "My-Game"])
+def test_names_that_are_also_config_words_keep_the_config_valid(tmp_path: Path, preset: str, old: str, new: str) -> None:
+    _write_project(tmp_path, preset, old)
+    planned = rename.plan(tmp_path, old, new)
+    rename.validate_config(planned.config.new)  # 'unknown key beta' / vscode.buttons before the fix
+    before, after = _flat(tomllib.loads(planned.config.old)), _flat(tomllib.loads(planned.config.new))
+    assert before.keys() == after.keys()
+    assert after["app.name"] == new and after["vscode.buttons"] == before["vscode.buttons"]
+    assert after["compile.modules"] == [f"{package_of(new)}.core"]
+    assert {k for k in before if before[k] != after[k]} <= {"app.name", "compile.modules", "typing.mypy_overrides", "deploy.wheel.entry"}
+
+
+def test_key_paths_in_comments_of_an_app_named_like_a_table(tmp_path: Path) -> None:
+    _write_project(tmp_path, "script", "app")
+    old = (tmp_path / "pytemplate.toml").read_text(encoding="utf-8")
+    assert "(= not app.gui)" in old and "(app.name" in old
+    new = rename.plan(tmp_path, "app", "beta").config.new
+    assert "(= not app.gui)" in new and "(app.name" in new and "app.preset cannot" in new
+    assert 'modules = ["beta.core"]' in new and "src/beta/" in new
+
+
+# --- Python code: scopes, f-strings, token families -------------------------------------------------------
+
+SHADOWS = [
+    "def main():\n    game = make()\n    game.run()\n    print(game.core.VERSION)\n",
+    "def main():\n    global game\n    game = 1\n    print(game)\n",
+    "def outer():\n    game = 1\n\n    def inner():\n        nonlocal game\n        game = 2\n\n    inner()\n    return game\n",
+    "def main():\n    game = 1\n    game += 1\n    return f'{game}'\n",
+    "def main(game=None):\n    return game\n",
+    "def main(xs):\n    for game in xs:\n        print(game)\n",
+    "def main(xs):\n    ys = [(game := x) for x in xs]\n    return game\n",
+    "game = 3\nprint(game)\n",
+    "class C:\n    game = 1\n    y = game + 1\n",
+    "def main():\n    try:\n        pass\n    except OSError as game:\n        print(game)\n",
+    "def main():\n    with open('x') as game:\n        print(game)\n",
+    "def main():\n    game: int = 1\n    return game\n",
+    "def main():\n    from other import game\n    return game\n",
+    "def main():\n    import other as game\n    return game\n",
+    "def game():\n    return game\n",
+]
+
+
+@pytest.mark.parametrize("body", SHADOWS)
+def test_a_variable_named_like_the_package_is_never_half_renamed(body: str) -> None:
+    out = rewrite("import game.core\n\n\n" + body, Names("game", "beta"), python=True)
+    assert out.text == "import beta.core\n\n\n" + body
+    compile(out.text, "t.py", "exec")  # the nonlocal case raised SyntaxError before the fix
+    assert {n for n, _ in out.kept} == {n for n, line in enumerate(body.splitlines(), 4) if "game" in line}
+
+
+def test_package_uses_next_to_shadowing_scopes_are_renamed() -> None:
+    src = (
+        "import game.core\n"
+        "print(game.core.X, f'{game.core}')\n"
+        "def f(game=None): return g(game=1)\n"
+        "class C:\n"
+        "    game = 1\n"
+        "    def m(self): return game.core.Y\n"
+        "def h():\n"
+        "    import game.gfx\n"
+        "    return game.gfx.Z\n"
+        "def k(x=game.core.DEFAULT): return [game.core for _ in x]\n"
+        "@game.core.deco\n"
+        "def d(): pass\n"
+    )
+    out = rewrite(src, Names("game", "beta"), python=True)
+    assert out.text == src.replace("game.", "beta.")
+    assert [n for n, _ in out.kept] == [3, 5]
+
+
+def test_a_local_import_of_the_package_under_a_module_rebinding() -> None:
+    src = "import game.core\ngame = None\n\ndef h():\n    import game.gfx\n    return game.gfx.Z\n"
+    out = rewrite(src, Names("game", "beta"), python=True)
+    assert out.text == "import beta.core\ngame = None\n\ndef h():\n    import beta.gfx\n    return beta.gfx.Z\n"
+
+
+def test_fstring_debug_field_of_the_bound_package() -> None:
+    out = rewrite('import myapp\nx = f"{myapp=}" f"{myapp = !r}" f"{myapp=:>9}"\nf(myapp=1)\nmyapp = 2\n', Names("myapp", "beta"), python=True)
+    # myapp = 2 rebinds the module name: nothing but the import changes, everything else is reported
+    assert out.text.startswith("import beta\n") and [n for n, _ in out.kept] == [2, 3, 4]
+    out = rewrite('import myapp\nx = f"{myapp=}" f"{myapp = !r}" f"{myapp=:>9}"\nf(myapp=1)\n', Names("myapp", "beta"), python=True)
+    assert out.text == 'import beta\nx = f"{beta=}" f"{beta = !r}" f"{beta=:>9}"\nf(myapp=1)\n'
+    assert [n for n, _ in out.kept] == [3]
+
+
+def test_the_token_rule_without_ast(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Syntax newer than the runner's Python: ast fails, the token rule still works
+    monkeypatch.setattr(rename, "_package_uses", lambda body, pkg: None)
+    out = rewrite('import myapp\nx = f"{myapp=}" + str(myapp.core)\nf(myapp=1)\n', Names("myapp", "beta"), python=True)
+    assert out.text == 'import beta\nx = f"{beta=}" + str(beta.core)\nf(myapp=1)\n'
+
+
+def test_unknown_string_token_family_is_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    if not hasattr(tokenize, "FSTRING_START"):
+        pytest.skip("Python 3.11: f-strings are one STRING token")
+    for kind in ("START", "MIDDLE", "END"):
+        monkeypatch.setitem(tokenize.tok_name, getattr(tokenize, f"FSTRING_{kind}"), f"XSTRING_{kind}")
+    assert rewrite('x = f"src/myapp/core {1}"\n', AMBIGUOUS, python=True).text == 'x = f"src/my_game/core {1}"\n'
+
+
+def test_tokenizer_canary() -> None:
+    """A new string token family (like TSTRING in 3.14) must end in _START/_END to be treated as text."""
+    starts = {n for n in tokenize.tok_name.values() if n.endswith("_START")}
+    assert starts <= {"FSTRING_START", "TSTRING_START"}, starts
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "import os, myapp.core, sys\nmyapp.core.run()\n",
+        "from myapp.core import (\n    a,\n    b,\n)\n",
+        "from myapp.core \\\n    import a\n",
+        "def g():\n    yield from myapp.core.items()\nimport myapp.core\n",
+        "try:\n    pass\nexcept ValueError as e:\n    raise KeyError() from e\nimport myapp\nprint(myapp.x)\n",
+    ],
+)
+def test_import_forms(src: str) -> None:
+    out = rewrite(src, Names("myapp", "beta"), python=True)
+    assert "myapp" not in out.text and out.text == src.replace("myapp", "beta")
+    compile(out.text, "t.py", "exec")
+
+
+def test_a_relative_import_of_a_sibling_named_like_the_package() -> None:
+    src = "from . import myapp\nprint(myapp.x)\n"
+    assert rewrite(src, Names("myapp", "beta"), python=True).text == src
+
+
+# --- paths inside the package --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("new", ["beta", "My-Game"])
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("# see src/core/core/x.py\n", "# see src/{pkg}/core/x.py\n"),
+        ('p = "src/core/core/bench.py"\n', 'p = "src/{pkg}/core/bench.py"\n'),
+        ('p = "src\\\\core\\\\core\\\\bench.py"\n', 'p = "src\\\\{pkg}\\\\core\\\\bench.py"\n'),
+        ('p = "src/core/core.py"\n', 'p = "src/{pkg}/core.py"\n'),
+        ('p = "core/core.txt"\n', 'p = "{pkg}/core.txt"\n'),
+        ('p = "src/my-core/core.py"\n', 'p = "src/my-core/{pkg}.py"\n'),  # another folder: core.py is a module path
+    ],
+)
+def test_a_path_segment_after_the_package_is_a_submodule(text: str, expected: str, new: str) -> None:
+    assert rewrite(text, Names("core", new), python=True).text == expected.format(pkg=package_of(new))
+
+
+# --- other encodings, other files ------------------------------------------------------------------------
+
+
+def test_python_file_with_a_coding_cookie_is_rewritten_in_its_encoding(tmp_path: Path) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    source = ('# -*- coding: cp1252 -*-\n"""Caf' + chr(0xE9) + '"""\nfrom alpha.core import bench\n').encode("cp1252")
+    (tmp_path / "src" / "alpha" / "legacy.py").write_bytes(source)
+    planned = _rename(tmp_path, "alpha", "beta")
+    assert (tmp_path / "src" / "beta" / "legacy.py").read_bytes() == source.replace(b"from alpha.core", b"from beta.core")
+    assert "src/alpha/legacy.py" not in planned.binary and not planned.unreadable
+    assert next(f for f in planned.files if f.target == "src/beta/legacy.py").encoding == "cp1252"
+
+
+def test_undecodable_files_that_mention_the_old_name_are_warned_about(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    (tmp_path / "src" / "alpha" / "nocookie.py").write_bytes(b'"""caf\xe9"""\nfrom alpha.core import bench\n')
+    (tmp_path / "src" / "alpha" / "notes.txt").write_bytes(b"see alpha caf\xe9")
+    (tmp_path / "src" / "alpha" / "other.txt").write_bytes(b"caf\xe9")
+    (tmp_path / "src" / "alpha" / "logo.png").write_bytes(b"\x89PNG\0alpha\0")
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    assert planned.unreadable == ["src/alpha/nocookie.py", "src/alpha/notes.txt"]
+    capsys.readouterr()
+    rename.report(planned, dry=False)  # not verbose: the warning must still show
+    err = capsys.readouterr().err
+    assert "warning: " in err and "src/beta/nocookie.py" in err and "src/beta/notes.txt" in err
+    assert "other.txt" not in err and "logo.png" not in err
+
+
+def test_mentions_outside_src_and_tests_are_reported(tmp_path: Path) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    files = {
+        "scripts/gen.py": "from alpha.core import bench\n",
+        "docs/usage.md": "Run `python -m alpha`.\n",
+        ".github/workflows/mine.yml": "run: python -m alpha\n",
+        ".github/workflows/ci.yml": "name: alpha\n",  # generated: re-rendered, never listed
+        ".venv/lib/alpha.py": "alpha\n",
+        "dist/alpha-cpython-pyz/notes.txt": "alpha\n",
+        ".pytemplate/editor.json": '{"name": "alpha"}\n',
+        ".claude/worktrees/x/src/alpha/app.py": "import alpha\n",
+        "big.txt": "alpha\n" + "x" * (rename.MENTION_MAX_BYTES + 1),
+    }
+    for rel_path, text in files.items():
+        (tmp_path / rel_path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel_path).write_text(text, encoding="utf-8")
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text(encoding="utf-8") + '\n[tool.pt-cov]\nsource = ["alpha"]\ninclude = ["src/alpha/*"]\n', encoding="utf-8")
+    planned = rename.plan(tmp_path, "alpha", "beta", generated={".github/workflows/ci.yml"})
+    assert planned.mentions == [".github/workflows/mine.yml", "docs/usage.md", "scripts/gen.py"]
+    assert planned.pyproject is not None
+    assert [line for _, line in planned.pyproject.kept] == ['source = ["alpha"]', 'include = ["src/alpha/*"]']
+    rename.apply_plan(tmp_path, planned)
+    assert (tmp_path / "scripts" / "gen.py").read_text(encoding="utf-8") == files["scripts/gen.py"]  # listed, not changed
+    assert 'source = ["alpha"]' in pyproject.read_text(encoding="utf-8")
+
+
+def test_rename_accepts_a_pyproject_with_a_bom(tmp_path: Path) -> None:
+    _write_project(tmp_path, "flet", "alpha")
+    path = tmp_path / "pyproject.toml"
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
+    rename.apply_plan(tmp_path, rename.plan(tmp_path, "alpha", "My-Game"))
+    data = path.read_bytes()
+    assert not data.startswith(b"\xef\xbb\xbf")
+    parsed = tomllib.loads(data.decode("utf-8"))
+    assert parsed["project"]["name"] == "My-Game" and parsed["tool"]["flet"]["product"] == "My-Game"
+
+
+def test_pytemplate_toml_keeps_its_bom_and_line_endings(tmp_path: Path) -> None:
+    """Like config.update_file: a Windows editor's CRLF and BOM survive the rename."""
+    _write_project(tmp_path, "raylib", "alpha")
+    path = tmp_path / "pytemplate.toml"
+    text = path.read_text(encoding="utf-8")
+    path.write_bytes(b"\xef\xbb\xbf" + text.replace("\n", "\r\n").encode("utf-8"))
+    planned = _rename(tmp_path, "alpha", "My-Game")
+    data = path.read_bytes()
+    assert data.startswith(b"\xef\xbb\xbf") and data.count(b"\r\n") == data.count(b"\n")
+    expected = presets.skeleton("raylib", "My-Game")["pytemplate.toml"].replace(b"\n", b"\r\n")
+    assert data == b"\xef\xbb\xbf" + expected  # byte for byte what new would write, in the file's own form
+    assert planned.config.bom and "\r\n" in planned.config.new
+
+
+def test_a_pytemplate_toml_that_is_not_utf8_is_a_clear_error(tmp_path: Path) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    path = tmp_path / "pytemplate.toml"
+    path.write_bytes(path.read_text(encoding="utf-8").encode("utf-16"))
+    with pytest.raises(DeployError, match="UTF-16") as e:
+        rename.plan(tmp_path, "alpha", "beta")
+    assert e.value.code == 2
+
+
+PROJECT_NAME_VARIANTS = {
+    "single-quotes": "[project]\nname = 'alpha'\nversion = \"0.1.0\"\n",
+    "indented": "[project]\n  name=\"alpha\"\nversion = \"0.1.0\"\n",
+    "table-before": "[[tool.uv.index]]\nname = \"pytorch\"\nurl = \"https://x.invalid/simple\"\n\n[project]\nname = \"alpha\"\nversion = \"0.1.0\"\n",
+    "comment": "[project]  # the app\nname = \"alpha\"  # keep\nversion = \"0.1.0\"\n",
+    "not-first-key": "[project]\nversion = \"0.1.0\"\nname = \"alpha\"\n",
+    "crlf": "[project]\r\nname = \"alpha\"\r\nversion = \"0.1.0\"\r\n",
+}
+
+
+@pytest.mark.parametrize("text", list(PROJECT_NAME_VARIANTS.values()), ids=list(PROJECT_NAME_VARIANTS))
+def test_set_project_name_only_touches_the_project_table(text: str) -> None:
+    before = tomllib.loads(text)
+    after = tomllib.loads(presets.set_project_name(text, "beta"))
+    assert after["project"]["name"] == "beta"
+    before["project"]["name"] = "beta"
+    assert after == before  # e.g. the [[tool.uv.index]] name is untouched
+
+
+@pytest.mark.parametrize("text", ['[tool.x]\nname = "alpha"\n', '[project]\nversion = "0.1.0"\n', 'project.name = "alpha"\n', "[project\n"])
+def test_set_project_name_refuses_what_it_cannot_edit(text: str) -> None:
+    with pytest.raises(DeployError, match=r"\[project\] name") as e:
+        presets.set_project_name(text, "beta")
+    assert e.value.code == 2
+
+
+def test_rename_of_a_single_quoted_project_name(tmp_path: Path) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    path = tmp_path / "pyproject.toml"
+    path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"', "name = 'alpha'", 1), encoding="utf-8", newline="\n")
+    _rename(tmp_path, "alpha", "beta")
+    assert tomllib.loads(path.read_text(encoding="utf-8"))["project"]["name"] == "beta"
+
+
+def test_a_pyproject_without_project_name_stops_the_plan(tmp_path: Path) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    path = tmp_path / "pyproject.toml"
+    path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"\n', "", 1), encoding="utf-8", newline="\n")
+    before = _tree(tmp_path)
+    with pytest.raises(DeployError, match="nothing was changed"):
+        rename.plan(tmp_path, "alpha", "beta")
+    assert _tree(tmp_path) == before
+
+
+# --- names: indirect dependencies, the standard library of every Python ---------------------------------
+
+
+def test_every_locked_package_name_is_refused() -> None:
+    cfg = _cfg("script")
+    names = rename.locked_names(ROOT)
+    assert {"iniconfig", "pluggy", "packaging", "pygments"} <= names  # pytest's and rich's own dependencies
+    for name in sorted(names):
+        with pytest.raises(DeployError, match="package in uv.lock|also the name of a dependency|standard library") as e:
+            rename.check_new_name(cfg, name)
+        assert e.value.code == 2
+    with pytest.raises(DeployError, match=r"\(iniconfig, "):
+        rename.check_new_name(cfg, "IniConfig")  # normalized like uv
+
+
+@pytest.mark.parametrize("name", ["mypyc", "PyPy", "cpython"])
+def test_backend_names_are_refused(name: str) -> None:
+    # src/mypyc/ would shadow the compiler in the mypyc stage, and a later rename away from a
+    # backend name would rewrite tests/conftest.py's `BACKEND != "mypyc"`
+    with pytest.raises(DeployError, match="name of a backend") as e:
+        rename.check_new_name(_cfg("script"), name)
+    assert e.value.code == 2
+
+
+def test_locked_names_skip_the_project_itself(tmp_path: Path) -> None:
+    lock = 'version = 1\n\n[[package]]\nname = "alpha"\nversion = "0.1.0"\nsource = { virtual = "." }\n\n'
+    lock += '[[package]]\nname = "Foo_Bar"\nversion = "1.0"\nsource = { registry = "https://pypi.org/simple" }\n'
+    (tmp_path / "uv.lock").write_text(lock, encoding="utf-8")
+    assert rename.locked_names(tmp_path) == {"foo-bar"}
+    assert rename.locked_names(tmp_path / "missing") == set()
+    (tmp_path / "uv.lock").write_text("not [toml", encoding="utf-8")
+    assert rename.locked_names(tmp_path) == set()
+    (tmp_path / "uv.lock").write_text("package = 3\n", encoding="utf-8")
+    assert rename.locked_names(tmp_path) == set()
+
+
+def test_case_only_rename_of_the_project_is_not_a_lock_clash() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"]
+    assert presets._norm_name(project) not in rename.locked_names(ROOT)
+
+
+@pytest.mark.parametrize("name", ["compression", "annotationlib", "imp", "asyncore", "distutils", "sre_parse"])
+def test_stdlib_names_do_not_depend_on_the_runner(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    monkeypatch.setattr(sys, "stdlib_module_names", frozenset({"json"}))
+    with pytest.raises(DeployError, match="standard library") as e:
+        rename.check_new_name(_cfg("script"), name)
+    assert e.value.code == 2
+    assert presets.shadows_stdlib(name) and presets.shadows_stdlib("json") and not presets.shadows_stdlib("beta")
+
+
+# --- git -------------------------------------------------------------------------------------------------
+
+
+def _git_env(tmp_path: Path) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    empty = tmp_path / "gitconfig"
+    empty.write_text("", encoding="utf-8")
+    return env | {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(empty), "GIT_CEILING_DIRECTORIES": str(tmp_path)}
+
+
+def _git(cwd: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", *args],
+        cwd=cwd, env=env, capture_output=True, text=True, check=False,
+    )
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not found")
+def test_git_changes_no_repo_clean_dirty_subfolder_and_broken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env = _git_env(tmp_path)
+    for key in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(key)
+    for key, value in env.items():
+        if key.startswith("GIT_"):
+            monkeypatch.setenv(key, value)
+    repo = tmp_path / "repo"
+    project = repo / "apps" / "p"
+    project.mkdir(parents=True)
+    assert rename.git_changes(project) is None
+    _git(repo, env, "init", "-q")
+    assert rename.git_changes(project) == []
+    (project / "x.py").write_text("x", encoding="utf-8")
+    (repo / "outside.txt").write_text("x", encoding="utf-8")
+    assert rename.git_changes(project) == ["x.py"]  # relative to the project, outside files ignored
+    _git(repo, env, "add", "-A")
+    _git(repo, env, "commit", "-q", "-m", "x")
+    _git(repo, env, "mv", "apps/p/x.py", "apps/p/y.py")
+    assert rename.git_changes(project) == ["y.py"]  # a rename: the old path is not a second entry
+    probe = subprocess.run(["git", "status"], cwd=project, env=env | {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}, capture_output=True, text=True, check=False)
+    if probe.returncode == 0:
+        pytest.skip("this git ignores GIT_TEST_ASSUME_DIFFERENT_OWNER")
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    result = rename.git_changes(project)
+    assert isinstance(result, str) and "dubious ownership" in result
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a sh script as git")
+def test_git_changes_reads_git_in_english(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = tmp_path / "bin" / "git"
+    fake.parent.mkdir()
+    fake.write_text(
+        '#!/bin/sh\nif [ "$LC_ALL" = C ]; then echo "fatal: not a git repository (or any of the parent directories): .git" >&2\n'
+        'else echo "fatal: no es un repositorio git" >&2; fi\nexit 128\n',  # lang: allow
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("LC_ALL", "es_ES.UTF-8")
+    monkeypatch.setenv("LANGUAGE", "es")
+    assert rename.git_changes(tmp_path) is None
+
+
+def test_dirty_tree_message() -> None:
+    assert rename.dirty_tree_message(None, "rename", "x") is None
+    assert rename.dirty_tree_message([], "rename", "x") is None
+    many = rename.dirty_tree_message([f"f{i}" for i in range(7)], "rename", "./deploy rename b --force")
+    assert many is not None and "7 path(s): f0, f1, f2, f3, f4 and 2 more" in many and "./deploy rename b --force" in many
+    broken = rename.dirty_tree_message("fatal: detected dubious ownership", "rename", "x")
+    assert broken is not None and broken.startswith("could not check for uncommitted changes in git (fatal: detected dubious")
+
+
+# --- the command, in-process -----------------------------------------------------------------------------
+
+
+@pytest.fixture
+def command_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A script project named alpha that the rename command works on (no uv: the lock is stubbed)."""
+    root = tmp_path / "p"
+    root.mkdir()
+    _write_project(root, "script", "alpha")
+    (root / ".pytemplate").mkdir()
+    for module in (rename, render, presets):
+        monkeypatch.setattr(module, "ROOT", root)
+    for module in (render, presets):
+        monkeypatch.setattr(module, "PYPROJECT", root / "pyproject.toml")
+    monkeypatch.setattr(render, "STATE_FILE", root / ".pytemplate" / "state.json")
+    from runner import cmd_apply
+
+    monkeypatch.setattr(cmd_apply, "ROOT", root)
+    monkeypatch.setattr(cmd_env, "ensure_lock", lambda cfg: None)
+    monkeypatch.setattr(rename, "tidy_before", lambda cfg, plan_, root=None: None)
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    for key, value in _git_env(tmp_path).items():
+        if key.startswith("GIT_"):
+            monkeypatch.setenv(key, value)
+    render.apply(_load(root))  # generated files as the project has them
+    return root
+
+
+def _load(root: Path) -> Config:
+    cfg: Config = config._build(Config, tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8")), "")
+    config.validate(cfg, set(cli.COMMANDS))
+    return cfg
+
+
+def test_rename_after_a_hand_edit_finishes_it(command_project: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = command_project
+    text = (root / "pytemplate.toml").read_text(encoding="utf-8")
+    (root / "pytemplate.toml").write_text(config.set_value(text, "app", "name", "beta"), encoding="utf-8", newline="\n")
+    assert rename.cmd_rename(_load(root), ["beta"]) == 0
+    err = capsys.readouterr().err
+    assert "was changed by hand" in err and "nothing to do" not in err
+    assert (root / "src" / "beta").is_dir() and not (root / "src" / "alpha").exists()
+    tree, skeleton = _tree(root), presets.skeleton("script", "beta")
+    assert {k: tree.get(k) for k in skeleton} == skeleton  # the skeleton of the new name, pytemplate.toml included
+
+
+def test_rename_updates_only_the_projects_own_record(command_project: Path) -> None:
+    from runner import cmd_apply
+
+    state = command_project / ".pytemplate" / "state.json"
+    data = json.loads(state.read_text(encoding="utf-8"))
+    foreign = {"name": "myapp", "preset": "script", "dependencies": [], "dev": []}  # the template's, copied by new
+    state.write_text(json.dumps({**data, "applied": foreign}), encoding="utf-8")
+    assert rename.cmd_rename(_load(command_project), ["beta"]) == 0
+    assert cmd_apply.load_record() == foreign  # not adopted
+    state.write_text(json.dumps({**json.loads(state.read_text(encoding="utf-8")), "applied": {**foreign, "name": "beta"}}), encoding="utf-8")
+    assert rename.cmd_rename(_load(command_project), ["gamma"]) == 0
+    assert cmd_apply.load_record() == {**foreign, "name": "gamma"}  # the project's own: follows the rename
+
+
+def test_rename_to_a_third_name_after_a_hand_edit(command_project: Path) -> None:
+    root = command_project
+    text = (root / "pytemplate.toml").read_text(encoding="utf-8")
+    (root / "pytemplate.toml").write_text(config.set_value(text, "app", "name", "beta"), encoding="utf-8", newline="\n")
+    assert rename.cmd_rename(_load(root), ["gamma"]) == 0
+    assert (root / "src" / "gamma").is_dir() and not (root / "src" / "alpha").exists() and not (root / "src" / "beta").exists()
+    data = tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8"))
+    assert data["app"]["name"] == "gamma" and data["compile"]["modules"] == ["gamma.core"]
+
+
+def test_same_name_with_missing_package_is_an_error(command_project: Path) -> None:
+    root = command_project
+    text = (root / "pytemplate.toml").read_text(encoding="utf-8")
+    (root / "pytemplate.toml").write_text(config.set_value(text, "app", "name", "beta"), encoding="utf-8", newline="\n")
+    pyproject = root / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "beta"', 1), encoding="utf-8")
+    before = _tree(root)
+    with pytest.raises(DeployError, match=r"src/beta/ not found[\s\S]*changed by hand") as e:
+        rename.cmd_rename(_load(root), ["beta"])
+    assert e.value.code == 2 and _tree(root) == before
+    (root / "pytemplate.toml").write_text(text, encoding="utf-8", newline="\n")
+    pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('name = "beta"', 'name = "alpha"', 1), encoding="utf-8")
+    assert rename.cmd_rename(_load(root), ["alpha"]) == 0  # the package exists: still "nothing to do"
+
+
+def test_dry_run_predicts_exactly_the_rerendered_files(command_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    root = command_project
+    for new in ("Alpha", "My-Game"):  # a case-only rename keeps the package: tasks.json does not change
+        cfg = _load(root)
+        capsys.readouterr()
+        monkeypatch.setattr(proc, "DRY_RUN", True)
+        assert rename.cmd_rename(cfg, [new]) == 0
+        line = next(ln for ln in capsys.readouterr().err.splitlines() if "generated files" in ln)
+        predicted = set(line.split("would re-render ", 1)[1].split(", ")) if "would re-render" in line else set()
+        monkeypatch.setattr(proc, "DRY_RUN", False)
+        assert rename.cmd_rename(cfg, [new]) == 0
+        updated = next((ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("render: updated ")), "render: updated ")
+        assert predicted == set(filter(None, updated.split("render: updated ", 1)[1].split(", ")))
+        if new == "Alpha":
+            assert ".vscode/tasks.json" not in predicted and ".pytemplate/editor.json" in predicted
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not found")
+def test_dirty_tree_is_refused_forced_and_only_warned_in_a_dry_run(command_project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    root = command_project
+    env = _git_env(tmp_path)
+    _git(root, env, "init", "-q")
+    _git(root, env, "add", "-A")
+    _git(root, env, "commit", "-q", "-m", "init")
+    (root / "src" / "main.py").write_text("# edited\n", encoding="utf-8")
+    render.apply(_load(root), force=True)  # generated files never count as changes
+    before = _tree(root)
+    with pytest.raises(DeployError, match=r"uncommitted changes in git \(1 path\(s\): src/main.py\)") as e:
+        rename.cmd_rename(_load(root), ["beta"])
+    assert e.value.code == 2 and "./deploy rename beta --force" in str(e.value) and _tree(root) == before
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert rename.cmd_rename(_load(root), ["beta"]) == 0
+    assert "warning: uncommitted changes in git" in capsys.readouterr().err and _tree(root) == before
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    assert rename.cmd_rename(_load(root), ["beta", "--force"]) == 0
+    assert (root / "src" / "beta").is_dir()
+
+
+def test_a_failed_move_changes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    before = _tree(tmp_path)
+    planned = rename.plan(tmp_path, "alpha", "beta")
+
+    def locked(self: Path, target: Any) -> Any:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "rename", locked)
+    with pytest.raises(DeployError, match="Nothing was changed") as e:
+        rename.apply_plan(tmp_path, planned)
+    assert e.value.code == 2 and _tree(tmp_path) == before
+
+
+def _everything(root: Path) -> dict[str, bytes | None]:
+    return {p.relative_to(root).as_posix(): (p.read_bytes() if p.is_file() else None) for p in sorted(root.rglob("*"))}
+
+
+@pytest.mark.parametrize("fail_at", ["first", "second", "last"])
+def test_a_failed_write_undoes_the_rename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_at: str) -> None:
+    """A file that cannot be written after the move (read-only, locked by an editor) must not leave
+    a half-renamed project: the written files get their bytes back and the folder moves back."""
+    _write_project(tmp_path, "flet", "alpha", crlf=True)
+    before = _everything(tmp_path)
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    total = len(planned.changed_files) + 2  # + pytemplate.toml and pyproject.toml
+    target = {"first": 0, "second": 1, "last": total - 1}[fail_at]
+    real = Path.write_bytes
+    calls: list[Path] = []
+
+    def flaky(self: Path, data: Any) -> int:
+        calls.append(self)
+        if len(calls) - 1 == target:
+            raise PermissionError(13, "Permission denied")
+        return real(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", flaky)
+    with pytest.raises(DeployError, match=r"could not write .*Permission denied\. The rename was undone") as e:
+        rename.apply_plan(tmp_path, planned)
+    monkeypatch.setattr(Path, "write_bytes", real)
+    assert e.value.code == 2
+    assert _everything(tmp_path) == before  # byte for byte, CRLF included
+    assert calls[target].name in {"pyproject.toml", "pytemplate.toml"} or fail_at != "last"
+
+
+def test_a_broken_pyproject_is_a_clear_error_not_a_traceback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    (tmp_path / "pyproject.toml").write_text("[project\n", encoding="utf-8")
+    monkeypatch.setattr(presets, "PYPROJECT", tmp_path / "pyproject.toml")
+    with pytest.raises(DeployError, match="pyproject.toml is not valid TOML: .*: fix it first") as e:
+        rename.check_new_name(_cfg("script"), "beta")
+    assert e.value.code == 2
+
+
+def test_name_checks_tolerate_a_bom_and_do_not_depend_on_the_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "pyproject.toml"
+    target.write_bytes(b'\xef\xbb\xbf[project]\nname = "x"\ndependencies = ["Rich>=13"]\n[dependency-groups]\ndev = ["pytest"]\n')
+    monkeypatch.setattr(presets, "PYPROJECT", target)
+    assert presets._declared(None) == {"rich"} and presets._declared("dev") == {"pytest"}
+    rename.check_new_name(_cfg("script"), "beta")  # a BOM (an editor, PowerShell 5.1) is fine
+    with pytest.raises(DeployError, match="dependency"):
+        rename.check_new_name(_cfg("script"), "rich")
+    monkeypatch.setattr(sys, "stdlib_module_names", frozenset({"json"}))
+    for name in ("compression", "annotationlib", "imp", "distutils"):  # `new` and `__init` too
+        with pytest.raises(DeployError, match="standard library") as e:
+            presets.check_name_free(None, "script", name)
+        assert e.value.code == 2
+
+
+def test_arguments(command_project: Path) -> None:
+    cfg = _load(command_project)
+    with pytest.raises(DeployError, match=r"unknown argument\(s\): --dry-run") as e:
+        rename.cmd_rename(cfg, ["beta", "--dry-run"])  # a global flag after the command
+    assert e.value.code == 2
+    with pytest.raises(SystemExit) as exit_:
+        rename.cmd_rename(cfg, ["-h"])
+    assert exit_.value.code == 0
+
+
+def test_the_renamed_config_is_validated_before_anything_is_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(DeployError, match=r"^rename: the renamed pytemplate.toml would be invalid .*nothing was changed"):
+        rename.validate_config('[app]\nname = "beta"\nbogus = 1\n')
+    with pytest.raises(DeployError, match="would not be valid TOML"):
+        rename.validate_config("[app\n")
+
+
+# --- names at random: the skeleton invariant and the round trip ----------------------------------------
+
+
+def _random_names(count: int) -> list[str]:
+    rng = random.Random(20260926)
+    alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    out: list[str] = []
+    while len(out) < count:
+        name = "zq" + "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 6)))
+        if rng.random() < 0.5:
+            name += rng.choice("-_") + "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 4)))
+        if name not in out and package_of(name) not in {package_of(n) for n in out}:
+            out.append(name)
+    return out
+
+
+@pytest.mark.parametrize("preset", ["script", "raylib", "flet"])
+def test_random_names_reproduce_the_skeleton_and_round_trip(tmp_path: Path, preset: str) -> None:
+    names = _random_names(6)
+    for i, (a, b) in enumerate(zip(names, names[1:], strict=False)):
+        root = tmp_path / f"r{i}"
+        root.mkdir()
+        _write_project(root, preset, a)
+        original = _tree(root)
+        _rename(root, a, b)
+        assert _tree(root) == presets.skeleton(preset, b), (a, b)
+        _rename(root, b, a)
+        assert _tree(root) == original, (b, a)
+
+
+def test_ruff_tidy_after_a_rename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Imports sorted and lines re-wrapped with the project's profile, only where the user had them so."""
+    if not envs.tool_env(_cfg("script")).python.is_file():
+        pytest.skip("no .venv with ruff (./deploy setup)")
+    root = tmp_path / "p"
+    root.mkdir()
+    _write_project(root, "script", "zzz")
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "BUILD", tmp_path / "build")
+    text = (root / "pytemplate.toml").read_text(encoding="utf-8").replace('relaxed = "off"', 'relaxed = "strict"')
+    (root / "pytemplate.toml").write_text(text, encoding="utf-8", newline="\n")
+    cfg = _load(root)
+    tests = root / "tests"
+    (tests / "test_order.py").write_text("from main import _main\nfrom zzz.core import bench\n\nX = (_main, bench)\n", encoding="utf-8")
+    long = "from zzz.core.bench import __name__ as bench_module_name_that_fills_the_line_up_to_a_hundred_cols\n"
+    assert len(long) <= 100
+    (tests / "test_wrap.py").write_text(long + "\nY = bench_module_name_that_fills_the_line_up_to_a_hundred_cols\n", encoding="utf-8")
+    (tests / "test_mess.py").write_text("from zzz.core import bench\nZ=bench\n", encoding="utf-8")  # unformatted by choice
+    planned = rename.plan(root, "zzz", "zzzzzzzzzzzz")
+    clean = rename.tidy_before(cfg, planned, root)
+    if clean is None:
+        pytest.skip("ruff could not run (uv or .venv unavailable)")
+    assert "tests/test_mess.py" not in clean.formatted and "tests/test_wrap.py" in clean.formatted
+    assert "tests/test_mess.py" not in clean.sorted_imports and "tests/test_order.py" in clean.sorted_imports
+    rename.apply_plan(root, planned)
+    rename.tidy_after(rename.validate_config(planned.config.new), planned, clean, root)
+    order = (tests / "test_order.py").read_text(encoding="utf-8")
+    assert order.index("from main import") < order.index("from zzzzzzzzzzzz.core import")  # m < z: order kept
+    wrapped = (tests / "test_wrap.py").read_text(encoding="utf-8")
+    assert all(len(line) <= 100 for line in wrapped.splitlines()), wrapped
+    assert (tests / "test_mess.py").read_text(encoding="utf-8") == "from zzzzzzzzzzzz.core import bench\nZ=bench\n"

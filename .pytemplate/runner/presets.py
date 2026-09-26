@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import proc, ui
+from .config import BACKENDS
 from .project import BUILD, PRESETS, PYPROJECT, ROOT, rel
 from .ui import DeployError
 
@@ -231,6 +232,11 @@ def _read_toml(path: Path, what: str) -> dict[str, Any]:
         raise DeployError(f"{what} is not valid TOML: {e}") from None
 
 
+def read_pyproject() -> dict[str, Any]:
+    """pyproject.toml, parsed (a BOM is fine); a DeployError that names the problem otherwise."""
+    return _read_toml(PYPROJECT, "pyproject.toml")
+
+
 def _names(items: Any) -> set[str]:
     return {_norm_name(r) for r in items if isinstance(r, str)} if isinstance(items, list) else set()
 
@@ -407,8 +413,9 @@ def _dependency_names(cfg: Config | None, preset: str) -> set[str]:
 
 def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
     """Reject an app name that would break the project: one uv refuses (APP_NAME), a package
-    src/<pkg>/ that is a Python keyword, a standard library module, a Windows device name, one
-    of the project's own folders or files, or a package the project depends on, directly or not
+    src/<pkg>/ that is a Python keyword, a standard library module (of any supported Python), a
+    backend name, a Windows device name, one of the project's own folders or files, or a
+    package the project depends on, directly or not
     (uv refuses a project that depends on itself, and src/<pkg>/ would shadow the library).
     new, init, their dry runs and rename (which keeps the first line) call it."""
     pkg = name.replace("-", "_").lower()
@@ -417,8 +424,10 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
         raise DeployError(f"'{name}' is not a valid app name: it may only contain {NAME_RULE}.{hint}")
     if keyword.iskeyword(pkg):
         raise DeployError(f"the package '{pkg}' would be a Python keyword (`import {pkg}` is a syntax error).{hint}")
-    if pkg in sys.stdlib_module_names:
+    if shadows_stdlib(pkg):  # every Python the project can run on, not only the runner's
         raise DeployError(f"src/{pkg}/ would shadow the standard library module '{pkg}'.{hint}")
+    if pkg in BACKENDS:  # src/mypyc/ would shadow mypy's compiler; `./deploy run pypy` reads a backend
+        raise DeployError(f"'{name}' is the name of a backend ({', '.join(BACKENDS)}).{hint}")
     if pkg in WINDOWS_DEVICES:
         raise DeployError(
             f"src/{pkg}/ cannot exist on Windows: '{pkg}' is a reserved device name there (CON, PRN, "
@@ -494,6 +503,69 @@ def extra_tables(preset: str, name: str) -> str:
     """The preset's extra pyproject.toml tables, with {{name}} and {{pkg}} filled in."""
     pkg = name.replace("-", "_").lower()
     return str(load(preset).get("pyproject", "")).replace("{{name}}", name).replace("{{pkg}}", pkg)
+
+
+# --- names and option-driven dependencies (./deploy apply, ./deploy rename) ------------------------
+
+# Top-level standard-library modules of only SOME of the Pythons a project can run on (PyPy 3.11
+# ... the newest CPython). sys.stdlib_module_names only knows the runner's own version, and uv
+# keeps whatever Python ran ./deploy the first time (3.11 on one machine, 3.15 on another).
+STDLIB_OTHER_VERSIONS = frozenset(
+    {
+        "annotationlib", "compression", "profiling",  # new in 3.14 / 3.15
+        "aifc", "asynchat", "asyncore", "audioop", "cgi", "cgitb", "chunk", "crypt", "distutils",
+        "imghdr", "imp", "lib2to3", "mailcap", "msilib", "nis", "nntplib", "ossaudiodev", "pipes",
+        "smtpd", "sndhdr", "spwd", "sunau", "telnetlib", "uu", "xdrlib",  # removed in 3.12 / 3.13 (PyPy 3.11 has them)
+        "sre_compile", "sre_constants", "sre_parse",  # removed in 3.15
+    }
+)
+
+
+def shadows_stdlib(pkg: str) -> bool:
+    """Whether src/<pkg>/ would shadow a standard-library module on some supported Python."""
+    return pkg in sys.stdlib_module_names or pkg in STDLIB_OTHER_VERSIONS
+
+
+def set_project_name(text: str, name: str) -> str:
+    """`text` (a pyproject.toml) with [project] name = `name` (_set_project_name). DeployError when
+    the result does not say so, so no caller reports a change it did not make (apply, rename)."""
+    new = _set_project_name(text, name)
+    if project_name(new) != name:
+        raise DeployError(f'could not set [project] name = "{name}" in pyproject.toml: edit that line by hand and try again')
+    return new
+
+
+def project_name(text: str) -> str | None:
+    """Return [project] name of a pyproject.toml text (None: missing, not a string or not TOML)."""
+    try:
+        value = tomllib.loads(text.lstrip("\ufeff")).get("project", {}).get("name")
+    except (tomllib.TOMLDecodeError, AttributeError):
+        return None
+    return value if isinstance(value, str) else None
+
+
+def default_options(preset: str) -> dict[str, Any]:
+    """Return the [options] defaults of a preset (what `init` applies)."""
+    return dict(load(preset).get("options", {}))
+
+
+def option_dependencies(preset: str, opts: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Return the preset requirements that use an option ({version}, {package}), formatted with
+    `opts`: (dependencies, dev group). pytemplate.toml [preset.<name>] keeps them in sync; the
+    plain ones (rich, types-cffi) belong to the project after `init` (./deploy add/remove)."""
+    data = load(preset)
+    out: list[list[str]] = []
+    for key in ("dependencies", "dev_dependencies"):
+        reqs: list[str] = []
+        for template in data.get(key, []):
+            if "{" not in str(template):
+                continue
+            try:
+                reqs.append(str(template).format_map(opts))
+            except (KeyError, IndexError, ValueError) as e:
+                raise DeployError(f"preset {preset}: cannot format {template!r} with [preset.{preset}] ({e!r})") from None
+        out.append(reqs)
+    return out[0], out[1]
 
 
 def _contains(data: Any, part: Any) -> bool:
