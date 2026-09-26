@@ -79,6 +79,15 @@ def test_windows_checkout_follows_the_mount_of_the_root(root: str, mounts: str |
     assert project.windows_checkout(Path(root), mounts) is expected
 
 
+def test_windows_checkout_reads_the_root_as_a_posix_path() -> None:
+    """The suite runs on Windows too: str() of the WindowsPath of /mnt/c/p is \\mnt\\c\\p, which
+    matched no mount point, and 10 tests (the Lua comparison too) failed there."""
+    from pathlib import PureWindowsPath
+
+    assert project.windows_checkout(PureWindowsPath("/mnt/c/Users/me/p"), WSL2_MOUNTS) is True
+    assert project.windows_checkout(PureWindowsPath("/home/me/p"), WSL2_MOUNTS) is False
+
+
 def test_wsl_kernel_needs_no_wsl_distro_name(tmp_path: Path) -> None:
     """sudo, sshd, cron and systemd units run without WSL_DISTRO_NAME: the kernel says WSL."""
     missing = str(tmp_path / "WSLInterop")

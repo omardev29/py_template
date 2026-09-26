@@ -984,7 +984,11 @@ def _package_modules(root: Path, pkg: str) -> frozenset[str]:
         stem = entry.name.partition(".")[0]
         if entry.name in SKIP_DIRS or not stem.isidentifier():
             continue
-        if entry.is_dir() or Path(entry.name).suffix in PY_SUFFIXES or entry.name.endswith(EXT_SUFFIXES):
+        try:
+            is_dir = entry.is_dir()
+        except OSError:  # a link Windows cannot follow (WinError 123): it names no folder here
+            is_dir = False
+        if is_dir or Path(entry.name).suffix in PY_SUFFIXES or entry.name.endswith(EXT_SUFFIXES):
             out.add(stem)
     return frozenset(out)
 

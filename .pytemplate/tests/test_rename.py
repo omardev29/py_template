@@ -311,9 +311,9 @@ def test_toml_escapes_are_never_the_name(text: str, expected: str, kept: int) ->
 def test_json_and_toml_files_of_src_and_tests_keep_their_escapes(tmp_path: Path) -> None:
     """A JSON fixture's "a\\n" once became "a\\tool" (a tab and "ool") for an app named n."""
     _write_project(tmp_path, "script", "n")
-    (tmp_path / "tests" / "data.json").write_text('{"sep": "a\\n", "app": "n", "path": "C:\\\\n", "odd": "\\q\\n"}\n', encoding="utf-8")
-    (tmp_path / "tests" / "cfg.toml").write_text("# a\\n n\nsep = \"a\\n\"\napp = \"n\"\nraw = 'a\\n'\n", encoding="utf-8")
-    (tmp_path / "tests" / "notes.txt").write_text("a\\n n\n", encoding="utf-8")  # plain text: no escapes
+    (tmp_path / "tests" / "data.json").write_text('{"sep": "a\\n", "app": "n", "path": "C:\\\\n", "odd": "\\q\\n"}\n', encoding="utf-8", newline="\n")
+    (tmp_path / "tests" / "cfg.toml").write_text("# a\\n n\nsep = \"a\\n\"\napp = \"n\"\nraw = 'a\\n'\n", encoding="utf-8", newline="\n")
+    (tmp_path / "tests" / "notes.txt").write_text("a\\n n\n", encoding="utf-8", newline="\n")  # plain text: no escapes
     edits = {edit.path: edit for edit in rename.plan(tmp_path, "n", "tool").files}
     json_edit, toml_edit = edits["tests/data.json"], edits["tests/cfg.toml"]
     assert json_edit.new == b'{"sep": "a\\n", "app": "tool", "path": "C:\\\\tool", "odd": "\\q\\n"}\n'
@@ -830,10 +830,30 @@ def test_undecodable_files_that_mention_the_old_name_are_warned_about(tmp_path: 
 
 
 def _symlink_or_skip(link: Path, target: str, *, directory: bool = False) -> None:
-    try:
-        link.symlink_to(target, target_is_directory=directory)
+    try:  # native separators: Windows cannot follow a relative target written with forward slashes
+        link.symlink_to(target.replace("/", os.sep), target_is_directory=directory)
     except (OSError, NotImplementedError) as e:  # Windows without the symlink privilege
         pytest.skip(f"cannot create symbolic links here: {e}")
+
+
+def test_a_link_windows_cannot_follow_is_no_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """os.DirEntry.is_dir() raises for a link Windows cannot resolve (WinError 123: a relative
+    target written with forward slashes): the rename plan stopped with an internal-error traceback."""
+    _write_project(tmp_path, "script", "alpha")
+    folder = tmp_path / "src" / "alpha"
+    real = os.scandir
+
+    class Odd:
+        name = "ext"
+
+        def is_dir(self) -> bool:
+            raise OSError(22, "The filename, directory name, or volume label syntax is incorrect", str(folder / "ext"))
+
+    def scandir(path: Any) -> Any:
+        return [*real(path), Odd()] if Path(path) == folder else real(path)
+
+    monkeypatch.setattr(rename.os, "scandir", scandir)
+    assert "ext" not in rename._package_modules(tmp_path, "alpha") and "core" in rename._package_modules(tmp_path, "alpha")
 
 
 def test_links_in_src_and_tests_are_reported_never_rewritten(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

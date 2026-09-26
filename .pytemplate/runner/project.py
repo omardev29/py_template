@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from . import ui
 from .ui import DeployError
@@ -45,12 +45,12 @@ def _mount_field(text: str) -> str:
     return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), text)
 
 
-def windows_checkout(root: Path, mounts: str | None) -> bool:
+def windows_checkout(root: PurePath, mounts: str | None) -> bool:
     """Whether `root` lies on a Windows drive mounted into WSL. `mounts` is /proc/self/mounts:
     the deepest mount above `root` decides (drvfs in WSL 1, 9p with aname=drvfs in WSL 2, or a
     source that is a drive or a UNC share: `mount -t drvfs D: /d`, automount root = /).
     Without it (unreadable), a checkout under /mnt/ counts, where WSL mounts the drives."""
-    target = str(root)
+    target = root.as_posix()  # a Linux path; str() of a WindowsPath would hold backslashes
     best: tuple[int, bool] | None = None
     for line in (mounts or "").splitlines():
         fields = line.split()
