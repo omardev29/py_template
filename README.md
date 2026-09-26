@@ -190,8 +190,9 @@ Exit codes:
 - 1: check, test or doctor failures, or an internal runner error (a traceback is printed).
 - 2: a usage or configuration error (also a program without its executable bit or `#!` line, a
   working folder that does not exist, a bad `[tasks]` entry).
-- 3: a missing requirement: uv, a uv older than 0.10.12, a compiler, an interpreter, or the
-  runner started on a Python older than 3.11.
+- 3: a missing requirement: uv, a uv older than 0.10.12, a program, a compiler, an interpreter,
+  Neovim or git for `selftest --nvim --require`, or the runner started on a Python older than
+  3.11.
 - 130: Ctrl+C. The runner waits for the app to finish its own cleanup, then stops without
   running the next step; it exits with the app's code, or 130 when the app exited with 0.
 - 141: the reader of stdout went away (`./deploy help | head -1`; Linux and macOS).
@@ -210,12 +211,13 @@ itself takes (`new DIR`, the `pyz-merge` files, `--project`, `--dir` and `--base
 are relative to the current folder.
 
 Environment variables the runner and the launchers read: `UV` (the uv binary, looked at first),
-`UV_INSTALL_DIR` (searched for uv), `CI` (no install prompt; `selftest --e2e` skips GUI runs on
-Windows and macOS CI), `NO_COLOR` and `TERM`, the compiler variables of mypyc (`CC`, `CFLAGS`,
-`CPPFLAGS`, `LDSHARED`, `LDFLAGS`, `ARCHFLAGS`, `CL`, `_CL_`), `MACOSX_DEPLOYMENT_TARGET` (the
-oldest macOS the pyz and portable wheels support, 13.0 by default), `LOCALAPPDATA` and
-`XDG_CACHE_HOME` (the pyz and UPX caches). At runtime, the app's `resources.assets_dir()` (raylib
-and flet presets) reads `PYTEMPLATE_ASSETS`, which the portable and pyz launchers set.
+`UV_INSTALL_DIR` (one of the folders searched for uv), `CI` (no install prompt; `selftest --e2e`
+skips GUI runs on Windows and macOS CI), `NO_COLOR` and `TERM`, the compiler variables of mypyc
+(`CC`, `CFLAGS`, `CPPFLAGS`, `LDSHARED`, `LDFLAGS`, `ARCHFLAGS`, `CL`, `_CL_`),
+`MACOSX_DEPLOYMENT_TARGET` (the oldest macOS the pyz and portable wheels support, 13.0 by default),
+`LOCALAPPDATA` and `XDG_CACHE_HOME` (the pyz and UPX caches). At runtime, the app's
+`resources.assets_dir()` (raylib and flet presets) reads `PYTEMPLATE_ASSETS`, which the portable and
+pyz launchers set.
 
 The runner ignores an activated virtual environment (`VIRTUAL_ENV`, `PYTHONHOME`, `PYTHONPATH`)
 and uv's environment selection (`UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PROJECT`,
@@ -1153,7 +1155,7 @@ pipeline input on. Print the xonsh snippet again to complete commands added late
 
 `./deploy apply` (and `setup`) installs a pre-commit hook when `[hooks] pre_commit = true` (the
 default): a small sh script in the repository's hooks folder that runs `./deploy hooks run`. On
-each commit it checks, in about a second:
+each commit it checks (and prints how long that took):
 
 - ruff and `ruff format --check` on the staged Python files of `src/` and `tests/`, with the
   active typing profile, in their staged version (a file with unstaged changes is checked as it
