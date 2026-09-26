@@ -334,10 +334,13 @@ def _load_state() -> dict[str, str]:
 
 
 def _save_state(files: dict[str, str]) -> None:
-    """Write the hashes, keeping every other top-level key (`./deploy apply` records its own)."""
-    body: dict[str, Any] = {"comment": STATE_COMMENT, "files": dict(sorted(files.items()))}
-    for key, value in _read_state().items():
-        body.setdefault(key, value)
+    """Write the hashes, keeping every other top-level key (`./deploy apply` records its own) and,
+    when the file has both of ours, the key order (no churn in git)."""
+    old = _read_state()
+    body: dict[str, Any] = {} if {"comment", "files"} <= old.keys() else {"comment": None, "files": None}
+    body.update(old)
+    body["comment"] = STATE_COMMENT
+    body["files"] = dict(sorted(files.items()))
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         STATE_FILE.write_text(json.dumps(body, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")

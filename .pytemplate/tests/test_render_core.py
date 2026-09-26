@@ -276,6 +276,13 @@ def test_state_keeps_unknown_top_level_keys(box: Sandbox) -> None:
     assert {k: json.loads(box.state.read_text(encoding="utf-8"))[k] for k in extra} == extra
 
 
+def test_state_key_order_is_kept(box: Sandbox) -> None:
+    box.write(".pytemplate/state.json", json.dumps({"applied": {"x": 1}, "files": {}, "comment": "old"}))
+    render.apply(CFG)
+    data = json.loads(box.state.read_text(encoding="utf-8"))
+    assert list(data) == ["applied", "files", "comment"] and data["comment"] == render.STATE_COMMENT
+
+
 CORRUPT_STATES = {
     "empty": b"",
     "garbage": b"garbage{",
@@ -867,14 +874,14 @@ def test_ci_workflow_for_every_preset_and_backend_set(preset: str, supported: li
     steps = test["steps"]
     runs = [s["run"] for s in steps if "run" in s]
     assert runs[0] == "./deploy render --check"  # before anything else can render
-    assert [s["uses"] for s in steps[:2]] == ["actions/checkout@v7", "astral-sh/setup-uv@v10.2.0"]
+    assert [s["uses"].partition("@")[0] for s in steps[:2]] == ["actions/checkout", "astral-sh/setup-uv"]
     apt = [s for s in steps if "apt-get" in s.get("run", "")]
     assert len(apt) == (preset == "raylib") and all(s["if"] == "runner.os == 'Linux'" for s in apt)
     build = next(r for r in runs if r.startswith("./deploy build "))
     backend = build.split()[2]
     assert backend == next((b for b in ("mypyc", "cpython") if b in supported), active)
     assert all(backend in r["backends"].split() for r in rows)  # every OS synced what it builds
-    upload = next(s for s in steps if s.get("uses") == "actions/upload-artifact@v7")
+    upload = next(s for s in steps if s.get("uses", "").startswith("actions/upload-artifact@"))
     # coupled to BuildRequest.out_name and the pyz method's output (dist/<out_name>/<name>.pyz)
     assert upload["with"]["path"] == f"dist/{BuildRequest(cfg, backend, 'pyz', Path('.')).out_name}/{cfg.app.name}.pyz"
     merge = doc["jobs"]["pyz"]

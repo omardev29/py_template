@@ -620,8 +620,8 @@ re-rendering.
   entry whose value is not a sha256 counts as unrecorded): every generated file is overwritten
   without warning, and the next write is valid UTF-8 JSON. It is read as `utf-8-sig`, so a BOM
   does not disable hand-edit detection. `_save_state` keeps every other top-level key (`./deploy
-  apply` records its own). Hashes of files no longer generated stay recorded (a file that
-  comes back keeps its hand-edit protection).
+  apply` records its own) and the key order. Hashes of files no longer generated stay recorded
+  (a file that comes back keeps its hand-edit protection).
 - `--check` and `--dry-run` write nothing. A folder in the way, or a read/write error, is a
   DeployError naming the file.
 - `render.auto` runs before most commands and prints one line when something changed; it also
