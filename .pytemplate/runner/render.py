@@ -568,11 +568,6 @@ def _verify(cfg: Config, text: str, new: str) -> None:
             f"  Does [tool.uv] repeat a managed key ({', '.join(managed)}) outside the markers? Delete it there\n"
             "  (./deploy lock writes the managed block again), or restore the markers"
         ) from None
-    if _table(data, "project").get("requires-python") != f">={cfg.min_python}":
-        raise DeployError("pyproject.toml: requires-python could not be set: is the [project] table missing?")
-    uv = _table(data, "tool", "uv")
-    if any(uv.get(key) != value for key, value in managed.items()):
-        raise DeployError("pyproject.toml: the managed keys did not end up in [tool.uv]: restore the markers")
     lines = _split(text)
     bounds = _managed_bounds(lines)
     old_keys: set[str] = set()
@@ -587,6 +582,11 @@ def _verify(cfg: Config, text: str, new: str) -> None:
             "  (is a key or table of yours between the markers?). Move it out of the managed block,\n"
             "  then run ./deploy lock"
         )
+    if _table(data, "project").get("requires-python") != f">={cfg.min_python}":
+        raise DeployError("pyproject.toml: requires-python could not be set: is the [project] table missing?")
+    uv = _table(data, "tool", "uv")
+    if any(uv.get(key) != value for key, value in managed.items()):
+        raise DeployError("pyproject.toml: the managed keys did not end up in [tool.uv]: restore the markers")
 
 
 def _read_pyproject() -> str:
