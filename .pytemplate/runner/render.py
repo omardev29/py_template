@@ -26,6 +26,7 @@ from typing import Any
 
 from . import presets, proc, ui
 from .config import Config, compiled_paths
+from .envs import MIN_UV
 from .project import PYPROJECT, ROOT, STATE_FILE, TEMPLATES, rel
 from .ui import DeployError
 
@@ -437,6 +438,9 @@ def managed_block(cfg: Config) -> str:
         ]
     for key, value in presets.uv_extras(cfg).items():
         lines.append(f"{key} = {_toml_scalar(value)}")
+    # The oldest uv that installs the pinned interpreters (envs.MIN_UV): an older uv stops with
+    # "Required uv version ... does not match" (uv >= 0.5.14 reads it; doctor also checks)
+    lines.append(f'required-version = ">={MIN_UV}"')
     lines.append(f'python-preference = "only-managed"  {MARK_END}')
     return "\n".join(lines)
 

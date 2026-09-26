@@ -26,7 +26,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cli, cmd_mode, config, presets, proc, render  # noqa: E402
+from runner import cli, cmd_mode, config, envs, presets, proc, render  # noqa: E402
 from runner.cmd_build import BuildRequest  # noqa: E402
 from runner.config import BACKENDS, Config  # noqa: E402
 from runner.editors import nvim  # noqa: E402
@@ -435,6 +435,7 @@ def test_managed_parts_for_every_preset_and_backend_set(pyproject: Path, preset:
     uv = data["tool"]["uv"]
     assert uv == tomllib.loads(render.managed_block(cfg))  # [tool.uv] holds the managed keys only
     assert ("pypy" in str(uv["environments"])) == ("pypy" in supported)
+    assert uv["required-version"] == f">={envs.MIN_UV}"  # an older uv stops with uv's own clear message
     before = tomllib.loads(text)
     assert {k: v for k, v in data["tool"].items() if k != "uv"} == {k: v for k, v in before["tool"].items() if k != "uv"}
     assert {k: v for k, v in data["project"].items() if k != "requires-python"} == {

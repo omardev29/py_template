@@ -835,7 +835,10 @@ Formats:
   CPython 3.14 final needs 0.9.0 (0.8.x silently installs 3.14.0rc2) and `uv export --format
   requirements.txt` 0.6.15. `envs.uv` calls `envs.require_min_uv` right before uv would CREATE
   an environment (its dir does not exist): an older uv exits 3 with `envs.UV_UPDATE`; asked
-  once per process, an unreadable version passes. doctor flags it. Bump it with the pins
+  once per process, an unreadable version passes. doctor flags it. The managed `[tool.uv]` block
+  also carries `required-version = ">=<MIN_UV>"`, so uv itself (>= 0.5.14) refuses every project
+  command, the launcher's `uv run --script` included, with "Required uv version ... does not
+  match" and `uv self update`. Bump it with the pins
   (`test_min_uv_matches_the_pinned_interpreters`) or a newer uv flag.
 - `./deploy clean` (`cmd_env.cmd_clean`): `.build/` (`.build/wsl` in WSL), `dist/`, and with
   `--envs` this side's environments (WSL on /mnt: only `.venv*-wsl`; elsewhere every `.venv*`
