@@ -2020,11 +2020,16 @@ LazyVim wiring:
   `.bak`, in LazyVim's own format; it refuses (exit 3) when there is no config or no
   `lazyvim.json` yet (start Neovim once). `bootstrap` clones the LazyVim starter (its newest
   commit, as LazyVim's own install steps do) and deletes its `.git`, only when the config dir
-  does not exist. `sync` = `nvim --headless "+Lazy! install" +qa` with cwd = ROOT and
-  `NVIM_LOG_FILE` in a temp dir: install only (`Lazy! sync` would also update every plugin
-  of the user's config, rewriting their `lazy-lock.json`, and clean the plugins its spec does
-  not name). It refuses with exit 3 while `.lazy.lua` is not trusted (the trust prompt would
-  hang a headless run, and from any other folder the project's plugins are not in the spec).
+  does not exist. `sync` = `nvim --headless "+Lazy! install" "+lua dofile(vim.env.PT_NVIM_CHECK)"
+  +qa` with cwd = ROOT and `NVIM_LOG_FILE` in a temp dir: install only (`Lazy! sync` would also
+  update every plugin of the user's config, rewriting their `lazy-lock.json`, and clean the
+  plugins its spec does not name). It refuses with exit 3 while `.lazy.lua` is not trusted (the
+  trust prompt would hang a headless run, and from any other folder the project's plugins are
+  not in the spec). Neovim's exit code proves nothing (0 after a failed clone), so the check
+  file (`cmd_nvim.SYNC_CHECK_LUA`, written to the temp dir) asks lazy.nvim for every plugin's
+  `_.installed` and writes JSON to `$PT_NVIM_RESULT` (the terminal keeps Neovim's own output):
+  a plugin not installed or no report is exit 1, no lazy.nvim (no `:Lazy`) exit 3, a plugin
+  with task errors (`has_errors`: a failed build step) only a warning.
 - `cmd_nvim.doctor(check)` (from `./deploy doctor`): one line, silent without `nvim`, at most
   one headless call.
 - Only started inside the project: `nvim path/x.py` from elsewhere, or a later `:cd`, does not
@@ -3006,11 +3011,14 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   Goes: the buffer form once 0.12 is the minimum.
 - **Headless Neovim** (LIMITATION): a Lua error still exits 0, `confirm()` never returns,
   `VeryLazy` never fires, and an unwritable `NVIM_LOG_FILE` drops `nvim.log` into the cwd. Fix:
-  the `PTNVIM{json}` marker of `cmd_nvim.headless`; trust through the API first (`nvim sync`
-  refuses while `.lazy.lua` is untrusted); `doautocmd UIEnter` in `nvimtest`; `NVIM_LOG_FILE`
-  always set (12.2). Test: `test_cmd_nvim.py::test_parse_marker_skips_noise`,
+  the `PTNVIM{json}` marker of `cmd_nvim.headless`; `nvim sync` asks lazy.nvim afterwards which
+  plugins are installed (`cmd_nvim.SYNC_CHECK_LUA`: a failed clone exited 0 and printed "ok
+  plugins installed"); trust through the API first (`nvim sync` refuses while `.lazy.lua` is
+  untrusted); `doautocmd UIEnter` in `nvimtest`; `NVIM_LOG_FILE` always set (12.2). Test:
+  `test_cmd_nvim.py::test_parse_marker_skips_noise`,
   `test_nvim_sync_refuses_an_untrusted_lazy_lua`, `test_nvim_sync_installs_only`,
-  `test_real_nvim_query_and_trust`. Goes: never.
+  `test_nvim_sync_fails_when_a_plugin_is_not_installed`,
+  `test_real_nvim_sync_checks_the_plugins`, `test_real_nvim_query_and_trust`. Goes: never.
 - **lazy.nvim installs a fresh config in rounds and prunes the lock between them** (DEFECT):
   LazyVim's own plugins came at their newest commits despite the pinned lock. Up: cf.
   folke/lazy.nvim#1279 (its startup install ignores and rewrites the lock; closed as not

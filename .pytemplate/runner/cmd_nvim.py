@@ -648,18 +648,73 @@ def cmd_sync(nv: Nvim) -> int:
         # Neovim would ask (confirm()), which never returns headless; and from another folder the
         # project's plugins are not in the spec, so there would be nothing to install.
         raise DeployError(f".lazy.lua is {trust.describe()}: ./deploy nvim trust first, then ./deploy nvim sync", 3)
-    argv = [nv.exe, "--headless", "+Lazy! install", "+qa"]
+    # Headless Neovim exits 0 after a Lua error (a clone that failed: "Too many rounds of missing
+    # plugins"; no lazy.nvim: "E492: Not an editor command"), so lazy.nvim itself is asked
+    # afterwards which plugins are installed (SYNC_CHECK_LUA, run from a file: short argv).
+    argv = [nv.exe, "--headless", "+Lazy! install", "+lua dofile(vim.env.PT_NVIM_CHECK)", "+qa"]
     ui.command(proc.show(argv))
     if proc.DRY_RUN:
         return 0
     with tempfile.TemporaryDirectory(prefix="pt-nvim-", ignore_cleanup_errors=True) as tmp:
         env = proc.base_env()
         env.setdefault("NVIM_LOG_FILE", str(Path(tmp) / "nvim.log"))  # else it may land in ROOT
+        check_lua, result = Path(tmp) / "check.lua", Path(tmp) / "plugins.json"
+        check_lua.write_text(SYNC_CHECK_LUA, encoding="utf-8", newline="\n")
+        env.update(PT_NVIM_CHECK=str(check_lua), PT_NVIM_RESULT=str(result))
         code = subprocess.run(argv, cwd=ROOT, env=env, stdin=subprocess.DEVNULL, check=False).returncode
+        report = _read_report(result)
     if code != 0:
         raise proc.CommandFailed(argv, code)
+    if report is None:
+        raise DeployError("Neovim did not say which plugins are installed (see its messages above): run ./deploy nvim sync again", 1)
+    if report.get("lazy") is not True:
+        raise DeployError("lazy.nvim did not start (no :Lazy command; see the messages above): ./deploy nvim doctor", 3)
+    missing, failed = _names(report.get("missing")), _names(report.get("failed"))
+    if missing:
+        raise DeployError(
+            f"lazy.nvim could not install: {', '.join(missing)} (see the messages above: no network, a proxy?). "
+            "Run ./deploy nvim sync again, or start Neovim in the project",
+            1,
+        )
+    if failed:
+        ui.warn(f"lazy.nvim reported errors for: {', '.join(failed)} (see the messages above, or :Lazy)")
     ui.ok("plugins installed (your other plugins were neither updated nor removed)")
     return 0
+
+
+# Run by `nvim sync` after `Lazy! install` (which waits): lazy.nvim's own view of every plugin
+# of the spec, written as JSON to $PT_NVIM_RESULT (the user's terminal keeps Neovim's output).
+SYNC_CHECK_LUA = """\
+local r = { lazy = false, missing = {}, failed = {} }
+local ok, cfg = pcall(require, "lazy.core.config")
+if ok and type(cfg) == "table" and type(cfg.plugins) == "table" and vim.fn.exists(":Lazy") == 2 then
+  r.lazy = true
+  local okp, plugin = pcall(require, "lazy.core.plugin")
+  for name, p in pairs(cfg.plugins) do
+    if not (type(p) == "table" and type(p._) == "table" and p._.installed) then
+      table.insert(r.missing, name)
+    elseif okp and type(plugin) == "table" and type(plugin.has_errors) == "function" and plugin.has_errors(p) then
+      table.insert(r.failed, name)
+    end
+  end
+end
+local f = assert(io.open(vim.env.PT_NVIM_RESULT, "w"))
+f:write(vim.json.encode(r))
+f:close()
+"""
+
+
+def _read_report(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _names(value: object) -> list[str]:
+    """Plugin names from the report (an empty Lua table may arrive as {} instead of [])."""
+    return sorted(str(v) for v in value) if isinstance(value, list) else []
 
 
 ACTIONS = ("doctor", "trust", "extras", "bootstrap", "sync")

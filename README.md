@@ -1080,7 +1080,8 @@ details.
 `./deploy nvim` alone is `nvim doctor`. `bootstrap` never touches an existing config. `extras`
 backs up `lazyvim.json` before changing it, and refuses (exit 3) until LazyVim has created that
 file (start Neovim once). `sync` installs only (it never updates or removes your plugins) and
-needs the trust first (exit 3 otherwise). Then start Neovim inside the project: `nvim` from the
+needs the trust first (exit 3 otherwise); it then asks lazy.nvim whether every plugin is
+installed and exits 1, naming them, when one is not (no network, a proxy). Then start Neovim inside the project: `nvim` from the
 project folder or any subfolder.
 
 **How it works.** lazy.nvim loads `.lazy.lua` from the folder where Neovim starts (or the
