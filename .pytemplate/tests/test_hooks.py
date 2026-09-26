@@ -1355,6 +1355,22 @@ def test_uv_error_message() -> None:
     assert envs.uv_error(out) == "error: The lockfile at `uv.lock` needs to be updated, but `--check` was provided."
     assert envs.uv_error("one\nlast line\n\n") == "last line"
     assert envs.uv_error("") == ""
+    # uv's graphical report (uv 0.8 to 0.11 print no `error:`): the last line was "cache." of the hint
+    report = (
+        "Using CPython 3.14.7\n"
+        "  \u00d7 No solution found when resolving dependencies:\n"
+        "  \u2570\u2500\u25b6 Because six was not found in the cache and wsapp depends\n"
+        "      on six>=1.16, we can conclude that wsapp's requirements are\n"
+        "      unsatisfiable.\n"
+        "\n"
+        "      hint: Packages were unavailable because the network was disabled. When\n"
+        "      the network is disabled, registry packages may only be read from the\n"
+        "      cache.\n"
+    )
+    assert envs.uv_error(report) == (
+        "No solution found when resolving dependencies: Because six was not found in the cache and wsapp depends "
+        "on six>=1.16, we can conclude that wsapp's requirements are unsatisfiable."
+    )
 
 
 @needs_git

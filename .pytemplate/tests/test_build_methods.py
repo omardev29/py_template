@@ -2360,7 +2360,8 @@ def test_upx_download_happens_before_the_work_and_never_in_a_dry_run(
     tool.chmod(0o755)
     monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(bindir)})
     assert cmd_build.cmd_build(cfg, ["cpython", "--method", "portable", "--no-check"]) == 0
-    assert f"upx: {tool}" in capsys.readouterr().err and len(downloads) == 1
+    # Windows: shutil.which spells the suffix as PATHEXT does (upx.EXE)
+    assert os.path.normcase(f"upx: {tool}") in os.path.normcase(capsys.readouterr().err) and len(downloads) == 1
 
 
 @pytest.mark.parametrize("windows", [False, True])
@@ -3116,7 +3117,9 @@ def test_check_lock_reads_the_real_lock(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setenv("UV_OFFLINE", "1")
     cmd_build.check_lock(make({}))  # up to date: nothing to say
     text = (project / "pyproject.toml").read_text(encoding="utf-8")
-    (project / "pyproject.toml").write_text(text.replace('["mylib"]', '["mylib", "six>=1.16"]'), encoding="utf-8")
+    # A change uv can check offline, whatever its cache holds (a new PyPI dependency could not be
+    # resolved there, and that is "cannot check", not a stale lock)
+    (project / "pyproject.toml").write_text(text.replace('["mylib"]', "[]"), encoding="utf-8")
     with pytest.raises(DeployError, match="uv.lock does not match pyproject.toml"):
         cmd_build.check_lock(make({}))
 

@@ -51,13 +51,28 @@ def uv_problem(version_text: str) -> str | None:
     return f"uv {'.'.join(map(str, found))} is too old: this project needs uv {MIN_UV} or newer"
 
 
+# uv's graphical report (no `error:` prefix before uv 0.12): "  x message" (U+00D7), then
+# "  `-> cause" lines drawn with box characters (U+2570 U+2500 U+25B6, U+251C, U+2502)
+_REPORT_MARK = "\u00d7"
+_REPORT_DRAWING = "\u00d7\u2570\u2500\u25b6\u251c\u2502 "
+
+
 def uv_error(out: str) -> str:
     """Return uv's `error:` message from its output (uv wraps it: indented continuation lines,
-    joined here), else the last non-empty line ("" for no output)."""
+    joined here), or its graphical report (the lines up to the first blank one: the hints that
+    follow are left out), else the last non-empty line ("" for no output)."""
     lines = out.splitlines()
     start = next((i for i, ln in enumerate(lines) if ln.lower().startswith("error")), None)
     if start is None:
-        return next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
+        report = next((i for i, ln in enumerate(lines) if ln.lstrip().startswith(_REPORT_MARK)), None)
+        if report is None:
+            return next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
+        parts = []
+        for ln in lines[report:]:
+            if not ln.strip():
+                break
+            parts.append(ln.strip().lstrip(_REPORT_DRAWING))
+        return " ".join(parts)
     parts = [lines[start].strip()]
     for ln in lines[start + 1 :]:
         if not ln.strip() or not ln[0].isspace():
