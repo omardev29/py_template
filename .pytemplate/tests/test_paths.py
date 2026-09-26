@@ -91,6 +91,91 @@ def test_wsl_kernel_needs_no_wsl_distro_name(tmp_path: Path) -> None:
     assert not project.wsl_kernel({}, "5.15.0-1057-azure", str(tmp_path / "none"))
 
 
+WSL_RELEASE = "5.15.167.4-microsoft-standard-WSL2"
+# (root, WSL_DISTRO_NAME, kernel release, WSLInterop registered, /proc/self/mounts, IS_WSL)
+WSL_CASES = [
+    ("/mnt/c/Users/me/p", None, WSL_RELEASE, False, WSL2_MOUNTS, True),  # sudo, sshd, cron: no WSL_DISTRO_NAME
+    ("/d/work/p", None, "6.6.87-custom", True, WSL2_MOUNTS, True),  # a custom WSL kernel, automount root = /
+    ("/mnt/c/p", "Ubuntu", "6.8.0-generic", False, WSL1_MOUNTS, True),
+    ("/mnt/c/x", None, WSL_RELEASE, False, None, True),  # mounts unreadable: WSL's default automount
+    ("/home/me/p", "Ubuntu", WSL_RELEASE, True, WSL2_MOUNTS, False),  # the distro's own ext4
+    ("/srv/p", None, WSL_RELEASE, False, None, False),
+    ("/mnt/c/p", None, "6.8.0-45-generic", False, WSL2_MOUNTS, False),  # plain Linux, a drvfs-like mount
+]
+
+
+@pytest.mark.parametrize(("root", "distro", "release", "interop", "mounts", "expected"), WSL_CASES)
+def test_is_wsl_needs_a_wsl_kernel_and_a_windows_checkout(
+    tmp_path: Path, root: str, distro: str | None, release: str, interop: bool, mounts: str | None, expected: bool
+) -> None:
+    environ = {"WSL_DISTRO_NAME": distro} if distro else {}
+    marker = tmp_path / "WSLInterop"
+    if interop:
+        marker.write_text("enabled\n", encoding="ascii")
+    got = project.detect_wsl(Path(root), system="linux", environ=environ, release=release, interop=str(marker), read_mounts=lambda: mounts)
+    assert got is expected
+    windows = project.detect_wsl(Path(root), system="win32", environ=environ, release=release, interop=str(marker), read_mounts=lambda: mounts)
+    assert windows is False
+
+
+def test_is_wsl_reads_the_mounts_only_under_a_wsl_kernel(tmp_path: Path) -> None:
+    def unread() -> str | None:
+        raise AssertionError("/proc/self/mounts read outside WSL")
+
+    assert not project.detect_wsl(Path("/mnt/c/p"), system="linux", environ={}, release="6.8.0-generic", interop=str(tmp_path / "x"), read_mounts=unread)
+
+
+_IMPORT_PROJECT = r"""
+import json, os, pathlib, platform, sys
+case = json.loads(os.environ["PT_CASE"])
+real_read = pathlib.Path.read_text
+def read_text(self, *args, **kwargs):
+    if str(self) == "/proc/self/mounts":
+        if case["mounts"] is None:
+            raise PermissionError(str(self))
+        return case["mounts"]
+    return real_read(self, *args, **kwargs)
+pathlib.Path.read_text = read_text
+real_exists = os.path.exists
+os.path.exists = lambda p: case["interop"] if str(p) == "/proc/sys/fs/binfmt_misc/WSLInterop" else real_exists(p)
+platform.release = lambda: case["release"]
+os.environ.pop("WSL_DISTRO_NAME", None)
+if case["distro"]:
+    os.environ["WSL_DISTRO_NAME"] = case["distro"]
+sys.path.insert(0, case["template"])
+from runner import project
+print("PTWSL" + json.dumps([project.IS_WSL, project.ENV_SUFFIX, project.BUILD.relative_to(project.ROOT).as_posix()]))
+"""
+
+
+def _own_mounts(windows: bool) -> str:
+    """A WSL 2 mount table whose Windows drive (or the distro's ext4) holds this project's root."""
+    point = str(project.ROOT).replace("\\", "\\134").replace(" ", "\\040").replace("\t", "\\011")
+    drive = f"C:\\134 {point} 9p rw,noatime,aname=drvfs;path=C:\\134;uid=1000 0 0\n" if windows else ""
+    return "none /mnt/wsl tmpfs rw 0 0\n/dev/sdc / ext4 rw,relatime 0 0\n" + drive
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="IS_WSL is only ever true on Linux")
+@pytest.mark.parametrize(
+    ("distro", "release", "windows", "expected"),
+    [
+        (None, WSL_RELEASE, True, True),  # sudo, sshd, cron, systemd: no WSL_DISTRO_NAME
+        ("Ubuntu", "6.8.0-generic", True, True),
+        (None, WSL_RELEASE, False, False),  # the distro's own ext4
+        (None, "6.8.0-45-generic", True, False),  # no WSL kernel
+    ],
+)
+def test_is_wsl_at_import_follows_the_kernel_and_the_mount_of_the_root(distro: str | None, release: str, windows: bool, expected: bool) -> None:
+    """project.IS_WSL, ENV_SUFFIX and BUILD as a fresh runner computes them at import, with the
+    kernel release, WSL_DISTRO_NAME and /proc/self/mounts faked around THIS project's root."""
+    data = {"distro": distro, "release": release, "interop": False, "mounts": _own_mounts(windows), "template": str(TEMPLATE_DIR)}
+    env = {**os.environ, "PT_CASE": json.dumps(data)}
+    r = subprocess.run([sys.executable, "-c", _IMPORT_PROJECT], env=env, capture_output=True, text=True, timeout=60, check=False)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTWSL")), None)
+    assert line is not None, r.stdout + r.stderr
+    assert json.loads(line[len("PTWSL") :]) == ([True, "-wsl", ".build/wsl"] if expected else [False, "", ".build"])
+
+
 # --- native_path ---------------------------------------------------------------------------------
 
 
