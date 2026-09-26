@@ -359,12 +359,16 @@ def project_copy(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @needs_uv
 def test_command_dry_run_then_real_run(project_copy: Path) -> None:
     root = project_copy
+    # the copy's own package (a project made with ./deploy new has its own name and preset)
+    old = package_of(tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8-sig"))["app"]["name"])
+    if old == "my_game":
+        pytest.skip("this project is already called my_game")
     before = _snapshot(root)
     r = _deploy(root, "--dry-run", "rename", "My-Game")
     assert r.returncode == 0, r.stderr
-    assert "would move       src/myapp/ -> src/my_game/" in r.stderr, r.stderr
+    assert f"would move       src/{old}/ -> src/my_game/" in r.stderr, r.stderr
     assert "uv.lock          would re-lock" in r.stderr
-    assert "+ from my_game.core import bench" in r.stderr
+    assert "src/my_game/__init__.py" in r.stderr and '+ """My-Game"""' in r.stderr  # every preset's docstring
     assert _snapshot(root) == before, "--dry-run wrote files"
 
     r = _deploy(root, "rename", "My-Game", "--bogus")
@@ -373,12 +377,12 @@ def test_command_dry_run_then_real_run(project_copy: Path) -> None:
     r = _deploy(root, "rename", "My-Game")
     if r.returncode != 0 and rename.needs_pypi(r.stderr):
         # The rename itself happened; only the re-lock needs the package index
-        assert (root / "src" / "my_game" / "app.py").is_file() and not (root / "src" / "myapp").exists()
+        assert (root / "src" / "my_game" / "__init__.py").is_file() and not (root / "src" / old).exists()
         assert "The files are already renamed" in r.stderr and "./deploy apply" in r.stderr, r.stderr
         pytest.skip("needs PyPI: uv lock could not reach the package index (offline, blocked proxy, or UV_OFFLINE with a cold cache)")
     assert r.returncode == 0, r.stderr
-    assert not (root / "src" / "myapp").exists()
-    assert (root / "src" / "my_game" / "app.py").is_file()
+    assert not (root / "src" / old).exists()
+    assert (root / "src" / "my_game" / "__init__.py").is_file()
     lock = tomllib.loads((root / "uv.lock").read_text(encoding="utf-8"))
     assert "my-game" in {p["name"] for p in lock["package"]}
     editor = (root / ".pytemplate" / "editor.json").read_text(encoding="utf-8")

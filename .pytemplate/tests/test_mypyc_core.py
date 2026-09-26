@@ -340,7 +340,9 @@ MODULE_LEVEL_FILE = (
 
 
 @pytest.mark.parametrize("modules", [["myapp.core"], ["myapp.core.bench"], ["solo", "myapp.core"], ["myapp"]])
-def test_lintc_allows_module_level_file_with_a_shared_lib(tmp_path: Path, modules: list[str]) -> None:
+def test_lintc_allows_module_level_file_with_a_shared_lib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, modules: list[str]) -> None:
+    (tmp_path / "src" / "myapp").mkdir(parents=True)  # a package, whatever this project's is called
+    monkeypatch.setattr(lintc, "SRC", tmp_path / "src")
     found = _lint(tmp_path, MODULE_LEVEL_FILE, {"compile": {"modules": modules}})
     assert not [f for f in found if "__file__" in f.message]
 
@@ -1693,6 +1695,8 @@ def test_real_mypyc_wheel_compiles_code_that_imports_a_dependency(wheel_project:
     setuptools + mypy, so mypycify failed with import-not-found."""
     import zipfile
 
+    if subprocess.run([str(TOOL_PYTHON), "-I", "-c", "import rich"], capture_output=True, check=False).returncode != 0:
+        pytest.skip("imports rich (the script preset's dependency), which this project's .venv does not have")
     from runner.cmd_build import BuildRequest
     from runner.methods import wheel
 

@@ -1384,12 +1384,23 @@ regenerate the root (CLAUDE.md, section 11).
 - `./deploy render --check` and `./deploy doctor` must pass too.
 
 **(template repository)** The template's own CI, in `.github/workflows/template-*.yml` (not
-copied into projects): `template-selftest.yml` runs `./deploy selftest` on Linux, macOS and
-Windows; `template-launchers.yml` runs `selftest --shells` and `shellcheck`;
-`template-nvim.yml` runs `selftest --nvim`; `template-e2e.yml` runs `selftest --e2e` for the three
-presets on the three systems (`--quick` on pushes and pull requests, the default depth weekly,
-`--full` monthly). The Tests and E2E badges at the top show the state of
-`template-selftest.yml` and `template-e2e.yml`.
+copied into projects):
+
+- `template-selftest.yml` runs `./deploy selftest` on Linux, macOS and Windows, the runner's
+  tests on Python 3.11 (its floor), the suite with the oldest uv that `required-version`
+  accepts, and `./deploy selftest` inside new raylib and flet projects; on every push and pull
+  request, and weekly.
+- `template-launchers.yml` runs `selftest --shells` and `shellcheck` (weekly with the newest
+  xonsh too).
+- `template-nvim.yml` runs `selftest --nvim` with Neovim 0.12.5 and 0.11.2 and pinned plugins,
+  plus a weekly canary with the newest Neovim, LazyVim and plugins.
+- `template-e2e.yml` runs `selftest --e2e` for the three presets on the three systems (`--quick`
+  on pushes and pull requests, the default depth weekly, `--full` monthly).
+- `template-keepalive.yml` re-enables the scheduled ones every week: GitHub disables a scheduled
+  workflow after 60 days without activity in the repository.
+
+The Tests and E2E badges at the top show the state of `template-selftest.yml` and
+`template-e2e.yml`.
 
 ## Quality bar
 

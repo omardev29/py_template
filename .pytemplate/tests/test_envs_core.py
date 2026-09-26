@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_env, cmd_nvim, config, envs, hooks, project, proc, render, shells  # noqa: E402
+from runner import cmd_apply, cmd_env, cmd_nvim, config, envs, hooks, project, proc, render, shells  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, venv_python  # noqa: E402
 from runner.ui import DeployError  # noqa: E402
@@ -679,6 +679,10 @@ class Doctor:
         monkeypatch.setattr(cmd_env.render, "pyproject_outdated", lambda cfg: False)
         monkeypatch.setattr(cmd_env, "_c_compiler", self._compiler)
         monkeypatch.setattr(cmd_env, "_long_paths", lambda: True)
+        # cmd_apply.doctor reads the real project (src/<pkg>/, pyproject.toml): in a project made
+        # with ./deploy new it would compare that project with the Config the test built
+        # (test_apply covers it)
+        monkeypatch.setattr(cmd_apply, "doctor", lambda cfg, check: self.reached.append("apply"))
         monkeypatch.setattr(shells, "doctor", lambda check: self.reached.append("shells"))
         monkeypatch.setattr(hooks, "doctor", lambda cfg, check: self.reached.append("hooks"))
         monkeypatch.setattr(cmd_nvim, "doctor", lambda check: self.reached.append("nvim"))
@@ -714,7 +718,7 @@ def doctor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Doctor:
 
 def test_doctor_all_good(doctor: Doctor, capsys: pytest.CaptureFixture[str]) -> None:
     assert cmd_env.cmd_doctor(make(PYPY), []) == 0
-    assert doctor.problems() == [] and doctor.reached == ["shells", "hooks", "nvim"]
+    assert doctor.problems() == [] and doctor.reached == ["apply", "shells", "hooks", "nvim"]
     assert "all good" in capsys.readouterr().err
     assert doctor.line("uv: uv 0.12.19")[0] is True
     assert doctor.compiler_platforms == ["linux-x86_64"]  # the .venv's platform picks the MSVC tools
@@ -744,7 +748,7 @@ def test_doctor_reports_a_broken_interpreter(doctor: Doctor, capsys: pytest.Capt
     env = doctor.cp if broken == "cpython" else doctor.pp
     assert [line[1] for line in doctor.problems()] == [f"environment {project.rel(env.dir)} is broken (its Python does not start)"]
     assert "./deploy setup" in doctor.problems()[0][2] and "&&" not in doctor.problems()[0][2]  # PowerShell 5.1 has no &&
-    assert doctor.reached == ["shells", "hooks", "nvim"]
+    assert doctor.reached == ["apply", "shells", "hooks", "nvim"]
     assert "error: 1 problem(s)" in capsys.readouterr().err
 
 

@@ -375,6 +375,7 @@ def test_new_creates_a_project_through_the_internal_route(tmp_path: Path) -> Non
 
 
 @needs_uv
+@pytest.mark.skipif(not (TEMPLATE / "template-repo").is_file(), reason="about the template repository (a project made with ./deploy new has its own name)")
 def test_maintainer_route_regenerates_the_root_pristine(tmp_path: Path) -> None:
     """The template root IS the script preset as "myapp": regenerating it changes no byte."""
     root_cfg = config.load(set(cli.COMMANDS))

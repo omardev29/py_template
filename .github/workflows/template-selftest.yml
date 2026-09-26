@@ -1,0 +1,189 @@
+# Test suite of the TEMPLATE repository (not rendered, and `./deploy new` does not copy
+# template-*.yml workflows): `./deploy selftest` (pytest + mypy --strict of the runner, whose
+# sys.platform branches mypy checks on the OS it runs on) on Linux, macOS and Windows, with the
+# shells and tools its tests look for, so few of them skip; the runner's tests on its floor
+# Python (3.11); the whole suite with the oldest uv pyproject.toml accepts (envs.MIN_UV); and
+# the suite inside projects made with `./deploy new`, which must pass there too. Weekly without
+# a push as well (the newest uv, Python patch releases and runner images), kept enabled by
+# template-keepalive.yml. The gate job skips everything in repositories made from the template.
+name: template-selftest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "29 5 * * 1" # weekly, Monday 05:29 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      template: ${{ steps.marker.outputs.template }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .pytemplate/template-repo
+          sparse-checkout-cone-mode: false
+      - id: marker
+        run: if [ -f .pytemplate/template-repo ]; then echo "template=true" >> "$GITHUB_OUTPUT"; fi
+
+  selftest:
+    name: selftest (${{ matrix.os }})
+    needs: gate
+    if: needs.gate.outputs.template == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      # Windows keeps git's default core.autocrlf (CRLF checkouts, like a Windows developer's)
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      # First, before any command renders: a generated file committed stale fails here
+      - name: Generated files match their sources
+        run: ./deploy render --check
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: v0.12.5
+      - name: Shells and tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dash zsh ksh mksh yash busybox fish
+          # actionlint for the workflow tests (pinned release, checked)
+          curl -fsSLo "$RUNNER_TEMP/actionlint.tgz" https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin" && tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP/bin" actionlint
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Shells (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fish nushell
+      - id: msys2
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with: {msystem: UCRT64, release: false, update: false, path-type: minimal, install: dash}
+      # A login MSYS2 shell has a minimal PATH: the launcher must find uv in a standard folder
+      - name: uv also in %USERPROFILE%\.local\bin (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null; Copy-Item (Get-Command uv).Source "$HOME\.local\bin\"
+      - name: xonsh (pinned; template-launchers follows the newest on its schedule)
+        run: |
+          uv tool install --python 3.14 xonsh==0.24.2
+          uv tool dir --bin >> "$GITHUB_PATH"
+      - name: Runner environment
+        run: ./deploy setup
+      - name: Tool versions
+        run: |
+          uv --version; nvim --version | sed -n 1p; pwsh --version || true; node --version || true
+          if [ "$RUNNER_OS" != Windows ]; then fish --version || true; fi
+          if [ "$RUNNER_OS" = macOS ]; then nu --version; fi
+          if [ "$RUNNER_OS" = Linux ]; then actionlint --version | sed -n 1p; shellcheck --version | sed -n 2p; fi
+      # test_upx's real run takes the pinned UPX of the runner's own download (upx.find: SHA-256)
+      - name: The pinned UPX in the runner's cache (Linux, Windows)
+        if: runner.os != 'macOS'
+        run: |
+          py=.venv/bin/python; [ -x "$py" ] || py=.venv/Scripts/python
+          "$py" -c "import sys; sys.path.insert(0, '.pytemplate'); from runner import config, upx; print(upx.find(config.load(set())))"
+      # the two tests that run a pinned tool offline get it into the uv cache first
+      - name: taplo and basedpyright in the uv cache (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          uv tool run --from "$(grep -m1 -o 'taplo==[0-9.]*' .pytemplate/tests/test_render_core.py)" taplo --version
+          uv tool run --from "$(sed -n 's/^BASEDPYRIGHT = "\(.*\)".*/\1/p' .pytemplate/runner/cmd_dev.py)" basedpyright --version
+      - name: selftest (POSIX)
+        if: runner.os != 'Windows'
+        run: ./deploy selftest -rs
+      - name: selftest (Windows, through deploy.ps1; short temp paths for MAX_PATH)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: ./deploy.ps1 selftest -rs "--basetemp=$env:RUNNER_TEMP\pt"; exit $LASTEXITCODE
+
+  python-floor:
+    name: runner tests on Python 3.11 (the floor)
+    needs: gate
+    if: needs.gate.outputs.template == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      # The tools the tests start (ruff, mypy, pytest in .venv) run on python.cpython, as for users
+      - name: Runner environment
+        run: ./deploy setup
+      - name: The runner starts on Python 3.11
+        run: uv run --quiet --python 3.11 --script .pytemplate/deploy.py help > /dev/null
+      # In process, so the runner code itself runs on 3.11 (tests that start ./deploy do it with
+      # this interpreter too): shutil.rmtree onerror, tokenize before PEP 701, 3.11's stdlib
+      - name: The runner's tests on Python 3.11
+        run: |
+          pytest=$(uv export --frozen --only-group dev --no-hashes --no-annotate --no-header | grep '^pytest==' | sed 's/ *;.*//')
+          uv run --no-project --python 3.11 --with "$pytest" python -m pytest -q -p no:cacheprovider -rs .pytemplate/tests
+
+  uv-floor:
+    name: selftest with the oldest supported uv
+    needs: gate
+    if: needs.gate.outputs.template == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      # the oldest uv that satisfies required-version in pyproject.toml
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          resolution-strategy: lowest
+      - name: uv is envs.MIN_UV
+        run: |
+          want=$(sed -n 's/^MIN_UV = "\([0-9.]*\)".*/\1/p' .pytemplate/runner/envs.py)
+          uv --version
+          test -n "$want" && test "$(uv --version | cut -d' ' -f2)" = "$want"
+      - name: Runner environment
+        run: ./deploy setup
+      # After a preset round trip uv 0.10.12 writes redundant markers into uv.lock (0.12 does
+      # not): the same lock, other bytes, which only that test's byte comparison notices
+      - name: selftest
+        run: ./deploy selftest -rs --deselect .pytemplate/tests/test_presets.py::test_init_round_trip_through_every_preset_is_byte_identical
+
+  new-project:
+    name: selftest in a new ${{ matrix.preset }} project
+    needs: gate
+    if: needs.gate.outputs.template == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [raylib, flet]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      # Another preset, backends and name (app.name != package): tests must follow the project
+      # they run in (a new project has its own README.md; the template's is .pytemplate/README.md)
+      - name: ./deploy new
+        env:
+          PRESET: ${{ matrix.preset }}
+        run: ./deploy new "$RUNNER_TEMP/p" --preset "$PRESET" --name "Pt-$PRESET"
+      - name: Runner environment
+        run: cd "$RUNNER_TEMP/p" && ./deploy setup
+      - name: selftest
+        run: cd "$RUNNER_TEMP/p" && ./deploy selftest -rs

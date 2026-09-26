@@ -30,6 +30,7 @@ from runner import cli, cmd_mode, config, envs, presets, proc, render  # noqa: E
 from runner.cmd_build import BuildRequest  # noqa: E402
 from runner.config import BACKENDS, Config  # noqa: E402
 from runner.editors import nvim  # noqa: E402
+from runner.methods import pyz  # noqa: E402
 from runner.project import PRESETS, ROOT, TEMPLATES  # noqa: E402
 from runner.ui import DeployError  # noqa: E402
 
@@ -832,25 +833,68 @@ def _block(lines: list[tuple[int, str, int]], pos: int) -> tuple[Any, int]:
     return out, pos
 
 
+def _literal(raw: list[str], start: int, parent: int) -> tuple[str, int]:
+    """The literal block scalar (`key: |`, clip chomping) whose lines start at raw[start]: every
+    line indented more than `parent` (the key line), blank ones included. Returns (value, next)."""
+    end = start
+    while end < len(raw) and (not raw[end].strip() or len(raw[end]) - len(raw[end].lstrip(" ")) > parent):
+        assert "\t" not in raw[end] and "\r" not in raw[end], f"line {end + 1}: tab or CR"
+        end += 1
+    body = raw[start:end]
+    while body and not body[-1].strip():
+        body.pop()
+    assert body, f"line {start}: empty block scalar"
+    indent = len(body[0]) - len(body[0].lstrip(" "))
+    assert all(not line.strip() or line[:indent] == " " * indent for line in body), f"line {start + 1}: bad block indentation"
+    return "\n".join(line[indent:] for line in body) + "\n", end
+
+
+def _fill(value: Any, literals: dict[str, str]) -> Any:
+    if isinstance(value, dict):
+        return {k: _fill(v, literals) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_fill(v, literals) for v in value]
+    return literals.get(value, value) if isinstance(value, str) else value
+
+
 def parse_yaml(text: str) -> Any:
     """A strict reader of the YAML subset templates/ci.yml uses: block mappings and sequences,
-    plain and quoted scalars, flow sequences and comments. Anything else (tabs, anchors, tags,
-    block scalars, flow mappings, a ': ' in a plain scalar, duplicate keys, a bad indent) fails."""
+    plain and quoted scalars, flow sequences, literal block scalars (`key: |`) and comments.
+    Anything else (tabs, anchors, tags, folded or chomped block scalars, flow mappings, a ': ' in
+    a plain scalar, duplicate keys, a bad indent) fails."""
     lines: list[tuple[int, str, int]] = []
-    for n, raw in enumerate(text.split("\n"), 1):
-        assert "\t" not in raw and "\r" not in raw, f"line {n}: tab or CR"
-        content = _strip_comment(raw).rstrip()
-        if content.strip():
-            lines.append((len(content) - len(content.lstrip(" ")), content.strip(), n))
+    literals: dict[str, str] = {}
+    raw = text.split("\n")
+    i = 0
+    while i < len(raw):
+        n, line = i + 1, raw[i]
+        i += 1
+        assert "\t" not in line and "\r" not in line, f"line {n}: tab or CR"
+        content = _strip_comment(line).rstrip()
+        if not content.strip():
+            continue
+        indent = len(content) - len(content.lstrip(" "))
+        if re.fullmatch(r"(- )?[A-Za-z0-9_-]+: \|", content.strip()):
+            token = f"__literal_{len(literals)}__"
+            literals[token], i = _literal(raw, i, indent)
+            content = content[:-1] + token
+        lines.append((indent, content.strip(), n))
     assert lines and lines[0][0] == 0, "the document must start at column 0"
     doc, pos = _block(lines, 0)
     assert pos == len(lines), f"line {lines[pos][2]}: bad indentation"
-    return doc
+    return _fill(doc, literals)
 
 
 def test_the_yaml_reader_is_strict() -> None:
     assert parse_yaml("a: 1\nb:\n  - x: 'y'\n    z: [p, q]\n  - w\n") == {"a": "1", "b": [{"x": "y", "z": ["p", "q"]}, "w"]}
-    for bad in ("a: 1\n b: 2\n", "a: 1\na: 2\n", "a: b: c\n", "a: *x\n", "a: |\n  x\n", "a: {b: 1}\n", "a:\n\t- x\n", "- x\na: 1\n"):
+    literal = "a:\n  b: |\n    x # kept\n\n      y\n  c: 1\n- d: |\n    z\n"
+    assert parse_yaml(literal.partition("- ")[0]) == {"a": {"b": "x # kept\n\n  y\n", "c": "1"}}
+    assert parse_yaml("- d: |\n    z\n\n- e\n") == [{"d": "z\n"}, "e"]
+    bad_yaml = (
+        "a: 1\n b: 2\n", "a: 1\na: 2\n", "a: b: c\n", "a: *x\n", "a: {b: 1}\n", "a:\n\t- x\n", "- x\na: 1\n",
+        "a: >\n  x\n", "a: |-\n  x\n", "a: |\nb: 1\n", "a: |\n    x\n  y\n",  # folded, chomped, empty, dedented
+    )  # fmt: skip
+    for bad in bad_yaml:
         with pytest.raises(AssertionError):
             parse_yaml(bad)
 
@@ -888,10 +932,26 @@ def test_ci_workflow_for_every_preset_and_backend_set(preset: str, supported: li
     merge = doc["jobs"]["pyz"]
     assert merge["needs"] == "test" and merge["runs-on"] == "ubuntu-latest"
     assert f"--out dist/{cfg.app.name}.pyz" in merge["steps"][3]["run"]
-    assert merge["steps"][4]["with"]["path"] == f"dist/{cfg.app.name}.pyz"
+    # the merged .pyz and the Windows wrapper pyz-merge writes next to it (pyz.wrapper_path)
+    wrapper = pyz.wrapper_path(Path(f"dist/{cfg.app.name}.pyz")).as_posix()
+    assert merge["steps"][4]["with"]["path"] == f"dist/{cfg.app.name}.pyz\n{wrapper}\n"
     uses = [s["uses"] for job in doc["jobs"].values() for s in job["steps"] if "uses" in s]
     assert all(re.fullmatch(r"[\w-]+/[\w-]+@v\d+(\.\d+\.\d+)?", u) for u in uses), uses
     assert all(re.fullmatch(r"astral-sh/setup-uv@v\d+\.\d+\.\d+", u) for u in uses if "setup-uv" in u)  # no floating tags
+
+
+@pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
+def test_ci_workflow_keeps_its_moving_parts_on_purpose(preset: str, supported: list[str], active: str) -> None:
+    """-latest runner labels (GitHub retires pinned ones) and no uv version (setup-uv takes the
+    newest that satisfies pyproject's required-version; a pinned uv cannot download newer
+    Pythons). The template says why, so nobody 'fixes' either."""
+    doc = parse_yaml(render.ci_workflow(combo_cfg(preset, supported, active)))
+    labels = [row["os"] for row in doc["jobs"]["test"]["strategy"]["matrix"]["include"]] + [doc["jobs"]["pyz"]["runs-on"]]
+    assert labels and all(label in ("ubuntu-latest", "windows-latest", "macos-latest") for label in labels), labels
+    setup_uv = [s for job in doc["jobs"].values() for s in job["steps"] if s.get("uses", "").startswith("astral-sh/setup-uv@")]
+    assert len(setup_uv) == 2 and not any("version" in s.get("with", {}) for s in setup_uv)
+    header = (TEMPLATES / "ci.yml").read_text(encoding="utf-8").partition("\nname: ci")[0]
+    assert "on purpose" in header and "required-version" in header and "-latest" in header
 
 
 def test_ci_workflows_pass_actionlint(tmp_path: Path) -> None:

@@ -2,6 +2,15 @@
 # with ./deploy new): the LazyVim integration, headless, in an isolated LazyVim (XDG_* under
 # a temp dir). For each preset it creates a project, trusts its .lazy.lua through Neovim's
 # API, installs the plugins and runs .pytemplate/nvim/tests/smoke.lua.
+#
+# Pushes and pull requests test pinned versions, so a red run is a regression, not upstream
+# drift: Neovim v0.12.5 and v0.11.2 (cmd_nvim.MIN_LAZYVIM, the documented minimum), the LazyVim
+# starter at cmd_nvim.STARTER_REV and the plugins of .pytemplate/nvim/tests/lazy-lock.json. The
+# canary (weekly, or by hand) runs the latest of everything: Neovim stable, the starter HEAD
+# and the newest plugins. Red there with no commit behind it means upstream changed; green
+# uploads the lazy-lock.json and starter-commit.txt that can become the new pins (CLAUDE.md
+# 13.1). template-keepalive.yml keeps the schedule alive. The gate job skips everything in
+# repositories made from the template.
 name: template-nvim
 
 on:
@@ -12,6 +21,8 @@ on:
       - ".pytemplate/**"
       - "deploy*"
       - "pytemplate.toml"
+      - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/template-nvim.yml"
   pull_request:
     paths:
@@ -19,16 +30,40 @@ on:
       - ".pytemplate/**"
       - "deploy*"
       - "pytemplate.toml"
+      - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/template-nvim.yml"
+  schedule:
+    - cron: "47 4 * * 1" # weekly, Monday 04:47 UTC: the canary
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      template: ${{ steps.marker.outputs.template }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .pytemplate/template-repo
+          sparse-checkout-cone-mode: false
+      - id: marker
+        run: if [ -f .pytemplate/template-repo ]; then echo "template=true" >> "$GITHUB_OUTPUT"; fi
+
   nvim:
-    name: nvim (${{ matrix.os }})
+    name: nvim (${{ matrix.os }}, ${{ matrix.nvim }})
+    needs: gate
+    if: needs.gate.outputs.template == 'true' && github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - {os: ubuntu-latest, nvim: v0.12.5}
+          - {os: windows-latest, nvim: v0.12.5}
+          - {os: ubuntu-latest, nvim: v0.11.2} # cmd_nvim.MIN_LAZYVIM
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     defaults:
@@ -40,7 +75,7 @@ jobs:
       - uses: rhysd/action-setup-vim@v1
         with:
           neovim: true
-          version: stable
+          version: ${{ matrix.nvim }}
       - name: Neovim version
         run: nvim --version
       # venv-selector (LazyVim's lang.python extra) raises an error on the first Python buffer
@@ -60,6 +95,40 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: nvim-logs-${{ matrix.os }}
+          name: nvim-logs-${{ matrix.os }}-${{ matrix.nvim }}
+          path: ${{ runner.temp }}/pt-nvim/logs
+          if-no-files-found: ignore
+
+  canary:
+    name: nvim canary (latest Neovim, starter and plugins)
+    needs: gate
+    if: needs.gate.outputs.template == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: stable
+      - name: Neovim version
+        run: nvim --version
+      - name: fd
+        run: sudo apt-get update && sudo apt-get install -y fd-find
+      - name: Runner environment
+        run: ./deploy setup
+      # Without the lock, selftest --nvim takes the starter HEAD and the newest plugins
+      - name: Unpin
+        run: rm .pytemplate/nvim/tests/lazy-lock.json
+      - name: LazyVim smoke test on the latest of everything
+        env:
+          PT_NVIM_DIR: ${{ runner.temp }}/pt-nvim
+        run: ./deploy selftest --nvim --require --dir "$PT_NVIM_DIR"
+      - name: Logs, the resolved lazy-lock.json and starter-commit.txt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvim-canary-logs
           path: ${{ runner.temp }}/pt-nvim/logs
           if-no-files-found: ignore
