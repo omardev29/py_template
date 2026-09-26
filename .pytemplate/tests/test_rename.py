@@ -765,6 +765,67 @@ def test_undecodable_files_that_mention_the_old_name_are_warned_about(tmp_path: 
     assert "other.txt" not in err and "logo.png" not in err
 
 
+def _symlink_or_skip(link: Path, target: str, *, directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except (OSError, NotImplementedError) as e:  # Windows without the symlink privilege
+        pytest.skip(f"cannot create symbolic links here: {e}")
+
+
+def test_links_in_src_and_tests_are_reported_never_rewritten(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A linked subpackage or module is neither rewritten (its target may be shared with other
+    projects) nor silently skipped: the rename warns, so its old imports do not break unnoticed."""
+    root = tmp_path / "p"
+    root.mkdir()
+    _write_project(root, "script", "alpha")
+    shared = tmp_path / "shared_ext"
+    shared.mkdir()
+    (shared / "helper.py").write_text("from alpha.core import bench\n", encoding="utf-8")
+    (shared / "linked.py").write_text("import alpha\n", encoding="utf-8")
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "x.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "src" / "alpha" / "data").mkdir()
+    _symlink_or_skip(root / "src" / "alpha" / "ext", "../../../shared_ext", directory=True)
+    _symlink_or_skip(root / "src" / "alpha" / "linked.py", "../../../shared_ext/linked.py")
+    _symlink_or_skip(root / "tests" / "other", "../../other", directory=True)  # mentions nothing: not listed
+    _symlink_or_skip(root / "tests" / "data", "../src/alpha/data", directory=True)  # dangles once src/alpha/ moves
+    planned = rename.plan(root, "alpha", "beta")
+    assert planned.linked == ["src/alpha/ext/", "src/alpha/linked.py", "tests/data/"]
+    assert not [f.path for f in planned.files if f.path.startswith(("src/alpha/ext", "src/alpha/linked", "tests/other"))]
+    capsys.readouterr()
+    rename.report(planned, dry=False)  # not verbose: the warning must still show
+    err = capsys.readouterr().err
+    assert "warning: " in err and "src/beta/ext/" in err and "src/beta/linked.py" in err and "tests/data/" in err
+    assert "tests/other" not in err
+    rename.apply_plan(root, planned)
+    assert (shared / "helper.py").read_text(encoding="utf-8") == "from alpha.core import bench\n"  # never through a link
+    assert (root / "src" / "beta" / "ext").is_symlink()
+
+
+def test_a_windows_junction_in_src_is_never_followed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """os.walk enters a junction (os.path.islink is False for it) and the files behind it were
+    rewritten, outside the project; now it is a link like any other: reported, never rewritten."""
+    import stat
+    import types
+
+    _write_project(tmp_path, "script", "alpha")
+    junction = tmp_path / "src" / "alpha" / "shared"
+    junction.mkdir()
+    (junction / "helper.py").write_text("from alpha.core import bench\n", encoding="utf-8")
+    real_lstat = os.lstat
+
+    def lstat(path: Any, *a: Any, **k: Any) -> Any:
+        if Path(path) == junction:
+            return types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_reparse_tag=cmd_env._JUNCTION)
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(cmd_env.os, "lstat", lstat)
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    assert "src/alpha/shared/helper.py" not in [f.path for f in planned.files]
+    assert planned.linked == ["src/alpha/shared/"]
+
+
 def test_mentions_outside_src_and_tests_are_reported(tmp_path: Path) -> None:
     _write_project(tmp_path, "script", "alpha")
     files = {

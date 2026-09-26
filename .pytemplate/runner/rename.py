@@ -783,6 +783,7 @@ class Plan:
     binary: list[str]  # files skipped because they are not UTF-8 text
     mentions: list[str]  # other files of the project that mention the old name: not changed
     unreadable: list[str] = field(default_factory=list)  # skipped (not UTF-8 text) but mention the old name
+    linked: list[str] = field(default_factory=list)  # links/junctions in src/, tests/ that mention it: never rewritten
 
     @property
     def changed_files(self) -> list[FileEdit]:
@@ -807,18 +808,74 @@ def _source_encoding(data: bytes) -> str | None:
     return None if encoding in ("utf-8", "utf-8-sig") else encoding
 
 
-def _code_files(root: Path) -> Iterator[tuple[str, Path]]:
-    """Every regular file of src/ and tests/ (no caches, no symlinks), sorted."""
+def _is_link(path: Path) -> bool:
+    """A symbolic link or a Windows junction (which os.walk and Path.is_symlink do not see)."""
+    from .cmd_env import _is_link as is_link  # reads st_reparse_tag (Python 3.11 has no is_junction)
+
+    return is_link(path)
+
+
+def _code_files(root: Path, links: list[str] | None = None) -> Iterator[tuple[str, Path]]:
+    """Every regular file of src/ and tests/ (no caches), sorted. Links and junctions are never
+    followed (their target may be shared with other projects): they go to `links` (a folder
+    with a trailing slash)."""
     for top in ("src", "tests"):
         base = root / top
         if not base.is_dir():
             continue
         for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".venv"))
+            here = Path(dirpath)
+            kept: list[str] = []
+            for d in sorted(dirnames):
+                if d in SKIP_DIRS or d.startswith(".venv"):
+                    continue
+                if _is_link(here / d):
+                    if links is not None:
+                        links.append((here / d).relative_to(root).as_posix() + "/")
+                    continue
+                kept.append(d)
+            dirnames[:] = kept
             for filename in sorted(filenames):
-                path = Path(dirpath) / filename
-                if not path.is_symlink() and path.is_file():
+                path = here / filename
+                if _is_link(path):
+                    if links is not None:
+                        links.append(path.relative_to(root).as_posix())
+                elif path.is_file():
                     yield path.relative_to(root).as_posix(), path
+
+
+def _mentions_name(path: Path, pattern: re.Pattern[str]) -> bool:
+    """Whether a text file (at most MENTION_MAX_BYTES) mentions the old name."""
+    try:
+        if path.stat().st_size > MENTION_MAX_BYTES:
+            return False
+        text = _decode(path.read_bytes())
+    except OSError:
+        return False
+    return text is not None and pattern.search(text) is not None
+
+
+def _link_mentions(link: Path, pattern: re.Pattern[str]) -> bool:
+    """Whether a link or junction points through the old name (src/alpha/data: it dangles once the
+    folder moves), or its file, or a text file below its folder, mentions it."""
+    try:
+        if pattern.search(os.readlink(link)):
+            return True
+    except (OSError, ValueError):
+        pass  # a junction on an old Python, or not readable: look at what it holds
+    if not link.is_dir():
+        return link.is_file() and _mentions_name(link, pattern)
+    seen: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(link, followlinks=True):
+        real = os.path.realpath(dirpath)
+        if real in seen:  # a link back up: a cycle
+            dirnames[:] = []
+            continue
+        seen.add(real)
+        dirnames[:] = [d for d in dirnames if d not in MENTION_SKIP_DIRS and not d.startswith(".venv")]
+        if any(_mentions_name(Path(dirpath) / f, pattern) for f in filenames):
+            return True
+    return False
 
 
 def same_file(a: Path, b: Path) -> bool:
@@ -932,20 +989,14 @@ def _mentions(root: Path, names: Names, skip: Iterable[str] = ()) -> list[str]:
             if d not in MENTION_SKIP_DIRS
             and not d.startswith(".venv")
             and not (top and d in ("src", "tests", "build"))
-            and not (here / d).is_symlink()
+            and not _is_link(here / d)  # a symlink or a junction: never followed
         )
         for filename in sorted(filenames):
             path = here / filename
             rel_path = path.relative_to(root).as_posix()
-            if (top and filename in ROOT_SKIP) or rel_path in skipped or path.is_symlink():
+            if (top and filename in ROOT_SKIP) or rel_path in skipped or _is_link(path):
                 continue
-            try:
-                if path.stat().st_size > MENTION_MAX_BYTES:
-                    continue
-                text = _decode(path.read_bytes())
-            except OSError:
-                continue
-            if text is not None and pattern.search(text):
+            if _mentions_name(path, pattern):
                 out.append(rel_path)
     return out
 
@@ -974,7 +1025,8 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
     binary: list[str] = []
     unreadable: list[str] = []
     pattern = _pattern(names)
-    for rel_path, path in _code_files(root):
+    links: list[str] = []
+    for rel_path, path in _code_files(root, links):
         data = path.read_bytes()
         text = _decode(data)
         encoding = "utf-8"
@@ -1008,6 +1060,7 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
         binary=binary,
         mentions=_mentions(root, names, generated),
         unreadable=unreadable,
+        linked=[rel for rel in links if _link_mentions(root / rel, pattern)],
     )
 
 
@@ -1371,6 +1424,12 @@ def report(plan_: Plan, *, dry: bool) -> None:
     if plan_.mentions:
         shown = ", ".join(plan_.mentions[:10]) + (f" and {len(plan_.mentions) - 10} more" if len(plan_.mentions) > 10 else "")
         ui.info(f"  not changed      {shown} also mention '{n.old_name}' (edit them by hand if needed)")
+    if plan_.linked:
+        paths = ", ".join(_target(p, plan_.move) for p in plan_.linked)
+        ui.warn(
+            f"not rewritten (symbolic links or junctions: their targets may be shared): {paths} mention "
+            f"'{n.old_name}' or point through it: edit them by hand"
+        )
     if plan_.unreadable:
         paths = ", ".join(_target(p, plan_.move) for p in plan_.unreadable)
         ui.warn(f"not rewritten (not UTF-8 text): {paths} mention '{n.old_name}': edit them by hand")

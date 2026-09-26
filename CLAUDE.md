@@ -798,9 +798,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   it and `os.replace` (`_replace_bytes`: mode kept, a symlink stays a link, a read-only file is
   an error), so a write cut short (disk full, a quota, `ulimit -f`) never leaves one
   half-written; a write that fails undoes everything, old bytes back and the folder moved back,
-  and the error names whatever it could not undo), `cmd_env.ensure_lock` (a failure there says "the
-  files are already renamed ... ./deploy apply"), `render.apply`, the ruff tidy-up, and the name
-  of the `applied` record (`cmd_apply.rename_record`, only the project's own record).
+  and the error names whatever it could not undo), `cmd_env.ensure_lock` (a failure there says
+  "the files are already renamed ... ./deploy apply"), `render.apply`, the ruff tidy-up, and the
+  name of the `applied` record (`cmd_apply.rename_record`, only the project's own record).
 - After a hand edit of `app.name` (src/<pkg>/ missing, or the very same folder: `alpha` ->
   `Alpha`), rename starts from the name the project really has (`cmd_apply.applied_name`, asked
   first, as apply does: the trusted record, else pyproject `[project] name`, whose package is in
@@ -838,16 +838,17 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     moves with the folder; `tools/alpha.py`, `assets/alpha.ico` and, for an app named deploy,
     `./deploy apply` are other files), and a dotted word only when it names a module or
     subpackage of src/<pkg>/ (`_package_modules`: `alpha.core`; not `alpha.ico` nor, for an app
-    named uv, `uv.lock`). Never a TOML key or table header (`_toml_key`: an app named `app`, `editor`,
-    `console` or `bunnymark` keeps `[app]`, `editor =` and its buttons), never a key path in a
-    comment (`app.gui` for an app named `app`: `_config_path`). The values of `MODULE_KEYS`
-    (compile.modules/exclude/forbid_imports, `[[typing.mypy_overrides]] module`,
+    named uv, `uv.lock`). Never a TOML key or table header (`_toml_key`: an app named `app`,
+    `editor`, `console` or `bunnymark` keeps `[app]`, `editor =` and its buttons), never a key
+    path in a comment (`app.gui` for an app named `app`: `_config_path`). The values of
+    `MODULE_KEYS` (compile.modules/exclude/forbid_imports, `[[typing.mypy_overrides]] module`,
     deploy.exe.hidden_imports, deploy.exclude_modules, deploy.wheel.entry; table-aware and
     multi-line arrays included: `module_value_lines`) are package references even when bare
-    (`modules = ["alpha"]`). Any other mention is reported, not changed ([tasks] can use
-    `{name}` and `{pkg}`). `validate_config` validates the result in memory ("the renamed
-    pytemplate.toml would be invalid ...; nothing was changed"). Decoded with `config._decode`
-    (UTF-16/ANSI is a clear error) and written back with its own BOM and line endings.
+    (`modules = ["alpha"]`, `exclude = ["alpha.slow"]`). Any other mention is reported, not
+    changed ([tasks] can use `{name}` and `{pkg}`). `validate_config` validates the result in
+    memory ("the renamed pytemplate.toml would be invalid ...; nothing was changed"). Decoded
+    with `config._decode` (UTF-16/ANSI is a clear error) and written back with its own BOM and
+    line endings.
   - `pyproject.toml`: `[project] name` (`presets.set_project_name`: the `[project]` table only,
     either quote style, any indentation; a table it cannot edit stops the plan) and the preset
     block; mentions in other tables are reported. Read as `utf-8-sig` (the BOM is not written
@@ -857,6 +858,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     only with `-v`. Files outside src/ and tests/ (README.md, scripts/, docs/, your own
     workflows) are only listed (`_mentions`: skips caches, environments, `.build`, `dist`,
     `.pytemplate`, `.claude`, the generated files and files over 2 MiB).
+  - Symbolic links and Windows junctions in src/ and tests/ are never followed nor rewritten
+    (`_code_files` with `cmd_env._is_link`: their target may be shared with other projects, and
+    os.walk enters a junction); those whose target path goes through the old name (it dangles
+    once src/<pkg>/ moves) or whose file or folder mentions it are a warning (`Plan.linked`,
+    `_link_mentions`, shown in the dry run and the real run): a linked subpackage that imports
+    the old package used to break silently. `_mentions` skips links and junctions too.
 - ruff tidy-up (`tidy_before`/`tidy_after`; best effort, never fails the rename): the new name
   has another length and sort position, so `ruff check --fix-only --fixable I001` (acts only when
   the active typing profile selects I) and `ruff format` run on the rewritten Python files, each
@@ -1355,11 +1362,11 @@ Formats:
   - Class decorators: resolved to full names through the absolute imports of the scope the class
     statement runs in, over those of the scopes around it (`_import_aliases`: module level with
     its if/try/with blocks; a function's own import never decides a module-level decorator, as
-    it once did when the file's last import won; star imports included) and compared with `NATIVE_CLASS_DECORATORS`,
-    which mirrors mypyc (`dataclasses.dataclass`, `attr.s`, `attr.attrs`, `typing[_extensions].final`,
-    `mypy_extensions.trait`/`mypyc_attr`): attrs' `define`/`frozen`/`mutable` are NOT native,
-    `@attr.s` is; `@mypyc_attr(native_class=False)` silences it. A drift test compares the set
-    with the locked mypyc's own source.
+    it once did when the file's last import won; star imports included) and compared with
+    `NATIVE_CLASS_DECORATORS`, which mirrors mypyc (`dataclasses.dataclass`, `attr.s`,
+    `attr.attrs`, `typing[_extensions].final`, `mypy_extensions.trait`/`mypyc_attr`): attrs'
+    `define`/`frozen`/`mutable` are NOT native, `@attr.s` is; `@mypyc_attr(native_class=False)`
+    silences it. A drift test compares the set with the locked mypyc's own source.
   - Nested classes and classes inside functions, each reported once (from its nearest class
     or function); t-strings; `if __name__ == "__main__"` (either order) at module level.
   - Module-level `__file__` ONLY when `compile.modules` is one top-level module file
@@ -2691,10 +2698,13 @@ CPython and its standard library:
   `test_envs_core.py::test_clean_retries_read_only_contents`. Goes: the switch once the runner
   needs 3.12; the retry never.
 - **`Path.is_symlink()` is False for a Windows junction** (LIMITATION; `Path.is_junction` from
-  3.12): `clean --envs` would have deleted what a junctioned `.venv` points to. Fix:
-  `cmd_env._is_link` reads `st_reparse_tag` (7). Test:
-  `test_workarounds.py::test_a_windows_junction_counts_as_a_link`. Goes: once the runner needs
-  3.12.
+  3.12): `clean --envs` would have deleted what a junctioned `.venv` points to, and os.walk,
+  which stops only where os.path.islink says so, entered a junction in src/: rename rewrote
+  the files behind it, outside the project. Fix: `cmd_env._is_link` reads `st_reparse_tag` (7);
+  `rename._code_files` and `rename._mentions` prune every link it reports (5.7). Test:
+  `test_workarounds.py::test_a_windows_junction_counts_as_a_link`,
+  `test_rename.py::test_a_windows_junction_in_src_is_never_followed`. Goes: the
+  `st_reparse_tag` read once the runner needs 3.12; the pruning never.
 - **The tokenizer changed with PEP 701** (LIMITATION): an f-string is one STRING token on 3.11
   and many tokens from 3.12 (t-strings from 3.14). Fix: `rename` handles both (5.7). Test:
   `test_rename.py::test_fstring_fields_as_one_token`, `test_tokenizer_canary`. Goes: the 3.11

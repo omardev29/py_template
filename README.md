@@ -333,6 +333,8 @@ name). What changes:
 
 Other files (README.md, `docs/`, scripts, your own workflows) are only listed when they mention
 the old name; `dist/` and `.build/` keep the old name until the next build (`./deploy clean`).
+Symbolic links and junctions in `src/` and `tests/` are never followed: a warning lists those
+that mention the old name or point through it, to edit by hand.
 It refuses uncommitted changes without `--force` (a project fresh from `./deploy new` has no
 commit yet: commit first), and the names `new` refuses. A write that fails puts every file back
 (each file is written to a temporary file first, so a full disk never leaves one half-written),
