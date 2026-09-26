@@ -16,9 +16,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 import zipapp
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -369,6 +371,11 @@ def _deploy(root: Path, *args: str, cwd: Path | None = None) -> subprocess.Compl
     )
 
 
+def _copy_config(root: Path) -> dict[str, Any]:
+    """The copy's pytemplate.toml: a project made with ./deploy new has its own preset and backends."""
+    return tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8-sig"))
+
+
 @pytest.fixture
 def unchanged(project_copy: Path) -> Iterator[Path]:
     before = _snapshot(project_copy)
@@ -390,6 +397,8 @@ def unchanged(project_copy: Path) -> Iterator[Path]:
     ],
 )
 def test_dry_run_writes_nothing(unchanged: Path, args: list[str], expected: str) -> None:
+    if args == ["__init", "raylib"] and _copy_config(unchanged)["app"]["preset"] == "raylib":
+        args, expected = ["__init", "script"], "- typings/raylib/__init__.pyi"  # a raylib project: the other way
     r = _deploy(unchanged, "--dry-run", *args)
     assert r.returncode == 0, r.stderr
     assert expected in r.stderr, r.stderr
@@ -397,6 +406,8 @@ def test_dry_run_writes_nothing(unchanged: Path, args: list[str], expected: str)
 
 @needs_uv
 def test_dry_run_mode_supports_pypy(unchanged: Path) -> None:
+    if "pypy" in _copy_config(unchanged)["backend"]["supported"]:
+        pytest.skip("this project already supports PyPy (the raylib preset): +pypy changes nothing")
     r = _deploy(unchanged, "--dry-run", "mode", "--supports", "+pypy")
     assert r.returncode == 0, r.stderr
     assert "pyproject.toml   would rewrite the managed parts" in r.stderr
@@ -445,7 +456,7 @@ def dry(monkeypatch: pytest.MonkeyPatch) -> Config:
         ("cmd_mode", ["mypyc", "--bogus"], "unknown argument(s): --bogus"),
         ("cmd_mode", ["--supports"], "--supports needs a value"),
         ("cmd_mode", ["--supports="], "--supports needs a value"),
-        ("cmd_mode", ["--supports", "-cpython,-mypyc"], "at least one backend"),
+        ("cmd_mode", ["--supports", "-cpython,-pypy,-mypyc"], "at least one backend"),  # every preset's backends
         ("cmd_mode", ["--supports", "+pypy,cpython"], "mixes changes (+name, -name) with plain names"),
         ("cmd_init", ["raylib", "--bogus"], "unknown argument(s): --bogus"),
         ("cmd_new", ["somewhere", "--bogus"], "unknown argument(s): --bogus"),

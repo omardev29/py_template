@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -20,14 +21,33 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_build, config, envs, mypyc, proc, upx  # noqa: E402
+from runner import cmd_build, config, envs, mypyc, presets, proc, upx  # noqa: E402
 from runner.cmd_build import BuildRequest  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.methods import common, exe, nuitka  # noqa: E402
+from runner.project import ROOT  # noqa: E402
 from runner.ui import DeployError  # noqa: E402
 
 IS_WINDOWS = os.name == "nt"
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
+
+
+TEMPLATE_REPO = (Path(__file__).resolve().parents[1] / "template-repo").is_file()
+
+
+def _exports_rich() -> bool:
+    """Whether `uv export --no-dev` of this project installs rich (the script preset's dependency)."""
+    try:
+        deps = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8-sig"))["project"]["dependencies"]
+    except (OSError, KeyError, ValueError):
+        return False
+    roots = {re.sub(r"[-_.]+", "-", m.group(0)).lower() for d in deps if (m := re.match(r"[A-Za-z0-9._-]+", str(d)))}
+    return "rich" in presets.locked_names(roots, ROOT / "uv.lock")
+
+
+# The REAL builds install this project's own uv.lock and run an app that imports rich (a script
+# preset project; a raylib project locks no rich)
+needs_rich = pytest.mark.skipif(not _exports_rich(), reason="installs this project's uv.lock and imports rich, which it does not lock")
 
 
 def make(data: dict[str, Any]) -> Config:
@@ -1215,8 +1235,9 @@ def test_pyz_merge_dry_run_checks_the_parts(tmp_path: Path, monkeypatch: pytest.
     assert not (tmp_path / "m.pyz").exists() and not (tmp_path / "m.cmd").exists()
 
 
+@needs_rich
 def test_pyz_merge_of_a_real_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A REAL host .pyz (uv export of the template's lock + uv pip install), run with `python -S`,
+    """A REAL host .pyz (uv export of this project's lock + uv pip install), run with `python -S`,
     then merged with a native part of another platform and run again."""
     from runner.methods import pyz
 
@@ -1236,6 +1257,8 @@ def test_pyz_merge_of_a_real_build(sandbox: Path, monkeypatch: pytest.MonkeyPatc
         info = json.loads(archive.read("_pyz.json"))
         names = archive.namelist()
         app_files = {n: archive.read(n).decode() for n in names if n.startswith("common/app/")}
+    if not info["pure"] and not TEMPLATE_REPO:  # the template's lock is pure Python: there it must be pure
+        pytest.skip("this project's dependencies are not pure Python: the merge below needs a pure host part")
     assert info["pure"] is True and info["host"] == _host_key()
     assert not [n for n in names if "/bin/" in n or n.endswith("/.lock")]  # no uv junk
     # The same build made on another platform, whose dependencies are native there
@@ -2059,6 +2082,7 @@ def test_portable_build_removes_the_previous_archive(sandbox: Path, monkeypatch:
 
 
 @pytest.mark.skipif(IS_WINDOWS, reason="runs the .sh launcher")
+@needs_rich
 def test_portable_system_folder_real_build_runs(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A REAL runtime = "system" folder (uv export + uv pip install into lib/), started through its
     .sh launcher with the machine's Python: it must import the locked dependencies from lib/."""

@@ -72,12 +72,25 @@ def _cfg_text(text: str) -> Config:
     return cfg
 
 
+def _preset_requirements() -> set[str]:
+    """Names of the requirements a preset adds to the shared pyproject.toml: every preset's with
+    its default options, and this project's own preset with its [preset.*] options."""
+    own = config.load(set(cli.COMMANDS))
+    names: set[str] = set()
+    for preset in presets.available():
+        deps, dev = presets.dependencies(own, preset)
+        names |= {cmd_apply.req_key(r)[0] for r in (*deps, *dev)}
+    return names
+
+
 def _pyproject(preset: str, name: str) -> str:
-    """pyproject.toml as `./deploy new NAME --preset PRESET` writes it (managed block included)."""
+    """pyproject.toml as `./deploy new NAME --preset PRESET` writes it (managed block included),
+    from this project's pyproject.toml without the requirements its own preset added."""
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8").replace("\r\n", "\n")
     data = tomllib.loads(text)
-    deps = [d for d in data["project"]["dependencies"] if cmd_apply.req_key(d)[0] != "rich"]
-    dev = list(data["dependency-groups"]["dev"])
+    added = _preset_requirements()
+    deps = [d for d in data["project"]["dependencies"] if cmd_apply.req_key(d)[0] not in added]
+    dev = [d for d in data["dependency-groups"]["dev"] if cmd_apply.req_key(d)[0] not in added]
     if preset == "script":
         deps.append("rich>=15.0.0")
     elif preset == "raylib":
@@ -1002,7 +1015,9 @@ def test_config_comments_say_how_changes_are_applied(preset: str) -> None:
     assert "./deploy apply" in _table(text, "[hooks]") and "false" in _table(text, "[hooks]")
     if preset != "script":
         assert "./deploy apply" in _table(text, f"[preset.{preset}]")
-    assert (ROOT / "pytemplate.toml").read_bytes() == presets.skeleton("script", "myapp")["pytemplate.toml"]
+    if (TEMPLATE_DIR / "template-repo").is_file():  # the template's root is the script preset as myapp
+        root = (ROOT / "pytemplate.toml").read_bytes().replace(b"\r\n", b"\n")  # a CRLF checkout (Windows)
+        assert root == presets.skeleton("script", "myapp")["pytemplate.toml"]
 
 
 # --- the real ./deploy in a throwaway copy ----------------------------------------------------------------
@@ -1040,13 +1055,20 @@ def _edit_copy(root: Path, table: str, key: str, value: Any) -> None:
     path.write_text(config.set_value(path.read_text(encoding="utf-8"), table, key, value), encoding="utf-8", newline="\n")
 
 
+def _copy_app(root: Path) -> dict[str, Any]:
+    """[app] of the copy: a project made with ./deploy new has its own name and preset."""
+    app: dict[str, Any] = tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8-sig"))["app"]
+    return app
+
+
 def test_real_dry_run_in_a_copy(copy: Path) -> None:
+    old = _copy_app(copy)["name"]
     _edit_copy(copy, "app", "name", "beta")
     _edit_copy(copy, "hooks", "pre_commit", False)
     before = _tree(copy)
     r = _deploy(copy, "--dry-run", "apply")
     assert r.returncode == 0, r.stderr
-    assert "would rename 'myapp' -> 'beta'" in r.stderr and "+ from beta.core import bench" in r.stderr
+    assert f"would rename '{old}' -> 'beta'" in r.stderr and '+ """beta"""' in r.stderr  # every preset's docstring
     assert "git hook         not a git work tree: nothing to do" in r.stderr
     assert _tree(copy) == before, "--dry-run wrote files"
     r = _deploy(copy, "apply", "--bogus")
@@ -1055,18 +1077,21 @@ def test_real_dry_run_in_a_copy(copy: Path) -> None:
 
 
 def test_real_hand_edited_preset_is_refused(copy: Path) -> None:
-    _edit_copy(copy, "app", "preset", "raylib")
+    old = _copy_app(copy)["preset"]
+    new = "script" if old == "raylib" else "raylib"
+    _edit_copy(copy, "app", "preset", new)
     before = _tree(copy)
     for command in ("apply", "setup"):
         r = _deploy(copy, command)
         assert r.returncode == 2, r.stderr
-        assert "changed from 'script' to 'raylib' by hand" in r.stderr and "./deploy new DIR --preset raylib" in r.stderr
+        assert f"changed from '{old}' to '{new}' by hand" in r.stderr and f"./deploy new DIR --preset {new}" in r.stderr
     assert _tree(copy) == before
 
 
 @needs_uv
 @needs_git
 def test_real_apply_after_a_hand_edited_name(copy: Path) -> None:
+    old = rename.package_of(_copy_app(copy)["name"])
     _git(copy, "init", "-q")
     _git(copy, "add", "-A")
     _git(copy, "commit", "-q", "-m", "init", "--no-verify")
@@ -1074,13 +1099,13 @@ def test_real_apply_after_a_hand_edited_name(copy: Path) -> None:
     (copy / "src" / "notes.txt").write_text("mine\n", encoding="utf-8")
     r = _deploy(copy, "apply")
     assert r.returncode == 2 and "uncommitted changes in git (1 path(s): src/notes.txt)" in r.stderr, r.stderr
-    assert "./deploy apply --force" in r.stderr and (copy / "src" / "myapp").is_dir()
+    assert "./deploy apply --force" in r.stderr and (copy / "src" / old).is_dir()
     (copy / "src" / "notes.txt").unlink()
     r = _deploy(copy, "apply")
     if r.returncode != 0 and rename.needs_pypi(r.stderr):
         pytest.skip("needs PyPI: uv lock could not reach the package index")
     assert r.returncode == 0, r.stderr
-    assert not (copy / "src" / "myapp").exists() and (copy / "src" / "beta" / "app.py").is_file()
+    assert not (copy / "src" / old).exists() and (copy / "src" / "beta" / "__init__.py").is_file()
     assert tomllib.loads((copy / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"] == "beta"
     assert "beta" in {p["name"] for p in tomllib.loads((copy / "uv.lock").read_text(encoding="utf-8"))["package"]}
     assert (copy / ".git" / "hooks" / "pre-commit").is_file()

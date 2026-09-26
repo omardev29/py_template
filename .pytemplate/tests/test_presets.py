@@ -1590,6 +1590,9 @@ def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: 
     env = _child_env(tmp_path)
     copy_root = tmp_path / "copy"
     presets.copy_template(copy_root)
+    if config.load(set(cli.COMMANDS)).app.preset == "raylib":  # a raylib project: from another preset first
+        r = _deploy(copy_root, "__init", "script", "--force", cwd=copy_root, env=env)
+        assert r.returncode == 0, r.stderr[-4000:]
     constraints = copy_root / ".pytemplate" / "presets" / "raylib" / "constraints.txt"
     constraints.write_text(constraints.read_text(encoding="utf-8").replace("pycparser==3.0", "pycparser==2.22"), encoding="utf-8")
     r = _deploy(copy_root, "__init", "raylib", cwd=copy_root, env=env)
@@ -1619,14 +1622,15 @@ def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv not found")
 def test_init_that_fails_in_uv_changes_nothing(tmp_path: Path, git_env: None) -> None:
-    """No network and an empty uv cache: `__init flet` fails in `uv add` and the project is exactly
-    as before (a later attempt starts from the script preset and removes rich)."""
+    """No network and an empty uv cache: `__init flet` (raylib in a flet project) fails in `uv add`
+    and the project is exactly as before (a later attempt starts from the same preset again)."""
     env = _child_env(tmp_path)
     env.update(UV_OFFLINE="1", UV_CACHE_DIR=str(tmp_path / "empty-cache"))
     copy_root = tmp_path / "copy"
     presets.copy_template(copy_root)
     before = _snapshot(copy_root)
-    r = _deploy(copy_root, "__init", "flet", cwd=copy_root, env=env)
+    target = "raylib" if config.load(set(cli.COMMANDS)).app.preset == "flet" else "flet"
+    r = _deploy(copy_root, "__init", target, cwd=copy_root, env=env)
     assert r.returncode != 0
     assert "init failed: every file is back as it was" in r.stderr
     assert _snapshot(copy_root) == before

@@ -458,7 +458,13 @@ def test_tools_are_pinned() -> None:
     assert re.fullmatch(r"nuitka==\d+\.\d+\.\d+", nuitka.NUITKA)
 
 
-def test_wheel_setup_py_follows_compile_options() -> None:
+def test_wheel_setup_py_follows_compile_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    src = tmp_path / "src"  # the default compile.modules (myapp.core), whatever this project is called
+    (src / "myapp" / "core").mkdir(parents=True)
+    for rel_path in ("myapp/__init__.py", "myapp/core/__init__.py", "myapp/core/logic.py"):
+        (src / rel_path).write_text("", encoding="utf-8")
+    for module in (config, mypyc, wheel):
+        monkeypatch.setattr(module, "SRC", src)
     cfg = make({"compile": {"separate": True, "multi_file": True, "strict_dunder_typing": True}})
     text = wheel.setup_py(cfg)
     compile(text, "setup.py", "exec")

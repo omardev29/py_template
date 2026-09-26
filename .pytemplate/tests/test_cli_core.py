@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,14 @@ def make(data: dict[str, Any]) -> Config:
     cfg: Config = config._build(Config, data, "")
     config.validate(cfg)
     return cfg
+
+
+def own(data: dict[str, Any]) -> Config:
+    """make() with this project's app name and compile.modules: code that reads src/ (the
+    compiled modules) finds them in any project made with ./deploy new, not only in myapp."""
+    real = config.load(set())
+    app = {"name": real.app.name, **data.get("app", {})}
+    return make({**data, "app": app, "compile": {"modules": list(real.compile.modules), **data.get("compile", {})}})
 
 
 def unchecked(data: dict[str, Any]) -> Config:
@@ -1286,7 +1295,7 @@ def fake_tests(monkeypatch: pytest.MonkeyPatch) -> FakeTests:
 
 
 def test_test_argv_and_the_compiled_proof(fake_tests: FakeTests) -> None:
-    cfg = make({"backend": {"supported": ["cpython", "pypy", "mypyc"]}})
+    cfg = own({"backend": {"supported": ["cpython", "pypy", "mypyc"]}})
     assert cmd_dev.test_backend(cfg, "mypyc", ["-k", "x"]) == 0
     key, argv, extra = fake_tests.calls[-1]
     assert key == "cpython" and argv == ["python", "-m", "pytest", "-o", "pythonpath=.build/pt-stage", "-k", "x"]
@@ -1299,7 +1308,7 @@ def test_test_argv_and_the_compiled_proof(fake_tests: FakeTests) -> None:
 
 
 def test_test_returns_pytests_code_for_one_backend(fake_tests: FakeTests, capsys: pytest.CaptureFixture[str]) -> None:
-    cfg = make({})
+    cfg = own({})
     fake_tests.codes.update(cpython=5)  # no tests collected
     assert cmd_dev.cmd_test(cfg, ["-k", "nothing"]) == 5
     fake_tests.codes.update(cpython=4)  # a pytest usage error
@@ -1389,7 +1398,10 @@ cmd = [{py}, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"]
 uv = false
 """
     toml = dest / "pytemplate.toml"
-    toml.write_text(toml.read_text(encoding="utf-8") + extra, encoding="utf-8")
+    text = toml.read_text(encoding="utf-8")
+    if "pypy" in tomllib.loads(text)["backend"]["supported"]:  # a raylib project: `pypyt` needs PyPy unsupported
+        text = config.set_value(config.set_value(text, "backend", "active", "cpython"), "backend", "supported", ["cpython", "mypyc"])
+    toml.write_text(text + extra, encoding="utf-8")
     return dest
 
 

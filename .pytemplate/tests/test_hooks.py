@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_dev, config, envs, hooks, lintc, mypyc, proc, render  # noqa: E402
+from runner import cmd_apply, cmd_dev, config, envs, hooks, lintc, mypyc, proc, render  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import IS_WINDOWS, ROOT, TEMPLATE  # noqa: E402
 from runner.ui import DeployError  # noqa: E402
@@ -845,6 +845,9 @@ class Tools:
         monkeypatch.setattr(render, "outputs", lambda cfg: dict(self.generated))
         monkeypatch.setattr(render, "apply", lambda cfg, check=False: self.render_result)
         monkeypatch.setattr(render, "pyproject_outdated", lambda cfg: self.pyproject_outdated)
+        # cmd_apply.pending reads the real project (src/<pkg>/, pyproject.toml), not the throwaway
+        # repository: test_apply covers what check_lock gets from it
+        monkeypatch.setattr(cmd_apply, "pending", lambda cfg, hook=True: [])
         monkeypatch.setattr(mypyc, "compiled_sources", lambda cfg: list(self.compiled))
         monkeypatch.setattr(lintc, "lint", self._lint)
         monkeypatch.setattr(lintc, "describe", lambda files: ", ".join(p.stem for p in files))
