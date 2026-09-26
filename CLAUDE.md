@@ -529,11 +529,14 @@ header rules (with detector tests proving each rule fires).
   completer skips the global options before the command (`shells.GLOBAL_OPTIONS`, those of
   `cli._parse_globals`: `test_xonsh_completer_after_hooks_help_and_global_flags`, offline
   with xonsh stubbed). Unlike the launchers it keeps the caller's `UV_PYTHON`, `PYTHONHOME`,
-  `PYTHONPATH` and `UV_WORKING_DIR` (a returned argv cannot change the environment), so the
-  runner's version check (section 5.2) is its guard. `test_shells` executes the fish, pwsh,
-  xonsh and nu snippets in their shells (argv, exit codes, walk-up, the xonsh completer, pwsh
-  pipeline input, the nu fallback to the launcher); the nu one only where nu is installed (the
-  macOS jobs of template-selftest and template-launchers install nushell).
+  `PYTHONPATH` and `UV_WORKING_DIR` (a returned argv cannot change the environment): the
+  runner's version check (section 5.2) guards only against an old `UV_PYTHON` (a `PYTHONHOME`
+  stops Python before `deploy.py` runs), so the snippet's header, and README's environment
+  section, name all four (`test_xonsh_snippet_says_which_variables_it_keeps`). `test_shells`
+  executes the fish, pwsh, xonsh and nu snippets in their shells (argv, exit codes, walk-up,
+  the xonsh completer, pwsh pipeline input, the nu fallback to the launcher); the nu one only
+  where nu is installed (the macOS jobs of template-selftest and template-launchers install
+  nushell).
 - `shells.doctor(check)` (from `./deploy doctor`): step "launchers": the launcher that started
   the run, then `deploy` (`#!/bin/sh`, LF, ASCII, git mode 100755, exec bit on POSIX),
   `deploy.cmd` (CRLF, ASCII) and `deploy.ps1` (LF, ASCII, no BOM; a mode other than 100755 is
@@ -760,7 +763,7 @@ header rules (with detector tests proving each rule fires).
 | `PYTEMPLATE_CALLER_CWD` | launchers, Neovim plugin (`init.caller_cwd`: Neovim's cwd when inside the project, else the root), nu snippet | Caller's cwd; read only through `project.caller_cwd` |
 | `PYTEMPLATE_LAUNCHER` | launchers, Neovim plugin (`nvim`), nu snippet (`nu`) | Which launcher/shell ran (section 4.1) |
 | `UV` | uv | uv's own path; `proc.find_uv` and the launchers use it |
-| `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PYTHON_PREFERENCE` | `envs.env_vars` | Environment selection (section 7). The caller's own `UV_PYTHON` never reaches the runner: the launchers, the Neovim plugin and the nu snippet remove or empty it (section 4.1); a `uv run` by hand that keeps a pre-3.11 one stops in `deploy.py` (exit 3) |
+| `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PYTHON_PREFERENCE` | `envs.env_vars` | Environment selection (section 7). The caller's own `UV_PYTHON` does not reach the runner: the launchers, the Neovim plugin and the nu snippet remove or empty it (section 4.1; the xonsh alias of `shell-setup` cannot, 4.9); a `uv run` by hand or that alias with a pre-3.11 one stops in `deploy.py` (exit 3) |
 | `PYTHONUTF8=1` | `proc.base_env`, portable launchers, pyz `.cmd` wrapper, the Neovim mypy linter, every VS Code launch config (`vscode.DEBUG_ENV`) | mypy/mypyc otherwise read files as cp1252; F5 behaves like `./deploy run` |
 | `PYTEMPLATE_BACKEND` | `cmd_dev.test_backend`, `mypyc.runtime_env_vars`, mypyc launch config | Backend under test (conftest) |
 | `PYTEMPLATE_COMPILED` | `mypyc.runtime_env_vars` | Modules that must load from `.pyd/.so` (conftest) |

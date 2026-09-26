@@ -238,7 +238,11 @@ and uv's environment selection (`UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PROJE
 `UV_NO_PROJECT`, `UV_WORKING_DIR`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`, `UV_ISOLATED`,
 `UV_NO_DEV`, `UV_NO_DEFAULT_GROUPS`, `UV_NO_SYNC`): its tools always run in the project's
 environments. uv's resolution settings (indexes, `UV_EXCLUDE_NEWER`, `UV_RESOLUTION`,
-`UV_PRERELEASE`) and its cache pass through.
+`UV_PRERELEASE`) and its cache pass through. The runner itself starts on the project's Python
+in the folder where the command was typed: the launchers remove `UV_PYTHON`, `PYTHONHOME`,
+`PYTHONPATH` and `UV_WORKING_DIR` before uv starts it, except the xonsh alias of
+[`shell-setup`](#shells), which hands uv only an argument list (unset them there, or use
+`./deploy`).
 
 ### Custom tasks
 
