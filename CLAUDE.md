@@ -3583,6 +3583,8 @@ Code coupling (rename together):
   `config._presets` mirrors `presets.available`; `render.managed_block` needs `pypy_minor`
   (PyPy's environment) and `min_python` (requires-python) to stay distinct.
 - `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`;
+  `cmd_mode._work_tree_top` calls the private `presets._git_env` (the same git environment as
+  `presets._git_init`, whose "inside a work tree" rule it mirrors for `new`);
   `e2e.flet_build_reason` imports `methods.flet._developer_mode`; `cmd_nvim.c_compiler`
   imports `cmd_env._msvc` and `_xcode_problem` lazily (`cmd_env` imports `cmd_nvim`).
 - `RULES_RE` / `tasks.parse_line` <-> `ui.error`, `ui.warn`, `str(lintc.Finding)` (5.3).
