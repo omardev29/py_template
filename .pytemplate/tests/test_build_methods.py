@@ -1405,3 +1405,430 @@ def test_build_dry_run_stops_after_the_argument_checks(no_build: None, monkeypat
     monkeypatch.setattr(proc, "DRY_RUN", True)
     assert cmd_build.cmd_build(make({}), ["--method", "pyz", "--no-check", "--target", WIN]) == 0
     assert "(--dry-run) build cpython -> pyz: would output dist/myapp-cpython-pyz*" in capsys.readouterr().err
+
+
+# --- portable: the .sh launcher -------------------------------------------------------------------
+
+POSIX_SHELLS = [s for s in ("sh", "dash", "bash", "zsh", "ksh", "mksh", "yash", "busybox") if shutil.which(s)]
+BOOT_ARGV = "import json, sys\nprint(json.dumps(sys.argv[1:]))\n"
+LAUNCH_ARGS = ["a b", "", "*"]
+
+
+def _shell_argv(shell: str, script: str) -> list[str]:
+    if shell == "busybox":
+        return ["busybox", "sh", script]
+    return [shell, script] if shell else [script]  # "" = the kernel runs the shebang
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX launchers and symlinks")
+@pytest.mark.parametrize("runtime", ["bundled", "system"])
+def test_portable_sh_launcher_via_symlinks_cdpath_and_spaces(tmp_path: Path, runtime: str) -> None:
+    # HERE was the folder of the SYMLINK (a link in ~/.local/bin: exec .../bin/runtime/bin/python3
+    # not found), and an exported CDPATH made `cd` print the folder (HERE got two lines) or pick
+    # a decoy folder with the same relative path
+    from runner.methods import portable
+
+    top = tmp_path / "dir with space"
+    out = top / "opt" / "app"
+    out.mkdir(parents=True)
+    (out / "boot.py").write_text(BOOT_ARGV, encoding="utf-8")
+    python: Path | None = None
+    if runtime == "bundled":
+        python = out / "runtime" / "bin" / "python3"
+        python.parent.mkdir(parents=True)
+        python.symlink_to(Path(sys.executable).resolve())
+    cfg = make({"deploy": {"portable": {"runtime": runtime}}})
+    launcher = out / "app.sh"
+    launcher.write_text(portable.sh_launcher(cfg, "cpython", out, python), encoding="utf-8", newline="\n")
+    launcher.chmod(0o755)
+    (top / "real" / "bin").mkdir(parents=True)
+    (top / "bin").symlink_to(top / "real" / "bin")  # the links are reached through a symlinked folder
+    (top / "real" / "bin" / "rel").symlink_to(Path("..") / ".." / "opt" / "app" / "app.sh")
+    (top / "real" / "bin" / "abs").symlink_to(launcher)
+    (top / "real" / "bin" / "chain").symlink_to("rel")
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "opt" / "app").mkdir(parents=True)  # a CDPATH hit must not win
+    env = dict(os.environ)
+    env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
+    env["CDPATH"] = f"{elsewhere}:."
+    paths = [str(launcher), str(top / "bin" / "rel"), str(top / "bin" / "abs"), str(top / "bin" / "chain"), "../dir with space/bin/chain", "../dir with space/opt/app/app.sh"]
+    shells = [*POSIX_SHELLS, ""] if runtime == "bundled" else ["sh", ""]
+    for shell in shells:
+        for path in paths:
+            r = subprocess.run([*_shell_argv(shell, path), *LAUNCH_ARGS], cwd=elsewhere, capture_output=True, text=True, env=env, timeout=120, check=False)
+            assert r.returncode == 0, (shell, path, r.stdout, r.stderr)
+            assert json.loads(r.stdout.strip().splitlines()[-1]) == LAUNCH_ARGS, (shell, path)
+    # Through PATH, from the folder of the links
+    env["PATH"] = os.pathsep.join([str(top / "bin"), env["PATH"]])
+    r = subprocess.run(["chain", "x"], cwd=top / "bin", capture_output=True, text=True, env=env, timeout=120, check=False)
+    assert r.returncode == 0 and json.loads(r.stdout.strip().splitlines()[-1]) == ["x"], r.stderr
+
+
+def test_portable_sh_launcher_is_posix_and_leaks_nothing() -> None:
+    from runner.methods import portable
+
+    for python in (None, Path("/x/runtime/bin/python3")):
+        text = portable.sh_launcher(make({}), "cpython", Path("/x"), python)
+        assert text.isascii() and "\r" not in text
+        assert "unset _pt_self _pt_dir _pt_link _pt_n" in text  # niubash runs it in-process
+        assert "CDPATH='' cd -P --" in text and 'readlink "$_pt_self"' in text
+        assert '"$(' not in text  # niubash keeps the inner quotes of "...$(cmd "$x")..."
+        for shell in ("dash", "bash", "mksh", "yash"):
+            if shutil.which(shell):
+                r = subprocess.run([shell, "-n"], input=text, capture_output=True, text=True, timeout=60, check=False)
+                assert r.returncode == 0, (shell, r.stderr)
+
+
+# --- portable: the .cmd launcher --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("backend", "windowed"), [("cpython", ["pyw -3.14", "pythonw", "pythonw"]), ("pypy", ["pypyw", "pypyw"])])
+def test_system_cmd_launcher_gui_is_windowless(tmp_path: Path, backend: str, windowed: list[str]) -> None:
+    # runtime = "system" with app.gui ran the console python: a console window stayed open for
+    # the whole life of the GUI app (the bundled branch already used start "" pythonw)
+    from runner.methods import portable
+
+    supported = {"backend": {"supported": ["cpython", "pypy"]}}
+    gui = make({**supported, "app": {"gui": True}, "deploy": {"optimize": 0, "portable": {"runtime": "system"}}})
+    lines = portable.cmd_launcher(gui, backend, tmp_path, None).split("\r\n")
+    runs = [lines[i + 1] for i, line in enumerate(lines) if line.startswith(":run")]
+    assert runs == [f'start "" {w} -s "%~dp0boot.py" %*' for w in windowed]
+    probes = [ln for ln in lines if ln.endswith(">nul 2>nul && goto run0")]
+    assert probes and probes[0].startswith(("py -3.14 -c ", "pypy3 -c "))  # the probe keeps console names
+    console = make({**supported, "deploy": {"optimize": 0, "portable": {"runtime": "system"}}})
+    text = portable.cmd_launcher(console, backend, tmp_path, None)
+    assert 'start ""' not in text and "pythonw" not in text and "pyw" not in text
+    assert "PYTHON_MANAGER_" not in text  # the user's install-manager settings are theirs
+
+
+# --- portable: copy_runtime prune -----------------------------------------------------------------
+
+
+def _fake_base(base: Path, files: list[str], links: dict[str, str]) -> None:
+    for name in files:
+        (base / name).parent.mkdir(parents=True, exist_ok=True)
+        (base / name).write_bytes(b"x")
+    for name, target in links.items():
+        (base / name).symlink_to(target)
+
+
+def _copy_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, base: Path, version: str, impl: str, *, lib_code: str = "", prune: bool = True) -> set[str]:
+    from runner.methods import portable
+
+    monkeypatch.setattr(envs, "interpreter_info", lambda python: {"base_prefix": str(base), "version": version, "impl": impl})
+    monkeypatch.setattr(common, "ensure_env", lambda env: env)
+    monkeypatch.setattr(portable, "IS_WINDOWS", False)
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    monkeypatch.setattr(common, "SRC", src)  # the app itself imports nothing
+    out = tmp_path / f"out-{impl}-{bool(lib_code)}-{prune}"
+    (out / "lib" / "gui").mkdir(parents=True)
+    (out / "lib" / "gui" / "__init__.py").write_text(lib_code, encoding="utf-8")
+    cfg = make({"deploy": {"portable": {"prune": prune}}, "backend": {"supported": ["cpython", "pypy"]}})
+    python = portable.copy_runtime(cfg, "pypy" if impl == "pypy" else "cpython", out / "runtime")
+    assert python == out / "runtime" / "bin" / "python3"
+    dest = out / "runtime"
+    return {p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file() or p.is_symlink()}
+
+
+CPYTHON_BASE = [
+    "bin/python3.14",
+    "include/python3.14/Python.h",
+    "share/man/man1/python3.1",
+    "lib/libpython3.14.so.1.0",
+    "lib/pkgconfig/python3.pc",
+    "lib/libtcl9.0.so",
+    "lib/libtcl9tk9.0.so",
+    "lib/tcl9/x.tcl",
+    "lib/tcl9.0/init.tcl",
+    "lib/tk9.0/tk.tcl",
+    "lib/itcl4.3.8/itcl.tcl",
+    "lib/thread3.0.6/thread.tcl",
+    "lib/python3.14/os.py",
+    "lib/python3.14/__pycache__/os.cpython-314.pyc",
+    "lib/python3.14/encodings/__init__.py",
+    "lib/python3.14/encodings/__pycache__/__init__.cpython-314.pyc",
+    "lib/python3.14/test/test_os.py",
+    "lib/python3.14/tkinter/__init__.py",
+    "lib/python3.14/turtle.py",
+    "lib/python3.14/idlelib/idle.py",
+    "lib/python3.14/site-packages/README.txt",
+    "lib/python3.14/EXTERNALLY-MANAGED",
+    "lib/python3.14/unittest/__init__.py",
+    "lib/python3.14/unittest/test/test_case.py",
+    "lib/python3.14/lib-dynload/_ssl.cpython-314-x86_64-linux-gnu.so",
+    "lib/python3.14/lib-dynload/_tkinter.cpython-314-x86_64-linux-gnu.so",
+]
+CPYTHON_LINKS = {"bin/python3": "python3.14", "bin/python": "python3.14", "lib/libpython3.14.so": "libpython3.14.so.1.0"}
+CPYTHON_KEPT = {
+    "bin/python3.14",
+    "bin/python3",
+    "bin/python",
+    "lib/libpython3.14.so.1.0",
+    "lib/libpython3.14.so",
+    "lib/pkgconfig/python3.pc",
+    "lib/python3.14/os.py",
+    "lib/python3.14/encodings/__init__.py",
+    "lib/python3.14/unittest/__init__.py",
+    "lib/python3.14/lib-dynload/_ssl.cpython-314-x86_64-linux-gnu.so",
+}
+CPYTHON_TK = {
+    "lib/libtcl9.0.so",
+    "lib/libtcl9tk9.0.so",
+    "lib/tcl9/x.tcl",
+    "lib/tcl9.0/init.tcl",
+    "lib/tk9.0/tk.tcl",
+    "lib/itcl4.3.8/itcl.tcl",
+    "lib/thread3.0.6/thread.tcl",
+    "lib/python3.14/tkinter/__init__.py",
+    "lib/python3.14/turtle.py",
+    "lib/python3.14/lib-dynload/_tkinter.cpython-314-x86_64-linux-gnu.so",
+}
+PYPY_BASE = [
+    "bin/pypy3.11",
+    "bin/libpypy3.11-c.so",
+    "bin/libpypy3.11-c.so.debug",
+    "bin/pypy3.11.debug",
+    "lib/libsqlite3.so.0",
+    "lib/libtcl8.6.so",
+    "lib/libtk8.6.so",
+    "lib/tcl8.6/init.tcl",
+    "lib/tk8.6/tk.tcl",
+    "lib/pypy3.11/os.py",
+    "lib/pypy3.11/_tkinter/__init__.py",
+    "lib/pypy3.11/unittest/__init__.py",
+    "lib/pypy3.11/unittest/test/test_case.py",
+    "lib/pypy3.11/lib2to3/__init__.py",
+    "lib/pypy3.11/lib2to3/tests/data/py2_test_grammar.py",
+    "lib/pypy3.11/ctypes/__init__.py",
+    "lib/pypy3.11/ctypes/test/test_x.py",
+    "lib/pypy3.11/hpy/devel/include/hpy.h",
+    "lib/pypy3.11/hpy/__init__.py",
+]
+PYPY_LINKS = {"bin/pypy3": "pypy3.11", "bin/python3": "pypy3.11"}
+PYPY_KEPT = {
+    "bin/pypy3.11",
+    "bin/libpypy3.11-c.so",
+    "bin/pypy3",
+    "bin/python3",
+    "lib/libsqlite3.so.0",
+    "lib/pypy3.11/os.py",
+    "lib/pypy3.11/unittest/__init__.py",
+    "lib/pypy3.11/lib2to3/__init__.py",
+    "lib/pypy3.11/ctypes/__init__.py",
+    "lib/pypy3.11/hpy/__init__.py",
+}
+PYPY_TK = {"lib/libtcl8.6.so", "lib/libtk8.6.so", "lib/tcl8.6/init.tcl", "lib/tk8.6/tk.tcl", "lib/pypy3.11/_tkinter/__init__.py"}
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX runtime layouts (symlinks)")
+@pytest.mark.parametrize("impl", ["cpython", "pypy"])
+@pytest.mark.parametrize("keep_tk", [False, True])
+def test_portable_prune_posix_layouts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, impl: str, keep_tk: bool) -> None:
+    # Tcl/Tk (9 MB), PyPy's detached .debug symbols (16 MB), nested stdlib test folders and every
+    # base __pycache__ were shipped; the tkinter prune looked only at the Windows layout
+    base = tmp_path / f"base-{impl}"
+    if impl == "cpython":
+        _fake_base(base, CPYTHON_BASE, CPYTHON_LINKS)
+        kept, tk, version = CPYTHON_KEPT, CPYTHON_TK, "3.14.7"
+    else:
+        _fake_base(base, PYPY_BASE, PYPY_LINKS)
+        kept, tk, version = PYPY_KEPT, PYPY_TK, "3.11.15"
+    got = _copy_runtime(tmp_path, monkeypatch, base, version, impl, lib_code="import tkinter\n" if keep_tk else "")
+    assert got == (kept | tk if keep_tk else kept)
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX runtime layouts (symlinks)")
+def test_portable_prune_off_copies_everything_but_the_caches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base = tmp_path / "base"
+    _fake_base(base, CPYTHON_BASE, CPYTHON_LINKS)
+    got = _copy_runtime(tmp_path, monkeypatch, base, "3.14.7", "cpython", prune=False)
+    expected = {n for n in [*CPYTHON_BASE, *CPYTHON_LINKS] if "__pycache__" not in n and not n.endswith("EXTERNALLY-MANAGED")}
+    assert got == expected
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX runtime layouts (symlinks)")
+@pytest.mark.parametrize(
+    "dep_code",
+    [
+        "from tkinter import Variable\n",  # customtkinter
+        "import tkinter as tk\nimport tkinter.ttk\n",  # ttkbootstrap, FreeSimpleGUI
+        "def f():\n    import turtle\n",  # a lazy import
+        "print 'py2 tkinter code'\n",  # mentions tkinter but cannot be parsed: keep Tk (safe side)
+    ],
+)
+def test_portable_keeps_tkinter_when_a_dependency_imports_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dep_code: str) -> None:
+    # customtkinter in lib/: the app never imports tkinter itself, the prune removed it and the
+    # portable app died at start with ModuleNotFoundError: No module named 'tkinter'
+    base = tmp_path / "base"
+    _fake_base(base, CPYTHON_BASE, CPYTHON_LINKS)
+    got = _copy_runtime(tmp_path, monkeypatch, base, "3.14.7", "cpython", lib_code=dep_code)
+    assert CPYTHON_TK <= got
+
+
+def test_portable_prunes_tkinter_when_nothing_imports_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lib = tmp_path / "lib"
+    (lib / "other").mkdir(parents=True)
+    (lib / "other" / "__init__.py").write_text("# works with tkinter too\nNAME = 'turtle'\nfrom typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import tkinter\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    monkeypatch.setattr(common, "SRC", src)
+    assert common.uses_tkinter(lib) is False
+    (src / "main.py").write_text("import turtle\n", encoding="utf-8")
+    assert common.uses_tkinter(lib) is True  # the app's own import still counts
+
+
+# --- portable: precompile, archive, stale files ------------------------------------------------------
+
+
+@pytest.mark.parametrize("optimize", [0, 1, 2])
+def test_portable_precompiles_the_stdlib_at_the_launcher_level(tmp_path: Path, optimize: int) -> None:
+    # The bundled stdlib was never compiled on Linux/macOS (only runtime/Lib was looked at) and
+    # never at the launchers' -O level: a read-only install recompiled it on every start
+    from runner.methods import portable
+
+    version = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    out = tmp_path / "out"
+    stdlib = out / "runtime" / ("Lib" if IS_WINDOWS else f"lib/{'pypy' if sys.implementation.name == 'pypy' else 'python'}{version}")
+    (stdlib / "pkg").mkdir(parents=True)
+    (stdlib / "pkg" / "__init__.py").write_text("X = 1\n", encoding="utf-8")
+    (stdlib / "lib2to3" / "tests" / "data").mkdir(parents=True)
+    (stdlib / "lib2to3" / "tests" / "data" / "py2.py").write_text("print 'x'\n", encoding="utf-8")
+    (out / "app").mkdir()
+    (out / "app" / "main.py").write_text("import pkg\n", encoding="utf-8")
+    (out / "lib").mkdir()
+    cfg = make({"deploy": {"optimize": optimize}})
+    calls = portable.compile_calls(cfg, Path(sys.executable), out, version)
+    assert len(calls) == 2
+    for argv in calls:
+        r = subprocess.run([str(a) for a in argv], capture_output=True, text=True, timeout=300, check=False)
+        assert r.returncode == 0, r.stdout + r.stderr
+    tag = sys.implementation.cache_tag
+    level = f".opt-{optimize}" if optimize else ""
+    assert sorted(p.name for p in stdlib.rglob("*.pyc")) == [f"__init__.{tag}{level}.pyc"]  # launcher level only, lib2to3 tests skipped
+    app_pycs = sorted(p.name for p in (out / "app").rglob("*.pyc"))
+    assert app_pycs == sorted({f"main.{tag}.pyc", f"main.{tag}{level}.pyc"})
+    for pyc in [*stdlib.rglob("*.pyc"), *(out / "app").rglob("*.pyc")]:
+        data = pyc.read_bytes()
+        assert int.from_bytes(data[4:8], "little") == 0b11, pyc  # checked-hash (PEP 552)
+        assert str(out).encode() not in data, pyc  # -s: this machine's folder is not embedded
+
+
+def test_portable_pycs_survive_a_zip_round_trip(tmp_path: Path) -> None:
+    # Timestamp .pyc went stale after the Windows zip (2-second DOS times, local time zone)
+    import importlib.util
+
+    from runner.methods import portable
+
+    out = tmp_path / "myapp-portable"
+    (out / "app" / "pkg").mkdir(parents=True)
+    (out / "lib").mkdir()
+    (out / "app" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (out / "app" / "pkg" / "mod.py").write_text("X = 1\n", encoding="utf-8")
+    for py in (out / "app").rglob("*.py"):
+        os.utime(py, (1_000_000_001, 1_000_000_001))  # an odd second: a zip truncates it
+    (argv, *_rest) = portable.compile_calls(make({}), Path(sys.executable), out, "0.0")
+    assert subprocess.run([str(a) for a in argv], capture_output=True, timeout=300, check=False).returncode == 0
+    archive = portable.make_archive(out, "zip")
+    extracted = tmp_path / "x"
+    shutil.unpack_archive(archive, extracted)
+    for py in (extracted / out.name).rglob("*.py"):
+        os.utime(py, (1_000_003_600, 1_000_003_600))  # extracted one time zone away
+    for pyc in (extracted / out.name).rglob("*.pyc"):
+        source = pyc.parent.parent / (pyc.name.split(".")[0] + ".py")
+        assert pyc.read_bytes()[8:16] == importlib.util.source_hash(source.read_bytes()), pyc
+    before = {p: p.stat().st_mtime_ns for p in (extracted / out.name).rglob("*.pyc")}
+    for flag in ([], ["-O"]):
+        subprocess.run([sys.executable, *flag, "-c", "import pkg.mod"], cwd=extracted / out.name / "app", check=True, timeout=120)
+    assert {p: p.stat().st_mtime_ns for p in (extracted / out.name).rglob("*.pyc")} == before  # nothing recompiled
+
+
+def test_portable_zip_keeps_the_sh_launcher_executable(tmp_path: Path) -> None:
+    # On Windows a .sh stats as 0o666 and zip entries are MS-DOS ones: unzip extracted
+    # myapp.sh without its x bit ("permission denied" on Linux/macOS)
+    import zipfile
+
+    from runner.methods import portable
+
+    out = tmp_path / "myapp-cpython-portable"
+    (out / "app" / "myapp").mkdir(parents=True)
+    (out / "app" / "myapp" / "__init__.py").write_text("", encoding="utf-8")
+    (out / "boot.py").write_text("", encoding="utf-8")
+    (out / "myapp.cmd").write_text("@echo off\r\n", encoding="ascii", newline="")
+    sh = out / "myapp.sh"
+    sh.write_text("#!/bin/sh\necho launched\n", encoding="utf-8", newline="\n")
+    sh.chmod(0o644)  # what os.stat reports on Windows
+    reference = shutil.make_archive(str(tmp_path / "ref"), "zip", root_dir=tmp_path, base_dir=out.name)
+    os.utime(out / "boot.py", (1, 1))  # a pre-1980 file (Nix store): shutil's zip raised ValueError
+    with pytest.raises(ValueError, match="1980"):
+        shutil.make_archive(str(tmp_path / "old"), "zip", root_dir=tmp_path, base_dir=out.name)
+    archive = portable.make_archive(out, "zip")
+    assert archive == tmp_path / "myapp-cpython-portable.zip"
+    with zipfile.ZipFile(archive) as ours, zipfile.ZipFile(reference) as theirs:
+        assert sorted(ours.namelist()) == sorted(theirs.namelist())  # the same content as before
+        info = ours.getinfo("myapp-cpython-portable/myapp.sh")
+        assert info.create_system == 3 and (info.external_attr >> 16) & 0o170777 == 0o100755
+        assert ours.read(info.filename) == sh.read_bytes()
+    if shutil.which("unzip") and not IS_WINDOWS:
+        dest = tmp_path / "unzipped"
+        subprocess.run(["unzip", "-q", str(archive), "-d", str(dest)], check=True, timeout=120)
+        r = subprocess.run([str(dest / out.name / "myapp.sh")], capture_output=True, text=True, timeout=60, check=False)
+        assert r.returncode == 0 and r.stdout == "launched\n"
+
+
+def _system_portable(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, fail: bool = False) -> Path:
+    from runner.methods import portable
+
+    cfg = make({"app": {"name": "x"}, "deploy": {"portable": {"runtime": "system", "archive": False}}})
+    monkeypatch.setattr(common, "host_target", lambda c, b: common.Target("cp", 3, 14, "linux", "x86_64"))
+    monkeypatch.setattr(common, "export_requirements", lambda c: _requirements(sandbox, "rich==15.0.0"))
+
+    def install(c: Config, b: str, t: common.Target, dest: Path, req: Path) -> Path:
+        if fail:
+            raise DeployError("simulated failure")
+        dest.mkdir(parents=True, exist_ok=True)
+        return dest
+
+    monkeypatch.setattr(common, "install_deps", install)
+    app = fake_app(sandbox / "payload", "x")
+    return portable.build(BuildRequest(cfg, "cpython", "portable", app))
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_portable_build_removes_the_previous_archive(sandbox: Path, monkeypatch: pytest.MonkeyPatch, fail: bool) -> None:
+    # archive = false (or a failed rebuild) left the old dist/<n>...tar.gz next to the new folder:
+    # a release script uploading dist/*.tar.gz shipped stale code
+    dist = sandbox / "dist"
+    dist.mkdir()
+    for suffix in (".zip", ".tar.gz"):
+        (dist / f"x-cpython-portable{suffix}").write_text("old build", encoding="utf-8")
+    if fail:
+        with pytest.raises(DeployError, match="simulated"):
+            _system_portable(sandbox, monkeypatch, fail=True)
+    else:
+        assert _system_portable(sandbox, monkeypatch) == dist / "x-cpython-portable"
+    assert not (dist / "x-cpython-portable.zip").exists() and not (dist / "x-cpython-portable.tar.gz").exists()
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="runs the .sh launcher")
+def test_portable_system_folder_real_build_runs(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A REAL runtime = "system" folder (uv export + uv pip install into lib/), started through its
+    .sh launcher with the machine's Python: it must import the locked dependencies from lib/."""
+    from runner.methods import portable
+
+    cfg = make({"deploy": {"portable": {"runtime": "system"}}})
+    app = fake_app(sandbox / "payload")
+    (app / "main.py").write_text("import rich, sys\nprint('rich', rich.__file__, *sys.argv[1:])\n", encoding="utf-8")
+    try:
+        out = portable.build(BuildRequest(cfg, "cpython", "portable", app))
+    except proc.CommandFailed as e:
+        pytest.skip(f"uv could not export/install the locked dependencies (offline?): {e}")
+    assert sorted(p.name for p in out.iterdir()) == ["app", "boot.py", "lib", "myapp.cmd", "myapp.sh"]
+    assert not (out / "lib" / "bin").exists() and not (out / "lib" / ".lock").exists()
+    assert (sandbox / "dist" / "myapp-cpython-portable.tar.gz").is_file()
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
+    env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
+    r = subprocess.run([str(out / "myapp.sh"), "arg"], capture_output=True, text=True, env=env, timeout=120, check=False)
+    assert r.returncode == 0, r.stderr
+    word, where, arg = r.stdout.split()
+    assert word == "rich" and Path(where).is_relative_to(out / "lib") and arg == "arg"

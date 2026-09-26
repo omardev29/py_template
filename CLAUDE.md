@@ -846,22 +846,43 @@ Per method:
 - **portable**: `dist/<n>-<b>-portable-<key>/` (no `-<key>` with `runtime = "system"`, which
   bundles no interpreter) with `app/`, `lib/` (`uv pip install --target`), `runtime/` (pruned
   copy of the interpreter's `base_prefix` through `\\?\` extended paths; the `ignore` callback
-  strips that prefix before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. Prunes `include libs
-  Tools share`, `tcl*`, stdlib `test idlelib turtledemo ensurepip site-packages`, tkinter/turtle
-  (unless the AST finds them imported), PyPy `hpy/devel`; deletes `EXTERNALLY-MANAGED`; copies
+  strips that prefix before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. The base's
+  `__pycache__` folders are never copied. Prunes `include libs Tools share`, `tcl*` (Windows
+  base), stdlib `test idlelib turtledemo ensurepip site-packages`, `test`/`tests` subfolders of
+  stdlib packages (PyPy's `unittest/test`, `lib2to3/tests`...), `*.debug` (PyPy's detached debug
+  symbols, 16 MB), PyPy `hpy/devel`, and Tk unless `src/` or an installed dependency in `lib/`
+  imports tkinter/turtle (`common.uses_tkinter(lib)`: customtkinter, ttkbootstrap; a bytes
+  pre-filter, then the AST; a file it cannot parse keeps Tk): tkinter, turtle and every Tcl/Tk
+  file `TCL_RE` matches in `lib/` (POSIX: `libtcl9.0.so`, `tcl9.0/`, `tk9.0/`, `itcl*`,
+  `thread*`), `DLLs/` and `lib-dynload/` (`_tkinter.*`). Deletes `EXTERNALLY-MANAGED`; copies
   `vcruntime140*.dll` from the CPython base into PyPy runtimes on Windows (PyPy's zip lacks
-  them). `compileall` runs with the console `python.exe` and also compiles PyPy's stdlib (PyPy
-  ships no `.pyc`).
+  them). `compile_calls` (console `python.exe`, `-B -f`, `--invalidation-mode checked-hash` so
+  the Windows zip's 2-second local times cannot make them stale, `-s <out>` so no `.pyc` embeds
+  the build folder): `lib/` and `app/` at levels 0 and `deploy.optimize`, the bundled stdlib
+  (`runtime_stdlib`: `lib/pythonX.Y`, `lib/pypyX.Y` or `Lib`) only at the launchers' level,
+  `-x` skipping PyPy's broken `lib2to3/tests` data: a read-only install never recompiles.
+  The previous `<out>.zip`/`<out>.tar.gz` is deleted first; `archive` writes gztar on POSIX and,
+  on Windows, `make_archive`'s zip (`strict_timestamps=False`; `.sh` entries as Unix entries with
+  mode 0755: `create_system = 3` is needed too, unzip ignores MS-DOS mode bits).
   - Launchers: `.cmd` = ASCII + CRLF, `start ""` + `pythonw.exe` for GUI apps, env values with
     `%` written `%%` and values it cannot hold (non-ASCII, `"`, line breaks) rejected; `.sh` =
     0755, values through `shlex.quote`, its folder from `${BASH_SOURCE:-$0}` (niubash keeps the
-    caller's `$0`). Both use `-s` plus `-O`/`-OO`, never `-I`/`-E`, and set `PYTHONUTF8=1` and
-    `PYTHON_JIT`.
+    caller's `$0`) with symlinks resolved (a `readlink` loop, at most 40 links, each relative
+    target joined to the `cd -P`/`pwd -P` folder of its link: a logical `cd`, and ksh93's `cd -P`
+    on a relative path, fold `..` as text) and `CDPATH=''` (an exported CDPATH made `cd` print the
+    folder or pick another one); its `_pt_*` helpers are unset. Both use `-s` plus `-O`/`-OO`,
+    never `-I`/`-E`, and set `PYTHONUTF8=1` and `PYTHON_JIT`.
   - `runtime = "system"`: each launcher RUNS every candidate interpreter with a minimum-version
-    probe (`.cmd`: `py -X.Y`, `python3`, `python`, exit 9009 when none fits: `py` can exist with
-    no Python registered; `.sh`: `pythonX.Y`, `python3`, `python`, exit 127; PyPy: `pypy3`,
-    `pypy`). With native dependencies it warns that the folder only works on the host key.
-  - mypyc builds are smoke-tested (`_smoke_compiled`, code from `smoke_code`): the same
+    probe (`.cmd`: `py -X.Y`, `python3`, `python`, exit 9009 when none fits: the legacy `py` can
+    exist with no Python registered; `.sh`: `pythonX.Y`, `python3`, `python`, exit 127; PyPy:
+    `pypy3`, `pypy`). With `app.gui` the `.cmd` run lines are `start "" pyw -X.Y`/`pythonw`/
+    `pypyw` (`common.windowed`; the probe keeps the console names). The Python install
+    manager's `py`/`python` install the requested version when NO runtime exists at all (its
+    `automatic_install` default; the silenced probe hides it, so that first start can take a
+    minute): the launchers leave `PYTHON_MANAGER_*` to the user. With native dependencies it warns
+    that the folder only works on the host key.
+  - mypyc builds are smoke-tested (`_smoke_compiled`, code from `smoke_code`, run with the
+    launchers' `-s -O` plus `-B`): the same
     `sys.path` as `boot.py` (`app/` first, then `lib/`), result read from a `PTSMOKE:` marker
     line because imported packages may print (raylib's banner); a failed import shows the
     traceback and raises `DeployError`.
@@ -1463,8 +1484,13 @@ Behaviour:
   do not reach the runner, so `/home/...`-style paths typed for `new`/`pyz-merge` fall back to
   the current drive with a warning. Fix idea: the launcher exports the Windows path of
   `/usr/bin/cygpath` and `find_cygpath` checks it first.
-- niubash: the generated portable `.sh` launcher leaks its variables into the calling
-  session (niubash runs sh scripts in-process).
+- niubash: the generated portable `.sh` launcher leaks `HERE` and its exported variables into
+  the calling session (niubash runs sh scripts in-process; its `_pt_*` helpers are unset). Its
+  `cd -P`/`pwd -P`/`CDPATH=''` symlink resolution is verified with dash, bash, zsh, ksh, mksh,
+  yash and busybox, not with niubash.
+- Portable: a runtime layout change in python-build-standalone or PyPy (bin/python3 missing, the
+  stdlib renamed) is only caught by `selftest --e2e`; a bundled PyPy portable build is not run
+  on CI.
 - Argument limits by design: `deploy.cmd` (and every CreateProcess caller of it) cannot pass
   `% ! " ^ & | < >`; PowerShell drops a bare `--`; xonsh `-c` exits 1 on any failing command
   (the child's real code is in its `CalledProcessError`).

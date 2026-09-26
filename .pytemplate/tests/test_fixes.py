@@ -346,7 +346,7 @@ def test_system_launchers_probe_the_minimum_version(tmp_path: Path) -> None:
     assert cmd.isascii() and "\n" not in cmd.replace("\r\n", "")
     sh = portable.sh_launcher(cfg, "pypy", tmp_path, None)
     assert "for py in pypy3 pypy; do" in sh
-    assert 'HERE=$(cd "$(dirname "${BASH_SOURCE:-$0}")" && pwd)' in sh  # niubash keeps the caller's $0
+    assert "_pt_self=${BASH_SOURCE:-$0}" in sh  # niubash keeps the caller's $0
 
 
 @windows_only
