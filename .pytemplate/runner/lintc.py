@@ -15,7 +15,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import Config
+from .config import Config, compiled_paths
 from .imports import iter_runtime_nodes, module_name, parse, parse_error
 from .project import PYPROJECT, SRC
 
@@ -181,10 +181,11 @@ def relative_file_at_import(cfg: Config) -> bool:
     always see the real path. Pinned by test_mypyc_core against the locked mypyc.
 
     With the [compile] rules of config.validate (an exclude is always inside an entry), that is
-    exactly one compile.modules entry that is a top-level module file.
+    exactly one compile.modules entry that is a top-level module file, the one Python imports
+    (config.compiled_paths: a leftover folder without __init__.py never hides it).
     """
-    modules = cfg.compile.modules
-    return len(modules) == 1 and "." not in modules[0] and not (SRC / modules[0]).is_dir()
+    paths = compiled_paths(cfg)
+    return len(paths) == 1 and "/" not in paths[0] and paths[0].endswith(".py")
 
 
 def _runtime_dependencies() -> set[str]:

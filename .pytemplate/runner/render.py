@@ -84,9 +84,10 @@ def _check_profile(path: Path, data: dict[str, Any]) -> None:
 
 
 def typings_dir() -> Path | None:
-    """Return the project's own stubs (e.g. the raylib ones fixed by the preset), if any."""
+    """Return the project's own stubs (e.g. the raylib ones fixed by the preset), if any: a
+    typings/ folder that holds no stub is not in a fresh clone (_holds_python)."""
     path = ROOT / "typings"
-    return path if path.is_dir() else None
+    return path if _holds_python(path) else None
 
 
 def _holds_python(folder: Path, _seen: frozenset[str] = frozenset()) -> bool:
@@ -153,6 +154,10 @@ def mypy_ini(cfg: Config, profile: str, *, for_compile: Path | None = None) -> s
     else:
         head["mypy_path"] = ["src", "typings"] if typings else "src"
         head["files"] = ["src", "tests"] if _has_tests() else "src"
+        if cfg.pypy_enabled:
+            # what mypy_cli_args passes to check, for a mypy run with no arguments (VS Code's mypy
+            # extension): mypy still reads the packages of the Python it runs on (sys.executable)
+            head["python_version"] = cfg.min_python
     lines = [f"# {HEADER}", f"# Typing profile: {profile} ({data.get('description', '')})", ""]
     lines += _ini_section("mypy", {**head, **data.get("mypy", {})})
     # One section per module pattern, later options winning: mypy refuses a repeated section
@@ -212,16 +217,26 @@ def pyright_config(cfg: Config, profile: str, *, absolute: bool = False) -> dict
     # for compiled code: pyright has no exclusion inside `strict`, so a compiled package that
     # holds an excluded module is listed by its other files and folders
     excluded = {rel for m in cfg.compile.exclude for rel in _module_paths(m)}
-    compiled = [p for top in compiled_paths(cfg) for p in _paths_without(f"src/{top}", excluded)]
+    # an entry whose folder holds no code (a module deleted, its __pycache__ left behind) is
+    # written as a fresh clone, which has no such folder, writes it: the module file
+    tops = [t if t.endswith(".py") or _has_code(f"src/{t}") else f"{t}.py" for t in compiled_paths(cfg)]
+    compiled = [p for top in tops for p in _paths_without(f"src/{top}", excluded)]
     if data.get("pyright_compiled", {}).get("strict"):
         conf["strict"] = [path(p) for p in compiled]
     based = data.get("basedpyright_compiled")
     if cfg.typing.editor == "basedpyright" and based:
         # The first environment that matches a file wins: the excluded ones come first, without the Any rules
         conf["executionEnvironments"] = [
-            {"root": path(p), "extraPaths": [path("src")]} for p in sorted(excluded) if (ROOT / p).exists()
-        ] + [{"root": path(p), "extraPaths": [path("src")], **based} for p in compiled if (ROOT / p).exists()]
+            {"root": path(p), "extraPaths": [path("src")]} for p in sorted(excluded) if _has_code(p)
+        ] + [{"root": path(p), "extraPaths": [path("src")], **based} for p in compiled if _has_code(p)]
     return conf
+
+
+def _has_code(rel: str) -> bool:
+    """Whether `rel` (relative to ROOT) is a .py/.pyi file or a folder that holds one: what a
+    fresh clone has too (a folder left holding only __pycache__ is not)."""
+    p = ROOT / rel
+    return p.is_file() if p.suffix in (".py", ".pyi") else _holds_python(p)
 
 
 def _module_paths(module: str) -> tuple[str, str]:
@@ -390,12 +405,13 @@ def _digest(text: str) -> str:
     return hashlib.sha256(_norm(text).encode("utf-8")).hexdigest()
 
 
-def _read_state() -> dict[str, Any]:
-    """state.json as an object: {} when it is missing, unreadable (not UTF-8: PS 5.1 `>` writes
-    UTF-16), not JSON or not an object. A BOM (an editor, PS 5.1 Set-Content) is fine; a file with
-    git conflict markers keeps what both sides agree on (_unconflicted)."""
+def _read_state(path: Path | None = None) -> dict[str, Any]:
+    """state.json (or `path`) as an object: {} when it is missing, unreadable (not UTF-8: PS 5.1
+    `>` writes UTF-16), not JSON or not an object. A BOM (an editor, PS 5.1 Set-Content) is fine; a
+    file with git conflict markers keeps what both sides agree on (_unconflicted). cmd_apply
+    reads its `applied` record through it too."""
     try:
-        text = STATE_FILE.read_text(encoding="utf-8-sig")
+        text = (path or STATE_FILE).read_text(encoding="utf-8-sig")
     except (OSError, ValueError):  # ValueError: UnicodeDecodeError
         return {}
     try:

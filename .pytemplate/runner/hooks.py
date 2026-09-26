@@ -654,6 +654,14 @@ def doctor(cfg: Config, check: Check, project: Path = ROOT) -> None:
         return
     ui.step("git hook")
     check(*_status_line(cfg, repo))
+    ci = ".github/workflows/ci.yml"
+    if repo.prefix and (project / ci).is_file():  # new warns only when it creates a project there
+        check(
+            None,
+            f"generated CI: {repo.prefix}/{ci} never runs (GitHub reads {repo.top.name}/.github/workflows only)",
+            f"For CI, add a workflow to the repository that runs its steps in {repo.prefix} "
+            f"(defaults.run.working-directory) and takes the artifacts from {repo.prefix}/dist/",
+        )
 
 
 # --- run: the checks -------------------------------------------------------------------------------

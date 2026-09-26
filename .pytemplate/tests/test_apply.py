@@ -356,6 +356,25 @@ def test_a_malformed_record_is_ignored_and_replaced(tmp_path: Path, content: str
     assert cmd_apply.load_record(state) == RECORD
 
 
+@pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_a_record_outside_a_merge_conflict_is_read(tmp_path: Path, eol: str) -> None:
+    """`git merge` left conflict markers in the hashes of state.json, the record intact below
+    them: `./deploy apply` run before any rendering command read no record and refused with a
+    false 'app.preset was changed' (render already salvages it: render._unconflicted)."""
+    state = tmp_path / "state.json"
+    ours = json.dumps({"comment": "x", "files": {"a": "1" * 64}, "applied": RECORD}, indent=2).split("\n")
+    theirs = [line.replace("1" * 64, "2" * 64) for line in ours]
+    lines: list[str] = []
+    for a, b in zip(ours, theirs, strict=True):
+        lines += [a] if a == b else ["<<<<<<< HEAD", a, "=======", b, ">>>>>>> other"]
+    state.write_text(eol.join(lines) + eol, encoding="utf-8", newline="")
+    assert cmd_apply.load_record(state) == RECORD
+    other = {**RECORD, "name": "beta"}
+    assert cmd_apply.save_record(other, state) is True
+    # written as valid JSON without the untrusted hashes: every generated file is rendered again
+    assert json.loads(state.read_text(encoding="utf-8")) == {"comment": "x", "applied": other}
+
+
 def test_record_with_a_bom_is_read(tmp_path: Path) -> None:
     state = tmp_path / "state.json"
     state.write_bytes(b"\xef\xbb\xbf" + json.dumps({"applied": RECORD}).encode("utf-8"))
@@ -1296,6 +1315,22 @@ def test_reference_problems(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     project.edit("backend", "supported", ["cpython"])
     project.edit("backend", "active", "cpython")
     assert len(cmd_apply.reference_problems(project.cfg())) == 1  # compile.modules only matters with mypyc
+
+
+def test_reference_problems_see_through_a_leftover_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A folder left holding only __pycache__ (a module deleted, a package turned into a module)
+    is no module: mypyc finds nothing there (config.compiled_paths, mypyc.compiled_sources)."""
+    project, _ = _project(tmp_path, monkeypatch)
+    project.edit("compile", "modules", ["alpha.core", "alpha.gone", "alpha.bench"])
+    for leftover in ("gone", "bench"):
+        (project.root / "src" / "alpha" / leftover / "__pycache__").mkdir(parents=True)
+        (project.root / "src" / "alpha" / leftover / "__pycache__" / "m.cpython-314.pyc").write_bytes(b"")
+    (project.root / "src" / "alpha" / "bench.py").write_text("X = 1\n", encoding="utf-8")
+    problems = [p for p in cmd_apply.reference_problems(project.cfg()) if p.startswith("compile.modules")]
+    assert problems == ["compile.modules: alpha.gone not found in src/ (mypyc builds and `test mypyc` will fail)"]
+    # a namespace folder that holds modules is one
+    (project.root / "src" / "alpha" / "gone" / "m.py").write_text("X = 1\n", encoding="utf-8")
+    assert not [p for p in cmd_apply.reference_problems(project.cfg()) if p.startswith("compile.modules")]
 
 
 def test_render_auto_points_at_apply(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

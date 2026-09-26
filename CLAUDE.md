@@ -552,7 +552,7 @@ header rules (with detector tests proving each rule fires).
 |---|---|
 | `deploy.py` (one level up) | Stops with exit 3 and one `error:` line (no traceback) when uv started it on Python < 3.11 (a `uv run` by hand with an old `UV_PYTHON`), BEFORE importing the runner; reconfigures stdout/stderr to UTF-8, puts its own dir on `sys.path`, calls `runner.cli.main`. |
 | `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `FORWARDS` / `HELP_PASSES_THROUGH` (section 5.2); `INTERNAL` (routes listed nowhere: `__init`). `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main`/`_main` (exception -> exit code, closed stdout), `cmd_help` (commands and `[tasks]` entries), `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
-| `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file` (section 6.1), its TOML statement scanner `scan` (render reads pyproject.toml with it, 6.3), `toml_value`. |
+| `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths` (`import_path`), comment-preserving editor `set_value` / `update_file` (section 6.1), its TOML statement scanner `scan` (render reads pyproject.toml with it, 6.3), `toml_value`. |
 | `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL` (`detect_wsl`: `wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C and passes SIGTERM/SIGHUP on), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`. |
@@ -818,8 +818,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   somebody else's `pre-commit.local`) and never touches another one (section 5.8). Any other
   git failure (dubious ownership...) is shown with git's own message: a warning in apply, an
   info line in `doctor` (whose "git hook" line is otherwise info too: missing is not a
-  problem). Every git call runs with `LC_ALL=C` (find_repo reads "not a git repository" in
-  English).
+  problem; for a project below the repository's top it adds an info line that the generated
+  `ci.yml` never runs there, section 13.2). Every git call runs with `LC_ALL=C` (find_repo
+  reads "not a git repository" in English).
 - The hook: `pre-commit` in the folder `git rev-parse --git-path hooks` reports (worktree
   aware), pure ASCII + LF, a marker comment, and `sh <launcher> hooks run` with the POSIX
   launcher path relative to the repository top (the project may be a subfolder of a bigger
@@ -1028,8 +1029,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   alone; the summary line follows `hooks.hook_state`) -> `render.apply` -> `rename.tidy_after`
   -> the unused-environment note (`unused_envs`: every `.venv*` of this side no supported backend
   uses, `.venv-jit` of older templates included; never deleted) -> warnings for missing
-  references (`reference_problems`: src/<pkg>/, compile.modules, app.assets, deploy.exe.icon,
-  deploy.upx.path; the `--dry-run` of a rename looks for them where they are before the move)
+  references (`reference_problems`: src/<pkg>/, compile.modules (the path `config.import_path`
+  gives, which must be a file or hold a `.py`/`.pyi` file: a folder left holding only
+  `__pycache__` is missing), app.assets, deploy.exe.icon, deploy.upx.path; the `--dry-run` of a
+  rename looks for them where they are before the move)
   -> a summary. A state.json or pyproject.toml that cannot be written is a `DeployError`
   naming it.
 - `--frozen`, never `--no-sync`: `flet-cli==V` pins `flet==V`, so a resolving `uv add` of one
@@ -1116,9 +1119,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   against each other: no entry of `modules` inside another (or repeated: mypyc aborted with
   "Duplicate module"), every `exclude` strictly inside a `modules` entry (a module or a
   subpackage: it excludes everything below it). Each `modules` entry is the path Python imports
-  (`config.compiled_paths`: a folder with `__init__.py`, else `<name>.py`, else a namespace
-  folder; a folder left holding only `__pycache__` never hides the module file, and the pyright
-  strict list follows it too). Whether they exist is checked by `mypyc.compiled_sources`: an
+  (`config.compiled_paths` through `config.import_path`: a folder with `__init__.py`, else
+  `<name>.py`, else a namespace folder; a folder left holding only `__pycache__` never hides the
+  module file, and the pyright strict list, lintc's `__file__` rule and apply's reference
+  warnings follow it too). Whether they exist is checked by `mypyc.compiled_sources`: an
   entry that does not exist or holds no module, or an `exclude` that names nothing, is an error
   naming the candidates, never a silent no-op.
 - `[deploy]`: `optimize 0|1|2`, `default {backend: method}` (merged over
@@ -1219,9 +1223,9 @@ re-rendering.
   (`render._unconflicted`, diff3 style too) without `files`: every generated file is written
   again and the `applied` record survives (it was lost, and a later apply refused with a false
   "app.preset was changed"); a key the sides disagree on is dropped (apply records it again).
-  `cmd_apply.load_record` reads the file itself, so run `./deploy render` (or any rendering
-  command) before `./deploy apply` after such a merge. `_save_state` keeps every other top-level key (`./deploy
-  apply` records its own) and the key order. Hashes of files no longer generated stay recorded
+  `cmd_apply.load_record` and `save_record` read the file through `render._read_state` too, so
+  an `apply` run first after such a merge finds the record as well. `_save_state` keeps every
+  other top-level key (`./deploy apply` records its own) and the key order. Hashes of files no longer generated stay recorded
   (a file that comes back keeps its hand-edit protection).
 - `--check` and `--dry-run` write nothing. A folder in the way, or a read/write error, is a
   DeployError naming the file.
@@ -1426,19 +1430,28 @@ Formats:
   so a compiled package that holds an excluded path is listed by its other files and folders
   (`render._paths_without`, only then does the list depend on the files in `src/`); a folder
   counts only when it holds a `.py`/`.pyi` file (`render._holds_python`, also for `tests/` in
-  `.mypy.ini` and pyright's `include`): a folder left holding only `__pycache__` (a subpackage
-  deleted with `git rm -r`) made the committed file differ from a fresh clone's, and CI's
-  `render --check` failed. An untracked `.py` file does count, like any source file: commit it
-  with the regenerated `pyrightconfig.json`; with
-  basedpyright the excluded paths come first in `executionEnvironments` (the first match wins)
-  without the Any rules. The same sections reach the stage's compile-time `mypy.ini`.
+  `.mypy.ini` and pyright's `include`, for `typings/` (`render.typings_dir`: `mypy_path`,
+  `stubPath`), for the folders of the VS Code mypy matchers (`vscode._roots`), for the roots of
+  basedpyright's `executionEnvironments` (`render._has_code`), and for a `compile.modules`
+  entry, written as its `.py` file when its folder holds no code): a folder left holding only
+  `__pycache__`, or emptied by hand (a subpackage deleted with `git rm -r`, a package turned
+  into a module, stubs deleted with `rm -r`) made the committed file differ from a fresh
+  clone's, and CI's `render --check` failed. An untracked `.py` file does count, like any
+  source file: commit it with the regenerated `pyrightconfig.json`; with basedpyright the
+  excluded paths come first in `executionEnvironments` (the first match wins) without the Any
+  rules. The same sections reach the stage's compile-time `mypy.ini`.
 - `cmd_dev.run_checks(cfg, backend, rules=True)`:
   1. `_profile_file` writes `.build/cfg/ruff-<profile>.toml` and `.build/cfg/mypy-<profile>.ini`
      (the profile of THAT backend, which may differ from the editor's active one).
   2. `ruff check --config ...` (`--exit-zero` when the profile says so).
   3. mypy unless `skip_mypy`; with PyPy supported `render.mypy_cli_args` adds
      `--python-version <min_python> --python-executable <tool python>`. Exit 1 is only a
-     warning when the profile is not `blocking`.
+     warning when the profile is not `blocking`. The same `python_version = <min_python>` is in
+     the `[mypy]` section of `.mypy.ini` and the `.build/cfg` copies (`render.mypy_ini`; never
+     the compile-time `mypy.ini`: mypyc compiles for the Python it runs on), so a mypy started
+     with no arguments (VS Code's mypy extension) checks as 3.11 too: mypy's
+     `python_executable` defaults to its own interpreter, so a config `python_version` never
+     makes it look for a `python3.11` (`test_mypy_reading_the_generated_ini_alone_flags_what_pypy_lacks`).
   4. `lintc` rules on the compiled sources (when mypyc is supported and `rules`): errors only
      under the `mypyc` profile, warnings otherwise. A file the runner cannot parse is one
      finding (`imports.parse_error`: a syntax error, or syntax newer than the runner's own
@@ -1612,12 +1625,14 @@ Formats:
     silences it. A drift test compares the set with the locked mypyc's own source.
   - Nested classes and classes inside functions, each reported once (from its nearest class
     or function); t-strings; `if __name__ == "__main__"` (either order) at module level.
-  - Module-level `__file__` ONLY when `compile.modules` is one top-level module file
-    (`relative_file_at_import`): mypyc (>= 1.20.2) sets the real `__file__` before a module
-    body runs, from the folder of the shared lib; with a single top-level module there is no
-    shared lib and the body sees a relative `<mod><EXT_SUFFIX>`. It looks at what runs at
-    import (class bodies, decorators, default values), not function or lambda bodies. Pinned
-    by a real-compile test: if mypyc fixes that case, the test fails and the rule can go.
+  - Module-level `__file__` ONLY when `compile.modules` is one top-level module file, the one
+    Python imports (`relative_file_at_import` reads `config.compiled_paths`: a leftover folder
+    of that name without `__init__.py` does not turn the rule off): mypyc (>= 1.20.2) sets the
+    real `__file__` before a module body runs, from the folder of the shared lib; with a single
+    top-level module there is no shared lib and the body sees a relative `<mod><EXT_SUFFIX>`.
+    It looks at what runs at import (class bodies, decorators, default values), not function
+    or lambda bodies. Pinned by a real-compile test: if mypyc fixes that case, the test fails
+    and the rule can go.
   `lintc` does not import `presets` or `mypyc`.
 - With PyPy supported user code must be 3.11 syntax and API (no PEP 695;
   `typing_extensions.override`, not `typing.override`). `mode --supports +pypy` prechecks it
@@ -2776,7 +2791,8 @@ short temp tree and unset `NVIM_APPNAME`.
   pinned uv cannot download Pythons released after it), and the runner labels stay `-latest`
   (GitHub retires a pinned label about six months after a newer image is GA). It runs only
   when the project is the root of its repository (GitHub reads `<top>/.github/workflows/`):
-  `new` warns when it creates a project inside another work tree (section 15.2).
+  `new` warns when it creates a project inside another work tree, and `./deploy doctor` notes
+  it for a project that sits in one (section 15.2).
 - **[template repo]** `template-selftest.yml` (push to `main`, pull requests, weekly and by
   hand; the gate): `./deploy render --check` first, then `setup` and `./deploy selftest` on
   ubuntu, macos and windows-latest (Windows through `deploy.ps1`, `--basetemp` in
@@ -4090,10 +4106,12 @@ Behaviour:
   the repository top) still gets its generated CI at `<project>/.github/workflows/ci.yml`, which
   GitHub never runs (it reads `<top>/.github/workflows/` only), and whose steps expect the
   project at the checkout root. `new` warns when it creates one there
-  (`cmd_mode._monorepo_note`); a project moved into a repository later gets no warning (render
-  runs no git, doctor does not check it). A fix would generate a relocatable workflow (a
+  (`cmd_mode._monorepo_note`), and `./deploy doctor` notes it (`[--]`, never a problem: the
+  setup is supported) for a project moved or cloned into a repository later (`hooks.doctor`:
+  the repository's top is not the project and the generated `ci.yml` exists); render runs no
+  git, so the other commands say nothing. A fix would generate a relocatable workflow (a
   `PROJECT` folder for `defaults.run.working-directory` and the artifact paths) for the user to
-  place at the top, or a doctor line.
+  place at the top.
 - flet presets: `constraints.txt` gives a new project httpx 0.28.1, but flet 1.0.1 only asks
   for `httpx>=0.28.1`, so `./deploy lock --upgrade` takes httpx 1.x once it is final, and its
   1.0 dev releases drop `AsyncClient`, which `flet.auth` (OAuth; not used by the skeleton)
@@ -4124,17 +4142,6 @@ Editors:
   are missed); for multi-line basedpyright messages only the first line is used (the rule code
   is lost); MSVC/gcc errors are not matched.
 - `actboy168.tasks` is a small third-party extension (disabled in Restricted Mode).
-- With PyPy supported, VS Code's mypy extension (mypy-type-checker) checks as the `.venv`
-  Python, not as `min_python`: an API that 3.11 lacks (`typing.override`) passes there while
-  `./deploy check` (`render.mypy_cli_args`), the Neovim linter and Pylance/basedpyright
-  (`pythonVersion`) flag it. `python_version` cannot go into `.mypy.ini`: without
-  `--python-executable` mypy then looks for a `python3.11` (`py -3.11` on Windows) for the
-  site-packages and stops without one, or reads another environment's packages with one; the
-  extension passes no `--python-executable` (it substitutes `${interpreter}` only in
-  `mypy-type-checker.path`), and a per-OS `.venv` path cannot go into a file committed for every
-  OS. Not fixed (unverifiable here: VS Code itself is untested, section 13.3); a candidate is a
-  generated `mypy-type-checker.path` of `${interpreter} -m mypy --python-version X
-  --python-executable ${interpreter}`, once verified in VS Code.
 - Stopping the flet `dev` task (hot reload) on Windows, from VS Code or Neovim, relies on
   ConPTY closing and uv's job object killing `flet.exe`: not verified.
 - Extras imported from `.lazy.lua` show as "not managed" in `:LazyExtras` and change
@@ -4170,9 +4177,13 @@ Code coupling (rename together):
   `BINARY_SUFFIXES`, and only `pytest.mark` at module level); `rename` calls the private
   `config._build`, `config._decode`, `config._string_end` (with `config._ScanError`, for
   `_toml_strings`), `presets._norm_name` and, lazily, `cmd_env._is_link`; `cmd_apply` calls the
-  private `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311` and
-  `rename._plan_pyproject`; `rename` and `cmd_env` import `cmd_apply` lazily (it imports both
-  at module level).
+  private `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311`,
+  `rename._plan_pyproject`, `render._holds_python` and `render._read_state`; `rename` and
+  `cmd_env` import `cmd_apply` lazily (it imports both at module level).
+- Which path a `compile.modules` entry names is decided once, by `config.import_path`
+  (`config.compiled_paths`): `mypyc.compiled_sources`, the pyright strict list,
+  `lintc.relative_file_at_import` and `cmd_apply.reference_problems` all read it (a copy of the
+  old folder-wins rule in lintc once turned the `__file__` rule off next to a leftover folder).
 - `upx.BUILTIN_EXCLUDE` must keep `flutter_windows.dll`; `nuitka._flet_client_archive` mirrors
   flet_desktop's download URL, its `FLET_CLIENT_URL` override and its `flet_desktop/app/`
   lookup, and `nuitka.archive_problem` the way `ensure_client_cached` extracts the archive.

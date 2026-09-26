@@ -384,6 +384,7 @@ MODULE_LEVEL_FILE = (
 def test_lintc_allows_module_level_file_with_a_shared_lib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, modules: list[str]) -> None:
     (tmp_path / "src" / "myapp").mkdir(parents=True)  # a package, whatever this project's is called
     monkeypatch.setattr(lintc, "SRC", tmp_path / "src")
+    monkeypatch.setattr(config, "SRC", tmp_path / "src")
     found = _lint(tmp_path, MODULE_LEVEL_FILE, {"compile": {"modules": modules}})
     assert not [f for f in found if "__file__" in f.message]
 
@@ -394,12 +395,24 @@ def test_lintc_flags_module_level_file_for_a_single_top_level_module(tmp_path: P
     assert all("relative path" in f.message and "inside a function" in f.message for f in found)
 
 
-def test_lintc_single_top_level_package_is_not_relative(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    src = tmp_path / "src"
-    (src / "solo").mkdir(parents=True)  # a package: its modules have dotted names, mypyc builds a shared lib
-    monkeypatch.setattr(lintc, "SRC", src)
+def test_lintc_single_top_level_package_is_not_relative(src_tree: Path) -> None:
+    (src_tree / "solo").mkdir()  # a package: its modules have dotted names, mypyc builds a shared lib
     assert not lintc.relative_file_at_import(make({"compile": {"modules": ["solo"]}}))
     assert lintc.relative_file_at_import(make({"compile": {"modules": ["other"]}}))
+
+
+def test_lintc_flags_a_lone_module_next_to_a_leftover_folder(src_tree: Path) -> None:
+    """A package turned into a module leaves solo/__pycache__/ behind: Python (and mypyc, through
+    config.compiled_paths) takes solo.py, alone, with no shared lib, so the rule must still fire."""
+    _project(src_tree, {"solo.py": MODULE_LEVEL_FILE, "solo/__pycache__/solo.cpython-314.pyc": b""})
+    cfg = make({"compile": {"modules": ["solo"]}})
+    assert config.compiled_paths(cfg) == ["solo.py"]
+    assert lintc.relative_file_at_import(cfg)
+    found = lintc.lint(cfg, mypyc.compiled_sources(cfg))
+    assert sorted(f.line for f in found if "__file__" in f.message) == [2, 3, 6, 9]
+    # a real package of that name wins over solo.py, as in Python: dotted modules, a shared lib
+    _project(src_tree, {"solo/__init__.py": "", "solo/m.py": MODULE_LEVEL_FILE})
+    assert not lintc.relative_file_at_import(cfg)
 
 
 @pytest.mark.parametrize(
@@ -1685,6 +1698,37 @@ def test_compile_mypy_ini_finds_typings_in_any_project_folder(tmp_path: Path, mo
     assert r.returncode == 0, r.stdout + r.stderr  # mypyc runs mypy the same way: from the stage
 
 
+@pytest.mark.parametrize("supported", [["cpython", "mypyc"], ["cpython", "pypy", "mypyc"]])
+def test_mypy_ini_checks_as_min_python_while_pypy_is_supported(supported: list[str], tmp_path: Path) -> None:
+    """VS Code's mypy extension reads .mypy.ini and passes no --python-version: without
+    python_version there it checked as the .venv's Python and missed the 3.11 API errors that
+    `./deploy check` (render.mypy_cli_args) and the Neovim linter report."""
+    cfg = make({"backend": {"supported": supported}})
+    expected = cfg.min_python if cfg.pypy_enabled else None
+    assert (expected == "3.11") is ("pypy" in supported)
+    for profile in ("strict", "mypyc", "warn", "off"):
+        assert _ini(render.mypy_ini(cfg, profile)).get("mypy", "python_version", fallback=None) == expected
+    # mypyc compiles for the interpreter it runs on: the compile-time ini never pins another one
+    assert _ini(render.mypy_ini(cfg, "mypyc", for_compile=tmp_path)).get("mypy", "python_version", fallback=None) is None
+
+
+@needs_venv
+def test_mypy_reading_the_generated_ini_alone_flags_what_pypy_lacks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the extension runs: mypy from the project folder, the .venv's interpreter, no
+    arguments. It must find the 3.12+ API, with no python3.11 on PATH and the .venv's packages."""
+    root = _project(
+        tmp_path,
+        {"src/myapp/__init__.py": "", "src/myapp/ov.py": "import pytest\nfrom typing import override\n", "tests/__init__.py": ""},
+    )
+    monkeypatch.setattr(render, "ROOT", root)
+    (root / ".mypy.ini").write_text(render.mypy_ini(make({"backend": {"supported": ["cpython", "pypy"]}}), "strict"), encoding="utf-8")
+    (tmp_path / "empty").mkdir()
+    env = {**proc.base_env(), "PATH": str(tmp_path / "empty")}
+    r = subprocess.run([str(TOOL_PYTHON), "-m", "mypy", "--no-incremental"], cwd=root, env=env, capture_output=True, text=True, check=False)
+    assert r.returncode == 1 and 'Module "typing" has no attribute "override"' in r.stdout, r.stdout + r.stderr
+    assert "pytest" not in r.stdout  # the .venv's packages, not another environment's
+
+
 def test_mypy_ini_without_compiled_rules_has_no_exclude_sections() -> None:
     cfg = make({"compile": {"exclude": ["myapp.core.loose"]}})
     assert [s for s in _ini(render.mypy_ini(cfg, "strict")).sections() if s != "mypy"] == []
@@ -1795,6 +1839,27 @@ def test_pyright_strict_list_never_names_a_folder_without_python(pyright_tree: P
     assert "src/myapp/core/old" in render.pyright_config(cfg, "mypyc")["strict"]
 
 
+def test_pyright_environments_never_name_a_leftover_folder(pyright_tree: Path) -> None:
+    """The excluded module loose.py and the compiled module bench.py each next to a folder left
+    holding only __pycache__ (a package turned into a module): basedpyright's
+    executionEnvironments and the strict list stay what a fresh clone renders."""
+    for modules, exclude in ((["myapp.core"], ["myapp.core.loose"]), (["myapp.core.bench"], [])):
+        cfg = make({"typing": {"editor": "basedpyright"}, "compile": {"modules": modules, "exclude": exclude}})
+        before = render.pyright_config(cfg, "mypyc")
+        for leftover in ("loose", "bench"):
+            _project(pyright_tree, {f"src/myapp/core/{leftover}/__pycache__/x.cpython-314.pyc": b""})
+        after = render.pyright_config(cfg, "mypyc")
+        assert after["executionEnvironments"] == before["executionEnvironments"]
+        assert after["strict"] == before["strict"]
+        for leftover in ("loose", "bench"):
+            shutil.rmtree(pyright_tree / "src/myapp/core" / leftover)
+    # a compiled module that is gone, its folder left behind: what a clone without the folder renders
+    cfg = make({"typing": {"editor": "basedpyright"}, "compile": {"modules": ["myapp.core.gone"]}})
+    clone = render.pyright_config(cfg, "mypyc")
+    _project(pyright_tree, {"src/myapp/core/gone/__pycache__/x.cpython-314.pyc": b""})
+    assert render.pyright_config(cfg, "mypyc") == clone
+
+
 def test_a_tests_folder_without_python_is_no_code_folder(pyright_tree: Path) -> None:
     """The same for a tests/ folder left holding only __pycache__ (.mypy.ini files, pyright include)."""
     shutil.rmtree(pyright_tree / "tests")
@@ -1804,6 +1869,19 @@ def test_a_tests_folder_without_python_is_no_code_folder(pyright_tree: Path) -> 
     _project(pyright_tree, {"tests/test_x.py": ""})
     assert "\nfiles = src, tests\n" in render.mypy_ini(make({}), "strict")
     assert render.pyright_config(make({}), "strict")["include"] == ["src", "tests"]
+
+
+def test_a_typings_folder_without_stubs_is_no_stub_folder(pyright_tree: Path) -> None:
+    """typings/ emptied by hand (`rm -r typings/raylib`: git removes no folder it did not
+    delete) is not in a fresh clone: mypy_path and stubPath must not name it."""
+    before = (render.mypy_ini(make({}), "strict"), render.pyright_config(make({}), "strict"))
+    (pyright_tree / "typings" / "raylib").mkdir(parents=True)
+    assert render.typings_dir() is None
+    assert (render.mypy_ini(make({}), "strict"), render.pyright_config(make({}), "strict")) == before
+    _project(pyright_tree, {"typings/raylib/__init__.pyi": ""})
+    assert render.typings_dir() == pyright_tree / "typings"
+    assert "\nmypy_path = src, typings\n" in render.mypy_ini(make({}), "strict")
+    assert render.pyright_config(make({}), "strict")["stubPath"] == "typings"
 
 
 def test_pyright_config_without_exclude_is_unchanged(pyright_tree: Path) -> None:

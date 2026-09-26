@@ -802,6 +802,21 @@ def test_header_lookalikes_in_strings_are_text(pyproject: Path, where: str, inse
     assert new.count("requires-python") == 1 and new.startswith('[project]\nrequires-python = ">=3.14"\n')
 
 
+@pytest.mark.parametrize("key", ['"bad\\q"', "'''x'''", '"\\uD800"'])
+def test_a_key_tomllib_refuses_is_invalid_toml_never_a_traceback(pyproject: Path, key: str) -> None:
+    """config.scan read quoted keys with tomllib and let its TOMLDecodeError escape: every
+    rendering command (render.auto), doctor and the hook died with an internal-error traceback."""
+    text = pyproject_text(CFG).replace("[project]\n", f"[project]\n{key} = 1\n", 1)
+    assert config.scan(text) is None
+    _write(pyproject, text)
+    assert render.pyproject_outdated(CFG) is True
+    with pytest.raises(DeployError, match="pyproject.toml is not valid TOML") as e:
+        render.write_pyproject(CFG)
+    assert e.value.code == 2
+    with pytest.raises(DeployError, match="pyproject.toml is not valid TOML"):
+        render.check_pyproject(CFG)
+
+
 def test_verify_requires_the_managed_values_in_tool_uv() -> None:
     # A safety net behind the marker checks: whatever the rewrite did, uv must find the values
     text = pyproject_text(CFG)

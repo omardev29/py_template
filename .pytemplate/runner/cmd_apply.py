@@ -26,7 +26,7 @@ prints the plan and stops):
      requirements (dev group too; --frozen because flet-cli==V pins flet==V, so a resolving add
      of one group alone has no solution), then cmd_env.ensure_lock (managed pyproject parts and
      one `uv lock`).
-  5. PyPy newly supported (tool.uv environments had no PyPy): the Python 3.11 precheck of
+  5. PyPy newly supported (tool.uv environments had no PyPy): the PyPy precheck (pypy_minor) of
      `mode --supports +pypy`. It syncs the tools environment with this configuration, so it runs
      once pyproject.toml and uv.lock follow it. If 4 or 5 fail, pyproject.toml and uv.lock get
      their old bytes back: nothing half-applied. Then the record (the steps below can still fail).
@@ -49,7 +49,7 @@ from typing import Any
 
 from . import cmd_env, envs, hooks, presets, proc, render, rename, ui
 from .cmd_dev import only_flags
-from .config import Config
+from .config import Config, import_path
 from .project import PYPROJECT, ROOT, STATE_FILE, rel
 from .ui import DeployError
 
@@ -148,13 +148,9 @@ def _str_list(value: object) -> bool:
 
 
 def load_record(path: Path | None = None) -> dict[str, Any] | None:
-    """Return the `applied` record of .pytemplate/state.json (None: missing or malformed)."""
-    path = path or _state_file()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        return None
-    record = data.get(RECORD_KEY) if isinstance(data, dict) else None
+    """Return the `applied` record of .pytemplate/state.json (None: missing or malformed). Read
+    like render reads the file: outside git's conflict markers the record survives a merge."""
+    record = render._read_state(path or _state_file()).get(RECORD_KEY)
     if not isinstance(record, dict):
         return None
     name, preset = record.get("name"), record.get("preset")
@@ -168,12 +164,7 @@ def save_record(record: dict[str, Any], path: Path | None = None) -> bool:
     """Store the record in .pytemplate/state.json, keeping every other key (the hashes of the
     generated files). Return whether it changed; nothing is written under --dry-run."""
     path = path or _state_file()
-    try:
-        data: Any = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
+    data = render._read_state(path)  # a conflicted file: what both sides agree on, no hashes
     if data.get(RECORD_KEY) == record:
         return False
     if proc.DRY_RUN:
@@ -616,9 +607,9 @@ def reference_problems(cfg: Config, *, package: bool = True, move: tuple[str, st
         except ValueError:
             return path
 
-    def module_exists(module: str) -> bool:
-        base = src / module.replace(".", "/")
-        return now(base).is_dir() or now(base.with_name(base.name + ".py")).is_file()
+    def module_exists(module: str) -> bool:  # what mypyc.compiled_sources finds a module in
+        path = import_path(now(src / module.replace(".", "/")))
+        return path.is_file() or render._holds_python(path)
 
     out: list[str] = []
     missing = missing_package(cfg) if package else None
@@ -741,7 +732,7 @@ def _print_plan(plan: Plan, command: str, force: bool) -> None:
     if plan.pypy_new and fresh:
         cmd_mode_precheck(plan.cfg)  # read-only under --dry-run
     elif plan.pypy_new:  # its `uv run --locked` would fail on the lock alone: apply runs it after the re-lock
-        ui.info("  (--dry-run) the Python 3.11 check (PyPy is new) is not run: uv.lock does not match yet; apply runs it after the re-lock")
+        ui.info(f"  (--dry-run) the Python {plan.cfg.pypy_minor} check (PyPy is new) is not run: uv.lock does not match yet; apply runs it after the re-lock")
     rows: list[tuple[str, str]] = []
     if plan.rename_plan is not None:
         n = plan.rename_plan.names
@@ -786,7 +777,8 @@ def _print_plan(plan: Plan, command: str, force: bool) -> None:
 
 
 def cmd_mode_precheck(cfg: Config) -> None:
-    """The Python 3.11 check of `mode --supports +pypy` (read-only under --dry-run)."""
+    """The PyPy precheck of `mode --supports +pypy`: the Python of python.pypy (3.11 by default;
+    Config.pypy_minor). Read-only under --dry-run."""
     from .cmd_mode import _precheck_py311
 
     _precheck_py311(cfg)
@@ -842,7 +834,7 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
         _edit_dependencies(cfg, plan.deps)
         cmd_env.ensure_lock(cfg)
         if plan.pypy_new:
-            # The Python 3.11 check of `mode --supports +pypy`. It syncs the tools environment
+            # The PyPy precheck of `mode --supports +pypy`. It syncs the tools environment
             # (`uv sync --locked`) with THIS configuration, so it runs once pyproject.toml and
             # uv.lock follow it (a python.cpython change in the same edit made uv refuse the old
             # lock); when it fails, both get their old bytes back below.

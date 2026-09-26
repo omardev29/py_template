@@ -738,10 +738,17 @@ def compiled_paths(cfg: Config) -> list[str]:
     out: list[str] = []
     for m in cfg.compile.modules:
         base = m.replace(".", "/")
-        folder = SRC / base
-        package = (folder / "__init__.py").is_file() or not (SRC / f"{base}.py").is_file()
-        out.append(base if package and folder.is_dir() else base + ".py")
+        out.append(base if import_path(SRC / base) == SRC / base else base + ".py")
     return out
+
+
+def import_path(folder: Path) -> Path:
+    """What Python imports for the module whose package folder would be `folder`: the folder
+    when it holds __init__.py, else `<folder>.py` when that file exists, else the folder when it
+    exists (a namespace package, maybe one left holding only __pycache__), else `<folder>.py`."""
+    file = folder.with_name(folder.name + ".py")
+    package = (folder / "__init__.py").is_file() or not file.is_file()
+    return folder if package and folder.is_dir() else file
 
 
 # --- editing pytemplate.toml while keeping comments --------------------------------------------
@@ -860,8 +867,13 @@ def _key(text: str, i: int) -> tuple[tuple[str, ...], int]:
     while True:
         i = _skip_blank(text, i)
         if text.startswith(('"', "'"), i):
+            if text.startswith(('"""', "'''"), i):  # a multi-line string is no key
+                raise _ScanError(i)
             end = _string_end(text, i)
-            parts.append(str(tomllib.loads("k = " + text[i:end])["k"]))
+            try:
+                parts.append(str(tomllib.loads("k = " + text[i:end])["k"]))
+            except tomllib.TOMLDecodeError:  # a bad escape: not valid TOML, never a traceback
+                raise _ScanError(i) from None
             i = end
         else:
             m = _BARE_KEY.match(text, i)
