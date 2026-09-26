@@ -41,7 +41,9 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
 10. QUALITY BAR (set by the owner; never relax it, never argue it away). Bug density = confirmed
     bugs / lines of our code:
     - at most 1 bug per 1000 lines: ACCEPTABLE, the only state in which the work is done;
-    - worse than 1 per 1000 (1 per 500 included): UNACCEPTABLE, fixing it comes first;
+    - worse than 1 per 1000 but better than 1 per 500: TOLERABLE only with a written plan back
+      under 1 per 1000 (every known bug listed with its fix);
+    - 1 per 500 or worse: UNACCEPTABLE, fixing it comes before anything else;
     - worse than 1 per 100: UNRELIABLE software.
     Counted: a reproduced defect of OUR code (the runner, launchers, templates, presets, the
     Neovim plugin, the template's CI) that stops the user from doing something, at one of three
@@ -53,6 +55,8 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
       supported setup, and there is no reasonable workaround;
     - notable: it fails in a supported case but a workaround exists, or it leaves a half-made
       change or a broken state the user must repair by hand.
+    Stability defects (what breaks by itself with time: a moving version, a schedule GitHub
+    disables) count like bugs, at the same severities.
     Not counted, but still fixed when found: minor and cosmetic defects that stop nothing (a
     character printed wrong, an `n` with tilde garbled in a message, an unclear hint, layout).
     Also not counted: the user's code;
@@ -773,8 +777,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 
 - `./deploy rename NEW_NAME [--force]`: `check_new_name` refuses a bad format, a keyword, a
   standard-library module of ANY Python the project can run on (`presets.shadows_stdlib`: the
-  runner's `sys.stdlib_module_names` plus `STDLIB_OTHER_VERSIONS`; uv keeps whatever Python ran
-  `./deploy` first, 3.11 on one machine and 3.15 on another), a dependency
+  runner's `sys.stdlib_module_names` plus `STDLIB_OTHER_VERSIONS`: the runner runs on
+  `python.cpython` (5.2), but the app may also run on PyPy 3.11 and `python.cpython` can move), a
+  dependency
   (`presets.check_name_free`, also used by `new` and `__init`) and any package of `uv.lock`
   (`locked_names`: indirect ones too, pygments via rich; the project's own entry excluded) and
   a backend name (`config.BACKENDS`: `src/mypyc/` would shadow mypy's compiler in the stage,
@@ -1419,7 +1424,10 @@ Per method:
   strips that prefix before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. The base's
   `__pycache__` folders are never copied. Prunes `include libs Tools share Scripts`, every `bin/` entry but the interpreter (`BIN_KEEP`:
   `python*`, `pypy*`, `libpypy*`; the base's console scripts, e.g. a 24 MB `ruff` installed into
-  it, carried the build machine's paths), `tcl*` (Windows
+  it, carried the build machine's paths), on Linux the shared `lib/libpython3.X.so*` when the
+  interpreter does not list it in its ELF `DT_NEEDED` (`_keeps_libpython`, `_elf_needed`:
+  python-build-standalone links the interpreter statically, so it was 33 MB twice; extension
+  modules never link libpython on Linux; an unreadable interpreter keeps it), `tcl*` (Windows
   base), stdlib `test idlelib turtledemo ensurepip site-packages`, `test`/`tests` subfolders of
   stdlib packages (PyPy's `unittest/test`, `lib2to3/tests`...), `*.debug` (PyPy's detached debug
   symbols, 16 MB), PyPy `hpy/devel`, and Tk unless `src/` or an installed dependency in `lib/`
@@ -1464,6 +1472,23 @@ Per method:
     `sys.path` as `boot.py` (`app/` first, then `lib/`), result read from a `PTSMOKE:` marker
     line because imported packages may print (raylib's banner); a failed import shows the
     traceback and raises `DeployError`.
+- **pyz is THE portable method (owner decision: never narrow it, never make it host-only).**
+  exe, nuitka and a bundled portable carry an interpreter, so each build serves one OS, one
+  architecture and one libc floor. A pyz carries no interpreter: ONE file for every platform
+  where a compatible Python runs. Keep these properties, and test them when pyz changes:
+  - a pure build (no native dependency, no platform- or version-conditional pin) runs on ANY
+    OS, architecture and libc with CPython or PyPy >= `min_python` (glibc, musl, Android/Termux,
+    the BSDs, riscv64...): the bootstrap falls back to `common/` for any key it has no target for;
+  - native dependencies travel per target key (`targets/<key>/lib`), installed cross-platform
+    by uv for every key of `[deploy.pyz] targets` / `--target` (Windows, Linux and macOS on
+    x86_64 and aarch64); PyPy keys and the mypyc extensions come from the build machine, and
+    `pyz-merge` joins builds made on several machines into one file (the generated `ci.yml`
+    does it on every push);
+  - mypyc extensions are an overlay for the keys they were built on, with the `.py` as the
+    fallback everywhere else (slower, same result);
+  - what a non-pure pyz cannot reach is a limit to document, not a goal: its native targets
+    need the exact CPython minor of the lock (`cp314` wheels load only in 3.14), glibc >= 2.28
+    (x86_64) / 2.35 (aarch64), macOS >= `MACOS_FLOOR`; no musl or Android wheels.
 - **pyz**: Python cannot import `.pyd/.so` from a zip, so `__main__.py` extracts to a per-build
   cache (`%LOCALAPPDATA%` / `~/Library/Caches` / an absolute `$XDG_CACHE_HOME` or `~/.cache`,
   then `<name>/pyz/<build_id>/<key|pure>/`), guarded by a `.complete` marker and an atomic
@@ -2315,8 +2340,8 @@ template-launchers; real niubash only on the maintainer's machine).
     77 low; a few are duplicates of each other) and 44 stability defects (breakage that comes
     with time: moving versions, expiring schedules). That hunt's severities are not the three
     of rule 1.10 (some "low" findings stopped every command, e.g. a non-UTF-8 byte in
-    pytemplate.toml), so the counted density lies between 1 per 114 lines (high and medium
-    only: UNACCEPTABLE) and 1 per 63 (every bug: UNRELIABLE). The
+    pytemplate.toml), so the counted density lies between 1 per 91 lines (high and medium
+    bugs and stability defects only) and 1 per 50 (all of them): UNRELIABLE either way. The
     September 2026 overhaul fixed or deliberately closed every one of the 172 bugs (wave 1)
     and took on the CI stability defects (wave 2); the code grew to 14,588 lines.
   - After the overhaul: not measured yet. Until a measurement says otherwise, the project is not
@@ -2411,11 +2436,834 @@ Files and git:
 
 ### 15.1 Upstream defects we work around
 
-A defect of a dependency that we work around is not our bug (rule 1.10) only while it is
-listed here: dependency and version, symptom, upstream issue (or "none filed"), our workaround
-by symbol, the test that covers it, and when the workaround can go.
+A dependency's defect that our code works around is not our bug (rule 1.10) only while it is
+listed here. One entry per workaround, grouped by dependency: what (DEFECT: it should work and
+does not; LIMITATION: documented or by-design behaviour we must live with), the symptom without
+the workaround, `Up:` the upstream issue (every DEFECT has one or "none found" after a search; a
+LIMITATION only when an issue discusses it; "cf." = related, not the same), `Fix:` our
+workaround by symbol and the section that explains it, `Test:` what covers it, `Goes:` when it
+can be removed. Versions as observed in September 2026 unless an entry says otherwise: uv
+0.12.19 (floor `envs.MIN_UV`), CPython 3.14.7 (the runner: 3.11+), PyPy 3.11.15, mypy/mypyc
+2.3.1, setuptools 84.0.0, PyInstaller 6.22.3, Nuitka 4.2.2, Flet 1.0.1, raylib 6.0.1.0, cffi
+2.1.1, ruff 0.16.9, UPX 5.2.1, Neovim 0.12.5 with the pinned LazyVim (`nvimtest.LOCK`),
+PowerShell 7.6 and 5.1, niubash 1.1.4. A new workaround gets its entry in the same commit; when
+an entry's `Goes:` comes true, the workaround and the entry go together.
 
-(Inventory in progress.)
+uv:
+- **`UV_PROJECT_ENVIRONMENT` needs `UV_PYTHON`** (LIMITATION): with only one of them uv silently
+  recreates the environment with another interpreter. Fix: `envs.env_vars` sets both, always
+  (7). Test:
+  `test_envs_core.py::test_env_vars_pin_the_environment_and_the_interpreter_together`. Goes:
+  never.
+- **The user's uv variables move the runner's calls** (LIMITATION): `UV_PROJECT`,
+  `UV_NO_PROJECT`, `UV_WORKING_DIR`, `UV_ISOLATED`, `UV_NO_DEV`, `UV_NO_DEFAULT_GROUPS`,
+  `UV_NO_SYNC` change the project, environment or groups of `uv run --locked`;
+  `UV_MANAGED_PYTHON`/`UV_NO_MANAGED_PYTHON` next to `UV_PYTHON_PREFERENCE` exit 2. Fix:
+  `proc.base_env` drops `proc.UV_SELECTION` (5.5). Test:
+  `test_cli_core.py::test_base_env_drops_what_would_move_uv_or_python`,
+  `test_uv_runs_in_the_projects_environment_whatever_the_user_exported`. Goes: never.
+- **`uv run --script` exports its throwaway environment** (LIMITATION): `VIRTUAL_ENV`, its
+  `bin/`/`Scripts/` first on PATH and `UV` reach every child, which then took the runner's
+  environment for the project's or skipped the launchers' own uv search. Fix: `proc.base_env`,
+  `shells.child_env`, `e2e.scrub_env`, `nvimtest.runner_env` (5.5). Test:
+  `test_cli_core.py::test_base_env_removes_the_runners_own_bin_folder`,
+  `test_shells.py::test_child_env_drops_what_uv_run_added`, `test_e2e_plan.py::test_scrub_env`.
+  Goes: never.
+- **A caller's `UV_PYTHON` picks the runner's interpreter** (LIMITATION): `uv run --script`
+  honours it, and a Python older than 3.11 crashed on `tomllib`. Fix: the launchers remove it,
+  the Neovim plugin and the nu snippet empty it (uv reads "" as unset), `.pytemplate/deploy.py`
+  exits 3 below 3.11 (4.1, 5.2). Test:
+  `test_launcher_sh.py::test_launcher_clears_the_callers_uv_python`,
+  `test_user_uv_python_older_than_3_11`, `test_entry_refuses_python_older_than_3_11`,
+  `test_launcher_win.py::test_ps1_clears_the_callers_uv_python_and_restores_it`. Goes: never.
+- **The project is found from the cwd** (LIMITATION): a work folder with its own
+  `pyproject.toml` (the `flet build` stage) became the project ("Unable to find lockfile"). Fix:
+  `envs.uv_run` adds `--project <ROOT>` (7). Test:
+  `test_fixes.py::test_uv_run_pins_the_project_outside_the_root`. Goes: never.
+- **`uv sync` is exact for the groups it installs** (LIMITATION): it removed a group added with
+  `./deploy add --group G`. Fix: `envs.sync` passes `--all-groups` (7). Test:
+  `test_envs_core.py::test_sync_installs_every_dependency_group`. Goes: never.
+- **An old uv knows only the interpreters of its release** (LIMITATION): < 0.10.12 cannot
+  download `pypy@3.11.15`, 0.8.x installs CPython 3.14.0rc2 without a word, < 0.6.15 has no `uv
+  export --format requirements.txt`. Fix: `envs.MIN_UV`, `envs.require_min_uv`,
+  `required-version` in `render.managed_block`, doctor (7). Test:
+  `test_envs_core.py::test_min_uv_matches_the_pinned_interpreters`,
+  `test_an_old_uv_is_refused_before_it_creates_an_environment`, `test_doctor_flags_an_old_uv`.
+  Goes: never (raise it with the pins).
+- **The lock resolves for every future Python** (LIMITATION): uv resolved for 3.15+, where
+  raylib has no wheels. Fix: `environments` bounded to the CPython and PyPy minors in
+  `render.managed_block` (7). Test: `test_runner.py::test_managed_block_bounds_cpython_minor`,
+  `test_managed_block_with_pypy`. Goes: never.
+- **uv's TOML edits re-attach comments** (LIMITATION, toml_edit): an end marker on a line of its
+  own could be detached from the managed block by `uv add`/`remove`. Fix: the end marker is an
+  inline comment on the block's last key (`render.managed_block`, 6.3). Test:
+  `test_runner.py::test_managed_block_bounds_cpython_minor`. Goes: never.
+- **`uv add` resolves each change alone** (LIMITATION): `flet-cli==V` pins `flet==V`, so adding
+  the new flet to one group had no solution. Fix: `uv add`/`remove --frozen`, then one `uv lock`
+  (`cmd_apply.apply`; `presets.init` removes the old preset's with `--frozen`; 5.8, 11). Test:
+  `test_apply.py::test_uv_frozen_edits_only_pyproject`, `test_apply_flet_version_change`. Goes:
+  never.
+- **uv writes normalized names** (LIMITATION, PEP 503): `raylib_sdl` became `raylib-sdl`, and a
+  verbatim comparison never matched. Fix: `cmd_apply.req_key` (5.8). Test:
+  `test_apply.py::test_req_key_normalizes_like_uv`. Goes: never.
+- **`uv pip install --target` leaves build-machine files** (DEFECT for the `.lock`, LIMITATION
+  for the rest): a `.lock`, `_virtualenv*` and console-script wrappers whose shebang or `.exe`
+  trampoline names this machine's `.venv` shipped in pyz and portable builds. Up: cf.
+  astral-sh/uv#11878 (the `.lock` uv left in a venv; 0.12.19 still leaves an empty one in a
+  `--target` folder). Fix: `common.drop_install_junk` (10). Test:
+  `test_build_methods.py::test_install_deps_removes_uv_junk_but_keeps_native_tools`. Goes: the
+  `.lock` part when uv removes it; the rest never.
+- **Wheels for this machine follow this machine** (LIMITATION): uv took the newest tags the
+  build machine allows (manylinux_2_34 on Ubuntu 24.04: the pyz failed on Debian 11), its macOS
+  default may move with a uv release, and an sdist built for another OS gives host binaries.
+  Fix: `common.host_floor`, `common.UV_PLATFORMS`, `common.MACOS_FLOOR` through
+  `MACOSX_DEPLOYMENT_TARGET`, `--only-binary :all:` for other targets (`common.install_deps`,
+  10). Test: `test_build_methods.py::test_host_linux_target_gets_the_platform_floor`,
+  `test_host_floor_falls_back_to_the_host_wheels`,
+  `test_macos_targets_pin_the_deployment_target`. Goes: never.
+- **PyPy wheels need a real PyPy** (LIMITATION): uv installs them for no other interpreter or
+  machine. Fix: `common.check_key` takes a `pp` key only for the pypy build's own host;
+  `pyz-merge` joins builds (10). Test:
+  `test_build_methods.py::test_target_keys_the_lock_cannot_serve_are_refused`. Goes: never.
+- **`uv build` builds outside the project environment** (LIMITATION): isolated, it resolved
+  setuptools and mypy from PyPI at every build (floating, online), and mypycify there could not
+  see the project's dependencies; without isolation it takes `./.venv` whatever
+  `UV_PROJECT_ENVIRONMENT` says (wrong under WSL). Fix: `methods.wheel.build` runs `uv build
+  --no-build-isolation --python <.venv python>` after `envs.sync` (10). Test:
+  `test_mypyc_core.py::test_wheel_builds_in_the_locked_tools_env`. Goes: never.
+- **`uv run --with` and `uvx` float** (LIMITATION): an unpinned tool re-resolves to the newest
+  release whenever uv's index cache expires (basedpyright's Node.js runtime too). Fix:
+  `cmd_dev.BASEDPYRIGHT`, `cmd_dev.BASEDPYRIGHT_NODE`, `methods.nuitka.NUITKA`, and editor.json
+  `typing.basedpyright` for the plugin's uvx server (7, 12.2). Test:
+  `test_cli_core.py::test_tools_are_pinned_exactly`, `test_basedpyright_runs_with_every_pin`.
+  Goes: never (bump the pins deliberately).
+- **uv's caches follow `XDG_*`** (LIMITATION): the isolated Neovim tree moves `XDG_CACHE_HOME`
+  and `XDG_DATA_HOME`, and uv then started from empty caches. Fix: `nvimtest.nvim_env` keeps
+  `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`, `UV_TOOL_DIR` as uv resolved them
+  (`nvimtest.uv_dirs`, 13.1). Test: `test_cmd_nvim.py::test_env_isolation`. Goes: never.
+
+CPython and its standard library:
+- **`subprocess.run` kills the child 0.25 s after Ctrl+C** (LIMITATION, 3.7+): an app's cleanup
+  was cut short; under `uv run` the app kept running as an orphan. Up: python/cpython#70130
+  (bpo-25942, where the grace period came from). Fix: `proc._wait_through_ctrl_c` (5.3). Test:
+  `test_cli_core.py::test_ctrl_c_waits_for_a_child_that_cleans_up` and the other
+  `test_ctrl_c_*`. Goes: never.
+- **`Path.rglob` does not enter symlinked folders** (LIMITATION; `recurse_symlinks` from 3.13):
+  a linked `src/assets` reached the mypyc stage empty. Up: python/cpython#77609. Fix:
+  `mypyc._walk` (9). Test: `test_mypyc_core.py::test_sync_tree_follows_symlinked_dirs`,
+  `test_compiled_sources_follow_a_symlinked_subpackage`. Goes: maybe once the runner needs 3.13
+  (the cycle check stays ours).
+- **ZIP stores no date before 1980, and `zipapp` cannot relax it** (LIMITATION): a payload file
+  from the Nix store (mtime 1) crashed the pyz and the portable zip with ValueError. Up: cf.
+  python/cpython#78278 (zipfile's `strict_timestamps`); none found for `zipapp`. Fix:
+  `pyz._write_archive` and `portable.make_archive` with `strict_timestamps=False` (10). Test:
+  `test_build_methods.py::test_pyz_accepts_payload_files_older_than_1980`. Goes: never.
+- **ZIP times are 2-second local DOS times** (LIMITATION): timestamp `.pyc` files went stale
+  after the portable zip, so a read-only install recompiled at every start. Fix:
+  `portable.compile_calls` with `--invalidation-mode checked-hash` (10). Test:
+  `test_build_methods.py::test_portable_pycs_survive_a_zip_round_trip`. Goes: never.
+- **A zip written on Windows holds MS-DOS entries** (LIMITATION): `os.stat` reports 0o666 for a
+  `.sh`, and unzip ignores DOS mode bits, so the launcher lost its x bit. Fix:
+  `portable.make_archive` writes `.sh` entries with `create_system = 3` and mode 0755 (10).
+  Test: `test_build_methods.py::test_portable_zip_keeps_the_sh_launcher_executable`. Goes:
+  never.
+- **`-I`/`-E` ignore `PYTHONUTF8` and `PYTHON*`** (LIMITATION): an isolated launcher dropped
+  UTF-8 mode and `deploy.portable.env`. Fix: the portable and pyz launchers use `-s` only
+  (`portable.write_launchers`, 10). Test:
+  `test_build_methods.py::test_portable_sh_launcher_exit_code_and_environment`. Goes: never.
+- **`open()` defaults to the ANSI code page on Windows** (LIMITATION until 3.15, PEP 686): mypy
+  and mypyc read sources as cp1252, and an app behaved differently under F5. Fix: `PYTHONUTF8=1`
+  in `proc.base_env`, the portable and pyz launchers, `vscode.DEBUG_ENV` and the Neovim mypy
+  linter; PyInstaller `--python-option "X utf8"`; `.pytemplate/deploy.py` reconfigures its
+  streams (5.5). Test: `test_cli_core.py::test_base_env_drops_what_would_move_uv_or_python`,
+  `test_vscode.py::test_launch_configs_run_in_utf8_mode`,
+  `test_build_methods.py::test_exe_default_argv_and_output`. Goes: when every supported Python
+  is 3.15 or newer.
+- **A closed stdout fails at exit** (LIMITATION): `./deploy help | head -1` printed a
+  BrokenPipeError traceback. Fix: `cli._output_closed` (quiet exit 141; POSIX only, 15.2). Test:
+  `test_cli_core.py::test_a_closed_stdout_is_not_a_runner_bug`. Goes: never.
+- **`sys.stdlib_module_names` knows only the running version** (LIMITATION): a name that is a
+  module of PyPy 3.11 or of another CPython passed the check. Fix:
+  `presets.STDLIB_OTHER_VERSIONS` in `presets.shadows_stdlib` (5.7). Test:
+  `test_rename.py::test_stdlib_names_do_not_depend_on_the_runner`. Goes: never (update it per
+  Python release).
+- **`shutil.rmtree` error hooks** (LIMITATION): `onerror` is deprecated from 3.12 and `onexc`
+  does not exist in 3.11, and a read-only file (git objects on Windows) needs a chmod and a
+  retry. Fix: the version switch in `cmd_nvim.remove_tree`, `presets._remove`, `e2e.rmtree`;
+  `cmd_env._remove` retries after `cmd_env._make_writable` (7). Test:
+  `test_cmd_nvim.py::test_remove_tree_read_only`,
+  `test_presets.py::test_remove_deletes_read_only_entries`,
+  `test_envs_core.py::test_clean_retries_read_only_contents`. Goes: the switch once the runner
+  needs 3.12; the retry never.
+- **`Path.is_symlink()` is False for a Windows junction** (LIMITATION; `Path.is_junction` from
+  3.12): `clean --envs` would have deleted what a junctioned `.venv` points to. Fix:
+  `cmd_env._is_link` reads `st_reparse_tag` (7). Test:
+  `test_workarounds.py::test_a_windows_junction_counts_as_a_link`. Goes: once the runner needs
+  3.12.
+- **The tokenizer changed with PEP 701** (LIMITATION): an f-string is one STRING token on 3.11
+  and many tokens from 3.12 (t-strings from 3.14). Fix: `rename` handles both (5.7). Test:
+  `test_rename.py::test_fstring_fields_as_one_token`, `test_tokenizer_canary`. Goes: the 3.11
+  form once the runner needs 3.12.
+- **No extension module loads from a zip** (LIMITATION, zipimport): Fix: the pyz bootstrap
+  (`templates/pyz/__main__.py`) extracts to a per-build cache (10). Test:
+  `test_build_methods.py::test_pyz_bootstrap_picks_the_flavour` and the other bootstrap tests.
+  Goes: never.
+- **`Path.home()` raises for a UID without a passwd entry** (LIMITATION): the pyz crashed in a
+  container with a random UID. Fix: the pyz bootstrap falls back to a `tempfile.mkdtemp` folder
+  (10). Test: `test_build_methods.py::test_pyz_runs_without_a_usable_cache`. Goes: never.
+- **A missing cwd is blamed on the program** (LIMITATION): subprocess raised FileNotFoundError
+  naming the program (POSIX) or NotADirectoryError (Windows). Fix: `proc.run` checks the cwd
+  first (5.3). Test: `test_cli_core.py::test_a_bad_working_folder_is_named`. Goes: never.
+
+PyPy:
+- **PyPy 8.0 changed the extension ABI to pp80** (LIMITATION): a loose request picked the newest
+  PyPy, for which raylib, numpy and cffi had no wheels. Fix: `python.pypy` must be exact
+  (`config.validate`, 6.1). Test: `test_config_rules.py::test_python_pypy_must_be_exact`,
+  `test_pypy_pins_match_the_default`. Goes: never (move the pin once the wheels exist).
+- **PyPy has cffi built in** (LIMITATION): uv tried to build cffi from its sdist for PyPy. Fix:
+  `override-dependencies` in `render.managed_block` (7). Test:
+  `test_runner.py::test_managed_block_with_pypy`. Goes: never.
+- **No PyPy wheels for the dev tools** (LIMITATION): mypy (its Rust `ast-serialize`),
+  PyInstaller, ruff, setuptools, debugpy. Fix: `implementation_name == 'cpython'` on them in the
+  dev group of `pyproject.toml`; `./deploy add --cpython-only` (`cmd_env.cmd_add`, 7). Test:
+  `test_workarounds.py::test_cpython_only_dev_tools_carry_the_marker`,
+  `test_envs_core.py::test_add_remove_argv`. Goes: per tool, when it publishes PyPy wheels.
+- **The PyPy Windows zip lacks the VC++ runtime** (LIMITATION, pypy.org/download.html: "you
+  might need the VC runtime library installer"): a bundled PyPy portable build did not start on
+  a machine without the redistributable. Fix: `portable.copy_runtime` copies `vcruntime140*.dll`
+  from the CPython base (10). Test:
+  `test_workarounds.py::test_portable_pypy_on_windows_gets_the_vc_runtime`. Goes: when PyPy's
+  zip ships them.
+- **PyPy ships lib2to3's broken test data** (LIMITATION): compileall fails on it. Fix:
+  `portable.COMPILE_EXCLUDE` (`-x`, 10). Test:
+  `test_build_methods.py::test_portable_precompiles_the_stdlib_at_the_launcher_level`. Goes:
+  when PyPy drops lib2to3.
+- **There is no `pypy3w.exe` or `python3w.exe`** (LIMITATION): Fix: `common.windowed` names
+  `pypyw`, `pythonw`, `pyw` (10). Test: `test_build_methods.py::test_windowed_twins_exist`.
+  Goes: never.
+
+Python on the user's machine (the `runtime = "system"` launchers and the pyz wrapper):
+- **`py` can exist with no Python registered, and `python3.exe` can be the Microsoft Store
+  alias** (LIMITATION): a system launcher started the alias or failed silently. Fix: the system
+  portable `.cmd`/`.sh` and the pyz `.cmd` run each candidate with a minimum-version probe
+  (`portable.cmd_launcher`, `pyz._wrapper_cmd`, 10); `nvim doctor` flags the alias. Test:
+  `test_fixes.py::test_system_launchers_probe_the_minimum_version`,
+  `test_portable_system_cmd_launcher_fails_cleanly` (Windows). Goes: never.
+
+mypy and mypyc:
+- **Module-level `__file__` is relative in a lone top-level compiled module** (DEFECT): mypyc
+  sets `__file__` from the folder of its shared lib, and one top-level module gets none, so its
+  body sees `<mod><EXT_SUFFIX>` relative to the cwd. Up: mypyc/mypyc#700 (open). Fix: the
+  `lintc` rule (`lintc.relative_file_at_import`, 9). Test:
+  `test_mypyc_core.py::test_real_compile_single_top_level_module_sees_a_relative_file` (a pin:
+  it fails once mypyc fixes it),
+  `test_lintc_flags_module_level_file_for_a_single_top_level_module`. Goes: when that pin fails.
+- **What mypyc compiles badly or not at all** (LIMITATION): a class decorator outside its native
+  list makes a slow Python class; nested classes, classes in functions, t-strings and a
+  module-level `if __name__ == "__main__"` are unsupported. Fix: the `lintc` rules,
+  `lintc.NATIVE_CLASS_DECORATORS` (9). Test:
+  `test_mypyc_core.py::test_lintc_native_decorators_follow_the_locked_mypyc`,
+  `test_lintc_flags_t_strings`, `test_runner.py::test_lintc_rules`. Goes: per rule, when mypyc
+  supports it.
+- **`librt` comes only with mypy** (LIMITATION): compiled code that imports mypyc's runtime
+  library lacked it in pyz, portable and wheel builds (dev group only), and PyPy has none. Fix:
+  the `librt` rule of `lintc` (9). Test:
+  `test_mypyc_core.py::test_lintc_librt_needs_a_runtime_dependency`,
+  `test_cli_core.py::test_librt_is_forbidden_only_while_pypy_is_supported`. Goes: never.
+- **Flet in compiled code** (LIMITATION, Flet 1.0.1): `async` handlers get no event, generator
+  handlers never run, `@ft.component` fails at import, `@ft.control` loses its event types. Fix:
+  the flet preset's `compile.forbid_imports` (flet, flet_desktop, flet_cli): the UI stays
+  interpreted (11). Test: `test_runner.py::test_lintc_rules`,
+  `test_mypyc_core.py::test_lintc_default_presets_are_clean`. Goes: when mypyc and Flet support
+  them.
+- **Compiled code holds the GIL** (LIMITATION): a heavy compiled call froze the Flet UI from a
+  thread. Fix: the flet skeleton runs it in a `ProcessPoolExecutor` (`ui/app.py`, 11). Test:
+  `test_workarounds.py::test_flet_skeleton_runs_compiled_work_in_a_process`. Goes: never.
+- **The mypyc CLI cannot set `strip_asserts`, `group_name` or `multi_file`** (LIMITATION) and
+  always writes to `./build`. Fix: `tools/mypyc_build.py` calls `mypycify` (9). Test:
+  `test_mypyc_core.py::test_build_spec_matches_what_the_tool_reads`,
+  `test_real_compile_roundtrip`. Goes: when the CLI takes them.
+- **`mypycify` hands every extension the same `extra_compile_args` list** (LIMITATION): flags
+  appended in place reached every extension once per extension. Fix: `tools/mypyc_build.py`
+  gives each a new list (9). Test:
+  `test_mypyc_core.py::test_build_script_adds_the_flags_to_every_extension_once`. Goes: never.
+- **PyInstaller and Nuitka cannot see imports inside a `.pyd/.so`** (LIMITATION): a compiled exe
+  crashed at startup on a missing module (`from html import parser` too). Fix:
+  `mypyc.hidden_imports` with `mypyc.importable` (9). Test:
+  `test_mypyc_core.py::test_hidden_imports_resolve_what_the_binaries_import`,
+  `test_build_methods.py::test_exe_mypyc_hidden_imports_icon_and_extra_args_order`. Goes: never.
+- **mypy config sections** (LIMITATION): `RawConfigParser` refuses a repeated section, a pattern
+  repeated in a comma list replaces the earlier options, and `strict` in an override applies to
+  every module. Fix: `render.mypy_ini` writes one section per pattern; `config._check_override`
+  refuses `strict` (6.1, 8). Test:
+  `test_mypyc_core.py::test_mypy_ini_merges_overrides_with_the_generated_sections`,
+  `test_config_rules.py::test_mypy_overrides_invalid`. Goes: never.
+
+setuptools:
+- **An extension is rebuilt only when a source is newer** (LIMITATION): a new `opt_level`, C
+  flag or compiler variable kept the old binary (and shipped it). Fix: `mypyc.COMPILED_STAMP`
+  and `build_ext --force` (9). Test:
+  `test_mypyc_core.py::test_build_forces_a_rebuild_for_every_binary_option`,
+  `test_build_forces_a_rebuild_when_the_compiler_environment_changes`. Goes: never.
+- **A `CFLAGS` environment variable replaces Python's own C flags** (LIMITATION): it drops
+  `-fno-strict-overflow` (i64/i32 wrap-around becomes undefined behaviour) and `-DNDEBUG`. Fix:
+  `tools/mypyc_build.py` `extra_cflags` always adds `-fno-strict-overflow`; the wheel's
+  `methods.wheel.SETUP_PY` mirrors it (9). Test: `test_mypyc_core.py::test_extra_cflags`,
+  `test_real_compile_adds_the_c_flags_and_inlines_compiled_calls`. Goes: never.
+
+MSVC and Visual Studio:
+- **VS 2026's `vcvarsall.bat` runs `vswhere.exe` by its bare name** (DEFECT): outside a
+  developer prompt setuptools failed with "Unable to find a compatible Visual Studio
+  installation". Up: none found. Fix: `proc.base_env` appends `proc.vs_installer_dir()` to PATH
+  on Windows (5.5). Test:
+  `test_workarounds.py::test_base_env_puts_the_vs_installer_on_path_on_windows`. Goes: when
+  vcvarsall finds vswhere itself.
+- **MSVC speaks the system language** (LIMITATION): its messages reached the terminal as
+  unreadable cp1252 text. Fix: `VSLANG=1033` in `mypyc.build` and `methods.wheel.build` (5.5).
+  Test: `test_workarounds.py::test_mypyc_build_asks_msvc_for_english_messages`,
+  `test_mypyc_core.py::test_wheel_builds_in_the_locked_tools_env`. Goes: never.
+- **uv installs x86_64 CPython even on Windows on ARM** (LIMITATION): the host's ARM64 tools are
+  the wrong ones for it. Fix: `cmd_env._msvc` and `mypyc.has_compiler_hint` take the `.venv`
+  Python's `sysconfig.get_platform()`, as setuptools' vswhere query does (7). Test:
+  `test_envs_core.py::test_msvc_component_follows_the_venv_platform`,
+  `test_msvc_component_matches_setuptools`,
+  `test_mypyc_core.py::test_compiler_hint_names_the_msvc_tools_of_the_venv_platform`. Goes:
+  never.
+
+PyInstaller:
+- **UPX only on Windows** (LIMITATION): `configure.get_config` turns UPX off elsewhere (packed
+  `.so` files crash). Fix: `exe.size_args` passes `--noupx`, downloads nothing and warns (10).
+  Test: `test_build_methods.py::test_exe_size_args_skip_upx_off_windows`. Goes: never.
+- **Its UPX step takes no level** (LIMITATION): PyInstaller always adds `--lzma`, and its binary
+  cache reused another level's output. Fix: the level in the `UPX` variable (`upx.env_value`),
+  `--clean` (10). Test: `test_upx.py::test_level_flags_and_pyinstaller_env`,
+  `test_build_methods.py::test_exe_size_args_use_upx_on_windows`. Goes: never.
+- **No PyPy** (LIMITATION, PyInstaller and Nuitka): Fix: `cmd_build.COMPAT` refuses exe, nuitka
+  and flet with pypy; portable is PyPy's standalone route (10). Test:
+  `test_build_methods.py::test_build_refuses_methods_without_pypy`,
+  `test_config_rules.py::test_deploy_default_follows_cmd_build_compat`. Goes: never.
+- **What any import reaches is bundled** (LIMITATION, Nuitka too): flet's lazy `from PIL import`
+  bundled Pillow (13 MB), and cffi's build-time imports bundled setuptools and pycparser into
+  raylib games. Fix: the flet preset's `deploy.exclude_modules = ["PIL"]`, the raylib preset's
+  `[deploy.exe] extra_args` (10, 11). Test:
+  `test_workarounds.py::test_presets_exclude_what_the_packagers_drag_in`. Goes: never.
+- **A frozen app's worker processes start the executable again** (LIMITATION, multiprocessing):
+  without `freeze_support()` a `ProcessPoolExecutor` child ran the whole app once more. Fix:
+  every preset's `src/main.py` calls `multiprocessing.freeze_support()` first (11). Test:
+  `test_workarounds.py::test_every_preset_main_calls_freeze_support_first`. Goes: never.
+
+Nuitka:
+- **FATAL on a module it cannot locate** (LIMITATION): a platform-guarded `import winreg` in
+  compiled code stopped the build. Fix: `nuitka.includable` (10). Test:
+  `test_build_methods.py::test_nuitka_includable_drops_what_the_build_env_cannot_locate`. Goes:
+  never.
+- **A standalone binary named like the package folder** (DEFECT): `main.dist/<name>` is a FILE
+  where the mypyc package folder `<pkg>/` must go: NotADirectoryError after minutes of work. Up:
+  none found (cf. Nuitka/Nuitka#2483, a data file named like the binary). Fix: `<name>.bin` on
+  POSIX standalone builds when `app.name.lower() == pkg` (`nuitka.build`, 10). Test:
+  `test_build_methods.py::test_nuitka_standalone_binary_never_clashes_with_the_package`. Goes:
+  when Nuitka reports or avoids the clash.
+- **Python support lags** (LIMITATION): 4.2.2 stops with FATAL on 3.15 and only warns on later
+  minors, then fails obscurely in the C compile. Fix: `nuitka.NUITKA_PYTHON`,
+  `nuitka.check_python` (10). Test:
+  `test_build_methods.py::test_nuitka_python_newer_than_the_pin_is_refused_before_any_work`,
+  `test_nuitka_failure_names_the_pin`. Goes: never (bump with the pin).
+- **PGO is experimental** (LIMITATION): its profiling run starts before `main.dist` holds the
+  mypyc extensions (ImportError, yet success), before the data files are in place, and waits for
+  a GUI window to close; macOS has no clang profdata step. Fix: `nuitka.check_options`,
+  `config._check_nuitka` (6.1, 10). Test:
+  `test_build_methods.py::test_nuitka_pgo_refuses_mypyc_and_macos_before_any_work`,
+  `test_nuitka_options_config_rules`. Goes: per case, when Nuitka's PGO handles it.
+
+Flet (flet, flet-desktop, flet pack, flet build):
+- **The desktop client must be bundled and match** (LIMITATION): the flet-desktop wheel has no
+  client (a plain PyInstaller or Nuitka build downloads ~40 MB at first start), and a
+  flet-desktop of another version is pip-installed at runtime, bypassing uv.lock. Fix: one
+  `[preset.flet] version` for flet, flet-desktop and flet-cli (5.8); exe through `flet pack`
+  (`exe._flet_pack`); `nuitka._flet_client_archive` bundles flet_desktop's own release archive
+  at `flet_desktop/app/` (10). Test:
+  `test_apply.py::test_flet_version_change_replaces_the_three_pins`,
+  `test_workarounds.py::test_nuitka_bundles_the_flet_client`. Goes: never.
+- **flet loads its controls lazily** (LIMITATION): module `__getattr__` + `importlib`, which
+  Nuitka cannot follow. Fix: `--include-package=flet --include-package=flet_desktop` in
+  `nuitka.build` (10). Test: `test_workarounds.py::test_nuitka_bundles_the_flet_client`. Goes:
+  never.
+- **`flet pack` options** (LIMITATION): `-y` wipes `<cwd>/build` and the distpath, `--onedir` is
+  refused on macOS (always a `.app`), it adds `--noconsole` unless `--debug-console` has a
+  value, and each `--pyinstaller-build-args` value is one argument. Fix: `exe._flet_pack` runs
+  in `.build/flet-pack/<b>`, never passes `--onedir` on macOS, maps `deploy.exe.console` to
+  `--debug-console=true`, passes `--python-option=X utf8` as one item (10). Test:
+  `test_build_methods.py::test_flet_pack_macos_is_never_onedir`,
+  `test_flet_pack_console_and_utf8` (every `_flet_pack` test checks the cwd). Goes: never.
+- **PyInstaller's flat onedir puts the executable where the package folder goes** (LIMITATION):
+  with `--contents-directory=.` on Linux, `dist/<n>/<n>` is a FILE where the folder `<pkg>/`
+  must go when `app.name == pkg` (the default). Fix: flat only on Windows (`exe._flet_pack`,
+  10). Test: `test_build_methods.py::test_flet_pack_onedir_linux_keeps_internal`,
+  `test_flet_pack_onedir_windows_is_flat`. Goes: never.
+- **`flet build` ignores uv.lock and bundles the highest Python its manifest matches**
+  (LIMITATION): `>=3.13` gave 3.14, and the cp313 mypyc extensions were silently not loaded.
+  Fix: `methods.flet.build_pyproject` pins the exported versions and `requires-python =
+  "==X.Y.*"` (10). Test: `test_build_methods.py::test_flet_build_pins_the_python_minor`,
+  `test_fixes.py::test_flet_build_pyproject_takes_only_tool_flet`. Goes: never.
+- **`flet build` looks for `<work>/<path>/main.py`** (LIMITATION): another `[tool.flet.app]
+  path` aborted after installing Flutter. Fix: `methods.flet.build_pyproject` forces
+  `methods.flet.STAGE_APP` with a warning (10). Test:
+  `test_build_methods.py::test_flet_build_pyproject_points_at_the_staged_app`. Goes: never.
+- **Flutter needs Developer Mode on Windows (symlinks), and mobile and web targets load no
+  extension** (LIMITATION): Fix: `methods.flet._developer_mode` is checked first; mobile and web
+  builds ship the `.py` (10). Test:
+  `test_build_methods.py::test_flet_build_needs_developer_mode_on_windows`,
+  `test_flet_build_mobile_and_web_ship_the_py_code`. Goes: never.
+
+cffi and raylib:
+- **The raylib stub does not match the runtime** (DEFECT, raylib 6.0.1.0): returns, fields and
+  parameters declared `bytes`/`list` are cdata or int at runtime, and mypyc checks those types,
+  so only compiled code raised TypeError; it also imports `warnings.deprecated` (3.13+). Up:
+  none found. Fix: `presets/raylib/tools/raylib_stubs.py` regenerates
+  `typings/raylib/__init__.pyi` (task `stubs`), picked up by `render.typings_dir`; a
+  `[[typing.mypy_overrides]]` `ignore_errors` for `raylib` (11). Test:
+  `test_presets.py::test_raylib_stubs_regenerates_the_committed_stub`. Goes: when the upstream
+  stub matches the runtime.
+- **cffi 2.x Linux wheels keep their C asserts** (DEFECT, cffi 2.1.1): reading `.fields` of an
+  opaque struct aborts the process (exit 134), which no `except` catches. Up: none found. Fix:
+  `raylib_stubs.py` skips a struct whose `ffi.sizeof` raises before reading its fields (11).
+  Test: `test_presets.py::test_raylib_stubs_skips_opaque_structs`. Goes: when cffi raises
+  instead.
+- **raylib wheels** (LIMITATION): no PyPy wheel for macOS arm64, and building raylib from its
+  sdist needs the C library. Fix: `no-build-package` from the preset's `[uv]`; `e2e.HOST_GAPS`
+  and `render.ci_workflow` drop PyPy there (11, 15.2). Test:
+  `test_render_core.py::test_ci_workflow_for_every_preset_and_backend_set`,
+  `test_e2e_plan.py::test_host_gaps_switch_the_project_off_the_backend`,
+  `test_apply.py::test_apply_raylib_package_switch`. Goes: when raylib ships that wheel.
+
+UPX:
+- **What packing breaks** (LIMITATION): UPX refuses Control Flow Guard PEs (and `--force` breaks
+  them) and inputs over 768 MiB; packed C runtimes, API sets and Python DLLs gain nothing or
+  break, packed `.so` files crash on Linux, and a packed `flutter_windows.dll` hangs the app at
+  startup (measured with Flet 1.0.1). Fix: `upx.BUILTIN_EXCLUDE`, `upx.MAX_INPUT`,
+  `upx.candidates` (Linux: ELF executables only), never `--force` (10). Test:
+  `test_upx.py::test_candidates_skip_runtime_dlls_and_user_globs`,
+  `test_candidates_on_posix_are_elf_executables`, `test_files_over_the_limit_are_never_packed`,
+  `test_upx_messages_are_classified`. Goes: never.
+- **No macOS support, no Windows arm64 release** (LIMITATION): UPX cannot pack current macOS
+  binaries (and packing breaks their signature). Fix: `upx.unsupported_reason` turns UPX off on
+  macOS with a warning; `upx.ASSETS` gives Windows arm64 the x64 build (emulated) (10). Test:
+  `test_workarounds.py::test_upx_is_off_on_macos_and_windows_arm64_runs_the_x64_build`. Goes:
+  per case, when UPX supports it.
+- **The packagers look for UPX differently** (LIMITATION): PyInstaller wants `<upx-dir>/upx`,
+  Nuitka a file named `upx`. Fix: `upx.find` hands them an absolute, unresolved path (10). Test:
+  `test_upx.py::test_relative_upx_path_resolves_against_the_project_root`. Goes: never.
+
+ruff:
+- **`ruff format --check` prints nothing for stdin** (LIMITATION): a staged file fed on stdin
+  failed without a word. Fix: `hooks._run_ruff` writes its own "Would reformat: <path> (its
+  staged version)" line (5.6). Test:
+  `test_hooks.py::test_partially_staged_python_file_is_checked_as_staged`,
+  `test_workarounds.py::test_ruff_format_check_says_nothing_for_stdin` (a pin). Goes: when that
+  pin fails.
+- **ruff 0.16 changed the `format --check` output** (LIMITATION): 0.15 printed "Would reformat:
+  path", 0.16 one `unformatted` diagnostic per file. Fix: `rename._UNFORMATTED` reads both for
+  the rename tidy-up (5.7). Test: `test_rename.py::test_ruff_tidy_after_a_rename`. Goes: when
+  the dev group requires ruff >= 0.16.
+
+VS Code, its extensions, pyright and basedpyright:
+- **Shell tasks run in the user's terminal profile** (LIMITATION): xonsh, niubash or MSYS2 as
+  the default profile broke `"type": "shell"` tasks. Fix: every task is `"type": "process"`
+  running `/bin/sh <root>/deploy` or `deploy.cmd` (12.1). Test:
+  `test_vscode.py::test_every_task_runs_the_launcher_as_a_process`. Goes: never.
+- **Per-OS `args` replace the default ones** (LIMITATION, tasks 2.0.0): Fix: both blocks carry
+  the full argv (12.1). Test: `test_vscode.py::test_every_task_runs_the_launcher_as_a_process`.
+  Goes: never.
+- **`information` is no problem-matcher severity** (LIMITATION): VS Code maps it to Ignore, then
+  Error, so basedpyright's information lines showed as errors. Up: cf. microsoft/vscode#452
+  ("Note" and "Hint" shown as errors). Fix: the PYRIGHT matcher captures only `info` (12.1).
+  Test: `test_vscode.py::test_matcher_samples`. Goes: never.
+- **`isBackground` needs a background matcher** (LIMITATION): `flet run -r` prints no stable
+  ready line, and VS Code would wait forever for such a dependency. Fix: `background = true`
+  tasks become restartable RUN tasks (12). Test: `test_vscode.py::test_custom_tasks`. Goes:
+  never.
+- **Ctrl+C in a Windows task asks cmd's "Terminate batch job (Y/N)?"** (LIMITATION): Fix:
+  run-like tasks get `runOptions` `instanceLimit 1`, `terminateOldest` (12.1). Test:
+  `test_vscode.py::test_run_tasks_restart_and_check_tasks_reveal_problems`. Goes: never.
+- **The debugger quotes for the terminal's shell by its name** (DEFECT): with xonsh or `niu.exe`
+  as the default profile, `runInTerminal` got cmd syntax and F5 failed. Up: cf.
+  microsoft/debugpy#1853 (the same with nushell). Fix: the automation profiles (cmd.exe,
+  `/bin/sh`) in `templates/vscode/settings.json` (12.1). Test:
+  `test_vscode.py::test_settings_and_extensions`. Goes: when the debugger quotes for the shell
+  it starts.
+- **basedpyright's extension writes into the Workspace settings** (LIMITATION): its conflict
+  prompt stored `python.languageServer` and `python.analysis.typeCheckingMode` in the generated
+  `.vscode/settings.json`, which then counted as hand-edited. Fix:
+  `vscode.BASEDPYRIGHT_SETTINGS` ships the answers (12.1). Test:
+  `test_vscode.py::test_basedpyright_settings_prevent_the_conflict_prompts`. Goes: never.
+- **actboy168.tasks (0.16.1)** (LIMITATION): it prefixes the task's own icon to the label and
+  creates the buttons in tasks.json order. Fix: bare labels, button tasks first (12.1). Test:
+  `test_vscode.py::test_buttons_map_to_tasks_in_order`. Goes: never.
+- **pyright's `strict` list has no exclusion** (LIMITATION): an excluded module inside a
+  compiled package got the strict rules. Fix: `render._paths_without`; with basedpyright the
+  excluded paths come first in `executionEnvironments` (8). Test:
+  `test_mypyc_core.py::test_pyright_config_leaves_compile_exclude_out_of_the_compiled_rules`.
+  Goes: never.
+
+Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
+- **Neovim trusts a file by the sha256 of its bytes and its real path** (LIMITATION,
+  `vim.secure`): any byte change (CRLF, a BOM, a mode-dependent value) untrusted `.lazy.lua`.
+  Fix: `.lazy.lua` is a static copy (`editors/nvim.py`), `.gitattributes` keeps it LF, all logic
+  lives in `.pytemplate/nvim/` (12.2). Test:
+  `test_nvim_render.py::test_lazy_lua_is_identical_in_every_mode`,
+  `test_lazy_lua_bytes_are_pinned`, `test_gitattributes_keeps_lazy_lua_lf`. Goes: never.
+- **`vim.secure.trust`** (LIMITATION): the `path` form exists from 0.12 only (0.11 needs a
+  buffer), and it writes its database with `io.open(<state>/trust, "w")`, which fails while the
+  state folder does not exist. Fix: the trust snippet of `cmd_nvim.trust_file` creates the
+  folder and picks the form (12.2). Test: `test_cmd_nvim.py::test_real_nvim_query_and_trust`.
+  Goes: the buffer form once 0.12 is the minimum.
+- **Headless Neovim** (LIMITATION): a Lua error still exits 0, `confirm()` never returns,
+  `VeryLazy` never fires, and an unwritable `NVIM_LOG_FILE` drops `nvim.log` into the cwd. Fix:
+  the `PTNVIM{json}` marker of `cmd_nvim.headless`; trust through the API first (`nvim sync`
+  refuses while `.lazy.lua` is untrusted); `doautocmd UIEnter` in `nvimtest`; `NVIM_LOG_FILE`
+  always set (12.2). Test: `test_cmd_nvim.py::test_parse_marker_skips_noise`,
+  `test_nvim_sync_refuses_an_untrusted_lazy_lua`, `test_nvim_sync_installs_only`,
+  `test_real_nvim_query_and_trust`. Goes: never.
+- **lazy.nvim installs a fresh config in rounds and prunes the lock between them** (DEFECT):
+  LazyVim's own plugins came at their newest commits despite the pinned lock. Up: cf.
+  folke/lazy.nvim#1279 (its startup install ignores and rewrites the lock; closed as not
+  planned). Fix: `nvimtest.prepare_base` installs, then runs `Lazy! restore` in a second Neovim;
+  the lock is copied in before every installing run; `nvimtest.lock_drift` (13.1). Test:
+  `test_cmd_nvim.py::test_prepare_base_pins_the_starter_and_restores_the_lock`,
+  `test_prepare_base_fails_when_a_pin_does_not_hold`. Goes: when one install run honours the
+  lock.
+- **`Lazy! sync` also updates and cleans** (LIMITATION): it rewrote the user's `lazy-lock.json`
+  and removed plugins its spec did not name. Fix: `./deploy nvim sync` runs `Lazy! install`
+  (12.2). Test: `test_cmd_nvim.py::test_nvim_sync_installs_only`. Goes: never.
+- **The local spec comes after the user's** (LIMITATION): an extra imported from `.lazy.lua`
+  trips LazyVim's import-order check. Fix: `.lazy.lua` sets `vim.g.lazyvim_check_order = false`
+  only then; `./deploy nvim extras` (12.2). Test:
+  `test_nvim_render.py::test_lua_modules_in_headless_neovim`. Goes: never.
+- **LazyVim reads `vim.g.lazyvim_python_lsp` at its first import** (LIMITATION): set from
+  `.lazy.lua` it came too late. Fix: `integrations.lsp` (Lua) switches
+  `opts.servers.<x>.enabled` in lspconfig's `opts` (12.2). Test:
+  `test_workarounds.py::test_nvim_plugin_workarounds[lsp]`. Goes: never.
+- **Mason prepends its bin folder to PATH after `.lazy.lua` runs** (LIMITATION): a Mason ruff or
+  mypy of another version ran. Fix: absolute `.venv` paths (`pytemplate.tool`,
+  `integrations.lsp`, `integrations.mypy_linter`; 12.2). Test:
+  `test_nvim_render.py::test_mypy_linter_follows_a_venv_created_later`. Goes: never.
+- **nvim-lint** (LIMITATION): a linter with `env` gets that table INSTEAD of the environment,
+  and on Windows every linter runs through `cmd.exe /C`, where a quoted absolute path breaks on
+  spaces or `& ^ %`. Fix: `integrations.mypy_linter` passes the whole environment plus
+  `PYTHONUTF8=1`, minus `VIRTUAL_ENV`, and on Windows the bare `mypy` with `.venv\Scripts` first
+  on PATH (12.2). Test: `test_workarounds.py::test_nvim_plugin_workarounds[mypy env]`,
+  `test_nvim_render.py::test_mypy_linter_follows_a_venv_created_later` (Windows). Goes: never.
+- **nvim-dap** (LIMITATION): it spawns adapters with a raw `uv.spawn` (no PATHEXT: Mason's
+  `.cmd` shim fails on Windows), waits 4 s for `initialize` (a cold adapter needs more), and
+  expands `${workspaceFolder}` to Neovim's cwd. Fix: `dap.adapter` (Lua) returns an absolute
+  python, `initialize_timeout_sec = 30` unless the configuration sets one, `dap.launch_configs`
+  for a cwd below the root (12.2). Test:
+  `test_workarounds.py::test_nvim_plugin_workarounds[dap]`, `[dap adapter]`, `[dap subfolder]`.
+  Goes: never.
+- **neotest-python finds the interpreter by globbing `*/pyvenv.cfg`** (DEFECT): with `.venv` and
+  `.venv-pypy` it built a broken path, and its `uv run` fallback syncs the project. Up: none
+  found. Fix: `integrations.neotest` sets `python` and `discovery.filter_dir` (12.2). Test:
+  `test_workarounds.py::test_nvim_plugin_workarounds[neotest]`. Goes: when neotest-python
+  handles several environments.
+- **overseer also loads the `.vscode/tasks.json` provider** (LIMITATION): every label twice,
+  tasks through `deploy.cmd`, shell tasks through `'shell'`. Fix: `integrations.overseer` adds
+  `overseer.template.vscode` to `disable_template_modules` (12.2). Test:
+  `test_workarounds.py::test_nvim_plugin_workarounds[overseer]`. Goes: never.
+- **venv-selector (LazyVim's `lang.python`) needs `fd`** (LIMITATION, documented): without it it
+  raises an error on the first Python buffer, which failed every smoke check that opens one.
+  Fix: `template-nvim.yml` installs `fd` (`fdfind` on Ubuntu) (13.2). Test: CI only (that
+  workflow's smoke run fails without it). Goes: never.
+- **A grandchild keeps a pipe open** (LIMITATION, every OS): git or Mason outliving a killed
+  Neovim blocked the harness's wait forever. Fix: the harnesses write to files and kill the
+  whole tree (`nvimtest._run_logged`, `nvimtest.kill_tree`; `e2e`, `shells` alike; 13.1). Test:
+  `test_cmd_nvim.py::test_run_logged_timeout_kills_the_whole_tree`,
+  `test_run_logged_ctrl_c_kills_the_whole_tree`. Goes: never.
+
+git and husky:
+- **`diff.relative=true` makes `git diff` print project-relative paths** (LIMITATION): the hook
+  dropped every staged path. Fix: `-c diff.relative=false` on every git call of `hooks` (5.6).
+  Test: `test_hooks.py::test_staged_and_unstaged_files_ignore_diff_relative`. Goes: never.
+- **The hook's environment** (LIMITATION): git exports a relative `GIT_INDEX_FILE` and, in a
+  linked worktree, `GIT_DIR` without `GIT_WORK_TREE`. Fix: `hooks.git_env` makes them absolute;
+  `hooks.run` removes them for uv and ruff (5.6). Test:
+  `test_hooks.py::test_git_env_pins_relative_paths`, `test_install_in_a_linked_worktree`. Goes:
+  never.
+- **`git check-ignore` refuses `--literal-pathspecs`** (LIMITATION): Fix: `hooks._git(...,
+  literal=False)` for it (5.6). Test:
+  `test_hooks.py::test_ensure_installed_skips_an_ignored_project`. Goes: never.
+- **git's messages follow the locale** (LIMITATION): "not a git repository" was not recognized.
+  Fix: `LC_ALL=C` for every git call (`hooks`, `rename.git_changes`, `presets`; 5.6). Test:
+  `test_rename.py::test_git_changes_reads_git_in_english`,
+  `test_hooks.py::test_find_repo_reports_other_git_errors`. Goes: never.
+- **git < 2.28 has no `init -b`** (LIMITATION): Fix: `presets` falls back to `git init` +
+  `symbolic-ref HEAD refs/heads/main` (11). Test:
+  `test_presets.py::test_git_init_falls_back_without_b`. Goes: when git 2.28 (2020) is the
+  minimum.
+- **A new repository starts on `main` or `master`** (LIMITATION, `init.defaultBranch`): Fix: the
+  generated CI triggers on both; `new` creates `main` (13.2). Test:
+  `test_render_core.py::test_ci_workflow_for_every_preset_and_backend_set`,
+  `test_presets.py::test_git_init_makes_a_main_branch`. Goes: never.
+- **The exec bit gets lost** (LIMITATION): `core.filemode=false` (Windows), zip downloads and
+  copies drop it, and with `core.filemode=true` an index-only fix is undone by the next `git
+  add`; Git for Windows runs hooks with its own sh. Fix: `cmd_env._fix_exec_bit` (the files and
+  the index); `sh <launcher>` in the hook; `/bin/sh <root>/deploy` in VS Code tasks and the
+  Neovim fallback (5.6, 12, 14). Test:
+  `test_envs_core.py::test_fix_exec_bit_repairs_the_index_and_the_files`,
+  `test_hooks.py::test_git_runs_the_hook`,
+  `test_vscode.py::test_every_task_runs_the_launcher_as_a_process`. Goes: never.
+- **CRLF checkouts** (LIMITATION): `* text=auto eol=native` with `core.autocrlf=true` checks
+  text out with CRLF on Windows. Fix: generated-file hashes are normalized (`render._norm`),
+  comparisons are CRLF-normalized (`presets.pristine`, the pyz parts' app code), the hook reads
+  staged files through `git cat-file --filters` (`hooks.staged_blob`), `.gitattributes` pins LF
+  for `deploy`, `deploy.ps1`, `.lazy.lua` and CRLF for `*.cmd` (6.2, 14). Test:
+  `test_render_core.py::test_crlf_and_bom_checkouts_are_neither_edits_nor_rewritten`,
+  `test_hooks.py::test_staged_blob_is_the_staged_version_as_checked_out`. Goes: never.
+- **husky 9 points `core.hooksPath` at `.husky/_`** (LIMITATION): its generated pre-commit runs
+  the user's `.husky/pre-commit`. Fix: `hooks._hooks_path_file` (5.6). Test:
+  `test_hooks.py::test_core_hooks_path_husky_layout`. Goes: never.
+- **MSYS2's own git prints `/c/...` paths** (LIMITATION): Fix: `hooks.find_repo` passes them
+  through `project.native_path` (4.8). Test: `test_paths.py::test_native_path_windows` (the
+  conversion; the call site is untested). Goes: never.
+
+GitHub Actions and hosted runners:
+- **setup-uv publishes no floating major tags since v8** (LIMITATION): `@v10` does not resolve.
+  Up: astral-sh/setup-uv#830. Fix: the exact release in `templates/ci.yml` and the template
+  workflows (13.2). Test:
+  `test_render_core.py::test_ci_workflow_for_every_preset_and_backend_set`. Goes: never.
+- **The `runner` context is not allowed in a job-level `env`** (LIMITATION): GitHub rejects the
+  whole workflow file. Fix: the step env of `template-nvim.yml` (13.2). Test:
+  `test_workarounds.py::test_template_workflows_use_contexts_where_actions_allows_them`
+  (actionlint, when installed). Goes: never.
+- **Hosted runners have no display, no OpenGL 3.3 on Windows and macOS, and `xvfb-run` starts an
+  8-bit screen, which has no GLX visuals** (LIMITATION): raylib and Flet windows could not open.
+  Fix: `e2e.detect_host` skips GUI runs on Windows/macOS CI and wraps Linux runs in `xvfb-run -a
+  -s "-screen 0 1280x720x24"` (13.1). Test: `test_e2e_plan.py::test_detect_host_gui_modes`,
+  `test_workarounds.py::test_xvfb_screen_has_24_bit_depth`. Goes: never.
+- **WSL setup on hosted runners is slow and sometimes fails** (LIMITATION): Fix: the WSL job of
+  `template-launchers.yml` is `continue-on-error`. Test: untested (CI only). Goes: when it is
+  reliable.
+
+PowerShell (details: section 4.5):
+- **A `.ps1` runs inside the caller's session** (LIMITATION): what it sets stays there, and the
+  caller's strict mode and preferences reach it (with `'Stop'`, 7.3+ turned a runner exit code
+  into an error and 5.1 turned redirected stderr into a bogus exit 126; 5.1 also printed module
+  progress). Fix: `deploy.ps1` restores every variable in `finally`, never assigns `$env:PATH`,
+  resets strict mode and the preferences in its own scope. Test:
+  `test_launcher_win.py::test_ps1_round_trip_in_a_session`,
+  `test_ps1_restores_every_variable_it_sets`. Goes: never.
+- **A `param()` block would take `-v`, `-h`, `-q`** (LIMITATION): Fix: `deploy.ps1` has none.
+  Test: `test_launcher_win.py::test_ps1_has_no_param_block_and_leaves_path_alone`. Goes: never.
+- **`$null` passed to a .NET string parameter becomes `''`** (LIMITATION; with .NET 9, in
+  PowerShell 7.5+, `''` no longer removes a variable): `SetEnvironmentVariable($n, $null)` left
+  an empty variable. Up: PowerShell/PowerShell#24637 (closed as a duplicate). Fix: `deploy.ps1`
+  uses `Remove-Item Env:NAME`. Test:
+  `test_launcher_win.py::test_ps1_clears_the_callers_uv_python_and_restores_it`. Goes: never
+  (`Remove-Item` stays right).
+- **Native arguments before 7.3 (and in `Legacy` mode)** (DEFECT): empty arguments were dropped
+  and embedded quotes mangled; 5.1's quote counter ignores backslashes. Up:
+  PowerShell/PowerShell#1995 (fixed by 7.3's `$PSNativeCommandArgumentPassing`). Fix:
+  `deploy.ps1` pre-quotes every argument (`""` on 5.1, `\"` on 7). Test:
+  `test_launcher_win.py::test_ps1_round_trip_in_a_session` (Legacy mode, 5.1 on Windows),
+  `test_ps1_hand_over_is_injection_safe`. Goes: when Windows PowerShell 5.1 is dropped.
+- **PowerShell 7 rewrites native arguments that are not quoted literals** (DEFECT): splatted
+  `@argv` included, it globs on Linux/macOS (`'*'` reached uv as a file list) and expands `~`.
+  Up: PowerShell/PowerShell#24178 (the globbing; none found for `~`). Fix: on Core `deploy.ps1`
+  rebuilds the call from single-quoted words (`EscapeSingleQuotedStringContent`, typographic
+  quotes too) for `Invoke-Expression`. Test:
+  `test_launcher_win.py::test_ps1_hand_over_is_injection_safe`; `shells.PS_ARGS` in `selftest
+  --shells`. Goes: when splatted arguments pass through verbatim.
+- **7.3+ takes any native argument equal to `--%`, quoted or splatted, for the stop-parsing
+  token** (LIMITATION): it drops it, then splits and `%VAR%`-expands the rest. Fix: `deploy.ps1`
+  switches that call to `Legacy` passing in its own scope. Test:
+  `test_launcher_win.py::test_ps1_passes_a_literal_stop_parsing_token`. Goes: never.
+- **A typed `-X:v` reaches a script as two elements** (DEFECT): `'-X:'` and `v`. Up:
+  PowerShell/PowerShell#6360 (closed for inactivity; 7.6 still splits it). Fix: `deploy.ps1`
+  joins them again (limit: `-X: v`; `pwsh -File` and the shebang route split at the colon before
+  the script runs, 4.5). Test:
+  `test_launcher_win.py::test_ps1_keeps_typed_colon_arguments_whole`. Goes: when fixed upstream.
+- **A script that names `$input` gets a redirected stdin re-read as text** (DEFECT): under `pwsh
+  -File` and the shebang route, invalid UTF-8 became U+FFFD and CRLF became LF. Up: none found.
+  Fix: `deploy.ps1` never names the variable and reads it by name. Test:
+  `test_launcher_win.py::test_ps1_never_names_the_pipeline_variable`,
+  `test_ps1_forwards_pipeline_input_and_keeps_raw_stdin`. Goes: never.
+- **ConstrainedLanguage mode blocks every .NET call** (LIMITATION, AppLocker/WDAC): Fix:
+  `deploy.ps1` checks the language mode first: one error, exit 126. Test:
+  `test_launcher_win.py::test_ps1_constrained_language_gives_one_clear_error`. Goes: never.
+- **`Get-Command uv` may return an alias, a function or a `uv.cmd`/`uv.ps1` wrapper**
+  (LIMITATION): a wrapper parses the arguments again. Fix: `-CommandType Application -All` and
+  only a real `uv.exe` on Windows (the plugin: `exepath('uv.exe')`; 4.1). Test:
+  `test_launcher_sh.py::test_uv_search_order`,
+  `test_nvim_render.py::test_lua_modules_in_headless_neovim`. Goes: never.
+- **`[IO.File]::GetUnixFileMode` needs .NET 7 (PowerShell 7.3+)** (LIMITATION): Fix: older
+  versions skip the x-bit check of a uv candidate (4.1). Test:
+  `test_launcher_win.py::test_ps1_skips_a_uv_without_exec_bit`. Goes: once 7.3 is the minimum.
+- **Windows PowerShell 5.1 reads a BOM-less script as ANSI and removes a bare `--`**
+  (LIMITATION): Fix: `deploy.ps1` is pure ASCII; no CLI syntax needs `--` (14). Test:
+  `test_launcher_win.py::test_ps1_is_ascii_lf_without_bom`. Goes: never.
+- **Windows PowerShell 5.1 writes UTF-16 (`>`, `Out-File`), ANSI (`Set-Content`) and BOMs**
+  (LIMITATION, editors add BOMs too): Fix: `config.read_text` names the encoding and how to save
+  the file again; the other readers take a BOM (`utf-8-sig`: `render._read_state`,
+  `render.load_profile`, `presets.load`; `imports.parse` reads bytes); a UTF-16 `state.json`
+  counts as empty (6.1, 6.2, 14). Test:
+  `test_config_rules.py::test_a_config_that_is_not_utf8_is_a_config_error`,
+  `test_render_core.py::test_corrupt_state_counts_as_empty`,
+  `test_profiles_tolerate_a_bom_and_crlf`,
+  `test_mypyc_core.py::test_imports_parse_honours_a_bom_and_crlf`. Goes: never.
+
+cmd.exe and CreateProcess (details: section 4.4):
+- **How cmd reads a batch file** (LIMITATION): in the OEM code page, labels break with LF, `( )`
+  blocks close early on a PATH holding `(x86)`, delayed expansion eats `!`, `%` expands inside
+  `rem`, and `call` expands `%*` twice. Fix: `deploy.cmd` and the generated `.cmd` files
+  (`portable.cmd_launcher`, `pyz._wrapper_cmd`) are ASCII and CRLF, with no blocks, no delayed
+  expansion and `%*` only on the uv line. Test:
+  `test_launcher_win.py::test_cmd_is_ascii_with_crlf`,
+  `test_cmd_has_no_blocks_and_no_delayed_expansion`,
+  `test_cmd_forwards_arguments_only_on_the_uv_line`,
+  `test_fixes.py::test_pyz_wrapper_is_ascii_crlf_without_blocks`. Goes: never.
+- **`%~dp0` is wrong when cmd found the file through PATH from a quoted name** (DEFECT): Up:
+  none found. Fix: `deploy.cmd` checks `%~dp0.pytemplate\deploy.py`, else walks up from `%CD%`.
+  Test: `test_launcher_win.py::test_cmd_walks_up_from_the_current_folder` (Windows). Goes:
+  never.
+- **cmd re-parses `%*`** (LIMITATION, the BatBadBut class): `% ! " ^` and unquoted `& | < >`
+  inside arguments do not survive, whatever quoting a CreateProcess caller applies. Fix: no CLI
+  syntax needs them (14); `shells.cmd_quote` for the probes. Test:
+  `test_shells.py::test_cmd_quote`. Goes: never.
+- **A quoted registry PATH entry splits `call` arguments** (LIMITATION): Fix: `deploy.cmd` keeps
+  the value in a variable, drops the quotes, then `call set`. Test:
+  `test_launcher_win.py::test_cmd_keeps_the_registry_path_out_of_call_arguments`,
+  `test_cmd_registry_path_with_quoted_entries` (Windows). Goes: never.
+- **`set "K=v"` in a generated launcher** (LIMITATION): a literal `%` must be written `%%`, and
+  non-ASCII text, `"` and line breaks cannot be held. Fix: `portable._cmd_value` (10). Test:
+  `test_fixes.py::test_portable_env_values_are_quoted`. Goes: never.
+
+niubash (1.1.4) and WinuxCmd (details: section 4.6):
+- **niubash runs `#!/bin/sh` scripts and `sh -c` inside the calling shell** (DEFECT): it ignores
+  the shebang, `$0` is the caller's (`$(dirname "$0")` pointed into `%TEMP%`), variables,
+  functions, aliases and `cd` leak into the session, and `exit`/`exec` only end the script. Up:
+  none found. Fix: `deploy` finds itself through `$BASH_SOURCE`, prefixes every name with `_pt_`
+  and unsets it, never changes folder, and runs uv without `exec` with a single exit (4.3); the
+  portable `.sh` launcher uses `${BASH_SOURCE:-$0}` (10). Test:
+  `test_launcher_sh.py::test_in_process_run_leaves_no_name_behind`, `test_lint`,
+  `test_niubash_leaves_nothing_behind` (Windows). Goes: never.
+- **niubash's parser** (DEFECT): `exit` is ignored inside `a || exit`, `a && exit` and `{ ...;
+  }`; a comment on a `name() {` line is a syntax error; `"...$(cmd "$x")..."` keeps the inner
+  quotes. Up: none found. Fix: the `deploy` rules, enforced by `test_launcher_sh.lint` (4.3).
+  Test: `test_launcher_sh.py::test_lint`, `test_lint_detects`. Goes: when niubash fixes them.
+- **niubash fakes its platform** (LIMITATION): `OSTYPE=msys`, `uname -s` = `MSWindows_NT`,
+  `$PWD` like `C:/Users/...`. Fix: `deploy` detects Windows by `OS=Windows_NT` without
+  `WSL_DISTRO_NAME`, and its walk-up stops at `C:` and `C:/` (4.3). Test:
+  `test_launcher_sh.py::test_windows_helpers_in_posix_shells`. Goes: never.
+- **A niubash session keeps stale exports** (LIMITATION): Fix: `project.caller_cwd` trusts
+  `PYTEMPLATE_CALLER_CWD` only while it names the process cwd (4.8). Test:
+  `test_paths.py::test_stale_caller_cwd_is_ignored`. Goes: never.
+- **`niu -c`, niubash scripts and the xonsh `!` route read only `$NIU_ENV`** (LIMITATION): Fix:
+  `shell-setup niubash` says to paste the function into both files (4.9). Test:
+  `test_shells.py::test_snippets_are_ascii_and_say_where_to_paste`. Goes: never.
+- **WinuxCmd's `cygpath.exe` knows no MSYS root** (DEFECT): it turns `/tmp/x` into `\tmp\x`. Up:
+  none found. Fix: `project.find_cygpath` takes only a cygpath next to `msys-2.0.dll` or
+  `cygwin1.dll`; `deploy` accepts only an `X:/...` answer (4.3, 4.8). Test:
+  `test_paths.py::test_cygpath_without_the_msys_runtime_is_ignored`. Goes: never.
+
+xonsh and bash:
+- **xonsh on Windows maps `#!/usr/bin/env bash` to `bash`** (LIMITATION): that can be the WSL
+  stub. Fix: `deploy` starts with `#!/bin/sh` (4.3). Test:
+  `test_launcher_sh.py::test_shebang_lf_ascii`. Goes: never.
+- **Older xonsh has no `@aliases.return_command`** (LIMITATION): Fix: the xonsh snippet falls
+  back to an unthreadable function alias (4.9). Test:
+  `test_shells.py::test_xonsh_snippet_runs_and_completes`. Goes: when the oldest supported xonsh
+  has it.
+- **bash rejects CRLF in an rc file** (LIMITATION): Fix: `shell-setup` writes LF bytes on every
+  OS (4.9). Test: `test_shells.py::test_snippets_are_ascii_and_say_where_to_paste`. Goes: never.
+
+MSYS2, Cygwin, Git Bash and busybox-w32 (details: section 4.7):
+- **A minimal PATH** (LIMITATION): MSYS2 login shells (`MSYS2_PATH_TYPE=minimal`) and Cygwin
+  with `CYGWIN_NOWINPATH` hide uv, and a console opened before uv was installed has the old
+  PATH. Fix: the launchers search the install folders, then the PATH stored in the registry
+  (4.1). Test: `test_launcher_sh.py::test_uv_search_order`, `test_registry_path_quoted_entries`,
+  `test_msys2_login_minimal_path` (Windows). Goes: never.
+- **MSYS rewrites arguments and variables; the others do not** (LIMITATION): `/v` becomes `V:/`
+  and `/c/x` `C:/x`, `SYSTEMROOT`/`PROGRAMFILES` are upper-cased, while Cygwin, niubash and
+  busybox-w32 pass `/c/x` through. Fix: `reg.exe query KEY` without `/v`; `%NAME%` expansion
+  retries the upper-case name; `project.native_path` takes every spelling (4.3, 4.8). Test:
+  `test_launcher_sh.py::test_registry_path_quoted_entries`,
+  `test_windows_helpers_in_posix_shells`, `test_paths.py::test_native_path_windows`. Goes:
+  never.
+- **Cygwin's command-line parser mangles argv from a Windows program** (LIMITATION): it mangles
+  `\"`, expands `*` and drops `'`. Fix: `shells` hands the probe commands over in `$PTCMD`
+  (4.9). Test: `test_shells.py::test_invocation`. Goes: never.
+- **An inherited `PWD`** (LIMITATION): MSYS2 bash started in a stale folder. Fix:
+  `shells.child_env` drops `PWD` and `OLDPWD` (4.9). Test:
+  `test_shells.py::test_child_env_drops_what_uv_run_added`. Goes: never.
+
+POSIX shells (dash, zsh, ksh93 and the rest; details: section 4.3):
+- **dash's `echo` interprets backslashes** (LIMITATION, POSIX allows it): `c:\Users` printed as
+  `c: sers`. Fix: `printf '%s\n'` (4.3). Test: `test_launcher_sh.py::test_lint_detects`. Goes:
+  never.
+- **zsh names a sourced file only in `${(%):-%x}`** (LIMITATION): dash cannot parse it. Fix:
+  `deploy` reads it through `eval`, then `emulate sh`. Test:
+  `test_launcher_sh.py::test_posix_shell_runs_the_launcher`. Goes: never.
+- **A caller's `set -eu`** (LIMITATION): `sh -eu deploy` and niubash with errexit stopped the
+  launcher at the first failing test. Fix: `${v:-}` and `|| :`/`|| _pt_x=` everywhere. Test:
+  `test_launcher_sh.py::test_launcher_survives_caller_errexit`. Goes: never.
+- **`command -v` prints aliases and functions** (LIMITATION): Fix: `deploy` accepts only an
+  answer that is a path (4.1). Test: `test_launcher_sh.py::test_uv_search_order`. Goes: never.
+- **`$PWD` is logical** (LIMITATION): below a symlinked folder its `..` is not where the kernel
+  found `../deploy`. Fix: `deploy` keeps the relative path unless the folded one holds the
+  project. Test: `test_launcher_sh.py::test_relative_launcher_from_a_symlinked_subfolder`. Goes:
+  never.
+- **An exported `CDPATH`, and ksh93's `cd -P` on a relative path** (LIMITATION; DEFECT for
+  ksh93): `cd` printed the folder or picked another one, and ksh93 folded `..` as text. Up: none
+  found (ksh93). Fix: the portable `.sh` launcher sets `CDPATH=''` and joins each relative link
+  target to the `pwd -P` folder of its link (`portable.sh_launcher`, 10). Test:
+  `test_build_methods.py::test_portable_sh_launcher_via_symlinks_cdpath_and_spaces`. Goes:
+  never.
+
+Windows:
+- **MAX_PATH (`LongPathsEnabled=0`)** (LIMITATION): deep paths broke MSVC (mypyc), PyPy runtime
+  copies, `compileall` and the Flet client extraction. Fix: stage-relative `c_dir`, `build_temp`
+  and `build_lib` in `mypyc.build`'s spec; `\\?\` paths in `portable.long_path` and
+  `e2e.rmtree`; short default folders (`nvimtest.default_dir`, `e2e.default_base`); doctor
+  reports the setting (`cmd_env._long_paths`; 1.7, 9, 10). Test:
+  `test_mypyc_core.py::test_build_spec_matches_what_the_tool_reads`,
+  `test_cmd_nvim.py::test_default_dir_is_short`, `test_e2e_plan.py::test_default_base_is_short`.
+  Goes: never.
+- **Reserved device names** (LIMITATION): `src/aux/` cannot exist, and git cannot check it out.
+  Fix: `presets.WINDOWS_DEVICES` in `presets.check_name_free` (11). Test:
+  `test_presets.py::test_check_name_free_refuses`. Goes: never.
+- **CreateProcess resolves a relative program against the parent's folder** (LIMITATION): a
+  task's `tools/gen.sh` ran from the caller's folder, not the task's cwd. Fix: `tasks.run_task`
+  anchors it (6.1). Test: `test_cli_core.py::test_a_relative_program_runs_from_the_task_cwd`.
+  Goes: never.
+- **A command line holds 32767 characters** (LIMITATION): Fix: `hooks.ARG_LIMIT` batches file
+  arguments (5.6). Test: `test_hooks.py::test_batches`. Goes: never.
+- **A file stays locked after its process ends** (LIMITATION): a just-exited exe, an antivirus
+  scan or a DLL still loaded. Fix: `e2e.rmtree` retries; the pyz bootstrap moves an incomplete
+  cache aside (`_discard`) (10, 13.1). Test:
+  `test_build_methods.py::test_pyz_repairs_an_incomplete_cache`. Goes: never.
+- **The classic console needs ANSI turned on** (LIMITATION): and the `os.system("")` trick
+  started a cmd.exe on every run. Fix: `ui.enable_vt_mode` (`SetConsoleMode`, 5.3). Test:
+  `test_paths.py::test_ui_never_spawns_cmd_for_colors`,
+  `test_windows_console_gets_ansi_without_cmd`. Goes: never.
+- **Ctrl+C ends a console program with `STATUS_CONTROL_C_EXIT`** (LIMITATION): Fix: `cli.main`
+  maps `proc.STATUS_CONTROL_C_EXIT` to 130 (5.3). Test:
+  `test_cli_core.py::test_main_maps_every_outcome_to_its_exit_code`. Goes: never.
+- **Case-insensitive file systems** (LIMITATION, macOS too): a case-only rename needs two moves,
+  and `Lib/` also matches `lib/`. Fix: `rename.apply_plan`; `portable.runtime_stdlib` looks for
+  `lib/pythonX.Y` first (5.7, 10). Test:
+  `test_rename.py::test_case_only_folder_fix_on_a_case_insensitive_file_system`. Goes: never.
+- **A venv is specific to its OS** (LIMITATION, WSL on `/mnt`): Fix: `.venv*-wsl` and
+  `.build/wsl` (`project.ENV_SUFFIX`, 7). Test:
+  `test_envs_core.py::test_runtime_and_tool_environments`, `test_clean_envs_on_the_wsl_side`.
+  Goes: never.
+- **`wsl -l -q` prints UTF-16** (LIMITATION): Fix: `shells.wsl_distros` decodes it. Test:
+  `test_workarounds.py::test_wsl_distros_are_read_as_utf16`. Goes: never.
+
+macOS:
+- **`/usr/bin/cc`, `gcc` and `clang` exist without the developer tools** (LIMITATION, xcrun
+  shims that open an install dialog): Fix: `cmd_env._xcode_problem`, `cmd_nvim.c_compiler` (7,
+  12.2). Test: `test_envs_core.py::test_c_compiler_rejects_macos_xcode_shims`,
+  `test_cmd_nvim.py::test_c_compiler_skips_the_macos_shims_without_developer_tools`. Goes:
+  never.
 
 ### 15.2 Our open issues and fragile points
 

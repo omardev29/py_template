@@ -49,7 +49,8 @@ def parse_error(e: SyntaxError | ValueError) -> tuple[int, str]:
     """(line, message) for a source that `parse` rejected.
 
     Either a real syntax error (ruff and mypy report it too), or syntax newer than the
-    runner's own Python: uv picks the runner's interpreter, which is not always the project's.
+    runner's own Python: only a runner started by hand on another Python (the launchers run
+    it on python.cpython).
     """
     line = (e.lineno if isinstance(e, SyntaxError) else None) or 1
     msg = (e.msg if isinstance(e, SyntaxError) else str(e)) or type(e).__name__

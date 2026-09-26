@@ -517,8 +517,8 @@ def extra_tables(preset: str, name: str) -> str:
 # --- names and option-driven dependencies (./deploy apply, ./deploy rename) ------------------------
 
 # Top-level standard-library modules of only SOME of the Pythons a project can run on (PyPy 3.11
-# ... the newest CPython). sys.stdlib_module_names only knows the runner's own version, and uv
-# keeps whatever Python ran ./deploy the first time (3.11 on one machine, 3.15 on another).
+# ... the newest CPython). sys.stdlib_module_names only knows the runner's own version: the
+# runner runs on python.cpython, but the app may also run on PyPy 3.11, and python.cpython can move.
 STDLIB_OTHER_VERSIONS = frozenset(
     {
         "annotationlib", "compression", "profiling",  # new in 3.14 / 3.15
