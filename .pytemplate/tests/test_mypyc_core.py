@@ -1159,14 +1159,21 @@ def test_compiler_hint_names_the_msvc_tools_of_the_venv_platform(monkeypatch: py
     assert "gcc/clang" in mypyc.has_compiler_hint("win-arm64")
 
 
+STALE_LOCK = "error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided."
+
+
 @pytest.mark.parametrize(
-    ("code", "stdout", "stderr", "verbose", "hint"),
+    ("code", "stdout", "stderr", "verbose", "hint", "exit_code"),
     [
-        (mypyc.MYPYC_REJECTED, "myapp/core/m.py:1: error: bad", "", False, False),
-        (mypyc.MYPYC_REJECTED, None, None, True, False),  # -v: nothing captured, still no hint
-        (1, "", "error: command 'gcc' failed: No such file or directory", False, True),
-        (1, None, None, True, True),
-        (1, "myapp/core/m.py:1: error: this text no longer decides", "", False, True),
+        (mypyc.MYPYC_REJECTED, "myapp/core/m.py:1: error: bad", "", False, False, 1),
+        (mypyc.MYPYC_REJECTED, None, None, True, False, 1),  # -v: nothing captured, still no hint
+        (mypyc.C_BUILD_FAILED, "", "error: command 'gcc' failed: No such file or directory", False, True, 1),
+        (mypyc.C_BUILD_FAILED, None, None, True, True, 1),
+        (mypyc.C_BUILD_FAILED, "myapp/core/m.py:1: error: this text no longer decides", "", False, True, 1),
+        # uv failed before mypyc ran (a stale uv.lock): it got "mypyc needs a C compiler" on a
+        # machine with gcc
+        (1, "", STALE_LOCK, False, False, 1),
+        (2, "", "error: No interpreter found", False, False, 2),
     ],
 )
 def test_build_compiler_hint_only_when_the_c_step_failed(
@@ -1178,6 +1185,7 @@ def test_build_compiler_hint_only_when_the_c_step_failed(
     stderr: str | None,
     verbose: bool,
     hint: bool,
+    exit_code: int,
 ) -> None:
     monkeypatch.setattr(ui, "VERBOSE", verbose)
     fake_build.code, fake_build.stdout, fake_build.stderr = code, stdout, stderr
@@ -1185,7 +1193,7 @@ def test_build_compiler_hint_only_when_the_c_step_failed(
         mypyc.build(make({}), "dev")
     assert fake_build.captures[-1] is not verbose
     assert (mypyc.has_compiler_hint() in str(err.value)) is hint
-    assert str(err.value).startswith("mypyc failed (exit code 1)") and err.value.code == 1
+    assert str(err.value).startswith(f"mypyc failed (exit code {exit_code})") and err.value.code == exit_code
     if not verbose and stdout:
         assert stdout in capsys.readouterr().err  # the captured output is shown
 
@@ -1199,6 +1207,18 @@ def test_build_a_compiler_that_cannot_start_is_a_missing_requirement(fake_build:
     assert err.value.code == 3
     assert "the C compiler cannot start" in str(err.value) and mypyc.has_compiler_hint() in str(err.value)
     assert not (mypyc.profile(make({}), "dev").dir / mypyc.COMPILED_STAMP).exists()  # the next build is forced
+
+
+def test_build_compiler_hint_names_the_tools_of_the_venv_platform(fake_build: FakeCompiler, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A win-arm64 .venv got the x86/x64 MSVC tools in the hint: build called has_compiler_hint()
+    platforms: list[str] = []
+    monkeypatch.setattr(mypyc, "IS_WINDOWS", True)
+    monkeypatch.setattr(mypyc.envs, "interpreter_info", lambda python: {"platform": "win-arm64"})
+    monkeypatch.setattr(mypyc, "has_compiler_hint", lambda platform="win-amd64": platforms.append(platform) or "HINT")
+    fake_build.code = mypyc.C_BUILD_FAILED
+    with pytest.raises(DeployError, match="HINT"):
+        mypyc.build(make({}), "dev")
+    assert platforms == ["win-arm64"]
 
 
 # --- 8. tools/mypyc_build.py -----------------------------------------------------------------------
@@ -1309,7 +1329,7 @@ def test_build_script_tells_a_missing_compiler_from_a_failed_compile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], problem: str | None
 ) -> None:
     """setuptools turns every failure into SystemExit("error: ..."): only when the compiler
-    cannot start does the script exit COMPILER_MISSING; a real compile error stays setuptools'."""
+    cannot start does the script exit COMPILER_MISSING; a real compile error is C_BUILD_FAILED."""
     module, _, _ = _run_build_script(tmp_path, monkeypatch)
     failure = SystemExit("error: [Errno 2] No such file or directory: 'clang-99'")
 
@@ -1319,9 +1339,8 @@ def test_build_script_tells_a_missing_compiler_from_a_failed_compile(
     sys.modules["setuptools"].setup = failing_setup  # type: ignore[attr-defined]
     monkeypatch.setattr(module, "missing_compiler", lambda: problem)
     if problem is None:
-        with pytest.raises(SystemExit) as e:
-            module.main()
-        assert e.value is failure
+        assert module.main() == module.C_BUILD_FAILED
+        assert "No such file or directory: 'clang-99'" in capsys.readouterr().err
         return
     assert module.main() == module.COMPILER_MISSING == mypyc.COMPILER_MISSING
     err = capsys.readouterr().err
@@ -1347,6 +1366,35 @@ def test_real_compile_with_a_missing_cc_is_a_missing_requirement(src_tree: Path,
     with pytest.raises(DeployError) as err:
         mypyc.build(make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}}), "dev")
     assert err.value.code == 3 and "the C compiler cannot start" in str(err.value)
+
+
+@pytest.mark.parametrize(
+    ("raised", "stderr"), [(SystemExit("error: command 'gcc' failed: No such file or directory"), "command 'gcc' failed"), (RuntimeError("boom"), "boom")]
+)
+def test_build_script_reports_a_failed_c_build_with_its_own_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], raised: BaseException, stderr: str
+) -> None:
+    # setuptools' SystemExit("error: ...") left the script with exit 1, the code `uv run --locked`
+    # itself fails with (a stale uv.lock): both got "mypyc needs a C compiler"
+    def setup(**kw: Any) -> None:
+        raise raised
+
+    fake_build_mod = types.ModuleType("mypyc.build")
+    fake_build_mod.mypycify = lambda args, **kw: [FakeExtension("m", [])]  # type: ignore[attr-defined]
+    fake_setuptools = types.ModuleType("setuptools")
+    fake_setuptools.setup = setup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mypyc", types.ModuleType("mypyc"))
+    monkeypatch.setitem(sys.modules, "mypyc.build", fake_build_mod)
+    monkeypatch.setitem(sys.modules, "setuptools", fake_setuptools)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["mypyc_build.py", str(_spec_file(tmp_path))])
+    module = _load_build_script()
+    monkeypatch.setattr(module, "compiler_type", lambda: "unix")
+    monkeypatch.setattr(module, "missing_compiler", lambda: None)
+    assert module.main() == module.C_BUILD_FAILED == mypyc.C_BUILD_FAILED
+    codes = {0, 1, 2, module.MYPYC_REJECTED, module.COMPILER_MISSING}
+    assert module.C_BUILD_FAILED not in codes  # never a code uv or Python uses, nor another outcome
+    assert stderr in capsys.readouterr().err
 
 
 @pytest.mark.skipif(not _has_mypyc(), reason="needs mypyc (run through ./deploy selftest)")
@@ -1842,6 +1890,89 @@ def test_wheel_copies_the_package_files(wheel_project: Path, monkeypatch: pytest
     assert files == [
         "__init__.py", "app.py", "assets/img.txt", "core/__init__.py", "core/m.py", "data/x.json", "native/libfoo.so", "py.typed",
     ]  # fmt: skip
+
+
+def _top_level_cfg() -> Config:
+    """compile.modules naming a lone top-level module and another top-level package of src/."""
+    return make({"app": {"name": "pkg", "assets": "assets"}, "compile": {"modules": ["pkg.core", "fastbench", "other.core"]}})
+
+
+def _add_top_level_modules(src: Path) -> None:
+    _project(
+        src,
+        {
+            "fastbench.py": "def twice(n: int) -> int:\n    return 2 * n\n",
+            "other/__init__.py": "",
+            "other/core/__init__.py": "",
+            "other/core/calc.py": "def add(a: int, b: int) -> int:\n    return a + b\n",
+            "other/core/calc" + LINUX_EXT: b"stray",  # a stray in-place build: never packaged
+        },
+    )
+
+
+@pytest.mark.parametrize("backend", ["cpython", "mypyc"])
+def test_wheel_carries_compiled_modules_outside_the_package(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    # compile.modules = ["fastbench"] (a module of src/): the build project held only src/pkg/, so
+    # mypycify stopped with "Cannot read file 'src/fastbench.py'" and a cpython wheel left it out
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    def fake_uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        out = Path(str(args[args.index("--out-dir") + 1]))
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "pkg-0.1.0-py3-none-any.whl").write_bytes(b"")
+        return _done([])
+
+    _add_top_level_modules(wheel_project / "src")
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.envs, "uv", fake_uv)
+    cfg = _top_level_cfg()
+    wheel.build(BuildRequest(cfg, backend, "wheel", wheel_project / "src"))
+    work = wheel_project / ".build" / "wheel" / backend
+    files = sorted(p.relative_to(work / "src").as_posix() for p in (work / "src").rglob("*") if p.is_file() and not p.is_relative_to(work / "src" / "pkg"))
+    assert files == ["fastbench.py", "other/__init__.py", "other/core/__init__.py", "other/core/calc.py"]
+    data = tomllib.loads((work / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["tool"]["setuptools"]["py-modules"] == ["fastbench"]
+    assert data["tool"]["setuptools"]["package-data"] == {"pkg": ["**/*"], "other": ["**/*"]}
+    if backend == "mypyc":  # every file mypycify gets exists in the build project
+        listed = re.findall(r"'(src/[^']+\.py)'", (work / "setup.py").read_text(encoding="utf-8"))
+        assert "src/fastbench.py" in listed and all((work / f).is_file() for f in listed)
+    else:  # a compile.modules entry that names nothing: a cpython wheel is built as before
+        missing = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core", "gone"]}})
+        wheel.build(BuildRequest(missing, backend, "wheel", wheel_project / "src"))
+        assert "py-modules" not in (work / "pyproject.toml").read_text(encoding="utf-8")
+
+
+@needs_venv
+def test_real_pure_wheel_holds_a_top_level_module(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    _add_top_level_modules(wheel_project / "src")
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    names = _wheel_names(wheel.build(BuildRequest(_top_level_cfg(), "cpython", "wheel", wheel_project / "src")))
+    assert {"fastbench.py", "other/__init__.py", "other/core/calc.py", "pkg/app.py"} <= set(names)
+    assert not [n for n in names if n.endswith(LINUX_EXT)]
+
+
+@needs_venv
+@needs_compiler
+def test_real_mypyc_wheel_compiles_a_top_level_module(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import zipfile
+
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    _add_top_level_modules(wheel_project / "src")
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["fastbench", "other.core"]}})
+    built = wheel.build(BuildRequest(cfg, "mypyc", "wheel", wheel_project / "src"))
+    site = wheel_project / "site"
+    with zipfile.ZipFile(built) as z:
+        z.extractall(site)
+    out = _import_from(site, "import fastbench, other.core.calc as c; print(fastbench.__file__); print(fastbench.twice(c.add(1, 2)))", wheel_project)
+    file, result = out.splitlines()
+    assert file.endswith(tuple(importlib.machinery.EXTENSION_SUFFIXES)) and result == "6"
 
 
 def _wheel_names(wheel_file: Path) -> list[str]:

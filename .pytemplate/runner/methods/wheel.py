@@ -21,9 +21,10 @@ from pathlib import Path
 
 from .. import envs, mypyc, render, ui
 from ..cmd_build import BuildRequest, dist_path
-from ..config import Config
+from ..config import Config, compiled_paths
 from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, SRC, rel
 from ..ui import DeployError
+from . import common
 
 
 def _locked_version(package: str) -> str:
@@ -37,8 +38,25 @@ def _locked_version(package: str) -> str:
     )
 
 
+def _outside_package(cfg: Config) -> list[str]:
+    """The top-level entries of src/ that compile.modules names besides the package: a lone
+    module (`fastbench.py`) or another package. The app imports them, so the wheel carries them
+    (mypycify compiles them from the build project; without them it stopped with "Cannot read
+    file 'src/fastbench.py'", and a cpython wheel left them out). An entry that names nothing
+    is left to mypyc.compiled_sources, which refuses it for a mypyc build."""
+    tops: list[str] = []
+    for rel_path in compiled_paths(cfg):
+        top = rel_path.split("/")[0]
+        if top != cfg.pkg and top not in tops and (SRC / top).exists():
+            tops.append(top)
+    return tops
+
+
 def _pyproject(cfg: Config, compiled: bool) -> str:
     project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))["project"]
+    outside = _outside_package(cfg)
+    modules = [top.removesuffix(".py") for top in outside if top.endswith(".py")]
+    packages = [cfg.pkg, *(top for top in outside if not top.endswith(".py"))]
     entry = cfg.deploy.wheel.entry or f"{cfg.pkg}.app:main"
     # Informational: the build runs without isolation, with what .venv has (these exact versions)
     requires = [f"setuptools=={_locked_version('setuptools')}"] + ([f"mypy=={_locked_version('mypy')}"] if compiled else [])
@@ -58,13 +76,14 @@ def _pyproject(cfg: Config, compiled: bool) -> str:
         "[project.gui-scripts]" if cfg.app.gui else "[project.scripts]",
         f"{json.dumps(cfg.app.name)} = {json.dumps(entry)}",
         "",
+        *(["[tool.setuptools]", f"py-modules = {json.dumps(modules)}", ""] if modules else []),
         "[tool.setuptools.packages.find]",
         'where = ["src"]',
         "",
         # Every file of the package travels with it: data files, py.typed, vendored native
         # libraries, and the assets (copied into <pkg>/assets, where resources.py looks)
         "[tool.setuptools.package-data]",
-        f'{json.dumps(cfg.pkg)} = ["**/*"]',
+        *(f'{json.dumps(name)} = ["**/*"]' for name in packages),
     ]
     return "\n".join(lines) + "\n"
 
@@ -140,6 +159,11 @@ def build(req: BuildRequest) -> Path:
         shutil.rmtree(work)
     (work / "src").mkdir(parents=True)
     shutil.copytree(package, work / "src" / cfg.pkg, ignore=_skip)
+    for top in _outside_package(cfg):  # compile.modules outside the package (a lone module)
+        if (SRC / top).is_dir():
+            shutil.copytree(SRC / top, work / "src" / top, ignore=_skip)
+        else:
+            shutil.copy2(SRC / top, work / "src" / top)
     assets = cfg.app.assets
     if assets and (SRC / assets).is_dir():
         # In a wheel the assets travel inside the package (resources.py looks for them there)
@@ -149,8 +173,7 @@ def build(req: BuildRequest) -> Path:
         (work / "mypy.ini").write_text(render.mypy_ini(cfg, "mypyc", for_compile=work), encoding="utf-8", newline="\n")
         (work / "setup.py").write_text(setup_py(cfg), encoding="utf-8", newline="\n")
     out = dist_path(req)
-    if out.exists():
-        shutil.rmtree(out)
+    common.remove_output(out)
     tool = envs.tool_env(cfg)
     # Synced first (a `--no-check` build never ran `uv run --locked`); `uv build` ignores
     # UV_PROJECT_ENVIRONMENT (it would take ./.venv, wrong under WSL), hence --python

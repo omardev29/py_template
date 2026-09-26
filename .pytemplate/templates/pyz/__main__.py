@@ -5,36 +5,60 @@ contents are extracted to a cache versioned per build and run from there. If thi
 and OS have their own build (_pyz.json "targets": binaries, or dependencies that differ per
 platform), it is used; otherwise the pure Python version is used (if the app allows it).
 
+Executables (an app's helper script, a dependency's binary) keep their x bit.
+
 Cache: %LOCALAPPDATA%, ~/Library/Caches, $XDG_CACHE_HOME or ~/.cache, then
 <name>/pyz/<build_id>/<key|pure>/. It keeps the most recently started builds plus every
-build started in the last day (one that is still running is never deleted); deleting the
-folder is always safe. Without a usable cache (no home folder, a read-only one) the .pyz
-extracts into a private temporary folder for this run only.
+build started in the last day, and never deletes a build that is still running (each start
+holds a lock in its build folder until it ends); deleting the folder is always safe. Without a
+usable cache (no home folder, a read-only one) the .pyz extracts into a private temporary
+folder for this run only.
 """
 
 import atexit
+import errno
 import json
 import os
 import platform
 import runpy
 import shutil
 import site
+import stat
 import sys
+import sysconfig
 import tempfile
 import time
 import zipfile
 from pathlib import Path
 
-ARCH = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}
+# The architecture of THIS interpreter in uv's names, as methods/common.py host_arch names the
+# build's host key: platform.machine() spellings, sysconfig's on Windows, a 32-bit interpreter
+ARCH = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64", "x86": "x86", "i386": "x86", "i686": "x86"}
+WINDOWS_ARCH = {"win-amd64": "x86_64", "win-arm64": "aarch64", "win32": "x86"}
+ARCH_32BIT = {"x86_64": "x86", "aarch64": "armv7l"}
 OS = {"win32": "windows", "linux": "linux", "darwin": "macos"}
 KEEP_BUILDS = 3  # the most recently started builds kept (this one included)...
-MIN_AGE = 86400  # ...plus every build started in the last day: it may still be running
+MIN_AGE = 86400  # ...plus every build started in the last day
+RUN_PREFIX = ".run-"  # <build>/.run-<pid>: locked while that start runs (_hold, _in_use)
+# What a lock held by another process raises: flock EWOULDBLOCK, msvcrt.locking EACCES/EDEADLOCK
+_BUSY = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)}
+_running = {}  # the open, locked run file of this process (kept for its whole life)
+
+
+def _arch() -> str:
+    """The interpreter's architecture, not the machine's: on Windows platform.machine() asks WMI
+    for the native CPU (an x64 Python on Windows on ARM said aarch64 and missed its x86_64 wheels),
+    and a 32-bit Python on a 64-bit kernel (Raspberry Pi OS 32-bit) got the 64-bit name."""
+    if sys.platform == "win32" and sysconfig.get_platform() in WINDOWS_ARCH:
+        return WINDOWS_ARCH[sysconfig.get_platform()]
+    machine = platform.machine().lower()
+    arch = ARCH.get(machine, machine)
+    return ARCH_32BIT.get(arch, arch) if sys.maxsize <= 2**32 else arch
 
 
 def _key() -> str:
     impl = {"cpython": "cp", "pypy": "pp"}.get(sys.implementation.name, sys.implementation.name)
-    arch = ARCH.get(platform.machine().lower(), platform.machine().lower())
-    return f"{impl}{sys.version_info[0]}{sys.version_info[1]}-{OS.get(sys.platform, sys.platform)}-{arch}"
+    return f"{impl}{sys.version_info[0]}{sys.version_info[1]}-{OS.get(sys.platform, sys.platform)}-{_arch()}"
 
 
 def _cache_root(name: str) -> Path:
@@ -58,22 +82,33 @@ def _discard(folder: Path) -> None:
     shutil.rmtree(stale, ignore_errors=True)
 
 
+def _executable(info: zipfile.ZipInfo) -> bool:
+    """Whether a member is a regular file with an x bit in its (Unix) mode."""
+    mode = info.external_attr >> 16
+    return bool(mode and stat.S_ISREG(mode) and mode & 0o111)
+
+
 def _extract(archive: zipfile.ZipFile, prefixes: list[str], dest: Path) -> None:
     """Extract atomically (temporary folder + rename): safe with concurrent startups. A folder
     left without its .complete marker (an interrupted prune, a DLL that was still loaded) is
-    moved aside and replaced."""
+    moved aside and replaced. Executables keep their x bit (a helper script of the app, a
+    dependency's binary such as ruff's bin/ruff)."""
     if (dest / ".complete").is_file():
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix=".tmp-", dir=dest.parent))
     try:
         for prefix in prefixes:
-            for member in archive.namelist():
+            for info in archive.infolist():
+                member = info.filename
                 if member.startswith(prefix) and not member.endswith("/"):
                     target = tmp / member[len(prefix) :]
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    with archive.open(member) as src, open(target, "wb") as out:
+                    with archive.open(info) as src, open(target, "wb") as out:
                         shutil.copyfileobj(src, out)
+                    if os.name != "nt" and _executable(info):
+                        mode = os.stat(target).st_mode  # what open() gave it under the umask
+                        os.chmod(target, mode | (mode & 0o444) >> 2)
         (tmp / ".complete").write_text("ok")
         for attempt in range(2):
             try:
@@ -89,9 +124,94 @@ def _extract(archive: zipfile.ZipFile, prefixes: list[str], dest: Path) -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _lock(fd: int) -> bool | None:
+    """Lock the first byte of an open file without waiting (the OS releases the lock when its
+    process ends, however it ends): True, False when another process holds it, None when this
+    file system cannot lock."""
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        return False if e.errno in _BUSY else None
+    return True
+
+
+def _hold(build: Path) -> None:
+    """Mark the build as in use for the life of this process: a lock on <build>/.run-<pid>.
+    Best effort: without it the build is only protected for a day (MIN_AGE)."""
+    run = build / f"{RUN_PREFIX}{os.getpid()}"
+    try:
+        fd = os.open(run, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return
+    if not _lock(fd):  # None: no locks here (MIN_AGE still protects it for a day)
+        os.close(fd)
+        return
+    _running.update(fd=fd, path=run, pid=os.getpid())
+    atexit.register(_release)
+
+
+def _release() -> None:
+    """At exit: drop this process's run file (a forked child that exits keeps its parent's)."""
+    if _running.get("pid") != os.getpid():
+        return
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            os.lseek(_running["fd"], 0, os.SEEK_SET)
+            msvcrt.locking(_running["fd"], msvcrt.LK_UNLCK, 1)
+        os.close(_running["fd"])
+        os.unlink(_running["path"])
+    except OSError:
+        pass
+
+
+def _in_use(build: Path) -> bool:
+    """Whether a running start holds the lock of one of the build's run files. A run file whose
+    lock is free was left by a start that was killed: it goes."""
+    try:
+        runs = [p for p in build.iterdir() if p.name.startswith(RUN_PREFIX)]
+    except OSError:
+        return False
+    for run in runs:
+        try:
+            fd = os.open(run, os.O_RDWR)
+        except OSError:
+            continue  # its start just ended and removed it
+        try:
+            locked = _lock(fd)
+            if locked is False:
+                return True
+            if locked is None:
+                continue  # cannot tell: MIN_AGE decides, as for a build without run files
+            if sys.platform == "win32":
+                import msvcrt
+
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+        try:
+            run.unlink()
+        except OSError:
+            pass
+    return False
+
+
 def _prune_old(root: Path, keep: str) -> None:
     """Delete the builds that were started least recently (main touches a build on every start),
-    except `keep`, the newest ones and any build started in the last day."""
+    except `keep`, the newest ones, any build started in the last day and any build a running
+    start holds (_in_use)."""
     try:
         entries = list(root.iterdir())
     except OSError:
@@ -108,7 +228,7 @@ def _prune_old(root: Path, keep: str) -> None:
     builds.sort()
     limit = time.time() - MIN_AGE
     for mtime, old in builds[: max(len(builds) - (KEEP_BUILDS - 1), 0)]:
-        if mtime > limit:
+        if mtime > limit or _in_use(old):
             continue
         # The markers first: an interrupted delete then reads as incomplete and is re-extracted
         for marker in old.glob("*/.complete"):
@@ -160,6 +280,7 @@ def main() -> None:
             dest = root / info["build_id"] / flavour
             _extract(archive, prefixes, dest)
     if cached:
+        _hold(dest.parent)  # while this process runs, no other start deletes its build
         try:
             os.utime(dest.parent)  # started now: the prune removes the least recently started builds
         except OSError:

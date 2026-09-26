@@ -20,14 +20,16 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import stat
 import tempfile
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from .. import ui
 from ..cmd_build import BuildRequest, dist_path
-from ..config import Config
+from ..config import APP_NAME, Config
 from ..project import BUILD, EXT_SUFFIXES, IS_WINDOWS, TEMPLATES, rel
 from ..ui import DeployError
 from . import common
@@ -43,25 +45,47 @@ def _build_id(root: Path) -> str:
     return h.hexdigest()[:16]
 
 
-def _write_archive(root: Path, out: Path) -> None:
+def _write_archive(root: Path, out: Path, modes: Mapping[str, int] | None = None) -> None:
     """zipapp.create_archive(root, out, interpreter="/usr/bin/env python3", compressed=True)
     that accepts any mtime.
 
     A zip cannot store dates before 1980, and zipapp's ZipFile raised ValueError (an internal
     error) for such a file: a copy from the Nix store has mtime 1, SOURCE_DATE_EPOCH=0 tarballs
     0. strict_timestamps=False stores 1980-01-01 instead. Deflate, never zstd: the .pyz must
-    open on Python 3.11 and PyPy.
+    open on Python 3.11 and PyPy. Each member keeps its file's mode (the bootstrap restores the
+    x bit); `modes` (pyz-merge: the parts' executables) sets a member's Unix mode whatever this
+    OS's files say.
     """
     tmp = out.with_name(out.name + ".tmp")
     with tmp.open("wb") as fd:
         fd.write(b"#!/usr/bin/env python3\n")
         with zipfile.ZipFile(fd, "w", compression=zipfile.ZIP_DEFLATED, strict_timestamps=False) as z:
             for path in sorted(root.rglob("*")):
-                if path.is_file():
-                    z.write(path, path.relative_to(root).as_posix())
-    tmp.replace(out)
+                if not path.is_file():
+                    continue
+                name = path.relative_to(root).as_posix()
+                if modes and name in modes:
+                    info = zipfile.ZipInfo.from_file(path, name, strict_timestamps=False)
+                    info.create_system = 3
+                    info.external_attr = (stat.S_IFREG | modes[name]) << 16
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    with path.open("rb") as src, z.open(info, "w") as dst:
+                        shutil.copyfileobj(src, dst)
+                else:
+                    z.write(path, name)
+    try:
+        tmp.replace(out)
+    except OSError as e:  # Windows: the previous .pyz is in use
+        tmp.unlink(missing_ok=True)
+        raise DeployError(f"cannot replace {rel(out)}: it is in use ({e.strerror or e}): close the app that uses it and try again", 1) from None
     if not IS_WINDOWS:
         out.chmod(0o755)
+
+
+def _executable(info: zipfile.ZipInfo) -> bool:
+    """Whether a member is a regular file with an x bit in its Unix mode (the bootstrap's test)."""
+    mode = info.external_attr >> 16
+    return bool(mode and stat.S_ISREG(mode) and mode & 0o111)
 
 
 def _wrapper_cmd(cfg: Config, backend: str, pyz_name: str, *, name: str = "", min_python: str = "") -> str:
@@ -164,8 +188,7 @@ def build(req: BuildRequest) -> Path:
         raise DeployError("bug: the pyz has compiled extensions in common/")
 
     out_dir = dist_path(req)
-    if out_dir.exists():
-        shutil.rmtree(out_dir)
+    common.remove_output(out_dir)
     out_dir.mkdir(parents=True)
     pyz = out_dir / f"{cfg.app.name}.pyz"
     _write_archive(root, pyz)
@@ -200,6 +223,7 @@ def _read_info(part: Path) -> dict[str, Any]:
     if not isinstance(info, dict) or not (
         all(k in info for k in INFO_KEYS)
         and isinstance(info["name"], str)
+        and APP_NAME.fullmatch(info["name"])  # an app.name: the wrapper echoes it unquoted
         and isinstance(info["targets"], list)
         and isinstance(info["min_python"], list)
         and len(info["min_python"]) == 2
@@ -232,12 +256,24 @@ def wrapper_path(out: Path) -> Path:
     return out.with_name(out.stem + ".cmd")
 
 
+# Characters of an --out name the wrapper cannot hold: it is ASCII, cmd expands % (and ! under
+# delayed expansion) even inside quotes and in `rem` lines, " ends the quoted "%~dp0<name>",
+# and ^ & | < > are cmd syntax outside quotes (the `rem` line holds the name too)
+_CMD_UNSAFE = frozenset('%!"^&|<>')
+
+
 def check_parts(parts: list[Path], out: Path) -> list[dict[str, Any]]:
     """Read and compare the parts' _pyz.json (also in --dry-run): one app, one build."""
     if len(parts) < 2:
         raise DeployError("pyz-merge needs at least two .pyz files")
     if out.suffix.lower() == ".cmd":  # any case: macOS and Windows folders ignore it
         raise DeployError(f"pyz-merge: --out {out.name} would be overwritten by its own .cmd wrapper: name it <name>.pyz")
+    if not (out.name.isascii() and out.name.isprintable()) or _CMD_UNSAFE & set(out.name):
+        raise DeployError(
+            f"pyz-merge: --out {out.name!r}: its Windows wrapper {wrapper_path(out).name} cannot hold this "
+            "name (printable ASCII only, without % ! \" ^ & | < >): choose another file name",
+            2,
+        )
     infos = [_read_info(p) for p in parts]
     names = {str(i["name"]) for i in infos}
     if len(names) != 1:
@@ -261,6 +297,10 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
     (UTF-8 mode, the interpreter search) is written next to `out`, as a build writes it.
     """
     infos = check_parts(parts, out)
+    # The wrapper text first: nothing is written when it cannot be made
+    backend = "pypy" if all(i.get("backend") == "pypy" for i in infos) else "cpython"
+    min_python = ".".join(str(x) for x in infos[0]["min_python"])
+    wrapper = _wrapper_cmd(cfg, backend, out.name, name=str(infos[0]["name"]), min_python=min_python).encode("ascii")
     pure = all(bool(i["pure"]) for i in infos)
     moved = {} if pure else {n: _part_host(p, i) for n, (p, i) in enumerate(zip(parts, infos, strict=True)) if i["pure"]}
 
@@ -279,6 +319,7 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
         root = Path(tmp) / "root"
         app_digest = ""
         overlay_from: dict[str, int] = {}
+        modes: dict[str, int] = {}  # the parts' executables keep their mode (see _write_archive)
         for n, part in enumerate(parts):
             with zipfile.ZipFile(part) as archive:
                 digest = _app_digest(archive)
@@ -286,7 +327,8 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
                     app_digest = digest
                 elif digest != app_digest:
                     raise DeployError(f"pyz-merge: {part} carries other app code than {parts[0]}: the parts come from different builds")
-                for member in archive.namelist():
+                for item in archive.infolist():
+                    member = item.filename
                     if member.endswith("/") or member == "_pyz.json":
                         continue
                     if member.startswith(("/", "\\")) or ".." in member.replace("\\", "/").split("/") or ":" in member:
@@ -313,20 +355,26 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
                     elif n == 0:
                         name = member  # common/app and __main__.py from the first part
                     else:
+                        if member.startswith("common/app/") and _executable(item):
+                            # the same file as the first part's, which may come from Windows (no modes)
+                            modes[member] = stat.S_IMODE(item.external_attr >> 16)
                         continue
                     target = root / name
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(archive.read(member))
+                    target.write_bytes(archive.read(item))
+                    if _executable(item):
+                        modes[name] = stat.S_IMODE(item.external_attr >> 16)
         targets = sorted(p.name for p in (root / "targets").iterdir()) if (root / "targets").is_dir() else []
         merged = {k: v for k, v in infos[0].items() if k != "host"}
         merged.update({"targets": targets, "pure": pure, "build_id": _build_id(root)})
         (root / "_pyz.json").write_text(json.dumps(merged, indent=2), encoding="utf-8", newline="\n")
         out.parent.mkdir(parents=True, exist_ok=True)
-        _write_archive(root, out)
-    backend = "pypy" if all(i.get("backend") == "pypy" for i in infos) else "cpython"
-    min_python = ".".join(str(x) for x in infos[0]["min_python"])
-    wrapper = _wrapper_cmd(cfg, backend, out.name, name=str(infos[0]["name"]), min_python=min_python)
-    wrapper_path(out).write_text(wrapper, encoding="ascii", newline="")
-    ui.ok(f"{rel(out)}: runs on {', '.join(targets) or 'any platform (pure Python)'}")
+        _write_archive(root, out, modes)
+    wrapper_path(out).write_bytes(wrapper)
+    if pure:  # targets/ holds only mypyc overlays: the .py runs everywhere else
+        detail = f"pure: works with Python >= {min_python} on any OS" + (f"; compiled code for {', '.join(targets)}" if targets else "")
+    else:
+        detail = f"runs on {', '.join(targets)}"
+    ui.ok(f"{rel(out)}: {detail}")
     ui.info(f"  on Windows also {rel(wrapper_path(out))}")
     return out

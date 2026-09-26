@@ -686,8 +686,9 @@ header rules (with detector tests proving each rule fires).
 - `render.apply` behaves like `--check` (writes nothing); `render.auto` prints "would update";
   `render` prints `would update: ...`.
 - `clean` prints `would remove X` per target. `build` validates its arguments, the pyz target
-  keys, the Nuitka pin and PGO rules (`nuitka.check_python`, `check_options`) as a real build
-  does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M: would output
+  keys, the Nuitka pin and PGO rules (`nuitka.check_python`, `check_options`), the flet preset
+  and Developer Mode (`flet.check`) and the portable launchers' env values (`portable.check`)
+  as a real build does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M: would output
   dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options: --lto=... [--pgo-c ...] <extras>`), then
   stops. `report` builds nothing and never opens the browser. No success line for a skipped
   step: `compile`, `report` and `check` print `(--dry-run) would ...`/`were not run` instead of
@@ -1411,10 +1412,11 @@ Formats:
 - `compiled_sources`: the `.py` files of `compile.modules` (never `__init__.py`; each entry
   resolved like Python's import by `config.compiled_paths`, section 6.1; an entry that does not
   exist or holds no module -> `DeployError`), minus `compile.exclude` (exact module or package
-  prefix; an entry naming nothing -> `DeployError`), deduplicated. Walks with `mypyc._walk`, like `sync_tree`.
+  prefix; an entry naming nothing -> `DeployError`), deduplicated. Walks with `mypyc.walk`, like
+  `sync_tree` and `common.uses_tkinter`.
 - `sync_tree(src, dst, owned=())` copies changed files only and deletes removed ones. Change
   detection is size + `st_mtime_ns` (`copy2` preserves the exact mtime), so a same-size edit
-  within one second is detected. `_walk` follows symlinked folders (`Path.rglob` does not
+  within one second is detected. `walk` follows symlinked folders (`Path.rglob` does not
   descend into them: a linked `src/assets` arrived empty), skipping a link back to a folder on
   the current path (cycles; two links to one folder are both copied) and never entering
   `SKIP_DIRS`; a broken symlink is a warning. A path that turned from file to folder (or back)
@@ -1456,11 +1458,12 @@ Formats:
   `strip_asserts`, `group_name` or `multi_file` and always writes to `./build`. When mypycify
   exits or raises (mypy/mypyc rejected the code; the errors are printed) it returns
   `MYPYC_REJECTED` (4, mirrored in `mypyc.py`). When the C build fails (setuptools reports
-  every failure as `SystemExit("error: ...")`) it asks `mypyc_build.missing_compiler` why: the
-  program of the compiler or linker command (`CC`, `LDSHARED`, Python's own `cc`) is not
-  found, or MSVC cannot be set up -> `COMPILER_MISSING` (5), which `mypyc.build` turns into
-  exit 3 (a missing requirement) with the install hint; any other C failure exits with
-  setuptools' code.
+  every failure as `SystemExit("error: ...")`; a crash of the C step too) it prints the error
+  and asks `mypyc_build.missing_compiler` why: the program of the compiler or linker command
+  (`CC`, `LDSHARED`, Python's own `cc`) is not found, or MSVC cannot be set up ->
+  `COMPILER_MISSING` (5), which `mypyc.build` turns into exit 3 (a missing requirement) with
+  the install hint; any other C failure -> `C_BUILD_FAILED` (6; setuptools' own exit 1 was
+  also uv's). Both are mirrored in `mypyc.py`.
   Every spec key it reads must be written by `mypyc.build` (a test parses the script).
 - Extra C flags (`mypyc_build.extra_cflags`, appended to mypyc's own `extra_compile_args` of
   every extension, as a NEW list each: mypycify hands one shared list to all of them; the
@@ -1489,9 +1492,13 @@ Formats:
   `opt_level "0"` (unoptimised C, C asserts on) is 1.8x SLOWER than the interpreter: for
   debugging only. MSVC has no levels: `"1"`-`"3"` are all `/O2`, `"0"` is `/Od`.
 - Output is captured unless `-v`; on failure it is printed. The compiler-install hint
-  (`has_compiler_hint`) is added only when the exit code is not `MYPYC_REJECTED` (with `-v`
-  the output was not captured, and every type error used to get the hint); the runner's own
-  code stays 1 (`mypyc failed (exit code 1)`), or 3 for `COMPILER_MISSING`.
+  (`has_compiler_hint`, with the MSVC tools of the `.venv` Python's platform: `_venv_platform`,
+  Windows only) is added only for `COMPILER_MISSING` and `C_BUILD_FAILED` (with `-v` the
+  output was not captured, and every type error used to get the hint; a stale `uv.lock` failed
+  in `uv run --locked` with exit 1 and got "mypyc needs a C compiler" too). The runner's own
+  code is 1 (`mypyc failed (exit code 1)`) for `MYPYC_REJECTED` and `C_BUILD_FAILED`, 3 for
+  `COMPILER_MISSING`; any other code is uv's or Python's (`mypyc failed (exit code N): see the
+  error above`, exit N).
 - After the build every compiled module must have an extension, else `DeployError` (and no
   record is written, so the next build is forced).
 - `compile.annotate = true`: every mypyc build (`run`, `test`, `compile`, `build`) also writes
@@ -1571,13 +1578,24 @@ Formats:
   `TARGET_METHODS` (pyz), `GLOBAL_FLAGS` (`--dry-run`, `--no-render`) typed after the command,
   and a leading bare word (`_stray_word`: "unknown backend 'mypy': did you mean mypyc?", "did you
   mean --method pyz?"). Then `nuitka.check_python` and, for pyz, `common.check_key` on every
-  key. Default method from `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs
-  `run_checks` unless `--no-check`. `payload`: the mypyc release stage, or `sync_tree(SRC,
-  .build/payload/<backend>)`. The `done: ... (N MB)` size (`common.tree_bytes`) counts a
+  key, `flet.check` (the flet preset; Developer Mode on Windows, exit 3) and `portable.check`
+  (the `[deploy.portable] env` values a `.cmd` launcher cannot hold): what a method refuses is
+  refused before the checks, the mypyc compile and the removal of the previous output, and in
+  `--dry-run` too. Default method from `deploy.default`; `COMPAT` rejects exe/nuitka/flet with
+  pypy. Runs `run_checks` unless `--no-check` (a failure is exit 1, like `./deploy check`).
+  `payload`: the mypyc release stage, or `sync_tree(SRC, .build/payload/<backend>)`. A method
+  whose result is missing or an empty folder is a DeployError, never `ok done` (`build -v`:
+  PyInstaller took `-v` for `--version`; the message says that `./deploy`'s `-v`/`-q` go before
+  the command). The `done: ... (N MB)` size (`common.tree_bytes`) counts a
   symlinked file once (a bundled runtime's `bin/python3 -> python3.14`).
 - Output: `dist_path(req, suffix)` = `dist/<app.name>-<backend>-<method><suffix>`; portable
   with a bundled runtime adds `-<target key>`, flet adds `-<target>`. The CI template hard-codes
-  `dist/<NAME>-<BUILD_BACKEND>-pyz/<NAME>.pyz`: it is coupled to `BuildRequest.out_name`.
+  `dist/<NAME>-<BUILD_BACKEND>-pyz/<NAME>.pyz`: it is coupled to `BuildRequest.out_name`. pyz,
+  portable and wheel replace their previous output whole or not at all
+  (`common.remove_output`: a folder is first moved aside in `dist/`, which Windows refuses while
+  a file in it is in use, the app still running from it: exit 1 naming it, nothing deleted; what
+  the moved copy still holds is a warning); `pyz._write_archive` turns a `.pyz` in use into the
+  same error. rmtree used to delete half of the folder, then fail with a traceback.
 - Work dirs live under `.build/<name>/<backend>` (`exe-stage`, `pyinstaller`, `flet-pack`,
   `pyz`, `wheel`, `nuitka-stage`, `nuitka`, `flet-build`); portable builds straight into `dist/`.
 - Target keys: `^(cp|pp)(\d)(\d+)-(windows|linux|macos)-(x86_64|aarch64)$`
@@ -1587,10 +1605,28 @@ Formats:
   cover the locked minors), and a `pp` key only when it is the pypy build's own interpreter on
   this machine (`config_host_key`; uv installs PyPy wheels only with a real PyPy: CPython and
   PyPy builds are joined with `pyz-merge`). A pypy build may add `cp<minor>` keys (installed
-  with the tools env).
+  with the tools env). The host key's architecture is the INTERPRETER's (`common.host_arch`,
+  the runner's, which is uv's managed `python.cpython` like `.venv`'s; not `project.host_arch`,
+  the machine's, which upx and e2e use): `sysconfig.get_platform()` on Windows, where
+  `platform.machine()` asks WMI for the native CPU (an x64 Python on Windows on ARM labelled its
+  x64 wheels `aarch64`), and `x86`/`armv7l` for a 32-bit interpreter on a 64-bit kernel. The pyz
+  bootstrap's `_arch` computes the same name (it said `i686` where the builder said `x86`).
+- `common.export_requirements` (pyz, portable): `uv export --locked --no-dev --no-editable
+  --no-emit-project` into `.build/deploy/requirements.txt`. `--locked`: a `uv.lock` that
+  `pyproject.toml` moved past fails like every `uv run --locked` (with `--frozen` a `--no-check`
+  pyz or portable build shipped without the new dependency). `--no-editable`: a workspace or path
+  dependency (`./deploy add ./libs/x`) is exported as a path, which `uv pip install --target`
+  builds and installs (editable, it left only a `.pth` naming this machine's source folder); uv
+  reads that relative path against its working folder, `ROOT`.
 - `common.install_deps` (`uv pip install --target --no-deps -r <export>`): a cross target gets
   `--python-platform UV_PLATFORMS[...] --python-version --only-binary :all:` (an sdist built for
-  another OS would produce host binaries); a HOST target gets the same `--python-platform` floor
+  another OS would produce host binaries), plus `--no-binary <name>` for each package uv.lock has
+  no wheel for (`common.source_only`, read from `common.LOCK`: an sdist-only release such as
+  docopt, a path, git or URL source such as a workspace library; pip's rule, which uv follows:
+  the later option wins for that package), which is built here and must come out pure
+  (`_built_native`: a platform wheel is a DeployError naming it, build that key on its platform
+  and `pyz-merge`); before, every cross target failed for such a package. A HOST target gets
+  the same `--python-platform` floor
   when this machine can load it (`host_floor`: glibc >= 2.28 x86_64 / 2.35 aarch64, never musl;
   macOS >= `MACOS_FLOOR` 13.0, pinned through `MACOSX_DEPLOYMENT_TARGET` unless the user sets it),
   without `--only-binary`, and falls back to the host's own wheels with a warning when a
@@ -1638,8 +1674,9 @@ Per method:
   base), stdlib `test idlelib turtledemo ensurepip site-packages`, `test`/`tests` subfolders of
   stdlib packages (PyPy's `unittest/test`, `lib2to3/tests`...), `*.debug` (PyPy's detached debug
   symbols, 16 MB), PyPy `hpy/devel`, and Tk unless `src/` or an installed dependency in `lib/`
-  imports tkinter/turtle (`common.uses_tkinter(lib)`: customtkinter, ttkbootstrap; a bytes
-  pre-filter, then the AST; a file it cannot parse keeps Tk): tkinter, turtle and every Tcl/Tk
+  imports tkinter/turtle (`common.uses_tkinter(lib)`: customtkinter, ttkbootstrap; `mypyc.walk`,
+  so a symlinked folder of `src/` counts; a bytes pre-filter, then the AST; a file it cannot
+  parse keeps Tk): tkinter, turtle and every Tcl/Tk
   file `TCL_RE` matches in `lib/` (POSIX: `libtcl9.0.so`, `tcl9.0/`, `tk9.0/`, `itcl*`,
   `thread*`), `DLLs/` and `lib-dynload/` (`_tkinter.*`). Deletes `EXTERNALLY-MANAGED`; copies
   `vcruntime140*.dll` from the CPython base into PyPy runtimes on Windows (PyPy's zip lacks
@@ -1667,8 +1704,10 @@ Per method:
     `pypyw` (`common.windowed`; the probe keeps the console names). The Python install
     manager's `py`/`python` install the requested version when NO runtime exists at all (its
     `automatic_install` default; the silenced probe hides it, so that first start can take a
-    minute): the launchers leave `PYTHON_MANAGER_*` to the user. With native dependencies it warns
-    that the folder only works on the host key.
+    minute): the launchers leave `PYTHON_MANAGER_*` to the user. With native dependencies, or
+    pins a marker left out on this interpreter (`common.skipped_requirements`, as pyz: tzdata on
+    win32, backports-tarfile below 3.12), `portable._warn_host_only` warns that `lib/` only fits
+    the host key (the launchers start it on any OS and Python at or above the minimum).
   - Every bundled build starts its interpreter before reporting success (`_smoke_runtime`, after
     UPX, with the launchers' `-s -O` plus `-B`): it must run and its `sys.prefix` (a `PTPREFIX:`
     line) must be inside the folder's `runtime/`, else `DeployError` (a prune or UPX regression,
@@ -1700,10 +1739,18 @@ Per method:
   cache (`%LOCALAPPDATA%` / `~/Library/Caches` / an absolute `$XDG_CACHE_HOME` or `~/.cache`,
   then `<name>/pyz/<build_id>/<key|pure>/`), guarded by a `.complete` marker and an atomic
   `os.replace`; a folder left without its marker (an interrupted prune, a DLL still loaded) is
-  moved aside and re-extracted (`_discard`). Every start touches its build folder; `_prune_old`
-  deletes only builds beyond the 3 most recently started AND older than a day (`MIN_AGE`: a
-  running build is never deleted), unlinking their `.complete` markers first, and tolerates
-  folders that vanish under it. Without a usable cache (`Path.home()` raises for a UID without
+  moved aside and re-extracted (`_discard`). On POSIX a member whose Unix mode has an x bit
+  (`_executable`: an app's helper script, ruff's `bin/ruff`) gets x bits where it has r bits
+  (`open()` made it 0644); `pyz._write_archive` stores each file's mode, and `pyz-merge` passes
+  the parts' executable modes through (`modes`, a `common/app` file from any part), since it
+  rewrites every member from a copy. Every start holds a lock on `<build>/.run-<pid>` for its
+  whole life (`_hold`: `fcntl.flock`, `msvcrt.locking` on Windows; the OS drops it when the
+  process ends, however it ends; removed at exit) and touches its build folder; `_prune_old`
+  deletes only builds beyond the 3 most recently started AND older than a day (`MIN_AGE`) AND
+  not in use (`_in_use`: a run file whose lock another process holds; a free one, left by a
+  killed start, is removed; a file system without locks leaves `MIN_AGE` alone to protect a
+  build: an app started more than a day ago was deleted under it), unlinking their `.complete`
+  markers first, and tolerates folders that vanish under it. Without a usable cache (`Path.home()` raises for a UID without
   a passwd entry; a read-only home) it extracts into a per-run `tempfile.mkdtemp` folder removed
   at exit (never a predictable shared `/tmp` path: another user could plant code there).
   Layout: `common/lib` only when the build is "pure": every target site installed exactly the
@@ -1730,8 +1777,11 @@ Per method:
   part, else "rebuild it") and keeps no `common/lib`. The merged `targets` come from the
   folders written; `host` is dropped. It also writes the `<out stem>.cmd` wrapper next to
   `--out` (`pyz.wrapper_path`; the parts' name and `min_python`, the pypy candidate order only
-  when every part is a pypy build; an `--out` ending in `.cmd` is refused). `pyz.check_parts`
-  runs the part checks in `--dry-run` too.
+  when every part is a pypy build; an `--out` ending in `.cmd` is refused, and so is a name the
+  ASCII wrapper cannot hold, `pyz._CMD_UNSAFE`: non-ASCII, control characters,
+  `% ! " ^ & | < >`; the wrapper text is made before the `.pyz` is written). A part's `name` must be an app name
+  (`config.APP_NAME`: the wrapper echoes it unquoted). `pyz.check_parts` runs the part and name
+  checks in `--dry-run` too.
 - **wheel**: synthetic build project in `.build/wheel/<b>` (for mypyc a `setup.py` using
   mypycify with the same `compile.multi_file`, `separate`, `strict_dunder_typing` and extra C
   flags (`no_semantic_interposition`, section 9) as the stage, and a compile `mypy.ini`), built
@@ -1744,7 +1794,11 @@ Per method:
   exact locked versions (`wheel._locked_version`: a clear error when missing). Package data =
   every file of the package (`"**/*"`: data files, `py.typed`, vendored native libraries; the
   copy skips caches and stray build outputs: an extension next to its `.py`, `*__mypyc`);
-  assets go into `<pkg>/assets`. `app.gui` -> `[project.gui-scripts]` (no console window on
+  assets go into `<pkg>/assets`. The top-level entries of `src/` that `compile.modules` names
+  besides the package (`wheel._outside_package`: a lone module becomes `[tool.setuptools]
+  py-modules`, another package gets its package data) are copied too, for every backend: only
+  `src/<pkg>/` was, so mypycify stopped with "Cannot read file 'src/fastbench.py'" and a
+  cpython wheel left the module out. `app.gui` -> `[project.gui-scripts]` (no console window on
   Windows), else `[project.scripts]`. mypyc -> platform wheel; cpython/pypy -> `py3-none-any`
   (even with a vendored native library: the wheel is not retagged).
 - **nuitka**: `.build/nuitka-stage/<b>`, `uv run --locked --with nuitka==<NUITKA> python -m
@@ -1788,7 +1842,8 @@ Per method:
   `.build/flet-client/<version>/` and bundles it at `flet_desktop/app/<archive>`, where
   flet_desktop looks for a bundled client. 61 MB with UPX; ~25 min build.
 - **flet** (`flet build`): requires `app.preset == "flet"`. Windows needs Developer Mode
-  (Flutter symlinks; checked in the registry by `methods.flet._developer_mode`) and Visual
+  (Flutter symlinks; checked in the registry by `methods.flet._developer_mode`, through
+  `flet.check`, which `cmd_build` runs before any work) and Visual
   Studio C++. The stage `.build/flet-build/<b>` is persistent (Flutter cache); stale
   extensions are deleted from it before this payload's are copied (a desktop `.pyd` must not
   reach a mobile/web build). `flet build` ignores `uv.lock`, so `build_pyproject` pins the
@@ -2873,10 +2928,14 @@ uv:
   build machine allows (manylinux_2_34 on Ubuntu 24.04: the pyz failed on Debian 11), its macOS
   default may move with a uv release, and an sdist built for another OS gives host binaries.
   Fix: `common.host_floor`, `common.UV_PLATFORMS`, `common.MACOS_FLOOR` through
-  `MACOSX_DEPLOYMENT_TARGET`, `--only-binary :all:` for other targets (`common.install_deps`,
-  10). Test: `test_build_methods.py::test_host_linux_target_gets_the_platform_floor`,
+  `MACOSX_DEPLOYMENT_TARGET`, `--only-binary :all:` for other targets but `--no-binary` for the
+  packages that publish no wheel (`common.source_only`), kept only when pure
+  (`common.install_deps`, 10). Test:
+  `test_build_methods.py::test_host_linux_target_gets_the_platform_floor`,
   `test_host_floor_falls_back_to_the_host_wheels`,
-  `test_macos_targets_pin_the_deployment_target`. Goes: never.
+  `test_macos_targets_pin_the_deployment_target`,
+  `test_cross_target_builds_a_package_that_publishes_no_wheel`,
+  `test_cross_target_builds_a_pure_sdist_for_real`. Goes: never.
 - **PyPy wheels need a real PyPy** (LIMITATION): uv installs them for no other interpreter or
   machine. Fix: `common.check_key` takes a `pp` key only for the pypy build's own host;
   `pyz-merge` joins builds (10). Test:
@@ -2911,10 +2970,13 @@ CPython and its standard library:
   `test_cli_core.py::test_ctrl_c_waits_for_a_child_that_cleans_up` and the other
   `test_ctrl_c_*`. Goes: never.
 - **`Path.rglob` does not enter symlinked folders** (LIMITATION; `recurse_symlinks` from 3.13):
-  a linked `src/assets` reached the mypyc stage empty. Up: python/cpython#77609. Fix:
-  `mypyc._walk` (9). Test: `test_mypyc_core.py::test_sync_tree_follows_symlinked_dirs`,
-  `test_compiled_sources_follow_a_symlinked_subpackage`. Goes: maybe once the runner needs 3.13
-  (the cycle check stays ours).
+  a linked `src/assets` reached the mypyc stage empty, and the portable prune removed Tk for a
+  `tkinter` import in a linked folder of `src/`. Up: python/cpython#77609. Fix: `mypyc.walk` in
+  `mypyc.sync_tree`, `mypyc.compiled_sources` and `common.uses_tkinter` (9, 10). Test:
+  `test_mypyc_core.py::test_sync_tree_follows_symlinked_dirs`,
+  `test_compiled_sources_follow_a_symlinked_subpackage`,
+  `test_build_methods.py::test_portable_keeps_tkinter_imported_in_a_symlinked_src_folder`. Goes:
+  maybe once the runner needs 3.13 (the cycle check stays ours).
 - **ZIP stores no date before 1980, and `zipapp` cannot relax it** (LIMITATION): a payload file
   from the Nix store (mtime 1) crashed the pyz and the portable zip with ValueError. Up: cf.
   python/cpython#78278 (zipfile's `strict_timestamps`); none found for `zipapp`. Fix:
@@ -2987,6 +3049,13 @@ CPython and its standard library:
 - **`Path.home()` raises for a UID without a passwd entry** (LIMITATION): the pyz crashed in a
   container with a random UID. Fix: the pyz bootstrap falls back to a `tempfile.mkdtemp` folder
   (10). Test: `test_build_methods.py::test_pyz_runs_without_a_usable_cache`. Goes: never.
+- **`platform`'s `machine()` names the machine, not the interpreter** (LIMITATION: on Windows
+  CPython 3.12+ asks WMI for the native CPU, elsewhere it is the kernel's `uname -m`): an x64
+  Python on Windows on ARM labelled its x64 wheels `aarch64`, and a pyz with a `windows-x86_64`
+  target refused to run there; a 32-bit Python on a 64-bit kernel took the 64-bit name. Fix:
+  `common.host_arch` and the pyz bootstrap's `_arch` read `sysconfig.get_platform()` on Windows
+  and the pointer size elsewhere (10). Test:
+  `test_build_methods.py::test_pyz_key_names_the_interpreter_not_the_machine`. Goes: never.
 - **A missing cwd is blamed on the program** (LIMITATION): subprocess raised FileNotFoundError
   naming the program (POSIX) or NotADirectoryError (Windows). Fix: `proc.run` checks the cwd
   first (5.3). Test: `test_cli_core.py::test_a_bad_working_folder_is_named`. Goes: never.
@@ -3109,8 +3178,8 @@ MSVC and Visual Studio:
   Python's `sysconfig.get_platform()`, as setuptools' vswhere query does (7). Test:
   `test_envs_core.py::test_msvc_component_follows_the_venv_platform`,
   `test_msvc_component_matches_setuptools`,
-  `test_mypyc_core.py::test_compiler_hint_names_the_msvc_tools_of_the_venv_platform`. Goes:
-  never.
+  `test_mypyc_core.py::test_compiler_hint_names_the_msvc_tools_of_the_venv_platform`,
+  `test_build_compiler_hint_names_the_tools_of_the_venv_platform`. Goes: never.
 
 PyInstaller:
 - **UPX only on Windows** (LIMITATION): `configure.get_config` turns UPX off elsewhere (packed
@@ -3790,6 +3859,13 @@ Behaviour:
   presets pin (`presets.IMPORT_NAMES`): a dependency the user adds is compared by its
   distribution name (`beautifulsoup4` refuses `beautifulsoup4`, not `bs4`). Reading them needs
   the installed wheels (an environment of the project, never there for `new`'s next preset).
+- exe and nuitka still remove their previous `dist/` output with rmtree: on Windows, with the
+  app running from it, half of it goes before a traceback. `common.remove_output` is the fix
+  pyz, portable and wheel use; `exe.build` and `nuitka.build` do not call it yet.
+- A pyz built on Windows stores no x bit (Windows files have no Unix mode), so the executables of
+  its Linux or macOS targets (`--target`), or of a script in `src/`, are not runnable where it is
+  extracted; the generated CI builds each OS's part on that OS, and `pyz-merge` keeps the parts'
+  modes (an app file is executable when it is in any part).
 
 Editors:
 - VS Code problem matchers and the Neovim parser depend on tool output formats (ruff, mypy,
@@ -3863,8 +3939,9 @@ Code coupling (rename together):
 - mypyc internals mirrored by the runner (checked by `test_mypyc_core` against the locked
   mypy): `lintc.NATIVE_CLASS_DECORATORS` <-> mypyc's native decorators;
   `lintc.relative_file_at_import` <-> when mypyc builds no shared lib; `mypyc.remove_stale_extensions`
-  <-> mypyc's lib names (`<group>__mypyc`, `<module>__mypyc`). `mypyc.MYPYC_REJECTED` and
-  `COMPILER_MISSING` <-> `tools/mypyc_build.py`; the spec keys the script reads <-> `mypyc.build`;
+  <-> mypyc's lib names (`<group>__mypyc`, `<module>__mypyc`). `mypyc.MYPYC_REJECTED`,
+  `COMPILER_MISSING` and `C_BUILD_FAILED` <-> `tools/mypyc_build.py`; the spec keys the script
+  reads <-> `mypyc.build`;
   `mypyc_build.extra_cflags`/`compiler_type` <-> the wheel's `SETUP_PY`
   (`test_wheel_setup_py_adds_the_same_flags_as_the_stage`); `mypyc.COMPILER_ENV` <-> the
   variables setuptools' `configure_system` reads.

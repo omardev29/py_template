@@ -8,8 +8,9 @@ extra_cflags() are added to mypyc's own.
 
 Exit codes: 0 ok; MYPYC_REJECTED when mypy/mypyc rejected the code (the errors are printed,
 no C compiler ran); COMPILER_MISSING when the C build failed because setuptools cannot start
-the C compiler (CC names a missing program, no `cc`, no MSVC); anything else is a failure of
-the C build (setuptools / the compiler).
+the C compiler (CC names a missing program, no `cc`, no MSVC); C_BUILD_FAILED when setuptools or
+the C compiler failed otherwise. Anything else comes from uv (a stale uv.lock) or Python before
+this script ran: no compiler involved.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from typing import Any
 
 MYPYC_REJECTED = 4  # mirrored by mypyc.MYPYC_REJECTED in the runner
 COMPILER_MISSING = 5  # mirrored by mypyc.COMPILER_MISSING in the runner
+C_BUILD_FAILED = 6  # mirrored by mypyc.C_BUILD_FAILED (these two get the compiler hint)
 
 
 def compiler_type() -> str:
@@ -109,24 +111,32 @@ def main() -> int:
         return MYPYC_REJECTED
     if not spec.get("compile", True):
         return 0
-    flags = extra_cflags(compiler_type(), sys.platform, spec["no_semantic_interposition"])
-    for ext in extensions:
-        # A new list for each: mypycify hands the SAME list object to every extension
-        ext.extra_compile_args = [*ext.extra_compile_args, *flags]
 
     from setuptools import setup
 
     try:
+        flags = extra_cflags(compiler_type(), sys.platform, spec["no_semantic_interposition"])
+        for ext in extensions:
+            # A new list for each: mypycify hands the SAME list object to every extension
+            ext.extra_compile_args = [*ext.extra_compile_args, *flags]
         build_ext(setup, spec, extensions)
     except SystemExit as exc:  # setuptools reports every failure as SystemExit("error: ...")
-        problem = None if exc.code in (None, 0) else missing_compiler()
-        if problem is None:
-            raise
+        if exc.code in (None, 0):
+            return 0
         if isinstance(exc.code, str):
             print(exc.code, file=sys.stderr)
-        print(f"error: {problem}", file=sys.stderr)
-        return COMPILER_MISSING
-    return 0
+    except Exception:  # a crash in setuptools or the compiler driver
+        traceback.print_exc()
+    else:
+        return 0
+    try:
+        problem = missing_compiler()
+    except Exception as e:  # setuptools cannot even set up a compiler object
+        problem = f"setuptools cannot set up a C compiler: {e}"
+    if problem is None:
+        return C_BUILD_FAILED
+    print(f"error: {problem}", file=sys.stderr)
+    return COMPILER_MISSING
 
 
 def build_ext(setup: Callable[..., object], spec: dict[str, Any], extensions: list[Any]) -> None:

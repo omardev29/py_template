@@ -617,7 +617,8 @@ cpython and pypy test runs cannot catch a wrap-around.
   docstrings): higher strips more, it is not faster. With the mypyc backend, 1 and 2 also strip
   the asserts of the compiled modules in every build method.
 - The C compiler's install hint appears only when the C step failed (a type error that mypyc
-  rejects is shown as such).
+  rejects is shown as such, and so is uv's own error, such as a `uv.lock` that needs updating);
+  on Windows it names the MSVC tools of the environment's Python (ARM64 or x64).
 
 ### PyPy
 
@@ -675,7 +676,9 @@ it), then packages the app into `dist/`:
 
 PyInstaller, Nuitka and `flet build` do not support PyPy. The default method is `exe` for
 cpython and mypyc and `portable` for pypy (`[deploy] default`; a backend left out of that table
-keeps its default). Each build replaces the previous output of the same backend and method:
+keeps its default). Every method, with `--no-check` too, refuses a `uv.lock` that
+`pyproject.toml` has moved past (`./deploy lock` updates it). Each build replaces the previous
+output of the same backend and method:
 
 | Method | Output | Start it with |
 |---|---|---|
@@ -729,8 +732,8 @@ A folder that runs the app with its own interpreter:
   `idlelib`, `turtledemo`, `ensurepip` and `site-packages`, PyPy's debug symbols, and Tk unless
   `src/` or a dependency imports `tkinter` (`prune = false` keeps it for an app that loads it
   another way).
-- `lib/`: the dependencies at the versions of `uv.lock`; they win over packages installed in a
-  Python.
+- `lib/`: the dependencies at the versions of `uv.lock`, local libraries
+  (`./deploy add ./libs/x`) included; they win over packages installed in a Python.
 - `app/`: the app (with mypyc, the compiled modules next to their `.py`), and `boot.py`.
 - `<name>.cmd` (a Windows build) or `<name>.sh` (Linux, macOS): run it from any folder (the `.sh`
   also through a symlink); the arguments reach the app and its exit code comes back. They run
@@ -749,8 +752,9 @@ read-only install starts fast, and it starts the copied interpreter before it re
 both launchers). The launcher runs each candidate (`py -X.Y`, `python3`, `python` on Windows;
 `pythonX.Y`, `python3`, `python` elsewhere; `pypy3`, `pypy` for PyPy) and uses the first that is at
 least the project's minimum Python. None: it prints `<name>: needs Python X.Y or newer in PATH` and
-exits with 9009 (`.cmd`) or 127 (`.sh`). With native dependencies such a folder only works on the OS
-it was built on (the build warns). On Windows with the Python install manager and no Python at all,
+exits with 9009 (`.cmd`) or 127 (`.sh`). With native dependencies, or a dependency that a marker
+limits to some platforms or Python versions (`tzdata` on Windows only, `backports-tarfile` below
+3.12), such a folder only works on the platform and Python minor that built it (the build warns). On Windows with the Python install manager and no Python at all,
 the first start silently downloads one (the install manager's default); set
 `PYTHON_MANAGER_AUTOMATIC_INSTALL=false` or run `py install 3.X` to control that.
 
@@ -763,9 +767,10 @@ platform key (such as `cp314-linux-x86_64`), the binaries: the mypyc extensions 
 that built it, and the native dependencies. Python cannot import `.pyd`/`.so` files from a zip,
 so the first start extracts it to a cache: `%LOCALAPPDATA%\<name>\pyz` (Windows),
 `~/Library/Caches/<name>/pyz` (macOS) or `$XDG_CACHE_HOME/<name>/pyz` (`~/.cache/<name>/pyz`). It
-keeps the three most recently started builds and any started in the last day; deleting the
-folder is always safe. Without a usable cache (a read-only home) it extracts into a private
-temporary folder for that run.
+keeps the three most recently started builds, any started in the last day and any that is still
+running; deleting the folder is always safe. Without a usable cache (a read-only home) it extracts into a private
+temporary folder for that run. Executable files (a script of the app, a binary a dependency
+ships) stay executable on Linux and macOS; a pyz built on Windows has no such mode to keep.
 
 How far a pyz reaches depends on its dependencies; the build prints which case it is:
 
@@ -784,17 +789,21 @@ How far a pyz reaches depends on its dependencies; the build prints which case i
   only there: the exact CPython minor of the lock (`cp314` wheels load only in 3.14, so a Python
   3.13 or 3.15 gets `this .pyz has no build for this interpreter and platform`), on Windows, Linux
   or macOS, x86_64 or aarch64 (Linux: glibc 2.28 on x86_64 or 2.35 on aarch64, or newer; macOS 13 or
-  newer). There are no musl or Android targets.
+  newer). There are no musl or Android targets. The architecture is the Python's, not the
+  machine's: an x64 Python on Windows on ARM uses the `windows-x86_64` binaries.
 - `[deploy.pyz] targets` is `["host"]` by default, so a local build that is not pure runs only on
   the platform that built it. For one file that serves several platforms, add target keys
   (`targets = ["host", "cp314-windows-x86_64"]`, or `--target KEY`: the locked CPython minor on
-  any of those systems and CPUs; PyPy keys come only from a PyPy build on that platform), or use
+  any of those systems and CPUs; PyPy keys come only from a PyPy build on that platform; a
+  dependency that publishes no wheel, such as `docopt` or a local library, is built on the build
+  machine and must be pure Python for another key), or use
   the generated CI, which builds a pyz on Windows, Linux and macOS and merges them on every run.
 - mypyc compiles only for the machine it runs on: its extensions are used for the key that built
   them, and everywhere else the same code runs as `.py` (slower, same result).
   `./deploy pyz-merge A.pyz B.pyz... --out all.pyz` joins pyz files built on several machines from
   one commit (the same app, minimum Python, locked dependencies and code) into one file with every
-  platform's binaries, and also writes `all.cmd` next to it.
+  platform's binaries, and also writes `all.cmd` next to it (so the `--out` name must be ASCII,
+  without `% ! " ^ & | < >`).
 - On Linux the dependencies of pyz and portable builds target glibc 2.28 (x86_64) or 2.35
   (aarch64) when the build machine can use those wheels (else its own, with a warning); on macOS,
   macOS 13 or newer (`MACOSX_DEPLOYMENT_TARGET` changes it).
@@ -807,7 +816,8 @@ A package for `uv tool install` or pip that installs the command `<name>` (a GUI
 `app.gui = true`: no console window on Windows), from `deploy.wheel.entry` (default
 `<pkg>.app:main`; flet: `<pkg>.ui.app:run`). cpython and pypy build a `py3-none-any` wheel;
 mypyc builds a platform wheel with the compiled modules and their `.py`. It holds every file of
-the package and `src/assets/` (as `<pkg>/assets`). It is built offline in the locked `.venv`
+the package, `src/assets/` (as `<pkg>/assets`) and the other modules and packages of `src/` that
+`compile.modules` names (a lone `src/fastbench.py`); any other module of `src/` stays out. It is built offline in the locked `.venv`
 (`uv build --no-build-isolation`). Its dependencies are the version ranges of
 `[project] dependencies`, not the exact versions of `uv.lock`.
 

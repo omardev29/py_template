@@ -8,16 +8,21 @@ import os
 import platform
 import re
 import shutil
+import sys
+import sysconfig
+import tempfile
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 from .. import envs, proc, ui
 from ..config import Config
 from ..imports import iter_runtime_nodes, parse
-from ..project import BUILD, EXT_SUFFIXES, SRC, host_arch, host_os, rel
+from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, SRC, host_os, rel
 from ..ui import DeployError
 
 NATIVE_SUFFIXES = (*EXT_SUFFIXES, ".dll", ".dylib")
+LOCK = PYPROJECT.parent / "uv.lock"
 # ASCII digits only (\d also matches other scripts' digits) and no trailing newline ($ allows one):
 # parse_key uses fullmatch
 KEY_RE = re.compile(r"(cp|pp)([0-9])([0-9]+)-(windows|linux|macos)-(x86_64|aarch64)")
@@ -36,6 +41,24 @@ UV_PLATFORMS = {
 # --python-platform *-apple-darwin in 0.12, pinned (MACOSX_DEPLOYMENT_TARGET, unless the user
 # sets it) so a uv upgrade or a newer build machine cannot move it
 MACOS_FLOOR = "13.0"
+# uv's names of an architecture: platform.machine() spellings, sysconfig's on Windows, and a
+# 32-bit interpreter on a 64-bit kernel. templates/pyz/__main__.py (_arch) mirrors host_arch
+ARCH_NAMES = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64", "x86": "x86", "i386": "x86", "i686": "x86"}
+WINDOWS_ARCH = {"win-amd64": "x86_64", "win-arm64": "aarch64", "win32": "x86"}
+ARCH_32BIT = {"x86_64": "x86", "aarch64": "armv7l"}
+
+
+def host_arch() -> str:
+    """The architecture of the interpreter the build installs for (x86_64 | aarch64 | x86...):
+    the runner's, which is uv's managed python.cpython like .venv's. Not the machine's CPU: on
+    Windows platform.machine() asks WMI for the native CPU, so an x64 Python on Windows on ARM
+    labelled its x64 wheels aarch64; a 32-bit Python on a 64-bit kernel likewise. The pyz
+    bootstrap computes the same name for the interpreter that runs it."""
+    if sys.platform == "win32" and sysconfig.get_platform() in WINDOWS_ARCH:
+        return WINDOWS_ARCH[sysconfig.get_platform()]
+    machine = platform.machine().lower()
+    arch = ARCH_NAMES.get(machine, machine)
+    return ARCH_32BIT.get(arch, arch) if sys.maxsize <= 2**32 else arch
 
 
 @dataclass(frozen=True)
@@ -137,12 +160,19 @@ def targets_for(cfg: Config, backend: str, keys: list[str]) -> list[Target]:
 
 
 def export_requirements(cfg: Config) -> Path:
-    """Export the runtime dependencies (no dev) with exact versions and hashes from uv.lock."""
+    """Export the runtime dependencies (no dev) with exact versions and hashes from uv.lock.
+
+    --locked, never --frozen: a uv.lock older than pyproject.toml (a dependency added by hand, a
+    merge) is refused like every `uv run --locked`; --frozen exported the old lock and the pyz or
+    portable build shipped without the new dependency. --no-editable: a workspace or path
+    dependency (`./deploy add ./libs/x`) is exported as a path and installed as a real package;
+    editable, `uv pip install --target` left only a .pth naming this machine's source folder.
+    """
     out = BUILD / "deploy" / "requirements.txt"
     out.parent.mkdir(parents=True, exist_ok=True)
     envs.uv(
         envs.tool_env(cfg),
-        ["export", "--frozen", "--no-dev", "--no-emit-project", "--format", "requirements.txt", "--output-file", out, "--quiet"],
+        ["export", "--locked", "--no-dev", "--no-editable", "--no-emit-project", "--format", "requirements.txt", "--output-file", out, "--quiet"],
     )
     return out
 
@@ -188,9 +218,10 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
     """Install the runtime deps for one target (host or cross) with `uv pip install --target`.
 
     Cross targets get binary wheels for UV_PLATFORMS (an sdist built here would produce host
-    binaries). The host target gets the same platform floor when this machine can load those
-    wheels (host_floor): without it uv picks the newest the build machine allows, e.g.
-    manylinux_2_34 on Ubuntu 24.04, and the result silently needed that glibc.
+    binaries), except the packages that publish no wheel at all (source_only): those are built
+    here, and a native result is refused. The host target gets the same platform floor when this
+    machine can load those wheels (host_floor): without it uv picks the newest the build machine
+    allows, e.g. manylinux_2_34 on Ubuntu 24.04, and the result silently needed that glibc.
     """
     if dest.exists():
         shutil.rmtree(dest)
@@ -202,14 +233,27 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
     extra_env = {"MACOSX_DEPLOYMENT_TARGET": _macos_floor()} if target.os == "macos" else {}
     base: list[str | Path] = ["pip", "install", "--quiet", "--target", dest, "--no-deps", "-r", requirements]
     if not target.is_host:
+        # Wheels only: an sdist built here for another OS gives this machine's binaries. Except
+        # the packages that publish no wheel at all (docopt, a workspace library): built here,
+        # and kept only when the result is pure Python
+        build_here = source_only(LOCK)
         argv = [
             *base,
             "--python", ensure_env(envs.tool_env(cfg)).python,
             "--python-platform", UV_PLATFORMS[(target.os, target.arch)],
             "--python-version", target.version,
-            "--only-binary", ":all:",  # building sdists for another OS would produce host binaries
+            "--only-binary", ":all:",
+            *(arg for name in build_here for arg in ("--no-binary", name)),
         ]
         envs.uv(env, argv, extra_env=extra_env)
+        native = _built_native(dest, build_here)
+        if native:
+            raise DeployError(
+                f"{target.key}: {', '.join(native)} publishes no wheel, and building it here gives this machine's "
+                f"binaries: build the pyz for {target.key} on that platform (./deploy build ... --method pyz there) "
+                "and join the parts with ./deploy pyz-merge",
+                2,
+            )
     else:
         base += ["--python", ensure_env(env).python]
         floor = host_floor(target)
@@ -228,6 +272,35 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
             envs.uv(env, base, extra_env=extra_env)
     drop_install_junk(dest)
     return dest
+
+
+def source_only(lock: Path) -> list[str]:
+    """The packages of uv.lock without any wheel: an sdist-only release on the index, or a path,
+    git or URL source (a workspace library). The project's own entry is left out."""
+    try:
+        data = tomllib.loads(lock.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return []
+    names: set[str] = set()
+    for package in data.get("package", []):
+        if not isinstance(package, dict) or package.get("wheels") or not isinstance(package.get("name"), str):
+            continue
+        source = package.get("source")
+        if isinstance(source, dict) and "." in (source.get("virtual"), source.get("editable"), source.get("directory")):
+            continue  # the project itself
+        names.add(package["name"])
+    return sorted(names)
+
+
+def _built_native(site: Path, names: list[str]) -> list[str]:
+    """Which of `names` got a platform-specific wheel in `site` (a native sdist built here)."""
+    wanted = {_norm_name(n) for n in names}
+    out = []
+    for wheel in sorted(site.glob("*.dist-info/WHEEL")):
+        name = wheel.parent.name[: -len(".dist-info")].rpartition("-")[0]
+        if _norm_name(name) in wanted and _platform_wheel(wheel):
+            out.append(name)
+    return out
 
 
 class _CaseSensitiveParser(configparser.ConfigParser):
@@ -338,6 +411,38 @@ def requirements_digest(requirements: Path) -> str:
     return hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest()[:16]
 
 
+def _move(src: Path, dst: Path) -> None:
+    os.replace(src, dst)
+
+
+def remove_output(path: Path) -> None:
+    """Remove a previous build output in dist/ (a file or a folder) whole, or not at all.
+
+    A folder is first moved aside in the same folder: Windows refuses that while a file inside
+    is in use (the app still running from it, a console in it), and rmtree used to delete half
+    of the folder before it failed with a traceback. What the moved copy still holds (a scanner,
+    an immutable file) is only a warning: the new output has its place.
+    """
+    if not path.exists() and not path.is_symlink():
+        return
+    hint = "close the app or window that uses it and build again"
+    if path.is_file() or path.is_symlink():
+        try:
+            path.unlink()
+        except OSError as e:
+            raise DeployError(f"cannot replace {rel(path)}: it is in use or read-only ({e.strerror or e}): {hint}", 1) from None
+        return
+    aside = Path(tempfile.mkdtemp(prefix=f".{path.name}.old-", dir=path.parent))
+    try:
+        _move(path, aside / path.name)
+    except OSError as e:
+        aside.rmdir()
+        raise DeployError(f"cannot replace {rel(path)}: a file in it is in use ({e.strerror or e}): {hint}", 1) from None
+    shutil.rmtree(aside, ignore_errors=True)
+    if aside.exists():
+        ui.warn(f"could not delete all of the previous output, moved to {rel(aside)}: delete it by hand")
+
+
 def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:
     """Copy the payload. extensions=False keeps only the .py files (pure fallback)."""
     if dest.exists():
@@ -356,12 +461,17 @@ def uses_tkinter(*extra: Path) -> bool:
     """Return True when a .py file in src/ or under `extra` imports tkinter or turtle.
 
     The portable prune passes the installed lib/: a dependency such as customtkinter or
-    ttkbootstrap needs tkinter even when the app never imports it itself.
+    ttkbootstrap needs tkinter even when the app never imports it itself. The walk follows
+    symlinked folders (mypyc.walk, like the payload's sync_tree): Path.rglob skips them.
     """
     import ast
 
+    from ..mypyc import walk
+
     for root in (SRC, *extra):
-        for path in root.rglob("*.py"):
+        for path in walk(root):
+            if path.suffix != ".py" or not path.is_file():
+                continue
             try:
                 data = path.read_bytes()
                 if b"tkinter" not in data and b"turtle" not in data:

@@ -3,10 +3,10 @@ pyz/portable layouts and bootstraps. No network, no packager: the packager calls
 
 from __future__ import annotations
 
+import hashlib
 import importlib.machinery
 import json
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -621,12 +621,8 @@ def test_nuitka_keys_of_every_preset_load() -> None:
 
 def _host_key() -> str:
     """The key the bootstrap computes for THIS interpreter (templates/pyz/__main__.py _key)."""
-    impl = {"cpython": "cp", "pypy": "pp"}.get(sys.implementation.name, sys.implementation.name)
-    arch = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}.get(
-        platform.machine().lower(), platform.machine().lower()
-    )
-    os_name = {"win32": "windows", "linux": "linux", "darwin": "macos"}.get(sys.platform, sys.platform)
-    return f"{impl}{sys.version_info[0]}{sys.version_info[1]}-{os_name}-{arch}"
+    key: str = _bootstrap_namespace()["_key"]()
+    return key
 
 
 MAIN_WAITS = (
@@ -777,6 +773,34 @@ def test_pyz_repairs_an_incomplete_cache(tmp_path: Path, damage: str) -> None:
     assert sorted(p.name for p in dest.parent.iterdir()) == ["pure"]
 
 
+def _add_members(pyz_file: Path, members: dict[str, int]) -> None:
+    """Append files with these Unix modes to a .pyz, whatever this OS's file modes are."""
+    import zipfile
+
+    with zipfile.ZipFile(pyz_file, "a", compression=zipfile.ZIP_DEFLATED) as z:
+        for name, mode in members.items():
+            info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.external_attr = (0o100000 | mode) << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            z.writestr(info, "#!/bin/sh\necho run\n")
+
+
+EXEC_MEMBERS = {"common/app/tool.sh": 0o755, "common/lib/bin/tool": 0o755, "common/app/data.txt": 0o644}
+MAIN_EXEC = "import os, pathlib\nhere = pathlib.Path(__file__).parent\nprint(*[os.access(here / n, os.X_OK) for n in ('tool.sh', '../lib/bin/tool', 'data.txt')])\n"
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX file modes")
+def test_pyz_bootstrap_keeps_the_executable_bit(tmp_path: Path) -> None:
+    # A helper script of the app or a dependency's binary (ruff's bin/ruff, which ruff looks up at
+    # <target>/bin) was extracted as 0644: PermissionError when the app ran it
+    pyz_file = fake_pyz(tmp_path / "x.pyz", files={"common/app/main.py": MAIN_EXEC})
+    _add_members(pyz_file, EXEC_MEMBERS)
+    r = run_pyz(pyz_file, pyz_env(tmp_path / "cache"))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["True", "True", "False"]
+
+
 def _cached_builds(cache: Path) -> list[str]:
     return sorted(p.name for p in pyz_root(cache).iterdir())
 
@@ -799,6 +823,66 @@ def test_pyz_prune_never_deletes_a_running_build(tmp_path: Path) -> None:
     assert slow.returncode == 0, err
     assert out.split()[:2] == ["ok", "common"]
     assert "build1" in _cached_builds(cache)
+
+
+MAIN_SIGNALS = (
+    "import os, pathlib, time\n"
+    "pathlib.Path(os.environ['PT_STARTED']).write_text('')\n"
+    "while not os.path.exists(os.environ['PT_WAIT']):\n"
+    "    time.sleep(0.05)\n"
+    "import lazymod\n"
+    "print('ok', lazymod.WHERE)\n"
+)
+
+
+def _start_waiting(pyz_file: Path, cache: Path, tmp_path: Path) -> tuple[subprocess.Popen[str], Path]:
+    """Start a pyz whose main waits for a flag file; return once its main runs."""
+    started, flag = tmp_path / f"{pyz_file.stem}.started", tmp_path / f"{pyz_file.stem}.go"
+    proc_ = subprocess.Popen([sys.executable, "-S", str(pyz_file)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=pyz_env(cache, PT_STARTED=str(started), PT_WAIT=str(flag)))
+    deadline = time.time() + 120
+    while not started.exists():
+        assert proc_.poll() is None and time.time() < deadline, proc_.communicate()[1] if proc_.poll() is not None else "timeout"
+        time.sleep(0.05)
+    return proc_, flag
+
+
+def _age(folder: Path, days: float) -> None:
+    old = time.time() - days * 86400
+    os.utime(folder, (old, old))
+
+
+def test_pyz_prune_never_deletes_a_build_running_for_days(tmp_path: Path) -> None:
+    # A server started more than a day ago (its folder's mtime, touched at start, is that old),
+    # then three newer builds started: the prune deleted the running build, whose next lazy
+    # import failed with ModuleNotFoundError
+    cache = tmp_path / "cache"
+    files = {"common/app/main.py": MAIN_SIGNALS, "common/lib/lazymod.py": "WHERE = 'common'\n"}
+    old = fake_pyz(tmp_path / "old.pyz", build_id="old", files=files)
+    running, flag = _start_waiting(old, cache, tmp_path)
+    try:
+        _age(pyz_root(cache) / "old", 2)
+        for n in (1, 2, 3):
+            assert run_pyz(fake_pyz(tmp_path / f"n{n}.pyz", build_id=f"new{n}"), pyz_env(cache)).returncode == 0
+        assert "old" in _cached_builds(cache)
+    finally:
+        flag.write_text("")
+        out, err = running.communicate(timeout=120)
+    assert running.returncode == 0, err
+    assert out.split() == ["ok", "common"]
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="the OS releases a killed process's lock at its own pace on Windows")
+def test_pyz_prune_removes_an_old_build_whose_start_was_killed(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    files = {"common/app/main.py": MAIN_SIGNALS, "common/lib/lazymod.py": "WHERE = 'common'\n"}
+    old = fake_pyz(tmp_path / "old.pyz", build_id="old", files=files)
+    killed, _flag = _start_waiting(old, cache, tmp_path)
+    killed.kill()
+    killed.communicate(timeout=120)
+    _age(pyz_root(cache) / "old", 2)
+    for n in (1, 2, 3):
+        assert run_pyz(fake_pyz(tmp_path / f"n{n}.pyz", build_id=f"new{n}"), pyz_env(cache)).returncode == 0
+    assert _cached_builds(cache) == ["new1", "new2", "new3"]
 
 
 def test_pyz_prune_still_removes_old_unused_builds(tmp_path: Path) -> None:
@@ -829,6 +913,40 @@ def _bootstrap_namespace() -> dict[str, Any]:
     namespace: dict[str, Any] = {"__name__": "pt_bootstrap"}
     exec(compile(source.rstrip()[: -len("main()")], "__main__.py", "exec"), namespace)  # noqa: S102
     return namespace
+
+
+@pytest.mark.parametrize(
+    ("plat", "sys_platform", "machine", "maxsize", "arch"),
+    [
+        ("win32", "win-amd64", "ARM64", 2**63 - 1, "x86_64"),  # an x64 Python on Windows on ARM (WMI names the CPU)
+        ("win32", "win-arm64", "ARM64", 2**63 - 1, "aarch64"),
+        ("win32", "win-amd64", "AMD64", 2**63 - 1, "x86_64"),
+        ("win32", "win32", "AMD64", 2**31 - 1, "x86"),  # a 32-bit Python on 64-bit Windows
+        ("linux", "linux-x86_64", "x86_64", 2**63 - 1, "x86_64"),
+        ("linux", "linux-aarch64", "aarch64", 2**63 - 1, "aarch64"),
+        ("linux", "linux-i686", "i686", 2**31 - 1, "x86"),  # the builder said x86, the bootstrap i686
+        ("linux", "linux-armv7l", "aarch64", 2**31 - 1, "armv7l"),  # Raspberry Pi OS 32-bit on a 64-bit kernel
+        ("linux", "linux-armv7l", "armv7l", 2**31 - 1, "armv7l"),
+        ("darwin", "macosx-11.0-arm64", "arm64", 2**63 - 1, "aarch64"),
+        ("darwin", "macosx-10.13-x86_64", "x86_64", 2**63 - 1, "x86_64"),  # Rosetta: uname names the process
+    ],
+)
+def test_pyz_key_names_the_interpreter_not_the_machine(monkeypatch: pytest.MonkeyPatch, plat: str, sys_platform: str, machine: str, maxsize: int, arch: str) -> None:
+    # platform.machine() on Windows asks WMI for the native CPU: an x64 Python on Windows on ARM got
+    # the aarch64 key and refused a pyz with a windows-x86_64 target; 32-bit x86 was "x86" for the
+    # builder and "i686" for the bootstrap, so a pyz never found the target it was built for
+    import types
+
+    fake_sys = types.SimpleNamespace(platform=plat, maxsize=maxsize, implementation=sys.implementation, version_info=sys.version_info)
+    fake_platform = types.SimpleNamespace(machine=lambda: machine)
+    fake_sysconfig = types.SimpleNamespace(get_platform=lambda: sys_platform)
+    namespace = _bootstrap_namespace()
+    namespace.update(sys=fake_sys, platform=fake_platform, sysconfig=fake_sysconfig)
+    assert namespace["_key"]().rsplit("-", 1)[1] == arch
+    monkeypatch.setattr(common, "sys", fake_sys)
+    monkeypatch.setattr(common, "platform", fake_platform)
+    monkeypatch.setattr(common, "sysconfig", fake_sysconfig)
+    assert common.host_arch() == arch  # the build's host key: the same name
 
 
 def test_pyz_prune_tolerates_vanishing_folders(tmp_path: Path) -> None:
@@ -1095,6 +1213,19 @@ def test_pyz_merge_of_pure_parts_stays_pure(tmp_path: Path) -> None:
     assert r.returncode == 0 and r.stdout.strip() == "dep=first", r.stderr
 
 
+def test_pyz_merge_says_a_pure_result_runs_everywhere(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # A pure part plus a pure mypyc part: _pyz.json said pure, the message "runs on <the overlay key>"
+    a = _pure_part(tmp_path / "a.pyz", host=LINUX, where="first")
+    b = _pure_part(tmp_path / "b.pyz", compiled=True, host=WIN)
+    info, _ = _merge([a, b], tmp_path / "m.pyz")
+    assert info["pure"] is True and info["targets"] == [WIN]
+    err = capsys.readouterr().err
+    assert "pure: works with Python >= 3.11 on any OS" in err and f"compiled code for {WIN}" in err and "runs on" not in err
+    _merge([_native_part(tmp_path / "x.pyz", key=LINUX), _native_part(tmp_path / "y.pyz", key=WIN)], tmp_path / "n.pyz")
+    err = capsys.readouterr().err
+    assert f"runs on {LINUX}, {WIN}" in err and "pure:" not in err
+
+
 def test_pyz_merge_takes_each_lib_from_the_part_built_there(tmp_path: Path) -> None:
     # Every CI part carries targets/<every key>/lib with [deploy.pyz] targets: mixing two
     # installs file by file could mix versions; the part built ON that platform wins
@@ -1222,6 +1353,58 @@ def test_pyz_merge_refuses_an_output_its_wrapper_would_replace(tmp_path: Path) -
             pyz.merge([a, b], tmp_path / name, make({}))
     assert not list(tmp_path.glob("merged.*"))
     assert pyz.wrapper_path(Path("x/app")) == Path("x/app.cmd") and pyz.wrapper_path(Path("app.pyz")) == Path("app.cmd")
+
+
+@pytest.mark.parametrize("name", ["juego-ni\u00f1o.pyz", "100%.pyz", 'say"hi".pyz', "a!b.pyz", "a&b.pyz", "tab\there.pyz"])
+def test_pyz_merge_refuses_an_output_name_its_wrapper_cannot_hold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    # A non-ASCII --out: the .pyz was written, then the ASCII .cmd raised UnicodeEncodeError (an
+    # internal error with a traceback) and left a 0-byte wrapper; --dry-run accepted the name. A
+    # % in it would be expanded by cmd inside "%~dp0<name>"
+    from runner.methods import pyz
+
+    a = _native_part(tmp_path / "a.pyz", key=LINUX)
+    b = _native_part(tmp_path / "b.pyz", key=WIN)
+    out = tmp_path / "out" / name
+    with pytest.raises(DeployError, match="wrapper") as e:
+        pyz.merge([a, b], out, make({}))
+    assert e.value.code == 2
+    assert not (tmp_path / "out").exists()  # nothing written
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    monkeypatch.setattr(cmd_build, "user_path", lambda raw: Path(raw))
+    with pytest.raises(DeployError, match="wrapper"):
+        cmd_build.cmd_pyz_merge(make({}), [str(a), str(b), "--out", str(out)])
+
+
+def test_pyz_merge_keeps_the_executable_bits(tmp_path: Path) -> None:
+    # pyz-merge rewrote every member from a scratch copy: the parts' 0755 became 0644 (and on
+    # Windows, where files have no modes, it would be lost whatever the copy did)
+    import zipfile
+
+    a = _native_part(tmp_path / "a.pyz", key=LINUX)
+    b = _native_part(tmp_path / "b.pyz", key=WIN)
+    _add_members(a, {"common/app/tool.sh": 0o755, f"targets/{LINUX}/lib/bin/tool": 0o755, "common/app/data.txt": 0o644})
+    _add_members(b, {"common/app/tool.sh": 0o755, "common/app/data.txt": 0o644})
+    out = tmp_path / "m.pyz"
+    _merge([a, b], out)
+    with zipfile.ZipFile(out) as merged:
+        modes = {i.filename: (i.external_attr >> 16) & 0o777 for i in merged.infolist()}
+    assert modes["common/app/tool.sh"] == 0o755 and modes[f"targets/{LINUX}/lib/bin/tool"] == 0o755
+    assert not modes["common/app/data.txt"] & 0o111 and not modes["common/app/main.py"] & 0o111
+    # A first part made on Windows stores no mode: the app's executable keeps it from another part
+    windows_first = _native_part(tmp_path / "w.pyz", key=WIN)
+    _add_members(windows_first, {"common/app/tool.sh": 0o644, "common/app/data.txt": 0o644})
+    _merge([windows_first, a], out)
+    with zipfile.ZipFile(out) as merged:
+        assert (merged.getinfo("common/app/tool.sh").external_attr >> 16) & 0o777 == 0o755
+
+
+def test_pyz_merge_refuses_an_app_name_that_is_no_app_name(tmp_path: Path) -> None:
+    # The part's name goes into the wrapper's unquoted `echo <name>: needs Python...`
+    a = _native_part(tmp_path / "a.pyz", key=LINUX, name="demo & calc")
+    b = _native_part(tmp_path / "b.pyz", key=WIN, name="demo & calc")
+    with pytest.raises(DeployError, match="no valid _pyz.json"):
+        _merge([a, b], tmp_path / "m.pyz")
+    assert not (tmp_path / "m.pyz").exists()
 
 
 def test_pyz_merge_dry_run_checks_the_parts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1419,6 +1602,86 @@ def test_macos_targets_pin_the_deployment_target(tmp_path: Path, monkeypatch: py
     assert _flag(calls[-1][1], "--python-platform") == "aarch64-apple-darwin" and calls[-1][2] == {"MACOSX_DEPLOYMENT_TARGET": "11.0"}
 
 
+SOURCE_ONLY_LOCK = """version = 1
+requires-python = ">=3.14"
+
+[[package]]
+name = "myapp"
+version = "0.1.0"
+source = { virtual = "." }
+
+[[package]]
+name = "docopt"
+version = "0.6.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/docopt-0.6.2.tar.gz", hash = "sha256:00", size = 25901 }
+
+[[package]]
+name = "mylib"
+version = "0.1.0"
+source = { editable = "libs/mylib" }
+
+[[package]]
+name = "six"
+version = "1.17.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/six-1.17.0.tar.gz", hash = "sha256:00", size = 34031 }
+wheels = [{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:00", size = 11050 }]
+"""
+
+
+@pytest.mark.parametrize(("docopt_tag", "error"), [("py3-none-any", None), ("cp314-cp314-linux_x86_64", "docopt")])
+def test_cross_target_builds_a_package_that_publishes_no_wheel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, docopt_tag: str, error: str | None) -> None:
+    # --only-binary :all: refused docopt (an sdist only, pure Python) for every other OS, so no pyz
+    # with a --target could be built; a workspace library (./deploy add ./libs/x) the same
+    calls = _install_recorder(tmp_path, monkeypatch)
+    lock = tmp_path / "uv.lock"
+    lock.write_text(SOURCE_ONLY_LOCK, encoding="utf-8")
+    monkeypatch.setattr(common, "LOCK", lock)
+    record = envs.uv  # _install_recorder's
+
+    def install(env: envs.PyEnv, argv: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        dest = Path(str(argv[argv.index("--target") + 1]))
+        _wheel(dest, "docopt", "0.6.2", docopt_tag, {"docopt.py": b""})
+        _wheel(dest, "mylib", "0.1.0")
+        _wheel(dest, "six", "1.17.0", files={"six.py": b""})
+        return record(env, argv, **kw)
+
+    monkeypatch.setattr(envs, "uv", install)
+    req = _requirements(tmp_path, "docopt==0.6.2", "six==1.17.0")
+    if error is None:
+        common.install_deps(make({}), "cpython", common.parse_key(WIN), tmp_path / "site", req)
+    else:
+        with pytest.raises(DeployError, match=f"{error}.*{WIN}.*pyz-merge") as e:
+            common.install_deps(make({}), "cpython", common.parse_key(WIN), tmp_path / "site", req)
+        assert e.value.code == 2
+    ((_key, args, _),) = calls
+    assert _flag(args, "--only-binary") == ":all:"  # every other package: a wheel for that platform
+    no_binary = [args[i + 1] for i, a in enumerate(args) if a == "--no-binary"]
+    assert no_binary == ["docopt", "mylib"]  # built here: the project itself and six are not
+
+
+def test_cross_target_builds_a_pure_sdist_for_real(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """uv's own flags: `--only-binary :all: --no-binary docopt` builds docopt (pip's rule: the
+    later option wins for that package) and still takes wheels for everything else."""
+    probe = subprocess.run(
+        [proc.find_uv(), "pip", "compile", "--no-deps", "--no-header", "--python-version", "3.14", "-"],
+        input="docopt==0.6.2\n", capture_output=True, text=True, env=proc.base_env(), timeout=120, check=False,
+    )
+    if probe.returncode != 0:
+        pytest.skip(f"needs PyPI (uv could not resolve docopt): {probe.stderr.strip()[-200:]}")
+    if not envs.tool_env(make({})).python.is_file():
+        pytest.skip("needs .venv (./deploy setup)")
+    lock = tmp_path / "uv.lock"
+    lock.write_text(SOURCE_ONLY_LOCK, encoding="utf-8")
+    monkeypatch.setattr(common, "LOCK", lock)
+    req = tmp_path / "requirements.txt"
+    req.write_text("docopt==0.6.2\nsix==1.17.0\n", encoding="utf-8")
+    site = common.install_deps(make({}), "cpython", common.parse_key(LINUX if IS_WINDOWS else WIN), tmp_path / "site", req)
+    assert (site / "docopt.py").is_file() and (site / "six.py").is_file()
+    assert common.installed(site) == {("docopt", "0.6.2"), ("six", "1.17.0")}
+
+
 def test_pypy_build_installs_cpython_keys_with_the_tools_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # It used to raise "CPython target from a PyPy build", but only for the host OS
     calls = _install_recorder(tmp_path, monkeypatch)
@@ -1539,6 +1802,47 @@ def test_skipped_requirements_compares_names_and_versions(tmp_path: Path) -> Non
     _wheel(site, "Zope.Interface", "05.4.0")
     req = _requirements(tmp_path, "jaraco-context==6.1.2", "pkg==1.9 ; python_full_version < '3.12'", "pkg==2.0 ; python_full_version >= '3.12'", "zope-interface==5.4.0", "colorama==0.4.6 ; sys_platform == 'win32'")
     assert common.skipped_requirements(req, site) == ["pkg==1.9", "colorama==0.4.6"]
+
+
+def _workspace_project(root: Path) -> Path:
+    """A project that depends on a local library the way `./deploy add ./libs/mylib` leaves it
+    (a uv workspace member, which uv installs editable), locked offline (static metadata)."""
+    (root / "libs" / "mylib" / "src" / "mylib").mkdir(parents=True)
+    (root / "libs" / "mylib" / "pyproject.toml").write_text(
+        '[project]\nname = "mylib"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n\n'
+        '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n',
+        encoding="utf-8",
+    )
+    (root / "libs" / "mylib" / "src" / "mylib" / "__init__.py").write_text("VALUE = 42\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "wsapp"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = ["mylib"]\n\n'
+        '[tool.uv.workspace]\nmembers = ["libs/mylib"]\n\n[tool.uv.sources]\nmylib = { workspace = true }\n',
+        encoding="utf-8",
+    )
+    env = {k: v for k, v in proc.base_env().items() if not k.startswith(("UV_PROJECT", "UV_PYTHON"))}
+    r = subprocess.run([proc.find_uv(), "lock", "--offline", "--quiet"], cwd=root, env=env, capture_output=True, text=True, timeout=120, check=False)
+    if r.returncode != 0:
+        pytest.skip(f"uv could not lock the scratch workspace offline: {r.stderr.strip()[-300:]}")
+    return root
+
+
+def test_export_ships_path_dependencies_and_refuses_a_stale_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A workspace library was exported as `-e ./libs/mylib`: `uv pip install --target` left only a
+    # .pth pointing at this machine's folder, so the pyz/portable app failed anywhere else. A
+    # dependency added to pyproject.toml without re-locking was silently left out (--frozen).
+    project = _workspace_project(tmp_path / "proj")
+    monkeypatch.setattr(proc, "ROOT", project)  # uv finds the project from its working folder
+    monkeypatch.setattr(common, "BUILD", tmp_path / "build")
+    monkeypatch.setenv("UV_OFFLINE", "1")  # an up-to-date lock is checked without the network
+    lines = common.export_requirements(make({})).read_text(encoding="utf-8").splitlines()
+    assert "./libs/mylib" in [ln.split(";")[0].strip().replace("\\", "/") for ln in lines]
+    assert not [ln for ln in lines if ln.startswith("-e")]
+    digest = common.requirements_digest(tmp_path / "build" / "deploy" / "requirements.txt")
+    assert digest != hashlib.sha256(b"").hexdigest()[:16]  # the path line is part of the fingerprint
+    text = (project / "pyproject.toml").read_text(encoding="utf-8")
+    (project / "pyproject.toml").write_text(text.replace('["mylib"]', '["mylib", "six>=1.16"]'), encoding="utf-8")
+    with pytest.raises(proc.CommandFailed):
+        common.export_requirements(make({}))
 
 
 def test_requirements_digest_ignores_the_header_and_hashes(tmp_path: Path) -> None:
@@ -1665,8 +1969,72 @@ def test_build_forwards_extras_to_the_packagers(monkeypatch: pytest.MonkeyPatch,
     assert cmd_build.cmd_build(cfg, ["pypy", "--method", "pyz", "--no-check", "--target", "pp311-linux-x86_64", "--target", WIN]) == 0
     assert seen[-1].targets == ["pp311-linux-x86_64", WIN]
     flet_cfg = make({"app": {"preset": "flet"}})
+    from runner.methods import flet
+
+    monkeypatch.setattr(flet, "_developer_mode", lambda: True)  # cmd_build checks it first on Windows
     assert cmd_build.cmd_build(flet_cfg, ["--method", "flet", "--no-check", "--build-number", "3"]) == 0
     assert seen[-1].extra == ["--build-number", "3"]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    ("data", "args", "message", "code"),
+    [
+        # flet build on a script project: it ran the checks and compiled mypyc first; --dry-run said fine
+        ({}, ["--method", "flet"], "--method flet is for the flet preset", 2),
+        # a value the .cmd launcher cannot hold: the real build deleted the previous folder and
+        # installed lib/ first, then stopped with a folder without launchers
+        ({"deploy": {"portable": {"runtime": "system", "env": {"GREETING": "h\u00e9llo"}}}}, ["--method", "portable"], "cannot hold this value", 2),
+    ],
+)
+def test_build_refuses_what_the_method_would_refuse_before_any_work(
+    no_build: None, monkeypatch: pytest.MonkeyPatch, data: dict[str, Any], args: list[str], message: str, code: int, dry_run: bool
+) -> None:
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    with pytest.raises(DeployError, match=re.escape(message)) as e:
+        cmd_build.cmd_build(make(data), args)
+    assert e.value.code == code
+
+
+def test_build_refuses_flet_build_without_developer_mode_before_any_work(no_build: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    from runner.methods import flet
+
+    monkeypatch.setattr(flet, "IS_WINDOWS", True)
+    monkeypatch.setattr(flet, "_developer_mode", lambda: False)
+    monkeypatch.setattr(flet, "host_os", lambda: "windows")
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    with pytest.raises(DeployError, match="Developer Mode") as e:
+        cmd_build.cmd_build(_flet_cfg(), ["--method", "flet"])
+    assert e.value.code == 3
+
+
+def test_build_check_failure_is_exit_code_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    # "check failed" exited 2 (usage/config) while ./deploy check exits 1 for the same findings
+    monkeypatch.setattr(cmd_build, "run_checks", lambda cfg, backend: False)
+    monkeypatch.setattr(cmd_build, "payload", lambda *a: pytest.fail("no payload after a failed check"))
+    with pytest.raises(DeployError, match="check failed") as e:
+        cmd_build.cmd_build(make({}), ["--method", "pyz"])
+    assert e.value.code == 1
+
+
+@pytest.mark.parametrize(("output", "extra"), [("missing", ["-v"]), ("empty folder", [])])
+def test_build_without_output_never_reports_done(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], output: str, extra: list[str]) -> None:
+    # `./deploy build -v`: PyInstaller read -v as --version, printed it and made nothing, and the
+    # build said "ok done: dist/p-cpython-exe (0.0 MB)" with exit 0
+    class FakeMethod:
+        @staticmethod
+        def build(req: BuildRequest) -> Path:
+            out = tmp_path / "dist" / "p-cpython-exe"
+            if output == "empty folder":
+                out.mkdir(parents=True)
+            return out
+
+    monkeypatch.setattr(cmd_build, "payload", lambda cfg, backend: tmp_path)
+    monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeMethod)
+    with pytest.raises(DeployError, match="no output") as e:
+        cmd_build.cmd_build(make({}), ["--method", "exe", "--no-check", *extra])
+    assert ("before the command" in str(e.value)) is bool(extra)
+    assert "done:" not in capsys.readouterr().err
 
 
 def test_build_dry_run_stops_after_the_argument_checks(no_build: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -2049,6 +2417,24 @@ def test_portable_prunes_tkinter_when_nothing_imports_it(tmp_path: Path, monkeyp
     assert common.uses_tkinter(lib) is True  # the app's own import still counts
 
 
+def test_portable_keeps_tkinter_imported_in_a_symlinked_src_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # src/myapp/gui -> ../../shared_gui: Path.rglob does not enter a symlinked folder, so the prune
+    # removed Tk although the payload (sync_tree follows the link) imports tkinter
+    shared = tmp_path / "shared_gui"
+    shared.mkdir()
+    (shared / "win.py").write_text("import tkinter\n", encoding="utf-8")
+    src = tmp_path / "src"
+    (src / "myapp").mkdir(parents=True)
+    (src / "myapp" / "__init__.py").write_text("", encoding="utf-8")
+    try:
+        (src / "myapp" / "gui").symlink_to(shared, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    (src / "myapp" / "loop").symlink_to(src / "myapp", target_is_directory=True)  # a cycle must not hang it
+    monkeypatch.setattr(common, "SRC", src)
+    assert common.uses_tkinter(tmp_path / "no-lib") is True
+
+
 # --- portable: precompile, archive, stale files ------------------------------------------------------
 
 
@@ -2163,6 +2549,80 @@ def _system_portable(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, fail: bo
     monkeypatch.setattr(common, "install_deps", install)
     app = fake_app(sandbox / "payload", "x")
     return portable.build(BuildRequest(cfg, "cpython", "portable", app))
+
+
+@pytest.mark.parametrize(
+    ("installed", "pins", "warning"),
+    [
+        # tzdata only on win32: the Linux build left it out without a word, and the folder's .cmd
+        # started the app on Windows, where zoneinfo then failed
+        ({"tzlocal": "5.4.4"}, ["tzlocal==5.4.4", "tzdata==2026.4 ; sys_platform == 'win32'"], "tzdata==2026.4"),
+        # backports-tarfile only below 3.12: the launcher accepts a Python 3.11 when PyPy is supported
+        ({"jaraco-context": "6.1.2"}, ["jaraco-context==6.1.2", "backports-tarfile==1.2.0 ; python_full_version < '3.12'"], "backports-tarfile==1.2.0"),
+        ({"rich": "15.0.0"}, ["rich==15.0.0 ; implementation_name == 'cpython'"], None),  # the same everywhere: no warning
+    ],
+)
+def test_portable_system_warns_about_pins_other_platforms_need(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], installed: dict[str, str], pins: list[str], warning: str | None
+) -> None:
+    from runner.methods import portable
+
+    cfg = make({"app": {"name": "x"}, "deploy": {"portable": {"runtime": "system", "archive": False}}})
+    monkeypatch.setattr(common, "host_target", lambda c, b: common.Target("cp", 3, 14, "linux", "x86_64"))
+    monkeypatch.setattr(common, "export_requirements", lambda c: _requirements(sandbox, *pins))
+
+    def install(c: Config, b: str, t: common.Target, dest: Path, req: Path) -> Path:
+        for name, version in installed.items():
+            _wheel(dest, name, version)
+        return dest
+
+    monkeypatch.setattr(common, "install_deps", install)
+    portable.build(BuildRequest(cfg, "cpython", "portable", fake_app(sandbox / "payload", "x")))
+    err = capsys.readouterr().err
+    if warning is None:
+        assert "warning:" not in err
+    else:
+        assert warning in err and "cp314-linux-x86_64" in err and "warning:" in err
+
+
+def _old_output(dist: Path) -> Path:
+    out = dist / "x-cpython-pyz"
+    out.mkdir(parents=True)
+    (out / "x.pyz").write_bytes(b"old")
+    (out / "x.cmd").write_text("old", encoding="utf-8")
+    return out
+
+
+def test_a_previous_output_in_use_is_left_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows: the previous app still runs from dist/ (or a console sits in it). rmtree deleted
+    # half of the folder, then PermissionError: a traceback and "internal runner error"
+    out = _old_output(tmp_path / "dist")
+
+    def in_use(src: Any, dst: Any) -> None:
+        raise PermissionError(13, "The process cannot access the file because it is being used by another process", str(src))
+
+    monkeypatch.setattr(common, "_move", in_use)
+    with pytest.raises(DeployError, match="in use") as e:
+        common.remove_output(out)
+    assert e.value.code == 1 and "x-cpython-pyz" in str(e.value)
+    assert sorted(p.name for p in out.iterdir()) == ["x.cmd", "x.pyz"]  # nothing deleted
+    assert [p.name for p in out.parent.iterdir()] == ["x-cpython-pyz"]  # no scratch folder left
+
+
+def test_a_previous_output_that_cannot_be_deleted_is_moved_aside(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # A file the moved folder still holds (an immutable file, a scanner): the build goes on
+    out = _old_output(tmp_path / "dist")
+    monkeypatch.setattr(common.shutil, "rmtree", lambda path, *a, **k: None)
+    common.remove_output(out)
+    assert not out.exists()
+    left = [p for p in out.parent.iterdir()]
+    assert len(left) == 1 and left[0].name.startswith(".x-cpython-pyz.old-")
+    assert "could not delete" in capsys.readouterr().err
+    archive = tmp_path / "dist" / "a.zip"
+    archive.write_bytes(b"zip")
+    common.remove_output(archive)  # a file goes as it is
+    assert not archive.exists()
+    common.remove_output(archive)  # a missing one is fine
 
 
 @pytest.mark.parametrize("fail", [False, True])

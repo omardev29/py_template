@@ -23,17 +23,19 @@ from pathlib import Path
 from . import envs, proc, render, ui
 from .config import Config, compiled_paths
 from .imports import imports_of, is_local, local_module, module_name, parse_error
-from .project import BUILD, EXT_SUFFIXES, SRC, TOOLS, rel
+from .project import BUILD, EXT_SUFFIXES, IS_WINDOWS, SRC, TOOLS, rel
 from .ui import DeployError
 
 SKIP_DIRS = {"__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 # The annotated HTML report (slow lines): ./deploy report, and every build with compile.annotate
 ANNOTATE_HTML = BUILD / "reports" / "mypyc-annotate.html"
-# Exit code of tools/mypyc_build.py when mypy/mypyc rejected the code (no C compiler ran yet)
+# Exit codes of tools/mypyc_build.py: mypy/mypyc rejected the code (no C compiler ran yet);
+# the C build failed because setuptools cannot start the C compiler (a missing requirement:
+# exit 3, like every other missing program); setuptools or the C compiler failed. Only the last
+# two get the compiler hint: a code 1 or 2 comes from uv (a stale uv.lock) before the script ran.
 MYPYC_REJECTED = 4
-# ... and when the C build failed because setuptools cannot start the C compiler: a missing
-# requirement (exit 3), like every other missing program
 COMPILER_MISSING = 5
+C_BUILD_FAILED = 6
 # The options of the last SUCCESSFUL compile of a profile (in its folder): see build()
 COMPILED_STAMP = "compiled-options.json"
 # spec.json keys that do not change the binaries (every other key does, see build())
@@ -72,7 +74,7 @@ def group_name(cfg: Config) -> str:
     return cfg.pkg
 
 
-def _walk(root: Path) -> Iterator[Path]:
+def walk(root: Path) -> Iterator[Path]:
     """Every entry below `root`, each folder before its contents, following symlinked folders.
 
     Path.rglob does not descend into a symlinked folder (3.11-3.14): a linked src/assets or
@@ -107,7 +109,7 @@ def compiled_sources(cfg: Config) -> list[Path]:
         path = SRC / rel_path
         stem = rel_path.removesuffix(".py")
         if path.is_dir():
-            candidates = sorted(p for p in _walk(path) if p.suffix == ".py" and p.name != "__init__.py" and p.is_file())
+            candidates = sorted(p for p in walk(path) if p.suffix == ".py" and p.name != "__init__.py" and p.is_file())
             if not candidates:  # an entry that compiles nothing is a mistake, never skipped silently
                 raise DeployError(f"compile.modules: neither src/{stem}.py nor src/{stem}/ holds a module to compile")
         elif path.is_file():
@@ -167,7 +169,7 @@ def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
     changed = 0
     dst.mkdir(parents=True, exist_ok=True)
     seen: set[Path] = set()
-    for path in _walk(src):
+    for path in walk(src):
         if _mypyc_output(path, src, owned):
             continue
         target = dst / path.relative_to(src)
@@ -324,8 +326,12 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
         if result.returncode == MYPYC_REJECTED:  # mypy/mypyc rejected the code: no compiler involved
             raise DeployError("mypyc failed (exit code 1): fix the errors above", 1)
         if result.returncode == COMPILER_MISSING:
-            raise DeployError(f"mypyc failed: the C compiler cannot start (above)\n{has_compiler_hint()}", 3)
-        raise DeployError(f"mypyc failed (exit code {result.returncode})\n{has_compiler_hint()}", result.returncode)
+            hint = has_compiler_hint(_venv_platform(tool))
+            raise DeployError(f"mypyc failed: the C compiler cannot start (above)\n{hint}", 3)
+        if result.returncode == C_BUILD_FAILED:
+            raise DeployError(f"mypyc failed (exit code 1)\n{has_compiler_hint(_venv_platform(tool))}", 1)
+        # uv, or Python before the script ran (a stale uv.lock: uv's error is above)
+        raise DeployError(f"mypyc failed (exit code {result.returncode}): see the error above", result.returncode)
     if annotate and result.stdout:
         ui.detail(result.stdout)
     if from_config and annotate and not proc.DRY_RUN:
@@ -427,6 +433,17 @@ def exe_stage(cfg: Config, stage: Path, dest: Path) -> Path:
         if target.exists():
             target.unlink()
     return dest
+
+
+def _venv_platform(tool: envs.PyEnv) -> str:
+    """sysconfig.get_platform() of the .venv Python, whose MSVC tools the hint names (Windows
+    only: elsewhere the hint does not depend on it)."""
+    if not IS_WINDOWS:
+        return ""
+    try:
+        return str(envs.interpreter_info(tool.python)["platform"])
+    except (OSError, ValueError, KeyError, proc.CommandFailed, DeployError):
+        return ""
 
 
 def has_compiler_hint(platform: str = "win-amd64") -> str:
