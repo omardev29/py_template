@@ -249,7 +249,9 @@ function deploy {
         $global:LASTEXITCODE = 2
         return
     }
-    & ([IO.Path]::Combine($dir, 'deploy.ps1')) @args
+    $ps1 = [IO.Path]::Combine($dir, 'deploy.ps1')
+    # Pipeline input ('x' | deploy run) goes on to the runner, like a native call.
+    if ($MyInvocation.ExpectingInput) { $input | & $ps1 @args } else { & $ps1 @args }
 }
 """
 
@@ -273,7 +275,8 @@ end
 NU_SNIPPET = r"""
 # `deploy` in nushell from any folder of a pytemplate project.
 # Paste into your config.nu (`$nu.config-path` prints where it is), then open a new shell.
-# It runs .pytemplate/deploy.py with uv directly, so uv must be on PATH.
+# It runs .pytemplate/deploy.py with uv directly, so uv must be on PATH. UV_PYTHON is
+# emptied for it (uv reads that as unset): the runner runs on the project's Python.
 def --wrapped deploy [...rest] {
     mut dir = $env.PWD
     while not ($dir | path join '.pytemplate' 'deploy.py' | path exists) {
@@ -284,7 +287,7 @@ def --wrapped deploy [...rest] {
         $dir = $parent
     }
     let script = ($dir | path join '.pytemplate' 'deploy.py')
-    with-env {PYTEMPLATE_CALLER_CWD: $env.PWD, PYTEMPLATE_LAUNCHER: 'nu'} { ^uv run --quiet --script $script ...$rest }
+    with-env {PYTEMPLATE_CALLER_CWD: $env.PWD, PYTEMPLATE_LAUNCHER: 'nu', UV_PYTHON: ''} { ^uv run --quiet --script $script ...$rest }
 }
 """
 
@@ -292,7 +295,8 @@ XONSH_TEMPLATE = r'''
 # `deploy` in xonsh from any folder of a pytemplate project (xonsh 0.14 or later).
 # Paste into ~/.xonshrc, then open a new shell. It runs .pytemplate/deploy.py with uv
 # directly (falling back to the launcher when uv is not on $PATH): on Windows ./deploy goes
-# through deploy.cmd, and cmd.exe cannot pass & | < > ^ % inside arguments.
+# through deploy.cmd, and cmd.exe cannot pass & | < > ^ % inside arguments. Unlike the
+# launchers it keeps a UV_PYTHON you set: the runner then needs it to be 3.11 or newer.
 # The completion words were taken from this project by `./deploy shell-setup xonsh`.
 import os as _pt_os
 import shutil as _pt_shutil
@@ -467,18 +471,27 @@ def snippet(shell: str, cfg: Config | None = None) -> str:
 
 
 def guess_shell(env: Mapping[str, str]) -> str | None:
-    """Guess the calling shell from PYTEMPLATE_LAUNCHER, XONSH_VERSION and SHELL."""
+    """Guess the calling shell from PYTEMPLATE_LAUNCHER, XONSH_VERSION and SHELL.
+
+    ps1: and sh:niubash name the caller (niubash runs the launcher in-process). sh:bash/sh:zsh
+    only name the interpreter of `#!/bin/sh` (bash on macOS, Fedora, Arch), not the user's
+    shell: they are the last resort after XONSH_VERSION and $SHELL (Git Bash/MSYS2 without it).
+    """
     launcher = env.get("PYTEMPLATE_LAUNCHER", "")
     if launcher.startswith("ps1:"):
         return "pwsh"
-    for prefix, shell in (("sh:niubash", "niubash"), ("sh:zsh", "zsh"), ("sh:bash", "bash")):
-        if launcher.startswith(prefix):
-            return shell
+    if launcher.startswith("sh:niubash"):
+        return "niubash"
     if env.get("XONSH_VERSION"):
         return "xonsh"
-    name = Path(env.get("SHELL", "")).name.lower()
+    name = re.split(r"[\\/]", env.get("SHELL", ""))[-1].lower()  # C:\x\zsh.exe on any host
     name = name[:-4] if name.endswith(".exe") else name
-    return name if name in ("bash", "zsh", "fish", "nu") else None
+    if name in ("bash", "zsh", "fish", "nu"):
+        return name
+    for prefix, shell in (("sh:zsh", "zsh"), ("sh:bash", "bash")):
+        if launcher.startswith(prefix):
+            return shell
+    return None
 
 
 def cmd_shell_setup(cfg: Config, args: list[str]) -> int:
@@ -500,7 +513,9 @@ def cmd_shell_setup(cfg: Config, args: list[str]) -> int:
 TESTS: dict[str, str] = {"T1": "argv", "T2": "exit", "T3": "cwd", "T4": "shx", "T5": "path", "T6": "stdin", "T7": "hints"}
 BASE_ARGS = ("plain", "with space", "", "back\\slash", "tail\\", "\u00fcn\u00ef", "--flag=x", "-v")
 EXTRA_ARGS = ('q"uote', "*", "$HOME", "a'b", "--")
-PS_ARGS = ("~", "~/x", "~\\x")  # PowerShell 7 expands these in unquoted native arguments
+# PowerShell 7 expands ~ in unquoted native arguments; typographic single quotes are quotes for
+# PowerShell too (the Core hand-over's Invoke-Expression must double them, not end on them).
+PS_ARGS = ("~", "~/x", "~\\x", "‘q’", "‚; Write-Output PWNED; ‛")
 MSYSTEMS = ("MSYS", "UCRT64", "MINGW64", "CLANG64", "CLANGARM64")
 POSIX_INTERPRETERS: dict[str, tuple[str, ...]] = {
     "bash": ("--norc", "--noprofile"),
