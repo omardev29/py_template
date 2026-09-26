@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import functools
 import hashlib
@@ -1046,25 +1047,75 @@ def test_quiet_init_quiets_uv_too(fake: Fake, monkeypatch: pytest.MonkeyPatch) -
     assert fake.calls and not any("--quiet" in c for c in fake.calls)
 
 
+MY_PROJ = str(Path("/p/my proj"))  # \p\my proj on Windows: the hint names the native path
+
+
 @pytest.mark.parametrize(
     ("launcher", "expected"),
     [
-        ("sh:bash", ["cd '/p/my proj'", "./deploy setup"]),
-        ("", ["cd '/p/my proj'", "./deploy setup"]),
-        ("cmd", ['cd /d "/p/my proj"', ".\\deploy setup"]),
-        ("ps1:Desktop:5.1", ["cd '/p/my proj'", "./deploy setup"]),
+        ("sh:bash", [f"cd {shlex.quote(MY_PROJ)}", "./deploy setup"]),
+        ("", [f"cd {shlex.quote(MY_PROJ)}", "./deploy setup"]),
+        ("cmd", [f'cd /d "{MY_PROJ}"', ".\\deploy setup"]),
+        ("ps1:Desktop:5.1", [f"cd '{MY_PROJ}'", "./deploy setup"]),
     ],
 )
 def test_new_says_what_comes_next_for_the_callers_shell(monkeypatch: pytest.MonkeyPatch, launcher: str, expected: list[str]) -> None:
     """One hint, each command on its own line (cmd and Windows PowerShell 5.1 have no `&&`), the
-    folder quoted (a space broke `cd <dest> && ./deploy setup`), `.\\deploy` in cmd."""
+    folder quoted (a space broke `cd <dest> && ./deploy setup`), `.\\deploy` in cmd. The
+    expected paths are the native ones: the test failed on Windows with POSIX literals."""
+    monkeypatch.delenv("XONSH_VERSION", raising=False)
+    monkeypatch.delenv("NU_VERSION", raising=False)
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
     assert presets.next_steps(Path("/p/my proj")) == expected
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "ps1:Core:7.6")
     quote = "\N{RIGHT SINGLE QUOTATION MARK}"
-    assert presets.next_steps(Path(f"/p/it's{quote}s"))[0] == f"cd '/p/it''s{quote}{quote}s'"
+    typographic = str(Path(f"/p/it's{quote}s"))
+    doubled = typographic.replace("'", "''").replace(quote, quote * 2)
+    assert presets.next_steps(Path(typographic))[0] == f"cd '{doubled}'"
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh")
-    assert presets.next_steps(Path("/p/it's"))[0] == "cd '/p/it'\"'\"'s'"
+    apostrophe = str(Path("/p/it's"))
+    assert presets.next_steps(Path(apostrophe))[0] == f"cd {shlex.quote(apostrophe)}"
+    assert shlex.split(presets.next_steps(Path(apostrophe))[0]) == ["cd", apostrophe]
+
+
+@pytest.mark.parametrize("launcher", ["cmd", ""])
+def test_new_says_what_comes_next_in_xonsh(monkeypatch: pytest.MonkeyPatch, launcher: str) -> None:
+    """xonsh on Windows runs deploy.cmd (PYTEMPLATE_LAUNCHER=cmd; its shell-setup alias sets
+    none) and got cmd's `cd /d "..."`, which it rejects. It reads a quoted argument as a Python
+    string (backslashes are escapes: `C:\\Users` needs them doubled)."""
+    monkeypatch.delenv("NU_VERSION", raising=False)
+    monkeypatch.setenv("XONSH_VERSION", "0.24.2")
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
+    for raw in ("/p/my proj", "/p/it's", "/p/a\\Ub"):
+        path = str(Path(raw))
+        cd, setup = presets.next_steps(Path(path))
+        assert cd.startswith("cd ") and ast.literal_eval(cd[3:]) == path
+        assert setup == "./deploy setup"
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh:niubash")  # niubash's own launcher value wins
+    assert presets.next_steps(Path("/p/my proj"))[0] == f"cd {shlex.quote(MY_PROJ)}"
+
+
+@pytest.mark.parametrize(
+    ("launcher", "nu_version", "setup"), [("cmd", "0.106.1", "./deploy.cmd setup"), ("nu", "", "deploy setup")]
+)
+def test_new_says_what_comes_next_in_nushell(monkeypatch: pytest.MonkeyPatch, launcher: str, nu_version: str, setup: str) -> None:
+    """nushell on Windows runs deploy.cmd too, typed `./deploy.cmd` (the shell-setup nu function
+    `deploy` sets `nu`): cmd's `cd /d "..."` is two arguments there. A single-quoted nushell
+    string is raw; a path with a quote goes in a double-quoted one, whose escapes are
+    backslash-backslash and backslash-quote."""
+    monkeypatch.delenv("XONSH_VERSION", raising=False)
+    if nu_version:
+        monkeypatch.setenv("NU_VERSION", nu_version)
+    else:
+        monkeypatch.delenv("NU_VERSION", raising=False)
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
+    assert presets.next_steps(Path("/p/my proj")) == [f"cd '{MY_PROJ}'", setup]
+    apostrophe = str(Path("/p/a\\b it's"))
+    escaped = apostrophe.replace("\\", "\\\\")
+    assert presets.next_steps(Path(apostrophe))[0] == f'cd "{escaped}"'
+    if launcher == "nu":  # the launcher value names the shell, before an inherited XONSH_VERSION
+        monkeypatch.setenv("XONSH_VERSION", "0.24.2")
+        assert presets.next_steps(Path("/p/my proj"))[0] == f"cd '{MY_PROJ}'"
 
 
 def test_new_prints_one_next_step_hint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fake: Fake) -> None:

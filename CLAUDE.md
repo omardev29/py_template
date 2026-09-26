@@ -186,9 +186,10 @@ then `shutil.which("uv")`, else `DeployError(..., 3)`.
 `ps1:Desktop:5.1`); `nvim`; `nu` (shell-setup snippet). The xonsh snippet sets none.
 `project.native_path` reads the `:msys`/`:cygwin` suffix, `shells.guess_shell` the prefix (only
 `ps1:`, `nu` and `sh:niubash` first: `sh:bash`/`sh:zsh` name the interpreter of `#!/bin/sh`, bash on
-macOS, Fedora and Arch, so `$SHELL` wins over them), `presets.next_steps` the `cmd`/`ps1:`
-prefix (how the hint after `new` quotes the folder), and `./deploy doctor` prints the value
-("unknown" when unset).
+macOS, Fedora and Arch, so `$SHELL` wins over them), `presets.next_steps` the `cmd`/`ps1:`/`nu`
+prefix (how the hint after `new` quotes the folder; behind `cmd`, which xonsh and nushell on
+Windows start too, `XONSH_VERSION` and `NU_VERSION` name those shells), and `./deploy doctor`
+prints the value ("unknown" when unset).
 
 ### 4.2 Which launcher runs
 
@@ -2028,8 +2029,15 @@ Per method:
   empty folder it was given) and says so; a folder with content is refused before anything
   is written. On success it prints one hint (init prints none: it runs in the copy), `cd
   <dest>` and `./deploy setup` on lines of their own, for the shell of the launcher
-  (`presets.next_steps` reads the `PYTEMPLATE_LAUNCHER` prefix: cmd `cd /d "..."` and
-  `.\deploy`, PowerShell single quotes, else `shlex.quote`).
+  (`presets.next_steps`, in the order of `shells.guess_shell`: the `PYTEMPLATE_LAUNCHER`
+  prefix `ps1:` (PowerShell single quotes) or `nu` (a raw single-quoted nushell string, a
+  double-quoted one for a path with `'`; `deploy setup`, the shell-setup function), then
+  `XONSH_VERSION` (a Python string literal: xonsh reads quoted arguments so), then
+  `NU_VERSION` behind `cmd` (nushell exports it; deploy.cmd serves xonsh and nushell on
+  Windows too; `./deploy.cmd setup`), then cmd `cd /d "..."` and `.\deploy`, else
+  `shlex.quote`). Behind deploy.cmd a shell that exports neither variable (a nushell that
+  stops exporting `NU_VERSION`, nushell/nushell#15533) gets cmd's syntax: only the hint is
+  wrong.
 - `init` is internal only: `cli.INTERNAL["__init"]` (`cmd_mode.cmd_init`), reached by `new` and
   by the template maintainer, listed nowhere. `./deploy init` exits 2 with the hint `./deploy
   new DIR --preset P`: a project's preset is chosen when it is created.

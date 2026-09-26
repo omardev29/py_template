@@ -1193,12 +1193,25 @@ def new(dest: Path, preset: str, name: str | None) -> None:
 
 def next_steps(dest: Path) -> list[str]:
     """The commands to type after `new`, each on its own line (cmd and Windows PowerShell 5.1
-    have no `&&`), quoted for the shell whose launcher started this run (PYTEMPLATE_LAUNCHER)."""
+    have no `&&`), quoted for the calling shell, told as shells.guess_shell tells it: the
+    launcher (PYTEMPLATE_LAUNCHER: ps1:, nu, sh:niubash), then XONSH_VERSION. deploy.cmd also
+    serves xonsh and nushell on Windows: behind it NU_VERSION (nushell exports it) names
+    nushell, and cmd's syntax is for the rest (cmd, a Python subprocess, a VS Code task)."""
     launcher = os.environ.get("PYTEMPLATE_LAUNCHER", "")
     path = str(dest)
-    if launcher.startswith("cmd"):
-        return [f'cd /d "{path}"', r".\deploy setup"]  # a Windows path never holds a double quote
     if launcher.startswith("ps1"):
         # PowerShell reads the typographic single quotes as quotes too: each is doubled
         return ["cd '" + re.sub("['\u2018-\u201b]", lambda m: m.group() * 2, path) + "'", "./deploy setup"]
+    cmd = launcher.startswith("cmd")
+    nushell = launcher == "nu"
+    if not nushell and not launcher.startswith("sh:niubash") and os.environ.get("XONSH_VERSION"):
+        return [f"cd {path!r}", "./deploy setup"]  # xonsh reads a quoted argument as a Python string
+    if nushell or (cmd and os.environ.get("NU_VERSION")):
+        # nushell: a single-quoted string is raw, a double-quoted one has the escapes \\ and \";
+        # the launcher value nu is the shell-setup function `deploy`, else Windows' deploy.cmd
+        escaped = path.replace("\\", "\\\\").replace('"', '\\"')
+        cd = f"cd '{path}'" if "'" not in path else f'cd "{escaped}"'
+        return [cd, "deploy setup" if nushell else "./deploy.cmd setup"]
+    if cmd:
+        return [f'cd /d "{path}"', r".\deploy setup"]  # a Windows path never holds a double quote
     return [f"cd {shlex.quote(path)}", "./deploy setup"]
