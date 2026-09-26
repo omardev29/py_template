@@ -801,11 +801,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   and the error names whatever it could not undo), `cmd_env.ensure_lock` (a failure there says "the
   files are already renamed ... ./deploy apply"), `render.apply`, the ruff tidy-up, and the name
   of the `applied` record (`cmd_apply.rename_record`, only the project's own record).
-- After a hand edit of `app.name` (src/<pkg>/ missing), rename starts from the name the project
-  really has (`cmd_apply.applied_name`: the trusted record, else pyproject `[project] name`,
-  whose package is in src/): `rename <the edited name>` finishes the job, `rename OTHER` goes
-  from the real name to OTHER; with no such name it exits 2 ("put the old name back"). It never
-  says "nothing to do" while src/<pkg>/ is missing.
+- After a hand edit of `app.name` (src/<pkg>/ missing, or the very same folder: `alpha` ->
+  `Alpha`), rename starts from the name the project really has (`cmd_apply.applied_name`, asked
+  first, as apply does: the trusted record, else pyproject `[project] name`, whose package is in
+  src/): `rename <the edited name>` finishes the job, `rename OTHER` goes from the real name to
+  OTHER; with no such name and src/<pkg>/ missing it exits 2 ("put the old name back"). It never
+  says "nothing to do" while doctor and the hook still report the edit as not applied.
 - What changes (`rewrite`, whole words only; `myapp_extra` and `my-app-2` never match):
   - Python code (`tokenize`): the first name of `import pkg...`/`from pkg... import`, and, in a
     file that binds the package with `import pkg[.x]` (no `as`), every name that resolves to that

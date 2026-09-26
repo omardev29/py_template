@@ -1397,18 +1397,19 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
     old_name = cfg.app.name
     generated = render.outputs(cfg)
     ignore = derived_paths(generated)
-    if package_dir(ROOT / "src", cfg.pkg) is None:
-        # app.name was changed by hand: rename from the name the project really has
-        applied = cmd_apply.applied_name(cfg)
-        if applied is None:
-            raise DeployError(
-                f"rename: src/{cfg.pkg}/ not found (app.name = '{cfg.app.name}' says the package is there).\n"
-                "  If app.name was changed by hand: put the old name back in pytemplate.toml and run "
-                f"./deploy rename {new_name} again"
-            )
+    # app.name was changed by hand (src/<pkg>/ missing, or the same folder: alpha -> Alpha):
+    # rename from the name the project really has, like apply
+    applied = cmd_apply.applied_name(cfg)
+    if applied is not None:
         ui.info(f"note: app.name = '{cfg.app.name}' was changed by hand; the project is still '{applied}': renaming from '{applied}'")
         old_name = applied
         ignore.add("pytemplate.toml")  # dirty by definition
+    elif package_dir(ROOT / "src", cfg.pkg) is None:
+        raise DeployError(
+            f"rename: src/{cfg.pkg}/ not found (app.name = '{cfg.app.name}' says the package is there).\n"
+            "  If app.name was changed by hand: put the old name back in pytemplate.toml and run "
+            f"./deploy rename {new_name} again"
+        )
     if new_name == old_name == cfg.app.name:
         ui.ok(f"the app is already called '{new_name}' (package src/{cfg.pkg}/): nothing to do")
         return 0

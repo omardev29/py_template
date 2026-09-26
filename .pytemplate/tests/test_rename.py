@@ -1039,6 +1039,36 @@ def test_rename_after_a_hand_edit_finishes_it(command_project: Path, capsys: pyt
     assert {k: tree.get(k) for k in skeleton} == skeleton  # the skeleton of the new name, pytemplate.toml included
 
 
+def test_rename_after_a_hand_edit_that_keeps_the_package(command_project: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """alpha -> Alpha by hand keeps src/alpha/: `rename Alpha` finishes it (pyproject.toml, the
+    name in text) like apply does, instead of 'nothing to do' while doctor says it is not applied."""
+    from runner import cmd_apply
+
+    root = command_project
+    text = (root / "pytemplate.toml").read_text(encoding="utf-8")
+    (root / "pytemplate.toml").write_text(config.set_value(text, "app", "name", "Alpha"), encoding="utf-8", newline="\n")
+    assert cmd_apply.applied_name(_load(root)) == "alpha"  # doctor and the hook: not applied
+    assert rename.cmd_rename(_load(root), ["Alpha"]) == 0
+    err = capsys.readouterr().err
+    assert "was changed by hand" in err and "nothing to do" not in err
+    assert presets.project_name((root / "pyproject.toml").read_text(encoding="utf-8")) == "Alpha"
+    tree, skeleton = _tree(root), presets.skeleton("script", "Alpha")
+    assert {k: tree.get(k) for k in skeleton} == skeleton
+    assert cmd_apply.applied_name(_load(root)) is None
+    assert rename.cmd_rename(_load(root), ["Alpha"]) == 0
+    assert "nothing to do" in capsys.readouterr().err
+
+
+def test_rename_to_another_name_after_a_hand_edit_that_keeps_the_package(command_project: Path) -> None:
+    root = command_project
+    (root / "src" / "alpha" / "notes.txt").write_text("Welcome to alpha.\n", encoding="utf-8")
+    text = (root / "pytemplate.toml").read_text(encoding="utf-8")
+    (root / "pytemplate.toml").write_text(config.set_value(text, "app", "name", "Alpha"), encoding="utf-8", newline="\n")
+    assert rename.cmd_rename(_load(root), ["My-Game"]) == 0  # from the real name, alpha: its prose is the name
+    assert (root / "src" / "my_game" / "notes.txt").read_text(encoding="utf-8") == "Welcome to My-Game.\n"
+    assert presets.project_name((root / "pyproject.toml").read_text(encoding="utf-8")) == "My-Game"
+
+
 def test_rename_updates_only_the_projects_own_record(command_project: Path) -> None:
     from runner import cmd_apply
 
