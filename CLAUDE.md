@@ -582,10 +582,9 @@ find a compatible Visual Studio installation"). Everything else (e.g. `FLET_*`) 
   `pypy` (`pypy@[0-9]+\.[0-9]+\.[0-9]+`, exact: a loose request picks the newest PyPy, and PyPy
   8.0 changed the extension ABI to pp80; in September 2026 raylib, numpy and cffi published no
   pp80 wheels. Bump the pin only once the dependencies ship wheels for the new ABI, then
-  `./deploy lock`), `jit`, `jit_interpreter` (must exist,
-  relative paths resolve against the project root, else exit 3). `Config.min_python` is the
-  lowest minor in use (CPython always, PyPy's `Config.pypy_minor` while supported), compared as
-  numbers.
+  `./deploy lock`), `jit`, `jit_interpreter` (must exist, relative paths resolve against the
+  project root, else exit 3). `Config.min_python` is the lowest minor in use (CPython always,
+  PyPy's `Config.pypy_minor` while supported), compared as numbers.
 - `[typing]`: `profile = auto|mypyc|strict|warn|off`, `relaxed = off|warn|strict` (what `auto`
   means on cpython/pypy), `editor = pylance|basedpyright`, `[[typing.mypy_overrides]]`
   (`config._check_override`: `module` required, a name/pattern or a non-empty list of them
@@ -599,9 +598,9 @@ find a compatible Visual Studio installation"). Everything else (e.g. `FLET_*`) 
   `config.DEFAULT_METHODS` in `DeployConfig.__post_init__`: a backend left out keeps its method,
   cpython/mypyc `exe`, pypy `portable`; each method must be allowed by `cmd_build.COMPAT` for its
   backend, and `flet` needs `app.preset = "flet"`: `config._check_default_methods`),
-  `exclude_modules` (dotted names:
-  PyInstaller `--exclude-module`, Nuitka `--nofollow-import-to`; the flet preset sets
-  `["PIL"]`), `[deploy.exe] mode console icon hidden_imports (dotted names) strip extra_args` (`strip`:
+  `exclude_modules` (dotted names: PyInstaller `--exclude-module`, Nuitka `--nofollow-import-to`;
+  the flet preset sets `["PIL"]`), `[deploy.exe] mode console icon hidden_imports strip
+  extra_args` (`hidden_imports`: dotted names; `strip`:
   PyInstaller `--strip`, Linux/macOS only), `[deploy.portable] runtime prune archive env`
   (`env` names must be identifiers), `[deploy.pyz] targets`, `[deploy.wheel] entry`,
   `[deploy.nuitka] mode extra_args`, `[deploy.flet] target cleanup exclude extra_args`

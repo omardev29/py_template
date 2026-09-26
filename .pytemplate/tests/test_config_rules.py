@@ -735,6 +735,46 @@ def test_set_value_edge_layouts(text: str, table: str, key: str, value: Any) -> 
         assert comment in out or key in ("supported", "nested")
 
 
+SCANNED = [
+    *[(f"{name}-{layout}", text) for name, text in shipped_configs().items() for layout, text in (("lf", text), ("taplo", taplo_expand(text)), ("crlf", text.replace("\n", "\r\n")))],
+    ("taplo-output", TAPLO),
+    *[(f"edge{i}", text) for i, (text, *_) in enumerate(EDGE_CASES)],
+]
+
+
+@pytest.mark.parametrize(("label", "text"), SCANNED, ids=[label for label, _ in SCANNED])
+def test_scanner_spans_are_the_documents_values(label: str, text: str) -> None:
+    """Every `key = value` the scanner finds: its span alone parses to the document's value."""
+    data = tomllib.loads(text)
+    stmts = config._statements(text)
+    keys = [s for s in stmts if s.kind == "key"]
+    assert len(keys) == len(re.findall(r"(?m)^[ \t]*[A-Za-z0-9_\"'-][^=\n]*=", text)) - _in_strings(text)
+    for s in keys:
+        if s.in_array:
+            continue
+        node: Any = data
+        for part in s.path:
+            node = node[part]
+        start, stop = s.value
+        assert tomllib.loads("v = " + text[start:stop])["v"] == node, (s.path, text[start:stop])
+    for s in stmts:
+        if s.kind == "table":
+            node = data
+            for part in s.path:
+                node = node[part]
+            assert isinstance(node, dict)
+
+
+def _in_strings(text: str) -> int:
+    """`key = ` look-alike lines inside multi-line strings and arrays (the scanner skips them)."""
+    count = 0
+    for s in config._statements(text):
+        if s.kind == "key":
+            inner = text[s.value[0] : s.value[1]]
+            count += len(re.findall(r"(?m)^[ \t]*[A-Za-z0-9_\"'-][^=\n]*=", inner))
+    return count
+
+
 def test_set_value_changes_only_the_value() -> None:
     text = '# head\n[backend]\nactive = "cpython"   # the mode\nsupported = ["cpython"]\n\n[python]\ncpython = "3.14"\n'
     out = set_value(text, "backend", "active", "mypyc")
