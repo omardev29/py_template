@@ -753,6 +753,58 @@ def test_copy_template_copies_only_what_git_tracks(tmp_path: Path, monkeypatch: 
     assert "x.spec" not in err and "pyc" not in err  # ignored or skipped: not worth a line
 
 
+def _links(root: Path) -> None:
+    (root / "docs" / "v1").mkdir(parents=True)
+    (root / "docs" / "v1" / "index.md").write_text("# v1\n", encoding="utf-8")
+    try:
+        (root / "AGENTS.md").symlink_to("modified.txt")
+        (root / "docs" / "latest").symlink_to("v1", target_is_directory=True)
+        (root / "dangling").symlink_to("missing-target")
+    except OSError as e:  # Windows without the symlink privilege
+        pytest.skip(f"cannot create symbolic links here: {e}")
+
+
+@needs_git
+@pytest.mark.parametrize("track", [True, False], ids=["git", "every-file"])
+def test_copy_template_copies_links_as_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_env: None, track: bool) -> None:
+    """Tracked links (git mode 120000) became copies of their targets (a link to a big folder
+    was copied whole) and a dangling one was dropped without a word."""
+    src = tmp_path / "template"
+    _fake_template(src, track=track)
+    _links(src)
+    if track:
+        _git(src, "add", "--", "AGENTS.md", "docs", "dangling")
+    monkeypatch.setattr(presets, "ROOT", src)
+    dest = tmp_path / "new"
+    presets.copy_template(dest)
+    assert os.readlink(dest / "AGENTS.md") == "modified.txt" and (dest / "AGENTS.md").read_text(encoding="utf-8") == "new\n"
+    assert os.readlink(dest / "docs" / "latest") == "v1" and (dest / "docs" / "latest" / "index.md").is_file()
+    assert os.readlink(dest / "dangling") == "missing-target"
+
+
+def test_copy_link_falls_back_to_the_content_without_the_privilege(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    src = tmp_path / "t"
+    src.mkdir()
+    _links(src)
+    (src / "modified.txt").write_text("content\n", encoding="utf-8")
+    monkeypatch.setattr(presets, "ROOT", src)
+
+    def denied(self: Path, target: Any, target_is_directory: bool = False) -> None:
+        raise OSError(1314, "A required privilege is not held by the client")
+
+    monkeypatch.setattr(Path, "symlink_to", denied)
+    dest = tmp_path / "d"
+    (dest / "docs").mkdir(parents=True)
+    presets._copy_link(src / "AGENTS.md", dest / "AGENTS.md", "AGENTS.md")
+    presets._copy_link(src / "docs" / "latest", dest / "docs" / "latest", "docs/latest")
+    presets._copy_link(src / "dangling", dest / "dangling", "dangling")
+    assert (dest / "AGENTS.md").read_text(encoding="utf-8") == "content\n" and not (dest / "AGENTS.md").is_symlink()
+    assert (dest / "docs" / "latest" / "index.md").is_file()
+    assert not os.path.lexists(dest / "dangling")
+    err = capsys.readouterr().err
+    assert "could not copy the link AGENTS.md" in err and "dangling (A required privilege is not held by the client); it points nowhere" in err
+
+
 @needs_git
 def test_copy_template_without_tracked_files_uses_the_skip_rules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], git_env: None) -> None:
     """A template git does not track (a copy inside another repository, a project never

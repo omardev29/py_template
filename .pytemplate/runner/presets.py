@@ -996,7 +996,9 @@ def copy_template(dest: Path) -> None:
     In a git work tree only what git tracks is copied (with its working-tree content):
     untracked and ignored files (.env secrets, .idea/, htmlcov/, *.spec...) stay behind, and the
     untracked ones are listed. Without git, or when git does not track the template (a copy
-    inside another repository), every file but the _skipped ones is copied.
+    inside another repository), every file but the _skipped ones is copied. A symbolic link is
+    copied as a link, as git tracks it (a link to a folder is not the folder's content, and a
+    dangling one is still a tracked file).
     """
     if dest.exists() and any(dest.iterdir()):
         raise DeployError(f"{dest} already exists and is not empty")
@@ -1004,15 +1006,18 @@ def copy_template(dest: Path) -> None:
     if tracked is None or ".pytemplate/deploy.py" not in tracked:
         if tracked is not None:
             ui.info("  git does not track this project's files (never committed?): copying every file")
-        shutil.copytree(ROOT, dest, ignore=_ignore, dirs_exist_ok=True)
+        shutil.copytree(ROOT, dest, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
         return
     dest.mkdir(parents=True, exist_ok=True)
     for rel_path in tracked:
         if _skipped(rel_path):
             continue
         src = ROOT / rel_path
-        if src.is_dir():  # a submodule
-            shutil.copytree(src, dest / rel_path, ignore=_ignore, dirs_exist_ok=True)
+        if src.is_symlink():  # git tracks the link itself (mode 120000)
+            (dest / rel_path).parent.mkdir(parents=True, exist_ok=True)
+            _copy_link(src, dest / rel_path, rel_path)
+        elif src.is_dir():  # a submodule
+            shutil.copytree(src, dest / rel_path, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
         elif src.exists():  # a tracked file deleted in the working tree is not copied
             (dest / rel_path).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest / rel_path)
@@ -1020,6 +1025,24 @@ def copy_template(dest: Path) -> None:
     if untracked:
         more = f" and {len(untracked) - 5} more" if len(untracked) > 5 else ""
         ui.info(f"  not copied (not tracked by git): {', '.join(untracked[:5])}{more}")
+
+
+def _copy_link(src: Path, target: Path, rel_path: str) -> None:
+    """A symbolic link copied as the link (its target text). Where no link can be made (Windows
+    without the symlink privilege) what it points to is copied instead, with a warning."""
+    try:
+        target.symlink_to(os.readlink(src), target_is_directory=src.is_dir())
+        return
+    except OSError as e:
+        reason = e.strerror or str(e)
+    if src.is_dir():
+        shutil.copytree(src, target, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
+    elif src.exists():
+        shutil.copy2(src, target)
+    else:
+        ui.warn(f"new: could not copy the link {rel_path} ({reason}); it points nowhere: left out")
+        return
+    ui.warn(f"new: could not copy the link {rel_path} ({reason}): copied what it points to")
 
 
 def _outermost_missing(path: Path) -> Path | None:

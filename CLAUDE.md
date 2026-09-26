@@ -1719,7 +1719,9 @@ Per method:
   ls-files --cached`, with their working-tree content): untracked files are listed as "not
   copied", ignored ones stay silent, so `.env`, `.idea/`, `htmlcov/`, `*.spec` never reach a
   new project. A maintainer's new file must be `git add`ed before `new` or `selftest --e2e`
-  sees it. Without git, or when git does not track `.pytemplate/deploy.py` (a copy inside
+  sees it. A symbolic link is copied as the link git tracks (`presets._copy_link`, dangling
+  ones too; where Windows refuses to create one, what it points to, with a warning), never as
+  a copy of its target. Without git, or when git does not track `.pytemplate/deploy.py` (a copy inside
   another repository, a project never committed), it copies every file; a git failure other
   than "not a git repository" (dubious ownership...) is a warning first (git runs with
   `LC_ALL=C`). Both skip (`presets._skipped`) `.git`, `.build`, `dist`, caches, `.flet`,
