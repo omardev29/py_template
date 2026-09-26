@@ -694,7 +694,8 @@ header rules (with detector tests proving each rule fires).
   a real build does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M:
   would output dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options: --lto=... [--pgo-c ...]
   <extras>`; a method that packs with UPX on this host: `upx: <path>` or `upx: would download
-  <url> into <cache>`, never the download), then stops. `report` builds nothing and never opens
+  <url> into <cache>` (`... if the build holds a binary to pack` for a `runtime = "system"`
+  portable build), never the download), then stops. `report` builds nothing and never opens
   the browser. No success line for a skipped step: `compile`, `report` and `check` print
   `(--dry-run) would ...`/`were not run` instead of their `ok` lines, and `test all` no summary
   of `[ok]` rows.
@@ -1119,7 +1120,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `cmd`, `env` values and `cwd` only bare placeholders (`config.task_format_error`: never `{}`,
   `{0}`, `{root.x}`, `{root!r}`, a lone brace; literal braces doubled `{{ }}`). Checked when
   the task runs (`tasks.run_task`), not at load: unknown placeholder names, `deps` quoting and
-  empty entries (all parsed before the first dep runs), `cwd` is a folder (not in a dry run),
+  empty entries (all parsed before the first dep runs; `tasks.split_words`: blanks separate,
+  quotes group, a backslash is a plain character, as in the plugin's `:Deploy`: POSIX shlex
+  passed `C:\data\in.txt` as `C:datain.txt`), `cwd` is a folder (not in a dry run),
   `backend = "pypy"` in `backend.supported` (only where its environment is used). `vscode.scan`
   renders a task whose deps do not parse.
 - `[preset.<name>]`: option overrides (`config._check_preset_tables`): `<name>` must be a preset
@@ -1593,16 +1596,18 @@ Formats:
   mean --method pyz?"). Then `nuitka.check_python`, for pyz `common.check_key` on every key,
   `flet.check_options` (the flet preset; Developer Mode on Windows for a windows target, exit
   3), `portable.check` (the `[deploy.portable] env` values a `.cmd` launcher cannot hold),
-  `check_lock` (a read-only `uv lock --check`: every method stops on a uv.lock that
-  pyproject.toml moved past, but only where it runs `uv ... --locked`, with `--no-check` after
-  the payload, and exe and nuitka after the previous output was removed; exit 2 with uv's
-  reason and `./deploy lock`) and
-  `upx.preflight`: when the method packs with UPX on this host (`upx.uses`: exe on Windows,
+  `check_lock` (a read-only `uv lock --check`, exit 2 with uv's reason and `./deploy lock`: a
+  uv.lock that pyproject.toml moved past used to stop a method only where it ran `uv ...
+  --locked`, with `--no-check` after the payload, exe and nuitka after the previous output was
+  removed) and `upx.preflight`: when the method packs with UPX on this host (`upx.uses`: exe on Windows,
   nuitka, portable, flet desktop targets) it resolves the upx binary now, downloading it if
-  needed. What a method refuses (a stale lock, a missing `deploy.upx.path`, a failed download
-  included) is refused before the checks, the mypyc compile and the removal of the previous
-  output, and in `--dry-run` too (which only names the upx binary or its download). Default method from
-  `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs `run_checks` unless
+  needed; a portable build with `runtime = "system"` (no interpreter: `upx._always_packs`) only
+  checks `deploy.upx.path` and leaves the download to `upx.pack_tree`, which asks for upx only
+  when the folder holds a candidate (a pure-Python one built offline before this check, and
+  still must). What a method refuses (a stale lock, a missing `deploy.upx.path`, a failed
+  download included) is refused before the checks, the mypyc compile and the removal of the
+  previous output, and in `--dry-run` too (which only names the upx binary or its download).
+  Default method from `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs `run_checks` unless
   `--no-check` (a failure is exit 1, like `./deploy check`). `payload`: the mypyc release
   stage, or `sync_tree(SRC, .build/payload/<backend>)`. A method whose result is missing or an
   empty folder is a DeployError, never `ok done` (`build -v`: PyInstaller took `-v` for
@@ -2199,8 +2204,11 @@ instead. Neovim opens its output on start and replaces a running instance (`uniq
   the task's own `icon` itself. The extension creates buttons in `tasks.json` order, so button
   tasks come FIRST, in the configured order; a button that names no catalog task (e.g.
   `build --method pyz`) gets its own task. Its words are split like `[tasks]` deps
-  (`vscode.split_words`: shlex, plain words on unbalanced quotes), and labels and `detail` quote
-  them back (`shlex.join`), so an argument with a space stays one and labels stay unique.
+  (`vscode.split_words`: `tasks.split_words`, plain words on unbalanced quotes; a backslash is
+  a plain character, so a Windows path arrives as typed), and labels and `detail` quote them
+  back only where needed (`vscode.shown`: an empty argument, a blank or a quote; never a
+  backslash or a non-ASCII letter, which `shlex.join` quoted), so an argument with a space
+  stays one, every label reads back as its arguments and labels stay unique.
   Without the extension the extra keys are ignored.
 - `launch.json`: "src/main.py (CPython, interpreted)" first, with no `python` key (VS Code's
   selected interpreter; works under WSL); PyPy (only when supported; per-OS `python`; the
@@ -2393,10 +2401,12 @@ LazyVim wiring:
   word), tools (`cmd_nvim.TOOLS`; required: git, curl, tar, fd or fdfind (venv-selector, from
   the `lang.python` extra `.lazy.lua` imports, raises an error on the first Python buffer
   without it) and a C compiler (nvim-treesitter builds its parsers; LazyVim lists it among its
-  requirements), with install hints; optional: rg, tree-sitter, python, node), the uv the
+  requirements), each with the install command of this OS (`cmd_nvim._install_hint`, chosen
+  when doctor runs); optional: rg, tree-sitter, python, node), the uv the
   runner runs on (the plugin runs `./deploy` and the uvx basedpyright with the uv it finds in
   the same places, never `uvx`), and ruff, mypy, debugpy in `.venv` (basedpyright optional)
-  (`test_nvim_doctor_needs_fd`, `test_nvim_doctor_needs_a_c_compiler`).
+  (`test_nvim_doctor_needs_fd`, `test_nvim_doctor_needs_a_c_compiler`,
+  `test_nvim_doctor_says_how_to_install_every_required_tool`).
 - Trust DB `<state>/trust`: lines `<sha256|!> <path>` (CRLF on Windows), path = real path
   (backslashes on Windows; `cmd_nvim.same_path`: case-insensitive on Windows, case- and
   Unicode-form-insensitive on macOS, where Neovim's key comes from realpath(3) with the on-disk

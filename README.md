@@ -258,7 +258,10 @@ env = { SEED = "42" }
   appended unchanged; the task's exit code is the program's.
 - `deps`: tasks or `./deploy` commands with their arguments (`"check all"`), run first and in
   order, each once per invocation; the first one that fails stops the task. A task with only
-  `deps` (every preset's `ci`) takes no arguments, and `./deploy ci -h` shows its help.
+  `deps` (every preset's `ci`) takes no arguments, and `./deploy ci -h` shows its help. Blanks
+  separate the words, single or double quotes group them (`'run cpython "a b"'`), and a
+  backslash is a plain character (`"run cpython C:\\data\\in.txt"` in TOML passes the path as
+  typed); to pass a quote, put it inside the other kind (`'say "hi"'`).
 - `env`: environment variables (string values; the names are identifiers).
 - `cwd`: the working folder, relative to the project root (default: the root).
 - `backend`: the environment the task runs in (default: `backend.active`). `pypy` needs PyPy in
@@ -939,7 +942,10 @@ startup). UPX 5.2.1 is downloaded once (SHA-256 checked) to `%LOCALAPPDATA%\pyte
 (`$XDG_CACHE_HOME/pytemplate/tools` or `~/.cache/pytemplate/tools` elsewhere), unless `upx` is on
 PATH or `deploy.upx.path` names one (absolute, `~`, or relative to the project root; the file is
 named `upx` or `upx.exe`); `build` finds (or downloads) it before any other work, so a wrong
-path or no network fails at once. macOS is not supported. The price: every start unpacks the
+path or no network fails at once. A portable build with `runtime = "system"` bundles no
+interpreter, so it downloads UPX only when its folder holds a binary to pack (a native
+dependency, a mypyc extension on Windows): a pure-Python one builds offline. macOS is not
+supported. The price: every start unpacks the
 files in memory (a slower start, no memory shared between processes), and some antivirus engines
 flag UPX-packed files.
 
@@ -1063,7 +1069,8 @@ buttons = ["run", "test", "check", "build"]   # commands or [tasks] names
 Preset defaults: script `run test check build`, raylib `run bunnymark test build`, flet
 `dev run test build`. A button can carry arguments (`"build --method pyz"`): it gets a task of its
 own. Its words are split like `[tasks]` deps: quotes group them (`'run cpython "a b"'` passes
-`a b` as one argument). Without the extension there are no buttons and nothing breaks.
+`a b` as one argument) and a backslash is a plain character (a Windows path arrives as typed).
+Without the extension there are no buttons and nothing breaks.
 
 **Workspace trust.** In Restricted Mode VS Code runs no tasks and the Tasks extension is off:
 trust the folder.
