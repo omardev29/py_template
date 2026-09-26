@@ -1026,9 +1026,10 @@ Open a project in LazyVim (Neovim 0.11.2 or newer) and you get, without installi
 into Neovim:
 
 - **LSP**: basedpyright by default (no Node.js), reading the generated `pyrightconfig.json`:
-  from `.venv` if the project adds it, else `uvx` at the version `./deploy check` pins
-  (basedpyright 1.40.1), else Mason. `vim.g.pytemplate_python_lsp = "pyright"` switches to
-  pyright (Mason, needs Node.js). `typing.editor` does not choose Neovim's server (it picks the
+  from `.venv` if the project adds it, else `uvx` at the versions `./deploy check` pins
+  (basedpyright 1.40.1 on the Node.js wheel 24.19.0), else Mason.
+  `vim.g.pytemplate_python_lsp = "pyright"` switches to pyright (Mason, needs Node.js).
+  `typing.editor` does not choose Neovim's server (it picks the
   VS Code extension, basedpyright's rules in `pyrightconfig.json`, and basedpyright in `check`).
   The ruff server comes from `.venv`, the same version `./deploy check` uses.
 - **mypy** diagnostics (nvim-lint) with the project's `.mypy.ini` and the severity of the typing

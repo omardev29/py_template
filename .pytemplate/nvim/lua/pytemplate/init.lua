@@ -118,6 +118,8 @@ function M.sanitize(data)
       python_version = str(typing.python_version, "^%d+%.%d+$", nil),
       -- the version ./deploy check runs (cmd_dev.BASEDPYRIGHT), for the uvx language server
       basedpyright = str(typing.basedpyright, "^basedpyright==%d+%.%d+%.%d+$", nil),
+      -- and its Node.js runtime (cmd_dev.BASEDPYRIGHT_NODE): basedpyright's own bound floats
+      basedpyright_node = str(typing.basedpyright_node, "^nodejs%-wheel%-binaries==%d+%.%d+%.%d+$", nil),
     },
     envs = {},
     mypyc_stage = rel_path(data.mypyc_stage, ".build/mypyc-dev/stage"),

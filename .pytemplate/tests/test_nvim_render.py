@@ -153,9 +153,10 @@ def test_editor_json_is_data_without_machine_paths(name: str) -> None:
     data = json.loads(text)
     assert set(data) == EXPECTED_KEYS
     assert data["schema"] == 1
-    assert set(data["typing"]) == {"profile", "editor", "mypy", "mypy_severity", "python_version", "basedpyright"}
-    # the plugin's uvx language server runs the basedpyright ./deploy check pins
+    assert set(data["typing"]) == {"profile", "editor", "mypy", "mypy_severity", "python_version", "basedpyright", "basedpyright_node"}
+    # the plugin's uvx language server runs the basedpyright ./deploy check pins, on its Node.js
     assert data["typing"]["basedpyright"] == cmd_dev.BASEDPYRIGHT
+    assert data["typing"]["basedpyright_node"] == cmd_dev.BASEDPYRIGHT_NODE
     assert set(data["envs"]) == {"tools", "cpython", "mypyc", "pypy"}
     assert all(re.fullmatch(r"\.venv[\w-]*", v) for v in data["envs"].values())
     for s in _strings(data):
@@ -330,6 +331,15 @@ end
 local lcmd, lsrc = integ.lsp_cmd("basedpyright")
 pt.tool = real_tool
 check("uvx runs the pin", lsrc ~= "uvx" or (lcmd[4] == "--from" and lcmd[5] == pt.info().typing.basedpyright), vim.inspect(lcmd))
+-- ...on the Node.js ./deploy check pins (basedpyright only asks for nodejs-wheel-binaries>=20.13.1)
+local node = pt.info().typing.basedpyright_node
+check("editor.json node pin", type(node) == "string" and node:match("^nodejs%-wheel%-binaries==%d") ~= nil, vim.inspect(pt.info().typing))
+check("uvx runs the node pin", lsrc ~= "uvx" or (lcmd[6] == "--with" and lcmd[7] == node and lcmd[8] == "basedpyright-langserver"), vim.inspect(lcmd))
+check("sanitize node pin", pt.sanitize({ typing = { basedpyright_node = "nodejs-wheel-binaries==24.19.0" } }).typing.basedpyright_node == "nodejs-wheel-binaries==24.19.0", "dropped")
+for _, bad in ipairs({ "nodejs-wheel-binaries", "nodejs-wheel-binaries>=24", "evil==1.0.0", "nodejs-wheel-binaries==24.19.0 --index-url=x", 7 }) do
+  local got = pt.sanitize({ typing = { basedpyright_node = bad } }).typing.basedpyright_node
+  check("sanitize bad node pin " .. tostring(bad), got == nil, vim.inspect(got))
+end
 
 -- commands that rewrite editor.json refresh the editor and show what they did
 local tasks = require("pytemplate.tasks")

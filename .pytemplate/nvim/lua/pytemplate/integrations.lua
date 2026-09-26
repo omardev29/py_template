@@ -45,9 +45,14 @@ function M.lsp_cmd(name)
   local uvbin = pt.uv()
   if name == "basedpyright" and uvbin then
     -- uvx: a cached, isolated basedpyright (bundles its own Node.js); never touches the project.
-    -- The version ./deploy check pins (editor.json): an unpinned request re-resolves to the newest.
-    local from = pt.info().typing.basedpyright or "basedpyright"
-    return { uvbin, "tool", "run", "--from", from, "basedpyright-langserver", "--stdio" }, "uvx"
+    -- The versions ./deploy check pins (editor.json), basedpyright's Node.js wheel included:
+    -- an unpinned request re-resolves to the newest (a new Node can raise the glibc/macOS floor).
+    local typing = pt.info().typing
+    local argv = { uvbin, "tool", "run", "--from", typing.basedpyright or "basedpyright" }
+    if typing.basedpyright_node then
+      vim.list_extend(argv, { "--with", typing.basedpyright_node })
+    end
+    return vim.list_extend(argv, { "basedpyright-langserver", "--stdio" }), "uvx"
   end
   return nil, "mason"
 end

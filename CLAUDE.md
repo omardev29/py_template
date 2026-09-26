@@ -1888,12 +1888,14 @@ Files:
 - `.pytemplate/editor.json` (`editors/nvim.editor_data`, schema 1): ASCII data only, relative
   paths only, no comments. Keys: `schema`, `generated`, `name`, `pkg`, `preset`, `gui`,
   `min_python`, `pypy_enabled`, `backend{active, supported}`, `typing{profile, editor, mypy,
-  mypy_severity, python_version, basedpyright}` (`basedpyright` = `cmd_dev.BASEDPYRIGHT`, the
-  pin of the uvx language server), `envs{tools, cpython, mypyc, pypy}` (without the `-wsl`
+  mypy_severity, python_version, basedpyright, basedpyright_node}` (`basedpyright` =
+  `cmd_dev.BASEDPYRIGHT` and `basedpyright_node` = `cmd_dev.BASEDPYRIGHT_NODE`, the pins of the
+  uvx language server), `envs{tools, cpython, mypyc, pypy}` (without the `-wsl`
   suffix, which the plugin adds itself),
   `mypyc_stage`, `tasks[{name, help, background}]`, `commands[{name, usage, summary, group}]`
   (from `cli.COMMANDS`), `build{methods, default}`. The Lua side (`init.sanitize`) validates
-  every value (whitelists, patterns; `basedpyright` only as `basedpyright==X.Y.Z`) and never
+  every value (whitelists, patterns; `basedpyright` only as `basedpyright==X.Y.Z`,
+  `basedpyright_node` only as `nodejs-wheel-binaries==X.Y.Z`) and never
   runs a program named in it. `test_sanitize_keeps_every_generated_value` feeds it the
   editor.json of every test variant and of the three presets: nothing may change (a whitelist
   missing a new profile, backend or command would silently fall back to a default), and
@@ -1933,9 +1935,11 @@ LazyVim wiring:
 - `vim.g.lazyvim_python_lsp` set from `.lazy.lua` is too late when `lang.python` is already
   enabled (read at first import): servers are switched by setting `opts.servers.<x>.enabled`
   in an lspconfig `opts` function (runs last). basedpyright by default (no Node.js; `.venv`'s
-  `basedpyright-langserver`, else `uv tool run --from <typing.basedpyright> basedpyright-langserver
-  --stdio` with the version `./deploy check` pins (an unpinned request re-resolves to the
-  newest release whenever uv's index cache expires), else Mason); pyright comes from Mason and
+  `basedpyright-langserver`, else `uv tool run --from <typing.basedpyright> --with
+  <typing.basedpyright_node> basedpyright-langserver --stdio` (`integrations.lsp_cmd`) with the
+  versions `./deploy check` pins, its Node.js wheel included (an unpinned request re-resolves
+  to the newest release whenever uv's index cache expires; a new Node can raise the
+  glibc/macOS floor), else Mason); pyright comes from Mason and
   needs Node.js. Pylance exists only in VS
   Code. pyright/basedpyright find `.venv` through `pyrightconfig.json` `venvPath`/`venv`, so
   venv-selector's automatic activation is turned off.
@@ -2617,9 +2621,11 @@ uv:
 - **`uv run --with` and `uvx` float** (LIMITATION): an unpinned tool re-resolves to the newest
   release whenever uv's index cache expires (basedpyright's Node.js runtime too). Fix:
   `cmd_dev.BASEDPYRIGHT`, `cmd_dev.BASEDPYRIGHT_NODE`, `methods.nuitka.NUITKA`, and editor.json
-  `typing.basedpyright` for the plugin's uvx server (7, 12.2). Test:
-  `test_cli_core.py::test_tools_are_pinned_exactly`, `test_basedpyright_runs_with_every_pin`.
-  Goes: never (bump the pins deliberately).
+  `typing.basedpyright` with its `basedpyright_node` for the plugin's uvx server
+  (`integrations.lsp_cmd`: `--from` and `--with`; 7, 12.2). Test:
+  `test_cli_core.py::test_tools_are_pinned_exactly`, `test_basedpyright_runs_with_every_pin`,
+  `test_nvim_render.py::test_editor_json_is_data_without_machine_paths`,
+  `test_lua_modules_in_headless_neovim`. Goes: never (bump the pins deliberately).
 - **uv's caches follow `XDG_*`** (LIMITATION): the isolated Neovim tree moves `XDG_CACHE_HOME`
   and `XDG_DATA_HOME`, and uv then started from empty caches. Fix: `nvimtest.nvim_env` keeps
   `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`, `UV_TOOL_DIR` as uv resolved them
@@ -3544,8 +3550,9 @@ Code coupling (rename together):
   `cmd_dev.BASEDPYRIGHT`, the taplo pin of `test_render_core.py` and the pytest pin of
   `uv.lock`; it deselects `test_init_round_trip_through_every_preset_is_byte_identical` by
   name in the uv-floor job. `test_workflows.py` checks the workflow texts it relies on.
-- `editor.json` `typing.basedpyright` <-> `cmd_dev.BASEDPYRIGHT` (bumping the pin changes a
-  generated file: re-render); the Lua whitelists `BACKENDS`, `PROFILES`, `EDITORS`,
+- `editor.json` `typing.basedpyright` <-> `cmd_dev.BASEDPYRIGHT` and `typing.basedpyright_node`
+  <-> `cmd_dev.BASEDPYRIGHT_NODE` (bumping a pin changes a generated file: re-render); the Lua
+  whitelists `BACKENDS`, `PROFILES`, `EDITORS`,
   `SEVERITIES` in `nvim/lua/pytemplate/init.lua` <-> the runner's
   (`test_lua_whitelists_match_the_runner`); `nvimtest.LOCK` <-> `cmd_nvim.STARTER_REV` (refresh
   both from one green run, 13.1); `.lazy.lua`'s bytes <-> `test_nvim_render.LAZY_LUA_SHA256`;
