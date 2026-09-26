@@ -160,6 +160,30 @@ def test_quiet_hides_uvs_own_progress(tmp_path: Path, monkeypatch: pytest.Monkey
     ]
 
 
+def test_quiet_keeps_the_output_of_the_uv_commands_the_user_drives(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """uv --quiet also hides uv's warnings and change summaries: `./deploy -q add 'idna[nope]'`
+    wrote the bogus extra without uv's `does not have an extra named nope`, and `-q lock
+    --upgrade` / `lock --dry-run` printed nothing of what they changed or would change. The uv
+    commands that take the user's own arguments keep their output; syncs and runs stay quiet."""
+    monkeypatch.setattr(envs, "ROOT", tmp_path)
+    (tmp_path / ".venv").mkdir()
+    monkeypatch.setattr(cmd_env, "PYPROJECT", tmp_path / "pyproject.toml")
+    monkeypatch.setattr(render, "write_pyproject", lambda cfg: False)
+    monkeypatch.setattr(render, "apply", lambda cfg, **kw: ([], []))
+    calls = Calls(monkeypatch)
+    monkeypatch.setattr(envs.ui, "QUIET", True)
+    cmd_env.cmd_add(make(), ["idna[nope]"])
+    cmd_env.cmd_remove(make(), ["idna"])
+    cmd_env.cmd_lock(make(), ["--upgrade", "--dry-run"])
+    assert calls.argvs == [
+        ["uv", "add", "--no-sync", "idna[nope]"],
+        ["uv", "--quiet", "sync", "--locked", "--all-groups"],
+        ["uv", "remove", "--no-sync", "idna"],
+        ["uv", "--quiet", "sync", "--locked", "--all-groups"],
+        ["uv", "lock", "--upgrade", "--dry-run"],
+    ]
+
+
 def test_a_polluted_uv_environment_still_selects_the_project_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Real uv, offline, in this project's .venv: an exported UV_PROJECT_ENVIRONMENT, UV_PYTHON
     or VIRTUAL_ENV (another project, an activated venv) never reaches uv."""

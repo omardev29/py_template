@@ -133,7 +133,7 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
             ui.info(f"pyproject.toml: put back as it was ({why})")
 
     try:
-        envs.uv(envs.tool_env(cfg), ["lock", *args])
+        envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False)  # -q keeps its summary and warnings
     except BaseException:  # a failed uv lock leaves uv.lock alone; Ctrl+C too
         restore("uv lock did not update uv.lock")
         raise
@@ -175,7 +175,7 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
     tool = envs.tool_env(cfg)
     before = _snapshot((PYPROJECT, PYPROJECT.with_name("uv.lock")))
     try:
-        envs.uv(tool, argv)
+        envs.uv(tool, argv, quiet=False)  # -q keeps uv's warnings about the packages typed
         envs.sync(tool)
     except BaseException:  # a failed or interrupted sync (uv add/remove revert their own failures)
         restored = _put_back(before)

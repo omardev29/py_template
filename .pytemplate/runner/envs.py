@@ -148,16 +148,22 @@ def uv(
     check: bool = True,
     capture: bool = False,
     echo: bool = True,
+    quiet: bool = True,
 ) -> subprocess.CompletedProcess[str]:
+    """`quiet=False`: a uv command the user drives with their own arguments (`./deploy lock
+    ARGS`, the `uv add|remove` of add/remove) keeps its output under -q."""
     uv_path = proc.find_uv()
     if not env.dir.exists():  # uv is about to create it (and maybe download its interpreter)
         require_min_uv(uv_path)
-    # -q: uv's own progress (Resolved, Installed, Checked...) is progress too. uv --quiet keeps
-    # its errors and warnings, and never touches the output of what `uv run` starts. A captured
-    # query keeps uv's full output: the runner reads it.
-    quiet = ["--quiet"] if ui.QUIET and echo and not capture else []
+    # -q: uv's own progress (Resolved, Installed, Checked...) is progress too, and uv --quiet
+    # hides it; it never touches the output of what `uv run` starts. It also hides uv's
+    # warnings and change summaries (uv has no level that keeps them): the commands whose
+    # warnings (an extra the package lacks) and summaries (`lock --upgrade`, `lock --dry-run`)
+    # answer the user's own arguments pass quiet=False. Errors always print. A captured query
+    # keeps uv's full output: the runner reads it.
+    quiet_flag = ["--quiet"] if quiet and ui.QUIET and echo and not capture else []
     return proc.run(
-        [uv_path, *quiet, *args],
+        [uv_path, *quiet_flag, *args],
         cwd=cwd,
         env=env_vars(env, extra_env),
         check=check,

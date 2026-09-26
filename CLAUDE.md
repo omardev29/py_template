@@ -662,8 +662,14 @@ header rules (with detector tests proving each rule fires).
   `ui.step` header goes), the paths `render` lists (`cmd_mode.cmd_render`: outdated, updated,
   would update) and the `render --diff` output (`render.apply`). uv's own progress
   (`Resolved`, `Installed`, `Checked`...) is progress too: under `-q`, `envs.uv` passes
-  `--quiet` to every uv call it echoes (uv still prints its errors and warnings; the output of
-  what `uv run` starts is untouched), never to a captured query the runner reads.
+  `--quiet` to every uv call it echoes (the output of what `uv run` starts is untouched), never
+  to a captured query the runner reads. uv's `--quiet` also hides uv's warnings and change
+  summaries (uv has no level that keeps them; errors still print), so the uv commands the user
+  drives with their own arguments keep their whole output (`envs.uv(..., quiet=False)`):
+  `./deploy lock ARGS` (`Updated rich v14 -> v15`, what `--dry-run` would change) and the `uv
+  add|remove` step of `add`/`remove` (`does not have an extra named ...`); their sync stays
+  quiet. Limit: a uv warning of a quiet step (a deprecated setting in pyproject.toml) shows
+  only without `-q`.
 - `ui.error` prints `error: ` and `ui.warn` prints `warning: ` (only the prefix is coloured on a
   TTY). The VS Code problem matcher `RULES_RE` and the Neovim parser `tasks.parse_line` depend
   on these exact prefixes and on `str(lintc.Finding)` (`src/...:N: msg`, relative to ROOT): do

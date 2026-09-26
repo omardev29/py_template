@@ -171,7 +171,9 @@ for `test` and `check`): to pass such a word to the app, name the backend first
 
 Global options go before the command: `-v` (more detail, such as the full compiler and
 PyInstaller output), `-q` (no progress lines, uv's own included; results, warnings and errors
-still print),
+still print; uv itself has no quiet level that keeps its warnings, so `lock`, `add` and
+`remove` keep uv's whole output, its change summary included, and a uv warning of a sync or a
+run shows only without `-q`),
 `--dry-run` (shows what would change and changes nothing; it ignores `-q`), `--no-render` (does
 not regenerate the generated files first). For example `./deploy --dry-run apply`; after the
 command, `--dry-run` is an error.
