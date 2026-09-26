@@ -8,13 +8,15 @@ Read-only checks (the Python 3.11 precheck, `uv lock --check`) still run.
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import tomllib
 from pathlib import Path
 from typing import Any
 
 from . import config, envs, presets, proc, render, ui
 from .config import BACKENDS, Config
-from .project import CONFIG_FILE, PYPROJECT, ROOT, code_dirs, rel, user_path
+from .project import CONFIG_FILE, PYPROJECT, ROOT, code_dirs, native_path, rel, user_path
 from .ui import DeployError
 
 _DRY = "(--dry-run: nothing is written)"
@@ -116,25 +118,27 @@ PRECHECK_MYPY_FLAGS = (
 
 
 def _precheck_py311(cfg: Config) -> None:
-    """Check that the code is valid on Python 3.11 before adding PyPy support.
+    """Check that the code is valid on the pinned PyPy's Python (python.pypy: 3.11 by default,
+    hence the name) before adding PyPy support.
 
-    Two checks, both independent of the typing profile: ruff's syntax rules for 3.11, then the
-    mypy errors that appear only when checking as 3.11 (an API that 3.11 lacks, e.g.
-    typing.override). A tool that cannot run (a stale uv.lock, a failed install, mypy aborting)
-    is reported as such: it is never blamed on the code and never passes silently.
+    Two checks, both independent of the typing profile: ruff's syntax rules for that version,
+    then the mypy errors that appear only when checking as it (an API it lacks, e.g.
+    typing.override on 3.11). A tool that cannot run (a stale uv.lock, a failed install, mypy
+    aborting) is reported as such: it is never blamed on the code and never passes silently.
 
     The tools environment is synced first; both tools then run with `uv run --no-sync`, so a
     failure of uv shows up in uv's own step. Under --dry-run nothing is synced: the checks run
     read-only, and are skipped when the environment does not exist yet.
     """
-    ui.step("checking that the code is valid on Python 3.11 (required by PyPy)")
+    version = cfg.pypy_minor
+    ui.step(f"checking that the code is valid on Python {version} (required by PyPy)")
     tool = envs.tool_env(cfg)
     dry = proc.DRY_RUN
     if dry and not tool.python.is_file():
         ui.info(f"  (--dry-run) skipped: {rel(tool.dir)} does not exist yet (./deploy setup), and creating it is a side effect")
         return
     if dry:
-        ui.info("  (--dry-run) running the read-only checks: ruff and mypy as Python 3.11, with uv run --no-sync")
+        ui.info(f"  (--dry-run) running the read-only checks: ruff and mypy as Python {version}, with uv run --no-sync")
     else:
         envs.sync(tool)  # a stale uv.lock or a failed install fails HERE, with uv's own message
     run = ["run", "--locked", "--no-sync"]
@@ -142,16 +146,16 @@ def _precheck_py311(cfg: Config) -> None:
     # 1) syntax: ruff reports syntax that does not exist in the target version as an error
     r = envs.uv(
         tool,
-        [*run, "ruff", "check", "--no-cache", "--isolated", "--target-version", "py311", "--select", "E9,F63,F7,F82", *dirs],
+        [*run, "ruff", "check", "--no-cache", "--isolated", "--target-version", "py" + version.replace(".", ""), "--select", "E9,F63,F7,F82", *dirs],
         check=False,
         echo=not dry,  # proc.run skips echoed commands under --dry-run
     )
     if r.returncode == 1:  # ruff: 1 = findings
-        raise DeployError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
+        raise DeployError(f"the code uses syntax that does not exist in Python {version} (see above); fix it before enabling PyPy")
     if r.returncode != 0:  # 2 = ruff (or uv starting it) failed: nothing was checked
-        raise DeployError(f"could not run ruff for the Python 3.11 check (exit code {r.returncode}, see above)")
+        raise DeployError(f"could not run ruff for the Python {version} check (exit code {r.returncode}, see above)")
 
-    # 2) APIs: mypy errors that appear ONLY when checking as 3.11 (e.g. typing.override)
+    # 2) APIs: mypy errors that appear ONLY when checking as that version (e.g. typing.override)
     def mypy_errors(version: str) -> set[str]:
         argv = [
             *run, "mypy", *PRECHECK_MYPY_FLAGS,
@@ -163,15 +167,36 @@ def _precheck_py311(cfg: Config) -> None:
             raise DeployError(f"mypy could not check the code as Python {version} (exit code {r.returncode}, see above)")
         return {ln.strip() for ln in (r.stdout or "").splitlines() if ": error:" in ln}
 
-    new = sorted(mypy_errors("3.11") - mypy_errors(cfg.python.cpython))
+    new = sorted(mypy_errors(version) - mypy_errors(cfg.python.cpython))
     if new:
         for line in new:
             ui.error(line)
         raise DeployError(
-            "the code uses APIs that do not exist in Python 3.11 (above). Fix it before enabling PyPy "
+            f"the code uses APIs that do not exist in Python {version} (above). Fix it before enabling PyPy "
             "(e.g. typing.override -> typing_extensions.override)"
         )
-    ui.ok("the code is valid on Python 3.11")
+    ui.ok(f"the code is valid on Python {version}")
+
+
+def _read_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _restore(before: dict[Path, bytes | None]) -> list[str]:
+    """Put back the bytes (or the absence) of each file; return the names of those that changed."""
+    restored: list[str] = []
+    for path, data in before.items():
+        if _read_bytes(path) == data:
+            continue
+        if data is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(data)
+        restored.append(path.name)
+    return restored
 
 
 def _current(cfg: Config, table: str, key: str) -> Any:
@@ -298,18 +323,30 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
         _describe(planned, "mode after the change (not applied: --dry-run)")
         return 0
 
-    config.update_file(changes)
-    new_cfg = config.load()
-    heavy = supported != cfg.backend.supported
-    if heavy or render.pyproject_outdated(new_cfg):
-        from .cmd_env import ensure_lock
+    # Nothing half-applied: when the re-lock or a new environment fails (no solution for the new
+    # interpreter, no network, Ctrl+C), the three files get their old bytes back. The generated
+    # files are rendered only after that, so they never describe a mode that did not happen.
+    before = {path: _read_bytes(path) for path in (CONFIG_FILE, PYPROJECT, PYPROJECT.with_name("uv.lock"))}
+    try:
+        config.update_file(changes)
+        new_cfg = config.load()
+        heavy = supported != cfg.backend.supported
+        if heavy or render.pyproject_outdated(new_cfg):
+            from .cmd_env import ensure_lock
 
-        ensure_lock(new_cfg)
+            ensure_lock(new_cfg)
+        for env in syncs:
+            envs.sync(env)
+    except BaseException as e:
+        restored = _restore(before)
+        done = f"{', '.join(restored)} restored: the mode did not change" if restored else "the mode did not change"
+        if not isinstance(e, DeployError):
+            ui.warn(done)
+            raise
+        raise DeployError(f"{e}\n  {done}; fix the problem above and run the command again", e.code) from None
     changed, _ = render.apply(new_cfg)
     if changed:
         ui.info(f"render: updated {', '.join(changed)}")
-    for env in syncs:
-        envs.sync(env)
     _leftover_envs(cfg, new_cfg)
     _describe(new_cfg)
     return 0
@@ -400,6 +437,32 @@ def cmd_init(cfg: Config, args: list[str]) -> int:
     return 0
 
 
+def _work_tree_top(folder: Path) -> Path | None:
+    """The top of the git work tree `folder` would be in (its nearest existing parent is asked:
+    new creates the folder), or None: no work tree there, or no git."""
+    git = shutil.which("git")
+    if git is None:
+        return None
+    probe = folder
+    while not probe.is_dir() and probe != probe.parent:
+        probe = probe.parent
+    r = proc.run([git, "rev-parse", "--show-toplevel"], cwd=probe, env=presets._git_env(), capture=True, check=False, echo=False)
+    top = r.stdout.strip() if r.returncode == 0 else ""
+    return Path(native_path(top)) if top else None  # MSYS2's own git prints /c/...
+
+
+def _monorepo_note(dest: Path, top: Path) -> None:
+    """A project inside a bigger repository: new runs no git init there, and GitHub reads workflows
+    only from the repository's own .github/workflows, so the generated CI never runs as it is."""
+    sub = Path(os.path.relpath(dest.resolve(), top.resolve())).as_posix()
+    ui.warn(
+        f"{dest} is inside the git work tree of {top}: GitHub runs only {top.name}/.github/workflows/*.yml,\n"
+        f"  so the project's generated .github/workflows/ci.yml does not run from {sub}/. For CI, add a\n"
+        f"  workflow to the repository that runs its steps in {sub} (defaults.run.working-directory) and\n"
+        f"  takes the artifacts from {sub}/dist/"
+    )
+
+
 def cmd_new(cfg: Config, args: list[str]) -> int:
     """new DIR [--preset P] [--name NAME]: copy the template to a new project."""
     parser = argparse.ArgumentParser(prog="./deploy new")
@@ -423,6 +486,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
             "Choose one with --name NAME"
         )
     presets.check_name_free(cfg, ns.preset, name)
+    top = _work_tree_top(dest)
     if proc.DRY_RUN:
         ui.step(f"new project in {dest} {_DRY}")
         ui.info(f"  preset  {ns.preset}")
@@ -430,10 +494,20 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         pins = presets.constraints(ns.preset)
         if pins:
             ui.info(f"  pins    {len(pins)} packages at the versions the template tested (constraints.txt of the preset)")
+        if top is not None:
+            git = f"(inside the git work tree of {top}: no git init)"
+        elif shutil.which("git") is None:
+            git = "(git not found: no git init)"
+        else:
+            git = "and `git init -b main`"
         ui.info(
             "  would copy this template there (the files git tracks; no .git, environments, builds or "
-            f"caches), run `./deploy __init {ns.preset} --name {name} --force` in it and `git init -b main`"
+            f"caches), run `./deploy __init {ns.preset} --name {name} --force` in it {git}"
         )
+        if top is not None:
+            _monorepo_note(dest, top)
         return 0
     presets.new(dest, ns.preset, name)
+    if top is not None:
+        _monorepo_note(dest, top)
     return 0

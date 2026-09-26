@@ -248,7 +248,9 @@ def test_app_name_invalid(name: str) -> None:
 
 def test_app_preset() -> None:
     assert make({"app": {"preset": "flet"}}).app.preset == "flet"
-    fails({"app": {"preset": "nope"}}, "is not a preset of this template")
+    err = fails({"app": {"preset": "nope"}}, "is not a preset of this template")
+    # every command (new included) stops on this error: the hint is an edit of the file
+    assert "set app.preset in pytemplate.toml back to" in str(err) and "Use: ./deploy" not in str(err)
 
 
 @pytest.mark.parametrize("assets", ["", "assets"])
@@ -273,7 +275,10 @@ def test_backend_supported() -> None:
 def test_backend_active() -> None:
     assert make({"backend": {"active": "mypyc"}}).backend.active == "mypyc"
     fails({"backend": {"active": "jython"}}, "'backend.active' = 'jython' is not valid")
-    fails({"backend": {"active": "pypy", "supported": ["cpython"]}}, "is not in backend.supported")
+    err = fails({"backend": {"active": "pypy", "supported": ["cpython"]}}, "is not in backend.supported")
+    # `./deploy mode` loads the same file first and stops with the same error: never suggest it
+    assert "./deploy mode" not in str(err)
+    assert "add it to backend.supported, or set backend.active to one of them, in pytemplate.toml" in str(err)
 
 
 @pytest.mark.parametrize("version", ["3.14", "3.9", "3.100", "4.0"])
@@ -779,6 +784,26 @@ def _in_strings(text: str) -> int:
     return count
 
 
+COMMENTED = '[backend]\nsupported = [\n  "cpython", # c\n  # compiled, when a C compiler exists\n  "mypyc",\n]\n[typing]\n'
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"])
+def test_set_value_keeps_the_comments_inside_a_multi_line_array(eol: str) -> None:
+    """mode rewrote such an array on one line, and the comments inside it were gone (README: mode
+    keeps comments)."""
+    text = COMMENTED.replace("\n", eol)
+    added = _check_edit(text, "backend", "supported", ["cpython", "pypy", "mypyc"])
+    assert added == (
+        '[backend]\nsupported = [\n  "cpython", # c\n  "pypy",\n  # compiled, when a C compiler exists\n  "mypyc",\n]\n[typing]\n'
+    ).replace("\n", eol)
+    assert _check_edit(added, "backend", "supported", ["cpython", "mypyc"]) == text  # and back: byte-identical
+    # an element that goes takes its own comments with it; the others keep theirs
+    assert _check_edit(text, "backend", "supported", ["cpython"]) == '[backend]\nsupported = [\n  "cpython", # c\n]\n[typing]\n'.replace("\n", eol)
+    last = '[backend]\nsupported = [ # the backends\n    "cpython",\n    "mypyc" # no comma\n    # the end\n]\n'
+    out = _check_edit(last, "backend", "supported", ["pypy", "mypyc"])
+    assert out == '[backend]\nsupported = [ # the backends\n    "pypy",\n    "mypyc", # no comma\n    # the end\n]\n'
+
+
 def test_set_value_changes_only_the_value() -> None:
     text = '# head\n[backend]\nactive = "cpython"   # the mode\nsupported = ["cpython"]\n\n[python]\ncpython = "3.14"\n'
     out = set_value(text, "backend", "active", "mypyc")
@@ -1032,6 +1057,106 @@ def test_mode_rejects_contradictory_arguments(dry: Config, args: list[str], mess
 def test_mode_leaves_values_that_are_already_set(dry: Config, capsys: pytest.CaptureFixture[str]) -> None:
     assert cmd_mode.cmd_mode(dry, ["--editor", dry.typing.editor]) == 0
     assert "pytemplate.toml  unchanged" in capsys.readouterr().err
+
+
+@pytest.fixture
+def git_sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """tmp_path, with git blind to anything around it and to the user's own configuration."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "no-gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.delenv(key, raising=False)
+    return tmp_path
+
+
+def test_dry_run_new_says_what_git_will_do(git_sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """--dry-run new always promised `git init -b main`, which new skips inside a work tree; and a
+    project there gets a generated CI that GitHub never runs (it reads <top>/.github/workflows)."""
+    cfg = config.load(set())
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert cmd_mode.cmd_new(cfg, [str(git_sandbox / "alone" / "p"), "--name", "alone"]) == 0
+    err = capsys.readouterr().err
+    assert "and `git init -b main`" in err and "ci.yml" not in err
+    outer = git_sandbox / "repo"
+    subprocess.run(["git", "init", "-q", str(outer)], check=True, capture_output=True)
+    assert cmd_mode.cmd_new(cfg, [str(outer / "apps" / "sub"), "--name", "subapp"]) == 0
+    err = capsys.readouterr().err
+    assert "`git init -b main`" not in err and "inside the git work tree of" in err and "no git init" in err
+    assert "warning: " in err and ".github/workflows/ci.yml" in err and "working-directory" in err
+    assert "apps/sub" in err  # the folder the steps must run in
+    assert not (outer / "apps").exists()  # a dry run creates nothing
+
+
+class _Relock:
+    """A throwaway copy of this project's three config files, the runner pointed at it, and a
+    fake uv: `uv lock` fails, or succeeds (and rewrites uv.lock) while the new sync fails."""
+
+    FILES = ("pytemplate.toml", "pyproject.toml", "uv.lock")
+
+    def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch, fail: str) -> None:
+        from runner import envs
+
+        self.root = root
+        for name in self.FILES:
+            (root / name).write_bytes((ROOT / name).read_bytes())
+        self.before = self.snapshot()
+        monkeypatch.setattr(proc, "DRY_RUN", False)
+        for module in (config, cmd_mode):
+            monkeypatch.setattr(module, "CONFIG_FILE", root / "pytemplate.toml")
+        for module in (render, cmd_mode):
+            monkeypatch.setattr(module, "PYPROJECT", root / "pyproject.toml")
+        monkeypatch.setattr(render, "apply", lambda *a, **k: pytest.fail("rendered a mode that did not happen"))
+        monkeypatch.setattr(cmd_mode, "_precheck_py311", lambda cfg: None)
+        self.synced: list[str] = []
+
+        def fake_uv(env: Any, args: list[str], *, check: bool = True, **kw: Any) -> subprocess.CompletedProcess[str]:
+            if list(args) == ["lock", "--check"]:
+                return subprocess.CompletedProcess(args, 1, "", "")
+            if list(args) == ["lock"]:
+                if fail == "lock":
+                    raise proc.CommandFailed(["uv", "lock"], 1)
+                if fail == "interrupt":
+                    raise proc.Interrupted(130)
+                (root / "uv.lock").write_text("# re-locked\n", encoding="utf-8")
+                return subprocess.CompletedProcess(args, 0, "", "")
+            raise AssertionError(args)
+
+        def fake_sync(env: Any) -> None:
+            self.synced.append(env.key)
+            raise proc.CommandFailed(["uv", "sync"], 2)
+
+        monkeypatch.setattr(envs, "uv", fake_uv)
+        monkeypatch.setattr(envs, "sync", fake_sync)
+
+    def snapshot(self) -> dict[str, bytes]:
+        return {name: (self.root / name).read_bytes() for name in self.FILES}
+
+
+@pytest.mark.parametrize("fail", ["lock", "sync", "interrupt"])
+def test_mode_puts_everything_back_when_the_relock_or_the_sync_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fail: str
+) -> None:
+    """A failed `uv lock` (or the new environment's sync) left pytemplate.toml and pyproject.toml
+    rewritten against the old uv.lock, and a second `mode` then reported success without locking."""
+    cfg = config.load(set())
+    if cfg.pypy_enabled:
+        pytest.skip("the test adds PyPy support")
+    fake = _Relock(tmp_path, monkeypatch, fail)
+    if fail == "interrupt":
+        with pytest.raises(KeyboardInterrupt):
+            cmd_mode.cmd_mode(cfg, ["--supports", "+pypy"])
+        assert "pytemplate.toml, pyproject.toml restored: the mode did not change" in capsys.readouterr().err
+    else:
+        with pytest.raises(DeployError) as info:
+            cmd_mode.cmd_mode(cfg, ["--supports", "+pypy"])
+        restored = "pytemplate.toml, pyproject.toml, uv.lock" if fail == "sync" else "pytemplate.toml, pyproject.toml"
+        assert f"{restored} restored: the mode did not change" in str(info.value)
+        assert info.value.code == (2 if fail == "sync" else 1)
+    assert fake.snapshot() == fake.before  # every byte back: a second run locks again
+    assert fake.synced == (["pypy"] if fail == "sync" else [])
 
 
 # --- mode: real runs in a throwaway copy of this project ----------------------------------------------

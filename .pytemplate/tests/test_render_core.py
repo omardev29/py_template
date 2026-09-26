@@ -315,6 +315,52 @@ def test_corrupt_state_counts_as_empty(box: Sandbox, raw: bytes) -> None:
     assert box.recorded() == {path: sha(content) for path, content in GENERATED.items()}  # valid UTF-8 JSON again
 
 
+APPLIED = {"name": "game", "preset": "raylib", "dependencies": ["raylib_sdl==6.0.1.0"], "dev": ["types-cffi"]}
+
+
+def _conflicted(box: Sandbox, *, base: bool, eol: str, applied_theirs: dict[str, Any] | None = None) -> str:
+    """state.json as `git merge` leaves it when both branches rendered: the hashes of one file
+    differ (a conflict hunk), the `applied` record of ./deploy apply sits outside the hunk."""
+    render.apply(CFG)
+    data = json.loads(box.state.read_text(encoding="utf-8"))
+    data["applied"] = APPLIED
+    ours = json.dumps(data, indent=2).split("\n")
+    theirs_data = copy.deepcopy(data)
+    theirs_data["files"]["b.ini"] = "0" * 64
+    if applied_theirs is not None:
+        theirs_data["applied"] = applied_theirs
+    theirs = json.dumps(theirs_data, indent=2).split("\n")
+    out: list[str] = []
+    for a, b in zip(ours, theirs, strict=True):
+        if a == b:
+            out.append(a)
+        else:
+            out += ["<<<<<<< HEAD", a, *(["||||||| base", a] if base else []), "=======", b, ">>>>>>> other"]
+    text = eol.join(out) + eol
+    box.write(".pytemplate/state.json", text)
+    return text
+
+
+@pytest.mark.parametrize("base", [False, True], ids=["merge", "diff3"])
+@pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_a_conflicted_state_keeps_the_applied_record(box: Sandbox, base: bool, eol: str) -> None:
+    """README's procedure after a conflict in state.json is `./deploy render`: it wrote a fresh
+    state.json without the `applied` record, and a later apply refused with a false 'app.preset was
+    changed from script'."""
+    _conflicted(box, base=base, eol=eol)
+    box.write("b.ini", "after the merge\n")  # the hashes are not trusted: regenerated, not "hand-edited"
+    assert render.apply(CFG) == (["b.ini"], [])
+    data = json.loads(box.state.read_text(encoding="utf-8"))
+    assert data["applied"] == APPLIED and list(data) == ["comment", "files", "applied"]
+    assert box.recorded() == {path: sha(content) for path, content in GENERATED.items()}
+
+
+def test_a_conflict_inside_a_record_drops_only_that_record(box: Sandbox) -> None:
+    _conflicted(box, base=False, eol="\n", applied_theirs={**APPLIED, "preset": "script"})
+    render.apply(CFG)
+    assert "applied" not in json.loads(box.state.read_text(encoding="utf-8"))  # ./deploy apply records it again
+
+
 @pytest.mark.parametrize("bom", [b"", b"\xef\xbb\xbf"], ids=["no-bom", "bom"])
 @pytest.mark.parametrize("eol", [b"\n", b"\r\n"], ids=["lf", "crlf"])
 def test_state_with_a_bom_or_crlf_still_protects_hand_edits(box: Sandbox, bom: bytes, eol: bytes) -> None:
@@ -651,14 +697,109 @@ def test_user_keys_in_tool_uv_survive(pyproject: Path) -> None:
     assert "3.15" in data["tool"]["uv"]["environments"][0]
 
 
+PYPY_CFG = preset_cfg(extra={"backend": {"supported": ["cpython", "pypy", "mypyc"]}})
+CFFI = "cffi>=1.15.1; implementation_name == 'cpython'"
+
+
+def _own_list(text: str, line: str) -> str:
+    """`text` with a [tool.uv] line of the project's own right after the managed block."""
+    end = f"  {render.MARK_END}\n"
+    assert text.count(end) == 1
+    return text.replace(end, f"{end}{line}\n")
+
+
+def test_a_project_keeps_its_own_override_dependencies(pyproject: Path) -> None:
+    """The managed block owned the whole key: with the project's own list outside the markers,
+    enabling PyPy gave invalid TOML (a repeated key) and lock, mode and apply refused."""
+    text = _own_list(pyproject_text(CFG), 'override-dependencies = ["pygments>=2.19"]')
+    _write(pyproject, text)
+    assert render.pyproject_outdated(CFG) is False and render.write_pyproject(CFG) is False
+    # PyPy needs the cffi override: the project's list must hold it, and the error says so
+    with pytest.raises(DeployError) as e:
+        render.check_pyproject(PYPY_CFG)
+    assert "override-dependencies" in str(e.value) and f'"{CFFI}"' in str(e.value) and "outside the" in str(e.value)
+    assert render.pyproject_outdated(PYPY_CFG) is True
+    assert pyproject.read_bytes() == text.encode("utf-8")
+    # with it (spelled another way), the block leaves the key to the project
+    own = 'override-dependencies = ["pygments>=2.19", "cffi >= 1.15.1 ; implementation_name==\\"cpython\\""]'
+    _write(pyproject, _own_list(pyproject_text(CFG), own))
+    assert render.write_pyproject(PYPY_CFG) is True
+    new = pyproject.read_text(encoding="utf-8")
+    uv = tomllib.loads(new)["tool"]["uv"]
+    assert uv["override-dependencies"] == ["pygments>=2.19", 'cffi >= 1.15.1 ; implementation_name=="cpython"']
+    assert "pypy" in str(uv["environments"]) and new.count("override-dependencies") == 1
+    assert render.pyproject_outdated(PYPY_CFG) is False and render.write_pyproject(PYPY_CFG) is False
+    # without PyPy again: the project's list stays as it is
+    assert render.write_pyproject(CFG) is True
+    assert tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["uv"]["override-dependencies"] == uv["override-dependencies"]
+
+
+def test_a_repeated_additive_key_is_repaired(pyproject: Path) -> None:
+    """The project added its own list while the block had the key (invalid TOML, uv refuses it
+    too): the rewrite leaves the key to the project once its list holds the block's entries."""
+    text = _own_list(pyproject_text(PYPY_CFG), f'override-dependencies = ["{CFFI}", "rich<16"]')
+    _write(pyproject, text)
+    with pytest.raises(tomllib.TOMLDecodeError):
+        tomllib.loads(text)
+    assert render.write_pyproject(PYPY_CFG) is True
+    uv = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["uv"]
+    assert uv["override-dependencies"] == [CFFI, "rich<16"]
+    # only that clash: a block broken some other way is the user's to fix, never rewritten
+    broken = pyproject_text(PYPY_CFG).replace("required-version = ", "required-version = = ")
+    _write(pyproject, broken)
+    with pytest.raises(DeployError, match="not valid TOML"):
+        render.write_pyproject(PYPY_CFG)
+    assert pyproject.read_text(encoding="utf-8") == broken
+
+
+@pytest.mark.parametrize("package", ["raylib", "raylib_sdl"])
+def test_a_raylib_project_keeps_its_own_no_build_package(pyproject: Path, package: str) -> None:
+    cfg = preset_cfg("raylib", {"preset": {"raylib": {"package": package}}})
+    base = pyproject_text(cfg)
+    _write(pyproject, _own_list(base.replace(f'no-build-package = ["{package}"]\n', ""), 'no-build-package = ["numpy"]'))
+    with pytest.raises(DeployError, match=f'(?s)no-build-package .*"{package}"'):
+        render.write_pyproject(cfg)
+    other = package.replace("_", "-").upper()  # uv normalizes names: the same package
+    _write(pyproject, _own_list(base.replace(f'no-build-package = ["{package}"]\n', ""), f'no-build-package = ["numpy", "{other}"]'))
+    assert render.write_pyproject(cfg) is False  # nothing to change: the list is the project's
+    assert tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["uv"]["no-build-package"] == ["numpy", other]
+
+
 def test_a_rewrite_never_changes_anything_else(pyproject: Path) -> None:
-    # requires-python inside a multi-line string of [project] is not the key: rather than rewrite
-    # the description, write_pyproject refuses (the file is left as it is)
+    # requires-python inside a multi-line string of [project] is not the key: the real one is
+    # rewritten, the string stays as it is
     text = pyproject_text(CFG).replace("[project]\n", '[project]\nnotes = """\nrequires-python = ">=2.7"\n"""\n', 1)
     _write(pyproject, text.replace('requires-python = ">=3.14"', 'requires-python = ">=3.13"'))
-    with pytest.raises(DeployError, match="would also change other settings"):
-        render.write_pyproject(CFG)
+    assert render.write_pyproject(CFG) is True
+    assert pyproject.read_text(encoding="utf-8") == text
     assert tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["notes"] == 'requires-python = ">=2.7"\n'
+
+
+STRING_HEADERS = {
+    # a line of a multi-line string (or array) that looks like a table header is text, not a header
+    "project-description": ("[project]\n", '[project]\ndescription = """Sieve benchmark.\n[beta]\n"""\n'),
+    "project-literal": ("[project]\n", "[project]\nreadme-text = '''\n  [[tool.uv]]\n'''\n"),
+    "project-array": ("[project]\n", '[project]\nkeywords = [\n"a",\n]\nclassifiers = [\n  "x", # [tool.uv]\n]\n'),
+    "tool-uv-string": ("[tool.uv]\n", '[tool.uv]\nnote = """\n[tool.other]\n"""\n'),
+}
+
+
+@pytest.mark.parametrize(("where", "insert"), STRING_HEADERS.values(), ids=STRING_HEADERS.keys())
+def test_header_lookalikes_in_strings_are_text(pyproject: Path, where: str, insert: str) -> None:
+    """A '[beta]' line in a multi-line description ended the [project] scan early: a second
+    requires-python was inserted, and lock, mode and apply refused a valid file."""
+    own = re.sub(r"(?m)^description = .*\n", "", pyproject_text(CFG))  # the test writes its own
+    text = own.replace(where, insert, 1)
+    assert tomllib.loads(text)  # a valid file
+    _write(pyproject, text.replace('requires-python = ">=3.14"', 'requires-python = ">=3.13"'))
+    render.check_pyproject(CFG)
+    assert render.pyproject_outdated(CFG) is True and render.write_pyproject(CFG) is True
+    assert pyproject.read_text(encoding="utf-8") == text  # only the managed value changed
+    assert render.pyproject_outdated(CFG) is False
+    _write(pyproject, text.replace('requires-python = ">=3.14"\n', ""))  # a missing one goes under [project]
+    assert render.write_pyproject(CFG) is True
+    new = pyproject.read_text(encoding="utf-8")
+    assert new.count("requires-python") == 1 and new.startswith('[project]\nrequires-python = ">=3.14"\n')
 
 
 def test_verify_requires_the_managed_values_in_tool_uv() -> None:

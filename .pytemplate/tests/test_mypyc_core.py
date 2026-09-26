@@ -140,6 +140,23 @@ def test_precheck_syncs_first_and_never_reads_the_project_mypy_ini(monkeypatch: 
         assert not any(a.endswith((".ini", ".toml")) for a in argv)
 
 
+def test_precheck_checks_the_python_of_the_pinned_pypy(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """It hard-coded 3.11: a project that moved to pypy@3.12.x (README's plan once raylib ships PyPy
+    8 wheels) could not enable PyPy with 3.12 code (PEP 695 generics)."""
+    tools = FakeTools().install(monkeypatch)
+    cfg = make({"python": {"pypy": "pypy@3.12.14"}})
+    cmd_mode._precheck_py311(cfg)
+    ruff = next(c for c in tools.calls if "ruff" in c)
+    assert ruff[ruff.index("--target-version") + 1] == "py312"
+    mypy = [c for c in tools.calls if "mypy" in c]
+    assert [c[c.index("--python-version") + 1] for c in mypy] == ["3.12", cfg.python.cpython]
+    err = capsys.readouterr().err
+    assert "valid on Python 3.12 (required by PyPy)" in err and "ok the code is valid on Python 3.12" in err
+    FakeTools(ruff=1).install(monkeypatch)
+    with pytest.raises(DeployError, match=r"syntax that does not exist in Python 3\.12"):
+        cmd_mode._precheck_py311(cfg)
+
+
 def test_precheck_dry_run_never_syncs(monkeypatch: pytest.MonkeyPatch, fake_venv: Path) -> None:
     tools = FakeTools().install(monkeypatch)
     monkeypatch.setattr(proc, "DRY_RUN", True)
@@ -653,8 +670,37 @@ def test_compiled_sources_of_modules_files_and_missing_entries(src_tree: Path) -
     _project(src_tree, {**CORE_TREE, "solo.py": "X = 1\n"})
     cfg = make({"compile": {"modules": ["myapp.core.sub", "solo", "myapp.core.a"]}})
     assert mypyc.compiled_modules(cfg) == ["myapp.core.sub.m", "myapp.core.sub.n", "solo", "myapp.core.a"]
-    with pytest.raises(DeployError, match="compile.modules: src/myapp/nope.py does not exist"):
+    with pytest.raises(DeployError, match="compile.modules: neither src/myapp/nope.py nor src/myapp/nope/ exists"):
         mypyc.compiled_sources(make({"compile": {"modules": ["myapp.nope"]}}))
+
+
+def test_a_module_file_wins_over_a_folder_that_is_no_package(src_tree: Path) -> None:
+    """Python imports bench.py when bench/ has no __init__.py (a package turned into a module
+    leaves bench/__pycache__/ behind): mypyc compiles that file, never the empty folder."""
+    _project(
+        src_tree,
+        {
+            **CORE_TREE,
+            "myapp/core/bench.py": "X = 1\n",
+            "myapp/core/bench/__pycache__/old.cpython-314.pyc": b"",
+            "myapp/core/data/notes.txt": "",
+        },
+    )
+    cfg = make({"compile": {"modules": ["myapp.core.bench", "myapp.core.a"]}})
+    assert config.compiled_paths(cfg) == ["myapp/core/bench.py", "myapp/core/a.py"]
+    assert mypyc.compiled_modules(cfg) == ["myapp.core.bench", "myapp.core.a"]
+    # a real package (with __init__.py) still wins over a module file of the same name, as in Python
+    _project(src_tree, {"myapp/core/bench/__init__.py": "", "myapp/core/bench/k.py": "X = 1\n"})
+    assert config.compiled_paths(cfg) == ["myapp/core/bench", "myapp/core/a.py"]
+    assert mypyc.compiled_modules(cfg) == ["myapp.core.bench.k", "myapp.core.a"]
+    # a namespace package (a folder of modules, no __init__.py and no bench.py) is a folder
+    (src_tree / "myapp/core/bench.py").unlink()
+    (src_tree / "myapp/core/bench/__init__.py").unlink()
+    assert config.compiled_paths(cfg) == ["myapp/core/bench", "myapp/core/a.py"]
+    assert mypyc.compiled_modules(cfg) == ["myapp.core.bench.k", "myapp.core.a"]
+    # a folder that holds no module and no bench.py: nothing to compile, said as such
+    with pytest.raises(DeployError, match="neither src/myapp/core/data.py nor src/myapp/core/data/ holds a module to compile"):
+        mypyc.compiled_sources(make({"compile": {"modules": ["myapp.core.data"]}}))
 
 
 def test_compiled_sources_follow_a_symlinked_subpackage(src_tree: Path, tmp_path: Path) -> None:
@@ -1482,12 +1528,37 @@ COMPILED_KEYS = list(render.load_profile("mypyc")["mypy_compiled"])
 
 
 @pytest.mark.parametrize("for_compile", [False, True])
-def test_mypy_ini_relaxes_compile_exclude(for_compile: bool) -> None:
+def test_mypy_ini_relaxes_compile_exclude(for_compile: bool, tmp_path: Path) -> None:
     cfg = make({"compile": {"modules": ["myapp.core"], "exclude": ["myapp.core.loose", "myapp.core.sub"]}})
-    ini = _ini(render.mypy_ini(cfg, "mypyc", for_compile=for_compile))
+    ini = _ini(render.mypy_ini(cfg, "mypyc", for_compile=tmp_path if for_compile else None))
     assert COMPILED_KEYS and all(ini.getboolean("mypy-myapp.core.*", key) for key in COMPILED_KEYS)
     for section in ("mypy-myapp.core.loose.*", "mypy-myapp.core.sub.*"):  # x.* covers x itself too
         assert all(ini.getboolean(section, key) is False for key in COMPILED_KEYS)
+
+
+PROJECT_FOLDERS = ["a,b"] + ([] if os.name == "nt" else ["a:b"])  # mypy splits mypy_path on both
+
+
+@needs_venv
+@pytest.mark.parametrize("folder", PROJECT_FOLDERS)
+def test_compile_mypy_ini_finds_typings_in_any_project_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, folder: str) -> None:
+    """The compile-time mypy.ini held typings/ as an absolute path, which mypy splits on ',' and
+    ':': from a project folder with a comma mypyc lost the project's stubs (the raylib preset's)."""
+    root = _project(
+        tmp_path / folder / "proj",
+        {
+            "typings/fastlib/__init__.pyi": "def f(x: int) -> int: ...\n",
+            ".build/mypyc-dev/stage/usefast.py": "import fastlib\n\n\ndef g(x: int) -> int:\n    return fastlib.f(x)\n",
+        },
+    )
+    monkeypatch.setattr(render, "ROOT", root)
+    ini_dir = root / ".build" / "mypyc-dev"
+    text = render.mypy_ini(make({}), "mypyc", for_compile=ini_dir)
+    assert "mypy_path = $MYPY_CONFIG_FILE_DIR/../../typings\n" in text
+    (ini_dir / "mypy.ini").write_text(text, encoding="utf-8")
+    argv = [str(TOOL_PYTHON), "-m", "mypy", "--config-file", str(ini_dir / "mypy.ini"), "--no-incremental", "usefast.py"]
+    r = subprocess.run(argv, cwd=ini_dir / "stage", env=proc.base_env(), capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stdout + r.stderr  # mypyc runs mypy the same way: from the stage
 
 
 def test_mypy_ini_without_compiled_rules_has_no_exclude_sections() -> None:
@@ -1577,6 +1648,38 @@ def test_pyright_config_leaves_compile_exclude_out_of_the_compiled_rules(pyright
     assert all("reportAny" not in e for e in envs_[:2]) and all(e.get("reportAny") == "error" for e in envs_[2:])
     absolute = render.pyright_config(cfg, "mypyc", absolute=True)
     assert absolute["strict"][0] == (pyright_tree / "src/myapp/core/__init__.py").as_posix()
+
+
+def test_pyright_strict_list_never_names_a_folder_without_python(pyright_tree: Path) -> None:
+    """A subpackage deleted with `git rm -r` leaves its ignored __pycache__ behind: listed, it made
+    the committed pyrightconfig.json differ from a fresh clone's (CI's `render --check` failed)."""
+    cfg = make({"typing": {"editor": "basedpyright"}, "compile": {"exclude": ["myapp.core.loose", "myapp.core.sub.m"]}})
+    before = render.pyright_config(cfg, "mypyc")
+    _project(
+        pyright_tree,
+        {
+            "src/myapp/core/old/__pycache__/m.cpython-314.pyc": b"",
+            "src/myapp/core/old/deeper/__pycache__/n.cpython-314.pyc": b"",
+            "src/myapp/core/.hidden/h.py": "",
+            "src/myapp/core/data/table.json": "{}",
+        },
+    )
+    (pyright_tree / "src/myapp/core/empty").mkdir()
+    after = render.pyright_config(cfg, "mypyc")
+    assert after["strict"] == before["strict"] and after["executionEnvironments"] == before["executionEnvironments"]
+    _project(pyright_tree, {"src/myapp/core/old/deeper/stub.pyi": ""})  # a folder that holds code counts
+    assert "src/myapp/core/old" in render.pyright_config(cfg, "mypyc")["strict"]
+
+
+def test_a_tests_folder_without_python_is_no_code_folder(pyright_tree: Path) -> None:
+    """The same for a tests/ folder left holding only __pycache__ (.mypy.ini files, pyright include)."""
+    shutil.rmtree(pyright_tree / "tests")
+    _project(pyright_tree, {"tests/__pycache__/test_x.cpython-314-pytest-9.1.1.pyc": b""})
+    assert "\nfiles = src\n" in render.mypy_ini(make({}), "strict")
+    assert render.pyright_config(make({}), "strict")["include"] == ["src"]
+    _project(pyright_tree, {"tests/test_x.py": ""})
+    assert "\nfiles = src, tests\n" in render.mypy_ini(make({}), "strict")
+    assert render.pyright_config(make({}), "strict")["include"] == ["src", "tests"]
 
 
 def test_pyright_config_without_exclude_is_unchanged(pyright_tree: Path) -> None:

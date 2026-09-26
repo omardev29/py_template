@@ -104,7 +104,10 @@ outside the template:
    needs the network. raylib and flet projects get the versions the template was tested with
    (`.pytemplate/presets/<preset>/constraints.txt`), once: `./deploy lock --upgrade` moves on.
 4. It runs `git init -b main` (unless `DIR` is inside a git work tree) with `deploy` and
-   `deploy.ps1` executable. It makes no commit.
+   `deploy.ps1` executable. It makes no commit. Inside a bigger repository it warns that the
+   generated `.github/workflows/ci.yml` will not run: GitHub reads workflows only from the
+   repository's own `.github/workflows/`, so CI there needs a workflow of the repository that
+   runs its steps in the project's folder (`defaults.run.working-directory`).
 
 When a step fails (a name uv refuses, no network, Ctrl+C), `new` removes what it created.
 Dependencies added with `./deploy add` and tracked files of your own (docs, scripts) come along
@@ -279,7 +282,9 @@ Run `./deploy apply` (preview it with `./deploy --dry-run apply`). It brings the
 line with `pytemplate.toml`, and only does what is needed: a second run changes no file.
 `./deploy setup` is the same operation under its first-time name, for a fresh clone.
 `./deploy mode` edits the common keys for you (it keeps comments, CRLF line endings and a BOM)
-and applies them.
+and applies them. When its re-lock or the new environment fails (no solution for the new
+interpreter, no network, Ctrl+C), `pytemplate.toml`, `pyproject.toml` and `uv.lock` get their old
+content back: the mode does not change, and the same command can simply run again.
 
 | You edited | What `./deploy apply` does |
 |---|---|
@@ -352,7 +357,9 @@ commands regenerate them first and say which changed; `./deploy render` does onl
   `./deploy render --force` overwrites it. Change `pytemplate.toml`, or the sources in
   `.pytemplate/templates/` (a typing profile is `.pytemplate/templates/typing/<profile>.toml`).
   CRLF line endings and a BOM (Windows checkouts, editors) do not count as edits.
-- After a merge conflict in `state.json` or `editor.json`, run `./deploy render` and commit both.
+- After a merge conflict in `state.json` or `editor.json`, run `./deploy render` and commit both
+  (it regenerates every generated file and keeps the record of `./deploy apply` that both sides
+  of `state.json` agree on).
 - The project's CI, `.github/workflows/ci.yml`, is generated from `.pytemplate/templates/ci.yml`:
   edit that file. Deleting it stops the generation (deleting only `ci.yml` is undone by the next
   command).
@@ -361,7 +368,11 @@ commands regenerate them first and say which changed; `./deploy render` does onl
   `# <<< pytemplate` (the Python versions `uv.lock` resolves for, the uv version floor,
   uv-managed interpreters only, and preset keys such as raylib's `no-build-package`). A TOML
   formatter may reformat them (only the meaning is compared), but the markers must stay; broken
-  markers are an error that says how to fix them. The rest of `pyproject.toml` is yours. Never add
+  markers are an error that says how to fix them. The rest of `pyproject.toml` is yours. Your own
+  `[tool.uv]` lists that only add constraints (`override-dependencies`, `constraint-dependencies`,
+  `no-build-package`, `no-binary-package`...) go outside the markers: the block then leaves that
+  key to you, and your list must also hold the block's entries (PyPy's cffi override, the raylib
+  preset's `no-build-package`), which `./deploy` names when one is missing. Never add
   `[build-system]`: the project is an application (the wheel method writes its own).
 
 Three tools run outside `uv.lock`, at versions pinned in the runner: `check` with
@@ -475,7 +486,10 @@ again.
 
 - **Layout**: `src/<pkg>/core/` is compiled; the boundary (`app.py`, `ui/`, `gfx.py`,
   `resources.py`) is not. `src/main.py` starts the app and is never compiled (a compiled module
-  cannot be `__main__`). `compile.exclude` keeps modules or subpackages of `compile.modules`
+  cannot be `__main__`). Each `compile.modules` entry is what Python imports under that name: a
+  regular package folder, else `<name>.py`, else a namespace folder of modules (a folder left
+  holding only `__pycache__` never hides the module file); an entry that does not exist or holds
+  no module is an error. `compile.exclude` keeps modules or subpackages of `compile.modules`
   interpreted; an entry that names nothing is an error.
 - **Constants with `Final`**: a global without `Final` is looked up in a dictionary on every
   access.
@@ -592,9 +606,10 @@ cpython and pypy test runs cannot catch a wrap-around.
 ### PyPy
 
 `./deploy mode --supports +pypy` enables PyPy (the raylib preset has it): it checks that the code
-is valid Python 3.11 (ruff's syntax rules for 3.11, and the mypy errors that appear only on 3.11,
-whatever the typing profile), lowers `requires-python` to `>=3.11`, re-locks `uv.lock` and
-creates `.venv-pypy`. `./deploy apply` runs the same check when `backend.supported` gains PyPy.
+is valid on the Python of `python.pypy`, 3.11 by default (ruff's syntax rules for it, and the
+mypy errors that appear only on it, whatever the typing profile), lowers `requires-python` to
+`>=3.11`, re-locks `uv.lock` and creates `.venv-pypy`. `./deploy apply` runs the same check when
+`backend.supported` gains PyPy.
 
 - While PyPy is supported, the code must be Python 3.11 in syntax and API: no `class C[T]` generics
   (PEP 695), and `from typing_extensions import override`, not `from typing import override`.

@@ -19,12 +19,14 @@ import copy
 import difflib
 import hashlib
 import json
+import os
 import re
 import tomllib
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
-from . import presets, proc, ui
+from . import config, presets, proc, ui
 from .config import Config, compiled_paths
 from .envs import MIN_UV
 from .project import PYPROJECT, ROOT, STATE_FILE, TEMPLATES, rel
@@ -87,6 +89,33 @@ def typings_dir() -> Path | None:
     return path if path.is_dir() else None
 
 
+def _holds_python(folder: Path, _seen: frozenset[str] = frozenset()) -> bool:
+    """Whether `folder` holds a .py or .pyi file, at any depth (hidden folders and __pycache__ do
+    not count; symlinked folders do, once). A folder left holding only __pycache__ (after `git rm
+    -r`, a branch switch) exists on one machine and not in a fresh clone: generated files that
+    named it differed from CI's."""
+    real = os.path.realpath(folder)
+    if real in _seen:
+        return False
+    try:
+        children = sorted(folder.iterdir())
+    except OSError:
+        return False
+    for child in children:
+        if child.name.startswith((".", "__pycache__")):
+            continue
+        if child.is_dir():
+            if _holds_python(child, _seen | {real}):
+                return True
+        elif child.suffix in (".py", ".pyi"):
+            return True
+    return False
+
+
+def _has_tests() -> bool:
+    return _holds_python(ROOT / "tests")
+
+
 def compiled_patterns(cfg: Config) -> list[str]:
     return [f"{m}.*" for m in cfg.compile.modules]
 
@@ -108,17 +137,22 @@ def _ini_section(name: str, options: dict[str, Any]) -> list[str]:
     return [*lines, ""]
 
 
-def mypy_ini(cfg: Config, profile: str, *, for_compile: bool = False) -> str:
-    """Return the mypy config. `for_compile`: the one mypyc uses from the stage (absolute paths)."""
+def mypy_ini(cfg: Config, profile: str, *, for_compile: Path | None = None) -> str:
+    """Return the mypy config. `for_compile`: the folder of the mypy.ini that mypyc reads while it
+    runs in its stage (the mypyc profile dir, the wheel's work dir), which typings/ is found from."""
     data = load_profile(profile)
     head: dict[str, Any] = {}
     typings = typings_dir()
-    if for_compile:
+    if for_compile is not None:
         if typings:
-            head["mypy_path"] = typings.as_posix()
+            # Relative to the ini itself, never absolute: mypy splits mypy_path on ',' and ':'
+            # BEFORE expanding variables, so a project folder with a comma (or a colon, or a
+            # Windows drive) lost typings/; $MYPY_CONFIG_FILE_DIR is expanded after the split
+            relative = Path(os.path.relpath(typings, for_compile)).as_posix()
+            head["mypy_path"] = f"$MYPY_CONFIG_FILE_DIR/{relative}"
     else:
         head["mypy_path"] = ["src", "typings"] if typings else "src"
-        head["files"] = ["src", "tests"] if (ROOT / "tests").is_dir() else "src"
+        head["files"] = ["src", "tests"] if _has_tests() else "src"
     lines = [f"# {HEADER}", f"# Typing profile: {profile} ({data.get('description', '')})", ""]
     lines += _ini_section("mypy", {**head, **data.get("mypy", {})})
     # One section per module pattern, later options winning: mypy refuses a repeated section
@@ -162,7 +196,7 @@ def pyright_config(cfg: Config, profile: str, *, absolute: bool = False) -> dict
     def path(p: str) -> str:
         return (ROOT / p).as_posix() if absolute else p
 
-    include = [path("src"), path("tests")] if (ROOT / "tests").is_dir() else [path("src")]
+    include = [path("src"), path("tests")] if _has_tests() else [path("src")]
     conf: dict[str, Any] = {
         "include": include,
         "exclude": ["**/node_modules", "**/__pycache__", "**/.*", path("dist"), path("build")],
@@ -204,7 +238,11 @@ def _paths_without(top: str, excluded: set[str]) -> list[str]:
         return [top]
     out: list[str] = []
     for child in sorted((ROOT / top).iterdir(), key=lambda p: p.name):
-        if child.name.startswith((".", "__pycache__")) or not (child.is_dir() or child.suffix in (".py", ".pyi")):
+        if child.name.startswith((".", "__pycache__")):
+            continue
+        # a folder counts only when it holds code: a leftover of a deleted subpackage (only its
+        # ignored __pycache__) must not reach the committed file (CI renders from a clone)
+        if not (_holds_python(child) if child.is_dir() else child.suffix in (".py", ".pyi")):
             continue
         out += _paths_without(f"{top}/{child.name}", excluded)
     return out
@@ -354,12 +392,57 @@ def _digest(text: str) -> str:
 
 def _read_state() -> dict[str, Any]:
     """state.json as an object: {} when it is missing, unreadable (not UTF-8: PS 5.1 `>` writes
-    UTF-16), not JSON or not an object. A BOM (an editor, PS 5.1 Set-Content) is fine."""
+    UTF-16), not JSON or not an object. A BOM (an editor, PS 5.1 Set-Content) is fine; a file with
+    git conflict markers keeps what both sides agree on (_unconflicted)."""
     try:
-        data = json.loads(STATE_FILE.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):  # ValueError: UnicodeDecodeError and JSONDecodeError
+        text = STATE_FILE.read_text(encoding="utf-8-sig")
+    except (OSError, ValueError):  # ValueError: UnicodeDecodeError
         return {}
+    try:
+        data = json.loads(text)
+    except ValueError:  # JSONDecodeError
+        return _unconflicted(text)
     return data if isinstance(data, dict) else {}
+
+
+def _unconflicted(text: str) -> dict[str, Any]:
+    """The top-level keys of a state.json that `git merge` left with conflict markers (both
+    branches rendered or applied), taken from both sides where they agree, `files` left out: the
+    hashes are not trusted then, so every generated file is written again (README: run
+    ./deploy render after such a merge) while the `applied` record of ./deploy apply, usually
+    outside the conflict, survives. A key the two sides disagree on is dropped (apply records it
+    again). {} when there are no markers or a side is not a JSON object."""
+    sides: tuple[list[str], list[str]] = ([], [])
+    side: int | None = None  # None: both sides; 0 ours; 1 theirs; -1 the base (diff3 style)
+    for line in text.split("\n"):
+        if line.startswith("<<<<<<<") and side is None:
+            side = 0
+        elif line.startswith("|||||||") and side == 0:
+            side = -1
+        elif line.rstrip("\r") == "=======" and side in (0, -1):
+            side = 1
+        elif line.startswith(">>>>>>>") and side == 1:
+            side = None
+        elif side is None:
+            sides[0].append(line)
+            sides[1].append(line)
+        elif side >= 0:
+            sides[side].append(line)
+    if side is not None or sides[0] == text.split("\n"):  # an unfinished hunk, or no markers at all
+        return {}
+    parsed: list[dict[str, Any]] = []
+    for lines in sides:
+        try:
+            data = json.loads("\n".join(lines))
+        except ValueError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        parsed.append(data)
+    ours, theirs = parsed
+    kept = {k: v for k, v in ours.items() if k != "files" and theirs.get(k, v) == v}
+    kept.update((k, v) for k, v in theirs.items() if k != "files" and k not in ours)
+    return kept
 
 
 def _load_state() -> dict[str, str]:
@@ -452,7 +535,28 @@ def auto(cfg: Config, *, force: bool = False) -> None:
 # --- pyproject.toml (managed parts) ---------------------------------------------------------------
 
 
-def managed_block(cfg: Config) -> str:
+# [tool.uv] lists where one more entry only adds a constraint. A project may keep its own list
+# outside the markers: the managed block then leaves that key to it, and the project's list must
+# also hold the entries the block would write (_verify names the missing ones).
+ADDITIVE_KEYS = frozenset(
+    {
+        "override-dependencies",
+        "constraint-dependencies",
+        "build-constraint-dependencies",
+        "no-build-package",
+        "no-binary-package",
+        "no-build-isolation-package",
+    }
+)
+_WHY = {
+    "override-dependencies": "PyPy ships cffi built in, and uv would try to build the one from PyPI",
+    "no-build-package": "the preset installs it from wheels only",
+}
+
+
+def managed_block(cfg: Config, *, leave: Collection[str] = ()) -> str:
+    """The managed [tool.uv] block. `leave`: additive keys the project keeps outside the markers."""
+
     def minor_range(version: str) -> str:
         major, minor = version.split(".")
         return f"python_full_version >= '{version}' and python_full_version < '{major}.{int(minor) + 1}'"
@@ -467,13 +571,14 @@ def managed_block(cfg: Config) -> str:
     if cfg.pypy_enabled:
         lines.append(f"    \"implementation_name == 'pypy' and {minor_range(cfg.pypy_minor)}\",")
     lines.append("]")
-    if cfg.pypy_enabled:
+    if cfg.pypy_enabled and "override-dependencies" not in leave:
         lines += [
             "# PyPy ships cffi built in; uv does not see it and would try to build the one from PyPI",
             "override-dependencies = [\"cffi>=1.15.1; implementation_name == 'cpython'\"]",
         ]
     for key, value in presets.uv_extras(cfg).items():
-        lines.append(f"{key} = {_toml_scalar(value)}")
+        if key not in leave:
+            lines.append(f"{key} = {_toml_scalar(value)}")
     # The oldest uv that installs the pinned interpreters (envs.MIN_UV): an older uv stops with
     # "Required uv version ... does not match" (uv >= 0.5.14 reads it; doctor also checks)
     lines.append(f'required-version = ">={MIN_UV}"')
@@ -507,6 +612,28 @@ def _split(text: str) -> list[str]:
     return lines
 
 
+_Headers = dict[int, tuple[str, tuple[str, ...]]] | None
+
+
+def _headers(lines: list[str]) -> _Headers:
+    """{line index: (kind, table path)} of the real table headers: a line of a multi-line string or
+    array that only looks like one (a '[beta]' line in a description) never counts. None when the
+    scanner cannot read the text: the line patterns decide then (and _verify reports invalid TOML)."""
+    text = "\n".join(lines) + "\n"
+    stmts = config.scan(text)
+    if stmts is None:
+        return None
+    return {text.count("\n", 0, s.end - 1): (s.kind, s.path) for s in stmts if s.kind in ("table", "array")}
+
+
+def _is_header(lines: list[str], headers: _Headers, i: int) -> bool:
+    return i in headers if headers is not None else bool(_HEADER_RE.fullmatch(lines[i]))
+
+
+def _is_table(lines: list[str], headers: _Headers, i: int, path: tuple[str, ...], pattern: re.Pattern[str]) -> bool:
+    return headers.get(i) == ("table", path) if headers is not None else bool(pattern.fullmatch(lines[i]))
+
+
 def _managed_bounds(lines: list[str]) -> tuple[int, int] | None:
     """Return the first and last line of the managed block; None when both markers are missing
     (the block is then inserted). A DeployError explains any other state of the markers."""
@@ -524,10 +651,11 @@ def _managed_bounds(lines: list[str]) -> tuple[int, int] | None:
         problem = "the closing marker comes before the opening one"
     else:
         begin, end = begins[0], ends[0]
-        table = next((ln for ln in reversed(lines[:begin]) if _HEADER_RE.fullmatch(ln)), "")
-        if not _UV_HEADER.fullmatch(table):
+        headers = _headers(lines)
+        table = next((i for i in range(begin - 1, -1, -1) if _is_header(lines, headers, i)), None)
+        if table is None or not _is_table(lines, headers, table, ("tool", "uv"), _UV_HEADER):
             problem = "the block is not in the [tool.uv] table"
-        elif any(_HEADER_RE.fullmatch(ln) for ln in lines[begin : end + 1]):
+        elif any(_is_header(lines, headers, i) for i in range(begin, end + 1)):
             problem = "a table header is between the markers"
         else:
             return begin, end
@@ -541,12 +669,25 @@ def _managed_bounds(lines: list[str]) -> tuple[int, int] | None:
 
 def _set_requires_python(lines: list[str], min_python: str) -> list[str]:
     """Set [project] requires-python (inserted under the header when missing: uv would default to
-    the running interpreter's minor)."""
+    the running interpreter's minor). Found with the TOML scanner, so a line of a multi-line string
+    that looks like a header or like the key is left alone."""
+    value = f'">={min_python}"'
+    text = "\n".join(lines) + "\n"
+    stmts = config.scan(text)
+    if stmts is not None:
+        key = next((s for s in stmts if s.kind == "key" and not s.in_array and s.path == ("project", "requires-python")), None)
+        if key is not None:
+            begin, end = key.value
+            return _split(text[:begin] + value + text[end:])
+        header = next((s for s in stmts if s.kind == "table" and s.path == ("project",)), None)
+        if header is None:
+            return lines  # no [project] table: _verify says so
+        return _split(text[: header.end] + f"requires-python = {value}\n" + text[header.end :])
+    # not readable as TOML (_verify reports it): the line patterns
     start = next((i for i, ln in enumerate(lines) if _PROJECT_HEADER.fullmatch(ln)), None)
     if start is None:
         return lines  # no [project] table: _verify says so
     stop = next((i for i in range(start + 1, len(lines)) if _HEADER_RE.fullmatch(lines[i])), len(lines))
-    value = f'">={min_python}"'
     section, found = _REQUIRES_PYTHON.subn(lambda m: m.group(1) + value, "\n".join(lines[start + 1 : stop]), count=1)
     body = section.split("\n") if stop > start + 1 else []
     if not found:
@@ -554,17 +695,40 @@ def _set_requires_python(lines: list[str], min_python: str) -> list[str]:
     return [*lines[: start + 1], *body, *lines[stop:]]
 
 
+def _outside_block(lines: list[str], bounds: tuple[int, int] | None) -> list[str]:
+    return lines if bounds is None else [*lines[: bounds[0]], *lines[bounds[1] + 1 :]]
+
+
+def _adopted(cfg: Config, lines: list[str], bounds: tuple[int, int] | None) -> set[str]:
+    """The additive keys of the block that the project's [tool.uv] defines outside the markers."""
+    try:
+        data = tomllib.loads("\n".join(_outside_block(lines, bounds)))
+    except tomllib.TOMLDecodeError:
+        return set()  # _verify says what is wrong
+    return set(_table(data, "tool", "uv")) & set(tomllib.loads(managed_block(cfg))) & ADDITIVE_KEYS
+
+
+def _entry_key(entry: str) -> str:
+    """An entry of an additive list as uv reads it: blanks and quote style do not count, and the
+    package name is normalized (PEP 503: raylib_sdl is raylib-sdl)."""
+    compact = re.sub(r"\s+", "", entry).replace('"', "'")
+    name = re.match(r"[A-Za-z0-9._-]*", compact)
+    head = name.group() if name else ""
+    return re.sub(r"[-_.]+", "-", head).lower() + compact[len(head) :]
+
+
 def pyproject_expected(cfg: Config, text: str) -> str:
     """Return `text` (LF) with the managed parts rewritten: [project] requires-python and the marked
     block of [tool.uv] (inserted after the [tool.uv] header, or in a new [tool.uv] table, when both
     markers are missing). Unusable markers are a DeployError."""
     lines = _set_requires_python(_split(text), cfg.min_python)
-    block = _split(managed_block(cfg))
     bounds = _managed_bounds(lines)
+    block = _split(managed_block(cfg, leave=_adopted(cfg, lines, bounds)))
     if bounds:
         lines[bounds[0] : bounds[1] + 1] = block
     else:
-        header = next((i for i, ln in enumerate(lines) if _UV_HEADER.fullmatch(ln)), None)
+        headers = _headers(lines)
+        header = next((i for i in range(len(lines)) if _is_table(lines, headers, i, ("tool", "uv"), _UV_HEADER)), None)
         if header is None:
             while lines and not lines[-1].strip():
                 lines.pop()
@@ -598,28 +762,43 @@ def _without_managed(data: dict[str, Any], uv_keys: set[str]) -> dict[str, Any]:
 def _verify(cfg: Config, text: str, new: str) -> None:
     """Refuse (DeployError) a rewrite that gives invalid TOML, misses a managed value or would
     change anything outside the managed parts: nothing is ever lost silently."""
+    lines = _split(text)
+    bounds = _managed_bounds(lines)
+    old_keys: set[str] = set()
     try:
         old = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        raise DeployError(f"pyproject.toml is not valid TOML ({e}).\n  Fix it, then run ./deploy lock") from None
+        # Only one clash is repaired: the project's own list of an additive key next to the
+        # block's (it added it while the block had it too), when both halves read on their own;
+        # the rewrite leaves the key to the project. Anything else broken is the user's to fix.
+        rest: dict[str, Any] | None = None
+        if bounds is not None and _adopted(cfg, lines, bounds):
+            try:
+                tomllib.loads("\n".join(lines[bounds[0] : bounds[1] + 1]))
+                rest = tomllib.loads("\n".join(_outside_block(lines, bounds)))
+            except tomllib.TOMLDecodeError:
+                rest = None
+        if rest is None:
+            raise DeployError(f"pyproject.toml is not valid TOML ({e}).\n  Fix it, then run ./deploy lock") from None
+        old = rest
+    else:
+        if bounds:
+            try:
+                old_keys = set(tomllib.loads("\n".join(lines[bounds[0] : bounds[1] + 1])))
+            except tomllib.TOMLDecodeError:
+                pass  # the comparison below reports it
     managed = tomllib.loads(managed_block(cfg))
+    adopted = _adopted(cfg, lines, bounds)
+    written = set(managed) - adopted
     try:
         data = tomllib.loads(new)
     except tomllib.TOMLDecodeError as e:
         raise DeployError(
             f"pyproject.toml: writing the parts managed by pytemplate would give invalid TOML ({e}).\n"
-            f"  Does [tool.uv] repeat a managed key ({', '.join(managed)}) outside the markers? Delete it there\n"
+            f"  Does [tool.uv] repeat a managed key ({', '.join(sorted(written))}) outside the markers? Delete it there\n"
             "  (./deploy lock writes the managed block again), or restore the markers"
         ) from None
-    lines = _split(text)
-    bounds = _managed_bounds(lines)
-    old_keys: set[str] = set()
-    if bounds:
-        try:
-            old_keys = set(tomllib.loads("\n".join(lines[bounds[0] : bounds[1] + 1])))
-        except tomllib.TOMLDecodeError:
-            pass  # the comparison below reports it
-    if _without_managed(old, old_keys) != _without_managed(data, set(managed)):
+    if _without_managed(old, old_keys) != _without_managed(data, written):
         raise DeployError(
             "pyproject.toml: rewriting the parts managed by pytemplate would also change other settings\n"
             "  (is a key or table of yours between the markers?). Move it out of the managed block,\n"
@@ -628,8 +807,19 @@ def _verify(cfg: Config, text: str, new: str) -> None:
     if _table(data, "project").get("requires-python") != f">={cfg.min_python}":
         raise DeployError("pyproject.toml: requires-python could not be set: is the [project] table missing?")
     uv = _table(data, "tool", "uv")
-    if any(uv.get(key) != value for key, value in managed.items()):
+    if any(uv.get(key) != managed[key] for key in written):
         raise DeployError("pyproject.toml: the managed keys did not end up in [tool.uv]: restore the markers")
+    for key in sorted(adopted):
+        own = uv.get(key)
+        have = {_entry_key(v) for v in own if isinstance(v, str)} if isinstance(own, list) else set()
+        missing = [v for v in managed[key] if isinstance(v, str) and _entry_key(v) not in have]
+        if missing:
+            why = _WHY.get(key, "pytemplate.toml needs it")
+            raise DeployError(
+                f"pyproject.toml: [tool.uv] {key} is the project's own (outside the pytemplate markers), so the\n"
+                f"  managed block leaves that key to it; it must then also hold {', '.join(json.dumps(v) for v in missing)}\n"
+                f"  ({why}): add it to that list, then run the command again"
+            )
 
 
 def _read_pyproject() -> str:
@@ -644,9 +834,15 @@ def _read_pyproject() -> str:
 
 
 def _same_meaning(text: str, new: str) -> bool:
-    """Whether `new` says the same as `text` (both valid TOML: _verify ran). A TOML formatter such as
-    taplo (Even Better TOML, LazyVim's toml extra) re-indents and re-spaces comments; that is fine."""
-    return text == new or tomllib.loads(text) == tomllib.loads(new)
+    """Whether `new` says the same as `text` (`new` is valid TOML: _verify ran; `text` may repeat an
+    additive key the block now leaves out). A TOML formatter such as taplo (Even Better TOML,
+    LazyVim's toml extra) re-indents and re-spaces comments; that is fine."""
+    if text == new:
+        return True
+    try:
+        return tomllib.loads(text) == tomllib.loads(new)
+    except tomllib.TOMLDecodeError:
+        return False
 
 
 def check_pyproject(cfg: Config) -> None:

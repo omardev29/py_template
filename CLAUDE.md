@@ -535,7 +535,7 @@ header rules (with detector tests proving each rule fires).
 |---|---|
 | `deploy.py` (one level up) | Stops with exit 3 and one `error:` line (no traceback) when uv started it on Python < 3.11 (a `uv run` by hand with an old `UV_PYTHON`), BEFORE importing the runner; reconfigures stdout/stderr to UTF-8, puts its own dir on `sys.path`, calls `runner.cli.main`. |
 | `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `FORWARDS` / `HELP_PASSES_THROUGH` (section 5.2); `INTERNAL` (routes listed nowhere: `__init`). `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main`/`_main` (exception -> exit code, closed stdout), `cmd_help` (commands and `[tasks]` entries), `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
-| `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file` (section 6.1), `toml_value`. |
+| `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file` (section 6.1), its TOML statement scanner `scan` (render reads pyproject.toml with it, 6.3), `toml_value`. |
 | `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL` (`wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C and passes SIGTERM/SIGHUP on), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`. |
@@ -656,12 +656,13 @@ header rules (with detector tests proving each rule fires).
 - `-q` hides progress (`ui.step`, `ui.command`, `ui.ok`, `ui.info`), never what was asked for:
   `ui.report` (the `tasks` list, the stderr of a failed query, the `selftest --shells` list,
   result table and failure/skip lines), warnings, errors and
-  `check_line` always print, and a dry run ignores `-q` (its output is the plan). Still
-  `ui.info` (hidden by `-q`): the `mode` display (`cmd_mode._describe`) and `render
-  --check/--diff` lists (`cmd_mode.cmd_render`, `render.apply`). uv's own progress (`Resolved`,
-  `Installed`, `Checked`...) is progress too: under `-q`, `envs.uv` passes `--quiet` to every uv
-  call it echoes (uv still prints its errors and warnings; the output of what `uv run` starts is
-  untouched), never to a captured query the runner reads.
+  `check_line` always print, and a dry run ignores `-q` (its output is the plan). Results are
+  `ui.report` too, so `-q` keeps them: the `mode` display (`cmd_mode._describe`; only its
+  `ui.step` header goes), the paths `render` lists (`cmd_mode.cmd_render`: outdated, updated,
+  would update) and the `render --diff` output (`render.apply`). uv's own progress
+  (`Resolved`, `Installed`, `Checked`...) is progress too: under `-q`, `envs.uv` passes
+  `--quiet` to every uv call it echoes (uv still prints its errors and warnings; the output of
+  what `uv run` starts is untouched), never to a captured query the runner reads.
 - `ui.error` prints `error: ` and `ui.warn` prints `warning: ` (only the prefix is coloured on a
   TTY). The VS Code problem matcher `RULES_RE` and the Neovim parser `tasks.parse_line` depend
   on these exact prefixes and on `str(lintc.Finding)` (`src/...:N: msg`, relative to ROOT): do
@@ -701,7 +702,9 @@ header rules (with detector tests proving each rule fires).
   `+` new or `~` replaced, the dependencies removed and added, the pinned versions, and what
   happens to `pyproject.toml` and `uv.lock`. `new` checks the destination and the name
   (format, `check_name_free`) and prints destination, preset, name, the number of pins and the
-  `__init` step it would run in the copy. `pyz-merge` validates its inputs (`pyz.check_parts`:
+  `__init` step it would run in the copy, then `git init -b main`, or why not (DIR inside the
+  work tree of another repository, `cmd_mode._work_tree_top`, with the CI warning of section
+  13.2; no git). `pyz-merge` validates its inputs (`pyz.check_parts`:
   valid `_pyz.json`, one app, one build) and prints inputs and outputs (the `.pyz` and its
   `.cmd`).
 - `nvim trust`, `extras`, `bootstrap` and `sync` print what they would do.
@@ -999,8 +1002,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `multi_file`, `separate`, `strict_dunder_typing`. `config._validate_compile` checks the names
   against each other: no entry of `modules` inside another (or repeated: mypyc aborted with
   "Duplicate module"), every `exclude` strictly inside a `modules` entry (a module or a
-  subpackage: it excludes everything below it). Whether they exist is checked by
-  `mypyc.compiled_sources` (an `exclude` that names nothing is an error, not a silent no-op).
+  subpackage: it excludes everything below it). Each `modules` entry is the path Python imports
+  (`config.compiled_paths`: a folder with `__init__.py`, else `<name>.py`, else a namespace
+  folder; a folder left holding only `__pycache__` never hides the module file, and the pyright
+  strict list follows it too). Whether they exist is checked by `mypyc.compiled_sources`: an
+  entry that does not exist or holds no module, or an `exclude` that names nothing, is an error
+  naming the candidates, never a silent no-op.
 - `[deploy]`: `optimize 0|1|2`, `default {backend: method}` (merged over
   `config.DEFAULT_METHODS` in `DeployConfig.__post_init__`: a backend left out keeps its method,
   cpython/mypyc `exe`, pypy `portable`; each method must be allowed by `cmd_build.COMPAT` for its
@@ -1043,7 +1050,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (`config._statements`: the four string kinds, multi-line arrays and inline tables, comments,
   dotted and quoted keys) finds the value's span, which may cover several lines (taplo, the
   LazyVim TOML formatter, expands long arrays), and replaces only that span: the comment after
-  it, the other lines and the line endings stay. A missing key goes after the table's last key
+  it, the other lines and the line endings stay. A list that replaces a multi-line array with
+  comments inside keeps that layout (`config._array_lines`): an element that stays keeps its
+  line, the comment on it and the comment lines above it, a new one gets a line of its own, and
+  one that goes takes its comments with it (mode dropped them all). An array without comments,
+  or one it cannot lay out (several elements on a line, numbers, nested values), is written on
+  one line. A missing key goes after the table's last key
   (a missing table at the end) with the file's line ending. The result is re-parsed and must
   equal the old data with only that key changed; anything else (the table written as an inline
   table, the key defined as a table) is a `DeployError` asking to edit it by hand.
@@ -1051,6 +1063,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 - `config.update_file` applies every change in memory first, writes only when something changed
   and never under `--dry-run`, keeps a UTF-8 BOM and the line endings, and never writes broken
   TOML. `mode` drops changes whose value is already set, so their spelling stays.
+- `mode` keeps the old bytes of `pytemplate.toml`, `pyproject.toml` and `uv.lock` (the lock next to
+  `pyproject.toml`) and puts them back (`cmd_mode._restore`) when
+  `config.update_file`, `cmd_env.ensure_lock` or the new environment's `envs.sync` fails or is
+  interrupted, saying which files it restored; the generated files are rendered only after that,
+  so a failed mode leaves nothing half-applied and a second run locks again (it used to find
+  nothing to change and report success with a stale `uv.lock`).
 
 ### 6.2 Generated files and `state.json`
 
@@ -1076,7 +1094,13 @@ re-rendering.
   not UTF-8 (PS 5.1 `>` writes UTF-16), not JSON, not an object, or `files` not an object; an
   entry whose value is not a sha256 counts as unrecorded): every generated file is overwritten
   without warning, and the next write is valid UTF-8 JSON. It is read as `utf-8-sig`, so a BOM
-  does not disable hand-edit detection. `_save_state` keeps every other top-level key (`./deploy
+  does not disable hand-edit detection. A file with git conflict markers (README's procedure
+  after such a merge is `./deploy render`) keeps the top-level keys both sides agree on
+  (`render._unconflicted`, diff3 style too) without `files`: every generated file is written
+  again and the `applied` record survives (it was lost, and a later apply refused with a false
+  "app.preset was changed"); a key the sides disagree on is dropped (apply records it again).
+  `cmd_apply.load_record` reads the file itself, so run `./deploy render` (or any rendering
+  command) before `./deploy apply` after such a merge. `_save_state` keeps every other top-level key (`./deploy
   apply` records its own) and the key order. Hashes of files no longer generated stay recorded
   (a file that comes back keeps its hand-edit protection).
 - `--check` and `--dry-run` write nothing. A folder in the way, or a read/write error, is a
@@ -1101,8 +1125,11 @@ Formats:
 - Path styles differ per tool: `.build/cfg/mypy-*.ini` uses relative `mypy_path = src` /
   `files = src, tests`, so mypy must run with cwd = ROOT (the `proc.run` default); the ruff and
   pyright copies under `.build/cfg` use absolute paths (`absolute=True`) because those tools
-  resolve paths relative to the config file; the compile-time `mypy.ini` only carries an
-  absolute `typings` path because mypyc runs with cwd = stage.
+  resolve paths relative to the config file; the compile-time `mypy.ini` (`render.mypy_ini`
+  with `for_compile=` the folder it is written to: the mypyc profile dir, the wheel's work dir)
+  only carries `mypy_path = $MYPY_CONFIG_FILE_DIR/<relative path to typings>`, because mypyc
+  runs with cwd = stage and mypy splits `mypy_path` on `,` and `:` before expanding variables (an
+  absolute path in a project folder with a comma lost typings/).
 
 ### 6.3 `pyproject.toml` managed parts
 
@@ -1110,7 +1137,12 @@ Formats:
   quoted key, any indent), is rewritten to `">=<min_python>"` (the lowest supported minor:
   usually PyPy's 3.11 with PyPy, else `python.cpython`) and inserted under `[project]` when
   missing (`render._set_requires_python`); a `requires-python` of another table is never
-  touched.
+  touched. The key, the `[project]` and `[tool.uv]` headers and the headers around the markers
+  (`render._headers`) are found with the TOML statement scanner (`config.scan`, the one
+  `set_value` uses): a line of a multi-line string or array that looks like a header or the key
+  never counts (a `[beta]` line in a multi-line description ended the `[project]` scan early,
+  a second requires-python was inserted and lock, mode and apply refused a valid file). Text the
+  scanner cannot read falls back to the line patterns, and `_verify` reports it.
 - The `[tool.uv]` block between `# >>> pytemplate` and `# <<< pytemplate`
   (`render.managed_block`). The END MARKER IS AN INLINE COMMENT on the last key line
   (`python-preference = "only-managed"  # <<< pytemplate`) so uv/toml_edit insertions cannot
@@ -1130,7 +1162,19 @@ Formats:
 - `render._verify` refuses (DeployError, nothing written) a rewrite that would give invalid TOML
   (e.g. a managed key repeated outside the markers), change anything but requires-python and the
   block's keys (a user key or table between the markers), or leave a managed value out of
-  `[tool.uv]`. `pyproject_outdated` never raises (an unusable file counts as outdated, and
+  `[tool.uv]`.
+- Additive lists (`render.ADDITIVE_KEYS`: `override-dependencies`, `constraint-dependencies`,
+  `build-constraint-dependencies`, `no-build-package`, `no-binary-package`,
+  `no-build-isolation-package`) belong to the project when its `[tool.uv]` defines them outside
+  the markers (`render._adopted`): `managed_block(cfg, leave=...)` then leaves the key out, and
+  `_verify` requires the project's list to hold the block's entries (compared by
+  `render._entry_key`: blanks, quote style and the PEP 503 name do not count), naming the
+  missing ones and why (`render._WHY`). Before, the block owned the whole key: a project that
+  kept its own overrides could not enable PyPy (a repeated key), and a raylib project could not
+  add a `no-build-package`. A file that already repeats such a key (the project added its list
+  while the block had one) is repaired by the next rewrite when the block and the rest each read
+  on their own; any other invalid TOML stays an error.
+  Entries typed INSIDE the markers are still replaced (the block is generated). `pyproject_outdated` never raises (an unusable file counts as outdated, and
   `./deploy lock` then explains); `render.check_pyproject(cfg)` runs the same checks without
   writing, as a preflight for commands that change other files first.
 - `render.auto` only warns (`pyproject_outdated`); `write_pyproject` runs in `lock`, `mode`,
@@ -1199,7 +1243,9 @@ Formats:
   `./deploy lock`.
 - With PyPy supported the block adds
   `override-dependencies = ["cffi>=1.15.1; implementation_name == 'cpython'"]`: PyPy ships
-  cffi built in and uv would otherwise try to build cffi from PyPI.
+  cffi built in and uv would otherwise try to build cffi from PyPI. A project with its own
+  `override-dependencies` outside the markers keeps it, and that list must hold the cffi entry
+  (section 6.3).
 - Dev group (`pyproject.toml [dependency-groups] dev`): `debugpy`, `mypy` (needs the Rust
   `ast-serialize`: no PyPy wheels), `pyinstaller`, `ruff` and `setuptools` carry
   `implementation_name == 'cpython'`; `.venv-pypy` only gets the app deps plus pytest.
@@ -1248,7 +1294,12 @@ Formats:
   pattern): mypy's `RawConfigParser` refuses a repeated section, and a pattern repeated in a
   comma list silently replaced the earlier options. pyright's `strict` list has no exclusion,
   so a compiled package that holds an excluded path is listed by its other files and folders
-  (`render._paths_without`, only then does the list depend on the files in `src/`); with
+  (`render._paths_without`, only then does the list depend on the files in `src/`); a folder
+  counts only when it holds a `.py`/`.pyi` file (`render._holds_python`, also for `tests/` in
+  `.mypy.ini` and pyright's `include`): a folder left holding only `__pycache__` (a subpackage
+  deleted with `git rm -r`) made the committed file differ from a fresh clone's, and CI's
+  `render --check` failed. An untracked `.py` file does count, like any source file: commit it
+  with the regenerated `pyrightconfig.json`; with
   basedpyright the excluded paths come first in `executionEnvironments` (the first match wins)
   without the Any rules. The same sections reach the stage's compile-time `mypy.ini`.
 - `cmd_dev.run_checks(cfg, backend, rules=True)`:
@@ -1286,9 +1337,10 @@ Formats:
   (the extension loader wins) so pyz/portable can fall back to the `.py` on another interpreter.
 - Profiles: `dev` (run, test, compile, report) keeps asserts, `debug_level "1"`; `release`
   (build, `compile --release`) strips asserts when `deploy.optimize >= 1`, `debug_level "0"`.
-- `compiled_sources`: the `.py` files of `compile.modules` (never `__init__.py`), minus
-  `compile.exclude` (exact module or package prefix; an entry naming nothing -> `DeployError`),
-  deduplicated. Walks with `mypyc._walk`, like `sync_tree`.
+- `compiled_sources`: the `.py` files of `compile.modules` (never `__init__.py`; each entry
+  resolved like Python's import by `config.compiled_paths`, section 6.1; an entry that does not
+  exist or holds no module -> `DeployError`), minus `compile.exclude` (exact module or package
+  prefix; an entry naming nothing -> `DeployError`), deduplicated. Walks with `mypyc._walk`, like `sync_tree`.
 - `sync_tree(src, dst, owned=())` copies changed files only and deletes removed ones. Change
   detection is size + `st_mtime_ns` (`copy2` preserves the exact mtime), so a same-size edit
   within one second is detected. `_walk` follows symlinked folders (`Path.rglob` does not
@@ -1427,10 +1479,12 @@ Formats:
   `lintc` does not import `presets` or `mypyc`.
 - With PyPy supported user code must be 3.11 syntax and API (no PEP 695;
   `typing_extensions.override`, not `typing.override`). `mode --supports +pypy` prechecks it
-  (`cmd_mode._precheck_py311`): it syncs the tools env first (a stale `uv.lock` fails in uv's
-  own step; not under `--dry-run`), then ruff `--target-version py311` syntax rules (exit 1 =
-  findings; any other code = "could not run ruff"), then the mypy errors that appear only as
-  3.11 (`PRECHECK_MYPY_FLAGS`: `--config-file=` so the project's `.mypy.ini` is never read,
+  (`cmd_mode._precheck_py311`, named after the default pin: it checks `Config.pypy_minor`, the
+  Python of `python.pypy`, so a project pinned to `pypy@3.12.x` may use 3.12 code): it syncs the
+  tools env first (a stale `uv.lock` fails in uv's own step; not under `--dry-run`), then ruff
+  `--target-version py3XX` syntax rules (exit 1 = findings; any other code = "could not run
+  ruff"), then the mypy errors that appear only as that version and not as `python.cpython`
+  (`PRECHECK_MYPY_FLAGS`: `--config-file=` so the project's `.mypy.ini` is never read,
   where the default `off` profile sets `ignore_errors`, and `--check-untyped-defs`); a mypy
   abort (exit 2) is a `DeployError` with mypy's output, never a silent pass.
 
@@ -1793,8 +1847,9 @@ Per method:
   then runs the copy's own runner with `__init <preset> --name <n> --force` inside the copy,
   `git init -b
   main` (the generated CI runs on `main`; git < 2.28: plain `init` + `symbolic-ref HEAD
-  refs/heads/main`; nothing inside an existing work tree) and `git add --chmod=+x deploy
-  deploy.ps1`. When the copy or `__init` fails (a name uv refuses, no network, Ctrl+C) `new`
+  refs/heads/main`; nothing inside an existing work tree, where `cmd_mode.cmd_new` then warns
+  that the generated CI will not run: `cmd_mode._monorepo_note`, section 13.2) and `git add
+  --chmod=+x deploy deploy.ps1`. When the copy or `__init` fails (a name uv refuses, no network, Ctrl+C) `new`
   removes what it created (the folder and the parents it made, or only the content of the
   empty folder it was given) and says so; a folder with content is refused before anything
   is written.
@@ -2190,9 +2245,10 @@ short temp tree and unset `NVIM_APPNAME`.
   `./deploy init` exits 2 with its hint; `new` and the maintainer route through `__init`, for
   real in throwaway copies),
   `test_config_rules.py` (every schema field and validate rule with a positive and a negative
-  case, the encodings, `set_value`/`update_file` on taplo-formatted, CRLF and BOM files, `mode`
-  argument parsing, and real `mode --typing/--editor/--supports` round trips in a throwaway
-  copy that must restore every byte), `test_cli_core.py` (the runner's core: global options,
+  case, the encodings, `set_value`/`update_file` on taplo-formatted, CRLF and BOM files and
+  commented multi-line arrays, `mode` argument parsing, a failed re-lock or sync putting every
+  file back (a fake uv), `new --dry-run` inside another git work tree, and real `mode
+  --typing/--editor/--supports` round trips in a throwaway copy that must restore every byte), `test_cli_core.py` (the runner's core: global options,
   dispatch, render-before-command, help, the exit code of every outcome, every command rejecting
   a bogus argument, `proc.run` dry-run/errors/signals/threads, `base_env` per variable, Ctrl+C
   and a SIGTERM/SIGHUP passed on, with real children that trap them, a closed stdout, `[tasks]`
@@ -2379,7 +2435,9 @@ short temp tree and unset `NVIM_APPNAME`.
   and pinned by `test_ci_workflow_keeps_its_moving_parts_on_purpose`: setup-uv gets no
   `version:`, so it installs the newest uv that satisfies pyproject's `required-version` (a
   pinned uv cannot download Pythons released after it), and the runner labels stay `-latest`
-  (GitHub retires a pinned label about six months after a newer image is GA).
+  (GitHub retires a pinned label about six months after a newer image is GA). It runs only
+  when the project is the root of its repository (GitHub reads `<top>/.github/workflows/`):
+  `new` warns when it creates a project inside another work tree (section 15.2).
 - **[template repo]** `template-selftest.yml` (push to `main`, pull requests, weekly and by
   hand; the gate): `./deploy render --check` first, then `setup` and `./deploy selftest` on
   ubuntu, macos and windows-latest (Windows through `deploy.ps1`, `--basetemp` in
@@ -2870,6 +2928,12 @@ mypy and mypyc:
   refuses `strict` (6.1, 8). Test:
   `test_mypyc_core.py::test_mypy_ini_merges_overrides_with_the_generated_sections`,
   `test_config_rules.py::test_mypy_overrides_invalid`. Goes: never.
+- **mypy splits `mypy_path` on `,` and `:` before it expands variables** (LIMITATION): the
+  absolute typings path of the compile-time mypy.ini fell apart in a project folder with a
+  comma (or a colon), so mypyc lost the project's stubs (the raylib preset's) and refused the
+  skeleton. Fix: `render.mypy_ini` writes it relative to the ini as
+  `$MYPY_CONFIG_FILE_DIR/<relative path>` (6.2). Test:
+  `test_mypyc_core.py::test_compile_mypy_ini_finds_typings_in_any_project_folder`. Goes: never.
 
 setuptools:
 - **An extension is rebuilt only when a source is newer** (LIMITATION): a new `opt_level`, C
@@ -3548,6 +3612,14 @@ Behaviour:
   `% ! " ^ & | < >`; PowerShell drops a bare `--`; xonsh `-c` exits 1 on any failing command
   (the child's real code is in its `CalledProcessError`).
 - `uv build` drops a `.gitignore` into `dist/<n>-<b>-wheel/`.
+- A project inside a bigger git repository (supported: `new` skips `git init`, the hook finds
+  the repository top) still gets its generated CI at `<project>/.github/workflows/ci.yml`, which
+  GitHub never runs (it reads `<top>/.github/workflows/` only), and whose steps expect the
+  project at the checkout root. `new` warns when it creates one there
+  (`cmd_mode._monorepo_note`); a project moved into a repository later gets no warning (render
+  runs no git, doctor does not check it). A fix would generate a relocatable workflow (a
+  `PROJECT` folder for `defaults.run.working-directory` and the artifact paths) for the user to
+  place at the top, or a doctor line.
 - flet presets: `constraints.txt` gives a new project httpx 0.28.1, but flet 1.0.1 only asks
   for `httpx>=0.28.1`, so `./deploy lock --upgrade` takes httpx 1.x once it is final, and its
   1.0 dev releases drop `AsyncClient`, which `flet.auth` (OAuth; not used by the skeleton)
@@ -3569,6 +3641,17 @@ Editors:
   are missed); for multi-line basedpyright messages only the first line is used (the rule code
   is lost); MSVC/gcc errors are not matched.
 - `actboy168.tasks` is a small third-party extension (disabled in Restricted Mode).
+- With PyPy supported, VS Code's mypy extension (mypy-type-checker) checks as the `.venv`
+  Python, not as `min_python`: an API that 3.11 lacks (`typing.override`) passes there while
+  `./deploy check` (`render.mypy_cli_args`), the Neovim linter and Pylance/basedpyright
+  (`pythonVersion`) flag it. `python_version` cannot go into `.mypy.ini`: without
+  `--python-executable` mypy then looks for a `python3.11` (`py -3.11` on Windows) for the
+  site-packages and stops without one, or reads another environment's packages with one; the
+  extension passes no `--python-executable` (it substitutes `${interpreter}` only in
+  `mypy-type-checker.path`), and a per-OS `.venv` path cannot go into a file committed for every
+  OS. Not fixed (unverifiable here: VS Code itself is untested, section 13.3); a candidate is a
+  generated `mypy-type-checker.path` of `${interpreter} -m mypy --python-version X
+  --python-executable ${interpreter}`, once verified in VS Code.
 - Stopping the flet `dev` task (hot reload) on Windows, from VS Code or Neovim, relies on
   ConPTY closing and uv's job object killing `flet.exe`: not verified.
 - Extras imported from `.lazy.lua` show as "not managed" in `:LazyExtras` and change
@@ -3613,6 +3696,8 @@ Code coupling (rename together):
   `config._presets` mirrors `presets.available`; `render.managed_block` needs `pypy_minor`
   (PyPy's environment) and `min_python` (requires-python) to stay distinct.
 - `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`;
+  `cmd_mode._work_tree_top` calls the private `presets._git_env` (the same git environment as
+  `presets._git_init`, whose "inside a work tree" rule it mirrors for `new`);
   `e2e.flet_build_reason` imports `methods.flet._developer_mode`; `cmd_nvim.c_compiler`
   imports `cmd_env._msvc` and `_xcode_problem` lazily (`cmd_env` imports `cmd_nvim`).
 - `RULES_RE` / `tasks.parse_line` <-> `ui.error`, `ui.warn`, `str(lintc.Finding)` (5.3).

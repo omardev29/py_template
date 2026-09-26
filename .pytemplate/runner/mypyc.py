@@ -105,12 +105,15 @@ def compiled_sources(cfg: Config) -> list[Path]:
     files: list[Path] = []
     for rel_path in compiled_paths(cfg):
         path = SRC / rel_path
+        stem = rel_path.removesuffix(".py")
         if path.is_dir():
             candidates = sorted(p for p in _walk(path) if p.suffix == ".py" and p.name != "__init__.py" and p.is_file())
+            if not candidates:  # an entry that compiles nothing is a mistake, never skipped silently
+                raise DeployError(f"compile.modules: neither src/{stem}.py nor src/{stem}/ holds a module to compile")
         elif path.is_file():
             candidates = [path]
         else:
-            raise DeployError(f"compile.modules: src/{rel_path} does not exist")
+            raise DeployError(f"compile.modules: neither src/{stem}.py nor src/{stem}/ exists")
         for p in candidates:
             name = module_name(p, SRC)
             hits = {ex for ex in cfg.compile.exclude if name == ex or name.startswith(ex + ".")}
@@ -271,7 +274,7 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
     ui.detail(f"  stage: {changed} file(s) updated in {rel(prof.stage)}")
 
     config_file = prof.dir / "mypy.ini"
-    config_file.write_text(render.mypy_ini(cfg, "mypyc", for_compile=True), encoding="utf-8", newline="\n")
+    config_file.write_text(render.mypy_ini(cfg, "mypyc", for_compile=prof.dir), encoding="utf-8", newline="\n")
     spec: dict[str, object] = {
         "stage": str(prof.stage),
         "config": str(config_file),

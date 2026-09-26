@@ -486,9 +486,11 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     if not APP_NAME.fullmatch(cfg.app.name):
         raise DeployError(f"pytemplate.toml: 'app.name' only allows {NAME_RULE}")
     if not re.fullmatch(r"[a-z][a-z0-9_-]*", cfg.app.preset) or not (PRESETS / cfg.app.preset / "preset.toml").is_file():
-        raise DeployError(
+        raise DeployError(  # every command validates first: the hint is an edit of the file
             f"pytemplate.toml: app.preset = {cfg.app.preset!r} is not a preset of this template "
-            f"(available: {', '.join(_presets()) or 'none'}). To start from another preset: ./deploy new DIR --preset P"
+            f"(available: {', '.join(_presets()) or 'none'}): set app.preset in pytemplate.toml back to "
+            "the preset this project was made from (a project cannot switch presets; for another one, "
+            "./deploy new DIR --preset P works again once this file loads)"
         )
 
     _check_schema(cfg.schema)
@@ -507,9 +509,10 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
         raise DeployError(f"pytemplate.toml: 'backend.supported' lists {', '.join(twice)} more than once")
     _one_of(cfg.backend.active, BACKENDS, "backend.active")
     if cfg.backend.active not in cfg.backend.supported:
-        raise DeployError(
+        raise DeployError(  # `./deploy mode` loads this file first: the hint is an edit of the file
             f"pytemplate.toml: backend.active = {cfg.backend.active!r} is not in backend.supported "
-            f"{cfg.backend.supported}. Use: ./deploy mode {cfg.backend.active} --supports +{cfg.backend.active}"
+            f"{cfg.backend.supported}: add it to backend.supported, or set backend.active to one of them, "
+            "in pytemplate.toml (then ./deploy apply)"
         )
     # [0-9], never \d: \d also matches other scripts' digits ("\u0663.\u0661\u0664")
     if not re.fullmatch(r"[0-9]+\.[0-9]+", cfg.python.cpython):
@@ -726,11 +729,18 @@ def load(builtin_commands: set[str] | None = None) -> Config:
 
 
 def compiled_paths(cfg: Config) -> list[str]:
-    """Return the paths (relative to src/) of the modules/packages in compile.modules."""
+    """Return the paths (relative to src/) of the modules/packages in compile.modules.
+
+    The one Python imports: a folder with __init__.py (a package) wins over <name>.py, and
+    <name>.py wins over a folder without __init__.py (a package turned into a module leaves its
+    __pycache__ folder behind); a folder alone is a namespace package.
+    """
     out: list[str] = []
     for m in cfg.compile.modules:
         base = m.replace(".", "/")
-        out.append(base if (SRC / base).is_dir() else base + ".py")
+        folder = SRC / base
+        package = (folder / "__init__.py").is_file() or not (SRC / f"{base}.py").is_file()
+        out.append(base if package and folder.is_dir() else base + ".py")
     return out
 
 
@@ -901,15 +911,85 @@ def _statements(text: str) -> list[_Stmt]:
     return out
 
 
-def _edited(text: str, path: tuple[str, ...], rendered: str) -> str:
-    """`text` with the value at `path` replaced by `rendered` (or the key/table added)."""
+def scan(text: str) -> list[_Stmt] | None:
+    """The top-level statements of a TOML text (table headers, array-of-tables headers and keys,
+    with their offsets), or None when the scanner cannot read it (not valid TOML). render reads
+    pyproject.toml with it: a line of a multi-line string is never taken for a header or a key."""
+    try:
+        return _statements(text)
+    except _ScanError:
+        return None
+
+
+def _array_lines(span: str, value: list[Any]) -> str | None:
+    """`value` in the layout of the old multi-line array `span`, with its comments: an element that
+    stays keeps its line (and the comment on it) and the comment lines just above it, a new one
+    gets a line of its own, one that goes takes its comments with it. None when the old array holds
+    no comment (the caller writes one line) or has a layout this does not handle (several elements
+    on a line, nested arrays or tables, a number: the caller writes one line then too)."""
+    if not (span.startswith("[") and span.endswith("]") and "\n" in span):
+        return None
+    eol = "\r\n" if "\r\n" in span else "\n"
+    pieces = [p.removesuffix("\r") for p in span[1:-1].split("\n")]
+    first, middle, last = pieces[0], pieces[1:-1], pieces[-1]
+    if (first.strip() and not first.strip().startswith("#")) or last.strip():
+        return None
+    commented = first.strip().startswith("#")
+    entries: list[tuple[Any, str, list[str]]] = []  # (element, its line, the lines above it)
+    above: list[str] = []
+    indent: str | None = None
+    for line in middle:
+        body = line.strip()
+        if not body or body.startswith("#"):
+            commented = commented or bool(body)
+            above.append(line)
+            continue
+        lead = len(line) - len(line.lstrip(" \t"))
+        if line[lead] in "[{":
+            return None
+        try:
+            stop = _value_end(line, lead)
+            item = tomllib.loads("v = " + line[lead:stop])["v"]
+        except (_ScanError, tomllib.TOMLDecodeError):
+            return None
+        rest = line[stop:].lstrip(" \t")
+        if rest.startswith(","):
+            rest = rest[1:].lstrip(" \t")
+        else:  # the last element may have no comma: it may not stay the last
+            line = line[:stop] + "," + line[stop:]
+        if rest and not rest.startswith("#"):
+            return None  # another element on the same line
+        commented = commented or bool(rest)
+        indent = line[:lead] if indent is None else indent
+        entries.append((item, line, above))
+        above = []
+    if not commented:
+        return None
+    out = ["[" + first]
+    used: set[int] = set()
+    for v in value:
+        hit = next((i for i, e in enumerate(entries) if i not in used and type(e[0]) is type(v) and e[0] == v), None)
+        if hit is None:
+            out.append(f"{'    ' if indent is None else indent}{toml_value(v)},")
+        else:
+            used.add(hit)
+            out += [*entries[hit][2], entries[hit][1]]
+    out += above  # the comment lines after the last element
+    out.append(last + "]")
+    return eol.join(out)
+
+
+def _edited(text: str, path: tuple[str, ...], rendered: str, value: Any = None) -> str:
+    """`text` with the value at `path` replaced by `rendered` (or the key/table added). A list
+    `value` that replaces a multi-line array with comments inside keeps them (_array_lines)."""
     stmts = _statements(text)
     m = re.search(r"\r?\n", text)
     eol = m.group() if m else "\n"
     hit = next((s for s in stmts if s.kind == "key" and not s.in_array and s.path == path), None)
     if hit:  # only the value changes: a comment after it and the line ending stay
         start, stop = hit.value
-        return text[:start] + rendered + text[stop:]
+        kept = _array_lines(text[start:stop], value) if isinstance(value, list) else None
+        return text[:start] + (rendered if kept is None else kept) + text[stop:]
     line = f"{path[-1]} = {rendered}{eol}"
     header = next((n for n, s in enumerate(stmts) if s.kind == "table" and s.path == path[:-1]), None)
     if header is None:  # a new table at the end, after a blank line
@@ -942,16 +1022,18 @@ def set_value(text: str, table: str, key: str, value: Any) -> str:
         before = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise DeployError(f"pytemplate.toml is not valid TOML: {e}") from None
-    try:
-        new: str | None = _edited(text, path, rendered)
-    except _ScanError:
-        new = None
-    if new is None or not _only_changed(before, new, path, value):
-        raise DeployError(
-            f"pytemplate.toml: could not set {'.'.join(path)} automatically (unusual layout): "
-            f"set it by hand to {key} = {rendered} in [{table}]"
-        )
-    return new
+    # A list first in the layout of the old array (its comments kept), else on one line
+    for layout in ((value, None) if isinstance(value, list) else (None,)):
+        try:
+            new = _edited(text, path, rendered, layout)
+        except _ScanError:
+            continue
+        if _only_changed(before, new, path, value):
+            return new
+    raise DeployError(
+        f"pytemplate.toml: could not set {'.'.join(path)} automatically (unusual layout): "
+        f"set it by hand to {key} = {rendered} in [{table}]"
+    )
 
 
 def _only_changed(before: dict[str, Any], text: str, path: tuple[str, ...], value: Any) -> bool:
