@@ -488,10 +488,10 @@ header rules (with detector tests proving each rule fires).
 - `./deploy shell-setup [xonsh|pwsh|powershell|bash|zsh|niubash|msys2|fish|nu]`
   (`shells.cmd_shell_setup`; no argument guesses the shell (`shells.guess_shell`): the
   `ps1:`/`sh:niubash` prefix or the `nu` of `PYTEMPLATE_LAUNCHER`, then `XONSH_VERSION`, then
-  the basename of `SHELL` (bash, zsh, fish, nu, pwsh), and only then the `sh:zsh`/`sh:bash` prefix, which names
-  the interpreter of `#!/bin/sh` (Git Bash/MSYS2 without `SHELL`); unknown shell exits 2):
-  prints a `deploy` function/alias that works
-  from any subfolder, plus where to paste it. Output is ASCII with LF even on Windows (written
+  the basename of `SHELL` (bash, zsh, fish, nu, pwsh), and only then the `sh:zsh`/`sh:bash`
+  prefix, which names the interpreter of `#!/bin/sh` (Git Bash/MSYS2 without `SHELL`); unknown
+  shell exits 2): prints a `deploy` function/alias that works from any subfolder, plus where
+  to paste it. Output is ASCII with LF even on Windows (written
   to `stdout.buffer`: it is appended to rc files); a user's file named in a header that is not
   ASCII (a `NIU_ENV` or MSYS2 home with an accent) is written `$NIU_ENV` or
   `<MSYS2 root>\home\<you>\.bashrc` instead. bash, zsh, niubash and msys2 share one POSIX
@@ -515,12 +515,12 @@ header rules (with detector tests proving each rule fires).
   `[install [--force]|...]`, `COMMAND` = the command and task names for `help`), and the
   completer skips the global options before the command (`shells.GLOBAL_OPTIONS`, those of
   `cli._parse_globals`: `test_xonsh_completer_after_hooks_help_and_global_flags`, offline
-  with xonsh stubbed). Unlike the launchers it keeps the
-  caller's `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` (a returned argv cannot
-  change the environment), so the runner's version check (section 5.2) is its guard. `test_shells` executes the fish, pwsh and xonsh
-  snippets in their shells (argv, exit codes, walk-up, the xonsh completer, pwsh pipeline
-  input); the nu one only where nu is installed (the macOS jobs of template-selftest and
-  template-launchers install nushell).
+  with xonsh stubbed). Unlike the launchers it keeps the caller's `UV_PYTHON`, `PYTHONHOME`,
+  `PYTHONPATH` and `UV_WORKING_DIR` (a returned argv cannot change the environment), so the
+  runner's version check (section 5.2) is its guard. `test_shells` executes the fish, pwsh,
+  xonsh and nu snippets in their shells (argv, exit codes, walk-up, the xonsh completer, pwsh
+  pipeline input, the nu fallback to the launcher); the nu one only where nu is installed (the
+  macOS jobs of template-selftest and template-launchers install nushell).
 - `shells.doctor(check)` (from `./deploy doctor`): step "launchers": the launcher that started
   the run, then `deploy` (`#!/bin/sh`, LF, ASCII, git mode 100755, exec bit on POSIX),
   `deploy.cmd` (CRLF, ASCII) and `deploy.ps1` (LF, ASCII, no BOM; a mode other than 100755 is
@@ -565,9 +565,10 @@ header rules (with detector tests proving each rule fires).
 ### 5.2 Call flow
 
 1. Launcher -> `uv run --quiet --script .pytemplate/deploy.py ARGS` (the caller's `UV_PYTHON`,
-   `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` removed, section 4.1). uv reads the `.python-version` found from the script's folder upward
-   (the project's, i.e. `python.cpython`) and the managed `python-preference`, so the runner
-   runs on the project's managed CPython (in a cached ephemeral env, maybe downloaded first)
+   `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` removed, section 4.1). uv reads the
+   `.python-version` found from the script's folder upward (the project's, i.e.
+   `python.cpython`) and the managed `python-preference`, so the runner runs on the project's
+   managed CPython (in a cached ephemeral env, maybe downloaded first)
    whatever the caller's cwd or a `.python-version` there says (measured with uv 0.8 and
    0.12; `test_launcher_sh.test_runner_runs_on_python_cpython_whatever_the_caller_pins`), and
    uv exports `UV`. Changing `python.cpython` changes the runner's Python too: the runner must

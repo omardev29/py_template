@@ -36,7 +36,8 @@ LazyVim's import-order warning and keeps their plugins installed when you work e
 `./deploy` always runs as `uv run --quiet --script .pytemplate/deploy.py ARGS` (an argument
 list): Neovim's `'shell'` is never used, so xonsh, niubash or PowerShell as `'shell'` do not matter.
 Like the launchers, the plugin keeps your `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and
-`UV_WORKING_DIR` away from it (the runner runs on the project's Python, in Neovim's folder). Only when uv is nowhere does it run the launcher (`/bin/sh deploy`, or `deploy.cmd` on
+`UV_WORKING_DIR` away from it (the runner runs on the project's Python, in Neovim's folder).
+Only when uv is nowhere does it run the launcher (`/bin/sh deploy`, or `deploy.cmd` on
 Windows), which prints how to install uv.
 
 ## Keymaps (`<leader>j`, which-key group "deploy")
