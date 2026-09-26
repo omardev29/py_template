@@ -1868,16 +1868,23 @@ class _Page:
         pass
 
 
-def _skeleton_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preset: str, module: str) -> Any:
-    """Import a module of the preset's skeleton rendered as `demo` (its third-party imports faked)."""
+def _fake_module(name: str, **attrs: Any) -> Any:
+    module = type(sys)(name)
+    module.__dict__.update(attrs)
+    return module
+
+
+FAKE_FLET = {"Slider": _Control, "Image": _Control, "Text": _Control, "Button": _Control, "Row": _Control, "ThemeMode": type("ThemeMode", (), {"DARK": "dark"})}
+
+
+def _skeleton_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preset: str, module: str, fakes: dict[str, Any]) -> Any:
+    """Import a module of the preset's skeleton rendered as `demo`, its third-party imports faked."""
     for rel_path, data in presets.skeleton(preset, "demo").items():
         if rel_path.startswith("src/"):
             (tmp_path / rel_path).parent.mkdir(parents=True, exist_ok=True)
             (tmp_path / rel_path).write_bytes(data)
-    flet = type(sys)("flet")
-    flet.Slider = flet.Image = flet.Text = flet.Button = flet.Row = _Control  # type: ignore[attr-defined]
-    flet.ThemeMode = type("ThemeMode", (), {"DARK": "dark"})  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "flet", flet)
+    for name, fake_module in fakes.items():
+        monkeypatch.setitem(sys.modules, name, fake_module)
     for name in [m for m in sys.modules if m == "demo" or m.startswith("demo.")]:
         monkeypatch.delitem(sys.modules, name)
     monkeypatch.syspath_prepend(str(tmp_path / "src"))
@@ -1901,7 +1908,7 @@ def test_flet_skeleton_draws_where_no_process_can_start(tmp_path: Path, monkeypa
 
     if "flet" not in PRESETS:
         pytest.skip("no flet preset")
-    app = _skeleton_package(tmp_path, monkeypatch, "flet", "demo.ui.app")
+    app = _skeleton_package(tmp_path, monkeypatch, "flet", "demo.ui.app", {"flet": _fake_module("flet", **FAKE_FLET)})
 
     def no_processes(*_: Any, **__: Any) -> Any:
         raise NotImplementedError("This Python build lacks multiprocessing.synchronize")
@@ -1925,7 +1932,7 @@ def test_flet_skeleton_gives_the_button_back_when_drawing_fails(tmp_path: Path, 
 
     if "flet" not in PRESETS:
         pytest.skip("no flet preset")
-    app = _skeleton_package(tmp_path, monkeypatch, "flet", "demo.ui.app")
+    app = _skeleton_package(tmp_path, monkeypatch, "flet", "demo.ui.app", {"flet": _fake_module("flet", **FAKE_FLET)})
     monkeypatch.setattr(app, "_executor", lambda: None)
 
     def broken(*_: Any) -> bytes:
@@ -1936,6 +1943,33 @@ def test_flet_skeleton_gives_the_button_back_when_drawing_fails(tmp_path: Path, 
     with pytest.raises(ValueError, match="boom"):
         asyncio.run(button.on_click(None))
     assert not button.disabled and status.value == "Draw failed (see the console)"
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [([], (0, 2000)), (["--frames", "900", "--bunnies", "30000"], (900, 30000)), (["--frames=5"], (5, 2000)), (["--bunnies=0"], (0, 0))],
+)
+def test_raylib_skeleton_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str], expected: tuple[int, int]) -> None:
+    """`--frames=900` was silently ignored (a benchmark that never ended)."""
+    app = _skeleton_package(tmp_path, monkeypatch, "raylib", "demo.app", {"raylib": _fake_module("raylib", __getattr__=lambda name: None)})
+    assert app._options(argv) == expected
+
+
+@pytest.mark.parametrize("argv", [["--frames"], ["--bunnies", "many"], ["--frames", "-1"], ["--fps", "3"]])
+def test_raylib_skeleton_refuses_bad_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]) -> None:
+    """`--frames` without a value or `--bunnies many` crashed with a traceback: now a usage error."""
+    app = _skeleton_package(tmp_path, monkeypatch, "raylib", "demo.app", {"raylib": _fake_module("raylib", __getattr__=lambda name: None)})
+    with pytest.raises(SystemExit) as e:
+        app._options(argv)
+    assert e.value.code == 2 and "usage: demo" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("preset", PRESETS)
+def test_presets_are_ascii(preset: str) -> None:
+    """Rule 1.5: every file of a preset (skeleton, preset.toml, pins, tools) is ASCII (a
+    `px/s` with a superscript two reached every raylib project)."""
+    bad = [p.relative_to(presets.PRESETS).as_posix() for p in sorted((presets.PRESETS / preset).rglob("*")) if p.is_file() and "__pycache__" not in p.parts and not p.read_bytes().isascii()]
+    assert not bad
 
 
 # --- the raylib stub generator ----------------------------------------------------------------------

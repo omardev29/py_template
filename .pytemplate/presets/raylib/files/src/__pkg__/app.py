@@ -6,6 +6,7 @@ The hot code lives in {{pkg}}.core: the physics (world) and the per-entity draw 
 
 from __future__ import annotations
 
+import argparse
 import gc
 import platform
 import sys
@@ -38,17 +39,35 @@ def _backend() -> str:
     return impl
 
 
-def _option(argv: list[str], name: str, default: int) -> int:
-    """`--frames N`: quit after N frames, no FPS cap (benchmark, CI); `--bunnies N`: start count."""
-    if name in argv:
-        return int(argv[argv.index(name) + 1])
-    return default
+def _count(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 or more: {value}")
+    return value
+
+
+def _options(argv: list[str]) -> tuple[int, int]:
+    """(frames, bunnies): `--frames N` quits after N frames, without the FPS cap (benchmark,
+    CI); `--bunnies N` is the start count. A wrong value is a usage error (exit 2)."""
+    parser = argparse.ArgumentParser(
+        prog="{{name}}",
+        description="Bunnymark: click to add bunnies.",
+    )
+    parser.add_argument(
+        "--frames", type=_count, default=0, metavar="N", help="quit after N frames, no FPS cap"
+    )
+    parser.add_argument(
+        "--bunnies", type=_count, default=START_BUNNIES, metavar="N", help="bunnies at the start"
+    )
+    options = parser.parse_args(argv)
+    return int(options.frames), int(options.bunnies)
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    limit = _option(argv, "--frames", 0)
-    bunnies = _option(argv, "--bunnies", START_BUNNIES)
+    limit, bunnies = _options(sys.argv[1:] if argv is None else argv)
     backend = _backend()
     rl.SetTraceLogLevel(rl.LOG_WARNING)
     rl.InitWindow(WIDTH, HEIGHT, b"{{name}}")
