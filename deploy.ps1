@@ -149,16 +149,19 @@ if (-not $uv) {
     }
 }
 
-# --- arguments: flatten `a,b` arrays, keep a typed -X:v whole, pre-quote for legacy passing.
-# PowerShell hands a script a typed -X:v as two elements: '-X:' (marked with the parameter
-# name) and v. Join them again, as PowerShell does for a native program.
+# --- arguments: keep typed a,b lists and -X:v whole, pre-quote for legacy passing.
+# PowerShell hands a script a typed list (cpython,mypyc) as one array, and a typed -X:v as two
+# elements: '-X:' (marked with the parameter name) and v. Join them again, as PowerShell does
+# for a native program (a list becomes one argument, its items joined with commas).
 $argv = @(for ($i = 0; $i -lt $args.Count; $i++) {
     $a = $args[$i]
     if ($a -is [string] -and $a.EndsWith(':') -and $a.PSObject.Properties['<CommandParameterName>'] -and $i + 1 -lt $args.Count) {
         $i++
         $a + ((@($args[$i]) | ForEach-Object { [string]$_ }) -join ',')
+    } elseif ($a -is [array]) {
+        (@($a) | ForEach-Object { [string]$_ }) -join ','
     } else {
-        foreach ($x in @($a)) { [string]$x }
+        [string]$a
     }
 })
 $v = $PSVersionTable.PSVersion

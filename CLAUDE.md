@@ -298,8 +298,11 @@ header rules (with detector tests proving each rule fires).
   its shebang `#!/usr/bin/env pwsh`, and Windows PowerShell 5.1 reads BOM-less files as ANSI.
   Git mode 100755 so `./deploy.ps1` works from bash/zsh on Linux/macOS (`shells.doctor` only
   notes a wrong mode: PowerShell itself runs it without the x bit).
-- No `param()` block: it would turn `-v`, `-h`, `-q` into PowerShell parameters. `a,b` arrays
-  in `$args` are flattened.
+- No `param()` block: it would turn `-v`, `-h`, `-q` into PowerShell parameters. A typed list
+  (`--supports cpython,mypyc`, `--tests T1,T2`) reaches the script as ONE array element: the
+  launcher joins its items with commas again, as PowerShell does for a native program (a
+  splatted array variable is indistinguishable and is joined too)
+  (`test_ps1_keeps_typed_comma_lists_whole`, also through the `shell-setup pwsh` function).
 - A `.ps1` runs inside the caller's session: never assign `$env:PATH`. The two `PYTEMPLATE_*`
   variables and the removed `UV_PYTHON` (the `$names` list) are restored in `finally`; a
   variable that did not exist before is removed with
@@ -2066,7 +2069,7 @@ short temp tree and unset `NVIM_APPNAME`.
   fake uvs for `deploy` and `deploy.ps1`, the install prompt on a pseudo-terminal),
   `test_launcher_win.py` (static rules on every OS, a PowerShell parser check; the deploy.ps1
   behaviour tests run wherever pwsh exists: injection safety of the Core hand-over, `--%`,
-  `-X:v`, pipeline input and raw stdin, `UV_PYTHON`, ConstrainedLanguage, the x bit; cmd and
+  `-X:v`, typed comma lists, pipeline input and raw stdin, `UV_PYTHON`, ConstrainedLanguage, the x bit; cmd and
   the registry only on Windows),
   `test_paths.py` (path spellings, colours in a hidden console, dry runs in a throwaway copy),
   `test_render_core.py` (`render.apply`/`auto` and `state.json` in a sandbox, the render

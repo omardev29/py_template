@@ -1173,8 +1173,9 @@ pipeline input on. Print the xonsh snippet again to complete commands added late
 - PowerShell removes a bare `--` before any script sees it (5.1 and 7 alike): quote it (`'--'`)
   or use `.\deploy.cmd`. `./deploy` itself never needs `--`: everything after `run` or `test`
   already goes to the app or to pytest.
-- Inside PowerShell, a typed `-X:utf8` stays one argument (but `-X: v`, with a space, arrives as
-  `-X:v`), `--%` passes through literally, and pipeline input reaches the app
+- Inside PowerShell, a typed list (`--supports cpython,mypyc`) and a typed `-X:utf8` stay one
+  argument each, as for any native program (but `-X: v`, with a space, arrives as `-X:v`), `--%`
+  passes through literally, and pipeline input reaches the app
   (`Get-Content data.txt | ./deploy run`). `pwsh -File deploy.ps1 ...`, and `./deploy.ps1` typed
   in bash or zsh, split every argument that starts with `-` at its first colon (PowerShell's own
   parsing): from POSIX shells use `./deploy`.

@@ -542,6 +542,31 @@ def test_ps1_keeps_typed_colon_arguments_whole(name: str) -> None:
         assert p["argv"] == COLON_ARGV
 
 
+COMMA_TYPED = "mode cpython --supports cpython,mypyc --opt=x,y a,b 'q,r' c, d +pypy,-mypyc --tests T1,T2 z"
+COMMA_ARGV = ["mode", "cpython", "--supports", "cpython,mypyc", "--opt=x,y", "a,b", "q,r", "c,d", "+pypy,-mypyc", "--tests", "T1,T2", "z"]
+
+
+@pytest.mark.parametrize("name", PS_NAMES)
+def test_ps1_keeps_typed_comma_lists_whole(name: str) -> None:
+    """PowerShell hands a script a typed comma list (cpython,mypyc) as an array: the launcher joins
+    it again, as PowerShell does for a native program, so the documented `--supports cpython,mypyc`
+    and `--tests T1,T2` reach the runner as one argument. Also through the shell-setup function."""
+    exe = _ps_exe(name)
+    sys.path.insert(0, str(ROOT / ".pytemplate"))
+    from runner import shells
+
+    function = shells.PWSH_SNIPPET
+    body =f"& ./deploy.ps1 __probe 0 0 {COMMA_TYPED}\n{function}\nSet-Location {_ps_literal(str(SUB))}\ndeploy __probe 0 0 {COMMA_TYPED}\n"
+    if name == "pwsh":  # also the legacy pre-quoting path that 5.1 always takes
+        body += f"$PSNativeCommandArgumentPassing = 'Legacy'\n& {_ps_literal(str(PS1))} __probe 0 0 {COMMA_TYPED}\n"
+    r = _session(exe, body + "exit 0\n")
+    assert r.returncode == 0, r.stdout + r.stderr
+    probes = _probes(r)
+    assert len(probes) == (3 if name == "pwsh" else 2), r.stdout + r.stderr
+    for p in probes:
+        assert p["argv"] == COMMA_ARGV
+
+
 @pytest.mark.parametrize("name", PS_NAMES)
 def test_ps1_forwards_pipeline_input_and_keeps_raw_stdin(name: str) -> None:
     """'x' | ./deploy.ps1 run gives uv the pipeline, like a native call; without a pipeline uv keeps
