@@ -867,8 +867,13 @@ def _key(text: str, i: int) -> tuple[tuple[str, ...], int]:
     while True:
         i = _skip_blank(text, i)
         if text.startswith(('"', "'"), i):
+            if text.startswith(('"""', "'''"), i):  # a multi-line string is no key
+                raise _ScanError(i)
             end = _string_end(text, i)
-            parts.append(str(tomllib.loads("k = " + text[i:end])["k"]))
+            try:
+                parts.append(str(tomllib.loads("k = " + text[i:end])["k"]))
+            except tomllib.TOMLDecodeError:  # a bad escape: not valid TOML, never a traceback
+                raise _ScanError(i) from None
             i = end
         else:
             m = _BARE_KEY.match(text, i)
