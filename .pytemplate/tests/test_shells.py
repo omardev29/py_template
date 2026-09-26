@@ -417,7 +417,10 @@ def test_guess_shell() -> None:
         ({"PYTEMPLATE_LAUNCHER": "sh:bash:msys", "SHELL": "/usr/bin/zsh"}, "zsh"),
         ({"PYTEMPLATE_LAUNCHER": "sh:bash"}, "bash"),  # Git Bash/MSYS2 without SHELL
         ({"PYTEMPLATE_LAUNCHER": "sh:zsh"}, "zsh"),
-        ({"PYTEMPLATE_LAUNCHER": "sh:bash", "SHELL": "/usr/local/bin/pwsh"}, "bash"),
+        ({"PYTEMPLATE_LAUNCHER": "sh:bash", "SHELL": "/usr/local/bin/pwsh"}, "pwsh"),  # pwsh logs in (macOS, Fedora)
+        ({"PYTEMPLATE_LAUNCHER": "sh", "SHELL": "C:\\Program Files\\PowerShell\\7\\pwsh.exe"}, "pwsh"),
+        ({"PYTEMPLATE_LAUNCHER": "nu"}, "nu"),  # the shell-setup nu function called the runner
+        ({"PYTEMPLATE_LAUNCHER": "nu", "SHELL": "/bin/bash"}, "nu"),
         ({"PYTEMPLATE_LAUNCHER": "sh:bash", "SHELL": "C:\\msys64\\usr\\bin\\zsh.exe"}, "zsh"),
         ({"PYTEMPLATE_LAUNCHER": "sh:niubash", "SHELL": "/bin/zsh"}, "niubash"),  # niubash runs it in-process
         ({"PYTEMPLATE_LAUNCHER": "ps1:Core:7.6", "SHELL": "/bin/zsh"}, "pwsh"),

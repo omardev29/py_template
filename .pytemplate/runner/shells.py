@@ -522,20 +522,23 @@ def snippet(shell: str, cfg: Config | None = None) -> str:
 def guess_shell(env: Mapping[str, str]) -> str | None:
     """Guess the calling shell from PYTEMPLATE_LAUNCHER, XONSH_VERSION and SHELL.
 
-    ps1: and sh:niubash name the caller (niubash runs the launcher in-process). sh:bash/sh:zsh
-    only name the interpreter of `#!/bin/sh` (bash on macOS, Fedora, Arch), not the user's
-    shell: they are the last resort after XONSH_VERSION and $SHELL (Git Bash/MSYS2 without it).
+    ps1:, nu (the shell-setup nu function) and sh:niubash name the caller (niubash runs the
+    launcher in-process). sh:bash/sh:zsh only name the interpreter of `#!/bin/sh` (bash on
+    macOS, Fedora, Arch), not the user's shell: they are the last resort after XONSH_VERSION
+    and $SHELL (Git Bash/MSYS2 without it).
     """
     launcher = env.get("PYTEMPLATE_LAUNCHER", "")
     if launcher.startswith("ps1:"):
         return "pwsh"
+    if launcher == "nu":
+        return "nu"
     if launcher.startswith("sh:niubash"):
         return "niubash"
     if env.get("XONSH_VERSION"):
         return "xonsh"
     name = re.split(r"[\\/]", env.get("SHELL", ""))[-1].lower()  # C:\x\zsh.exe on any host
     name = name[:-4] if name.endswith(".exe") else name
-    if name in ("bash", "zsh", "fish", "nu"):
+    if name in ("bash", "zsh", "fish", "nu", "pwsh"):
         return name
     for prefix, shell in (("sh:zsh", "zsh"), ("sh:bash", "bash")):
         if launcher.startswith(prefix):

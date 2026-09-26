@@ -185,7 +185,7 @@ then `shutil.which("uv")`, else `DeployError(..., 3)`.
 `sh:msys` for dash under MSYS2); `cmd`; `ps1:<PSEdition>:<major>.<minor>` (`ps1:Core:7.6`,
 `ps1:Desktop:5.1`); `nvim`; `nu` (shell-setup snippet). The xonsh snippet sets none.
 `project.native_path` reads the `:msys`/`:cygwin` suffix, `shells.guess_shell` the prefix (only
-`ps1:` and `sh:niubash` first: `sh:bash`/`sh:zsh` name the interpreter of `#!/bin/sh`, bash on
+`ps1:`, `nu` and `sh:niubash` first: `sh:bash`/`sh:zsh` name the interpreter of `#!/bin/sh`, bash on
 macOS, Fedora and Arch, so `$SHELL` wins over them), and `./deploy doctor` prints the value
 ("unknown" when unset).
 
@@ -486,8 +486,8 @@ header rules (with detector tests proving each rule fires).
   candidates before they land).
 - `./deploy shell-setup [xonsh|pwsh|powershell|bash|zsh|niubash|msys2|fish|nu]`
   (`shells.cmd_shell_setup`; no argument guesses the shell (`shells.guess_shell`): the
-  `ps1:`/`sh:niubash` prefix of `PYTEMPLATE_LAUNCHER`, then `XONSH_VERSION`, then the basename
-  of `SHELL` (bash, zsh, fish, nu), and only then the `sh:zsh`/`sh:bash` prefix, which names
+  `ps1:`/`sh:niubash` prefix or the `nu` of `PYTEMPLATE_LAUNCHER`, then `XONSH_VERSION`, then
+  the basename of `SHELL` (bash, zsh, fish, nu, pwsh), and only then the `sh:zsh`/`sh:bash` prefix, which names
   the interpreter of `#!/bin/sh` (Git Bash/MSYS2 without `SHELL`); unknown shell exits 2):
   prints a `deploy` function/alias that works
   from any subfolder, plus where to paste it. Output is ASCII with LF even on Windows (written
