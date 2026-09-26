@@ -39,7 +39,7 @@ from pathlib import Path
 
 from . import cmd_nvim, presets, proc, ui
 from .config import Config
-from .project import IS_WINDOWS, ROOT, user_path
+from .project import IS_WINDOWS, ROOT, check_private_dir, scratch_name, user_path
 from .ui import DeployError
 
 DEFAULT_PRESETS = ("script", "raylib", "flet")
@@ -64,9 +64,9 @@ XDG_HOMES = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HO
 
 
 def default_dir() -> Path:
-    """%TEMP%\\pt\\nvim on Windows (short), $TMPDIR/pt-nvim elsewhere."""
+    """%TEMP%\\pt\\nvim on Windows (short), $TMPDIR/pt-nvim-<uid> elsewhere (/tmp is shared)."""
     tmp = Path(tempfile.gettempdir())
-    return tmp / "pt" / "nvim" if IS_WINDOWS else tmp / "pt-nvim"
+    return tmp / "pt" / "nvim" if IS_WINDOWS else tmp / scratch_name("pt-nvim")
 
 
 @dataclass(frozen=True)
@@ -312,10 +312,11 @@ def _prepare_dir(layout: Layout) -> None:
         raise DeployError(f"--dir must be outside the template ({base}): Neovim would find its .lazy.lua")
     if base.exists() and not base.is_dir():
         raise DeployError(f"--dir {base} is not a folder: pick another --dir")
+    check_private_dir(base, "--dir")
     if base.exists() and any(base.iterdir()) and not (base / DIR_MARKER).is_file():
         raise DeployError(f"{base} is not empty and was not created by selftest --nvim: pick another --dir")
     try:
-        base.mkdir(parents=True, exist_ok=True)
+        base.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError as e:  # a parent that is a file, no permission
         raise DeployError(f"cannot create --dir {base}: {e.strerror or e}") from None
     (base / DIR_MARKER).write_text("work directory of ./deploy selftest --nvim (safe to delete)\n", encoding="utf-8", newline="\n")

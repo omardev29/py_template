@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_nvim, nvimtest, proc  # noqa: E402
+from runner import cmd_nvim, nvimtest, proc, project  # noqa: E402
 from runner.ui import DeployError  # noqa: E402
 
 # lazyvim.json exactly as LazyVim 16 writes it on first start (util/json.lua: sorted keys,
@@ -323,7 +323,7 @@ def test_env_isolation(tmp_path: Path) -> None:
 
 def test_default_dir_is_short() -> None:
     d = nvimtest.default_dir()
-    assert d.name in ("nvim", "pt-nvim") and len(str(d)) < 80
+    assert d.name in ("nvim", project.scratch_name("pt-nvim")) and len(str(d)) < 80
 
 
 def test_prepare_dir_refuses_foreign_dirs(tmp_path: Path) -> None:
@@ -336,6 +336,28 @@ def test_prepare_dir_refuses_foreign_dirs(tmp_path: Path) -> None:
     nvimtest._prepare_dir(fresh)
     nvimtest._prepare_dir(fresh)  # reusable: it carries the marker
     assert (fresh.base / nvimtest.DIR_MARKER).is_file()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX owners and modes (Windows %TEMP% is per user)")
+def test_prepare_dir_refuses_a_dir_another_user_can_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The isolated LazyVim runs from --dir: a /tmp/pt-nvim made by another user, or one every
+    user can write, let that user plant code there. The default is per user and made 0700."""
+    assert nvimtest.default_dir().name == project.scratch_name("pt-nvim") != "pt-nvim"
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    with pytest.raises(DeployError, match="written by every user"):
+        nvimtest._prepare_dir(nvimtest.Layout(shared))
+    shared.chmod(0o700)
+    real = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: real + 1)
+    with pytest.raises(DeployError, match="belongs to another user"):
+        nvimtest._prepare_dir(nvimtest.Layout(shared))
+    assert not (shared / nvimtest.DIR_MARKER).exists()
+    monkeypatch.setattr(os, "getuid", lambda: real)
+    fresh = nvimtest.Layout(tmp_path / "fresh" / "dir")
+    nvimtest._prepare_dir(fresh)
+    assert fresh.base.stat().st_mode & 0o777 == 0o700
 
 
 def test_prepare_dir_refuses_a_file(tmp_path: Path) -> None:

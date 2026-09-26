@@ -55,7 +55,7 @@ from typing import Any
 from . import proc, ui
 from .cmd_build import COMPAT
 from .config import BACKENDS, METHODS, Config
-from .project import CONFIG_FILE, ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, host_arch, host_os, user_path, venv_python
+from .project import CONFIG_FILE, ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, check_private_dir, host_arch, host_os, scratch_name, user_path, venv_python
 from .ui import DeployError
 
 DEFAULT_PRESETS = ("script", "raylib", "flet")
@@ -426,7 +426,7 @@ def parse_args(args: Sequence[str], available: Sequence[str]) -> Options:
     parser.add_argument("--keep", action="store_true", help="keep the base dir even when everything passes")
     parser.add_argument("--reuse", action="store_true", help="reuse <base>/<preset> kept by an earlier run instead of recreating it")
     parser.add_argument("--json", action="store_true", help="print the results as JSON on stdout")
-    parser.add_argument("--base", default="", help="base dir (default: %%TEMP%%\\pt\\e2e on Windows, $TMPDIR/pt-e2e elsewhere)")
+    parser.add_argument("--base", default="", help="base dir (default: %%TEMP%%\\pt\\e2e on Windows, $TMPDIR/pt-e2e-<uid> elsewhere)")
     ns = parser.parse_intermixed_args(list(args))  # `raylib --quick flet` works too
     names = [n for chunk in ns.presets for n in chunk.split(",") if n] or list(DEFAULT_PRESETS)
     unknown = [n for n in names if n not in available]
@@ -659,9 +659,10 @@ def detect_host(gui: str) -> Host:
 
 
 def default_base() -> Path:
-    """A SHORT path: LongPathsEnabled=0 breaks PyPy runtime copies and Flet client extraction."""
+    """A SHORT path: LongPathsEnabled=0 breaks PyPy runtime copies and Flet client extraction.
+    Per user on POSIX (/tmp is shared): `check_private_dir` refuses one another user made."""
     tmp = Path(tempfile.gettempdir())
-    return tmp / "pt" / "e2e" if IS_WINDOWS else tmp / "pt-e2e"
+    return tmp / "pt" / "e2e" if IS_WINDOWS else tmp / scratch_name("pt-e2e")
 
 
 def child_env(base: Path) -> dict[str, str]:
@@ -1164,9 +1165,10 @@ def _prepare_base(base: Path) -> None:
         raise DeployError("selftest --e2e: the base dir cannot be inside this template")
     if base.exists() and not base.is_dir():
         raise DeployError(f"selftest --e2e: {base} is not a directory")
+    check_private_dir(base, "--base")
     if base.is_dir() and any(base.iterdir()) and not (base / MARKER).is_file():
         raise DeployError(f"selftest --e2e: {base} is not empty and was not made by selftest --e2e (no {MARKER}): pick another --base")
-    base.mkdir(parents=True, exist_ok=True)
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
     (base / MARKER).write_text("Made by ./deploy selftest --e2e: safe to delete.\n", encoding="utf-8", newline="\n")
 
 

@@ -265,3 +265,24 @@ def user_path(raw: str) -> Path:
     if not p.is_absolute():
         p = caller_cwd() / p
     return Path(os.path.normpath(p)) if IS_WINDOWS else p
+
+
+def scratch_name(name: str) -> str:
+    """`name` for a default scratch folder in the system temp dir: per user on POSIX, where
+    /tmp is shared (Windows %TEMP% and macOS $TMPDIR already are per user)."""
+    return name if IS_WINDOWS else f"{name}-{os.getuid()}"
+
+
+def check_private_dir(path: Path, option: str) -> None:
+    """Refuse (POSIX) a scratch folder that another user owns or can write to: the harnesses
+    run code from it as this user, and its owner could put their own there between two steps.
+    Both the path itself (a link planted in a shared /tmp) and the folder it names count."""
+    if IS_WINDOWS or not os.path.lexists(path):
+        return
+    uid = os.getuid()
+    for st in (os.lstat(path), os.stat(path)):
+        if st.st_uid != uid:
+            raise DeployError(f"{path} belongs to another user (uid {st.st_uid}): code run from it could be theirs; pick another {option}")
+    mode = os.stat(path).st_mode
+    if mode & 0o002:  # group-writable is the norm with a user-private group (umask 002)
+        raise DeployError(f"{path} can be written by every user (mode {mode & 0o7777:o}): pick another {option}, or chmod o-w it")

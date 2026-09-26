@@ -20,7 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import config, e2e, render  # noqa: E402
+from runner import config, e2e, project, render  # noqa: E402
 from runner.cmd_build import COMPAT  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.e2e import Host, Options, PresetInfo, Step  # noqa: E402
@@ -379,8 +379,32 @@ def test_detect_host_gui_modes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_default_base_is_short() -> None:
     base = e2e.default_base()
-    assert base.name in ("e2e", "pt-e2e")
+    assert base.name in ("e2e", project.scratch_name("pt-e2e"))
     assert len(str(base)) < 80
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX owners and modes (Windows %TEMP% is per user)")
+def test_prepare_base_refuses_a_base_another_user_can_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every step runs code from the base: a /tmp/pt-e2e made by another user (or one every
+    user can write) let that user swap a project between two steps (critical: code run as
+    the one who runs the suite). The default is per user and made 0700."""
+    assert e2e.default_base().name == project.scratch_name("pt-e2e") != "pt-e2e"
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    with pytest.raises(DeployError, match="written by every user"):
+        e2e._prepare_base(shared)
+    assert not (shared / e2e.MARKER).exists()
+    shared.chmod(0o700)
+    real = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: real + 1)  # the folder now belongs to someone else
+    with pytest.raises(DeployError, match="belongs to another user"):
+        e2e._prepare_base(shared)
+    monkeypatch.setattr(os, "getuid", lambda: real)
+    fresh = tmp_path / "fresh" / "base"
+    e2e._prepare_base(fresh)
+    assert (fresh / e2e.MARKER).is_file() and fresh.stat().st_mode & 0o777 == 0o700
+    e2e._prepare_base(fresh)  # its own base: reused
 
 
 # --- options -----------------------------------------------------------------------------------
