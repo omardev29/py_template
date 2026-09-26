@@ -2926,8 +2926,13 @@ template-launchers; real niubash only on the maintainer's machine).
     `./deploy selftest` there): 78 confirmed, 1 per 199 lines. Capture-recapture on the hunt:
     A found 41 of the counted, B 47, both 22: about 87 (Chapman), about 99 with the CI's 12:
     1 per 157 lines. UNACCEPTABLE (worse than 1 per 500, better than 1 per 100). Both teams are
-    the same model, so their finds are correlated and the estimate is likely low. The 66
-    counted and 62 minor defects are fixed next; a new measurement follows.
+    the same model, so their finds are correlated and the estimate is likely low. Fixed since:
+    one branch per area, each fix with a regression test that fails without it, then an
+    adversarial review of every branch, whose findings on the fixes themselves (about 40, 2 of
+    them critical) were fixed too. All 66 counted and 62 minor defects are fixed but one counted
+    notable, only partly: a project inside another git repository keeps a generated CI that
+    GitHub never runs (`new` and `doctor` now say so; section 15.2). Not measured again yet:
+    until a new measurement says otherwise, the project is not at the bar.
 
 ## 14. Conventions and recipes
 
