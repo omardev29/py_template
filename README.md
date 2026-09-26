@@ -638,7 +638,9 @@ it), then packages the app into `dist/`:
 
 PyInstaller, Nuitka and `flet build` do not support PyPy. The default method is `exe` for
 cpython and mypyc and `portable` for pypy (`[deploy] default`; a backend left out of that table
-keeps its default). Each build replaces the previous output of the same backend and method:
+keeps its default). Every method, with `--no-check` too, refuses a `uv.lock` that
+`pyproject.toml` has moved past (`./deploy lock` updates it). Each build replaces the previous
+output of the same backend and method:
 
 | Method | Output | Start it with |
 |---|---|---|
@@ -692,8 +694,8 @@ A folder that runs the app with its own interpreter:
   `idlelib`, `turtledemo`, `ensurepip` and `site-packages`, PyPy's debug symbols, and Tk unless
   `src/` or a dependency imports `tkinter` (`prune = false` keeps it for an app that loads it
   another way).
-- `lib/`: the dependencies at the versions of `uv.lock`; they win over packages installed in a
-  Python.
+- `lib/`: the dependencies at the versions of `uv.lock`, local libraries
+  (`./deploy add ./libs/x`) included; they win over packages installed in a Python.
 - `app/`: the app (with mypyc, the compiled modules next to their `.py`), and `boot.py`.
 - `<name>.cmd` (a Windows build) or `<name>.sh` (Linux, macOS): run it from any folder (the `.sh`
   also through a symlink); the arguments reach the app and its exit code comes back. They run

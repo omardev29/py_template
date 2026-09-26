@@ -3,6 +3,7 @@ pyz/portable layouts and bootstraps. No network, no packager: the packager calls
 
 from __future__ import annotations
 
+import hashlib
 import importlib.machinery
 import json
 import os
@@ -1539,6 +1540,47 @@ def test_skipped_requirements_compares_names_and_versions(tmp_path: Path) -> Non
     _wheel(site, "Zope.Interface", "05.4.0")
     req = _requirements(tmp_path, "jaraco-context==6.1.2", "pkg==1.9 ; python_full_version < '3.12'", "pkg==2.0 ; python_full_version >= '3.12'", "zope-interface==5.4.0", "colorama==0.4.6 ; sys_platform == 'win32'")
     assert common.skipped_requirements(req, site) == ["pkg==1.9", "colorama==0.4.6"]
+
+
+def _workspace_project(root: Path) -> Path:
+    """A project that depends on a local library the way `./deploy add ./libs/mylib` leaves it
+    (a uv workspace member, which uv installs editable), locked offline (static metadata)."""
+    (root / "libs" / "mylib" / "src" / "mylib").mkdir(parents=True)
+    (root / "libs" / "mylib" / "pyproject.toml").write_text(
+        '[project]\nname = "mylib"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n\n'
+        '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n',
+        encoding="utf-8",
+    )
+    (root / "libs" / "mylib" / "src" / "mylib" / "__init__.py").write_text("VALUE = 42\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "wsapp"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = ["mylib"]\n\n'
+        '[tool.uv.workspace]\nmembers = ["libs/mylib"]\n\n[tool.uv.sources]\nmylib = { workspace = true }\n',
+        encoding="utf-8",
+    )
+    env = {k: v for k, v in proc.base_env().items() if not k.startswith(("UV_PROJECT", "UV_PYTHON"))}
+    r = subprocess.run([proc.find_uv(), "lock", "--offline", "--quiet"], cwd=root, env=env, capture_output=True, text=True, timeout=120, check=False)
+    if r.returncode != 0:
+        pytest.skip(f"uv could not lock the scratch workspace offline: {r.stderr.strip()[-300:]}")
+    return root
+
+
+def test_export_ships_path_dependencies_and_refuses_a_stale_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A workspace library was exported as `-e ./libs/mylib`: `uv pip install --target` left only a
+    # .pth pointing at this machine's folder, so the pyz/portable app failed anywhere else. A
+    # dependency added to pyproject.toml without re-locking was silently left out (--frozen).
+    project = _workspace_project(tmp_path / "proj")
+    monkeypatch.setattr(proc, "ROOT", project)  # uv finds the project from its working folder
+    monkeypatch.setattr(common, "BUILD", tmp_path / "build")
+    monkeypatch.setenv("UV_OFFLINE", "1")  # an up-to-date lock is checked without the network
+    lines = common.export_requirements(make({})).read_text(encoding="utf-8").splitlines()
+    assert "./libs/mylib" in [ln.split(";")[0].strip() for ln in lines]
+    assert not [ln for ln in lines if ln.startswith("-e")]
+    digest = common.requirements_digest(tmp_path / "build" / "deploy" / "requirements.txt")
+    assert digest != hashlib.sha256(b"").hexdigest()[:16]  # the path line is part of the fingerprint
+    text = (project / "pyproject.toml").read_text(encoding="utf-8")
+    (project / "pyproject.toml").write_text(text.replace('["mylib"]', '["mylib", "six>=1.16"]'), encoding="utf-8")
+    with pytest.raises(proc.CommandFailed):
+        common.export_requirements(make({}))
 
 
 def test_requirements_digest_ignores_the_header_and_hashes(tmp_path: Path) -> None:

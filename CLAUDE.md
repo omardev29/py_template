@@ -1385,6 +1385,13 @@ Formats:
   this machine (`config_host_key`; uv installs PyPy wheels only with a real PyPy: CPython and
   PyPy builds are joined with `pyz-merge`). A pypy build may add `cp<minor>` keys (installed
   with the tools env).
+- `common.export_requirements` (pyz, portable): `uv export --locked --no-dev --no-editable
+  --no-emit-project` into `.build/deploy/requirements.txt`. `--locked`: a `uv.lock` that
+  `pyproject.toml` moved past fails like every `uv run --locked` (with `--frozen` a `--no-check`
+  pyz or portable build shipped without the new dependency). `--no-editable`: a workspace or path
+  dependency (`./deploy add ./libs/x`) is exported as a path, which `uv pip install --target`
+  builds and installs (editable, it left only a `.pth` naming this machine's source folder); uv
+  reads that relative path against its working folder, `ROOT`.
 - `common.install_deps` (`uv pip install --target --no-deps -r <export>`): a cross target gets
   `--python-platform UV_PLATFORMS[...] --python-version --only-binary :all:` (an sdist built for
   another OS would produce host binaries); a HOST target gets the same `--python-platform` floor
