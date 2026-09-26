@@ -841,6 +841,62 @@ def test_new_says_what_it_could_not_remove(tmp_path: Path, monkeypatch: pytest.M
     assert e.value.code == 2
 
 
+def test_new_keeps_the_exit_code_of_a_missing_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """uv not found (exit 3, a missing requirement) stays exit 3 after the cleanup."""
+
+    def no_uv() -> str:
+        raise DeployError("uv not found", 3)
+
+    monkeypatch.setattr(presets, "copy_template", _fake_copy)
+    monkeypatch.setattr(proc, "find_uv", no_uv)
+    monkeypatch.setattr(proc, "run", lambda *a, **k: pytest.fail("ran a command"))
+    with pytest.raises(DeployError, match="(?s)uv not found.*was removed") as e:
+        presets.new(tmp_path / "demo", "script", "demo")
+    assert e.value.code == 3
+    assert not (tmp_path / "demo").exists()
+
+
+@pytest.mark.parametrize(
+    ("args", "code", "message"),
+    [
+        (["script", "--bogus"], 2, "unknown argument(s): --bogus"),
+        (["script", "extra"], 2, "unknown argument(s): extra"),
+        (["script", "--name"], 2, None),  # argparse: expected one argument
+        (["nope"], 2, None),  # argparse: invalid choice
+        ([], 2, None),  # argparse: the preset is required
+    ],
+)
+def test_the_internal_init_rejects_bad_arguments(dry: Config, monkeypatch: pytest.MonkeyPatch, args: list[str], code: int, message: str | None) -> None:
+    """__init is outside cli.COMMANDS (so outside the every-command test of test_cli_core)."""
+    monkeypatch.setattr(presets, "plan_init", lambda *a, **k: pytest.fail("planned"))
+    monkeypatch.setattr(presets, "init", lambda *a, **k: pytest.fail("ran"))
+    if message is None:
+        with pytest.raises(SystemExit) as exit_info:
+            cmd_mode.cmd_init(dry, args)
+        assert exit_info.value.code == code
+    else:
+        with pytest.raises(DeployError, match=re.escape(message)) as e:
+            cmd_mode.cmd_init(dry, args)
+        assert e.value.code == code
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [(["x", "--bogus"], "unknown argument(s): --bogus"), (["x", "y"], "unknown argument(s): y"), ([], None), (["x", "--preset", "nope"], None)],
+)
+def test_new_rejects_bad_arguments_before_anything(dry: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str], message: str | None) -> None:
+    monkeypatch.chdir(tmp_path)
+    if message is None:
+        with pytest.raises(SystemExit) as exit_info:
+            cmd_mode.cmd_new(dry, args)
+        assert exit_info.value.code == 2
+    else:
+        with pytest.raises(DeployError, match=re.escape(message)) as e:
+            cmd_mode.cmd_new(dry, args)
+        assert e.value.code == 2
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_new_never_touches_a_folder_with_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proc, "run", lambda *a, **k: pytest.fail("ran a command"))
     monkeypatch.setattr(presets, "copy_template", lambda dest: pytest.fail("copied"))
