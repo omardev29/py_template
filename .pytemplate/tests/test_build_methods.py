@@ -50,6 +50,13 @@ def _exports_rich() -> bool:
 needs_rich = pytest.mark.skipif(not _exports_rich(), reason="installs this project's uv.lock and imports rich, which it does not lock")
 
 
+def skip_when_older_than(cfg: Config) -> None:
+    """Skip a test that starts what it built with sys.executable when this interpreter is older
+    than the build's Python (the template's CI runs the suite on the runner's floor, 3.11)."""
+    if sys.version_info[:2] < tuple(int(part) for part in cfg.min_python.split(".")):
+        pytest.skip(f"runs the build with Python {sys.version_info[0]}.{sys.version_info[1]}, older than the {cfg.min_python} it needs")
+
+
 def make(data: dict[str, Any]) -> Config:
     cfg: Config = config._build(Config, data, "")
     config.validate(cfg)
@@ -1242,6 +1249,7 @@ def test_pyz_merge_of_a_real_build(sandbox: Path, monkeypatch: pytest.MonkeyPatc
     from runner.methods import pyz
 
     cfg = make({})
+    skip_when_older_than(cfg)
     app = fake_app(sandbox / "payload")
     (app / "main.py").write_text("import rich, sys\nprint('rich', rich.__name__, *sys.argv[1:])\n", encoding="utf-8")
     try:
@@ -1709,6 +1717,8 @@ def test_portable_sh_launcher_via_symlinks_cdpath_and_spaces(tmp_path: Path, run
         python.parent.mkdir(parents=True)
         python.symlink_to(Path(sys.executable).resolve())
     cfg = make({"deploy": {"portable": {"runtime": runtime}}})
+    if runtime == "system":  # the launcher looks for cfg.min_python on PATH: this interpreter
+        skip_when_older_than(cfg)
     launcher = out / "app.sh"
     launcher.write_text(portable.sh_launcher(cfg, "cpython", out, python), encoding="utf-8", newline="\n")
     launcher.chmod(0o755)
@@ -2095,6 +2105,7 @@ def test_portable_system_folder_real_build_runs(sandbox: Path, monkeypatch: pyte
     from runner.methods import portable
 
     cfg = make({"deploy": {"portable": {"runtime": "system"}}})
+    skip_when_older_than(cfg)
     app = fake_app(sandbox / "payload")
     (app / "main.py").write_text("import rich, sys\nprint('rich', rich.__file__, *sys.argv[1:])\n", encoding="utf-8")
     try:
