@@ -655,6 +655,21 @@ def test_compiled_sources_follow_a_symlinked_subpackage(src_tree: Path, tmp_path
     assert "myapp.core.linked.z" in mypyc.compiled_modules(make({}))
 
 
+def test_hook_reports_an_unparsable_module_and_a_bad_exclude(src_tree: Path) -> None:
+    """Through the pre-commit hook's check with the real lintc: a failed check, never a crash."""
+    from runner import hooks
+
+    _project(src_tree, {"myapp/__init__.py": "", "myapp/core/__init__.py": "", "myapp/core/m.py": "def f() -> str:\n    return 'a' +\n"})
+    staged = {"src/myapp/core/m.py"}
+    strict = hooks.check_mypyc(make({"backend": {"active": "mypyc"}}), src_tree.parent, staged)
+    assert strict.passed is False and len(strict.errors) == 1
+    assert strict.errors[0].startswith("src/myapp/core/m.py:2: cannot parse it with the runner's Python")
+    relaxed = hooks.check_mypyc(make({}), src_tree.parent, staged)
+    assert relaxed.passed is True and len(relaxed.warnings) == 1
+    bad = hooks.check_mypyc(make({"compile": {"exclude": ["myapp.core.nope"]}}), src_tree.parent, staged)
+    assert bad.passed is False and "matches no module" in bad.hint
+
+
 # --- 5. sync_tree ----------------------------------------------------------------------------------
 
 
