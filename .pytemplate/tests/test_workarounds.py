@@ -248,13 +248,14 @@ def test_mypyc_build_asks_msvc_for_english_messages(tmp_path: Path, monkeypatch:
     seen: list[dict[str, str]] = []
 
     def run(argv: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
-        seen.append(kw["env"])
+        if any(str(a).endswith("mypyc_build.py") for a in argv):  # the compile step
+            seen.append(kw["env"])
         return subprocess.CompletedProcess([str(a) for a in argv], mypyc.MYPYC_REJECTED, "", "")
 
     monkeypatch.setattr(mypyc.proc, "run", run)
     with pytest.raises(DeployError):  # the fake compiler rejects the code: the env is what counts
         mypyc.build(make({}), "dev")
-    assert seen and seen[0]["VSLANG"] == "1033"
+    assert len(seen) == 1 and seen[0].get("VSLANG") == "1033"
 
 
 # --- UPX ---------------------------------------------------------------------------------------------------
