@@ -637,8 +637,9 @@ header rules (with detector tests proving each rule fires).
 - `render.apply` behaves like `--check` (writes nothing); `render.auto` prints "would update";
   `render` prints `would update: ...`.
 - `clean` prints `would remove X` per target. `build` validates its arguments, the pyz target
-  keys, the Nuitka pin and PGO rules (`nuitka.check_python`, `check_options`) as a real build
-  does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M: would output
+  keys, the Nuitka pin and PGO rules (`nuitka.check_python`, `check_options`), the flet preset
+  and Developer Mode (`flet.check`) and the portable launchers' env values (`portable.check`)
+  as a real build does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M: would output
   dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options: --lto=... [--pgo-c ...] <extras>`), then
   stops. `report` builds nothing and never opens the browser.
 - `mode` validates the new `pytemplate.toml` in memory and prints the keys that would change
@@ -1368,9 +1369,15 @@ Formats:
   `TARGET_METHODS` (pyz), `GLOBAL_FLAGS` (`--dry-run`, `--no-render`) typed after the command,
   and a leading bare word (`_stray_word`: "unknown backend 'mypy': did you mean mypyc?", "did you
   mean --method pyz?"). Then `nuitka.check_python` and, for pyz, `common.check_key` on every
-  key. Default method from `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs
-  `run_checks` unless `--no-check`. `payload`: the mypyc release stage, or `sync_tree(SRC,
-  .build/payload/<backend>)`. The `done: ... (N MB)` size (`common.tree_bytes`) counts a
+  key, `flet.check` (the flet preset; Developer Mode on Windows, exit 3) and `portable.check`
+  (the `[deploy.portable] env` values a `.cmd` launcher cannot hold): what a method refuses is
+  refused before the checks, the mypyc compile and the removal of the previous output, and in
+  `--dry-run` too. Default method from `deploy.default`; `COMPAT` rejects exe/nuitka/flet with
+  pypy. Runs `run_checks` unless `--no-check` (a failure is exit 1, like `./deploy check`).
+  `payload`: the mypyc release stage, or `sync_tree(SRC, .build/payload/<backend>)`. A method
+  whose result is missing or an empty folder is a DeployError, never `ok done` (`build -v`:
+  PyInstaller took `-v` for `--version`; the message says that `./deploy`'s `-v`/`-q` go before
+  the command). The `done: ... (N MB)` size (`common.tree_bytes`) counts a
   symlinked file once (a bundled runtime's `bin/python3 -> python3.14`).
 - Output: `dist_path(req, suffix)` = `dist/<app.name>-<backend>-<method><suffix>`; portable
   with a bundled runtime adds `-<target key>`, flet adds `-<target>`. The CI template hard-codes
@@ -1621,7 +1628,8 @@ Per method:
   `.build/flet-client/<version>/` and bundles it at `flet_desktop/app/<archive>`, where
   flet_desktop looks for a bundled client. 61 MB with UPX; ~25 min build.
 - **flet** (`flet build`): requires `app.preset == "flet"`. Windows needs Developer Mode
-  (Flutter symlinks; checked in the registry by `methods.flet._developer_mode`) and Visual
+  (Flutter symlinks; checked in the registry by `methods.flet._developer_mode`, through
+  `flet.check`, which `cmd_build` runs before any work) and Visual
   Studio C++. The stage `.build/flet-build/<b>` is persistent (Flutter cache); stale
   extensions are deleted from it before this payload's are copied (a desktop `.pyd` must not
   reach a mobile/web build). `flet build` ignores `uv.lock`, so `build_pyproject` pins the

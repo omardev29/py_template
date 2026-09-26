@@ -122,9 +122,17 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
         for key in [*cfg.deploy.pyz.targets, *ns.target]:  # a bad key fails now, also in --dry-run
             if key != "host":
                 common.check_key(cfg, backend, key)
+    if method == "flet":
+        from .methods import flet
+
+        flet.check(cfg)  # the flet preset, Developer Mode on Windows
+    if method == "portable":
+        from .methods import portable
+
+        portable.check(cfg)  # [deploy.portable] env values the .cmd launcher cannot hold
 
     if not ns.no_check and not run_checks(cfg, backend):
-        raise DeployError("check failed: fix it or use --no-check")
+        raise DeployError("check failed: fix it or use --no-check", 1)  # like ./deploy check
     if proc.DRY_RUN:
         ui.info(f"(--dry-run) build {backend} -> {method}: would output {rel(DIST)}/{cfg.app.name}-{backend}-{method}*")
         if method == "nuitka":
@@ -142,6 +150,12 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
     ui.step(f"build {backend} -> {method}")
     module = importlib.import_module(f"{__package__}.methods.{method}")
     result: Path = module.build(req)
+    if not result.exists() or (result.is_dir() and not any(result.iterdir())):
+        # e.g. `./deploy build -v`: PyInstaller read -v as --version, printed it and made nothing
+        hint = ""
+        if any(arg in ("-v", "--verbose", "-q", "--quiet") for arg in extra):
+            hint = "; ./deploy's own -v and -q go before the command (./deploy -v build ...): after it they reach the packager"
+        raise DeployError(f"build {backend} -> {method}: no output at {rel(result)} (see the packager's output above){hint}")
     ui.ok(f"done: {rel(result)}  ({_size(result)})")
     return 0
 

@@ -87,8 +87,9 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def build(req: BuildRequest) -> Path:
-    cfg = req.cfg
+def check(cfg: Config) -> str:
+    """Refuse what flet build cannot do, and return the target (cmd_build calls it before the
+    checks and the payload, also in --dry-run)."""
     if cfg.app.preset != "flet":
         raise DeployError("--method flet is for the flet preset (pytemplate.toml app.preset)")
     target = cfg.deploy.flet.target
@@ -101,6 +102,12 @@ def build(req: BuildRequest) -> Path:
             "  `./deploy build` (flet pack), which does not need it.",
             3,
         )
+    return target
+
+
+def build(req: BuildRequest) -> Path:
+    cfg = req.cfg
+    target = check(cfg)
 
     app_dir = req.app_dir
     if req.compiled and target in MOBILE_WEB:

@@ -1956,8 +1956,72 @@ def test_build_forwards_extras_to_the_packagers(monkeypatch: pytest.MonkeyPatch,
     assert cmd_build.cmd_build(cfg, ["pypy", "--method", "pyz", "--no-check", "--target", "pp311-linux-x86_64", "--target", WIN]) == 0
     assert seen[-1].targets == ["pp311-linux-x86_64", WIN]
     flet_cfg = make({"app": {"preset": "flet"}})
+    from runner.methods import flet
+
+    monkeypatch.setattr(flet, "_developer_mode", lambda: True)  # cmd_build checks it first on Windows
     assert cmd_build.cmd_build(flet_cfg, ["--method", "flet", "--no-check", "--build-number", "3"]) == 0
     assert seen[-1].extra == ["--build-number", "3"]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    ("data", "args", "message", "code"),
+    [
+        # flet build on a script project: it ran the checks and compiled mypyc first; --dry-run said fine
+        ({}, ["--method", "flet"], "--method flet is for the flet preset", 2),
+        # a value the .cmd launcher cannot hold: the real build deleted the previous folder and
+        # installed lib/ first, then stopped with a folder without launchers
+        ({"deploy": {"portable": {"runtime": "system", "env": {"GREETING": "h\u00e9llo"}}}}, ["--method", "portable"], "cannot hold this value", 2),
+    ],
+)
+def test_build_refuses_what_the_method_would_refuse_before_any_work(
+    no_build: None, monkeypatch: pytest.MonkeyPatch, data: dict[str, Any], args: list[str], message: str, code: int, dry_run: bool
+) -> None:
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    with pytest.raises(DeployError, match=re.escape(message)) as e:
+        cmd_build.cmd_build(make(data), args)
+    assert e.value.code == code
+
+
+def test_build_refuses_flet_build_without_developer_mode_before_any_work(no_build: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    from runner.methods import flet
+
+    monkeypatch.setattr(flet, "IS_WINDOWS", True)
+    monkeypatch.setattr(flet, "_developer_mode", lambda: False)
+    monkeypatch.setattr(flet, "host_os", lambda: "windows")
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    with pytest.raises(DeployError, match="Developer Mode") as e:
+        cmd_build.cmd_build(_flet_cfg(), ["--method", "flet"])
+    assert e.value.code == 3
+
+
+def test_build_check_failure_is_exit_code_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    # "check failed" exited 2 (usage/config) while ./deploy check exits 1 for the same findings
+    monkeypatch.setattr(cmd_build, "run_checks", lambda cfg, backend: False)
+    monkeypatch.setattr(cmd_build, "payload", lambda *a: pytest.fail("no payload after a failed check"))
+    with pytest.raises(DeployError, match="check failed") as e:
+        cmd_build.cmd_build(make({}), ["--method", "pyz"])
+    assert e.value.code == 1
+
+
+@pytest.mark.parametrize(("output", "extra"), [("missing", ["-v"]), ("empty folder", [])])
+def test_build_without_output_never_reports_done(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], output: str, extra: list[str]) -> None:
+    # `./deploy build -v`: PyInstaller read -v as --version, printed it and made nothing, and the
+    # build said "ok done: dist/p-cpython-exe (0.0 MB)" with exit 0
+    class FakeMethod:
+        @staticmethod
+        def build(req: BuildRequest) -> Path:
+            out = tmp_path / "dist" / "p-cpython-exe"
+            if output == "empty folder":
+                out.mkdir(parents=True)
+            return out
+
+    monkeypatch.setattr(cmd_build, "payload", lambda cfg, backend: tmp_path)
+    monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeMethod)
+    with pytest.raises(DeployError, match="no output") as e:
+        cmd_build.cmd_build(make({}), ["--method", "exe", "--no-check", *extra])
+    assert ("before the command" in str(e.value)) is bool(extra)
+    assert "done:" not in capsys.readouterr().err
 
 
 def test_build_dry_run_stops_after_the_argument_checks(no_build: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

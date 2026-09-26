@@ -188,6 +188,13 @@ def _cmd_value(key: str, value: str) -> str:
     return value.replace("%", "%%")
 
 
+def check(cfg: Config) -> None:
+    """Refuse what the launchers cannot hold (cmd_build calls it before the checks and the
+    payload, also in --dry-run): a .cmd is written on Windows and for runtime = "system"."""
+    if IS_WINDOWS or cfg.deploy.portable.runtime != "bundled":
+        _env_lines(cfg, windows=True)
+
+
 def _env_lines(cfg: Config, windows: bool) -> list[str]:
     env = {"PYTHONUTF8": "1", **cfg.deploy.portable.env}
     if windows:
