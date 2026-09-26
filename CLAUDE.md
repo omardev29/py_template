@@ -310,11 +310,23 @@ header rules (with detector tests proving each rule fires).
   its shebang `#!/usr/bin/env pwsh`, and Windows PowerShell 5.1 reads BOM-less files as ANSI.
   Git mode 100755 so `./deploy.ps1` works from bash/zsh on Linux/macOS (`shells.doctor` only
   notes a wrong mode: PowerShell itself runs it without the x bit).
-- No `param()` block: it would turn `-v`, `-h`, `-q` into PowerShell parameters. A typed list
-  (`--supports cpython,mypyc`, `--tests T1,T2`) reaches the script as ONE array element: the
-  launcher joins its items with commas again, as PowerShell does for a native program (a
-  splatted array variable is indistinguishable and is joined too)
-  (`test_ps1_keeps_typed_comma_lists_whole`, also through the `shell-setup pwsh` function).
+- No `param()` block: it would turn `-v`, `-h`, `-q` into PowerShell parameters.
+- A script gets a typed list (`--supports cpython,mypyc`, `--tests T1,T2`) and an array value
+  (`$files`, `(Get-ChildItem -Name)`) alike, as ONE array element; a native program gets the
+  list as one argument, its items joined with commas, and the value's items as separate
+  arguments. `Get-Typed` tells them apart by the text of the call: the internal
+  `InvocationInfo.ScriptPosition` of `Get-PSCallStack`'s frames (read by reflection; no public
+  property has it on 5.1) parsed with `Parser.ParseInput`, where a typed list is an
+  `ArrayLiteralAst`. It counts the arguments as PowerShell binds them (`-X:v` gives two, a bare
+  `--` none), reads a splatted `@args` where that caller was called (the `shell-setup pwsh`
+  function, `function drun { ./deploy.ps1 run @args }`), and lets ONE other splatted variable
+  (`@files`) take the arguments the others leave. The launcher joins a typed list and passes
+  the items of a value (and of any other collection, `List[string]`: never typed) one by one.
+  What it cannot tell, it treats as a typed list: the arrays of that gap, and every array when
+  the words do not line up (two splatted variables, a wrapper whose `param()` binds some of
+  them) or the text cannot be read; `@files` at the user's own call passes items separately
+  anywhere (`test_ps1_keeps_typed_comma_lists_whole`, also through the `shell-setup pwsh`
+  function; `test_ps1_passes_array_values_like_a_native_call`, which pins the limit too).
 - A `.ps1` runs inside the caller's session: never assign `$env:PATH`. The two `PYTEMPLATE_*`
   variables and the removed `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` (the
   `$names` list) are restored in `finally`; a
@@ -518,11 +530,14 @@ header rules (with detector tests proving each rule fires).
   completer skips the global options before the command (`shells.GLOBAL_OPTIONS`, those of
   `cli._parse_globals`: `test_xonsh_completer_after_hooks_help_and_global_flags`, offline
   with xonsh stubbed). Unlike the launchers it keeps the caller's `UV_PYTHON`, `PYTHONHOME`,
-  `PYTHONPATH` and `UV_WORKING_DIR` (a returned argv cannot change the environment), so the
-  runner's version check (section 5.2) is its guard. `test_shells` executes the fish, pwsh,
-  xonsh and nu snippets in their shells (argv, exit codes, walk-up, the xonsh completer, pwsh
-  pipeline input, the nu fallback to the launcher); the nu one only where nu is installed (the
-  macOS jobs of template-selftest and template-launchers install nushell).
+  `PYTHONPATH` and `UV_WORKING_DIR` (a returned argv cannot change the environment): the
+  runner's version check (section 5.2) guards only against an old `UV_PYTHON` (a `PYTHONHOME`
+  stops Python before `deploy.py` runs), so the snippet's header, and README's environment
+  section, name all four (`test_xonsh_snippet_says_which_variables_it_keeps`). `test_shells`
+  executes the fish, pwsh, xonsh and nu snippets in their shells (argv, exit codes, walk-up,
+  the xonsh completer, pwsh pipeline input, the nu fallback to the launcher); the nu one only
+  where nu is installed (the macOS jobs of template-selftest and template-launchers install
+  nushell).
 - `shells.doctor(check)` (from `./deploy doctor`): step "launchers": the launcher that started
   the run, then `deploy` (`#!/bin/sh`, LF, ASCII, git mode 100755, exec bit on POSIX),
   `deploy.cmd` (CRLF, ASCII) and `deploy.ps1` (LF, ASCII, no BOM; a mode other than 100755 is
@@ -538,7 +553,7 @@ header rules (with detector tests proving each rule fires).
 | `deploy.py` (one level up) | Stops with exit 3 and one `error:` line (no traceback) when uv started it on Python < 3.11 (a `uv run` by hand with an old `UV_PYTHON`), BEFORE importing the runner; reconfigures stdout/stderr to UTF-8, puts its own dir on `sys.path`, calls `runner.cli.main`. |
 | `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `FORWARDS` / `HELP_PASSES_THROUGH` (section 5.2); `INTERNAL` (routes listed nowhere: `__init`). `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main`/`_main` (exception -> exit code, closed stdout), `cmd_help` (commands and `[tasks]` entries), `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
 | `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file` (section 6.1), its TOML statement scanner `scan` (render reads pyproject.toml with it, 6.3), `toml_value`. |
-| `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL` (`wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
+| `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL` (`detect_wsl`: `wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C and passes SIGTERM/SIGHUP on), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`. |
 | `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (all groups), `interpreter_info` (with `platform` and `cc`); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
@@ -751,7 +766,7 @@ header rules (with detector tests proving each rule fires).
 | `PYTEMPLATE_CALLER_CWD` | launchers, Neovim plugin (`init.caller_cwd`: Neovim's cwd when inside the project, else the root), nu snippet | Caller's cwd; read only through `project.caller_cwd` |
 | `PYTEMPLATE_LAUNCHER` | launchers, Neovim plugin (`nvim`), nu snippet (`nu`) | Which launcher/shell ran (section 4.1) |
 | `UV` | uv | uv's own path; `proc.find_uv` and the launchers use it |
-| `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PYTHON_PREFERENCE` | `envs.env_vars` | Environment selection (section 7). The caller's own `UV_PYTHON` never reaches the runner: the launchers, the Neovim plugin and the nu snippet remove or empty it (section 4.1); a `uv run` by hand that keeps a pre-3.11 one stops in `deploy.py` (exit 3) |
+| `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PYTHON_PREFERENCE` | `envs.env_vars` | Environment selection (section 7). The caller's own `UV_PYTHON` does not reach the runner: the launchers, the Neovim plugin and the nu snippet remove or empty it (section 4.1; the xonsh alias of `shell-setup` cannot, 4.9); a `uv run` by hand or that alias with a pre-3.11 one stops in `deploy.py` (exit 3) |
 | `PYTHONUTF8=1` | `proc.base_env`, portable launchers, pyz `.cmd` wrapper, the Neovim mypy linter, every VS Code launch config (`vscode.DEBUG_ENV`) | mypy/mypyc otherwise read files as cp1252; F5 behaves like `./deploy run` |
 | `PYTEMPLATE_BACKEND` | `cmd_dev.test_backend`, `mypyc.runtime_env_vars`, mypyc launch config | Backend under test (conftest) |
 | `PYTEMPLATE_COMPILED` | `mypyc.runtime_env_vars` | Modules that must load from `.pyd/.so` (conftest) |
@@ -1344,8 +1359,13 @@ Formats:
   and uv then replaced the Windows `.venv`), the checkout from the deepest mount above `ROOT`
   in `/proc/self/mounts` (`project.windows_checkout`: drvfs, 9p with `aname=drvfs`, or a drive
   or UNC share as its source, so `/d/...` of `mount -t drvfs D: /d` or `automount root = /`
-  counts; unreadable: a path under `/mnt/`). The Neovim plugin mirrors both
-  (`init.windows_checkout`, `test_lua_windows_checkout_matches_the_runner`).
+  counts; unreadable: a path under `/mnt/`). `project.detect_wsl` joins the two (the mounts
+  read only under a WSL kernel) and gives `IS_WSL`
+  (`test_is_wsl_at_import_follows_the_kernel_and_the_mount_of_the_root` imports the runner
+  afresh with the kernel release and the mounts faked around its root). The Neovim plugin
+  mirrors both (`init.windows_checkout`, `test_lua_windows_checkout_matches_the_runner`) and
+  their join (its `env_suffix`: `test_lua_wsl_environments_follow_the_runner` fakes uname,
+  fs_stat and io.open and compares `venv_exe` with `project.detect_wsl`).
 - Tools outside `uv.lock` run through `uv run --locked --with <pin>` and are pinned in module
   constants: `cmd_dev.BASEDPYRIGHT = "basedpyright==1.40.1"` plus its Node.js runtime
   `cmd_dev.BASEDPYRIGHT_NODE = "nodejs-wheel-binaries==24.19.0"` (basedpyright's only
@@ -2482,9 +2502,9 @@ short temp tree and unset `NVIM_APPNAME`.
   fake uvs for `deploy` and `deploy.ps1`, the install prompt on a pseudo-terminal),
   `test_launcher_win.py` (static rules on every OS, a PowerShell parser check; the deploy.ps1
   behaviour tests run wherever pwsh exists: injection safety of the Core hand-over, `--%`,
-  `-X:v`, typed comma lists, pipeline input and raw stdin, `UV_PYTHON` and the other cleared
-  variables, ConstrainedLanguage, the x bit; cmd and
-  the registry only on Windows),
+  `-X:v`, typed comma lists and array values, pipeline input and raw stdin, `UV_PYTHON` and
+  the other cleared variables, ConstrainedLanguage, the x bit; cmd and the registry only on
+  Windows),
   `test_paths.py` (path spellings, WSL detection, colours in a hidden console, dry runs in a
   throwaway copy),
   `test_render_core.py` (`render.apply`/`auto` and `state.json` in a sandbox, the render
@@ -3733,6 +3753,15 @@ PowerShell (details: section 4.5):
   token** (LIMITATION): it drops it, then splits and `%VAR%`-expands the rest. Fix: `deploy.ps1`
   switches that call to `Legacy` passing in its own scope. Test:
   `test_launcher_win.py::test_ps1_passes_a_literal_stop_parsing_token`. Goes: never.
+- **A script gets a typed list (`a,b`) and an array value (`$files`) alike, as one array**
+  (LIMITATION): a native program gets the list as one argument `a,b` and the value's items as
+  separate arguments, but the launcher saw the same `object[]`: it split both (`mode
+  --supports cpython,mypyc` exited 2), then joined both (`./deploy run $files` gave the app
+  `a.py,b.py`). Fix: `deploy.ps1`'s `Get-Typed` reads the text of the call (an
+  `ArrayLiteralAst` is a typed list; a forwarded `@args` is read at its caller) through the
+  internal `InvocationInfo.ScriptPosition`; what it cannot tell counts as a typed list (4.5).
+  Test: `test_launcher_win.py::test_ps1_keeps_typed_comma_lists_whole`,
+  `test_ps1_passes_array_values_like_a_native_call`. Goes: never.
 - **A typed `-X:v` reaches a script as two elements** (DEFECT): `'-X:'` and `v`. Up:
   PowerShell/PowerShell#6360 (closed for inactivity; 7.6 still splits it). Fix: `deploy.ps1`
   joins them again (limit: `-X: v`; `pwsh -File` and the shebang route split at the colon before
@@ -3944,10 +3973,12 @@ Windows:
   `test_rename.py::test_case_only_folder_fix_on_a_case_insensitive_file_system`. Goes: never.
 - **A venv is specific to its OS** (LIMITATION, WSL on a Windows checkout): Fix: `.venv*-wsl`
   and `.build/wsl` (`project.ENV_SUFFIX`), WSL read from the kernel and the checkout from its
-  mount (`project.wsl_kernel`, `project.windows_checkout`; 7). Test:
+  mount (`project.detect_wsl`: `project.wsl_kernel`, `project.windows_checkout`; 7). Test:
   `test_envs_core.py::test_runtime_and_tool_environments`, `test_clean_envs_on_the_wsl_side`,
   `test_paths.py::test_windows_checkout_follows_the_mount_of_the_root`,
-  `test_wsl_kernel_needs_no_wsl_distro_name`. Goes: never.
+  `test_wsl_kernel_needs_no_wsl_distro_name`,
+  `test_is_wsl_at_import_follows_the_kernel_and_the_mount_of_the_root`,
+  `test_nvim_render.py::test_lua_wsl_environments_follow_the_runner`. Goes: never.
 - **`wsl -l -q` prints UTF-16** (LIMITATION): Fix: `shells.wsl_distros` decodes it. Test:
   `test_workarounds.py::test_wsl_distros_are_read_as_utf16`. Goes: never.
 

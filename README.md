@@ -239,7 +239,11 @@ and uv's environment selection (`UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PROJE
 `UV_NO_PROJECT`, `UV_WORKING_DIR`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`, `UV_ISOLATED`,
 `UV_NO_DEV`, `UV_NO_DEFAULT_GROUPS`, `UV_NO_SYNC`): its tools always run in the project's
 environments. uv's resolution settings (indexes, `UV_EXCLUDE_NEWER`, `UV_RESOLUTION`,
-`UV_PRERELEASE`) and its cache pass through.
+`UV_PRERELEASE`) and its cache pass through. The runner itself starts on the project's Python
+in the folder where the command was typed: the launchers remove `UV_PYTHON`, `PYTHONHOME`,
+`PYTHONPATH` and `UV_WORKING_DIR` before uv starts it, except the xonsh alias of
+[`shell-setup`](#shells), which hands uv only an argument list (unset them there, or use
+`./deploy`).
 
 ### Custom tasks
 
@@ -1259,12 +1263,18 @@ pipeline input on. Print the xonsh snippet again to complete commands added late
 - PowerShell removes a bare `--` before any script sees it (5.1 and 7 alike): quote it (`'--'`)
   or use `.\deploy.cmd`. `./deploy` itself never needs `--`: everything after `run` or `test`
   already goes to the app or to pytest.
-- Inside PowerShell, a typed list (`--supports cpython,mypyc`) and a typed `-X:utf8` stay one
-  argument each, as for any native program (but `-X: v`, with a space, arrives as `-X:v`), `--%`
-  passes through literally, and pipeline input reaches the app
-  (`Get-Content data.txt | ./deploy run`). `pwsh -File deploy.ps1 ...`, and `./deploy.ps1` typed
-  in bash or zsh, split every argument that starts with `-` at its first colon (PowerShell's own
-  parsing): from POSIX shells use `./deploy`.
+- Inside PowerShell, `./deploy` gets its arguments as any native program does: a typed list
+  (`--supports cpython,mypyc`) and a typed `-X:utf8` stay one argument each (but `-X: v`, with a
+  space, arrives as `-X:v`), the items of an array (`./deploy run $files`) are separate
+  arguments, `--%` passes through literally, and pipeline input reaches the app
+  (`Get-Content data.txt | ./deploy run`). The launcher tells a typed list from an array by
+  reading the command you typed (through the `shell-setup pwsh` function and any wrapper that
+  forwards `@args` too). Where it cannot (a call that splats two variables, a wrapper that binds
+  some of the words with `param()` or splats a copy of `$args`), an array arrives as ONE
+  argument with its items joined by commas: splat it in your own command (`@files`).
+  `pwsh -File deploy.ps1 ...`, and `./deploy.ps1` typed in bash or zsh, split every argument
+  that starts with `-` at its first colon (PowerShell's own parsing): from POSIX shells use
+  `./deploy`.
 - In PowerShell on Windows, `./deploy` and `../deploy` resolve to `deploy.ps1`, but a full path
   without the extension (`C:\proj\deploy`) opens the extensionless sh launcher through Windows'
   file association: type `C:\proj\deploy.ps1`.

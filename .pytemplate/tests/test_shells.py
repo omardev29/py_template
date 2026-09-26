@@ -385,14 +385,15 @@ def _complete(completer: Any, line: str) -> list[str]:
 def test_xonsh_completer_after_hooks_help_and_global_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     """hooks' subcommands (a nested [--force] in its usage), command names after `help` or `-h`,
     and the command after global flags (`deploy -v --dry-run test <TAB>`)."""
-    cfg = make({"tasks": {"gen": {"cmd": ["python", "gen.py"]}}})
-    _, choices, _ = shells.completion_words(cfg)
+    cfg = make({"tasks": {"gen": {"cmd": ["python", "gen.py"]}, "gen_docs": {"cmd": ["python", "docs.py"]}}})
+    first, choices, _ = shells.completion_words(cfg)
     assert choices["hooks"] == ["install", "uninstall", "run", "status"]
-    assert {"build", "test", "gen"} <= set(choices["help"])
+    assert {"build", "test", "gen", "gen_docs"} <= set(choices["help"])  # task names may hold "_"
+    assert set(first) - {"-v", "-q", "--dry-run", "--no-render"} <= set(choices["help"])
     complete = _xonsh_completer(monkeypatch, cfg)
     assert _complete(complete, "deploy hooks ") == ["install", "run", "status", "uninstall"]
     assert _complete(complete, "deploy hooks install --") == ["--force"]
-    assert "build" in _complete(complete, "deploy help ") and "gen" in _complete(complete, "deploy help g")
+    assert "build" in _complete(complete, "deploy help ") and _complete(complete, "deploy help g") == ["gen", "gen_docs"]
     assert "build" in _complete(complete, "deploy -h b")
     assert _complete(complete, "deploy -v --dry-run te") == ["test"]
     assert {"all", "cpython"} <= set(_complete(complete, "deploy -q test "))
@@ -471,6 +472,19 @@ def test_snippets_keep_the_launcher_contract() -> None:
     assert "let uv = if $windows { 'uv.exe' } else { 'uv' }" in nu and "deploy.cmd" in nu
     xonsh = shells.snippet("xonsh")
     assert '[uv, "run", "--quiet", "--script", str(script), *args]' in xonsh
+
+
+def test_xonsh_snippet_says_which_variables_it_keeps() -> None:
+    """The xonsh alias hands uv only an argument list, so it keeps the four variables the
+    launchers remove: its header names every one (a PYTHONHOME stops Python before the runner's
+    own version check), and the manual says the alias is the exception."""
+    header = " ".join(line[1:].strip() for line in shells.snippet("xonsh").splitlines() if line.startswith("#"))
+    for name in ("UV_PYTHON", "PYTHONHOME", "PYTHONPATH", "UV_WORKING_DIR"):
+        assert name in header, name
+    manual = (ROOT / "README.md").read_text(encoding="utf-8") if (ROOT / "README.md").is_file() else ""
+    if "The runner ignores an activated virtual environment" in manual:
+        paragraph = manual.split("The runner ignores an activated virtual environment", 1)[1].split("\n\n", 1)[0]
+        assert "xonsh alias" in paragraph, paragraph
 
 
 @pytest.mark.parametrize("windows", [True, False])

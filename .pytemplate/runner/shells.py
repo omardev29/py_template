@@ -309,7 +309,10 @@ XONSH_TEMPLATE = r'''
 # directly (on Windows only a real uv.exe: a uv.cmd shim would go through cmd.exe; falling
 # back to the launcher when there is none on $PATH): on Windows ./deploy goes through
 # deploy.cmd, and cmd.exe cannot pass & | < > ^ % inside arguments. Unlike the
-# launchers it keeps a UV_PYTHON you set: the runner then needs it to be 3.11 or newer.
+# launchers it keeps the UV_PYTHON, PYTHONHOME, PYTHONPATH and UV_WORKING_DIR of your
+# session (an alias hands uv only an argument list): a UV_PYTHON must name Python 3.11 or
+# newer, a PYTHONHOME or PYTHONPATH can stop the runner's Python before it starts, and a
+# UV_WORKING_DIR moves it to another folder. Unset them for deploy, or use ./deploy.
 # The completion words were taken from this project by `./deploy shell-setup xonsh`.
 import os as _pt_os
 import shutil as _pt_shutil
@@ -430,7 +433,8 @@ def completion_words(cfg: Config | None) -> tuple[list[str], dict[str, list[str]
             words: list[str] = []
             for word in (w.strip() for w in group.split("|")):
                 words += list(BACKENDS) if word == "BACKEND" else names if word == "COMMAND" else [word]
-            choices[name] = list(dict.fromkeys(w for w in words if re.fullmatch(r"-{0,2}[a-z][a-z0-9-]*", w)))
+            # the words of a command, a task (its names may hold "_") or an option
+            choices[name] = list(dict.fromkeys(w for w in words if re.fullmatch(r"-{0,2}[a-z][a-z0-9_-]*", w)))
         options = list(dict.fromkeys(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", command.usage)))
         if options:
             flags[name] = options

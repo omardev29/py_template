@@ -8,7 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from . import ui
@@ -74,9 +74,18 @@ def _read_mounts() -> str | None:
         return None
 
 
+def detect_wsl(
+    root: Path, *, system: str = sys.platform, environ: Mapping[str, str] = os.environ, release: str | None = None,
+    interop: str = WSL_INTEROP, read_mounts: Callable[[], str | None] = _read_mounts,
+) -> bool:  # fmt: skip
+    """IS_WSL: Linux under a WSL kernel, with `root` on a Windows drive (the mounts are read
+    only then). The Neovim plugin mirrors it (`init.lua` env_suffix)."""
+    return system == "linux" and wsl_kernel(environ, release, interop) and windows_checkout(root, read_mounts())
+
+
 # WSL on a Windows checkout (/mnt/c/...): separate environments and builds, so the
-# Windows .venv is not turned into a Linux one (the Neovim plugin mirrors this test).
-IS_WSL = sys.platform == "linux" and wsl_kernel() and windows_checkout(ROOT, _read_mounts())
+# Windows .venv is not turned into a Linux one.
+IS_WSL = detect_wsl(ROOT)
 ENV_SUFFIX = "-wsl" if IS_WSL else ""
 BUILD = ROOT / ".build" / "wsl" if IS_WSL else ROOT / ".build"
 

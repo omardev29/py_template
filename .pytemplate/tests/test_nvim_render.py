@@ -495,6 +495,82 @@ def test_lua_windows_checkout_matches_the_runner(tmp_path: Path) -> None:
     assert True in expected and False in expected
 
 
+WSL_ENV_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+local pt = require("pytemplate")
+local uv = vim.uv or vim.loop
+local cases = vim.json.decode(table.concat(vim.fn.readfile(vim.env.PT_TMP .. "/wslenv.json"), "\n"))
+local case
+local real_uname, real_stat, real_open = uv.os_uname, uv.fs_stat, io.open
+uv.os_uname = function()
+  return { sysname = "Linux", release = case.release }
+end
+uv.fs_stat = function(path, ...)
+  if path == "/proc/sys/fs/binfmt_misc/WSLInterop" then
+    return case.interop and { type = "file" } or nil
+  end
+  return real_stat(path, ...)
+end
+io.open = function(path, ...)
+  if path == "/proc/self/mounts" then
+    if case.mounts == vim.NIL then
+      return nil
+    end
+    return { read = function() return case.mounts end, close = function() end }
+  end
+  return real_open(path, ...)
+end
+local got = {}
+for i, c in ipairs(cases) do
+  case = c
+  vim.env.WSL_DISTRO_NAME = c.distro ~= vim.NIL and c.distro or nil
+  pt.config.root = c.root
+  got[i] = pt.venv_exe(".venv", "python"):find(".venv-wsl", 1, true) ~= nil
+end
+uv.os_uname, uv.fs_stat, io.open = real_uname, real_stat, real_open
+io.stdout:write("PTWSLENV" .. vim.json.encode(got) .. "\n")
+vim.cmd("qa!")
+"""
+
+WSL_RELEASE = "5.15.167.4-microsoft-standard-WSL2"
+# (root, WSL_DISTRO_NAME, kernel release, WSLInterop registered, /proc/self/mounts)
+WSL_ENV_CASES = [
+    ("/mnt/c/Users/me/p", None, WSL_RELEASE, False, WSL_MOUNTS[0]),  # sudo, sshd, cron: no WSL_DISTRO_NAME
+    ("/d/w/p", None, "6.6.87-custom", True, WSL_MOUNTS[0]),  # a custom WSL kernel, automount root = /
+    ("/mnt/c/p", "Ubuntu", "6.8.0-generic", False, WSL_MOUNTS[1]),
+    ("/mnt/c/x", None, WSL_RELEASE, False, None),  # mounts unreadable
+    ("/home/me/p", "Ubuntu", WSL_RELEASE, True, WSL_MOUNTS[0]),  # the distro's own ext4
+    ("/mnt/c/y", None, "6.8.0-45-generic", False, WSL_MOUNTS[0]),  # no WSL kernel
+    ("/srv/p", None, WSL_RELEASE, False, None),
+]
+
+
+def test_lua_wsl_environments_follow_the_runner(tmp_path: Path) -> None:
+    """The plugin's -wsl suffix is project.IS_WSL for the same kernel release, WSL_DISTRO_NAME,
+    WSLInterop and mount table: its uname, fs_stat and io.open are faked, and each case asks
+    venv_exe, the path every tool the plugin starts goes through."""
+    marker = tmp_path / "WSLInterop"
+    marker.write_text("enabled\n", encoding="ascii")
+    missing = str(tmp_path / "none")
+    cases, expected = [], []
+    for root, distro, release, interop, mounts in WSL_ENV_CASES:
+        cases.append({"root": root, "distro": distro, "release": release, "interop": interop, "mounts": mounts})
+        environ = {"WSL_DISTRO_NAME": distro} if distro else {}
+        expected.append(
+            project.detect_wsl(
+                Path(root), system="win32" if sys.platform == "win32" else "linux", environ=environ, release=release,
+                interop=str(marker) if interop else missing, read_mounts=lambda m=mounts: m,
+            )  # fmt: skip
+        )
+    (tmp_path / "wslenv.json").write_text(json.dumps(cases), encoding="utf-8")
+    r = _headless_lua(tmp_path, WSL_ENV_CHECK, ROOT)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTWSLENV")), None)
+    assert line is not None, r.stdout + r.stderr
+    assert json.loads(line[len("PTWSLENV") :]) == expected
+    if sys.platform != "win32":  # the plugin never adds -wsl on Windows
+        assert expected == [True, True, True, True, False, False, False]
+
+
 SANITIZE_CHECK = r"""
 vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
 local pt = require("pytemplate")
