@@ -162,7 +162,8 @@ for `test` and `check`): to pass such a word to the app, name the backend first
 (`./deploy run cpython mypyc`).
 
 Global options go before the command: `-v` (more detail, such as the full compiler and
-PyInstaller output), `-q` (no progress lines; results, warnings and errors still print),
+PyInstaller output), `-q` (no progress lines, uv's own included; results, warnings and errors
+still print),
 `--dry-run` (shows what would change and changes nothing; it ignores `-q`), `--no-render` (does
 not regenerate the generated files first). For example `./deploy --dry-run apply`; after the
 command, `--dry-run` is an error.
@@ -255,7 +256,8 @@ env = { SEED = "42" }
   `backend.supported`. `mypyc` runs interpreted in `.venv`: to run the compiled modules, add
   `deps = ["compile"]` and run `{build}/mypyc-dev/stage/main.py`.
 - `uv`: `true` (default) runs `cmd` with `uv run` in that environment; `false` runs the program
-  as it is (a `{python}` whose environment does not exist yet is created first).
+  as it is (a `{python}` whose environment does not exist yet is created first; on Windows a
+  bare name is looked up on `PATH` with its `.cmd`/`.bat` extensions too, so `npm` works).
 - `help`: the line that `./deploy tasks` and `./deploy help` show.
 - `background`: a long-running server (flet's `dev`): the editors start it without waiting.
 

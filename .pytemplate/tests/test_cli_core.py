@@ -1178,6 +1178,37 @@ def test_a_relative_program_runs_from_the_task_cwd(rec: Recorder, tmp_path: Path
     assert rec.runs == [["tool"], [f"{ROOT}/tools/x"]]  # a bare name keeps the OS search
 
 
+def test_a_bare_program_is_found_with_pathext_on_windows(rec: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows: CreateProcess only tries `npm.exe` for a bare `npm`, so a task running npm, yarn
+    or mvn (.cmd files) failed with "program not found: npm" there and worked elsewhere."""
+    bin_dir = tmp_path / "nodejs"
+    bin_dir.mkdir()
+    looked_up: list[tuple[str, str]] = []
+
+    def which(name: str, mode: int = os.F_OK | os.X_OK, path: str | None = None) -> str | None:
+        looked_up.append((name, path or ""))
+        return str(bin_dir / "npm.cmd") if name == "npm" else None  # PATHEXT, as on Windows
+
+    monkeypatch.setattr(tasks, "IS_WINDOWS", True)
+    monkeypatch.setattr(tasks.shutil, "which", which)
+    cfg = make({"tasks": {
+        "web": {"cmd": ["npm", "run", "build"], "uv": False, "env": {"PATH": str(bin_dir)}},
+        "missing": {"cmd": ["no-such-tool"], "uv": False},
+        "rel": {"cmd": ["tools/x.cmd"], "uv": False},
+    }})
+    tasks.run_task(cfg, "web", ["--prod"], rec.dispatch)
+    assert rec.runs[-1] == [str(bin_dir / "npm.cmd"), "run", "build", "--prod"]
+    assert looked_up[-1] == ("npm", str(bin_dir))  # the task's own PATH
+    tasks.run_task(cfg, "missing", [], rec.dispatch)
+    assert rec.runs[-1] == ["no-such-tool"]  # not found: proc.run reports it
+    count = len(looked_up)
+    tasks.run_task(cfg, "rel", [], rec.dispatch)
+    assert len(looked_up) == count and Path(rec.runs[-1][0]) == ROOT / "tools" / "x.cmd"  # a path is no PATH lookup
+    monkeypatch.setattr(tasks, "IS_WINDOWS", False)
+    tasks.run_task(cfg, "web", [], rec.dispatch)
+    assert rec.runs[-1][0] == "npm" and len(looked_up) == count  # POSIX: execvp searches PATH itself
+
+
 def test_the_task_list_is_shown_with_quiet(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(ui, "QUIET", True)
     assert cli.cmd_tasks(make({"tasks": {"ci": {"deps": ["check all"]}, "gen": {"cmd": ["g"], "help": "Generate"}}}), []) == 0

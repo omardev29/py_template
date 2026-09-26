@@ -139,6 +139,27 @@ def test_sync_installs_every_dependency_group(tmp_path: Path, monkeypatch: pytes
     assert calls.argvs == [["uv", "sync", "--locked", "--all-groups"]]
 
 
+def test_quiet_hides_uvs_own_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """README: -q prints no progress lines. `./deploy -q sync` still printed uv's `Resolved 26
+    packages` and `Checked 21 packages`."""
+    monkeypatch.setattr(envs, "ROOT", tmp_path)
+    (tmp_path / ".venv").mkdir()
+    calls = Calls(monkeypatch)
+    env = envs.cpython_env(make())
+    monkeypatch.setattr(envs.ui, "QUIET", True)
+    envs.sync(env)
+    envs.uv_run(env, ["python", "app.py"])  # uv's own lines only: the app's output is untouched
+    envs.uv(env, ["lock", "--check"], check=False, capture=True, echo=False)  # a query: the runner reads it
+    monkeypatch.setattr(envs.ui, "QUIET", False)
+    envs.sync(env)
+    assert calls.argvs == [
+        ["uv", "--quiet", "sync", "--locked", "--all-groups"],
+        ["uv", "--quiet", "run", "--locked", "python", "app.py"],
+        ["uv", "lock", "--check"],
+        ["uv", "sync", "--locked", "--all-groups"],
+    ]
+
+
 def test_a_polluted_uv_environment_still_selects_the_project_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Real uv, offline, in this project's .venv: an exported UV_PROJECT_ENVIRONMENT, UV_PYTHON
     or VIRTUAL_ENV (another project, an activated venv) never reaches uv."""

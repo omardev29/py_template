@@ -627,7 +627,10 @@ header rules (with detector tests proving each rule fires).
   `ui.report` (the `tasks` list, the stderr of a failed query), warnings, errors and
   `check_line` always print, and a dry run ignores `-q` (its output is the plan). Still
   `ui.info` (hidden by `-q`): the `mode` display (`cmd_mode._describe`) and `render
-  --check/--diff` lists (`cmd_mode.cmd_render`, `render.apply`).
+  --check/--diff` lists (`cmd_mode.cmd_render`, `render.apply`). uv's own progress (`Resolved`,
+  `Installed`, `Checked`...) is progress too: under `-q`, `envs.uv` passes `--quiet` to every uv
+  call it echoes (uv still prints its errors and warnings; the output of what `uv run` starts is
+  untouched), never to a captured query the runner reads.
 - `ui.error` prints `error: ` and `ui.warn` prints `warning: ` (only the prefix is coloured on a
   TTY). The VS Code problem matcher `RULES_RE` and the Neovim parser `tasks.parse_line` depend
   on these exact prefixes and on `str(lintc.Finding)` (`src/...:N: msg`, relative to ROOT): do
@@ -3389,6 +3392,11 @@ Windows:
   task's `tools/gen.sh` ran from the caller's folder, not the task's cwd. Fix: `tasks.run_task`
   anchors it (6.1). Test: `test_cli_core.py::test_a_relative_program_runs_from_the_task_cwd`.
   Goes: never.
+- **CreateProcess tries only `<name>.exe` for a bare program name** (LIMITATION, PATHEXT is a
+  shell feature): a `uv = false` task running `npm`, `yarn` or `mvn` (`.cmd` files) failed with
+  "program not found" on Windows only. Fix: `tasks.run_task` looks the name up on the task's
+  PATH with PATHEXT, through the standard library's shutil.which (6.1). Test:
+  `test_cli_core.py::test_a_bare_program_is_found_with_pathext_on_windows`. Goes: never.
 - **A command line holds 32767 characters** (LIMITATION): Fix: `hooks.ARG_LIMIT` batches file
   arguments (5.6). Test: `test_hooks.py::test_batches`. Goes: never.
 - **A file stays locked after its process ends** (LIMITATION): a just-exited exe, an antivirus
