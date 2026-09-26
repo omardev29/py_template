@@ -1,17 +1,32 @@
-# myapp: multi-backend uv template (CPython · PyPy · mypyc)
+[![Tests](https://github.com/omardev29/py_template/actions/workflows/template-selftest.yml/badge.svg)](https://github.com/omardev29/py_template/actions/workflows/template-selftest.yml)
+[![E2E](https://github.com/omardev29/py_template/actions/workflows/template-e2e.yml/badge.svg)](https://github.com/omardev29/py_template/actions/workflows/template-e2e.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue?logo=python&logoColor=white)](#requirements)
+[![Backends](https://img.shields.io/badge/backends-CPython%20%7C%20PyPy%20%7C%20mypyc-informational)](#backends)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Checked with mypy](https://www.mypy-lang.org/static/mypy_badge.svg)](https://mypy-lang.org/)
+[![GitHub stars](https://img.shields.io/github/stars/omardev29/py_template?style=social)](https://github.com/omardev29/py_template/stargazers)
 
-A single template for scripts, **raylib** games and **Flet** apps, with three ways to run
-the same code and six ways to distribute it. Everything is driven by `./deploy`, a Justfile-style
-runner that only needs [uv](https://docs.astral.sh/uv/) (if it is missing, the launcher offers to
-install it or prints how).
+# py_template
 
-| Backend | What it is | Types | Best for |
+A uv-based template for Python applications. One codebase runs on three backends (CPython,
+PyPy and mypyc) and is packaged six ways; the configurations of mypy, ruff, pyright, VS Code
+and Neovim are generated from one file, `pytemplate.toml`. Everything goes through `./deploy`,
+a command runner that only needs [uv](https://docs.astral.sh/uv/). A preset sets up the kind of
+project: `script` (a console program), `raylib` (a 2D game) or `flet` (a desktop app).
+
+This page is the manual of `./deploy` and `pytemplate.toml`. A project made with `./deploy new`
+keeps a copy of it, from the template version it was made with, as `.pytemplate/README.md`.
+Parts marked **(template repository)** only concern the template itself.
+
+| Backend | What runs the code | Typing | Typical use |
 |---|---|---|---|
-| `cpython` | The usual interpreter | Optional | Short scripts, C-API libraries (numpy, pillow...) |
-| `pypy` | JIT compiler | Optional | Long-running pure Python and **cffi** libraries (raylib) |
-| `mypyc` | Compiles your core to C (AOT) | **Required, no `Any`** | Numeric/CPU logic; shipping a fast binary |
+| `cpython` | uv's CPython (`python.cpython`, 3.14 by default) | optional | scripts, libraries with C extensions (numpy, pillow...) |
+| `pypy` | PyPy, a JIT compiler (`python.pypy`, pinned exactly); Python 3.11 syntax | optional | long-running pure Python, cffi libraries (raylib) |
+| `mypyc` | the modules of `compile.modules` compiled to C extensions ahead of time, on the CPython of `.venv` | required, no `Any` in compiled code | numeric and CPU-bound logic |
 
-Measured on this machine (Windows 11, CPython 3.14.7, PyPy 7.3.23, mypyc 2.3.1):
+Measured on the maintainer's machine (Windows 11, CPython 3.14.7, PyPy 7.3.23, mypyc 2.3.1):
 
 | Benchmark | CPython | PyPy | mypyc |
 |---|---|---|---|
@@ -20,35 +35,229 @@ Measured on this machine (Windows 11, CPython 3.14.7, PyPy 7.3.23, mypyc 2.3.1):
 | Bunnymark 30,000 bunnies (raylib preset) | 67 FPS | **217 FPS** | 152 FPS |
 | Fractal 640x400 (flet preset) | 2.81 s | n/a | 0.08 s |
 
+## Requirements
+
+- [uv](https://docs.astral.sh/uv/) 0.10.12 or newer: the only program `./deploy` needs. Older
+  versions cannot download `pypy@3.11.15`, and uv 0.8 installs a CPython 3.14 release candidate
+  instead of 3.14. uv refuses them inside a project ("Required uv version `>=0.10.12` does not
+  match", from the `required-version` that `./deploy` writes into `pyproject.toml`) and
+  `./deploy doctor` flags them: update with `uv self update` (or `brew upgrade uv`, `pipx
+  upgrade uv`, `winget upgrade astral-sh.uv`, `scoop update uv`). When uv is missing, the
+  launchers print how to install it; `deploy` and `deploy.ps1` also offer to run the official
+  installer in an interactive terminal (never when `CI` is set).
+- No Python installation: uv downloads the interpreters (`python.cpython`, `python.pypy`). The
+  runner itself runs on the project's CPython, which must be 3.11 or newer.
+- A C compiler for the `mypyc` backend (every preset supports it): MSVC Build Tools on Windows
+  (`./deploy doctor` prints the `winget` command), gcc or clang on Linux, the Xcode Command Line
+  Tools on macOS (`xcode-select --install`).
+- The `nuitka` build method needs a C compiler for every backend (on Windows, Nuitka downloads
+  one when it finds none) and, on Linux, `patchelf`.
+- The `flet` build method (`flet build`) needs, on Windows, Developer Mode and the Visual Studio
+  C++ tools; Flet downloads the Flutter SDK it pins (about 3 GB) on the first build.
+- The Neovim integration needs Neovim 0.11.2 or newer with LazyVim.
+- Network access for the first `./deploy setup` (interpreters and packages) and whenever
+  `uv.lock` is re-locked.
+
+What a user of the finished program needs depends on the build method. An `exe`, `nuitka`,
+`flet` or bundled `portable` build carries its own Python and dependencies, and runs only on the
+OS and CPU it was built on (Linux `exe` and `nuitka` builds also need a glibc at least as new as
+the build machine's). A `.pyz`, a wheel or a `runtime = "system"` portable folder needs an
+installed CPython (or PyPy, when the project supports it) at or above the project's minimum
+Python: `python.cpython` (3.14 by default), or 3.11 when PyPy is supported.
+
 ## Getting started
 
-```bash
-./deploy setup            # interpreters, environments, uv.lock and editor configs
-./deploy run              # run with the active backend (pytemplate.toml)
-./deploy run mypyc        # compile the core with mypyc and run
-./deploy test all         # pytest on every backend (on mypyc, against the binaries)
-./deploy build mypyc      # PyInstaller executable in dist/
+```sh
+git clone https://github.com/omardev29/py_template
+cd py_template
+./deploy new ../my-game --preset raylib   # a new project: script (default), raylib or flet
+cd ../my-game
+./deploy setup       # interpreters, environments, uv.lock, git hook, generated files
+./deploy run         # run the app on the active backend (backend.active)
+./deploy test all    # pytest on every supported backend (mypyc: on the compiled modules)
+./deploy build       # package the app into dist/ with the backend's default method
 ```
 
-New project from this template (no need for a separate repo per project type):
+On Windows, type the same commands in PowerShell or Git Bash; in cmd, `.\deploy` (see
+[Shells](#shells)). `./deploy help` lists every command and task, `./deploy help COMMAND`
+shows one. On a Mac with Apple Silicon or on Linux ARM64, a raylib project first needs
+`./deploy mode cpython --supports cpython,mypyc`: raylib publishes no PyPy wheel there.
 
-```bash
-./deploy new ../my-game --preset raylib     # or: script, flet
-./deploy init flet --name myapp             # or convert THIS project to another preset
+The template repository is itself a project of the script preset: `./deploy setup` also works
+in a plain clone.
+
+### New projects
+
+`./deploy new DIR [--preset P] [--name NAME]` creates a project in `DIR`, a new or empty folder
+outside the template:
+
+1. It copies the files git tracks (and lists the untracked ones it leaves out; without git, or
+   when nothing was ever committed, it copies every file). It never copies the git history, the
+   environments, builds and caches, `.claude/`, the template's own CI (`template-*.yml`), or the
+   template's `README.md` and `LICENSE`, which go to `.pytemplate/README.md` (this manual) and
+   `.pytemplate/LICENSE`.
+2. It writes the project's own `README.md` (its name, the preset's description and the first
+   commands) and `[project] description` in `pyproject.toml`.
+3. It runs the preset step in the copy: `src/`, `tests/`, `typings/` and `pytemplate.toml` from
+   the preset's skeleton, the preset's dependencies in `pyproject.toml` and `uv lock`, which
+   needs the network. raylib and flet projects get the versions the template was tested with
+   (`.pytemplate/presets/<preset>/constraints.txt`), once: `./deploy lock --upgrade` moves on.
+4. It runs `git init -b main` (unless `DIR` is inside a git work tree) with `deploy` and
+   `deploy.ps1` executable. It makes no commit.
+
+When a step fails (a name uv refuses, no network, Ctrl+C), `new` removes what it created.
+Dependencies added with `./deploy add` and tracked files of your own (docs, scripts) come along
+into the copy: for a clean project, run `new` from an untouched clone of the template.
+
+The app name is the folder name unless `--name` is given (accents are dropped, other characters
+become `-`). It is the executable's name; the Python package is the name in lower case with `_`
+for `-` (`My-Game` -> `src/my_game/`). A name has letters, digits, `-` and `_`, starts with a
+letter and ends with a letter or digit, and must not be a Python keyword, a standard-library
+module, a backend (`cpython`, `pypy`, `mypyc`), a package the project locks (directly or not:
+`flet`, `rich`, `pygments`...), one of the project's own names (`tests`, `typings`, `build`,
+`dist`, `assets`, `main`) or a Windows device name (`con`, `aux`, `nul`, `com1`...). So
+`./deploy new ../flet --preset flet` fails: add `--name`.
+
+The preset is fixed when the project is created: to use another one, create a new project with
+it and move the code over.
+
+## Commands
+
+`./deploy [-v|-q] [--dry-run] [--no-render] COMMAND [args...]`
+
+| Command (as `./deploy help COMMAND` shows it) | What it does |
+|---|---|
+| `setup [--force]` | The first run on a fresh clone: the same operation as `apply` |
+| `apply [--force]` | Applies every `pytemplate.toml` change: rename, dependencies, `uv.lock`, environments, git hook, generated files ([details](#after-editing-pytemplatetoml)) |
+| `doctor` | Checks uv, the environments, the C compiler, the generated files, `pyproject.toml`, `uv.lock`, the changes `apply` has not applied yet, the launchers, the shell, the git hook and Neovim; exit 1 when a line is `[XX]` |
+| `sync [cpython\|pypy\|mypyc\|all]` | `uv sync --locked --all-groups` of one environment or of all (default); it never re-locks |
+| `lock [--upgrade] [--upgrade-package PKG]` | Rewrites the managed parts of `pyproject.toml` and re-locks `uv.lock`; its other arguments go to `uv lock`. It does not apply `[preset.*]`: `apply` does |
+| `add PKG... [--dev\|--group G] [--cpython-only]` | `uv add`; `--cpython-only` adds the marker `implementation_name == 'cpython'` (C-API libraries that are slow or missing on PyPy) |
+| `remove PKG... [--dev\|--group G]` | `uv remove` |
+| `clean [--envs]` | Deletes `.build/` and `dist/`; `--envs` also this side's `.venv*` environments (`setup` recreates the ones in use) |
+| `hooks [install [--force]\|uninstall\|run\|status]` | The git pre-commit hook ([details](#git-pre-commit-hook)); without an argument, `status` |
+| `mode [BACKEND] [--supports +B\|-B\|B,B...] [--typing auto\|off\|warn\|strict\|mypyc] [--editor pylance\|basedpyright]` | Shows the mode without arguments; otherwise edits `pytemplate.toml` and applies it (re-lock, generated files, a new PyPy environment) |
+| `render [--check] [--diff] [--force]` | Regenerates the generated files; `--check` exits 1 when one is outdated or hand-edited (or `pyproject.toml` does not match), `--diff` shows hand edits, `--force` overwrites them |
+| `rename NEW_NAME [--force]` | Renames the app ([details](#renaming-the-app)) |
+| `new DIR [--preset P] [--name NAME]` | Creates a project from this template ([details](#new-projects)) |
+| `run [BACKEND] [app args...]` | Runs `src/main.py` (mypyc: compiles first); the arguments go to the app |
+| `check [BACKEND\|all]` | ruff and mypy with the backend's typing profile, the mypyc rules, and basedpyright with `typing.editor = "basedpyright"` |
+| `lint [--fix]` | `ruff check` of `src/` and `tests/` with the active typing profile |
+| `fmt [--check]` | `ruff format` of `src/` and `tests/` |
+| `test [BACKEND\|all] [pytest args...]` | pytest; with mypyc on the compiled modules (it fails when they were not loaded) |
+| `report [--open] [--no-mypy]` | mypyc's HTML report of slow lines and mypy's `Any` reports, in `.build/reports/` (no C compiler needed) |
+| `compile [--release]` | Compiles the mypyc stage without running it (for debuggers and editors) |
+| `build [BACKEND] [--method exe\|portable\|pyz\|wheel\|nuitka\|flet] [--onefile\|--onedir] [--target KEY]... [--no-check]` | Runs `check`, then packages the app into `dist/` ([details](#distribution)) |
+| `pyz-merge A.pyz B.pyz... --out C.pyz` | Merges the `.pyz` files built on several OSes into one |
+| `tasks` | Lists the `[tasks]` entries of `pytemplate.toml` |
+| `shell-setup [xonsh\|pwsh\|powershell\|bash\|zsh\|niubash\|msys2\|fish\|nu]` | Prints a `deploy` function for a shell ([details](#shells)) |
+| `nvim [doctor\|trust\|extras\|bootstrap\|sync]` | The Neovim/LazyVim integration ([details](#neovim-lazyvim)) |
+| `selftest [--shells\|--nvim\|--e2e] [args...]` | The template's own tests ([details](#testing-the-template)) |
+| `help [COMMAND]` | Every command and task, or one of them |
+
+`BACKEND` is `cpython`, `pypy` or `mypyc` (default: `backend.active`). `run`, `test`, `check`
+and `build` read their first argument as the backend when it is one of these words (or `all`,
+for `test` and `check`): to pass such a word to the app, name the backend first
+(`./deploy run cpython mypyc`).
+
+Global options go before the command: `-v` (more detail, such as the full compiler and
+PyInstaller output), `-q` (no progress lines; results, warnings and errors still print),
+`--dry-run` (shows what would change and changes nothing; it ignores `-q`), `--no-render` (does
+not regenerate the generated files first). For example `./deploy --dry-run apply`; after the
+command, `--dry-run` is an error.
+
+Unknown arguments are an error (exit 2), never ignored. Only these commands pass extra
+arguments on: `run` to the app, `test` to pytest, `lock` to `uv lock`, `selftest` to pytest,
+`build --method exe|nuitka|flet` to the packager (PyInstaller or `flet pack`, Nuitka, `flet
+build`; `pyz`, `portable` and `wheel` take none), and a task with a `cmd` to its program.
+`-h` or `--help` after a command shows `./deploy help COMMAND`, except after `run`, `test`,
+`lock` and `selftest`, where it goes to the app, pytest, uv or the suite; `./deploy -h COMMAND`
+works too.
+
+`--dry-run` is not a sandbox: it skips every command it would run and every change to the
+project's files, but still writes scratch files under `.build/` (tool configurations, the mypyc
+stage). `selftest --shells`, `--nvim` and `--e2e` refuse it.
+
+### Output, exit codes and environment
+
+The runner writes its own messages to stderr, so stdout belongs to the app
+(`./deploy run > out.txt` captures only the app). `help`, `shell-setup` and the `--json` reports
+of `selftest --shells` and `selftest --e2e` write to stdout, for pipes. Colours are used only on a
+terminal, and never with `NO_COLOR` (any non-empty value) or `TERM=dumb`.
+
+Exit codes:
+
+- 0: success.
+- 1: check, test or doctor failures, or an internal runner error (a traceback is printed).
+- 2: a usage or configuration error (also a program without its executable bit or `#!` line, a
+  working folder that does not exist, a bad `[tasks]` entry).
+- 3: a missing requirement: uv, a uv older than 0.10.12, a compiler, an interpreter, or the
+  runner started on a Python older than 3.11.
+- 130: Ctrl+C. The runner waits for the app to finish its own cleanup, then stops without
+  running the next step; it exits with the app's code, or 130 when the app exited with 0.
+- 141: the reader of stdout went away (`./deploy help | head -1`; Linux and macOS).
+- 128 + N: a program killed by signal N.
+- `run`, `test BACKEND` and tasks return their program's exit code (pytest: 5 when no test was
+  collected, 4 for a usage error). `test all` tests every backend, even after a failure, and
+  returns 0 or 1.
+
+The launchers have their own codes: 2 (no project found), 127 (uv not found), 126 (`deploy.ps1`
+could not start uv, or PowerShell runs it in ConstrainedLanguage mode).
+
+`run`, `test` and tasks start in the project root, whatever folder the command was typed in, and
+the arguments they pass on are not rewritten: a relative path given to the app or to pytest is
+relative to the root (`../deploy test tests/test_core.py` from `src/`). Paths that the runner
+itself takes (`new DIR`, the `pyz-merge` files, `--project`, `--dir` and `--base` of `selftest`)
+are relative to the current folder.
+
+Environment variables the runner and the launchers read: `UV` (the uv binary, looked at first),
+`UV_INSTALL_DIR` (searched for uv), `CI` (no install prompt; `selftest --e2e` skips GUI runs on
+Windows and macOS CI), `NO_COLOR` and `TERM`, the compiler variables of mypyc (`CC`, `CFLAGS`,
+`CPPFLAGS`, `LDSHARED`, `LDFLAGS`, `ARCHFLAGS`, `CL`, `_CL_`), `MACOSX_DEPLOYMENT_TARGET` (the
+oldest macOS the pyz and portable wheels support, 13.0 by default), `LOCALAPPDATA` and
+`XDG_CACHE_HOME` (the pyz and UPX caches). At runtime, the app's `resources.assets_dir()` (raylib
+and flet presets) reads `PYTEMPLATE_ASSETS`, which the portable and pyz launchers set.
+
+The runner ignores an activated virtual environment (`VIRTUAL_ENV`, `PYTHONHOME`, `PYTHONPATH`)
+and uv's environment selection (`UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PROJECT`,
+`UV_NO_PROJECT`, `UV_WORKING_DIR`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`, `UV_ISOLATED`,
+`UV_NO_DEV`, `UV_NO_DEFAULT_GROUPS`, `UV_NO_SYNC`): its tools always run in the project's
+environments. uv's resolution settings (indexes, `UV_EXCLUDE_NEWER`, `UV_RESOLUTION`,
+`UV_PRERELEASE`) and its cache pass through.
+
+### Custom tasks
+
+Justfile-style recipes in `pytemplate.toml`, run as `./deploy NAME [args...]` the same way in
+every shell (no shell in between):
+
+```toml
+[tasks.gen]
+help = "Generate the assets"
+cmd = ["python", "scripts/gen.py", "{backend}"]   # the program and its arguments
+deps = ["check"]                                   # run first: tasks or ./deploy commands
+env = { SEED = "42" }
 ```
 
-The app name (the executable, and the package in `src/` with `-` written as `_`) is the folder
-name unless you pass `--name`: letters, digits, `-` and `_`, starting with a letter. `new` and
-`init` also reject a name that is one of the project's dependencies:
-`./deploy new ../flet --preset flet` fails, because uv refuses a project that depends on itself
-and `src/flet/` would shadow the library. Pick another one with `--name`.
+- `cmd`: the program and its arguments, as a list. Extra arguments (`./deploy gen a b`) are
+  appended unchanged; the task's exit code is the program's.
+- `deps`: tasks or `./deploy` commands with their arguments (`"check all"`), run first and in
+  order, each once per invocation; the first one that fails stops the task. A task with only
+  `deps` (every preset's `ci`) takes no arguments, and `./deploy ci -h` shows its help.
+- `env`: environment variables (string values; the names are identifiers).
+- `cwd`: the working folder, relative to the project root (default: the root).
+- `backend`: the environment the task runs in (default: `backend.active`). `pypy` needs PyPy in
+  `backend.supported`. `mypyc` runs interpreted in `.venv`: to run the compiled modules, add
+  `deps = ["compile"]` and run `{build}/mypyc-dev/stage/main.py`.
+- `uv`: `true` (default) runs `cmd` with `uv run` in that environment; `false` runs the program
+  as it is (a `{python}` whose environment does not exist yet is created first).
+- `help`: the line that `./deploy tasks` and `./deploy help` show.
+- `background`: a long-running server (flet's `dev`): the editors start it without waiting.
 
-Requirements: only **uv**. The mypyc backend also needs a C compiler:
-MSVC on Windows (`./deploy doctor` gives you the exact `winget` command), gcc or clang on
-Linux and `xcode-select --install` on macOS. Whoever receives your program needs nothing.
-
-Editors: [VS Code](#vs-code) and [Neovim with LazyVim](#neovim-lazyvim) are configured from the
-same `pytemplate.toml`, with tasks, problem reporting and debugging for every backend.
+Placeholders in `cmd`, `env` values and `cwd`: `{root}`, `{src}`, `{build}`, `{dist}`,
+`{backend}`, `{name}`, `{pkg}` and `{python}` (the backend's interpreter). They are bare names;
+a literal brace is written twice (`"d = {{}}"`). Task names are lower-case letters, digits, `-`
+and `_`, start with a letter, and are never a `./deploy` command. Tasks also show up in
+`./deploy help`, in VS Code and in Neovim.
 
 ## Shells
 
@@ -104,72 +313,6 @@ the enclosing project from any subfolder, with a comment saying where to paste i
 
 `./deploy doctor` shows which launcher started it and checks that the launchers kept their line
 endings and executable bit.
-
-## Commands
-
-| Command | What it does |
-|---|---|
-| `setup` · `doctor` | Installs environments · checks uv, compiler, PyPy, JIT, launchers, shells, Neovim and configs |
-| `mode [BACKEND] [--supports +pypy] [--typing warn] [--jit on] [--editor basedpyright]` | Shows or changes the mode |
-| `run [BACKEND] [args...]` | Runs the app (the arguments go to your app) |
-| `compile [--release]` | Compiles the mypyc stage without running it (for debuggers and editors) |
-| `check [BACKEND\|all]` · `lint [--fix]` · `fmt [--check]` | ruff + mypy with the backend's typing profile + mypyc rules |
-| `test [BACKEND\|all] [args...]` | pytest; with mypyc it checks that the `.pyd`/`.so` files were loaded |
-| `report [--open] [--no-mypy]` | mypyc HTML report: slow lines in red and how to fix them |
-| `build [BACKEND] [--method M] [--no-check]` · `pyz-merge A.pyz B.pyz... --out C.pyz` | Distribution (see below) |
-| `add PKG [--cpython-only]` · `remove` · `lock` · `sync` | Dependencies (uv) |
-| `init PRESET` · `new DIR` · `rename NEW_NAME [--force]` · `render` · `clean [--envs]` · `tasks` | Template and utilities (see [Renaming](#renaming-the-app)) |
-| `hooks [install [--force]\|uninstall\|run\|status]` | The git pre-commit hook (see [below](#git-pre-commit-hook)) |
-| `nvim [doctor\|trust\|extras\|bootstrap\|sync]` | Neovim/LazyVim integration (see [Neovim](#neovim-lazyvim)) |
-| `shell-setup [SHELL]` | Prints a `deploy` function for your shell (see [Shells](#shells)) |
-| `selftest [--shells\|--nvim\|--e2e]` | Tests of the template itself (see below) |
-| `help [COMMAND]` | Every command, or the options of one |
-
-Global options go BEFORE the command: `-v` (verbose), `-q` (quiet), `--dry-run` (show what
-would change without changing it), `--no-render`. Example: `./deploy --dry-run mode mypyc`.
-
-Unknown arguments are an error (exit 2), never silently ignored. Only a few commands pass extra
-arguments on: `run` to your app, `test` to pytest, `lock` to `uv lock`, `build` to the packager
-(PyInstaller, Nuitka or flet) and custom tasks to their command.
-
-**Tests of the template itself** (for changes to `.pytemplate/` or the launchers):
-
-```bash
-./deploy selftest            # the runner's tests (pytest) + mypy --strict; extra args go to pytest
-./deploy selftest --shells   # every launcher through every shell installed here
-./deploy selftest --nvim     # the LazyVim integration, per preset, in an isolated LazyVim
-./deploy selftest --e2e      # each preset end to end
-```
-
-- `--shells [NAME,...] [--list] [--json] [--keep] [--project DIR] [--tests T1,...] [--jobs N]
-  [--timeout S]`: seven probes per shell (arguments, exit code, folders, a temporary script like
-  xonsh-shell-kit's `!` lines, a minimal PATH, stdin, uv install hints). `--list` shows the
-  shells it found; `msys2` selects every `msys2-*` shell.
-- `--nvim [PRESET,...] [--keep] [--fresh] [--require] [--timeout S] [--dir DIR]`: creates each
-  preset with `./deploy new` and runs a headless smoke test in its own Neovim folders, never
-  yours (minutes the first time). `--fresh` reinstalls that LazyVim; `--require` fails instead of
-  skipping when nvim or git is missing (CI).
-- `--e2e [PRESET ...] [--backends B,..] [--methods M,..] [--quick|--full] [--gui auto|on|off]
-  [--keep] [--reuse] [--json] [--base DIR]`: creates a project from each preset with
-  `./deploy new` in a short temp dir, then runs setup, doctor, check, test, run and every
-  compatible build in it. It prints a PASS/FAIL/SKIP table (`--json` for CI). `--quick` builds
-  only each backend's default method; `--full` adds Nuitka and a PyPy round trip. The
-  `template-e2e` workflow runs it weekly.
-
-Justfile-style **custom tasks** in `pytemplate.toml` (the same in every shell, no shell in between):
-
-```toml
-[tasks.gen]
-help = "Generate the assets"
-cmd = ["python", "scripts/gen.py", "{backend}"]   # runs with `uv run` in the backend's environment
-deps = ["check"]                                   # other tasks or ./deploy commands
-env = { SEED = "42" }
-```
-
-Run it with `./deploy gen [extra args]`. Placeholders: `{root}` `{src}` `{build}` `{dist}`
-`{backend}` `{name}` `{pkg}` `{python}`. `backend = "pypy"` picks the environment, `uv = false`
-runs the program as-is, and `background = true` marks a long-running server (editors start it
-without waiting). Tasks also show up in `./deploy help`, VS Code and Neovim.
 
 ### Renaming the app
 
