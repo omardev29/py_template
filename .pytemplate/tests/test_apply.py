@@ -439,16 +439,17 @@ def _declared(deps: list[str], dev: list[str] | None = None) -> cmd_apply.Projec
         ("flet", {"version": "1.0.0"}, FLET_DEPS, FLET_DEV, None, "flet"),
         # the dependencies were removed by hand: the record says it is still that preset
         ("flet", {}, [], [], {"preset": "flet"}, "flet"),
-        # a new project copies the template's record (script): the dependencies win
-        ("flet", {}, FLET_DEPS, FLET_DEV, {"preset": "script"}, "flet"),
-        ("raylib", {}, ["raylib==6.0.1.0"], [], {"preset": "script"}, "raylib"),
+        # the record decides, whatever pyproject.toml declares (`./deploy new` writes the new
+        # project's own record, so a copy of the template's never stands for it)
+        ("flet", {}, FLET_DEPS, FLET_DEV, {"preset": "script"}, "script"),
+        ("raylib", {}, ["raylib==6.0.1.0"], [], {"preset": "script"}, "script"),
         ("script", {}, ["rich>=15.0.0"], [], {"preset": "no-such-preset"}, "script"),
         # a script project (the record says so) that depends on raylib or flet: no preset switch
         ("script", {}, ["rich>=15.0.0", "raylib==6.0.1.0"], [], {"preset": "script"}, "script"),
         ("script", {}, ["rich>=15.0.0", *FLET_DEPS], FLET_DEV, {"preset": "script"}, "script"),
         ("script", {}, [], ["flet-cli==1.0.1"], {"preset": "script"}, "script"),
-        # ...but a hand switch of that project is still one
-        ("flet", {}, ["rich>=15.0.0", "raylib==6.0.1.0"], [], {"preset": "script"}, "raylib"),
+        # ...but a hand switch of that project is still one, from the recorded preset
+        ("flet", {}, ["rich>=15.0.0", "raylib==6.0.1.0"], [], {"preset": "script"}, "script"),
         ("raylib", {}, ["rich>=15.0.0"], [], {"preset": "script"}, "script"),
     ],
 )
@@ -458,27 +459,92 @@ def test_applied_preset(preset: str, options: dict[str, str], deps: list[str], d
 
 
 NO_BUILD_RAYLIB = {"tool": {"uv": {"no-build-package": ["raylib"]}}}  # the managed block of a raylib project
+NO_BUILD_RAYLIB_SDL = {"tool": {"uv": {"no-build-package": ["raylib_sdl"]}}}  # ...applied with package = "raylib_sdl"
 
 
 @pytest.mark.parametrize(
     ("preset", "options", "deps", "data", "expected"),
     [
-        # no record (a fresh project, or a lost state.json): raylib swapped by hand for another package
-        ("raylib", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB, "raylib"),
-        ("raylib", {"package": "raylib_software"}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB, "raylib"),
+        # no record (a lost state.json): the package the managed block was last written with
+        ("raylib", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, "raylib"),
+        ("raylib", {"package": "raylib_software"}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, "raylib"),
         # every flet dependency removed: [tool.flet] is still there
         ("flet", {}, [], {"tool": {"flet": {"org": "com.example"}, "uv": {}}}, "flet"),
         # hand switches without a record: another preset's traces
         ("script", {}, ["rich>=15.0.0"], {"tool": {"flet": {"org": "com.example"}}}, "flet"),
-        ("flet", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB, "raylib"),
-        # no trace of any preset in pyproject.toml: only a preset without traces made it
+        ("flet", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, "raylib"),
+        ("script", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, "raylib"),
+        # the managed block follows app.preset (`./deploy lock` after a hand switch writes the
+        # new preset's keys): never a trace of it; putting app.preset back is accepted
+        ("raylib", {}, ["rich>=15.0.0"], NO_BUILD_RAYLIB, "script"),
+        ("script", {}, ["rich>=15.0.0"], NO_BUILD_RAYLIB, "script"),
+        # no trace of any preset in pyproject.toml: only a preset without traces made it (a
+        # guess, which the refusal says: raylib replaced by hand, not through [preset.raylib])
         ("raylib", {}, ["raylib-sdl==6.0.1.0"], {}, "script"),
+        ("raylib", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB, "script"),
         ("flet", {}, [], {"tool": {"uv": {"environments": []}}}, "script"),
+        # the project's own no-build-package list outside the markers (render._adopted): no option read
+        ("raylib", {}, ["raylib-sdl==6.0.1.0"], {"tool": {"uv": {"no-build-package": ["raylib_sdl", "numpy"]}}}, "script"),
     ],
 )
 def test_applied_preset_reads_every_trace(preset: str, options: dict[str, str], deps: list[str], data: dict[str, Any], expected: str) -> None:
     project = cmd_apply.Project(data, "alpha", {cmd_apply.req_key(r)[0]: r for r in deps}, {})
     assert cmd_apply._applied_preset(_cfg(preset, **options), project, None) == expected
+
+
+@pytest.mark.parametrize(
+    ("template", "text", "expected"),
+    [
+        ("{package}", "raylib_sdl", {"package": "raylib_sdl"}),
+        ("{package}=={version}", "raylib==6.0.1.0", {"package": "raylib", "version": "6.0.1.0"}),
+        ("{a}-{a}", "x-x", {"a": "x"}),
+        ("{a}-{a}", "x-y", None),
+        ("lib-{a}", "other", None),
+        ("{{a}}", "{a}", {}),
+        ("{a!r}", "x", None),  # a conversion or a format spec cannot be read back
+        ("{a:>4}", "   x", None),
+        ("{0}", "x", None),
+    ],
+)
+def test_unformat_reads_the_options_back(template: str, text: str, expected: dict[str, str] | None) -> None:
+    assert cmd_apply._unformat(template, text) == expected
+
+
+@pytest.mark.parametrize("made_with", ["script", "flet"])
+def test_a_hand_switch_stays_refused_after_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, made_with: str) -> None:
+    """`./deploy lock` (mode and rename too) writes the managed [tool.uv] block from app.preset: after
+    a hand switch to raylib it holds raylib's no-build-package. That is no trace of the preset the
+    project was made with: apply stays refused, doctor names the recorded preset, and putting
+    app.preset back is accepted."""
+    project, _ = _project(tmp_path, monkeypatch, made_with)
+    monkeypatch.setattr(cmd_env, "PYPROJECT", project.root / "pyproject.toml")
+    assert _run(project) == 0  # the record: made_with
+    before = project.pyproject()["project"]["dependencies"]
+    project.edit("app", "preset", "raylib")
+    assert cmd_env.cmd_lock(project.cfg(), []) == 0
+    assert project.pyproject()["tool"]["uv"]["no-build-package"] == ["raylib"]
+    with pytest.raises(DeployError, match=f"changed from '{made_with}' to 'raylib'") as e:
+        _run(project)
+    assert e.value.code == 2 and "Put back app.preset = \"" + made_with + '"' in str(e.value)
+    assert cmd_apply.pending(project.cfg())[0][0] == f"app.preset = 'raylib' but the project was made with the '{made_with}' preset"
+    assert project.pyproject()["project"]["dependencies"] == before  # nothing half switched
+    project.edit("app", "preset", made_with)
+    assert _run(project) == 0
+    assert "no-build-package" not in project.pyproject()["tool"]["uv"] and cmd_apply.pending(project.cfg()) == []
+
+
+def test_a_record_names_the_preset_of_a_script_project_with_raylib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A script project that depends on raylib, whose app.preset is set to flet by hand: the
+    refusal names the preset it was made with (script), not raylib (following that advice was
+    then accepted as an in-place switch)."""
+    project, uv = _project(tmp_path, monkeypatch, "script")
+    assert _run(project) == 0
+    uv(envs.tool_env(project.cfg()), ["add", "--frozen", "raylib==6.0.1.0"])
+    uv.locked = (project.root / "pyproject.toml").read_bytes()
+    for switched in ("flet", "raylib"):
+        project.edit("app", "preset", switched)
+        with pytest.raises(DeployError, match=f"changed from 'script' to '{switched}'"):
+            _run(project)
 
 
 def test_a_script_project_may_depend_on_raylib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -495,10 +561,29 @@ def test_a_script_project_may_depend_on_raylib(tmp_path: Path, monkeypatch: pyte
     assert cmd_apply.load_record() == cmd_apply.record_of(project.cfg())
 
 
+def _as_new(project: Project) -> None:
+    """What `./deploy new` leaves: the new project's own record (presets.init writes it)."""
+    cmd_apply.save_record(cmd_apply.record_of(project.cfg()), cmd_apply.state_file(project.root))
+
+
+@pytest.mark.parametrize("added", [["raylib==6.0.1.0"], FLET_DEPS])
+def test_a_new_script_project_may_depend_on_raylib_before_its_first_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, added: list[str]) -> None:
+    """`./deploy new DIR --preset script`, `./deploy add raylib` (or flet), then the first
+    `./deploy setup`: the project's own record (written by new) says script."""
+    project, uv = _project(tmp_path, monkeypatch, "script")
+    _as_new(project)
+    uv(envs.tool_env(project.cfg()), ["add", "--frozen", *added])
+    uv.locked = (project.root / "pyproject.toml").read_bytes()
+    assert cmd_apply.pending(project.cfg()) == []
+    assert _run(project, command="setup") == 0
+    assert set(added) <= set(project.pyproject()["project"]["dependencies"])
+
+
 def test_a_raylib_package_swapped_by_hand_before_the_first_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A fresh raylib project (no record of its own) whose raylib was swapped by hand for
-    raylib_sdl, or whose record was lost: still a raylib project, not a script one."""
+    """A new raylib project whose raylib was swapped by hand for raylib_sdl: still a raylib
+    project, not a script one."""
     project, uv = _project(tmp_path, monkeypatch, "raylib")
+    _as_new(project)
     uv(envs.tool_env(project.cfg()), ["remove", "--frozen", "raylib"])
     uv(envs.tool_env(project.cfg()), ["add", "--frozen", "raylib_sdl==6.0.1.0"])
     assert cmd_apply.applied_state(project.cfg(), cmd_apply.read_project()).preset == "raylib"
@@ -508,11 +593,46 @@ def test_a_raylib_package_swapped_by_hand_before_the_first_apply(tmp_path: Path,
     assert cmd_apply.pending(project.cfg()) == []
     assert _run(project) == 0
     assert [r for r in project.pyproject()["project"]["dependencies"] if r.startswith("raylib")] == ["raylib-sdl==6.0.1.0"]
-    # the record lost (a state.json merge conflict resolved by rendering), then the next switch
-    (project.root / ".pytemplate" / "state.json").write_text("{}", encoding="utf-8")
-    project.edit("preset.raylib", "package", "raylib_software")
-    assert cmd_apply.applied_state(project.cfg(), cmd_apply.read_project()).preset == "raylib"
-    assert _run(project) == 0
+
+
+def _raylib(project: Project) -> list[str]:
+    return [r for r in project.pyproject()["project"]["dependencies"] if r.startswith("raylib")]
+
+
+def test_a_package_switch_after_the_record_was_lost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The record lost (a state.json merge conflict whose sides disagree on it, resolved by
+    rendering): the managed block still names the package applied last, so the next switch
+    removes it instead of keeping both raylib distributions (one import package)."""
+    project, _ = _project(tmp_path, monkeypatch, "raylib")
+    project.edit("preset.raylib", "package", "raylib_sdl")
+    assert _run(project) == 0 and _raylib(project) == ["raylib-sdl==6.0.1.0"]
+    state = project.root / ".pytemplate" / "state.json"
+    for package, expected in (("raylib_software", "raylib-software==6.0.1.0"), ("raylib", "raylib==6.0.1.0")):
+        state.write_text("{}", encoding="utf-8")
+        project.edit("preset.raylib", "package", package)
+        assert cmd_apply.applied_state(project.cfg(), cmd_apply.read_project()).preset == "raylib"
+        assert cmd_apply.pending(project.cfg())[0][0].startswith("[preset.raylib] is not applied to pyproject.toml (remove raylib-")
+        assert _run(project) == 0
+        assert _raylib(project) == [expected]
+        assert cmd_apply.pending(project.cfg()) == []
+
+
+def test_a_guessed_preset_says_it_is_a_guess(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No record and no trace of app.preset in pyproject.toml (raylib replaced by hand, then the
+    record lost): the preset is a guess, and the refusal says how to keep app.preset."""
+    project, uv = _project(tmp_path, monkeypatch, "raylib")
+    uv(envs.tool_env(project.cfg()), ["remove", "--frozen", "raylib"])
+    uv(envs.tool_env(project.cfg()), ["add", "--frozen", "raylib_sdl==6.0.1.0"])
+    with pytest.raises(DeployError, match="changed from 'script' to 'raylib'") as e:
+        _run(project)
+    assert "no record of the last apply, and pyproject.toml holds no trace of the raylib preset" in str(e.value)
+    assert "./deploy add raylib==6.0.1.0" in str(e.value) and "[preset.raylib]" in str(e.value)
+    [(label, hint)] = cmd_apply.pending(project.cfg())
+    assert label == "app.preset = 'raylib', but pyproject.toml holds no trace of that preset (and there is no record of the last apply)"
+    assert "./deploy add raylib==6.0.1.0" in hint
+    # following the hint: set [preset.raylib] to what pyproject.toml declares
+    project.edit("preset.raylib", "package", "raylib_sdl")
+    assert cmd_apply.pending(project.cfg()) == [] and _run(project) == 0
 
 
 # --- which requirements change ----------------------------------------------------------------------
@@ -977,9 +1097,37 @@ def test_a_name_of_another_package_in_src_is_refused(tmp_path: Path, monkeypatch
     assert cmd_apply.pending(project.cfg()) == []
 
 
+def test_a_pyproject_name_edited_to_another_package_is_put_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """pyproject.toml [project] name set by hand to another package of src/: the record says
+    app.name is the app, so apply puts the pyproject.toml line back (it refused, advising to move
+    the real app away, and the hook blocked every commit)."""
+    project, uv = _project(tmp_path, monkeypatch)
+    assert _run(project) == 0  # the record: alpha
+    engine = project.root / "src" / "engine"
+    engine.mkdir()
+    (engine / "__init__.py").write_text('"""Engine."""\n', encoding="utf-8")
+    path = project.root / "pyproject.toml"
+    path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "engine"', 1), encoding="utf-8", newline="\n")
+    uv.locked = path.read_bytes()
+    assert cmd_apply.pending(project.cfg()) == [("pyproject.toml [project] name = 'engine', but app.name = 'alpha'", "./deploy apply")]
+    assert _run(project) == 0
+    assert project.pyproject()["project"]["name"] == "alpha" and cmd_apply.pending(project.cfg()) == []
+    assert (project.root / "src" / "alpha").is_dir() and engine.is_dir()
+    # without a record either line may be the edited one: refused, and the message says both ways
+    path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "engine"', 1), encoding="utf-8", newline="\n")
+    (project.root / ".pytemplate" / "state.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(DeployError, match="src/alpha/ already exists and is not the app's package") as e:
+        _run(project)
+    assert 'put back name = "alpha" there' in str(e.value)
+    assert 'put back name = "alpha" there' in cmd_apply.pending(project.cfg())[0][1]
+
+
+@pytest.mark.parametrize("record", [True, False])
 @pytest.mark.parametrize(("old", "new"), [("script", "flet"), ("flet", "raylib"), ("raylib", "script"), ("flet", "script")])
-def test_a_hand_edited_preset_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old: str, new: str) -> None:
+def test_a_hand_edited_preset_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old: str, new: str, record: bool) -> None:
     project, uv = _project(tmp_path, monkeypatch, old)
+    if record:
+        _as_new(project)  # the record `./deploy new` writes (else: it was lost)
     project.edit("app", "preset", new)
     before = project.snapshot()
     for command in ("apply", "setup"):
@@ -993,7 +1141,11 @@ def test_a_hand_edited_preset_is_refused(tmp_path: Path, monkeypatch: pytest.Mon
     with pytest.raises(DeployError, match="by hand"):
         _run(project)
     assert project.snapshot() == before and uv.calls == []
-    assert cmd_apply.pending(project.cfg())[0][0] == f"app.preset = '{new}' but the project was made with the '{old}' preset"
+    label = cmd_apply.pending(project.cfg())[0][0]
+    if record or old != "script":
+        assert label == f"app.preset = '{new}' but the project was made with the '{old}' preset"
+    else:  # script leaves no trace in pyproject.toml: without a record the refusal is a guess, and says so
+        assert label.startswith(f"app.preset = '{new}', but pyproject.toml holds no trace of that preset")
 
 
 def test_an_invalid_hand_edited_name_is_refused_before_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1207,13 +1359,15 @@ def test_apply_and_a_chained_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     hooks.install(rp)
     hooks.install(rq, force=True)
     q_hook = target.read_bytes()
-    chained = "runs this project's checks (pre-commit.local) after another project's hook"
+    # q's hook runs pre-commit.local (p's copy) FIRST, then q's own checks (hooks.hook_script)
+    chained = "runs this project's checks from pre-commit.local, which another project's hook runs first"
     assert row(True) == row(False) == chained
     assert target.read_bytes() == q_hook and hooks.own_local(rp)
     assert not [p for p, _ in cmd_apply.pending(project.cfg()) if "hook" in p]
     project.edit("hooks", "pre_commit", False)
     assert cmd_apply.pending(project.cfg())[-1][0].startswith("hooks.pre_commit = false, but pytemplate's")
-    assert row(True).startswith("would remove pre-commit.local") and local.is_file()
+    assert row(True) == "would remove pre-commit.local, this project's checks that another project's hook runs first (hooks.pre_commit = false)"
+    assert local.is_file()
     assert row(False) == "removed (hooks.pre_commit = false)"
     assert not local.exists() and target.read_bytes() == q_hook  # q's own hook is never touched
     assert not [p for p, _ in cmd_apply.pending(project.cfg()) if "hook" in p]

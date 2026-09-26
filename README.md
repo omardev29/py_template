@@ -310,7 +310,7 @@ content back: the mode does not change, and the same command can simply run agai
 | You edited | What `./deploy apply` does |
 |---|---|
 | `app.name` | Renames the app the way `./deploy rename` does ([Renaming the app](#renaming-the-app)): moves `src/<pkg>/`, rewrites the references, updates `pyproject.toml`, re-locks and regenerates. It refuses when git has uncommitted changes (`--force` skips that check), when the name is not valid (the rules of [New projects](#new-projects)) and when `src/` already has a package of that name. |
-| `app.preset` | Refuses (exit 2) and writes nothing: a project cannot switch presets in place. Put the old value back; for another preset, create a project with `./deploy new DIR --preset P` and move the code. A dependency you add yourself (`./deploy add raylib` in a script project) is not a preset switch. |
+| `app.preset` | Refuses (exit 2) and writes nothing: a project cannot switch presets in place. Put the old value back; for another preset, create a project with `./deploy new DIR --preset P` and move the code. A dependency you add yourself (`./deploy add raylib` in a script project) is not a preset switch. The preset a project was made with is in the record of the last apply in `.pytemplate/state.json` (`./deploy new` writes the first one). If that record is lost, `apply` reads the preset from what it left in `pyproject.toml`. When `pyproject.toml` holds no trace of any preset, the refusal says it is a guess and how to keep `app.preset`. |
 | `[preset.flet] version` | Pins `flet`, `flet-desktop` and `flet-cli` to that version, re-locks `uv.lock` and syncs the environments. |
 | `[preset.raylib] package`, `version` | Removes the old raylib package, adds `{package}=={version}`, moves `no-build-package` to it, re-locks and syncs. |
 | `backend.supported` | Rewrites the managed parts of `pyproject.toml`, re-locks and syncs every supported environment. When PyPy is new it checks, right after the re-lock, that the code is valid Python 3.11 (if not, `pyproject.toml` and `uv.lock` get their old content back). Environments no longer used are only listed (`./deploy clean --envs` removes them). |
@@ -395,7 +395,10 @@ commands regenerate them first and say which changed; `./deploy render` does onl
   CRLF line endings and a BOM (Windows checkouts, editors) do not count as edits.
 - After a merge conflict in `state.json` or `editor.json`, run `./deploy render` and commit both
   (it regenerates every generated file and keeps the record of `./deploy apply` that both sides
-  of `state.json` agree on).
+  of `state.json` agree on). A record the two sides disagree on is dropped: `apply` then reads
+  the options applied last from the managed block of `pyproject.toml`. Known limit: a
+  `./deploy lock` after a `[preset.raylib] package` edit and before `apply` rewrites that block
+  first, so the old raylib package stays next to the new one (`./deploy remove` it).
 - The project's CI, `.github/workflows/ci.yml`, is generated from `.pytemplate/templates/ci.yml`:
   edit that file. Deleting it stops the generation (deleting only `ci.yml` is undone by the next
   command).
@@ -1325,8 +1328,11 @@ only deletes files is checked too).
   project's hook becomes `pre-commit.local`: that project's `hooks uninstall`, or its
   `pre_commit = false`, removes it). A third project cannot be chained that way. A project that
   the enclosing repository ignores gets no hook. Linked worktrees share the hook. A hook of your
-  own counts as running the checks only when a line that is not a comment calls this project's
-  `deploy` with `hooks run`.
+  own counts as running the checks only when a command that is not a comment calls this
+  project's `deploy` with `hooks run`. Global options may come first (`sh ./deploy -q hooks run`).
+  A relative path is read from the top of the repository, where git runs hooks, or from the
+  folder a `cd` moved to (`cd apps/a && ./deploy hooks run`). A path built from a variable or
+  `$(...)` cannot be checked, so it counts.
 - It works from any git client (Git Bash, cmd, PowerShell, xonsh, VS Code, lazygit): git runs
   hooks with its own `sh`, and the hook calls the POSIX launcher, which finds uv by itself. When
   the launcher cannot check the commit (uv not found from a GUI client, a broken

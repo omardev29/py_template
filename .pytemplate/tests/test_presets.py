@@ -17,6 +17,7 @@ import copy
 import functools
 import hashlib
 import importlib.util
+import json
 import os
 import re
 import shlex
@@ -1553,6 +1554,32 @@ def test_init_removes_the_old_preset_first_and_adds_the_new_one(fake: Fake) -> N
     assert uv[1][:2] == ["add", "--no-sync"] and uv[1][-1] == "raylib==6.0.1.0"
     assert uv[2][:3] == ["add", "--no-sync", "--dev"] and uv[2][-1] == "types-cffi"
     assert uv[3] == ["lock"]
+
+
+@pytest.mark.parametrize("preset", PRESETS)
+def test_init_writes_the_projects_own_record(fake: Fake, preset: str) -> None:
+    """state.json came with the copy (`./deploy new`): its `applied` record is the template's
+    (myapp, script) and would be trusted by a project named like it. init writes the new
+    project's own, the one `./deploy apply` would write, and keeps the other keys."""
+    from runner import cmd_apply
+
+    state = fake.root / ".pytemplate" / "state.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    copied = {"name": "myapp", "preset": "script", "dependencies": [], "dev": []}
+    state.write_text(json.dumps({"files": {"x": "0" * 64}, "applied": copied}), encoding="utf-8")
+    presets.init(fake.cfg, preset, "myapp", force=True)
+    data = json.loads(state.read_text(encoding="utf-8"))
+    deps, dev = presets.option_dependencies(preset, presets.default_options(preset))
+    assert data == {"files": {"x": "0" * 64}, "applied": {"name": "myapp", "preset": preset, "dependencies": deps, "dev": dev}}
+    assert data["applied"] == cmd_apply.record_of(fake.rendered[0])
+
+
+def test_init_puts_the_state_file_back_when_it_cannot_write_the_record(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
+    (fake.root / ".pytemplate" / "state.json").mkdir(parents=True)  # a folder in the way
+    before = _snapshot(fake.root)
+    with pytest.raises(DeployError, match=r"cannot write .*state\.json"):
+        presets.init(fake.cfg, "raylib", None, force=False)
+    assert _snapshot(fake.root) == before and not _left_aside(fake.root)
 
 
 @pytest.mark.parametrize("failing", ["remove", "add", "lock"])

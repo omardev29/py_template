@@ -20,8 +20,10 @@ is true in pytemplate.toml (the default).
   copy stays p's own ("chained"): `uninstall` in p (and apply with hooks.pre_commit = false)
   deletes it, never restores it, and `install` in p drops it once p's hook is back in
   `pre-commit` (q's went away), so p's checks never run twice.
-- A hook pytemplate does not manage "calls" the checks only with a line that is not a comment
-  and runs THIS project's launcher with `hooks run` (another project's line does not count).
+- A hook pytemplate does not manage "calls" the checks only with a command that is not a comment
+  and runs THIS project's launcher with `hooks run` (runs_checks: global options may come
+  between, a relative launcher is read from the top or the folder a `cd` moved to, a launcher
+  built from an expansion cannot be resolved and counts; another project's command does not).
 - A project the enclosing repository ignores (`git check-ignore deploy`) gets no hook unless
   forced: that repository's commits never contain it.
 - With `core.hooksPath` set (husky, a shared hooks folder...) git ignores `.git/hooks`: the
@@ -324,37 +326,207 @@ def _other_project(repo: Repo, launcher: str) -> bool:
         return True
 
 
-def _is_this_launcher(word: str, repo: Repo) -> bool:
-    """Whether `word` (a launcher as a hook line spells it: relative to the top of the work tree,
-    where git runs hooks, or absolute) is this project's launcher. A word with a shell expansion
-    ("$ROOT/deploy", husky's "$(dirname ...)") cannot be resolved: it counts as this project's."""
-    if any(c in word for c in "$`") or word.startswith("~"):
+def _unresolved(word: str) -> bool:
+    """A word with a shell expansion ("$ROOT/deploy", husky's "$(dirname ...)", `...`, ~)."""
+    return any(c in word for c in "$`") or word.startswith("~")
+
+
+def _is_this_launcher(word: str, repo: Repo, cwd: Path | None) -> bool:
+    """Whether `word` (a launcher as a hook spells it: absolute, or relative to `cwd`, the top of
+    the work tree where git runs hooks unless a `cd` moved it) is this project's launcher. A word
+    with a shell expansion, or a relative one where the folder is not known (cwd None: a `cd`
+    into an expansion), cannot be resolved: it counts as this project's."""
+    if _unresolved(word):
         return True
     path = Path(native_path(word))
     if path.name not in LAUNCHERS:
         return False
-    folder = (path if path.is_absolute() else repo.top / path).parent
+    if not path.is_absolute():
+        if cwd is None:
+            return True
+        path = cwd / path
+    folder = path.parent  # samefile follows `..` as the kernel does
     try:
         return os.path.samefile(folder, repo.project)
     except OSError:
         return _same(folder, repo.project)
 
 
-# A launcher called with `hooks run`: `sh ./apps/p/deploy hooks run`, `sh 'my app/deploy' hooks run`...
-_RUN_CALL = re.compile(r"""(?:"([^"]+)"|'([^']+)'|([^\s"';&|<>()]+))\s+hooks\s+run(?![\w-])""")
+def _quoted_end(text: str, i: int) -> int:
+    """The index after the `"` that closes a double-quoted string whose content starts at i."""
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+        elif text[i] == '"':
+            return i + 1
+        elif text.startswith("$(", i):
+            i = _substitution_end(text, i + 2)
+        elif text[i] == "`":
+            i = _backquote_end(text, i + 1)
+        else:
+            i += 1
+    return len(text)
+
+
+def _substitution_end(text: str, i: int) -> int:
+    """The index after the `)` that closes a `$(` whose content starts at i (quotes and nested
+    brackets inside it included)."""
+    depth = 1
+    while i < len(text):
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'":
+            end = text.find("'", i + 1)
+            i = len(text) if end < 0 else end + 1
+            continue
+        if c == '"':
+            i = _quoted_end(text, i + 1)
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return len(text)
+
+
+def _backquote_end(text: str, i: int) -> int:
+    """The index after the backquote that closes a `...` substitution whose content starts at i."""
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+        elif text[i] == "`":
+            return i + 1
+        else:
+            i += 1
+    return len(text)
+
+
+def _shell_commands(text: str) -> list[tuple[tuple[int, ...], list[str]]]:
+    """The simple commands of a sh script in order, each with the subshells it runs in (the
+    numbers of their `(`, outermost first) and its words: the quotes removed, the expansions kept
+    as written ($X, $(...), `...`). A command ends at ; & | < > and a newline, `(` and `)` open
+    and close a subshell, comments are dropped. Enough to find the calls of a hook, not a sh
+    parser (no here-documents, aliases or functions)."""
+    commands: list[tuple[tuple[int, ...], list[str]]] = []
+    words: list[str] = []
+    word: list[str] = []
+    started = False
+    subshells: list[int] = []
+    opened, i, n = 0, 0, len(text)
+
+    def close_word() -> None:
+        nonlocal started
+        if started:
+            words.append("".join(word))
+        word.clear()
+        started = False
+
+    def close_command() -> None:
+        close_word()
+        if words:
+            commands.append((tuple(subshells), list(words)))
+        words.clear()
+
+    while i < n:
+        c = text[i]
+        if c in " \t\r":
+            close_word()
+            i += 1
+        elif c == "\\":
+            if not text.startswith("\\\n", i):  # a backslash-newline continues the line
+                word.append(text[i + 1 : i + 2])
+                started = True
+            i += 2
+        elif c == "#" and not started:
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+        elif c in ";&|<>\n()":
+            close_command()
+            if c == "(":
+                opened += 1
+                subshells.append(opened)
+            elif c == ")" and subshells:
+                subshells.pop()
+            i += 1
+        elif c == "'":
+            end = text.find("'", i + 1)
+            end = n if end < 0 else end
+            word.append(text[i + 1 : end])
+            started = True
+            i = end + 1
+        elif c == '"':
+            end = _quoted_end(text, i + 1)
+            inner = text[i + 1 : end - 1] if text[end - 1] == '"' and end - 1 > i else text[i + 1 : end]
+            word.append(re.sub(r'\\([$`"\\])', r"\1", inner))
+            started = True
+            i = end
+        elif text.startswith("$(", i) or c == "`":
+            end = _substitution_end(text, i + 2) if c == "$" else _backquote_end(text, i + 1)
+            word.append(text[i:end])
+            started = True
+            i = end
+        else:
+            word.append(c)
+            started = True
+            i += 1
+    close_command()
+    return commands
+
+
+# ./deploy's global options, which come before the command (`sh ./deploy -q hooks run`)
+_GLOBAL_OPTIONS = frozenset({"-v", "--verbose", "-q", "--quiet", "--no-render", "--dry-run"})
+# Words that may come before a `cd` in the same command: `{ cd x; ...; }`, `if cd x; then ...`
+_BEFORE_CD = frozenset({"{", "}", "!", "if", "then", "else", "elif", "do", "while", "until", "builtin", "command"})
+
+
+def _cd(words: list[str], cwd: Path | None) -> Path | None:
+    """The folder after `cd ARGS` run from `cwd` (None: it cannot be known)."""
+    args = [w for w in words[1:] if not (w.startswith("-") and w != "-")]  # cd -P DIR
+    if len(args) != 1 or cwd is None or args[0] == "-" or _unresolved(args[0]):
+        return None
+    target = Path(native_path(args[0]))
+    return Path(os.path.normpath(target if target.is_absolute() else cwd / target))
+
+
+def _calls_launcher(words: list[str], repo: Repo, cwd: Path | None) -> bool:
+    """Whether a command calls this project's launcher with `hooks run` (`sh ./deploy hooks run`,
+    `./deploy -q hooks run`: the launcher's global options come before the command)."""
+    for i in range(1, len(words) - 1):
+        if words[i : i + 2] != ["hooks", "run"]:
+            continue
+        j = i - 1
+        while j > 0 and words[j] in _GLOBAL_OPTIONS:
+            j -= 1
+        if words[j] not in _GLOBAL_OPTIONS and _is_this_launcher(words[j], repo, cwd):
+            return True
+    return False
 
 
 def runs_checks(text: str, repo: Repo) -> bool:
     """Whether a hook script runs THIS project's checks: pytemplate's own hook for this launcher,
-    or a line that is not a comment and calls this project's launcher with `hooks run` (a line
-    of another project of the repository, or a commented-out one, does not count)."""
+    or a command that is not a comment and calls this project's launcher with `hooks run`
+    (_calls_launcher). A relative launcher is resolved from the top of the work tree, where git
+    runs hooks, or from the folder a `cd` before it moved to (a `cd` in a subshell stays there);
+    a launcher, or a `cd` folder, that holds a shell expansion cannot be resolved and counts.
+    Another project's launcher, a commented-out line or a quoted string does not."""
     if MARKER in text and (launcher := launcher_of(text)) is not None:
-        return _is_this_launcher(launcher, repo)
-    for line in text.splitlines():
-        code = line.strip()
-        if not code or code.startswith("#"):
-            continue
-        if any(_is_this_launcher(m.group(1) or m.group(2) or m.group(3), repo) for m in _RUN_CALL.finditer(code)):
+        return _is_this_launcher(launcher, repo, repo.top)
+    folders: dict[tuple[int, ...], Path | None] = {(): repo.top}  # the current folder of each (sub)shell
+    for subshells, words in _shell_commands(text):
+        if subshells not in folders:  # a subshell starts in the folder of the shell around it
+            outer = subshells[:-1]
+            while outer not in folders:
+                outer = outer[:-1]
+            folders[subshells] = folders[outer]
+        start = next((k for k, w in enumerate(words) if w not in _BEFORE_CD), len(words))
+        if words[start : start + 1] == ["cd"]:
+            folders[subshells] = _cd(words[start:], folders[subshells])
+        elif _calls_launcher(words, repo, folders[subshells]):
             return True
     return False
 
@@ -387,7 +559,7 @@ def own_local(repo: Repo) -> bool:
         return False
     text = _read(local)
     launcher = launcher_of(text) if MARKER in text else None
-    return launcher is not None and _is_this_launcher(launcher, repo)
+    return launcher is not None and _is_this_launcher(launcher, repo, repo.top)
 
 
 def hook_state(repo: Repo) -> str:

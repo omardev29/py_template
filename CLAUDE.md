@@ -566,7 +566,7 @@ header rules (with detector tests proving each rule fires).
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
 | `tasks.py` | `[tasks]`: `Placeholders` (lazy `{python}`), `deps` (each once per invocation), cycle detection, `run_task`, `describe`, `list_tasks`. |
 | `cmd_env.py` | `setup` (= `cmd_apply.apply(command="setup")`), `doctor` (calls `cmd_apply.doctor`), `sync`, `lock`, `add`, `remove`, `clean` (`_env_dirs`, `_remove`, `_is_link`); `ensure_lock`; `_fix_exec_bit`; `_c_compiler` (the one setuptools runs: `$CC`, else the `.venv` Python's sysconfig CC), `_msvc(platform)`, `_xcode_problem`, `_long_paths`. |
-| `cmd_apply.py` | `./deploy apply [--force]` / `setup [--force]` (section 5.8): `make_plan` (every refusal before the first write), `apply`, `_print_plan` (--dry-run), the `applied` record (`load_record`, `save_record`, `trusted_record`, `project_record`, `record_of`, `rename_record`), `applied_state` / `_applied_preset` (`_marks`: a preset's traces in pyproject.toml) / `applied_name` / `_other_package`, `dependency_changes` (`DepChanges`, `req_key`), `read_project`, `pending` + `doctor` (changes not applied yet), `reference_problems`, `unused_envs`, `_restore`. |
+| `cmd_apply.py` | `./deploy apply [--force]` / `setup [--force]` (section 5.8): `make_plan` (every refusal before the first write), `apply`, `_print_plan` (--dry-run), the `applied` record (`load_record`, `save_record`, `trusted_record`, `project_record`, `record_of`, `rename_record`), `state_file`, `applied_state` / `_infer_preset` (the record, else `_traced`: a preset's traces in pyproject.toml, `_block_options`/`_unformat`: the options the managed block was written with, `_marks`: extra tables) / `applied_name` / `_other_package`, `dependency_changes` (`DepChanges`, `req_key`), `read_project`, `pending` + `doctor` (changes not applied yet), `reference_problems`, `unused_envs`, `_restore`. |
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `new`, the internal `__init` (`cmd_init`), and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
 | `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`, `stage_pythonpath`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`, `BASEDPYRIGHT_NODE`. |
 | `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `check_lock`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
@@ -845,9 +845,13 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   that hook and deletes the copy (the checks ran twice). A third project cannot be chained
   (`pre-commit.local` taken: `install --force` refuses): `hooks.chain_hint`/`chain_advice` then
   say so instead of suggesting `--force`. A hook pytemplate does not manage runs the checks
-  ("calls") only with a line that is not a comment and calls THIS project's launcher with
-  `hooks run` (`hooks.runs_checks`: resolved against the top, or absolute; a word with a shell
-  expansion cannot be resolved and counts); another project's line is "foreign". A project that
+  ("calls") only with a command that is not a comment and calls THIS project's launcher with
+  `hooks run` (`hooks.runs_checks`: the script split into commands and words by
+  `hooks._shell_commands`, quotes and `$(...)` kept whole; `./deploy`'s global options may come
+  before `hooks`; a relative launcher is resolved against the top, or the folder a `cd` before it
+  moved to, a subshell's `cd` staying in it; a launcher or `cd` folder with a shell expansion
+  (`"$ROOT"/apps/a/deploy`, `$(git rev-parse --show-toplevel)/...`) cannot be resolved and
+  counts); another project's command, or a quoted string, is "foreign". A project that
   an enclosing repository ignores (`git check-ignore -q deploy`, which refuses
   `--literal-pathspecs`) gets no hook unless forced. With `core.hooksPath` set nothing is
   written: install/status/doctor print the line to add (`sh ./deploy hooks run || exit $?`), and
@@ -1011,8 +1015,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   no PyPy yet), then the rename plan (`rename.check_new_name`, `rename.plan`,
   `rename.validate_config`) or, when only pyproject `[project] name` differs, its new text
   (`rename.check_new_name` too). An app.name that names ANOTHER package of src/ (the record's
-  or pyproject's name has its own package there: `_other_package`) is refused, as `rename`
-  refuses it (`src/<new>/ already exists`); it used to rewrite only `[project] name`.
+  name, or without a record pyproject's, has its own package there: `_other_package`) is
+  refused, as `rename` refuses it (`src/<new>/ already exists`); it used to rewrite only
+  `[project] name`. A record named like app.name means only pyproject.toml was edited: apply
+  puts its name back. Without a record either line may be the edited one, and the refusal says
+  both ways out.
 - Order of `apply`: dirty-tree check (rename only; `--force` skips it) -> the rename
   (`rename.report`, `tidy_before`, `apply_plan`, then the record under the new name: a later
   failure must not leave it naming the old app, which is no longer trusted) or the `[project]
@@ -1051,17 +1058,25 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   An old value is removed only when the last applied options produced it (a `raylib` the user
   added next to `raylib_sdl` stays). `[preset.<name>]` wins over a hand `./deploy add flet==X`.
 - The `applied` record (top-level key of `.pytemplate/state.json`, committed; `render._save_state`
-  keeps it): `{name, preset, dependencies, dev}`, written by each apply once the lock follows
-  the options (its name by rename). It counts only when its name is `app.name` or pyproject
-  `[project] name` (`trusted_record`): the template's own record, copied by `./deploy new`, is
-  ignored. The preset (`_applied_preset`) is `app.preset` when pyproject.toml holds its traces
-  (its option-driven dependencies by name, with the default, current and recorded options; its
-  keys of the managed `[tool.uv]` block, raylib's `no-build-package` whatever its value; its
-  extra tables, flet's `[tool.flet]`) or when the trusted record names it (a script project may
-  `./deploy add raylib` or flet); else a preset whose traces are there (a hand switch); else,
-  with no trace of any preset, the preset without traces (script: `app.preset` names a preset
-  that left none). Without a record the applied requirements are the preset.toml defaults (what
-  `__init` wrote) and the old name is pyproject `[project] name` when its package is in src/.
+  keeps it): `{name, preset, dependencies, dev}`, written by `./deploy new` (`presets._record`
+  in `__init`: the new project's own, never the copied one), by each apply once the lock follows
+  the options, and renamed by rename. It counts only when its name is `app.name` or pyproject
+  `[project] name` (`trusted_record`). The trusted record decides the preset
+  (`_infer_preset`): an app.preset that differs from it was edited by hand, whatever
+  pyproject.toml holds (a script project may `./deploy add raylib` or flet). Without one (lost:
+  a state.json merge conflict whose sides disagree on it, a deleted file) pyproject.toml's
+  traces stand in (`_traced`): a preset's option-driven dependencies by name (with the default
+  and current options, and those the managed block was last written with: `_block_options`
+  reads raylib's `no-build-package` back through `_unformat`), its extra tables (flet's
+  `[tool.flet]`). The managed `[tool.uv]` KEYS are never a trace: `render.managed_block` writes
+  them from app.preset, so `./deploy lock`, `mode` or `rename` after a hand edit wrote the new
+  preset's keys and apply then accepted the switch. app.preset when it shows traces, else a
+  preset that does (a hand switch), else, with no trace of any preset, the preset without traces
+  (script): a guess (`Applied.guessed`), and the refusal and doctor say so and how to keep
+  app.preset (restore its requirements with `./deploy add`, or set `[preset.<name>]` to what
+  pyproject.toml declares). Without a record the applied requirements are those of the options
+  the managed block names (else the preset.toml defaults, what `__init` wrote) and the old name
+  is pyproject `[project] name` when its package is in src/.
 - `pending` / `doctor` (one call from `cmd_env.cmd_doctor`): an `[XX]` line per change not
   applied yet (hand-edited app.name or app.preset, an app.name that names another package,
   `[preset.*]` vs pyproject.toml, `hooks.pre_commit = false` with pytemplate's hook installed,
@@ -2054,8 +2069,10 @@ Per method:
   typings/` into `.pytemplate-init-*` (all or nothing: a locked file fails the rename before
   anything changed), writes every skeleton file (root `pytemplate.toml` included) and chmods
   `deploy`/`deploy.ps1` on POSIX. Any failure or Ctrl+C in (1) or (2) puts every file back
-  (`presets._Undo`, prints "every file is back as it was") and is raised. (3) Deletes the
-  aside folder and runs `render.apply(force=True)`.
+  (`presets._Undo`, prints "every file is back as it was") and is raised; the last step of (2)
+  writes the project's own `applied` record (`presets._record`, section 5.8: the copied one,
+  the template's or that of the project `new` ran in, must never stand for it). (3) Deletes
+  the aside folder and runs `render.apply(force=True)`.
 - `presets.check_name_free` (in `new`, `__init`, their dry runs, and `rename`/`apply`, which
   keep its first line) refuses: a name uv refuses (`config.APP_NAME`: a letter first, a letter
   or digit last, PEP 508), a keyword, a standard-library module of any supported Python
@@ -4074,12 +4091,16 @@ Behaviour:
   `./deploy apply` runs (every mismatch hint names apply). A `[preset.flet] version` edit that
   is not applied yet shows only in `doctor` (`cmd_apply.pending`): `render.auto` and the
   pre-commit hook compare the managed block, where flet leaves no trace.
-- Without a trusted `applied` record (a `state.json` merge conflict resolved with `./deploy
-  render`, which rewrites the unparsable file without it), apply knows only the preset.toml
-  defaults as the options applied last: a `[preset.raylib] package` switch away from a
-  non-default value (raylib_sdl -> raylib_software) adds the new package and keeps the old one
-  (`./deploy remove raylib-sdl`). Fix idea: keep the record when render rewrites a conflicted
-  state.json, or read the last applied package back from the managed `no-build-package`.
+- Without a trusted `applied` record (lost: a `state.json` merge conflict whose sides disagree
+  on it, resolved with `./deploy render`; a deleted file) apply reads the options applied last
+  back from the managed block (`cmd_apply._block_options`: raylib's `no-build-package`) and the
+  preset from pyproject.toml's traces (5.8). Two cases stay wrong there: a `./deploy lock` between
+  a `[preset.raylib] package` edit and the apply writes the block with the new package first, so
+  the switch keeps the old package next to the new one (`./deploy remove raylib-sdl`); and a
+  raylib project whose raylib requirement was replaced by hand (`./deploy remove/add`, not
+  `[preset.raylib]`) shows no trace of its preset, so apply refuses app.preset = "raylib" as a
+  guess that says so and names the way out (`./deploy add raylib==...`, or `[preset.raylib]
+  package`). Fix idea: keep one side's record when render rewrites a conflicted state.json.
 - A hand-edited `app.name` is rendered into `editor.json` and `ci.yml` by the next command's
   `render.auto` before `apply` renames the package (harmless: apply's dirty-tree check ignores
   generated files, and a run in between still uses src/<old_pkg>/).
@@ -4198,7 +4219,10 @@ Code coupling (rename together):
   flet method's docstring follow the manual (`test_docs.test_the_runner_gives_the_manuals_flutter_size`);
   `upx.uses` imports `methods.flet.MOBILE_WEB` lazily (`methods.flet` imports `upx`);
   `cmd_nvim.c_compiler` imports `cmd_env._msvc` and `_xcode_problem` lazily (`cmd_env` imports
-  `cmd_nvim`).
+  `cmd_nvim`); `presets._record` imports `cmd_apply` lazily (`cmd_apply` imports `presets`).
+- `cmd_apply._block_options` reads the preset.toml `[uv]` templates back from the values
+  `render.managed_block` wrote with `presets.uv_extras` (`str.format_map`, reversed by
+  `cmd_apply._unformat`): a template with a format spec or conversion is never read back.
 - `RULES_RE` / `tasks.parse_line` <-> `ui.error`, `ui.warn`, `str(lintc.Finding)` (5.3).
 - mypyc internals mirrored by the runner (checked by `test_mypyc_core` against the locked
   mypy): `lintc.NATIVE_CLASS_DECORATORS` <-> mypyc's native decorators;
