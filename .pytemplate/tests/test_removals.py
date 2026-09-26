@@ -212,7 +212,7 @@ def test_generated_files_never_mention_the_jit() -> None:
         for stage in stages:
             assert stage["python"] == "${workspaceFolder}/.venv/bin/python"
             assert stage["windows"] == {"python": "${workspaceFolder}/.venv/Scripts/python.exe"}
-            assert stage["env"] == {"PYTEMPLATE_BACKEND": "mypyc"}
+            assert stage["env"] == {"PYTHONUTF8": "1", "PYTEMPLATE_BACKEND": "mypyc"}
         data = nvim.editor_data(cfg, cfg.profile_for())
         assert data["envs"] == {"tools": ".venv", "cpython": ".venv", "mypyc": ".venv", "pypy": ".venv-pypy"}
 

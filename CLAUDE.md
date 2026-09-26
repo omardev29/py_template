@@ -387,7 +387,7 @@ header rules (with detector tests proving each rule fires).
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env`, `run` (echo, `DRY_RUN`, cwd defaults to `ROOT`, UTF-8 capture), `output`, `show` (display quoting only), `vs_installer_dir`, `CommandFailed`. |
 | `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync`, `interpreter_info`. |
-| `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`). |
+| `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
 | `presets.py` | Preset discovery/loading, option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, `check_name_free`, `init` (run by `./deploy __init`), `copy_template`, `new`. |
@@ -496,7 +496,7 @@ header rules (with detector tests proving each rule fires).
 | `PYTEMPLATE_LAUNCHER` | launchers, Neovim plugin (`nvim`), nu snippet (`nu`) | Which launcher/shell ran (section 4.1) |
 | `UV` | uv | uv's own path; `proc.find_uv` and the launchers use it |
 | `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PYTHON_PREFERENCE` | `envs.env_vars` | Environment selection (section 7) |
-| `PYTHONUTF8=1` | `proc.base_env`, portable launchers, pyz `.cmd` wrapper, the Neovim mypy linter | mypy/mypyc otherwise read files as cp1252 |
+| `PYTHONUTF8=1` | `proc.base_env`, portable launchers, pyz `.cmd` wrapper, the Neovim mypy linter, every VS Code launch config (`vscode.DEBUG_ENV`) | mypy/mypyc otherwise read files as cp1252; F5 behaves like `./deploy run` |
 | `PYTEMPLATE_BACKEND` | `cmd_dev.test_backend`, `mypyc.runtime_env_vars`, mypyc launch config | Backend under test (conftest) |
 | `PYTEMPLATE_COMPILED` | `mypyc.runtime_env_vars` | Modules that must load from `.pyd/.so` (conftest) |
 | `PYTEMPLATE_ASSETS` | `portable/boot.py`, `pyz/__main__.py` (setdefault) | Assets dir for `resources.assets_dir()` (raylib, flet) |
@@ -623,8 +623,10 @@ find a compatible Visual Studio installation"). Everything else (e.g. `FLET_*`) 
 - `[preset.<name>]`: option overrides (`config._check_preset_tables`): `<name>` must be a preset
   of this template, and each key and its value type must match that preset's `preset.toml`
   `[options]`, read with `tomllib` (no `presets` import); the script preset has none.
-- `[vscode]`: `settings` (merged into `.vscode/settings.json`; free-form but JSON values only),
-  `buttons` (each first word must be a builtin command or a `[tasks]` name: `config.validate`).
+- `[vscode]`: `settings` (merged into `.vscode/settings.json`; keys NOT validated, values must be
+  JSON values: a TOML date/time, nan/inf or NUL is a config error naming the key, from the loader
+  (`config._check_free`) and again from `vscode.settings`), `buttons` (each first word must be a
+  builtin command or a `[tasks]` name: `config.validate`).
 - `config.set_value(text, table, key, value)` edits the TOML text itself: a small scanner
   (`config._statements`: the four string kinds, multi-line arrays and inline tables, comments,
   dotted and quoted keys) finds the value's span, which may cover several lines (taplo, the
@@ -658,13 +660,24 @@ re-rendering.
   Windows and editors/PS 5.1 add BOMs. Every runner write uses `newline="\n"`.
 - Current hash == new hash -> skip. Recorded hash in `state.json` != current file -> hand-edited:
   not written (warning) unless `--force`. Otherwise write (LF) and record the hash.
-- A missing or corrupt `state.json` counts as empty: every generated file is overwritten
-  without warning.
-- `--check` and `--dry-run` write nothing.
+- A missing or corrupt `state.json` counts as empty (`render._read_state`/`_load_state`: missing,
+  not UTF-8 (PS 5.1 `>` writes UTF-16), not JSON, not an object, or `files` not an object; an
+  entry whose value is not a sha256 counts as unrecorded): every generated file is overwritten
+  without warning, and the next write is valid UTF-8 JSON. It is read as `utf-8-sig`, so a BOM
+  does not disable hand-edit detection. `_save_state` keeps every other top-level key (`./deploy
+  apply` records its own) and the key order. Hashes of files no longer generated stay recorded
+  (a file that comes back keeps its hand-edit protection).
+- `--check` and `--dry-run` write nothing. A folder in the way, or a read/write error, is a
+  DeployError naming the file.
 - `render.auto` runs before most commands and prints one line when something changed; it also
   warns when `pyproject_outdated`.
 - Changing `render.HEADER` rewrites every generated file (fine: only files whose current hash
   differs from the recorded one are protected).
+- Templates are read as `utf-8-sig` (a BOM is fine); errors are DeployErrors naming the file:
+  `templates/vscode/settings.json` must be a plain JSON object (no comments, no trailing
+  commas), a typing profile valid TOML with the known keys of the right type
+  (`render._check_profile`), and `ci.yml` must leave no placeholder behind
+  (`render.CI_PLACEHOLDERS`). `render.jsonc` refuses values JSON cannot hold (nan/inf, dates).
 
 Formats:
 - Generated JSON is JSONC: the first line is `// GENERATED ...` (`render.jsonc`). VS Code,
@@ -681,13 +694,33 @@ Formats:
 
 ### 6.3 `pyproject.toml` managed parts
 
-- `requires-python`: the first `^requires-python` line is rewritten to `">=<min_python>"` (the
-  lowest supported minor: usually PyPy's 3.11 with PyPy, else `python.cpython`).
+- `requires-python` of the `[project]` table, in any TOML string form (literal, multi-line,
+  quoted key, any indent), is rewritten to `">=<min_python>"` (the lowest supported minor:
+  usually PyPy's 3.11 with PyPy, else `python.cpython`) and inserted under `[project]` when
+  missing (`render._set_requires_python`); a `requires-python` of another table is never
+  touched.
 - The `[tool.uv]` block between `# >>> pytemplate` and `# <<< pytemplate`
   (`render.managed_block`). The END MARKER IS AN INLINE COMMENT on the last key line
   (`python-preference = "only-managed"  # <<< pytemplate`) so uv/toml_edit insertions cannot
-  detach it; `test_managed_block_bounds_cpython_minor` asserts it. Without markers the block is
-  inserted right after `[tool.uv]`.
+  detach it; `test_managed_block_bounds_cpython_minor` asserts it. The opening marker is a whole
+  line `# >>> pytemplate[: ...]` and the closing one ends its line (`render._BEGIN_RE`,
+  `_END_RE`): the preset markers `# >>> pytemplate-preset` never count (they once made `lock`
+  replace `[tool.flet]` with the block). `render._managed_bounds`: both markers missing = the
+  block is inserted after the `[tool.uv]` header (any spelling: `[ tool.uv ]`, a trailing
+  comment) or in a new `[tool.uv]` table; one missing, duplicated, out of order, outside
+  `[tool.uv]` or with a table header between them = DeployError (restore them, or delete the
+  whole block and run `./deploy lock`).
+- Compared by MEANING: `pyproject_outdated` and `write_pyproject` parse both texts
+  (`render._same_meaning`), so a TOML formatter (taplo: Even Better TOML, LazyVim's toml
+  extra) re-indenting arrays or re-spacing comments is no change: `write_pyproject` then writes
+  nothing (layout, BOM and CRLF stay; a real rewrite is LF without a BOM). A template that only
+  rewords the block's comments does not rewrite old projects.
+- `render._verify` refuses (DeployError, nothing written) a rewrite that would give invalid TOML
+  (e.g. a managed key repeated outside the markers), change anything but requires-python and the
+  block's keys (a user key or table between the markers), or leave a managed value out of
+  `[tool.uv]`. `pyproject_outdated` never raises (an unusable file counts as outdated, and
+  `./deploy lock` then explains); `render.check_pyproject(cfg)` runs the same checks without
+  writing, as a preflight for commands that change other files first.
 - `render.auto` only warns (`pyproject_outdated`); `write_pyproject` runs in `lock`, `mode`,
   `setup` (via `cmd_env.ensure_lock`) and `__init`, because the change needs re-locking.
 - Preset tables go between `# >>> pytemplate-preset` and `# <<< pytemplate-preset`
@@ -740,6 +773,11 @@ Formats:
   compiled modules), `[pyright]`, `[pyright_compiled].strict`, `[basedpyright_compiled]`,
   `[ruff] select/ignore/exit_zero`, `[vscode]` (merged into settings; its
   `"mypy-type-checker.severity"` also feeds `editor.json` `typing.mypy_severity`).
+  `render.load_profile` reads them as `utf-8-sig` and checks the type of these keys (DeployError
+  naming the file). `[pyright]` rule names are pyright's, which Pylance and basedpyright share
+  (`reportPossiblyUnboundVariable`; `reportPossiblyUnbound` never existed and was silently
+  ignored): `test_profile_rule_names_are_known_to_the_pinned_basedpyright` runs the
+  `cmd_dev.BASEDPYRIGHT` pin on every profile's keys when it is in the uv cache.
 - `Config.profile_for(backend)`: `mypyc` backend -> `mypyc`; otherwise `typing.relaxed` when
   `profile = "auto"`, else `profile`.
 - `cmd_dev.run_checks(cfg, backend, rules=True)`:
@@ -1010,10 +1048,18 @@ instead. Neovim opens its output on start and replaces a running instance (`uniq
 ### 12.1 VS Code (`editors/vscode.py`)
 
 - `settings.json` = `.pytemplate/templates/vscode/settings.json` + the profile's `[vscode]` +
-  `[vscode] settings` (later wins). The template sets the automation terminal profiles,
+  (with `typing.editor = "basedpyright"`) `vscode.BASEDPYRIGHT_SETTINGS` + `[vscode] settings`
+  (later wins). The template sets the automation terminal profiles,
   `tasks.statusbar.default.hide: true` and `files.watcherExclude` (`.venv*`, `.build`,
   `dist`). `extensions.json`: Python, Pylance or basedpyright (then Pylance is unwanted),
   debugpy, mypy type checker, Ruff, Even Better TOML, `actboy168.tasks`.
+- Anything VS Code or an extension writes into the Workspace settings lands in this generated
+  file, which then counts as hand-edited (`render --check` and the hook fail): such settings
+  belong in `[vscode] settings`. basedpyright's extension checks `python.languageServer` (set
+  by the Python extension: "Default") and, with Pylance installed,
+  `python.analysis.typeCheckingMode` at every start, and writes its modal's answer there, so
+  `BASEDPYRIGHT_SETTINGS` ships the answers (`"None"`, `"off"`; basedpyright reads its own
+  `basedpyright.analysis` section and `pyrightconfig.json`, not these).
 - `tasks.json`: every task is `"type": "process"`, never `"shell"`: shell tasks go through the
   user's terminal profile (xonsh, niubash, MSYS2) and break; process tasks run the launcher
   directly. `"command": "/bin/sh"`, `"args": ["${workspaceFolder}/deploy", ...]` (no exec bit
@@ -1025,7 +1071,9 @@ instead. Neovim opens its output on start and replaces a running instance (`uniq
   test task), `test <b>`, `test all` and `check all` (only with more than one backend),
   `check`, `build` (default build task), `report --open` (label `deploy: report`; mypyc only),
   `compile` (mypyc only, hidden), `lint --fix`, `fmt`, `doctor`, `setup`, and one task per
-  `[tasks]` entry. Labels are `deploy: <args>`; each task has `detail` (`./deploy <args>  |
+  `[tasks]` entry. Labels are `deploy: <args>` (only the catalog's `report --open` hides its
+  `--open`: `run --open` is not `deploy: run`; buttons that name the same task, `report` and
+  `report --open`, get one task); each task has `detail` (`./deploy <args>  |
   <summary>`), `icon` and a presentation preset (RUN, CHECK, OTHER); run-like tasks use
   `runOptions {instanceLimit 1, instancePolicy terminateOldest}` (a re-run restarts instead of
   hitting cmd's Ctrl+C prompt). A `[tasks]` entry gets its matchers and presentation from
@@ -1036,13 +1084,23 @@ instead. Neovim opens its output on start and replaces a running instance (`uniq
   MYPY error and note (`path:line[:col]: error|note: msg  [code]`, backslash paths on Windows,
   "See https://..." notes skipped), MYPYC (stage-relative paths because `mypyc_build.py`
   chdirs into the stage, mapped to `${workspaceFolder}/src`), RULES (`RULES_RE`, section 5.3),
+  PYTEST (crash lines). Under mypyc (a task whose scan has both `pytest` and `mypyc`) pytest
+  imports the stage, so two more PYTEST matchers relative to `${workspaceFolder}/src` map
+  `.build[/wsl]/mypyc-{dev,release}/stage/X` (relative or absolute) and the stage-relative path
+  mypyc records for a compiled module (`<pkg>/core/x.py`) back to `src/`; the main one skips
+  both with a lookahead, so every line has exactly one matcher whatever VS Code's order. Before,
+  such a problem opened the throwaway stage copy or an unopenable `/<pkg>/...` (autoDetect falls
+  back to absolute). No compiled module (empty `compile.modules`): no mypyc/stage matchers.
   PYRIGHT (only with basedpyright; captures `info` out of `information` because VS Code maps
-  `information` to Ignore and falls back to Error), PYTEST (crash lines). Severity follows the
-  task's typing profiles (`blocking`, ruff `exit_zero`); with several profiles the strictest
+  `information` to Ignore and falls back to Error). Severity follows the task's typing
+  profiles (`blocking`, ruff `exit_zero`); with several profiles the strictest
   wins. `RUFF_OUTPUT_FORMAT=concise` is set only in tasks that carry the ruff matcher (ruff's
   default `full` format is multi-line). Every regex must work in JavaScript AND Python `re`:
-  `test_vscode.py` checks them against real ruff, mypy, mypyc, pytest and basedpyright output
-  (and was cross-checked in VS Code's own Electron as Node). Changing `ui.error`/`ui.warn`,
+  `test_vscode.py` checks them against real ruff, mypy, mypyc, pytest and basedpyright output,
+  runs real ruff, mypy, pytest (and a real mypyc build when a C compiler exists) on a project
+  with one known defect per tool through each generated task's matchers, resolving every file
+  like VS Code's `getResource` (it must open under `src/` or `tests/`), and compares every
+  regex with Node's `RegExp` when `node` is installed. Changing `ui.error`/`ui.warn`,
   `lintc.Finding` or the tools' formats breaks them.
 - Buttons: tasks named in `[vscode] buttons` get `options.statusbar = {"label": "<Name>",
   "hide": false, "running": {"icon": {"id": "sync~spin"}}}` (read by `actboy168.tasks`). The
@@ -1056,7 +1114,9 @@ instead. Neovim opens its output on start and replaces a running instance (`uniq
   when mypyc is supported (program `.build/mypyc-dev/stage/main.py`, `.venv` python per OS
   through a `windows` block, `preLaunchTask: "deploy: compile"`, `pathMappings` src <->
   stage, `PYTEMPLATE_BACKEND=mypyc`; breakpoints bind in `main.py` and the interpreted modules,
-  never in compiled ones: verified with a headless DAP client); "Tests (pytest)". nvim-dap
+  never in compiled ones: verified with a headless DAP client); "Tests (pytest)". Every config
+  sets `PYTHONUTF8=1` (`vscode.DEBUG_ENV`, merged under each config's own `env`): without it
+  `open()` without an encoding reads cp1252 on Windows (Python < 3.15) only under F5. nvim-dap
   reads these configs: keep names stable.
 - `terminal.integrated.automationProfile.windows` = `${env:windir}\System32\cmd.exe`,
   `.linux`/`.osx` = `/bin/sh`: the debugger's `runInTerminal` picks its quoting from the
@@ -1222,7 +1282,13 @@ short temp tree and unset `NVIM_APPNAME`.
   syntax checks, `__probe` round-trips per shell found), `test_launcher_win.py` (static rules
   on every OS, a PowerShell parser check, Windows behaviour through `__probe`),
   `test_paths.py` (path spellings, colours in a hidden console, dry runs in a throwaway copy),
-  `test_shells.py`, `test_vscode.py`, `test_nvim_render.py` (also loads the Lua modules in
+  `test_render_core.py` (`render.apply`/`auto` and `state.json` in a sandbox, the render
+  command's exit codes, the managed pyproject parts for every preset and backend set, typing
+  profiles, the generated CI for 36 preset/backend combinations through a strict YAML reader and
+  `actionlint` when installed, every output clean and hash-seed independent; real taplo and the
+  pinned basedpyright when the uv cache has them), `test_shells.py`, `test_vscode.py` (also real
+  tool output through each task's matchers and a Node `RegExp` cross-check),
+  `test_nvim_render.py` (also loads the Lua modules in
   `nvim --headless --clean`), `test_cmd_nvim.py`, `test_fixes.py` (regression tests of the
   runner fixes: portable smoke with `lib/`, lazy `{python}`, the pyz `.cmd` wrapper, binary
   preset files, `compile.annotate`, `sync_tree` ns mtimes, portable launcher quoting and
@@ -1305,10 +1371,15 @@ short temp tree and unset `NVIM_APPNAME`.
   exist exactly), `__NAME__`, `__BUILD_BACKEND__`; action majors pinned: bump deliberately;
   `astral-sh/setup-uv` publishes no floating major tags since v8 (`@v10` does not resolve), so
   it is pinned to an exact release, `v10.2.0`, in every workflow; deleting the template
-  disables CI generation). It never runs `setup`: it `sync`s only the matrix backends of each
-  OS (so raylib drops PyPy on macOS; an OS left with no backend gets no matrix row), then
-  `check all`, `test` per
-  backend, a pyz per OS, and `pyz-merge` into one cross-platform `.pyz`.
+  disables CI generation; a placeholder left behind is a DeployError). It triggers on pushes to
+  `main` AND `master` (a plain `git init` gives either), pull requests and manual dispatch. Its
+  first step is `./deploy render --check` (no environment needed; the generators read no
+  platform state, CRLF/BOM checkouts count as up to date): a `pytemplate.toml` edit committed
+  without rendering or re-locking (web editor, no hook) fails there instead of being rendered
+  silently inside the runner. It never runs `setup`: it `sync`s only the matrix backends of
+  each OS (so raylib drops PyPy on macOS; an OS left with no backend gets no matrix row), then
+  `check all`, `test` per backend, a pyz per OS, and `pyz-merge` into one cross-platform
+  `.pyz`.
 - **[template repo]** `template-launchers.yml` (Linux/macOS shells + shellcheck, Windows with
   MSYS2, Cygwin and busybox-w32, optional WSL job; `selftest --shells` plus user-style
   invocations; a gate job checks the marker file), `template-nvim.yml` (Ubuntu + Windows,
@@ -1472,5 +1543,6 @@ Code coupling (rename together):
   imports `cmd_env._msvc` lazily (`cmd_env` imports `cmd_nvim`).
 - `RULES_RE` / `tasks.parse_line` <-> `ui.error`, `ui.warn`, `str(lintc.Finding)` (5.3).
 - `editor.json` <-> `cli.COMMANDS` (6.2); `cmd_nvim.EXTRAS` <-> the extras list in
-  `templates/nvim/lazy.lua`; `vscode.MYPYC_STAGE` / `editor.json` `mypyc_stage` <->
-  `mypyc.profile(cfg, "dev").stage`; the CI pyz path <-> `BuildRequest.out_name` (10).
+  `templates/nvim/lazy.lua`; `vscode.MYPYC_STAGE` / `editor.json` `mypyc_stage` /
+  `vscode._STAGE` (the pytest stage matcher) <-> `mypyc.profile(cfg, ...).stage`; the CI pyz path
+  <-> `BuildRequest.out_name` (10; `test_ci_workflow_for_every_preset_and_backend_set`).
