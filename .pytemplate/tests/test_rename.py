@@ -940,6 +940,34 @@ def test_set_project_name_refuses_what_it_cannot_edit(text: str) -> None:
     assert e.value.code == 2
 
 
+def test_a_crlf_pyproject_keeps_its_line_endings(tmp_path: Path) -> None:
+    _write_project(tmp_path, "flet", "alpha")
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_bytes(pyproject.read_bytes().replace(b"\n", b"\r\n"))  # a Windows checkout
+    planned = _rename(tmp_path, "alpha", "beta")
+    data = pyproject.read_bytes()
+    assert data.count(b"\n") == data.count(b"\r\n") and b'name = "beta"\r\n' in data
+    assert planned.pyproject is not None and [line for _, line, _ in planned.pyproject.changes][0] == 'name = "alpha"'
+
+
+def test_a_file_that_cannot_be_read_is_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A root-owned file in tests/ (a container run), a file another program holds on Windows."""
+    _write_project(tmp_path, "script", "alpha")
+    locked = tmp_path / "tests" / "data.txt"
+    locked.write_text("alpha\n", encoding="utf-8")
+    real = Path.read_bytes
+
+    def read_bytes(self: Path) -> bytes:
+        if self.name == "data.txt":
+            raise PermissionError(13, "Permission denied")
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    with pytest.raises(DeployError, match=r"rename: cannot read tests/data.txt: Permission denied") as e:
+        rename.plan(tmp_path, "alpha", "beta")
+    assert e.value.code == 2 and "nothing was changed" in str(e.value)
+
+
 def test_rename_of_a_single_quoted_project_name(tmp_path: Path) -> None:
     _write_project(tmp_path, "script", "alpha")
     path = tmp_path / "pyproject.toml"
@@ -1211,6 +1239,33 @@ def test_dry_run_predicts_exactly_the_rerendered_files(command_project: Path, mo
         assert predicted == set(filter(None, updated.split("render: updated ", 1)[1].split(", ")))
         if new == "Alpha":
             assert ".vscode/tasks.json" not in predicted and ".pytemplate/editor.json" in predicted
+
+
+def test_dry_run_predicts_the_lock_like_the_real_run(command_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A case-only rename keeps the normalized project name, but the real run still re-locks a
+    stale uv.lock (ensure_lock): the dry run asks `uv lock --check` (read-only) instead of guessing."""
+    calls: list[list[str]] = []
+    stale = [True]
+
+    def fake_uv(env: Any, args: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append([str(a) for a in args])
+        assert kw.get("echo") is False and kw.get("cwd") == command_project  # a query in the project, even in a dry run
+        return subprocess.CompletedProcess(args, 1 if stale[0] else 0, "", "")
+
+    monkeypatch.setattr(envs, "uv", fake_uv)
+    monkeypatch.setattr(render, "pyproject_outdated", lambda cfg: False)
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+
+    def lock_line(new: str) -> str:
+        capsys.readouterr()
+        assert rename.cmd_rename(_load(command_project), [new]) == 0
+        return next(ln for ln in capsys.readouterr().err.splitlines() if ln.strip().startswith("uv.lock"))
+
+    assert "would re-lock" in lock_line("Alpha") and calls == [["lock", "--check"]]
+    stale[0] = False
+    assert "would re-lock" not in lock_line("Alpha") and "up to date" in lock_line("Alpha")
+    calls.clear()
+    assert "would re-lock" in lock_line("beta") and calls == []  # another project name: re-locked anyway
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not found")

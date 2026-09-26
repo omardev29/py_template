@@ -658,9 +658,12 @@ header rules (with detector tests proving each rule fires).
 - `nvim trust`, `extras`, `bootstrap` and `sync` print what they would do.
 - `rename` runs the real checks (a dirty git tree is only a warning) and prints the move, each
   file with its reference count and sample lines, the pytemplate/pyproject lines, the lines left
-  unchanged, the other files that mention the old name, the `uv.lock` re-lock and the generated
-  files it would re-render (`render.apply(new_cfg)` in check mode: exactly what the real run
-  writes). `hooks install`/`uninstall` only print.
+  unchanged, the other files that mention the old name, what happens to `uv.lock`
+  (`rename._lock_forecast`: a new normalized project name or changed managed parts re-lock;
+  otherwise a read-only `uv lock --check` in the project, as the real run's `ensure_lock` asks:
+  a stale lock is re-locked even by a case-only rename) and the generated files it would
+  re-render (`render.apply(new_cfg)` in check mode: exactly what the real run writes). `hooks
+  install`/`uninstall` only print.
 - `apply` and `setup` run every check and refusal of the real run (`cmd_apply.make_plan`: a
   hand-edited preset, `render.check_pyproject`, the new name, the renamed pytemplate.toml; the
   dirty tree is only a warning; the PyPy 3.11 precheck runs read-only) and print one row per
@@ -855,8 +858,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     line endings.
   - `pyproject.toml`: `[project] name` (`presets.set_project_name`: the `[project]` table only,
     either quote style, any indentation; a table it cannot edit stops the plan) and the preset
-    block; mentions in other tables are reported. Read as `utf-8-sig` (the BOM is not written
-    back).
+    block; mentions in other tables are reported. Read as bytes decoded `utf-8-sig`: its line
+    endings stay (a CRLF checkout used to come back LF), the BOM is not written back.
+  - A file of src/ or tests/ that cannot be read (root-owned, locked by another program) stops
+    the plan with a DeployError naming it: nothing changed, never an internal-error traceback.
   - A Python file with a PEP 263 cookie is rewritten in its own encoding; other files that are
     not UTF-8 text but mention the old name are a warning (`Plan.unreadable`); binaries show
     only with `-v`. Files outside src/ and tests/ (README.md, scripts/, docs/, your own

@@ -974,7 +974,10 @@ def _plan_pyproject(root: Path, names: Names) -> TextEdit | None:
     path = root / "pyproject.toml"
     if not path.is_file():
         return None
-    old = path.read_text(encoding="utf-8-sig")  # an editor or PowerShell 5.1 may add a BOM (written back without it)
+    try:  # bytes, so its line endings stay (a CRLF checkout); a BOM is dropped (written back without it)
+        old = path.read_bytes().decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError) as e:
+        raise DeployError(f"rename: cannot read pyproject.toml ({e}); nothing was changed") from None
     try:
         new = presets.set_project_name(old, names.new_name)
     except DeployError as e:
@@ -1054,7 +1057,13 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
     pattern = _pattern(names)
     links: list[str] = []
     for rel_path, path in _code_files(root, links):
-        data = path.read_bytes()
+        try:
+            data = path.read_bytes()
+        except OSError as e:  # a root-owned file (a container run), a file another program locks
+            raise DeployError(
+                f"rename: cannot read {rel_path}: {e.strerror or e}; nothing was changed.\n"
+                "  Make it readable (or move it out of src/ and tests/) and try again"
+            ) from None
         text = _decode(data)
         encoding = "utf-8"
         if text is None and path.suffix in PY_SUFFIXES and b"\0" not in data:
@@ -1464,6 +1473,20 @@ def report(plan_: Plan, *, dry: bool) -> None:
         ui.detail(f"  skipped (binary or not UTF-8): {', '.join(plan_.binary)}")
 
 
+def _lock_forecast(new_cfg: Config, old_name: str, new_name: str) -> str:
+    """What the real run's cmd_env.ensure_lock does to uv.lock, for --dry-run (nothing is written;
+    the same normalized project name still re-locks a stale lock)."""
+    if presets._norm_name(old_name) != presets._norm_name(new_name):
+        return "would re-lock (uv lock): the project name changes"
+    if render.pyproject_outdated(new_cfg):
+        return "would re-lock (uv lock): the managed parts of pyproject.toml change"
+    try:
+        r = envs.uv(envs.tool_env(new_cfg), ["lock", "--check"], cwd=ROOT, check=False, capture=True, echo=False)
+    except DeployError as e:
+        return f"cannot tell: uv lock --check could not run ({e})"
+    return "up to date (uv lock --check)" if r.returncode == 0 else "would re-lock (uv lock): uv.lock is not up to date"
+
+
 def needs_pypi(stderr: str) -> bool:
     """Whether a failed `./deploy rename` failed only because its `uv lock` could not reach the index."""
     return "$ uv lock" in stderr and any(marker in stderr for marker in PYPI_UNREACHABLE)
@@ -1512,8 +1535,7 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
     new_cfg = validate_config(planned.config.new)
     report(planned, dry=proc.DRY_RUN)
     if proc.DRY_RUN:
-        relock = presets._norm_name(old_name) != presets._norm_name(new_name)
-        ui.info("  uv.lock          " + ("would re-lock (uv lock): the project name changes" if relock else "unchanged (same normalized project name)"))
+        ui.info(f"  uv.lock          {_lock_forecast(new_cfg, old_name, new_name)}")
         rerendered, edited = render.apply(new_cfg)  # --dry-run: compares only (what the real run writes)
         ui.info("  generated files  " + (f"would re-render {', '.join(rerendered)}" if rerendered else "unchanged"))
         if edited:
