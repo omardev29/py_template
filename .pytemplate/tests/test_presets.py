@@ -397,7 +397,7 @@ def test_check_name_free_accepts_near_misses(name: str) -> None:
     presets.check_name_free(_skeleton_config("script", "myapp"), "script", name)
 
 
-@pytest.mark.parametrize(("name", "message"), [("game-", "valid app name|may only contain"), ("g_", "valid app name|may only contain"), ("aux", "Windows"), ("typings", "typings/"), ("markdown-it", "module 'markdown_it' of markdown-it-py")])
+@pytest.mark.parametrize(("name", "message"), [("game-", "valid app name|may only contain"), ("g_", "valid app name|may only contain"), ("aux", "Windows"), ("typings", "typings/")])
 def test_rename_refuses_the_names_check_name_free_refuses(name: str, message: str) -> None:
     """`./deploy rename` goes through check_name_free: a name uv refuses (game-) used to move
     src/ and rewrite the project before `uv lock` failed on it."""
@@ -405,6 +405,23 @@ def test_rename_refuses_the_names_check_name_free_refuses(name: str, message: st
 
     with pytest.raises(DeployError, match=message) as e:
         rename.check_new_name(config.load(set(cli.COMMANDS)), name)
+    assert e.value.code == 2
+
+
+def test_rename_refuses_a_module_a_pinned_dependency_installs() -> None:
+    """The module of one of this project's pinned packages (markdown_it in a script project,
+    pyray in a raylib one): the preset of the project the suite runs in decides which."""
+    from runner import rename
+
+    cfg = config.load(set(cli.COMMANDS))
+    pins = presets.constraints(cfg.app.preset)
+    # mypy's mypyc and pytest's py are refused for another reason (a backend, a Python command)
+    found = [(dist, modules[0]) for dist, modules in presets.IMPORT_NAMES.items() if dist in pins and dist not in ("mypy", "pytest")]
+    if not found:
+        pytest.skip(f"the {cfg.app.preset} preset pins no package with another module name")
+    dist, module = found[0]
+    with pytest.raises(DeployError, match=f"module '{module}' of {dist}") as e:
+        rename.check_new_name(cfg, module.lower().replace("_", "-"))
     assert e.value.code == 2
 
 

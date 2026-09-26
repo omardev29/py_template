@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import e2e, presets  # noqa: E402
+from runner import config, e2e, presets  # noqa: E402
 from runner.e2e import FAIL, PASS, SKIP, Context, Host, Options, PresetInfo, Step  # noqa: E402
 from runner.hooks import MARKER as HOOK_MARKER  # noqa: E402
 from runner.project import ROOT  # noqa: E402
@@ -237,14 +237,16 @@ def test_a_round_trip_must_restore_the_projects_files(tmp_path: Path, monkeypatc
 @needs_git
 def test_verify_checks_what_new_made(tmp_path: Path) -> None:
     base = tmp_path / "base"
-    ctx = make_ctx(tmp_path, env=isolated_git_env(base))
+    # The preset of the project the suite runs in: its uv.lock holds that preset's tested pins
+    info = e2e.preset_info(config.load(set()).app.preset)
+    ctx = make_ctx(tmp_path, info, env=isolated_git_env(base))
     p = ctx.project
     for launcher in ("deploy", "deploy.ps1"):
         (p / launcher).write_text("#!/bin/sh\n", encoding="utf-8")
     shutil.copyfile(presets.LOCK, p / "uv.lock")  # the template's own versions
-    description = str(presets.load("script")["description"])
-    (p / "pyproject.toml").write_text(f"[project]\nname = \"e2escript\"\ndescription = {json.dumps(description)}\n", encoding="utf-8")
-    (p / "README.md").write_text("# e2escript\n", encoding="utf-8")
+    description = str(presets.load(info.name)["description"])
+    (p / "pyproject.toml").write_text(f"[project]\nname = \"{info.app}\"\ndescription = {json.dumps(description)}\n", encoding="utf-8")
+    (p / "README.md").write_text(f"# {info.app}\n", encoding="utf-8")
     template_repo = (ROOT / ".pytemplate" / "template-repo").is_file()
     for name, target in presets.TEMPLATE_DOCS.items():
         source = ROOT / (name if template_repo else target)
@@ -257,7 +259,7 @@ def test_verify_checks_what_new_made(tmp_path: Path) -> None:
     ctx.results["new"] = PASS
     (p / ".build" / "init").mkdir(parents=True)  # __init's own scratch (the pins it hands to uv)
     (p / ".build" / "init" / "constraints.txt").write_text("raylib==6.0.1.0\n", encoding="utf-8")
-    step = Step("script", "verify copy", "verify", timeout=60)
+    step = Step(info.name, "verify copy", "verify", timeout=60)
     log = ctx.logs / "verify.log"
     assert e2e.do_verify(ctx, step, log) == (PASS, ""), log.read_text(encoding="utf-8")
     subprocess.run([*git, "update-index", "--chmod=-x", "deploy.ps1"], check=True, env=ctx.env)

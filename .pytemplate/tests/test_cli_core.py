@@ -1011,7 +1011,8 @@ def test_every_placeholder(rec: Recorder) -> None:
 def test_literal_braces_are_written_doubled(rec: Recorder) -> None:
     cfg = make({"tasks": {"t": {"cmd": ["python", "-c", "d = {{}}; print({{'a': 1}})"], "uv": False}}})
     tasks.run_task(cfg, "t", [], rec.dispatch)
-    assert rec.runs == [["python", "-c", "d = {}; print({'a': 1})"]]
+    [(program, *rest)] = rec.runs  # Windows runs the python it finds on PATH (PATHEXT), by its full path
+    assert Path(program).stem.lower() == "python" and rest == ["-c", "d = {}; print({'a': 1})"]
 
 
 BAD_BRACES = ["{}", "{", "}", "x{0}", "{name!r}", "{name:>9}", "{name.upper}", "{name[0]}", "{name[a]}", "{root"]
@@ -1682,7 +1683,7 @@ def test_a_dry_run_reports_no_success_for_what_it_skipped(
     `ok Any expressions`, `ok check: no errors` and a test summary of [ok] lines were printed."""
     monkeypatch.setattr(proc, "DRY_RUN", True)
     monkeypatch.setattr(cmd_dev, "_profile_file", lambda _cfg, _profile, _kind: Path("mypy.ini"))
-    cfg = make({"backend": {"supported": ["cpython", "mypyc"]}})
+    cfg = own({"backend": {"supported": ["cpython", "mypyc"]}})  # test mypyc reads the compiled modules in src/
     assert cmd_dev.cmd_compile(cfg, []) == 0
     assert cmd_dev.cmd_report(cfg, []) == 0
     assert cmd_dev.cmd_test(cfg, ["all"]) == 0
