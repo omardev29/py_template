@@ -1225,6 +1225,35 @@ def test_pyz_merge_refuses_an_output_its_wrapper_would_replace(tmp_path: Path) -
     assert pyz.wrapper_path(Path("x/app")) == Path("x/app.cmd") and pyz.wrapper_path(Path("app.pyz")) == Path("app.cmd")
 
 
+@pytest.mark.parametrize("name", ["juego-ni\u00f1o.pyz", "100%.pyz", 'say"hi".pyz', "a!b.pyz", "a&b.pyz", "tab\there.pyz"])
+def test_pyz_merge_refuses_an_output_name_its_wrapper_cannot_hold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    # A non-ASCII --out: the .pyz was written, then the ASCII .cmd raised UnicodeEncodeError (an
+    # internal error with a traceback) and left a 0-byte wrapper; --dry-run accepted the name. A
+    # % in it would be expanded by cmd inside "%~dp0<name>"
+    from runner.methods import pyz
+
+    a = _native_part(tmp_path / "a.pyz", key=LINUX)
+    b = _native_part(tmp_path / "b.pyz", key=WIN)
+    out = tmp_path / "out" / name
+    with pytest.raises(DeployError, match="wrapper") as e:
+        pyz.merge([a, b], out, make({}))
+    assert e.value.code == 2
+    assert not (tmp_path / "out").exists()  # nothing written
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    monkeypatch.setattr(cmd_build, "user_path", lambda raw: Path(raw))
+    with pytest.raises(DeployError, match="wrapper"):
+        cmd_build.cmd_pyz_merge(make({}), [str(a), str(b), "--out", str(out)])
+
+
+def test_pyz_merge_refuses_an_app_name_that_is_no_app_name(tmp_path: Path) -> None:
+    # The part's name goes into the wrapper's unquoted `echo <name>: needs Python...`
+    a = _native_part(tmp_path / "a.pyz", key=LINUX, name="demo & calc")
+    b = _native_part(tmp_path / "b.pyz", key=WIN, name="demo & calc")
+    with pytest.raises(DeployError, match="no valid _pyz.json"):
+        _merge([a, b], tmp_path / "m.pyz")
+    assert not (tmp_path / "m.pyz").exists()
+
+
 def test_pyz_merge_dry_run_checks_the_parts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     # --dry-run used to accept any zip: the real merge then refused it (another app, no _pyz.json)
     import zipfile

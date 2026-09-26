@@ -1537,8 +1537,11 @@ Per method:
   part, else "rebuild it") and keeps no `common/lib`. The merged `targets` come from the
   folders written; `host` is dropped. It also writes the `<out stem>.cmd` wrapper next to
   `--out` (`pyz.wrapper_path`; the parts' name and `min_python`, the pypy candidate order only
-  when every part is a pypy build; an `--out` ending in `.cmd` is refused). `pyz.check_parts`
-  runs the part checks in `--dry-run` too.
+  when every part is a pypy build; an `--out` ending in `.cmd` is refused, and so is a name the
+  ASCII wrapper cannot hold, `pyz._CMD_UNSAFE`: non-ASCII, control characters,
+  `% ! " ^ & | < >`; the wrapper text is made before the `.pyz` is written). A part's `name` must be an app name
+  (`config.APP_NAME`: the wrapper echoes it unquoted). `pyz.check_parts` runs the part and name
+  checks in `--dry-run` too.
 - **wheel**: synthetic build project in `.build/wheel/<b>` (for mypyc a `setup.py` using
   mypycify with the same `compile.multi_file`, `separate`, `strict_dunder_typing` and extra C
   flags (`no_semantic_interposition`, section 9) as the stage, and a compile `mypy.ini`), built

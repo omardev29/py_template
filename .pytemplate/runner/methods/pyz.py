@@ -27,7 +27,7 @@ from typing import Any
 
 from .. import ui
 from ..cmd_build import BuildRequest, dist_path
-from ..config import Config
+from ..config import APP_NAME, Config
 from ..project import BUILD, EXT_SUFFIXES, IS_WINDOWS, TEMPLATES, rel
 from ..ui import DeployError
 from . import common
@@ -200,6 +200,7 @@ def _read_info(part: Path) -> dict[str, Any]:
     if not isinstance(info, dict) or not (
         all(k in info for k in INFO_KEYS)
         and isinstance(info["name"], str)
+        and APP_NAME.fullmatch(info["name"])  # an app.name: the wrapper echoes it unquoted
         and isinstance(info["targets"], list)
         and isinstance(info["min_python"], list)
         and len(info["min_python"]) == 2
@@ -232,12 +233,24 @@ def wrapper_path(out: Path) -> Path:
     return out.with_name(out.stem + ".cmd")
 
 
+# Characters of an --out name the wrapper cannot hold: it is ASCII, cmd expands % (and ! under
+# delayed expansion) even inside quotes and in `rem` lines, " ends the quoted "%~dp0<name>",
+# and ^ & | < > are cmd syntax outside quotes (the `rem` line holds the name too)
+_CMD_UNSAFE = frozenset('%!"^&|<>')
+
+
 def check_parts(parts: list[Path], out: Path) -> list[dict[str, Any]]:
     """Read and compare the parts' _pyz.json (also in --dry-run): one app, one build."""
     if len(parts) < 2:
         raise DeployError("pyz-merge needs at least two .pyz files")
     if out.suffix.lower() == ".cmd":  # any case: macOS and Windows folders ignore it
         raise DeployError(f"pyz-merge: --out {out.name} would be overwritten by its own .cmd wrapper: name it <name>.pyz")
+    if not (out.name.isascii() and out.name.isprintable()) or _CMD_UNSAFE & set(out.name):
+        raise DeployError(
+            f"pyz-merge: --out {out.name!r}: its Windows wrapper {wrapper_path(out).name} cannot hold this "
+            "name (printable ASCII only, without % ! \" ^ & | < >): choose another file name",
+            2,
+        )
     infos = [_read_info(p) for p in parts]
     names = {str(i["name"]) for i in infos}
     if len(names) != 1:
@@ -261,6 +274,10 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
     (UTF-8 mode, the interpreter search) is written next to `out`, as a build writes it.
     """
     infos = check_parts(parts, out)
+    # The wrapper text first: nothing is written when it cannot be made
+    backend = "pypy" if all(i.get("backend") == "pypy" for i in infos) else "cpython"
+    min_python = ".".join(str(x) for x in infos[0]["min_python"])
+    wrapper = _wrapper_cmd(cfg, backend, out.name, name=str(infos[0]["name"]), min_python=min_python).encode("ascii")
     pure = all(bool(i["pure"]) for i in infos)
     moved = {} if pure else {n: _part_host(p, i) for n, (p, i) in enumerate(zip(parts, infos, strict=True)) if i["pure"]}
 
@@ -323,10 +340,7 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
         (root / "_pyz.json").write_text(json.dumps(merged, indent=2), encoding="utf-8", newline="\n")
         out.parent.mkdir(parents=True, exist_ok=True)
         _write_archive(root, out)
-    backend = "pypy" if all(i.get("backend") == "pypy" for i in infos) else "cpython"
-    min_python = ".".join(str(x) for x in infos[0]["min_python"])
-    wrapper = _wrapper_cmd(cfg, backend, out.name, name=str(infos[0]["name"]), min_python=min_python)
-    wrapper_path(out).write_text(wrapper, encoding="ascii", newline="")
+    wrapper_path(out).write_bytes(wrapper)
     ui.ok(f"{rel(out)}: runs on {', '.join(targets) or 'any platform (pure Python)'}")
     ui.info(f"  on Windows also {rel(wrapper_path(out))}")
     return out
