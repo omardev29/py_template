@@ -10,16 +10,18 @@ import re
 import shutil
 import sys
 import sysconfig
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 from .. import envs, proc, ui
 from ..config import Config
 from ..imports import iter_runtime_nodes, parse
-from ..project import BUILD, EXT_SUFFIXES, SRC, host_os, rel
+from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, SRC, host_os, rel
 from ..ui import DeployError
 
 NATIVE_SUFFIXES = (*EXT_SUFFIXES, ".dll", ".dylib")
+LOCK = PYPROJECT.parent / "uv.lock"
 # ASCII digits only (\d also matches other scripts' digits) and no trailing newline ($ allows one):
 # parse_key uses fullmatch
 KEY_RE = re.compile(r"(cp|pp)([0-9])([0-9]+)-(windows|linux|macos)-(x86_64|aarch64)")
@@ -229,14 +231,27 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
     extra_env = {"MACOSX_DEPLOYMENT_TARGET": _macos_floor()} if target.os == "macos" else {}
     base: list[str | Path] = ["pip", "install", "--quiet", "--target", dest, "--no-deps", "-r", requirements]
     if not target.is_host:
+        # Wheels only: an sdist built here for another OS gives this machine's binaries. Except
+        # the packages that publish no wheel at all (docopt, a workspace library): built here,
+        # and kept only when the result is pure Python
+        build_here = source_only(LOCK)
         argv = [
             *base,
             "--python", ensure_env(envs.tool_env(cfg)).python,
             "--python-platform", UV_PLATFORMS[(target.os, target.arch)],
             "--python-version", target.version,
-            "--only-binary", ":all:",  # building sdists for another OS would produce host binaries
+            "--only-binary", ":all:",
+            *(arg for name in build_here for arg in ("--no-binary", name)),
         ]
         envs.uv(env, argv, extra_env=extra_env)
+        native = _built_native(dest, build_here)
+        if native:
+            raise DeployError(
+                f"{target.key}: {', '.join(native)} publishes no wheel, and building it here gives this machine's "
+                f"binaries: build the pyz for {target.key} on that platform (./deploy build ... --method pyz there) "
+                "and join the parts with ./deploy pyz-merge",
+                2,
+            )
     else:
         base += ["--python", ensure_env(env).python]
         floor = host_floor(target)
@@ -255,6 +270,35 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
             envs.uv(env, base, extra_env=extra_env)
     drop_install_junk(dest)
     return dest
+
+
+def source_only(lock: Path) -> list[str]:
+    """The packages of uv.lock without any wheel: an sdist-only release on the index, or a path,
+    git or URL source (a workspace library). The project's own entry is left out."""
+    try:
+        data = tomllib.loads(lock.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return []
+    names: set[str] = set()
+    for package in data.get("package", []):
+        if not isinstance(package, dict) or package.get("wheels") or not isinstance(package.get("name"), str):
+            continue
+        source = package.get("source")
+        if isinstance(source, dict) and "." in (source.get("virtual"), source.get("editable"), source.get("directory")):
+            continue  # the project itself
+        names.add(package["name"])
+    return sorted(names)
+
+
+def _built_native(site: Path, names: list[str]) -> list[str]:
+    """Which of `names` got a platform-specific wheel in `site` (a native sdist built here)."""
+    wanted = {_norm_name(n) for n in names}
+    out = []
+    for wheel in sorted(site.glob("*.dist-info/WHEEL")):
+        name = wheel.parent.name[: -len(".dist-info")].rpartition("-")[0]
+        if _norm_name(name) in wanted and _platform_wheel(wheel):
+            out.append(name)
+    return out
 
 
 class _CaseSensitiveParser(configparser.ConfigParser):

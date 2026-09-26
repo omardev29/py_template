@@ -756,7 +756,9 @@ How far a pyz reaches depends on its dependencies; the build prints which case i
 - `[deploy.pyz] targets` is `["host"]` by default, so a local build that is not pure runs only on
   the platform that built it. For one file that serves several platforms, add target keys
   (`targets = ["host", "cp314-windows-x86_64"]`, or `--target KEY`: the locked CPython minor on
-  any of those systems and CPUs; PyPy keys come only from a PyPy build on that platform), or use
+  any of those systems and CPUs; PyPy keys come only from a PyPy build on that platform; a
+  dependency that publishes no wheel, such as `docopt` or a local library, is built on the build
+  machine and must be pure Python for another key), or use
   the generated CI, which builds a pyz on Windows, Linux and macOS and merges them on every run.
 - mypyc compiles only for the machine it runs on: its extensions are used for the key that built
   them, and everywhere else the same code runs as `.py` (slower, same result).

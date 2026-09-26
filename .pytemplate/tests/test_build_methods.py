@@ -1589,6 +1589,86 @@ def test_macos_targets_pin_the_deployment_target(tmp_path: Path, monkeypatch: py
     assert _flag(calls[-1][1], "--python-platform") == "aarch64-apple-darwin" and calls[-1][2] == {"MACOSX_DEPLOYMENT_TARGET": "11.0"}
 
 
+SOURCE_ONLY_LOCK = """version = 1
+requires-python = ">=3.14"
+
+[[package]]
+name = "myapp"
+version = "0.1.0"
+source = { virtual = "." }
+
+[[package]]
+name = "docopt"
+version = "0.6.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/docopt-0.6.2.tar.gz", hash = "sha256:00", size = 25901 }
+
+[[package]]
+name = "mylib"
+version = "0.1.0"
+source = { editable = "libs/mylib" }
+
+[[package]]
+name = "six"
+version = "1.17.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/six-1.17.0.tar.gz", hash = "sha256:00", size = 34031 }
+wheels = [{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:00", size = 11050 }]
+"""
+
+
+@pytest.mark.parametrize(("docopt_tag", "error"), [("py3-none-any", None), ("cp314-cp314-linux_x86_64", "docopt")])
+def test_cross_target_builds_a_package_that_publishes_no_wheel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, docopt_tag: str, error: str | None) -> None:
+    # --only-binary :all: refused docopt (an sdist only, pure Python) for every other OS, so no pyz
+    # with a --target could be built; a workspace library (./deploy add ./libs/x) the same
+    calls = _install_recorder(tmp_path, monkeypatch)
+    lock = tmp_path / "uv.lock"
+    lock.write_text(SOURCE_ONLY_LOCK, encoding="utf-8")
+    monkeypatch.setattr(common, "LOCK", lock)
+    record = envs.uv  # _install_recorder's
+
+    def install(env: envs.PyEnv, argv: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        dest = Path(str(argv[argv.index("--target") + 1]))
+        _wheel(dest, "docopt", "0.6.2", docopt_tag, {"docopt.py": b""})
+        _wheel(dest, "mylib", "0.1.0")
+        _wheel(dest, "six", "1.17.0", files={"six.py": b""})
+        return record(env, argv, **kw)
+
+    monkeypatch.setattr(envs, "uv", install)
+    req = _requirements(tmp_path, "docopt==0.6.2", "six==1.17.0")
+    if error is None:
+        common.install_deps(make({}), "cpython", common.parse_key(WIN), tmp_path / "site", req)
+    else:
+        with pytest.raises(DeployError, match=f"{error}.*{WIN}.*pyz-merge") as e:
+            common.install_deps(make({}), "cpython", common.parse_key(WIN), tmp_path / "site", req)
+        assert e.value.code == 2
+    ((_key, args, _),) = calls
+    assert _flag(args, "--only-binary") == ":all:"  # every other package: a wheel for that platform
+    no_binary = [args[i + 1] for i, a in enumerate(args) if a == "--no-binary"]
+    assert no_binary == ["docopt", "mylib"]  # built here: the project itself and six are not
+
+
+def test_cross_target_builds_a_pure_sdist_for_real(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """uv's own flags: `--only-binary :all: --no-binary docopt` builds docopt (pip's rule: the
+    later option wins for that package) and still takes wheels for everything else."""
+    probe = subprocess.run(
+        [proc.find_uv(), "pip", "compile", "--no-deps", "--no-header", "--python-version", "3.14", "-"],
+        input="docopt==0.6.2\n", capture_output=True, text=True, env=proc.base_env(), timeout=120, check=False,
+    )
+    if probe.returncode != 0:
+        pytest.skip(f"needs PyPI (uv could not resolve docopt): {probe.stderr.strip()[-200:]}")
+    if not envs.tool_env(make({})).python.is_file():
+        pytest.skip("needs .venv (./deploy setup)")
+    lock = tmp_path / "uv.lock"
+    lock.write_text(SOURCE_ONLY_LOCK, encoding="utf-8")
+    monkeypatch.setattr(common, "LOCK", lock)
+    req = tmp_path / "requirements.txt"
+    req.write_text("docopt==0.6.2\nsix==1.17.0\n", encoding="utf-8")
+    site = common.install_deps(make({}), "cpython", common.parse_key(LINUX if IS_WINDOWS else WIN), tmp_path / "site", req)
+    assert (site / "docopt.py").is_file() and (site / "six.py").is_file()
+    assert common.installed(site) == {("docopt", "0.6.2"), ("six", "1.17.0")}
+
+
 def test_pypy_build_installs_cpython_keys_with_the_tools_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # It used to raise "CPython target from a PyPy build", but only for the host OS
     calls = _install_recorder(tmp_path, monkeypatch)

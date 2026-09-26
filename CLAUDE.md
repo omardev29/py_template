@@ -1399,7 +1399,13 @@ Formats:
   reads that relative path against its working folder, `ROOT`.
 - `common.install_deps` (`uv pip install --target --no-deps -r <export>`): a cross target gets
   `--python-platform UV_PLATFORMS[...] --python-version --only-binary :all:` (an sdist built for
-  another OS would produce host binaries); a HOST target gets the same `--python-platform` floor
+  another OS would produce host binaries), plus `--no-binary <name>` for each package uv.lock has
+  no wheel for (`common.source_only`, read from `common.LOCK`: an sdist-only release such as
+  docopt, a path, git or URL source such as a workspace library; pip's rule, which uv follows:
+  the later option wins for that package), which is built here and must come out pure
+  (`_built_native`: a platform wheel is a DeployError naming it, build that key on its platform
+  and `pyz-merge`); before, every cross target failed for such a package. A HOST target gets
+  the same `--python-platform` floor
   when this machine can load it (`host_floor`: glibc >= 2.28 x86_64 / 2.35 aarch64, never musl;
   macOS >= `MACOS_FLOOR` 13.0, pinned through `MACOSX_DEPLOYMENT_TARGET` unless the user sets it),
   without `--only-binary`, and falls back to the host's own wheels with a warning when a
@@ -2616,10 +2622,14 @@ uv:
   build machine allows (manylinux_2_34 on Ubuntu 24.04: the pyz failed on Debian 11), its macOS
   default may move with a uv release, and an sdist built for another OS gives host binaries.
   Fix: `common.host_floor`, `common.UV_PLATFORMS`, `common.MACOS_FLOOR` through
-  `MACOSX_DEPLOYMENT_TARGET`, `--only-binary :all:` for other targets (`common.install_deps`,
-  10). Test: `test_build_methods.py::test_host_linux_target_gets_the_platform_floor`,
+  `MACOSX_DEPLOYMENT_TARGET`, `--only-binary :all:` for other targets but `--no-binary` for the
+  packages that publish no wheel (`common.source_only`), kept only when pure
+  (`common.install_deps`, 10). Test:
+  `test_build_methods.py::test_host_linux_target_gets_the_platform_floor`,
   `test_host_floor_falls_back_to_the_host_wheels`,
-  `test_macos_targets_pin_the_deployment_target`. Goes: never.
+  `test_macos_targets_pin_the_deployment_target`,
+  `test_cross_target_builds_a_package_that_publishes_no_wheel`,
+  `test_cross_target_builds_a_pure_sdist_for_real`. Goes: never.
 - **PyPy wheels need a real PyPy** (LIMITATION): uv installs them for no other interpreter or
   machine. Fix: `common.check_key` takes a `pp` key only for the pypy build's own host;
   `pyz-merge` joins builds (10). Test:
