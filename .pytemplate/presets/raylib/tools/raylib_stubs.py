@@ -90,6 +90,13 @@ def main() -> int:
             continue
         if ct.kind not in ("struct", "union"):
             continue
+        # An opaque struct (GLFWcursor, GLFWwindow, rAudioBuffer...) has no size. Reading its
+        # `.fields` trips a C assert in cffi 2.x builds that keep asserts (the Linux wheels):
+        # the process aborts (exit 134), which no `except` can catch. So test it first.
+        try:
+            ffi.sizeof(ct)
+        except ffi.error:
+            continue
         fields = dict(ct.fields or [])
         for stmt in cls.body:
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.target.id in fields:
@@ -121,8 +128,8 @@ def main() -> int:
             if name in bad_returns:
                 ret = "CData"
             for fname, pname in int_params:
-                if fname == name:
-                    params = params.replace(f"{pname}: bytes", f"{pname}: int").replace(f"{pname}: str", f"{pname}: int")
+                if fname == name:  # whole words: `x: bytes` must not also match `text: bytes`
+                    params = re.sub(rf"\b{re.escape(pname)}: (?:bytes|str)\b", f"{pname}: int", params)
             params = params.replace("|list|tuple", "|Sequence[object]")
             line = f"def {name}({params}) -> {ret}:"
         elif current:

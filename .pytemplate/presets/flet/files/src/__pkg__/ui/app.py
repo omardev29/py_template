@@ -42,7 +42,9 @@ async def main(page: ft.Page) -> None:
     page.title = "{{name}}"
     page.theme_mode = ft.ThemeMode.DARK
 
-    iterations = ft.Slider(min=50, max=2000, divisions=39, value=300, label="{value} iterations", expand=True)
+    iterations = ft.Slider(
+        min=50, max=2000, divisions=39, value=300, label="{value} iterations", expand=True
+    )
     image = ft.Image(src=fractal.render_png(8, 5, 1), width=WIDTH, height=HEIGHT)
     status = ft.Text(f"Core: {_backend()}. Press Draw.")
 
@@ -55,7 +57,8 @@ async def main(page: ft.Page) -> None:
         loop = asyncio.get_running_loop()
         png = await loop.run_in_executor(_executor(), fractal.render_png, WIDTH, HEIGHT, max_iter)
         image.src = png
-        status.value = f"{max_iter} iterations in {time.perf_counter() - start:.2f} s (core: {_backend()})"
+        elapsed = time.perf_counter() - start
+        status.value = f"{max_iter} iterations in {elapsed:.2f} s (core: {_backend()})"
         button.disabled = False
         page.update()
 

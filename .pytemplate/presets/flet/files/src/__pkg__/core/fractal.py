@@ -29,7 +29,9 @@ def escape_time(cr: float, ci: float, max_iter: int) -> int:
     return max_iter
 
 
-def render_rgb(width: int, height: int, max_iter: int, center_x: float = -0.6, center_y: float = 0.0) -> bytes:
+def render_rgb(
+    width: int, height: int, max_iter: int, center_x: float = -0.6, center_y: float = 0.0
+) -> bytes:
     """Return RGB pixels row by row, each row preceded by the PNG filter byte (0)."""
     scale = 3.0 / width
     data: list[int] = []
@@ -57,7 +59,12 @@ def _chunk(kind: bytes, payload: bytes) -> bytes:
 
 def to_png(width: int, height: int, raw: bytes) -> bytes:
     header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)  # 8 bits, RGB
-    return PNG_SIGNATURE + _chunk(b"IHDR", header) + _chunk(b"IDAT", zlib.compress(raw, 6)) + _chunk(b"IEND", b"")
+    return (
+        PNG_SIGNATURE
+        + _chunk(b"IHDR", header)
+        + _chunk(b"IDAT", zlib.compress(raw, 6))
+        + _chunk(b"IEND", b"")
+    )
 
 
 def render_png(width: int, height: int, max_iter: int) -> bytes:

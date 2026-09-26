@@ -21,7 +21,14 @@ WIDTH = 1280
 HEIGHT = 720
 START_BUNNIES = 2_000
 SPAWN_PER_FRAME = 100
-PALETTE = [(230, 41, 55), (0, 228, 48), (0, 121, 241), (253, 249, 0), (200, 122, 255), (255, 161, 0)]
+PALETTE = [
+    (230, 41, 55),
+    (0, 228, 48),
+    (0, 121, 241),
+    (253, 249, 0),
+    (200, 122, 255),
+    (255, 161, 0),
+]
 
 
 def _backend() -> str:
@@ -69,7 +76,8 @@ def main(argv: list[str] | None = None) -> int:
         rl.ClearBackground(background)
         render.draw_world(game, texture, tints)
         rl.DrawRectangle(0, 0, WIDTH, 36, panel)
-        gfx.text(f"{len(game.bunnies)} bunnies | {rl.GetFPS()} FPS | {backend} | click: more bunnies", 10, 8, 20, white)
+        hud = f"{len(game.bunnies)} bunnies | {rl.GetFPS()} FPS | {backend} | click: more bunnies"
+        gfx.text(hud, 10, 8, 20, white)
         rl.EndDrawing()
 
         if gc_step is not None:
@@ -81,5 +89,8 @@ def main(argv: list[str] | None = None) -> int:
     elapsed = time.perf_counter() - start
     rl.UnloadTexture(texture)
     rl.CloseWindow()
-    print(f"{frames} frames in {elapsed:.2f} s: {frames / elapsed:.0f} FPS average with {len(game.bunnies)} bunnies ({backend})")
+    print(
+        f"{frames} frames in {elapsed:.2f} s: {frames / elapsed:.0f} FPS average "
+        f"with {len(game.bunnies)} bunnies ({backend})"
+    )
     return 0
