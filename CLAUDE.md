@@ -470,7 +470,8 @@ header rules (with detector tests proving each rule fires).
 - `init` runs the real checks (name, `check_name_free`, pristine) and lists each file as `-`
   deleted, `+` new or `~` replaced, the dependencies removed and added, and what happens to
   `pyproject.toml` and `uv.lock`. `new` checks the destination and the name and prints
-  destination, preset and name. `pyz-merge` validates its inputs and prints inputs and output.
+  destination, preset and name. `pyz-merge` validates its inputs (`pyz.check_parts`: valid
+  `_pyz.json`, one app, one build) and prints inputs and outputs (the `.pyz` and its `.cmd`).
 - `nvim trust`, `extras`, `bootstrap` and `sync` print what they would do.
 - `rename` runs the real checks (a dirty git tree is only a warning) and prints the move, each
   file with its reference count and sample lines, the pytemplate/pyproject lines, the `uv.lock`
@@ -882,6 +883,11 @@ Per method:
     `automatic_install` default; the silenced probe hides it, so that first start can take a
     minute): the launchers leave `PYTHON_MANAGER_*` to the user. With native dependencies it warns
     that the folder only works on the host key.
+  - Every bundled build starts its interpreter before reporting success (`_smoke_runtime`, after
+    UPX, with the launchers' `-s -O` plus `-B`): it must run and its `sys.prefix` (a `PTPREFIX:`
+    line) must be inside the folder's `runtime/`, else `DeployError` (a prune or UPX regression,
+    a python-build-standalone/PyPy layout change, an interpreter that finds the uv base again);
+    a copy without the interpreter file fails before `compileall` (`_check_interpreter`).
   - mypyc builds are smoke-tested (`_smoke_compiled`, code from `smoke_code`, run with the
     launchers' `-s -O` plus `-B`): the same
     `sys.path` as `boot.py` (`app/` first, then `lib/`), result read from a `PTSMOKE:` marker
@@ -919,7 +925,10 @@ Per method:
   key, and when parts differ in purity moves each pure part's `common/lib` to
   `targets/<its host>/lib` (an older part without `host`: the single overlay key of a mypyc
   part, else "rebuild it") and keeps no `common/lib`. The merged `targets` come from the
-  folders written; `host` is dropped.
+  folders written; `host` is dropped. It also writes the `<out stem>.cmd` wrapper next to
+  `--out` (`pyz.wrapper_path`; the parts' name and `min_python`, the pypy candidate order only
+  when every part is a pypy build; an `--out` ending in `.cmd` is refused). `pyz.check_parts`
+  runs the part checks in `--dry-run` too.
 - **wheel**: synthetic build project in `.build/wheel/<b>` (`setuptools>=84`; for mypyc
   `mypy==<version locked in uv.lock>` in `build-system.requires`, a `setup.py` using mypycify
   with the same `compile.multi_file`, `separate` and `strict_dunder_typing` as the stage, and a
@@ -1295,8 +1304,8 @@ short temp tree and unset `NVIM_APPNAME`.
   `cmd_build` argument checks; target keys, `install_deps` floors and junk; the pyz layout,
   `pyz-merge` and the real bootstrap run in subprocesses with the cache redirected; one REAL
   host pyz build run with `python -S`, skipped when uv cannot install offline; portable prune,
-  launchers and precompile), `test_upx.py` (UPX flags, candidates per OS, the pinned download
-  with fake archives).
+  launchers, precompile and the runtime smoke with real interpreters), `test_upx.py` (UPX
+  flags, candidates per OS, the pinned download with fake archives).
 - **[template repo]** Language guard `test_no_spanish.py`: skipped unless
   `.pytemplate/template-repo` exists. Scans `git ls-files --cached --others --exclude-standard`
   (so new untracked files count) for accented Spanish letters and a list of Spanish words

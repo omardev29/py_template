@@ -7,6 +7,7 @@ import importlib.machinery
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -863,12 +864,12 @@ FOREIGN = "cp399-nowhere-x86_64"  # a platform no test machine has
 MERGE_MAIN = "import dep\nprint('dep=' + dep.WHERE)\n"
 
 
-def _merge(parts: list[Path], out: Path) -> tuple[dict[str, Any], set[str]]:
+def _merge(parts: list[Path], out: Path, cfg: Config | None = None) -> tuple[dict[str, Any], set[str]]:
     import zipfile
 
     from runner.methods import pyz
 
-    pyz.merge(parts, out)
+    pyz.merge(parts, out, cfg or make({}))
     with zipfile.ZipFile(out) as archive:
         return json.loads(archive.read("_pyz.json")), set(archive.namelist())
 
@@ -878,7 +879,8 @@ def _native_part(path: Path, *, compiled: bool = False, key: str = FOREIGN, main
     if compiled:
         files[f"targets/{key}/app/overlay.txt"] = "native"
     info.setdefault("host", key)
-    return fake_pyz(path, targets=[key], pure=False, files=files, backend="mypyc" if compiled else "cpython", **info)
+    info.setdefault("backend", "mypyc" if compiled else "cpython")
+    return fake_pyz(path, targets=[key], pure=False, files=files, **info)
 
 
 def _pure_part(
@@ -1017,6 +1019,66 @@ def test_pyz_merge_needs_the_host_of_a_pure_part(tmp_path: Path) -> None:
     # Two old NON-pure parts need no host (test_paths covers them too)
     info, _ = _merge([_native_part(tmp_path / "x.pyz", key=LINUX, host=""), _native_part(tmp_path / "y.pyz", key=WIN, host="")], tmp_path / "m3.pyz")
     assert info["targets"] == [LINUX, WIN]
+
+
+@pytest.mark.parametrize("gui", [False, True])
+@pytest.mark.parametrize("backends", [("cpython", "cpython"), ("pypy", "pypy"), ("pypy", "cpython")])
+def test_pyz_merge_writes_the_windows_wrapper(tmp_path: Path, gui: bool, backends: tuple[str, str]) -> None:
+    # CI's merged .pyz had no <name>.cmd: Windows users ran it without UTF-8 mode and without the
+    # interpreter search a build writes next to its .pyz. The wrapper follows the PARTS (their
+    # name and minimum Python), the order of a pypy build only when every part is one.
+    from runner.methods import pyz
+
+    a = _native_part(tmp_path / "a.pyz", key=LINUX, name="parts-app", min_python=[3, 12], backend=backends[0])
+    b = _native_part(tmp_path / "b.pyz", key=WIN, name="parts-app", min_python=[3, 12], backend=backends[1])
+    cfg = make({"app": {"gui": gui}, "backend": {"supported": ["cpython", "pypy"]}})
+    _merge([a, b], tmp_path / "dist" / "merged.pyz", cfg)
+    wrapper = tmp_path / "dist" / "merged.cmd"
+    data = wrapper.read_bytes()
+    assert data.isascii() and data.endswith(b"\r\n") and b"\n" not in data.replace(b"\r\n", b"")
+    text = data.decode("ascii")
+    expected = pyz._wrapper_cmd(cfg, "pypy" if backends == ("pypy", "pypy") else "cpython", "merged.pyz", name="parts-app", min_python="3.12")
+    assert text == expected
+    assert '"%~dp0merged.pyz" %*' in text and "(3, 12)" in text and "parts-app: needs Python or PyPy 3.12" in text
+    assert ('start ""' in text) is gui
+    first_probe = next(ln for ln in text.split("\r\n") if ln.endswith("&& goto run0"))
+    assert first_probe.startswith("pypy3 -c " if backends == ("pypy", "pypy") else "py -3.14 -c ")
+
+
+def test_pyz_merge_refuses_an_output_its_wrapper_would_replace(tmp_path: Path) -> None:
+    from runner.methods import pyz
+
+    a = _native_part(tmp_path / "a.pyz", key=LINUX)
+    b = _native_part(tmp_path / "b.pyz", key=WIN)
+    for name in ("merged.cmd", "merged.CMD"):  # any case: macOS and Windows folders ignore it
+        with pytest.raises(DeployError, match="its own .cmd wrapper"):
+            pyz.merge([a, b], tmp_path / name, make({}))
+    assert not list(tmp_path.glob("merged.*"))
+    assert pyz.wrapper_path(Path("x/app")) == Path("x/app.cmd") and pyz.wrapper_path(Path("app.pyz")) == Path("app.cmd")
+
+
+def test_pyz_merge_dry_run_checks_the_parts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # --dry-run used to accept any zip: the real merge then refused it (another app, no _pyz.json)
+    import zipfile
+
+    a = _native_part(tmp_path / "a.pyz", key=LINUX)
+    other = _native_part(tmp_path / "other.pyz", key=WIN, name="other")
+    no_info = tmp_path / "plain.zip"
+    with zipfile.ZipFile(no_info, "w") as z:
+        z.writestr("x.txt", "")
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    monkeypatch.setattr(cmd_build, "user_path", lambda raw: Path(raw))
+    cfg = make({})
+    with pytest.raises(DeployError, match="different apps"):
+        cmd_build.cmd_pyz_merge(cfg, [str(a), str(other), "--out", str(tmp_path / "m.pyz")])
+    with pytest.raises(DeployError, match="no valid _pyz.json"):
+        cmd_build.cmd_pyz_merge(cfg, [str(a), str(no_info), "--out", str(tmp_path / "m.pyz")])
+    capsys.readouterr()
+    b = _native_part(tmp_path / "b.pyz", key=WIN)
+    assert cmd_build.cmd_pyz_merge(cfg, [str(a), str(b), "--out", str(tmp_path / "m.pyz")]) == 0
+    outs = [line.split(maxsplit=1)[1] for line in capsys.readouterr().err.splitlines() if line.startswith("  out ")]
+    assert outs == [str(tmp_path / "m.pyz"), str(tmp_path / "m.cmd")]
+    assert not (tmp_path / "m.pyz").exists() and not (tmp_path / "m.cmd").exists()
 
 
 def test_pyz_merge_of_a_real_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1869,9 +1931,113 @@ def test_portable_system_folder_real_build_runs(sandbox: Path, monkeypatch: pyte
     assert word == "rich" and Path(where).is_relative_to(out / "lib") and arg == "arg"
 
 
+# --- portable: the bundled runtime is started before the build reports success ----------------------
+
+
+class FakeRun:
+    """proc.run stand-in for the runtime smoke: records the call, answers with `stdout`/`code`."""
+
+    def __init__(self, stdout: str, code: int = 0, stderr: str = "") -> None:
+        self.stdout, self.code, self.stderr = stdout, code, stderr
+        self.calls: list[tuple[list[str], Path | None]] = []
+
+    def __call__(self, argv: Any, *, cwd: Path | None = None, **_: Any) -> subprocess.CompletedProcess[str]:
+        self.calls.append(([str(a) for a in argv], cwd))
+        return subprocess.CompletedProcess(argv, self.code, self.stdout, self.stderr)
+
+
+def _runtime_python(out: Path) -> Path:
+    python = out / "runtime" / "bin" / "python3"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"")
+    return python
+
+
+@pytest.mark.parametrize(("optimize", "flags"), [(0, ["-s", "-B"]), (1, ["-s", "-O", "-B"]), (2, ["-s", "-OO", "-B"])])
+def test_portable_runtime_smoke_runs_like_the_launchers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, optimize: int, flags: list[str]) -> None:
+    from runner.methods import portable
+
+    out = tmp_path / "out"
+    python = _runtime_python(out)
+    fake = FakeRun(f"a banner\n{portable.PREFIX_MARK}{out / 'runtime'}\n")
+    monkeypatch.setattr(proc, "run", fake)
+    portable._smoke_runtime(make({"deploy": {"optimize": optimize}}), python, out)
+    argv, cwd = fake.calls[0]
+    assert argv[0] == str(python) and argv[1:-2] == flags and argv[-2] == "-c" and cwd == out  # -B: no .pyc written
+
+
+@pytest.mark.parametrize(
+    ("stdout", "code", "message"),
+    [
+        ("", 3, "does not start (exit code 3)"),
+        ("no marker\n", 0, "does not start (exit code 0)"),
+        ("{mark}/usr\n", 0, "not on its own"),
+        ("{mark}{out}\n", 0, "not on its own"),  # the folder itself, not its runtime/
+    ],
+)
+def test_portable_runtime_smoke_refuses_a_broken_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str, code: int, message: str) -> None:
+    from runner.methods import portable
+
+    out = tmp_path / "out"
+    python = _runtime_python(out)
+    monkeypatch.setattr(proc, "run", FakeRun(stdout.format(mark=portable.PREFIX_MARK, out=out), code, "boom"))
+    with pytest.raises(DeployError, match=re.escape(message)):
+        portable._smoke_runtime(make({}), python, out)
+
+
+def test_portable_build_stops_when_the_copied_runtime_has_no_interpreter(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A layout change (bin/python3 gone) used to surface as "program not found" from compileall
+    from runner.methods import portable
+
+    cfg = make({"deploy": {"portable": {"archive": False}}})
+    monkeypatch.setattr(common, "host_target", lambda c, b: common.Target("cp", 3, 14, "linux", "x86_64"))
+    monkeypatch.setattr(common, "export_requirements", lambda c: _requirements(sandbox))
+
+    def install(c: Config, b: str, t: common.Target, dest: Path, req: Path) -> Path:
+        dest.mkdir(parents=True, exist_ok=True)
+        return dest
+
+    monkeypatch.setattr(common, "install_deps", install)
+    monkeypatch.setattr(portable, "copy_runtime", lambda c, b, dest, lib=None: dest / "bin" / "python3")
+    monkeypatch.setattr(proc, "run", FakeRun("", 0))
+    with pytest.raises(DeployError, match="layout"):
+        portable.build(BuildRequest(cfg, "cpython", "portable", fake_app(sandbox / "payload")))
+    assert not proc.run.calls  # type: ignore[attr-defined]
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX interpreter layout (symlinks)")
+def test_portable_runtime_smoke_with_real_interpreters(tmp_path: Path) -> None:
+    from runner.methods import portable
+
+    real = Path(sys.executable).resolve()
+    base = Path(sys.base_prefix)
+    if not (base / "bin" / real.name).is_file():
+        pytest.skip(f"{real} is not in {base}/bin")
+    # A runtime/ that IS the interpreter's own prefix (a symlink here: no stdlib copy): accepted
+    good = tmp_path / "good"
+    good.mkdir()
+    (good / "runtime").symlink_to(base, target_is_directory=True)
+    portable._smoke_runtime(make({}), good / "runtime" / "bin" / real.name, good)
+    # An interpreter that only LINKS to one outside the folder runs on that one's prefix: the
+    # folder would only work on this machine
+    bad = tmp_path / "bad"
+    (bad / "runtime" / "bin").mkdir(parents=True)
+    (bad / "runtime" / "bin" / "python3").symlink_to(real)
+    with pytest.raises(DeployError, match="only work on this machine"):
+        portable._smoke_runtime(make({}), bad / "runtime" / "bin" / "python3", bad)
+    # One that does not start at all
+    broken = tmp_path / "broken"
+    (broken / "runtime" / "bin").mkdir(parents=True)
+    script = broken / "runtime" / "bin" / "python3"
+    script.write_text("#!/bin/sh\necho 'cannot start' >&2\nexit 7\n", encoding="utf-8", newline="\n")
+    script.chmod(0o755)
+    with pytest.raises(DeployError, match=r"exit code 7"):
+        portable._smoke_runtime(make({}), script, broken)
+
+
 # --- flet build ---------------------------------------------------------------------------------------
 
-FLET_PYPROJECT = '[project]\nname = "fletdemo"\nversion = "0.1.0"\n\n[tool.flet]\norg = "com.example"\n\n[tool.flet.app]\npath = "src"\nmodule = "main"\n'
+FLET_PYPROJECT ='[project]\nname = "fletdemo"\nversion = "0.1.0"\n\n[tool.flet]\norg = "com.example"\n\n[tool.flet.app]\npath = "src"\nmodule = "main"\n'
 
 
 def _flet_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, backend: str = "cpython", target: str = "host", produce: bool = True, payload_ext: bool = False, **deploy: Any) -> tuple[Path, Recorder]:

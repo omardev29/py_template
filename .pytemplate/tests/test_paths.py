@@ -477,9 +477,9 @@ def test_dry_run_pyz_merge(dry: Config, tmp_path: Path, monkeypatch: pytest.Monk
     assert cmd_build.cmd_pyz_merge(dry, ["../in/a.pyz", "../in/b.pyz", "--out", "out/c.pyz"]) == 0
     err = capsys.readouterr().err
     shown = [line.split(maxsplit=1) for line in err.splitlines() if line.startswith(("  in ", "  out "))]
-    assert [kind for kind, _ in shown] == ["in", "in", "out"], err
+    assert [kind for kind, _ in shown] == ["in", "in", "out", "out"], err
     # Compared resolved: on POSIX user_path keeps `..` for the OS to resolve (symlinked folders)
-    assert [Path(p).resolve() for _, p in shown] == [p.resolve() for p in (*parts, work / "out" / "c.pyz")]
+    assert [Path(p).resolve() for _, p in shown] == [p.resolve() for p in (*parts, work / "out" / "c.pyz", work / "out" / "c.cmd")]
     assert not (work / "out").exists()
 
 

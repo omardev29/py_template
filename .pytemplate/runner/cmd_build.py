@@ -169,13 +169,15 @@ def cmd_pyz_merge(cfg: Config, args: list[str]) -> int:
             raise DeployError(f"pyz-merge: {part} is not a .pyz (zip) file")
     if out.is_dir():
         raise DeployError(f"pyz-merge: --out {out} is a folder; give the path of the .pyz to write")
+    from .methods import pyz
+
     if proc.DRY_RUN:
+        pyz.check_parts(parts, out)  # the real checks: one app, one build, valid _pyz.json
         ui.step("pyz-merge: dry run, nothing is written")
         for part in parts:
             ui.info(f"  in   {part}")
-        ui.info(f"  out  {out}" + ("   (exists: would be replaced)" if out.exists() else ""))
+        for path in (out, pyz.wrapper_path(out)):
+            ui.info(f"  out  {path}" + ("   (exists: would be replaced)" if path.exists() else ""))
         return 0
-    from .methods import pyz
-
-    pyz.merge(parts, out)
+    pyz.merge(parts, out, cfg)
     return 0

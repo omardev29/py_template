@@ -298,9 +298,11 @@ def build(req: BuildRequest) -> Path:
     python = copy_runtime(cfg, req.backend, out / "runtime", out / "lib") if bundled else None
     shutil.copy2(TEMPLATES / "portable" / "boot.py", out / "boot.py")
     launchers = write_launchers(cfg, req.backend, out, python)
+    # The console interpreter runs the build's own steps (pythonw.exe has no stdout)
+    console_python = None if python is None else python.with_name("python.exe") if IS_WINDOWS else python
 
-    if python is not None:
-        console_python = python.with_name("python.exe") if IS_WINDOWS else python
+    if console_python is not None:
+        _check_interpreter(console_python)
         failed = 0
         for argv in compile_calls(cfg, console_python, out, host.version):
             compiled = proc.run(argv, check=False, capture=True)
@@ -313,9 +315,11 @@ def build(req: BuildRequest) -> Path:
             )
 
     if upx.active(cfg):
-        upx.pack_tree(cfg, out)  # before the smoke test, so that it loads the packed binaries
-    if python is not None and req.compiled:
-        _smoke_compiled(cfg, python.with_name("python.exe") if IS_WINDOWS else python, out)
+        upx.pack_tree(cfg, out)  # before the smoke tests, so that they load the packed binaries
+    if console_python is not None:
+        _smoke_runtime(cfg, console_python, out)
+        if req.compiled:
+            _smoke_compiled(cfg, console_python, out)
 
     if cfg.deploy.portable.archive:
         archive = make_archive(out, "zip" if IS_WINDOWS else "gztar")
@@ -325,6 +329,37 @@ def build(req: BuildRequest) -> Path:
 
 
 SMOKE_MARK = "PTSMOKE:"
+PREFIX_MARK = "PTPREFIX:"
+
+
+def _check_interpreter(python: Path) -> None:
+    if not python.is_file():
+        raise DeployError(f"the copied runtime has no {rel(python)}: did the interpreter's layout change?")
+
+
+def _smoke_runtime(cfg: Config, python: Path, out: Path) -> None:
+    """Start the bundled interpreter as the launchers do: it must run on its OWN runtime/.
+
+    A prune rule that removes something the interpreter needs, a binary UPX broke, or a layout
+    change of python-build-standalone or PyPy (bin/python3 missing, an interpreter that finds
+    the uv base again) would otherwise ship as "done" and only fail on another machine.
+    """
+    _check_interpreter(python)
+    code = f"import sys; print({PREFIX_MARK!r} + sys.prefix)"
+    argv: list[str | Path] = [python, "-s", *_opt_flag(cfg).split(), "-B", "-c", code]
+    result = proc.run(argv, cwd=out, capture=True, check=False, echo=False)
+    marks = [ln for ln in result.stdout.splitlines() if ln.startswith(PREFIX_MARK)]
+    if result.returncode != 0 or not marks:
+        if result.stderr:
+            ui.info(result.stderr.rstrip())
+        raise DeployError(f"the bundled interpreter {rel(python)} does not start (exit code {result.returncode})")
+    prefix = Path(marks[-1].removeprefix(PREFIX_MARK))
+    runtime = (out / "runtime").resolve()
+    if not prefix.resolve().is_relative_to(runtime):
+        raise DeployError(
+            f"the bundled interpreter runs on {prefix}, not on its own {rel(out / 'runtime')}: "
+            "the folder would only work on this machine"
+        )
 
 
 def smoke_code(modules: list[str]) -> str:

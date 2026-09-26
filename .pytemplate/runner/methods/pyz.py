@@ -64,13 +64,18 @@ def _write_archive(root: Path, out: Path) -> None:
         out.chmod(0o755)
 
 
-def _wrapper_cmd(cfg: Config, backend: str, pyz_name: str) -> str:
-    """Return the Windows wrapper <name>.cmd (ASCII, CRLF, no ( ) blocks: PATH may contain "(x86)")."""
+def _wrapper_cmd(cfg: Config, backend: str, pyz_name: str, *, name: str = "", min_python: str = "") -> str:
+    """Return the Windows wrapper <name>.cmd (ASCII, CRLF, no ( ) blocks: PATH may contain "(x86)").
+
+    `name` and `min_python` default to the project's; pyz-merge passes the parts' own.
+    """
     if backend == "pypy":
         order = ["pypy3", "pypy", "py", "python"]
     else:
         order = [f"py -{cfg.python.cpython}", "python3", "python", "pypy3"]
-    major, minor = cfg.min_python.split(".")
+    name = name or cfg.app.name
+    min_python = min_python or cfg.min_python
+    major, minor = min_python.split(".")
     probe = f'-c "import sys; sys.exit(sys.version_info[:2] < ({major}, {minor}))"'
     lines = [
         "@echo off",
@@ -84,7 +89,7 @@ def _wrapper_cmd(cfg: Config, backend: str, pyz_name: str) -> str:
     # `py` launcher can be installed with no Python registered
     for i, cmd in enumerate(order):
         lines.append(f"{cmd} {probe} >nul 2>nul && goto run{i}")
-    lines += [f"echo {cfg.app.name}: needs Python or PyPy {cfg.min_python} or newer in PATH 1>&2", "exit /b 9009"]
+    lines += [f"echo {name}: needs Python or PyPy {min_python} or newer in PATH 1>&2", "exit /b 9009"]
     for i, cmd in enumerate(order):
         # app.gui: the windowed twin without a console, like the portable launchers (the probe
         # above keeps the console names: it needs the exit code)
@@ -199,7 +204,8 @@ def _read_info(part: Path) -> dict[str, Any]:
         and isinstance(info["name"], str)
         and isinstance(info["targets"], list)
         and isinstance(info["min_python"], list)
-        and all(isinstance(x, int) for x in info["min_python"])
+        and len(info["min_python"]) == 2
+        and all(isinstance(x, int) and not isinstance(x, bool) for x in info["min_python"])
     ):
         raise DeployError(f"pyz-merge: {part} has no valid _pyz.json: build it with ./deploy build ... --method pyz")
     return info
@@ -223,18 +229,17 @@ def _app_digest(archive: zipfile.ZipFile) -> str:
     return h.hexdigest()
 
 
-def merge(parts: list[Path], out: Path) -> Path:
-    """Merge several .pyz files of the same project (one per OS, e.g. from CI) into a multi-platform one.
+def wrapper_path(out: Path) -> Path:
+    """The Windows wrapper written next to a merged .pyz: <stem>.cmd."""
+    return out.with_name(out.stem + ".cmd")
 
-    common/app and __main__.py come from the first part (every part must carry the same app);
-    targets/ from all of them, each targets/<key>/lib from ONE part (the one built on that
-    platform when there is one) and each compiled overlay targets/<key>/app from exactly one.
-    When every part is pure the result is pure (common/lib of the first part). Otherwise a pure
-    part's common/lib moves to targets/<its host>/lib and no common/lib is kept: one platform's
-    dependencies must not be extracted on every other one.
-    """
+
+def check_parts(parts: list[Path], out: Path) -> list[dict[str, Any]]:
+    """Read and compare the parts' _pyz.json (also in --dry-run): one app, one build."""
     if len(parts) < 2:
         raise DeployError("pyz-merge needs at least two .pyz files")
+    if out.suffix.lower() == ".cmd":  # any case: macOS and Windows folders ignore it
+        raise DeployError(f"pyz-merge: --out {out.name} would be overwritten by its own .cmd wrapper: name it <name>.pyz")
     infos = [_read_info(p) for p in parts]
     names = {str(i["name"]) for i in infos}
     if len(names) != 1:
@@ -243,6 +248,21 @@ def merge(parts: list[Path], out: Path) -> Path:
         raise DeployError("pyz-merge: the parts need different minimum Python versions: they come from different builds")
     if len({i["deps"] for i in infos if i.get("deps")}) > 1:
         raise DeployError("pyz-merge: the parts lock different dependencies: they come from different builds (rebuild them from one commit)")
+    return infos
+
+
+def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
+    """Merge several .pyz files of the same project (one per OS, e.g. from CI) into a multi-platform one.
+
+    common/app and __main__.py come from the first part (every part must carry the same app);
+    targets/ from all of them, each targets/<key>/lib from ONE part (the one built on that
+    platform when there is one) and each compiled overlay targets/<key>/app from exactly one.
+    When every part is pure the result is pure (common/lib of the first part). Otherwise a pure
+    part's common/lib moves to targets/<its host>/lib and no common/lib is kept: one platform's
+    dependencies must not be extracted on every other one. The <stem>.cmd wrapper for Windows
+    (UTF-8 mode, the interpreter search) is written next to `out`, as a build writes it.
+    """
+    infos = check_parts(parts, out)
     pure = all(bool(i["pure"]) for i in infos)
     moved = {} if pure else {n: _part_host(p, i) for n, (p, i) in enumerate(zip(parts, infos, strict=True)) if i["pure"]}
 
@@ -305,5 +325,10 @@ def merge(parts: list[Path], out: Path) -> Path:
         (root / "_pyz.json").write_text(json.dumps(merged, indent=2), encoding="utf-8", newline="\n")
         out.parent.mkdir(parents=True, exist_ok=True)
         _write_archive(root, out)
+    backend = "pypy" if all(i.get("backend") == "pypy" for i in infos) else "cpython"
+    min_python = ".".join(str(x) for x in infos[0]["min_python"])
+    wrapper = _wrapper_cmd(cfg, backend, out.name, name=str(infos[0]["name"]), min_python=min_python)
+    wrapper_path(out).write_text(wrapper, encoding="ascii", newline="")
     ui.ok(f"{rel(out)}: runs on {', '.join(targets) or 'any platform (pure Python)'}")
+    ui.info(f"  on Windows also {rel(wrapper_path(out))}")
     return out
