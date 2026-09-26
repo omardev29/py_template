@@ -384,6 +384,7 @@ MODULE_LEVEL_FILE = (
 def test_lintc_allows_module_level_file_with_a_shared_lib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, modules: list[str]) -> None:
     (tmp_path / "src" / "myapp").mkdir(parents=True)  # a package, whatever this project's is called
     monkeypatch.setattr(lintc, "SRC", tmp_path / "src")
+    monkeypatch.setattr(config, "SRC", tmp_path / "src")
     found = _lint(tmp_path, MODULE_LEVEL_FILE, {"compile": {"modules": modules}})
     assert not [f for f in found if "__file__" in f.message]
 
@@ -394,12 +395,24 @@ def test_lintc_flags_module_level_file_for_a_single_top_level_module(tmp_path: P
     assert all("relative path" in f.message and "inside a function" in f.message for f in found)
 
 
-def test_lintc_single_top_level_package_is_not_relative(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    src = tmp_path / "src"
-    (src / "solo").mkdir(parents=True)  # a package: its modules have dotted names, mypyc builds a shared lib
-    monkeypatch.setattr(lintc, "SRC", src)
+def test_lintc_single_top_level_package_is_not_relative(src_tree: Path) -> None:
+    (src_tree / "solo").mkdir()  # a package: its modules have dotted names, mypyc builds a shared lib
     assert not lintc.relative_file_at_import(make({"compile": {"modules": ["solo"]}}))
     assert lintc.relative_file_at_import(make({"compile": {"modules": ["other"]}}))
+
+
+def test_lintc_flags_a_lone_module_next_to_a_leftover_folder(src_tree: Path) -> None:
+    """A package turned into a module leaves solo/__pycache__/ behind: Python (and mypyc, through
+    config.compiled_paths) takes solo.py, alone, with no shared lib, so the rule must still fire."""
+    _project(src_tree, {"solo.py": MODULE_LEVEL_FILE, "solo/__pycache__/solo.cpython-314.pyc": b""})
+    cfg = make({"compile": {"modules": ["solo"]}})
+    assert config.compiled_paths(cfg) == ["solo.py"]
+    assert lintc.relative_file_at_import(cfg)
+    found = lintc.lint(cfg, mypyc.compiled_sources(cfg))
+    assert sorted(f.line for f in found if "__file__" in f.message) == [2, 3, 6, 9]
+    # a real package of that name wins over solo.py, as in Python: dotted modules, a shared lib
+    _project(src_tree, {"solo/__init__.py": "", "solo/m.py": MODULE_LEVEL_FILE})
+    assert not lintc.relative_file_at_import(cfg)
 
 
 @pytest.mark.parametrize(

@@ -1298,6 +1298,22 @@ def test_reference_problems(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert len(cmd_apply.reference_problems(project.cfg())) == 1  # compile.modules only matters with mypyc
 
 
+def test_reference_problems_see_through_a_leftover_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A folder left holding only __pycache__ (a module deleted, a package turned into a module)
+    is no module: mypyc finds nothing there (config.compiled_paths, mypyc.compiled_sources)."""
+    project, _ = _project(tmp_path, monkeypatch)
+    project.edit("compile", "modules", ["alpha.core", "alpha.gone", "alpha.bench"])
+    for leftover in ("gone", "bench"):
+        (project.root / "src" / "alpha" / leftover / "__pycache__").mkdir(parents=True)
+        (project.root / "src" / "alpha" / leftover / "__pycache__" / "m.cpython-314.pyc").write_bytes(b"")
+    (project.root / "src" / "alpha" / "bench.py").write_text("X = 1\n", encoding="utf-8")
+    problems = [p for p in cmd_apply.reference_problems(project.cfg()) if p.startswith("compile.modules")]
+    assert problems == ["compile.modules: alpha.gone not found in src/ (mypyc builds and `test mypyc` will fail)"]
+    # a namespace folder that holds modules is one
+    (project.root / "src" / "alpha" / "gone" / "m.py").write_text("X = 1\n", encoding="utf-8")
+    assert not [p for p in cmd_apply.reference_problems(project.cfg()) if p.startswith("compile.modules")]
+
+
 def test_render_auto_points_at_apply(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(render, "apply", lambda cfg, **kw: ([], []))
     monkeypatch.setattr(render, "pyproject_outdated", lambda cfg: True)

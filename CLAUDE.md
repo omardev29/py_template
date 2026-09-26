@@ -536,7 +536,7 @@ header rules (with detector tests proving each rule fires).
 |---|---|
 | `deploy.py` (one level up) | Stops with exit 3 and one `error:` line (no traceback) when uv started it on Python < 3.11 (a `uv run` by hand with an old `UV_PYTHON`), BEFORE importing the runner; reconfigures stdout/stderr to UTF-8, puts its own dir on `sys.path`, calls `runner.cli.main`. |
 | `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `FORWARDS` / `HELP_PASSES_THROUGH` (section 5.2); `INTERNAL` (routes listed nowhere: `__init`). `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main`/`_main` (exception -> exit code, closed stdout), `cmd_help` (commands and `[tasks]` entries), `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
-| `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file` (section 6.1), its TOML statement scanner `scan` (render reads pyproject.toml with it, 6.3), `toml_value`. |
+| `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths` (`import_path`), comment-preserving editor `set_value` / `update_file` (section 6.1), its TOML statement scanner `scan` (render reads pyproject.toml with it, 6.3), `toml_value`. |
 | `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL` (`wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C and passes SIGTERM/SIGHUP on), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`. |
@@ -989,8 +989,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   alone; the summary line follows `hooks.hook_state`) -> `render.apply` -> `rename.tidy_after`
   -> the unused-environment note (`unused_envs`: every `.venv*` of this side no supported backend
   uses, `.venv-jit` of older templates included; never deleted) -> warnings for missing
-  references (`reference_problems`: src/<pkg>/, compile.modules, app.assets, deploy.exe.icon,
-  deploy.upx.path; the `--dry-run` of a rename looks for them where they are before the move)
+  references (`reference_problems`: src/<pkg>/, compile.modules (the path `config.import_path`
+  gives, which must be a file or hold a `.py`/`.pyi` file: a folder left holding only
+  `__pycache__` is missing), app.assets, deploy.exe.icon, deploy.upx.path; the `--dry-run` of a
+  rename looks for them where they are before the move)
   -> a summary. A state.json or pyproject.toml that cannot be written is a `DeployError`
   naming it.
 - `--frozen`, never `--no-sync`: `flet-cli==V` pins `flet==V`, so a resolving `uv add` of one
@@ -1077,9 +1079,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   against each other: no entry of `modules` inside another (or repeated: mypyc aborted with
   "Duplicate module"), every `exclude` strictly inside a `modules` entry (a module or a
   subpackage: it excludes everything below it). Each `modules` entry is the path Python imports
-  (`config.compiled_paths`: a folder with `__init__.py`, else `<name>.py`, else a namespace
-  folder; a folder left holding only `__pycache__` never hides the module file, and the pyright
-  strict list follows it too). Whether they exist is checked by `mypyc.compiled_sources`: an
+  (`config.compiled_paths` through `config.import_path`: a folder with `__init__.py`, else
+  `<name>.py`, else a namespace folder; a folder left holding only `__pycache__` never hides the
+  module file, and the pyright strict list, lintc's `__file__` rule and apply's reference
+  warnings follow it too). Whether they exist is checked by `mypyc.compiled_sources`: an
   entry that does not exist or holds no module, or an `exclude` that names nothing, is an error
   naming the candidates, never a silent no-op.
 - `[deploy]`: `optimize 0|1|2`, `default {backend: method}` (merged over
@@ -1552,12 +1555,14 @@ Formats:
     silences it. A drift test compares the set with the locked mypyc's own source.
   - Nested classes and classes inside functions, each reported once (from its nearest class
     or function); t-strings; `if __name__ == "__main__"` (either order) at module level.
-  - Module-level `__file__` ONLY when `compile.modules` is one top-level module file
-    (`relative_file_at_import`): mypyc (>= 1.20.2) sets the real `__file__` before a module
-    body runs, from the folder of the shared lib; with a single top-level module there is no
-    shared lib and the body sees a relative `<mod><EXT_SUFFIX>`. It looks at what runs at
-    import (class bodies, decorators, default values), not function or lambda bodies. Pinned
-    by a real-compile test: if mypyc fixes that case, the test fails and the rule can go.
+  - Module-level `__file__` ONLY when `compile.modules` is one top-level module file, the one
+    Python imports (`relative_file_at_import` reads `config.compiled_paths`: a leftover folder
+    of that name without `__init__.py` does not turn the rule off): mypyc (>= 1.20.2) sets the
+    real `__file__` before a module body runs, from the folder of the shared lib; with a single
+    top-level module there is no shared lib and the body sees a relative `<mod><EXT_SUFFIX>`.
+    It looks at what runs at import (class bodies, decorators, default values), not function
+    or lambda bodies. Pinned by a real-compile test: if mypyc fixes that case, the test fails
+    and the rule can go.
   `lintc` does not import `presets` or `mypyc`.
 - With PyPy supported user code must be 3.11 syntax and API (no PEP 695;
   `typing_extensions.override`, not `typing.override`). `mode --supports +pypy` prechecks it
@@ -4036,9 +4041,13 @@ Code coupling (rename together):
   `BINARY_SUFFIXES`, and only `pytest.mark` at module level); `rename` calls the private
   `config._build`, `config._decode`, `config._string_end` (with `config._ScanError`, for
   `_toml_strings`), `presets._norm_name` and, lazily, `cmd_env._is_link`; `cmd_apply` calls the
-  private `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311` and
-  `rename._plan_pyproject`; `rename` and `cmd_env` import `cmd_apply` lazily (it imports both
-  at module level).
+  private `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311`,
+  `rename._plan_pyproject` and `render._holds_python`; `rename` and `cmd_env` import `cmd_apply`
+  lazily (it imports both at module level).
+- Which path a `compile.modules` entry names is decided once, by `config.import_path`
+  (`config.compiled_paths`): `mypyc.compiled_sources`, the pyright strict list,
+  `lintc.relative_file_at_import` and `cmd_apply.reference_problems` all read it (a copy of the
+  old folder-wins rule in lintc once turned the `__file__` rule off next to a leftover folder).
 - `upx.BUILTIN_EXCLUDE` must keep `flutter_windows.dll`; `nuitka._flet_client_archive` mirrors
   flet_desktop's download URL, its `FLET_CLIENT_URL` override and its `flet_desktop/app/`
   lookup, and `nuitka.archive_problem` the way `ensure_client_cached` extracts the archive.

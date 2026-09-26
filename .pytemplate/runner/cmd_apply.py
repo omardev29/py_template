@@ -49,7 +49,7 @@ from typing import Any
 
 from . import cmd_env, envs, hooks, presets, proc, render, rename, ui
 from .cmd_dev import only_flags
-from .config import Config
+from .config import Config, import_path
 from .project import PYPROJECT, ROOT, STATE_FILE, rel
 from .ui import DeployError
 
@@ -616,9 +616,9 @@ def reference_problems(cfg: Config, *, package: bool = True, move: tuple[str, st
         except ValueError:
             return path
 
-    def module_exists(module: str) -> bool:
-        base = src / module.replace(".", "/")
-        return now(base).is_dir() or now(base.with_name(base.name + ".py")).is_file()
+    def module_exists(module: str) -> bool:  # what mypyc.compiled_sources finds a module in
+        path = import_path(now(src / module.replace(".", "/")))
+        return path.is_file() or render._holds_python(path)
 
     out: list[str] = []
     missing = missing_package(cfg) if package else None
