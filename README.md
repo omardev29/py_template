@@ -273,7 +273,9 @@ Run `./deploy apply` (preview it with `./deploy --dry-run apply`). It brings the
 line with `pytemplate.toml`, and only does what is needed: a second run changes no file.
 `./deploy setup` is the same operation under its first-time name, for a fresh clone.
 `./deploy mode` edits the common keys for you (it keeps comments, CRLF line endings and a BOM)
-and applies them.
+and applies them. When its re-lock or the new environment fails (no solution for the new
+interpreter, no network, Ctrl+C), `pytemplate.toml`, `pyproject.toml` and `uv.lock` get their old
+content back: the mode does not change, and the same command can simply run again.
 
 | You edited | What `./deploy apply` does |
 |---|---|

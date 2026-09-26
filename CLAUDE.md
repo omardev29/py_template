@@ -1006,6 +1006,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 - `config.update_file` applies every change in memory first, writes only when something changed
   and never under `--dry-run`, keeps a UTF-8 BOM and the line endings, and never writes broken
   TOML. `mode` drops changes whose value is already set, so their spelling stays.
+- `mode` keeps the old bytes of `pytemplate.toml`, `pyproject.toml` and `uv.lock` (the lock next to
+  `pyproject.toml`) and puts them back (`cmd_mode._restore`) when
+  `config.update_file`, `cmd_env.ensure_lock` or the new environment's `envs.sync` fails or is
+  interrupted, saying which files it restored; the generated files are rendered only after that,
+  so a failed mode leaves nothing half-applied and a second run locks again (it used to find
+  nothing to change and report success with a stale `uv.lock`).
 
 ### 6.2 Generated files and `state.json`
 

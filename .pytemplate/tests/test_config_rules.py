@@ -1034,6 +1034,75 @@ def test_mode_leaves_values_that_are_already_set(dry: Config, capsys: pytest.Cap
     assert "pytemplate.toml  unchanged" in capsys.readouterr().err
 
 
+class _Relock:
+    """A throwaway copy of this project's three config files, the runner pointed at it, and a
+    fake uv: `uv lock` fails, or succeeds (and rewrites uv.lock) while the new sync fails."""
+
+    FILES = ("pytemplate.toml", "pyproject.toml", "uv.lock")
+
+    def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch, fail: str) -> None:
+        from runner import envs
+
+        self.root = root
+        for name in self.FILES:
+            (root / name).write_bytes((ROOT / name).read_bytes())
+        self.before = self.snapshot()
+        monkeypatch.setattr(proc, "DRY_RUN", False)
+        for module in (config, cmd_mode):
+            monkeypatch.setattr(module, "CONFIG_FILE", root / "pytemplate.toml")
+        for module in (render, cmd_mode):
+            monkeypatch.setattr(module, "PYPROJECT", root / "pyproject.toml")
+        monkeypatch.setattr(render, "apply", lambda *a, **k: pytest.fail("rendered a mode that did not happen"))
+        monkeypatch.setattr(cmd_mode, "_precheck_py311", lambda cfg: None)
+        self.synced: list[str] = []
+
+        def fake_uv(env: Any, args: list[str], *, check: bool = True, **kw: Any) -> subprocess.CompletedProcess[str]:
+            if list(args) == ["lock", "--check"]:
+                return subprocess.CompletedProcess(args, 1, "", "")
+            if list(args) == ["lock"]:
+                if fail == "lock":
+                    raise proc.CommandFailed(["uv", "lock"], 1)
+                if fail == "interrupt":
+                    raise proc.Interrupted(130)
+                (root / "uv.lock").write_text("# re-locked\n", encoding="utf-8")
+                return subprocess.CompletedProcess(args, 0, "", "")
+            raise AssertionError(args)
+
+        def fake_sync(env: Any) -> None:
+            self.synced.append(env.key)
+            raise proc.CommandFailed(["uv", "sync"], 2)
+
+        monkeypatch.setattr(envs, "uv", fake_uv)
+        monkeypatch.setattr(envs, "sync", fake_sync)
+
+    def snapshot(self) -> dict[str, bytes]:
+        return {name: (self.root / name).read_bytes() for name in self.FILES}
+
+
+@pytest.mark.parametrize("fail", ["lock", "sync", "interrupt"])
+def test_mode_puts_everything_back_when_the_relock_or_the_sync_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fail: str
+) -> None:
+    """A failed `uv lock` (or the new environment's sync) left pytemplate.toml and pyproject.toml
+    rewritten against the old uv.lock, and a second `mode` then reported success without locking."""
+    cfg = config.load(set())
+    if cfg.pypy_enabled:
+        pytest.skip("the test adds PyPy support")
+    fake = _Relock(tmp_path, monkeypatch, fail)
+    if fail == "interrupt":
+        with pytest.raises(KeyboardInterrupt):
+            cmd_mode.cmd_mode(cfg, ["--supports", "+pypy"])
+        assert "pytemplate.toml, pyproject.toml restored: the mode did not change" in capsys.readouterr().err
+    else:
+        with pytest.raises(DeployError) as info:
+            cmd_mode.cmd_mode(cfg, ["--supports", "+pypy"])
+        restored = "pytemplate.toml, pyproject.toml, uv.lock" if fail == "sync" else "pytemplate.toml, pyproject.toml"
+        assert f"{restored} restored: the mode did not change" in str(info.value)
+        assert info.value.code == (2 if fail == "sync" else 1)
+    assert fake.snapshot() == fake.before  # every byte back: a second run locks again
+    assert fake.synced == (["pypy"] if fail == "sync" else [])
+
+
 # --- mode: real runs in a throwaway copy of this project ----------------------------------------------
 
 needs_uv = pytest.mark.skipif(shutil.which("uv") is None, reason="uv not found")

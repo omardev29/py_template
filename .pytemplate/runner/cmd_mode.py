@@ -174,6 +174,27 @@ def _precheck_py311(cfg: Config) -> None:
     ui.ok("the code is valid on Python 3.11")
 
 
+def _read_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _restore(before: dict[Path, bytes | None]) -> list[str]:
+    """Put back the bytes (or the absence) of each file; return the names of those that changed."""
+    restored: list[str] = []
+    for path, data in before.items():
+        if _read_bytes(path) == data:
+            continue
+        if data is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(data)
+        restored.append(path.name)
+    return restored
+
+
 def _current(cfg: Config, table: str, key: str) -> Any:
     return getattr(getattr(cfg, table), key)
 
@@ -298,18 +319,30 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
         _describe(planned, "mode after the change (not applied: --dry-run)")
         return 0
 
-    config.update_file(changes)
-    new_cfg = config.load()
-    heavy = supported != cfg.backend.supported
-    if heavy or render.pyproject_outdated(new_cfg):
-        from .cmd_env import ensure_lock
+    # Nothing half-applied: when the re-lock or a new environment fails (no solution for the new
+    # interpreter, no network, Ctrl+C), the three files get their old bytes back. The generated
+    # files are rendered only after that, so they never describe a mode that did not happen.
+    before = {path: _read_bytes(path) for path in (CONFIG_FILE, PYPROJECT, PYPROJECT.with_name("uv.lock"))}
+    try:
+        config.update_file(changes)
+        new_cfg = config.load()
+        heavy = supported != cfg.backend.supported
+        if heavy or render.pyproject_outdated(new_cfg):
+            from .cmd_env import ensure_lock
 
-        ensure_lock(new_cfg)
+            ensure_lock(new_cfg)
+        for env in syncs:
+            envs.sync(env)
+    except BaseException as e:
+        restored = _restore(before)
+        done = f"{', '.join(restored)} restored: the mode did not change" if restored else "the mode did not change"
+        if not isinstance(e, DeployError):
+            ui.warn(done)
+            raise
+        raise DeployError(f"{e}\n  {done}; fix the problem above and run the command again", e.code) from None
     changed, _ = render.apply(new_cfg)
     if changed:
         ui.info(f"render: updated {', '.join(changed)}")
-    for env in syncs:
-        envs.sync(env)
     _leftover_envs(cfg, new_cfg)
     _describe(new_cfg)
     return 0
