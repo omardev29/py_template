@@ -8,13 +8,15 @@ Read-only checks (the Python 3.11 precheck, `uv lock --check`) still run.
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import tomllib
 from pathlib import Path
 from typing import Any
 
 from . import config, envs, presets, proc, render, ui
 from .config import BACKENDS, Config
-from .project import CONFIG_FILE, PYPROJECT, ROOT, code_dirs, rel, user_path
+from .project import CONFIG_FILE, PYPROJECT, ROOT, code_dirs, native_path, rel, user_path
 from .ui import DeployError
 
 _DRY = "(--dry-run: nothing is written)"
@@ -435,6 +437,32 @@ def cmd_init(cfg: Config, args: list[str]) -> int:
     return 0
 
 
+def _work_tree_top(folder: Path) -> Path | None:
+    """The top of the git work tree `folder` would be in (its nearest existing parent is asked:
+    new creates the folder), or None: no work tree there, or no git."""
+    git = shutil.which("git")
+    if git is None:
+        return None
+    probe = folder
+    while not probe.is_dir() and probe != probe.parent:
+        probe = probe.parent
+    r = proc.run([git, "rev-parse", "--show-toplevel"], cwd=probe, env=presets._git_env(), capture=True, check=False, echo=False)
+    top = r.stdout.strip() if r.returncode == 0 else ""
+    return Path(native_path(top)) if top else None  # MSYS2's own git prints /c/...
+
+
+def _monorepo_note(dest: Path, top: Path) -> None:
+    """A project inside a bigger repository: new runs no git init there, and GitHub reads workflows
+    only from the repository's own .github/workflows, so the generated CI never runs as it is."""
+    sub = Path(os.path.relpath(dest.resolve(), top.resolve())).as_posix()
+    ui.warn(
+        f"{dest} is inside the git work tree of {top}: GitHub runs only {top.name}/.github/workflows/*.yml,\n"
+        f"  so the project's generated .github/workflows/ci.yml does not run from {sub}/. For CI, add a\n"
+        f"  workflow to the repository that runs its steps in {sub} (defaults.run.working-directory) and\n"
+        f"  takes the artifacts from {sub}/dist/"
+    )
+
+
 def cmd_new(cfg: Config, args: list[str]) -> int:
     """new DIR [--preset P] [--name NAME]: copy the template to a new project."""
     parser = argparse.ArgumentParser(prog="./deploy new")
@@ -458,6 +486,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
             "Choose one with --name NAME"
         )
     presets.check_name_free(cfg, ns.preset, name)
+    top = _work_tree_top(dest)
     if proc.DRY_RUN:
         ui.step(f"new project in {dest} {_DRY}")
         ui.info(f"  preset  {ns.preset}")
@@ -465,10 +494,20 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         pins = presets.constraints(ns.preset)
         if pins:
             ui.info(f"  pins    {len(pins)} packages at the versions the template tested (constraints.txt of the preset)")
+        if top is not None:
+            git = f"(inside the git work tree of {top}: no git init)"
+        elif shutil.which("git") is None:
+            git = "(git not found: no git init)"
+        else:
+            git = "and `git init -b main`"
         ui.info(
             "  would copy this template there (the files git tracks; no .git, environments, builds or "
-            f"caches), run `./deploy __init {ns.preset} --name {name} --force` in it and `git init -b main`"
+            f"caches), run `./deploy __init {ns.preset} --name {name} --force` in it {git}"
         )
+        if top is not None:
+            _monorepo_note(dest, top)
         return 0
     presets.new(dest, ns.preset, name)
+    if top is not None:
+        _monorepo_note(dest, top)
     return 0

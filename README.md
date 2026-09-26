@@ -104,7 +104,10 @@ outside the template:
    needs the network. raylib and flet projects get the versions the template was tested with
    (`.pytemplate/presets/<preset>/constraints.txt`), once: `./deploy lock --upgrade` moves on.
 4. It runs `git init -b main` (unless `DIR` is inside a git work tree) with `deploy` and
-   `deploy.ps1` executable. It makes no commit.
+   `deploy.ps1` executable. It makes no commit. Inside a bigger repository it warns that the
+   generated `.github/workflows/ci.yml` will not run: GitHub reads workflows only from the
+   repository's own `.github/workflows/`, so CI there needs a workflow of the repository that
+   runs its steps in the project's folder (`defaults.run.working-directory`).
 
 When a step fails (a name uv refuses, no network, Ctrl+C), `new` removes what it created.
 Dependencies added with `./deploy add` and tracked files of your own (docs, scripts) come along

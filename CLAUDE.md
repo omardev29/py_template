@@ -652,7 +652,9 @@ header rules (with detector tests proving each rule fires).
   `+` new or `~` replaced, the dependencies removed and added, the pinned versions, and what
   happens to `pyproject.toml` and `uv.lock`. `new` checks the destination and the name
   (format, `check_name_free`) and prints destination, preset, name, the number of pins and the
-  `__init` step it would run in the copy. `pyz-merge` validates its inputs (`pyz.check_parts`:
+  `__init` step it would run in the copy, then `git init -b main`, or why not (DIR inside the
+  work tree of another repository, `cmd_mode._work_tree_top`, with the CI warning of section
+  13.2; no git). `pyz-merge` validates its inputs (`pyz.check_parts`:
   valid `_pyz.json`, one app, one build) and prints inputs and outputs (the `.pyz` and its
   `.cmd`).
 - `nvim trust`, `extras`, `bootstrap` and `sync` print what they would do.
@@ -1762,8 +1764,9 @@ Per method:
   then runs the copy's own runner with `__init <preset> --name <n> --force` inside the copy,
   `git init -b
   main` (the generated CI runs on `main`; git < 2.28: plain `init` + `symbolic-ref HEAD
-  refs/heads/main`; nothing inside an existing work tree) and `git add --chmod=+x deploy
-  deploy.ps1`. When the copy or `__init` fails (a name uv refuses, no network, Ctrl+C) `new`
+  refs/heads/main`; nothing inside an existing work tree, where `cmd_mode.cmd_new` then warns
+  that the generated CI will not run: `cmd_mode._monorepo_note`, section 13.2) and `git add
+  --chmod=+x deploy deploy.ps1`. When the copy or `__init` fails (a name uv refuses, no network, Ctrl+C) `new`
   removes what it created (the folder and the parents it made, or only the content of the
   empty folder it was given) and says so; a folder with content is refused before anything
   is written.
@@ -2343,7 +2346,9 @@ short temp tree and unset `NVIM_APPNAME`.
   and pinned by `test_ci_workflow_keeps_its_moving_parts_on_purpose`: setup-uv gets no
   `version:`, so it installs the newest uv that satisfies pyproject's `required-version` (a
   pinned uv cannot download Pythons released after it), and the runner labels stay `-latest`
-  (GitHub retires a pinned label about six months after a newer image is GA).
+  (GitHub retires a pinned label about six months after a newer image is GA). It runs only
+  when the project is the root of its repository (GitHub reads `<top>/.github/workflows/`):
+  `new` warns when it creates a project inside another work tree (section 15.2).
 - **[template repo]** `template-selftest.yml` (push to `main`, pull requests, weekly and by
   hand; the gate): `./deploy render --check` first, then `setup` and `./deploy selftest` on
   ubuntu, macos and windows-latest (Windows through `deploy.ps1`, `--basetemp` in
@@ -3488,6 +3493,14 @@ Behaviour:
   `% ! " ^ & | < >`; PowerShell drops a bare `--`; xonsh `-c` exits 1 on any failing command
   (the child's real code is in its `CalledProcessError`).
 - `uv build` drops a `.gitignore` into `dist/<n>-<b>-wheel/`.
+- A project inside a bigger git repository (supported: `new` skips `git init`, the hook finds
+  the repository top) still gets its generated CI at `<project>/.github/workflows/ci.yml`, which
+  GitHub never runs (it reads `<top>/.github/workflows/` only), and whose steps expect the
+  project at the checkout root. `new` warns when it creates one there
+  (`cmd_mode._monorepo_note`); a project moved into a repository later gets no warning (render
+  runs no git, doctor does not check it). A fix would generate a relocatable workflow (a
+  `PROJECT` folder for `defaults.run.working-directory` and the artifact paths) for the user to
+  place at the top, or a doctor line.
 - flet presets: `constraints.txt` gives a new project httpx 0.28.1, but flet 1.0.1 only asks
   for `httpx>=0.28.1`, so `./deploy lock --upgrade` takes httpx 1.x once it is final, and its
   1.0 dev releases drop `AsyncClient`, which `flet.auth` (OAuth; not used by the skeleton)
