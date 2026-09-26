@@ -1389,7 +1389,9 @@ Per method:
   bundles no interpreter) with `app/`, `lib/` (`uv pip install --target`), `runtime/` (pruned
   copy of the interpreter's `base_prefix` through `\\?\` extended paths; the `ignore` callback
   strips that prefix before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. The base's
-  `__pycache__` folders are never copied. Prunes `include libs Tools share`, `tcl*` (Windows
+  `__pycache__` folders are never copied. Prunes `include libs Tools share Scripts`, every `bin/` entry but the interpreter (`BIN_KEEP`:
+  `python*`, `pypy*`, `libpypy*`; the base's console scripts, e.g. a 24 MB `ruff` installed into
+  it, carried the build machine's paths), `tcl*` (Windows
   base), stdlib `test idlelib turtledemo ensurepip site-packages`, `test`/`tests` subfolders of
   stdlib packages (PyPy's `unittest/test`, `lib2to3/tests`...), `*.debug` (PyPy's detached debug
   symbols, 16 MB), PyPy `hpy/devel`, and Tk unless `src/` or an installed dependency in `lib/`
