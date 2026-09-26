@@ -2063,7 +2063,11 @@ short temp tree and unset `NVIM_APPNAME`.
   runner fixes: portable smoke with `lib/`, lazy `{python}`, the pyz `.cmd` wrapper, binary
   preset files, `compile.annotate`, `sync_tree` ns mtimes, portable launcher quoting and
   version probes, unknown arguments, `app.preset`, pinned tools, flet pyproject, wheel
-  options), `test_e2e_plan.py` (the pure planning of `e2e.py`), `test_build_methods.py` (argv and
+  options), `test_e2e_plan.py` (the pure planning of `e2e.py`, its pin/docs/file-state checks,
+  git isolation, host detection, the HOST_GAPS drift guard against the generated CI, and
+  template-e2e.yml's triggers and depths), `test_e2e_run.py` (its running parts with the steps
+  faked: logs, timeouts that kill the tree, exit codes, the JSON report, SIGTERM/SIGHUP, the
+  step kinds on small fake projects), `test_build_methods.py` (argv and
   output discovery of exe, flet pack, Nuitka and flet build with the packager recorded;
   `cmd_build` argument checks; target keys, `install_deps` floors and junk; the pyz layout,
   `pyz-merge` and the real bootstrap run in subprocesses with the cache redirected; one REAL
@@ -2180,28 +2184,70 @@ short temp tree and unset `NVIM_APPNAME`.
   profile's severity, a debugger stopping at a breakpoint, and the mypyc launch configuration
   (overseer runs its preLaunchTask `deploy: compile`, then a breakpoint in `src/main.py`).
 - `./deploy selftest --e2e [PRESET ...] [--backends B,..] [--methods M,..] [--quick|--full]
-  [--gui auto|on|off] [--keep] [--reuse] [--json] [--base DIR]` (`e2e.selftest`): per preset
-  (default script, raylib, flet) `./deploy new <base>/<preset>` from THIS template with app
-  name `e2e-<preset>`, a verify step (`deploy` 100755; no `template-repo`, `template-*.yml`
-  or `.claude` copied), `render --check`, `mode` only where the host cannot install a backend
-  (`e2e.HOST_GAPS`: raylib + PyPy on macOS arm64 -> `mode cpython --supports cpython,mypyc`,
-  the pypy rows SKIP, as the generated `ci.yml` drops it), `setup`, `doctor`, `check all`,
-  `test all`, `run`
-  per backend, and `build <b> --method <m> --no-check` for every pair `cmd_build.COMPAT`
-  allows (non-empty `dist/` output), then smoke runs of the headless artifacts of console
-  presets (exe, portable launcher, `python -S <pyz>` with its cache redirected, the wheel in a
-  scratch venv, nuitka; output must contain the preset's text and, for mypyc, the compiled
-  marker). Default: every method but nuitka; `--quick`: each backend's default method;
-  `--full`: + nuitka and a `mode --supports +/-pypy` round trip. `flet build` is SKIP unless
-  Flutter and (Windows) Developer Mode are available; GUI runs are SKIP without a display
-  (Linux uses `xvfb-run`) or on Windows/macOS CI. Layout: `<base>/<preset>`,
-  `<base>/logs/<preset>/NN-step.log`, `<base>/work/<preset>` (smoke scratch); default base
-  `%TEMP%\pt\e2e` / `$TMPDIR/pt-e2e`; only a base carrying `.pytemplate-e2e` is wiped. Steps
-  run with stdin closed, a clean env and per-step timeouts that kill the whole process tree; a
-  failed `new`/`setup` skips the rest of its preset; a smoke needs its build. The base is kept
-  on failure or `--keep`; `--reuse` reuses kept projects. `--json` report to stdout.
-  Measured: script default ~3.5 min, raylib+flet `--quick` ~3 min, `--full` with nuitka ~12
-  min.
+  [--gui auto|on|off] [--keep] [--reuse] [--json] [--base DIR]` (`e2e.selftest`; `e2e.plan`
+  lists the rows of a preset): per preset (default script, raylib, flet) `./deploy new
+  <base>/<preset>` from THIS template, then what a user does there. App names `e2escript`
+  (named like its package, `e2e.SAME_AS_PACKAGE`: nuitka's `<app>.bin`, the package folder
+  next to the executables), `e2e-raylib`, `e2e-flet` (name != package). Every depth:
+  - `verify copy` (`do_verify`): nothing `new` must leave out (`template-repo`,
+    `template-*.yml`, `.claude`, `.build`, `dist`, `build`, `.venv*`); a git repository with
+    `deploy` and `deploy.ps1` at 100755; `uv.lock` at the tested versions (`lock_problems`:
+    the template's own lock for the packages it holds, `constraints.txt` for the rest); the
+    project's own README (`# <app>`, no myapp) and `[project] description` (the preset's), no
+    root LICENSE, `.pytemplate/README.md` and `.pytemplate/LICENSE` byte-equal to the
+    template's (`docs_problems`);
+  - `pristine skeleton` (`--dry-run __init <preset> --name <app>`), `render --check`, `mode`
+    only where the host cannot install a backend (`e2e.HOST_GAPS`: raylib + PyPy on macOS arm64
+    and Linux arm64 -> `mode cpython --supports cpython,mypyc`, the pypy rows SKIP; the
+    generated `ci.yml` leaves the same backends out for its runners' architectures:
+    `test_host_gaps_match_the_generated_ci_matrix`), `setup`, `doctor`, `fmt --check`, the first
+    commit (`git add -A` + `git commit` through the hook setup installed), raylib's `stubs`
+    task (typings/ must not change), `check`, `test`, `run` per backend;
+  - `build <b> --method <m> --no-check` (non-empty `dist/` output, size by `common.tree_bytes`)
+    and smoke runs of the headless artifacts of console presets: exe, nuitka (`<app>.bin`
+    too), the portable launcher after its folder was moved to `<base>/work` (put back
+    afterwards), `python -S <pyz>` with its cache redirected, the wheel in a scratch venv;
+    the output must contain the preset's text and, for mypyc, the compiled marker.
+  `--quick`: each backend's `deploy.default` method only. Default: every pair
+  `cmd_build.COMPAT` allows but nuitka, `./deploy selftest` in the project, a usage error
+  (`build <b> pyz` must exit 2) and a rename round trip (`--dry-run rename`, `rename` to
+  `e2e.renamed_app` (the other name shape), `render --check`, `test`, the wheel built and run
+  under the new name, a commit through the hook (rename refuses a dirty tree), `rename` back).
+  `--full`: + nuitka, a `mode --supports +/-pypy` round trip (back to the preset's active
+  backend) and a `[preset.*]` option edit (`e2e.OPTION_EDITS` with `config.set_value`, then
+  `./deploy apply`: pyproject.toml and uv.lock must follow, `doctor` passes, a second `apply`
+  changes nothing). A round trip must give back the project's files (`project_state`: not
+  `.git`, environments, builds, caches). `flet build` is SKIP unless Flutter and (Windows)
+  Developer Mode are available; GUI runs are SKIP without a display (Linux uses `xvfb-run`)
+  or on Windows/macOS CI. A filter shows what it leaves out (SKIP rows `<b> (not supported)`,
+  `build (none selected)`); one that tests nothing in any preset exits 2 before anything is
+  created (`selection_problem`).
+  Isolation: children get `scrub_env` (no `UV`, `UV_PYTHON`, `UV_PROJECT_ENVIRONMENT`,
+  `VIRTUAL_ENV`, `PYTHONHOME/PATH`, `PYTEMPLATE_*`, `GIT_*`) plus `isolate_git`:
+  `GIT_CEILING_DIRECTORIES` = the base's PARENT (git ignores a ceiling equal to its cwd, and
+  `new` looks from the base), so `new` runs `git init` and `setup` installs the hook in the
+  project even under a base inside a work tree (the hook used to land in the outer repository
+  and stay there); `GIT_CONFIG_GLOBAL` (a missing file) and `GIT_CONFIG_NOSYSTEM=1` keep a
+  user's core.hooksPath, init.templateDir or commit.gpgsign out. A base whose ceiling would hide
+  the template's own repository (a template in a subfolder of a bigger repository, the base
+  next to it) is refused (`hidden_template_repository`: `new` would copy untracked files).
+  Layout: `<base>/<preset>`, `<base>/logs/<preset>/NN-step.log`, `<base>/work/<preset>`
+  (smoke scratch); default base `%TEMP%\pt\e2e` / `$TMPDIR/pt-e2e`; only a base carrying
+  `.pytemplate-e2e` is wiped. Steps run with stdin closed and per-step timeouts (`TIMEOUTS`,
+  `BUILD_TIMEOUTS`) that kill the whole process tree (each step in its own session on POSIX);
+  a failed `new`, `setup` or host `mode` skips the rest of its preset; a row with `after`
+  needs that row to PASS. Exit codes: 0; 1 on any FAIL; 2 usage; 130 interrupted: Ctrl+C, and
+  SIGTERM/SIGHUP (`termination_as_interrupt`; a group signal from `timeout` or a closed
+  terminal never reached the steps' sessions, and the running build went on as an orphan):
+  the running step's tree is killed and the rows so far are reported. The base is kept on
+  failure, interrupt or `--keep`; `--reuse` reuses kept projects. `--json` report to stdout
+  (`ok`, `interrupted`, `base`, `kept`, `seconds`, `host`, `options`, `results[preset, step,
+  status, seconds, detail, log]`).
+  Measured (Linux, 4 CPUs shared with other work; ~2.3 min of each run is the project's own
+  `./deploy selftest`): script default 4.5 min, raylib default 4.4 min and `--full` 5.7 min,
+  flet `--full` 4.3 min (its exe and nuitka builds failed at once there: the sandbox proxy's
+  CA broke the Flet client download), script `--full --methods nuitka,wheel` 14.9 min (5.3
+  and 6.5 of them its two nuitka builds).
 - `./deploy render --check` (exit 1 when something is outdated or hand-edited) and
   `./deploy doctor`.
 - Manual end-to-end: `./deploy new C:\t\p1 --preset <p> --name <n>`, then in the copy
@@ -2229,10 +2275,16 @@ short temp tree and unset `NVIM_APPNAME`.
   Neovim stable, `fd` (venv-selector from LazyVim's `lang.python` errors on the first Python
   buffer without it), `selftest --nvim --require --dir $RUNNER_TEMP/pt-nvim` (the `runner`
   context is not allowed in a job-level `env`, hence the step env), logs on failure),
-  `template-e2e.yml` (3 OS x 3 presets, dispatch quick/default/full, weekly, pushes that touch
-  `.pytemplate/**` or the launchers; Linux gets the raylib libs, `libgl1-mesa-dri` and
-  `xvfb`; JSON report always uploaded, logs on failure). First run on GitHub in September 2026
-  (images ubuntu-24.04, macos-26-arm64, windows-2025-vs2026; uv 0.12, Neovim 0.12.5).
+  `template-e2e.yml` (gate job, then 3 OS x 3 presets: `--quick` on pushes and pull requests
+  that touch what `new` copies (`.pytemplate/**`, the launchers, `pyproject.toml`, `uv.lock`,
+  `pytemplate.toml`, `.python-version`, `src/**`, `tests/**`, `.gitignore`, `.gitattributes`,
+  the workflow), the default depth weekly (Monday cron), `--full` monthly (day-1 cron, named by
+  its string in the `MODE` expression), any depth on dispatch; job timeout 120 min, 300 for
+  full; Linux gets the raylib libs, `libgl1-mesa-dri` and `xvfb`; the JSON report is always
+  uploaded and the logs on failure, one artifact name per matrix row;
+  `test_e2e_plan.test_e2e_workflow_*` pin the depths and triggers). First run on GitHub in
+  September 2026 (images ubuntu-24.04, macos-26-arm64, windows-2025-vs2026; uv 0.12, Neovim
+  0.12.5).
 
 ### 13.3 Coverage limits
 
@@ -2761,12 +2813,15 @@ cffi and raylib:
   `raylib_stubs.py` skips a struct whose `ffi.sizeof` raises before reading its fields (11).
   Test: `test_presets.py::test_raylib_stubs_skips_opaque_structs`. Goes: when cffi raises
   instead.
-- **raylib wheels** (LIMITATION): no PyPy wheel for macOS arm64, and building raylib from its
-  sdist needs the C library. Fix: `no-build-package` from the preset's `[uv]`; `e2e.HOST_GAPS`
-  and `render.ci_workflow` drop PyPy there (11, 15.2). Test:
+- **raylib wheels** (LIMITATION): no PyPy wheel for arm64 (macOS and Linux: pp311 wheels for
+  x86_64 only), and building raylib from its sdist needs the C library. Fix: `no-build-package`
+  from the preset's `[uv]`; `e2e.HOST_GAPS` (macOS and Linux arm64) and `render.ci_workflow`
+  (its arm64 runner, macOS) drop PyPy there (11, 15.2). Test:
   `test_render_core.py::test_ci_workflow_for_every_preset_and_backend_set`,
   `test_e2e_plan.py::test_host_gaps_switch_the_project_off_the_backend`,
-  `test_apply.py::test_apply_raylib_package_switch`. Goes: when raylib ships that wheel.
+  `test_e2e_plan.py::test_raylib_pypy_gap_on_linux_arm64`,
+  `test_e2e_plan.py::test_host_gaps_match_the_generated_ci_matrix`,
+  `test_apply.py::test_apply_raylib_package_switch`. Goes: when raylib ships those wheels.
 
 UPX:
 - **What packing breaks** (LIMITATION): UPX refuses Control Flow Guard PEs (and `--force` breaks
@@ -2923,6 +2978,11 @@ git and husky:
 - **`git check-ignore` refuses `--literal-pathspecs`** (LIMITATION): Fix: `hooks._git(...,
   literal=False)` for it (5.6). Test:
   `test_hooks.py::test_ensure_installed_skips_an_ignored_project`. Goes: never.
+- **`GIT_CEILING_DIRECTORIES` never excludes the current folder** (LIMITATION, documented): with
+  the e2e base itself as the ceiling, `new` (it asks git from the base) still found a repository
+  around the base and skipped `git init`, and `setup` installed the hook into that repository.
+  Fix: `e2e.isolate_git` puts the ceiling at the base's PARENT (13.1). Test:
+  `test_e2e_plan.py::test_isolated_git_never_sees_a_repository_around_the_base`. Goes: never.
 - **git's messages follow the locale** (LIMITATION): "not a git repository" was not recognized.
   Fix: `LC_ALL=C` for every git call (`hooks`, `rename.git_changes`, `presets`; 5.6). Test:
   `test_rename.py::test_git_changes_reads_git_in_english`,
@@ -3169,9 +3229,12 @@ Windows:
 - **A command line holds 32767 characters** (LIMITATION): Fix: `hooks.ARG_LIMIT` batches file
   arguments (5.6). Test: `test_hooks.py::test_batches`. Goes: never.
 - **A file stays locked after its process ends** (LIMITATION): a just-exited exe, an antivirus
-  scan or a DLL still loaded. Fix: `e2e.rmtree` retries; the pyz bootstrap moves an incomplete
-  cache aside (`_discard`) (10, 13.1). Test:
-  `test_build_methods.py::test_pyz_repairs_an_incomplete_cache`. Goes: never.
+  scan or a DLL still loaded. Fix: `e2e.rmtree` and `e2e._move` (the portable smoke moves the
+  folder away and back) retry, `e2e.run_logged` leaves a stdout file a killed tree still holds
+  to the base's cleanup; the pyz bootstrap moves an incomplete cache aside (`_discard`) (10,
+  13.1). Test: `test_build_methods.py::test_pyz_repairs_an_incomplete_cache`,
+  `test_e2e_run.py::test_move_retries_a_locked_folder`,
+  `test_e2e_run.py::test_run_logged_timeout_kills_the_whole_tree`. Goes: never.
 - **The classic console needs ANSI turned on** (LIMITATION): and the `os.system("")` trick
   started a cmd.exe on every run. Fix: `ui.enable_vt_mode` (`SetConsoleMode`, 5.3). Test:
   `test_paths.py::test_ui_never_spawns_cmd_for_colors`,
@@ -3214,13 +3277,14 @@ Behaviour:
   including the environments in use; there is no "unused only" option (`mode` and `apply`
   only print a note about leftovers). On Windows close the editor first (its mypy/ruff servers run from
   `.venv`), or clean fails with exit 1.
-- raylib + PyPy on macOS arm64: no PyPy wheel for that platform (raylib 6.0.1.0 still has
-  none) and `no-build-package`, so `./deploy setup` of a raylib project fails to sync
-  `.venv-pypy` on Apple Silicon (confirmed on `macos-latest`: "marked as `--no-build` but has
-  no binary distribution"). The generated `ci.yml` syncs only the matrix backends and
-  `selftest --e2e` switches the project off PyPy first (`e2e.HOST_GAPS`); users there run
-  `./deploy mode cpython --supports cpython,mypyc`. Possible fix: skip PyPy for raylib on
-  macOS aarch64 in `apply`/`new`.
+- raylib + PyPy on arm64 (macOS and Linux): no PyPy wheel for those platforms (raylib 6.0.1.0
+  publishes pp311 wheels for x86_64 only) and `no-build-package`, so `./deploy setup` of a
+  raylib project fails to sync `.venv-pypy` on Apple Silicon (confirmed on `macos-latest`:
+  "marked as `--no-build` but has no binary distribution") and on Linux arm64 (Raspberry Pi,
+  Graviton, Docker on a Mac; simulated with uv's `--python-platform`). The generated `ci.yml`
+  syncs only the matrix backends (its Linux runner is x86_64) and `selftest --e2e` switches the
+  project off PyPy first (`e2e.HOST_GAPS`); users there run `./deploy mode cpython --supports
+  cpython,mypyc`. Possible fix: skip PyPy for raylib on arm64 in `apply`/`new`.
 - `./deploy lock` re-locks without applying `[preset.*]`: after a `[preset.raylib] package`
   switch it moves `no-build-package` to the new name and keeps the old dependency until
   `./deploy apply` runs (every mismatch hint names apply). A `[preset.flet] version` edit that
