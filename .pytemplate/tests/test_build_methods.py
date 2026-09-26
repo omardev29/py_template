@@ -919,6 +919,11 @@ def test_pyz_merge_of_pure_parts_stays_pure(tmp_path: Path) -> None:
     assert info["pure"] is True and info["targets"] == [] and "common/lib/dep.py" in names
     r = run_pyz(tmp_path / "m.pyz", pyz_env(tmp_path / "cache"))
     assert r.returncode == 0 and r.stdout.strip() == "dep=first", r.stderr
+    # --out may be one of the inputs: every part is read before the output is replaced
+    info, _ = _merge([a, b], a)
+    assert info["pure"] is True
+    r = run_pyz(a, pyz_env(tmp_path / "cache2"))
+    assert r.returncode == 0 and r.stdout.strip() == "dep=first", r.stderr
 
 
 def test_pyz_merge_takes_each_lib_from_the_part_built_there(tmp_path: Path) -> None:
@@ -1418,6 +1423,23 @@ def test_build_dry_run_stops_after_the_argument_checks(no_build: None, monkeypat
     monkeypatch.setattr(proc, "DRY_RUN", True)
     assert cmd_build.cmd_build(make({}), ["--method", "pyz", "--no-check", "--target", WIN]) == 0
     assert "(--dry-run) build cpython -> pyz: would output dist/myapp-cpython-pyz*" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("method", "reason"), [("exe", "PyInstaller does not support PyPy"), ("nuitka", "Nuitka only compiles for CPython"), ("flet", "flet build embeds CPython")])
+def test_build_refuses_methods_without_pypy(no_build: None, method: str, reason: str) -> None:
+    with pytest.raises(DeployError, match=reason) as e:
+        cmd_build.cmd_build(make(ALL_BACKENDS), ["pypy", "--method", method])
+    assert e.value.code == 2
+
+
+def test_build_default_method_per_backend(no_build: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    cfg = make(ALL_BACKENDS)
+    for backend, method in (("cpython", "exe"), ("mypyc", "exe"), ("pypy", "portable")):
+        assert cmd_build.cmd_build(cfg, [backend, "--no-check"]) == 0
+        assert f"build {backend} -> {method}: would output" in capsys.readouterr().err
+    with pytest.raises(DeployError, match="not in backend.supported"):
+        cmd_build.cmd_build(make({}), ["pypy", "--no-check"])
 
 
 # --- portable: the .sh launcher -------------------------------------------------------------------
