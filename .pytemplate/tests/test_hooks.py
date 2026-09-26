@@ -1526,6 +1526,78 @@ def test_real_ruff_accepts_the_hook_arguments(tmp_path: Path, monkeypatch: pytes
     assert code == 0, out
 
 
+NAME_DISPATCH_HOOK = """{shebang}
+. "$(dirname "$0")/helper.sh"
+case $(basename "$0") in
+    pre-commit) check_it ;;
+    *) exit 0 ;;
+esac
+"""
+HELPER = """check_it() {
+    printf '%s\\n' "user check as $(basename "$0")" >> "$PT_HOOK_LOG"
+    exit "${PT_LOCAL_EXIT:-0}"
+}
+"""
+
+
+@needs_git
+@pytest.mark.parametrize("shebang", ["#!/bin/sh", "#!/bin/sh -e", "#!/usr/bin/env bash"])
+def test_a_kept_hook_runs_under_its_own_name(tmp_path: Path, shebang: str) -> None:
+    """husky v4 and yorkie pick their job from `basename "$0"` and source their helpers from
+    `dirname "$0"`: kept as pre-commit.local and run by that name, the user's blocking check
+    silently checked nothing while pytemplate said it ran first."""
+    if "bash" in shebang and shutil.which("bash") is None:
+        pytest.skip("no bash")
+    top, project = make_repo(tmp_path)
+    (project / "deploy").write_bytes(FAKE_LAUNCHER.encode("ascii"))
+    (top / ".topmark").write_text("", encoding="utf-8")
+    (top / ".git" / "info" / "exclude").write_text(".topmark\n", encoding="utf-8")
+    log = tmp_path / "hook.log"
+    env = dict(git_env(), PT_HOOK_LOG=log.as_posix())
+    hooks_dir = top / ".git" / "hooks"
+    (hooks_dir / hooks.HOOK).write_bytes(NAME_DISPATCH_HOOK.format(shebang=shebang).encode("ascii"))
+    (hooks_dir / "helper.sh").write_bytes(HELPER.encode("ascii"))
+    if not IS_WINDOWS:
+        (hooks_dir / hooks.HOOK).chmod(0o755)
+    hooks.install(find(project, top), force=True)
+
+    def commit(name: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        (project / name).write_text(name, encoding="utf-8")
+        git(top, "add", "-A", env=env)
+        return git(top, "commit", "-q", "-m", name, env={**env, **extra}, check=False, timeout=120)
+
+    assert commit("one.txt").returncode == 0
+    assert log.read_text(encoding="utf-8").splitlines() == ["user check as pre-commit", "launcher hooks run from top"]
+    log.unlink()
+    assert commit("two.txt", PT_LOCAL_EXIT="1").returncode != 0  # the user's check still blocks
+    assert log.read_text(encoding="utf-8").splitlines() == ["user check as pre-commit"]
+
+
+@needs_git
+def test_force_leaves_a_non_shell_hook_that_reads_its_name(tmp_path: Path) -> None:
+    """overcommit's Ruby hook picks its job from $0: it cannot be sourced as pre-commit, and
+    run as pre-commit.local it would check nothing. --force leaves it alone and says what line
+    to add to it instead."""
+    top, project = make_repo(tmp_path)
+    target = top / ".git" / "hooks" / hooks.HOOK
+    text = "#!/usr/bin/env ruby\nhook_type = File.basename($0)\nexit 0\n"
+    target.write_text(text, encoding="utf-8")
+    with pytest.raises(DeployError, match=r"reads its own name .*Add this line to it instead:\n  sh \./deploy hooks run \|\| exit \$\?"):
+        hooks.install(find(project, top), force=True)
+    assert target.read_text(encoding="utf-8") == text and not (target.parent / hooks.LOCAL).exists()
+
+
+def test_interpreter_reads_the_hash_bang_line_as_the_hook_does() -> None:
+    assert hooks.interpreter("#!/bin/sh\n") == "sh"
+    assert hooks.interpreter("#! /bin/bash -e\r\n") == "bash"
+    assert hooks.interpreter("#!/usr/bin/env python3\n") == "python3"
+    assert hooks.interpreter("#!/usr/bin/env -S ruby -w\n") == "-S"  # as the hook script: run by its path
+    assert hooks.interpreter("echo no hash bang\n") == "sh"
+    assert not hooks.reads_its_name('#!/bin/sh\ncase $(basename "$0") in *) ;; esac\n')  # sourced: $0 is right
+    assert hooks.reads_its_name("#!/usr/bin/env node\nconst h = process.argv[1]\n")
+    assert not hooks.reads_its_name("#!/usr/bin/env python3\nprint('checks')\n")
+
+
 @needs_git
 @pytest.mark.parametrize("sub", ["", "apps/my app", "caf\u00e9"])
 def test_git_runs_the_hook(tmp_path: Path, sub: str) -> None:

@@ -856,8 +856,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `hooks.hook_script` makes installed hooks "outdated": apply/setup rewrite them.
 - Never overwritten: a hook without the marker, or any symlink (writing through a dangling
   link created a file in the work tree). `install --force` renames it to `pre-commit.local` (a
-  link moves as a link; a dangling `.local` counts as existing) and ours runs it first;
-  `uninstall` restores it. A marked hook whose launcher is another live project of the same
+  link moves as a link; a dangling `.local` counts as existing) and ours runs it first, a shell
+  script (`hooks.SHELLS`, its `#!` line read by `hooks.CHAIN_LINES`, flags kept) sourced with
+  `$0` = `<hooks>/pre-commit`: husky v4 and yorkie pick their job from `basename "$0"` and find
+  their helpers next to it, and run as `pre-commit.local` they checked nothing. A hook in
+  another language that reads its own name (`hooks.reads_its_name`: overcommit's Ruby) is left
+  alone by `--force`, which prints the line to add to it instead; `uninstall` restores it. A marked hook whose launcher is another live project of the same
   repository (state "other", a monorepo) is left alone by apply, install and uninstall;
   `install --force` writes a FRESH copy of it as `pre-commit.local` (the script skips
   `pre-commit.local` when it is itself that file; older copies would recurse), so both checks

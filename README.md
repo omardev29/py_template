@@ -1320,7 +1320,9 @@ only deletes files is checked too).
 - Skip it once: `git commit --no-verify`. Remove it: `./deploy hooks uninstall`, and set
   `pre_commit = false` (then `./deploy apply` removes it too). Its state: `./deploy hooks`.
 - An existing hook of yours (or a symlink) is never overwritten: `./deploy hooks install --force`
-  keeps it as `pre-commit.local` and runs it first; `uninstall` puts it back. With
+  keeps it as `pre-commit.local` and runs it first (a shell script still sees its own name,
+  `pre-commit`, as husky v4 and yorkie need); `uninstall` puts it back. A hook in another
+  language that reads its own name is left alone: add the line below to it instead. With
   `core.hooksPath` set, nothing is written: add `sh ./deploy hooks run || exit $?` to your own hook
   (husky 9: `.husky/pre-commit`).
 - A project in a subfolder of a bigger repository: the hook goes into that repository's hooks

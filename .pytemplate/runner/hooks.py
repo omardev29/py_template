@@ -276,6 +276,56 @@ def launcher_of(text: str) -> str | None:
         return None
 
 
+# The shells a kept hook is sourced by, with $0 = <hooks>/pre-commit: a hook that picks its job
+# from its own name (husky v4, yorkie: `basename "$0"`) or finds its helpers next to it ran as
+# pre-commit.local and silently checked nothing. zsh is left out: it sets $0 to a sourced file.
+SHELLS = ("sh", "bash", "dash", "ash", "ksh", "mksh", "yash")
+CHAIN_LINES = (
+    f'    _pt_local="$_pt_dir/{LOCAL}"',
+    "    _pt_line=",
+    '    IFS= read -r _pt_line < "$_pt_local" || :',
+    "    case $_pt_line in *\"$(printf '\\r')\") _pt_line=${_pt_line%?} ;; esac",
+    "    case $_pt_line in '#!'*) _pt_line=${_pt_line#??} ;; *) _pt_line=/bin/sh ;; esac",
+    '    _pt_line=${_pt_line#"${_pt_line%%[! ]*}"}',
+    "    _pt_interp=${_pt_line%% *}",
+    '    _pt_args=${_pt_line#"$_pt_interp"}',
+    '    _pt_args=${_pt_args#"${_pt_args%%[! ]*}"}',
+    '    if [ "${_pt_interp##*/}" = env ]; then',
+    "        _pt_interp=${_pt_args%% *}",
+    '        _pt_args=${_pt_args#"$_pt_interp"}',
+    '        _pt_args=${_pt_args#"${_pt_args%%[! ]*}"}',
+    "    fi",
+    '    _pt_args=${_pt_args%"${_pt_args##*[! ]}"}',
+    f"    if grep -q '{MARKER}' \"$_pt_local\" 2>/dev/null; then",
+    '        "$_pt_local" "$@" || exit $?',
+    "    else",
+    "        case ${_pt_interp##*/} in",
+    f"            {'|'.join(SHELLS)})",
+    '                _PT_HOOK=$_pt_local "$_pt_interp" ${_pt_args:+"$_pt_args"} -c ". \\"\\$_PT_HOOK\\"" "$_pt_dir/pre-commit" "$@" || exit $? ;;',
+    '            *) "$_pt_local" "$@" || exit $? ;;',
+    "        esac",
+    "    fi",
+)
+_NAME_READS = re.compile(r"\$0\b|\$\{0\}|argv\[0\]|__FILE__|\$PROGRAM_NAME|process\.argv")
+
+
+def interpreter(text: str) -> str:
+    """The program a hook's #! line names (after env, as the hook script reads it); sh without one."""
+    first = text.split("\n", 1)[0].rstrip("\r")
+    if not first.startswith("#!"):
+        return "sh"
+    words = first[2:].split()
+    if words and words[0].rsplit("/", 1)[-1] == "env":
+        words = words[1:]
+    return words[0].rsplit("/", 1)[-1] if words else "sh"
+
+
+def reads_its_name(text: str) -> bool:
+    """Whether a hook that is not a shell script reads its own name: kept as pre-commit.local it
+    runs under that name (only a shell script can be sourced as pre-commit)."""
+    return interpreter(text) not in SHELLS and _NAME_READS.search(text) is not None
+
+
 def hook_script(launcher: str) -> str:
     """Return the pre-commit hook: pure ASCII, LF, runs `sh <launcher> hooks run` from the top."""
     lines = [
@@ -289,7 +339,7 @@ def hook_script(launcher: str) -> str:
         f"# itself the {LOCAL} of another project's hook).",
         "case $0 in */*) _pt_dir=${0%/*} ;; *) _pt_dir=. ;; esac",
         f'if [ "${{0##*/}}" != {LOCAL} ] && [ -x "$_pt_dir/{LOCAL}" ]; then',
-        f'    "$_pt_dir/{LOCAL}" "$@" || exit $?',
+        *CHAIN_LINES,
         "fi",
         f"_pt_launcher={sh_literal(launcher)}",
         'if [ ! -f "$_pt_launcher" ]; then',
@@ -655,6 +705,12 @@ def install(repo: Repo, *, force: bool = False) -> str:
             raise DeployError(f"{_show(target, repo)} already exists and is not pytemplate's hook: left alone.\n  {chain_hint(repo)}")
         if os.path.lexists(local):  # lexists: a dangling link there is somebody's too
             raise DeployError(f"both {_show(target, repo)} and {_show(local, repo)} exist: merge them by hand, then ./deploy hooks install")
+        text = _read(target)
+        if state == "foreign" and reads_its_name(text):
+            raise DeployError(
+                f"{_show(target, repo)} is a {interpreter(text)} script that reads its own name ($0): kept as {LOCAL} "
+                f"it would not run its checks, so it was left alone. Add this line to it instead:\n  {run_line(repo)}"
+            )
         moved = True
     elif state == "installed" and not drop:
         return f"pre-commit hook already installed: {_show(target, repo)}"
