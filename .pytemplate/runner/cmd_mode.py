@@ -414,9 +414,9 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         raise DeployError(f"new: {dest} already exists and is not empty")
     # Checked here, before copying (and under --dry-run): a copy whose `init` fails is removed
     name = ns.name or presets.name_from_folder(resolved.name)
-    if not presets.APP_NAME.fullmatch(name):
+    if not config.APP_NAME.fullmatch(name):
         raise DeployError(
-            f"new: '{name}' is not a valid app name (it may only contain {presets.NAME_RULE}). "
+            f"new: '{name}' is not a valid app name (it may only contain {config.NAME_RULE}). "
             "Choose one with --name NAME"
         )
     presets.check_name_free(cfg, ns.preset, name)

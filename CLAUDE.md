@@ -478,7 +478,7 @@ header rules (with detector tests proving each rule fires).
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
-| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `DeployError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME`, `name_from_folder`, `check_name_free`, `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./deploy __init`; with rollback), `copy_template`, `new`; for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
+| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `DeployError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free`, `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./deploy __init`; with rollback), `copy_template`, `new`; for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
 | `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
@@ -724,7 +724,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (`shells.launcher_problems`) and the template repo's language guard read the staged content
   too. Project-wide and conservative (they read the working tree, so they may block a commit
   that touches none of their files): generated files up to date (`render.apply(check=True)`)
-  and none unstaged/untracked; managed pyproject parts and `uv lock --check`; `pytemplate.toml`,
+  and none unstaged/untracked; managed pyproject parts, what only `./deploy apply` brings in
+  line (`cmd_apply.pending(hook=False)`: a hand-edited `app.name`/`app.preset`, the
+  `[preset.*]` options) and `uv lock --check`; `pytemplate.toml`,
   `pyproject.toml`, `uv.lock` and the generated files committed together (once any is in the
   commit, none of the three config files may keep unstaged changes; the hints name the dirty
   config files with the generated ones, so following them never splits a source from its
@@ -883,7 +885,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 - `schema` must equal `config.SCHEMA` (1; a missing line means 1). It is checked before the
   other keys, so a file from another template version fails with that reason instead of an
   unknown key. There is no migration logic.
-- `[app]`: `name` (`[A-Za-z][A-Za-z0-9_-]*`; `pkg = name.replace("-", "_").lower()`), `preset`
+- `[app]`: `name` (`config.APP_NAME`: a letter first, a letter or digit last, PEP 508; `pkg =
+  name.replace("-", "_").lower()`), `preset`
   (`config.validate`: `[a-z][a-z0-9_-]*` and `PRESETS/<name>/preset.toml` must exist, checked
   without importing `presets.py`), `gui`, `assets` (`"assets"` = bundle `src/assets/`, `""` =
   none; any other name is rejected: `resources.assets_dir` and the portable/pyz bootstraps
@@ -1614,7 +1617,7 @@ Per method:
   (`presets._Undo`, prints "every file is back as it was") and is raised. (3) Deletes the
   aside folder and runs `render.apply(force=True)`.
 - `presets.check_name_free` (in `new`, `__init`, their dry runs, and `rename`/`apply`, which
-  keep its first line) refuses: a name uv refuses (`presets.APP_NAME`: a letter first, a letter
+  keep its first line) refuses: a name uv refuses (`config.APP_NAME`: a letter first, a letter
   or digit last, PEP 508), a keyword, a standard-library module of any supported Python
   (`presets.shadows_stdlib`), a backend name (cpython, pypy, mypyc), a Windows device name (`WINDOWS_DEVICES`: `aux`,
   `con`, `nul`, `com1`...: the folder cannot exist there and git cannot check it out), the
@@ -1734,7 +1737,7 @@ instead. Neovim opens its output on start and replaces a running instance (`uniq
 - Catalog (`vscode.catalog`): `run`, `run <b>` per other supported backend, `test` (default
   test task), `test <b>`, `test all` and `check all` (only with more than one backend),
   `check`, `build` (default build task), `report --open` (label `deploy: report`; mypyc only),
-  `compile` (mypyc only, hidden), `lint --fix`, `fmt`, `doctor`, `setup`, and one task per
+  `compile` (mypyc only, hidden), `lint --fix`, `fmt`, `doctor`, `apply`, `setup`, and one task per
   `[tasks]` entry. Labels are `deploy: <args>` (only the catalog's `report --open` hides its
   `--open`: `run --open` is not `deploy: run`; buttons that name the same task, `report` and
   `report --open`, get one task); each task has `detail` (`./deploy <args>  |

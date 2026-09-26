@@ -773,10 +773,16 @@ def check_generated(cfg: Config, generated: Sequence[str], dirty: set[str]) -> I
 
 
 def check_lock(cfg: Config) -> Result:
-    """pyproject.toml matches pytemplate.toml and uv.lock matches pyproject.toml (working tree)."""
+    """pyproject.toml matches pytemplate.toml and uv.lock matches pyproject.toml (working tree).
+
+    "Matches" includes what only ./deploy apply brings in line (a hand-edited app.name, the
+    [preset.*] options, a hand-edited app.preset): cmd_apply.pending, without its git check."""
+    from . import cmd_apply  # lazy: cmd_apply imports this module
+
     hints: list[str] = []
     if render.pyproject_outdated(cfg):
         hints.append("pyproject.toml does not match pytemplate.toml: ./deploy apply")
+    hints += [f"{problem}: {hint}" for problem, hint in cmd_apply.pending(cfg, hook=False)]
     code, out = uv_lock_check(cfg)
     if code != 0:
         hints.append(f"uv lock --check: {envs.uv_error(out) or f'exit code {code}'}\n./deploy lock")

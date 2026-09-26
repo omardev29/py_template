@@ -970,8 +970,8 @@ def locked_names(root: Path) -> set[str]:
 
 def check_new_name(cfg: Config, new_name: str, *, who: str = "rename", retry: str = "./deploy rename OTHER_NAME") -> None:
     """Reject names that cannot work: format, keywords, stdlib modules, dependencies (uv.lock too)."""
-    if not presets.APP_NAME.fullmatch(new_name):
-        raise DeployError(f"{who}: the name may only contain {presets.NAME_RULE}")
+    if not config.APP_NAME.fullmatch(new_name):
+        raise DeployError(f"{who}: the name may only contain {config.NAME_RULE}")
     pkg = package_of(new_name)
     if keyword.iskeyword(pkg):
         raise DeployError(f"{who}: the package '{pkg}' would be a Python keyword (import {pkg} is a syntax error)")

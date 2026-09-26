@@ -121,7 +121,7 @@ def build(req: BuildRequest) -> Path:
         target_ext.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ext, target_ext)
 
-    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))  # an editor or PS 5.1 may add a BOM
     text = build_pyproject(cfg, data, _pinned_requirements(envs.tool_env(cfg)))
     (work / "pyproject.toml").write_text(text, encoding="utf-8", newline="\n")
 

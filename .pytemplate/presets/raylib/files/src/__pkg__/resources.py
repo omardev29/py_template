@@ -1,7 +1,6 @@
 """Asset paths that work the same in dev, mypyc stage, pyz, portable, wheel and PyInstaller.
 
-Always use it INSIDE functions: in a compiled module, `__file__` at module level
-does not work (mypyc#700). This is a boundary module (it is not compiled).
+This is a boundary module (it is not compiled).
 """
 
 from __future__ import annotations

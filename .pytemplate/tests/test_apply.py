@@ -951,6 +951,19 @@ def test_doctor_lines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert lines[0][0] is False and lines[0][1].startswith("pyproject.toml is not valid TOML")
 
 
+def test_the_hook_blocks_a_commit_of_changes_apply_has_not_applied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A [preset.*] edit leaves the managed parts of pyproject.toml alone, so only
+    cmd_apply.pending sees it: the hook's lock check must report it too."""
+    project, _ = _project(tmp_path, monkeypatch, "raylib")
+    monkeypatch.setattr(hooks, "uv_lock_check", lambda cfg: (0, ""))  # the lock itself is not the point here
+    assert hooks.check_lock(project.cfg()).passed is True
+    project.edit("preset.raylib", "version", "6.0.2.0")
+    assert not render.pyproject_outdated(project.cfg())
+    result = hooks.check_lock(project.cfg())
+    assert result.passed is False
+    assert "[preset.raylib] is not applied to pyproject.toml (add raylib==6.0.2.0): ./deploy apply" in result.hint
+
+
 def test_reference_problems(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project, _ = _project(tmp_path, monkeypatch, "flet")
     assert cmd_apply.reference_problems(project.cfg()) == []

@@ -241,7 +241,7 @@ def test_app_name_valid(name: str) -> None:
     assert make({"app": {"name": name}}).app.name == name
 
 
-@pytest.mark.parametrize("name", ["", "1app", "my app", "app\n", "-app", "caf" + E_ACUTE, "a.b"])
+@pytest.mark.parametrize("name", ["", "1app", "my app", "app\n", "-app", "app-", "app_", "caf" + E_ACUTE, "a.b"])
 def test_app_name_invalid(name: str) -> None:
     fails({"app": {"name": name}}, "'app.name' only allows")
 

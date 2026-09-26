@@ -303,12 +303,12 @@ def test_rendered_skeleton_passes_the_precommit_ruff_checks(preset: str, tmp_pat
 
 @pytest.mark.parametrize("name", ["a", "a1", "My-App", "x_y", "A-B-C", "game2"])
 def test_app_name_rule_accepts(name: str) -> None:
-    assert presets.APP_NAME.fullmatch(name)
+    assert config.APP_NAME.fullmatch(name)
 
 
 @pytest.mark.parametrize("name", ["", "1a", "a-", "a_", "-a", "_a", "a b", "a.b", CAFE, "a/b"])
 def test_app_name_rule_refuses(name: str) -> None:
-    assert not presets.APP_NAME.fullmatch(name)
+    assert not config.APP_NAME.fullmatch(name)
 
 
 @pytest.mark.parametrize(
@@ -327,7 +327,7 @@ def test_app_name_rule_refuses(name: str) -> None:
 )
 def test_name_from_folder(folder: str, name: str) -> None:
     assert presets.name_from_folder(folder) == name
-    assert name == "" or name[0].isdigit() or presets.APP_NAME.fullmatch(name)
+    assert name == "" or name[0].isdigit() or config.APP_NAME.fullmatch(name)
 
 
 @pytest.mark.parametrize(

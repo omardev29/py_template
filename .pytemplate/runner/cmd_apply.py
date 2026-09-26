@@ -54,6 +54,8 @@ Check = Callable[[bool | None, str, str], None]
 
 RECORD_KEY = "applied"  # top-level key of .pytemplate/state.json
 _REQ = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*([^;]*)")
+# An OLD name (the record, pyproject.toml) may predate config.APP_NAME, which also wants a
+# letter or digit at the end: it is still recognised, so apply can rename away from it
 _APP_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 _DRY = "(--dry-run: nothing is written)"
 

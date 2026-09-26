@@ -166,6 +166,7 @@ def test_catalog_script() -> None:
         "deploy: lint --fix",
         "deploy: fmt",
         "deploy: doctor",
+        "deploy: apply",
         "deploy: setup",
         "deploy: ci",
     ]

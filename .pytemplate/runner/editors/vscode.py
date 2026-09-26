@@ -50,6 +50,7 @@ ICONS = {
     "fmt": "edit",
     "doctor": "pulse",
     "setup": "tools",
+    "apply": "sync",
 }
 CUSTOM_ICON = "run-all"
 P_RUN = {"reveal": "always", "focus": True, "panel": "dedicated", "clear": True, "showReuseMessage": False}
@@ -306,7 +307,8 @@ def catalog(cfg: Config) -> list[Entry]:
     out.append(Entry(("lint", "--fix"), f"ruff check --fix (rules of the '{cfg.profile_for()}' typing profile)", ICONS["lint"]))
     out.append(Entry(("fmt",), "ruff format src/ and tests/", ICONS["fmt"]))
     out.append(Entry(("doctor",), "check uv, the compiler, PyPy, shells and the generated files", ICONS["doctor"]))
-    out.append(Entry(("setup",), "install interpreters and environments, lock deps and generate configs", ICONS["setup"]))
+    out.append(Entry(("apply",), "apply every pytemplate.toml change (rename, dependencies, uv.lock, environments, hook)", ICONS["apply"]))
+    out.append(Entry(("setup",), "first time on a clone: the same as apply", ICONS["setup"]))
     out += [Entry((name,), _custom_summary(cfg, name), CUSTOM_ICON) for name in cfg.tasks]
     return out
 

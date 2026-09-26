@@ -26,6 +26,10 @@ from .ui import DeployError
 
 SCHEMA = 1  # the pytemplate.toml layout this runner reads (`schema = 1`)
 BACKENDS = ("cpython", "pypy", "mypyc")
+# app.name: PEP 508 (and uv) wants a letter or digit at both ends; the package src/<pkg>/ (the
+# name in snake_case) must start with a letter. new, __init and rename check it too (presets)
+APP_NAME = re.compile(r"[A-Za-z](?:[A-Za-z0-9_-]*[A-Za-z0-9])?")
+NAME_RULE = "letters, digits, '-' and '_', starting with a letter and ending with a letter or digit"
 PROFILES = ("mypyc", "strict", "warn", "off")
 METHODS = ("exe", "portable", "pyz", "wheel", "nuitka", "flet")
 EDITORS = ("pylance", "basedpyright")
@@ -479,8 +483,8 @@ def _validate_task(name: str, task: TaskConfig, builtin_commands: set[str] | Non
 
 
 def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
-    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", cfg.app.name):
-        raise DeployError("pytemplate.toml: 'app.name' only allows letters, digits, '-' and '_'")
+    if not APP_NAME.fullmatch(cfg.app.name):
+        raise DeployError(f"pytemplate.toml: 'app.name' only allows {NAME_RULE}")
     if not re.fullmatch(r"[a-z][a-z0-9_-]*", cfg.app.preset) or not (PRESETS / cfg.app.preset / "preset.toml").is_file():
         raise DeployError(
             f"pytemplate.toml: app.preset = {cfg.app.preset!r} is not a preset of this template "

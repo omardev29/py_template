@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import proc, ui
-from .config import BACKENDS
+from .config import APP_NAME, BACKENDS, NAME_RULE
 from .project import BUILD, PRESETS, PYPROJECT, ROOT, rel
 from .ui import DeployError
 
@@ -45,10 +45,6 @@ OWNED_DIRS = ("src", "tests", "typings")
 LOCK = ROOT / "uv.lock"
 CONSTRAINTS = "constraints.txt"
 
-# PEP 508 (and uv): a project name starts AND ends with a letter or digit; the package
-# src/<pkg>/ (the name in snake_case) must also start with a letter
-APP_NAME = re.compile(r"[A-Za-z](?:[A-Za-z0-9_-]*[A-Za-z0-9])?")
-NAME_RULE = "letters, digits, '-' and '_', starting with a letter and ending with a letter or digit"
 # src/<pkg>/ may not be one of the project's own folders (the preset's src/ entries, such as
 # src/main.py, are checked too: see check_name_free)
 RESERVED_PACKAGES = {

@@ -842,8 +842,37 @@
             "problemMatcher": []
         },
         {
+            "label": "deploy: apply",
+            "detail": "./deploy apply  |  apply every pytemplate.toml change (rename, dependencies, uv.lock, environments, hook)",
+            "icon": {
+                "id": "sync"
+            },
+            "type": "process",
+            "command": "/bin/sh",
+            "args": [
+                "${workspaceFolder}/deploy",
+                "apply"
+            ],
+            "windows": {
+                "command": "${workspaceFolder}\\deploy.cmd",
+                "args": [
+                    "apply"
+                ]
+            },
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            },
+            "problemMatcher": []
+        },
+        {
             "label": "deploy: setup",
-            "detail": "./deploy setup  |  install interpreters and environments, lock deps and generate configs",
+            "detail": "./deploy setup  |  first time on a clone: the same as apply",
             "icon": {
                 "id": "tools"
             },
