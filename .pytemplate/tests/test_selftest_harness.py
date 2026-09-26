@@ -131,6 +131,24 @@ def test_shells_list_runs_nothing(probes: dict[tuple[str, str], str], monkeypatc
     assert shells.selftest(make(), ["--list"]) == 0
 
 
+def test_quiet_keeps_what_selftest_shells_was_asked_for(
+    probes: dict[tuple[str, str], str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """-q hides progress, never the answer (CLAUDE.md 5.3): the --list rows, the result table and
+    which shell failed which test, and why."""
+    from runner import ui
+
+    monkeypatch.setattr(ui, "QUIET", True)
+    assert shells.selftest(make(), ["--list"]) == 0
+    listed = capsys.readouterr().err
+    assert "/bin/sh" in listed and "/bin/dash" in listed, listed
+    probes[("dash", "T2")] = "fail"
+    assert shells.selftest(make(), ["--tests", "T1,T2"]) == 1
+    err = capsys.readouterr().err
+    assert "T1 argv" in err and "failures:" in err and "dash T2 exit: detail" in err, err
+    assert "dash: FAIL T2" not in err  # the per-shell progress lines stay hidden
+
+
 def test_shells_refuse_what_cannot_run(probes: dict[tuple[str, str], str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     with pytest.raises(DeployError, match="not found here: fish") as e:
         shells.selftest(make(), ["fish"])

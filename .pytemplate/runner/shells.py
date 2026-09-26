@@ -1383,9 +1383,9 @@ def _list_shells(shells: Sequence[Shell], as_json: bool) -> None:
         return
     ui.step(f"{len(shells)} shells found")
     width = max([len(s.name) for s in shells] + [5]) + 2
-    for s in shells:
-        ui.info(f"  {s.name.ljust(width)}{s.argv[0]}")
-        ui.info(f"  {''.ljust(width)}{s.describe()}")
+    for s in shells:  # what --list was asked for: shown even with -q
+        ui.report(f"  {s.name.ljust(width)}{s.argv[0]}")
+        ui.report(f"  {''.ljust(width)}{s.describe()}")
 
 
 def _run_all(ctx: Context, shells: Sequence[Shell], tests: Sequence[str], jobs: int) -> list[Result]:
@@ -1450,16 +1450,17 @@ def selftest(cfg: Config, args: list[str]) -> int:
             shutil.rmtree(tmp, ignore_errors=True)
     seconds = time.perf_counter() - started
 
+    # The table and why each test failed or was skipped are the answer: shown even with -q.
     ui.info("")
     for line in table(shells, results, opts.tests):
-        ui.info(line)
+        ui.report(line)
     fails = [r for r in results if r.status == "fail"]
     skips = [r for r in results if r.status == "skip"]
     for title, group in (("failures", fails), ("skipped", skips)):
         if group:
-            ui.info(f"\n{title}:")
+            ui.report(f"\n{title}:")
             for r in group:
-                ui.info(f"  {r.shell} {r.test} {TESTS[r.test]}: {r.detail}")
+                ui.report(f"  {r.shell} {r.test} {TESTS[r.test]}: {r.detail}")
     if opts.as_json:
         print(json.dumps(report_json(project, shells, results, seconds), indent=2))
     passed = sum(1 for r in results if r.status == "pass")

@@ -626,7 +626,8 @@ header rules (with detector tests proving each rule fires).
   stdout on purpose: `help`, `__probe`, `shell-setup` snippets, and the `--json` reports of
   `selftest --shells` (also with `--list`) and `selftest --e2e`.
 - `-q` hides progress (`ui.step`, `ui.command`, `ui.ok`, `ui.info`), never what was asked for:
-  `ui.report` (the `tasks` list, the stderr of a failed query), warnings, errors and
+  `ui.report` (the `tasks` list, the stderr of a failed query, the `selftest --shells` list,
+  result table and failure/skip lines), warnings, errors and
   `check_line` always print, and a dry run ignores `-q` (its output is the plan). Still
   `ui.info` (hidden by `-q`): the `mode` display (`cmd_mode._describe`) and `render
   --check/--diff` lists (`cmd_mode.cmd_render`, `render.apply`).
