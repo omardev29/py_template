@@ -306,6 +306,30 @@ def test_lintc_native_decorators_match_mypyc(tmp_path: Path, head: str, native: 
         assert len(found) == 1 and "class 'P' uses @" in found[0].message and "regular (slow) Python class" in found[0].message
 
 
+SCOPED_CASES = [
+    # A function's own import never decides a module-level decorator (the last import of the
+    # whole file won: a false error under the mypyc profile, or a slow class not reported)
+    ("from dataclasses import dataclass\n\n\ndef f():\n    from mylib import dataclass\n    return dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n", True),
+    ("from attrs import define as dataclass\n\n\ndef f():\n    from dataclasses import dataclass\n    return dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n", False),
+    ("from dataclasses import dataclass\n\n\nclass C:\n    from mylib import dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n", True),
+    # module level includes the blocks of if/try/with
+    ("try:\n    from dataclasses import dataclass\nexcept ImportError:\n    raise\n\n\n@dataclass\nclass P:\n    x: int = 0\n", True),
+    ("import sys\nif sys.version_info >= (3, 11):\n    from attrs import define as dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n", False),
+]
+
+
+@pytest.mark.parametrize(("source", "native"), SCOPED_CASES)
+def test_lintc_resolves_decorators_in_the_scope_of_the_class(tmp_path: Path, source: str, native: bool) -> None:
+    found = [f for f in _lint(tmp_path, source) if "class 'P'" in f.message]
+    assert (found == []) is native, [f.message for f in found]
+
+
+def test_lintc_a_class_in_a_function_sees_that_functions_imports(tmp_path: Path) -> None:
+    source = "def f():\n    from dataclasses import dataclass\n\n    @dataclass\n    class P:\n        x: int = 0\n\n    return P\n"
+    found = _lint(tmp_path, source)
+    assert [("uses @" in f.message, "inside a function" in f.message) for f in found] == [(False, True)]
+
+
 @needs_venv
 def test_lintc_native_decorators_follow_the_locked_mypyc() -> None:
     """A mypy bump that changes mypyc's list of native decorators must fail selftest."""

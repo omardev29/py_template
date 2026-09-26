@@ -1351,8 +1351,10 @@ Formats:
   - `librt` (mypyc's runtime library): an error while PyPy is supported; otherwise only when it
     is not a `[project]` dependency (read from `PYPROJECT`): mypy installs it in the dev group
     only, so pyz/portable/wheel builds lacked it (`./deploy add librt --cpython-only`).
-  - Class decorators: resolved through the module's absolute imports to full names
-    (`_import_aliases`, star imports included) and compared with `NATIVE_CLASS_DECORATORS`,
+  - Class decorators: resolved to full names through the absolute imports of the scope the class
+    statement runs in, over those of the scopes around it (`_import_aliases`: module level with
+    its if/try/with blocks; a function's own import never decides a module-level decorator, as
+    it once did when the file's last import won; star imports included) and compared with `NATIVE_CLASS_DECORATORS`,
     which mirrors mypyc (`dataclasses.dataclass`, `attr.s`, `attr.attrs`, `typing[_extensions].final`,
     `mypy_extensions.trait`/`mypyc_attr`): attrs' `define`/`frozen`/`mutable` are NOT native,
     `@attr.s` is; `@mypyc_attr(native_class=False)` silences it. A drift test compares the set

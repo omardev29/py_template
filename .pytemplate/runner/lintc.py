@@ -59,30 +59,63 @@ def _decorator_name(node: ast.expr) -> str:
     return ".".join(reversed(parts))
 
 
-def _import_aliases(tree: ast.Module) -> dict[str, str]:
-    """Local name -> full dotted name, from the module's absolute imports (what mypy resolves).
+def _add_import(aliases: dict[str, str], node: ast.Import | ast.ImportFrom) -> None:
+    """Record the names an absolute import binds: local name -> full dotted name.
 
     Relative imports stay unresolved: a local `final` or `dataclass` is not the real one.
     """
-    aliases: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for a in node.names:
-                if a.asname:
-                    aliases[a.asname] = a.name
-                else:
-                    top = a.name.partition(".")[0]
-                    aliases[top] = top
-        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
-            for a in node.names:
-                if a.name == "*":  # mypy resolves star imports too
-                    for full in NATIVE_CLASS_DECORATORS:
-                        module, _, name = full.rpartition(".")
-                        if module == node.module:
-                            aliases.setdefault(name, full)
-                else:
-                    aliases[a.asname or a.name] = f"{node.module}.{a.name}"
-    return aliases
+    if isinstance(node, ast.Import):
+        for a in node.names:
+            if a.asname:
+                aliases[a.asname] = a.name
+            else:
+                top = a.name.partition(".")[0]
+                aliases[top] = top
+    elif not node.level and node.module:
+        for a in node.names:
+            if a.name == "*":  # mypy resolves star imports too
+                for full in NATIVE_CLASS_DECORATORS:
+                    module, _, name = full.rpartition(".")
+                    if module == node.module:
+                        aliases.setdefault(name, full)
+            else:
+                aliases[a.asname or a.name] = f"{node.module}.{a.name}"
+
+
+def _scope_statements(body: list[ast.stmt]) -> Iterator[ast.stmt]:
+    """The statements that run in the scope of `body`, in source order: those in its if/try/with/
+    for/while/match blocks too, never those of a nested function or class body."""
+    for stmt in body:
+        yield stmt
+        if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+        for name in ("body", "orelse", "finalbody"):
+            inner = getattr(stmt, name, None)
+            if isinstance(inner, list):
+                yield from _scope_statements(inner)
+        for block in (*getattr(stmt, "handlers", ()), *getattr(stmt, "cases", ())):
+            yield from _scope_statements(block.body)
+
+
+def _import_aliases(tree: ast.Module) -> dict[ast.ClassDef, dict[str, str]]:
+    """Each class -> the names its decorators resolve through (what mypy resolves): the absolute
+    imports of the scope the class statement runs in over those of the scopes around it. A
+    function's own import never decides a module-level decorator."""
+    out: dict[ast.ClassDef, dict[str, str]] = {}
+    stack: list[tuple[list[ast.stmt], dict[str, str]]] = [(tree.body, {})]
+    while stack:
+        body, outer = stack.pop()
+        aliases = dict(outer)
+        statements = list(_scope_statements(body))
+        for stmt in statements:
+            if isinstance(stmt, ast.Import | ast.ImportFrom):
+                _add_import(aliases, stmt)
+        for stmt in statements:
+            if isinstance(stmt, ast.ClassDef):
+                out[stmt] = aliases
+            if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                stack.append((stmt.body, aliases))
+    return out
 
 
 def _full_name(written: str, aliases: dict[str, str]) -> str:
@@ -211,7 +244,8 @@ def lint_file(cfg: Config, path: Path) -> list[Finding]:
             decorators = node.decorator_list
             if not any(_is_explicitly_non_native(d) for d in decorators):
                 written = [_decorator_name(d) for d in decorators]
-                bad = [w or "<expression>" for w in written if _full_name(w, aliases) not in NATIVE_CLASS_DECORATORS]
+                scope = aliases.get(node, {})
+                bad = [w or "<expression>" for w in written if _full_name(w, scope) not in NATIVE_CLASS_DECORATORS]
                 if bad:
                     add(
                         node,
