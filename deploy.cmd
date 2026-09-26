@@ -44,9 +44,14 @@ if not defined PT_UV goto :no_uv
 
 set "PYTEMPLATE_CALLER_CWD=%CD%"
 set "PYTEMPLATE_LAUNCHER=cmd"
-rem The runner runs on the project's Python (.python-version next to it): a
-rem UV_PYTHON of the caller must not choose it (setlocal keeps this local).
+rem The runner runs on the project's Python (.python-version next to it), in
+rem the caller's folder: a UV_PYTHON of the caller must not choose that Python,
+rem a PYTHONHOME or PYTHONPATH must not break it, a UV_WORKING_DIR must not
+rem move it (setlocal keeps this local).
 set "UV_PYTHON="
+set "PYTHONHOME="
+set "PYTHONPATH="
+set "UV_WORKING_DIR="
 rem cmd expands the whole line before running it: the helper variables are
 rem cleared for the runner while uv still gets their values.
 set "PT_ROOT=" & set "PT_UV=" & "%PT_UV%" run --quiet --script "%PT_ROOT%.pytemplate\deploy.py" %*

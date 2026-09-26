@@ -277,8 +277,9 @@ end
 NU_SNIPPET = r"""
 # `deploy` in nushell from any folder of a pytemplate project.
 # Paste into your config.nu (`$nu.config-path` prints where it is), then open a new shell.
-# It runs .pytemplate/deploy.py with uv directly, so uv must be on PATH. UV_PYTHON is
-# emptied for it (uv reads that as unset): the runner runs on the project's Python.
+# It runs .pytemplate/deploy.py with uv directly, so uv must be on PATH. Like the launchers
+# it keeps your UV_PYTHON, PYTHONHOME, PYTHONPATH and UV_WORKING_DIR away from the runner
+# (uv and Python read an empty value as unset; uv refuses an empty UV_WORKING_DIR).
 def --wrapped deploy [...rest] {
     mut dir = $env.PWD
     while not ($dir | path join '.pytemplate' 'deploy.py' | path exists) {
@@ -289,7 +290,7 @@ def --wrapped deploy [...rest] {
         $dir = $parent
     }
     let script = ($dir | path join '.pytemplate' 'deploy.py')
-    with-env {PYTEMPLATE_CALLER_CWD: $env.PWD, PYTEMPLATE_LAUNCHER: 'nu', UV_PYTHON: ''} { ^uv run --quiet --script $script ...$rest }
+    with-env {PYTEMPLATE_CALLER_CWD: $env.PWD, PYTEMPLATE_LAUNCHER: 'nu', UV_PYTHON: '', PYTHONHOME: '', PYTHONPATH: '', UV_WORKING_DIR: '.'} { ^uv run --quiet --script $script ...$rest }
 }
 """
 

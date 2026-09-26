@@ -1136,8 +1136,10 @@ is typed the same way everywhere:
 | PowerShell 7 / Windows PowerShell 5.1 on Windows | `deploy.ps1` | `./deploy` resolves to `deploy.ps1`. If the execution policy blocks it: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (a copy from a downloaded zip also needs `Unblock-File .\deploy.ps1`), or use `.\deploy.cmd` |
 
 Editors do not depend on the shell: VS Code tasks run `/bin/sh deploy` (`deploy.cmd` on
-Windows) and Neovim runs uv directly. The launchers ignore a `UV_PYTHON` you export: the runner
-always runs on the project's `python.cpython`. `./deploy` works under a caller's `set -eu`.
+Windows) and Neovim runs uv directly. The launchers ignore a `UV_PYTHON`, `PYTHONHOME`,
+`PYTHONPATH` or `UV_WORKING_DIR` you export: the runner always runs on the project's
+`python.cpython`, in the folder where the command was typed (the xonsh alias of `shell-setup`
+keeps them: it can only hand uv an argument list). `./deploy` works under a caller's `set -eu`.
 `./deploy doctor` shows which launcher started it and checks that the launchers kept their line
 endings and executable bit.
 

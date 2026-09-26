@@ -353,6 +353,7 @@ def test_snippets_keep_the_launcher_contract() -> None:
     assert "if ($MyInvocation.ExpectingInput) { $input | & $ps1 @args } else { & $ps1 @args }" in pwsh
     nu = shells.snippet("nu")
     assert "PYTEMPLATE_LAUNCHER: 'nu'" in nu and "UV_PYTHON: ''" in nu
+    assert "PYTHONHOME: ''" in nu and "PYTHONPATH: ''" in nu and "UV_WORKING_DIR: '.'" in nu
     assert "^uv run --quiet --script $script ...$rest" in nu
     xonsh = shells.snippet("xonsh")
     assert '[uv, "run", "--quiet", "--script", str(script), *args]' in xonsh
@@ -367,11 +368,22 @@ def _snippet_file(tmp_path: Path, shell: str, suffix: str) -> Path:
     return path
 
 
-def _snippet_run(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+def _snippet_run(argv: list[str], cwd: Path, extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        argv, cwd=cwd, env=shells.child_env(), capture_output=True, text=True, encoding="utf-8",
+        argv, cwd=cwd, env={**shells.child_env(), **(extra or {})}, capture_output=True, text=True, encoding="utf-8",
         errors="replace", timeout=180, stdin=subprocess.DEVNULL, check=False,
     )  # fmt: skip
+
+
+def _python_traps(tmp: Path) -> dict[str, str]:
+    """A caller's PYTHONHOME without a stdlib, a PYTHONPATH that shadows tomllib and a
+    UV_WORKING_DIR elsewhere: the functions that run uv directly (nu) keep them from the runner
+    like the launchers do."""
+    shadow = tmp / "shadow"
+    shadow.mkdir(exist_ok=True)
+    (shadow / "tomllib.py").write_text('raise SystemExit("shadowed tomllib")\n', encoding="utf-8")
+    (tmp / "elsewhere").mkdir(exist_ok=True)
+    return {"PYTHONHOME": str(tmp / "no-home"), "PYTHONPATH": str(shadow), "UV_WORKING_DIR": str(tmp / "elsewhere")}
 
 
 def _probe_lines(stdout: str) -> list[dict[str, object]]:
@@ -435,7 +447,7 @@ def test_pwsh_snippet_runs(tmp_path: Path) -> None:
         "'RC2=' + $LASTEXITCODE",
         "exit 0",
     ])  # fmt: skip
-    r = _snippet_run([pwsh, "-NoProfile", "-NonInteractive", "-EncodedCommand", shells.ps_encoded(code)], tmp_path)
+    r = _snippet_run([pwsh, "-NoProfile", "-NonInteractive", "-EncodedCommand", shells.ps_encoded(code)], tmp_path, _python_traps(tmp_path))
     probes = _probe_lines(r.stdout)
     assert len(probes) == 2, r.stdout + r.stderr
     _assert_probe(probes[0], ["a b", "", "*", "-X:utf8"], sub)
@@ -485,7 +497,8 @@ def test_nu_snippet_runs(tmp_path: Path) -> None:
         pytest.skip("nu not installed")
     snip = _snippet_file(tmp_path, "nu", ".nu")
     sub = _sub()
-    r = _snippet_run([nu, "--no-config-file", "-c", f"source {shells.nu_quote(str(snip))}; cd {shells.nu_quote(str(sub))}; deploy __probe 7 0 'a b' ''"], tmp_path)
+    run = [nu, "--no-config-file", "-c", f"source {shells.nu_quote(str(snip))}; cd {shells.nu_quote(str(sub))}; deploy __probe 7 0 'a b' ''"]
+    r = _snippet_run(run, tmp_path, _python_traps(tmp_path))
     probes = _probe_lines(r.stdout)
     assert len(probes) == 1 and r.returncode == 7, r.stdout + r.stderr
     _assert_probe(probes[0], ["a b", ""], sub)

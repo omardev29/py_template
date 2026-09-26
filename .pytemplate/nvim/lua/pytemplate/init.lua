@@ -352,11 +352,19 @@ function M.caller_cwd()
   return M.native(M.root() or ".")
 end
 
----Environment additions for ./deploy (jobstart/vim.system keep the rest of Neovim's). UV_PYTHON
----is emptied (uv reads that as unset) like the launchers do: the runner runs on the project's
----Python, whatever the user's UV_PYTHON says.
+---Environment additions for ./deploy (jobstart/vim.system keep the rest of Neovim's). Like the
+---launchers, the runner runs on the project's Python in the job's folder whatever the user
+---exported: UV_PYTHON, PYTHONHOME and PYTHONPATH are emptied (uv and Python read an empty one
+---as unset) and UV_WORKING_DIR is "." (uv refuses an empty one).
 function M.deploy_env(extra)
-  local base = { PYTEMPLATE_CALLER_CWD = M.caller_cwd(), PYTEMPLATE_LAUNCHER = "nvim", UV_PYTHON = "" }
+  local base = {
+    PYTEMPLATE_CALLER_CWD = M.caller_cwd(),
+    PYTEMPLATE_LAUNCHER = "nvim",
+    UV_PYTHON = "",
+    PYTHONHOME = "",
+    PYTHONPATH = "",
+    UV_WORKING_DIR = ".",
+  }
   return vim.tbl_extend("force", base, extra or {})
 end
 

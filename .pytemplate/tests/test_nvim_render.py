@@ -277,9 +277,15 @@ else
   check("launcher fallback argv", #fb == 3 and fb[1] == "/bin/sh" and fb[2] == pt.launcher() and fb[3] == "help", vim.inspect(fb))
 end
 
--- the runner never runs on the caller's UV_PYTHON (uv reads an empty one as unset)
+-- the runner never runs on the caller's UV_PYTHON, PYTHONHOME, PYTHONPATH (uv and Python read an
+-- empty one as unset) nor in its UV_WORKING_DIR (uv refuses an empty one: "." is the job's folder)
 local denv = pt.deploy_env({ X = "1" })
-check("deploy env", denv.UV_PYTHON == "" and denv.PYTEMPLATE_LAUNCHER == "nvim" and denv.X == "1", vim.inspect(denv))
+check(
+  "deploy env",
+  denv.UV_PYTHON == "" and denv.PYTHONHOME == "" and denv.PYTHONPATH == "" and denv.UV_WORKING_DIR == "."
+    and denv.PYTEMPLATE_LAUNCHER == "nvim" and denv.X == "1",
+  vim.inspect(denv)
+)
 
 -- Windows: uv from PATH only as a real uv.exe, never a uv.cmd/uv.bat shim earlier on PATH
 -- (deploy.cmd and deploy.ps1 do the same). The stub emulates Neovim's PATHEXT lookup.

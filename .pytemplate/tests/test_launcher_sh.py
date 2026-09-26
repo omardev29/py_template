@@ -163,7 +163,7 @@ LINT_RULES = [
     # `x=$(cmd)` takes cmd's status: a caller's set -e (sh -e deploy, niubash) would stop there.
     (r"^(?!.*\|\|).*\b_pt_\w+=\$\(", "a command substitution needs `|| _pt_x=` (a caller's set -e)"),
 ]
-PREFIX_ONLY = {"IFS", "MSYS_NO_PATHCONV", "MSYS2_ARG_CONV_EXCL", "UV_PYTHON"}  # only as `NAME=value command`
+PREFIX_ONLY = {"IFS", "MSYS_NO_PATHCONV", "MSYS2_ARG_CONV_EXCL", "UV_PYTHON", "PYTHONHOME", "PYTHONPATH", "UV_WORKING_DIR"}  # only as `NAME=value command`
 EXPORTED = {"PYTEMPLATE_CALLER_CWD", "PYTEMPLATE_LAUNCHER"}
 FUNCTION = re.compile(r"^\s*([A-Za-z_]\w*)\s*\(\)\s*\{")
 
@@ -638,7 +638,8 @@ def test_in_process_run_leaves_no_name_behind(name: str, case: str, tmp_path: Pa
     argv = _shell_argv(name)
     assert len(FUNCTIONS) >= 10, FUNCTIONS
     launcher, cwd, code = LAUNCHER, ROOT, 5
-    env = _clean_env(__RUBASH_SHELL_NAME="1", UV_PYTHON=str(tmp_path / "no" / "python"))
+    keep = {"UV_PYTHON": str(tmp_path / "no" / "python"), **_python_traps(tmp_path)}  # the session's own
+    env = _clean_env(__RUBASH_SHELL_NAME="1", **keep)
     if case == "no-project":
         launcher, cwd, code = tmp_path / "deploy", tmp_path, 2
         shutil.copyfile(LAUNCHER, launcher)
@@ -646,11 +647,12 @@ def test_in_process_run_leaves_no_name_behind(name: str, case: str, tmp_path: Pa
         if _system_uv():
             pytest.skip("uv is installed in a system folder the launcher always searches")
         code = 127
-        env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "__RUBASH_SHELL_NAME": "1", "UV_PYTHON": "keep"}
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "__RUBASH_SHELL_NAME": "1", **keep}
     report = (
         "printf 'LEFT:'; set | grep '^_pt_' | tr '\\n' ' '; printf '\\n'; "
         f"for f in {' '.join(FUNCTIONS)}; do if command -v \"$f\" >/dev/null 2>&1; then printf 'FUNC:%s\\n' \"$f\"; fi; done; "
-        "printf 'VARS:%s|%s|%s\\n' \"${PYTEMPLATE_LAUNCHER-unset}\" \"${PYTEMPLATE_CALLER_CWD-unset}\" \"${UV_PYTHON-unset}\""
+        "printf 'VARS:%s|%s|%s|%s|%s|%s\\n' \"${PYTEMPLATE_LAUNCHER-unset}\" \"${PYTEMPLATE_CALLER_CWD-unset}\" "
+        "\"${UV_PYTHON-unset}\" \"${PYTHONHOME-unset}\" \"${PYTHONPATH-unset}\" \"${UV_WORKING_DIR-unset}\""
     )
     ptcmd = f"trap {q(report)} EXIT; set -- __probe {code} 0 x; . {q(str(launcher))}"
     run = Run([*argv, "-c", 'eval "$PTCMD"'], cwd, {**env, "PTCMD": ptcmd})
@@ -658,9 +660,10 @@ def test_in_process_run_leaves_no_name_behind(name: str, case: str, tmp_path: Pa
     where = f"stdout={run.out!r} stderr={run.err!r}"
     assert run.rc == code, where
     assert "LEFT:" in lines and not [ln for ln in lines if ln.startswith("FUNC:")], where
-    assert f"VARS:unset|unset|{env['UV_PYTHON']}" in lines, where
+    assert "VARS:unset|unset|" + "|".join(keep.values()) in lines, where
     if case == "ok":
         assert run.probe and run.probe["launcher"] == "sh:niubash" and run.probe["argv"] == ["x"], where
+        assert run.probe["cwd"] == str(ROOT), where  # not UV_WORKING_DIR
 
 
 # --- UV_PYTHON never picks the runner's Python ---------------------------------------------------------
@@ -672,6 +675,33 @@ def test_launcher_clears_the_callers_uv_python(tmp_path: Path) -> None:
     would refuse) must not choose it."""
     env = _clean_env(UV_PYTHON=str(tmp_path / "no" / "python3.10"))
     Run(["/bin/sh", "deploy", "__probe", "0", "0", "x"], ROOT, env).check(0, ROOT, args=["x"])
+
+
+def _python_traps(tmp: Path) -> dict[str, str]:
+    """What a caller may export that breaks the Python uv starts the runner on (a PYTHONHOME
+    without a stdlib, a PYTHONPATH module shadowing one the runner imports) or moves the folder
+    uv starts it in (UV_WORKING_DIR)."""
+    shadow = tmp / "shadow"
+    shadow.mkdir(exist_ok=True)
+    (shadow / "tomllib.py").write_text('raise SystemExit("shadowed tomllib")\n', encoding="utf-8")
+    (tmp / "elsewhere").mkdir(exist_ok=True)
+    return {"PYTHONHOME": str(tmp / "no-home"), "PYTHONPATH": str(shadow), "UV_WORKING_DIR": str(tmp / "elsewhere")}
+
+
+@needs_posix
+@pytest.mark.parametrize("launcher", ["deploy", "deploy.ps1"])
+def test_launcher_ignores_the_callers_python_home_path_and_uv_working_dir(launcher: str, tmp_path: Path) -> None:
+    """README: the runner ignores PYTHONHOME, PYTHONPATH and UV_WORKING_DIR. The launchers remove
+    them for uv (like UV_PYTHON): every command used to die with `Failed to import encodings`,
+    and UV_WORKING_DIR moved the runner (and the caller's folder with it) elsewhere."""
+    env = _clean_env(**_python_traps(tmp_path))
+    cwd = ROOT / ".pytemplate"
+    if launcher == "deploy":
+        run = Run(["/bin/sh", LAUNCHER, "__probe", "0", "0", "x"], cwd, env)
+    else:
+        run = Run([_pwsh(), "-NoProfile", "-NonInteractive", "-File", ROOT / "deploy.ps1", "__probe", "0", "0", "x"], cwd, env)
+    run.check(0, cwd, args=["x"])
+    assert run.probe["cwd"] == str(cwd), run.out + run.err
 
 
 @needs_posix

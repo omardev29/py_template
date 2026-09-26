@@ -43,6 +43,9 @@ PS_ARGS = [
     "\u2018q\u2019", "\u201a; Write-Output PWNED; \u201b",
 ]  # fmt: skip
 QUOTES = ("'", "\u2018", "\u2019", "\u201a", "\u201b")  # what PowerShell reads as a single quote
+# What the launchers keep from the runner's start: the caller's interpreter choice, a PYTHONHOME or
+# PYTHONPATH that breaks the runner's Python, and the folder uv would move to.
+CLEARED = {"UV_PYTHON", "PYTHONHOME", "PYTHONPATH", "UV_WORKING_DIR"}
 
 
 def _ps_literal(s: str) -> str:
@@ -93,7 +96,8 @@ def test_cmd_keeps_the_registry_path_out_of_call_arguments() -> None:
     assert any(line.lower().startswith('set "pt_list=%pt_list:"=%"') for line in code), "quotes are not removed"
     uv_line = next(line for line in code if "%*" in line)
     before = code[: code.index(uv_line)]
-    assert 'set "UV_PYTHON="' in before, "the caller's UV_PYTHON must not choose the runner's Python"
+    for name in sorted(CLEARED):  # they must not choose, break or move the runner's Python
+        assert f'set "{name}="' in before, name
 
 
 # --- deploy.ps1: static ------------------------------------------------------------------------
@@ -116,12 +120,12 @@ def test_ps1_has_no_param_block_and_leaves_path_alone() -> None:
 def test_ps1_restores_every_variable_it_sets() -> None:
     text = PS1.read_text(encoding="ascii")
     assigned = {m.upper() for m in re.findall(r"(?i)\$env:(\w+)\s*=(?!=)", text)}
-    removed = {m.upper() for m in re.findall(r"(?i)Remove-Item\s+-LiteralPath\s+Env:(\w+)", text)}
+    removed = {m.upper() for line in re.findall(r"(?im)^\s*Remove-Item\s+-LiteralPath\s+(Env:.*)$", text) for m in re.findall(r"Env:(\w+)", line)}
     names = re.search(r"(?m)^\$names = (.+)$", text)
     assert names, "deploy.ps1 lists the variables it restores in `$names = ...`"
     restored = {m.upper() for m in re.findall(r"'(\w+)'", names[1])}
     assert assigned and assigned <= restored, f"set but not restored: {assigned - restored}"
-    assert removed == {"UV_PYTHON"} and removed <= restored, f"removed but not restored: {removed - restored}"
+    assert removed == CLEARED and removed <= restored, f"removed but not restored: {removed - restored}"
 
 
 def test_ps1_never_names_the_pipeline_variable() -> None:
@@ -371,10 +375,19 @@ def test_cmd_hands_the_runner_only_its_two_variables(tmp_path: Path) -> None:
 
 @windows_only
 def test_cmd_clears_the_callers_uv_python(tmp_path: Path) -> None:
-    """A UV_PYTHON (here a missing interpreter, which uv would refuse) never picks the runner's Python."""
-    r = _run([str(CMD), "__probe", "0", "0", "x"], ROOT, _clean_env(UV_PYTHON=str(tmp_path / "no" / "python.exe")))
+    """A UV_PYTHON (here a missing interpreter, which uv would refuse) never picks the runner's
+    Python; a PYTHONHOME or PYTHONPATH never breaks it, a UV_WORKING_DIR never moves it."""
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    (shadow / "tomllib.py").write_text('raise SystemExit("shadowed tomllib")\n', encoding="utf-8")
+    (tmp_path / "elsewhere").mkdir()
+    env = _clean_env(
+        UV_PYTHON=str(tmp_path / "no" / "python.exe"), PYTHONHOME=str(tmp_path / "no-home"), PYTHONPATH=str(shadow),
+        UV_WORKING_DIR=str(tmp_path / "elsewhere"),
+    )  # fmt: skip
+    r = _run([str(CMD), "__probe", "0", "0", "x"], SUB, env)
     assert r.returncode == 0, r.stdout + r.stderr
-    _check(_probes(r)[0], ROOT, "cmd", ["x"])
+    _check(_probes(r)[0], SUB, "cmd", ["x"])
 
 
 def _fake_reg(tmp: Path, value: str) -> Path:
@@ -615,19 +628,30 @@ def test_ps1_clears_the_callers_uv_python_and_restores_it(name: str, tmp_path: P
     exe = _ps_exe(name)
     ps1 = _ps_literal(str(PS1))
     missing = str(tmp_path / "no" / "python")
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    (shadow / "tomllib.py").write_text('raise SystemExit("shadowed tomllib")\n', encoding="utf-8")
+    (tmp_path / "elsewhere").mkdir()
+    values = {"UV_PYTHON": missing, "PYTHONHOME": str(tmp_path / "no-home"), "PYTHONPATH": str(shadow), "UV_WORKING_DIR": str(tmp_path / "elsewhere")}
+    assert set(values) == CLEARED
     body = "\n".join([
-        f"$env:UV_PYTHON = {_ps_literal(missing)}",
+        *[f"$env:{k} = {_ps_literal(v)}" for k, v in values.items()],
         f"& {ps1} __probe 0 0 x",
         "'RC=' + $LASTEXITCODE",
-        "'UVP=' + $env:UV_PYTHON",
-        "Remove-Item Env:UV_PYTHON",
+        *[f"'KEPT={k}=' + $env:{k}" for k in values],
+        *[f"Remove-Item Env:{k}" for k in values],
         f"& {ps1} __probe 0 0 y",
-        "'EXISTS=' + (Test-Path Env:UV_PYTHON)",
+        *[f"'EXISTS={k}=' + (Test-Path Env:{k})" for k in values],
         "exit 0",
     ])  # fmt: skip
-    r = _session(exe, body)
-    assert [p["argv"] for p in _probes(r)] == [["x"], ["y"]], r.stdout + r.stderr
-    assert "RC=0" in r.stdout and f"UVP={missing}" in r.stdout and "EXISTS=False" in r.stdout, r.stdout
+    r = _session(exe, body, SUB)
+    probes = _probes(r)
+    assert [p["argv"] for p in probes] == [["x"], ["y"]], r.stdout + r.stderr
+    for p in probes:
+        _check(p, SUB, "ps1:")  # in the caller's folder, not UV_WORKING_DIR
+    assert "RC=0" in r.stdout, r.stdout
+    for k, v in values.items():
+        assert f"KEPT={k}={v}" in r.stdout and f"EXISTS={k}=False" in r.stdout, r.stdout
 
 
 @pytest.mark.parametrize("name", PS_NAMES)
