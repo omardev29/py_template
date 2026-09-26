@@ -277,19 +277,20 @@ and applies them.
 
 | You edited | What `./deploy apply` does |
 |---|---|
-| `app.name` | Renames the app the way `./deploy rename` does ([Renaming the app](#renaming-the-app)): moves `src/<pkg>/`, rewrites the references, updates `pyproject.toml`, re-locks and regenerates. It refuses when git has uncommitted changes (`--force` skips that check) and when the name is not valid (the rules of [New projects](#new-projects)). |
-| `app.preset` | Refuses (exit 2) and writes nothing: a project cannot switch presets in place. Put the old value back; for another preset, create a project with `./deploy new DIR --preset P` and move the code. |
+| `app.name` | Renames the app the way `./deploy rename` does ([Renaming the app](#renaming-the-app)): moves `src/<pkg>/`, rewrites the references, updates `pyproject.toml`, re-locks and regenerates. It refuses when git has uncommitted changes (`--force` skips that check), when the name is not valid (the rules of [New projects](#new-projects)) and when `src/` already has a package of that name. |
+| `app.preset` | Refuses (exit 2) and writes nothing: a project cannot switch presets in place. Put the old value back; for another preset, create a project with `./deploy new DIR --preset P` and move the code. A dependency you add yourself (`./deploy add raylib` in a script project) is not a preset switch. |
 | `[preset.flet] version` | Pins `flet`, `flet-desktop` and `flet-cli` to that version, re-locks `uv.lock` and syncs the environments. |
 | `[preset.raylib] package`, `version` | Removes the old raylib package, adds `{package}=={version}`, moves `no-build-package` to it, re-locks and syncs. |
-| `backend.supported` | Rewrites the managed parts of `pyproject.toml`, re-locks and syncs every supported environment. When PyPy is new it first checks that the code is valid Python 3.11. Environments no longer used are only listed (`./deploy clean --envs` removes them). |
+| `backend.supported` | Rewrites the managed parts of `pyproject.toml`, re-locks and syncs every supported environment. When PyPy is new it checks, right after the re-lock, that the code is valid Python 3.11 (if not, `pyproject.toml` and `uv.lock` get their old content back). Environments no longer used are only listed (`./deploy clean --envs` removes them). |
 | `python.cpython`, `python.pypy` | Rewrites the managed parts of `pyproject.toml`, re-locks when needed and syncs the environments on the new interpreters. |
 | `hooks.pre_commit` | `true`: installs or updates the git hook. `false`: removes pytemplate's own hook (another tool's hook is never touched). |
 | `backend.active`, `[typing]`, `[compile]`, `[vscode]`, `[tasks]`, `app.gui`, `app.assets` | Regenerates the generated files (most commands do it too). It warns when `compile.modules` or `app.assets` names something that does not exist. |
 | `[deploy]` and its tables | Nothing: `build` reads them. It warns when `deploy.exe.icon` or `deploy.upx.path` names a missing file. |
 
-Every check and refusal happens before the first write. When a dependency edit or the re-lock
-fails, `pyproject.toml` gets its old content back and nothing is recorded: fix the problem and run
-`apply` again. `--force` only skips the uncommitted-changes check of a rename. The summary ends
+Every check and refusal happens before the first write. When a dependency edit, the re-lock or
+the Python 3.11 check fails, `pyproject.toml` and `uv.lock` get their old content back and
+nothing is recorded: fix the problem and run `apply` again. `--force` only skips the
+uncommitted-changes check of a rename. The summary ends
 with `ok pytemplate.toml applied` (`setup`: `ok done. Try: ./deploy run ...`).
 
 Until `apply` runs, such an edit is only partly in effect. The commands that regenerate files

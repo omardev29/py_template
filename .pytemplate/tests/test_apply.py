@@ -424,11 +424,76 @@ def _declared(deps: list[str], dev: list[str] | None = None) -> cmd_apply.Projec
         ("flet", {}, FLET_DEPS, FLET_DEV, {"preset": "script"}, "flet"),
         ("raylib", {}, ["raylib==6.0.1.0"], [], {"preset": "script"}, "raylib"),
         ("script", {}, ["rich>=15.0.0"], [], {"preset": "no-such-preset"}, "script"),
+        # a script project (the record says so) that depends on raylib or flet: no preset switch
+        ("script", {}, ["rich>=15.0.0", "raylib==6.0.1.0"], [], {"preset": "script"}, "script"),
+        ("script", {}, ["rich>=15.0.0", *FLET_DEPS], FLET_DEV, {"preset": "script"}, "script"),
+        ("script", {}, [], ["flet-cli==1.0.1"], {"preset": "script"}, "script"),
+        # ...but a hand switch of that project is still one
+        ("flet", {}, ["rich>=15.0.0", "raylib==6.0.1.0"], [], {"preset": "script"}, "raylib"),
+        ("raylib", {}, ["rich>=15.0.0"], [], {"preset": "script"}, "script"),
     ],
 )
 def test_applied_preset(preset: str, options: dict[str, str], deps: list[str], dev: list[str], record: dict[str, Any] | None, expected: str) -> None:
     full = None if record is None else {"name": "alpha", "dependencies": [], "dev": [], **record}
     assert cmd_apply._applied_preset(_cfg(preset, **options), _declared(deps, dev), full) == expected
+
+
+NO_BUILD_RAYLIB = {"tool": {"uv": {"no-build-package": ["raylib"]}}}  # the managed block of a raylib project
+
+
+@pytest.mark.parametrize(
+    ("preset", "options", "deps", "data", "expected"),
+    [
+        # no record (a fresh project, or a lost state.json): raylib swapped by hand for another package
+        ("raylib", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB, "raylib"),
+        ("raylib", {"package": "raylib_software"}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB, "raylib"),
+        # every flet dependency removed: [tool.flet] is still there
+        ("flet", {}, [], {"tool": {"flet": {"org": "com.example"}, "uv": {}}}, "flet"),
+        # hand switches without a record: another preset's traces
+        ("script", {}, ["rich>=15.0.0"], {"tool": {"flet": {"org": "com.example"}}}, "flet"),
+        ("flet", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB, "raylib"),
+        # no trace of any preset in pyproject.toml: only a preset without traces made it
+        ("raylib", {}, ["raylib-sdl==6.0.1.0"], {}, "script"),
+        ("flet", {}, [], {"tool": {"uv": {"environments": []}}}, "script"),
+    ],
+)
+def test_applied_preset_reads_every_trace(preset: str, options: dict[str, str], deps: list[str], data: dict[str, Any], expected: str) -> None:
+    project = cmd_apply.Project(data, "alpha", {cmd_apply.req_key(r)[0]: r for r in deps}, {})
+    assert cmd_apply._applied_preset(_cfg(preset, **options), project, None) == expected
+
+
+def test_a_script_project_may_depend_on_raylib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`./deploy add raylib` in a script project that was applied (its record says script):
+    apply, setup and doctor take it for what it is, not for a hand-switched raylib project."""
+    project, uv = _project(tmp_path, monkeypatch, "script")
+    assert _run(project) == 0  # the record: script
+    uv(envs.tool_env(project.cfg()), ["add", "--frozen", "raylib==6.0.1.0"])
+    uv.locked = (project.root / "pyproject.toml").read_bytes()
+    for command in ("apply", "setup"):
+        assert _run(project, command=command) == 0
+    assert "raylib==6.0.1.0" in project.pyproject()["project"]["dependencies"]  # never removed
+    assert cmd_apply.pending(project.cfg()) == []
+    assert cmd_apply.load_record() == cmd_apply.record_of(project.cfg())
+
+
+def test_a_raylib_package_swapped_by_hand_before_the_first_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh raylib project (no record of its own) whose raylib was swapped by hand for
+    raylib_sdl, or whose record was lost: still a raylib project, not a script one."""
+    project, uv = _project(tmp_path, monkeypatch, "raylib")
+    uv(envs.tool_env(project.cfg()), ["remove", "--frozen", "raylib"])
+    uv(envs.tool_env(project.cfg()), ["add", "--frozen", "raylib_sdl==6.0.1.0"])
+    assert cmd_apply.applied_state(project.cfg(), cmd_apply.read_project()).preset == "raylib"
+    # the one thing to fix is [preset.raylib] (it wins over a hand `uv add`), not app.preset
+    assert cmd_apply.pending(project.cfg()) == [("[preset.raylib] is not applied to pyproject.toml (add raylib==6.0.1.0)", "./deploy apply")]
+    project.edit("preset.raylib", "package", "raylib_sdl")
+    assert cmd_apply.pending(project.cfg()) == []
+    assert _run(project) == 0
+    assert [r for r in project.pyproject()["project"]["dependencies"] if r.startswith("raylib")] == ["raylib-sdl==6.0.1.0"]
+    # the record lost (a state.json merge conflict resolved by rendering), then the next switch
+    (project.root / ".pytemplate" / "state.json").write_text("{}", encoding="utf-8")
+    project.edit("preset.raylib", "package", "raylib_software")
+    assert cmd_apply.applied_state(project.cfg(), cmd_apply.read_project()).preset == "raylib"
+    assert _run(project) == 0
 
 
 # --- which requirements change ----------------------------------------------------------------------
@@ -566,6 +631,155 @@ def test_a_failed_add_restores_pyproject_too(tmp_path: Path, monkeypatch: pytest
     assert (project.root / "pyproject.toml").read_bytes() == original
 
 
+def test_the_record_follows_the_lock_when_a_later_step_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The option change is locked, then `uv sync` fails: pyproject.toml and uv.lock hold the new
+    package, and so must the record, or reverting the option kept both raylib distributions."""
+    project, uv = _project(tmp_path, monkeypatch, "raylib")
+    assert _run(project) == 0
+    project.edit("preset.raylib", "package", "raylib_software")
+    uv.fail.add("sync")
+    with pytest.raises(DeployError, match="sync"):
+        _run(project)
+    assert [r for r in project.pyproject()["project"]["dependencies"] if r.startswith("raylib")] == ["raylib-software==6.0.1.0"]
+    assert cmd_apply.load_record() == {"name": "alpha", "preset": "raylib", "dependencies": ["raylib_software==6.0.1.0"], "dev": []}
+    uv.fail.clear()
+    project.edit("preset.raylib", "package", "raylib")
+    assert _run(project) == 0
+    assert [r for r in project.pyproject()["project"]["dependencies"] if r.startswith("raylib")] == ["raylib==6.0.1.0"]
+    assert cmd_apply.pending(project.cfg()) == []
+
+
+def test_the_record_follows_a_rename_when_the_lock_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rename is done before the lock: when the lock fails, the record keeps the applied
+    options under the NEW name (named after the old one it would no longer be trusted)."""
+    project, uv = _project(tmp_path, monkeypatch, "raylib")
+    project.edit("preset.raylib", "package", "raylib_sdl")
+    assert _run(project) == 0
+    project.edit("app", "name", "beta")
+    uv.fail.add("lock")
+    with pytest.raises(DeployError, match="the app is already renamed"):
+        _run(project)
+    uv.fail.clear()
+    assert cmd_apply.load_record() == {"name": "beta", "preset": "raylib", "dependencies": ["raylib_sdl==6.0.1.0"], "dev": []}
+    project.edit("preset.raylib", "package", "raylib_software")
+    assert _run(project) == 0
+    assert [r for r in project.pyproject()["project"]["dependencies"] if r.startswith("raylib")] == ["raylib-software==6.0.1.0"]
+
+
+def test_pypy_and_a_python_change_in_one_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Python 3.11 check syncs the tools environment (`uv sync --locked`) with the NEW
+    configuration: it runs once pyproject.toml and uv.lock follow it (with a python.cpython change
+    in the same edit, uv refused the old lock and apply stopped)."""
+    project, uv = _project(tmp_path, monkeypatch)
+    assert _run(project) == 0
+    project.edit("backend", "supported", ["cpython", "pypy", "mypyc"])
+    project.edit("python", "cpython", "3.13")
+    seen: list[tuple[bool, int]] = []
+
+    def precheck(cfg: Config) -> None:
+        seen.append((render.pyproject_outdated(cfg), envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, echo=False).returncode))
+
+    monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", precheck)
+    assert _run(project) == 0
+    assert seen == [(False, 0)]  # pyproject.toml follows the configuration, and uv.lock follows it
+    assert cmd_apply.read_project().pypy_locked
+
+
+def test_a_failed_python_311_check_restores_pyproject_and_the_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, uv = _project(tmp_path, monkeypatch)
+    assert _run(project) == 0
+    (project.root / "uv.lock").write_text("# locked\n", encoding="utf-8")
+    record = cmd_apply.load_record()
+    before = {n: (project.root / n).read_bytes() for n in ("pyproject.toml", "uv.lock")}
+    project.edit("backend", "supported", ["cpython", "pypy", "mypyc"])
+
+    def precheck(cfg: Config) -> None:
+        raise DeployError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
+
+    monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", precheck)
+    count = len(uv.calls)
+    with pytest.raises(DeployError) as e:
+        _run(project)
+    assert "pyproject.toml and uv.lock were restored" in str(e.value) and e.value.code == 2
+    assert {n: (project.root / n).read_bytes() for n in ("pyproject.toml", "uv.lock")} == before
+    assert ["lock"] in uv.changing(count) and not [c for c in uv.changing(count) if c[0] == "sync"]
+    assert cmd_apply.load_record() == record  # nothing recorded as applied
+
+
+def test_dry_run_with_pypy_new_and_a_stale_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """--dry-run runs the Python 3.11 check read-only (`uv run --locked --no-sync`), which a stale
+    uv.lock alone would fail: then it says the check waits for the re-lock instead of failing."""
+    project, uv = _project(tmp_path, monkeypatch)
+    assert _run(project) == 0
+    project.edit("backend", "supported", ["cpython", "pypy", "mypyc"])
+    uv(envs.tool_env(project.cfg()), ["add", "--frozen", "idna>=3"])  # by hand, not locked
+    ran: list[Config] = []
+    monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", ran.append)
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    capsys.readouterr()
+    assert _run(project) == 0
+    err = capsys.readouterr().err
+    assert ran == [] and "the Python 3.11 check (PyPy is new) is not run" in err and "uv.lock          would re-lock" in err
+    uv.locked = (project.root / "pyproject.toml").read_bytes()  # the lock follows pyproject.toml
+    assert _run(project) == 0
+    assert len(ran) == 1
+
+
+def test_a_state_file_that_cannot_be_written_is_a_clear_error(tmp_path: Path) -> None:
+    state = tmp_path / "state.json"
+    state.mkdir()  # a folder in the way: unwritable on every OS, even for root
+    with pytest.raises(DeployError, match="cannot write") as e:
+        cmd_apply.save_record(RECORD, state)
+    assert e.value.code == 2
+
+
+def test_a_pyproject_that_cannot_be_written_is_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, uv = _project(tmp_path, monkeypatch, "flet")
+    path = project.root / "pyproject.toml"
+    path.write_text(path.read_text(encoding="utf-8").replace('"alpha"', '"other"'), encoding="utf-8", newline="\n")
+    real = Path.write_text
+
+    def write_text(self: Path, *args: Any, **kwargs: Any) -> int:
+        if self.name == "pyproject.toml":
+            raise PermissionError(13, "Permission denied")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+    with pytest.raises(DeployError, match="cannot write pyproject.toml: Permission denied") as e:
+        _run(project)
+    assert e.value.code == 2
+
+
+def test_dry_run_of_a_name_that_normalizes_the_same(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """uv.lock holds the normalized project name: alpha -> Alpha re-locks nothing, and the
+    --dry-run says so (as rename's does)."""
+    project, uv = _project(tmp_path, monkeypatch)
+    assert _run(project) == 0
+    project.edit("app", "name", "Alpha")
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    capsys.readouterr()
+    assert _run(project) == 0
+    err = capsys.readouterr().err
+    assert "would rewrite [project] name" in err and "uv.lock          up to date (uv lock --check)" in err
+    project.edit("app", "name", "beta")
+    assert _run(project) == 0
+    assert "uv.lock          would re-lock (uv lock)" in capsys.readouterr().err
+
+
+def test_dry_run_of_a_rename_checks_the_references_where_they_are(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """compile.modules names the renamed package (zed.core): before the move it lives in
+    src/alpha/, so the --dry-run must not warn that it is missing; a module that is really
+    missing still warns."""
+    project, uv = _project(tmp_path, monkeypatch)
+    project.edit("compile", "modules", ["alpha.core", "alpha.gone"])
+    project.edit("app", "name", "zed")
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    capsys.readouterr()
+    assert _run(project) == 0
+    warnings = [line for line in capsys.readouterr().err.splitlines() if line.startswith("warning: compile.modules")]
+    assert warnings == ["warning: compile.modules: zed.gone not found in src/ (mypyc builds and `test mypyc` will fail)"]
+
+
 def test_dry_run_writes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     project, uv = _project(tmp_path, monkeypatch, "raylib")
     project.edit("preset.raylib", "package", "raylib_sdl")
@@ -639,8 +853,8 @@ def test_matrix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.
     assert _run(project) == 0  # a project in line with its pytemplate.toml
     project.edit(table, key, value)
     pyproject, count = (project.root / "pyproject.toml").read_bytes(), len(uv.calls)
-    prechecks: list[int] = []  # changing uv calls made before the precheck ran
-    monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", lambda cfg: prechecks.append(len(uv.changing(count))))
+    prechecks: list[list[list[str]]] = []  # changing uv calls made before the precheck ran
+    monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", lambda cfg: prechecks.append(uv.changing(count)))
     capsys.readouterr()
     assert _run(project) == 0
     summary = capsys.readouterr().err.split("==> summary")[1]
@@ -653,7 +867,7 @@ def test_matrix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.
         done.add("lock")
     if prechecks:
         done.add("precheck")
-        assert prechecks == [0]  # before anything changed the lock
+        assert prechecks == [[["lock"]]]  # once the lock follows the configuration, before any sync
     if ".venv-pypy" in summary:
         done.add("sync pypy")
     assert done == expected
@@ -716,6 +930,32 @@ def test_only_the_pyproject_name_differs(tmp_path: Path, monkeypatch: pytest.Mon
     assert data["project"]["name"] == "alpha" and data["tool"]["flet"]["product"] == "alpha"
     assert (project.root / "src" / "alpha").is_dir() and not (project.root / "src" / "other").exists()
     assert ["lock"] in uv.changing() and cmd_apply.pending(project.cfg()) == []
+
+
+@pytest.mark.parametrize("record", [True, False])
+def test_a_name_of_another_package_in_src_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: bool) -> None:
+    """app.name set by hand to the name of another package of the project (src/helpers/): apply
+    rewrote only pyproject.toml [project] name and said "applied", the app still in src/alpha/.
+    It refuses, as `./deploy rename helpers` does, and writes nothing."""
+    project, uv = _project(tmp_path, monkeypatch)
+    assert _run(project) == 0
+    if not record:  # pyproject.toml [project] name alone says what the app is
+        (project.root / ".pytemplate" / "state.json").write_text("{}", encoding="utf-8")
+    helpers = project.root / "src" / "helpers"
+    helpers.mkdir()
+    (helpers / "__init__.py").write_text('"""Helpers."""\n', encoding="utf-8")
+    project.edit("app", "name", "helpers")
+    before, count = project.snapshot(), len(uv.calls)
+    for dry in (False, True):
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        with pytest.raises(DeployError, match=r"src/helpers/ already exists and is not the app's package") as e:
+            _run(project)
+        assert e.value.code == 2 and 'Put back app.name = "alpha"' in str(e.value)
+    assert project.snapshot() == before and uv.changing(count) == []
+    problem, hint = cmd_apply.pending(project.cfg())[0]
+    assert "names src/helpers/, another package: the app is 'alpha'" in problem and 'put back app.name = "alpha"' in hint
+    project.edit("app", "name", "alpha")
+    assert cmd_apply.pending(project.cfg()) == []
 
 
 @pytest.mark.parametrize(("old", "new"), [("script", "flet"), ("flet", "raylib"), ("raylib", "script"), ("flet", "script")])

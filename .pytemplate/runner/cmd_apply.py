@@ -18,18 +18,21 @@ prints the plan and stops):
   2. app.preset changed by hand: refused (exit 2). A preset decides src/, tests/, the
      dependencies and pyproject.toml: it cannot be switched in place (./deploy new DIR --preset P).
      The managed pyproject parts must be rewritable (render.check_pyproject).
-  3. PyPy newly supported (tool.uv environments has no PyPy yet): the Python 3.11 precheck of
-     `mode --supports +pypy` (it runs `uv run --locked`, so before anything changes the lock).
-  4. app.name changed by hand: the rename flow (rename.plan/apply_plan) from the applied name,
+  3. app.name changed by hand: the rename flow (rename.plan/apply_plan) from the applied name,
      refused on a dirty git tree without --force (pytemplate.toml and the generated files do not
-     count). When only pyproject.toml [project] name differs, only that line changes.
-  5. [preset.<name>] options: `uv remove --frozen` / `uv add --frozen` of the option-driven
+     count), then the record follows the new name. When only pyproject.toml [project] name
+     differs, only that line changes; an app.name that names another package of src/ is refused.
+  4. [preset.<name>] options: `uv remove --frozen` / `uv add --frozen` of the option-driven
      requirements (dev group too; --frozen because flet-cli==V pins flet==V, so a resolving add
      of one group alone has no solution), then cmd_env.ensure_lock (managed pyproject parts and
-     one `uv lock`). If they fail, pyproject.toml is restored: nothing half-applied.
+     one `uv lock`).
+  5. PyPy newly supported (tool.uv environments had no PyPy): the Python 3.11 precheck of
+     `mode --supports +pypy`. It syncs the tools environment with this configuration, so it runs
+     once pyproject.toml and uv.lock follow it. If 4 or 5 fail, pyproject.toml and uv.lock get
+     their old bytes back: nothing half-applied. Then the record (the steps below can still fail).
   6. `uv sync --locked --all-groups` of every supported backend's environment, the exec bit of
      the launchers, the git hook (installed when hooks.pre_commit, pytemplate's own hook removed
-     when false), render.apply, ruff tidy-up of renamed files, the record.
+     when false), render.apply, ruff tidy-up of renamed files.
   7. A note for every unused .venv* (never deleted), warnings for references that do not exist
      (src/<pkg>/, compile.modules, app.assets, deploy.exe.icon, deploy.upx.path), a summary.
 """
@@ -176,8 +179,11 @@ def save_record(record: dict[str, Any], path: Path | None = None) -> bool:
     if proc.DRY_RUN:
         return True
     data[RECORD_KEY] = record
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    except OSError as e:  # read-only, owned by another user, a folder in the way...
+        raise DeployError(f"cannot write {rel(path)}: {e.strerror or e}") from None
     return True
 
 
@@ -230,6 +236,30 @@ def _old_name(cfg: Config, candidates: list[str | None]) -> str | None:
     return None
 
 
+def _other_package(cfg: Config, candidates: list[str | None]) -> str | None:
+    """The name the project really has (the record's, pyproject.toml [project] name) when its
+    package is in src/ next to app.name's own, as ANOTHER folder: app.name was set by hand to the
+    name of another package of the project (src/helpers/), which is not the app."""
+    here = rename.package_dir(_src(), rename.package_of(cfg.app.name))
+    if here is None:
+        return None
+    for old in candidates:
+        if not old or old == cfg.app.name or not _APP_NAME.fullmatch(old):
+            continue
+        folder = rename.package_dir(_src(), rename.package_of(old))
+        if folder is not None and not rename.same_file(folder, here):
+            return old
+    return None
+
+
+def _onto_another_package(cfg: Config, old: str) -> str:
+    return (
+        f"app.name: src/{cfg.pkg}/ already exists and is not the app's package (the app is '{old}', in "
+        f"src/{rename.package_of(old)}/): the app is not renamed onto another package.\n"
+        f"  Put back app.name = \"{old}\" in pytemplate.toml, or move or delete src/{cfg.pkg}/ first, then ./deploy apply"
+    )
+
+
 def trusted_record(cfg: Config, project_name: str | None) -> dict[str, Any] | None:
     """The `applied` record, when it describes this project: its name is app.name or pyproject.toml
     [project] name (a hand edit changes only one of them). Anything else is foreign, e.g. the
@@ -264,13 +294,52 @@ def _option_names(preset: str, opts: dict[str, Any]) -> set[str]:
     return {req_key(r)[0] for r in (*deps, *dev)}
 
 
+def _table_paths(data: dict[str, Any], path: tuple[str, ...] = ()) -> set[tuple[str, ...]]:
+    """The tables of `data` that hold a value of their own ([tool.flet], not the bare [tool])."""
+    out: set[tuple[str, ...]] = set()
+    for key, value in data.items():
+        if isinstance(value, dict):
+            out |= _table_paths(value, (*path, key))
+        elif path:
+            out.add(path)
+    return out
+
+
+def _has_table(data: dict[str, Any], path: tuple[str, ...]) -> bool:
+    node: Any = data
+    for key in path:
+        node = node.get(key) if isinstance(node, dict) else None
+    return isinstance(node, dict)
+
+
+def _marks(preset: str) -> tuple[set[str], set[tuple[str, ...]]]:
+    """What only `preset` writes into pyproject.toml besides its dependencies: its keys of the
+    managed [tool.uv] block (raylib's no-build-package, whatever the option made its value) and
+    its extra tables (flet's [tool.flet])."""
+    data = presets.load(preset)
+    try:
+        extra = tomllib.loads(presets.extra_tables(preset, "x"))  # only the table paths count
+    except tomllib.TOMLDecodeError:
+        extra = {}
+    return set(data.get("uv", {})), _table_paths(extra)
+
+
 def _applied_preset(cfg: Config, project: Project, record: dict[str, Any] | None) -> str:
-    """The preset the project was made with: the one whose option-driven dependencies pyproject
-    declares (flet, raylib), else the record's, else app.preset (a preset without such
-    dependencies, like script, leaves no other trace)."""
+    """The preset the project was made with. Its traces in pyproject.toml: the option-driven
+    dependencies (by name: any version; the default, current and recorded options), the keys it
+    adds to the managed [tool.uv] block, its extra tables (script leaves none).
+
+    app.preset when pyproject.toml holds its traces, or when the trusted record names it (a
+    script project may depend on raylib or flet); else a preset whose traces are there (a hand
+    switch); else, with no trace of any preset, app.preset when it is a preset without traces
+    (script), else the traceless preset the record names or the only one: app.preset names a
+    preset that left no trace at all, so the project was made with a preset that leaves none."""
     available = presets.available()
     declared = set(project.deps) | set(project.dev)
     recorded = record["preset"] if record and record["preset"] in available else None
+    tool = project.data.get("tool")
+    uv = tool.get("uv") if isinstance(tool, dict) else None
+    uv_keys = set(uv) if isinstance(uv, dict) else set()
 
     def present(preset: str) -> bool:
         names = _option_names(preset, presets.default_options(preset))
@@ -278,20 +347,20 @@ def _applied_preset(cfg: Config, project: Project, record: dict[str, Any] | None
             names |= _option_names(preset, presets.options(cfg))
         if record is not None and preset == recorded:
             names |= {req_key(r)[0] for r in (*record["dependencies"], *record["dev"])}
-        return bool(names & declared)
+        keys, tables = _marks(preset)
+        return bool(names & declared or keys & uv_keys or any(_has_table(project.data, t) for t in tables))
 
-    signed = [p for p in available if _option_names(p, presets.default_options(p))]
-    if cfg.app.preset in signed and present(cfg.app.preset):
+    if present(cfg.app.preset) or recorded == cfg.app.preset:
         return cfg.app.preset
-    others = [p for p in signed if p != cfg.app.preset and present(p)]
+    others = [p for p in available if p != cfg.app.preset and present(p)]
     if others:
         return recorded if recorded in others else others[0]
-    if cfg.app.preset not in signed or recorded == cfg.app.preset:
-        return cfg.app.preset  # script, or its dependencies were removed by hand (apply adds them back)
-    unsigned = [p for p in available if p not in signed]
-    if recorded in unsigned:
+    traceless = [p for p in available if not (_option_names(p, presets.default_options(p)) or any(_marks(p)))]
+    if cfg.app.preset in traceless:
+        return cfg.app.preset
+    if recorded in traceless:
         return str(recorded)
-    return unsigned[0] if len(unsigned) == 1 else cfg.app.preset
+    return traceless[0] if len(traceless) == 1 else cfg.app.preset
 
 
 def applied_state(cfg: Config, project: Project) -> Applied:
@@ -397,6 +466,10 @@ def make_plan(cfg: Config) -> Plan:
         plan.rename_plan = rename.plan(ROOT, applied.renamed_from, cfg.app.name, generated=plan.generated)
         plan.new_cfg = rename.validate_config(plan.rename_plan.config.new)
     elif project.name != cfg.app.name and rename.package_dir(_src(), cfg.pkg) is not None:
+        other = _other_package(cfg, [applied.record["name"] if applied.record else None, project.name])
+        if other is not None:  # `rename` refuses the same: src/<new>/ exists
+            raise DeployError(_onto_another_package(cfg, other))
+        rename.check_new_name(cfg, cfg.app.name, who="app.name", retry="another app.name in pytemplate.toml, then ./deploy apply")
         plan.name_text = _project_name_text(cfg, project)
     return plan
 
@@ -528,29 +601,39 @@ def _hook_plan(cfg: Config) -> str:
     return "would update the pre-commit hook" if state == "outdated" else "would install the pre-commit hook"
 
 
-def _module_exists(src: Path, module: str) -> bool:
-    base = module.replace(".", "/")
-    return (src / base).is_dir() or (src / f"{base}.py").is_file()
-
-
-def reference_problems(cfg: Config, *, package: bool = True) -> list[str]:
-    """Paths pytemplate.toml refers to that do not exist (each makes some command fail later)."""
+def reference_problems(cfg: Config, *, package: bool = True, move: tuple[str, str] | None = None) -> list[str]:
+    """Paths pytemplate.toml refers to that do not exist (each makes some command fail later).
+    `move` (rename.Plan.move: src/<old>, src/<new>): a rename that is planned, not done (--dry-run):
+    a path under src/<new>/ is looked for where it is now, under src/<old>/."""
     src = _src()
+
+    def now(path: Path) -> Path:
+        if move is None:
+            return path
+        try:
+            return ROOT / move[0] / path.relative_to(ROOT / move[1])
+        except ValueError:
+            return path
+
+    def module_exists(module: str) -> bool:
+        base = src / module.replace(".", "/")
+        return now(base).is_dir() or now(base.with_name(base.name + ".py")).is_file()
+
     out: list[str] = []
     missing = missing_package(cfg) if package else None
     if missing is not None:
         out.append(f"{missing[0]}\n  {missing[1]}")
     if cfg.supports("mypyc"):
-        modules = [m for m in cfg.compile.modules if not _module_exists(src, m)]
+        modules = [m for m in cfg.compile.modules if not module_exists(m)]
         if modules:
             out.append(f"compile.modules: {', '.join(modules)} not found in src/ (mypyc builds and `test mypyc` will fail)")
-    if cfg.app.assets and not (src / cfg.app.assets).is_dir():
+    if cfg.app.assets and not now(src / cfg.app.assets).is_dir():
         out.append(f"app.assets = '{cfg.app.assets}': src/{cfg.app.assets}/ does not exist (nothing is packaged with the app)")
-    if cfg.deploy.exe.icon and not (ROOT / cfg.deploy.exe.icon).is_file():
+    if cfg.deploy.exe.icon and not now(ROOT / cfg.deploy.exe.icon).is_file():
         out.append(f"deploy.exe.icon = '{cfg.deploy.exe.icon}' does not exist (relative to the project root): exe and nuitka builds fail")
     if cfg.deploy.upx.path:
         upx = Path(cfg.deploy.upx.path).expanduser()
-        if not (upx if upx.is_absolute() else ROOT / upx).is_file():
+        if not (upx if upx.is_absolute() else now(ROOT / upx)).is_file():
             out.append(f"deploy.upx.path = '{cfg.deploy.upx.path}' does not exist: builds with UPX fail")
     return out
 
@@ -579,6 +662,13 @@ def pending(cfg: Config, *, hook: bool = True) -> list[tuple[str, str]]:
         out.append((f"app.name = '{cfg.app.name}' is not applied: the package is still src/{rename.package_of(old)}/", f"./deploy apply  (renames '{old}' -> '{cfg.app.name}')"))
     elif (missing := missing_package(cfg)) is not None:
         out.append(missing)
+    elif project.name != cfg.app.name and (other := _other_package(cfg, [applied.record["name"] if applied.record else None, project.name])):
+        out.append(
+            (
+                f"app.name = '{cfg.app.name}' names src/{cfg.pkg}/, another package: the app is '{other}' (src/{rename.package_of(other)}/)",
+                f"put back app.name = \"{other}\" (or move src/{cfg.pkg}/ away, then ./deploy apply)",
+            )
+        )
     elif project.name != cfg.app.name:
         out.append((f"pyproject.toml [project] name = '{project.name}', but app.name = '{cfg.app.name}'", "./deploy apply"))
     try:
@@ -627,6 +717,18 @@ def _read_bytes(path: Path) -> bytes | None:
         return None
 
 
+def _restore(path: Path, before: bytes | None) -> bool:
+    """Give `path` its old bytes back; return whether it had changed. None (it could not be read
+    before): left as it is, never deleted (a re-lock makes a stale uv.lock right again)."""
+    if before is None or _read_bytes(path) == before:
+        return False
+    try:
+        path.write_bytes(before)
+    except OSError as e:
+        ui.warn(f"could not restore {path.name}: {e.strerror or e}")
+        return False
+    return True
+
 
 
 def _print_plan(plan: Plan, command: str, force: bool) -> None:
@@ -634,8 +736,12 @@ def _print_plan(plan: Plan, command: str, force: bool) -> None:
     cfg = plan.new_cfg or plan.cfg
     ui.step(f"{command} {_DRY}")
     _dirty(plan, command, force)
-    if plan.pypy_new:
+    # uv.lock against the pyproject.toml of today (read-only; UV_PYTHON is this configuration's)
+    fresh = envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, capture=True, echo=False).returncode == 0
+    if plan.pypy_new and fresh:
         cmd_mode_precheck(plan.cfg)  # read-only under --dry-run
+    elif plan.pypy_new:  # its `uv run --locked` would fail on the lock alone: apply runs it after the re-lock
+        ui.info("  (--dry-run) the Python 3.11 check (PyPy is new) is not run: uv.lock does not match yet; apply runs it after the re-lock")
     rows: list[tuple[str, str]] = []
     if plan.rename_plan is not None:
         n = plan.rename_plan.names
@@ -656,11 +762,12 @@ def _print_plan(plan: Plan, command: str, force: bool) -> None:
         if due
     ]
     rows.append(("pyproject.toml", f"would rewrite {', '.join(parts)}" if parts else "unchanged"))
-    if parts:
+    # uv.lock holds the normalized project name: p -> P, or my_app -> My-App, changes no lock
+    renamed = (plan.name_text is not None or plan.rename_plan is not None) and req_key(plan.project.name or "")[0] != req_key(cfg.app.name)[0]
+    if render.pyproject_outdated(cfg) or plan.deps or renamed or not fresh:
         lock = "would re-lock (uv lock)"
     else:
-        r = envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, capture=True, echo=False)
-        lock = "up to date (uv lock --check)" if r.returncode == 0 else "would re-lock (uv lock)"
+        lock = "up to date (uv lock --check)"
     rows.append(("uv.lock", lock))
     rows.append(("environments", "would sync " + ", ".join(f"{rel(e.dir)} ({e.request})" for e in cmd_env._envs_for(cfg, "all"))))
     rows.append(("git hook", _hook_plan(cfg)))
@@ -673,7 +780,8 @@ def _print_plan(plan: Plan, command: str, force: bool) -> None:
     if plan.rename_plan is not None:
         rename.report(plan.rename_plan, dry=True)
     _leftover_note(cfg)
-    for problem in reference_problems(cfg, package=plan.rename_plan is None):
+    move = plan.rename_plan.move if plan.rename_plan is not None else None
+    for problem in reference_problems(cfg, package=plan.rename_plan is None, move=move):
         ui.warn(problem)
 
 
@@ -711,8 +819,6 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
     ui.step(command)
     summary: list[tuple[str, str]] = []
     _dirty(plan, command, force)
-    if plan.pypy_new:
-        cmd_mode_precheck(cfg)  # before anything changes the lock (it runs `uv run --locked`)
     clean: rename.Tidy | None = None
     if plan.rename_plan is not None and plan.new_cfg is not None:
         n = plan.rename_plan.names
@@ -720,9 +826,14 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
         clean = rename.tidy_before(cfg, plan.rename_plan)
         rename.apply_plan(ROOT, plan.rename_plan)
         cfg = plan.new_cfg  # the renamed pytemplate.toml, validated before anything was written
+        # the record follows the rename at once: a later failure must not leave it naming the old app
+        save_record({"name": cfg.app.name, "preset": plan.applied.preset, "dependencies": plan.applied.dependencies, "dev": plan.applied.dev})
         summary.append(("app.name", f"renamed '{n.old_name}' -> '{n.new_name}' (src/{cfg.pkg}/)"))
     elif plan.name_text is not None:
-        (ROOT / PYPROJECT.name).write_text(plan.name_text, encoding="utf-8", newline="\n")
+        try:
+            (ROOT / PYPROJECT.name).write_text(plan.name_text, encoding="utf-8", newline="\n")
+        except OSError as e:
+            raise DeployError(f"cannot write pyproject.toml: {e.strerror or e}") from None
         summary.append(("app.name", f"pyproject.toml [project] name = \"{cfg.app.name}\""))
 
     pyproject_before = _read_bytes(ROOT / PYPROJECT.name)
@@ -730,15 +841,26 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
     try:
         _edit_dependencies(cfg, plan.deps)
         cmd_env.ensure_lock(cfg)
-    except BaseException as e:  # restore pyproject.toml: nothing half-applied (a failed uv lock leaves uv.lock alone)
-        restored = pyproject_before is not None and _read_bytes(ROOT / PYPROJECT.name) != pyproject_before
-        if restored and pyproject_before is not None:
-            (ROOT / PYPROJECT.name).write_bytes(pyproject_before)
+        if plan.pypy_new:
+            # The Python 3.11 check of `mode --supports +pypy`. It syncs the tools environment
+            # (`uv sync --locked`) with THIS configuration, so it runs once pyproject.toml and
+            # uv.lock follow it (a python.cpython change in the same edit made uv refuse the old
+            # lock); when it fails, both get their old bytes back below.
+            cmd_mode_precheck(cfg)
+    except BaseException as e:  # restore pyproject.toml and uv.lock: nothing half-applied
+        restored = [
+            name
+            for name, before in ((PYPROJECT.name, pyproject_before), ("uv.lock", lock_before))
+            if _restore(ROOT / name, before)
+        ]
         if not isinstance(e, DeployError):
             raise
-        notes = ["the app is already renamed" if plan.rename_plan is not None else "", "pyproject.toml was restored" if restored else ""]
+        notes = ["the app is already renamed" if plan.rename_plan is not None else "", f"{' and '.join(restored)} {'was' if len(restored) == 1 else 'were'} restored" if restored else ""]
         done = "; ".join(x for x in notes if x)
         raise DeployError(f"{e}\n  {done + ': ' if done else ''}fix the problem above and run ./deploy {command} again", e.code) from None
+    # pyproject.toml and uv.lock now follow [preset.*]: record it before the steps that can still
+    # fail (a sync, the hook, render), or the next apply would not know what to remove
+    save_record(record_of(cfg))
     if plan.deps:
         summary.append((f"[preset.{cfg.app.preset}]", plan.deps.describe()))
     if _read_bytes(ROOT / PYPROJECT.name) != pyproject_before and not plan.deps:
@@ -762,7 +884,6 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
         ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./deploy render --force)")
     if plan.rename_plan is not None:
         rename.tidy_after(cfg, plan.rename_plan, clean)
-    save_record(record_of(cfg))
     _leftover_note(cfg)
     problems = reference_problems(cfg)
     for problem in problems:
