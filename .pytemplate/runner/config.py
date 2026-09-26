@@ -597,7 +597,7 @@ def _check_preset_tables(cfg: Config) -> None:
 def _preset_options(path: Path) -> dict[str, Any]:
     """The [options] of a preset.toml, read with tomllib (importing presets.py would be a cycle)."""
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        data = tomllib.loads(path.read_text(encoding="utf-8-sig"))  # a BOM is fine, as in presets.load
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise DeployError(f"{rel(path)} cannot be read: {e}") from None
     options = data.get("options", {})

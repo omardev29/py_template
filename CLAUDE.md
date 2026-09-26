@@ -1127,14 +1127,14 @@ Per method:
   last, PEP 508), a keyword, a stdlib module, a Windows device name (`WINDOWS_DEVICES`: `aux`,
   `con`, `nul`, `com1`...: the folder cannot exist there and git cannot check it out), the
   project's own folders and files (`RESERVED_PACKAGES`: tests, typings, build, dist, assets;
-  plus the preset's `src/` entries such as `main`), and every package the
-  project will lock: the declared requirements (minus the current preset's own), their tree in
-  `uv.lock` (`locked_names`, markers ignored because uv refuses a self-dependency on any
-  platform; the project's own entry excluded) and the preset's pins. When a preset adds
-  packages the lock does not have, their dependencies are unknown, so every locked name counts
-  (conservative). `new` derives the name from the folder with `name_from_folder` (NFKD ->
-  ASCII, other runs -> `-`, no `-`/`_` at the ends) and checks it before copying, so `./deploy
-  new ../flet --preset flet` fails with a hint to use `--name`.
+  plus the preset's `src/` entries such as `main`), and every package the project will lock:
+  the declared requirements (minus the current preset's own), their tree in `uv.lock`
+  (`locked_names`, markers ignored because uv refuses a self-dependency on any platform; the
+  project's own entry excluded) and the preset's pins. When a preset adds packages the lock
+  does not have, their dependencies are unknown, so every locked name counts (conservative).
+  `new` derives the name from the folder with `name_from_folder` (NFKD -> ASCII, other runs ->
+  `-`, no `-`/`_` at the ends) and checks it before copying, so `./deploy new ../flet --preset
+  flet` fails with a hint to use `--name`.
 - **[template repo]** Root `src/`, `tests/` and `pytemplate.toml` must equal
   `presets/script/files` rendered with `name = "myapp"` (`test_presets.py` checks it, and
   that every preset ships the same `tests/conftest.py`). Edit the preset, then regenerate the
@@ -1147,16 +1147,16 @@ Per method:
   sees it. Without git, or when git does not track `.pytemplate/deploy.py` (a copy inside
   another repository, a project never committed), it copies every file; a git failure other
   than "not a git repository" (dubious ownership...) is a warning first (git runs with
-  `LC_ALL=C`). Both skip
-  (`presets._skipped`) `.git`, `.build`, `dist`, caches, `.flet`, `.venv*`, `template-repo`
-  at any depth; `build/` and `.claude/` at the root; and `.github/workflows/template-*`
-  (template CI files MUST use that prefix). `new` then runs the copy's own runner with
-  `__init <preset> --name <n> --force` inside the copy, `git init -b main` (the generated CI
-  runs on `main`; git < 2.28: plain `init` + `symbolic-ref HEAD refs/heads/main`; nothing
-  inside an existing work tree) and `git add --chmod=+x deploy deploy.ps1`. When the copy or
-  `__init` fails (a name uv refuses, no network, Ctrl+C) `new` removes what it created (the
-  folder and the parents it made, or only the content of the empty folder it was given) and
-  says so; a folder with content is refused before anything is written.
+  `LC_ALL=C`). Both skip (`presets._skipped`) `.git`, `.build`, `dist`, caches, `.flet`,
+  `.venv*`, `template-repo` at any depth; `build/` and `.claude/` at the root; and
+  `.github/workflows/template-*` (template CI files MUST use that prefix). `new` then runs the
+  copy's own runner with `__init <preset> --name <n> --force` inside the copy, `git init -b
+  main` (the generated CI runs on `main`; git < 2.28: plain `init` + `symbolic-ref HEAD
+  refs/heads/main`; nothing inside an existing work tree) and `git add --chmod=+x deploy
+  deploy.ps1`. When the copy or `__init` fails (a name uv refuses, no network, Ctrl+C) `new`
+  removes what it created (the folder and the parents it made, or only the content of the
+  empty folder it was given) and says so; a folder with content is refused before anything
+  is written.
 - `init` is internal only: `cli.INTERNAL["__init"]` (`cmd_mode.cmd_init`), reached by `new` and
   by the template maintainer, listed nowhere. `./deploy init` exits 2 with the hint `./deploy
   new DIR --preset P`: a project's preset is chosen when it is created.
@@ -1708,6 +1708,12 @@ Behaviour:
   `% ! " ^ & | < >`; PowerShell drops a bare `--`; xonsh `-c` exits 1 on any failing command
   (the child's real code is in its `CalledProcessError`).
 - `uv build` drops a `.gitignore` into `dist/<n>-<b>-wheel/`.
+- flet presets: `constraints.txt` gives a new project httpx 0.28.1, but flet 1.0.1 only asks
+  for `httpx>=0.28.1`, so `./deploy lock --upgrade` takes httpx 1.x once it is final, and its
+  1.0 dev releases drop `AsyncClient`, which `flet.auth` (OAuth; not used by the skeleton)
+  needs. Not bounded in the preset on purpose (a direct dependency every flet project would
+  have to remove when Flet moves on): an app that uses `flet.auth` runs `./deploy add
+  "httpx<1"`.
 
 Editors:
 - VS Code problem matchers and the Neovim parser depend on tool output formats (ruff, mypy,

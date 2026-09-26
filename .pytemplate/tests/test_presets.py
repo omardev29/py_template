@@ -227,11 +227,14 @@ def test_a_broken_preset_toml_is_a_clear_error(tmp_path: Path, monkeypatch: pyte
 
 
 def test_preset_toml_may_carry_a_bom_and_crlf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An editor or PowerShell 5.1 adds a BOM: both readers of preset.toml (presets.load, and
+    config's [preset.<p>] check, which cannot import presets) take it like uv and render do."""
     (tmp_path / "p").mkdir()
     text = 'description = "x"\r\ndependencies = ["a=={version}"]\r\n\r\n[options]\r\nversion = "1"\r\n'
     (tmp_path / "p" / "preset.toml").write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
     monkeypatch.setattr(presets, "PRESETS", tmp_path)
     assert presets.load("p") == {"description": "x", "dependencies": ["a=={version}"], "options": {"version": "1"}}
+    assert config._preset_options(tmp_path / "p" / "preset.toml") == {"version": "1"}
 
 
 def test_unknown_preset_lists_the_available_ones() -> None:
