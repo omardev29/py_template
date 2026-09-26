@@ -315,6 +315,52 @@ def test_corrupt_state_counts_as_empty(box: Sandbox, raw: bytes) -> None:
     assert box.recorded() == {path: sha(content) for path, content in GENERATED.items()}  # valid UTF-8 JSON again
 
 
+APPLIED = {"name": "game", "preset": "raylib", "dependencies": ["raylib_sdl==6.0.1.0"], "dev": ["types-cffi"]}
+
+
+def _conflicted(box: Sandbox, *, base: bool, eol: str, applied_theirs: dict[str, Any] | None = None) -> str:
+    """state.json as `git merge` leaves it when both branches rendered: the hashes of one file
+    differ (a conflict hunk), the `applied` record of ./deploy apply sits outside the hunk."""
+    render.apply(CFG)
+    data = json.loads(box.state.read_text(encoding="utf-8"))
+    data["applied"] = APPLIED
+    ours = json.dumps(data, indent=2).split("\n")
+    theirs_data = copy.deepcopy(data)
+    theirs_data["files"]["b.ini"] = "0" * 64
+    if applied_theirs is not None:
+        theirs_data["applied"] = applied_theirs
+    theirs = json.dumps(theirs_data, indent=2).split("\n")
+    out: list[str] = []
+    for a, b in zip(ours, theirs, strict=True):
+        if a == b:
+            out.append(a)
+        else:
+            out += ["<<<<<<< HEAD", a, *(["||||||| base", a] if base else []), "=======", b, ">>>>>>> other"]
+    text = eol.join(out) + eol
+    box.write(".pytemplate/state.json", text)
+    return text
+
+
+@pytest.mark.parametrize("base", [False, True], ids=["merge", "diff3"])
+@pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_a_conflicted_state_keeps_the_applied_record(box: Sandbox, base: bool, eol: str) -> None:
+    """README's procedure after a conflict in state.json is `./deploy render`: it wrote a fresh
+    state.json without the `applied` record, and a later apply refused with a false 'app.preset was
+    changed from script'."""
+    _conflicted(box, base=base, eol=eol)
+    box.write("b.ini", "after the merge\n")  # the hashes are not trusted: regenerated, not "hand-edited"
+    assert render.apply(CFG) == (["b.ini"], [])
+    data = json.loads(box.state.read_text(encoding="utf-8"))
+    assert data["applied"] == APPLIED and list(data) == ["comment", "files", "applied"]
+    assert box.recorded() == {path: sha(content) for path, content in GENERATED.items()}
+
+
+def test_a_conflict_inside_a_record_drops_only_that_record(box: Sandbox) -> None:
+    _conflicted(box, base=False, eol="\n", applied_theirs={**APPLIED, "preset": "script"})
+    render.apply(CFG)
+    assert "applied" not in json.loads(box.state.read_text(encoding="utf-8"))  # ./deploy apply records it again
+
+
 @pytest.mark.parametrize("bom", [b"", b"\xef\xbb\xbf"], ids=["no-bom", "bom"])
 @pytest.mark.parametrize("eol", [b"\n", b"\r\n"], ids=["lf", "crlf"])
 def test_state_with_a_bom_or_crlf_still_protects_hand_edits(box: Sandbox, bom: bytes, eol: bytes) -> None:

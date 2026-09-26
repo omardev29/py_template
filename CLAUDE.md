@@ -1037,7 +1037,13 @@ re-rendering.
   not UTF-8 (PS 5.1 `>` writes UTF-16), not JSON, not an object, or `files` not an object; an
   entry whose value is not a sha256 counts as unrecorded): every generated file is overwritten
   without warning, and the next write is valid UTF-8 JSON. It is read as `utf-8-sig`, so a BOM
-  does not disable hand-edit detection. `_save_state` keeps every other top-level key (`./deploy
+  does not disable hand-edit detection. A file with git conflict markers (README's procedure
+  after such a merge is `./deploy render`) keeps the top-level keys both sides agree on
+  (`render._unconflicted`, diff3 style too) without `files`: every generated file is written
+  again and the `applied` record survives (it was lost, and a later apply refused with a false
+  "app.preset was changed"); a key the sides disagree on is dropped (apply records it again).
+  `cmd_apply.load_record` reads the file itself, so run `./deploy render` (or any rendering
+  command) before `./deploy apply` after such a merge. `_save_state` keeps every other top-level key (`./deploy
   apply` records its own) and the key order. Hashes of files no longer generated stay recorded
   (a file that comes back keeps its hand-edit protection).
 - `--check` and `--dry-run` write nothing. A folder in the way, or a read/write error, is a

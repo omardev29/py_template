@@ -348,7 +348,9 @@ commands regenerate them first and say which changed; `./deploy render` does onl
   `./deploy render --force` overwrites it. Change `pytemplate.toml`, or the sources in
   `.pytemplate/templates/` (a typing profile is `.pytemplate/templates/typing/<profile>.toml`).
   CRLF line endings and a BOM (Windows checkouts, editors) do not count as edits.
-- After a merge conflict in `state.json` or `editor.json`, run `./deploy render` and commit both.
+- After a merge conflict in `state.json` or `editor.json`, run `./deploy render` and commit both
+  (it regenerates every generated file and keeps the record of `./deploy apply` that both sides
+  of `state.json` agree on).
 - The project's CI, `.github/workflows/ci.yml`, is generated from `.pytemplate/templates/ci.yml`:
   edit that file. Deleting it stops the generation (deleting only `ci.yml` is undone by the next
   command).

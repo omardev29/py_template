@@ -392,12 +392,57 @@ def _digest(text: str) -> str:
 
 def _read_state() -> dict[str, Any]:
     """state.json as an object: {} when it is missing, unreadable (not UTF-8: PS 5.1 `>` writes
-    UTF-16), not JSON or not an object. A BOM (an editor, PS 5.1 Set-Content) is fine."""
+    UTF-16), not JSON or not an object. A BOM (an editor, PS 5.1 Set-Content) is fine; a file with
+    git conflict markers keeps what both sides agree on (_unconflicted)."""
     try:
-        data = json.loads(STATE_FILE.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):  # ValueError: UnicodeDecodeError and JSONDecodeError
+        text = STATE_FILE.read_text(encoding="utf-8-sig")
+    except (OSError, ValueError):  # ValueError: UnicodeDecodeError
         return {}
+    try:
+        data = json.loads(text)
+    except ValueError:  # JSONDecodeError
+        return _unconflicted(text)
     return data if isinstance(data, dict) else {}
+
+
+def _unconflicted(text: str) -> dict[str, Any]:
+    """The top-level keys of a state.json that `git merge` left with conflict markers (both
+    branches rendered or applied), taken from both sides where they agree, `files` left out: the
+    hashes are not trusted then, so every generated file is written again (README: run
+    ./deploy render after such a merge) while the `applied` record of ./deploy apply, usually
+    outside the conflict, survives. A key the two sides disagree on is dropped (apply records it
+    again). {} when there are no markers or a side is not a JSON object."""
+    sides: tuple[list[str], list[str]] = ([], [])
+    side: int | None = None  # None: both sides; 0 ours; 1 theirs; -1 the base (diff3 style)
+    for line in text.split("\n"):
+        if line.startswith("<<<<<<<") and side is None:
+            side = 0
+        elif line.startswith("|||||||") and side == 0:
+            side = -1
+        elif line.rstrip("\r") == "=======" and side in (0, -1):
+            side = 1
+        elif line.startswith(">>>>>>>") and side == 1:
+            side = None
+        elif side is None:
+            sides[0].append(line)
+            sides[1].append(line)
+        elif side >= 0:
+            sides[side].append(line)
+    if side is not None or sides[0] == text.split("\n"):  # an unfinished hunk, or no markers at all
+        return {}
+    parsed: list[dict[str, Any]] = []
+    for lines in sides:
+        try:
+            data = json.loads("\n".join(lines))
+        except ValueError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        parsed.append(data)
+    ours, theirs = parsed
+    kept = {k: v for k, v in ours.items() if k != "files" and theirs.get(k, v) == v}
+    kept.update((k, v) for k, v in theirs.items() if k != "files" and k not in ours)
+    return kept
 
 
 def _load_state() -> dict[str, str]:
