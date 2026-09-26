@@ -89,6 +89,33 @@ def typings_dir() -> Path | None:
     return path if path.is_dir() else None
 
 
+def _holds_python(folder: Path, _seen: frozenset[str] = frozenset()) -> bool:
+    """Whether `folder` holds a .py or .pyi file, at any depth (hidden folders and __pycache__ do
+    not count; symlinked folders do, once). A folder left holding only __pycache__ (after `git rm
+    -r`, a branch switch) exists on one machine and not in a fresh clone: generated files that
+    named it differed from CI's."""
+    real = os.path.realpath(folder)
+    if real in _seen:
+        return False
+    try:
+        children = sorted(folder.iterdir())
+    except OSError:
+        return False
+    for child in children:
+        if child.name.startswith((".", "__pycache__")):
+            continue
+        if child.is_dir():
+            if _holds_python(child, _seen | {real}):
+                return True
+        elif child.suffix in (".py", ".pyi"):
+            return True
+    return False
+
+
+def _has_tests() -> bool:
+    return _holds_python(ROOT / "tests")
+
+
 def compiled_patterns(cfg: Config) -> list[str]:
     return [f"{m}.*" for m in cfg.compile.modules]
 
@@ -125,7 +152,7 @@ def mypy_ini(cfg: Config, profile: str, *, for_compile: Path | None = None) -> s
             head["mypy_path"] = f"$MYPY_CONFIG_FILE_DIR/{relative}"
     else:
         head["mypy_path"] = ["src", "typings"] if typings else "src"
-        head["files"] = ["src", "tests"] if (ROOT / "tests").is_dir() else "src"
+        head["files"] = ["src", "tests"] if _has_tests() else "src"
     lines = [f"# {HEADER}", f"# Typing profile: {profile} ({data.get('description', '')})", ""]
     lines += _ini_section("mypy", {**head, **data.get("mypy", {})})
     # One section per module pattern, later options winning: mypy refuses a repeated section
@@ -169,7 +196,7 @@ def pyright_config(cfg: Config, profile: str, *, absolute: bool = False) -> dict
     def path(p: str) -> str:
         return (ROOT / p).as_posix() if absolute else p
 
-    include = [path("src"), path("tests")] if (ROOT / "tests").is_dir() else [path("src")]
+    include = [path("src"), path("tests")] if _has_tests() else [path("src")]
     conf: dict[str, Any] = {
         "include": include,
         "exclude": ["**/node_modules", "**/__pycache__", "**/.*", path("dist"), path("build")],
@@ -211,7 +238,11 @@ def _paths_without(top: str, excluded: set[str]) -> list[str]:
         return [top]
     out: list[str] = []
     for child in sorted((ROOT / top).iterdir(), key=lambda p: p.name):
-        if child.name.startswith((".", "__pycache__")) or not (child.is_dir() or child.suffix in (".py", ".pyi")):
+        if child.name.startswith((".", "__pycache__")):
+            continue
+        # a folder counts only when it holds code: a leftover of a deleted subpackage (only its
+        # ignored __pycache__) must not reach the committed file (CI renders from a clone)
+        if not (_holds_python(child) if child.is_dir() else child.suffix in (".py", ".pyi")):
             continue
         out += _paths_without(f"{top}/{child.name}", excluded)
     return out

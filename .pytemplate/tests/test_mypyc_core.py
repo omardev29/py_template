@@ -1577,6 +1577,38 @@ def test_pyright_config_leaves_compile_exclude_out_of_the_compiled_rules(pyright
     assert absolute["strict"][0] == (pyright_tree / "src/myapp/core/__init__.py").as_posix()
 
 
+def test_pyright_strict_list_never_names_a_folder_without_python(pyright_tree: Path) -> None:
+    """A subpackage deleted with `git rm -r` leaves its ignored __pycache__ behind: listed, it made
+    the committed pyrightconfig.json differ from a fresh clone's (CI's `render --check` failed)."""
+    cfg = make({"typing": {"editor": "basedpyright"}, "compile": {"exclude": ["myapp.core.loose", "myapp.core.sub.m"]}})
+    before = render.pyright_config(cfg, "mypyc")
+    _project(
+        pyright_tree,
+        {
+            "src/myapp/core/old/__pycache__/m.cpython-314.pyc": b"",
+            "src/myapp/core/old/deeper/__pycache__/n.cpython-314.pyc": b"",
+            "src/myapp/core/.hidden/h.py": "",
+            "src/myapp/core/data/table.json": "{}",
+        },
+    )
+    (pyright_tree / "src/myapp/core/empty").mkdir()
+    after = render.pyright_config(cfg, "mypyc")
+    assert after["strict"] == before["strict"] and after["executionEnvironments"] == before["executionEnvironments"]
+    _project(pyright_tree, {"src/myapp/core/old/deeper/stub.pyi": ""})  # a folder that holds code counts
+    assert "src/myapp/core/old" in render.pyright_config(cfg, "mypyc")["strict"]
+
+
+def test_a_tests_folder_without_python_is_no_code_folder(pyright_tree: Path) -> None:
+    """The same for a tests/ folder left holding only __pycache__ (.mypy.ini files, pyright include)."""
+    shutil.rmtree(pyright_tree / "tests")
+    _project(pyright_tree, {"tests/__pycache__/test_x.cpython-314-pytest-9.1.1.pyc": b""})
+    assert "\nfiles = src\n" in render.mypy_ini(make({}), "strict")
+    assert render.pyright_config(make({}), "strict")["include"] == ["src"]
+    _project(pyright_tree, {"tests/test_x.py": ""})
+    assert "\nfiles = src, tests\n" in render.mypy_ini(make({}), "strict")
+    assert render.pyright_config(make({}), "strict")["include"] == ["src", "tests"]
+
+
 def test_pyright_config_without_exclude_is_unchanged(pyright_tree: Path) -> None:
     conf = render.pyright_config(make({"typing": {"editor": "basedpyright"}}), "mypyc")
     assert conf["strict"] == ["src/myapp/core"]

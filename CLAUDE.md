@@ -1212,7 +1212,12 @@ Formats:
   pattern): mypy's `RawConfigParser` refuses a repeated section, and a pattern repeated in a
   comma list silently replaced the earlier options. pyright's `strict` list has no exclusion,
   so a compiled package that holds an excluded path is listed by its other files and folders
-  (`render._paths_without`, only then does the list depend on the files in `src/`); with
+  (`render._paths_without`, only then does the list depend on the files in `src/`); a folder
+  counts only when it holds a `.py`/`.pyi` file (`render._holds_python`, also for `tests/` in
+  `.mypy.ini` and pyright's `include`): a folder left holding only `__pycache__` (a subpackage
+  deleted with `git rm -r`) made the committed file differ from a fresh clone's, and CI's
+  `render --check` failed. An untracked `.py` file does count, like any source file: commit it
+  with the regenerated `pyrightconfig.json`; with
   basedpyright the excluded paths come first in `executionEnvironments` (the first match wins)
   without the Any rules. The same sections reach the stage's compile-time `mypy.ini`.
 - `cmd_dev.run_checks(cfg, backend, rules=True)`:
