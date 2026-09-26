@@ -626,6 +626,8 @@ TRACKED = {
     "deploy": "#!/bin/sh\n",
     "modified.txt": "old\n",
     "deleted.txt": "gone\n",
+    "README.md": "# the template\n",
+    "LICENSE": "MIT\n",
 }
 UNTRACKED = {".env": "SECRET=1\n", "notes.txt": "scratch\n", "src/app/__pycache__/m.cpython-314.pyc": "x"}
 IGNORED = {"x.spec": "spec\n", "htmlcov/index.html": "<html>\n", ".venv-x/pyvenv.cfg": "home\n", "build/out.txt": "out\n"}
@@ -755,6 +757,11 @@ def test_copy_template_says_when_git_fails(tmp_path: Path, monkeypatch: pytest.M
         ("sub/.claude/x", False),
         ("src/app/core/bench.py", False),
         ("CLAUDE.md", False),
+        ("README.md", True),  # the template's page and license: a new project is another program
+        ("LICENSE", True),
+        ("docs/README.md", False),
+        (".pytemplate/README.md", False),  # a project's copy of the manual travels on
+        (".pytemplate/LICENSE", False),
     ],
 )
 def test_skipped(path: str, skipped: bool) -> None:
@@ -789,6 +796,68 @@ def _fake_copy(dest: Path) -> None:
     (dest / ".pytemplate").mkdir(parents=True, exist_ok=True)
     (dest / ".pytemplate" / "deploy.py").write_text("# copied\n", encoding="utf-8")
     (dest / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+
+
+def _new_with_a_fake_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preset: str) -> Path:
+    """`presets.new` with the real copy of this template and `__init` faked (no uv, no network)."""
+    calls: list[list[str]] = []
+
+    def run(argv: list[Any], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append([str(a) for a in argv])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(proc, "run", run)
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+    monkeypatch.setattr(presets, "_git_init", lambda dest: None)
+    dest = tmp_path / "demo"
+    presets.new(dest, preset, "demo")
+    assert [c[5:7] for c in calls if "__init" in c] == [["__init", preset]]
+    return dest
+
+
+@needs_git
+@template_repo
+@pytest.mark.parametrize("preset", PRESETS)
+def test_new_gives_the_project_its_own_readme_and_description(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_env: None, preset: str) -> None:
+    # The copy used to start with the template's README ("# myapp: multi-backend uv template") and
+    # pyproject description, as if the new project were the template
+    dest = _new_with_a_fake_init(tmp_path, monkeypatch, preset)
+    readme = (dest / "README.md").read_text(encoding="utf-8")
+    description = str(presets.load(preset)["description"])
+    assert readme.startswith(f"# demo\n\n{description.rstrip('.')}. Made from [py_template](")
+    assert "`.pytemplate/README.md`" in readme and "myapp" not in readme and readme.isascii()
+    assert tomllib.loads((dest / "pyproject.toml").read_text(encoding="utf-8"))["project"]["description"] == description
+    # The template's page and license travel under .pytemplate/: the manual of the version the
+    # project was made from, and the notice the MIT license asks for with the copied runner
+    assert (dest / ".pytemplate" / "README.md").read_bytes() == (ROOT / "README.md").read_bytes()
+    assert (dest / ".pytemplate" / "LICENSE").read_bytes() == (ROOT / "LICENSE").read_bytes()
+    assert not (dest / "LICENSE").exists()
+
+
+@needs_git
+def test_new_from_a_project_keeps_the_manual_it_carries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_env: None) -> None:
+    """A project (no template-repo marker) running `new`: its own README.md and LICENSE stay
+    behind, its .pytemplate/README.md and LICENSE (tracked) are copied on like any file."""
+    src = tmp_path / "project"
+    _fake_template(src)
+    (src / ".pytemplate" / "template-repo").unlink()
+    (src / ".pytemplate" / "README.md").write_text("# manual\n", encoding="utf-8")
+    (src / ".pytemplate" / "LICENSE").write_text("MIT (template)\n", encoding="utf-8")
+    (src / "pyproject.toml").write_text('[project]\nname = "old"\ndescription = "my old project"\n', encoding="utf-8")
+    _git(src, "add", "--", ".pytemplate/README.md", ".pytemplate/LICENSE", "pyproject.toml")
+    monkeypatch.setattr(presets, "ROOT", src)
+    monkeypatch.setattr(presets, "TEMPLATE", src / ".pytemplate")
+    dest = _new_with_a_fake_init(tmp_path, monkeypatch, "script")
+    assert (dest / ".pytemplate" / "README.md").read_text(encoding="utf-8") == "# manual\n"
+    assert (dest / ".pytemplate" / "LICENSE").read_text(encoding="utf-8") == "MIT (template)\n"
+    assert (dest / "README.md").read_text(encoding="utf-8").startswith("# demo\n")
+    assert not (dest / "LICENSE").exists()  # the old project's own license is not the new one's
+    assert tomllib.loads((dest / "pyproject.toml").read_text(encoding="utf-8"))["project"]["description"] == presets.load("script")["description"]
+
+
+def test_project_readme_without_a_manual_points_at_the_template() -> None:
+    readme = presets.project_readme("demo", "script", manual=False)
+    assert presets.TEMPLATE_URL in readme.split("Made from", 1)[1] and ".pytemplate/README.md" not in readme
 
 
 @pytest.mark.parametrize("pre_existing", [False, True], ids=["new-folder", "empty-folder"])
