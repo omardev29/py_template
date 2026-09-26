@@ -2975,9 +2975,11 @@ UPX:
   `test_upx_messages_are_classified`. Goes: never.
 - **No macOS support, no Windows arm64 release** (LIMITATION): UPX cannot pack current macOS
   binaries (and packing breaks their signature). Fix: `upx.unsupported_reason` turns UPX off on
-  macOS with a warning; `upx.ASSETS` gives Windows arm64 the x64 build (emulated) (10). Test:
-  `test_workarounds.py::test_upx_is_off_on_macos_and_windows_arm64_runs_the_x64_build`. Goes:
-  per case, when UPX supports it.
+  macOS with a warning (`upx.active`, and `exe.size_args` with the same reason);
+  `upx.ASSETS` gives Windows arm64 the x64 build (emulated) (10). Test:
+  `test_workarounds.py::test_upx_is_off_on_macos_and_windows_arm64_runs_the_x64_build`,
+  `test_build_methods.py::test_exe_size_args_say_why_upx_is_off_on_macos`. Goes: per case, when
+  UPX supports it.
 - **The packagers look for UPX differently** (LIMITATION): PyInstaller wants `<upx-dir>/upx`,
   Nuitka a file named `upx`. Fix: `upx.find` hands them an absolute, unresolved path (10). Test:
   `test_upx.py::test_relative_upx_path_resolves_against_the_project_root`. Goes: never.

@@ -198,6 +198,20 @@ def test_exe_size_args_skip_upx_off_windows(monkeypatch: pytest.MonkeyPatch, cap
     assert "--noupx" in args and capsys.readouterr().err == ""
 
 
+def test_exe_size_args_say_why_upx_is_off_on_macos(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # On macOS neither warning fired (the Windows-only one skipped hosts UPX does not support,
+    # and upx.active, which names them, was never called): UPX was dropped without a word
+    monkeypatch.setattr(exe, "IS_WINDOWS", False)
+    monkeypatch.setattr(upx, "IS_MACOS", True)
+    monkeypatch.setattr(upx, "find", lambda cfg: pytest.fail("upx.find must not run"))
+    args, env = exe.size_args(make({"deploy": {"upx": {"enabled": True}}}))
+    assert "--noupx" in args and env == {}
+    err = capsys.readouterr().err
+    assert "UPX cannot pack current macOS binaries" in err and "not UPX-packed" in err
+    exe.size_args(make({}))
+    assert capsys.readouterr().err == ""
+
+
 def test_exe_size_args_use_upx_on_windows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(exe, "IS_WINDOWS", True)
     monkeypatch.setattr(upx, "unsupported_reason", lambda: "")

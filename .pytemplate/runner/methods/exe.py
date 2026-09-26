@@ -70,8 +70,9 @@ def size_args(cfg: Config) -> tuple[list[str], dict[str, str]]:
         args += [f"--upx-exclude={p}" for p in upx.excludes(cfg)]
         env["UPX"] = upx.env_value(cfg)
     else:
-        if cfg.deploy.upx.enabled and not upx.unsupported_reason():
-            ui.warn("deploy.upx: PyInstaller packs with UPX only on Windows: this exe is not UPX-packed")
+        if cfg.deploy.upx.enabled and not IS_WINDOWS:  # (on Windows upx.active already said why)
+            reason = upx.unsupported_reason() or "PyInstaller packs with UPX only on Windows"
+            ui.warn(f"deploy.upx: {reason}: this exe is not UPX-packed")
         args.append("--noupx")
     args += [f"--exclude-module={m}" for m in cfg.deploy.exclude_modules]
     if cfg.deploy.exe.strip and not IS_WINDOWS:
