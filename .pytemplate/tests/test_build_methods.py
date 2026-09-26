@@ -472,7 +472,8 @@ def test_nuitka_argv_follows_the_config(sandbox: Path, monkeypatch: pytest.Monke
     from runner.project import ROOT
 
     assert f"--windows-icon-from-ico={ROOT / 'art' / 'app.ico'}" in argv
-    assert f"--include-data-dir={stage / 'assets'}=assets" in argv
+    assert "--include-data-dir=assets=assets" in argv  # relative to the stage: Nuitka splits a path at ',' and '='
+    assert not any(str(stage) in str(a) for a in argv if str(a).startswith("--include-data"))
     assert "--plugin-enable=upx" in argv and f"--upx-binary={Path('/opt/upx/upx')}" in argv
     assert argv[-2:] == ["--lto=no", "--report=r.xml"]  # extra_args, then the command line
     assert not [a for a in argv if a.startswith("--include-module=")]  # cpython: Nuitka follows the imports

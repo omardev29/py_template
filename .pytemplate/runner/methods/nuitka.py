@@ -270,9 +270,12 @@ def build(req: BuildRequest) -> Path:
         argv.append("--python-flag=no_asserts")
     if cfg.deploy.optimize >= 2:
         argv.append("--python-flag=no_docstrings")
+    # Data paths relative to the stage (Nuitka's cwd): Nuitka splits a data source at every ','
+    # and '=' and reads it as a glob, so an absolute path under a folder like `game, v2` left
+    # the Flet client out with only a warning (and '=' or '[' stopped the build)
     assets = cfg.app.assets
     if assets and (stage / assets).is_dir():
-        argv.append(f"--include-data-dir={stage / assets}={assets}")
+        argv.append(f"--include-data-dir={assets}={assets}")
     if cfg.app.gui and IS_WINDOWS:
         argv.append("--windows-console-mode=disable")
     if cfg.deploy.exe.icon and IS_WINDOWS:
@@ -289,11 +292,13 @@ def build(req: BuildRequest) -> Path:
         # JSON files (flet_cli's own PyInstaller hook adds the same), and without them the app
         # died with FileNotFoundError at its first icon.
         archive = _flet_client_archive(cfg)
+        (stage / "flet-client").mkdir(exist_ok=True)
+        shutil.copy2(archive, stage / "flet-client" / archive.name)
         argv += [
             "--include-package=flet",
             "--include-package=flet_desktop",
             *(f"--include-package-data={data}" for data in FLET_PACKAGE_DATA),
-            f"--include-data-files={archive}=flet_desktop/app/{archive.name}",
+            f"--include-data-files=flet-client/{archive.name}=flet_desktop/app/{archive.name}",
         ]
     argv += optimization_args(cfg)  # before extra_args and the command line: a later --lto wins
     argv += cfg.deploy.nuitka.extra_args + req.extra

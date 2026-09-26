@@ -154,7 +154,9 @@ def test_nuitka_bundles_the_flet_client(build_dirs: Path, monkeypatch: pytest.Mo
     assert urls == [f"https://github.com/flet-dev/flet/releases/download/v{FakeUv.VERSION}/{FakeUv.ARCHIVE}"]
     assert archive.read_bytes() == client
     assert "--include-package=flet" in fake.argv and "--include-package=flet_desktop" in fake.argv
-    assert f"--include-data-files={archive}=flet_desktop/app/{FakeUv.ARCHIVE}" in fake.argv
+    # relative to the stage (Nuitka's cwd): Nuitka splits an absolute source at ',' and '='
+    assert f"--include-data-files=flet-client/{FakeUv.ARCHIVE}=flet_desktop/app/{FakeUv.ARCHIVE}" in fake.argv
+    assert (build_dirs / "build" / "nuitka-stage" / "cpython" / "flet-client" / FakeUv.ARCHIVE).read_bytes() == client
     # ft.Icons reads icons.json through importlib.resources: without it the app died at its
     # first icon (FileNotFoundError), and Nuitka bundles no package data by default
     assert "--include-package-data=flet.controls.material:icons.json" in fake.argv

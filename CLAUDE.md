@@ -2009,8 +2009,10 @@ Per method:
   FileNotFoundError); the flet-desktop wheel
   has NO client, so `nuitka._flet_client_archive` downloads the release archive
   (`flet_desktop.get_artifact_filename()`, the same URL flet uses, or `FLET_CLIENT_URL` when set,
-  as flet_desktop does) once into `.build/flet-client/<version>/` and bundles it at
-  `flet_desktop/app/<archive>`, where flet_desktop looks for a bundled client (and never
+  as flet_desktop does) once into `.build/flet-client/<version>/`, copies it into the stage
+  (`flet-client/`) and bundles it, named relative to the stage as the assets are (Nuitka splits a
+  data source at `,` and `=` and globs it: under `game, v2` the client was left out with only a
+  warning), at `flet_desktop/app/<archive>`, where flet_desktop looks for a bundled client (and never
   downloads one: a damaged archive would break the shipped app at its first start). So a
   download is cached only when it delivered every byte the server announced (Content-Length)
   and the archive reads to its end the way flet_desktop extracts it (`nuitka.archive_problem`:
