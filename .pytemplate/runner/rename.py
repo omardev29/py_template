@@ -19,11 +19,12 @@ Which occurrences change (whole words only: `myapp_extra` and `my-app-2` never m
   not changed. Attributes (`obj.myapp`) and keyword arguments (`f(myapp=1)`) never change.
 - Strings, comments, docstrings and other text files: every occurrence except right after a
   dot (`x.myapp` is a submodule or an attribute, never the top-level package) and a path
-  segment right after the package itself (`src/myapp/myapp` is a submodule of it). In Python
-  and TOML strings the prefix (`f`, `rb`...) and escapes (`\\n`, `\\x89`) are never the name,
-  and a name right after a backslash in a raw string or a path (`r"\\d"`) and a one-letter
-  name that ends a format directive (`"%d"`, `"{:d}"`, `f"{x:d}"`) are reported, not changed:
-  an app may be called `f`, `n`, `r` or `d`.
+  segment right after the package itself (`src/myapp/myapp` is a submodule of it). In Python,
+  TOML and JSON strings the prefix (`f`, `rb`...) and escapes (`\\n`, `\\x89`) are never the
+  name, and a name right after a single backslash that makes no escape (`r"\\d"`,
+  `"\\myapp"`) and a one-letter name that ends a format directive (`"%d"`, `"{:d}"`,
+  `f"{x:d}"`) are reported, not changed: an app may be called `f`, `n`, `r` or `d`. Comments
+  and other text files (Markdown, YAML...) have no escapes.
 - When the old name is also the old package but the new name is not a package name
   (`alpha` -> `My-Game`, package `my_game`), each text occurrence is either the package or the
   name. Package: path-like (`src/alpha/`, `alpha\\core`), dotted (`alpha.core`, `alpha.*`,
@@ -142,6 +143,10 @@ _STRING_PREFIX = re.compile(r"[A-Za-z]*(?=['\"])")
 _PY_ESCAPES = frozenset("abfnrtvxNuU01234567")
 _BYTES_ESCAPES = frozenset("abfnrtvx01234567")
 _TOML_ESCAPES = frozenset("btnfruUex")  # TOML 1.0, plus \e and \x of TOML 1.1
+_JSON_ESCAPES = frozenset("bfnrtu")
+_JSON_STRING = re.compile(r'"(?:[^"\\\n]|\\.)*"?')
+# Data files of src/ and tests/ whose strings have escapes (other text files are plain text)
+DATA_STRINGS = {".toml": "toml", ".json": "json"}
 # A format directive in a string ends in one letter: printf's `%d`, `%(k)-5s`, str.format's
 # `{:d}`, `{0:>4x}`, `{!r}` (the text before the letter, and the letters it can end in)
 _PRINTF_BEFORE = re.compile(r"%(?:\([^()\n]*\))?[#0 +\-]*(?:\*|\d+)?(?:\.(?:\*|\d*))?[hlL]?\Z")
@@ -662,6 +667,11 @@ def _toml_strings(text: str) -> list[tuple[int, int, bool]]:
     return out
 
 
+def _json_strings(text: str) -> list[tuple[int, int, bool]]:
+    """(start, end, False) of every string of a JSON text: a quote starts one only there."""
+    return [(m.start(), m.end(), False) for m in _JSON_STRING.finditer(text)]
+
+
 def _toml_key(text: str, start: int, end: int) -> bool:
     """Whether the occurrence is a TOML key or a table header (`[alpha]`, `alpha = `, `x.alpha.y =`)."""
     line_start = text.rfind("\n", 0, start) + 1
@@ -719,6 +729,7 @@ def rewrite(
     python: bool = False,
     only_pkg: bool = False,
     toml: bool = False,
+    strings: str = "",
     module_keys: frozenset[str] = frozenset(),
     package_modules: frozenset[str] | None = None,
 ) -> Rewrite:
@@ -726,7 +737,9 @@ def rewrite(
 
     `python`: tell code from strings and comments with the tokenizer. `only_pkg`: change only
     the package references, chosen by context, and report the other occurrences as kept
-    (pytemplate.toml). `toml`: TOML keys and table headers never change. `module_keys`: TOML
+    (pytemplate.toml). `toml`: TOML keys and table headers never change. `strings` ("toml",
+    "json"; `toml` implies "toml"): the string syntax of a data file, whose escapes are never the
+    name (other text is plain: `a\\n` has no escape there). `module_keys`: TOML
     keys whose quoted values are module names (a bare old package there is the package).
     `package_modules`: the modules and subpackages of src/<old pkg>/ (only_pkg: `pkg.x` is the
     package only when x is one of them; `pkg.ico`, `uv.lock` are file names).
@@ -734,8 +747,10 @@ def rewrite(
     code = _python_code(text, names.old_pkg) if python else None
     module_lines = module_value_lines(text, module_keys) if module_keys else set()
     line_starts = [0, *(m.end() for m in re.finditer("\n", text))]
-    strings = _toml_strings(text) if toml else []
-    string_starts = [s[0] for s in strings]
+    syntax = "toml" if toml else strings
+    found = _toml_strings(text) if syntax == "toml" else _json_strings(text) if syntax == "json" else []
+    escapes = _JSON_ESCAPES if syntax == "json" else _TOML_ESCAPES
+    string_starts = [s[0] for s in found]
     pieces: list[str] = []
     last = 0
     count = 0
@@ -746,8 +761,8 @@ def rewrite(
         if toml and _toml_key(text, start, end):
             continue
         i = bisect.bisect_right(string_starts, start) - 1
-        if i >= 0 and start < strings[i][1]:  # inside a TOML string: its escapes are never the name
-            escaped = _escaped(text, start, strings[i][0], raw=strings[i][2], escapes=_TOML_ESCAPES)
+        if i >= 0 and start < found[i][1]:  # inside a TOML or JSON string: its escapes are never the name
+            escaped = _escaped(text, start, found[i][0], raw=found[i][2], escapes=escapes)
             if escaped == "skip":
                 continue
             if escaped == "keep":
@@ -1101,7 +1116,7 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
             if b"\0" not in data and pattern.search(data.decode("latin-1")):
                 unreadable.append(rel_path)
             continue
-        result = rewrite(text, names, python=path.suffix in PY_SUFFIXES)
+        result = rewrite(text, names, python=path.suffix in PY_SUFFIXES, strings=DATA_STRINGS.get(path.suffix.lower(), ""))
         if result.count or result.kept:
             try:
                 new = result.text.encode(encoding)

@@ -308,6 +308,20 @@ def test_toml_escapes_are_never_the_name(text: str, expected: str, kept: int) ->
     assert out.text == expected and len(out.kept) == kept
 
 
+def test_json_and_toml_files_of_src_and_tests_keep_their_escapes(tmp_path: Path) -> None:
+    """A JSON fixture's "a\\n" once became "a\\tool" (a tab and "ool") for an app named n."""
+    _write_project(tmp_path, "script", "n")
+    (tmp_path / "tests" / "data.json").write_text('{"sep": "a\\n", "app": "n", "path": "C:\\\\n", "odd": "\\q\\n"}\n', encoding="utf-8")
+    (tmp_path / "tests" / "cfg.toml").write_text("# a\\n n\nsep = \"a\\n\"\napp = \"n\"\nraw = 'a\\n'\n", encoding="utf-8")
+    (tmp_path / "tests" / "notes.txt").write_text("a\\n n\n", encoding="utf-8")  # plain text: no escapes
+    edits = {edit.path: edit for edit in rename.plan(tmp_path, "n", "tool").files}
+    json_edit, toml_edit = edits["tests/data.json"], edits["tests/cfg.toml"]
+    assert json_edit.new == b'{"sep": "a\\n", "app": "tool", "path": "C:\\\\tool", "odd": "\\q\\n"}\n'
+    assert toml_edit.new == b"# a\\tool tool\nsep = \"a\\n\"\napp = \"tool\"\nraw = 'a\\n'\n"
+    assert [n for n, _ in toml_edit.result.kept] == [4]  # a literal string's \n: no escape there, reported
+    assert edits["tests/notes.txt"].new == b"a\\tool tool\n"
+
+
 @pytest.mark.parametrize("preset", ["script", "raylib", "flet"])
 @pytest.mark.parametrize("old", ["b", "f", "r", "rb", "fr", "u"])
 def test_names_that_are_string_prefixes_or_escapes_keep_the_code_intact(tmp_path: Path, preset: str, old: str) -> None:
