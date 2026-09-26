@@ -20,8 +20,10 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import stat
 import tempfile
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -43,25 +45,43 @@ def _build_id(root: Path) -> str:
     return h.hexdigest()[:16]
 
 
-def _write_archive(root: Path, out: Path) -> None:
+def _write_archive(root: Path, out: Path, modes: Mapping[str, int] | None = None) -> None:
     """zipapp.create_archive(root, out, interpreter="/usr/bin/env python3", compressed=True)
     that accepts any mtime.
 
     A zip cannot store dates before 1980, and zipapp's ZipFile raised ValueError (an internal
     error) for such a file: a copy from the Nix store has mtime 1, SOURCE_DATE_EPOCH=0 tarballs
     0. strict_timestamps=False stores 1980-01-01 instead. Deflate, never zstd: the .pyz must
-    open on Python 3.11 and PyPy.
+    open on Python 3.11 and PyPy. Each member keeps its file's mode (the bootstrap restores the
+    x bit); `modes` (pyz-merge: the parts' executables) sets a member's Unix mode whatever this
+    OS's files say.
     """
     tmp = out.with_name(out.name + ".tmp")
     with tmp.open("wb") as fd:
         fd.write(b"#!/usr/bin/env python3\n")
         with zipfile.ZipFile(fd, "w", compression=zipfile.ZIP_DEFLATED, strict_timestamps=False) as z:
             for path in sorted(root.rglob("*")):
-                if path.is_file():
-                    z.write(path, path.relative_to(root).as_posix())
+                if not path.is_file():
+                    continue
+                name = path.relative_to(root).as_posix()
+                if modes and name in modes:
+                    info = zipfile.ZipInfo.from_file(path, name, strict_timestamps=False)
+                    info.create_system = 3
+                    info.external_attr = (stat.S_IFREG | modes[name]) << 16
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    with path.open("rb") as src, z.open(info, "w") as dst:
+                        shutil.copyfileobj(src, dst)
+                else:
+                    z.write(path, name)
     tmp.replace(out)
     if not IS_WINDOWS:
         out.chmod(0o755)
+
+
+def _executable(info: zipfile.ZipInfo) -> bool:
+    """Whether a member is a regular file with an x bit in its Unix mode (the bootstrap's test)."""
+    mode = info.external_attr >> 16
+    return bool(mode and stat.S_ISREG(mode) and mode & 0o111)
 
 
 def _wrapper_cmd(cfg: Config, backend: str, pyz_name: str, *, name: str = "", min_python: str = "") -> str:
@@ -296,6 +316,7 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
         root = Path(tmp) / "root"
         app_digest = ""
         overlay_from: dict[str, int] = {}
+        modes: dict[str, int] = {}  # the parts' executables keep their mode (see _write_archive)
         for n, part in enumerate(parts):
             with zipfile.ZipFile(part) as archive:
                 digest = _app_digest(archive)
@@ -303,7 +324,8 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
                     app_digest = digest
                 elif digest != app_digest:
                     raise DeployError(f"pyz-merge: {part} carries other app code than {parts[0]}: the parts come from different builds")
-                for member in archive.namelist():
+                for item in archive.infolist():
+                    member = item.filename
                     if member.endswith("/") or member == "_pyz.json":
                         continue
                     if member.startswith(("/", "\\")) or ".." in member.replace("\\", "/").split("/") or ":" in member:
@@ -330,16 +352,21 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
                     elif n == 0:
                         name = member  # common/app and __main__.py from the first part
                     else:
+                        if member.startswith("common/app/") and _executable(item):
+                            # the same file as the first part's, which may come from Windows (no modes)
+                            modes[member] = stat.S_IMODE(item.external_attr >> 16)
                         continue
                     target = root / name
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(archive.read(member))
+                    target.write_bytes(archive.read(item))
+                    if _executable(item):
+                        modes[name] = stat.S_IMODE(item.external_attr >> 16)
         targets = sorted(p.name for p in (root / "targets").iterdir()) if (root / "targets").is_dir() else []
         merged = {k: v for k, v in infos[0].items() if k != "host"}
         merged.update({"targets": targets, "pure": pure, "build_id": _build_id(root)})
         (root / "_pyz.json").write_text(json.dumps(merged, indent=2), encoding="utf-8", newline="\n")
         out.parent.mkdir(parents=True, exist_ok=True)
-        _write_archive(root, out)
+        _write_archive(root, out, modes)
     wrapper_path(out).write_bytes(wrapper)
     ui.ok(f"{rel(out)}: runs on {', '.join(targets) or 'any platform (pure Python)'}")
     ui.info(f"  on Windows also {rel(wrapper_path(out))}")

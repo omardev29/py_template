@@ -778,6 +778,34 @@ def test_pyz_repairs_an_incomplete_cache(tmp_path: Path, damage: str) -> None:
     assert sorted(p.name for p in dest.parent.iterdir()) == ["pure"]
 
 
+def _add_members(pyz_file: Path, members: dict[str, int]) -> None:
+    """Append files with these Unix modes to a .pyz, whatever this OS's file modes are."""
+    import zipfile
+
+    with zipfile.ZipFile(pyz_file, "a", compression=zipfile.ZIP_DEFLATED) as z:
+        for name, mode in members.items():
+            info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.external_attr = (0o100000 | mode) << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            z.writestr(info, "#!/bin/sh\necho run\n")
+
+
+EXEC_MEMBERS = {"common/app/tool.sh": 0o755, "common/lib/bin/tool": 0o755, "common/app/data.txt": 0o644}
+MAIN_EXEC = "import os, pathlib\nhere = pathlib.Path(__file__).parent\nprint(*[os.access(here / n, os.X_OK) for n in ('tool.sh', '../lib/bin/tool', 'data.txt')])\n"
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX file modes")
+def test_pyz_bootstrap_keeps_the_executable_bit(tmp_path: Path) -> None:
+    # A helper script of the app or a dependency's binary (ruff's bin/ruff, which ruff looks up at
+    # <target>/bin) was extracted as 0644: PermissionError when the app ran it
+    pyz_file = fake_pyz(tmp_path / "x.pyz", files={"common/app/main.py": MAIN_EXEC})
+    _add_members(pyz_file, EXEC_MEMBERS)
+    r = run_pyz(pyz_file, pyz_env(tmp_path / "cache"))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["True", "True", "False"]
+
+
 def _cached_builds(cache: Path) -> list[str]:
     return sorted(p.name for p in pyz_root(cache).iterdir())
 
@@ -1243,6 +1271,29 @@ def test_pyz_merge_refuses_an_output_name_its_wrapper_cannot_hold(tmp_path: Path
     monkeypatch.setattr(cmd_build, "user_path", lambda raw: Path(raw))
     with pytest.raises(DeployError, match="wrapper"):
         cmd_build.cmd_pyz_merge(make({}), [str(a), str(b), "--out", str(out)])
+
+
+def test_pyz_merge_keeps_the_executable_bits(tmp_path: Path) -> None:
+    # pyz-merge rewrote every member from a scratch copy: the parts' 0755 became 0644 (and on
+    # Windows, where files have no modes, it would be lost whatever the copy did)
+    import zipfile
+
+    a = _native_part(tmp_path / "a.pyz", key=LINUX)
+    b = _native_part(tmp_path / "b.pyz", key=WIN)
+    _add_members(a, {"common/app/tool.sh": 0o755, f"targets/{LINUX}/lib/bin/tool": 0o755, "common/app/data.txt": 0o644})
+    _add_members(b, {"common/app/tool.sh": 0o755, "common/app/data.txt": 0o644})
+    out = tmp_path / "m.pyz"
+    _merge([a, b], out)
+    with zipfile.ZipFile(out) as merged:
+        modes = {i.filename: (i.external_attr >> 16) & 0o777 for i in merged.infolist()}
+    assert modes["common/app/tool.sh"] == 0o755 and modes[f"targets/{LINUX}/lib/bin/tool"] == 0o755
+    assert not modes["common/app/data.txt"] & 0o111 and not modes["common/app/main.py"] & 0o111
+    # A first part made on Windows stores no mode: the app's executable keeps it from another part
+    windows_first = _native_part(tmp_path / "w.pyz", key=WIN)
+    _add_members(windows_first, {"common/app/tool.sh": 0o644, "common/app/data.txt": 0o644})
+    _merge([windows_first, a], out)
+    with zipfile.ZipFile(out) as merged:
+        assert (merged.getinfo("common/app/tool.sh").external_attr >> 16) & 0o777 == 0o755
 
 
 def test_pyz_merge_refuses_an_app_name_that_is_no_app_name(tmp_path: Path) -> None:

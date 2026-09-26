@@ -1507,7 +1507,11 @@ Per method:
   cache (`%LOCALAPPDATA%` / `~/Library/Caches` / an absolute `$XDG_CACHE_HOME` or `~/.cache`,
   then `<name>/pyz/<build_id>/<key|pure>/`), guarded by a `.complete` marker and an atomic
   `os.replace`; a folder left without its marker (an interrupted prune, a DLL still loaded) is
-  moved aside and re-extracted (`_discard`). Every start touches its build folder; `_prune_old`
+  moved aside and re-extracted (`_discard`). On POSIX a member whose Unix mode has an x bit
+  (`_executable`: an app's helper script, ruff's `bin/ruff`) gets x bits where it has r bits
+  (`open()` made it 0644); `pyz._write_archive` stores each file's mode, and `pyz-merge` passes
+  the parts' executable modes through (`modes`, a `common/app` file from any part), since it
+  rewrites every member from a copy. Every start touches its build folder; `_prune_old`
   deletes only builds beyond the 3 most recently started AND older than a day (`MIN_AGE`: a
   running build is never deleted), unlinking their `.complete` markers first, and tolerates
   folders that vanish under it. Without a usable cache (`Path.home()` raises for a UID without
@@ -3465,6 +3469,10 @@ Behaviour:
   extensions out of `common/`, and a cpython/pypy wheel stays tagged `py3-none-any`.
 - `sync_tree` does not detect a case-only rename (`Data.py` -> `data.py`) on a
   case-insensitive file system: the stage keeps the old spelling until `./deploy clean`.
+- A pyz built on Windows stores no x bit (Windows files have no Unix mode), so the executables of
+  its Linux or macOS targets (`--target`), or of a script in `src/`, are not runnable where it is
+  extracted; the generated CI builds each OS's part on that OS, and `pyz-merge` keeps the parts'
+  modes (an app file is executable when it is in any part).
 
 Editors:
 - VS Code problem matchers and the Neovim parser depend on tool output formats (ruff, mypy,

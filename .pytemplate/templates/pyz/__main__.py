@@ -5,6 +5,8 @@ contents are extracted to a cache versioned per build and run from there. If thi
 and OS have their own build (_pyz.json "targets": binaries, or dependencies that differ per
 platform), it is used; otherwise the pure Python version is used (if the app allows it).
 
+Executables (an app's helper script, a dependency's binary) keep their x bit.
+
 Cache: %LOCALAPPDATA%, ~/Library/Caches, $XDG_CACHE_HOME or ~/.cache, then
 <name>/pyz/<build_id>/<key|pure>/. It keeps the most recently started builds plus every
 build started in the last day (one that is still running is never deleted); deleting the
@@ -19,6 +21,7 @@ import platform
 import runpy
 import shutil
 import site
+import stat
 import sys
 import tempfile
 import time
@@ -58,22 +61,33 @@ def _discard(folder: Path) -> None:
     shutil.rmtree(stale, ignore_errors=True)
 
 
+def _executable(info: zipfile.ZipInfo) -> bool:
+    """Whether a member is a regular file with an x bit in its (Unix) mode."""
+    mode = info.external_attr >> 16
+    return bool(mode and stat.S_ISREG(mode) and mode & 0o111)
+
+
 def _extract(archive: zipfile.ZipFile, prefixes: list[str], dest: Path) -> None:
     """Extract atomically (temporary folder + rename): safe with concurrent startups. A folder
     left without its .complete marker (an interrupted prune, a DLL that was still loaded) is
-    moved aside and replaced."""
+    moved aside and replaced. Executables keep their x bit (a helper script of the app, a
+    dependency's binary such as ruff's bin/ruff)."""
     if (dest / ".complete").is_file():
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix=".tmp-", dir=dest.parent))
     try:
         for prefix in prefixes:
-            for member in archive.namelist():
+            for info in archive.infolist():
+                member = info.filename
                 if member.startswith(prefix) and not member.endswith("/"):
                     target = tmp / member[len(prefix) :]
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    with archive.open(member) as src, open(target, "wb") as out:
+                    with archive.open(info) as src, open(target, "wb") as out:
                         shutil.copyfileobj(src, out)
+                    if os.name != "nt" and _executable(info):
+                        mode = os.stat(target).st_mode  # what open() gave it under the umask
+                        os.chmod(target, mode | (mode & 0o444) >> 2)
         (tmp / ".complete").write_text("ok")
         for attempt in range(2):
             try:
