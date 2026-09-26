@@ -438,10 +438,14 @@ def xonsh_snippet(cfg: Config | None) -> str:
     )
 
 
+# The snippets are ASCII (they are appended to rc files): a path of the user's that is not
+# (C:\Users\Jos<e-acute>) is named by its generic form instead.
 def _msys2_bashrc() -> str:
     user = os.environ.get("USERNAME") or os.environ.get("USER") or "<you>"
     for root in _msys2_roots(dict(os.environ), standard=True):
-        return str(root / "home" / user / ".bashrc")
+        path = str(root / "home" / user / ".bashrc")
+        if path.isascii():
+            return path
     return "<MSYS2 root>\\home\\<you>\\.bashrc"
 
 
@@ -452,6 +456,8 @@ def _posix_header(shell: str) -> str:
         return "# `deploy` in zsh from any folder of a pytemplate project.\n# Paste into ~/.zshrc, then open a new shell."
     if shell == "niubash":
         niu_env = os.environ.get("NIU_ENV") or "(unset: set NIU_ENV to a file first)"
+        if not niu_env.isascii():
+            niu_env = "$NIU_ENV"  # `echo $NIU_ENV` in niubash names it
         return (
             "# `deploy` in niubash from any folder of a pytemplate project.\n"
             "# Paste it into BOTH of these files, then open a new shell:\n"

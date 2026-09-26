@@ -274,6 +274,24 @@ def test_snippets_are_ascii_and_say_where_to_paste(monkeypatch: pytest.MonkeyPat
         shells.snippet("tcsh")
 
 
+def test_snippets_stay_ascii_with_non_ascii_user_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The niubash and msys2 headers name the user's files: a NIU_ENV or user name with an accent
+    must not put non-ASCII bytes into the snippet (it is appended to rc files)."""
+    root = tmp_path / "msys64"
+    (root / "usr" / "bin").mkdir(parents=True)
+    for name in ("bash.exe", "msys-2.0.dll"):
+        (root / "usr" / "bin" / name).write_bytes(b"")
+    user = "Jos\u00e9"
+    for key, value in (("NIU_ENV", f"/home/{user}/niu.env"), ("USERNAME", user), ("MSYS2_ROOT", str(root)), ("SCOOP", "")):
+        monkeypatch.setenv(key, value)
+    for shell in ("niubash", "msys2"):
+        text = shells.snippet(shell)
+        assert text.isascii(), text
+    assert "$NIU_ENV" in shells.snippet("niubash")
+    monkeypatch.setenv("USERNAME", "me")  # an ASCII path is still named in full
+    assert str(root / "home" / "me" / ".bashrc") in shells.snippet("msys2")
+
+
 def test_xonsh_snippet_words_and_syntax() -> None:
     cfg = make({"tasks": {"gen": {"cmd": ["python", "gen.py"]}}})
     text = shells.snippet("xonsh", cfg)

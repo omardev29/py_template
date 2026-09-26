@@ -488,7 +488,9 @@ header rules (with detector tests proving each rule fires).
   the interpreter of `#!/bin/sh` (Git Bash/MSYS2 without `SHELL`); unknown shell exits 2):
   prints a `deploy` function/alias that works
   from any subfolder, plus where to paste it. Output is ASCII with LF even on Windows (written
-  to `stdout.buffer`: it is appended to rc files). bash, zsh, niubash and msys2 share one POSIX
+  to `stdout.buffer`: it is appended to rc files); a user's file named in a header that is not
+  ASCII (a `NIU_ENV` or MSYS2 home with an accent) is written `$NIU_ENV` or
+  `<MSYS2 root>\home\<you>\.bashrc` instead. bash, zsh, niubash and msys2 share one POSIX
   function whose walk-up stops at `/`, `C:`, `C:/` and at a backslash `PWD` (the old `dirname`
   loop never ended on niubash's `C:/...` paths); niubash: paste it into `~/.niubashrc` AND the
   `$NIU_ENV` file; msys2: above the interactive guard of `.bashrc` (`!m` lines also need
