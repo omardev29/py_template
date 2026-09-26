@@ -1,28 +1,80 @@
-# End-to-end test of the TEMPLATE itself: `./deploy selftest --e2e` creates a project from
-# each preset with ./deploy new and sets it up, checks, tests, runs and builds it there.
-# The template- prefix keeps this workflow out of the projects that ./deploy new creates.
+# End-to-end test of the TEMPLATE itself: `./deploy selftest --e2e` creates a project from each
+# preset with ./deploy new and works in it like a user: setup, the first commit through the
+# pre-commit hook, check, test, run, build (and run the headless artifacts), plus in the deeper
+# modes the runner's own tests in the project, a rename round trip, and mode and apply changes.
+# The template- prefix keeps this workflow out of the projects ./deploy new creates, and the gate
+# job skips everything in repositories made from the template.
+#   push, pull request   quick: one build per backend
+#   weekly (Monday)      default: every build method but nuitka, selftest and rename in the project
+#   monthly (day 1)      full: + nuitka, the pypy round trip and a [preset.*] option edit
+#   manual dispatch      the mode picked (Actions > template-e2e > Run workflow)
+# The scheduled runs test the latest uv, PyPI and runner images: a red one without a commit
+# behind it means an upstream change.
 name: template-e2e
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "quick (one build per backend), default (every method but nuitka) or full (+ nuitka and the pypy round trip)"
+        description: "quick (one build per backend), default (every method but nuitka, selftest and rename in the project) or full (+ nuitka, the pypy round trip and an option edit)"
         type: choice
         options: [quick, default, full]
         default: quick
   schedule:
-    - cron: "17 4 * * 1" # weekly, Monday 04:17 UTC
+    - cron: "17 4 * * 1" # weekly, Monday 04:17 UTC: default
+    - cron: "37 3 1 * *" # monthly, day 1 03:37 UTC: full (the MODE expression below names this string)
+  # what ./deploy new copies into every project: the runner and presets, the launchers, the tool
+  # versions of the root lock, the skeleton of the script preset and the git settings
   push:
     paths:
       - ".pytemplate/**"
       - "deploy"
       - "deploy.cmd"
       - "deploy.ps1"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "pytemplate.toml"
+      - ".python-version"
+      - "src/**"
+      - "tests/**"
+      - ".gitignore"
+      - ".gitattributes"
+      - ".github/workflows/template-e2e.yml"
+  pull_request:
+    paths:
+      - ".pytemplate/**"
+      - "deploy"
+      - "deploy.cmd"
+      - "deploy.ps1"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "pytemplate.toml"
+      - ".python-version"
+      - "src/**"
+      - "tests/**"
+      - ".gitignore"
+      - ".gitattributes"
       - ".github/workflows/template-e2e.yml"
 
+permissions:
+  contents: read
+
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      template: ${{ steps.marker.outputs.template }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .pytemplate/template-repo
+          sparse-checkout-cone-mode: false
+      - id: marker
+        run: if [ -f .pytemplate/template-repo ]; then echo "template=true" >> "$GITHUB_OUTPUT"; fi
+
   e2e:
+    needs: gate
+    if: needs.gate.outputs.template == 'true'
     name: e2e ${{ matrix.preset }} (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -30,7 +82,9 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         preset: [script, raylib, flet]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    # full builds nuitka (a flet build took ~25 min per backend when measured); every step also
+    # has its own timeout in e2e.TIMEOUTS / BUILD_TIMEOUTS
+    timeout-minutes: ${{ (inputs.mode == 'full' || github.event.schedule == '37 3 1 * *') && 300 || 120 }}
     defaults:
       run:
         shell: bash
@@ -42,15 +96,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libgl1 libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6 libgl1-mesa-dri xvfb
       - name: selftest --e2e ${{ matrix.preset }}
         env:
-          MODE: ${{ inputs.mode || 'quick' }}
+          # dispatch: the chosen mode; monthly cron: full; weekly cron: default; push and PR: quick
+          MODE: ${{ inputs.mode || (github.event.schedule == '37 3 1 * *' && 'full') || (github.event_name == 'schedule' && 'default') || 'quick' }}
           PRESET: ${{ matrix.preset }}
         run: |
           case "$MODE" in
-            quick) size=--quick ;;
-            full) size=--full ;;
-            *) size= ;;
+            quick) args=(--quick) ;;
+            full) args=(--full) ;;
+            *) args=() ;;
           esac
-          ./deploy selftest --e2e "$PRESET" $size --json --base "$RUNNER_TEMP/e2e" > "e2e-$PRESET.json"
+          echo "selftest --e2e $PRESET: $MODE mode"
+          ./deploy selftest --e2e "$PRESET" "${args[@]}" --json --base "$RUNNER_TEMP/e2e" > "e2e-$PRESET.json"
       - name: Upload the JSON report
         if: always()
         uses: actions/upload-artifact@v7
