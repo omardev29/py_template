@@ -1109,8 +1109,9 @@ def _git_init(dest: Path) -> None:
         [git, "rev-parse", "--is-inside-work-tree"], cwd=dest.parent, env=env, capture=True, check=False, echo=False
     )
     if inside.returncode == 0 and inside.stdout.strip() == "true":
-        filemode = proc.run([git, "config", "--get", "core.filemode"], cwd=dest, env=env, capture=True, check=False, echo=False)
-        if filemode.stdout.strip().lower() == "false":  # an ignored folder: git refuses, and that is fine
+        # --bool: git's own reading of the value (off, no and 0 are false too); every git has it
+        filemode = proc.run([git, "config", "--bool", "--get", "core.filemode"], cwd=dest, env=env, capture=True, check=False, echo=False)
+        if filemode.stdout.strip() == "false":  # an ignored folder: git refuses, and that is fine
             proc.run([git, "add", "--chmod=+x", "--", "deploy", "deploy.ps1"], cwd=dest, env=env, capture=True, check=False)
         return
     if (dest / ".git").exists():

@@ -1309,11 +1309,12 @@ def test_git_init_makes_a_main_branch(tmp_path: Path, git_env: None) -> None:
 
 
 @needs_git
-@pytest.mark.parametrize("filemode", ["false", "true"])
+@pytest.mark.parametrize("filemode", ["false", "true", "off", "no", "0", "yes"])
 def test_git_init_in_a_monorepo_stages_the_launchers_executable(tmp_path: Path, git_env: None, filemode: str) -> None:
     """new inside a repository with core.filemode = false (Git for Windows): `git add` recorded
     deploy as 100644 and the pre-commit hook refused the first commit. Staged 100755 there;
-    elsewhere (core.filemode = true) nothing is staged: the files' own x bit is recorded."""
+    elsewhere (core.filemode = true) nothing is staged: the files' own x bit is recorded. Every
+    spelling git reads as false counts (off, no, 0: only "false" did)."""
     mono = tmp_path / "mono"
     mono.mkdir()
     _git(mono, "init", "--quiet")
@@ -1326,7 +1327,8 @@ def test_git_init_in_a_monorepo_stages_the_launchers_executable(tmp_path: Path, 
     presets._git_init(dest)
     assert not (dest / ".git").exists()  # no nested repository
     modes = {line.split()[3]: line.split()[0] for line in _git(mono, "ls-files", "-s").splitlines()}
-    assert modes == ({"apps/game/deploy": "100755", "apps/game/deploy.ps1": "100755"} if filemode == "false" else {})
+    executable = {"apps/game/deploy": "100755", "apps/game/deploy.ps1": "100755"}
+    assert modes == (executable if filemode in ("false", "off", "no", "0") else {})
 
 
 @needs_git
