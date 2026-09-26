@@ -1087,7 +1087,9 @@ Per method:
 - `preset.toml`: `description`, `dependencies` / `dev_dependencies` (with `{option}`),
   `[options]` (defaults of `[preset.<p>]`), optional `[uv]` (extra managed `[tool.uv]` keys),
   optional `pyproject` string (extra tables, with `{{name}}`/`{{pkg}}`: `extra_tables`).
-  Optional `constraints.txt` next to it: the tested pins (below).
+  Optional `constraints.txt` next to it: the tested pins (below). `presets.load` reads it as
+  `utf-8-sig` and refuses (`DeployError` naming the file) invalid TOML or UTF-8, an unknown key
+  and a wrong type (`PRESET_KEYS`): `render.managed_block` reads it on every run.
 - `files/`: complete skeleton, including a full `pytemplate.toml` (`__init` overwrites the root
   one), `src/main.py`, `src/__pkg__/core/` (compiled) + a boundary, `tests/conftest.py`
   (identical in every preset), optional `typings/` and tools. It must be ruff-clean: the
@@ -1107,8 +1109,11 @@ Per method:
   `check_name_free`, pristine, the skeleton's `pytemplate.toml` validated,
   `render.check_pyproject` for the new configuration, and the new `pyproject.toml`
   (`pyproject_after_init`: name and managed parts without the old preset tables, then the new
-  ones) parsed and checked: a preset table outside the markers or a damaged marker is a
-  `DeployError` (exit 2). `--dry-run __init` prints the plan (`cmd_mode._plan_init`).
+  ones) parsed and checked: a preset table outside the markers, a damaged or repeated preset
+  marker (`_extra_bounds`) or a `[project]` table without `name` is a `DeployError` (exit 2).
+  `_set_project_name` only touches the `name` of `[project]` (any quoting, CRLF kept: `rename`
+  uses it too), and the text is split on `\n` only (a U+2028 inside a TOML string is not a
+  line break). `--dry-run __init` prints the plan (`cmd_mode._plan_init`).
   `presets.init` then (1) writes `pyproject.toml` and runs `uv remove --frozen` (no
   resolution) for the old preset's requirements, `uv add --no-sync [--constraints]` for the
   new ones and `uv lock`: the only step that needs the network; (2) renames `src/ tests/
@@ -1117,10 +1122,12 @@ Per method:
   `deploy`/`deploy.ps1` on POSIX. Any failure or Ctrl+C in (1) or (2) puts every file back
   (`presets._Undo`, prints "every file is back as it was") and is raised. (3) Deletes the
   aside folder and runs `render.apply(force=True)`.
-- `presets.check_name_free` (in `new`, `__init`, their dry runs and `rename`) refuses: a name uv
-  refuses (`presets.APP_NAME`: a letter first, a letter or digit last, PEP 508), a keyword, a
-  stdlib module, the project's own folders and files (`RESERVED_PACKAGES`: tests, typings,
-  build, dist, assets; plus the preset's `src/` entries such as `main`), and every package the
+- `presets.check_name_free` (in `new`, `__init`, their dry runs and `rename`, which keeps its
+  first line) refuses: a name uv refuses (`presets.APP_NAME`: a letter first, a letter or digit
+  last, PEP 508), a keyword, a stdlib module, a Windows device name (`WINDOWS_DEVICES`: `aux`,
+  `con`, `nul`, `com1`...: the folder cannot exist there and git cannot check it out), the
+  project's own folders and files (`RESERVED_PACKAGES`: tests, typings, build, dist, assets;
+  plus the preset's `src/` entries such as `main`), and every package the
   project will lock: the declared requirements (minus the current preset's own), their tree in
   `uv.lock` (`locked_names`, markers ignored because uv refuses a self-dependency on any
   platform; the project's own entry excluded) and the preset's pins. When a preset adds
@@ -1138,7 +1145,9 @@ Per method:
   copied", ignored ones stay silent, so `.env`, `.idea/`, `htmlcov/`, `*.spec` never reach a
   new project. A maintainer's new file must be `git add`ed before `new` or `selftest --e2e`
   sees it. Without git, or when git does not track `.pytemplate/deploy.py` (a copy inside
-  another repository, a project never committed), it copies every file. Both skip
+  another repository, a project never committed), it copies every file; a git failure other
+  than "not a git repository" (dubious ownership...) is a warning first (git runs with
+  `LC_ALL=C`). Both skip
   (`presets._skipped`) `.git`, `.build`, `dist`, caches, `.flet`, `.venv*`, `template-repo`
   at any depth; `build/` and `.claude/` at the root; and `.github/workflows/template-*`
   (template CI files MUST use that prefix). `new` then runs the copy's own runner with
@@ -1597,7 +1606,9 @@ Runner code:
   and stdin (section 5.6).
 - Text files: `encoding="utf-8", newline="\n"`; write `"\ufeff"`, never a literal BOM; read
   `pytemplate.toml` with `config.read_text` (a bad encoding becomes a clear config error);
-  parse Python sources as bytes (`imports.parse`).
+  read `pyproject.toml`, `uv.lock` and the preset files (`preset.toml`, `constraints.txt`) as
+  `utf-8-sig`, like uv (`presets._read_text`, `presets.load`); parse Python sources as bytes
+  (`imports.parse`).
   Generated `.cmd` files: ASCII, explicit `\r\n`, written with `newline=""`.
 - Project paths from `project.*` (never the cwd); user-typed paths through
   `project.user_path`.

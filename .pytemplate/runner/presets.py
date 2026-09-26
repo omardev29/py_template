@@ -57,17 +57,55 @@ RESERVED_PACKAGES = {
     "dist": "dist/ (.gitignore excludes it at any depth: the app would never reach git)",
     "assets": "src/assets/ (the data folder bundled with the app: app.assets)",
 }
+# Windows reserves these names (any case, any extension) for devices: src/aux/ cannot be created
+# there, and git cannot check out a repository that holds it
+WINDOWS_DEVICES = frozenset({"con", "prn", "aux", "nul", *(f"{d}{i}" for d in ("com", "lpt") for i in range(10))})
 
 
 def available() -> list[str]:
     return sorted(p.name for p in PRESETS.iterdir() if (p / "preset.toml").is_file())
 
 
+# The keys of preset.toml and what each holds
+PRESET_KEYS: dict[str, str] = {
+    "description": "a string",
+    "dependencies": "a list of strings",
+    "dev_dependencies": "a list of strings",
+    "options": "a table",
+    "uv": "a table",
+    "pyproject": "a string",
+}
+
+
+def _holds(value: Any, kind: str) -> bool:
+    if kind == "a list of strings":
+        return isinstance(value, list) and all(isinstance(v, str) for v in value)
+    return isinstance(value, dict if kind == "a table" else str)
+
+
 def load(name: str) -> dict[str, Any]:
+    """preset.toml of `name`, read like every file the template ships (a BOM is fine). A file
+    that cannot be read, is not TOML or holds an unknown key or a wrong type is a DeployError
+    naming it: render (the managed [tool.uv] block) and new read it on every run."""
     path = PRESETS / name / "preset.toml"
     if not path.is_file():
         raise DeployError(f"unknown preset '{name}' (available: {', '.join(available())})")
-    return tomllib.loads(path.read_text(encoding="utf-8"))
+    where = rel(path)
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    except UnicodeDecodeError as e:
+        raise DeployError(f"{where} is not UTF-8 text (byte {e.start}): save it as UTF-8") from None
+    except OSError as e:
+        raise DeployError(f"cannot read {where}: {e.strerror or e}") from None
+    except tomllib.TOMLDecodeError as e:
+        raise DeployError(f"{where} is not valid TOML: {e}") from None
+    for key, value in data.items():
+        kind = PRESET_KEYS.get(key)
+        if kind is None:
+            raise DeployError(f"{where}: unknown key '{key}' (known: {', '.join(PRESET_KEYS)})")
+        if not _holds(value, kind):
+            raise DeployError(f"{where}: '{key}' must be {kind}")
+    return data
 
 
 def _fmt(value: Any, options: dict[str, Any]) -> Any:
@@ -174,14 +212,21 @@ def _norm_name(req: str) -> str:
     return re.sub(r"[-_.]+", "-", m.group(1)).lower() if m else req
 
 
-def _read_toml(path: Path, what: str) -> dict[str, Any]:
-    """Parse a TOML file that uv reads too: a BOM is tolerated, as uv does."""
+def _read_text(path: Path, what: str) -> str:
+    """A text file that uv reads too, such as pyproject.toml: a BOM is dropped, as uv does."""
     try:
-        return tomllib.loads(path.read_text(encoding="utf-8-sig"))
+        return path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
         raise DeployError(f"{what} not found: {path}") from None
-    except (OSError, UnicodeDecodeError) as e:
-        raise DeployError(f"cannot read {what}: {e}") from None
+    except UnicodeDecodeError as e:
+        raise DeployError(f"{what} is not UTF-8 text (byte {e.start}): save it as UTF-8") from None
+    except OSError as e:
+        raise DeployError(f"cannot read {what}: {e.strerror or e}") from None
+
+
+def _read_toml(path: Path, what: str) -> dict[str, Any]:
+    try:
+        return tomllib.loads(_read_text(path, what))
     except tomllib.TOMLDecodeError as e:
         raise DeployError(f"{what} is not valid TOML: {e}") from None
 
@@ -286,8 +331,14 @@ def constraints(preset: str) -> dict[str, str]:
     path = constraints_path(preset)
     if not path.is_file():
         return {}
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise DeployError(f"{rel(path)} is not UTF-8 text (byte {e.start}): regenerate it (CLAUDE.md section 11)") from None
+    except OSError as e:
+        raise DeployError(f"cannot read {rel(path)}: {e.strerror or e}") from None
     pins: dict[str, str] = {}
-    for number, raw in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+    for number, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
@@ -355,16 +406,24 @@ def _dependency_names(cfg: Config | None, preset: str) -> set[str]:
 
 
 def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
-    """Reject an app name whose package src/<pkg>/ would break the project: a Python keyword, a
-    standard library module, one of the project's own folders or files, or a package the
-    project depends on, directly or not (uv refuses a project that depends on itself, and
-    src/<pkg>/ would shadow the library)."""
+    """Reject an app name that would break the project: one uv refuses (APP_NAME), a package
+    src/<pkg>/ that is a Python keyword, a standard library module, a Windows device name, one
+    of the project's own folders or files, or a package the project depends on, directly or not
+    (uv refuses a project that depends on itself, and src/<pkg>/ would shadow the library).
+    new, init, their dry runs and rename (which keeps the first line) call it."""
     pkg = name.replace("-", "_").lower()
     hint = "\n  Choose another name with --name NAME"
+    if not APP_NAME.fullmatch(name):
+        raise DeployError(f"'{name}' is not a valid app name: it may only contain {NAME_RULE}.{hint}")
     if keyword.iskeyword(pkg):
         raise DeployError(f"the package '{pkg}' would be a Python keyword (`import {pkg}` is a syntax error).{hint}")
     if pkg in sys.stdlib_module_names:
         raise DeployError(f"src/{pkg}/ would shadow the standard library module '{pkg}'.{hint}")
+    if pkg in WINDOWS_DEVICES:
+        raise DeployError(
+            f"src/{pkg}/ cannot exist on Windows: '{pkg}' is a reserved device name there (CON, PRN, "
+            f"AUX, NUL, COM0-9, LPT0-9) and a repository holding it cannot be checked out.{hint}"
+        )
     taken = {**_skeleton_src_names(preset), **RESERVED_PACKAGES}
     if pkg in taken:
         raise DeployError(f"src/{pkg}/ would collide with the project's own {taken[pkg]}.{hint}")
@@ -380,20 +439,54 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
 # --- pyproject ---------------------------------------------------------------------------------
 
 
+# A [project] header, any table header (the end of [project]), and a `name = "..."` line: a
+# trailing \r is fine (rename passes CRLF text)
+_PROJECT_HEADER = re.compile(r"[ \t]*\[[ \t]*project[ \t]*\][ \t\r]*(?:#.*)?")
+_TABLE_HEADER = re.compile(r"[ \t]*\[\[?[^\[\]\n]+\]\]?[ \t\r]*(?:#.*)?")
+_NAME_KEY = re.compile(r"""([ \t]*(?:name|"name"|'name')[ \t]*=[ \t]*)(?:"(?:[^"\\\n]|\\.)*"|'[^'\n]*')""")
+
+
 def _set_project_name(text: str, name: str) -> str:
-    return re.sub(r'(?m)^(name\s*=\s*)"[^"]*"', lambda m: f'{m.group(1)}"{name}"', text, count=1)
+    """`text` with the name of its [project] table set to `name`; any other `name` key (an index,
+    a tool table) is left alone. Unchanged without one: pyproject_after_init checks the result."""
+    lines = text.split("\n")
+    start = next((i for i, ln in enumerate(lines) if _PROJECT_HEADER.fullmatch(ln)), len(lines))
+    for i in range(start + 1, len(lines)):
+        if _TABLE_HEADER.fullmatch(lines[i]):
+            break
+        m = _NAME_KEY.match(lines[i])
+        if m:
+            lines[i] = f'{m.group(1)}"{name}"{lines[i][m.end():]}'
+            break
+    return "\n".join(lines)
+
+
+def _extra_bounds(lines: list[str]) -> tuple[int, int] | None:
+    """The lines of the preset markers (None: no preset block); DeployError when they are damaged."""
+    begins = [i for i, ln in enumerate(lines) if ln.strip() == EXTRA_BEGIN]
+    ends = [i for i, ln in enumerate(lines) if ln.strip() == EXTRA_END]
+    if not begins and not ends:
+        return None
+    if len(begins) == 1 and len(ends) == 1 and begins[0] < ends[0]:
+        return begins[0], ends[0]
+    order = " (the closing one comes first)" if len(begins) == len(ends) == 1 else ""
+    raise DeployError(
+        f"pyproject.toml: the preset's tables sit between one '{EXTRA_BEGIN}' line and one "
+        f"'{EXTRA_END}' line; found {len(begins)} and {len(ends)}{order}.\n"
+        "  Restore the markers around those tables (or delete the markers with the tables), then try again"
+    )
 
 
 def _set_extra_tables(text: str, extra: str) -> str:
-    lines = text.rstrip("\n").splitlines()
-    begin = next((i for i, ln in enumerate(lines) if ln.strip() == EXTRA_BEGIN), None)
-    end = next((i for i, ln in enumerate(lines) if ln.strip() == EXTRA_END), None)
-    if begin is not None and end is not None:
-        del lines[begin : end + 1]
+    """`text` (LF) with the preset block replaced by `extra` (dropped when `extra` is empty)."""
+    lines = text.rstrip("\n").split("\n") if text.strip() else []
+    bounds = _extra_bounds(lines)
+    if bounds is not None:
+        del lines[bounds[0] : bounds[1] + 1]
         while lines and not lines[-1].strip():
             lines.pop()
     if extra.strip():
-        lines += ["", EXTRA_BEGIN, *extra.strip("\n").splitlines(), EXTRA_END]
+        lines += ["", EXTRA_BEGIN, *extra.strip("\n").split("\n"), EXTRA_END]
     return "\n".join(lines) + "\n"
 
 
@@ -411,25 +504,32 @@ def _contains(data: Any, part: Any) -> bool:
 
 
 def pyproject_after_init(cfg: Config, preset: str, name: str) -> str:
-    """pyproject.toml as `init` writes it for the new configuration `cfg`: project name, managed
-    parts, then the preset's tables. DeployError when the result would not be valid TOML (a table
-    of the preset also defined outside the markers, a damaged marker) or would not hold both."""
+    """pyproject.toml as `init` writes it for the new configuration `cfg`: the old preset's tables
+    out, the project name and the managed parts in, then the new preset's tables. DeployError when
+    the result would not be valid TOML (a table of the preset also defined outside the markers)
+    or would not hold all of them; damaged markers are a DeployError too."""
     from . import render
 
-    text = PYPROJECT.read_text(encoding="utf-8-sig").replace("\r\n", "\n")
+    text = _read_text(PYPROJECT, "pyproject.toml").replace("\r\n", "\n")
     extra = extra_tables(preset, name)
+    try:
+        wanted = tomllib.loads(extra)
+    except tomllib.TOMLDecodeError as e:
+        raise DeployError(f"{rel(PRESETS / preset / 'preset.toml')}: the pyproject tables are not valid TOML ({e})") from None
     hint = f"fix the '{EXTRA_BEGIN}' / '{EXTRA_END}' and '# >>> pytemplate' markers of pyproject.toml and try again"
     try:
-        # The managed block first, without any preset table: its markers must not be confused
         managed = render.pyproject_expected(cfg, _set_extra_tables(_set_project_name(text, name), ""))
         text = _set_extra_tables(managed, extra)
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise DeployError(
             f"pyproject.toml would not be valid TOML with the tables of the '{preset}' preset ({e}).\n"
-            f"  One of them is probably defined outside the markers, or a marker is missing: {hint}"
+            f"  One of them is probably defined outside the markers: {hint}"
         ) from None
-    if not _contains(data, tomllib.loads(extra)) or render.pyproject_expected(cfg, text) != text:
+    project = data.get("project")
+    if not isinstance(project, dict) or project.get("name") != name:
+        raise DeployError(f"pyproject.toml: the [project] table has no name = \"...\" line to set to '{name}': add one")
+    if not _contains(data, wanted) or render.pyproject_expected(cfg, text) != text:
         raise DeployError(f"pyproject.toml: the tables of the '{preset}' preset or the managed [tool.uv] block did not land: {hint}")
     return text
 
@@ -462,12 +562,10 @@ def _dropped(old: list[str], new: list[str], declared: set[str]) -> list[str]:
 
 def plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> InitPlan:
     """Every check `init` makes, in memory: nothing is written (the --dry-run of init prints it)."""
-    from . import config
+    from . import config, render
 
     new_name = name or cfg.app.name
-    if not APP_NAME.fullmatch(new_name):
-        raise DeployError(f"'{new_name}' is not a valid app name: it may only contain {NAME_RULE}")
-    check_name_free(cfg, preset, new_name)
+    check_name_free(cfg, preset, new_name)  # the format too
     target = load(preset)
     if not force and not pristine(cfg):
         raise DeployError(
@@ -479,13 +577,16 @@ def plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> Ini
     if "pytemplate.toml" not in files:
         raise DeployError(f"{where} is missing")
     try:
-        data = tomllib.loads(files["pytemplate.toml"].decode("utf-8"))
+        data = tomllib.loads(files["pytemplate.toml"].decode("utf-8-sig"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise DeployError(f"{where} is not valid TOML: {e}") from None
     new_cfg: Config = config._build(config.Config, data, "")
     config.validate(new_cfg)
     if (new_cfg.app.name, new_cfg.app.preset) != (new_name, preset):
         raise DeployError(f"{where}: [app] must say name = \"{{{{name}}}}\" and preset = \"{preset}\"")
+    # The managed parts of pyproject.toml can be rewritten for the new configuration (broken
+    # markers, a managed key repeated outside them...): refused here, before anything changes
+    render.check_pyproject(new_cfg)
     text = pyproject_after_init(new_cfg, preset, new_name)
     old_deps, old_dev = dependencies(cfg)
     new_deps, new_dev = dependencies(new_cfg, preset)
@@ -692,12 +793,19 @@ def _git_env() -> dict[str, str]:
 
 
 def _git_files(*args: str) -> list[str] | None:
-    """`git ls-files -z ARGS` in ROOT (paths relative to it); None without git or a work tree."""
+    """`git ls-files -z ARGS` in ROOT (paths relative to it); None without git or a work tree.
+    Any other git failure (dubious ownership, a broken repository) is said out loud: the copy then
+    takes every file, untracked ones included."""
     git = shutil.which("git")
     if git is None:
         return None
-    r = proc.run([git, "ls-files", "-z", *args], cwd=ROOT, env=_git_env(), capture=True, check=False, echo=False)
+    env = {**_git_env(), "LC_ALL": "C"}  # git's messages in English: "not a git repository"
+    r = proc.run([git, "ls-files", "-z", *args], cwd=ROOT, env=env, capture=True, check=False, echo=False)
     if r.returncode != 0:
+        reason = (r.stderr or r.stdout or "").strip()
+        if "not a git repository" not in reason:
+            first = reason.splitlines()[0] if reason else f"exit code {r.returncode}"
+            ui.warn(f"git ls-files failed in {ROOT} ({first}): the copy includes files git does not track")
         return None
     return [p for p in r.stdout.split("\0") if p]
 

@@ -185,7 +185,7 @@ def test_skeleton_config_is_valid_and_names_the_app(preset: str, name: str) -> N
 @pytest.mark.parametrize("preset", PRESETS)
 def test_preset_toml_is_complete(preset: str) -> None:
     data = presets.load(preset)
-    assert set(data) <= {"description", "dependencies", "dev_dependencies", "options", "uv", "pyproject"}, set(data)
+    assert set(data) <= set(presets.PRESET_KEYS), set(data)
     assert str(data.get("description", "")).strip()
     opts = dict(data.get("options", {}))
     values: list[str] = [*data.get("dependencies", []), *data.get("dev_dependencies", [])]
@@ -196,6 +196,48 @@ def test_preset_toml_is_complete(preset: str) -> None:
     extra = presets.extra_tables(preset, "My-App")
     assert not TOKEN.search(extra), extra
     tomllib.loads(extra)
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (b"description = [\n", "is not valid TOML"),
+        (b'description = "caf\xe9"\n', r"is not UTF-8 text \(byte 18\)"),
+        (b'description = "x"\nversion = "1"\n', "unknown key 'version'"),
+        (b'dependencies = "flet"\n', "'dependencies' must be a list of strings"),
+        (b"dev_dependencies = [1]\n", "'dev_dependencies' must be a list of strings"),
+        (b"description = 1\n", "'description' must be a string"),
+        (b'options = "x"\n', "'options' must be a table"),
+        (b"[pyproject]\n", "'pyproject' must be a string"),
+    ],
+)
+def test_a_broken_preset_toml_is_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: bytes, message: str) -> None:
+    """render reads preset.toml on every run (the managed [tool.uv] block): a damaged file must
+    say which file and what, never end in a traceback."""
+    (tmp_path / "p").mkdir()
+    (tmp_path / "p" / "preset.toml").write_bytes(raw)
+    monkeypatch.setattr(presets, "PRESETS", tmp_path)
+    with pytest.raises(DeployError, match=message) as e:
+        presets.load("p")
+    assert e.value.code == 2
+    assert "preset.toml" in str(e.value)
+    cfg = config._build(Config, {"app": {"name": "demo", "preset": "p"}}, "")
+    with pytest.raises(DeployError, match=message):
+        render.managed_block(cfg)
+
+
+def test_preset_toml_may_carry_a_bom_and_crlf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "p").mkdir()
+    text = 'description = "x"\r\ndependencies = ["a=={version}"]\r\n\r\n[options]\r\nversion = "1"\r\n'
+    (tmp_path / "p" / "preset.toml").write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
+    monkeypatch.setattr(presets, "PRESETS", tmp_path)
+    assert presets.load("p") == {"description": "x", "dependencies": ["a=={version}"], "options": {"version": "1"}}
+
+
+def test_unknown_preset_lists_the_available_ones() -> None:
+    with pytest.raises(DeployError, match=r"unknown preset 'nope' \(available: .*script") as e:
+        presets.load("nope")
+    assert e.value.code == 2
 
 
 YEAR = re.compile(r"(?<![\d.])(?:19|20)\d\d(?![\d.])")
@@ -301,6 +343,20 @@ def test_name_from_folder(folder: str, name: str) -> None:
         ("flet", "main", "src/main.py"),
         ("flet", "flet", "also the name of a dependency of the 'flet' preset (flet"),
         ("script", "Rich", "also the name of a dependency of the 'script' preset (rich"),
+        # uv refuses these (PEP 508): rename relies on this check too
+        ("script", "app-", "'app-' is not a valid app name"),
+        ("script", "app_", "ending with a letter or digit"),
+        ("script", "1app", "starting with a letter"),
+        ("script", "my app", "not a valid app name"),
+        ("script", "", "not a valid app name"),
+        ("script", CAFE, "not a valid app name"),
+        # Windows device names: the folder cannot exist there, git cannot check it out
+        ("script", "aux", "src/aux/ cannot exist on Windows"),
+        ("script", "Con", "src/con/ cannot exist on Windows"),
+        ("script", "NUL", "reserved device name"),
+        ("script", "com1", "reserved device name"),
+        ("raylib", "LPT9", "reserved device name"),
+        ("script", "prn", "reserved device name"),
     ],
 )
 def test_check_name_free_refuses(preset: str, name: str, message: str) -> None:
@@ -311,9 +367,20 @@ def test_check_name_free_refuses(preset: str, name: str, message: str) -> None:
         assert str(e.value).endswith("Choose another name with --name NAME")
 
 
-@pytest.mark.parametrize("name", ["test-s", "builds", "mains", "asset", "my-dist", "typing_s", "Beta"])
+@pytest.mark.parametrize("name", ["test-s", "builds", "mains", "asset", "my-dist", "typing_s", "Beta", "com10", "auxiliary", "console", "null", "a"])
 def test_check_name_free_accepts_near_misses(name: str) -> None:
     presets.check_name_free(_skeleton_config("script", "myapp"), "script", name)
+
+
+@pytest.mark.parametrize(("name", "message"), [("game-", "valid app name|may only contain"), ("g_", "valid app name|may only contain"), ("aux", "Windows"), ("typings", "typings/")])
+def test_rename_refuses_the_names_check_name_free_refuses(name: str, message: str) -> None:
+    """`./deploy rename` goes through check_name_free: a name uv refuses (game-) used to move
+    src/ and rewrite the project before `uv lock` failed on it."""
+    from runner import rename
+
+    with pytest.raises(DeployError, match=message) as e:
+        rename.check_new_name(config.load(set(cli.COMMANDS)), name)
+    assert e.value.code == 2
 
 
 def test_every_locked_package_name_is_refused() -> None:
@@ -471,6 +538,10 @@ def test_constraints_parser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         (tmp_path / "p" / "constraints.txt").write_text("ok==1\n" + bad, encoding="utf-8")
         with pytest.raises(DeployError, match=r"constraints\.txt:2: expected name==version"):
             presets.constraints("p")
+    (tmp_path / "p" / "constraints.txt").write_bytes(b"ok==1\nb\xe9==2\n")
+    with pytest.raises(DeployError, match=r"constraints\.txt is not UTF-8 text \(byte 7\): regenerate it") as e:
+        presets.constraints("p")
+    assert e.value.code == 2
 
 
 def test_constraints_text_lists_what_the_template_lock_lacks(tmp_path: Path) -> None:
@@ -624,6 +695,37 @@ def test_copy_template_without_git(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     copied = set(_files(tmp_path / "new"))
     assert copied == {rel for rel in {**TRACKED, **UNTRACKED} if not presets._skipped(rel)}
     assert ".env" in copied  # without git nothing tells a local file from the template's
+
+
+@pytest.mark.parametrize(
+    ("stderr", "warned"),
+    [
+        ("fatal: detected dubious ownership in repository at '/t'\nTo add an exception...\n", True),
+        ("fatal: not a git repository (or any of the parent directories): .git\n", False),
+        ("", True),
+    ],
+)
+def test_copy_template_says_when_git_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stderr: str, warned: bool) -> None:
+    """Without a list from git the copy takes every file, secrets included: a git failure other
+    than "not a repository" (dubious ownership on a shared or copied folder) must say so."""
+    src = tmp_path / "t"
+    _write(src, {".pytemplate/deploy.py": b"# entry\n", ".env": b"SECRET=1\n"})
+    monkeypatch.setattr(presets, "ROOT", src)
+    monkeypatch.setattr(shutil, "which", lambda name: "git")
+    locales: list[str | None] = []
+
+    def run(argv: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        locales.append(kw["env"].get("LC_ALL"))
+        return subprocess.CompletedProcess(argv, 128, "", stderr)
+
+    monkeypatch.setattr(proc, "run", run)
+    presets.copy_template(tmp_path / "new")
+    err = capsys.readouterr().err
+    assert ("warning: git ls-files failed" in err) is warned, err
+    if stderr:
+        assert ("dubious ownership" in err) is warned
+    assert (tmp_path / "new" / ".env").is_file()  # the fallback: every file
+    assert locales == ["C"]  # git's messages in English, whatever the user's locale
 
 
 @pytest.mark.parametrize(
@@ -888,6 +990,7 @@ def fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Fake:
     (root / "uv.lock").write_text(FAKE_LOCK, encoding="utf-8")
     for name, value in (("ROOT", root), ("PYPROJECT", root / "pyproject.toml"), ("LOCK", root / "uv.lock"), ("BUILD", root / ".build")):
         monkeypatch.setattr(presets, name, value)
+    monkeypatch.setattr(render, "PYPROJECT", root / "pyproject.toml")  # render.check_pyproject
     calls: list[list[str]] = []
     rendered: list[Config] = []
 
@@ -1080,6 +1183,88 @@ def test_init_reads_a_pyproject_with_a_bom_and_crlf(fake: Fake) -> None:
     data = pyproject.read_bytes()
     assert not data.startswith(b"\xef\xbb\xbf") and b"\r\n" not in data
     assert tomllib.loads(data.decode("utf-8"))["tool"]["flet"]["product"] == "myapp"
+
+
+@pytest.mark.parametrize(
+    ("pyproject", "message"),
+    [
+        # uv would reject the duplicate key: render's own message says which key and why
+        (FAKE_PYPROJECT + 'python-preference = "system"\n', "repeat a managed key"),
+        (FAKE_PYPROJECT + "# >>> pytemplate: generated\n", "block managed by pytemplate is broken"),
+        (FAKE_PYPROJECT.replace("[project]", "[tool.other]"), r"is the \[project\] table missing"),
+        (FAKE_PYPROJECT.replace('name = "myapp"\n', ""), r"\[project\] table has no name"),
+    ],
+    ids=["managed-key-repeated", "managed-marker-damaged", "no-project-table", "no-project-name"],
+)
+def test_init_checks_the_pyproject_rewrite_before_writing(fake: Fake, pyproject: str, message: str) -> None:
+    """render.check_pyproject and pyproject_after_init run in plan_init: a pyproject.toml that
+    cannot be rewritten stops init (and its dry run) before any file or uv.lock changes."""
+    (fake.root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    before = _snapshot(fake.root)
+    for attempt in (lambda: presets.plan_init(fake.cfg, "raylib", None, force=False), lambda: presets.init(fake.cfg, "raylib", None, force=False)):
+        with pytest.raises(DeployError, match=message) as e:
+            attempt()
+        assert e.value.code == 2
+    assert _snapshot(fake.root) == before and fake.calls == [] and not fake.rendered
+
+
+def test_a_preset_with_broken_pyproject_tables_is_named(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(presets, "extra_tables", lambda preset, name: "[tool.flet\norg = 1\n")
+    with pytest.raises(DeployError, match=r"presets/flet/preset\.toml: the pyproject tables are not valid TOML") as e:
+        presets.pyproject_after_init(_skeleton_config("flet", "myapp"), "flet", "myapp")
+    assert e.value.code == 2
+
+
+SAME = "<unchanged>"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('[project]\nname = "old"\nversion = "1"\n', '[project]\nname = "new"\nversion = "1"\n'),
+        ("[project]\nname = 'old'  # the app\n", '[project]\nname = "new"  # the app\n'),
+        ('[project]\r\nname = "old"\r\nversion = "1"\r\n', '[project]\r\nname = "new"\r\nversion = "1"\r\n'),  # rename keeps CRLF
+        ('[project]\nname = "o\\"ld"\n', '[project]\nname = "new"\n'),
+        ('[[tool.uv.index]]\nname = "pypi"\n\n[project]\n"name" = "old"\n', '[[tool.uv.index]]\nname = "pypi"\n\n[project]\n"name" = "new"\n'),
+        ('[ project ]  # the app\nversion = "1"\n  name = "old"\n[tool.x]\nname = "keep"\n', '[ project ]  # the app\nversion = "1"\n  name = "new"\n[tool.x]\nname = "keep"\n'),
+        ('[project]\nversion = "1"\n\n[tool.x]\nname = "keep"\n', SAME),  # [project] has no name
+        ('name = "top"\n\n[tool.x]\nname = "keep"\n', SAME),  # no [project] at all
+        ('[project]\nnamespace = "x"\nname = "old"\n', '[project]\nnamespace = "x"\nname = "new"\n'),
+    ],
+)
+def test_set_project_name_only_touches_the_project_table(text: str, expected: str) -> None:
+    assert presets._set_project_name(text, "new") == (text if expected == SAME else expected)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f'x = 1\n{presets.EXTRA_BEGIN}\n[tool.a]\ny = 2\n',  # the closing marker is gone
+        f'x = 1\n[tool.a]\ny = 2\n{presets.EXTRA_END}\n',  # the opening marker is gone
+        f"{presets.EXTRA_END}\n{presets.EXTRA_BEGIN}\n",  # swapped
+        f"{presets.EXTRA_BEGIN}\n{presets.EXTRA_END}\n{presets.EXTRA_BEGIN}\n{presets.EXTRA_END}\n",  # twice
+    ],
+)
+def test_damaged_preset_markers_are_refused(text: str) -> None:
+    """A lone marker used to append a second block (duplicate tables) or leave the old one."""
+    for extra in ("", "[tool.b]\nz = 3\n"):
+        with pytest.raises(DeployError, match="pytemplate-preset") as e:
+            presets._set_extra_tables(text, extra)
+        assert e.value.code == 2
+
+
+def test_set_extra_tables_replaces_only_the_block() -> None:
+    """Lines split on \\n only: a U+2028 or U+0085 inside a TOML string is not a line break
+    (str.splitlines would cut the string in two and rejoin it with \\n: invalid TOML)."""
+    head = '[project]\nname = "a"\ndescription = "one\N{LINE SEPARATOR}two\x85three"\n'
+    block = f"\n{presets.EXTRA_BEGIN}\n[tool.a]\nx = 1\n{presets.EXTRA_END}\n"
+    once = presets._set_extra_tables(head, "[tool.a]\nx = 1\n")
+    assert once == head + block
+    assert presets._set_extra_tables(once, "[tool.a]\nx = 1\n") == once  # idempotent
+    assert presets._set_extra_tables(once, "") == head
+    assert presets._set_extra_tables(once + "\n\n", "[tool.b]\ny = 2\n") == head + block.replace("[tool.a]\nx = 1", "[tool.b]\ny = 2")
+    assert tomllib.loads(once)["project"]["description"] == "one\N{LINE SEPARATOR}two\x85three"
+    assert presets._set_extra_tables("", "[tool.a]\nx = 1\n") == block
 
 
 def test_a_broken_pyproject_is_a_clear_error(fake: Fake) -> None:
