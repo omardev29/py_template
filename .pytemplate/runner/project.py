@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path, PurePath
 
@@ -286,3 +290,39 @@ def check_private_dir(path: Path, option: str) -> None:
     mode = os.stat(path).st_mode
     if mode & 0o002:  # group-writable is the norm with a user-private group (umask 002)
         raise DeployError(f"{path} can be written by every user (mode {mode & 0o7777:o}): pick another {option}, or chmod o-w it")
+
+
+def _umask() -> int:
+    mask = os.umask(0)  # the only way to read it; at import, before any thread starts
+    os.umask(mask)
+    return mask
+
+
+_UMASK = _umask()
+
+
+def write_whole(path: Path, data: bytes) -> None:
+    """Write `data` to `path` so that it is never left half-written: the bytes go to a temporary
+    file next to it, which then replaces it (os.replace is atomic). A write cut short (a full
+    disk, a quota, a file size limit, Ctrl+C) leaves `path` as it was: an in-place write had
+    truncated pyproject.toml mid-block. The file keeps its permissions, a symlink stays a link
+    (its target is replaced), a read-only file is an error as with a plain write, and a new file
+    gets the permissions a plain write would give it."""
+    real = Path(os.path.realpath(path))
+    if real.exists():
+        mode = stat.S_IMODE(real.stat().st_mode)
+        if not os.access(real, os.W_OK):
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
+    else:
+        mode = 0o666 & ~_UMASK
+    fd, name = tempfile.mkstemp(prefix=f".{real.name}.", suffix=".pt-tmp", dir=real.parent)
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        tmp.write_bytes(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, real)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise

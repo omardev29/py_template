@@ -52,7 +52,7 @@ from typing import Any
 from . import cmd_env, envs, hooks, presets, proc, render, rename, ui
 from .cmd_dev import only_flags
 from .config import Config, import_path
-from .project import PYPROJECT, ROOT, STATE_FILE, rel
+from .project import PYPROJECT, ROOT, STATE_FILE, rel, write_whole
 from .ui import DeployError
 
 Check = Callable[[bool | None, str, str], None]
@@ -174,7 +174,7 @@ def save_record(record: dict[str, Any], path: Path | None = None) -> bool:
     data[RECORD_KEY] = record
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+        write_whole(path, (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
     except OSError as e:  # read-only, owned by another user, a folder in the way...
         raise DeployError(f"cannot write {rel(path)}: {e.strerror or e}") from None
     return True
@@ -806,7 +806,7 @@ def _restore(path: Path, before: bytes | None) -> bool:
     if before is None or _read_bytes(path) == before:
         return False
     try:
-        path.write_bytes(before)
+        write_whole(path, before)
     except OSError as e:
         ui.warn(f"could not restore {path.name}: {e.strerror or e}")
         return False
@@ -914,7 +914,7 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
         summary.append(("app.name", f"renamed '{n.old_name}' -> '{n.new_name}' (src/{cfg.pkg}/)"))
     elif plan.name_text is not None:
         try:
-            (ROOT / PYPROJECT.name).write_text(plan.name_text, encoding="utf-8", newline="\n")
+            write_whole(ROOT / PYPROJECT.name, plan.name_text.encode("utf-8"))
         except OSError as e:
             raise DeployError(f"cannot write pyproject.toml: {e.strerror or e}") from None
         summary.append(("app.name", f"pyproject.toml [project] name = \"{cfg.app.name}\""))

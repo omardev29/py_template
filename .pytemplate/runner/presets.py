@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import proc, ui
 from .config import APP_NAME, BACKENDS, NAME_RULE
-from .project import BUILD, PRESETS, PYPROJECT, ROOT, TEMPLATE, rel
+from .project import BUILD, PRESETS, PYPROJECT, ROOT, TEMPLATE, rel, write_whole
 from .ui import DeployError
 
 if TYPE_CHECKING:
@@ -867,7 +867,7 @@ class _Undo:
                 if data is None:
                     path.unlink(missing_ok=True)
                 else:
-                    path.write_bytes(data)
+                    write_whole(path, data)
             except OSError:
                 left.append(rel(path))
         return left
@@ -884,7 +884,7 @@ def _swap_dependencies(plan: InitPlan, undo: _Undo) -> None:
 
     undo.save(PYPROJECT)
     undo.save(LOCK)
-    PYPROJECT.write_text(plan.pyproject, encoding="utf-8", newline="\n")
+    write_whole(PYPROJECT, plan.pyproject.encode("utf-8"))
     uv = proc.find_uv()
     q = ["--quiet"] if ui.QUIET else []  # -q: uv's progress too (its errors still show)
     env = envs.env_vars(envs.tool_env(plan.cfg))

@@ -15,7 +15,7 @@ from pathlib import Path
 from . import cmd_nvim, envs, hooks, mypyc, proc, render, shells, ui
 from .cmd_dev import only_flags
 from .config import Config
-from .project import BUILD, DIST, ENV_SUFFIX, IS_MACOS, IS_WINDOWS, PYPROJECT, ROOT, rel
+from .project import BUILD, DIST, ENV_SUFFIX, IS_MACOS, IS_WINDOWS, PYPROJECT, ROOT, rel, write_whole
 from .ui import DeployError
 
 LAUNCHERS_X = ("deploy", "deploy.ps1")  # the launchers that must stay executable (100755)
@@ -129,7 +129,7 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
 
     def restore(why: str) -> None:
         if changed and before is not None and not proc.DRY_RUN and PYPROJECT.read_bytes() != before:
-            PYPROJECT.write_bytes(before)
+            write_whole(PYPROJECT, before)
             ui.info(f"pyproject.toml: put back as it was ({why})")
 
     try:
@@ -220,7 +220,7 @@ def _put_back(before: dict[Path, bytes | None]) -> list[str]:
             if data is None:
                 path.unlink(missing_ok=True)
             else:
-                path.write_bytes(data)
+                write_whole(path, data)
         except OSError as e:
             ui.warn(f"could not put {path.name} back: {e.strerror or e}")
             continue

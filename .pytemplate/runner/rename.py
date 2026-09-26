@@ -55,16 +55,12 @@ from __future__ import annotations
 import argparse
 import ast
 import bisect
-import contextlib
 import dataclasses
-import errno
 import functools
 import io
 import keyword
 import os
 import re
-import stat
-import tempfile
 import tokenize
 import tomllib
 import warnings
@@ -75,7 +71,7 @@ from typing import Literal
 
 from . import config, envs, presets, proc, render, ui
 from .config import Config
-from .project import DIST, EXT_SUFFIXES, ROOT
+from .project import DIST, EXT_SUFFIXES, ROOT, write_whole
 from .project import ROOT as _RUNNER_CWD  # where the tools run (tests move ROOT, never this)
 from .ui import DeployError
 
@@ -1167,21 +1163,7 @@ def _replace_bytes(path: Path, data: bytes) -> None:
     file next to it, which then replaces it (os.replace is atomic). A write that fails midway (disk
     full, a quota, a file size limit) leaves `path` as it was. The file keeps its permissions, a
     symlink stays a link, and a read-only file is an error, as with a plain write."""
-    real = Path(os.path.realpath(path))
-    mode = stat.S_IMODE(real.stat().st_mode)
-    if not os.access(real, os.W_OK):
-        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
-    fd, name = tempfile.mkstemp(prefix=f".{real.name}.", suffix=".pt-rename", dir=real.parent)
-    os.close(fd)
-    tmp = Path(name)
-    try:
-        tmp.write_bytes(data)
-        os.chmod(tmp, mode)
-        os.replace(tmp, real)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
+    write_whole(path, data)
 
 
 def apply_plan(root: Path, plan_: Plan) -> None:

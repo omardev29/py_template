@@ -16,7 +16,7 @@ from typing import Any
 
 from . import config, envs, presets, proc, render, ui
 from .config import BACKENDS, Config
-from .project import CONFIG_FILE, PYPROJECT, ROOT, code_dirs, native_path, rel, user_path
+from .project import CONFIG_FILE, PYPROJECT, ROOT, code_dirs, native_path, rel, user_path, write_whole
 from .ui import DeployError
 
 _DRY = "(--dry-run: nothing is written)"
@@ -194,7 +194,7 @@ def _restore(before: dict[Path, bytes | None]) -> list[str]:
         if data is None:
             path.unlink(missing_ok=True)
         else:
-            path.write_bytes(data)
+            write_whole(path, data)
         restored.append(path.name)
     return restored
 

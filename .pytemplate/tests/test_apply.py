@@ -877,14 +877,14 @@ def test_a_pyproject_that_cannot_be_written_is_a_clear_error(tmp_path: Path, mon
     project, uv = _project(tmp_path, monkeypatch, "flet")
     path = project.root / "pyproject.toml"
     path.write_text(path.read_text(encoding="utf-8").replace('"alpha"', '"other"'), encoding="utf-8", newline="\n")
-    real = Path.write_text
+    real = Path.write_bytes
 
-    def write_text(self: Path, *args: Any, **kwargs: Any) -> int:
-        if self.name == "pyproject.toml":
+    def write_bytes(self: Path, data: Any) -> int:
+        if "pyproject.toml" in self.name:  # the temporary file next to it (project.write_whole)
             raise PermissionError(13, "Permission denied")
-        return real(self, *args, **kwargs)
+        return real(self, data)
 
-    monkeypatch.setattr(Path, "write_text", write_text)
+    monkeypatch.setattr(Path, "write_bytes", write_bytes)
     with pytest.raises(DeployError, match="cannot write pyproject.toml: Permission denied") as e:
         _run(project)
     assert e.value.code == 2

@@ -257,7 +257,7 @@ def test_write_failures_are_clear_errors(box: Sandbox, monkeypatch: pytest.Monke
         raise PermissionError(13, "Permission denied")
 
     with monkeypatch.context() as m:
-        m.setattr(Path, "write_text", refuse)
+        m.setattr(Path, "write_bytes", refuse)  # project.write_whole writes a temporary file
         with pytest.raises(DeployError, match="cannot write the generated file gen/a.json: Permission denied"):
             render.apply(CFG)
 
@@ -832,6 +832,60 @@ def test_generated_json_never_holds_what_json_cannot(value: object) -> None:
     with pytest.raises(DeployError, match="JSON cannot represent"):
         render.jsonc({"key": [value]})
     assert render.jsonc({"key": [1.5, "x", None, True]}).endswith('\n}\n')
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX file size limit (ulimit -f)")
+def test_a_pyproject_rewrite_cut_short_leaves_the_file_whole(tmp_path: Path) -> None:
+    """A full disk (here the file size limit) during the rewrite of the managed parts left
+    pyproject.toml truncated mid-block, and every later lock and apply refused its broken
+    markers: the rewrite goes through a temporary file now, so the file stays whole."""
+    target = tmp_path / "pyproject.toml"
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    old = re.sub(r'requires-python = "[^"]*"', 'requires-python = ">=3.9"', text, count=1)  # needs a rewrite
+    assert old != text and len(old.encode()) > 1024
+    target.write_text(old, encoding="utf-8", newline="\n")
+    code = (
+        "import resource, signal, sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(ROOT / '.pytemplate')!r})\n"
+        "from runner import config, render\n"
+        "from runner.ui import DeployError\n"
+        "render.PYPROJECT = Path(sys.argv[1])\n"
+        "cfg = config.load(set())\n"
+        "signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\n"
+        "resource.setrlimit(resource.RLIMIT_FSIZE, (512, 512))\n"
+        "try:\n"
+        "    render.write_pyproject(cfg)\n"
+        "    print('written')\n"
+        "except DeployError as e:\n"
+        "    print(e)\n"
+    )
+    r = subprocess.run([sys.executable, "-c", code, str(target)], capture_output=True, text=True, timeout=120, check=False)
+    assert "cannot write pyproject.toml" in r.stdout, r.stdout + r.stderr
+    assert target.read_text(encoding="utf-8") == old
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["pyproject.toml"]  # no temporary file left
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes and symlinks")
+def test_write_whole_keeps_modes_and_links(tmp_path: Path) -> None:
+    from runner.project import write_whole
+
+    script = tmp_path / "run.sh"
+    script.write_text("old\n", encoding="utf-8")
+    script.chmod(0o754)
+    write_whole(script, b"new\n")
+    assert script.read_bytes() == b"new\n" and script.stat().st_mode & 0o777 == 0o754
+    shared = tmp_path / "shared.toml"
+    shared.write_text("a = 1\n", encoding="utf-8")
+    (tmp_path / "link.toml").symlink_to(shared)
+    write_whole(tmp_path / "link.toml", b"a = 2\n")
+    assert (tmp_path / "link.toml").is_symlink() and shared.read_bytes() == b"a = 2\n"
+    mask = os.umask(0o022)
+    try:
+        write_whole(tmp_path / "fresh.json", b"{}\n")
+    finally:
+        os.umask(mask)
+    assert (tmp_path / "fresh.json").read_bytes() == b"{}\n"
 
 
 def test_write_pyproject_under_dry_run_reports_but_writes_nothing(pyproject: Path, monkeypatch: pytest.MonkeyPatch) -> None:

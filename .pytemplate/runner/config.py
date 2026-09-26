@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from . import proc
-from .project import CONFIG_FILE, PRESETS, SRC, rel
+from .project import CONFIG_FILE, PRESETS, SRC, rel, write_whole
 from .ui import DeployError
 
 SCHEMA = 1  # the pytemplate.toml layout this runner reads (`schema = 1`)
@@ -1080,4 +1080,4 @@ def update_file(changes: list[tuple[str, str, Any]]) -> None:
     except tomllib.TOMLDecodeError as e:  # set_value checks each edit; this guards the sum
         raise DeployError(f"pytemplate.toml: the change would break the file ({e}); nothing was written") from None
     if new != old and not proc.DRY_RUN:
-        CONFIG_FILE.write_text(("\ufeff" if bom else "") + new, encoding="utf-8", newline="\n")
+        write_whole(CONFIG_FILE, (("\ufeff" if bom else "") + new).encode("utf-8"))
