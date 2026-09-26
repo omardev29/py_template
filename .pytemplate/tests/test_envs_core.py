@@ -362,6 +362,53 @@ def test_a_failed_remove_syncs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == ["remove"]
 
 
+@pytest.mark.parametrize("verb", ["add", "remove"])
+@pytest.mark.parametrize("failure", [proc.CommandFailed(["uv", "sync"], 1), proc.Interrupted(130)])
+def test_a_failed_sync_puts_pyproject_and_the_lock_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], verb: str, failure: BaseException
+) -> None:
+    """`uv add --no-sync` writes pyproject.toml and uv.lock before envs.sync installs anything. A
+    package that locks but cannot be installed (an sdist that needs a compiler or pg_config, a
+    broken local package) failed the sync and left both files edited: every `uv run --locked`
+    (run, test, check) then tried to build it again, until a `git checkout`. A plain `uv add`
+    reverts its edits when its own sync fails; so must add and remove here (Ctrl+C too)."""
+    pyproject, lock = tmp_path / "pyproject.toml", tmp_path / "uv.lock"
+    old_pyproject, old_lock = b"[project]\r\nname = 'p'\r\ndependencies = []\r\n", b"version = 1\r\n"
+    pyproject.write_bytes(old_pyproject)
+    lock.write_bytes(old_lock)
+    monkeypatch.setattr(cmd_env, "PYPROJECT", pyproject)
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+
+    def uv(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if args[0] == "sync":
+            raise failure
+        pyproject.write_text("[project]\nname = 'p'\ndependencies = ['broken']\n", encoding="utf-8")
+        lock.write_text("version = 1\n[[package]]\nname = 'broken'\n", encoding="utf-8")
+        return done(args)
+
+    monkeypatch.setattr(envs, "uv", uv)
+    with pytest.raises(type(failure)):
+        getattr(cmd_env, f"cmd_{verb}")(make(), ["broken"])
+    assert pyproject.read_bytes() == old_pyproject and lock.read_bytes() == old_lock  # every byte, CRLF too
+    assert "pyproject.toml, uv.lock: put back as they were" in capsys.readouterr().err
+
+
+def test_a_successful_add_keeps_its_edits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[project]\nname = 'p'\n", encoding="utf-8")
+    monkeypatch.setattr(cmd_env, "PYPROJECT", pyproject)
+
+    def uv(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if args[0] == "add":
+            pyproject.write_text("[project]\nname = 'p'\ndependencies = ['x']\n", encoding="utf-8")
+            (tmp_path / "uv.lock").write_text("version = 1\n", encoding="utf-8")  # a lock uv created
+        return done(args)
+
+    monkeypatch.setattr(envs, "uv", uv)
+    assert cmd_env.cmd_add(make(), ["x"]) == 0
+    assert "'x'" in pyproject.read_text(encoding="utf-8") and (tmp_path / "uv.lock").is_file()
+
+
 def test_cmd_lock_applies_pyproject_and_forwards_its_arguments(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     calls = fake_uv(monkeypatch)
     written: list[bool] = []

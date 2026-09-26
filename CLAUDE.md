@@ -1283,7 +1283,12 @@ Formats:
   next sync and reaches a fresh clone (an exact sync of the default groups removed it); `uv run`
   syncs inexactly and never removes them. `add`/`remove` take `--dev` or `--group G`, not both,
   and run `uv add|remove --no-sync` (it still re-locks), then `envs.sync` of `.venv`: uv's own
-  sync after `remove` is exact for the default groups and uninstalled every other group.
+  sync after `remove` is exact for the default groups and uninstalled every other group. uv has
+  written pyproject.toml and uv.lock before that sync: when it fails (a package that locks but
+  cannot be built: an sdist that needs a compiler or pg_config) or is interrupted,
+  `cmd_env._add_remove` puts both back byte for byte (`_snapshot`, `_put_back`), as a plain
+  `uv add` reverts its edits when its own sync fails; kept, they made every `uv run --locked`
+  try to build that package again.
 - The oldest supported uv is `envs.MIN_UV` = 0.10.12, read from uv's own download metadata:
   the first uv that downloads `pypy@3.11.15` (0.10.11: "No download found for request");
   CPython 3.14 final needs 0.9.0 (0.8.x silently installs 3.14.0rc2) and `uv export --format
@@ -2950,8 +2955,14 @@ uv:
   `envs.uv_run` adds `--project <ROOT>` (7). Test:
   `test_fixes.py::test_uv_run_pins_the_project_outside_the_root`. Goes: never.
 - **`uv sync` is exact for the groups it installs** (LIMITATION): it removed a group added with
-  `./deploy add --group G`. Fix: `envs.sync` passes `--all-groups` (7). Test:
-  `test_envs_core.py::test_sync_installs_every_dependency_group`. Goes: never.
+  `./deploy add --group G`, and so did the sync `uv remove` runs itself (`./deploy remove idna`
+  uninstalled the packages of every non-default group). Fix: `envs.sync` passes `--all-groups`;
+  `cmd_env._add_remove` runs `uv add|remove --no-sync`, then `envs.sync`, and puts
+  pyproject.toml and uv.lock back when that sync fails or is interrupted (uv's own rollback
+  covers only its own sync) (7). Test:
+  `test_envs_core.py::test_sync_installs_every_dependency_group`,
+  `test_remove_keeps_the_packages_of_every_group`,
+  `test_a_failed_sync_puts_pyproject_and_the_lock_back`. Goes: never.
 - **An old uv knows only the interpreters of its release** (LIMITATION): < 0.10.12 cannot
   download `pypy@3.11.15`, 0.8.x installs CPython 3.14.0rc2 without a word, < 0.6.15 has no `uv
   export --format requirements.txt`. Fix: `envs.MIN_UV`, `envs.require_min_uv`,

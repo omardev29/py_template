@@ -160,7 +160,10 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
     ns = parser.parse_args(args)
     # --no-sync, then envs.sync: uv's own sync after `remove` is EXACT for the default groups
     # only, so it uninstalled every package of the other groups (`add --group G`); `uv sync
-    # --all-groups` keeps them, as setup and sync do.
+    # --all-groups` keeps them, as setup and sync do. uv has written pyproject.toml and uv.lock
+    # by then: when the sync fails (a package that locks but cannot be built) or is
+    # interrupted, both get their old bytes back, as a plain `uv add` does when its own sync
+    # fails. Otherwise every `uv run --locked` tried to build that package again.
     argv: list[str] = [verb, "--no-sync"]
     if ns.dev:
         argv.append("--dev")
@@ -170,14 +173,59 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
         argv += ["--marker", "implementation_name == 'cpython'"]
     argv += ns.packages
     tool = envs.tool_env(cfg)
-    envs.uv(tool, argv)
-    envs.sync(tool)
+    before = _snapshot((PYPROJECT, PYPROJECT.with_name("uv.lock")))
+    try:
+        envs.uv(tool, argv)
+        envs.sync(tool)
+    except BaseException:  # a failed or interrupted sync (uv add/remove revert their own failures)
+        restored = _put_back(before)
+        if restored:
+            they = "they were" if len(restored) > 1 else "it was"
+            ui.info(f"{', '.join(restored)}: put back as {they} (./deploy {verb} did not finish)")
+        raise
     if verb == "add" and cfg.pypy_enabled and not ns.cpython_only:
         ui.info(
             "PyPy is supported: if the package uses the CPython C-API (numpy, pillow, pydantic-core...) "
             "it will be slow on PyPy; consider `--cpython-only`. Check with: ./deploy sync pypy"
         )
     return 0
+
+
+def _snapshot(paths: tuple[Path, ...]) -> dict[Path, bytes | None]:
+    """The bytes of each file, None for a missing one; an unreadable file is left out (never
+    touched by _put_back)."""
+    before: dict[Path, bytes | None] = {}
+    for path in paths:
+        try:
+            before[path] = path.read_bytes()
+        except FileNotFoundError:
+            before[path] = None
+        except OSError:
+            pass
+    return before
+
+
+def _put_back(before: dict[Path, bytes | None]) -> list[str]:
+    """Give each file its old bytes back (a file that did not exist is removed); return the names
+    of those that changed."""
+    restored: list[str] = []
+    for path, data in before.items():
+        try:
+            now: bytes | None = path.read_bytes()
+        except OSError:
+            now = None
+        if now == data:
+            continue
+        try:
+            if data is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(data)
+        except OSError as e:
+            ui.warn(f"could not put {path.name} back: {e.strerror or e}")
+            continue
+        restored.append(path.name)
+    return restored
 
 
 def cmd_add(cfg: Config, args: list[str]) -> int:
