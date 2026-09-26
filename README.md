@@ -45,8 +45,8 @@ Measured on the maintainer's machine (Windows 11, CPython 3.14.7, PyPy 7.3.23, m
   upgrade uv`, `winget upgrade astral-sh.uv`, `scoop update uv`). When uv is missing, the
   launchers print how to install it; `deploy` and `deploy.ps1` also offer to run the official
   installer in an interactive terminal (never when `CI` is set).
-- No Python installation: uv downloads the interpreters (`python.cpython`, `python.pypy`). The
-  runner itself runs on the project's CPython, which must be 3.11 or newer.
+- No Python installation is needed: uv downloads the interpreters (`python.cpython`,
+  `python.pypy`). The runner itself runs on the project's CPython, which must be 3.11 or newer.
 - A C compiler for the `mypyc` backend (every preset supports it): MSVC Build Tools on Windows
   (`./deploy doctor` prints the `winget` command), gcc or clang on Linux, the Xcode Command Line
   Tools on macOS (`xcode-select --install`).
@@ -234,7 +234,7 @@ every shell (no shell in between):
 [tasks.gen]
 help = "Generate the assets"
 cmd = ["python", "scripts/gen.py", "{backend}"]   # the program and its arguments
-deps = ["check"]                                   # run first: tasks or ./deploy commands
+deps = ["check"]                                   # run first: other tasks or commands
 env = { SEED = "42" }
 ```
 
@@ -324,11 +324,11 @@ hand is finished by `./deploy apply` (or by `./deploy rename` with that name). W
   before get their import order and formatting fixed.
 
 Other files (README.md, `docs/`, scripts, your own workflows) are only listed when they mention
-the old name; `dist/` and `.build/` keep the old name until the next build (`./deploy clean`). It refuses uncommitted changes
-without `--force` (a project fresh from `./deploy new` has no commit yet: commit first), and
-the names `new` refuses. A write that fails puts every file back. When the old name is a
-common word (`app`, `game`, `core`), matching words in comments and strings change too: review
-`git diff`.
+the old name; `dist/` and `.build/` keep the old name until the next build (`./deploy clean`).
+It refuses uncommitted changes without `--force` (a project fresh from `./deploy new` has no
+commit yet: commit first), and the names `new` refuses. A write that fails puts every file back.
+When the old name is a common word (`app`, `game`, `core`), matching words in comments and
+strings change too: review `git diff`.
 
 ### Generated files
 
@@ -388,7 +388,7 @@ file must be UTF-8 (a BOM is fine); `schema = 1` is the layout this runner reads
 | `compile.opt_level` | `"3"` | mypyc's C optimisation, `"0"` to `"3"` ([C compiler options](#c-compiler-options-and-rebuilds)) |
 | `compile.no_semantic_interposition` | `true` | Linux gcc/clang: calls between compiled functions may be inlined |
 | `compile.multi_file` | `false` | mypyc's `multi_file`: one C file per module |
-| `compile.separate` | `false` | one shared library per compiled module instead of one per package |
+| `compile.separate` | `false` | one shared library per compiled module instead of one for all of them |
 | `compile.strict_dunder_typing` | `false` | mypyc's `strict_dunder_typing` |
 | `deploy.optimize` | `1` | Python's `-O` level of the exe, nuitka and portable builds: `0`, `1` (no asserts) or `2` (no docstrings either) |
 | `deploy.default` | `{ cpython = "exe", mypyc = "exe", pypy = "portable" }` | the `build` method of each backend (one left out keeps its default) |
@@ -400,7 +400,7 @@ file must be UTF-8 (a BOM is fine); `schema = 1` is the layout this runner reads
 | `deploy.exe.strip` | `false` | Linux, macOS: strip the symbol tables of the bundled binaries |
 | `deploy.exe.extra_args` | `[]` (raylib: three `--exclude-module`) | appended to the PyInstaller or `flet pack` command |
 | `deploy.portable.runtime` | `"bundled"` | `bundled` (the interpreter inside) or `system` (the target's own Python) |
-| `deploy.portable.prune` | `true` | leave the parts of the interpreter the app does not use out |
+| `deploy.portable.prune` | `true` | leave out the parts of the interpreter that apps do not use |
 | `deploy.portable.archive` | `true` | also a `.zip` (Windows) or `.tar.gz` of the folder |
 | `deploy.portable.env` | `{}` | environment variables the launchers set (literal values) |
 | `deploy.pyz.targets` | `["host"]` | extra platforms, such as `"cp314-linux-x86_64"` |
@@ -471,9 +471,9 @@ again.
 - **Constants with `Final`**: a global without `Final` is looked up in a dictionary on every
   access.
 - **Native classes**: typed attributes, and only these class decorators: `@dataclass`,
-  `@attr.s`, `@final`, `@trait` and `@mypyc_attr`. Any other one, attrs' `@define`, `@frozen` and
-  `@mutable` included, turns the class into a slower regular Python class (mark it
-  `@mypyc_attr(native_class=False)` when that is intended).
+  `@attr.s` (`@attr.attrs`), `@final`, `@trait` and `@mypyc_attr`. Any other one, attrs'
+  `@define`, `@frozen` and `@mutable` included, turns the class into a slower regular Python
+  class (mark it `@mypyc_attr(native_class=False)` when that is intended).
 - **Concrete types**: `list[bool]` compiles to direct accesses, `bytearray` takes the generic
   path (sieve: 4.2x vs 1.9x).
 - `./deploy report --open` marks every generic operation in red ("make it Final", "Generic
@@ -643,10 +643,11 @@ keeps its default). Each build replaces the previous output of the same backend 
 Arguments: `--onefile` and `--onedir` override `deploy.exe.mode` and `deploy.nuitka.mode` (exe
 and nuitka only); `--target KEY` (repeatable) adds platforms to a pyz; other flags go to the
 packager of exe (PyInstaller or `flet pack`), nuitka and flet (`flet build`), while pyz,
-portable and wheel refuse them (exit 2). Options are never abbreviated, and a bare word is an
-error with a hint ("unknown backend 'mypy': did you mean mypyc?", "did you mean --method
-pyz?"). `./deploy --dry-run build ...` checks the arguments and the configuration as a real
-build does and prints the output name (for nuitka also its options), without building.
+portable and wheel refuse them (exit 2). Options are not abbreviated (`--meth` is not
+`--method`), and a bare word is an error with a hint ("unknown backend 'mypy': did you mean
+mypyc?", "did you mean --method pyz?"). `./deploy --dry-run build ...` checks the arguments and
+the configuration as a real build does and prints the output name (for nuitka also its
+options), without building.
 
 ### exe
 
@@ -667,11 +668,12 @@ A folder that runs the app with its own interpreter:
 
 - `runtime/`: a copy of the backend's interpreter (uv's CPython or PyPy). With `prune = true`
   (default) it leaves out what an app does not need: headers and import libraries (`include/`,
-  `libs/`), `share/`, `Tools/`, the base's `Scripts/` (Windows) and every `bin/` entry but the interpreter (so console scripts installed
-  into uv's Python are not shipped), on Linux the shared `libpython3.X.so` when the interpreter
-  does not use it, the standard library's tests, `idlelib`, `turtledemo`, `ensurepip` and
-  `site-packages`, PyPy's debug symbols, and Tk unless `src/` or a dependency imports `tkinter`
-  (`prune = false` keeps it for an app that loads it another way).
+  `libs/`), `share/`, `Tools/`, the base's `Scripts/` (Windows) and every `bin/` entry but the
+  interpreter (so console scripts installed into uv's Python are not shipped), on Linux the
+  shared `libpython3.X.so` when the interpreter does not use it, the standard library's tests,
+  `idlelib`, `turtledemo`, `ensurepip` and `site-packages`, PyPy's debug symbols, and Tk unless
+  `src/` or a dependency imports `tkinter` (`prune = false` keeps it for an app that loads it
+  another way).
 - `lib/`: the dependencies at the versions of `uv.lock`; they win over packages installed in a
   Python.
 - `app/`: the app (with mypyc, the compiled modules next to their `.py`), and `boot.py`.
@@ -692,20 +694,20 @@ read-only install starts fast, and it starts the copied interpreter before it re
 with both launchers). The launcher runs each candidate (`py -X.Y`, `python3`, `python` on
 Windows; `pythonX.Y`, `python3`, `python` elsewhere; `pypy3`, `pypy` for PyPy) and uses the first
 that is at least the project's minimum Python. None: it prints `<name>: needs Python X.Y or newer
-in PATH` and exits with 9009 (`.cmd`) or 127 (`.sh`). With native dependencies such a folder only works on the
-OS it was built on (the build warns). On Windows with the Python install manager and no Python at
-all, the first start silently downloads one (the install manager's default); set
-`PYTHON_MANAGER_AUTOMATIC_INSTALL=false` or run `py install 3.X` to control that.
+in PATH` and exits with 9009 (`.cmd`) or 127 (`.sh`). With native dependencies such a folder
+only works on the OS it was built on (the build warns). On Windows with the Python install
+manager and no Python at all, the first start silently downloads one (the install manager's
+default); set `PYTHON_MANAGER_AUTOMATIC_INSTALL=false` or run `py install 3.X` to control that.
 
 ### pyz
 
 One zip file with the app as `.py`, the dependencies, and, for each platform, the binaries (the
 mypyc extensions of the machine that built it, and native dependencies). Python cannot import
-`.pyd`/`.so` files from a zip, so the first start extracts it to a cache: `%LOCALAPPDATA%\<name>\pyz`
-(Windows), `~/Library/Caches/<name>/pyz` (macOS) or `$XDG_CACHE_HOME/<name>/pyz`
-(`~/.cache/<name>/pyz`). It keeps the three most recently started builds and any started in the
-last day; deleting the folder is always safe. Without a usable cache (a read-only home) it
-extracts into a private temporary folder for that run.
+`.pyd`/`.so` files from a zip, so the first start extracts it to a cache:
+`%LOCALAPPDATA%\<name>\pyz` (Windows), `~/Library/Caches/<name>/pyz` (macOS) or
+`$XDG_CACHE_HOME/<name>/pyz` (`~/.cache/<name>/pyz`). It keeps the three most recently started
+builds and any started in the last day; deleting the folder is always safe. Without a usable
+cache (a read-only home) it extracts into a private temporary folder for that run.
 
 - It runs on a CPython or PyPy at or above the project's minimum Python (`python.cpython`, 3.14
   by default; 3.11 when PyPy is supported); an older one gets `<name>: needs Python X.Y or newer`.
@@ -744,12 +746,14 @@ the dependencies it follows to C. It needs a C compiler on every backend and, on
 preset). This Nuitka supports CPython up to 3.14: a newer `python.cpython` stops with exit 3
 unless Nuitka's own `--experimental=python3.X` is passed.
 
-- `[deploy.nuitka] mode`: `standalone` (a folder) or `onefile` (one zstd-compressed file).
+- `[deploy.nuitka] mode`: `standalone` (a folder) or `onefile` (one file, zstd-compressed with
+  CPython 3.14's `compression.zstd`).
 - `lto`: `auto` (default), `yes` or `no`, always passed as `--lto=...`. `auto` means yes with
   uv's CPython on Linux, Windows and macOS until more than 250 modules are compiled (the
   standard library does not count): the script and raylib presets stay far below (a raylib app
-  compiles about 18), the flet preset compiles about 794 and gets no LTO. Measured with gcc 13 on a small script: `--lto=yes` built
-  in 9-10 s instead of 22 s, 7.21 MB instead of 7.78 MB, and ran 0-5% faster.
+  compiles about 18), the flet preset compiles about 794 and gets no LTO. Measured with gcc 13
+  on a small script: `--lto=yes` built in 9-10 s instead of 22 s, 7.21 MB instead of 7.78 MB,
+  and ran 0-5% faster.
 - `pgo = true` adds `--pgo-c`: Nuitka runs the app once while building to profile it
   (`pgo_args` are the app's arguments for that run). Only for console apps (`app.gui = false`)
   without assets, not with the mypyc backend and not on macOS; each refusal exits 2 with the
@@ -939,7 +943,7 @@ basedpyright message of several lines keeps its first line; C compiler errors ar
 
 ```toml
 [vscode]
-buttons = ["run", "test", "check", "build"]   # ./deploy commands or [tasks] names
+buttons = ["run", "test", "check", "build"]   # commands or [tasks] names
 ```
 
 Preset defaults: script `run test check build`, raylib `run bunnymark test build`, flet
@@ -1101,7 +1105,8 @@ launcher from anywhere, works (from a symlinked folder too). Paths given to the 
 (`./deploy new ../game`, `./deploy pyz-merge a.pyz b.pyz --out all.pyz`) are relative to the
 folder where the command was typed; `~` works everywhere, and on Windows `/c/Users/...`,
 `/cygdrive/c/...` and `C:/...` are accepted too. Arguments passed on to the app or to pytest are
-relative to the project root ([Output, exit codes and environment](#output-exit-codes-and-environment)).
+relative to the project root
+([Output, exit codes and environment](#output-exit-codes-and-environment)).
 
 **Without `./`.** `./deploy shell-setup SHELL` prints a `deploy` function (or alias) that finds
 the enclosing project from any subfolder, with a comment saying where to paste it. Shells:
@@ -1256,8 +1261,8 @@ typings/                         the project's stubs (raylib: the corrected rayl
 .github/workflows/template-*.yml (template repository) the template's own CI
 .pytemplate/README.md, LICENSE   (projects) this manual and the license of the copied runner
 .pytemplate/runner/              the runner (Python standard library only)
-.pytemplate/templates/           sources of the generated files (typing profiles, VS Code, Neovim, CI)
-.pytemplate/presets/             the script, raylib and flet skeletons, dependencies and tested pins
+.pytemplate/templates/           sources of the generated files (typing, VS Code, Neovim, CI)
+.pytemplate/presets/             the script, raylib and flet skeletons, deps and tested pins
 .pytemplate/nvim/                the Neovim plugin that .lazy.lua loads
 .pytemplate/tests/               tests of the runner (./deploy selftest)
 .pytemplate/state.json           hashes of the generated files, and the record of the last apply
@@ -1301,7 +1306,7 @@ regenerate the root (CLAUDE.md, section 11).
 ### Testing the template
 
 ```sh
-./deploy selftest            # the runner's tests (pytest) and mypy --strict; extra args go to pytest
+./deploy selftest            # the runner's tests (pytest), then mypy --strict on the runner
 ./deploy selftest --shells   # every launcher through every shell installed here
 ./deploy selftest --nvim     # the LazyVim integration, per preset, in an isolated LazyVim
 ./deploy selftest --e2e      # each preset end to end: new, setup, check, test, run and builds
@@ -1361,10 +1366,10 @@ The owner's bar for this template, set in `CLAUDE.md` (rule 1.10 and section 13.
   first x found by the second / found by both).
 - The measurements: on 2026-09-25, at commit fc131b9, 10,837 lines: between 1 bug per 91 lines
   (high and medium bugs and stability defects only) and 1 per 50 (all of them): UNRELIABLE
-  either way. The September 2026 overhaul fixed or closed every finding of that hunt, and the code
-  grew to 14,588 lines. The new density is not measured yet: until a measurement says otherwise,
-  the template is not at the bar. The next measurement is two independent hunts of 10 agents each
-  on one commit, after the overhaul.
+  either way. The September 2026 overhaul fixed or deliberately closed each of that hunt's 172 bug
+  findings and took on its stability defects; the code grew to 14,588 lines. The new density is
+  not measured yet: until a measurement says otherwise, the template is not at the bar. The next
+  measurement is two independent hunts of 10 agents each on one commit, after the overhaul.
 
 The template is MIT-licensed (`LICENSE`). A project made with `./deploy new` keeps that notice as
 `.pytemplate/LICENSE`, next to the copied runner, and has no root `LICENSE` of its own.
