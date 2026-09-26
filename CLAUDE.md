@@ -75,7 +75,8 @@ typings/                          project stubs (raylib preset: the corrected ra
 .pytemplate/tools/mypyc_build.py  runs INSIDE .venv (needs mypy + setuptools), calls mypycify
 .pytemplate/templates/            typing/*.toml, vscode/settings.json, nvim/lazy.lua, ci.yml,
                                   portable/boot.py, pyz/__main__.py
-.pytemplate/presets/<p>/          preset.toml + files/ skeleton (+ raylib/tools/raylib_stubs.py)
+.pytemplate/presets/<p>/          preset.toml + files/ skeleton (+ constraints.txt: tested pins;
+                                  + raylib/tools/raylib_stubs.py)
 .pytemplate/nvim/                 local Neovim plugin pytemplate.nvim (lua/, tests/smoke.lua,
                                   README.md: setup, keymaps, options)
 .pytemplate/tests/                runner tests (pytest) + mypy-runner.ini
@@ -389,7 +390,7 @@ header rules (with detector tests proving each rule fires).
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
-| `presets.py` | Preset discovery/loading, option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, `check_name_free`, `init`, `copy_template`, `new`. |
+| `presets.py` | Preset discovery/loading, option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME`, `name_from_folder`, `check_name_free`, `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (with rollback), `copy_template`, `new`. |
 | `mypyc.py` | Incremental stage (`sync_tree`), `spec.json`, spawning `tools/mypyc_build.py`, `ANNOTATE_HTML`, `hidden_imports`, `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks; parses bytes (tolerates a BOM). |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`. |
@@ -464,10 +465,12 @@ header rules (with detector tests proving each rule fires).
   environments it would sync and the leftover-environment note. `--jit on` still looks for the
   JIT interpreter. The PyPy 3.11 precheck runs read-only (`uv run --locked --no-sync`) and is
   skipped when `.venv` does not exist (`uv run --no-sync` would create it).
-- `init` runs the real checks (name, `check_name_free`, pristine) and lists each file as `-`
-  deleted, `+` new or `~` replaced, the dependencies removed and added, and what happens to
-  `pyproject.toml` and `uv.lock`. `new` checks the destination and the name and prints
-  destination, preset and name. `pyz-merge` validates its inputs and prints inputs and output.
+- `init` runs `presets.plan_init` (every check of the real run, the new `pyproject.toml`
+  included) and lists each file as `-` deleted, `+` new or `~` replaced, the dependencies
+  removed and added, the pinned versions, and what happens to `pyproject.toml` and `uv.lock`.
+  `new` checks the destination and the name (format, `check_name_free`) and prints
+  destination, preset, name and the number of pins. `pyz-merge` validates its inputs and
+  prints inputs and output.
 - `nvim trust`, `extras`, `bootstrap` and `sync` print what they would do.
 - `rename` runs the real checks (a dirty git tree is only a warning) and prints the move, each
   file with its reference count and sample lines, the pytemplate/pyproject lines, the `uv.lock`
@@ -900,10 +903,14 @@ Per method:
 
 - `preset.toml`: `description`, `dependencies` / `dev_dependencies` (with `{option}`),
   `[options]` (defaults of `[preset.<p>]`), optional `[uv]` (extra managed `[tool.uv]` keys),
-  optional `pyproject` string (extra tables, with `{{name}}`/`{{pkg}}`).
+  optional `pyproject` string (extra tables, with `{{name}}`/`{{pkg}}`: `extra_tables`).
+  Optional `constraints.txt` next to it: the tested pins (below).
 - `files/`: complete skeleton, including a full `pytemplate.toml` (`init` overwrites the root
   one), `src/main.py`, `src/__pkg__/core/` (compiled) + a boundary, `tests/conftest.py`
-  (identical in every preset), optional `typings/` and tools.
+  (identical in every preset), optional `typings/` and tools. It must be ruff-clean: the
+  pre-commit hook of a fresh project runs `ruff format --check` and ruff on it
+  (`test_presets.py` renders every preset with three names under every profile, py311 and
+  py314 targets). No calendar year anywhere in a preset (it goes stale in later projects).
 - Four templating syntaxes coexist: `__pkg__` in paths and `{{name}}`/`{{pkg}}` in text (plain
   `.replace`; `f"{{name}}: ..."` in `script/app.py` renders to the app name on purpose);
   `{option}` in `preset.toml` deps and `[uv]` (`str.format_map`); `__HEADER__`-style in
@@ -912,32 +919,76 @@ Per method:
   `presets.TEXT_SUFFIXES` or it has none, it holds no NUL byte and it decodes as UTF-8;
   anything else is copied byte for byte, and `pristine` never rewrites CRLF inside binaries.
 - `pristine(cfg)`: `src/`, `tests/`, `typings/` equal the current preset skeleton rendered
-  with the current name (CRLF-normalised). `init` refuses otherwise (use `--force`). `init`
-  deletes `src/ tests/ typings/`, writes every skeleton file (including root
-  `pytemplate.toml`, not covered by the pristine check), chmods `deploy` and `deploy.ps1` on
-  POSIX, sets `project.name`, replaces the preset tables, `write_pyproject`, `uv remove/add
-  --no-sync` for the dependency diff, `uv lock`, `render.apply(force=True)`.
-- `presets.check_name_free` (in `new`, `init` and their dry runs): the app name may not equal
-  (normalised) a dependency of the resulting project: uv refuses self-dependencies and
-  `src/<pkg>/` would shadow the library. `new` names the app after the folder, so
-  `./deploy new ../flet --preset flet` fails with a hint to use `--name`. `new` also checks the
-  name format before copying (no half-made project).
+  with the current name (CRLF-normalised). `init` (the internal step of `new`) refuses
+  otherwise (use `--force`). `presets.plan_init` makes every check in memory first: name,
+  `check_name_free`, pristine, the skeleton's `pytemplate.toml` validated, and the new
+  `pyproject.toml` (`pyproject_after_init`: name, managed block, THEN the preset tables,
+  because `render.pyproject_expected` takes `# >>> pytemplate-preset` for its own begin marker
+  when the managed markers are missing) parsed and checked: a preset table outside the
+  markers or a damaged marker is a `DeployError` (exit 2). `--dry-run init` prints the plan
+  (`cmd_mode._plan_init`). `presets.init` then (1) writes `pyproject.toml` and runs `uv remove
+  --frozen` (no resolution) for the old preset's requirements, `uv add --no-sync
+  [--constraints]` for the new ones and `uv lock`: the only step that needs the network;
+  (2) renames `src/ tests/ typings/` into `.pytemplate-init-*` (all or nothing: a locked file
+  fails the rename before anything changed), writes every skeleton file (root
+  `pytemplate.toml` included) and chmods `deploy`/`deploy.ps1` on POSIX. Any failure or
+  Ctrl+C in (1) or (2) puts every file back (`presets._Undo`, prints "every file is back as
+  it was") and is raised. (3) Deletes the aside folder and runs `render.apply(force=True)`.
+- `presets.check_name_free` (in `new`, `init`, their dry runs and `rename`) refuses: a keyword,
+  a stdlib module, the project's own folders and files (`RESERVED_PACKAGES`: tests, typings,
+  build, dist, assets; plus the preset's `src/` entries such as `main`), and every package
+  the project will lock: the declared requirements (minus the current preset's own), their
+  tree in `uv.lock` (`locked_names`, markers ignored because uv refuses a self-dependency on
+  any platform; the project's own entry excluded) and the preset's pins. When a preset adds
+  packages the lock does not have, their dependencies are unknown, so every locked name
+  counts (conservative). Names must match `presets.APP_NAME` (a letter first, a letter or
+  digit last: PEP 508); `new` derives the name from the folder with `name_from_folder` (NFKD
+  -> ASCII, other runs -> `-`, no `-`/`_` at the ends) and checks it before copying, so
+  `./deploy new ../flet --preset flet` fails with a hint to use `--name`.
 - **[template repo]** Root `src/`, `tests/` and `pytemplate.toml` must equal
-  `presets/script/files` rendered with `name = "myapp"` (verified: `presets.pristine` is
-  true). Edit the preset, then regenerate the root with `./deploy init script --name myapp
-  --force`, or mirror the edit byte for byte.
-- `copy_template(dest)` (used by `new`) skips `.git`, `.build`, `dist`, caches, `.flet`,
-  `.venv*`, `template-repo` at any depth; `build/` and `.claude/` at the root; and
-  `.github/workflows/template-*` (template CI files MUST use that prefix). `new` then runs
-  `init <preset> --name <n> --force` inside the copy, `git init` and
-  `git add --chmod=+x deploy deploy.ps1`.
+  `presets/script/files` rendered with `name = "myapp"` (`test_presets.py` checks it, and
+  that every preset ships the same `tests/conftest.py`). Edit the preset, then regenerate
+  the root with `./deploy init script --name myapp --force` (a byte-for-byte no-op when they
+  already agree), or mirror the edit byte for byte.
+- `copy_template(dest)` (used by `new`): in a git work tree only the files git tracks (`git
+  ls-files --cached`, with their working-tree content): untracked files are listed as "not
+  copied", ignored ones stay silent, so `.env`, `.idea/`, `htmlcov/`, `*.spec` never reach a
+  new project. A maintainer's new file must be `git add`ed before `new` or `selftest --e2e`
+  sees it. Without git, or when git does not track `.pytemplate/deploy.py` (a copy inside
+  another repository, a project never committed), it copies every file. Both skip
+  (`presets._skipped`) `.git`, `.build`, `dist`, caches, `.flet`, `.venv*`, `template-repo`
+  at any depth; `build/` and `.claude/` at the root; and `.github/workflows/template-*`
+  (template CI files MUST use that prefix). `new` then runs `init <preset> --name <n>
+  --force` inside the copy, `git init -b main` (the generated CI runs on `main`; git < 2.28:
+  plain `init` + `symbolic-ref HEAD refs/heads/main`; nothing inside an existing work tree)
+  and `git add --chmod=+x deploy deploy.ps1`. When the copy or `init` fails (a name uv
+  refuses, no network, Ctrl+C) `new` removes what it created (the folder and the parents it
+  made, or only the content of the empty folder it was given) and says so; a folder with
+  content is refused before anything is written.
+- Tested pins: `presets/<p>/constraints.txt` (`name==version`, sorted, generated, never
+  hand-edited) lists every package a project of the preset locks that the template's
+  `uv.lock` does not (flet 32, raylib 5; script needs none: the root lock is its tested set).
+  `init` hands the ones the project does not lock yet to `uv add --constraints`: a one-off
+  (nothing in `pyproject.toml` or the lock manifest, `uv lock --check` passes, `./deploy lock
+  --upgrade` moves on), so a new project gets the versions CI tested instead of the newest of
+  the day, and packages the source project already locks keep their versions. Regenerate
+  after changing a preset's pins or the root `uv.lock` (`test_presets.py` fails, offline,
+  when the file is stale): delete it, `./deploy new <tmp>/p --preset <p>`, then write
+  `presets.constraints_text(p, <tmp>/p/uv.lock)` to `presets.constraints_path(p)` (a
+  `python -c` in `.venv` with `.pytemplate` on `sys.path`) and `git add` it. Rejected:
+  `exclude-newer` (recorded in the lock: the next `uv lock --check` fails) and `==`
+  `constraint-dependencies` in the managed block (permanent: blocks updates, takes the key
+  from the user).
 - Hard-coded preset names in the runner: `render.ci_workflow` (raylib: apt GL/X11 libs, no
   PyPy on macOS), `methods/exe.build` (flet -> `flet pack`), `methods/flet.build` (flet only),
   `e2e.SMOKE` / `e2e.COMPILED_MARK` (expected app output per preset). A new preset that needs
   special packaging or smoke checks must touch these.
 - raylib: the upstream stub lies (returns/fields/params declared `bytes`/`list` that are cdata
   or int at runtime); mypyc checks simple types at runtime, so they raise `TypeError` only when
-  compiled. `tools/raylib_stubs.py` regenerates `typings/raylib/__init__.pyi` (task `stubs`).
+  compiled. `tools/raylib_stubs.py` regenerates `typings/raylib/__init__.pyi` (task `stubs`;
+  deterministic, byte-identical to the shipped stub). It skips opaque structs (GLFWcursor...:
+  `ffi.sizeof` raises) before reading `.fields`: cffi 2.x wheels that keep their C asserts
+  (Linux) abort the process there (exit 134), which no `except` catches.
   `typings/` is picked up by `render.typings_dir` (mypy `mypy_path`, pyright `stubPath`, ruff
   `extend-exclude`, `presets.OWNED_DIRS`). Also: `[[typing.mypy_overrides]] raylib
   ignore_errors`, `no-build-package = ["raylib"]` via `[uv]`, `forbid_imports = ["pyray"]`
@@ -949,7 +1000,10 @@ Per method:
   types; hence `forbid_imports = flet, flet_desktop, flet_cli`. Heavy work runs in a
   `ProcessPoolExecutor` (compiled code does not release the GIL). mypy overrides relax
   `{pkg}.ui.*`. Wheel entry `{pkg}.ui.app:run`. Task `dev` (`flet run -d -r`) has
-  `background = true`.
+  `background = true`. `[tool.flet]` (read by `flet build` only, which embeds `copyright` in
+  the app metadata): `org`, `company` and `copyright = "Copyright (C) {{name}}"` are
+  placeholders; no year (dropping the key would not help: Flet's own template default says
+  "2026 Your Company").
 - Editor buttons per preset come from each preset's `pytemplate.toml` `[vscode] buttons`
   (script `run test check build`, raylib `run bunnymark test build`, flet `dev run test
   build`). Every preset also has a `ci` task.
@@ -1188,7 +1242,10 @@ short temp tree and unset `NVIM_APPNAME`.
   runner fixes: portable smoke with `lib/`, lazy `{python}`, pyz `PYTHON_JIT`, binary preset
   files, `compile.annotate`, `sync_tree` ns mtimes, portable launcher quoting and version
   probes, unknown arguments, `app.preset`, pinned tools, flet pyproject, wheel options, JIT
-  path), `test_e2e_plan.py` (the pure planning of `e2e.py`).
+  path), `test_e2e_plan.py` (the pure planning of `e2e.py`), `test_presets.py` (preset data
+  and skeletons, ruff under every profile, name rules, pins, `copy_template`, `new`/`init`
+  failures with uv faked; real `new` per preset, the pins steering uv and the raylib stub
+  generator when uv reaches the network, checked with `uv pip compile --no-cache`).
 - **[template repo]** Language guard `test_no_spanish.py`: skipped unless
   `.pytemplate/template-repo` exists. Scans `git ls-files --cached --others --exclude-standard`
   (so new untracked files count) for accented Spanish letters and a list of Spanish words
@@ -1337,7 +1394,10 @@ Adding a preset:
 1. `presets/<p>/preset.toml` and `files/` (section 11), including `[vscode] buttons` and
    `[tasks]` (`background = true` for dev servers) in its `pytemplate.toml`.
 2. Copy `tests/conftest.py` verbatim. Check the hard-coded preset branches (section 11).
-3. It must pass `./deploy selftest --e2e <p>` and `./deploy selftest --nvim <p>`.
+3. Generate its `constraints.txt` if it adds packages to the template's `uv.lock` (section 11)
+   and `git add` everything (`new` only copies tracked files).
+4. It must pass `./deploy selftest` (`test_presets.py`: ruff-clean skeleton, valid config,
+   pins), `./deploy selftest --e2e <p>` and `./deploy selftest --nvim <p>`.
 
 Adding a typing profile:
 1. `templates/typing/<p>.toml` with the keys of section 8.
