@@ -506,7 +506,7 @@ header rules (with detector tests proving each rule fires).
 |---|---|
 | `deploy.py` (one level up) | Stops with exit 3 and one `error:` line (no traceback) when uv started it on Python < 3.11 (a `uv run` by hand with an old `UV_PYTHON`), BEFORE importing the runner; reconfigures stdout/stderr to UTF-8, puts its own dir on `sys.path`, calls `runner.cli.main`. |
 | `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `FORWARDS` / `HELP_PASSES_THROUGH` (section 5.2); `INTERNAL` (routes listed nowhere: `__init`). `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main`/`_main` (exception -> exit code, closed stdout), `cmd_help` (commands and `[tasks]` entries), `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
-| `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file` (section 6.1), `toml_value`. |
+| `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file` (section 6.1), its TOML statement scanner `scan` (render reads pyproject.toml with it, 6.3), `toml_value`. |
 | `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL`, `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`. |
@@ -1074,7 +1074,12 @@ Formats:
   quoted key, any indent), is rewritten to `">=<min_python>"` (the lowest supported minor:
   usually PyPy's 3.11 with PyPy, else `python.cpython`) and inserted under `[project]` when
   missing (`render._set_requires_python`); a `requires-python` of another table is never
-  touched.
+  touched. The key, the `[project]` and `[tool.uv]` headers and the headers around the markers
+  (`render._headers`) are found with the TOML statement scanner (`config.scan`, the one
+  `set_value` uses): a line of a multi-line string or array that looks like a header or the key
+  never counts (a `[beta]` line in a multi-line description ended the `[project]` scan early,
+  a second requires-python was inserted and lock, mode and apply refused a valid file). Text the
+  scanner cannot read falls back to the line patterns, and `_verify` reports it.
 - The `[tool.uv]` block between `# >>> pytemplate` and `# <<< pytemplate`
   (`render.managed_block`). The END MARKER IS AN INLINE COMMENT on the last key line
   (`python-preference = "only-managed"  # <<< pytemplate`) so uv/toml_edit insertions cannot

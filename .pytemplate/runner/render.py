@@ -26,7 +26,7 @@ from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
-from . import presets, proc, ui
+from . import config, presets, proc, ui
 from .config import Config, compiled_paths
 from .envs import MIN_UV
 from .project import PYPROJECT, ROOT, STATE_FILE, TEMPLATES, rel
@@ -567,6 +567,28 @@ def _split(text: str) -> list[str]:
     return lines
 
 
+_Headers = dict[int, tuple[str, tuple[str, ...]]] | None
+
+
+def _headers(lines: list[str]) -> _Headers:
+    """{line index: (kind, table path)} of the real table headers: a line of a multi-line string or
+    array that only looks like one (a '[beta]' line in a description) never counts. None when the
+    scanner cannot read the text: the line patterns decide then (and _verify reports invalid TOML)."""
+    text = "\n".join(lines) + "\n"
+    stmts = config.scan(text)
+    if stmts is None:
+        return None
+    return {text.count("\n", 0, s.end - 1): (s.kind, s.path) for s in stmts if s.kind in ("table", "array")}
+
+
+def _is_header(lines: list[str], headers: _Headers, i: int) -> bool:
+    return i in headers if headers is not None else bool(_HEADER_RE.fullmatch(lines[i]))
+
+
+def _is_table(lines: list[str], headers: _Headers, i: int, path: tuple[str, ...], pattern: re.Pattern[str]) -> bool:
+    return headers.get(i) == ("table", path) if headers is not None else bool(pattern.fullmatch(lines[i]))
+
+
 def _managed_bounds(lines: list[str]) -> tuple[int, int] | None:
     """Return the first and last line of the managed block; None when both markers are missing
     (the block is then inserted). A DeployError explains any other state of the markers."""
@@ -584,10 +606,11 @@ def _managed_bounds(lines: list[str]) -> tuple[int, int] | None:
         problem = "the closing marker comes before the opening one"
     else:
         begin, end = begins[0], ends[0]
-        table = next((ln for ln in reversed(lines[:begin]) if _HEADER_RE.fullmatch(ln)), "")
-        if not _UV_HEADER.fullmatch(table):
+        headers = _headers(lines)
+        table = next((i for i in range(begin - 1, -1, -1) if _is_header(lines, headers, i)), None)
+        if table is None or not _is_table(lines, headers, table, ("tool", "uv"), _UV_HEADER):
             problem = "the block is not in the [tool.uv] table"
-        elif any(_HEADER_RE.fullmatch(ln) for ln in lines[begin : end + 1]):
+        elif any(_is_header(lines, headers, i) for i in range(begin, end + 1)):
             problem = "a table header is between the markers"
         else:
             return begin, end
@@ -601,12 +624,25 @@ def _managed_bounds(lines: list[str]) -> tuple[int, int] | None:
 
 def _set_requires_python(lines: list[str], min_python: str) -> list[str]:
     """Set [project] requires-python (inserted under the header when missing: uv would default to
-    the running interpreter's minor)."""
+    the running interpreter's minor). Found with the TOML scanner, so a line of a multi-line string
+    that looks like a header or like the key is left alone."""
+    value = f'">={min_python}"'
+    text = "\n".join(lines) + "\n"
+    stmts = config.scan(text)
+    if stmts is not None:
+        key = next((s for s in stmts if s.kind == "key" and not s.in_array and s.path == ("project", "requires-python")), None)
+        if key is not None:
+            begin, end = key.value
+            return _split(text[:begin] + value + text[end:])
+        header = next((s for s in stmts if s.kind == "table" and s.path == ("project",)), None)
+        if header is None:
+            return lines  # no [project] table: _verify says so
+        return _split(text[: header.end] + f"requires-python = {value}\n" + text[header.end :])
+    # not readable as TOML (_verify reports it): the line patterns
     start = next((i for i, ln in enumerate(lines) if _PROJECT_HEADER.fullmatch(ln)), None)
     if start is None:
         return lines  # no [project] table: _verify says so
     stop = next((i for i in range(start + 1, len(lines)) if _HEADER_RE.fullmatch(lines[i])), len(lines))
-    value = f'">={min_python}"'
     section, found = _REQUIRES_PYTHON.subn(lambda m: m.group(1) + value, "\n".join(lines[start + 1 : stop]), count=1)
     body = section.split("\n") if stop > start + 1 else []
     if not found:
@@ -646,7 +682,8 @@ def pyproject_expected(cfg: Config, text: str) -> str:
     if bounds:
         lines[bounds[0] : bounds[1] + 1] = block
     else:
-        header = next((i for i, ln in enumerate(lines) if _UV_HEADER.fullmatch(ln)), None)
+        headers = _headers(lines)
+        header = next((i for i in range(len(lines)) if _is_table(lines, headers, i, ("tool", "uv"), _UV_HEADER)), None)
         if header is None:
             while lines and not lines[-1].strip():
                 lines.pop()

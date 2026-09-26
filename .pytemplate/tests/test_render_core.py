@@ -714,13 +714,40 @@ def test_a_raylib_project_keeps_its_own_no_build_package(pyproject: Path, packag
 
 
 def test_a_rewrite_never_changes_anything_else(pyproject: Path) -> None:
-    # requires-python inside a multi-line string of [project] is not the key: rather than rewrite
-    # the description, write_pyproject refuses (the file is left as it is)
+    # requires-python inside a multi-line string of [project] is not the key: the real one is
+    # rewritten, the string stays as it is
     text = pyproject_text(CFG).replace("[project]\n", '[project]\nnotes = """\nrequires-python = ">=2.7"\n"""\n', 1)
     _write(pyproject, text.replace('requires-python = ">=3.14"', 'requires-python = ">=3.13"'))
-    with pytest.raises(DeployError, match="would also change other settings"):
-        render.write_pyproject(CFG)
+    assert render.write_pyproject(CFG) is True
+    assert pyproject.read_text(encoding="utf-8") == text
     assert tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["notes"] == 'requires-python = ">=2.7"\n'
+
+
+STRING_HEADERS = {
+    # a line of a multi-line string (or array) that looks like a table header is text, not a header
+    "project-description": ("[project]\n", '[project]\ndescription = """Sieve benchmark.\n[beta]\n"""\n'),
+    "project-literal": ("[project]\n", "[project]\nreadme-text = '''\n  [[tool.uv]]\n'''\n"),
+    "project-array": ("[project]\n", '[project]\nkeywords = [\n"a",\n]\nclassifiers = [\n  "x", # [tool.uv]\n]\n'),
+    "tool-uv-string": ("[tool.uv]\n", '[tool.uv]\nnote = """\n[tool.other]\n"""\n'),
+}
+
+
+@pytest.mark.parametrize(("where", "insert"), STRING_HEADERS.values(), ids=STRING_HEADERS.keys())
+def test_header_lookalikes_in_strings_are_text(pyproject: Path, where: str, insert: str) -> None:
+    """A '[beta]' line in a multi-line description ended the [project] scan early: a second
+    requires-python was inserted, and lock, mode and apply refused a valid file."""
+    own = re.sub(r"(?m)^description = .*\n", "", pyproject_text(CFG))  # the test writes its own
+    text = own.replace(where, insert, 1)
+    assert tomllib.loads(text)  # a valid file
+    _write(pyproject, text.replace('requires-python = ">=3.14"', 'requires-python = ">=3.13"'))
+    render.check_pyproject(CFG)
+    assert render.pyproject_outdated(CFG) is True and render.write_pyproject(CFG) is True
+    assert pyproject.read_text(encoding="utf-8") == text  # only the managed value changed
+    assert render.pyproject_outdated(CFG) is False
+    _write(pyproject, text.replace('requires-python = ">=3.14"\n', ""))  # a missing one goes under [project]
+    assert render.write_pyproject(CFG) is True
+    new = pyproject.read_text(encoding="utf-8")
+    assert new.count("requires-python") == 1 and new.startswith('[project]\nrequires-python = ">=3.14"\n')
 
 
 def test_verify_requires_the_managed_values_in_tool_uv() -> None:

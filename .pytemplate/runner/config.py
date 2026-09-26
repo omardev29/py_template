@@ -908,6 +908,16 @@ def _statements(text: str) -> list[_Stmt]:
     return out
 
 
+def scan(text: str) -> list[_Stmt] | None:
+    """The top-level statements of a TOML text (table headers, array-of-tables headers and keys,
+    with their offsets), or None when the scanner cannot read it (not valid TOML). render reads
+    pyproject.toml with it: a line of a multi-line string is never taken for a header or a key."""
+    try:
+        return _statements(text)
+    except _ScanError:
+        return None
+
+
 def _edited(text: str, path: tuple[str, ...], rendered: str) -> str:
     """`text` with the value at `path` replaced by `rendered` (or the key/table added)."""
     stmts = _statements(text)
