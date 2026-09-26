@@ -693,7 +693,8 @@ Formats:
 - Tools outside `uv.lock` run through `uv run --locked --with <pin>` and are pinned in module
   constants: `cmd_dev.BASEDPYRIGHT = "basedpyright==1.40.1"` (`check` with
   `typing.editor = "basedpyright"`) and `methods.nuitka.NUITKA = "nuitka==4.2.2"`. Bump them
-  deliberately.
+  deliberately; `NUITKA` together with `methods.nuitka.NUITKA_PYTHON` (the newest CPython minor
+  it supports, `3.14`): raising `python.cpython` past it needs a newer Nuitka pin.
 - `mode --jit off` / `--supports -pypy` never delete the old env: they print a note that
   `./deploy clean --envs` removes the `.venv*` environments (all of them; `setup` recreates
   the ones in use).
@@ -851,9 +852,19 @@ Per method:
   compile `mypy.ini`). Assets go into `<pkg>/assets` (package data). Needs network (isolated
   build env). mypyc -> platform wheel; cpython/pypy -> `py3-none-any`.
 - **nuitka**: `.build/nuitka-stage/<b>`, `uv run --locked --with nuitka==<NUITKA> python -m
-  nuitka` with cwd = stage; `--include-package=<pkg>`, `--include-module` for mypyc hidden
-  imports, `--python-flag=no_asserts/no_docstrings` from `optimize`, `--nofollow-import-to`
-  per `deploy.exclude_modules`, the upx plugin when enabled. Output found by file-name
+  nuitka` with cwd = stage; `--include-package=<pkg>`, `--include-module` for the mypyc hidden
+  imports the tools env can locate (`nuitka.includable`: top-level `find_spec` with the stage on
+  `sys.path`, built-ins dropped, compiled modules and extensions always kept; Nuitka stops with
+  FATAL on a module it cannot locate, e.g. a platform-guarded `import winreg`),
+  `--python-flag=no_asserts/no_docstrings` from `optimize`, `--nofollow-import-to`
+  per `deploy.exclude_modules`, the upx plugin when enabled. Standalone on Linux/macOS names the
+  binary `<name>.bin` when `app.name.lower() == pkg` (the default): it sits in `main.dist/` next
+  to the package folder `<pkg>/`, and a file with that name made Nuitka fail with
+  NotADirectoryError (case-insensitive on macOS); onefile and Windows keep the plain name.
+  `nuitka.check_python` (called by `cmd_build` before the checks): a `python.cpython` newer
+  than `NUITKA_PYTHON` (the newest minor the pin supports; bump both together) exits 3 naming
+  the pin, unless Nuitka's own `--experimental=python3.X` is passed; a failed Nuitka run also
+  names the pin. Output found by file-name
   prefix (onefile) or `.dist` suffix; none found -> `DeployError`. Builds take minutes (~4-7
   min measured). Flet (verified: runs and starts the client): `flet/__init__.py` loads its
   controls lazily (module `__getattr__` + `importlib`), which Nuitka cannot follow, so the

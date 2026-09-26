@@ -72,6 +72,10 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
     reason = COMPAT[method].get(backend)
     if reason:
         raise DeployError(f"{method} + {backend}: {reason}")
+    if method == "nuitka":
+        from .methods import nuitka
+
+        nuitka.check_python(cfg, [*cfg.deploy.nuitka.extra_args, *extra])  # before minutes of checks and compiling
 
     if not ns.no_check and not run_checks(cfg, backend):
         raise DeployError("check failed: fix it or use --no-check")
