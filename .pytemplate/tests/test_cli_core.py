@@ -1416,9 +1416,75 @@ def test_quiet_keeps_what_was_asked_for(tasks_project: Path) -> None:
     assert r.returncode == 2 and "takes no arguments" in r.stderr
 
 
-@pytest.mark.skipif(shutil.which("uv") is None, reason="uv not on PATH")
+uv_on_path = pytest.mark.skipif(shutil.which("uv") is None, reason="uv not on PATH")
+
+
+@uv_on_path
 def test_quiet_does_not_hide_a_dry_runs_plan(tasks_project: Path) -> None:
     r = _deploy(tasks_project, "-q", "--no-render", "--dry-run", "sync", "cpython")
     assert r.returncode == 0, r.stderr
     assert "$ uv sync --locked" in r.stderr
     assert not (tasks_project / ".venv").exists()
+
+
+@uv_on_path
+def test_a_dry_run_of_sync_and_add_changes_nothing(tasks_project: Path) -> None:
+    files = {name: (tasks_project / name).read_bytes() for name in ("pyproject.toml", "uv.lock")}
+    for args in (["sync", "cpython"], ["add", "requests"], ["remove", "rich"]):
+        r = _deploy(tasks_project, "--no-render", "--dry-run", *args)
+        assert r.returncode == 0, r.stderr
+        assert f"$ uv {args[0]}" in r.stderr
+    assert {name: (tasks_project / name).read_bytes() for name in files} == files
+    assert not (tasks_project / ".venv").exists()
+
+
+@posix
+@uv_on_path
+@pytest.mark.parametrize(("task", "code"), [("exit7", 7), ("killed", 137), ("ci --x", 2)])
+def test_task_exit_codes_cross_the_sh_launcher(tasks_project: Path, task: str, code: int) -> None:
+    # deploy -> uv run --script -> deploy.py: nothing on the way may change the code
+    r = subprocess.run(
+        ["sh", str(tasks_project / "deploy"), "--no-render", *task.split()],
+        cwd=tasks_project,
+        env=child_env(),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert r.returncode == code, r.stderr
+
+
+# === 12. invariants of other modules that the runner's error paths depend on =======================
+
+
+def test_update_file_never_writes_broken_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # config.set_value is line-based: a multi-line array plus set_value gave broken TOML
+    path = tmp_path / "pytemplate.toml"
+    original = '[backend]\nactive = "cpython"\nsupported = [\n  "cpython",\n  "mypyc",\n]\n'
+    path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(config, "CONFIG_FILE", path)
+    try:
+        config.update_file([("backend", "supported", ["cpython", "pypy"])])
+    except Exception:  # refusing is fine; writing a broken file is not
+        assert path.read_text(encoding="utf-8") == original
+    import tomllib
+
+    tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(("preset", "name"), [("script", "json"), ("script", "class"), ("script", "rich"), ("flet", "Flet")])
+def test_names_that_would_break_the_project(preset: str, name: str) -> None:
+    with pytest.raises(DeployError) as e:
+        presets.check_name_free(None, preset, name)
+    assert e.value.code == 2 and "--name" in str(e.value)
+    presets.check_name_free(None, preset, "my-app")
+
+
+def test_librt_is_forbidden_only_while_pypy_is_supported(tmp_path: Path) -> None:
+    module = tmp_path / "fast.py"
+    module.write_text("import librt\nfrom librt.base64 import b64encode\n", encoding="utf-8")
+    with_pypy = lintc.lint_file(make({"backend": {"supported": ["cpython", "pypy", "mypyc"]}}), module)
+    assert len([f for f in with_pypy if "librt" in f.message]) == 2
+    assert not [f for f in lintc.lint_file(make({}), module) if "librt" in f.message]
