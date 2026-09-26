@@ -101,7 +101,11 @@ jobs:
       - name: busybox-w32
         shell: pwsh
         run: |
-          Invoke-WebRequest https://frippery.org/files/busybox/busybox64u.exe -OutFile "$env:RUNNER_TEMP\busybox.exe"
+          # frippery.org sometimes times out: retry a few times before failing the job
+          for ($i = 1; ; $i++) {
+            try { Invoke-WebRequest https://frippery.org/files/busybox/busybox64u.exe -OutFile "$env:RUNNER_TEMP\busybox.exe"; break }
+            catch { if ($i -ge 4) { throw }; Write-Host "busybox download failed (try $i): $_"; Start-Sleep -Seconds (15 * $i) }
+          }
           Add-Content $env:GITHUB_PATH $env:RUNNER_TEMP
       - name: xonsh
         shell: bash

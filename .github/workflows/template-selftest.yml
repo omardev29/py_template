@@ -69,7 +69,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends dash zsh ksh mksh yash busybox fish
           # actionlint for the workflow tests (pinned release, checked)
-          curl -fsSLo "$RUNNER_TEMP/actionlint.tgz" https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          curl -fsSL --retry 4 --retry-all-errors -o "$RUNNER_TEMP/actionlint.tgz" https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/bin" && tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP/bin" actionlint
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
