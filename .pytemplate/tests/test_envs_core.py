@@ -569,6 +569,24 @@ def test_make_writable_never_follows_links(tmp_path: Path) -> None:
     os.chmod(outside, 0o644)
 
 
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX folder modes")
+def test_make_writable_fixes_the_top_folder_too(tmp_path: Path) -> None:
+    """`chmod 555 .build`: _make_writable fixed only the entries below it, so clean still
+    could not delete them ("could not remove .build completely")."""
+    root = tmp_path / ".build"
+    (root / "sub").mkdir(parents=True)
+    (root / "a").write_text("x", encoding="utf-8")
+    os.chmod(root, 0o555)
+    try:
+        cmd_env._make_writable(root)
+        assert stat.S_IMODE(os.stat(root).st_mode) & 0o700 == 0o700
+    finally:
+        os.chmod(root, 0o755)
+    link = tmp_path / "link"
+    os.symlink(tmp_path / "elsewhere", link)  # a (dangling) link as the root: nothing to change
+    cmd_env._make_writable(link)
+
+
 # --- the exec bits of the launchers -------------------------------------------------------------------
 
 
@@ -636,6 +654,28 @@ def test_fix_exec_bit_outside_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     cmd_env._fix_exec_bit()
     assert os.access(root / "deploy", os.X_OK)
     assert not (root / "deploy.ps1").exists()  # a missing launcher is not created
+
+
+@needs_git
+@pytest.mark.skipif(IS_WINDOWS, reason="exec bits are POSIX")
+def test_fix_exec_bit_warns_when_the_file_is_not_ours(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A launcher without its x bit that belongs to another user (a shared checkout): chmod
+    raised PermissionError, an internal runner error, and setup/apply stopped before the hook,
+    render and the applied record, at every later run too."""
+    root = launcher_repo(tmp_path, monkeypatch)
+    real_chmod = Path.chmod
+
+    def not_the_owner(self: Path, mode: int, **kw: Any) -> None:
+        if self.name in cmd_env.LAUNCHERS_X:
+            raise PermissionError(1, "Operation not permitted", str(self))
+        real_chmod(self, mode, **kw)
+
+    monkeypatch.setattr(Path, "chmod", not_the_owner)
+    cmd_env._fix_exec_bit()  # no exception
+    err = capsys.readouterr().err
+    assert "warning: cannot make deploy executable: Operation not permitted" in err and "chmod +x deploy" in err
+    assert "deploy.ps1" in err
+    assert index_mode(root, "deploy") == index_mode(root, "deploy.ps1") == "100755"  # the git part still ran
 
 
 @needs_git

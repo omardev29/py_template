@@ -2533,8 +2533,10 @@ Files and git:
   the runner normalises.
 - `deploy` and `deploy.ps1` are 100755: `cmd_env._fix_exec_bit` repairs both on `setup`, the
   files' own exec bit on POSIX (with or without git: with `core.filemode=true` an index-only fix
-  is undone by the next `git add`) and the git mode (`core.filemode=false` on Windows loses
-  it); `presets.new` marks both, `presets.init` chmods both on POSIX. `deploy.cmd` stays 100644.
+  is undone by the next `git add`; a file it may not chmod, another user's in a shared checkout,
+  is a warning naming `chmod +x`, and apply goes on) and the git mode (`core.filemode=false` on
+  Windows loses it); `presets.new` marks both, `presets.init` chmods both on POSIX.
+  `deploy.cmd` stays 100644.
 - Default app content lives in `presets/script/files/` (section 11).
 
 ## 15. Known issues and fragile points (still open)

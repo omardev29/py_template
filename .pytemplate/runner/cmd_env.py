@@ -72,7 +72,12 @@ def _fix_exec_bit() -> None:
             if path.is_file() and not os.access(path, os.X_OK):
                 ui.command(f"chmod +x {launcher}")
                 if not proc.DRY_RUN:
-                    path.chmod(path.stat().st_mode | 0o111)
+                    try:
+                        path.chmod(path.stat().st_mode | 0o111)
+                    except OSError as e:  # another user's file (a shared checkout), a read-only mount
+                        # a warning, never a stop: setup/apply still install the hook, render and
+                        # record; `sh ./deploy` works without the bit
+                        ui.warn(f"cannot make {launcher} executable: {e.strerror or e}. Its owner can: chmod +x {launcher}")
     # rev-parse, not ROOT/.git: the project may live in a subfolder of a bigger repository
     if not shutil.which("git"):
         return
@@ -211,7 +216,12 @@ def _env_dirs() -> list[Path]:
 
 
 def _make_writable(root: Path) -> None:
-    """Clear read-only flags below `root` (links are neither followed nor changed)."""
+    """Clear read-only flags of `root` and below it (links are neither followed nor changed).
+    `root` itself too: its entries cannot be deleted while it is read-only."""
+    with contextlib.suppress(OSError):
+        mode = os.lstat(root).st_mode
+        if stat.S_ISDIR(mode):
+            os.chmod(root, mode | stat.S_IRWXU)
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if not _is_link(Path(dirpath, d))]
         for name in (*dirnames, *filenames):
