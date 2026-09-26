@@ -921,6 +921,17 @@ def test_deps_run_in_order_then_the_cmd_with_the_extra_arguments(rec: Recorder) 
     assert rec.runs == [["o", "--x"], ["tool", "cpython", "--y", "{root}", "a b"]]  # extra args are never formatted
 
 
+def test_a_backslash_in_a_dep_is_a_plain_character(rec: Recorder) -> None:
+    """A Windows path in a deps entry reaches the command as typed (POSIX shlex turned
+    C:\\data\\in.txt into C:datain.txt); quotes still group words, as for [vscode] buttons and
+    the Neovim plugin's :Deploy."""
+    deps = [r"run cpython C:\data\in.txt", r'run cpython "C:\My Data\x" a\b', r"other 'say \"hi\"'"]
+    cfg = make({"tasks": {"t": {"deps": deps}, "other": {"cmd": ["o"], "uv": False}}})
+    assert tasks.run_task(cfg, "t", [], rec.dispatch) == 0
+    assert rec.dispatched == [["run", "cpython", r"C:\data\in.txt"], ["run", "cpython", r"C:\My Data\x", "a\\b"]]
+    assert rec.runs == [["o", r"say \"hi\""]]
+
+
 def test_the_first_failing_dep_stops_the_task_with_its_code(rec: Recorder) -> None:
     cfg = make({"tasks": {"t": {"cmd": ["tool"], "deps": ["check", "other", "test"], "uv": False}, "other": {"cmd": ["o"], "uv": False}}})
     rec.codes.update(check=0, o=4)

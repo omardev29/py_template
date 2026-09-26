@@ -83,9 +83,23 @@ def list_tasks(cfg: Config) -> None:
         ui.report(f"  {name:<14} {describe(task)}")
 
 
+def split_words(text: str) -> list[str]:
+    """Split a deps entry (and a [vscode] buttons entry: vscode.split_words) into words: blanks
+    separate them, single or double quotes group them, and a backslash is a plain character, so
+    a Windows path such as C:\\data\\in.txt stays whole (POSIX shlex took it for an escape and
+    passed C:datain.txt). A quote inside a word needs the other kind around it: 'say "hi"'. The
+    Neovim plugin's tasks.split_args splits :Deploy arguments the same way. Unbalanced quotes
+    raise ValueError."""
+    lex = shlex.shlex(text, posix=True)
+    lex.whitespace_split = True
+    lex.commenters = ""
+    lex.escape = ""
+    return list(lex)
+
+
 def _dep_argv(name: str, dep: str) -> list[str]:
     try:
-        argv = shlex.split(dep)
+        argv = split_words(dep)
     except ValueError as e:  # unbalanced quotes
         raise DeployError(f"task '{name}': deps entry {dep!r}: {e}") from None
     if not argv:

@@ -23,10 +23,11 @@ import json
 import math
 import re
 import shlex
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from .. import render
+from .. import render, tasks as task_runner
 from ..config import BACKENDS, Config, compiled_paths
 from ..project import ROOT, TEMPLATES, rel
 from ..ui import DeployError
@@ -196,12 +197,23 @@ def _profiles(cfg: Config, backends: list[str]) -> tuple[str, ...]:
 
 
 def split_words(text: str) -> list[str]:
-    """Split a [tasks] dep or a [vscode] buttons entry like the runner splits deps (shlex: quotes
-    group words); unbalanced quotes give plain words (the runner reports them when the task runs)."""
+    """Split a [tasks] dep or a [vscode] buttons entry like the runner splits deps
+    (tasks.split_words: quotes group words, a backslash is a plain character); unbalanced quotes
+    give plain words (the runner reports them when the task runs)."""
     try:
-        return shlex.split(text)
+        return task_runner.split_words(text)
     except ValueError:
         return text.split()
+
+
+_READS_BACK = re.compile(r"[^\s'\"]+")
+
+
+def shown(args: Iterable[str]) -> str:
+    """The words as a label or a detail shows them: an argument is quoted only when split_words
+    would not read it back as one word (empty, a blank or a quote in it); a backslash or a
+    non-ASCII letter stays as typed (shlex.join quoted both)."""
+    return " ".join(a if _READS_BACK.fullmatch(a) else shlex.quote(a) for a in args)
 
 
 def scan(cfg: Config, argv: list[str], stack: tuple[str, ...] = ()) -> Scan:
@@ -258,7 +270,7 @@ class Entry:
         # The catalog's `report --open` reads "deploy: report"; any other argument stays visible
         # (`run --open` passes --open to the app: it is not the catalog's "deploy: run").
         args = self.args[:1] if self.args == ("report", "--open") else self.args
-        return "deploy: " + shlex.join(args)  # quoted: an argument with a space stays one
+        return "deploy: " + shown(args)  # quoted: an argument with a space stays one
 
 
 def _what_runs(backend: str) -> str:
@@ -335,7 +347,7 @@ def _task(cfg: Config, entry: Entry, button: str | None) -> dict[str, Any]:
     matchers = problem_matchers(cfg, set(found.kinds), list(found.profiles))
     t: dict[str, Any] = {
         "label": entry.label,
-        "detail": f"./deploy {shlex.join(entry.args)}  |  {entry.summary}",
+        "detail": f"./deploy {shown(entry.args)}  |  {entry.summary}",
         "icon": {"id": entry.icon},
     }
     if entry.hide:
@@ -387,7 +399,7 @@ def tasks(cfg: Config) -> dict[str, Any]:
     for args in dict.fromkeys(tuple(split_words(b)) for b in cfg.vscode.buttons):
         if not args:
             continue
-        match = next((e for e in entries if e.args == args or e.label == f"deploy: {shlex.join(args)}"), None)
+        match = next((e for e in entries if e.args == args or e.label == f"deploy: {shown(args)}"), None)
         if match is None:
             match = _button_entry(cfg, args)
         else:

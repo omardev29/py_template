@@ -14,7 +14,6 @@ import json
 import os
 import posixpath
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -237,7 +236,7 @@ def test_buttons_without_a_catalog_task_get_their_own() -> None:
 
 
 def test_button_arguments_are_split_like_task_deps() -> None:
-    """Quotes group words, as in [tasks] deps (shlex): a quoted argument reaches the command as
+    """Quotes group words, as in [tasks] deps: a quoted argument reaches the command as
     one argument, without the quote characters, on every OS."""
     buttons = ["run", 'run cpython "hello world"', "run cpython hello world", "run  cpython  'hello world'", "test 'x"]
     tasks = task_list(preset("script", {"vscode": {"buttons": buttons}}))
@@ -257,6 +256,40 @@ def test_button_arguments_are_split_like_task_deps() -> None:
     assert shown[3]["args"][1:] == ["test", "'x"]
     labels = [t["label"] for t in tasks]
     assert len(labels) == len(set(labels)), labels
+
+
+def test_a_backslash_in_a_button_is_a_plain_character() -> None:
+    """A Windows path reaches the app as typed: POSIX shlex took the backslashes for escapes
+    and passed C:datain.txt. Quotes still group words; a quote inside needs the other kind."""
+    buttons = ["run", r"run cpython C:\data\in.txt", r'run cpython "C:\My Data\in.txt" a\b', r"test 'say \"hi\"'"]
+    tasks = task_list(preset("script", {"vscode": {"buttons": buttons}}))
+    shown = [t for t in tasks if "statusbar" in t["options"]]
+    assert [t["args"][1:] for t in shown] == [
+        ["run"],
+        ["run", "cpython", r"C:\data\in.txt"],
+        ["run", "cpython", r"C:\My Data\in.txt", "a\\b"],
+        ["test", r"say \"hi\""],
+    ]
+    for t in shown:
+        assert t["windows"]["args"] == t["args"][1:]
+    assert shown[1]["label"] == r"deploy: run cpython C:\data\in.txt"
+    assert shown[1]["options"]["statusbar"]["label"] == r"Run cpython C:\data\in.txt"
+    assert shown[1]["detail"].startswith(r"./deploy run cpython C:\data\in.txt  |  ")
+
+
+def test_labels_quote_only_what_would_not_read_back_as_one_word() -> None:
+    """A non-ASCII letter is no reason to quote (shlex.join quoted `--title=cafe` with an
+    accent); a blank, a quote or an empty argument is."""
+    buttons = ["run --title=caf\u00e9", "run cpython ''", "run cpython \"it's\""]
+    tasks = task_list(preset("script", {"vscode": {"buttons": buttons}}))
+    shown = [t for t in tasks if "statusbar" in t["options"]]
+    assert shown[0]["label"] == "deploy: run --title=caf\u00e9"
+    assert shown[0]["options"]["statusbar"]["label"] == "Run --title=caf\u00e9"
+    assert shown[0]["detail"].startswith("./deploy run --title=caf\u00e9  |  ")
+    assert shown[1]["args"][1:] == ["run", "cpython", ""]
+    assert shown[2]["args"][1:] == ["run", "cpython", "it's"]
+    for t in shown:  # every label reads back as the task's own arguments
+        assert vscode.split_words(t["label"].removeprefix("deploy: ")) == t["args"][1:]
 
 
 def test_task_cycles_and_bad_deps_do_not_break_rendering() -> None:
@@ -797,7 +830,7 @@ def test_labels_stay_unique_for_any_buttons(buttons: list[str], supported: list[
     assert len(labels) == len(set(labels)), labels
     for t in tasks:  # a label never hides an argument, except the catalog's `report --open`
         args = t["args"][1:]
-        assert t["label"] == "deploy: " + shlex.join(["report"] if args == ["report", "--open"] else args)
+        assert vscode.split_words(t["label"].removeprefix("deploy: ")) == (["report"] if args == ["report", "--open"] else args)
     bars = [t["options"]["statusbar"]["label"] for t in tasks if "statusbar" in t["options"]]
     assert len(bars) == len(set(bars)), bars
 

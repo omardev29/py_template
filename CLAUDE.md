@@ -1108,7 +1108,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `cmd`, `env` values and `cwd` only bare placeholders (`config.task_format_error`: never `{}`,
   `{0}`, `{root.x}`, `{root!r}`, a lone brace; literal braces doubled `{{ }}`). Checked when
   the task runs (`tasks.run_task`), not at load: unknown placeholder names, `deps` quoting and
-  empty entries (all parsed before the first dep runs), `cwd` is a folder (not in a dry run),
+  empty entries (all parsed before the first dep runs; `tasks.split_words`: blanks separate,
+  quotes group, a backslash is a plain character, as in the plugin's `:Deploy`: POSIX shlex
+  passed `C:\data\in.txt` as `C:datain.txt`), `cwd` is a folder (not in a dry run),
   `backend = "pypy"` in `backend.supported` (only where its environment is used). `vscode.scan`
   renders a task whose deps do not parse.
 - `[preset.<name>]`: option overrides (`config._check_preset_tables`): `<name>` must be a preset
@@ -2159,8 +2161,11 @@ instead. Neovim opens its output on start and replaces a running instance (`uniq
   the task's own `icon` itself. The extension creates buttons in `tasks.json` order, so button
   tasks come FIRST, in the configured order; a button that names no catalog task (e.g.
   `build --method pyz`) gets its own task. Its words are split like `[tasks]` deps
-  (`vscode.split_words`: shlex, plain words on unbalanced quotes), and labels and `detail` quote
-  them back (`shlex.join`), so an argument with a space stays one and labels stay unique.
+  (`vscode.split_words`: `tasks.split_words`, plain words on unbalanced quotes; a backslash is
+  a plain character, so a Windows path arrives as typed), and labels and `detail` quote them
+  back only where needed (`vscode.shown`: an empty argument, a blank or a quote; never a
+  backslash or a non-ASCII letter, which `shlex.join` quoted), so an argument with a space
+  stays one, every label reads back as its arguments and labels stay unique.
   Without the extension the extra keys are ignored.
 - `launch.json`: "src/main.py (CPython, interpreted)" first, with no `python` key (VS Code's
   selected interpreter; works under WSL); PyPy (only when supported; per-OS `python`; the
