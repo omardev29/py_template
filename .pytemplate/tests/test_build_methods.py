@@ -1761,9 +1761,11 @@ def test_portable_sh_launcher_is_posix_and_leaks_nothing() -> None:
         assert "CDPATH='' cd -P --" in text and 'readlink "$_pt_self"' in text
         assert '"$(' not in text  # niubash keeps the inner quotes of "...$(cmd "$x")..."
         for shell in ("dash", "bash", "mksh", "yash"):
-            if shutil.which(shell):
+            found = shutil.which(shell)
+            # never Windows' System32 bash.exe: the WSL launcher, not a shell
+            if found and "system32" not in found.lower() and "windowsapps" not in found.lower():
                 # bytes: a text-mode stdin would hand the shell CRLF on Windows
-                r = subprocess.run([shell, "-n"], input=text.encode("ascii"), capture_output=True, timeout=60, check=False)
+                r = subprocess.run([found, "-n"], input=text.encode("ascii"), capture_output=True, timeout=60, check=False)
                 assert r.returncode == 0, (shell, r.stderr)
 
 

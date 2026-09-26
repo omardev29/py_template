@@ -552,17 +552,10 @@ def test_ps1_forwards_pipeline_input_and_keeps_raw_stdin(name: str) -> None:
     assert uv
     direct = f"& {_ps_literal(uv)} run --quiet --script {_ps_literal(str(ROOT / '.pytemplate' / 'deploy.py'))}"
     body = "\n".join([
-        # PowerShell encodes pipeline text for a native program with $OutputEncoding (5.1 on
-        # GitHub's Windows runners: UTF-8 WITH a BOM, which it writes even for an empty pipeline);
-        # pinned here so the expected text holds on every machine
         "$OutputEncoding = New-Object System.Text.UTF8Encoding $false",
         f"& {ps1} __probe 0 1",
         f"'ping','two' | & {ps1} __probe 3 1",
         "'RC=' + $LASTEXITCODE",
-        f"@() | & {ps1} __probe 0 1",
-        # the same pipelines straight into uv: the launcher must hand over exactly these bytes
-        "$OutputEncoding = New-Object System.Text.UTF8Encoding $true",
-        f"'ping','two' | & {ps1} __probe 0 1",
         f"'ping','two' | {direct} __probe 0 1",
         f"@() | & {ps1} __probe 0 1",
         f"@() | {direct} __probe 0 1",
@@ -570,8 +563,13 @@ def test_ps1_forwards_pipeline_input_and_keeps_raw_stdin(name: str) -> None:
     ])  # fmt: skip
     r = _session(exe, body, stdin="WRONG\n")
     got = [p["stdin"] for p in _probes(r)]
-    assert got[:3] == ["WRONG", "ping", ""], r.stdout + r.stderr
-    assert got[3:] == [got[4], got[4], got[6], got[6]], r.stdout + r.stderr  # like a direct native call
+    assert len(got) == 5 and got[0] == "WRONG", r.stdout + r.stderr
+    # the pipelines reach uv exactly as they reach a direct native call...
+    assert got[1] == got[2] and got[3] == got[4], r.stdout + r.stderr
+    # ...where Windows PowerShell 5.1 (GitHub's runners) puts a BOM in front of the text, even of an
+    # empty pipeline and whatever $OutputEncoding says; PowerShell 7 hands the text over as is
+    bom = "\ufeff" if name == "powershell" else ""
+    assert [got[1].removeprefix(bom), got[3].removeprefix(bom)] == ["ping", ""], r.stdout + r.stderr
     assert "RC=3" in r.stdout
     if name != "pwsh":
         return  # how Windows PowerShell 5.1 -File treats a redirected stdin is not asserted here

@@ -331,10 +331,11 @@ header rules (with detector tests proving each rule fires).
   becomes LF). It reads the variable by name
   (`$ExecutionContext.SessionState.PSVariable.GetValue('input')`) when
   `$MyInvocation.ExpectingInput`; Core prefixes the Invoke-Expression call with
-  `$pipeIn | `. PowerShell encodes pipeline text with `$OutputEncoding`, as for any native call
-  (5.1: ASCII by default; a UTF-8 one with a BOM, seen on GitHub's Windows runners, writes the
-  BOM even for an empty pipeline): `test_ps1_forwards_pipeline_input_and_keeps_raw_stdin` pins
-  it and compares the launcher with a direct uv call.
+  `$pipeIn | `. PowerShell encodes pipeline text with `$OutputEncoding`, exactly as for a direct
+  native call (5.1: ASCII by default; on GitHub's Windows runners 5.1 also puts a BOM in front of
+  it, even of an empty pipeline and whatever `$OutputEncoding` says):
+  `test_ps1_forwards_pipeline_input_and_keeps_raw_stdin` compares the launcher with a direct uv
+  call in the same session.
 - ConstrainedLanguage mode (AppLocker/WDAC policies run unsigned scripts in it) blocks every
   .NET call, `[Console]` included: the launcher checks
   `$ExecutionContext.SessionState.LanguageMode` first and stops with one `Write-Error` naming
