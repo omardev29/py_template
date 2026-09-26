@@ -6,7 +6,10 @@ It needs no Python tooling setup in Neovim: every tool comes from the project's 
 ## First time
 
 Requires Neovim 0.11.2 or newer with LazyVim (`./deploy nvim doctor` checks both;
-`./deploy nvim bootstrap` installs the LazyVim starter when you have no Neovim config yet).
+`./deploy nvim bootstrap` installs the LazyVim starter when you have no Neovim config yet), plus
+git, curl, tar, `fd` (the venv-selector of LazyVim's `lang.python` extra raises an error without
+it) and a C compiler (nvim-treesitter builds its parsers): `nvim doctor` names what is missing
+and how to install it.
 
 1. `./deploy setup` (creates `.venv` with ruff, mypy and debugpy, pinned by `uv.lock`).
 2. Trust `.lazy.lua` once per clone: `./deploy nvim trust`, or open Neovim in the project, pick
@@ -25,7 +28,7 @@ LazyVim's import-order warning and keeps their plugins installed when you work e
 
 | Area | Behaviour |
 |---|---|
-| Language server | basedpyright (no Node.js): `.venv`, else `uvx` with the version `./deploy check` pins (`typing.basedpyright` in `.pytemplate/editor.json`), else Mason. It reads the generated `pyrightconfig.json` (typing profile, `.venv`, `typings/` stubs). `vim.g.pytemplate_python_lsp = "pyright"` switches to pyright (Mason, needs Node.js). |
+| Language server | basedpyright (no Node.js): `.venv`, else `uvx` with the versions `./deploy check` pins, its Node.js wheel included (`typing.basedpyright` and `typing.basedpyright_node` in `.pytemplate/editor.json`), else Mason. It reads the generated `pyrightconfig.json` (typing profile, `.venv`, `typings/` stubs). `vim.g.pytemplate_python_lsp = "pyright"` switches to pyright (Mason, needs Node.js). |
 | ruff | The language server from `.venv`: the same version as `./deploy check`. |
 | mypy | nvim-lint runs `.venv`'s mypy from the project root with `.mypy.ini`; off with the `off` typing profile, the default on cpython and pypy (`typing.relaxed = "off"`): `./deploy mode --typing warn` (or `strict`) turns it on; errors shown with the profile's severity (warn: warnings). With PyPy supported it checks the 3.11 syntax like `./deploy check`. |
 | Tasks | overseer templates `deploy: <command>` for every `./deploy` command and every `pytemplate.toml` `[tasks]` entry (they replace the `tasks.json` ones). Output of check/lint/test/build becomes diagnostics and quickfix items. |

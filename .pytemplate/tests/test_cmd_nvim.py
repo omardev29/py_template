@@ -105,15 +105,37 @@ def test_trust_windows_paths_are_case_insensitive(tmp_path: Path) -> None:
     db.write_text(f"{digest} {real.upper().replace('/', chr(92))}\n", encoding="utf-8")
     assert cmd_nvim.trust_status(db, file, windows=True).state == "trusted"
     if real.upper() != real:
-        assert cmd_nvim.trust_status(db, file, windows=False).state == "untrusted"
+        assert cmd_nvim.trust_status(db, file, windows=False, macos=False).state == "untrusted"
     # an exact entry wins over a case-insensitive one
     db.write_text(f"{'0' * 64} {real.upper()}\n{digest} {real}\n", encoding="utf-8")
     assert cmd_nvim.trust_status(db, file, windows=True).state == "trusted"
 
 
+def test_trust_macos_paths_ignore_case_and_unicode_form(tmp_path: Path) -> None:
+    """macOS volumes are case- and normalization-insensitive by default. Neovim keys the trust
+    database with realpath(3), which returns the on-disk spelling (`MyGame`, NFD accents);
+    Python's os.path.realpath keeps what was typed (`cd ~/projects/mygame`, NFC): a trusted
+    .lazy.lua read as untrusted, and `nvim trust` failed after Neovim reported success."""
+    project = tmp_path / "caf\u00e9 Game"  # typed: NFC, this case
+    project.mkdir()
+    file = project / ".lazy.lua"
+    file.write_bytes(b"return {}\n")
+    digest = hashlib.sha256(b"return {}\n").hexdigest()
+    real = os.path.realpath(file)
+    on_disk = real.replace("caf\u00e9 Game", "CAFE\u0301 GAME")  # Neovim's key: another case, NFD
+    db = tmp_path / "trust"
+    db.write_text(f"{digest} {on_disk}\n", encoding="utf-8")
+    assert cmd_nvim.trust_status(db, file, windows=False, macos=True).state == "trusted"
+    assert cmd_nvim.trust_status(db, file, windows=False, macos=False).state == "untrusted"  # Linux
+    db.write_text(f"! {on_disk}\n", encoding="utf-8")
+    assert cmd_nvim.trust_status(db, file, windows=False, macos=True).state == "denied"
+
+
 def test_same_path() -> None:
     assert cmd_nvim.same_path("C:\\Users\\Me\\p\\.lazy.lua", "c:/users/me/P/.lazy.lua", windows=True)
-    assert not cmd_nvim.same_path("/home/Me/.lazy.lua", "/home/me/.lazy.lua", windows=False)
+    assert not cmd_nvim.same_path("/home/Me/.lazy.lua", "/home/me/.lazy.lua", windows=False, macos=False)
+    assert cmd_nvim.same_path("/Users/Me/Caf\u00e9/.lazy.lua", "/Users/me/cafe\u0301/.lazy.lua", windows=False, macos=True)
+    assert not cmd_nvim.same_path("/Users/me/a/.lazy.lua", "/Users/me/b/.lazy.lua", windows=False, macos=True)
 
 
 # --- lazyvim.json ----------------------------------------------------------------------------------
@@ -353,9 +375,11 @@ def test_a_tree_that_cannot_be_removed_is_a_suite_fail(tmp_path: Path, monkeypat
 def test_real_nvim_query_and_trust(tmp_path: Path) -> None:
     layout = nvimtest.Layout(tmp_path / "w")
     env = nvimtest.nvim_env(layout, dict(os.environ))
-    nv = cmd_nvim.query(shutil.which("nvim"), env=env)
-    assert nv is not None and nv.version >= (0, 9, 0)
+    nv = cmd_nvim.query(shutil.which("nvim"), env=env)  # any Neovim: an old one is reported as such
+    assert nv is not None
     nvimtest._check_isolated(nv, layout)  # config/data/state/cache all inside the throwaway tree
+    if nv.version < (0, 9, 0):
+        pytest.skip(f"Neovim {nv.version_text}: vim.secure (the trust database) came with 0.9")
     file, real, digest = _lazy_lua(tmp_path)
     assert cmd_nvim.trust_status(nv.trust_db, file).state == "untrusted"
     data = cmd_nvim.trust_file(nv.exe, file, env=env, cwd=file.parent)  # path form on 0.12+, buffer before
@@ -363,6 +387,34 @@ def test_real_nvim_query_and_trust(tmp_path: Path) -> None:
     status = cmd_nvim.trust_status(nv.trust_db, file)
     assert (status.state, status.sha256, status.path) == ("trusted", digest, real)
     assert not (file.parent / "nvim.log").exists() and not Path("nvim.log").exists()
+
+
+# What older Neovims answer, on the Neovim at hand: before 0.10 vim.version() is a plain table
+# (tostring gives "table: 0x..."), before 0.8 stdpath('state') is an error (E6100).
+OLD_API = {
+    "0.9.5": "vim.version = function() return { major = 0, minor = 9, patch = 5, api_level = 11, api_prerelease = false } end",
+    "0.7.2": "vim.version = function() return { major = 0, minor = 7, patch = 2, api_level = 9, api_prerelease = false } end; "
+    "local sp = vim.fn.stdpath; vim.fn.stdpath = function(what) if what == 'state' then error('E6100: state is not a valid stdpath') end return sp(what) end",
+}
+
+
+@pytest.mark.skipif(shutil.which("nvim") is None, reason="nvim not in PATH")
+@pytest.mark.parametrize("old", sorted(OLD_API))
+def test_query_reports_an_old_neovim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old: str) -> None:
+    """An old distro Neovim on PATH (Ubuntu 24.04: 0.9.5, Debian 12: 0.7.2) must be reported as too
+    old by nvim doctor and skipped by selftest --nvim, not break the query (exit 3)."""
+    monkeypatch.setattr(cmd_nvim, "QUERY_LUA", "lua " + OLD_API[old] + "; " + cmd_nvim.QUERY_LUA.removeprefix("lua "))
+    layout = nvimtest.Layout(tmp_path / "w")
+    nv = cmd_nvim.query(shutil.which("nvim"), env=nvimtest.nvim_env(layout, dict(os.environ)))
+    assert nv is not None and nv.version_text == old and nv.version < cmd_nvim.MIN_LAZYVIM
+    nvimtest._check_isolated(nv, layout)
+    if old == "0.7.2":
+        assert nv.state == nv.data, "no state dir before 0.8: the data dir held what it holds now"
+
+
+def test_query_lua_needs_no_new_api() -> None:
+    assert "tostring(vim.version())" not in cmd_nvim.QUERY_LUA and "pcall(vim.fn.stdpath, 'state')" in cmd_nvim.QUERY_LUA
+    assert '"' not in cmd_nvim.QUERY_LUA, "the -c snippet crosses the Windows command line"
 
 
 # --- timeouts kill the whole tree -----------------------------------------------------------------
@@ -434,30 +486,118 @@ def _nvim_in(tmp_path: Path) -> cmd_nvim.Nvim:
     return nv
 
 
-def _record_runs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+ALL_INSTALLED = '{"lazy": true, "missing": [], "failed": []}'
+
+
+def _record_runs(monkeypatch: pytest.MonkeyPatch, report: str | None = ALL_INSTALLED) -> list[dict[str, object]]:
+    """Fake Neovim: records the run and writes `report` where the plugin check would (None: nothing)."""
     runs: list[dict[str, object]] = []
 
     def run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
         runs.append({"argv": list(argv), **kw})
+        env = kw.get("env")
+        if report is not None and isinstance(env, dict) and env.get("PT_NVIM_RESULT"):
+            Path(env["PT_NVIM_RESULT"]).write_text(report, encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(cmd_nvim.subprocess, "run", run)
     return runs
 
 
-def test_nvim_sync_installs_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _trusted_nvim(tmp_path: Path) -> cmd_nvim.Nvim:
     nv = _nvim_in(tmp_path)
     nv.state.mkdir()
     lazy_lua = cmd_nvim.LAZY_LUA
     nv.trust_db.write_text(f"{hashlib.sha256(lazy_lua.read_bytes()).hexdigest()} {os.path.realpath(lazy_lua)}\n", encoding="utf-8")
+    return nv
+
+
+def test_nvim_sync_installs_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    nv = _trusted_nvim(tmp_path)
     runs = _record_runs(monkeypatch)
     assert cmd_nvim.cmd_sync(nv) == 0
     assert len(runs) == 1
     argv = [str(a) for a in runs[0]["argv"]]  # type: ignore[attr-defined]
     assert "+Lazy! install" in argv and not [a for a in argv if any(w in a for w in ("sync", "update", "clean", "restore"))]
+    assert argv.index("+Lazy! install") < argv.index("+lua dofile(vim.env.PT_NVIM_CHECK)") < argv.index("+qa")
+    assert not [a for a in argv if '"' in a], "the arguments cross the Windows command line"
     assert runs[0]["cwd"] == cmd_nvim.ROOT
     env = runs[0]["env"]
     assert isinstance(env, dict) and env.get("NVIM_LOG_FILE"), "without NVIM_LOG_FILE Neovim may drop nvim.log in the project"
+
+
+@pytest.mark.parametrize(
+    ("report", "code", "message"),
+    [
+        ('{"lazy": true, "missing": ["overseer.nvim", "neotest"], "failed": []}', 1, "could not install: neotest, overseer.nvim"),
+        ('{"lazy": false, "missing": [], "failed": []}', 3, "lazy.nvim did not start"),
+        (None, 1, "did not say which plugins are installed"),
+        ("not json", 1, "did not say which plugins are installed"),
+    ],
+)
+def test_nvim_sync_fails_when_a_plugin_is_not_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, report: str | None, code: int, message: str) -> None:
+    """Headless Neovim exits 0 after a failed clone ("Too many rounds of missing plugins") or
+    without lazy.nvim at all (E492: Not an editor command: Lazy! install): the check after
+    `Lazy! install` decides, never the exit code alone."""
+    nv = _trusted_nvim(tmp_path)
+    _record_runs(monkeypatch, report)
+    with pytest.raises(DeployError, match=re.escape(message)) as e:
+        cmd_nvim.cmd_sync(nv)
+    assert e.value.code == code
+
+
+def test_nvim_sync_warns_about_plugins_with_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    nv = _trusted_nvim(tmp_path)
+    _record_runs(monkeypatch, '{"lazy": true, "missing": {}, "failed": ["nvim-treesitter"]}')
+    assert cmd_nvim.cmd_sync(nv) == 0
+    err = capsys.readouterr().err
+    assert "warning: lazy.nvim reported errors for: nvim-treesitter" in err and "plugins installed" in err
+
+
+FAKE_LAZY = r"""
+-- a stand-in for lazy.nvim: its plugin table, has_errors() and the :Lazy command
+package.preload["lazy.core.config"] = function()
+  return { plugins = {
+    good = { _ = { installed = true } },
+    flaky = { _ = { installed = true } },
+    PT_BROKEN = { _ = { installed = false } },
+  } }
+end
+package.preload["lazy.core.plugin"] = function()
+  return { has_errors = function(p) return p == require("lazy.core.config").plugins.flaky end }
+end
+if vim.env.PT_WITH_LAZY == "1" then
+  vim.api.nvim_create_user_command("Lazy", function() end, { bang = true, nargs = "*" })
+end
+"""
+
+
+@pytest.mark.skipif(shutil.which("nvim") is None, reason="nvim not in PATH")
+@pytest.mark.parametrize("case", ["broken", "all installed", "no lazy.nvim"])
+def test_real_nvim_sync_checks_the_plugins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], case: str) -> None:
+    """The plugin check runs in a real Neovim after `Lazy! install` (a fake lazy.nvim config)."""
+    for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.setenv(var, str(tmp_path / var.lower()))
+    monkeypatch.delenv("NVIM_APPNAME", raising=False)
+    monkeypatch.setenv("PT_WITH_LAZY", "0" if case == "no lazy.nvim" else "1")
+    init = tmp_path / "xdg_config_home" / "nvim" / "init.lua"
+    init.parent.mkdir(parents=True)
+    init.write_text(FAKE_LAZY.replace('PT_BROKEN = { _ = { installed = false } },', "" if case == "all installed" else "broken = {},"), encoding="utf-8")
+    exe = shutil.which("nvim")
+    assert exe
+    nv = cmd_nvim.Nvim(exe, (0, 12, 5), init.parent, tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    (nv.data / "lazy" / "LazyVim").mkdir(parents=True)
+    monkeypatch.setattr(cmd_nvim, "trust_status", lambda db, f: cmd_nvim.Trust("trusted", str(f), "x", "x"))
+    if case == "all installed":
+        assert cmd_nvim.cmd_sync(nv) == 0
+        assert "lazy.nvim reported errors for: flaky" in capsys.readouterr().err
+        return
+    with pytest.raises(DeployError) as e:
+        cmd_nvim.cmd_sync(nv)
+    if case == "broken":
+        assert e.value.code == 1 and "could not install: broken" in str(e.value) and "good" not in str(e.value)
+    else:
+        assert e.value.code == 3 and "lazy.nvim did not start" in str(e.value)
 
 
 @pytest.mark.parametrize("state", ["untrusted", "changed", "denied"])
@@ -766,6 +906,81 @@ def test_run_preset_fails_when_the_extras_miss_their_pins(tmp_path: Path, monkey
     base, row = _preset_run(tmp_path, monkeypatch, stuck={"overseer.nvim"})
     assert not row.ok and row.smoke is None, row
     assert "overseer.nvim at ffffffffffff, pinned bbbbbbbbbbbb" in row.error and "lazy-install.log" in row.error
+
+
+# --- nvim doctor ------------------------------------------------------------------------------------
+
+EVERY_TOOL = {name: f"/usr/bin/{name}" for name in ("git", "curl", "tar", "rg", "fd", "tree-sitter", "python3", "python", "node")}
+
+
+def _doctor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    tools: dict[str, str] = EVERY_TOOL,
+    cc: str | None = "/usr/bin/gcc",
+    lazyvim_json: str | None = None,
+) -> tuple[int, str]:
+    """nvim doctor with Neovim, the tools, the trust and the project's .venv faked."""
+    from types import SimpleNamespace
+
+    from runner import config
+    from runner.config import Config
+
+    nv = cmd_nvim.Nvim("nvim", (0, 12, 5), tmp_path / "c", tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    (nv.config / "lua" / "config").mkdir(parents=True)
+    (nv.config / "lua" / "config" / "lazy.lua").write_text("", encoding="utf-8")
+    if lazyvim_json is None:
+        lazyvim_json = json.dumps({"extras": list(cmd_nvim.EXTRAS), "version": 8})
+    if lazyvim_json:
+        nv.lazyvim_json.write_text(lazyvim_json, encoding="utf-8")
+    monkeypatch.setattr(cmd_nvim, "find_nvim", lambda: "nvim")
+    monkeypatch.setattr(cmd_nvim, "query", lambda exe=None, env=None: nv)
+    monkeypatch.setattr(cmd_nvim, "which", lambda name: tools.get(name))
+    monkeypatch.setattr(cmd_nvim, "c_compiler", lambda: cc)
+    monkeypatch.setattr(cmd_nvim, "trust_status", lambda db, f: cmd_nvim.Trust("trusted", str(f), "x", "x"))
+    monkeypatch.setattr(cmd_nvim.proc, "find_uv", lambda: "/opt/uv/bin/uv")
+    monkeypatch.setattr(cmd_nvim.envs, "tool_env", lambda cfg: SimpleNamespace(dir=tmp_path))
+    monkeypatch.setattr(cmd_nvim, "_venv_exe", lambda env_dir, name: Path(__file__))
+    monkeypatch.setattr(cmd_nvim, "_has_package", lambda env_dir, package: True)
+    cfg: Config = config._build(Config, {}, "")
+    code = cmd_nvim.cmd_doctor(cfg)
+    return code, capsys.readouterr().err
+
+
+def test_nvim_doctor_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out = _doctor(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "Neovim integration ready" in out, out
+    # the plugin runs ./deploy (and basedpyright: uv tool run) with the uv it finds itself, never uvx
+    assert "[ok] uv: /opt/uv/bin/uv" in out and "uvx" not in out, out
+
+
+def test_nvim_doctor_needs_fd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """venv-selector (LazyVim's lang.python extra, which .lazy.lua imports) raises an error on the
+    first Python buffer of every session without fd: not an optional "faster pickers" tool."""
+    tools = {k: v for k, v in EVERY_TOOL.items() if k != "fd"}
+    code, out = _doctor(tmp_path, monkeypatch, capsys, tools=tools)
+    assert code == 1 and "[XX] fd not found" in out and "venv-selector" in out, out
+    assert re.search(r"install.*fd", out), "an install hint"
+    code, out = _doctor(tmp_path / "debian", monkeypatch, capsys, tools={**tools, "fdfind": "/usr/bin/fdfind"})
+    assert code == 0 and "[ok] fd: /usr/bin/fdfind" in out, out
+
+
+def test_nvim_doctor_needs_a_c_compiler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """LazyVim lists a C compiler among its requirements: nvim-treesitter builds its parsers."""
+    code, out = _doctor(tmp_path, monkeypatch, capsys, cc=None)
+    assert code == 1 and "[XX] no C compiler" in out and "nvim-treesitter" in out, out
+
+
+def test_nvim_doctor_tells_an_invalid_lazyvim_json_from_a_missing_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out = _doctor(tmp_path, monkeypatch, capsys, lazyvim_json='{ "extras": [ "a", ] }')
+    assert "cannot read it as JSON" in out and "not found" not in out, out
+    assert code == 0, "a note: LazyVim ignores it, .lazy.lua imports the extras anyway"
+    code, out = _doctor(tmp_path / "fresh", monkeypatch, capsys, lazyvim_json="")
+    assert "lazyvim.json not found" in out and code == 0, out
+    with pytest.raises(DeployError, match="cannot read it as JSON"):
+        cmd_nvim.missing_extras(tmp_path / "c" / "lazyvim.json")
 
 
 def test_c_compiler_skips_the_macos_shims_without_developer_tools(monkeypatch: pytest.MonkeyPatch) -> None:

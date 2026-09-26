@@ -2205,12 +2205,16 @@ Files:
 - `.pytemplate/editor.json` (`editors/nvim.editor_data`, schema 1): ASCII data only, relative
   paths only, no comments. Keys: `schema`, `generated`, `name`, `pkg`, `preset`, `gui`,
   `min_python`, `pypy_enabled`, `backend{active, supported}`, `typing{profile, editor, mypy,
-  mypy_severity, python_version, basedpyright}` (`basedpyright` = `cmd_dev.BASEDPYRIGHT`, the
-  pin of the uvx language server), `envs{tools, cpython, mypyc, pypy}` (without the `-wsl`
+  mypy_severity, python_version, basedpyright, basedpyright_node, task_severity}` (`basedpyright`
+  = `cmd_dev.BASEDPYRIGHT` and `basedpyright_node` = `cmd_dev.BASEDPYRIGHT_NODE`, the pins of the
+  uvx language server; `task_severity` = `editors.nvim.task_severity`, per supported backend
+  `{mypy, ruff}` = `error`|`warning` from its profile's `blocking` and ruff `exit_zero`, the
+  rule of `vscode.problem_matchers`), `envs{tools, cpython, mypyc, pypy}` (without the `-wsl`
   suffix, which the plugin adds itself),
   `mypyc_stage`, `tasks[{name, help, background}]`, `commands[{name, usage, summary, group}]`
   (from `cli.COMMANDS`), `build{methods, default}`. The Lua side (`init.sanitize`) validates
-  every value (whitelists, patterns; `basedpyright` only as `basedpyright==X.Y.Z`) and never
+  every value (whitelists, patterns; `basedpyright` only as `basedpyright==X.Y.Z`,
+  `basedpyright_node` only as `nodejs-wheel-binaries==X.Y.Z`) and never
   runs a program named in it. `test_sanitize_keeps_every_generated_value` feeds it the
   editor.json of every test variant and of the three presets: nothing may change (a whitelist
   missing a new profile, backend or command would silently fall back to a default), and
@@ -2251,9 +2255,11 @@ LazyVim wiring:
 - `vim.g.lazyvim_python_lsp` set from `.lazy.lua` is too late when `lang.python` is already
   enabled (read at first import): servers are switched by setting `opts.servers.<x>.enabled`
   in an lspconfig `opts` function (runs last). basedpyright by default (no Node.js; `.venv`'s
-  `basedpyright-langserver`, else `uv tool run --from <typing.basedpyright> basedpyright-langserver
-  --stdio` with the version `./deploy check` pins (an unpinned request re-resolves to the
-  newest release whenever uv's index cache expires), else Mason); pyright comes from Mason and
+  `basedpyright-langserver`, else `uv tool run --from <typing.basedpyright> --with
+  <typing.basedpyright_node> basedpyright-langserver --stdio` (`integrations.lsp_cmd`) with the
+  versions `./deploy check` pins, its Node.js wheel included (an unpinned request re-resolves
+  to the newest release whenever uv's index cache expires; a new Node can raise the
+  glibc/macOS floor), else Mason); pyright comes from Mason and
   needs Node.js. Pylance exists only in VS
   Code. pyright/basedpyright find `.venv` through `pyrightconfig.json` `venvPath`/`venv`, so
   venv-selector's automatic activation is turned off.
@@ -2291,21 +2297,42 @@ LazyVim wiring:
   the mode or `editor.json` (`mode`, `setup`, `apply` (the same `tasks.META` entry as
   `setup`), `sync`, `lock`, `add`, `remove`, `render`, `rename`) get the `pytemplate.refresh`
   component (re-read `editor.json`, LSP `didChangeConfiguration`, rebuild the mypy linter);
-  `mode`, `setup`, `apply`, `lock` and `rename` also open their output. Without overseer, tasks
-  run in a terminal split.
+  `mode`, `setup`, `apply`, `lock` and `rename` also open their output. Every task carries
+  `unique` (`tasks.components`): `run` and background tasks with `replace = true` (a new run
+  restarts them), the rest with `soft = true`, which disposes the FINISHED previous run of the
+  same command (same name) and never stops a running one. overseer keys a task's diagnostics
+  by its name and keeps a finished task until `on_complete_dispose` (never for a run nobody
+  opened): without it the problems of a fixed file stayed after a clean re-run
+  (`test_every_task_replaces_its_previous_run`). Without overseer, tasks run in a terminal
+  split.
 - Output parser `tasks.parse_line` (overseer `on_output_parse` -> diagnostics + quickfix):
-  strips ANSI, honours the `error: `/`warning: ` prefixes, reads basedpyright
+  strips ANSI (CSI, and OSC ended by BEL or by ST `ESC \`: ruff links its rule codes with OSC 8
+  in terminals it recognises, `VTE_VERSION`, `WT_SESSION`, iTerm..., and overseer's own cleanup
+  keeps them; `test_parser_strips_every_terminal_escape`), honours the `error: `/`warning: `
+  prefixes, types mypy's `error:` lines and ruff's findings by the task's typing profiles like
+  the VS Code matchers (`tasks.severity`: the strictest `typing.task_severity` of the backends
+  the task checks, `tasks.task_backends`: its BACKEND argument, `all`, mypyc for
+  `compile`/`report`, every supported one for a `[tasks]` entry, else the active one; E/W
+  without editor.json data; `test_task_diagnostics_follow_the_typing_profile`), reads basedpyright
   `  path:l:c - sev: msg` and `path:l[:c]: [sev: ]msg` (mypy, ruff concise, pytest crash
   lines); skips notes, `site-packages` and `in <func>` frames. Relative paths resolve against
   the root; mypyc prints them relative to its stage (a copy of `src/`: `<pkg>/core/x.py`), so
   a relative path that exists under `src/` but not under the root lands on `src/` (like the VS
-  Code MYPYC matcher).
+  Code MYPYC matcher). A path INTO the stage (`.build[/wsl]/mypyc-{dev,release}/stage/X`,
+  relative or absolute: pytest under `test mypyc` imports the stage) lands on `src/X` when that
+  file exists (`tasks.absolute`, like the VS Code stage matchers): an edit made in the stage
+  copy is overwritten by the next sync (`test_parser_maps_mypyc_stage_paths_to_src`).
 - Keymaps under `<leader>j` (which-key group "deploy"; `tasks.KEYS`): `j` pick, `r`/`R` run /
   run on a backend with args, `t`/`T` test / all, `c`/`C` check / all, `b`/`B` build / on a
   backend, `l` lint --fix, `f` fmt, `m` switch backend, `k` `[tasks]` picker, `d` `dev` task,
   `p` mypyc report, `s` sync all, `S` setup, `D` doctor, `w` task list, `x` stop deploy tasks.
-  `:Deploy ARGS` (completion; no args = help; quotes group words through `tasks.split_args`,
-  like the `R`/`B` prompts: `:Deploy run cpython "a b"` passes `a b` as one argument).
+  `:Deploy ARGS` (no args = help; quotes group words through `tasks.split_args`, like the
+  `R`/`B` prompts: `:Deploy run cpython "a b"` passes `a b` as one argument). Completion
+  (`tasks.complete`): command and `[tasks]` names, then `tasks.argument_words` from the
+  command's editor.json usage and `tasks.META`: the backends (+ `all`) as the first argument
+  of a BACKEND command, a first choice group (`nvim [doctor|trust|...]`), the flags anywhere
+  (`--method exe|pyz...` as `--method=exe`...), the names after `help`, nothing after a
+  `[tasks]` entry (`test_deploy_completion_follows_the_command`).
   `<leader>j` was chosen because no LazyVim core or extra mapping uses it.
 
 `./deploy nvim [doctor|trust|extras|bootstrap|sync]` (`cmd_nvim.cmd_nvim`):
@@ -2313,13 +2340,28 @@ LazyVim wiring:
   `nvim --headless --clean -n -i NONE -c "lua ..." -c qa!`, which prints one `PTNVIM{json}`
   line; the `-c` snippets are one line without double quotes because they cross the Windows
   command line; respects `NVIM_APPNAME` and `XDG_*`). On Windows `XDG_CONFIG_HOME=X` gives
-  `X\nvim` and `XDG_DATA_HOME`/`XDG_STATE_HOME=X` give `X\nvim-data`.
+  `X\nvim` and `XDG_DATA_HOME`/`XDG_STATE_HOME=X` give `X\nvim-data`. `cmd_nvim.QUERY_LUA`
+  works on ANY Neovim, so an old distro one (Ubuntu 24.04: 0.9.5, Debian 12: 0.7.2) is reported
+  as too old by `doctor` and skipped by `selftest --nvim`: the version comes from
+  `vim.version()`'s fields (a plain table before 0.10: `tostring` gave `table: 0x...`, exit 3)
+  and `stdpath('state')` runs under `pcall` (an error before 0.8: the data dir then)
+  (`test_query_reports_an_old_neovim`, which fakes the old API on the Neovim at hand; the real
+  trust test skips below 0.9, which brought `vim.secure`).
 - `doctor` (default; exit 1 on real problems): Neovim >= 0.11.2 (`MIN_LAZYVIM`), LazyVim
   installed, no `local_spec = false`, the trust of `.lazy.lua`, missing extras in
-  `lazyvim.json`, tools (git, curl, tar required; rg, fd, tree-sitter, python, node, uvx, a C
-  compiler optional), and ruff, mypy, debugpy in `.venv` (basedpyright optional).
+  `lazyvim.json` (an unreadable one is a note naming the JSON error: LazyVim skips it without a
+  word), tools (`cmd_nvim.TOOLS`; required: git, curl, tar, fd or fdfind (venv-selector, from
+  the `lang.python` extra `.lazy.lua` imports, raises an error on the first Python buffer
+  without it) and a C compiler (nvim-treesitter builds its parsers; LazyVim lists it among its
+  requirements), with install hints; optional: rg, tree-sitter, python, node), the uv the
+  runner runs on (the plugin runs `./deploy` and the uvx basedpyright with the uv it finds in
+  the same places, never `uvx`), and ruff, mypy, debugpy in `.venv` (basedpyright optional)
+  (`test_nvim_doctor_needs_fd`, `test_nvim_doctor_needs_a_c_compiler`).
 - Trust DB `<state>/trust`: lines `<sha256|!> <path>` (CRLF on Windows), path = real path
-  (backslashes on Windows; compared case-insensitively), hash over raw bytes. `trust` calls
+  (backslashes on Windows; `cmd_nvim.same_path`: case-insensitive on Windows, case- and
+  Unicode-form-insensitive on macOS, where Neovim's key comes from realpath(3) with the on-disk
+  spelling while `os.path.realpath` keeps the typed one, e.g. after `cd ~/projects/mygame` for
+  `MyGame`; an exact entry wins), hash over raw bytes. `trust` calls
   `vim.secure.trust({action = "allow", path = ...})` on >= 0.12 (`bufnr` form on 0.11), with
   the file in `$PT_TRUST_FILE`, after creating the state dir (the DB is opened with
   `io.open(..., "w")`), then re-reads the DB to confirm; already trusted -> nothing. Neovim
@@ -2329,11 +2371,16 @@ LazyVim wiring:
   `.bak`, in LazyVim's own format; it refuses (exit 3) when there is no config or no
   `lazyvim.json` yet (start Neovim once). `bootstrap` clones the LazyVim starter (its newest
   commit, as LazyVim's own install steps do) and deletes its `.git`, only when the config dir
-  does not exist. `sync` = `nvim --headless "+Lazy! install" +qa` with cwd = ROOT and
-  `NVIM_LOG_FILE` in a temp dir: install only (`Lazy! sync` would also update every plugin
-  of the user's config, rewriting their `lazy-lock.json`, and clean the plugins its spec does
-  not name). It refuses with exit 3 while `.lazy.lua` is not trusted (the trust prompt would
-  hang a headless run, and from any other folder the project's plugins are not in the spec).
+  does not exist. `sync` = `nvim --headless "+Lazy! install" "+lua dofile(vim.env.PT_NVIM_CHECK)"
+  +qa` with cwd = ROOT and `NVIM_LOG_FILE` in a temp dir: install only (`Lazy! sync` would also
+  update every plugin of the user's config, rewriting their `lazy-lock.json`, and clean the
+  plugins its spec does not name). It refuses with exit 3 while `.lazy.lua` is not trusted (the
+  trust prompt would hang a headless run, and from any other folder the project's plugins are
+  not in the spec). Neovim's exit code proves nothing (0 after a failed clone), so the check
+  file (`cmd_nvim.SYNC_CHECK_LUA`, written to the temp dir) asks lazy.nvim for every plugin's
+  `_.installed` and writes JSON to `$PT_NVIM_RESULT` (the terminal keeps Neovim's own output):
+  a plugin not installed or no report is exit 1, no lazy.nvim (no `:Lazy`) exit 3, a plugin
+  with task errors (`has_errors`: a failed build step) only a warning.
 - `cmd_nvim.doctor(check)` (from `./deploy doctor`): one line, silent without `nvim`, at most
   one headless call.
 - Only started inside the project: `nvim path/x.py` from elsewhere, or a later `:cd`, does not
@@ -2397,10 +2444,13 @@ short temp tree and unset `NVIM_APPNAME`.
   pinned basedpyright when the uv cache has them), `test_shells.py` (also runs the fish, pwsh
   and xonsh snippets in their shells, nu where installed), `test_vscode.py` (also real
   tool output through each task's matchers and a Node `RegExp` cross-check),
-  `test_nvim_render.py` (also loads the Lua modules in `nvim --headless --clean`: parser,
-  uv lookup, launcher fallback, sanitize round trip, the mypy linter, `tasks.META`, `:Deploy`;
-  the pinned `.lazy.lua` hash), `test_cmd_nvim.py` (`nvim` subcommands with fake Neovims,
-  the `selftest --nvim` harness: pins, base reuse, smoke parsing, tree kill), `test_fixes.py` (regression tests of the
+  `test_nvim_render.py` (also loads the Lua modules in `nvim --headless --clean`: parser (stage
+  paths, terminal escapes, the profile's severities), uv lookup, launcher fallback, sanitize
+  round trip, the mypy linter, `tasks.META`, `unique` on every task, `:Deploy` and its
+  completion; the pinned `.lazy.lua` hash), `test_cmd_nvim.py` (`nvim` subcommands with fake
+  Neovims, `nvim doctor`'s lines, `nvim sync`'s plugin check (also in a real Neovim with a fake
+  lazy.nvim), the query of an old Neovim, the `selftest --nvim` harness: pins, base reuse,
+  smoke parsing, tree kill), `test_fixes.py` (regression tests of the
   runner fixes: portable smoke with `lib/`, lazy `{python}`, the pyz `.cmd` wrapper, binary
   preset files, `compile.annotate`, `sync_tree` ns mtimes, portable launcher quoting and
   version probes, unknown arguments, `app.preset`, pinned tools, flet pyproject, wheel
@@ -2971,9 +3021,11 @@ uv:
 - **`uv run --with` and `uvx` float** (LIMITATION): an unpinned tool re-resolves to the newest
   release whenever uv's index cache expires (basedpyright's Node.js runtime too). Fix:
   `cmd_dev.BASEDPYRIGHT`, `cmd_dev.BASEDPYRIGHT_NODE`, `methods.nuitka.NUITKA`, and editor.json
-  `typing.basedpyright` for the plugin's uvx server (7, 12.2). Test:
-  `test_cli_core.py::test_tools_are_pinned_exactly`, `test_basedpyright_runs_with_every_pin`.
-  Goes: never (bump the pins deliberately).
+  `typing.basedpyright` with its `basedpyright_node` for the plugin's uvx server
+  (`integrations.lsp_cmd`: `--from` and `--with`; 7, 12.2). Test:
+  `test_cli_core.py::test_tools_are_pinned_exactly`, `test_basedpyright_runs_with_every_pin`,
+  `test_nvim_render.py::test_editor_json_is_data_without_machine_paths`,
+  `test_lua_modules_in_headless_neovim`. Goes: never (bump the pins deliberately).
 - **uv's caches follow `XDG_*`** (LIMITATION): the isolated Neovim tree moves `XDG_CACHE_HOME`
   and `XDG_DATA_HOME`, and uv then started from empty caches. Fix: `nvimtest.nvim_env` keeps
   `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`, `UV_TOOL_DIR` as uv resolved them
@@ -3411,11 +3463,15 @@ VS Code, its extensions, pyright and basedpyright:
 
 Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
 - **Neovim trusts a file by the sha256 of its bytes and its real path** (LIMITATION,
-  `vim.secure`): any byte change (CRLF, a BOM, a mode-dependent value) untrusted `.lazy.lua`.
-  Fix: `.lazy.lua` is a static copy (`editors/nvim.py`), `.gitattributes` keeps it LF, all logic
-  lives in `.pytemplate/nvim/` (12.2). Test:
+  `vim.secure`): any byte change (CRLF, a BOM, a mode-dependent value) untrusted `.lazy.lua`;
+  the path is realpath(3)'s, which on macOS has the on-disk case and Unicode form, where
+  Python's realpath keeps the typed ones (a trusted file read as untrusted, and `nvim trust`
+  failed with exit 3). Fix: `.lazy.lua` is a static copy (`editors/nvim.py`), `.gitattributes`
+  keeps it LF, all logic lives in `.pytemplate/nvim/`; `cmd_nvim.trust_status` compares the
+  paths with `cmd_nvim.same_path`, as the volume does (12.2). Test:
   `test_nvim_render.py::test_lazy_lua_is_identical_in_every_mode`,
-  `test_lazy_lua_bytes_are_pinned`, `test_gitattributes_keeps_lazy_lua_lf`. Goes: never.
+  `test_lazy_lua_bytes_are_pinned`, `test_gitattributes_keeps_lazy_lua_lf`,
+  `test_cmd_nvim.py::test_trust_macos_paths_ignore_case_and_unicode_form`. Goes: never.
 - **`vim.secure.trust`** (LIMITATION): the `path` form exists from 0.12 only (0.11 needs a
   buffer), and it writes its database with `io.open(<state>/trust, "w")`, which fails while the
   state folder does not exist. Fix: the trust snippet of `cmd_nvim.trust_file` creates the
@@ -3423,11 +3479,14 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   Goes: the buffer form once 0.12 is the minimum.
 - **Headless Neovim** (LIMITATION): a Lua error still exits 0, `confirm()` never returns,
   `VeryLazy` never fires, and an unwritable `NVIM_LOG_FILE` drops `nvim.log` into the cwd. Fix:
-  the `PTNVIM{json}` marker of `cmd_nvim.headless`; trust through the API first (`nvim sync`
-  refuses while `.lazy.lua` is untrusted); `doautocmd UIEnter` in `nvimtest`; `NVIM_LOG_FILE`
-  always set (12.2). Test: `test_cmd_nvim.py::test_parse_marker_skips_noise`,
+  the `PTNVIM{json}` marker of `cmd_nvim.headless`; `nvim sync` asks lazy.nvim afterwards which
+  plugins are installed (`cmd_nvim.SYNC_CHECK_LUA`: a failed clone exited 0 and printed "ok
+  plugins installed"); trust through the API first (`nvim sync` refuses while `.lazy.lua` is
+  untrusted); `doautocmd UIEnter` in `nvimtest`; `NVIM_LOG_FILE` always set (12.2). Test:
+  `test_cmd_nvim.py::test_parse_marker_skips_noise`,
   `test_nvim_sync_refuses_an_untrusted_lazy_lua`, `test_nvim_sync_installs_only`,
-  `test_real_nvim_query_and_trust`. Goes: never.
+  `test_nvim_sync_fails_when_a_plugin_is_not_installed`,
+  `test_real_nvim_sync_checks_the_plugins`, `test_real_nvim_query_and_trust`. Goes: never.
 - **lazy.nvim installs a fresh config in rounds and prunes the lock between them** (DEFECT):
   LazyVim's own plugins came at their newest commits despite the pinned lock. Up: cf.
   folke/lazy.nvim#1279 (its startup install ignores and rewrites the lock; closed as not
@@ -3482,8 +3541,10 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   `test_workarounds.py::test_nvim_plugin_workarounds[overseer]`. Goes: never.
 - **venv-selector (LazyVim's `lang.python`) needs `fd`** (LIMITATION, documented): without it it
   raises an error on the first Python buffer, which failed every smoke check that opens one.
-  Fix: `template-nvim.yml` installs `fd` (`fdfind` on Ubuntu) (13.2). Test: CI only (that
-  workflow's smoke run fails without it). Goes: never.
+  Fix: `template-nvim.yml` installs `fd` (`fdfind` on Ubuntu) (13.2); `./deploy nvim doctor`
+  counts a missing fd as a problem, with the install command (`cmd_nvim.TOOLS`, 12.2). Test:
+  `test_cmd_nvim.py::test_nvim_doctor_needs_fd`; CI (that workflow's smoke run fails without
+  it). Goes: never.
 - **A grandchild keeps a pipe open** (LIMITATION, every OS): git or Mason outliving a killed
   Neovim blocked the harness's wait forever. Fix: the harnesses write to files and kill the
   whole tree (`nvimtest._run_logged`, `nvimtest.kill_tree`; `e2e`, `shells` alike; 13.1). Test:
@@ -4017,8 +4078,9 @@ Code coupling (rename together):
   `cmd_dev.BASEDPYRIGHT`, the taplo pin of `test_render_core.py` and the pytest pin of
   `uv.lock`; it deselects `test_init_round_trip_through_every_preset_is_byte_identical` by
   name in the uv-floor job. `test_workflows.py` checks the workflow texts it relies on.
-- `editor.json` `typing.basedpyright` <-> `cmd_dev.BASEDPYRIGHT` (bumping the pin changes a
-  generated file: re-render); the Lua whitelists `BACKENDS`, `PROFILES`, `EDITORS`,
+- `editor.json` `typing.basedpyright` <-> `cmd_dev.BASEDPYRIGHT` and `typing.basedpyright_node`
+  <-> `cmd_dev.BASEDPYRIGHT_NODE` (bumping a pin changes a generated file: re-render); the Lua
+  whitelists `BACKENDS`, `PROFILES`, `EDITORS`,
   `SEVERITIES` in `nvim/lua/pytemplate/init.lua` <-> the runner's
   (`test_lua_whitelists_match_the_runner`); `nvimtest.LOCK` <-> `cmd_nvim.STARTER_REV` (refresh
   both from one green run, 13.1); `.lazy.lua`'s bytes <-> `test_nvim_render.LAZY_LUA_SHA256`;

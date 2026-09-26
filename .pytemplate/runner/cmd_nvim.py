@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,10 +55,15 @@ LAZY_LUA = ROOT / ".lazy.lua"
 MARK = "PTNVIM"  # prefix of the JSON line the headless snippets print
 
 # `-c` snippets: one line each, no double quotes (they go through the Windows command line).
+# QUERY_LUA must work on ANY Neovim, so an old one is reported as too old (doctor) or skipped
+# (selftest --nvim): vim.version() is a plain table before 0.10 (tostring gives "table: 0x..."),
+# and stdpath('state') is an error before 0.8 (the data dir held the shada then).
 QUERY_LUA = (
-    "lua io.stdout:write('" + MARK + "' .. vim.json.encode({"
-    "config = vim.fn.stdpath('config'), data = vim.fn.stdpath('data'), state = vim.fn.stdpath('state'), "
-    "cache = vim.fn.stdpath('cache'), version = tostring(vim.version()), progpath = vim.v.progpath"
+    "lua local v = vim.version(); local has_state, state = pcall(vim.fn.stdpath, 'state'); "
+    "io.stdout:write('" + MARK + "' .. vim.json.encode({"
+    "config = vim.fn.stdpath('config'), data = vim.fn.stdpath('data'), "
+    "state = has_state and state or vim.fn.stdpath('data'), cache = vim.fn.stdpath('cache'), "
+    "version = v.major .. '.' .. v.minor .. '.' .. v.patch, progpath = vim.v.progpath"
     "}) .. '\\n')"
 )
 # The file comes in $PT_TRUST_FILE (no quoting problems). The trust DB is written with
@@ -242,16 +248,29 @@ def read_trust_db(db: Path) -> list[tuple[str, str]]:
     return out
 
 
-def same_path(a: str, b: str, *, windows: bool = IS_WINDOWS) -> bool:
-    """Compare two real paths as the OS does (Windows: case-insensitive, / and \\ alike)."""
-    return ntpath.normcase(a) == ntpath.normcase(b) if windows else a == b
+def _fold(path: str) -> str:
+    """A macOS path as its (case- and normalization-insensitive) volume compares it."""
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", path).casefold())
 
 
-def trust_status(db: Path, file: Path, *, windows: bool = IS_WINDOWS) -> Trust:
+def same_path(a: str, b: str, *, windows: bool = IS_WINDOWS, macos: bool = IS_MACOS) -> bool:
+    """Compare two real paths as the OS does (Windows: case-insensitive, / and \\ alike; macOS:
+    case- and Unicode-form-insensitive, like its default APFS/HFS+ volumes)."""
+    if windows:
+        return ntpath.normcase(a) == ntpath.normcase(b)
+    if macos:
+        return _fold(a) == _fold(b)
+    return a == b
+
+
+def trust_status(db: Path, file: Path, *, windows: bool = IS_WINDOWS, macos: bool = IS_MACOS) -> Trust:
     """Return the trust state of `file`: its entry (by real path) compared with its sha256.
 
     Neovim keys the database by vim.uv.fs_realpath() and hashes the raw bytes, so a moved
-    project or an LF/CRLF change means "not trusted" again.
+    project or an LF/CRLF change means "not trusted" again. That key is realpath(3)'s, which on
+    macOS has the on-disk case and Unicode form, while os.path.realpath keeps the typed ones
+    (`cd ~/projects/mygame` for `MyGame`): an exact entry wins, else one that is the same path
+    for the OS.
     """
     real = os.path.realpath(file)
     if not file.is_file():
@@ -259,7 +278,7 @@ def trust_status(db: Path, file: Path, *, windows: bool = IS_WINDOWS) -> Trust:
     digest = hashlib.sha256(file.read_bytes()).hexdigest()
     entries = read_trust_db(db)
     exact = [h for h, p in entries if p == real]
-    loose = [h for h, p in entries if same_path(p, real, windows=windows)]
+    loose = [h for h, p in entries if same_path(p, real, windows=windows, macos=macos)]
     recorded = (exact or loose or [""])[-1]
     if not recorded:
         state = "untrusted"
@@ -318,13 +337,12 @@ def load_lazyvim_json(path: Path) -> dict[str, Any]:
 
 
 def missing_extras(path: Path, wanted: Sequence[str] = EXTRAS) -> list[str] | None:
-    """Return the `wanted` extras absent from lazyvim.json (None if it does not exist or is invalid)."""
+    """Return the `wanted` extras absent from lazyvim.json (None if it does not exist).
+
+    An unreadable file raises DeployError (load_lazyvim_json): it is not "missing"."""
     if not path.is_file():
         return None
-    try:
-        data = load_lazyvim_json(path)
-    except DeployError:
-        return None
+    data = load_lazyvim_json(path)
     extras = data.get("extras")
     have = set(extras) if isinstance(extras, list) else set()
     return [e for e in wanted if e not in have]
@@ -455,17 +473,28 @@ def doctor(check: Check) -> None:
     )
 
 
-TOOLS: tuple[tuple[tuple[str, ...], bool, str], ...] = (
-    # (names, required, what for)
-    (("git",), True, "lazy.nvim installs every plugin with git"),
-    (("curl",), True, "downloads (Mason packages, blink.cmp binaries)"),
-    (("tar",), True, "Mason unpacks its packages with tar"),
-    (("rg",), False, "ripgrep: live grep in the pickers"),
-    (("fd", "fdfind"), False, "fd: faster file pickers"),
-    (("tree-sitter",), False, "tree-sitter CLI builds the parsers (LazyVim installs it with Mason when missing)"),
-    (("python3", "python") if not IS_WINDOWS else ("python",), False, "Mason's PyPI packages (basedpyright, debugpy)"),
-    (("node",), False, "only for pyright from Mason (basedpyright needs no Node.js)"),
-    (("uvx",), False, "runs basedpyright when .venv has no basedpyright-langserver"),
+def _install_hint(windows: str, macos: str, linux: str) -> str:
+    return "install it: " + (windows if IS_WINDOWS else macos if IS_MACOS else linux)
+
+
+TOOLS: tuple[tuple[tuple[str, ...], bool, str, str], ...] = (
+    # (names, required, what for, how to install)
+    (("git",), True, "lazy.nvim installs every plugin with git", ""),
+    (("curl",), True, "downloads (Mason packages, blink.cmp binaries)", ""),
+    (("tar",), True, "Mason unpacks its packages with tar", ""),
+    (
+        ("fd", "fdfind"),
+        True,
+        "venv-selector (LazyVim's lang.python extra, which .lazy.lua imports) raises an error on the first Python buffer without it",
+        _install_hint("scoop install fd (or winget install sharkdp.fd)", "brew install fd", "sudo apt install fd-find (Debian, Ubuntu: fdfind), sudo dnf install fd-find, sudo pacman -S fd"),
+    ),
+    (("rg",), False, "ripgrep: live grep in the pickers", ""),
+    (("tree-sitter",), False, "tree-sitter CLI builds the parsers (LazyVim installs it with Mason when missing)", ""),
+    (("python3", "python") if not IS_WINDOWS else ("python",), False, "Mason's PyPI packages (basedpyright, debugpy)", ""),
+    (("node",), False, "only for pyright from Mason (basedpyright needs no Node.js)", ""),
+)
+CC_HINT = "nvim-treesitter compiles its parsers (LazyVim needs a C compiler): " + _install_hint(
+    "scoop install mingw, or the VS Build Tools", "xcode-select --install", "sudo apt install build-essential (or gcc/clang)"
 )
 
 
@@ -521,21 +550,25 @@ def cmd_doctor(cfg: Config) -> int:
     check(trust.state == "trusted", f".lazy.lua {trust.describe()}", "./deploy nvim trust   (or open Neovim here: (v)iew, :trust, restart)")
     if trust.state != "missing":
         ui.detail(f"         {trust.path}  sha256 {trust.sha256}  (database: {nv.trust_db})")
-    missing = missing_extras(nv.lazyvim_json)
-    if missing is None:
-        if installed:
-            check(None, f"{nv.lazyvim_json} not found", "Start Neovim once: LazyVim creates it (then ./deploy nvim extras)")
-    elif missing:
-        check(
-            None,
-            "extras not enabled in lazyvim.json: " + ", ".join(short_extra(e) for e in missing),
-            ".lazy.lua imports them anyway; ./deploy nvim extras makes it permanent and silences LazyVim's import-order warning",
-        )
+    try:
+        missing = missing_extras(nv.lazyvim_json)
+    except DeployError as e:  # LazyVim itself skips such a file without a word
+        check(None, str(e), "LazyVim ignores an unreadable lazyvim.json (the extras it lists do not load): fix it by hand")
     else:
-        check(True, "recommended extras enabled in lazyvim.json", "")
+        if missing is None:
+            if installed:
+                check(None, f"{nv.lazyvim_json} not found", "Start Neovim once: LazyVim creates it (then ./deploy nvim extras)")
+        elif missing:
+            check(
+                None,
+                "extras not enabled in lazyvim.json: " + ", ".join(short_extra(e) for e in missing),
+                ".lazy.lua imports them anyway; ./deploy nvim extras makes it permanent and silences LazyVim's import-order warning",
+            )
+        else:
+            check(True, "recommended extras enabled in lazyvim.json", "")
 
     ui.step("tools")
-    for names, required, why in TOOLS:
+    for names, required, why, hint in TOOLS:
         found = _which_any(names)
         if found and IS_WINDOWS and "windowsapps" in found.lower() and names[-1] == "python":
             check(None, f"python is the Microsoft Store alias ({found})", "Install a real Python (scoop install python, or python.org) for Mason's PyPI packages")
@@ -543,9 +576,17 @@ def cmd_doctor(cfg: Config) -> int:
         if found:
             check(True, f"{names[0]}: {found}", "")
         else:
-            check(False if required else None, f"{names[0]} not found: {why}", "")
+            check(False if required else None, f"{names[0]} not found: {why}", hint)
     cc = c_compiler()
-    check(cc is not None, f"C compiler: {cc}" if cc else "no C compiler (CC, gcc, cc, clang or MSVC)", "nvim-treesitter compiles its parsers (scoop install mingw, or VS Build Tools)")
+    check(cc is not None, f"C compiler: {cc}" if cc else "no C compiler (CC, gcc, cc, clang or MSVC)", CC_HINT)
+    try:
+        # the one the runner runs on; the plugin searches the same places (init.uv_candidates)
+        uv = proc.find_uv()
+    except DeployError:
+        check(None, "uv not found", "")
+    else:
+        check(True, f"uv: {uv}", "")
+        ui.detail("         the plugin runs ./deploy with it, and basedpyright (uv tool run) when .venv has none")
 
     ui.step("project")
     venv = envs.tool_env(cfg).dir
@@ -648,18 +689,73 @@ def cmd_sync(nv: Nvim) -> int:
         # Neovim would ask (confirm()), which never returns headless; and from another folder the
         # project's plugins are not in the spec, so there would be nothing to install.
         raise DeployError(f".lazy.lua is {trust.describe()}: ./deploy nvim trust first, then ./deploy nvim sync", 3)
-    argv = [nv.exe, "--headless", "+Lazy! install", "+qa"]
+    # Headless Neovim exits 0 after a Lua error (a clone that failed: "Too many rounds of missing
+    # plugins"; no lazy.nvim: "E492: Not an editor command"), so lazy.nvim itself is asked
+    # afterwards which plugins are installed (SYNC_CHECK_LUA, run from a file: short argv).
+    argv = [nv.exe, "--headless", "+Lazy! install", "+lua dofile(vim.env.PT_NVIM_CHECK)", "+qa"]
     ui.command(proc.show(argv))
     if proc.DRY_RUN:
         return 0
     with tempfile.TemporaryDirectory(prefix="pt-nvim-", ignore_cleanup_errors=True) as tmp:
         env = proc.base_env()
         env.setdefault("NVIM_LOG_FILE", str(Path(tmp) / "nvim.log"))  # else it may land in ROOT
+        check_lua, result = Path(tmp) / "check.lua", Path(tmp) / "plugins.json"
+        check_lua.write_text(SYNC_CHECK_LUA, encoding="utf-8", newline="\n")
+        env.update(PT_NVIM_CHECK=str(check_lua), PT_NVIM_RESULT=str(result))
         code = subprocess.run(argv, cwd=ROOT, env=env, stdin=subprocess.DEVNULL, check=False).returncode
+        report = _read_report(result)
     if code != 0:
         raise proc.CommandFailed(argv, code)
+    if report is None:
+        raise DeployError("Neovim did not say which plugins are installed (see its messages above): run ./deploy nvim sync again", 1)
+    if report.get("lazy") is not True:
+        raise DeployError("lazy.nvim did not start (no :Lazy command; see the messages above): ./deploy nvim doctor", 3)
+    missing, failed = _names(report.get("missing")), _names(report.get("failed"))
+    if missing:
+        raise DeployError(
+            f"lazy.nvim could not install: {', '.join(missing)} (see the messages above: no network, a proxy?). "
+            "Run ./deploy nvim sync again, or start Neovim in the project",
+            1,
+        )
+    if failed:
+        ui.warn(f"lazy.nvim reported errors for: {', '.join(failed)} (see the messages above, or :Lazy)")
     ui.ok("plugins installed (your other plugins were neither updated nor removed)")
     return 0
+
+
+# Run by `nvim sync` after `Lazy! install` (which waits): lazy.nvim's own view of every plugin
+# of the spec, written as JSON to $PT_NVIM_RESULT (the user's terminal keeps Neovim's output).
+SYNC_CHECK_LUA = """\
+local r = { lazy = false, missing = {}, failed = {} }
+local ok, cfg = pcall(require, "lazy.core.config")
+if ok and type(cfg) == "table" and type(cfg.plugins) == "table" and vim.fn.exists(":Lazy") == 2 then
+  r.lazy = true
+  local okp, plugin = pcall(require, "lazy.core.plugin")
+  for name, p in pairs(cfg.plugins) do
+    if not (type(p) == "table" and type(p._) == "table" and p._.installed) then
+      table.insert(r.missing, name)
+    elseif okp and type(plugin) == "table" and type(plugin.has_errors) == "function" and plugin.has_errors(p) then
+      table.insert(r.failed, name)
+    end
+  end
+end
+local f = assert(io.open(vim.env.PT_NVIM_RESULT, "w"))
+f:write(vim.json.encode(r))
+f:close()
+"""
+
+
+def _read_report(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _names(value: object) -> list[str]:
+    """Plugin names from the report (an empty Lua table may arrive as {} instead of [])."""
+    return sorted(str(v) for v in value) if isinstance(value, list) else []
 
 
 ACTIONS = ("doctor", "trust", "extras", "bootstrap", "sync")

@@ -23,7 +23,18 @@
       "note": "Information"
     },
     "python_version": null,
-    "basedpyright": "basedpyright==1.40.1"
+    "basedpyright": "basedpyright==1.40.1",
+    "basedpyright_node": "nodejs-wheel-binaries==24.19.0",
+    "task_severity": {
+      "cpython": {
+        "mypy": "warning",
+        "ruff": "error"
+      },
+      "mypyc": {
+        "mypy": "error",
+        "ruff": "error"
+      }
+    }
   },
   "envs": {
     "tools": ".venv",
