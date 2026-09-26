@@ -129,6 +129,24 @@ def test_template_root_is_the_script_skeleton_named_myapp() -> None:
     assert root_config == presets.skeleton("script", "myapp")["pytemplate.toml"]
 
 
+@template_repo
+def test_committed_generated_files_are_up_to_date() -> None:
+    cfg = config.load(set(cli.COMMANDS))
+    assert render.apply(cfg, check=True) == ([], []), "./deploy render, then commit the generated files"
+    assert not render.pyproject_outdated(cfg), "./deploy lock"
+
+
+def test_the_e2e_smoke_texts_are_in_the_skeletons() -> None:
+    """selftest --e2e looks for these texts in the output of the built apps (e2e.SMOKE,
+    e2e.COMPILED_MARK): a skeleton edit must keep them."""
+    from runner import e2e
+
+    for preset in PRESETS:
+        sources = "\n".join(d.decode("utf-8") for r, d in presets.skeleton(preset, "myapp").items() if r.endswith(".py"))
+        for text in (e2e.SMOKE.get(preset, ((), ""))[1], e2e.COMPILED_MARK.get(preset, "")):
+            assert text in sources, f"{preset}: {text!r}"
+
+
 def test_every_preset_ships_the_same_conftest() -> None:
     copies = {p: (presets.PRESETS / p / "files" / "tests" / "conftest.py").read_bytes().replace(b"\r\n", b"\n") for p in PRESETS}
     assert len(set(copies.values())) == 1, f"tests/conftest.py differs between presets: {sorted(copies)}"
@@ -732,6 +750,10 @@ def test_new_never_touches_a_folder_with_content(tmp_path: Path, monkeypatch: py
         with pytest.raises(DeployError, match="--name NAME"):
             presets.new(tmp_path / folder, "script", name)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["f", "p"]
+    monkeypatch.setattr(presets, "ROOT", tmp_path.resolve())
+    with pytest.raises(DeployError, match="inside this template"):
+        presets.new(tmp_path / "sub" / "demo", "script", "demo")
+    assert not (tmp_path / "sub").exists()
     assert (tmp_path / "p" / "keep.txt").read_text(encoding="utf-8") == "user data"
 
 
@@ -1302,6 +1324,24 @@ def test_init_pins_steer_the_resolution(tmp_path: Path, network: None) -> None:
     locked = {e["name"]: e["version"] for e in presets._lock_entries(copy_root / "uv.lock")}
     assert locked["pycparser"] == "2.22" and locked["raylib"] == pins["raylib"]
     assert "pycparser" not in (copy_root / "pyproject.toml").read_text(encoding="utf-8")
+
+
+def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, network: None) -> None:
+    """current -> every other preset -> current gives back the same bytes: every init removes
+    the previous preset's dependencies, tables and files (and the template root is exactly what
+    `init script --name myapp --force` writes)."""
+    cfg = config.load(set(cli.COMMANDS))
+    if not presets.pristine(cfg):
+        pytest.skip("src/, tests/ or typings/ are not the pristine skeleton of the current preset")
+    env = _child_env(tmp_path)
+    copy_root = tmp_path / "copy"
+    presets.copy_template(copy_root)
+    before = _snapshot(copy_root)
+    for preset in [*(p for p in PRESETS if p != cfg.app.preset), cfg.app.preset]:
+        r = _deploy(copy_root, "init", preset, "--force", cwd=copy_root, env=env)
+        assert r.returncode == 0, f"init {preset}:\n{r.stderr[-4000:]}"
+    after = _snapshot(copy_root)
+    assert sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k)) == []
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv not found")

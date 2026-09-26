@@ -775,6 +775,8 @@ def new(dest: Path, preset: str, name: str | None) -> None:
     (empty). A folder with content is refused before anything is written.
     """
     dest = dest.resolve()
+    if dest == ROOT or ROOT in dest.parents:
+        raise DeployError("new: the destination folder cannot be inside this template")
     app_name = name or name_from_folder(dest.name)
     if not APP_NAME.fullmatch(app_name):
         raise DeployError(f"'{app_name}' is not a valid app name: it may only contain {NAME_RULE}.\n  Choose one with --name NAME")
