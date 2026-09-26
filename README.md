@@ -613,6 +613,290 @@ creates `.venv-pypy`. `./deploy apply` runs the same check when `backend.support
   Silicon and Linux ARM64 a raylib project needs `./deploy mode cpython --supports
   cpython,mypyc`.
 
+## Distribution
+
+`./deploy build [BACKEND] [--method M]` runs `./deploy check` for the backend (`--no-check` skips
+it), then packages the app into `dist/`:
+
+| Method | cpython | mypyc | pypy | Result |
+|---|---|---|---|---|
+| `exe` | yes | yes | no | a PyInstaller executable (flet preset: `flet pack`, with the Flutter client inside) |
+| `portable` | yes | yes | yes | a folder with the interpreter and a launcher: the standalone build for PyPy |
+| `pyz` | yes | yes | yes | one zip file that runs on an installed CPython or PyPy |
+| `wheel` | yes | yes | yes | an installable package (`uv tool install`); mypyc: a platform wheel |
+| `nuitka` | yes | yes | no | a Nuitka executable (it compiles the dependencies to C too; slow builds) |
+| `flet` | yes | yes | no | `flet build` (flet preset only): desktop apps, Android, iOS and web |
+
+PyInstaller, Nuitka and `flet build` do not support PyPy. The default method is `exe` for
+cpython and mypyc and `portable` for pypy (`[deploy] default`; a backend left out of that table
+keeps its default). Each build replaces the previous output of the same backend and method:
+
+| Method | Output | Start it with |
+|---|---|---|
+| `exe` | `dist/<name>-<backend>-exe/` | `<name>` (`<name>.exe` on Windows; onedir: inside the folder `<name>/`; macOS with flet: an `.app`) |
+| `portable` | `dist/<name>-<backend>-portable-<key>/` (`<key>` such as `cp314-linux-x86_64`; no key with `runtime = "system"`), and a `.zip` (Windows) or `.tar.gz` of it | `<name>.cmd` (Windows) or `<name>.sh` |
+| `pyz` | `dist/<name>-<backend>-pyz/<name>.pyz` and `<name>.cmd` | `python <name>.pyz`; on Windows also `<name>.cmd` |
+| `wheel` | `dist/<name>-<backend>-wheel/<file>.whl` | `uv tool install <file>.whl`, then `<name>` |
+| `nuitka` | `dist/<name>-<backend>-nuitka/` | `<name>` (`<name>.exe` on Windows; `<name>.bin` in a standalone build on Linux or macOS when the app name has no `-`) |
+| `flet` | `dist/<name>-<backend>-flet-<target>/` | the platform's app |
+
+Arguments: `--onefile` and `--onedir` override `deploy.exe.mode` and `deploy.nuitka.mode` (exe
+and nuitka only); `--target KEY` (repeatable) adds platforms to a pyz; other flags go to the
+packager of exe (PyInstaller or `flet pack`), nuitka and flet (`flet build`), while pyz,
+portable and wheel refuse them (exit 2). Options are never abbreviated, and a bare word is an
+error with a hint ("unknown backend 'mypy': did you mean mypyc?", "did you mean --method
+pyz?"). `./deploy --dry-run build ...` checks the arguments and the configuration as a real
+build does and prints the output name (for nuitka also its options), without building.
+
+### exe
+
+PyInstaller, in UTF-8 mode (`-X utf8`, like `./deploy run`), with the bytecode of
+`deploy.optimize`, no console for GUI apps (`deploy.exe.console`), the hidden imports of the
+compiled modules (plus `deploy.exe.hidden_imports`), `src/assets/`, the icon and
+`deploy.exe.extra_args`. `onefile` is one compressed file that unpacks itself to a temporary
+folder on every start; `onedir` starts faster.
+
+The flet preset uses `flet pack` instead: PyInstaller plus Flet's Flutter client inside the
+executable (with plain PyInstaller the app would download about 40 MB at first start). Its
+onedir build is a flat folder on Windows (`<name>.exe` next to its files) and keeps
+PyInstaller's `_internal/` on Linux; on macOS `flet pack` always builds an `.app`.
+
+### portable
+
+A folder that runs the app with its own interpreter:
+
+- `runtime/`: a copy of the backend's interpreter (uv's CPython or PyPy). With `prune = true`
+  (default) it leaves out what an app does not need: headers and import libraries (`include/`,
+  `libs/`), `share/`, `Tools/`, the base's `Scripts/` (Windows) and every `bin/` entry but the interpreter (so console scripts installed
+  into uv's Python are not shipped), on Linux the shared `libpython3.X.so` when the interpreter
+  does not use it, the standard library's tests, `idlelib`, `turtledemo`, `ensurepip` and
+  `site-packages`, PyPy's debug symbols, and Tk unless `src/` or a dependency imports `tkinter`
+  (`prune = false` keeps it for an app that loads it another way).
+- `lib/`: the dependencies at the versions of `uv.lock`; they win over packages installed in a
+  Python.
+- `app/`: the app (with mypyc, the compiled modules next to their `.py`), and `boot.py`.
+- `<name>.cmd` (a Windows build) or `<name>.sh` (Linux, macOS): run it from any folder (the `.sh`
+  also through a symlink); the arguments reach the app and its exit code comes back. They run
+  the interpreter with `-s` and the `-O` level of `deploy.optimize`, and set `PYTHONUTF8=1` and
+  the `[deploy.portable] env` variables (literal values; the `.cmd` takes only ASCII values
+  without `"` or line breaks). For a GUI app the `.cmd` starts `pythonw` and returns at once. If
+  an unzip tool dropped the executable bit, run `sh <name>.sh`.
+
+A bundled folder runs only on the OS and CPU it was built on (the key in its name): build it on
+each OS, or use a pyz. The build precompiles the standard library, `lib/` and `app/`, so a
+read-only install starts fast, and it starts the copied interpreter before it reports success
+(for mypyc also the compiled modules). With `archive = true` (default) a `.zip` (Windows) or
+`.tar.gz` (Linux, macOS) of the folder is written next to it.
+
+`runtime = "system"` writes a folder without an interpreter (`dist/<name>-<backend>-portable/`,
+with both launchers). The launcher runs each candidate (`py -X.Y`, `python3`, `python` on
+Windows; `pythonX.Y`, `python3`, `python` elsewhere; `pypy3`, `pypy` for PyPy) and uses the first
+that is at least the project's minimum Python. None: it prints `<name>: needs Python X.Y or newer
+in PATH` and exits with 9009 (`.cmd`) or 127 (`.sh`). With native dependencies such a folder only works on the
+OS it was built on (the build warns). On Windows with the Python install manager and no Python at
+all, the first start silently downloads one (the install manager's default); set
+`PYTHON_MANAGER_AUTOMATIC_INSTALL=false` or run `py install 3.X` to control that.
+
+### pyz
+
+One zip file with the app as `.py`, the dependencies, and, for each platform, the binaries (the
+mypyc extensions of the machine that built it, and native dependencies). Python cannot import
+`.pyd`/`.so` files from a zip, so the first start extracts it to a cache: `%LOCALAPPDATA%\<name>\pyz`
+(Windows), `~/Library/Caches/<name>/pyz` (macOS) or `$XDG_CACHE_HOME/<name>/pyz`
+(`~/.cache/<name>/pyz`). It keeps the three most recently started builds and any started in the
+last day; deleting the folder is always safe. Without a usable cache (a read-only home) it
+extracts into a private temporary folder for that run.
+
+- It runs on a CPython or PyPy at or above the project's minimum Python (`python.cpython`, 3.14
+  by default; 3.11 when PyPy is supported); an older one gets `<name>: needs Python X.Y or newer`.
+  On the maintainer's machine, a 1.7 MB pyz of a project with PyPy supported used the compiled
+  core on CPython 3.14 and ran the `.py` on PyPy and on CPython 3.13.
+- A build is "pure" when every target got the whole locked set of dependencies and none of them
+  is native: it then runs on any OS. Otherwise it carries the dependencies of each target and
+  prints `runs on: <keys>`. `[deploy.pyz] targets` (or `--target`) adds platforms, such as
+  `"cp314-linux-x86_64"`: the locked CPython minor on any OS and CPU. PyPy targets come only from
+  a PyPy build on that platform.
+- mypyc compiles only for the machine it runs on. The generated CI builds a pyz on Windows,
+  Linux and macOS and merges them: `./deploy pyz-merge A.pyz B.pyz... --out all.pyz` takes parts
+  of one build (the same app, minimum Python, locked dependencies and code), keeps every
+  platform's binaries, and also writes `all.cmd` next to it.
+- On Linux the dependencies of pyz and portable builds target glibc 2.28 (x86_64) or 2.35
+  (aarch64) when the build machine can use those wheels (else its own, with a warning); on macOS,
+  macOS 13 or newer (`MACOSX_DEPLOYMENT_TARGET` changes it).
+- On Windows, `<name>.cmd` looks for a Python or PyPy that meets the minimum (`py -X.Y`,
+  `python3`, `python`, `pypy3`) and runs the pyz with it (`pythonw` for a GUI app).
+
+### wheel
+
+A package for `uv tool install` or pip that installs the command `<name>` (a GUI script when
+`app.gui = true`: no console window on Windows), from `deploy.wheel.entry` (default
+`<pkg>.app:main`; flet: `<pkg>.ui.app:run`). cpython and pypy build a `py3-none-any` wheel;
+mypyc builds a platform wheel with the compiled modules and their `.py`. It holds every file of
+the package and `src/assets/` (as `<pkg>/assets`). It is built offline in the locked `.venv`
+(`uv build --no-build-isolation`). Its dependencies are the version ranges of
+`[project] dependencies`, not the exact versions of `uv.lock`.
+
+### nuitka
+
+Nuitka `4.2.2` (run with `uv run --with nuitka==4.2.2`, outside `uv.lock`) compiles the app and
+the dependencies it follows to C. It needs a C compiler on every backend and, on Linux,
+`patchelf`; a build takes minutes (4 to 13 measured for the script preset, about 25 for the flet
+preset). This Nuitka supports CPython up to 3.14: a newer `python.cpython` stops with exit 3
+unless Nuitka's own `--experimental=python3.X` is passed.
+
+- `[deploy.nuitka] mode`: `standalone` (a folder) or `onefile` (one zstd-compressed file).
+- `lto`: `auto` (default), `yes` or `no`, always passed as `--lto=...`. `auto` means yes with
+  uv's CPython on Linux, Windows and macOS until more than 250 modules are compiled (the
+  standard library does not count): the script and raylib presets stay far below (a raylib app
+  compiles about 18), the flet preset compiles about 794 and gets no LTO. Measured with gcc 13 on a small script: `--lto=yes` built
+  in 9-10 s instead of 22 s, 7.21 MB instead of 7.78 MB, and ran 0-5% faster.
+- `pgo = true` adds `--pgo-c`: Nuitka runs the app once while building to profile it
+  (`pgo_args` are the app's arguments for that run). Only for console apps (`app.gui = false`)
+  without assets, not with the mypyc backend and not on macOS; each refusal exits 2 with the
+  reason. Nuitka calls it experimental; measured: 10-15% faster on pure-Python loops only.
+- `extra_args` are appended, after the `--lto` above: a later `--lto` wins. Asserts and
+  docstrings follow `deploy.optimize`.
+- Imports Nuitka cannot find (a platform-guarded `import winreg`) are skipped. Flet works: all of
+  `flet` is included (it loads its controls lazily, which Nuitka cannot follow) and the Flet
+  client archive is bundled, as `flet pack` does.
+
+### flet
+
+`flet build` (flet preset only) builds desktop apps (`host`, `windows`, `macos`, `linux`),
+Android (`apk`, `aab`), iOS (`ipa`) or `web` apps: `[deploy.flet] target`. On Windows it needs
+Developer Mode (Settings > System > For developers) and the Visual Studio C++ tools. The first
+build downloads the Flutter SDK that Flet pins (3.44.8 for Flet 1.0.1, about 3 GB in `~/flutter`)
+and a Python build (`~/.flet`). Measured on Windows 11 in September 2026: the first build took
+about 7 minutes, the next ones about 3.
+
+- It embeds exactly the `python.cpython` minor, so the mypyc extensions work in desktop apps.
+  Mobile and web apps cannot load extensions: with the mypyc backend they get the `.py`.
+- `flet build` ignores `uv.lock`: the runner pins the locked versions in its build project. It
+  reads `[tool.flet]` of `pyproject.toml`, where `org`, `company` and `copyright` are
+  placeholders that end up in the app; `[tool.flet.app] path` is always `src`.
+- `cleanup` (default `true`): `--cleanup-app --cleanup-packages`; `exclude`: app files left out;
+  `extra_args` go to `flet build`.
+
+### Binary size
+
+Measured on Windows 11 in September 2026 with the flet preset (CPython backend, Flet 1.0.1):
+
+| Build | Folder | Zip | First start |
+|---|---|---|---|
+| `exe` (`flet pack`, onedir) with Pillow | 85.5 MB | - | unpacks the Flet client: +97 MB in `~/.flet/client` |
+| `exe` with `exclude_modules = ["PIL"]` (the preset default) | 72 MB | 58 MB | +97 MB |
+| ... plus `[deploy.upx] enabled = true` | 63 MB | 57 MB | +97 MB |
+| `flet` (`flet build`) with `cleanup = false`, no UPX | 97 MB | - | nothing to unpack |
+| `flet` with the default `cleanup = true` + UPX | 78 MB | **38 MB** | nothing to unpack |
+
+Where it goes: every Flet desktop app carries the Flutter engine (`flutter_windows.dll`, 20 MB)
+and Flet's compiled Dart UI (`app.so`, 15-19 MB); Python adds its runtime (`python314.dll`,
+6 MB, plus the standard library) and the dependencies. `flet pack` (and PyInstaller with
+`flet-desktop`, which is the same thing) ships Flet's prebuilt full client, zipped (40 MB), with
+libmpv for audio and video (28 MB) and Rive, and unpacks it on the first start. `flet build`
+compiles a client with only the Flutter packages the app uses: the smallest download and the
+smallest install. The smallest Flet app: `./deploy build --method flet` (or `[deploy] default =
+{ cpython = "flet", ... }`).
+
+The script preset with mypyc, measured on Windows 11 in September 2026: the onefile `exe` is
+13.2 MB (12.3 MB with UPX); the `portable` folder 62 MB (49 MB with UPX), its zip 23 MB. A
+bundled portable build of the script preset on Linux x86_64 (CPython 3.14.7, September 2026,
+with the `bin/` and `libpython` pruning above): an 80 MB folder and a 25 MB `.tar.gz`.
+
+Size settings (each method ignores what does not apply to it):
+
+| Setting | Methods | Effect |
+|---|---|---|
+| `[deploy] exclude_modules = [...]` | exe, nuitka | Modules never bundled even if something imports them (PyInstaller also follows imports inside functions). flet preset: `["PIL"]` (-13 MB; Flet only uses Pillow for `RawImage`). `"ssl"` saves 2 MB more if the app never uses HTTPS (OpenSSL's `libcrypto` stays while `hashlib` needs it). |
+| `[deploy.upx]` `enabled`, `level`, `lzma`, `exclude` | exe (Windows), nuitka, portable, flet | UPX packs executables and libraries (below) |
+| `[deploy.exe] mode = "onefile"` | exe | One compressed file (zlib), unpacked to a temporary folder on every start |
+| `[deploy.exe] strip = true` | exe (Linux, macOS) | Strips the symbol tables of the bundled binaries |
+| `[deploy.nuitka] mode = "onefile"` | nuitka | One zstd-compressed file |
+| `[deploy.flet] cleanup` (default `true`), `exclude = [...]` | flet | `--cleanup-app --cleanup-packages` (no tests or docs in the bundle); app files left out |
+| `[deploy.portable] prune`, `archive` | portable | Unused parts of the interpreter removed; a zip or tar.gz next to the folder |
+| `[deploy] optimize = 2` | exe, nuitka, portable | `-OO` bytecode (no asserts, no docstrings); with mypyc, the compiled modules lose their asserts in every method |
+
+**UPX** (`[deploy.upx]`, off by default): `level` is `1` to `9`, `best` (default), `brute` or
+`ultra-brute` (much slower builds for a few % more); `lzma = true` packs smaller and unpacks
+slower; `exclude` adds file-name globs. The exe method uses PyInstaller's own UPX step, on
+Windows only (PyInstaller turns UPX off on other systems, where packed `.so` files crash: the
+build warns that the exe is not packed); every binary is packed before bundling, also in
+onefile mode, and PyInstaller always uses LZMA and skips Control Flow Guard DLLs. Nuitka uses its
+upx plugin (always `--best --lzma`), and the portable and flet builds are packed when they are
+done (the portable smoke test then loads the packed modules). Never packed: files over 600 MiB
+(UPX refuses anything over 768 MiB), binaries UPX rejects (Control Flow Guard), the C runtime,
+`python3*.dll`, `libpython3*` and `flutter_windows.dll` (a packed Flutter engine hangs the app at
+startup). UPX 5.2.1 is downloaded once (SHA-256 checked) to `%LOCALAPPDATA%\pytemplate\tools`
+(`$XDG_CACHE_HOME/pytemplate/tools` or `~/.cache/pytemplate/tools` elsewhere), unless `upx` is on
+PATH or `deploy.upx.path` names one (absolute, `~`, or relative to the project root; the file is
+named `upx` or `upx.exe`). macOS is not supported. The price: every start unpacks the files in
+memory (a slower start, no memory shared between processes), and some antivirus engines flag
+UPX-packed files.
+
+**Compressed binaries**: mypyc builds ordinary C extensions (`.pyd`/`.so`, without debug
+information in release builds); nothing compresses them by default, but UPX packs them to about a
+third. Always compressed: onefile executables (PyInstaller zlib, Nuitka zstd), the `.pyz`
+(deflate) and the portable archive. Nuitka with Flet does not make the app smaller (61 MB
+standalone with UPX, about the same as `flet pack`, because the Flutter client dominates) and the
+build takes about 25 minutes (Nuitka compiles all of Flet to C).
+
+## Presets
+
+The preset is chosen when a project is created (`./deploy new DIR --preset P`). Every preset has
+a `ci` task (`./deploy ci`: `check all`, then `test all`).
+
+### script (default)
+
+A console program: `src/<pkg>/core/bench.py` (compiled: a sieve and a Collatz benchmark) and
+`src/<pkg>/app.py` (the output, with rich).
+
+### raylib
+
+A 2D game with raylib's cffi binding (the `raylib` package). PyPy is the default active backend
+(its JIT also speeds up the cffi calls), and the core (`src/<pkg>/core/`) compiles with mypyc.
+
+- **Always `import raylib as rl`**, never pyray in loops: pyray wraps every call in Python (~700 ns
+  vs ~100 ns). `compile.forbid_imports = ["pyray"]` keeps it out of compiled code.
+- **Create colors and structs once** (`gfx.color(...)`, cdata). Passing tuples such as `rl.RED`
+  converts them again on every call: with tuples, PyPy loses its advantage.
+- **The upstream raylib stub declares wrong types**: 55 functions claim to return `bytes` but
+  return a pointer, and `Color.r` claims to be `bytes` but is an `int`. Interpreted, nothing
+  happens; compiled, mypyc checks the type and raises `TypeError`. The preset ships the corrected
+  stub in `typings/raylib`; regenerate it after changing the raylib version with `./deploy stubs`.
+- `./deploy bunnymark` measures FPS with 30,000 bunnies (`./deploy run mypyc --frames 900
+  --bunnies 30000` for another backend).
+- `[preset.raylib] package` picks the binding (`raylib` with GLFW, `raylib_sdl` with SDL3, or
+  `raylib_software`) and `version` its version; `./deploy apply` swaps the dependency.
+- `src/assets/` is bundled with the game (`<pkg>.resources.asset("name")` finds it in every
+  build).
+- There is no PyPy wheel for Apple Silicon or Linux ARM64 ([PyPy](#pypy)), and on Linux the game
+  needs the GL/X11 libraries ([Troubleshooting](#troubleshooting)).
+
+### flet
+
+A desktop app with Flet: Flutter draws the UI and Flet's Python side cannot be compiled, so mypyc
+speeds up the core (`src/<pkg>/core/`) and the UI (`src/<pkg>/ui/`) always runs interpreted.
+Tested with Flet 1.0.1 and mypyc 2.3.1, with Flet in a compiled module:
+
+- `async def` handlers are called without the event (TypeError);
+- generator handlers never run, and raise no error;
+- `@ft.component` fails on import;
+- `@ft.control` loses the types of its events.
+
+So compiled code has `compile.forbid_imports = ["flet", "flet_desktop", "flet_cli"]`. The pattern:
+the interpreted handler converts Flet values to simple types and calls the core in another
+process (`ProcessPoolExecutor`: compiled code does not release the GIL, so a thread would freeze
+the UI).
+
+- `./deploy dev`: hot reload (`flet run -d -r`; the editors start it without waiting).
+- `./deploy build` uses `flet pack`; `./deploy build --method flet` uses `flet build`
+  ([Distribution](#distribution)).
+- `[preset.flet] version` pins `flet`, `flet-desktop` and `flet-cli` together (`./deploy
+  apply`): when `flet` and `flet-desktop` differ, Flet pip-installs `flet-desktop` at runtime,
+  outside `uv.lock`.
+- The mypy rules are relaxed for `<pkg>.ui.*`, since Flet's API exposes `Any`.
+- `src/assets/` is served by Flet and packaged with the app.
+
 ## Shells
 
 The logic lives in `.pytemplate/deploy.py` (standard library only, run by uv). Three thin
@@ -685,137 +969,6 @@ sync with `pyproject.toml`, the mypyc rules on staged compiled modules (blocking
   add `sh ./deploy hooks run || exit $?` to your own hook.
 - It works from any git client (Git Bash, cmd, PowerShell, xonsh, VS Code, lazygit): git runs
   hooks with its own `sh`, and the hook calls the POSIX launcher, which finds uv by itself.
-
-## Distribution: `./deploy build [BACKEND] --method ...`
-
-| Method | cpython | mypyc | pypy | Result |
-|---|---|---|---|---|
-| `exe` | ✓ | ✓ | ✗ | PyInstaller executable (Flet: `flet pack`, with the Flutter client inside) |
-| `portable` | ✓ | ✓ | ✓ | Folder with the interpreter inside + `.cmd`/`.sh` launcher (the only standalone option for PyPy) |
-| `pyz` | ✓ | ✓ | ✓ | **A single file** that runs on any installed CPython or PyPy |
-| `wheel` | ✓ | ✓ | ✓ | Package for `uv tool install` (with mypyc, a platform wheel) |
-| `nuitka` | ✓ | ✓ | ✗ | Nuitka executable (it also compiles the dependencies; slow builds) |
-| `flet` | ✓ | ✓ | ✗ | `flet build`: native installers, Android/iOS/web (flet preset) |
-
-By default, `cpython` and `mypyc` use `exe` and `pypy` uses `portable` (`[deploy] default`).
-
-**The portable `.pyz`** carries your code as `.py` plus, for each platform, the binaries
-(the mypyc `.pyd` files from the OS you compiled on, and the native dependencies). The first
-time it runs, it extracts itself to a cache and uses whatever matches the interpreter running it.
-The same 1.7 MB file, tested here: CPython 3.14 uses the compiled core, PyPy runs the
-`.py` with its JIT and CPython 3.13 runs the `.py`. mypyc does not compile for other OSes: the
-CI (`.github/workflows/ci.yml`) compiles on Windows, Linux and macOS, and `./deploy pyz-merge`
-merges the three into a single `.pyz`. For native dependencies of other OSes without CI:
-`[deploy.pyz] targets = ["cp314-linux-x86_64", ...]`. On Windows, the `.cmd` next to the `.pyz`
-finds a suitable Python or PyPy for you.
-
-Other options in `pytemplate.toml` (for the size ones, see [Binary size](#binary-size)):
-`deploy.optimize` (`-O` bytecode; with mypyc it strips
-the `assert`s), `deploy.exe.mode` (`onefile`/`onedir`), `app.gui` (no console),
-`deploy.portable.runtime = "system"` (folder without an interpreter, for the target machine's
-Python), `deploy.portable.env` (variables the portable launchers set: the names must be valid
-variable names and the values strings; the Windows `.cmd` launcher only takes ASCII values with
-no `"` or line breaks).
-
-### Binary size
-
-Measured on Windows 11 with the flet preset (CPython backend, Flet 1.0.1):
-
-| Build | Folder | Zip | First start |
-|---|---|---|---|
-| `exe` (`flet pack`, onedir) with Pillow | 85.5 MB | - | unpacks the Flet client: +97 MB in `~/.flet/client` |
-| `exe` with `exclude_modules = ["PIL"]` (the preset default) | 72 MB | 58 MB | +97 MB |
-| ... plus `[deploy.upx] enabled = true` | 63 MB | 57 MB | +97 MB |
-| `flet` (`flet build`), no options | 97 MB | - | nothing to unpack |
-| `flet` with `cleanup = true` + UPX | 78 MB | **38 MB** | nothing to unpack |
-
-Where it goes: every Flet desktop app carries the Flutter engine (`flutter_windows.dll`, 20 MB)
-and Flet's compiled Dart UI (`app.so`, 15-19 MB); Python adds its runtime (`python314.dll`,
-6 MB, plus the standard library) and your dependencies. `flet pack` (and PyInstaller with
-`flet-desktop`, which is the same thing) ships Flet's prebuilt **full** client, zipped (40 MB),
-with libmpv for audio and video (28 MB) and Rive, and unpacks it on the first start. `flet build`
-compiles a client with only the Flutter packages the app uses: the smallest download and the
-smallest install. It needs Windows Developer Mode, the Visual Studio C++ tools, and it downloads
-the Flutter SDK version Flet pins (3.44.8 for Flet 1.0.1: about 3 GB in `~/flutter`, once); the
-first build takes about 7 minutes, the next ones about 3. For the smallest Flet app:
-`./deploy build --method flet` (or `[deploy] default = { cpython = "flet", ... }`).
-
-For the script preset with mypyc: the onefile `exe` is 13.2 MB (12.3 MB with UPX); the
-`portable` folder is 62 MB, 49 MB with UPX, and its zip 23 MB.
-
-Size settings (each method ignores what does not apply to it):
-
-| Setting | Methods | Effect |
-|---|---|---|
-| `[deploy] exclude_modules = [...]` | exe, nuitka | Modules never bundled even if something imports them (PyInstaller also follows imports inside functions). flet preset: `["PIL"]` (-13 MB; Flet only uses Pillow for `RawImage`). `"ssl"` saves 2 MB more if the app never uses HTTPS (OpenSSL's `libcrypto` stays while `hashlib` needs it). |
-| `[deploy.upx]` `enabled`, `level`, `lzma`, `exclude` | exe, nuitka, portable, flet | UPX packs executables and libraries (below) |
-| `[deploy.exe] mode = "onefile"` | exe | One compressed file (zlib), unpacked to a temp folder on every start |
-| `[deploy.exe] strip = true` | exe (Linux, macOS) | Strips the symbol tables of the bundled binaries |
-| `[deploy.nuitka] mode = "onefile"` | nuitka | One zstd-compressed file |
-| `[deploy.flet] cleanup = true`, `exclude = [...]` | flet | `--cleanup-app --cleanup-packages` (no tests or docs in the bundle); app files left out |
-| `[deploy.portable] prune`, `archive` | portable | Unused parts of the interpreter removed; a zip or tar.gz next to the folder |
-| `[deploy] optimize = 2` | all | `-OO` bytecode (no docstrings) |
-
-**UPX** (`[deploy.upx]`, off by default): `level` is `1`..`9`, `best` (default), `brute` or
-`ultra-brute` (much slower builds for a few % more); `lzma = true` packs smaller and unpacks
-slower; `exclude` adds file-name globs. The exe method uses PyInstaller's own UPX step (every
-binary is packed before bundling, also in onefile mode; PyInstaller always uses LZMA and skips
-Control Flow Guard DLLs), Nuitka its upx plugin (always `--best --lzma`), and the portable and
-flet builds are packed when they are done (the portable smoke test then loads the packed
-modules). Never packed: files over 600 MiB (UPX refuses anything over 768 MiB; the margin is on
-purpose), binaries UPX rejects (Control Flow Guard), the C runtime, `python3*.dll` and
-`flutter_windows.dll` (a packed Flutter engine hangs the app at startup). UPX is downloaded
-once (pinned version, SHA-256 checked) to `%LOCALAPPDATA%\pytemplate\tools`
-(`~/.cache/pytemplate/tools` on Linux) unless `upx` is on PATH or `deploy.upx.path` names one;
-macOS is not supported. The price: every start unpacks the files in memory (slower start, no
-memory shared between processes), and some antivirus engines flag UPX-packed files.
-
-**Compressed binaries**: mypyc builds ordinary C extensions (`.pyd`/`.so`, without debug
-information in release builds); nothing compresses them by default, but UPX packs them to about
-a third. What is always compressed: onefile executables (PyInstaller zlib, Nuitka zstd), the
-`.pyz` (deflate) and the portable archive. **Nuitka with Flet** works: the method includes all
-of `flet` (it loads its controls lazily, which Nuitka cannot follow) and bundles the Flet client
-archive as `flet pack` does. It does not make the app smaller (61 MB standalone with UPX, about
-the same as `flet pack`, because the Flutter client dominates) and the build takes about 25
-minutes (Nuitka compiles all of Flet to C): use it for other reasons (startup, obfuscation).
-
-## Presets
-
-### script (default)
-Console app: `src/myapp/core/bench.py` (compiled) and `src/myapp/app.py` (output with rich).
-
-### raylib
-PyPy by default (its JIT also speeds up the cffi calls), with a core that mypyc can compile.
-raylib publishes no PyPy wheel for Apple Silicon (macOS arm64): there, switch the project to
-CPython and mypyc once with `./deploy mode cpython --supports cpython,mypyc`.
-
-- **Always `import raylib as rl`**, never pyray in loops: pyray wraps every call in
-  Python (~700 ns vs ~100 ns). `compile.forbid_imports` prevents it in compiled code.
-- **Create colors and structs once** (`gfx.color(...)`, cdata). Passing tuples such as `rl.RED`
-  converts them again on every call: with tuples, PyPy loses all its advantage.
-- **The official raylib stub lies**: 55 functions claim to return `bytes` but return a
-  pointer, and `Color.r` claims to be `bytes` but is an `int`. Interpreted, nothing happens;
-  compiled, mypyc checks the type and raises `TypeError`. The preset ships `typings/raylib`,
-  the corrected stub (regenerate it after updating raylib: `./deploy stubs`).
-- `./deploy bunnymark`: measures FPS with 30,000 bunnies
-  (`./deploy run mypyc --frames 900 --bunnies 30000` for another backend).
-
-### flet
-**No need for a separate repo**: Flet is a preset (dependencies, skeleton and packaging)
-of this same template. Flutter draws the UI and Flet's Python cannot be compiled,
-so mypyc speeds up your core (`src/<pkg>/core/`) and the UI always runs interpreted.
-Tested with Flet 1.0.1 and mypyc 2.3.1, with Flet in a compiled module:
-
-- `async def` handlers are called **without the event** (TypeError);
-- generator handlers never run, and raise no error;
-- `@ft.component` fails on import;
-- `@ft.control` loses the types of its events.
-
-That is why compiled code has `forbid_imports = ["flet"]`. Pattern: the (interpreted) handler
-converts Flet values to simple types and calls the core in another process
-(`ProcessPoolExecutor`; compiled code does not release the GIL, so a thread would freeze the UI).
-Hot reload: `./deploy dev`. `./deploy build` uses `flet pack`, which puts the Flutter client
-inside the executable (with plain PyInstaller, 40 MB would be downloaded at startup).
 
 ## VS Code
 
