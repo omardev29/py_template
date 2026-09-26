@@ -364,6 +364,13 @@ def test_in_page_links_resolve() -> None:
     assert not broken, f"links to headings that do not exist: {broken}"
 
 
+def test_code_spans_stay_on_one_line() -> None:
+    # A command split across two lines cannot be copied from the raw file (.pytemplate/README.md
+    # in an editor), and the span checks above only see spans on one line
+    broken = [line for line in _prose(_text()).split("\n") if line.count("`") % 2]
+    assert not broken, "code spans broken across lines:\n" + "\n".join(broken[:20])
+
+
 def test_headings_are_statements() -> None:
     text = _text()
     questions = [title for _level, title in _headings(text) if title.rstrip().endswith("?")]
