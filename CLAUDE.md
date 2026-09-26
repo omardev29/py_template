@@ -1660,7 +1660,8 @@ PowerShell 6.x-7.2, a UNC current folder, uv found only in `ProgramFiles` or cho
 PATH entry with quotes in `deploy.cmd`, the interactive install prompt, Neovim 0.11 (only
 0.12.5), pyright via Mason, VS Code itself (buttons, Problems panel: only simulated), `flet
 build` (Developer Mode is off), bundled PyPy portable builds on CI, Ctrl+C handling of the
-harnesses.
+harnesses, `[deploy.nuitka]` lto/pgo outside Linux (measured with Nuitka 4.2.2 and gcc 13 only:
+PGO with MSVC and an ~800-module LTO link are unmeasured).
 
 ## 14. Conventions and recipes
 
