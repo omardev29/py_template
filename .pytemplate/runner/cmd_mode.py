@@ -24,13 +24,13 @@ _DRY = "(--dry-run: nothing is written)"
 
 def _describe(cfg: Config, title: str = "current mode") -> None:
     ui.step(title)
-    ui.info(f"  app            {cfg.app.name}  (preset {cfg.app.preset}, package src/{cfg.pkg}/)")
-    ui.info(f"  active backend {cfg.backend.active}")
-    ui.info(f"  supported      {', '.join(cfg.backend.supported)}  (Python {cfg.min_python}+ syntax)")
+    ui.report(f"  app            {cfg.app.name}  (preset {cfg.app.preset}, package src/{cfg.pkg}/)")
+    ui.report(f"  active backend {cfg.backend.active}")
+    ui.report(f"  supported      {', '.join(cfg.backend.supported)}  (Python {cfg.min_python}+ syntax)")
     for b in cfg.backend.supported:
-        ui.info(f"  {'typing ' + b:<14} {cfg.profile_for(b)}")
-    ui.info(f"  editor         {cfg.typing.editor}")
-    ui.info(f"  mypyc compiles {', '.join(cfg.compile.modules)}")
+        ui.report(f"  {'typing ' + b:<14} {cfg.profile_for(b)}")
+    ui.report(f"  editor         {cfg.typing.editor}")
+    ui.report(f"  mypyc compiles {', '.join(cfg.compile.modules)}")
 
 
 def _parse(parser: argparse.ArgumentParser, args: list[str]) -> argparse.Namespace:
@@ -301,7 +301,7 @@ def cmd_render(cfg: Config, args: list[str]) -> int:
     changed, edited = render.apply(cfg, force=ns.force, check=ns.check, show_diff=ns.diff)
     prefix = "outdated: " if ns.check else "would update: " if proc.DRY_RUN else "updated: "
     for path in changed:
-        ui.info(prefix + path)
+        ui.report(prefix + path)  # the answer to --check: shown even with -q
     for path in edited:
         ui.warn(f"hand-edited (left untouched without --force): {path}")
     if render.pyproject_outdated(cfg):

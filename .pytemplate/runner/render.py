@@ -384,7 +384,7 @@ def apply(cfg: Config, *, force: bool = False, check: bool = False, show_diff: b
                     diff = difflib.unified_diff(
                         content.splitlines(), _norm(current).splitlines(), f"{path} (generated)", f"{path} (current)", lineterm=""
                     )
-                    ui.info("\n".join(diff))
+                    ui.report("\n".join(diff))  # --diff: shown even with -q
                 continue
         changed.append(path)
         if not check:

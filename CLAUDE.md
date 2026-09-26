@@ -320,8 +320,10 @@ header rules (with detector tests proving each rule fires).
   Order: `MSYSTEM_PREFIX`, `EXEPATH` (Git Bash), `SHELL`, then PATH.
 - `project.caller_cwd()`: `PYTEMPLATE_CALLER_CWD` only while it is absolute and the same
   directory as the process cwd (`os.path.samefile`); then it keeps the shell's logical path
-  (junction, symlink). Otherwise `Path.cwd()`; a deleted cwd raises `DeployError`.
-  `uv run --script` never changes the cwd.
+  (junction, symlink). Otherwise `Path.cwd()`; a deleted cwd raises `DeployError`, which only
+  a runner started without uv sees (tests): uv itself refuses to start in a deleted folder
+  (`error: No such file or directory (os error 2)`, exit 2, for every command, `help`
+  included). `uv run --script` never changes the cwd.
 - `project.user_path(raw)`: use it for EVERY path argument the user types for the runner
   (`new DEST`, `pyz-merge` inputs and `--out`, `selftest --shells --project`, `--nvim --dir`,
   `--e2e --base`). It expands `~`, rejects an empty path, resolves relative paths against
@@ -381,11 +383,11 @@ header rules (with detector tests proving each rule fires).
 | Module | Responsibility |
 |---|---|
 | `deploy.py` (one level up) | Reconfigures stdout/stderr to UTF-8, puts its own dir on `sys.path`, calls `runner.cli.main`. |
-| `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `INTERNAL` (routes listed nowhere: `__init`). `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main` (exception -> exit code), `cmd_help`, `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
+| `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `FORWARDS` / `HELP_PASSES_THROUGH` (section 5.2); `INTERNAL` (routes listed nowhere: `__init`). `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main`/`_main` (exception -> exit code, closed stdout), `cmd_help` (commands and `[tasks]` entries), `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
 | `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file` (section 6.1), `toml_value`. |
 | `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL`, `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
-| `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
-| `proc.py` | `find_uv`, `base_env`, `run` (echo, `DRY_RUN`, cwd defaults to `ROOT`, UTF-8 capture), `output`, `show` (display quoting only), `vs_installer_dir`, `CommandFailed`. |
+| `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
+| `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`. |
 | `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync`, `interpreter_info`. |
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
@@ -394,10 +396,10 @@ header rules (with detector tests proving each rule fires).
 | `mypyc.py` | Incremental stage (`sync_tree`), `spec.json`, spawning `tools/mypyc_build.py`, `ANNOTATE_HTML`, `hidden_imports`, `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks; parses bytes (tolerates a BOM). |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`. |
-| `tasks.py` | `[tasks]`: `Placeholders` (lazy `{python}`), `deps`, cycle detection, `run_task`, `list_tasks`. |
+| `tasks.py` | `[tasks]`: `Placeholders` (lazy `{python}`), `deps` (each once per invocation), cycle detection, `run_task`, `describe`, `list_tasks`. |
 | `cmd_env.py` | `setup`, `doctor`, `sync`, `lock`, `add`, `remove`, `clean`; `ensure_lock`; `_fix_exec_bit`; `_msvc`, `_long_paths`. |
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `new`, the internal `__init` (`cmd_init`), and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
-| `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`. |
+| `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`, `BASEDPYRIGHT_NODE`. |
 | `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
 | `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys, `UV_PLATFORMS`, `export_requirements`, `install_deps`, `copy_app`, `uses_tkinter`; `nuitka.NUITKA`. |
 | `shells.py` | `__probe`, launcher/shell doctor checks, `shell-setup` snippets, `selftest --shells` (section 4.9). |
@@ -413,39 +415,70 @@ header rules (with detector tests proving each rule fires).
 1. Launcher -> `uv run --quiet --script .pytemplate/deploy.py ARGS`. uv picks any Python >= 3.11
    for the PEP 723 script, often in an ephemeral env, and exports `UV`.
 2. `cli.main`: `__probe` short-circuit, then `_parse_globals` (global flags must come BEFORE the
-   command: `-v/--verbose`, `-q/--quiet`, `--dry-run`, `--no-render`, `-h/--help`), then
+   command: `-v/--verbose`, `-q/--quiet`, `--dry-run`, `--no-render`, `-h/--help`; `-h` keeps
+   the command: `./deploy -h run` = `help run`; `--dry-run` switches `-q` off), then
    `dispatch`.
-3. `dispatch`: `help` needs no config. Otherwise `config.load(set(COMMANDS))` (validates;
-   task names may not shadow builtins). Builtins run `render.auto(cfg)` first when
-   `Command.render` is true and `--no-render` is not set, then `module.func(cfg, args)`. Names
-   in `[tasks]` run `render.auto` and `tasks.run_task(cfg, name, args, dispatch)`.
-   `cli.INTERNAL` routes (`__init`) dispatch like builtins but are listed nowhere (help,
-   `editor.json`, the editors' task lists and the shell completion read `COMMANDS` only). `init`
-   is no longer a command: unless a `[tasks]` entry took the name, it exits 2 with the hint
-   `./deploy new DIR --preset P`.
+3. `dispatch`: `help` needs no config. `-h`/`--help` anywhere after a builtin prints `help
+   COMMAND` (no config load, nothing runs), except after `cli.HELP_PASSES_THROUGH` (`run`,
+   `test`, `lock`, `selftest`), where it goes to the app, pytest, uv or the suite. Otherwise
+   `config.load(set(COMMANDS))` (validates; task names may not shadow builtins). Builtins run
+   `render.auto(cfg)` first when `Command.render` is true and `--no-render` is not set, then
+   `module.func(cfg, args)`. Names in `[tasks]` run `render.auto` and
+   `tasks.run_task(cfg, name, args, dispatch)`; `-h` after a deps-only task prints its help.
+   `help NAME` also describes a `[tasks]` entry (cmd, deps, backend, cwd, env); an unknown
+   NAME, or a second one, exits 2. `cli.INTERNAL` routes (`__init`) dispatch like builtins but are
+   listed nowhere (help, `editor.json`, the editors' task lists and the shell completion read
+   `COMMANDS` only). `init` is no longer a command: unless a `[tasks]` entry took the name, it
+   exits 2 with the hint `./deploy new DIR --preset P`.
 4. Commands with `render=False`: `clean`, `render`, `new`, `pyz-merge`, `tasks`,
    `shell-setup`, `selftest`, `help`, `hooks` (the hook must not rewrite generated files in
-   the middle of a commit).
+   the middle of a commit). `test_cli_core.NEVER_RENDER` pins this list.
 5. Commands reject unknown arguments with exit 2 (a typo is never silently ignored):
    argparse commands, `render`/`mode`/`__init`/`new` (`cmd_mode._parse`), `lint`, `fmt`,
-   `clean`, `setup`, `doctor` (`cmd_dev.only_flags`), `check` and `sync` (extra positionals),
-   `shell-setup`. By design: `run`/`test`/tasks forward the rest, `build` forwards unknown
-   flags to the packager, `lock` to `uv lock`, plain `selftest` to pytest; `help` and `tasks`
-   ignore extras. `mode` also rejects abbreviations (`allow_abbrev=False`), an option given
-   twice, `--supports` mixing `+`/`-` changes with plain names or adding and removing the same
-   backend, and a BACKEND that `--supports` removes or leaves out of a full list
+   `clean`, `setup`, `doctor`, `tasks` (`cmd_dev.only_flags`), `check` and `sync` (extra
+   positionals), `shell-setup`, `help`, a `[tasks]` entry without `cmd`. By design
+   (`cli.FORWARDS`): `run`/`test` forward the rest, `build` forwards unknown flags to the
+   packager, `lock` to `uv lock`, plain `selftest` to pytest, tasks with a `cmd` to it.
+   `test_cli_core.test_every_command_rejects_an_unknown_argument` runs every other command
+   with a bogus flag and a bogus positional: a new command fails it until it is classified
+   (`MINIMAL` there, or `cli.FORWARDS`).
+   `mode` also rejects abbreviations (`allow_abbrev=False`), an option given twice,
+   `--supports` mixing `+`/`-` changes with plain names or adding and removing the same backend,
+   and a BACKEND that `--supports` removes or leaves out of a full list
    (`cmd_mode._supports_after`); stray commas and spaces in `--supports` are ignored.
 
 ### 5.3 Exit codes and output
 
 - 0 ok; 1 = check/test failures, doctor problems, any FAIL in a selftest suite, or an internal
-  runner error (traceback printed); 2 = usage/config (`DeployError` default, argparse); 3 =
-  missing requirement (uv, compiler, interpreter, Neovim/git with `--require`); 130 = Ctrl+C.
-  `run`, `test BACKEND` and tasks return the child's exit code (`test all`: 0 or 1);
-  `proc.CommandFailed` carries the failed child's code.
+  runner error (traceback printed); 2 = usage/config (`DeployError` default, argparse; also a
+  program that cannot be started: no exec bit, no `#!` line, a folder; a working folder that
+  does not exist; bad `[tasks]` entries); 3 = missing requirement (uv, a program, compiler,
+  interpreter, Neovim/git with `--require`); 130 = Ctrl+C;
+  141 = the reader of stdout went away (`./deploy help | head -1`: quiet, no traceback; POSIX
+  only, Windows reports a closed pipe as `OSError` EINVAL, unhandled). `run`, `test BACKEND`
+  (pytest's own code: 5 = no tests collected, 4 = usage error) and tasks return the child's
+  exit code (`test all`: 0 or 1, after testing every backend even when one fails to build);
+  `proc.CommandFailed` carries the failed child's code. A child killed by signal N gives
+  128 + N (`proc.exit_code`, like sh and uv; `cli.main` also maps a negative code a command
+  returns), never 256 - N.
+- Ctrl+C (`proc._wait_through_ctrl_c`): the child got the same Ctrl+C (terminal process group,
+  console), so `proc.run` waits for it instead of letting `subprocess.run` SIGKILL it 0.25 s
+  later (an app's cleanup was cut short; under `uv run` the app kept running as an orphan). A
+  no-op Python handler records the Ctrl+C, only in the main thread and only while SIGINT has
+  its default handler (a runner started with SIGINT ignored keeps passing SIG_IGN on). Then
+  `proc.Interrupted` (a KeyboardInterrupt) stops the command, so `check`, `test all` and task
+  deps never go on to the next step; `cli.main` prints `error: interrupted` and exits with the
+  child's code, or 130 when it exited 0 (an interrupted command never reports success) or died
+  of the Ctrl+C (`STATUS_CONTROL_C_EXIT` on Windows). A child that ignores SIGINT is waited
+  for, like `uv run` does. Ctrl+C in the runner's own Python code: KeyboardInterrupt, 130.
 - Runner output goes to stderr through `ui` so the app keeps stdout. Exceptions, printed to
   stdout on purpose: `help`, `__probe`, `shell-setup` snippets, and the `--json` reports of
   `selftest --shells` (also with `--list`) and `selftest --e2e`.
+- `-q` hides progress (`ui.step`, `ui.command`, `ui.ok`, `ui.info`), never what was asked for:
+  `ui.report` (the `tasks` list, the stderr of a failed query), warnings, errors and
+  `check_line` always print, and a dry run ignores `-q` (its output is the plan). Still
+  `ui.info` (hidden by `-q`): the `mode` display (`cmd_mode._describe`) and `render
+  --check/--diff` lists (`cmd_mode.cmd_render`, `render.apply`).
 - `ui.error` prints `error: ` and `ui.warn` prints `warning: ` (only the prefix is coloured on a
   TTY). The VS Code problem matcher `RULES_RE` and the Neovim parser `tasks.parse_line` depend
   on these exact prefixes and on `str(lintc.Finding)` (`src/...:N: msg`, relative to ROOT): do
@@ -458,9 +491,13 @@ header rules (with detector tests proving each rule fires).
 
 ### 5.4 `--dry-run`
 
-- `proc.run` skips only ECHOED commands (`echo=True`) and reports them as exit 0;
-  `echo=False` queries still run. So `run`, `test`, `check`, `add`, `remove`, `sync`, tasks and
-  the plain `selftest` only print their commands; in-process work (the `lintc` rules) runs.
+- `proc.run` skips only ECHOED commands (`echo=True`) and reports them as exit 0 (without
+  checking their working folder: a skipped step would create it); `echo=False` queries still
+  run. So `run`, `test`, `check`, `add`, `remove`, `sync`, tasks and the plain `selftest` only
+  print their commands; in-process work (the `lintc` rules) runs. A task's deps are echoed,
+  each once, and its `cwd` is not checked. `-q` has no effect: the output is the plan.
+- `selftest --shells|--nvim|--e2e` refuse `--dry-run` (exit 2): they start shells, Neovim and
+  `./deploy` runs themselves, in their own scratch folders.
 - `render.apply` behaves like `--check` (writes nothing); `render.auto` prints "would update";
   `render` prints `would update: ...`.
 - `clean` prints what it would remove. `build` prints the checks (unless `--no-check`) and
@@ -507,12 +544,22 @@ header rules (with detector tests proving each rule fires).
 | `__RUBASH_SHELL_NAME` | niubash | Detected by `deploy` (section 4.3) |
 | `PT_TRUST_FILE`, `PT_ROOT`, `PTCMD` | `cmd_nvim.trust_file`, `nvimtest`, `shells` | File to trust headless; project the smoke test expects; probe command text |
 
-`proc.base_env` removes `VIRTUAL_ENV`, `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `PYTHONHOME` and
-`PYTHONPATH`; removes the runner's own ephemeral `Scripts/` or `bin/` from PATH when
-`sys.prefix != sys.base_prefix` (uv exports it for `--script` runs); sets `PYTHONUTF8=1`; on
-Windows appends `%ProgramFiles(x86)%\Microsoft Visual Studio\Installer` to PATH (VS 2026
-`vcvarsall.bat` calls `vswhere.exe` by bare name; without it setuptools fails with "Unable to
-find a compatible Visual Studio installation"). Everything else (e.g. `FLET_*`) passes through.
+`proc.base_env` removes `VIRTUAL_ENV`, `PYTHONHOME`, `PYTHONPATH` and the user's uv variables
+that would move the runner's `uv run --locked` calls (`proc.UV_SELECTION`, each measured with
+uv 0.12): `UV_PROJECT_ENVIRONMENT` and `UV_PYTHON` (`envs.env_vars` sets both), `UV_PROJECT`,
+`UV_NO_PROJECT`, `UV_WORKING_DIR` (another project or none: `--locked` is ignored, relative
+paths move), `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON` (exit 2 next to
+`UV_PYTHON_PREFERENCE`), `UV_ISOLATED` (a throwaway env instead of `.venv`), `UV_NO_DEV`,
+`UV_NO_DEFAULT_GROUPS` (no mypy/ruff/pytest: a PATH-wide one of another version runs) and
+`UV_NO_SYNC` (`.venv` stays empty after `git clean -fdx`). Resolution settings (indexes,
+`UV_EXCLUDE_NEWER`, `UV_RESOLUTION`, `UV_PRERELEASE`), `UV_FROZEN`/`UV_LOCKED` (uv ignores
+`UV_FROZEN` next to `--locked`) and the cache stay: they are the user's, and uv reports when
+they disagree with `uv.lock`. It also removes the runner's own ephemeral `Scripts/` or `bin/`
+from PATH when `sys.prefix != sys.base_prefix` (uv exports it for `--script` runs); sets
+`PYTHONUTF8=1`; on Windows appends `%ProgramFiles(x86)%\Microsoft Visual Studio\Installer` to
+PATH (VS 2026 `vcvarsall.bat` calls `vswhere.exe` by bare name; without it setuptools fails
+with "Unable to find a compatible Visual Studio installation"). Everything else (e.g.
+`FLET_*`) passes through.
 
 ### 5.6 Git pre-commit hook (`hooks.py`)
 
@@ -619,7 +666,13 @@ find a compatible Visual Studio installation"). Everything else (e.g. `FLET_*`) 
   a process environment can hold (not empty, no `=` or NUL; checked by the loader).
 - `[tasks.<name>]`: `cmd` (argv), `deps`, `env`, `backend`, `uv = true`, `cwd`, `help`,
   `background` (long-running dev server; section 12). Name regex `[a-z][a-z0-9_-]*`; `cmd` or
-  `deps` required.
+  `deps` required; a non-empty program (`cmd[0]`); `env` names `[A-Za-z_][A-Za-z0-9_]*`; in
+  `cmd`, `env` values and `cwd` only bare placeholders (`config.task_format_error`: never `{}`,
+  `{0}`, `{root.x}`, `{root!r}`, a lone brace; literal braces doubled `{{ }}`). Checked when
+  the task runs (`tasks.run_task`), not at load: unknown placeholder names, `deps` quoting and
+  empty entries (all parsed before the first dep runs), `cwd` is a folder (not in a dry run),
+  `backend = "pypy"` in `backend.supported` (only where its environment is used). `vscode.scan`
+  renders a task whose deps do not parse.
 - `[preset.<name>]`: option overrides (`config._check_preset_tables`): `<name>` must be a preset
   of this template, and each key and its value type must match that preset's `preset.toml`
   `[options]`, read with `tomllib` (no `presets` import); the script preset has none.
@@ -759,8 +812,11 @@ Formats:
 - WSL on `/mnt/*` (`project.IS_WSL`): separate `.venv*-wsl` envs and `.build/wsl`, so the
   Windows `.venv` is not turned into a Linux one.
 - Tools outside `uv.lock` run through `uv run --locked --with <pin>` and are pinned in module
-  constants: `cmd_dev.BASEDPYRIGHT = "basedpyright==1.40.1"` (`check` with
-  `typing.editor = "basedpyright"`) and `methods.nuitka.NUITKA = "nuitka==4.2.2"`. Bump them
+  constants: `cmd_dev.BASEDPYRIGHT = "basedpyright==1.40.1"` plus its Node.js runtime
+  `cmd_dev.BASEDPYRIGHT_NODE = "nodejs-wheel-binaries==24.19.0"` (basedpyright's only
+  dependency, `>=20.13.1`: unpinned, every new Node LTS on PyPI changed `check` and its
+  glibc/macOS floor; bump both together) (`check` with `typing.editor = "basedpyright"`) and
+  `methods.nuitka.NUITKA = "nuitka==4.2.2"` (no dependencies outside extras). Bump them
   deliberately.
 - `mode --supports -pypy` never deletes the old env: it prints a note that
   `./deploy clean --envs` removes the `.venv*` environments (all of them; `setup` recreates
@@ -1299,7 +1355,12 @@ short temp tree and unset `NVIM_APPNAME`.
   `test_config_rules.py` (every schema field and validate rule with a positive and a negative
   case, the encodings, `set_value`/`update_file` on taplo-formatted, CRLF and BOM files, `mode`
   argument parsing, and real `mode --typing/--editor/--supports` round trips in a throwaway
-  copy that must restore every byte).
+  copy that must restore every byte), `test_cli_core.py` (the runner's core: global options,
+  dispatch, render-before-command, help, the exit code of every outcome, every command rejecting
+  a bogus argument, `proc.run` dry-run/errors/signals/threads, `base_env` per variable, Ctrl+C
+  with real children that trap SIGINT, a closed stdout, `[tasks]` deps/cycles/placeholders/cwd/
+  env/uv modes/arguments, `check`/`test`/`lint` semantics, and exit codes through `deploy.py` in a
+  throwaway copy).
 - **[template repo]** Language guard `test_no_spanish.py`: skipped unless
   `.pytemplate/template-repo` exists. Scans `git ls-files --cached --others --exclude-standard`
   (so new untracked files count) for accented Spanish letters and a list of Spanish words
@@ -1435,7 +1496,10 @@ Adding a command:
    it must work without (or before) rendering. An internal step that must stay out of help,
    `editor.json`, the editors and completion goes to `cli.INTERNAL` instead (name `__x`).
 2. `def cmd_x(cfg: Config, args: list[str]) -> int` in a `cmd_*.py`, argparse with
-   `prog="./deploy x"`; reject unknown arguments (`cmd_dev.only_flags` for flag-only commands).
+   `prog="./deploy x"`; reject unknown arguments (`cmd_dev.only_flags` for flag-only commands)
+   and add it to `test_cli_core.MINIMAL` (or, if its arguments belong to another program, to
+   `cli.FORWARDS`), and to `test_cli_core.NEVER_RENDER` when `render=False`. `-h`/`--help`
+   after it is handled by `cli.dispatch`.
 3. `./deploy render` and commit `.pytemplate/editor.json` + `state.json` (section 6.2).
 4. Tests in `.pytemplate/tests/`; README commands table; VS Code task catalog
    (`editors/vscode.catalog`, and `vscode.scan` if its output should reach the Problems panel)
@@ -1486,6 +1550,10 @@ Behaviour:
   eaten by PowerShell.
 - Tasks: a task with `backend = "mypyc"` runs interpreted in `.venv` unless it goes through a
   `deps` entry such as `compile` and runs the stage.
+- Ctrl+C waits for the running child (section 5.3): a child that ignores SIGINT keeps the
+  runner waiting (Ctrl+\ or closing the terminal ends both), as with `uv run`. Windows: a
+  closed stdout pipe is `OSError` EINVAL there, so `./deploy help | more` quitting early still
+  prints a traceback (untested).
 - `clean --envs` removes every `.venv*`, including the environments in use; there is no
   "unused only" option (`mode` only prints a note about leftovers).
 - raylib + PyPy on macOS arm64: no PyPy wheel for that platform (raylib 6.0.1.0 still has

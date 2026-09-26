@@ -89,7 +89,7 @@
     },
     {
       "name": "mode",
-      "usage": "[BACKEND] [--supports +pypy|-pypy] [--typing off|warn|strict|auto] [--editor pylance|basedpyright]",
+      "usage": "[BACKEND] [--supports +B|-B|B,B...] [--typing auto|off|warn|strict|mypyc] [--editor pylance|basedpyright]",
       "summary": "Show or change the mode (backend, supported, typing, editor)",
       "group": "Mode"
     },

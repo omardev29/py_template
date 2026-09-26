@@ -259,8 +259,10 @@ def test_the_internal_route_is_the_old_init(capsys: pytest.CaptureFixture[str]) 
     for name in cli.INTERNAL:
         with pytest.raises(DeployError, match="invalid task name"):
             make({"tasks": {name: {"cmd": ["x"]}}})
-    # `help __init` does not document it (internal), and `__init -h` is argparse's help
-    assert cli.cmd_help(None, ["__init"]) == 0
+    # `help __init` does not document it (internal: like any unknown name, exit 2), and
+    # `__init -h` is argparse's help
+    with pytest.raises(DeployError, match="unknown command: __init"):
+        cli.cmd_help(None, ["__init"])
     assert "__init" not in capsys.readouterr().out
     with pytest.raises(SystemExit) as e:
         cmd_mode.cmd_init(make({}), ["-h"])
