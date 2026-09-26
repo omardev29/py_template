@@ -309,11 +309,23 @@ header rules (with detector tests proving each rule fires).
   its shebang `#!/usr/bin/env pwsh`, and Windows PowerShell 5.1 reads BOM-less files as ANSI.
   Git mode 100755 so `./deploy.ps1` works from bash/zsh on Linux/macOS (`shells.doctor` only
   notes a wrong mode: PowerShell itself runs it without the x bit).
-- No `param()` block: it would turn `-v`, `-h`, `-q` into PowerShell parameters. A typed list
-  (`--supports cpython,mypyc`, `--tests T1,T2`) reaches the script as ONE array element: the
-  launcher joins its items with commas again, as PowerShell does for a native program (a
-  splatted array variable is indistinguishable and is joined too)
-  (`test_ps1_keeps_typed_comma_lists_whole`, also through the `shell-setup pwsh` function).
+- No `param()` block: it would turn `-v`, `-h`, `-q` into PowerShell parameters.
+- A script gets a typed list (`--supports cpython,mypyc`, `--tests T1,T2`) and an array value
+  (`$files`, `(Get-ChildItem -Name)`) alike, as ONE array element; a native program gets the
+  list as one argument, its items joined with commas, and the value's items as separate
+  arguments. `Get-Typed` tells them apart by the text of the call: the internal
+  `InvocationInfo.ScriptPosition` of `Get-PSCallStack`'s frames (read by reflection; no public
+  property has it on 5.1) parsed with `Parser.ParseInput`, where a typed list is an
+  `ArrayLiteralAst`. It counts the arguments as PowerShell binds them (`-X:v` gives two, a bare
+  `--` none), reads a splatted `@args` where that caller was called (the `shell-setup pwsh`
+  function, `function drun { ./deploy.ps1 run @args }`), and lets ONE other splatted variable
+  (`@files`) take the arguments the others leave. The launcher joins a typed list and passes
+  the items of a value (and of any other collection, `List[string]`: never typed) one by one.
+  What it cannot tell, it treats as a typed list: the arrays of that gap, and every array when
+  the words do not line up (two splatted variables, a wrapper whose `param()` binds some of
+  them) or the text cannot be read; `@files` at the user's own call passes items separately
+  anywhere (`test_ps1_keeps_typed_comma_lists_whole`, also through the `shell-setup pwsh`
+  function; `test_ps1_passes_array_values_like_a_native_call`, which pins the limit too).
 - A `.ps1` runs inside the caller's session: never assign `$env:PATH`. The two `PYTEMPLATE_*`
   variables and the removed `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` (the
   `$names` list) are restored in `finally`; a
@@ -2432,9 +2444,9 @@ short temp tree and unset `NVIM_APPNAME`.
   fake uvs for `deploy` and `deploy.ps1`, the install prompt on a pseudo-terminal),
   `test_launcher_win.py` (static rules on every OS, a PowerShell parser check; the deploy.ps1
   behaviour tests run wherever pwsh exists: injection safety of the Core hand-over, `--%`,
-  `-X:v`, typed comma lists, pipeline input and raw stdin, `UV_PYTHON` and the other cleared
-  variables, ConstrainedLanguage, the x bit; cmd and
-  the registry only on Windows),
+  `-X:v`, typed comma lists and array values, pipeline input and raw stdin, `UV_PYTHON` and
+  the other cleared variables, ConstrainedLanguage, the x bit; cmd and the registry only on
+  Windows),
   `test_paths.py` (path spellings, WSL detection, colours in a hidden console, dry runs in a
   throwaway copy),
   `test_render_core.py` (`render.apply`/`auto` and `state.json` in a sandbox, the render
@@ -3672,6 +3684,15 @@ PowerShell (details: section 4.5):
   token** (LIMITATION): it drops it, then splits and `%VAR%`-expands the rest. Fix: `deploy.ps1`
   switches that call to `Legacy` passing in its own scope. Test:
   `test_launcher_win.py::test_ps1_passes_a_literal_stop_parsing_token`. Goes: never.
+- **A script gets a typed list (`a,b`) and an array value (`$files`) alike, as one array**
+  (LIMITATION): a native program gets the list as one argument `a,b` and the value's items as
+  separate arguments, but the launcher saw the same `object[]`: it split both (`mode
+  --supports cpython,mypyc` exited 2), then joined both (`./deploy run $files` gave the app
+  `a.py,b.py`). Fix: `deploy.ps1`'s `Get-Typed` reads the text of the call (an
+  `ArrayLiteralAst` is a typed list; a forwarded `@args` is read at its caller) through the
+  internal `InvocationInfo.ScriptPosition`; what it cannot tell counts as a typed list (4.5).
+  Test: `test_launcher_win.py::test_ps1_keeps_typed_comma_lists_whole`,
+  `test_ps1_passes_array_values_like_a_native_call`. Goes: never.
 - **A typed `-X:v` reaches a script as two elements** (DEFECT): `'-X:'` and `v`. Up:
   PowerShell/PowerShell#6360 (closed for inactivity; 7.6 still splits it). Fix: `deploy.ps1`
   joins them again (limit: `-X: v`; `pwsh -File` and the shebang route split at the colon before
