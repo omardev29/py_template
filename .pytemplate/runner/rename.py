@@ -19,10 +19,12 @@ Which occurrences change (whole words only: `myapp_extra` and `my-app-2` never m
   not changed. Attributes (`obj.myapp`) and keyword arguments (`f(myapp=1)`) never change.
 - Strings, comments, docstrings and other text files: every occurrence except right after a
   dot (`x.myapp` is a submodule or an attribute, never the top-level package) and a path
-  segment right after the package itself (`src/myapp/myapp` is a submodule of it). In Python
-  and TOML strings the prefix (`f`, `rb`...) and escapes (`\\n`, `\\x89`) are never the name,
-  and a name right after a backslash in a raw string or a path (`r"\\d"`) is reported, not
-  changed: an app may be called `f`, `n` or `r`.
+  segment right after the package itself (`src/myapp/myapp` is a submodule of it). In Python,
+  TOML and JSON strings the prefix (`f`, `rb`...) and escapes (`\\n`, `\\x89`) are never the
+  name, and a name right after a single backslash that makes no escape (`r"\\d"`,
+  `"\\myapp"`) and a one-letter name that ends a format directive (`"%d"`, `"{:d}"`,
+  `f"{x:d}"`) are reported, not changed: an app may be called `f`, `n`, `r` or `d`. Comments
+  and other text files (Markdown, YAML...) have no escapes.
 - When the old name is also the old package but the new name is not a package name
   (`alpha` -> `My-Game`, package `my_game`), each text occurrence is either the package or the
   name. Package: path-like (`src/alpha/`, `alpha\\core`), dotted (`alpha.core`, `alpha.*`,
@@ -141,6 +143,15 @@ _STRING_PREFIX = re.compile(r"[A-Za-z]*(?=['\"])")
 _PY_ESCAPES = frozenset("abfnrtvxNuU01234567")
 _BYTES_ESCAPES = frozenset("abfnrtvx01234567")
 _TOML_ESCAPES = frozenset("btnfruUex")  # TOML 1.0, plus \e and \x of TOML 1.1
+_JSON_ESCAPES = frozenset("bfnrtu")
+_JSON_STRING = re.compile(r'"(?:[^"\\\n]|\\.)*"?')
+# Data files of src/ and tests/ whose strings have escapes (other text files are plain text)
+DATA_STRINGS = {".toml": "toml", ".json": "json"}
+# A format directive in a string ends in one letter: printf's `%d`, `%(k)-5s`, str.format's
+# `{:d}`, `{0:>4x}`, `{!r}` (the text before the letter, and the letters it can end in)
+_PRINTF_BEFORE = re.compile(r"%(?:\([^()\n]*\))?[#0 +\-]*(?:\*|\d+)?(?:\.(?:\*|\d*))?[hlL]?\Z")
+_FORMAT_BEFORE = re.compile(r"\{[^{}\n]*[:!][^{}\n]*\Z")
+_DIRECTIVE_LETTERS = frozenset("abcdeEfFgGinorsuxX")
 # ruff format --check --output-format concise: "path:1:2: unformatted: ..." (older: "Would reformat: path")
 _UNFORMATTED = re.compile(r"^(?:Would reformat: (?P<old>.+)|(?P<path>.+?):\d+:\d+: unformatted\b)", re.MULTILINE)
 # ruff check --output-format concise: "path:1:1: I001 [*] Import block is un-sorted or un-formatted"
@@ -185,7 +196,7 @@ class _Region:
     start: int
     end: int
     forced: bool = False  # argument of import_module() & co.: a module name
-    fstring: bool = False  # a whole f-string as ONE token (Python 3.11): {fields} are code
+    fstring: bool = False  # an f-string or t-string: its {fields} are code, their format specs syntax
 
 
 @dataclass
@@ -440,7 +451,7 @@ def _python_code(text: str, pkg: str) -> _Code | None:
         elif kind.endswith("STRING_END"):
             depth -= 1
             if depth == 0:
-                regions.append(_Region(fstart, offset(tok.end)))
+                regions.append(_Region(fstart, offset(tok.end), fstring=True))  # {fields} are code, as on 3.11
         elif depth == 0 and tok.type in (tokenize.STRING, tokenize.COMMENT):
             forced = fstring = False
             if tok.type == tokenize.STRING and brackets and last and last[-1].type == tokenize.OP and last[-1].string in "(,=":
@@ -544,6 +555,8 @@ def _text_kind(
         return "keep"  # x.alpha: a submodule or an attribute, never the top-level package
     if prev in ("/", "\\") and _inside_package(text, start, names.old_pkg):
         return "keep"  # src/alpha/alpha: a submodule of the package, like alpha.alpha
+    if names.old_pkg == "src" and text[end : end + 1] in ("/", "\\") and not _after_src(text, start):
+        return "skip"  # an app named src (made by hand: new refuses it): src/src/x is the folder, then the package
     if names.old_name != names.old_pkg:
         return "pkg" if word == names.old_pkg else "name"
     if names.new_name == names.new_pkg and not contextual:
@@ -581,6 +594,18 @@ def _escaped(text: str, start: int, floor: int, *, raw: bool, escapes: frozenset
     return "skip" if not raw and text[start] in escapes else "keep"
 
 
+def _directive(text: str, start: int, end: int, floor: int) -> bool:
+    """Whether a one-letter occurrence in a string (which starts at `floor`) ends a format
+    directive: `"%d" % x`, `"{:d}".format(x)`, `"{!r}"`. Whether the string is ever formatted is
+    unknown: it is reported, never changed."""
+    if end - start != 1 or text[start] not in _DIRECTIVE_LETTERS:
+        return False
+    before = text[max(floor, start - 100) : start]  # a directive is short: never scan a whole docstring
+    if _PRINTF_BEFORE.search(before):
+        return True
+    return text[end : end + 1] in ("}", ":") and _FORMAT_BEFORE.search(before) is not None
+
+
 def _string_quote(text: str, region: _Region) -> tuple[int, str] | None:
     """(offset of the opening quote, prefix) of a string region (`rb"..."`); None for a comment."""
     m = _STRING_PREFIX.match(text, region.start)
@@ -603,7 +628,7 @@ def _classify(
     quote = _string_quote(text, region)
     if quote is not None and start < quote[0]:
         return "skip"  # the string prefix (f, r, b, rb...): syntax, never the name
-    if region.fstring and _in_fstring_field(text, region, start):  # code inside a 3.11 f-string
+    if region.fstring and _in_fstring_field(text, region, start):  # code, or the format spec of a field
         if code.scoped:
             return "pkg" if start in code.refs else "keep"
         return "pkg" if word == names.old_pkg and code.bound and text[start - 1 : start] != "." else "keep"
@@ -612,6 +637,8 @@ def _classify(
         escaped = _escaped(text, start, quote[0], raw="r" in prefix, escapes=_BYTES_ESCAPES if "b" in prefix else _PY_ESCAPES)
         if escaped is not None:
             return escaped
+        if _directive(text, start, end, quote[0]):
+            return "keep"
     if not _whole_word(text, start, end):
         return "skip"
     kind = _text_kind(text, start, end, word, names)
@@ -638,6 +665,11 @@ def _toml_strings(text: str) -> list[tuple[int, int, bool]]:
         else:
             i += 1
     return out
+
+
+def _json_strings(text: str) -> list[tuple[int, int, bool]]:
+    """(start, end, False) of every string of a JSON text: a quote starts one only there."""
+    return [(m.start(), m.end(), False) for m in _JSON_STRING.finditer(text)]
 
 
 def _toml_key(text: str, start: int, end: int) -> bool:
@@ -697,6 +729,7 @@ def rewrite(
     python: bool = False,
     only_pkg: bool = False,
     toml: bool = False,
+    strings: str = "",
     module_keys: frozenset[str] = frozenset(),
     package_modules: frozenset[str] | None = None,
 ) -> Rewrite:
@@ -704,7 +737,9 @@ def rewrite(
 
     `python`: tell code from strings and comments with the tokenizer. `only_pkg`: change only
     the package references, chosen by context, and report the other occurrences as kept
-    (pytemplate.toml). `toml`: TOML keys and table headers never change. `module_keys`: TOML
+    (pytemplate.toml). `toml`: TOML keys and table headers never change. `strings` ("toml",
+    "json"; `toml` implies "toml"): the string syntax of a data file, whose escapes are never the
+    name (other text is plain: `a\\n` has no escape there). `module_keys`: TOML
     keys whose quoted values are module names (a bare old package there is the package).
     `package_modules`: the modules and subpackages of src/<old pkg>/ (only_pkg: `pkg.x` is the
     package only when x is one of them; `pkg.ico`, `uv.lock` are file names).
@@ -712,8 +747,10 @@ def rewrite(
     code = _python_code(text, names.old_pkg) if python else None
     module_lines = module_value_lines(text, module_keys) if module_keys else set()
     line_starts = [0, *(m.end() for m in re.finditer("\n", text))]
-    strings = _toml_strings(text) if toml else []
-    string_starts = [s[0] for s in strings]
+    syntax = "toml" if toml else strings
+    found = _toml_strings(text) if syntax == "toml" else _json_strings(text) if syntax == "json" else []
+    escapes = _JSON_ESCAPES if syntax == "json" else _TOML_ESCAPES
+    string_starts = [s[0] for s in found]
     pieces: list[str] = []
     last = 0
     count = 0
@@ -724,8 +761,8 @@ def rewrite(
         if toml and _toml_key(text, start, end):
             continue
         i = bisect.bisect_right(string_starts, start) - 1
-        if i >= 0 and start < strings[i][1]:  # inside a TOML string: its escapes are never the name
-            escaped = _escaped(text, start, strings[i][0], raw=strings[i][2], escapes=_TOML_ESCAPES)
+        if i >= 0 and start < found[i][1]:  # inside a TOML or JSON string: its escapes are never the name
+            escaped = _escaped(text, start, found[i][0], raw=found[i][2], escapes=escapes)
             if escaped == "skip":
                 continue
             if escaped == "keep":
@@ -1079,7 +1116,7 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
             if b"\0" not in data and pattern.search(data.decode("latin-1")):
                 unreadable.append(rel_path)
             continue
-        result = rewrite(text, names, python=path.suffix in PY_SUFFIXES)
+        result = rewrite(text, names, python=path.suffix in PY_SUFFIXES, strings=DATA_STRINGS.get(path.suffix.lower(), ""))
         if result.count or result.kept:
             try:
                 new = result.text.encode(encoding)

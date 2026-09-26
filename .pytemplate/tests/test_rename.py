@@ -265,6 +265,16 @@ def test_fstring_fields_as_one_token() -> None:
         ("d", 'x = re.compile(r"\\d+")\n', 'x = re.compile(r"\\d+")\n', 1),  # raw: a regex escape or a path, reported
         ("alpha", 'x = r"src\\alpha"\n', 'x = r"src\\alpha"\n', 1),
         ("myapp", 'x = "src\\myapp"\n', 'x = "src\\myapp"\n', 1),  # an invalid escape: the new name could make it a real one
+        # format directives of a one-letter name: syntax whatever the Python (3.12+ splits f-strings into tokens)
+        ("f", 'x = f"{y:f}"\n', 'x = f"{y:f}"\n', 1),
+        ("d", 'x = f"{y:>d} {z:,d}"\n', 'x = f"{y:>d} {z:,d}"\n', 1),
+        ("x", 'x = f"{y:x}"\n', 'x = f"{y:x}"\n', 1),
+        ("alpha", "x = f\"{d['alpha']}\"\n", "x = f\"{d['alpha']}\"\n", 1),  # a string inside a field is code
+        ("d", 'x = "%d" % y\n', 'x = "%d" % y\n', 1),
+        ("s", 'x = "%(k)-s %.*s" % y\n', 'x = "%(k)-s %.*s" % y\n', 1),
+        ("d", 'x = "{:d} {0:,d}".format(y)\n', 'x = "{:d} {0:,d}".format(y)\n', 1),
+        ("r", 'x = "{!r}".format(y)\n', 'x = "{!r}".format(y)\n', 1),
+        ("d", 'x = "d: {d}"\n', 'x = "tool: {tool}"\n', 0),  # not a directive
     ],
 )
 @pytest.mark.filterwarnings("ignore::SyntaxWarning", "ignore::DeprecationWarning")  # "\m" is an invalid escape on purpose (3.11: a DeprecationWarning)
@@ -296,6 +306,20 @@ def test_backslash_pairs_and_comments_are_plain_text(old: str, text: str, expect
 def test_toml_escapes_are_never_the_name(text: str, expected: str, kept: int) -> None:
     out = rewrite(text, Names("n", "tool"), toml=True)
     assert out.text == expected and len(out.kept) == kept
+
+
+def test_json_and_toml_files_of_src_and_tests_keep_their_escapes(tmp_path: Path) -> None:
+    """A JSON fixture's "a\\n" once became "a\\tool" (a tab and "ool") for an app named n."""
+    _write_project(tmp_path, "script", "n")
+    (tmp_path / "tests" / "data.json").write_text('{"sep": "a\\n", "app": "n", "path": "C:\\\\n", "odd": "\\q\\n"}\n', encoding="utf-8")
+    (tmp_path / "tests" / "cfg.toml").write_text("# a\\n n\nsep = \"a\\n\"\napp = \"n\"\nraw = 'a\\n'\n", encoding="utf-8")
+    (tmp_path / "tests" / "notes.txt").write_text("a\\n n\n", encoding="utf-8")  # plain text: no escapes
+    edits = {edit.path: edit for edit in rename.plan(tmp_path, "n", "tool").files}
+    json_edit, toml_edit = edits["tests/data.json"], edits["tests/cfg.toml"]
+    assert json_edit.new == b'{"sep": "a\\n", "app": "tool", "path": "C:\\\\tool", "odd": "\\q\\n"}\n'
+    assert toml_edit.new == b"# a\\tool tool\nsep = \"a\\n\"\napp = \"tool\"\nraw = 'a\\n'\n"
+    assert [n for n, _ in toml_edit.result.kept] == [4]  # a literal string's \n: no escape there, reported
+    assert edits["tests/notes.txt"].new == b"a\\tool tool\n"
 
 
 @pytest.mark.parametrize("preset", ["script", "raylib", "flet"])
@@ -393,6 +417,19 @@ def test_pytemplate_toml_comments_of_an_app_named_like_a_path_word(tmp_path: Pat
     _write_project(tmp_path, preset, old)
     planned = rename.plan(tmp_path, old, "beta")
     assert planned.config.new == presets.skeleton(preset, "beta")["pytemplate.toml"].decode("utf-8")
+
+
+@pytest.mark.parametrize(
+    ("python", "text", "expected"),
+    [
+        (True, 'DATA = Path("src/src/data.json")\n# see src/src/core.py\n', 'DATA = Path("src/beta/data.json")\n# see src/beta/core.py\n'),
+        (False, "see src/src/core.py, src\\src\\x and src/src/src/y\n", "see src/beta/core.py, src\\beta\\x and src/beta/src/y\n"),
+    ],
+)
+def test_code_of_an_app_named_src_keeps_the_project_folder(python: bool, text: str, expected: str) -> None:
+    """`new` refuses the name src, but a project made by hand can have it: in src/src/x the first
+    src is the project's own folder and the second the package (it once became beta/beta/x)."""
+    assert rewrite(text, Names("src", "beta"), python=python).text == expected
 
 
 def test_root_files_that_mention_the_name_are_reported(tmp_path: Path) -> None:

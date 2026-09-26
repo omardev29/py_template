@@ -892,7 +892,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     own; they are reported, not changed). Keyword arguments (`f(pkg=1)`) and attributes never
     change; `f"{pkg=}"` is a use. When `ast` cannot parse the file (syntax newer than the
     runner's Python) the token rule is the fallback. String tokens are recognised by their
-    `*STRING_START`/`*STRING_END` suffix (f-strings 3.12, t-strings 3.14, any later family). A
+    `*STRING_START`/`*STRING_END` suffix (f-strings 3.12, t-strings 3.14, any later family); such
+    a string is one region whose `{fields}` are code, as 3.11's single token (`_in_fstring_field`:
+    a format spec `{x:f}` or a string inside a field is kept and reported, on every Python). A
     lone CR is a line break, as for the compiler (`_python_code` reads it as LF, one character
     for one: classic Mac line endings once ended in an internal error).
   - Strings are syntax first (`_classify`, `_escaped`): a string prefix (`f`, `r`, `b`, `rb`...:
@@ -900,11 +902,18 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     backslashes is an escape when the string is not raw and its first letter makes one (`\n`,
     `\x89`, `\a`...: skipped) and else (`r"\d"`, `r"src\alpha"`, an invalid `"\myapp"`) kept and
     reported, never changed (a new name could turn it into an escape or another regex). The
-    same for TOML basic and literal strings (`_toml_strings`); comments and plain text files
-    have no escapes. Names of one or two letters are legal, and the flet skeleton's PNG
-    signature `b"\x89PNG\r\n..."` once changed silently for `r` and `n`.
+    same for TOML basic and literal strings (`_toml_strings`: pytemplate.toml, pyproject.toml
+    and the `.toml` files of src/ and tests/) and JSON strings (`_json_strings`, `.json` files:
+    `DATA_STRINGS`); comments and other text files (Markdown, YAML, INI) have no escapes: `a\n`
+    there changes like any word (a JSON fixture's `"a\n"` once became `"a\tool"`). A one-letter occurrence that ends a format directive in a string (`"%d"`,
+    `"%(k)-s"`, `"{:d}"`, `"{0:,d}"`, `"{!r}"`: `_directive`) is kept and reported too (whether
+    the string is ever formatted is unknown). Names of one or two letters are legal, and the
+    flet skeleton's PNG signature `b"\x89PNG\r\n..."` once changed silently for `r` and `n`.
   - Text (strings, comments, other files): every occurrence except `x.pkg` and a path segment
-    right after the package itself (`src/pkg/pkg`, `src\pkg\pkg`: a submodule). When the
+    right after the package itself (`src/pkg/pkg`, `src\pkg\pkg`: a submodule). For a package
+    named `src` (a project made by hand: `new` and `rename` refuse the name) a `src/` segment
+    that is not right inside another `src/` is the project's own folder and never changes
+    (`src/src/x` -> `src/beta/x`; it once became `beta/beta/x`). When the
     old name equals the old package but the new name differs from the new package (`alpha` ->
     `My-Game` / `my_game`): paths, dotted names, `pkg:main`, "package"/"module",
     `import`/`from`, `-m` and the module-name arguments of loader calls get the package
