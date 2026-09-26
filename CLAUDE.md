@@ -556,8 +556,8 @@ find a compatible Visual Studio installation"). Everything else (e.g. `FLET_*`) 
   config files with the generated ones, so following them never splits a source from its
   output). `lintc` on staged compiled modules (blocking only under the `mypyc` profile, reads
   the working tree). Never mypy (the user's choice: `./deploy check` does it).
-- `hooks._run_bytes` is the one process start outside `proc.run`: raw bytes (proc.run's text
-  mode turns CRLF into LF) and stdin, for `git cat-file` and ruff on stdin.
+- `hooks._run_bytes` is the module's only process start outside `proc.run`: raw bytes
+  (proc.run's text mode turns CRLF into LF) and stdin, for `git cat-file` and ruff on stdin.
 - Git hands hooks a relative `GIT_INDEX_FILE` and, in linked worktrees, `GIT_DIR` without
   `GIT_WORK_TREE`: `hooks` makes them absolute for its own git calls and removes them before
   starting uv/ruff (they would point git at the wrong repository for a sub-folder project).

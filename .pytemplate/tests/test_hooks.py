@@ -456,6 +456,16 @@ def test_ensure_installed_skips_an_ignored_project(tmp_path: Path, capsys: pytes
         hooks.install(repo)
     passed, label, hint = hooks._status_line(make(), repo)
     assert passed is None and "ignores this project" in label and "git init" in hint
+    # another project's hook there (the enclosing repository's own): still "ignored" is the news
+    (top / "deploy").write_text("#!/bin/sh\n", encoding="utf-8")
+    target.write_bytes(hooks.hook_script("./deploy").encode("ascii"))
+    assert hooks.classify(target, repo) == "other"
+    hooks.ensure_installed(make(), project)
+    err = capsys.readouterr().err
+    assert "ignores this project" in err and "another project" not in err
+    assert "ignores this project" in hooks._status_line(make(), repo)[1]
+    target.unlink()
+    (top / "deploy").unlink()
     assert "installed" in hooks.install(repo, force=True)
     assert hooks._status_line(make(), repo)[0] is True
     hooks.ensure_installed(make(), project)  # installed on purpose: nothing to say
@@ -947,6 +957,15 @@ def test_ruff_uses_the_lock_as_it_is(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(envs, "uv", fake_uv)
     assert hooks.ruff(make(), ["check", "--force-exclude"], ["src/a.py"]) == (0, "")
     assert calls == [["run", "--quiet", "--frozen", "ruff", "check", "--force-exclude", "src/a.py"]]
+    # a batch killed by a signal is never hidden by a later clean batch
+    codes = iter([-9, *[0] * 20])
+
+    def killed_then_ok(env: envs.PyEnv, args: Sequence[str | Path], **kw: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(list(args), next(codes), "", "")
+
+    monkeypatch.setattr(envs, "uv", killed_then_ok)
+    many = [f"src/{i:04}_{'x' * 40}.py" for i in range(400)]  # more than one batch
+    assert hooks.ruff(make(), ["check"], many)[0] == 2
 
 
 @needs_git

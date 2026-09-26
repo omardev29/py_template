@@ -479,20 +479,20 @@ def _status_line(cfg: Config, repo: Repo) -> tuple[bool | None, str, str]:
         return None, "git pre-commit hook outdated (another launcher path or template version)", "./deploy hooks install"
     if state == "calls":
         return True, f"git pre-commit hook: {_show(target, repo)} runs ./deploy hooks run", ""
-    if state == "other":
-        other = launcher_of(_read(target))
-        if chained and classify(local, repo) in ("installed", "outdated"):
-            return True, f"git pre-commit hook: {_show(target, repo)} runs this project's checks ({LOCAL}), then those of {other}", ""
+    other = launcher_of(_read(target)) if state == "other" else None
+    if other is not None and chained and classify(local, repo) in ("installed", "outdated"):
+        return True, f"git pre-commit hook: {_show(target, repo)} runs this project's checks ({LOCAL}), then those of {other}", ""
+    if repo.ignored():  # missing, foreign or another project's: none of ours, and this is why
+        return None, f"git pre-commit hook not installed: the repository at {repo.top} ignores this project", (
+            "git init the project to give it its own repository (or ./deploy hooks install --force)"
+        )
+    if other is not None:
         return None, f"git pre-commit hook: {_show(target, repo)} runs the checks of another project ({other}), not this one's", (
             f"./deploy hooks install --force keeps it as {LOCAL} (it runs first) and adds this project's checks"
         )
     if state == "foreign":
         return None, f"git pre-commit hook: {_show(target, repo)} is another tool's hook", (
             f"./deploy hooks install --force keeps it as {LOCAL}, runs it first, then pytemplate's checks"
-        )
-    if repo.ignored():
-        return None, f"git pre-commit hook not installed: the repository at {repo.top} ignores this project", (
-            "git init the project to give it its own repository (or ./deploy hooks install --force)"
         )
     off = "" if cfg.hooks.pre_commit else "   (hooks.pre_commit = false: ./deploy setup does not install it)"
     return None, "git pre-commit hook not installed", "./deploy hooks install" + off
@@ -531,7 +531,7 @@ def ensure_installed(cfg: Config, project: Path = ROOT) -> None:
             return
         target = repo.default_dir / HOOK
         state = classify(target, repo)
-        if state == "missing" and repo.ignored():
+        if state in ("missing", "foreign", "other") and repo.ignored():  # nothing of ours there: why
             ui.info(f"git pre-commit hook: not installed: {_ignored_message(repo)} (or: ./deploy hooks install --force)")
         elif state in ("missing", "outdated"):
             ui.ok(install(repo).splitlines()[0])
@@ -666,7 +666,7 @@ def ruff(cfg: Config, args: Sequence[str | Path], files: Sequence[str]) -> tuple
             r = envs.uv(envs.tool_env(cfg), [*RUFF, *args, *batch], capture=True, check=False, echo=False)
         except DeployError as e:  # uv missing or too old
             return e.code, str(e)
-        code = max(code, r.returncode)
+        code = max(code, r.returncode if r.returncode in (0, 1) else 2)  # 2: did not run (uv, a crash, a signal)
         out += [t.strip() for t in (r.stdout, r.stderr) if t.strip()]
     return code, "\n".join(out)
 
