@@ -473,29 +473,49 @@ def doctor(check: Check) -> None:
     )
 
 
-def _install_hint(windows: str, macos: str, linux: str) -> str:
+Hint = tuple[str, str, str]  # how to install a tool on Windows, macOS, Linux
+
+
+def _install_hint(hint: Hint | None) -> str:
+    """The install command of this host ("" without one), chosen when doctor runs."""
+    if hint is None:
+        return ""
+    windows, macos, linux = hint
     return "install it: " + (windows if IS_WINDOWS else macos if IS_MACOS else linux)
 
 
-TOOLS: tuple[tuple[tuple[str, ...], bool, str, str], ...] = (
-    # (names, required, what for, how to install)
-    (("git",), True, "lazy.nvim installs every plugin with git", ""),
-    (("curl",), True, "downloads (Mason packages, blink.cmp binaries)", ""),
-    (("tar",), True, "Mason unpacks its packages with tar", ""),
+TOOLS: tuple[tuple[tuple[str, ...], bool, str, Hint | None], ...] = (
+    # (names, required, what for, how to install: every required tool has one)
+    (
+        ("git",),
+        True,
+        "lazy.nvim installs every plugin with git",
+        ("winget install Git.Git (or scoop install git)", "xcode-select --install (or brew install git)", "sudo apt install git, sudo dnf install git, sudo pacman -S git"),
+    ),
+    (
+        ("curl",),
+        True,
+        "downloads (Mason packages, blink.cmp binaries)",
+        ("winget install cURL.cURL (or scoop install curl)", "brew install curl", "sudo apt install curl, sudo dnf install curl, sudo pacman -S curl"),
+    ),
+    (
+        ("tar",),
+        True,
+        "Mason unpacks its packages with tar",
+        ("Windows 10 1803 and later ship tar.exe in %SystemRoot%\\System32: put that folder back on PATH", "brew install gnu-tar", "sudo apt install tar, sudo dnf install tar, sudo pacman -S tar"),
+    ),
     (
         ("fd", "fdfind"),
         True,
         "venv-selector (LazyVim's lang.python extra, which .lazy.lua imports) raises an error on the first Python buffer without it",
-        _install_hint("scoop install fd (or winget install sharkdp.fd)", "brew install fd", "sudo apt install fd-find (Debian, Ubuntu: fdfind), sudo dnf install fd-find, sudo pacman -S fd"),
+        ("scoop install fd (or winget install sharkdp.fd)", "brew install fd", "sudo apt install fd-find (Debian, Ubuntu: fdfind), sudo dnf install fd-find, sudo pacman -S fd"),
     ),
-    (("rg",), False, "ripgrep: live grep in the pickers", ""),
-    (("tree-sitter",), False, "tree-sitter CLI builds the parsers (LazyVim installs it with Mason when missing)", ""),
-    (("python3", "python") if not IS_WINDOWS else ("python",), False, "Mason's PyPI packages (basedpyright, debugpy)", ""),
-    (("node",), False, "only for pyright from Mason (basedpyright needs no Node.js)", ""),
+    (("rg",), False, "ripgrep: live grep in the pickers", None),
+    (("tree-sitter",), False, "tree-sitter CLI builds the parsers (LazyVim installs it with Mason when missing)", None),
+    (("python3", "python") if not IS_WINDOWS else ("python",), False, "Mason's PyPI packages (basedpyright, debugpy)", None),
+    (("node",), False, "only for pyright from Mason (basedpyright needs no Node.js)", None),
 )
-CC_HINT = "nvim-treesitter compiles its parsers (LazyVim needs a C compiler): " + _install_hint(
-    "scoop install mingw, or the VS Build Tools", "xcode-select --install", "sudo apt install build-essential (or gcc/clang)"
-)
+CC_HINT: Hint = ("scoop install mingw, or the VS Build Tools", "xcode-select --install", "sudo apt install build-essential (or gcc/clang)")
 
 
 def _which_any(names: Sequence[str]) -> str | None:
@@ -576,9 +596,10 @@ def cmd_doctor(cfg: Config) -> int:
         if found:
             check(True, f"{names[0]}: {found}", "")
         else:
-            check(False if required else None, f"{names[0]} not found: {why}", hint)
+            check(False if required else None, f"{names[0]} not found: {why}", _install_hint(hint))
     cc = c_compiler()
-    check(cc is not None, f"C compiler: {cc}" if cc else "no C compiler (CC, gcc, cc, clang or MSVC)", CC_HINT)
+    cc_hint = "nvim-treesitter compiles its parsers (LazyVim needs a C compiler): " + _install_hint(CC_HINT)
+    check(cc is not None, f"C compiler: {cc}" if cc else "no C compiler (CC, gcc, cc, clang or MSVC)", cc_hint)
     try:
         # the one the runner runs on; the plugin searches the same places (init.uv_candidates)
         uv = proc.find_uv()

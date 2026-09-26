@@ -969,6 +969,25 @@ def test_nvim_doctor_needs_fd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, c
     assert code == 0 and "[ok] fd: /usr/bin/fdfind" in out, out
 
 
+@pytest.mark.parametrize(("os_name", "windows", "macos"), [("windows", True, False), ("macos", False, True), ("linux", False, False)])
+def test_nvim_doctor_says_how_to_install_every_required_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], os_name: str, windows: bool, macos: bool
+) -> None:
+    """The manual promises an install command for every required tool: git, curl and tar had
+    an empty hint (only fd and the C compiler had one), on every OS."""
+    assert [names[0] for names, required, _why, _hint in cmd_nvim.TOOLS if required] == ["git", "curl", "tar", "fd"]
+    monkeypatch.setattr(cmd_nvim, "IS_WINDOWS", windows)
+    monkeypatch.setattr(cmd_nvim, "IS_MACOS", macos)
+    command = {"windows": "winget", "macos": "brew", "linux": "apt"}[os_name]
+    code, out = _doctor(tmp_path, monkeypatch, capsys, tools={}, cc=None)
+    lines = out.splitlines()
+    assert code == 1
+    for label in ("git not found", "curl not found", "tar not found", "fd not found", "no C compiler"):
+        at = next(i for i, line in enumerate(lines) if label in line)
+        assert "install it: " in lines[at + 1] and len(lines[at + 1].split("install it: ", 1)[1]) > 5, (label, lines[at + 1])
+    assert command in "\n".join(line for line in lines if "install it: " in line), out
+
+
 def test_nvim_doctor_needs_a_c_compiler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """LazyVim lists a C compiler among its requirements: nvim-treesitter builds its parsers."""
     code, out = _doctor(tmp_path, monkeypatch, capsys, cc=None)

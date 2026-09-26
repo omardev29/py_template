@@ -2361,10 +2361,12 @@ LazyVim wiring:
   word), tools (`cmd_nvim.TOOLS`; required: git, curl, tar, fd or fdfind (venv-selector, from
   the `lang.python` extra `.lazy.lua` imports, raises an error on the first Python buffer
   without it) and a C compiler (nvim-treesitter builds its parsers; LazyVim lists it among its
-  requirements), with install hints; optional: rg, tree-sitter, python, node), the uv the
+  requirements), each with the install command of this OS (`cmd_nvim._install_hint`, chosen
+  when doctor runs); optional: rg, tree-sitter, python, node), the uv the
   runner runs on (the plugin runs `./deploy` and the uvx basedpyright with the uv it finds in
   the same places, never `uvx`), and ruff, mypy, debugpy in `.venv` (basedpyright optional)
-  (`test_nvim_doctor_needs_fd`, `test_nvim_doctor_needs_a_c_compiler`).
+  (`test_nvim_doctor_needs_fd`, `test_nvim_doctor_needs_a_c_compiler`,
+  `test_nvim_doctor_says_how_to_install_every_required_tool`).
 - Trust DB `<state>/trust`: lines `<sha256|!> <path>` (CRLF on Windows), path = real path
   (backslashes on Windows; `cmd_nvim.same_path`: case-insensitive on Windows, case- and
   Unicode-form-insensitive on macOS, where Neovim's key comes from realpath(3) with the on-disk
