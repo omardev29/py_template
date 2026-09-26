@@ -30,7 +30,8 @@ class Command:
 
 COMMANDS: dict[str, Command] = {
     # environment
-    "setup": Command("cmd_env", "cmd_setup", "Install interpreters and backend environments, lock deps and generate configs", group="Environment"),
+    "setup": Command("cmd_env", "cmd_setup", "First time on a clone: the same as apply (interpreters, environments, uv.lock, hook)", "[--force]", render=False, group="Environment"),
+    "apply": Command("cmd_apply", "cmd_apply", "Apply every pytemplate.toml change (rename, dependencies, uv.lock, envs, hook, configs)", "[--force]", render=False, group="Environment"),
     "doctor": Command("cmd_env", "cmd_doctor", "Check uv, compiler, PyPy, JIT, shells and generated files", group="Environment"),
     "sync": Command("cmd_env", "cmd_sync", "Run uv sync --locked on one or all environments", "[cpython|pypy|mypyc|all]", group="Environment"),
     "lock": Command("cmd_env", "cmd_lock", "Apply the managed parts of pyproject and re-lock uv.lock", "[--upgrade] [--upgrade-package PKG]", group="Environment"),
@@ -42,7 +43,7 @@ COMMANDS: dict[str, Command] = {
     "mode": Command("cmd_mode", "cmd_mode", "Show or change the mode (backend, supported, typing, JIT, editor)", "[BACKEND] [--supports +pypy|-pypy] [--typing off|warn|strict|auto] [--jit on|off] [--editor pylance|basedpyright]", group="Mode"),
     "render": Command("cmd_mode", "cmd_render", "Regenerate .mypy.ini, pyrightconfig.json, .ruff.toml and .vscode/", "[--check] [--diff] [--force]", render=False, group="Mode"),
     "init": Command("cmd_mode", "cmd_init", "Convert this project to a preset (script, raylib, flet)", "PRESET [--name NAME] [--force]", group="Mode"),
-    "rename": Command("rename", "cmd_rename", "Rename the app: src/<pkg>, imports, pytemplate.toml, pyproject.toml, uv.lock", "NEW_NAME [--force]", group="Mode"),
+    "rename": Command("rename", "cmd_rename", "Rename the app: src/<pkg>, imports, pytemplate.toml, pyproject.toml, uv.lock", "NEW_NAME [--force]", render=False, group="Mode"),
     "new": Command("cmd_mode", "cmd_new", "Create a new project from this template", "DIR [--preset P] [--name NAME]", render=False, group="Mode"),
     # development
     "run": Command("cmd_dev", "cmd_run", "Run the app (mypyc: compile first)", "[BACKEND] [app args...]", group="Development"),

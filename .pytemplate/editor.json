@@ -41,8 +41,14 @@
   "commands": [
     {
       "name": "setup",
-      "usage": "",
-      "summary": "Install interpreters and backend environments, lock deps and generate configs",
+      "usage": "[--force]",
+      "summary": "First time on a clone: the same as apply (interpreters, environments, uv.lock, hook)",
+      "group": "Environment"
+    },
+    {
+      "name": "apply",
+      "usage": "[--force]",
+      "summary": "Apply every pytemplate.toml change (rename, dependencies, uv.lock, envs, hook, configs)",
       "group": "Environment"
     },
     {

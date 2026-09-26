@@ -42,18 +42,10 @@ def ensure_lock(cfg: Config) -> None:
 
 
 def cmd_setup(cfg: Config, args: list[str]) -> int:
-    """setup: interpreters, uv.lock and the environments of every supported backend."""
-    only_flags("setup", args, ())
-    ui.step("setup")
-    ensure_lock(cfg)
-    for env in _envs_for(cfg, "all"):
-        ui.step(f"environment {env.key}: {rel(env.dir)} ({env.request})")
-        envs.sync(env)
-    _fix_exec_bit()
-    hooks.ensure_installed(cfg)
-    render.apply(cfg)
-    ui.ok("done. Try: ./deploy run  |  ./deploy test  |  ./deploy doctor")
-    return 0
+    """setup [--force]: the first-time name of ./deploy apply (one implementation: cmd_apply.apply)."""
+    from . import cmd_apply  # cmd_apply imports this module
+
+    return cmd_apply.apply(cfg, args, command="setup")
 
 
 def _fix_exec_bit() -> None:
@@ -231,6 +223,9 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
     for path in edited:
         check(False, f"{path} hand-edited", "Edit pytemplate.toml or .pytemplate/templates, or ./deploy render --force")
     check(not render.pyproject_outdated(cfg), "pyproject.toml matches pytemplate.toml", "./deploy lock")
+    from . import cmd_apply  # lazy: cmd_apply imports this module
+
+    cmd_apply.doctor(cfg, check)  # app.name, app.preset, [preset.*], hooks.pre_commit edited but not applied
     r = envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, capture=True, echo=False)
     check(r.returncode == 0, "uv.lock up to date", "./deploy lock")
 

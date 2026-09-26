@@ -200,6 +200,81 @@ def _set_extra_tables(text: str, extra: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+# --- names and option-driven dependencies (./deploy apply, ./deploy rename) ------------------------
+
+# Top-level standard-library modules of only SOME of the Pythons a project can run on (PyPy 3.11
+# ... the newest CPython). sys.stdlib_module_names only knows the runner's own version, and uv
+# keeps whatever Python ran ./deploy the first time (3.11 on one machine, 3.15 on another).
+STDLIB_OTHER_VERSIONS = frozenset(
+    {
+        "annotationlib", "compression", "profiling",  # new in 3.14 / 3.15
+        "aifc", "asynchat", "asyncore", "audioop", "cgi", "cgitb", "chunk", "crypt", "distutils",
+        "imghdr", "imp", "lib2to3", "mailcap", "msilib", "nis", "nntplib", "ossaudiodev", "pipes",
+        "smtpd", "sndhdr", "spwd", "sunau", "telnetlib", "uu", "xdrlib",  # removed in 3.12 / 3.13 (PyPy 3.11 has them)
+        "sre_compile", "sre_constants", "sre_parse",  # removed in 3.15
+    }
+)
+
+
+def shadows_stdlib(pkg: str) -> bool:
+    """Whether src/<pkg>/ would shadow a standard-library module on some supported Python."""
+    return pkg in sys.stdlib_module_names or pkg in STDLIB_OTHER_VERSIONS
+
+
+_PROJECT_HEADER = re.compile(r"(?m)^[ \t]*\[[ \t]*project[ \t]*\][ \t]*(?:#.*)?$")
+_ANY_HEADER = re.compile(r"(?m)^[ \t]*\[")
+_NAME_KEY = re.compile(r"""(?m)^([ \t]*name[ \t]*=[ \t]*)(?:"[^"\n]*"|'[^'\n]*')""")
+
+
+def set_project_name(text: str, name: str) -> str:
+    """Set `name` in the [project] table of a pyproject.toml text (either quote style, any
+    indentation; a `name` of another table is never touched). DeployError when the result does
+    not say [project] name = `name`, so no caller reports a change it did not make."""
+    new = text
+    header = _PROJECT_HEADER.search(text)
+    if header is not None:
+        nxt = _ANY_HEADER.search(text, header.end())
+        end = nxt.start() if nxt else len(text)
+        body = _NAME_KEY.sub(lambda m: f'{m.group(1)}"{name}"', text[header.end() : end], count=1)
+        new = text[: header.end()] + body + text[end:]
+    if project_name(new) != name:
+        raise DeployError(f'could not set [project] name = "{name}" in pyproject.toml: edit that line by hand and try again')
+    return new
+
+
+def project_name(text: str) -> str | None:
+    """Return [project] name of a pyproject.toml text (None: missing, not a string or not TOML)."""
+    try:
+        value = tomllib.loads(text.lstrip("\ufeff")).get("project", {}).get("name")
+    except (tomllib.TOMLDecodeError, AttributeError):
+        return None
+    return value if isinstance(value, str) else None
+
+
+def default_options(preset: str) -> dict[str, Any]:
+    """Return the [options] defaults of a preset (what `init` applies)."""
+    return dict(load(preset).get("options", {}))
+
+
+def option_dependencies(preset: str, opts: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Return the preset requirements that use an option ({version}, {package}), formatted with
+    `opts`: (dependencies, dev group). pytemplate.toml [preset.<name>] keeps them in sync; the
+    plain ones (rich, types-cffi) belong to the project after `init` (./deploy add/remove)."""
+    data = load(preset)
+    out: list[list[str]] = []
+    for key in ("dependencies", "dev_dependencies"):
+        reqs: list[str] = []
+        for template in data.get(key, []):
+            if "{" not in str(template):
+                continue
+            try:
+                reqs.append(str(template).format_map(opts))
+            except (KeyError, IndexError, ValueError) as e:
+                raise DeployError(f"preset {preset}: cannot format {template!r} with [preset.{preset}] ({e!r})") from None
+        out.append(reqs)
+    return out[0], out[1]
+
+
 # --- init / new --------------------------------------------------------------------------------
 
 
