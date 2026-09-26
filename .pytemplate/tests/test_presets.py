@@ -872,6 +872,37 @@ def test_new_from_a_project_keeps_the_manual_it_carries(tmp_path: Path, monkeypa
     assert tomllib.loads((dest / "pyproject.toml").read_text(encoding="utf-8"))["project"]["description"] == presets.load("script")["description"]
 
 
+@pytest.mark.parametrize(
+    "pyproject",
+    [
+        '[project]\nname = "old"\ndescription = """\nMy tool:\ncounts primes."""\nversion = "1"\n',
+        "[project]\nname = \"old\"\ndescription = '''My tool'''  # mine\nversion = \"1\"\n",
+        '[project]\r\nname = "old"\r\ndescription = "one line"\r\nversion = "1"\r\n',
+        '[project]\nname = "old"\nversion = "1"\n\n[tool.x]\ndescription = "not this one"\n',  # no description yet
+    ],
+    ids=["basic-multi-line", "literal-multi-line", "crlf", "missing"],
+)
+def test_make_own_sets_the_description_whatever_its_form(tmp_path: Path, pyproject: str) -> None:
+    """A triple-quoted description was half-replaced (invalid TOML: `new` then failed with a
+    misleading error), and a missing one was never written although README says new writes it."""
+    dest = tmp_path / "copy"
+    (dest / ".pytemplate").mkdir(parents=True)
+    (dest / "pyproject.toml").write_text(pyproject, encoding="utf-8", newline="")
+    presets._make_own(dest, "script", "demo")
+    data = tomllib.loads((dest / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["project"] == {"name": "old", "description": presets.load("script")["description"], "version": "1"}
+    assert data.get("tool", {}).get("x", {}).get("description") in (None, "not this one")
+
+
+def test_make_own_leaves_a_pyproject_without_a_project_table(tmp_path: Path) -> None:
+    dest = tmp_path / "copy"
+    (dest / ".pytemplate").mkdir(parents=True)
+    for text in ('[tool.x]\ndescription = "keep"\n', "[project\n"):  # init names what is wrong
+        (dest / "pyproject.toml").write_text(text, encoding="utf-8")
+        presets._make_own(dest, "script", "demo")
+        assert (dest / "pyproject.toml").read_text(encoding="utf-8") == text
+
+
 def test_project_readme_without_a_manual_points_at_the_template() -> None:
     readme = presets.project_readme("demo", "script", manual=False)
     assert presets.TEMPLATE_URL in readme.split("Made from", 1)[1] and ".pytemplate/README.md" not in readme
@@ -1423,6 +1454,10 @@ SAME = "<unchanged>"
         ('[project]\nversion = "1"\n\n[tool.x]\nname = "keep"\n', SAME),  # [project] has no name
         ('name = "top"\n\n[tool.x]\nname = "keep"\n', SAME),  # no [project] at all
         ('[project]\nnamespace = "x"\nname = "old"\n', '[project]\nnamespace = "x"\nname = "new"\n'),
+        # a multi-line string is never half-replaced (it was `name = "new""old"""`): callers check
+        ('[project]\nname = """old"""\n', SAME),
+        ("[project]\nname = '''old'''\n", SAME),
+        ('[project]\nname = ""\n', '[project]\nname = "new"\n'),
     ],
 )
 def test_set_project_name_only_touches_the_project_table(text: str, expected: str) -> None:

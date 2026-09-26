@@ -469,9 +469,10 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
 _PROJECT_HEADER = re.compile(r"[ \t]*\[[ \t]*project[ \t]*\][ \t\r]*(?:#.*)?")
 _TABLE_HEADER = re.compile(r"[ \t]*\[\[?[^\[\]\n]+\]\]?[ \t\r]*(?:#.*)?")
 def _string_key(key: str) -> re.Pattern[str]:
-    """A `key = "..."` (or '...') line, the key bare or quoted; group 1 is everything before the value."""
+    """A `key = "..."` (or '...') line, the key bare or quoted; group 1 is everything before the
+    value. A multi-line string never matches (its opening quotes are not an empty string)."""
     k = re.escape(key)
-    return re.compile(rf"""([ \t]*(?:{k}|"{k}"|'{k}')[ \t]*=[ \t]*)(?:"(?:[^"\\\n]|\\.)*"|'[^'\n]*')""")
+    return re.compile(rf"""([ \t]*(?:{k}|"{k}"|'{k}')[ \t]*=[ \t]*)(?:"(?:[^"\\\n]|\\.)*"(?!")|'[^'\n]*'(?!'))""")
 
 
 def _set_project_string(text: str, key: str, value: str) -> str:
@@ -1045,8 +1046,26 @@ def _make_own(dest: Path, preset: str, name: str) -> None:
     pyproject = dest / PYPROJECT.name
     if pyproject.is_file():
         text = _read_text(pyproject, "pyproject.toml of the copy").replace("\r\n", "\n")
-        description = str(load(preset).get("description", ""))
-        pyproject.write_text(_set_project_string(text, "description", description), encoding="utf-8", newline="\n")
+        pyproject.write_text(_set_description(text, str(load(preset).get("description", ""))), encoding="utf-8", newline="\n")
+
+
+def _set_description(text: str, description: str) -> str:
+    """`text` (a pyproject.toml) with [project] description = `description`, whatever form the
+    old value has (a multi-line string too) and added when missing (config.set_value checks the
+    result). Unchanged, with a warning, when the file has no [project] table or an unusual
+    layout: the description is not worth failing `new` for (init checks the rest)."""
+    from . import config
+
+    try:
+        if not isinstance(tomllib.loads(text).get("project"), dict):
+            return text
+    except tomllib.TOMLDecodeError:
+        return text  # init says what is wrong with it
+    try:
+        return config.set_value(text, "project", "description", description)
+    except DeployError:
+        ui.warn("new: could not set [project] description in the copy's pyproject.toml: set it by hand")
+        return text
 
 
 def new(dest: Path, preset: str, name: str | None) -> None:

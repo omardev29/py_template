@@ -1666,8 +1666,9 @@ Per method:
   (`pyproject_after_init`: name and managed parts without the old preset tables, then the new
   ones) parsed and checked: a preset table outside the markers, a damaged or repeated preset
   marker (`_extra_bounds`) or a `[project]` table without `name` is a `DeployError` (exit 2).
-  `_set_project_name` only touches the `name` of `[project]` (any quoting, CRLF kept: `rename`
-  uses it too), and the text is split on `\n` only (a U+2028 inside a TOML string is not a
+  `_set_project_name` only touches the `name` of `[project]` (either one-line quoting, CRLF
+  kept: `rename` uses it too; a multi-line string is left alone, so the callers' check stops),
+  and the text is split on `\n` only (a U+2028 inside a TOML string is not a
   line break). `--dry-run __init` prints the plan (`cmd_mode._plan_init`).
   `presets.init` then (1) writes `pyproject.toml` and runs `uv remove --frozen` (no
   resolution) for the old preset's requirements and every declared one the new preset adds in
@@ -1716,7 +1717,9 @@ Per method:
   project made with `new` is another program, not the template (an owner decision): `new`
   (`presets._make_own`) writes its own `README.md` (`presets.project_readme`: name, preset
   description, getting started) and sets `[project] description` to the preset's
-  (`_set_project_string`), and, from the template repository only (the `template-repo`
+  (`_set_description` through `config.set_value`: a multi-line string is replaced whole, a
+  missing key is added, an unusual layout is only a warning), and, from the template
+  repository only (the `template-repo`
   marker), copies the template's `README.md` and `LICENSE` to `.pytemplate/README.md` (the
   manual of `./deploy`, of that version) and `.pytemplate/LICENSE` (the MIT notice that must
   travel with the copied runner): `presets.TEMPLATE_DOCS`. A project running `new` passes
