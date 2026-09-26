@@ -79,11 +79,31 @@ def _supports_after(cfg: Config, spec: str) -> list[str]:
     return out
 
 
+# mypy flags of the 3.11 API check: never the project's .mypy.ini (the default typing profile
+# "off" sets ignore_errors = True there, which hid every error), and the bodies of unannotated
+# functions are checked too. Only the errors that appear as 3.11 and not as python.cpython count.
+PRECHECK_MYPY_FLAGS = (
+    "--config-file=",  # an empty value: no config file at all
+    "--check-untyped-defs",
+    "--no-incremental",
+    "--ignore-missing-imports",
+    "--follow-imports", "silent",
+    "--no-error-summary",
+    "--hide-error-context",
+)
+
+
 def _precheck_py311(cfg: Config) -> None:
     """Check that the code is valid on Python 3.11 before adding PyPy support.
 
-    Under --dry-run both checks still run, but with `uv run --no-sync` so the environment is
-    never installed or updated (and they are skipped when it does not exist yet).
+    Two checks, both independent of the typing profile: ruff's syntax rules for 3.11, then the
+    mypy errors that appear only when checking as 3.11 (an API that 3.11 lacks, e.g.
+    typing.override). A tool that cannot run (a stale uv.lock, a failed install, mypy aborting)
+    is reported as such: it is never blamed on the code and never passes silently.
+
+    The tools environment is synced first; both tools then run with `uv run --no-sync`, so a
+    failure of uv shows up in uv's own step. Under --dry-run nothing is synced: the checks run
+    read-only, and are skipped when the environment does not exist yet.
     """
     ui.step("checking that the code is valid on Python 3.11 (required by PyPy)")
     tool = envs.tool_env(cfg)
@@ -91,10 +111,12 @@ def _precheck_py311(cfg: Config) -> None:
     if dry and not tool.python.is_file():
         ui.info(f"  (--dry-run) skipped: {rel(tool.dir)} does not exist yet (./deploy setup), and creating it is a side effect")
         return
-    run = ["run", "--locked", "--no-sync"] if dry else ["run", "--locked"]
-    dirs = code_dirs()
     if dry:
         ui.info("  (--dry-run) running the read-only checks: ruff and mypy as Python 3.11, with uv run --no-sync")
+    else:
+        envs.sync(tool)  # a stale uv.lock or a failed install fails HERE, with uv's own message
+    run = ["run", "--locked", "--no-sync"]
+    dirs = code_dirs()
     # 1) syntax: ruff reports syntax that does not exist in the target version as an error
     r = envs.uv(
         tool,
@@ -102,18 +124,22 @@ def _precheck_py311(cfg: Config) -> None:
         check=False,
         echo=not dry,  # proc.run skips echoed commands under --dry-run
     )
-    if r.returncode != 0:
+    if r.returncode == 1:  # ruff: 1 = findings
         raise DeployError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
+    if r.returncode != 0:  # 2 = ruff (or uv starting it) failed: nothing was checked
+        raise DeployError(f"could not run ruff for the Python 3.11 check (exit code {r.returncode}, see above)")
 
     # 2) APIs: mypy errors that appear ONLY when checking as 3.11 (e.g. typing.override)
     def mypy_errors(version: str) -> set[str]:
         argv = [
-            *run, "mypy", "--no-incremental", "--ignore-missing-imports",
-            "--follow-imports", "silent", "--no-error-summary", "--hide-error-context",
+            *run, "mypy", *PRECHECK_MYPY_FLAGS,
             "--python-version", version, "--python-executable", str(tool.python), *dirs,
         ]
-        out = envs.uv(tool, argv, capture=True, check=False, echo=False).stdout
-        return {ln.strip() for ln in out.splitlines() if ": error:" in ln}
+        r = envs.uv(tool, argv, capture=True, check=False, echo=False)
+        if r.returncode not in (0, 1):  # 2 = mypy (or uv starting it) aborted: nothing was checked
+            ui.info(((r.stdout or "") + (r.stderr or "")).rstrip())
+            raise DeployError(f"mypy could not check the code as Python {version} (exit code {r.returncode}, see above)")
+        return {ln.strip() for ln in (r.stdout or "").splitlines() if ": error:" in ln}
 
     new = sorted(mypy_errors("3.11") - mypy_errors(cfg.python.cpython))
     if new:
