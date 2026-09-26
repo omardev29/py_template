@@ -164,11 +164,11 @@ def cmd_help(cfg: object, args: list[str]) -> int:
 
 def cmd_tasks(cfg: object, args: list[str]) -> int:
     from . import tasks
-    from .cmd_dev import only_flags
     from .config import Config
 
     assert isinstance(cfg, Config)
-    only_flags("tasks", args, ())
+    if args:
+        raise DeployError(f"tasks: unrecognized arguments: {' '.join(args)}  (it takes no arguments)")
     tasks.list_tasks(cfg)
     return 0
 
@@ -188,7 +188,10 @@ def cmd_selftest(cfg: object, args: list[str]) -> int:
         if proc.DRY_RUN:
             # The suites start their shells, Neovim and ./deploy runs themselves (not through
             # proc.run), in scratch folders: nothing of them can be skipped and still mean anything
-            raise DeployError(f"selftest {args[0]} has no --dry-run: it only writes into its own scratch folders; run it without --dry-run")
+            raise DeployError(
+                f"selftest {args[0]} has no --dry-run: it runs real shells, projects and builds, "
+                "only in its own scratch folders; run it without --dry-run"
+            )
         return suites[args[0]](cfg, args[1:])
     tool = envs.tool_env(cfg)
     code = envs.uv_run(tool, ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", TEMPLATE / "tests", *args], check=False).returncode

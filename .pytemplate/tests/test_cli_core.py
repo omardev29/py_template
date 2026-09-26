@@ -29,7 +29,7 @@ sys.path.insert(0, str(TEMPLATE_DIR))
 
 from runner import cli, cmd_dev, cmd_env, config, e2e, envs, lintc, mypyc, nvimtest, presets, proc, render, shells, tasks, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
-from runner.project import BUILD, DIST, ROOT, SRC, venv_python  # noqa: E402
+from runner.project import BUILD, DIST, ROOT, SRC  # noqa: E402
 from runner.ui import DeployError  # noqa: E402
 
 DEPLOY_PY = TEMPLATE_DIR / "deploy.py"
@@ -1253,14 +1253,14 @@ class FakeTests:
         self.calls.append((env.key, [str(a) for a in argv], dict(extra)))
         return completed(argv, self.codes.get(backend, 0))
 
-    def build(self, _cfg: Config, profile: str, **_kw: Any) -> Path:
+    def build(self, _cfg: Config, _profile: str, **_kw: Any) -> Path:
         if isinstance(self.codes.get("build"), int):
             raise DeployError("mypyc failed (exit code 1)", 1)
         return self.stage
 
 
 @pytest.fixture
-def fake_tests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeTests:
+def fake_tests(monkeypatch: pytest.MonkeyPatch) -> FakeTests:
     fake = FakeTests(ROOT / ".build" / "pt-stage")
     monkeypatch.setattr(envs, "uv_run", fake.uv_run)
     monkeypatch.setattr(mypyc, "build", fake.build)
@@ -1319,7 +1319,8 @@ def test_run_returns_the_apps_code(fake_tests: FakeTests) -> None:
         cmd_dev.cmd_run(cfg, ["pypy"])
 
 
-def test_report_needs_mypyc_and_never_opens_a_browser_in_a_dry_run(fake_tests: FakeTests, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.usefixtures("fake_tests")
+def test_report_needs_mypyc_and_never_opens_a_browser_in_a_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(DeployError, match="report comes from mypyc"):
         cmd_dev.cmd_report(make({"backend": {"supported": ["cpython"]}}), [])
     monkeypatch.setattr(cmd_dev.webbrowser, "open", fail)
