@@ -228,7 +228,7 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
         raise DeployError(f"mode: {', '.join(repeated)} given more than once; give each option once")
     ns = _parse(parser, fixed)
     if ns.supports is not None and not ns.supports.strip():
-        raise DeployError(_NEEDS_VALUE)
+        raise DeployError("mode --supports needs a value: +pypy, -pypy or a list such as cpython,mypyc")
     if not any((ns.backend, ns.supports, ns.typing, ns.jit, ns.editor)):
         _describe(cfg)
         return 0
