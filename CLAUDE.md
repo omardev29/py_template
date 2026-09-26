@@ -2031,8 +2031,14 @@ LazyVim wiring:
   trust test skips below 0.9, which brought `vim.secure`).
 - `doctor` (default; exit 1 on real problems): Neovim >= 0.11.2 (`MIN_LAZYVIM`), LazyVim
   installed, no `local_spec = false`, the trust of `.lazy.lua`, missing extras in
-  `lazyvim.json`, tools (git, curl, tar required; rg, fd, tree-sitter, python, node, uvx, a C
-  compiler optional), and ruff, mypy, debugpy in `.venv` (basedpyright optional).
+  `lazyvim.json` (an unreadable one is a note naming the JSON error: LazyVim skips it without a
+  word), tools (`cmd_nvim.TOOLS`; required: git, curl, tar, fd or fdfind (venv-selector, from
+  the `lang.python` extra `.lazy.lua` imports, raises an error on the first Python buffer
+  without it) and a C compiler (nvim-treesitter builds its parsers; LazyVim lists it among its
+  requirements), with install hints; optional: rg, tree-sitter, python, node), the uv the
+  runner runs on (the plugin runs `./deploy` and the uvx basedpyright with the uv it finds in
+  the same places, never `uvx`), and ruff, mypy, debugpy in `.venv` (basedpyright optional)
+  (`test_nvim_doctor_needs_fd`, `test_nvim_doctor_needs_a_c_compiler`).
 - Trust DB `<state>/trust`: lines `<sha256|!> <path>` (CRLF on Windows), path = real path
   (backslashes on Windows; `cmd_nvim.same_path`: case-insensitive on Windows, case- and
   Unicode-form-insensitive on macOS, where Neovim's key comes from realpath(3) with the on-disk
@@ -3106,8 +3112,10 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   `test_workarounds.py::test_nvim_plugin_workarounds[overseer]`. Goes: never.
 - **venv-selector (LazyVim's `lang.python`) needs `fd`** (LIMITATION, documented): without it it
   raises an error on the first Python buffer, which failed every smoke check that opens one.
-  Fix: `template-nvim.yml` installs `fd` (`fdfind` on Ubuntu) (13.2). Test: CI only (that
-  workflow's smoke run fails without it). Goes: never.
+  Fix: `template-nvim.yml` installs `fd` (`fdfind` on Ubuntu) (13.2); `./deploy nvim doctor`
+  counts a missing fd as a problem, with the install command (`cmd_nvim.TOOLS`, 12.2). Test:
+  `test_cmd_nvim.py::test_nvim_doctor_needs_fd`; CI (that workflow's smoke run fails without
+  it). Goes: never.
 - **A grandchild keeps a pipe open** (LIMITATION, every OS): git or Mason outliving a killed
   Neovim blocked the harness's wait forever. Fix: the harnesses write to files and kill the
   whole tree (`nvimtest._run_logged`, `nvimtest.kill_tree`; `e2e`, `shells` alike; 13.1). Test:

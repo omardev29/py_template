@@ -1070,7 +1070,8 @@ details.
 **First time**, after `./deploy setup`:
 
 ```sh
-./deploy nvim doctor      # Neovim, LazyVim, the trust of .lazy.lua, extras and tools, with hints
+./deploy nvim doctor      # Neovim, LazyVim, the trust of .lazy.lua, extras and tools (git, curl,
+                          # tar, fd, a C compiler), with hints
 ./deploy nvim bootstrap   # only without a Neovim config: installs the LazyVim starter
                           # (then start nvim once, so LazyVim installs itself)
 ./deploy nvim trust       # trust this project's .lazy.lua (once per clone or folder)

@@ -337,13 +337,12 @@ def load_lazyvim_json(path: Path) -> dict[str, Any]:
 
 
 def missing_extras(path: Path, wanted: Sequence[str] = EXTRAS) -> list[str] | None:
-    """Return the `wanted` extras absent from lazyvim.json (None if it does not exist or is invalid)."""
+    """Return the `wanted` extras absent from lazyvim.json (None if it does not exist).
+
+    An unreadable file raises DeployError (load_lazyvim_json): it is not "missing"."""
     if not path.is_file():
         return None
-    try:
-        data = load_lazyvim_json(path)
-    except DeployError:
-        return None
+    data = load_lazyvim_json(path)
     extras = data.get("extras")
     have = set(extras) if isinstance(extras, list) else set()
     return [e for e in wanted if e not in have]
@@ -474,17 +473,28 @@ def doctor(check: Check) -> None:
     )
 
 
-TOOLS: tuple[tuple[tuple[str, ...], bool, str], ...] = (
-    # (names, required, what for)
-    (("git",), True, "lazy.nvim installs every plugin with git"),
-    (("curl",), True, "downloads (Mason packages, blink.cmp binaries)"),
-    (("tar",), True, "Mason unpacks its packages with tar"),
-    (("rg",), False, "ripgrep: live grep in the pickers"),
-    (("fd", "fdfind"), False, "fd: faster file pickers"),
-    (("tree-sitter",), False, "tree-sitter CLI builds the parsers (LazyVim installs it with Mason when missing)"),
-    (("python3", "python") if not IS_WINDOWS else ("python",), False, "Mason's PyPI packages (basedpyright, debugpy)"),
-    (("node",), False, "only for pyright from Mason (basedpyright needs no Node.js)"),
-    (("uvx",), False, "runs basedpyright when .venv has no basedpyright-langserver"),
+def _install_hint(windows: str, macos: str, linux: str) -> str:
+    return "install it: " + (windows if IS_WINDOWS else macos if IS_MACOS else linux)
+
+
+TOOLS: tuple[tuple[tuple[str, ...], bool, str, str], ...] = (
+    # (names, required, what for, how to install)
+    (("git",), True, "lazy.nvim installs every plugin with git", ""),
+    (("curl",), True, "downloads (Mason packages, blink.cmp binaries)", ""),
+    (("tar",), True, "Mason unpacks its packages with tar", ""),
+    (
+        ("fd", "fdfind"),
+        True,
+        "venv-selector (LazyVim's lang.python extra, which .lazy.lua imports) raises an error on the first Python buffer without it",
+        _install_hint("scoop install fd (or winget install sharkdp.fd)", "brew install fd", "sudo apt install fd-find (Debian, Ubuntu: fdfind), sudo dnf install fd-find, sudo pacman -S fd"),
+    ),
+    (("rg",), False, "ripgrep: live grep in the pickers", ""),
+    (("tree-sitter",), False, "tree-sitter CLI builds the parsers (LazyVim installs it with Mason when missing)", ""),
+    (("python3", "python") if not IS_WINDOWS else ("python",), False, "Mason's PyPI packages (basedpyright, debugpy)", ""),
+    (("node",), False, "only for pyright from Mason (basedpyright needs no Node.js)", ""),
+)
+CC_HINT = "nvim-treesitter compiles its parsers (LazyVim needs a C compiler): " + _install_hint(
+    "scoop install mingw, or the VS Build Tools", "xcode-select --install", "sudo apt install build-essential (or gcc/clang)"
 )
 
 
@@ -540,21 +550,25 @@ def cmd_doctor(cfg: Config) -> int:
     check(trust.state == "trusted", f".lazy.lua {trust.describe()}", "./deploy nvim trust   (or open Neovim here: (v)iew, :trust, restart)")
     if trust.state != "missing":
         ui.detail(f"         {trust.path}  sha256 {trust.sha256}  (database: {nv.trust_db})")
-    missing = missing_extras(nv.lazyvim_json)
-    if missing is None:
-        if installed:
-            check(None, f"{nv.lazyvim_json} not found", "Start Neovim once: LazyVim creates it (then ./deploy nvim extras)")
-    elif missing:
-        check(
-            None,
-            "extras not enabled in lazyvim.json: " + ", ".join(short_extra(e) for e in missing),
-            ".lazy.lua imports them anyway; ./deploy nvim extras makes it permanent and silences LazyVim's import-order warning",
-        )
+    try:
+        missing = missing_extras(nv.lazyvim_json)
+    except DeployError as e:  # LazyVim itself skips such a file without a word
+        check(None, str(e), "LazyVim ignores an unreadable lazyvim.json (the extras it lists do not load): fix it by hand")
     else:
-        check(True, "recommended extras enabled in lazyvim.json", "")
+        if missing is None:
+            if installed:
+                check(None, f"{nv.lazyvim_json} not found", "Start Neovim once: LazyVim creates it (then ./deploy nvim extras)")
+        elif missing:
+            check(
+                None,
+                "extras not enabled in lazyvim.json: " + ", ".join(short_extra(e) for e in missing),
+                ".lazy.lua imports them anyway; ./deploy nvim extras makes it permanent and silences LazyVim's import-order warning",
+            )
+        else:
+            check(True, "recommended extras enabled in lazyvim.json", "")
 
     ui.step("tools")
-    for names, required, why in TOOLS:
+    for names, required, why, hint in TOOLS:
         found = _which_any(names)
         if found and IS_WINDOWS and "windowsapps" in found.lower() and names[-1] == "python":
             check(None, f"python is the Microsoft Store alias ({found})", "Install a real Python (scoop install python, or python.org) for Mason's PyPI packages")
@@ -562,9 +576,17 @@ def cmd_doctor(cfg: Config) -> int:
         if found:
             check(True, f"{names[0]}: {found}", "")
         else:
-            check(False if required else None, f"{names[0]} not found: {why}", "")
+            check(False if required else None, f"{names[0]} not found: {why}", hint)
     cc = c_compiler()
-    check(cc is not None, f"C compiler: {cc}" if cc else "no C compiler (CC, gcc, cc, clang or MSVC)", "nvim-treesitter compiles its parsers (scoop install mingw, or VS Build Tools)")
+    check(cc is not None, f"C compiler: {cc}" if cc else "no C compiler (CC, gcc, cc, clang or MSVC)", CC_HINT)
+    try:
+        # the one the runner runs on; the plugin searches the same places (init.uv_candidates)
+        uv = proc.find_uv()
+    except DeployError:
+        check(None, "uv not found", "")
+    else:
+        check(True, f"uv: {uv}", "")
+        ui.detail("         the plugin runs ./deploy with it, and basedpyright (uv tool run) when .venv has none")
 
     ui.step("project")
     venv = envs.tool_env(cfg).dir

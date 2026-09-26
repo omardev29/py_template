@@ -846,6 +846,81 @@ def test_run_preset_fails_when_the_extras_miss_their_pins(tmp_path: Path, monkey
     assert "overseer.nvim at ffffffffffff, pinned bbbbbbbbbbbb" in row.error and "lazy-install.log" in row.error
 
 
+# --- nvim doctor ------------------------------------------------------------------------------------
+
+EVERY_TOOL = {name: f"/usr/bin/{name}" for name in ("git", "curl", "tar", "rg", "fd", "tree-sitter", "python3", "python", "node")}
+
+
+def _doctor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    tools: dict[str, str] = EVERY_TOOL,
+    cc: str | None = "/usr/bin/gcc",
+    lazyvim_json: str | None = None,
+) -> tuple[int, str]:
+    """nvim doctor with Neovim, the tools, the trust and the project's .venv faked."""
+    from types import SimpleNamespace
+
+    from runner import config
+    from runner.config import Config
+
+    nv = cmd_nvim.Nvim("nvim", (0, 12, 5), tmp_path / "c", tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    (nv.config / "lua" / "config").mkdir(parents=True)
+    (nv.config / "lua" / "config" / "lazy.lua").write_text("", encoding="utf-8")
+    if lazyvim_json is None:
+        lazyvim_json = json.dumps({"extras": list(cmd_nvim.EXTRAS), "version": 8})
+    if lazyvim_json:
+        nv.lazyvim_json.write_text(lazyvim_json, encoding="utf-8")
+    monkeypatch.setattr(cmd_nvim, "find_nvim", lambda: "nvim")
+    monkeypatch.setattr(cmd_nvim, "query", lambda exe=None, env=None: nv)
+    monkeypatch.setattr(cmd_nvim, "which", lambda name: tools.get(name))
+    monkeypatch.setattr(cmd_nvim, "c_compiler", lambda: cc)
+    monkeypatch.setattr(cmd_nvim, "trust_status", lambda db, f: cmd_nvim.Trust("trusted", str(f), "x", "x"))
+    monkeypatch.setattr(cmd_nvim.proc, "find_uv", lambda: "/opt/uv/bin/uv")
+    monkeypatch.setattr(cmd_nvim.envs, "tool_env", lambda cfg: SimpleNamespace(dir=tmp_path))
+    monkeypatch.setattr(cmd_nvim, "_venv_exe", lambda env_dir, name: Path(__file__))
+    monkeypatch.setattr(cmd_nvim, "_has_package", lambda env_dir, package: True)
+    cfg: Config = config._build(Config, {}, "")
+    code = cmd_nvim.cmd_doctor(cfg)
+    return code, capsys.readouterr().err
+
+
+def test_nvim_doctor_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out = _doctor(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "Neovim integration ready" in out, out
+    # the plugin runs ./deploy (and basedpyright: uv tool run) with the uv it finds itself, never uvx
+    assert "[ok] uv: /opt/uv/bin/uv" in out and "uvx" not in out, out
+
+
+def test_nvim_doctor_needs_fd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """venv-selector (LazyVim's lang.python extra, which .lazy.lua imports) raises an error on the
+    first Python buffer of every session without fd: not an optional "faster pickers" tool."""
+    tools = {k: v for k, v in EVERY_TOOL.items() if k != "fd"}
+    code, out = _doctor(tmp_path, monkeypatch, capsys, tools=tools)
+    assert code == 1 and "[XX] fd not found" in out and "venv-selector" in out, out
+    assert re.search(r"install.*fd", out), "an install hint"
+    code, out = _doctor(tmp_path / "debian", monkeypatch, capsys, tools={**tools, "fdfind": "/usr/bin/fdfind"})
+    assert code == 0 and "[ok] fd: /usr/bin/fdfind" in out, out
+
+
+def test_nvim_doctor_needs_a_c_compiler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """LazyVim lists a C compiler among its requirements: nvim-treesitter builds its parsers."""
+    code, out = _doctor(tmp_path, monkeypatch, capsys, cc=None)
+    assert code == 1 and "[XX] no C compiler" in out and "nvim-treesitter" in out, out
+
+
+def test_nvim_doctor_tells_an_invalid_lazyvim_json_from_a_missing_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out = _doctor(tmp_path, monkeypatch, capsys, lazyvim_json='{ "extras": [ "a", ] }')
+    assert "cannot read it as JSON" in out and "not found" not in out, out
+    assert code == 0, "a note: LazyVim ignores it, .lazy.lua imports the extras anyway"
+    code, out = _doctor(tmp_path / "fresh", monkeypatch, capsys, lazyvim_json="")
+    assert "lazyvim.json not found" in out and code == 0, out
+    with pytest.raises(DeployError, match="cannot read it as JSON"):
+        cmd_nvim.missing_extras(tmp_path / "c" / "lazyvim.json")
+
+
 def test_c_compiler_skips_the_macos_shims_without_developer_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     from runner import cmd_env
 

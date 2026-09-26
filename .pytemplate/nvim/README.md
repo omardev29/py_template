@@ -6,7 +6,10 @@ It needs no Python tooling setup in Neovim: every tool comes from the project's 
 ## First time
 
 Requires Neovim 0.11.2 or newer with LazyVim (`./deploy nvim doctor` checks both;
-`./deploy nvim bootstrap` installs the LazyVim starter when you have no Neovim config yet).
+`./deploy nvim bootstrap` installs the LazyVim starter when you have no Neovim config yet), plus
+git, curl, tar, `fd` (the venv-selector of LazyVim's `lang.python` extra raises an error without
+it) and a C compiler (nvim-treesitter builds its parsers): `nvim doctor` names what is missing
+and how to install it.
 
 1. `./deploy setup` (creates `.venv` with ruff, mypy and debugpy, pinned by `uv.lock`).
 2. Trust `.lazy.lua` once per clone: `./deploy nvim trust`, or open Neovim in the project, pick
