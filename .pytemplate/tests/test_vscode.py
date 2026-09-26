@@ -910,8 +910,9 @@ def test_real_check_and_compile_output_lands_in_src(defects: Path) -> None:
 def test_real_pytest_under_mypyc_lands_in_src(defects: Path, compiled: str) -> None:
     _stage(defects, compiled)
     lines = _run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", f"pythonpath={STAGE}"], defects)
-    assert any(ln.startswith(".build/mypyc-dev/stage/myapp/app.py:5: ValueError") for ln in lines), lines  # the stage copy
-    assert any(ln.startswith("myapp/core/bench.py:5: ZeroDivisionError") for ln in lines), lines  # the path mypyc recorded
+    stage_copy = re.compile(r"\.build[\\/]mypyc-dev[\\/]stage[\\/]myapp[\\/]app\.py:5: ValueError")
+    assert any(stage_copy.match(ln) for ln in lines), lines  # the interpreted module, from the stage
+    assert any(re.match(r"myapp[\\/]core[\\/]bench\.py:5: ZeroDivisionError", ln) for ln in lines), lines  # mypyc's path
     for label in ("deploy: test mypyc", "deploy: test all"):
         assert _problems(lines, by_label(make("script"))[label], defects) == TEST_PROBLEMS, (label, lines)
 
