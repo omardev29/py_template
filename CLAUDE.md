@@ -496,6 +496,7 @@ header rules (with detector tests proving each rule fires).
 | `PYTEMPLATE_COMPILED` | `mypyc.runtime_env_vars` | Modules that must load from `.pyd/.so` (conftest) |
 | `PYTEMPLATE_ASSETS` | `portable/boot.py`, `pyz/__main__.py` (setdefault) | Assets dir for `resources.assets_dir()` (raylib, flet) |
 | `VSLANG=1033` | `mypyc.build`, wheel builds | English MSVC messages |
+| `MACOSX_DEPLOYMENT_TARGET` | `methods.common.install_deps` for macOS targets, unless the user set it (`MACOS_FLOOR`, 13.0) | The oldest macOS the pyz/portable wheels must support |
 | `RUFF_OUTPUT_FORMAT=concise` | VS Code tasks with the ruff matcher, Neovim tasks that parse output | One-line ruff output for the parsers |
 | `NO_COLOR` (non-empty), `TERM=dumb` | user | Disable runner colours |
 | `CI` | CI | Disables the install prompt of `deploy` and `deploy.ps1`; `selftest --e2e` skips GUI runs on Windows/macOS CI |

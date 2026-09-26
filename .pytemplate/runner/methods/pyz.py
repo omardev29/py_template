@@ -194,7 +194,13 @@ def _read_info(part: Path) -> dict[str, Any]:
             info = json.loads(archive.read("_pyz.json"))
     except (KeyError, ValueError, zipfile.BadZipFile, OSError) as e:
         raise DeployError(f"pyz-merge: {part} has no valid _pyz.json ({e}): build it with ./deploy build ... --method pyz") from None
-    if not isinstance(info, dict) or any(k not in info for k in INFO_KEYS) or not isinstance(info["targets"], list):
+    if not isinstance(info, dict) or not (
+        all(k in info for k in INFO_KEYS)
+        and isinstance(info["name"], str)
+        and isinstance(info["targets"], list)
+        and isinstance(info["min_python"], list)
+        and all(isinstance(x, int) for x in info["min_python"])
+    ):
         raise DeployError(f"pyz-merge: {part} has no valid _pyz.json: build it with ./deploy build ... --method pyz")
     return info
 
@@ -265,6 +271,8 @@ def merge(parts: list[Path], out: Path) -> Path:
                 for member in archive.namelist():
                     if member.endswith("/") or member == "_pyz.json":
                         continue
+                    if member.startswith(("/", "\\")) or ".." in member.replace("\\", "/").split("/") or ":" in member:
+                        raise DeployError(f"pyz-merge: {part} holds an unsafe member name {member!r}")
                     if member.startswith("common/lib/"):
                         if n in moved:  # a pure part next to per-platform ones: its lib is its host's
                             if lib_from[moved[n]] != n:

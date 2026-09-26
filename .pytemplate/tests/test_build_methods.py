@@ -854,6 +854,7 @@ def test_pyz_wrapper_gui_runs_windowed(backend: str, windowed: list[str]) -> Non
     assert [ln for ln in lines if ">nul 2>nul" in ln][0].split(" -c ")[0] in ("py -3.14", "pypy3")  # the probe keeps console names
     console = pyz._wrapper_cmd(make({"backend": {"supported": ["cpython", "pypy"]}}), backend, "a.pyz")
     assert 'start ""' not in console and "pythonw" not in console and "pyw" not in console
+    assert "PYTHON_MANAGER_" not in console  # the Python install manager's settings stay the user's
 
 
 # --- pyz-merge ------------------------------------------------------------------------------------
@@ -951,11 +952,23 @@ def test_pyz_merge_refuses_invalid_parts(tmp_path: Path) -> None:
     partial = tmp_path / "partial.zip"
     with zipfile.ZipFile(partial, "w") as z:
         z.writestr("_pyz.json", json.dumps({"name": "demo"}))
+    wrong_type = tmp_path / "wrong-type.zip"
+    with zipfile.ZipFile(wrong_type, "w") as z:
+        z.writestr("_pyz.json", json.dumps({"name": "demo", "build_id": "x", "min_python": "3.11", "targets": [], "pure": True}))
     out = tmp_path / "out.pyz"
-    for bad in (no_info, broken, partial):
+    for bad in (no_info, broken, partial, wrong_type):
         with pytest.raises(DeployError, match="no valid _pyz.json"):  # was a KeyError traceback
             _merge([good, bad], out)
     assert not out.exists()
+    # A member name that climbs out of the scratch folder is refused, never written
+    evil = tmp_path / "evil.zip"
+    with zipfile.ZipFile(good) as src, zipfile.ZipFile(evil, "w") as dst:
+        for item in src.infolist():
+            dst.writestr(item, src.read(item.filename))
+        dst.writestr(f"targets/{FOREIGN}/lib/../../../../escaped.py", "x")
+    with pytest.raises(DeployError, match="unsafe member name"):
+        _merge([evil, _native_part(tmp_path / "other.pyz", key=LINUX)], out)
+    assert not out.exists() and not list(tmp_path.parent.glob("escaped.py"))
 
 
 def test_pyz_merge_refuses_two_compiled_apps_for_one_platform(tmp_path: Path) -> None:
@@ -1953,3 +1966,64 @@ def test_flet_build_upx_only_for_desktop_and_missing_output(sandbox: Path, monke
     assert packed == [out]  # mobile/web output is not packed
     with pytest.raises(DeployError, match="without producing the output"):
         _flet_build(sandbox, monkeypatch, target="macos", produce=False)
+
+
+# --- couplings and launcher files ---------------------------------------------------------------------
+
+
+def test_ci_uploads_the_pyz_where_the_build_writes_it(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # templates/ci.yml hard-codes dist/__NAME__-__BUILD_BACKEND__-pyz/__NAME__.pyz
+    ci = (TEMPLATES / "ci.yml").read_text(encoding="utf-8")
+    if "__BUILD_BACKEND__-pyz" not in ci:
+        pytest.skip("the CI template no longer uploads a pyz")
+    assert "path: dist/__NAME__-__BUILD_BACKEND__-pyz/__NAME__.pyz" in ci
+    out, _, _ = _pyz_build(sandbox, monkeypatch, {LINUX: lambda d: _wheel(d, "rich", "15.0.0")}, ["rich==15.0.0"])
+    assert out.relative_to(sandbox).as_posix() == "dist/myapp-cpython-pyz/myapp.pyz"
+    assert BuildRequest(make({}), "mypyc", "pyz", sandbox).out_name == "myapp-mypyc-pyz"
+
+
+@pytest.mark.parametrize("windows", [False, True])
+@pytest.mark.parametrize("bundled", [False, True])
+def test_portable_write_launchers_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows: bool, bundled: bool) -> None:
+    from runner.methods import portable
+
+    monkeypatch.setattr(portable, "IS_WINDOWS", windows)
+    cfg = make({"app": {"gui": True}})
+    python = (tmp_path / "runtime" / ("pythonw.exe" if windows else "bin/python3")) if bundled else None
+    written = portable.write_launchers(cfg, "cpython", tmp_path, python)
+    names = sorted(p.name for p in written)
+    if not bundled:
+        assert names == ["myapp.cmd", "myapp.sh"]  # a system folder may be copied to any OS
+    else:
+        assert names == (["myapp.cmd"] if windows else ["myapp.sh"])
+    for path in written:
+        data = path.read_bytes()
+        assert data.isascii()
+        if path.suffix == ".cmd":
+            assert data.endswith(b"\r\n") and b"\n" not in data.replace(b"\r\n", b"")
+            if bundled:
+                assert b'start "" "%~dp0runtime\\pythonw.exe" -s -O "%~dp0boot.py" %*' in data
+        else:
+            assert b"\r" not in data and data.startswith(b"#!/bin/sh\n")
+            if not IS_WINDOWS:
+                assert path.stat().st_mode & 0o777 == 0o755
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX launcher")
+def test_portable_sh_launcher_exit_code_and_environment(tmp_path: Path) -> None:
+    from runner.methods import portable
+
+    out = tmp_path / "out"
+    (out / "runtime" / "bin").mkdir(parents=True)
+    python = out / "runtime" / "bin" / "python3"
+    python.symlink_to(Path(sys.executable).resolve())
+    boot = "import os, sys\nprint(os.environ.get('PYTHONHOME'), os.environ.get('PYTHONPATH'), os.environ['PYTHONUTF8'], sys.flags.optimize)\nsys.exit(7)\n"
+    (out / "boot.py").write_text(boot, encoding="utf-8")
+    launcher = out / "app.sh"
+    launcher.write_text(portable.sh_launcher(make({}), "cpython", out, python), encoding="utf-8", newline="\n")
+    launcher.chmod(0o755)
+    env = {**os.environ, "PYTHONPATH": "/caller/path", "PYTHONUTF8": "0"}
+    env.pop("PYTHONHOME", None)
+    r = subprocess.run([str(launcher)], capture_output=True, text=True, env=env, timeout=120, check=False)
+    assert r.returncode == 7, r.stderr  # the app's exit code
+    assert r.stdout.split() == ["None", "None", "1", "1"]  # caller's PYTHONPATH cleared, UTF-8 on, -O
