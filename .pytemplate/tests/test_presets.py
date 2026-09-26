@@ -430,6 +430,39 @@ def test_every_pypy_standard_library_module_is_refused() -> None:
     assert not missing, "add them to presets.STDLIB_OTHER_VERSIONS"
 
 
+def _other_import_names(installed: dict[str, list[str]], pinned: set[str]) -> dict[str, set[str]]:
+    """The modules a pinned distribution installs under another name than its own, from
+    importlib.metadata.packages_distributions(): {distribution: {module, ...}}. Left out: what
+    is never an app package (private modules, non-identifiers) and mypyc's runtime libraries
+    (`<20 hex digits>__mypyc`, a new hash per release of a mypyc-compiled wheel: mypy,
+    charset-normalizer, pytokens)."""
+    found: dict[str, set[str]] = {}
+    for module, dists in installed.items():
+        if not module.isidentifier() or module.startswith("_") or module.endswith("__mypyc"):
+            continue
+        for dist in dists:
+            name = presets._norm_name(dist)
+            if name in pinned and module.lower() != name.replace("-", "_"):
+                found.setdefault(name, set()).add(module)
+    return found
+
+
+def test_other_import_names_skip_mypycs_runtime_libraries() -> None:
+    """mypy 2.3.1 ships 08ae81f72d5a2b5fa9e0__mypyc (a digit first: skipped as no identifier),
+    but the hash changes with every release and may start with a letter (pytokens 0.4.1:
+    fd7dcdb10166ebd4db98__mypyc): after `./deploy lock --upgrade` the test below asked to add
+    it to IMPORT_NAMES and ./deploy selftest failed in every project."""
+    installed = {
+        "e3b0c44298fc1c149afb__mypyc": ["mypy"],
+        "08ae81f72d5a2b5fa9e0__mypyc": ["mypy"],
+        "mypyc": ["mypy"],
+        "_pytest": ["pytest"],
+        "py": ["pytest"],
+        "yaml": ["PyYAML"],
+    }
+    assert _other_import_names(installed, {"mypy", "pytest", "pyyaml"}) == {"mypy": {"mypyc"}, "pytest": {"py"}, "pyyaml": {"yaml"}}
+
+
 def test_import_names_follow_the_installed_packages() -> None:
     """presets.IMPORT_NAMES must know every module a pinned package installs under another name
     (the ones installed in this environment: .venv of the project, so every preset is covered
@@ -439,14 +472,7 @@ def test_import_names_follow_the_installed_packages() -> None:
     pinned: set[str] = set()
     for preset in PRESETS:
         pinned |= set(presets.constraints(preset))
-    found: dict[str, set[str]] = {}
-    for module, dists in importlib.metadata.packages_distributions().items():
-        if not module.isidentifier() or module.startswith("_"):
-            continue  # never an app package
-        for dist in dists:
-            name = presets._norm_name(dist)
-            if name in pinned and module.lower() != name.replace("-", "_"):
-                found.setdefault(name, set()).add(module)
+    found = _other_import_names(importlib.metadata.packages_distributions(), pinned)
     missing = {n: sorted(m - set(presets.IMPORT_NAMES.get(n, ()))) for n, m in found.items()}
     assert not {n: m for n, m in missing.items() if m}, "add them to presets.IMPORT_NAMES"
     assert set(presets.IMPORT_NAMES) <= pinned  # only pinned packages (their pins name them)
