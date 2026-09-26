@@ -88,6 +88,49 @@ def _payload(root: Path, pkg: str) -> Path:
     return root
 
 
+def _client_archive(zip_format: bool = False) -> bytes:
+    """A small Flet client archive as flet_desktop extracts it (flet-linux-*.tar.gz, or
+    flet-windows.zip); incompressible, so that a cut lands in the middle of the data."""
+    import random
+    import tarfile
+    import zipfile
+
+    files = {"flet/flet": random.Random(1).randbytes(60_000), "flet/lib/libapp.so": random.Random(2).randbytes(90_000)}
+    buffer = io.BytesIO()
+    if zip_format:
+        with zipfile.ZipFile(buffer, "w") as z:
+            for name, data in files.items():
+                z.writestr(name, data)
+    else:
+        with tarfile.open(fileobj=buffer, mode="w:gz") as t:
+            for name, data in files.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                t.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def _http_response(body: bytes, *, announce: int | None = None, chunked: bool = False, cut: bool = False) -> Any:
+    """A REAL http.client response read from bytes: what urlopen returns when the server sends
+    `body`, announcing `announce` bytes (Content-Length) or chunked, and with `cut` closes the
+    connection before the last chunk."""
+    import http.client
+
+    if chunked:
+        raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + f"{announce or len(body):x}\r\n".encode() + body
+        raw += b"" if cut else b"\r\n0\r\n\r\n"
+    else:
+        raw = f"HTTP/1.1 200 OK\r\nContent-Length: {len(body) if announce is None else announce}\r\n\r\n".encode() + body
+
+    class Socket:
+        def makefile(self, mode: str) -> io.BytesIO:
+            return io.BytesIO(raw)
+
+    response = http.client.HTTPResponse(Socket())  # type: ignore[arg-type]
+    response.begin()
+    return response
+
+
 def test_nuitka_bundles_the_flet_client(build_dirs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Nuitka cannot follow flet's lazy controls (module __getattr__ + importlib), and the
     # flet-desktop wheel has no Flutter client (the app would download it at its first start):
@@ -96,18 +139,20 @@ def test_nuitka_bundles_the_flet_client(build_dirs: Path, monkeypatch: pytest.Mo
     app = _payload(build_dirs / "payload", cfg.pkg)
     fake = FakeUv()
     urls: list[str] = []
+    client = _client_archive()
 
-    def urlopen(url: str, timeout: float = 0) -> io.BytesIO:
+    def urlopen(url: str, timeout: float = 0) -> Any:
         urls.append(url)
-        return io.BytesIO(b"client archive")
+        return _http_response(client)
 
+    monkeypatch.delenv("FLET_CLIENT_URL", raising=False)
     monkeypatch.setattr(nuitka, "IS_WINDOWS", False)
     monkeypatch.setattr(envs, "uv", fake)
     monkeypatch.setattr(nuitka.urllib.request, "urlopen", urlopen)
     nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
     archive = build_dirs / "build" / "flet-client" / FakeUv.VERSION / FakeUv.ARCHIVE
     assert urls == [f"https://github.com/flet-dev/flet/releases/download/v{FakeUv.VERSION}/{FakeUv.ARCHIVE}"]
-    assert archive.read_bytes() == b"client archive"
+    assert archive.read_bytes() == client
     assert "--include-package=flet" in fake.argv and "--include-package=flet_desktop" in fake.argv
     assert f"--include-data-files={archive}=flet_desktop/app/{FakeUv.ARCHIVE}" in fake.argv
     # Downloaded once: the next build takes the cached archive
@@ -124,6 +169,83 @@ def test_nuitka_bundles_the_flet_client(build_dirs: Path, monkeypatch: pytest.Mo
         nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
     assert info.value.code == 3 and "cannot download the Flet client" in str(info.value)
     assert list(archive.parent.iterdir()) == []
+
+
+def _serve_client(monkeypatch: pytest.MonkeyPatch, responses: list[Any], archive: str = FakeUv.ARCHIVE) -> list[str]:
+    """envs.uv answers flet_desktop's query with `archive`; urlopen hands out `responses` in order."""
+    fake = FakeUv()
+    fake.ARCHIVE = archive
+    urls: list[str] = []
+
+    def urlopen(url: str, timeout: float = 0) -> Any:
+        urls.append(url)
+        return responses.pop(0)
+
+    monkeypatch.delenv("FLET_CLIENT_URL", raising=False)
+    monkeypatch.setattr(envs, "uv", fake)
+    monkeypatch.setattr(nuitka.urllib.request, "urlopen", urlopen)
+    return urls
+
+
+@pytest.mark.parametrize("case", ["cut", "chunked cut", "not an archive", "damaged zip"])
+def test_a_flet_client_download_cut_short_is_never_cached(build_dirs: Path, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    # http.client ends a body cut short (the connection closed, a ragged TLS end) like a whole
+    # one when the server announced its length: the short file was cached as the client, every
+    # later build bundled it and reported success, and the app failed at its first start.
+    # Chunked, the same cut raised IncompleteRead, which is no OSError: a runner traceback.
+    zip_format = case == "damaged zip"
+    client = _client_archive(zip_format)
+    name = "flet-windows.zip" if zip_format else FakeUv.ARCHIVE
+    if case == "cut":
+        bad = _http_response(client[: len(client) // 2], announce=len(client))
+        message = f"ended after {len(client) // 2} of {len(client)} bytes"
+    elif case == "chunked cut":
+        bad = _http_response(client[: len(client) // 2], announce=len(client), chunked=True, cut=True)
+        message = "cannot download the Flet client"
+    elif case == "not an archive":
+        bad = _http_response(b"<html>a proxy's error page</html>")
+        message = "not a whole archive"
+    else:
+        damaged = bytearray(client)
+        damaged[len(damaged) // 3] ^= 0xFF  # same length, one byte of a member changed
+        bad = _http_response(bytes(damaged))
+        message = "not a whole archive"
+    urls = _serve_client(monkeypatch, [bad, _http_response(client)], name)
+    with pytest.raises(DeployError, match=message) as info:
+        nuitka._flet_client_archive(make({"app": {"preset": "flet"}}))
+    assert info.value.code == 3
+    folder = build_dirs / "build" / "flet-client" / FakeUv.VERSION
+    assert list(folder.iterdir()) == []  # neither the archive nor a .part
+    # The next build downloads it again, whole
+    archive = nuitka._flet_client_archive(make({"app": {"preset": "flet"}}))
+    assert archive == folder / name and archive.read_bytes() == client and len(urls) == 2
+
+
+def test_a_damaged_cached_flet_client_is_downloaded_again(build_dirs: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # A short archive an older runner cached stayed in .build/flet-client/ for every build
+    client = _client_archive()
+    urls = _serve_client(monkeypatch, [_http_response(client)])
+    cached = build_dirs / "build" / "flet-client" / FakeUv.VERSION / FakeUv.ARCHIVE
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(client[:1000])
+    assert nuitka.archive_problem(cached)
+    assert nuitka._flet_client_archive(make({"app": {"preset": "flet"}})) == cached
+    assert cached.read_bytes() == client and len(urls) == 1 and nuitka.archive_problem(cached) == ""
+    assert "is damaged" in capsys.readouterr().err
+    # A whole cached archive is used as it is
+    assert nuitka._flet_client_archive(make({"app": {"preset": "flet"}})) == cached and len(urls) == 1
+
+
+def test_the_flet_client_follows_flet_client_url(build_dirs: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # flet_desktop downloads its client from FLET_CLIENT_URL when it is set (a mirror behind a
+    # firewall): flet run and flet pack honoured it, the Nuitka build went to github.com anyway
+    client = _client_archive()
+    urls = _serve_client(monkeypatch, [_http_response(client)])
+    monkeypatch.setenv("FLET_CLIENT_URL", "https://mirror.example/flet-linux.tar.gz")
+    archive = nuitka._flet_client_archive(make({"app": {"preset": "flet"}}))
+    assert urls == ["https://mirror.example/flet-linux.tar.gz"]
+    assert archive.name == FakeUv.ARCHIVE and archive.read_bytes() == client  # cached under flet_desktop's own name
+    assert "(FLET_CLIENT_URL)" in capsys.readouterr().err
 
 
 def test_nuitka_includes_flet_only_for_the_flet_preset(build_dirs: Path, monkeypatch: pytest.MonkeyPatch) -> None:

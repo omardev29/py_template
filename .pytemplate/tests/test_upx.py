@@ -204,8 +204,31 @@ def test_download_extracts_the_windows_binary(monkeypatch: pytest.MonkeyPatch, t
     assert target == tmp_path / "tools" / "upx.exe" and target.read_bytes() == b"MZ upx"
 
 
-@pytest.mark.parametrize("case", ["bad-sha", "no-binary", "offline"])
+def _cut_response(body: bytes, *, chunked: bool) -> Any:
+    """A REAL http.client response whose server closed the connection halfway through `body`
+    (announced with Content-Length, or chunked)."""
+    import http.client
+    import io
+
+    half = body[: len(body) // 2]
+    if chunked:
+        raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + f"{len(body):x}\r\n".encode() + half
+    else:
+        raw = f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n".encode() + half
+
+    class Socket:
+        def makefile(self, mode: str) -> io.BytesIO:
+            return io.BytesIO(raw)
+
+    response = http.client.HTTPResponse(Socket())  # type: ignore[arg-type]
+    response.begin()
+    return response
+
+
+@pytest.mark.parametrize("case", ["bad-sha", "no-binary", "offline", "cut", "chunked cut"])
 def test_download_failures_are_clear_and_leave_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str) -> None:
+    # A connection closed halfway raises http.client.IncompleteRead, which is no OSError: it
+    # ended as an "internal runner error" traceback instead of this clear exit 3
     asset = f"upx-{upx.VERSION}-amd64_linux.tar.xz"
     data = _tar_xz({f"upx-{upx.VERSION}-amd64_linux/upx": b"\x7fELF"})
     if case == "bad-sha":
@@ -214,6 +237,10 @@ def test_download_failures_are_clear_and_leave_nothing(monkeypatch: pytest.Monke
     elif case == "no-binary":
         _serve(monkeypatch, _tar_xz({f"upx-{upx.VERSION}-amd64_linux/README": b""}), asset, windows=False)
         message = "has no upx binary"
+    elif case in ("cut", "chunked cut"):
+        _serve(monkeypatch, data, asset, windows=False)
+        monkeypatch.setattr(upx.urllib.request, "urlopen", lambda url, timeout=0: _cut_response(data, chunked=case == "chunked cut"))
+        message = "cannot download"
     else:
         _serve(monkeypatch, data, asset, windows=False)
 

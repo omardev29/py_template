@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import http.client
 import io
 import os
 import shutil
@@ -130,7 +131,7 @@ def _download(dest: Path) -> Path:
     try:
         with urllib.request.urlopen(url, timeout=120) as r:  # noqa: S310 (fixed https URL)
             data = r.read()
-    except OSError as e:
+    except (OSError, http.client.HTTPException) as e:  # a connection closed halfway: IncompleteRead, no OSError
         raise DeployError(f"upx: cannot download {url}: {e}\n  Install it yourself (scoop/winget/apt) or set deploy.upx.path", 3) from None
     digest = hashlib.sha256(data).hexdigest()
     if digest != sha256:

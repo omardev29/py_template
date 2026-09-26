@@ -798,7 +798,10 @@ unless Nuitka's own `--experimental=python3.X` is passed.
   docstrings follow `deploy.optimize`.
 - Imports Nuitka cannot find (a platform-guarded `import winreg`) are skipped. Flet works: all of
   `flet` is included (it loads its controls lazily, which Nuitka cannot follow) and the Flet
-  client archive is bundled, as `flet pack` does.
+  client archive is bundled, as `flet pack` does. The first build downloads it once into
+  `.build/flet-client/` from GitHub, or from `FLET_CLIENT_URL` when you set it (Flet's own
+  variable, for a mirror). A download cut short is refused, never cached, and a damaged cached
+  archive is downloaded again.
 
 ### flet build
 

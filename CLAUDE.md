@@ -1581,9 +1581,14 @@ Per method:
   controls lazily (module `__getattr__` + `importlib`), which Nuitka cannot follow, so the
   method adds `--include-package=flet --include-package=flet_desktop`; the flet-desktop wheel
   has NO client, so `nuitka._flet_client_archive` downloads the release archive
-  (`flet_desktop.get_artifact_filename()`, the same URL flet uses) once into
-  `.build/flet-client/<version>/` and bundles it at `flet_desktop/app/<archive>`, where
-  flet_desktop looks for a bundled client. 61 MB with UPX; ~25 min build.
+  (`flet_desktop.get_artifact_filename()`, the same URL flet uses, or `FLET_CLIENT_URL` when set,
+  as flet_desktop does) once into `.build/flet-client/<version>/` and bundles it at
+  `flet_desktop/app/<archive>`, where flet_desktop looks for a bundled client (and never
+  downloads one: a damaged archive would break the shipped app at its first start). So a
+  download is cached only when it delivered every byte the server announced (Content-Length)
+  and the archive reads to its end the way flet_desktop extracts it (`nuitka.archive_problem`:
+  zipfile CRCs, or tarfile over gzip and the gzip trailer); a cached archive is checked again
+  at every build and downloaded anew when damaged. 61 MB with UPX; ~25 min build.
 - **flet** (`flet build`): requires `app.preset == "flet"`. Windows needs Developer Mode
   (Flutter symlinks; checked in the registry by `methods.flet._developer_mode`) and Visual
   Studio C++. The stage `.build/flet-build/<b>` is persistent (Flutter cache); stale
@@ -2689,6 +2694,18 @@ CPython and its standard library:
 - **A missing cwd is blamed on the program** (LIMITATION): subprocess raised FileNotFoundError
   naming the program (POSIX) or NotADirectoryError (Windows). Fix: `proc.run` checks the cwd
   first (5.3). Test: `test_cli_core.py::test_a_bad_working_folder_is_named`. Goes: never.
+- **An HTTP body cut short can end like a whole one** (LIMITATION, http.client): a read of a
+  response that announced its Content-Length returns an empty chunk when the connection closes
+  early (a ragged TLS end reads the same) instead of raising IncompleteRead (kept for
+  compatibility, says CPython's own comment), and a chunked one raises IncompleteRead, which is
+  no OSError: a Flet client cut short was cached and bundled into every later Nuitka build (the
+  app failed at its first start), and a cut UPX download ended in a runner traceback. Fix:
+  `nuitka._flet_client_archive` counts the bytes against Content-Length, reads the archive to
+  its end (`nuitka.archive_problem`, also for a cached one) and catches HTTPException;
+  `upx._download` catches it too and checks the SHA-256 (10). Test:
+  `test_workarounds.py::test_a_flet_client_download_cut_short_is_never_cached`,
+  `test_a_damaged_cached_flet_client_is_downloaded_again`,
+  `test_upx.py::test_download_failures_are_clear_and_leave_nothing`. Goes: never.
 
 PyPy:
 - **PyPy 8.0 changed the extension ABI to pp80** (LIMITATION): a loose request picked the newest
@@ -2856,9 +2873,10 @@ Flet (flet, flet-desktop, flet pack, flet build):
   flet-desktop of another version is pip-installed at runtime, bypassing uv.lock. Fix: one
   `[preset.flet] version` for flet, flet-desktop and flet-cli (5.8); exe through `flet pack`
   (`exe._flet_pack`); `nuitka._flet_client_archive` bundles flet_desktop's own release archive
-  at `flet_desktop/app/` (10). Test:
-  `test_apply.py::test_flet_version_change_replaces_the_three_pins`,
-  `test_workarounds.py::test_nuitka_bundles_the_flet_client`. Goes: never.
+  at `flet_desktop/app/`, from the same URL (or its `FLET_CLIENT_URL` override, a mirror) (10).
+  Test: `test_apply.py::test_flet_version_change_replaces_the_three_pins`,
+  `test_workarounds.py::test_nuitka_bundles_the_flet_client`,
+  `test_the_flet_client_follows_flet_client_url`. Goes: never.
 - **flet loads its controls lazily** (LIMITATION): module `__getattr__` + `importlib`, which
   Nuitka cannot follow. Fix: `--include-package=flet --include-package=flet_desktop` in
   `nuitka.build` (10). Test: `test_workarounds.py::test_nuitka_bundles_the_flet_client`. Goes:
@@ -3496,7 +3514,8 @@ Code coupling (rename together):
   `rename._plan_pyproject`; `rename` and `cmd_env` import `cmd_apply` lazily (it imports both
   at module level).
 - `upx.BUILTIN_EXCLUDE` must keep `flutter_windows.dll`; `nuitka._flet_client_archive` mirrors
-  flet_desktop's download URL and its `flet_desktop/app/` lookup.
+  flet_desktop's download URL, its `FLET_CLIENT_URL` override and its `flet_desktop/app/`
+  lookup, and `nuitka.archive_problem` the way `ensure_client_cached` extracts the archive.
 - `config._check_default_methods` imports `cmd_build.COMPAT` lazily (`cmd_build` imports
   `config`); `config._check_preset_tables` reads `preset.toml` `[options]` itself, like
   `config._presets` mirrors `presets.available`; `render.managed_block` needs `pypy_minor`

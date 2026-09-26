@@ -8,10 +8,16 @@ mypyc backend, your core modules are already compiled by mypyc (Nuitka includes 
 
 from __future__ import annotations
 
+import gzip
+import http.client
 import json
+import os
 import shlex
 import shutil
+import tarfile
 import urllib.request
+import zipfile
+import zlib
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -148,11 +154,38 @@ def includable(cfg: Config, stage: Path, names: Sequence[str]) -> list[str]:
     return sorted((set(names) & compiled) | keep)
 
 
+def archive_problem(path: Path, name: str = "") -> str:
+    """Return why a Flet client archive cannot be bundled ("" when it is whole).
+
+    It reads the archive to its end the way flet_desktop extracts it at the app's first start
+    (zipfile, or tarfile over gzip; `name`, default the file's own, tells which): a download cut
+    short, or a page that is no archive at all, would otherwise ship, and the app would fail
+    there with no download to fall back on.
+    """
+    try:
+        if (name or path.name).endswith(".zip"):
+            with zipfile.ZipFile(path) as z:
+                damaged = z.testzip()  # reads every member and checks its CRC
+                if damaged is not None:
+                    return f"{damaged} is damaged"
+                return "" if z.namelist() else "it holds no file"
+        with gzip.open(path, "rb") as g, tarfile.open(fileobj=g, mode="r:") as t:
+            members = t.getmembers()
+            while g.read(1 << 20):  # the rest of the stream: gzip checks its length and CRC at the end
+                pass
+        return "" if members else "it holds no file"
+    except (OSError, EOFError, ValueError, tarfile.TarError, zipfile.BadZipFile, zlib.error) as e:
+        return str(e) or type(e).__name__
+
+
 def _flet_client_archive(cfg: Config) -> Path:
     """Return the Flet desktop client archive of the locked flet-desktop (downloaded once).
 
     Same file and URL as flet_desktop's own first-start download (flet-windows.zip,
-    flet-macos.tar.gz or the glibc-matched Linux tarball), cached in .build/flet-client/.
+    flet-macos.tar.gz or the glibc-matched Linux tarball; FLET_CLIENT_URL replaces the URL, as
+    in flet_desktop), cached in .build/flet-client/. The download must deliver every byte the
+    server announced and the archive must read to its end (archive_problem) before it is
+    cached; a cached archive is checked again, so a damaged one is downloaded anew.
     """
     query = "import flet_desktop, flet_desktop.version as v; print(flet_desktop.get_artifact_filename(), v.version)"
     out = envs.uv(envs.tool_env(cfg), ["run", "--locked", "python", "-c", query], capture=True, echo=False).stdout.split()
@@ -161,19 +194,36 @@ def _flet_client_archive(cfg: Config) -> Path:
     name, version = out
     archive = BUILD / "flet-client" / version / name
     if archive.is_file():
-        return archive
+        problem = archive_problem(archive)
+        if not problem:
+            return archive
+        ui.warn(f"{rel(archive)} is damaged ({problem}): downloading it again")
+        archive.unlink()
     url = f"https://github.com/flet-dev/flet/releases/download/v{version}/{name}"
-    ui.info(f"  downloading the Flet client for Nuitka: {url}")
-    if proc.DRY_RUN:
-        return archive
+    url = os.environ.get("FLET_CLIENT_URL") or url  # flet_desktop's own override (a mirror)
+    source = f"{url} (FLET_CLIENT_URL)" if os.environ.get("FLET_CLIENT_URL") else url
+    ui.info(f"  downloading the Flet client for Nuitka: {source}")
     archive.parent.mkdir(parents=True, exist_ok=True)
     partial = archive.with_suffix(archive.suffix + ".part")
     try:
-        with urllib.request.urlopen(url, timeout=300) as r, partial.open("wb") as f:  # noqa: S310 (fixed https URL)
-            shutil.copyfileobj(r, f)
-    except OSError as e:
+        with urllib.request.urlopen(url, timeout=300) as r, partial.open("wb") as f:  # noqa: S310 (https URL or the user's mirror)
+            announced = r.headers.get("Content-Length")
+            written = 0
+            while chunk := r.read(1 << 20):
+                f.write(chunk)
+                written += len(chunk)
+        # http.client ends a body cut short (a closed connection, a ragged TLS end) like a whole
+        # one when the server announced its length: only the count shows it
+        if announced is not None and announced.strip().isdecimal() and written != int(announced):
+            problem = f"the download ended after {written} of {int(announced)} bytes"
+        else:
+            problem = archive_problem(partial, name)
+    except (OSError, ValueError, http.client.HTTPException) as e:  # IncompleteRead is no OSError
         partial.unlink(missing_ok=True)
-        raise DeployError(f"cannot download the Flet client {url}: {e}", 3) from None
+        raise DeployError(f"cannot download the Flet client {source}: {str(e) or type(e).__name__}", 3) from None
+    if problem:
+        partial.unlink(missing_ok=True)
+        raise DeployError(f"the Flet client downloaded from {source} is not a whole archive: {problem}. Build again to retry", 3)
     partial.replace(archive)
     return archive
 
