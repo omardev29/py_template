@@ -360,25 +360,69 @@ function M.pick()
   end
 end
 
----Completion for :Deploy.
-function M.complete(lead, line)
+local function names()
+  local out = vim.tbl_map(function(c)
+    return c.name
+  end, M.commands())
+  for _, t in ipairs(pt.info().tasks) do
+    out[#out + 1] = t.name
+  end
+  return out
+end
+
+---The words argument `argn` (1 = the first) of `./deploy NAME` can take, from the command's
+---usage in editor.json (and tasks.META): BACKEND (+ `all`), a first choice group such as
+---`[doctor|trust|...]`, and the flags anywhere (`--flag a|b` as `--flag=a`, `--flag=b`).
+---A [tasks] entry forwards its arguments: nothing to offer.
+function M.argument_words(name, argn)
   local info = pt.info()
-  local words = {}
-  local nargs = #vim.split(vim.trim(line), "%s+") - (line:match("%s$") and 0 or 1)
-  if nargs <= 1 then
-    for _, c in ipairs(M.commands()) do
-      words[#words + 1] = c.name
-    end
-    for _, t in ipairs(info.tasks) do
-      words[#words + 1] = t.name
-    end
-  else
-    vim.list_extend(words, info.backend.supported)
-    words[#words + 1] = "all"
-    for _, m in ipairs(info.build.methods) do
-      words[#words + 1] = "--method=" .. m
+  if name == "help" then
+    return argn == 1 and names() or {}
+  end
+  local cmd = vim.tbl_filter(function(c)
+    return c.name == name
+  end, M.commands())[1]
+  if not cmd then
+    return {}
+  end
+  local meta, usage, out = M.META[name] or {}, cmd.usage, {}
+  if argn == 1 then
+    if meta.backend or usage:match("BACKEND") then
+      vim.list_extend(out, info.backend.supported)
+      if (meta.backend == "all" or usage:match("BACKEND|all")) and #info.backend.supported > 1 then
+        out[#out + 1] = "all"
+      end
+    else
+      -- "[install [--force]|uninstall|run|status]" -> install|uninstall|run|status
+      local group = (usage:match("^(%b[])") or ""):sub(2, -2):gsub("%s*%b[]", "")
+      if group:match("^%l[%l%d|%-]*$") then
+        vim.list_extend(out, vim.split(group, "|", { plain = true }))
+      end
     end
   end
+  for flag, pos in usage:gmatch("(%-%-%w[%w%-]*)()") do
+    local values = usage:sub(pos):match("^ (%l[%l%d%-]*|[%l%d|%-]+)")
+    if values then
+      for _, v in ipairs(vim.split(values, "|", { plain = true })) do
+        out[#out + 1] = flag .. "=" .. v
+      end
+    else
+      out[#out + 1] = flag
+    end
+  end
+  local seen = {}
+  return vim.tbl_filter(function(w)
+    local new = not seen[w]
+    seen[w] = true
+    return new
+  end, out)
+end
+
+---Completion for :Deploy: command and [tasks] names, then what that command takes.
+function M.complete(lead, line)
+  local typed = vim.split(vim.trim(line), "%s+")
+  local nargs = #typed - (line:match("%s$") and 0 or 1)
+  local words = nargs <= 1 and names() or M.argument_words(typed[2], nargs - 1)
   return vim.tbl_filter(function(w)
     return vim.startswith(w, lead)
   end, words)

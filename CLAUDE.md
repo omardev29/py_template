@@ -2002,8 +2002,13 @@ LazyVim wiring:
   run on a backend with args, `t`/`T` test / all, `c`/`C` check / all, `b`/`B` build / on a
   backend, `l` lint --fix, `f` fmt, `m` switch backend, `k` `[tasks]` picker, `d` `dev` task,
   `p` mypyc report, `s` sync all, `S` setup, `D` doctor, `w` task list, `x` stop deploy tasks.
-  `:Deploy ARGS` (completion; no args = help; quotes group words through `tasks.split_args`,
-  like the `R`/`B` prompts: `:Deploy run cpython "a b"` passes `a b` as one argument).
+  `:Deploy ARGS` (no args = help; quotes group words through `tasks.split_args`, like the
+  `R`/`B` prompts: `:Deploy run cpython "a b"` passes `a b` as one argument). Completion
+  (`tasks.complete`): command and `[tasks]` names, then `tasks.argument_words` from the
+  command's editor.json usage and `tasks.META`: the backends (+ `all`) as the first argument
+  of a BACKEND command, a first choice group (`nvim [doctor|trust|...]`), the flags anywhere
+  (`--method exe|pyz...` as `--method=exe`...), the names after `help`, nothing after a
+  `[tasks]` entry (`test_deploy_completion_follows_the_command`).
   `<leader>j` was chosen because no LazyVim core or extra mapping uses it.
 
 `./deploy nvim [doctor|trust|extras|bootstrap|sync]` (`cmd_nvim.cmd_nvim`):

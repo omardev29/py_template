@@ -585,6 +585,50 @@ done()
 """
 
 
+COMPLETE_CHECK = LUA_PRELUDE + r"""
+local function words(line)
+  local lead = line:match("(%S*)$")
+  return tasks.complete(lead, line)
+end
+local function same(line, want)
+  local got = words(line)
+  check("complete '" .. line .. "'", vim.deep_equal(got, want), vim.inspect(got))
+end
+local function has(line, yes, no)
+  local got = words(line)
+  for _, w in ipairs(yes) do check("'" .. line .. "' offers " .. w, vim.tbl_contains(got, w), vim.inspect(got)) end
+  for _, w in ipairs(no) do check("'" .. line .. "' never offers " .. w, not vim.tbl_contains(got, w), vim.inspect(got)) end
+end
+has("Deploy ", { "test", "nvim", "help", "ci" }, { "cpython" })
+has("Deploy te", { "test" }, { "run" })
+has("Deploy help ", { "run", "test", "ci" }, { "cpython", "all", "--method=pyz" })
+same("Deploy help run ", {})
+same("Deploy test ", { "cpython", "mypyc", "all" })
+same("Deploy check m", { "mypyc" })
+same("Deploy run ", { "cpython", "mypyc" })
+same("Deploy nvim ", { "doctor", "trust", "extras", "bootstrap", "sync" })
+same("Deploy nvim t", { "trust" })
+same("Deploy nvim trust ", {})
+same("Deploy lint ", { "--fix" })
+same("Deploy hooks ", { "install", "uninstall", "run", "status", "--force" })
+same("Deploy sync ", { "cpython", "mypyc", "all" })
+same("Deploy build cpython --m", { "--method=exe", "--method=portable", "--method=pyz", "--method=wheel", "--method=nuitka", "--method=flet" })
+has("Deploy build ", { "cpython", "--onefile", "--no-check", "--method=pyz" }, { "all" })
+has("Deploy mode ", { "cpython", "--supports", "--typing=strict", "--editor=basedpyright" }, { "all" })
+same("Deploy ci ", {}) -- a [tasks] entry forwards its arguments
+same("Deploy no-such-command ", {})
+done()
+"""
+
+
+def test_deploy_completion_follows_the_command(tmp_path: Path) -> None:
+    """:Deploy offered the backends, `all` and six --method= values after every command (`help
+    cpython` exits 2, `test --method=pyz` goes to pytest): the words now come from the command's
+    usage in editor.json and tasks.META."""
+    r = _headless_lua(tmp_path, COMPLETE_CHECK, _project(tmp_path))
+    assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
 def test_parser_strips_every_terminal_escape(tmp_path: Path) -> None:
     r = _headless_lua(tmp_path, ESCAPES_CHECK, _project(tmp_path))
     assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
