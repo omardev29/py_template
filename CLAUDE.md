@@ -891,7 +891,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     own; they are reported, not changed). Keyword arguments (`f(pkg=1)`) and attributes never
     change; `f"{pkg=}"` is a use. When `ast` cannot parse the file (syntax newer than the
     runner's Python) the token rule is the fallback. String tokens are recognised by their
-    `*STRING_START`/`*STRING_END` suffix (f-strings 3.12, t-strings 3.14, any later family). A
+    `*STRING_START`/`*STRING_END` suffix (f-strings 3.12, t-strings 3.14, any later family); such
+    a string is one region whose `{fields}` are code, as 3.11's single token (`_in_fstring_field`:
+    a format spec `{x:f}` or a string inside a field is kept and reported, on every Python). A
     lone CR is a line break, as for the compiler (`_python_code` reads it as LF, one character
     for one: classic Mac line endings once ended in an internal error).
   - Strings are syntax first (`_classify`, `_escaped`): a string prefix (`f`, `r`, `b`, `rb`...:
@@ -900,7 +902,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     `\x89`, `\a`...: skipped) and else (`r"\d"`, `r"src\alpha"`, an invalid `"\myapp"`) kept and
     reported, never changed (a new name could turn it into an escape or another regex). The
     same for TOML basic and literal strings (`_toml_strings`); comments and plain text files
-    have no escapes. Names of one or two letters are legal, and the flet skeleton's PNG
+    have no escapes. A one-letter occurrence that ends a format directive in a string (`"%d"`,
+    `"%(k)-s"`, `"{:d}"`, `"{0:,d}"`, `"{!r}"`: `_directive`) is kept and reported too (whether
+    the string is ever formatted is unknown). Names of one or two letters are legal, and the flet skeleton's PNG
     signature `b"\x89PNG\r\n..."` once changed silently for `r` and `n`.
   - Text (strings, comments, other files): every occurrence except `x.pkg` and a path segment
     right after the package itself (`src/pkg/pkg`, `src\pkg\pkg`: a submodule). When the

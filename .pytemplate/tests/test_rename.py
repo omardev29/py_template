@@ -265,6 +265,16 @@ def test_fstring_fields_as_one_token() -> None:
         ("d", 'x = re.compile(r"\\d+")\n', 'x = re.compile(r"\\d+")\n', 1),  # raw: a regex escape or a path, reported
         ("alpha", 'x = r"src\\alpha"\n', 'x = r"src\\alpha"\n', 1),
         ("myapp", 'x = "src\\myapp"\n', 'x = "src\\myapp"\n', 1),  # an invalid escape: the new name could make it a real one
+        # format directives of a one-letter name: syntax whatever the Python (3.12+ splits f-strings into tokens)
+        ("f", 'x = f"{y:f}"\n', 'x = f"{y:f}"\n', 1),
+        ("d", 'x = f"{y:>d} {z:,d}"\n', 'x = f"{y:>d} {z:,d}"\n', 1),
+        ("x", 'x = f"{y:x}"\n', 'x = f"{y:x}"\n', 1),
+        ("alpha", "x = f\"{d['alpha']}\"\n", "x = f\"{d['alpha']}\"\n", 1),  # a string inside a field is code
+        ("d", 'x = "%d" % y\n', 'x = "%d" % y\n', 1),
+        ("s", 'x = "%(k)-s %.*s" % y\n', 'x = "%(k)-s %.*s" % y\n', 1),
+        ("d", 'x = "{:d} {0:,d}".format(y)\n', 'x = "{:d} {0:,d}".format(y)\n', 1),
+        ("r", 'x = "{!r}".format(y)\n', 'x = "{!r}".format(y)\n', 1),
+        ("d", 'x = "d: {d}"\n', 'x = "tool: {tool}"\n', 0),  # not a directive
     ],
 )
 @pytest.mark.filterwarnings("ignore::SyntaxWarning", "ignore::DeprecationWarning")  # "\m" is an invalid escape on purpose (3.11: a DeprecationWarning)

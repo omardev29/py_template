@@ -21,8 +21,9 @@ Which occurrences change (whole words only: `myapp_extra` and `my-app-2` never m
   dot (`x.myapp` is a submodule or an attribute, never the top-level package) and a path
   segment right after the package itself (`src/myapp/myapp` is a submodule of it). In Python
   and TOML strings the prefix (`f`, `rb`...) and escapes (`\\n`, `\\x89`) are never the name,
-  and a name right after a backslash in a raw string or a path (`r"\\d"`) is reported, not
-  changed: an app may be called `f`, `n` or `r`.
+  and a name right after a backslash in a raw string or a path (`r"\\d"`) and a one-letter
+  name that ends a format directive (`"%d"`, `"{:d}"`, `f"{x:d}"`) are reported, not changed:
+  an app may be called `f`, `n`, `r` or `d`.
 - When the old name is also the old package but the new name is not a package name
   (`alpha` -> `My-Game`, package `my_game`), each text occurrence is either the package or the
   name. Package: path-like (`src/alpha/`, `alpha\\core`), dotted (`alpha.core`, `alpha.*`,
@@ -141,6 +142,11 @@ _STRING_PREFIX = re.compile(r"[A-Za-z]*(?=['\"])")
 _PY_ESCAPES = frozenset("abfnrtvxNuU01234567")
 _BYTES_ESCAPES = frozenset("abfnrtvx01234567")
 _TOML_ESCAPES = frozenset("btnfruUex")  # TOML 1.0, plus \e and \x of TOML 1.1
+# A format directive in a string ends in one letter: printf's `%d`, `%(k)-5s`, str.format's
+# `{:d}`, `{0:>4x}`, `{!r}` (the text before the letter, and the letters it can end in)
+_PRINTF_BEFORE = re.compile(r"%(?:\([^()\n]*\))?[#0 +\-]*(?:\*|\d+)?(?:\.(?:\*|\d*))?[hlL]?\Z")
+_FORMAT_BEFORE = re.compile(r"\{[^{}\n]*[:!][^{}\n]*\Z")
+_DIRECTIVE_LETTERS = frozenset("abcdeEfFgGinorsuxX")
 # ruff format --check --output-format concise: "path:1:2: unformatted: ..." (older: "Would reformat: path")
 _UNFORMATTED = re.compile(r"^(?:Would reformat: (?P<old>.+)|(?P<path>.+?):\d+:\d+: unformatted\b)", re.MULTILINE)
 # ruff check --output-format concise: "path:1:1: I001 [*] Import block is un-sorted or un-formatted"
@@ -185,7 +191,7 @@ class _Region:
     start: int
     end: int
     forced: bool = False  # argument of import_module() & co.: a module name
-    fstring: bool = False  # a whole f-string as ONE token (Python 3.11): {fields} are code
+    fstring: bool = False  # an f-string or t-string: its {fields} are code, their format specs syntax
 
 
 @dataclass
@@ -440,7 +446,7 @@ def _python_code(text: str, pkg: str) -> _Code | None:
         elif kind.endswith("STRING_END"):
             depth -= 1
             if depth == 0:
-                regions.append(_Region(fstart, offset(tok.end)))
+                regions.append(_Region(fstart, offset(tok.end), fstring=True))  # {fields} are code, as on 3.11
         elif depth == 0 and tok.type in (tokenize.STRING, tokenize.COMMENT):
             forced = fstring = False
             if tok.type == tokenize.STRING and brackets and last and last[-1].type == tokenize.OP and last[-1].string in "(,=":
@@ -581,6 +587,18 @@ def _escaped(text: str, start: int, floor: int, *, raw: bool, escapes: frozenset
     return "skip" if not raw and text[start] in escapes else "keep"
 
 
+def _directive(text: str, start: int, end: int, floor: int) -> bool:
+    """Whether a one-letter occurrence in a string (which starts at `floor`) ends a format
+    directive: `"%d" % x`, `"{:d}".format(x)`, `"{!r}"`. Whether the string is ever formatted is
+    unknown: it is reported, never changed."""
+    if end - start != 1 or text[start] not in _DIRECTIVE_LETTERS:
+        return False
+    before = text[max(floor, start - 100) : start]  # a directive is short: never scan a whole docstring
+    if _PRINTF_BEFORE.search(before):
+        return True
+    return text[end : end + 1] in ("}", ":") and _FORMAT_BEFORE.search(before) is not None
+
+
 def _string_quote(text: str, region: _Region) -> tuple[int, str] | None:
     """(offset of the opening quote, prefix) of a string region (`rb"..."`); None for a comment."""
     m = _STRING_PREFIX.match(text, region.start)
@@ -603,7 +621,7 @@ def _classify(
     quote = _string_quote(text, region)
     if quote is not None and start < quote[0]:
         return "skip"  # the string prefix (f, r, b, rb...): syntax, never the name
-    if region.fstring and _in_fstring_field(text, region, start):  # code inside a 3.11 f-string
+    if region.fstring and _in_fstring_field(text, region, start):  # code, or the format spec of a field
         if code.scoped:
             return "pkg" if start in code.refs else "keep"
         return "pkg" if word == names.old_pkg and code.bound and text[start - 1 : start] != "." else "keep"
@@ -612,6 +630,8 @@ def _classify(
         escaped = _escaped(text, start, quote[0], raw="r" in prefix, escapes=_BYTES_ESCAPES if "b" in prefix else _PY_ESCAPES)
         if escaped is not None:
             return escaped
+        if _directive(text, start, end, quote[0]):
+            return "keep"
     if not _whole_word(text, start, end):
         return "skip"
     kind = _text_kind(text, start, end, word, names)

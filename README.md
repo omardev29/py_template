@@ -338,9 +338,10 @@ name). What changes:
   other text files there: package paths, dotted names, `-m` arguments, `pkg:function`
   references and module-name arguments (`import_module("<pkg>")`, `resources.files(package=...)`,
   `pkgutil.get_data`, `runpy.run_module`) get the package; titles and other prose get the name.
-  String prefixes and escapes are never the name (an app named `f`, `n` or `r` keeps `f"..."`,
-  `"\n"` and `b"\r"`); a name right after a backslash in a raw string or a path (`r"\d"`,
-  `r"src\alpha"`) is reported, not changed.
+  String prefixes, escapes and format directives are never the name (an app named `f`, `n`, `r`
+  or `d` keeps `f"..."`, `"\n"`, `b"\r"`, `"%d"` and `f"{x:d}"`); a name right after a
+  backslash in a raw string or a path (`r"\d"`, `r"src\alpha"`) and a one-letter name that ends
+  a format directive (`"%d"`, `"{:d}"`) are reported, not changed.
 - `pytemplate.toml`: `app.name` and every package reference (`compile.modules`, `exclude`,
   `forbid_imports`, the mypy overrides, `hidden_imports`, `exclude_modules`, the wheel entry,
   `src/<pkg>/` paths and `<pkg>.<module>` names); other mentions are reported, among them file
