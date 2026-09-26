@@ -1469,6 +1469,23 @@ Per method:
     `sys.path` as `boot.py` (`app/` first, then `lib/`), result read from a `PTSMOKE:` marker
     line because imported packages may print (raylib's banner); a failed import shows the
     traceback and raises `DeployError`.
+- **pyz is THE portable method (owner decision: never narrow it, never make it host-only).**
+  exe, nuitka and a bundled portable carry an interpreter, so each build serves one OS, one
+  architecture and one libc floor. A pyz carries no interpreter: ONE file for every platform
+  where a compatible Python runs. Keep these properties, and test them when pyz changes:
+  - a pure build (no native dependency, no platform- or version-conditional pin) runs on ANY
+    OS, architecture and libc with CPython or PyPy >= `min_python` (glibc, musl, Android/Termux,
+    the BSDs, riscv64...): the bootstrap falls back to `common/` for any key it has no target for;
+  - native dependencies travel per target key (`targets/<key>/lib`), installed cross-platform
+    by uv for every key of `[deploy.pyz] targets` / `--target` (Windows, Linux and macOS on
+    x86_64 and aarch64); PyPy keys and the mypyc extensions come from the build machine, and
+    `pyz-merge` joins builds made on several machines into one file (the generated `ci.yml`
+    does it on every push);
+  - mypyc extensions are an overlay for the keys they were built on, with the `.py` as the
+    fallback everywhere else (slower, same result);
+  - what a non-pure pyz cannot reach is a limit to document, not a goal: its native targets
+    need the exact CPython minor of the lock (`cp314` wheels load only in 3.14), glibc >= 2.28
+    (x86_64) / 2.35 (aarch64), macOS >= `MACOS_FLOOR`; no musl or Android wheels.
 - **pyz**: Python cannot import `.pyd/.so` from a zip, so `__main__.py` extracts to a per-build
   cache (`%LOCALAPPDATA%` / `~/Library/Caches` / an absolute `$XDG_CACHE_HOME` or `~/.cache`,
   then `<name>/pyz/<build_id>/<key|pure>/`), guarded by a `.complete` marker and an atomic
