@@ -1428,7 +1428,7 @@ def test_init_converts_the_project(fake: Fake, preset: str) -> None:
     if pins:
         adds = [c for c in uv if c[0] == "add"]
         assert adds and all("--constraints" in c for c in adds)
-        pinned = Path(adds[0][adds[0].index("--constraints") + 1])
+        pinned = fake.root / adds[0][adds[0].index("--constraints") + 1]  # relative to the root
         assert pinned.read_text(encoding="utf-8").splitlines() == [f"{n}=={v}" for n, v in sorted(pins.items())]
 
 
@@ -1824,6 +1824,28 @@ def test_new_from_another_project_gets_the_tested_versions(fake: Fake) -> None:
     assert adds and all("--constraints" in c for c in adds)
 
 
+def test_init_passes_the_pins_by_a_path_without_spaces(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
+    """uv splits a --constraints value at every space (astral-sh/uv#12639): `new "../my game"
+    --preset script` from a raylib project failed with "File not found: .../my". The pins go by
+    their path relative to the root, which is uv's working folder."""
+    cfg = _as_raylib_project(fake)
+    seen: list[tuple[list[str], Path | None]] = []
+
+    def run(argv: list[Any], cwd: Path | None = None, **_: Any) -> subprocess.CompletedProcess[str]:
+        seen.append(([str(a) for a in argv], cwd))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(proc, "run", run)
+    presets.init(cfg, "script", "demo", force=True)
+    adds = [(argv, cwd) for argv, cwd in seen if argv[1] == "add"]
+    assert adds
+    for argv, cwd in adds:
+        value = argv[argv.index("--constraints") + 1]
+        assert not Path(value).is_absolute() and " " not in value
+        assert cwd == fake.root
+        assert "rich==" in (cwd / value).read_text(encoding="utf-8")
+
+
 def _self_dependent_lock(name: str) -> str:
     """The uv.lock uv (0.12) writes when a dependency of a dependency has the project's name."""
     return (
@@ -2208,12 +2230,13 @@ def test_new_into_a_folder_with_a_space_and_an_accent(tmp_path: Path, network: N
 
 
 def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: None) -> None:
-    """An older pinned version wins over the newest one: the pins are really used."""
+    """An older pinned version wins over the newest one: the pins are really used, also in a
+    project folder with a space (uv splits a --constraints value at spaces: astral-sh/uv#12639)."""
     pins = presets.constraints("raylib")
     if pins.get("pycparser") != "3.0":
         pytest.skip("this check expects the raylib preset to pin pycparser 3.0")
     env = _child_env(tmp_path)
-    copy_root = tmp_path / "copy"
+    copy_root = tmp_path / "my copy"
     presets.copy_template(copy_root)
     if config.load(set(cli.COMMANDS)).app.preset == "raylib":  # a raylib project: from another preset first
         r = _deploy(copy_root, "__init", "script", "--force", cwd=copy_root, env=env)

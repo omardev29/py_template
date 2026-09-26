@@ -857,11 +857,13 @@ def _swap_dependencies(plan: InitPlan, undo: _Undo) -> None:
         path = BUILD / "init" / CONSTRAINTS
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("".join(f"{n}=={v}\n" for n, v in sorted(plan.pins.items())), encoding="utf-8", newline="\n")
-        pins = ["--constraints", str(path)]
+        # Relative to the root, uv's working folder: uv splits a --constraints value at every
+        # space (astral-sh/uv#12639), and the project's own folder may hold one
+        pins = ["--constraints", path.relative_to(ROOT).as_posix()]
     if plan.add:
-        proc.run([uv, "add", *q, "--no-sync", *pins, *plan.add], env=env)
+        proc.run([uv, "add", *q, "--no-sync", *pins, *plan.add], cwd=ROOT, env=env)
     if plan.add_dev:
-        proc.run([uv, "add", *q, "--no-sync", "--dev", *pins, *plan.add_dev], env=env)
+        proc.run([uv, "add", *q, "--no-sync", "--dev", *pins, *plan.add_dev], cwd=ROOT, env=env)
     proc.run([uv, "lock", *q], env=env)
     # The name check knows the tested tree (constraints.txt); this catches what it cannot know
     needs = _self_dependents(plan.name)

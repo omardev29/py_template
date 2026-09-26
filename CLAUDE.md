@@ -1952,8 +1952,8 @@ Per method:
   resolution) for the old preset's requirements and every declared one the new preset adds in
   another form (`presets._dropped`: a `flet-cli==1.0.0` left in the dev group of a flet project
   with `[preset.flet] version = "1.0.0"` made the resolving `uv add flet==1.0.1` fail), `uv add
-  --no-sync [--constraints]` for the
-  new ones and `uv lock`: the only step that needs the network; a resolved `uv.lock` in which a
+  --no-sync [--constraints]` for the new ones (the pins file relative to the root: uv splits a
+  `--constraints` value at spaces, section 15.1) and `uv lock`: the only step that needs the network; a resolved `uv.lock` in which a
   package depends on the project itself (`presets._self_dependents`, section 15.1) is refused
   there, before any file of the skeleton is written; (2) renames `src/ tests/
   typings/` into `.pytemplate-init-*` (all or nothing: a locked file fails the rename before
@@ -2986,6 +2986,14 @@ uv:
   `test_presets.py::test_new_from_a_project_without_the_presets_tree_refuses_its_names`,
   `test_init_refuses_a_lock_that_resolves_a_dependency_to_the_project`, `test_self_dependents`.
   Goes: when uv refuses it (the name check stays: src/<pkg>/ would shadow the library).
+- **uv splits a `--constraints` value at every space** (DEFECT): `uv add --constraints "/a
+  b/c.txt"` looked for `/a` ("File not found"), so `new` into a folder with a space failed
+  (and cleaned up) whenever it passed the tested pins, e.g. `new "../my game" --preset script`
+  from a raylib project. Up: astral-sh/uv#12639 (open). Fix: `presets._swap_dependencies`
+  passes the pins file relative to the project root, uv's working folder (11). Test:
+  `test_presets.py::test_init_passes_the_pins_by_a_path_without_spaces`,
+  `test_init_pins_steer_the_resolution`. Goes: when uv takes the value whole (the relative
+  path can stay).
 - **uv writes normalized names** (LIMITATION, PEP 503): `raylib_sdl` became `raylib-sdl`, and a
   verbatim comparison never matched. Fix: `cmd_apply.req_key` (5.8). Test:
   `test_apply.py::test_req_key_normalizes_like_uv`. Goes: never.
