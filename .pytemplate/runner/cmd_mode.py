@@ -55,24 +55,49 @@ def _config_from_text(text: str, where: str) -> Config:
 # --- mode ----------------------------------------------------------------------------------------
 
 
-def _supports_after(cfg: Config, spec: str) -> list[str]:
-    current = list(cfg.backend.supported)
-    if spec.startswith(("+", "-")):
-        for token in (t.strip() for t in spec.split(",")):
-            sign, name = token[:1], token[1:]
-            if sign not in ("+", "-") or name not in BACKENDS:
-                raise DeployError(f"mode --supports: unknown backend '{token}' (use +name or -name)")
-            if sign == "+" and name not in current:
-                current.append(name)
-            elif sign == "-" and name in current:
-                current.remove(name)
-        out = [b for b in BACKENDS if b in current]
+_NEEDS_VALUE = "mode --supports needs a value: +pypy, -pypy or a list such as cpython,mypyc"
+
+
+def _supports_after(cfg: Config, spec: str, backend: str | None = None) -> list[str]:
+    """backend.supported after `--supports SPEC`: +name/-name changes, or the full list.
+
+    `backend` (the BACKEND argument of `mode`) is added as `mode BACKEND` alone would, unless
+    SPEC removes it or leaves it out of a full list: that contradiction is an error.
+    """
+    tokens = [t.strip() for t in spec.split(",") if t.strip()]  # "+pypy," and " +pypy" are fine
+    if not tokens:
+        raise DeployError(_NEEDS_VALUE)
+    signed = [t[:1] in ("+", "-") for t in tokens]
+    if any(signed) and not all(signed):
+        raise DeployError(
+            f"mode --supports {spec}: mixes changes (+name, -name) with plain names; give every "
+            "change its sign (+pypy,-mypyc) or the full list (cpython,pypy,mypyc)"
+        )
+    known = " | ".join(BACKENDS)
+    if all(signed):
+        signs: dict[str, str] = {}
+        for token in tokens:
+            sign, name = token[0], token[1:].strip()
+            if name not in BACKENDS:
+                raise DeployError(f"mode --supports: unknown backend '{name}' in '{token}' ({known})")
+            if signs.setdefault(name, sign) != sign:
+                raise DeployError(f"mode --supports {spec}: {name} is both added and removed")
+        dropped = {n for n, s in signs.items() if s == "-"}
+        wanted = {*cfg.backend.supported, *(n for n, s in signs.items() if s == "+")} - dropped
     else:
-        names = [n.strip() for n in spec.split(",") if n.strip()]
-        for n in names:
-            if n not in BACKENDS:
-                raise DeployError(f"mode --supports: unknown backend '{n}'")
-        out = [b for b in BACKENDS if b in names]
+        for name in tokens:
+            if name not in BACKENDS:
+                raise DeployError(f"mode --supports: unknown backend '{name}' ({known})")
+        dropped = set(BACKENDS) - set(tokens)
+        wanted = set(tokens)
+    if backend:
+        if backend in dropped:
+            how = "removes it" if all(signed) else "leaves it out of the list"
+            raise DeployError(
+                f"mode {backend} --supports {spec}: {backend} would be the active backend, but --supports {how}"
+            )
+        wanted.add(backend)
+    out = [b for b in BACKENDS if b in wanted]
     if not out:
         raise DeployError(f"mode --supports {spec}: at least one backend must stay supported")
     return out
@@ -176,7 +201,8 @@ def _plan_mode(cfg: Config, new_cfg: Config, changes: list[tuple[str, str, objec
 
 def cmd_mode(cfg: Config, args: list[str]) -> int:
     """mode [BACKEND] [--supports +pypy|-pypy|a,b] [--typing off|warn|strict|auto] [--editor pylance|basedpyright]"""
-    parser = argparse.ArgumentParser(prog="./deploy mode")
+    # allow_abbrev=False: `--typ` is an unknown argument, never a silent alias of --typing
+    parser = argparse.ArgumentParser(prog="./deploy mode", allow_abbrev=False)
     parser.add_argument("backend", nargs="?", choices=BACKENDS)
     parser.add_argument("--supports", help="+pypy, -pypy or a full list (cpython,mypyc)")
     parser.add_argument("--typing", choices=("auto", "off", "warn", "strict", "mypyc"))
@@ -185,7 +211,17 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
     fixed: list[str] = []
     it = iter(args)
     for a in it:
-        fixed.append(f"--supports={next(it, '')}" if a == "--supports" else a)
+        if a == "--supports":
+            spec = next(it, "")
+            if spec.startswith("--"):  # `--supports --typing strict`: the value is missing
+                raise DeployError(_NEEDS_VALUE)
+            fixed.append(f"--supports={spec}")
+        else:
+            fixed.append(a)
+    options = [a.split("=", 1)[0] for a in fixed if a.startswith("--")]
+    repeated = sorted({o for o in options if options.count(o) > 1})
+    if repeated:  # argparse would silently keep the last one
+        raise DeployError(f"mode: {', '.join(repeated)} given more than once; give each option once")
     ns = _parse(parser, fixed)
     if ns.supports is not None and not ns.supports.strip():
         raise DeployError("mode --supports needs a value: +pypy, -pypy or a list such as cpython,mypyc")
@@ -194,13 +230,14 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
         return 0
 
     changes: list[tuple[str, str, object]] = []
-    supported = _supports_after(cfg, ns.supports) if ns.supports else list(cfg.backend.supported)
-    if ns.backend and ns.backend not in supported:
+    supported = _supports_after(cfg, ns.supports, ns.backend) if ns.supports else list(cfg.backend.supported)
+    if ns.backend and ns.backend not in supported:  # `mode pypy` alone also adds PyPy support
         supported = [b for b in BACKENDS if b in {*supported, ns.backend}]
     if supported != cfg.backend.supported:
         changes.append(("backend", "supported", supported))
     active = ns.backend or cfg.backend.active
-    if active not in supported:
+    dropped_active = active not in supported  # `--supports -cpython` while cpython is active
+    if dropped_active:
         active = supported[0]
     if active != cfg.backend.active:
         changes.append(("backend", "active", active))
@@ -211,12 +248,16 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
             changes.append(("typing", "profile", ns.typing))
     if ns.editor:
         changes.append(("typing", "editor", ns.editor))
+    # Only real changes: a value that is already set is not rewritten (its spelling stays)
+    changes = [(t, k, v) for t, k, v in changes if _current(cfg, t, k) != v]
 
     # The new configuration, validated in memory BEFORE anything is written
-    text = CONFIG_FILE.read_text(encoding="utf-8-sig")
+    text = config.read_text()
     for table, key, value in changes:
         text = config.set_value(text, table, key, value)
     planned = _config_from_text(text, "mode: the new pytemplate.toml")
+    if dropped_active:
+        ui.info(f"note: {cfg.backend.active} is no longer supported: the active backend becomes {active}")
 
     adding_pypy = planned.pypy_enabled and not cfg.pypy_enabled
     syncs: list[envs.PyEnv] = []

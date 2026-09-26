@@ -446,7 +446,7 @@ def dry(monkeypatch: pytest.MonkeyPatch) -> Config:
         ("cmd_mode", ["--supports"], "--supports needs a value"),
         ("cmd_mode", ["--supports="], "--supports needs a value"),
         ("cmd_mode", ["--supports", "-cpython,-mypyc"], "at least one backend"),
-        ("cmd_mode", ["--supports", "+pypy,cpython"], "unknown backend 'cpython'"),
+        ("cmd_mode", ["--supports", "+pypy,cpython"], "mixes changes (+name, -name) with plain names"),
         ("cmd_init", ["raylib", "--bogus"], "unknown argument(s): --bogus"),
         ("cmd_new", ["somewhere", "--bogus"], "unknown argument(s): --bogus"),
     ],

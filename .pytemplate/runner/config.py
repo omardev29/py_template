@@ -1,26 +1,36 @@
 """Loading, validation and editing of pytemplate.toml.
 
-The schema is defined with dataclasses: each field with its default value. An unknown key
-or a key of the wrong type is an error (exit 2) that shows the full path of the key, so a
-typo is never silently ignored.
+The schema is defined with dataclasses: each field with its default value and its type. An
+unknown key or a value of the wrong type is an error (exit 2) that shows the full path of the
+key, so a typo is never silently ignored. The file must be UTF-8 (TOML requires it): another
+encoding is a config error that says how to save it again, never a traceback.
 """
 
 from __future__ import annotations
 
+import copy
 import dataclasses
+import datetime
 import json
+import math
 import re
 import tomllib
+import typing
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from .project import CONFIG_FILE, PRESETS, SRC
+from . import proc
+from .project import CONFIG_FILE, PRESETS, SRC, rel
 from .ui import DeployError
 
+SCHEMA = 1  # the pytemplate.toml layout this runner reads (`schema = 1`)
 BACKENDS = ("cpython", "pypy", "mypyc")
 PROFILES = ("mypyc", "strict", "warn", "off")
 METHODS = ("exe", "portable", "pyz", "wheel", "nuitka", "flet")
 EDITORS = ("pylance", "basedpyright")
+# [deploy] default: the build method of each backend; a backend left out of the table keeps its own
+DEFAULT_METHODS = {"cpython": "exe", "mypyc": "exe", "pypy": "portable"}
 
 _DOTTED = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
@@ -30,7 +40,7 @@ class AppConfig:
     name: str = "myapp"  # executable/dist name; the package is its snake_case version
     preset: str = "script"  # script | raylib | flet
     gui: bool = False  # True: exe without a console, launchers use pythonw/pypyw
-    assets: str = "assets"  # folder inside src/ that gets packaged ("" = none)
+    assets: str = "assets"  # "assets": src/assets/ is bundled with the app; "" = none (no other name)
 
 
 @dataclass
@@ -121,9 +131,7 @@ class UpxConfig:
 @dataclass
 class DeployConfig:
     optimize: int = 1
-    default: dict[str, str] = field(
-        default_factory=lambda: {"cpython": "exe", "mypyc": "exe", "pypy": "portable"}
-    )
+    default: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_METHODS))
     exe: ExeConfig = field(default_factory=ExeConfig)
     portable: PortableConfig = field(default_factory=PortableConfig)
     pyz: PyzConfig = field(default_factory=PyzConfig)
@@ -133,6 +141,11 @@ class DeployConfig:
     upx: UpxConfig = field(default_factory=UpxConfig)
     # Modules left out of the exe and nuitka builds even if something imports them (size)
     exclude_modules: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # A partial table (`default = { cpython = "pyz" }`) keeps the method of the other
+        # backends: without this, pypy fell back to "exe", which PyInstaller cannot build
+        self.default = {**DEFAULT_METHODS, **self.default}
 
 
 @dataclass
@@ -161,7 +174,7 @@ class VSCodeConfig:
 
 @dataclass
 class Config:
-    schema: int = 1
+    schema: int = SCHEMA
     app: AppConfig = field(default_factory=AppConfig)
     backend: BackendConfig = field(default_factory=BackendConfig)
     python: PythonConfig = field(default_factory=PythonConfig)
@@ -188,12 +201,20 @@ class Config:
         return self.supports("pypy")
 
     @property
+    def pypy_minor(self) -> str:
+        """Python version of the pinned PyPy: "pypy@3.11.15" -> "3.11"."""
+        m = re.fullmatch(r"pypy@([0-9]+\.[0-9]+)\.[0-9]+", self.python.pypy)
+        return m.group(1) if m else "3.11"
+
+    @property
     def min_python(self) -> str:
-        """Minimum syntax version: 3.11 if PyPy is supported."""
-        if self.pypy_enabled:
-            m = re.search(r"@(\d+\.\d+)", self.python.pypy)
-            return m.group(1) if m else "3.11"
-        return self.python.cpython
+        """Oldest Python the code must run on: the lowest minor of the interpreters in use.
+
+        CPython (python.cpython) always counts: the tools run on it and mypyc compiles for it.
+        PyPy (python.pypy) counts while it is supported, usually lowering it to 3.11.
+        """
+        minors = [self.python.cpython, *([self.pypy_minor] if self.pypy_enabled else [])]
+        return min(minors, key=_version_key)
 
     def profile_for(self, backend: str | None = None) -> str:
         """Return the effective typing profile for a backend (the active one by default)."""
@@ -206,71 +227,139 @@ class Config:
         return self.preset.get(name, {})
 
 
+def _version_key(version: str) -> tuple[int, ...]:
+    """Sort key of a version: numbers, never strings ("3.9" < "3.11" < "3.100")."""
+    return tuple(int(n) for n in re.findall(r"[0-9]+", version))
+
+
 # --- loading -----------------------------------------------------------------------------
 
+_BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
+_TYPE_NAMES: dict[Any, str] = {bool: "boolean", int: "integer", str: "string"}
 
-def _default_of(f: dataclasses.Field[Any]) -> Any:
-    if f.default is not dataclasses.MISSING:
-        return f.default
-    if f.default_factory is not dataclasses.MISSING:
-        return f.default_factory()
-    raise AssertionError(f.name)
+
+def _join(where: str, key: str) -> str:
+    """The dotted path of `key` inside `where`, quoting keys that are not bare TOML keys."""
+    part = key if _BARE_KEY.fullmatch(key) else json.dumps(key)
+    return f"{where}.{part}" if where else part
 
 
 def _type_name(value: Any) -> str:
+    if isinstance(value, datetime.datetime):
+        return "date-time"
     return {
         bool: "boolean",
         int: "integer",
+        float: "float",
         str: "string",
         list: "list",
         dict: "table",
+        datetime.date: "date",
+        datetime.time: "time",
     }.get(type(value), type(value).__name__)
 
 
-def _check_type(value: Any, default: Any, where: str) -> None:
-    if isinstance(default, bool):
-        ok = isinstance(value, bool)
-    elif isinstance(default, int):
-        ok = isinstance(value, int) and not isinstance(value, bool)
-    else:
-        ok = isinstance(value, type(default))
-    if not ok:
+_HINTS: dict[type[Any], dict[str, Any]] = {}
+
+
+def _fields(cls: type[Any]) -> dict[str, Any]:
+    """Field name -> resolved type (e.g. list[str]) of a schema dataclass."""
+    if cls not in _HINTS:
+        _HINTS[cls] = typing.get_type_hints(cls)
+    return _HINTS[cls]
+
+
+def _check_type(value: Any, hint: Any, where: str) -> None:
+    """Raise DeployError unless `value` (from tomllib) has the schema type `hint`, recursively."""
+    if hint is Any:  # free-form: [vscode] settings, [preset.<p>] options, mypy override options
+        _check_free(value, where)
+        return
+    origin = typing.get_origin(hint)
+    if origin is list or origin is dict:
+        if not isinstance(value, origin):
+            wanted = "list" if origin is list else "table"
+            raise DeployError(f"pytemplate.toml: '{where}' must be of type {wanted}, not {_type_name(value)}")
+        item = typing.get_args(hint)[-1]
+        if isinstance(value, list):
+            for i, v in enumerate(value):
+                _check_type(v, item, f"{where}[{i}]")
+        else:
+            for k, v in value.items():
+                _check_type(v, item, _join(where, k))
+        return
+    if not isinstance(value, hint) or (hint is not bool and isinstance(value, bool)):
+        name = _TYPE_NAMES.get(hint, getattr(hint, "__name__", str(hint)))
+        raise DeployError(f"pytemplate.toml: '{where}' must be of type {name}, not {_type_name(value)}")
+    if isinstance(value, str) and "\0" in value:
+        raise DeployError(f"pytemplate.toml: '{where}' contains a NUL character (\\u0000)")
+
+
+def _check_free(value: Any, where: str) -> None:
+    """A free-form value: strings, finite numbers, booleans, lists and tables only.
+
+    They end up in JSON (.vscode/settings.json), .mypy.ini or dependency strings, which cannot
+    hold a TOML date/time, nan/inf or a NUL character.
+    """
+    if isinstance(value, str):
+        if "\0" in value:
+            raise DeployError(f"pytemplate.toml: '{where}' contains a NUL character (\\u0000)")
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            raise DeployError(f"pytemplate.toml: '{where}' = {value}: only finite numbers are allowed here")
+    elif isinstance(value, (datetime.date, datetime.time)):
         raise DeployError(
-            f"pytemplate.toml: '{where}' must be of type {_type_name(default)}, not {_type_name(value)}"
+            f"pytemplate.toml: '{where}' is a TOML {_type_name(value)}, which the generated files "
+            "cannot hold: write it as a string (quoted)"
         )
-    if isinstance(default, list) and all(isinstance(x, str) for x in default):
-        wants_str = bool(default) or where.endswith(
-            ("supported", "modules", "exclude", "forbid_imports", "targets", "args", "deps", "cmd", "imports")
-        )
-        if wants_str and not all(isinstance(x, str) for x in value):
-            raise DeployError(f"pytemplate.toml: '{where}' must be a list of strings")
-    if isinstance(default, dict) and where.endswith(".env"):
-        # Environment variables (tasks.X.env, deploy.portable.env): string values only
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            _check_free(v, f"{where}[{i}]")
+    elif isinstance(value, dict):
         for k, v in value.items():
-            if not isinstance(v, str):
-                raise DeployError(f"pytemplate.toml: '{where}.{k}' must be of type string, not {_type_name(v)}")
+            _check_free(v, _join(where, k))
+
+
+def _check_env_names(env: dict[str, str], where: str) -> None:
+    """Names no process environment can hold (subprocess would raise ValueError)."""
+    for name in env:
+        if not name or "=" in name or "\0" in name:
+            raise DeployError(
+                f"pytemplate.toml: '{where}': invalid environment variable name {name!r} "
+                "(it cannot be empty or contain '=')"
+            )
+
+
+def _check_schema(schema: Any) -> None:
+    if isinstance(schema, int) and not isinstance(schema, bool) and schema != SCHEMA:
+        raise DeployError(
+            f"pytemplate.toml: schema = {schema} is not supported by this runner, which reads "
+            f"schema = {SCHEMA}: the file comes from a different version of the template"
+        )
 
 
 def _build(cls: type[Any], data: Any, where: str) -> Any:
     if not isinstance(data, dict):
         raise DeployError(f"pytemplate.toml: '{where}' must be a table")
-    fields = {f.name: f for f in dataclasses.fields(cls)}
+    if cls is Config:
+        _check_schema(data.get("schema", SCHEMA))  # before a newer layout's unknown keys
+    hints = _fields(cls)
     kwargs: dict[str, Any] = {}
     for key, value in data.items():
-        path = f"{where}.{key}" if where else key
-        f = fields.get(key)
-        if f is None:
-            valid = ", ".join(sorted(fields))
+        path = _join(where, key)
+        hint = hints.get(key)
+        if hint is None:
+            valid = ", ".join(sorted(hints))
             raise DeployError(f"pytemplate.toml: unknown key '{path}' (valid: {valid})")
-        default = _default_of(f)
-        if dataclasses.is_dataclass(default):
-            kwargs[key] = _build(type(default), value, path)
+        if isinstance(hint, type) and dataclasses.is_dataclass(hint):
+            kwargs[key] = _build(hint, value, path)
         elif key == "tasks" and cls is Config:
             kwargs[key] = {
-                name: _build(TaskConfig, spec, f"tasks.{name}") for name, spec in _table(value, path).items()
+                name: _build(TaskConfig, spec, _join("tasks", name)) for name, spec in _table(value, path).items()
             }
         else:
-            _check_type(value, default, path)
+            _check_type(value, hint, path)
+            if key == "env":  # tasks.X.env, deploy.portable.env
+                _check_env_names(value, path)
             kwargs[key] = value
     return cls(**kwargs)
 
@@ -301,22 +390,35 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
             f"pytemplate.toml: app.preset = {cfg.app.preset!r} is not a preset of this template "
             f"(available: {', '.join(_presets()) or 'none'}). To start from another preset: ./deploy new DIR --preset P"
         )
+
+    _check_schema(cfg.schema)
+    if cfg.app.assets not in ("", "assets"):
+        raise DeployError(
+            f"pytemplate.toml: app.assets = {cfg.app.assets!r} is not supported: use \"assets\" "
+            "(bundle src/assets/ with the app) or \"\" (no assets folder). The runtime lookup "
+            "(resources.assets_dir) and the portable/pyz bootstraps only know src/assets/"
+        )
     for b in cfg.backend.supported:
         _one_of(b, BACKENDS, "backend.supported")
     if not cfg.backend.supported:
         raise DeployError("pytemplate.toml: 'backend.supported' cannot be empty")
+    twice = sorted({b for b in cfg.backend.supported if cfg.backend.supported.count(b) > 1})
+    if twice:
+        raise DeployError(f"pytemplate.toml: 'backend.supported' lists {', '.join(twice)} more than once")
     _one_of(cfg.backend.active, BACKENDS, "backend.active")
     if cfg.backend.active not in cfg.backend.supported:
         raise DeployError(
             f"pytemplate.toml: backend.active = {cfg.backend.active!r} is not in backend.supported "
             f"{cfg.backend.supported}. Use: ./deploy mode {cfg.backend.active} --supports +{cfg.backend.active}"
         )
-    if not re.fullmatch(r"\d+\.\d+", cfg.python.cpython):
+    # [0-9], never \d: \d also matches other scripts' digits ("\u0663.\u0661\u0664")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+", cfg.python.cpython):
         raise DeployError("pytemplate.toml: 'python.cpython' must be a minor version, e.g. \"3.14\"")
-    if not re.fullmatch(r"pypy@\d+\.\d+\.\d+", cfg.python.pypy):
+    if not re.fullmatch(r"pypy@[0-9]+\.[0-9]+\.[0-9]+", cfg.python.pypy):
         raise DeployError(
-            "pytemplate.toml: 'python.pypy' must be an exact version, e.g. \"pypy@3.11.15\" "
-            "(a loose version may resolve to PyPy 8.0, whose pp80 ABI has no wheels yet)"
+            f"pytemplate.toml: 'python.pypy' must be an exact version, e.g. \"{PythonConfig.pypy}\": "
+            "a loose request picks the newest PyPy, and a new PyPy can change the extension ABI "
+            "(7.3 -> 8.0: pp73 -> pp80) that your dependencies must publish wheels for"
         )
     _one_of(cfg.typing.profile, ("auto", *PROFILES), "typing.profile")
     _one_of(cfg.typing.relaxed, ("off", "warn", "strict"), "typing.relaxed")
@@ -326,23 +428,18 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
             "pytemplate.toml: with the mypyc backend, typing cannot be 'warn' or 'off' "
             "(mypyc aborts on any mypy error). Use typing.profile = \"auto\"."
         )
-    for m in [*cfg.compile.modules, *cfg.compile.exclude]:
-        if not _DOTTED.match(m):
+    for m in [*cfg.compile.modules, *cfg.compile.exclude, *cfg.compile.forbid_imports]:
+        if not _DOTTED.fullmatch(m):  # fullmatch: `$` alone accepts a trailing newline
             raise DeployError(f"pytemplate.toml: invalid module in [compile]: {m!r}")
-    for o in cfg.typing.mypy_overrides:
-        if "module" not in o:
-            raise DeployError("pytemplate.toml: each [[typing.mypy_overrides]] needs 'module'")
-        if "strict" in o:
-            raise DeployError(
-                "pytemplate.toml: do not put 'strict' in typing.mypy_overrides "
-                "(mypy would apply it to ALL modules); use specific options instead"
-            )
+    for i, override in enumerate(cfg.typing.mypy_overrides):
+        _check_override(override, f"typing.mypy_overrides[{i}]")
     _one_of(cfg.compile.opt_level, ("0", "1", "2", "3"), "compile.opt_level")
     if cfg.deploy.optimize not in (0, 1, 2):
         raise DeployError("pytemplate.toml: 'deploy.optimize' must be 0, 1 or 2")
     for backend, method in cfg.deploy.default.items():
         _one_of(backend, BACKENDS, "deploy.default")
         _one_of(method, METHODS, f"deploy.default.{backend}")
+    _check_default_methods(cfg)
     _one_of(cfg.deploy.exe.mode, ("onefile", "onedir"), "deploy.exe.mode")
     _one_of(cfg.deploy.exe.console, ("auto", "yes", "no"), "deploy.exe.console")
     _one_of(cfg.deploy.portable.runtime, ("bundled", "system"), "deploy.portable.runtime")
@@ -352,9 +449,11 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
             raise DeployError(f"pytemplate.toml: deploy.portable.env: invalid environment variable name {key!r}")
     _one_of(cfg.deploy.nuitka.mode, ("standalone", "onefile"), "deploy.nuitka.mode")
     _one_of(cfg.deploy.upx.level, ("1", "2", "3", "4", "5", "6", "7", "8", "9", "best", "brute", "ultra-brute"), "deploy.upx.level")
-    for m in cfg.deploy.exclude_modules:
-        if not _DOTTED.match(m):
-            raise DeployError(f"pytemplate.toml: invalid module in deploy.exclude_modules: {m!r}")
+    for where, names in (("deploy.exclude_modules", cfg.deploy.exclude_modules), ("deploy.exe.hidden_imports", cfg.deploy.exe.hidden_imports)):
+        for m in names:
+            if not _DOTTED.fullmatch(m):
+                raise DeployError(f"pytemplate.toml: invalid module in {where}: {m!r}")
+    _check_preset_tables(cfg)
     for name, task in cfg.tasks.items():
         if not re.fullmatch(r"[a-z][a-z0-9_-]*", name):
             raise DeployError(f"pytemplate.toml: invalid task name: {name!r}")
@@ -373,12 +472,135 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
                 )
 
 
+# A [[typing.mypy_overrides]] table becomes a `[mypy-<module>,...]` section of .mypy.ini
+_MODULE_PATTERN = re.compile(r"(\*|[A-Za-z_][A-Za-z0-9_]*)(\.(\*|[A-Za-z_][A-Za-z0-9_]*))*")
+_OPTION_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
+
+
+def _check_override(override: dict[str, Any], where: str) -> None:
+    if "module" not in override:
+        raise DeployError(f"pytemplate.toml: '{where}' needs 'module' (each [[typing.mypy_overrides]] names its modules)")
+    if "strict" in override:
+        raise DeployError(
+            "pytemplate.toml: do not put 'strict' in typing.mypy_overrides "
+            "(mypy would apply it to ALL modules); use specific options instead"
+        )
+    names = override["module"] if isinstance(override["module"], list) else [override["module"]]
+    if not names:
+        raise DeployError(f"pytemplate.toml: '{where}.module' is empty: name a module or a pattern")
+    for name in names:
+        if not isinstance(name, str) or not _MODULE_PATTERN.fullmatch(name.replace("{pkg}", "pkg")):
+            raise DeployError(
+                f"pytemplate.toml: '{where}.module': {name!r} is not a module name or pattern "
+                "(e.g. \"raylib\", \"raylib.*\", \"{pkg}.ui.*\")"
+            )
+    for key, value in override.items():
+        if key == "module":
+            continue
+        if not _OPTION_NAME.fullmatch(key):
+            raise DeployError(f"pytemplate.toml: '{where}': {key!r} is not a mypy option name")
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, (list, dict)) or (isinstance(item, str) and ("\n" in item or "\r" in item)):
+                raise DeployError(
+                    f"pytemplate.toml: '{_join(where, key)}' must be a boolean, a number, a one-line "
+                    "string or a list of them (it becomes one line of .mypy.ini)"
+                )
+
+
+def _check_default_methods(cfg: Config) -> None:
+    """deploy.default: each method must be able to package its backend."""
+    from .cmd_build import COMPAT  # imported here: cmd_build imports this module
+
+    for backend, method in cfg.deploy.default.items():
+        reason = COMPAT.get(method, {}).get(backend)
+        if reason:
+            raise DeployError(f"pytemplate.toml: deploy.default.{backend} = {method!r} cannot package {backend}: {reason}")
+        if method == "flet" and cfg.app.preset != "flet":
+            raise DeployError(
+                f"pytemplate.toml: deploy.default.{backend} = 'flet': the flet method (flet build) "
+                f"is only for the flet preset (app.preset is {cfg.app.preset!r})"
+            )
+
+
+def _check_preset_tables(cfg: Config) -> None:
+    """[preset.<p>]: a preset of this template, and only the [options] its preset.toml declares."""
+    for name, options in cfg.preset.items():
+        table = _join("preset", name)
+        path = PRESETS / name / "preset.toml"
+        if not re.fullmatch(r"[a-z][a-z0-9_-]*", name) or not path.is_file():
+            raise DeployError(
+                f"pytemplate.toml: [{table}]: {name!r} is not a preset of this template "
+                f"(available: {', '.join(_presets()) or 'none'})"
+            )
+        declared = _preset_options(path)
+        for key, value in options.items():
+            if key not in declared:
+                valid = ", ".join(sorted(declared)) or f"none, the {name} preset has no options"
+                raise DeployError(f"pytemplate.toml: unknown key '{_join(table, key)}' (valid: {valid})")
+            if type(value) is not type(declared[key]):
+                raise DeployError(
+                    f"pytemplate.toml: '{_join(table, key)}' must be of type "
+                    f"{_type_name(declared[key])}, not {_type_name(value)}"
+                )
+
+
+def _preset_options(path: Path) -> dict[str, Any]:
+    """The [options] of a preset.toml, read with tomllib (importing presets.py would be a cycle)."""
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise DeployError(f"{rel(path)} cannot be read: {e}") from None
+    options = data.get("options", {})
+    return options if isinstance(options, dict) else {}
+
+
+# --- reading pytemplate.toml ---------------------------------------------------------------------
+
+_UTF8_BOM = b"\xef\xbb\xbf"
+_WIDE_BOMS = ((b"\x00\x00\xfe\xff", "UTF-32"), (b"\xff\xfe\x00\x00", "UTF-32"), (b"\xfe\xff", "UTF-16"), (b"\xff\xfe", "UTF-16"))
+_SAVE_AS_UTF8 = (
+    "save it as UTF-8 (TOML files are UTF-8). Windows PowerShell 5.1 writes UTF-16 with '>' and "
+    "Out-File and ANSI with Set-Content: add -Encoding utf8"
+)
+
+
+def _decode(raw: bytes, name: str) -> str:
+    """UTF-8 bytes (with or without a BOM) as text; anything else is a DeployError with the fix."""
+    for bom, kind in _WIDE_BOMS:
+        if raw.startswith(bom):
+            raise DeployError(f"{name} is {kind} text, not UTF-8: {_SAVE_AS_UTF8}")
+    body = raw.removeprefix(_UTF8_BOM)  # by hand: the line numbers below count from the text
+    if b"\0" in body:  # never in TOML: ASCII text saved as UTF-16 without a BOM
+        line = body.count(b"\n", 0, body.index(b"\0")) + 1
+        raise DeployError(f"{name} has NUL bytes (line {line}), like UTF-16 text without a BOM: {_SAVE_AS_UTF8}")
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError as e:
+        line = body.count(b"\n", 0, e.start) + 1
+        raise DeployError(
+            f"{name} is not UTF-8 (byte 0x{body[e.start]:02X} on line {line}; ANSI/cp1252?): {_SAVE_AS_UTF8}"
+        ) from None
+
+
+def _read() -> tuple[str, bool]:
+    """pytemplate.toml as text (line endings kept) and whether it starts with a UTF-8 BOM."""
+    try:
+        raw = CONFIG_FILE.read_bytes()
+    except OSError as e:
+        raise DeployError(f"cannot read {CONFIG_FILE.name}: {e.strerror or e}") from None
+    return _decode(raw, CONFIG_FILE.name), raw.startswith(_UTF8_BOM)
+
+
+def read_text() -> str:
+    """pytemplate.toml as text: UTF-8 with or without a BOM (dropped); line endings are kept."""
+    return _read()[0]
+
+
 def load(builtin_commands: set[str] | None = None) -> Config:
     if not CONFIG_FILE.is_file():
         raise DeployError(f"{CONFIG_FILE.name} not found in the project root")
-    text = CONFIG_FILE.read_text(encoding="utf-8-sig")
     try:
-        data = tomllib.loads(text)
+        data = tomllib.loads(read_text())
     except tomllib.TOMLDecodeError as e:
         raise DeployError(f"pytemplate.toml is not valid TOML: {e}") from None
     cfg: Config = _build(Config, data, "")
@@ -399,44 +621,252 @@ def compiled_paths(cfg: Config) -> list[str]:
 
 
 def toml_value(value: Any) -> str:
+    """A bool, int, str or list of them as a one-line TOML value."""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
     if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False)
+        if any("\ud800" <= c <= "\udfff" for c in value):
+            raise DeployError(f"{value!r} cannot be written to TOML: it holds a lone surrogate (not valid Unicode)")
+        # JSON escapes '"', '\' and U+0000-U+001F the way TOML does; TOML also forbids a raw DEL
+        return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
     if isinstance(value, list):
         return "[" + ", ".join(toml_value(v) for v in value) + "]"
     raise TypeError(value)
 
 
+class _ScanError(Exception):
+    """The scanner met something it does not understand: set_value refuses to edit."""
+
+
+@dataclass
+class _Stmt:
+    kind: str  # "table" ([a.b]), "array" ([[a.b]]) or "key" (a key = value statement)
+    path: tuple[str, ...]  # the header, or the table + the (dotted) key
+    value: tuple[int, int]  # "key": the span of the value, which may cover several lines
+    end: int  # just past the statement's line ending (or the end of the text)
+    in_array: bool = False  # "key" statements under a [[header]]
+
+
+def _skip_blank(text: str, i: int) -> int:
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    return i
+
+
+def _line_end(text: str, i: int) -> int:
+    """Index just past the rest of the line at i: blanks, an optional comment, the line ending."""
+    i = _skip_blank(text, i)
+    if text.startswith("#", i):
+        nl = text.find("\n", i)
+        return len(text) if nl < 0 else nl + 1
+    if i >= len(text):
+        return i
+    if text.startswith("\n", i):
+        return i + 1
+    if text.startswith("\r\n", i):
+        return i + 2
+    raise _ScanError(i)
+
+
+def _string_end(text: str, i: int) -> int:
+    """Index just past the string that starts at i (basic, literal, or their multi-line forms)."""
+    q = text[i]
+    if text.startswith(q * 3, i):
+        j = i + 3
+        while j < len(text):
+            if q == '"' and text[j] == "\\":
+                j += 2
+            elif text.startswith(q * 3, j):
+                k = j + 3
+                while k < min(j + 5, len(text)) and text[k] == q:  # """a"""" ends with a quote
+                    k += 1
+                return k
+            else:
+                j += 1
+        raise _ScanError(i)
+    j = i + 1
+    while j < len(text) and text[j] not in (q, "\n"):
+        j += 2 if q == '"' and text[j] == "\\" else 1
+    if j >= len(text) or text[j] != q:
+        raise _ScanError(i)
+    return j + 1
+
+
+def _value_end(text: str, i: int) -> int:
+    """Index just past the value that starts at i (an array or inline table may span lines)."""
+    if text.startswith(('"', "'"), i):
+        return _string_end(text, i)
+    if text.startswith(("[", "{"), i):
+        depth, j = 0, i
+        while j < len(text):
+            c = text[j]
+            if c in "\"'":
+                j = _string_end(text, j)
+                continue
+            if c == "#":  # a comment inside a multi-line array
+                nl = text.find("\n", j)
+                j = len(text) if nl < 0 else nl
+                continue
+            if c in "[{":
+                depth += 1
+            elif c in "]}":
+                depth -= 1
+                if depth == 0:
+                    return j + 1
+            j += 1
+        raise _ScanError(i)
+    j = i  # a number, boolean or date: up to a comment or the end of the line
+    while j < len(text) and text[j] not in "#\n":
+        j += 1
+    while j > i and text[j - 1] in " \t\r":
+        j -= 1
+    if j == i:
+        raise _ScanError(i)
+    return j
+
+
+def _key(text: str, i: int) -> tuple[tuple[str, ...], int]:
+    """A (dotted, maybe quoted) key at i: its parts and the index after it and its blanks."""
+    parts: list[str] = []
+    while True:
+        i = _skip_blank(text, i)
+        if text.startswith(('"', "'"), i):
+            end = _string_end(text, i)
+            parts.append(str(tomllib.loads("k = " + text[i:end])["k"]))
+            i = end
+        else:
+            m = _BARE_KEY.match(text, i)
+            if not m:
+                raise _ScanError(i)
+            parts.append(m.group())
+            i = m.end()
+        i = _skip_blank(text, i)
+        if not text.startswith(".", i):
+            return tuple(parts), i
+        i += 1
+
+
+def _statements(text: str) -> list[_Stmt]:
+    """The top-level statements of a TOML text with their offsets.
+
+    Strings and multi-line arrays are skipped as a whole, so a `[table]` or `key = ...` line
+    inside a multi-line string or array is never taken for a real one.
+    """
+    out: list[_Stmt] = []
+    table: tuple[str, ...] = ()
+    in_array = False
+    i = 0
+    while i < len(text):
+        i = _skip_blank(text, i)
+        if i >= len(text):
+            break
+        if text[i] in "\r\n#":
+            i = _line_end(text, i)
+            continue
+        if text[i] == "[":
+            in_array = text.startswith("[[", i)
+            table, i = _key(text, i + (2 if in_array else 1))
+            close = "]]" if in_array else "]"
+            if not text.startswith(close, i):
+                raise _ScanError(i)
+            i = _line_end(text, i + len(close))
+            out.append(_Stmt("array" if in_array else "table", table, (i, i), i))
+            continue
+        key, i = _key(text, i)
+        if not text.startswith("=", i):
+            raise _ScanError(i)
+        start = _skip_blank(text, i + 1)
+        stop = _value_end(text, start)
+        i = _line_end(text, stop)
+        out.append(_Stmt("key", table + key, (start, stop), i, in_array))
+    return out
+
+
+def _edited(text: str, path: tuple[str, ...], rendered: str) -> str:
+    """`text` with the value at `path` replaced by `rendered` (or the key/table added)."""
+    stmts = _statements(text)
+    m = re.search(r"\r?\n", text)
+    eol = m.group() if m else "\n"
+    hit = next((s for s in stmts if s.kind == "key" and not s.in_array and s.path == path), None)
+    if hit:  # only the value changes: a comment after it and the line ending stay
+        start, stop = hit.value
+        return text[:start] + rendered + text[stop:]
+    line = f"{path[-1]} = {rendered}{eol}"
+    header = next((n for n, s in enumerate(stmts) if s.kind == "table" and s.path == path[:-1]), None)
+    if header is None:  # a new table at the end, after a blank line
+        body = text if not text or text.endswith("\n") else text + eol
+        gap = eol if body.strip() and not body.endswith(eol * 2) else ""
+        return f"{body}{gap}[{'.'.join(path[:-1])}]{eol}{line}"
+    at = stmts[header].end  # after the table's last key: comments before the next header stay there
+    for s in stmts[header + 1 :]:
+        if s.kind != "key":
+            break
+        at = s.end
+    head = text[:at]
+    if head and not head.endswith("\n"):  # the last line of the file had no line ending
+        head += eol
+    return head + line + text[at:]
+
+
 def set_value(text: str, table: str, key: str, value: Any) -> str:
-    """Change `key = ...` inside `[table]` (or add it), keeping the comment on that line."""
-    lines = text.splitlines(keepends=True)
-    header = re.compile(r"^\s*\[\s*" + re.escape(table) + r"\s*\]\s*(#.*)?$")
-    any_header = re.compile(r"^\s*\[")
-    key_line = re.compile(r"^(\s*" + re.escape(key) + r"\s*=\s*)(.*?)(\s+#.*)?(\r?\n)?$")
-    start = next((i for i, ln in enumerate(lines) if header.match(ln)), None)
+    """Set `key = value` in `[table]` of a pytemplate.toml text and return the new text.
+
+    Only the value changes: the comment after it, the other lines, the layout and the line
+    endings (LF or CRLF) stay. The old value may span several lines (taplo, the TOML formatter,
+    expands long arrays): all of it is replaced. A missing key is added after the table's last
+    key, a missing table at the end. The result is parsed again: an edit that would change
+    anything but this key (an unusual layout) is refused with a DeployError, never written.
+    """
+    path = (*table.split("."), key)
     rendered = toml_value(value)
-    if start is None:
-        sep = "" if not text or text.endswith("\n") else "\n"
-        return f"{text}{sep}\n[{table}]\n{key} = {rendered}\n"
-    end = next((i for i in range(start + 1, len(lines)) if any_header.match(lines[i])), len(lines))
-    for i in range(start + 1, end):
-        m = key_line.match(lines[i])
-        if m:
-            lines[i] = f"{m.group(1)}{rendered}{m.group(3) or ''}{m.group(4) or ''}"
-            return "".join(lines)
-    insert_at = end
-    while insert_at > start + 1 and not lines[insert_at - 1].strip():
-        insert_at -= 1
-    lines.insert(insert_at, f"{key} = {rendered}\n")
-    return "".join(lines)
+    try:
+        before = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise DeployError(f"pytemplate.toml is not valid TOML: {e}") from None
+    try:
+        new: str | None = _edited(text, path, rendered)
+    except _ScanError:
+        new = None
+    if new is None or not _only_changed(before, new, path, value):
+        raise DeployError(
+            f"pytemplate.toml: could not set {'.'.join(path)} automatically (unusual layout): "
+            f"set it by hand to {key} = {rendered} in [{table}]"
+        )
+    return new
+
+
+def _only_changed(before: dict[str, Any], text: str, path: tuple[str, ...], value: Any) -> bool:
+    """Whether `text` parses as `before` with only `path` set to `value`."""
+    try:
+        after = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return False
+    expected = copy.deepcopy(before)
+    node: Any = expected
+    for part in path[:-1]:
+        node = node.setdefault(part, {})
+        if not isinstance(node, dict):
+            return False
+    node[path[-1]] = value
+    return bool(after == expected)
 
 
 def update_file(changes: list[tuple[str, str, Any]]) -> None:
-    text = CONFIG_FILE.read_text(encoding="utf-8-sig")
+    """Apply `changes` (table, key, value) to pytemplate.toml, keeping comments and layout.
+
+    Every edit is checked in memory first (set_value), so a failing one writes nothing and the
+    file is never left as broken TOML. A UTF-8 BOM and the line endings are kept. Nothing is
+    written when nothing changes or under --dry-run.
+    """
+    old, bom = _read()
+    new = old
     for table, key, value in changes:
-        text = set_value(text, table, key, value)
-    tomllib.loads(text)  # never leave a broken file behind
-    CONFIG_FILE.write_text(text, encoding="utf-8", newline="\n")
+        new = set_value(new, table, key, value)
+    try:
+        tomllib.loads(new)
+    except tomllib.TOMLDecodeError as e:  # set_value checks each edit; this guards the sum
+        raise DeployError(f"pytemplate.toml: the change would break the file ({e}); nothing was written") from None
+    if new != old and not proc.DRY_RUN:
+        CONFIG_FILE.write_text(("\ufeff" if bom else "") + new, encoding="utf-8", newline="\n")

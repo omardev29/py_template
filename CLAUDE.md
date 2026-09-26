@@ -382,7 +382,7 @@ header rules (with detector tests proving each rule fires).
 |---|---|
 | `deploy.py` (one level up) | Reconfigures stdout/stderr to UTF-8, puts its own dir on `sys.path`, calls `runner.cli.main`. |
 | `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `INTERNAL` (routes listed nowhere: `__init`). `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main` (exception -> exit code), `cmd_help`, `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
-| `config.py` | Dataclass schema, strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file`, `toml_value`. |
+| `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file` (section 6.1), `toml_value`. |
 | `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL`, `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env`, `run` (echo, `DRY_RUN`, cwd defaults to `ROOT`, UTF-8 capture), `output`, `show` (display quoting only), `vs_installer_dir`, `CommandFailed`. |
@@ -431,7 +431,10 @@ header rules (with detector tests proving each rule fires).
    `clean`, `setup`, `doctor` (`cmd_dev.only_flags`), `check` and `sync` (extra positionals),
    `shell-setup`. By design: `run`/`test`/tasks forward the rest, `build` forwards unknown
    flags to the packager, `lock` to `uv lock`, plain `selftest` to pytest; `help` and `tasks`
-   ignore extras.
+   ignore extras. `mode` also rejects abbreviations (`allow_abbrev=False`), an option given
+   twice, `--supports` mixing `+`/`-` changes with plain names or adding and removing the same
+   backend, and a BACKEND that `--supports` removes or leaves out of a full list
+   (`cmd_mode._supports_after`); stray commas and spaces in `--supports` are ignored.
 
 ### 5.3 Exit codes and output
 
@@ -562,42 +565,78 @@ find a compatible Visual Studio installation"). Everything else (e.g. `FLET_*`) 
 
 ### 6.1 `pytemplate.toml` (`config.py`)
 
-- `schema = 1` is only type-checked; there is no migration logic.
+- Reading (`config.read_text`, used by `load`, `update_file` and `mode`): UTF-8, a UTF-8 BOM is
+  dropped, line endings are kept. UTF-16/32 (BOM; PowerShell 5.1 `>`/`Out-File`), NUL bytes
+  (UTF-16 without a BOM) and invalid UTF-8 (ANSI, `Set-Content`) are a `DeployError` (exit 2)
+  naming the encoding or the byte and its line, and how to save the file again; never a
+  traceback, for every command (`help` still prints, without the custom tasks).
+- Loader (`config._build`): types come from the dataclass annotations (`typing.get_type_hints`),
+  recursively: list items (`key[i]`), table values (`key.k`; non-bare keys are quoted in the
+  path). `Any`-typed values (`[vscode] settings`, `[preset.<p>]` options, mypy override options)
+  must be JSON-like: no TOML date/time, `nan`/`inf` (`_check_free`). NUL characters are rejected
+  everywhere.
+- `schema` must equal `config.SCHEMA` (1; a missing line means 1). It is checked before the
+  other keys, so a file from another template version fails with that reason instead of an
+  unknown key. There is no migration logic.
 - `[app]`: `name` (`[A-Za-z][A-Za-z0-9_-]*`; `pkg = name.replace("-", "_").lower()`), `preset`
   (`config.validate`: `[a-z][a-z0-9_-]*` and `PRESETS/<name>/preset.toml` must exist, checked
-  without importing `presets.py`), `gui`, `assets` (dir inside `src/`, `""` = none).
-- `[backend]`: `active`, `supported` (non-empty subset of `cpython, pypy, mypyc`, contains
-  `active`).
-- `[python]`: `cpython` (`^\d+\.\d+$`), `pypy` (`^pypy@\d+\.\d+\.\d+$`, exact: a loose request
-  can resolve to PyPy 8.0 / pp80, which has no wheels). The removed CPython JIT keys (`jit`,
-  `jit_interpreter`) fail like any unknown key (no compatibility shim: each project carries its
-  own runner).
+  without importing `presets.py`), `gui`, `assets` (`"assets"` = bundle `src/assets/`, `""` =
+  none; any other name is rejected: `resources.assets_dir` and the portable/pyz bootstraps
+  hard-code `assets`).
+- `[backend]`: `active`, `supported` (non-empty subset of `cpython, pypy, mypyc` without
+  duplicates, contains `active`).
+- `[python]`: `cpython` (`[0-9]+\.[0-9]+`: ASCII digits, `\d` also matches other scripts'),
+  `pypy` (`pypy@[0-9]+\.[0-9]+\.[0-9]+`, exact: a loose request picks the newest PyPy, and PyPy
+  8.0 changed the extension ABI to pp80; in September 2026 raylib, numpy and cffi published no
+  pp80 wheels. Bump the pin only once the dependencies ship wheels for the new ABI, then
+  `./deploy lock`). The removed CPython JIT keys (`jit`, `jit_interpreter`) fail like any
+  unknown key (no compatibility shim: each project carries its own runner). `Config.min_python`
+  is the lowest minor in use (CPython always, PyPy's `Config.pypy_minor` while supported),
+  compared as numbers.
 - `[typing]`: `profile = auto|mypyc|strict|warn|off`, `relaxed = off|warn|strict` (what `auto`
   means on cpython/pypy), `editor = pylance|basedpyright`, `[[typing.mypy_overrides]]`
-  (`module` required, `strict` forbidden: mypy would apply it to ALL modules; `{pkg}` token in
-  module names). `backend.active = "mypyc"` rejects `warn`/`off`.
+  (`config._check_override`: `module` required, a name/pattern or a non-empty list of them
+  (dotted identifiers or `*`, `{pkg}` token); `strict` forbidden: mypy would apply it to ALL
+  modules; option names identifier-like, values booleans, numbers, one-line strings or lists of
+  them: each becomes a `.mypy.ini` line). `backend.active = "mypyc"` rejects `warn`/`off`.
 - `[compile]`: `modules`, `exclude`, `forbid_imports` (dotted names checked), `annotate` (every
   mypyc build writes the annotate report, section 9), `opt_level "0".."3"`, `multi_file`,
   `separate`, `strict_dunder_typing`.
-- `[deploy]`: `optimize 0|1|2`, `default {backend: method}`, `exclude_modules` (dotted names:
-  PyInstaller `--exclude-module`, Nuitka `--nofollow-import-to`; the flet preset sets
-  `["PIL"]`), `[deploy.exe] mode console icon hidden_imports strip extra_args` (`strip`:
+- `[deploy]`: `optimize 0|1|2`, `default {backend: method}` (merged over
+  `config.DEFAULT_METHODS` in `DeployConfig.__post_init__`: a backend left out keeps its method,
+  cpython/mypyc `exe`, pypy `portable`; each method must be allowed by `cmd_build.COMPAT` for its
+  backend, and `flet` needs `app.preset = "flet"`: `config._check_default_methods`),
+  `exclude_modules` (dotted names: PyInstaller `--exclude-module`, Nuitka `--nofollow-import-to`;
+  the flet preset sets `["PIL"]`), `[deploy.exe] mode console icon hidden_imports strip
+  extra_args` (`hidden_imports`: dotted names; `strip`:
   PyInstaller `--strip`, Linux/macOS only), `[deploy.portable] runtime prune archive env`
   (`env` names must be identifiers), `[deploy.pyz] targets`, `[deploy.wheel] entry`,
   `[deploy.nuitka] mode extra_args`, `[deploy.flet] target cleanup exclude extra_args`
   (`target` is not validated; `cleanup` = `--cleanup-app --cleanup-packages`),
   `[deploy.upx] enabled level lzma exclude path` (`level` in `1..9|best|brute|ultra-brute`).
 - `[hooks]`: `pre_commit` (setup installs the git hook; section 5.6).
-- Every `*.env` table (`tasks.X.env`, `deploy.portable.env`) takes string values only.
+- Every `*.env` table (`tasks.X.env`, `deploy.portable.env`) takes string values only, and names
+  a process environment can hold (not empty, no `=` or NUL; checked by the loader).
 - `[tasks.<name>]`: `cmd` (argv), `deps`, `env`, `backend`, `uv = true`, `cwd`, `help`,
   `background` (long-running dev server; section 12). Name regex `[a-z][a-z0-9_-]*`; `cmd` or
   `deps` required.
-- `[preset.<name>]`: free-form option overrides, NOT validated.
-- `[vscode]`: `settings` (merged into `.vscode/settings.json`, NOT validated), `buttons`
-  (each first word must be a builtin command or a `[tasks]` name: `config.validate`).
-- `config.set_value` is line-based: it only rewrites single-line `key = value` entries (a
-  multi-line array would break it). `update_file` re-parses with `tomllib` and refuses to write
-  broken TOML. The config is read as `utf-8-sig` (tolerates a BOM).
+- `[preset.<name>]`: option overrides (`config._check_preset_tables`): `<name>` must be a preset
+  of this template, and each key and its value type must match that preset's `preset.toml`
+  `[options]`, read with `tomllib` (no `presets` import); the script preset has none.
+- `[vscode]`: `settings` (merged into `.vscode/settings.json`; free-form but JSON values only),
+  `buttons` (each first word must be a builtin command or a `[tasks]` name: `config.validate`).
+- `config.set_value(text, table, key, value)` edits the TOML text itself: a small scanner
+  (`config._statements`: the four string kinds, multi-line arrays and inline tables, comments,
+  dotted and quoted keys) finds the value's span, which may cover several lines (taplo, the
+  LazyVim TOML formatter, expands long arrays), and replaces only that span: the comment after
+  it, the other lines and the line endings stay. A missing key goes after the table's last key
+  (a missing table at the end) with the file's line ending. The result is re-parsed and must
+  equal the old data with only that key changed; anything else (the table written as an inline
+  table, the key defined as a table) is a `DeployError` asking to edit it by hand.
+  `config.toml_value` escapes DEL and refuses lone surrogates.
+- `config.update_file` applies every change in memory first, writes only when something changed
+  and never under `--dry-run`, keeps a UTF-8 BOM and the line endings, and never writes broken
+  TOML. `mode` drops changes whose value is already set, so their spelling stays.
 
 ### 6.2 Generated files and `state.json`
 
@@ -642,7 +681,8 @@ Formats:
 
 ### 6.3 `pyproject.toml` managed parts
 
-- `requires-python`: the first `^requires-python` line is rewritten to `">=<min_python>"`.
+- `requires-python`: the first `^requires-python` line is rewritten to `">=<min_python>"` (the
+  lowest supported minor: usually PyPy's 3.11 with PyPy, else `python.cpython`).
 - The `[tool.uv]` block between `# >>> pytemplate` and `# <<< pytemplate`
   (`render.managed_block`). The END MARKER IS AN INLINE COMMENT on the last key line
   (`python-preference = "only-managed"  # <<< pytemplate`) so uv/toml_edit insertions cannot
@@ -673,7 +713,8 @@ Formats:
   `uv run --locked` recreates `.venv` by itself (verified on a clone: `run`, `test all`, `check
   all`, `render --check`, `doctor` all pass without `setup`).
 - `environments` in the managed block is bounded to the CPython minor (e.g.
-  `cpython and >=3.14,<3.15`), plus `pypy and >=3.11,<3.12` when PyPy is supported. Without the
+  `cpython and >=3.14,<3.15`), plus `pypy and >=3.11,<3.12` (PyPy's own minor,
+  `Config.pypy_minor`, never `min_python`) when PyPy is supported. Without the
   bound uv resolves for 3.15+, where raylib has no wheels. Changing `python.cpython` needs
   `./deploy lock`.
 - With PyPy supported the block adds
@@ -931,6 +972,7 @@ Per method:
   new DIR --preset P`: a project's preset is chosen when it is created.
 - Hard-coded preset names in the runner: `render.ci_workflow` (raylib: apt GL/X11 libs, no
   PyPy on macOS), `methods/exe.build` (flet -> `flet pack`), `methods/flet.build` (flet only),
+  `config._check_default_methods` (a `deploy.default` of `flet` needs the flet preset),
   `e2e.SMOKE` / `e2e.COMPILED_MARK` (expected app output per preset). A new preset that needs
   special packaging or smoke checks must touch these.
 - raylib: the upstream stub lies (returns/fields/params declared `bytes`/`list` that are cdata
@@ -1187,7 +1229,11 @@ short temp tree and unset `NVIM_APPNAME`.
   version probes, unknown arguments, `app.preset`, pinned tools, flet pyproject, wheel
   options), `test_e2e_plan.py` (the pure planning of `e2e.py`), `test_removals.py` (no JIT
   key, env, launch config or `PYTHON_JIT` left; `./deploy init` exits 2 with its hint; `new`
-  and the maintainer route through `__init`, for real in throwaway copies).
+  and the maintainer route through `__init`, for real in throwaway copies),
+  `test_config_rules.py` (every schema field and validate rule with a positive and a negative
+  case, the encodings, `set_value`/`update_file` on taplo-formatted, CRLF and BOM files, `mode`
+  argument parsing, and real `mode --typing/--editor/--supports` round trips in a throwaway
+  copy that must restore every byte).
 - **[template repo]** Language guard `test_no_spanish.py`: skipped unless
   `.pytemplate/template-repo` exists. Scans `git ls-files --cached --others --exclude-standard`
   (so new untracked files count) for accented Spanish letters and a list of Spanish words
@@ -1303,7 +1349,8 @@ Runner code:
   harnesses (`shells`, `nvimtest`, `e2e`) use `subprocess` directly with stdin closed, output
   to log files and timeouts that kill the process tree.
 - Text files: `encoding="utf-8", newline="\n"`; write `"\ufeff"`, never a literal BOM; read
-  `pytemplate.toml` as `utf-8-sig`; parse Python sources as bytes (`imports.parse`).
+  `pytemplate.toml` with `config.read_text` (a bad encoding becomes a clear config error);
+  parse Python sources as bytes (`imports.parse`).
   Generated `.cmd` files: ASCII, explicit `\r\n`, written with `newline=""`.
 - Project paths from `project.*` (never the cwd); user-typed paths through
   `project.user_path`.
@@ -1368,7 +1415,6 @@ Behaviour:
   eaten by PowerShell.
 - Tasks: a task with `backend = "mypyc"` runs interpreted in `.venv` unless it goes through a
   `deps` entry such as `compile` and runs the stage.
-- `config.set_value` only edits single-line entries.
 - `clean --envs` removes every `.venv*`, including the environments in use; there is no
   "unused only" option (`mode` only prints a note about leftovers).
 - raylib + PyPy on macOS arm64: no PyPy wheel for that platform (raylib 6.0.1.0 still has
@@ -1417,6 +1463,10 @@ Code coupling (rename together):
   `config._build`, `presets._set_project_name` and `presets._norm_name`.
 - `upx.BUILTIN_EXCLUDE` must keep `flutter_windows.dll`; `nuitka._flet_client_archive` mirrors
   flet_desktop's download URL and its `flet_desktop/app/` lookup.
+- `config._check_default_methods` imports `cmd_build.COMPAT` lazily (`cmd_build` imports
+  `config`); `config._check_preset_tables` reads `preset.toml` `[options]` itself, like
+  `config._presets` mirrors `presets.available`; `render.managed_block` needs `pypy_minor`
+  (PyPy's environment) and `min_python` (requires-python) to stay distinct.
 - `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`;
   `e2e.flet_build_reason` imports `methods.flet._developer_mode`; `cmd_nvim.c_compiler`
   imports `cmd_env._msvc` lazily (`cmd_env` imports `cmd_nvim`).
