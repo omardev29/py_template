@@ -1753,6 +1753,10 @@ def test_wheel_carries_compiled_modules_outside_the_package(wheel_project: Path,
     if backend == "mypyc":  # every file mypycify gets exists in the build project
         listed = re.findall(r"'(src/[^']+\.py)'", (work / "setup.py").read_text(encoding="utf-8"))
         assert "src/fastbench.py" in listed and all((work / f).is_file() for f in listed)
+    else:  # a compile.modules entry that names nothing: a cpython wheel is built as before
+        missing = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core", "gone"]}})
+        wheel.build(BuildRequest(missing, backend, "wheel", wheel_project / "src"))
+        assert "py-modules" not in (work / "pyproject.toml").read_text(encoding="utf-8")
 
 
 @needs_venv

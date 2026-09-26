@@ -42,11 +42,12 @@ def _outside_package(cfg: Config) -> list[str]:
     """The top-level entries of src/ that compile.modules names besides the package: a lone
     module (`fastbench.py`) or another package. The app imports them, so the wheel carries them
     (mypycify compiles them from the build project; without them it stopped with "Cannot read
-    file 'src/fastbench.py'", and a cpython wheel left them out)."""
+    file 'src/fastbench.py'", and a cpython wheel left them out). An entry that names nothing
+    is left to mypyc.compiled_sources, which refuses it for a mypyc build."""
     tops: list[str] = []
     for rel_path in compiled_paths(cfg):
         top = rel_path.split("/")[0]
-        if top != cfg.pkg and top not in tops:
+        if top != cfg.pkg and top not in tops and (SRC / top).exists():
             tops.append(top)
     return tops
 
