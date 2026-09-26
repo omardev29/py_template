@@ -2165,9 +2165,10 @@ short temp tree and unset `NVIM_APPNAME`.
   `./deploy init` exits 2 with its hint; `new` and the maintainer route through `__init`, for
   real in throwaway copies),
   `test_config_rules.py` (every schema field and validate rule with a positive and a negative
-  case, the encodings, `set_value`/`update_file` on taplo-formatted, CRLF and BOM files, `mode`
-  argument parsing, and real `mode --typing/--editor/--supports` round trips in a throwaway
-  copy that must restore every byte), `test_cli_core.py` (the runner's core: global options,
+  case, the encodings, `set_value`/`update_file` on taplo-formatted, CRLF and BOM files and
+  commented multi-line arrays, `mode` argument parsing, a failed re-lock or sync putting every
+  file back (a fake uv), `new --dry-run` inside another git work tree, and real `mode
+  --typing/--editor/--supports` round trips in a throwaway copy that must restore every byte), `test_cli_core.py` (the runner's core: global options,
   dispatch, render-before-command, help, the exit code of every outcome, every command rejecting
   a bogus argument, `proc.run` dry-run/errors/signals/threads, `base_env` per variable, Ctrl+C
   with real children that trap SIGINT, a closed stdout, `[tasks]` deps/cycles/placeholders/cwd/
