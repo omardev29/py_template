@@ -9,7 +9,17 @@ the project's .venv. All the logic lives in the `runner/` package next to this f
 """
 
 import sys
-from pathlib import Path
+
+# A UV_PYTHON (the launchers clear it; `uv run` by hand does not) or a python.cpython below
+# 3.11 makes uv start an older Python, which would crash on tomllib and blame the runner.
+if sys.version_info < (3, 11):
+    sys.stderr.write(
+        f"error: the ./deploy runner needs Python 3.11 or newer, but uv started Python {sys.version.split()[0]}"
+        f" ({sys.executable}). Unset UV_PYTHON (or point it at 3.11+) and check python.cpython in pytemplate.toml.\n"
+    )
+    raise SystemExit(3)
+
+from pathlib import Path  # noqa: E402
 
 # UTF-8 output even when the console/pipe uses cp1252 (paths and tool output may be non-ASCII)
 for _stream in (sys.stdout, sys.stderr):

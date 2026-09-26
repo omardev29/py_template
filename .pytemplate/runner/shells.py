@@ -48,10 +48,18 @@ Check = Callable[[bool | None, str, str], None]
 
 
 def probe(argv: list[str]) -> int:
-    """__probe EXIT STDIN(0|1) ARGS...: print one PTPROBE{json} line and exit with EXIT."""
+    """__probe EXIT STDIN(0|1) ARGS...: print one PTPROBE{json} line and exit with EXIT.
+
+    The stdin line is read as bytes and decoded as UTF-8 with surrogateescape, whatever the
+    locale: a byte that is not UTF-8 shows up as \\udcXX (raw bytes arrived), while a wrapper
+    that re-encoded the text (PowerShell) leaves U+FFFD.
+    """
     code = int(argv[0]) if argv and argv[0].lstrip("-").isdigit() else 0
     read_stdin = len(argv) > 1 and argv[1] == "1"
-    line = sys.stdin.readline().rstrip("\r\n") if read_stdin else None
+    line: str | None = None
+    if read_stdin and sys.stdin is not None:
+        raw = sys.stdin.buffer.readline() if hasattr(sys.stdin, "buffer") else sys.stdin.readline().encode("utf-8", "surrogateescape")
+        line = raw.decode("utf-8", "surrogateescape").rstrip("\r\n")
     data = {
         "argv": argv[2:],
         "cwd": os.getcwd(),
