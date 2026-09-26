@@ -9,7 +9,10 @@
             "program": "${workspaceFolder}/src/main.py",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "env": {
+                "PYTHONUTF8": "1"
+            }
         },
         {
             "name": "Run mypyc stage (compiled modules cannot be stepped into)",
@@ -31,6 +34,7 @@
                 }
             ],
             "env": {
+                "PYTHONUTF8": "1",
                 "PYTEMPLATE_BACKEND": "mypyc"
             }
         },
@@ -41,7 +45,10 @@
             "module": "pytest",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "justMyCode": false
+            "justMyCode": false,
+            "env": {
+                "PYTHONUTF8": "1"
+            }
         }
     ]
 }

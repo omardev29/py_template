@@ -1,14 +1,17 @@
 # __HEADER__
 #
-# CI: on Windows, Linux and macOS it runs the same commands as on your machine
-# (./deploy setup, check, test) and builds one .pyz per OS. mypyc does not compile for
-# other OSes, so each runner contributes its binaries and the "pyz" job merges them into
-# a single .pyz that uses the binary for each OS (and the .py on any other interpreter).
+# CI: on Windows, Linux and macOS it checks that the generated files and the managed parts of
+# pyproject.toml match pytemplate.toml (./deploy render --check), syncs the backends that OS
+# supports (./deploy sync, never setup), runs ./deploy check all and ./deploy test per backend,
+# and builds one .pyz per OS. mypyc does not compile for other OSes, so each runner contributes
+# its binaries and the "pyz" job merges them into a single .pyz that uses the binary for each OS
+# (and the .py on any other interpreter).
 name: ci
 
 on:
   push:
-    branches: [main]
+    # `git init` names the first branch main or master (git version, init.defaultBranch)
+    branches: [main, master]
   pull_request:
   workflow_dispatch:
 
@@ -27,6 +30,9 @@ __MATRIX__
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.2.0
+      # A pytemplate.toml edit committed without running ./deploy (no hook, the web editor)
+      - name: Generated files match pytemplate.toml
+        run: ./deploy render --check
 __LINUX_DEPS__
       # Only this OS's backends (e.g. raylib publishes no PyPy wheels for macOS arm64);
       # `sync` never re-locks: a stale uv.lock fails here, as it should in CI

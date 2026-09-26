@@ -24,7 +24,6 @@ M.META = {
   add = { refresh = true },
   remove = { refresh = true },
   render = { refresh = true },
-  init = { refresh = true, show = true },
   clean = { tag = "CLEAN" },
   doctor = { show = true },
   help = { show = true },
