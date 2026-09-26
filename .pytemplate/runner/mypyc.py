@@ -130,16 +130,19 @@ def _is_ext(name: str) -> bool:
 
 
 def _mypyc_output(path: Path, root: Path, owned: Collection[str]) -> bool:
-    """An extension that mypyc builds: a compiled module in `owned`, or a `*__mypyc` shared lib.
+    """An extension that mypyc builds: a compiled module in `owned`, a `*__mypyc` shared lib, or
+    any extension next to the .py it was built from.
 
-    sync_tree never copies one from src/ (a stray in-place build would shadow the stage's) and
-    never deletes one from the stage (remove_stale_extensions does). Every other .so/.pyd in
-    src/ (a vendored native library) is app content and synced like any file.
+    sync_tree never copies one from src/ (a stray in-place build would shadow the stage's, or
+    reach a payload without its shared lib) and never deletes one from the stage
+    (remove_stale_extensions does). Every other .so/.pyd in src/ (a vendored native library)
+    is app content and synced like any file.
     """
     if not _is_ext(path.name):
         return False
     module = _ext_module(path, root)
-    return module in owned or module.endswith("__mypyc")
+    stem = path.name.split(".")[0]
+    return module in owned or module.endswith("__mypyc") or path.with_name(f"{stem}.py").is_file()
 
 
 def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
@@ -209,7 +212,7 @@ def _other_python(ext: Path, python: str) -> bool:
 
 
 def remove_stale_extensions(
-    stage: Path, modules: list[str], group: str, *, python: str, separate: bool = False, src: Path = SRC
+    stage: Path, modules: list[str], group: str, *, python: str, separate: bool = False, src: Path | None = None
 ) -> None:
     """Delete the extensions of the stage that this build will not produce.
 
@@ -219,6 +222,7 @@ def remove_stale_extensions(
       or one `<module>__mypyc` per module with compile.separate = true.
     A native file of the app itself (a .so/.pyd in src/, synced by sync_tree) is left alone.
     """
+    src = SRC if src is None else src
     wanted = set(modules) | ({f"{m}__mypyc" for m in modules} if separate else {f"{group}__mypyc"})
     for ext in extension_files(stage):
         if not _mypyc_output(ext, stage, wanted) and (src / ext.relative_to(stage)).is_file():

@@ -756,6 +756,18 @@ def test_sync_tree_keeps_user_native_files_and_skips_mypyc_outputs(tmp_path: Pat
     assert (dst / "pkg" / "core" / ("m" + LINUX_EXT)).read_bytes() == b"built"
 
 
+def test_sync_tree_payload_never_takes_a_stray_build_without_its_shared_lib(tmp_path: Path) -> None:
+    """The cpython/pypy payload (owned=()): a stray compiled copy of a module next to its .py
+    is a build output, not app content (its shared lib would be missing); a vendored one is kept."""
+    src = _project(
+        tmp_path / "src",
+        {"pkg/x.py": "X = 1\n", "pkg/x" + LINUX_EXT: b"stray", "pkg__mypyc" + LINUX_EXT: b"stray", "pkg/libz" + LINUX_EXT: b"z"},
+    )
+    dst = tmp_path / "payload"
+    mypyc.sync_tree(src, dst)
+    assert _snapshot(dst) == {"pkg": None, "pkg/x.py": b"X = 1\n", "pkg/libz" + LINUX_EXT: b"z"}
+
+
 # --- 6. stale extensions -------------------------------------------------------------------------
 
 
@@ -967,6 +979,24 @@ def test_build_removes_stale_extensions_before_the_sync(fake_build: FakeCompiler
     fake_build.suffix = ".cpython-315-x86_64-linux-gnu.so"
     mypyc.build(make({"python": {"cpython": "3.15"}}), "dev")
     assert _left(stage) == ["myapp/core/m.cpython-315-x86_64-linux-gnu.so", "myapp__mypyc.cpython-315-x86_64-linux-gnu.so"]
+
+
+def test_build_leaves_a_vendored_native_file_alone(
+    fake_build: FakeCompiler, src_tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _project(src_tree, {"myapp/native/libfoo.so": b"native", "myapp/native/_v.cpython-313-x86_64-linux-gnu.so": b"v"})
+    cfg = make({})
+    stage = mypyc.profile(cfg, "dev").stage
+    mypyc.build(cfg, "dev")
+    assert (stage / "myapp" / "native" / "_v.cpython-313-x86_64-linux-gnu.so").read_bytes() == b"v"
+    monkeypatch.setattr(ui, "VERBOSE", True)
+    capsys.readouterr()
+    mypyc.build(cfg, "dev")  # neither deleted ("no longer compiled", "another Python") nor copied again
+    err = capsys.readouterr().err
+    assert "stage: 0 file(s) updated" in err and "native" not in err
+    (src_tree / "myapp" / "native" / "libfoo.so").unlink()
+    mypyc.build(cfg, "dev")
+    assert not (stage / "myapp" / "native" / "libfoo.so").exists()
 
 
 def test_build_with_separate_keeps_the_per_module_libs(fake_build: FakeCompiler) -> None:

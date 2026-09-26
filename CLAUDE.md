@@ -762,9 +762,10 @@ Formats:
   the current path (cycles; two links to one folder are both copied) and never entering
   `SKIP_DIRS`; a broken symlink is a warning. A path that turned from file to folder (or back)
   is replaced; a folder deleted from `src` goes with its caches (a `__pycache__` kept it
-  importable as a namespace package). Extensions: only mypyc's own outputs (`_mypyc_output`:
-  a module in `owned`, or `*__mypyc`) are never copied from `src/` (a stray in-place build
-  would shadow the stage's) nor deleted from `dst`; any other `.so`/`.pyd` in `src/` (a
+  importable as a namespace package). Extensions: only build outputs (`_mypyc_output`: a
+  module in `owned`, a `*__mypyc` lib, or an extension next to its own `.py`) are never copied
+  from `src/` (a stray in-place build would shadow the stage's, or reach a payload without its
+  shared lib) nor deleted from `dst`; any other `.so`/`.pyd` in `src/` (a
   vendored native library, which must be `git add -f`ed past `.gitignore`) is app content and
   synced like any file, so `run mypyc` and every payload see what `run cpython` sees.
   `mypyc.build` passes `owned=modules`; `cmd_build.payload` and `methods/flet.py` use the
