@@ -16,6 +16,7 @@ from __future__ import annotations
 import keyword
 import os
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -842,12 +843,13 @@ def _swap_dependencies(plan: InitPlan, undo: _Undo) -> None:
     undo.save(LOCK)
     PYPROJECT.write_text(plan.pyproject, encoding="utf-8", newline="\n")
     uv = proc.find_uv()
+    q = ["--quiet"] if ui.QUIET else []  # -q: uv's progress too (its errors still show)
     env = envs.env_vars(envs.tool_env(plan.cfg))
     # --frozen: only pyproject.toml changes; the next resolution sees every removal at once
     if plan.drop:
-        proc.run([uv, "remove", "--frozen", *sorted({_norm_name(r) for r in plan.drop})], env=env)
+        proc.run([uv, "remove", *q, "--frozen", *sorted({_norm_name(r) for r in plan.drop})], env=env)
     if plan.drop_dev:
-        proc.run([uv, "remove", "--frozen", "--dev", *sorted({_norm_name(r) for r in plan.drop_dev})], env=env)
+        proc.run([uv, "remove", *q, "--frozen", "--dev", *sorted({_norm_name(r) for r in plan.drop_dev})], env=env)
     pins: list[str] = []
     if plan.pins:  # the versions the template was tested with, for this resolution only
         path = BUILD / "init" / CONSTRAINTS
@@ -855,10 +857,10 @@ def _swap_dependencies(plan: InitPlan, undo: _Undo) -> None:
         path.write_text("".join(f"{n}=={v}\n" for n, v in sorted(plan.pins.items())), encoding="utf-8", newline="\n")
         pins = ["--constraints", str(path)]
     if plan.add:
-        proc.run([uv, "add", "--no-sync", *pins, *plan.add], env=env)
+        proc.run([uv, "add", *q, "--no-sync", *pins, *plan.add], env=env)
     if plan.add_dev:
-        proc.run([uv, "add", "--no-sync", "--dev", *pins, *plan.add_dev], env=env)
-    proc.run([uv, "lock"], env=env)
+        proc.run([uv, "add", *q, "--no-sync", "--dev", *pins, *plan.add_dev], env=env)
+    proc.run([uv, "lock", *q], env=env)
     # The name check knows the tested tree (constraints.txt); this catches what it cannot know
     needs = _self_dependents(plan.name)
     if needs:
@@ -926,7 +928,7 @@ def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
         raise
     undo.discard()
     render.apply(plan.cfg, force=True)
-    ui.ok(f"preset '{preset}' done. Next step: ./deploy setup && ./deploy run")
+    ui.ok(f"preset '{preset}' done")  # `new` says what comes next, from the right folder
 
 
 # --- new -----------------------------------------------------------------------------------------
@@ -1140,7 +1142,8 @@ def new(dest: Path, preset: str, name: str | None) -> None:
         copy_template(dest)
         _make_own(dest, preset, app_name)
         deploy_py = dest / ".pytemplate" / "deploy.py"
-        proc.run([proc.find_uv(), "run", "--quiet", "--script", deploy_py, "__init", preset, "--name", app_name, "--force"], cwd=dest)
+        loud = ["-q"] if ui.QUIET else ["-v"] if ui.VERBOSE else []  # the copy's runner, as quiet as this one
+        proc.run([proc.find_uv(), "run", "--quiet", "--script", deploy_py, *loud, "__init", preset, "--name", app_name, "--force"], cwd=dest)
     except BaseException as e:
         if top is not None:
             left = [] if _remove(top) else [str(top)]
@@ -1156,4 +1159,19 @@ def new(dest: Path, preset: str, name: str | None) -> None:
             raise
         raise DeployError(f"{e}\n  {note}", e.code if isinstance(e, DeployError) else 1) from e
     _git_init(dest)
-    ui.ok(f"project created. cd {dest} && ./deploy setup")
+    ui.ok(f"project created in {dest}. Next:")
+    for line in next_steps(dest):
+        ui.info(f"  {line}")
+
+
+def next_steps(dest: Path) -> list[str]:
+    """The commands to type after `new`, each on its own line (cmd and Windows PowerShell 5.1
+    have no `&&`), quoted for the shell whose launcher started this run (PYTEMPLATE_LAUNCHER)."""
+    launcher = os.environ.get("PYTEMPLATE_LAUNCHER", "")
+    path = str(dest)
+    if launcher.startswith("cmd"):
+        return [f'cd /d "{path}"', r".\deploy setup"]  # a Windows path never holds a double quote
+    if launcher.startswith("ps1"):
+        # PowerShell reads the typographic single quotes as quotes too: each is doubled
+        return ["cd '" + re.sub("['\u2018-\u201b]", lambda m: m.group() * 2, path) + "'", "./deploy setup"]
+    return [f"cd {shlex.quote(path)}", "./deploy setup"]

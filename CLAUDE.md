@@ -181,7 +181,8 @@ then `shutil.which("uv")`, else `DeployError(..., 3)`.
 `ps1:Desktop:5.1`); `nvim`; `nu` (shell-setup snippet). The xonsh snippet sets none.
 `project.native_path` reads the `:msys`/`:cygwin` suffix, `shells.guess_shell` the prefix (only
 `ps1:` and `sh:niubash` first: `sh:bash`/`sh:zsh` name the interpreter of `#!/bin/sh`, bash on
-macOS, Fedora and Arch, so `$SHELL` wins over them), and `./deploy doctor` prints the value
+macOS, Fedora and Arch, so `$SHELL` wins over them), `presets.next_steps` the `cmd`/`ps1:`
+prefix (how the hint after `new` quotes the folder), and `./deploy doctor` prints the value
 ("unknown" when unset).
 
 ### 4.2 Which launcher runs
@@ -1732,7 +1733,8 @@ Per method:
   manual of `./deploy`, of that version) and `.pytemplate/LICENSE` (the MIT notice that must
   travel with the copied runner): `presets.TEMPLATE_DOCS`. A project running `new` passes
   those two on as tracked files, and its own root `README.md`/`LICENSE` stay behind. `new`
-  then runs the copy's own runner with `__init <preset> --name <n> --force` inside the copy,
+  then runs the copy's own runner with `__init <preset> --name <n> --force` inside the copy
+  (with this run's `-q` or `-v`; under `-q` init's uv calls get `--quiet` too),
   `git init -b
   main` (the generated CI runs on `main`; git < 2.28: plain `init` + `symbolic-ref HEAD
   refs/heads/main`; no repository inside an existing work tree) and `git add --chmod=+x deploy
@@ -1741,7 +1743,10 @@ Per method:
   files and the hook refused the first commit; a path it ignores is left alone). When the copy or `__init` fails (a name uv refuses, no network, Ctrl+C) `new`
   removes what it created (the folder and the parents it made, or only the content of the
   empty folder it was given) and says so; a folder with content is refused before anything
-  is written.
+  is written. On success it prints one hint (init prints none: it runs in the copy), `cd
+  <dest>` and `./deploy setup` on lines of their own, for the shell of the launcher
+  (`presets.next_steps` reads the `PYTEMPLATE_LAUNCHER` prefix: cmd `cd /d "..."` and
+  `.\deploy`, PowerShell single quotes, else `shlex.quote`).
 - `init` is internal only: `cli.INTERNAL["__init"]` (`cmd_mode.cmd_init`), reached by `new` and
   by the template maintainer, listed nowhere. `./deploy init` exits 2 with the hint `./deploy
   new DIR --preset P`: a project's preset is chosen when it is created.

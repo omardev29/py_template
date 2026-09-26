@@ -18,6 +18,7 @@ import hashlib
 import importlib.util
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -956,6 +957,70 @@ def test_make_own_leaves_a_pyproject_without_a_project_table(tmp_path: Path) -> 
         (dest / "pyproject.toml").write_text(text, encoding="utf-8")
         presets._make_own(dest, "script", "demo")
         assert (dest / "pyproject.toml").read_text(encoding="utf-8") == text
+
+
+@pytest.mark.parametrize(("quiet", "verbose", "flags"), [(False, False, []), (True, False, ["-q"]), (False, True, ["-v"])])
+def test_new_passes_quiet_and_verbose_to_the_copys_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quiet: bool, verbose: bool, flags: list[str]) -> None:
+    """`./deploy -q new` printed the whole __init step (and -v never listed its files)."""
+    calls: list[list[str]] = []
+
+    def run(argv: list[Any], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append([str(a) for a in argv])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(presets, "copy_template", _fake_copy)
+    monkeypatch.setattr(presets, "_git_init", lambda dest: None)
+    monkeypatch.setattr(proc, "run", run)
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+    monkeypatch.setattr(presets.ui, "QUIET", quiet)
+    monkeypatch.setattr(presets.ui, "VERBOSE", verbose)
+    presets.new(tmp_path / "demo", "script", "demo")
+    child = next(c for c in calls if "__init" in c)
+    assert child[5 : child.index("__init")] == flags
+
+
+def test_quiet_init_quiets_uv_too(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(presets.ui, "QUIET", True)
+    presets.init(fake.cfg, "raylib", None, force=True)
+    assert fake.calls and all(c[2] == "--quiet" for c in fake.calls)
+    monkeypatch.setattr(presets.ui, "QUIET", False)
+    fake.calls.clear()
+    presets.init(_skeleton_config("raylib", "myapp"), "flet", None, force=True)
+    assert fake.calls and not any("--quiet" in c for c in fake.calls)
+
+
+@pytest.mark.parametrize(
+    ("launcher", "expected"),
+    [
+        ("sh:bash", ["cd '/p/my proj'", "./deploy setup"]),
+        ("", ["cd '/p/my proj'", "./deploy setup"]),
+        ("cmd", ['cd /d "/p/my proj"', ".\\deploy setup"]),
+        ("ps1:Desktop:5.1", ["cd '/p/my proj'", "./deploy setup"]),
+    ],
+)
+def test_new_says_what_comes_next_for_the_callers_shell(monkeypatch: pytest.MonkeyPatch, launcher: str, expected: list[str]) -> None:
+    """One hint, each command on its own line (cmd and Windows PowerShell 5.1 have no `&&`), the
+    folder quoted (a space broke `cd <dest> && ./deploy setup`), `.\\deploy` in cmd."""
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
+    assert presets.next_steps(Path("/p/my proj")) == expected
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "ps1:Core:7.6")
+    quote = "\N{RIGHT SINGLE QUOTATION MARK}"
+    assert presets.next_steps(Path(f"/p/it's{quote}s"))[0] == f"cd '/p/it''s{quote}{quote}s'"
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh")
+    assert presets.next_steps(Path("/p/it's"))[0] == "cd '/p/it'\"'\"'s'"
+
+
+def test_new_prints_one_next_step_hint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fake: Fake) -> None:
+    """init (run by new in the copy) printed "Next step: ./deploy setup && ./deploy run", for
+    the wrong folder, before new's own `cd <dest> && ./deploy setup`."""
+    presets.init(fake.cfg, "script", "demo", force=True)
+    assert "Next" not in capsys.readouterr().err
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh")
+    monkeypatch.setattr(presets, "copy_template", _fake_copy)
+    monkeypatch.setattr(presets, "_git_init", lambda dest: None)
+    presets.new(tmp_path / "my proj", "script", "demo")
+    err = capsys.readouterr().err
+    assert err.count("Next") == 1 and f"  cd {shlex.quote(str((tmp_path / 'my proj').resolve()))}\n  ./deploy setup\n" in err
 
 
 def test_project_readme_without_a_manual_points_at_the_template() -> None:
