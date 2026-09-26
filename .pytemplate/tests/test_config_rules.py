@@ -325,7 +325,9 @@ def test_mypyc_backend_needs_real_typing() -> None:
 
 @pytest.mark.parametrize("key", ["modules", "exclude", "forbid_imports"])
 def test_compile_module_names(key: str) -> None:
-    assert make({"compile": {key: ["myapp.core", "_x.y1"]}})
+    # exclude: modules or subpackages of compile.modules (config._validate_compile)
+    good = ["myapp.core.x", "myapp.core._y1"] if key == "exclude" else ["myapp.core", "_x.y1"]
+    assert make({"compile": {key: good}})
     # forbid_imports was never checked: "flet, flet_desktop" or "flet " silently disabled the rule
     for bad in ["a b", "flet, flet_desktop", "flet ", "a.", ".a", "a..b", "1a", "", "myapp.core\n"]:
         fails({"compile": {key: [bad]}}, "invalid module in [compile]")
@@ -348,7 +350,9 @@ def test_mypy_overrides_valid() -> None:
     cfg = make({"typing": {"mypy_overrides": GOOD_OVERRIDES}})
     ini = render.mypy_ini(cfg, "off")
     assert "[mypy-myapp.ui.*]\nignore_errors = True" in ini
-    assert "[mypy-raylib,raylib.*]\ndisable_error_code = explicit-override, no-untyped-call" in ini
+    # a list is one section per pattern (render.mypy_ini merges them with the generated ones)
+    for name in ("raylib", "raylib.*"):
+        assert f"[mypy-{name}]\ndisable_error_code = explicit-override, no-untyped-call\nwarn_return_any = False\n" in ini
 
 
 @pytest.mark.parametrize(

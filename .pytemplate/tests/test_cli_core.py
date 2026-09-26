@@ -1498,9 +1498,13 @@ def test_names_that_would_break_the_project(preset: str, name: str) -> None:
     presets.check_name_free(None, preset, "my-app")
 
 
-def test_librt_is_forbidden_only_while_pypy_is_supported(tmp_path: Path) -> None:
+def test_librt_is_forbidden_only_while_pypy_is_supported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = tmp_path / "fast.py"
     module.write_text("import librt\nfrom librt.base64 import b64encode\n", encoding="utf-8")
     with_pypy = lintc.lint_file(make({"backend": {"supported": ["cpython", "pypy", "mypyc"]}}), module)
     assert len([f for f in with_pypy if "librt" in f.message]) == 2
+    # Without PyPy it only has to be a runtime dependency (mypy installs it in the dev group only)
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "x"\ndependencies = ["librt>=0.15"]\n', encoding="utf-8")
+    monkeypatch.setattr(lintc, "PYPROJECT", pyproject)
     assert not [f for f in lintc.lint_file(make({}), module) if "librt" in f.message]

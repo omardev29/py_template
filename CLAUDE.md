@@ -394,9 +394,9 @@ header rules (with detector tests proving each rule fires).
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
 | `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `DeployError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME`, `name_from_folder`, `check_name_free`, `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./deploy __init`; with rollback), `copy_template`, `new`. |
-| `mypyc.py` | Incremental stage (`sync_tree`), `spec.json`, spawning `tools/mypyc_build.py`, `ANNOTATE_HTML`, `hidden_imports`, `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
-| `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks; parses bytes (tolerates a BOM). |
-| `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`. |
+| `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
+| `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
+| `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
 | `tasks.py` | `[tasks]`: `Placeholders` (lazy `{python}`), `deps` (each once per invocation), cycle detection, `run_task`, `describe`, `list_tasks`. |
 | `cmd_env.py` | `setup`, `doctor`, `sync`, `lock`, `add`, `remove`, `clean` (`_env_dirs`, `_remove`, `_is_link`); `ensure_lock`; `_fix_exec_bit`; `_c_compiler`, `_msvc(platform)`, `_xcode_problem`, `_long_paths`. |
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `new`, the internal `__init` (`cmd_init`), and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
@@ -513,8 +513,8 @@ header rules (with detector tests proving each rule fires).
   (new and current value), whether `pyproject.toml` would be rewritten, `uv.lock` ("would
   re-lock", or a read-only `uv lock --check`), the generated files that would update, the
   environments it would sync and the leftover-environment note. The PyPy 3.11 precheck runs
-  read-only (`uv run --locked --no-sync`) and is skipped when `.venv` does not exist (`uv run
-  --no-sync` would create it).
+  read-only (`uv run --locked --no-sync`, no `uv sync` first) and is skipped when `.venv` does
+  not exist (`uv run --no-sync` would create it).
 - `__init` runs `presets.plan_init` (every check of the real run: name, `check_name_free`,
   pristine, the new `pytemplate.toml` and `pyproject.toml`) and lists each file as `-` deleted,
   `+` new or `~` replaced, the dependencies removed and added, the pinned versions, and what
@@ -550,6 +550,7 @@ header rules (with detector tests proving each rule fires).
 | `PYTEMPLATE_ASSETS` | `portable/boot.py`, `pyz/__main__.py` (setdefault) | Assets dir for `resources.assets_dir()` (raylib, flet) |
 | `VSLANG=1033` | `mypyc.build`, wheel builds | English MSVC messages |
 | `MACOSX_DEPLOYMENT_TARGET` | `methods.common.install_deps` for macOS targets, unless the user set it (`MACOS_FLOOR`, 13.0) | The oldest macOS the pyz/portable wheels must support |
+| `CC`, `CFLAGS`, `CPPFLAGS`, `LDSHARED`, `LDFLAGS`, `ARCHFLAGS`, `CL`, `_CL_` | user | setuptools builds the mypyc extensions with them (a `CFLAGS` REPLACES Python's own: section 9); `mypyc.COMPILER_ENV`, a change forces a rebuild |
 | `RUFF_OUTPUT_FORMAT=concise` | VS Code tasks with the ruff matcher, Neovim tasks that parse output | One-line ruff output for the parsers |
 | `NO_COLOR` (non-empty), `TERM=dumb` | user | Disable runner colours |
 | `CI` | CI | Disables the install prompt of `deploy` and `deploy.ps1`; `selftest --e2e` skips GUI runs on Windows/macOS CI |
@@ -690,8 +691,13 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   modules; option names identifier-like, values booleans, numbers, one-line strings or lists of
   them: each becomes a `.mypy.ini` line). `backend.active = "mypyc"` rejects `warn`/`off`.
 - `[compile]`: `modules`, `exclude`, `forbid_imports` (dotted names checked), `annotate` (every
-  mypyc build writes the annotate report, section 9), `opt_level "0".."3"`, `multi_file`,
-  `separate`, `strict_dunder_typing`.
+  mypyc build writes the annotate report, section 9), `opt_level "0".."3"`,
+  `no_semantic_interposition` (default true: a C flag on Linux gcc/clang, section 9),
+  `multi_file`, `separate`, `strict_dunder_typing`. `config._validate_compile` checks the names
+  against each other: no entry of `modules` inside another (or repeated: mypyc aborted with
+  "Duplicate module"), every `exclude` strictly inside a `modules` entry (a module or a
+  subpackage: it excludes everything below it). Whether they exist is checked by
+  `mypyc.compiled_sources` (an `exclude` that names nothing is an error, not a silent no-op).
 - `[deploy]`: `optimize 0|1|2`, `default {backend: method}` (merged over
   `config.DEFAULT_METHODS` in `DeployConfig.__post_init__`: a backend left out keeps its method,
   cpython/mypyc `exe`, pypy `portable`; each method must be allowed by `cmd_build.COMPAT` for its
@@ -907,6 +913,18 @@ Formats:
   `cmd_dev.BASEDPYRIGHT` pin on every profile's keys when it is in the uv cache.
 - `Config.profile_for(backend)`: `mypyc` backend -> `mypyc`; otherwise `typing.relaxed` when
   `profile = "auto"`, else `profile`.
+- Compiled modules in the generated configs (`render.mypy_ini`, `render.pyright_config`):
+  `[mypy_compiled]` goes to `[mypy-<m>.*]` per `compile.modules` entry (`x.*` also covers `x`
+  itself); each `compile.exclude` entry gets `[mypy-<ex>.*]` with those keys back to the
+  global `[mypy]` value (mypy prefers the longer pattern), so interpreted glue may use `Any`.
+  `mypy_ini` writes ONE section per module pattern and merges generated sections with
+  `[[typing.mypy_overrides]]` (later options win; a list of modules becomes one section per
+  pattern): mypy's `RawConfigParser` refuses a repeated section, and a pattern repeated in a
+  comma list silently replaced the earlier options. pyright's `strict` list has no exclusion,
+  so a compiled package that holds an excluded path is listed by its other files and folders
+  (`render._paths_without`, only then does the list depend on the files in `src/`); with
+  basedpyright the excluded paths come first in `executionEnvironments` (the first match wins)
+  without the Any rules. The same sections reach the stage's compile-time `mypy.ini`.
 - `cmd_dev.run_checks(cfg, backend, rules=True)`:
   1. `_profile_file` writes `.build/cfg/ruff-<profile>.toml` and `.build/cfg/mypy-<profile>.ini`
      (the profile of THAT backend, which may differ from the editor's active one).
@@ -915,7 +933,9 @@ Formats:
      `--python-version <min_python> --python-executable <tool python>`. Exit 1 is only a
      warning when the profile is not `blocking`.
   4. `lintc` rules on the compiled sources (when mypyc is supported and `rules`): errors only
-     under the `mypyc` profile, warnings otherwise.
+     under the `mypyc` profile, warnings otherwise. A file the runner cannot parse is one
+     finding (`imports.parse_error`: a syntax error, or syntax newer than the runner's own
+     Python), never an internal error.
   5. With `typing.editor = "basedpyright"`: basedpyright (`BASEDPYRIGHT` pin) on
      `.build/cfg/pyright-<profile>.json`.
 - `check all` runs each distinct profile once (cpython and pypy usually share one) and the
@@ -926,6 +946,9 @@ Formats:
   (mypy --strict), not by `check`.
 - Profiles that select `RUF` ignore `RUF001-003` (ambiguous unicode) so app text may be
   non-ASCII; template code stays ASCII anyway.
+- Native ints (`mypy_extensions.i64`/`i32`) are a typing choice with runtime effects: compiled,
+  their arithmetic is plain C and wraps silently on overflow; interpreted they are plain `int`
+  (no wrap), so a test on the cpython backend never sees the overflow. Speed facts: section 9.
 
 ## 9. mypyc pipeline (`mypyc.py`, `tools/mypyc_build.py`)
 
@@ -934,21 +957,86 @@ Formats:
   (the extension loader wins) so pyz/portable can fall back to the `.py` on another interpreter.
 - Profiles: `dev` (run, test, compile, report) keeps asserts, `debug_level "1"`; `release`
   (build, `compile --release`) strips asserts when `deploy.optimize >= 1`, `debug_level "0"`.
-- `sync_tree(src, dst)` copies changed files only and deletes removed ones, never extensions.
-  Change detection is size + `st_mtime_ns` (`copy2` preserves the exact mtime), so a same-size
-  edit within one second is detected.
-- `remove_stale_extensions` keeps only the compiled modules and `<group>__mypyc`.
+- `compiled_sources`: the `.py` files of `compile.modules` (never `__init__.py`), minus
+  `compile.exclude` (exact module or package prefix; an entry naming nothing -> `DeployError`),
+  deduplicated. Walks with `mypyc._walk`, like `sync_tree`.
+- `sync_tree(src, dst, owned=())` copies changed files only and deletes removed ones. Change
+  detection is size + `st_mtime_ns` (`copy2` preserves the exact mtime), so a same-size edit
+  within one second is detected. `_walk` follows symlinked folders (`Path.rglob` does not
+  descend into them: a linked `src/assets` arrived empty), skipping a link back to a folder on
+  the current path (cycles; two links to one folder are both copied) and never entering
+  `SKIP_DIRS`; a broken symlink is a warning. A path that turned from file to folder (or back)
+  is replaced; a folder deleted from `src` goes with its caches (a `__pycache__` kept it
+  importable as a namespace package). Extensions: only build outputs (`_mypyc_output`: a
+  module in `owned`, a `*__mypyc` lib, or an extension next to its own `.py`) are never copied
+  from `src/` (a stray in-place build would shadow the stage's, or reach a payload without its
+  shared lib) nor deleted from `dst`; any other `.so`/`.pyd` in `src/` (a
+  vendored native library, which must be `git add -f`ed past `.gitignore`) is app content and
+  synced like any file, so `run mypyc` and every payload see what `run cpython` sees.
+  `mypyc.build` passes `owned=modules`; `cmd_build.payload` and `methods/flet.py` use the
+  default. Not handled: a case-only rename on a case-insensitive file system.
+- `remove_stale_extensions(stage, modules, group, python=, separate=, src=)` runs BEFORE the
+  sync (a folder it empties is then removed) and deletes: extensions whose ABI tag
+  (`cpython-314-...`, `cp314-...`, a trailing `t` = free-threaded) is not `python.cpython` (old
+  code that an interpreter of that version would still import: portable `runtime = "system"`,
+  `flet build`); modules no longer compiled; shared libs this build does not use (`<group>__mypyc`,
+  or one `<module>__mypyc` per module with `compile.separate = true`, which were deleted on every
+  build). A non-output file mirrored from `src/` is left alone.
 - `group_name = pkg` gives a stable shared lib `<pkg>__mypyc.<tag>.pyd`; `hidden_imports` and
   `remove_stale_extensions` depend on that name. `compile.separate = true` -> `group_name=None`.
+- Forced rebuilds: setuptools rebuilds an extension only when a source is newer, and an option
+  that only reaches the C compiler (`opt_level`, `no_semantic_interposition`; `debug_level`
+  per profile; the compiler variables of the environment) leaves the C unchanged, so the old
+  binary was kept (and shipped). `build` records the options of the last SUCCESSFUL compile of
+  a profile in `<profile dir>/compiled-options.json` (`COMPILED_STAMP`: every spec key but
+  `annotate`, `compile`, `files`, `force`, plus `env`: the `COMPILER_ENV` variables that are
+  set, `CC CFLAGS CPPFLAGS LDSHARED LDFLAGS ARCHFLAGS CL _CL_`), deletes it
+  before compiling (a failed or interrupted build forces the next one) and sets
+  `spec["force"]` when it differs: `mypyc_build.py` then passes `build_ext --force`. `report`
+  (`compile_c=False`) and `--dry-run` neither force nor record. A `.build` from before has no
+  record: one full rebuild. mypyc dates a new C file 1 s ahead, so a very fast first build is
+  redone once by setuptools itself.
 - `spec.json` uses stage-relative `c_dir=../c`, `build_temp=../obj`, `build_lib=../lib`: short
   paths under MSVC's MAX_PATH.
 - `tools/mypyc_build.py` runs in `.venv` with `VSLANG=1033`: `chdir(stage)`,
-  `mypycify(..., group_name, target_dir=../c)`, then `setup(build_ext --inplace ...
+  `mypycify(..., group_name, target_dir=../c)`, then `setup(build_ext [--force] --inplace ...
   --parallel N)`. It uses the mypycify API because `python -m mypyc` cannot set
-  `strip_asserts`, `group_name` or `multi_file` and always writes to `./build`.
-- Output is captured unless `-v`; on failure it is printed, and the compiler-install hint
-  (`has_compiler_hint`) is added only when the output has no `error: `.
-- After the build every compiled module must have an extension, else `DeployError`.
+  `strip_asserts`, `group_name` or `multi_file` and always writes to `./build`. When mypycify
+  exits or raises (mypy/mypyc rejected the code; the errors are printed) it returns
+  `MYPYC_REJECTED` (4, mirrored in `mypyc.py`); a C build failure exits with setuptools' code.
+  Every spec key it reads must be written by `mypyc.build` (a test parses the script).
+- Extra C flags (`mypyc_build.extra_cflags`, appended to mypyc's own `extra_compile_args` of
+  every extension, as a NEW list each: mypycify hands one shared list to all of them; the
+  wheel's generated `setup.py` mirrors it). The compiler kind comes from `compiler_type()`,
+  the way mypycify picks `-O3` or `/O2` (`distutils.ccompiler.new_compiler()` +
+  `customize_compiler`); it is only looked up when compiling (`report` needs no compiler).
+  - gcc/clang (`"unix"`): `-fno-strict-overflow`, always. It is in Python's own `CFLAGS`, but
+    setuptools (84) REPLACES those with a `CFLAGS` environment variable (they also carry
+    `-DNDEBUG`, which is then lost: the C asserts of mypyc's runtime come back), and without it
+    the wrap-around of i64/i32 arithmetic is undefined behaviour in C. The user's `CFLAGS`
+    stay (they come first; mypyc's `-O<opt_level>` after them wins); a repeated flag is harmless.
+  - Linux gcc/clang with `compile.no_semantic_interposition` (default true):
+    `-fno-semantic-interposition`, as CPython itself is built (`PY_CFLAGS_NODIST`, which
+    extensions never get). mypyc's native functions are exported symbols of a `-fPIC` shared
+    object, which another library could interpose, so gcc never inlines a call between two
+    compiled functions, not even in one module: every call goes through the PLT. Measured (gcc
+    13, `f` calling `g` in an i64 loop, N=1e8): 177 ms without, 0 ms with (gcc inlined `g` and
+    folded the loop into `return max(n, 0)`). Not on macOS (Apple clang: not verified) nor
+    MSVC. `test_mypyc_core` pins it with a real compile through a logging `CC` (objdump shows
+    the call only without the flag, gcc only).
+- Speed facts (measured with gcc 13, CPython 3.14, mypyc 2.3.1; README "Fast integers: `i64`"
+  has the table): plain `int` loops always stay loops (tagged ints, overflow checks, slow paths
+  into CPython). With `mypy_extensions.i64`/`i32` locals gcc/clang at `-O2`+ remove or
+  vectorise them: `for i in range(1, 100_000_001): x += 1` became `return 100000000`. i64 wraps
+  silently when compiled (`x + 1` at `2**63 - 1` gives `-2**63`), not when interpreted.
+  `opt_level "0"` (unoptimised C, C asserts on) is 1.8x SLOWER than the interpreter: for
+  debugging only. MSVC has no levels: `"1"`-`"3"` are all `/O2`, `"0"` is `/Od`.
+- Output is captured unless `-v`; on failure it is printed. The compiler-install hint
+  (`has_compiler_hint`) is added only when the exit code is not `MYPYC_REJECTED` (with `-v`
+  the output was not captured, and every type error used to get the hint); the runner's own
+  code stays 1 (`mypyc failed (exit code 1)`).
+- After the build every compiled module must have an extension, else `DeployError` (and no
+  record is written, so the next build is forced).
 - `compile.annotate = true`: every mypyc build (`run`, `test`, `compile`, `build`) also writes
   `mypyc.ANNOTATE_HTML` (`.build/reports/mypyc-annotate.html`); cost within timing noise.
 - `./deploy compile [--release]` builds the stage without running it: the hidden VS Code task
@@ -960,18 +1048,51 @@ Formats:
   `tests/conftest.py` (identical copies) raises `UsageError` when a listed module did not load
   from `.pyd/.so`, and skips tests marked `interpreted_only` under mypyc.
 - `exe_stage` deletes the compiled `.py` files so PyInstaller/Nuitka can only bundle the binary.
-- `hidden_imports`: `imports_of` over the compiled sources (skips `if TYPE_CHECKING:`, resolves
-  relative imports and `from pkg import submodule`) plus every extension module, including
-  `<pkg>__mypyc`: PyInstaller and Nuitka cannot see imports inside a `.pyd`.
-- `lintc` rules (compiled code only): `compile.forbid_imports`; `librt` while PyPy is
-  supported; class decorators outside `NATIVE_CLASS_DECORATORS` make the class non-native
-  (allowed with `@mypyc_attr(native_class=False)`); nested classes and classes inside
-  functions; t-strings; `if __name__` at module level; module-level `__file__` (mypyc#700).
-  `lintc` does not import `presets`.
+- `hidden_imports` (PyInstaller and Nuitka cannot see imports inside a `.pyd`): the compiled
+  modules and mypyc's shared libs (`<pkg>__mypyc`, `<module>__mypyc`; never a vendored
+  `.so`), plus what `imports_of` finds in the compiled sources (skips `if TYPE_CHECKING:` and
+  the `else:` of `if not TYPE_CHECKING:`, resolves relative imports, drops imports beyond the
+  top-level package). The app's own names are kept when they exist in `src/`
+  (`imports.local_module`: `.py`, package folder or extension file). Every other name goes
+  through `importable`: ONE `uv run --locked python -c _FIND_CODE` in the tools env (where the
+  packagers run), which keeps a name when its top-level module exists and is not built in
+  (Nuitka aborts on `--include-module` of a module it cannot find: a platform-guarded
+  `import winreg`, an optional dependency), and `from X import a` candidates (`X.a`, from
+  `imports_of(..., candidates)`) when that exact submodule exists: `from html import parser`
+  needs `html.parser`, which `html/__init__` never imports (the exe crashed at startup). That
+  check imports X's parent packages (they may print: the result is the last `PTMODS:` line);
+  if it cannot run, a warning and every name unchecked. A file the runner cannot parse is a
+  `DeployError` (2) naming `path:line`.
+- `lintc` rules (compiled code only; findings sorted by `lint`, deduplicated per line and
+  message; one finding for a file that cannot be parsed):
+  - `compile.forbid_imports`, matched against `import a.b`, `from a import b` (also `a.b`) and
+    never against relative imports (the app's own modules); one finding per statement.
+  - `librt` (mypyc's runtime library): an error while PyPy is supported; otherwise only when it
+    is not a `[project]` dependency (read from `PYPROJECT`): mypy installs it in the dev group
+    only, so pyz/portable/wheel builds lacked it (`./deploy add librt --cpython-only`).
+  - Class decorators: resolved through the module's absolute imports to full names
+    (`_import_aliases`, star imports included) and compared with `NATIVE_CLASS_DECORATORS`,
+    which mirrors mypyc (`dataclasses.dataclass`, `attr.s`, `attr.attrs`, `typing[_extensions].final`,
+    `mypy_extensions.trait`/`mypyc_attr`): attrs' `define`/`frozen`/`mutable` are NOT native,
+    `@attr.s` is; `@mypyc_attr(native_class=False)` silences it. A drift test compares the set
+    with the locked mypyc's own source.
+  - Nested classes and classes inside functions, each reported once (from its nearest class
+    or function); t-strings; `if __name__ == "__main__"` (either order) at module level.
+  - Module-level `__file__` ONLY when `compile.modules` is one top-level module file
+    (`relative_file_at_import`): mypyc (>= 1.20.2) sets the real `__file__` before a module
+    body runs, from the folder of the shared lib; with a single top-level module there is no
+    shared lib and the body sees a relative `<mod><EXT_SUFFIX>`. It looks at what runs at
+    import (class bodies, decorators, default values), not function or lambda bodies. Pinned
+    by a real-compile test: if mypyc fixes that case, the test fails and the rule can go.
+  `lintc` does not import `presets` or `mypyc`.
 - With PyPy supported user code must be 3.11 syntax and API (no PEP 695;
   `typing_extensions.override`, not `typing.override`). `mode --supports +pypy` prechecks it
-  (`cmd_mode._precheck_py311`: ruff `--target-version py311` syntax rules, then the mypy errors
-  that appear only at 3.11).
+  (`cmd_mode._precheck_py311`): it syncs the tools env first (a stale `uv.lock` fails in uv's
+  own step; not under `--dry-run`), then ruff `--target-version py311` syntax rules (exit 1 =
+  findings; any other code = "could not run ruff"), then the mypy errors that appear only as
+  3.11 (`PRECHECK_MYPY_FLAGS`: `--config-file=` so the project's `.mypy.ini` is never read,
+  where the default `off` profile sets `ignore_errors`, and `--check-untyped-defs`); a mypy
+  abort (exit 2) is a `DeployError` with mypy's output, never a silent pass.
 
 ## 10. Build methods (`cmd_build.py`, `methods/*`)
 
@@ -1122,11 +1243,21 @@ Per method:
   `--out` (`pyz.wrapper_path`; the parts' name and `min_python`, the pypy candidate order only
   when every part is a pypy build; an `--out` ending in `.cmd` is refused). `pyz.check_parts`
   runs the part checks in `--dry-run` too.
-- **wheel**: synthetic build project in `.build/wheel/<b>` (`setuptools>=84`; for mypyc
-  `mypy==<version locked in uv.lock>` in `build-system.requires`, a `setup.py` using mypycify
-  with the same `compile.multi_file`, `separate` and `strict_dunder_typing` as the stage, and a
-  compile `mypy.ini`). Assets go into `<pkg>/assets` (package data). Needs network (isolated
-  build env). mypyc -> platform wheel; cpython/pypy -> `py3-none-any`.
+- **wheel**: synthetic build project in `.build/wheel/<b>` (for mypyc a `setup.py` using
+  mypycify with the same `compile.multi_file`, `separate`, `strict_dunder_typing` and extra C
+  flags (`no_semantic_interposition`, section 9) as the stage, and a compile `mypy.ini`), built
+  with `uv build --wheel --no-build-isolation --python <.venv python>` after
+  `envs.sync(tool)`: the setuptools, mypy and project dependencies of `uv.lock` (the packages
+  the mypyc stage uses), offline. An isolated env resolved
+  `setuptools>=84` and mypy's uncapped dependencies from PyPI at every build, and mypycify
+  there could not see the project's dependencies (a compiled `import rich` failed). `uv build`
+  ignores `UV_PROJECT_ENVIRONMENT`, hence `--python`; `build-system.requires` only records the
+  exact locked versions (`wheel._locked_version`: a clear error when missing). Package data =
+  every file of the package (`"**/*"`: data files, `py.typed`, vendored native libraries; the
+  copy skips caches and stray build outputs: an extension next to its `.py`, `*__mypyc`);
+  assets go into `<pkg>/assets`. `app.gui` -> `[project.gui-scripts]` (no console window on
+  Windows), else `[project.scripts]`. mypyc -> platform wheel; cpython/pypy -> `py3-none-any`
+  (even with a vendored native library: the wheel is not retagged).
 - **nuitka**: `.build/nuitka-stage/<b>`, `uv run --locked --with nuitka==<NUITKA> python -m
   nuitka` with cwd = stage; `--include-package=<pkg>`, `--include-module` for the mypyc hidden
   imports the tools env can locate (`nuitka.includable`: top-level `find_spec` with the stage on
@@ -1216,7 +1347,8 @@ Per method:
   `exclude_modules = ["PIL"]`.
 - Assets at runtime: `resources.assets_dir()` (raylib and flet presets) tries
   `$PYTEMPLATE_ASSETS`, then `sys._MEIPASS/assets`, then `<pkg>/assets` (wheel), then
-  `src/assets`. Call it inside functions (module-level `__file__` is broken when compiled).
+  `src/assets`. `resources.py` is a boundary module; module-level `__file__` is fine in
+  compiled packages (section 9: only a single top-level compiled module sees a relative one).
 
 ## 11. Presets (`presets.py`, `.pytemplate/presets/<p>/`)
 
@@ -1611,7 +1743,16 @@ short temp tree and unset `NVIM_APPNAME`.
   data and skeletons, ruff under every profile, name rules, pins, `copy_template`,
   `new`/`__init` failures with uv faked; real `new` per preset, the pins steering uv and the
   raylib stub generator when uv reaches the network, checked with `uv pip compile
-  --no-cache`), `test_removals.py` (no JIT key, env, launch config or `PYTHON_JIT` left;
+  --no-cache`), `test_mypyc_core.py` (the PyPy
+  precheck, lintc and imports tables, `[compile]` validation, `sync_tree`, stale extensions,
+  `mypyc.build` with a fake compiler, `tools/mypyc_build.py`, hidden imports, the
+  compiled-module sections of `.mypy.ini`/pyright, the wheel method; plus real runs that skip
+  without `.venv` or a C compiler: mypy for the precheck and the exclude sections, a mypyc
+  compile of a tmp project (loading, incremental, opt_level rebuild), the relative-`__file__`
+  pin, pure and mypyc wheels, and the extra C flags through a logging `CC` with a user
+  `CFLAGS`: in every compile command of the stage and the wheel, the i64 wrap-around, and on
+  Linux the inlined call (objdump; without the option gcc keeps the call)),
+  `test_removals.py` (no JIT key, env, launch config or `PYTHON_JIT` left;
   `./deploy init` exits 2 with its hint; `new` and the maintainer route through `__init`, for
   real in throwaway copies),
   `test_config_rules.py` (every schema field and validate rule with a positive and a negative
@@ -1638,8 +1779,11 @@ short temp tree and unset `NVIM_APPNAME`.
   and path tests already take 10-40 s under load.
 - `test_runner.py` matches message substrings (`unknown key 'backend.mode'`, `boolean`,
   `is not in backend.supported`, `exact version`, `clashes with`, and the lintc texts `flet`,
-  `@cache`, `nested class`, `__file__`, `__main__`): rewording those messages means updating
-  the tests in the same commit.
+  `@cache`, `nested class`, `__main__`; it asserts NO `__file__` finding for the default
+  package), and so does `test_mypyc_core.py` (`cannot parse`, `regular (slow) Python class`,
+  `relative path`, `dev group`, `does not exist on PyPy`, `matches no module`, `is inside`,
+  `mypyc failed (exit code 1)`, `could not run ruff`, `mypy could not check`...): rewording
+  those messages means updating the tests in the same commit.
 - `./deploy selftest --shells`: section 4.9.
 - `./deploy selftest --nvim [PRESET,...] [--keep] [--fresh] [--require] [--timeout S]
   [--dir DIR]` (`nvimtest.selftest`): isolated LazyVim under `--dir` (default `%TEMP%\pt\nvim`,
@@ -1862,6 +2006,12 @@ Behaviour:
   needs. Not bounded in the preset on purpose (a direct dependency every flet project would
   have to remove when Flet moves on): an app that uses `flet.auth` runs `./deploy add
   "httpx<1"`.
+- Vendored native libraries (`.so`/`.pyd` in `src/`, `git add -f`): the stage, the payloads,
+  portable and wheel carry them; PyInstaller/Nuitka only bundle what they detect (a library
+  loaded with ctypes needs `[deploy.exe] extra_args = ["--add-binary", ...]`), pyz leaves
+  extensions out of `common/`, and a cpython/pypy wheel stays tagged `py3-none-any`.
+- `sync_tree` does not detect a case-only rename (`Data.py` -> `data.py`) on a
+  case-insensitive file system: the stage keeps the old spelling until `./deploy clean`.
 
 Editors:
 - VS Code problem matchers and the Neovim parser depend on tool output formats (ruff, mypy,
@@ -1896,6 +2046,14 @@ Code coupling (rename together):
   `e2e.flet_build_reason` imports `methods.flet._developer_mode`; `cmd_nvim.c_compiler`
   imports `cmd_env._msvc` lazily (`cmd_env` imports `cmd_nvim`).
 - `RULES_RE` / `tasks.parse_line` <-> `ui.error`, `ui.warn`, `str(lintc.Finding)` (5.3).
+- mypyc internals mirrored by the runner (checked by `test_mypyc_core` against the locked
+  mypy): `lintc.NATIVE_CLASS_DECORATORS` <-> mypyc's native decorators;
+  `lintc.relative_file_at_import` <-> when mypyc builds no shared lib; `mypyc.remove_stale_extensions`
+  <-> mypyc's lib names (`<group>__mypyc`, `<module>__mypyc`). `mypyc.MYPYC_REJECTED` <->
+  `tools/mypyc_build.py`; the spec keys the script reads <-> `mypyc.build`;
+  `mypyc_build.extra_cflags`/`compiler_type` <-> the wheel's `SETUP_PY`
+  (`test_wheel_setup_py_adds_the_same_flags_as_the_stage`); `mypyc.COMPILER_ENV` <-> the
+  variables setuptools' `configure_system` reads.
 - `envs.MIN_UV` <-> the presets' `python.pypy` pin and default `python.cpython`, and the newest
   uv flag the runner uses (7); `hooks.launcher_of` <-> `hooks.sh_literal`; `cmd_env._msvc`
   <-> setuptools' `_find_vc2017` component choice (`test_msvc_component_matches_setuptools`);

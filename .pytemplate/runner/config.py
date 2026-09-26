@@ -72,6 +72,9 @@ class CompileConfig:
     # of slow lines to .build/reports/mypyc-annotate.html (./deploy report does it on demand)
     annotate: bool = False
     opt_level: str = "3"
+    # Linux gcc/clang: -fno-semantic-interposition (as CPython itself is built), so the compiler
+    # may inline calls between compiled functions (tools/mypyc_build.py, extra_cflags)
+    no_semantic_interposition: bool = True
     multi_file: bool = False
     separate: bool = False
     strict_dunder_typing: bool = False
@@ -388,6 +391,36 @@ def _presets() -> list[str]:
     return sorted(p.name for p in PRESETS.iterdir() if (p / "preset.toml").is_file())
 
 
+def _within(name: str, package: str) -> bool:
+    return name == package or name.startswith(package + ".")
+
+
+def _validate_compile(cfg: Config) -> None:
+    """[compile]: the relations between the dotted names, once validate() checked each of them
+    (whether they exist is checked when mypyc runs: mypyc.compiled_sources)."""
+    modules = cfg.compile.modules
+    for i, m in enumerate(modules):
+        for other in modules[:i]:
+            if m == other:
+                raise DeployError(f"pytemplate.toml: compile.modules lists {m!r} twice")
+            if _within(m, other) or _within(other, m):
+                inner, outer = (m, other) if _within(m, other) else (other, m)
+                raise DeployError(
+                    f"pytemplate.toml: compile.modules: {inner!r} is inside {outer!r}, which already compiles it "
+                    f"(mypyc would see the module twice): keep only {outer!r}"
+                )
+    for ex in cfg.compile.exclude:
+        if ex in modules:
+            raise DeployError(
+                f"pytemplate.toml: compile.exclude: {ex!r} is a whole compile.modules entry: remove it from compile.modules instead"
+            )
+        if not any(ex.startswith(m + ".") for m in modules):
+            raise DeployError(
+                f"pytemplate.toml: compile.exclude: {ex!r} is not inside compile.modules {modules}: "
+                "list modules or subpackages of those packages"
+            )
+
+
 # --- [tasks] -------------------------------------------------------------------------------------
 
 TASK_PLACEHOLDERS = ("root", "src", "build", "dist", "backend", "name", "pkg", "python")
@@ -497,6 +530,7 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     for i, override in enumerate(cfg.typing.mypy_overrides):
         _check_override(override, f"typing.mypy_overrides[{i}]")
     _one_of(cfg.compile.opt_level, ("0", "1", "2", "3"), "compile.opt_level")
+    _validate_compile(cfg)
     if cfg.deploy.optimize not in (0, 1, 2):
         raise DeployError("pytemplate.toml: 'deploy.optimize' must be 0, 1 or 2")
     for backend, method in cfg.deploy.default.items():

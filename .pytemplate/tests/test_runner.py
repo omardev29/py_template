@@ -159,7 +159,8 @@ def test_lintc_rules(tmp_path: Path) -> None:
     assert any("flet" in m for m in messages)
     assert any("@cache" in m for m in messages)
     assert any("nested class" in m for m in messages)
-    assert any("__file__" in m for m in messages)
+    # compile.modules is a package: mypyc sets the real __file__ before the module body runs
+    assert not any("__file__" in m for m in messages)
     assert any("__main__" in m for m in messages)
 
 

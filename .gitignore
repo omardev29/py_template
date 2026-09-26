@@ -15,7 +15,8 @@ dist/
 build/
 *.spec
 
-# Compiled extensions: they only exist in .build/ (any that show up in src/ are stray)
+# Compiled extensions: mypyc's live in .build/ (one in src/ is a stray build); a vendored
+# native .so/.pyd in src/ must be added with `git add -f` (builds ship it; a pure pyz cannot)
 *.so
 *.pyd
 

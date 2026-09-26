@@ -40,10 +40,13 @@ exclude = []
 # and @ft.control loses the types of its events.
 forbid_imports = ["flet", "flet_desktop", "flet_cli"]
 annotate = false
-opt_level = "3"
+# opt_level: mypyc's C optimization. MSVC: 1, 2 and 3 are all /O2
+opt_level = "3"   # 0 (debug only, slower than CPython) | 1 | 2 | 3 (default)
+no_semantic_interposition = true   # Linux gcc/clang: calls between compiled functions may be inlined
 
 [deploy]
-optimize = 1
+# optimize: Python -O level of every build method (higher = MORE stripped, not faster)
+optimize = 1   # 0 keep asserts | 1 strip asserts | 2 also docstrings
 default = { cpython = "exe", mypyc = "exe", pypy = "portable" }
 exclude_modules = ["PIL"]   # flet imports Pillow only for RawImage: -13 MB (remove it if you use it)
 
