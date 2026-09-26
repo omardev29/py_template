@@ -39,6 +39,9 @@ Check = Callable[[bool | None, str, str], None]
 MIN_LAZYVIM = (0, 11, 2)  # LazyVim 15+
 MIN_PATH_TRUST = (0, 12, 0)  # vim.secure.trust({path=...}); older versions need a buffer
 STARTER = "https://github.com/LazyVim/starter"
+# The starter commit `selftest --nvim` tests against (with nvimtest.LOCK); `nvim bootstrap`
+# takes the newest, as LazyVim's own install steps do.
+STARTER_REV = "803bc181d7c0d6d5eeba9274d9be49b287294d99"
 EXTRAS = (
     "lazyvim.plugins.extras.lang.python",
     "lazyvim.plugins.extras.lang.toml",
@@ -623,29 +626,31 @@ def cmd_bootstrap(nv: Nvim) -> int:
 
 
 def cmd_sync(nv: Nvim) -> int:
-    """nvim sync: `nvim --headless "+Lazy! sync" +qa` from the project (installs what .lazy.lua adds)."""
+    """nvim sync: `nvim --headless "+Lazy! install" +qa` from the project (installs what .lazy.lua adds).
+
+    install, never sync: Lazy! sync would also update every plugin of the user's config
+    (rewriting lazy-lock.json) and clean the plugins its spec does not name.
+    """
     if not nv.lazyvim_installed():
         raise DeployError("LazyVim is not installed: ./deploy nvim bootstrap", 3)
     trust = trust_status(nv.trust_db, LAZY_LUA)
-    argv = [nv.exe, "--headless", "+Lazy! sync", "+qa"]
-    cwd = ROOT
-    tmp: tempfile.TemporaryDirectory[str] | None = None
+    if trust.state == "missing":
+        raise DeployError(".lazy.lua not found: ./deploy render generates it")
     if trust.state != "trusted":
-        # An untrusted .lazy.lua makes Neovim ask (confirm()), which never returns headless.
-        ui.warn(".lazy.lua is not trusted: syncing only your own plugins (./deploy nvim trust, then sync again)")
-        tmp = tempfile.TemporaryDirectory(prefix="pt-nvim-", ignore_cleanup_errors=True)
-        cwd = Path(tmp.name)
-    ui.command(proc.show(argv) + ("" if cwd == ROOT else f"   (in {cwd})"))
+        # Neovim would ask (confirm()), which never returns headless; and from another folder the
+        # project's plugins are not in the spec, so there would be nothing to install.
+        raise DeployError(f".lazy.lua is {trust.describe()}: ./deploy nvim trust first, then ./deploy nvim sync", 3)
+    argv = [nv.exe, "--headless", "+Lazy! install", "+qa"]
+    ui.command(proc.show(argv))
     if proc.DRY_RUN:
         return 0
-    try:
-        code = subprocess.run(argv, cwd=cwd, env=proc.base_env(), stdin=subprocess.DEVNULL, check=False).returncode
-    finally:
-        if tmp is not None:
-            tmp.cleanup()
+    with tempfile.TemporaryDirectory(prefix="pt-nvim-", ignore_cleanup_errors=True) as tmp:
+        env = proc.base_env()
+        env.setdefault("NVIM_LOG_FILE", str(Path(tmp) / "nvim.log"))  # else it may land in ROOT
+        code = subprocess.run(argv, cwd=ROOT, env=env, stdin=subprocess.DEVNULL, check=False).returncode
     if code != 0:
         raise proc.CommandFailed(argv, code)
-    ui.ok("plugins synced (lazy-lock.json in your config was updated)")
+    ui.ok("plugins installed (your other plugins were neither updated nor removed)")
     return 0
 
 
@@ -658,7 +663,8 @@ def cmd_nvim(cfg: Config, args: list[str]) -> int:
         prog="./deploy nvim",
         description="Neovim/LazyVim integration. doctor (default): check it; trust: pre-trust .lazy.lua; "
         "extras: enable the recommended extras in lazyvim.json; bootstrap: install the LazyVim starter "
-        "if there is no config; sync: install/update the plugins (Lazy! sync) from this project.",
+        "if there is no config; sync: install the plugins .lazy.lua adds (Lazy! install: nothing is "
+        "updated or removed; .lazy.lua must be trusted).",
     )
     parser.add_argument("action", nargs="?", default="doctor", choices=ACTIONS)
     ns = parser.parse_args(args)

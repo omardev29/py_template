@@ -1,9 +1,11 @@
-"""The Windows launchers deploy.cmd and deploy.ps1 (run them with `./deploy selftest`).
+"""The launchers deploy.cmd and deploy.ps1 (run them with `./deploy selftest`).
 
-Static rules are checked everywhere. The behavioural tests run only on Windows: they call the
-hidden runner command `__probe EXIT STDIN(0|1) ARGS...` through each launcher, which prints one
-PTPROBE{json} line (argv, caller cwd, launcher, stdin, root) and exits with EXIT. A cmd start
-costs about 0.3 s and a PowerShell one 1-2 s, so each PowerShell process checks several things.
+Static rules are checked everywhere. The behavioural tests call the hidden runner command
+`__probe EXIT STDIN(0|1) ARGS...` through each launcher, which prints one PTPROBE{json} line
+(argv, caller cwd, launcher, stdin, root) and exits with EXIT. deploy.cmd needs Windows;
+deploy.ps1 runs wherever PowerShell 7 (pwsh) is installed, Linux and macOS included (the same
+Core hand-over), and Windows PowerShell 5.1 is added on Windows. A cmd start costs about 0.3 s
+and a PowerShell one 1-2 s, so each PowerShell process checks several things.
 """
 
 from __future__ import annotations
@@ -27,13 +29,27 @@ PS1 = ROOT / "deploy.ps1"
 SUB = ROOT / "src" if (ROOT / "src").is_dir() else ROOT / ".pytemplate"
 IS_WINDOWS = sys.platform == "win32"
 windows_only = pytest.mark.skipif(not IS_WINDOWS, reason="Windows launchers")
+posix_only = pytest.mark.skipif(IS_WINDOWS, reason="exec bits and fake #!/bin/sh programs: Linux/macOS")
+PS_NAMES = ["pwsh", "powershell"]
 
 NON_ASCII = "\u00e9\u00f1"
 # cmd parses its own command line: no % ! " ^ & | < > in these (see the deploy.cmd header).
 CMD_ARGS = ["plain", "a b", "", "tr\\", "sp tr\\", NON_ASCII, "--flag=x", "-v", "--"]
-# PowerShell also keeps quotes, $, * and commas. A bare -- is removed by PowerShell itself, so
-# the session scripts pass it quoted ('--'), and -v bare (a parameter token for PowerShell).
-PS_ARGS = [*CMD_ARGS, 'q"x', "a'b", "*", "$HOME", 'x "y z', 'a\\"b c', '"', "%PATH%", "a,b", "$(1)"]
+# PowerShell also keeps quotes (the typographic single quotes are quotes for PowerShell too), $,
+# * and commas. A bare -- is removed by PowerShell itself, so the session scripts pass it quoted
+# ('--'), and -v bare (a parameter token for PowerShell).
+PS_ARGS = [
+    *CMD_ARGS, 'q"x', "a'b", "*", "$HOME", 'x "y z', 'a\\"b c', '"', "%PATH%", "a,b", "$(1)",
+    "\u2018q\u2019", "\u201a; Write-Output PWNED; \u201b",
+]  # fmt: skip
+QUOTES = ("'", "\u2018", "\u2019", "\u201a", "\u201b")  # what PowerShell reads as a single quote
+
+
+def _ps_literal(s: str) -> str:
+    """A PowerShell single-quoted literal (every kind of single quote doubled, like shells.ps_quote)."""
+    for q in QUOTES:
+        s = s.replace(q, q + q)
+    return "'" + s + "'"
 
 
 def _text_lines(path: Path) -> list[str]:
@@ -70,6 +86,16 @@ def test_cmd_forwards_arguments_only_on_the_uv_line() -> None:
     )
 
 
+def test_cmd_keeps_the_registry_path_out_of_call_arguments() -> None:
+    """A quoted registry entry ("C:\\Program Files\\x") would split `call :x "%%B"` at its blank."""
+    code = _code_lines_cmd()
+    assert not [line for line in code if re.match(r'(?i)call\s+:uv_in_list\s+\S', line)], code
+    assert any(line.lower().startswith('set "pt_list=%pt_list:"=%"') for line in code), "quotes are not removed"
+    uv_line = next(line for line in code if "%*" in line)
+    before = code[: code.index(uv_line)]
+    assert 'set "UV_PYTHON="' in before, "the caller's UV_PYTHON must not choose the runner's Python"
+
+
 # --- deploy.ps1: static ------------------------------------------------------------------------
 
 
@@ -90,10 +116,18 @@ def test_ps1_has_no_param_block_and_leaves_path_alone() -> None:
 def test_ps1_restores_every_variable_it_sets() -> None:
     text = PS1.read_text(encoding="ascii")
     assigned = {m.upper() for m in re.findall(r"(?i)\$env:(\w+)\s*=(?!=)", text)}
+    removed = {m.upper() for m in re.findall(r"(?i)Remove-Item\s+-LiteralPath\s+Env:(\w+)", text)}
     names = re.search(r"(?m)^\$names = (.+)$", text)
     assert names, "deploy.ps1 lists the variables it restores in `$names = ...`"
     restored = {m.upper() for m in re.findall(r"'(\w+)'", names[1])}
     assert assigned and assigned <= restored, f"set but not restored: {assigned - restored}"
+    assert removed == {"UV_PYTHON"} and removed <= restored, f"removed but not restored: {removed - restored}"
+
+
+def test_ps1_never_names_the_pipeline_variable() -> None:
+    """A script whose text uses the automatic pipeline variable makes `pwsh -File` (and the shebang
+    route) read a redirected stdin as text lines (IsUsingDollarInput): the bytes would change."""
+    assert "$input" not in PS1.read_text(encoding="ascii").lower()
 
 
 def test_ps1_is_executable_in_git() -> None:
@@ -110,15 +144,21 @@ def _powershells() -> list[str]:
     return [exe for exe in (shutil.which("pwsh"), shutil.which("powershell") if IS_WINDOWS else None) if exe]
 
 
+def _ps_exe(name: str) -> str:
+    """pwsh on every OS, Windows PowerShell 5.1 only on Windows; skip when it is not installed."""
+    exe = shutil.which(name) if name == "pwsh" or IS_WINDOWS else None
+    if not exe:
+        pytest.skip(f"{name} not installed")
+    return exe
+
+
 def _encoded(script: str) -> str:
     return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
 
 
-@pytest.mark.parametrize("name", ["pwsh", "powershell"])
+@pytest.mark.parametrize("name", PS_NAMES)
 def test_ps1_parses(name: str) -> None:
-    exe = shutil.which(name) if name == "pwsh" or IS_WINDOWS else None
-    if not exe:
-        pytest.skip(f"{name} not installed")
+    exe = _ps_exe(name)
     script = (
         "$e = $null; $t = $null\n"
         "[void][System.Management.Automation.Language.Parser]::ParseFile($env:PT_TEST_PS1, [ref]$t, [ref]$e)\n"
@@ -132,12 +172,12 @@ def test_ps1_parses(name: str) -> None:
     assert r.returncode == 0, r.stdout + r.stderr
 
 
-# --- behaviour (Windows) -----------------------------------------------------------------------
+# --- behaviour ---------------------------------------------------------------------------------
 
 
 def _clean_env(**changes: str | None) -> dict[str, str]:
     """This environment without what `uv run` (pytest's parent) sets, so the launchers search for uv."""
-    drop = {"UV", "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_RUN_RECURSION_DEPTH"}
+    drop = {"UV", "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "UV_PYTHON_PREFERENCE", "UV_RUN_RECURSION_DEPTH"}
     env = {k: v for k, v in os.environ.items() if k.upper() not in drop and not k.upper().startswith("PYTEMPLATE_")}
     for key, value in changes.items():
         for k in [k for k in env if k.upper() == key.upper()]:
@@ -150,8 +190,13 @@ def _clean_env(**changes: str | None) -> dict[str, str]:
 def _run(argv: list[str] | str, cwd: Path, env: dict[str, str] | None = None, stdin: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         argv, cwd=cwd, env=env if env is not None else _clean_env(), input=stdin, capture_output=True,
-        text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
+        text=True, encoding="utf-8", errors="replace", timeout=180, check=False,
     )
+
+
+def _session(exe: str, body: str, cwd: Path = ROOT, env: dict[str, str] | None = None, stdin: str = "") -> subprocess.CompletedProcess[str]:
+    """Run PowerShell code in one session (a caller typing in its own shell)."""
+    return _run([exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", _encoded(body)], cwd, env, stdin)
 
 
 def _probes(r: subprocess.CompletedProcess[str]) -> list[dict[str, object]]:
@@ -194,15 +239,22 @@ def _hidden_env(tmp: Path, path: str) -> dict[str, str]:
 def _no_uv_env(tmp: Path) -> dict[str, str]:
     """No uv anywhere: install folders moved away and an empty PATH (so no reg.exe either)."""
     (tmp / "bin").mkdir(exist_ok=True)
-    return _hidden_env(tmp, str(tmp / "bin"))
+    if IS_WINDOWS:
+        return _hidden_env(tmp, str(tmp / "bin"))
+    return {"PATH": str(tmp / "bin"), "HOME": str(tmp)}
 
 
 def _assert_hints(r: subprocess.CompletedProcess[str]) -> None:
     assert r.returncode == 127, (r.returncode, r.stdout, r.stderr)
     assert "PTPROBE" not in r.stdout
-    for hint in ("irm https://astral.sh/uv/install.ps1 | iex", "winget install --id=astral-sh.uv -e", "scoop install main/uv"):
-        assert hint in r.stderr, r.stderr
-    assert "curl" not in r.stderr
+    if IS_WINDOWS:
+        for hint in ("irm https://astral.sh/uv/install.ps1 | iex", "winget install --id=astral-sh.uv -e", "scoop install main/uv"):
+            assert hint in r.stderr, r.stderr
+        assert "curl" not in r.stderr
+    else:
+        for hint in ("curl -LsSf https://astral.sh/uv/install.sh | sh", "brew install uv", "pipx install uv"):
+            assert hint in r.stderr, r.stderr
+        assert "winget" not in r.stderr
 
 
 def _has_uv(dirs: list[str]) -> bool:
@@ -251,6 +303,9 @@ def _check_uv_outside_path(launcher: list[str], tmp: Path, prefix: str) -> None:
     r = _run([*launcher, "__probe", "0", "0", "r"], ROOT, env)
     assert r.returncode == 0, r.stderr
     _check(_probes(r)[0], ROOT, prefix, ["r"])
+
+
+# --- deploy.cmd (Windows) ------------------------------------------------------------------------
 
 
 @windows_only
@@ -314,8 +369,47 @@ def test_cmd_hands_the_runner_only_its_two_variables(tmp_path: Path) -> None:
     assert seen[0]["PYTEMPLATE_LAUNCHER"] == "cmd" and _same(seen[0]["PYTEMPLATE_CALLER_CWD"], project)
 
 
+@windows_only
+def test_cmd_clears_the_callers_uv_python(tmp_path: Path) -> None:
+    """A UV_PYTHON (here a missing interpreter, which uv would refuse) never picks the runner's Python."""
+    r = _run([str(CMD), "__probe", "0", "0", "x"], ROOT, _clean_env(UV_PYTHON=str(tmp_path / "no" / "python.exe")))
+    assert r.returncode == 0, r.stdout + r.stderr
+    _check(_probes(r)[0], ROOT, "cmd", ["x"])
+
+
+def _fake_reg(tmp: Path, value: str) -> Path:
+    """A reg.cmd that prints a `reg query` answer (CRLF) with `value` as the Path: PATH = only
+    this folder, so for /f runs it and the real registry is never read."""
+    fake = tmp / "fake"
+    fake.mkdir(exist_ok=True)
+    (fake / "reg.cmd").write_bytes(b'@type "%~dp0reg.txt"\r\n')
+    (fake / "reg.txt").write_bytes(f"\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    {value}\r\n\r\n".encode("ascii"))
+    return fake
+
+
+@windows_only
+def test_cmd_registry_path_with_quoted_entries(tmp_path: Path) -> None:
+    """Quoted registry entries ("C:\\Program Files\\x") neither split the list nor hide uv."""
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if not uv:
+        pytest.skip("uv not found")
+    qdir = tmp_path / "q dir"
+    qdir.mkdir()
+    shutil.copyfile(uv, qdir / "uv.exe")
+    fake = _fake_reg(tmp_path, '"C:\\no such dir\\x";"%PT_Q%";C:\\after')
+    env = {**_hidden_env(tmp_path, str(fake)), "PT_Q": str(qdir)}
+    r = _run([str(CMD), "__probe", "0", "0", "q"], ROOT, env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    _check(_probes(r)[0], ROOT, "cmd", ["q"])
+    (fake / "reg.txt").write_bytes(b'\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    "C:\\Program Files (x86)\\nope";C:\\x\r\n\r\n')
+    _assert_hints(_run([str(CMD), "__probe", "0", "0"], ROOT, _hidden_env(tmp_path, str(fake))))
+
+
+# --- deploy.ps1 (pwsh everywhere, Windows PowerShell 5.1 on Windows) ---------------------------------
+
+
 def _ps_session(launcher: str, legacy: bool) -> str:
-    args = " ".join(a if a == "-v" else "'" + a.replace("'", "''") + "'" for a in PS_ARGS)
+    args = " ".join(a if a == "-v" else _ps_literal(a) for a in PS_ARGS)
     lines = [
         # A demanding caller session: the launcher must still return the runner's exit code,
         # without an error record. No progress records: 5.1 prints them as CLIXML on stderr.
@@ -340,16 +434,13 @@ def _ps_session(launcher: str, legacy: bool) -> str:
     return "\n".join(lines)
 
 
-@windows_only
-@pytest.mark.parametrize("name", ["pwsh", "powershell"])
+@pytest.mark.parametrize("name", PS_NAMES)
 def test_ps1_round_trip_in_a_session(name: str) -> None:
-    exe = shutil.which(name)
-    if not exe:
-        pytest.skip(f"{name} not installed")
+    exe = _ps_exe(name)
     legacy = name == "pwsh"  # also with $PSNativeCommandArgumentPassing = 'Legacy' (5.1 always is)
     launcher = os.path.relpath(PS1, SUB)
     body = _ps_session(launcher if launcher.startswith(".") else ".\\" + launcher, legacy)
-    r = _run([exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", _encoded(body)], SUB)
+    r = _session(exe, body, SUB)
     assert r.returncode == 0, r.stdout + r.stderr
     assert r.stderr.strip() == "", r.stderr
     probes = _probes(r)
@@ -365,6 +456,159 @@ def test_ps1_round_trip_in_a_session(name: str) -> None:
     assert rcs == ["RC=0", "RC=37", "RC=2"] + (["RC=0"] if legacy else []), rcs
     after = [json.loads(line[len("AFTER="):]) for line in r.stdout.splitlines() if line.startswith("AFTER=")]
     assert after == [["before", None]], f"the caller's environment was not restored: {after}"
+    assert not [ln for ln in r.stdout.splitlines() if "PWNED" in ln and not ln.startswith("PTPROBE")], r.stdout
+
+
+def _injection_args() -> list[str]:
+    """Arguments that would run code if the Core hand-over (Invoke-Expression of single-quoted
+    words) ever quoted them wrong, plus the characters PowerShell or a command line treat specially."""
+    payloads = [f"{q}; Write-Output PWNED; {q}" for q in QUOTES] + [f"x{q}+(Write-Output PWNED)+{q}" for q in QUOTES]
+    return [
+        *QUOTES, "''", "a'b", "\u2018\u2019\u201a\u201b", *payloads,
+        "$(Write-Output PWNED)", "${env:PATH}", "`$x", "``", "a`nb", "a\nb", "a\r\nb", "tab\there",
+        "\u2028", "\u2029", "\u0085", "\u200b", "\u00a0", "\U0001f600",
+        "; Write-Output PWNED", "| Write-Output PWNED", "& Write-Output PWNED", "&& Write-Output PWNED",
+        "@args", "-Command", "-v", "[a]", "{", "}", "(", ")", "#", "<#", "#>", "$null", "$true", "1,2", "@(1)",
+        "-", "---", "--x", "", "", '"', '""', '\\"', "tail\\", "tail\\\\", 'a\\\\\\"b', "*", "?", "~", "~/x", "%PATH%",
+        "x" * (8000 if IS_WINDOWS else 100000),
+    ]  # fmt: skip
+
+
+@pytest.mark.parametrize("name", PS_NAMES)
+def test_ps1_hand_over_is_injection_safe(name: str, tmp_path: Path) -> None:
+    exe = _ps_exe(name)
+    args = _injection_args()
+    data = tmp_path / "args.json"
+    data.write_text(json.dumps(args), encoding="utf-8")
+    ps1 = _ps_literal(str(PS1))
+    body = (
+        f"$l = @(Get-Content -Raw -Encoding UTF8 -LiteralPath {_ps_literal(str(data))} | ConvertFrom-Json)\n"
+        f"& {ps1} __probe 0 0 @l\n'RC=' + $LASTEXITCODE\n"
+    )
+    if name == "pwsh":  # the legacy pre-quoting path (5.1 always takes it)
+        body += f"$PSNativeCommandArgumentPassing = 'Legacy'\n& {ps1} __probe 0 0 @l\n'RC=' + $LASTEXITCODE\n"
+    r = _session(exe, body + "exit 0\n")
+    probes = _probes(r)
+    assert len(probes) == (2 if name == "pwsh" else 1), r.stdout + r.stderr
+    for p in probes:
+        got = p["argv"]
+        assert isinstance(got, list) and len(got) == len(args), (len(got) if isinstance(got, list) else got, len(args))
+        assert [(i, a) for i, (a, g) in enumerate(zip(args, got, strict=True)) if a != g] == []
+    leaked = [ln for ln in (r.stdout + r.stderr).splitlines() if "PWNED" in ln and not ln.startswith("PTPROBE")]
+    assert not leaked, leaked
+    assert [ln for ln in r.stdout.splitlines() if ln.startswith("RC=")] == ["RC=0"] * len(probes)
+
+
+STOP_PARSING_ARGS = ["x", "--%", "a b", "%PATH%", "$HOME", "", 'q"x', "*", "~"]
+
+
+@pytest.mark.parametrize("mode", ["", "Standard", "Windows", "Legacy"])
+def test_ps1_passes_a_literal_stop_parsing_token(mode: str) -> None:
+    """PowerShell 7.3+ takes any native argument equal to --% for its stop-parsing token (then splits
+    and %VAR%-expands the rest): the launcher passes it like any other word."""
+    exe = _ps_exe("pwsh")
+    args = " ".join(_ps_literal(a) for a in STOP_PARSING_ARGS)
+    body = "\n".join([
+        f"$PSNativeCommandArgumentPassing = '{mode}'" if mode else "",
+        "$before = [string]$PSNativeCommandArgumentPassing",
+        f"& {_ps_literal(str(PS1))} __probe 0 0 {args}",
+        "'RC=' + $LASTEXITCODE",
+        "if ([string]$PSNativeCommandArgumentPassing -ne $before) { 'LEAKED=' + $PSNativeCommandArgumentPassing }",
+        "exit 0",
+    ])  # fmt: skip
+    r = _session(exe, body)
+    assert r.returncode == 0 and "RC=0" in r.stdout, r.stdout + r.stderr
+    assert _probes(r)[0]["argv"] == STOP_PARSING_ARGS
+    assert "LEAKED=" not in r.stdout
+
+
+COLON_TYPED = "-X:utf8 -W:ignore::DeprecationWarning -m:x -X:\"a b\" -X:a,b '-X:' utf8 -X utf8 --add-data:x --d=a:b"
+COLON_ARGV = ["-X:utf8", "-W:ignore::DeprecationWarning", "-m:x", "-X:a b", "-X:a,b", "-X:", "utf8", "-X", "utf8", "--add-data:x", "--d=a:b"]
+
+
+@pytest.mark.parametrize("name", PS_NAMES)
+def test_ps1_keeps_typed_colon_arguments_whole(name: str) -> None:
+    """A typed -X:v reaches a script split in two ('-X:' plus v): the launcher joins it again, as
+    PowerShell does for a native program. A quoted '-X:' and a colon-less -X stay as typed."""
+    exe = _ps_exe(name)
+    body = f"& ./deploy.ps1 __probe 0 0 {COLON_TYPED}\n"
+    if name == "pwsh":  # also the legacy pre-quoting path that 5.1 always takes
+        body += f"$PSNativeCommandArgumentPassing = 'Legacy'\n& ./deploy.ps1 __probe 0 0 {COLON_TYPED}\n"
+    r = _session(exe, body + "exit 0\n")
+    assert r.returncode == 0, r.stdout + r.stderr
+    probes = _probes(r)
+    assert len(probes) == (2 if name == "pwsh" else 1), r.stdout
+    for p in probes:
+        assert p["argv"] == COLON_ARGV
+
+
+@pytest.mark.parametrize("name", PS_NAMES)
+def test_ps1_forwards_pipeline_input_and_keeps_raw_stdin(name: str) -> None:
+    """'x' | ./deploy.ps1 run gives uv the pipeline, like a native call; without a pipeline uv keeps
+    the process stdin; @() gives it EOF. Exit codes still come through."""
+    exe = _ps_exe(name)
+    ps1 = _ps_literal(str(PS1))
+    body = "\n".join([
+        f"& {ps1} __probe 0 1",
+        f"'ping','two' | & {ps1} __probe 3 1",
+        "'RC=' + $LASTEXITCODE",
+        f"@() | & {ps1} __probe 0 1",
+        "exit 0",
+    ])  # fmt: skip
+    r = _session(exe, body, stdin="WRONG\n")
+    assert [p["stdin"] for p in _probes(r)] == ["WRONG", "ping", ""], r.stdout + r.stderr
+    assert "RC=3" in r.stdout
+    if name != "pwsh":
+        return  # how Windows PowerShell 5.1 -File treats a redirected stdin is not asserted here
+    # pwsh -File (and the shebang route): the raw bytes of a redirected stdin reach uv. A script
+    # naming the pipeline variable would get them as re-encoded text lines (U+FFFD for \xe9).
+    raw = subprocess.run(
+        [exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(PS1), "__probe", "0", "1"],
+        cwd=ROOT, env=_clean_env(), input=b"caf\xe9\r\nlast", capture_output=True, timeout=180, check=False,
+    )  # fmt: skip
+    got = [json.loads(ln[len(b"PTPROBE"):]) for ln in raw.stdout.splitlines() if ln.startswith(b"PTPROBE")]
+    assert got and got[0]["stdin"] == "caf\udce9", (raw.stdout, raw.stderr)
+
+
+@pytest.mark.parametrize("name", PS_NAMES)
+def test_ps1_clears_the_callers_uv_python_and_restores_it(name: str, tmp_path: Path) -> None:
+    """A UV_PYTHON (here a missing interpreter, which uv would refuse) never picks the runner's
+    Python; the caller's session keeps its own value, or none."""
+    exe = _ps_exe(name)
+    ps1 = _ps_literal(str(PS1))
+    missing = str(tmp_path / "no" / "python")
+    body = "\n".join([
+        f"$env:UV_PYTHON = {_ps_literal(missing)}",
+        f"& {ps1} __probe 0 0 x",
+        "'RC=' + $LASTEXITCODE",
+        "'UVP=' + $env:UV_PYTHON",
+        "Remove-Item Env:UV_PYTHON",
+        f"& {ps1} __probe 0 0 y",
+        "'EXISTS=' + (Test-Path Env:UV_PYTHON)",
+        "exit 0",
+    ])  # fmt: skip
+    r = _session(exe, body)
+    assert [p["argv"] for p in _probes(r)] == [["x"], ["y"]], r.stdout + r.stderr
+    assert "RC=0" in r.stdout and f"UVP={missing}" in r.stdout and "EXISTS=False" in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("name", PS_NAMES)
+def test_ps1_constrained_language_gives_one_clear_error(name: str) -> None:
+    """AppLocker/WDAC policies run unsigned scripts in ConstrainedLanguage mode, which blocks the
+    launcher's .NET calls: one error that names deploy.cmd, exit 126, no cascade."""
+    exe = _ps_exe(name)
+    body = "\n".join([
+        "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'",
+        f"$out = & {_ps_literal(str(PS1))} __probe 0 0 q 2>&1",
+        "'RC=' + $LASTEXITCODE",
+        "foreach ($o in $out) { 'OUT=' + $o }",
+        "exit 0",
+    ])  # fmt: skip
+    r = _session(exe, body)
+    out = [ln for ln in r.stdout.splitlines() if ln.startswith("OUT=")]
+    assert "RC=126" in r.stdout, r.stdout + r.stderr
+    assert len(out) == 1 and "ConstrainedLanguage" in out[0] and "deploy.cmd" in out[0], r.stdout
+    assert "PTPROBE" not in r.stdout and "Cannot invoke method" not in r.stdout + r.stderr
 
 
 def _any_powershell() -> str:
@@ -374,7 +618,6 @@ def _any_powershell() -> str:
     return exes[0]
 
 
-@windows_only
 def test_ps1_walks_up_and_passes_file_arguments(tmp_path: Path) -> None:
     exe = _any_powershell()
     copy = tmp_path / "deploy.ps1"
@@ -393,16 +636,36 @@ def test_ps1_finds_uv_outside_path(tmp_path: Path) -> None:
     _check_uv_outside_path([exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(PS1)], tmp_path, "ps1:")
 
 
-@windows_only
 def test_ps1_prints_install_hints_without_uv(tmp_path: Path) -> None:
     exe = _any_powershell()
     base = [exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]
-    # The registry PATH cannot be hidden from .NET without touching the registry: drop those
-    # two lines from a copy (the copy finds the project by walking up from ROOT).
     lines = PS1.read_text(encoding="ascii").splitlines()
-    registry = [line for line in lines if "GetEnvironmentVariable('Path'" in line]
-    assert len(registry) == 2
+    if IS_WINDOWS:
+        # The registry PATH cannot be hidden from .NET without touching the registry: drop those
+        # two lines from a copy (the copy finds the project by walking up from ROOT).
+        registry = [line for line in lines if "GetEnvironmentVariable('Path'" in line]
+        assert len(registry) == 2
+        lines = [line for line in lines if line not in registry]
+    elif any(Path(d, "uv").exists() for d in ("/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin")):
+        pytest.skip("uv is installed in a system folder the launcher always searches")
     copy = tmp_path / "nouv" / "deploy.ps1"
     copy.parent.mkdir()
-    copy.write_text("\n".join(line for line in lines if line not in registry) + "\n", encoding="ascii", newline="\n")
+    copy.write_text("\n".join(lines) + "\n", encoding="ascii", newline="\n")
     _assert_hints(_run([*base, str(copy), "__probe", "0", "0"], ROOT, _no_uv_env(tmp_path)))
+
+
+@posix_only
+def test_ps1_skips_a_uv_without_exec_bit(tmp_path: Path) -> None:
+    """Like `test -x` in ./deploy: a uv without x bit ($UV, PATH, an install folder) is skipped."""
+    exe = _ps_exe("pwsh")
+    home = tmp_path / "home"
+    broken = [tmp_path / "path" / "uv", home / ".local" / "bin" / "uv"]
+    good = home / ".cargo" / "bin" / "uv"
+    for f in [*broken, good]:
+        f.parent.mkdir(parents=True)
+        f.write_text('#!/bin/sh\necho "FAKE $0"\nexit 7\n', encoding="ascii", newline="\n")
+        f.chmod(0o644 if f in broken else 0o755)
+    drop = ("UV_INSTALL_DIR", "XDG_BIN_HOME", "XDG_DATA_HOME", "CARGO_HOME")
+    env = _clean_env(HOME=str(home), PATH=f"{broken[0].parent}:/usr/bin:/bin", UV=str(broken[0]), CI="1", **dict.fromkeys(drop))
+    r = _run([exe, "-NoProfile", "-NonInteractive", "-File", str(PS1), "x"], ROOT, env)
+    assert (r.returncode, r.stdout.strip()) == (7, f"FAKE {good}"), (r.returncode, r.stdout, r.stderr)

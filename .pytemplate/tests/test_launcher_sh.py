@@ -20,6 +20,8 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -93,13 +95,15 @@ def _msys2(rel: str) -> Path | None:
     return _first_file([MSYS2 / rel]) if MSYS2 else None
 
 
+DROP_ENV = (
+    "UV", "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "UV_PYTHON_PREFERENCE", "UV_RUN_RECURSION_DEPTH",
+    "PTCMD", "SHX_CWD_FILE", "PT_CODE",
+)  # fmt: skip
+
+
 def _clean_env(**extra: str) -> dict[str, str]:
     """The caller's environment without what `uv run` (pytest's parent) exports."""
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if k not in ("UV", "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "PTCMD", "SHX_CWD_FILE") and not k.startswith("PYTEMPLATE_")
-    }
+    env = {k: v for k, v in os.environ.items() if k not in DROP_ENV and not k.startswith("PYTEMPLATE_")}
     env.update(extra)
     return env
 
@@ -156,8 +160,10 @@ LINT_RULES = [
     (r"(^|[\s;&|(])set\s+-[A-Za-z]*[eu]", "no set -e / set -u (bash 3.2, niubash in-process)"),
     (r"(^|[\s;&|(])set\s+-o\s+(errexit|nounset)", "no set -e / set -u (bash 3.2, niubash in-process)"),
     (r"(^|[\s;&|(])cd(\s|$)", "the launcher never changes directory (niubash would move the caller)"),
+    # `x=$(cmd)` takes cmd's status: a caller's set -e (sh -e deploy, niubash) would stop there.
+    (r"^(?!.*\|\|).*\b_pt_\w+=\$\(", "a command substitution needs `|| _pt_x=` (a caller's set -e)"),
 ]
-PREFIX_ONLY = {"IFS", "MSYS_NO_PATHCONV", "MSYS2_ARG_CONV_EXCL"}  # only as `NAME=value command`
+PREFIX_ONLY = {"IFS", "MSYS_NO_PATHCONV", "MSYS2_ARG_CONV_EXCL", "UV_PYTHON"}  # only as `NAME=value command`
 EXPORTED = {"PYTEMPLATE_CALLER_CWD", "PYTEMPLATE_LAUNCHER"}
 FUNCTION = re.compile(r"^\s*([A-Za-z_]\w*)\s*\(\)\s*\{")
 
@@ -276,6 +282,9 @@ def lint(text: str) -> list[str]:
     cleanup = text.find("\nunset -f ")
     if not 0 <= cleanup < cut:
         return [*bad, 'the helpers must be removed with unset -f before exec "$@"']
+    # Errors too: an exit before the cleanup leaves every _pt_ name in a niubash session.
+    first_cleanup_line = text[: cleanup + 1].count("\n") + 1
+    bad += [f"{n}: exit before the cleanup (unset -f ...)" for n, line in code if n < first_cleanup_line and re.search(r"(^|[\s;&|(])exit\b", line)]
     statements = [s for s in text[cleanup:cut].replace("\\\n", " ").split("\n") if re.match(r"\s*unset\s", s)]
     unset_f = _names("\n".join(s.replace("unset -f", "unset", 1) for s in statements if re.match(r"\s*unset\s+-f\s", s)))
     unset_v = _names("\n".join(s for s in statements if not re.match(r"\s*unset\s+-f\s", s)))
@@ -334,6 +343,9 @@ _OK_TAIL = '\nunset -f _pt_ok\nunset _pt_v\nexec "$@"\n'
         ("_pt_w=1", "_pt_w is not unset"),
         ("_pt_f() {\n    :\n}", "function _pt_f is not unset"),
         ("IFS=:", "IFS may only prefix a command"),
+        ("UV_PYTHON=", "UV_PYTHON may only prefix a command"),
+        ("_pt_v=$(uname -s 2>/dev/null)", "needs `|| _pt_x=`"),
+        ("if [ -z \"$_pt_v\" ]; then\n    exit 2\nfi", "exit before the cleanup"),
     ],
 )
 def test_lint_detects(snippet: str, why: str) -> None:
@@ -342,7 +354,9 @@ def test_lint_detects(snippet: str, why: str) -> None:
 
 
 def test_lint_accepts_a_clean_launcher() -> None:
-    assert lint("#!/bin/sh\n_pt_ok() {\n    return 0\n}\n_pt_v=$(printf '%s' \"$1\")\nIFS= read -r _pt_v\n" + _OK_TAIL) == []
+    code = "#!/bin/sh\n_pt_ok() {\n    return 0\n}\n_pt_v=$(printf '%s' \"$1\") || _pt_v=\nIFS= read -r _pt_v || :\n"
+    tail = "\nunset -f _pt_ok\nunset _pt_v\nif [ \"$#\" -eq 1 ]; then\n    exit \"$1\"\nfi\nUV_PYTHON='' \"$@\"\nexec \"$@\"\n"
+    assert lint(code + tail) == []
 
 
 # --- syntax (-n) with every shell found ---------------------------------------------------------
@@ -512,3 +526,465 @@ def test_no_uv_anywhere(tmp_path: Path) -> None:
         assert "winget" in run.err and "curl" not in run.err
     else:
         assert "curl" in run.err
+
+
+# --- a caller's set -e / set -u ------------------------------------------------------------------
+
+POSIX_SHELLS = ["sh", "dash", "bash", "zsh", "ksh", "mksh", "yash", "busybox"]
+SYSTEM_UV_DIRS = ("/usr/bin", "/bin", "/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin")
+
+
+def _shell_argv(name: str) -> list[str | Path]:
+    """argv that runs a script with the POSIX shell `name` (skips when it is not installed)."""
+    shell = Path("/bin/sh") if name == "sh" else _posix_shell(name)
+    shell = _need(shell if shell and shell.is_file() else None, name)
+    return [shell, "sh"] if name == "busybox" else [shell]
+
+
+def _system_uv() -> str | None:
+    """A system folder with a uv in it: the launchers always search those, so 'no uv' cannot be set up."""
+    return next((d for d in SYSTEM_UV_DIRS if Path(d, "uv").exists()), None)
+
+
+@needs_posix
+@pytest.mark.parametrize("case", ["uv-off-path", "stale-UV", "no-uv"])
+@pytest.mark.parametrize("name", POSIX_SHELLS)
+def test_launcher_survives_caller_errexit(name: str, case: str, tmp_path: Path) -> None:
+    """`sh -eu deploy` (and niubash with set -e, in-process) must still reach every fallback."""
+    argv = [*_shell_argv(name), "-eu"]
+    if case == "no-uv":
+        if _system_uv():
+            pytest.skip("uv is installed in a system folder the launcher always searches")
+        # PATH keeps /usr/bin:/bin: yash runs `[` only when it is found on PATH.
+        run = Run([*argv, "deploy", "help"], ROOT, {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
+        assert run.rc == 127 and "uv not found" in run.err and "curl" in run.err, run.out + run.err
+        return
+    uv = shutil.which("uv", path=_clean_env().get("PATH"))
+    if uv is None:
+        pytest.skip("uv not on PATH")
+    if case == "uv-off-path":
+        if any(Path(d, "uv").exists() for d in ("/usr/bin", "/bin")):
+            pytest.skip("uv is in /usr/bin or /bin")
+        (tmp_path / "bin").mkdir()
+        (tmp_path / "bin" / "uv").symlink_to(uv)
+        env = _clean_env(PATH="/usr/bin:/bin", XDG_BIN_HOME=str(tmp_path / "bin"))
+    else:
+        env = _clean_env(UV=str(tmp_path / "none" / "uv"))
+    Run([*argv, "deploy", "__probe", "0", "0", *ARGS], ROOT, env).check(0, ROOT)
+
+
+# --- paths: symlinks and backslashes on POSIX -------------------------------------------------------
+
+
+@needs_posix
+@pytest.mark.parametrize("via", ["exec", "sh"])
+def test_relative_launcher_from_a_symlinked_subfolder(tmp_path: Path, via: str) -> None:
+    """`../deploy` from a symlink to src/: $PWD is logical, but the kernel found ../deploy physically."""
+    if via == "exec" and not os.access(LAUNCHER, os.X_OK):
+        pytest.skip("deploy has no exec bit in this checkout")
+    link = tmp_path / "link"
+    link.symlink_to(SRC, target_is_directory=True)
+    launcher = "../deploy" if via == "exec" else "sh ../deploy"
+    # cd inside the shell keeps $PWD logical (a subprocess cwd would be physical).
+    code = f"cd {q(str(link))} && " + probe_cmd(launcher, 6, ["x", "a b"])
+    run = Run(["/bin/sh", "-c", 'eval "$PTCMD"'], tmp_path, _clean_env(PTCMD=code))
+    assert run.probe and run.rc == 6, run.out + run.err
+    assert run.probe["argv"] == ["x", "a b"]
+    assert Path(str(run.probe["root"])) == ROOT
+    assert run.probe["caller_cwd_raw"] == str(link)
+    assert run.probe["caller_cwd"] == str(link)
+
+
+def _copy_project(dest: Path) -> Path:
+    """The launcher and the runner (enough for __probe) in `dest`."""
+    (dest / ".pytemplate").mkdir(parents=True)
+    shutil.copyfile(LAUNCHER, dest / "deploy")
+    (dest / "deploy").chmod(0o755)
+    shutil.copyfile(ROOT / ".pytemplate" / "deploy.py", dest / ".pytemplate" / "deploy.py")
+    shutil.copytree(ROOT / ".pytemplate" / "runner", dest / ".pytemplate" / "runner", ignore=shutil.ignore_patterns("__pycache__"))
+    (dest / "src").mkdir()
+    return dest
+
+
+@needs_posix
+@pytest.mark.parametrize("name", ["sh", "dash", "bash", "zsh", "ksh", "mksh", "busybox"])
+def test_posix_backslash_in_the_project_path(tmp_path: Path, name: str) -> None:
+    """A backslash is a legal POSIX file-name character: only Windows shells convert it to /."""
+    argv = _shell_argv(name)
+    project = _copy_project(tmp_path / "a\\b" / "p")
+    for launcher, cwd in (("./deploy", project), ("../deploy", project / "src"), (str(project / "deploy"), tmp_path)):
+        run = Run([*argv, launcher, "__probe", "4", "0", *ARGS], cwd, _clean_env())
+        where = f"{launcher} from {cwd}: stdout={run.out!r} stderr={run.err!r}"
+        assert run.rc == 4 and run.probe, where
+        assert run.probe["argv"] == ARGS, where
+        assert run.probe["root"] == str(project.resolve()), where
+        assert run.probe["caller_cwd_raw"] == str(cwd), where
+        assert run.probe["caller_cwd"] == str(cwd), where
+
+
+# --- niubash hygiene on every exit path (simulated: niubash itself is Windows only) --------------------
+
+FUNCTIONS = re.findall(r"(?m)^(_pt_\w+)\(\) \{", LAUNCHER.read_text(encoding="ascii"))
+
+
+@needs_posix
+@pytest.mark.parametrize("case", ["ok", "no-project", "no-uv"])
+@pytest.mark.parametrize("name", ["bash", "dash", "busybox", "ksh", "mksh", "yash"])
+def test_in_process_run_leaves_no_name_behind(name: str, case: str, tmp_path: Path) -> None:
+    """niubash runs ./deploy inside the calling shell: no _pt_ name may survive any exit (errors
+    too), the exports are dropped and the caller's UV_PYTHON is kept. Simulated by sourcing the
+    launcher with an EXIT trap that reports what is left when its `exit` ends the shell (not in
+    zsh: after the launcher's `emulate sh` an exit from a sourced file skips the trap)."""
+    argv = _shell_argv(name)
+    assert len(FUNCTIONS) >= 10, FUNCTIONS
+    launcher, cwd, code = LAUNCHER, ROOT, 5
+    env = _clean_env(__RUBASH_SHELL_NAME="1", UV_PYTHON=str(tmp_path / "no" / "python"))
+    if case == "no-project":
+        launcher, cwd, code = tmp_path / "deploy", tmp_path, 2
+        shutil.copyfile(LAUNCHER, launcher)
+    elif case == "no-uv":
+        if _system_uv():
+            pytest.skip("uv is installed in a system folder the launcher always searches")
+        code = 127
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "__RUBASH_SHELL_NAME": "1", "UV_PYTHON": "keep"}
+    report = (
+        "printf 'LEFT:'; set | grep '^_pt_' | tr '\\n' ' '; printf '\\n'; "
+        f"for f in {' '.join(FUNCTIONS)}; do if command -v \"$f\" >/dev/null 2>&1; then printf 'FUNC:%s\\n' \"$f\"; fi; done; "
+        "printf 'VARS:%s|%s|%s\\n' \"${PYTEMPLATE_LAUNCHER-unset}\" \"${PYTEMPLATE_CALLER_CWD-unset}\" \"${UV_PYTHON-unset}\""
+    )
+    ptcmd = f"trap {q(report)} EXIT; set -- __probe {code} 0 x; . {q(str(launcher))}"
+    run = Run([*argv, "-c", 'eval "$PTCMD"'], cwd, {**env, "PTCMD": ptcmd})
+    lines = run.out.splitlines()
+    where = f"stdout={run.out!r} stderr={run.err!r}"
+    assert run.rc == code, where
+    assert "LEFT:" in lines and not [ln for ln in lines if ln.startswith("FUNC:")], where
+    assert f"VARS:unset|unset|{env['UV_PYTHON']}" in lines, where
+    if case == "ok":
+        assert run.probe and run.probe["launcher"] == "sh:niubash" and run.probe["argv"] == ["x"], where
+
+
+# --- UV_PYTHON never picks the runner's Python ---------------------------------------------------------
+
+
+@needs_posix
+def test_launcher_clears_the_callers_uv_python(tmp_path: Path) -> None:
+    """The runner runs on the project's Python: a caller's UV_PYTHON (here a missing one, which uv
+    would refuse) must not choose it."""
+    env = _clean_env(UV_PYTHON=str(tmp_path / "no" / "python3.10"))
+    Run(["/bin/sh", "deploy", "__probe", "0", "0", "x"], ROOT, env).check(0, ROOT, args=["x"])
+
+
+@needs_posix
+def test_user_uv_python_older_than_3_11() -> None:
+    old = next((p for p in (shutil.which(f"python3.{m}") for m in (10, 9, 8)) if p), None)
+    if old is None:
+        pytest.skip("no Python older than 3.11 here")
+    run = Run(["/bin/sh", "deploy", "help"], ROOT, _clean_env(UV_PYTHON=old))
+    assert run.rc == 0 and "tomllib" not in run.err, run.out + run.err
+    # `uv run` by hand keeps UV_PYTHON: the entry point stops with one clear line, no traceback.
+    uv = shutil.which("uv", path=_clean_env().get("PATH"))
+    if uv is None:
+        pytest.skip("uv not on PATH")
+    run = Run([uv, "run", "--quiet", "--script", ROOT / ".pytemplate" / "deploy.py", "help"], ROOT, _clean_env(UV_PYTHON=old))
+    assert run.rc == 3, run.out + run.err
+    assert "3.11" in run.err and "UV_PYTHON" in run.err
+    assert "Traceback" not in run.err and "internal runner error" not in run.err
+
+
+def test_entry_refuses_python_older_than_3_11() -> None:
+    entry = ROOT / ".pytemplate" / "deploy.py"
+    code = (
+        "import runpy, sys; sys.version_info = (3, 10, 0, 'final', 0); sys.argv = ['deploy.py', 'help']; "
+        f"runpy.run_path({str(entry)!r}, run_name='__main__')"
+    )
+    r = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True, timeout=60, env=_clean_env(), check=False)
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "3.11" in r.stderr and "UV_PYTHON" in r.stderr and r.stderr.startswith("error: ")
+    assert "Traceback" not in r.stderr and "internal runner error" not in r.stderr and not r.stdout
+
+
+def test_entry_checks_the_version_before_importing_the_runner() -> None:
+    text = (ROOT / ".pytemplate" / "deploy.py").read_text(encoding="utf-8")
+    assert text.index("sys.version_info < (3, 11)") < text.index("from runner.cli import main")
+
+
+@needs_posix
+@pytest.mark.parametrize("launcher", ["deploy", "deploy.ps1"])
+def test_runner_runs_on_python_cpython_whatever_the_caller_pins(launcher: str, tmp_path: Path) -> None:
+    """uv reads the .python-version next to .pytemplate/deploy.py (python.cpython): neither a
+    .python-version in the caller's folder nor the caller's UV_PYTHON picks the runner's Python
+    (CLAUDE.md 5.2). The runner therefore runs on whatever python.cpython says (3.11+)."""
+    pinned = (ROOT / ".python-version").read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"3\.\d+", pinned), pinned
+    other = "3.11" if pinned != "3.11" else "3.12"
+    (tmp_path / ".python-version").write_text(other + "\n", encoding="utf-8")
+    env = _clean_env(UV_PYTHON=other)
+    if launcher == "deploy":
+        run = Run(["/bin/sh", LAUNCHER, "__probe", "0", "0", "x"], tmp_path, env)
+    else:
+        run = Run([_pwsh(), "-NoProfile", "-NonInteractive", "-File", ROOT / "deploy.ps1", "__probe", "0", "0", "x"], tmp_path, env)
+    assert run.rc == 0 and run.probe, run.out + run.err
+    assert run.probe["argv"] == ["x"] and Path(str(run.probe["root"])) == ROOT
+    assert str(run.probe["python"]).startswith(pinned + "."), (run.probe["python"], pinned)
+
+
+# --- the Windows-only helpers are plain sh: run them in every POSIX shell ---------------------------
+
+HELPERS = ("_pt_slashes", "_pt_backslashes", "_pt_drive", "_pt_winpath", "_pt_try_uv", "_pt_try_dir", "_pt_expand", "_pt_uv_in_list", "_pt_uv_from_registry")
+
+
+def _launcher_functions(*names: str) -> str:
+    text = LAUNCHER.read_text(encoding="ascii")
+    out = []
+    for name in names:
+        m = re.search(rf"(?ms)^{name}\(\) \{{\n.*?^\}}\n", text)
+        assert m, f"{name}() not found in deploy"
+        out.append(m.group(0))
+    return "".join(out)
+
+
+def _run_helpers(name: str, calls: str, env: dict[str, str]) -> list[str]:
+    """Run the launcher's helpers as on Windows (_pt_win=1) in shell `name`: code through the
+    environment, never argv (section 4.7)."""
+    prelude = ("emulate sh\n" if name == "zsh" else "") + "_pt_win=1\n_pt_exe=uv\n"
+    run = Run([*_shell_argv(name), "-c", 'eval "$PT_CODE"'], ROOT, {**env, "PT_CODE": prelude + _launcher_functions(*HELPERS) + calls})
+    assert run.rc == 0, run.out + run.err
+    return run.out.splitlines()
+
+
+WINPATH_CASES = [
+    ("/c/Users/x", "C:\\Users\\x"),
+    ("/C/x", "C:\\x"),
+    ("/c", "C:\\"),
+    ("/cygdrive/d/a b/c", "D:\\a b\\c"),
+    ("//server/share/x", "\\\\server\\share\\x"),
+    ("C:/x/y", "C:\\x\\y"),
+    ("C:\\x\\y", "C:\\x\\y"),
+]
+EXPAND_CASES = [
+    ("%PT_SYSROOT%\\x", "OK:C:\\Windows\\x"),
+    ("%pt_sysroot%\\x", "OK:C:\\Windows\\x"),  # MSYS2/Cygwin upper-case SYSTEMROOT: retried upper-case
+    ("%PT_NOPE%\\x", "FAIL"),
+    ("100%", "OK:100%"),
+    ("%1%", "FAIL"),
+    ("plain", "OK:plain"),
+]
+
+
+@needs_posix
+@pytest.mark.parametrize("name", ["sh", "dash", "bash", "busybox", "ksh", "mksh", "yash", "zsh"])
+def test_windows_helpers_in_posix_shells(name: str) -> None:
+    calls = "".join(f"_pt_winpath {q(raw)}\nprintf 'W:%s\\n' \"$_pt_r\"\n" for raw, _ in WINPATH_CASES)
+    calls += "".join(f"_pt_drive {q(d)}\nprintf 'D:%s\\n' \"$_pt_r\"\n" for d in ("c", "z", "C", "cd"))
+    calls += "".join(f"if _pt_expand {q(raw)}; then printf 'E:OK:%s\\n' \"$_pt_r\"; else printf 'E:FAIL\\n'; fi\n" for raw, _ in EXPAND_CASES)
+    out = _run_helpers(name, calls, _clean_env(PT_SYSROOT="C:\\Windows"))
+    assert [ln[2:] for ln in out if ln.startswith("W:")] == [want for _, want in WINPATH_CASES]
+    assert [ln[2:] for ln in out if ln.startswith("D:")] == ["C", "Z", "C", "cd"]
+    assert [ln[2:] for ln in out if ln.startswith("E:")] == [want for _, want in EXPAND_CASES]
+
+
+@needs_posix
+@pytest.mark.parametrize("name", ["sh", "dash", "bash", "busybox", "ksh", "mksh", "yash", "zsh"])
+def test_registry_path_quoted_entries(name: str, tmp_path: Path) -> None:
+    """Quoted PATH entries ("C:\\Program Files\\x"), as some installers write them, are found."""
+    uvdir = tmp_path / "q dir"
+    uvdir.mkdir()
+    (uvdir / "uv").write_text("#!/bin/sh\n", encoding="ascii")
+    (uvdir / "uv").chmod(0o755)
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    reg = fake / "reg.exe"  # CRLF output with the 4-space layout of reg.exe
+    reg.write_text(
+        "#!/bin/sh\ncase $2 in\n"
+        "    HKCU*) printf '\\r\\nHKEY_CURRENT_USER\\\\Environment\\r\\n    Path    %s    %s\\r\\n\\r\\n' \"$PT_TYPE\" \"$PT_VALUE\" ;;\n"
+        "    *) printf '\\r\\nHKEY_LOCAL_MACHINE\\\\x\\r\\n    Path    REG_EXPAND_SZ    %%SystemRoot%%\\\\nope\\r\\n\\r\\n' ;;\n"
+        "esac\n",
+        encoding="ascii", newline="\n",
+    )  # fmt: skip
+    reg.chmod(0o755)
+    lists = [f"/nope;{uvdir};/x", f'/nope;"{uvdir}";/x', f'"{uvdir}"', '"%PT_Q%"', "/nope;/x"]
+    calls = "".join(f"_pt_uv=\nif _pt_uv_in_list {q(v)}; then printf 'L:%s\\n' \"$_pt_uv\"; else printf 'L:none\\n'; fi\n" for v in lists)
+    calls += "_pt_uv=\nif _pt_uv_from_registry; then printf 'R:%s\\n' \"$_pt_uv\"; else printf 'R:none\\n'; fi\n"
+    env = _clean_env(PATH=f"{fake}:/usr/bin:/bin", PT_Q=str(uvdir), PT_TYPE="REG_EXPAND_SZ", PT_VALUE='%PT_NOPE%\\x;"%PT_Q%";/nope')
+    found = str(uvdir / "uv")
+    assert _run_helpers(name, calls, env) == [f"L:{found}"] * 4 + ["L:none", f"R:{found}"]
+    env.update(PT_TYPE="REG_SZ", PT_VALUE=f'"{uvdir}"')
+    assert _run_helpers(name, "_pt_uv=\n_pt_uv_from_registry || :\nprintf 'R:%s\\n' \"$_pt_uv\"\n", env) == [f"R:{found}"]
+    env.update(PT_VALUE="/nope")
+    assert _run_helpers(name, "_pt_uv=\n_pt_uv_from_registry || :\nprintf 'R:%s\\n' \"$_pt_uv\"\n", env) == ["R:"]
+
+
+# --- the uv search order (CLAUDE.md 4.1), for ./deploy and deploy.ps1 -------------------------------
+
+SEARCH_ORDER = ("envuv", "path", "uvi", "uvi_bin", "xdgbin", "xdgdata_bin", "home_local", "cargo", "home_cargo", "nix")
+
+
+def _fake_uvs(tmp: Path) -> tuple[dict[str, Path], dict[str, str]]:
+    """A fake uv (prints FAKE:<place>) in every folder the launchers search, and the environment."""
+    home = tmp / "home"
+    places = {
+        "envuv": tmp / "envuv" / "uv",
+        "path": tmp / "path" / "uv",
+        "uvi": tmp / "uvi" / "uv",
+        "uvi_bin": tmp / "uvi" / "bin" / "uv",
+        "xdgbin": tmp / "xdgbin" / "uv",
+        "xdgdata_bin": tmp / "share" / "bin" / "uv",
+        "home_local": home / ".local" / "bin" / "uv",
+        "cargo": tmp / "cargo" / "bin" / "uv",
+        "home_cargo": home / ".cargo" / "bin" / "uv",
+        "nix": home / ".nix-profile" / "bin" / "uv",
+    }
+    for name, path in places.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"#!/bin/sh\necho FAKE:{name}\n", encoding="ascii", newline="\n")
+        path.chmod(0o755)
+    (tmp / "share" / "data").mkdir()
+    env = {
+        "PATH": f"{tmp / 'path'}:/usr/bin:/bin", "HOME": str(home), "UV": str(places["envuv"]), "CI": "1",
+        "UV_INSTALL_DIR": str(tmp / "uvi"), "XDG_BIN_HOME": str(tmp / "xdgbin"),
+        "XDG_DATA_HOME": str(tmp / "share" / "data"), "CARGO_HOME": str(tmp / "cargo"),
+    }  # fmt: skip
+    return places, env
+
+
+def _pwsh() -> str:
+    exe = shutil.which("pwsh")
+    if not exe:
+        pytest.skip("pwsh not installed")
+    return exe
+
+
+def _ps_encoded(script: str) -> str:
+    import base64
+
+    return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
+
+@needs_posix
+@pytest.mark.parametrize("launcher", ["deploy", "deploy.ps1"])
+def test_uv_search_order(launcher: str, tmp_path: Path) -> None:
+    """$UV (a file) -> PATH -> UV_INSTALL_DIR[/bin] -> XDG_BIN_HOME -> XDG_DATA_HOME/../bin ->
+    ~/.local/bin -> CARGO_HOME/bin -> ~/.cargo/bin -> (system folders) -> ~/.nix-profile/bin:
+    remove the winner, the next one must win; none left: exit 127."""
+    if any(Path(d, "uv").exists() for d in ("/usr/bin", "/bin")):
+        pytest.skip("uv is in /usr/bin or /bin: PATH cannot hide it")
+    system = _system_uv()
+    order = [p for p in SEARCH_ORDER if not (system and p == "nix")]  # nix comes after the system folders
+    places, env = _fake_uvs(tmp_path)
+    want = ["FAKE:path", "FAKE:path", *[f"FAKE:{p}" for p in order]]
+    bad_uv = [str(tmp_path / "envuv"), str(tmp_path / "missing" / "uv")]  # a folder, a missing file: skipped
+    if launcher == "deploy":
+        seen = [Run(["/bin/sh", LAUNCHER, "help"], ROOT, {**env, "UV": bad}).out.strip() for bad in bad_uv]
+        for place in order:
+            seen.append(Run(["/bin/sh", LAUNCHER, "help"], ROOT, env).out.strip())
+            places[place].unlink()
+        last = Run(["/bin/sh", LAUNCHER, "help"], ROOT, env)
+        rc, err = last.rc, last.err
+    else:
+        ps1 = str(ROOT / "deploy.ps1").replace("'", "''")
+        lines = [f"$env:UV = '{bad}'; & '{ps1}' help" for bad in bad_uv] + [f"$env:UV = '{places['envuv']}'"]
+        for place in order:
+            lines += [f"& '{ps1}' help", f"Remove-Item -LiteralPath '{places[place]}'"]
+        lines += [f"& '{ps1}' help 2>$null", "'RC=' + $LASTEXITCODE", "exit 0"]
+        r = subprocess.run(
+            [_pwsh(), "-NoProfile", "-NonInteractive", "-EncodedCommand", _ps_encoded("\n".join(lines))],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=300, check=False,
+        )  # fmt: skip
+        seen = [ln for ln in r.stdout.splitlines() if ln.startswith("FAKE:")]
+        rc = 127 if "RC=127" in r.stdout else -1
+        err = r.stdout + r.stderr
+    assert seen == want
+    if not system:
+        assert rc == 127, err
+
+
+@needs_posix
+def test_sh_skips_a_uv_without_exec_bit(tmp_path: Path) -> None:
+    places, env = _fake_uvs(tmp_path)
+    for place in ("envuv", "path", "uvi"):
+        places[place].chmod(0o644)  # a broken download: the next folder wins, like deploy.ps1
+    assert Run(["/bin/sh", LAUNCHER, "help"], ROOT, env).out.strip() == "FAKE:uvi_bin"
+
+
+# --- the interactive install prompt (a pseudo-terminal) --------------------------------------------
+
+
+def _pty_run(argv: list[str | Path], env: dict[str, str], answer: bytes | None, timeout: float = 120) -> tuple[int, str]:
+    """Run argv on a pseudo-terminal (stdin, stdout and stderr; it is also the controlling
+    terminal) and type `answer` once the [y/N] prompt shows."""
+    import fcntl
+    import pty
+    import select
+    import termios
+
+    def controlling_tty() -> None:
+        os.setsid()
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+    master, slave = pty.openpty()
+    try:
+        p = subprocess.Popen([str(a) for a in argv], cwd=ROOT, env=env, stdin=slave, stdout=slave, stderr=slave, preexec_fn=controlling_tty)
+    finally:
+        os.close(slave)
+    out = b""
+    answered = answer is None
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if time.monotonic() > deadline:
+                p.kill()
+                pytest.fail(f"timed out: {out!r}")
+            ready, _, _ = select.select([master], [], [], 0.1)
+            if not ready:
+                if p.poll() is not None:
+                    break
+                continue
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:  # EIO: the terminal has no writer left
+                break
+            if not chunk:
+                break
+            out += chunk
+            if b"\x1b[6n" in chunk:  # a cursor position query (.NET's console): answer it
+                os.write(master, b"\x1b[1;1R")
+            if not answered and b"[y/N]" in out:
+                os.write(master, answer or b"")
+                answered = True
+    finally:
+        os.close(master)
+    return p.wait(timeout=30), out.decode("utf-8", "replace")
+
+
+INSTALLER = """mkdir -p "$HOME/.local/bin"
+printf '%s\\n' '#!/bin/sh' 'echo "FAKEUV $*"' > "$HOME/.local/bin/uv"
+chmod +x "$HOME/.local/bin/uv"
+echo "installer ran"
+"""
+
+
+@needs_posix
+@pytest.mark.parametrize("answer", ["y", "n", "CI"])
+@pytest.mark.parametrize("launcher", ["deploy", "deploy.ps1"])
+def test_install_prompt_through_a_terminal(launcher: str, answer: str, tmp_path: Path) -> None:
+    """No uv, stdin and stderr on a terminal: [y/N]. y runs the official installer (a fake curl
+    here) and then the uv it installed; n prints the hints (exit 127); CI=1 never asks."""
+    if _system_uv():
+        pytest.skip("uv is installed in a system folder the launcher always searches")
+    bindir, home = tmp_path / "bin", tmp_path / "home"
+    bindir.mkdir()
+    home.mkdir()
+    (tmp_path / "install.sh").write_text(INSTALLER, encoding="ascii", newline="\n")
+    (bindir / "curl").write_text(f"#!/bin/sh\ncat {q(str(tmp_path / 'install.sh'))}\n", encoding="ascii", newline="\n")
+    (bindir / "curl").chmod(0o755)
+    env = {"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(home), "TERM": "dumb"}
+    if answer == "CI":
+        env["CI"] = "1"
+    argv: list[str | Path] = ["/bin/sh", LAUNCHER, "help"] if launcher == "deploy" else [_pwsh(), "-NoProfile", "-File", ROOT / "deploy.ps1", "help"]
+    rc, out = _pty_run(argv, env, None if answer == "CI" else answer.encode() + b"\r")
+    if answer == "y":
+        assert rc == 0 and "installer ran" in out and "FAKEUV run --quiet --script" in out, out
+        assert out.rstrip().endswith("help"), out
+    else:
+        assert rc == 127 and "installer ran" not in out and "curl -LsSf" in out and "brew install uv" in out, out
+        assert ("[y/N]" in out) == (answer == "n"), out

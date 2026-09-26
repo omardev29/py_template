@@ -6,6 +6,7 @@ editor.json validation) runs in `nvim --headless --clean` when Neovim >= 0.10 is
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -19,11 +20,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cli, config  # noqa: E402
+from runner import cli, cmd_dev, cmd_nvim, config, mypyc, render  # noqa: E402
 from runner.config import Config  # noqa: E402
-from runner.editors import nvim  # noqa: E402
+from runner.editors import nvim, vscode  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
+PLUGIN = ROOT / ".pytemplate" / "nvim"
+# Neovim trusts .lazy.lua by the sha256 of its bytes: changing them forces every user of every
+# project to trust it again. Update this only on purpose (and say so in the release notes).
+LAZY_LUA_SHA256 = "9e1930de909c429568181529f44db984490843cfb4e7079375d7cfe02e96a4f3"
 
 VARIANTS: dict[str, dict[str, Any]] = {
     "script": {},
@@ -80,6 +85,43 @@ def test_lazy_lua_matches_the_template() -> None:
     assert outputs("script")[nvim.LAZY_LUA] == template
 
 
+def test_lazy_lua_bytes_are_pinned() -> None:
+    digest = hashlib.sha256(outputs("script")[nvim.LAZY_LUA].encode("utf-8")).hexdigest()
+    assert digest == LAZY_LUA_SHA256, (
+        "changing .lazy.lua forces every user of every project to trust it again "
+        "(./deploy nvim trust): put the change in .pytemplate/nvim/ instead, or update LAZY_LUA_SHA256 on purpose"
+    )
+
+
+def test_lazy_lua_extras_match_cmd_nvim() -> None:
+    """./deploy nvim extras enables exactly what .lazy.lua imports."""
+    extras = re.findall(r'"(lazyvim\.plugins\.extras\.[\w.]+)"', nvim.LAZY_TEMPLATE.read_text(encoding="utf-8"))
+    assert extras == list(cmd_nvim.EXTRAS)
+
+
+def test_editor_json_stage_matches_the_runner() -> None:
+    stage = mypyc.profile(make({}), "dev").stage.relative_to(ROOT).as_posix()
+    assert editor("script")["mypyc_stage"] == vscode.MYPYC_STAGE == stage
+
+
+def _lua_list(name: str) -> list[str]:
+    """A `local NAME = { "a", "b" }` whitelist of the plugin's init.lua."""
+    text = (PLUGIN / "lua" / "pytemplate" / "init.lua").read_text(encoding="utf-8")
+    m = re.search(rf"(?m)^local {name} = \{{([^}}]*)\}}", text)
+    assert m, name
+    return re.findall(r'"([^"]+)"', m[1])
+
+
+def test_lua_whitelists_match_the_runner() -> None:
+    """sanitize() replaces any value it does not know with a default: a profile, backend or editor
+    added to the runner but not to init.lua would silently fall back."""
+    assert set(_lua_list("BACKENDS")) == set(config.BACKENDS)
+    assert set(_lua_list("PROFILES")) == set(config.PROFILES)
+    assert set(_lua_list("EDITORS")) == set(config.EDITORS)
+    severities = {s for name in config.PROFILES for s in render.load_profile(name).get("vscode", {}).get("mypy-type-checker.severity", {}).values()}
+    assert severities <= set(_lua_list("SEVERITIES")), severities
+
+
 def test_gitattributes_keeps_lazy_lua_lf() -> None:
     lines = [ln.split() for ln in (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()]
     rules = [ln for ln in lines if ln and ln[0] == ".lazy.lua"]
@@ -111,7 +153,9 @@ def test_editor_json_is_data_without_machine_paths(name: str) -> None:
     data = json.loads(text)
     assert set(data) == EXPECTED_KEYS
     assert data["schema"] == 1
-    assert set(data["typing"]) == {"profile", "editor", "mypy", "mypy_severity", "python_version"}
+    assert set(data["typing"]) == {"profile", "editor", "mypy", "mypy_severity", "python_version", "basedpyright"}
+    # the plugin's uvx language server runs the basedpyright ./deploy check pins
+    assert data["typing"]["basedpyright"] == cmd_dev.BASEDPYRIGHT
     assert set(data["envs"]) == {"tools", "cpython", "mypyc", "pypy"}
     assert all(re.fullmatch(r"\.venv[\w-]*", v) for v in data["envs"].values())
     for s in _strings(data):
@@ -212,6 +256,104 @@ check("parse note", p("src/x.py:5: note: see") == nil, "note not ignored")
 local tmpl = require("overseer.template.pytemplate")
 check("overseer provider", type(tmpl.generator) == "function", vim.inspect(tmpl))
 
+-- mypyc prints paths relative to its stage (a copy of src/): they land on src/
+local pkg = pt.info().pkg
+local core = root .. "/src/" .. pkg .. "/core/__init__.py"
+m = p(pkg .. "/core/__init__.py:2: error: Incompatible types in assignment  [assignment]")
+check("parse mypyc stage path", m and m.type == "E" and pt.same_path(m.filename, core), vim.inspect(m))
+m = p("src/" .. pkg .. "/core/__init__.py:2: error: x  [misc]")
+check("parse mypy src path", m and pt.same_path(m.filename, core), vim.inspect(m))
+m = p("nowhere/x.py:1: error: y")
+check("parse a path found nowhere", m and pt.same_path(m.filename, root .. "/nowhere/x.py"), vim.inspect(m))
+
+-- the launcher only when uv is nowhere; on POSIX through /bin/sh (no exec bit needed)
+local saved_uv = pt._uv
+pt._uv = false
+local fb = pt.deploy_cmd({ "help" })
+pt._uv = saved_uv
+if pt.is_win then
+  check("launcher fallback argv", #fb == 2 and fb[1]:match("deploy%.cmd$") ~= nil and fb[2] == "help", vim.inspect(fb))
+else
+  check("launcher fallback argv", #fb == 3 and fb[1] == "/bin/sh" and fb[2] == pt.launcher() and fb[3] == "help", vim.inspect(fb))
+end
+
+-- the runner never runs on the caller's UV_PYTHON (uv reads an empty one as unset)
+local denv = pt.deploy_env({ X = "1" })
+check("deploy env", denv.UV_PYTHON == "" and denv.PYTEMPLATE_LAUNCHER == "nvim" and denv.X == "1", vim.inspect(denv))
+
+-- Windows: uv from PATH only as a real uv.exe, never a uv.cmd/uv.bat shim earlier on PATH
+-- (deploy.cmd and deploy.ps1 do the same). The stub emulates Neovim's PATHEXT lookup.
+do
+  local tmp = vim.fs.normalize(vim.fn.tempname())
+  local dirs = { tmp .. "/shims", tmp .. "/bin" }
+  for i, f in ipairs({ dirs[1] .. "/uv.cmd", dirs[2] .. "/uv.exe" }) do
+    vim.fn.mkdir(dirs[i], "p")
+    vim.fn.writefile({ "" }, f)
+    vim.uv.fs_chmod(f, 493)
+  end
+  local real, asked = vim.fn.exepath, {}
+  vim.fn.exepath = function(name)
+    asked[#asked + 1] = name
+    for _, d in ipairs(dirs) do
+      for _, e in ipairs(name:find("%.") and { "" } or { ".com", ".exe", ".bat", ".cmd" }) do
+        if vim.uv.fs_stat(d .. "/" .. name .. e) then
+          return d .. "/" .. name .. e
+        end
+      end
+    end
+    return ""
+  end
+  local saved_env, saved_win = vim.env.UV, pt.is_win
+  vim.env.UV = nil
+  pt.is_win = true
+  pt.reset()
+  local okw, got = pcall(pt.uv)
+  pt.is_win, vim.fn.exepath, vim.env.UV = saved_win, real, saved_env
+  pt.reset()
+  local want = vim.fs.normalize(dirs[2] .. "/uv.exe")
+  check("windows uv is a real uv.exe", okw and got and vim.fs.normalize((got:gsub("\\", "/"))) == want, vim.inspect({ got, want, asked }))
+end
+
+-- basedpyright from uvx runs the version ./deploy check pins (editor.json typing.basedpyright)
+local pin = pt.sanitize({ typing = { basedpyright = "basedpyright==1.2.3" } }).typing.basedpyright
+check("sanitize pin", pin == "basedpyright==1.2.3", vim.inspect(pin))
+for _, bad in ipairs({ "basedpyright; rm -rf /", "evil==1.0.0", "basedpyright==1.2", "basedpyright>=1.2.3", 42 }) do
+  local got = pt.sanitize({ typing = { basedpyright = bad } }).typing.basedpyright
+  check("sanitize bad pin " .. tostring(bad), got == nil, vim.inspect(got))
+end
+check("editor.json pin", type(pt.info().typing.basedpyright) == "string" and pt.info().typing.basedpyright:match("^basedpyright==") ~= nil, vim.inspect(pt.info().typing))
+local integ = require("pytemplate.integrations")
+local real_tool = pt.tool
+pt.tool = function()
+  return nil
+end
+local lcmd, lsrc = integ.lsp_cmd("basedpyright")
+pt.tool = real_tool
+check("uvx runs the pin", lsrc ~= "uvx" or (lcmd[4] == "--from" and lcmd[5] == pt.info().typing.basedpyright), vim.inspect(lcmd))
+
+-- commands that rewrite editor.json refresh the editor and show what they did
+local tasks = require("pytemplate.tasks")
+for _, name in ipairs({ "rename", "apply", "setup", "mode" }) do
+  local meta = tasks.META[name] or {}
+  check("META " .. name, meta.refresh == true and meta.show == true, vim.inspect(meta))
+end
+check("rename task refreshes", vim.tbl_contains(tasks.components("rename"), "pytemplate.refresh"), vim.inspect(tasks.components("rename")))
+-- apply is setup under its everyday name: the same task metadata (refresh, show)
+check("META apply is setup's", vim.deep_equal(tasks.META.apply, tasks.META.setup), vim.inspect(tasks.META.apply))
+check("apply task refreshes", vim.tbl_contains(tasks.components("apply"), "pytemplate.refresh"), vim.inspect(tasks.components("apply")))
+check("no init task", tasks.META.init == nil, "init is internal to ./deploy new")
+
+-- :Deploy groups quoted words like the <leader>jR prompt
+local captured = {}
+local real_run = tasks.run
+tasks.run = function(args)
+  captured[#captured + 1] = args
+end
+vim.cmd('Deploy run cpython "a b" c')
+vim.cmd("Deploy")
+tasks.run = real_run
+check(":Deploy quotes", vim.deep_equal(captured, { { "run", "cpython", "a b", "c" }, { "help" } }), vim.inspect(captured))
+
 io.stdout:write(#errors == 0 and "PTLUA OK\n" or ("PTLUA FAIL\n" .. table.concat(errors, "\n") .. "\n"))
 vim.cmd(#errors == 0 and "qa!" or "cq!")
 """
@@ -244,4 +386,106 @@ def test_lua_modules_in_headless_neovim(tmp_path: Path) -> None:
         [exe, "--headless", "--clean", "-n", "-i", "NONE", "-c", f"luafile {script.as_posix()}"],
         cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
     )  # fmt: skip
+    assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
+def _headless_lua(tmp_path: Path, lua: str, test_root: Path) -> subprocess.CompletedProcess[str]:
+    """Run `lua` in `nvim --headless --clean` with isolated XDG dirs (never the user's Neovim)."""
+    exe = _nvim()
+    if not exe:
+        pytest.skip("Neovim >= 0.10 not on PATH")
+    script = tmp_path / "check.lua"
+    script.write_text(lua, encoding="utf-8", newline="\n")
+    env = {k: v for k, v in os.environ.items() if k != "NVIM_APPNAME"}
+    for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        env[var] = str(tmp_path / var.lower())
+    env.update(NVIM_LOG_FILE=str(tmp_path / "nvim.log"), PT_TEST_ROOT=test_root.as_posix(), PT_PLUGIN=PLUGIN.as_posix(), PT_TMP=tmp_path.as_posix())
+    return subprocess.run(
+        [exe, "--headless", "--clean", "-n", "-i", "NONE", "-c", f"luafile {script.as_posix()}"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+    )  # fmt: skip
+
+
+SANITIZE_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+local pt = require("pytemplate")
+local errors = {}
+for _, f in ipairs(vim.fn.glob(vim.env.PT_TMP .. "/editor-*.json", true, true)) do
+  local raw = table.concat(vim.fn.readfile(f), "\n")
+  local data = vim.json.decode(raw, { luanil = { object = true, array = true } })
+  data.generated = nil
+  local clean = pt.sanitize(data)
+  if not vim.deep_equal(data, clean) then
+    errors[#errors + 1] = f .. "\n" .. vim.inspect(data) .. "\n--- sanitize() made it ---\n" .. vim.inspect(clean)
+  end
+end
+io.stdout:write(#errors == 0 and "PTLUA OK\n" or ("PTLUA FAIL\n" .. table.concat(errors, "\n") .. "\n"))
+vim.cmd(#errors == 0 and "qa!" or "cq!")
+"""
+
+
+def _preset_configs() -> dict[str, Config]:
+    """The real presets' pytemplate.toml, as `./deploy new` renders them."""
+    import tomllib
+
+    out: dict[str, Config] = {}
+    for toml in sorted((ROOT / ".pytemplate" / "presets").glob("*/files/pytemplate.toml")):
+        text = toml.read_text(encoding="utf-8").replace("{{name}}", "demo").replace("{{pkg}}", "demo")
+        out[f"preset-{toml.parents[1].name}"] = make(tomllib.loads(text))
+    return out
+
+
+def test_sanitize_keeps_every_generated_value(tmp_path: Path) -> None:
+    """Every value the runner writes to editor.json survives the plugin's validation unchanged: a
+    whitelist that misses a new profile, backend, method or command would drop it silently."""
+    configs = {name: make(data) for name, data in VARIANTS.items()} | _preset_configs()
+    assert len(configs) >= len(VARIANTS) + 3
+    for name, cfg in configs.items():
+        (tmp_path / f"editor-{name}.json").write_text(nvim.outputs(cfg, cfg.profile_for())[nvim.EDITOR_JSON], encoding="utf-8")
+    r = _headless_lua(tmp_path, SANITIZE_CHECK, ROOT)
+    assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
+MYPY_LINTER_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+package.loaded["lint.linters.mypy"] = { parser = function() return {} end }
+local root = vim.env.PT_TEST_ROOT
+local pt = require("pytemplate")
+pt.config.root = root
+local integ = require("pytemplate.integrations")
+local errors = {}
+local function check(name, ok, msg)
+  if not ok then errors[#errors + 1] = name .. ": " .. tostring(msg) end
+end
+local file = root .. "/src/x.py"
+check("no mypy yet", pt.tool("mypy") == nil and not integ.mypy_enabled(file), pt.tool("mypy"))
+local linter = integ.mypy_linter()  -- built when Neovim starts, before ./deploy setup
+local exe = pt.venv_exe(".venv", "mypy")
+vim.fn.mkdir(vim.fs.dirname((exe:gsub("\\", "/"))), "p")
+vim.fn.writefile({ "" }, exe)
+vim.uv.fs_chmod(exe, 493)
+check("enabled once .venv exists", integ.mypy_enabled(file), "still disabled")
+local cmd = type(linter.cmd) == "function" and linter.cmd() or linter.cmd
+if pt.is_win then
+  local dir = vim.fs.dirname((exe:gsub("\\", "/"))):gsub("/", "\\")
+  check("bare mypy with .venv\\Scripts first on PATH", cmd == "mypy" and vim.startswith(linter.env.PATH or "", dir .. ";"), vim.inspect({ cmd, linter.env.PATH }))
+else
+  check("the .venv mypy runs", cmd == pt.tool("mypy"), cmd)
+end
+io.stdout:write(#errors == 0 and "PTLUA OK\n" or ("PTLUA FAIL\n" .. table.concat(errors, "\n") .. "\n"))
+vim.cmd(#errors == 0 and "qa!" or "cq!")
+"""
+
+
+def test_mypy_linter_follows_a_venv_created_later(tmp_path: Path) -> None:
+    """nvim-lint's mypy is built when Neovim starts; `./deploy setup` (or any `uv run --locked`)
+    may create .venv afterwards: the locked mypy must run then, not a mypy found on PATH."""
+    project = tmp_path / "proj"
+    (project / ".pytemplate").mkdir(parents=True)
+    (project / "src").mkdir()
+    (project / "pytemplate.toml").write_text("", encoding="utf-8")
+    data = json.loads((ROOT / ".pytemplate" / "editor.json").read_text(encoding="utf-8"))
+    data["typing"].update(profile="warn", mypy=True)
+    (project / ".pytemplate" / "editor.json").write_text(json.dumps(data), encoding="utf-8")
+    r = _headless_lua(tmp_path, MYPY_LINTER_CHECK, project)
     assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr

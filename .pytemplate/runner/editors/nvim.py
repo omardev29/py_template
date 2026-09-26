@@ -38,6 +38,8 @@ def commands() -> list[dict[str, str]]:
 
 def editor_data(cfg: Config, profile: str) -> dict[str, Any]:
     """Return the content of .pytemplate/editor.json (schema 1)."""
+    from ..cmd_dev import BASEDPYRIGHT  # lazily, like commands(): render imports this module
+
     data = render.load_profile(profile)
     severity = data.get("vscode", {}).get("mypy-type-checker.severity", DEFAULT_SEVERITY)
     return {
@@ -57,6 +59,8 @@ def editor_data(cfg: Config, profile: str) -> dict[str, Any]:
             "mypy_severity": severity,
             # Same as render.mypy_cli_args: with PyPy supported mypy checks the 3.11 syntax
             "python_version": cfg.min_python if cfg.pypy_enabled else None,
+            # the plugin's uvx language server runs the basedpyright ./deploy check pins
+            "basedpyright": BASEDPYRIGHT,
         },
         "envs": env_dirs(),
         "mypyc_stage": ".build/mypyc-dev/stage",
