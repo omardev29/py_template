@@ -139,7 +139,7 @@ def _check_launchers(check: Check) -> None:
         check(
             None,
             "this run was started by: unknown (PYTEMPLATE_LAUNCHER is not set)",
-            "An older launcher, a shell-setup function that runs uv directly (xonsh, nu), or uv run by hand",
+            "An older launcher, the shell-setup xonsh alias (it runs uv directly), or uv run by hand",
         )
     labels = {"deploy": "#!/bin/sh, LF, ASCII", "deploy.cmd": "CRLF, ASCII", "deploy.ps1": "LF, ASCII, no BOM"}
     modes = _git_modes(list(labels))

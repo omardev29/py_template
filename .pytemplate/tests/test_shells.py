@@ -10,6 +10,7 @@ import base64
 import dataclasses
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -684,6 +685,21 @@ def test_posix_function_runs_the_enclosing_launcher(tmp_path: Path) -> None:
 
 
 # --- doctor ------------------------------------------------------------------------------------------
+
+
+def test_doctor_names_who_runs_the_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first launcher line: the value, or who leaves it unset (the xonsh alias, uv by hand;
+    never the nu function, which sets PYTEMPLATE_LAUNCHER=nu)."""
+    lines: list[tuple[bool | None, str, str]] = []
+    monkeypatch.setattr(shells, "_git_modes", lambda names: {})
+    monkeypatch.delenv("PYTEMPLATE_LAUNCHER", raising=False)
+    shells._check_launchers(lambda ok, label, hint: lines.append((ok, label, hint)))
+    ok, label, hint = lines[0]
+    assert ok is None and "unknown" in label and "xonsh" in hint and not re.search(r"\bnu\b", hint), hint
+    lines.clear()
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "nu")
+    shells._check_launchers(lambda ok, label, hint: lines.append((ok, label, hint)))
+    assert lines[0][1] == "this run was started by: nu"
 
 
 def test_launcher_problems() -> None:
