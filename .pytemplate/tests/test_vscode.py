@@ -14,6 +14,7 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -25,7 +26,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cli, config, lintc, render, ui  # noqa: E402
+from runner import cli, config, lintc, presets, render, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.editors import vscode  # noqa: E402
 from runner.project import PRESETS, SRC, TEMPLATES  # noqa: E402
@@ -233,6 +234,29 @@ def test_buttons_without_a_catalog_task_get_their_own() -> None:
     assert tasks[0]["args"][1:] == ["build", "--method", "pyz"]
     assert "ruff" in owners(tasks[0]) and "ruff" in owners(tasks[1])
     assert "deploy: build --method pyz" not in [t["label"] for t in tasks[5:]]
+
+
+def test_button_arguments_are_split_like_task_deps() -> None:
+    """Quotes group words, as in [tasks] deps (shlex): a quoted argument reaches the command as
+    one argument, without the quote characters, on every OS."""
+    buttons = ["run", 'run cpython "hello world"', "run cpython hello world", "run  cpython  'hello world'", "test 'x"]
+    tasks = task_list(preset("script", {"vscode": {"buttons": buttons}}))
+    shown = [t for t in tasks if "statusbar" in t["options"]]
+    assert [t["label"] for t in shown] == [
+        "deploy: run",
+        "deploy: run cpython 'hello world'",  # the same button twice: one task
+        "deploy: run cpython hello world",
+        "deploy: test ''\"'\"'x'",  # unbalanced quotes: plain words, as for deps
+    ]
+    quoted = shown[1]
+    assert quoted["args"][1:] == quoted["windows"]["args"] == ["run", "cpython", "hello world"]
+    assert quoted["detail"].startswith("./deploy run cpython 'hello world'  |  ")
+    assert quoted["options"]["statusbar"]["label"] == "Run cpython 'hello world'"
+    assert "runOptions" in quoted, "a run task: restarted, not stacked"
+    assert shown[2]["args"][1:] == ["run", "cpython", "hello", "world"]
+    assert shown[3]["args"][1:] == ["test", "'x"]
+    labels = [t["label"] for t in tasks]
+    assert len(labels) == len(set(labels)), labels
 
 
 def test_task_cycles_and_bad_deps_do_not_break_rendering() -> None:
@@ -488,6 +512,23 @@ def test_matcher_samples(line: str, kind: str | None, expected: dict[str, str | 
         got = fields(matchers[kind], hit)
         for key, value in expected.items():
             assert got[key] == value, (line, key, got)
+
+
+@pytest.mark.parametrize("name", ["src", "Src", "tests", "typings"])
+def test_a_package_named_like_a_code_folder_is_refused(name: str) -> None:
+    """mypy prints paths relative to the root (src/<pkg>/x.py), mypyc relative to its stage
+    (<pkg>/x.py). For a package named src the mypy and mypyc matchers of `report` and `ci` both
+    matched every line, one of them pointing at a file that does not exist: the name rules
+    refuse every code folder as a package name, so the two can never read the same line."""
+    pkg = name.lower()
+    with pytest.raises(DeployError, match=re.escape(f"src/{pkg}/ would collide with the project's own {pkg}/")) as e:
+        presets.check_name_free(None, "script", name)
+    assert e.value.code == 2
+    cfg = make("script")
+    matchers = vscode.problem_matchers(cfg, {"mypy", "mypyc"}, ["mypyc"])
+    for line, owner in (("src/myapp/core/bench.py:3: error: x  [assignment]", "mypy"), ("myapp/core/bench.py:3: error: x  [assignment]", "mypyc")):
+        hits = [m["owner"] for m in matchers if re.search(m["pattern"]["regexp"], line)]
+        assert hits == [f"pytemplate-{owner}"], (line, hits)
 
 
 def test_mypy_roots_only_list_existing_folders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -756,7 +797,7 @@ def test_labels_stay_unique_for_any_buttons(buttons: list[str], supported: list[
     assert len(labels) == len(set(labels)), labels
     for t in tasks:  # a label never hides an argument, except the catalog's `report --open`
         args = t["args"][1:]
-        assert t["label"] == "deploy: " + " ".join(["report"] if args == ["report", "--open"] else args)
+        assert t["label"] == "deploy: " + shlex.join(["report"] if args == ["report", "--open"] else args)
     bars = [t["options"]["statusbar"]["label"] for t in tasks if "statusbar" in t["options"]]
     assert len(bars) == len(set(bars)), bars
 

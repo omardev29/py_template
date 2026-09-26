@@ -25,6 +25,9 @@ from runner.shells import Result, Shell  # noqa: E402
 from runner.ui import DeployError  # noqa: E402
 
 
+PREPARE_BASE = nvimtest.prepare_base  # the real one: the nvim_run fixture fakes it
+
+
 def make() -> Config:
     cfg: Config = config._build(Config, {}, "")
     config.validate(cfg)
@@ -225,4 +228,27 @@ def test_nvim_older_than_lazyvims_minimum_skips_or_fails_with_require(nvim_run: 
 def test_nvim_unknown_preset_is_a_usage_error(nvim_run: dict[str, Any]) -> None:
     with pytest.raises(DeployError, match="unknown preset") as e:
         nvimtest.selftest(make(), ["script,nosuch", *nvim_run["args"]])
+    assert e.value.code == 2 and nvim_run["ran"] == []
+
+
+def test_nvim_base_that_cannot_be_installed_fails_the_suite(nvim_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """No network, a git failure, a timeout: exit 1 (a FAIL of the suite), never 2 (usage)."""
+    monkeypatch.setattr(nvimtest, "prepare_base", PREPARE_BASE)
+
+    def run_logged(argv: list[str], *, cwd: Path, env: dict[str, str], log: Path, timeout: float) -> int:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("fatal: unable to access 'https://github.com/LazyVim/starter/'\n", encoding="utf-8")
+        return 128
+
+    monkeypatch.setattr(nvimtest, "_run_logged", run_logged)
+    with pytest.raises(DeployError, match="clone the LazyVim starter: exit code 128") as e:
+        nvimtest.selftest(make(), ["script", *nvim_run["args"]])
+    assert e.value.code == 1 and nvim_run["ran"] == []
+
+
+def test_nvim_dir_that_is_a_file_is_a_usage_error(nvim_run: dict[str, Any], tmp_path: Path) -> None:
+    afile = tmp_path / "afile"
+    afile.write_text("x", encoding="utf-8")
+    with pytest.raises(DeployError, match="is not a folder") as e:
+        nvimtest.selftest(make(), ["script", "--dir", str(afile)])
     assert e.value.code == 2 and nvim_run["ran"] == []

@@ -195,6 +195,15 @@ def _profiles(cfg: Config, backends: list[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(cfg.profile_for(b) for b in backends))
 
 
+def split_words(text: str) -> list[str]:
+    """Split a [tasks] dep or a [vscode] buttons entry like the runner splits deps (shlex: quotes
+    group words); unbalanced quotes give plain words (the runner reports them when the task runs)."""
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
+
+
 def scan(cfg: Config, argv: list[str], stack: tuple[str, ...] = ()) -> Scan:
     """Return what `./deploy ARGV` runs (a [tasks] entry: the union of its deps)."""
     if not argv:
@@ -207,11 +216,7 @@ def scan(cfg: Config, argv: list[str], stack: tuple[str, ...] = ()) -> Scan:
         runs = bool(task.cmd)
         deps = [] if name in stack else task.deps  # a cycle is the runner's error to report
         for dep in deps:
-            try:
-                dep_argv = shlex.split(dep)
-            except ValueError:  # unbalanced quotes: the runner reports it when the task runs
-                dep_argv = dep.split()
-            sub = scan(cfg, dep_argv, (*stack, name))
+            sub = scan(cfg, split_words(dep), (*stack, name))
             kinds |= sub.kinds
             profiles.update(dict.fromkeys(sub.profiles))
             runs = runs or sub.runs_app
@@ -253,7 +258,7 @@ class Entry:
         # The catalog's `report --open` reads "deploy: report"; any other argument stays visible
         # (`run --open` passes --open to the app: it is not the catalog's "deploy: run").
         args = self.args[:1] if self.args == ("report", "--open") else self.args
-        return "deploy: " + " ".join(args)
+        return "deploy: " + shlex.join(args)  # quoted: an argument with a space stays one
 
 
 def _what_runs(backend: str) -> str:
@@ -330,7 +335,7 @@ def _task(cfg: Config, entry: Entry, button: str | None) -> dict[str, Any]:
     matchers = problem_matchers(cfg, set(found.kinds), list(found.profiles))
     t: dict[str, Any] = {
         "label": entry.label,
-        "detail": f"./deploy {' '.join(entry.args)}  |  {entry.summary}",
+        "detail": f"./deploy {shlex.join(entry.args)}  |  {entry.summary}",
         "icon": {"id": entry.icon},
     }
     if entry.hide:
@@ -379,10 +384,12 @@ def tasks(cfg: Config) -> dict[str, Any]:
     # actboy168.tasks creates the buttons in tasks.json order: the button tasks go first, in
     # the order of [vscode] buttons; a button that names no catalog task gets its own task.
     buttons: list[Entry] = []
-    for raw in dict.fromkeys(" ".join(b.split()) for b in cfg.vscode.buttons if b.split()):
-        match = next((e for e in entries if " ".join(e.args) == raw or e.label == f"deploy: {raw}"), None)
+    for args in dict.fromkeys(tuple(split_words(b)) for b in cfg.vscode.buttons):
+        if not args:
+            continue
+        match = next((e for e in entries if e.args == args or e.label == f"deploy: {shlex.join(args)}"), None)
         if match is None:
-            match = _button_entry(cfg, tuple(raw.split()))
+            match = _button_entry(cfg, args)
         else:
             entries.remove(match)
         if any(b.label == match.label for b in buttons):

@@ -14,7 +14,8 @@ from typing import Any
 
 from .. import render
 from ..config import METHODS, Config
-from ..project import TEMPLATES
+from ..project import TEMPLATES, rel
+from ..ui import DeployError
 
 LAZY_TEMPLATE = TEMPLATES / "nvim" / "lazy.lua"
 LAZY_LUA = ".lazy.lua"
@@ -76,5 +77,16 @@ def outputs(cfg: Config, profile: str) -> dict[str, str]:
     """Return the generated Neovim files: {path relative to the root: content}."""
     files = {EDITOR_JSON: json.dumps(editor_data(cfg, profile), indent=2, ensure_ascii=True) + "\n"}
     if LAZY_TEMPLATE.is_file():
-        files[LAZY_LUA] = LAZY_TEMPLATE.read_text(encoding="utf-8").lstrip(BOM).replace("\r\n", "\n")
+        files[LAZY_LUA] = lazy_lua()
     return files
+
+
+def lazy_lua() -> str:
+    """Return .lazy.lua: the template without a BOM, with LF (the bytes Neovim trusts)."""
+    try:
+        text = LAZY_TEMPLATE.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        raise DeployError(f"{rel(LAZY_TEMPLATE)} is not UTF-8 text: save it as UTF-8") from None
+    except OSError as e:
+        raise DeployError(f"cannot read {rel(LAZY_TEMPLATE)}: {e.strerror or e}") from None
+    return text.lstrip(BOM).replace("\r\n", "\n")

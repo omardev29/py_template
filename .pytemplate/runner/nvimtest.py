@@ -8,14 +8,14 @@ Pinned, so a red run means a regression and not upstream drift: the starter is c
 cmd_nvim.STARTER_REV and the plugins at the commits of LOCK (a lazy-lock.json of a green run,
 applied by a `Lazy! restore` once everything is installed, and by the startup install of each
 project's plugins; any plugin left elsewhere fails the run). Without LOCK it takes the latest of
-everything (starter HEAD, `Lazy! sync`): a run without it shows upstream changes coming. Each
-run copies the resolved lazy-lock.json and the starter commit to <dir>/logs/ (the new pins
-after a green run without LOCK).
+everything (starter HEAD, `Lazy! sync`, never a base kept from an earlier run): a run without it
+shows upstream changes coming. Each run copies the resolved lazy-lock.json and the starter
+commit to <dir>/logs/ (the new pins after a green run without LOCK).
 
 Layout of the work directory (short on purpose: Windows MAX_PATH, deep plugin trees):
 
     <dir>/x/{config,data,state,cache}   XDG_*_HOME of every Neovim call (LazyVim + plugins)
-    <dir>/base.json                     marker: the base above is complete and reusable
+    <dir>/base.json                     marker: the base above is complete (reused while pinned)
     <dir>/p/<preset>                    scratch projects (./deploy new), removed unless --keep
     <dir>/logs/                         output of every step of the last run (+ the resolved pins)
 """
@@ -50,6 +50,7 @@ CLONE_TIMEOUT = 300.0
 BASE_SYNC_TIMEOUT = 1800.0
 STEP_TIMEOUT = 900.0
 KILL_GRACE = 5.0  # seconds between SIGTERM (Neovim stops its jobs) and SIGKILL of a timed-out tree
+FAILED = 1  # exit code of a step that failed (a FAIL of the suite; 2 is a usage error)
 PHASES = ("new+sync", "trust+lazy", "smoke")
 # The smoke's mypy check needs a typing profile: every preset defaults to typing.relaxed = off.
 SMOKE_TYPING = "strict"
@@ -272,7 +273,7 @@ def _remove(path: Path) -> None:
     try:
         cmd_nvim.remove_tree(path)
     except OSError as e:
-        raise DeployError(f"cannot remove {path}: {e}\n  Is a Neovim (or git/tar/curl) process still using it?") from None
+        raise DeployError(f"cannot remove {path}: {e}\n  Is a Neovim (or git/tar/curl) process still using it?", FAILED) from None
 
 
 def _tail(log: Path, lines: int = 15) -> str:
@@ -283,12 +284,17 @@ def _tail(log: Path, lines: int = 15) -> str:
     return "\n".join(text.rstrip().splitlines()[-lines:])
 
 
+def _failed(message: str, log: Path) -> DeployError:
+    """A step of the suite that failed: exit 1 (a FAIL), with the end of its log."""
+    tail = _tail(log)
+    return DeployError(f"{message} (log: {log})" + (f"\n{tail}" if tail else ""), FAILED)
+
+
 def _step(argv: Sequence[str | Path], *, cwd: Path, env: Mapping[str, str], log: Path, timeout: float, what: str) -> None:
     code = _run_logged(argv, cwd=cwd, env=env, log=log, timeout=timeout)
     if code != 0:
         why = f"timed out after {timeout:.0f} s" if code is None else f"exit code {code}"
-        tail = _tail(log)
-        raise DeployError(f"{what}: {why} (log: {log})" + (f"\n{tail}" if tail else ""))
+        raise _failed(f"{what}: {why}", log)
 
 
 def _check_isolated(nv: cmd_nvim.Nvim, layout: Layout) -> None:
@@ -304,9 +310,14 @@ def _prepare_dir(layout: Layout) -> None:
     resolved = base.resolve()
     if resolved == ROOT or ROOT in resolved.parents:
         raise DeployError(f"--dir must be outside the template ({base}): Neovim would find its .lazy.lua")
+    if base.exists() and not base.is_dir():
+        raise DeployError(f"--dir {base} is not a folder: pick another --dir")
     if base.exists() and any(base.iterdir()) and not (base / DIR_MARKER).is_file():
         raise DeployError(f"{base} is not empty and was not created by selftest --nvim: pick another --dir")
-    base.mkdir(parents=True, exist_ok=True)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError as e:  # a parent that is a file, no permission
+        raise DeployError(f"cannot create --dir {base}: {e.strerror or e}") from None
     (base / DIR_MARKER).write_text("work directory of ./deploy selftest --nvim (safe to delete)\n", encoding="utf-8", newline="\n")
 
 
@@ -359,7 +370,8 @@ def _check_pins(lock: Path | None, nv: cmd_nvim.Nvim, what: str, log: Path) -> N
         if drift:
             raise DeployError(
                 f"{what} left plugins off the pinned commits of {rel_lock()}: {'; '.join(drift)} "
-                f"(log: {log}; --fresh reinstalls the isolated LazyVim)"
+                f"(log: {log}; --fresh reinstalls the isolated LazyVim)",
+                FAILED,
             )
 
 
@@ -376,13 +388,18 @@ def prepare_base(layout: Layout, exe: str, env: Mapping[str, str], *, fresh: boo
     lock = LOCK if LOCK.is_file() else None
     want = base_info(nv, lock)
     have = _read_marker(layout.marker)
-    if have and all(have.get(k) == v for k, v in want.items()) and nv.lazyvim_installed():
+    # Only a pinned base is reused: without LOCK the run takes the latest of everything, and a
+    # base from an earlier run holds the starter and plugin commits of that day (record_pins
+    # would report them as the new pins).
+    if lock and have and all(have.get(k) == v for k, v in want.items()) and nv.lazyvim_installed():
         ui.info(f"reusing the isolated LazyVim in {layout.xdg}   (--fresh reinstalls it)")
         return nv, None
-    if have:
+    if have and not lock:
+        ui.info(f"no {rel_lock()}: reinstalling the isolated LazyVim to take the latest of everything")
+    elif have:
         changed = ", ".join(f"{k} {have.get(k)} -> {v}" for k, v in want.items() if have.get(k) != v)
         ui.info(f"the isolated LazyVim was made for something else ({changed or 'incomplete'}): reinstalling it")
-    ui.step(f"isolated LazyVim in {layout.xdg} (first run: this takes a few minutes)")
+    ui.step(f"isolated LazyVim in {layout.xdg} (this takes a few minutes)")
     start = time.perf_counter()
     _remove(layout.xdg)
     for key in XDG_HOMES:
@@ -413,7 +430,7 @@ def prepare_base(layout: Layout, exe: str, env: Mapping[str, str], *, fresh: boo
         cwd=layout.base, env=env, log=sync_log, timeout=BASE_SYNC_TIMEOUT, what=f"Lazy! {action}",
     )
     if not (nv.data / "lazy" / "LazyVim").is_dir():
-        raise DeployError(f"LazyVim was not installed in {nv.data} (log: {sync_log})\n{_tail(sync_log)}")
+        raise _failed(f"LazyVim was not installed in {nv.data}", sync_log)
     if lock:
         # A fresh config installs in two rounds: LazyVim first, then the plugins its specs name.
         # After the first round lazy.nvim rewrites the lock, on disk and in memory, with the
@@ -594,7 +611,7 @@ def run_preset(
 
 def _table(rows: Sequence[Row], base_seconds: float | None) -> None:
     ui.step("selftest --nvim results")
-    base = "reused (cached)" if base_seconds is None else f"installed in {base_seconds:.0f} s (first run)"
+    base = "reused (cached)" if base_seconds is None else f"installed in {base_seconds:.0f} s"
     ui.info(f"  isolated LazyVim: {base}")
     ui.info(f"  {'preset':<8} {'result':<6} {'ok':>3} {'fail':>4} {'skip':>4} {'exit':>4} {'new+sync':>9} {'trust+lazy':>10} {'smoke':>6} {'total':>6}")
     for r in rows:

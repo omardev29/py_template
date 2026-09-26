@@ -118,8 +118,8 @@ become `-`). It is the executable's name; the Python package is the name in lowe
 for `-` (`My-Game` -> `src/my_game/`). A name has letters, digits, `-` and `_`, starts with a
 letter and ends with a letter or digit, and must not be a Python keyword, a standard-library
 module, a backend (`cpython`, `pypy`, `mypyc`), a package the project locks (directly or not:
-`flet`, `rich`, `pygments`...), one of the project's own names (`tests`, `typings`, `build`,
-`dist`, `assets`, `main`) or a Windows device name (`con`, `aux`, `nul`, `com1`...). So
+`flet`, `rich`, `pygments`...), one of the project's own names (`src`, `tests`, `typings`,
+`build`, `dist`, `assets`, `main`) or a Windows device name (`con`, `aux`, `nul`, `com1`...). So
 `./deploy new ../flet --preset flet` fails: add `--name`.
 
 The preset is fixed when the project is created: to use another one, create a new project with
@@ -1012,7 +1012,8 @@ buttons = ["run", "test", "check", "build"]   # commands or [tasks] names
 
 Preset defaults: script `run test check build`, raylib `run bunnymark test build`, flet
 `dev run test build`. A button can carry arguments (`"build --method pyz"`): it gets a task of its
-own. Without the extension there are no buttons and nothing breaks.
+own. Its words are split like `[tasks]` deps: quotes group them (`'run cpython "a b"'` passes
+`a b` as one argument). Without the extension there are no buttons and nothing breaks.
 
 **Workspace trust.** In Restricted Mode VS Code runs no tasks and the Tasks extension is off:
 trust the folder.
@@ -1419,8 +1420,8 @@ copied into projects):
 
 - `template-selftest.yml` runs `./deploy selftest` on Linux, macOS and Windows, the runner's
   tests on Python 3.11 (its floor), the suite with the oldest uv that `required-version`
-  accepts, and `./deploy selftest` inside new raylib and flet projects; on every push and pull
-  request, and weekly.
+  accepts, and `./deploy selftest` inside new raylib and flet projects; on pushes to `main`, pull
+  requests, weekly and by hand.
 - `template-launchers.yml` runs `selftest --shells` and `shellcheck` (weekly with the newest
   xonsh too).
 - `template-nvim.yml` runs `selftest --nvim` with Neovim 0.12.5 and 0.11.2 and pinned plugins,

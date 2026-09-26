@@ -316,6 +316,36 @@ def test_prepare_dir_refuses_foreign_dirs(tmp_path: Path) -> None:
     assert (fresh.base / nvimtest.DIR_MARKER).is_file()
 
 
+def test_prepare_dir_refuses_a_file(tmp_path: Path) -> None:
+    """A --dir that names a file (a typo, a log) is a usage error, not an internal one."""
+    afile = tmp_path / "afile"
+    afile.write_text("x", encoding="utf-8")
+    for base in (afile, afile / "sub"):
+        with pytest.raises(DeployError, match="is not a folder|cannot create") as e:
+            nvimtest._prepare_dir(nvimtest.Layout(base))
+        assert e.value.code == 2 and str(base) in str(e.value)
+    assert afile.read_text(encoding="utf-8") == "x"
+
+
+def test_a_failed_step_is_a_suite_fail(tmp_path: Path) -> None:
+    """A failed clone, Lazy! install or restore fails the suite (exit 1), not the usage (2)."""
+    log = tmp_path / "logs" / "clone.log"
+    argv = [sys.executable, "-c", "import sys; print('fatal: unable to access'); sys.exit(128)"]
+    with pytest.raises(DeployError, match=r"clone the LazyVim starter: exit code 128 \(log: .*clone\.log\)\n.*fatal: unable to access") as e:
+        nvimtest._step(argv, cwd=tmp_path, env=dict(os.environ), log=log, timeout=60, what="clone the LazyVim starter")
+    assert e.value.code == 1
+
+
+def test_a_tree_that_cannot_be_removed_is_a_suite_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def remove_tree(path: Path) -> None:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(cmd_nvim, "remove_tree", remove_tree)
+    with pytest.raises(DeployError, match=r"(?s)cannot remove .*still using it") as e:
+        nvimtest._remove(tmp_path / "x")
+    assert e.value.code == 1
+
+
 # --- real Neovim (skipped when it is not installed) ---------------------------------------------------
 
 
@@ -574,6 +604,23 @@ def test_prepare_base_without_the_lock_takes_the_latest(tmp_path: Path, monkeypa
     assert order == sorted(order) and order[1] < next(i for i, s in enumerate(base.steps) if "+Lazy! sync" in s)
 
 
+def test_prepare_base_without_the_lock_is_never_reused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pin refresh (no lock) must take the latest of everything: a base from an earlier
+    run without the lock holds the commits of that day, and record_pins would report them as
+    the new pins."""
+    base = Base(tmp_path, monkeypatch, lock=False)
+    assert base.run() is not None
+    old = base.head
+    base.head = "fedcba9876543210fedcba9876543210fedcba98"  # upstream moved on since
+    base.steps.clear()
+    assert base.run() is not None, "an unpinned base is installed again"
+    assert any("clone" in s for s in base.steps) and [a for s in base.steps for a in s if a.startswith("+Lazy! ")] == ["+Lazy! sync"]
+    marker = json.loads(base.layout.marker.read_text(encoding="utf-8"))
+    assert marker["commit"] == base.head != old
+    assert base.head in nvimtest.record_pins(base.layout, base.nv)
+    assert (base.layout.logs / "starter-commit.txt").read_text(encoding="ascii") == base.head + "\n"
+
+
 def test_prepare_base_fails_when_a_pin_does_not_hold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A plugin left off its locked commit would make the pinned run test something else."""
     base = Base(tmp_path, monkeypatch, lock=True)
@@ -581,7 +628,22 @@ def test_prepare_base_fails_when_a_pin_does_not_hold(tmp_path: Path, monkeypatch
     with pytest.raises(DeployError, match=r"nvim-treesitter at f{12}, pinned c{12}") as e:
         base.run()
     assert "base-restore.log" in str(e.value)
+    assert e.value.code == 1, "a FAIL of the suite, not a usage error"
     assert not base.layout.marker.is_file(), "a base that missed its pins is never reused"
+
+
+def test_prepare_base_fails_when_lazyvim_is_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base = Base(tmp_path, monkeypatch, lock=True)
+    real = base.lazy
+
+    def lazy(action: str, project: bool) -> None:
+        real(action, project)
+        cmd_nvim.remove_tree(base.nv.data / "lazy" / "LazyVim")  # Lazy! exited 0 but installed nothing
+
+    monkeypatch.setattr(base, "lazy", lazy)
+    with pytest.raises(DeployError, match="LazyVim was not installed") as e:
+        base.run()
+    assert e.value.code == 1 and not base.layout.marker.is_file()
 
 
 @pytest.mark.parametrize(

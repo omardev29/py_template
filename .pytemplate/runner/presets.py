@@ -48,6 +48,7 @@ CONSTRAINTS = "constraints.txt"
 # src/<pkg>/ may not be one of the project's own folders (the preset's src/ entries, such as
 # src/main.py, are checked too: see check_name_free)
 RESERVED_PACKAGES = {
+    "src": "src/ (paths relative to the root and to src/ would read the same: the problem matchers, rename)",
     "tests": "tests/ (a package too: the imports would clash)",
     "typings": "typings/ (.ruff.toml excludes it: ruff would skip the app)",
     "build": "build/ (.gitignore excludes it at any depth: the app would never reach git)",

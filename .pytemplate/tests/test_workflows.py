@@ -121,6 +121,18 @@ def test_selftest_workflow_covers_every_os_and_both_floors() -> None:
     assert "preset: [raylib, flet]" in new and "./deploy new" in new and "./deploy selftest" in new
 
 
+def test_readme_tells_when_the_selftest_workflow_runs() -> None:
+    """Pushes to main only (a branch pushed without a pull request runs nothing), pull
+    requests, weekly and by hand: the README must not promise every push."""
+    block = "\n".join(_top_block(_text("template-selftest.yml"), "on"))
+    assert re.search(r"(?m)^  push:\n    branches: \[main\]$", block), block
+    readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+    entry = readme[readme.index("- `template-selftest.yml` runs") :]
+    entry = entry[: entry.index("- `template-launchers.yml`")]
+    assert "on pushes to `main`, pull requests, weekly and by hand" in entry, entry
+    assert "every push" not in entry, entry
+
+
 def test_what_the_selftest_workflow_reads_by_text_exists() -> None:
     """The workflow greps pins out of the code and deselects one test by name: a rename must
     fail here, not turn a CI step into `--from ""` or a deselect that matches nothing."""

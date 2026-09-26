@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from runner import cli, cmd_dev, cmd_nvim, config, mypyc, project, render  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.editors import nvim, vscode  # noqa: E402
+from runner.ui import DeployError  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / ".pytemplate" / "nvim"
@@ -91,6 +92,21 @@ def test_lazy_lua_bytes_are_pinned() -> None:
         "changing .lazy.lua forces every user of every project to trust it again "
         "(./deploy nvim trust): put the change in .pytemplate/nvim/ instead, or update LAZY_LUA_SHA256 on purpose"
     )
+
+
+def test_lazy_lua_template_in_another_encoding_is_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Like every other template (CLAUDE.md 6.2): a DeployError naming the file, never a traceback."""
+    shipped = outputs("script")[nvim.LAZY_LUA]
+    original = nvim.LAZY_TEMPLATE.read_bytes()
+    template = tmp_path / "lazy.lua"
+    template.write_bytes(original + b"-- caf\xe9\n")  # saved as Latin-1
+    monkeypatch.setattr(nvim, "LAZY_TEMPLATE", template)
+    cfg = make(VARIANTS["script"])
+    with pytest.raises(DeployError, match=r"lazy\.lua is not UTF-8 text: save it as UTF-8") as e:
+        nvim.outputs(cfg, cfg.profile_for())
+    assert e.value.code == 2
+    template.write_bytes(b"\xef\xbb\xbf" + original.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))  # a BOM and CRLF
+    assert outputs("script")[nvim.LAZY_LUA] == shipped  # the same bytes: the trust holds
 
 
 def test_lazy_lua_extras_match_cmd_nvim() -> None:

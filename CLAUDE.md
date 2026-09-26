@@ -1847,8 +1847,9 @@ Per method:
   or digit last, PEP 508), a keyword, a standard-library module of any supported Python
   (`presets.shadows_stdlib`), a backend name (cpython, pypy, mypyc), a Windows device name (`WINDOWS_DEVICES`: `aux`,
   `con`, `nul`, `com1`...: the folder cannot exist there and git cannot check it out), the
-  project's own folders and files (`RESERVED_PACKAGES`: tests, typings, build, dist, assets;
-  plus the preset's `src/` entries such as `main`), and every package the project will lock:
+  project's own folders and files (`RESERVED_PACKAGES`: src (root- and src-relative paths would
+  read the same: the VS Code matchers, rename), tests, typings, build, dist, assets; plus the
+  preset's `src/` entries such as `main`), and every package the project will lock:
   the declared requirements (minus the current preset's own), their tree in `uv.lock`
   (`locked_names`, markers ignored because uv refuses a self-dependency on any platform; the
   project's own entry excluded) and the preset's pins. When a preset adds packages the lock
@@ -2010,7 +2011,10 @@ instead. Neovim opens its output on start and replaces a running instance (`uniq
   label is the bare capitalised name without an icon because the extension (0.16.1) prefixes
   the task's own `icon` itself. The extension creates buttons in `tasks.json` order, so button
   tasks come FIRST, in the configured order; a button that names no catalog task (e.g.
-  `build --method pyz`) gets its own task. Without the extension the extra keys are ignored.
+  `build --method pyz`) gets its own task. Its words are split like `[tasks]` deps
+  (`vscode.split_words`: shlex, plain words on unbalanced quotes), and labels and `detail` quote
+  them back (`shlex.join`), so an argument with a space stays one and labels stay unique.
+  Without the extension the extra keys are ignored.
 - `launch.json`: "src/main.py (CPython, interpreted)" first, with no `python` key (VS Code's
   selected interpreter; works under WSL); PyPy (only when supported; per-OS `python`; the
   debugger is unreliable on PyPy); "Run mypyc stage (compiled modules cannot be stepped into)"
@@ -2335,8 +2339,8 @@ short temp tree and unset `NVIM_APPNAME`.
   `$TMPDIR/pt-nvim` elsewhere): `<dir>/x/{config,data,state,cache}` = the `XDG_*` homes,
   `<dir>/base.json` = the base is complete, `<dir>/p/<preset>` = scratch projects,
   `<dir>/logs/` = one log per step. It stops unless Neovim reports every stdpath inside
-  `<dir>/x`, refuses a `--dir` inside the template, and only wipes a dir carrying its marker
-  `.pytemplate-nvim-test`. Pinned, so a red run is a regression and not upstream drift: the
+  `<dir>/x`, refuses a `--dir` inside the template or one that is a file (exit 2), and only
+  wipes a dir carrying its marker `.pytemplate-nvim-test`. Pinned, so a red run is a regression and not upstream drift: the
   LazyVim starter is cloned in full and checked out at `cmd_nvim.STARTER_REV`, and the plugins
   come from `nvimtest.LOCK` (`.pytemplate/nvim/tests/lazy-lock.json`, a green run's lock),
   copied into the isolated config before every Neovim run that installs (lazy.nvim rewrites the
@@ -2349,9 +2353,12 @@ short temp tree and unset `NVIM_APPNAME`.
   (measured with an older overseer.nvim pin). After the restore and after each project's install
   `nvimtest.lock_drift` compares the resolved lock with `LOCK`: any plugin at another commit
   fails the run, naming it. Without `LOCK` it takes the latest of everything (a `--depth 1`
-  clone of the starter HEAD, `Lazy! sync`). The base is made once and reused; `<dir>/base.json` records
-  starter, rev, the lock's sha256, the Neovim version and the starter commit the clone held,
-  and a base made for other pins or another Neovim is reinstalled (`--fresh` forces it). Per
+  clone of the starter HEAD, `Lazy! sync`), in a base installed again on every such run (a base
+  kept from an earlier one holds the commits of its day, which `record_pins` would report as
+  the new pins). A pinned base is made once and reused; `<dir>/base.json` records starter,
+  rev, the lock's sha256, the Neovim version and the starter commit the clone held, and a base
+  made for other pins or another Neovim is reinstalled (`--fresh` forces it). A base that
+  cannot be installed (the clone, a `Lazy!` step, a pin that does not hold) exits 1. Per
   preset: `./deploy new` (name `pt-<preset>`), `./deploy sync cpython` (clean env), `./deploy
   mode --typing strict` (every preset ships `typing.relaxed = off`, which would leave the mypy
   linter untested), trust through the API, `Lazy! install` from the project, and
