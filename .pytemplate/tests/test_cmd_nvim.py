@@ -455,11 +455,22 @@ def test_nvim_sync_needs_lazyvim(tmp_path: Path) -> None:
 # --- selftest --nvim: pinned starter and plugins ----------------------------------------------------
 
 
-LOCKED = {"LazyVim": {"branch": "main", "commit": "a" * 40}, "overseer.nvim": {"branch": "master", "commit": "b" * 40}}
+LOCKED = {
+    "LazyVim": {"branch": "main", "commit": "a" * 40},
+    "nvim-treesitter": {"branch": "main", "commit": "c" * 40},  # a plugin LazyVim's own specs name
+    "overseer.nvim": {"branch": "master", "commit": "b" * 40},  # a plugin only .lazy.lua's extras add
+}
+NEWEST = "f" * 40  # what upstream has now
 
 
 class Base:
-    """prepare_base with every external step faked: records argv, mimics git and lazy.nvim."""
+    """prepare_base with every external step faked: records argv, mimics git and lazy.nvim.
+
+    The lazy.nvim fake follows what lazy/core/loader.lua and lazy/manage/lock.lua do: on a fresh
+    config the startup install runs in rounds, LazyVim first (at its locked commit); then lazy
+    rewrites the lock, on disk and in memory, with the plugins its spec named so far, so the
+    plugins LazyVim's specs add come at their newest commits. A restore moves the installed
+    plugins to the commits of the lock in memory; a project run adds the extras' plugins."""
 
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock: bool, version: tuple[int, int, int] = (0, 12, 5)) -> None:
         self.layout = nvimtest.Layout(tmp_path / "w")
@@ -474,6 +485,9 @@ class Base:
         self.steps: list[list[str]] = []
         self.lock_at_lazy: list[dict[str, object]] = []
         self.head = cmd_nvim.STARTER_REV if lock else "0123456789abcdef0123456789abcdef01234567"
+        self.installed: dict[str, str] = {}  # plugin -> the commit its folder holds
+        self.after: list[dict[str, str]] = []  # `installed` after each Neovim run
+        self.stuck: set[str] = set()  # plugins that stay at the newest commit (a checkout that fails)
         monkeypatch.setattr(nvimtest, "_step", self.step)
 
     def step(self, argv: list[str | Path], **kwargs: object) -> None:
@@ -487,12 +501,37 @@ class Base:
             log = kwargs["log"]
             assert isinstance(log, Path)
             log.write_text(f"{self.head}\n", encoding="ascii")
-        if any(a.startswith("+Lazy! ") for a in args):
-            lock = self.nv.config / "lazy-lock.json"
-            self.lock_at_lazy.append(json.loads(lock.read_text(encoding="utf-8")) if lock.is_file() else {})
-            (self.nv.data / "lazy" / "LazyVim").mkdir(parents=True, exist_ok=True)
-            # lazy.nvim rewrites the lock with the plugins of its current spec only
-            lock.write_text(json.dumps({"LazyVim": LOCKED["LazyVim"]}), encoding="utf-8")
+        action = next((a[len("+Lazy! ") :] for a in args if a.startswith("+Lazy! ")), None)
+        if action:
+            cwd = kwargs["cwd"]
+            assert isinstance(cwd, Path)
+            self.lazy(action, project=cwd != self.layout.base)
+
+    def lazy(self, action: str, project: bool) -> None:
+        path = self.nv.config / "lazy-lock.json"
+        lock: dict[str, dict[str, str]] = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        self.lock_at_lazy.append(dict(lock))
+        spec = ["LazyVim", "nvim-treesitter", *(["overseer.nvim"] if project else [])]
+
+        def put(name: str, commit: str | None) -> None:
+            self.installed[name] = NEWEST if name in self.stuck else (commit or NEWEST)
+
+        if "LazyVim" not in self.installed:  # first round: only LazyVim is in the spec yet
+            put("LazyVim", lock.get("LazyVim", {}).get("commit"))
+            lock = {k: v for k, v in lock.items() if k == "LazyVim"}
+        for name in spec:  # the startup install of the missing plugins, with the lock in memory
+            if name not in self.installed:
+                put(name, lock.get(name, {}).get("commit"))
+        if action == "restore":
+            for name in spec:
+                if name in lock and name not in self.stuck:
+                    self.installed[name] = lock[name]["commit"]
+        elif action in ("sync", "update"):
+            for name in spec:
+                self.installed[name] = NEWEST
+        self.after.append(dict(self.installed))
+        (self.nv.data / "lazy" / "LazyVim").mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({n: {"branch": "main", "commit": self.installed[n]} for n in spec}), encoding="utf-8")
 
     def run(self, fresh: bool = False) -> float | None:
         nv, seconds = nvimtest.prepare_base(self.layout, "nvim", {}, fresh=fresh)
@@ -507,8 +546,12 @@ def test_prepare_base_pins_the_starter_and_restores_the_lock(tmp_path: Path, mon
     assert "--depth" not in clone, "a pinned commit needs history"
     assert ["checkout", cmd_nvim.STARTER_REV] == [s for s in base.steps if "checkout" in s][0][-2:]
     lazy = [a for s in base.steps for a in s if a.startswith("+Lazy! ")]
-    assert lazy == ["+Lazy! restore"], "the pinned base restores the lock, it never syncs to the newest"
-    assert base.lock_at_lazy == [LOCKED]
+    assert lazy == ["+Lazy! install", "+Lazy! restore"], "the pinned base never syncs to the newest"
+    assert base.lock_at_lazy == [LOCKED, LOCKED], "the pinned lock goes back before each run"
+    # the first run's second round took LazyVim's plugins at their newest commits: only a run
+    # that starts with everything installed restores them
+    assert base.after[0] == {"LazyVim": "a" * 40, "nvim-treesitter": NEWEST}
+    assert base.installed == {"LazyVim": "a" * 40, "nvim-treesitter": "c" * 40}
     marker = json.loads(base.layout.marker.read_text(encoding="utf-8"))
     assert marker["rev"] == cmd_nvim.STARTER_REV and marker["lock"] == hashlib.sha256(base.lock.read_bytes()).hexdigest()
     assert marker["nvim"] == "0.12.5" and not (base.nv.config / ".git").exists()
@@ -523,11 +566,48 @@ def test_prepare_base_without_the_lock_takes_the_latest(tmp_path: Path, monkeypa
     clone = next(s for s in base.steps if "clone" in s)
     assert "--depth" in clone and not [s for s in base.steps if "checkout" in s]
     assert [a for s in base.steps for a in s if a.startswith("+Lazy! ")] == ["+Lazy! sync"]
+    assert set(base.installed.values()) == {NEWEST}
     marker = json.loads(base.layout.marker.read_text(encoding="utf-8"))
     assert marker["rev"] == "HEAD"
     assert marker["commit"] == base.head, "the newest starter commit is recorded: the next STARTER_REV"
     order = [next(i for i, s in enumerate(base.steps) if word in s) for word in ("clone", "rev-parse")]
     assert order == sorted(order) and order[1] < next(i for i, s in enumerate(base.steps) if "+Lazy! sync" in s)
+
+
+def test_prepare_base_fails_when_a_pin_does_not_hold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plugin left off its locked commit would make the pinned run test something else."""
+    base = Base(tmp_path, monkeypatch, lock=True)
+    base.stuck = {"nvim-treesitter"}
+    with pytest.raises(DeployError, match=r"nvim-treesitter at f{12}, pinned c{12}") as e:
+        base.run()
+    assert "base-restore.log" in str(e.value)
+    assert not base.layout.marker.is_file(), "a base that missed its pins is never reused"
+
+
+@pytest.mark.parametrize(
+    ("resolved", "expected"),
+    [
+        ({"LazyVim": {"branch": "main", "commit": "a" * 40}}, []),  # a subset: fine
+        ({**LOCKED, "extra.nvim": {"branch": "main", "commit": "e" * 40}}, []),  # not in the lock: not compared
+        ({"LazyVim": {"branch": "main", "commit": "d" * 40}}, ["LazyVim at dddddddddddd, pinned aaaaaaaaaaaa"]),
+        ({"LazyVim": {"branch": "main"}, "overseer.nvim": "x"}, ["LazyVim at ?, pinned aaaaaaaaaaaa", "overseer.nvim at ?, pinned bbbbbbbbbbbb"]),
+    ],
+)
+def test_lock_drift(tmp_path: Path, resolved: dict[str, object], expected: list[str]) -> None:
+    lock, got = tmp_path / "lock.json", tmp_path / "resolved.json"
+    lock.write_text(json.dumps(LOCKED), encoding="utf-8")
+    got.write_text(json.dumps(resolved), encoding="utf-8")
+    assert nvimtest.lock_drift(lock, got) == expected
+
+
+def test_lock_drift_on_unreadable_files(tmp_path: Path) -> None:
+    lock, got = tmp_path / "lock.json", tmp_path / "resolved.json"
+    lock.write_text(json.dumps(LOCKED), encoding="utf-8")
+    assert nvimtest.lock_drift(lock, got) and "cannot compare" in nvimtest.lock_drift(lock, got)[0]  # missing
+    got.write_text("{not json", encoding="utf-8")
+    assert "cannot compare" in nvimtest.lock_drift(lock, got)[0]
+    got.write_text("[1, 2]", encoding="utf-8")
+    assert nvimtest.lock_drift(lock, got) == [f"{got} is not a lazy-lock.json"]
 
 
 @pytest.mark.parametrize("pinned", [True, False])
@@ -586,11 +666,13 @@ def test_the_shipped_pins_are_complete() -> None:
     assert nvimtest.LOCK.read_bytes().isascii()
 
 
-def test_run_preset_uses_a_typing_profile_and_the_locked_plugins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _preset_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stuck: set[str]) -> tuple[Base, nvimtest.Row]:
+    """run_preset after a pinned base, with ./deploy, the trust and the smoke run faked."""
     base = Base(tmp_path, monkeypatch, lock=True)
     base.run()
     base.steps.clear()
     base.lock_at_lazy.clear()
+    base.stuck = stuck
     monkeypatch.setattr(cmd_nvim, "trust_file", lambda *a, **k: {"ok": True})
     monkeypatch.setattr(cmd_nvim, "trust_status", lambda db, f: cmd_nvim.Trust("trusted", str(f), "x", "x"))
     monkeypatch.setattr(proc, "find_uv", lambda: "uv")
@@ -604,10 +686,21 @@ def test_run_preset_uses_a_typing_profile_and_the_locked_plugins(tmp_path: Path,
         return 0
 
     monkeypatch.setattr(nvimtest, "run_smoke", run_smoke)
-    row = nvimtest.run_preset("script", base.layout, base.nv, renv={}, venv={}, timeout=60)
+    return base, nvimtest.run_preset("script", base.layout, base.nv, renv={}, venv={}, timeout=60)
+
+
+def test_run_preset_uses_a_typing_profile_and_the_locked_plugins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base, row = _preset_run(tmp_path, monkeypatch, stuck=set())
     assert row.ok, row
     deploys = [s[5:] for s in base.steps if s[:4] == ["uv", "run", "--quiet", "--script"]]
     assert [d[0] for d in deploys] == ["new", "sync", "mode"], deploys
     assert deploys[-1] == ["mode", "--typing", nvimtest.SMOKE_TYPING], deploys
     assert [a for s in base.steps for a in s if a.startswith("+Lazy! ")] == ["+Lazy! install"]
     assert base.lock_at_lazy == [LOCKED], "the lock (pruned by the base run) goes back before Lazy! install"
+    assert base.installed["overseer.nvim"] == "b" * 40, "the extras' plugins come at their locked commits"
+
+
+def test_run_preset_fails_when_the_extras_miss_their_pins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base, row = _preset_run(tmp_path, monkeypatch, stuck={"overseer.nvim"})
+    assert not row.ok and row.smoke is None, row
+    assert "overseer.nvim at ffffffffffff, pinned bbbbbbbbbbbb" in row.error and "lazy-install.log" in row.error

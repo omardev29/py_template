@@ -1571,11 +1571,17 @@ short temp tree and unset `NVIM_APPNAME`.
   `.pytemplate-nvim-test`. Pinned, so a red run is a regression and not upstream drift: the
   LazyVim starter is cloned in full and checked out at `cmd_nvim.STARTER_REV`, and the plugins
   come from `nvimtest.LOCK` (`.pytemplate/nvim/tests/lazy-lock.json`, a green run's lock),
-  copied into the isolated config before `Lazy! restore` (never `sync`) and again before each
-  project's `Lazy! install` (lazy.nvim rewrites the lock after every run and drops the plugins
-  its spec did not name; the startup install checks newly named ones out at the locked
-  commits). Without `LOCK` it takes the latest of everything (a `--depth 1` clone of the
-  starter HEAD, `Lazy! sync`). The base is made once and reused; `<dir>/base.json` records
+  copied into the isolated config before every Neovim run that installs (lazy.nvim rewrites the
+  lock after each run, on disk and in memory, keeping only the plugins its spec named). The base
+  takes two runs: `Lazy! install`, where a fresh config installs in rounds (LazyVim, then the
+  plugins its specs name) and the lock is pruned between them, so LazyVim's own plugins come at
+  their NEWEST commits (measured: nvim-treesitter), then `Lazy! restore`, which starts with
+  everything installed and moves them to the lock. Each project's `Lazy! install` is one round
+  (LazyVim is installed), so the extras' plugins are checked out at their locked commits
+  (measured with an older overseer.nvim pin). After the restore and after each project's install
+  `nvimtest.lock_drift` compares the resolved lock with `LOCK`: any plugin at another commit
+  fails the run, naming it. Without `LOCK` it takes the latest of everything (a `--depth 1`
+  clone of the starter HEAD, `Lazy! sync`). The base is made once and reused; `<dir>/base.json` records
   starter, rev, the lock's sha256, the Neovim version and the starter commit the clone held,
   and a base made for other pins or another Neovim is reinstalled (`--fresh` forces it). Per
   preset: `./deploy new` (name `pt-<preset>`), `./deploy sync cpython` (clean env), `./deploy

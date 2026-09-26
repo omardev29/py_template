@@ -6,16 +6,18 @@ each scratch project's .lazy.lua through Neovim's API, installs the plugins and 
 
 Pinned, so a red run means a regression and not upstream drift: the starter is checked out at
 cmd_nvim.STARTER_REV and the plugins at the commits of LOCK (a lazy-lock.json of a green run,
-applied with `Lazy! restore`). Without LOCK it takes the latest of everything (starter HEAD,
-`Lazy! sync`): the weekly canary of template-nvim.yml deletes it to see upstream changes coming.
-Each run copies the resolved lazy-lock.json to <dir>/logs/ (a new LOCK after a green canary).
+applied by a `Lazy! restore` once everything is installed, and by the startup install of each
+project's plugins; any plugin left elsewhere fails the run). Without LOCK it takes the latest of
+everything (starter HEAD, `Lazy! sync`): a run without it shows upstream changes coming. Each
+run copies the resolved lazy-lock.json and the starter commit to <dir>/logs/ (the new pins
+after a green run without LOCK).
 
 Layout of the work directory (short on purpose: Windows MAX_PATH, deep plugin trees):
 
     <dir>/x/{config,data,state,cache}   XDG_*_HOME of every Neovim call (LazyVim + plugins)
     <dir>/base.json                     marker: the base above is complete and reusable
     <dir>/p/<preset>                    scratch projects (./deploy new), removed unless --keep
-    <dir>/logs/                         output of every step of the last run (+ lazy-lock.json)
+    <dir>/logs/                         output of every step of the last run (+ the resolved pins)
 """
 
 from __future__ import annotations
@@ -334,6 +336,33 @@ def use_lock(nv: cmd_nvim.Nvim, lock: Path | None) -> None:
         shutil.copyfile(lock, nv.config / "lazy-lock.json")
 
 
+def lock_drift(lock: Path, resolved: Path) -> list[str]:
+    """Plugins that lazy.nvim left at another commit than the pinned lock ('name at X, pinned
+    Y'), among those both files name; a file that is not a lazy-lock.json is drift too."""
+    try:
+        want = json.loads(lock.read_text(encoding="utf-8"))
+        have = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return [f"cannot compare {resolved} with {lock}: {e}"]
+    if not isinstance(want, dict) or not isinstance(have, dict):
+        return [f"{lock if not isinstance(want, dict) else resolved} is not a lazy-lock.json"]
+
+    def commit(entry: object) -> str:
+        return str(entry.get("commit", "")) if isinstance(entry, dict) else ""
+
+    return [f"{name} at {commit(have[name])[:12] or '?'}, pinned {commit(want[name])[:12] or '?'}" for name in sorted(set(want) & set(have)) if commit(want[name]) != commit(have[name])]
+
+
+def _check_pins(lock: Path | None, nv: cmd_nvim.Nvim, what: str, log: Path) -> None:
+    if lock:
+        drift = lock_drift(lock, nv.config / "lazy-lock.json")
+        if drift:
+            raise DeployError(
+                f"{what} left plugins off the pinned commits of {rel_lock()}: {'; '.join(drift)} "
+                f"(log: {log}; --fresh reinstalls the isolated LazyVim)"
+            )
+
+
 def prepare_base(layout: Layout, exe: str, env: Mapping[str, str], *, fresh: bool) -> tuple[cmd_nvim.Nvim, float | None]:
     """Install the LazyVim starter + plugins in the isolated tree once; return (nvim, seconds or None if reused)."""
     if fresh:
@@ -374,10 +403,9 @@ def prepare_base(layout: Layout, exe: str, env: Mapping[str, str], *, fresh: boo
     commit = _starter_commit(git, nv, layout, env)
     _remove(nv.config / ".git")
     use_lock(nv, lock)
-    # From the work dir: there is no .lazy.lua above it, so only LazyVim's own plugins.
-    # Pinned: the startup install checks the missing plugins out at the locked commits, and
-    # restore moves the installed ones there (it never updates). Else: sync = the newest.
-    action = "restore" if lock else "sync"
+    # From the work dir: there is no .lazy.lua above it, so only LazyVim's own plugins. Pinned:
+    # install them (restore follows); else sync = the newest of everything.
+    action = "install" if lock else "sync"
     ui.command(f'nvim --headless "+Lazy! {action}" +qa   (in {layout.base})')
     sync_log = layout.logs / "base-sync.log"
     _step(
@@ -386,6 +414,19 @@ def prepare_base(layout: Layout, exe: str, env: Mapping[str, str], *, fresh: boo
     )
     if not (nv.data / "lazy" / "LazyVim").is_dir():
         raise DeployError(f"LazyVim was not installed in {nv.data} (log: {sync_log})\n{_tail(sync_log)}")
+    if lock:
+        # A fresh config installs in two rounds: LazyVim first, then the plugins its specs name.
+        # After the first round lazy.nvim rewrites the lock, on disk and in memory, with the
+        # plugins named so far, so the second round (and a restore in that same run) takes the
+        # newest commits. The second run starts with everything installed and restores the lock.
+        use_lock(nv, lock)
+        restore_log = layout.logs / "base-restore.log"
+        ui.command(f'nvim --headless "+Lazy! restore" +qa   (in {layout.base}; everything installed now)')
+        _step(
+            [nv.exe, "--headless", "+Lazy! restore", "+qa"],
+            cwd=layout.base, env=env, log=restore_log, timeout=BASE_SYNC_TIMEOUT, what="Lazy! restore",
+        )
+        _check_pins(lock, nv, "Lazy! restore", restore_log)
     seconds = time.perf_counter() - start
     info = {**want, "commit": commit, "created": time.strftime("%Y-%m-%d %H:%M:%S"), "seconds": round(seconds)}
     layout.marker.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8", newline="\n")
@@ -516,12 +557,16 @@ def run_preset(
         if state.state != "trusted":
             raise DeployError(f"{lazy_lua} is {state.state} after vim.secure.trust")
         # install, not sync: only what .lazy.lua adds (never an update), at the locked commits
-        use_lock(nv, LOCK if LOCK.is_file() else None)
+        # (one round: LazyVim is installed, so the startup install knows every plugin at once)
+        lock = LOCK if LOCK.is_file() else None
+        use_lock(nv, lock)
         ui.command('nvim --headless "+Lazy! install" +qa')
+        install_log = logs / "lazy-install.log"
         _step(
             [nv.exe, "--headless", "+Lazy! install", "+qa"],
-            cwd=proj, env=venv, log=logs / "lazy-install.log", timeout=STEP_TIMEOUT, what=f"Lazy! install ({preset})",
+            cwd=proj, env=venv, log=install_log, timeout=STEP_TIMEOUT, what=f"Lazy! install ({preset})",
         )
+        _check_pins(lock, nv, f"Lazy! install ({preset})", install_log)
 
     def smoke() -> None:
         log = logs / "smoke.log"
@@ -578,7 +623,7 @@ def _parse_args(args: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="./deploy selftest --nvim")
     parser.add_argument("presets", nargs="?", default=",".join(DEFAULT_PRESETS), help="comma-separated presets (default: script,raylib,flet)")
     parser.add_argument("--keep", action="store_true", help="keep the scratch projects")
-    parser.add_argument("--fresh", action="store_true", help="reinstall the isolated LazyVim (clone + Lazy! restore of the pinned lock)")
+    parser.add_argument("--fresh", action="store_true", help="reinstall the isolated LazyVim (clone the starter, install and restore the pinned plugins)")
     parser.add_argument("--require", action="store_true", help="fail instead of skipping when nvim or git is missing (CI)")
     parser.add_argument("--timeout", type=float, default=600.0, help="seconds for each smoke.lua run (default 600)")
     parser.add_argument("--dir", help=f"work directory (default {default_dir()})")
