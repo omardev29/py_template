@@ -2584,7 +2584,7 @@ mypy and mypyc:
   them.
 - **Compiled code holds the GIL** (LIMITATION): a heavy compiled call froze the Flet UI from a
   thread. Fix: the flet skeleton runs it in a `ProcessPoolExecutor` (`ui/app.py`, 11). Test:
-  untested (a design rule of the skeleton; `selftest --e2e` runs it). Goes: never.
+  `test_workarounds.py::test_flet_skeleton_runs_compiled_work_in_a_process`. Goes: never.
 - **The mypyc CLI cannot set `strip_asserts`, `group_name` or `multi_file`** (LIMITATION) and
   always writes to `./build`. Fix: `tools/mypyc_build.py` calls `mypycify` (9). Test:
   `test_mypyc_core.py::test_build_spec_matches_what_the_tool_reads`,
@@ -2877,8 +2877,8 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   `test_workarounds.py::test_nvim_plugin_workarounds[overseer]`. Goes: never.
 - **venv-selector (LazyVim's `lang.python`) needs `fd`** (LIMITATION, documented): without it it
   raises an error on the first Python buffer, which failed every smoke check that opens one.
-  Fix: `template-nvim.yml` installs `fd` (`fdfind` on Ubuntu) (13.2). Test: untested (CI only).
-  Goes: never.
+  Fix: `template-nvim.yml` installs `fd` (`fdfind` on Ubuntu) (13.2). Test: CI only (that
+  workflow's smoke run fails without it). Goes: never.
 - **A grandchild keeps a pipe open** (LIMITATION, every OS): git or Mason outliving a killed
   Neovim blocked the harness's wait forever. Fix: the harnesses write to files and kill the
   whole tree (`nvimtest._run_logged`, `nvimtest.kill_tree`; `e2e`, `shells` alike; 13.1). Test:
@@ -2936,8 +2936,10 @@ GitHub Actions and hosted runners:
   Up: astral-sh/setup-uv#830. Fix: the exact release in `templates/ci.yml` and the template
   workflows (13.2). Test:
   `test_render_core.py::test_ci_workflow_for_every_preset_and_backend_set`. Goes: never.
-- **The `runner` context is not allowed in a job-level `env`** (LIMITATION): Fix: the step env
-  of `template-nvim.yml` (13.2). Test: untested here (actionlint on CI). Goes: never.
+- **The `runner` context is not allowed in a job-level `env`** (LIMITATION): GitHub rejects the
+  whole workflow file. Fix: the step env of `template-nvim.yml` (13.2). Test:
+  `test_workarounds.py::test_template_workflows_use_contexts_where_actions_allows_them`
+  (actionlint, when installed). Goes: never.
 - **Hosted runners have no display, no OpenGL 3.3 on Windows and macOS, and `xvfb-run` starts an
   8-bit screen, which has no GLX visuals** (LIMITATION): raylib and Flet windows could not open.
   Fix: `e2e.detect_host` skips GUI runs on Windows/macOS CI and wraps Linux runs in `xvfb-run -a

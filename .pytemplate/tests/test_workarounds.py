@@ -217,6 +217,20 @@ def test_presets_exclude_what_the_packagers_drag_in() -> None:
     assert {"setuptools", "pycparser", "_distutils_hack"} <= excluded
 
 
+def test_flet_skeleton_runs_compiled_work_in_a_process() -> None:
+    # Compiled code never releases the GIL: a heavy compiled call froze the Flet UI from a
+    # thread just as from the event loop, so the skeleton hands it to a worker process.
+    source = (PRESETS / "flet" / "files" / "src" / "__pkg__" / "ui" / "app.py").read_text(encoding="utf-8")
+    tree = ast.parse(source.replace("{{pkg}}", "demo").replace("{{name}}", "demo"))
+    executor = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_executor")
+    made = [ast.unparse(n.value.func) for n in ast.walk(executor) if isinstance(n, ast.Return) and isinstance(n.value, ast.Call)]
+    assert made == ["ProcessPoolExecutor"]
+    handed = [n.args for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "run_in_executor"]
+    assert handed and all(ast.unparse(a[0]) == "_executor()" and ast.unparse(a[1]).startswith("fractal.") for a in handed)
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert not names & {"ThreadPoolExecutor", "Thread", "to_thread"}
+
+
 # --- MSVC / Visual Studio ------------------------------------------------------------------------------
 
 
@@ -271,7 +285,7 @@ def test_upx_is_off_on_macos_and_windows_arm64_runs_the_x64_build(monkeypatch: p
     assert upx.ASSETS[("windows", "aarch64")] == upx.ASSETS[("windows", "x86_64")]
 
 
-# --- GitHub runners: xvfb-run's default screen has no GLX visuals -------------------------------------
+# --- GitHub Actions: xvfb-run's default screen has no GLX visuals; contexts only where allowed ---------
 
 
 def test_xvfb_screen_has_24_bit_depth(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -284,6 +298,21 @@ def test_xvfb_screen_has_24_bit_depth(monkeypatch: pytest.MonkeyPatch) -> None:
     wrap = e2e.detect_host("on").gui_wrap
     assert wrap and wrap[0] == "/usr/bin/xvfb-run"
     assert any(re.fullmatch(r"-screen \d+ \d+x\d+x24", arg) for arg in wrap), wrap
+
+
+def test_template_workflows_use_contexts_where_actions_allows_them() -> None:
+    # The runner context exists only at step level: `${{ runner.temp }}` in a job's env makes
+    # GitHub reject the whole workflow file. actionlint knows where each context is available
+    # (shellcheck and pyflakes off: this is about the workflows, not the scripts in them).
+    workflows = sorted((ROOT / ".github" / "workflows").glob("template-*.yml"))
+    if not workflows:
+        pytest.skip("no template workflows here (a project made with ./deploy new)")
+    actionlint = shutil.which("actionlint")
+    if actionlint is None:
+        pytest.skip("actionlint is not installed")
+    argv = [actionlint, "-no-color", "-shellcheck=", "-pyflakes=", *(str(p) for p in workflows)]
+    r = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True, timeout=120, check=False)
+    assert r.returncode == 0, r.stdout + r.stderr
 
 
 # --- WSL: `wsl -l -q` prints UTF-16 -------------------------------------------------------------------
