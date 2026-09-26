@@ -686,7 +686,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     multi-line arrays included: `module_value_lines`) are package references even when bare
     (`modules = ["alpha"]`). Any other mention is reported, not changed ([tasks] can use
     `{name}` and `{pkg}`). `validate_config` validates the result in memory ("the renamed
-    pytemplate.toml would be invalid ...; nothing was changed").
+    pytemplate.toml would be invalid ...; nothing was changed"). Decoded with `config._decode`
+    (UTF-16/ANSI is a clear error) and written back with its own BOM and line endings.
   - `pyproject.toml`: `[project] name` (`presets.set_project_name`: the `[project]` table only,
     either quote style, any indentation; a table it cannot edit stops the plan) and the preset
     block; mentions in other tables are reported. Read as `utf-8-sig` (the BOM is not written
@@ -1813,9 +1814,10 @@ Code coupling (rename together):
 - `hooks` imports the private `cmd_dev._profile_file` and `shells.launcher_problems`, and loads
   `.pytemplate/tests/test_no_spanish.py` by path (it needs `offending_lines`, `ALLOWED_PATHS`,
   `BINARY_SUFFIXES`, and only `pytest.mark` at module level); `rename` calls the private
-  `config._build` and `presets._norm_name`; `cmd_apply` calls the private `cmd_env._envs_for`,
-  `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311` and `rename._plan_pyproject`;
-  `rename` and `cmd_env` import `cmd_apply` lazily (it imports both at module level).
+  `config._build`, `config._decode` and `presets._norm_name`; `cmd_apply` calls the private
+  `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311` and
+  `rename._plan_pyproject`; `rename` and `cmd_env` import `cmd_apply` lazily (it imports both
+  at module level).
 - `upx.BUILTIN_EXCLUDE` must keep `flutter_windows.dll`; `nuitka._flet_client_archive` mirrors
   flet_desktop's download URL and its `flet_desktop/app/` lookup.
 - `config._check_default_methods` imports `cmd_build.COMPAT` lazily (`cmd_build` imports
