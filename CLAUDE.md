@@ -2164,8 +2164,10 @@ short temp tree and unset `NVIM_APPNAME`.
   copy of the template, and `test_uv_frozen_edits_only_pyproject` checks offline the uv
   behaviour the fake imitates), `test_rename.py` (the skeleton invariant for 3 presets x 7
   pairs x LF/CRLF, random names and round trips, every rewrite rule, scopes, TOML keys and
-  module keys, encodings, git states, rollback, the ruff tidy-up, the command in-process and a
-  real run in a copy), `test_selftest_harness.py` (the exit codes CI trusts: plain `selftest`
+  module keys, string prefixes and escapes (names of one or two letters), loader arguments,
+  encodings and line endings, links and junctions, git states, rollback (a write cut short by
+  `ulimit -f` in a child process), the ruff tidy-up, the command in-process and a real run in a
+  copy), `test_selftest_harness.py` (the exit codes CI trusts: plain `selftest`
   with pytest and mypy faked, `--shells` with the probes faked but `_run_all` and the table
   real, `--nvim` with Neovim, the base and the smoke runs faked: 0, 1 on any FAIL, 2 usage, 3
   with `--require`), `test_workflows.py` (template repository only: the promises of the
@@ -3530,8 +3532,9 @@ Code coupling (rename together):
 - `hooks` imports the private `cmd_dev._profile_file` and `shells.launcher_problems`, and loads
   `.pytemplate/tests/test_no_spanish.py` by path (it needs `offending_lines`, `ALLOWED_PATHS`,
   `BINARY_SUFFIXES`, and only `pytest.mark` at module level); `rename` calls the private
-  `config._build`, `config._decode` and `presets._norm_name`; `cmd_apply` calls the private
-  `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311` and
+  `config._build`, `config._decode`, `config._string_end` (with `config._ScanError`, for
+  `_toml_strings`), `presets._norm_name` and, lazily, `cmd_env._is_link`; `cmd_apply` calls the
+  private `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311` and
   `rename._plan_pyproject`; `rename` and `cmd_env` import `cmd_apply` lazily (it imports both
   at module level).
 - `upx.BUILTIN_EXCLUDE` must keep `flutter_windows.dll`; `nuitka._flet_client_archive` mirrors

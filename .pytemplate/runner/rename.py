@@ -35,10 +35,11 @@ Which occurrences change (whole words only: `myapp_extra` and `my-app-2` never m
 - pytemplate.toml: app.name (its comment is kept) and package references only, always chosen
   by context, never a TOML key or table header. A path is the package only right inside src/
   (`src/alpha/data`; not `tools/alpha.py`, `assets/alpha.ico`, `./deploy`), a dotted word only
-  when it names a module of src/<pkg>/ (`alpha.core`; not `alpha.ico`, `uv.lock`). The values of the keys that hold module names
-  (MODULE_KEYS: compile.modules, [[typing.mypy_overrides]] module, deploy.exe.hidden_imports...)
-  are package references even when bare (`modules = ["alpha"]`). Any other occurrence of the
-  old name is reported, not changed ([tasks] can use `{name}` and `{pkg}`).
+  when it names a module of src/<pkg>/ (`alpha.core`; not `alpha.ico`, `uv.lock`). The values
+  of the keys that hold module names (MODULE_KEYS: compile.modules, [[typing.mypy_overrides]]
+  module, deploy.exe.hidden_imports...) are package references even when bare
+  (`modules = ["alpha"]`). Any other occurrence of the old name is reported, not changed
+  ([tasks] can use `{name}` and `{pkg}`).
 - pyproject.toml: [project] name and the preset block (`# >>> pytemplate-preset`); other
   occurrences are reported.
 - A Python file saved in another encoding is rewritten in the encoding its PEP 263 cookie
@@ -1160,21 +1161,21 @@ def apply_plan(root: Path, plan_: Plan) -> None:
             old = path.read_bytes()
             _replace_bytes(path, data)
         except OSError as e:
-            lost = []
+            lost: list[str] = []  # files that kept the new bytes
             for written, previous in reversed(done):
                 try:
                     _replace_bytes(written, previous)
                 except OSError:
                     lost.append(written.relative_to(root).as_posix())
-            moved_back = plan_.move is None
+            back: tuple[str, str] | None = None  # where the lost files are now
             if plan_.move is not None:
                 try:
                     _move_dir(root, plan_.move[1], plan_.move[0])
-                    moved_back = True
+                    back = (plan_.move[1], plan_.move[0])
                 except DeployError:
                     pass
-            problems = [f"{_target(p, (plan_.move[1], plan_.move[0])) if plan_.move and moved_back else p} could not be restored" for p in reversed(lost)]
-            if not moved_back and plan_.move is not None:
+            problems = [f"{_target(p, back)} could not be restored" for p in reversed(lost)]
+            if plan_.move is not None and back is None:
                 problems.append(f"{plan_.move[1]}/ could not be moved back to {plan_.move[0]}/")
             undone = (
                 f"The rename was NOT fully undone: {'; '.join(problems)} (fix it by hand: git status shows what changed)"
