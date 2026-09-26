@@ -477,15 +477,74 @@ vim.cmd(#errors == 0 and "qa!" or "cq!")
 """
 
 
-def test_mypy_linter_follows_a_venv_created_later(tmp_path: Path) -> None:
-    """nvim-lint's mypy is built when Neovim starts; `./deploy setup` (or any `uv run --locked`)
-    may create .venv afterwards: the locked mypy must run then, not a mypy found on PATH."""
+def _project(tmp_path: Path, **typing: Any) -> Path:
+    """A minimal project for the plugin: pytemplate.toml, editor.json (with `typing` changes), src/."""
     project = tmp_path / "proj"
     (project / ".pytemplate").mkdir(parents=True)
     (project / "src").mkdir()
     (project / "pytemplate.toml").write_text("", encoding="utf-8")
     data = json.loads((ROOT / ".pytemplate" / "editor.json").read_text(encoding="utf-8"))
-    data["typing"].update(profile="warn", mypy=True)
+    data["typing"].update(typing)
     (project / ".pytemplate" / "editor.json").write_text(json.dumps(data), encoding="utf-8")
+    return project
+
+
+def test_mypy_linter_follows_a_venv_created_later(tmp_path: Path) -> None:
+    """nvim-lint's mypy is built when Neovim starts; `./deploy setup` (or any `uv run --locked`)
+    may create .venv afterwards: the locked mypy must run then, not a mypy found on PATH."""
+    project = _project(tmp_path, profile="warn", mypy=True)
     r = _headless_lua(tmp_path, MYPY_LINTER_CHECK, project)
+    assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
+LUA_PRELUDE = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+local root = vim.env.PT_TEST_ROOT
+local pt = require("pytemplate")
+pt.config.root = root
+local tasks = require("pytemplate.tasks")
+local p = tasks.parse_line
+local errors = {}
+local function check(name, ok, msg)
+  if not ok then errors[#errors + 1] = name .. ": " .. tostring(msg) end
+end
+local function done()
+  io.stdout:write(#errors == 0 and "PTLUA OK\n" or ("PTLUA FAIL\n" .. table.concat(errors, "\n") .. "\n"))
+  vim.cmd(#errors == 0 and "qa!" or "cq!")
+end
+"""
+
+STAGE_PATHS_CHECK = LUA_PRELUDE + r"""
+local src = root .. "/src/demo/app.py"
+local stages = {
+  ".build/mypyc-dev/stage/", ".build/mypyc-release/stage/", ".build/wsl/mypyc-dev/stage/",
+  ".build\\mypyc-dev\\stage\\", root .. "/.build/mypyc-dev/stage/", root .. "/.build/wsl/mypyc-release/stage/",
+}
+for _, stage in ipairs(stages) do
+  -- pytest under `./deploy test mypyc` imports the stage: its crash lines name the stage copy
+  local m = p(stage .. "demo/app.py:45: ValueError")
+  check("stage " .. stage, m and pt.same_path(m.filename, src) and m.lnum == 45 and m.text == "ValueError", vim.inspect(m))
+end
+local m = p(".build/mypyc-dev/stage/main.py:5: KeyError")
+check("stage main.py", m and pt.same_path(m.filename, root .. "/src/main.py"), vim.inspect(m))
+m = p("x.build/mypyc-dev/stage/main.py:5: KeyError")
+check("x.build is no stage", m and pt.same_path(m.filename, root .. "/x.build/mypyc-dev/stage/main.py"), vim.inspect(m))
+m = p(".build/mypyc-dev/stage/demo/gone.py:5: KeyError")
+check("a stage file src/ no longer has", m and pt.same_path(m.filename, root .. "/.build/mypyc-dev/stage/demo/gone.py"), vim.inspect(m))
+done()
+"""
+
+
+def test_parser_maps_mypyc_stage_paths_to_src(tmp_path: Path) -> None:
+    """`./deploy test mypyc` runs pytest on the stage (a throwaway copy of src/): a failure in an
+    interpreted module names `.build/mypyc-dev/stage/<pkg>/x.py`. The diagnostic and the quickfix
+    item must open src/<pkg>/x.py (an edit made in the stage is overwritten by the next sync),
+    as the VS Code stage matchers do, even while the stage copy exists."""
+    project = _project(tmp_path)
+    for base in (project / "src", project / ".build" / "mypyc-dev" / "stage", project / ".build" / "mypyc-release" / "stage"):
+        (base / "demo").mkdir(parents=True)
+        (base / "demo" / "app.py").write_text("x = 1\n", encoding="utf-8")
+        (base / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (project / ".build" / "mypyc-dev" / "stage" / "demo" / "gone.py").write_text("x = 1\n", encoding="utf-8")
+    r = _headless_lua(tmp_path, STAGE_PATHS_CHECK, project)
     assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr

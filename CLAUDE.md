@@ -1981,7 +1981,10 @@ LazyVim wiring:
   lines); skips notes, `site-packages` and `in <func>` frames. Relative paths resolve against
   the root; mypyc prints them relative to its stage (a copy of `src/`: `<pkg>/core/x.py`), so
   a relative path that exists under `src/` but not under the root lands on `src/` (like the VS
-  Code MYPYC matcher).
+  Code MYPYC matcher). A path INTO the stage (`.build[/wsl]/mypyc-{dev,release}/stage/X`,
+  relative or absolute: pytest under `test mypyc` imports the stage) lands on `src/X` when that
+  file exists (`tasks.absolute`, like the VS Code stage matchers): an edit made in the stage
+  copy is overwritten by the next sync (`test_parser_maps_mypyc_stage_paths_to_src`).
 - Keymaps under `<leader>j` (which-key group "deploy"; `tasks.KEYS`): `j` pick, `r`/`R` run /
   run on a backend with args, `t`/`T` test / all, `c`/`C` check / all, `b`/`B` build / on a
   backend, `l` lint --fix, `f` fmt, `m` switch backend, `k` `[tasks]` picker, `d` `dev` task,

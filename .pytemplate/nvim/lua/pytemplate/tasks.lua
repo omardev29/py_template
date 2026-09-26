@@ -66,12 +66,32 @@ local function strip(line)
   return (line:gsub("\27%[[%d;?]*[%a@]", ""):gsub("\27%].-\7", ""):gsub("\r", ""))
 end
 
+-- The mypyc stage (.build[/wsl]/mypyc-{dev,release}/stage/, relative or absolute) is a throwaway
+-- copy of src/ (pytest under `test mypyc` imports it): the rest of such a path, or nil.
+local STAGE = { "^(.-)%.build/mypyc%-%l+/stage/(.+)$", "^(.-)%.build/wsl/mypyc%-%l+/stage/(.+)$" }
+local function in_stage(file)
+  for _, pattern in ipairs(STAGE) do
+    local prefix, rest = file:match(pattern)
+    if prefix and (prefix == "" or prefix:sub(-1) == "/") then
+      return rest
+    end
+  end
+end
+
 local function absolute(file)
   file = file:gsub("\\", "/")
+  local root = pt.root()
+  local staged = root and in_stage(file)
+  if staged then
+    -- land on the src/ file: an edit made in the stage copy is overwritten by the next sync
+    local src = vim.fs.normalize(root .. "/src/" .. staged)
+    if vim.uv.fs_stat(src) then
+      return src
+    end
+  end
   if file:match("^%a:/") or file:sub(1, 1) == "/" then
     return vim.fs.normalize(file)
   end
-  local root = pt.root()
   if not root then
     return file
   end
@@ -94,7 +114,8 @@ end
 --- runner     warning: src/pkg/core/x.py:7: <message>                        (runner warnings/errors)
 --- basedpyright  C:\p\src\x.py:3:5 - error: <message>
 ---Relative paths are relative to the project root (the runner runs the tools there); mypyc's,
----relative to its stage (a copy of src/), resolve to src/ when the root has no such file.
+---relative to its stage (a copy of src/), resolve to src/ when the root has no such file; paths
+---into the stage itself (pytest under mypyc: .build/mypyc-dev/stage/pkg/x.py) land on src/ too.
 function M.parse_line(line)
   line = strip(line)
   local forced
