@@ -172,7 +172,12 @@ function M.components(name, o)
   local show = o.show or o.background or (name == "run" and not info.gui)
   c[#c + 1] = { "open_output", direction = "dock", on_start = show and "always" or "never", on_complete = "failure" }
   if name == "run" or o.background then
-    c[#c + 1] = { "unique", replace = true }
+    c[#c + 1] = { "unique", replace = true } -- a new run restarts the app or the dev server
+  else
+    -- a re-run disposes the finished previous run of the same command (tasks are compared by
+    -- name): its diagnostics share the namespace and would otherwise stay until overseer
+    -- disposes it (never for a run nobody opened). soft: a running one is never stopped.
+    c[#c + 1] = { "unique", soft = true }
   end
   if o.refresh then
     c[#c + 1] = "pytemplate.refresh"

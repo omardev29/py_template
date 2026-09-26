@@ -1973,8 +1973,14 @@ LazyVim wiring:
   the mode or `editor.json` (`mode`, `setup`, `apply` (the same `tasks.META` entry as
   `setup`), `sync`, `lock`, `add`, `remove`, `render`, `rename`) get the `pytemplate.refresh`
   component (re-read `editor.json`, LSP `didChangeConfiguration`, rebuild the mypy linter);
-  `mode`, `setup`, `apply`, `lock` and `rename` also open their output. Without overseer, tasks
-  run in a terminal split.
+  `mode`, `setup`, `apply`, `lock` and `rename` also open their output. Every task carries
+  `unique` (`tasks.components`): `run` and background tasks with `replace = true` (a new run
+  restarts them), the rest with `soft = true`, which disposes the FINISHED previous run of the
+  same command (same name) and never stops a running one. overseer keys a task's diagnostics
+  by its name and keeps a finished task until `on_complete_dispose` (never for a run nobody
+  opened): without it the problems of a fixed file stayed after a clean re-run
+  (`test_every_task_replaces_its_previous_run`). Without overseer, tasks run in a terminal
+  split.
 - Output parser `tasks.parse_line` (overseer `on_output_parse` -> diagnostics + quickfix):
   strips ANSI, honours the `error: `/`warning: ` prefixes, reads basedpyright
   `  path:l:c - sev: msg` and `path:l[:c]: [sev: ]msg` (mypy, ruff concise, pytest crash

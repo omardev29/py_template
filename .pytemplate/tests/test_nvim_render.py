@@ -535,6 +535,39 @@ done()
 """
 
 
+UNIQUE_CHECK = LUA_PRELUDE + r"""
+local function unique(name, o)
+  for _, c in ipairs(tasks.components(name, o)) do
+    if type(c) == "table" and c[1] == "unique" then
+      return c
+    end
+  end
+end
+-- every command, the project's [tasks] entries included: a re-run replaces the previous run of
+-- the same command, whose diagnostics would otherwise stay until overseer disposes it
+local names = vim.tbl_map(function(c) return c.name end, tasks.commands())
+vim.list_extend(names, { "lint", "check", "test", "build", "ci", "no-such-command" })
+for _, name in ipairs(names) do
+  local u = unique(name)
+  check("unique " .. name, u ~= nil, vim.inspect(tasks.components(name)))
+  if u and name ~= "run" then
+    check("soft " .. name, u.soft == true, vim.inspect(u)) -- a running task is never stopped
+  end
+end
+check("run replaces a running app", (unique("run") or {}).soft ~= true, vim.inspect(unique("run")))
+check("background replaces", (unique("dev", { background = true }) or {}).soft ~= true, vim.inspect(unique("dev", { background = true })))
+done()
+"""
+
+
+def test_every_task_replaces_its_previous_run(tmp_path: Path) -> None:
+    """overseer keys a task's diagnostics by its name and keeps a finished task (and its
+    diagnostics) until it disposes it: without `unique`, the problems of a fixed file stayed
+    after a clean re-run of the same command."""
+    r = _headless_lua(tmp_path, UNIQUE_CHECK, _project(tmp_path))
+    assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
 def test_parser_maps_mypyc_stage_paths_to_src(tmp_path: Path) -> None:
     """`./deploy test mypyc` runs pytest on the stage (a throwaway copy of src/): a failure in an
     interpreted module names `.build/mypyc-dev/stage/<pkg>/x.py`. The diagnostic and the quickfix
