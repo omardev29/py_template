@@ -16,6 +16,7 @@ from __future__ import annotations
 import keyword
 import os
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -58,6 +59,29 @@ RESERVED_PACKAGES = {
 # Windows reserves these names (any case, any extension) for devices: src/aux/ cannot be created
 # there, and git cannot check out a repository that holds it
 WINDOWS_DEVICES = frozenset({"con", "prn", "aux", "nul", *(f"{d}{i}" for d in ("com", "lpt") for i in range(10))})
+# The interpreters the generated Windows launchers call by bare name (pyz._wrapper_cmd,
+# portable.cmd_launcher, common.windowed): cmd.exe looks in the current folder first, so an app
+# called python started its own python.cmd again and again instead of Python
+INTERPRETER_COMMANDS = frozenset({"py", "pyw", "python", "python3", "pythonw", "pypy", "pypy3", "pypyw"})
+# The top-level modules a pinned package (constraints.txt of any preset) installs under another
+# name than its own (normalized, '_' for '-'), read from the wheels' RECORD files; names that
+# cannot be an app package (_pytest, _yaml, cffi-stubs...) are left out. src/<pkg>/ with such a
+# name shadows the library: a project named py failed ./deploy test at once (pytest imports its
+# `py` shim), one named markdown-it broke rich.markdown. Compared in lower case (PIL and src/pil/
+# merge on a case-insensitive file system). test_import_names_follow_the_installed_packages
+# checks it against what .venv installs.
+IMPORT_NAMES: dict[str, tuple[str, ...]] = {
+    "markdown-it-py": ("markdown_it",),
+    "mypy": ("mypyc",),
+    "pefile": ("ordlookup", "peutils"),
+    "pillow": ("PIL",),
+    "pytest": ("py",),
+    "python-dateutil": ("dateutil",),
+    "python-slugify": ("slugify",),
+    "pywin32-ctypes": ("win32ctypes",),
+    "pyyaml": ("yaml",),
+    "raylib": ("pyray",),
+}
 
 
 def available() -> list[str]:
@@ -198,11 +222,12 @@ def pristine(cfg: Config) -> bool:
 
 
 def name_from_folder(folder: str) -> str:
-    """The app name `./deploy new DIR` derives from the folder name: accents dropped (NFKD ->
-    ASCII, so an accented e becomes e), every run of other characters -> '-' (no '--'), and no
-    '-' or '_' at either end (uv refuses a name that does not end with a letter or digit)."""
-    ascii_name = unicodedata.normalize("NFKD", folder).encode("ascii", "ignore").decode("ascii")
-    return re.sub(r"-{2,}", "-", re.sub(r"[^A-Za-z0-9_-]+", "-", ascii_name)).strip("-_")
+    """The app name `./deploy new DIR` derives from the folder name: accents dropped (NFKD, then
+    the combining marks: an accented e becomes e), every run of other characters, letters
+    without an ASCII form included (a sharp s, an o with stroke), -> '-' (no '--'), and no '-'
+    or '_' at either end (uv refuses a name that does not end with a letter or digit)."""
+    plain = "".join(c for c in unicodedata.normalize("NFKD", folder) if not unicodedata.combining(c))
+    return re.sub(r"-{2,}", "-", re.sub(r"[^A-Za-z0-9_-]+", "-", plain)).strip("-_")
 
 
 def _norm_name(req: str) -> str:
@@ -238,13 +263,17 @@ def _names(items: Any) -> set[str]:
     return {_norm_name(r) for r in items if isinstance(r, str)} if isinstance(items, list) else set()
 
 
-def _declared(group: str | None) -> set[str]:
-    """The requirement names of [project] dependencies (group None) or of a dependency group."""
+def _declared_requirements(group: str | None) -> list[str]:
+    """The requirements of [project] dependencies (group None) or of a dependency group."""
     data = _read_toml(PYPROJECT, "pyproject.toml")
     table = data.get("project") if group is None else data.get("dependency-groups")
-    if not isinstance(table, dict):
-        return set()
-    return _names(table.get("dependencies" if group is None else group))
+    items = table.get("dependencies" if group is None else group) if isinstance(table, dict) else None
+    return [r for r in items if isinstance(r, str)] if isinstance(items, list) else []
+
+
+def _declared(group: str | None) -> set[str]:
+    """The requirement names of [project] dependencies (group None) or of a dependency group."""
+    return _names(_declared_requirements(group))
 
 
 def _declared_anywhere() -> set[str]:
@@ -299,6 +328,17 @@ def _lock_graph(lock: Path | None = None) -> dict[str, set[str]]:
     return graph
 
 
+def _self_dependents(name: str, lock: Path | None = None) -> list[str]:
+    """The packages of uv.lock that depend on a package called `name`, when that package is
+    the project itself: uv (0.12) resolves such a dependency to the project (markdown-it-py's
+    mdurl -> a project named mdurl) instead of refusing it, and the library is then missing."""
+    wanted = _norm_name(name)
+    entries = _lock_entries(lock)
+    if not any(_is_project(e) and _norm_name(e["name"]) == wanted for e in entries):
+        return []
+    return sorted({e["name"] for e in entries if not _is_project(e) and wanted in _requires(e)})
+
+
 def _closure(graph: dict[str, set[str]], roots: set[str]) -> set[str]:
     seen: set[str] = set()
     todo = [r for r in roots if r in graph]
@@ -326,10 +366,13 @@ def constraints(preset: str) -> dict[str, str]:
     """{normalized name: version} from PRESETS/<preset>/constraints.txt ({} without the file).
 
     The file pins, one `name==version` per line, every package a project of this preset locks
-    that the template's own uv.lock does not (the preset's dependencies and what they pull in),
-    at the versions the template was tested with. `init` hands the ones the project does not
-    lock yet to `uv add --constraints`: a one-off, nothing is written into pyproject.toml, and
-    `./deploy lock --upgrade` moves on later. How to regenerate it: CLAUDE.md section 11.
+    (the template's own packages it keeps, the preset's dependencies and what they pull in), at
+    the versions the template was tested with. `init` hands the ones the project does not lock
+    yet to `uv add --constraints`: a one-off, nothing is written into pyproject.toml, and
+    `./deploy lock --upgrade` moves on later. The name check reads it too: from a project whose
+    uv.lock lacks the preset's tree, it is the only place that names that tree (a project named
+    mdurl made from a raylib project got markdown-it-py's mdurl resolved to itself). How to
+    regenerate it: CLAUDE.md section 11.
     """
     path = constraints_path(preset)
     if not path.is_file():
@@ -352,20 +395,20 @@ def constraints(preset: str) -> dict[str, str]:
     return pins
 
 
-def constraints_text(preset: str, project_lock: Path, template_lock: Path | None = None) -> str:
+def constraints_text(preset: str, project_lock: Path) -> str:
     """The constraints.txt of `preset`, made from the uv.lock of a project just created with it
-    (without constraints): every package it locks that the template's uv.lock does not. A
-    package locked at two versions (a fork by platform) cannot be pinned and is left out."""
-    base = locked_names(lock=template_lock)
+    from the template: every package it locks (the project itself excluded). A package locked
+    at two versions (a fork by platform) cannot be pinned and is left out (init's check of the
+    resolved uv.lock, `_self_dependents`, still covers its name)."""
     versions: dict[str, set[str]] = {}
     for entry in _lock_entries(project_lock):
-        name = _norm_name(entry["name"])
-        if not _is_project(entry) and name not in base:
-            versions.setdefault(name, set()).add(str(entry.get("version", "")))
+        if not _is_project(entry):
+            versions.setdefault(_norm_name(entry["name"]), set()).add(str(entry.get("version", "")))
     lines = [
-        f"# Versions the template was tested with for the packages the {preset} preset adds to the",
-        "# template's uv.lock. `./deploy new` hands them to `uv add --constraints` (a one-off:",
-        "# pyproject.toml keeps plain bounds). Regenerate it, never edit it: CLAUDE.md section 11.",
+        f"# Versions the template was tested with for every package a project of the {preset} preset",
+        "# locks. `./deploy new` hands the ones the source project does not lock yet to `uv add",
+        "# --constraints` (a one-off: pyproject.toml keeps plain bounds), and the name check refuses",
+        "# them all. Regenerate it, never edit it: CLAUDE.md section 11.",
         *(f"{name}=={next(iter(v))}" for name, v in sorted(versions.items()) if len(v) == 1 and "" not in v),
     ]
     return "\n".join(lines) + "\n"
@@ -387,7 +430,8 @@ def _skeleton_src_names(preset: str) -> dict[str, str]:
 def _dependency_names(cfg: Config | None, preset: str) -> set[str]:
     """Normalized names of every package the project has after `init preset`: what pyproject
     declares (without the current preset's own dependencies, which init removes), the preset's
-    dependencies, and what they pull in (from uv.lock and the preset's constraints)."""
+    dependencies, and what they pull in (from uv.lock and the preset's constraints, which name
+    the preset's whole tested tree even when uv.lock lacks it)."""
     target = load(preset)
     opts: dict[str, Any] = dict(target.get("options", {}))
     if cfg is not None and preset == cfg.app.preset:
@@ -402,8 +446,9 @@ def _dependency_names(cfg: Config | None, preset: str) -> set[str]:
     graph = _lock_graph()
     names = kept | _closure(graph, kept) | pins
     if pins - set(graph):
-        # The preset brings packages uv.lock does not have: only their names are known, not what
-        # they need, which may be any package already locked (flet-cli -> rich -> mdurl)
+        # The preset brings packages uv.lock does not have: the pins name what they needed when
+        # the template was tested, but uv may resolve them against the versions this lock holds,
+        # which may need any package already locked (conservative)
         names |= set(graph)
     return names
 
@@ -411,9 +456,10 @@ def _dependency_names(cfg: Config | None, preset: str) -> set[str]:
 def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
     """Reject an app name that would break the project: one uv refuses (APP_NAME), a package
     src/<pkg>/ that is a Python keyword, a standard library module (of any supported Python), a
-    backend name, a Windows device name, one of the project's own folders or files, or a
-    package the project depends on, directly or not
-    (uv refuses a project that depends on itself, and src/<pkg>/ would shadow the library).
+    backend name, a Windows device name, one of the project's own folders or files, a package
+    the project depends on, directly or not (uv refuses a project that depends on itself, and
+    src/<pkg>/ would shadow the library), or a module such a package installs under another
+    name (IMPORT_NAMES: pytest's py, raylib's pyray).
     new, init, their dry runs and rename (which keeps the first line) call it."""
     pkg = name.replace("-", "_").lower()
     hint = "\n  Choose another name with --name NAME"
@@ -430,16 +476,29 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
             f"src/{pkg}/ cannot exist on Windows: '{pkg}' is a reserved device name there (CON, PRN, "
             f"AUX, NUL, COM0-9, LPT0-9) and a repository holding it cannot be checked out.{hint}"
         )
+    if name.lower() in INTERPRETER_COMMANDS:
+        raise DeployError(
+            f"'{name}' is the name of a Python command: the Windows launchers of the pyz and portable "
+            f"builds ({name}.cmd) call it by name, and cmd.exe would start {name}.cmd itself again and again.{hint}"
+        )
     taken = {**_skeleton_src_names(preset), **RESERVED_PACKAGES}
     if pkg in taken:
         raise DeployError(f"src/{pkg}/ would collide with the project's own {taken[pkg]}.{hint}")
     clash = _norm_name(name)
-    if clash in _dependency_names(cfg, preset):
+    names = _dependency_names(cfg, preset)
+    if clash in names:
         raise DeployError(
             f"the app name '{name}' is also the name of a dependency of the '{preset}' preset "
             f"({clash}, direct or indirect): uv would refuse the project and src/{pkg}/ would "
             f"shadow the library.{hint}"
         )
+    for dist in sorted(names & IMPORT_NAMES.keys()):
+        module = next((m for m in IMPORT_NAMES[dist] if m.lower() == pkg), None)
+        if module is not None:
+            raise DeployError(
+                f"src/{pkg}/ would shadow the module '{module}' of {dist}, a dependency of the "
+                f"'{preset}' preset (direct or indirect): `import {module}` would find the app.{hint}"
+            )
 
 
 # --- pyproject ---------------------------------------------------------------------------------
@@ -450,9 +509,10 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
 _PROJECT_HEADER = re.compile(r"[ \t]*\[[ \t]*project[ \t]*\][ \t\r]*(?:#.*)?")
 _TABLE_HEADER = re.compile(r"[ \t]*\[\[?[^\[\]\n]+\]\]?[ \t\r]*(?:#.*)?")
 def _string_key(key: str) -> re.Pattern[str]:
-    """A `key = "..."` (or '...') line, the key bare or quoted; group 1 is everything before the value."""
+    """A `key = "..."` (or '...') line, the key bare or quoted; group 1 is everything before the
+    value. A multi-line string never matches (its opening quotes are not an empty string)."""
     k = re.escape(key)
-    return re.compile(rf"""([ \t]*(?:{k}|"{k}"|'{k}')[ \t]*=[ \t]*)(?:"(?:[^"\\\n]|\\.)*"|'[^'\n]*')""")
+    return re.compile(rf"""([ \t]*(?:{k}|"{k}"|'{k}')[ \t]*=[ \t]*)(?:"(?:[^"\\\n]|\\.)*"(?!")|'[^'\n]*'(?!'))""")
 
 
 def _set_project_string(text: str, key: str, value: str) -> str:
@@ -527,6 +587,10 @@ STDLIB_OTHER_VERSIONS = frozenset(
         "imghdr", "imp", "lib2to3", "mailcap", "msilib", "nis", "nntplib", "ossaudiodev", "pipes",
         "smtpd", "sndhdr", "spwd", "sunau", "telnetlib", "uu", "xdrlib",  # removed in 3.12 / 3.13 (PyPy 3.11 has them)
         "sre_compile", "sre_constants", "sre_parse",  # removed in 3.15
+        # PyPy 3.11's own sys.stdlib_module_names and built-ins (a built-in is found before
+        # sys.path: an app named pypyjit could not import itself there)
+        "cpyext", "ctypes_support", "future_builtins", "greenlet", "identity_dict", "pypyjit",
+        "stackless", "tputil",
     }
 )
 
@@ -636,10 +700,25 @@ class InitPlan:
     pins: dict[str, str]  # tested versions of the packages uv.lock does not have yet (constraints)
 
 
-def _dropped(old: list[str], new: list[str], declared: set[str]) -> list[str]:
-    """The old preset's requirements that init removes: not in the new preset, still declared."""
+def _requirement_key(req: str) -> str:
+    """A requirement as uv compares it: the name normalized, no blanks."""
+    m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)(.*)", req, re.S)
+    return _norm_name(m.group(1)) + re.sub(r"\s+", "", m.group(2)) if m else req.strip()
+
+
+def _dropped(old: list[str], new: list[str], added: list[str], declared: list[str]) -> list[str]:
+    """The requirements of one group (`declared`: what pyproject.toml lists there) that init
+    removes before the new preset's are added: the old preset's that the new one does not have,
+    and every one the new preset adds (`added`, both groups) in another form. A pin left in
+    place breaks the resolving `uv add`: flet-cli==1.0.0 in the dev group (a flet project with
+    [preset.flet] version = "1.0.0") pins flet==1.0.0, so adding flet==1.0.1 had no solution."""
     keep = {_norm_name(r) for r in new}
-    return sorted((r for r in old if _norm_name(r) not in keep and _norm_name(r) in declared), key=_norm_name)
+    gone = {_norm_name(r) for r in old} - keep
+    again = {_norm_name(r): _requirement_key(r) for r in added}
+    return sorted(
+        (r for r in declared if _norm_name(r) in gone or again.get(_norm_name(r), _requirement_key(r)) != _requirement_key(r)),
+        key=_norm_name,
+    )
 
 
 def plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> InitPlan:
@@ -680,8 +759,8 @@ def plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> Ini
         files=files,
         cfg=new_cfg,
         pyproject=text,
-        drop=_dropped(old_deps, new_deps, _declared(None)),
-        drop_dev=_dropped(old_dev, new_dev, _declared("dev")),
+        drop=_dropped(old_deps, new_deps, [*new_deps, *new_dev], _declared_requirements(None)),
+        drop_dev=_dropped(old_dev, new_dev, [*new_deps, *new_dev], _declared_requirements("dev")),
         add=new_deps,
         add_dev=new_dev,
         pins={n: v for n, v in constraints(preset).items() if n not in locked},
@@ -766,12 +845,13 @@ def _swap_dependencies(plan: InitPlan, undo: _Undo) -> None:
     undo.save(LOCK)
     PYPROJECT.write_text(plan.pyproject, encoding="utf-8", newline="\n")
     uv = proc.find_uv()
+    q = ["--quiet"] if ui.QUIET else []  # -q: uv's progress too (its errors still show)
     env = envs.env_vars(envs.tool_env(plan.cfg))
     # --frozen: only pyproject.toml changes; the next resolution sees every removal at once
     if plan.drop:
-        proc.run([uv, "remove", "--frozen", *(_norm_name(r) for r in plan.drop)], env=env)
+        proc.run([uv, "remove", *q, "--frozen", *sorted({_norm_name(r) for r in plan.drop})], env=env)
     if plan.drop_dev:
-        proc.run([uv, "remove", "--frozen", "--dev", *(_norm_name(r) for r in plan.drop_dev)], env=env)
+        proc.run([uv, "remove", *q, "--frozen", "--dev", *sorted({_norm_name(r) for r in plan.drop_dev})], env=env)
     pins: list[str] = []
     if plan.pins:  # the versions the template was tested with, for this resolution only
         path = BUILD / "init" / CONSTRAINTS
@@ -779,10 +859,19 @@ def _swap_dependencies(plan: InitPlan, undo: _Undo) -> None:
         path.write_text("".join(f"{n}=={v}\n" for n, v in sorted(plan.pins.items())), encoding="utf-8", newline="\n")
         pins = ["--constraints", str(path)]
     if plan.add:
-        proc.run([uv, "add", "--no-sync", *pins, *plan.add], env=env)
+        proc.run([uv, "add", *q, "--no-sync", *pins, *plan.add], env=env)
     if plan.add_dev:
-        proc.run([uv, "add", "--no-sync", "--dev", *pins, *plan.add_dev], env=env)
-    proc.run([uv, "lock"], env=env)
+        proc.run([uv, "add", *q, "--no-sync", "--dev", *pins, *plan.add_dev], env=env)
+    proc.run([uv, "lock", *q], env=env)
+    # The name check knows the tested tree (constraints.txt); this catches what it cannot know
+    needs = _self_dependents(plan.name)
+    if needs:
+        raise DeployError(
+            f"the app name '{plan.name}' is also the name of a package the '{plan.preset}' preset needs "
+            f"({', '.join(needs)} depend{'s' if len(needs) == 1 else ''} on {_norm_name(plan.name)}): uv "
+            "resolved it to the project itself, so the library would be missing.\n"
+            "  Choose another name with --name NAME"
+        )
 
 
 def _swap_files(plan: InitPlan, undo: _Undo) -> None:
@@ -841,7 +930,7 @@ def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
         raise
     undo.discard()
     render.apply(plan.cfg, force=True)
-    ui.ok(f"preset '{preset}' done. Next step: ./deploy setup && ./deploy run")
+    ui.ok(f"preset '{preset}' done")  # `new` says what comes next, from the right folder
 
 
 # --- new -----------------------------------------------------------------------------------------
@@ -908,7 +997,9 @@ def copy_template(dest: Path) -> None:
     In a git work tree only what git tracks is copied (with its working-tree content):
     untracked and ignored files (.env secrets, .idea/, htmlcov/, *.spec...) stay behind, and the
     untracked ones are listed. Without git, or when git does not track the template (a copy
-    inside another repository), every file but the _skipped ones is copied.
+    inside another repository), every file but the _skipped ones is copied. A symbolic link is
+    copied as a link, as git tracks it (a link to a folder is not the folder's content, and a
+    dangling one is still a tracked file).
     """
     if dest.exists() and any(dest.iterdir()):
         raise DeployError(f"{dest} already exists and is not empty")
@@ -916,15 +1007,18 @@ def copy_template(dest: Path) -> None:
     if tracked is None or ".pytemplate/deploy.py" not in tracked:
         if tracked is not None:
             ui.info("  git does not track this project's files (never committed?): copying every file")
-        shutil.copytree(ROOT, dest, ignore=_ignore, dirs_exist_ok=True)
+        shutil.copytree(ROOT, dest, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
         return
     dest.mkdir(parents=True, exist_ok=True)
     for rel_path in tracked:
         if _skipped(rel_path):
             continue
         src = ROOT / rel_path
-        if src.is_dir():  # a submodule
-            shutil.copytree(src, dest / rel_path, ignore=_ignore, dirs_exist_ok=True)
+        if src.is_symlink():  # git tracks the link itself (mode 120000)
+            (dest / rel_path).parent.mkdir(parents=True, exist_ok=True)
+            _copy_link(src, dest / rel_path, rel_path)
+        elif src.is_dir():  # a submodule
+            shutil.copytree(src, dest / rel_path, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
         elif src.exists():  # a tracked file deleted in the working tree is not copied
             (dest / rel_path).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest / rel_path)
@@ -932,6 +1026,24 @@ def copy_template(dest: Path) -> None:
     if untracked:
         more = f" and {len(untracked) - 5} more" if len(untracked) > 5 else ""
         ui.info(f"  not copied (not tracked by git): {', '.join(untracked[:5])}{more}")
+
+
+def _copy_link(src: Path, target: Path, rel_path: str) -> None:
+    """A symbolic link copied as the link (its target text). Where no link can be made (Windows
+    without the symlink privilege) what it points to is copied instead, with a warning."""
+    try:
+        target.symlink_to(os.readlink(src), target_is_directory=src.is_dir())
+        return
+    except OSError as e:
+        reason = e.strerror or str(e)
+    if src.is_dir():
+        shutil.copytree(src, target, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
+    elif src.exists():
+        shutil.copy2(src, target)
+    else:
+        ui.warn(f"new: could not copy the link {rel_path} ({reason}); it points nowhere: left out")
+        return
+    ui.warn(f"new: could not copy the link {rel_path} ({reason}): copied what it points to")
 
 
 def _outermost_missing(path: Path) -> Path | None:
@@ -944,7 +1056,9 @@ def _outermost_missing(path: Path) -> Path | None:
 
 def _git_init(dest: Path) -> None:
     """A git repository on branch main (the branch the generated CI runs on), with deploy and
-    deploy.ps1 executable. Nothing when dest is already inside a work tree (a monorepo)."""
+    deploy.ps1 executable. Inside a work tree (a monorepo) no repository; only where that one
+    has core.filemode = false (Git for Windows) the two launchers are staged executable: a
+    later `git add` would record them as 100644, and the pre-commit hook refuses that."""
     git = shutil.which("git")
     if git is None:
         ui.info("  git not found: the project is not a git repository (later: git init -b main)")
@@ -953,7 +1067,12 @@ def _git_init(dest: Path) -> None:
     inside = proc.run(
         [git, "rev-parse", "--is-inside-work-tree"], cwd=dest.parent, env=env, capture=True, check=False, echo=False
     )
-    if (inside.returncode == 0 and inside.stdout.strip() == "true") or (dest / ".git").exists():
+    if inside.returncode == 0 and inside.stdout.strip() == "true":
+        filemode = proc.run([git, "config", "--get", "core.filemode"], cwd=dest, env=env, capture=True, check=False, echo=False)
+        if filemode.stdout.strip().lower() == "false":  # an ignored folder: git refuses, and that is fine
+            proc.run([git, "add", "--chmod=+x", "--", "deploy", "deploy.ps1"], cwd=dest, env=env, capture=True, check=False)
+        return
+    if (dest / ".git").exists():
         return
     r = proc.run([git, "init", "--quiet", "-b", "main"], cwd=dest, env=env, capture=True, check=False)
     if r.returncode != 0:  # git < 2.28 has no -b: a plain init, then HEAD -> main
@@ -1002,8 +1121,26 @@ def _make_own(dest: Path, preset: str, name: str) -> None:
     pyproject = dest / PYPROJECT.name
     if pyproject.is_file():
         text = _read_text(pyproject, "pyproject.toml of the copy").replace("\r\n", "\n")
-        description = str(load(preset).get("description", ""))
-        pyproject.write_text(_set_project_string(text, "description", description), encoding="utf-8", newline="\n")
+        pyproject.write_text(_set_description(text, str(load(preset).get("description", ""))), encoding="utf-8", newline="\n")
+
+
+def _set_description(text: str, description: str) -> str:
+    """`text` (a pyproject.toml) with [project] description = `description`, whatever form the
+    old value has (a multi-line string too) and added when missing (config.set_value checks the
+    result). Unchanged, with a warning, when the file has no [project] table or an unusual
+    layout: the description is not worth failing `new` for (init checks the rest)."""
+    from . import config
+
+    try:
+        if not isinstance(tomllib.loads(text).get("project"), dict):
+            return text
+    except tomllib.TOMLDecodeError:
+        return text  # init says what is wrong with it
+    try:
+        return config.set_value(text, "project", "description", description)
+    except DeployError:
+        ui.warn("new: could not set [project] description in the copy's pyproject.toml: set it by hand")
+        return text
 
 
 def new(dest: Path, preset: str, name: str | None) -> None:
@@ -1030,7 +1167,8 @@ def new(dest: Path, preset: str, name: str | None) -> None:
         copy_template(dest)
         _make_own(dest, preset, app_name)
         deploy_py = dest / ".pytemplate" / "deploy.py"
-        proc.run([proc.find_uv(), "run", "--quiet", "--script", deploy_py, "__init", preset, "--name", app_name, "--force"], cwd=dest)
+        loud = ["-q"] if ui.QUIET else ["-v"] if ui.VERBOSE else []  # the copy's runner, as quiet as this one
+        proc.run([proc.find_uv(), "run", "--quiet", "--script", deploy_py, *loud, "__init", preset, "--name", app_name, "--force"], cwd=dest)
     except BaseException as e:
         if top is not None:
             left = [] if _remove(top) else [str(top)]
@@ -1046,4 +1184,19 @@ def new(dest: Path, preset: str, name: str | None) -> None:
             raise
         raise DeployError(f"{e}\n  {note}", e.code if isinstance(e, DeployError) else 1) from e
     _git_init(dest)
-    ui.ok(f"project created. cd {dest} && ./deploy setup")
+    ui.ok(f"project created in {dest}. Next:")
+    for line in next_steps(dest):
+        ui.info(f"  {line}")
+
+
+def next_steps(dest: Path) -> list[str]:
+    """The commands to type after `new`, each on its own line (cmd and Windows PowerShell 5.1
+    have no `&&`), quoted for the shell whose launcher started this run (PYTEMPLATE_LAUNCHER)."""
+    launcher = os.environ.get("PYTEMPLATE_LAUNCHER", "")
+    path = str(dest)
+    if launcher.startswith("cmd"):
+        return [f'cd /d "{path}"', r".\deploy setup"]  # a Windows path never holds a double quote
+    if launcher.startswith("ps1"):
+        # PowerShell reads the typographic single quotes as quotes too: each is doubled
+        return ["cd '" + re.sub("['\u2018-\u201b]", lambda m: m.group() * 2, path) + "'", "./deploy setup"]
+    return [f"cd {shlex.quote(path)}", "./deploy setup"]

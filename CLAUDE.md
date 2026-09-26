@@ -186,7 +186,8 @@ then `shutil.which("uv")`, else `DeployError(..., 3)`.
 `ps1:Desktop:5.1`); `nvim`; `nu` (shell-setup snippet). The xonsh snippet sets none.
 `project.native_path` reads the `:msys`/`:cygwin` suffix, `shells.guess_shell` the prefix (only
 `ps1:`, `nu` and `sh:niubash` first: `sh:bash`/`sh:zsh` name the interpreter of `#!/bin/sh`, bash on
-macOS, Fedora and Arch, so `$SHELL` wins over them), and `./deploy doctor` prints the value
+macOS, Fedora and Arch, so `$SHELL` wins over them), `presets.next_steps` the `cmd`/`ps1:`
+prefix (how the hint after `new` quotes the folder), and `./deploy doctor` prints the value
 ("unknown" when unset).
 
 ### 4.2 Which launcher runs
@@ -543,7 +544,7 @@ header rules (with detector tests proving each rule fires).
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
-| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `DeployError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free`, `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./deploy __init`; with rollback), `copy_template`, `new`; for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
+| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `DeployError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./deploy __init`; with rollback), `copy_template`, `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
 | `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`, `COMPILER_MISSING`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
@@ -701,7 +702,8 @@ header rules (with detector tests proving each rule fires).
   pristine, the new `pytemplate.toml` and `pyproject.toml`) and lists each file as `-` deleted,
   `+` new or `~` replaced, the dependencies removed and added, the pinned versions, and what
   happens to `pyproject.toml` and `uv.lock`. `new` checks the destination and the name
-  (format, `check_name_free`) and prints destination, preset, name, the number of pins and the
+  (format, `check_name_free`) and prints destination, preset, name, the number of pins
+  `__init` would pass (the ones this `uv.lock` lacks, as `plan_init` counts them) and the
   `__init` step it would run in the copy, then `git init -b main`, or why not (DIR inside the
   work tree of another repository, `cmd_mode._work_tree_top`, with the CI warning of section
   13.2; no git). `pyz-merge` validates its inputs (`pyz.check_parts`:
@@ -1831,12 +1833,18 @@ Per method:
   (`pyproject_after_init`: name and managed parts without the old preset tables, then the new
   ones) parsed and checked: a preset table outside the markers, a damaged or repeated preset
   marker (`_extra_bounds`) or a `[project]` table without `name` is a `DeployError` (exit 2).
-  `_set_project_name` only touches the `name` of `[project]` (any quoting, CRLF kept: `rename`
-  uses it too), and the text is split on `\n` only (a U+2028 inside a TOML string is not a
+  `_set_project_name` only touches the `name` of `[project]` (either one-line quoting, CRLF
+  kept: `rename` uses it too; a multi-line string is left alone, so the callers' check stops),
+  and the text is split on `\n` only (a U+2028 inside a TOML string is not a
   line break). `--dry-run __init` prints the plan (`cmd_mode._plan_init`).
   `presets.init` then (1) writes `pyproject.toml` and runs `uv remove --frozen` (no
-  resolution) for the old preset's requirements, `uv add --no-sync [--constraints]` for the
-  new ones and `uv lock`: the only step that needs the network; (2) renames `src/ tests/
+  resolution) for the old preset's requirements and every declared one the new preset adds in
+  another form (`presets._dropped`: a `flet-cli==1.0.0` left in the dev group of a flet project
+  with `[preset.flet] version = "1.0.0"` made the resolving `uv add flet==1.0.1` fail), `uv add
+  --no-sync [--constraints]` for the
+  new ones and `uv lock`: the only step that needs the network; a resolved `uv.lock` in which a
+  package depends on the project itself (`presets._self_dependents`, section 15.1) is refused
+  there, before any file of the skeleton is written; (2) renames `src/ tests/
   typings/` into `.pytemplate-init-*` (all or nothing: a locked file fails the rename before
   anything changed), writes every skeleton file (root `pytemplate.toml` included) and chmods
   `deploy`/`deploy.ps1` on POSIX. Any failure or Ctrl+C in (1) or (2) puts every file back
@@ -1846,16 +1854,27 @@ Per method:
   keep its first line) refuses: a name uv refuses (`config.APP_NAME`: a letter first, a letter
   or digit last, PEP 508), a keyword, a standard-library module of any supported Python
   (`presets.shadows_stdlib`), a backend name (cpython, pypy, mypyc), a Windows device name (`WINDOWS_DEVICES`: `aux`,
-  `con`, `nul`, `com1`...: the folder cannot exist there and git cannot check it out), the
+  `con`, `nul`, `com1`...: the folder cannot exist there and git cannot check it out), a Python
+  command (`INTERPRETER_COMMANDS`: `py`, `python`, `python3`, `pyw`, `pythonw`, `pypy3`...: the
+  pyz and portable `<name>.cmd` launchers call them by name, and cmd.exe, which looks in the
+  current folder first, found `<name>.cmd` itself and restarted it forever), the
   project's own folders and files (`RESERVED_PACKAGES`: src (root- and src-relative paths would
   read the same: the VS Code matchers, rename), tests, typings, build, dist, assets; plus the
   preset's `src/` entries such as `main`), and every package the project will lock:
   the declared requirements (minus the current preset's own), their tree in `uv.lock`
   (`locked_names`, markers ignored because uv refuses a self-dependency on any platform; the
-  project's own entry excluded) and the preset's pins. When a preset adds packages the lock
-  does not have, their dependencies are unknown, so every locked name counts (conservative).
-  `new` derives the name from the folder with `name_from_folder` (NFKD -> ASCII, other runs ->
-  `-`, no `-`/`_` at the ends) and checks it before copying, so `./deploy new ../flet --preset
+  project's own entry excluded) and the preset's pins (`constraints.txt`: the preset's whole
+  tested tree, so a raylib project, whose `uv.lock` has no rich, still refuses `new --preset
+  script --name mdurl`). When a preset adds packages the lock does not have, uv may resolve
+  them against this lock's versions, so every locked name counts too (conservative). Also a
+  module one of those packages installs under another name (`presets.IMPORT_NAMES`, read from
+  the pinned wheels' RECORD files: pytest's `py`, which pytest imports before the app,
+  markdown-it-py's `markdown_it`, raylib's `pyray`, pyyaml's `yaml`, pillow's `PIL` in lower
+  case...; `test_import_names_follow_the_installed_packages` checks it against what `.venv`
+  installs). Only the presets' pinned packages are mapped (15.2).
+  `new` derives the name from the folder with `name_from_folder` (NFKD without the combining
+  marks, every run of other characters, letters without an ASCII form included, -> `-`, no
+  `-`/`_` at the ends) and checks it before copying, so `./deploy new ../flet --preset
   flet` fails with a hint to use `--name`.
 - **[template repo]** Root `src/`, `tests/` and `pytemplate.toml` must equal
   `presets/script/files` rendered with `name = "myapp"` (`test_presets.py` checks it, and
@@ -1866,7 +1885,9 @@ Per method:
   ls-files --cached`, with their working-tree content): untracked files are listed as "not
   copied", ignored ones stay silent, so `.env`, `.idea/`, `htmlcov/`, `*.spec` never reach a
   new project. A maintainer's new file must be `git add`ed before `new` or `selftest --e2e`
-  sees it. Without git, or when git does not track `.pytemplate/deploy.py` (a copy inside
+  sees it. A symbolic link is copied as the link git tracks (`presets._copy_link`, dangling
+  ones too; where Windows refuses to create one, what it points to, with a warning), never as
+  a copy of its target. Without git, or when git does not track `.pytemplate/deploy.py` (a copy inside
   another repository, a project never committed), it copies every file; a git failure other
   than "not a git repository" (dubious ownership...) is a warning first (git runs with
   `LC_ALL=C`). Both skip (`presets._skipped`) `.git`, `.build`, `dist`, caches, `.flet`,
@@ -1875,32 +1896,45 @@ Per method:
   project made with `new` is another program, not the template (an owner decision): `new`
   (`presets._make_own`) writes its own `README.md` (`presets.project_readme`: name, preset
   description, getting started) and sets `[project] description` to the preset's
-  (`_set_project_string`), and, from the template repository only (the `template-repo`
+  (`_set_description` through `config.set_value`: a multi-line string is replaced whole, a
+  missing key is added, an unusual layout is only a warning), and, from the template
+  repository only (the `template-repo`
   marker), copies the template's `README.md` and `LICENSE` to `.pytemplate/README.md` (the
   manual of `./deploy`, of that version) and `.pytemplate/LICENSE` (the MIT notice that must
   travel with the copied runner): `presets.TEMPLATE_DOCS`. A project running `new` passes
   those two on as tracked files, and its own root `README.md`/`LICENSE` stay behind. `new`
-  then runs the copy's own runner with `__init <preset> --name <n> --force` inside the copy,
+  then runs the copy's own runner with `__init <preset> --name <n> --force` inside the copy
+  (with this run's `-q` or `-v`; under `-q` init's uv calls get `--quiet` too),
   `git init -b
   main` (the generated CI runs on `main`; git < 2.28: plain `init` + `symbolic-ref HEAD
-  refs/heads/main`; nothing inside an existing work tree, where `cmd_mode.cmd_new` then warns
-  that the generated CI will not run: `cmd_mode._monorepo_note`, section 13.2) and `git add
-  --chmod=+x deploy deploy.ps1`. When the copy or `__init` fails (a name uv refuses, no network, Ctrl+C) `new`
+  refs/heads/main`; no repository inside an existing work tree, where `cmd_mode.cmd_new` then
+  warns that the generated CI will not run: `cmd_mode._monorepo_note`, section 13.2) and `git
+  add --chmod=+x deploy deploy.ps1` (inside an existing work tree only where it has
+  `core.filemode = false`, Git for Windows: a later `git add` records a new file as 100644
+  there, `_fix_exec_bit` skips untracked files and the hook refused the first commit; a path it
+  ignores is left alone). When the copy or `__init` fails (a name uv refuses, no network, Ctrl+C) `new`
   removes what it created (the folder and the parents it made, or only the content of the
   empty folder it was given) and says so; a folder with content is refused before anything
-  is written.
+  is written. On success it prints one hint (init prints none: it runs in the copy), `cd
+  <dest>` and `./deploy setup` on lines of their own, for the shell of the launcher
+  (`presets.next_steps` reads the `PYTEMPLATE_LAUNCHER` prefix: cmd `cd /d "..."` and
+  `.\deploy`, PowerShell single quotes, else `shlex.quote`).
 - `init` is internal only: `cli.INTERNAL["__init"]` (`cmd_mode.cmd_init`), reached by `new` and
   by the template maintainer, listed nowhere. `./deploy init` exits 2 with the hint `./deploy
   new DIR --preset P`: a project's preset is chosen when it is created.
 - Tested pins: `presets/<p>/constraints.txt` (`name==version`, sorted, generated, never
-  hand-edited) lists every package a project of the preset locks that the template's
-  `uv.lock` does not (flet 32, raylib 5; script needs none: the root lock is its tested set).
-  `init` hands the ones the project does not lock yet to `uv add --constraints`: a one-off
+  hand-edited) lists every package a project of the preset locks (script 24: the template's
+  own `uv.lock`; raylib 26; flet 56), the ones the template's `uv.lock` also holds at its
+  versions (a package locked at two versions, a fork by platform, cannot be pinned: none so
+  far). `init` hands the ones the project does not lock yet to `uv add --constraints`: a one-off
   (nothing in `pyproject.toml` or the lock manifest, `uv lock --check` passes, `./deploy lock
   --upgrade` moves on), so a new project gets the versions CI tested instead of the newest of
-  the day, and packages the source project already locks keep their versions. Regenerate
-  after changing a preset's pins or the root `uv.lock` (`test_presets.py` fails, offline,
-  when the file is stale): delete it, `./deploy new <tmp>/p --preset <p>`, then write
+  the day, also when `new` runs from a project of another preset (a raylib project has no
+  rich), and packages the source project already locks keep their versions. The name check
+  reads the whole list. Regenerate after changing a preset's pins or the root `uv.lock`
+  (`test_presets.py::test_preset_pins_hold_the_whole_tested_tree` fails, offline, when the file
+  is stale): `./deploy new <tmp>/p --preset <p>` from the template (delete the file first to
+  take the newest versions of the packages the template's lock lacks), then write
   `presets.constraints_text(p, <tmp>/p/uv.lock)` to `presets.constraints_path(p)` (a
   `python -c` in `.venv` with `.pytemplate` on `sys.path`) and `git add` it. Rejected:
   `exclude-newer` (recorded in the lock: the next `uv lock --check` fails) and `==`
@@ -1926,7 +1960,9 @@ Per method:
 - flet: measured with Flet 1.0.1 + mypyc 2.3.1 in compiled code: `async` handlers get no event,
   generator handlers never run, `@ft.component` fails at import, `@ft.control` loses its event
   types; hence `forbid_imports = flet, flet_desktop, flet_cli`. Heavy work runs in a
-  `ProcessPoolExecutor` (compiled code does not release the GIL). mypy overrides relax
+  `ProcessPoolExecutor` (compiled code does not release the GIL), in the event loop where no
+  process can start (`flet build` for the web, Android, iOS: section 15.1), and the button
+  comes back in a `finally`. mypy overrides relax
   `{pkg}.ui.*`. Wheel entry `{pkg}.ui.app:run`. Task `dev` (`flet run -d -r`) has
   `background = true`. `[tool.flet]` (read by `flet build` only, which embeds `copyright` in
   the app metadata): `org`, `company` and `copyright = "Copyright (C) {{name}}"` are
@@ -2268,7 +2304,7 @@ short temp tree and unset `NVIM_APPNAME`.
   host pyz build run with `python -S`, skipped when uv cannot install offline; portable prune,
   launchers, precompile and the runtime smoke with real interpreters), `test_upx.py` (UPX
   flags, candidates per OS, the pinned download with fake archives), `test_presets.py` (preset
-  data and skeletons, ruff under every profile, name rules, pins, `copy_template`,
+  data and skeletons, ruff under every profile, the skeletons' own code with flet and raylib faked, name rules, pins, `copy_template`,
   `new`/`__init` failures with uv faked; real `new` per preset, the pins steering uv and the
   raylib stub generator when uv reaches the network, checked with `uv pip compile
   --no-cache`), `test_mypyc_core.py` (the PyPy
@@ -2658,8 +2694,8 @@ Adding a preset:
 1. `presets/<p>/preset.toml` and `files/` (section 11), including `[vscode] buttons` and
    `[tasks]` (`background = true` for dev servers) in its `pytemplate.toml`.
 2. Copy `tests/conftest.py` verbatim. Check the hard-coded preset branches (section 11).
-3. Generate its `constraints.txt` if it adds packages to the template's `uv.lock` (section 11)
-   and `git add` everything (`new` only copies tracked files).
+3. Generate its `constraints.txt` (section 11: the name check and `new` from other projects need
+   its whole tested tree) and `git add` everything (`new` only copies tracked files).
 4. It must pass `./deploy selftest` (`test_presets.py`: ruff-clean skeleton, valid config,
    pins), `./deploy selftest --e2e <p>` and `./deploy selftest --nvim <p>`.
 
@@ -2768,9 +2804,23 @@ uv:
   `test_runner.py::test_managed_block_bounds_cpython_minor`. Goes: never.
 - **`uv add` resolves each change alone** (LIMITATION): `flet-cli==V` pins `flet==V`, so adding
   the new flet to one group had no solution. Fix: `uv add`/`remove --frozen`, then one `uv lock`
-  (`cmd_apply.apply`; `presets.init` removes the old preset's with `--frozen`; 5.8, 11). Test:
-  `test_apply.py::test_uv_frozen_edits_only_pyproject`, `test_apply_flet_version_change`. Goes:
-  never.
+  (`cmd_apply.apply`; `presets.init` first removes with `--frozen` the old preset's and every pin
+  the new one adds in another form, `presets._dropped`; 5.8, 11). Test:
+  `test_apply.py::test_uv_frozen_edits_only_pyproject`, `test_apply_flet_version_change`,
+  `test_presets.py::test_init_from_a_flet_project_of_another_version_removes_its_pins_first`.
+  Goes: never.
+- **uv resolves a dependency of a dependency named like the project to the project itself**
+  (DEFECT): only a version the project does not have fails ("depends on itself at an
+  incompatible version"); in a project named `mdurl` markdown-it-py's `mdurl~=0.1` was
+  satisfied by the project (0.1.0): uv.lock recorded `mdurl` with `source = { virtual = "." }`,
+  and the real library was missing from the lock, `.venv` and every build (rich's Markdown
+  failed), without an error. Up: none
+  found. Fix: `presets.check_name_free` refuses every name of the preset's tested tree
+  (`constraints.txt`) and of uv.lock; `init` refuses a resolved uv.lock in which a package
+  depends on the project (`presets._self_dependents`) and rolls back (11). Test:
+  `test_presets.py::test_new_from_a_project_without_the_presets_tree_refuses_its_names`,
+  `test_init_refuses_a_lock_that_resolves_a_dependency_to_the_project`, `test_self_dependents`.
+  Goes: when uv refuses it (the name check stays: src/<pkg>/ would shadow the library).
 - **uv writes normalized names** (LIMITATION, PEP 503): `raylib_sdl` became `raylib-sdl`, and a
   verbatim comparison never matched. Fix: `cmd_apply.req_key` (5.8). Test:
   `test_apply.py::test_req_key_normalizes_like_uv`. Goes: never.
@@ -2857,10 +2907,13 @@ CPython and its standard library:
   BrokenPipeError traceback. Fix: `cli._output_closed` (quiet exit 141; POSIX only, 15.2). Test:
   `test_cli_core.py::test_a_closed_stdout_is_not_a_runner_bug`. Goes: never.
 - **`sys.stdlib_module_names` knows only the running version** (LIMITATION): a name that is a
-  module of PyPy 3.11 or of another CPython passed the check. Fix:
-  `presets.STDLIB_OTHER_VERSIONS` in `presets.shadows_stdlib` (5.7). Test:
-  `test_rename.py::test_stdlib_names_do_not_depend_on_the_runner`. Goes: never (update it per
-  Python release).
+  module of PyPy 3.11 or of another CPython passed the check (a project named pypyjit could not
+  import itself on PyPy: its built-in wins over sys.path). Fix: `presets.STDLIB_OTHER_VERSIONS`
+  (removed and new CPython modules, PyPy's own stdlib names and built-ins) in
+  `presets.shadows_stdlib` (5.7). Test:
+  `test_rename.py::test_stdlib_names_do_not_depend_on_the_runner`,
+  `test_presets.py::test_every_pypy_standard_library_module_is_refused` (the pinned PyPy, when
+  uv has it). Goes: never (update it per Python release).
 - **`shutil.rmtree` error hooks** (LIMITATION): `onerror` is deprecated from 3.12 and `onexc`
   does not exist in 3.11, and a read-only file (git objects on Windows) needs a chmod and a
   retry. Fix: the version switch in `cmd_nvim.remove_tree`, `presets._remove`, `e2e.rmtree`;
@@ -2878,6 +2931,14 @@ CPython and its standard library:
   and many tokens from 3.12 (t-strings from 3.14). Fix: `rename` handles both (5.7). Test:
   `test_rename.py::test_fstring_fields_as_one_token`, `test_tokenizer_canary`. Goes: the 3.11
   form once the runner needs 3.12.
+- **No processes on WebAssembly, Android and iOS** (LIMITATION, documented: `multiprocessing` and
+  the process pools are "not Emscripten, not WASI, not Android, not iOS"): in a `flet build`
+  web or mobile app the flet skeleton's Draw handler died on `ProcessPoolExecutor` and left the
+  button disabled on "Computing...". Fix: the flet skeleton's `ui/app.py` runs the work in the
+  event loop there (its `NO_PROCESSES` platforms, or a pool that raises NotImplementedError)
+  and gives the button back in a `finally` (11). Test:
+  `test_presets.py::test_flet_skeleton_draws_where_no_process_can_start`,
+  `test_flet_skeleton_gives_the_button_back_when_drawing_fails`. Goes: never.
 - **No extension module loads from a zip** (LIMITATION, zipimport): Fix: the pyz bootstrap
   (`templates/pyz/__main__.py`) extracts to a per-build cache (10). Test:
   `test_build_methods.py::test_pyz_bootstrap_picks_the_flavour` and the other bootstrap tests.
@@ -3301,9 +3362,11 @@ git and husky:
 - **The exec bit gets lost** (LIMITATION): `core.filemode=false` (Windows), zip downloads and
   copies drop it, and with `core.filemode=true` an index-only fix is undone by the next `git
   add`; Git for Windows runs hooks with its own sh. Fix: `cmd_env._fix_exec_bit` (the files and
-  the index); `sh <launcher>` in the hook; `/bin/sh <root>/deploy` in VS Code tasks and the
-  Neovim fallback (5.6, 12, 14). Test:
+  the index); `presets._git_init` stages both launchers executable (a new repository, or an
+  enclosing one with `core.filemode=false`); `sh <launcher>` in the hook; `/bin/sh
+  <root>/deploy` in VS Code tasks and the Neovim fallback (5.6, 11, 12, 14). Test:
   `test_envs_core.py::test_fix_exec_bit_repairs_the_index_and_the_files`,
+  `test_presets.py::test_git_init_in_a_monorepo_stages_the_launchers_executable`,
   `test_hooks.py::test_git_runs_the_hook`,
   `test_vscode.py::test_every_task_runs_the_launcher_as_a_process`. Goes: never.
 - **CRLF checkouts** (LIMITATION): `* text=auto eol=native` with `core.autocrlf=true` checks
@@ -3682,6 +3745,10 @@ Behaviour:
   extensions out of `common/`, and a cpython/pypy wheel stays tagged `py3-none-any`.
 - `sync_tree` does not detect a case-only rename (`Data.py` -> `data.py`) on a
   case-insensitive file system: the stage keeps the old spelling until `./deploy clean`.
+- The name check (`presets.check_name_free`) knows the import names only of the packages the
+  presets pin (`presets.IMPORT_NAMES`): a dependency the user adds is compared by its
+  distribution name (`beautifulsoup4` refuses `beautifulsoup4`, not `bs4`). Reading them needs
+  the installed wheels (an environment of the project, never there for `new`'s next preset).
 
 Editors:
 - VS Code problem matchers and the Neovim parser depend on tool output formats (ruff, mypy,

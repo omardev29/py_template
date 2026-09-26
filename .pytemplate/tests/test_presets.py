@@ -18,6 +18,7 @@ import hashlib
 import importlib.util
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -327,6 +328,11 @@ def test_app_name_rule_refuses(name: str) -> None:
         ("__x__", "x"),
         (CJK, ""),  # nothing left: `new` asks for --name
         ("2game", "2game"),  # kept, then refused by APP_NAME
+        # letters without an ASCII form become '-', like any other character (they were dropped)
+        ("Stra\N{LATIN SMALL LETTER SHARP S}e", "Stra-e"),
+        ("my\N{LATIN SMALL LETTER O WITH STROKE}game", "my-game"),
+        (CJK + "app", "app"),
+        ("\N{LATIN SMALL LIGATURE FI}le", "file"),  # a compatibility form has an ASCII one
     ],
 )
 def test_name_from_folder(folder: str, name: str) -> None:
@@ -350,6 +356,13 @@ def test_name_from_folder(folder: str, name: str) -> None:
         ("flet", "main", "src/main.py"),
         ("flet", "flet", "also the name of a dependency of the 'flet' preset (flet"),
         ("script", "Rich", "also the name of a dependency of the 'script' preset (rich"),
+        # a module a dependency installs under another name (pytest imports its py shim first)
+        ("script", "markdown-it", "src/markdown_it/ would shadow the module 'markdown_it' of markdown-it-py"),
+        ("raylib", "pyray", "the module 'pyray' of raylib"),
+        ("flet", "yaml", "the module 'yaml' of pyyaml"),
+        ("flet", "dateutil", "the module 'dateutil' of python-dateutil"),
+        ("flet", "Slugify", "src/slugify/ would shadow the module 'slugify' of python-slugify"),
+        ("flet", "pil", "the module 'PIL' of pillow"),
         # uv refuses these (PEP 508): rename relies on this check too
         ("script", "app-", "'app-' is not a valid app name"),
         ("script", "app_", "ending with a letter or digit"),
@@ -364,6 +377,9 @@ def test_name_from_folder(folder: str, name: str) -> None:
         ("script", "com1", "reserved device name"),
         ("raylib", "LPT9", "reserved device name"),
         ("script", "prn", "reserved device name"),
+        # the Windows launchers call these by name: python.cmd in its own folder started itself
+        *(("script", n, "is the name of a Python command") for n in ("py", "Pyw", "python", "python3", "pythonw", "pypy3", "pypyw")),
+        ("raylib", "Python", "(Python.cmd) call it by name"),
     ],
 )
 def test_check_name_free_refuses(preset: str, name: str, message: str) -> None:
@@ -379,7 +395,7 @@ def test_check_name_free_accepts_near_misses(name: str) -> None:
     presets.check_name_free(_skeleton_config("script", "myapp"), "script", name)
 
 
-@pytest.mark.parametrize(("name", "message"), [("game-", "valid app name|may only contain"), ("g_", "valid app name|may only contain"), ("aux", "Windows"), ("typings", "typings/")])
+@pytest.mark.parametrize(("name", "message"), [("game-", "valid app name|may only contain"), ("g_", "valid app name|may only contain"), ("aux", "Windows"), ("typings", "typings/"), ("markdown-it", "module 'markdown_it' of markdown-it-py")])
 def test_rename_refuses_the_names_check_name_free_refuses(name: str, message: str) -> None:
     """`./deploy rename` goes through check_name_free: a name uv refuses (game-) used to move
     src/ and rewrite the project before `uv lock` failed on it."""
@@ -388,6 +404,51 @@ def test_rename_refuses_the_names_check_name_free_refuses(name: str, message: st
     with pytest.raises(DeployError, match=message) as e:
         rename.check_new_name(config.load(set(cli.COMMANDS)), name)
     assert e.value.code == 2
+
+
+@pytest.mark.parametrize("name", ["pypyjit", "cpyext", "greenlet", "stackless", "tputil", "identity_dict", "future_builtins", "ctypes_support"])
+def test_pypy_standard_library_names_are_refused(name: str) -> None:
+    """PyPy 3.11 is a supported backend (raylib's default): a project named pypyjit could not
+    import itself there (`'pypyjit' is not a package`: the built-in wins over sys.path)."""
+    with pytest.raises(DeployError, match=f"standard library module '{name}'"):
+        presets.check_name_free(None, "script", name)
+
+
+def test_every_pypy_standard_library_module_is_refused() -> None:
+    """Compared with the pinned PyPy when uv has it installed (it downloads nothing)."""
+    uv = shutil.which("uv") or os.environ.get("UV")
+    pypy = config.load(set(cli.COMMANDS)).python.pypy
+    if uv is None:
+        pytest.skip("uv not found")
+    found = subprocess.run([uv, "python", "find", pypy, "--no-python-downloads", "--no-project"], capture_output=True, text=True, check=False)
+    if found.returncode != 0:
+        pytest.skip(f"{pypy} is not installed")
+    code = "import sys; print(*sorted(set(sys.stdlib_module_names) | set(sys.builtin_module_names)))"
+    names = subprocess.run([found.stdout.strip(), "-c", code], capture_output=True, text=True, check=True).stdout.split()
+    missing = [n for n in names if "." not in n and not n.startswith("_") and not presets.shadows_stdlib(n.lower()) and n.lower() == n]
+    assert not missing, "add them to presets.STDLIB_OTHER_VERSIONS"
+
+
+def test_import_names_follow_the_installed_packages() -> None:
+    """presets.IMPORT_NAMES must know every module a pinned package installs under another name
+    (the ones installed in this environment: .venv of the project, so every preset is covered
+    by a project of it), or an app package with that name shadows the library unnoticed."""
+    import importlib.metadata
+
+    pinned: set[str] = set()
+    for preset in PRESETS:
+        pinned |= set(presets.constraints(preset))
+    found: dict[str, set[str]] = {}
+    for module, dists in importlib.metadata.packages_distributions().items():
+        if not module.isidentifier() or module.startswith("_"):
+            continue  # never an app package
+        for dist in dists:
+            name = presets._norm_name(dist)
+            if name in pinned and module.lower() != name.replace("-", "_"):
+                found.setdefault(name, set()).add(module)
+    missing = {n: sorted(m - set(presets.IMPORT_NAMES.get(n, ()))) for n, m in found.items()}
+    assert not {n: m for n, m in missing.items() if m}, "add them to presets.IMPORT_NAMES"
+    assert set(presets.IMPORT_NAMES) <= pinned  # only pinned packages (their pins name them)
 
 
 def test_every_locked_package_name_is_refused() -> None:
@@ -551,9 +612,7 @@ def test_constraints_parser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert e.value.code == 2
 
 
-def test_constraints_text_lists_what_the_template_lock_lacks(tmp_path: Path) -> None:
-    template = tmp_path / "template.lock"
-    template.write_text(FAKE_LOCK, encoding="utf-8")
+def test_constraints_text_lists_every_locked_package(tmp_path: Path) -> None:
     project = tmp_path / "project.lock"
     project.write_text(
         FAKE_LOCK.replace('name = "myapp"', 'name = "demo"')
@@ -563,10 +622,14 @@ def test_constraints_text_lists_what_the_template_lock_lacks(tmp_path: Path) -> 
         + '\n[[package]]\nname = "forked"\nversion = "2.0"\nsource = { registry = "https://pypi.org/simple" }\n',
         encoding="utf-8",
     )
-    text = presets.constraints_text("demo", project, template)
+    text = presets.constraints_text("demo", project)
     pins = [line for line in text.splitlines() if line and not line.startswith("#")]
-    assert pins == ["alpha==1.0", "zeta-pkg==2.0"]  # sorted; the fork cannot be pinned; no project entry
-    assert "CLAUDE.md" in text
+    # sorted; the template's packages too (rich, pytest...); the fork cannot be pinned; no project entry
+    assert pins == [
+        "alpha==1.0", "colorama==0.4.6", "linkify-it-py==2.0.0", "markdown-it-py==4.2.0", "mdurl==0.1.2",
+        "orphan==1.0", "pygments==2.21.0", "pytest==9.1.1", "rich==15.0.0", "zeta-pkg==2.0",
+    ]  # fmt: skip
+    assert "CLAUDE.md" in text and text.isascii()
 
 
 @pytest.mark.parametrize("preset", PRESETS)
@@ -589,15 +652,26 @@ def test_preset_pins_agree_with_the_preset(preset: str) -> None:
 
 @template_repo
 @pytest.mark.parametrize("preset", PRESETS)
-def test_preset_pins_only_list_what_the_template_lock_lacks(preset: str) -> None:
-    """A pinned package that the template's uv.lock also has would be forced to another version
-    than the template tested: regenerate constraints.txt after changing the template's lock."""
-    shared = sorted(set(presets.constraints(preset)) & presets.locked_names())
-    assert not shared, f"{preset}: {shared} are in the template's uv.lock too: regenerate (CLAUDE.md 11)"
+def test_preset_pins_hold_the_whole_tested_tree(preset: str) -> None:
+    """constraints.txt pins every package a project of the preset locks, at the versions the
+    template tested: the name check reads it (from a project whose uv.lock lacks the preset's
+    tree, it is the only place that names it), and `new` from such a project gets those
+    versions. A package the template's uv.lock also has must carry the lock's version, and every
+    locked package the new project keeps or needs must be there: regenerate constraints.txt
+    after changing the template's lock or the preset (CLAUDE.md 11)."""
+    pins = presets.constraints(preset)
+    template = {presets._norm_name(e["name"]): str(e.get("version")) for e in presets._lock_entries() if not presets._is_project(e)}
+    moved = sorted(f"{n}: {pins[n]} (uv.lock: {v})" for n, v in template.items() if n in pins and pins[n] != v)
+    assert not moved, f"{preset}: {moved}: regenerate constraints.txt (CLAUDE.md 11)"
+    cfg = config.load(set(cli.COMMANDS))
+    old_deps, old_dev = presets.dependencies(cfg)
     deps, dev = presets.dependencies(_skeleton_config(preset, "myapp"), preset)
-    needed = {presets._norm_name(r) for r in (*deps, *dev)}
-    missing = sorted(needed - presets.locked_names() - set(presets.constraints(preset)))
-    assert not missing, f"{preset}: {missing} would be resolved fresh at ./deploy new: add a constraints.txt (CLAUDE.md 11)"
+    new = {presets._norm_name(r) for r in (*deps, *dev)}
+    kept = (presets._declared_anywhere() - {presets._norm_name(r) for r in (*old_deps, *old_dev)}) | new
+    missing = sorted((presets.locked_names(kept) | new) - set(pins))
+    assert not missing, f"{preset}: {missing} are not pinned: regenerate constraints.txt (CLAUDE.md 11)"
+    if preset == cfg.app.preset:  # the template is a project of this preset: its lock is the tested set
+        assert set(pins) == set(template)
 
 
 # --- copy_template ---------------------------------------------------------------------------
@@ -677,6 +751,58 @@ def test_copy_template_copies_only_what_git_tracks(tmp_path: Path, monkeypatch: 
     err = capsys.readouterr().err
     assert "not copied (not tracked by git): .env, notes.txt" in err
     assert "x.spec" not in err and "pyc" not in err  # ignored or skipped: not worth a line
+
+
+def _links(root: Path) -> None:
+    (root / "docs" / "v1").mkdir(parents=True)
+    (root / "docs" / "v1" / "index.md").write_text("# v1\n", encoding="utf-8")
+    try:
+        (root / "AGENTS.md").symlink_to("modified.txt")
+        (root / "docs" / "latest").symlink_to("v1", target_is_directory=True)
+        (root / "dangling").symlink_to("missing-target")
+    except OSError as e:  # Windows without the symlink privilege
+        pytest.skip(f"cannot create symbolic links here: {e}")
+
+
+@needs_git
+@pytest.mark.parametrize("track", [True, False], ids=["git", "every-file"])
+def test_copy_template_copies_links_as_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_env: None, track: bool) -> None:
+    """Tracked links (git mode 120000) became copies of their targets (a link to a big folder
+    was copied whole) and a dangling one was dropped without a word."""
+    src = tmp_path / "template"
+    _fake_template(src, track=track)
+    _links(src)
+    if track:
+        _git(src, "add", "--", "AGENTS.md", "docs", "dangling")
+    monkeypatch.setattr(presets, "ROOT", src)
+    dest = tmp_path / "new"
+    presets.copy_template(dest)
+    assert os.readlink(dest / "AGENTS.md") == "modified.txt" and (dest / "AGENTS.md").read_text(encoding="utf-8") == "new\n"
+    assert os.readlink(dest / "docs" / "latest") == "v1" and (dest / "docs" / "latest" / "index.md").is_file()
+    assert os.readlink(dest / "dangling") == "missing-target"
+
+
+def test_copy_link_falls_back_to_the_content_without_the_privilege(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    src = tmp_path / "t"
+    src.mkdir()
+    _links(src)
+    (src / "modified.txt").write_text("content\n", encoding="utf-8")
+    monkeypatch.setattr(presets, "ROOT", src)
+
+    def denied(self: Path, target: Any, target_is_directory: bool = False) -> None:
+        raise OSError(1314, "A required privilege is not held by the client")
+
+    monkeypatch.setattr(Path, "symlink_to", denied)
+    dest = tmp_path / "d"
+    (dest / "docs").mkdir(parents=True)
+    presets._copy_link(src / "AGENTS.md", dest / "AGENTS.md", "AGENTS.md")
+    presets._copy_link(src / "docs" / "latest", dest / "docs" / "latest", "docs/latest")
+    presets._copy_link(src / "dangling", dest / "dangling", "dangling")
+    assert (dest / "AGENTS.md").read_text(encoding="utf-8") == "content\n" and not (dest / "AGENTS.md").is_symlink()
+    assert (dest / "docs" / "latest" / "index.md").is_file()
+    assert not os.path.lexists(dest / "dangling")
+    err = capsys.readouterr().err
+    assert "could not copy the link AGENTS.md" in err and "dangling (A required privilege is not held by the client); it points nowhere" in err
 
 
 @needs_git
@@ -859,6 +985,101 @@ def test_new_from_a_project_keeps_the_manual_it_carries(tmp_path: Path, monkeypa
     assert tomllib.loads((dest / "pyproject.toml").read_text(encoding="utf-8"))["project"]["description"] == presets.load("script")["description"]
 
 
+@pytest.mark.parametrize(
+    "pyproject",
+    [
+        '[project]\nname = "old"\ndescription = """\nMy tool:\ncounts primes."""\nversion = "1"\n',
+        "[project]\nname = \"old\"\ndescription = '''My tool'''  # mine\nversion = \"1\"\n",
+        '[project]\r\nname = "old"\r\ndescription = "one line"\r\nversion = "1"\r\n',
+        '[project]\nname = "old"\nversion = "1"\n\n[tool.x]\ndescription = "not this one"\n',  # no description yet
+    ],
+    ids=["basic-multi-line", "literal-multi-line", "crlf", "missing"],
+)
+def test_make_own_sets_the_description_whatever_its_form(tmp_path: Path, pyproject: str) -> None:
+    """A triple-quoted description was half-replaced (invalid TOML: `new` then failed with a
+    misleading error), and a missing one was never written although README says new writes it."""
+    dest = tmp_path / "copy"
+    (dest / ".pytemplate").mkdir(parents=True)
+    (dest / "pyproject.toml").write_text(pyproject, encoding="utf-8", newline="")
+    presets._make_own(dest, "script", "demo")
+    data = tomllib.loads((dest / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["project"] == {"name": "old", "description": presets.load("script")["description"], "version": "1"}
+    assert data.get("tool", {}).get("x", {}).get("description") in (None, "not this one")
+
+
+def test_make_own_leaves_a_pyproject_without_a_project_table(tmp_path: Path) -> None:
+    dest = tmp_path / "copy"
+    (dest / ".pytemplate").mkdir(parents=True)
+    for text in ('[tool.x]\ndescription = "keep"\n', "[project\n"):  # init names what is wrong
+        (dest / "pyproject.toml").write_text(text, encoding="utf-8")
+        presets._make_own(dest, "script", "demo")
+        assert (dest / "pyproject.toml").read_text(encoding="utf-8") == text
+
+
+@pytest.mark.parametrize(("quiet", "verbose", "flags"), [(False, False, []), (True, False, ["-q"]), (False, True, ["-v"])])
+def test_new_passes_quiet_and_verbose_to_the_copys_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quiet: bool, verbose: bool, flags: list[str]) -> None:
+    """`./deploy -q new` printed the whole __init step (and -v never listed its files)."""
+    calls: list[list[str]] = []
+
+    def run(argv: list[Any], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append([str(a) for a in argv])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(presets, "copy_template", _fake_copy)
+    monkeypatch.setattr(presets, "_git_init", lambda dest: None)
+    monkeypatch.setattr(proc, "run", run)
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+    monkeypatch.setattr(presets.ui, "QUIET", quiet)
+    monkeypatch.setattr(presets.ui, "VERBOSE", verbose)
+    presets.new(tmp_path / "demo", "script", "demo")
+    child = next(c for c in calls if "__init" in c)
+    assert child[5 : child.index("__init")] == flags
+
+
+def test_quiet_init_quiets_uv_too(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(presets.ui, "QUIET", True)
+    presets.init(fake.cfg, "raylib", None, force=True)
+    assert fake.calls and all(c[2] == "--quiet" for c in fake.calls)
+    monkeypatch.setattr(presets.ui, "QUIET", False)
+    fake.calls.clear()
+    presets.init(_skeleton_config("raylib", "myapp"), "flet", None, force=True)
+    assert fake.calls and not any("--quiet" in c for c in fake.calls)
+
+
+@pytest.mark.parametrize(
+    ("launcher", "expected"),
+    [
+        ("sh:bash", ["cd '/p/my proj'", "./deploy setup"]),
+        ("", ["cd '/p/my proj'", "./deploy setup"]),
+        ("cmd", ['cd /d "/p/my proj"', ".\\deploy setup"]),
+        ("ps1:Desktop:5.1", ["cd '/p/my proj'", "./deploy setup"]),
+    ],
+)
+def test_new_says_what_comes_next_for_the_callers_shell(monkeypatch: pytest.MonkeyPatch, launcher: str, expected: list[str]) -> None:
+    """One hint, each command on its own line (cmd and Windows PowerShell 5.1 have no `&&`), the
+    folder quoted (a space broke `cd <dest> && ./deploy setup`), `.\\deploy` in cmd."""
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
+    assert presets.next_steps(Path("/p/my proj")) == expected
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "ps1:Core:7.6")
+    quote = "\N{RIGHT SINGLE QUOTATION MARK}"
+    assert presets.next_steps(Path(f"/p/it's{quote}s"))[0] == f"cd '/p/it''s{quote}{quote}s'"
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh")
+    assert presets.next_steps(Path("/p/it's"))[0] == "cd '/p/it'\"'\"'s'"
+
+
+def test_new_prints_one_next_step_hint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fake: Fake) -> None:
+    """init (run by new in the copy) printed "Next step: ./deploy setup && ./deploy run", for
+    the wrong folder, before new's own `cd <dest> && ./deploy setup`."""
+    presets.init(fake.cfg, "script", "demo", force=True)
+    assert "Next" not in capsys.readouterr().err
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh")
+    monkeypatch.setattr(presets, "copy_template", _fake_copy)
+    monkeypatch.setattr(presets, "_git_init", lambda dest: None)
+    presets.new(tmp_path / "my proj", "script", "demo")
+    err = capsys.readouterr().err
+    assert err.count("Next") == 1 and f"  cd {shlex.quote(str((tmp_path / 'my proj').resolve()))}\n  ./deploy setup\n" in err
+
+
 def test_project_readme_without_a_manual_points_at_the_template() -> None:
     readme = presets.project_readme("demo", "script", manual=False)
     assert presets.TEMPLATE_URL in readme.split("Made from", 1)[1] and ".pytemplate/README.md" not in readme
@@ -1010,6 +1231,41 @@ def test_git_init_makes_a_main_branch(tmp_path: Path, git_env: None) -> None:
     assert not (inner / ".git").exists()
 
 
+@needs_git
+@pytest.mark.parametrize("filemode", ["false", "true"])
+def test_git_init_in_a_monorepo_stages_the_launchers_executable(tmp_path: Path, git_env: None, filemode: str) -> None:
+    """new inside a repository with core.filemode = false (Git for Windows): `git add` recorded
+    deploy as 100644 and the pre-commit hook refused the first commit. Staged 100755 there;
+    elsewhere (core.filemode = true) nothing is staged: the files' own x bit is recorded."""
+    mono = tmp_path / "mono"
+    mono.mkdir()
+    _git(mono, "init", "--quiet")
+    _git(mono, "config", "core.filemode", filemode)  # the throwaway repository's own config
+    dest = mono / "apps" / "game"
+    dest.mkdir(parents=True)
+    for script in ("deploy", "deploy.ps1", "deploy.cmd"):
+        (dest / script).write_text("#!/bin/sh\n", encoding="utf-8")
+        (dest / script).chmod(0o644)
+    presets._git_init(dest)
+    assert not (dest / ".git").exists()  # no nested repository
+    modes = {line.split()[3]: line.split()[0] for line in _git(mono, "ls-files", "-s").splitlines()}
+    assert modes == ({"apps/game/deploy": "100755", "apps/game/deploy.ps1": "100755"} if filemode == "false" else {})
+
+
+@needs_git
+def test_git_init_in_a_monorepo_that_ignores_the_project(tmp_path: Path, git_env: None) -> None:
+    mono = tmp_path / "mono"
+    mono.mkdir()
+    _git(mono, "init", "--quiet")
+    _git(mono, "config", "core.filemode", "false")
+    (mono / ".gitignore").write_text("apps/\n", encoding="utf-8")
+    dest = mono / "apps" / "game"
+    dest.mkdir(parents=True)
+    (dest / "deploy").write_text("#!/bin/sh\n", encoding="utf-8")
+    presets._git_init(dest)  # git refuses to add an ignored path: nothing staged, no error
+    assert _git(mono, "ls-files", "-s") == ""
+
+
 def test_git_init_falls_back_without_b(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """git < 2.28 has no `init -b`: a plain init, then HEAD -> refs/heads/main."""
     calls: list[list[str]] = []
@@ -1074,13 +1330,18 @@ def test_cmd_new_derives_a_valid_name_from_the_folder(dry: Config, tmp_path: Pat
     assert list(tmp_path.iterdir()) == []
 
 
-def test_cmd_new_dry_run_mentions_the_pins(dry: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    preset = next((p for p in PRESETS if presets.constraints(p)), None)
-    if preset is None:
-        pytest.skip("no preset has pins")
+@pytest.mark.parametrize("preset", PRESETS)
+def test_cmd_new_dry_run_counts_the_pins_init_passes(dry: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], preset: str) -> None:
+    """The dry run counted every pin of the preset, while init pins only the packages uv.lock
+    does not have yet (the copy's lock is this one): from a flet project it said 32, init 0."""
     monkeypatch.chdir(tmp_path)
     assert cmd_mode.cmd_new(dry, ["x", "--preset", preset]) == 0
-    assert f"pins    {len(presets.constraints(preset))} packages" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    count = len(set(presets.constraints(preset)) - presets.locked_names())
+    if count:
+        assert f"pins    {count} packages new to uv.lock" in err
+    else:
+        assert "pins " not in err
 
 
 # --- init, in-process with uv faked -----------------------------------------------------------------
@@ -1162,12 +1423,47 @@ def test_init_converts_the_project(fake: Fake, preset: str) -> None:
     assert uv[-1] == ["lock"]
     assert all("--frozen" in c for c in uv if c[0] == "remove")
     assert all("--no-sync" in c for c in uv if c[0] == "add")
-    pins = presets.constraints(preset)
-    if pins and preset != "script":
+    # the pins of the packages uv.lock does not have yet (the ones it has keep their versions)
+    pins = {n: v for n, v in presets.constraints(preset).items() if n not in presets.locked_names(lock=presets.LOCK)}
+    if pins:
         adds = [c for c in uv if c[0] == "add"]
         assert adds and all("--constraints" in c for c in adds)
         pinned = Path(adds[0][adds[0].index("--constraints") + 1])
         assert pinned.read_text(encoding="utf-8").splitlines() == [f"{n}=={v}" for n, v in sorted(pins.items())]
+
+
+def test_init_from_a_flet_project_of_another_version_removes_its_pins_first(fake: Fake) -> None:
+    """A flet project whose [preset.flet] version = "1.0.0" is applied: `new --preset flet` ran a
+    resolving `uv add flet==1.0.1 flet-desktop==1.0.1` while the dev group still pinned
+    flet-cli==1.0.0 (which pins flet==1.0.0): no solution, and new failed. Every pin the new
+    preset adds in another form now leaves pyproject.toml first (uv remove --frozen)."""
+    data = tomllib.loads(presets.skeleton("flet", "myapp")["pytemplate.toml"].decode("utf-8"))
+    data["preset"] = {"flet": {"version": "1.0.0"}}
+    cfg = _config(data)
+    pyproject = FAKE_PYPROJECT.replace('"rich>=15.0.0"', '"flet==1.0.0",\n    "flet-desktop == 1.0.0"').replace('"pytest>=9.0.0",', '"pytest>=9.0.0",\n    "flet-cli==1.0.0",')
+    (fake.root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    version = presets.default_options("flet")["version"]
+    assert version != "1.0.0"
+    plan = presets.plan_init(cfg, "flet", "Other", force=True)
+    assert plan.drop == ["flet==1.0.0", "flet-desktop == 1.0.0"] and plan.drop_dev == ["flet-cli==1.0.0"]
+    presets.init(cfg, "flet", "Other", force=True)
+    uv = [c[1:] for c in fake.calls]
+    assert uv[0] == ["remove", "--frozen", "flet", "flet-desktop"]
+    assert uv[1] == ["remove", "--frozen", "--dev", "flet-cli"]
+    assert uv[2][:2] == ["add", "--no-sync"] and uv[2][-2:] == [f"flet=={version}", f"flet-desktop=={version}"]
+    assert uv[3][:3] == ["add", "--no-sync", "--dev"] and uv[3][-1] == f"flet-cli=={version}"
+    assert uv[4] == ["lock"]
+
+
+def test_dropped_keeps_what_the_new_preset_adds_unchanged() -> None:
+    added = ["flet==1.0.1", "flet-desktop==1.0.1", "flet-cli==1.0.1"]
+    declared = ["mypy-extensions>=1.1.0", "Flet == 1.0.1", "flet_desktop==1.0.0", "rich>=15"]
+    # rich: the old preset's, gone; flet_desktop: another pin; Flet == 1.0.1: the same requirement
+    assert presets._dropped(["rich>=15"], added[:2], added, declared) == ["flet_desktop==1.0.0", "rich>=15"]
+    assert presets._dropped(["rich>=15"], ["rich>=15"], [], declared) == []  # the same preset: nothing
+    assert presets._dropped([], [], added, ["pytest>=9", "flet-cli==1.0.0; sys_platform != 'emscripten'"]) == [
+        "flet-cli==1.0.0; sys_platform != 'emscripten'"
+    ]
 
 
 def test_init_removes_the_old_preset_first_and_adds_the_new_one(fake: Fake) -> None:
@@ -1375,6 +1671,10 @@ SAME = "<unchanged>"
         ('[project]\nversion = "1"\n\n[tool.x]\nname = "keep"\n', SAME),  # [project] has no name
         ('name = "top"\n\n[tool.x]\nname = "keep"\n', SAME),  # no [project] at all
         ('[project]\nnamespace = "x"\nname = "old"\n', '[project]\nnamespace = "x"\nname = "new"\n'),
+        # a multi-line string is never half-replaced (it was `name = "new""old"""`): callers check
+        ('[project]\nname = """old"""\n', SAME),
+        ("[project]\nname = '''old'''\n", SAME),
+        ('[project]\nname = ""\n', '[project]\nname = "new"\n'),
     ],
 )
 def test_set_project_name_only_touches_the_project_table(text: str, expected: str) -> None:
@@ -1430,14 +1730,136 @@ def test_init_refuses_names_uv_refuses(fake: Fake, name: str) -> None:
 def test_init_pins_only_what_the_lock_does_not_have(fake: Fake) -> None:
     """A package the project already locks keeps its version (a project made from another
     project); the preset's pins only decide the packages new to uv.lock."""
-    pins = presets.constraints("raylib")
+    pins = {n: v for n, v in presets.constraints("raylib").items() if n not in presets.locked_names()}
     if not pins:
-        pytest.skip("the raylib preset has no pins")
+        pytest.skip("the raylib preset has no pins beyond this uv.lock")
     first = sorted(pins)[0]
     lock = fake.root / "uv.lock"
     lock.write_text(lock.read_text(encoding="utf-8") + f'\n[[package]]\nname = "{first}"\nversion = "0.0.1"\nsource = {{ registry = "https://pypi.org/simple" }}\n', encoding="utf-8")
     plan = presets.plan_init(fake.cfg, "raylib", None, force=False)
     assert plan.pins == {n: v for n, v in pins.items() if n != first}
+    assert not set(plan.pins) & presets.locked_names()  # rich, pytest... (FAKE_LOCK) keep theirs too
+
+
+# A raylib project's pyproject.toml and uv.lock: none of the script preset's tree (rich,
+# markdown-it-py, mdurl), which the flet preset needs too (flet-cli -> rich)
+RAYLIB_PYPROJECT = FAKE_PYPROJECT.replace('"rich>=15.0.0"', '"raylib==6.0.1.0"').replace('"pytest>=9.0.0",', '"pytest>=9.0.0",\n    "types-cffi",')
+RAYLIB_LOCK = """\
+version = 1
+requires-python = ">=3.14"
+
+[[package]]
+name = "myapp"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [{ name = "raylib" }]
+
+[package.dev-dependencies]
+dev = [{ name = "pytest" }, { name = "types-cffi" }]
+
+[[package]]
+name = "raylib"
+version = "6.0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "cffi" }]
+
+[[package]]
+name = "cffi"
+version = "2.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "pycparser" }]
+
+[[package]]
+name = "pycparser"
+version = "3.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "types-cffi"
+version = "2.1.0.20260827"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "pytest"
+version = "9.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "pygments" }]
+
+[[package]]
+name = "pygments"
+version = "2.21.0"
+source = { registry = "https://pypi.org/simple" }
+"""
+
+
+def _as_raylib_project(fake: Fake) -> Config:
+    (fake.root / "pyproject.toml").write_text(RAYLIB_PYPROJECT, encoding="utf-8")
+    (fake.root / "uv.lock").write_text(RAYLIB_LOCK, encoding="utf-8")
+    return _skeleton_config("raylib", "myapp")
+
+
+@pytest.mark.parametrize(("preset", "name"), [("script", "mdurl"), ("script", "Markdown-It-Py"), ("script", "rich"), ("flet", "mdurl"), ("flet", "rich")])
+def test_new_from_a_project_without_the_presets_tree_refuses_its_names(fake: Fake, preset: str, name: str) -> None:
+    """From a raylib project (its uv.lock has no rich), `new --preset script --name mdurl` was
+    accepted: uv then resolved markdown-it-py's mdurl to the project itself, and the library was
+    missing from uv.lock, .venv and every build. The pins name the preset's whole tested tree."""
+    cfg = _as_raylib_project(fake)
+    with pytest.raises(DeployError, match="also the name of a dependency") as e:
+        presets.check_name_free(cfg, preset, name)
+    assert e.value.code == 2
+    presets.check_name_free(cfg, preset, "demo")
+
+
+def test_new_from_another_project_gets_the_tested_versions(fake: Fake) -> None:
+    """`new --preset script` from a raylib project resolved rich, markdown-it-py and mdurl to
+    the newest release of the day: the pins must reach every package the source lock lacks."""
+    cfg = _as_raylib_project(fake)
+    plan = presets.plan_init(cfg, "script", "demo", force=True)
+    tested = presets.constraints("script")
+    assert {"rich", "markdown-it-py", "mdurl"} <= set(plan.pins)
+    assert plan.pins == {n: v for n, v in tested.items() if n not in presets.locked_names()}
+    assert "pytest" not in plan.pins  # the source project's own version stays
+    presets.init(cfg, "script", "demo", force=True)
+    adds = [c for c in fake.calls if c[1] == "add"]
+    assert adds and all("--constraints" in c for c in adds)
+
+
+def _self_dependent_lock(name: str) -> str:
+    """The uv.lock uv (0.12) writes when a dependency of a dependency has the project's name."""
+    return (
+        f'version = 1\n\n[[package]]\nname = "markdown-it-py"\nversion = "4.2.0"\nsource = {{ registry = "https://pypi.org/simple" }}\n'
+        f'dependencies = [{{ name = "{name}" }}]\n\n[[package]]\nname = "{name}"\nversion = "0.1.0"\nsource = {{ virtual = "." }}\n'
+        'dependencies = [{ name = "markdown-it-py" }]\n'
+    )
+
+
+def test_self_dependents(tmp_path: Path) -> None:
+    lock = tmp_path / "uv.lock"
+    lock.write_text(_self_dependent_lock("mdurl"), encoding="utf-8")
+    assert presets._self_dependents("mdurl", lock) == ["markdown-it-py"]
+    assert presets._self_dependents("MDURL", lock) == ["markdown-it-py"]
+    assert presets._self_dependents("other", lock) == []  # not the project's name
+    lock.write_text(FAKE_LOCK, encoding="utf-8")
+    assert presets._self_dependents("myapp", lock) == []
+    assert presets._self_dependents("mdurl", lock) == []  # the real library, not the project
+
+
+def test_init_refuses_a_lock_that_resolves_a_dependency_to_the_project(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The last guard, for what the name check cannot know (a fork left out of the pins, a
+    source lock with other versions): uv resolved a dependency to the project and said nothing."""
+    before = _snapshot(fake.root)
+
+    def run(argv: list[Any], **_: Any) -> subprocess.CompletedProcess[str]:
+        if str(argv[1]) == "lock":
+            (fake.root / "uv.lock").write_text(_self_dependent_lock("Demo"), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(proc, "run", run)
+    monkeypatch.setattr(presets, "check_name_free", lambda *a: None)
+    with pytest.raises(DeployError, match=r"(?s)'Demo' is also the name of a package .*markdown-it-py depends on demo.*--name NAME") as e:
+        presets.init(fake.cfg, "script", "Demo", force=True)
+    assert e.value.code == 2
+    assert _snapshot(fake.root) == before and not fake.rendered and not _left_aside(fake.root)
 
 
 def test_plan_init_writes_nothing_and_the_dry_run_prints_it(fake: Fake, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1483,6 +1905,133 @@ def test_remove_deletes_read_only_entries(tmp_path: Path) -> None:
     single.chmod(0o444)
     assert presets._remove(single) and not single.exists()
     assert presets._remove(tmp_path / "missing")
+
+
+# --- the skeletons' own code ---------------------------------------------------------------------------
+
+
+class _Control:
+    """A stand-in for every Flet control the flet skeleton creates."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.args = args
+        self.disabled = False
+        self.__dict__.update(kwargs)
+
+
+class _Page:
+    def __init__(self) -> None:
+        self.added: list[Any] = []
+
+    def add(self, *controls: Any) -> None:
+        self.added += controls
+
+    def update(self) -> None:
+        pass
+
+
+def _fake_module(name: str, **attrs: Any) -> Any:
+    module = type(sys)(name)
+    module.__dict__.update(attrs)
+    return module
+
+
+FAKE_FLET = {"Slider": _Control, "Image": _Control, "Text": _Control, "Button": _Control, "Row": _Control, "ThemeMode": type("ThemeMode", (), {"DARK": "dark"})}
+
+
+def _skeleton_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preset: str, module: str, fakes: dict[str, Any]) -> Any:
+    """Import a module of the preset's skeleton rendered as `demo`, its third-party imports faked."""
+    for rel_path, data in presets.skeleton(preset, "demo").items():
+        if rel_path.startswith("src/"):
+            (tmp_path / rel_path).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel_path).write_bytes(data)
+    for name, fake_module in fakes.items():
+        monkeypatch.setitem(sys.modules, name, fake_module)
+    for name in [m for m in sys.modules if m == "demo" or m.startswith("demo.")]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.syspath_prepend(str(tmp_path / "src"))
+    return importlib.import_module(module)
+
+
+def _flet_draw(app: Any) -> tuple[Any, Any, Any, Any]:
+    import asyncio
+
+    page = _Page()
+    asyncio.run(app.main(page))
+    row, image, status = page.added
+    button = row.args[0][1]
+    return page, button, image, status
+
+
+def test_flet_skeleton_draws_where_no_process_can_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """flet build for the web (Pyodide), Android and iOS: ProcessPoolExecutor raises there, and
+    the Draw handler died with the button disabled on 'Computing...'. It draws in-process."""
+    import asyncio
+
+    if "flet" not in PRESETS:
+        pytest.skip("no flet preset")
+    app = _skeleton_package(tmp_path, monkeypatch, "flet", "demo.ui.app", {"flet": _fake_module("flet", **FAKE_FLET)})
+
+    def no_processes(*_: Any, **__: Any) -> Any:
+        raise NotImplementedError("This Python build lacks multiprocessing.synchronize")
+
+    monkeypatch.setattr(app, "ProcessPoolExecutor", no_processes)
+    app._executor.cache_clear()
+    _, button, image, status = _flet_draw(app)
+    before = image.src
+    asyncio.run(button.on_click(None))
+    assert not button.disabled and image.src != before and image.src.startswith(b"\x89PNG")
+    assert "iterations in" in status.value
+    for platform in app.NO_PROCESSES:  # never even tried there
+        monkeypatch.setattr(sys, "platform", platform)
+        app._executor.cache_clear()
+        assert app._executor() is None
+    app._executor.cache_clear()
+
+
+def test_flet_skeleton_gives_the_button_back_when_drawing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    if "flet" not in PRESETS:
+        pytest.skip("no flet preset")
+    app = _skeleton_package(tmp_path, monkeypatch, "flet", "demo.ui.app", {"flet": _fake_module("flet", **FAKE_FLET)})
+    monkeypatch.setattr(app, "_executor", lambda: None)
+
+    def broken(*_: Any) -> bytes:
+        raise ValueError("boom")
+
+    _, button, _, status = _flet_draw(app)
+    monkeypatch.setattr(app.fractal, "render_png", broken)
+    with pytest.raises(ValueError, match="boom"):
+        asyncio.run(button.on_click(None))
+    assert not button.disabled and status.value == "Draw failed (see the console)"
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [([], (0, 2000)), (["--frames", "900", "--bunnies", "30000"], (900, 30000)), (["--frames=5"], (5, 2000)), (["--bunnies=0"], (0, 0))],
+)
+def test_raylib_skeleton_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str], expected: tuple[int, int]) -> None:
+    """`--frames=900` was silently ignored (a benchmark that never ended)."""
+    app = _skeleton_package(tmp_path, monkeypatch, "raylib", "demo.app", {"raylib": _fake_module("raylib", __getattr__=lambda name: None)})
+    assert app._options(argv) == expected
+
+
+@pytest.mark.parametrize("argv", [["--frames"], ["--bunnies", "many"], ["--frames", "-1"], ["--fps", "3"]])
+def test_raylib_skeleton_refuses_bad_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]) -> None:
+    """`--frames` without a value or `--bunnies many` crashed with a traceback: now a usage error."""
+    app = _skeleton_package(tmp_path, monkeypatch, "raylib", "demo.app", {"raylib": _fake_module("raylib", __getattr__=lambda name: None)})
+    with pytest.raises(SystemExit) as e:
+        app._options(argv)
+    assert e.value.code == 2 and "usage: demo" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("preset", PRESETS)
+def test_presets_are_ascii(preset: str) -> None:
+    """Rule 1.5: every file of a preset (skeleton, preset.toml, pins, tools) is ASCII (a
+    `px/s` with a superscript two reached every raylib project)."""
+    bad = [p.relative_to(presets.PRESETS).as_posix() for p in sorted((presets.PRESETS / preset).rglob("*")) if p.is_file() and "__pycache__" not in p.parts and not p.read_bytes().isascii()]
+    assert not bad
 
 
 # --- the raylib stub generator ----------------------------------------------------------------------
@@ -1618,7 +2167,10 @@ def test_new_creates_a_working_project(preset: str, tmp_path: Path, network: Non
     assert "constraint-dependencies" not in project["tool"]["uv"]  # the pins were a one-off
     locked = {presets._norm_name(e["name"]): e["version"] for e in presets._lock_entries(dest / "uv.lock") if not presets._is_project(e)}
     pins = presets.constraints(preset)
-    assert {n: locked.get(n) for n in pins} == pins, "the new project does not lock the tested versions"
+    # what this project locks keeps its version (init pins only the packages it lacks)
+    source = {presets._norm_name(e["name"]): e["version"] for e in presets._lock_entries() if not presets._is_project(e)}
+    expected = {n: source.get(n, v) for n, v in pins.items()}
+    assert {n: locked.get(n) for n in pins} == expected, "the new project does not lock the tested versions"
     if TEMPLATE_REPO:
         fresh = sorted(set(locked) - presets.locked_names() - set(pins))
         assert not fresh, (

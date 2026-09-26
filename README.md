@@ -101,12 +101,14 @@ outside the template:
    commands) and `[project] description` in `pyproject.toml`.
 3. It runs the preset step in the copy: `src/`, `tests/`, `typings/` and `pytemplate.toml` from
    the preset's skeleton, the preset's dependencies in `pyproject.toml` and `uv lock`, which
-   needs the network. raylib and flet projects get the versions the template was tested with
-   (`.pytemplate/presets/<preset>/constraints.txt`), once: `./deploy lock --upgrade` moves on.
+   needs the network. The packages the source project does not lock yet get the versions the
+   template was tested with (`.pytemplate/presets/<preset>/constraints.txt`, the preset's whole
+   tested tree), once: `./deploy lock --upgrade` moves on.
 4. It runs `git init -b main` (unless `DIR` is inside a git work tree) with `deploy` and
-   `deploy.ps1` executable. It makes no commit. Inside a bigger repository it warns that the
-   generated `.github/workflows/ci.yml` will not run: GitHub reads workflows only from the
-   repository's own `.github/workflows/`, so CI there needs a workflow of the repository that
+   `deploy.ps1` executable. Inside a work tree with `core.filemode = false` (Git for Windows) it
+   stages those two as executable there. It makes no commit. Inside a bigger repository it warns
+   that the generated `.github/workflows/ci.yml` will not run: GitHub reads workflows only from
+   the repository's own `.github/workflows/`, so CI there needs a workflow of the repository that
    runs its steps in the project's folder (`defaults.run.working-directory`).
 
 When a step fails (a name uv refuses, no network, Ctrl+C), `new` removes what it created.
@@ -118,8 +120,11 @@ become `-`). It is the executable's name; the Python package is the name in lowe
 for `-` (`My-Game` -> `src/my_game/`). A name has letters, digits, `-` and `_`, starts with a
 letter and ends with a letter or digit, and must not be a Python keyword, a standard-library
 module, a backend (`cpython`, `pypy`, `mypyc`), a package the project locks (directly or not:
-`flet`, `rich`, `pygments`...), one of the project's own names (`src`, `tests`, `typings`,
-`build`, `dist`, `assets`, `main`) or a Windows device name (`con`, `aux`, `nul`, `com1`...). So
+`flet`, `rich`, `pygments`...) or a module one of them installs under another name (`py`,
+`markdown_it`, `pyray`, `yaml`...), one of the project's own names (`src`, `tests`, `typings`,
+`build`, `dist`, `assets`, `main`), a Python command (`py`, `python`, `python3`, `pythonw`,
+`pypy3`...: the Windows `.cmd` launchers call them) or a Windows device name (`con`, `aux`,
+`nul`, `com1`...). So
 `./deploy new ../flet --preset flet` fails: add `--name`.
 
 The preset is fixed when the project is created: to use another one, create a new project with
@@ -954,7 +959,8 @@ Tested with Flet 1.0.1 and mypyc 2.3.1, with Flet in a compiled module:
 So compiled code has `compile.forbid_imports = ["flet", "flet_desktop", "flet_cli"]`. The pattern:
 the interpreted handler converts Flet values to simple types and calls the core in another
 process (`ProcessPoolExecutor`: compiled code does not release the GIL, so a thread would freeze
-the UI).
+the UI). Web and mobile apps (`flet build` for `web`, `apk`, `aab`, `ipa`) cannot start processes:
+there the skeleton runs the work in the event loop, and the UI waits for it.
 
 - `./deploy dev`: hot reload (`flet run -d -r`; the editors start it without waiting).
 - `./deploy build` uses `flet pack`; `./deploy build --method flet` uses `flet build`
@@ -1362,7 +1368,7 @@ Pinned, and moved on purpose:
 
 | What | Where | How |
 |---|---|---|
-| dependencies | `uv.lock`; the presets' `constraints.txt` | `./deploy lock --upgrade` (or `--upgrade-package NAME`), then the tests below; regenerate the constraints of a preset whose versions moved (CLAUDE.md, section 11) |
+| dependencies | `uv.lock`; the presets' `constraints.txt` | `./deploy lock --upgrade` (or `--upgrade-package NAME`), then the tests below; regenerate the presets' constraints (each lists its preset's whole tested tree: CLAUDE.md, section 11) |
 | CPython, PyPy | `python.cpython`, `python.pypy` in the root and preset `pytemplate.toml` files | edit, `./deploy apply`; native dependencies must publish wheels for the new version |
 | the uv floor | `envs.MIN_UV` (0.10.12), written as `required-version` | with the Python pins: the first uv that downloads them |
 | basedpyright | `cmd_dev.BASEDPYRIGHT` and `cmd_dev.BASEDPYRIGHT_NODE` | together, then `./deploy render` (`editor.json` carries the version) |
