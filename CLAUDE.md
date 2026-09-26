@@ -612,9 +612,10 @@ header rules (with detector tests proving each rule fires).
   `selftest --shells` (also with `--list`) and `selftest --e2e`.
 - `-q` hides progress (`ui.step`, `ui.command`, `ui.ok`, `ui.info`), never what was asked for:
   `ui.report` (the `tasks` list, the stderr of a failed query), warnings, errors and
-  `check_line` always print, and a dry run ignores `-q` (its output is the plan). Still
-  `ui.info` (hidden by `-q`): the `mode` display (`cmd_mode._describe`) and `render
-  --check/--diff` lists (`cmd_mode.cmd_render`, `render.apply`).
+  `check_line` always print, and a dry run ignores `-q` (its output is the plan). Results are
+  `ui.report` too, so `-q` keeps them: the `mode` display (`cmd_mode._describe`; only its
+  `ui.step` header goes), the paths `render` lists (`cmd_mode.cmd_render`: outdated, updated,
+  would update) and the `render --diff` output (`render.apply`).
 - `ui.error` prints `error: ` and `ui.warn` prints `warning: ` (only the prefix is coloured on a
   TTY). The VS Code problem matcher `RULES_RE` and the Neovim parser `tasks.parse_line` depend
   on these exact prefixes and on `str(lintc.Finding)` (`src/...:N: msg`, relative to ROOT): do
@@ -3527,6 +3528,17 @@ Editors:
   are missed); for multi-line basedpyright messages only the first line is used (the rule code
   is lost); MSVC/gcc errors are not matched.
 - `actboy168.tasks` is a small third-party extension (disabled in Restricted Mode).
+- With PyPy supported, VS Code's mypy extension (mypy-type-checker) checks as the `.venv`
+  Python, not as `min_python`: an API that 3.11 lacks (`typing.override`) passes there while
+  `./deploy check` (`render.mypy_cli_args`), the Neovim linter and Pylance/basedpyright
+  (`pythonVersion`) flag it. `python_version` cannot go into `.mypy.ini`: without
+  `--python-executable` mypy then looks for a `python3.11` (`py -3.11` on Windows) for the
+  site-packages and stops without one, or reads another environment's packages with one; the
+  extension passes no `--python-executable` (it substitutes `${interpreter}` only in
+  `mypy-type-checker.path`), and a per-OS `.venv` path cannot go into a file committed for every
+  OS. Not fixed (unverifiable here: VS Code itself is untested, section 13.3); a candidate is a
+  generated `mypy-type-checker.path` of `${interpreter} -m mypy --python-version X
+  --python-executable ${interpreter}`, once verified in VS Code.
 - Stopping the flet `dev` task (hot reload) on Windows, from VS Code or Neovim, relies on
   ConPTY closing and uv's job object killing `flet.exe`: not verified.
 - Extras imported from `.lazy.lua` show as "not managed" in `:LazyExtras` and change
