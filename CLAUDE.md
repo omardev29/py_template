@@ -1974,7 +1974,8 @@ Per method:
   read the same: the VS Code matchers, rename), tests, typings, build, dist, assets; plus the
   preset's `src/` entries such as `main`), and every package the project will lock:
   the declared requirements (minus the current preset's own), their tree in `uv.lock`
-  (`locked_names`, markers ignored because uv refuses a self-dependency on any platform; the
+  (`locked_names`, markers ignored because uv treats the project's own name alike on any
+  platform: it refuses the project, or resolves the dependency to the project itself, 15.1; the
   project's own entry excluded) and the preset's pins (`constraints.txt`: the preset's whole
   tested tree, so a raylib project, whose `uv.lock` has no rich, still refuses `new --preset
   script --name mdurl`). When a preset adds packages the lock does not have, uv may resolve

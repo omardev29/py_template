@@ -353,8 +353,9 @@ def _closure(graph: dict[str, set[str]], roots: set[str]) -> set[str]:
 
 def locked_names(roots: set[str] | None = None, lock: Path | None = None) -> set[str]:
     """Normalized names of the packages in uv.lock, the project itself excluded. With `roots`,
-    only the ones they need (dependencies of dependencies included, markers ignored: uv refuses
-    a project that depends on itself on every platform)."""
+    only the ones they need (dependencies of dependencies included, markers ignored: uv resolves
+    the project's own name the same way on every platform, refusing the project or taking it
+    for the dependency)."""
     graph = _lock_graph(lock)
     return set(graph) if roots is None else _closure(graph, roots)
 
@@ -493,7 +494,8 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
     """Reject an app name that would break the project: one uv refuses (APP_NAME), a package
     src/<pkg>/ that is a Python keyword, a standard library module (of any supported Python), a
     backend name, a Windows device name, one of the project's own folders or files, a package
-    the project depends on, directly or not (uv refuses a project that depends on itself, and
+    the project depends on, directly or not (uv refuses the project, or resolves a dependency
+    of a dependency to the project itself when its version fits, section 15.1 of CLAUDE.md; and
     src/<pkg>/ would shadow the library), or a module such a package installs under another
     name (IMPORT_NAMES for the presets' pins: pytest's py, raylib's pyray; the environments of
     the project for the rest: beautifulsoup4's bs4 once `./deploy add` installed it).
@@ -526,8 +528,8 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
     if clash in names:
         raise DeployError(
             f"the app name '{name}' is also the name of a dependency of the '{preset}' preset "
-            f"({clash}, direct or indirect): uv would refuse the project and src/{pkg}/ would "
-            f"shadow the library.{hint}"
+            f"({clash}, direct or indirect): uv would refuse the project or resolve that dependency "
+            f"to the project itself, and src/{pkg}/ would shadow the library.{hint}"
         )
     installed = _installed_import_names()
     for dist in sorted(names & (IMPORT_NAMES.keys() | installed.keys())):

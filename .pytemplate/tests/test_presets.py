@@ -479,8 +479,9 @@ def test_import_names_follow_the_installed_packages() -> None:
 
 
 def test_every_locked_package_name_is_refused() -> None:
-    """uv refuses a project that depends on itself, also through a dependency of a dependency
-    (rich -> pygments), and on any platform (colorama is win32 only): every name in uv.lock."""
+    """uv refuses a project that depends on itself, or resolves the dependency to the project
+    (section 15.1), also through a dependency of a dependency (rich -> pygments), and on any
+    platform (colorama is win32 only): every name in uv.lock."""
     cfg = config.load(set(cli.COMMANDS))
     locked = presets.locked_names()
     assert locked, "uv.lock is missing or empty"
@@ -1886,6 +1887,8 @@ def test_new_from_a_project_without_the_presets_tree_refuses_its_names(fake: Fak
     with pytest.raises(DeployError, match="also the name of a dependency") as e:
         presets.check_name_free(cfg, preset, name)
     assert e.value.code == 2
+    # the reason as uv behaves (15.1): it does not always refuse, it may take the project for it
+    assert "uv would refuse the project or resolve that dependency to the project itself" in str(e.value)
     presets.check_name_free(cfg, preset, "demo")
 
 

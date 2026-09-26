@@ -1234,7 +1234,8 @@ def check_new_name(cfg: Config, new_name: str, *, who: str = "rename", retry: st
     if clash in locked_names(ROOT):
         raise DeployError(
             f"{who}: '{new_name}' is also the name of a package in uv.lock ({clash}, a dependency of a dependency): "
-            f"uv would refuse the project and src/{pkg}/ would shadow the library.\n  Choose another name: {retry}"
+            f"uv would refuse the project or resolve that dependency to the project itself, and src/{pkg}/ "
+            f"would shadow the library.\n  Choose another name: {retry}"
         )
 
 
