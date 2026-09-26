@@ -645,8 +645,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   runner's `sys.stdlib_module_names` plus `STDLIB_OTHER_VERSIONS`; uv keeps whatever Python ran
   `./deploy` first, 3.11 on one machine and 3.15 on another), a dependency
   (`presets.check_name_free`, also used by `new` and `__init`) and any package of `uv.lock`
-  (`locked_names`: indirect ones too, pygments via rich; the project's own entry excluded);
-  a broken pyproject.toml is a DeployError, never a traceback. The dirty-tree check
+  (`locked_names`: indirect ones too, pygments via rich; the project's own entry excluded) and
+  a backend name (`config.BACKENDS`: `src/mypyc/` would shadow mypy's compiler in the stage,
+  and a later rename would rewrite conftest's backend strings); a broken pyproject.toml is a
+  DeployError, never a traceback. The dirty-tree check
   (`git_changes`: `git status --porcelain -z -uall` with `LC_ALL=C`, paths relative to the
   project; the generated files and `state.json` (`derived_paths`) never count, nor, after a
   hand edit, `pytemplate.toml`) refuses without `--force` (a warning under `--dry-run`); git

@@ -767,6 +767,15 @@ def test_every_locked_package_name_is_refused() -> None:
         rename.check_new_name(cfg, "IniConfig")  # normalized like uv
 
 
+@pytest.mark.parametrize("name", ["mypyc", "PyPy", "cpython"])
+def test_backend_names_are_refused(name: str) -> None:
+    # src/mypyc/ would shadow the compiler in the mypyc stage, and a later rename away from a
+    # backend name would rewrite tests/conftest.py's `BACKEND != "mypyc"`
+    with pytest.raises(DeployError, match="name of a backend") as e:
+        rename.check_new_name(_cfg("script"), name)
+    assert e.value.code == 2
+
+
 def test_locked_names_skip_the_project_itself(tmp_path: Path) -> None:
     lock = 'version = 1\n\n[[package]]\nname = "alpha"\nversion = "0.1.0"\nsource = { virtual = "." }\n\n'
     lock += '[[package]]\nname = "Foo_Bar"\nversion = "1.0"\nsource = { registry = "https://pypi.org/simple" }\n'

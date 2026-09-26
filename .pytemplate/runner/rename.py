@@ -978,6 +978,8 @@ def check_new_name(cfg: Config, new_name: str, *, who: str = "rename", retry: st
         raise DeployError(f"{who}: the package '{pkg}' would be a Python keyword (import {pkg} is a syntax error)")
     if presets.shadows_stdlib(pkg):
         raise DeployError(f"{who}: src/{pkg}/ would shadow the standard library module '{pkg}'. Choose another name: {retry}")
+    if pkg in config.BACKENDS:  # src/mypyc/ shadows mypy's compiler; tests/conftest.py and [backend] use these words
+        raise DeployError(f"{who}: '{new_name}' is the name of a backend ({', '.join(config.BACKENDS)}). Choose another name: {retry}")
     try:
         presets.check_name_free(cfg, cfg.app.preset, new_name)
     except DeployError as e:
