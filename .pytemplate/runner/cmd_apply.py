@@ -547,19 +547,20 @@ def _apply_hook(cfg: Config) -> str:
         ui.warn(f"git pre-commit hook not checked: {repo}")
         return "not checked: git refuses the repository (see above)"
     before, copy_before = hooks.hook_state(repo), hooks.own_local(repo)
+    ours = before in OURS or (copy_before and before == "missing")  # what hooks.uninstall removes
     if cfg.hooks.pre_commit:
         hooks.ensure_installed(cfg, ROOT)
-    elif before in OURS or copy_before:
+    elif ours:
         try:
             ui.ok(hooks.uninstall(repo))
         except OSError as e:
             ui.warn(f"could not remove the git pre-commit hook: {e} (./deploy hooks uninstall)")
             return "not removed (see above)"
-    after = hooks.hook_state(repo)
-    dropped = " (and removed pre-commit.local, a copy of this project's hook)" if copy_before and not hooks.own_local(repo) else ""
+    after, copy_after = hooks.hook_state(repo), hooks.own_local(repo)
+    dropped = " (and removed pre-commit.local, a copy of this project's hook)" if copy_before and not copy_after else ""
     if after == "installed" and (before != "installed" or dropped):
         return ("updated" if before in ("outdated", "installed") else "installed") + dropped
-    if (before in OURS or copy_before) and after not in OURS:
+    if ours and not cfg.hooks.pre_commit and after not in OURS and not copy_after:
         return "removed (hooks.pre_commit = false)"
     if repo.custom_hooks_path and cfg.hooks.pre_commit:
         return _hooks_path_summary(repo)
@@ -584,7 +585,7 @@ def _hook_plan(cfg: Config) -> str:
     if not cfg.hooks.pre_commit:
         if state == "chained":
             return "would remove pre-commit.local, this project's hook after another project's (hooks.pre_commit = false)"
-        if state in OURS or copy:
+        if state in OURS or (copy and state == "missing"):
             return "would remove pytemplate's pre-commit hook (hooks.pre_commit = false)"
         return _left_alone(state, repo) or "not installed (hooks.pre_commit = false)"
     if repo.custom_hooks_path:

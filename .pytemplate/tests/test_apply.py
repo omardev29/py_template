@@ -1207,6 +1207,13 @@ def test_apply_and_a_chained_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     hooks.uninstall(rq)
     hooks.install(rp)
     hooks.install(rq, force=True)
+    # (another tool's hook put on top by hand: it runs no pre-commit.local, nothing is removed)
+    target.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+    project.edit("hooks", "pre_commit", False)
+    assert row(True).startswith("another tool's hook: left alone") and row(False).startswith("another tool's hook: left alone")
+    assert target.read_text(encoding="utf-8") == "#!/bin/sh\necho mine\n" and hooks.own_local(rp)
+    project.edit("hooks", "pre_commit", True)
+    target.write_bytes(q_hook)
     shutil.rmtree(q)
     assert row(True) == "would update the pre-commit hook"
     assert row(False) == "updated (and removed pre-commit.local, a copy of this project's hook)"
