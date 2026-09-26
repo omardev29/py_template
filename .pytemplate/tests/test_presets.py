@@ -1110,8 +1110,9 @@ def test_init_puts_everything_back_when_writing_fails(fake: Fake, monkeypatch: p
         return real(self, data)
 
     monkeypatch.setattr(Path, "write_bytes", write_bytes)
-    with pytest.raises(OSError, match="No space left"):
+    with pytest.raises(DeployError, match="init could not write: No space left") as e:  # not "internal runner error"
         presets.init(fake.cfg, "raylib", None, force=False)
+    assert e.value.code == 2
     assert _snapshot(fake.root) == before
     assert not _left_aside(fake.root)
 
@@ -1126,9 +1127,21 @@ def test_init_reports_what_it_could_not_put_back(fake: Fake, monkeypatch: pytest
 
     monkeypatch.setattr(Path, "write_bytes", write_bytes)
     monkeypatch.setattr(presets, "_remove", lambda path: False)
-    with pytest.raises(OSError):
+    with pytest.raises(DeployError, match="No space left"):
         presets.init(fake.cfg, "raylib", None, force=False)
     assert "could not put back: src/ (partly written)" in capsys.readouterr().err
+
+
+def test_init_with_a_name_the_file_system_refuses_puts_everything_back(fake: Fake) -> None:
+    """A huge name passes the name rules, but no file system takes a 300-character folder name:
+    a clear error naming the file, and the project as it was (never an internal-error traceback)."""
+    name = "a" * 300
+    before = _snapshot(fake.root)
+    with pytest.raises(DeployError, match=r"init could not write .*src[/\\]a{300}\b") as e:
+        presets.init(fake.cfg, "script", name, force=True)
+    assert e.value.code == 2
+    assert _snapshot(fake.root) == before
+    assert not _left_aside(fake.root)
 
 
 def test_init_refuses_a_changed_tree_without_force(fake: Fake) -> None:
@@ -1495,6 +1508,22 @@ def test_new_creates_a_working_project(preset: str, tmp_path: Path, network: Non
             assert subprocess.run(["git", "symbolic-ref", "HEAD"], cwd=dest, env=env, capture_output=True, text=True, check=True).stdout.strip() == "refs/heads/main"
             staged = subprocess.run(["git", "ls-files", "-s", "deploy", "deploy.ps1"], cwd=dest, env=env, capture_output=True, text=True, check=True).stdout
             assert [line.split()[0] for line in staged.splitlines()] == ["100755", "100755"]
+
+
+def test_new_into_a_folder_with_a_space_and_an_accent(tmp_path: Path, network: None) -> None:
+    """The folder name gives the app name (accent dropped: cafe); the paths, with a space and a
+    non-ASCII character, reach uv, git and the copy's own runner intact."""
+    env = _child_env(tmp_path)
+    parent = tmp_path / "my projects"
+    parent.mkdir()
+    r = _deploy(ROOT, "new", CAFE, cwd=parent, env={**env, "PYTEMPLATE_CALLER_CWD": str(parent)})
+    assert r.returncode == 0, r.stderr[-4000:]
+    dest = parent / CAFE
+    assert (dest / "src" / "cafe" / "__init__.py").is_file()
+    assert tomllib.loads((dest / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"] == "cafe"
+    assert tomllib.loads((dest / "pytemplate.toml").read_text(encoding="utf-8"))["app"]["name"] == "cafe"
+    check = _deploy(dest, "render", "--check", cwd=dest, env=env)
+    assert check.returncode == 0, check.stderr
 
 
 def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: None) -> None:

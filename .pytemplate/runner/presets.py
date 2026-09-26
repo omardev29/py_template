@@ -747,12 +747,15 @@ def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
     try:
         _swap_dependencies(plan, undo)
         _swap_files(plan, undo)
-    except BaseException:
+    except BaseException as e:
         left = undo.rollback()
         if left:
             ui.error(f"init failed and could not put back: {', '.join(left)}")
         else:
             ui.info("init failed: every file is back as it was")
+        if isinstance(e, OSError):  # a full disk, permissions, a name the file system refuses
+            where = f" {rel(e.filename)}" if isinstance(e.filename, str) and e.filename else ""
+            raise DeployError(f"init could not write{where}: {e.strerror or e}") from None
         raise
     undo.discard()
     render.apply(plan.cfg, force=True)
