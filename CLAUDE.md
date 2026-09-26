@@ -981,7 +981,11 @@ Per method:
   `MAX_INPUT` (600 MiB; UPX refuses 768 MiB), `BUILTIN_EXCLUDE` (C runtime, API sets,
   `python3*.dll`, `libpython3*`, and `flutter_windows.dll`: a packed Flutter engine hangs the
   app at startup with a 4 MB working set and no window, measured), binaries UPX rejects
-  (`GUARD_CF`: never pass `--force`). UPX 5.2.1 is downloaded once (SHA-256 checked) to
+  (`GUARD_CF`: never pass `--force`). `upx.find` order: `deploy.upx.path` (absolute, `~`, or
+  relative to the project root, never the caller's cwd; handed to the tools absolute but not
+  resolved: PyInstaller wants `<upx-dir>/upx`, Nuitka a file named `upx`), `upx` on PATH, the
+  cache, a download: UPX 5.2.1 once (SHA-256 checked, written as `.part` then renamed so an
+  interrupted write never looks cached) to
   `%LOCALAPPDATA%\pytemplate\tools\upx-5.2.1` / `$XDG_CACHE_HOME/pytemplate/tools`; macOS
   is unsupported (`upx.unsupported_reason`). `flet pack` ships Flet's prebuilt FULL client
   zipped (40.5 MB, libmpv 28 MB inside) and unpacks it on first start into
