@@ -927,6 +927,9 @@ def test_copy_template_says_when_git_fails(tmp_path: Path, monkeypatch: pytest.M
         ("build/x", True),
         (".claude/settings.json", True),
         (".github/workflows/template-e2e.yml", True),
+        (".github/workflows/template-ci-image", True),  # the template's CI image (its folder)
+        (".github/workflows/template-ci-image/Dockerfile", True),
+        (".github/workflows/template-ci-image/pins.py", True),
         (".github/workflows/ci.yml", False),
         (".github/template-x.yml", False),
         ("sub/build/x", False),
@@ -960,7 +963,7 @@ def test_copy_of_the_real_template_is_exactly_its_tracked_files(tmp_path: Path, 
     presets.copy_template(dest)
     copied = {p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()}
     assert copied == expected
-    for rel in (".pytemplate/template-repo", ".claude", ".github/workflows/template-e2e.yml"):
+    for rel in (".pytemplate/template-repo", ".claude", ".github/workflows/template-e2e.yml", ".github/workflows/template-ci-image"):
         assert not (dest / rel).exists(), rel
     assert (dest / "deploy").read_bytes() == (ROOT / "deploy").read_bytes()
 

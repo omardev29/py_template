@@ -94,8 +94,8 @@ outside the template:
 
 1. It copies the files git tracks (and lists the untracked ones it leaves out; without git, or
    when nothing was ever committed, it copies every file). It never copies the git history, the
-   environments, builds and caches, `.claude/`, the template's own CI (`template-*.yml`), or the
-   template's `README.md` and `LICENSE`, which go to `.pytemplate/README.md` (this manual) and
+   environments, builds and caches, `.claude/`, the template's own CI (`template-*.yml` and its
+   CI image, `template-ci-image/`), or the template's `README.md` and `LICENSE`, which go to `.pytemplate/README.md` (this manual) and
    `.pytemplate/LICENSE`.
 2. It writes the project's own `README.md` (its name, the preset's description and the first
    commands) and `[project] description` in `pyproject.toml`.
@@ -1422,6 +1422,7 @@ typings/                         the project's stubs (raylib: the corrected rayl
 .python-version, .mypy.ini, .ruff.toml, pyrightconfig.json, .vscode/, .lazy.lua   generated
 .github/workflows/ci.yml         the project's CI (generated)
 .github/workflows/template-*.yml (template repository) the template's own CI
+.github/workflows/template-ci-image/   (template repository) its Linux CI image (Dockerfile, pins.py)
 .pytemplate/README.md, LICENSE   (projects) this manual and the license of the copied runner
 .pytemplate/runner/              the runner (Python standard library only)
 .pytemplate/templates/           sources of the generated files (typing, VS Code, Neovim, CI)
@@ -1455,6 +1456,7 @@ Pinned, and moved on purpose:
 | UPX | `upx.VERSION` and the SHA-256 values of `upx.ASSETS` | together |
 | GitHub actions | `.pytemplate/templates/ci.yml` and `.github/workflows/template-*.yml` | edit the template, then `./deploy render`; never edit the generated `ci.yml` |
 | the Neovim test | `cmd_nvim.STARTER_REV` and `.pytemplate/nvim/tests/lazy-lock.json` | from one green run without the lock (CLAUDE.md, section 13.1) |
+| the Linux CI image | `.github/workflows/template-ci-image/pins.py`: its base, apt snapshot, uv, Neovim, PowerShell, actionlint, xonsh (the other versions it reads from the files above) | edit the pin and its SHA-256; the next push builds and publishes an image with a new tag |
 
 Not pinned: uv itself (the generated CI takes the latest, never older than the floor) and the GitHub
 runner images (`*-latest`), on purpose: CI runs what users run; nor the Neovim plugins of a user's
@@ -1513,6 +1515,10 @@ copied into projects):
   plus a weekly canary with the newest Neovim, LazyVim and plugins.
 - `template-e2e.yml` runs `selftest --e2e` for the three presets on the three systems (`--quick`
   on pushes and pull requests, the default depth weekly, `--full` monthly).
+- `template-ci-image.yml` builds the Linux CI image (Ubuntu with every tool the Linux jobs
+  install, pinned, and their downloads already cached: `template-ci-image/pins.py`), publishes it
+  to `ghcr.io/<owner>/<repo>-ci` under a tag that is a hash of its inputs, and runs the Linux jobs
+  of the three workflows above in it, next to them; weekly it rebuilds the image from scratch.
 - `template-keepalive.yml` re-enables the scheduled ones every week: GitHub disables a scheduled
   workflow after 60 days without activity in the repository.
 

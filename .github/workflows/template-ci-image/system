@@ -1,0 +1,69 @@
+#!/bin/sh
+# System part of the Linux CI image (template-ci-image.yml), run as root by the Dockerfile: the
+# apt packages the test suites look for, from a fixed Ubuntu snapshot, and the pinned releases
+# the runner images give the hosted jobs (uv, Neovim, PowerShell, actionlint), each checked
+# against its SHA-256 (pins.py). A builder behind a TLS-intercepting proxy passes its CA bundle
+# as the BuildKit secret `ca`; the image never keeps it.
+set -eu
+set -a
+# shellcheck source=/dev/null # written by the build script (pins.py env)
+. /opt/ci/pins.env
+set +a
+ca=
+if [ -f /run/secrets/ca ]; then ca=/run/secrets/ca; fi
+export DEBIAN_FRONTEND=noninteractive
+curl_ca() {  # curl with the builder's CA bundle, when it passed one
+    if [ -n "$ca" ]; then curl --cacert "$ca" "$@"; else curl "$@"; fi
+}
+
+# The base has no CA certificates, and the snapshot is served over https only: the certificates
+# come first, from the live archive over http (apt checks the signed Release files).
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates
+# Everything else from the snapshot: every apt call below reads the same lists
+printf 'APT::Snapshot "%s";\n' "$APT_SNAPSHOT" > /etc/apt/apt.conf.d/50pytemplate-snapshot
+if [ -n "$ca" ]; then printf 'Acquire::https::CaInfo "%s";\n' "$ca" > /etc/apt/apt.conf.d/50pytemplate-ca; fi
+apt-get update
+# build-essential: mypyc's real compiles, objdump; the shells: test_launcher_sh and selftest
+# --shells; nodejs: test_vscode's RegExp check; fd-find: venv-selector (LazyVim) and nvim
+# doctor; libicu74: PowerShell; libx11-6 and libgl1: `import raylib` (the stub generator test)
+apt-get install -y --no-install-recommends \
+    build-essential busybox curl dash fd-find fish git gzip ksh libgl1 libicu74 libx11-6 mksh \
+    nodejs procps shellcheck tar unzip xz-utils yash zip zsh
+rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/50pytemplate-ca
+
+fetch() {  # fetch URL SHA256 FILE
+    curl_ca -fsSL --retry 4 --retry-all-errors -o "$3" "$1"
+    printf '%s  %s\n' "$2" "$3" | sha256sum -c -
+}
+tmp=$(mktemp -d)
+
+# uv outside /usr/bin, /bin and /usr/local/bin: the launcher tests that hide uv (and T7 of
+# selftest --shells) look for it there, and a uv they cannot hide makes them skip
+fetch "https://github.com/astral-sh/uv/releases/download/$UV/uv-x86_64-unknown-linux-gnu.tar.gz" "$UV_SHA256" "$tmp/uv.tgz"
+mkdir -p /opt/ci/uv/bin
+tar -xzf "$tmp/uv.tgz" -C /opt/ci/uv/bin --strip-components=1
+
+# Neovim: the pinned one on PATH (/opt/ci/nvim/default), the minimum next to it
+nvim_release() {  # nvim_release VERSION SHA256
+    fetch "https://github.com/neovim/neovim/releases/download/$1/nvim-linux-x86_64.tar.gz" "$2" "$tmp/nvim.tgz"
+    mkdir -p "/opt/ci/nvim/$1"
+    tar -xzf "$tmp/nvim.tgz" -C "/opt/ci/nvim/$1" --strip-components=1
+}
+nvim_release "$NVIM" "$NVIM_SHA256"
+nvim_release "$NVIM_MIN" "$NVIM_MIN_SHA256"
+ln -s "$NVIM" /opt/ci/nvim/default
+
+fetch "https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT/actionlint_${ACTIONLINT}_linux_amd64.tar.gz" "$ACTIONLINT_SHA256" "$tmp/actionlint.tgz"
+tar -xzf "$tmp/actionlint.tgz" -C /usr/local/bin actionlint
+
+# PowerShell where the runner image has it (/usr/bin/pwsh)
+fetch "https://github.com/PowerShell/PowerShell/releases/download/v$PWSH/powershell-$PWSH-linux-x64.tar.gz" "$PWSH_SHA256" "$tmp/pwsh.tgz"
+mkdir -p /opt/microsoft/powershell/7
+tar -xzf "$tmp/pwsh.tgz" -C /opt/microsoft/powershell/7
+chmod +x /opt/microsoft/powershell/7/pwsh
+ln -s /opt/microsoft/powershell/7/pwsh /usr/bin/pwsh
+rm -rf "$tmp"
+
+# The hosted runner's user and home: the jobs run as it (the checkout belongs to it)
+useradd --uid "$CI_UID" --create-home --home-dir /home/runner --shell /bin/bash runner

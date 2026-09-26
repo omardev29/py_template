@@ -1,0 +1,292 @@
+# Linux CI image of the TEMPLATE repository (the template- prefix keeps it, and the folder
+# template-ci-image/, out of projects made with ./deploy new): an Ubuntu image with every tool
+# the Linux jobs install on a bare runner (the shells, uv, Neovim, PowerShell, actionlint, a C
+# compiler, xonsh) at pinned versions, and their downloads (managed Pythons, the wheels of the
+# locks, taplo, basedpyright, UPX) already in its caches, so a Linux job depends on one image
+# pull instead of a dozen downloads. template-ci-image/pins.py holds its pins and names its tag:
+# a hash of every input, so a change of a pin, the lock or a preset builds and publishes a new
+# image to ghcr.io/<owner>/<repo>-ci, and a published tag is never rebuilt over.
+#
+# Stage 1 (CLAUDE.md 13.2): the jobs below run the Linux jobs of template-selftest,
+# template-launchers and template-nvim in the image, next to them, which stay the gates.
+# Pull requests from another repository cannot push: the image is built and checked, and the
+# jobs that run in it are skipped. Weekly the image is rebuilt from scratch (not pushed unless
+# its tag is missing): red with no commit behind it means a pinned download is gone, or an
+# unpinned dependency of a pin moved. template-keepalive.yml keeps the schedule alive. The gate
+# job skips everything in repositories made from the template.
+name: template-ci-image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "7 2 * * 1" # weekly, Monday 02:07 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      template: ${{ steps.marker.outputs.template }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .pytemplate/template-repo
+          sparse-checkout-cone-mode: false
+      - id: marker
+        run: if [ -f .pytemplate/template-repo ]; then echo "template=true" >> "$GITHUB_OUTPUT"; fi
+
+  image:
+    needs: gate
+    if: needs.gate.outputs.template == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      ref: ${{ steps.tag.outputs.ref }}
+      usable: ${{ steps.tag.outputs.published == 'true' || steps.push.outputs.pushed == 'true' }}
+    steps:
+      # the token must not sit in .git/config while the checkout's code runs in the image
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: tag
+        name: The image's tag, and whether it is published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          ref=$(python3 .github/workflows/template-ci-image/pins.py ref "$GITHUB_REPOSITORY")
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "image: $ref"
+          printf '%s\n' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if docker manifest inspect "$ref" > /dev/null 2>&1; then echo "published=true" >> "$GITHUB_OUTPUT"; fi
+          # a pull request from another repository gets a token that cannot push packages
+          if [ -z "$HEAD_REPO" ] || [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ]; then echo "can_push=true" >> "$GITHUB_OUTPUT"; fi
+      - id: build
+        name: Build (weekly from scratch, so every pinned download is proven again)
+        if: steps.tag.outputs.published != 'true' || github.event_name == 'schedule'
+        env:
+          REF: ${{ steps.tag.outputs.ref }}
+          FRESH: ${{ github.event_name == 'schedule' && '--no-cache --pull' || '' }}
+        run: |
+          # shellcheck disable=SC2086 # FRESH holds zero or two options
+          sh .github/workflows/template-ci-image/build "$REF" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" --progress plain $FRESH
+          echo "built=true" >> "$GITHUB_OUTPUT"
+      - name: The image holds its tools and its inputs
+        if: steps.build.outputs.built == 'true'
+        env:
+          REF: ${{ steps.tag.outputs.ref }}
+        run: |
+          python3 .github/workflows/template-ci-image/pins.py canonical > "$RUNNER_TEMP/inputs.txt"
+          docker run --rm --init --user 1001 "$REF" cat /opt/ci/inputs.txt | diff - "$RUNNER_TEMP/inputs.txt"
+          docker run --rm --init --user 1001 "$REF" bash -c 'id; uv --version; nvim --version | sed -n 1p; pwsh --version; node --version; fish --version; xonsh --version; actionlint --version | sed -n 1p; shellcheck --version | sed -n 2p; gcc --version | sed -n 1p; git --version; ls ~/.cache/pytemplate/tools; uv python list --only-installed'
+          docker image ls "$REF"
+      - id: push
+        name: Publish (never over a published tag)
+        if: steps.build.outputs.built == 'true' && steps.tag.outputs.published != 'true' && steps.tag.outputs.can_push == 'true'
+        env:
+          REF: ${{ steps.tag.outputs.ref }}
+        run: |
+          docker push "$REF"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+  # The Linux jobs of the other workflows, in the image. Each keeps the steps of the job it
+  # mirrors, minus what the image already holds.
+  selftest:
+    name: selftest (image)
+    needs: [gate, image]
+    if: needs.gate.outputs.template == 'true' && needs.image.outputs.usable == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.image.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+      # the runner's user (the checkout belongs to it), and an init that reaps orphans
+      options: --init --user 1001
+    env:
+      HOME: /home/runner
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Generated files match their sources
+        run: ./deploy render --check
+      - name: Runner environment
+        run: ./deploy setup
+      - name: Tool versions
+        run: |
+          id; uv --version; nvim --version | sed -n 1p; pwsh --version; node --version; fish --version; xonsh --version
+          actionlint --version | sed -n 1p; shellcheck --version | sed -n 2p
+      - name: selftest
+        run: ./deploy selftest -rs
+
+  python-floor:
+    name: runner tests on Python 3.11 (image)
+    needs: [gate, image]
+    if: needs.gate.outputs.template == 'true' && needs.image.outputs.usable == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.image.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+      options: --init --user 1001
+    env:
+      HOME: /home/runner
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Runner environment
+        run: ./deploy setup
+      - name: The runner starts on Python 3.11
+        run: uv run --quiet --python 3.11 --script .pytemplate/deploy.py help > /dev/null
+      - name: The runner's tests on Python 3.11
+        run: |
+          pytest=$(uv export --frozen --only-group dev --no-hashes --no-annotate --no-header | grep '^pytest==' | sed 's/ *;.*//')
+          uv run --no-project --python 3.11 --with "$pytest" python -m pytest -q -p no:cacheprovider -rs .pytemplate/tests
+
+  new-project:
+    name: selftest in a new ${{ matrix.preset }} project (image)
+    needs: [gate, image]
+    if: needs.gate.outputs.template == 'true' && needs.image.outputs.usable == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [raylib, flet]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.image.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+      options: --init --user 1001
+    env:
+      HOME: /home/runner
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: ./deploy new
+        env:
+          PRESET: ${{ matrix.preset }}
+        run: ./deploy new "$RUNNER_TEMP/p" --preset "$PRESET" --name "Pt-$PRESET"
+      - name: Runner environment
+        run: cd "$RUNNER_TEMP/p" && ./deploy setup
+      - name: selftest
+        run: cd "$RUNNER_TEMP/p" && ./deploy selftest -rs
+
+  launchers:
+    name: launchers (image)
+    needs: [gate, image]
+    if: needs.gate.outputs.template == 'true' && needs.image.outputs.usable == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.image.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+      options: --init --user 1001
+    env:
+      HOME: /home/runner
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Shell versions
+        run: |
+          xonsh --version; fish --version; pwsh --version; uv --version
+          (busybox 2>&1 || true) | sed -n 1p; shellcheck --version | sed -n 2p
+      - name: shellcheck
+        run: shellcheck -s sh deploy
+      - name: uv also in ~/.local/bin (the launchers' fallback discovery, T5)
+        run: mkdir -p ~/.local/bin && cp "$(command -v uv)" ~/.local/bin/
+      - name: selftest --shells
+        run: ./deploy selftest --shells
+      - name: User-style invocations
+        run: |
+          for s in /bin/sh bash dash zsh; do "$s" ./deploy help >/dev/null || exit; echo "$s ok"; done
+          (cd src && ../deploy help >/dev/null)
+          (cd /tmp && "$GITHUB_WORKSPACE/deploy" help >/dev/null)
+          env -u UV PATH=/usr/bin:/bin ./deploy help >/dev/null
+          busybox sh ./deploy help >/dev/null
+          pwsh -NoProfile -Command "./deploy.ps1 help > \$null; exit \$LASTEXITCODE"
+          set +e; ./deploy no-such-command; test $? -eq 2
+
+  nvim:
+    name: nvim (image, ${{ matrix.nvim }})
+    needs: [gate, image]
+    if: needs.gate.outputs.template == 'true' && needs.image.outputs.usable == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        nvim: [v0.12.5, v0.11.2] # pins.NVIM, cmd_nvim.MIN_LAZYVIM: both are in the image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.image.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+      options: --init --user 1001
+    env:
+      HOME: /home/runner
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Neovim ${{ matrix.nvim }} first on PATH
+        env:
+          NVIM: ${{ matrix.nvim }}
+        run: echo "/opt/ci/nvim/$NVIM/bin" >> "$GITHUB_PATH"
+      - name: Neovim version
+        run: nvim --version
+      - name: Runner environment
+        run: ./deploy setup
+      # /tmp, not the runner's temp folder: in a container job the runner.temp context names
+      # the host's path (actions/runner#2058), which the upload step would not find
+      - name: LazyVim smoke test (script, raylib, flet)
+        run: ./deploy selftest --nvim --require --dir /tmp/pt-nvim
+      - name: Logs of the smoke test
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvim-image-logs-${{ matrix.nvim }}
+          path: /tmp/pt-nvim/logs
+          if-no-files-found: ignore

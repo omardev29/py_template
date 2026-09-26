@@ -1,0 +1,48 @@
+#!/bin/sh
+# User part of the Linux CI image (template-ci-image.yml), run as the runner user by the
+# Dockerfile: what the Linux jobs download on a bare runner (managed Pythons, the wheels of the
+# locks, the uv tools, the pinned UPX) goes into uv's and the runner's DEFAULT folders under
+# HOME, as on the hosted runner, by running what those jobs run with the image's uv.
+#   warm template   the template's own environment, the floor Python, UPX, xonsh, taplo, basedpyright
+#   warm presets    a new raylib and flet project each, set up (PyPy and their wheels)
+# /src is the build context (the template's tracked files), mounted read-only for the step.
+set -eu
+set -a
+# shellcheck source=/dev/null # written by the build script (pins.py env)
+. /opt/ci/pins.env
+set +a
+if [ -f /run/secrets/ca ]; then  # a builder behind a TLS-intercepting proxy (system)
+    export SSL_CERT_FILE=/run/secrets/ca UV_SYSTEM_CERTS=1 GIT_SSL_CAINFO=/run/secrets/ca
+fi
+work=$(mktemp -d)
+cp -R /src "$work/t"
+cd "$work/t"
+
+case "${1:-}" in
+template)
+    ./deploy setup
+    # the python-floor job: the runner started on the floor Python, pytest of uv.lock on it
+    uv run --quiet --python "$PYTHON_FLOOR" --script .pytemplate/deploy.py help > /dev/null
+    pytest=$(uv export --frozen --only-group dev --no-hashes --no-annotate --no-header | grep '^pytest==' | sed 's/ *;.*//')
+    uv run --no-project --python "$PYTHON_FLOOR" --with "$pytest" python -c ''
+    # test_upx's real run: the pinned UPX of the runner's own download (upx.find: SHA-256)
+    .venv/bin/python -c "import sys; sys.path.insert(0, '.pytemplate'); from runner import config, upx; print(upx.find(config.load(set())))"
+    uv tool install --python "$CPYTHON" "$XONSH"
+    # the tests that run a pinned tool offline (test_render_core)
+    uv tool run --from "$TAPLO" taplo --version
+    uv tool run --from "$BASEDPYRIGHT" basedpyright --version
+    ;;
+presets)
+    # what template-selftest's new-project job does (its names too), so its wheels are cached
+    for preset in raylib flet; do
+        ./deploy new "$work/$preset" --preset "$preset" --name "Pt-$preset"
+        (cd "$work/$preset" && ./deploy setup)
+    done
+    ;;
+*)
+    echo "usage: warm template|presets" >&2
+    exit 2
+    ;;
+esac
+cd /
+rm -rf "$work"

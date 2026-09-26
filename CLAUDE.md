@@ -118,8 +118,11 @@ typings/                          project stubs (raylib preset: the corrected ra
 .pytemplate/state.json            hashes of the generated files + the `applied` record (committed)
 .pytemplate/template-repo         [template repo] marker, not copied by ./deploy new
 .github/workflows/ci.yml          generated CI of the project
-.github/workflows/template-*.yml  [template repo] selftest, launchers, nvim, e2e CI and the
-                                  keepalive of their schedules (section 13.2); not copied
+.github/workflows/template-*.yml  [template repo] selftest, launchers, nvim, e2e CI, the
+                                  Linux CI image and the keepalive of their schedules (section
+                                  13.2); not copied
+.github/workflows/template-ci-image/  [template repo] the Linux CI image: Dockerfile, pins.py
+                                  (its pins and tag), system, warm, build; not copied
 ignored: .venv*/ .build/ dist/ build/ *.spec *.pyd *.so .flet/ tool caches,
          .claude/worktrees/ .claude/settings.local.json
 ```
@@ -2123,7 +2126,8 @@ Per method:
   than "not a git repository" (dubious ownership...) is a warning first (git runs with
   `LC_ALL=C`). Both skip (`presets._skipped`) `.git`, `.build`, `dist`, caches, `.flet`,
   `.venv*`, `template-repo` at any depth; `build/`, `.claude/`, `README.md` and `LICENSE` at
-  the root; and `.github/workflows/template-*` (template CI files MUST use that prefix). A
+  the root; and `.github/workflows/template-*` (template CI files MUST use that prefix; the CI
+  image's folder `template-ci-image/` has it too). A
   project made with `new` is another program, not the template (an owner decision): `new`
   (`presets._make_own`) writes its own `README.md` (`presets.project_readme`: name, preset
   description, getting started) and sets `[project] description` to the preset's
@@ -2643,7 +2647,12 @@ short temp tree and unset `NVIM_APPNAME`.
   real, `--nvim` with Neovim, the base and the smoke runs faked: 0, 1 on any FAIL, 2 usage, 3
   with `--require`), `test_workflows.py` (template repository only: the promises of the
   template-*.yml workflows, the keepalive covering every scheduled one, the gates, `-latest`
-  labels, pinned actions, and actionlint on every workflow when installed).
+  labels, pinned actions, and actionlint on every workflow when installed; the CI image: the
+  pins `pins.py` reads from the code, what its tag hashes and that a change moves it (CRLF and
+  a BOM do not), its workflow's build, push and container rules, the workflow literals that
+  repeat its pins, shellcheck of its scripts, mypy --strict of pins.py, and, inside the image
+  only (`CI_IMAGE_INPUTS`), that it holds this checkout's inputs and every tool the suites look
+  for).
 - **[template repo]** Language guard `test_no_spanish.py`: skipped unless
   `.pytemplate/template-repo` exists. Scans `git ls-files --cached --others --exclude-standard`
   (so new untracked files count) for accented Spanish letters and a list of Spanish words
@@ -2845,6 +2854,35 @@ short temp tree and unset `NVIM_APPNAME`.
   template workflow is covered by itself (`test_every_scheduled_workflow_is_kept_alive`).
   If the keepalive itself was disabled, enable it in the Actions tab (`gh workflow enable
   template-keepalive.yml`) and run it once.
+- **[template repo]** `template-ci-image.yml` (push to `main`, pull requests, weekly and by
+  hand; the gate) and its folder `template-ci-image/`: an Ubuntu 24.04 image (the base pinned by
+  digest, apt from `snapshot.ubuntu.com` at one date, `APT_SNAPSHOT`) with what the Linux jobs
+  install on a bare runner (the shells, gcc, fd, node, shellcheck; uv, Neovim 0.12.5 and 0.11.2,
+  PowerShell and actionlint from their releases, SHA-256 checked, uv outside the folders the
+  no-uv tests hide; xonsh) and what they download, in the runner user's default folders (`warm`,
+  which runs what those jobs run: CPython 3.14 and 3.11, PyPy, the wheels of the template's lock
+  and of a new raylib and flet project, taplo, basedpyright, the pinned UPX). `pins.py` holds
+  the image's own pins and reads the others from their files by text (`.python-version`,
+  `cmd_nvim.MIN_LAZYVIM`, `cmd_dev.BASEDPYRIGHT`, the taplo pin of `test_render_core.py`,
+  `upx.VERSION`, the floor of `.pytemplate/deploy.py`). The tag is the first 16 hex digits of
+  the sha256 of `pins.py canonical`: every pin, the image's files and the files that decide its
+  downloads (`uv.lock`, `pyproject.toml`, `pytemplate.toml`, `.python-version`, each preset's
+  `preset.toml`, `constraints.txt` and `pytemplate.toml`; a BOM and CRLF do not count); the image
+  is `ghcr.io/<owner>/<repo>-ci:<tag>`. The `image` job builds it (`build`: the tracked files as
+  the context) when the tag is not published, and weekly from scratch (`--no-cache --pull`: red
+  with no commit behind it means a pinned download is gone, or an unpinned dependency of a pin
+  moved), checks that its `/opt/ci/inputs.txt` equals this checkout's canonical text, prints the
+  tool versions, and pushes a missing tag only, from this repository only (a fork's pull request
+  gets a token that cannot push). A tag is never rebuilt over. Stage 1 (now): its other jobs run
+  template-selftest's Linux selftest, python-floor and new-project, template-launchers' Linux
+  posix job and template-nvim's two Linux rows in the image, as GitHub container jobs, whenever
+  the image is usable (published, or pushed by this run); they are not gates. `options: --init
+  --user 1001` (the runner's uid owns the checkout; an init reaps orphaned processes),
+  `HOME: /home/runner` (where the caches are), and the nvim job's `--dir /tmp/pt-nvim` (in a
+  container job the `runner.temp` context names the host's path). The package is private when
+  first pushed: the jobs pull with the job token (`packages: read`). Stage 2, once their `-rs`
+  skip lists and times match the bare jobs: the Linux jobs move into the image, and uv-floor,
+  the e2e rows, the nvim canary and every Windows and macOS job stay on bare runners.
 - **[template repo]** `template-launchers.yml` also runs weekly and installs xonsh 0.24.2 on
   pushes and pull requests but the newest xonsh on the schedule (a red scheduled run with no
   commit behind it is upstream drift; the shell versions are logged: xonsh, fish, pwsh,
@@ -2902,7 +2940,8 @@ template-launchers; real niubash only on the maintainer's machine).
   `.pytemplate/runner/**/*.py`, `.pytemplate/deploy.py`, `.pytemplate/tools/*.py`, `deploy`,
   `deploy.cmd`, `deploy.ps1`, `.pytemplate/nvim/**/*.lua` (not its `tests/`),
   `.pytemplate/templates/**`, the preset skeletons and tools (`.py`, `.pyi`, `.toml`; not
-  `typings/`) and `.github/workflows/template-*.yml`. Tests (`.pytemplate/tests/`,
+  `typings/`), `.github/workflows/template-*.yml` and the CI image's `Dockerfile`, `pins.py`,
+  `system`, `warm` and `build` (`.github/workflows/template-ci-image/`). Tests (`.pytemplate/tests/`,
   `.pytemplate/nvim/tests/`) are not in the denominator; a test defect counts as a bug only when
   it breaks `./deploy selftest` for a user or hides a product bug.
 - Measure with a bug hunt on a fixed commit: every finding reproduced and confirmed by an
@@ -3016,7 +3055,8 @@ Files and git:
 - `.gitattributes`: `* text=auto eol=native`; `*.bat`, `*.cmd`, `*.ps1` CRLF; `*.sh` LF; then
   `deploy`, `deploy.ps1` and `.lazy.lua` LF (the last matching line wins); `*.png *.ico *.pyz`
   binary. With `core.autocrlf=true` most working-tree files are CRLF on Windows: that is fine,
-  the runner normalises.
+  the runner normalises. **[template repo]** `.github/workflows/template-ci-image/.gitattributes`
+  (`* text eol=lf`) keeps the CI image's Dockerfile and scripts LF on a Windows checkout.
 - `deploy` and `deploy.ps1` are 100755: `cmd_env._fix_exec_bit` repairs both on `setup`, the
   files' own exec bit on POSIX (with or without git: with `core.filemode=true` an index-only fix
   is undone by the next `git add`; a file it may not chmod, another user's in a shared checkout,
@@ -3793,6 +3833,31 @@ GitHub Actions and hosted runners:
 - **WSL setup on hosted runners is slow and sometimes fails** (LIMITATION): Fix: the WSL job of
   `template-launchers.yml` is `continue-on-error`. Test: untested (CI only). Goes: when it is
   reliable.
+- **A container job runs as root, with `tail -f /dev/null` as PID 1 and `HOME=/github/home`, and
+  its `runner.temp` context names the host's path** (LIMITATION): as root, git sees the
+  runner's (uid 1001) checkout as dubious ownership and the read-only-folder tests skip; nothing
+  reaps orphaned processes (the nvim harness counts them as alive); the image's caches under
+  `/home/runner` are not found; an upload of `${{ runner.temp }}/...` finds nothing. Up:
+  actions/runner#2058 (`runner.temp`). Fix: the jobs of template-ci-image.yml pass `options:
+  --init --user 1001` and `HOME: /home/runner`, and its nvim job uses `/tmp/pt-nvim` (13.2).
+  Test: `test_workflows.py::test_ci_image_workflow_builds_publishes_and_runs_the_linux_jobs`.
+  Goes: never.
+- **A GHCR package pushed with the job token is private, and a fork's pull request token cannot
+  push** (LIMITATION): Fix: the container jobs pull with the job token (`packages: read`), the
+  `image` job pushes only from this repository, and the jobs in the image run only when its tag
+  is usable (13.2). Test: `test_workflows.py::test_ci_image_workflow_builds_publishes_and_runs_the_linux_jobs`.
+  Goes: never.
+
+Ubuntu and apt (the CI image, 13.2):
+- **The ubuntu:24.04 image has no CA certificates, and snapshot.ubuntu.com serves https only**
+  (LIMITATION): an apt call with the snapshot failed before the certificates were there. Fix:
+  the image's `system` installs ca-certificates from the live archive over http first (apt
+  checks the signed Release files), then sets `APT::Snapshot` for every later apt call. Test:
+  the image build of template-ci-image.yml. Goes: never.
+- **apt downloads as the `_apt` user, and a BuildKit secret is readable by root only** (LIMITATION):
+  a builder's CA bundle (a TLS-intercepting proxy) could not be read by apt. Fix: the
+  Dockerfile mounts the `ca` secret with `mode=0444`. Test: a local build through such a proxy
+  (13.3). Goes: never.
 
 PowerShell (details: section 4.5):
 - **A `.ps1` runs inside the caller's session** (LIMITATION): what it sets stays there, and the
@@ -4160,6 +4225,13 @@ Behaviour:
   of the project has it installed (`presets._installed_import_names`): in a clone without
   `.venv`, `./deploy rename bs4` after the dependency beautifulsoup4 still passes (its
   distribution name is refused). `./deploy add` syncs `.venv`, so the usual order is covered.
+- **[template repo]** The CI image (13.2) freezes the Linux tool versions of its jobs per tag (uv
+  0.12.19, xonsh, noble's shells, git 2.43 and Node 18, PowerShell 7.6.6): the newest ones show
+  up in the jobs on bare runners (Windows, macOS, the e2e rows, the nvim canary, and until stage
+  2 the Linux jobs that still run bare). Its jobs still reach PyPI (the resolution of `./deploy
+  new`, test_presets' `uv pip compile --no-cache`) and GitHub (the LazyVim starter and plugins
+  of `selftest --nvim`). A fork's pull request that changes one of its inputs skips the jobs in
+  the image. Old tags pile up in GHCR: nothing prunes them.
 - A pyz built on Windows stores no x bit (Windows files have no Unix mode), so the executables of
   its Linux or macOS targets (`--target`), or of a script in `src/`, are not runnable where it is
   extracted; the generated CI builds each OS's part on that OS, and `pyz-merge` keeps the parts'
@@ -4254,6 +4326,12 @@ Code coupling (rename together):
   `mypyc.profile(cfg, ...).stage` (`test_editor_json_stage_matches_the_runner`); the CI pyz path
   <-> `BuildRequest.out_name` and the merged upload's `.cmd` <-> `pyz.wrapper_path` (10;
   `test_ci_workflow_for_every_preset_and_backend_set`).
+- **[template repo]** `template-ci-image/pins.py` reads pins from the code by text:
+  `.python-version`, the `MIN_LAZYVIM = (...)` line of `cmd_nvim.py`, `BASEDPYRIGHT = "..."` of
+  `cmd_dev.py`, `VERSION = "..."` of `upx.py`, the one `"taplo==X"` of `test_render_core.py` and
+  the `# requires-python` line of `.pytemplate/deploy.py` (`test_ci_image_pins_come_from_the_code`);
+  the nvim matrix of template-ci-image.yml and the xonsh, Neovim and actionlint literals of the
+  other template workflows repeat its pins (`test_workflow_literals_follow_the_ci_image_pins`).
 - template-selftest.yml reads pins from the code by text: `envs.MIN_UV` (`MIN_UV = "..."`),
   `cmd_dev.BASEDPYRIGHT`, the taplo pin of `test_render_core.py` and the pytest pin of
   `uv.lock`; it deselects `test_init_round_trip_through_every_preset_is_byte_identical` by
