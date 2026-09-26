@@ -2690,10 +2690,13 @@ CPython and its standard library:
   BrokenPipeError traceback. Fix: `cli._output_closed` (quiet exit 141; POSIX only, 15.2). Test:
   `test_cli_core.py::test_a_closed_stdout_is_not_a_runner_bug`. Goes: never.
 - **`sys.stdlib_module_names` knows only the running version** (LIMITATION): a name that is a
-  module of PyPy 3.11 or of another CPython passed the check. Fix:
-  `presets.STDLIB_OTHER_VERSIONS` in `presets.shadows_stdlib` (5.7). Test:
-  `test_rename.py::test_stdlib_names_do_not_depend_on_the_runner`. Goes: never (update it per
-  Python release).
+  module of PyPy 3.11 or of another CPython passed the check (a project named pypyjit could not
+  import itself on PyPy: its built-in wins over sys.path). Fix: `presets.STDLIB_OTHER_VERSIONS`
+  (removed and new CPython modules, PyPy's built-ins, stdlib names and the packages of its
+  standard library folder) in `presets.shadows_stdlib` (5.7). Test:
+  `test_rename.py::test_stdlib_names_do_not_depend_on_the_runner`,
+  `test_presets.py::test_every_pypy_standard_library_module_is_refused` (the pinned PyPy, when
+  uv has it). Goes: never (update it per Python release).
 - **`shutil.rmtree` error hooks** (LIMITATION): `onerror` is deprecated from 3.12 and `onexc`
   does not exist in 3.11, and a read-only file (git objects on Windows) needs a chmod and a
   retry. Fix: the version switch in `cmd_nvim.remove_tree`, `presets._remove`, `e2e.rmtree`;

@@ -398,6 +398,29 @@ def test_rename_refuses_the_names_check_name_free_refuses(name: str, message: st
     assert e.value.code == 2
 
 
+@pytest.mark.parametrize("name", ["pypyjit", "cpyext", "greenlet", "stackless", "tputil", "identity_dict", "future_builtins", "ctypes_support"])
+def test_pypy_standard_library_names_are_refused(name: str) -> None:
+    """PyPy 3.11 is a supported backend (raylib's default): a project named pypyjit could not
+    import itself there (`'pypyjit' is not a package`: the built-in wins over sys.path)."""
+    with pytest.raises(DeployError, match=f"standard library module '{name}'"):
+        presets.check_name_free(None, "script", name)
+
+
+def test_every_pypy_standard_library_module_is_refused() -> None:
+    """Compared with the pinned PyPy when uv has it installed (it downloads nothing)."""
+    uv = shutil.which("uv") or os.environ.get("UV")
+    pypy = config.load(set(cli.COMMANDS)).python.pypy
+    if uv is None:
+        pytest.skip("uv not found")
+    found = subprocess.run([uv, "python", "find", pypy, "--no-python-downloads", "--no-project"], capture_output=True, text=True, check=False)
+    if found.returncode != 0:
+        pytest.skip(f"{pypy} is not installed")
+    code = "import sys; print(*sorted(set(sys.stdlib_module_names) | set(sys.builtin_module_names)))"
+    names = subprocess.run([found.stdout.strip(), "-c", code], capture_output=True, text=True, check=True).stdout.split()
+    missing = [n for n in names if "." not in n and not n.startswith("_") and not presets.shadows_stdlib(n.lower()) and n.lower() == n]
+    assert not missing, "add them to presets.STDLIB_OTHER_VERSIONS"
+
+
 def test_import_names_follow_the_installed_packages() -> None:
     """presets.IMPORT_NAMES must know every module a pinned package installs under another name
     (the ones installed in this environment: .venv of the project, so every preset is covered
