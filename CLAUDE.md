@@ -65,6 +65,22 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
     (dependency and version, symptom, upstream issue, the workaround by symbol, the test that
     covers it, when it can go). An undocumented workaround counts as our bug. Lines and the
     measurements so far: section 13.4.
+11. `pytemplate.toml` IS A STABLE CONTRACT (set by the owner; never relax it). Once a key or an
+    allowed value (a backend, method, profile, preset or option name) has shipped in a
+    template version, it keeps its name, its place, its meaning and its default:
+    - adding keys and values is fine; renaming, moving or removing one, changing what it
+      means or its default, and bumping `schema` are not;
+    - the only exception is a change that is truly unavoidable (for example a whole backend
+      removed), and only after telling the owner and getting their explicit approval for that
+      very change;
+    - even then the runner keeps reading the old files: a retired key or value is recognised,
+      gives a warning that says what happened and what to do, and is ignored or mapped to its
+      replacement; it never stops a command. Keys that never existed stay errors (typos);
+    - the goal: a user upgrades by taking the new template and bringing their own
+      `pytemplate.toml`, their code (`src/`, `tests/`) and their dependencies (`[project]`
+      dependencies and dependency groups of `pyproject.toml`, `uv.lock` for the versions),
+      without editing any of them.
+    Known violation, to fix: the JIT keys (section 15.2).
 
 ## 2. What this is
 
@@ -1110,7 +1126,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   everywhere.
 - `schema` must equal `config.SCHEMA` (1; a missing line means 1). It is checked before the
   other keys, so a file from another template version fails with that reason instead of an
-  unknown key. There is no migration logic.
+  unknown key. There is no migration logic: rule 1.11 allows a bump only with the owner's
+  approval, and then the runner must still read the older layout, with warnings.
 - `[app]`: `name` (`config.APP_NAME`: a letter first, a letter or digit last, PEP 508; `pkg =
   name.replace("-", "_").lower()`), `preset`
   (`config.validate`: `[a-z][a-z0-9_-]*` and `PRESETS/<name>/preset.toml` must exist, checked
@@ -1123,8 +1140,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `pypy` (`pypy@[0-9]+\.[0-9]+\.[0-9]+`, exact: a loose request picks the newest PyPy, and PyPy
   8.0 changed the extension ABI to pp80; in September 2026 raylib, numpy and cffi published no
   pp80 wheels. Bump the pin only once the dependencies ship wheels for the new ABI, then
-  `./deploy lock`). The removed CPython JIT keys (`jit`, `jit_interpreter`) fail like any
-  unknown key (no compatibility shim: each project carries its own runner). `Config.min_python`
+  `./deploy lock`). The removed CPython JIT keys (`jit`, `jit_interpreter`) still fail like any
+  unknown key, which breaks rule 1.11 (section 15.2). `Config.min_python`
   is the lowest minor in use (CPython always, PyPy's `Config.pypy_minor` while supported),
   compared as numbers.
 - `[typing]`: `profile = auto|mypyc|strict|warn|off`, `relaxed = off|warn|strict` (what `auto`
@@ -4159,6 +4176,12 @@ macOS:
 ### 15.2 Our open issues and fragile points
 
 Behaviour:
+- Rule 1.11 is broken by the keys of the removed CPython JIT (`python.jit`,
+  `python.jit_interpreter`): every `pytemplate.toml` the template shipped before September 2026
+  has `jit = false`, so such a project that takes the new runner stops with `unknown key
+  'python.jit'` (exit 2) on every command. The fix: `config` recognises the retired keys, warns
+  (the JIT is gone; delete the line) and ignores them; `test_removals.py` then expects the
+  warning instead of the error.
 - `cmd_dev.split_backend` treats a first argument equal to `cpython`, `pypy` or `mypyc` (and
   `all` for `test`/`check`) as the backend: an app argument with that value must be preceded
   by an explicit backend (`./deploy run cpython mypyc`). By design: the usual fix, `--`, is
