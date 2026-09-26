@@ -260,6 +260,61 @@ purpose; if you want to see it in the editor too: `./deploy mode --editor basedp
   dap keys in Neovim). The "Run mypyc stage" debug configuration runs the compiled build, but
   compiled modules cannot be stepped into.
 
+### Fast integers: `i64`
+
+A Python `int` has no size limit, so mypyc stores it as a *tagged* integer: small values live in
+a machine word, and every operation checks the tag and for overflow, with a slow path that
+creates a big Python int. That is already much faster than CPython, but the C compiler cannot
+see through the slow path, so a loop stays a loop. `mypy_extensions.i64` (also `i32`, `i16`,
+`u8`) is your promise that the value always fits in 64 bits: mypyc then emits plain C
+`int64_t` arithmetic, and gcc/clang can simplify, vectorise or even delete the loop.
+`mypy-extensions` is already a runtime dependency of every project (`pyproject.toml`): just
+`from mypy_extensions import i64`. Interpreted code (the cpython and pypy backends) sees `i64`
+as a plain `int`.
+
+100 million iterations of `x += 1` (Linux x86_64, gcc 13, CPython 3.14, mypyc 2.3.1, Nuitka
+4.2.2; MSVC on Windows not measured):
+
+| How it runs | Time | The loop |
+|---|---|---|
+| CPython 3.14, interpreted | ~1.8 s | runs |
+| Nuitka (default, `--lto=yes` or PGO) | ~1.3-1.9 s | runs (Python objects and libpython calls) |
+| mypyc, `int`, `compile.opt_level` "1"-"3" | ~0.13-0.18 s | runs |
+| mypyc, `int`, `compile.opt_level = "0"` | ~3.4 s | runs (slower than CPython: debug only) |
+| mypyc, `i64`, `compile.opt_level` "2"/"3" | ~0 s | removed: the function became `return n` |
+
+When to use it:
+- Use `i64` for local variables in the hot loops of compiled modules (`src/<pkg>/core/`):
+  counters, indices, accumulators, bit twiddling, hashes, grid/pixel coordinates, fixed-point
+  math, when the values are known to fit in +-9.2e18. Profile first (`./deploy report --open`).
+- Keep `int` everywhere else: public functions, ids, money, sizes that come from outside,
+  values that can grow (powers, factorials), and anything stored in a `list`/`dict`/`set`
+  (containers hold Python int objects either way: no speed-up there). `int` in mypyc is
+  already ~10x faster than CPython on this loop.
+- A `range` loop gets a native index only when its END is a fixed-width int: `for i in range(n)`
+  with `n: i64`, or `range(i64(n))`. With `n: int` the index is a tagged int and the loop stays
+  (158 ms for 1e8 in the same test, even with `x: i64`). Constant bounds (`range(1, 100_000_001)`)
+  are also cheap.
+
+What changes when compiled (checked with mypyc 2.3.1; interpreted code keeps Python's
+unlimited ints, so the cpython/pypy backends never show these):
+
+| `x: i64` | Compiled | Interpreted |
+|---|---|---|
+| `2**63 - 1 + 1`, `2**62 * 4`, `1 << 64` | wraps silently: `-2**63`, `0`, `1` | `2**63`, `2**64`, `2**64` |
+| `-x` / `abs` for `x = -2**63` | `-2**63` | `2**63` |
+| assigning an `int` that does not fit (`x = 2**63`) | `ValueError: int too large to convert to i64` | works |
+| `-2**63 // -1` | `OverflowError` | `2**63` |
+| `-7 // 2`, `-7 % 2`, `x // 0` | `-4`, `1`, `ZeroDivisionError` (Python semantics) | same |
+
+mypy accepts `+ - * // % << >> & | ^`, comparisons, `min`/`max`, `int(x)`, `float(x)`, an `i64`
+wherever an `int` is expected, and an `int` assigned to an `i64` (range-checked when compiled).
+It rejects, as type errors, `x / y`, `x ** y`, `abs(x)`, `round(x)`, `divmod(x, y)` and mixing
+with `float` (`x * 0.5`): convert explicitly, e.g. `float(x) / y`, `float(x) * 0.5`,
+`int(x) ** 2`, `abs(int(x))`, `divmod(int(x), int(y))` (those take the generic, slower path).
+Because overflow only happens compiled, test the edge values with `./deploy test mypyc`: the
+cpython and pypy test runs cannot catch a wrap-around.
+
 ## PyPy
 
 Enable it per project with `./deploy mode --supports +pypy` (the raylib preset comes with it):
