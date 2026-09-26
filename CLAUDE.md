@@ -78,6 +78,7 @@ typings/                          project stubs (raylib preset: the corrected ra
                                   portable/boot.py, pyz/__main__.py
 .pytemplate/presets/<p>/          preset.toml + files/ skeleton (+ raylib/tools/raylib_stubs.py)
 .pytemplate/nvim/                 local Neovim plugin pytemplate.nvim (lua/, tests/smoke.lua,
+                                  tests/lazy-lock.json: the plugin commits selftest --nvim pins,
                                   README.md: setup, keymaps, options)
 .pytemplate/tests/                runner tests (pytest) + mypy-runner.ini
 .pytemplate/editor.json           generated data file for the Neovim plugin
@@ -405,7 +406,8 @@ header rules (with detector tests proving each rule fires).
 - `./deploy __probe EXIT STDIN(0|1) ARGS...` (`shells.probe`; `cli.main` routes it before
   `_parse_globals`: no config load, no render, not in help). Prints ONE line `PTPROBE{json}`
   to stdout (ASCII JSON with keys `argv`, `cwd`, `caller_cwd_raw`, `caller_cwd`, `launcher`,
-  `stdin_tty`, `stdin`, `root`) and exits with EXIT. Launcher tests use it: keep the keys.
+  `stdin_tty`, `stdin`, `root`, `python` (the runner's interpreter version)) and exits with
+  EXIT. Launcher tests use it: keep the keys.
   The stdin line is read as BYTES and decoded UTF-8 with surrogateescape whatever the locale:
   a raw non-UTF-8 byte shows up as `\udcXX`, PowerShell's re-encoded text as U+FFFD.
 - `./deploy selftest --shells [NAME,...] [--list] [--json] [--keep] [--project DIR]
@@ -444,7 +446,9 @@ header rules (with detector tests proving each rule fires).
   `PYTEMPLATE_LAUNCHER=nu` and `UV_PYTHON` emptied. xonsh: an alias that runs uv directly
   (falls back to the launcher without uv; `@aliases.return_command` when the xonsh has it,
   else an unthreadable function alias) plus a registered completer whose words come from
-  `cli.COMMANDS` and the project's `[tasks]` at print time; unlike the launchers it keeps the
+  `cli.COMMANDS` and the project's `[tasks]` at print time (a new command appears once it is
+  in `COMMANDS`, `cli.INTERNAL` routes never: `test_xonsh_completion_follows_cli_commands`;
+  users print the snippet again to get it); unlike the launchers it keeps the
   caller's `UV_PYTHON` (a returned argv cannot change the environment), so the runner's
   version check (section 5.2) is its guard. `test_shells` executes the fish, pwsh and xonsh
   snippets in their shells (argv, exit codes, walk-up, the xonsh completer, pwsh pipeline
@@ -461,7 +465,7 @@ header rules (with detector tests proving each rule fires).
 
 | Module | Responsibility |
 |---|---|
-| `deploy.py` (one level up) | Reconfigures stdout/stderr to UTF-8, puts its own dir on `sys.path`, calls `runner.cli.main`. |
+| `deploy.py` (one level up) | Stops with exit 3 and one `error:` line (no traceback) when uv started it on Python < 3.11 (a `uv run` by hand with an old `UV_PYTHON`), BEFORE importing the runner; reconfigures stdout/stderr to UTF-8, puts its own dir on `sys.path`, calls `runner.cli.main`. |
 | `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `FORWARDS` / `HELP_PASSES_THROUGH` (section 5.2); `INTERNAL` (routes listed nowhere: `__init`). `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main`/`_main` (exception -> exit code, closed stdout), `cmd_help` (commands and `[tasks]` entries), `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
 | `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file` (section 6.1), `toml_value`. |
 | `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL`, `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
@@ -491,8 +495,14 @@ header rules (with detector tests proving each rule fires).
 
 ### 5.2 Call flow
 
-1. Launcher -> `uv run --quiet --script .pytemplate/deploy.py ARGS`. uv picks any Python >= 3.11
-   for the PEP 723 script, often in an ephemeral env, and exports `UV`.
+1. Launcher -> `uv run --quiet --script .pytemplate/deploy.py ARGS` (the caller's `UV_PYTHON`
+   removed, section 4.1). uv reads the `.python-version` found from the script's folder upward
+   (the project's, i.e. `python.cpython`) and the managed `python-preference`, so the runner
+   runs on the project's managed CPython (in a cached ephemeral env, maybe downloaded first)
+   whatever the caller's cwd or a `.python-version` there says (measured with uv 0.8 and
+   0.12; `test_launcher_sh.test_runner_runs_on_python_cpython_whatever_the_caller_pins`), and
+   uv exports `UV`. Changing `python.cpython` changes the runner's Python too: the runner must
+   stay 3.11 code (the PEP 723 floor) and work on newer versions.
 2. `cli.main`: `__probe` short-circuit, then `_parse_globals` (global flags must come BEFORE the
    command: `-v/--verbose`, `-q/--quiet`, `--dry-run`, `--no-render`, `-h/--help`; `-h` keeps
    the command: `./deploy -h run` = `help run`; `--dry-run` switches `-q` off), then
@@ -532,7 +542,8 @@ header rules (with detector tests proving each rule fires).
   runner error (traceback printed); 2 = usage/config (`DeployError` default, argparse; also a
   program that cannot be started: no exec bit, no `#!` line, a folder; a working folder that
   does not exist; bad `[tasks]` entries); 3 = missing requirement (uv, a uv older than
-  `envs.MIN_UV`, a program, compiler, interpreter, Neovim/git with `--require`); 130 = Ctrl+C;
+  `envs.MIN_UV`, a program, compiler, interpreter, Neovim/git with `--require`, the runner
+  itself started on Python < 3.11 by `deploy.py`'s check); 130 = Ctrl+C;
   141 = the reader of stdout went away (`./deploy help | head -1`: quiet, no traceback; POSIX
   only, Windows reports a closed pipe as `OSError` EINVAL, unhandled). `run`, `test BACKEND`
   (pytest's own code: 5 = no tests collected, 4 = usage error) and tasks return the child's
@@ -613,7 +624,7 @@ header rules (with detector tests proving each rule fires).
 | `PYTEMPLATE_CALLER_CWD` | launchers, Neovim plugin (`init.caller_cwd`: Neovim's cwd when inside the project, else the root), nu snippet | Caller's cwd; read only through `project.caller_cwd` |
 | `PYTEMPLATE_LAUNCHER` | launchers, Neovim plugin (`nvim`), nu snippet (`nu`) | Which launcher/shell ran (section 4.1) |
 | `UV` | uv | uv's own path; `proc.find_uv` and the launchers use it |
-| `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PYTHON_PREFERENCE` | `envs.env_vars` | Environment selection (section 7) |
+| `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PYTHON_PREFERENCE` | `envs.env_vars` | Environment selection (section 7). The caller's own `UV_PYTHON` never reaches the runner: the launchers, the Neovim plugin and the nu snippet remove or empty it (section 4.1); a `uv run` by hand that keeps a pre-3.11 one stops in `deploy.py` (exit 3) |
 | `PYTHONUTF8=1` | `proc.base_env`, portable launchers, pyz `.cmd` wrapper, the Neovim mypy linter, every VS Code launch config (`vscode.DEBUG_ENV`) | mypy/mypyc otherwise read files as cp1252; F5 behaves like `./deploy run` |
 | `PYTEMPLATE_BACKEND` | `cmd_dev.test_backend`, `mypyc.runtime_env_vars`, mypyc launch config | Backend under test (conftest) |
 | `PYTEMPLATE_COMPILED` | `mypyc.runtime_env_vars` | Modules that must load from `.pyd/.so` (conftest) |
@@ -1326,7 +1337,10 @@ Files:
   `test_nvim_render.py` checks 6 configs): Neovim trusts it by the sha256 of its raw bytes,
   keyed by its real path, in `stdpath('state')/trust`. Any byte change (CRLF, a BOM, an edit)
   or moving the folder = untrusted again. Hence `.gitattributes` `.lazy.lua text eol=lf` and
-  all logic in the plugin. Editing the template forces every user to re-trust: avoid it.
+  all logic in the plugin. Editing the template forces every user to re-trust: avoid it
+  (`test_lazy_lua_bytes_are_pinned` pins the sha256 in `LAZY_LUA_SHA256`, so a change is
+  always deliberate; projects already made keep their own copy). Its unguarded read of
+  lazy.nvim's internal `spec.modules` is an open fragile point (section 15).
 - `loadstring` gives the chunk no path: the root is found with
   `vim.fs.root(vim.uv.cwd(), "pytemplate.toml")`.
 - Trusting `.lazy.lua` also trusts `.pytemplate/nvim/**`, loaded as a local plugin
@@ -1337,11 +1351,17 @@ Files:
 - `.pytemplate/editor.json` (`editors/nvim.editor_data`, schema 1): ASCII data only, relative
   paths only, no comments. Keys: `schema`, `generated`, `name`, `pkg`, `preset`, `gui`,
   `min_python`, `pypy_enabled`, `backend{active, supported}`, `typing{profile, editor, mypy,
-  mypy_severity, python_version}`, `envs{tools, cpython, mypyc, pypy}` (without the `-wsl`
+  mypy_severity, python_version, basedpyright}` (`basedpyright` = `cmd_dev.BASEDPYRIGHT`, the
+  pin of the uvx language server), `envs{tools, cpython, mypyc, pypy}` (without the `-wsl`
   suffix, which the plugin adds itself),
   `mypyc_stage`, `tasks[{name, help, background}]`, `commands[{name, usage, summary, group}]`
   (from `cli.COMMANDS`), `build{methods, default}`. The Lua side (`init.sanitize`) validates
-  every value (whitelists, patterns) and never runs a program named in it. `init.info` re-reads
+  every value (whitelists, patterns; `basedpyright` only as `basedpyright==X.Y.Z`) and never
+  runs a program named in it. `test_sanitize_keeps_every_generated_value` feeds it the
+  editor.json of every test variant and of the three presets: nothing may change (a whitelist
+  missing a new profile, backend or command would silently fall back to a default), and
+  `test_lua_whitelists_match_the_runner` compares `BACKENDS`, `PROFILES`, `EDITORS` and
+  `SEVERITIES` with the runner's. `init.info` re-reads
   it when its mtime/size changes; it is regenerated only when `./deploy` runs (render-on-save
   of `pytemplate.toml` covers edits made in Neovim).
 - Plugin (`.pytemplate/nvim/lua/`, documented in `.pytemplate/nvim/README.md`):
@@ -1354,11 +1374,15 @@ Files:
 
 Runner contract from Lua (the fourth caller of section 4.1): argv `{<absolute uv>, "run",
 "--quiet", "--script", <root>/.pytemplate/deploy.py, ...}` (`init.deploy_cmd`) through overseer
-/ `jobstart` with a LIST, env `PYTEMPLATE_CALLER_CWD=<cwd>` and `PYTEMPLATE_LAUNCHER=nvim`
-(`init.deploy_env`). Never a string command (it would go through `'shell'`, which may be xonsh
-or niubash) and never `deploy.cmd`/`deploy` unless uv is nowhere (the launcher prints the
-install hints). The uv lookup mirrors the launchers because a GUI, launchd or MSYS2-login
-Neovim may have a minimal PATH.
+/ `jobstart` with a LIST, env `PYTEMPLATE_CALLER_CWD=<cwd>`, `PYTEMPLATE_LAUNCHER=nvim` and
+`UV_PYTHON=""` (`init.deploy_env`; uv reads an empty value as unset, so the runner runs on the
+project's Python like with the launchers). Never a string command (it would go through
+`'shell'`, which may be xonsh or niubash) and never `deploy.cmd`/`deploy` unless uv is nowhere
+(the launcher prints the install hints; on POSIX it runs as `/bin/sh <root>/deploy`, like the
+VS Code tasks and the git hook, so a checkout without the exec bit still gets them). The uv
+lookup mirrors the launchers because a GUI, launchd or MSYS2-login Neovim may have a minimal
+PATH; on Windows PATH is searched for `uv.exe` exactly (`exepath('uv.exe')`: a `uv.cmd`/`uv.bat`
+shim earlier on PATH would run through cmd.exe and parse the arguments again).
 
 LazyVim wiring:
 - Extras imported by `.lazy.lua` (only when the config is LazyVim): `lazyvim.plugins.extras`
@@ -1372,8 +1396,10 @@ LazyVim wiring:
 - `vim.g.lazyvim_python_lsp` set from `.lazy.lua` is too late when `lang.python` is already
   enabled (read at first import): servers are switched by setting `opts.servers.<x>.enabled`
   in an lspconfig `opts` function (runs last). basedpyright by default (no Node.js; `.venv`'s
-  `basedpyright-langserver`, else `uv tool run --from basedpyright basedpyright-langserver
-  --stdio`, else Mason); pyright comes from Mason and needs Node.js. Pylance exists only in VS
+  `basedpyright-langserver`, else `uv tool run --from <typing.basedpyright> basedpyright-langserver
+  --stdio` with the version `./deploy check` pins (an unpinned request re-resolves to the
+  newest release whenever uv's index cache expires), else Mason); pyright comes from Mason and
+  needs Node.js. Pylance exists only in VS
   Code. pyright/basedpyright find `.venv` through `pyrightconfig.json` `venvPath`/`venv`, so
   venv-selector's automatic activation is turned off.
 - ruff server from `.venv` with `mason = false` (same version as `./deploy check`). Mason
@@ -1382,7 +1408,11 @@ LazyVim wiring:
   relative to it, the only form the parser matches), `--python-version <min_python>
   --python-executable <.venv python>` when PyPy is supported (like `render.mypy_cli_args`),
   severity from `typing.mypy_severity`, disabled with the `off` profile or without `.venv`.
-  On Windows nvim-lint wraps every linter in `cmd.exe /C`, where a quoted absolute path breaks
+  The linter is built once (at startup or on a refresh), but `.venv` may appear later (`./deploy
+  setup` in a terminal, or any `uv run --locked` of run/test/check): `cmd` is a function
+  resolved at every run, like `condition`, and the Windows PATH prefix is built from the path
+  even before `.venv` exists (`test_mypy_linter_follows_a_venv_created_later`). On Windows
+  nvim-lint wraps every linter in `cmd.exe /C`, where a quoted absolute path breaks
   with spaces or `& ^ %`: the linter runs the bare name `mypy` with `.venv\Scripts` first on
   PATH. nvim-lint REPLACES the environment when a linter has `env`, so it passes the full
   environment plus `PYTHONUTF8=1`, minus `VIRTUAL_ENV`.
@@ -1403,19 +1433,25 @@ LazyVim wiring:
   (`disable_template_modules = {"overseer.template.vscode"}`), otherwise labels would be
   duplicated and tasks would go through `deploy.cmd`. overseer runs `"type": "shell"` tasks
   through `'shell'`: another reason to keep VS Code tasks `process`. Commands that can change
-  the mode (`mode`, `setup`, `sync`, `lock`, `add`, `remove`, `render`) get the
-  `pytemplate.refresh` component (re-read `editor.json`, LSP `didChangeConfiguration`, rebuild
-  the mypy linter). Without overseer, tasks run in a terminal split.
+  the mode or `editor.json` (`mode`, `setup`, `apply` (the same `tasks.META` entry as
+  `setup`), `sync`, `lock`, `add`, `remove`, `render`, `rename`) get the `pytemplate.refresh`
+  component (re-read `editor.json`, LSP `didChangeConfiguration`, rebuild the mypy linter);
+  `mode`, `setup`, `apply`, `lock` and `rename` also open their output. Without overseer, tasks
+  run in a terminal split.
 - Output parser `tasks.parse_line` (overseer `on_output_parse` -> diagnostics + quickfix):
   strips ANSI, honours the `error: `/`warning: ` prefixes, reads basedpyright
   `  path:l:c - sev: msg` and `path:l[:c]: [sev: ]msg` (mypy, ruff concise, pytest crash
-  lines); skips notes, `site-packages` and `in <func>` frames.
+  lines); skips notes, `site-packages` and `in <func>` frames. Relative paths resolve against
+  the root; mypyc prints them relative to its stage (a copy of `src/`: `<pkg>/core/x.py`), so
+  a relative path that exists under `src/` but not under the root lands on `src/` (like the VS
+  Code MYPYC matcher).
 - Keymaps under `<leader>j` (which-key group "deploy"; `tasks.KEYS`): `j` pick, `r`/`R` run /
   run on a backend with args, `t`/`T` test / all, `c`/`C` check / all, `b`/`B` build / on a
   backend, `l` lint --fix, `f` fmt, `m` switch backend, `k` `[tasks]` picker, `d` `dev` task,
   `p` mypyc report, `s` sync all, `S` setup, `D` doctor, `w` task list, `x` stop deploy tasks.
-  `:Deploy ARGS` (completion; no args = help). `<leader>j` was chosen because no LazyVim core
-  or extra mapping uses it.
+  `:Deploy ARGS` (completion; no args = help; quotes group words through `tasks.split_args`,
+  like the `R`/`B` prompts: `:Deploy run cpython "a b"` passes `a b` as one argument).
+  `<leader>j` was chosen because no LazyVim core or extra mapping uses it.
 
 `./deploy nvim [doctor|trust|extras|bootstrap|sync]` (`cmd_nvim.cmd_nvim`):
 - Neovim's directories come from one headless query, never hard-coded (`cmd_nvim.headless`:
@@ -1436,10 +1472,13 @@ LazyVim wiring:
   already skipped the file for that session).
 - `extras` adds exactly the five extras above to `<config>/lazyvim.json` after a timestamped
   `.bak`, in LazyVim's own format; it refuses (exit 3) when there is no config or no
-  `lazyvim.json` yet (start Neovim once). `bootstrap` clones the LazyVim starter and deletes
-  its `.git`, only when the config dir does not exist. `sync` = `nvim --headless "+Lazy! sync"
-  +qa` with cwd = ROOT; when `.lazy.lua` is untrusted it warns and runs from a temp dir (the
-  trust prompt would hang a headless run).
+  `lazyvim.json` yet (start Neovim once). `bootstrap` clones the LazyVim starter (its newest
+  commit, as LazyVim's own install steps do) and deletes its `.git`, only when the config dir
+  does not exist. `sync` = `nvim --headless "+Lazy! install" +qa` with cwd = ROOT and
+  `NVIM_LOG_FILE` in a temp dir: install only (`Lazy! sync` would also update every plugin
+  of the user's config, rewriting their `lazy-lock.json`, and clean the plugins its spec does
+  not name). It refuses with exit 3 while `.lazy.lua` is not trusted (the trust prompt would
+  hang a headless run, and from any other folder the project's plugins are not in the spec).
 - `cmd_nvim.doctor(check)` (from `./deploy doctor`): one line, silent without `nvim`, at most
   one headless call.
 - Only started inside the project: `nvim path/x.py` from elsewhere, or a later `:cd`, does not
@@ -1465,20 +1504,31 @@ short temp tree and unset `NVIM_APPNAME`.
   --no-incremental --python-version 3.11 --config-file .pytemplate/tests/mypy-runner.ini
   .pytemplate/runner .pytemplate/deploy.py`. Both must pass. Needs `.venv` (`./deploy setup`).
   mypy checks the host platform only: add `--platform linux` / `--platform darwin` by hand to
-  check the other branches.
+  check the other branches. The arguments are ADDED after `.pytemplate/tests`: a file path does
+  not narrow the run (pytest still collects the whole folder); select with `-k EXPR`.
 - `.pytemplate/tests/`: `test_runner.py` (config, render, lintc, imports, target keys),
   `test_no_spanish.py`, `test_launcher_sh.py` (static lint of the `deploy` header rules, `-n`
-  syntax checks, `__probe` round-trips per shell found), `test_launcher_win.py` (static rules
-  on every OS, a PowerShell parser check, Windows behaviour through `__probe`),
+  syntax checks, `__probe` round-trips per shell found; a caller's `set -eu` in 8 shells,
+  symlinked subfolders, backslashes in POSIX paths, niubash's in-process run simulated by
+  sourcing (no `_pt_` name left on any exit path), `UV_PYTHON` and the runner's Python, the
+  Windows-only sh helpers and a fake `reg.exe` in every POSIX shell, the uv search order with
+  fake uvs for `deploy` and `deploy.ps1`, the install prompt on a pseudo-terminal),
+  `test_launcher_win.py` (static rules on every OS, a PowerShell parser check; the deploy.ps1
+  behaviour tests run wherever pwsh exists: injection safety of the Core hand-over, `--%`,
+  `-X:v`, pipeline input and raw stdin, `UV_PYTHON`, ConstrainedLanguage, the x bit; cmd and
+  the registry only on Windows),
   `test_paths.py` (path spellings, colours in a hidden console, dry runs in a throwaway copy),
   `test_render_core.py` (`render.apply`/`auto` and `state.json` in a sandbox, the render
   command's exit codes, the managed pyproject parts for every preset and backend set, typing
   profiles, the generated CI for 36 preset/backend combinations through a strict YAML reader and
   `actionlint` when installed, every output clean and hash-seed independent; real taplo and the
-  pinned basedpyright when the uv cache has them), `test_shells.py`, `test_vscode.py` (also real
+  pinned basedpyright when the uv cache has them), `test_shells.py` (also runs the fish, pwsh
+  and xonsh snippets in their shells, nu where installed), `test_vscode.py` (also real
   tool output through each task's matchers and a Node `RegExp` cross-check),
-  `test_nvim_render.py` (also loads the Lua modules in
-  `nvim --headless --clean`), `test_cmd_nvim.py`, `test_fixes.py` (regression tests of the
+  `test_nvim_render.py` (also loads the Lua modules in `nvim --headless --clean`: parser,
+  uv lookup, launcher fallback, sanitize round trip, the mypy linter, `tasks.META`, `:Deploy`;
+  the pinned `.lazy.lua` hash), `test_cmd_nvim.py` (`nvim` subcommands with fake Neovims,
+  the `selftest --nvim` harness: pins, base reuse, smoke parsing, tree kill), `test_fixes.py` (regression tests of the
   runner fixes: portable smoke with `lib/`, lazy `{python}`, the pyz `.cmd` wrapper, binary
   preset files, `compile.annotate`, `sync_tree` ns mtimes, portable launcher quoting and
   version probes, unknown arguments, `app.preset`, pinned tools, flet pyproject, wheel
@@ -1518,21 +1568,46 @@ short temp tree and unset `NVIM_APPNAME`.
   `<dir>/base.json` = the base is complete, `<dir>/p/<preset>` = scratch projects,
   `<dir>/logs/` = one log per step. It stops unless Neovim reports every stdpath inside
   `<dir>/x`, refuses a `--dir` inside the template, and only wipes a dir carrying its marker
-  `.pytemplate-nvim-test`. The starter is cloned and `Lazy! sync`ed once and reused (unless
-  `--fresh`); then per preset: `./deploy new` (name `pt-<preset>`), `./deploy sync cpython`
-  (clean env), trust through the API, `Lazy! install` from the project, and
+  `.pytemplate-nvim-test`. Pinned, so a red run is a regression and not upstream drift: the
+  LazyVim starter is cloned in full and checked out at `cmd_nvim.STARTER_REV`, and the plugins
+  come from `nvimtest.LOCK` (`.pytemplate/nvim/tests/lazy-lock.json`, a green run's lock),
+  copied into the isolated config before `Lazy! restore` (never `sync`) and again before each
+  project's `Lazy! install` (lazy.nvim rewrites the lock after every run and drops the plugins
+  its spec did not name; the startup install checks newly named ones out at the locked
+  commits). Without `LOCK` it takes the latest of everything (a `--depth 1` clone of the
+  starter HEAD, `Lazy! sync`). The base is made once and reused; `<dir>/base.json` records
+  starter, rev, the lock's sha256, the Neovim version and the starter commit the clone held,
+  and a base made for other pins or another Neovim is reinstalled (`--fresh` forces it). Per
+  preset: `./deploy new` (name `pt-<preset>`), `./deploy sync cpython` (clean env), `./deploy
+  mode --typing strict` (every preset ships `typing.relaxed = off`, which would leave the mypy
+  linter untested), trust through the API, `Lazy! install` from the project, and
   `nvim --headless -c "doautocmd UIEnter" -c "luafile .pytemplate/nvim/tests/smoke.lua"` with
-  `PT_ROOT=<project>` (timeout 600 s). Per-preset table with timings; exit 1 on any FAIL,
-  non-zero exit, timeout or no result lines. Without `nvim`/`git`: SKIP with exit 0, or exit 3
-  with `--require`; unknown preset: exit 2. First run ~1-2 min for the base, then ~7-35 s per
-  preset.
+  `PT_ROOT=<project>` (timeout 600 s). Every child runs in its own session: a timeout or Ctrl+C
+  kills the whole tree (`nvimtest.kill_tree`: SIGTERM to the group, so Neovim can stop its
+  jobstart jobs, then SIGKILL after 5 s; `taskkill /T` on Windows). Per-preset table with
+  timings; exit 1 on any FAIL, non-zero exit, timeout, a missing `DONE` line, a result count
+  that differs from it, or a mypy check that did not run with a typing profile
+  (`nvimtest.smoke_problem`). Without `nvim`/`git`: SKIP with exit 0, or exit 3 with
+  `--require`; unknown preset: exit 2. First run ~1-2 min for the base, then ~7-35 s per
+  preset. Each run copies the resolved `lazy-lock.json` and `starter-commit.txt` into
+  `<dir>/logs/` (`nvimtest.record_pins`). Refreshing the pins: run it without the lock
+  (`rm .pytemplate/nvim/tests/lazy-lock.json`); when it is green, copy `<dir>/logs/lazy-lock.json`
+  back and set `cmd_nvim.STARTER_REV` to `<dir>/logs/starter-commit.txt`, in one commit
+  (`test_the_shipped_pins_are_complete` checks the lock names every plugin `.lazy.lua`
+  configures).
 - `smoke.lua` output contract (parsed by `nvimtest.parse_smoke`): one stdout line per check,
   `ok   NAME`, `FAIL NAME` followed by the error indented 5 spaces, or `SKIP NAME (reason)`
   (only for things that need a network install: a language server via uvx/Mason, a treesitter
-  parser; basedpyright is SKIPped after 150 s); exit 0 via `qa!`, 1 via `cq!`; a 20-minute
+  parser; basedpyright is SKIPped after 150 s; and the mypyc debug check without a C
+  compiler); each result starts on a fresh line (stdout is shared with anything that leaks
+  there, a pty or a banner, and text without a newline would hide the next result) and the
+  last line is `DONE <number of checks>`; exit 0 via `qa!`, 1 via `cq!`; a 20-minute
   watchdog; `PT_ROOT` optional. Parse only lines that start with those markers. It runs
   `./deploy help`, `render` and `lint`, and briefly creates `src/<pkg>/_pt_smoke_lint.py` and
-  `_pt_smoke_mypy.py`. 19 checks, including a debugger stopping at a breakpoint.
+  `_pt_smoke_mypy.py`. 20 checks, including the launcher fallback while the scratch project's
+  `deploy` has no exec bit (POSIX), stage-relative mypyc paths in the output parser, the mypy diagnostics with the typing
+  profile's severity, a debugger stopping at a breakpoint, and the mypyc launch configuration
+  (overseer runs its preLaunchTask `deploy: compile`, then a breakpoint in `src/main.py`).
 - `./deploy selftest --e2e [PRESET ...] [--backends B,..] [--methods M,..] [--quick|--full]
   [--gui auto|on|off] [--keep] [--reuse] [--json] [--base DIR]` (`e2e.selftest`): per preset
   (default script, raylib, flet) `./deploy new <base>/<preset>` from THIS template with app
@@ -1592,12 +1667,18 @@ short temp tree and unset `NVIM_APPNAME`.
 
 Developed on Windows 11: the Linux/macOS code paths (launcher branches, `.sh` launchers, xvfb,
 pyz cache in `HOME`, the nvim harness) are exercised by the CI workflows. Not installed locally, CI only: zsh,
-ksh, mksh, yash, fish, nu, Cygwin, busybox-w32, WSL, macOS bash 3.2. Untested anywhere so far:
+ksh, mksh, yash, fish, Cygwin, busybox-w32, WSL, macOS bash 3.2. Untested anywhere so far:
+nushell (no CI job installs it: `selftest --shells` and `test_nu_snippet_runs` skip it),
 PowerShell 6.x-7.2, a UNC current folder, uv found only in `ProgramFiles` or chocolatey, a
-PATH entry with quotes in `deploy.cmd`, the interactive install prompt, Neovim 0.11 (only
-0.12.5), pyright via Mason, VS Code itself (buttons, Problems panel: only simulated), `flet
-build` (Developer Mode is off), bundled PyPy portable builds on CI, Ctrl+C handling of the
-harnesses.
+quoted registry PATH entry in `deploy.cmd` (`test_cmd_registry_path_with_quoted_entries` is
+Windows-only and has not run yet), the install prompt on Windows (POSIX `deploy` and pwsh
+`deploy.ps1` answer it on a pseudo-terminal), Neovim 0.11 (only 0.12.5), pyright via Mason, VS
+Code itself (buttons, Problems panel: only simulated), `flet build` (Developer Mode is off),
+bundled PyPy portable builds on CI, Ctrl+C handling of the harnesses (nvimtest's tree kill only
+simulated). The launcher changes of September 2026 were developed on Linux (pwsh 7.6 for
+`deploy.ps1`; niubash simulated by sourcing `deploy` in bash, dash, busybox, ksh, mksh and
+yash): their Windows paths (Windows PowerShell 5.1, `deploy.cmd`, real niubash and MSYS2) run
+only with `./deploy selftest` and `selftest --shells` on Windows.
 
 ## 14. Conventions and recipes
 
@@ -1732,6 +1813,19 @@ Editors:
   `vim.g.lazyvim_json` override.
 - `selftest --nvim` does not pre-install the treesitter python parser or warm basedpyright:
   on a cold cache those smoke checks SKIP and the first run is slow.
+- `.lazy.lua` reads lazy.nvim's internal `require("lazy.core.config").spec.modules` without a
+  guard (LazyVim reads the same field in several places, and lazy.nvim has not changed it
+  since 2023): if it ever changes, lazy.nvim reports "Failed to load `.lazy.lua`" and the
+  whole integration is missing. It also names the five extras and the plugins' repositories.
+  Fixing any of it changes `.lazy.lua`'s bytes (a re-trust; projects already made keep their
+  own copy). Recommended in one go: make `.lazy.lua` a minimal loader that finds the root and
+  returns `dofile(root .. "/.pytemplate/nvim/spec.lua")(root)` (no pcall: lazy.nvim reports
+  its errors), with today's body in `spec.lua` and the internal read guarded
+  (`pcall(require, ...)`, `type(...) == "table"`, else no extras). `.pytemplate/nvim/**` is
+  already trusted with `.lazy.lua`, so later fixes there need no re-trust.
+- The pinned `selftest --nvim` (`nvimtest.LOCK`, `cmd_nvim.STARTER_REV`) stays green while
+  upstream moves: only a run without the lock (a scheduled canary) shows drift coming, and
+  users' LazyVim follows its own `lazy-lock.json`.
 - On Windows the debugger prints harmless noise on disconnect (debugpy's "NoMoreMessages"
   traceback, "adapter exited with 1").
 
@@ -1755,6 +1849,13 @@ Code coupling (rename together):
   <-> setuptools' `_find_vc2017` component choice (`test_msvc_component_matches_setuptools`);
   `cmd_nvim.c_compiler` lacks `cmd_env._xcode_problem` (the macOS xcrun shim check).
 - `editor.json` <-> `cli.COMMANDS` (6.2); `cmd_nvim.EXTRAS` <-> the extras list in
-  `templates/nvim/lazy.lua`; `vscode.MYPYC_STAGE` / `editor.json` `mypyc_stage` /
-  `vscode._STAGE` (the pytest stage matcher) <-> `mypyc.profile(cfg, ...).stage`; the CI pyz path
+  `templates/nvim/lazy.lua` (`test_lazy_lua_extras_match_cmd_nvim`); `vscode.MYPYC_STAGE` /
+  `editor.json` `mypyc_stage` / `vscode._STAGE` (the pytest stage matcher) <->
+  `mypyc.profile(cfg, ...).stage` (`test_editor_json_stage_matches_the_runner`); the CI pyz path
   <-> `BuildRequest.out_name` (10; `test_ci_workflow_for_every_preset_and_backend_set`).
+- `editor.json` `typing.basedpyright` <-> `cmd_dev.BASEDPYRIGHT` (bumping the pin changes a
+  generated file: re-render); the Lua whitelists `BACKENDS`, `PROFILES`, `EDITORS`,
+  `SEVERITIES` in `nvim/lua/pytemplate/init.lua` <-> the runner's
+  (`test_lua_whitelists_match_the_runner`); `nvimtest.LOCK` <-> `cmd_nvim.STARTER_REV` (refresh
+  both from one green run, 13.1); `.lazy.lua`'s bytes <-> `test_nvim_render.LAZY_LUA_SHA256`;
+  `tasks.META.apply` <-> `tasks.META.setup` (one operation, two names).

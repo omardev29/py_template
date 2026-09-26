@@ -708,6 +708,26 @@ def test_entry_checks_the_version_before_importing_the_runner() -> None:
     assert text.index("sys.version_info < (3, 11)") < text.index("from runner.cli import main")
 
 
+@needs_posix
+@pytest.mark.parametrize("launcher", ["deploy", "deploy.ps1"])
+def test_runner_runs_on_python_cpython_whatever_the_caller_pins(launcher: str, tmp_path: Path) -> None:
+    """uv reads the .python-version next to .pytemplate/deploy.py (python.cpython): neither a
+    .python-version in the caller's folder nor the caller's UV_PYTHON picks the runner's Python
+    (CLAUDE.md 5.2). The runner therefore runs on whatever python.cpython says (3.11+)."""
+    pinned = (ROOT / ".python-version").read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"3\.\d+", pinned), pinned
+    other = "3.11" if pinned != "3.11" else "3.12"
+    (tmp_path / ".python-version").write_text(other + "\n", encoding="utf-8")
+    env = _clean_env(UV_PYTHON=other)
+    if launcher == "deploy":
+        run = Run(["/bin/sh", LAUNCHER, "__probe", "0", "0", "x"], tmp_path, env)
+    else:
+        run = Run([_pwsh(), "-NoProfile", "-NonInteractive", "-File", ROOT / "deploy.ps1", "__probe", "0", "0", "x"], tmp_path, env)
+    assert run.rc == 0 and run.probe, run.out + run.err
+    assert run.probe["argv"] == ["x"] and Path(str(run.probe["root"])) == ROOT
+    assert str(run.probe["python"]).startswith(pinned + "."), (run.probe["python"], pinned)
+
+
 # --- the Windows-only helpers are plain sh: run them in every POSIX shell ---------------------------
 
 HELPERS = ("_pt_slashes", "_pt_backslashes", "_pt_drive", "_pt_winpath", "_pt_try_uv", "_pt_try_dir", "_pt_expand", "_pt_uv_in_list", "_pt_uv_from_registry")

@@ -338,6 +338,10 @@ for _, name in ipairs({ "rename", "apply", "setup", "mode" }) do
   check("META " .. name, meta.refresh == true and meta.show == true, vim.inspect(meta))
 end
 check("rename task refreshes", vim.tbl_contains(tasks.components("rename"), "pytemplate.refresh"), vim.inspect(tasks.components("rename")))
+-- apply is setup under its everyday name: the same task metadata (refresh, show)
+check("META apply is setup's", vim.deep_equal(tasks.META.apply, tasks.META.setup), vim.inspect(tasks.META.apply))
+check("apply task refreshes", vim.tbl_contains(tasks.components("apply"), "pytemplate.refresh"), vim.inspect(tasks.components("apply")))
+check("no init task", tasks.META.init == nil, "init is internal to ./deploy new")
 
 -- :Deploy groups quoted words like the <leader>jR prompt
 local captured = {}

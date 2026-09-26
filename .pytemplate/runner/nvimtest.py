@@ -371,6 +371,7 @@ def prepare_base(layout: Layout, exe: str, env: Mapping[str, str], *, fresh: boo
     else:
         ui.command(f"git clone --depth 1 {cmd_nvim.STARTER} {nv.config}   (no {rel_lock()}: the latest)")
         _step([git, "clone", "--depth", "1", cmd_nvim.STARTER, nv.config], cwd=layout.base, env=env, log=clone_log, timeout=CLONE_TIMEOUT, what="clone the LazyVim starter")
+    commit = _starter_commit(git, nv, layout, env)
     _remove(nv.config / ".git")
     use_lock(nv, lock)
     # From the work dir: there is no .lazy.lua above it, so only LazyVim's own plugins.
@@ -386,10 +387,38 @@ def prepare_base(layout: Layout, exe: str, env: Mapping[str, str], *, fresh: boo
     if not (nv.data / "lazy" / "LazyVim").is_dir():
         raise DeployError(f"LazyVim was not installed in {nv.data} (log: {sync_log})\n{_tail(sync_log)}")
     seconds = time.perf_counter() - start
-    info = {**want, "created": time.strftime("%Y-%m-%d %H:%M:%S"), "seconds": round(seconds)}
+    info = {**want, "commit": commit, "created": time.strftime("%Y-%m-%d %H:%M:%S"), "seconds": round(seconds)}
     layout.marker.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8", newline="\n")
     ui.ok(f"isolated LazyVim ready in {seconds:.0f} s")
     return nv, seconds
+
+
+_SHA = re.compile(r"(?m)^([0-9a-f]{40})\s*$")
+
+
+def _starter_commit(git: str, nv: cmd_nvim.Nvim, layout: Layout, env: Mapping[str, str]) -> str:
+    """The commit the starter clone holds, read before its .git goes ('' if git cannot tell).
+    Without LOCK it is the newest one: a green run makes it the next cmd_nvim.STARTER_REV."""
+    log = layout.logs / "starter-commit.log"
+    _step([git, "-C", nv.config, "rev-parse", "HEAD"], cwd=layout.base, env=env, log=log, timeout=CLONE_TIMEOUT, what="read the LazyVim starter commit")
+    m = _SHA.search(log.read_text(encoding="utf-8", errors="replace")) if log.is_file() else None
+    return m[1] if m else ""
+
+
+def record_pins(layout: Layout, nv: cmd_nvim.Nvim) -> str:
+    """Copy what this run used into the logs (the CI artifact): the lazy-lock.json lazy.nvim
+    resolved and the starter commit. After a green run without LOCK they are the new pins
+    (LOCK and cmd_nvim.STARTER_REV). Returns the summary line's text."""
+    resolved = nv.config / "lazy-lock.json"
+    if resolved.is_file():
+        shutil.copyfile(resolved, layout.logs / "lazy-lock.json")
+    commit = str(_read_marker(layout.marker).get("commit") or "")
+    commit = commit if re.fullmatch(r"[0-9a-f]{40}", commit) else ""
+    if commit:
+        (layout.logs / "starter-commit.txt").write_text(commit + "\n", encoding="ascii", newline="\n")
+    if LOCK.is_file():
+        return f"starter {cmd_nvim.STARTER_REV[:12]}, plugins of {rel_lock()}"
+    return f"the latest (no {rel_lock()}): starter {commit or 'commit unknown'}, plugins in {layout.logs / 'lazy-lock.json'}"
 
 
 def rel_lock() -> str:
@@ -595,12 +624,10 @@ def selftest(cfg: Config, args: list[str]) -> int:
                 cmd_nvim.remove_tree(layout.projects / p)
             except OSError as e:
                 ui.warn(f"could not remove {layout.projects / p}: {e}")
-    # the plugin commits this run used (the uploaded CI logs; a new pin after a green canary)
-    resolved = nv.config / "lazy-lock.json"
-    if resolved.is_file():
-        shutil.copyfile(resolved, layout.logs / "lazy-lock.json")
+    # the starter and plugin commits this run used (the uploaded CI logs; new pins after a green
+    # run without LOCK)
+    pins = record_pins(layout, nv)
     _table(rows, base_seconds)
-    pins = f"starter {cmd_nvim.STARTER_REV[:12]}, plugins of {rel_lock()}" if LOCK.is_file() else f"the latest (no {rel_lock()})"
     ui.info(f"  pinned to: {pins}")
     ui.info(f"  logs: {layout.logs}" + (f"   projects: {layout.projects}" if ns.keep else "   (--keep keeps the projects)"))
     if all(r.ok for r in rows):

@@ -7,6 +7,7 @@ The full shell x test matrix is `./deploy selftest --shells`, not pytest.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import os
 import shutil
@@ -267,6 +268,29 @@ def test_xonsh_snippet_words_and_syntax() -> None:
     assert "--method" in flags["build"]
     compile(text.replace("${...}", "{}"), "snippet", "exec")
     assert "add_one_completer" in text and 'aliases["deploy"]' in text
+
+
+def _xonsh_words(cfg: Config | None) -> list[object]:
+    text = shells.snippet("xonsh", cfg)
+    namespace: dict[str, object] = {}
+    exec(compile(text.split("\n\nif hasattr(aliases")[0].replace("${...}", "{}"), "snippet", "exec"), namespace)
+    words = namespace["_PT_WORDS"]
+    assert isinstance(words, list)
+    return words
+
+
+def test_xonsh_completion_follows_cli_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The completion words come from cli.COMMANDS when the snippet is printed: a new command
+    (`apply`, the same operation as `setup`) is offered without touching shells.py."""
+    from runner import cli
+
+    words = _xonsh_words(None)
+    assert set(cli.COMMANDS) <= set(words), set(cli.COMMANDS) - set(words)
+    assert not [w for w in words if isinstance(w, str) and w.startswith("__")], "internal routes are never offered"
+    commands = dict(cli.COMMANDS)
+    commands["apply"] = dataclasses.replace(cli.COMMANDS["setup"], summary="Apply every pytemplate.toml change")
+    monkeypatch.setattr(cli, "COMMANDS", commands)
+    assert "apply" in _xonsh_words(make({})) and "setup" in _xonsh_words(make({}))
 
 
 def test_guess_shell() -> None:

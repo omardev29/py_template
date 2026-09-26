@@ -473,13 +473,20 @@ class Base:
         monkeypatch.setattr(cmd_nvim, "query", lambda exe=None, env=None: self.nv)
         self.steps: list[list[str]] = []
         self.lock_at_lazy: list[dict[str, object]] = []
+        self.head = cmd_nvim.STARTER_REV if lock else "0123456789abcdef0123456789abcdef01234567"
         monkeypatch.setattr(nvimtest, "_step", self.step)
 
-    def step(self, argv: list[str | Path], **_: object) -> None:
+    def step(self, argv: list[str | Path], **kwargs: object) -> None:
         args = [str(a) for a in argv]
         self.steps.append(args)
         if "clone" in args:
             (Path(args[-1]) / ".git").mkdir(parents=True)
+        if "rev-parse" in args:
+            # git's answer, only while the clone still has its .git
+            assert (self.nv.config / ".git").is_dir(), "the starter commit is read before .git goes"
+            log = kwargs["log"]
+            assert isinstance(log, Path)
+            log.write_text(f"{self.head}\n", encoding="ascii")
         if any(a.startswith("+Lazy! ") for a in args):
             lock = self.nv.config / "lazy-lock.json"
             self.lock_at_lazy.append(json.loads(lock.read_text(encoding="utf-8")) if lock.is_file() else {})
@@ -505,6 +512,7 @@ def test_prepare_base_pins_the_starter_and_restores_the_lock(tmp_path: Path, mon
     marker = json.loads(base.layout.marker.read_text(encoding="utf-8"))
     assert marker["rev"] == cmd_nvim.STARTER_REV and marker["lock"] == hashlib.sha256(base.lock.read_bytes()).hexdigest()
     assert marker["nvim"] == "0.12.5" and not (base.nv.config / ".git").exists()
+    assert marker["commit"] == cmd_nvim.STARTER_REV, "the commit the checkout really holds"
     base.steps.clear()
     assert base.run() is None and base.steps == [], "same pins, same Neovim: reused"
 
@@ -515,7 +523,35 @@ def test_prepare_base_without_the_lock_takes_the_latest(tmp_path: Path, monkeypa
     clone = next(s for s in base.steps if "clone" in s)
     assert "--depth" in clone and not [s for s in base.steps if "checkout" in s]
     assert [a for s in base.steps for a in s if a.startswith("+Lazy! ")] == ["+Lazy! sync"]
-    assert json.loads(base.layout.marker.read_text(encoding="utf-8"))["rev"] == "HEAD"
+    marker = json.loads(base.layout.marker.read_text(encoding="utf-8"))
+    assert marker["rev"] == "HEAD"
+    assert marker["commit"] == base.head, "the newest starter commit is recorded: the next STARTER_REV"
+    order = [next(i for i, s in enumerate(base.steps) if word in s) for word in ("clone", "rev-parse")]
+    assert order == sorted(order) and order[1] < next(i for i, s in enumerate(base.steps) if "+Lazy! sync" in s)
+
+
+@pytest.mark.parametrize("pinned", [True, False])
+def test_record_pins_keeps_what_the_run_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pinned: bool) -> None:
+    """The logs (CI's artifact) get the resolved lazy-lock.json and the starter commit: after a
+    green run without the lock they are the new pins."""
+    base = Base(tmp_path, monkeypatch, lock=pinned)
+    base.run()
+    (base.nv.config / "lazy-lock.json").write_text('{"LazyVim": {"branch": "main", "commit": "x"}}\n', encoding="utf-8")
+    text = nvimtest.record_pins(base.layout, base.nv)
+    logs = base.layout.logs
+    assert (logs / "lazy-lock.json").read_text(encoding="utf-8") == (base.nv.config / "lazy-lock.json").read_text(encoding="utf-8")
+    assert (logs / "starter-commit.txt").read_text(encoding="ascii") == base.head + "\n"
+    if pinned:
+        assert text.startswith(f"starter {cmd_nvim.STARTER_REV[:12]}, plugins of "), text
+    else:
+        assert text.startswith("the latest (no ") and base.head in text, text
+    # a base made before the commit was recorded (or a hand-edited base.json): no guessing
+    marker = json.loads(base.layout.marker.read_text(encoding="utf-8"))
+    marker["commit"] = "HEAD; rm -rf /"
+    base.layout.marker.write_text(json.dumps(marker), encoding="utf-8")
+    (logs / "starter-commit.txt").unlink()
+    text = nvimtest.record_pins(base.layout, base.nv)
+    assert not (logs / "starter-commit.txt").exists() and "rm -rf" not in text
 
 
 @pytest.mark.parametrize("change", ["nvim", "lock"])
