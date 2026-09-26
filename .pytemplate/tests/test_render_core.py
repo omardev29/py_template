@@ -651,6 +651,68 @@ def test_user_keys_in_tool_uv_survive(pyproject: Path) -> None:
     assert "3.15" in data["tool"]["uv"]["environments"][0]
 
 
+PYPY_CFG = preset_cfg(extra={"backend": {"supported": ["cpython", "pypy", "mypyc"]}})
+CFFI = "cffi>=1.15.1; implementation_name == 'cpython'"
+
+
+def _own_list(text: str, line: str) -> str:
+    """`text` with a [tool.uv] line of the project's own right after the managed block."""
+    end = f"  {render.MARK_END}\n"
+    assert text.count(end) == 1
+    return text.replace(end, f"{end}{line}\n")
+
+
+def test_a_project_keeps_its_own_override_dependencies(pyproject: Path) -> None:
+    """The managed block owned the whole key: with the project's own list outside the markers,
+    enabling PyPy gave invalid TOML (a repeated key) and lock, mode and apply refused."""
+    text = _own_list(pyproject_text(CFG), 'override-dependencies = ["pygments>=2.19"]')
+    _write(pyproject, text)
+    assert render.pyproject_outdated(CFG) is False and render.write_pyproject(CFG) is False
+    # PyPy needs the cffi override: the project's list must hold it, and the error says so
+    with pytest.raises(DeployError) as e:
+        render.check_pyproject(PYPY_CFG)
+    assert "override-dependencies" in str(e.value) and f'"{CFFI}"' in str(e.value) and "outside the" in str(e.value)
+    assert render.pyproject_outdated(PYPY_CFG) is True
+    assert pyproject.read_bytes() == text.encode("utf-8")
+    # with it (spelled another way), the block leaves the key to the project
+    own = 'override-dependencies = ["pygments>=2.19", "cffi >= 1.15.1 ; implementation_name==\\"cpython\\""]'
+    _write(pyproject, _own_list(pyproject_text(CFG), own))
+    assert render.write_pyproject(PYPY_CFG) is True
+    new = pyproject.read_text(encoding="utf-8")
+    uv = tomllib.loads(new)["tool"]["uv"]
+    assert uv["override-dependencies"] == ["pygments>=2.19", 'cffi >= 1.15.1 ; implementation_name=="cpython"']
+    assert "pypy" in str(uv["environments"]) and new.count("override-dependencies") == 1
+    assert render.pyproject_outdated(PYPY_CFG) is False and render.write_pyproject(PYPY_CFG) is False
+    # without PyPy again: the project's list stays as it is
+    assert render.write_pyproject(CFG) is True
+    assert tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["uv"]["override-dependencies"] == uv["override-dependencies"]
+
+
+def test_a_repeated_additive_key_is_repaired(pyproject: Path) -> None:
+    """The project added its own list while the block had the key (invalid TOML, uv refuses it
+    too): the rewrite leaves the key to the project once its list holds the block's entries."""
+    text = _own_list(pyproject_text(PYPY_CFG), f'override-dependencies = ["{CFFI}", "rich<16"]')
+    _write(pyproject, text)
+    with pytest.raises(tomllib.TOMLDecodeError):
+        tomllib.loads(text)
+    assert render.write_pyproject(PYPY_CFG) is True
+    uv = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["uv"]
+    assert uv["override-dependencies"] == [CFFI, "rich<16"]
+
+
+@pytest.mark.parametrize("package", ["raylib", "raylib_sdl"])
+def test_a_raylib_project_keeps_its_own_no_build_package(pyproject: Path, package: str) -> None:
+    cfg = preset_cfg("raylib", {"preset": {"raylib": {"package": package}}})
+    base = pyproject_text(cfg)
+    _write(pyproject, _own_list(base.replace(f'no-build-package = ["{package}"]\n', ""), 'no-build-package = ["numpy"]'))
+    with pytest.raises(DeployError, match=f'(?s)no-build-package .*"{package}"'):
+        render.write_pyproject(cfg)
+    other = package.replace("_", "-").upper()  # uv normalizes names: the same package
+    _write(pyproject, _own_list(base.replace(f'no-build-package = ["{package}"]\n', ""), f'no-build-package = ["numpy", "{other}"]'))
+    assert render.write_pyproject(cfg) is False  # nothing to change: the list is the project's
+    assert tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["uv"]["no-build-package"] == ["numpy", other]
+
+
 def test_a_rewrite_never_changes_anything_else(pyproject: Path) -> None:
     # requires-python inside a multi-line string of [project] is not the key: rather than rewrite
     # the description, write_pyproject refuses (the file is left as it is)

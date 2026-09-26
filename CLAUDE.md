@@ -1094,7 +1094,18 @@ Formats:
 - `render._verify` refuses (DeployError, nothing written) a rewrite that would give invalid TOML
   (e.g. a managed key repeated outside the markers), change anything but requires-python and the
   block's keys (a user key or table between the markers), or leave a managed value out of
-  `[tool.uv]`. `pyproject_outdated` never raises (an unusable file counts as outdated, and
+  `[tool.uv]`.
+- Additive lists (`render.ADDITIVE_KEYS`: `override-dependencies`, `constraint-dependencies`,
+  `build-constraint-dependencies`, `no-build-package`, `no-binary-package`,
+  `no-build-isolation-package`) belong to the project when its `[tool.uv]` defines them outside
+  the markers (`render._adopted`): `managed_block(cfg, leave=...)` then leaves the key out, and
+  `_verify` requires the project's list to hold the block's entries (compared by
+  `render._entry_key`: blanks, quote style and the PEP 503 name do not count), naming the
+  missing ones and why (`render._WHY`). Before, the block owned the whole key: a project that
+  kept its own overrides could not enable PyPy (a repeated key), and a raylib project could not
+  add a `no-build-package`. A file that already repeats such a key (the project added its list
+  while the block had one) is repaired by the next rewrite, since the rest of it still reads.
+  Entries typed INSIDE the markers are still replaced (the block is generated). `pyproject_outdated` never raises (an unusable file counts as outdated, and
   `./deploy lock` then explains); `render.check_pyproject(cfg)` runs the same checks without
   writing, as a preflight for commands that change other files first.
 - `render.auto` only warns (`pyproject_outdated`); `write_pyproject` runs in `lock`, `mode`,
@@ -1157,7 +1168,9 @@ Formats:
   `./deploy lock`.
 - With PyPy supported the block adds
   `override-dependencies = ["cffi>=1.15.1; implementation_name == 'cpython'"]`: PyPy ships
-  cffi built in and uv would otherwise try to build cffi from PyPI.
+  cffi built in and uv would otherwise try to build cffi from PyPI. A project with its own
+  `override-dependencies` outside the markers keeps it, and that list must hold the cffi entry
+  (section 6.3).
 - Dev group (`pyproject.toml [dependency-groups] dev`): `debugpy`, `mypy` (needs the Rust
   `ast-serialize`: no PyPy wheels), `pyinstaller`, `ruff` and `setuptools` carry
   `implementation_name == 'cpython'`; `.venv-pypy` only gets the app deps plus pytest.

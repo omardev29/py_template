@@ -22,6 +22,7 @@ import json
 import os
 import re
 import tomllib
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -458,7 +459,28 @@ def auto(cfg: Config, *, force: bool = False) -> None:
 # --- pyproject.toml (managed parts) ---------------------------------------------------------------
 
 
-def managed_block(cfg: Config) -> str:
+# [tool.uv] lists where one more entry only adds a constraint. A project may keep its own list
+# outside the markers: the managed block then leaves that key to it, and the project's list must
+# also hold the entries the block would write (_verify names the missing ones).
+ADDITIVE_KEYS = frozenset(
+    {
+        "override-dependencies",
+        "constraint-dependencies",
+        "build-constraint-dependencies",
+        "no-build-package",
+        "no-binary-package",
+        "no-build-isolation-package",
+    }
+)
+_WHY = {
+    "override-dependencies": "PyPy ships cffi built in, and uv would try to build the one from PyPI",
+    "no-build-package": "the preset installs it from wheels only",
+}
+
+
+def managed_block(cfg: Config, *, leave: Collection[str] = ()) -> str:
+    """The managed [tool.uv] block. `leave`: additive keys the project keeps outside the markers."""
+
     def minor_range(version: str) -> str:
         major, minor = version.split(".")
         return f"python_full_version >= '{version}' and python_full_version < '{major}.{int(minor) + 1}'"
@@ -473,13 +495,14 @@ def managed_block(cfg: Config) -> str:
     if cfg.pypy_enabled:
         lines.append(f"    \"implementation_name == 'pypy' and {minor_range(cfg.pypy_minor)}\",")
     lines.append("]")
-    if cfg.pypy_enabled:
+    if cfg.pypy_enabled and "override-dependencies" not in leave:
         lines += [
             "# PyPy ships cffi built in; uv does not see it and would try to build the one from PyPI",
             "override-dependencies = [\"cffi>=1.15.1; implementation_name == 'cpython'\"]",
         ]
     for key, value in presets.uv_extras(cfg).items():
-        lines.append(f"{key} = {_toml_scalar(value)}")
+        if key not in leave:
+            lines.append(f"{key} = {_toml_scalar(value)}")
     # The oldest uv that installs the pinned interpreters (envs.MIN_UV): an older uv stops with
     # "Required uv version ... does not match" (uv >= 0.5.14 reads it; doctor also checks)
     lines.append(f'required-version = ">={MIN_UV}"')
@@ -560,13 +583,35 @@ def _set_requires_python(lines: list[str], min_python: str) -> list[str]:
     return [*lines[: start + 1], *body, *lines[stop:]]
 
 
+def _outside_block(lines: list[str], bounds: tuple[int, int] | None) -> list[str]:
+    return lines if bounds is None else [*lines[: bounds[0]], *lines[bounds[1] + 1 :]]
+
+
+def _adopted(cfg: Config, lines: list[str], bounds: tuple[int, int] | None) -> set[str]:
+    """The additive keys of the block that the project's [tool.uv] defines outside the markers."""
+    try:
+        data = tomllib.loads("\n".join(_outside_block(lines, bounds)))
+    except tomllib.TOMLDecodeError:
+        return set()  # _verify says what is wrong
+    return set(_table(data, "tool", "uv")) & set(tomllib.loads(managed_block(cfg))) & ADDITIVE_KEYS
+
+
+def _entry_key(entry: str) -> str:
+    """An entry of an additive list as uv reads it: blanks and quote style do not count, and the
+    package name is normalized (PEP 503: raylib_sdl is raylib-sdl)."""
+    compact = re.sub(r"\s+", "", entry).replace('"', "'")
+    name = re.match(r"[A-Za-z0-9._-]*", compact)
+    head = name.group() if name else ""
+    return re.sub(r"[-_.]+", "-", head).lower() + compact[len(head) :]
+
+
 def pyproject_expected(cfg: Config, text: str) -> str:
     """Return `text` (LF) with the managed parts rewritten: [project] requires-python and the marked
     block of [tool.uv] (inserted after the [tool.uv] header, or in a new [tool.uv] table, when both
     markers are missing). Unusable markers are a DeployError."""
     lines = _set_requires_python(_split(text), cfg.min_python)
-    block = _split(managed_block(cfg))
     bounds = _managed_bounds(lines)
+    block = _split(managed_block(cfg, leave=_adopted(cfg, lines, bounds)))
     if bounds:
         lines[bounds[0] : bounds[1] + 1] = block
     else:
@@ -604,28 +649,38 @@ def _without_managed(data: dict[str, Any], uv_keys: set[str]) -> dict[str, Any]:
 def _verify(cfg: Config, text: str, new: str) -> None:
     """Refuse (DeployError) a rewrite that gives invalid TOML, misses a managed value or would
     change anything outside the managed parts: nothing is ever lost silently."""
+    lines = _split(text)
+    bounds = _managed_bounds(lines)
+    old_keys: set[str] = set()
     try:
         old = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        raise DeployError(f"pyproject.toml is not valid TOML ({e}).\n  Fix it, then run ./deploy lock") from None
+        # The block and the project's own list of an additive key clash (the project added it
+        # while the block had it too): fine when the rest reads, since the block now leaves it out
+        try:
+            if bounds is None:
+                raise
+            old = tomllib.loads("\n".join(_outside_block(lines, bounds)))
+        except tomllib.TOMLDecodeError:
+            raise DeployError(f"pyproject.toml is not valid TOML ({e}).\n  Fix it, then run ./deploy lock") from None
+    else:
+        if bounds:
+            try:
+                old_keys = set(tomllib.loads("\n".join(lines[bounds[0] : bounds[1] + 1])))
+            except tomllib.TOMLDecodeError:
+                pass  # the comparison below reports it
     managed = tomllib.loads(managed_block(cfg))
+    adopted = _adopted(cfg, lines, bounds)
+    written = set(managed) - adopted
     try:
         data = tomllib.loads(new)
     except tomllib.TOMLDecodeError as e:
         raise DeployError(
             f"pyproject.toml: writing the parts managed by pytemplate would give invalid TOML ({e}).\n"
-            f"  Does [tool.uv] repeat a managed key ({', '.join(managed)}) outside the markers? Delete it there\n"
+            f"  Does [tool.uv] repeat a managed key ({', '.join(sorted(written))}) outside the markers? Delete it there\n"
             "  (./deploy lock writes the managed block again), or restore the markers"
         ) from None
-    lines = _split(text)
-    bounds = _managed_bounds(lines)
-    old_keys: set[str] = set()
-    if bounds:
-        try:
-            old_keys = set(tomllib.loads("\n".join(lines[bounds[0] : bounds[1] + 1])))
-        except tomllib.TOMLDecodeError:
-            pass  # the comparison below reports it
-    if _without_managed(old, old_keys) != _without_managed(data, set(managed)):
+    if _without_managed(old, old_keys) != _without_managed(data, written):
         raise DeployError(
             "pyproject.toml: rewriting the parts managed by pytemplate would also change other settings\n"
             "  (is a key or table of yours between the markers?). Move it out of the managed block,\n"
@@ -634,8 +689,19 @@ def _verify(cfg: Config, text: str, new: str) -> None:
     if _table(data, "project").get("requires-python") != f">={cfg.min_python}":
         raise DeployError("pyproject.toml: requires-python could not be set: is the [project] table missing?")
     uv = _table(data, "tool", "uv")
-    if any(uv.get(key) != value for key, value in managed.items()):
+    if any(uv.get(key) != managed[key] for key in written):
         raise DeployError("pyproject.toml: the managed keys did not end up in [tool.uv]: restore the markers")
+    for key in sorted(adopted):
+        own = uv.get(key)
+        have = {_entry_key(v) for v in own if isinstance(v, str)} if isinstance(own, list) else set()
+        missing = [v for v in managed[key] if isinstance(v, str) and _entry_key(v) not in have]
+        if missing:
+            why = _WHY.get(key, "pytemplate.toml needs it")
+            raise DeployError(
+                f"pyproject.toml: [tool.uv] {key} is the project's own (outside the pytemplate markers), so the\n"
+                f"  managed block leaves that key to it; it must then also hold {', '.join(json.dumps(v) for v in missing)}\n"
+                f"  ({why}): add it to that list, then run the command again"
+            )
 
 
 def _read_pyproject() -> str:
@@ -650,9 +716,15 @@ def _read_pyproject() -> str:
 
 
 def _same_meaning(text: str, new: str) -> bool:
-    """Whether `new` says the same as `text` (both valid TOML: _verify ran). A TOML formatter such as
-    taplo (Even Better TOML, LazyVim's toml extra) re-indents and re-spaces comments; that is fine."""
-    return text == new or tomllib.loads(text) == tomllib.loads(new)
+    """Whether `new` says the same as `text` (`new` is valid TOML: _verify ran; `text` may repeat an
+    additive key the block now leaves out). A TOML formatter such as taplo (Even Better TOML,
+    LazyVim's toml extra) re-indents and re-spaces comments; that is fine."""
+    if text == new:
+        return True
+    try:
+        return tomllib.loads(text) == tomllib.loads(new)
+    except tomllib.TOMLDecodeError:
+        return False
 
 
 def check_pyproject(cfg: Config) -> None:

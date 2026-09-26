@@ -357,7 +357,11 @@ commands regenerate them first and say which changed; `./deploy render` does onl
   `# <<< pytemplate` (the Python versions `uv.lock` resolves for, the uv version floor,
   uv-managed interpreters only, and preset keys such as raylib's `no-build-package`). A TOML
   formatter may reformat them (only the meaning is compared), but the markers must stay; broken
-  markers are an error that says how to fix them. The rest of `pyproject.toml` is yours. Never add
+  markers are an error that says how to fix them. The rest of `pyproject.toml` is yours. Your own
+  `[tool.uv]` lists that only add constraints (`override-dependencies`, `constraint-dependencies`,
+  `no-build-package`, `no-binary-package`...) go outside the markers: the block then leaves that
+  key to you, and your list must also hold the block's entries (PyPy's cffi override, the raylib
+  preset's `no-build-package`), which `./deploy` names when one is missing. Never add
   `[build-system]`: the project is an application (the wheel method writes its own).
 
 Three tools run outside `uv.lock`, at versions pinned in the runner: `check` with
