@@ -221,7 +221,7 @@ def shadows_stdlib(pkg: str) -> bool:
     return pkg in sys.stdlib_module_names or pkg in STDLIB_OTHER_VERSIONS
 
 
-_PROJECT_HEADER = re.compile(r"(?m)^[ \t]*\[[ \t]*project[ \t]*\][ \t]*(?:#.*)?$")
+_PROJECT_HEADER = re.compile(r"(?m)^[ \t]*\[[ \t]*project[ \t]*\][ \t]*(?:#[^\r\n]*)?\r?$")
 _ANY_HEADER = re.compile(r"(?m)^[ \t]*\[")
 _NAME_KEY = re.compile(r"""(?m)^([ \t]*name[ \t]*=[ \t]*)(?:"[^"\n]*"|'[^'\n]*')""")
 

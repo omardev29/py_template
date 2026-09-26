@@ -111,6 +111,8 @@ _TOML_TABLE = re.compile(r"[ \t]*\[\[?[ \t]*([A-Za-z0-9_.\- \t]+?)[ \t]*\]\]?[ \
 _TOML_ASSIGN = re.compile(r"[ \t]*([A-Za-z0-9_-]+(?:[ \t]*\.[ \t]*[A-Za-z0-9_-]+)*)[ \t]*=")
 # ruff format --check --output-format concise: "path:1:2: unformatted: ..." (older: "Would reformat: path")
 _UNFORMATTED = re.compile(r"^(?:Would reformat: (?P<old>.+)|(?P<path>.+?):\d+:\d+: unformatted\b)", re.MULTILINE)
+# ruff check --output-format concise: "path:1:1: I001 [*] Import block is un-sorted or un-formatted"
+_UNSORTED = re.compile(r"^(?P<path>.+?):\d+:\d+: I001\b", re.MULTILINE)
 
 
 def package_of(name: str) -> str:
@@ -569,7 +571,7 @@ def module_value_lines(text: str, keys: Iterable[str] = MODULE_KEYS) -> set[int]
         m = _TOML_ASSIGN.match(line)
         if m is not None:
             key = re.sub(r"[ \t]", "", m.group(1))
-        if key and f"{table}.{key}".lstrip(".") in wanted:
+        if key and line.strip() and f"{table}.{key}".lstrip(".") in wanted:
             out.add(n)
     return out
 
@@ -1001,7 +1003,8 @@ def git_changes(root: Path) -> list[str] | str | None:
     if r.returncode != 0:
         return failure(r.returncode, r.stderr)
     prefix = r.stdout.strip()
-    r = proc.run(["git", "status", "--porcelain", "-z", "--", "."], cwd=root, env=env, capture=True, check=False, echo=False)
+    # -uall: every untracked file, never a whole untracked folder (the project itself may be one)
+    r = proc.run(["git", "status", "--porcelain", "-z", "-uall", "--", "."], cwd=root, env=env, capture=True, check=False, echo=False)
     if r.returncode != 0:
         return failure(r.returncode, r.stderr)
     return _porcelain_paths(r.stdout, prefix)
@@ -1067,32 +1070,45 @@ def _ruff(cfg: Config, args: Sequence[str | Path], files: Sequence[Path]) -> tup
     return code, "\n".join(out)
 
 
-def tidy_before(cfg: Config, plan_: Plan, root: Path | None = None) -> set[str] | None:
-    """Before the rename: which rewritten Python files `ruff format` accepts as they are (only those
-    are re-formatted afterwards: a file you keep unformatted stays so). None: ruff cannot run."""
+@dataclass
+class Tidy:
+    """The rewritten Python files ruff accepted BEFORE the rename (paths as in the plan). Only
+    those are tidied afterwards: a file you keep unformatted or unsorted stays as you wrote it."""
+
+    formatted: set[str]  # `ruff format --check` passed
+    sorted_imports: set[str]  # no I001 (import block un-sorted) under the project's typing profile
+
+
+def tidy_before(cfg: Config, plan_: Plan, root: Path | None = None) -> Tidy | None:
+    """Before the rename: which rewritten Python files ruff accepts as they are (formatting, and
+    the import order when the typing profile selects ruff's I rules). None: ruff cannot run."""
     from .cmd_dev import _profile_file
 
     root = root or ROOT
     files = [f.path for f in _python_edits(plan_)]
     if not files or proc.DRY_RUN or not envs.tool_env(cfg).python.is_file():
         return None
+    paths = [root / f for f in files]
     try:
         config_file = _profile_file(cfg, cfg.profile_for(), "ruff")
-        args: list[str | Path] = ["format", "--check", "--config", config_file, "--force-exclude", "--output-format", "concise"]
-        code, out = _ruff(cfg, args, [root / f for f in files])
+        fmt_code, fmt_out = _ruff(cfg, ["format", "--check", "--config", config_file, "--force-exclude", "--output-format", "concise"], paths)
+        lint_code, lint_out = _ruff(cfg, ["check", "--config", config_file, "--force-exclude", "--no-fix", "--output-format", "concise"], paths)
     except (DeployError, OSError):
         return None
-    if code == 0:
-        return set(files)
-    bad = {_same_path(m.group("old") or m.group("path")) for m in _UNFORMATTED.finditer(out)}
-    if code != 1 or not bad:
-        return None  # ruff failed, or an output format this runner does not know: format nothing
-    return {f for f in files if _same_path(root / f) not in bad}
+    unformatted = {_same_path(m.group("old") or m.group("path")) for m in _UNFORMATTED.finditer(fmt_out)}
+    if fmt_code not in (0, 1) or (fmt_code == 1 and not unformatted):
+        return None  # ruff failed, or an output format this runner does not know: tidy nothing
+    unsorted = {_same_path(m.group("path")) for m in _UNSORTED.finditer(lint_out)}
+    return Tidy(
+        formatted={f for f in files if _same_path(root / f) not in unformatted},
+        sorted_imports={f for f in files if _same_path(root / f) not in unsorted} if lint_code in (0, 1) else set(),
+    )
 
 
-def tidy_after(cfg: Config, plan_: Plan, clean: set[str] | None, root: Path | None = None) -> None:
+def tidy_after(cfg: Config, plan_: Plan, clean: Tidy | None, root: Path | None = None) -> None:
     """After the rename: sort the imports the new name moved (only when the typing profile selects
-    ruff's I rules) and re-format the files that were formatted before. Best effort: it never fails."""
+    ruff's I rules) and re-format, each only in the files that were clean before. Best effort: it
+    never fails the rename."""
     from .cmd_dev import _profile_file
 
     root = root or ROOT
@@ -1103,18 +1119,19 @@ def tidy_after(cfg: Config, plan_: Plan, clean: set[str] | None, root: Path | No
     if clean is None:
         ui.info(f"  note: {hint}")
         return
-    targets = [root / f.target for f in edits]
-    formatted = [root / f.target for f in edits if f.path in clean]
-    before = {t: t.read_bytes() for t in targets if t.is_file()}
+    sortable = [root / f.target for f in edits if f.path in clean.sorted_imports]
+    formatted = [root / f.target for f in edits if f.path in clean.formatted]
+    before = {t: t.read_bytes() for t in (*sortable, *formatted) if t.is_file()}
     try:
         config_file = _profile_file(cfg, cfg.profile_for(), "ruff")
-        _ruff(cfg, ["check", "--config", config_file, "--force-exclude", "--fix-only", "--fixable", "I001", "--quiet"], targets)
+        if sortable:
+            _ruff(cfg, ["check", "--config", config_file, "--force-exclude", "--fix-only", "--fixable", "I001", "--quiet"], sortable)
         if formatted:
             _ruff(cfg, ["format", "--config", config_file, "--force-exclude", "--quiet"], formatted)
     except (DeployError, OSError) as e:
         ui.warn(f"ruff could not tidy the renamed files ({e}): {hint}")
         return
-    touched = [t.relative_to(root).as_posix() for t, data in before.items() if t.is_file() and t.read_bytes() != data]
+    touched = sorted(t.relative_to(root).as_posix() for t, data in before.items() if t.is_file() and t.read_bytes() != data)
     if touched:
         ui.info(f"  ruff: import order / formatting fixed in {', '.join(touched)}")
 

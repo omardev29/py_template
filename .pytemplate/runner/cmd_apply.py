@@ -607,7 +607,7 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
     _dirty(plan, command, force)
     if plan.pypy_new:
         cmd_mode_precheck(cfg)  # before anything changes the lock (it runs `uv run --locked`)
-    clean: set[str] | None = None
+    clean: rename.Tidy | None = None
     if plan.rename_plan is not None and plan.new_cfg is not None:
         n = plan.rename_plan.names
         rename.report(plan.rename_plan, dry=False)
