@@ -145,7 +145,7 @@ it and move the code over.
 | `check [BACKEND\|all]` | ruff and mypy with the backend's typing profile, the mypyc rules, and basedpyright with `typing.editor = "basedpyright"` |
 | `lint [--fix]` | `ruff check` of `src/` and `tests/` with the active typing profile |
 | `fmt [--check]` | `ruff format` of `src/` and `tests/` |
-| `test [BACKEND\|all] [pytest args...]` | pytest; with mypyc on the compiled modules (it fails when they were not loaded) |
+| `test [BACKEND\|all] [pytest args...]` | pytest; with mypyc on the compiled modules (it fails when they were not loaded): the stage takes the place of `src` in pytest's `pythonpath`, your other entries stay |
 | `report [--open] [--no-mypy]` | mypyc's HTML report of slow lines and mypy's `Any` reports, in `.build/reports/` (no C compiler needed) |
 | `compile [--release]` | Compiles the mypyc stage without running it (for debuggers and editors) |
 | `build [BACKEND] [--method exe\|portable\|pyz\|wheel\|nuitka\|flet] [--onefile\|--onedir] [--target KEY]... [--no-check]` | Runs `check`, then packages the app into `dist/` ([details](#distribution)) |
