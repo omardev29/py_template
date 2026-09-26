@@ -2406,7 +2406,7 @@ uv:
   `test_runner.py::test_managed_block_bounds_cpython_minor`. Goes: never.
 - **`uv add` resolves each change alone** (LIMITATION): `flet-cli==V` pins `flet==V`, so adding
   the new flet to one group had no solution. Fix: `uv add`/`remove --frozen`, then one `uv lock`
-  (`cmd_apply.apply`, `presets.init`; 5.8). Test:
+  (`cmd_apply.apply`; `presets.init` removes the old preset's with `--frozen`; 5.8, 11). Test:
   `test_apply.py::test_uv_frozen_edits_only_pyproject`, `test_apply_flet_version_change`. Goes:
   never.
 - **uv writes normalized names** (LIMITATION, PEP 503): `raylib_sdl` became `raylib-sdl`, and a
@@ -2548,7 +2548,7 @@ PyPy:
   `pypyw`, `pythonw`, `pyw` (10). Test: `test_build_methods.py::test_windowed_twins_exist`.
   Goes: never.
 
-python-build-standalone (uv's CPython builds), Windows and the Python launchers:
+Python on the user's machine (the `runtime = "system"` launchers and the pyz wrapper):
 - **`py` can exist with no Python registered, and `python3.exe` can be the Microsoft Store
   alias** (LIMITATION): a system launcher started the alias or failed silently. Fix: the system
   portable `.cmd`/`.sh` and the pyz `.cmd` run each candidate with a minimum-version probe
@@ -2559,8 +2559,8 @@ python-build-standalone (uv's CPython builds), Windows and the Python launchers:
 mypy and mypyc:
 - **Module-level `__file__` is relative in a lone top-level compiled module** (DEFECT): mypyc
   sets `__file__` from the folder of its shared lib, and one top-level module gets none, so its
-  body sees `<mod><EXT_SUFFIX>` relative to the cwd. Up: mypyc/mypyc#700. Fix: the `lintc` rule
-  (`lintc.relative_file_at_import`, 9). Test:
+  body sees `<mod><EXT_SUFFIX>` relative to the cwd. Up: mypyc/mypyc#700 (open). Fix: the
+  `lintc` rule (`lintc.relative_file_at_import`, 9). Test:
   `test_mypyc_core.py::test_real_compile_single_top_level_module_sees_a_relative_file` (a pin:
   it fails once mypyc fixes it),
   `test_lintc_flags_module_level_file_for_a_single_top_level_module`. Goes: when that pin fails.
@@ -2959,9 +2959,10 @@ PowerShell (details: section 4.5):
   `test_ps1_restores_every_variable_it_sets`. Goes: never.
 - **A `param()` block would take `-v`, `-h`, `-q`** (LIMITATION): Fix: `deploy.ps1` has none.
   Test: `test_launcher_win.py::test_ps1_has_no_param_block_and_leaves_path_alone`. Goes: never.
-- **`$null` passed to a .NET string parameter becomes `''`** (DEFECT, 7.5+):
-  `SetEnvironmentVariable($n, $null)` left an empty variable. Up: PowerShell/PowerShell#24637
-  (closed as a duplicate). Fix: `deploy.ps1` uses `Remove-Item Env:NAME`. Test:
+- **`$null` passed to a .NET string parameter becomes `''`** (LIMITATION; with .NET 9, in
+  PowerShell 7.5+, `''` no longer removes a variable): `SetEnvironmentVariable($n, $null)` left
+  an empty variable. Up: PowerShell/PowerShell#24637 (closed as a duplicate). Fix: `deploy.ps1`
+  uses `Remove-Item Env:NAME`. Test:
   `test_launcher_win.py::test_ps1_clears_the_callers_uv_python_and_restores_it`. Goes: never
   (`Remove-Item` stays right).
 - **Native arguments before 7.3 (and in `Legacy` mode)** (DEFECT): empty arguments were dropped
@@ -2977,10 +2978,10 @@ PowerShell (details: section 4.5):
   quotes too) for `Invoke-Expression`. Test:
   `test_launcher_win.py::test_ps1_hand_over_is_injection_safe`; `shells.PS_ARGS` in `selftest
   --shells`. Goes: when splatted arguments pass through verbatim.
-- **7.3+ takes any native argument equal to `--%` for the stop-parsing token** (LIMITATION,
-  documented), quoted or splatted. Fix: `deploy.ps1` switches that call to `Legacy` passing in
-  its own scope. Test: `test_launcher_win.py::test_ps1_passes_a_literal_stop_parsing_token`.
-  Goes: never.
+- **7.3+ takes any native argument equal to `--%`, quoted or splatted, for the stop-parsing
+  token** (LIMITATION): it drops it, then splits and `%VAR%`-expands the rest. Fix: `deploy.ps1`
+  switches that call to `Legacy` passing in its own scope. Test:
+  `test_launcher_win.py::test_ps1_passes_a_literal_stop_parsing_token`. Goes: never.
 - **A typed `-X:v` reaches a script as two elements** (DEFECT): `'-X:'` and `v`. Up:
   PowerShell/PowerShell#6360 (closed for inactivity; 7.6 still splits it). Fix: `deploy.ps1`
   joins them again (limit: `-X: v`; `pwsh -File` and the shebang route split at the colon before
