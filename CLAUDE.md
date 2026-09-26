@@ -102,28 +102,39 @@ implement the same contract: change them together. The `nu` and `xonsh` snippets
 3. Export `PYTEMPLATE_CALLER_CWD` (the caller's cwd; `C:\...` form with an upper-case drive on
    Windows) and `PYTEMPLATE_LAUNCHER`.
 4. Run `uv run --quiet --script <root>/.pytemplate/deploy.py ARGS...` with argv untouched and
-   propagate its exit code. Launchers never `cd`; besides the uv search and the install
-   hints they contain no logic.
+   propagate its exit code, with the caller's `UV_PYTHON` removed for uv only (`deploy`:
+   `unset` before `exec`, `UV_PYTHON=''` for niubash; `deploy.cmd`: `set "UV_PYTHON="` under
+   `setlocal`; `deploy.ps1`: removed and restored like the `PYTEMPLATE_*` pair; plugin and nu
+   snippet: an empty value, which uv reads as unset). The runner then always runs on the
+   project's Python (section 5.2); its own tools never used the caller's `UV_PYTHON` anyway
+   (`proc.base_env`). Launchers never `cd`; besides the uv search and the install hints they
+   contain no logic.
 
 Launcher exit codes: 2 = no project found, 127 = uv not found (after the install hints),
-126 = `deploy.ps1` could not start uv; anything else comes from the runner.
+126 = `deploy.ps1` could not start uv, or PowerShell runs it in ConstrainedLanguage mode;
+anything else comes from the runner (3 when uv started it on a Python older than 3.11).
 
-uv search order (the same in all three launchers and the plugin, `init.uv_candidates`):
+uv search order (the same in all three launchers and the plugin, `init.uv_candidates`;
+`test_launcher_sh.test_uv_search_order` walks it with fake uvs for `deploy` and `deploy.ps1`):
 `$UV` (must be a file) -> PATH (`deploy`: `command -v uv` accepted only when it prints a
 path, which rejects aliases and functions; `deploy.ps1`: `Get-Command -CommandType
-Application`, only a real `uv.exe` on Windows) -> `UV_INSTALL_DIR[/bin]`, `XDG_BIN_HOME`,
+Application -All`, only a real `uv.exe` on Windows; the plugin: `exepath('uv.exe')` on
+Windows, never a `uv.cmd`/`uv.bat` shim) -> `UV_INSTALL_DIR[/bin]`, `XDG_BIN_HOME`,
 `XDG_DATA_HOME/../bin`, `~/.local/bin`, `CARGO_HOME/bin`, `~/.cargo/bin` -> Windows: WinGet
 `Links` and `Packages/astral-sh.uv_*` (`LOCALAPPDATA`, then `ProgramFiles`), scoop shims
 (`SCOOP`, `~/scoop`, `SCOOP_GLOBAL`, `ProgramData/scoop`), chocolatey, and last the user and
 machine `Path` stored in the registry (a console opened before uv was installed; not in the
 plugin) -> POSIX: `/opt/homebrew/bin`, `/usr/local/bin`, linuxbrew, `~/.nix-profile/bin` (the
 plugin also tries the nix default profile, `/run/current-system/sw/bin` and `/usr/bin`). On
-Windows the sh launcher uses `USERPROFILE` as home.
+Windows the sh launcher uses `USERPROFILE` as home. On Linux/macOS a candidate needs an x bit
+(`test -x` in `deploy`, `deploy.ps1`'s `Test-Uv` through `[IO.File]::GetUnixFileMode`, which
+PowerShell < 7.3 lacks: then no mode check): a `uv` left without one is skipped.
 
 Install hints: Windows prints the PowerShell installer, winget and scoop (never curl); POSIX
 prints curl, brew and pipx. `deploy` (stdin and stderr are TTYs) and `deploy.ps1`
 (`UserInteractive`, stdin not redirected) offer to run the official installer when `CI` is
-unset; `deploy.cmd` never prompts.
+unset; `deploy.cmd` never prompts. `test_launcher_sh.test_install_prompt_through_a_terminal`
+answers y/n on a pseudo-terminal (a fake `curl` installs a fake uv) for both.
 
 uv exports `UV` (its own path) to everything it starts, so `proc.find_uv` checks `$UV` first,
 then `shutil.which("uv")`, else `DeployError(..., 3)`.
@@ -132,8 +143,10 @@ then `shutil.which("uv")`, else `DeployError(..., 3)`.
 `/usr/bin/msys-2.0.dll` exists) or `:cygwin` (`cygwin1.dll`) appended (`sh:bash:msys`,
 `sh:msys` for dash under MSYS2); `cmd`; `ps1:<PSEdition>:<major>.<minor>` (`ps1:Core:7.6`,
 `ps1:Desktop:5.1`); `nvim`; `nu` (shell-setup snippet). The xonsh snippet sets none.
-`project.native_path` reads the `:msys`/`:cygwin` suffix, `shells.guess_shell` the prefix, and
-`./deploy doctor` prints the value ("unknown" when unset).
+`project.native_path` reads the `:msys`/`:cygwin` suffix, `shells.guess_shell` the prefix (only
+`ps1:` and `sh:niubash` first: `sh:bash`/`sh:zsh` name the interpreter of `#!/bin/sh`, bash on
+macOS, Fedora and Arch, so `$SHELL` wins over them), and `./deploy doctor` prints the value
+("unknown" when unset).
 
 ### 4.2 Which launcher runs
 
@@ -162,32 +175,51 @@ header rules (with detector tests proving each rule fires).
   `#!/usr/bin/env bash` is wrong: on Windows xonsh maps it to `bash`, which can be the WSL
   stub. `shells.doctor` checks the shebang, LF, ASCII and the git mode.
 - POSIX sh only (dash, bash 3.2, busybox ash, ksh; zsh through `emulate sh`): no arrays,
-  `[[ ]]`, `${v//a/b}`, `local`, `$'...'`, `function`. No `set -e` / `set -u` (a caller's
-  `set -eu` in niubash and `dash -eu deploy` still work).
+  `[[ ]]`, `${v//a/b}`, `local`, `$'...'`, `function`. No `set -e` / `set -u` in the file, but
+  a caller's (`sh -eu deploy`, niubash with errexit, in-process) must not stop it: `${v:-}`
+  for variables that may be unset, and every command that may fail sits in a condition or
+  ends in `|| :` / `|| _pt_x=` (never `read -r x || x=`: a last line without a newline still
+  fills x and returns 1). The lint rejects a `_pt_x=$(...)` without `||`;
+  `test_launcher_survives_caller_errexit` runs `-eu` in 8 shells (uv off PATH, a stale `UV`,
+  no uv).
 - `printf '%s\n'`, never `echo`, for anything that may contain a backslash (dash's `echo`
   interprets `\`: `c:\Users` prints as `c: sers`).
 - niubash hygiene (section 4.6): every variable and function name starts with `_pt_` and is
-  `unset` before the hand-over; never `cd`; `exit` only at top level or inside `if`/`case`
+  `unset` before the one `exit`/`exec` at the end: errors (no project: 2, no uv: 127) only set
+  `_pt_rc` and fall through to the cleanup, then `exit "$1"` (the lint rejects an `exit`
+  before the `unset -f` cleanup; `test_in_process_run_leaves_no_name_behind` sources the
+  launcher with an EXIT trap in bash, dash, busybox, ksh, mksh and yash and checks that no
+  name is left on every path); never `cd`; `exit` only at top level or inside `if`/`case`
   bodies (`return` is fine anywhere); no comment on a `name() {` line; never write
   `"...$(cmd "$x")..."`: assign the substitution to a variable first.
 - niubash is detected by `__RUBASH_SHELL_NAME`. There uv runs WITHOUT `exec` (exec would only
-  end the in-process script), then the launcher unsets `PYTEMPLATE_CALLER_CWD` and
-  `PYTEMPLATE_LAUNCHER` and exits with uv's code, so nothing leaks into the calling session.
+  end the in-process script) as `if UV_PYTHON='' "$@"` (errexit-proof; the session keeps its
+  own `UV_PYTHON`), then the launcher unsets `PYTEMPLATE_CALLER_CWD` and `PYTEMPLATE_LAUNCHER`
+  and exits with uv's code, so nothing leaks into the calling session. Elsewhere it runs
+  `unset UV_PYTHON` and `exec "$@"`.
 - Root discovery: `$BASH_SOURCE` -> zsh `${(%):-%x}` (read through `eval` so dash never parses
   it) -> `$0` -> walk up from `$PWD`. The walk stops at `/`, `C:` and `C:/`; relative
-  candidates (`./`, `../`) are folded against `$PWD`.
-- Windows detection: `OS=Windows_NT` and no `WSL_DISTRO_NAME`; `uname -s` only when `OS` is
-  unset. Never `OSTYPE` (niubash fakes `msys`). Never trust the output format of `uname` or
-  `cygpath`: in non-login MSYS2 shells on the maintainer's machine they resolve to WinuxCmd
-  copies.
+  candidates (`./`, `../`) are folded against `$PWD`, but the folded path is used only when it
+  holds `.pytemplate/deploy.py`: `$PWD` is logical, and below a symlinked folder its `..` is
+  not the folder the kernel found `../deploy` in; then the relative path stays (uv resolves it
+  physically, like the kernel). A logical parent that is ANOTHER project still wins (fixing
+  that needs `test -ef`, which `shellcheck -s sh` rejects, or a `pwd -P` fork).
+- Windows detection (computed first, before any path helper): `OS=Windows_NT` and no
+  `WSL_DISTRO_NAME`; `uname -s` only when `OS` is unset. Never `OSTYPE` (niubash fakes
+  `msys`). Never trust the output format of `uname` or `cygpath`: in non-login MSYS2 shells on
+  the maintainer's machine they resolve to WinuxCmd copies. `_pt_slashes` turns `\` into `/`
+  only there: on POSIX a backslash is part of a file name (`/data/a\b/proj` works).
 - On Windows the script path and `PYTEMPLATE_CALLER_CWD` are handed over as `C:\...`: `/c/x`
   and `/cygdrive/c/x` are converted in pure sh (drive letter upper-cased); `cygpath -m` runs
   only for paths inside the MSYS/Cygwin root such as `/home` or `/tmp`, and only an `X:/...`
   answer is accepted.
 - `%NAME%` in registry values is expanded from the environment, retrying the upper-case name
-  (MSYS2/Cygwin upper-case `SYSTEMROOT`, `PROGRAMFILES`...).
+  (MSYS2/Cygwin upper-case `SYSTEMROOT`, `PROGRAMFILES`...). Quoted entries
+  (`"C:\Program Files\x"`, written by some installers) lose their quotes first.
 - Registry lookup: `reg.exe query KEY` WITHOUT `/v` (MSYS rewrites `/v` into `V:/`). It only
-  runs when every other lookup failed.
+  runs when every other lookup failed. The Windows-only helpers are plain sh:
+  `test_windows_helpers_in_posix_shells` and `test_registry_path_quoted_entries` run them
+  (`_pt_win=1`, a fake `reg.exe`) in 8 POSIX shells.
 - Overhead over a bare shell start (Windows, quiet machine, median of 15): Git dash +31 ms,
   MSYS2 dash +40 ms, MSYS2 `bash -lc` +44 ms, Git sh +52 ms, niubash script +78 ms, niubash
   `-c` +124 ms; the registry fallback adds ~80 ms; a project under an MSYS-root path adds two
@@ -209,7 +241,11 @@ header rules (with detector tests proving each rule fires).
   from a quoted name: check `%~dp0.pytemplate\deploy.py` first, else walk up from `%CD%` (the
   start is normalised so a drive root works).
 - A `UV` variable that names a folder is rejected. The registry is read with
-  `reg query KEY /v Path` (cmd has no MSYS rewriting); `call` expands `REG_EXPAND_SZ` values.
+  `reg query KEY /v Path` (cmd has no MSYS rewriting) into a variable (`set "PT_LIST=%%B"`),
+  never passed as `call` arguments: a quoted entry (`"C:\Program Files\x"`) would split them
+  and leave the FOR set unclosed. The quotes are removed (`%PT_LIST:"=%`), then `call set`
+  expands `REG_EXPAND_SZ` values (`test_cmd_registry_path_with_quoted_entries`, a fake
+  `reg.cmd` on PATH, Windows only).
 - The helper variables are cleared on the uv line itself
   (`set "PT_ROOT=" & set "PT_UV=" & "%PT_UV%" run ...`): cmd expands the whole line first, so
   uv still gets their values and the runner sees only the two `PYTEMPLATE_*` variables.
@@ -229,7 +265,8 @@ header rules (with detector tests proving each rule fires).
 - No `param()` block: it would turn `-v`, `-h`, `-q` into PowerShell parameters. `a,b` arrays
   in `$args` are flattened.
 - A `.ps1` runs inside the caller's session: never assign `$env:PATH`. The two `PYTEMPLATE_*`
-  variables are restored in `finally`; a variable that did not exist before is removed with
+  variables and the removed `UV_PYTHON` (the `$names` list) are restored in `finally`; a
+  variable that did not exist before is removed with
   `Remove-Item Env:NAME`, never `[Environment]::SetEnvironmentVariable($n, $null)`: PowerShell
   passes `$null` to a .NET string parameter as `''`, and PowerShell 7 then keeps an empty
   variable.
@@ -240,6 +277,29 @@ header rules (with detector tests proving each rule fires).
   error and 5.1 turned redirected runner stderr (`2>&1`) into a bogus exit 126.
 - PowerShell removes a bare `--` before any script or function sees it (5.1 and 7 alike).
   Never design CLI syntax that needs `--`; users quote it (`'--'`) or use `deploy.cmd`.
+- PowerShell 7.3+ takes ANY native argument equal to `--%` (quoted or splatted too) for its
+  stop-parsing token: it drops it, then splits and `%VAR%`-expands the rest. An argument
+  `--%` switches that one call to legacy passing (`$PSNativeCommandArgumentPassing =
+  'Legacy'` in the script's scope only), whose pre-quoted `"--%"` reaches uv intact.
+- A typed `-X:v` reaches a script (and a function's `@args`) as two elements, `'-X:'` marked
+  with a hidden `<CommandParameterName>` note, and `v`: the launcher joins them again, as
+  PowerShell does for a native program. Limit: `-X: v` (a blank after the colon) arrives as
+  `-X:v`. `pwsh -File deploy.ps1 ...` and `./deploy.ps1` typed in bash/zsh (the shebang
+  route) are worse: pwsh itself splits every argument starting with `-` at its first colon
+  before the script runs (`--x=a:b` -> `--x=a` `b`): from POSIX shells use `./deploy`.
+- Pipeline input (`'x' | ./deploy.ps1 run`, `Get-Content f | ./deploy run`) goes to uv's
+  stdin, like a direct native call; without a pipeline uv keeps the process stdin. The file
+  NEVER names the automatic `$input` variable (`test_ps1_never_names_the_pipeline_variable`):
+  a script whose text uses it makes `pwsh -File` and the shebang route re-read a redirected
+  stdin as text lines (ConsoleHost `IsUsingDollarInput`: invalid UTF-8 becomes U+FFFD, CRLF
+  becomes LF). It reads the variable by name
+  (`$ExecutionContext.SessionState.PSVariable.GetValue('input')`) when
+  `$MyInvocation.ExpectingInput`; Core prefixes the Invoke-Expression call with
+  `$pipeIn | `. Windows PowerShell 5.1 encodes pipeline text with its ASCII `$OutputEncoding`.
+- ConstrainedLanguage mode (AppLocker/WDAC policies run unsigned scripts in it) blocks every
+  .NET call, `[Console]` included: the launcher checks
+  `$ExecutionContext.SessionState.LanguageMode` first and stops with one `Write-Error` naming
+  `deploy.cmd`, exit 126.
 - PowerShell < 7.3 (or `$PSNativeCommandArgumentPassing = 'Legacy'`) drops empty arguments and
   mangles embedded quotes when calling native programs, so the launcher pre-quotes every
   argument: a `"` is written `""` in 5.1 (Desktop: its quote counter ignores backslashes, so
@@ -250,12 +310,20 @@ header rules (with detector tests proving each rule fires).
   the home folder. On Core the launcher therefore rebuilds the uv call from single-quoted
   words (`CodeGeneration.EscapeSingleQuotedStringContent`, which keeps the file ASCII) and
   runs it with `Invoke-Expression`; Windows PowerShell 5.1 does neither and keeps the plain
-  `& $uv ... @argv`. `selftest --shells` T1 passes `~`, `~/x`, `~\x` to PowerShell only
+  `& $uv ... @argv`. Its safety rests on `EscapeSingleQuotedStringContent`, which also doubles
+  the typographic single quotes U+2018..U+201B (PowerShell reads them as quotes): never
+  "simplify" it to `.Replace("'", "''")`. `test_ps1_hand_over_is_injection_safe` splats ~80
+  hostile arguments (a payload per quote kind, `$(...)`, backticks, newlines, U+2028, a 100000
+  character one) and fails on any argv change or executed payload. `selftest --shells` T1
+  passes `~`, `~/x`, `~\x` and typographic quotes with a payload to PowerShell only
   (`shells.PS_ARGS`).
-- uv: `Get-Command uv -CommandType Application`, and on Windows only a real `.exe` (a plain
-  `Get-Command uv` can return an alias or function; a `uv.cmd`/`uv.ps1` wrapper would parse the
-  arguments again). The registry `Path` is read with `[Environment]::GetEnvironmentVariable`
-  (expands `%VARS%`). `Read-Host` is wrapped in `try`.
+- uv: `Get-Command uv -CommandType Application -All`, and on Windows only a real `.exe` (a
+  plain `Get-Command uv` can return an alias or function; a `uv.cmd`/`uv.ps1` wrapper would
+  parse the arguments again). The registry `Path` is read with
+  `[Environment]::GetEnvironmentVariable` (expands `%VARS%`). `Read-Host` is wrapped in `try`.
+- Tests: every deploy.ps1 behaviour test runs wherever pwsh is installed (Linux and macOS
+  too: the same Core hand-over), plus Windows PowerShell 5.1 on Windows; only the registry
+  and cmd tests are Windows-only.
 - Root: `$PSScriptRoot`, else walk up from `Get-Location` (its `ProviderPath` when the provider
   is FileSystem, else `[Environment]::CurrentDirectory`), which is also the caller cwd.
 - Execution policy `Restricted`/`AllSigned`, or Mark-of-the-Web on a copy from a downloaded
@@ -335,6 +403,8 @@ header rules (with detector tests proving each rule fires).
   `_parse_globals`: no config load, no render, not in help). Prints ONE line `PTPROBE{json}`
   to stdout (ASCII JSON with keys `argv`, `cwd`, `caller_cwd_raw`, `caller_cwd`, `launcher`,
   `stdin_tty`, `stdin`, `root`) and exits with EXIT. Launcher tests use it: keep the keys.
+  The stdin line is read as BYTES and decoded UTF-8 with surrogateescape whatever the locale:
+  a raw non-UTF-8 byte shows up as `\udcXX`, PowerShell's re-encoded text as U+FFFD.
 - `./deploy selftest --shells [NAME,...] [--list] [--json] [--keep] [--project DIR]
   [--tests T1,...] [--jobs N] [--timeout S]` (`shells.selftest`; default jobs min(8, CPUs),
   60 s per probe). Discovers the installed shells (Windows: cmd, powershell, pwsh, xonsh,
@@ -355,18 +425,27 @@ header rules (with detector tests proving each rule fires).
   to files and every probe has a timeout. `--project DIR` probes another copy (to test launcher
   candidates before they land).
 - `./deploy shell-setup [xonsh|pwsh|powershell|bash|zsh|niubash|msys2|fish|nu]`
-  (`shells.cmd_shell_setup`; no argument guesses the shell from `PYTEMPLATE_LAUNCHER`,
-  `XONSH_VERSION`, `SHELL`; unknown shell exits 2): prints a `deploy` function/alias that works
+  (`shells.cmd_shell_setup`; no argument guesses the shell (`shells.guess_shell`): the
+  `ps1:`/`sh:niubash` prefix of `PYTEMPLATE_LAUNCHER`, then `XONSH_VERSION`, then the basename
+  of `SHELL` (bash, zsh, fish, nu), and only then the `sh:zsh`/`sh:bash` prefix, which names
+  the interpreter of `#!/bin/sh` (Git Bash/MSYS2 without `SHELL`); unknown shell exits 2):
+  prints a `deploy` function/alias that works
   from any subfolder, plus where to paste it. Output is ASCII with LF even on Windows (written
   to `stdout.buffer`: it is appended to rc files). bash, zsh, niubash and msys2 share one POSIX
   function whose walk-up stops at `/`, `C:`, `C:/` and at a backslash `PWD` (the old `dirname`
   loop never ended on niubash's `C:/...` paths); niubash: paste it into `~/.niubashrc` AND the
   `$NIU_ENV` file; msys2: above the interactive guard of `.bashrc` (`!m` lines also need
-  `BASH_ENV`). pwsh/powershell: a function that walks up and calls `deploy.ps1`. nu: a
-  `def --wrapped` that runs uv directly with `PYTEMPLATE_LAUNCHER=nu`. xonsh: an alias that
-  runs uv directly (falls back to the launcher without uv; `@aliases.return_command` when the
-  xonsh has it, else an unthreadable function alias) plus a registered completer whose words
-  come from `cli.COMMANDS` and the project's `[tasks]` at print time.
+  `BASH_ENV`). pwsh/powershell: a function that walks up and calls `deploy.ps1` (it forwards
+  pipeline input with `$input` when `$MyInvocation.ExpectingInput`: fine in a profile
+  function, never in deploy.ps1). nu: a `def --wrapped` that runs uv directly with
+  `PYTEMPLATE_LAUNCHER=nu` and `UV_PYTHON` emptied. xonsh: an alias that runs uv directly
+  (falls back to the launcher without uv; `@aliases.return_command` when the xonsh has it,
+  else an unthreadable function alias) plus a registered completer whose words come from
+  `cli.COMMANDS` and the project's `[tasks]` at print time; unlike the launchers it keeps the
+  caller's `UV_PYTHON` (a returned argv cannot change the environment), so the runner's
+  version check (section 5.2) is its guard. `test_shells` executes the fish, pwsh and xonsh
+  snippets in their shells (argv, exit codes, walk-up, the xonsh completer, pwsh pipeline
+  input); the nu one only where nu is installed (no CI job installs nushell).
 - `shells.doctor(check)` (from `./deploy doctor`): step "launchers": the launcher that started
   the run, then `deploy` (`#!/bin/sh`, LF, ASCII, git mode 100755, exec bit on POSIX),
   `deploy.cmd` (CRLF, ASCII) and `deploy.ps1` (LF, ASCII, no BOM; a mode other than 100755 is

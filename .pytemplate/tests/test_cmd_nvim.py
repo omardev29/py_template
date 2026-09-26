@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -530,6 +531,23 @@ def test_prepare_base_is_rebuilt_when_neovim_or_the_pins_change(tmp_path: Path, 
     base.layout.marker.write_text("{not json", encoding="utf-8")
     base.steps.clear()
     assert base.run() is not None, "an unreadable base.json counts as a different base"
+
+
+def test_the_shipped_pins_are_complete() -> None:
+    """The lock pins LazyVim, lazy.nvim, every plugin .lazy.lua configures and the ones its extras
+    bring (neotest-python): an unpinned one would be installed at its newest commit."""
+    assert re.fullmatch(r"[0-9a-f]{40}", cmd_nvim.STARTER_REV)
+    if not nvimtest.LOCK.is_file():
+        pytest.skip("no pinned lazy-lock.json (a run without it takes the latest of everything)")
+    lock = json.loads(nvimtest.LOCK.read_text(encoding="utf-8"))
+    assert isinstance(lock, dict)
+    configured = re.findall(r'\{ "[\w.-]+/([\w.-]+)", optional = true', (cmd_nvim.ROOT / ".pytemplate" / "templates" / "nvim" / "lazy.lua").read_text(encoding="utf-8"))
+    assert len(configured) >= 8, configured
+    for name in ("LazyVim", "lazy.nvim", "neotest-python", *configured):
+        entry = lock.get(name)
+        assert isinstance(entry, dict) and re.fullmatch(r"[0-9a-f]{40}", str(entry.get("commit", ""))), name
+    assert all(isinstance(v, dict) and set(v) == {"branch", "commit"} for v in lock.values()), "lazy.nvim's own lock format"
+    assert nvimtest.LOCK.read_bytes().isascii()
 
 
 def test_run_preset_uses_a_typing_profile_and_the_locked_plugins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
