@@ -1075,18 +1075,16 @@ def test_a_launcher_outside_a_project_never_runs_another_users_one(tmp_path: Pat
         assert r.returncode == 2 and "is not yours" in r.stderr and "PWNED" not in r.stdout + r.stderr, (shell, r.stdout, r.stderr)
 
 
-def test_the_walk_up_never_takes_a_drive_root_on_windows() -> None:
+@needs_posix
+@pytest.mark.parametrize("name", POSIX_SHELLS)
+def test_the_walk_up_never_takes_a_drive_root_on_windows(name: str) -> None:
     """On Windows, whose owners the sh launcher does not read, any user may create folders
-    at C:\\: a C:\\.pytemplate\\deploy.py is never the project a walk-up finds."""
-    text = LAUNCHER.read_text(encoding="ascii")
-    body = re.search(r"^_pt_foreign\(\) \{\n.*?^\}\n", text, re.S | re.M)
-    assert body, "no _pt_foreign in deploy"
-    code = "_pt_win=1\n" + body.group(0) + "\n".join(
-        f'if _pt_foreign "{d}"; then echo "{d} refused"; else echo "{d} taken"; fi' for d in ("C:/", "C:", "/c", "/cygdrive/d", "/", "C:/Users/x", "/c/Users/x")
-    ) + "\n"
-    for shell in ("sh", "dash", "bash", "busybox"):
-        if not shutil.which(shell):
-            continue
-        argv = [shell, "sh", "-c", code] if shell == "busybox" else [shell, "-c", code]
-        out = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False).stdout.splitlines()
-        assert out == ["C:/ refused", "C: refused", "/c refused", "/cygdrive/d refused", "/ refused", "C:/Users/x taken", "/c/Users/x taken"], (shell, out)
+    at C:\\: a C:\\.pytemplate\\deploy.py is never the project a walk-up finds. Run as on
+    Windows (_pt_win=1) in every POSIX shell, like the other Windows helpers (a bare `bash` on
+    Windows is the WSL stub)."""
+    drives = ("C:/", "C:", "/c", "/cygdrive/d", "/", "C:/Users/x", "/c/Users/x")
+    calls = "".join(f'if _pt_foreign "{d}"; then echo "{d} refused"; else echo "{d} taken"; fi\n' for d in drives)
+    prelude = ("emulate sh\n" if name == "zsh" else "") + "_pt_win=1\n"
+    run = Run([*_shell_argv(name), "-c", 'eval "$PT_CODE"'], ROOT, _clean_env(PT_CODE=prelude + _launcher_functions("_pt_foreign") + calls))
+    assert run.rc == 0, run.out + run.err
+    assert run.out.splitlines() == ["C:/ refused", "C: refused", "/c refused", "/cygdrive/d refused", "/ refused", "C:/Users/x taken", "/c/Users/x taken"]
