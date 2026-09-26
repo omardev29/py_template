@@ -41,8 +41,8 @@ Measured on the maintainer's machine (Windows 11, CPython 3.14.7, PyPy 7.3.23, m
   versions cannot download `pypy@3.11.15`, and uv 0.8 installs a CPython 3.14 release candidate
   instead of 3.14. uv refuses them inside a project ("Required uv version `>=0.10.12` does not
   match", from the `required-version` that `./deploy` writes into `pyproject.toml`) and
-  `./deploy doctor` flags them: update with `uv self update` (or `brew upgrade uv`, `pipx
-  upgrade uv`, `winget upgrade astral-sh.uv`, `scoop update uv`). When uv is missing, the
+  `./deploy doctor` flags them: update with `uv self update` (or `brew upgrade uv`,
+  `pipx upgrade uv`, `winget upgrade astral-sh.uv`, `scoop update uv`). When uv is missing, the
   launchers print how to install it; `deploy` and `deploy.ps1` also offer to run the official
   installer in an interactive terminal (never when `CI` is set).
 - No Python installation is needed: uv downloads the interpreters (`python.cpython`,
@@ -166,13 +166,12 @@ PyInstaller output), `-q` (no progress lines; results, warnings and errors still
 not regenerate the generated files first). For example `./deploy --dry-run apply`; after the
 command, `--dry-run` is an error.
 
-Unknown arguments are an error (exit 2), never ignored. Only these commands pass extra
-arguments on: `run` to the app, `test` to pytest, `lock` to `uv lock`, `selftest` to pytest,
-`build --method exe|nuitka|flet` to the packager (PyInstaller or `flet pack`, Nuitka, `flet
-build`; `pyz`, `portable` and `wheel` take none), and a task with a `cmd` to its program.
-`-h` or `--help` after a command shows `./deploy help COMMAND`, except after `run`, `test`,
-`lock` and `selftest`, where it goes to the app, pytest, uv or the suite; `./deploy -h COMMAND`
-works too.
+Unknown arguments are an error (exit 2), never ignored. Only these commands pass extra arguments on:
+`run` to the app, `test` to pytest, `lock` to `uv lock`, `selftest` to pytest,
+`build --method exe|nuitka|flet` to the packager (PyInstaller or `flet pack`, Nuitka, `flet build`;
+`pyz`, `portable` and `wheel` take none), and a task with a `cmd` to its program. `-h` or `--help`
+after a command shows `./deploy help COMMAND`, except after `run`, `test`, `lock` and `selftest`,
+where it goes to the app, pytest, uv or the suite; `./deploy -h COMMAND` works too.
 
 `--dry-run` is not a sandbox: it skips every command it would run and every change to the
 project's files, but still writes scratch files under `.build/` (tool configurations, the mypyc
@@ -308,9 +307,10 @@ Flet version either: it fails against the pinned `flet-cli`, and `apply` would p
 
 ### Renaming the app
 
-`./deploy rename NEW_NAME [--force]` renames the app; preview it with `./deploy --dry-run rename
-NEW_NAME`, which lists the folder move and every file with sample lines. An `app.name` edited by
-hand is finished by `./deploy apply` (or by `./deploy rename` with that name). What changes:
+`./deploy rename NEW_NAME [--force]` renames the app; preview it with
+`./deploy --dry-run rename NEW_NAME`, which lists the folder move and every file with sample lines.
+An `app.name` edited by hand is finished by `./deploy apply` (or by `./deploy rename` with that
+name). What changes:
 
 - `src/<pkg>/` moves to the new package (the name in lower case, `_` for `-`).
 - The Python files of `src/` and `tests/`: the imports of the package and the names bound to
@@ -430,10 +430,10 @@ file must be UTF-8 (a BOM is fine); `schema = 1` is the layout this runner reads
 ## Backends
 
 `run`, `test`, `check` and `build` take the backend as their first argument (default:
-`backend.active`). `./deploy mode BACKEND` changes the active one; `./deploy mode --supports
-+pypy`, `-pypy` or a full list (`cpython,mypyc`) changes the supported set (`mode pypy` alone
-also adds PyPy). The cpython and mypyc backends share `.venv`; pypy has `.venv-pypy`. The tools
-(mypy, ruff, mypyc, PyInstaller) always run in `.venv`.
+`backend.active`). `./deploy mode BACKEND` changes the active one; `./deploy mode --supports +pypy`,
+`-pypy` or a full list (`cpython,mypyc`) changes the supported set (`mode pypy` alone also adds
+PyPy). The cpython and mypyc backends share `.venv`; pypy has `.venv-pypy`. The tools (mypy, ruff,
+mypyc, PyInstaller) always run in `.venv`.
 
 ### Typing profiles
 
@@ -476,10 +476,10 @@ again.
   class (mark it `@mypyc_attr(native_class=False)` when that is intended).
 - **Concrete types**: `list[bool]` compiles to direct accesses, `bytearray` takes the generic
   path (sieve: 4.2x vs 1.9x).
-- `./deploy report --open` marks every generic operation in red ("make it Final", "Generic
-  `*`"). With `compile.annotate = true`, every mypyc build (`run`, `test`, `compile`, `build`) also
-  writes that report to `.build/reports/mypyc-annotate.html` (the same report as `./deploy
-  report`, without mypy's `Any` reports).
+- `./deploy report --open` marks every generic operation in red ("make it Final", "Generic `*`").
+  With `compile.annotate = true`, every mypyc build (`run`, `test`, `compile`, `build`) also writes
+  that report to `.build/reports/mypyc-annotate.html` (the same report as `./deploy report`, without
+  mypy's `Any` reports).
 - `./deploy check` adds rules for the compiled modules that mypy does not check: imports listed in
   `compile.forbid_imports`, class decorators that make a class non-native, nested classes and
   classes defined inside functions, t-strings, `if __name__ == "__main__"`, `librt` while PyPy is
@@ -501,14 +501,14 @@ again.
 
 #### Fast integers: `i64`
 
-A Python `int` has no size limit, so mypyc stores it as a *tagged* integer: small values live in
-a machine word, and every operation checks the tag and for overflow, with a slow path that
-creates a big Python int. That is already much faster than CPython, but the C compiler cannot
-see through the slow path, so a loop stays a loop. `mypy_extensions.i64` (also `i32`, `i16`,
-`u8`) promises that the value always fits in 64 bits: mypyc then emits plain C `int64_t`
-arithmetic, and gcc/clang can simplify, vectorise or even delete the loop. `mypy-extensions` is
-already a runtime dependency of every project (`pyproject.toml`): `from mypy_extensions import
-i64`. Interpreted code (the cpython and pypy backends) sees `i64` as a plain `int`.
+A Python `int` has no size limit, so mypyc stores it as a *tagged* integer: small values live in a
+machine word, and every operation checks the tag and for overflow, with a slow path that creates a
+big Python int. That is already much faster than CPython, but the C compiler cannot see through the
+slow path, so a loop stays a loop. `mypy_extensions.i64` (also `i32`, `i16`, `u8`) promises that the
+value always fits in 64 bits: mypyc then emits plain C `int64_t` arithmetic, and gcc/clang can
+simplify, vectorise or even delete the loop. `mypy-extensions` is already a runtime dependency of
+every project (`pyproject.toml`): `from mypy_extensions import i64`. Interpreted code (the cpython
+and pypy backends) sees `i64` as a plain `int`.
 
 100 million iterations of `x += 1` (Linux x86_64, gcc 13, CPython 3.14, mypyc 2.3.1, Nuitka
 4.2.2; MSVC on Windows not measured):
@@ -587,9 +587,8 @@ is valid Python 3.11 (ruff's syntax rules for 3.11, and the mypy errors that app
 whatever the typing profile), lowers `requires-python` to `>=3.11`, re-locks `uv.lock` and
 creates `.venv-pypy`. `./deploy apply` runs the same check when `backend.supported` gains PyPy.
 
-- While PyPy is supported, the code must be Python 3.11 in syntax and API: no `class C[T]`
-  generics (PEP 695), and `from typing_extensions import override`, not `from typing import
-  override`.
+- While PyPy is supported, the code must be Python 3.11 in syntax and API: no `class C[T]` generics
+  (PEP 695), and `from typing_extensions import override`, not `from typing import override`.
 - PyPy is pinned exactly (`python.pypy = "pypy@3.11.15"`): a loose request picks the newest
   PyPy, and PyPy 8.0 (the `pypy@3.11.16` builds and later) changed the extension ABI to pp80, for
   which, as of September 2026, raylib, numpy and cffi publish no wheels. Move the pin once your
@@ -610,8 +609,7 @@ creates `.venv-pypy`. `./deploy apply` runs the same check when `backend.support
   PyPy once the dependencies have wheels for it, keep mypy at the last version that accepts
   3.11, or drop PyPy (`./deploy mode --supports -pypy`).
 - raylib publishes PyPy wheels only for Linux x86_64, Windows x86_64 and macOS x86_64: on Apple
-  Silicon and Linux ARM64 a raylib project needs `./deploy mode cpython --supports
-  cpython,mypyc`.
+  Silicon and Linux ARM64 a raylib project needs `./deploy mode cpython --supports cpython,mypyc`.
 
 ## Distribution
 
@@ -622,7 +620,7 @@ it), then packages the app into `dist/`:
 |---|---|---|---|---|
 | `exe` | yes | yes | no | a PyInstaller executable (flet preset: `flet pack`, with the Flutter client inside) |
 | `portable` | yes | yes | yes | a folder with the interpreter and a launcher: the standalone build for PyPy |
-| `pyz` | yes | yes | yes | one zip file that runs on an installed CPython or PyPy |
+| `pyz` | yes | yes | yes | one zip file for every platform with an installed CPython or PyPy |
 | `wheel` | yes | yes | yes | an installable package (`uv tool install`); mypyc: a platform wheel |
 | `nuitka` | yes | yes | no | a Nuitka executable (it compiles the dependencies to C too; slow builds) |
 | `flet` | yes | yes | no | `flet build` (flet preset only): desktop apps, Android, iOS and web |
@@ -690,20 +688,22 @@ read-only install starts fast, and it starts the copied interpreter before it re
 (for mypyc also the compiled modules). With `archive = true` (default) a `.zip` (Windows) or
 `.tar.gz` (Linux, macOS) of the folder is written next to it.
 
-`runtime = "system"` writes a folder without an interpreter (`dist/<name>-<backend>-portable/`,
-with both launchers). The launcher runs each candidate (`py -X.Y`, `python3`, `python` on
-Windows; `pythonX.Y`, `python3`, `python` elsewhere; `pypy3`, `pypy` for PyPy) and uses the first
-that is at least the project's minimum Python. None: it prints `<name>: needs Python X.Y or newer
-in PATH` and exits with 9009 (`.cmd`) or 127 (`.sh`). With native dependencies such a folder
-only works on the OS it was built on (the build warns). On Windows with the Python install
-manager and no Python at all, the first start silently downloads one (the install manager's
-default); set `PYTHON_MANAGER_AUTOMATIC_INSTALL=false` or run `py install 3.X` to control that.
+`runtime = "system"` writes a folder without an interpreter (`dist/<name>-<backend>-portable/`, with
+both launchers). The launcher runs each candidate (`py -X.Y`, `python3`, `python` on Windows;
+`pythonX.Y`, `python3`, `python` elsewhere; `pypy3`, `pypy` for PyPy) and uses the first that is at
+least the project's minimum Python. None: it prints `<name>: needs Python X.Y or newer in PATH` and
+exits with 9009 (`.cmd`) or 127 (`.sh`). With native dependencies such a folder only works on the OS
+it was built on (the build warns). On Windows with the Python install manager and no Python at all,
+the first start silently downloads one (the install manager's default); set
+`PYTHON_MANAGER_AUTOMATIC_INSTALL=false` or run `py install 3.X` to control that.
 
 ### pyz
 
-One zip file with the app as `.py`, the dependencies, and, for each platform, the binaries (the
-mypyc extensions of the machine that built it, and native dependencies). Python cannot import
-`.pyd`/`.so` files from a zip, so the first start extracts it to a cache:
+exe, nuitka and a bundled portable folder carry an interpreter, so each build serves one OS and
+CPU. A pyz carries none: one file serves every platform where a compatible Python is installed
+(the limits are below). It holds the app as `.py`, the dependencies, and, for each platform, the
+binaries (the mypyc extensions of the machine that built it, and native dependencies). Python
+cannot import `.pyd`/`.so` files from a zip, so the first start extracts it to a cache:
 `%LOCALAPPDATA%\<name>\pyz` (Windows), `~/Library/Caches/<name>/pyz` (macOS) or
 `$XDG_CACHE_HOME/<name>/pyz` (`~/.cache/<name>/pyz`). It keeps the three most recently started
 builds and any started in the last day; deleting the folder is always safe. Without a usable
@@ -713,15 +713,20 @@ cache (a read-only home) it extracts into a private temporary folder for that ru
   by default; 3.11 when PyPy is supported); an older one gets `<name>: needs Python X.Y or newer`.
   On the maintainer's machine, a 1.7 MB pyz of a project with PyPy supported used the compiled
   core on CPython 3.14 and ran the `.py` on PyPy and on CPython 3.13.
-- A build is "pure" when every target got the whole locked set of dependencies and none of them
-  is native: it then runs on any OS. Otherwise it carries the dependencies of each target and
-  prints `runs on: <keys>`. `[deploy.pyz] targets` (or `--target`) adds platforms, such as
-  `"cp314-linux-x86_64"`: the locked CPython minor on any OS and CPU. PyPy targets come only from
-  a PyPy build on that platform.
-- mypyc compiles only for the machine it runs on. The generated CI builds a pyz on Windows,
-  Linux and macOS and merges them: `./deploy pyz-merge A.pyz B.pyz... --out all.pyz` takes parts
-  of one build (the same app, minimum Python, locked dependencies and code), keeps every
-  platform's binaries, and also writes `all.cmd` next to it.
+- A build is "pure" when every target got the whole locked set of dependencies and none of them is
+  native: it then runs on any OS, CPU and C library with such a Python (a platform without a target
+  of its own uses the common part). Otherwise it carries the dependencies of each target, prints
+  `runs on: <keys>`, and stops elsewhere with
+  `this .pyz has no build for this interpreter and platform`. `[deploy.pyz] targets` (or `--target`)
+  adds platforms, such as `"cp314-linux-x86_64"`: the locked CPython minor (`cp314` wheels load only
+  in 3.14) on Windows, Linux or macOS, x86_64 or aarch64; there are no musl or Android targets. PyPy
+  targets come only from a PyPy build on that platform.
+- mypyc compiles only for the machine it runs on: its extensions are used on the platform that
+  built them, and on every other platform the same code runs as `.py` (slower, same result).
+  The generated CI builds a pyz on Windows, Linux and macOS and merges them:
+  `./deploy pyz-merge A.pyz B.pyz... --out all.pyz` takes parts of one build (the same app,
+  minimum Python, locked dependencies and code), keeps every platform's binaries, and also
+  writes `all.cmd` next to it.
 - On Linux the dependencies of pyz and portable builds target glibc 2.28 (x86_64) or 2.35
   (aarch64) when the build machine can use those wheels (else its own, with a warning); on macOS,
   macOS 13 or newer (`MACOSX_DEPLOYMENT_TARGET` changes it).
@@ -793,14 +798,13 @@ Measured on Windows 11 in September 2026 with the flet preset (CPython backend, 
 | `flet` (`flet build`) with `cleanup = false`, no UPX | 97 MB | - | nothing to unpack |
 | `flet` with the default `cleanup = true` + UPX | 78 MB | **38 MB** | nothing to unpack |
 
-Where it goes: every Flet desktop app carries the Flutter engine (`flutter_windows.dll`, 20 MB)
-and Flet's compiled Dart UI (`app.so`, 15-19 MB); Python adds its runtime (`python314.dll`,
-6 MB, plus the standard library) and the dependencies. `flet pack` (and PyInstaller with
-`flet-desktop`, which is the same thing) ships Flet's prebuilt full client, zipped (40 MB), with
-libmpv for audio and video (28 MB) and Rive, and unpacks it on the first start. `flet build`
-compiles a client with only the Flutter packages the app uses: the smallest download and the
-smallest install. The smallest Flet app: `./deploy build --method flet` (or `[deploy] default =
-{ cpython = "flet", ... }`).
+Where it goes: every Flet desktop app carries the Flutter engine (`flutter_windows.dll`, 20 MB) and
+Flet's compiled Dart UI (`app.so`, 15-19 MB); Python adds its runtime (`python314.dll`, 6 MB, plus
+the standard library) and the dependencies. `flet pack` (and PyInstaller with `flet-desktop`, which
+is the same thing) ships Flet's prebuilt full client, zipped (40 MB), with libmpv for audio and
+video (28 MB) and Rive, and unpacks it on the first start. `flet build` compiles a client with only
+the Flutter packages the app uses: the smallest download and the smallest install. The smallest Flet
+app: `./deploy build --method flet` (or `[deploy] default = { cpython = "flet", ... }`).
 
 The script preset with mypyc, measured on Windows 11 in September 2026: the onefile `exe` is
 13.2 MB (12.3 MB with UPX); the `portable` folder 62 MB (49 MB with UPX), its zip 23 MB. A
@@ -867,8 +871,8 @@ A 2D game with raylib's cffi binding (the `raylib` package). PyPy is the default
   return a pointer, and `Color.r` claims to be `bytes` but is an `int`. Interpreted, nothing
   happens; compiled, mypyc checks the type and raises `TypeError`. The preset ships the corrected
   stub in `typings/raylib`; regenerate it after changing the raylib version with `./deploy stubs`.
-- `./deploy bunnymark` measures FPS with 30,000 bunnies (`./deploy run mypyc --frames 900
-  --bunnies 30000` for another backend).
+- `./deploy bunnymark` measures FPS with 30,000 bunnies
+  (`./deploy run mypyc --frames 900 --bunnies 30000` for another backend).
 - `[preset.raylib] package` picks the binding (`raylib` with GLFW, `raylib_sdl` with SDL3, or
   `raylib_software`) and `version` its version; `./deploy apply` swaps the dependency.
 - `src/assets/` is bundled with the game (`<pkg>.resources.asset("name")` finds it in every
@@ -895,9 +899,9 @@ the UI).
 - `./deploy dev`: hot reload (`flet run -d -r`; the editors start it without waiting).
 - `./deploy build` uses `flet pack`; `./deploy build --method flet` uses `flet build`
   ([Distribution](#distribution)).
-- `[preset.flet] version` pins `flet`, `flet-desktop` and `flet-cli` together (`./deploy
-  apply`): when `flet` and `flet-desktop` differ, Flet pip-installs `flet-desktop` at runtime,
-  outside `uv.lock`.
+- `[preset.flet] version` pins `flet`, `flet-desktop` and `flet-cli` together (`./deploy apply`):
+  when `flet` and `flet-desktop` differ, Flet pip-installs `flet-desktop` at runtime, outside
+  `uv.lock`.
 - The mypy rules are relaxed for `<pkg>.ui.*`, since Flet's API exposes `Any`.
 - `src/assets/` is served by Flet and packaged with the app.
 
@@ -1193,13 +1197,13 @@ only deletes files is checked too).
 - **"pyproject.toml does not match pytemplate.toml"**: run `./deploy apply`.
 - **A generated file is "hand-edited"** (`render --check` and the git hook fail): something wrote
   into it (VS Code's Settings UI writes `.vscode/settings.json`). Move the change to
-  `pytemplate.toml` (`[vscode] settings`) or to `.pytemplate/templates/`, then run `./deploy
-  render --force`; `./deploy render --diff` shows what differs.
+  `pytemplate.toml` (`[vscode] settings`) or to `.pytemplate/templates/`, then run
+  `./deploy render --force`; `./deploy render --diff` shows what differs.
 - **`pytemplate.toml` is not UTF-8** (every command stops with exit 2 and says how to fix it):
   save it as UTF-8. Windows PowerShell 5.1 writes UTF-16 with `>` and `Out-File`, and ANSI with
   `Set-Content`: add `-Encoding utf8`.
-- **uv is too old** ("Required uv version `>=0.10.12` does not match the running version"): `uv
-  self update` (or the package manager that installed uv).
+- **uv is too old** ("Required uv version `>=0.10.12` does not match the running version"):
+  `uv self update` (or the package manager that installed uv).
 - **`deploy: uv not found`**: the launchers also look in uv's usual install folders and, on
   Windows, in the PATH saved in the registry (a terminal opened before uv was installed).
   Otherwise install uv with one of the printed commands and open a new terminal.
@@ -1211,9 +1215,10 @@ only deletes files is checked too).
   unset it for the project. The launchers need the Python of `.python-version` (`python.cpython`):
   with `UV_NO_MANAGED_PYTHON`, `UV_PYTHON_PREFERENCE=only-system` or `UV_PYTHON_DOWNLOADS=never`
   set, unset them or run `uv python install <python.cpython>`.
-- **PyPy: "No interpreter found for PyPy 3.11.15 in managed installations"** after a uv update:
-  that uv no longer downloads the pinned PyPy. Pick a version from `uv python list
-  --only-downloads --all-versions pypy`, set `python.pypy`, and run `./deploy apply`.
+- **PyPy: "No interpreter found for PyPy 3.11.15 in managed installations"** after a uv update: that
+  uv no longer downloads the pinned PyPy. Pick a version from
+  `uv python list --only-downloads --all-versions pypy`, set `python.pypy`, and run
+  `./deploy apply`.
 - **mypyc: "Unable to find a compatible Visual Studio installation"** (Windows): `./deploy` adds
   the Visual Studio Installer folder to PATH (the `vcvarsall.bat` of VS 2026 needs `vswhere.exe`
   from it). If it still fails, `./deploy doctor` says what is missing.
@@ -1223,10 +1228,12 @@ only deletes files is checked too).
   (their own `bash.exe`), xonsh, PowerShell or cmd. From WSL on a `/mnt/...` checkout the runner
   keeps separate environments (`.venv-wsl`, `.build/wsl`), so the Windows ones stay intact.
 - **raylib: `setup` fails with "marked as `--no-build` but has no binary distribution"** (Apple
-  Silicon, Linux ARM64): raylib publishes no PyPy wheel there. Run `./deploy mode cpython
-  --supports cpython,mypyc`, then `./deploy setup`. The generated CI already skips PyPy on macOS.
-- **raylib on a minimal Linux** (containers, WSL, CI) needs the GL and X11 libraries: `libgl1
-  libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6` (Debian/Ubuntu names; desktops have them).
+  Silicon, Linux ARM64): raylib publishes no PyPy wheel there. Run
+  `./deploy mode cpython --supports cpython,mypyc`, then `./deploy setup`. The generated CI already
+  skips PyPy on macOS.
+- **raylib on a minimal Linux** (containers, WSL, CI) needs the GL and X11 libraries:
+  `libgl1 libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6` (Debian/Ubuntu names; desktops have
+  them).
 - **Flet downloads its client or pip-installs packages when it starts**: `flet` and
   `flet-desktop` must have the same version. Set `[preset.flet] version` and run `./deploy apply`.
 - **`flet build` on Windows** needs Developer Mode (Settings > System > For developers) and the
@@ -1315,20 +1322,20 @@ regenerate the root (CLAUDE.md, section 11).
 - `selftest` needs `.venv` (`./deploy setup` once). Its arguments are added to the whole suite
   (select tests with `-k EXPR`). It needs the network only for two tests that re-lock a copy;
   they are skipped offline.
-- `--shells [NAME,...] [--list] [--json] [--keep] [--project DIR] [--tests T1,...] [--jobs N]
-  [--timeout S]`: seven probes per shell (arguments, exit code, folders, a temporary script like
-  xonsh-shell-kit's `!` lines, a minimal PATH, stdin, uv install hints). `--list` shows the shells
-  it found; `msys2` selects every `msys2-*` shell.
+- `--shells [NAME,...] [--list] [--json] [--keep]`
+  `[--project DIR] [--tests T1,...] [--jobs N] [--timeout S]`: seven probes per shell (arguments,
+  exit code, folders, a temporary script like xonsh-shell-kit's `!` lines, a minimal PATH, stdin, uv
+  install hints). `--list` shows the shells it found; `msys2` selects every `msys2-*` shell.
 - `--nvim [PRESET,...] [--keep] [--fresh] [--require] [--timeout S] [--dir DIR]`: creates each
   preset with `./deploy new` and runs a headless smoke test in Neovim folders of its own, never
   yours, with LazyVim and its plugins at pinned commits (minutes the first time). `--fresh`
   reinstalls that LazyVim; `--require` fails instead of skipping when nvim or git is missing.
-- `--e2e [PRESET ...] [--backends B,..] [--methods M,..] [--quick|--full] [--gui auto|on|off]
-  [--keep] [--reuse] [--json] [--base DIR]`: creates a project of each preset with `./deploy new`
-  in a short temporary folder, then runs setup, doctor, check, test, run and every build the
-  backends allow, and starts the headless builds. It prints a PASS/FAIL/SKIP table (`--json` for
-  CI). `--quick` builds only each backend's default method; `--full` adds Nuitka and a PyPy round
-  trip.
+- `--e2e [PRESET ...] [--backends B,..] [--methods M,..] [--quick|--full]`
+  `[--gui auto|on|off] [--keep] [--reuse] [--json] [--base DIR]`: creates a project of each preset
+  with `./deploy new` in a short temporary folder, then runs setup, doctor, check, test, run and
+  every build the backends allow, and starts the headless builds. It prints a PASS/FAIL/SKIP table
+  (`--json` for CI). `--quick` builds only each backend's default method; `--full` adds Nuitka and a
+  PyPy round trip.
 - `./deploy render --check` and `./deploy doctor` must pass too.
 
 **(template repository)** The template's own CI, in `.github/workflows/template-*.yml` (not
