@@ -320,6 +320,7 @@ from pathlib import Path as _PtPath
 _PT_WORDS = @WORDS@
 _PT_CHOICES = @CHOICES@
 _PT_FLAGS = @FLAGS@
+_PT_GLOBALS = @GLOBALS@
 _PT_MISSING = "deploy: no .pytemplate/deploy.py in this folder or any parent folder"
 
 
@@ -371,14 +372,19 @@ else:
         """./deploy commands, tasks, backends and options"""
         if not command.args or _PtPath(command.args[0].value).name.lower() not in ("deploy", "deploy.cmd", "deploy.ps1"):
             return None
-        if command.arg_index == 1:
+        at = 1  # the command comes after the global options (deploy -v --dry-run test)
+        while at < command.arg_index and at < len(command.args) and command.args[at].value in _PT_GLOBALS:
+            at += 1
+        if command.arg_index == at:
             words = _PT_WORDS
-        elif command.arg_index >= 2 and len(command.args) > 1:
-            name = command.args[1].value
+        elif command.arg_index > at and len(command.args) > at:
+            name = command.args[at].value
+            if name in ("-h", "--help"):
+                name = "help"
             if command.prefix.startswith("-"):
                 words = _PT_FLAGS.get(name, [])
             else:
-                words = _PT_CHOICES.get(name, []) if command.arg_index == 2 else []
+                words = _PT_CHOICES.get(name, []) if command.arg_index == at + 1 else []
         else:
             return None
         return {w for w in words if w.startswith(command.prefix)} or None
@@ -387,20 +393,43 @@ else:
 '''
 
 
+# The global options of cli._parse_globals (before the command): the completer skips them.
+GLOBAL_OPTIONS = ("-v", "--verbose", "-q", "--quiet", "--dry-run", "--no-render", "-h", "--help")
+
+
+def _first_group(usage: str) -> str | None:
+    """The leading [...] group of a usage line without its nested groups:
+    `[install [--force]|uninstall|run|status]` -> `install |uninstall|run|status`."""
+    if not usage.startswith("["):
+        return None
+    depth = 0
+    for end, ch in enumerate(usage):
+        depth += {"[": 1, "]": -1}.get(ch, 0)
+        if depth == 0:
+            break
+    else:
+        return None  # unbalanced
+    inner = usage[1:end]
+    while (flat := re.sub(r"\[[^\[\]]*\]", "", inner)) != inner:
+        inner = flat
+    return inner
+
+
 def completion_words(cfg: Config | None) -> tuple[list[str], dict[str, list[str]], dict[str, list[str]]]:
     """Return (first words, choices of the 2nd word, --options) per command, from cli.COMMANDS."""
     from .cli import COMMANDS
 
     tasks = sorted(cfg.tasks) if cfg is not None else []
-    first = sorted(COMMANDS) + [t for t in tasks if t not in COMMANDS] + ["-v", "-q", "--dry-run", "--no-render"]
+    names = sorted(COMMANDS) + [t for t in tasks if t not in COMMANDS]
+    first = names + ["-v", "-q", "--dry-run", "--no-render"]
     choices: dict[str, list[str]] = {}
     flags: dict[str, list[str]] = {}
     for name, command in COMMANDS.items():
-        group = re.match(r"\[([^\]]+)\]", command.usage)
-        if group and " " not in group[1]:
+        group = _first_group(command.usage)
+        if group is not None:
             words: list[str] = []
-            for word in group[1].split("|"):
-                words += list(BACKENDS) if word == "BACKEND" else [word]
+            for word in (w.strip() for w in group.split("|")):
+                words += list(BACKENDS) if word == "BACKEND" else names if word == "COMMAND" else [word]
             choices[name] = list(dict.fromkeys(w for w in words if re.fullmatch(r"-{0,2}[a-z][a-z0-9-]*", w)))
         options = list(dict.fromkeys(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", command.usage)))
         if options:
@@ -435,6 +464,7 @@ def xonsh_snippet(cfg: Config | None) -> str:
         XONSH_TEMPLATE.replace("@WORDS@", _py_words(first))
         .replace("@CHOICES@", _py_word_map(choices))
         .replace("@FLAGS@", _py_word_map(flags))
+        .replace("@GLOBALS@", repr(GLOBAL_OPTIONS))
     )
 
 

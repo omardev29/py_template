@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -317,6 +318,68 @@ def _xonsh_words(cfg: Config | None) -> list[object]:
     words = namespace["_PT_WORDS"]
     assert isinstance(words, list)
     return words
+
+
+def _xonsh_completer(monkeypatch: pytest.MonkeyPatch, cfg: Config | None = None) -> Any:
+    """The snippet's completer, run as plain Python: xonsh's completer modules, `aliases` and
+    ${...} are stubbed, the rest of the snippet is the real one."""
+    import types
+
+    registered: dict[str, Any] = {}
+    completer_mod = types.ModuleType("xonsh.completers.completer")
+    completer_mod.add_one_completer = lambda name, func, loc: registered.update({name: func})  # type: ignore[attr-defined]
+    tools_mod = types.ModuleType("xonsh.completers.tools")
+    tools_mod.contextual_command_completer = lambda func: func  # type: ignore[attr-defined]
+    for name, module in (("xonsh", types.ModuleType("xonsh")), ("xonsh.completers", types.ModuleType("xonsh.completers")),
+                         ("xonsh.completers.completer", completer_mod), ("xonsh.completers.tools", tools_mod)):  # fmt: skip
+        monkeypatch.setitem(sys.modules, name, module)
+
+    class Aliases(dict[str, Any]):
+        @staticmethod
+        def return_command(func: Any) -> Any:
+            return func
+
+    text = shells.snippet("xonsh", cfg).replace("${...}", "{}")
+    exec(compile(text, "snippet", "exec"), {"aliases": Aliases()})
+    return registered["deploy"]
+
+
+def _complete(completer: Any, line: str) -> list[str]:
+    import types
+
+    words = line.split(" ")
+    command = types.SimpleNamespace(
+        args=[types.SimpleNamespace(value=w) for w in words[:-1]], arg_index=len(words) - 1, prefix=words[-1]
+    )
+    return sorted(completer(command) or [])
+
+
+def test_xonsh_completer_after_hooks_help_and_global_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """hooks' subcommands (a nested [--force] in its usage), command names after `help` or `-h`,
+    and the command after global flags (`deploy -v --dry-run test <TAB>`)."""
+    cfg = make({"tasks": {"gen": {"cmd": ["python", "gen.py"]}}})
+    _, choices, _ = shells.completion_words(cfg)
+    assert choices["hooks"] == ["install", "uninstall", "run", "status"]
+    assert {"build", "test", "gen"} <= set(choices["help"])
+    complete = _xonsh_completer(monkeypatch, cfg)
+    assert _complete(complete, "deploy hooks ") == ["install", "run", "status", "uninstall"]
+    assert _complete(complete, "deploy hooks install --") == ["--force"]
+    assert "build" in _complete(complete, "deploy help ") and "gen" in _complete(complete, "deploy help g")
+    assert "build" in _complete(complete, "deploy -h b")
+    assert _complete(complete, "deploy -v --dry-run te") == ["test"]
+    assert {"all", "cpython"} <= set(_complete(complete, "deploy -q test "))
+    assert _complete(complete, "deploy --no-render build --me") == ["--method"]
+    assert "test" in _complete(complete, "deploy te") and _complete(complete, "deploy test cpython x") == []
+    # the skipped options are exactly the global options the runner takes before a command
+    from runner import cli, proc, ui
+
+    for module, attr in ((ui, "VERBOSE"), (ui, "QUIET"), (proc, "DRY_RUN")):
+        monkeypatch.setattr(module, attr, getattr(module, attr))  # restored afterwards
+    monkeypatch.setitem(cli._OPTS, "no_render", False)
+    for flag in shells.GLOBAL_OPTIONS:
+        assert cli._parse_globals([flag, "x"])[-1] == "x", flag
+    with pytest.raises(DeployError):
+        cli._parse_globals(["--nope", "x"])
 
 
 def test_xonsh_completion_follows_cli_commands(monkeypatch: pytest.MonkeyPatch) -> None:

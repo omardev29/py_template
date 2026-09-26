@@ -506,7 +506,12 @@ header rules (with detector tests proving each rule fires).
   folders and prints the hints). The xonsh snippet also registers a completer whose words come from
   `cli.COMMANDS` and the project's `[tasks]` at print time (a new command appears once it is
   in `COMMANDS`, `cli.INTERNAL` routes never: `test_xonsh_completion_follows_cli_commands`;
-  users print the snippet again to get it); unlike the launchers it keeps the
+  users print the snippet again to get it). The 2nd word's choices come from the leading
+  `[a|b]` group of each usage with nested groups dropped (`shells.completion_words`: hooks'
+  `[install [--force]|...]`, `COMMAND` = the command and task names for `help`), and the
+  completer skips the global options before the command (`shells.GLOBAL_OPTIONS`, those of
+  `cli._parse_globals`: `test_xonsh_completer_after_hooks_help_and_global_flags`, offline
+  with xonsh stubbed). Unlike the launchers it keeps the
   caller's `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` (a returned argv cannot
   change the environment), so the runner's version check (section 5.2) is its guard. `test_shells` executes the fish, pwsh and xonsh
   snippets in their shells (argv, exit codes, walk-up, the xonsh completer, pwsh pipeline
