@@ -1209,6 +1209,39 @@ def test_a_bare_program_is_found_with_pathext_on_windows(rec: Recorder, tmp_path
     assert rec.runs[-1][0] == "npm" and len(looked_up) == count  # POSIX: execvp searches PATH itself
 
 
+@pytest.mark.parametrize(
+    ("arg", "refused"),
+    [
+        ("react@^18", "^"), ("a&b", "&"), ("x|y", "|"), ("<in", "<"), ("out>", ">"),  # unquoted: operators
+        ("%PATH%", "%"), ("50%", "%"), ('say "hi"', '"'), ("a\nb", "\n"),  # quoted or not
+        ("a & b", None), ("x ^ y", None), ("", None), ("--prod", None), ("C:\\a b\\", None),  # list2cmdline quotes these
+    ],
+)
+def test_a_batch_file_gets_only_arguments_cmd_passes_unchanged(
+    rec: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arg: str, refused: str | None
+) -> None:
+    """Windows runs a .cmd/.bat through cmd.exe, which re-parses the command line list2cmdline
+    builds: `./deploy web react@^18` installed react@18 (an unquoted ^ is cmd's escape), `a&b`
+    ran `b`, and %VAR% expands even inside quotes. Such an argument is refused (exit 2) instead
+    of reaching the program changed; one that list2cmdline quotes (a space) is passed."""
+    monkeypatch.setattr(tasks, "IS_WINDOWS", True)
+    monkeypatch.setattr(tasks.shutil, "which", lambda name, mode=0, path=None: str(tmp_path / "npm.cmd"))
+    cfg = make({"tasks": {"web": {"cmd": ["npm", "install"], "uv": False}, "bat": {"cmd": ["tools/build.BAT"], "uv": False}}})
+    for task in ("web", "bat"):
+        before = len(rec.runs)
+        if refused is None:
+            tasks.run_task(cfg, task, [arg], rec.dispatch)
+            assert rec.runs[-1][-1] == arg
+            continue
+        with pytest.raises(DeployError) as e:
+            tasks.run_task(cfg, task, [arg], rec.dispatch)
+        assert e.value.code == 2 and len(rec.runs) == before  # nothing ran
+        assert f"{refused!r}" in str(e.value) and "cmd.exe" in str(e.value)
+    monkeypatch.setattr(tasks, "IS_WINDOWS", False)  # POSIX: no cmd.exe in between
+    tasks.run_task(cfg, "web", [arg], rec.dispatch)
+    assert rec.runs[-1][-1] == arg
+
+
 def test_the_task_list_is_shown_with_quiet(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(ui, "QUIET", True)
     assert cli.cmd_tasks(make({"tasks": {"ci": {"deps": ["check all"]}, "gen": {"cmd": ["g"], "help": "Generate"}}}), []) == 0

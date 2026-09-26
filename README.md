@@ -256,7 +256,8 @@ env = { SEED = "42" }
 ```
 
 - `cmd`: the program and its arguments, as a list. Extra arguments (`./deploy gen a b`) are
-  appended unchanged; the task's exit code is the program's.
+  appended unchanged (a `.cmd`/`.bat` program on Windows: see `uv` below); the task's exit code
+  is the program's.
 - `deps`: tasks or `./deploy` commands with their arguments (`"check all"`), run first and in
   order, each once per invocation; the first one that fails stops the task. A task with only
   `deps` (every preset's `ci`) takes no arguments, and `./deploy ci -h` shows its help.
@@ -268,6 +269,10 @@ env = { SEED = "42" }
 - `uv`: `true` (default) runs `cmd` with `uv run` in that environment; `false` runs the program
   as it is (a `{python}` whose environment does not exist yet is created first; on Windows a
   bare name is looked up on `PATH` with its `.cmd`/`.bat` extensions too, so `npm` works).
+  Windows runs a `.cmd`/`.bat` program (npm, yarn, mvn) through cmd.exe, which parses its
+  arguments again, so there an argument cmd.exe would change is refused (exit 2) instead of
+  reaching the program changed: one with `%`, `"` or a line break, and one with `^ & | < >`
+  and no space (`npm install react@^18` would install `react@18`: cmd.exe drops the `^`).
 - `help`: the line that `./deploy tasks` and `./deploy help` show.
 - `background`: a long-running server (flet's `dev`): the editors start it without waiting.
 

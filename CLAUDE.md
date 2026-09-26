@@ -1117,7 +1117,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   the task runs (`tasks.run_task`), not at load: unknown placeholder names, `deps` quoting and
   empty entries (all parsed before the first dep runs), `cwd` is a folder (not in a dry run),
   `backend = "pypy"` in `backend.supported` (only where its environment is used). `vscode.scan`
-  renders a task whose deps do not parse.
+  renders a task whose deps do not parse. `uv = false` on Windows: a bare program is looked up
+  on the task's PATH with PATHEXT (`npm` -> `npm.cmd`), and a `.cmd`/`.bat` program runs
+  through cmd.exe, which re-parses the `list2cmdline` line: an argument it would change (`%`,
+  `"`, a line break; `^ & | < >` when list2cmdline leaves it unquoted: no space, tab or empty
+  value) is refused with exit 2 (`tasks._batch_problem`), never passed changed
+  (`npm install react@^18` installed react@18).
 - `[preset.<name>]`: option overrides (`config._check_preset_tables`): `<name>` must be a preset
   of this template, and each key and its value type must match that preset's `preset.toml`
   `[options]`, read with `tomllib` (no `presets` import); the script preset has none.
@@ -3746,8 +3751,10 @@ cmd.exe and CreateProcess (details: section 4.4):
   never.
 - **cmd re-parses `%*`** (LIMITATION, the BatBadBut class): `% ! " ^` and unquoted `& | < >`
   inside arguments do not survive, whatever quoting a CreateProcess caller applies. Fix: no CLI
-  syntax needs them (14); `shells.cmd_quote` for the probes. Test:
-  `test_shells.py::test_cmd_quote`. Goes: never.
+  syntax needs them (14); `shells.cmd_quote` for the probes; a `uv = false` task whose program
+  is a `.cmd`/`.bat` (npm, found through PATHEXT) refuses an argument cmd.exe would change
+  (`tasks._batch_problem`, 6.1). Test: `test_shells.py::test_cmd_quote`,
+  `test_cli_core.py::test_a_batch_file_gets_only_arguments_cmd_passes_unchanged`. Goes: never.
 - **A quoted registry PATH entry splits `call` arguments** (LIMITATION): Fix: `deploy.cmd` keeps
   the value in a variable, drops the quotes, then `call set`. Test:
   `test_launcher_win.py::test_cmd_keeps_the_registry_path_out_of_call_arguments`,
@@ -3870,7 +3877,8 @@ Windows:
 - **CreateProcess tries only `<name>.exe` for a bare program name** (LIMITATION, PATHEXT is a
   shell feature): a `uv = false` task running `npm`, `yarn` or `mvn` (`.cmd` files) failed with
   "program not found" on Windows only. Fix: `tasks.run_task` looks the name up on the task's
-  PATH with PATHEXT, through the standard library's shutil.which (6.1). Test:
+  PATH with PATHEXT, through the standard library's shutil.which; the `.cmd` it finds runs
+  through cmd.exe (the entry "cmd re-parses `%*`" below) (6.1). Test:
   `test_cli_core.py::test_a_bare_program_is_found_with_pathext_on_windows`. Goes: never.
 - **A command line holds 32767 characters** (LIMITATION): Fix: `hooks.ARG_LIMIT` batches file
   arguments (5.6). Test: `test_hooks.py::test_batches`. Goes: never.
@@ -3973,7 +3981,8 @@ Behaviour:
   stdlib renamed) is only caught by `selftest --e2e`; a bundled PyPy portable build is not run
   on CI.
 - Argument limits by design: `deploy.cmd` (and every CreateProcess caller of it) cannot pass
-  `% ! " ^ & | < >`; PowerShell drops a bare `--`; xonsh `-c` exits 1 on any failing command
+  `% ! " ^ & | < >`; a `uv = false` task running a `.cmd`/`.bat` on Windows refuses the
+  arguments cmd.exe would change (6.1); PowerShell drops a bare `--`; xonsh `-c` exits 1 on any failing command
   (the child's real code is in its `CalledProcessError`).
 - `uv build` drops a `.gitignore` into `dist/<n>-<b>-wheel/`.
 - A project inside a bigger git repository (supported: `new` skips `git init`, the hook finds
