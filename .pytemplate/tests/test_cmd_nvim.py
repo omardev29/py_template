@@ -6,14 +6,17 @@ import hashlib
 import json
 import os
 import shutil
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_nvim, nvimtest  # noqa: E402
+from runner import cmd_nvim, nvimtest, proc  # noqa: E402
 from runner.ui import DeployError  # noqa: E402
 
 # lazyvim.json exactly as LazyVim 16 writes it on first start (util/json.lua: sorted keys,
@@ -205,33 +208,55 @@ def test_remove_tree_read_only(tmp_path: Path) -> None:
 
 def test_parse_smoke() -> None:
     out = (
-        "ok   pytemplate.nvim loaded from .lazy.lua\r\n"
-        "FAIL overseer templates\n"
+        "\nok   pytemplate.nvim loaded from .lazy.lua\r\n"
+        "\nFAIL overseer templates\n"
         "...smoke.lua:12: duplicate deploy: run\n"
         "stack traceback:\n"
         "\t[C]: in function 'error'\n"
-        "SKIP mypy lint (profile off)\n"
-        "ok   parser\n"
+        "\nSKIP mypy lint (profile off)\n"
+        "\nok   parser\n"
         "random noise\n"
+        "\nDONE 4\n"
     )
     s = nvimtest.parse_smoke(out)
     assert s.passed == ["pytemplate.nvim loaded from .lazy.lua", "parser"]
     assert s.skipped == ["mypy lint (profile off)"]
     assert [name for name, _ in s.failed] == ["overseer templates"]
     assert s.failed[0][1].splitlines()[0] == "...smoke.lua:12: duplicate deploy: run"
-    assert "stack traceback:" in s.failed[0][1]
+    assert "stack traceback:" in s.failed[0][1] and not s.failed[0][1].endswith("\n")
     assert s.other == ["random noise"]
-    assert s.total == 4
+    assert (s.total, s.expected, s.complete) == (4, 4, True)
     assert nvimtest.parse_smoke("").total == 0
 
 
+def test_parse_smoke_requires_done() -> None:
+    """A result glued onto leaked output (no newline before it) is lost: the DONE count shows it."""
+    lost = nvimtest.parse_smoke("ok   a\ngarbage from a pty ok   x\nok   y\nDONE 3\n")
+    assert (lost.passed, lost.total, lost.expected, lost.complete) == (["a", "y"], 2, 3, False)
+    assert lost.other == ["garbage from a pty ok   x"]
+    assert not nvimtest.Row("script", smoke=lost, code=0).ok
+    assert "3 checks but 2 result lines" in nvimtest.smoke_problem(lost) and "garbage" in nvimtest.smoke_problem(lost)
+    unfinished = nvimtest.parse_smoke("ok   a\n")  # killed, or a watchdog: no DONE
+    assert not unfinished.complete and "no DONE line" in nvimtest.smoke_problem(unfinished)
+
+
+def test_smoke_problem_wants_a_typing_profile() -> None:
+    off = nvimtest.parse_smoke("ok   mypy diagnostics (profile off)\nDONE 1\n")
+    assert f"--typing {nvimtest.SMOKE_TYPING}" in nvimtest.smoke_problem(off)
+    missing = nvimtest.parse_smoke("ok   a\nDONE 1\n")
+    assert "did not run with a typing profile" in nvimtest.smoke_problem(missing)
+    good = nvimtest.parse_smoke("ok   a\nok   mypy diagnostics (profile strict)\nDONE 2\n")
+    assert nvimtest.smoke_problem(good) == ""
+
+
 def test_row_ok() -> None:
-    good = nvimtest.Row("script", smoke=nvimtest.parse_smoke("ok   a\n"), code=0)
+    good = nvimtest.Row("script", smoke=nvimtest.parse_smoke("ok   a\nDONE 1\n"), code=0)
     assert good.ok
-    assert not nvimtest.Row("script", smoke=nvimtest.parse_smoke("ok   a\n"), code=1).ok
-    assert not nvimtest.Row("script", smoke=nvimtest.parse_smoke("FAIL a\n"), code=0).ok
-    assert not nvimtest.Row("script", smoke=nvimtest.parse_smoke(""), code=0).ok  # no result lines
-    assert not nvimtest.Row("script", smoke=nvimtest.parse_smoke("ok   a\n"), code=0, error="boom").ok
+    assert not nvimtest.Row("script", smoke=nvimtest.parse_smoke("ok   a\n"), code=0).ok  # no DONE
+    assert not nvimtest.Row("script", smoke=nvimtest.parse_smoke("ok   a\nDONE 1\n"), code=1).ok
+    assert not nvimtest.Row("script", smoke=nvimtest.parse_smoke("FAIL a\nDONE 1\n"), code=0).ok
+    assert not nvimtest.Row("script", smoke=nvimtest.parse_smoke("DONE 0\n"), code=0).ok  # no result lines
+    assert not nvimtest.Row("script", smoke=nvimtest.parse_smoke("ok   a\nDONE 1\n"), code=0, error="boom").ok
 
 
 def test_env_isolation(tmp_path: Path) -> None:
@@ -307,3 +332,228 @@ def test_real_nvim_query_and_trust(tmp_path: Path) -> None:
     status = cmd_nvim.trust_status(nv.trust_db, file)
     assert (status.state, status.sha256, status.path) == ("trusted", digest, real)
     assert not (file.parent / "nvim.log").exists() and not Path("nvim.log").exists()
+
+
+# --- timeouts kill the whole tree -----------------------------------------------------------------
+
+
+def _gone(pid: int, within: float = 5.0) -> bool:
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _kill(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, AttributeError):
+        pass
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows uses taskkill /T")
+def test_run_logged_timeout_kills_the_whole_tree(tmp_path: Path) -> None:
+    """git, Mason, uv, debugpy... started by a hung Neovim must not outlive the timeout."""
+    argv = ["sh", "-c", "sleep 30 & echo $! > pid; wait"]
+    start = time.monotonic()
+    code = nvimtest._run_logged(argv, cwd=tmp_path, env=dict(os.environ), log=tmp_path / "x.log", timeout=1)
+    assert code is None and time.monotonic() - start < 20
+    pid = int((tmp_path / "pid").read_text(encoding="ascii"))
+    try:
+        assert _gone(pid), f"grandchild {pid} survived the timeout"
+    finally:
+        _kill(pid)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups; Windows uses taskkill /T")
+def test_run_logged_ctrl_c_kills_the_whole_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """In its own session the child no longer gets the terminal's Ctrl+C: the harness kills it."""
+    real_wait = subprocess.Popen.wait
+    calls: list[float | None] = []
+
+    def wait(self: subprocess.Popen[bytes], timeout: float | None = None) -> int:
+        calls.append(timeout)
+        if len(calls) == 1:
+            deadline = time.monotonic() + 10
+            while not (tmp_path / "pid").is_file() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            raise KeyboardInterrupt
+        return real_wait(self, timeout)
+
+    monkeypatch.setattr(subprocess.Popen, "wait", wait)
+    with pytest.raises(KeyboardInterrupt):
+        nvimtest._run_logged(["sh", "-c", "sleep 30 & echo $! > pid; wait"], cwd=tmp_path, env=dict(os.environ), log=tmp_path / "x.log", timeout=60)
+    pid = int((tmp_path / "pid").read_text(encoding="ascii"))
+    try:
+        assert _gone(pid), f"grandchild {pid} survived Ctrl+C"
+    finally:
+        _kill(pid)
+
+
+# --- ./deploy nvim sync: install only, never an update or a clean ---------------------------------------
+
+
+def _nvim_in(tmp_path: Path) -> cmd_nvim.Nvim:
+    nv = cmd_nvim.Nvim("nvim", (0, 12, 5), tmp_path / "c", tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    (tmp_path / "d" / "lazy" / "LazyVim").mkdir(parents=True)
+    return nv
+
+
+def _record_runs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    runs: list[dict[str, object]] = []
+
+    def run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+        runs.append({"argv": list(argv), **kw})
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(cmd_nvim.subprocess, "run", run)
+    return runs
+
+
+def test_nvim_sync_installs_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    nv = _nvim_in(tmp_path)
+    nv.state.mkdir()
+    lazy_lua = cmd_nvim.LAZY_LUA
+    nv.trust_db.write_text(f"{hashlib.sha256(lazy_lua.read_bytes()).hexdigest()} {os.path.realpath(lazy_lua)}\n", encoding="utf-8")
+    runs = _record_runs(monkeypatch)
+    assert cmd_nvim.cmd_sync(nv) == 0
+    assert len(runs) == 1
+    argv = [str(a) for a in runs[0]["argv"]]  # type: ignore[attr-defined]
+    assert "+Lazy! install" in argv and not [a for a in argv if any(w in a for w in ("sync", "update", "clean", "restore"))]
+    assert runs[0]["cwd"] == cmd_nvim.ROOT
+    env = runs[0]["env"]
+    assert isinstance(env, dict) and env.get("NVIM_LOG_FILE"), "without NVIM_LOG_FILE Neovim may drop nvim.log in the project"
+
+
+@pytest.mark.parametrize("state", ["untrusted", "changed", "denied"])
+def test_nvim_sync_refuses_an_untrusted_lazy_lua(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str) -> None:
+    """Untrusted, Neovim would ask (it never returns headless); from another folder the old code
+    cleaned the project's plugins out of the user's config."""
+    nv = _nvim_in(tmp_path)
+    nv.state.mkdir()
+    real = os.path.realpath(cmd_nvim.LAZY_LUA)
+    nv.trust_db.write_text({"untrusted": "", "changed": f"{'0' * 64} {real}\n", "denied": f"! {real}\n"}[state], encoding="utf-8")
+    assert cmd_nvim.trust_status(nv.trust_db, cmd_nvim.LAZY_LUA).state == state
+    runs = _record_runs(monkeypatch)
+    with pytest.raises(DeployError, match="nvim trust") as e:
+        cmd_nvim.cmd_sync(nv)
+    assert e.value.code == 3 and runs == []
+
+
+def test_nvim_sync_needs_lazyvim(tmp_path: Path) -> None:
+    nv = cmd_nvim.Nvim("nvim", (0, 12, 5), tmp_path / "c", tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    with pytest.raises(DeployError, match="bootstrap") as e:
+        cmd_nvim.cmd_sync(nv)
+    assert e.value.code == 3
+
+
+# --- selftest --nvim: pinned starter and plugins ----------------------------------------------------
+
+
+LOCKED = {"LazyVim": {"branch": "main", "commit": "a" * 40}, "overseer.nvim": {"branch": "master", "commit": "b" * 40}}
+
+
+class Base:
+    """prepare_base with every external step faked: records argv, mimics git and lazy.nvim."""
+
+    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock: bool, version: tuple[int, int, int] = (0, 12, 5)) -> None:
+        self.layout = nvimtest.Layout(tmp_path / "w")
+        self.layout.logs.mkdir(parents=True)
+        self.lock = tmp_path / "lazy-lock.json"
+        if lock:
+            self.lock.write_text(json.dumps(LOCKED, indent=2), encoding="utf-8")
+        monkeypatch.setattr(nvimtest, "LOCK", self.lock)
+        home = self.layout.home
+        self.nv = cmd_nvim.Nvim("nvim", version, home("XDG_CONFIG_HOME") / "nvim", home("XDG_DATA_HOME") / "nvim", home("XDG_STATE_HOME") / "nvim", home("XDG_CACHE_HOME") / "nvim")
+        monkeypatch.setattr(cmd_nvim, "query", lambda exe=None, env=None: self.nv)
+        self.steps: list[list[str]] = []
+        self.lock_at_lazy: list[dict[str, object]] = []
+        monkeypatch.setattr(nvimtest, "_step", self.step)
+
+    def step(self, argv: list[str | Path], **_: object) -> None:
+        args = [str(a) for a in argv]
+        self.steps.append(args)
+        if "clone" in args:
+            (Path(args[-1]) / ".git").mkdir(parents=True)
+        if any(a.startswith("+Lazy! ") for a in args):
+            lock = self.nv.config / "lazy-lock.json"
+            self.lock_at_lazy.append(json.loads(lock.read_text(encoding="utf-8")) if lock.is_file() else {})
+            (self.nv.data / "lazy" / "LazyVim").mkdir(parents=True, exist_ok=True)
+            # lazy.nvim rewrites the lock with the plugins of its current spec only
+            lock.write_text(json.dumps({"LazyVim": LOCKED["LazyVim"]}), encoding="utf-8")
+
+    def run(self, fresh: bool = False) -> float | None:
+        nv, seconds = nvimtest.prepare_base(self.layout, "nvim", {}, fresh=fresh)
+        assert nv is self.nv
+        return seconds
+
+
+def test_prepare_base_pins_the_starter_and_restores_the_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base = Base(tmp_path, monkeypatch, lock=True)
+    assert base.run() is not None
+    clone = next(s for s in base.steps if "clone" in s)
+    assert "--depth" not in clone, "a pinned commit needs history"
+    assert ["checkout", cmd_nvim.STARTER_REV] == [s for s in base.steps if "checkout" in s][0][-2:]
+    lazy = [a for s in base.steps for a in s if a.startswith("+Lazy! ")]
+    assert lazy == ["+Lazy! restore"], "the pinned base restores the lock, it never syncs to the newest"
+    assert base.lock_at_lazy == [LOCKED]
+    marker = json.loads(base.layout.marker.read_text(encoding="utf-8"))
+    assert marker["rev"] == cmd_nvim.STARTER_REV and marker["lock"] == hashlib.sha256(base.lock.read_bytes()).hexdigest()
+    assert marker["nvim"] == "0.12.5" and not (base.nv.config / ".git").exists()
+    base.steps.clear()
+    assert base.run() is None and base.steps == [], "same pins, same Neovim: reused"
+
+
+def test_prepare_base_without_the_lock_takes_the_latest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base = Base(tmp_path, monkeypatch, lock=False)
+    base.run()
+    clone = next(s for s in base.steps if "clone" in s)
+    assert "--depth" in clone and not [s for s in base.steps if "checkout" in s]
+    assert [a for s in base.steps for a in s if a.startswith("+Lazy! ")] == ["+Lazy! sync"]
+    assert json.loads(base.layout.marker.read_text(encoding="utf-8"))["rev"] == "HEAD"
+
+
+@pytest.mark.parametrize("change", ["nvim", "lock"])
+def test_prepare_base_is_rebuilt_when_neovim_or_the_pins_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str) -> None:
+    base = Base(tmp_path, monkeypatch, lock=True)
+    base.run()
+    if change == "nvim":
+        base.nv = cmd_nvim.Nvim("nvim", (0, 13, 0), base.nv.config, base.nv.data, base.nv.state, base.nv.cache)
+    else:
+        base.lock.write_text(json.dumps({**LOCKED, "neotest": {"commit": "c" * 40}}), encoding="utf-8")
+    base.steps.clear()
+    assert base.run() is not None and any("clone" in s for s in base.steps), f"a {change} change must reinstall the base"
+    base.layout.marker.write_text("{not json", encoding="utf-8")
+    base.steps.clear()
+    assert base.run() is not None, "an unreadable base.json counts as a different base"
+
+
+def test_run_preset_uses_a_typing_profile_and_the_locked_plugins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base = Base(tmp_path, monkeypatch, lock=True)
+    base.run()
+    base.steps.clear()
+    base.lock_at_lazy.clear()
+    monkeypatch.setattr(cmd_nvim, "trust_file", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr(cmd_nvim, "trust_status", lambda db, f: cmd_nvim.Trust("trusted", str(f), "x", "x"))
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+    smoke_out = "\nok   a\n\nok   mypy diagnostics (profile strict)\n\nDONE 2\n"
+
+    def run_smoke(nv: cmd_nvim.Nvim, proj: Path, env: dict[str, str], log: Path, err_log: Path, timeout: float) -> int:
+        assert env["PT_ROOT"] == str(proj)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(smoke_out, encoding="utf-8")
+        err_log.write_text("", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(nvimtest, "run_smoke", run_smoke)
+    row = nvimtest.run_preset("script", base.layout, base.nv, renv={}, venv={}, timeout=60)
+    assert row.ok, row
+    deploys = [s[5:] for s in base.steps if s[:4] == ["uv", "run", "--quiet", "--script"]]
+    assert [d[0] for d in deploys] == ["new", "sync", "mode"], deploys
+    assert deploys[-1] == ["mode", "--typing", nvimtest.SMOKE_TYPING], deploys
+    assert [a for s in base.steps for a in s if a.startswith("+Lazy! ")] == ["+Lazy! install"]
+    assert base.lock_at_lazy == [LOCKED], "the lock (pruned by the base run) goes back before Lazy! install"

@@ -22,7 +22,8 @@
       "error": "Error",
       "note": "Information"
     },
-    "python_version": null
+    "python_version": null,
+    "basedpyright": "basedpyright==1.40.1"
   },
   "envs": {
     "tools": ".venv",

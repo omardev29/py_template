@@ -116,6 +116,8 @@ function M.sanitize(data)
         note = one_of(tbl(typing.mypy_severity).note, SEVERITIES, "Information"),
       },
       python_version = str(typing.python_version, "^%d+%.%d+$", nil),
+      -- the version ./deploy check runs (cmd_dev.BASEDPYRIGHT), for the uvx language server
+      basedpyright = str(typing.basedpyright, "^basedpyright==%d+%.%d+%.%d+$", nil),
     },
     envs = {},
     mypyc_stage = rel_path(data.mypyc_stage, ".build/mypyc-dev/stage"),
@@ -259,7 +261,9 @@ function M.uv_candidates()
     end
   end
   add(vim.env.UV)
-  add(vim.fn.exepath("uv"))
+  -- Windows: only a real uv.exe from PATH (a uv.cmd/uv.bat shim earlier on PATH would go through
+  -- cmd.exe and parse the arguments again), like deploy.cmd and deploy.ps1
+  add(vim.fn.exepath(exe))
   dir(vim.env.UV_INSTALL_DIR)
   dir(vim.env.UV_INSTALL_DIR, "/bin")
   dir(vim.env.XDG_BIN_HOME)
@@ -333,7 +337,8 @@ function M.deploy_cmd(args)
   if uvbin then
     argv = { uvbin, "run", "--quiet", "--script", M.native(join(root, ".pytemplate", "deploy.py")) }
   else
-    argv = { M.launcher() }
+    -- POSIX: through /bin/sh like the VS Code tasks and the git hook (no exec bit needed)
+    argv = M.is_win and { M.launcher() } or { "/bin/sh", M.launcher() }
   end
   return vim.list_extend(argv, args or {})
 end
@@ -347,9 +352,12 @@ function M.caller_cwd()
   return M.native(M.root() or ".")
 end
 
----Environment additions for ./deploy (jobstart/vim.system keep the rest of Neovim's).
+---Environment additions for ./deploy (jobstart/vim.system keep the rest of Neovim's). UV_PYTHON
+---is emptied (uv reads that as unset) like the launchers do: the runner runs on the project's
+---Python, whatever the user's UV_PYTHON says.
 function M.deploy_env(extra)
-  return vim.tbl_extend("force", { PYTEMPLATE_CALLER_CWD = M.caller_cwd(), PYTEMPLATE_LAUNCHER = "nvim" }, extra or {})
+  local base = { PYTEMPLATE_CALLER_CWD = M.caller_cwd(), PYTEMPLATE_LAUNCHER = "nvim", UV_PYTHON = "" }
+  return vim.tbl_extend("force", base, extra or {})
 end
 
 -- --- language server choice --------------------------------------------------------------------

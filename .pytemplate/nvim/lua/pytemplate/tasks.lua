@@ -19,12 +19,15 @@ M.META = {
   build = { tag = "BUILD", backend = "optional", method = true, parse = true },
   mode = { refresh = true, show = true },
   setup = { refresh = true, show = true },
+  apply = { refresh = true, show = true },
   sync = { backend = "all", refresh = true },
   lock = { refresh = true, show = true },
   add = { refresh = true },
   remove = { refresh = true },
   render = { refresh = true },
   init = { refresh = true, show = true },
+  -- rename rewrites editor.json (name, pkg), uv.lock and the sources: refresh, and show what changed
+  rename = { refresh = true, show = true },
   clean = { tag = "CLEAN" },
   doctor = { show = true },
   help = { show = true },
@@ -70,16 +73,29 @@ local function absolute(file)
     return vim.fs.normalize(file)
   end
   local root = pt.root()
-  return root and vim.fs.normalize(root .. "/" .. file) or file
+  if not root then
+    return file
+  end
+  local path = vim.fs.normalize(root .. "/" .. file)
+  -- mypyc runs in its stage (a copy of src/) and prints stage-relative paths: map them to src/
+  if not vim.uv.fs_stat(path) then
+    local src = vim.fs.normalize(root .. "/src/" .. file)
+    if vim.uv.fs_stat(src) then
+      return src
+    end
+  end
+  return path
 end
 
 ---Parse one output line of ./deploy into a quickfix item, or nil. Understands
 --- mypy       src/pkg/x.py:12: error: Incompatible types  [assignment]   (and :12:5:)
 --- ruff       src\pkg\x.py:3:8: F401 [*] `os` imported but unused           (concise format)
 --- pytest     tests/test_x.py:14: AssertionError                             (not "in func" frames)
---- mypyc      warning: src/pkg/core/x.py:7: <message>                        (runner warnings/errors)
+--- mypyc      pkg/core/x.py:7: error: <message>                              (relative to its stage)
+--- runner     warning: src/pkg/core/x.py:7: <message>                        (runner warnings/errors)
 --- basedpyright  C:\p\src\x.py:3:5 - error: <message>
----Relative paths are relative to the project root (the runner runs every tool there).
+---Relative paths are relative to the project root (the runner runs the tools there); mypyc's,
+---relative to its stage (a copy of src/), resolve to src/ when the root has no such file.
 function M.parse_line(line)
   line = strip(line)
   local forced
@@ -379,7 +395,9 @@ function M.setup(cfg)
     vim.keymap.set("n", prefix .. k[1], rhs, { desc = k[3] })
   end
   vim.api.nvim_create_user_command("Deploy", function(a)
-    M.run(#a.fargs > 0 and a.fargs or { "help" }, { show = true })
+    -- quotes group words ("a b" is one argument), like the <leader>jR prompt
+    local args = M.split_args(a.args)
+    M.run(#args > 0 and args or { "help" }, { show = true })
   end, { nargs = "*", complete = M.complete, desc = "./deploy ARGS (through uv, never 'shell')" })
   local group = vim.api.nvim_create_augroup("pytemplate", { clear = true })
   if cfg.render_on_save then
