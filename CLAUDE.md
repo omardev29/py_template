@@ -1474,8 +1474,10 @@ Formats:
   `MYPYC_REJECTED` (4, mirrored in `mypyc.py`). When the C build fails (setuptools reports
   every failure as `SystemExit("error: ...")`; a crash of the C step too) it prints the error
   and asks `mypyc_build.missing_compiler` why: the program of the compiler or linker command
-  (`CC`, `LDSHARED`, Python's own `cc`) is not found, or MSVC cannot be set up ->
-  `COMPILER_MISSING` (5), which `mypyc.build` turns into exit 3 (a missing requirement) with
+  (`CC`, `LDSHARED`, Python's own `cc`) is not found, on macOS it is a `/usr/bin` Xcode shim
+  whose developer folder holds no clang (`mypyc_build.xcode_problem`, a mirror of
+  `cmd_env._xcode_problem`: the usual Mac without the Command Line Tools), or MSVC cannot be
+  set up -> `COMPILER_MISSING` (5), which `mypyc.build` turns into exit 3 (a missing requirement) with
   the install hint; any other C failure -> `C_BUILD_FAILED` (6; setuptools' own exit 1 was
   also uv's). Both are mirrored in `mypyc.py`.
   Every spec key it reads must be written by `mypyc.build` (a test parses the script).
@@ -3910,9 +3912,12 @@ macOS:
 - **`/usr/bin/cc`, `gcc` and `clang` exist without the developer tools** (LIMITATION, xcrun
   shims that open an install dialog): Fix: `cmd_env._xcode_problem` (the active developer
   folder must hold a clang: `cmd_env.XCODE_CLANG`, the Command Line Tools or an Xcode.app
-  toolchain), `cmd_nvim.c_compiler` (7, 12.2). Test: `test_envs_core.py::test_c_compiler_rejects_macos_xcode_shims`,
-  `test_cmd_nvim.py::test_c_compiler_skips_the_macos_shims_without_developer_tools`. Goes:
-  never.
+  toolchain), `cmd_nvim.c_compiler`, and after a failed mypyc build `mypyc_build.xcode_problem`
+  (its mirror in the build script, so the missing compiler exits 3) (7, 9, 12.2). Test:
+  `test_envs_core.py::test_c_compiler_rejects_macos_xcode_shims`,
+  `test_cmd_nvim.py::test_c_compiler_skips_the_macos_shims_without_developer_tools`,
+  `test_mypyc_core.py::test_build_script_finds_the_macos_compiler_shims_without_developer_tools`,
+  `test_build_script_reads_the_developer_folder_like_doctor`. Goes: never.
 
 ### 15.2 Our open issues and fragile points
 
@@ -4078,7 +4083,8 @@ Code coupling (rename together):
   `lintc.relative_file_at_import` <-> when mypyc builds no shared lib; `mypyc.remove_stale_extensions`
   <-> mypyc's lib names (`<group>__mypyc`, `<module>__mypyc`). `mypyc.MYPYC_REJECTED`,
   `COMPILER_MISSING` and `C_BUILD_FAILED` <-> `tools/mypyc_build.py`; the spec keys the script
-  reads <-> `mypyc.build`;
+  reads <-> `mypyc.build`; `mypyc_build.XCODE_CLANG`/`xcode_problem` <-> `cmd_env.XCODE_CLANG`/
+  `_xcode_problem` (`test_build_script_reads_the_developer_folder_like_doctor`);
   `mypyc_build.extra_cflags`/`compiler_type` <-> the wheel's `SETUP_PY`
   (`test_wheel_setup_py_adds_the_same_flags_as_the_stage`); `mypyc.COMPILER_ENV` <-> the
   variables setuptools' `configure_system` reads.

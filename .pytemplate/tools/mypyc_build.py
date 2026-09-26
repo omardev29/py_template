@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import traceback
 from collections.abc import Callable
@@ -39,10 +40,11 @@ def compiler_type() -> str:
     return str(compiler.compiler_type)
 
 
-def missing_compiler() -> str | None:
+def missing_compiler(platform: str = sys.platform) -> str | None:
     """Why setuptools cannot start the C compiler, or None. Asked only after a failed C build
     (MSVC's check runs vcvarsall.bat): gcc/clang = the programs of the compiler and linker
-    commands (CC, LDSHARED or Python's own) exist; MSVC = setuptools can set it up."""
+    commands (CC, LDSHARED or Python's own) exist, and on macOS a /usr/bin one is not an Xcode
+    shim without developer tools; MSVC = setuptools can set it up."""
     from distutils import ccompiler, sysconfig  # setuptools' copy (mypyc.build imported setuptools)
 
     compiler = ccompiler.new_compiler()
@@ -53,9 +55,42 @@ def missing_compiler() -> str | None:
         except Exception as e:  # PlatformError; its class moved between setuptools versions
             return f"MSVC cannot be used: {e}"
         return None
+    shims: list[str] = []
     for command in (getattr(compiler, "compiler_so", None), getattr(compiler, "linker_so", None)):
-        if command and shutil.which(command[0]) is None:
+        if not command:
+            continue
+        found = shutil.which(command[0])
+        if found is None:
             return f"the C compiler command {' '.join(command)!r} cannot start: {command[0]} was not found"
+        if platform == "darwin" and os.path.dirname(found) == "/usr/bin" and found not in shims:
+            shims.append(found)
+    if shims:
+        # /usr/bin/cc and clang exist on every Mac, even without the developer tools: they run
+        # the clang of the active developer folder, and fail when there is none
+        problem = xcode_problem()
+        if problem:
+            return f"{shims[0]} is an Xcode shim: {problem} (xcode-select --install)"
+    return None
+
+
+# The clang of the active developer folder: the Command Line Tools or an Xcode.app's default
+# toolchain. Mirrors cmd_env.XCODE_CLANG (the script cannot import the runner).
+XCODE_CLANG = (("usr", "bin", "clang"), ("Toolchains", "XcodeDefault.xctoolchain", "usr", "bin", "clang"))
+
+
+def xcode_problem() -> str | None:
+    """macOS: why the /usr/bin compiler shims cannot compile, or None (mirrors
+    cmd_env._xcode_problem; the shims themselves never run: on a fresh Mac they open the install
+    dialog)."""
+    try:
+        r = subprocess.run(["/usr/bin/xcode-select", "-p"], capture_output=True, text=True, check=False)
+    except OSError:
+        return "no xcode-select"
+    dev = r.stdout.strip()
+    if r.returncode != 0 or not dev:
+        return "no Xcode Command Line Tools"
+    if not any(os.path.isfile(os.path.join(dev, *parts)) for parts in XCODE_CLANG):
+        return f"the developer folder {dev} has no clang (usual after a macOS upgrade)"
     return None
 
 
