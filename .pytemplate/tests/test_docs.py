@@ -383,6 +383,13 @@ def test_no_marketing_phrases(phrase: str) -> None:
     assert phrase not in _text().lower()
 
 
+def test_the_template_workflows_are_named() -> None:
+    # A new template-*.yml lands with a line in "Testing the template" (projects have none)
+    workflows = sorted(p.name for p in (ROOT / ".github" / "workflows").glob("template-*.yml"))
+    missing = [name for name in workflows if f"`{name}`" not in _text()]
+    assert not missing, f"template workflows the manual does not name: {missing}"
+
+
 def test_the_manual_says_what_a_new_project_gets() -> None:
     text = _text()
     for target in presets.TEMPLATE_DOCS.values():
