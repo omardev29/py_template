@@ -1280,9 +1280,10 @@ pipeline input on. Print the xonsh snippet again to complete commands added late
   arguments, `--%` passes through literally, and pipeline input reaches the app
   (`Get-Content data.txt | ./deploy run`). The launcher tells a typed list from an array by
   reading the command you typed (through the `shell-setup pwsh` function and any wrapper that
-  forwards `@args` too). Where it cannot (a call that splats two variables, a wrapper that binds
-  some of the words with `param()` or splats a copy of `$args`), an array arrives as ONE
-  argument with its items joined by commas: splat it in your own command (`@files`).
+  forwards `@args` too; a splatted `@files`, or a wrapper that splats a copy of `$args`, passes
+  items separately, as for a native program). Where it cannot (a call that splats two variables,
+  a wrapper that binds some of the words with `param()`), an array arrives as ONE argument with
+  its items joined by commas: splat it in your own command (`@files`).
   `pwsh -File deploy.ps1 ...`, and `./deploy.ps1` typed in bash or zsh, split every argument
   that starts with `-` at its first colon (PowerShell's own parsing): from POSIX shells use
   `./deploy`.

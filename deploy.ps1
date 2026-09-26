@@ -155,8 +155,9 @@ if (-not $uv) {
 # items as separate arguments. Only the text of the call tells them apart: Get-Typed reads it
 # (a list is an ArrayLiteralAst) and returns, per argument that frame $K of $Stack received,
 # $true when it was typed as a list, else $false; a splatted @args is read where that caller
-# was called, and any other splatted variable is one 'gap' of unknown length. $null when the
-# text cannot be read. What it cannot tell counts as a typed list. A typed -X:v arrives as two
+# was called, and any other splatted variable is one 'gap' of unknown length (its items are
+# values, as for a native call). $null when the text cannot be read or two gaps make the words
+# not line up: then an array counts as a typed list. A typed -X:v arrives as two
 # elements, '-X:' (marked with the parameter name) and v.
 function Get-Typed([object[]] $Stack, [int] $K) {
     try {
@@ -187,11 +188,12 @@ function Get-Typed([object[]] $Stack, [int] $K) {
 $typed = $null
 foreach ($a in $args) { if ($a -is [array]) { $typed = Get-Typed @(Get-PSCallStack) 0; break } }
 if ($null -ne $typed) {
-    # A gap takes the arguments the others leave; with two gaps nothing lines up.
+    # A gap takes the arguments the others leave, and its arrays pass their items one by one,
+    # as a native call splats them; with two gaps nothing lines up.
     $gaps = @(foreach ($t in $typed) { if ($t -is [string]) { $t } }).Count
     $fill = $args.Count - $typed.Count + 1
     if ($gaps -eq 1 -and $fill -ge 0) {
-        $typed = @(foreach ($t in $typed) { if ($t -is [string]) { for ($n = 0; $n -lt $fill; $n++) { $true } } else { $t } })
+        $typed = @(foreach ($t in $typed) { if ($t -is [string]) { for ($n = 0; $n -lt $fill; $n++) { $false } } else { $t } })
     }
     if ($typed.Count -ne $args.Count -or $gaps -gt 1) { $typed = $null }
 }

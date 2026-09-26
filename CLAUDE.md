@@ -320,13 +320,16 @@ header rules (with detector tests proving each rule fires).
   `ArrayLiteralAst`. It counts the arguments as PowerShell binds them (`-X:v` gives two, a bare
   `--` none), reads a splatted `@args` where that caller was called (the `shell-setup pwsh`
   function, `function drun { ./deploy.ps1 run @args }`), and lets ONE other splatted variable
-  (`@files`) take the arguments the others leave. The launcher joins a typed list and passes
-  the items of a value (and of any other collection, `List[string]`: never typed) one by one.
-  What it cannot tell, it treats as a typed list: the arrays of that gap, and every array when
-  the words do not line up (two splatted variables, a wrapper whose `param()` binds some of
-  them) or the text cannot be read; `@files` at the user's own call passes items separately
-  anywhere (`test_ps1_keeps_typed_comma_lists_whole`, also through the `shell-setup pwsh`
-  function; `test_ps1_passes_array_values_like_a_native_call`, which pins the limit too).
+  (`@files`, a wrapper's `@rest` copy of `$args`) take the arguments the others leave, as values:
+  its arrays pass their items one by one, as a native call splats them (a typed list forwarded
+  through such a copy is split, for a native program too; Windows PowerShell 5.1's
+  `ConvertFrom-Json` returns a JSON array as one element, which `@l` then splats). The launcher
+  joins a typed list and passes the items of a value (and of any other collection,
+  `List[string]`: never typed) one by one. What it cannot tell, it treats as a typed list: every
+  array when the words do not line up (two splatted variables, a wrapper whose `param()` binds
+  some of them) or the text cannot be read (`test_ps1_keeps_typed_comma_lists_whole`, also
+  through the `shell-setup pwsh` function; `test_ps1_passes_array_values_like_a_native_call`
+  compares every case with a direct native call, the wrapper that splats a copy included).
 - A `.ps1` runs inside the caller's session: never assign `$env:PATH`. The two `PYTEMPLATE_*`
   variables and the removed `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` (the
   `$names` list) are restored in `finally`; a
@@ -1675,7 +1678,8 @@ Formats:
   `check_lock` (a read-only `uv lock --check`, exit 2 with uv's reason and `./deploy lock`: a
   uv.lock that pyproject.toml moved past used to stop a method only where it ran `uv ...
   --locked`, with `--no-check` after the payload, exe and nuitka after the previous output was
-  removed) and `upx.preflight`: when the method packs with UPX on this host (`upx.uses`: exe on Windows,
+  removed; a check uv cannot answer, offline or without its interpreter, is exit 3 naming uv's
+  reason, never "does not match") and `upx.preflight`: when the method packs with UPX on this host (`upx.uses`: exe on Windows,
   nuitka, portable, flet desktop targets) it resolves the upx binary now, downloading it if
   needed; a portable build with `runtime = "system"` (no interpreter: `upx._always_packs`) only
   checks `deploy.upx.path` and leaves the download to `upx.pack_tree`, which asks for upx only
@@ -3829,7 +3833,8 @@ PowerShell (details: section 4.5):
   --supports cpython,mypyc` exited 2), then joined both (`./deploy run $files` gave the app
   `a.py,b.py`). Fix: `deploy.ps1`'s `Get-Typed` reads the text of the call (an
   `ArrayLiteralAst` is a typed list; a forwarded `@args` is read at its caller) through the
-  internal `InvocationInfo.ScriptPosition`; what it cannot tell counts as a typed list (4.5).
+  internal `InvocationInfo.ScriptPosition`; another splatted variable passes values, as for a
+  native program; what it cannot tell counts as a typed list (4.5).
   Test: `test_launcher_win.py::test_ps1_keeps_typed_comma_lists_whole`,
   `test_ps1_passes_array_values_like_a_native_call`. Goes: never.
 - **A typed `-X:v` reaches a script as two elements** (DEFECT): `'-X:'` and `v`. Up:

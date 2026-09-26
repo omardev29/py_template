@@ -586,8 +586,11 @@ def test_ps1_keeps_typed_comma_lists_whole(name: str) -> None:
 VALUES_SETUP = "$files = 'a.py','b 2.py'; $list = New-Object 'Collections.Generic.List[string]'; $list.Add('l 1'); $list.Add('l2')"
 VALUES_TYPED = "run a,b $files @files ('p','q') $list -X:c,d z"
 VALUES_ARGV = ["run", "a,b", "a.py", "b 2.py", "a.py", "b 2.py", "p", "q", "l 1", "l2", "-X:c,d", "z"]
-# A wrapper that splats another variable cannot be read back: an array then counts as a typed list.
-UNREAD_ARGV = ["run", "a,b", "a.py,b 2.py", "a.py", "b 2.py", "p,q", "l 1", "l2", "-X:c,d", "z"]
+# A wrapper that splats a copy of $args: its arrays are values, split as for a native program
+# (the typed a,b too, which reached the wrapper as one array)
+COPY_ARGV = ["run", "a", "b", "a.py", "b 2.py", "a.py", "b 2.py", "p", "q", "l 1", "l2", "-X:c,d", "z"]
+# ... where a native call even drops the typed -X: (PowerShell 7.6): the launcher keeps it
+NATIVE_COPY_ARGV = [*COPY_ARGV[:-2], "c", "d", "z"]
 
 
 @pytest.mark.parametrize("name", PS_NAMES)
@@ -595,7 +598,8 @@ def test_ps1_passes_array_values_like_a_native_call(name: str) -> None:
     """`./deploy run $files` gives the app the items of $files as separate arguments, like a direct
     native call in the same session, while a typed a,b stays one argument; also when the call is
     forwarded with @args (the shell-setup function, a wrapper that adds words of its own), and with
-    legacy argument passing. A wrapper that splats another variable is the documented limit."""
+    legacy argument passing. A wrapper that splats a copy of $args gets what a native program
+    gets through the same wrapper: the arrays' items one by one."""
     exe = _ps_exe(name)
     sys.path.insert(0, str(ROOT / ".pytemplate"))
     from runner import shells
@@ -616,18 +620,22 @@ def test_ps1_passes_array_values_like_a_native_call(name: str) -> None:
         f"outer {VALUES_TYPED}",
         f"function unread {{ $rest = $args; & {ps1} __probe 0 0 @rest }}",
         f"unread {VALUES_TYPED}",
+        f"function unreadn {{ $rest = $args; {direct} __probe 0 0 @rest }}",
+        f"unreadn {VALUES_TYPED}",
     ])  # fmt: skip
     if name == "pwsh":  # also the legacy pre-quoting path that 5.1 always takes
         body += f"\n$PSNativeCommandArgumentPassing = 'Legacy'\n& {ps1} __probe 0 0 {VALUES_TYPED}"
     r = _session(exe, body + "\nexit 0\n")
     assert r.returncode == 0, r.stdout + r.stderr
     probes = [p["argv"] for p in _probes(r)]
-    assert len(probes) == (6 if name == "pwsh" else 5), r.stdout + r.stderr
+    assert len(probes) == (7 if name == "pwsh" else 6), r.stdout + r.stderr
     assert probes[0] == VALUES_ARGV, "a direct native call no longer passes these as expected"
     assert probes[1:4] == [VALUES_ARGV] * 3
-    assert probes[4] == UNREAD_ARGV
+    assert probes[4] == COPY_ARGV
+    if name == "pwsh":  # the native call through the same wrapper, as measured with 7.6
+        assert probes[5] == NATIVE_COPY_ARGV, "a native call through a wrapper's copy of $args no longer passes these as expected"
     if name == "pwsh":
-        assert probes[5] == VALUES_ARGV
+        assert probes[6] == VALUES_ARGV
 
 
 @pytest.mark.parametrize("name", PS_NAMES)
