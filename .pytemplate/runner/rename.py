@@ -27,7 +27,9 @@ Which occurrences change (whole words only: `myapp_extra` and `my-app-2` never m
   (`alpha` -> `My-Game`, package `my_game`), each text occurrence is either the package or the
   name. Package: path-like (`src/alpha/`, `alpha\\core`), dotted (`alpha.core`, `alpha.*`,
   `alpha:main`), next to the words package/module, after `import` or `-m`, in `from alpha
-  import`, and strings passed to `import_module()`, `__import__()`, `find_spec()` or `files()`.
+  import`, and the module-name arguments of loader calls (LOADERS: `import_module()`,
+  `find_spec()`, `files()`, the importlib.resources functions, `pkgutil.get_data()`,
+  `runpy.run_module()`; positional or as a `name=`, `package=`, `anchor=`, `mod_name=` keyword).
   Name: everything else (titles, `\"\"\"alpha\"\"\"`, `f"alpha: ..."`) and artifact names
   (`alpha.exe`, `alpha.pyz`, `alpha-cpython-exe`...).
 - pytemplate.toml: app.name (its comment is kept) and package references only, always chosen
@@ -85,8 +87,24 @@ ROOT_SKIP = {"pytemplate.toml", "pyproject.toml", "uv.lock", "pyrightconfig.json
 # runner, Claude Code's state (it holds whole copies of the project in worktrees)
 MENTION_SKIP_DIRS = {*SKIP_DIRS, ".build", "dist", ".pytemplate", ".claude", ".tox", ".nox", ".eggs", ".idea", "node_modules"}
 MENTION_MAX_BYTES = 2 * 1024 * 1024
-# Functions whose string argument is a module name: import_module("alpha") is the package
-LOADERS = {"import_module", "__import__", "find_spec", "files"}
+# Calls whose string arguments are module names, never the display name: the argument positions,
+# or a keyword of MODULE_ARGUMENTS (import_module("alpha"), import_module(".x", package="alpha"))
+LOADERS: dict[str, tuple[int, ...]] = {
+    "import_module": (0, 1),  # importlib.import_module(name, package)
+    "__import__": (0,),
+    "find_spec": (0, 1),  # importlib.util.find_spec(name, package)
+    "files": (0,),  # importlib.resources.files(anchor)
+    "read_text": (0,),  # importlib.resources' functional API: (package, resource, ...)
+    "read_binary": (0,),
+    "open_text": (0,),
+    "open_binary": (0,),
+    "path": (0,),
+    "is_resource": (0,),
+    "contents": (0,),
+    "get_data": (0,),  # pkgutil.get_data(package, resource)
+    "run_module": (0,),  # runpy.run_module(mod_name)
+}
+MODULE_ARGUMENTS = frozenset({"name", "package", "anchor", "mod_name"})
 SAMPLES = 3  # sample lines per file in the --dry-run plan
 # pytemplate.toml keys whose values are module names: a bare "alpha" there is the package
 MODULE_KEYS = frozenset(
@@ -410,6 +428,8 @@ def _python_code(text: str, pkg: str) -> _Code | None:
     depth = 0
     fstart = 0
     last: list[tokenize.TokenInfo] = []  # the last two significant tokens
+    # Open brackets: [the called name (for a call), index of the current argument, its keyword]
+    brackets: list[list[str | int | None]] = []
     for tok in tokens:
         kind = tokenize.tok_name.get(tok.type, "")
         if kind.endswith("STRING_START"):  # Python 3.12+: f-strings, t-strings (and any later family) are text
@@ -422,17 +442,24 @@ def _python_code(text: str, pkg: str) -> _Code | None:
                 regions.append(_Region(fstart, offset(tok.end)))
         elif depth == 0 and tok.type in (tokenize.STRING, tokenize.COMMENT):
             forced = fstring = False
+            if tok.type == tokenize.STRING and brackets and last and last[-1].type == tokenize.OP and last[-1].string in "(,=":
+                callee, index, keyword = brackets[-1]
+                positions = LOADERS.get(callee, ()) if isinstance(callee, str) else ()
+                forced = bool(positions) and (keyword in MODULE_ARGUMENTS if keyword is not None else index in positions)
             if tok.type == tokenize.STRING:
-                forced = (
-                    len(last) == 2
-                    and last[1].type == tokenize.OP
-                    and last[1].string == "("
-                    and last[0].type == tokenize.NAME
-                    and last[0].string in LOADERS
-                )
                 prefix = re.match(r"[A-Za-z]*", tok.string)
                 fstring = prefix is not None and "f" in prefix.group().lower()
             regions.append(_Region(offset(tok.start), offset(tok.end), forced, fstring))
+        elif depth == 0 and tok.type == tokenize.OP:
+            if tok.string in "([{":
+                called = tok.string == "(" and last and last[-1].type == tokenize.NAME
+                brackets.append([last[-1].string if called else None, 0, None])
+            elif tok.string in ")]}" and brackets:
+                brackets.pop()
+            elif tok.string == "," and brackets:
+                brackets[-1][1:] = [int(brackets[-1][1] or 0) + 1, None]
+            elif tok.string == "=" and brackets and len(last) == 2 and last[1].type == tokenize.NAME and last[0].string in ("(", ","):
+                brackets[-1][2] = last[1].string  # f(name=...): a keyword argument
         if tok.type not in trivia:
             last = [*last[-1:], tok]
     return _Code(

@@ -209,6 +209,33 @@ def test_text_occurrences_are_the_package_or_the_name(text: str, expected: str) 
     assert rewrite(text + "\n", AMBIGUOUS, python=True).text == expected + "\n"
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("m = importlib.import_module(name='myapp')", "m = importlib.import_module(name='my_game')"),
+        ("m = importlib.import_module('.core', 'myapp')", "m = importlib.import_module('.core', 'my_game')"),
+        ("m = importlib.import_module('.core', package='myapp')", "m = importlib.import_module('.core', package='my_game')"),
+        ("s = importlib.util.find_spec('.core', 'myapp')", "s = importlib.util.find_spec('.core', 'my_game')"),
+        ("f = resources.files(package='myapp')", "f = resources.files(package='my_game')"),
+        ("f = resources.files(anchor='myapp')", "f = resources.files(anchor='my_game')"),
+        ("t = resources.read_text('myapp', 'data.txt')", "t = resources.read_text('my_game', 'data.txt')"),
+        ("t = resources.open_binary('myapp', 'img.png')", "t = resources.open_binary('my_game', 'img.png')"),
+        ("d = pkgutil.get_data('myapp', 'data.txt')", "d = pkgutil.get_data('my_game', 'data.txt')"),
+        ("g = runpy.run_module('myapp')", "g = runpy.run_module('my_game')"),
+        ("g = runpy.run_module(mod_name='myapp', run_name='myapp')", "g = runpy.run_module(mod_name='my_game', run_name='My-Game')"),
+        ("t = resources.read_text('myapp', 'about myapp')", "t = resources.read_text('my_game', 'about My-Game')"),  # the resource: text
+        ("print(import_module, 'myapp')", "print(import_module, 'My-Game')"),  # not a call of it
+        ("x = f(importlib.import_module('a'), 'myapp')", "x = f(importlib.import_module('a'), 'My-Game')"),  # after the call closed
+        ("d = {'myapp': 1}[importlib.import_module('myapp').x]", "d = {'My-Game': 1}[importlib.import_module('my_game').x]"),
+    ],
+)
+def test_module_name_arguments_of_loader_calls_get_the_package(text: str, expected: str) -> None:
+    """A display name is not a module name: import_module(name=...), the package argument of
+    import_module/find_spec, files(package=...), the resources functions, pkgutil.get_data and
+    runpy.run_module get the package, like the first argument of import_module always did."""
+    assert rewrite(text + "\n", AMBIGUOUS, python=True).text == expected + "\n"
+
+
 def test_fstrings_tell_fields_from_text() -> None:
     src = 'import myapp\nprint(f"{myapp.core} {{myapp}}: myapp")\n'
     out = rewrite(src, AMBIGUOUS, python=True)

@@ -318,11 +318,12 @@ name). What changes:
 - `src/<pkg>/` moves to the new package (the name in lower case, `_` for `-`).
 - The Python files of `src/` and `tests/`: the imports of the package and the names bound to
   them (a local variable of the same name is left alone and reported). Strings, comments and
-  other text files there: package paths, dotted names, `-m` arguments and `pkg:function`
-  references get the package; titles and other prose get the name. String prefixes and escapes
-  are never the name (an app named `f`, `n` or `r` keeps `f"..."`, `"\n"` and `b"\r"`); a name
-  right after a backslash in a raw string or a path (`r"\d"`, `r"src\alpha"`) is reported, not
-  changed.
+  other text files there: package paths, dotted names, `-m` arguments, `pkg:function`
+  references and module-name arguments (`import_module("<pkg>")`, `resources.files(package=...)`,
+  `pkgutil.get_data`, `runpy.run_module`) get the package; titles and other prose get the name.
+  String prefixes and escapes are never the name (an app named `f`, `n` or `r` keeps `f"..."`,
+  `"\n"` and `b"\r"`); a name right after a backslash in a raw string or a path (`r"\d"`,
+  `r"src\alpha"`) is reported, not changed.
 - `pytemplate.toml`: `app.name` and every package reference (`compile.modules`, `exclude`,
   `forbid_imports`, the mypy overrides, `hidden_imports`, `exclude_modules`, the wheel entry,
   `src/<pkg>/` paths and `<pkg>.<module>` names); other mentions are reported, among them file

@@ -831,8 +831,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     right after the package itself (`src/pkg/pkg`, `src\pkg\pkg`: a submodule). When the
     old name equals the old package but the new name differs from the new package (`alpha` ->
     `My-Game` / `my_game`): paths, dotted names, `pkg:main`, "package"/"module",
-    `import`/`from`, `-m` and `import_module`-like calls get the package; titles, other prose
-    and artifact names (`alpha.exe`, `alpha-cpython-exe`) get the name.
+    `import`/`from`, `-m` and the module-name arguments of loader calls get the package
+    (`LOADERS`: the name and package of `import_module`/`find_spec`, `__import__`, `files` and
+    the other importlib.resources functions, `pkgutil.get_data`, `runpy.run_module`; positional
+    or as a `MODULE_ARGUMENTS` keyword, tracked per open bracket: `files(package="alpha")` once
+    got the display name, which is no module name); titles, other prose and artifact names
+    (`alpha.exe`, `alpha-cpython-exe`) get the name.
   - `pytemplate.toml`: always by context (`contextual`, even when the new name is a package
     name). A path there is the package only right inside `src/` (`_after_src`: `src/alpha/data`
     moves with the folder; `tools/alpha.py`, `assets/alpha.ico` and, for an app named deploy,
