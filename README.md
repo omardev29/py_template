@@ -374,6 +374,8 @@ Console app: `src/myapp/core/bench.py` (compiled) and `src/myapp/app.py` (output
 
 ### raylib
 PyPy by default (its JIT also speeds up the cffi calls), with a core that mypyc can compile.
+raylib publishes no PyPy wheel for Apple Silicon (macOS arm64): there, switch the project to
+CPython and mypyc once with `./deploy mode cpython --supports cpython,mypyc`.
 
 - **Always `import raylib as rl`**, never pyray in loops: pyray wraps every call in
   Python (~700 ns vs ~100 ns). `compile.forbid_imports` prevents it in compiled code.

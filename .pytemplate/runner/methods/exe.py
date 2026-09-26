@@ -12,7 +12,7 @@ from pathlib import Path
 from .. import envs, mypyc, ui, upx
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
-from ..project import BUILD, IS_WINDOWS, ROOT
+from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT
 
 
 def _console(req: BuildRequest) -> bool:
@@ -118,7 +118,8 @@ def _flet_pack(req: BuildRequest) -> Path:
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
-    onefile = _onefile(req)
+    # flet pack refuses --onedir on macOS ("not supported"): there it always builds a .app bundle
+    onedir = not _onefile(req) and not IS_MACOS
     argv: list[str | Path] = [
         "flet", "pack", stage / "main.py",
         "-y",
@@ -126,7 +127,7 @@ def _flet_pack(req: BuildRequest) -> Path:
         "--distpath", work / "dist",
         "--product-name", cfg.app.name,
     ]
-    if not onefile:
+    if onedir:
         argv.append("--onedir")
     for h in _hidden(req, stage):
         argv += ["--hidden-import", h]
@@ -138,7 +139,7 @@ def _flet_pack(req: BuildRequest) -> Path:
     size, size_env = size_args(cfg)
     argv += [f"--pyinstaller-build-args=--optimize={cfg.deploy.optimize}"]
     argv += [f"--pyinstaller-build-args={a}" for a in size]
-    if not onefile:
+    if onedir:
         argv.append("--pyinstaller-build-args=--contents-directory=.")
     argv += cfg.deploy.exe.extra_args + req.extra
     envs.uv_run(envs.tool_env(cfg), argv, cwd=work, extra_env=size_env)

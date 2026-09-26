@@ -492,6 +492,7 @@ def cmd_shell_setup(cfg: Config, args: list[str]) -> int:
 TESTS: dict[str, str] = {"T1": "argv", "T2": "exit", "T3": "cwd", "T4": "shx", "T5": "path", "T6": "stdin", "T7": "hints"}
 BASE_ARGS = ("plain", "with space", "", "back\\slash", "tail\\", "\u00fcn\u00ef", "--flag=x", "-v")
 EXTRA_ARGS = ('q"uote', "*", "$HOME", "a'b", "--")
+PS_ARGS = ("~", "~/x", "~\\x")  # PowerShell 7 expands these in unquoted native arguments
 MSYSTEMS = ("MSYS", "UCRT64", "MINGW64", "CLANG64", "CLANGARM64")
 POSIX_INTERPRETERS: dict[str, tuple[str, ...]] = {
     "bash": ("--norc", "--noprofile"),
@@ -800,6 +801,8 @@ def argset(sh: Shell) -> tuple[str, ...]:
     """T1 arguments this shell must pass through unchanged (cmd lines cannot carry `%!"^`)."""
     if sh.family == "cmd" or (sh.family == "nu" and IS_WINDOWS):
         return BASE_ARGS
+    if sh.family == "powershell":
+        return BASE_ARGS + EXTRA_ARGS + PS_ARGS
     return BASE_ARGS + EXTRA_ARGS
 
 

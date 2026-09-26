@@ -426,8 +426,10 @@ check("debug adapter and launch.json", function()
   end
   local cfgs = require("dap.ext.vscode").getconfigs(root .. "/.vscode/launch.json")
   assert(#cfgs >= 2 and cfgs[1].type == "debugpy", vim.inspect(cfgs))
+  -- nvim-dap lifts only this OS's block; the other OSes' blocks stay (and are ignored)
+  local os_key = pt.is_win and "windows" or (vim.fn.has("mac") == 1 and "osx" or "linux")
   for _, c in ipairs(cfgs) do
-    assert(not c.windows and not c.linux and not c.osx, "OS block not lifted: " .. c.name)
+    assert(not c[os_key], "OS block not lifted: " .. c.name)
   end
   local provider = dap.providers.configs.pytemplate
   assert(provider and #provider(0) == 0, "the pytemplate provider must stay empty at the root")

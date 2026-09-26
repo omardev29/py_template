@@ -38,7 +38,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: Extra shells
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
@@ -57,7 +57,7 @@ jobs:
         run: ./deploy selftest --shells
       - name: User-style invocations
         run: |
-          for s in /bin/sh bash dash zsh; do "$s" ./deploy help >/dev/null && echo "$s ok"; done
+          for s in /bin/sh bash dash zsh; do "$s" ./deploy help >/dev/null || exit; echo "$s ok"; done
           (cd src && ../deploy help >/dev/null)
           (cd /tmp && "$GITHUB_WORKSPACE/deploy" help >/dev/null)
           env -u UV PATH=/usr/bin:/bin ./deploy help >/dev/null
@@ -73,7 +73,7 @@ jobs:
     steps:
       - run: git config --global core.autocrlf input
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: uv also in %USERPROFILE%\.local\bin (the launchers' fallback discovery, T5)
         shell: pwsh
         run: New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null; Copy-Item (Get-Command uv).Source "$HOME\.local\bin\"
@@ -105,7 +105,7 @@ jobs:
         shell: msys2 {0}
         run: |
           if command -v uv; then echo "uv unexpectedly on PATH"; exit 1; fi
-          for m in MSYS UCRT64 MINGW64 CLANG64; do MSYSTEM=$m bash -lc './deploy help >/dev/null' && echo "$m ok"; done
+          for m in MSYS UCRT64 MINGW64 CLANG64; do MSYSTEM=$m bash -lc './deploy help >/dev/null' || exit; echo "$m ok"; done
           dash ./deploy help >/dev/null
           (cd src && ../deploy help >/dev/null)
           rc=0; out=$(env -u UV USERPROFILE=/nonexistent LOCALAPPDATA=/nonexistent PATH=/usr/bin ./deploy help 2>&1 </dev/null) || rc=$?
@@ -124,7 +124,7 @@ jobs:
     continue-on-error: true  # optional: WSL setup on hosted runners is slow and sometimes flaky
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
       - uses: Vampire/setup-wsl@v7
         with: {distribution: Ubuntu-24.04, additional-packages: curl dash zsh}
       - shell: wsl-bash {0}

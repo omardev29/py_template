@@ -41,7 +41,7 @@ from typing import Any
 from . import proc, ui
 from .cmd_build import COMPAT
 from .config import BACKENDS, METHODS, Config
-from .project import CONFIG_FILE, ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, host_os, user_path, venv_python
+from .project import CONFIG_FILE, ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, host_arch, host_os, user_path, venv_python
 from .ui import DeployError
 
 DEFAULT_PRESETS = ("script", "raylib", "flet")
@@ -64,6 +64,12 @@ SMOKE: dict[str, tuple[tuple[str, ...], str]] = {
 # What the app prints when its core really is the mypyc binary (not the .py fallback)
 COMPILED_MARK = {"script": "mypyc (compiled)", "raylib": "mypyc/"}
 SMOKE_METHODS = ("exe", "portable", "pyz", "wheel", "nuitka")  # `flet build`: files only
+# Backends a preset cannot install on a host: (preset, "<os>-<arch>") -> {backend: reason}.
+# The project is switched off them (`mode`) before setup; render.ci_workflow leaves the same
+# ones out of the generated CI matrix.
+HOST_GAPS: dict[tuple[str, str], dict[str, str]] = {
+    ("raylib", "macos-aarch64"): {"pypy": "raylib publishes no PyPy wheels for macOS arm64"},
+}
 
 
 # --- planning (pure: unit-tested) --------------------------------------------------------------
@@ -89,6 +95,7 @@ class Host:
     display: str = ""  # why a GUI window cannot open here ("" = it can)
     gui_wrap: tuple[str, ...] = ()  # argv prefix for GUI runs (xvfb-run on a headless Linux)
     flet_build: str = ""  # why `flet build` cannot run here ("" = it can)
+    arch: str = ""  # x86_64 | aarch64 (uv names; "" = unknown)
 
 
 @dataclass(frozen=True)
@@ -181,6 +188,12 @@ def pypy_round_trip(info: PresetInfo, opts: Options) -> list[Step]:
     ]
 
 
+def host_gaps(info: PresetInfo, host: Host) -> dict[str, str]:
+    """Return the preset's backends this host cannot install, with the reason."""
+    gaps = HOST_GAPS.get((info.name, f"{host.os}-{host.arch}"), {})
+    return {b: why for b, why in gaps.items() if b in info.supported}
+
+
 def plan(info: PresetInfo, opts: Options, host: Host) -> list[Step]:
     """Return every step (row) for one preset, in order."""
     p = info.name
@@ -188,14 +201,19 @@ def plan(info: PresetInfo, opts: Options, host: Host) -> list[Step]:
         Step(p, "new", "new", timeout=TIMEOUTS["new"], required=True),
         Step(p, "verify copy", "verify", timeout=TIMEOUTS["verify"]),
         _deploy(p, "render --check", ("render", "--check")),
-        _deploy(p, "setup", ("setup",), required=True),
-        _deploy(p, "doctor", ("doctor",)),
     ]
-    backends = [b for b in info.supported if not opts.backends or b in opts.backends]
+    gaps = host_gaps(info, host)
+    keep = [b for b in info.supported if b not in gaps]
+    if gaps:
+        # `mode` BACKEND also moves the active backend off a gap (raylib's is pypy)
+        steps.append(_deploy(p, f"mode --supports {','.join(keep)}", ("mode", keep[0], "--supports", ",".join(keep)), required=True))
+    steps += [_deploy(p, "setup", ("setup",), required=True), _deploy(p, "doctor", ("doctor",))]
+    backends = [b for b in keep if not opts.backends or b in opts.backends]
     targets = backends if opts.backends else ["all"]
     for verb in ("check", "test"):
         steps += [_deploy(p, f"{verb} {t}", (verb, t)) for t in targets]
     steps += [run_step(info, b, host) for b in backends]
+    steps += [Step(p, f"{b} (every step)", "deploy", skip=why, backend=b) for b, why in gaps.items() if not opts.backends or b in opts.backends]
     for b in backends:
         for method, reason in build_methods(info, b, opts, host):
             build = f"build {b} {method}"
@@ -204,7 +222,7 @@ def plan(info: PresetInfo, opts: Options, host: Host) -> list[Step]:
             )
             if not reason and not info.gui and method in SMOKE_METHODS:
                 steps.append(Step(p, f"smoke {b} {method}", "smoke", timeout=TIMEOUTS["smoke"], after=build, expect=expected_output(p, b), backend=b, method=method))
-    if opts.full:
+    if opts.full and "pypy" not in gaps:
         steps += pypy_round_trip(info, opts)
     return steps
 
@@ -262,7 +280,9 @@ def scrub_env(environ: Mapping[str, str], drop_dirs: Sequence[str] = ()) -> dict
 def find_artifact(dist: Path, app: str, backend: str, method: str) -> Path | None:
     """Return the non-empty output dir of a build: dist/<app>-<backend>-<method>[-<platform key>]."""
     stem = f"{app}-{backend}-{method}"
-    candidates = sorted(p for p in dist.glob(f"{stem}-*") if p.is_dir()) if method in ("portable", "flet") else [dist / stem]
+    candidates = [dist / stem]
+    if method in ("portable", "flet"):  # portable with runtime = "system" has no -<key> suffix
+        candidates = sorted(p for p in dist.glob(f"{stem}-*") if p.is_dir()) + candidates
     return next((c for c in candidates if c.is_dir() and any(c.iterdir())), None)
 
 
@@ -318,7 +338,7 @@ def detect_host(gui: str) -> Host:
             display = "no display (DISPLAY unset) and no xvfb-run"
     elif gui == "auto" and os_name != "linux" and os.environ.get("CI"):
         display = "CI runner without an OpenGL 3.3 context (--gui on forces it)"
-    return Host(os_name, display, wrap, flet_build_reason(os_name))
+    return Host(os_name, display, wrap, flet_build_reason(os_name), host_arch())
 
 
 def default_base() -> Path:

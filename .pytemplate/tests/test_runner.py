@@ -82,6 +82,13 @@ def test_set_value_keeps_comments() -> None:
 # --- render ------------------------------------------------------------------------------------
 
 
+def test_ci_workflow_leaves_out_an_os_without_backends() -> None:
+    raylib = render.ci_workflow(make({"app": {"preset": "raylib"}, "backend": {"active": "pypy", "supported": ["cpython", "pypy", "mypyc"]}}))
+    assert 'backends: "cpython mypyc"' in raylib.split("macos-latest", 1)[1].split("\n", 2)[1]
+    only_pypy = render.ci_workflow(make({"app": {"preset": "raylib"}, "backend": {"active": "pypy", "supported": ["pypy"]}}))
+    assert "macos-latest" not in only_pypy and only_pypy.count('backends: "pypy"') == 2
+
+
 def test_managed_block_bounds_cpython_minor() -> None:
     block = render.managed_block(make({}))
     assert "python_full_version < '3.15'" in block
