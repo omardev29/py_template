@@ -237,13 +237,17 @@ def _names(items: Any) -> set[str]:
     return {_norm_name(r) for r in items if isinstance(r, str)} if isinstance(items, list) else set()
 
 
-def _declared(group: str | None) -> set[str]:
-    """The requirement names of [project] dependencies (group None) or of a dependency group."""
+def _declared_requirements(group: str | None) -> list[str]:
+    """The requirements of [project] dependencies (group None) or of a dependency group."""
     data = _read_toml(PYPROJECT, "pyproject.toml")
     table = data.get("project") if group is None else data.get("dependency-groups")
-    if not isinstance(table, dict):
-        return set()
-    return _names(table.get("dependencies" if group is None else group))
+    items = table.get("dependencies" if group is None else group) if isinstance(table, dict) else None
+    return [r for r in items if isinstance(r, str)] if isinstance(items, list) else []
+
+
+def _declared(group: str | None) -> set[str]:
+    """The requirement names of [project] dependencies (group None) or of a dependency group."""
+    return _names(_declared_requirements(group))
 
 
 def _declared_anywhere() -> set[str]:
@@ -651,10 +655,25 @@ class InitPlan:
     pins: dict[str, str]  # tested versions of the packages uv.lock does not have yet (constraints)
 
 
-def _dropped(old: list[str], new: list[str], declared: set[str]) -> list[str]:
-    """The old preset's requirements that init removes: not in the new preset, still declared."""
+def _requirement_key(req: str) -> str:
+    """A requirement as uv compares it: the name normalized, no blanks."""
+    m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)(.*)", req, re.S)
+    return _norm_name(m.group(1)) + re.sub(r"\s+", "", m.group(2)) if m else req.strip()
+
+
+def _dropped(old: list[str], new: list[str], added: list[str], declared: list[str]) -> list[str]:
+    """The requirements of one group (`declared`: what pyproject.toml lists there) that init
+    removes before the new preset's are added: the old preset's that the new one does not have,
+    and every one the new preset adds (`added`, both groups) in another form. A pin left in
+    place breaks the resolving `uv add`: flet-cli==1.0.0 in the dev group (a flet project with
+    [preset.flet] version = "1.0.0") pins flet==1.0.0, so adding flet==1.0.1 had no solution."""
     keep = {_norm_name(r) for r in new}
-    return sorted((r for r in old if _norm_name(r) not in keep and _norm_name(r) in declared), key=_norm_name)
+    gone = {_norm_name(r) for r in old} - keep
+    again = {_norm_name(r): _requirement_key(r) for r in added}
+    return sorted(
+        (r for r in declared if _norm_name(r) in gone or again.get(_norm_name(r), _requirement_key(r)) != _requirement_key(r)),
+        key=_norm_name,
+    )
 
 
 def plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> InitPlan:
@@ -695,8 +714,8 @@ def plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> Ini
         files=files,
         cfg=new_cfg,
         pyproject=text,
-        drop=_dropped(old_deps, new_deps, _declared(None)),
-        drop_dev=_dropped(old_dev, new_dev, _declared("dev")),
+        drop=_dropped(old_deps, new_deps, [*new_deps, *new_dev], _declared_requirements(None)),
+        drop_dev=_dropped(old_dev, new_dev, [*new_deps, *new_dev], _declared_requirements("dev")),
         add=new_deps,
         add_dev=new_dev,
         pins={n: v for n, v in constraints(preset).items() if n not in locked},
@@ -784,9 +803,9 @@ def _swap_dependencies(plan: InitPlan, undo: _Undo) -> None:
     env = envs.env_vars(envs.tool_env(plan.cfg))
     # --frozen: only pyproject.toml changes; the next resolution sees every removal at once
     if plan.drop:
-        proc.run([uv, "remove", "--frozen", *(_norm_name(r) for r in plan.drop)], env=env)
+        proc.run([uv, "remove", "--frozen", *sorted({_norm_name(r) for r in plan.drop})], env=env)
     if plan.drop_dev:
-        proc.run([uv, "remove", "--frozen", "--dev", *(_norm_name(r) for r in plan.drop_dev)], env=env)
+        proc.run([uv, "remove", "--frozen", "--dev", *sorted({_norm_name(r) for r in plan.drop_dev})], env=env)
     pins: list[str] = []
     if plan.pins:  # the versions the template was tested with, for this resolution only
         path = BUILD / "init" / CONSTRAINTS

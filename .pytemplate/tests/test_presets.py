@@ -1184,6 +1184,40 @@ def test_init_converts_the_project(fake: Fake, preset: str) -> None:
         assert pinned.read_text(encoding="utf-8").splitlines() == [f"{n}=={v}" for n, v in sorted(pins.items())]
 
 
+def test_init_from_a_flet_project_of_another_version_removes_its_pins_first(fake: Fake) -> None:
+    """A flet project whose [preset.flet] version = "1.0.0" is applied: `new --preset flet` ran a
+    resolving `uv add flet==1.0.1 flet-desktop==1.0.1` while the dev group still pinned
+    flet-cli==1.0.0 (which pins flet==1.0.0): no solution, and new failed. Every pin the new
+    preset adds in another form now leaves pyproject.toml first (uv remove --frozen)."""
+    data = tomllib.loads(presets.skeleton("flet", "myapp")["pytemplate.toml"].decode("utf-8"))
+    data["preset"] = {"flet": {"version": "1.0.0"}}
+    cfg = _config(data)
+    pyproject = FAKE_PYPROJECT.replace('"rich>=15.0.0"', '"flet==1.0.0",\n    "flet-desktop == 1.0.0"').replace('"pytest>=9.0.0",', '"pytest>=9.0.0",\n    "flet-cli==1.0.0",')
+    (fake.root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    version = presets.default_options("flet")["version"]
+    assert version != "1.0.0"
+    plan = presets.plan_init(cfg, "flet", "Other", force=True)
+    assert plan.drop == ["flet==1.0.0", "flet-desktop == 1.0.0"] and plan.drop_dev == ["flet-cli==1.0.0"]
+    presets.init(cfg, "flet", "Other", force=True)
+    uv = [c[1:] for c in fake.calls]
+    assert uv[0] == ["remove", "--frozen", "flet", "flet-desktop"]
+    assert uv[1] == ["remove", "--frozen", "--dev", "flet-cli"]
+    assert uv[2][:2] == ["add", "--no-sync"] and uv[2][-2:] == [f"flet=={version}", f"flet-desktop=={version}"]
+    assert uv[3][:3] == ["add", "--no-sync", "--dev"] and uv[3][-1] == f"flet-cli=={version}"
+    assert uv[4] == ["lock"]
+
+
+def test_dropped_keeps_what_the_new_preset_adds_unchanged() -> None:
+    added = ["flet==1.0.1", "flet-desktop==1.0.1", "flet-cli==1.0.1"]
+    declared = ["mypy-extensions>=1.1.0", "Flet == 1.0.1", "flet_desktop==1.0.0", "rich>=15"]
+    # rich: the old preset's, gone; flet_desktop: another pin; Flet == 1.0.1: the same requirement
+    assert presets._dropped(["rich>=15"], added[:2], added, declared) == ["flet_desktop==1.0.0", "rich>=15"]
+    assert presets._dropped(["rich>=15"], ["rich>=15"], [], declared) == []  # the same preset: nothing
+    assert presets._dropped([], [], added, ["pytest>=9", "flet-cli==1.0.0; sys_platform != 'emscripten'"]) == [
+        "flet-cli==1.0.0; sys_platform != 'emscripten'"
+    ]
+
+
 def test_init_removes_the_old_preset_first_and_adds_the_new_one(fake: Fake) -> None:
     presets.init(fake.cfg, "raylib", None, force=False)
     uv = [c[1:] for c in fake.calls]

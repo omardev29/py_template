@@ -1670,7 +1670,10 @@ Per method:
   uses it too), and the text is split on `\n` only (a U+2028 inside a TOML string is not a
   line break). `--dry-run __init` prints the plan (`cmd_mode._plan_init`).
   `presets.init` then (1) writes `pyproject.toml` and runs `uv remove --frozen` (no
-  resolution) for the old preset's requirements, `uv add --no-sync [--constraints]` for the
+  resolution) for the old preset's requirements and every declared one the new preset adds in
+  another form (`presets._dropped`: a `flet-cli==1.0.0` left in the dev group of a flet project
+  with `[preset.flet] version = "1.0.0"` made the resolving `uv add flet==1.0.1` fail), `uv add
+  --no-sync [--constraints]` for the
   new ones and `uv lock`: the only step that needs the network; a resolved `uv.lock` in which a
   package depends on the project itself (`presets._self_dependents`, section 15.1) is refused
   there, before any file of the skeleton is written; (2) renames `src/ tests/
@@ -2577,9 +2580,11 @@ uv:
   `test_runner.py::test_managed_block_bounds_cpython_minor`. Goes: never.
 - **`uv add` resolves each change alone** (LIMITATION): `flet-cli==V` pins `flet==V`, so adding
   the new flet to one group had no solution. Fix: `uv add`/`remove --frozen`, then one `uv lock`
-  (`cmd_apply.apply`; `presets.init` removes the old preset's with `--frozen`; 5.8, 11). Test:
-  `test_apply.py::test_uv_frozen_edits_only_pyproject`, `test_apply_flet_version_change`. Goes:
-  never.
+  (`cmd_apply.apply`; `presets.init` first removes with `--frozen` the old preset's and every pin
+  the new one adds in another form, `presets._dropped`; 5.8, 11). Test:
+  `test_apply.py::test_uv_frozen_edits_only_pyproject`, `test_apply_flet_version_change`,
+  `test_presets.py::test_init_from_a_flet_project_of_another_version_removes_its_pins_first`.
+  Goes: never.
 - **uv resolves a dependency of a dependency named like the project to the project itself**
   (DEFECT): a direct self-dependency is refused ("self-dependencies are not permitted"), but in a
   project named `mdurl` markdown-it-py's `mdurl~=0.1` was satisfied by the project (0.1.0):
