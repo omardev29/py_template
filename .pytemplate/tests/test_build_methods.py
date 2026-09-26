@@ -226,8 +226,15 @@ def _flet_pack(sandbox: Path, monkeypatch: pytest.MonkeyPatch, cfg: Config, back
     app = fake_app(sandbox / "payload", cfg.pkg)
 
     def effect(args: list[str], cwd: Path | None) -> None:
+        # What flet pack 1.0.1 writes: PyInstaller's output into <cwd>/<--distpath>, then (Linux)
+        # a desktop entry next to it whose Exec is the absolute path of the executable
         assert cwd is not None
-        (cwd / "dist" / cfg.app.name).mkdir(parents=True)  # what flet pack writes into its cwd
+        dist = cwd / args[args.index("--distpath") + 1]
+        name = cfg.app.name
+        (dist / name).mkdir(parents=True)
+        (dist / name / name).write_bytes(b"\x7fELF")
+        if not windows and not macos:
+            (dist / f"{name}.desktop").write_text(f'[Desktop Entry]\nType=Application\nExec="{dist / name / name}"\n', encoding="utf-8")
 
     rec = Recorder(effect)
     monkeypatch.setattr(exe, "IS_WINDOWS", windows)
@@ -261,6 +268,56 @@ def test_flet_pack_onedir_windows_is_flat(sandbox: Path, monkeypatch: pytest.Mon
 def test_flet_pack_macos_is_never_onedir(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     argv = _flet_pack(sandbox, monkeypatch, _flet_cfg(), "cpython", windows=False, macos=True).argv
     assert "--onedir" not in argv and not [a for a in argv if "--contents-directory" in a]
+
+
+def test_flet_pack_desktop_entry_names_the_shipped_executable(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # flet pack writes the Linux desktop entry after PyInstaller, with an absolute Exec built from
+    # --distpath: that pointed into .build/flet-pack/<b>/dist, which the build then moved to
+    # dist/ (the entry launched nothing). The output folder itself is the distpath now.
+    cfg = _flet_cfg()
+    _flet_pack(sandbox, monkeypatch, cfg, "cpython", windows=False, macos=False)
+    out = sandbox / "dist" / "fletdemo-cpython-exe"
+    entry = (out / "fletdemo.desktop").read_text(encoding="utf-8")
+    executable = Path(re.search(r'^Exec="(.*)"$', entry, re.MULTILINE).group(1))  # type: ignore[union-attr]
+    assert executable.is_file() and executable.parent.parent == out
+
+
+def test_flet_pack_cleans_pyinstallers_cache(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # PyInstaller's binary cache (global, keyed without the UPX level) handed back binaries
+    # packed at another deploy.upx.level: the plain exe build passes --clean, flet pack did not
+    argv = _flet_pack(sandbox, monkeypatch, _flet_cfg(), "cpython", windows=True, macos=False).argv
+    assert "--pyinstaller-build-args=--clean" in argv
+
+
+@pytest.mark.parametrize("method", ["exe", "flet pack", "nuitka"])
+def test_an_output_in_use_is_a_clear_error_before_the_packager_runs(sandbox: Path, monkeypatch: pytest.MonkeyPatch, method: str) -> None:
+    # Windows refuses to delete a running exe or a loaded DLL: rebuilding while the previous
+    # build ran gave an "internal runner error" traceback (after Nuitka's minutes of work)
+    cfg = _flet_cfg() if method == "flet pack" else make({})
+    name = {"exe": "myapp-cpython-exe", "flet pack": "fletdemo-cpython-exe", "nuitka": "myapp-cpython-nuitka"}[method]
+    out = sandbox / "dist" / name
+    (out / "sub").mkdir(parents=True)
+    (out / "sub" / "app.exe").write_bytes(b"MZ")
+    real = shutil.rmtree
+
+    def locked(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == out:
+            raise PermissionError(13, "The process cannot access the file because it is being used by another process", str(out / "sub" / "app.exe"))
+        real(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", locked)
+    started: list[list[str]] = []
+    monkeypatch.setattr(envs, "uv_run", lambda env, argv, **k: started.append([str(a) for a in argv]))
+    monkeypatch.setattr(envs, "uv", lambda env, argv, **k: started.append([str(a) for a in argv]))
+    monkeypatch.setattr(exe, "IS_WINDOWS", True)
+    monkeypatch.setattr(nuitka, "IS_WINDOWS", True)
+    app = fake_app(sandbox / "payload", cfg.pkg)
+    module = nuitka if method == "nuitka" else exe
+    with pytest.raises(DeployError) as e:
+        module.build(BuildRequest(cfg, "cpython", "nuitka" if method == "nuitka" else "exe", app))
+    assert f"dist{os.sep}{name}" in str(e.value) or f"dist/{name}" in str(e.value)
+    assert "still running" in str(e.value) and "app.exe" in str(e.value)
+    assert started == []  # refused before the packager ran
 
 
 @pytest.mark.parametrize(("console", "expected"), [("auto", False), ("yes", True), ("no", False)])

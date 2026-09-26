@@ -1381,7 +1381,10 @@ Formats:
   symlinked file once (a bundled runtime's `bin/python3 -> python3.14`).
 - Output: `dist_path(req, suffix)` = `dist/<app.name>-<backend>-<method><suffix>`; portable
   with a bundled runtime adds `-<target key>`, flet adds `-<target>`. The CI template hard-codes
-  `dist/<NAME>-<BUILD_BACKEND>-pyz/<NAME>.pyz`: it is coupled to `BuildRequest.out_name`.
+  `dist/<NAME>-<BUILD_BACKEND>-pyz/<NAME>.pyz`: it is coupled to `BuildRequest.out_name`. exe,
+  flet pack and nuitka delete the previous output with `common.remove_output` BEFORE the
+  packager runs: a file Windows keeps (the app still running) is a `DeployError` (exit 1, "Is
+  the app still running?"), never a traceback after minutes of work.
 - Work dirs live under `.build/<name>/<backend>` (`exe-stage`, `pyinstaller`, `flet-pack`,
   `pyz`, `wheel`, `nuitka-stage`, `nuitka`, `flet-build`); portable builds straight into `dist/`.
 - Target keys: `^(cp|pp)(\d)(\d+)-(windows|linux|macos)-(x86_64|aarch64)$`
@@ -1417,7 +1420,11 @@ Per method:
   `deploy.exclude_modules`; `--strip`), `--clean`, `--log-level=WARN` unless `-v`, `--hidden-import` for
   mypyc, `--add-data "<src>:<dest>"` (`:` is PyInstaller's documented separator). The flet
   preset uses `flet pack` instead (`methods/exe._flet_pack`): it runs from its own cwd
-  `.build/flet-pack/<b>` because `flet pack -y` wipes `<cwd>/build` and the distpath; onedir
+  `.build/flet-pack/<b>` because `flet pack -y` wipes `<cwd>/build` and the distpath, which is
+  the final `dist/<n>-<b>-exe` itself (on Linux flet pack writes `<n>.desktop` after PyInstaller,
+  its absolute `Exec` built from `--distpath`: a build in `.build` moved to `dist/` shipped an
+  entry that launched nothing); PyInstaller gets `--clean` through
+  `--pyinstaller-build-args` as in the plain build (the UPX level, below); onedir
   uses `--contents-directory=.` on Windows only (on Linux the executable `dist/<n>/<n>` would be
   a FILE where the package folder `<pkg>/` of the mypyc extensions must go when
   `app.name == pkg`, the default; Linux keeps PyInstaller's `_internal/`); macOS never gets
@@ -2835,9 +2842,11 @@ PyInstaller:
   `.so` files crash). Fix: `exe.size_args` passes `--noupx`, downloads nothing and warns (10).
   Test: `test_build_methods.py::test_exe_size_args_skip_upx_off_windows`. Goes: never.
 - **Its UPX step takes no level** (LIMITATION): PyInstaller always adds `--lzma`, and its binary
-  cache reused another level's output. Fix: the level in the `UPX` variable (`upx.env_value`),
-  `--clean` (10). Test: `test_upx.py::test_level_flags_and_pyinstaller_env`,
-  `test_build_methods.py::test_exe_size_args_use_upx_on_windows`. Goes: never.
+  cache (global, keyed without the level) reused another level's output. Fix: the level in the
+  `UPX` variable (`upx.env_value`), `--clean` (`exe.build`, and `exe._flet_pack` through
+  `--pyinstaller-build-args`) (10). Test: `test_upx.py::test_level_flags_and_pyinstaller_env`,
+  `test_build_methods.py::test_exe_size_args_use_upx_on_windows`,
+  `test_flet_pack_cleans_pyinstallers_cache`. Goes: never.
 - **No PyPy** (LIMITATION, PyInstaller and Nuitka): Fix: `cmd_build.COMPAT` refuses exe, nuitka
   and flet with pypy; portable is PyPy's standalone route (10). Test:
   `test_build_methods.py::test_build_refuses_methods_without_pypy`,
@@ -2891,11 +2900,14 @@ Flet (flet, flet-desktop, flet pack, flet build):
   never.
 - **`flet pack` options** (LIMITATION): `-y` wipes `<cwd>/build` and the distpath, `--onedir` is
   refused on macOS (always a `.app`), it adds `--noconsole` unless `--debug-console` has a
-  value, and each `--pyinstaller-build-args` value is one argument. Fix: `exe._flet_pack` runs
-  in `.build/flet-pack/<b>`, never passes `--onedir` on macOS, maps `deploy.exe.console` to
+  value, each `--pyinstaller-build-args` value is one argument, and on Linux it writes a
+  desktop entry whose `Exec` is the absolute executable path under `--distpath`. Fix:
+  `exe._flet_pack` runs in `.build/flet-pack/<b>` with the final `dist/` folder as
+  `--distpath`, never passes `--onedir` on macOS, maps `deploy.exe.console` to
   `--debug-console=true`, passes `--python-option=X utf8` as one item (10). Test:
   `test_build_methods.py::test_flet_pack_macos_is_never_onedir`,
-  `test_flet_pack_console_and_utf8` (every `_flet_pack` test checks the cwd). Goes: never.
+  `test_flet_pack_console_and_utf8` (every `_flet_pack` test checks the cwd),
+  `test_flet_pack_desktop_entry_names_the_shipped_executable`. Goes: never.
 - **PyInstaller's flat onedir puts the executable where the package folder goes** (LIMITATION):
   with `--contents-directory=.` on Linux, `dist/<n>/<n>` is a FILE where the folder `<pkg>/`
   must go when `app.name == pkg` (the default). Fix: flat only on Windows (`exe._flet_pack`,
@@ -3388,6 +3400,12 @@ Windows:
   13.1). Test: `test_build_methods.py::test_pyz_repairs_an_incomplete_cache`,
   `test_e2e_run.py::test_move_retries_a_locked_folder`,
   `test_e2e_run.py::test_run_logged_timeout_kills_the_whole_tree`. Goes: never.
+- **A running program's files cannot be deleted** (LIMITATION): rebuilding an exe, flet pack or
+  nuitka output while the previous build ran raised PermissionError in the middle of deleting
+  it (a runner traceback, for nuitka after minutes of work). Fix: `common.remove_output` deletes
+  the old output before the packager runs and turns the error into a clear one (exit 1, 10).
+  Test: `test_build_methods.py::test_an_output_in_use_is_a_clear_error_before_the_packager_runs`.
+  Goes: never.
 - **The classic console needs ANSI turned on** (LIMITATION): and the `os.system("")` trick
   started a cmd.exe on every run. Fix: `ui.enable_vt_mode` (`SetConsoleMode`, 5.3). Test:
   `test_paths.py::test_ui_never_spawns_cmd_for_colors`,

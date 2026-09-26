@@ -13,6 +13,7 @@ from .. import envs, mypyc, ui, upx
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
 from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT
+from .common import remove_output
 
 
 def _console(req: BuildRequest) -> bool:
@@ -107,28 +108,34 @@ def build(req: BuildRequest) -> Path:
         argv += ["--hidden-import", h]
     size, size_env = size_args(cfg)
     argv += size + _data_args(req, stage) + _icon_args(req) + cfg.deploy.exe.extra_args + req.extra
-    if out.exists():
-        shutil.rmtree(out)
+    remove_output(out)
     envs.uv_run(envs.tool_env(cfg), argv, extra_env=size_env)
     result = out / (cfg.app.name + (".exe" if IS_WINDOWS else "")) if onefile else out / cfg.app.name
     return result if result.exists() else out
 
 
 def _flet_pack(req: BuildRequest) -> Path:
-    """Run `flet pack` from its own folder: it removes <cwd>/build and the distpath without asking (-y)."""
+    """Run `flet pack` from its own folder: it removes <cwd>/build and the distpath without asking (-y).
+
+    The distpath is the final output folder: flet pack writes the Linux desktop entry after
+    PyInstaller with an absolute Exec built from it, which a later move would leave pointing at
+    nothing.
+    """
     cfg = req.cfg
     stage = _stage(req)
     work = BUILD / "flet-pack" / req.backend
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
+    out = dist_path(req)
+    remove_output(out)  # flet pack's own -y removal ignores errors: a running app is refused here
     # flet pack refuses --onedir on macOS ("not supported"): there it always builds a .app bundle
     onedir = not _onefile(req) and not IS_MACOS
     argv: list[str | Path] = [
         "flet", "pack", stage / "main.py",
         "-y",
         "--name", cfg.app.name,
-        "--distpath", work / "dist",
+        "--distpath", out,
         "--product-name", cfg.app.name,
     ]
     if onedir:
@@ -144,7 +151,9 @@ def _flet_pack(req: BuildRequest) -> Path:
     if cfg.deploy.exe.icon:
         argv += ["--icon", str(ROOT / cfg.deploy.exe.icon)]
     size, size_env = size_args(cfg)
-    argv += [f"--pyinstaller-build-args=--optimize={cfg.deploy.optimize}"]
+    # --clean as in the plain PyInstaller build: PyInstaller's global binary cache is keyed
+    # without the UPX level, so it would hand back binaries packed at another deploy.upx.level
+    argv += ["--pyinstaller-build-args=--clean", f"--pyinstaller-build-args=--optimize={cfg.deploy.optimize}"]
     # UTF-8 as in development, like the plain PyInstaller build (one argv item: flet pack
     # hands each --pyinstaller-build-args value to PyInstaller unchanged)
     argv.append("--pyinstaller-build-args=--python-option=X utf8")
@@ -156,9 +165,5 @@ def _flet_pack(req: BuildRequest) -> Path:
         argv.append("--pyinstaller-build-args=--contents-directory=.")
     argv += cfg.deploy.exe.extra_args + req.extra
     envs.uv_run(envs.tool_env(cfg), argv, cwd=work, extra_env=size_env)
-    out = dist_path(req)
-    if out.exists():
-        shutil.rmtree(out)
-    shutil.move(str(work / "dist"), str(out))
     ui.info("Flet: the Flutter client is inside the executable (it is not downloaded on first startup)")
     return out

@@ -338,6 +338,28 @@ def requirements_digest(requirements: Path) -> str:
     return hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest()[:16]
 
 
+def remove_output(out: Path) -> None:
+    """Delete a previous build output before the packager runs (exe, flet pack, nuitka).
+
+    Windows refuses to delete a running executable or a loaded DLL: rebuilding while the last
+    build runs is then a clear error (exit 1) before the minutes of work, never a traceback.
+    """
+    if not out.exists() and not out.is_symlink():
+        return
+    try:
+        if out.is_dir() and not out.is_symlink():
+            shutil.rmtree(out)
+        else:
+            out.unlink()
+    except OSError as e:
+        where = f" ({e.filename})" if e.filename else ""
+        raise DeployError(
+            f"cannot replace {rel(out)}: {e.strerror or e}{where}.\n"
+            "  Is the app still running? Close it and build again (the next build replaces what is left)",
+            1,
+        ) from None
+
+
 def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:
     """Copy the payload. extensions=False keeps only the .py files (pure fallback)."""
     if dest.exists():

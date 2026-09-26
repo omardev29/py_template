@@ -26,6 +26,7 @@ from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
 from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT, rel
 from ..ui import DeployError
+from .common import remove_output
 
 # Nuitka is not in uv.lock (`uv run --with`), so it is pinned here to keep builds reproducible:
 # the latest release on PyPI in September 2026. Bump it deliberately, together with NUITKA_PYTHON.
@@ -289,6 +290,8 @@ def build(req: BuildRequest) -> Path:
     argv += optimization_args(cfg)  # before extra_args and the command line: a later --lto wins
     argv += cfg.deploy.nuitka.extra_args + req.extra
 
+    out = dist_path(req)
+    remove_output(out)  # before minutes of work: a running build of it is refused now
     ui.info("  Nuitka compiles everything to C: the first build takes several minutes")
     if cfg.deploy.nuitka.pgo:
         ui.info(PGO_NOTE)
@@ -301,9 +304,6 @@ def build(req: BuildRequest) -> Path:
             e.code,
         ) from None
 
-    out = dist_path(req)
-    if out.exists():
-        shutil.rmtree(out)
     produced = sorted(work.iterdir()) if work.is_dir() else []
     if onefile:
         exe = next((p for p in produced if p.is_file() and p.name.startswith(cfg.app.name)), None)

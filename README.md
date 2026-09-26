@@ -682,7 +682,13 @@ folder on every start; `onedir` starts faster.
 The flet preset uses `flet pack` instead: PyInstaller plus Flet's Flutter client inside the
 executable (with plain PyInstaller the app would download about 40 MB at first start). Its
 onedir build is a flat folder on Windows (`<name>.exe` next to its files) and keeps
-PyInstaller's `_internal/` on Linux; on macOS `flet pack` always builds an `.app`.
+PyInstaller's `_internal/` on Linux; on macOS `flet pack` always builds an `.app`. On Linux it
+also writes `<name>.desktop` into `dist/<name>-<backend>-exe/`, a desktop entry whose `Exec` is
+the absolute path of the executable there: copy it to `~/.local/share/applications/` to get a
+launcher (edit `Exec` if you move the folder).
+
+A rebuild first deletes the previous `dist/<name>-<backend>-exe/` (or `-nuitka/`); while that
+app still runs, Windows refuses, and the build stops at once with that message (exit 1).
 
 ### portable
 
