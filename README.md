@@ -414,7 +414,7 @@ file must be UTF-8 (a BOM is fine); `schema = 1` is the layout this runner reads
 | `deploy.nuitka.pgo_args` | `[]` | the app's arguments for the profiling run |
 | `deploy.nuitka.extra_args` | `[]` | appended to the Nuitka command |
 | `deploy.flet.target` | `"host"` | `host`, `windows`, `macos`, `linux`, `apk`, `aab`, `ipa` or `web` |
-| `deploy.flet.cleanup` | `true` | `--cleanup-app --cleanup-packages`: no tests or docs in the bundle |
+| `deploy.flet.cleanup` | `true` | `--cleanup-app --cleanup-packages`: no tests or docs in the bundle (`false` keeps them) |
 | `deploy.flet.exclude` | `[]` | app files or folders `flet build` leaves out |
 | `deploy.flet.extra_args` | `[]` | appended to the `flet build` command |
 | `deploy.upx.enabled` | `false` | pack the binaries with UPX ([Binary size](#binary-size)) |
@@ -825,10 +825,13 @@ about 7 minutes, the next ones about 3.
 - It embeds exactly the `python.cpython` minor, so the mypyc extensions work in desktop apps.
   Mobile and web apps cannot load extensions: with the mypyc backend they get the `.py`.
 - `flet build` ignores `uv.lock`: the runner pins the locked versions in its build project. It
-  reads `[tool.flet]` of `pyproject.toml`, where `org`, `company` and `copyright` are
-  placeholders that end up in the app; `[tool.flet.app] path` is always `src`.
-- `cleanup` (default `true`): `--cleanup-app --cleanup-packages`; `exclude`: app files left out;
-  `extra_args` go to `flet build`.
+  reads `[tool.flet]` and the `[project] description` of `pyproject.toml`, where `org`,
+  `company` and `copyright` are placeholders that end up in the app; `[tool.flet.app] path` is
+  always `src`.
+- `cleanup` (default `true`): `--cleanup-app --cleanup-packages`. `false` turns both off: Flet
+  cleans the packages unless told not to, so the build project gets `app = false` and
+  `packages = false` in `[tool.flet.cleanup]` (values your own `[tool.flet.cleanup]` sets stay).
+  `exclude`: app files left out; `extra_args` go to `flet build`.
 
 ### Binary size
 

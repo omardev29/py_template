@@ -23,7 +23,7 @@ from typing import Any
 
 from .. import envs, mypyc, proc, render, ui, upx
 from ..cmd_build import BuildRequest, dist_path
-from ..config import Config
+from ..config import Config, toml_value
 from ..project import BUILD, IS_WINDOWS, PYPROJECT, SRC, host_os
 from ..ui import DeployError
 
@@ -62,7 +62,10 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     [tool.flet.app] path is always the staged app folder (flet looks for <work>/<path>/<module>.py
     and aborts, after installing Flutter, when it is elsewhere); every other key is kept.
     requires-python pins the minor of uv.lock and the mypyc build: with ">=3.13" flet bundled
-    its newest Python (3.14), which silently ignored the cp313 extensions.
+    its newest Python (3.14), which silently ignored the cp313 extensions. [project] description
+    is kept (flet puts it in the app's metadata). With [deploy.flet] cleanup = false,
+    [tool.flet.cleanup] app and packages default to false: flet cleans the packages unless told
+    not to, and its --cleanup-* flags have no negative form.
     """
     project = data["project"]
     tool_flet = copy.deepcopy(data.get("tool", {}).get("flet") or {})
@@ -72,10 +75,18 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     if app.get("path", STAGE_APP) != STAGE_APP:
         ui.warn(f"[tool.flet.app] path = {app['path']!r} is ignored: ./deploy build stages the app in {STAGE_APP}/")
     app["path"] = STAGE_APP
+    if not cfg.deploy.flet.cleanup:
+        cleanup = tool_flet.setdefault("cleanup", {})
+        if not isinstance(cleanup, dict):
+            raise DeployError("pyproject.toml: [tool.flet] cleanup must be a table ([tool.flet.cleanup])")
+        cleanup.setdefault("app", False)
+        cleanup.setdefault("packages", False)
+    description = project.get("description")
     lines = [
         "[project]",
         f"name = {json.dumps(project['name'])}",
         f"version = {json.dumps(project['version'])}",
+        *([f"description = {toml_value(description)}"] if isinstance(description, str) else []),
         f'requires-python = "=={cfg.python.cpython}.*"',
         "dependencies = [",
         *[f"    {json.dumps(p)}," for p in pins],

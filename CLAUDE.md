@@ -968,7 +968,7 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   Nuitka's profiling run starts the app while building, so the build waited for its window to be
   closed, and the data files were not in place yet; mypyc and macOS are refused at build time,
   section 10), `[deploy.flet] target cleanup exclude extra_args` (`target` is not validated;
-  `cleanup` = `--cleanup-app --cleanup-packages`), `[deploy.upx] enabled level lzma exclude
+  `cleanup` = `--cleanup-app --cleanup-packages`, `false` = neither), `[deploy.upx] enabled level lzma exclude
   path` (`level` in `1..9|best|brute|ultra-brute`; `path` relative to the project root).
 - `[hooks]`: `pre_commit` (apply/setup install the git hook when true and remove pytemplate's
   own when false; section 5.6).
@@ -1615,9 +1615,13 @@ Per method:
   ignored with a warning: flet looked for `<work>/<path>/main.py` and aborted after installing
   Flutter) and `requires-python = "==<python.cpython>.*"` (flet bundles the HIGHEST Python of
   its manifest matching it: `>=3.13` gave 3.14 and the cp313 mypyc extensions were silently not
-  loaded; a minor its manifest lacks now fails loudly). Mobile/web targets (`apk aab ipa
+  loaded; a minor its manifest lacks now fails loudly), plus `[project] description` (flet puts
+  it in the app's metadata; `config.toml_value` writes it). Mobile/web targets (`apk aab ipa
   ios-simulator web`) cannot load extensions: a mypyc backend ships the `.py`. Desktop embeds
-  the `python.cpython` minor, so the mypyc `.pyd`/`.so` files work. `cleanup`/`exclude` map to `--cleanup-app --cleanup-packages` / `--exclude`;
+  the `python.cpython` minor, so the mypyc `.pyd`/`.so` files work. `cleanup = true` passes
+  `--cleanup-app --cleanup-packages`; `cleanup = false` writes `app = false` and `packages =
+  false` into the build's `[tool.flet.cleanup]` unless the project sets them (flet_cli cleans
+  the packages by default and its flags have no negative form); `exclude` maps to `--exclude`;
   with UPX the finished folder goes through `upx.pack_tree` (desktop targets only). Verified on
   Windows (Developer Mode on): Flet 1.0.1 downloads ITS pinned Flutter (3.44.8, ~3 GB in
   `~/flutter`, ignoring a scoop Flutter) and a Python build (`~/.flet`); first build ~7 min,
@@ -2922,6 +2926,12 @@ Flet (flet, flet-desktop, flet pack, flet build):
   path` aborted after installing Flutter. Fix: `methods.flet.build_pyproject` forces
   `methods.flet.STAGE_APP` with a warning (10). Test:
   `test_build_methods.py::test_flet_build_pyproject_points_at_the_staged_app`. Goes: never.
+- **`flet build` cleans the packages unless told not to** (LIMITATION): its packages setting of
+  `[tool.flet.cleanup]` defaults to true and `--cleanup-packages` has no negative form, so
+  `[deploy.flet] cleanup = false` (no flags) still cleaned them. Fix: `methods.flet.build_pyproject` writes `app` and
+  `packages` false into the build's `[tool.flet.cleanup]` unless the project sets them (10).
+  Test: `test_build_methods.py::test_flet_build_cleanup_false_turns_flets_own_cleanup_off`.
+  Goes: never.
 - **Flutter needs Developer Mode on Windows (symlinks), and mobile and web targets load no
   extension** (LIMITATION): Fix: `methods.flet._developer_mode` is checked by
   `methods.flet.check_options` before the checks and the payload (also in `--dry-run`); mobile

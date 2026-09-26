@@ -2519,6 +2519,42 @@ def test_flet_build_argv_stage_and_pyproject(sandbox: Path, monkeypatch: pytest.
     assert data["tool"]["flet"] == {"org": "com.example", "app": {"path": "src", "module": "main"}}
 
 
+def test_flet_build_cleanup_false_turns_flets_own_cleanup_off(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # flet_cli 1.0.1 cleans the packages by default (cleanup.packages defaults to true, and
+    # --cleanup-packages has no negative form): cleanup = false only dropped --cleanup-app
+    import tomllib
+
+    from runner.methods import flet
+
+    _, rec = _flet_build(sandbox, monkeypatch, cleanup=False)
+    argv = rec.calls[-1][0]
+    assert "--cleanup-app" not in argv and "--cleanup-packages" not in argv
+    work = sandbox / "build" / "flet-build" / "cpython"
+    tool = tomllib.loads((work / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["flet"]
+    assert tool["cleanup"] == {"app": False, "packages": False} and tool["org"] == "com.example"
+    # What the project's own [tool.flet.cleanup] says stays (flet reads it after the flags)
+    off = make({"deploy": {"flet": {"cleanup": False}}})
+    data = tomllib.loads('[project]\nname = "a"\nversion = "1"\n\n[tool.flet.cleanup]\npackages = true\n')
+    assert tomllib.loads(flet.build_pyproject(off, data, []))["tool"]["flet"]["cleanup"] == {"packages": True, "app": False}
+    with pytest.raises(DeployError, match=r"\[tool.flet.cleanup\]"):
+        flet.build_pyproject(off, tomllib.loads('[project]\nname = "a"\nversion = "1"\n\n[tool.flet]\ncleanup = true\n'), [])
+    # cleanup = true (the default) passes the flags and adds no table
+    assert "cleanup" not in tomllib.loads(flet.build_pyproject(make({}), data | {"tool": {}}, []))["tool"]["flet"]
+
+
+def test_flet_build_keeps_the_project_description() -> None:
+    # flet build takes the app's description from [project] description: it was dropped, so
+    # the built app described itself as ""
+    import tomllib
+
+    from runner.methods import flet
+
+    text = 'Desktop app: "quoted", \\\\ back, caf\u00e9 \U0001f600 and DEL \u007f'
+    data = {"project": {"name": "a", "version": "1", "description": text}}
+    assert tomllib.loads(flet.build_pyproject(make({}), data, []))["project"]["description"] == text
+    assert "description" not in tomllib.loads(flet.build_pyproject(make({}), {"project": {"name": "a", "version": "1"}}, []))["project"]
+
+
 def test_flet_build_pins_the_python_minor() -> None:
     # flet_cli picks the HIGHEST stable Python of its manifest that matches requires-python:
     # ">=3.13" bundled 3.14 and the cp313 mypyc extensions were silently not loaded
