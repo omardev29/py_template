@@ -305,7 +305,7 @@ def cmd_render(cfg: Config, args: list[str]) -> int:
     for path in edited:
         ui.warn(f"hand-edited (left untouched without --force): {path}")
     if render.pyproject_outdated(cfg):
-        ui.warn("pyproject.toml does not match pytemplate.toml: ./deploy lock")
+        ui.warn("pyproject.toml does not match pytemplate.toml: ./deploy apply")
         if ns.check:
             return 1
     if ns.check and (changed or edited):

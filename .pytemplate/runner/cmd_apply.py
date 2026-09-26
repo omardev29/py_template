@@ -326,6 +326,22 @@ def missing_package(cfg: Config) -> tuple[str, str] | None:
     )
 
 
+def _project_name_text(cfg: Config, project: Project) -> str:
+    """app.name and src/<pkg>/ agree, pyproject.toml [project] name does not: the new pyproject.toml
+    text with that line fixed (and the name in the preset block, such as [tool.flet] product).
+    Planned before anything is written: a [project] table it cannot edit is a refusal."""
+    old = project.name
+    if old is not None and _APP_NAME.fullmatch(old):
+        edit = rename._plan_pyproject(ROOT, rename.Names(old, cfg.app.name))
+        if edit is not None:
+            return edit.new
+    try:
+        text = (ROOT / PYPROJECT.name).read_text(encoding="utf-8-sig")
+        return presets.set_project_name(text, cfg.app.name)
+    except OSError as e:
+        raise DeployError(f"pyproject.toml cannot be read: {e.strerror or e}") from None
+
+
 # --- the plan ------------------------------------------------------------------------------------
 
 
@@ -337,7 +353,7 @@ class Plan:
     deps: DepChanges
     rename_plan: rename.Plan | None = None
     new_cfg: Config | None = None  # the configuration after the rename (compile.modules...)
-    set_name: bool = False  # only pyproject.toml [project] name differs
+    name_text: str | None = None  # only pyproject.toml [project] name differs: its new text
     pypy_new: bool = False
     generated: dict[str, str] = field(default_factory=dict)
 
@@ -348,6 +364,7 @@ def make_plan(cfg: Config) -> Plan:
     applied = applied_state(cfg, project)
     if applied.preset != cfg.app.preset:
         raise DeployError(preset_message(cfg, applied.preset))
+    render.check_pyproject(cfg)  # broken markers, a managed key outside them...: before any change
     plan = Plan(cfg, project, applied, dependency_changes(cfg, applied, project))
     plan.pypy_new = cfg.pypy_enabled and not project.pypy_locked
     if applied.renamed_from is not None:
@@ -356,7 +373,7 @@ def make_plan(cfg: Config) -> Plan:
         plan.rename_plan = rename.plan(ROOT, applied.renamed_from, cfg.app.name, generated=plan.generated)
         plan.new_cfg = rename.validate_config(plan.rename_plan.config.new)
     elif project.name != cfg.app.name and rename.package_dir(_src(), cfg.pkg) is not None:
-        plan.set_name = True
+        plan.name_text = _project_name_text(cfg, project)
     return plan
 
 
@@ -378,44 +395,89 @@ def _dirty(plan: Plan, command: str, force: bool) -> None:
 # --- hook, references ------------------------------------------------------------------------------
 
 
-def _hook_state(cfg: Config) -> str | None:
-    """classify() of pytemplate's hook in the default hooks folder (None: not in git)."""
+OURS = ("installed", "outdated")  # hooks.classify: pytemplate's hook of this project
+
+
+def _repo() -> hooks.Repo | str | None:
+    """The git repository of the project: None outside git, git's refusal (dubious ownership, a
+    broken .git...) as one line."""
     try:
-        repo = hooks.find_repo(ROOT)
-    except DeployError:
+        return hooks.find_repo(ROOT)
+    except hooks.NotInGit:
         return None
-    return hooks.classify(repo.default_dir / hooks.HOOK, repo)
+    except DeployError as e:
+        return " ".join(line.strip() for line in str(e).splitlines())
+
+
+def _hook_state(cfg: Config) -> str | None:
+    """classify() of the pre-commit hook in the default hooks folder (None: not in git, or git
+    refuses the repository)."""
+    repo = _repo()
+    return hooks.classify(repo.default_dir / hooks.HOOK, repo) if isinstance(repo, hooks.Repo) else None
+
+
+# What is in the hooks folder when apply leaves it alone (summary and --dry-run)
+_LEFT_ALONE = {
+    "foreign": "another tool's hook: left alone (./deploy hooks install --force chains both)",
+    "calls": "a hook that runs ./deploy hooks run: left alone",
+    "other": "another project's hook of this repository: left alone (./deploy hooks install --force runs both)",
+}
 
 
 def _apply_hook(cfg: Config) -> str:
-    """Install the hook when hooks.pre_commit, remove pytemplate's own when false."""
-    before = _hook_state(cfg)
-    if before is None:
+    """Install the hook when hooks.pre_commit (hooks.ensure_installed: never fails), remove
+    pytemplate's own when false (another tool's is never touched). Return the summary line."""
+    repo = _repo()
+    if repo is None:
         return "not a git work tree: nothing to do"
+    if isinstance(repo, str):
+        ui.warn(f"git pre-commit hook not checked: {repo}")
+        return "not checked: git refuses the repository (see above)"
+    target = repo.default_dir / hooks.HOOK
+    before = hooks.classify(target, repo)
     if cfg.hooks.pre_commit:
         hooks.ensure_installed(cfg, ROOT)
-    elif before in ("installed", "outdated"):
-        repo = hooks.find_repo(ROOT)
-        ui.ok(hooks.uninstall(repo))
-    after = _hook_state(cfg)
-    if before != after:
-        return "installed" if after in ("installed", "calls") else "removed (hooks.pre_commit = false)" if after in ("missing", "foreign") else str(after)
-    return "unchanged"
+    elif before in OURS:
+        try:
+            ui.ok(hooks.uninstall(repo))
+        except OSError as e:
+            ui.warn(f"could not remove the git pre-commit hook: {e} (./deploy hooks uninstall)")
+            return "not removed (see above)"
+    after = hooks.classify(target, repo)
+    if after == "installed" and before != "installed":
+        return "updated" if before == "outdated" else "installed"
+    if before in OURS and after not in OURS:
+        return "removed (hooks.pre_commit = false)"
+    if after in _LEFT_ALONE:
+        return _LEFT_ALONE[after]
+    if repo.custom_hooks_path and cfg.hooks.pre_commit:
+        return "core.hooksPath is set: nothing installed (./deploy hooks status says what to add)"
+    if after == "missing":
+        return "not installed (hooks.pre_commit = false)" if not cfg.hooks.pre_commit else "not installed (see above)"
+    return "already installed" if after == "installed" else "unchanged"
 
 
 def _hook_plan(cfg: Config) -> str:
-    state = _hook_state(cfg)
-    if state is None:
+    """--dry-run: what _apply_hook would do."""
+    repo = _repo()
+    if repo is None:
         return "not a git work tree: nothing to do"
-    if cfg.hooks.pre_commit:
-        return {
-            "missing": "would install the pre-commit hook",
-            "outdated": "would update the pre-commit hook",
-            "foreign": "another tool's hook is installed: left alone (./deploy hooks install --force chains both)",
-        }.get(state, "installed")
-    if state in ("installed", "outdated"):
-        return "would remove pytemplate's pre-commit hook (hooks.pre_commit = false)"
-    return "not installed (hooks.pre_commit = false)"
+    if isinstance(repo, str):
+        return f"not checked: git refuses the repository ({repo})"
+    state = hooks.classify(repo.default_dir / hooks.HOOK, repo)
+    if not cfg.hooks.pre_commit:
+        if state in OURS:
+            return "would remove pytemplate's pre-commit hook (hooks.pre_commit = false)"
+        return _LEFT_ALONE.get(state, "not installed (hooks.pre_commit = false)")
+    if repo.custom_hooks_path:
+        return "core.hooksPath is set: nothing installed (./deploy hooks status says what to add)"
+    if state in _LEFT_ALONE:
+        return _LEFT_ALONE[state]
+    if state == "installed":
+        return "installed"
+    if state == "missing" and repo.ignored():
+        return "not installed: the enclosing git repository ignores this project (./deploy hooks status)"
+    return "would update the pre-commit hook" if state == "outdated" else "would install the pre-commit hook"
 
 
 def _module_exists(src: Path, module: str) -> bool:
@@ -516,18 +578,6 @@ def _read_bytes(path: Path) -> bytes | None:
         return None
 
 
-def _set_project_name(cfg: Config, project: Project) -> None:
-    """app.name and src/<pkg>/ agree, pyproject.toml [project] name does not: fix that line (and
-    the name in the preset block, such as [tool.flet] product)."""
-    old = project.name
-    if old is not None and _APP_NAME.fullmatch(old):
-        edit = rename._plan_pyproject(ROOT, rename.Names(old, cfg.app.name))
-        if edit is not None and edit.new != edit.old:
-            (ROOT / edit.path).write_text(edit.new, encoding="utf-8", newline="\n")
-        return
-    path = ROOT / PYPROJECT.name
-    text = path.read_text(encoding="utf-8-sig")
-    path.write_text(presets.set_project_name(text, cfg.app.name), encoding="utf-8", newline="\n")
 
 
 def _print_plan(plan: Plan, command: str, force: bool) -> None:
@@ -541,7 +591,7 @@ def _print_plan(plan: Plan, command: str, force: bool) -> None:
     if plan.rename_plan is not None:
         n = plan.rename_plan.names
         rows.append(("app.name", f"would rename '{n.old_name}' -> '{n.new_name}' (details below)"))
-    elif plan.set_name:
+    elif plan.name_text is not None:
         rows.append(("app.name", f"would set pyproject.toml [project] name = \"{cfg.app.name}\" (now '{plan.project.name}')"))
     else:
         rows.append(("app.name", f"'{cfg.app.name}' (src/{cfg.pkg}/): unchanged"))
@@ -551,7 +601,7 @@ def _print_plan(plan: Plan, command: str, force: bool) -> None:
         text
         for text, due in (
             ("the managed parts", render.pyproject_outdated(cfg)),
-            ("[project] name", plan.set_name or plan.rename_plan is not None),
+            ("[project] name", plan.name_text is not None or plan.rename_plan is not None),
             ("dependencies", bool(plan.deps)),
         )
         if due
@@ -585,12 +635,19 @@ def cmd_mode_precheck(cfg: Config) -> None:
     _precheck_py311(cfg)
 
 
+def unused_envs(cfg: Config) -> list[Path]:
+    """The .venv* environments of this side that the configuration does not use (.venv-pypy
+    once PyPy left backend.supported, the .venv-jit of an older template...): never deleted."""
+    used = {env.dir for env in cmd_env._envs_for(cfg, "all")}
+    return [d for d in cmd_env._env_dirs() if d not in used and not any(rename.same_file(d, u) for u in used)]
+
+
 def _leftover_note(cfg: Config) -> None:
-    pypy = envs.pypy_env(cfg).dir
-    if not cfg.pypy_enabled and pypy.is_dir():
+    names = [rel(d) for d in unused_envs(cfg)]
+    if names:
         ui.info(
-            f"note: {rel(pypy)} is no longer used (PyPy is not in backend.supported): "
-            "./deploy clean --envs removes the .venv* environments (./deploy setup recreates the ones in use)"
+            f"note: {', '.join(names)} {'is' if len(names) == 1 else 'are'} not used by this configuration: "
+            "./deploy clean --envs removes the .venv* environments (./deploy apply recreates the ones in use)"
         )
 
 
@@ -615,8 +672,8 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
         rename.apply_plan(ROOT, plan.rename_plan)
         cfg = plan.new_cfg  # the renamed pytemplate.toml, validated before anything was written
         summary.append(("app.name", f"renamed '{n.old_name}' -> '{n.new_name}' (src/{cfg.pkg}/)"))
-    elif plan.set_name:
-        _set_project_name(cfg, plan.project)
+    elif plan.name_text is not None:
+        (ROOT / PYPROJECT.name).write_text(plan.name_text, encoding="utf-8", newline="\n")
         summary.append(("app.name", f"pyproject.toml [project] name = \"{cfg.app.name}\""))
 
     pyproject_before = _read_bytes(ROOT / PYPROJECT.name)

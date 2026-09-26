@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import ast
 import bisect
+import contextlib
 import dataclasses
 import functools
 import io
@@ -910,14 +911,36 @@ def _move_dir(root: Path, old_rel: str, new_rel: str) -> None:
 
 
 def apply_plan(root: Path, plan_: Plan) -> None:
-    """Write a plan: move src/<pkg>/ first (the step that can fail on a locked file), then the files."""
+    """Write a plan: move src/<pkg>/ first (the step that can fail on a locked file), then the files.
+
+    A file that cannot be written (read-only, locked by another program) undoes what was already
+    done: the files written so far get their old bytes back and the folder moves back."""
     if plan_.move is not None:
         _move_dir(root, *plan_.move)
-    for f in plan_.changed_files:
-        (root / f.target).write_bytes(f.new)
+    writes: list[tuple[Path, bytes]] = [(root / f.target, f.new) for f in plan_.changed_files]
     for edit in (plan_.config, plan_.pyproject):
         if edit is not None and edit.new != edit.old:
-            (root / edit.path).write_text(edit.new, encoding="utf-8", newline="\n")
+            writes.append((root / edit.path, edit.new.encode("utf-8")))  # LF, no BOM (the runner's own files)
+    done: list[tuple[Path, bytes]] = []
+    for path, data in writes:
+        try:
+            old = path.read_bytes()
+            path.write_bytes(data)
+        except OSError as e:
+            for written, previous in reversed(done):
+                with contextlib.suppress(OSError):
+                    written.write_bytes(previous)
+            undone = "the files written so far were restored"
+            if plan_.move is not None:
+                try:
+                    _move_dir(root, plan_.move[1], plan_.move[0])
+                except DeployError:
+                    undone += f", but {plan_.move[1]}/ could not be moved back to {plan_.move[0]}/ (move it by hand)"
+            raise DeployError(
+                f"rename: could not write {path.relative_to(root).as_posix()}: {e.strerror or e}. The rename was undone "
+                f"({undone}).\n  Close the programs that use it (or make it writable) and try again"
+            ) from None
+        done.append((path, old))
 
 
 # --- checks ----------------------------------------------------------------------------------------
@@ -955,6 +978,8 @@ def check_new_name(cfg: Config, new_name: str, *, who: str = "rename", retry: st
     except DeployError as e:
         reason = str(e).splitlines()[0]
         raise DeployError(f"{who}: {reason}\n  Choose another name: {retry}") from None
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:  # it reads pyproject.toml
+        raise DeployError(f"{who}: pyproject.toml cannot be read as TOML ({e}): fix it first; nothing was changed") from None
     clash = presets._norm_name(new_name)
     if clash in locked_names(ROOT):
         raise DeployError(

@@ -776,7 +776,7 @@ def check_lock(cfg: Config) -> Result:
     """pyproject.toml matches pytemplate.toml and uv.lock matches pyproject.toml (working tree)."""
     hints: list[str] = []
     if render.pyproject_outdated(cfg):
-        hints.append("pyproject.toml does not match pytemplate.toml: ./deploy lock")
+        hints.append("pyproject.toml does not match pytemplate.toml: ./deploy apply")
     code, out = uv_lock_check(cfg)
     if code != 0:
         hints.append(f"uv lock --check: {envs.uv_error(out) or f'exit code {code}'}\n./deploy lock")

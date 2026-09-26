@@ -141,7 +141,7 @@ def _norm_name(req: str) -> str:
 
 
 def _declared(group: str | None) -> set[str]:
-    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))  # an editor or PS 5.1 may add a BOM
     if group is None:
         reqs = data.get("project", {}).get("dependencies", [])
     else:
@@ -172,7 +172,7 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
     pkg = name.replace("-", "_").lower()
     if keyword.iskeyword(pkg):
         raise DeployError(f"the package '{pkg}' would be a Python keyword (`import {pkg}` is a syntax error).\n  Choose another name with --name NAME")
-    if pkg in sys.stdlib_module_names:
+    if shadows_stdlib(pkg):  # every Python the project can run on, not only the runner's
         raise DeployError(f"src/{pkg}/ would shadow the standard library module '{pkg}'.\n  Choose another name with --name NAME")
     clash = _norm_name(name)
     if clash in _dependency_names(cfg, preset):

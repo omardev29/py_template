@@ -963,6 +963,61 @@ def test_a_failed_move_changes_nothing(tmp_path: Path, monkeypatch: pytest.Monke
     assert e.value.code == 2 and _tree(tmp_path) == before
 
 
+def _everything(root: Path) -> dict[str, bytes | None]:
+    return {p.relative_to(root).as_posix(): (p.read_bytes() if p.is_file() else None) for p in sorted(root.rglob("*"))}
+
+
+@pytest.mark.parametrize("fail_at", ["first", "second", "last"])
+def test_a_failed_write_undoes_the_rename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_at: str) -> None:
+    """A file that cannot be written after the move (read-only, locked by an editor) must not leave
+    a half-renamed project: the written files get their bytes back and the folder moves back."""
+    _write_project(tmp_path, "flet", "alpha", crlf=True)
+    before = _everything(tmp_path)
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    total = len(planned.changed_files) + 2  # + pytemplate.toml and pyproject.toml
+    target = {"first": 0, "second": 1, "last": total - 1}[fail_at]
+    real = Path.write_bytes
+    calls: list[Path] = []
+
+    def flaky(self: Path, data: Any) -> int:
+        calls.append(self)
+        if len(calls) - 1 == target:
+            raise PermissionError(13, "Permission denied")
+        return real(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", flaky)
+    with pytest.raises(DeployError, match=r"could not write .*Permission denied\. The rename was undone") as e:
+        rename.apply_plan(tmp_path, planned)
+    monkeypatch.setattr(Path, "write_bytes", real)
+    assert e.value.code == 2
+    assert _everything(tmp_path) == before  # byte for byte, CRLF included
+    assert calls[target].name in {"pyproject.toml", "pytemplate.toml"} or fail_at != "last"
+
+
+def test_a_broken_pyproject_is_a_clear_error_not_a_traceback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    (tmp_path / "pyproject.toml").write_text("[project\n", encoding="utf-8")
+    monkeypatch.setattr(presets, "PYPROJECT", tmp_path / "pyproject.toml")
+    with pytest.raises(DeployError, match="pyproject.toml cannot be read as TOML") as e:
+        rename.check_new_name(_cfg("script"), "beta")
+    assert e.value.code == 2
+
+
+def test_name_checks_tolerate_a_bom_and_do_not_depend_on_the_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "pyproject.toml"
+    target.write_bytes(b'\xef\xbb\xbf[project]\nname = "x"\ndependencies = ["Rich>=13"]\n[dependency-groups]\ndev = ["pytest"]\n')
+    monkeypatch.setattr(presets, "PYPROJECT", target)
+    assert presets._declared(None) == {"rich"} and presets._declared("dev") == {"pytest"}
+    rename.check_new_name(_cfg("script"), "beta")  # a BOM (an editor, PowerShell 5.1) is fine
+    with pytest.raises(DeployError, match="dependency"):
+        rename.check_new_name(_cfg("script"), "rich")
+    monkeypatch.setattr(sys, "stdlib_module_names", frozenset({"json"}))
+    for name in ("compression", "annotationlib", "imp", "distutils"):  # `new` and `__init` too
+        with pytest.raises(DeployError, match="standard library") as e:
+            presets.check_name_free(None, "script", name)
+        assert e.value.code == 2
+
+
 def test_arguments(command_project: Path) -> None:
     cfg = _load(command_project)
     with pytest.raises(DeployError, match=r"unknown argument\(s\): --dry-run") as e:

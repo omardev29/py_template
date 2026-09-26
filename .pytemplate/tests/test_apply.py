@@ -103,7 +103,7 @@ class Project:
             path.write_bytes(data)
         (root / "pyproject.toml").write_text(_pyproject(preset, name), encoding="utf-8", newline="\n")
         (root / ".pytemplate").mkdir(exist_ok=True)
-        for module in (cmd_apply, rename, render, presets, envs, project_module):
+        for module in (cmd_apply, cmd_env, rename, render, presets, envs, project_module):
             monkeypatch.setattr(module, "ROOT", root)
         for module in (render, presets):
             monkeypatch.setattr(module, "PYPROJECT", root / "pyproject.toml")
@@ -634,7 +634,7 @@ def test_a_dropped_backend_leaves_a_note(tmp_path: Path, monkeypatch: pytest.Mon
     project.edit("backend", "supported", ["cpython", "mypyc"])
     assert _run(project) == 0
     err = capsys.readouterr().err
-    assert "note: .venv-pypy is no longer used" in err and "./deploy clean --envs" in err
+    assert "note: .venv-pypy is not used by this configuration" in err and "./deploy clean --envs" in err
     assert (project.root / ".venv-pypy").is_dir()  # never deleted by apply
     assert ["sync", "--locked", "--all-groups"] in uv.calls and "environments     synced .venv\n" in err
 
@@ -726,6 +726,70 @@ def test_missing_package_is_a_warning_not_a_crash(tmp_path: Path, monkeypatch: p
     assert cmd_apply.pending(project.cfg())[0][0].startswith("src/alpha/ does not exist")
 
 
+def test_a_broken_managed_block_is_refused_before_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # render.check_pyproject: the preflight runs before the rename, the uv edits and the lock
+    project, uv = _project(tmp_path, monkeypatch, "raylib")
+    path = project.root / "pyproject.toml"
+    path.write_text(path.read_text(encoding="utf-8").replace("  # <<< pytemplate", ""), encoding="utf-8", newline="\n")
+    project.edit("app", "name", "beta")
+    project.edit("preset.raylib", "package", "raylib_sdl")
+    before = project.snapshot()
+    for dry in (False, True):
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        with pytest.raises(DeployError, match="pytemplate") as e:
+            _run(project)
+        assert e.value.code == 2
+    assert project.snapshot() == before and uv.calls == []
+    assert (project.root / "src" / "alpha").is_dir()
+
+
+def test_a_project_name_that_cannot_be_set_is_refused_before_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, uv = _project(tmp_path, monkeypatch, "flet")
+    path = project.root / "pyproject.toml"
+    path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"\n', "", 1), encoding="utf-8", newline="\n")
+    project.edit("preset.flet", "version", "1.0.0")
+    before = project.snapshot()
+    for dry in (True, False):  # planned: --dry-run says it too, and the real run writes nothing
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        with pytest.raises(DeployError, match=r'could not set \[project\] name = "alpha"') as e:
+            _run(project)
+        assert e.value.code == 2
+    assert project.snapshot() == before and uv.calls == []
+
+
+def test_unused_environments_are_named_never_deleted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    project, _ = _project(tmp_path, monkeypatch, "raylib")  # supports pypy
+    suffix = project_module.ENV_SUFFIX  # WSL on /mnt: the -wsl environments are this side's
+    for name in (".venv", ".venv-pypy", ".venv-jit", ".venv-other-side" + ("" if suffix else "-wsl")):
+        (project.root / (name + suffix if name != ".venv-other-side-wsl" else name)).mkdir()
+    (project.root / ".venv-file").write_text("not an environment", encoding="utf-8")
+    assert [p.name for p in cmd_apply.unused_envs(project.cfg())] == [".venv-jit" + suffix]
+    project.edit("backend", "active", "cpython")
+    project.edit("backend", "supported", ["cpython", "mypyc"])
+    assert [p.name for p in cmd_apply.unused_envs(project.cfg())] == [".venv-jit" + suffix, ".venv-pypy" + suffix]
+    capsys.readouterr()
+    assert _run(project) == 0
+    err = capsys.readouterr().err
+    assert f"note: .venv-jit{suffix}, .venv-pypy{suffix} are not used by this configuration" in err
+    assert (project.root / (".venv-jit" + suffix)).is_dir() and (project.root / (".venv-pypy" + suffix)).is_dir()
+
+
+def test_the_mismatch_hints_name_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`./deploy lock` applies the managed block but not [preset.*]: after a raylib package switch
+    it moved no-build-package to raylib_sdl and kept the raylib dependency. Every hint for a
+    pyproject.toml that does not match pytemplate.toml names apply."""
+    from runner import cmd_mode
+
+    monkeypatch.setattr(render, "pyproject_outdated", lambda cfg: True)
+    monkeypatch.setattr(hooks, "uv_lock_check", lambda cfg: (0, ""))
+    result = hooks.check_lock(_cfg("raylib"))
+    assert result.passed is False and "does not match pytemplate.toml: ./deploy apply" in result.hint and "lock" not in result.hint
+    monkeypatch.setattr(render, "apply", lambda cfg, **kw: ([], []))
+    assert cmd_mode.cmd_render(_cfg("raylib"), ["--check"]) == 1
+    assert "does not match pytemplate.toml: ./deploy apply" in capsys.readouterr().err
+    assert '"pyproject.toml matches pytemplate.toml", "./deploy apply"' in inspect.getsource(cmd_env.cmd_doctor)
+
+
 # --- the git hook ------------------------------------------------------------------------------------
 
 
@@ -760,6 +824,81 @@ def test_the_hook_follows_pre_commit(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert _run(project) == 0
     assert hook.read_text(encoding="utf-8") == "#!/bin/sh\necho mine\n"
     assert not [p for p, _ in cmd_apply.pending(project.cfg()) if "hook" in p]
+
+
+def test_git_refusing_the_repository_is_said_not_hidden(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    project, _ = _project(tmp_path, monkeypatch)
+
+    def refuse(*args: Any, **kwargs: Any) -> hooks.Repo:
+        raise DeployError(f"git cannot use the repository of {project.root}:\n  fatal: detected dubious ownership in repository", 2)
+
+    monkeypatch.setattr(hooks, "find_repo", refuse)
+    assert _run(project) == 0
+    err = capsys.readouterr().err
+    assert "warning: git pre-commit hook not checked: git cannot use the repository" in err and "dubious ownership" in err
+    assert "git hook         not checked: git refuses the repository" in err
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert _run(project) == 0
+    assert "git hook         not checked: git refuses the repository (git cannot use" in capsys.readouterr().err
+    assert not [p for p, _ in cmd_apply.pending(project.cfg()) if "hook" in p]
+
+
+@needs_git
+def test_every_hook_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """What apply does, and what its --dry-run says, for each state of the hooks folder."""
+    project, _ = _project(tmp_path, monkeypatch)
+    _git(project.root, "init", "-q")
+    hook = project.root / ".git" / "hooks" / "pre-commit"
+    ours = hooks.hook_script("./deploy")
+
+    def run(dry: bool) -> str:
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        capsys.readouterr()
+        assert _run(project) == 0
+        out = capsys.readouterr().err
+        return next(line for line in out.splitlines() if line.startswith("  git hook ")).split(None, 2)[2]
+
+    cases = [  # (hooks.pre_commit, hook content or None, dry-run row, real-run row)
+        (True, None, "would install the pre-commit hook", "installed"),
+        (True, ours, "installed", "already installed"),
+        (True, ours.replace("hooks run", "hooks run  "), "would update the pre-commit hook", "updated"),
+        (True, "#!/bin/sh\necho mine\n", "another tool's hook: left alone", "another tool's hook: left alone"),
+        (True, "#!/bin/sh\nsh ./deploy hooks run || exit $?\n", "a hook that runs ./deploy hooks run: left alone", "a hook that runs ./deploy hooks run: left alone"),
+        (False, ours, "would remove pytemplate's pre-commit hook", "removed (hooks.pre_commit = false)"),
+        (False, None, "not installed (hooks.pre_commit = false)", "not installed (hooks.pre_commit = false)"),
+        (False, "#!/bin/sh\necho mine\n", "another tool's hook: left alone", "another tool's hook: left alone"),
+    ]
+    for pre_commit, content, planned, done in cases:
+        project.edit("hooks", "pre_commit", pre_commit)
+        hook.unlink(missing_ok=True)
+        if content is not None:
+            hook.parent.mkdir(parents=True, exist_ok=True)
+            hook.write_text(content, encoding="utf-8")
+        assert run(True).startswith(planned), (pre_commit, content)
+        assert hook.exists() == (content is not None)  # --dry-run: untouched
+        assert run(False).startswith(done), (pre_commit, content)
+        if content is not None and "echo mine" in content:
+            assert hook.read_text(encoding="utf-8") == content  # never someone else's
+    project.edit("hooks", "pre_commit", True)
+    hook.unlink(missing_ok=True)
+    _git(project.root, "config", "core.hooksPath", ".githooks")
+    assert run(True).startswith("core.hooksPath is set: nothing installed")
+    assert run(False).startswith("core.hooksPath is set: nothing installed") and not hook.exists()
+
+
+@needs_git
+def test_a_project_ignored_by_its_enclosing_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    project, _ = _project(tmp_path, monkeypatch)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))  # the enclosing repository is tmp_path itself
+    _git(tmp_path, "init", "-q")
+    (tmp_path / ".gitignore").write_text("p/\n", encoding="utf-8")
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert _run(project) == 0
+    assert "not installed: the enclosing git repository ignores this project" in capsys.readouterr().err
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    assert _run(project) == 0
+    assert "git hook         not installed (see above)" in capsys.readouterr().err
+    assert not (tmp_path / ".git" / "hooks" / "pre-commit").exists()
 
 
 # --- doctor, references, docs ---------------------------------------------------------------------------

@@ -363,7 +363,7 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
             "Move the change into pytemplate.toml (e.g. [vscode] settings) or .pytemplate/templates\n"
             "(./deploy render --diff shows it), or drop it: ./deploy render --force",
         )
-    check(not render.pyproject_outdated(cfg), "pyproject.toml matches pytemplate.toml", "./deploy lock")
+    check(not render.pyproject_outdated(cfg), "pyproject.toml matches pytemplate.toml", "./deploy apply")
     from . import cmd_apply  # lazy: cmd_apply imports this module
 
     cmd_apply.doctor(cfg, check)  # app.name, app.preset, [preset.*], hooks.pre_commit edited but not applied
