@@ -142,8 +142,8 @@ it and move the code over.
 | `doctor` | Checks uv, the environments, the C compiler, the generated files, `pyproject.toml`, `uv.lock`, the changes `apply` has not applied yet, the launchers, the shell, the git hook and Neovim; exit 1 when a line is `[XX]` |
 | `sync [cpython\|pypy\|mypyc\|all]` | `uv sync --locked --all-groups` of one environment or of all (default); it never re-locks |
 | `lock [--upgrade] [--upgrade-package PKG]` | Rewrites the managed parts of `pyproject.toml` and re-locks `uv.lock`; its other arguments go to `uv lock`. When `uv lock` fails or writes nothing (`--check`, `--dry-run`), `pyproject.toml` is put back as it was. It does not apply `[preset.*]`: `apply` does |
-| `add PKG... [--dev\|--group G] [--cpython-only]` | `uv add`, then `uv sync --locked --all-groups` of `.venv`; `--cpython-only` adds the marker `implementation_name == 'cpython'` (C-API libraries that are slow or missing on PyPy) |
-| `remove PKG... [--dev\|--group G]` | `uv remove`, then `uv sync --locked --all-groups` of `.venv` (the packages of every group stay installed) |
+| `add PKG... [--dev\|--group G] [--cpython-only]` | `uv add`, then `uv sync --locked --all-groups` of `.venv`; `--cpython-only` adds the marker `implementation_name == 'cpython'` (C-API libraries that are slow or missing on PyPy). When the sync fails (a package that locks but cannot be built) or is interrupted, `pyproject.toml` and `uv.lock` are put back as they were |
+| `remove PKG... [--dev\|--group G]` | `uv remove`, then `uv sync --locked --all-groups` of `.venv` (the packages of every group stay installed); a failed sync puts `pyproject.toml` and `uv.lock` back, as for `add` |
 | `clean [--envs]` | Deletes `.build/` and `dist/`; `--envs` also this side's `.venv*` environments (`setup` recreates the ones in use) |
 | `hooks [install [--force]\|uninstall\|run\|status]` | The git pre-commit hook ([details](#git-pre-commit-hook)); without an argument, `status` |
 | `mode [BACKEND] [--supports +B\|-B\|B,B...] [--typing auto\|off\|warn\|strict\|mypyc] [--editor pylance\|basedpyright]` | Shows the mode without arguments; otherwise edits `pytemplate.toml` and applies it (re-lock, generated files, a new PyPy environment) |
@@ -172,7 +172,9 @@ for `test` and `check`): to pass such a word to the app, name the backend first
 
 Global options go before the command: `-v` (more detail, such as the full compiler and
 PyInstaller output), `-q` (no progress lines, uv's own included; results, warnings and errors
-still print),
+still print; uv itself has no quiet level that keeps its warnings, so `lock`, `add` and
+`remove` keep uv's whole output, its change summary included, and a uv warning of a sync or a
+run shows only without `-q`),
 `--dry-run` (shows what would change and changes nothing; it ignores `-q`), `--no-render` (does
 not regenerate the generated files first). For example `./deploy --dry-run apply`; after the
 command, `--dry-run` is an error.
@@ -259,7 +261,8 @@ env = { SEED = "42" }
 ```
 
 - `cmd`: the program and its arguments, as a list. Extra arguments (`./deploy gen a b`) are
-  appended unchanged; the task's exit code is the program's.
+  appended unchanged (a `.cmd`/`.bat` program on Windows: see `uv` below); the task's exit code
+  is the program's.
 - `deps`: tasks or `./deploy` commands with their arguments (`"check all"`), run first and in
   order, each once per invocation; the first one that fails stops the task. A task with only
   `deps` (every preset's `ci`) takes no arguments, and `./deploy ci -h` shows its help. Blanks
@@ -274,6 +277,10 @@ env = { SEED = "42" }
 - `uv`: `true` (default) runs `cmd` with `uv run` in that environment; `false` runs the program
   as it is (a `{python}` whose environment does not exist yet is created first; on Windows a
   bare name is looked up on `PATH` with its `.cmd`/`.bat` extensions too, so `npm` works).
+  Windows runs a `.cmd`/`.bat` program (npm, yarn, mvn) through cmd.exe, which parses its
+  arguments again, so there an argument cmd.exe would change is refused (exit 2) instead of
+  reaching the program changed: one with `%`, `"` or a line break, and one with `^ & | < >`
+  and no space (`npm install react@^18` would install `react@18`: cmd.exe drops the `^`).
 - `help`: the line that `./deploy tasks` and `./deploy help` show.
 - `background`: a long-running server (flet's `dev`): the editors start it without waiting.
 

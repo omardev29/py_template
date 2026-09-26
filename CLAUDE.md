@@ -665,8 +665,12 @@ header rules (with detector tests proving each rule fires).
   run` does, and the child is waited for; then `proc.Interrupted(code, signum)` stops the
   command like Ctrl+C: `error: terminated (SIGTERM)`, the child's code, or 128 + N when it
   exited 0. Same conditions (main thread, default handler: `nohup` keeps SIG_IGN). A signal
-  sent to the whole process group reaches the child twice, as with uv itself. Outside a child
-  (in-process work) the default action still ends the runner.
+  sent to the whole process group (`kill -TERM -PGID`) reaches the app more than once: from
+  the group, and again from each process between that passes it on (measured: 3 times through
+  `./deploy` and the inner `uv run`, twice under a plain `uv run`). Not fixable here: a signal's
+  sender does not say whether it hit the group, and a child in a process group of its own
+  would lose the terminal's Ctrl+C. Outside a child (in-process work) the default action still
+  ends the runner.
 - Runner output goes to stderr through `ui` so the app keeps stdout. Exceptions, printed to
   stdout on purpose: `help`, `__probe`, `shell-setup` snippets, and the `--json` reports of
   `selftest --shells` (also with `--list`) and `selftest --e2e`.
@@ -678,8 +682,15 @@ header rules (with detector tests proving each rule fires).
   `ui.step` header goes), the paths `render` lists (`cmd_mode.cmd_render`: outdated, updated,
   would update) and the `render --diff` output (`render.apply`). uv's own progress
   (`Resolved`, `Installed`, `Checked`...) is progress too: under `-q`, `envs.uv` passes
-  `--quiet` to every uv call it echoes (uv still prints its errors and warnings; the output of
-  what `uv run` starts is untouched), never to a captured query the runner reads.
+  `--quiet` to every uv call whose output reaches the terminal (the output of what `uv run`
+  starts is untouched; basedpyright's install step, which echoes no command line, too), never
+  to a captured query the runner reads. uv's `--quiet` also hides uv's warnings and change
+  summaries (uv has no level that keeps them; errors still print), so the uv commands the user
+  drives with their own arguments keep their whole output (`envs.uv(..., quiet=False)`):
+  `./deploy lock ARGS` (`Updated rich v14 -> v15`, what `--dry-run` would change) and the `uv
+  add|remove` step of `add`/`remove` (`does not have an extra named ...`); their sync stays
+  quiet. Limit: a uv warning of a quiet step (a deprecated setting in pyproject.toml) shows
+  only without `-q`.
 - `ui.error` prints `error: ` and `ui.warn` prints `warning: ` (only the prefix is coloured on a
   TTY). The VS Code problem matcher `RULES_RE` and the Neovim parser `tasks.parse_line` depend
   on these exact prefixes and on `str(lintc.Finding)` (`src/...:N: msg`, relative to ROOT): do
@@ -713,7 +724,8 @@ header rules (with detector tests proving each rule fires).
   portable build), never the download), then stops. `report` builds nothing and never opens
   the browser. No success line for a skipped step: `compile`, `report` and `check` print
   `(--dry-run) would ...`/`were not run` instead of their `ok` lines, and `test all` no summary
-  of `[ok]` rows.
+  of `[ok]` rows. A check that fails in a dry run still fails it: `test all` lists the backends
+  that failed theirs (a `compile.exclude` naming nothing) and exits 1, as a real run does.
 - `mode` validates the new `pytemplate.toml` in memory and prints the keys that would change
   (new and current value), whether `pyproject.toml` would be rewritten, `uv.lock` ("would
   re-lock", or a read-only `uv lock --check`), the generated files that would update, the
@@ -1139,7 +1151,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   quotes group, a backslash is a plain character, as in the plugin's `:Deploy`: POSIX shlex
   passed `C:\data\in.txt` as `C:datain.txt`), `cwd` is a folder (not in a dry run),
   `backend = "pypy"` in `backend.supported` (only where its environment is used). `vscode.scan`
-  renders a task whose deps do not parse.
+  renders a task whose deps do not parse. `uv = false` on Windows: a bare program is looked up
+  on the task's PATH with PATHEXT (`npm` -> `npm.cmd`), and a `.cmd`/`.bat` program runs
+  through cmd.exe, which re-parses the `list2cmdline` line: an argument it would change (`%`,
+  `"`, a line break; `^ & | < >` when list2cmdline leaves it unquoted: no space, tab or empty
+  value) is refused with exit 2 (`tasks._batch_problem`), never passed changed
+  (`npm install react@^18` installed react@18).
 - `[preset.<name>]`: option overrides (`config._check_preset_tables`): `<name>` must be a preset
   of this template, and each key and its value type must match that preset's `preset.toml`
   `[options]`, read with `tomllib` (no `presets` import); the script preset has none.
@@ -1312,7 +1329,12 @@ Formats:
   next sync and reaches a fresh clone (an exact sync of the default groups removed it); `uv run`
   syncs inexactly and never removes them. `add`/`remove` take `--dev` or `--group G`, not both,
   and run `uv add|remove --no-sync` (it still re-locks), then `envs.sync` of `.venv`: uv's own
-  sync after `remove` is exact for the default groups and uninstalled every other group.
+  sync after `remove` is exact for the default groups and uninstalled every other group. uv has
+  written pyproject.toml and uv.lock before that sync: when it fails (a package that locks but
+  cannot be built: an sdist that needs a compiler or pg_config) or is interrupted,
+  `cmd_env._add_remove` puts both back byte for byte (`_snapshot`, `_put_back`), as a plain
+  `uv add` reverts its edits when its own sync fails; kept, they made every `uv run --locked`
+  try to build that package again.
 - The oldest supported uv is `envs.MIN_UV` = 0.10.12, read from uv's own download metadata:
   the first uv that downloads `pypy@3.11.15` (0.10.11: "No download found for request");
   CPython 3.14 final needs 0.9.0 (0.8.x silently installs 3.14.0rc2) and `uv export --format
@@ -1424,8 +1446,10 @@ Formats:
   5. With `typing.editor = "basedpyright"`: basedpyright (`BASEDPYRIGHT` pin) on
      `.build/cfg/pyright-<profile>.json` (`cmd_dev._run_basedpyright`). Exit 1 is only a
      warning when the profile is not `blocking`; any other code, or pins uv cannot install
-     (offline, a cold cache: asked first with a quiet `uv run --with ... python -c ""`,
-     because uv then exits 1 as well), fails the check.
+     (offline, a cold cache: asked first with a `uv run --with ... python -c ""` that echoes
+     no command line, because uv then exits 1 as well), fails the check. That step is not
+     captured: on a cold cache it downloads basedpyright and Node.js (tens of MB), and uv's
+     progress shows it (`-q` hides it; once cached it prints nothing).
 - `check all` runs each distinct profile once (cpython and pypy usually share one) and the
   mypyc rules only once, with the strictest profile (`mypyc` when present), so each finding
   appears once in the Problems panel.
@@ -1496,8 +1520,10 @@ Formats:
   `MYPYC_REJECTED` (4, mirrored in `mypyc.py`). When the C build fails (setuptools reports
   every failure as `SystemExit("error: ...")`; a crash of the C step too) it prints the error
   and asks `mypyc_build.missing_compiler` why: the program of the compiler or linker command
-  (`CC`, `LDSHARED`, Python's own `cc`) is not found, or MSVC cannot be set up ->
-  `COMPILER_MISSING` (5), which `mypyc.build` turns into exit 3 (a missing requirement) with
+  (`CC`, `LDSHARED`, Python's own `cc`) is not found, on macOS it is a `/usr/bin` Xcode shim
+  whose developer folder holds no clang (`mypyc_build.xcode_problem`, a mirror of
+  `cmd_env._xcode_problem`: the usual Mac without the Command Line Tools), or MSVC cannot be
+  set up -> `COMPILER_MISSING` (5), which `mypyc.build` turns into exit 3 (a missing requirement) with
   the install hint; any other C failure -> `C_BUILD_FAILED` (6; setuptools' own exit 1 was
   also uv's). Both are mirrored in `mypyc.py`.
   Every spec key it reads must be written by `mypyc.build` (a test parses the script).
@@ -3020,8 +3046,14 @@ uv:
   `envs.uv_run` adds `--project <ROOT>` (7). Test:
   `test_fixes.py::test_uv_run_pins_the_project_outside_the_root`. Goes: never.
 - **`uv sync` is exact for the groups it installs** (LIMITATION): it removed a group added with
-  `./deploy add --group G`. Fix: `envs.sync` passes `--all-groups` (7). Test:
-  `test_envs_core.py::test_sync_installs_every_dependency_group`. Goes: never.
+  `./deploy add --group G`, and so did the sync `uv remove` runs itself (`./deploy remove idna`
+  uninstalled the packages of every non-default group). Fix: `envs.sync` passes `--all-groups`;
+  `cmd_env._add_remove` runs `uv add|remove --no-sync`, then `envs.sync`, and puts
+  pyproject.toml and uv.lock back when that sync fails or is interrupted (uv's own rollback
+  covers only its own sync) (7). Test:
+  `test_envs_core.py::test_sync_installs_every_dependency_group`,
+  `test_remove_keeps_the_packages_of_every_group`,
+  `test_a_failed_sync_puts_pyproject_and_the_lock_back`. Goes: never.
 - **An old uv knows only the interpreters of its release** (LIMITATION): < 0.10.12 cannot
   download `pypy@3.11.15`, 0.8.x installs CPython 3.14.0rc2 without a word, < 0.6.15 has no `uv
   export --format requirements.txt`. Fix: `envs.MIN_UV`, `envs.require_min_uv`,
@@ -3816,8 +3848,10 @@ cmd.exe and CreateProcess (details: section 4.4):
   never.
 - **cmd re-parses `%*`** (LIMITATION, the BatBadBut class): `% ! " ^` and unquoted `& | < >`
   inside arguments do not survive, whatever quoting a CreateProcess caller applies. Fix: no CLI
-  syntax needs them (14); `shells.cmd_quote` for the probes. Test:
-  `test_shells.py::test_cmd_quote`. Goes: never.
+  syntax needs them (14); `shells.cmd_quote` for the probes; a `uv = false` task whose program
+  is a `.cmd`/`.bat` (npm, found through PATHEXT) refuses an argument cmd.exe would change
+  (`tasks._batch_problem`, 6.1). Test: `test_shells.py::test_cmd_quote`,
+  `test_cli_core.py::test_a_batch_file_gets_only_arguments_cmd_passes_unchanged`. Goes: never.
 - **A quoted registry PATH entry splits `call` arguments** (LIMITATION): Fix: `deploy.cmd` keeps
   the value in a variable, drops the quotes, then `call set`. Test:
   `test_launcher_win.py::test_cmd_keeps_the_registry_path_out_of_call_arguments`,
@@ -3940,7 +3974,8 @@ Windows:
 - **CreateProcess tries only `<name>.exe` for a bare program name** (LIMITATION, PATHEXT is a
   shell feature): a `uv = false` task running `npm`, `yarn` or `mvn` (`.cmd` files) failed with
   "program not found" on Windows only. Fix: `tasks.run_task` looks the name up on the task's
-  PATH with PATHEXT, through the standard library's shutil.which (6.1). Test:
+  PATH with PATHEXT, through the standard library's shutil.which; the `.cmd` it finds runs
+  through cmd.exe (the entry "cmd re-parses `%*`" below) (6.1). Test:
   `test_cli_core.py::test_a_bare_program_is_found_with_pathext_on_windows`. Goes: never.
 - **A command line holds 32767 characters** (LIMITATION): Fix: `hooks.ARG_LIMIT` batches file
   arguments (5.6). Test: `test_hooks.py::test_batches`. Goes: never.
@@ -3986,9 +4021,12 @@ macOS:
 - **`/usr/bin/cc`, `gcc` and `clang` exist without the developer tools** (LIMITATION, xcrun
   shims that open an install dialog): Fix: `cmd_env._xcode_problem` (the active developer
   folder must hold a clang: `cmd_env.XCODE_CLANG`, the Command Line Tools or an Xcode.app
-  toolchain), `cmd_nvim.c_compiler` (7, 12.2). Test: `test_envs_core.py::test_c_compiler_rejects_macos_xcode_shims`,
-  `test_cmd_nvim.py::test_c_compiler_skips_the_macos_shims_without_developer_tools`. Goes:
-  never.
+  toolchain), `cmd_nvim.c_compiler`, and after a failed mypyc build `mypyc_build.xcode_problem`
+  (its mirror in the build script, so the missing compiler exits 3) (7, 9, 12.2). Test:
+  `test_envs_core.py::test_c_compiler_rejects_macos_xcode_shims`,
+  `test_cmd_nvim.py::test_c_compiler_skips_the_macos_shims_without_developer_tools`,
+  `test_mypyc_core.py::test_build_script_finds_the_macos_compiler_shims_without_developer_tools`,
+  `test_build_script_reads_the_developer_folder_like_doctor`. Goes: never.
 
 ### 15.2 Our open issues and fragile points
 
@@ -4044,7 +4082,8 @@ Behaviour:
   stdlib renamed) is only caught by `selftest --e2e`; a bundled PyPy portable build is not run
   on CI.
 - Argument limits by design: `deploy.cmd` (and every CreateProcess caller of it) cannot pass
-  `% ! " ^ & | < >`; PowerShell drops a bare `--`; xonsh `-c` exits 1 on any failing command
+  `% ! " ^ & | < >`; a `uv = false` task running a `.cmd`/`.bat` on Windows refuses the
+  arguments cmd.exe would change (6.1); PowerShell drops a bare `--`; xonsh `-c` exits 1 on any failing command
   (the child's real code is in its `CalledProcessError`).
 - `uv build` drops a `.gitignore` into `dist/<n>-<b>-wheel/`.
 - A project inside a bigger git repository (supported: `new` skips `git init`, the hook finds
@@ -4155,7 +4194,8 @@ Code coupling (rename together):
   `lintc.relative_file_at_import` <-> when mypyc builds no shared lib; `mypyc.remove_stale_extensions`
   <-> mypyc's lib names (`<group>__mypyc`, `<module>__mypyc`). `mypyc.MYPYC_REJECTED`,
   `COMPILER_MISSING` and `C_BUILD_FAILED` <-> `tools/mypyc_build.py`; the spec keys the script
-  reads <-> `mypyc.build`;
+  reads <-> `mypyc.build`; `mypyc_build.XCODE_CLANG`/`xcode_problem` <-> `cmd_env.XCODE_CLANG`/
+  `_xcode_problem` (`test_build_script_reads_the_developer_folder_like_doctor`);
   `mypyc_build.extra_cflags`/`compiler_type` <-> the wheel's `SETUP_PY`
   (`test_wheel_setup_py_adds_the_same_flags_as_the_stage`); `mypyc.COMPILER_ENV` <-> the
   variables setuptools' `configure_system` reads.

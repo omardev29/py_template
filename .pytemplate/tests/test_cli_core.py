@@ -1220,6 +1220,39 @@ def test_a_bare_program_is_found_with_pathext_on_windows(rec: Recorder, tmp_path
     assert rec.runs[-1][0] == "npm" and len(looked_up) == count  # POSIX: execvp searches PATH itself
 
 
+@pytest.mark.parametrize(
+    ("arg", "refused"),
+    [
+        ("react@^18", "^"), ("a&b", "&"), ("x|y", "|"), ("<in", "<"), ("out>", ">"),  # unquoted: operators
+        ("%PATH%", "%"), ("50%", "%"), ('say "hi"', '"'), ("a\nb", "\n"),  # quoted or not
+        ("a & b", None), ("x ^ y", None), ("", None), ("--prod", None), ("C:\\a b\\", None),  # list2cmdline quotes these
+    ],
+)
+def test_a_batch_file_gets_only_arguments_cmd_passes_unchanged(
+    rec: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arg: str, refused: str | None
+) -> None:
+    """Windows runs a .cmd/.bat through cmd.exe, which re-parses the command line list2cmdline
+    builds: `./deploy web react@^18` installed react@18 (an unquoted ^ is cmd's escape), `a&b`
+    ran `b`, and %VAR% expands even inside quotes. Such an argument is refused (exit 2) instead
+    of reaching the program changed; one that list2cmdline quotes (a space) is passed."""
+    monkeypatch.setattr(tasks, "IS_WINDOWS", True)
+    monkeypatch.setattr(tasks.shutil, "which", lambda name, mode=0, path=None: str(tmp_path / "npm.cmd"))
+    cfg = make({"tasks": {"web": {"cmd": ["npm", "install"], "uv": False}, "bat": {"cmd": ["tools/build.BAT"], "uv": False}}})
+    for task in ("web", "bat"):
+        before = len(rec.runs)
+        if refused is None:
+            tasks.run_task(cfg, task, [arg], rec.dispatch)
+            assert rec.runs[-1][-1] == arg
+            continue
+        with pytest.raises(DeployError) as e:
+            tasks.run_task(cfg, task, [arg], rec.dispatch)
+        assert e.value.code == 2 and len(rec.runs) == before  # nothing ran
+        assert f"{refused!r}" in str(e.value) and "cmd.exe" in str(e.value)
+    monkeypatch.setattr(tasks, "IS_WINDOWS", False)  # POSIX: no cmd.exe in between
+    tasks.run_task(cfg, "web", [arg], rec.dispatch)
+    assert rec.runs[-1][-1] == arg
+
+
 def test_the_task_list_is_shown_with_quiet(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(ui, "QUIET", True)
     assert cli.cmd_tasks(make({"tasks": {"ci": {"deps": ["check all"]}, "gen": {"cmd": ["g"], "help": "Generate"}}}), []) == 0
@@ -1420,11 +1453,16 @@ def test_basedpyright_that_cannot_run_always_fails(
     cfg = make({"typing": {"editor": "basedpyright", "relaxed": relaxed}})
     calls: list[list[str]] = []
 
-    def uv(_env: envs.PyEnv, argv: list[Any], **_kw: Any) -> subprocess.CompletedProcess[str]:
+    def uv(_env: envs.PyEnv, argv: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
         args = [str(a) for a in argv]
         calls.append(args)
         if args[-3:] == ["python", "-c", ""]:
-            return subprocess.CompletedProcess(args, ready, "", "error: No solution found when resolving --with dependencies" if ready else "")
+            # Not captured: on a cold cache this step downloads the pins (tens of MB), and uv's
+            # progress, or its error, reaches the terminal itself
+            assert not kw.get("capture") and kw.get("echo") is False
+            if ready:
+                print("error: No solution found when resolving --with dependencies", file=sys.stderr)
+            return subprocess.CompletedProcess(args, ready)
         return completed(args, code)
 
     monkeypatch.setattr(envs, "uv_run", lambda _env, argv, **_kw: completed(argv))
@@ -1502,6 +1540,17 @@ def test_test_argv_and_the_compiled_proof(fake_tests: FakeTests) -> None:
     assert fake_tests.calls[-1] == ("cpython", ["python", "-m", "pytest"], {"PYTEMPLATE_BACKEND": "cpython"})
     assert cmd_dev.test_backend(cfg, "pypy", ["-q"]) == 0
     assert fake_tests.calls[-1] == ("pypy", ["python", "-m", "pytest", "-q"], {"PYTEMPLATE_BACKEND": "pypy"})
+
+
+def test_the_mypyc_tests_keep_the_projects_other_pythonpath_entries(fake_tests: FakeTests, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wiring of stage_pythonpath: with the project's `pythonpath = ["src", "tests/helpers"]`
+    the mypyc run gets the stage in place of src AND tests/helpers (a plain `pythonpath=<stage>`
+    dropped it: the tests that import a helper failed to collect under mypyc only). The project's
+    own ["src"] cannot tell the two apart."""
+    monkeypatch.setattr(cmd_dev, "pytest_pythonpath", lambda root=ROOT: ["src", "tests/helpers"])
+    cfg = own({"backend": {"supported": ["cpython", "mypyc"]}})
+    assert cmd_dev.test_backend(cfg, "mypyc", []) == 0
+    assert fake_tests.calls[-1][1] == ["python", "-m", "pytest", "-o", "pythonpath=.build/pt-stage tests/helpers"]
 
 
 @pytest.mark.parametrize(
@@ -1642,6 +1691,22 @@ def test_a_dry_run_reports_no_success_for_what_it_skipped(
     assert "ok " not in err and "[ok]" not in err and "test summary" not in err
     assert "(--dry-run) would compile the stage" in err and "(--dry-run) would write the mypyc report" in err
     assert "(--dry-run) would write the Any reports" in err and "(--dry-run) check: ruff, mypy and basedpyright were not run" in err
+
+
+def test_a_dry_run_of_test_all_still_fails_when_a_backend_fails_its_checks(
+    fake_tests: FakeTests, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The dry run makes the real checks (CLAUDE.md 5.4): a `compile.exclude` naming nothing
+    stops `test mypyc` with a DeployError there too. `--dry-run test all` printed that error and
+    still exited 0 (it returned before looking at the results); the failed backend is listed
+    and the exit code is 1, while no [ok] row claims a test that did not run."""
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    fake_tests.codes["build"] = 1  # the mypyc step raises DeployError
+    cfg = make({"backend": {"supported": ["cpython", "mypyc"]}})
+    assert cmd_dev.cmd_test(cfg, ["all"]) == 1
+    err = capsys.readouterr().err
+    assert "error: test mypyc: mypyc failed" in err and "[XX] mypyc" in err
+    assert "[ok]" not in err and "cpython" not in err.split("test summary", 1)[1]
 
 
 # === 11. end to end: the exit codes cross deploy.py (a throwaway copy, no uv needed) ==============

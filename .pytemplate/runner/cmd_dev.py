@@ -146,15 +146,17 @@ def run_checks(cfg: Config, backend: str, *, rules: bool = True) -> bool:
 def _run_basedpyright(cfg: Config, profile: str, blocking: bool, conf: Path) -> bool:
     """basedpyright with the pinned versions. Its exit 1 (findings) is only a warning under a
     profile that is not blocking; basedpyright that cannot run is always a failure. uv exits 1
-    too when it cannot install the pins (offline, a cold cache): that is asked first, quietly
-    (the environment it resolves is cached for the real run), so it is never taken for
-    findings under a non-blocking profile and followed by `ok check: no errors`."""
+    too when it cannot install the pins (offline, a cold cache): that is asked first, without a
+    command line (the environment it resolves is cached for the real run), so it is never taken
+    for findings under a non-blocking profile and followed by `ok check: no errors`. Not
+    captured: on a cold cache that step downloads basedpyright and Node.js (tens of MB), and
+    uv's progress shows it (nothing prints once they are cached; -q hides it); uv prints its own
+    error too."""
     tool = envs.tool_env(cfg)
     with_pins = ["run", "--locked", "--with", BASEDPYRIGHT, "--with", BASEDPYRIGHT_NODE]
     if not proc.DRY_RUN:  # a dry run never installs anything
-        ready = envs.uv(tool, [*with_pins, "python", "-c", ""], check=False, capture=True, echo=False)
-        if ready.returncode != 0:
-            ui.report((ready.stderr or ready.stdout).rstrip())
+        ready = envs.uv(tool, [*with_pins, "python", "-c", ""], check=False, echo=False)
+        if ready.returncode != 0:  # uv's reason is above
             ui.error(f"basedpyright could not run: uv could not install {BASEDPYRIGHT} (exit code {ready.returncode})")
             return False
     r = envs.uv(tool, [*with_pins, "basedpyright", "--project", conf], check=False)
@@ -320,13 +322,16 @@ def cmd_test(cfg: Config, args: list[str]) -> int:
             ui.error(f"test {b}: {e}")
             results[b] = e.code or 1
             reasons[b] = str(e).splitlines()[0] if str(e) else f"exit code {results[b]}"
-    if proc.DRY_RUN:
-        return 0  # nothing ran: no summary
-    if len(results) > 1:
+    failed = [b for b, code in results.items() if code != 0]
+    # --dry-run: pytest never ran, so no [ok] row; a backend whose checks failed (a compile.exclude
+    # naming nothing) is still listed, and the exit code is 1 as in a real run
+    if len(results) > 1 and (failed or not proc.DRY_RUN):
         ui.step("test summary")
         for b, code in results.items():
+            if code == 0 and proc.DRY_RUN:
+                continue
             ui.check_line(code == 0, b, "" if code == 0 else reasons.get(b, f"exit code {code}"))
-    return 0 if all(c == 0 for c in results.values()) else 1
+    return 1 if failed else 0
 
 
 # --- report --------------------------------------------------------------------------------------

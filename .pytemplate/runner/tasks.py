@@ -16,7 +16,9 @@ git clean -fdx). Extra arguments to `./deploy <task> ...` are appended to the en
 without cmd (deps only) takes none (exit 2). Every dependency runs at most once per ./deploy
 invocation, like just: a dependency shared by two others (a diamond) runs once. With uv = false
 a relative program with a folder in it (tools/gen.sh) runs from the task's cwd on every OS, and
-on Windows a bare name is found on PATH with PATHEXT, as in a shell (npm -> npm.cmd).
+on Windows a bare name is found on PATH with PATHEXT, as in a shell (npm -> npm.cmd). Windows
+runs a .cmd/.bat through cmd.exe, which re-parses its arguments: one it would change (a `%` or
+`"`; an unquoted `^ & | < >`) is refused instead (exit 2).
 """
 
 from __future__ import annotations
@@ -186,4 +188,36 @@ def run_task(
         found = shutil.which(program, path=base.get("PATH", ""))
         if found:
             argv[0] = os.path.abspath(found)
+    if IS_WINDOWS and argv[0].lower().endswith((".cmd", ".bat")):
+        for arg in argv[1:]:
+            char = _batch_problem(arg)
+            if char is not None:
+                raise DeployError(
+                    f"task '{name}': {os.path.basename(argv[0])} is a batch file, which Windows runs through cmd.exe, "
+                    f"and cmd.exe would change the argument {arg!r} ({char!r}) before the program sees it. "
+                    "Pass it without that character (an argument with a space is quoted, so ^ & | < > are "
+                    "literal there), or run the program behind the batch file directly"
+                )
     return proc.run(argv, cwd=cwd, env=base, check=False).returncode
+
+
+# CreateProcess runs a .cmd/.bat through cmd.exe, which re-parses the command line that
+# subprocess.list2cmdline builds (the BatBadBut class, CLAUDE.md 4.4): `%` expands variables and
+# `"` ends the quoting whatever list2cmdline escapes; a line break ends the command; outside
+# quotes `^ & | < >` are cmd's escape and operators. list2cmdline quotes an argument only when it
+# is empty or holds a space or a tab.
+_BATCH_ALWAYS = '%"\r\n'
+_BATCH_UNQUOTED = "^&|<>"
+
+
+def _batch_problem(arg: str) -> str | None:
+    """The character cmd.exe would act on in `arg`, passed to a batch file; None when it reaches
+    the batch file unchanged."""
+    for char in _BATCH_ALWAYS:
+        if char in arg:
+            return char
+    if arg and " " not in arg and "\t" not in arg:
+        for char in _BATCH_UNQUOTED:
+            if char in arg:
+                return char
+    return None

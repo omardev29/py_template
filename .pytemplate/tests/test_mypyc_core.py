@@ -30,7 +30,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_mode, config, envs, imports, lintc, mypyc, proc, render, ui  # noqa: E402
+from runner import cmd_env, cmd_mode, config, envs, imports, lintc, mypyc, proc, render, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import ENV_SUFFIX, PRESETS, ROOT, TOOLS, venv_python  # noqa: E402
 from runner.ui import DeployError  # noqa: E402
@@ -1354,6 +1354,58 @@ def test_build_script_finds_a_cc_that_does_not_exist(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("CC", cc)
     problem = _load_build_script().missing_compiler()
     assert problem is not None and cc.split()[0] in problem
+
+
+@pytest.mark.skipif(os.name == "nt", reason="CC is for gcc/clang: MSVC is found by vswhere")
+@pytest.mark.parametrize(("platform", "xcode", "shim"), [("darwin", "no Xcode Command Line Tools", True), ("darwin", None, False), ("linux", "never asked", False)])
+def test_build_script_finds_the_macos_compiler_shims_without_developer_tools(
+    monkeypatch: pytest.MonkeyPatch, platform: str, xcode: str | None, shim: bool
+) -> None:
+    """A Mac without the Command Line Tools still has /usr/bin/cc and clang: xcrun shims that
+    exist (so shutil.which finds them) and fail, which left the usual missing compiler of a Mac
+    at exit 1 instead of 3. On macOS a compiler in /usr/bin is asked about the developer folder,
+    as doctor does (cmd_env._xcode_problem)."""
+    pytest.importorskip("setuptools")  # the script runs where mypyc imported setuptools (.venv)
+    monkeypatch.setenv("CC", "/usr/bin/env")  # a program that exists in /usr/bin everywhere
+    monkeypatch.delenv("LDSHARED", raising=False)
+    module = _load_build_script()
+    asked: list[bool] = []
+
+    def xcode_problem() -> str | None:
+        asked.append(True)
+        return xcode
+
+    monkeypatch.setattr(module, "xcode_problem", xcode_problem)
+    problem = module.missing_compiler(platform)
+    if shim:
+        assert problem is not None and "/usr/bin/env is an Xcode shim: no Xcode Command Line Tools" in problem
+    else:
+        assert problem is None
+    assert asked == ([] if platform == "linux" else [True])  # once for the compiler and the linker
+
+
+def test_build_script_reads_the_developer_folder_like_doctor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_build_script()
+    assert module.XCODE_CLANG == cmd_env.XCODE_CLANG  # mirrored: the script cannot import the runner
+    answer: list[subprocess.CompletedProcess[str] | OSError] = []
+
+    def run(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        assert argv == ["/usr/bin/xcode-select", "-p"]
+        result = answer[-1]
+        if isinstance(result, OSError):
+            raise result
+        return result
+
+    monkeypatch.setattr(module, "subprocess", types.SimpleNamespace(run=run))
+    answer.append(FileNotFoundError("xcode-select"))
+    assert module.xcode_problem() == "no xcode-select"
+    answer.append(subprocess.CompletedProcess([], 2, "", "xcode-select: error: unable to get active developer directory"))
+    assert module.xcode_problem() == "no Xcode Command Line Tools"
+    answer.append(subprocess.CompletedProcess([], 0, f"{tmp_path}\n", ""))
+    assert "has no clang" in (module.xcode_problem() or "")
+    (tmp_path / "usr" / "bin").mkdir(parents=True)
+    (tmp_path / "usr" / "bin" / "clang").write_text("", encoding="utf-8")
+    assert module.xcode_problem() is None
 
 
 @needs_venv
