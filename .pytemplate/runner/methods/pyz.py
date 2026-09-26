@@ -371,6 +371,10 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
         out.parent.mkdir(parents=True, exist_ok=True)
         _write_archive(root, out, modes)
     wrapper_path(out).write_bytes(wrapper)
-    ui.ok(f"{rel(out)}: runs on {', '.join(targets) or 'any platform (pure Python)'}")
+    if pure:  # targets/ holds only mypyc overlays: the .py runs everywhere else
+        detail = f"pure: works with Python >= {min_python} on any OS" + (f"; compiled code for {', '.join(targets)}" if targets else "")
+    else:
+        detail = f"runs on {', '.join(targets)}"
+    ui.ok(f"{rel(out)}: {detail}")
     ui.info(f"  on Windows also {rel(wrapper_path(out))}")
     return out

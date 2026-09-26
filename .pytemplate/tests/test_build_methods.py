@@ -1213,6 +1213,19 @@ def test_pyz_merge_of_pure_parts_stays_pure(tmp_path: Path) -> None:
     assert r.returncode == 0 and r.stdout.strip() == "dep=first", r.stderr
 
 
+def test_pyz_merge_says_a_pure_result_runs_everywhere(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # A pure part plus a pure mypyc part: _pyz.json said pure, the message "runs on <the overlay key>"
+    a = _pure_part(tmp_path / "a.pyz", host=LINUX, where="first")
+    b = _pure_part(tmp_path / "b.pyz", compiled=True, host=WIN)
+    info, _ = _merge([a, b], tmp_path / "m.pyz")
+    assert info["pure"] is True and info["targets"] == [WIN]
+    err = capsys.readouterr().err
+    assert "pure: works with Python >= 3.11 on any OS" in err and f"compiled code for {WIN}" in err and "runs on" not in err
+    _merge([_native_part(tmp_path / "x.pyz", key=LINUX), _native_part(tmp_path / "y.pyz", key=WIN)], tmp_path / "n.pyz")
+    err = capsys.readouterr().err
+    assert f"runs on {LINUX}, {WIN}" in err and "pure:" not in err
+
+
 def test_pyz_merge_takes_each_lib_from_the_part_built_there(tmp_path: Path) -> None:
     # Every CI part carries targets/<every key>/lib with [deploy.pyz] targets: mixing two
     # installs file by file could mix versions; the part built ON that platform wins
