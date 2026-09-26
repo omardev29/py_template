@@ -1177,9 +1177,9 @@ re-rendering.
   (`render._unconflicted`, diff3 style too) without `files`: every generated file is written
   again and the `applied` record survives (it was lost, and a later apply refused with a false
   "app.preset was changed"); a key the sides disagree on is dropped (apply records it again).
-  `cmd_apply.load_record` reads the file itself, so run `./deploy render` (or any rendering
-  command) before `./deploy apply` after such a merge. `_save_state` keeps every other top-level key (`./deploy
-  apply` records its own) and the key order. Hashes of files no longer generated stay recorded
+  `cmd_apply.load_record` and `save_record` read the file through `render._read_state` too, so
+  an `apply` run first after such a merge finds the record as well. `_save_state` keeps every
+  other top-level key (`./deploy apply` records its own) and the key order. Hashes of files no longer generated stay recorded
   (a file that comes back keeps its hand-edit protection).
 - `--check` and `--dry-run` write nothing. A folder in the way, or a read/write error, is a
   DeployError naming the file.
@@ -4042,8 +4042,8 @@ Code coupling (rename together):
   `config._build`, `config._decode`, `config._string_end` (with `config._ScanError`, for
   `_toml_strings`), `presets._norm_name` and, lazily, `cmd_env._is_link`; `cmd_apply` calls the
   private `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311`,
-  `rename._plan_pyproject` and `render._holds_python`; `rename` and `cmd_env` import `cmd_apply`
-  lazily (it imports both at module level).
+  `rename._plan_pyproject`, `render._holds_python` and `render._read_state`; `rename` and
+  `cmd_env` import `cmd_apply` lazily (it imports both at module level).
 - Which path a `compile.modules` entry names is decided once, by `config.import_path`
   (`config.compiled_paths`): `mypyc.compiled_sources`, the pyright strict list,
   `lintc.relative_file_at_import` and `cmd_apply.reference_problems` all read it (a copy of the

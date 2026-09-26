@@ -305,8 +305,8 @@ content back: the mode does not change, and the same command can simply run agai
 | `[deploy]` and its tables | Nothing: `build` reads them. It warns when `deploy.exe.icon` or `deploy.upx.path` names a missing file. |
 
 Every check and refusal happens before the first write. When a dependency edit, the re-lock or
-the Python 3.11 check fails, `pyproject.toml` and `uv.lock` get their old content back and
-nothing is recorded: fix the problem and run `apply` again. `--force` only skips the
+the check of the PyPy Python (3.11 by default) fails, `pyproject.toml` and `uv.lock` get their
+old content back and nothing is recorded: fix the problem and run `apply` again. `--force` only skips the
 uncommitted-changes check of a rename. The summary ends
 with `ok pytemplate.toml applied` (`setup`: `ok done. Try: ./deploy run ...`).
 

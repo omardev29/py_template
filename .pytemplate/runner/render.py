@@ -404,12 +404,13 @@ def _digest(text: str) -> str:
     return hashlib.sha256(_norm(text).encode("utf-8")).hexdigest()
 
 
-def _read_state() -> dict[str, Any]:
-    """state.json as an object: {} when it is missing, unreadable (not UTF-8: PS 5.1 `>` writes
-    UTF-16), not JSON or not an object. A BOM (an editor, PS 5.1 Set-Content) is fine; a file with
-    git conflict markers keeps what both sides agree on (_unconflicted)."""
+def _read_state(path: Path | None = None) -> dict[str, Any]:
+    """state.json (or `path`) as an object: {} when it is missing, unreadable (not UTF-8: PS 5.1
+    `>` writes UTF-16), not JSON or not an object. A BOM (an editor, PS 5.1 Set-Content) is fine; a
+    file with git conflict markers keeps what both sides agree on (_unconflicted). cmd_apply
+    reads its `applied` record through it too."""
     try:
-        text = STATE_FILE.read_text(encoding="utf-8-sig")
+        text = (path or STATE_FILE).read_text(encoding="utf-8-sig")
     except (OSError, ValueError):  # ValueError: UnicodeDecodeError
         return {}
     try:
