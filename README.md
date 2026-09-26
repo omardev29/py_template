@@ -324,8 +324,10 @@ name). What changes:
   right after a backslash in a raw string or a path (`r"\d"`, `r"src\alpha"`) is reported, not
   changed.
 - `pytemplate.toml`: `app.name` and every package reference (`compile.modules`, `exclude`,
-  `forbid_imports`, the mypy overrides, `hidden_imports`, `exclude_modules`, the wheel entry);
-  other mentions are reported. `pyproject.toml`: `[project] name` and the preset tables.
+  `forbid_imports`, the mypy overrides, `hidden_imports`, `exclude_modules`, the wheel entry,
+  `src/<pkg>/` paths and `<pkg>.<module>` names); other mentions are reported, among them file
+  names (an icon `assets/<name>.ico`, a task's `tools/<name>.py`: the files keep their names).
+  `pyproject.toml`: `[project] name` and the preset tables.
 - `uv.lock` is re-locked, the generated files are regenerated, and the files that ruff accepted
   before get their import order and formatting fixed.
 

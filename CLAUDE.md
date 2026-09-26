@@ -831,7 +831,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     `import`/`from`, `-m` and `import_module`-like calls get the package; titles, other prose
     and artifact names (`alpha.exe`, `alpha-cpython-exe`) get the name.
   - `pytemplate.toml`: always by context (`contextual`, even when the new name is a package
-    name), never a TOML key or table header (`_toml_key`: an app named `app`, `editor`,
+    name). A path there is the package only right inside `src/` (`_after_src`: `src/alpha/data`
+    moves with the folder; `tools/alpha.py`, `assets/alpha.ico` and, for an app named deploy,
+    `./deploy apply` are other files), and a dotted word only when it names a module or
+    subpackage of src/<pkg>/ (`_package_modules`: `alpha.core`; not `alpha.ico` nor, for an app
+    named uv, `uv.lock`). Never a TOML key or table header (`_toml_key`: an app named `app`, `editor`,
     `console` or `bunnymark` keeps `[app]`, `editor =` and its buttons), never a key path in a
     comment (`app.gui` for an app named `app`: `_config_path`). The values of `MODULE_KEYS`
     (compile.modules/exclude/forbid_imports, `[[typing.mypy_overrides]] module`,

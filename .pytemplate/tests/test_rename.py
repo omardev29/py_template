@@ -325,6 +325,36 @@ def test_pytemplate_toml_changes_only_package_references(tmp_path: Path) -> None
     assert tomllib.loads(new)["compile"]["modules"] == ["my_game.core"]
 
 
+@pytest.mark.parametrize("new", ["beta", "My-Game"])
+def test_pytemplate_toml_keeps_file_names_and_other_folders(tmp_path: Path, new: str) -> None:
+    """Only src/<pkg>/ moves and only <pkg>.<its module> is a module name: an icon, a data file or
+    a tool named like the app keeps its name (the file itself is not renamed)."""
+    _write_project(tmp_path, "script", "alpha")
+    cfg_file = tmp_path / "pytemplate.toml"
+    text = cfg_file.read_text(encoding="utf-8").replace('icon = ""', 'icon = "assets/alpha.ico"')
+    text += '\n[tasks.gen]\ncmd = ["{python}", "tools/alpha.py", "--out", "levels/alpha.json", "src/alpha/data", "-m", "alpha.core.bench"]\n'
+    cfg_file.write_text(text, encoding="utf-8", newline="\n")
+    planned = _rename(tmp_path, "alpha", new)
+    pkg = package_of(new)
+    data = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
+    assert data["deploy"]["exe"]["icon"] == "assets/alpha.ico"
+    assert data["tasks"]["gen"]["cmd"] == ["{python}", "tools/alpha.py", "--out", "levels/alpha.json", f"src/{pkg}/data", "-m", f"{pkg}.core.bench"]
+    assert data["compile"]["modules"] == [f"{pkg}.core"]
+    kept = [line.split(" =")[0] for _, line in planned.config.kept]
+    assert kept == ["icon", "cmd"]
+    assert planned.config.count == 4  # the app.name comment's src/alpha/, compile.modules, the two in cmd: never the icon
+
+
+@pytest.mark.parametrize("preset", ["script", "raylib", "flet"])
+@pytest.mark.parametrize("old", ["deploy", "uv", "src", "tools"])
+def test_pytemplate_toml_comments_of_an_app_named_like_a_path_word(tmp_path: Path, preset: str, old: str) -> None:
+    """`./deploy apply`, `uv.lock` and `src/<pkg>/` in the comments are not the package of an app
+    named deploy, uv or src: the renamed pytemplate.toml is the new name's skeleton."""
+    _write_project(tmp_path, preset, old)
+    planned = rename.plan(tmp_path, old, "beta")
+    assert planned.config.new == presets.skeleton(preset, "beta")["pytemplate.toml"].decode("utf-8")
+
+
 def test_root_files_that_mention_the_name_are_reported(tmp_path: Path) -> None:
     _write_project(tmp_path, "script", "alpha")
     (tmp_path / "README.md").write_text("# alpha\n", encoding="utf-8")

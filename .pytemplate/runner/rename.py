@@ -31,7 +31,9 @@ Which occurrences change (whole words only: `myapp_extra` and `my-app-2` never m
   Name: everything else (titles, `\"\"\"alpha\"\"\"`, `f"alpha: ..."`) and artifact names
   (`alpha.exe`, `alpha.pyz`, `alpha-cpython-exe`...).
 - pytemplate.toml: app.name (its comment is kept) and package references only, always chosen
-  by context, never a TOML key or table header. The values of the keys that hold module names
+  by context, never a TOML key or table header. A path is the package only right inside src/
+  (`src/alpha/data`; not `tools/alpha.py`, `assets/alpha.ico`, `./deploy`), a dotted word only
+  when it names a module of src/<pkg>/ (`alpha.core`; not `alpha.ico`, `uv.lock`). The values of the keys that hold module names
   (MODULE_KEYS: compile.modules, [[typing.mypy_overrides]] module, deploy.exe.hidden_imports...)
   are package references even when bare (`modules = ["alpha"]`). Any other occurrence of the
   old name is reported, not changed ([tasks] can use `{name}` and `{pkg}`).
@@ -68,7 +70,7 @@ from typing import Literal
 
 from . import config, envs, presets, proc, render, ui
 from .config import Config
-from .project import DIST, ROOT
+from .project import DIST, EXT_SUFFIXES, ROOT
 from .project import ROOT as _RUNNER_CWD  # where the tools run (tests move ROOT, never this)
 from .ui import DeployError
 
@@ -480,14 +482,32 @@ def _inside_package(text: str, start: int, pkg: str) -> bool:
         return False
     if seg >= 1 and _is_word(text[seg - 1]):
         return False
+    if pkg == "src" and not _after_src(text, seg):
+        return False  # an app named src: in src/src/core the first one is the project's folder
     return not (seg >= 2 and text[seg - 1] == "-" and _is_word(text[seg - 2]))
 
 
-def _text_kind(text: str, start: int, end: int, word: str, names: Names, *, contextual: bool = False) -> Kind:
+def _after_src(text: str, start: int) -> bool:
+    """Whether the path segment at `start` is right inside a `src` folder: `src/alpha`, `src\\alpha`."""
+    sep = start
+    while sep > 0 and text[sep - 1] in "/\\":
+        sep -= 1
+    if sep == start or text[sep - 3 : sep] != "src":
+        return False
+    return not (sep >= 4 and (_is_word(text[sep - 4]) or text[sep - 4] == "-"))
+
+
+def _text_kind(
+    text: str, start: int, end: int, word: str, names: Names, *, contextual: bool = False, modules: frozenset[str] | None = None
+) -> Kind:
     """Classify an occurrence in text (a string, a comment, a Markdown or TOML file).
 
     `contextual`: decide by context even when the new name is also a package name (pytemplate.toml,
-    where `[app]`, `editor = ` or a button named like the app must never change).
+    where `[app]`, `editor = ` or a button named like the app must never change). There a path is
+    the package only right inside `src/` (the folder the rename moves: `tools/alpha.py`,
+    `assets/alpha.ico` and `./deploy` stay) and, when `modules` (the modules and subpackages of
+    src/<pkg>/) is given, a dotted word only when it names one of them (`alpha.core`; not
+    `alpha.ico` or `uv.lock`).
     """
     prev = text[start - 1 : start]
     if prev == "." and start >= 2 and _is_word(text[start - 2]):
@@ -503,9 +523,11 @@ def _text_kind(text: str, start: int, end: int, word: str, names: Names, *, cont
     nxt = text[end : end + 1]
     nxt2 = text[end + 1 : end + 2]
     if nxt in ("/", "\\") or prev in ("/", "\\"):
-        return "pkg"
+        return "pkg" if not contextual or _after_src(text, start) else "name"
     if nxt in (".", ":") and (nxt2 == "*" or (nxt2 != "" and _is_word(nxt2))):
-        return "pkg"
+        member = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[end + 1 : end + 65])
+        if not contextual or modules is None or nxt == ":" or nxt2 == "*" or (member is not None and member.group() in modules):
+            return "pkg"
     before = text[max(0, start - 80) : start]
     if _PKG_WORD_AFTER.match(text, end) or _PKG_WORD_BEFORE.search(before):
         return "pkg"
@@ -535,9 +557,11 @@ def _string_quote(text: str, region: _Region) -> tuple[int, str] | None:
     return None if m is None else (m.end(), m.group().lower())
 
 
-def _classify(text: str, start: int, end: int, word: str, names: Names, code: _Code | None, *, contextual: bool = False) -> Kind:
+def _classify(
+    text: str, start: int, end: int, word: str, names: Names, code: _Code | None, *, contextual: bool = False, modules: frozenset[str] | None = None
+) -> Kind:
     if code is None:
-        return _text_kind(text, start, end, word, names, contextual=contextual) if _whole_word(text, start, end) else "skip"
+        return _text_kind(text, start, end, word, names, contextual=contextual, modules=modules) if _whole_word(text, start, end) else "skip"
     token = code.names.get(start)
     if token is not None:  # code
         if token != word:
@@ -644,6 +668,7 @@ def rewrite(
     only_pkg: bool = False,
     toml: bool = False,
     module_keys: frozenset[str] = frozenset(),
+    package_modules: frozenset[str] | None = None,
 ) -> Rewrite:
     """Replace the old name/package in `text`. Line endings and everything else are kept.
 
@@ -651,6 +676,8 @@ def rewrite(
     the package references, chosen by context, and report the other occurrences as kept
     (pytemplate.toml). `toml`: TOML keys and table headers never change. `module_keys`: TOML
     keys whose quoted values are module names (a bare old package there is the package).
+    `package_modules`: the modules and subpackages of src/<old pkg>/ (only_pkg: `pkg.x` is the
+    package only when x is one of them; `pkg.ico`, `uv.lock` are file names).
     """
     code = _python_code(text, names.old_pkg) if python else None
     module_lines = module_value_lines(text, module_keys) if module_keys else set()
@@ -674,7 +701,7 @@ def rewrite(
             if escaped == "keep":
                 kept_at.append(start)
                 continue
-        kind = _classify(text, start, end, word, names, code, contextual=only_pkg)
+        kind = _classify(text, start, end, word, names, code, contextual=only_pkg, modules=package_modules)
         if kind == "skip":
             continue
         module_line = bool(module_lines) and bisect.bisect_right(line_starts, start) in module_lines
@@ -683,9 +710,9 @@ def rewrite(
             and module_line
             and word == names.old_pkg
             and text[start - 1 : start] in ("'", '"')
-            and text[end : end + 1] == text[start - 1 : start]
+            and (text[end : end + 1] == text[start - 1 : start] or text[end : end + 1] in (".", ":"))
         ):
-            kind = "pkg"  # modules = ["alpha"]
+            kind = "pkg"  # modules = ["alpha"], exclude = ["alpha.slow"] (a module that does not exist yet)
         elif kind == "pkg" and toml and not module_line and _config_path(text, end, word):
             kind = "keep"  # "# auto (= not app.gui)" in a project named app
         if kind == "keep" or (only_pkg and kind == "name"):
@@ -821,6 +848,23 @@ def _target(path: str, move: tuple[str, str] | None) -> str:
     return path
 
 
+def _package_modules(root: Path, pkg: str) -> frozenset[str]:
+    """The modules and subpackages of src/<pkg>/: `core` for core.py, core/ or core.<tag>.so."""
+    folder = package_dir(root / "src", pkg)
+    try:
+        entries = list(os.scandir(folder)) if folder is not None else []
+    except OSError:
+        return frozenset()
+    out: set[str] = set()
+    for entry in entries:
+        stem = entry.name.partition(".")[0]
+        if entry.name in SKIP_DIRS or not stem.isidentifier():
+            continue
+        if entry.is_dir() or Path(entry.name).suffix in PY_SUFFIXES or entry.name.endswith(EXT_SUFFIXES):
+            out.add(stem)
+    return frozenset(out)
+
+
 def _plan_config(root: Path, names: Names) -> TextEdit:
     path = root / "pytemplate.toml"
     try:
@@ -828,7 +872,8 @@ def _plan_config(root: Path, names: Names) -> TextEdit:
     except OSError as e:
         raise DeployError(f"rename: cannot read pytemplate.toml: {e.strerror or e}") from None
     old = config._decode(raw, "pytemplate.toml")  # a clear error for UTF-16/ANSI; CRLF kept
-    result = rewrite(old, names, only_pkg=True, toml=True, module_keys=MODULE_KEYS)
+    modules = _package_modules(root, names.old_pkg)
+    result = rewrite(old, names, only_pkg=True, toml=True, module_keys=MODULE_KEYS, package_modules=modules)
     new = config.set_value(result.text, "app", "name", names.new_name)
     try:
         tomllib.loads(new)
