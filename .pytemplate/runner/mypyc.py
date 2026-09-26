@@ -31,6 +31,9 @@ SKIP_DIRS = {"__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 ANNOTATE_HTML = BUILD / "reports" / "mypyc-annotate.html"
 # Exit code of tools/mypyc_build.py when mypy/mypyc rejected the code (no C compiler ran yet)
 MYPYC_REJECTED = 4
+# ... and when the C build failed because setuptools cannot start the C compiler: a missing
+# requirement (exit 3), like every other missing program
+COMPILER_MISSING = 5
 # The options of the last SUCCESSFUL compile of a profile (in its folder): see build()
 COMPILED_STAMP = "compiled-options.json"
 # spec.json keys that do not change the binaries (every other key does, see build())
@@ -317,6 +320,8 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
             ui.info((result.stdout or "") + (result.stderr or ""))
         if result.returncode == MYPYC_REJECTED:  # mypy/mypyc rejected the code: no compiler involved
             raise DeployError("mypyc failed (exit code 1): fix the errors above", 1)
+        if result.returncode == COMPILER_MISSING:
+            raise DeployError(f"mypyc failed: the C compiler cannot start (above)\n{has_compiler_hint()}", 3)
         raise DeployError(f"mypyc failed (exit code {result.returncode})\n{has_compiler_hint()}", result.returncode)
     if annotate and result.stdout:
         ui.detail(result.stdout)

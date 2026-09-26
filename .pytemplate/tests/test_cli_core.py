@@ -151,6 +151,10 @@ def test_quiet_without_a_dry_run() -> None:
         (proc.Interrupted(0), 130, "error: interrupted"),  # an interrupted command never reports success
         (proc.Interrupted(130), 130, "error: interrupted"),
         (proc.Interrupted(proc.STATUS_CONTROL_C_EXIT), 130, "error: interrupted"),
+        (proc.Interrupted(0, signal.SIGTERM), 143, "error: terminated (SIGTERM)"),  # passed on, the child exited 0
+        (proc.Interrupted(4, signal.SIGTERM), 4, "error: terminated (SIGTERM)"),
+        (proc.Interrupted(143, signal.SIGTERM), 143, "error: terminated (SIGTERM)"),
+        (proc.Interrupted(0, 1), 129, "error: terminated ("),  # SIGHUP (POSIX only)
         (SystemExit(0), 0, ""),  # argparse -h
         (SystemExit(2), 2, ""),  # argparse usage error
         (SystemExit(None), 0, ""),
@@ -169,6 +173,49 @@ def test_main_maps_every_outcome_to_its_exit_code(
     err = capsys.readouterr().err
     assert stderr in err
     assert ("Traceback" in err) == isinstance(raised, RuntimeError)
+
+
+@pytest.mark.parametrize(
+    ("filename", "code", "stderr"),
+    [
+        (BUILD / "cfg" / "ruff-off.toml", 2, "error: cannot write .build/cfg/ruff-off.toml: Permission denied"),
+        (BUILD / "mypyc-dev" / "stage" / "main.py", 2, "error: cannot write .build/mypyc-dev/stage/main.py"),
+        (DIST / "app-cpython-pyz", 2, "error: cannot write dist/app-cpython-pyz"),
+        (ROOT / "src" / "main.py", 1, "internal runner error"),  # not a scratch folder: a bug to see
+    ],
+)
+def test_a_scratch_folder_another_user_left_is_a_clear_error(
+    filename: Path, code: int, stderr: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`sudo ./deploy check` leaves .build/cfg owned by root: the next `./deploy check` crashed
+    with a PermissionError traceback and "internal runner error"."""
+
+    def dispatch(_argv: list[str]) -> int:
+        raise PermissionError(13, "Permission denied", str(filename))
+
+    monkeypatch.setattr(cli, "dispatch", dispatch)
+    assert cli.main(["check"]) == code
+    err = capsys.readouterr().err
+    assert stderr in err
+    assert ("Traceback" in err) is (code == 1)
+    if code == 2:
+        assert "./deploy clean" in err and "sudo" in err
+
+
+@posix
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root writes into a read-only folder")
+def test_check_into_an_unwritable_build_folder_is_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    build = tmp_path / ".build"
+    (build / "cfg").mkdir(parents=True)
+    (build / "cfg").chmod(0o555)
+    monkeypatch.setattr(cmd_dev, "BUILD", build)
+    monkeypatch.setattr(cli, "BUILD", build)
+    monkeypatch.setattr(cli, "dispatch", lambda _argv: cmd_dev._profile_file(make({}), "off", "ruff") and 0)
+    try:
+        assert cli.main(["check"]) == 2
+    finally:
+        (build / "cfg").chmod(0o755)
+    assert "error: cannot write" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(("returned", "code"), [(0, 0), (1, 1), (5, 5), (-9, 137), (-15, 143)])
@@ -507,6 +554,28 @@ def test_a_program_that_cannot_start_is_a_clear_error(tmp_path: Path) -> None:
         assert "cannot run" in str(e.value) and program.name in str(e.value)
 
 
+@posix
+def test_a_script_whose_interpreter_is_missing_names_it(tmp_path: Path) -> None:
+    """exec reports a missing #! interpreter as ENOENT: `program not found: tools/bad.sh` sent
+    the user looking for a script that is right there."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    bad = tools / "bad.sh"
+    bad.write_text("#!/nonexistent/interp -x\necho hi\n", encoding="utf-8")
+    bad.chmod(0o755)
+    for argv, cwd in (([str(bad)], None), (["tools/bad.sh"], tmp_path)):  # absolute, and relative to cwd
+        with pytest.raises(DeployError) as e:
+            proc.run(argv, cwd=cwd, echo=False)
+        assert e.value.code == 3
+        assert "the interpreter of its #! line was not found: /nonexistent/interp" in str(e.value)
+    env = proc.base_env()
+    env["PATH"] = f"{tools}{os.pathsep}{env['PATH']}"
+    with pytest.raises(DeployError, match=r"cannot run bad\.sh: the interpreter of its #! line was not found"):
+        proc.run(["bad.sh"], env=env, echo=False)  # found on the child's PATH
+    with pytest.raises(DeployError, match="program not found: no-such-tool"):
+        proc.run(["no-such-tool"], env=env, echo=False)
+
+
 @pytest.mark.parametrize(("name", "message"), [("missing", "folder not found"), ("a-file", "not a folder")])
 def test_a_bad_working_folder_is_named(name: str, message: str, tmp_path: Path) -> None:
     (tmp_path / "a-file").write_text("x", encoding="utf-8")
@@ -631,6 +700,9 @@ if mode == "second":
 got = []
 if mode.startswith("trap"):
     signal.signal(signal.SIGINT, lambda *_: got.append(1))
+if mode.startswith("term"):  # the SIGTERM/SIGHUP the runner passes on (a supervisor, kill PID)
+    signal.signal(signal.SIGTERM, lambda *_: got.append(1))
+    signal.signal(signal.SIGHUP, lambda *_: got.append(1))
 print("CHILD-" + "READY", flush=True)
 deadline = time.monotonic() + 30
 while not got and time.monotonic() < deadline:
@@ -657,9 +729,10 @@ raise SystemExit(cli.main(["x"]))
 """
 
 
-def _interrupt(tmp_path: Path, *modes: str) -> tuple[int, bool, str]:
+def _interrupt(tmp_path: Path, *modes: str, sig: int = signal.SIGINT, group: bool = True) -> tuple[int, bool, str]:
     """Run DRIVER in its own session, press Ctrl+C (SIGINT to the process group, as a terminal
-    does) once the child is ready; return (exit code, marker written before the exit, log)."""
+    does) once the child is ready; return (exit code, marker written before the exit, log).
+    `sig`/`group`: another signal, sent to the driver alone (kill PID) when `group` is False."""
     child = tmp_path / "child.py"
     child.write_text(CHILD, encoding="utf-8")
     marker = tmp_path / "marker"
@@ -679,7 +752,10 @@ def _interrupt(tmp_path: Path, *modes: str) -> tuple[int, bool, str]:
             if p.poll() is not None or time.monotonic() > deadline:
                 pytest.fail(f"the child never got ready: {log.read_text(encoding='utf-8', errors='replace')}")
             time.sleep(0.02)
-        os.killpg(p.pid, signal.SIGINT)
+        if group:
+            os.killpg(p.pid, sig)
+        else:
+            os.kill(p.pid, sig)
         code = p.wait(timeout=60)
         written = marker.exists()  # at the moment the driver returned
     finally:
@@ -715,6 +791,45 @@ def test_ctrl_c_stops_the_remaining_steps(tmp_path: Path) -> None:
     code, written, log = _interrupt(tmp_path, "trap", "second")
     assert (code, written) == (130, True), log
     assert not (tmp_path / "marker.second").exists(), "a step ran after Ctrl+C"
+
+
+@posix
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP] if hasattr(signal, "SIGHUP") else [])
+def test_a_sigterm_to_the_runner_is_passed_on_and_waited_for(tmp_path: Path, sig: int) -> None:
+    """kill PID, a supervisor, docker stop, Popen.terminate(): the signal reaches the runner
+    alone. Its default action killed the runner at once (exit 143) and left uv and the app
+    running as orphans that never got the signal."""
+    code, written, log = _interrupt(tmp_path, "term", "second", sig=sig, group=False)
+    assert written, f"the child did not get the signal, or was not waited for: {log}"
+    assert code == 128 + sig, log  # the child exited 0 after its cleanup: never a success
+    assert f"error: terminated ({signal.Signals(sig).name})" in log
+    assert not (tmp_path / "marker.second").exists(), "a step ran after the SIGTERM"
+
+
+@posix
+def test_a_sigterm_passed_on_reports_the_childs_own_code(tmp_path: Path) -> None:
+    code, written, log = _interrupt(tmp_path, "term5", sig=signal.SIGTERM, group=False)
+    assert (code, written) == (5, True), log
+
+
+@posix
+def test_a_child_that_dies_of_the_sigterm_passed_on_leaves_no_orphan(tmp_path: Path) -> None:
+    code, written, log = _interrupt(tmp_path, "default", sig=signal.SIGTERM, group=False)
+    assert (code, written) == (143, False), log  # the child died of it: 128 + 15
+
+
+@posix
+def test_an_ignored_sigterm_is_passed_on_to_the_child() -> None:
+    # nohup and supervisors that ignore SIGHUP/SIGTERM: the children keep inheriting SIG_IGN
+    code = (
+        "import signal, sys; signal.signal(signal.SIGTERM, signal.SIG_IGN); sys.path.insert(0, sys.argv[1]); "
+        "from runner import proc; "
+        "probe = 'import signal; print(signal.getsignal(signal.SIGTERM) == signal.SIG_IGN, signal.getsignal(signal.SIGHUP) == signal.SIG_DFL)'; "
+        "print(proc.run([sys.executable, '-c', probe], capture=True, echo=False).stdout.strip()); "
+        "print(signal.getsignal(signal.SIGTERM) == signal.SIG_IGN, signal.getsignal(signal.SIGHUP) == signal.SIG_DFL)"
+    )
+    r = subprocess.run([sys.executable, "-c", code, str(TEMPLATE_DIR)], capture_output=True, text=True, env=child_env(), timeout=60, check=False)
+    assert r.stdout.split() == ["True", "True", "True", "True"], r.stderr  # the child's, then the runner's afterwards
 
 
 @posix
@@ -1063,6 +1178,37 @@ def test_a_relative_program_runs_from_the_task_cwd(rec: Recorder, tmp_path: Path
     assert rec.runs == [["tool"], [f"{ROOT}/tools/x"]]  # a bare name keeps the OS search
 
 
+def test_a_bare_program_is_found_with_pathext_on_windows(rec: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows: CreateProcess only tries `npm.exe` for a bare `npm`, so a task running npm, yarn
+    or mvn (.cmd files) failed with "program not found: npm" there and worked elsewhere."""
+    bin_dir = tmp_path / "nodejs"
+    bin_dir.mkdir()
+    looked_up: list[tuple[str, str]] = []
+
+    def which(name: str, mode: int = os.F_OK | os.X_OK, path: str | None = None) -> str | None:
+        looked_up.append((name, path or ""))
+        return str(bin_dir / "npm.cmd") if name == "npm" else None  # PATHEXT, as on Windows
+
+    monkeypatch.setattr(tasks, "IS_WINDOWS", True)
+    monkeypatch.setattr(tasks.shutil, "which", which)
+    cfg = make({"tasks": {
+        "web": {"cmd": ["npm", "run", "build"], "uv": False, "env": {"PATH": str(bin_dir)}},
+        "missing": {"cmd": ["no-such-tool"], "uv": False},
+        "rel": {"cmd": ["tools/x.cmd"], "uv": False},
+    }})
+    tasks.run_task(cfg, "web", ["--prod"], rec.dispatch)
+    assert rec.runs[-1] == [str(bin_dir / "npm.cmd"), "run", "build", "--prod"]
+    assert looked_up[-1] == ("npm", str(bin_dir))  # the task's own PATH
+    tasks.run_task(cfg, "missing", [], rec.dispatch)
+    assert rec.runs[-1] == ["no-such-tool"]  # not found: proc.run reports it
+    count = len(looked_up)
+    tasks.run_task(cfg, "rel", [], rec.dispatch)
+    assert len(looked_up) == count and Path(rec.runs[-1][0]) == ROOT / "tools" / "x.cmd"  # a path is no PATH lookup
+    monkeypatch.setattr(tasks, "IS_WINDOWS", False)
+    tasks.run_task(cfg, "web", [], rec.dispatch)
+    assert rec.runs[-1][0] == "npm" and len(looked_up) == count  # POSIX: execvp searches PATH itself
+
+
 def test_the_task_list_is_shown_with_quiet(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(ui, "QUIET", True)
     assert cli.cmd_tasks(make({"tasks": {"ci": {"deps": ["check all"]}, "gen": {"cmd": ["g"], "help": "Generate"}}}), []) == 0
@@ -1241,6 +1387,46 @@ def test_basedpyright_runs_with_every_pin(relaxed: str, passed: bool, tmp_path: 
     assert argv[argv.index("--project") + 1] == str(tmp_path / "cfg" / f"pyright-{relaxed}.json")
 
 
+@pytest.mark.parametrize(
+    ("relaxed", "ready", "code", "passed", "message"),
+    [
+        ("warn", 0, 0, True, ""),
+        ("warn", 0, 1, True, "warning: basedpyright: type warnings (profile 'warn', non-blocking)"),
+        ("strict", 0, 1, False, ""),
+        # uv could not install the pins (offline, cold cache): uv exits 1 too, never "findings"
+        ("warn", 1, 1, False, "error: basedpyright could not run: uv could not install basedpyright=="),
+        ("strict", 2, 0, False, "error: basedpyright could not run"),
+        ("warn", 0, 2, False, "error: basedpyright stopped (exit code 2)"),  # a fatal error
+        ("warn", 0, 3, False, "error: basedpyright stopped (exit code 3)"),  # its config
+    ],
+)
+@pytest.mark.usefixtures("isolated_checks")
+def test_basedpyright_that_cannot_run_always_fails(
+    relaxed: str, ready: int, code: int, passed: bool, message: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Offline with a cold cache, `uv run --with basedpyright==...` failed (exit 1: No solution
+    found), and under the non-blocking `warn` profile check said `ok check: no errors`."""
+    cfg = make({"typing": {"editor": "basedpyright", "relaxed": relaxed}})
+    calls: list[list[str]] = []
+
+    def uv(_env: envs.PyEnv, argv: list[Any], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        calls.append(args)
+        if args[-3:] == ["python", "-c", ""]:
+            return subprocess.CompletedProcess(args, ready, "", "error: No solution found when resolving --with dependencies" if ready else "")
+        return completed(args, code)
+
+    monkeypatch.setattr(envs, "uv_run", lambda _env, argv, **_kw: completed(argv))
+    monkeypatch.setattr(envs, "uv", uv)
+    assert cmd_dev.run_checks(cfg, "cpython") is passed
+    err = capsys.readouterr().err
+    assert message in err
+    assert [c[-3:] == ["python", "-c", ""] for c in calls] == ([True] if ready else [True, False])
+    assert all(c[:6] == ["run", "--locked", "--with", cmd_dev.BASEDPYRIGHT, "--with", cmd_dev.BASEDPYRIGHT_NODE] for c in calls)
+    if ready:
+        assert "No solution found" in err  # uv's own reason
+
+
 def test_tools_are_pinned_exactly() -> None:
     assert re.fullmatch(r"basedpyright==\d+\.\d+\.\d+", cmd_dev.BASEDPYRIGHT)
     assert re.fullmatch(r"nodejs-wheel-binaries==\d+\.\d+\.\d+", cmd_dev.BASEDPYRIGHT_NODE)
@@ -1307,6 +1493,64 @@ def test_test_argv_and_the_compiled_proof(fake_tests: FakeTests) -> None:
     assert fake_tests.calls[-1] == ("pypy", ["python", "-m", "pytest", "-q"], {"PYTEMPLATE_BACKEND": "pypy"})
 
 
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        # the template's own: src becomes the stage
+        ({"pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["src"]\n'}, ["STAGE"]),
+        # the user's extra entries stay (-o replaces the whole setting)
+        ({"pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["tests/helpers", "./src", "my libs"]\n'}, ["tests/helpers", "STAGE", "my libs"]),
+        ({"pyproject.toml": '[tool.pytest.ini_options]\npythonpath = "src tests/helpers"\n'}, ["STAGE", "tests/helpers"]),
+        ({"pyproject.toml": '[tool.pytest]\npythonpath = ["src", "tests/helpers"]\n'}, ["STAGE", "tests/helpers"]),  # pytest 9 native
+        # no src entry: the stage goes first
+        ({"pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["lib"]\n'}, ["STAGE", "lib"]),
+        ({"pyproject.toml": "[project]\nname = 'x'\n"}, ["STAGE"]),
+        ({}, ["STAGE"]),
+        # the other files pytest reads, in pytest's order
+        ({"pytest.ini": "[pytest]\npythonpath = src\n    tests/helpers\n", "pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["x"]\n'}, ["STAGE", "tests/helpers"]),
+        ({"pytest.ini": "", "pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["src", "x"]\n'}, ["STAGE"]),  # an empty pytest.ini wins
+        ({"pytest.toml": '[pytest]\npythonpath = ["src", "h"]\n', "pytest.ini": "[pytest]\npythonpath = x\n"}, ["STAGE", "h"]),
+        ({"tox.ini": "[pytest]\npythonpath = src h\n"}, ["STAGE", "h"]),
+        ({"setup.cfg": "[tool:pytest]\npythonpath = src h\n", "tox.ini": "[tox]\n"}, ["STAGE", "h"]),
+        ({"pyproject.toml": "not toml ["}, ["STAGE"]),
+    ],
+)
+def test_mypyc_tests_keep_the_other_pythonpath_entries(tmp_path: Path, files: dict[str, str], expected: list[str]) -> None:
+    """`test mypyc` passed `-o pythonpath=<stage>`, which replaces the WHOLE setting: a test
+    importing a helper from an extra entry (tests/helpers) passed on cpython and failed to
+    collect on mypyc."""
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    stage = ROOT / ".build" / "pt-stage"
+    value = cmd_dev.stage_pythonpath(stage, root=tmp_path, src=tmp_path / "src")
+    assert shlex.split(value) == [".build/pt-stage" if e == "STAGE" else e for e in expected]
+
+
+def test_pytest_reads_the_mypyc_pythonpath_like_the_project_setting(tmp_path: Path) -> None:
+    """The real pytest: the compiled package of the stage wins over src/, and a helper of an
+    extra pythonpath entry (with a space in its folder) still imports."""
+    (tmp_path / "pyproject.toml").write_text('[tool.pytest.ini_options]\npythonpath = ["src", "tests/my helpers"]\n', encoding="utf-8")
+    for folder, where in (("src", "src"), ("stage", "stage")):
+        (tmp_path / folder / "pkg").mkdir(parents=True)
+        (tmp_path / folder / "pkg" / "__init__.py").write_text(f"WHERE = {where!r}\n", encoding="utf-8")
+    (tmp_path / "tests" / "my helpers").mkdir(parents=True)
+    (tmp_path / "tests" / "my helpers" / "myhelp.py").write_text("VALUE = 3\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_x.py").write_text(
+        "import pkg\nfrom myhelp import VALUE\n\ndef test_it():\n    assert (pkg.WHERE, VALUE) == ('stage', 3)\n", encoding="utf-8"
+    )
+    value = cmd_dev.stage_pythonpath(tmp_path / "stage", root=tmp_path, src=tmp_path / "src")
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", f"pythonpath={value}", "tests"],
+        cwd=tmp_path,
+        env=child_env(),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 def test_test_returns_pytests_code_for_one_backend(fake_tests: FakeTests, capsys: pytest.CaptureFixture[str]) -> None:
     cfg = own({})
     fake_tests.codes.update(cpython=5)  # no tests collected
@@ -1354,6 +1598,39 @@ def test_report_needs_mypyc_and_never_opens_a_browser_in_a_dry_run(monkeypatch: 
     monkeypatch.setattr(cmd_dev, "_profile_file", lambda _cfg, _profile, _kind: Path("mypy.ini"))
     monkeypatch.setattr(proc, "DRY_RUN", True)
     assert cmd_dev.cmd_report(make({}), ["--open"]) == 0
+
+
+@pytest.mark.parametrize(("mypy", "code", "line"), [(0, 0, "ok Any expressions per module"), (1, 0, "ok Any expressions per module"), (2, 1, "error: mypy stopped (exit code 2)")])
+def test_report_follows_mypys_exit_code(
+    fake_tests: FakeTests, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mypy: int, code: int, line: str
+) -> None:
+    """A syntax error stops mypy (exit 2) before its reports: report said `ok Any expressions per
+    module` and exited 0 with an empty any-exprs.txt. Type errors (exit 1) still write them."""
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    monkeypatch.setattr(cmd_dev, "_profile_file", lambda _cfg, _profile, _kind: Path("mypy.ini"))
+    fake_tests.codes["cpython"] = mypy  # the mypy run of the report
+    assert cmd_dev.cmd_report(make({}), []) == code
+    err = capsys.readouterr().err
+    assert line in err
+    assert ("ok Any expressions" in err) is (code == 0)
+
+
+def test_a_dry_run_reports_no_success_for_what_it_skipped(
+    fake_tests: FakeTests, checks: FakeChecks, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--dry-run skips compile, pytest, ruff, mypy: `ok compiled stage`, `ok mypyc report`,
+    `ok Any expressions`, `ok check: no errors` and a test summary of [ok] lines were printed."""
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    monkeypatch.setattr(cmd_dev, "_profile_file", lambda _cfg, _profile, _kind: Path("mypy.ini"))
+    cfg = make({"backend": {"supported": ["cpython", "mypyc"]}})
+    assert cmd_dev.cmd_compile(cfg, []) == 0
+    assert cmd_dev.cmd_report(cfg, []) == 0
+    assert cmd_dev.cmd_test(cfg, ["all"]) == 0
+    assert cmd_dev.cmd_check(cfg, ["all"]) == 0
+    err = capsys.readouterr().err
+    assert "ok " not in err and "[ok]" not in err and "test summary" not in err
+    assert "(--dry-run) would compile the stage" in err and "(--dry-run) would write the mypyc report" in err
+    assert "(--dry-run) would write the Any reports" in err and "(--dry-run) check: ruff, mypy and basedpyright were not run" in err
 
 
 # === 11. end to end: the exit codes cross deploy.py (a throwaway copy, no uv needed) ==============

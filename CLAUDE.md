@@ -538,20 +538,20 @@ header rules (with detector tests proving each rule fires).
 | `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths`, comment-preserving editor `set_value` / `update_file` (section 6.1), `toml_value`. |
 | `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL` (`wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
-| `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`. |
-| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (all groups), `interpreter_info` (with `platform`); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
+| `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C and passes SIGTERM/SIGHUP on), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`. |
+| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (all groups), `interpreter_info` (with `platform` and `cc`); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
 | `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `DeployError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free`, `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./deploy __init`; with rollback), `copy_template`, `new`; for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
-| `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
+| `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`, `COMPILER_MISSING`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
 | `tasks.py` | `[tasks]`: `Placeholders` (lazy `{python}`), `deps` (each once per invocation), cycle detection, `run_task`, `describe`, `list_tasks`. |
-| `cmd_env.py` | `setup` (= `cmd_apply.apply(command="setup")`), `doctor` (calls `cmd_apply.doctor`), `sync`, `lock`, `add`, `remove`, `clean` (`_env_dirs`, `_remove`, `_is_link`); `ensure_lock`; `_fix_exec_bit`; `_c_compiler`, `_msvc(platform)`, `_xcode_problem`, `_long_paths`. |
+| `cmd_env.py` | `setup` (= `cmd_apply.apply(command="setup")`), `doctor` (calls `cmd_apply.doctor`), `sync`, `lock`, `add`, `remove`, `clean` (`_env_dirs`, `_remove`, `_is_link`); `ensure_lock`; `_fix_exec_bit`; `_c_compiler` (the one setuptools runs: `$CC`, else the `.venv` Python's sysconfig CC), `_msvc(platform)`, `_xcode_problem`, `_long_paths`. |
 | `cmd_apply.py` | `./deploy apply [--force]` / `setup [--force]` (section 5.8): `make_plan` (every refusal before the first write), `apply`, `_print_plan` (--dry-run), the `applied` record (`load_record`, `save_record`, `trusted_record`, `project_record`, `record_of`, `rename_record`), `applied_state` / `_applied_preset` / `applied_name`, `dependency_changes` (`DepChanges`, `req_key`), `read_project`, `pending` + `doctor` (changes not applied yet), `reference_problems`, `unused_envs`. |
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `new`, the internal `__init` (`cmd_init`), and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
-| `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`, `BASEDPYRIGHT_NODE`. |
+| `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`, `stage_pythonpath`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`, `BASEDPYRIGHT_NODE`. |
 | `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
 | `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys (`parse_key`, `check_key`, `targets_for`), `UV_PLATFORMS`/`host_floor`, `ensure_env`, `export_requirements`, `install_deps`, `drop_install_junk`, `has_native`, `skipped_requirements`, `copy_app`, `uses_tkinter`, `windowed`, `tree_bytes`; `nuitka.NUITKA`/`NUITKA_PYTHON`, `check_python`, `check_options`, `optimization_args` (`[deploy.nuitka]` lto/pgo); `pyz.check_parts`, `merge`. |
 | `shells.py` | `__probe`, launcher/shell doctor checks, `shell-setup` snippets, `selftest --shells` (section 4.9). |
@@ -617,9 +617,12 @@ header rules (with detector tests proving each rule fires).
 - 0 ok; 1 = check/test failures, doctor problems, any FAIL in a selftest suite, or an internal
   runner error (traceback printed); 2 = usage/config (`DeployError` default, argparse; also a
   program that cannot be started: no exec bit, no `#!` line, a folder; a working folder that
-  does not exist; bad `[tasks]` entries); 3 = missing requirement (uv, a uv older than
-  `envs.MIN_UV`, a program, compiler, interpreter, Neovim/git with `--require`, the runner
-  itself started on Python < 3.11 by `deploy.py`'s check); 130 = Ctrl+C;
+  does not exist; bad `[tasks]` entries; a file under `.build/` or `dist/` it may not write, left
+  by another user: `cli._scratch_denied`); 3 = missing requirement (uv, a uv older than
+  `envs.MIN_UV`, a program (or the interpreter a script's `#!` line names: `proc._not_found`),
+  a C compiler mypyc cannot start, an interpreter, Neovim/git with `--require`, the runner
+  itself started on Python < 3.11 by `deploy.py`'s check); 130 = Ctrl+C; 143/129 = a SIGTERM/
+  SIGHUP sent to the runner (POSIX);
   141 = the reader of stdout went away (`./deploy help | head -1`: quiet, no traceback; POSIX
   only, Windows reports a closed pipe as `OSError` EINVAL, unhandled). `run`, `test BACKEND`
   (pytest's own code: 5 = no tests collected, 4 = usage error) and tasks return the child's
@@ -627,16 +630,26 @@ header rules (with detector tests proving each rule fires).
   `proc.CommandFailed` carries the failed child's code. A child killed by signal N gives
   128 + N (`proc.exit_code`, like sh and uv; `cli.main` also maps a negative code a command
   returns), never 256 - N.
-- Ctrl+C (`proc._wait_through_ctrl_c`): the child got the same Ctrl+C (terminal process group,
-  console), so `proc.run` waits for it instead of letting `subprocess.run` SIGKILL it 0.25 s
-  later (an app's cleanup was cut short; under `uv run` the app kept running as an orphan). A
-  no-op Python handler records the Ctrl+C, only in the main thread and only while SIGINT has
-  its default handler (a runner started with SIGINT ignored keeps passing SIG_IGN on). Then
-  `proc.Interrupted` (a KeyboardInterrupt) stops the command, so `check`, `test all` and task
-  deps never go on to the next step; `cli.main` prints `error: interrupted` and exits with the
-  child's code, or 130 when it exited 0 (an interrupted command never reports success) or died
-  of the Ctrl+C (`STATUS_CONTROL_C_EXIT` on Windows). A child that ignores SIGINT is waited
-  for, like `uv run` does. Ctrl+C in the runner's own Python code: KeyboardInterrupt, 130.
+- Ctrl+C (`proc._wait_through_signals`): the child got the same Ctrl+C (terminal process group,
+  console), so `proc.run` (a `subprocess.Popen` it waits for itself) waits for it instead of
+  letting `subprocess.run` SIGKILL it 0.25 s later (an app's cleanup was cut short; under `uv
+  run` the app kept running as an orphan). A no-op Python handler records the Ctrl+C, only in
+  the main thread and only while SIGINT has its default handler (a runner started with SIGINT
+  ignored keeps passing SIG_IGN on). Then `proc.Interrupted` (a KeyboardInterrupt) stops the
+  command, so `check`, `test all` and task deps never go on to the next step; `cli.main` prints
+  `error: interrupted` and exits with the child's code, or 130 when it exited 0 (an
+  interrupted command never reports success) or died of the Ctrl+C (`STATUS_CONTROL_C_EXIT` on
+  Windows). A child that ignores SIGINT is waited for, like `uv run` does. Ctrl+C in the
+  runner's own Python code: KeyboardInterrupt, 130.
+- SIGTERM and SIGHUP (POSIX; `proc._Waiter.forward`): usually sent to the runner alone (`kill
+  PID`, a supervisor, `docker stop`, `Popen.terminate()`, which `uv run --script` passes on to
+  the runner). Their default action killed the runner at once and left uv and the app running
+  as orphans that never got the signal. While a child runs they are passed on to it, like `uv
+  run` does, and the child is waited for; then `proc.Interrupted(code, signum)` stops the
+  command like Ctrl+C: `error: terminated (SIGTERM)`, the child's code, or 128 + N when it
+  exited 0. Same conditions (main thread, default handler: `nohup` keeps SIG_IGN). A signal
+  sent to the whole process group reaches the child twice, as with uv itself. Outside a child
+  (in-process work) the default action still ends the runner.
 - Runner output goes to stderr through `ui` so the app keeps stdout. Exceptions, printed to
   stdout on purpose: `help`, `__probe`, `shell-setup` snippets, and the `--json` reports of
   `selftest --shells` (also with `--list`) and `selftest --e2e`.
@@ -645,7 +658,10 @@ header rules (with detector tests proving each rule fires).
   result table and failure/skip lines), warnings, errors and
   `check_line` always print, and a dry run ignores `-q` (its output is the plan). Still
   `ui.info` (hidden by `-q`): the `mode` display (`cmd_mode._describe`) and `render
-  --check/--diff` lists (`cmd_mode.cmd_render`, `render.apply`).
+  --check/--diff` lists (`cmd_mode.cmd_render`, `render.apply`). uv's own progress (`Resolved`,
+  `Installed`, `Checked`...) is progress too: under `-q`, `envs.uv` passes `--quiet` to every uv
+  call it echoes (uv still prints its errors and warnings; the output of what `uv run` starts is
+  untouched), never to a captured query the runner reads.
 - `ui.error` prints `error: ` and `ui.warn` prints `warning: ` (only the prefix is coloured on a
   TTY). The VS Code problem matcher `RULES_RE` and the Neovim parser `tasks.parse_line` depend
   on these exact prefixes and on `str(lintc.Finding)` (`src/...:N: msg`, relative to ROOT): do
@@ -671,7 +687,9 @@ header rules (with detector tests proving each rule fires).
   keys, the Nuitka pin and PGO rules (`nuitka.check_python`, `check_options`) as a real build
   does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M: would output
   dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options: --lto=... [--pgo-c ...] <extras>`), then
-  stops. `report` builds nothing and never opens the browser.
+  stops. `report` builds nothing and never opens the browser. No success line for a skipped
+  step: `compile`, `report` and `check` print `(--dry-run) would ...`/`were not run` instead of
+  their `ok` lines, and `test all` no summary of `[ok]` rows.
 - `mode` validates the new `pytemplate.toml` in memory and prints the keys that would change
   (new and current value), whether `pyproject.toml` would be rewritten, `uv.lock` ("would
   re-lock", or a read-only `uv lock --check`), the generated files that would update, the
@@ -1117,7 +1135,11 @@ Formats:
   writing, as a preflight for commands that change other files first.
 - `render.auto` only warns (`pyproject_outdated`); `write_pyproject` runs in `lock`, `mode`,
   `apply`/`setup` and `rename` (via `cmd_env.ensure_lock`) and `__init`, because the change
-  needs re-locking.
+  needs re-locking. `lock` (`cmd_env.cmd_lock`) puts `pyproject.toml`'s old bytes back when its
+  `uv lock` fails (offline, no solution, Ctrl+C) or writes no `uv.lock`
+  (`cmd_env.LOCK_READ_ONLY`: `--check`, `--locked`, `--check-exists`, `--frozen`, `--dry-run`;
+  `UV_LOCKED`/`UV_FROZEN` set): a rewritten pyproject.toml next to the old lock made every
+  `uv run --locked` fail.
 - Not a managed part, but kept in line by `./deploy apply` (section 5.8): the option-driven
   preset requirements in `[project] dependencies` and the dev group (flet's three pins,
   raylib's `{package}=={version}`), through `uv remove/add --frozen` and one `uv lock`.
@@ -1138,10 +1160,12 @@ Formats:
   hook's ruff uses `--frozen`, section 5.6). `cmd_env.ensure_lock` runs `uv lock --check` and
   then `uv lock` if needed; under `--dry-run`, when the managed pyproject parts would change, it
   echoes `uv lock` instead (the check would read the unwritten file and pass).
-- `envs.sync` = `uv sync --locked --all-groups` (apply/setup, sync, mode): every dependency group of
-  `pyproject.toml` is installed, so `./deploy add --group G pkg` survives the next sync and
-  reaches a fresh clone (an exact sync of the default groups removed it); `uv run` syncs
-  inexactly and never removes them. `add`/`remove` take `--dev` or `--group G`, not both.
+- `envs.sync` = `uv sync --locked --all-groups` (apply/setup, sync, mode, add, remove): every
+  dependency group of `pyproject.toml` is installed, so `./deploy add --group G pkg` survives the
+  next sync and reaches a fresh clone (an exact sync of the default groups removed it); `uv run`
+  syncs inexactly and never removes them. `add`/`remove` take `--dev` or `--group G`, not both,
+  and run `uv add|remove --no-sync` (it still re-locks), then `envs.sync` of `.venv`: uv's own
+  sync after `remove` is exact for the default groups and uninstalled every other group.
 - The oldest supported uv is `envs.MIN_UV` = 0.10.12, read from uv's own download metadata:
   the first uv that downloads `pypy@3.11.15` (0.10.11: "No download found for request");
   CPython 3.14 final needs 0.9.0 (0.8.x silently installs 3.14.0rc2) and `uv export --format
@@ -1239,7 +1263,10 @@ Formats:
      finding (`imports.parse_error`: a syntax error, or syntax newer than the runner's own
      Python), never an internal error.
   5. With `typing.editor = "basedpyright"`: basedpyright (`BASEDPYRIGHT` pin) on
-     `.build/cfg/pyright-<profile>.json`.
+     `.build/cfg/pyright-<profile>.json` (`cmd_dev._run_basedpyright`). Exit 1 is only a
+     warning when the profile is not `blocking`; any other code, or pins uv cannot install
+     (offline, a cold cache: asked first with a quiet `uv run --with ... python -c ""`,
+     because uv then exits 1 as well), fails the check.
 - `check all` runs each distinct profile once (cpython and pypy usually share one) and the
   mypyc rules only once, with the strictest profile (`mypyc` when present), so each finding
   appears once in the Problems panel.
@@ -1305,7 +1332,12 @@ Formats:
   --parallel N)`. It uses the mypycify API because `python -m mypyc` cannot set
   `strip_asserts`, `group_name` or `multi_file` and always writes to `./build`. When mypycify
   exits or raises (mypy/mypyc rejected the code; the errors are printed) it returns
-  `MYPYC_REJECTED` (4, mirrored in `mypyc.py`); a C build failure exits with setuptools' code.
+  `MYPYC_REJECTED` (4, mirrored in `mypyc.py`). When the C build fails (setuptools reports
+  every failure as `SystemExit("error: ...")`) it asks `mypyc_build.missing_compiler` why: the
+  program of the compiler or linker command (`CC`, `LDSHARED`, Python's own `cc`) is not
+  found, or MSVC cannot be set up -> `COMPILER_MISSING` (5), which `mypyc.build` turns into
+  exit 3 (a missing requirement) with the install hint; any other C failure exits with
+  setuptools' code.
   Every spec key it reads must be written by `mypyc.build` (a test parses the script).
 - Extra C flags (`mypyc_build.extra_cflags`, appended to mypyc's own `extra_compile_args` of
   every extension, as a NEW list each: mypycify hands one shared list to all of them; the
@@ -1336,7 +1368,7 @@ Formats:
 - Output is captured unless `-v`; on failure it is printed. The compiler-install hint
   (`has_compiler_hint`) is added only when the exit code is not `MYPYC_REJECTED` (with `-v`
   the output was not captured, and every type error used to get the hint); the runner's own
-  code stays 1 (`mypyc failed (exit code 1)`).
+  code stays 1 (`mypyc failed (exit code 1)`), or 3 for `COMPILER_MISSING`.
 - After the build every compiled module must have an extension, else `DeployError` (and no
   record is written, so the next build is forced).
 - `compile.annotate = true`: every mypyc build (`run`, `test`, `compile`, `build`) also writes
@@ -1344,9 +1376,15 @@ Formats:
 - `./deploy compile [--release]` builds the stage without running it: the hidden VS Code task
   `deploy: compile` is the `preLaunchTask` of the mypyc debug config.
 - `report` writes the same `ANNOTATE_HTML` with `compile_c=False` (no C compiler needed) plus
-  mypy `--any-exprs-report` and `--lineprecision-report` into `.build/reports/`.
-- Test-time proof: `./deploy test mypyc` runs pytest with `-o pythonpath=<stage>` (overrides
-  pyproject's `pythonpath = ["src"]`) and `PYTEMPLATE_COMPILED`; every preset's
+  mypy `--any-exprs-report` and `--lineprecision-report` into `.build/reports/`. mypy's exit 1
+  (type errors) still writes them; any other code (2: a syntax error or a bad config stopped
+  it) is an error, exit 1, never `ok Any expressions per module`.
+- Test-time proof: `./deploy test mypyc` runs pytest with `-o pythonpath=...` and
+  `PYTEMPLATE_COMPILED`. An `-o` value replaces the whole setting, so it repeats the project's
+  own entries (`cmd_dev.pytest_pythonpath`: the first configuration file pytest itself reads in
+  the project folder, `PYTEST_CONFIGS`) with the `src` one replaced by the stage
+  (`cmd_dev.stage_pythonpath`; the stage first when none is `src`): an extra entry such as
+  `tests/helpers` imports under mypyc too. Every preset's
   `tests/conftest.py` (identical copies) raises `UsageError` when a listed module did not load
   from `.pyd/.so`, and skips tests marked `interpreted_only` under mypyc.
 - `exe_stage` deletes the compiled `.py` files so PyInstaller/Nuitka can only bundle the binary.
@@ -2157,8 +2195,9 @@ short temp tree and unset `NVIM_APPNAME`.
   copy that must restore every byte), `test_cli_core.py` (the runner's core: global options,
   dispatch, render-before-command, help, the exit code of every outcome, every command rejecting
   a bogus argument, `proc.run` dry-run/errors/signals/threads, `base_env` per variable, Ctrl+C
-  with real children that trap SIGINT, a closed stdout, `[tasks]` deps/cycles/placeholders/cwd/
-  env/uv modes/arguments, `check`/`test`/`lint` semantics, and exit codes through `deploy.py` in a
+  and a SIGTERM/SIGHUP passed on, with real children that trap them, a closed stdout, `[tasks]`
+  deps/cycles/placeholders/cwd/env/uv modes/arguments, `check`/`test`/`lint`/`report` semantics
+  and their dry runs, the mypyc tests' pythonpath, and exit codes through `deploy.py` in a
   throwaway copy), `test_envs_core.py` (the section 7 contract, `MIN_UV`, clean, sync/add/remove/lock
   command lines, `ensure_lock`, exec bits in a throwaway git repository, compiler checks, doctor
   lines and exit code; real uv only offline in `.venv`), `test_hooks.py` (the hook in throwaway
@@ -2539,8 +2578,10 @@ Files and git:
   the runner normalises.
 - `deploy` and `deploy.ps1` are 100755: `cmd_env._fix_exec_bit` repairs both on `setup`, the
   files' own exec bit on POSIX (with or without git: with `core.filemode=true` an index-only fix
-  is undone by the next `git add`) and the git mode (`core.filemode=false` on Windows loses
-  it); `presets.new` marks both, `presets.init` chmods both on POSIX. `deploy.cmd` stays 100644.
+  is undone by the next `git add`; a file it may not chmod, another user's in a shared checkout,
+  is a warning naming `chmod +x`, and apply goes on) and the git mode (`core.filemode=false` on
+  Windows loses it); `presets.new` marks both, `presets.init` chmods both on POSIX.
+  `deploy.cmd` stays 100644.
 - Default app content lives in `presets/script/files/` (section 11).
 
 ## 15. Known issues and fragile points (still open)
@@ -2676,7 +2717,7 @@ uv:
 CPython and its standard library:
 - **`subprocess.run` kills the child 0.25 s after Ctrl+C** (LIMITATION, 3.7+): an app's cleanup
   was cut short; under `uv run` the app kept running as an orphan. Up: python/cpython#70130
-  (bpo-25942, where the grace period came from). Fix: `proc._wait_through_ctrl_c` (5.3). Test:
+  (bpo-25942, where the grace period came from). Fix: `proc._wait_through_signals` (5.3). Test:
   `test_cli_core.py::test_ctrl_c_waits_for_a_child_that_cleans_up` and the other
   `test_ctrl_c_*`. Goes: never.
 - **`Path.rglob` does not enter symlinked folders** (LIMITATION; `recurse_symlinks` from 3.13):
@@ -3414,6 +3455,11 @@ Windows:
   task's `tools/gen.sh` ran from the caller's folder, not the task's cwd. Fix: `tasks.run_task`
   anchors it (6.1). Test: `test_cli_core.py::test_a_relative_program_runs_from_the_task_cwd`.
   Goes: never.
+- **CreateProcess tries only `<name>.exe` for a bare program name** (LIMITATION, PATHEXT is a
+  shell feature): a `uv = false` task running `npm`, `yarn` or `mvn` (`.cmd` files) failed with
+  "program not found" on Windows only. Fix: `tasks.run_task` looks the name up on the task's
+  PATH with PATHEXT, through the standard library's shutil.which (6.1). Test:
+  `test_cli_core.py::test_a_bare_program_is_found_with_pathext_on_windows`. Goes: never.
 - **A command line holds 32767 characters** (LIMITATION): Fix: `hooks.ARG_LIMIT` batches file
   arguments (5.6). Test: `test_hooks.py::test_batches`. Goes: never.
 - **A file stays locked after its process ends** (LIMITATION): a just-exited exe, an antivirus
@@ -3461,9 +3507,9 @@ Behaviour:
 - Tasks: a task with `backend = "mypyc"` runs interpreted in `.venv` unless it goes through a
   `deps` entry such as `compile` and runs the stage.
 - Ctrl+C waits for the running child (section 5.3): a child that ignores SIGINT keeps the
-  runner waiting (Ctrl+\ or closing the terminal ends both), as with `uv run`. Windows: a
-  closed stdout pipe is `OSError` EINVAL there, so `./deploy help | more` quitting early still
-  prints a traceback (untested).
+  runner waiting (Ctrl+\ ends both; closing the terminal passes SIGHUP on), as with `uv run`.
+  Windows: a closed stdout pipe is `OSError` EINVAL there, so `./deploy help | more` quitting
+  early still prints a traceback (untested).
 - `clean --envs` removes every `.venv*` of this side (WSL on /mnt: only the `-wsl` ones),
   including the environments in use; there is no "unused only" option (`mode` and `apply`
   only print a note about leftovers). On Windows close the editor first (its mypy/ruff servers run from
@@ -3573,8 +3619,8 @@ Code coupling (rename together):
 - mypyc internals mirrored by the runner (checked by `test_mypyc_core` against the locked
   mypy): `lintc.NATIVE_CLASS_DECORATORS` <-> mypyc's native decorators;
   `lintc.relative_file_at_import` <-> when mypyc builds no shared lib; `mypyc.remove_stale_extensions`
-  <-> mypyc's lib names (`<group>__mypyc`, `<module>__mypyc`). `mypyc.MYPYC_REJECTED` <->
-  `tools/mypyc_build.py`; the spec keys the script reads <-> `mypyc.build`;
+  <-> mypyc's lib names (`<group>__mypyc`, `<module>__mypyc`). `mypyc.MYPYC_REJECTED` and
+  `COMPILER_MISSING` <-> `tools/mypyc_build.py`; the spec keys the script reads <-> `mypyc.build`;
   `mypyc_build.extra_cflags`/`compiler_type` <-> the wheel's `SETUP_PY`
   (`test_wheel_setup_py_adds_the_same_flags_as_the_stage`); `mypyc.COMPILER_ENV` <-> the
   variables setuptools' `configure_system` reads.

@@ -139,6 +139,27 @@ def test_sync_installs_every_dependency_group(tmp_path: Path, monkeypatch: pytes
     assert calls.argvs == [["uv", "sync", "--locked", "--all-groups"]]
 
 
+def test_quiet_hides_uvs_own_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """README: -q prints no progress lines. `./deploy -q sync` still printed uv's `Resolved 26
+    packages` and `Checked 21 packages`."""
+    monkeypatch.setattr(envs, "ROOT", tmp_path)
+    (tmp_path / ".venv").mkdir()
+    calls = Calls(monkeypatch)
+    env = envs.cpython_env(make())
+    monkeypatch.setattr(envs.ui, "QUIET", True)
+    envs.sync(env)
+    envs.uv_run(env, ["python", "app.py"])  # uv's own lines only: the app's output is untouched
+    envs.uv(env, ["lock", "--check"], check=False, capture=True, echo=False)  # a query: the runner reads it
+    monkeypatch.setattr(envs.ui, "QUIET", False)
+    envs.sync(env)
+    assert calls.argvs == [
+        ["uv", "--quiet", "sync", "--locked", "--all-groups"],
+        ["uv", "--quiet", "run", "--locked", "python", "app.py"],
+        ["uv", "lock", "--check"],
+        ["uv", "sync", "--locked", "--all-groups"],
+    ]
+
+
 def test_a_polluted_uv_environment_still_selects_the_project_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Real uv, offline, in this project's .venv: an exported UV_PROJECT_ENVIRONMENT, UV_PYTHON
     or VIRTUAL_ENV (another project, an activated venv) never reaches uv."""
@@ -164,6 +185,7 @@ def test_interpreter_info_of_this_python() -> None:
     assert info["impl"] == sys.implementation.name
     assert info["version"] == "%d.%d.%d" % sys.version_info[:3]
     assert info["platform"] == sysconfig.get_platform()  # what setuptools picks the MSVC tools by
+    assert info["cc"] == sysconfig.get_config_var("CC")  # the compiler it runs without $CC
 
 
 # --- the oldest uv ---------------------------------------------------------------------------------
@@ -281,19 +303,22 @@ def fake_uv(monkeypatch: pytest.MonkeyPatch, code_for: dict[tuple[str, ...], int
     return calls
 
 
+SYNC_ALL = ["sync", "--locked", "--all-groups"]
+
+
 def test_add_remove_argv(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     calls = fake_uv(monkeypatch)
     cfg, pp = make(), make(PYPY)
     assert cmd_env.cmd_add(cfg, ["x", "--cpython-only"]) == 0
-    assert calls[-1] == ["add", "--marker", "implementation_name == 'cpython'", "x"]
+    assert calls[-2:] == [["add", "--no-sync", "--marker", "implementation_name == 'cpython'", "x"], SYNC_ALL]
     cmd_env.cmd_add(cfg, ["--dev", "x", "y"])
-    assert calls[-1] == ["add", "--dev", "x", "y"]
+    assert calls[-2:] == [["add", "--no-sync", "--dev", "x", "y"], SYNC_ALL]
     cmd_env.cmd_add(cfg, ["--group", "docs", "x"])
-    assert calls[-1] == ["add", "--group", "docs", "x"]
+    assert calls[-2:] == [["add", "--no-sync", "--group", "docs", "x"], SYNC_ALL]
     cmd_env.cmd_remove(cfg, ["--group", "docs", "x"])
-    assert calls[-1] == ["remove", "--group", "docs", "x"]
+    assert calls[-2:] == [["remove", "--no-sync", "--group", "docs", "x"], SYNC_ALL]
     cmd_env.cmd_remove(cfg, ["x"])
-    assert calls[-1] == ["remove", "x"]
+    assert calls[-2:] == [["remove", "--no-sync", "x"], SYNC_ALL]
     count = len(calls)
     for bad in (["--dev", "--group", "g", "x"], [], ["--dev"]):
         with pytest.raises(SystemExit) as e:
@@ -312,6 +337,31 @@ def test_add_remove_argv(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capture
     assert "PyPy" not in capsys.readouterr().err
 
 
+def test_remove_keeps_the_packages_of_every_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`uv remove` syncs EXACTLY for the default groups: `./deploy remove idna` uninstalled six,
+    added with `./deploy add --group docs six`. The environment is synced like setup and sync do
+    (every group), never by uv add/remove themselves."""
+    calls = fake_uv(monkeypatch)
+    cmd_env.cmd_remove(make(), ["idna"])
+    edits = [c for c in calls if c[0] in ("add", "remove")]
+    syncs = [c for c in calls if c[0] == "sync"]
+    assert all("--no-sync" in c for c in edits) and edits
+    assert syncs == [SYNC_ALL] and calls[-1] == SYNC_ALL  # after the edit
+
+
+def test_a_failed_remove_syncs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def failing(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(str(args[0]))
+        raise proc.CommandFailed(["uv", *args], 1)
+
+    monkeypatch.setattr(envs, "uv", failing)
+    with pytest.raises(proc.CommandFailed):
+        cmd_env.cmd_remove(make(), ["not-a-dependency"])
+    assert calls == ["remove"]
+
+
 def test_cmd_lock_applies_pyproject_and_forwards_its_arguments(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     calls = fake_uv(monkeypatch)
     written: list[bool] = []
@@ -320,6 +370,71 @@ def test_cmd_lock_applies_pyproject_and_forwards_its_arguments(monkeypatch: pyte
     assert cmd_env.cmd_lock(make(), ["--upgrade-package", "rich"]) == 0
     assert written == [True] and calls == [["lock", "--upgrade-package", "rich"]]
     assert "pyproject.toml: updated the parts managed by pytemplate" in capsys.readouterr().err
+
+
+@pytest.fixture
+def lock_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A pyproject.toml that render.write_pyproject rewrites (the managed parts changed)."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_bytes(b"[project]\r\nname = 'old'\r\n")
+    monkeypatch.setattr(cmd_env, "PYPROJECT", pyproject)
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    for name in cmd_env.LOCK_READ_ONLY_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+    def write(cfg: Config) -> bool:
+        pyproject.write_text("[project]\nname = 'new'\n", encoding="utf-8", newline="\n")
+        return True
+
+    monkeypatch.setattr(render, "write_pyproject", write)
+    monkeypatch.setattr(render, "apply", lambda cfg, **kw: ([], []))
+    return pyproject
+
+
+def test_a_failed_lock_puts_pyproject_back(lock_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Offline (or no solution): uv lock fails and leaves uv.lock alone. The rewritten
+    pyproject.toml stayed, so pyproject and uv.lock disagreed and every `uv run --locked`
+    (run, test, check...) failed until a successful lock or a `git checkout pyproject.toml`."""
+    failure: BaseException = proc.CommandFailed(["uv", "lock"], 1)
+
+    def failing(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        raise failure
+
+    monkeypatch.setattr(envs, "uv", failing)
+    with pytest.raises(proc.CommandFailed):
+        cmd_env.cmd_lock(make(), [])
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"  # every byte, CRLF included
+    assert "pyproject.toml: put back as it was" in capsys.readouterr().err
+    failure = proc.Interrupted(130)  # Ctrl+C during uv lock
+    with pytest.raises(KeyboardInterrupt):
+        cmd_env.cmd_lock(make(), [])
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
+
+
+@pytest.mark.parametrize("args", [["--check"], ["--locked"], ["--dry-run"], ["--upgrade", "--dry-run"], ["--frozen"], ["--check-exists"]])
+def test_a_read_only_lock_puts_pyproject_back(lock_project: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]) -> None:
+    """`./deploy lock --dry-run` (a preview) rewrote pyproject.toml, uv wrote no uv.lock, and the
+    project was left with a pyproject.toml its uv.lock does not match."""
+    calls = fake_uv(monkeypatch)
+    assert cmd_env.cmd_lock(make(), args) == 0
+    assert calls == [["lock", *args]]
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
+
+
+@pytest.mark.parametrize("name", ["UV_LOCKED", "UV_FROZEN"])
+def test_a_lock_made_read_only_by_the_environment_puts_pyproject_back(lock_project: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    fake_uv(monkeypatch)
+    monkeypatch.setenv(name, "1")
+    cmd_env.cmd_lock(make(), [])
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
+
+
+def test_a_successful_lock_keeps_the_new_pyproject(lock_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    fake_uv(monkeypatch)
+    monkeypatch.setenv("UV_FROZEN", "0")  # a false value is no read-only lock
+    assert cmd_env.cmd_lock(make(), ["--upgrade"]) == 0
+    assert lock_project.read_text(encoding="utf-8") == "[project]\nname = 'new'\n"
+    assert "put back" not in capsys.readouterr().err
 
 
 def test_ensure_lock_dry_run_announces_the_relock(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -334,6 +449,7 @@ def test_ensure_lock_dry_run_announces_the_relock(monkeypatch: pytest.MonkeyPatc
         raise AssertionError("no process may start under --dry-run")
 
     monkeypatch.setattr(subprocess, "run", no_process)
+    monkeypatch.setattr(subprocess, "Popen", no_process)  # proc.run starts its children with Popen
     cmd_env.ensure_lock(make())
     err = capsys.readouterr().err
     assert "pyproject.toml: would update" in err
@@ -474,6 +590,24 @@ def test_make_writable_never_follows_links(tmp_path: Path) -> None:
     os.chmod(outside, 0o644)
 
 
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX folder modes")
+def test_make_writable_fixes_the_top_folder_too(tmp_path: Path) -> None:
+    """`chmod 555 .build`: _make_writable fixed only the entries below it, so clean still
+    could not delete them ("could not remove .build completely")."""
+    root = tmp_path / ".build"
+    (root / "sub").mkdir(parents=True)
+    (root / "a").write_text("x", encoding="utf-8")
+    os.chmod(root, 0o555)
+    try:
+        cmd_env._make_writable(root)
+        assert stat.S_IMODE(os.stat(root).st_mode) & 0o700 == 0o700
+    finally:
+        os.chmod(root, 0o755)
+    link = tmp_path / "link"
+    os.symlink(tmp_path / "elsewhere", link)  # a (dangling) link as the root: nothing to change
+    cmd_env._make_writable(link)
+
+
 # --- the exec bits of the launchers -------------------------------------------------------------------
 
 
@@ -544,6 +678,28 @@ def test_fix_exec_bit_outside_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 
 @needs_git
+@pytest.mark.skipif(IS_WINDOWS, reason="exec bits are POSIX")
+def test_fix_exec_bit_warns_when_the_file_is_not_ours(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A launcher without its x bit that belongs to another user (a shared checkout): chmod
+    raised PermissionError, an internal runner error, and setup/apply stopped before the hook,
+    render and the applied record, at every later run too."""
+    root = launcher_repo(tmp_path, monkeypatch)
+    real_chmod = Path.chmod
+
+    def not_the_owner(self: Path, mode: int, **kw: Any) -> None:
+        if self.name in cmd_env.LAUNCHERS_X:
+            raise PermissionError(1, "Operation not permitted", str(self))
+        real_chmod(self, mode, **kw)
+
+    monkeypatch.setattr(Path, "chmod", not_the_owner)
+    cmd_env._fix_exec_bit()  # no exception
+    err = capsys.readouterr().err
+    assert "warning: cannot make deploy executable: Operation not permitted" in err and "chmod +x deploy" in err
+    assert "deploy.ps1" in err
+    assert index_mode(root, "deploy") == index_mode(root, "deploy.ps1") == "100755"  # the git part still ran
+
+
+@needs_git
 def test_fix_exec_bit_dry_run_changes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     root = launcher_repo(tmp_path, monkeypatch)
     monkeypatch.setattr(proc, "DRY_RUN", True)
@@ -598,9 +754,38 @@ def test_c_compiler_rejects_macos_xcode_shims(tmp_path: Path, monkeypatch: pytes
     calls.clear()
     monkeypatch.setenv("CC", "/opt/llvm/bin/clang")  # Homebrew llvm, zig cc: never the shim check
     assert cmd_env._c_compiler() == (True, "/opt/llvm/bin/clang") and calls == []
-    monkeypatch.setenv("CC", "ccache gcc")  # not a path: the next candidate
-    monkeypatch.setattr(cmd_env, "IS_MACOS", False)  # Linux: /usr/bin/cc is a real compiler
-    assert cmd_env._c_compiler() == (True, "/usr/bin/cc") and calls == []
+    monkeypatch.setenv("CC", "ccache gcc")  # setuptools runs ccache
+    monkeypatch.setattr(cmd_env, "IS_MACOS", False)  # Linux: /usr/bin/* are real programs
+    assert cmd_env._c_compiler() == (True, "/usr/bin/ccache") and calls == []
+
+
+@pytest.mark.parametrize(
+    ("cc_env", "venv_cc", "programs", "expected"),
+    [
+        (None, "cc -pthread", {"cc"}, (True, "/bin/cc")),
+        (None, "", {"cc"}, (True, "/bin/cc")),  # no .venv yet: setuptools' usual `cc`
+        (None, "clang", {"clang"}, (True, "/bin/clang")),  # macOS builds of CPython
+        # gcc or clang installed, but not the `cc` setuptools runs: the build fails
+        (None, "cc -pthread", {"gcc", "clang"}, (False, "cc not found (the CC of the .venv Python: 'cc -pthread')")),
+        # the user's CC wins, even when it names a program that does not exist
+        ("clang-99", "cc -pthread", {"cc", "gcc"}, (False, "clang-99 not found (CC='clang-99')")),
+        ("gcc-14 -m64", "cc -pthread", {"gcc-14"}, (True, "/bin/gcc-14")),
+        ("", "cc -pthread", {"cc"}, (False, "no C compiler (CC='')")),  # an empty CC is what setuptools gets
+    ],
+)
+def test_c_compiler_is_the_one_setuptools_runs(
+    monkeypatch: pytest.MonkeyPatch, cc_env: str | None, venv_cc: str, programs: set[str], expected: tuple[bool, str]
+) -> None:
+    """doctor said `[ok] C compiler for mypyc: /usr/bin/cc` with CC=clang-99 (setuptools then
+    failed: No such file or directory: 'clang-99'), and `[ok] .../gcc` where no `cc` existed."""
+    monkeypatch.setattr(cmd_env, "IS_WINDOWS", False)
+    monkeypatch.setattr(cmd_env, "IS_MACOS", False)
+    if cc_env is None:
+        monkeypatch.delenv("CC", raising=False)
+    else:
+        monkeypatch.setenv("CC", cc_env)
+    monkeypatch.setattr(cmd_env.shutil, "which", lambda name: f"/bin/{name}" if name in programs else None)
+    assert cmd_env._c_compiler("", cc=venv_cc) == expected
 
 
 @pytest.mark.parametrize(("platform", "component"), [("win-amd64", "VC.Tools.x86.x64"), ("win-arm64", "VC.Tools.arm64"), ("win32", "VC.Tools.x86.x64")])
@@ -670,6 +855,7 @@ class Doctor:
             "pypy": {"impl": "pypy", "version": "3.11.15", "jit": False, "platform": "linux-x86_64"},
         }
         self.compiler_platforms: list[str] = []
+        self.compiler_ccs: list[str] = []
         self.cp = envs.PyEnv("cpython", tmp_path / ".venv", "3.14", "only-managed")
         self.pp = envs.PyEnv("pypy", tmp_path / ".venv-pypy", "pypy@3.11.15", "only-managed")
         for env in (self.cp, self.pp):
@@ -707,8 +893,9 @@ class Doctor:
         err = "error: The lockfile at `uv.lock` needs to be updated, but `--check` was\n       provided.\n" if self.lock else ""
         return done(args, self.lock, "", err)
 
-    def _compiler(self, platform: str = "") -> tuple[bool, str]:
+    def _compiler(self, platform: str = "", cc: str = "") -> tuple[bool, str]:
         self.compiler_platforms.append(platform)
+        self.compiler_ccs.append(cc)
         return True, "/usr/bin/cc"
 
     def problems(self) -> list[tuple[bool | None, str, str]]:
@@ -804,6 +991,9 @@ def test_doctor_passes_the_venv_platform_to_the_compiler_check(doctor: Doctor) -
     assert isinstance(info, dict)
     info["platform"] = "win-arm64"
     cmd_env.cmd_doctor(make(), [])
+    info["cc"] = "clang -pthread"
+    cmd_env.cmd_doctor(make(), [])
     doctor.cp.python.unlink()  # no .venv yet: the check uses uv's default (x86_64 CPython)
     cmd_env.cmd_doctor(make(), [])
-    assert doctor.compiler_platforms == ["win-arm64", ""]
+    assert doctor.compiler_platforms == ["win-arm64", "win-arm64", ""]
+    assert doctor.compiler_ccs == ["", "clang -pthread", ""]  # the .venv Python's sysconfig CC

@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import importlib
 import os
+import signal
 import sys
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import proc, ui
+from .project import BUILD, DIST, rel
 from .ui import DeployError
 
 if TYPE_CHECKING:
@@ -299,6 +302,30 @@ def _system_exit_code(e: SystemExit) -> int:
     return 1
 
 
+def _scratch_denied(e: PermissionError) -> str | None:
+    """The file under .build/ or dist/ that `e` could not write, or None. Those folders only
+    hold what ./deploy writes again, and one left behind by another user (`sudo ./deploy ...`)
+    is no runner bug: every write there (tool configs, the mypyc stage, the build work dirs)
+    ends here as one clear error instead of a traceback."""
+    for name in (e.filename, e.filename2):
+        if not name:
+            continue
+        try:
+            path = Path(os.fsdecode(name)).resolve()
+        except (OSError, ValueError):
+            continue
+        if any(path.is_relative_to(d.resolve()) for d in (BUILD, DIST)):
+            return rel(path)
+    return None
+
+
+def _signal_name(signum: int) -> str:
+    try:
+        return signal.Signals(signum).name
+    except ValueError:  # not a signal of this OS
+        return f"signal {signum}"
+
+
 def _main(argv: list[str]) -> int:
     try:
         code = proc.exit_code(dispatch(_parse_globals(argv)))
@@ -310,14 +337,22 @@ def _main(argv: list[str]) -> int:
         ui.error(str(e))
         return e.code
     except KeyboardInterrupt as e:
-        ui.error("interrupted")
-        # proc.Interrupted: the child had the Ctrl+C too and exited with its own code. Never 0:
-        # the command did not finish its remaining steps.
-        code = e.code if isinstance(e, proc.Interrupted) else 0
-        return 130 if code in (0, proc.STATUS_CONTROL_C_EXIT) else code
+        # proc.Interrupted: the child had the Ctrl+C too (or got the SIGTERM/SIGHUP passed on) and
+        # exited with its own code. Never 0: the command did not finish its remaining steps.
+        code, signum = (e.code, e.signum) if isinstance(e, proc.Interrupted) else (0, int(signal.SIGINT))
+        ui.error("interrupted" if signum == signal.SIGINT else f"terminated ({_signal_name(signum)})")
+        return 128 + signum if code in (0, proc.STATUS_CONTROL_C_EXIT) else code
     except SystemExit as e:  # argparse: -h (0) and usage errors (2)
         return _system_exit_code(e)
-    except Exception:
+    except Exception as e:
+        scratch = _scratch_denied(e) if isinstance(e, PermissionError) else None
+        if scratch is not None:
+            ui.error(
+                f"cannot write {scratch}: {e.strerror if isinstance(e, OSError) else e}.\n"
+                "  .build/ and dist/ only hold what ./deploy writes again: ./deploy clean removes them\n"
+                "  (if another user created them, e.g. `sudo ./deploy ...`, remove them as that user)"
+            )
+            return 2
         traceback.print_exc()
         ui.error("internal runner error (the traceback above is a bug in .pytemplate/runner)")
         return 1

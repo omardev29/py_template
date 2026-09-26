@@ -132,9 +132,9 @@ it and move the code over.
 | `apply [--force]` | Applies every `pytemplate.toml` change: rename, dependencies, `uv.lock`, environments, git hook, generated files ([details](#after-editing-pytemplatetoml)) |
 | `doctor` | Checks uv, the environments, the C compiler, the generated files, `pyproject.toml`, `uv.lock`, the changes `apply` has not applied yet, the launchers, the shell, the git hook and Neovim; exit 1 when a line is `[XX]` |
 | `sync [cpython\|pypy\|mypyc\|all]` | `uv sync --locked --all-groups` of one environment or of all (default); it never re-locks |
-| `lock [--upgrade] [--upgrade-package PKG]` | Rewrites the managed parts of `pyproject.toml` and re-locks `uv.lock`; its other arguments go to `uv lock`. It does not apply `[preset.*]`: `apply` does |
-| `add PKG... [--dev\|--group G] [--cpython-only]` | `uv add`; `--cpython-only` adds the marker `implementation_name == 'cpython'` (C-API libraries that are slow or missing on PyPy) |
-| `remove PKG... [--dev\|--group G]` | `uv remove` |
+| `lock [--upgrade] [--upgrade-package PKG]` | Rewrites the managed parts of `pyproject.toml` and re-locks `uv.lock`; its other arguments go to `uv lock`. When `uv lock` fails or writes nothing (`--check`, `--dry-run`), `pyproject.toml` is put back as it was. It does not apply `[preset.*]`: `apply` does |
+| `add PKG... [--dev\|--group G] [--cpython-only]` | `uv add`, then `uv sync --locked --all-groups` of `.venv`; `--cpython-only` adds the marker `implementation_name == 'cpython'` (C-API libraries that are slow or missing on PyPy) |
+| `remove PKG... [--dev\|--group G]` | `uv remove`, then `uv sync --locked --all-groups` of `.venv` (the packages of every group stay installed) |
 | `clean [--envs]` | Deletes `.build/` and `dist/`; `--envs` also this side's `.venv*` environments (`setup` recreates the ones in use) |
 | `hooks [install [--force]\|uninstall\|run\|status]` | The git pre-commit hook ([details](#git-pre-commit-hook)); without an argument, `status` |
 | `mode [BACKEND] [--supports +B\|-B\|B,B...] [--typing auto\|off\|warn\|strict\|mypyc] [--editor pylance\|basedpyright]` | Shows the mode without arguments; otherwise edits `pytemplate.toml` and applies it (re-lock, generated files, a new PyPy environment) |
@@ -145,7 +145,7 @@ it and move the code over.
 | `check [BACKEND\|all]` | ruff and mypy with the backend's typing profile, the mypyc rules, and basedpyright with `typing.editor = "basedpyright"` |
 | `lint [--fix]` | `ruff check` of `src/` and `tests/` with the active typing profile |
 | `fmt [--check]` | `ruff format` of `src/` and `tests/` |
-| `test [BACKEND\|all] [pytest args...]` | pytest; with mypyc on the compiled modules (it fails when they were not loaded) |
+| `test [BACKEND\|all] [pytest args...]` | pytest; with mypyc on the compiled modules (it fails when they were not loaded): the stage takes the place of `src` in pytest's `pythonpath`, your other entries stay |
 | `report [--open] [--no-mypy]` | mypyc's HTML report of slow lines and mypy's `Any` reports, in `.build/reports/` (no C compiler needed) |
 | `compile [--release]` | Compiles the mypyc stage without running it (for debuggers and editors) |
 | `build [BACKEND] [--method exe\|portable\|pyz\|wheel\|nuitka\|flet] [--onefile\|--onedir] [--target KEY]... [--no-check]` | Runs `check`, then packages the app into `dist/` ([details](#distribution)) |
@@ -162,7 +162,8 @@ for `test` and `check`): to pass such a word to the app, name the backend first
 (`./deploy run cpython mypyc`).
 
 Global options go before the command: `-v` (more detail, such as the full compiler and
-PyInstaller output), `-q` (no progress lines; results, warnings and errors still print),
+PyInstaller output), `-q` (no progress lines, uv's own included; results, warnings and errors
+still print),
 `--dry-run` (shows what would change and changes nothing; it ignores `-q`), `--no-render` (does
 not regenerate the generated files first). For example `./deploy --dry-run apply`; after the
 command, `--dry-run` is an error.
@@ -190,13 +191,17 @@ Exit codes:
 - 0: success.
 - 1: check, test or doctor failures, or an internal runner error (a traceback is printed).
 - 2: a usage or configuration error (also a program without its executable bit or `#!` line, a
-  working folder that does not exist, a bad `[tasks]` entry).
+  working folder that does not exist, a bad `[tasks]` entry, a `.build/` or `dist/` that another
+  user left behind with `sudo ./deploy ...`).
 - 3: a missing requirement: uv, a uv older than 0.10.12, a program, a compiler, an interpreter,
   Neovim or git for `selftest --nvim --require`, or the runner started on a Python older than
   3.11.
 - 130: Ctrl+C. The runner waits for the app to finish its own cleanup, then stops without
   running the next step; it exits with the app's code, or 130 when the app exited with 0.
 - 141: the reader of stdout went away (`./deploy help | head -1`; Linux and macOS).
+- 143 (129): the runner got a SIGTERM (a SIGHUP) of its own, from `kill`, a supervisor or
+  `docker stop` (Linux and macOS). It passes the signal on to the app, waits for it and stops
+  like after Ctrl+C: the app's code, or 143 (129) when the app exited with 0.
 - 128 + N: a program killed by signal N.
 - `run`, `test BACKEND` and tasks return their program's exit code (pytest: 5 when no test was
   collected, 4 for a usage error). `test all` tests every backend, even after a failure, and
@@ -251,7 +256,8 @@ env = { SEED = "42" }
   `backend.supported`. `mypyc` runs interpreted in `.venv`: to run the compiled modules, add
   `deps = ["compile"]` and run `{build}/mypyc-dev/stage/main.py`.
 - `uv`: `true` (default) runs `cmd` with `uv run` in that environment; `false` runs the program
-  as it is (a `{python}` whose environment does not exist yet is created first).
+  as it is (a `{python}` whose environment does not exist yet is created first; on Windows a
+  bare name is looked up on `PATH` with its `.cmd`/`.bat` extensions too, so `npm` works).
 - `help`: the line that `./deploy tasks` and `./deploy help` show.
 - `background`: a long-running server (flet's `dev`): the editors start it without waiting.
 

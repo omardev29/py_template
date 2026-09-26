@@ -15,18 +15,20 @@ used; with uv = false its environment is synced first if it does not exist yet (
 git clean -fdx). Extra arguments to `./deploy <task> ...` are appended to the end of cmd; a task
 without cmd (deps only) takes none (exit 2). Every dependency runs at most once per ./deploy
 invocation, like just: a dependency shared by two others (a diamond) runs once. With uv = false
-a relative program with a folder in it (tools/gen.sh) runs from the task's cwd on every OS.
+a relative program with a folder in it (tools/gen.sh) runs from the task's cwd on every OS, and
+on Windows a bare name is found on PATH with PATHEXT, as in a shell (npm -> npm.cmd).
 """
 
 from __future__ import annotations
 
 import os
 import shlex
+import shutil
 from collections.abc import Callable
 
 from . import config, envs, proc, ui
 from .config import Config, TaskConfig
-from .project import BUILD, DIST, ROOT, SRC
+from .project import BUILD, DIST, IS_WINDOWS, ROOT, SRC
 from .ui import DeployError
 
 Dispatcher = Callable[[list[str]], int]
@@ -156,11 +158,18 @@ def run_task(
     ui.step(f"task {name}")
     if values.env is not None and not values.env.python.exists():
         envs.sync(values.env)  # {python} of an environment that does not exist yet
+    base = proc.base_env()
+    base.update(extra_env)
     program = argv[0]
     if not os.path.isabs(program) and any(sep and sep in program for sep in (os.sep, os.altsep)):
         # Windows (CreateProcess) resolves a relative program against the runner's cwd (the
         # caller's folder), not cwd=: anchor tools/gen.sh to the task cwd, as POSIX does
         argv[0] = str(cwd / program)
-    base = proc.base_env()
-    base.update(extra_env)
+    elif IS_WINDOWS and not os.path.isabs(program):
+        # A bare name: CreateProcess only tries `<name>.exe`, so npm, yarn or mvn (npm.cmd...)
+        # were "not found". Search the task's PATH with PATHEXT, as a shell does (not found:
+        # the name stays, and proc.run says so)
+        found = shutil.which(program, path=base.get("PATH", ""))
+        if found:
+            argv[0] = os.path.abspath(found)
     return proc.run(argv, cwd=cwd, env=base, check=False).returncode

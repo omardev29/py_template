@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import proc
+from . import proc, ui
 from .config import Config
 from .project import ENV_SUFFIX, ROOT, venv_python
 from .ui import DeployError
@@ -152,8 +152,12 @@ def uv(
     uv_path = proc.find_uv()
     if not env.dir.exists():  # uv is about to create it (and maybe download its interpreter)
         require_min_uv(uv_path)
+    # -q: uv's own progress (Resolved, Installed, Checked...) is progress too. uv --quiet keeps
+    # its errors and warnings, and never touches the output of what `uv run` starts. A captured
+    # query keeps uv's full output: the runner reads it.
+    quiet = ["--quiet"] if ui.QUIET and echo and not capture else []
     return proc.run(
-        [uv_path, *args],
+        [uv_path, *quiet, *args],
         cwd=cwd,
         env=env_vars(env, extra_env),
         check=check,
@@ -192,11 +196,12 @@ def sync(env: PyEnv) -> None:
 
 def interpreter_info(python: str | Path) -> dict[str, object]:
     """Return interpreter data (impl, version, platform, prefix) without importing anything from
-    the project. `platform` is sysconfig.get_platform(): setuptools picks the MSVC tools by it."""
+    the project. `platform` is sysconfig.get_platform(): setuptools picks the MSVC tools by it;
+    `cc` the C compiler command it runs without $CC (None on Windows)."""
     code = (
         "import json,sys,sysconfig;"
         "print(json.dumps({'impl':sys.implementation.name,'version':'%d.%d.%d'%sys.version_info[:3],"
-        "'platform':sysconfig.get_platform(),"
+        "'platform':sysconfig.get_platform(),'cc':sysconfig.get_config_var('CC'),"
         "'executable':sys.executable,'base_prefix':sys.base_prefix,"
         "'gil_disabled':bool(sysconfig.get_config_var('Py_GIL_DISABLED'))}))"
     )

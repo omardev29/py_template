@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -14,7 +15,7 @@ from pathlib import Path
 from . import cmd_nvim, envs, hooks, mypyc, proc, render, shells, ui
 from .cmd_dev import only_flags
 from .config import Config
-from .project import BUILD, DIST, ENV_SUFFIX, IS_MACOS, IS_WINDOWS, ROOT, rel
+from .project import BUILD, DIST, ENV_SUFFIX, IS_MACOS, IS_WINDOWS, PYPROJECT, ROOT, rel
 from .ui import DeployError
 
 LAUNCHERS_X = ("deploy", "deploy.ps1")  # the launchers that must stay executable (100755)
@@ -71,7 +72,12 @@ def _fix_exec_bit() -> None:
             if path.is_file() and not os.access(path, os.X_OK):
                 ui.command(f"chmod +x {launcher}")
                 if not proc.DRY_RUN:
-                    path.chmod(path.stat().st_mode | 0o111)
+                    try:
+                        path.chmod(path.stat().st_mode | 0o111)
+                    except OSError as e:  # another user's file (a shared checkout), a read-only mount
+                        # a warning, never a stop: setup/apply still install the hook, render and
+                        # record; `sh ./deploy` works without the bit
+                        ui.warn(f"cannot make {launcher} executable: {e.strerror or e}. Its owner can: chmod +x {launcher}")
     # rev-parse, not ROOT/.git: the project may live in a subfolder of a bigger repository
     if not shutil.which("git"):
         return
@@ -93,11 +99,47 @@ def cmd_sync(cfg: Config, args: list[str]) -> int:
     return 0
 
 
+# `uv lock` arguments (and the variables uv reads for them) that make it write no uv.lock
+LOCK_READ_ONLY = ("--check", "--locked", "--check-exists", "--frozen", "--dry-run")
+LOCK_READ_ONLY_ENV = ("UV_LOCKED", "UV_FROZEN")
+
+
+def _lock_read_only(args: list[str]) -> str:
+    """The argument or variable that keeps `uv lock` from writing uv.lock, or ""."""
+    for a in args:
+        if a in LOCK_READ_ONLY:
+            return a
+    for name in LOCK_READ_ONLY_ENV:  # uv's boolean variables: 1/true/yes/on
+        if os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on", "y", "t"):
+            return name
+    return ""
+
+
 def cmd_lock(cfg: Config, args: list[str]) -> int:
-    """lock [--upgrade] [--upgrade-package PKG]: apply the managed pyproject parts and `uv lock`."""
-    if render.write_pyproject(cfg):
+    """lock [--upgrade] [--upgrade-package PKG]: apply the managed pyproject parts and `uv lock`.
+
+    pyproject.toml and uv.lock change together or not at all: when `uv lock` fails (offline, no
+    solution, Ctrl+C) or writes no uv.lock (--check, --dry-run...), pyproject.toml gets its old
+    bytes back. Otherwise the two would disagree and every `uv run --locked` would fail.
+    """
+    before = PYPROJECT.read_bytes() if PYPROJECT.is_file() else None
+    changed = render.write_pyproject(cfg)
+    if changed:
         ui.info(render.pyproject_message())
-    envs.uv(envs.tool_env(cfg), ["lock", *args])
+
+    def restore(why: str) -> None:
+        if changed and before is not None and not proc.DRY_RUN and PYPROJECT.read_bytes() != before:
+            PYPROJECT.write_bytes(before)
+            ui.info(f"pyproject.toml: put back as it was ({why})")
+
+    try:
+        envs.uv(envs.tool_env(cfg), ["lock", *args])
+    except BaseException:  # a failed uv lock leaves uv.lock alone; Ctrl+C too
+        restore("uv lock did not update uv.lock")
+        raise
+    read_only = _lock_read_only(args)
+    if read_only:
+        restore(f"uv lock with {read_only} writes no uv.lock")
     render.apply(cfg)
     return 0
 
@@ -108,7 +150,7 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
     where = parser.add_mutually_exclusive_group()
     where.add_argument("--dev", action="store_true", help="development group")
     # setup and sync install every group (envs.sync: --all-groups), so it stays installed
-    where.add_argument("--group", help="dependency group (./deploy setup and sync install every group)")
+    where.add_argument("--group", help="dependency group (add, remove, setup and sync install every group)")
     if verb == "add":
         parser.add_argument(
             "--cpython-only",
@@ -116,7 +158,10 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
             help="only on CPython/mypyc (C-API libraries such as numpy: slow or unavailable on PyPy)",
         )
     ns = parser.parse_args(args)
-    argv: list[str] = [verb]
+    # --no-sync, then envs.sync: uv's own sync after `remove` is EXACT for the default groups
+    # only, so it uninstalled every package of the other groups (`add --group G`); `uv sync
+    # --all-groups` keeps them, as setup and sync do.
+    argv: list[str] = [verb, "--no-sync"]
     if ns.dev:
         argv.append("--dev")
     if ns.group:
@@ -124,7 +169,9 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
     if verb == "add" and ns.cpython_only:
         argv += ["--marker", "implementation_name == 'cpython'"]
     argv += ns.packages
-    envs.uv(envs.tool_env(cfg), argv)
+    tool = envs.tool_env(cfg)
+    envs.uv(tool, argv)
+    envs.sync(tool)
     if verb == "add" and cfg.pypy_enabled and not ns.cpython_only:
         ui.info(
             "PyPy is supported: if the package uses the CPython C-API (numpy, pillow, pydantic-core...) "
@@ -169,7 +216,12 @@ def _env_dirs() -> list[Path]:
 
 
 def _make_writable(root: Path) -> None:
-    """Clear read-only flags below `root` (links are neither followed nor changed)."""
+    """Clear read-only flags of `root` and below it (links are neither followed nor changed).
+    `root` itself too: its entries cannot be deleted while it is read-only."""
+    with contextlib.suppress(OSError):
+        mode = os.lstat(root).st_mode
+        if stat.S_ISDIR(mode):
+            os.chmod(root, mode | stat.S_IRWXU)
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if not _is_link(Path(dirpath, d))]
         for name in (*dirnames, *filenames):
@@ -280,19 +332,30 @@ def _xcode_problem() -> str | None:
     return None
 
 
-def _c_compiler(platform: str = "") -> tuple[bool, str]:
-    """The C compiler mypyc would use; `platform`: the .venv Python's sysconfig platform."""
+def _c_compiler(platform: str = "", cc: str = "") -> tuple[bool, str]:
+    """The C compiler mypyc would use. Windows: MSVC for `platform` (the .venv Python's sysconfig
+    platform). Elsewhere what setuptools runs, nothing else: $CC when it is set, else `cc`, the
+    CC of the .venv Python's sysconfig ("cc -pthread"; "cc" when unknown). A gcc or clang next to
+    a missing `cc`, or a CC naming a missing program, is no compiler: the build would fail."""
     if IS_WINDOWS:
         return _msvc(platform or "win-amd64")
-    for cc in (os.environ.get("CC"), "cc", "gcc", "clang"):
-        found = shutil.which(cc) if cc else None
-        if found:
-            if IS_MACOS and os.path.dirname(found) == "/usr/bin":
-                problem = _xcode_problem()
-                if problem:
-                    return False, f"{found} is an Xcode shim: {problem}"
-            return True, found
-    return False, "no C compiler"
+    user = "CC" in os.environ
+    command = os.environ["CC"] if user else cc or "cc"
+    source = f"CC={command!r}" if user else f"the CC of the .venv Python: {command!r}"
+    try:
+        words = shlex.split(command)
+    except ValueError:  # unbalanced quotes
+        words = []
+    if not words:
+        return False, f"no C compiler ({source})"
+    found = shutil.which(words[0])  # "ccache gcc" runs ccache
+    if not found:
+        return False, f"{words[0]} not found ({source})"
+    if IS_MACOS and os.path.dirname(found) == "/usr/bin":
+        problem = _xcode_problem()
+        if problem:
+            return False, f"{found} is an Xcode shim: {problem}"
+    return True, found
 
 
 def cmd_doctor(cfg: Config, args: list[str]) -> int:
@@ -334,9 +397,11 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
     ui.step(f"backends (active: {cfg.backend.active}; supported: {', '.join(cfg.backend.supported)})")
     cp = envs.cpython_env(cfg)
     platform = ""  # the .venv Python's sysconfig platform: which MSVC tools mypyc needs
+    cc = ""  # and its sysconfig CC: the compiler setuptools runs when $CC is not set
     if cp.python.is_file():
         if (info := env_info(cp)) is not None:
             platform = str(info.get("platform", ""))
+            cc = str(info.get("cc") or "")
             check(True, f"CPython {info['version']} in {rel(cp.dir)}")
     else:
         check(False, f"environment {rel(cp.dir)} is missing", "./deploy setup")
@@ -348,7 +413,7 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
         else:
             check(False, f"environment {rel(pp.dir)} is missing ({cfg.python.pypy})", "./deploy setup   (or ./deploy sync pypy)")
     if cfg.supports("mypyc"):
-        found, where = _c_compiler(platform)
+        found, where = _c_compiler(platform, cc=cc)
         check(found, f"C compiler for mypyc: {where}", mypyc.has_compiler_hint(platform or "win-amd64"))
     if IS_WINDOWS and cfg.supports("mypyc"):
         long_paths = _long_paths()
