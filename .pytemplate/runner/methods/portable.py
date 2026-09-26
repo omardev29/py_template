@@ -91,8 +91,7 @@ def _cmd_value(key: str, value: str) -> str:
 
 
 def _env_lines(cfg: Config, windows: bool) -> list[str]:
-    # PYTHON_JIT is read by its first character ("false" would ENABLE it): always "0" or "1"
-    env = {"PYTHONUTF8": "1", "PYTHON_JIT": "1" if cfg.python.jit else "0", **cfg.deploy.portable.env}
+    env = {"PYTHONUTF8": "1", **cfg.deploy.portable.env}
     if windows:
         return ['set "PYTHONHOME="', 'set "PYTHONPATH="', *(f'set "{k}={_cmd_value(k, v)}"' for k, v in env.items())]
     return ["unset PYTHONHOME PYTHONPATH", *(f"export {k}={shlex.quote(v)}" for k, v in env.items())]
@@ -167,7 +166,7 @@ def sh_launcher(cfg: Config, backend: str, out: Path, python: Path | None) -> st
 
 
 def write_launchers(cfg: Config, backend: str, out: Path, python: Path | None) -> list[Path]:
-    """Write <name>.cmd (Windows) and/or <name>.sh (POSIX). Never -I/-E: they would disable PYTHON_JIT."""
+    """Write <name>.cmd (Windows) and/or <name>.sh (POSIX). Never -I/-E: they would ignore PYTHONUTF8."""
     written: list[Path] = []
     if python is None or IS_WINDOWS:
         path = out / f"{cfg.app.name}.cmd"

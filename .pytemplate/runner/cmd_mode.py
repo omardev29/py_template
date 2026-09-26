@@ -1,4 +1,4 @@
-"""Mode and template commands: mode, render, init, new.
+"""Mode and template commands: mode, render, new, and the internal init step (./deploy __init).
 
 Under --dry-run each of them prints what it would do and writes nothing: no pytemplate.toml,
 pyproject.toml, uv.lock or generated file, no environment synced, no project copied.
@@ -15,7 +15,7 @@ from typing import Any
 
 from . import config, envs, presets, proc, render, ui
 from .config import BACKENDS, Config
-from .project import CONFIG_FILE, ENV_SUFFIX, PYPROJECT, ROOT, code_dirs, rel, user_path
+from .project import CONFIG_FILE, PYPROJECT, ROOT, code_dirs, rel, user_path
 from .ui import DeployError
 
 _APP_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
@@ -24,14 +24,13 @@ _DRY = "(--dry-run: nothing is written)"
 
 def _describe(cfg: Config, title: str = "current mode") -> None:
     ui.step(title)
-    ui.info(f"  app            {cfg.app.name}  (preset {cfg.app.preset}, package src/{cfg.pkg}/)")
-    ui.info(f"  active backend {cfg.backend.active}")
-    ui.info(f"  supported      {', '.join(cfg.backend.supported)}  (Python {cfg.min_python}+ syntax)")
+    ui.report(f"  app            {cfg.app.name}  (preset {cfg.app.preset}, package src/{cfg.pkg}/)")
+    ui.report(f"  active backend {cfg.backend.active}")
+    ui.report(f"  supported      {', '.join(cfg.backend.supported)}  (Python {cfg.min_python}+ syntax)")
     for b in cfg.backend.supported:
-        ui.info(f"  {'typing ' + b:<14} {cfg.profile_for(b)}")
-    ui.info(f"  editor         {cfg.typing.editor}")
-    ui.info(f"  mypyc compiles {', '.join(cfg.compile.modules)}")
-    ui.info(f"  CPython JIT    {'yes' if cfg.python.jit else 'no'}")
+        ui.report(f"  {'typing ' + b:<14} {cfg.profile_for(b)}")
+    ui.report(f"  editor         {cfg.typing.editor}")
+    ui.report(f"  mypyc compiles {', '.join(cfg.compile.modules)}")
 
 
 def _parse(parser: argparse.ArgumentParser, args: list[str]) -> argparse.Namespace:
@@ -56,24 +55,49 @@ def _config_from_text(text: str, where: str) -> Config:
 # --- mode ----------------------------------------------------------------------------------------
 
 
-def _supports_after(cfg: Config, spec: str) -> list[str]:
-    current = list(cfg.backend.supported)
-    if spec.startswith(("+", "-")):
-        for token in (t.strip() for t in spec.split(",")):
-            sign, name = token[:1], token[1:]
-            if sign not in ("+", "-") or name not in BACKENDS:
-                raise DeployError(f"mode --supports: unknown backend '{token}' (use +name or -name)")
-            if sign == "+" and name not in current:
-                current.append(name)
-            elif sign == "-" and name in current:
-                current.remove(name)
-        out = [b for b in BACKENDS if b in current]
+_NEEDS_VALUE = "mode --supports needs a value: +pypy, -pypy or a list such as cpython,mypyc"
+
+
+def _supports_after(cfg: Config, spec: str, backend: str | None = None) -> list[str]:
+    """backend.supported after `--supports SPEC`: +name/-name changes, or the full list.
+
+    `backend` (the BACKEND argument of `mode`) is added as `mode BACKEND` alone would, unless
+    SPEC removes it or leaves it out of a full list: that contradiction is an error.
+    """
+    tokens = [t.strip() for t in spec.split(",") if t.strip()]  # "+pypy," and " +pypy" are fine
+    if not tokens:
+        raise DeployError(_NEEDS_VALUE)
+    signed = [t[:1] in ("+", "-") for t in tokens]
+    if any(signed) and not all(signed):
+        raise DeployError(
+            f"mode --supports {spec}: mixes changes (+name, -name) with plain names; give every "
+            "change its sign (+pypy,-mypyc) or the full list (cpython,pypy,mypyc)"
+        )
+    known = " | ".join(BACKENDS)
+    if all(signed):
+        signs: dict[str, str] = {}
+        for token in tokens:
+            sign, name = token[0], token[1:].strip()
+            if name not in BACKENDS:
+                raise DeployError(f"mode --supports: unknown backend '{name}' in '{token}' ({known})")
+            if signs.setdefault(name, sign) != sign:
+                raise DeployError(f"mode --supports {spec}: {name} is both added and removed")
+        dropped = {n for n, s in signs.items() if s == "-"}
+        wanted = {*cfg.backend.supported, *(n for n, s in signs.items() if s == "+")} - dropped
     else:
-        names = [n.strip() for n in spec.split(",") if n.strip()]
-        for n in names:
-            if n not in BACKENDS:
-                raise DeployError(f"mode --supports: unknown backend '{n}'")
-        out = [b for b in BACKENDS if b in names]
+        for name in tokens:
+            if name not in BACKENDS:
+                raise DeployError(f"mode --supports: unknown backend '{name}' ({known})")
+        dropped = set(BACKENDS) - set(tokens)
+        wanted = set(tokens)
+    if backend:
+        if backend in dropped:
+            how = "removes it" if all(signed) else "leaves it out of the list"
+            raise DeployError(
+                f"mode {backend} --supports {spec}: {backend} would be the active backend, but --supports {how}"
+            )
+        wanted.add(backend)
+    out = [b for b in BACKENDS if b in wanted]
     if not out:
         raise DeployError(f"mode --supports {spec}: at least one backend must stay supported")
     return out
@@ -135,8 +159,6 @@ def _leftover_envs(cfg: Config, new_cfg: Config) -> None:
     left: list[Path] = []
     if cfg.pypy_enabled and not new_cfg.pypy_enabled:
         left.append(envs.pypy_env(new_cfg).dir)
-    if cfg.python.jit and not new_cfg.python.jit:
-        left.append(ROOT / f".venv-jit{ENV_SUFFIX}")  # envs.jit_env would look for the interpreter
     names = [rel(d) for d in left if d.is_dir()]
     if names:
         ui.info(
@@ -178,33 +200,44 @@ def _plan_mode(cfg: Config, new_cfg: Config, changes: list[tuple[str, str, objec
 
 
 def cmd_mode(cfg: Config, args: list[str]) -> int:
-    """mode [BACKEND] [--supports +pypy|-pypy|a,b] [--typing off|warn|strict|auto] [--jit on|off] [--editor pylance|basedpyright]"""
-    parser = argparse.ArgumentParser(prog="./deploy mode")
+    """mode [BACKEND] [--supports +pypy|-pypy|a,b] [--typing off|warn|strict|auto] [--editor pylance|basedpyright]"""
+    # allow_abbrev=False: `--typ` is an unknown argument, never a silent alias of --typing
+    parser = argparse.ArgumentParser(prog="./deploy mode", allow_abbrev=False)
     parser.add_argument("backend", nargs="?", choices=BACKENDS)
     parser.add_argument("--supports", help="+pypy, -pypy or a full list (cpython,mypyc)")
     parser.add_argument("--typing", choices=("auto", "off", "warn", "strict", "mypyc"))
-    parser.add_argument("--jit", choices=("on", "off"))
     parser.add_argument("--editor", choices=config.EDITORS)
     # `--supports -pypy`: argparse would take "-pypy" for an option; join it as --supports=-pypy
     fixed: list[str] = []
     it = iter(args)
     for a in it:
-        fixed.append(f"--supports={next(it, '')}" if a == "--supports" else a)
+        if a == "--supports":
+            spec = next(it, "")
+            if spec.startswith("--"):  # `--supports --typing strict`: the value is missing
+                raise DeployError(_NEEDS_VALUE)
+            fixed.append(f"--supports={spec}")
+        else:
+            fixed.append(a)
+    options = [a.split("=", 1)[0] for a in fixed if a.startswith("--")]
+    repeated = sorted({o for o in options if options.count(o) > 1})
+    if repeated:  # argparse would silently keep the last one
+        raise DeployError(f"mode: {', '.join(repeated)} given more than once; give each option once")
     ns = _parse(parser, fixed)
     if ns.supports is not None and not ns.supports.strip():
         raise DeployError("mode --supports needs a value: +pypy, -pypy or a list such as cpython,mypyc")
-    if not any((ns.backend, ns.supports, ns.typing, ns.jit, ns.editor)):
+    if not any((ns.backend, ns.supports, ns.typing, ns.editor)):
         _describe(cfg)
         return 0
 
     changes: list[tuple[str, str, object]] = []
-    supported = _supports_after(cfg, ns.supports) if ns.supports else list(cfg.backend.supported)
-    if ns.backend and ns.backend not in supported:
+    supported = _supports_after(cfg, ns.supports, ns.backend) if ns.supports else list(cfg.backend.supported)
+    if ns.backend and ns.backend not in supported:  # `mode pypy` alone also adds PyPy support
         supported = [b for b in BACKENDS if b in {*supported, ns.backend}]
     if supported != cfg.backend.supported:
         changes.append(("backend", "supported", supported))
     active = ns.backend or cfg.backend.active
-    if active not in supported:
+    dropped_active = active not in supported  # `--supports -cpython` while cpython is active
+    if dropped_active:
         active = supported[0]
     if active != cfg.backend.active:
         changes.append(("backend", "active", active))
@@ -213,24 +246,23 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
             changes += [("typing", "profile", "auto"), ("typing", "relaxed", ns.typing)]
         else:
             changes.append(("typing", "profile", ns.typing))
-    if ns.jit:
-        changes.append(("python", "jit", ns.jit == "on"))
     if ns.editor:
         changes.append(("typing", "editor", ns.editor))
+    # Only real changes: a value that is already set is not rewritten (its spelling stays)
+    changes = [(t, k, v) for t, k, v in changes if _current(cfg, t, k) != v]
 
     # The new configuration, validated in memory BEFORE anything is written
-    text = CONFIG_FILE.read_text(encoding="utf-8-sig")
+    text = config.read_text()
     for table, key, value in changes:
         text = config.set_value(text, table, key, value)
     planned = _config_from_text(text, "mode: the new pytemplate.toml")
+    if dropped_active:
+        ui.info(f"note: {cfg.backend.active} is no longer supported: the active backend becomes {active}")
 
     adding_pypy = planned.pypy_enabled and not cfg.pypy_enabled
     syncs: list[envs.PyEnv] = []
     if adding_pypy:
         syncs.append(envs.pypy_env(planned))
-    if ns.jit == "on":
-        syncs.append(envs.jit_env(planned))  # finds the JIT interpreter now: fail before writing
-    if adding_pypy:
         _precheck_py311(cfg)
 
     if proc.DRY_RUN:
@@ -269,7 +301,7 @@ def cmd_render(cfg: Config, args: list[str]) -> int:
     changed, edited = render.apply(cfg, force=ns.force, check=ns.check, show_diff=ns.diff)
     prefix = "outdated: " if ns.check else "would update: " if proc.DRY_RUN else "updated: "
     for path in changed:
-        ui.info(prefix + path)
+        ui.report(prefix + path)  # the answer to --check: shown even with -q
     for path in edited:
         ui.warn(f"hand-edited (left untouched without --force): {path}")
     if render.pyproject_outdated(cfg):
@@ -312,7 +344,7 @@ def _plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> No
     if not force and not presets.pristine(cfg):
         raise DeployError(
             "src/, tests/ or typings/ have changes compared to the skeleton of the current preset "
-            f"('{cfg.app.preset}'). init would replace them.\n  If you are sure: ./deploy init {preset} --force"
+            f"('{cfg.app.preset}'). init would replace them.\n  If you are sure: ./deploy __init {preset} --force"
         )
     files = presets.skeleton(preset, new_name)
     owned = _owned_now()
@@ -346,8 +378,8 @@ def _plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> No
 
 
 def cmd_init(cfg: Config, args: list[str]) -> int:
-    """init PRESET [--name NAME] [--force]: convert this project to the preset."""
-    parser = argparse.ArgumentParser(prog="./deploy init")
+    """__init PRESET [--name NAME] [--force]: convert this project to the preset (internal: ./deploy new)."""
+    parser = argparse.ArgumentParser(prog="./deploy __init")
     parser.add_argument("preset", choices=presets.available())
     parser.add_argument("--name")
     parser.add_argument("--force", action="store_true")
@@ -389,7 +421,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         ui.info(f"  name    {name}  (package src/{name.replace('-', '_').lower()}/)")
         ui.info(
             f"  would copy this template there (without .git, environments, builds or caches), "
-            f"run `./deploy init {ns.preset} --name {name} --force` in it and `git init`"
+            f"run `./deploy __init {ns.preset} --name {name} --force` in it and `git init`"
         )
         return 0
     presets.new(dest, ns.preset, name)

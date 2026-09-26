@@ -9,13 +9,18 @@ Global options go BEFORE the command; everything after it belongs to the command
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from . import proc, ui
 from .ui import DeployError
+
+if TYPE_CHECKING:
+    from .config import TaskConfig
 
 
 @dataclass(frozen=True)
@@ -32,7 +37,7 @@ COMMANDS: dict[str, Command] = {
     # environment
     "setup": Command("cmd_env", "cmd_setup", "First time on a clone: the same as apply (interpreters, environments, uv.lock, hook)", "[--force]", render=False, group="Environment"),
     "apply": Command("cmd_apply", "cmd_apply", "Apply every pytemplate.toml change (rename, dependencies, uv.lock, envs, hook, configs)", "[--force]", render=False, group="Environment"),
-    "doctor": Command("cmd_env", "cmd_doctor", "Check uv, compiler, PyPy, JIT, shells and generated files", group="Environment"),
+    "doctor": Command("cmd_env", "cmd_doctor", "Check uv, compiler, PyPy, shells and generated files", group="Environment"),
     "sync": Command("cmd_env", "cmd_sync", "Run uv sync --locked on one or all environments", "[cpython|pypy|mypyc|all]", group="Environment"),
     "lock": Command("cmd_env", "cmd_lock", "Apply the managed parts of pyproject and re-lock uv.lock", "[--upgrade] [--upgrade-package PKG]", group="Environment"),
     "add": Command("cmd_env", "cmd_add", "Add dependencies (uv add)", "PKG... [--dev|--group G] [--cpython-only]", group="Environment"),
@@ -40,9 +45,8 @@ COMMANDS: dict[str, Command] = {
     "clean": Command("cmd_env", "cmd_clean", "Remove .build/ and dist/ (and the environments with --envs)", "[--envs]", render=False, group="Environment"),
     "hooks": Command("hooks", "cmd_hooks", "Install or remove the git pre-commit hook, or run its checks on the staged files", "[install [--force]|uninstall|run|status]", render=False, group="Environment"),
     # mode and template
-    "mode": Command("cmd_mode", "cmd_mode", "Show or change the mode (backend, supported, typing, JIT, editor)", "[BACKEND] [--supports +pypy|-pypy] [--typing off|warn|strict|auto] [--jit on|off] [--editor pylance|basedpyright]", group="Mode"),
+    "mode": Command("cmd_mode", "cmd_mode", "Show or change the mode (backend, supported, typing, editor)", "[BACKEND] [--supports +B|-B|B,B...] [--typing auto|off|warn|strict|mypyc] [--editor pylance|basedpyright]", group="Mode"),
     "render": Command("cmd_mode", "cmd_render", "Regenerate .mypy.ini, pyrightconfig.json, .ruff.toml and .vscode/", "[--check] [--diff] [--force]", render=False, group="Mode"),
-    "init": Command("cmd_mode", "cmd_init", "Convert this project to a preset (script, raylib, flet)", "PRESET [--name NAME] [--force]", group="Mode"),
     "rename": Command("rename", "cmd_rename", "Rename the app: src/<pkg>, imports, pytemplate.toml, pyproject.toml, uv.lock", "NEW_NAME [--force]", render=False, group="Mode"),
     "new": Command("cmd_mode", "cmd_new", "Create a new project from this template", "DIR [--preset P] [--name NAME]", render=False, group="Mode"),
     # development
@@ -64,6 +68,14 @@ COMMANDS: dict[str, Command] = {
     "help": Command("cli", "cmd_help", "Show this help (or a command's help)", "[COMMAND]", render=False, group="Other"),
 }
 
+# Internal routes: dispatched like COMMANDS but never listed (help, editor.json, the editors'
+# task lists and the shell completion read COMMANDS only). Task names cannot start with "_".
+INTERNAL: dict[str, Command] = {
+    # `./deploy new` runs it in the fresh copy; the template maintainer regenerates the template
+    # root with it (./deploy __init script --name myapp --force). Users pick a preset with `new`.
+    "__init": Command("cmd_mode", "cmd_init", "Replace src/, tests/, typings/ and pytemplate.toml with a preset's skeleton", "PRESET [--name NAME] [--force]"),
+}
+
 EXAMPLES = """\
 Examples:
   ./deploy setup                 # first time: interpreters, environments and configs
@@ -78,12 +90,61 @@ Examples:
   ./deploy nvim doctor           # check the LazyVim integration (./deploy nvim trust once)"""
 
 
+# Commands whose extra arguments belong to someone else: `run` -> the app, `test` -> pytest,
+# `lock` -> `uv lock`, `selftest` -> pytest (or its --shells/--nvim/--e2e suite), `build` -> the
+# packager (unknown flags only). Every other command rejects an unknown argument (exit 2).
+FORWARDS = frozenset({"run", "test", "lock", "selftest", "build"})
+# `-h`/`--help` after these goes to the app, pytest, uv or the suite; after any other command it
+# shows `./deploy help COMMAND` (also after a [tasks] entry that only has deps).
+HELP_PASSES_THROUGH = frozenset({"run", "test", "lock", "selftest"})
+HELP_FLAGS = ("-h", "--help")
+
+
+def _asks_help(args: list[str]) -> bool:
+    return any(a in HELP_FLAGS for a in args)
+
+
+def _print_task(name: str, task: TaskConfig) -> None:
+    from . import tasks
+
+    print(f"./deploy {name}{' [args...]' if task.cmd else ''}")
+    print(f"  {tasks.describe(task)}")
+    if task.cmd:
+        print(f"  cmd      {proc.show(task.cmd)}   (extra arguments are appended)")
+    if task.deps:
+        print(f"  deps     {', '.join(task.deps)}" + ("" if task.cmd else "   (it only runs its deps: no arguments)"))
+    if task.cmd:
+        where = f"the {task.backend} environment" if task.backend else "the active backend's environment"
+        print(f"  runs     {'with uv run in ' + where if task.uv else 'the program as-is (uv = false)'}")
+    if task.cwd:
+        print(f"  cwd      {task.cwd}")
+    for key, value in task.env.items():
+        print(f"  env      {key}={value}")
+    if task.background:
+        print("  background: a long-running server (editors start it without waiting)")
+
+
 def cmd_help(cfg: object, args: list[str]) -> int:
-    if args and args[0] in COMMANDS:
-        c = COMMANDS[args[0]]
-        print(f"./deploy {args[0]} {c.usage}".rstrip())
-        print(f"  {c.summary}")
-        return 0
+    """help [COMMAND]: every command and task, or one of them."""
+    from . import config
+
+    names = [a for a in args if a not in HELP_FLAGS] or (["help"] if args else [])  # help -h: this one
+    if len(names) > 1:
+        raise DeployError(f"help: unrecognized arguments: {' '.join(names[1:])}  (./deploy help [COMMAND])")
+    if names:
+        name = names[0]
+        if name in COMMANDS:
+            c = COMMANDS[name]
+            print(f"./deploy {name} {c.usage}".rstrip())
+            print(f"  {c.summary}")
+            return 0
+        # Not a builtin: a [tasks] entry, a typo, or a pytemplate.toml that does not load (that
+        # error is the answer then: it says why the task is unknown)
+        loaded = cfg if isinstance(cfg, config.Config) else config.load(set(COMMANDS))
+        if name in loaded.tasks:
+            _print_task(name, loaded.tasks[name])
+            return 0
+        raise DeployError(f"unknown command: {name}  (./deploy help lists the commands and tasks)")
     print("./deploy [-v|-q] [--dry-run] [--no-render] COMMAND [args...]\n")
     groups: dict[str, list[str]] = {}
     for name, c in COMMANDS.items():
@@ -94,13 +155,13 @@ def cmd_help(cfg: object, args: list[str]) -> int:
             print(f"  {name:<12} {COMMANDS[name].summary}")
         print()
     try:
-        from . import config
+        from . import tasks
 
         loaded = config.load(set(COMMANDS))
         if loaded.tasks:
             print("Custom tasks (pytemplate.toml [tasks]):")
             for name, task in loaded.tasks.items():
-                print(f"  {name:<12} {task.help or ' '.join(task.cmd)}")
+                print(f"  {name:<12} {tasks.describe(task)}")
             print()
     except DeployError:
         pass
@@ -114,6 +175,8 @@ def cmd_tasks(cfg: object, args: list[str]) -> int:
     from .config import Config
 
     assert isinstance(cfg, Config)
+    if args:
+        raise DeployError(f"tasks: unrecognized arguments: {' '.join(args)}  (it takes no arguments)")
     tasks.list_tasks(cfg)
     return 0
 
@@ -130,6 +193,13 @@ def cmd_selftest(cfg: object, args: list[str]) -> int:
         "--e2e": e2e.selftest,  # ./deploy new + setup/check/test/build per preset
     }
     if args and args[0] in suites:
+        if proc.DRY_RUN:
+            # The suites start their shells, Neovim and ./deploy runs themselves (not through
+            # proc.run), in scratch folders: nothing of them can be skipped and still mean anything
+            raise DeployError(
+                f"selftest {args[0]} has no --dry-run: it runs real shells, projects and builds, "
+                "only in its own scratch folders; run it without --dry-run"
+            )
         return suites[args[0]](cfg, args[1:])
     tool = envs.tool_env(cfg)
     code = envs.uv_run(tool, ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", TEMPLATE / "tests", *args], check=False).returncode
@@ -142,7 +212,13 @@ def cmd_selftest(cfg: object, args: list[str]) -> int:
 
 
 def _parse_globals(argv: list[str]) -> list[str]:
+    """Consume the global options (only BEFORE the command) and return the command line.
+
+    `-h`/`--help` turns it into `help [COMMAND]`. `-q` does not apply to a dry run: its
+    output is the plan it was asked for.
+    """
     rest = list(argv)
+    wants_help = False
     while rest and rest[0].startswith("-"):
         flag = rest.pop(0)
         if flag in ("-v", "--verbose"):
@@ -153,11 +229,13 @@ def _parse_globals(argv: list[str]) -> list[str]:
             proc.DRY_RUN = True
         elif flag == "--no-render":
             _OPTS["no_render"] = True
-        elif flag in ("-h", "--help"):
-            return ["help"]
+        elif flag in HELP_FLAGS:
+            wants_help = True
         else:
             raise DeployError(f"unknown global option: {flag}  (command options go AFTER the command)")
-    return rest
+    if proc.DRY_RUN:
+        ui.QUIET = False
+    return ["help", *rest] if wants_help else rest
 
 
 _OPTS: dict[str, bool] = {"no_render": False}
@@ -169,14 +247,21 @@ def dispatch(argv: list[str]) -> int:
     if not argv or argv[0] == "help":
         return cmd_help(None, argv[1:])
     name, args = argv[0], argv[1:]
+    command = COMMANDS.get(name) or INTERNAL.get(name)
+    if name in COMMANDS and name not in HELP_PASSES_THROUGH and _asks_help(args):
+        return cmd_help(None, [name])  # the same as `./deploy help NAME` (no config needed)
     cfg = config.load(set(COMMANDS))
-    command = COMMANDS.get(name)
     if command is None:
-        if name in cfg.tasks:
-            if not _OPTS["no_render"]:
-                render.auto(cfg)
-            return tasks.run_task(cfg, name, args, dispatch)
-        raise DeployError(f"unknown command: {name}  (./deploy help)")
+        task = cfg.tasks.get(name)
+        if task is None:
+            if name == "init":  # no longer public (it is INTERNAL["__init"]): the preset is chosen by `new`
+                raise DeployError("init is no longer a ./deploy command. To start from another preset: ./deploy new DIR --preset P")
+            raise DeployError(f"unknown command: {name}  (./deploy help)")
+        if not task.cmd and _asks_help(args):
+            return cmd_help(cfg, [name])  # a deps-only task has no program to pass -h on to
+        if not _OPTS["no_render"]:
+            render.auto(cfg)
+        return tasks.run_task(cfg, name, args, dispatch)
     if command.render and not _OPTS["no_render"]:
         render.auto(cfg)
     module = importlib.import_module(f"{__package__}.{command.module}")
@@ -184,24 +269,71 @@ def dispatch(argv: list[str]) -> int:
     return func(cfg, args)
 
 
+def _output_closed() -> int:
+    """The reader of our output went away (`./deploy help | head -1`, `less` quit early): exit
+    quietly with the SIGPIPE code of a shell pipeline. stdout and stderr now point at the null
+    device, so the interpreter's final flush of what is still buffered cannot fail again.
+
+    Windows reports a closed pipe as OSError EINVAL, not BrokenPipeError: not handled there.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            null = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(null, stream.fileno())
+            finally:
+                os.close(null)
+        except (OSError, ValueError):  # no file descriptor (a replaced stream)
+            pass
+    return 1 if sys.platform == "win32" else 141
+
+
+def _system_exit_code(e: SystemExit) -> int:
+    """What Python itself would exit with: None -> 0, an int as-is, a message -> printed, 1."""
+    if e.code is None:
+        return 0
+    if isinstance(e.code, int):
+        return e.code
+    ui.error(str(e.code))
+    return 1
+
+
+def _main(argv: list[str]) -> int:
+    try:
+        code = proc.exit_code(dispatch(_parse_globals(argv)))
+        sys.stdout.flush()  # inside the try: a closed pipe is reported by main, not as a bug
+        return code
+    except BrokenPipeError:
+        raise
+    except DeployError as e:
+        ui.error(str(e))
+        return e.code
+    except KeyboardInterrupt as e:
+        ui.error("interrupted")
+        # proc.Interrupted: the child had the Ctrl+C too and exited with its own code. Never 0:
+        # the command did not finish its remaining steps.
+        code = e.code if isinstance(e, proc.Interrupted) else 0
+        return 130 if code in (0, proc.STATUS_CONTROL_C_EXIT) else code
+    except SystemExit as e:  # argparse: -h (0) and usage errors (2)
+        return _system_exit_code(e)
+    except Exception:
+        traceback.print_exc()
+        ui.error("internal runner error (the traceback above is a bug in .pytemplate/runner)")
+        return 1
+
+
 def main(argv: list[str]) -> int:
+    """Run one ./deploy command line; return the exit code (section 5.3 of CLAUDE.md)."""
     if argv[:1] == ["__probe"]:  # launcher self-test target: no config, no render, not in help
         from . import shells
 
         return shells.probe(argv[1:])
     try:
-        return dispatch(_parse_globals(argv))
-    except DeployError as e:
-        ui.error(str(e))
-        return e.code
-    except KeyboardInterrupt:
-        ui.error("interrupted")
-        return 130
-    except SystemExit as e:  # argparse
-        return e.code if isinstance(e.code, int) else 2
-    except Exception:
-        traceback.print_exc()
-        ui.error("internal runner error (the traceback above is a bug in .pytemplate/runner)")
-        return 1
+        return _main(argv)
+    except BrokenPipeError:  # stdout or stderr closed, even while an error was being reported
+        return _output_closed()
     finally:
-        sys.stdout.flush()
+        try:
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            _output_closed()

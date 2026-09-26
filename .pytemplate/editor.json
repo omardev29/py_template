@@ -54,7 +54,7 @@
     {
       "name": "doctor",
       "usage": "",
-      "summary": "Check uv, compiler, PyPy, JIT, shells and generated files",
+      "summary": "Check uv, compiler, PyPy, shells and generated files",
       "group": "Environment"
     },
     {
@@ -95,20 +95,14 @@
     },
     {
       "name": "mode",
-      "usage": "[BACKEND] [--supports +pypy|-pypy] [--typing off|warn|strict|auto] [--jit on|off] [--editor pylance|basedpyright]",
-      "summary": "Show or change the mode (backend, supported, typing, JIT, editor)",
+      "usage": "[BACKEND] [--supports +B|-B|B,B...] [--typing auto|off|warn|strict|mypyc] [--editor pylance|basedpyright]",
+      "summary": "Show or change the mode (backend, supported, typing, editor)",
       "group": "Mode"
     },
     {
       "name": "render",
       "usage": "[--check] [--diff] [--force]",
       "summary": "Regenerate .mypy.ini, pyrightconfig.json, .ruff.toml and .vscode/",
-      "group": "Mode"
-    },
-    {
-      "name": "init",
-      "usage": "PRESET [--name NAME] [--force]",
-      "summary": "Convert this project to a preset (script, raylib, flet)",
       "group": "Mode"
     },
     {

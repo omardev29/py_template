@@ -35,4 +35,5 @@ addopts = ["-ra"]
 environments = [
     "implementation_name == 'cpython' and python_full_version >= '3.14' and python_full_version < '3.15'",
 ]
+required-version = ">=0.10.12"
 python-preference = "only-managed"  # <<< pytemplate

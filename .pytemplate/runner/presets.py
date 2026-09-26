@@ -289,7 +289,7 @@ def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
     if not force and not pristine(cfg):
         raise DeployError(
             "src/, tests/ or typings/ have changes compared to the skeleton of the current preset "
-            f"('{cfg.app.preset}'). init would replace them.\n  If you are sure: ./deploy init {preset} --force"
+            f"('{cfg.app.preset}'). init would replace them.\n  If you are sure: ./deploy __init {preset} --force"
         )
     old_deps, old_dev = dependencies(cfg)
 
@@ -366,7 +366,7 @@ def new(dest: Path, preset: str, name: str | None) -> None:
     ui.step(f"new project in {dest}")
     copy_template(dest)
     proc.run(
-        [proc.find_uv(), "run", "--quiet", "--script", dest / ".pytemplate" / "deploy.py", "init", preset, "--name", app_name, "--force"],
+        [proc.find_uv(), "run", "--quiet", "--script", dest / ".pytemplate" / "deploy.py", "__init", preset, "--name", app_name, "--force"],
         cwd=dest,
     )
     # no nested repository when the destination is already inside one (a monorepo)

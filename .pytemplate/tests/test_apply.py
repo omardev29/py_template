@@ -469,7 +469,7 @@ def test_apply_flet_version_change(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         ["lock"],
     ]
     assert not any(c[0] in ("add", "remove") and "--frozen" not in c for c in uv.calls)  # --no-sync cannot bump flet
-    assert ["sync", "--locked"] in uv.calls
+    assert ["sync", "--locked", "--all-groups"] in uv.calls  # envs.sync: every dependency group
     data = project.pyproject()
     assert {"flet==1.0.0", "flet-desktop==1.0.0"} <= set(data["project"]["dependencies"])
     assert "flet-cli==1.0.0" in data["dependency-groups"]["dev"]
@@ -636,7 +636,7 @@ def test_a_dropped_backend_leaves_a_note(tmp_path: Path, monkeypatch: pytest.Mon
     err = capsys.readouterr().err
     assert "note: .venv-pypy is no longer used" in err and "./deploy clean --envs" in err
     assert (project.root / ".venv-pypy").is_dir()  # never deleted by apply
-    assert ["sync", "--locked"] in uv.calls and "environments     synced .venv\n" in err
+    assert ["sync", "--locked", "--all-groups"] in uv.calls and "environments     synced .venv\n" in err
 
 
 # --- app.name and app.preset edited by hand ------------------------------------------------------------
@@ -791,7 +791,7 @@ def test_doctor_lines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def test_reference_problems(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project, _ = _project(tmp_path, monkeypatch, "flet")
     assert cmd_apply.reference_problems(project.cfg()) == []
-    project.edit("app", "assets", "media")
+    shutil.rmtree(project.root / "src" / "assets")
     project.edit("compile", "modules", ["alpha.core", "alpha.gone"])
     project.edit("deploy.upx", "path", "tools/upx")
     problems = cmd_apply.reference_problems(project.cfg())
