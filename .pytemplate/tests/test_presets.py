@@ -1309,7 +1309,7 @@ def test_new_creates_a_working_project(preset: str, tmp_path: Path, network: Non
             assert [line.split()[0] for line in staged.splitlines()] == ["100755", "100755"]
 
 
-def test_init_pins_steer_the_resolution(tmp_path: Path, network: None) -> None:
+def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: None) -> None:
     """An older pinned version wins over the newest one: the pins are really used."""
     pins = presets.constraints("raylib")
     if pins.get("pycparser") != "3.0":
@@ -1326,7 +1326,7 @@ def test_init_pins_steer_the_resolution(tmp_path: Path, network: None) -> None:
     assert "pycparser" not in (copy_root / "pyproject.toml").read_text(encoding="utf-8")
 
 
-def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, network: None) -> None:
+def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, network: None, git_env: None) -> None:
     """current -> every other preset -> current gives back the same bytes: every init removes
     the previous preset's dependencies, tables and files (and the template root is exactly what
     `init script --name myapp --force` writes)."""
@@ -1345,7 +1345,7 @@ def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, 
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv not found")
-def test_init_that_fails_in_uv_changes_nothing(tmp_path: Path) -> None:
+def test_init_that_fails_in_uv_changes_nothing(tmp_path: Path, git_env: None) -> None:
     """No network and an empty uv cache: `init flet` fails in `uv add` and the project is exactly
     as before (a later attempt starts from the script preset and removes rich)."""
     env = _child_env(tmp_path)
