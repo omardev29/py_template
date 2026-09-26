@@ -1273,13 +1273,18 @@ def test_cmd_new_derives_a_valid_name_from_the_folder(dry: Config, tmp_path: Pat
     assert list(tmp_path.iterdir()) == []
 
 
-def test_cmd_new_dry_run_mentions_the_pins(dry: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    preset = next((p for p in PRESETS if presets.constraints(p)), None)
-    if preset is None:
-        pytest.skip("no preset has pins")
+@pytest.mark.parametrize("preset", PRESETS)
+def test_cmd_new_dry_run_counts_the_pins_init_passes(dry: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], preset: str) -> None:
+    """The dry run counted every pin of the preset, while init pins only the packages uv.lock
+    does not have yet (the copy's lock is this one): from a flet project it said 32, init 0."""
     monkeypatch.chdir(tmp_path)
     assert cmd_mode.cmd_new(dry, ["x", "--preset", preset]) == 0
-    assert f"pins    {len(presets.constraints(preset))} packages" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    count = len(set(presets.constraints(preset)) - presets.locked_names())
+    if count:
+        assert f"pins    {count} packages new to uv.lock" in err
+    else:
+        assert "pins " not in err
 
 
 # --- init, in-process with uv faked -----------------------------------------------------------------

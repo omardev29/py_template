@@ -427,9 +427,11 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         ui.step(f"new project in {dest} {_DRY}")
         ui.info(f"  preset  {ns.preset}")
         ui.info(f"  name    {name}  (package src/{name.replace('-', '_').lower()}/)")
-        pins = presets.constraints(ns.preset)
+        # what __init pins in the copy: the packages its uv.lock (this one) does not have yet
+        locked = presets.locked_names()
+        pins = [n for n in presets.constraints(ns.preset) if n not in locked]
         if pins:
-            ui.info(f"  pins    {len(pins)} packages at the versions the template tested (constraints.txt of the preset)")
+            ui.info(f"  pins    {len(pins)} packages new to uv.lock at the versions the template tested (constraints.txt of the preset)")
         ui.info(
             "  would copy this template there (the files git tracks; no .git, environments, builds or "
             f"caches), run `./deploy __init {ns.preset} --name {name} --force` in it and `git init -b main`"

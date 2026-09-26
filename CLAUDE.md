@@ -652,7 +652,8 @@ header rules (with detector tests proving each rule fires).
   pristine, the new `pytemplate.toml` and `pyproject.toml`) and lists each file as `-` deleted,
   `+` new or `~` replaced, the dependencies removed and added, the pinned versions, and what
   happens to `pyproject.toml` and `uv.lock`. `new` checks the destination and the name
-  (format, `check_name_free`) and prints destination, preset, name, the number of pins and the
+  (format, `check_name_free`) and prints destination, preset, name, the number of pins
+  `__init` would pass (the ones this `uv.lock` lacks, as `plan_init` counts them) and the
   `__init` step it would run in the copy. `pyz-merge` validates its inputs (`pyz.check_parts`:
   valid `_pyz.json`, one app, one build) and prints inputs and outputs (the `.pyz` and its
   `.cmd`).
