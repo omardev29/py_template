@@ -903,12 +903,25 @@ def _swap_files(plan: InitPlan, undo: _Undo) -> None:
                 p.chmod(p.stat().st_mode | 0o111)
 
 
+def _record(plan: InitPlan, undo: _Undo) -> None:
+    """The project's own `applied` record (cmd_apply): what init wrote is what `./deploy apply`
+    finds applied. The record copied from the template, or from the project `new` ran in, must
+    never stand for the new project: one named like it would trust it, and apply took the copied
+    preset for the project's own."""
+    from . import cmd_apply  # it imports this module
+
+    state = cmd_apply.state_file(ROOT)
+    undo.save(state)
+    cmd_apply.save_record(cmd_apply.record_of(plan.cfg), state)
+
+
 def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
     """Convert the project to `preset`: the internal step of `./deploy new`.
 
     Every check runs first (plan_init). Then pyproject.toml and uv.lock change (uv: the only
-    step that needs the network), then src/, tests/, typings/ and pytemplate.toml are swapped.
-    When a step fails, every file is put back as it was and the error is raised.
+    step that needs the network), then src/, tests/, typings/ and pytemplate.toml are swapped,
+    and the project's own `applied` record is written (_record). When a step fails, every file
+    is put back as it was and the error is raised.
     """
     from . import render
 
@@ -918,6 +931,7 @@ def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
     try:
         _swap_dependencies(plan, undo)
         _swap_files(plan, undo)
+        _record(plan, undo)
     except BaseException as e:
         left = undo.rollback()
         if left:

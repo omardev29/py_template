@@ -11,10 +11,11 @@ Steps (every check and refusal happens before the first write, in make_plan; --d
 prints the plan and stops):
   1. What the project really is ("applied"): the app name whose package is in src/, the preset,
      the option-driven requirements (flet==V, raylib's {package}=={version}) applied last time.
-     The record `applied` in .pytemplate/state.json says what the last apply/rename wrote; it
-     counts only when its name is app.name or pyproject.toml [project] name (a new project
-     copies the template's record: ignored), and the project itself (pyproject.toml, src/)
-     confirms or replaces it, so a missing or stale record is harmless.
+     The record `applied` in .pytemplate/state.json says what the last apply, rename or
+     `./deploy new` wrote (new writes the project's own, never the copied one); it counts only
+     when its name is app.name or pyproject.toml [project] name. Without one (lost to a merge
+     conflict) pyproject.toml stands in: the preset's traces, and the options the managed
+     [tool.uv] block was last written with.
   2. app.preset changed by hand: refused (exit 2). A preset decides src/, tests/, the
      dependencies and pyproject.toml: it cannot be switched in place (./deploy new DIR --preset P).
      The managed pyproject parts must be rewritable (render.check_pyproject).
@@ -41,6 +42,7 @@ from __future__ import annotations
 
 import json
 import re
+import string
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -201,7 +203,12 @@ def rename_record(name: str, record: dict[str, Any] | None) -> None:
 
 
 def _state_file() -> Path:
-    return ROOT / STATE_FILE.relative_to(STATE_FILE.parents[1])
+    return state_file(ROOT)
+
+
+def state_file(root: Path) -> Path:
+    """The state.json of the project at `root` (presets.init writes a new project's record there)."""
+    return root / STATE_FILE.relative_to(STATE_FILE.parents[1])
 
 
 # --- what the project really is ----------------------------------------------------------------------
@@ -216,6 +223,7 @@ class Applied:
     dev: list[str]
     renamed_from: str | None  # app.name changed by hand: the name whose package is still in src/
     record: dict[str, Any] | None  # the record read from state.json, if any
+    guessed: bool = False  # no record and no trace of any preset: `preset` is the traceless one
 
 
 def _src() -> Path:
@@ -316,66 +324,121 @@ def _has_table(data: dict[str, Any], path: tuple[str, ...]) -> bool:
     return isinstance(node, dict)
 
 
-def _marks(preset: str) -> tuple[set[str], set[tuple[str, ...]]]:
-    """What only `preset` writes into pyproject.toml besides its dependencies: its keys of the
-    managed [tool.uv] block (raylib's no-build-package, whatever the option made its value) and
-    its extra tables (flet's [tool.flet])."""
-    data = presets.load(preset)
+def _marks(preset: str) -> set[tuple[str, ...]]:
+    """What only `preset` writes into pyproject.toml besides its dependencies, and only when the
+    project is made (`./deploy new`): its extra tables (flet's [tool.flet])."""
     try:
         extra = tomllib.loads(presets.extra_tables(preset, "x"))  # only the table paths count
     except tomllib.TOMLDecodeError:
         extra = {}
-    return set(data.get("uv", {})), _table_paths(extra)
+    return _table_paths(extra)
 
 
-def _applied_preset(cfg: Config, project: Project, record: dict[str, Any] | None) -> str:
-    """The preset the project was made with. Its traces in pyproject.toml: the option-driven
-    dependencies (by name: any version; the default, current and recorded options), the keys it
-    adds to the managed [tool.uv] block, its extra tables (script leaves none).
+def _unformat(template: str, text: str) -> dict[str, str] | None:
+    """The values of the {fields} of `template` that format it into `text` (the reverse of
+    str.format), or None: no match, or a field that cannot be read back (a conversion, a format
+    spec, a positional or dotted name)."""
+    pattern: list[str] = []
+    seen: set[str] = set()
+    try:
+        parts = list(string.Formatter().parse(template))
+    except ValueError:
+        return None
+    for literal, name, spec, conversion in parts:
+        pattern.append(re.escape(literal))
+        if name is None:
+            continue
+        if spec or conversion or not name.isidentifier():
+            return None
+        pattern.append(f"(?P={name})" if name in seen else f"(?P<{name}>.+?)")
+        seen.add(name)
+    m = re.fullmatch("".join(pattern), text, re.DOTALL)
+    return None if m is None else {k: v for k, v in m.groupdict().items() if v is not None}
 
-    app.preset when pyproject.toml holds its traces, or when the trusted record names it (a
-    script project may depend on raylib or flet); else a preset whose traces are there (a hand
-    switch); else, with no trace of any preset, app.preset when it is a preset without traces
-    (script), else the traceless preset the record names or the only one: app.preset names a
-    preset that left no trace at all, so the project was made with a preset that leaves none."""
-    available = presets.available()
-    declared = set(project.deps) | set(project.dev)
-    recorded = record["preset"] if record and record["preset"] in available else None
+
+def _block_options(preset: str, project: Project) -> dict[str, str]:
+    """The [preset.<name>] options the managed [tool.uv] block was last written with, read back
+    from the values of the preset's own keys there (raylib's no-build-package = ["{package}"]: the
+    package of the last apply, or lock). Empty: the block holds no key of the preset (it follows
+    app.preset), or a value its template does not give (the project's own list outside the markers,
+    render._adopted)."""
     tool = project.data.get("tool")
     uv = tool.get("uv") if isinstance(tool, dict) else None
-    uv_keys = set(uv) if isinstance(uv, dict) else set()
+    found: dict[str, str] = {}
+    for key, template in presets.load(preset).get("uv", {}).items():
+        value = uv.get(key) if isinstance(uv, dict) else None
+        if isinstance(template, str) and isinstance(value, str):
+            pairs = [(template, value)]
+        elif isinstance(template, list) and isinstance(value, list) and len(template) == len(value):
+            pairs = list(zip(template, value, strict=True))
+        else:
+            return {}
+        for want, got in pairs:
+            options = _unformat(want, got) if isinstance(want, str) and isinstance(got, str) else None
+            if options is None or any(found.setdefault(k, v) != v for k, v in options.items()):
+                return {}
+    return found
+
+
+def _traced(cfg: Config, project: Project) -> list[str]:
+    """The presets whose traces pyproject.toml holds: an option-driven requirement (by name: any
+    version; with the default options, app.preset's current ones, and those the managed block was
+    last written with) or an extra table. The managed [tool.uv] keys themselves are no trace:
+    render.managed_block writes them from app.preset, so `./deploy lock` after a hand edit of
+    app.preset writes the NEW preset's keys."""
+    declared = set(project.deps) | set(project.dev)
 
     def present(preset: str) -> bool:
         names = _option_names(preset, presets.default_options(preset))
         if preset == cfg.app.preset:
             names |= _option_names(preset, presets.options(cfg))
-        if record is not None and preset == recorded:
-            names |= {req_key(r)[0] for r in (*record["dependencies"], *record["dev"])}
-        keys, tables = _marks(preset)
-        return bool(names & declared or keys & uv_keys or any(_has_table(project.data, t) for t in tables))
+        block = _block_options(preset, project)
+        if block:
+            names |= _option_names(preset, {**presets.default_options(preset), **block})
+        return bool(names & declared or any(_has_table(project.data, t) for t in _marks(preset)))
 
-    if present(cfg.app.preset) or recorded == cfg.app.preset:
-        return cfg.app.preset
-    others = [p for p in available if p != cfg.app.preset and present(p)]
-    if others:
-        return recorded if recorded in others else others[0]
-    traceless = [p for p in available if not (_option_names(p, presets.default_options(p)) or any(_marks(p)))]
-    if cfg.app.preset in traceless:
-        return cfg.app.preset
-    if recorded in traceless:
-        return str(recorded)
-    return traceless[0] if len(traceless) == 1 else cfg.app.preset
+    return [p for p in presets.available() if present(p)]
+
+
+def _infer_preset(cfg: Config, project: Project, record: dict[str, Any] | None) -> tuple[str, bool]:
+    """(the preset the project was made with, whether that is a guess).
+
+    The trusted record decides: the last apply, rename or `./deploy new` wrote it, so an app.preset
+    that differs from it was changed by hand, whatever pyproject.toml holds (a script project may
+    depend on raylib or flet). Without one (it was lost: a state.json merge conflict whose sides
+    disagree on it, a deleted file), pyproject.toml's traces (_traced): app.preset when it shows
+    them, else a preset that does (a hand switch), else, with no trace of any preset, app.preset
+    when it leaves none (script), else the preset that leaves none (a guess: its dependencies may
+    also have been replaced by hand)."""
+    available = presets.available()
+    if record is not None and record["preset"] in available:
+        return str(record["preset"]), False
+    traced = _traced(cfg, project)
+    if cfg.app.preset in traced:
+        return cfg.app.preset, False
+    if traced:
+        return traced[0], False
+    traceless = [p for p in available if not (_option_names(p, presets.default_options(p)) or _marks(p))]
+    if cfg.app.preset in traceless or len(traceless) != 1:
+        return cfg.app.preset, False
+    return traceless[0], True
+
+
+def _applied_preset(cfg: Config, project: Project, record: dict[str, Any] | None) -> str:
+    """The preset the project was made with (_infer_preset)."""
+    return _infer_preset(cfg, project, record)[0]
 
 
 def applied_state(cfg: Config, project: Project) -> Applied:
     record = trusted_record(cfg, project.name)
-    preset = _applied_preset(cfg, project, record)
+    preset, guessed = _infer_preset(cfg, project, record)
     if record is not None and record["preset"] == preset:
         deps, dev = list(record["dependencies"]), list(record["dev"])
-    else:  # no record, or a foreign one: what `init` applies (the preset.toml defaults)
-        deps, dev = presets.option_dependencies(preset, presets.default_options(preset))
+    else:  # no record: the options the managed block was last written with, else init's defaults
+        options = {**presets.default_options(preset), **_block_options(preset, project)}
+        deps, dev = presets.option_dependencies(preset, options)
     renamed_from = _old_name(cfg, [record["name"] if record else None, project.name])
-    return Applied(preset, deps, dev, renamed_from, record)
+    return Applied(preset, deps, dev, renamed_from, record, guessed)
 
 
 def dependency_changes(cfg: Config, applied: Applied, project: Project) -> DepChanges:
@@ -401,13 +464,32 @@ def dependency_changes(cfg: Config, applied: Applied, project: Project) -> DepCh
     return changes
 
 
-def preset_message(cfg: Config, applied: str) -> str:
-    return (
+def _restore_hint(cfg: Config) -> str:
+    """How to keep app.preset when its requirements were replaced by hand (a guessed preset)."""
+    try:
+        deps, dev = presets.option_dependencies(cfg.app.preset, presets.options(cfg))
+    except DeployError:  # [preset.<name>] cannot format them: pending reports that on its own line
+        deps, dev = [], []
+    adds = [f"./deploy add {' '.join(deps)}"] if deps else []
+    adds += [f"./deploy add --dev {' '.join(dev)}"] if dev else []
+    restore = f"restore them ({' and '.join(adds)}) or " if adds else ""
+    return f"{restore}set [preset.{cfg.app.preset}] in pytemplate.toml to the ones pyproject.toml declares"
+
+
+def preset_message(cfg: Config, applied: str, *, guessed: bool = False) -> str:
+    text = (
         f"app.preset was changed from '{applied}' to '{cfg.app.preset}' by hand: a project cannot switch presets in place\n"
         f"  (the preset decides src/, tests/, the dependencies and pyproject.toml). Put back app.preset = \"{applied}\" in\n"
         f"  pytemplate.toml; to use the {cfg.app.preset} preset, create a new project and move your code there:\n"
         f"    ./deploy new DIR --preset {cfg.app.preset}"
     )
+    if guessed:
+        text += (
+            f"\n  ('{applied}' is a guess: there is no record of the last apply, and pyproject.toml holds no trace of the "
+            f"{cfg.app.preset} preset.\n  If the project was made with {cfg.app.preset} and its requirements were "
+            f"replaced by hand, {_restore_hint(cfg)} instead)"
+        )
+    return text
 
 
 def missing_package(cfg: Config) -> tuple[str, str] | None:
@@ -460,7 +542,7 @@ def make_plan(cfg: Config) -> Plan:
     project = read_project()
     applied = applied_state(cfg, project)
     if applied.preset != cfg.app.preset:
-        raise DeployError(preset_message(cfg, applied.preset))
+        raise DeployError(preset_message(cfg, applied.preset, guessed=applied.guessed))
     render.check_pyproject(cfg)  # broken markers, a managed key outside them...: before any change
     plan = Plan(cfg, project, applied, dependency_changes(cfg, applied, project))
     plan.pypy_new = cfg.pypy_enabled and not project.pypy_locked
@@ -656,12 +738,15 @@ def pending(cfg: Config, *, hook: bool = True) -> list[tuple[str, str]]:
     except DeployError as e:
         return [(str(e).splitlines()[0], "fix it, then ./deploy apply")]
     if applied.preset != cfg.app.preset:
-        return [
-            (
-                f"app.preset = '{cfg.app.preset}' but the project was made with the '{applied.preset}' preset",
-                f"put back app.preset = \"{applied.preset}\" (a preset cannot change in place: ./deploy new DIR --preset {cfg.app.preset})",
-            )
-        ]
+        put_back = f"put back app.preset = \"{applied.preset}\" (a preset cannot change in place: ./deploy new DIR --preset {cfg.app.preset})"
+        if applied.guessed:
+            return [
+                (
+                    f"app.preset = '{cfg.app.preset}', but pyproject.toml holds no trace of that preset (and there is no record of the last apply)",
+                    f"{put_back}; or, if its requirements were replaced by hand, {_restore_hint(cfg)}",
+                )
+            ]
+        return [(f"app.preset = '{cfg.app.preset}' but the project was made with the '{applied.preset}' preset", put_back)]
     out: list[tuple[str, str]] = []
     if applied.renamed_from is not None:
         old = applied.renamed_from
