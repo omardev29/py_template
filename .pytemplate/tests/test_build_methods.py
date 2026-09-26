@@ -183,13 +183,13 @@ def test_exe_size_args_use_upx_on_windows(monkeypatch: pytest.MonkeyPatch, tmp_p
 # --- exe with the flet preset: flet pack ---------------------------------------------------------
 
 
-def _flet_cfg(name: str = "fletdemo", **exe_cfg: Any) -> Config:
+def _flet_cfg(name: str = "fletdemo", deploy: dict[str, Any] | None = None, **exe_cfg: Any) -> Config:
     return make(
         {
             "app": {"name": name, "preset": "flet", "gui": True},
             "backend": {"active": "cpython", "supported": ["cpython", "mypyc"]},
             "compile": {"modules": [f"{name.replace('-', '_').lower()}.core"]},
-            "deploy": {"exe": {"mode": "onedir", **exe_cfg}},
+            "deploy": {"exe": {"mode": "onedir", **exe_cfg}, **(deploy or {})},
         }
     )
 
@@ -1832,3 +1832,124 @@ def test_portable_system_folder_real_build_runs(sandbox: Path, monkeypatch: pyte
     assert r.returncode == 0, r.stderr
     word, where, arg = r.stdout.split()
     assert word == "rich" and Path(where).is_relative_to(out / "lib") and arg == "arg"
+
+
+# --- flet build ---------------------------------------------------------------------------------------
+
+FLET_PYPROJECT = '[project]\nname = "fletdemo"\nversion = "0.1.0"\n\n[tool.flet]\norg = "com.example"\n\n[tool.flet.app]\npath = "src"\nmodule = "main"\n'
+
+
+def _flet_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, backend: str = "cpython", target: str = "host", produce: bool = True, payload_ext: bool = False, **deploy: Any) -> tuple[Path, Recorder]:
+    from runner.methods import flet
+
+    cfg = _flet_cfg(deploy={"flet": {"target": target, "extra_args": ["--build-number", "7"], **deploy}})
+    app = sandbox / f"payload-{backend}-{target}-{payload_ext}"
+    fake_app(app, cfg.pkg)
+    if payload_ext:
+        (app / cfg.pkg / "core" / f"fractal{EXT}").write_bytes(b"\x7fELF")
+    pyproject = sandbox / "pyproject.toml"
+    pyproject.write_text(FLET_PYPROJECT, encoding="utf-8")
+    monkeypatch.setattr(flet, "PYPROJECT", pyproject)
+    monkeypatch.setattr(flet, "_pinned_requirements", lambda env: ["flet==1.0.1", "msgpack==1.1.0"])
+    monkeypatch.setattr(flet, "host_os", lambda: "linux")
+
+    def effect(args: list[str], cwd: Path | None) -> None:
+        if produce:
+            Path(args[args.index("--output") + 1]).mkdir(parents=True, exist_ok=True)
+
+    rec = Recorder(effect)
+    monkeypatch.setattr(envs, "uv_run", rec)
+    out = flet.build(BuildRequest(cfg, backend, "flet", app, extra=["--verbose"]))
+    return out, rec
+
+
+def test_flet_build_argv_stage_and_pyproject(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import tomllib
+
+    out, rec = _flet_build(sandbox, monkeypatch, exclude=["assets/big"])
+    work = sandbox / "build" / "flet-build" / "cpython"
+    assert out == sandbox / "dist" / "fletdemo-cpython-flet-linux"
+    argv, cwd, _ = rec.calls[-1]
+    assert argv == ["flet", "build", "linux", str(work), "--yes", "--output", str(out), "--cleanup-app", "--cleanup-packages", "--exclude", "assets/big", "--build-number", "7", "--verbose"]
+    assert cwd == work  # envs.uv_run then adds --project <ROOT> (the stage has its own pyproject.toml)
+    assert (work / "src" / "main.py").is_file() and (work / "src" / "fletdemo" / "app.py").is_file()
+    data = tomllib.loads((work / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["project"]["requires-python"] == "==3.14.*"
+    assert data["project"]["dependencies"] == ["flet==1.0.1", "msgpack==1.1.0"]
+    assert data["tool"]["flet"] == {"org": "com.example", "app": {"path": "src", "module": "main"}}
+
+
+def test_flet_build_pins_the_python_minor() -> None:
+    # flet_cli picks the HIGHEST stable Python of its manifest that matches requires-python:
+    # ">=3.13" bundled 3.14 and the cp313 mypyc extensions were silently not loaded
+    from runner.methods import flet
+
+    data = {"project": {"name": "a", "version": "1"}}
+    for minor in ("3.12", "3.13", "3.14"):
+        text = flet.build_pyproject(make({"python": {"cpython": minor}}), data, [])
+        assert f'requires-python = "=={minor}.*"' in text
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ('[tool.flet]\norg = "x"\n', {"org": "x", "app": {"path": "src"}}),  # no [tool.flet.app]: flet found no main.py
+        ('[tool.flet]\norg = "x"\n[tool.flet.app]\npath = "app"\n', {"org": "x", "app": {"path": "src"}}),
+        ("", {"app": {"path": "src"}}),
+        ('[tool.flet.app]\nmodule = "ui"\n', {"app": {"module": "ui", "path": "src"}}),
+    ],
+)
+def test_flet_build_pyproject_points_at_the_staged_app(extra: str, expected: dict[str, Any], capsys: pytest.CaptureFixture[str]) -> None:
+    import tomllib
+
+    from runner.methods import flet
+
+    data = tomllib.loads('[project]\nname = "a"\nversion = "1"\n\n' + extra)
+    before = json.dumps(data, sort_keys=True)
+    tool = tomllib.loads(flet.build_pyproject(make({}), data, []))["tool"]["flet"]
+    assert tool == expected
+    assert json.dumps(data, sort_keys=True) == before  # the caller's data is not mutated
+    assert ("is ignored" in capsys.readouterr().err) is ('path = "app"' in extra)
+
+
+def test_flet_build_needs_developer_mode_on_windows(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from runner.methods import flet
+
+    monkeypatch.setattr(flet, "IS_WINDOWS", True)
+    monkeypatch.setattr(flet, "_developer_mode", lambda: False)
+    monkeypatch.setattr(flet, "host_os", lambda: "windows")
+    monkeypatch.setattr(envs, "uv_run", lambda *a, **k: pytest.fail("flet build must not start"))
+    with pytest.raises(DeployError, match="Developer Mode") as e:
+        flet.build(BuildRequest(_flet_cfg(), "cpython", "flet", fake_app(sandbox / "p", "fletdemo")))
+    assert e.value.code == 3
+    with pytest.raises(DeployError, match="flet preset"):
+        flet.build(BuildRequest(make({}), "cpython", "flet", sandbox / "p"))
+
+
+def test_flet_build_mobile_and_web_ship_the_py_code(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from runner.methods import flet
+
+    src = sandbox / "src"
+    fake_app(src, "fletdemo")
+    monkeypatch.setattr(flet, "SRC", src)
+    # A desktop build leaves its extension in the persistent stage...
+    _flet_build(sandbox, monkeypatch, backend="mypyc", payload_ext=True)
+    stage = sandbox / "build" / "flet-build" / "mypyc" / "src"
+    assert (stage / "fletdemo" / "core" / f"fractal{EXT}").is_file()
+    # ...which must not reach a web build: it packages the .py of src/ (interpreted)
+    out, _ = _flet_build(sandbox, monkeypatch, backend="mypyc", target="web", payload_ext=True)
+    assert out.name == "fletdemo-mypyc-flet-web"
+    assert not [p for p in stage.rglob("*") if p.name.endswith((".so", ".pyd"))]
+    assert "web: compiled extensions are not supported" in capsys.readouterr().err
+
+
+def test_flet_build_upx_only_for_desktop_and_missing_output(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    packed: list[Path] = []
+    monkeypatch.setattr(upx, "active", lambda cfg: True)
+    monkeypatch.setattr(upx, "pack_tree", lambda cfg, root: packed.append(root) or [])
+    out, _ = _flet_build(sandbox, monkeypatch)
+    assert packed == [out]
+    _flet_build(sandbox, monkeypatch, target="apk")
+    assert packed == [out]  # mobile/web output is not packed
+    with pytest.raises(DeployError, match="without producing the output"):
+        _flet_build(sandbox, monkeypatch, target="macos", produce=False)

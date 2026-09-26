@@ -952,10 +952,14 @@ Per method:
   extensions are deleted from it before this payload's are copied (a desktop `.pyd` must not
   reach a mobile/web build). `flet build` ignores `uv.lock`, so `build_pyproject` pins the
   `uv export --frozen --no-dev` versions and serialises the PARSED `[tool.flet]` of the
-  project `pyproject.toml` (no other table leaks in; `[tool.flet.app]` alone is kept; default
-  `app.path = "src"`). Mobile/web targets (`apk aab ipa ios-simulator web`) cannot load
-  extensions: a mypyc backend ships the `.py`. Desktop embeds CPython 3.14, so cp314 `.pyd`
-  files work. `cleanup`/`exclude` map to `--cleanup-app --cleanup-packages` / `--exclude`;
+  project `pyproject.toml` (no other table leaks in; `[tool.flet.app]` alone is kept) with
+  `app.path` forced to `STAGE_APP` (`src`, where `build` stages the app; another value is
+  ignored with a warning: flet looked for `<work>/<path>/main.py` and aborted after installing
+  Flutter) and `requires-python = "==<python.cpython>.*"` (flet bundles the HIGHEST Python of
+  its manifest matching it: `>=3.13` gave 3.14 and the cp313 mypyc extensions were silently not
+  loaded; a minor its manifest lacks now fails loudly). Mobile/web targets (`apk aab ipa
+  ios-simulator web`) cannot load extensions: a mypyc backend ships the `.py`. Desktop embeds
+  the `python.cpython` minor, so the mypyc `.pyd`/`.so` files work. `cleanup`/`exclude` map to `--cleanup-app --cleanup-packages` / `--exclude`;
   with UPX the finished folder goes through `upx.pack_tree` (desktop targets only). Verified on
   Windows (Developer Mode on): Flet 1.0.1 downloads ITS pinned Flutter (3.44.8, ~3 GB in
   `~/flutter`, ignoring a scoop Flutter) and a Python build (`~/.flet`); first build ~7 min,
