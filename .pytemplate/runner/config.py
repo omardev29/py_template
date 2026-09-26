@@ -295,6 +295,63 @@ def _presets() -> list[str]:
     return sorted(p.name for p in PRESETS.iterdir() if (p / "preset.toml").is_file())
 
 
+# --- [tasks] -------------------------------------------------------------------------------------
+
+TASK_PLACEHOLDERS = ("root", "src", "build", "dist", "backend", "name", "pkg", "python")
+BRACES_HINT = "write a literal brace doubled: {{ and }}"
+
+
+def task_format_error(text: str) -> str | None:
+    """Why `text` (a [tasks] cmd item, env value or cwd) is not a valid template, or None.
+
+    Only the syntax, which str.format_map would otherwise turn into a traceback: placeholders
+    are bare names ({root}; never {}, {0}, {root.x}, {root!r}, {root:>9}), literal braces are
+    doubled. An unknown name ({nope}) is reported when the task runs.
+    """
+    import string
+
+    try:
+        parts = list(string.Formatter().parse(text))
+    except ValueError as e:  # a lone '{' or '}'
+        return f"{e} ({BRACES_HINT})"
+    for _literal, field_name, spec, conversion in parts:
+        if field_name is None:
+            continue
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", field_name) or spec or conversion:
+            shown = "{" + field_name + (f"!{conversion}" if conversion else "") + (f":{spec}" if spec else "") + "}"
+            known = " ".join("{" + p + "}" for p in TASK_PLACEHOLDERS)
+            return f"{shown} is not a placeholder ({known}; {BRACES_HINT})"
+    return None
+
+
+def _validate_task(name: str, task: TaskConfig, builtin_commands: set[str] | None) -> None:
+    """The static rules of a [tasks] entry. Its deps (quoting, the command they name) and its
+    placeholder names are checked when the task runs (tasks.run_task), which is what the
+    editor renderers expect (vscode.scan renders a task whose deps do not parse)."""
+    where = f"pytemplate.toml: tasks.{name}"
+    if not re.fullmatch(r"[a-z][a-z0-9_-]*", name):
+        raise DeployError(f"pytemplate.toml: invalid task name: {name!r}")
+    if builtin_commands and name in builtin_commands:
+        raise DeployError(f"pytemplate.toml: task '{name}' clashes with the built-in command ./deploy {name}")
+    if not task.cmd and not task.deps:
+        raise DeployError(f"pytemplate.toml: task '{name}' needs 'cmd' or 'deps'")
+    if task.backend:
+        _one_of(task.backend, BACKENDS, f"tasks.{name}.backend")
+    if task.cmd and not task.cmd[0].strip():
+        raise DeployError(f"{where}.cmd: the program (its first item) is empty")
+    values = [(f"{where}.cmd", item) for item in task.cmd] + [(f"{where}.env.{k}", v) for k, v in task.env.items()]
+    if task.cwd:
+        values.append((f"{where}.cwd", task.cwd))
+    for key_path, value in values:
+        problem = task_format_error(value)
+        if problem:
+            raise DeployError(f"{key_path}: {value!r}: {problem}")
+    for key in task.env:
+        # They become environment variables of the task's process ('=' or '' would crash it)
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise DeployError(f"{where}.env: invalid environment variable name {key!r}")
+
+
 def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", cfg.app.name):
         raise DeployError("pytemplate.toml: 'app.name' only allows letters, digits, '-' and '_'")
@@ -358,14 +415,7 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
         if not _DOTTED.match(m):
             raise DeployError(f"pytemplate.toml: invalid module in deploy.exclude_modules: {m!r}")
     for name, task in cfg.tasks.items():
-        if not re.fullmatch(r"[a-z][a-z0-9_-]*", name):
-            raise DeployError(f"pytemplate.toml: invalid task name: {name!r}")
-        if builtin_commands and name in builtin_commands:
-            raise DeployError(f"pytemplate.toml: task '{name}' clashes with the built-in command ./deploy {name}")
-        if not task.cmd and not task.deps:
-            raise DeployError(f"pytemplate.toml: task '{name}' needs 'cmd' or 'deps'")
-        if task.backend:
-            _one_of(task.backend, BACKENDS, f"tasks.{name}.backend")
+        _validate_task(name, task, builtin_commands)
     if builtin_commands:
         for button in cfg.vscode.buttons:
             first = button.split()[0] if button.split() else ""
