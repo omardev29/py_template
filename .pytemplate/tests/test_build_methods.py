@@ -1803,6 +1803,37 @@ def test_install_deps_removes_uv_junk_but_keeps_native_tools(tmp_path: Path, mon
     assert (site / "bin" / "pygmentize").is_file()
 
 
+def test_install_junk_drops_the_build_machines_path_of_a_local_library(tmp_path: Path) -> None:
+    # Since --no-editable a local library is installed for real, and uv writes its source folder
+    # on this machine into direct_url.json (file:///home/someone/proj/libs/mylib), plus its own
+    # cache files: every pyz and portable build shipped them. A URL requirement keeps its
+    # direct_url.json (PEP 610; it names no machine).
+    site = tmp_path / "site"
+    local = site / "mylib-0.1.0.dist-info"
+    remote = site / "six-1.17.0.dist-info"
+    built = site / "docopt-0.6.2.dist-info"
+    for info in (local, remote, built):
+        info.mkdir(parents=True)
+        (info / "METADATA").write_text("Metadata-Version: 2.4\n", encoding="utf-8")
+    (local / "direct_url.json").write_text('{"url":"file:///home/someone/proj/libs/mylib","dir_info":{}}', encoding="utf-8")
+    (local / "uv_cache.json").write_text('{"timestamp":{"secs_since_epoch":1}}', encoding="utf-8")
+    (local / "uv_build.json").write_text("{}", encoding="utf-8")
+    (built / "uv_build.json").write_text("{}", encoding="utf-8")
+    (remote / "direct_url.json").write_text('{"url":"https://example.org/six-1.17.0-py2.py3-none-any.whl","archive_info":{}}', encoding="utf-8")
+    for info in (local, remote, built):
+        files = sorted(p.name for p in info.iterdir())
+        rows = [f"{info.name}/{name},sha256=x,1" for name in files] + [f"{info.name}/RECORD,,"]
+        (info / "RECORD").write_text("\n".join(rows) + "\n", encoding="utf-8", newline="\n")
+    common.drop_install_junk(site)
+    assert sorted(p.name for p in local.iterdir()) == ["METADATA", "RECORD"]
+    assert sorted(p.name for p in built.iterdir()) == ["METADATA", "RECORD"]
+    assert sorted(p.name for p in remote.iterdir()) == ["METADATA", "RECORD", "direct_url.json"]
+    for info in (local, built):  # RECORD lists only the files that are there
+        listed = [row.split(",")[0] for row in (info / "RECORD").read_text(encoding="utf-8").splitlines()]
+        assert listed == [f"{info.name}/METADATA", f"{info.name}/RECORD"]
+    assert "someone" not in "".join(p.read_text(encoding="utf-8") for p in site.rglob("*") if p.is_file())
+
+
 def test_empty_requirements_install_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(envs, "uv", lambda *a, **k: pytest.fail("no install for no dependency"))
     req = tmp_path / "requirements.txt"

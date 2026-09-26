@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 import hashlib
+import json
 import os
 import platform
 import re
@@ -329,10 +330,14 @@ def drop_install_junk(dest: Path) -> None:
     or .exe trampoline holds this machine's absolute .venv path (dead elsewhere, and it leaks the
     developer's folder). Other files in bin/ stay: wheels such as ruff or uv ship a native binary
     there and find it at <target>/bin; a real package named bin (with __init__.py) stays too.
+    In each *.dist-info: uv's cache files, and a direct_url.json naming a folder of this machine
+    (a local library, installed for real since --no-editable), taken out of RECORD too.
     """
     for junk in [*dest.glob("_virtualenv*"), dest / ".lock"]:
         if junk.is_file() or junk.is_symlink():
             junk.unlink()
+    for info in dest.glob("*.dist-info"):
+        _drop_build_records(info)
     names = _entry_points(dest)
     for scripts in (dest / "bin", dest / "Scripts"):
         if not scripts.is_dir() or (scripts / "__init__.py").exists():
@@ -342,6 +347,32 @@ def drop_install_junk(dest: Path) -> None:
                 f.unlink()
         if not any(scripts.iterdir()):
             scripts.rmdir()
+
+
+def _drop_build_records(info: Path) -> None:
+    """Delete uv_cache.json, uv_build.json and a file: direct_url.json (PEP 610) of a dist-info,
+    and their RECORD rows. A URL requirement keeps its direct_url.json: it names no machine."""
+    junk = [info / "uv_cache.json", info / "uv_build.json"]
+    direct = info / "direct_url.json"
+    try:
+        data = json.loads(direct.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        data = None
+    if isinstance(data, dict) and str(data.get("url", "")).startswith("file:"):
+        junk.append(direct)
+    gone = {f"{info.name}/{p.name}" for p in junk if p.is_file()}
+    if not gone:
+        return
+    for name in gone:
+        (info.parent / name).unlink()
+    record = info / "RECORD"
+    try:
+        rows = record.read_text(encoding="utf-8").splitlines(keepends=True)
+    except (OSError, UnicodeDecodeError):
+        return
+    kept = [row for row in rows if row.split(",", 1)[0] not in gone]
+    if len(kept) != len(rows):
+        record.write_text("".join(kept), encoding="utf-8", newline="")
 
 
 def _platform_wheel(wheel: Path) -> bool:

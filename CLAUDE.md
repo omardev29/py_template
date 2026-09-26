@@ -1650,7 +1650,10 @@ Formats:
   `drop_install_junk` removes uv's `.lock`, `_virtualenv*` and the console/GUI script wrappers
   of `bin/` / `Scripts/` (names from `*.dist-info/entry_points.txt`; their shebang or `.exe`
   trampoline holds the build machine's `.venv` path), keeping other files there (ruff and uv
-  wheels look up their native binary at `<target>/bin`) and a real `bin` package.
+  wheels look up their native binary at `<target>/bin`) and a real `bin` package; in each
+  `*.dist-info` (`_drop_build_records`) uv's `uv_cache.json` and `uv_build.json`, and a
+  `direct_url.json` whose URL is `file:` (a local library names its source folder on this
+  machine), with their `RECORD` rows (a URL requirement keeps its `direct_url.json`).
 - `common.has_native`: a `*.dist-info/WHEEL` tag with an ABI or platform (also pure-Python
   platform wheels that ship an executable, e.g. imageio-ffmpeg), else a `.pyd/.so/.dll/.dylib`
   or `.so.N` file.
@@ -3006,12 +3009,15 @@ uv:
   verbatim comparison never matched. Fix: `cmd_apply.req_key` (5.8). Test:
   `test_apply.py::test_req_key_normalizes_like_uv`. Goes: never.
 - **`uv pip install --target` leaves build-machine files** (DEFECT for the `.lock`, LIMITATION
-  for the rest): a `.lock`, `_virtualenv*` and console-script wrappers whose shebang or `.exe`
-  trampoline names this machine's `.venv` shipped in pyz and portable builds. Up: cf.
+  for the rest): a `.lock`, `_virtualenv*`, console-script wrappers whose shebang or `.exe`
+  trampoline names this machine's `.venv`, and for a local library (installed for real since
+  `--no-editable`) a `direct_url.json` naming its source folder on this machine (PEP 610) plus
+  uv's `uv_cache.json`/`uv_build.json` shipped in pyz and portable builds. Up: cf.
   astral-sh/uv#11878 (the `.lock` uv left in a venv; 0.12.19 still leaves an empty one in a
   `--target` folder). Fix: `common.drop_install_junk` (10). Test:
-  `test_build_methods.py::test_install_deps_removes_uv_junk_but_keeps_native_tools`. Goes: the
-  `.lock` part when uv removes it; the rest never.
+  `test_build_methods.py::test_install_deps_removes_uv_junk_but_keeps_native_tools`,
+  `test_install_junk_drops_the_build_machines_path_of_a_local_library`. Goes: the `.lock` part
+  when uv removes it; the rest never.
 - **Wheels for this machine follow this machine** (LIMITATION): uv took the newest tags the
   build machine allows (manylinux_2_34 on Ubuntu 24.04: the pyz failed on Debian 11), its macOS
   default may move with a uv release, and an sdist built for another OS gives host binaries.
