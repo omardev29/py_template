@@ -88,7 +88,7 @@ def _pyproject(preset: str, name: str) -> str:
         dev += FLET_DEV
     text = _set_array(_set_array(text, "dependencies", sorted(deps)), "dev", sorted(dev))
     extra = str(presets.load(preset).get("pyproject", "")).replace("{{name}}", name).replace("{{pkg}}", rename.package_of(name))
-    text = presets._set_extra_tables(presets._set_project_name(text, name), extra)
+    text = presets._set_extra_tables(presets.set_project_name(text, name), extra)
     return render.pyproject_expected(_cfg_text(presets.skeleton(preset, name)["pytemplate.toml"].decode("utf-8")), text)
 
 
@@ -930,6 +930,13 @@ def test_doctor_lines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     cmd_apply.doctor(project.cfg(), check)
     assert lines == [(True, "pytemplate.toml applied (app.name, app.preset, [preset.*], hooks.pre_commit)")]
+    real_state, calls = cmd_apply._hook_state, []
+    monkeypatch.setattr(cmd_apply, "_hook_state", lambda cfg: calls.append(1) or "installed")
+    project.edit("hooks", "pre_commit", False)
+    assert cmd_apply.pending(project.cfg(), hook=False) == [] and calls == []  # no git process for a quick check
+    assert cmd_apply.pending(project.cfg())[0][0].startswith("hooks.pre_commit = false") and calls == [1]
+    monkeypatch.setattr(cmd_apply, "_hook_state", real_state)
+    project.edit("hooks", "pre_commit", True)
     project.edit("preset.raylib", "version", "6.0.2.0")
     project.edit("deploy.exe", "icon", "art/app.ico")
     lines.clear()

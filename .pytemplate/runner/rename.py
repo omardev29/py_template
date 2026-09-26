@@ -668,6 +668,7 @@ class TextEdit:
     count: int  # references changed besides the name itself
     kept: list[tuple[int, str]]
     detail: str  # e.g. [project] name = "My-Game"
+    bom: bool = False  # written back with its UTF-8 BOM (pytemplate.toml keeps it, like config.update_file)
 
     @property
     def changes(self) -> list[tuple[int, str, str]]:
@@ -753,7 +754,11 @@ def _target(path: str, move: tuple[str, str] | None) -> str:
 
 def _plan_config(root: Path, names: Names) -> TextEdit:
     path = root / "pytemplate.toml"
-    old = path.read_text(encoding="utf-8-sig")
+    try:
+        raw = path.read_bytes()
+    except OSError as e:
+        raise DeployError(f"rename: cannot read pytemplate.toml: {e.strerror or e}") from None
+    old = config._decode(raw, "pytemplate.toml")  # a clear error for UTF-16/ANSI; CRLF kept
     result = rewrite(old, names, only_pkg=True, toml=True, module_keys=MODULE_KEYS)
     new = config.set_value(result.text, "app", "name", names.new_name)
     try:
@@ -762,7 +767,7 @@ def _plan_config(root: Path, names: Names) -> TextEdit:
         raise DeployError(f"rename: the new pytemplate.toml would not be valid TOML ({e}); nothing was changed") from None
     renamed = {n for n, _, _ in _line_changes(result.text, new)}
     kept = [(n, line) for n, line in result.kept if n not in renamed]  # app.name itself
-    return TextEdit("pytemplate.toml", old, new, result.count, kept, f'app.name = "{names.new_name}"')
+    return TextEdit("pytemplate.toml", old, new, result.count, kept, f'app.name = "{names.new_name}"', bom=raw.startswith(b"\xef\xbb\xbf"))
 
 
 def _plan_pyproject(root: Path, names: Names) -> TextEdit | None:
@@ -920,7 +925,7 @@ def apply_plan(root: Path, plan_: Plan) -> None:
     writes: list[tuple[Path, bytes]] = [(root / f.target, f.new) for f in plan_.changed_files]
     for edit in (plan_.config, plan_.pyproject):
         if edit is not None and edit.new != edit.old:
-            writes.append((root / edit.path, edit.new.encode("utf-8")))  # LF, no BOM (the runner's own files)
+            writes.append((root / edit.path, (("\ufeff" if edit.bom else "") + edit.new).encode("utf-8")))
     done: list[tuple[Path, bytes]] = []
     for path, data in writes:
         try:

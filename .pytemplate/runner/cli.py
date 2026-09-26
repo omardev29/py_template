@@ -79,6 +79,7 @@ INTERNAL: dict[str, Command] = {
 EXAMPLES = """\
 Examples:
   ./deploy setup                 # first time: interpreters, environments and configs
+  ./deploy apply                 # after editing pytemplate.toml: apply every change
   ./deploy run                   # run with the active backend (pytemplate.toml)
   ./deploy run mypyc --verbose   # compile with mypyc and run (--verbose goes to your app)
   ./deploy test all              # pytest on every supported backend

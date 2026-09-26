@@ -532,8 +532,9 @@ def reference_problems(cfg: Config, *, package: bool = True) -> list[str]:
 # --- doctor --------------------------------------------------------------------------------------
 
 
-def pending(cfg: Config) -> list[tuple[str, str]]:
-    """(problem, hint) for each pytemplate.toml change that is not applied yet (for doctor)."""
+def pending(cfg: Config, *, hook: bool = True) -> list[tuple[str, str]]:
+    """(problem, hint) for each pytemplate.toml change that is not applied yet (for doctor).
+    `hook=False` skips the git hook (a git process): a quick check before every command."""
     try:
         project = read_project()
         applied = applied_state(cfg, project)
@@ -561,7 +562,7 @@ def pending(cfg: Config) -> list[tuple[str, str]]:
         out.append((str(e).splitlines()[0], f"fix [preset.{cfg.app.preset}] in pytemplate.toml"))
     if changes:
         out.append((f"[preset.{cfg.app.preset}] is not applied to pyproject.toml ({changes.describe()})", "./deploy apply"))
-    if not cfg.hooks.pre_commit and _hook_state(cfg) in ("installed", "outdated"):
+    if hook and not cfg.hooks.pre_commit and _hook_state(cfg) in OURS:
         out.append(("hooks.pre_commit = false, but pytemplate's git pre-commit hook is installed", "./deploy apply  (or ./deploy hooks uninstall)"))
     return out
 

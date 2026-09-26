@@ -685,6 +685,29 @@ def test_rename_accepts_a_pyproject_with_a_bom(tmp_path: Path) -> None:
     assert parsed["project"]["name"] == "My-Game" and parsed["tool"]["flet"]["product"] == "My-Game"
 
 
+def test_pytemplate_toml_keeps_its_bom_and_line_endings(tmp_path: Path) -> None:
+    """Like config.update_file: a Windows editor's CRLF and BOM survive the rename."""
+    _write_project(tmp_path, "raylib", "alpha")
+    path = tmp_path / "pytemplate.toml"
+    text = path.read_text(encoding="utf-8")
+    path.write_bytes(b"\xef\xbb\xbf" + text.replace("\n", "\r\n").encode("utf-8"))
+    planned = _rename(tmp_path, "alpha", "My-Game")
+    data = path.read_bytes()
+    assert data.startswith(b"\xef\xbb\xbf") and data.count(b"\r\n") == data.count(b"\n")
+    expected = presets.skeleton("raylib", "My-Game")["pytemplate.toml"].replace(b"\n", b"\r\n")
+    assert data == b"\xef\xbb\xbf" + expected  # byte for byte what new would write, in the file's own form
+    assert planned.config.bom and "\r\n" in planned.config.new
+
+
+def test_a_pytemplate_toml_that_is_not_utf8_is_a_clear_error(tmp_path: Path) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    path = tmp_path / "pytemplate.toml"
+    path.write_bytes(path.read_text(encoding="utf-8").encode("utf-16"))
+    with pytest.raises(DeployError, match="UTF-16") as e:
+        rename.plan(tmp_path, "alpha", "beta")
+    assert e.value.code == 2
+
+
 PROJECT_NAME_VARIANTS = {
     "single-quotes": "[project]\nname = 'alpha'\nversion = \"0.1.0\"\n",
     "indented": "[project]\n  name=\"alpha\"\nversion = \"0.1.0\"\n",
