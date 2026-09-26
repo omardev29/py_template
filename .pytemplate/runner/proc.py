@@ -176,7 +176,10 @@ def _wait_through_signals() -> Iterator[_Waiter]:
     `docker stop`, Popen.terminate()): their default action killed the runner at once and left
     uv and the app running as orphans that never got the signal. They are passed on to the
     child, like uv run does, and the child is waited for. (A signal sent to the whole process
-    group reaches the child twice, as with uv itself.)
+    group reaches the app more than once: from the group, and again from each process between
+    that passes it on: 3 times through ./deploy and `uv run`, twice under a plain `uv run`. The
+    runner cannot tell a group signal from its own, and a child in a group of its own would
+    lose the terminal's Ctrl+C.)
 
     Each handler is only installed in the main thread and while the signal has its default
     handler: a runner started with SIGINT ignored (a background job), or under nohup, keeps

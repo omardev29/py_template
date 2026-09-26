@@ -649,8 +649,12 @@ header rules (with detector tests proving each rule fires).
   run` does, and the child is waited for; then `proc.Interrupted(code, signum)` stops the
   command like Ctrl+C: `error: terminated (SIGTERM)`, the child's code, or 128 + N when it
   exited 0. Same conditions (main thread, default handler: `nohup` keeps SIG_IGN). A signal
-  sent to the whole process group reaches the child twice, as with uv itself. Outside a child
-  (in-process work) the default action still ends the runner.
+  sent to the whole process group (`kill -TERM -PGID`) reaches the app more than once: from
+  the group, and again from each process between that passes it on (measured: 3 times through
+  `./deploy` and the inner `uv run`, twice under a plain `uv run`). Not fixable here: a signal's
+  sender does not say whether it hit the group, and a child in a process group of its own
+  would lose the terminal's Ctrl+C. Outside a child (in-process work) the default action still
+  ends the runner.
 - Runner output goes to stderr through `ui` so the app keeps stdout. Exceptions, printed to
   stdout on purpose: `help`, `__probe`, `shell-setup` snippets, and the `--json` reports of
   `selftest --shells` (also with `--list`) and `selftest --e2e`.
