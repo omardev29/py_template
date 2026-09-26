@@ -1258,6 +1258,23 @@ def test_real_compile_roundtrip(src_tree: Path, tmp_path: Path, monkeypatch: pyt
 
 @needs_venv
 @needs_compiler
+def test_real_compile_separate_names_one_lib_per_module(src_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """compile.separate = true: mypyc builds `<module>__mypyc` next to each shim (the names
+    remove_stale_extensions keeps); a second build deletes none of them."""
+    _project(src_tree, {"main.py": "", "pkg/__init__.py": "", "pkg/core/__init__.py": "", "pkg/core/m.py": "X = 1\n", "pkg/core/n.py": "Y = 2\n"})
+    monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
+    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "separate": True}})
+    stage = mypyc.build(cfg, "dev")
+    stems = sorted(p.relative_to(stage).as_posix().split(".")[0] for p in mypyc.extension_files(stage))
+    assert stems == ["pkg/core/m", "pkg/core/m__mypyc", "pkg/core/n", "pkg/core/n__mypyc"]
+    before = {p: p.stat().st_mtime_ns for p in mypyc.extension_files(stage)}
+    mypyc.build(cfg, "dev")
+    assert set(mypyc.extension_files(stage)) == set(before)
+    assert _import_from(stage, "import pkg.core.m as m, pkg.core.n as n; print(m.X + n.Y)", tmp_path) == "3"
+
+
+@needs_venv
+@needs_compiler
 def test_real_compile_single_top_level_module_sees_a_relative_file(src_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Pins the case lintc's module-level `__file__` rule exists for. If this starts failing
     after a mypy bump, mypyc fixed it: drop the rule (lintc.relative_file_at_import)."""
