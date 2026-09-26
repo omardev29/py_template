@@ -427,6 +427,192 @@ file must be UTF-8 (a BOM is fine); `schema = 1` is the layout this runner reads
 | `vscode.buttons` | `["run", "test", "check", "build"]` | status bar buttons: commands or task names ([VS Code](#vs-code)) |
 | `hooks.pre_commit` | `true` | the git pre-commit hook ([Git pre-commit hook](#git-pre-commit-hook)) |
 
+## Backends
+
+`run`, `test`, `check` and `build` take the backend as their first argument (default:
+`backend.active`). `./deploy mode BACKEND` changes the active one; `./deploy mode --supports
++pypy`, `-pypy` or a full list (`cpython,mypyc`) changes the supported set (`mode pypy` alone
+also adds PyPy). The cpython and mypyc backends share `.venv`; pypy has `.venv-pypy`. The tools
+(mypy, ruff, mypyc, PyInstaller) always run in `.venv`.
+
+### Typing profiles
+
+| Profile | When | What it requires |
+|---|---|---|
+| `off` | cpython and pypy by default (`typing.relaxed = "off"`) | nothing: ruff reports only real errors (syntax, undefined names); mypy does not run |
+| `warn` | `./deploy mode --typing warn` | mypy and ruff findings as warnings, never blocking |
+| `strict` | `./deploy mode --typing strict` | mypy `--strict`, `Any` allowed; blocking |
+| `mypyc` | always with the mypyc backend (`./deploy mode --typing mypyc`: on every backend) | `--strict` across `src/` and `tests/`, and `Any` forbidden in the compiled modules |
+
+`check` uses the profile of the backend it checks, and `check all` runs each profile once. The
+generated `.mypy.ini`, `.ruff.toml`, `pyrightconfig.json` and VS Code settings follow the active
+backend's profile. With the `mypyc` backend the profile cannot be `warn` or `off` (mypyc stops at
+any mypy error).
+
+With mypyc, `Any` is slow: mypyc generates generic operations wherever there is `Any` (a
+`list[Any]` can be slower than uncompiled CPython). That is why the `mypyc` profile enables
+`disallow_any_explicit/expr/decorated/unimported` in the modules of `compile.modules`, while the
+rest of `src/` (the boundary with poorly typed libraries, and the modules of `compile.exclude`)
+stays strict but may use `Any`. Pylance in strict mode does not flag an `Any` written on
+purpose; to see it in the editor too: `./deploy mode --editor basedpyright`.
+
+### mypyc
+
+mypyc compiles the modules of `compile.modules` (default `<pkg>.core`) to C extensions, never in
+`src/`: `run`, `test`, `compile` and `report` use a copy in `.build/mypyc-dev/stage` (asserts
+kept) and `build` one in `.build/mypyc-release/stage` (asserts stripped when `deploy.optimize` is
+1 or 2). Each `.pyd`/`.so` sits next to its `.py`, and only what changed is copied and compiled
+again.
+
+- **Layout**: `src/<pkg>/core/` is compiled; the boundary (`app.py`, `ui/`, `gfx.py`,
+  `resources.py`) is not. `src/main.py` starts the app and is never compiled (a compiled module
+  cannot be `__main__`). `compile.exclude` keeps modules or subpackages of `compile.modules`
+  interpreted; an entry that names nothing is an error.
+- **Constants with `Final`**: a global without `Final` is looked up in a dictionary on every
+  access.
+- **Native classes**: typed attributes, and only these class decorators: `@dataclass`,
+  `@attr.s`, `@final`, `@trait` and `@mypyc_attr`. Any other one, attrs' `@define`, `@frozen` and
+  `@mutable` included, turns the class into a slower regular Python class (mark it
+  `@mypyc_attr(native_class=False)` when that is intended).
+- **Concrete types**: `list[bool]` compiles to direct accesses, `bytearray` takes the generic
+  path (sieve: 4.2x vs 1.9x).
+- `./deploy report --open` marks every generic operation in red ("make it Final", "Generic
+  `*`"). With `compile.annotate = true`, every mypyc build (`run`, `test`, `compile`, `build`) also
+  writes that report to `.build/reports/mypyc-annotate.html` (the same report as `./deploy
+  report`, without mypy's `Any` reports).
+- `./deploy check` adds rules for the compiled modules that mypy does not check: imports listed in
+  `compile.forbid_imports`, class decorators that make a class non-native, nested classes and
+  classes defined inside functions, t-strings, `if __name__ == "__main__"`, `librt` while PyPy is
+  supported, and a module-level `__file__` when `compile.modules` is a single top-level module
+  (there it is a relative path). Compiled code that imports `librt` needs it as an app dependency:
+  `./deploy add librt --cpython-only` (mypy installs it only in the dev group).
+- **Executables**: PyInstaller and Nuitka cannot see the imports inside a compiled module:
+  `./deploy` passes them on (`from X import submodule` included). If one is still missing at
+  runtime, list it in `[deploy.exe] hidden_imports` (PyInstaller) or add `--include-module=NAME`
+  to `[deploy.nuitka] extra_args`.
+- **Debugging and tests**: compiled code has no pdb, cProfile or monkeypatch: debug it
+  interpreted (F5 in VS Code, the dap keys in Neovim). The "Run mypyc stage" debug configuration
+  runs the compiled build, but compiled modules cannot be stepped into. `./deploy test mypyc`
+  runs pytest on the compiled stage and fails when a compiled module was loaded from its `.py`;
+  mark the tests that mock compiled code with `@pytest.mark.interpreted_only` (skipped there).
+- **Native libraries you vendor** (`.so`/`.pyd` files in `src/`, added with `git add -f` past
+  `.gitignore`): the portable and wheel builds carry them; PyInstaller and Nuitka bundle only what
+  they detect (a library loaded with ctypes needs `--add-binary` in `[deploy.exe] extra_args`).
+
+#### Fast integers: `i64`
+
+A Python `int` has no size limit, so mypyc stores it as a *tagged* integer: small values live in
+a machine word, and every operation checks the tag and for overflow, with a slow path that
+creates a big Python int. That is already much faster than CPython, but the C compiler cannot
+see through the slow path, so a loop stays a loop. `mypy_extensions.i64` (also `i32`, `i16`,
+`u8`) promises that the value always fits in 64 bits: mypyc then emits plain C `int64_t`
+arithmetic, and gcc/clang can simplify, vectorise or even delete the loop. `mypy-extensions` is
+already a runtime dependency of every project (`pyproject.toml`): `from mypy_extensions import
+i64`. Interpreted code (the cpython and pypy backends) sees `i64` as a plain `int`.
+
+100 million iterations of `x += 1` (Linux x86_64, gcc 13, CPython 3.14, mypyc 2.3.1, Nuitka
+4.2.2; MSVC on Windows not measured):
+
+| How it runs | Time | The loop |
+|---|---|---|
+| CPython 3.14, interpreted | ~1.8 s | runs |
+| Nuitka (default, `--lto=yes` or PGO) | ~1.3-1.9 s | runs (Python objects and libpython calls) |
+| mypyc, `int`, `compile.opt_level` "1"-"3" | ~0.13-0.18 s | runs |
+| mypyc, `int`, `compile.opt_level = "0"` | ~3.4 s | runs (slower than CPython: debug only) |
+| mypyc, `i64`, `compile.opt_level` "2"/"3" | ~0 s | removed: the function became `return n` |
+
+When to use it:
+
+- Use `i64` for local variables in the hot loops of compiled modules (`src/<pkg>/core/`):
+  counters, indices, accumulators, bit twiddling, hashes, grid/pixel coordinates, fixed-point
+  math, when the values are known to fit in +-9.2e18. Profile first (`./deploy report --open`).
+- Keep `int` everywhere else: public functions, ids, money, sizes that come from outside,
+  values that can grow (powers, factorials), and anything stored in a `list`/`dict`/`set`
+  (containers hold Python int objects either way: no speed-up there). `int` in mypyc is
+  already ~10x faster than CPython on this loop.
+- A `range` loop gets a native index only when its END is a fixed-width int: `for i in range(n)`
+  with `n: i64`, or `range(i64(n))`. With `n: int` the index is a tagged int and the loop stays
+  (158 ms for 1e8 in the same test, even with `x: i64`). Constant bounds (`range(1, 100_000_001)`)
+  are also cheap.
+
+What changes when compiled (checked with mypyc 2.3.1; interpreted code keeps Python's
+unlimited ints, so the cpython/pypy backends never show these):
+
+| `x: i64` | Compiled | Interpreted |
+|---|---|---|
+| `2**63 - 1 + 1`, `2**62 * 4`, `1 << 64` | wraps silently: `-2**63`, `0`, `1` | `2**63`, `2**64`, `2**64` |
+| `-x` / `abs` for `x = -2**63` | `-2**63` | `2**63` |
+| assigning an `int` that does not fit (`x = 2**63`) | `ValueError: int too large to convert to i64` | works |
+| `-2**63 // -1` | `OverflowError` | `2**63` |
+| `-7 // 2`, `-7 % 2`, `x // 0` | `-4`, `1`, `ZeroDivisionError` (Python semantics) | same |
+
+mypy accepts `+ - * // % << >> & | ^`, comparisons, `min`/`max`, `int(x)`, `float(x)`, an `i64`
+wherever an `int` is expected, and an `int` assigned to an `i64` (range-checked when compiled).
+It rejects, as type errors, `x / y`, `x ** y`, `abs(x)`, `round(x)`, `divmod(x, y)` and mixing
+with `float` (`x * 0.5`): convert explicitly, e.g. `float(x) / y`, `float(x) * 0.5`,
+`int(x) ** 2`, `abs(int(x))`, `divmod(int(x), int(y))` (those take the generic, slower path).
+Because overflow only happens compiled, test the edge values with `./deploy test mypyc`: the
+cpython and pypy test runs cannot catch a wrap-around.
+
+#### C compiler options and rebuilds
+
+- `compile.opt_level` is mypyc's C optimisation level, `"3"` by default. `"0"` is unoptimised C
+  with the C asserts on, about 1.8x slower than the interpreter: for debugging only. MSVC has no
+  levels: `"1"` to `"3"` are all `/O2`, `"0"` is `/Od`.
+- `compile.no_semantic_interposition = true` (the default) adds `-fno-semantic-interposition` on
+  Linux with gcc or clang, as CPython itself is built. Without it, every call between two
+  compiled functions goes through the PLT and gcc never inlines it. Measured with gcc 13 (a
+  function calling another one in an `i64` loop, 100 million iterations): 177 ms without the flag,
+  0 ms with it (gcc inlined the call and folded the loop into `return max(n, 0)`). Nothing is
+  added on macOS (not verified there) or with MSVC; `false` keeps mypyc's own flags.
+- gcc and clang always get `-fno-strict-overflow`, so the wrap-around of `i64`/`i32` arithmetic
+  stays defined C. A `CFLAGS` environment variable replaces Python's own compile flags (setuptools
+  does that): your flags stay and mypyc's `-O<opt_level>` after them wins, but Python's `-DNDEBUG`
+  is lost, which turns the C asserts of mypyc's runtime back on (slower).
+- A change of `compile.opt_level`, `no_semantic_interposition`, `multi_file`, `separate`,
+  `strict_dunder_typing` or `deploy.optimize`, or of a compiler variable (`CC`, `CFLAGS`,
+  `CPPFLAGS`, `LDSHARED`, `LDFLAGS`, `ARCHFLAGS`, `CL`, `_CL_`), forces a full rebuild of the
+  stage, and so does a build that failed or was interrupted. Extensions built for another
+  `python.cpython` are removed from the stage.
+- `deploy.optimize` is Python's `-O` level (0 keeps the asserts, 1 strips them, 2 also strips the
+  docstrings): higher strips more, it is not faster. With the mypyc backend, 1 and 2 also strip
+  the asserts of the compiled modules in every build method.
+- The C compiler's install hint appears only when the C step failed (a type error that mypyc
+  rejects is shown as such).
+
+### PyPy
+
+`./deploy mode --supports +pypy` enables PyPy (the raylib preset has it): it checks that the code
+is valid Python 3.11 (ruff's syntax rules for 3.11, and the mypy errors that appear only on 3.11,
+whatever the typing profile), lowers `requires-python` to `>=3.11`, re-locks `uv.lock` and
+creates `.venv-pypy`. `./deploy apply` runs the same check when `backend.supported` gains PyPy.
+
+- While PyPy is supported, the code must be Python 3.11 in syntax and API: no `class C[T]`
+  generics (PEP 695), and `from typing_extensions import override`, not `from typing import
+  override`.
+- PyPy is pinned exactly (`python.pypy = "pypy@3.11.15"`): a loose request picks the newest
+  PyPy, and PyPy 8.0 (the `pypy@3.11.16` builds and later) changed the extension ABI to pp80, for
+  which, as of September 2026, raylib, numpy and cffi publish no wheels. Move the pin once your
+  dependencies ship wheels for the new ABI, then run `./deploy apply`.
+- uv resolves the pin from the downloads it knows: with uv 0.12, `pypy@3.11.15` installs PyPy
+  7.3.23 (uv takes the newest PyPy build of that Python version). A later uv may stop offering
+  it (uv 0.12 no longer offers 3.11.11 and 3.11.13): see [Troubleshooting](#troubleshooting).
+- The tools (mypy, ruff, PyInstaller, debugpy) run on CPython: `.venv-pypy` holds the app's
+  dependencies and pytest.
+- CPython C-API libraries (numpy, pillow, pydantic-core) are slow on PyPy: add them with
+  `./deploy add numpy --cpython-only`. cffi libraries (raylib) are fast: the JIT also compiles the
+  cffi calls.
+- The JIT needs about 1 s to warm up: very short scripts run slower than on CPython.
+- While PyPy is supported, mypy checks the code as Python 3.11 (`--python-version`). mypy has
+  dropped a target version 6 to 9 months after that Python's end of life (3.8, 3.9); 3.11
+  reaches its end of life in October 2027. `uv.lock` pins mypy, so nothing changes until mypy is
+  upgraded. If an upgraded mypy says that 3.11 is not supported: move `python.pypy` to a newer
+  PyPy once the dependencies have wheels for it, keep mypy at the last version that accepts
+  3.11, or drop PyPy (`./deploy mode --supports -pypy`).
+- raylib publishes PyPy wheels only for Linux x86_64, Windows x86_64 and macOS x86_64: on Apple
+  Silicon and Linux ARM64 a raylib project needs `./deploy mode cpython --supports
+  cpython,mypyc`.
+
 ## Shells
 
 The logic lives in `.pytemplate/deploy.py` (standard library only, run by uv). Three thin
@@ -499,110 +685,6 @@ sync with `pyproject.toml`, the mypyc rules on staged compiled modules (blocking
   add `sh ./deploy hooks run || exit $?` to your own hook.
 - It works from any git client (Git Bash, cmd, PowerShell, xonsh, VS Code, lazygit): git runs
   hooks with its own `sh`, and the hook calls the POSIX launcher, which finds uv by itself.
-
-### Typing by backend
-
-| Profile | When | What it requires |
-|---|---|---|
-| `off` | cpython/pypy by default | Nothing: only real errors (syntax, undefined names) |
-| `warn` | `./deploy mode --typing warn` | Everything as a warning, never blocking |
-| `strict` | `./deploy mode --typing strict` | mypy `--strict`, `Any` allowed |
-| `mypyc` | always with the mypyc backend | `--strict` across all of `src/` and **`Any` forbidden in compiled code** |
-
-With mypyc, `Any` is not just ugly, it is **slow**: mypyc generates generic operations wherever
-there is `Any` (a `list[Any]` can be slower than uncompiled CPython). That is why the
-`mypyc` profile enables `disallow_any_explicit/expr/decorated/unimported` in the modules of
-`compile.modules`, while the rest of `src/` (the boundary with poorly typed libraries) stays
-strict but may use `Any`. Pylance in strict mode does not flag an `Any` written on
-purpose; if you want to see it in the editor too: `./deploy mode --editor basedpyright`.
-
-## mypyc: rules to make the binary fly
-
-- **Layout**: `src/<package>/core/` is compiled; the boundary (`app.py`, `ui/`, `gfx/`) is not.
-  `src/main.py` is the launcher and is never compiled (a compiled module cannot be `__main__`).
-- **Constants with `Final`**: a global without `Final` is looked up in a dictionary on every access.
-- **Native classes**: typed `float`/`int` attributes; only the `@dataclass`, `@final`,
-  `@trait` and `@mypyc_attr` decorators (any other one turns the class into a slow Python class).
-- **Concrete types**: `list[bool]` compiles to direct accesses, `bytearray` takes the generic
-  path (sieve: 4.2x vs 1.9x).
-- `./deploy report --open` marks every generic operation in red ("make it Final", "Generic `*`").
-  With `compile.annotate = true`, every mypyc build (`run`, `test`, `compile`, `build`) also
-  writes that annotated HTML report of slow lines to `.build/reports/mypyc-annotate.html` (the
-  same report as `./deploy report`, without mypy's Any reports).
-- `./deploy check` adds rules that mypy does not see: forbidden imports in compiled code,
-  decorators that disable native classes, `__file__` at module level, t-strings...
-- Compiled code has no pdb, cProfile or monkeypatch: debug it interpreted (F5 in VS Code, the
-  dap keys in Neovim). The "Run mypyc stage" debug configuration runs the compiled build, but
-  compiled modules cannot be stepped into.
-
-### Fast integers: `i64`
-
-A Python `int` has no size limit, so mypyc stores it as a *tagged* integer: small values live in
-a machine word, and every operation checks the tag and for overflow, with a slow path that
-creates a big Python int. That is already much faster than CPython, but the C compiler cannot
-see through the slow path, so a loop stays a loop. `mypy_extensions.i64` (also `i32`, `i16`,
-`u8`) is your promise that the value always fits in 64 bits: mypyc then emits plain C
-`int64_t` arithmetic, and gcc/clang can simplify, vectorise or even delete the loop.
-`mypy-extensions` is already a runtime dependency of every project (`pyproject.toml`): just
-`from mypy_extensions import i64`. Interpreted code (the cpython and pypy backends) sees `i64`
-as a plain `int`.
-
-100 million iterations of `x += 1` (Linux x86_64, gcc 13, CPython 3.14, mypyc 2.3.1, Nuitka
-4.2.2; MSVC on Windows not measured):
-
-| How it runs | Time | The loop |
-|---|---|---|
-| CPython 3.14, interpreted | ~1.8 s | runs |
-| Nuitka (default, `--lto=yes` or PGO) | ~1.3-1.9 s | runs (Python objects and libpython calls) |
-| mypyc, `int`, `compile.opt_level` "1"-"3" | ~0.13-0.18 s | runs |
-| mypyc, `int`, `compile.opt_level = "0"` | ~3.4 s | runs (slower than CPython: debug only) |
-| mypyc, `i64`, `compile.opt_level` "2"/"3" | ~0 s | removed: the function became `return n` |
-
-When to use it:
-- Use `i64` for local variables in the hot loops of compiled modules (`src/<pkg>/core/`):
-  counters, indices, accumulators, bit twiddling, hashes, grid/pixel coordinates, fixed-point
-  math, when the values are known to fit in +-9.2e18. Profile first (`./deploy report --open`).
-- Keep `int` everywhere else: public functions, ids, money, sizes that come from outside,
-  values that can grow (powers, factorials), and anything stored in a `list`/`dict`/`set`
-  (containers hold Python int objects either way: no speed-up there). `int` in mypyc is
-  already ~10x faster than CPython on this loop.
-- A `range` loop gets a native index only when its END is a fixed-width int: `for i in range(n)`
-  with `n: i64`, or `range(i64(n))`. With `n: int` the index is a tagged int and the loop stays
-  (158 ms for 1e8 in the same test, even with `x: i64`). Constant bounds (`range(1, 100_000_001)`)
-  are also cheap.
-
-What changes when compiled (checked with mypyc 2.3.1; interpreted code keeps Python's
-unlimited ints, so the cpython/pypy backends never show these):
-
-| `x: i64` | Compiled | Interpreted |
-|---|---|---|
-| `2**63 - 1 + 1`, `2**62 * 4`, `1 << 64` | wraps silently: `-2**63`, `0`, `1` | `2**63`, `2**64`, `2**64` |
-| `-x` / `abs` for `x = -2**63` | `-2**63` | `2**63` |
-| assigning an `int` that does not fit (`x = 2**63`) | `ValueError: int too large to convert to i64` | works |
-| `-2**63 // -1` | `OverflowError` | `2**63` |
-| `-7 // 2`, `-7 % 2`, `x // 0` | `-4`, `1`, `ZeroDivisionError` (Python semantics) | same |
-
-mypy accepts `+ - * // % << >> & | ^`, comparisons, `min`/`max`, `int(x)`, `float(x)`, an `i64`
-wherever an `int` is expected, and an `int` assigned to an `i64` (range-checked when compiled).
-It rejects, as type errors, `x / y`, `x ** y`, `abs(x)`, `round(x)`, `divmod(x, y)` and mixing
-with `float` (`x * 0.5`): convert explicitly, e.g. `float(x) / y`, `float(x) * 0.5`,
-`int(x) ** 2`, `abs(int(x))`, `divmod(int(x), int(y))` (those take the generic, slower path).
-Because overflow only happens compiled, test the edge values with `./deploy test mypyc`: the
-cpython and pypy test runs cannot catch a wrap-around.
-
-## PyPy
-
-Enable it per project with `./deploy mode --supports +pypy` (the raylib preset comes with it):
-it checks that your code is valid Python 3.11, lowers `requires-python` to `>=3.11` and
-creates `.venv-pypy`. Details the template already handles for you:
-
-- PyPy is pinned **exactly** (`pypy@3.11.15`): PyPy 8.0 changed the extension ABI and there
-  are no wheels for it yet.
-- The tools (mypy, ruff, PyInstaller) always run on CPython; the PyPy environment
-  only has your dependencies and pytest.
-- CPython C-API libraries (numpy, pillow, pydantic-core) are slow on PyPy:
-  add them with `./deploy add numpy --cpython-only`. **cffi** libraries (raylib) run very well.
-- The JIT needs to warm up (~1 s): on very short scripts PyPy does not win.
 
 ## Distribution: `./deploy build [BACKEND] --method ...`
 
@@ -734,16 +816,6 @@ converts Flet values to simple types and calls the core in another process
 (`ProcessPoolExecutor`; compiled code does not release the GIL, so a thread would freeze the UI).
 Hot reload: `./deploy dev`. `./deploy build` uses `flet pack`, which puts the Flutter client
 inside the executable (with plain PyInstaller, 40 MB would be downloaded at startup).
-
-## CPython JIT (experimental)
-
-`./deploy mode --jit on` sets `PYTHON_JIT=1` in `run`, `test`, the `portable` launchers and the
-pyz `.cmd` wrapper (a `.pyz` started directly with `python app.pyz` or through its shebang
-cannot set it: export `PYTHON_JIT=1` yourself). The CPython builds that uv downloads for
-Windows do not include the JIT, so it uses a system python.org 3.14 (`py install 3.14`, or the
-path in `python.jit_interpreter`) in a separate environment (`.venv-jit`). It cannot be enabled
-in a PyInstaller executable. Here it gave 1.6x on Collatz and 1.15x on the sieve; mypyc and
-PyPy win by far.
 
 ## VS Code
 
