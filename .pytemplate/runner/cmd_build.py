@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import importlib
 import zipfile
 from dataclasses import dataclass, field
@@ -23,6 +24,13 @@ COMPAT: dict[str, dict[str, str]] = {
     "pyz": {},
     "wheel": {},
 }
+# What a method takes from the command line besides --method and --no-check. Anything else
+# would be silently dropped, so it is refused with exit 2 (a typo is never ignored). Only these
+# methods hand the unknown flags to their packager (PyInstaller / flet pack, Nuitka, flet build).
+PASSTHROUGH = ("exe", "nuitka", "flet")
+ONEFILE_METHODS = ("exe", "nuitka")  # --onefile / --onedir
+TARGET_METHODS = ("pyz",)  # --target: the other methods build for this OS only
+GLOBAL_FLAGS = ("--dry-run", "--no-render")  # ./deploy's own options: they go before the command
 
 
 @dataclass
@@ -53,18 +61,48 @@ def payload(cfg: Config, backend: str) -> Path:
     return dest
 
 
+def _stray_word(word: str, args: list[str]) -> str:
+    """The error for a bare word where build takes none: a typo'd backend, a method without --method."""
+    if word in METHODS:
+        return f"build: unexpected argument '{word}': did you mean --method {word}?"
+    if args and args[0] == word:
+        close = difflib.get_close_matches(word, BACKENDS, n=1)
+        hint = f": did you mean {close[0]}?" if close else ""
+        return f"build: unknown backend '{word}'{hint} (backends: {' | '.join(BACKENDS)}; the method goes after --method)"
+    return f"build: unexpected argument '{word}' (usage: ./deploy build [BACKEND] [--method METHOD] [options])"
+
+
+def _check_arguments(method: str, ns: argparse.Namespace, extra: list[str]) -> None:
+    """Refuse what the chosen method would silently ignore (before the checks and the payload)."""
+    for flag in GLOBAL_FLAGS:
+        if flag in extra:
+            raise DeployError(f"build: {flag} is a global option: put it before the command (./deploy {flag} build ...)", 2)
+    if extra and method not in PASSTHROUGH:
+        raise DeployError(
+            f"build --method {method}: unrecognized arguments: {' '.join(extra)}  "
+            f"(only {', '.join(PASSTHROUGH)} pass extra arguments to their packager)",
+            2,
+        )
+    if (ns.onefile or ns.onedir) and method not in ONEFILE_METHODS:
+        flag = "--onefile" if ns.onefile else "--onedir"
+        raise DeployError(f"build --method {method}: {flag} only applies to --method {' or '.join(ONEFILE_METHODS)}", 2)
+    if ns.target and method not in TARGET_METHODS:
+        raise DeployError(f"build --method {method}: --target only applies to --method pyz ({method} builds for this OS only)", 2)
+
+
 def cmd_build(cfg: Config, args: list[str]) -> int:
     backend, rest = split_backend(cfg, args)
-    parser = argparse.ArgumentParser(prog="./deploy build")
+    parser = argparse.ArgumentParser(prog="./deploy build", allow_abbrev=False)  # --onedri is not --onedir
     parser.add_argument("--method", choices=METHODS)
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--onefile", action="store_true")
-    mode.add_argument("--onedir", action="store_true")
-    parser.add_argument("--target", action="append", default=[], help="extra platforms (pyz/portable), e.g. cp314-linux-x86_64")
+    mode.add_argument("--onefile", action="store_true", help="exe and nuitka only")
+    mode.add_argument("--onedir", action="store_true", help="exe and nuitka only")
+    parser.add_argument("--target", action="append", default=[], help="extra platforms (pyz only), e.g. cp314-linux-x86_64")
     parser.add_argument("--no-check", action="store_true", help="do not run ./deploy check first")
     ns, extra = parser.parse_known_args(rest)
-    if backend not in BACKENDS:
-        raise DeployError(f"unknown backend: {backend}")
+    if extra and not extra[0].startswith("-"):
+        # The first leftover can never be a known option's value (argparse consumed those)
+        raise DeployError(_stray_word(extra[0], args), 2)
     from . import envs
 
     envs.ensure_supported(cfg, backend)
@@ -72,10 +110,17 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
     reason = COMPAT[method].get(backend)
     if reason:
         raise DeployError(f"{method} + {backend}: {reason}")
+    _check_arguments(method, ns, extra)
     if method == "nuitka":
         from .methods import nuitka
 
         nuitka.check_python(cfg, [*cfg.deploy.nuitka.extra_args, *extra])  # before minutes of checks and compiling
+    if method == "pyz":
+        from .methods import common
+
+        for key in [*cfg.deploy.pyz.targets, *ns.target]:  # a bad key fails now, also in --dry-run
+            if key != "host":
+                common.check_key(cfg, backend, key)
 
     if not ns.no_check and not run_checks(cfg, backend):
         raise DeployError("check failed: fix it or use --no-check")
@@ -94,8 +139,9 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
 
 
 def _size(path: Path) -> str:
-    total = path.stat().st_size if path.is_file() else sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
-    return f"{total / 1_048_576:.1f} MB"
+    from .methods.common import tree_bytes  # symlinks (runtime/bin/python3 -> python3.14) count once
+
+    return f"{tree_bytes(path) / 1_048_576:.1f} MB"
 
 
 def dist_path(req: BuildRequest, suffix: str = "") -> Path:

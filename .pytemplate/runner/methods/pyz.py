@@ -2,15 +2,17 @@
 
     myapp.pyz
       __main__.py             bootstrap (extracts to a cache the first time)
-      _pyz.json               build_id, minimum version, targets
+      _pyz.json               build_id, minimum version, targets, host, deps
       common/app/             your code as .py (works on any interpreter)
-      common/lib/             pure dependencies (if none is native)
-      targets/<key>/lib/      dependencies for that platform (if any are native)
-      targets/<key>/app/      the packages compiled by mypyc (host key only)
+      common/lib/             the dependencies, when they are the same everywhere ("pure")
+      targets/<key>/lib/      the dependencies of that platform, when they differ per platform:
+                              native wheels, or markers (colorama on win32, backports for 3.11)
+      targets/<key>/app/      the extensions compiled by mypyc (host key only)
 
-Keys: cp314-windows-x86_64, cp314-linux-x86_64, pp311-windows-x86_64...
-Add more with [deploy.pyz] targets or --target. mypyc does not compile for other OSes:
-there the .py is used (slower, same result).
+Keys: cp314-windows-x86_64, cp314-linux-x86_64, cp314-macos-aarch64... (the python.cpython
+minor on any OS; PyPy only from a pypy build on that machine). Add more with
+[deploy.pyz] targets or --target, or join builds from several machines with pyz-merge.
+mypyc does not compile for other OSes: there the .py is used (slower, same result).
 """
 
 from __future__ import annotations
@@ -18,8 +20,10 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-import zipapp
+import tempfile
+import zipfile
 from pathlib import Path
+from typing import Any
 
 from .. import ui
 from ..cmd_build import BuildRequest, dist_path
@@ -28,6 +32,8 @@ from ..project import BUILD, EXT_SUFFIXES, IS_WINDOWS, TEMPLATES, rel
 from ..ui import DeployError
 from . import common
 
+INFO_KEYS = ("name", "build_id", "min_python", "targets", "pure")
+
 
 def _build_id(root: Path) -> str:
     h = hashlib.sha256()
@@ -35,6 +41,27 @@ def _build_id(root: Path) -> str:
         h.update(path.relative_to(root).as_posix().encode())
         h.update(path.read_bytes())
     return h.hexdigest()[:16]
+
+
+def _write_archive(root: Path, out: Path) -> None:
+    """zipapp.create_archive(root, out, interpreter="/usr/bin/env python3", compressed=True)
+    that accepts any mtime.
+
+    A zip cannot store dates before 1980, and zipapp's ZipFile raised ValueError (an internal
+    error) for such a file: a copy from the Nix store has mtime 1, SOURCE_DATE_EPOCH=0 tarballs
+    0. strict_timestamps=False stores 1980-01-01 instead. Deflate, never zstd: the .pyz must
+    open on Python 3.11 and PyPy.
+    """
+    tmp = out.with_name(out.name + ".tmp")
+    with tmp.open("wb") as fd:
+        fd.write(b"#!/usr/bin/env python3\n")
+        with zipfile.ZipFile(fd, "w", compression=zipfile.ZIP_DEFLATED, strict_timestamps=False) as z:
+            for path in sorted(root.rglob("*")):
+                if path.is_file():
+                    z.write(path, path.relative_to(root).as_posix())
+    tmp.replace(out)
+    if not IS_WINDOWS:
+        out.chmod(0o755)
 
 
 def _wrapper_cmd(cfg: Config, backend: str, pyz_name: str) -> str:
@@ -59,8 +86,26 @@ def _wrapper_cmd(cfg: Config, backend: str, pyz_name: str) -> str:
         lines.append(f"{cmd} {probe} >nul 2>nul && goto run{i}")
     lines += [f"echo {cfg.app.name}: needs Python or PyPy {cfg.min_python} or newer in PATH 1>&2", "exit /b 9009"]
     for i, cmd in enumerate(order):
-        lines += [f":run{i}", f'{cmd} "%~dp0{pyz_name}" %*', "exit /b %ERRORLEVEL%"]
+        # app.gui: the windowed twin without a console, like the portable launchers (the probe
+        # above keeps the console names: it needs the exit code)
+        run = f'start "" {common.windowed(cmd)}' if cfg.app.gui else cmd
+        lines += [f":run{i}", f'{run} "%~dp0{pyz_name}" %*', "exit /b %ERRORLEVEL%"]
     return "\r\n".join(lines) + "\r\n"
+
+
+def _copy_extensions(app_dir: Path, dest: Path) -> None:
+    """Copy only the compiled extensions of the payload, keeping their relative paths.
+
+    The bootstrap extracts common/ and targets/<key>/ into ONE folder, so each .pyd/.so lands
+    next to its .py from common/app (the extension loader wins): no need to store the package,
+    main.py or the assets twice.
+    """
+    for ext in sorted(p for p in app_dir.rglob("*") if p.is_file() and p.name.endswith(EXT_SUFFIXES)):
+        if "__pycache__" in ext.relative_to(app_dir).parts:
+            continue
+        target = dest / ext.relative_to(app_dir)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ext, target)
 
 
 def build(req: BuildRequest) -> Path:
@@ -83,20 +128,22 @@ def build(req: BuildRequest) -> Path:
         ui.info(f"  dependencies for {t.key}")
         sites[t.key] = common.install_deps(cfg, req.backend, t, work / "site" / t.key, requirements)
     native = any(common.has_native(p) for p in sites.values())
-    if native:
+    # Dependencies behind markers (colorama on win32, backports for Python 3.11 or PyPy...)
+    # differ per platform or interpreter even when every wheel is pure: the host's lib alone
+    # would miss them elsewhere
+    skipped = {key: common.skipped_requirements(requirements, site) for key, site in sites.items()}
+    varies = native or any(skipped.values()) or len({common.installed(s) for s in sites.values()}) > 1
+    if varies:
         for key, site in sites.items():
             shutil.copytree(site, root / "targets" / key / "lib")
     else:
         shutil.copytree(sites[host.key], root / "common" / "lib")
 
     if req.compiled:
-        # COMPLETE compiled packages (with __init__.py): a partial overlay would be a
-        # namespace package and Python would load the .py files from the zip instead
-        overlay = root / "targets" / host.key / "app"
-        common.copy_app(req.app_dir, overlay, extensions=True)
+        _copy_extensions(req.app_dir, root / "targets" / host.key / "app")
 
     target_keys = sorted(p.name for p in (root / "targets").iterdir()) if (root / "targets").is_dir() else []
-    pure = not native
+    pure = not varies
     min_python = [int(x) for x in cfg.min_python.split(".")]
     info = {
         "name": cfg.app.name,
@@ -105,68 +152,150 @@ def build(req: BuildRequest) -> Path:
         "targets": target_keys,
         "pure": pure,
         "backend": req.backend,
+        "host": host.key,  # pyz-merge: the platform a pure part's common/lib was resolved for
+        "deps": common.requirements_digest(requirements),  # pyz-merge: parts of one build lock the same set
     }
     (root / "_pyz.json").write_text(json.dumps(info, indent=2), encoding="utf-8", newline="\n")
     shutil.copy2(TEMPLATES / "pyz" / "__main__.py", root / "__main__.py")
+    if any(p.name.endswith(EXT_SUFFIXES) for p in (root / "common").rglob("*")):
+        raise DeployError("bug: the pyz has compiled extensions in common/")
 
     out_dir = dist_path(req)
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
     pyz = out_dir / f"{cfg.app.name}.pyz"
-    zipapp.create_archive(root, pyz, interpreter="/usr/bin/env python3", compressed=True)
+    _write_archive(root, pyz)
     (out_dir / f"{cfg.app.name}.cmd").write_text(_wrapper_cmd(cfg, req.backend, pyz.name), encoding="ascii", newline="")
-    if not IS_WINDOWS:
-        pyz.chmod(0o755)
 
-    where = ", ".join(target_keys) if target_keys else "any platform"
     if req.compiled:
         ui.info(f"  compiled (mypyc) for {host.key}; everywhere else the .py is used")
     if pure:
         ui.info(f"  pure: works with CPython or PyPy >= {cfg.min_python} on any OS")
     else:
-        ui.info(f"  binaries for: {where}")
+        ui.info(f"  runs on: {', '.join(target_keys)}")
+        conditional = sorted({pin for pins in skipped.values() for pin in pins})
+        if not native and conditional:
+            ui.warn(
+                f"dependencies for other platforms or Python versions ({', '.join(conditional)}): this .pyz only "
+                f"runs on {', '.join(target_keys)}. Add the other platforms to [deploy.pyz] targets, or build on "
+                "each machine (PyPy: ./deploy build pypy --method pyz) and join the parts with ./deploy pyz-merge"
+            )
     ui.info(f"  run: python {rel(pyz)}   (on Windows also {rel(out_dir / (cfg.app.name + '.cmd'))})")
-    if any(p.name.endswith(EXT_SUFFIXES) for p in (root / "common").rglob("*")):
-        raise DeployError("bug: the pyz has compiled extensions in common/")
     return pyz
 
 
-def merge(parts: list[Path], out: Path) -> Path:
-    """Merge several .pyz files of the same project (one per OS, e.g. from CI) into a multi-platform one."""
-    import tempfile
-    import zipfile
+# --- pyz-merge ------------------------------------------------------------------------------------
 
+
+def _read_info(part: Path) -> dict[str, Any]:
+    try:
+        with zipfile.ZipFile(part) as archive:
+            info = json.loads(archive.read("_pyz.json"))
+    except (KeyError, ValueError, zipfile.BadZipFile, OSError) as e:
+        raise DeployError(f"pyz-merge: {part} has no valid _pyz.json ({e}): build it with ./deploy build ... --method pyz") from None
+    if not isinstance(info, dict) or any(k not in info for k in INFO_KEYS) or not isinstance(info["targets"], list):
+        raise DeployError(f"pyz-merge: {part} has no valid _pyz.json: build it with ./deploy build ... --method pyz")
+    return info
+
+
+def _part_host(part: Path, info: dict[str, Any]) -> str:
+    """Return the key of the machine that built a pure part (its common/lib was resolved for it)."""
+    host = info.get("host")
+    if isinstance(host, str) and host:
+        return host
+    if info.get("backend") == "mypyc" and len(info["targets"]) == 1:
+        return str(info["targets"][0])  # a pure mypyc part only carries its host's overlay
+    raise DeployError(f"pyz-merge: {part} does not record the platform that built it (an older ./deploy made it): rebuild it")
+
+
+def _app_digest(archive: zipfile.ZipFile) -> str:
+    """The app code of a part (common/app), line endings normalised: a Windows checkout is CRLF."""
+    h = hashlib.sha256()
+    for name in sorted(n for n in archive.namelist() if n.startswith("common/app/") and not n.endswith("/")):
+        h.update(name.encode() + b"\0" + archive.read(name).replace(b"\r\n", b"\n") + b"\0")
+    return h.hexdigest()
+
+
+def merge(parts: list[Path], out: Path) -> Path:
+    """Merge several .pyz files of the same project (one per OS, e.g. from CI) into a multi-platform one.
+
+    common/app and __main__.py come from the first part (every part must carry the same app);
+    targets/ from all of them, each targets/<key>/lib from ONE part (the one built on that
+    platform when there is one) and each compiled overlay targets/<key>/app from exactly one.
+    When every part is pure the result is pure (common/lib of the first part). Otherwise a pure
+    part's common/lib moves to targets/<its host>/lib and no common/lib is kept: one platform's
+    dependencies must not be extracted on every other one.
+    """
     if len(parts) < 2:
         raise DeployError("pyz-merge needs at least two .pyz files")
+    infos = [_read_info(p) for p in parts]
+    names = {str(i["name"]) for i in infos}
+    if len(names) != 1:
+        raise DeployError(f"pyz-merge: they come from different apps: {', '.join(sorted(names))}")
+    if len({tuple(i["min_python"]) for i in infos}) != 1:
+        raise DeployError("pyz-merge: the parts need different minimum Python versions: they come from different builds")
+    if len({i["deps"] for i in infos if i.get("deps")}) > 1:
+        raise DeployError("pyz-merge: the parts lock different dependencies: they come from different builds (rebuild them from one commit)")
+    pure = all(bool(i["pure"]) for i in infos)
+    moved = {} if pure else {n: _part_host(p, i) for n, (p, i) in enumerate(zip(parts, infos, strict=True)) if i["pure"]}
+
+    # Which part provides each targets/<key>/lib (the one built on that platform first)
+    libs: dict[str, list[int]] = {}
+    for n, part in enumerate(parts):
+        with zipfile.ZipFile(part) as archive:
+            keys = {m.split("/")[1] for m in archive.namelist() if m.startswith("targets/") and m.count("/") >= 3 and m.split("/")[2] == "lib"}
+        if n in moved:
+            keys.add(moved[n])
+        for key in keys:
+            libs.setdefault(key, []).append(n)
+    lib_from = {key: next((n for n in owners if infos[n].get("host") == key), owners[0]) for key, owners in libs.items()}
+
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "root"
-        infos: list[dict[str, object]] = []
-        for i, part in enumerate(parts):
+        app_digest = ""
+        overlay_from: dict[str, int] = {}
+        for n, part in enumerate(parts):
             with zipfile.ZipFile(part) as archive:
-                info = json.loads(archive.read("_pyz.json"))
-                infos.append(info)
+                digest = _app_digest(archive)
+                if n == 0:
+                    app_digest = digest
+                elif digest != app_digest:
+                    raise DeployError(f"pyz-merge: {part} carries other app code than {parts[0]}: the parts come from different builds")
                 for member in archive.namelist():
                     if member.endswith("/") or member == "_pyz.json":
                         continue
-                    # common/ and __main__.py from the first one; targets/ from all of them
-                    if i > 0 and not member.startswith("targets/"):
+                    if member.startswith("common/lib/"):
+                        if n in moved:  # a pure part next to per-platform ones: its lib is its host's
+                            if lib_from[moved[n]] != n:
+                                continue
+                            name = f"targets/{moved[n]}/lib/{member[len('common/lib/') :]}"
+                        elif pure and n == 0:
+                            name = member
+                        else:
+                            continue
+                    elif member.startswith("targets/"):
+                        key, kind = (member.split("/") + ["", ""])[1:3]
+                        if kind == "lib" and lib_from.get(key) != n:
+                            continue
+                        if kind == "app" and overlay_from.setdefault(key, n) != n:
+                            raise DeployError(
+                                f"pyz-merge: {parts[overlay_from[key]]} and {part} both carry the compiled app "
+                                f"for {key}: pass one part per platform"
+                            )
+                        name = member
+                    elif n == 0:
+                        name = member  # common/app and __main__.py from the first part
+                    else:
                         continue
-                    target = root / member
+                    target = root / name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(archive.read(member))
-        names = {str(i["name"]) for i in infos}
-        if len(names) != 1:
-            raise DeployError(f"pyz-merge: they come from different apps: {', '.join(sorted(names))}")
-        targets = sorted({str(t) for i in infos for t in i["targets"]})  # type: ignore[attr-defined]
-        merged = {
-            **infos[0],
-            "targets": targets,
-            "pure": all(bool(i["pure"]) for i in infos),
-            "build_id": _build_id(root),
-        }
+        targets = sorted(p.name for p in (root / "targets").iterdir()) if (root / "targets").is_dir() else []
+        merged = {k: v for k, v in infos[0].items() if k != "host"}
+        merged.update({"targets": targets, "pure": pure, "build_id": _build_id(root)})
         (root / "_pyz.json").write_text(json.dumps(merged, indent=2), encoding="utf-8", newline="\n")
         out.parent.mkdir(parents=True, exist_ok=True)
-        zipapp.create_archive(root, out, interpreter="/usr/bin/env python3", compressed=True)
-    ui.ok(f"{rel(out)}: binaries for {', '.join(targets) or 'no platform (pure Python)'}")
+        _write_archive(root, out)
+    ui.ok(f"{rel(out)}: runs on {', '.join(targets) or 'any platform (pure Python)'}")
     return out

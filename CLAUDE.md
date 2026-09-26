@@ -398,7 +398,7 @@ header rules (with detector tests proving each rule fires).
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `init`, `new`, and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
 | `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`. |
 | `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
-| `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys, `UV_PLATFORMS`, `export_requirements`, `install_deps`, `copy_app`, `uses_tkinter`; `nuitka.NUITKA`. |
+| `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys (`parse_key`, `check_key`, `targets_for`), `UV_PLATFORMS`/`host_floor`, `ensure_env`, `export_requirements`, `install_deps`, `drop_install_junk`, `has_native`, `skipped_requirements`, `copy_app`, `uses_tkinter`, `windowed`, `tree_bytes`; `nuitka.NUITKA`/`NUITKA_PYTHON`. |
 | `shells.py` | `__probe`, launcher/shell doctor checks, `shell-setup` snippets, `selftest --shells` (section 4.9). |
 | `cmd_nvim.py` | `./deploy nvim ...` and `doctor(check)` (section 12.2). |
 | `nvimtest.py` | `selftest --nvim` (section 13.1). |
@@ -425,8 +425,10 @@ header rules (with detector tests proving each rule fires).
    argparse commands, `render`/`mode`/`init`/`new` (`cmd_mode._parse`), `lint`, `fmt`,
    `clean`, `setup`, `doctor` (`cmd_dev.only_flags`), `check` and `sync` (extra positionals),
    `shell-setup`. By design: `run`/`test`/tasks forward the rest, `build` forwards unknown
-   flags to the packager, `lock` to `uv lock`, plain `selftest` to pytest; `help` and `tasks`
-   ignore extras.
+   flags to the packager of exe, nuitka and flet only (`cmd_build.PASSTHROUGH`; pyz, portable
+   and wheel refuse them, `--onefile/--onedir` apply to exe/nuitka, `--target` to pyz, and a
+   bare word or a global flag such as `--dry-run` after `build` is an error), `lock` to
+   `uv lock`, plain `selftest` to pytest; `help` and `tasks` ignore extras.
 
 ### 5.3 Exit codes and output
 
@@ -455,9 +457,10 @@ header rules (with detector tests proving each rule fires).
   the plain `selftest` only print their commands; in-process work (the `lintc` rules) runs.
 - `render.apply` behaves like `--check` (writes nothing); `render.auto` prints "would update";
   `render` prints `would update: ...`.
-- `clean` prints what it would remove. `build` prints the checks (unless `--no-check`) and
-  `(--dry-run) build B -> M: would output dist/<name>-<b>-<m>*`, then stops. `report` builds
-  nothing and never opens the browser.
+- `clean` prints what it would remove. `build` validates its arguments, the pyz target keys and
+  the Nuitka pin (`nuitka.check_python`) as a real build does, prints the checks (unless
+  `--no-check`) and `(--dry-run) build B -> M: would output dist/<name>-<b>-<m>*`, then stops.
+  `report` builds nothing and never opens the browser.
 - `mode` validates the new `pytemplate.toml` in memory and prints the keys that would change
   (new and current value), whether `pyproject.toml` would be rewritten, `uv.lock` ("would
   re-lock", or a read-only `uv lock --check`), the generated files that would update, the
@@ -667,7 +670,9 @@ Formats:
   (nuitka, the stages without a pyproject) rely on the walk reaching `ROOT`.
 - `git clean -fdx` is safe: only envs, `.build/`, `dist/`, caches and `.claude/` go; the next
   `uv run --locked` recreates `.venv` by itself (verified on a clone: `run`, `test all`, `check
-  all`, `render --check`, `doctor` all pass without `setup`).
+  all`, `render --check`, `doctor` all pass without `setup`). pyz and portable run an env's
+  python directly (`interpreter_info`, `uv pip install --python`), so they create a missing
+  env first (`methods.common.ensure_env`: `uv sync --locked`); `build ... --no-check` works too.
 - `environments` in the managed block is bounded to the CPython minor (e.g.
   `cpython and >=3.14,<3.15`), plus `pypy and >=3.11,<3.12` when PyPy is supported. Without the
   bound uv resolves for 3.15+, where raylib has no wheels. Changing `python.cpython` needs
@@ -777,17 +782,45 @@ Formats:
 ## 10. Build methods (`cmd_build.py`, `methods/*`)
 
 - `cmd_build`: backend (`split_backend`), `--method`, `--onefile/--onedir`, repeated
-  `--target`, `--no-check`; unknown flags go to `req.extra` and are appended to the packager
-  argv. Default method from `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs
+  `--target`, `--no-check`; argparse with `allow_abbrev=False`. Unknown flags go to
+  `req.extra` and are appended to the packager argv, for `PASSTHROUGH` methods (exe, nuitka,
+  flet) only; `_check_arguments` refuses (exit 2, before the checks, also in `--dry-run`) extras
+  for pyz/portable/wheel, `--onefile/--onedir` outside `ONEFILE_METHODS`, `--target` outside
+  `TARGET_METHODS` (pyz), `GLOBAL_FLAGS` (`--dry-run`, `--no-render`) typed after the command,
+  and a leading bare word (`_stray_word`: "unknown backend 'mypy': did you mean mypyc?", "did you
+  mean --method pyz?"). Then `nuitka.check_python` and, for pyz, `common.check_key` on every
+  key. Default method from `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs
   `run_checks` unless `--no-check`. `payload`: the mypyc release stage, or `sync_tree(SRC,
-  .build/payload/<backend>)`.
+  .build/payload/<backend>)`. The `done: ... (N MB)` size (`common.tree_bytes`) counts a
+  symlinked file once (a bundled runtime's `bin/python3 -> python3.14`).
 - Output: `dist_path(req, suffix)` = `dist/<app.name>-<backend>-<method><suffix>`; portable
   with a bundled runtime adds `-<target key>`, flet adds `-<target>`. The CI template hard-codes
   `dist/<NAME>-<BUILD_BACKEND>-pyz/<NAME>.pyz`: it is coupled to `BuildRequest.out_name`.
 - Work dirs live under `.build/<name>/<backend>` (`exe-stage`, `pyinstaller`, `flet-pack`,
   `pyz`, `wheel`, `nuitka-stage`, `nuitka`, `flet-build`); portable builds straight into `dist/`.
 - Target keys: `^(cp|pp)(\d)(\d+)-(windows|linux|macos)-(x86_64|aarch64)$`
-  (`methods.common.KEY_RE`), e.g. `cp314-windows-x86_64`.
+  (`methods.common.KEY_RE`), e.g. `cp314-windows-x86_64`. `common.check_key` accepts only what
+  uv.lock can serve: `cp<python.cpython>` on any OS/arch (another CPython minor got the build
+  interpreter's binaries on the same OS, or an empty lib/ elsewhere: the export's markers only
+  cover the locked minors), and a `pp` key only when it is the pypy build's own interpreter on
+  this machine (`config_host_key`; uv installs PyPy wheels only with a real PyPy: CPython and
+  PyPy builds are joined with `pyz-merge`). A pypy build may add `cp<minor>` keys (installed
+  with the tools env).
+- `common.install_deps` (`uv pip install --target --no-deps -r <export>`): a cross target gets
+  `--python-platform UV_PLATFORMS[...] --python-version --only-binary :all:` (an sdist built for
+  another OS would produce host binaries); a HOST target gets the same `--python-platform` floor
+  when this machine can load it (`host_floor`: glibc >= 2.28 x86_64 / 2.35 aarch64, never musl;
+  macOS >= `MACOS_FLOOR` 13.0, pinned through `MACOSX_DEPLOYMENT_TARGET` unless the user sets it),
+  without `--only-binary`, and falls back to the host's own wheels with a warning when a
+  dependency has no wheel for the floor. Without it uv picked the newest the build machine
+  allows (manylinux_2_34 on Ubuntu 24.04: the result failed on Debian 11 / RHEL 8).
+  `drop_install_junk` removes uv's `.lock`, `_virtualenv*` and the console/GUI script wrappers
+  of `bin/` / `Scripts/` (names from `*.dist-info/entry_points.txt`; their shebang or `.exe`
+  trampoline holds the build machine's `.venv` path), keeping other files there (ruff and uv
+  wheels look up their native binary at `<target>/bin`) and a real `bin` package.
+- `common.has_native`: a `*.dist-info/WHEEL` tag with an ABI or platform (also pure-Python
+  platform wheels that ship an executable, e.g. imageio-ffmpeg), else a `.pyd/.so/.dll/.dylib`
+  or `.so.N` file.
 - Both bootstraps (`portable/boot.py`, `pyz/__main__.py`) put `lib/` BEFORE site-packages
   (`_prepend_sitedir`: `site.addsitedir` for the `.pth` files, then moved to the front), so
   the locked dependencies win over packages installed in the running Python.
@@ -833,19 +866,38 @@ Per method:
     line because imported packages may print (raylib's banner); a failed import shows the
     traceback and raises `DeployError`.
 - **pyz**: Python cannot import `.pyd/.so` from a zip, so `__main__.py` extracts to a per-build
-  cache (`%LOCALAPPDATA%` / `~/Library/Caches` / `$XDG_CACHE_HOME`, then
-  `<name>/pyz/<build_id>/<key|pure>/`), guarded by a `.complete` marker and an atomic
-  `os.replace`; the 3 newest builds are kept. `common/` never holds extensions (runtime `bug:`
-  check). The mypyc overlay `targets/<host>/app` is the FULL package (`.py` + `.pyd` +
-  `__init__.py`): a partial overlay would be a namespace-package trap where `common`'s `.py`
-  wins. `zipapp compressed=True` = deflate, never zstd: it must open on 3.11 and PyPy.
-  Cross-target deps use `uv pip install --target --python-platform --python-version
-  --only-binary :all:` (an sdist built for another OS would produce host binaries); PyPy
-  targets are host-only; `_virtualenv*` junk is removed. The `<n>.cmd` wrapper runs each
-  candidate interpreter with a minimum-version probe, sets `PYTHONUTF8=1` and
-  `PYTHON_JIT=0|1`. `pyz-merge` (>= 2 zip parts, same app name) takes `common/` and
-  `__main__.py` from the first part and `targets/` from all parts, recomputes the `build_id`
-  and prints "no platform (pure Python)" when no part has binaries.
+  cache (`%LOCALAPPDATA%` / `~/Library/Caches` / an absolute `$XDG_CACHE_HOME` or `~/.cache`,
+  then `<name>/pyz/<build_id>/<key|pure>/`), guarded by a `.complete` marker and an atomic
+  `os.replace`; a folder left without its marker (an interrupted prune, a DLL still loaded) is
+  moved aside and re-extracted (`_discard`). Every start touches its build folder; `_prune_old`
+  deletes only builds beyond the 3 most recently started AND older than a day (`MIN_AGE`: a
+  running build is never deleted), unlinking their `.complete` markers first, and tolerates
+  folders that vanish under it. Without a usable cache (`Path.home()` raises for a UID without
+  a passwd entry; a read-only home) it extracts into a per-run `tempfile.mkdtemp` folder removed
+  at exit (never a predictable shared `/tmp` path: another user could plant code there).
+  Layout: `common/lib` only when the build is "pure": every target site installed exactly the
+  locked set (`common.skipped_requirements`: no pin was excluded by a `sys_platform`,
+  `python_version` or `implementation_name` marker), the sites hold the same distributions and
+  nothing is native (`has_native`); otherwise EVERY target gets `targets/<key>/lib` and the build
+  warns which conditional pins restrict it ("runs on: <keys>"). `common/` never holds extensions
+  (`bug:` check). The mypyc overlay `targets/<host>/app` holds only the extension files: the
+  bootstrap extracts `common/` and `targets/<key>/` into ONE folder, so each `.pyd/.so` lands
+  next to its `.py` and the extension loader wins. `_pyz.json`: `name`, `build_id`, `min_python`,
+  `targets`, `pure`, `backend`, `host` (the key that built it), `deps`
+  (`common.requirements_digest`: the pin lines of the export, not its header). The archive is
+  written by `pyz._write_archive` (deflate, never zstd: it must open on 3.11 and PyPy;
+  `strict_timestamps=False`: a payload file older than 1980, e.g. from the Nix store, used to
+  crash `zipapp`; shebang `/usr/bin/env python3`, mode 0755). The `<n>.cmd` wrapper runs each
+  candidate interpreter with a minimum-version probe, sets `PYTHONUTF8=1` and `PYTHON_JIT=0|1`;
+  with `app.gui` its run lines are `start "" pyw/pythonw/pypyw` (`common.windowed`). `pyz-merge`
+  (>= 2 parts; `_read_info` refuses a part without a valid `_pyz.json`) requires the same app
+  name, `min_python`, `deps` and app code (`common/app`, CRLF-normalised: Windows CI checkouts);
+  takes `common/app` and `__main__.py` from the first part, every `targets/<key>/lib` from ONE
+  part (the one built on that platform, else the first), refuses two compiled overlays for one
+  key, and when parts differ in purity moves each pure part's `common/lib` to
+  `targets/<its host>/lib` (an older part without `host`: the single overlay key of a mypyc
+  part, else "rebuild it") and keeps no `common/lib`. The merged `targets` come from the
+  folders written; `host` is dropped.
 - **wheel**: synthetic build project in `.build/wheel/<b>` (`setuptools>=84`; for mypyc
   `mypy==<version locked in uv.lock>` in `build-system.requires`, a `setup.py` using mypycify
   with the same `compile.multi_file`, `separate` and `strict_dunder_typing` as the stage, and a
@@ -1208,7 +1260,13 @@ short temp tree and unset `NVIM_APPNAME`.
   runner fixes: portable smoke with `lib/`, lazy `{python}`, pyz `PYTHON_JIT`, binary preset
   files, `compile.annotate`, `sync_tree` ns mtimes, portable launcher quoting and version
   probes, unknown arguments, `app.preset`, pinned tools, flet pyproject, wheel options, JIT
-  path), `test_e2e_plan.py` (the pure planning of `e2e.py`).
+  path), `test_e2e_plan.py` (the pure planning of `e2e.py`), `test_build_methods.py` (argv and
+  output discovery of exe, flet pack, Nuitka and flet build with the packager recorded;
+  `cmd_build` argument checks; target keys, `install_deps` floors and junk; the pyz layout,
+  `pyz-merge` and the real bootstrap run in subprocesses with the cache redirected; one REAL
+  host pyz build run with `python -S`, skipped when uv cannot install offline; portable prune,
+  launchers and precompile), `test_upx.py` (UPX flags, candidates per OS, the pinned download
+  with fake archives).
 - **[template repo]** Language guard `test_no_spanish.py`: skipped unless
   `.pytemplate/template-repo` exists. Scans `git ls-files --cached --others --exclude-standard`
   (so new untracked files count) for accented Spanish letters and a list of Spanish words

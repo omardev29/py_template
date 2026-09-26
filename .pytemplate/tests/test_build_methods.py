@@ -4,10 +4,13 @@ pyz/portable layouts and bootstraps. No network, no packager: the packager calls
 from __future__ import annotations
 
 import importlib.machinery
+import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -449,3 +452,956 @@ def test_nuitka_failure_names_the_pin(sandbox: Path, monkeypatch: pytest.MonkeyP
     with pytest.raises(DeployError) as e:
         nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
     assert e.value.code == 1 and nuitka.NUITKA in str(e.value) and "methods/nuitka.py" in str(e.value)
+
+
+# --- pyz: the bootstrap (templates/pyz/__main__.py), run for real ---------------------------------
+
+
+def _host_key() -> str:
+    """The key the bootstrap computes for THIS interpreter (templates/pyz/__main__.py _key)."""
+    impl = {"cpython": "cp", "pypy": "pp"}.get(sys.implementation.name, sys.implementation.name)
+    arch = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}.get(
+        platform.machine().lower(), platform.machine().lower()
+    )
+    os_name = {"win32": "windows", "linux": "linux", "darwin": "macos"}.get(sys.platform, sys.platform)
+    return f"{impl}{sys.version_info[0]}{sys.version_info[1]}-{os_name}-{arch}"
+
+
+MAIN_WAITS = (
+    "import os, sys, time\n"
+    "flag = os.environ.get('PT_WAIT')\n"
+    "while flag and not os.path.exists(flag):\n"
+    "    time.sleep(0.05)\n"
+    "import lazymod\n"
+    "print('ok', lazymod.WHERE, os.environ.get('PYTEMPLATE_ASSETS', ''), sys.argv[0], *sys.argv[1:])\n"
+)
+
+
+def fake_pyz(path: Path, *, build_id: str = "b1", targets: list[str] | None = None, pure: bool = True, files: dict[str, str] | None = None, **info: Any) -> Path:
+    """A .pyz as methods/pyz.py lays it out, with the REAL bootstrap and pyz._write_archive."""
+    from runner.methods import pyz
+
+    root = path.parent / f"{path.stem}-root"
+    if root.exists():
+        shutil.rmtree(root)
+    content = files if files is not None else {"common/app/main.py": MAIN_WAITS, "common/lib/lazymod.py": "WHERE = 'common'\n"}
+    for name, text in content.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text, encoding="utf-8", newline="")
+    data = {"name": "demo", "build_id": build_id, "min_python": [3, 11], "targets": targets or [], "pure": pure, "backend": "cpython", **info}
+    (root / "_pyz.json").write_text(json.dumps(data), encoding="utf-8")
+    shutil.copy2(TEMPLATES / "pyz" / "__main__.py", root / "__main__.py")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pyz._write_archive(root, path)
+    return path
+
+
+def pyz_env(cache: Path, **extra: str) -> dict[str, str]:
+    """A child env whose user cache is `cache` (never the real one) on every OS."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTEMPLATE_", "PT_"))}
+    env.update({"LOCALAPPDATA": str(cache), "XDG_CACHE_HOME": str(cache), "HOME": str(cache), "USERPROFILE": str(cache)})
+    env.update(extra)
+    return env
+
+
+def run_pyz(pyz_file: Path, env: dict[str, str], *args: str, prelude: str = "") -> subprocess.CompletedProcess[str]:
+    """`python -S app.pyz ARGS` (no site-packages: the .pyz must bring its own dependencies)."""
+    if prelude:
+        code = prelude + f"import runpy, sys\nsys.argv = [{str(pyz_file)!r}, *{list(args)!r}]\nrunpy.run_path({str(pyz_file)!r}, run_name='__main__')\n"
+        argv = [sys.executable, "-S", "-c", code]
+    else:
+        argv = [sys.executable, "-S", str(pyz_file), *args]
+    return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=120, check=False)
+
+
+def test_pyz_bootstrap_picks_the_flavour(tmp_path: Path) -> None:
+    key = _host_key()
+    cache = tmp_path / "cache"
+    files = {
+        "common/app/main.py": MAIN_WAITS,
+        "common/app/assets/logo.txt": "x",
+        "common/lib/lazymod.py": "WHERE = 'common'\n",
+        f"targets/{key}/lib/lazymod.py": "WHERE = 'target'\n",
+    }
+    own = fake_pyz(tmp_path / "own.pyz", build_id="own", targets=[key], pure=False, files=files)
+    r = run_pyz(own, pyz_env(cache), "a b", "")
+    assert r.returncode == 0, r.stderr
+    root = cache / "demo" / "pyz" / "own" / key
+    assert r.stdout.split() == ["ok", "target", str(root / "app" / "assets"), str(root / "app" / "main.py"), "a", "b"]
+    pure = fake_pyz(tmp_path / "pure.pyz", build_id="pure", targets=["cp399-nowhere-x86_64"], pure=True)
+    r = run_pyz(pure, pyz_env(cache))
+    assert r.returncode == 0 and r.stdout.split()[:2] == ["ok", "common"], r.stderr
+    assert (cache / "demo" / "pyz" / "pure" / "pure" / ".complete").is_file()
+    other = fake_pyz(tmp_path / "other.pyz", build_id="other", targets=["cp399-nowhere-x86_64"], pure=False)
+    r = run_pyz(other, pyz_env(cache))
+    assert r.returncode == 1
+    assert f"no build for this interpreter and platform ({key})" in r.stderr and "Built for: cp399-nowhere-x86_64" in r.stderr
+
+
+def test_pyz_bootstrap_refuses_an_older_python(tmp_path: Path) -> None:
+    newer = fake_pyz(tmp_path / "n.pyz", min_python=[3, 99])
+    r = run_pyz(newer, pyz_env(tmp_path / "cache"))
+    assert r.returncode == 1 and "demo: needs Python 3.99 or newer" in r.stderr
+    assert not (tmp_path / "cache").exists()  # nothing extracted
+
+
+@pytest.mark.parametrize("case", ["no_home", "unwritable"])
+def test_pyz_runs_without_a_usable_cache(tmp_path: Path, case: str) -> None:
+    # A random UID without a passwd entry (Path.home() raises RuntimeError) or a read-only home
+    # (service users): the bootstrap crashed with a traceback. Now: a private per-run folder.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("")  # a FILE: every cache folder below it fails to mkdir, even as root
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    env = pyz_env(blocker / "x", TMPDIR=str(scratch), TEMP=str(scratch), TMP=str(scratch))
+    prelude = ""
+    if case == "no_home":
+        for name in ("LOCALAPPDATA", "XDG_CACHE_HOME", "HOME", "USERPROFILE"):
+            env.pop(name, None)
+        prelude = "import pathlib\ndef _no_home(cls): raise RuntimeError('Could not determine home directory.')\npathlib.Path.home = classmethod(_no_home)\n"
+    r = run_pyz(fake_pyz(tmp_path / "t.pyz"), env, "arg", prelude=prelude)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split()[:2] == ["ok", "common"] and r.stdout.split()[-1] == "arg"
+    assert not any(scratch.iterdir())  # the per-run folder is removed at exit
+
+
+@pytest.mark.skipif(IS_WINDOWS or sys.platform == "darwin", reason="XDG_CACHE_HOME is the Linux/BSD cache")
+def test_pyz_ignores_a_relative_xdg_cache_home(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    work.mkdir()
+    env = pyz_env(home, XDG_CACHE_HOME="relative/cache")
+    r = subprocess.run([sys.executable, "-S", str(fake_pyz(tmp_path / "t.pyz"))], cwd=work, capture_output=True, text=True, env=env, timeout=120, check=False)
+    assert r.returncode == 0, r.stderr
+    assert (home / ".cache" / "demo" / "pyz" / "b1" / "pure" / ".complete").is_file()
+    assert not (work / "relative").exists()
+
+
+def test_pyz_concurrent_first_starts_extract_once(tmp_path: Path) -> None:
+    pyz_file = fake_pyz(tmp_path / "t.pyz")
+    cache = tmp_path / "cache"
+    procs = [subprocess.Popen([sys.executable, "-S", str(pyz_file)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=pyz_env(cache)) for _ in range(8)]
+    for p in procs:
+        out, err = p.communicate(timeout=120)
+        assert p.returncode == 0, err
+        assert out.split()[:2] == ["ok", "common"]
+    build = cache / "demo" / "pyz" / "b1"
+    assert sorted(p.name for p in build.iterdir()) == ["pure"]  # no .tmp-* or .stale-* left behind
+    assert (build / "pure" / ".complete").is_file()
+
+
+@pytest.mark.parametrize("damage", ["marker", "marker+file"])
+def test_pyz_repairs_an_incomplete_cache(tmp_path: Path, damage: str) -> None:
+    # An interrupted prune (or a Windows delete that skipped a loaded DLL) left the build folder
+    # without .complete: every later start failed in os.replace with "Directory not empty"
+    pyz_file = fake_pyz(tmp_path / "t.pyz")
+    cache = tmp_path / "cache"
+    assert run_pyz(pyz_file, pyz_env(cache)).returncode == 0
+    dest = cache / "demo" / "pyz" / "b1" / "pure"
+    (dest / ".complete").unlink()
+    if damage == "marker+file":
+        (dest / "lib" / "lazymod.py").unlink()
+    for _ in range(2):
+        r = run_pyz(pyz_file, pyz_env(cache))
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.split()[:2] == ["ok", "common"]
+    assert (dest / ".complete").is_file()
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["pure"]
+
+
+def _cached_builds(cache: Path) -> list[str]:
+    return sorted(p.name for p in (cache / "demo" / "pyz").iterdir())
+
+
+def test_pyz_prune_never_deletes_a_running_build(tmp_path: Path) -> None:
+    # Builds 1-3 cached; build 1 still running; builds 4-6 started: the prune used to delete
+    # build 1 (oldest extraction), which then died on its next lazy import
+    cache = tmp_path / "cache"
+    parts = {n: fake_pyz(tmp_path / f"b{n}.pyz", build_id=f"build{n}") for n in range(1, 7)}
+    for n in (1, 2, 3):
+        assert run_pyz(parts[n], pyz_env(cache)).returncode == 0
+    flag = tmp_path / "go"
+    slow = subprocess.Popen([sys.executable, "-S", str(parts[1])], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=pyz_env(cache, PT_WAIT=str(flag)))
+    try:
+        for n in (4, 5, 6):
+            assert run_pyz(parts[n], pyz_env(cache)).returncode == 0
+    finally:
+        flag.write_text("")
+        out, err = slow.communicate(timeout=120)
+    assert slow.returncode == 0, err
+    assert out.split()[:2] == ["ok", "common"]
+    assert "build1" in _cached_builds(cache)
+
+
+def test_pyz_prune_still_removes_old_unused_builds(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    for n in (1, 2, 3):
+        assert run_pyz(fake_pyz(tmp_path / f"b{n}.pyz", build_id=f"build{n}"), pyz_env(cache)).returncode == 0
+    old = time.time() - 3 * 86400
+    for n, name in enumerate(("build1", "build2", "build3")):
+        os.utime(cache / "demo" / "pyz" / name, (old + n, old + n))
+    assert run_pyz(fake_pyz(tmp_path / "b4.pyz", build_id="build4"), pyz_env(cache)).returncode == 0
+    assert _cached_builds(cache) == ["build2", "build3", "build4"]  # the 3 most recently started
+
+
+def test_pyz_rerun_marks_a_build_as_recently_used(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    pyz_file = fake_pyz(tmp_path / "t.pyz")
+    assert run_pyz(pyz_file, pyz_env(cache)).returncode == 0
+    build = cache / "demo" / "pyz" / "b1"
+    os.utime(build, (1_000_000_000, 1_000_000_000))
+    assert run_pyz(pyz_file, pyz_env(cache)).returncode == 0
+    assert build.stat().st_mtime > time.time() - 3600
+
+
+def _bootstrap_namespace() -> dict[str, Any]:
+    """The bootstrap's functions, without running main()."""
+    source = (TEMPLATES / "pyz" / "__main__.py").read_text(encoding="utf-8")
+    assert source.rstrip().endswith("main()")
+    namespace: dict[str, Any] = {"__name__": "pt_bootstrap"}
+    exec(compile(source.rstrip()[: -len("main()")], "__main__.py", "exec"), namespace)  # noqa: S102
+    return namespace
+
+
+def test_pyz_prune_tolerates_vanishing_folders(tmp_path: Path) -> None:
+    # Two builds pruning at once: a folder listed by iterdir() is gone before its stat()
+    base = type(tmp_path)
+
+    class Racy(base):  # type: ignore[valid-type,misc]
+        def iterdir(self) -> Iterator[Path]:
+            yield from super().iterdir()
+            yield self / "ghost"
+
+        def is_dir(self, **kwargs: Any) -> bool:
+            return True if self.name == "ghost" else super().is_dir(**kwargs)
+
+        def stat(self, **kwargs: Any) -> os.stat_result:
+            if self.name == "ghost":
+                raise FileNotFoundError(str(self))
+            return super().stat(**kwargs)
+
+    (tmp_path / "old1").mkdir()
+    os.utime(tmp_path / "old1", (1, 1))
+    namespace = _bootstrap_namespace()
+    namespace["_prune_old"](Racy(tmp_path), "current")  # must not raise
+    namespace["_prune_old"](Racy(tmp_path / "missing"), "current")  # a cache root that vanished
+
+
+# --- pyz: build() with the installs recorded --------------------------------------------------------
+
+
+def _wheel(site: Path, name: str, version: str, tag: str = "py3-none-any", files: dict[str, bytes] | None = None) -> None:
+    """Fake an installed distribution: <name>-<version>.dist-info/WHEEL (+ files)."""
+    info = site / f"{name.replace('-', '_')}-{version}.dist-info"
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "WHEEL").write_text(f"Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: {tag}\n", encoding="utf-8")
+    for rel_name, data in (files or {f"{name.replace('-', '_')}/__init__.py": b""}).items():
+        (site / rel_name).parent.mkdir(parents=True, exist_ok=True)
+        (site / rel_name).write_bytes(data)
+
+
+def _requirements(tmp_path: Path, *pins: str) -> Path:
+    lines = ["# This file was autogenerated by uv via the following command:", f"#    uv export --output-file {tmp_path}/requirements.txt"]
+    for pin in pins:
+        lines += [f"{pin} \\", "    --hash=sha256:" + "0" * 64, "    # via myapp"]
+    path = tmp_path / "requirements.txt"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _pyz_build(
+    sandbox: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sites: dict[str, Any],
+    pins: list[str],
+    *,
+    backend: str = "cpython",
+    cfg: Config | None = None,
+    compiled_files: bool = False,
+    app: Path | None = None,
+) -> tuple[Path, dict[str, Any], set[str]]:
+    """Run pyz.build with the target list and the installs faked: `sites` maps a key to a
+    function filling that target's site folder."""
+    from runner.methods import pyz
+
+    cfg = cfg or make({})
+    app = app or fake_app(sandbox / "payload", cfg.pkg)
+    if compiled_files:
+        (app / cfg.pkg / "core" / f"bench{EXT}").write_bytes(b"\x7fELF")
+        (app / cfg.pkg / "core" / "bench.py").write_text("X = 1\n", encoding="utf-8")
+        (app / f"{cfg.pkg}__mypyc{EXT}").write_bytes(b"\x7fELF")
+    keys = list(sites)
+    monkeypatch.setattr(common, "targets_for", lambda c, b, k: [common.parse_key(x) for x in keys])
+    requirements = _requirements(sandbox, *pins)
+    monkeypatch.setattr(common, "export_requirements", lambda c: requirements)
+
+    def install(c: Config, b: str, t: common.Target, dest: Path, req: Path) -> Path:
+        dest.mkdir(parents=True, exist_ok=True)
+        sites[t.key](dest)
+        return dest
+
+    monkeypatch.setattr(common, "install_deps", install)
+    out = pyz.build(BuildRequest(cfg, backend, "pyz", app))
+    import zipfile
+
+    with zipfile.ZipFile(out) as archive:
+        info = json.loads(archive.read("_pyz.json"))
+        names = set(archive.namelist())
+    return out, info, names
+
+
+LINUX = "cp314-linux-x86_64"
+WIN = "cp314-windows-x86_64"
+MAC = "cp314-macos-aarch64"
+
+
+def test_pyz_pure_build_layout(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    out, info, names = _pyz_build(sandbox, monkeypatch, {LINUX: lambda d: _wheel(d, "rich", "15.0.0")}, ["rich==15.0.0 ; implementation_name == 'cpython'"])
+    assert info["pure"] is True and info["targets"] == [] and info["host"] == LINUX
+    assert {"common/lib/rich/__init__.py", "common/app/main.py", "common/app/assets/logo.txt", "__main__.py", "_pyz.json"} <= names
+    assert not [n for n in names if n.startswith("targets/")]
+    assert len(info["deps"]) == 16 and info["build_id"]
+    assert "pure: works with CPython or PyPy >= 3.14 on any OS" in capsys.readouterr().err
+    assert out.read_bytes().startswith(b"#!/usr/bin/env python3\n")
+    if not IS_WINDOWS:
+        assert os.stat(out).st_mode & 0o111
+    assert (out.parent / "myapp.cmd").is_file()
+
+
+def test_pyz_build_id_is_stable(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pins = ["rich==15.0.0"]
+    _, first, _ = _pyz_build(sandbox, monkeypatch, {LINUX: lambda d: _wheel(d, "rich", "15.0.0")}, pins)
+    shutil.rmtree(sandbox / "payload")
+    _, second, _ = _pyz_build(sandbox, monkeypatch, {LINUX: lambda d: _wheel(d, "rich", "15.0.0")}, pins)
+    assert first["build_id"] == second["build_id"] and first["deps"] == second["deps"]
+
+
+def test_pyz_with_marker_skipped_deps_is_not_pure(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # loguru needs colorama/win32_setctime on Windows, jaraco.context needs backports-tarfile on
+    # 3.11/PyPy: the host install skips them, yet the pyz said "pure ... on any OS"
+    pins = ["colorama==0.4.6 ; sys_platform == 'win32'", "loguru==0.7.3 ; implementation_name == 'cpython'"]
+    _, info, names = _pyz_build(sandbox, monkeypatch, {LINUX: lambda d: _wheel(d, "loguru", "0.7.3")}, pins)
+    assert info["pure"] is False and info["targets"] == [LINUX]
+    assert f"targets/{LINUX}/lib/loguru/__init__.py" in names
+    assert not [n for n in names if n.startswith("common/lib/")]
+    err = capsys.readouterr().err
+    assert "colorama==0.4.6" in err and "any OS" not in err and "pyz-merge" in err
+
+
+def test_pyz_uses_per_target_libs_when_sites_differ(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # tzlocal needs tzdata on Windows only: an explicit Windows target installed it, and the
+    # "pure" build then threw that site away
+    pins = ["tzlocal==5.4.4", "tzdata==2026.4 ; sys_platform == 'win32'"]
+    sites = {
+        LINUX: lambda d: _wheel(d, "tzlocal", "5.4.4"),
+        WIN: lambda d: (_wheel(d, "tzlocal", "5.4.4"), _wheel(d, "tzdata", "2026.4")),
+    }
+    _, info, names = _pyz_build(sandbox, monkeypatch, sites, pins)
+    assert info["pure"] is False and info["targets"] == sorted([LINUX, WIN])
+    assert f"targets/{WIN}/lib/tzdata/__init__.py" in names and f"targets/{LINUX}/lib/tzlocal/__init__.py" in names
+    assert f"targets/{LINUX}/lib/tzdata/__init__.py" not in names
+
+
+def test_pyz_platform_wheel_without_extension_is_native(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # imageio-ffmpeg: a py3-none-<platform> wheel whose binary has no .so/.pyd suffix
+    sites = {
+        LINUX: lambda d: _wheel(d, "imageio-ffmpeg", "0.6.0", "py3-none-manylinux2014_x86_64", {"imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2": b"\x7fELF"}),
+        WIN: lambda d: _wheel(d, "imageio-ffmpeg", "0.6.0", "py3-none-win_amd64", {"imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe": b"MZ"}),
+    }
+    _, info, names = _pyz_build(sandbox, monkeypatch, sites, ["imageio-ffmpeg==0.6.0"])
+    assert info["pure"] is False and info["targets"] == sorted([LINUX, WIN])
+    assert f"targets/{WIN}/lib/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe" in names
+    assert "runs on:" in capsys.readouterr().err
+
+
+def test_pyz_mypyc_overlay_holds_only_extensions(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = make({"backend": {"active": "mypyc"}})
+    _, info, names = _pyz_build(sandbox, monkeypatch, {LINUX: lambda d: _wheel(d, "rich", "15.0.0")}, ["rich==15.0.0"], backend="mypyc", cfg=cfg, compiled_files=True)
+    overlay = sorted(n for n in names if n.startswith(f"targets/{LINUX}/app/"))
+    assert overlay == [f"targets/{LINUX}/app/myapp/core/bench{EXT}", f"targets/{LINUX}/app/myapp__mypyc{EXT}"]
+    assert not [n for n in names if n.startswith("common/") and n.endswith((".so", ".pyd"))]
+    assert "common/app/myapp/core/bench.py" in names  # the pure fallback of other platforms
+    assert info["pure"] is True and info["targets"] == [LINUX]
+
+
+def test_pyz_accepts_payload_files_older_than_1980(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A copy from the Nix store has mtime 1: zipapp raised "ZIP does not support timestamps
+    # before 1980" (an internal-error traceback)
+    import zipfile
+
+    def old_site(d: Path) -> None:
+        _wheel(d, "rich", "15.0.0")
+        os.utime(d / "rich" / "__init__.py", (0, 0))
+
+    app = fake_app(sandbox / "payload")
+    os.utime(app / "myapp" / "app.py", (1, 1))
+    out, _, names = _pyz_build(sandbox, monkeypatch, {LINUX: old_site}, ["rich==15.0.0"], app=app)
+    assert "common/app/myapp/app.py" in names and "common/lib/rich/__init__.py" in names
+    with zipfile.ZipFile(out) as archive:
+        assert archive.testzip() is None
+        assert archive.getinfo("common/app/myapp/app.py").date_time[0] == 1980
+    assert os.stat(app / "myapp" / "app.py").st_mtime == 1  # the payload itself is untouched
+
+
+@pytest.mark.parametrize(("backend", "windowed"), [("cpython", ["pyw -3.14", "pythonw", "pythonw", "pypyw"]), ("pypy", ["pypyw", "pypyw", "pyw", "pythonw"])])
+def test_pyz_wrapper_gui_runs_windowed(backend: str, windowed: list[str]) -> None:
+    from runner.methods import pyz
+
+    cfg = make({"app": {"gui": True}, "backend": {"supported": ["cpython", "pypy"]}})
+    lines = pyz._wrapper_cmd(cfg, backend, "a.pyz").split("\r\n")
+    runs = [lines[i + 1] for i, line in enumerate(lines) if line.startswith(":run")]
+    assert runs == [f'start "" {w} "%~dp0a.pyz" %*' for w in windowed]
+    assert [ln for ln in lines if ">nul 2>nul" in ln][0].split(" -c ")[0] in ("py -3.14", "pypy3")  # the probe keeps console names
+    console = pyz._wrapper_cmd(make({"backend": {"supported": ["cpython", "pypy"]}}), backend, "a.pyz")
+    assert 'start ""' not in console and "pythonw" not in console and "pyw" not in console
+
+
+# --- pyz-merge ------------------------------------------------------------------------------------
+
+FOREIGN = "cp399-nowhere-x86_64"  # a platform no test machine has
+MERGE_MAIN = "import dep\nprint('dep=' + dep.WHERE)\n"
+
+
+def _merge(parts: list[Path], out: Path) -> tuple[dict[str, Any], set[str]]:
+    import zipfile
+
+    from runner.methods import pyz
+
+    pyz.merge(parts, out)
+    with zipfile.ZipFile(out) as archive:
+        return json.loads(archive.read("_pyz.json")), set(archive.namelist())
+
+
+def _native_part(path: Path, *, compiled: bool = False, key: str = FOREIGN, main: str = MERGE_MAIN, **info: Any) -> Path:
+    files = {"common/app/main.py": main, f"targets/{key}/lib/dep.py": "WHERE = 'native part'\n"}
+    if compiled:
+        files[f"targets/{key}/app/overlay.txt"] = "native"
+    info.setdefault("host", key)
+    return fake_pyz(path, targets=[key], pure=False, files=files, backend="mypyc" if compiled else "cpython", **info)
+
+
+def _pure_part(
+    path: Path, *, compiled: bool = False, host: str | None = None, record_host: bool = True, where: str = "pure part", **info: Any
+) -> Path:
+    key = host or _host_key()
+    files = {"common/app/main.py": MERGE_MAIN, "common/lib/dep.py": f"WHERE = {where!r}\n"}
+    if compiled:
+        files[f"targets/{key}/app/overlay.txt"] = "pure"
+    if record_host:  # an older ./deploy did not record it
+        info["host"] = key
+    return fake_pyz(path, targets=[key] if compiled else [], pure=True, files=files, backend="mypyc" if compiled else "cpython", **info)
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+@pytest.mark.parametrize("pure_first", [True, False])
+def test_pyz_merge_keeps_the_dependencies_of_a_pure_part(tmp_path: Path, pure_first: bool, compiled: bool) -> None:
+    # CI merges pyz-parts/*/*.pyz with macOS first: a native macOS part plus a pure Linux part
+    # lost Linux's dependencies ("no binaries for this interpreter", or ModuleNotFoundError)
+    host = _host_key()
+    pure = _pure_part(tmp_path / "pure.pyz", compiled=compiled)
+    native = _native_part(tmp_path / "native.pyz", compiled=compiled)
+    info, names = _merge([pure, native] if pure_first else [native, pure], tmp_path / "merged.pyz")
+    assert info["pure"] is False and info["targets"] == sorted([FOREIGN, host]) and "host" not in info
+    assert {f"targets/{host}/lib/dep.py", f"targets/{FOREIGN}/lib/dep.py"} <= names
+    assert not [n for n in names if n.startswith("common/lib/")]
+    if compiled:
+        assert {f"targets/{host}/app/overlay.txt", f"targets/{FOREIGN}/app/overlay.txt"} <= names
+    r = run_pyz(tmp_path / "merged.pyz", pyz_env(tmp_path / "cache"))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "dep=pure part"
+
+
+def test_pyz_merge_of_pure_parts_stays_pure(tmp_path: Path) -> None:
+    a = _pure_part(tmp_path / "a.pyz", host="cp314-linux-x86_64", where="first")
+    b = _pure_part(tmp_path / "b.pyz", host="cp314-windows-x86_64", where="second")
+    info, names = _merge([a, b], tmp_path / "m.pyz")
+    assert info["pure"] is True and info["targets"] == [] and "common/lib/dep.py" in names
+    r = run_pyz(tmp_path / "m.pyz", pyz_env(tmp_path / "cache"))
+    assert r.returncode == 0 and r.stdout.strip() == "dep=first", r.stderr
+
+
+def test_pyz_merge_takes_each_lib_from_the_part_built_there(tmp_path: Path) -> None:
+    # Every CI part carries targets/<every key>/lib with [deploy.pyz] targets: mixing two
+    # installs file by file could mix versions; the part built ON that platform wins
+    def part(name: str, host: str) -> Path:
+        files = {"common/app/main.py": MERGE_MAIN}
+        for key in (LINUX, WIN):
+            files[f"targets/{key}/lib/dep.py"] = f"WHERE = '{name} for {key}'\n"
+        return fake_pyz(tmp_path / f"{name}.pyz", targets=[LINUX, WIN], pure=False, files=files, host=host)
+
+    import zipfile
+
+    out = tmp_path / "m.pyz"
+    _merge([part("a", LINUX), part("b", WIN)], out)
+    with zipfile.ZipFile(out) as archive:
+        assert archive.read(f"targets/{LINUX}/lib/dep.py").decode() == f"WHERE = 'a for {LINUX}'\n"
+        assert archive.read(f"targets/{WIN}/lib/dep.py").decode() == f"WHERE = 'b for {WIN}'\n"
+
+
+def test_pyz_merge_refuses_invalid_parts(tmp_path: Path) -> None:
+    import zipfile
+
+    good = _native_part(tmp_path / "good.pyz")
+    no_info = tmp_path / "no-info.zip"
+    with zipfile.ZipFile(no_info, "w") as z:
+        z.writestr("common/app/main.py", "")
+    broken = tmp_path / "broken.zip"
+    with zipfile.ZipFile(broken, "w") as z:
+        z.writestr("_pyz.json", "{not json")
+    partial = tmp_path / "partial.zip"
+    with zipfile.ZipFile(partial, "w") as z:
+        z.writestr("_pyz.json", json.dumps({"name": "demo"}))
+    out = tmp_path / "out.pyz"
+    for bad in (no_info, broken, partial):
+        with pytest.raises(DeployError, match="no valid _pyz.json"):  # was a KeyError traceback
+            _merge([good, bad], out)
+    assert not out.exists()
+
+
+def test_pyz_merge_refuses_two_compiled_apps_for_one_platform(tmp_path: Path) -> None:
+    a = _native_part(tmp_path / "a.pyz", compiled=True)
+    b = _native_part(tmp_path / "b.pyz", compiled=True)
+    with pytest.raises(DeployError, match="one part per platform"):
+        _merge([a, b], tmp_path / "m.pyz")
+    assert not (tmp_path / "m.pyz").exists()
+
+
+def test_pyz_merge_refuses_parts_of_different_builds(tmp_path: Path) -> None:
+    a = _native_part(tmp_path / "a.pyz", key=LINUX, deps="d1")
+    crlf = _native_part(tmp_path / "crlf.pyz", key=WIN, deps="d1", main=MERGE_MAIN.replace("\n", "\r\n"))
+    info, _ = _merge([a, crlf], tmp_path / "ok.pyz")  # a CRLF checkout (Windows CI) is not another build
+    assert info["targets"] == [LINUX, WIN]
+    other_code = _native_part(tmp_path / "v2.pyz", key=WIN, deps="d1", main=MERGE_MAIN + "# v2\n")
+    with pytest.raises(DeployError, match="other app code"):
+        _merge([a, other_code], tmp_path / "m.pyz")
+    other_deps = _native_part(tmp_path / "deps.pyz", key=WIN, deps="d2")
+    with pytest.raises(DeployError, match="different dependencies"):
+        _merge([a, other_deps], tmp_path / "m.pyz")
+    other_min = _native_part(tmp_path / "min.pyz", key=WIN, deps="d1", min_python=[3, 12])
+    with pytest.raises(DeployError, match="minimum Python"):
+        _merge([a, other_min], tmp_path / "m.pyz")
+    renamed = _native_part(tmp_path / "other.pyz", key=WIN, name="other")
+    with pytest.raises(DeployError, match="different apps"):
+        _merge([a, renamed], tmp_path / "m.pyz")
+    assert not (tmp_path / "m.pyz").exists()
+
+
+def test_pyz_merge_needs_the_host_of_a_pure_part(tmp_path: Path) -> None:
+    native = _native_part(tmp_path / "native.pyz")
+    old = _pure_part(tmp_path / "old.pyz", record_host=False)
+    with pytest.raises(DeployError, match="rebuild it"):
+        _merge([native, old], tmp_path / "m.pyz")
+    assert not (tmp_path / "m.pyz").exists()
+    # An older pure mypyc part names its host through its single overlay target
+    old_mypyc = _pure_part(tmp_path / "old-mypyc.pyz", compiled=True, host=LINUX, record_host=False)
+    info, names = _merge([_native_part(tmp_path / "n2.pyz", compiled=True), old_mypyc], tmp_path / "m2.pyz")
+    assert info["targets"] == sorted([FOREIGN, LINUX]) and f"targets/{LINUX}/lib/dep.py" in names
+    # Two old NON-pure parts need no host (test_paths covers them too)
+    info, _ = _merge([_native_part(tmp_path / "x.pyz", key=LINUX, host=""), _native_part(tmp_path / "y.pyz", key=WIN, host="")], tmp_path / "m3.pyz")
+    assert info["targets"] == [LINUX, WIN]
+
+
+def test_pyz_merge_of_a_real_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A REAL host .pyz (uv export of the template's lock + uv pip install), run with `python -S`,
+    then merged with a native part of another platform and run again."""
+    from runner.methods import pyz
+
+    cfg = make({})
+    app = fake_app(sandbox / "payload")
+    (app / "main.py").write_text("import rich, sys\nprint('rich', rich.__name__, *sys.argv[1:])\n", encoding="utf-8")
+    try:
+        out = pyz.build(BuildRequest(cfg, "cpython", "pyz", app))
+    except proc.CommandFailed as e:
+        pytest.skip(f"uv could not export/install the locked dependencies (offline?): {e}")
+    r = run_pyz(out, pyz_env(sandbox / "cache"), "arg")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "rich rich arg"
+    import zipfile
+
+    with zipfile.ZipFile(out) as archive:
+        info = json.loads(archive.read("_pyz.json"))
+        names = archive.namelist()
+        app_files = {n: archive.read(n).decode() for n in names if n.startswith("common/app/")}
+    assert info["pure"] is True and info["host"] == _host_key()
+    assert not [n for n in names if "/bin/" in n or n.endswith("/.lock")]  # no uv junk
+    # The same build made on another platform, whose dependencies are native there
+    files = {**app_files, f"targets/{FOREIGN}/lib/dep.py": "WHERE = 'native'\n"}
+    other = fake_pyz(sandbox / "native.pyz", targets=[FOREIGN], pure=False, files=files, name="myapp", min_python=info["min_python"], deps=info["deps"], host=FOREIGN)
+    merged, merged_names = _merge([other, out], sandbox / "merged.pyz")
+    assert merged["targets"] == sorted([FOREIGN, _host_key()]) and f"targets/{_host_key()}/lib/rich/__init__.py" in merged_names
+    r = run_pyz(sandbox / "merged.pyz", pyz_env(sandbox / "cache2"), "x")
+    assert r.returncode == 0 and r.stdout.strip() == "rich rich x", r.stderr
+
+
+# --- target keys, installs, environments --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("supported", "backend", "key", "message"),
+    [
+        (["cpython"], "cpython", "cp313-windows-x86_64", "only resolves CPython 3.14"),  # below min_python
+        (["cpython"], "cpython", "cp315-windows-x86_64", "only resolves CPython 3.14"),  # above the lock bound
+        (["cpython", "pypy"], "cpython", "cp312-windows-x86_64", "only resolves CPython 3.14"),  # >= min 3.11, not locked
+        (["cpython", "pypy"], "cpython", "cp313-linux-x86_64", "only resolves CPython 3.14"),  # host OS: got cp314 wheels
+        (["cpython", "pypy"], "cpython", "pp311-linux-x86_64", "pypy build"),  # got CPython wheels
+        (["cpython"], "cpython", "pp311-linux-x86_64", "pypy build"),  # PyPy not supported
+        (["cpython", "pypy"], "pypy", "pp310-linux-x86_64", "pypy build"),
+        (["cpython", "pypy"], "pypy", "pp311-windows-x86_64", "pypy build"),
+        (["cpython"], "cpython", "cp314-plan9-x86_64", "invalid platform key"),
+    ],
+)
+def test_target_keys_the_lock_cannot_serve_are_refused(monkeypatch: pytest.MonkeyPatch, supported: list[str], backend: str, key: str, message: str) -> None:
+    monkeypatch.setattr(common, "host_os", lambda: "linux")
+    monkeypatch.setattr(common, "host_arch", lambda: "x86_64")
+    cfg = make({"backend": {"supported": supported}})
+    with pytest.raises(DeployError, match=message) as e:
+        common.check_key(cfg, backend, key)
+    assert e.value.code == 2
+
+
+def test_target_keys_of_the_locked_minor_work_everywhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(common, "host_os", lambda: "linux")
+    monkeypatch.setattr(common, "host_arch", lambda: "x86_64")
+    cfg = make({"backend": {"supported": ["cpython", "pypy"]}})
+    host = {"cpython": common.Target("cp", 3, 14, "linux", "x86_64"), "pypy": common.Target("pp", 3, 11, "linux", "x86_64")}
+    monkeypatch.setattr(common, "host_target", lambda c, b: host[b])
+    keys = ["host", LINUX, WIN, MAC, WIN]
+    assert [t.key for t in common.targets_for(cfg, "cpython", keys)] == [LINUX, WIN, MAC]  # host first, no duplicates
+    # A pypy build: its own PyPy plus CPython keys of the locked minor (the .venv installs them)
+    assert [t.key for t in common.targets_for(cfg, "pypy", ["pp311-linux-x86_64", WIN, LINUX])] == ["pp311-linux-x86_64", WIN, LINUX]
+
+
+def _install_recorder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, fail_first: bool = False) -> list[tuple[str, list[str], dict[str, str]]]:
+    calls: list[tuple[str, list[str], dict[str, str]]] = []
+
+    def fake_uv(env: envs.PyEnv, argv: Any, *, extra_env: Any = None, **_: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        calls.append((env.key, args, dict(extra_env or {})))
+        if fail_first and len(calls) == 1:
+            raise proc.CommandFailed(["uv", *args], 1)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    for name in ("cpython", "pypy"):
+        env = envs.PyEnv(name, tmp_path / f"venv-{name}", "x", "only-managed")
+        env.python.parent.mkdir(parents=True)
+        env.python.write_text("", encoding="utf-8")
+        monkeypatch.setattr(envs, f"{name}_env", lambda cfg, env=env: env)
+    monkeypatch.setattr(envs, "uv", fake_uv)
+    monkeypatch.setattr(common, "host_os", lambda: "linux")
+    monkeypatch.setattr(common, "host_arch", lambda: "x86_64")
+    return calls
+
+
+def _flag(args: list[str], name: str) -> str | None:
+    return args[args.index(name) + 1] if name in args else None
+
+
+@pytest.mark.parametrize(("libc", "floor"), [(("glibc", "2.39"), "x86_64-manylinux_2_28"), (("glibc", "2.17"), None), (("musl", "1.2.5"), None), (("", ""), None)])
+def test_host_linux_target_gets_the_platform_floor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, libc: tuple[str, str], floor: str | None) -> None:
+    # Built on Ubuntu 24.04 (glibc 2.39), uv picked cryptography's manylinux_2_34 wheel for the
+    # host: the pyz/portable failed on Debian 11 or RHEL 8 with "GLIBC_2.33 not found"
+    calls = _install_recorder(tmp_path, monkeypatch)
+    monkeypatch.setattr(common.platform, "libc_ver", lambda *a, **k: libc)
+    req = _requirements(tmp_path, "rich==15.0.0")
+    common.install_deps(make({}), "cpython", common.parse_key(LINUX), tmp_path / "site", req)
+    ((key, args, _),) = calls
+    assert key == "cpython" and _flag(args, "--python") == str(envs.cpython_env(make({})).python)
+    assert _flag(args, "--python-platform") == floor
+    assert _flag(args, "--python-version") == ("3.14" if floor else None)
+    assert "--only-binary" not in args  # the host may still build an sdist
+
+
+def test_host_and_cross_builds_share_one_floor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install_recorder(tmp_path, monkeypatch)
+    monkeypatch.setattr(common.platform, "libc_ver", lambda *a, **k: ("glibc", "2.39"))
+    req = _requirements(tmp_path, "rich==15.0.0")
+    common.install_deps(make({}), "cpython", common.parse_key(LINUX), tmp_path / "a", req)
+    monkeypatch.setattr(common, "host_os", lambda: "windows")
+    common.install_deps(make({}), "cpython", common.parse_key(LINUX), tmp_path / "b", req)
+    host_args, cross_args = calls[0][1], calls[1][1]
+    assert _flag(host_args, "--python-platform") == _flag(cross_args, "--python-platform") == common.UV_PLATFORMS[("linux", "x86_64")]
+    assert _flag(cross_args, "--only-binary") == ":all:"
+
+
+def test_host_floor_falls_back_to_the_host_wheels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    calls = _install_recorder(tmp_path, monkeypatch, fail_first=True)
+    monkeypatch.setattr(common.platform, "libc_ver", lambda *a, **k: ("glibc", "2.39"))
+    site = tmp_path / "site"
+    common.install_deps(make({}), "cpython", common.parse_key(LINUX), site, _requirements(tmp_path, "rich==15.0.0"))
+    assert len(calls) == 2 and "--python-platform" in calls[0][1] and "--python-platform" not in calls[1][1]
+    assert "needs glibc 2.39 or newer" in capsys.readouterr().err
+    assert site.is_dir()
+
+
+def test_macos_targets_pin_the_deployment_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install_recorder(tmp_path, monkeypatch)
+    monkeypatch.delenv("MACOSX_DEPLOYMENT_TARGET", raising=False)
+    monkeypatch.setattr(common, "host_os", lambda: "macos")
+    monkeypatch.setattr(common, "host_arch", lambda: "aarch64")
+    req = _requirements(tmp_path, "rich==15.0.0")
+    for version, floor in (("26.0", "aarch64-apple-darwin"), ("12.7", None)):
+        monkeypatch.setattr(common.platform, "mac_ver", lambda *a, v=version, **k: (v, ("", "", ""), "arm64"))
+        common.install_deps(make({}), "cpython", common.parse_key(MAC), tmp_path / "s", req)
+        assert _flag(calls[-1][1], "--python-platform") == floor
+        assert calls[-1][2] == {"MACOSX_DEPLOYMENT_TARGET": common.MACOS_FLOOR}
+    monkeypatch.setattr(common, "host_os", lambda: "linux")
+    monkeypatch.setattr(common, "host_arch", lambda: "x86_64")
+    monkeypatch.setenv("MACOSX_DEPLOYMENT_TARGET", "11.0")  # the user's own floor wins
+    common.install_deps(make({}), "cpython", common.parse_key(MAC), tmp_path / "s", req)
+    assert _flag(calls[-1][1], "--python-platform") == "aarch64-apple-darwin" and calls[-1][2] == {"MACOSX_DEPLOYMENT_TARGET": "11.0"}
+
+
+def test_pypy_build_installs_cpython_keys_with_the_tools_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # It used to raise "CPython target from a PyPy build", but only for the host OS
+    calls = _install_recorder(tmp_path, monkeypatch)
+    monkeypatch.setattr(common.platform, "libc_ver", lambda *a, **k: ("glibc", "2.39"))
+    cfg = make({"backend": {"supported": ["cpython", "pypy"]}})
+    req = _requirements(tmp_path, "rich==15.0.0")
+    common.install_deps(cfg, "pypy", common.parse_key(LINUX), tmp_path / "a", req)
+    common.install_deps(cfg, "pypy", common.parse_key("pp311-linux-x86_64"), tmp_path / "b", req)
+    assert calls[0][0] == "cpython" and _flag(calls[0][1], "--python") == str(envs.cpython_env(cfg).python)
+    assert calls[1][0] == "pypy" and _flag(calls[1][1], "--python") == str(envs.pypy_env(cfg).python)
+    assert _flag(calls[1][1], "--python-version") == "3.11"
+
+
+def test_install_deps_removes_uv_junk_but_keeps_native_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # uv pip install --target leaves .lock and console scripts whose shebang (or .exe
+    # trampoline) holds the build machine's absolute .venv path: none of it may ship
+    def fake_uv(env: object, argv: Any, **_: Any) -> subprocess.CompletedProcess[str]:
+        dest = Path(str(argv[argv.index("--target") + 1]))
+        (dest / ".lock").write_text("")
+        (dest / "_virtualenv.pth").write_text("import _virtualenv\n")
+        (dest / "_virtualenv.py").write_text("")
+        info = dest / "pygments-2.21.0.dist-info"
+        info.mkdir()
+        (info / "entry_points.txt").write_text("[console_scripts]\npygmentize = pygments.cmdline:main\n\n[gui_scripts]\nPyGUI = pygments.gui:main\n", encoding="utf-8")
+        (dest / "pygments").mkdir()
+        (dest / "pygments" / "__init__.py").write_text("")
+        (dest / "bin").mkdir()
+        (dest / "bin" / "pygmentize").write_text("#!/home/someone/proj/.venv/bin/python\n")
+        (dest / "bin" / "pygmentize.exe").write_bytes(b"MZ C:\\Users\\someone\\.venv\\Scripts\\python.exe")
+        (dest / "bin" / "PyGUI").write_text("#!/home/someone/proj/.venv/bin/python\n")
+        (dest / "bin" / "ruff").write_bytes(b"\x7fELF native binary")  # ruff/uv/ty look it up at <target>/bin
+        (dest / "Scripts").mkdir()
+        (dest / "Scripts" / "pygmentize.exe").write_bytes(b"MZ")
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(envs, "uv", fake_uv)
+    monkeypatch.setattr(common, "ensure_env", lambda env: env)
+    site = common.install_deps(make({}), "cpython", common.parse_key(WIN if not IS_WINDOWS else LINUX), tmp_path / "site", _requirements(tmp_path, "pygments==2.21.0"))
+    assert sorted(p.relative_to(site).as_posix() for p in site.rglob("*") if p.is_file()) == [
+        "bin/ruff",
+        "pygments-2.21.0.dist-info/entry_points.txt",
+        "pygments/__init__.py",
+    ]
+    (site / "bin" / "ruff").unlink()
+    common.drop_install_junk(site)
+    assert not (site / "bin").exists()  # an emptied bin/ goes
+    (site / "bin").mkdir()
+    (site / "bin" / "__init__.py").write_text("")
+    (site / "bin" / "pygmentize").write_text("a package named bin keeps its modules\n")
+    common.drop_install_junk(site)
+    assert (site / "bin" / "pygmentize").is_file()
+
+
+def test_empty_requirements_install_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(envs, "uv", lambda *a, **k: pytest.fail("no install for no dependency"))
+    req = tmp_path / "requirements.txt"
+    req.write_text("\n", encoding="utf-8")
+    dest = tmp_path / "site"
+    (dest / "stale").mkdir(parents=True)
+    assert common.install_deps(make({}), "cpython", common.parse_key(LINUX), dest, req) == dest
+    assert list(dest.iterdir()) == []
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_host_target_creates_a_missing_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, present: bool) -> None:
+    # pyz and portable run the env's python directly: on a fresh clone (or after git clean -fdx)
+    # `build --method pyz --no-check` failed with "program not found: .venv/bin/python"
+    env = envs.PyEnv("pypy", tmp_path / ".venv-pypy", "pypy@3.11.15", "only-managed")
+    if present:
+        env.python.parent.mkdir(parents=True)
+        env.python.write_text("", encoding="utf-8")
+    synced: list[envs.PyEnv] = []
+
+    def fake_sync(e: envs.PyEnv, **_: Any) -> None:
+        synced.append(e)
+        e.python.parent.mkdir(parents=True, exist_ok=True)
+        e.python.write_text("", encoding="utf-8")
+
+    def fake_info(python: str | Path) -> dict[str, object]:
+        assert Path(python).is_file(), "interpreter_info ran before the environment existed"
+        return {"impl": "pypy", "version": "3.11.15"}
+
+    monkeypatch.setattr(envs, "runtime_env", lambda cfg, backend: env)
+    monkeypatch.setattr(envs, "sync", fake_sync)
+    monkeypatch.setattr(envs, "interpreter_info", fake_info)
+    target = common.host_target(make({"backend": {"supported": ["cpython", "pypy"]}}), "pypy")
+    assert synced == ([] if present else [env])
+    assert (target.impl, target.major, target.minor) == ("pp", 3, 11)
+
+
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        ({"x-1.0.dist-info/WHEEL": "Tag: py3-none-any\n", "x/__init__.py": ""}, False),
+        ({"x-1.0.dist-info/WHEEL": "Tag: py2.py3-none-any\n"}, False),
+        ({"x-1.0.dist-info/WHEEL": "Tag: py3-none-manylinux2014_x86_64\n", "x/bin/ffmpeg-linux": ""}, True),
+        ({"x-1.0.dist-info/WHEEL": "Tag: py3-none-win_amd64\n", "x/tool.exe": ""}, True),
+        ({"x-1.0.dist-info/WHEEL": "Tag: cp311-abi3-manylinux_2_17_x86_64\nTag: cp311-abi3-manylinux2014_x86_64\n"}, True),
+        ({"x-1.0.dist-info/WHEEL": "Tag: py3-none-macosx_11_0_arm64\n"}, True),
+        ({"x-1.0.dist-info/WHEEL": "Tag: py3-none-any\n", "x/_speedups.cpython-314-x86_64-linux-gnu.so": ""}, True),
+        ({"x-1.0.dist-info/WHEEL": "Tag: py3-none-any\n", "x/_speedups.pyd": ""}, True),
+        ({"a.py": ""}, False),  # no dist-info at all: the file suffixes decide
+        ({"a.py": "", "libfoo.so.1": ""}, True),
+        ({"a.py": "", "b.dylib": ""}, True),
+    ],
+)
+def test_has_native_reads_wheel_tags_and_binaries(tmp_path: Path, files: dict[str, str], expected: bool) -> None:
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    assert common.has_native(tmp_path) is expected
+
+
+def test_skipped_requirements_compares_names_and_versions(tmp_path: Path) -> None:
+    site = tmp_path / "site"
+    _wheel(site, "jaraco_context", "6.1.2")
+    _wheel(site, "pkg", "2.0")
+    _wheel(site, "Zope.Interface", "05.4.0")
+    req = _requirements(tmp_path, "jaraco-context==6.1.2", "pkg==1.9 ; python_full_version < '3.12'", "pkg==2.0 ; python_full_version >= '3.12'", "zope-interface==5.4.0", "colorama==0.4.6 ; sys_platform == 'win32'")
+    assert common.skipped_requirements(req, site) == ["pkg==1.9", "colorama==0.4.6"]
+
+
+def test_requirements_digest_ignores_the_header_and_hashes(tmp_path: Path) -> None:
+    first = common.requirements_digest(_requirements(tmp_path, "rich==15.0.0", "mdurl==0.1.2"))
+    b = tmp_path / "b.txt"
+    b.write_text("# via /other/machine/path\nmdurl==0.1.2 \\\n    --hash=sha256:ff\nrich==15.0.0\n", encoding="utf-8")
+    assert common.requirements_digest(b) == first
+    b.write_text("rich==15.0.1\nmdurl==0.1.2\n", encoding="utf-8")
+    assert common.requirements_digest(b) != first
+
+
+def test_tree_bytes_counts_symlinked_files_once(tmp_path: Path) -> None:
+    from runner import cmd_build
+
+    root = tmp_path / "out"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "python3.14").write_bytes(b"\0" * 1_048_576)
+    try:
+        os.symlink("python3.14", root / "bin" / "python3")  # a file symlink: counted once
+        os.symlink("bin", root / "bindir")  # a folder symlink: not walked
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    assert common.dir_size_mb(root) == 1.0
+    assert cmd_build._size(root) == "1.0 MB"  # the "done: ... (N MB)" line (201 MB shown for 108 MB)
+    assert common.tree_bytes(root / "bin" / "python3.14") == 1_048_576
+
+
+@pytest.mark.parametrize(("cmd", "expected"), [("py -3.14", "pyw -3.14"), ("py", "pyw"), ("python3", "pythonw"), ("python", "pythonw"), ("pypy3", "pypyw"), ("pypy", "pypyw")])
+def test_windowed_twins_exist(cmd: str, expected: str) -> None:
+    assert common.windowed(cmd) == expected  # PyPy's Windows zip has pypyw.exe, no pypy3w.exe
+
+
+# --- cmd_build: arguments ---------------------------------------------------------------------------
+
+ALL_BACKENDS = {"backend": {"supported": ["cpython", "pypy", "mypyc"]}}
+
+
+@pytest.fixture
+def no_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every argument error must come before the checks and the payload (minutes of work)."""
+
+    def must_not_run(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("the build went past the argument checks")
+
+    monkeypatch.setattr(cmd_build, "run_checks", must_not_run)
+    monkeypatch.setattr(cmd_build, "payload", must_not_run)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["cpython", "--method", "pyz", "--tagret", "cp314-windows-x86_64"], "unrecognized arguments: --tagret cp314-windows-x86_64"),
+        (["cpython", "--method", "portable", "--bogus"], "unrecognized arguments: --bogus"),
+        (["cpython", "--method", "wheel", "--noconfirm"], "unrecognized arguments: --noconfirm"),
+        (["pypy", "--method", "portable", "-v"], "unrecognized arguments: -v"),
+        (["cpython", "--method", "pyz", "--onedri"], "unrecognized arguments: --onedri"),  # no abbreviation of --onedir
+        (["cpython", "--method", "pyz", "--onefile"], "--onefile only applies to --method exe or nuitka"),
+        (["cpython", "--method", "portable", "--onedir"], "--onedir only applies"),
+        (["cpython", "--method", "wheel", "--onefile"], "--onefile only applies"),
+        (["cpython", "--method", "exe", "--target", "cp314-linux-x86_64"], "--target only applies to --method pyz"),
+        (["cpython", "--method", "nuitka", "--target", "cp314-linux-x86_64"], "--target only applies"),
+        (["cpython", "--method", "portable", "--target", "cp314-windows-x86_64"], "--target only applies"),
+        (["cpython", "--method", "wheel", "--target", "cp314-windows-x86_64"], "--target only applies"),
+        (["cpython", "--method", "exe", "--dry-run"], "--dry-run is a global option: put it before the command"),
+        (["cpython", "--method", "nuitka", "--no-render"], "--no-render is a global option"),
+        (["--method", "pyz", "--no-check", "--dry-run"], "--dry-run is a global option"),
+        (["mypy", "--method", "pyz"], "unknown backend 'mypy': did you mean mypyc?"),
+        (["pypi", "--method", "exe"], "unknown backend 'pypi': did you mean pypy?"),
+        (["pyz"], "did you mean --method pyz?"),
+        (["cpython", "portable"], "did you mean --method portable?"),
+        (["pypy", "pyz", "--no-check"], "did you mean --method pyz?"),
+        (["--method", "exe", "--no-check", "stray"], "unexpected argument 'stray'"),
+        (["cpython", "--method", "pyz", "--target", "bogus"], "invalid platform key"),
+        (["cpython", "--method", "pyz", "--target", "cp313-windows-x86_64"], "only resolves CPython 3.14"),
+        (["cpython", "--method", "pyz", "--target", "pp311-linux-x86_64"], "pypy build"),
+    ],
+)
+def test_build_rejects_arguments_the_method_would_ignore(no_build: None, monkeypatch: pytest.MonkeyPatch, args: list[str], message: str, dry_run: bool) -> None:
+    # They were all silently dropped (pyz, portable and wheel read no extra argument): a typo'd
+    # --target built a host-only .pyz, `build --dry-run` REALLY built, `build mypy` built cpython
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    with pytest.raises(DeployError) as e:
+        cmd_build.cmd_build(make(ALL_BACKENDS), args)
+    assert message in str(e.value)
+    assert e.value.code == 2
+
+
+def test_build_rejects_a_bad_configured_target_key(no_build: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    with pytest.raises(DeployError, match="only resolves CPython 3.14") as e:
+        cmd_build.cmd_build(make({"deploy": {"pyz": {"targets": ["host", "cp315-linux-x86_64"]}}}), ["--method", "pyz"])
+    assert e.value.code == 2
+    # Other methods ignore [deploy.pyz] targets
+    assert cmd_build.cmd_build(make({"deploy": {"pyz": {"targets": ["cp315-linux-x86_64"]}}}), ["--method", "portable", "--no-check"]) == 0
+
+
+def test_build_forwards_extras_to_the_packagers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Guard against over-rejecting: exe/nuitka/flet get the unknown flags (their values too),
+    # exe/nuitka get --onefile/--onedir, pyz gets --target
+    seen: list[BuildRequest] = []
+
+    class FakeMethod:
+        @staticmethod
+        def build(req: BuildRequest) -> Path:
+            seen.append(req)
+            out = tmp_path / "out.bin"
+            out.write_bytes(b"x")
+            return out
+
+    monkeypatch.setattr(cmd_build, "payload", lambda cfg, backend: tmp_path)
+    monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeMethod)
+    cfg = make(ALL_BACKENDS)
+    assert cmd_build.cmd_build(cfg, ["cpython", "--method", "exe", "--no-check", "--onedir", "--add-data", "a:b", "--icon", "x.ico"]) == 0
+    assert seen[-1].extra == ["--add-data", "a:b", "--icon", "x.ico"] and seen[-1].onefile is False
+    assert cmd_build.cmd_build(cfg, ["mypyc", "--method", "nuitka", "--no-check", "--onefile", "--lto=no"]) == 0
+    assert seen[-1].extra == ["--lto=no"] and seen[-1].onefile is True and seen[-1].backend == "mypyc"
+    assert cmd_build.cmd_build(cfg, ["--method", "exe", "--no-check", "--onedri"]) == 0  # PyInstaller judges it
+    assert seen[-1].extra == ["--onedri"] and seen[-1].onefile is None
+    monkeypatch.setattr(common, "host_os", lambda: "linux")
+    monkeypatch.setattr(common, "host_arch", lambda: "x86_64")
+    assert cmd_build.cmd_build(cfg, ["cpython", "--method", "pyz", "--no-check", "--target", WIN]) == 0
+    assert seen[-1].targets == [WIN] and seen[-1].extra == []
+    assert cmd_build.cmd_build(cfg, ["pypy", "--method", "pyz", "--no-check", "--target", "pp311-linux-x86_64", "--target", WIN]) == 0
+    assert seen[-1].targets == ["pp311-linux-x86_64", WIN]
+    flet_cfg = make({"app": {"preset": "flet"}})
+    assert cmd_build.cmd_build(flet_cfg, ["--method", "flet", "--no-check", "--build-number", "3"]) == 0
+    assert seen[-1].extra == ["--build-number", "3"]
+
+
+def test_build_dry_run_stops_after_the_argument_checks(no_build: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert cmd_build.cmd_build(make({}), ["--method", "pyz", "--no-check", "--target", WIN]) == 0
+    assert "(--dry-run) build cpython -> pyz: would output dist/myapp-cpython-pyz*" in capsys.readouterr().err
