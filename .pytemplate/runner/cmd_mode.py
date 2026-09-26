@@ -222,7 +222,6 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
     syncs: list[envs.PyEnv] = []
     if adding_pypy:
         syncs.append(envs.pypy_env(planned))
-    if adding_pypy:
         _precheck_py311(cfg)
 
     if proc.DRY_RUN:
