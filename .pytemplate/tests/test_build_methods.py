@@ -1892,6 +1892,81 @@ def test_portable_prune_posix_layouts(tmp_path: Path, monkeypatch: pytest.Monkey
     assert got == (kept | tk if keep_tk else kept)
 
 
+def _elf(needed: list[str], *, dynamic: bool = True) -> bytes:
+    """A minimal 64-bit little-endian ELF executable whose dynamic section lists `needed`."""
+    import struct
+
+    strtab = b"\0" + b"".join(n.encode() + b"\0" for n in needed)
+    offsets = [1 + sum(len(n) + 1 for n in needed[:i]) for i in range(len(needed))]
+    phnum = 2 if dynamic else 1
+    dyn_off = 64 + 56 * phnum
+    entries = [(1, o) for o in offsets] + [(5, 0), (10, len(strtab)), (0, 0)]  # NEEDED..., STRTAB, STRSZ, NULL
+    str_off = dyn_off + 16 * len(entries)
+    vaddr = 0x400000
+    entries[len(offsets)] = (5, vaddr + str_off)
+    total = str_off + len(strtab)
+    header = b"\x7fELF" + bytes([2, 1, 1, 0]) + bytes(8)
+    header += struct.pack("<HHIQQQIHHHHHH", 2, 62, 1, 0, 64, 0, 0, 64, 56, phnum, 0, 0, 0)
+    phdrs = struct.pack("<IIQQQQQQ", 1, 5, 0, vaddr, vaddr, total, total, 0x1000)
+    if dynamic:
+        phdrs += struct.pack("<IIQQQQQQ", 2, 6, dyn_off, vaddr + dyn_off, vaddr + dyn_off, 16 * len(entries), 16 * len(entries), 8)
+    body = b"".join(struct.pack("<qQ", tag, value) for tag, value in entries) if dynamic else b""
+    out = header + phdrs
+    out += bytes(dyn_off - len(out)) + body
+    out += bytes(str_off - len(out)) + strtab if dynamic else b""
+    return out
+
+
+def test_elf_needed_reads_the_dynamic_section(tmp_path: Path) -> None:
+    from runner.methods import portable
+
+    exe = tmp_path / "python3.14"
+    exe.write_bytes(_elf(["libc.so.6", "libpython3.14.so.1.0"]))
+    assert portable._elf_needed(exe) == ["libc.so.6", "libpython3.14.so.1.0"]
+    exe.write_bytes(_elf(["libm.so.6", "libc.so.6"]))
+    assert portable._elf_needed(exe) == ["libm.so.6", "libc.so.6"]
+    exe.write_bytes(_elf([], dynamic=False))
+    assert portable._elf_needed(exe) == []  # fully static
+    exe.write_bytes(b"x")
+    assert portable._elf_needed(exe) is None  # not ELF: the caller keeps everything
+    exe.write_bytes(_elf(["libc.so.6"])[:70])
+    assert portable._elf_needed(exe) is None  # truncated
+    assert portable._elf_needed(tmp_path / "missing") is None
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a real ELF executable (Linux)")
+def test_elf_needed_agrees_with_a_real_executable() -> None:
+    from runner.methods import portable
+
+    needed = portable._elf_needed(Path(sys.executable).resolve())
+    assert needed is not None and any(n.startswith("libc.so") for n in needed), needed
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX runtime layouts (symlinks)")
+@pytest.mark.parametrize(
+    ("needed", "host", "kept"),
+    [
+        (["libm.so.6", "libc.so.6"], "linux", False),  # python-build-standalone: a static interpreter
+        (["libpython3.14.so.1.0", "libc.so.6"], "linux", True),  # a shared build needs it
+        (None, "linux", True),  # not readable as ELF: keep it (safe side)
+        (["libc.so.6"], "macos", True),  # only pruned on Linux
+    ],
+)
+def test_portable_prunes_libpython_only_when_the_interpreter_does_not_need_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, needed: list[str] | None, host: str, kept: bool) -> None:
+    # 33 MB of lib/libpython3.14.so.1.0 next to a 31 MB interpreter that already holds all of it
+    from runner.methods import portable
+
+    base = tmp_path / "base"
+    _fake_base(base, CPYTHON_BASE, CPYTHON_LINKS)
+    if needed is not None:
+        (base / "bin" / "python3.14").write_bytes(_elf(needed))
+    monkeypatch.setattr(portable, "host_os", lambda: host)
+    got = _copy_runtime(tmp_path, monkeypatch, base, "3.14.7", "cpython")
+    libpython = {"lib/libpython3.14.so.1.0", "lib/libpython3.14.so"}
+    assert (libpython <= got) is kept and (not (libpython & got)) is (not kept)
+    assert got - libpython == CPYTHON_KEPT - libpython  # nothing else changes
+
+
 @pytest.mark.skipif(IS_WINDOWS, reason="POSIX runtime layouts (symlinks)")
 def test_portable_prune_off_copies_everything_but_the_caches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     base = tmp_path / "base"

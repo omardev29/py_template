@@ -12,13 +12,14 @@ from __future__ import annotations
 import re
 import shlex
 import shutil
+import struct
 import zipfile
 from pathlib import Path
 
 from .. import envs, proc, ui, upx
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
-from ..project import IS_WINDOWS, TEMPLATES, rel
+from ..project import IS_WINDOWS, TEMPLATES, host_os, rel
 from ..ui import DeployError
 from . import common
 
@@ -35,6 +36,11 @@ TK = {"tkinter", "_tkinter", "turtle.py"}
 # libtcl9.0.so, libtcl9tk9.0.so, tcl9.0/, tk9.0/, itcl4.3.8/, thread3.0.6/ and
 # lib-dynload/_tkinter.*.so; PyPy lib/libtcl8.6.so, tk8.6/...; Windows DLLs/tcl86t.dll, _tkinter.pyd
 TCL_RE = re.compile(r"(lib)?(tcl|tk|itcl|thread)\d|_tkinter\.", re.IGNORECASE)
+# The shared libpython next to a statically linked interpreter (Linux, python-build-standalone:
+# bin/python3.X holds the whole interpreter, 31 MB, and lib/libpython3.X.so.1.0 is another 33 MB
+# copy for programs that embed Python). Pruned only when the interpreter does not need it (its
+# ELF DT_NEEDED entries, _elf_needed): extension modules never link libpython on Linux (3.8+)
+LIBPYTHON_RE = re.compile(r"libpython3[.0-9]*[a-z]*\.so(\.[.0-9]+)?")
 # PyPy still ships lib2to3's deliberately broken test data: it never compiles
 COMPILE_EXCLUDE = r"[/\\]lib2to3[/\\]tests[/\\]"
 LONG_PREFIX = "\\\\?\\"
@@ -44,6 +50,65 @@ def long_path(path: Path) -> str:
     """Return the path in extended-length form on Windows (\\\\?\\C:\\...): no 260-character limit."""
     resolved = str(path.resolve())
     return LONG_PREFIX + resolved if IS_WINDOWS and not resolved.startswith(LONG_PREFIX) else resolved
+
+
+def _elf_needed(path: Path) -> list[str] | None:
+    """The DT_NEEDED entries (shared libraries) of an ELF executable; None when `path` is not an
+    ELF file this can read (then the caller keeps what it would have pruned)."""
+    try:
+        with path.open("rb") as f:
+            ident = f.read(16)
+            if len(ident) < 16 or ident[:4] != b"\x7fELF" or ident[4] not in (1, 2) or ident[5] not in (1, 2):
+                return None
+            wide, end = ident[4] == 2, "<" if ident[5] == 1 else ">"
+            head = struct.unpack(end + ("HHIQQQIHHHHHH" if wide else "HHIIIIIHHHHHH"), f.read(48 if wide else 36))
+            phoff, phentsize, phnum = head[4], head[8], head[9]
+            loads: list[tuple[int, int, int]] = []  # (vaddr, filesz, offset) of each PT_LOAD
+            dynamic: tuple[int, int] | None = None  # (offset, size) of PT_DYNAMIC
+            for i in range(phnum):
+                f.seek(phoff + i * phentsize)
+                if wide:
+                    p_type, _flags, p_offset, p_vaddr, _paddr, p_filesz = struct.unpack(end + "IIQQQQ", f.read(40))
+                else:
+                    p_type, p_offset, p_vaddr, _paddr, p_filesz = struct.unpack(end + "IIIII", f.read(20))
+                if p_type == 1:
+                    loads.append((p_vaddr, p_filesz, p_offset))
+                elif p_type == 2:
+                    dynamic = (p_offset, p_filesz)
+            if dynamic is None:
+                return []  # fully static: needs no shared library at all
+            f.seek(dynamic[0])
+            raw = f.read(dynamic[1])
+            size = 16 if wide else 8
+            needed: list[int] = []
+            strtab = strsz = 0
+            for i in range(0, len(raw) - size + 1, size):
+                tag, value = struct.unpack(end + ("qQ" if wide else "iI"), raw[i : i + size])
+                if tag == 0:
+                    break
+                if tag == 1:
+                    needed.append(value)
+                elif tag == 5:
+                    strtab = value
+                elif tag == 10:
+                    strsz = value
+            start = next((strtab - v + off for v, n, off in loads if v <= strtab < v + n), None)
+            if start is None or not strsz:
+                return None
+            f.seek(start)
+            table = f.read(strsz)
+    except (OSError, struct.error):
+        return None
+    return [table[i : table.find(b"\0", i)].decode("utf-8", "replace") for i in needed if i < len(table)]
+
+
+def _keeps_libpython(base: Path, version: str) -> bool:
+    """Whether the copied runtime must keep lib/libpython3.X.so*: everywhere but Linux, and on
+    Linux when the interpreter itself needs it (a shared build) or cannot be read as ELF."""
+    if host_os() != "linux":
+        return True
+    needed = _elf_needed((base / "bin" / f"python{version}").resolve())
+    return needed is None or any(LIBPYTHON_RE.fullmatch(n) for n in needed)
 
 
 def _stdlib_dirs(base: Path, version: str) -> set[Path]:
@@ -62,6 +127,7 @@ def copy_runtime(cfg: Config, backend: str, dest: Path, lib: Path | None = None)
     version = ".".join(str(info["version"]).split(".")[:2])
     prune = cfg.deploy.portable.prune
     keep_tk = common.uses_tkinter(lib if lib is not None else dest.parent / "lib")
+    keep_libpython = info["impl"] != "cpython" or _keeps_libpython(base, version)
     stdlib = _stdlib_dirs(base, version)
     tk_dirs = {base / "lib", base / "DLLs"} | {s / "lib-dynload" for s in stdlib}
 
@@ -77,6 +143,8 @@ def copy_runtime(cfg: Config, backend: str, dest: Path, lib: Path | None = None)
             skip |= {n for n in names if n in ROOT_PRUNE or (not keep_tk and n.lower().startswith("tcl"))}
         if d == base / "bin":
             skip |= {n for n in names if not n.startswith(BIN_KEEP)}
+        if d == base / "lib" and not keep_libpython:
+            skip |= {n for n in names if LIBPYTHON_RE.fullmatch(n)}
         if not keep_tk and d in tk_dirs and d not in stdlib:  # not in stdlib: on Windows lib == Lib
             skip |= {n for n in names if TCL_RE.match(n)}
         if d in stdlib:

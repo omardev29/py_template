@@ -1421,7 +1421,10 @@ Per method:
   strips that prefix before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. The base's
   `__pycache__` folders are never copied. Prunes `include libs Tools share Scripts`, every `bin/` entry but the interpreter (`BIN_KEEP`:
   `python*`, `pypy*`, `libpypy*`; the base's console scripts, e.g. a 24 MB `ruff` installed into
-  it, carried the build machine's paths), `tcl*` (Windows
+  it, carried the build machine's paths), on Linux the shared `lib/libpython3.X.so*` when the
+  interpreter does not list it in its ELF `DT_NEEDED` (`_keeps_libpython`, `_elf_needed`:
+  python-build-standalone links the interpreter statically, so it was 33 MB twice; extension
+  modules never link libpython on Linux; an unreadable interpreter keeps it), `tcl*` (Windows
   base), stdlib `test idlelib turtledemo ensurepip site-packages`, `test`/`tests` subfolders of
   stdlib packages (PyPy's `unittest/test`, `lib2to3/tests`...), `*.debug` (PyPy's detached debug
   symbols, 16 MB), PyPy `hpy/devel`, and Tk unless `src/` or an installed dependency in `lib/`
