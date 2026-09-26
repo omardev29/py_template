@@ -472,7 +472,7 @@ def plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> Ini
     if not force and not pristine(cfg):
         raise DeployError(
             "src/, tests/ or typings/ have changes compared to the skeleton of the current preset "
-            f"('{cfg.app.preset}'). init would replace them.\n  If you are sure: ./deploy init {preset} --force"
+            f"('{cfg.app.preset}'). init would replace them.\n  If you are sure: ./deploy __init {preset} --force"
         )
     files = skeleton(preset, new_name)
     where = f"preset {preset}: files/pytemplate.toml"
@@ -790,7 +790,7 @@ def new(dest: Path, preset: str, name: str | None) -> None:
     try:
         copy_template(dest)
         deploy_py = dest / ".pytemplate" / "deploy.py"
-        proc.run([proc.find_uv(), "run", "--quiet", "--script", deploy_py, "init", preset, "--name", app_name, "--force"], cwd=dest)
+        proc.run([proc.find_uv(), "run", "--quiet", "--script", deploy_py, "__init", preset, "--name", app_name, "--force"], cwd=dest)
     except BaseException as e:
         if top is not None:
             left = [] if _remove(top) else [str(top)]

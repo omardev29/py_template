@@ -1,4 +1,4 @@
-"""Presets, `./deploy new` and its internal `init` (runner/presets.py, cmd_mode.cmd_new/_plan_init).
+"""Presets, `./deploy new` and its internal step `__init` (runner/presets.py, cmd_mode.cmd_new/_plan_init).
 
 - The preset data and skeletons: every preset rendered with several names is complete, valid,
   ruff-clean under every typing profile (a fresh project must pass its own pre-commit hook),
@@ -704,7 +704,7 @@ def test_new_removes_the_copy_when_init_fails(tmp_path: Path, monkeypatch: pytes
     with pytest.raises(DeployError, match="half-made project in .* was removed") as e:
         presets.new(dest, "script", "demo")
     assert e.value.code == 1
-    assert [c[5:7] for c in calls] == [["init", "script"]]  # no git init after a failure
+    assert [c[5:7] for c in calls] == [["__init", "script"]]  # no git init after a failure
     if pre_existing:
         assert dest.is_dir() and not any(dest.iterdir())
     else:
@@ -1028,7 +1028,7 @@ def test_init_reports_what_it_could_not_put_back(fake: Fake, monkeypatch: pytest
 def test_init_refuses_a_changed_tree_without_force(fake: Fake) -> None:
     (fake.root / "src" / "myapp" / "app.py").write_text("# my code\n", encoding="utf-8")
     before = _snapshot(fake.root)
-    with pytest.raises(DeployError, match="init raylib --force"):
+    with pytest.raises(DeployError, match="__init raylib --force"):
         presets.init(fake.cfg, "raylib", None, force=False)
     assert _snapshot(fake.root) == before and fake.calls == []
 
@@ -1319,7 +1319,7 @@ def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: 
     presets.copy_template(copy_root)
     constraints = copy_root / ".pytemplate" / "presets" / "raylib" / "constraints.txt"
     constraints.write_text(constraints.read_text(encoding="utf-8").replace("pycparser==3.0", "pycparser==2.22"), encoding="utf-8")
-    r = _deploy(copy_root, "init", "raylib", cwd=copy_root, env=env)
+    r = _deploy(copy_root, "__init", "raylib", cwd=copy_root, env=env)
     assert r.returncode == 0, r.stderr[-4000:]
     locked = {e["name"]: e["version"] for e in presets._lock_entries(copy_root / "uv.lock")}
     assert locked["pycparser"] == "2.22" and locked["raylib"] == pins["raylib"]
@@ -1329,7 +1329,7 @@ def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: 
 def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, network: None, git_env: None) -> None:
     """current -> every other preset -> current gives back the same bytes: every init removes
     the previous preset's dependencies, tables and files (and the template root is exactly what
-    `init script --name myapp --force` writes)."""
+    `__init script --name myapp --force` writes)."""
     cfg = config.load(set(cli.COMMANDS))
     if not presets.pristine(cfg):
         pytest.skip("src/, tests/ or typings/ are not the pristine skeleton of the current preset")
@@ -1338,7 +1338,7 @@ def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, 
     presets.copy_template(copy_root)
     before = _snapshot(copy_root)
     for preset in [*(p for p in PRESETS if p != cfg.app.preset), cfg.app.preset]:
-        r = _deploy(copy_root, "init", preset, "--force", cwd=copy_root, env=env)
+        r = _deploy(copy_root, "__init", preset, "--force", cwd=copy_root, env=env)
         assert r.returncode == 0, f"init {preset}:\n{r.stderr[-4000:]}"
     after = _snapshot(copy_root)
     assert sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k)) == []
@@ -1346,14 +1346,14 @@ def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv not found")
 def test_init_that_fails_in_uv_changes_nothing(tmp_path: Path, git_env: None) -> None:
-    """No network and an empty uv cache: `init flet` fails in `uv add` and the project is exactly
+    """No network and an empty uv cache: `__init flet` fails in `uv add` and the project is exactly
     as before (a later attempt starts from the script preset and removes rich)."""
     env = _child_env(tmp_path)
     env.update(UV_OFFLINE="1", UV_CACHE_DIR=str(tmp_path / "empty-cache"))
     copy_root = tmp_path / "copy"
     presets.copy_template(copy_root)
     before = _snapshot(copy_root)
-    r = _deploy(copy_root, "init", "flet", cwd=copy_root, env=env)
+    r = _deploy(copy_root, "__init", "flet", cwd=copy_root, env=env)
     assert r.returncode != 0
     assert "init failed: every file is back as it was" in r.stderr
     assert _snapshot(copy_root) == before

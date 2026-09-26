@@ -140,10 +140,9 @@ def test_pyz_main_puts_lib_before_site_packages(tmp_path: Path) -> None:
 # --- 2. tasks resolve {python} lazily -------------------------------------------------------------
 
 
-def test_tasks_do_not_look_for_the_jit_python_unless_needed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tasks_do_not_resolve_the_python_unless_needed(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = make(
         {
-            "python": {"jit": True},
             "tasks": {
                 "plain": {"cmd": ["tool", "{root}", "{backend}"], "uv": False, "env": {"OUT": "{build}"}},
                 "needs": {"cmd": ["{python}", "-V"], "uv": False},
@@ -152,8 +151,8 @@ def test_tasks_do_not_look_for_the_jit_python_unless_needed(monkeypatch: pytest.
         }
     )
 
-    def no_jit(_cfg: Config) -> str:
-        raise DeployError("no JIT python", 3)
+    def no_python(_cfg: Config, _backend: str) -> envs.PyEnv:
+        raise DeployError("no python", 3)
 
     calls: list[list[str]] = []
 
@@ -161,11 +160,11 @@ def test_tasks_do_not_look_for_the_jit_python_unless_needed(monkeypatch: pytest.
         calls.append([str(a) for a in argv])
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    monkeypatch.setattr(envs, "find_jit_interpreter", no_jit)
+    monkeypatch.setattr(envs, "runtime_env", no_python)
     monkeypatch.setattr(tasks.proc, "run", fake_run)
     assert tasks.run_task(cfg, "plain", ["x"], lambda _argv: 0) == 0
     assert calls[-1][0] == "tool" and calls[-1][2:] == ["cpython", "x"]
-    with pytest.raises(DeployError, match="no JIT python"):
+    with pytest.raises(DeployError, match="no python"):
         tasks.run_task(cfg, "needs", [], lambda _argv: 0)
     with pytest.raises(DeployError, match="unknown placeholder 'nope'"):
         tasks.run_task(cfg, "typo", [], lambda _argv: 0)
@@ -177,13 +176,11 @@ def test_task_python_placeholder_is_the_runtime_env() -> None:
     assert "{python}".format_map(values) == str(envs.cpython_env(cfg).python)
 
 
-# --- 3. the pyz .cmd wrapper exports PYTHON_JIT ---------------------------------------------------
+# --- 3. the pyz .cmd wrapper ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("jit", "value"), [(False, "0"), (True, "1")])
-def test_pyz_wrapper_sets_python_jit(jit: bool, value: str) -> None:
-    text = pyz._wrapper_cmd(make({"python": {"jit": jit}}), "cpython", "myapp.pyz")
-    assert f'set "PYTHON_JIT={value}"' in text.splitlines()
+def test_pyz_wrapper_is_ascii_crlf_without_blocks() -> None:
+    text = pyz._wrapper_cmd(make({}), "cpython", "myapp.pyz")
     assert text.isascii()
     assert text.endswith("\r\n") and "\n" not in text.replace("\r\n", "")
     assert not any(line.rstrip().endswith("(") for line in text.splitlines())  # no ( ) blocks
@@ -193,13 +190,13 @@ def test_pyz_wrapper_sets_python_jit(jit: bool, value: str) -> None:
 def test_pyz_wrapper_runs(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()
-    (root / "__main__.py").write_text("import os, sys\nprint('JIT=' + os.environ['PYTHON_JIT'], *sys.argv[1:])\n")
+    (root / "__main__.py").write_text("import sys\nprint('ran', *sys.argv[1:])\n")
     zipapp.create_archive(root, tmp_path / "app.pyz")
     cmd = tmp_path / "app.cmd"
-    cmd.write_text(pyz._wrapper_cmd(make({"python": {"jit": True}}), "cpython", "app.pyz"), encoding="ascii", newline="")
+    cmd.write_text(pyz._wrapper_cmd(make({}), "cpython", "app.pyz"), encoding="ascii", newline="")
     r = _run_cmd(cmd)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert r.stdout.strip() == "JIT=1"
+    assert r.stdout.strip() == "ran"
 
 
 # --- 4. binary files in presets -------------------------------------------------------------------
@@ -307,7 +304,7 @@ POSIX_TRICKY = {**TRICKY, "DQ": 'say "hi" $HOME `id` \\ end'}
 BOOT = (
     "import json, os, sys\n"
     "keys = sys.argv[1].split('+')\n"
-    "print(json.dumps({'jit': os.environ.get('PYTHON_JIT'), 'env': {k: os.environ.get(k) for k in keys}}))\n"
+    "print(json.dumps({'env': {k: os.environ.get(k) for k in keys}}))\n"
 )
 
 
@@ -322,7 +319,6 @@ def test_portable_env_values_are_quoted() -> None:
     cfg = make({"deploy": {"portable": {"env": POSIX_TRICKY}}})
     sh_lines = portable._env_lines(cfg, windows=False)
     assert "export SQ='it'\"'\"'s'" in sh_lines
-    assert "export PYTHON_JIT=0" in sh_lines
     cmd_cfg = make({"deploy": {"portable": {"env": TRICKY}}})
     assert 'set "PCT=50%% %%PATH%%"' in portable._env_lines(cmd_cfg, windows=True)
     with pytest.raises(DeployError, match="deploy.portable.env.DQ"):
@@ -354,14 +350,14 @@ def test_portable_system_cmd_launcher_runs(tmp_path: Path) -> None:
     # runtime = "system": the same env lines as a bundled launcher, plus the version probe.
     # (A bundled runtime needs a full interpreter copy: the real portable build covers it.)
     out = _portable_folder(tmp_path)
-    cfg = make({"python": {"jit": True}, "deploy": {"portable": {"runtime": "system", "env": TRICKY}}})
+    cfg = make({"deploy": {"portable": {"runtime": "system", "env": TRICKY}}})
     path = out / "app.cmd"
     path.write_text(portable.cmd_launcher(cfg, "cpython", out, None), encoding="ascii", newline="")
     r = subprocess.run(
         ["cmd.exe", "/d", "/c", str(path), "+".join(TRICKY)], capture_output=True, text=True, timeout=120, check=False
     )
     assert r.returncode == 0, r.stdout + r.stderr
-    assert json.loads(r.stdout.strip().splitlines()[-1]) == {"jit": "1", "env": TRICKY}
+    assert json.loads(r.stdout.strip().splitlines()[-1]) == {"env": TRICKY}
 
 
 @windows_only
@@ -392,7 +388,7 @@ def test_portable_system_sh_launcher_runs(tmp_path: Path, cpython: str) -> None:
         assert "needs Python 3.99 or newer" in r.stderr
     else:
         assert r.returncode == 0, r.stdout + r.stderr
-        assert json.loads(r.stdout.strip().splitlines()[-1]) == {"jit": "0", "env": POSIX_TRICKY}
+        assert json.loads(r.stdout.strip().splitlines()[-1]) == {"env": POSIX_TRICKY}
 
 
 # --- 8. commands reject unknown arguments ---------------------------------------------------------
@@ -451,7 +447,7 @@ def test_app_preset_must_exist() -> None:
         make({"app": {"preset": "../presets/script"}})
 
 
-# --- 10/11. dead code, pinned tools, JIT interpreter ----------------------------------------------
+# --- 10/11. dead code, pinned tools ---------------------------------------------------------------
 
 
 def test_tools_are_pinned() -> None:
@@ -484,12 +480,3 @@ def test_flet_build_pyproject_takes_only_tool_flet() -> None:
     assert tomllib.loads(flet.build_pyproject(make({}), only_app, []))["tool"] == {"flet": {"app": {"path": "app"}}}
     no_flet = tomllib.loads('[project]\nname = "a"\nversion = "1"\n')
     assert tomllib.loads(flet.build_pyproject(make({}), no_flet, []))["tool"] == {"flet": {"app": {"path": "src"}}}
-
-
-def test_missing_jit_interpreter_is_reported(tmp_path: Path) -> None:
-    cfg = make({"python": {"jit": True, "jit_interpreter": str(tmp_path / "nope" / "python.exe")}})
-    with pytest.raises(DeployError, match="does not exist") as e:
-        envs.find_jit_interpreter(cfg)
-    assert e.value.code == 3
-    real = make({"python": {"jit": True, "jit_interpreter": sys.executable}})
-    assert envs.find_jit_interpreter(real) == str(Path(sys.executable))
