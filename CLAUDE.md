@@ -1343,8 +1343,9 @@ Formats:
   writing, as a preflight for commands that change other files first.
 - `render.auto` only warns (`pyproject_outdated`); `write_pyproject` runs in `lock`, `mode`,
   `apply`/`setup` and `rename` (via `cmd_env.ensure_lock`) and `__init`, because the change
-  needs re-locking. `lock` (`cmd_env.cmd_lock`) puts `pyproject.toml`'s old bytes back when its
-  `uv lock` fails (offline, no solution, Ctrl+C) or writes no `uv.lock`
+  needs re-locking. `lock` (`cmd_env.cmd_lock`) puts the old bytes of `pyproject.toml` and
+  `uv.lock` back when its `uv lock` fails (offline, no solution, Ctrl+C, a full disk that cut
+  the new `uv.lock` short) or writes no `uv.lock`
   (`cmd_env.LOCK_READ_ONLY`: `--check`, `--locked`, `--check-exists`, `--frozen`, `--dry-run`;
   `UV_LOCKED`/`UV_FROZEN` set): a rewritten pyproject.toml next to the old lock made every
   `uv run --locked` fail.
@@ -3223,6 +3224,12 @@ uv:
   `test_presets.py::test_init_passes_the_pins_by_a_path_without_spaces`,
   `test_init_pins_steer_the_resolution`. Goes: when uv takes the value whole (the relative
   path can stay).
+- **uv writes `uv.lock` in place** (LIMITATION): a `uv lock` stopped by a full disk or a quota
+  left `uv.lock` cut short (invalid TOML) next to the old pyproject.toml, and every `uv run
+  --locked` and the next lock failed on it. Fix: `cmd_env.cmd_lock` snapshots both files and puts
+  them back when `uv lock` fails (`_snapshot`, `_put_back`, 6.3), as `mode`, `apply` and
+  `add`/`remove` do. Test: `test_envs_core.py::test_a_lock_cut_short_puts_uv_lock_back_too`.
+  Goes: never.
 - **uv writes normalized names** (LIMITATION, PEP 503): `raylib_sdl` became `raylib-sdl`, and a
   verbatim comparison never matched. Fix: `cmd_apply.req_key` (5.8). Test:
   `test_apply.py::test_req_key_normalizes_like_uv`. Goes: never.

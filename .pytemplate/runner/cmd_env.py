@@ -119,23 +119,27 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
     """lock [--upgrade] [--upgrade-package PKG]: apply the managed pyproject parts and `uv lock`.
 
     pyproject.toml and uv.lock change together or not at all: when `uv lock` fails (offline, no
-    solution, Ctrl+C) or writes no uv.lock (--check, --dry-run...), pyproject.toml gets its old
-    bytes back. Otherwise the two would disagree and every `uv run --locked` would fail.
+    solution, Ctrl+C) or writes no uv.lock (--check, --dry-run...), both get their old bytes back.
+    Otherwise the two would disagree and every `uv run --locked` would fail. uv writes uv.lock in
+    place: a full disk left it cut short, invalid TOML, next to the old pyproject.toml.
     """
-    before = PYPROJECT.read_bytes() if PYPROJECT.is_file() else None
+    before = _snapshot((PYPROJECT, PYPROJECT.with_name("uv.lock")))
     changed = render.write_pyproject(cfg)
     if changed:
         ui.info(render.pyproject_message())
 
     def restore(why: str) -> None:
-        if changed and before is not None and not proc.DRY_RUN and PYPROJECT.read_bytes() != before:
-            write_whole(PYPROJECT, before)
-            ui.info(f"pyproject.toml: put back as it was ({why})")
+        if proc.DRY_RUN:
+            return
+        restored = _put_back(before)
+        if restored:
+            they = "it was" if len(restored) == 1 else "they were"
+            ui.info(f"{' and '.join(restored)}: put back as {they} ({why})")
 
     try:
         envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False)  # -q keeps its summary and warnings
-    except BaseException:  # a failed uv lock leaves uv.lock alone; Ctrl+C too
-        restore("uv lock did not update uv.lock")
+    except BaseException:  # a failed uv lock (Ctrl+C too) may have written part of uv.lock
+        restore("uv lock did not finish")
         raise
     read_only = _lock_read_only(args)
     if read_only:

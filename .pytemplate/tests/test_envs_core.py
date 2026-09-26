@@ -484,6 +484,25 @@ def test_a_failed_lock_puts_pyproject_back(lock_project: Path, monkeypatch: pyte
     assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
 
 
+def test_a_lock_cut_short_puts_uv_lock_back_too(lock_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """uv writes uv.lock in place: a full disk stopped it in the middle of the new lock, and
+    only pyproject.toml was put back, so uv.lock stayed cut short (invalid TOML) and every
+    `uv run --locked` and the next lock failed on it."""
+    lock = lock_project.with_name("uv.lock")
+    lock.write_bytes(b"version = 1\n# the old lock\n")
+
+    def cut_short(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        lock.write_bytes(b'version = 1\nrequires-python = ">=3')  # what reached the disk
+        raise proc.CommandFailed(["uv", "lock"], 2)
+
+    monkeypatch.setattr(envs, "uv", cut_short)
+    with pytest.raises(proc.CommandFailed):
+        cmd_env.cmd_lock(make(), [])
+    assert lock.read_bytes() == b"version = 1\n# the old lock\n"
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
+    assert "pyproject.toml and uv.lock: put back as they were" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("args", [["--check"], ["--locked"], ["--dry-run"], ["--upgrade", "--dry-run"], ["--frozen"], ["--check-exists"]])
 def test_a_read_only_lock_puts_pyproject_back(lock_project: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]) -> None:
     """`./deploy lock --dry-run` (a preview) rewrote pyproject.toml, uv wrote no uv.lock, and the
