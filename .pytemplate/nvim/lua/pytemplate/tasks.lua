@@ -61,6 +61,7 @@ end
 -- --- output parser ------------------------------------------------------------------------------
 
 local SEV = { error = "E", warning = "W", note = "N", information = "I" }
+local DEFAULT_SEVERITY = { mypy = "E", ruff = "W" }
 
 -- CSI (colours), then OSC (ruff's OSC 8 links in terminals it knows) ended by BEL or by ST
 -- (ESC \): a payload never holds ESC or BEL, so one sequence never swallows the text after it.
@@ -118,7 +119,10 @@ end
 ---Relative paths are relative to the project root (the runner runs the tools there); mypyc's,
 ---relative to its stage (a copy of src/), resolve to src/ when the root has no such file; paths
 ---into the stage itself (pytest under mypyc: .build/mypyc-dev/stage/pkg/x.py) land on src/ too.
-function M.parse_line(line)
+---`sev` ({ mypy = "E"|"W", ruff = "E"|"W"}, from M.severity) types mypy's `error:` lines and ruff's
+---findings as the task's typing profile does (default: E and W).
+function M.parse_line(line, sev)
+  sev = sev or DEFAULT_SEVERITY
   line = strip(line)
   local forced
   local rest = line:match("^warning: (.*)$")
@@ -130,9 +134,9 @@ function M.parse_line(line)
       forced, line = "E", rest
     end
   end
-  local file, lnum, col, sev, msg = line:match("^%s+(%S.-%.pyi?):(%d+):(%d+) %- (%a+): (.*)$")
+  local file, lnum, col, level, msg = line:match("^%s+(%S.-%.pyi?):(%d+):(%d+) %- (%a+): (.*)$")
   if file then
-    local k = SEV[sev:lower()] or "E"
+    local k = SEV[level:lower()] or "E"
     if k == "N" then
       return nil
     end
@@ -142,12 +146,14 @@ function M.parse_line(line)
   if not file or file:find("site-packages", 1, true) or rest:match("^in ") or rest == "" then
     return nil
   end
-  sev, msg = rest:match("^(%a+): (.*)$")
-  local k = SEV[(sev or ""):lower()]
+  local word
+  word, msg = rest:match("^(%a+): (.*)$")
+  local k = SEV[(word or ""):lower()]
   if k == "N" then
     return nil
   end
-  local kind = forced or k or (rest:match("^%u+%d+") and "W" or "E")
+  -- mypy (and mypyc, always under the blocking mypyc profile) `error:` lines, and ruff codes
+  local kind = forced or (k == "E" and sev.mypy) or k or (rest:match("^%u+%d+") and sev.ruff or "E")
   return {
     filename = absolute(file),
     lnum = tonumber(lnum),
@@ -159,14 +165,51 @@ end
 
 -- --- task definitions ---------------------------------------------------------------------------
 
----overseer components for a ./deploy task.
+---The backends whose typing profiles `./deploy ARGS` checks with (like vscode.scan).
+function M.task_backends(args)
+  local info = pt.info()
+  local name, first = args[1], args[2]
+  local meta = M.META[name] or {}
+  if M.project_task(name) then
+    return info.backend.supported -- a [tasks] entry: its deps are not in editor.json (ci: check all)
+  elseif name == "compile" or name == "report" then
+    return { "mypyc" }
+  elseif meta.backend == "all" and first == "all" then
+    return info.backend.supported
+  elseif meta.backend and vim.tbl_contains(info.backend.supported, first) then
+    return { first }
+  end
+  return { info.backend.active }
+end
+
+---{ mypy = "E"|"W", ruff = "E"|"W" } for the output of `./deploy ARGS`: the strictest of its
+---backends' typing profiles (editor.json typing.task_severity), as in the VS Code matchers.
+function M.severity(args)
+  local levels = pt.info().typing.task_severity
+  local out, known = { mypy = "W", ruff = "W" }, false
+  for _, b in ipairs(M.task_backends(args)) do
+    local l = levels[b]
+    if l then
+      known = true
+      out.mypy = (out.mypy == "E" or l.mypy == "error") and "E" or "W"
+      out.ruff = (out.ruff == "E" or l.ruff == "error") and "E" or "W"
+    end
+  end
+  return known and out or vim.deepcopy(DEFAULT_SEVERITY)
+end
+
+---overseer components for a ./deploy task (o.severity: M.severity of its arguments).
 function M.components(name, o)
   local info = pt.info()
   local meta = M.META[name] or {}
   o = vim.tbl_extend("keep", o or {}, meta)
   local c = {}
   if o.parse then
-    c[#c + 1] = { "on_output_parse", parser = M.parse_line, relative_file_root = pt.root() }
+    local sev = o.severity
+    local parser = sev and function(line)
+      return M.parse_line(line, sev)
+    end or M.parse_line
+    c[#c + 1] = { "on_output_parse", parser = parser, relative_file_root = pt.root() }
     c[#c + 1] = { "on_result_diagnostics", remove_on_restart = true }
     c[#c + 1] = { "on_result_diagnostics_quickfix", open = false }
   end
@@ -211,6 +254,9 @@ function M.definition(args, o)
   end
   local meta = M.META[args[1]] or {}
   local parse = o.parse or meta.parse
+  if parse and o.severity == nil then
+    o.severity = M.severity(args)
+  end
   return {
     name = "deploy " .. table.concat(args, " "),
     cmd = pt.deploy_cmd(args),

@@ -59,6 +59,7 @@ local BACKENDS = { "cpython", "pypy", "mypyc" }
 local PROFILES = { "off", "warn", "strict", "mypyc" }
 local EDITORS = { "pylance", "basedpyright" }
 local SEVERITIES = { "Error", "Warning", "Information", "Hint" }
+local LEVELS = { "error", "warning" } -- typing.task_severity
 local NAME = "^[%a_][%w_%-]*$" -- command, task, preset, method and package names
 local ENV_DIR = "^%.venv[%w_%-]*$" -- environments are always .venv* folders in the root
 M.BACKENDS = BACKENDS
@@ -120,6 +121,8 @@ function M.sanitize(data)
       basedpyright = str(typing.basedpyright, "^basedpyright==%d+%.%d+%.%d+$", nil),
       -- and its Node.js runtime (cmd_dev.BASEDPYRIGHT_NODE): basedpyright's own bound floats
       basedpyright_node = str(typing.basedpyright_node, "^nodejs%-wheel%-binaries==%d+%.%d+%.%d+$", nil),
+      -- per backend, the severity of mypy errors and ruff findings in the tasks' output
+      task_severity = {},
     },
     envs = {},
     mypyc_stage = rel_path(data.mypyc_stage, ".build/mypyc-dev/stage"),
@@ -136,6 +139,12 @@ function M.sanitize(data)
     out.backend.supported = { "cpython" }
   end
   out.backend.active = one_of(backend.active, out.backend.supported, out.backend.supported[1])
+  for b, levels in pairs(tbl(typing.task_severity)) do
+    if vim.tbl_contains(BACKENDS, b) then
+      levels = tbl(levels)
+      out.typing.task_severity[b] = { mypy = one_of(levels.mypy, LEVELS, "error"), ruff = one_of(levels.ruff, LEVELS, "warning") }
+    end
+  end
   for role, default in pairs(DEFAULT_ENVS) do
     out.envs[role] = str(envs[role], ENV_DIR, default)
   end

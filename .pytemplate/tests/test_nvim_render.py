@@ -153,7 +153,7 @@ def test_editor_json_is_data_without_machine_paths(name: str) -> None:
     data = json.loads(text)
     assert set(data) == EXPECTED_KEYS
     assert data["schema"] == 1
-    assert set(data["typing"]) == {"profile", "editor", "mypy", "mypy_severity", "python_version", "basedpyright", "basedpyright_node"}
+    assert set(data["typing"]) == {"profile", "editor", "mypy", "mypy_severity", "python_version", "basedpyright", "basedpyright_node", "task_severity"}
     # the plugin's uvx language server runs the basedpyright ./deploy check pins, on its Node.js
     assert data["typing"]["basedpyright"] == cmd_dev.BASEDPYRIGHT
     assert data["typing"]["basedpyright_node"] == cmd_dev.BASEDPYRIGHT_NODE
@@ -187,6 +187,28 @@ def test_editor_json_follows_the_mode() -> None:
     assert warn["min_python"] == "3.11"
 
     assert editor("basedpyright")["typing"]["editor"] == "basedpyright"
+
+
+@pytest.mark.parametrize("name", sorted(VARIANTS))
+def test_task_severity_follows_the_vscode_matchers(name: str) -> None:
+    """The severity of mypy errors and ruff findings in a Neovim task's output, per backend, is
+    what the VS Code problem matchers give for that backend's typing profile."""
+    cfg = make(VARIANTS[name])
+    severity = editor(name)["typing"]["task_severity"]
+    assert list(severity) == list(cfg.backend.supported)
+    for backend, levels in severity.items():
+        matchers = vscode.problem_matchers(cfg, {"ruff", "mypy"}, [cfg.profile_for(backend)])
+        by_owner = {m["owner"]: m.get("severity") for m in matchers if "error: " in m["pattern"]["regexp"] or m["owner"] == "pytemplate-ruff"}
+        assert levels["ruff"] == by_owner["pytemplate-ruff"], backend
+        assert levels["mypy"] == by_owner.get("pytemplate-mypy", levels["mypy"]), backend  # no matcher: skip_mypy
+
+
+def test_task_severity_examples() -> None:
+    assert editor("mypyc-active")["typing"]["task_severity"]["mypyc"] == {"mypy": "error", "ruff": "error"}
+    warn = editor("pypy-supported")["typing"]["task_severity"]
+    assert warn == {"cpython": {"mypy": "warning", "ruff": "warning"}, "pypy": {"mypy": "warning", "ruff": "warning"}}
+    # the default `off` profile: mypy does not run, ruff's few rules fail the check
+    assert editor("script")["typing"]["task_severity"]["cpython"] == {"mypy": "warning", "ruff": "error"}
 
 
 def test_editor_json_lists_every_command_and_method() -> None:
@@ -410,8 +432,8 @@ def _headless_lua(tmp_path: Path, lua: str, test_root: Path) -> subprocess.Compl
     for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
         env[var] = str(tmp_path / var.lower())
     env.update(NVIM_LOG_FILE=str(tmp_path / "nvim.log"), PT_TEST_ROOT=test_root.as_posix(), PT_PLUGIN=PLUGIN.as_posix(), PT_TMP=tmp_path.as_posix())
-    return subprocess.run(
-        [exe, "--headless", "--clean", "-n", "-i", "NONE", "-c", f"luafile {script.as_posix()}"],
+    return subprocess.run(  # the script quits itself; `cq!` only runs after a Lua error in it
+        [exe, "--headless", "--clean", "-n", "-i", "NONE", "-c", f"luafile {script.as_posix()}", "-c", "cq!"],
         cwd=tmp_path, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
     )  # fmt: skip
 
@@ -619,6 +641,59 @@ same("Deploy ci ", {}) -- a [tasks] entry forwards its arguments
 same("Deploy no-such-command ", {})
 done()
 """
+
+
+SEVERITY_CHECK = LUA_PRELUDE + r"""
+local mypy_line = "src/p/_bad.py:2: error: Incompatible types in assignment  [assignment]"
+local ruff_line = "src/p/_bad.py:1:8: F401 [*] `os` imported but unused"
+local function kinds(sev)
+  return { (p(mypy_line, sev) or {}).type, (p(ruff_line, sev) or {}).type }
+end
+check("default kinds", vim.deep_equal(kinds(nil), { "E", "W" }), vim.inspect(kinds(nil)))
+check("lenient kinds", vim.deep_equal(kinds({ mypy = "W", ruff = "W" }), { "W", "W" }), vim.inspect(kinds({ mypy = "W", ruff = "W" })))
+check("strict kinds", vim.deep_equal(kinds({ mypy = "E", ruff = "E" }), { "E", "E" }), vim.inspect(kinds({ mypy = "E", ruff = "E" })))
+local lenient = { mypy = "W", ruff = "W" }
+local m = p("error: src/p/core/x.py:3: nested class", lenient)
+check("the runner's error: prefix still wins", m and m.type == "E", vim.inspect(m))
+m = p("tests/test_x.py:14: AssertionError", lenient)
+check("pytest crash lines stay errors", m and m.type == "E", vim.inspect(m))
+m = p("  /r/src/x.py:3:5 - warning: y", { mypy = "E", ruff = "E" })
+check("basedpyright keeps its own", m and m.type == "W", vim.inspect(m))
+
+-- editor.json of this project: cpython (active) on the warn profile, mypyc on its own
+local E, W = { mypy = "E", ruff = "E" }, { mypy = "W", ruff = "W" }
+for _, case in ipairs({
+  { { "check" }, W }, { { "check", "cpython" }, W }, { { "check", "mypyc" }, E }, { { "check", "all" }, E },
+  { { "test", "all" }, E }, { { "lint", "--fix" }, W }, { { "build", "mypyc", "--method", "pyz" }, E },
+  { { "build" }, W }, { { "compile" }, E }, { { "report", "--open" }, E }, { { "ci" }, E },
+}) do
+  local got = tasks.severity(case[1])
+  check("severity " .. table.concat(case[1], " "), vim.deep_equal(got, case[2]), vim.inspect(got))
+end
+-- the task's parser uses them
+local function parser_of(args)
+  for _, c in ipairs(tasks.definition(args).components) do
+    if type(c) == "table" and c[1] == "on_output_parse" then return c.parser end
+  end
+end
+check("check parser is lenient", (parser_of({ "check" })(mypy_line) or {}).type == "W", "not W")
+check("check mypyc parser is strict", (parser_of({ "check", "mypyc" })(ruff_line) or {}).type == "E", "not E")
+done()
+"""
+
+
+def test_task_diagnostics_follow_the_typing_profile(tmp_path: Path) -> None:
+    """mypy errors were always E and ruff findings always W, whatever the profile: under `warn`
+    (not blocking) the task showed an error where the mypy linter shows a warning; under a
+    blocking profile the ruff findings that fail the check showed as warnings."""
+    project = _project(tmp_path, profile="warn", mypy=True)
+    data = json.loads((project / ".pytemplate" / "editor.json").read_text(encoding="utf-8"))
+    data["backend"] = {"active": "cpython", "supported": ["cpython", "mypyc"]}
+    data["typing"]["task_severity"] = {"cpython": {"mypy": "warning", "ruff": "warning"}, "mypyc": {"mypy": "error", "ruff": "error"}}
+    data["tasks"] = [{"name": "ci", "help": "", "background": False}]
+    (project / ".pytemplate" / "editor.json").write_text(json.dumps(data), encoding="utf-8")
+    r = _headless_lua(tmp_path, SEVERITY_CHECK, project)
+    assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
 
 
 def test_deploy_completion_follows_the_command(tmp_path: Path) -> None:

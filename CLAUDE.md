@@ -1888,9 +1888,11 @@ Files:
 - `.pytemplate/editor.json` (`editors/nvim.editor_data`, schema 1): ASCII data only, relative
   paths only, no comments. Keys: `schema`, `generated`, `name`, `pkg`, `preset`, `gui`,
   `min_python`, `pypy_enabled`, `backend{active, supported}`, `typing{profile, editor, mypy,
-  mypy_severity, python_version, basedpyright, basedpyright_node}` (`basedpyright` =
-  `cmd_dev.BASEDPYRIGHT` and `basedpyright_node` = `cmd_dev.BASEDPYRIGHT_NODE`, the pins of the
-  uvx language server), `envs{tools, cpython, mypyc, pypy}` (without the `-wsl`
+  mypy_severity, python_version, basedpyright, basedpyright_node, task_severity}` (`basedpyright`
+  = `cmd_dev.BASEDPYRIGHT` and `basedpyright_node` = `cmd_dev.BASEDPYRIGHT_NODE`, the pins of the
+  uvx language server; `task_severity` = `editors.nvim.task_severity`, per supported backend
+  `{mypy, ruff}` = `error`|`warning` from its profile's `blocking` and ruff `exit_zero`, the
+  rule of `vscode.problem_matchers`), `envs{tools, cpython, mypyc, pypy}` (without the `-wsl`
   suffix, which the plugin adds itself),
   `mypyc_stage`, `tasks[{name, help, background}]`, `commands[{name, usage, summary, group}]`
   (from `cli.COMMANDS`), `build{methods, default}`. The Lua side (`init.sanitize`) validates
@@ -1989,7 +1991,11 @@ LazyVim wiring:
   strips ANSI (CSI, and OSC ended by BEL or by ST `ESC \`: ruff links its rule codes with OSC 8
   in terminals it recognises, `VTE_VERSION`, `WT_SESSION`, iTerm..., and overseer's own cleanup
   keeps them; `test_parser_strips_every_terminal_escape`), honours the `error: `/`warning: `
-  prefixes, reads basedpyright
+  prefixes, types mypy's `error:` lines and ruff's findings by the task's typing profiles like
+  the VS Code matchers (`tasks.severity`: the strictest `typing.task_severity` of the backends
+  the task checks, `tasks.task_backends`: its BACKEND argument, `all`, mypyc for
+  `compile`/`report`, every supported one for a `[tasks]` entry, else the active one; E/W
+  without editor.json data; `test_task_diagnostics_follow_the_typing_profile`), reads basedpyright
   `  path:l:c - sev: msg` and `path:l[:c]: [sev: ]msg` (mypy, ruff concise, pytest crash
   lines); skips notes, `site-packages` and `in <func>` frames. Relative paths resolve against
   the root; mypyc prints them relative to its stage (a copy of `src/`: `<pkg>/core/x.py`), so

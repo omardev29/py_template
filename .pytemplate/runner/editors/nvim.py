@@ -29,6 +29,20 @@ def env_dirs() -> dict[str, str]:
     return {"tools": ".venv", "cpython": ".venv", "mypyc": ".venv", "pypy": ".venv-pypy"}
 
 
+def task_severity(cfg: Config) -> dict[str, dict[str, str]]:
+    """Per supported backend, the severity of mypy errors and ruff findings in a task's output:
+    its typing profile decides, as for the VS Code problem matchers (vscode.problem_matchers:
+    mypy errors are errors only when the profile is blocking, ruff findings unless exit_zero)."""
+    out: dict[str, dict[str, str]] = {}
+    for backend in cfg.backend.supported:
+        data = render.load_profile(cfg.profile_for(backend))
+        out[backend] = {
+            "mypy": "error" if data.get("blocking") else "warning",
+            "ruff": "warning" if data.get("ruff", {}).get("exit_zero") else "error",
+        }
+    return out
+
+
 def commands() -> list[dict[str, str]]:
     """Return the ./deploy commands (name, usage, summary, group) for the editor's task list."""
     from ..cli import COMMANDS
@@ -63,6 +77,8 @@ def editor_data(cfg: Config, profile: str) -> dict[str, Any]:
             # same Node.js (basedpyright asks for nodejs-wheel-binaries>=20.13.1: it floats)
             "basedpyright": BASEDPYRIGHT,
             "basedpyright_node": BASEDPYRIGHT_NODE,
+            # the parser of the tasks' output (tasks.severity): strictest of the task's backends
+            "task_severity": task_severity(cfg),
         },
         "envs": env_dirs(),
         "mypyc_stage": ".build/mypyc-dev/stage",
