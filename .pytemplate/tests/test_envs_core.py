@@ -150,12 +150,14 @@ def test_quiet_hides_uvs_own_progress(tmp_path: Path, monkeypatch: pytest.Monkey
     envs.sync(env)
     envs.uv_run(env, ["python", "app.py"])  # uv's own lines only: the app's output is untouched
     envs.uv(env, ["lock", "--check"], check=False, capture=True, echo=False)  # a query: the runner reads it
+    envs.uv(env, ["run", "--with", "x", "python", "-c", ""], check=False, echo=False)  # not echoed, not read: progress
     monkeypatch.setattr(envs.ui, "QUIET", False)
     envs.sync(env)
     assert calls.argvs == [
         ["uv", "--quiet", "sync", "--locked", "--all-groups"],
         ["uv", "--quiet", "run", "--locked", "python", "app.py"],
         ["uv", "lock", "--check"],
+        ["uv", "--quiet", "run", "--with", "x", "python", "-c", ""],
         ["uv", "sync", "--locked", "--all-groups"],
     ]
 

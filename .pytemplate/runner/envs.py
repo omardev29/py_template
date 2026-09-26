@@ -160,8 +160,9 @@ def uv(
     # warnings and change summaries (uv has no level that keeps them): the commands whose
     # warnings (an extra the package lacks) and summaries (`lock --upgrade`, `lock --dry-run`)
     # answer the user's own arguments pass quiet=False. Errors always print. A captured query
-    # keeps uv's full output: the runner reads it.
-    quiet_flag = ["--quiet"] if quiet and ui.QUIET and echo and not capture else []
+    # keeps uv's full output: the runner reads it. A call without a command line (echo=False)
+    # that is not captured is a preparation step whose progress reaches the terminal: quiet too.
+    quiet_flag = ["--quiet"] if quiet and ui.QUIET and not capture else []
     return proc.run(
         [uv_path, *quiet_flag, *args],
         cwd=cwd,

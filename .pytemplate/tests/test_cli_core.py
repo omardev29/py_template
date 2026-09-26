@@ -1442,11 +1442,16 @@ def test_basedpyright_that_cannot_run_always_fails(
     cfg = make({"typing": {"editor": "basedpyright", "relaxed": relaxed}})
     calls: list[list[str]] = []
 
-    def uv(_env: envs.PyEnv, argv: list[Any], **_kw: Any) -> subprocess.CompletedProcess[str]:
+    def uv(_env: envs.PyEnv, argv: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
         args = [str(a) for a in argv]
         calls.append(args)
         if args[-3:] == ["python", "-c", ""]:
-            return subprocess.CompletedProcess(args, ready, "", "error: No solution found when resolving --with dependencies" if ready else "")
+            # Not captured: on a cold cache this step downloads the pins (tens of MB), and uv's
+            # progress, or its error, reaches the terminal itself
+            assert not kw.get("capture") and kw.get("echo") is False
+            if ready:
+                print("error: No solution found when resolving --with dependencies", file=sys.stderr)
+            return subprocess.CompletedProcess(args, ready)
         return completed(args, code)
 
     monkeypatch.setattr(envs, "uv_run", lambda _env, argv, **_kw: completed(argv))

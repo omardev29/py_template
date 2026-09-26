@@ -666,7 +666,8 @@ header rules (with detector tests proving each rule fires).
   `ui.step` header goes), the paths `render` lists (`cmd_mode.cmd_render`: outdated, updated,
   would update) and the `render --diff` output (`render.apply`). uv's own progress
   (`Resolved`, `Installed`, `Checked`...) is progress too: under `-q`, `envs.uv` passes
-  `--quiet` to every uv call it echoes (the output of what `uv run` starts is untouched), never
+  `--quiet` to every uv call whose output reaches the terminal (the output of what `uv run`
+  starts is untouched; basedpyright's install step, which echoes no command line, too), never
   to a captured query the runner reads. uv's `--quiet` also hides uv's warnings and change
   summaries (uv has no level that keeps them; errors still print), so the uv commands the user
   drives with their own arguments keep their whole output (`envs.uv(..., quiet=False)`):
@@ -1411,8 +1412,10 @@ Formats:
   5. With `typing.editor = "basedpyright"`: basedpyright (`BASEDPYRIGHT` pin) on
      `.build/cfg/pyright-<profile>.json` (`cmd_dev._run_basedpyright`). Exit 1 is only a
      warning when the profile is not `blocking`; any other code, or pins uv cannot install
-     (offline, a cold cache: asked first with a quiet `uv run --with ... python -c ""`,
-     because uv then exits 1 as well), fails the check.
+     (offline, a cold cache: asked first with a `uv run --with ... python -c ""` that echoes
+     no command line, because uv then exits 1 as well), fails the check. That step is not
+     captured: on a cold cache it downloads basedpyright and Node.js (tens of MB), and uv's
+     progress shows it (`-q` hides it; once cached it prints nothing).
 - `check all` runs each distinct profile once (cpython and pypy usually share one) and the
   mypyc rules only once, with the strictest profile (`mypyc` when present), so each finding
   appears once in the Problems panel.

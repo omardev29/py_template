@@ -146,15 +146,17 @@ def run_checks(cfg: Config, backend: str, *, rules: bool = True) -> bool:
 def _run_basedpyright(cfg: Config, profile: str, blocking: bool, conf: Path) -> bool:
     """basedpyright with the pinned versions. Its exit 1 (findings) is only a warning under a
     profile that is not blocking; basedpyright that cannot run is always a failure. uv exits 1
-    too when it cannot install the pins (offline, a cold cache): that is asked first, quietly
-    (the environment it resolves is cached for the real run), so it is never taken for
-    findings under a non-blocking profile and followed by `ok check: no errors`."""
+    too when it cannot install the pins (offline, a cold cache): that is asked first, without a
+    command line (the environment it resolves is cached for the real run), so it is never taken
+    for findings under a non-blocking profile and followed by `ok check: no errors`. Not
+    captured: on a cold cache that step downloads basedpyright and Node.js (tens of MB), and
+    uv's progress shows it (nothing prints once they are cached; -q hides it); uv prints its own
+    error too."""
     tool = envs.tool_env(cfg)
     with_pins = ["run", "--locked", "--with", BASEDPYRIGHT, "--with", BASEDPYRIGHT_NODE]
     if not proc.DRY_RUN:  # a dry run never installs anything
-        ready = envs.uv(tool, [*with_pins, "python", "-c", ""], check=False, capture=True, echo=False)
-        if ready.returncode != 0:
-            ui.report((ready.stderr or ready.stdout).rstrip())
+        ready = envs.uv(tool, [*with_pins, "python", "-c", ""], check=False, echo=False)
+        if ready.returncode != 0:  # uv's reason is above
             ui.error(f"basedpyright could not run: uv could not install {BASEDPYRIGHT} (exit code {ready.returncode})")
             return False
     r = envs.uv(tool, [*with_pins, "basedpyright", "--project", conf], check=False)
