@@ -303,7 +303,7 @@ def test_the_build_methods_table_follows_compat() -> None:
     rows = {_unquote(row[0]): row for row in table[1:]}
     assert list(rows) == list(config.METHODS), f"methods: {list(rows)} != {list(config.METHODS)}"
     for method, row in rows.items():
-        for backend, cell in zip(backends, row[1:-1]):
+        for backend, cell in zip(backends, row[1:-1], strict=True):
             expected = "no" if COMPAT[method].get(backend) else "yes"
             assert cell == expected, f"{method} + {backend}: the table says {cell!r}, cmd_build.COMPAT says {expected!r}"
 
