@@ -2402,8 +2402,19 @@ template-launchers; real niubash only on the maintainer's machine).
     bugs and stability defects only) and 1 per 50 (all of them): UNRELIABLE either way. The
     September 2026 overhaul fixed or deliberately closed every one of the 172 bugs (wave 1)
     and took on the CI stability defects (wave 2); the code grew to 14,588 lines.
-  - After the overhaul: not measured yet. Until a measurement says otherwise, the project is not
-    at the bar.
+  - 2026-09-26, commit 87e28f9 (after the overhaul), 15,495 lines: two independent teams of 10
+    hunters (one per area, the same brief, results never shared) reported 88 and 94 findings;
+    one verifier per area reproduced or traced each, merged duplicates and matched the teams
+    (4 rejected, 128 unique defects after merging across areas), and a skeptic per area tried
+    to refute every critical and serious one and a third of the notable ones (30 of 32 upheld,
+    2 downgraded to minor). Counted: 66 (9 critical, 1 serious, 56 notable; one of them a
+    stability defect), plus 12 that the first CI runs on macOS and Windows found in the same
+    commit and no hunter did (a false `doctor` error with Xcode.app, 11 test defects that broke
+    `./deploy selftest` there): 78 confirmed, 1 per 199 lines. Capture-recapture on the hunt:
+    A found 41 of the counted, B 47, both 22: about 87 (Chapman), about 99 with the CI's 12:
+    1 per 157 lines. UNACCEPTABLE (worse than 1 per 500, better than 1 per 100). Both teams are
+    the same model, so their finds are correlated and the estimate is likely low. The 66
+    counted and 62 minor defects are fixed next; a new measurement follows.
 
 ## 14. Conventions and recipes
 

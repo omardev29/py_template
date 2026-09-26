@@ -1431,9 +1431,12 @@ The owner's bar for this template, set in `CLAUDE.md` (rule 1.10 and section 13.
 - The measurements: on 2026-09-25, at commit fc131b9, 10,837 lines: between 1 bug per 91 lines
   (high and medium bugs and stability defects only) and 1 per 50 (all of them): UNRELIABLE
   either way. The September 2026 overhaul fixed or deliberately closed each of that hunt's 172 bug
-  findings and took on its stability defects; the code grew to 14,588 lines. The new density is
-  not measured yet: until a measurement says otherwise, the template is not at the bar. The next
-  measurement is two independent hunts of 10 agents each on one commit, after the overhaul.
+  findings and took on its stability defects. On 2026-09-26, at commit 87e28f9 (after the
+  overhaul, 15,495 lines), two independent hunts of 10 agents each, one verifier per area and a
+  skeptical second check confirmed 66 counted defects (9 critical, 1 serious, 56 notable), and
+  the first CI runs on macOS and Windows found 12 more: 78 confirmed, 1 per 199 lines;
+  capture-recapture estimates about 99, 1 per 157 lines. UNACCEPTABLE: the template is not at
+  the bar. Every one of those defects is being fixed, and a new measurement follows.
 
 The template is MIT-licensed (`LICENSE`). A project made with `./deploy new` keeps that notice as
 `.pytemplate/LICENSE`, next to the copied runner, and has no root `LICENSE` of its own.
