@@ -375,6 +375,9 @@ header rules (with detector tests proving each rule fires).
   plain `Get-Command uv` can return an alias or function; a `uv.cmd`/`uv.ps1` wrapper would
   parse the arguments again). The registry `Path` is read with
   `[Environment]::GetEnvironmentVariable` (expands `%VARS%`). `Read-Host` is wrapped in `try`.
+  A uv that cannot start (a broken download with its x bit) gives exit 126 and ONE line with
+  the innermost exception's message: the outer message (and the error record) carry the
+  position of the Invoke-Expression call (`test_ps1_uv_that_cannot_start_gives_one_line`).
 - Tests: every deploy.ps1 behaviour test runs wherever pwsh is installed (Linux and macOS
   too: the same Core hand-over), plus Windows PowerShell 5.1 on Windows; only the registry
   and cmd tests are Windows-only.

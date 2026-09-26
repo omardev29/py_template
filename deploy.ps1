@@ -214,7 +214,11 @@ try {
     }
     $code = $LASTEXITCODE
 } catch {
-    [Console]::Error.WriteLine("deploy: cannot run ${uv}: $_")
+    # The innermost exception's message on one line: the outer one (and the error record) add
+    # the position of the generated Invoke-Expression call (At line:1 char:1, + & '...').
+    $e = $_.Exception
+    while ($e.InnerException) { $e = $e.InnerException }
+    [Console]::Error.WriteLine("deploy: cannot run ${uv}: " + ($e.Message -replace '\s*[\r\n]+\s*', ' '))
     $code = 126
 } finally {
     # Not SetEnvironmentVariable($n, $null): PowerShell passes $null to a .NET string

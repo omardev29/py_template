@@ -717,6 +717,21 @@ def test_ps1_prints_install_hints_without_uv(tmp_path: Path) -> None:
 
 
 @posix_only
+def test_ps1_uv_that_cannot_start_gives_one_line(tmp_path: Path) -> None:
+    """A uv that exists with its x bit but cannot run (a broken download): exit 126 and one line
+    `deploy: cannot run <uv>: <reason>`, without the Invoke-Expression position text."""
+    exe = _ps_exe("pwsh")
+    broken = tmp_path / "uv"
+    broken.write_bytes(b"\x00\x01garbage, not a program\n")
+    broken.chmod(0o755)
+    r = _run([exe, "-NoProfile", "-NonInteractive", "-File", str(PS1), "__probe", "0", "0"], ROOT, _clean_env(UV=str(broken), CI="1"))
+    lines = [ln for ln in r.stderr.splitlines() if ln.strip()]
+    assert r.returncode == 126, (r.returncode, r.stdout, r.stderr)
+    assert len(lines) == 1 and lines[0].startswith(f"deploy: cannot run {broken}: "), r.stderr
+    assert "At line:" not in r.stderr and "char:" not in r.stderr, r.stderr
+
+
+@posix_only
 def test_ps1_skips_a_uv_without_exec_bit(tmp_path: Path) -> None:
     """Like `test -x` in ./deploy: a uv without x bit ($UV, PATH, an install folder) is skipped."""
     exe = _ps_exe("pwsh")
