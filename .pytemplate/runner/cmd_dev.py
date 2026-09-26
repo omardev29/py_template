@@ -320,13 +320,16 @@ def cmd_test(cfg: Config, args: list[str]) -> int:
             ui.error(f"test {b}: {e}")
             results[b] = e.code or 1
             reasons[b] = str(e).splitlines()[0] if str(e) else f"exit code {results[b]}"
-    if proc.DRY_RUN:
-        return 0  # nothing ran: no summary
-    if len(results) > 1:
+    failed = [b for b, code in results.items() if code != 0]
+    # --dry-run: pytest never ran, so no [ok] row; a backend whose checks failed (a compile.exclude
+    # naming nothing) is still listed, and the exit code is 1 as in a real run
+    if len(results) > 1 and (failed or not proc.DRY_RUN):
         ui.step("test summary")
         for b, code in results.items():
+            if code == 0 and proc.DRY_RUN:
+                continue
             ui.check_line(code == 0, b, "" if code == 0 else reasons.get(b, f"exit code {code}"))
-    return 0 if all(c == 0 for c in results.values()) else 1
+    return 1 if failed else 0
 
 
 # --- report --------------------------------------------------------------------------------------

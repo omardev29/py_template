@@ -1633,6 +1633,22 @@ def test_a_dry_run_reports_no_success_for_what_it_skipped(
     assert "(--dry-run) would write the Any reports" in err and "(--dry-run) check: ruff, mypy and basedpyright were not run" in err
 
 
+def test_a_dry_run_of_test_all_still_fails_when_a_backend_fails_its_checks(
+    fake_tests: FakeTests, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The dry run makes the real checks (CLAUDE.md 5.4): a `compile.exclude` naming nothing
+    stops `test mypyc` with a DeployError there too. `--dry-run test all` printed that error and
+    still exited 0 (it returned before looking at the results); the failed backend is listed
+    and the exit code is 1, while no [ok] row claims a test that did not run."""
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    fake_tests.codes["build"] = 1  # the mypyc step raises DeployError
+    cfg = make({"backend": {"supported": ["cpython", "mypyc"]}})
+    assert cmd_dev.cmd_test(cfg, ["all"]) == 1
+    err = capsys.readouterr().err
+    assert "error: test mypyc: mypyc failed" in err and "[XX] mypyc" in err
+    assert "[ok]" not in err and "cpython" not in err.split("test summary", 1)[1]
+
+
 # === 11. end to end: the exit codes cross deploy.py (a throwaway copy, no uv needed) ==============
 
 
