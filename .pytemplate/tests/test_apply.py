@@ -238,10 +238,12 @@ def _guard(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(cmd_dev, "_profile_file", profile_file)
     for key in [k for k in os.environ if k.startswith("GIT_")]:
         monkeypatch.delenv(key)
-    empty = tmp_path / "gitconfig"
-    empty.write_text("", encoding="utf-8")
+    config = tmp_path / "gitconfig"
+    # no background maintenance after a commit: it writes and removes .git/objects/maintenance.lock
+    # while a test compares snapshots (git 2.5x on macOS)
+    config.write_text("[maintenance]\n\tauto = false\n[gc]\n\tauto = 0\n", encoding="utf-8")
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     monkeypatch.setattr(proc, "DRY_RUN", False)
 

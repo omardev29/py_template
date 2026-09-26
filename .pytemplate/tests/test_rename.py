@@ -811,9 +811,11 @@ def test_stdlib_names_do_not_depend_on_the_runner(monkeypatch: pytest.MonkeyPatc
 
 def _git_env(tmp_path: Path) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    empty = tmp_path / "gitconfig"
-    empty.write_text("", encoding="utf-8")
-    return env | {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(empty), "GIT_CEILING_DIRECTORIES": str(tmp_path)}
+    config = tmp_path / "gitconfig"
+    # no background maintenance after a commit: it writes and removes .git/objects/maintenance.lock
+    # while a test compares the tree (git 2.5x on macOS)
+    config.write_text("[maintenance]\n\tauto = false\n[gc]\n\tauto = 0\n", encoding="utf-8")
+    return env | {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(config), "GIT_CEILING_DIRECTORIES": str(tmp_path)}
 
 
 def _git(cwd: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
