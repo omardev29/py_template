@@ -653,7 +653,9 @@ header rules (with detector tests proving each rule fires).
   keys, the Nuitka pin and PGO rules (`nuitka.check_python`, `check_options`) as a real build
   does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M: would output
   dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options: --lto=... [--pgo-c ...] <extras>`), then
-  stops. `report` builds nothing and never opens the browser.
+  stops. `report` builds nothing and never opens the browser. No success line for a skipped
+  step: `compile`, `report` and `check` print `(--dry-run) would ...`/`were not run` instead of
+  their `ok` lines, and `test all` no summary of `[ok]` rows.
 - `mode` validates the new `pytemplate.toml` in memory and prints the keys that would change
   (new and current value), whether `pyproject.toml` would be rewritten, `uv.lock` ("would
   re-lock", or a read-only `uv lock --check`), the generated files that would update, the
@@ -1220,7 +1222,10 @@ Formats:
      finding (`imports.parse_error`: a syntax error, or syntax newer than the runner's own
      Python), never an internal error.
   5. With `typing.editor = "basedpyright"`: basedpyright (`BASEDPYRIGHT` pin) on
-     `.build/cfg/pyright-<profile>.json`.
+     `.build/cfg/pyright-<profile>.json` (`cmd_dev._run_basedpyright`). Exit 1 is only a
+     warning when the profile is not `blocking`; any other code, or pins uv cannot install
+     (offline, a cold cache: asked first with a quiet `uv run --with ... python -c ""`,
+     because uv then exits 1 as well), fails the check.
 - `check all` runs each distinct profile once (cpython and pypy usually share one) and the
   mypyc rules only once, with the strictest profile (`mypyc` when present), so each finding
   appears once in the Problems panel.
@@ -1325,9 +1330,15 @@ Formats:
 - `./deploy compile [--release]` builds the stage without running it: the hidden VS Code task
   `deploy: compile` is the `preLaunchTask` of the mypyc debug config.
 - `report` writes the same `ANNOTATE_HTML` with `compile_c=False` (no C compiler needed) plus
-  mypy `--any-exprs-report` and `--lineprecision-report` into `.build/reports/`.
-- Test-time proof: `./deploy test mypyc` runs pytest with `-o pythonpath=<stage>` (overrides
-  pyproject's `pythonpath = ["src"]`) and `PYTEMPLATE_COMPILED`; every preset's
+  mypy `--any-exprs-report` and `--lineprecision-report` into `.build/reports/`. mypy's exit 1
+  (type errors) still writes them; any other code (2: a syntax error or a bad config stopped
+  it) is an error, exit 1, never `ok Any expressions per module`.
+- Test-time proof: `./deploy test mypyc` runs pytest with `-o pythonpath=...` and
+  `PYTEMPLATE_COMPILED`. An `-o` value replaces the whole setting, so it repeats the project's
+  own entries (`cmd_dev.pytest_pythonpath`: the first configuration file pytest itself reads in
+  the project folder, `PYTEST_CONFIGS`) with the `src` one replaced by the stage
+  (`cmd_dev.stage_pythonpath`; the stage first when none is `src`): an extra entry such as
+  `tests/helpers` imports under mypyc too. Every preset's
   `tests/conftest.py` (identical copies) raises `UsageError` when a listed module did not load
   from `.pyd/.so`, and skips tests marked `interpreted_only` under mypyc.
 - `exe_stage` deletes the compiled `.py` files so PyInstaller/Nuitka can only bundle the binary.
@@ -2134,8 +2145,9 @@ short temp tree and unset `NVIM_APPNAME`.
   copy that must restore every byte), `test_cli_core.py` (the runner's core: global options,
   dispatch, render-before-command, help, the exit code of every outcome, every command rejecting
   a bogus argument, `proc.run` dry-run/errors/signals/threads, `base_env` per variable, Ctrl+C
-  with real children that trap SIGINT, a closed stdout, `[tasks]` deps/cycles/placeholders/cwd/
-  env/uv modes/arguments, `check`/`test`/`lint` semantics, and exit codes through `deploy.py` in a
+  and a SIGTERM/SIGHUP passed on, with real children that trap them, a closed stdout, `[tasks]`
+  deps/cycles/placeholders/cwd/env/uv modes/arguments, `check`/`test`/`lint`/`report` semantics
+  and their dry runs, the mypyc tests' pythonpath, and exit codes through `deploy.py` in a
   throwaway copy), `test_envs_core.py` (the section 7 contract, `MIN_UV`, clean, sync/add/remove/lock
   command lines, `ensure_lock`, exec bits in a throwaway git repository, compiler checks, doctor
   lines and exit code; real uv only offline in `.venv`), `test_hooks.py` (the hook in throwaway

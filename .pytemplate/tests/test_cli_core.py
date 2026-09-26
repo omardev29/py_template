@@ -1356,6 +1356,46 @@ def test_basedpyright_runs_with_every_pin(relaxed: str, passed: bool, tmp_path: 
     assert argv[argv.index("--project") + 1] == str(tmp_path / "cfg" / f"pyright-{relaxed}.json")
 
 
+@pytest.mark.parametrize(
+    ("relaxed", "ready", "code", "passed", "message"),
+    [
+        ("warn", 0, 0, True, ""),
+        ("warn", 0, 1, True, "warning: basedpyright: type warnings (profile 'warn', non-blocking)"),
+        ("strict", 0, 1, False, ""),
+        # uv could not install the pins (offline, cold cache): uv exits 1 too, never "findings"
+        ("warn", 1, 1, False, "error: basedpyright could not run: uv could not install basedpyright=="),
+        ("strict", 2, 0, False, "error: basedpyright could not run"),
+        ("warn", 0, 2, False, "error: basedpyright stopped (exit code 2)"),  # a fatal error
+        ("warn", 0, 3, False, "error: basedpyright stopped (exit code 3)"),  # its config
+    ],
+)
+@pytest.mark.usefixtures("isolated_checks")
+def test_basedpyright_that_cannot_run_always_fails(
+    relaxed: str, ready: int, code: int, passed: bool, message: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Offline with a cold cache, `uv run --with basedpyright==...` failed (exit 1: No solution
+    found), and under the non-blocking `warn` profile check said `ok check: no errors`."""
+    cfg = make({"typing": {"editor": "basedpyright", "relaxed": relaxed}})
+    calls: list[list[str]] = []
+
+    def uv(_env: envs.PyEnv, argv: list[Any], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        calls.append(args)
+        if args[-3:] == ["python", "-c", ""]:
+            return subprocess.CompletedProcess(args, ready, "", "error: No solution found when resolving --with dependencies" if ready else "")
+        return completed(args, code)
+
+    monkeypatch.setattr(envs, "uv_run", lambda _env, argv, **_kw: completed(argv))
+    monkeypatch.setattr(envs, "uv", uv)
+    assert cmd_dev.run_checks(cfg, "cpython") is passed
+    err = capsys.readouterr().err
+    assert message in err
+    assert [c[-3:] == ["python", "-c", ""] for c in calls] == ([True] if ready else [True, False])
+    assert all(c[:6] == ["run", "--locked", "--with", cmd_dev.BASEDPYRIGHT, "--with", cmd_dev.BASEDPYRIGHT_NODE] for c in calls)
+    if ready:
+        assert "No solution found" in err  # uv's own reason
+
+
 def test_tools_are_pinned_exactly() -> None:
     assert re.fullmatch(r"basedpyright==\d+\.\d+\.\d+", cmd_dev.BASEDPYRIGHT)
     assert re.fullmatch(r"nodejs-wheel-binaries==\d+\.\d+\.\d+", cmd_dev.BASEDPYRIGHT_NODE)
@@ -1422,6 +1462,64 @@ def test_test_argv_and_the_compiled_proof(fake_tests: FakeTests) -> None:
     assert fake_tests.calls[-1] == ("pypy", ["python", "-m", "pytest", "-q"], {"PYTEMPLATE_BACKEND": "pypy"})
 
 
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        # the template's own: src becomes the stage
+        ({"pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["src"]\n'}, ["STAGE"]),
+        # the user's extra entries stay (-o replaces the whole setting)
+        ({"pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["tests/helpers", "./src", "my libs"]\n'}, ["tests/helpers", "STAGE", "my libs"]),
+        ({"pyproject.toml": '[tool.pytest.ini_options]\npythonpath = "src tests/helpers"\n'}, ["STAGE", "tests/helpers"]),
+        ({"pyproject.toml": '[tool.pytest]\npythonpath = ["src", "tests/helpers"]\n'}, ["STAGE", "tests/helpers"]),  # pytest 9 native
+        # no src entry: the stage goes first
+        ({"pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["lib"]\n'}, ["STAGE", "lib"]),
+        ({"pyproject.toml": "[project]\nname = 'x'\n"}, ["STAGE"]),
+        ({}, ["STAGE"]),
+        # the other files pytest reads, in pytest's order
+        ({"pytest.ini": "[pytest]\npythonpath = src\n    tests/helpers\n", "pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["x"]\n'}, ["STAGE", "tests/helpers"]),
+        ({"pytest.ini": "", "pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["src", "x"]\n'}, ["STAGE"]),  # an empty pytest.ini wins
+        ({"pytest.toml": '[pytest]\npythonpath = ["src", "h"]\n', "pytest.ini": "[pytest]\npythonpath = x\n"}, ["STAGE", "h"]),
+        ({"tox.ini": "[pytest]\npythonpath = src h\n"}, ["STAGE", "h"]),
+        ({"setup.cfg": "[tool:pytest]\npythonpath = src h\n", "tox.ini": "[tox]\n"}, ["STAGE", "h"]),
+        ({"pyproject.toml": "not toml ["}, ["STAGE"]),
+    ],
+)
+def test_mypyc_tests_keep_the_other_pythonpath_entries(tmp_path: Path, files: dict[str, str], expected: list[str]) -> None:
+    """`test mypyc` passed `-o pythonpath=<stage>`, which replaces the WHOLE setting: a test
+    importing a helper from an extra entry (tests/helpers) passed on cpython and failed to
+    collect on mypyc."""
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    stage = ROOT / ".build" / "pt-stage"
+    value = cmd_dev.stage_pythonpath(stage, root=tmp_path, src=tmp_path / "src")
+    assert shlex.split(value) == [".build/pt-stage" if e == "STAGE" else e for e in expected]
+
+
+def test_pytest_reads_the_mypyc_pythonpath_like_the_project_setting(tmp_path: Path) -> None:
+    """The real pytest: the compiled package of the stage wins over src/, and a helper of an
+    extra pythonpath entry (with a space in its folder) still imports."""
+    (tmp_path / "pyproject.toml").write_text('[tool.pytest.ini_options]\npythonpath = ["src", "tests/my helpers"]\n', encoding="utf-8")
+    for folder, where in (("src", "src"), ("stage", "stage")):
+        (tmp_path / folder / "pkg").mkdir(parents=True)
+        (tmp_path / folder / "pkg" / "__init__.py").write_text(f"WHERE = {where!r}\n", encoding="utf-8")
+    (tmp_path / "tests" / "my helpers").mkdir(parents=True)
+    (tmp_path / "tests" / "my helpers" / "myhelp.py").write_text("VALUE = 3\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_x.py").write_text(
+        "import pkg\nfrom myhelp import VALUE\n\ndef test_it():\n    assert (pkg.WHERE, VALUE) == ('stage', 3)\n", encoding="utf-8"
+    )
+    value = cmd_dev.stage_pythonpath(tmp_path / "stage", root=tmp_path, src=tmp_path / "src")
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", f"pythonpath={value}", "tests"],
+        cwd=tmp_path,
+        env=child_env(),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 def test_test_returns_pytests_code_for_one_backend(fake_tests: FakeTests, capsys: pytest.CaptureFixture[str]) -> None:
     cfg = own({})
     fake_tests.codes.update(cpython=5)  # no tests collected
@@ -1469,6 +1567,39 @@ def test_report_needs_mypyc_and_never_opens_a_browser_in_a_dry_run(monkeypatch: 
     monkeypatch.setattr(cmd_dev, "_profile_file", lambda _cfg, _profile, _kind: Path("mypy.ini"))
     monkeypatch.setattr(proc, "DRY_RUN", True)
     assert cmd_dev.cmd_report(make({}), ["--open"]) == 0
+
+
+@pytest.mark.parametrize(("mypy", "code", "line"), [(0, 0, "ok Any expressions per module"), (1, 0, "ok Any expressions per module"), (2, 1, "error: mypy stopped (exit code 2)")])
+def test_report_follows_mypys_exit_code(
+    fake_tests: FakeTests, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mypy: int, code: int, line: str
+) -> None:
+    """A syntax error stops mypy (exit 2) before its reports: report said `ok Any expressions per
+    module` and exited 0 with an empty any-exprs.txt. Type errors (exit 1) still write them."""
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    monkeypatch.setattr(cmd_dev, "_profile_file", lambda _cfg, _profile, _kind: Path("mypy.ini"))
+    fake_tests.codes["cpython"] = mypy  # the mypy run of the report
+    assert cmd_dev.cmd_report(make({}), []) == code
+    err = capsys.readouterr().err
+    assert line in err
+    assert ("ok Any expressions" in err) is (code == 0)
+
+
+def test_a_dry_run_reports_no_success_for_what_it_skipped(
+    fake_tests: FakeTests, checks: FakeChecks, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--dry-run skips compile, pytest, ruff, mypy: `ok compiled stage`, `ok mypyc report`,
+    `ok Any expressions`, `ok check: no errors` and a test summary of [ok] lines were printed."""
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    monkeypatch.setattr(cmd_dev, "_profile_file", lambda _cfg, _profile, _kind: Path("mypy.ini"))
+    cfg = make({"backend": {"supported": ["cpython", "mypyc"]}})
+    assert cmd_dev.cmd_compile(cfg, []) == 0
+    assert cmd_dev.cmd_report(cfg, []) == 0
+    assert cmd_dev.cmd_test(cfg, ["all"]) == 0
+    assert cmd_dev.cmd_check(cfg, ["all"]) == 0
+    err = capsys.readouterr().err
+    assert "ok " not in err and "[ok]" not in err and "test summary" not in err
+    assert "(--dry-run) would compile the stage" in err and "(--dry-run) would write the mypyc report" in err
+    assert "(--dry-run) would write the Any reports" in err and "(--dry-run) check: ruff, mypy and basedpyright were not run" in err
 
 
 # === 11. end to end: the exit codes cross deploy.py (a throwaway copy, no uv needed) ==============
