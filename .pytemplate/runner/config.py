@@ -374,7 +374,12 @@ def _build(cls: type[Any], data: Any, where: str) -> Any:
             if key == "env":  # tasks.X.env, deploy.portable.env
                 _check_env_names(value, path)
             kwargs[key] = value
-    return cls(**kwargs)
+    built = cls(**kwargs)
+    if cls is Config and "modules" not in data.get("compile", {}):
+        # the documented default is the app's own <pkg>.core: the dataclass knows no app name, and
+        # its myapp.core (the template's) sent every mypyc run of project `p` to src/myapp/
+        built.compile.modules = [f"{built.pkg}.core"]
+    return built
 
 
 def _table(value: Any, where: str) -> dict[str, Any]:

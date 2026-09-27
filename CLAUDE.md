@@ -1206,7 +1206,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (dotted identifiers or `*`, `{pkg}` token); `strict` forbidden: mypy would apply it to ALL
   modules; option names identifier-like, values booleans, numbers, one-line strings or lists of
   them: each becomes a `.mypy.ini` line). `backend.active = "mypyc"` rejects `warn`/`off`.
-- `[compile]`: `modules`, `exclude`, `forbid_imports` (dotted names checked), `annotate` (every
+- `[compile]`: `modules` (without the line: `<pkg>.core` of `app.name`, filled in by
+  `config._build`; the dataclass default, the template's own `myapp.core`, sent every mypyc run
+  of another app to `src/myapp/`), `exclude`, `forbid_imports` (dotted names checked), `annotate` (every
   mypyc build writes the annotate report, section 9), `opt_level "0".."3"`,
   `no_semantic_interposition` (default true: a C flag on Linux gcc/clang, section 9),
   `multi_file`, `separate`, `strict_dunder_typing`. `config._validate_compile` checks the names

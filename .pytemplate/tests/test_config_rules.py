@@ -338,6 +338,16 @@ def test_compile_module_names(key: str) -> None:
         fails({"compile": {key: [bad]}}, "invalid module in [compile]")
 
 
+def test_compile_modules_defaults_to_the_apps_own_package() -> None:
+    """CLAUDE.md 2: compile.modules defaults to <pkg>.core. Without the line the default was the
+    template's own myapp.core: in a project named p, mode showed "mypyc compiles myapp.core" and
+    every mypyc run failed with "neither src/myapp/core.py nor src/myapp/core/ exists"."""
+    assert make({"app": {"name": "My-Game"}}).compile.modules == ["my_game.core"]
+    assert make({"app": {"name": "p"}, "compile": {"opt_level": "2"}}).compile.modules == ["p.core"]
+    assert make({"app": {"name": "p"}, "compile": {"modules": ["p.fast"]}}).compile.modules == ["p.fast"]  # written: kept
+    assert make({}).compile.modules == ["myapp.core"]
+
+
 def test_compile_opt_level() -> None:
     for level in ("0", "1", "2", "3"):
         assert make({"compile": {"opt_level": level}}).compile.opt_level == level
