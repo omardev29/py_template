@@ -1571,6 +1571,32 @@ def needs_pypi(stderr: str) -> bool:
     return "$ uv lock" in stderr and any(marker in stderr for marker in PYPI_UNREACHABLE)
 
 
+def _check_the_name_is_applied(cfg: Config, new_name: str) -> None:
+    """Refuse what doctor and apply report about the name when src/<pkg>/ of app.name exists: an
+    app.name set by hand to ANOTHER package of src/ (the rename would move that package and
+    leave the app where it is; `rename <that name>` said "nothing to do"), and a pyproject.toml
+    [project] name edited by hand ("nothing to do" while doctor reports it)."""
+    from . import cmd_apply
+
+    try:
+        project_name = cmd_apply.read_project().name
+    except DeployError:
+        return  # check_new_name says what is wrong with pyproject.toml
+    record = cmd_apply.trusted_record(cfg, project_name)
+    other = cmd_apply._other_package(cfg, record, project_name)
+    if other is not None:
+        either = "" if record is not None else f"\n  (or, if pyproject.toml [project] name is the line edited by hand, put back name = \"{cfg.app.name}\" there)"
+        raise DeployError(
+            f"rename: app.name = '{cfg.app.name}' names src/{cfg.pkg}/, another package: the app is '{other}' "
+            f"(src/{package_of(other)}/).\n  Put back app.name = \"{other}\" in pytemplate.toml, then ./deploy rename {new_name}{either}"
+        )
+    if new_name == cfg.app.name and project_name is not None and project_name != cfg.app.name:
+        raise DeployError(
+            f"rename: the app is already called '{new_name}' (src/{cfg.pkg}/), but pyproject.toml [project] name = "
+            f"'{project_name}' was changed by hand: ./deploy apply puts the app's name back there"
+        )
+
+
 def cmd_rename(cfg: Config, args: list[str]) -> int:
     """rename NEW_NAME [--force]"""
     from . import cmd_apply
@@ -1598,6 +1624,8 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
             "  If app.name was changed by hand: put the old name back in pytemplate.toml and run "
             f"./deploy rename {new_name} again"
         )
+    else:
+        _check_the_name_is_applied(cfg, new_name)
     if new_name == old_name == cfg.app.name:
         ui.ok(f"the app is already called '{new_name}' (package src/{cfg.pkg}/): nothing to do")
         return 0

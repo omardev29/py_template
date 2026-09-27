@@ -957,7 +957,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   first, as apply does: the trusted record, else pyproject `[project] name`, whose package is in
   src/): `rename <the edited name>` finishes the job, `rename OTHER` goes from the real name to
   OTHER; with no such name and src/<pkg>/ missing it exits 2 ("put the old name back"). It never
-  says "nothing to do" while doctor and the hook still report the edit as not applied.
+  says "nothing to do" while doctor and the hook still report the edit as not applied: an app.name
+  set by hand to ANOTHER package of src/ is refused as apply refuses it (`_check_the_name_is_applied`
+  with `cmd_apply._other_package`: `rename other --force` moved that package and left the app
+  where it was), and a pyproject.toml [project] name edited by hand, with NEW_NAME = app.name,
+  exits 2 naming `./deploy apply`.
 - What changes (`rewrite`, whole words only; `myapp_extra` and `my-app-2` never match):
   - Python code (`tokenize`): the first name of `import pkg...`/`from pkg... import`, and, in a
     file that binds the package with `import pkg[.x]` (no `as`), every name that resolves to that
@@ -4403,7 +4407,8 @@ Code coupling (rename together):
   `.pytemplate/tests/test_no_spanish.py` by path (it needs `offending_lines`, `ALLOWED_PATHS`,
   `BINARY_SUFFIXES`, and only `pytest.mark` at module level); `rename` calls the private
   `config._build`, `config._decode`, `config._string_end` (with `config._ScanError`, for
-  `_toml_strings`), `presets._norm_name` and, lazily, `cmd_env._is_link`; `cmd_apply` calls the
+  `_toml_strings`), `presets._norm_name` and, lazily, `cmd_env._is_link` and
+  `cmd_apply._other_package`; `cmd_apply` calls the
   private `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311`,
   `rename._plan_pyproject`, `render._holds_python` and `render._read_state`; `rename` and
   `cmd_env` import `cmd_apply` lazily (it imports both at module level).

@@ -1372,6 +1372,32 @@ def test_same_name_with_missing_package_is_an_error(command_project: Path) -> No
     assert rename.cmd_rename(_load(root), ["alpha"]) == 0  # the package exists: still "nothing to do"
 
 
+@pytest.mark.parametrize("new", ["helpers", "other"])
+def test_rename_refuses_an_app_name_set_to_another_package(command_project: Path, new: str) -> None:
+    """app.name set by hand to another package of src/ (src/helpers/): `rename helpers` said
+    "nothing to do" while doctor reported it, and `rename other --force` moved src/helpers/, left
+    the app in src/alpha/ and recorded the damage as applied."""
+    root = command_project
+    (root / "src" / "helpers").mkdir()
+    (root / "src" / "helpers" / "__init__.py").write_text("", encoding="utf-8")
+    text = (root / "pytemplate.toml").read_text(encoding="utf-8")
+    (root / "pytemplate.toml").write_text(config.set_value(text, "app", "name", "helpers"), encoding="utf-8", newline="\n")
+    before = _tree(root)
+    with pytest.raises(DeployError, match=r"names src/helpers/, another package: the app is 'alpha'[\s\S]*Put back app.name = \"alpha\"") as e:
+        rename.cmd_rename(_load(root), [new, "--force"])
+    assert e.value.code == 2 and _tree(root) == before
+
+
+def test_rename_to_the_same_name_is_not_done_while_pyproject_differs(command_project: Path) -> None:
+    root = command_project
+    pyproject = root / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "foo"', 1), encoding="utf-8")
+    with pytest.raises(DeployError, match=r"pyproject.toml \[project\] name = 'foo' was changed by hand: ./deploy apply"):
+        rename.cmd_rename(_load(root), ["alpha"])
+    assert rename.cmd_rename(_load(root), ["beta"]) == 0  # a real rename writes the name there too
+    assert presets.project_name(pyproject.read_text(encoding="utf-8")) == "beta"
+
+
 def test_dry_run_predicts_exactly_the_rerendered_files(command_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     root = command_project
     for new in ("Alpha", "My-Game"):  # a case-only rename keeps the package: tasks.json does not change
