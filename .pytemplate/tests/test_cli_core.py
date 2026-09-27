@@ -253,7 +253,7 @@ def test_probe_needs_no_config(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
 # after its checks, never with a hand-edited app.name before the dirty-tree check; the internal
 # __init renders with --force at its end (rendering the copy first, `new` warned about the source
 # project's hand-edited .vscode/settings.json: "use ./pyt render --force")
-NEVER_RENDER = {"clean", "render", "new", "pyz-merge", "tasks", "selftest", "help", "hooks", "setup", "apply", "rename", "__init"}
+NEVER_RENDER = {"clean", "render", "new", "install", "uninstall", "pyz-merge", "tasks", "selftest", "help", "hooks", "setup", "apply", "rename", "__init"}
 
 
 def test_commands_that_never_render() -> None:
@@ -437,6 +437,8 @@ MINIMAL: dict[str, tuple[list[str], bool]] = {
     "init": (["script"], False),
     "rename": (["othername"], False),
     "new": (["somewhere"], False),
+    "install": ([], False),
+    "uninstall": ([], False),
     "check": (["cpython"], False),
     "lint": ([], False),
     "fmt": ([], False),

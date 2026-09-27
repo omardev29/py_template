@@ -14,7 +14,7 @@ import sysconfig
 from pathlib import Path
 from typing import Protocol
 
-from . import cmd_nvim, envs, hooks, mypyc, proc, project, render, shells, ui
+from . import cmd_install, cmd_nvim, envs, hooks, mypyc, proc, project, render, shells, ui
 from .cmd_dev import only_flags
 from .config import Config
 from .project import BUILD, DIST, ENV_SUFFIX, IS_MACOS, IS_WINDOWS, PYPROJECT, ROOT, rel, write_whole
@@ -603,6 +603,7 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
     else:
         _project(cfg, check)  # backends, generated files, pyproject.toml, uv.lock, launchers, git hook
     cmd_nvim.doctor(check)  # Neovim/LazyVim summary (details: ./pyt nvim doctor)
+    cmd_install.doctor(check)  # the `pyt` command of pyt install (notes only)
     ui.info("")
     if problems:
         ui.error(f"{problems} problem(s)")

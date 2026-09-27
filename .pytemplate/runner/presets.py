@@ -1152,9 +1152,10 @@ def copy_template(dest: Path) -> None:
             ui.info(f"  not copied ({what}): {', '.join(paths[:5])}{more}")
 
 
-def _copy_link(src: Path, target: Path, rel_path: str) -> None:
+def _copy_link(src: Path, target: Path, rel_path: str, command: str = "new") -> None:
     """A symbolic link copied as the link (its target text). Where no link can be made (Windows
-    without the symlink privilege) what it points to is copied instead, with a warning."""
+    without the symlink privilege) what it points to is copied instead, with a warning naming
+    `command` (`new`, or `install` for the installed template)."""
     try:
         target.symlink_to(os.readlink(src), target_is_directory=src.is_dir())
         return
@@ -1165,9 +1166,9 @@ def _copy_link(src: Path, target: Path, rel_path: str) -> None:
     elif src.exists():
         shutil.copy2(src, target)
     else:
-        ui.warn(f"new: could not copy the link {rel_path} ({reason}); it points nowhere: left out")
+        ui.warn(f"{command}: could not copy the link {rel_path} ({reason}); it points nowhere: left out")
         return
-    ui.warn(f"new: could not copy the link {rel_path} ({reason}): copied what it points to")
+    ui.warn(f"{command}: could not copy the link {rel_path} ({reason}): copied what it points to")
 
 
 def _outermost_missing(path: Path) -> Path | None:

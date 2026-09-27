@@ -1,8 +1,11 @@
 #!/bin/sh
 # ./pyt: POSIX launcher of the pytemplate runner.
+# pytemplate-launcher: `pyt install` copies this file into uv's tool bin folder and `pyt uninstall` removes it.
 #
 # Finds the project root and uv, then hands every argument to
-# .pytemplate/pyt.py, where all the logic lives. It must keep working under
+# .pytemplate/pyt.py, where all the logic lives. Outside any project it runs
+# the copy of the template that `pyt install` made, in its global mode
+# (PYTEMPLATE_GLOBAL=1). It must keep working under
 # dash, bash 3.2+, zsh, busybox ash and ksh on Linux, macOS and WSL, and under
 # Git Bash, MSYS2 (any MSYSTEM, login or not), Cygwin, busybox-w32 and niubash
 # on Windows. CLAUDE.md ("Launchers") explains each rule:
@@ -145,8 +148,22 @@ _pt_winpath() {
 
 # --- project root ---------------------------------------------------------------
 
+# $1 = a folder. Sets _pt_entry to the runner it holds: .pytemplate/pyt.py, else
+# .pytemplate/deploy.py (a project made before the launchers were renamed).
+_pt_entry_in() {
+    if [ -f "${1%/}/.pytemplate/pyt.py" ]; then
+        _pt_entry=pyt.py
+        return 0
+    fi
+    if [ -f "${1%/}/.pytemplate/deploy.py" ]; then
+        _pt_entry=deploy.py
+        return 0
+    fi
+    return 1
+}
+
 # $1 = this file as the shell named it. Sets _pt_root when its directory
-# holds .pytemplate/pyt.py. A symlink (~/bin/mypyt -> proj/pyt) is
+# holds a runner (_pt_entry_in). A symlink (~/bin/mypyt -> proj/pyt) is
 # followed to the launcher it names, at most 40 links; a relative target is
 # joined to its link's folder, and the kernel resolves the '..' in it.
 _pt_from_launcher() {
@@ -178,17 +195,17 @@ _pt_from_launcher() {
         '') _pt_c=/ ;;
         [A-Za-z]:) _pt_c=$_pt_c/ ;;
     esac
-    if [ -f "${_pt_c%/}/.pytemplate/pyt.py" ]; then
+    if _pt_entry_in "$_pt_c"; then
         _pt_root=$_pt_c
         return 0
     fi
     return 1
 }
 
-# $1 = a folder holding .pytemplate/pyt.py, found by walking up from $PWD.
-# Its code is not run when another user owns it: anyone may create
-# /tmp/.pytemplate/pyt.py (on Windows, whose owners are not read here: a
-# drive root, where any user may create folders).
+# $1 = a folder holding .pytemplate/$_pt_entry, found by walking up from $PWD
+# (or the installed template). Its code is not run when another user owns it:
+# anyone may create /tmp/.pytemplate/pyt.py (on Windows, whose owners are not
+# read here: a drive root, where any user may create folders).
 _pt_foreign() {
     if [ -n "$_pt_win" ]; then
         case $1 in
@@ -196,9 +213,36 @@ _pt_foreign() {
         esac
         return 1
     fi
-    if [ -O "${1%/}/.pytemplate/pyt.py" ]; then
+    if [ -O "${1%/}/.pytemplate/$_pt_entry" ]; then
         return 1
     fi
+    return 0
+}
+
+# The copy of the template that `pyt install` made (the runner's
+# cmd_install.snapshot_dir): %LOCALAPPDATA%\pytemplate\template on Windows,
+# else $XDG_DATA_HOME/pytemplate/template (an absolute XDG_DATA_HOME only) or
+# ~/.local/share/pytemplate/template (an absolute HOME only). Sets _pt_r ('' when
+# nothing names it).
+_pt_installed() {
+    _pt_r=
+    if [ -n "$_pt_win" ]; then
+        _pt_slashes "${LOCALAPPDATA:-}"
+        if [ -z "$_pt_r" ] && [ -n "${USERPROFILE:-}" ]; then
+            _pt_slashes "$USERPROFILE/AppData/Local"
+        fi
+        if [ -n "$_pt_r" ]; then
+            _pt_r=${_pt_r%/}/pytemplate/template
+        fi
+        return 0
+    fi
+    case ${XDG_DATA_HOME:-} in
+        /*) _pt_r=${XDG_DATA_HOME%/}/pytemplate/template ;;
+        *)
+            case ${HOME:-} in
+                /*) _pt_r=${HOME%/}/.local/share/pytemplate/template ;;
+            esac ;;
+    esac
     return 0
 }
 
@@ -210,6 +254,8 @@ _pt_slashes "$_pt_pwd"
 _pt_pwd=$_pt_r
 _pt_root=
 _pt_other=
+_pt_entry=pyt.py
+_pt_global=
 
 # bash and niubash name this file in $BASH_SOURCE (niubash's $0 is the
 # caller's); zsh in $_pt_self; everything else in $0; else walk up from $PWD.
@@ -222,7 +268,7 @@ elif _pt_from_launcher "$0"; then
 else
     _pt_d=$_pt_pwd
     while :; do
-        if [ -f "${_pt_d%/}/.pytemplate/pyt.py" ]; then
+        if _pt_entry_in "$_pt_d"; then
             if _pt_foreign "$_pt_d"; then
                 _pt_other=$_pt_d
             else
@@ -240,6 +286,20 @@ else
         fi
         _pt_d=$_pt_n
     done
+    # No project: the installed template, in its global mode (pyt new...),
+    # under the same ownership rule as a folder found by walking up.
+    if [ -z "$_pt_root" ] && [ -z "$_pt_other" ]; then
+        _pt_installed
+        if [ -n "$_pt_r" ] && [ -f "$_pt_r/.pytemplate/pyt.py" ]; then
+            _pt_entry=pyt.py
+            if _pt_foreign "$_pt_r"; then
+                _pt_other=$_pt_r
+            else
+                _pt_root=$_pt_r
+                _pt_global=1
+            fi
+        fi
+    fi
 fi
 
 case $_pt_root in
@@ -265,7 +325,7 @@ case $_pt_root in
         # $PWD is logical: below a symlink its '..' is not the folder the
         # kernel found this file in. Then keep the relative path, which uv
         # resolves the way the kernel did (the launcher never changes folder).
-        if [ -f "${_pt_t%/}/.pytemplate/pyt.py" ]; then
+        if [ -f "${_pt_t%/}/.pytemplate/$_pt_entry" ]; then
             _pt_root=$_pt_t
         fi ;;
 esac
@@ -428,10 +488,11 @@ EOF
 _pt_rc=
 _pt_uv=
 if [ -n "$_pt_other" ]; then
-    printf '%s\n' "pyt: ${_pt_other%/}/.pytemplate/pyt.py is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run ${_pt_other%/}/pyt yourself." >&2
+    printf '%s\n' "pyt: ${_pt_other%/}/.pytemplate/$_pt_entry is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run ${_pt_other%/}/${_pt_entry%.py} yourself." >&2
     _pt_rc=2
 elif [ -z "$_pt_root" ]; then
-    printf '%s\n' "pyt: no .pytemplate/pyt.py next to this launcher, in $_pt_pwd or in any parent directory." >&2
+    printf '%s\n' "pyt: no .pytemplate/pyt.py next to this launcher, in $_pt_pwd or in any parent directory." \
+        "To run pyt outside a project, install it: ./pyt install in a clone of the template (https://github.com/omardev29/py_template)." >&2
     _pt_rc=2
 else
     if [ -n "${UV:-}" ]; then
@@ -515,7 +576,7 @@ else
         _pt_launcher=$_pt_launcher:cygwin
     fi
 
-    _pt_script=${_pt_root%/}/.pytemplate/pyt.py
+    _pt_script=${_pt_root%/}/.pytemplate/$_pt_entry
     _pt_cwd=$_pt_pwd
     if [ -n "$_pt_win" ]; then
         _pt_winpath "$_pt_script"
@@ -526,14 +587,21 @@ else
     PYTEMPLATE_CALLER_CWD=$_pt_cwd
     PYTEMPLATE_LAUNCHER=$_pt_launcher
     export PYTEMPLATE_CALLER_CWD PYTEMPLATE_LAUNCHER
+    # The installed template runs in its global mode; a project's runner never does.
+    if [ -n "$_pt_global" ]; then
+        PYTEMPLATE_GLOBAL=1
+        export PYTEMPLATE_GLOBAL
+    else
+        unset PYTEMPLATE_GLOBAL
+    fi
     set -- "$_pt_uv" run --quiet --script "$_pt_script" "$@"
 fi
 
-unset -f _pt_slashes _pt_backslashes _pt_drive _pt_winpath _pt_from_launcher \
-    _pt_foreign _pt_try_uv _pt_try_dir _pt_find_uv_dirs _pt_expand _pt_uv_in_list \
+unset -f _pt_slashes _pt_backslashes _pt_drive _pt_winpath _pt_entry_in _pt_from_launcher \
+    _pt_foreign _pt_installed _pt_try_uv _pt_try_dir _pt_find_uv_dirs _pt_expand _pt_uv_in_list \
     _pt_uv_from_registry
 unset _pt_self _pt_r _pt_s _pt_p _pt_t _pt_d _pt_c _pt_n _pt_link _pt_pwd _pt_root _pt_other _pt_win \
-    _pt_exe _pt_uv _pt_h _pt_l _pt_f _pt_a _pt_g _pt_v _pt_rest _pt_e _pt_cr _pt_k \
+    _pt_entry _pt_global _pt_exe _pt_uv _pt_h _pt_l _pt_f _pt_a _pt_g _pt_v _pt_rest _pt_e _pt_cr _pt_k \
     _pt_o _pt_launcher _pt_script _pt_cwd _pt_rc
 if [ "$#" -eq 1 ]; then
     # An error above (no project, no uv): $1 is its exit code.
@@ -545,16 +613,16 @@ fi
 # (the runner's own tools never get them either).
 if [ -n "${__RUBASH_SHELL_NAME:-}" ]; then
     # niubash runs this file inside the calling shell and `exec` only ends the
-    # file: run uv, then drop the two exports so the session keeps no stale copy.
-    # The session keeps its own values: uv reads an empty UV_PYTHON as unset,
-    # Python an empty PYTHONHOME/PYTHONPATH, and uv refuses an empty
+    # file: run uv, then drop the PYTEMPLATE_ exports so the session keeps no
+    # stale copy. The session keeps its own values: uv reads an empty UV_PYTHON
+    # as unset, Python an empty PYTHONHOME/PYTHONPATH, and uv refuses an empty
     # UV_WORKING_DIR (. is the caller's folder).
     if UV_PYTHON='' PYTHONHOME='' PYTHONPATH='' UV_WORKING_DIR=. "$@"; then
         set -- 0
     else
         set -- "$?"
     fi
-    unset PYTEMPLATE_CALLER_CWD PYTEMPLATE_LAUNCHER
+    unset PYTEMPLATE_CALLER_CWD PYTEMPLATE_LAUNCHER PYTEMPLATE_GLOBAL
     exit "$1"
 fi
 unset UV_PYTHON PYTHONHOME PYTHONPATH UV_WORKING_DIR

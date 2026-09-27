@@ -1,7 +1,10 @@
 #!/usr/bin/env pwsh
 # ./pyt launcher for PowerShell 7+ (any OS) and Windows PowerShell 5.1.
+# pytemplate-launcher: `pyt install` copies this file into uv's tool bin folder and `pyt uninstall` removes it.
 # Finds the project root and uv and hands every argument to
-# .pytemplate/pyt.py, where all the logic lives. Rules (CLAUDE.md, "Launchers"):
+# .pytemplate/pyt.py, where all the logic lives. Outside any project it runs the copy of the
+# template that `pyt install` made, in its global mode (PYTEMPLATE_GLOBAL=1). Rules
+# (CLAUDE.md, "Launchers"):
 #   * ASCII only, LF endings, no BOM: xonsh and Unix kernels read the shebang.
 #   * No param() block: it would turn -v, -h, -q into PowerShell parameters.
 #   * Never touch $env:PATH and restore every variable set here: a .ps1 runs
@@ -103,6 +106,25 @@ function Find-Uv {
     return Find-UvIn $dirs
 }
 
+# The runner a folder holds: .pytemplate/pyt.py, else .pytemplate/deploy.py (a project made
+# before the launchers were renamed); $null when it holds neither.
+function Get-Entry([string] $Dir) {
+    if (-not $Dir) { return $null }
+    foreach ($name in 'pyt.py', 'deploy.py') {
+        $p = [IO.Path]::Combine($Dir, '.pytemplate', $name)
+        if ([IO.File]::Exists($p)) { return $p }
+    }
+    return $null
+}
+
+# Whether another user owns this runner (POSIX: anyone may create /tmp/.pytemplate/pyt.py; on
+# Windows, whose owners are not read here, a drive root, where any user may create folders).
+function Test-Foreign([string] $Entry, [bool] $Top) {
+    if ($onWindows) { return $Top }
+    & /bin/sh -c 'set -f; IFS=; [ -O $1 ]' sh $Entry
+    return $LASTEXITCODE -ne 0
+}
+
 # --- project root: this file's folder, else walk up from the current location. A symlink to
 # this file (~/bin/mypyt.ps1 -> proj/pyt.ps1) is followed to the launcher it names.
 $root = $PSScriptRoot
@@ -123,7 +145,9 @@ for ($hops = 0; $self -and $hops -lt 40; $hops++) {
     $self = [IO.Path]::Combine([string]$dir, $link)
     $root = [IO.Path]::GetDirectoryName($self)
 }
-if (-not ($root -and [IO.File]::Exists([IO.Path]::Combine($root, '.pytemplate', 'pyt.py')))) {
+$entry = Get-Entry $root
+$globalMode = $false
+if (-not $entry) {
     $root = $null
     $loc = Get-Location
     $dir = if ($loc.Provider.Name -eq 'FileSystem') { $loc.ProviderPath } else { [Environment]::CurrentDirectory }
@@ -131,24 +155,41 @@ if (-not ($root -and [IO.File]::Exists([IO.Path]::Combine($root, '.pytemplate', 
     while ($dir) {
         $parent = [IO.Path]::GetDirectoryName($dir)
         $top = -not $parent -or $parent -eq $dir
-        $candidate = [IO.Path]::Combine($dir, '.pytemplate', 'pyt.py')
-        if ([IO.File]::Exists($candidate)) {
-            # Its code is not run when another user owns it: anyone may create
-            # /tmp/.pytemplate/pyt.py (on Windows, whose owners are not read here: a drive
-            # root, where any user may create folders).
-            $foreign = if ($onWindows) { $top } else { & /bin/sh -c 'set -f; IFS=; [ -O $1 ]' sh $candidate; $LASTEXITCODE -ne 0 }
-            if ($foreign) { $other = $dir } else { $root = $dir }
+        $candidate = Get-Entry $dir
+        if ($candidate) {
+            # Its code is not run when another user owns it (Test-Foreign)
+            if (Test-Foreign $candidate $top) { $other = $candidate } else { $root = $dir; $entry = $candidate }
             break
         }
         if ($top) { break }
         $dir = $parent
     }
+    if (-not $root -and -not $other) {
+        # No project: the copy of the template that `pyt install` made (the runner's
+        # cmd_install.snapshot_dir), in its global mode, under the same ownership rule.
+        $data = if ($onWindows) {
+            if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } elseif ($env:USERPROFILE) { [IO.Path]::Combine($env:USERPROFILE, 'AppData', 'Local') }
+        } elseif ($env:XDG_DATA_HOME -and $env:XDG_DATA_HOME.StartsWith('/')) {
+            $env:XDG_DATA_HOME
+        } elseif ($env:HOME -and $env:HOME.StartsWith('/')) {
+            [IO.Path]::Combine($env:HOME, '.local', 'share')
+        }
+        if ($data) {
+            $snapshot = [IO.Path]::Combine($data, 'pytemplate', 'template')
+            $candidate = [IO.Path]::Combine($snapshot, '.pytemplate', 'pyt.py')
+            if ([IO.File]::Exists($candidate)) {
+                if (Test-Foreign $candidate $false) { $other = $candidate } else { $root = $snapshot; $entry = $candidate; $globalMode = $true }
+            }
+        }
+    }
     if ($other) {
-        [Console]::Error.WriteLine("pyt: $([IO.Path]::Combine($other, '.pytemplate', 'pyt.py')) is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run $([IO.Path]::Combine($other, 'pyt.ps1')) yourself.")
+        $own = [IO.Path]::GetFileNameWithoutExtension($other) + '.ps1'
+        [Console]::Error.WriteLine("pyt: $other is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run $([IO.Path]::Combine([IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($other)), $own)) yourself.")
         exit 2
     }
     if (-not $root) {
         [Console]::Error.WriteLine('pyt: no .pytemplate/pyt.py next to this launcher, in the current folder or in any parent folder.')
+        [Console]::Error.WriteLine('To run pyt outside a project, install it: ./pyt install in a clone of the template (https://github.com/omardev29/py_template).')
         exit 2
     }
 }
@@ -267,18 +308,19 @@ if ($fromPipe) { $pipeIn = $ExecutionContext.SessionState.PSVariable.GetValue('i
 
 # --- hand over, restoring the caller's environment afterwards
 $loc = Get-Location
-$names = 'PYTEMPLATE_CALLER_CWD', 'PYTEMPLATE_LAUNCHER', 'UV_PYTHON', 'PYTHONHOME', 'PYTHONPATH', 'UV_WORKING_DIR'
+$names = 'PYTEMPLATE_CALLER_CWD', 'PYTEMPLATE_LAUNCHER', 'PYTEMPLATE_GLOBAL', 'UV_PYTHON', 'PYTHONHOME', 'PYTHONPATH', 'UV_WORKING_DIR'
 $saved = @{}
 foreach ($n in $names) { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
 $code = 1
 try {
     $env:PYTEMPLATE_CALLER_CWD = if ($loc.Provider.Name -eq 'FileSystem') { $loc.ProviderPath } else { [Environment]::CurrentDirectory }
     $env:PYTEMPLATE_LAUNCHER = "ps1:$($PSVersionTable.PSEdition):$($v.Major).$($v.Minor)"
+    # The installed template runs in its global mode; a project's runner never does.
+    if ($globalMode) { $env:PYTEMPLATE_GLOBAL = '1' } else { Remove-Item -LiteralPath Env:PYTEMPLATE_GLOBAL -ErrorAction Ignore }
     # The runner runs on the project's Python (.python-version next to it), in the caller's
     # folder: a UV_PYTHON of the caller must not choose that Python, a PYTHONHOME or PYTHONPATH
     # must not break it, a UV_WORKING_DIR must not move it (its own tools never get them either).
     Remove-Item -LiteralPath Env:UV_PYTHON, Env:PYTHONHOME, Env:PYTHONPATH, Env:UV_WORKING_DIR -ErrorAction Ignore
-    $entry = [IO.Path]::Combine($root, '.pytemplate', 'pyt.py')
     if ($PSVersionTable.PSEdition -eq 'Core') {
         # PowerShell 7 rewrites native arguments that are not quoted literals, splatted ones
         # included: it globs '*' (Linux/macOS) and expands '~', '~/x' ('~\x' on Windows). Run

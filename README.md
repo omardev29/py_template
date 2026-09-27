@@ -87,12 +87,6 @@ shows one. On a Mac with Apple Silicon or on Linux ARM64, a raylib project first
 The template repository is itself a project of the script preset: `./pyt setup` also works
 in a plain clone.
 
-### Install `pyt`
-
-`pyt install` puts the launchers on PATH: `pyt` then works in any folder, in a project (any
-subfolder) as its `./pyt`, and outside one on the installed copy of the template
-([Outside a project](#outside-a-project)). `pyt uninstall` takes them off again.
-
 ### New projects
 
 `./pyt new DIR [--preset P] [--name NAME]` creates a project in `DIR`, a new or empty folder
@@ -142,6 +136,50 @@ it is installed in `.venv`), one of the project's own names (`src`, `tests`, `ty
 The preset is fixed when the project is created: to use another one, create a new project with
 it and move the code over.
 
+### Install `pyt`
+
+`./pyt install`, typed in a clone of the template, installs a `pyt` command for every folder:
+
+- Inside a project, `pyt` runs that project's own runner, from any subfolder: `pyt test`,
+  `pyt build`... do what `./pyt test` and `./pyt build` do there. A project made before the
+  launchers were renamed (its runner is `.pytemplate/deploy.py`) works too.
+- Outside any project, `pyt` runs the installed copy of the template in its global mode, where
+  `help`, `new`, `doctor`, `install` and `uninstall` work: `pyt new ~/code/game --preset raylib`
+  makes a project without a clone at hand.
+
+It writes two things, and never edits PATH, a shell's startup file or the registry:
+
+- The installed template: the files git tracks in the clone, with their working-tree content
+  (uncommitted changes are copied, and noted), without the template's own CI. It goes into the
+  user data folder: `$XDG_DATA_HOME/pytemplate/template` (an absolute `XDG_DATA_HOME`), else
+  `~/.local/share/pytemplate/template`; on Windows `%LOCALAPPDATA%\pytemplate\template`. Its
+  `.pytemplate/installed.json` records the commit, the clone it came from and the bin folder.
+- The launchers, into uv's tool bin folder (`uv tool dir --bin`: `UV_TOOL_BIN_DIR`,
+  `XDG_BIN_HOME`, `XDG_DATA_HOME/../bin` or `~/.local/bin`), where `uv tool install` puts its
+  commands: `pyt`, and on Windows also `pyt.cmd` and `pyt.ps1`. cmd runs `pyt.cmd`, PowerShell
+  5.1 and 7 run `pyt.ps1` (they take a `.ps1` before any other file of that name), Git Bash and
+  MSYS2 run `pyt`.
+
+When the bin folder is not on PATH, `install` says so: run `uv tool update-shell` once (uv adds
+the folder to PATH), then open a new terminal; on Windows a console opened before the change
+keeps its old PATH. A file of the bin folder that `install` did not write (without the
+`pytemplate-launcher` line, or a symbolic link) is never overwritten: `install` names it and
+stops before writing anything, as it does for a data folder it did not make.
+
+To update the installed template, run `./pyt install` again in the clone (after a `git pull`,
+say): the new copy is written next to the old one and swapped in whole, and a failure or Ctrl+C
+at any step puts the old copy and the old launchers back. `./pyt doctor` says whether pyt is
+installed, whether the installed template is older than the clone it runs in, and whether the
+bin folder is on PATH; `./pyt --dry-run install` shows what `install` would write. `install`
+runs only in a clone of the template: a project made with `new` holds no template to install.
+
+`pyt uninstall` (in the clone, in any project, or outside any project) removes the launchers and
+the installed template that `install` wrote, and names what it leaves and why: a file of the bin
+folder it did not write, a data folder without `installed.json`.
+
+Without `pyt install` nothing changes: `./pyt` works in every project, and a launcher run
+outside any project exits 2 with how to install pyt.
+
 ## Commands
 
 `./pyt [-v|-q] [--dry-run] [--no-render] COMMAND [args...]`
@@ -150,7 +188,7 @@ it and move the code over.
 |---|---|
 | `setup [--force]` | The first run on a fresh clone: the same operation as `apply` |
 | `apply [--force]` | Applies every `pytemplate.toml` change: rename, dependencies, `uv.lock`, environments, git hook, generated files ([details](#after-editing-pytemplatetoml)) |
-| `doctor` | Checks uv, the environments, the C compiler, the generated files, `pyproject.toml`, `uv.lock`, the changes `apply` has not applied yet, the launchers, the shell, the git hook and Neovim; exit 1 when a line is `[XX]`. Outside a project: uv, the runner's Python, git, the C compiler and Neovim only |
+| `doctor` | Checks uv, the environments, the C compiler, the generated files, `pyproject.toml`, `uv.lock`, the changes `apply` has not applied yet, the launchers, the shell, the git hook, Neovim and the installed `pyt` (notes only); exit 1 when a line is `[XX]`. Outside a project: uv, the runner's Python, git, the C compiler, Neovim and the installed `pyt` only |
 | `sync [cpython\|pypy\|mypyc\|all]` | `uv sync --locked --all-groups` of one environment or of all (default); it never re-locks. A group uv cannot install there is left out with a note (`--no-group`): one that `[tool.uv] conflicts` pairs with another group, or whose own `requires-python` (`[tool.uv.dependency-groups]`) excludes that environment's Python; the default groups always stay |
 | `lock [--upgrade] [--upgrade-package PKG]` | Rewrites the managed parts of `pyproject.toml` and re-locks `uv.lock`; its other arguments go to `uv lock`. When `uv lock` fails or writes nothing (`--check`, `--dry-run`), `pyproject.toml` is put back as it was; `--help` changes nothing. It does not apply `[preset.*]`: `apply` does |
 | `add PKG... [--dev\|--group G] [--cpython-only]` | `uv add`, then `uv sync --locked --all-groups` of `.venv`; `--cpython-only` adds the marker `implementation_name == 'cpython'` (C-API libraries that are slow or missing on PyPy). When the sync fails (a package that locks but cannot be built) or is interrupted, `pyproject.toml` and `uv.lock` are put back as they were |
@@ -161,6 +199,8 @@ it and move the code over.
 | `render [--check] [--diff] [--force]` | Regenerates the generated files; `--check` exits 1 when one is outdated or hand-edited (or `pyproject.toml` does not match), `--diff` shows hand edits, `--force` overwrites them |
 | `rename NEW_NAME [--force]` | Renames the app ([details](#renaming-the-app)) |
 | `new DIR [--preset P] [--name NAME]` | Creates a project from this template ([details](#new-projects)) |
+| `install` | Installs the `pyt` command for every folder: the template into the user data folder, the launchers into uv's tool bin folder; only in a clone of the template ([details](#install-pyt)) |
+| `uninstall` | Removes the launchers and the installed template that `install` wrote, and names what it leaves ([details](#install-pyt)) |
 | `run [BACKEND] [app args...]` | Runs `src/main.py` (mypyc: compiles first); the arguments go to the app |
 | `check [BACKEND\|all]` | ruff and mypy with the backend's typing profile, the mypyc rules, and basedpyright with `typing.editor = "basedpyright"` |
 | `lint [--fix]` | `ruff check` of `src/` and `tests/` with the active typing profile |
@@ -209,8 +249,9 @@ runs the installed copy of the template. There only `new`, `doctor`, `help`, `in
 - `pyt new DIR [--preset P] [--name NAME]` creates a project in `DIR`, relative to the folder it
   was typed in ([New projects](#new-projects)).
 - `pyt doctor` checks what every project needs of the computer: uv, the Python the runner runs
-  on, git, the C compiler mypyc would use and Neovim. Only an old uv fails it (exit 1): uv is
-  the one requirement, and a project's own `doctor` says what else it needs.
+  on, git, the C compiler mypyc would use and Neovim, and how pyt is installed. Only an old uv
+  fails it (exit 1): uv is the one requirement, and a project's own `doctor` says what else it
+  needs.
 - `pyt help` lists what runs there; `pyt help COMMAND` shows any command's help, and whether it
   needs a project.
 
@@ -252,8 +293,9 @@ Exit codes:
   collected, 4 for a usage error). `test all` tests every backend, even after a failure, and
   returns 0 or 1.
 
-The launchers have their own codes: 2 (no project found), 127 (uv not found), 126 (`pyt.ps1`
-could not start uv, or PowerShell runs it in ConstrainedLanguage mode).
+The launchers have their own codes: 2 (no project found, and no installed template of
+[`pyt install`](#install-pyt)), 127 (uv not found), 126 (`pyt.ps1` could not start uv, or
+PowerShell runs it in ConstrainedLanguage mode).
 
 `run`, `test` and tasks start in the project root, whatever folder the command was typed in, and
 the arguments they pass on are not rewritten: a relative path given to the app or to pytest is
@@ -267,7 +309,9 @@ skips GUI runs on Windows and macOS CI), `NO_COLOR` and `TERM`, the compiler var
 (`CC`, `CFLAGS`, `CPPFLAGS`, `LDSHARED`, `LDFLAGS`, `ARCHFLAGS`, `CL`, `_CL_`),
 `MACOSX_DEPLOYMENT_TARGET` (the oldest macOS the pyz and portable wheels support, 13.0 by default),
 `LOCALAPPDATA` and `XDG_CACHE_HOME` (the pyz and UPX caches, and outside a project the runner's
-bytecode cache). At runtime, the portable and pyz
+bytecode cache), `XDG_DATA_HOME`, `HOME`, `LOCALAPPDATA` and `USERPROFILE` (where the launchers
+look for the installed template of [`pyt install`](#install-pyt)) and `UV_TOOL_BIN_DIR` (through
+uv: where `install` puts the launchers). At runtime, the portable and pyz
 launchers set `PYTEMPLATE_ASSETS` to the app's own assets folder (whatever value the app inherited
 from the program that started it); the presets' `resources.assets_dir()` finds that folder next to
 its package.

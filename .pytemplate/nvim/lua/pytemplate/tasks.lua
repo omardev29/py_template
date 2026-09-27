@@ -33,6 +33,8 @@ M.META = {
   tasks = { show = true },
   nvim = { show = true },
   selftest = { show = true },
+  install = { show = true },
+  uninstall = { show = true },
 }
 
 -- Used when editor.json is missing or unreadable (./pyt render fixes it).

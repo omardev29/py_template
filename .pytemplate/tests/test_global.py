@@ -5,7 +5,7 @@ when they find no project they run that copy's .pytemplate/pyt.py with PYTEMPLAT
 (project.GLOBAL). Only help, new, doctor, install and uninstall run then; any other command,
 internal route and name exits 2 and says what to do; nothing is written into the installed
 template (its bytecode cache included); `new` copies it whole and the copy's `__init` runs as a
-project; doctor checks the machine only.
+project; doctor checks the machine only (and how pyt is installed).
 
 The in-process tests set project.GLOBAL; the real runs start the pyt.py of a fake installed
 template (this project's files, as the install contract says) with PYTEMPLATE_GLOBAL=1.
@@ -29,7 +29,7 @@ import pytest
 TEMPLATE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEMPLATE_DIR))
 
-from runner import cli, cmd_env, cmd_mode, cmd_nvim, config, e2e, envs, hooks, nvimtest, presets, proc, project, render, shells, ui  # noqa: E402
+from runner import cli, cmd_env, cmd_install, cmd_mode, cmd_nvim, config, e2e, envs, hooks, nvimtest, presets, proc, project, render, shells, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import ROOT  # noqa: E402
 
@@ -237,6 +237,8 @@ def test_doctor_outside_a_project_checks_this_machine_only(monkeypatch: pytest.M
     monkeypatch.setattr(cmd_env, "_c_compiler", lambda platform, cc="": (False, "cc not found (the CC of the .venv Python: 'cc')"))
     monkeypatch.setattr(shutil, "which", lambda name, *a, **kw: None)  # no git either
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh")
+    # the `pyt install` step (test_install.py): a machine step too, never the user's real one here
+    monkeypatch.setattr(cmd_install, "doctor", lambda check: check(None, "pyt install: (its own lines)", ""))
     lines = _doctor_lines(monkeypatch)
     assert cmd_env.cmd_doctor(make({}), []) == 0  # what is missing here is a note: uv is there
     labels = [label for _, label, _ in lines]
@@ -246,7 +248,8 @@ def test_doctor_outside_a_project_checks_this_machine_only(monkeypatch: pytest.M
     assert notes["git not found: `new` makes no repository, and a project gets no pre-commit hook"] is None
     assert notes["C compiler for mypyc: cc not found (the CC of the .venv Python: 'cc')"] is None
     assert "this run was started by: sh" in labels
-    machine = ("outside a project", "uv: ", "runner: ", "git", "C compiler for mypyc: ", "Windows long paths", "this run was started by: ")
+    assert "pyt install: (its own lines)" in labels
+    machine = ("outside a project", "uv: ", "runner: ", "git", "C compiler for mypyc: ", "Windows long paths", "this run was started by: ", "pyt install: ")
     assert not [label for label in labels if not label.startswith(machine)], labels  # no project step
 
 
@@ -256,6 +259,7 @@ def test_doctor_outside_a_project_fails_only_on_uv(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(proc, "find_uv", lambda: "uv")
     monkeypatch.setattr(proc, "output", lambda argv, **_kw: "uv 0.8.0")
     monkeypatch.setattr(cmd_env, "_c_compiler", lambda platform, cc="": (True, "/usr/bin/cc"))
+    monkeypatch.setattr(cmd_install, "doctor", lambda check: None)  # notes only (test_install.py)
     lines = _doctor_lines(monkeypatch)
     assert cmd_env.cmd_doctor(make({}), []) == 1
     assert [label for passed, label, _ in lines if passed is False] == ["uv: uv 0.8.0"]
@@ -270,8 +274,9 @@ def test_doctor_ends_with_the_same_steps_in_both_modes(global_mode: bool, monkey
     monkeypatch.setattr(cmd_env, "_machine", lambda check: calls.append("machine"))
     monkeypatch.setattr(cmd_env, "_project", lambda cfg, check: calls.append("project"))
     monkeypatch.setattr(cmd_nvim, "doctor", lambda check: calls.append("neovim"))
+    monkeypatch.setattr(cmd_install, "doctor", lambda check: calls.append("pyt install"))
     assert cmd_env.cmd_doctor(make({}), []) == 0
-    assert calls == ["tools", "machine" if global_mode else "project", "neovim"]
+    assert calls == ["tools", "machine" if global_mode else "project", "neovim", "pyt install"]
 
 
 @pytest.mark.parametrize("lazyvim", [True, False])
@@ -353,6 +358,8 @@ def _global_env(tmp_path: Path, **extra: str) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in drop and not k.startswith("PYTEMPLATE_")}
     cache = str(tmp_path / "cache")
     env.update(PYTEMPLATE_GLOBAL="1", NO_COLOR="1", XDG_CACHE_HOME=cache, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=str(tmp_path / "no-gitconfig"))
+    # doctor's `pyt install` step looks for the installed pyt: never the user's real one
+    env.update(XDG_DATA_HOME=str(tmp_path / "data"), UV_TOOL_BIN_DIR=str(tmp_path / "bin"))
     if IS_WINDOWS:
         env["LOCALAPPDATA"] = cache
     env.update(extra)

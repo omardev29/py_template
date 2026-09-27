@@ -130,6 +130,18 @@
       "group": "Mode"
     },
     {
+      "name": "install",
+      "usage": "",
+      "summary": "Install the `pyt` command for use in any folder (run it in a clone of the template)",
+      "group": "Mode"
+    },
+    {
+      "name": "uninstall",
+      "usage": "",
+      "summary": "Remove the `pyt` command and the copy of the template that install made",
+      "group": "Mode"
+    },
+    {
       "name": "run",
       "usage": "[BACKEND] [app args...]",
       "summary": "Run the app (mypyc: compile first)",
