@@ -214,6 +214,78 @@ def test_actions_are_pinned() -> None:
         assert all(re.fullmatch(r"astral-sh/setup-uv@v\d+\.\d+\.\d+", u) for u in uses if "setup-uv" in u), path.name
 
 
+def _step(text: str, name: str) -> str:
+    """The text of the step whose name starts with `name`, up to the next step."""
+    start = text.index(f"      - name: {name}")
+    end = text.find("\n      - ", start + 1)
+    return text[start:] if end == -1 else text[start:end]
+
+
+def test_every_downloaded_file_is_checked_against_a_pinned_sha256() -> None:
+    """A tool a template workflow downloads is one release, checked against its SHA-256 before it
+    runs (busybox-w32 was the rolling busybox64u.exe, unchecked: whatever frippery.org served that
+    day ran on every push and pull request). Not a file: uv's installer in the optional WSL job,
+    which installs the newest uv on purpose, as setup-uv does everywhere else."""
+    checked = []
+    for path in sorted(WORKFLOWS.glob("template-*.yml")):
+        steps = path.read_text(encoding="utf-8").split("\n      - ")
+        for step in steps:
+            if re.search(r"-OutFile\b|curl [^\n|]*-o ", step):
+                assert re.search(r"\b[0-9a-f]{64}\b", step) and ("sha256sum -c" in step or "Get-FileHash" in step), (path.name, step)
+                checked.append(path.name)
+    assert {"template-launchers.yml", "template-selftest.yml"} <= set(checked)
+    step = _step(_text("template-launchers.yml"), "busybox-w32")
+    assert re.search(r"(?m)^          BUSYBOX: busybox-w64-FRP-\d+-g[0-9a-f]+\.exe$", step), step
+    assert '"https://frippery.org/files/busybox/$env:BUSYBOX"' in step  # never a rolling busybox64u.exe
+
+
+def test_the_busybox_step_refuses_a_file_that_is_not_the_pinned_one(tmp_path: Path) -> None:
+    """The step's own PowerShell against a local server: the pinned hash passes and puts the
+    folder on PATH, another file fails the step and is removed."""
+    import hashlib
+    import http.server
+    import threading
+
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("pwsh is not installed")
+    step = _step(_text("template-launchers.yml"), "busybox-w32")
+    body = step.split("        run: |\n", 1)[1]
+    script = "\n".join(line[10:] for line in body.splitlines())
+    name = re.search(r"BUSYBOX: (\S+)", step)
+    assert name and "https://frippery.org/files/busybox/$env:BUSYBOX" in script
+    served = tmp_path / "served"
+    served.mkdir()
+    (served / name[1]).write_bytes(b"not really busybox\n")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), lambda *a: Quiet(*a, directory=str(served)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/"
+        ps1 = tmp_path / "step.ps1"
+        ps1.write_text("$ErrorActionPreference = 'stop'\n" + script.replace("https://frippery.org/files/busybox/", url), encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if "proxy" not in k.lower()}
+        for digest, ok in ((hashlib.sha256(b"not really busybox\n").hexdigest(), True), ("0" * 64, False)):
+            temp = tmp_path / ("ok" if ok else "bad")
+            temp.mkdir()
+            gh_path = tmp_path / f"path-{ok}"
+            run_env = {**env, "BUSYBOX": name[1], "BUSYBOX_SHA256": digest, "RUNNER_TEMP": str(temp), "GITHUB_PATH": str(gh_path)}
+            r = subprocess.run([pwsh, "-NoProfile", "-NonInteractive", "-File", str(ps1)], env=run_env, capture_output=True, text=True, timeout=120, check=False)
+            assert (r.returncode == 0) is ok, r.stdout + r.stderr
+            assert (temp / "busybox.exe").is_file() is ok
+            if ok:
+                assert gh_path.read_text(encoding="utf-8").strip() == str(temp)
+            else:
+                assert "not the pinned" in r.stdout + r.stderr and not gh_path.exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 # --- the Linux CI image (template-ci-image.yml and its folder) ---------------------------------
 
 

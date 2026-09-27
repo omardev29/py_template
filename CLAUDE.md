@@ -3065,7 +3065,11 @@ short temp tree and unset `NVIM_APPNAME`.
   stable) deletes `.pytemplate/nvim/tests/lazy-lock.json` and always uploads the logs with the
   resolved `lazy-lock.json` and `starter-commit.txt`, the next pins after a green run (13.1).
 - **[template repo]** `template-launchers.yml` (Linux/macOS shells + shellcheck, Windows with
-  MSYS2, Cygwin and busybox-w32, optional WSL job; `selftest --shells` plus user-style
+  MSYS2, Cygwin and busybox-w32 (one release, `BUSYBOX: busybox-w64-FRP-<n>-g<commit>.exe`, the
+  build scoop, Chocolatey and winget install, checked against its pinned `BUSYBOX_SHA256`
+  before it runs; a new release takes its line of frippery.org's `SHA256SUM`. The rolling
+  `busybox64u.exe` ran unchecked whatever the server held that day:
+  `test_workflows.test_every_downloaded_file_is_checked_against_a_pinned_sha256`), optional WSL job; `selftest --shells` plus user-style
   invocations; a gate job checks the marker file), `template-nvim.yml` (Ubuntu + Windows,
   Neovim pinned (above), `fd` (venv-selector from LazyVim's `lang.python` errors on the first Python
   buffer without it), `selftest --nvim --require --dir $RUNNER_TEMP/pt-nvim` (the `runner`
