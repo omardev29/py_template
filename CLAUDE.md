@@ -2827,7 +2827,13 @@ short temp tree and unset `NVIM_APPNAME`.
   `<dir>/base.json` = the base is complete, `<dir>/p/<preset>` = scratch projects,
   `<dir>/logs/` = one log per step. It stops unless Neovim reports every stdpath inside
   `<dir>/x`, refuses a `--dir` inside the template or one that is a file (exit 2), and only
-  wipes a dir carrying its marker `.pytemplate-nvim-test`. Pinned, so a red run is a regression and not upstream drift: the
+  wipes a dir carrying its marker `.pytemplate-nvim-test`. Its `./deploy` steps get
+  `e2e.isolate_git` (the ceiling at the `--dir`'s parent, no global or system git config), as
+  those of `--e2e`: with a `--dir` inside the user's work tree `new` skipped `git init` and, with
+  `core.filemode = false`, staged the scratch launchers in that repository, where they stayed
+  (`test_nvim_deploy_steps_never_touch_a_repository_around_the_dir`); a `--dir` that would hide
+  the template's own repository is refused (`e2e.hidden_template_repository`). Neovim keeps the
+  user's git config (lazy.nvim clones with it). Pinned, so a red run is a regression and not upstream drift: the
   LazyVim starter is cloned in full and checked out at `cmd_nvim.STARTER_REV`, and the plugins
   come from `nvimtest.LOCK` (`.pytemplate/nvim/tests/lazy-lock.json`, a green run's lock),
   copied into the isolated config before every Neovim run that installs (lazy.nvim rewrites the
@@ -4500,8 +4506,8 @@ Code coupling (rename together):
 - `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`;
   `cmd_mode._work_tree_top` calls the private `presets._git_env` (the same git environment as
   `presets._git_init`, whose "inside a work tree" rule it mirrors for `new`);
-  `nvimtest.selftest` imports `e2e.termination_as_interrupt` lazily (one SIGTERM/SIGHUP rule for
-  both harnesses);
+  `nvimtest.selftest` imports `e2e.termination_as_interrupt`, `isolate_git` and
+  `hidden_template_repository` lazily (one rule for both harnesses);
   `e2e.flet_build_reason` imports `methods.flet._developer_mode`, and its Flutter size and the
   flet method's docstring follow the manual (`test_docs.test_the_runner_gives_the_manuals_flutter_size`);
   `upx.uses` imports `methods.flet.MOBILE_WEB` lazily (`methods.flet` imports `upx`);

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -298,6 +299,60 @@ def test_nvim_dir_that_is_a_file_is_a_usage_error(nvim_run: dict[str, Any], tmp_
     with pytest.raises(DeployError, match="is not a folder") as e:
         nvimtest.selftest(make(), ["script", "--dir", str(afile)])
     assert e.value.code == 2 and nvim_run["ran"] == []
+
+
+def test_nvim_deploy_steps_never_touch_a_repository_around_the_dir(nvim_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A --dir inside the user's git work tree with core.filemode = false (Git for Windows; a
+    default %TEMP% under a dotfiles repository): the harness's `./deploy new` saw that repository,
+    skipped git init and staged the scratch project's launchers there (`git add --chmod=+x`); the
+    project was deleted afterwards and the user's next commit recorded two files of a folder that
+    no longer existed. The step here runs the real presets._git_init in a child with the
+    environment the harness gives its ./deploy steps."""
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("needs git")
+    genv = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "no-gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    subprocess.run([git, "init", "-q"], cwd=outer, env=genv, check=True)
+    subprocess.run([git, "config", "core.filemode", "false"], cwd=outer, env=genv, check=True)
+    seen: dict[str, dict[str, str]] = {}
+
+    def run_preset(preset: str, layout: nvimtest.Layout, nv: cmd_nvim.Nvim, *, renv: dict[str, str], venv: dict[str, str], **_: Any) -> nvimtest.Row:
+        proj = layout.projects / preset
+        proj.mkdir(parents=True)
+        for name in ("deploy", "deploy.ps1"):
+            (proj / name).write_text("#!/bin/sh\n", encoding="utf-8")
+        code = "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from runner import presets; presets._git_init(Path(sys.argv[2]))"
+        subprocess.run([sys.executable, "-c", code, str(TEMPLATE), str(proj)], env=renv, stdin=subprocess.DEVNULL, capture_output=True, check=True)
+        seen.update(renv=renv, venv=venv)
+        return _row(preset, True)
+
+    monkeypatch.setattr(nvimtest, "run_preset", run_preset)
+    assert nvimtest.selftest(make(), ["script", "--keep", "--dir", str(outer / "nvt")]) == 0
+    staged = subprocess.run([git, "diff", "--cached", "--name-only"], cwd=outer, env=genv, capture_output=True, text=True, check=True).stdout
+    assert staged == "", f"the scratch project's files were staged in the repository around --dir: {staged}"
+    assert (outer / "nvt" / "p" / "script" / ".git").is_dir()  # the project's own repository instead
+    # Neovim keeps the user's git configuration (lazy.nvim clones the plugins with it)
+    assert seen["venv"].get("GIT_CONFIG_GLOBAL") == os.environ.get("GIT_CONFIG_GLOBAL")
+    assert seen["renv"]["GIT_CONFIG_NOSYSTEM"] == "1"
+
+
+def test_nvim_dir_that_would_hide_the_templates_repository_is_refused(nvim_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A --dir next to a template that is a subfolder of a bigger repository: git there must not
+    see a repository around --dir, which hides the template's own (new would copy its untracked
+    files). Refused before anything is created, as for selftest --e2e."""
+    asked: list[str] = []
+
+    def hidden(env: dict[str, str]) -> str:
+        asked.append(env["GIT_CEILING_DIRECTORIES"])
+        return "/big"
+
+    monkeypatch.setattr(e2e, "hidden_template_repository", hidden)
+    with pytest.raises(DeployError, match="inside its git repository /big") as e:
+        nvimtest.selftest(make(), ["script", *nvim_run["args"]])
+    assert e.value.code == 2 and nvim_run["ran"] == [] and not (tmp_path / "w").exists()
+    assert asked == [str((tmp_path / "w").resolve().parent)]
 
 
 def _gone(pid: int, within: float = 10.0) -> bool:

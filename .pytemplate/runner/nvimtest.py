@@ -684,11 +684,27 @@ def selftest(cfg: Config, args: list[str]) -> int:
 
 
 def _run(ns: argparse.Namespace, names: list[str], exe: str, layout: Layout) -> int:
+    from .e2e import hidden_template_repository, isolate_git
+
+    renv = runner_env(proc.base_env())
+    # Neovim keeps the user's git configuration: lazy.nvim clones the plugins with it (a proxy,
+    # url.*.insteadOf)
+    venv = nvim_env(layout, renv, uv_dirs(renv))
+    # The ./deploy steps work in --dir only, as those of selftest --e2e: git there never sees a
+    # repository around --dir (`new` skipped git init there and, with core.filemode = false, staged
+    # its launchers in the user's repository, which kept them once the scratch project was gone),
+    # nor the user's global or system git configuration.
+    isolate_git(renv, layout.base)
+    hidden = hidden_template_repository(renv)
+    if hidden:
+        raise DeployError(
+            f"selftest --nvim: --dir {layout.base} is next to this template inside its git repository {hidden}: "
+            "git in --dir must not see a repository around it (./deploy new would skip git init), which would "
+            "hide the template's own. Pick a --dir outside that repository"
+        )
     _prepare_dir(layout)
     _remove(layout.logs)  # logs of the previous run
     layout.logs.mkdir(parents=True)
-    renv = runner_env(proc.base_env())
-    venv = nvim_env(layout, renv, uv_dirs(renv))
     version = cmd_nvim.query(exe, env=venv)
     if version is not None and version.version < cmd_nvim.MIN_LAZYVIM:
         msg = f"selftest --nvim: Neovim {version.version_text} is older than LazyVim's minimum {cmd_nvim.version_str(cmd_nvim.MIN_LAZYVIM)}"

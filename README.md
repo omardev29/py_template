@@ -1516,7 +1516,8 @@ regenerate the root (CLAUDE.md, section 11).
   distribution is tested only when it has a uv of its own (otherwise its row is skipped).
 - `--nvim [PRESET,...] [--keep] [--fresh] [--require] [--timeout S] [--dir DIR]`: creates each
   preset with `./deploy new` and runs a headless smoke test in Neovim folders of its own, never
-  yours, with LazyVim and its plugins at pinned commits (minutes the first time). `--fresh`
+  yours, with LazyVim and its plugins at pinned commits (minutes the first time). Its projects
+  get git repositories of their own, even when `--dir` is inside one of yours. `--fresh`
   reinstalls that LazyVim; `--require` fails instead of skipping when nvim or git is missing.
 - `--e2e [PRESET ...] [--backends B,..] [--methods M,..] [--quick|--full]`
   `[--gui auto|on|off] [--keep] [--reuse] [--json] [--base DIR]`: creates a project of each preset
