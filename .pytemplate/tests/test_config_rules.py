@@ -178,6 +178,10 @@ def test_schema_types_come_from_the_dataclasses() -> None:
         {"tasks": {"t": {"cmd": ["echo", "a\0b"]}}},
         {"vscode": {"settings": {"k": ["ok", "a\0"]}}},
         {"app": {"preset": "flet"}, "preset": {"flet": {"version": "1\0"}}},
+        # keys too: `"a\u0000b" = 1` under [vscode.settings] reached settings.json
+        {"vscode": {"settings": {"a\0b": 1}}},
+        {"vscode": {"settings": {"[python]": {"editor.x\0": 1}}}},
+        {"typing": {"mypy_overrides": [{"module": "a", "opt": {"k\0": 1}}]}},
     ],
 )
 def test_nul_characters_are_rejected(data: dict[str, Any]) -> None:

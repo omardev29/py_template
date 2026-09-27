@@ -1178,7 +1178,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   recursively: list items (`key[i]`), table values (`key.k`; non-bare keys are quoted in the
   path). `Any`-typed values (`[vscode] settings`, `[preset.<p>]` options, mypy override options)
   must be JSON-like: no TOML date/time, `nan`/`inf` (`_check_free`). NUL characters are rejected
-  everywhere.
+  everywhere, in the keys of the open tables too (`_check_key`: a `[vscode.settings]` key reached
+  settings.json as `"a\u0000b"`).
 - `schema` must equal `config.SCHEMA` (1; a missing line means 1). It is checked before the
   other keys, so a file from another template version fails with that reason instead of an
   unknown key. There is no migration logic: rule 1.11 allows a bump only with the owner's

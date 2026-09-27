@@ -298,6 +298,7 @@ def _check_type(value: Any, hint: Any, where: str) -> None:
                 _check_type(v, item, f"{where}[{i}]")
         else:
             for k, v in value.items():
+                _check_key(k, where)
                 _check_type(v, item, _join(where, k))
         return
     if not isinstance(value, hint) or (hint is not bool and isinstance(value, bool)):
@@ -329,7 +330,15 @@ def _check_free(value: Any, where: str) -> None:
             _check_free(v, f"{where}[{i}]")
     elif isinstance(value, dict):
         for k, v in value.items():
+            _check_key(k, where)
             _check_free(v, _join(where, k))
+
+
+def _check_key(key: str, where: str) -> None:
+    """The keys of a table the schema leaves open ([vscode.settings]) reach the generated files as
+    they are: a NUL character is refused there too (settings.json got "a\\u0000b": 1)."""
+    if "\0" in key:
+        raise DeployError(f"pytemplate.toml: '{_join(where, key)}': the key contains a NUL character (\\u0000)")
 
 
 def _check_env_names(env: dict[str, str], where: str) -> None:
@@ -370,9 +379,9 @@ def _build(cls: type[Any], data: Any, where: str) -> Any:
                 name: _build(TaskConfig, spec, _join("tasks", name)) for name, spec in _table(value, path).items()
             }
         else:
+            if key == "env" and isinstance(value, dict):  # tasks.X.env, deploy.portable.env (named
+                _check_env_names(value, path)  # before _check_type's NUL rule for the keys of a table)
             _check_type(value, hint, path)
-            if key == "env":  # tasks.X.env, deploy.portable.env
-                _check_env_names(value, path)
             kwargs[key] = value
     built = cls(**kwargs)
     if cls is Config and "modules" not in data.get("compile", {}):
