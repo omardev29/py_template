@@ -1837,7 +1837,11 @@ Formats:
     test), a base in `NON_NATIVE_BASES` (every `enum` class: its metaclass is EnumMeta;
     NamedTuple; TypedDict), and a subclass of such a class of the same module (a NamedTuple's
     subclass is a mypyc error of its own). A base imported from another module is not looked
-    into (no types here).
+    into (no types here). A base of `NON_NATIVE_BASES` (and a subclass of one) is a note
+    (`Finding.note`): a warning under every profile, never blocking in `check` nor in the hook
+    (`hooks.check_mypyc`): an Enum, a NamedTuple or a TypedDict works compiled, only slower, and
+    blocking every Enum of a mypyc project was no help; a metaclass of the user's own stays a
+    finding like a foreign decorator.
   - Nested classes and classes inside functions, each reported once (from its nearest class
     or function); t-strings; `if __name__ == "__main__"` (either order) at module level.
   - Module-level `__file__` ONLY when `compile.modules` is one top-level module file, the one

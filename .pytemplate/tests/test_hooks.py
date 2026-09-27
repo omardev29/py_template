@@ -1187,9 +1187,19 @@ class Tools:
         self.staged_calls.append((str(args[0]), path, data))
         return self.ruff_code, self.ruff_output
 
-    def _lint(self, cfg: Config, files: list[Path]) -> list[str]:
+    def _lint(self, cfg: Config, files: list[Path]) -> list[FakeFinding]:
         self.linted += files
-        return list(self.findings)
+        return [FakeFinding(text) for text in self.findings]
+
+
+class FakeFinding:
+    """A lintc.Finding the hook prints as `text`; `note` findings never block."""
+
+    def __init__(self, text: str, note: bool = False) -> None:
+        self.text, self.note = text, note
+
+    def __str__(self) -> str:
+        return self.text
 
 
 @pytest.fixture

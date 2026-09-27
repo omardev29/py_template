@@ -426,9 +426,12 @@ METACLASS_CASES = [
 def test_lintc_flags_classes_mypyc_compiles_as_python_classes_for_their_metaclass(tmp_path: Path, source: str, kind: str | None) -> None:
     """Only the decorators were checked: an Enum, a NamedTuple, a TypedDict or a class with its
     own metaclass silently became a slow Python class under mypyc, with no finding."""
-    found = [f.message for f in _lint(tmp_path, source) if "class 'P'" in f.message]
+    found = [f for f in _lint(tmp_path, source) if "class 'P'" in f.message]
     expected = [] if kind is None else [f"class 'P' {kind}: mypyc compiles it as a regular (slow) Python class"]
-    assert [m.split(". Move it")[0] for m in found] == expected
+    assert [f.message.split("Python class")[0] + "Python class" for f in found] == expected
+    # an Enum, a NamedTuple or a TypedDict works compiled, only slower: a note that never blocks;
+    # a metaclass of the user's own is the surprise the rule is for, like a foreign decorator
+    assert [f.note for f in found] == ([] if kind is None else ["has the metaclass" not in kind])
 
 
 @needs_venv
@@ -868,6 +871,32 @@ def test_hook_reports_an_unparsable_module_and_a_bad_exclude(src_tree: Path) -> 
     assert relaxed.passed is True and len(relaxed.warnings) == 1
     bad = hooks.check_mypyc(make({"compile": {"exclude": ["myapp.core.nope"]}}), src_tree.parent, staged)
     assert bad.passed is False and "matches no module" in bad.hint
+
+
+def test_a_note_of_the_mypyc_rules_never_blocks(src_tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An Enum in compiled code works (mypyc compiles it as a regular Python class): under the
+    mypyc profile it made the pre-commit hook and `./deploy check` fail, where a warning says
+    all there is to say. A metaclass of the user's own still blocks there."""
+    from runner import cmd_dev, hooks
+
+    enum = "from enum import Enum\n\n\nclass Color(Enum):\n    RED = 1\n"
+    _project(src_tree, {"myapp/__init__.py": "", "myapp/core/__init__.py": "", "myapp/core/m.py": enum})
+    staged = {"src/myapp/core/m.py"}
+    cfg = make({"backend": {"active": "mypyc"}})
+    note = hooks.check_mypyc(cfg, src_tree.parent, staged)
+    assert note.passed is True and not note.errors and len(note.warnings) == 1 and "a note" in note.warnings[0]
+    (src_tree / "myapp" / "core" / "m.py").write_text("class Color(metaclass=type(int)):\n    red = 1\n", encoding="utf-8")
+    blocked = hooks.check_mypyc(cfg, src_tree.parent, staged)
+    assert blocked.passed is False and len(blocked.errors) == 1 and "has the metaclass" in blocked.errors[0]
+    (src_tree / "myapp" / "core" / "m.py").write_text(enum, encoding="utf-8")
+    lines: list[tuple[str, str]] = []
+    monkeypatch.setattr(cmd_dev.ui, "error", lambda msg: lines.append(("error", msg)))
+    monkeypatch.setattr(cmd_dev.ui, "warn", lambda msg: lines.append(("warn", msg)))
+    monkeypatch.setattr(cmd_dev, "_profile_file", lambda cfg, profile, kind: src_tree / f"{kind}.cfg")
+    monkeypatch.setattr(cmd_dev.envs, "uv_run", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
+    monkeypatch.setattr(cmd_dev, "_run_mypy", lambda cfg, profile, blocking: True)
+    assert cmd_dev.run_checks(cfg, "mypyc") is True
+    assert [kind for kind, _ in lines] == ["warn"]
 
 
 # --- 5. sync_tree ----------------------------------------------------------------------------------

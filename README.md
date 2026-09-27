@@ -545,7 +545,8 @@ again.
   `@attr.s` (`@attr.attrs`), `@final`, `@trait` and `@mypyc_attr`. Any other one, attrs'
   `@define`, `@frozen` and `@mutable` included, turns the class into a slower regular Python
   class (mark it `@mypyc_attr(native_class=False)` when that is intended). So do a metaclass other
-  than `ABCMeta` (every `Enum` has one) and a `NamedTuple` or `TypedDict` class.
+  than `ABCMeta` (every `Enum` has one) and a `NamedTuple` or `TypedDict` class; those three work
+  compiled, only slower, so `./deploy check` notes them as warnings that never block.
 - **Concrete types**: `list[bool]` compiles to direct accesses, `bytearray` takes the generic
   path (sieve: 4.2x vs 1.9x).
 - `./deploy report --open` marks every generic operation in red ("make it Final", "Generic `*`").

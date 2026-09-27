@@ -1208,13 +1208,16 @@ def check_mypyc(cfg: Config, project: Path, staged: set[str]) -> Result:
     files = [p for p in sources if _within(p, project) in staged]
     if not files:
         return Result(None, "mypyc rules: no staged compiled module")
-    findings = [str(f) for f in lintc.lint(cfg, files)]
+    found = lintc.lint(cfg, files)
     strict = cfg.profile_for() == "mypyc"
-    if not findings:
+    if not found:
         return Result(True, f"mypyc rules: {lintc.describe(files)}")
-    if strict:
-        return Result(False, f"mypyc rules: {len(findings)} problem(s)", "fix them, or move the code to a boundary module", errors=findings)
-    return Result(True, f"mypyc rules: {len(findings)} warning(s) (non-blocking with profile '{cfg.profile_for()}')", warnings=findings)
+    errors = [str(f) for f in found if strict and not f.note]  # a note never blocks (lintc.Finding)
+    warnings = [str(f) for f in found if not strict or f.note]
+    if errors:
+        return Result(False, f"mypyc rules: {len(errors)} problem(s)", "fix them, or move the code to a boundary module", errors=errors, warnings=warnings)
+    why = "notes" if strict else f"non-blocking with profile '{cfg.profile_for()}'"
+    return Result(True, f"mypyc rules: {len(warnings)} warning(s) ({why})", warnings=warnings)
 
 
 def _index_modes(repo: Repo, names: Sequence[str]) -> dict[str, str]:

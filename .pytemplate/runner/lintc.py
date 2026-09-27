@@ -52,6 +52,7 @@ class Finding:
     path: Path
     line: int
     message: str
+    note: bool = False  # never blocking, a warning under every profile (an Enum, a NamedTuple...)
 
     def __str__(self) -> str:
         return f"{self.path.relative_to(SRC.parent).as_posix()}:{self.line}: {self.message}"
@@ -262,8 +263,8 @@ def _runtime_dependencies() -> set[str]:
 def lint_file(cfg: Config, path: Path) -> list[Finding]:
     findings: list[Finding] = []
 
-    def add(node: ast.AST, msg: str) -> None:
-        finding = Finding(path, getattr(node, "lineno", 1), msg)
+    def add(node: ast.AST, msg: str, note: bool = False) -> None:
+        finding = Finding(path, getattr(node, "lineno", 1), msg, note)
         if finding not in findings:
             findings.append(finding)
 
@@ -304,7 +305,17 @@ def lint_file(cfg: Config, path: Path) -> list[Finding]:
                 scope = aliases.get(node, {})
                 bad = [w or "<expression>" for w in written if _full_name(w, scope) not in NATIVE_CLASS_DECORATORS]
                 why = f"uses @{bad[0]}" if bad else kinds.get(node)
-                if why:
+                if why and not bad and "has the metaclass" not in why:
+                    # an Enum, a NamedTuple, a TypedDict (or a subclass of one): standard idioms that
+                    # work compiled, only slower; a note, where a decorator or a metaclass of the
+                    # user's own is the surprise the rule is for
+                    add(
+                        node,
+                        f"class '{node.name}' {why}: mypyc compiles it as a regular (slow) Python class, which "
+                        "works (a note, never blocking; @mypyc_attr(native_class=False) silences it)",
+                        note=True,
+                    )
+                elif why:
                     add(
                         node,
                         f"class '{node.name}' {why}: mypyc compiles it as a regular (slow) Python class. "

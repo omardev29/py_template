@@ -128,8 +128,8 @@ def run_checks(cfg: Config, backend: str, *, rules: bool = True) -> bool:
         findings = lintc.lint(cfg, files)
         strict = profile == "mypyc"
         for f in findings:
-            (ui.error if strict else ui.warn)(str(f))
-        if findings and strict:
+            (ui.error if strict and not f.note else ui.warn)(str(f))
+        if strict and any(not f.note for f in findings):
             ok = False
         elif not findings:
             ui.ok(f"mypyc rules: no problems in {lintc.describe(files)}")
