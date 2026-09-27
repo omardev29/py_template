@@ -1415,7 +1415,11 @@ Formats:
 - Every tool call is `uv run --locked` (syncs when needed, fails on a stale lock; the git
   hook's ruff uses `--frozen`, section 5.6). `cmd_env.ensure_lock` runs `uv lock --check` and
   then `uv lock` if needed; under `--dry-run`, when the managed pyproject parts would change, it
-  echoes `uv lock` instead (the check would read the unwritten file and pass).
+  echoes `uv lock` instead (the check would read the unwritten file and pass). A needed re-lock
+  under the user's `UV_FROZEN` or `UV_LOCKED` is refused, naming the variable
+  (`cmd_env._refuse_a_frozen_lock`): with it `uv lock` writes nothing and exits 0 (UV_FROZEN
+  only checks the lock's validity), and mode, apply and rename went on with a stale uv.lock;
+  refused, they put their files back.
 - `envs.sync` = `uv sync --locked --all-groups` (apply/setup, sync, mode, add, remove): every
   dependency group of `pyproject.toml` is installed, so `./deploy add --group G pkg` survives the
   next sync and reaches a fresh clone (an exact sync of the default groups removed it); `uv run`

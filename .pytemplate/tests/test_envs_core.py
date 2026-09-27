@@ -560,6 +560,23 @@ def test_ensure_lock_relocks_only_when_the_check_fails(
     assert (["lock"] in calls) is relocks
 
 
+@pytest.mark.parametrize("name", ["UV_FROZEN", "UV_LOCKED"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_ensure_lock_refuses_a_relock_the_environment_makes_a_no_op(monkeypatch: pytest.MonkeyPatch, name: str, dry_run: bool) -> None:
+    """Under the user's UV_FROZEN `uv lock` only checks the lock's validity and exits 0: mode,
+    apply and rename went on as if they had re-locked and left uv.lock stale (every `uv run
+    --locked` failed). The re-lock is refused, naming the variable, so they put their files back."""
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    monkeypatch.setattr(render, "write_pyproject", lambda cfg: True)
+    calls = fake_uv(monkeypatch, {("lock", "--check"): 1})
+    monkeypatch.setenv(name, "1")
+    with pytest.raises(DeployError, match=f"{name} is set") as e:
+        cmd_env.ensure_lock(make())
+    assert e.value.code == 2 and ["lock"] not in calls
+    monkeypatch.setenv(name, "0")  # a false value is no read-only lock
+    cmd_env.ensure_lock(make())
+
+
 # --- clean ---------------------------------------------------------------------------------------------
 
 

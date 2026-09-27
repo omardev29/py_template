@@ -1159,6 +1159,20 @@ def test_mode_puts_everything_back_when_the_relock_or_the_sync_fails(
     assert fake.synced == (["pypy"] if fail == "sync" else [])
 
 
+def test_mode_under_uv_frozen_refuses_the_relock_and_puts_everything_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With UV_FROZEN=1 exported, `uv lock` only checks the lock's validity and exits 0: mode
+    printed the new mode while uv.lock stayed stale, and every `uv run --locked` failed."""
+    cfg = config.load(set())
+    if cfg.pypy_enabled:
+        pytest.skip("the test adds PyPy support")
+    fake = _Relock(tmp_path, monkeypatch, "none")  # a `uv lock` that would write the new lock
+    monkeypatch.setenv("UV_FROZEN", "1")
+    with pytest.raises(DeployError) as info:
+        cmd_mode.cmd_mode(cfg, ["--supports", "+pypy"])
+    assert "UV_FROZEN is set" in str(info.value) and "the mode did not change" in str(info.value), info.value
+    assert fake.snapshot() == fake.before and fake.synced == []
+
+
 # --- mode: real runs in a throwaway copy of this project ----------------------------------------------
 
 needs_uv = pytest.mark.skipif(shutil.which("uv") is None, reason="uv not found")

@@ -36,18 +36,34 @@ def _envs_for(cfg: Config, target: str) -> list[envs.PyEnv]:
 
 
 def ensure_lock(cfg: Config) -> None:
-    """Apply the managed parts of pyproject and re-lock if needed."""
+    """Apply the managed parts of pyproject and re-lock if needed.
+
+    A UV_FROZEN or UV_LOCKED of the user's keeps `uv lock` from writing uv.lock (under UV_FROZEN
+    it only checks the lock's validity and exits 0): a needed re-lock is then refused, so the
+    caller (mode, apply, rename) puts its files back instead of leaving uv.lock stale."""
     tool = envs.tool_env(cfg)
     if render.write_pyproject(cfg):
         ui.info(render.pyproject_message())
         if proc.DRY_RUN:
             # Nothing was written, so `uv lock --check` would read the old pyproject.toml and
             # pass: show the re-lock the real run makes (echoed, skipped under --dry-run).
+            _refuse_a_frozen_lock()
             envs.uv(tool, ["lock"])
             return
     r = envs.uv(tool, ["lock", "--check"], check=False, capture=True, echo=False)
     if r.returncode != 0:
+        _refuse_a_frozen_lock()
         envs.uv(tool, ["lock"])
+
+
+def _refuse_a_frozen_lock() -> None:
+    """Refuse a re-lock that the user's UV_FROZEN or UV_LOCKED would turn into a no-op."""
+    frozen = _lock_read_only([])
+    if frozen:
+        raise DeployError(
+            f"uv.lock must follow pyproject.toml, but {frozen} is set, and with it `uv lock` writes "
+            f"nothing: unset {frozen} and run the command again"
+        )
 
 
 def cmd_setup(cfg: Config, args: list[str]) -> int:
