@@ -65,6 +65,16 @@ def test_plain_selftest_fails_when_pytest_or_mypy_fails(monkeypatch: pytest.Monk
     assert my_argv[-2:] == [str(TEMPLATE / "runner"), str(TEMPLATE / "deploy.py")]
 
 
+@pytest.mark.parametrize("flag", ["-h", "--help", "--version", "-V"])
+def test_plain_selftest_help_runs_no_mypy(monkeypatch: pytest.MonkeyPatch, flag: str) -> None:
+    """`./deploy selftest --help` printed pytest's help, then ran mypy --strict of the whole runner
+    (seconds, more on Windows) and took mypy's exit code."""
+    fake = FakeUvRun(0)
+    monkeypatch.setattr(envs, "uv_run", fake)
+    assert cli.cmd_selftest(make(), [flag]) == 0
+    assert [argv[:3] for _, argv, _ in fake.calls] == [["python", "-m", "pytest"]]
+
+
 @pytest.mark.parametrize("suite", ["--shells", "--nvim", "--e2e"])
 @pytest.mark.parametrize("code", [0, 1, 3])
 def test_a_suite_returns_its_own_exit_code(monkeypatch: pytest.MonkeyPatch, suite: str, code: int) -> None:

@@ -102,6 +102,8 @@ FORWARDS = frozenset({"run", "test", "lock", "selftest", "build"})
 # shows `./deploy help COMMAND` (also after a [tasks] entry that only has deps).
 HELP_PASSES_THROUGH = frozenset({"run", "test", "lock", "selftest"})
 HELP_FLAGS = ("-h", "--help")
+# pytest options that only print (plain `selftest` then skips its mypy step)
+SELFTEST_INFO_FLAGS = (*HELP_FLAGS, "--version", "-V")
 
 
 def _asks_help(args: list[str]) -> bool:
@@ -207,6 +209,8 @@ def cmd_selftest(cfg: object, args: list[str]) -> int:
         return suites[args[0]](cfg, args[1:])
     tool = envs.tool_env(cfg)
     code = envs.uv_run(tool, ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", TEMPLATE / "tests", *args], check=False).returncode
+    if any(a in SELFTEST_INFO_FLAGS for a in args):
+        return code  # pytest printed its help or version: no mypy of the whole runner after it
     typed = envs.uv_run(
         tool,
         ["mypy", "--strict", "--no-incremental", "--python-version", "3.11", "--config-file", TEMPLATE / "tests" / "mypy-runner.ini", TEMPLATE / "runner", TEMPLATE / "deploy.py"],

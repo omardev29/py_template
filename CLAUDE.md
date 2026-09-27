@@ -2623,7 +2623,8 @@ short temp tree and unset `NVIM_APPNAME`.
   .pytemplate/runner .pytemplate/deploy.py`. Both must pass. Needs `.venv` (`./deploy setup`).
   mypy checks the host platform only: add `--platform linux` / `--platform darwin` by hand to
   check the other branches (template-selftest runs it on all three OSes). The exit code is
-  pytest's when it failed, else mypy's (mypy runs either way); `--shells`, `--nvim` and `--e2e`
+  pytest's when it failed, else mypy's (mypy runs either way, but not after pytest's own
+  `-h`/`--help`/`--version`: `cli.SELFTEST_INFO_FLAGS`); `--shells`, `--nvim` and `--e2e`
   return their suite's own code. The arguments are ADDED after `.pytemplate/tests`: a file path
   does not narrow the run (pytest still collects the whole folder); select with `-k EXPR`.
 - It must pass in every project made with `./deploy new` too (its CLAUDE.md says so; any
