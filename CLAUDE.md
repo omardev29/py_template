@@ -1151,7 +1151,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   a state.json merge conflict whose sides disagree on it, a deleted file) pyproject.toml's
   traces stand in (`_traced`): a preset's option-driven dependencies by name (with the default
   and current options, and those the managed block was last written with: `_block_options`
-  reads raylib's `no-build-package` back through `_unformat`), its extra tables (flet's
+  reads raylib's `no-build-package` back through `_unformat`, from between the markers only,
+  `Project.block` (`render.managed_values`): a script project's own `no-build-package = ["six"]`
+  outside them read as raylib's `["{package}"]`, a hand switch apply refused), its extra tables (flet's
   `[tool.flet]`). The managed `[tool.uv]` KEYS are never a trace: `render.managed_block` writes
   them from app.preset, so `./deploy lock`, `mode` or `rename` after a hand edit wrote the new
   preset's keys and apply then accepted the switch. app.preset when it shows traces, else a

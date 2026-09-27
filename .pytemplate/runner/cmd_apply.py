@@ -88,6 +88,9 @@ class Project:
     name: str | None  # [project] name
     deps: dict[str, str]  # normalized name -> requirement ([project] dependencies)
     dev: dict[str, str]  # the same for [dependency-groups] dev
+    # [tool.uv] between the pytemplate markers (render.managed_values): the project's own keys
+    # outside them never count as what the block was written with
+    block: dict[str, Any] = field(default_factory=dict)
 
     @property
     def pypy_locked(self) -> bool:
@@ -104,7 +107,8 @@ def read_project(path: Path | None = None) -> Project:
     """Parse pyproject.toml (a BOM is tolerated); DeployError when it is missing or not TOML."""
     path = path or ROOT / PYPROJECT.name
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+        text = path.read_text(encoding="utf-8-sig")
+        data = tomllib.loads(text)
     except OSError as e:
         raise DeployError(f"pyproject.toml cannot be read: {e.strerror or e}") from None
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
@@ -117,6 +121,7 @@ def read_project(path: Path | None = None) -> Project:
         name=name if isinstance(name, str) else None,
         deps=_requirements(project.get("dependencies") if isinstance(project, dict) else None),
         dev=_requirements(groups.get("dev") if isinstance(groups, dict) else None),
+        block=render.managed_values(text),
     )
 
 
@@ -347,14 +352,15 @@ def _unformat(template: str, text: str) -> dict[str, str] | None:
 def _block_options(preset: str, project: Project) -> dict[str, str]:
     """The [preset.<name>] options the managed [tool.uv] block was last written with, read back
     from the values of the preset's own keys there (raylib's no-build-package = ["{package}"]: the
-    package of the last apply, or lock). Empty: the block holds no key of the preset (it follows
-    app.preset), or a value its template does not give (the project's own list outside the markers,
-    render._adopted)."""
-    tool = project.data.get("tool")
-    uv = tool.get("uv") if isinstance(tool, dict) else None
+    package of the last apply, or lock). Only the block counts (Project.block, between the
+    markers): the project's own list outside them (render._adopted) is no preset's, and a script
+    project's no-build-package = ["six"] once read as raylib's package, a hand switch to refuse.
+    Empty: the block holds no key of the preset (it follows app.preset), or a value its template
+    does not give."""
+    uv = project.block
     found: dict[str, str] = {}
     for key, template in presets.load(preset).get("uv", {}).items():
-        value = uv.get(key) if isinstance(uv, dict) else None
+        value = uv.get(key)
         if isinstance(template, str) and isinstance(value, str):
             pairs = [(template, value)]
         elif isinstance(template, list) and isinstance(value, list) and len(template) == len(value):

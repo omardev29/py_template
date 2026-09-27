@@ -461,36 +461,59 @@ def test_applied_preset(preset: str, options: dict[str, str], deps: list[str], d
 
 NO_BUILD_RAYLIB = {"tool": {"uv": {"no-build-package": ["raylib"]}}}  # the managed block of a raylib project
 NO_BUILD_RAYLIB_SDL = {"tool": {"uv": {"no-build-package": ["raylib_sdl"]}}}  # ...applied with package = "raylib_sdl"
+OWN_NO_BUILD_SIX = {"tool": {"uv": {"no-build-package": ["six"]}}}  # a project's own list, outside the markers
 
 
 @pytest.mark.parametrize(
-    ("preset", "options", "deps", "data", "expected"),
+    ("preset", "options", "deps", "data", "block", "expected"),
     [
         # no record (a lost state.json): the package the managed block was last written with
-        ("raylib", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, "raylib"),
-        ("raylib", {"package": "raylib_software"}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, "raylib"),
+        ("raylib", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, NO_BUILD_RAYLIB_SDL, "raylib"),
+        ("raylib", {"package": "raylib_software"}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, NO_BUILD_RAYLIB_SDL, "raylib"),
         # every flet dependency removed: [tool.flet] is still there
-        ("flet", {}, [], {"tool": {"flet": {"org": "com.example"}, "uv": {}}}, "flet"),
+        ("flet", {}, [], {"tool": {"flet": {"org": "com.example"}, "uv": {}}}, {}, "flet"),
         # hand switches without a record: another preset's traces
-        ("script", {}, ["rich>=15.0.0"], {"tool": {"flet": {"org": "com.example"}}}, "flet"),
-        ("flet", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, "raylib"),
-        ("script", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, "raylib"),
+        ("script", {}, ["rich>=15.0.0"], {"tool": {"flet": {"org": "com.example"}}}, {}, "flet"),
+        ("flet", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, NO_BUILD_RAYLIB_SDL, "raylib"),
+        ("script", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, NO_BUILD_RAYLIB_SDL, "raylib"),
         # the managed block follows app.preset (`./deploy lock` after a hand switch writes the
         # new preset's keys): never a trace of it; putting app.preset back is accepted
-        ("raylib", {}, ["rich>=15.0.0"], NO_BUILD_RAYLIB, "script"),
-        ("script", {}, ["rich>=15.0.0"], NO_BUILD_RAYLIB, "script"),
+        ("raylib", {}, ["rich>=15.0.0"], NO_BUILD_RAYLIB, NO_BUILD_RAYLIB, "script"),
+        ("script", {}, ["rich>=15.0.0"], NO_BUILD_RAYLIB, NO_BUILD_RAYLIB, "script"),
         # no trace of any preset in pyproject.toml: only a preset without traces made it (a
         # guess, which the refusal says: raylib replaced by hand, not through [preset.raylib])
-        ("raylib", {}, ["raylib-sdl==6.0.1.0"], {}, "script"),
-        ("raylib", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB, "script"),
-        ("flet", {}, [], {"tool": {"uv": {"environments": []}}}, "script"),
-        # the project's own no-build-package list outside the markers (render._adopted): no option read
-        ("raylib", {}, ["raylib-sdl==6.0.1.0"], {"tool": {"uv": {"no-build-package": ["raylib_sdl", "numpy"]}}}, "script"),
+        ("raylib", {}, ["raylib-sdl==6.0.1.0"], {}, {}, "script"),
+        ("raylib", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB, NO_BUILD_RAYLIB, "script"),
+        ("flet", {}, [], {"tool": {"uv": {"environments": []}}}, {"tool": {"uv": {"environments": []}}}, "script"),
+        # the project's own no-build-package list outside the markers (render._adopted): no
+        # option read, whatever its length (["six"] once read as raylib's {package})
+        ("raylib", {}, ["raylib-sdl==6.0.1.0"], {"tool": {"uv": {"no-build-package": ["raylib_sdl", "numpy"]}}}, {}, "script"),
+        ("script", {}, ["six==1.17.0"], OWN_NO_BUILD_SIX, {}, "script"),
+        ("raylib", {}, ["six==1.17.0"], OWN_NO_BUILD_SIX, {}, "script"),
     ],
 )
-def test_applied_preset_reads_every_trace(preset: str, options: dict[str, str], deps: list[str], data: dict[str, Any], expected: str) -> None:
-    project = cmd_apply.Project(data, "alpha", {cmd_apply.req_key(r)[0]: r for r in deps}, {})
+def test_applied_preset_reads_every_trace(
+    preset: str, options: dict[str, str], deps: list[str], data: dict[str, Any], block: dict[str, Any], expected: str
+) -> None:
+    project = cmd_apply.Project(data, "alpha", {cmd_apply.req_key(r)[0]: r for r in deps}, {}, block=block.get("tool", {}).get("uv", {}))
     assert cmd_apply._applied_preset(_cfg(preset, **options), project, None) == expected
+
+
+def test_the_projects_own_no_build_package_is_no_preset_trace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A script project that keeps its own `no-build-package = ["six"]` in [tool.uv], outside the
+    markers (render._adopted), then loses the `applied` record: the one-entry list read as raylib's
+    ["{package}"], so apply refused a hand switch from raylib, doctor and the hook reported it, and
+    putting app.preset = "raylib" back failed too."""
+    monkeypatch.setattr(cmd_apply, "load_record", lambda: None)  # the record is lost
+    cfg = _cfg("script")
+    base = '[project]\nname = "alpha"\nversion = "0.1.0"\ndependencies = ["six==1.17.0"]\n\n[tool.uv]\n# our own: never build six\nno-build-package = ["six"]\n'
+    path = tmp_path / "pyproject.toml"
+    path.write_text(render.pyproject_expected(cfg, base), encoding="utf-8")
+    project = cmd_apply.read_project(path)
+    assert project.data["tool"]["uv"]["no-build-package"] == ["six"]
+    assert cmd_apply._applied_preset(cfg, project, None) == "script"
+    assert cmd_apply.applied_state(cfg, project).preset == "script"
+    assert "no-build-package" not in project.block and project.block["python-preference"] == "only-managed"  # the block itself is read
 
 
 @pytest.mark.parametrize(

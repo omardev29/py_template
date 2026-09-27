@@ -735,6 +735,24 @@ def _outside_block(lines: list[str], bounds: tuple[int, int] | None) -> list[str
     return lines if bounds is None else [*lines[: bounds[0]], *lines[bounds[1] + 1 :]]
 
 
+def managed_values(text: str) -> dict[str, Any]:
+    """The keys and values between the pytemplate markers of [tool.uv] in a pyproject.toml text:
+    the managed block as it was last written. A key the project keeps outside the markers
+    (_adopted: its own no-build-package list) is not in it. {} without markers, with markers
+    _managed_bounds refuses, or a block that does not read as TOML on its own."""
+    lines = _split(_norm(text))
+    try:
+        bounds = _managed_bounds(lines)
+    except DeployError:
+        return {}
+    if bounds is None:
+        return {}
+    try:
+        return tomllib.loads("\n".join(lines[bounds[0] : bounds[1] + 1]))
+    except tomllib.TOMLDecodeError:
+        return {}
+
+
 def _adopted(cfg: Config, lines: list[str], bounds: tuple[int, int] | None) -> set[str]:
     """The additive keys of the block that the project's [tool.uv] defines outside the markers."""
     try:
