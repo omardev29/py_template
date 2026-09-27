@@ -932,6 +932,25 @@ def test_only_links_the_move_breaks_are_reported(tmp_path: Path) -> None:
     assert rename.plan(root, "alpha", "Alpha").linked == []  # the package does not move
 
 
+def test_quiet_still_lists_what_must_be_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """-q hides progress, never what the user must act on: `./deploy -q rename beta` printed
+    nothing and left `return alpha.core` (kept: the module rebinds alpha) next to the renamed
+    `import beta.core`, a NameError at runtime, without a word."""
+    _write_project(tmp_path, "script", "alpha")
+    (tmp_path / "src" / "alpha" / "extra.py").write_text(
+        "import alpha.core\n\n\ndef run():\n    return alpha.core\n\n\ndef other():\n    global alpha\n    alpha = None\n", encoding="utf-8"
+    )
+    (tmp_path / "notes.md").write_text("Run alpha.\n", encoding="utf-8")
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    monkeypatch.setattr(rename.ui, "QUIET", True)
+    capsys.readouterr()
+    rename.report(planned, dry=False)
+    err = capsys.readouterr().err
+    assert "left unchanged" in err and "src/beta/extra.py:5: return alpha.core" in err
+    assert "notes.md also mention 'alpha'" in err
+    assert "==> rename" not in err  # the progress stays hidden
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes: POSIX")
 def test_a_named_pipe_is_never_read(tmp_path: Path) -> None:
     """A FIFO outside src/ and tests/ (a dev script's run/app.fifo): the search for other files

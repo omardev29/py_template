@@ -1526,17 +1526,19 @@ def report(plan_: Plan, *, dry: bool) -> None:
         ui.info(f"  {edit.path:<16} {edit.detail}{refs}")
         if dry:
             _samples(edit.changes, 2 * SAMPLES)
+    # What the user must review: ui.report, which -q never hides (a kept `return p.core` next to
+    # a renamed `import beta.core` fails at runtime, and -q printed nothing at all)
     kept = [(f.target, line, text) for f in plan_.files for line, text in f.result.kept]
     kept += [(e.path, line, text) for e in (plan_.config, plan_.pyproject) if e is not None for line, text in e.kept]
     if kept:
-        ui.info(f"  left unchanged   {len(kept)} line(s) still mention '{n.old_name}' (not changed; review them):")
+        ui.report(f"  left unchanged   {len(kept)} line(s) still mention '{n.old_name}' (not changed; review them):")
         for path, line, text in kept[:10]:
-            ui.info(f"    {path}:{line}: {_clip(text, 90)}")
+            ui.report(f"    {path}:{line}: {_clip(text, 90)}")
         if len(kept) > 10:
-            ui.info(f"    ... {len(kept) - 10} more")
+            ui.report(f"    ... {len(kept) - 10} more")
     if plan_.mentions:
         shown = ", ".join(plan_.mentions[:10]) + (f" and {len(plan_.mentions) - 10} more" if len(plan_.mentions) > 10 else "")
-        ui.info(f"  not changed      {shown} also mention '{n.old_name}' (edit them by hand if needed)")
+        ui.report(f"  not changed      {shown} also mention '{n.old_name}' (edit them by hand if needed)")
     if plan_.linked:
         paths = ", ".join(_target(p, plan_.move) for p in plan_.linked)
         ui.warn(
