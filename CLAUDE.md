@@ -986,9 +986,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     `\x89`, `\a`...: skipped) and else (`r"\d"`, `r"src\alpha"`, an invalid `"\myapp"`) kept and
     reported, never changed (a new name could turn it into an escape or another regex). The
     same for TOML basic and literal strings (`_toml_strings`: pytemplate.toml, pyproject.toml
-    and the `.toml` files of src/ and tests/) and JSON strings (`_json_strings`, `.json` files:
-    `DATA_STRINGS`); comments and other text files (Markdown, YAML, INI) have no escapes: `a\n`
-    there changes like any word (a JSON fixture's `"a\n"` once became `"a\tool"`). A one-letter occurrence that ends a format directive in a string (`"%d"`,
+    and the `.toml` files of src/ and tests/) and JSON strings (`_json_strings`, `DATA_STRINGS`:
+    `.json` files, notebooks `.ipynb`, `.jsonc`, `.geojson`, `.jsonl`, `.ndjson`; and YAML's
+    double-quoted strings with `_YAML_ESCAPES`: an app named n once turned a notebook's `\n` and
+    YAML's `"hello\n"` into `\b`); comments and other text files (Markdown, INI, YAML's plain and
+    single-quoted scalars) have no escapes: `a\n` there changes like any word (a JSON fixture's
+    `"a\n"` once became `"a\tool"`). A one-letter occurrence that ends a format directive in a string (`"%d"`,
     `"%(k)-s"`, `"{:d}"`, `"{0:,d}"`, `"{!r}"`: `_directive`) is kept and reported too (whether
     the string is ever formatted is unknown). Names of one or two letters are legal, and the
     flet skeleton's PNG signature `b"\x89PNG\r\n..."` once changed silently for `r` and `n`.

@@ -144,9 +144,16 @@ _PY_ESCAPES = frozenset("abfnrtvxNuU01234567")
 _BYTES_ESCAPES = frozenset("abfnrtvx01234567")
 _TOML_ESCAPES = frozenset("btnfruUex")  # TOML 1.0, plus \e and \x of TOML 1.1
 _JSON_ESCAPES = frozenset("bfnrtu")
+_YAML_ESCAPES = frozenset("0abtnvfreNLPxuU")  # YAML 1.2, in double-quoted scalars only
 _JSON_STRING = re.compile(r'"(?:[^"\\\n]|\\.)*"?')
-# Data files of src/ and tests/ whose strings have escapes (other text files are plain text)
-DATA_STRINGS = {".toml": "toml", ".json": "json"}
+# Data files of src/ and tests/ whose strings have escapes (other text files are plain text): a
+# notebook is JSON, and YAML's double-quoted strings have escapes (an app named n turned their
+# `\n` into `\b` when renamed to b)
+DATA_STRINGS = {
+    ".toml": "toml",
+    **dict.fromkeys((".json", ".ipynb", ".jsonc", ".geojson", ".jsonl", ".ndjson"), "json"),
+    **dict.fromkeys((".yaml", ".yml"), "yaml"),
+}
 # A format directive in a string ends in one letter: printf's `%d`, `%(k)-5s`, str.format's
 # `{:d}`, `{0:>4x}`, `{!r}` (the text before the letter, and the letters it can end in)
 _PRINTF_BEFORE = re.compile(r"%(?:\([^()\n]*\))?[#0 +\-]*(?:\*|\d+)?(?:\.(?:\*|\d*))?[hlL]?\Z")
@@ -691,7 +698,8 @@ def _toml_strings(text: str) -> list[tuple[int, int, bool]]:
 
 
 def _json_strings(text: str) -> list[tuple[int, int, bool]]:
-    """(start, end, False) of every string of a JSON text: a quote starts one only there."""
+    """(start, end, False) of every string of a JSON text: a quote starts one only there. YAML's
+    double-quoted scalars read the same way (on one line: the usual form)."""
     return [(m.start(), m.end(), False) for m in _JSON_STRING.finditer(text)]
 
 
@@ -761,7 +769,7 @@ def rewrite(
     `python`: tell code from strings and comments with the tokenizer. `only_pkg`: change only
     the package references, chosen by context, and report the other occurrences as kept
     (pytemplate.toml). `toml`: TOML keys and table headers never change. `strings` ("toml",
-    "json"; `toml` implies "toml"): the string syntax of a data file, whose escapes are never the
+    "json", "yaml"; `toml` implies "toml"): the string syntax of a data file, whose escapes are never the
     name (other text is plain: `a\\n` has no escape there). `module_keys`: TOML
     keys whose quoted values are module names (a bare old package there is the package).
     `package_modules`: the modules and subpackages of src/<old pkg>/ (only_pkg: `pkg.x` is the
@@ -772,8 +780,8 @@ def rewrite(
     module_lines = module_value_lines(text, module_keys) if module_keys else set()
     line_starts = [0, *(m.end() for m in re.finditer("\n", text))]
     syntax = "toml" if toml else strings
-    found = _toml_strings(text) if syntax == "toml" else _json_strings(text) if syntax == "json" else []
-    escapes = _JSON_ESCAPES if syntax == "json" else _TOML_ESCAPES
+    found = _toml_strings(text) if syntax == "toml" else _json_strings(text) if syntax in ("json", "yaml") else []
+    escapes = {"json": _JSON_ESCAPES, "yaml": _YAML_ESCAPES}.get(syntax, _TOML_ESCAPES)
     string_starts = [s[0] for s in found]
     pieces: list[str] = []
     last = 0

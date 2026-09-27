@@ -379,6 +379,20 @@ def test_json_and_toml_files_of_src_and_tests_keep_their_escapes(tmp_path: Path)
     assert edits["tests/notes.txt"].new == b"a\\tool tool\n"
 
 
+def test_notebooks_and_yaml_keep_their_escapes(tmp_path: Path) -> None:
+    """A notebook (JSON under another suffix) and YAML's double-quoted strings were plain text:
+    renamed from n to b, every code line's "\\n" of a notebook became a backspace, and YAML's
+    "hello\\n" became "hello\\b"."""
+    _write_project(tmp_path, "script", "n")
+    cell = {"cell_type": "code", "source": ["from n.core import bench\n", "print(bench)\n"]}
+    (tmp_path / "tests" / "demo.ipynb").write_text(json.dumps({"cells": [cell]}, indent=1) + "\n", encoding="utf-8", newline="\n")
+    (tmp_path / "tests" / "messages.yaml").write_text("greeting: \"hello\\n\"\napp: n\nplain: a\\n\n", encoding="utf-8", newline="\n")
+    edits = {edit.path: edit for edit in rename.plan(tmp_path, "n", "b").files}
+    notebook = json.loads(edits["tests/demo.ipynb"].new)
+    assert notebook["cells"][0]["source"] == ["from b.core import bench\n", "print(bench)\n"]
+    assert edits["tests/messages.yaml"].new == b"greeting: \"hello\\n\"\napp: b\nplain: a\\b\n"  # a plain scalar has no escapes
+
+
 @pytest.mark.parametrize("preset", ["script", "raylib", "flet"])
 @pytest.mark.parametrize("old", ["b", "f", "r", "rb", "fr", "u"])
 def test_names_that_are_string_prefixes_or_escapes_keep_the_code_intact(tmp_path: Path, preset: str, old: str) -> None:

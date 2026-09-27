@@ -360,9 +360,9 @@ name). What changes:
   or `d` keeps `f"..."`, `"\n"`, `b"\r"`, `"%d"` and `f"{x:d}"`. A name right after a single
   backslash that makes no escape (a raw string: `r"\d"`, `r"src\alpha"`; an invalid escape:
   `"\myapp"`) and a one-letter name that ends a format directive (`"%d"`, `"{:d}"`) are
-  reported, not changed. Escapes exist only in the strings of Python, TOML and JSON files:
-  comments and other text files (Markdown, YAML, INI...) are plain text, where `a\n` changes
-  like any other word.
+  reported, not changed. Escapes exist only in the strings of Python, TOML and JSON files
+  (notebooks `.ipynb` included) and in YAML's double-quoted strings: comments and other text
+  files (Markdown, INI...) are plain text, where `a\n` changes like any other word.
 - `pytemplate.toml`: `app.name` and every package reference (`compile.modules`, `exclude`,
   `forbid_imports`, the mypy overrides, `hidden_imports`, `exclude_modules`, the wheel entry,
   `src/<pkg>/` paths and `<pkg>.<module>` names); other mentions are reported, among them file
