@@ -3058,7 +3058,9 @@ short temp tree and unset `NVIM_APPNAME`.
   invocations; a gate job checks the marker file), `template-nvim.yml` (Ubuntu + Windows,
   Neovim pinned (above), `fd` (venv-selector from LazyVim's `lang.python` errors on the first Python
   buffer without it), `selftest --nvim --require --dir $RUNNER_TEMP/pt-nvim` (the `runner`
-  context is not allowed in a job-level `env`, hence the step env), logs on failure),
+  context is not allowed in a job-level `env`, hence the step env), logs on failure or
+  cancellation, as for e2e and in the nvim job of template-ci-image.yml
+  (`test_workflows.test_logs_of_a_job_that_timed_out_are_uploaded`)),
   `template-e2e.yml` (gate job, then 3 OS x 3 presets: `--quick` on pushes and pull requests
   that touch what `new` copies (`.pytemplate/**`, the launchers, `pyproject.toml`, `uv.lock`,
   `pytemplate.toml`, `.python-version`, `src/**`, `tests/**`, `.gitignore`, `.gitattributes`,

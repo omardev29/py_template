@@ -180,6 +180,19 @@ def test_nvim_workflow_pins_neovim_and_runs_a_canary() -> None:
     assert "if: always()" in upload  # the new pins travel even when the canary is red
 
 
+def test_logs_of_a_job_that_timed_out_are_uploaded() -> None:
+    """A job over its timeout-minutes is concluded "cancelled", not "failed": a step that uploads
+    logs on `failure()` alone skipped exactly the logs of the runs that hung. template-e2e.yml
+    had it fixed; the nvim jobs of template-nvim.yml and template-ci-image.yml had not."""
+    found = []
+    for path in sorted(WORKFLOWS.glob("template-*.yml")):
+        for condition in re.findall(r"(?m)^\s+if: (.+)$", path.read_text(encoding="utf-8")):
+            if "failure()" in condition:
+                found.append(path.name)
+                assert "cancelled()" in condition, (path.name, condition)
+    assert {"template-nvim.yml", "template-ci-image.yml", "template-e2e.yml"} <= set(found)
+
+
 def test_runner_labels_are_latest() -> None:
     """GitHub retires pinned image labels (a pinned one fails for certain within a few years);
     -latest only moves. Expressions (${{ matrix.os }}) are checked through the matrix values."""
