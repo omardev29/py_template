@@ -2667,7 +2667,8 @@ LazyVim wiring:
 - `doctor` (default; exit 1 on real problems): Neovim >= 0.11.2 (`MIN_LAZYVIM`), LazyVim
   installed, no `local_spec = false`, the trust of `.lazy.lua`, missing extras in
   `lazyvim.json` (an unreadable one is a note naming the JSON error: LazyVim skips it without a
-  word), tools (`cmd_nvim.TOOLS`; required: git, curl, tar, fd or fdfind (venv-selector, from
+  word; `missing_extras` reads the module names only, a hand-written `{...}` entry made it raise
+  TypeError), tools (`cmd_nvim.TOOLS`; required: git, curl, tar, fd or fdfind (venv-selector, from
   the `lang.python` extra `.lazy.lua` imports, raises an error on the first Python buffer
   without it) and a C compiler (nvim-treesitter builds its parsers; LazyVim lists it among its
   requirements), each with the install command of this OS (`cmd_nvim._install_hint`, chosen

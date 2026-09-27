@@ -1041,6 +1041,20 @@ def test_nvim_doctor_tells_an_invalid_lazyvim_json_from_a_missing_one(tmp_path: 
         cmd_nvim.missing_extras(tmp_path / "c" / "lazyvim.json")
 
 
+def test_extras_entries_that_are_no_module_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # A hand-written {...} or [...] entry in lazyvim.json's extras made set() raise TypeError:
+    # nvim doctor ended in an internal-error traceback before its tools and project sections
+    path = tmp_path / "lazyvim.json"
+    mine = [cmd_nvim.EXTRAS[0], {"import": "x"}, ["y"]]
+    path.write_text(json.dumps({"extras": mine, "version": 8}), encoding="utf-8")
+    assert cmd_nvim.missing_extras(path) == list(cmd_nvim.EXTRAS[1:])
+    added, _ = cmd_nvim.enable_extras(path, stamp="s")
+    assert added == list(cmd_nvim.EXTRAS[1:])
+    assert json.loads(path.read_text(encoding="utf-8"))["extras"][:3] == mine  # the user's entries stay
+    code, out = _doctor(tmp_path / "doctor", monkeypatch, capsys, lazyvim_json=json.dumps({"extras": ["a", {"x": 1}]}))
+    assert code == 0 and "extras not enabled in lazyvim.json" in out and "Neovim integration ready" in out, out
+
+
 def test_c_compiler_skips_the_macos_shims_without_developer_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     from runner import cmd_env
 

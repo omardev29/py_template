@@ -346,7 +346,8 @@ def missing_extras(path: Path, wanted: Sequence[str] = EXTRAS) -> list[str] | No
         return None
     data = load_lazyvim_json(path)
     extras = data.get("extras")
-    have = set(extras) if isinstance(extras, list) else set()
+    # the module names only: a hand-written {...} entry made set() raise TypeError (a traceback)
+    have = {e for e in extras if isinstance(e, str)} if isinstance(extras, list) else set()
     return [e for e in wanted if e not in have]
 
 
