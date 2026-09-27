@@ -142,7 +142,14 @@ function M.parse_line(line, sev)
     end
     return { filename = absolute(file), lnum = tonumber(lnum), col = tonumber(col), text = msg, type = k }
   end
-  file, lnum, col, rest = line:match("^(%a?:?[^:]+%.pyi?):(%d+):(%d*):?%s*(.*)$")
+  -- pytest's `-ra` summary (`SKIPPED [1] tests/x.py:11: reason`) and its indented warnings
+  -- summary (`  /abs/tests/x.py:7: DeprecationWarning: ...`) are no problems: they became errors
+  -- on files named `SKIPPED [1] tests/x.py` and `  /abs/...` after a green run. A path starts
+  -- with a non-blank character, as in the VS Code matchers (vscode._ANY_FILE)
+  if line:match("^SKIPPED %[%d+%] ") then
+    return nil
+  end
+  file, lnum, col, rest = line:match("^(%a?:?[^:%s][^:]*%.pyi?):(%d+):(%d*):?%s*(.*)$")
   if not file or file:find("site-packages", 1, true) or rest:match("^in ") or rest == "" then
     return nil
   end

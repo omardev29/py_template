@@ -860,6 +860,40 @@ done()
 """
 
 
+PYTEST_SUMMARY_CHECK = LUA_PRELUDE + r"""
+-- `addopts = ["-ra"]` of every new project: the skip summary and pytest's warnings summary are no
+-- problems of a green run (they became errors on files named "SKIPPED [1] tests/..." and
+-- "  <root>/tests/...")
+for _, line in ipairs({
+  "SKIPPED [1] tests/test_yy.py:11: not on this machine",
+  "SKIPPED [12] tests/test_skip.py:4: not on this backend",
+  "  " .. root .. "/tests/test_yy.py:7: DeprecationWarning: old_api is deprecated",
+  "  tests/test_warn.py:5: UserWarning: careful",
+}) do
+  check("ignored: " .. line, p(line) == nil, vim.inspect(p(line)))
+end
+-- what the parser must still read
+local m = p("tests/test_yy.py:15: AssertionError")
+check("pytest crash line", m and m.type == "E" and pt.same_path(m.filename, root .. "/tests/test_yy.py") and m.lnum == 15, vim.inspect(m))
+m = p(root .. "/tests/test_yy.py:15: assert 1 == 2")
+check("absolute crash line", m and pt.same_path(m.filename, root .. "/tests/test_yy.py"), vim.inspect(m))
+m = p("/data/My Projects/p/tests/test_yy.py:15: assert 1 == 2")
+check("a folder with a blank", m and m.filename == "/data/My Projects/p/tests/test_yy.py", vim.inspect(m))
+m = p("src/demo/x.py:3: error: Incompatible return value type  [return-value]")
+check("mypy", m and m.type == "E" and m.lnum == 3, vim.inspect(m))
+m = p("  " .. root .. "/src/demo/x.py:3:5 - error: Bad (reportX)")
+check("basedpyright keeps its indented form", m and m.type == "E" and m.col == 5, vim.inspect(m))
+done()
+"""
+
+
+def test_parser_ignores_pytest_summary_lines(tmp_path: Path) -> None:
+    """`./deploy test` with a skipped test or a test warning ended SUCCESS but left ERROR
+    diagnostics and quickfix items on files named `SKIPPED [1] tests/x.py` and `  /abs/...`."""
+    r = _headless_lua(tmp_path, PYTEST_SUMMARY_CHECK, _project(tmp_path))
+    assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
 COMPLETE_CHECK = LUA_PRELUDE + r"""
 local function words(line)
   local lead = line:match("(%S*)$")

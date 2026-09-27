@@ -2629,7 +2629,10 @@ LazyVim wiring:
   `compile`/`report`, every supported one for a `[tasks]` entry, else the active one; E/W
   without editor.json data; `test_task_diagnostics_follow_the_typing_profile`), reads basedpyright
   `  path:l:c - sev: msg` and `path:l[:c]: [sev: ]msg` (mypy, ruff concise, pytest crash
-  lines); skips notes, `site-packages` and `in <func>` frames. Relative paths resolve against
+  lines); skips notes, `site-packages` and `in <func>` frames, and pytest's `-ra` skip summary
+  (`SKIPPED [1] tests/x.py:11: reason`) and indented warnings summary: a path starts with a
+  non-blank character, as in `vscode._ANY_FILE` (they became errors on files named `SKIPPED [1]
+  tests/x.py` after a green run: `test_parser_ignores_pytest_summary_lines`). Relative paths resolve against
   the root; mypyc prints them relative to its stage (a copy of `src/`: `<pkg>/core/x.py`), so
   a relative path that exists under `src/` but not under the root lands on `src/` (like the VS
   Code MYPYC matcher). A path INTO the stage (`.build[/wsl]/mypyc-{dev,release}/stage/X`,
