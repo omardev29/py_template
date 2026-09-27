@@ -3529,9 +3529,12 @@ short temp tree and unset `NVIM_APPNAME`.
     mutant's limit, `TIMEOUT_FACTOR` x baseline + `TIMEOUT_EXTRA` (2 x + 60 s). A mutant over it
     is a timeout, which counts as a kill.
   - the verdict (`classify`): a kill needs pytest's own summary line with failed or erroring
-    tests (exit 1 or 2; "subtests failed" counts, "xfailed" never), a survivor the summary with
-    none (exit 0); any other end (no summary: a crash, a Python that did not start) is an error,
-    never a kill, and keeps its log. Colour codes are read through (`pytest_counts`). A run the
+    tests (exit 1 or 2; "subtests failed" counts, "xfailed" never), or its KeyboardInterrupt
+    banner with exit 2 in a run the suite did not stop (the tests' own interrupt, which the
+    mutant caused: one that switched a signal handler off; pytest counts no failure then, and
+    its summary may be "no tests ran"); a survivor the summary with none (exit 0); any other end
+    (no summary: a crash, a Python that did not start) is an error, never a kill, and keeps its
+    log. Colour codes are read through (`pytest_counts`). A run the
     suite stopped (Ctrl+C, SIGTERM, SIGHUP: `e2e.termination_as_interrupt`) proves nothing and
     is not run, whatever it returned (`Runs.run` gives None: stop() may kill it before its own
     loop sees the stop, and on Windows the tests get the Ctrl+C too). A run over its limit or

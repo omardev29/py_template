@@ -467,6 +467,11 @@ def test_mutant_diff() -> None:
         (1, "2 passed, 1 subtests failed, 3 subtests passed in 1.00s\n", KILLED, "2 passed, 1 subtests failed, 3 subtests passed in 1.00s"),
         (0, "3 passed, 1 xfailed, 1 xpassed in 1.00s\n", SURVIVED, ""),  # an expected failure is none
         (1, "ERROR t.py::test_x - OSError\n1 passed, 2 errors in 1.00s\n", KILLED, "ERROR t.py::test_x - OSError"),
+        # a KeyboardInterrupt of the tests' own (a mutant switched a signal handler off): pytest
+        # stops with 2 and counts no failure, and the summary may be "no tests ran"
+        (2, f"{'.' * 80}\n{'!' * 30} KeyboardInterrupt {'!' * 30}\n/w0/t.py:968: KeyboardInterrupt\n(to show a full traceback on KeyboardInterrupt use --full-trace)\n80 passed in 14.39s\n", KILLED, "a KeyboardInterrupt ended the tests: /w0/t.py:968: KeyboardInterrupt"),
+        (2, f"\n{'!' * 30} KeyboardInterrupt {'!' * 30}\n/w0/t.py:4: KeyboardInterrupt\nno tests ran in 0.28s\n", KILLED, "a KeyboardInterrupt ended the tests: /w0/t.py:4: KeyboardInterrupt"),
+        (1, f"{'!' * 30} KeyboardInterrupt {'!' * 30}\n3 passed in 1.00s\n", mutation.ERROR, "exit code 1: 3 passed in 1.00s"),  # only with pytest's 2
     ],
 )
 def test_classify(code: int, output: str, status: str, detail: str) -> None:
@@ -698,6 +703,20 @@ def test_run_reports_pytests_result(tmp_path: Path) -> None:
     assert mutation.junit_seconds(tmp_path / "junit.xml", ["test_ok.py"]).keys() == {"test_ok.py"}
     code, output, _ = runs.run(worker, ["test_ok.py", "test_bad.py"], 120)
     assert mutation.classify(code, output)[0] == KILLED
+
+
+def test_a_test_run_that_a_keyboard_interrupt_ends_is_a_kill(tmp_path: Path) -> None:
+    """For real: a test that sends itself SIGINT (a mutant switched off the handler it counted
+    on), first or after others. The runs were not stopped: the tests' own interrupt."""
+    worker = _worker(tmp_path, {
+        "test_first.py": "import signal\n\ndef test_sig():\n    signal.raise_signal(signal.SIGINT)\n",
+        "test_later.py": "def test_ok():\n    pass\n\ndef test_ki():\n    raise KeyboardInterrupt\n",
+    })  # fmt: skip
+    runs = Runs()
+    for name, line in (("test_first.py", 4), ("test_later.py", 5)):
+        code, output, _ = runs.run(worker, [name], 120)
+        status, detail = mutation.classify(code, output, stopped=runs.stopped.is_set())
+        assert (code, status) == (2, KILLED) and detail.endswith(f"{name}:{line}: KeyboardInterrupt"), output
 
 
 def test_run_reads_pytest_whatever_colours_the_user_asked_for(tmp_path: Path) -> None:

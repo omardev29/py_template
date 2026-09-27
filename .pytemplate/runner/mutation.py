@@ -540,6 +540,19 @@ def _failures(counts: Mapping[str, int]) -> int:
     return sum(n for words, n in counts.items() if words.split()[-1] in ("failed", "error", "errors"))
 
 
+_KEYBOARD_INTERRUPT = re.compile(r"^!+ KeyboardInterrupt !+$")  # pytest's banner when one ended its session
+
+
+def _interrupted_at(output: str) -> str | None:
+    """Where pytest says a KeyboardInterrupt ended its session (the line after its banner:
+    "path:line: KeyboardInterrupt"), None when none did."""
+    lines = output.splitlines()
+    for i, line in enumerate(lines):
+        if _KEYBOARD_INTERRUPT.match(line.strip()):
+            return next((x.strip()[:200] for x in lines[i + 1 :] if x.strip()), "KeyboardInterrupt")
+    return None
+
+
 def _first_failure(output: str) -> str:
     for line in output.splitlines():
         if line.startswith(("FAILED ", "ERROR ")):
@@ -557,13 +570,18 @@ def classify(code: int | None, output: str, *, stopped: bool = False) -> tuple[s
     this one ran, which then proves nothing, whatever it returned (on Windows a Ctrl+C reaches
     the tests too, and pytest ends with its own code 2). `code` None: the run was ended by its
     time limit. A kill needs pytest's word for it: exit code 1 or 2 with failed or erroring tests
-    in its summary; a survivor its summary with none; any other end (no summary: a crash, a lost
-    child, a Python that did not start) proves neither and is an error."""
+    in its summary, or exit code 2 with its KeyboardInterrupt banner (not the suite's stop, which
+    is `stopped`: the tests' own, which the mutant caused, such as a signal handler it switched
+    off; pytest counts no failure then); a survivor its summary with none; any other end (no
+    summary: a crash, a lost child, a Python that did not start) proves neither and is an error."""
     if stopped:
         return NOT_RUN, "interrupted"
     if code is None:
         return TIMEOUT, ""
     output = _ANSI.sub("", output)
+    where = _interrupted_at(output) if code == 2 else None
+    if where is not None:
+        return KILLED, f"a KeyboardInterrupt ended the tests: {where}"
     counts = pytest_counts(output)
     if counts is None:
         return ERROR, f"exit code {proc.exit_code(code)} without pytest's summary line: {_last_line(output)}"
