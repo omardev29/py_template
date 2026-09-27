@@ -2457,6 +2457,59 @@ def test_raylib_stubs_regenerates_the_committed_stub(tmp_path: Path, network: No
     assert out.read_bytes() == committed.read_bytes().replace(b"\r\n", b"\n")
 
 
+def _locked_versions(root: Path) -> dict[str, str]:
+    return {presets._norm_name(e["name"]): e["version"] for e in presets._lock_entries(root / "uv.lock") if not presets._is_project(e)}
+
+
+def _uv_settings(root: Path) -> dict[str, Any]:
+    uv: dict[str, Any] = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8-sig")).get("tool", {}).get("uv", {})
+    return uv
+
+
+def _pin_problems(source: Path, dest: Path, preset: str) -> list[str]:
+    """What `new` promises about versions, from the project it ran in (`source`) to the copy
+    (`dest`): init pins, at the tested version (constraints.txt), every package the source
+    neither locks nor constrains itself, and the pins leave nothing in pyproject.toml (the
+    source's own constraint-dependencies stay). What the source locks keeps its version or
+    moves with the new preset's requirements (a [preset.flet] version applied in the source),
+    and a pin the new project does not need (a dev tool the source removed) is not locked."""
+    settings, copied = _uv_settings(source), _uv_settings(dest)
+    problems = []
+    if copied.get("constraint-dependencies") != settings.get("constraint-dependencies"):
+        problems.append(f"constraint-dependencies {copied.get('constraint-dependencies')}, the source has {settings.get('constraint-dependencies')}")
+    own = {presets._norm_name(re.split(r"[^A-Za-z0-9._-]", str(r), maxsplit=1)[0]) for key in ("constraint-dependencies", "override-dependencies") for r in settings.get(key, [])}
+    before, after = _locked_versions(source), _locked_versions(dest)
+    for name, version in sorted(presets.constraints(preset).items()):
+        if name in after and name not in before and name not in own and after[name] != version:
+            problems.append(f"{name} {after[name]}, tested {version}")
+    return problems
+
+
+def test_pin_problems_follow_what_new_promises(tmp_path: Path) -> None:
+    """The real `new` test wanted every pin locked at the source's version or the tested one,
+    and no constraint-dependencies at all: it failed in a project that had removed debugpy,
+    applied another [preset.flet] version or kept its own constraints."""
+    pins = presets.constraints("script")
+    removed, moved, constrained, pinned = "debugpy", "rich", "pygments", "iniconfig"
+    assert {removed, moved, constrained, pinned} <= set(pins)
+
+    def project(root: Path, constraints: list[str], locked: dict[str, str]) -> Path:
+        root.mkdir()
+        (root / "pyproject.toml").write_text(f'[project]\nname = "p"\n\n[tool.uv]\nconstraint-dependencies = {json.dumps(constraints)}\n', encoding="utf-8")
+        (root / "uv.lock").write_text("".join(f'[[package]]\nname = "{n}"\nversion = "{v}"\n\n' for n, v in locked.items()), encoding="utf-8")
+        return root
+
+    locked = {n: v for n, v in pins.items() if n not in (removed, constrained)}
+    source = project(tmp_path / "source", ["pygments<99"], {**locked, moved: "1.0"})
+    dest = project(tmp_path / "dest", ["pygments<99"], {**locked, moved: "2.0", constrained: "0.1"})
+    assert _pin_problems(source, dest, "script") == []
+    wrong = project(tmp_path / "wrong", [], {**locked, moved: "2.0", removed: "0.1"})
+    assert _pin_problems(source, wrong, "script") == [
+        "constraint-dependencies [], the source has ['pygments<99']",
+        f"{removed} 0.1, tested {pins[removed]}",
+    ]
+
+
 # --- real runs (uv + network) ---------------------------------------------------------------------
 
 
@@ -2476,14 +2529,10 @@ def test_new_creates_a_working_project(preset: str, tmp_path: Path, network: Non
 
     project = tomllib.loads((dest / "pyproject.toml").read_text(encoding="utf-8"))
     assert project["project"]["name"] == name
-    assert "constraint-dependencies" not in project["tool"]["uv"]  # the pins were a one-off
-    locked = {presets._norm_name(e["name"]): e["version"] for e in presets._lock_entries(dest / "uv.lock") if not presets._is_project(e)}
-    pins = presets.constraints(preset)
-    # what this project locks keeps its version (init pins only the packages it lacks)
-    source = {presets._norm_name(e["name"]): e["version"] for e in presets._lock_entries() if not presets._is_project(e)}
-    expected = {n: source.get(n, v) for n, v in pins.items()}
-    assert {n: locked.get(n) for n in pins} == expected, "the new project does not lock the tested versions"
+    assert _pin_problems(ROOT, dest, preset) == [], "the new project does not lock the tested versions"
     if TEMPLATE_REPO:
+        locked = _locked_versions(dest)
+        pins = presets.constraints(preset)
         fresh = sorted(set(locked) - presets.locked_names() - set(pins))
         assert not fresh, (
             f"{preset}: {fresh} were resolved on the day, not pinned: regenerate constraints.txt (CLAUDE.md 11):\n"
