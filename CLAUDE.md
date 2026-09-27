@@ -2191,7 +2191,9 @@ Per method:
   travel with the copied runner): `presets.TEMPLATE_DOCS`. A project running `new` passes
   those two on as tracked files, and its own root `README.md`/`LICENSE` stay behind. `new`
   then runs the copy's own runner with `__init <preset> --name <n> --force` inside the copy
-  (with this run's `-q` or `-v`; under `-q` init's uv calls get `--quiet` too),
+  (with this run's `-q` or `-v`, and `--no-render`: init renders every generated file itself,
+  and `render.auto` only warned about the source's hand-edited ones; under `-q` init's uv calls
+  get `--quiet` too),
   `git init -b
   main` (the generated CI runs on `main`; git < 2.28: plain `init` + `symbolic-ref HEAD
   refs/heads/main`; no repository inside an existing work tree, where `cmd_mode.cmd_new` then

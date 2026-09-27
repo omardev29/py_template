@@ -1082,7 +1082,40 @@ def test_new_passes_quiet_and_verbose_to_the_copys_runner(tmp_path: Path, monkey
     monkeypatch.setattr(presets.ui, "VERBOSE", verbose)
     presets.new(tmp_path / "demo", "script", "demo")
     child = next(c for c in calls if "__init" in c)
-    assert child[5 : child.index("__init")] == flags
+    assert child[5 : child.index("__init")] == [*flags, "--no-render"]
+
+
+def test_new_never_warns_about_the_sources_hand_edited_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The copy's runner rendered (render.auto) before `__init`: a `.vscode/settings.json` that
+    VS Code had changed in the source project gave 'not overwriting hand-edited generated files',
+    under -q too, for files init then rendered again with force. The global options new passes
+    skip that step (init still writes every generated file itself)."""
+    cfg = config.load(set(cli.COMMANDS))
+    calls: list[list[str]] = []
+
+    def run(argv: list[Any], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append([str(a) for a in argv])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(presets, "copy_template", _fake_copy)
+    monkeypatch.setattr(presets, "_git_init", lambda dest: None)
+    monkeypatch.setattr(proc, "run", run)
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+    presets.new(tmp_path / "demo", cfg.app.preset, cfg.app.name)
+    child = next(c for c in calls if "__init" in c)
+    options = child[5 : child.index("__init")]  # the copy's runner: uv run --quiet --script deploy.py OPTIONS __init ...
+    monkeypatch.undo()
+    copy_root = tmp_path / "copy"
+    presets.copy_template(copy_root)
+    settings = copy_root / ".vscode" / "settings.json"
+    settings.write_text(settings.read_text(encoding="utf-8").replace("{", '{\n  "editor.fontSize": 13,', 1), encoding="utf-8")
+    init = ("__init", cfg.app.preset, "--name", cfg.app.name, "--force")
+    env = _child_env(tmp_path)
+    r = _deploy(copy_root, "--dry-run", *options, *init, cwd=copy_root, env=env)
+    assert r.returncode == 0, r.stderr
+    assert "hand-edited" not in r.stderr
+    r = _deploy(copy_root, "--dry-run", *init, cwd=copy_root, env=env)
+    assert "hand-edited" in r.stderr  # what those options leave out
 
 
 def test_quiet_init_quiets_uv_too(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:

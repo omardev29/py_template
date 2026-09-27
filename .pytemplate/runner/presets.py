@@ -1226,7 +1226,10 @@ def new(dest: Path, preset: str, name: str | None) -> None:
         _make_own(dest, preset, app_name)
         deploy_py = dest / ".pytemplate" / "deploy.py"
         loud = ["-q"] if ui.QUIET else ["-v"] if ui.VERBOSE else []  # the copy's runner, as quiet as this one
-        proc.run([proc.find_uv(), "run", "--quiet", "--script", deploy_py, *loud, "__init", preset, "--name", app_name, "--force"], cwd=dest)
+        # --no-render: init renders every generated file itself (force=True); render.auto first
+        # warned about the source's hand-edited ones, which the new project never had
+        init = ["--no-render", "__init", preset, "--name", app_name, "--force"]
+        proc.run([proc.find_uv(), "run", "--quiet", "--script", deploy_py, *loud, *init], cwd=dest)
     except BaseException as e:
         if top is not None:
             left = [] if _remove(top) else [str(top)]
