@@ -3574,8 +3574,9 @@ they were written. Nor had template-ci-image.yml (stage 1): its seven jobs passe
 in a local build of the image, as `docker run --init --user 1001` with the checkout mounted
 (September 2026, behind a TLS-intercepting proxy: the image's `ca` secret path runs only in
 such a local build, CI passes no secret), with the skip list of the hosted Ubuntu selftest
-minus its PyPy test; on GitHub they then passed for weeks next to the bare jobs before stage 2
-made them the only Linux jobs. Untested anywhere so far:
+minus its PyPy test; on GitHub they then ran next to the bare jobs for about 15 hours (13 runs
+of the workflow, September 26-27) before stage 2 made them the only Linux jobs. Untested
+anywhere so far:
 PowerShell 6.x-7.2, a UNC current folder or a project on a share (its long-path names are only
 simulated: `test_long_paths_keep_a_network_share_valid`), uv found only in `ProgramFiles` or chocolatey, the
 install prompt on Windows (POSIX `pyt` and pwsh
