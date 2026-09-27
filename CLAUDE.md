@@ -1041,6 +1041,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     endings stay (a CRLF checkout used to come back LF), the BOM is not written back.
   - A file of src/ or tests/ that cannot be read (root-owned, locked by another program) stops
     the plan with a DeployError naming it: nothing changed, never an internal-error traceback.
+    So does a folder there that cannot be listed (`_code_files`: os.walk skipped it silently, and
+    its files kept the old imports inside the moved package).
   - A Python file with a PEP 263 cookie is rewritten in its own encoding; other files that are
     not UTF-8 text but mention the old name are a warning (`Plan.unreadable`); binaries show
     only with `-v`. Files outside src/ and tests/ (README.md, scripts/, docs/, your own

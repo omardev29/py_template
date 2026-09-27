@@ -1009,6 +1009,27 @@ def test_only_links_the_move_breaks_are_reported(tmp_path: Path) -> None:
     assert rename.plan(root, "alpha", "Alpha").linked == []  # the package does not move
 
 
+def test_a_folder_that_cannot_be_listed_stops_the_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """os.walk skips a folder it cannot list (another user's 0700 folder, a container run): its
+    files were neither rewritten nor reported, and after the move they still imported the old
+    package. Faked, since root reads every folder."""
+    _write_project(tmp_path, "script", "alpha")
+    secret = tmp_path / "src" / "alpha" / "secret"
+    secret.mkdir()
+    (secret / "use.py").write_text("from alpha.core import bench\n", encoding="utf-8")
+    real = os.scandir
+
+    def scandir(path: Any = ".") -> Any:
+        if Path(path) == secret:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    with pytest.raises(DeployError, match=r"cannot list src/alpha/secret/: Permission denied; nothing was changed") as e:
+        rename.plan(tmp_path, "alpha", "beta")
+    assert e.value.code == 2
+
+
 def test_quiet_still_lists_what_must_be_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """-q hides progress, never what the user must act on: `./deploy -q rename beta` printed
     nothing and left `return alpha.core` (kept: the module rebinds alpha) next to the renamed

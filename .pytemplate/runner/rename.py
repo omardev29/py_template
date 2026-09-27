@@ -923,11 +923,22 @@ def _code_files(root: Path, links: list[str] | None = None) -> Iterator[tuple[st
     """Every regular file of src/ and tests/ (no caches), sorted. Links and junctions are never
     followed (their target may be shared with other projects): they go to `links` (a folder
     with a trailing slash)."""
+    def unlistable(e: OSError) -> None:
+        """A folder that cannot be listed stops the plan, as an unreadable file does: os.walk skipped
+        it, and its files kept the old imports inside the moved package."""
+        where = str(e.filename or "a folder of src/ or tests/")
+        with contextlib.suppress(ValueError):
+            where = Path(where).relative_to(root).as_posix()
+        raise DeployError(
+            f"rename: cannot list {where}/: {e.strerror or e}; nothing was changed.\n"
+            "  Make it readable (or move it out of src/ and tests/) and try again"
+        )
+
     for top in ("src", "tests"):
         base = root / top
         if not base.is_dir():
             continue
-        for dirpath, dirnames, filenames in os.walk(base):
+        for dirpath, dirnames, filenames in os.walk(base, onerror=unlistable):
             here = Path(dirpath)
             kept: list[str] = []
             for d in sorted(dirnames):
