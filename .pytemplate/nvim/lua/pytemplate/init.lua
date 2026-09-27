@@ -442,11 +442,14 @@ end
 ---Environment additions for ./pyt (jobstart/vim.system keep the rest of Neovim's). Like the
 ---launchers, the runner runs on the project's Python in the job's folder whatever the user
 ---exported: UV_PYTHON, PYTHONHOME and PYTHONPATH are emptied (uv and Python read an empty one
----as unset) and UV_WORKING_DIR is "." (uv refuses an empty one).
+---as unset) and UV_WORKING_DIR is "." (uv refuses an empty one). PYTEMPLATE_GLOBAL is emptied
+---too (the runner reads only "1" as global mode): the project's runner never runs in the global
+---mode of the installed template (a Neovim that inherited it got "needs a project" for every task).
 function M.pyt_env(extra)
   local base = {
     PYTEMPLATE_CALLER_CWD = M.caller_cwd(),
     PYTEMPLATE_LAUNCHER = "nvim",
+    PYTEMPLATE_GLOBAL = "",
     UV_PYTHON = "",
     PYTHONHOME = "",
     PYTHONPATH = "",

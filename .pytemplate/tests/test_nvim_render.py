@@ -317,12 +317,13 @@ else
 end
 
 -- the runner never runs on the caller's UV_PYTHON, PYTHONHOME, PYTHONPATH (uv and Python read an
--- empty one as unset) nor in its UV_WORKING_DIR (uv refuses an empty one: "." is the job's folder)
+-- empty one as unset) nor in its UV_WORKING_DIR (uv refuses an empty one: "." is the job's folder),
+-- and never in global mode (a PYTEMPLATE_GLOBAL=1 Neovim inherited: "needs a project" for every task)
 local denv = pt.pyt_env({ X = "1" })
 check(
   "pyt env",
   denv.UV_PYTHON == "" and denv.PYTHONHOME == "" and denv.PYTHONPATH == "" and denv.UV_WORKING_DIR == "."
-    and denv.PYTEMPLATE_LAUNCHER == "nvim" and denv.X == "1",
+    and denv.PYTEMPLATE_GLOBAL == "" and denv.PYTEMPLATE_LAUNCHER == "nvim" and denv.X == "1",
   vim.inspect(denv)
 )
 
@@ -441,6 +442,31 @@ def test_lua_modules_in_headless_neovim(tmp_path: Path) -> None:
         cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
     )  # fmt: skip
     assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
+GLOBAL_MODE_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+local pt = require("pytemplate")
+pt.config.root = vim.env.PT_TEST_ROOT
+local r = vim.system(pt.pyt_cmd({ "help" }), { env = pt.pyt_env(), cwd = vim.env.PT_TEST_ROOT, text = true }):wait(180000)
+io.stdout:write("PTRC " .. tostring(r.code) .. "\n" .. (r.stdout or "") .. "\nPTERR\n" .. (r.stderr or "") .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def test_a_neovim_that_inherited_the_global_mode_runs_the_projects_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Neovim started with PYTEMPLATE_GLOBAL=1 in its environment (a shell a launcher left it in,
+    a user export) handed it to the project's runner, which then ran in the installed template's
+    global mode: every task exited 2 "needs a project". The launchers remove it; the plugin empties
+    it (the runner reads only "1")."""
+    if not (os.environ.get("UV") or shutil.which("uv")):
+        pytest.skip("uv not found")
+    monkeypatch.setenv("PYTEMPLATE_GLOBAL", "1")
+    for name in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON"):
+        monkeypatch.delenv(name, raising=False)
+    r = _headless_lua(tmp_path, GLOBAL_MODE_CHECK, ROOT)
+    out = r.stdout
+    assert "PTRC 0\n./pyt [-v|-q]" in out and "Outside a project" not in out, out + r.stderr
 
 
 def _headless_lua(tmp_path: Path, lua: str, test_root: Path) -> subprocess.CompletedProcess[str]:

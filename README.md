@@ -142,10 +142,12 @@ it and move the code over.
 
 - Inside a project, `pyt` runs that project's own runner, from any subfolder: `pyt test`,
   `pyt build`... do what `./pyt test` and `./pyt build` do there. A project made before the
-  launchers were renamed (its runner is `.pytemplate/deploy.py`) works too.
+  launchers were renamed (its runner is `.pytemplate/deploy.py`) works too, with the commands of
+  its own runner, which has no `install` or `uninstall`.
 - Outside any project, `pyt` runs the installed copy of the template in its global mode, where
-  `help`, `new`, `doctor`, `install` and `uninstall` work: `pyt new ~/code/game --preset raylib`
-  makes a project without a clone at hand.
+  `help`, `new`, `doctor` and `uninstall` work (and `install` says how to install or update
+  pyt: it runs in a clone): `pyt new ~/code/game --preset raylib` makes a project without a
+  clone at hand.
 
 It writes two things, and never edits PATH, a shell's startup file or the registry:
 
@@ -158,24 +160,40 @@ It writes two things, and never edits PATH, a shell's startup file or the regist
   `XDG_BIN_HOME`, `XDG_DATA_HOME/../bin` or `~/.local/bin`), where `uv tool install` puts its
   commands: `pyt`, and on Windows also `pyt.cmd` and `pyt.ps1`. cmd runs `pyt.cmd`, PowerShell
   5.1 and 7 run `pyt.ps1` (they take a `.ps1` before any other file of that name), Git Bash and
-  MSYS2 run `pyt`.
+  MSYS2 run `pyt`. Windows PowerShell 5.1 runs no script under its default execution policy on
+  client Windows (`Restricted`), and neither does an `AllSigned` one: `install` and `doctor` say
+  so for each PowerShell where it is the case; run
+  `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or type `pyt.cmd` in that
+  PowerShell.
 
 When the bin folder is not on PATH, `install` says so: run `uv tool update-shell` once (uv adds
 the folder to PATH), then open a new terminal; on Windows a console opened before the change
 keeps its old PATH. A file of the bin folder that `install` did not write (without the
 `pytemplate-launcher` line, or a symbolic link) is never overwritten: `install` names it and
-stops before writing anything, as it does for a data folder it did not make.
+stops before writing anything, as it does for a data folder it did not make (or one that is a
+symbolic link). On Windows it also stops for another tool's `pyt.exe`, `pyt.com` or `pyt.bat`
+in the bin folder: cmd, xonsh and nushell take those before `pyt.cmd` (PATHEXT order);
+`uv tool list` names the tool it belongs to. Every such problem of one run is named in one
+message.
 
 To update the installed template, run `./pyt install` again in the clone (after a `git pull`,
-say): the new copy is written next to the old one and swapped in whole, and a failure or Ctrl+C
-at any step puts the old copy and the old launchers back. `./pyt doctor` says whether pyt is
-installed, whether the installed template is older than the clone it runs in, and whether the
-bin folder is on PATH; `./pyt --dry-run install` shows what `install` would write. `install`
-runs only in a clone of the template: a project made with `new` holds no template to install.
+say): the new copy is written next to the old one and swapped in whole, and a failure, Ctrl+C,
+SIGTERM or SIGHUP at any step puts the old copy and the old launchers back. When uv's tool bin
+folder has changed since the last install (`UV_TOOL_BIN_DIR`), the launchers that install wrote
+into the old one (those with the `pytemplate-launcher` line only) are removed once the new ones
+are in place. `./pyt doctor` says whether pyt is installed, whether the installed template is
+older than the clone it runs in, whether launchers of the install are left in another folder,
+and whether the bin folder is on PATH; `./pyt --dry-run install` shows what `install` would
+write. `install` runs only in a clone of the template: a project made with `new` holds no
+template to install.
 
-`pyt uninstall` (in the clone, in any project, or outside any project) removes the launchers and
-the installed template that `install` wrote, and names what it leaves and why: a file of the bin
-folder it did not write, a data folder without `installed.json`.
+`pyt uninstall` (outside any project, in the clone, or in a project made from this version of
+the template; in an older project, whose runner has no `uninstall`, run it from another folder)
+removes the launchers and the installed template that `install` wrote, and names what it leaves
+and why: a file of the bin folder it did not write, a data folder without `installed.json` or
+one that is a symbolic link. When a file of the installed template cannot be deleted (a program
+still uses it), it says so: close that program and run `pyt uninstall` again (once the `pyt`
+command is gone, `./pyt uninstall` in a project or in the clone), which finishes the job.
 
 Without `pyt install` nothing changes: `./pyt` works in every project, and a launcher run
 outside any project exits 2 with how to install pyt.
@@ -244,7 +262,8 @@ stage). `selftest --shells`, `--nvim` and `--e2e` refuse it.
 
 `pyt` on PATH ([Install `pyt`](#install-pyt)), typed in a folder that belongs to no project,
 runs the installed copy of the template. There only `new`, `doctor`, `help`, `install` and
-`uninstall` run, with the same global options:
+`uninstall` run, with the same global options (`install` only says how to install or update
+pyt: it runs in a clone of the template):
 
 - `pyt new DIR [--preset P] [--name NAME]` creates a project in `DIR`, relative to the folder it
   was typed in ([New projects](#new-projects)).

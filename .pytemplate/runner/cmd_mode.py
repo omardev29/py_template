@@ -487,7 +487,9 @@ def _monorepo_note(dest: Path, top: Path) -> None:
 
 def cmd_new(cfg: Config, args: list[str]) -> int:
     """new DIR [--preset P] [--name NAME]: copy the template to a new project."""
-    parser = argparse.ArgumentParser(prog="./pyt new")
+    from .cli import _prog  # `pyt` outside a project (global mode), where `new` runs too
+
+    parser = argparse.ArgumentParser(prog=f"{_prog()} new")
     parser.add_argument("dest")
     parser.add_argument("--preset", default="script", choices=presets.available())
     parser.add_argument("--name")

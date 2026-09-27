@@ -38,8 +38,9 @@ LazyVim's import-order warning and keeps their plugins installed when you work e
 
 `./pyt` always runs as `uv run --quiet --script .pytemplate/pyt.py ARGS` (an argument
 list): Neovim's `'shell'` is never used, so xonsh, niubash or PowerShell as `'shell'` do not matter.
-Like the launchers, the plugin keeps your `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and
-`UV_WORKING_DIR` away from it (the runner runs on the project's Python, in Neovim's folder).
+Like the launchers, the plugin keeps your `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH`,
+`UV_WORKING_DIR` and `PYTEMPLATE_GLOBAL` away from it (the runner runs on the project's Python,
+in Neovim's folder, as the project's runner: never in the global mode of the installed `pyt`).
 Only when uv is nowhere does it run the launcher (`/bin/sh pyt`, or `pyt.cmd` on
 Windows), which prints how to install uv.
 

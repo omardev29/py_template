@@ -104,8 +104,12 @@ Examples:
 # launchers on PATH and take them off again. Every other command, internal route and name (a
 # project's [tasks] entry) exits 2: it needs a project (_outside_a_project).
 GLOBAL_COMMANDS = ("new", "doctor", "install", "uninstall", "help")
-# What a global command does outside a project, where it differs from its summary
-GLOBAL_SUMMARIES = {"doctor": "Check this machine: uv, the runner's Python, git, the C compiler of mypyc, Neovim, the installed pyt"}
+# What a global command does outside a project, where it differs from its summary (install runs
+# only in a clone of the template: outside a project it installs nothing and says so)
+GLOBAL_SUMMARIES = {
+    "doctor": "Check this machine: uv, the runner's Python, git, the C compiler of mypyc, Neovim, the installed pyt",
+    "install": "Say how to install or update pyt: install runs in a clone of the template (from here it installs nothing)",
+}
 NEEDS_A_PROJECT = "run it in a project folder (any subfolder works), or create one: pyt new DIR [--preset P]"
 
 
