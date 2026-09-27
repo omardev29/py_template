@@ -1054,6 +1054,11 @@ def test_mentions_outside_src_and_tests_are_reported(tmp_path: Path) -> None:
         ".pytemplate/editor.json": '{"name": "alpha"}\n',
         ".claude/worktrees/x/src/alpha/app.py": "import alpha\n",
         "big.txt": "alpha\n" + "x" * (rename.MENTION_MAX_BYTES + 1),
+        # the template's own files: their words are no app name (they were listed to edit by hand)
+        "CLAUDE.md": "# the alpha of the runner\n",
+        "deploy": "#!/bin/sh\n# alpha\n",
+        "deploy.cmd": "rem alpha\r\n",
+        "deploy.ps1": "# alpha\n",
     }
     for rel_path, text in files.items():
         (tmp_path / rel_path).parent.mkdir(parents=True, exist_ok=True)

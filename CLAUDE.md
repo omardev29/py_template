@@ -1042,8 +1042,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     not UTF-8 text but mention the old name are a warning (`Plan.unreadable`); binaries show
     only with `-v`. Files outside src/ and tests/ (README.md, scripts/, docs/, your own
     workflows) are only listed (`_mentions`: skips caches, environments, `.build`, `dist`,
-    `.pytemplate`, `.claude`, the generated files, files over 2 MiB and anything that is not a
-    regular file: `_mentions_name`, since opening a named pipe waited for a writer forever).
+    `.pytemplate`, `.claude`, the generated files, the template's own launchers and CLAUDE.md
+    (`ROOT_SKIP`), files over 2 MiB and anything that is not a regular file: `_mentions_name`,
+    since opening a named pipe waited for a writer forever).
   - Symbolic links and Windows junctions in src/ and tests/ are never followed nor rewritten
     (`_code_files` with `cmd_env._is_link`: their target may be shared with other projects, and
     os.walk enters a junction); those that dangle once src/<pkg>/ moves (`_dangles`: the target

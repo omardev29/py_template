@@ -83,8 +83,10 @@ Kind = Literal["pkg", "name", "keep", "skip"]
 _DRY = "(--dry-run: nothing is written)"
 SKIP_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".git", ".flet"}
 PY_SUFFIXES = {".py", ".pyi", ".pyw"}
-# Root files that never get a "this file also mentions the old name" note (rename edits them)
-ROOT_SKIP = {"pytemplate.toml", "pyproject.toml", "uv.lock", "pyrightconfig.json"}
+# Root files that never get a "this file also mentions the old name" note: rename edits them, or
+# they are the template's own (the launchers and CLAUDE.md, whose words such as `app` or `p` are
+# no app name: the note invited editing them by hand)
+ROOT_SKIP = {"pytemplate.toml", "pyproject.toml", "uv.lock", "pyrightconfig.json", "deploy", "deploy.cmd", "deploy.ps1", "CLAUDE.md"}
 # Folders never searched for other mentions of the old name: caches, environments, builds, the
 # runner, Claude Code's state (it holds whole copies of the project in worktrees)
 MENTION_SKIP_DIRS = {*SKIP_DIRS, ".build", "dist", ".pytemplate", ".claude", ".tox", ".nox", ".eggs", ".idea", "node_modules"}
