@@ -181,6 +181,14 @@ def test_the_exit_codes_are_listed() -> None:
     assert {"0", "1", "2", "3", "130"} <= listed, f"exit codes listed: {sorted(listed)}"
 
 
+def test_the_manual_says_which_code_uv_s_missing_requirements_end_with() -> None:
+    """Exit 3 is what the runner checks itself: an interpreter uv can neither find nor download,
+    or a program a `uv = true` task names, ends with uv's own code (2), which the manual listed as
+    a missing requirement (3)."""
+    section = " ".join(_section(_text(), "Output, exit codes and environment").split())
+    assert "uv itself reports missing" in section and "ends with uv's own code, 2" in section, section
+
+
 # --- pytemplate.toml -----------------------------------------------------------------------------
 
 

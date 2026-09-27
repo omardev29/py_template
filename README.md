@@ -207,7 +207,9 @@ Exit codes:
   user left behind with `sudo ./deploy ...`).
 - 3: a missing requirement: uv, a uv older than 0.10.12, a program, a compiler, an interpreter,
   Neovim or git for `selftest --nvim --require`, or the runner started on a Python older than
-  3.11.
+  3.11. A requirement that uv itself reports missing (an interpreter it can neither find nor
+  download, a program `uv run` cannot start: a `[tasks]` entry with `uv = true`) ends with
+  uv's own code, 2, and uv's message.
 - 130: Ctrl+C. The runner waits for the app to finish its own cleanup, then stops without
   running the next step; it exits with the app's code, or 130 when the app exited with 0.
 - 141: the reader of stdout went away (`./deploy help | head -1`; Linux and macOS).

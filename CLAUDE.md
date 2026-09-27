@@ -697,7 +697,10 @@ header rules (with detector tests proving each rule fires).
   by another user: `cli._scratch_denied`); 3 = missing requirement (uv, a uv older than
   `envs.MIN_UV`, a program (or the interpreter a script's `#!` line names: `proc._not_found`),
   a C compiler mypyc cannot start, an interpreter, Neovim/git with `--require`, the runner
-  itself started on Python < 3.11 by `deploy.py`'s check); 130 = Ctrl+C; 143/129 = a SIGTERM/
+  itself started on Python < 3.11 by `deploy.py`'s check; what uv itself reports missing, an
+  interpreter it can neither find nor download or a program `uv run` cannot spawn (a `uv =
+  true` task), ends with uv's code, 2: the runner streams uv's output and cannot tell that
+  error from uv's others, section 15.2); 130 = Ctrl+C; 143/129 = a SIGTERM/
   SIGHUP sent to the runner (POSIX);
   141 = the reader of stdout went away (`./deploy help | head -1`: quiet, no traceback; POSIX
   only, Windows reports a closed pipe as `OSError` EINVAL, unhandled). A write that finds no
@@ -4281,6 +4284,12 @@ Behaviour:
   eaten by PowerShell.
 - Tasks: a task with `backend = "mypyc"` runs interpreted in `.venv` unless it goes through a
   `deps` entry such as `compile` and runs the stage.
+- Exit 3 is a requirement the runner checks itself. One uv reports missing (an interpreter it
+  can neither find nor download: `python.pypy` pinned to a PyPy not installed, with
+  `UV_PYTHON_DOWNLOADS=never`; a program a `uv = true` task names that `uv run` cannot spawn)
+  ends with uv's own code, 2, after uv's message: the runner streams uv's output and 2 is uv's
+  code for its other errors too (the same program with `uv = false` is the runner's exit 3).
+  README's exit codes say so (`test_docs.test_the_manual_says_which_code_uv_s_missing_requirements_end_with`).
 - Ctrl+C waits for the running child (section 5.3): a child that ignores SIGINT keeps the
   runner waiting (Ctrl+\ ends both; closing the terminal passes SIGHUP on), as with `uv run`.
   Windows: a closed stdout pipe is `OSError` EINVAL there, so `./deploy help | more` quitting
