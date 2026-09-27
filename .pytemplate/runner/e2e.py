@@ -729,7 +729,9 @@ def rmtree(path: Path) -> None:
     """Remove a tree even with read-only files (.git objects) and paths over 260 characters."""
     if not path.exists():
         return
-    target = "\\\\?\\" + str(path.resolve()) if IS_WINDOWS else str(path)
+    from .methods.portable import long_path  # \\?\C:\... or, for a share, \\?\UNC\server\...
+
+    target = long_path(path) if IS_WINDOWS else str(path)
 
     def retry(func: Callable[..., object], name: str, exc: object) -> None:
         os.chmod(name, stat.S_IWRITE)

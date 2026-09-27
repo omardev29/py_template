@@ -16,7 +16,8 @@ import shutil
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from typing import cast
 
 import pytest
 
@@ -274,6 +275,25 @@ def test_verify_checks_what_new_made(tmp_path: Path) -> None:
     assert "no git repository (new runs git init)" in e2e.do_verify(ctx, step, log)[1]
     ctx.results["new"] = SKIP
     assert e2e.do_verify(ctx, step, log)[0] == SKIP, "--reuse: nothing new to verify"
+
+
+def test_rmtree_reaches_a_base_on_a_network_share(monkeypatch: pytest.MonkeyPatch) -> None:
+    # It removed \\?\\\server\share\... (no valid name) for a --base on a share or a mapped drive
+    from runner.methods import portable
+
+    class Share:
+        def exists(self) -> bool:
+            return True
+
+        def resolve(self) -> PureWindowsPath:
+            return PureWindowsPath(r"\\server\share\pt\e2e")
+
+    removed: list[str] = []
+    monkeypatch.setattr(e2e, "IS_WINDOWS", True)
+    monkeypatch.setattr(portable, "IS_WINDOWS", True)
+    monkeypatch.setattr(e2e.shutil, "rmtree", lambda target, **kwargs: removed.append(target))
+    e2e.rmtree(cast(Path, Share()))
+    assert removed == [r"\\?\UNC\server\share\pt\e2e"]
 
 
 @needs_git

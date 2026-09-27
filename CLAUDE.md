@@ -1866,8 +1866,11 @@ Per method:
   pip-installs `flet-desktop` at runtime, bypassing `uv.lock`.
 - **portable**: `dist/<n>-<b>-portable-<key>/` (no `-<key>` with `runtime = "system"`, which
   bundles no interpreter) with `app/`, `lib/` (`uv pip install --target`), `runtime/` (pruned
-  copy of the interpreter's `base_prefix` through `\\?\` extended paths; the `ignore` callback
-  strips that prefix before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. The base's
+  copy of the interpreter's `base_prefix` through `\\?\` extended paths, `portable.long_path`:
+  a share or a mapped drive, which resolve() gives as `\\server\share\...`, takes the
+  `\\?\UNC\server\share\...` form, since `\\?\\\server` is no valid name (WinError 123), as
+  `e2e.rmtree` does; the `ignore` callback reads the folders back with `portable.short_path`
+  before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. The base's
   `__pycache__` folders are never copied. Prunes `include libs Tools share Scripts`, every `bin/` entry but the interpreter (`BIN_KEEP`:
   `python*`, `pypy*`, `libpypy*`; the base's console scripts, e.g. a 24 MB `ruff` installed into
   it, carried the build machine's paths), on Linux the shared `lib/libpython3.X.so*` when the
@@ -3045,7 +3048,8 @@ in a local build of the image, as `docker run --init --user 1001` with the check
 (September 2026, behind a TLS-intercepting proxy: the image's `ca` secret path runs only in
 such a local build, CI passes no secret), with the skip list of the hosted Ubuntu selftest
 minus its PyPy test. Untested anywhere so far:
-PowerShell 6.x-7.2, a UNC current folder, uv found only in `ProgramFiles` or chocolatey, the
+PowerShell 6.x-7.2, a UNC current folder or a project on a share (its long-path names are only
+simulated: `test_long_paths_keep_a_network_share_valid`), uv found only in `ProgramFiles` or chocolatey, the
 install prompt on Windows (POSIX `deploy` and pwsh
 `deploy.ps1` answer it on a pseudo-terminal), Neovim 0.11 on Windows, pyright via Mason, VS
 Code itself (buttons, Problems panel: only simulated), `flet build` outside Windows (verified by

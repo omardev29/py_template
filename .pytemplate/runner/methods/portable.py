@@ -45,12 +45,29 @@ LIBPYTHON_RE = re.compile(r"libpython3[.0-9]*[a-z]*\.so(\.[.0-9]+)?")
 # PyPy still ships lib2to3's deliberately broken test data: it never compiles
 COMPILE_EXCLUDE = r"[/\\]lib2to3[/\\]tests[/\\]"
 LONG_PREFIX = "\\\\?\\"
+LONG_UNC = LONG_PREFIX + "UNC\\"  # the extended-length form of \\server\share\...
 
 
 def long_path(path: Path) -> str:
-    """Return the path in extended-length form on Windows (\\\\?\\C:\\...): no 260-character limit."""
+    """Return the path in extended-length form on Windows (\\\\?\\C:\\...): no 260-character limit.
+
+    A network path (a share or a mapped drive: resolve() gives \\\\server\\share\\...) takes the UNC
+    form \\\\?\\UNC\\server\\share\\...: \\\\?\\ in front of \\\\server is no valid name (WinError 123), and
+    the bundled portable build of a project on a share failed.
+    """
     resolved = str(path.resolve())
-    return LONG_PREFIX + resolved if IS_WINDOWS and not resolved.startswith(LONG_PREFIX) else resolved
+    if not IS_WINDOWS or resolved.startswith((LONG_PREFIX, "\\\\.\\")):
+        return resolved
+    if resolved.startswith("\\\\"):
+        return LONG_UNC + resolved[2:]
+    return LONG_PREFIX + resolved
+
+
+def short_path(text: str) -> str:
+    """The usual form of a path `long_path` made long (\\\\?\\UNC\\server\\x -> \\\\server\\x)."""
+    if text.startswith(LONG_UNC):
+        return "\\\\" + text[len(LONG_UNC) :]
+    return text.removeprefix(LONG_PREFIX)
 
 
 def _elf_needed(path: Path) -> list[str] | None:
@@ -133,7 +150,7 @@ def copy_runtime(cfg: Config, backend: str, dest: Path, lib: Path | None = None)
     tk_dirs = {base / "lib", base / "DLLs"} | {s / "lib-dynload" for s in stdlib}
 
     def ignore(directory: str, names: list[str]) -> set[str]:
-        d = Path(directory.removeprefix(LONG_PREFIX)).resolve()
+        d = Path(short_path(directory)).resolve()
         # The base's bytecode caches are partial and mostly at the wrong -O level: build()
         # compiles the stdlib at the launchers' level instead
         skip = {n for n in names if n == "__pycache__"}

@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import importlib.machinery
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -14,8 +15,8 @@ import sys
 import time
 import tomllib
 from collections.abc import Iterator
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PureWindowsPath
+from typing import Any, cast
 
 import pytest
 
@@ -2815,6 +2816,66 @@ def test_portable_prune_off_copies_everything_but_the_caches(tmp_path: Path, mon
     got = _copy_runtime(tmp_path, monkeypatch, base, "3.14.7", "cpython", prune=False)
     expected = {n for n in [*CPYTHON_BASE, *CPYTHON_LINKS] if "__pycache__" not in n and not n.endswith("EXTERNALLY-MANAGED")}
     assert got == expected
+
+
+class _ResolvesTo:
+    """A path whose resolve() is a Windows path, whatever the host (long_path reads only that)."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def resolve(self) -> PureWindowsPath:
+        return PureWindowsPath(self.text)
+
+
+@pytest.mark.parametrize(
+    ("resolved", "long", "volume", "short"),
+    [
+        (r"C:\p\dist\x", r"\\?\C:\p\dist\x", r"\\?\C:", r"C:\p\dist\x"),
+        (r"\\server\share\p\dist\x", r"\\?\UNC\server\share\p\dist\x", r"\\?\UNC\server\share", r"\\server\share\p\dist\x"),
+        (r"\\?\C:\p", r"\\?\C:\p", r"\\?\C:", r"C:\p"),  # already long
+        (r"\\?\UNC\server\share\p", r"\\?\UNC\server\share\p", r"\\?\UNC\server\share", r"\\server\share\p"),
+    ],
+)
+def test_long_paths_keep_a_network_share_valid(monkeypatch: pytest.MonkeyPatch, resolved: str, long: str, volume: str, short: str) -> None:
+    # A project on a share, or on a mapped drive (resolve() turns Z:\ into \\server\share\): the
+    # bundled portable build copied the interpreter to \\?\\\server\... (WinError 123, blamed on
+    # the 260-character limit), and e2e.rmtree built the same name
+    from runner.methods import portable
+
+    monkeypatch.setattr(portable, "IS_WINDOWS", True)
+    got = portable.long_path(cast(Path, _ResolvesTo(resolved)))
+    assert got == long
+    assert ntpath.splitdrive(got)[0] == volume  # a real volume, never the bare \\?\
+    assert portable.short_path(got) == short
+    monkeypatch.setattr(portable, "IS_WINDOWS", False)
+    assert portable.long_path(tmp := Path("x")) == str(tmp.resolve())  # POSIX: unchanged
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="spells the Windows names on a POSIX file system (a share would be reached)")
+def test_the_runtime_prune_reads_the_folders_of_a_network_share(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # copytree hands the prune callback \\?\UNC\server\share\...: without its UNC prefix it read
+    # UNC\server\..., a relative name that matched no folder of the base, and a runtime on a
+    # share was copied whole (the base's console scripts, tests, Tk...)
+    from runner.methods import portable
+
+    monkeypatch.chdir(tmp_path)
+    base = r"\\server\share\py"  # a relative name here: resolve() puts it in tmp_path
+    monkeypatch.setattr(envs, "interpreter_info", lambda python: {"base_prefix": base, "version": "3.14.7", "impl": "cpython"})
+    monkeypatch.setattr(common, "ensure_env", lambda env: env)
+    monkeypatch.setattr(common, "SRC", tmp_path / "src")
+    (tmp_path / "src").mkdir()
+    monkeypatch.setattr(portable, "long_path", lambda p: portable.LONG_UNC + base[2:] if p == Path(base).resolve() else str(p))
+    seen: dict[str, Any] = {}
+
+    def copytree(src: str, dst: str, ignore: Any, symlinks: bool) -> None:
+        seen.update(src=src, ignore=ignore)
+
+    monkeypatch.setattr(portable.shutil, "copytree", copytree)
+    portable.copy_runtime(make({}), "cpython", tmp_path / "out" / "runtime", lib=tmp_path / "lib")
+    assert seen["src"] == r"\\?\UNC\server\share\py"
+    assert seen["ignore"](seen["src"] + "/bin", ["python3.14", "ruff"]) == {"ruff"}  # bin/: the interpreter only
+    assert seen["ignore"](seen["src"], ["include", "lib"]) == {"include"}
 
 
 @pytest.mark.skipif(IS_WINDOWS, reason="POSIX runtime layouts (symlinks)")
