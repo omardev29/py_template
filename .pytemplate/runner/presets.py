@@ -1029,22 +1029,49 @@ def _git_env() -> dict[str, str]:
     return env
 
 
+_GIT_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def _git_path(line: str) -> str:
+    """A path as git prints it with core.quotePath (a name holding a control character, a quote,
+    a backslash or a byte above 0x7f is written in double quotes with C escapes, octal for the
+    bytes) as the file system names it: os.fsdecode keeps the bytes of a name that is not UTF-8
+    (a Latin-1 `caf\\351.txt` from an old archive), which text decoding turned into U+FFFD."""
+    if not (len(line) >= 2 and line.startswith('"') and line.endswith('"')):
+        return line
+    raw = bytearray()
+    i = 1
+    while i < len(line) - 1:
+        if line[i] != "\\":
+            raw += line[i].encode("utf-8")
+            i += 1
+        elif line[i + 1] in _GIT_ESCAPES:
+            raw.append(_GIT_ESCAPES[line[i + 1]])
+            i += 2
+        else:
+            raw.append(int(line[i + 1 : i + 4], 8))
+            i += 4
+    return os.fsdecode(bytes(raw))
+
+
 def _git_files(*args: str) -> list[str] | None:
-    """`git ls-files -z ARGS` in ROOT (paths relative to it); None without git or a work tree.
-    Any other git failure (dubious ownership, a broken repository) is said out loud: the copy then
-    takes every file, untracked ones included."""
+    """`git ls-files ARGS` in ROOT (paths relative to it, _git_path); None without git or a work
+    tree. Any other git failure (dubious ownership, a broken repository) is said out loud: the
+    copy then takes every file, untracked ones included."""
     git = shutil.which("git")
     if git is None:
         return None
     env = {**_git_env(), "LC_ALL": "C"}  # git's messages in English: "not a git repository"
-    r = proc.run([git, "ls-files", "-z", *args], cwd=ROOT, env=env, capture=True, check=False, echo=False)
+    # One quoted ASCII line per path, whatever core.quotePath says: the output is read as text
+    argv = [git, "-c", "core.quotePath=true", "ls-files", *args]
+    r = proc.run(argv, cwd=ROOT, env=env, capture=True, check=False, echo=False)
     if r.returncode != 0:
         reason = (r.stderr or r.stdout or "").strip()
         if "not a git repository" not in reason:
             first = reason.splitlines()[0] if reason else f"exit code {r.returncode}"
             ui.warn(f"git ls-files failed in {ROOT} ({first}): the copy includes files git does not track")
         return None
-    return [p for p in r.stdout.split("\0") if p]
+    return [_git_path(line) for line in r.stdout.split("\n") if line]
 
 
 def _tracked_template() -> tuple[list[str] | None, str]:
@@ -1082,6 +1109,7 @@ def copy_template(dest: Path) -> None:
         shutil.copytree(ROOT, dest, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
         return
     dest.mkdir(parents=True, exist_ok=True)
+    deleted: list[str] = []
     for rel_path in tracked:
         if _skipped(rel_path):
             continue
@@ -1091,13 +1119,16 @@ def copy_template(dest: Path) -> None:
             _copy_link(src, dest / rel_path, rel_path)
         elif src.is_dir():  # a submodule
             shutil.copytree(src, dest / rel_path, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
-        elif src.exists():  # a tracked file deleted in the working tree is not copied
+        elif src.exists():
             (dest / rel_path).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest / rel_path)
+        else:  # the working tree is what is copied: a tracked file deleted there stays out
+            deleted.append(rel_path)
     untracked = [p for p in _git_files("--others", "--exclude-standard") or [] if not _skipped(p)]
-    if untracked:
-        more = f" and {len(untracked) - 5} more" if len(untracked) > 5 else ""
-        ui.info(f"  not copied (not tracked by git): {', '.join(untracked[:5])}{more}")
+    for what, paths in (("deleted in the working tree", deleted), ("not tracked by git", untracked)):
+        if paths:
+            more = f" and {len(paths) - 5} more" if len(paths) > 5 else ""
+            ui.info(f"  not copied ({what}): {', '.join(paths[:5])}{more}")
 
 
 def _copy_link(src: Path, target: Path, rel_path: str) -> None:

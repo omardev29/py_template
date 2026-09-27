@@ -2171,9 +2171,11 @@ Per method:
   root with `./deploy __init script --name myapp --force` (changes no byte when they already
   match: `test_removals` checks it), or mirror the edit byte for byte.
 - `copy_template(dest)` (used by `new`): in a git work tree only the files git tracks (`git
-  ls-files --cached`, with their working-tree content): untracked files are listed as "not
-  copied", ignored ones stay silent, so `.env`, `.idea/`, `htmlcov/`, `*.spec` never reach a
-  new project. A maintainer's new file must be `git add`ed before `new` or `selftest --e2e`
+  ls-files --cached`, with their working-tree content; its names are read through git's C
+  quoting, `presets._git_path`, so a name that is not UTF-8 keeps its bytes: read as text it
+  named no file and was left out silently): untracked files, and tracked ones deleted from the
+  working tree, are listed as "not copied", ignored ones stay silent, so `.env`, `.idea/`,
+  `htmlcov/`, `*.spec` never reach a new project. A maintainer's new file must be `git add`ed before `new` or `selftest --e2e`
   sees it. A symbolic link is copied as the link git tracks (`presets._copy_link`, dangling
   ones too; where Windows refuses to create one, what it points to, with a warning), never as
   a copy of its target. Without git, or when git does not track `.pytemplate/deploy.py` (a copy inside

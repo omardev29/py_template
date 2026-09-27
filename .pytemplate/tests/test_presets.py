@@ -799,6 +799,42 @@ def test_copy_template_copies_only_what_git_tracks(tmp_path: Path, monkeypatch: 
     assert "x.spec" not in err and "pyc" not in err  # ignored or skipped: not worth a line
 
 
+@needs_git
+@pytest.mark.skipif(sys.platform != "linux", reason="names that are not UTF-8, a newline or a quote: Linux file systems only")
+def test_copy_template_copies_every_tracked_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], git_env: None) -> None:
+    """`git ls-files -z` was read as UTF-8 text: a Latin-1 name (`caf\\xe9.txt` from an old
+    archive) became U+FFFD, named no file, and was left out without a word; the new project
+    was created with exit 0 and without it. A tracked file deleted in the working tree is
+    still left out, and now said."""
+    src = tmp_path / "template"
+    _fake_template(src)
+    names = [b"caf\xe9.txt", "caf\u00e9-utf8.txt".encode(), b'quo"te.txt', b"back\\slash.txt", b"tab\there.txt", b"new\nline.txt"]
+    docs = os.fsencode(src / "docs")
+    os.mkdir(docs)
+    for name in names:
+        with open(os.path.join(docs, name), "wb") as f:
+            f.write(name)
+    _git(src, "add", "--", "docs")
+    monkeypatch.setattr(presets, "ROOT", src)
+    presets.copy_template(tmp_path / "new")
+    copied = os.fsencode(tmp_path / "new" / "docs")
+    assert sorted(os.listdir(copied)) == sorted(names)
+    assert all(open(os.path.join(copied, n), "rb").read() == n for n in names)
+    assert "not copied (deleted in the working tree): deleted.txt" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("line", "path"),
+    [
+        ("docs/a b.txt", "docs/a b.txt"),
+        ('"docs/caf\\303\\251.txt"', "docs/caf\u00e9.txt"),
+        ('"q\\"uote\\\\back\\ttab\\nline"', 'q"uote\\back\ttab\nline'),
+    ],
+)
+def test_git_path_reads_gits_quoting(line: str, path: str) -> None:
+    assert presets._git_path(line) == path
+
+
 def _links(root: Path) -> None:
     (root / "docs" / "v1").mkdir(parents=True)
     (root / "docs" / "v1" / "index.md").write_text("# v1\n", encoding="utf-8")
