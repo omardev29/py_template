@@ -916,10 +916,20 @@ about 7 minutes, the next ones about 3.
 
 - It embeds exactly the `python.cpython` minor, so the mypyc extensions work in desktop apps.
   Mobile and web apps cannot load extensions: with the mypyc backend they get the `.py`.
+- Web (`target = "web"`): the build (`dist/<name>-<backend>-flet-web/`) is a static site. Serve
+  it over HTTP, as any static host or `flet serve` does (a browser does not start it from a
+  file). Its Python runs in the browser (Pyodide, loaded from a CDN with the page), where the
+  skeleton's core runs in the page's event loop. Android (`apk`, `aab`) builds need a JDK 17
+  (`JAVA_HOME`) and the Android SDK (`ANDROID_HOME`); Flet installs whichever is missing.
 - `flet build` ignores `uv.lock`: the runner pins the locked versions in its build project. It
   reads `[tool.flet]` and the `[project] description` of `pyproject.toml`, where `org`,
   `company` and `copyright` are placeholders that end up in the app; `[tool.flet.app] path` is
   always `src`.
+- A `flet build` app never starts the desktop client of `./pyt run` and `flet pack`: its build
+  leaves `flet-desktop` out, with what only that package needs (rich, pygments), and a web build
+  also leaves out what Flet does not use in a browser (httpx, oauthlib). The skeleton's web
+  build, measured on Linux in September 2026: 12.6 MB, of which the zip of the app and its
+  Python packages is 1.2 MB (5.6 MB with those packages).
 - Mobile and web apps take their binary packages (msgpack, numpy: those without a pure-Python
   wheel) from Flet's own index, `pypi.flet.dev`, which holds other releases than PyPI. For those
   targets such a package is not pinned to `uv.lock`'s version (a new flet project locks msgpack
@@ -929,6 +939,10 @@ about 7 minutes, the next ones about 3.
   cleans the packages unless told not to, so the build project gets `app = false` and
   `packages = false` in `[tool.flet.cleanup]` (values your own `[tool.flet.cleanup]` sets stay).
   `exclude`: app files left out; `extra_args` go to `flet build`.
+- The template's own CI (`template-flet.yml`) builds a new flet project for the web on Linux and
+  opens it in a headless Chromium (its Python starts, the window title and the controls show, a
+  click on Draw draws), and builds its `.apk` and checks what that file holds. Android apps are
+  only built, never run; iOS apps and the desktop targets are not built there.
 
 ### Binary size
 
@@ -1507,6 +1521,7 @@ Pinned, and moved on purpose:
 | UPX | `upx.VERSION` and the SHA-256 values of `upx.ASSETS` | together |
 | GitHub actions | `.pytemplate/templates/ci.yml` and `.github/workflows/template-*.yml` | edit the template, then `./pyt render`; never edit the generated `ci.yml` |
 | the Neovim test | `cmd_nvim.STARTER_REV` and `.pytemplate/nvim/tests/lazy-lock.json` | from one green run without the lock (CLAUDE.md, section 13.1) |
+| the flet builds' browser | `.github/workflows/template-flet/browser.txt`: Playwright and its dependencies | together (a Playwright release installs its own Chromium build); a new Ubuntu runner image may need a newer Playwright |
 | the Linux CI image | `.github/workflows/template-ci-image/pins.py`: its base, apt snapshot, uv, Neovim, PowerShell, actionlint, xonsh (the other versions it reads from the files above) | edit the pin (and its SHA-256 where it has one; a new base needs a later apt snapshot too); a new Neovim or xonsh also goes into the other `template-*.yml` workflows (their macOS and Windows jobs), a new Neovim into the image workflow's `nvim:` matrix (the workflow tests check both); the next push to `main` or pull request builds and publishes the new tag |
 
 Not pinned: uv itself (the generated CI and the template's jobs on bare runners take the latest,
@@ -1568,6 +1583,11 @@ copied into projects):
   plus a weekly canary with the newest Neovim, LazyVim and plugins.
 - `template-e2e.yml` runs `selftest --e2e` for the three presets on the three systems (`--quick`
   on pushes and pull requests, the default depth weekly, `--full` monthly).
+- `template-flet.yml` builds a new flet project with `./pyt build cpython --method flet` on
+  Linux: for the web, opened in a headless Chromium (Playwright) that must see the app's Python
+  start, its controls and window title, and a drawing after a click on Draw; and as an Android
+  `.apk`, built only, whose contents are checked (`template-flet/check.py`). On pushes to `main`
+  and pull requests that touch the flet method or preset, weekly and by hand.
 - `template-ci-image.yml` builds the Linux CI image (Ubuntu with every tool the Linux jobs
   need, pinned, and their downloads already cached: `template-ci-image/pins.py`), publishes it
   to `ghcr.io/<owner>/<repo>-ci` under a tag that is a hash of its inputs, and runs the Linux
