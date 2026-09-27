@@ -2599,13 +2599,51 @@ def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: 
     assert ("pycparser" in (copy_root / "pyproject.toml").read_text(encoding="utf-8")) is declared  # the pins leave nothing behind
 
 
+def _round_trip_problem(cfg: Config, root: Path = ROOT) -> str | None:
+    """Why a round trip through the presets cannot give this project back byte for byte (the
+    skip reason), None when it can: the last init writes the preset's skeleton (src/, tests/,
+    typings/ and pytemplate.toml) and pins, at the tested version, what it adds again."""
+    if not presets.pristine(cfg):
+        return "src/, tests/ or typings/ are not the pristine skeleton of the current preset"
+    own = (root / "pytemplate.toml").read_bytes().removeprefix(b"\xef\xbb\xbf").replace(b"\r\n", b"\n")
+    if own != presets.skeleton(cfg.app.preset, cfg.app.name)["pytemplate.toml"]:
+        return "pytemplate.toml is not the preset's own (a mode change, [preset.*] options): init writes the preset's"
+    pins = presets.constraints(cfg.app.preset)
+    moved = sorted(n for n, v in _locked_versions(root).items() if pins.get(n, v) != v)
+    if moved:
+        return f"uv.lock moved past the tested versions ({', '.join(moved)}): init pins what it adds again"
+    return None
+
+
+def test_round_trip_problem_names_what_a_round_trip_changes(tmp_path: Path) -> None:
+    """The round-trip test failed (and `./deploy selftest` with it) in a project after `mode
+    --typing strict`, `mode --supports +pypy`, a [preset.flet] version or a `lock --upgrade`:
+    the last init writes the preset's pytemplate.toml and pins back what it adds again."""
+    cfg = config.load(set(cli.COMMANDS))
+    if not presets.pristine(cfg):
+        pytest.skip("src/, tests/ or typings/ are not the pristine skeleton of the current preset")
+    root = tmp_path / "p"
+    root.mkdir()
+    (root / "pytemplate.toml").write_bytes(presets.skeleton(cfg.app.preset, cfg.app.name)["pytemplate.toml"].replace(b"\n", b"\r\n"))
+    pins = presets.constraints(cfg.app.preset)
+    lock = "".join(f'[[package]]\nname = "{n}"\nversion = "{v}"\n\n' for n, v in pins.items())
+    (root / "uv.lock").write_text(lock + '[[package]]\nname = "httpx"\nversion = "0.28.1"\n', encoding="utf-8")
+    assert _round_trip_problem(cfg, root) is None  # a CRLF checkout and a dependency of the user's own
+    name, version = next(iter(pins.items()))
+    (root / "uv.lock").write_text(lock.replace(f'"{name}"\nversion = "{version}"', f'"{name}"\nversion = "0.0.1"'), encoding="utf-8")
+    assert f"moved past the tested versions ({name})" in str(_round_trip_problem(cfg, root))
+    (root / "pytemplate.toml").write_bytes(presets.skeleton(cfg.app.preset, cfg.app.name)["pytemplate.toml"] + b"\n[typing]\nprofile = \"strict\"\n")
+    assert "pytemplate.toml is not the preset's own" in str(_round_trip_problem(cfg, root))
+
+
 def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, network: None, git_env: None) -> None:
     """current -> every other preset -> current gives back the same bytes: every init removes
     the previous preset's dependencies, tables and files (and the template root is exactly what
     `__init script --name myapp --force` writes)."""
     cfg = config.load(set(cli.COMMANDS))
-    if not presets.pristine(cfg):
-        pytest.skip("src/, tests/ or typings/ are not the pristine skeleton of the current preset")
+    reason = _round_trip_problem(cfg)
+    if reason:
+        pytest.skip(reason)
     env = _child_env(tmp_path)
     copy_root = tmp_path / "copy"
     presets.copy_template(copy_root)
