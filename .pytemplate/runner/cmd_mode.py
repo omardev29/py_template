@@ -503,7 +503,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         else:
             git = "and `git init -b main`"
         ui.info(
-            "  would copy this template there (the files git tracks; no .git, environments, builds or "
+            f"  would copy this template there ({presets.copy_scope()}; no .git, environments, builds or "
             f"caches), run `./deploy __init {ns.preset} --name {name} --force` in it {git}"
         )
         if top is not None:

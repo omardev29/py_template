@@ -767,8 +767,9 @@ header rules (with detector tests proving each rule fires).
   pristine, the new `pytemplate.toml` and `pyproject.toml`) and lists each file as `-` deleted,
   `+` new or `~` replaced, the dependencies removed and added, the pinned versions, and what
   happens to `pyproject.toml` and `uv.lock`. `new` checks the destination and the name
-  (format, `check_name_free`) and prints destination, preset, name, the number of pins
-  `__init` would pass (the ones this `uv.lock` lacks, as `plan_init` counts them) and the
+  (format, `check_name_free`) and prints destination, preset, name, what it would copy (the
+  test `copy_template` makes, `presets.copy_scope`: the files git tracks, or every file and
+  why), the number of pins `__init` would pass (the ones this `uv.lock` lacks, as `plan_init` counts them) and the
   `__init` step it would run in the copy, then `git init -b main`, or why not (DIR inside the
   work tree of another repository, `cmd_mode._work_tree_top`, with the CI warning of section
   13.2; no git). `pyz-merge` validates its inputs (`pyz.check_parts`:
@@ -2174,7 +2175,8 @@ Per method:
   sees it. A symbolic link is copied as the link git tracks (`presets._copy_link`, dangling
   ones too; where Windows refuses to create one, what it points to, with a warning), never as
   a copy of its target. Without git, or when git does not track `.pytemplate/deploy.py` (a copy inside
-  another repository, a project never committed), it copies every file; a git failure other
+  another repository, a project never committed), it copies every file, and says so and why
+  (`presets._tracked_template`); a git failure other
   than "not a git repository" (dubious ownership...) is a warning first (git runs with
   `LC_ALL=C`). Both skip (`presets._skipped`) `.git`, `.build`, `dist`, caches, `.flet`,
   `.venv*`, `template-repo` at any depth; `build/`, `.claude/`, `README.md` and `LICENSE` at

@@ -1047,6 +1047,22 @@ def _git_files(*args: str) -> list[str] | None:
     return [p for p in r.stdout.split("\0") if p]
 
 
+def _tracked_template() -> tuple[list[str] | None, str]:
+    """The files copy_template copies: git's tracked files, or None for every file (ignored ones
+    included), with how it picks them (the real run and the dry run of `new` say it alike)."""
+    tracked = _git_files("--cached")
+    if tracked is not None and ".pytemplate/deploy.py" in tracked:
+        return tracked, "the files git tracks"
+    if tracked is not None:
+        return None, "every file, ignored ones included: git does not track this project's files (never committed?)"
+    return None, "every file, ignored ones included: " + ("git not found" if shutil.which("git") is None else "not a git work tree")
+
+
+def copy_scope() -> str:
+    """What copy_template would copy from here (`new --dry-run`)."""
+    return _tracked_template()[1]
+
+
 def copy_template(dest: Path) -> None:
     """Copy the template to `dest`, without history, environments, builds, caches or the
     template repository's own files (_skipped).
@@ -1060,10 +1076,9 @@ def copy_template(dest: Path) -> None:
     """
     if dest.exists() and any(dest.iterdir()):
         raise DeployError(f"{dest} already exists and is not empty")
-    tracked = _git_files("--cached")
-    if tracked is None or ".pytemplate/deploy.py" not in tracked:
-        if tracked is not None:
-            ui.info("  git does not track this project's files (never committed?): copying every file")
+    tracked, how = _tracked_template()
+    if tracked is None:
+        ui.info(f"  copying {how}")
         shutil.copytree(ROOT, dest, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
         return
     dest.mkdir(parents=True, exist_ok=True)

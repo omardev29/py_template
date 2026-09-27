@@ -866,6 +866,24 @@ def test_copy_template_without_tracked_files_uses_the_skip_rules(tmp_path: Path,
     assert "git does not track" in capsys.readouterr().err
 
 
+@needs_git
+@pytest.mark.parametrize(("track", "scope"), [(True, "the files git tracks"), (False, "every file, ignored ones included: git does not track")])
+def test_new_dry_run_says_what_the_copy_takes(
+    dry: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], git_env: None, track: bool, scope: str
+) -> None:
+    """`--dry-run new` always said "the files git tracks", while from a project never committed
+    the real run copies every file, the ignored ones (.env, *.spec) included."""
+    src = tmp_path / "template"
+    _fake_template(src, track=track)
+    monkeypatch.setattr(presets, "ROOT", src)
+    monkeypatch.chdir(tmp_path)
+    assert cmd_mode.cmd_new(dry, ["x", "--name", "demo"]) == 0
+    assert f"would copy this template there ({scope}" in capsys.readouterr().err
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    presets.copy_template(tmp_path / "real")
+    assert ((tmp_path / "real" / ".env").exists(), f"copying {scope}" in capsys.readouterr().err) == (not track, not track)
+
+
 def test_copy_template_without_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     for rel, text in {**TRACKED, **UNTRACKED}.items():
         (tmp_path / "t" / rel).parent.mkdir(parents=True, exist_ok=True)
