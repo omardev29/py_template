@@ -1512,8 +1512,11 @@ Formats:
      makes it look for a `python3.11` (`test_mypy_reading_the_generated_ini_alone_flags_what_pypy_lacks`).
   4. `lintc` rules on the compiled sources (when mypyc is supported and `rules`): errors only
      under the `mypyc` profile, warnings otherwise. A file the runner cannot parse is one
-     finding (`imports.parse_error`: a syntax error, or syntax newer than the runner's own
-     Python), never an internal error.
+     finding (`imports.parse_error`: a syntax error, syntax newer than the runner's own
+     Python, or a source nested too deeply for the compiler's stack; `imports.PARSE_ERRORS`,
+     which `mypyc.hidden_imports` and `common.uses_tkinter` catch too), never an internal
+     error. The rules walk the tree without recursion (`lintc._scope_statements`: a generated
+     elif chain of ~1000 branches passed Python's recursion limit).
   5. With `typing.editor = "basedpyright"`: basedpyright (`BASEDPYRIGHT` pin) on
      `.build/cfg/pyright-<profile>.json` (`cmd_dev._run_basedpyright`). Exit 1 is only a
      warning when the profile is not `blocking`; any other code, or pins uv cannot install

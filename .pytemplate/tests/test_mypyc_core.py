@@ -347,6 +347,24 @@ def test_lintc_a_class_in_a_function_sees_that_functions_imports(tmp_path: Path)
     assert [("uses @" in f.message, "inside a function" in f.message) for f in found] == [(False, True)]
 
 
+@pytest.mark.parametrize(("last", "native"), [("from dataclasses import dataclass", True), ("from attrs import define as dataclass", False)])
+def test_lintc_reads_a_long_elif_chain(tmp_path: Path, last: str, native: bool) -> None:
+    """The blocks of a scope were walked recursively, one level per `elif`: a generated dispatch
+    table of ~1000 branches crashed `check`, `build` and the pre-commit hook with an internal
+    runner error (RecursionError). The import in the chain's last `else` still decides."""
+    branches = "".join(f"elif sys.argv[0] == '{i}':\n    pass\n" for i in range(1, 3000))
+    source = f"import sys\n\nif sys.argv[0] == '0':\n    pass\n{branches}else:\n    {last}\n\n\n@dataclass\nclass P:\n    x: int = 0\n"
+    found = _lint(tmp_path, source)
+    assert (found == []) is native, [f.message for f in found]
+
+
+def test_lintc_reports_a_source_nested_too_deeply_for_the_compiler(tmp_path: Path) -> None:
+    # ast.parse itself raises RecursionError ("during ast construction", "Stack overflow ...
+    # during compilation"): one finding, like a syntax error, never an internal error
+    found = _lint(tmp_path, "x = " + " + ".join(["1"] * 100_000) + "\n")
+    assert len(found) == 1 and "cannot parse" in found[0].message and "skipped this file" in found[0].message
+
+
 @needs_venv
 def test_lintc_native_decorators_follow_the_locked_mypyc() -> None:
     """A mypy bump that changes mypyc's list of native decorators must fail selftest."""
@@ -1565,9 +1583,17 @@ def test_hidden_imports_keep_everything_when_the_check_cannot_run(
     assert "html.parser" not in hidden  # candidates need the check
 
 
-def test_hidden_imports_of_an_unparsable_file_is_a_deploy_error(src_tree: Path, tmp_path: Path) -> None:
-    _project(src_tree, {"myapp/__init__.py": "", "myapp/core/__init__.py": "", "myapp/core/m.py": b"import json\n\ndef f(:\n"})
-    with pytest.raises(DeployError, match=r"src[/\\]myapp[/\\]core[/\\]m\.py:3: cannot parse it with the runner's Python") as err:
+@pytest.mark.parametrize(
+    ("source", "line"),
+    [
+        (b"import json\n\ndef f(:\n", 3),
+        ("x = " + " + ".join(["1"] * 100_000) + "\n", 1),  # too deep for the compiler's stack: RecursionError
+    ],
+    ids=["syntax-error", "too-deep"],
+)
+def test_hidden_imports_of_an_unparsable_file_is_a_deploy_error(src_tree: Path, tmp_path: Path, source: str | bytes, line: int) -> None:
+    _project(src_tree, {"myapp/__init__.py": "", "myapp/core/__init__.py": "", "myapp/core/m.py": source})
+    with pytest.raises(DeployError, match=rf"src[/\\]myapp[/\\]core[/\\]m\.py:{line}: cannot parse it with the runner's Python") as err:
         mypyc.hidden_imports(make({}), tmp_path / "stage")
     assert err.value.code == 2
 

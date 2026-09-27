@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .. import envs, proc, ui
 from ..config import Config
-from ..imports import iter_runtime_nodes, parse
+from ..imports import PARSE_ERRORS, iter_runtime_nodes, parse
 from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, SRC, host_os, rel
 from ..ui import DeployError
 
@@ -587,7 +587,7 @@ def uses_tkinter(*extra: Path) -> bool:
                 tree = parse(path)
             except OSError:
                 continue
-            except (SyntaxError, ValueError):
+            except PARSE_ERRORS:
                 return True  # mentions tkinter but this Python cannot parse it: keep Tk (safe side)
             for node in iter_runtime_nodes(tree):
                 names: list[str] = []

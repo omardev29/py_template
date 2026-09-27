@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import envs, proc, render, ui
 from .config import Config, compiled_paths
-from .imports import imports_of, is_local, local_module, module_name, parse_error
+from .imports import PARSE_ERRORS, imports_of, is_local, local_module, module_name, parse_error
 from .project import BUILD, EXT_SUFFIXES, IS_WINDOWS, SRC, TOOLS, rel
 from .ui import DeployError
 
@@ -415,7 +415,7 @@ def hidden_imports(cfg: Config, stage: Path) -> list[str]:
     for path in sources:
         try:
             names = imports_of(path, module_name(path, SRC), SRC, candidates)
-        except (SyntaxError, ValueError) as e:  # a runner older than the project's syntax
+        except PARSE_ERRORS as e:  # a runner older than the project's syntax, a too deeply nested source
             line, msg = parse_error(e)
             raise DeployError(f"{rel(path)}:{line}: {msg}") from None
         for name in names:

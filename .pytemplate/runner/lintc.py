@@ -9,6 +9,7 @@ module-level `__file__` where mypyc runs the module body with a relative one.
 from __future__ import annotations
 
 import ast
+import itertools
 import re
 import tomllib
 from collections.abc import Iterator
@@ -16,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config, compiled_paths
-from .imports import iter_runtime_nodes, module_name, parse, parse_error
+from .imports import PARSE_ERRORS, iter_runtime_nodes, module_name, parse, parse_error
 from .project import PYPROJECT, SRC
 
 # The class decorators that keep a class native, by FULL name, as mypyc (2.3.1) decides it:
@@ -84,17 +85,21 @@ def _add_import(aliases: dict[str, str], node: ast.Import | ast.ImportFrom) -> N
 
 def _scope_statements(body: list[ast.stmt]) -> Iterator[ast.stmt]:
     """The statements that run in the scope of `body`, in source order: those in its if/try/with/
-    for/while/match blocks too, never those of a nested function or class body."""
-    for stmt in body:
+    for/while/match blocks too, never those of a nested function or class body. Iterative: an
+    elif chain nests one `orelse` per branch, and 1000 of them (a generated dispatch table)
+    passed Python's recursion limit."""
+    stack: list[Iterator[ast.stmt]] = [iter(body)]
+    while stack:
+        stmt = next(stack[-1], None)
+        if stmt is None:
+            stack.pop()
+            continue
         yield stmt
         if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             continue
-        for name in ("body", "orelse", "finalbody"):
-            inner = getattr(stmt, name, None)
-            if isinstance(inner, list):
-                yield from _scope_statements(inner)
-        for block in (*getattr(stmt, "handlers", ()), *getattr(stmt, "cases", ())):
-            yield from _scope_statements(block.body)
+        blocks = [inner for name in ("body", "orelse", "finalbody") if isinstance(inner := getattr(stmt, name, None), list)]
+        blocks += [block.body for block in (*getattr(stmt, "handlers", ()), *getattr(stmt, "cases", ()))]
+        stack.append(itertools.chain.from_iterable(blocks))
 
 
 def _import_aliases(tree: ast.Module) -> dict[ast.ClassDef, dict[str, str]]:
@@ -214,7 +219,7 @@ def lint_file(cfg: Config, path: Path) -> list[Finding]:
 
     try:
         tree = parse(path)
-    except (SyntaxError, ValueError) as e:  # ruff and mypy report the real syntax error
+    except PARSE_ERRORS as e:  # ruff and mypy report a real syntax error
         line, msg = parse_error(e)
         return [Finding(path, line, f"{msg} (the mypyc rules skipped this file)")]
 

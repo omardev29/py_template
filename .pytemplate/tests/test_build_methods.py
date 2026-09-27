@@ -2828,6 +2828,15 @@ def test_portable_prunes_tkinter_when_nothing_imports_it(tmp_path: Path, monkeyp
     assert common.uses_tkinter(lib) is True  # the app's own import still counts
 
 
+def test_uses_tkinter_keeps_tk_for_a_source_too_deep_to_parse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # ast.parse raises RecursionError on it: an internal runner error, now the safe side
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "table.py").write_text("NAME = 'tkinter'\nx = " + " + ".join(["1"] * 100_000) + "\n", encoding="utf-8")
+    monkeypatch.setattr(common, "SRC", src)
+    assert common.uses_tkinter(tmp_path / "lib") is True
+
+
 def test_portable_keeps_tkinter_imported_in_a_symlinked_src_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # src/myapp/gui -> ../../shared_gui: Path.rglob does not enter a symlinked folder, so the prune
     # removed Tk although the payload (sync_tree follows the link) imports tkinter

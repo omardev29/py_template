@@ -45,12 +45,19 @@ def parse(path: Path) -> ast.Module:
     return ast.parse(path.read_bytes(), filename=str(path))
 
 
-def parse_error(e: SyntaxError | ValueError) -> tuple[int, str]:
-    """(line, message) for a source that `parse` rejected.
+# What `parse` raises for a source it cannot read: a syntax error (or syntax newer than the
+# runner's Python), a NUL byte (ValueError), and a source nested too deeply for the compiler's
+# own stack (RecursionError "Stack overflow during compilation": an expression of 100000
+# terms; MemoryError on some Pythons). Callers catch them all: an internal error otherwise.
+PARSE_ERRORS = (SyntaxError, ValueError, RecursionError, MemoryError)
 
-    Either a real syntax error (ruff and mypy report it too), or syntax newer than the
-    runner's own Python: only a runner started by hand on another Python (the launchers run
-    it on python.cpython).
+
+def parse_error(e: Exception) -> tuple[int, str]:
+    """(line, message) for a source that `parse` rejected (one of PARSE_ERRORS).
+
+    Either a real syntax error (ruff and mypy report it too), syntax newer than the runner's
+    own Python (only a runner started by hand on another Python: the launchers run it on
+    python.cpython), or a source too deeply nested for the compiler's stack.
     """
     line = (e.lineno if isinstance(e, SyntaxError) else None) or 1
     msg = (e.msg if isinstance(e, SyntaxError) else str(e)) or type(e).__name__
