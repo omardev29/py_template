@@ -10,13 +10,15 @@
 #
 # Stage 2 (CLAUDE.md 13.2): the Linux jobs of template-selftest (selftest, the runner's tests on
 # Python 3.11, the suite in new raylib and flet projects), template-launchers and template-nvim
-# (its two pinned rows) run here only, in the image: they are the Linux gates. uv-floor, the e2e
-# rows, the nvim canary and every Windows and macOS job stay on bare runners. Pull requests from
-# another repository cannot push: when they change an input of the image, it is built and
-# checked, and the jobs that would run in it are skipped (no Linux jobs for such a pull request). Weekly the image is rebuilt from scratch (not pushed unless
-# its tag is missing): red with no commit behind it means a pinned download is gone, or an
-# unpinned dependency of a pin moved. template-keepalive.yml keeps the schedule alive. The gate
-# job skips everything in repositories made from the template.
+# (its two pinned rows) run here only, in the image: they are the Linux gates. For a pull request
+# the image also runs mutation testing of the runner lines it changes (job mutation). uv-floor,
+# the e2e rows, the nvim canary and every Windows and macOS job stay on bare runners. Pull
+# requests from another repository cannot push: when they change an input of the image, it is
+# built and checked, and the jobs that would run in it are skipped (no Linux jobs for such a pull
+# request). Weekly the image is rebuilt from scratch (not pushed unless its tag is missing): red
+# with no commit behind it means a pinned download is gone, or an unpinned dependency of a pin
+# moved. template-keepalive.yml keeps the schedule alive. The gate job skips everything in
+# repositories made from the template.
 name: template-ci-image
 
 on:
@@ -305,4 +307,53 @@ jobs:
         with:
           name: nvim-image-logs-${{ matrix.nvim }}
           path: /tmp/pt-nvim/logs
+          if-no-files-found: ignore
+
+  # Mutation testing of the runner lines a pull request changes (CLAUDE.md 13.1): a measure, not
+  # a gate. The mutants no test notices are listed in the log and in the JSON artifact; the job
+  # fails only when the suite could not judge them (a baseline that fails, a run that ends in an
+  # error). A pull request with more mutants than the budget allows gets the report of those
+  # that ran, and a warning. A whole pass of the runner takes about a day of CPU: never here.
+  mutation:
+    name: mutation testing of the changed runner lines (image)
+    needs: [gate, image]
+    if: needs.gate.outputs.template == 'true' && needs.image.outputs.usable == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.image.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+      options: --init --user 1001
+    env:
+      HOME: /home/runner
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the base branch, for --diff
+          persist-credentials: false # the mutants run code: no token in .git/config
+      - name: selftest --mutation of the runner lines this pull request changes
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # timeout: SIGTERM ends the suite like Ctrl+C (exit 130, the report of what ran), then 124
+          set +e
+          timeout -k 5m -s TERM 70m ./pyt selftest --mutation --diff "origin/$BASE_REF" --jobs 3 --json > mutation.json
+          code=$?
+          set -e
+          if [ "$code" -eq 124 ]; then echo "::warning::selftest --mutation ran out of its 70 minutes: the report holds the mutants that ran"; exit 0; fi
+          exit "$code"
+      - name: Mutation report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutation-report
+          path: mutation.json
           if-no-files-found: ignore

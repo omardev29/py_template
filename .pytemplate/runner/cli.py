@@ -72,7 +72,7 @@ COMMANDS: dict[str, Command] = {
     # other
     "tasks": Command("cli", "cmd_tasks", "List the custom tasks in pytemplate.toml [tasks]", render=False, group="Other"),
     "nvim": Command("cmd_nvim", "cmd_nvim", "Neovim/LazyVim integration: check it, trust .lazy.lua, enable extras, sync plugins", "[doctor|trust|extras|bootstrap|sync]", group="Other"),
-    "selftest": Command("cli", "cmd_selftest", "Run the runner's own tests and mypy --strict (.pytemplate)", "[--shells|--nvim|--e2e] [args...]", render=False, group="Other"),
+    "selftest": Command("cli", "cmd_selftest", "Run the runner's own tests and mypy --strict (.pytemplate)", "[--shells|--nvim|--e2e|--mutation] [args...]", render=False, group="Other"),
     "help": Command("cli", "cmd_help", "Show this help (or a command's help)", "[COMMAND]", render=False, group="Other"),
 }
 
@@ -298,7 +298,7 @@ def cmd_tasks(cfg: object, args: list[str]) -> int:
 
 
 def cmd_selftest(cfg: object, args: list[str]) -> int:
-    from . import e2e, envs, nvimtest, shells
+    from . import e2e, envs, mutation, nvimtest, shells
     from .config import Config
     from .project import TEMPLATE
 
@@ -307,6 +307,7 @@ def cmd_selftest(cfg: object, args: list[str]) -> int:
         "--shells": shells.selftest,  # every launcher through every installed shell
         "--nvim": nvimtest.selftest,  # the LazyVim integration in an isolated LazyVim
         "--e2e": e2e.selftest,  # ./pyt new + setup/check/test/build per preset
+        "--mutation": mutation.selftest,  # Cosmic Ray's mutants of the runner against its tests
     }
     if args and args[0] in suites:
         if proc.DRY_RUN:

@@ -21,7 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cli, cmd_nvim, config, e2e, envs, nvimtest, shells  # noqa: E402
+from runner import cli, cmd_nvim, config, e2e, envs, mutation, nvimtest, shells  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import TEMPLATE  # noqa: E402
 from runner.shells import Result, Shell  # noqa: E402
@@ -78,7 +78,7 @@ def test_plain_selftest_help_runs_no_mypy(monkeypatch: pytest.MonkeyPatch, flag:
     assert [argv[:3] for _, argv, _ in fake.calls] == [["python", "-m", "pytest"]]
 
 
-@pytest.mark.parametrize("suite", ["--shells", "--nvim", "--e2e"])
+@pytest.mark.parametrize("suite", ["--shells", "--nvim", "--e2e", "--mutation"])
 @pytest.mark.parametrize("code", [0, 1, 3])
 def test_a_suite_returns_its_own_exit_code(monkeypatch: pytest.MonkeyPatch, suite: str, code: int) -> None:
     got: list[list[str]] = []
@@ -87,7 +87,7 @@ def test_a_suite_returns_its_own_exit_code(monkeypatch: pytest.MonkeyPatch, suit
         got.append(args)
         return code
 
-    for module in (shells, nvimtest, e2e):
+    for module in (shells, nvimtest, e2e, mutation):
         monkeypatch.setattr(module, "selftest", fake)
     monkeypatch.setattr(envs, "uv_run", FakeUvRun())  # pytest must not start
     assert cli.cmd_selftest(make(), [suite, "a", "--b"]) == code

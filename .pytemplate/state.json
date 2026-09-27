@@ -4,7 +4,7 @@
     ".github/workflows/ci.yml": "4d426dc79570212ec6c7896dabdaa5faeedb224e0d81cade73f7e92e6a8acebf",
     ".lazy.lua": "08894628ac537240b2ed9fbb385e9fe8ea2ee41398b52efc08aee2a69b2e8f57",
     ".mypy.ini": "caf263ce0ec64f4ca57e65cb2f929b8a0c5a75707fa3deeb5a4225e7d60740e8",
-    ".pytemplate/editor.json": "8e330b73c16eae3f2cc33171bf3e31f92ae60faaf8ec640008ebfe8f18f4adab",
+    ".pytemplate/editor.json": "7b68e727d935e71b9bca5d36b08a87c85dfa7906ff1236b6cb86181c34762e36",
     ".python-version": "a876e0b10411037a012498b9fe18d9bc1df32ed8b722a13564dc944ddcfd9135",
     ".ruff.toml": "4be57607cd51c51cf42097ccbdca8759e0c6c00c9801156f94cc323cae242e78",
     ".vscode/extensions.json": "3fb8afdf2809d5b96db1cbb7c0ba86ace1e9327b219570dc11d6e9653633a461",

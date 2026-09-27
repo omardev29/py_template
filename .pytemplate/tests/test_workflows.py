@@ -406,6 +406,7 @@ def test_ci_image_folder_is_what_the_tag_hashes() -> None:
     for rel in pins.data_files():
         assert (ROOT / rel).is_file() and any(line.endswith(f"  {rel}") for line in lines), rel
     assert {"uv.lock", "pyproject.toml", ".python-version"} <= set(pins.data_files())
+    assert {".pytemplate/tools/mutation_cr.py", ".pytemplate/tools/mutation_cr.py.lock"} <= set(pins.data_files())  # Cosmic Ray
     assert all(any(rel.startswith(f".pytemplate/presets/{p}/") for rel in pins.data_files()) for p in ("script", "raylib", "flet"))
 
 
@@ -453,7 +454,7 @@ def test_ci_image_workflow_builds_publishes_and_runs_the_linux_jobs() -> None:
     assert 'if [ -z "$HEAD_REPO" ] || [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ]' in image
     assert "cat /opt/ci/inputs.txt | diff -" in image  # the image holds what its tag names
     pins = _pins()
-    assert set(found) == {"selftest", "python-floor", "new-project", "launchers", "nvim"}
+    assert set(found) == {"selftest", "python-floor", "new-project", "launchers", "nvim", "mutation"}
     for name, body in found.items():
         assert "needs.image.outputs.usable == 'true'" in body and "packages: read" in body, name
         assert "image: ${{ needs.image.outputs.ref }}" in body and "password: ${{ github.token }}" in body, name
@@ -461,6 +462,22 @@ def test_ci_image_workflow_builds_publishes_and_runs_the_linux_jobs() -> None:
         assert "shell: bash" in body and "setup-uv" not in body and "apt-get" not in body, name
         assert "${{ runner.temp }}" not in body, name  # the host's path inside a container job
     assert f"nvim: [{pins.NVIM}, {pins.from_code()['NVIM_MIN']}]" in found["nvim"]
+
+
+def test_mutation_job_measures_the_lines_a_pull_request_changes() -> None:
+    """template-ci-image.yml's mutation job: pull requests only, against their base branch (the
+    whole history fetched), within a budget that leaves the report of what ran (a warning, never
+    a red job), and red when the suite cannot judge; the JSON report is always uploaded."""
+    body = jobs(_text("template-ci-image.yml"))["mutation"]
+    assert "github.event_name == 'pull_request'" in body
+    assert "fetch-depth: 0" in body and "persist-credentials: false" in body
+    assert "BASE_REF: ${{ github.base_ref }}" in body and '--mutation --diff "origin/$BASE_REF"' in body and "--json > mutation.json" in body
+    budget = re.search(r"timeout -k (\d+)m -s TERM (\d+)m \./pyt selftest --mutation", body)
+    job = re.search(r"timeout-minutes: (\d+)", body)
+    assert budget and job and int(budget[1]) + int(budget[2]) + 10 <= int(job[1])  # the report is written before the job's end
+    assert '[ "$code" -eq 124 ]' in body and "::warning::" in body and 'exit "$code"' in body
+    report = body[body.index("name: Mutation report") :]
+    assert "if: always()" in report and "path: mutation.json" in report
 
 
 def test_workflow_literals_follow_the_ci_image_pins() -> None:

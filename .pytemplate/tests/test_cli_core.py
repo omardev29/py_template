@@ -30,7 +30,7 @@ import pytest
 TEMPLATE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEMPLATE_DIR))
 
-from runner import cli, cmd_dev, cmd_env, cmd_mode, config, e2e, envs, lintc, mypyc, nvimtest, presets, proc, project, render, shells, tasks, ui  # noqa: E402
+from runner import cli, cmd_dev, cmd_env, cmd_mode, config, e2e, envs, lintc, mutation, mypyc, nvimtest, presets, proc, project, render, shells, tasks, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import BUILD, DIST, ROOT, SRC  # noqa: E402
 from runner.ui import PytError  # noqa: E402
@@ -518,16 +518,16 @@ def test_every_command_rejects_an_unknown_argument(name: str, bogus: str, monkey
     assert "Traceback" not in err
 
 
-@pytest.mark.parametrize("suite", ["--shells", "--nvim", "--e2e"])
+@pytest.mark.parametrize("suite", ["--shells", "--nvim", "--e2e", "--mutation"])
 @pytest.mark.usefixtures("no_processes")
 def test_the_selftest_suites_reject_an_unknown_option(suite: str) -> None:
     assert cli.main(["selftest", suite, "--pt-bogus-flag"]) == 2
 
 
-@pytest.mark.parametrize("suite", ["--shells", "--nvim", "--e2e"])
+@pytest.mark.parametrize("suite", ["--shells", "--nvim", "--e2e", "--mutation"])
 @pytest.mark.usefixtures("no_processes")
 def test_a_dry_run_never_starts_a_selftest_suite(suite: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    for module in (shells, nvimtest, e2e):
+    for module in (shells, nvimtest, e2e, mutation):
         monkeypatch.setattr(module, "selftest", fail)
     monkeypatch.setattr(proc, "DRY_RUN", True)
     with pytest.raises(PytError, match="has no --dry-run") as e:
