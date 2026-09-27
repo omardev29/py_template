@@ -323,6 +323,9 @@ def build(req: BuildRequest) -> Path:
             "--include-package=flet_desktop",
             *(f"--include-package-data={data}" for data in FLET_PACKAGE_DATA),
             f"--include-data-files=flet-client/{archive.name}=flet_desktop/app/{archive.name}",
+            # Linux: the app looks for exactly this archive, not for the name of the user's glibc
+            # or of a pyproject.toml in the folder it starts from (it downloaded one at first start)
+            *(f"--force-runtime-environment-variable={k}={v}" for k, v in flet_client_env(archive.name).items()),
         ]
     argv += optimization_args(cfg)  # before extra_args and the command line: a later --lto wins
     argv += cfg.deploy.nuitka.extra_args + req.extra

@@ -131,6 +131,33 @@ def _http_response(body: bytes, *, announce: int | None = None, chunked: bool = 
     return response
 
 
+@pytest.mark.parametrize(
+    ("archive", "pinned"),
+    [
+        ("flet-linux-ubuntu24.04-amd64.tar.gz", ["FLET_LINUX_DISTRO=ubuntu24.04", "FLET_DESKTOP_FLAVOR=full"]),
+        ("flet-linux-debian10-light-arm64.tar.gz", ["FLET_LINUX_DISTRO=debian10", "FLET_DESKTOP_FLAVOR=light"]),
+        ("flet-windows.zip", []),  # one name per OS elsewhere
+    ],
+)
+def test_nuitka_pins_the_client_name_the_app_looks_for(build_dirs: Path, monkeypatch: pytest.MonkeyPatch, archive: str, pinned: list[str]) -> None:
+    # flet_desktop names the Linux client from the user's glibc bracket and from a pyproject.toml
+    # in the folder the app starts from: the build bundled ...-ubuntu24.04-amd64 (the project
+    # sets desktop_flavor = "full"), the app looked for ...-ubuntu24.04-light-amd64 and
+    # downloaded the client at its first start (offline it could not start)
+    cfg = make({"app": {"name": "demo", "preset": "flet", "gui": True}})
+    app = _payload(build_dirs / "payload", cfg.pkg)
+    fake = FakeUv()
+    fake.ARCHIVE = archive
+    monkeypatch.delenv("FLET_CLIENT_URL", raising=False)
+    monkeypatch.setattr(nuitka, "IS_WINDOWS", False)
+    monkeypatch.setattr(envs, "uv", fake)
+    client = _client_archive(zip_format=archive.endswith(".zip"))
+    monkeypatch.setattr(nuitka.urllib.request, "urlopen", lambda url, timeout=0: _http_response(client))
+    nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
+    forced = sorted(a.split("=", 1)[1] for a in fake.argv if a.startswith("--force-runtime-environment-variable="))
+    assert forced == sorted(pinned)
+
+
 def test_nuitka_bundles_the_flet_client(build_dirs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Nuitka cannot follow flet's lazy controls (module __getattr__ + importlib), and the
     # flet-desktop wheel has no Flutter client (the app would download it at its first start):

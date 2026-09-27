@@ -2098,7 +2098,11 @@ Per method:
   (`flet-client/`) and bundles it, named relative to the stage as the assets are (Nuitka splits a
   data source at `,` and `=` and globs it: under `game, v2` the client was left out with only a
   warning), at `flet_desktop/app/<archive>`, where flet_desktop looks for a bundled client (and never
-  downloads one: a damaged archive would break the shipped app at its first start). So a
+  downloads one: a damaged archive would break the shipped app at its first start), with the
+  name it looks for forced into the binary on Linux (`nuitka.flet_client_env` through
+  `--force-runtime-environment-variable`: `FLET_LINUX_DISTRO`, `FLET_DESKTOP_FLAVOR`; the app
+  computed another name from the user's glibc or a pyproject.toml in its current folder and
+  downloaded the client, section 15.1). So a
   download is cached only when it delivered every byte the server announced (Content-Length)
   and the archive reads to its end the way flet_desktop extracts it (`nuitka.archive_problem`:
   zipfile CRCs, or tarfile over gzip and the gzip trailer); a cached archive is checked again
@@ -3705,6 +3709,17 @@ Flet (flet, flet-desktop, flet pack, flet build):
   `test_the_flet_client_follows_flet_client_url`,
   `test_build_methods.py::test_a_bundled_portable_flet_app_carries_its_desktop_client`. Goes:
   never.
+- **flet_desktop names the client it looks for from the machine and folder the app runs in**
+  (LIMITATION, Flet 1.0.1): on Linux `flet-linux-<distro>[-light]-<arch>.tar.gz`, the distro from
+  the user's glibc bracket (`FLET_LINUX_DISTRO` overrides it) and the flavor from
+  `FLET_DESKTOP_FLAVOR`, else `[tool.flet] desktop_flavor` of a pyproject.toml in its CURRENT
+  folder, else light. A bundled archive of another name is ignored and the client downloaded at
+  the first start (offline: the app cannot start). Fix: `nuitka.flet_client_env` reads both
+  parts back from the bundled name, and nuitka forces them into the binary
+  (`--force-runtime-environment-variable`), a bundled portable folder into its launchers (10).
+  Test: `test_workarounds.py::test_nuitka_pins_the_client_name_the_app_looks_for`,
+  `test_build_methods.py::test_the_flet_client_env_pins_what_the_archive_was_named_for`. Goes:
+  never (flet pack's own exe does not pin it: another glibc bracket downloads its client).
 - **flet loads its controls lazily** (LIMITATION): module `__getattr__` + `importlib`, which
   Nuitka cannot follow. Fix: `--include-package=flet --include-package=flet_desktop` in
   `nuitka.build` (10). Test: `test_workarounds.py::test_nuitka_bundles_the_flet_client`. Goes:
