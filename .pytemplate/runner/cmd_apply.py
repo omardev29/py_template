@@ -223,12 +223,17 @@ def _src() -> Path:
     return ROOT / "src"
 
 
-def _old_name(cfg: Config, candidates: list[str | None]) -> str | None:
-    """The app name to rename from after a hand edit of app.name: the first candidate (the
-    record, pyproject.toml [project] name) whose package is in src/, when app.name's own package
-    is not (or is the very same folder: MyApp for myapp, or my-app for my_app)."""
+def _old_name(cfg: Config, record_name: str | None, project_name: str | None = None) -> str | None:
+    """The app name to rename from after a hand edit of app.name: the record's name, else
+    pyproject.toml [project] name, whose package is in src/, when app.name's own package is not
+    (or is the very same folder: MyApp for myapp, or my-app for my_app). A record named like
+    app.name says app.name was not edited: only [project] name was (in case or -/_ at most, so
+    its package is app.name's folder), and apply puts that line back: None. It took pyproject's
+    name for the real one and planned a rename that rewrote the user's prose."""
+    if record_name is not None and record_name == cfg.app.name:
+        return None
     here = rename.package_dir(_src(), rename.package_of(cfg.app.name))
-    for old in candidates:
+    for old in (record_name, project_name):
         if not old or old == cfg.app.name or not _APP_NAME.fullmatch(old):
             continue
         folder = rename.package_dir(_src(), rename.package_of(old))
@@ -291,7 +296,7 @@ def applied_name(cfg: Config) -> str | None:
     """The name the project really has when app.name was changed by hand (None: no such case)."""
     project_name = _project_name()
     record = trusted_record(cfg, project_name)
-    return _old_name(cfg, [record["name"] if record else None, project_name])
+    return _old_name(cfg, record["name"] if record else None, project_name)
 
 
 def _option_names(preset: str, opts: dict[str, Any]) -> set[str]:
@@ -431,7 +436,7 @@ def applied_state(cfg: Config, project: Project) -> Applied:
     else:  # no record: the options the managed block was last written with, else init's defaults
         options = {**presets.default_options(preset), **_block_options(preset, project)}
         deps, dev = presets.option_dependencies(preset, options)
-    renamed_from = _old_name(cfg, [record["name"] if record else None, project.name])
+    renamed_from = _old_name(cfg, record["name"] if record else None, project.name)
     return Applied(preset, deps, dev, renamed_from, record, guessed)
 
 

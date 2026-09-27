@@ -1101,7 +1101,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   name, or without a record pyproject's, has its own package there: `_other_package`) is
   refused, as `rename` refuses it (`src/<new>/ already exists`); it used to rewrite only
   `[project] name`. A record named like app.name means only pyproject.toml was edited: apply
-  puts its name back. Without a record either line may be the edited one, and the refusal says
+  puts its name back (`_old_name`: also when that name differs only in case or `-`/`_`, so its
+  package is app.name's folder; it was taken for the real name, and a rename myapp -> MyApp
+  rewrote the user's prose). Without a record either line may be the edited one, and the refusal says
   both ways out.
 - Order of `apply`: dirty-tree check (rename only; `--force` skips it) -> the rename
   (`rename.report`, `tidy_before`, `apply_plan`, then the record under the new name: a later

@@ -1095,6 +1095,27 @@ def test_only_the_pyproject_name_differs(tmp_path: Path, monkeypatch: pytest.Mon
     assert ["lock"] in uv.changing() and cmd_apply.pending(project.cfg()) == []
 
 
+def test_a_pyproject_name_that_differs_only_in_spelling_is_put_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """app.name = "MyApp" (src/myapp/, the record MyApp) and only pyproject.toml [project] name
+    changed to "myapp" (by hand, or a tool that lowercases it): the record says app.name is
+    current, so apply puts that line back. It took "myapp" for the real name: doctor and the hook
+    reported app.name as not applied, apply wanted a clean tree for a rename myapp -> MyApp that
+    rewrote the user's prose, and `rename Other` started from "myapp"."""
+    project, uv = _project(tmp_path, monkeypatch, "script", "MyApp")
+    assert _run(project) == 0  # the record: MyApp
+    prose = project.root / "tests" / "test_prose.py"
+    prose.write_text("# welcome to myapp, the best app\n", encoding="utf-8")
+    path = project.root / "pyproject.toml"
+    path.write_text(path.read_text(encoding="utf-8").replace('name = "MyApp"', 'name = "myapp"', 1), encoding="utf-8", newline="\n")
+    uv.locked = path.read_bytes()
+    cfg = project.cfg()
+    assert cmd_apply.applied_name(cfg) is None  # what rename starts from: app.name itself
+    assert cmd_apply.pending(cfg) == [("pyproject.toml [project] name = 'myapp', but app.name = 'MyApp'", "./deploy apply")]
+    assert _run(project) == 0
+    assert project.pyproject()["project"]["name"] == "MyApp" and cmd_apply.pending(project.cfg()) == []
+    assert prose.read_text(encoding="utf-8") == "# welcome to myapp, the best app\n"  # no rename touched it
+
+
 @pytest.mark.parametrize("record", [True, False])
 def test_a_name_of_another_package_in_src_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: bool) -> None:
     """app.name set by hand to the name of another package of the project (src/helpers/): apply
