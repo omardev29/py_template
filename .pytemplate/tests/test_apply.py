@@ -1116,6 +1116,26 @@ def test_a_pyproject_name_that_differs_only_in_spelling_is_put_back(tmp_path: Pa
     assert prose.read_text(encoding="utf-8") == "# welcome to myapp, the best app\n"  # no rename touched it
 
 
+def test_both_names_edited_by_hand_are_renamed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """app.name and pyproject.toml [project] name both edited to the new name: the record (the old
+    name) matched neither, so apply skipped the rename, recorded the new name (the real one lost),
+    warned that src/beta/ does not exist and said "applied". The record's package is still in
+    src/: it is this project's record, and apply renames from it."""
+    project, _ = _project(tmp_path, monkeypatch, "script", "alpha")
+    assert _run(project) == 0  # the record: alpha
+    project.edit("app", "name", "beta")
+    path = project.root / "pyproject.toml"
+    path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "beta"', 1), encoding="utf-8", newline="\n")
+    cfg = project.cfg()
+    assert cmd_apply.applied_name(cfg) == "alpha"
+    assert cmd_apply.pending(cfg)[0] == ("app.name = 'beta' is not applied: the package is still src/alpha/", "./deploy apply  (renames 'alpha' -> 'beta')")
+    assert _run(project) == 0
+    skeleton = presets.skeleton("script", "beta")
+    assert _owned(project.root) == {k: v for k, v in skeleton.items() if k.split("/")[0] in ("src", "tests", "typings")}
+    record = cmd_apply.load_record()
+    assert record is not None and record["name"] == "beta" and cmd_apply.pending(project.cfg()) == []
+
+
 @pytest.mark.parametrize("record", [True, False])
 def test_a_name_of_another_package_in_src_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: bool) -> None:
     """app.name set by hand to the name of another package of the project (src/helpers/): apply

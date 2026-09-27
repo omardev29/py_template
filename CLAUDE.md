@@ -1147,7 +1147,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   keeps it): `{name, preset, dependencies, dev}`, written by `./deploy new` (`presets._record`
   in `__init`: the new project's own, never the copied one), by each apply once the lock follows
   the options, and renamed by rename. It counts only when its name is `app.name` or pyproject
-  `[project] name` (`trusted_record`). The trusted record decides the preset
+  `[project] name`, or its package is in src/ where app.name's is not (`trusted_record`: both
+  lines edited by hand to the new name; apply skipped the rename, recorded the new name and lost
+  the real one). The trusted record decides the preset
   (`_infer_preset`): an app.preset that differs from it was edited by hand, whatever
   pyproject.toml holds (a script project may `./deploy add raylib` or flet). Without one (lost:
   a state.json merge conflict whose sides disagree on it, a deleted file) pyproject.toml's

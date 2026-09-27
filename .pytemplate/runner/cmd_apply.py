@@ -272,12 +272,17 @@ def _onto_another_package(cfg: Config, old: str, record: dict[str, Any] | None) 
 
 def trusted_record(cfg: Config, project_name: str | None) -> dict[str, Any] | None:
     """The `applied` record, when it describes this project: its name is app.name or pyproject.toml
-    [project] name (a hand edit changes only one of them). Anything else is foreign, e.g. the
-    template's own record in a project that `./deploy new` just made: ignored."""
+    [project] name (a hand edit of one of them), or its package is in src/ where app.name's is not
+    (or is that very folder: _old_name): both lines were edited by hand to the new name, and apply
+    skipped the rename, recorded the new name and lost the real one. Anything else is foreign,
+    e.g. the template's own record in a copy of it: ignored."""
     record = load_record()
-    if record is None or record["name"] not in (cfg.app.name, project_name):
+    if record is None:
         return None
-    return record
+    name = record["name"]
+    if name in (cfg.app.name, project_name) or _old_name(cfg, name) == name:
+        return record
+    return None
 
 
 def _project_name() -> str | None:
