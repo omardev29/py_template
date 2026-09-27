@@ -139,6 +139,176 @@ def test_sync_installs_every_dependency_group(tmp_path: Path, monkeypatch: pytes
     assert calls.argvs == [["uv", "sync", "--locked", "--all-groups"]]
 
 
+GROUPS_PYPROJECT = """\
+[project]
+name = "My_App"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest"]
+Cpu = ["torch==2.8.0"]
+gpu = ["torch==2.8.0"]
+docs = ["mkdocs"]
+lint = ["ruff"]
+bench = ["pyperf"]
+tools = ["pre-commit"]
+
+[tool.uv]
+conflicts = [
+    [{ group = "CPU" }, { package = "my-app", group = "gpu" }],
+    [{ group = "lint" }, { extra = "fast" }],
+    [{ package = "other-member", group = "docs" }, { group = "bench" }],
+    [{ group = "dev" }, { group = "tools" }],
+]
+
+[tool.uv.dependency-groups]
+docs = { requires-python = ">=3.12" }
+bench = { requires-python = "==3.14.*" }
+"""
+
+
+def _no_groups(*groups: str) -> list[str]:
+    return [a for g in groups for a in ("--no-group", g)]
+
+
+def test_sync_leaves_out_the_groups_uv_cannot_install_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`uv sync --all-groups` refused the whole sync in a project whose [tool.uv] conflicts pairs
+    two groups (a cpu/gpu split: "Groups `cpu` and `gpu` are incompatible"), and in .venv-pypy
+    with a group whose own requires-python needs 3.12: sync, setup and apply exited 2 and every
+    `./deploy add` was rolled back, while `uv run --locked` (the default groups) worked. Those
+    groups are left out, each with a note; the default groups stay, and so do a group paired
+    with an extra only (--all-groups enables no extra) and one paired with another package's."""
+    monkeypatch.setattr(envs, "ROOT", tmp_path)
+    (tmp_path / "pyproject.toml").write_text(GROUPS_PYPROJECT, encoding="utf-8")
+    calls = Calls(monkeypatch)
+    cfg = make(PYPY)
+    envs.sync(envs.cpython_env(cfg))
+    envs.sync(envs.pypy_env(cfg))
+    assert calls.argvs == [
+        ["uv", "sync", "--locked", "--all-groups", *_no_groups("cpu", "gpu", "tools")],
+        ["uv", "sync", "--locked", "--all-groups", *_no_groups("cpu", "gpu", "docs", "bench", "tools")],
+    ]
+    err = capsys.readouterr().err
+    assert "dependency group 'cpu' not installed ([tool.uv] conflicts pairs it with 'gpu')" in err
+    assert "dependency group 'tools' not installed ([tool.uv] conflicts pairs it with 'dev')" in err
+    assert "dependency group 'docs' not installed (its requires-python '>=3.12' excludes Python 3.11.15)" in err
+    assert "'bench' not installed (its requires-python '==3.14.*' excludes Python 3.11.15)" in err
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        None,  # no pyproject.toml
+        "[project\n",  # broken: uv says what is wrong with it
+        GROUPS_PYPROJECT.replace("[tool.uv]\n", '[tool.uv]\ndefault-groups = "all"\n'),  # uv run needs them all too
+        GROUPS_PYPROJECT.replace("conflicts", "no-conflicts").replace("[tool.uv.dependency-groups]", "[x]"),
+    ],
+)
+def test_sync_leaves_nothing_out_without_a_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str | None) -> None:
+    monkeypatch.setattr(envs, "ROOT", tmp_path)
+    if text is not None:
+        (tmp_path / "pyproject.toml").write_text(text, encoding="utf-8")
+    calls = Calls(monkeypatch)
+    envs.sync(envs.pypy_env(make(PYPY)))
+    assert calls.argvs == [["uv", "sync", "--locked", "--all-groups"]]
+
+
+@pytest.mark.parametrize(
+    ("spec", "version", "excluded"),
+    [
+        (">=3.12", (3, 11, 15), True),
+        (">=3.12", (3, 14), False),
+        (">= 3.11 , <4", (3, 11, 15), False),
+        ("<3.12", (3, 14), True),
+        ("==3.13.*", (3, 14), True),
+        ("==3.14.*", (3, 14), False),
+        ("!=3.14.*", (3, 14), True),
+        ("!=3.14", (3, 14), False),  # 3.14.1 and later
+        (">=3.14.2", (3, 14), False),  # a later patch release fits: uv decides
+        (">3.14.0,<3.14.5", (3, 14), False),
+        ("==3.14.3", (3, 14), False),
+        ("==3.14.3", (3, 14, 7), True),
+        (">3.14.7", (3, 14, 7), True),
+        ("~=3.12", (3, 11, 15), True),
+        ("~=3.12", (3, 14), False),
+        ("~=3.12.1", (3, 13), True),
+        ("~=3", (3, 14), False),  # not PEP 440: uv decides
+        (">=3.12.0rc1", (3, 11, 15), False),  # outside the subset: uv decides
+        ("", (3, 11, 15), False),
+    ],
+)
+def test_group_requires_python(spec: str, version: tuple[int, ...], excluded: bool) -> None:
+    assert envs._excludes(spec, version) is excluded
+
+
+def test_sync_with_real_uv_installs_what_the_groups_allow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real uv, offline, in a project of empty groups: `--all-groups` alone is refused (the pair
+    of [tool.uv] conflicts, a group whose requires-python no interpreter meets), envs.sync is not."""
+    try:
+        proc.find_uv()
+    except DeployError:
+        pytest.skip("uv not found")
+    here = "%d.%d" % sys.version_info[:2]
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "p"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = []\n\n'
+        "[dependency-groups]\ndev = []\ncpu = []\ngpu = []\nfuture = []\n\n"
+        '[tool.uv]\nconflicts = [[{ group = "cpu" }, { group = "gpu" }]]\n\n'
+        '[tool.uv.dependency-groups]\nfuture = { requires-python = ">=3.99" }\n',
+        encoding="utf-8",
+    )
+    for module in (envs, proc):
+        monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    env = envs.cpython_env(make({"python": {"cpython": here}}))
+    if envs.uv(env, ["lock"], check=False, capture=True, echo=False).returncode:
+        pytest.skip(f"uv cannot lock offline with a managed CPython {here}")
+    plain = envs.uv(env, ["sync", "--locked", "--all-groups"], check=False, capture=True, echo=False)
+    assert plain.returncode == 2 and "requires-python" in plain.stderr, plain.stderr
+    plain = envs.uv(env, ["sync", "--locked", "--all-groups", "--no-group", "future"], check=False, capture=True, echo=False)
+    assert plain.returncode == 2 and "incompatible with the conflicts" in plain.stderr, plain.stderr
+    envs.sync(env)
+    assert env.python.is_file()
+
+
+@pytest.mark.parametrize(("find", "install"), [(0, None), (2, 0), (2, 2)])
+def test_ensure_python_finds_or_installs_the_version_or_says_why(monkeypatch: pytest.MonkeyPatch, find: int, install: int | None) -> None:
+    seen: list[list[str]] = []
+
+    def fake(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        argv = [str(a) for a in args]
+        seen.append(argv)
+        assert env.request == "3.41" and env.preference == "only-managed"
+        code = find if argv[1] == "find" else install
+        return done(argv, code or 0, "", "error: No download found for request: cpython-3.41-linux-x86_64-gnu\n" if code else "")
+
+    monkeypatch.setattr(envs, "uv", fake)
+    if install == 2:
+        with pytest.raises(DeployError) as e:
+            envs.ensure_python("3.41")
+        assert e.value.code == 3 and 'python.cpython = "3.41"' in str(e.value) and "No download found" in str(e.value)
+        assert ".python-version keeps its old value" in str(e.value)
+    else:
+        envs.ensure_python("3.41")
+    assert seen == [["python", "find", "3.41"], *([["python", "install", "3.41"]] if find else [])]
+
+
+def test_ensure_python_with_real_uv_refuses_a_version_that_does_not_exist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real uv, offline: a typo such as 3.41 has no download (uv knows its downloads offline)."""
+    try:
+        proc.find_uv()
+    except DeployError:
+        pytest.skip("uv not found")
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    with pytest.raises(DeployError, match=r'python\.cpython = "3\.41": uv can neither find nor install') as e:
+        envs.ensure_python("3.41")
+    assert e.value.code == 3
+    envs.ensure_python("%d.%d" % sys.version_info[:2])  # the runner's own: found, nothing installed
+
+
 def test_quiet_hides_uvs_own_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """README: -q prints no progress lines. `./deploy -q sync` still printed uv's `Resolved 26
     packages` and `Checked 21 packages`."""
@@ -326,6 +496,7 @@ def fake_uv(monkeypatch: pytest.MonkeyPatch, code_for: dict[tuple[str, ...], int
         return done(args, (code_for or {}).get(tuple(calls[-1]), 0))
 
     monkeypatch.setattr(envs, "uv", run)
+    monkeypatch.setattr(envs, "left_out", lambda env: [])  # the project's own groups never change these argvs
     return calls
 
 
@@ -484,6 +655,25 @@ def test_a_failed_lock_puts_pyproject_back(lock_project: Path, monkeypatch: pyte
     assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
 
 
+def test_a_lock_cut_short_puts_uv_lock_back_too(lock_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """uv writes uv.lock in place: a full disk stopped it in the middle of the new lock, and
+    only pyproject.toml was put back, so uv.lock stayed cut short (invalid TOML) and every
+    `uv run --locked` and the next lock failed on it."""
+    lock = lock_project.with_name("uv.lock")
+    lock.write_bytes(b"version = 1\n# the old lock\n")
+
+    def cut_short(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        lock.write_bytes(b'version = 1\nrequires-python = ">=3')  # what reached the disk
+        raise proc.CommandFailed(["uv", "lock"], 2)
+
+    monkeypatch.setattr(envs, "uv", cut_short)
+    with pytest.raises(proc.CommandFailed):
+        cmd_env.cmd_lock(make(), [])
+    assert lock.read_bytes() == b"version = 1\n# the old lock\n"
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
+    assert "pyproject.toml and uv.lock: put back as they were" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("args", [["--check"], ["--locked"], ["--dry-run"], ["--upgrade", "--dry-run"], ["--frozen"], ["--check-exists"]])
 def test_a_read_only_lock_puts_pyproject_back(lock_project: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]) -> None:
     """`./deploy lock --dry-run` (a preview) rewrote pyproject.toml, uv wrote no uv.lock, and the
@@ -491,6 +681,26 @@ def test_a_read_only_lock_puts_pyproject_back(lock_project: Path, monkeypatch: p
     calls = fake_uv(monkeypatch)
     assert cmd_env.cmd_lock(make(), args) == 0
     assert calls == [["lock", *args]]
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
+
+
+@pytest.mark.parametrize("args", [["--help"], ["-h"], ["--upgrade", "-h"], ["--version"], ["-V"]])
+def test_lock_help_changes_nothing(lock_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], args: list[str]) -> None:
+    """`./deploy lock --help` (help passes through to uv) rewrote the managed parts of
+    pyproject.toml, then `uv lock --help` wrote no uv.lock and nothing put pyproject.toml back:
+    every `uv run --locked` failed until the next real lock."""
+    calls = fake_uv(monkeypatch)
+    assert cmd_env.cmd_lock(make(), args) == 0
+    assert calls == [["lock", *args]]
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"  # never rewritten
+    assert "pyproject.toml" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("args", [["--script", "tool.py"], ["--script=tool.py"]])
+def test_a_script_lock_puts_pyproject_back(lock_project: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]) -> None:
+    """`uv lock --script X` writes X's own lock, never uv.lock: pyproject.toml must not move past it."""
+    fake_uv(monkeypatch)
+    assert cmd_env.cmd_lock(make(), args) == 0
     assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
 
 
@@ -539,6 +749,109 @@ def test_ensure_lock_relocks_only_when_the_check_fails(
     cmd_env.ensure_lock(make())
     assert calls[0] == ["lock", "--check"]
     assert (["lock"] in calls) is relocks
+
+
+NO_PYPY_PYPROJECT = '[project]\nname = "p"\nversion = "0.1.0"\nrequires-python = ">=3.14"\ndependencies = []\n'
+
+
+def test_a_relock_that_first_resolves_pypy_checks_the_code_after_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """backend.supported gained pypy by hand: mode (another change), rename and lock re-locked
+    for PyPy without the Python 3.11 check, which ran only when mode itself added PyPy, and apply
+    then found PyPy in the lock and skipped it too. ensure_lock runs it once uv.lock resolves for
+    PyPy for the first time, after the re-lock (it syncs the tools environment with it)."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(NO_PYPY_PYPROJECT, encoding="utf-8")
+    monkeypatch.setattr(render, "PYPROJECT", pyproject)
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    calls = fake_uv(monkeypatch, {("lock", "--check"): 1})
+    checked: list[list[list[str]]] = []
+    monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", lambda cfg: checked.append(list(calls)))
+    cmd_env.ensure_lock(make(PYPY))
+    assert checked == [[["lock", "--check"], ["lock"]]]  # after the re-lock
+    assert render.resolves_pypy(tomllib.loads(pyproject.read_text(encoding="utf-8")))
+    cmd_env.ensure_lock(make(PYPY))  # the lock resolves PyPy already: no second check
+    cmd_env.ensure_lock(make())  # PyPy leaves: nothing to check
+    assert len(checked) == 1
+
+
+def test_lock_that_first_resolves_pypy_checks_the_code_or_puts_both_files_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pyproject, lock = tmp_path / "pyproject.toml", tmp_path / "uv.lock"
+    pyproject.write_text(NO_PYPY_PYPROJECT, encoding="utf-8")
+    lock.write_text("version = 1\n", encoding="utf-8")
+    for module in (render, cmd_env):
+        monkeypatch.setattr(module, "PYPROJECT", pyproject)
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    for name in cmd_env.LOCK_READ_ONLY_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(render, "apply", lambda cfg, **kw: ([], []))
+    fake_uv(monkeypatch)
+
+    def refused(cfg: Config) -> None:
+        raise DeployError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
+
+    monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", refused)
+    with pytest.raises(DeployError, match="Python 3.11"):
+        cmd_env.cmd_lock(make(PYPY), [])
+    assert pyproject.read_text(encoding="utf-8") == NO_PYPY_PYPROJECT and lock.read_text(encoding="utf-8") == "version = 1\n"
+    assert "put back as it was (the code is not ready for PyPy yet)" in capsys.readouterr().err
+    checked: list[Config] = []
+    monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", checked.append)
+    assert cmd_env.cmd_lock(make(PYPY), ["--dry-run"]) == 0 and checked == []  # writes no uv.lock: nothing to check
+    assert cmd_env.cmd_lock(make(PYPY), []) == 0 and len(checked) == 1
+    assert cmd_env.cmd_lock(make(PYPY), ["--upgrade"]) == 0 and len(checked) == 1  # resolves PyPy already
+
+
+def test_a_relock_whose_pypy_check_fails_puts_both_files_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """rename puts nothing back when ensure_lock fails (its files are renamed by then): a failed
+    PyPy check there left uv.lock resolving for PyPy, and the next apply, which checks the code
+    only when the lock does not resolve for PyPy yet, skipped the check. ensure_lock puts both
+    files back itself."""
+    pyproject, lock = tmp_path / "pyproject.toml", tmp_path / "uv.lock"
+    pyproject.write_text(NO_PYPY_PYPROJECT, encoding="utf-8")
+    lock.write_text("version = 1\n", encoding="utf-8")
+    for module in (render, cmd_env):
+        monkeypatch.setattr(module, "PYPROJECT", pyproject)
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    for name in cmd_env.LOCK_READ_ONLY_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+    def uv(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if list(args) == ["lock"]:
+            lock.write_text("version = 1\n# resolves for pypy too\n", encoding="utf-8")
+        return done(args, 1 if list(args) == ["lock", "--check"] else 0)
+
+    monkeypatch.setattr(envs, "uv", uv)
+
+    def refused(cfg: Config) -> None:
+        raise DeployError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
+
+    monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", refused)
+    with pytest.raises(DeployError, match="Python 3.11"):
+        cmd_env.ensure_lock(make(PYPY))
+    assert pyproject.read_text(encoding="utf-8") == NO_PYPY_PYPROJECT and lock.read_text(encoding="utf-8") == "version = 1\n"
+    assert "put back as they were (the code is not ready for PyPy yet)" in capsys.readouterr().err
+    assert render.gains_pypy(make(PYPY))  # so the next re-lock (apply) checks the code again
+
+
+@pytest.mark.parametrize("name", ["UV_FROZEN", "UV_LOCKED"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_ensure_lock_refuses_a_relock_the_environment_makes_a_no_op(monkeypatch: pytest.MonkeyPatch, name: str, dry_run: bool) -> None:
+    """Under the user's UV_FROZEN `uv lock` only checks the lock's validity and exits 0: mode,
+    apply and rename went on as if they had re-locked and left uv.lock stale (every `uv run
+    --locked` failed). The re-lock is refused, naming the variable, so they put their files back."""
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    monkeypatch.setattr(render, "write_pyproject", lambda cfg: True)
+    calls = fake_uv(monkeypatch, {("lock", "--check"): 1})
+    monkeypatch.setenv(name, "1")
+    with pytest.raises(DeployError, match=f"{name} is set") as e:
+        cmd_env.ensure_lock(make())
+    assert e.value.code == 2 and ["lock"] not in calls
+    monkeypatch.setenv(name, "0")  # a false value is no read-only lock
+    cmd_env.ensure_lock(make())
 
 
 # --- clean ---------------------------------------------------------------------------------------------

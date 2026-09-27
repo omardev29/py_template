@@ -131,6 +131,73 @@ def _http_response(body: bytes, *, announce: int | None = None, chunked: bool = 
     return response
 
 
+@pytest.mark.parametrize(
+    ("archive", "pinned"),
+    [
+        ("flet-linux-ubuntu24.04-amd64.tar.gz", ["FLET_LINUX_DISTRO=ubuntu24.04", "FLET_DESKTOP_FLAVOR=full", "FLET_APP_ID=demo"]),
+        ("flet-linux-debian10-light-arm64.tar.gz", ["FLET_LINUX_DISTRO=debian10", "FLET_DESKTOP_FLAVOR=light", "FLET_APP_ID=demo"]),
+        ("flet-windows.zip", []),  # one name per OS elsewhere
+    ],
+)
+def test_nuitka_pins_the_client_name_the_app_looks_for(build_dirs: Path, monkeypatch: pytest.MonkeyPatch, archive: str, pinned: list[str]) -> None:
+    # flet_desktop names the Linux client from the user's glibc bracket and from a pyproject.toml
+    # in the folder the app starts from: the build bundled ...-ubuntu24.04-amd64 (the project
+    # sets desktop_flavor = "full"), the app looked for ...-ubuntu24.04-light-amd64 and
+    # downloaded the client at its first start (offline it could not start)
+    cfg = make({"app": {"name": "demo", "preset": "flet", "gui": True}})
+    app = _payload(build_dirs / "payload", cfg.pkg)
+    fake = FakeUv()
+    fake.ARCHIVE = archive
+    monkeypatch.delenv("FLET_CLIENT_URL", raising=False)
+    monkeypatch.setattr(nuitka, "IS_WINDOWS", False)
+    monkeypatch.setattr(envs, "uv", fake)
+    client = _client_archive(zip_format=archive.endswith(".zip"))
+    monkeypatch.setattr(nuitka.urllib.request, "urlopen", lambda url, timeout=0: _http_response(client))
+    nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
+    forced = sorted(a.split("=", 1)[1] for a in fake.argv if a.startswith("--force-runtime-environment-variable="))
+    assert forced == sorted(pinned)
+
+
+def test_nuitka_bundles_the_client_fingerprint_flet_pack_writes(build_dirs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # flet pack ships <archive>.sha256 ("<sha256> <size>"): without it flet_desktop hashed the
+    # whole client (tens of MB) at every start that could not keep its own copy (onefile)
+    import hashlib
+
+    cfg = make({"app": {"name": "demo", "preset": "flet", "gui": True}})
+    app = _payload(build_dirs / "payload", cfg.pkg)
+    fake = FakeUv()
+    client = _client_archive()
+    monkeypatch.delenv("FLET_CLIENT_URL", raising=False)
+    monkeypatch.setattr(nuitka, "IS_WINDOWS", False)
+    monkeypatch.setattr(envs, "uv", fake)
+    monkeypatch.setattr(nuitka.urllib.request, "urlopen", lambda url, timeout=0: _http_response(client))
+    nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
+    sidecar = build_dirs / "build" / "flet-client" / FakeUv.VERSION / (FakeUv.ARCHIVE + ".sha256")
+    expected = f"{hashlib.sha256(client).hexdigest()} {len(client)}"
+    assert sidecar.read_text(encoding="ascii") == expected
+    assert f"--include-data-files=flet-client/{sidecar.name}=flet_desktop/app/{sidecar.name}" in fake.argv
+    assert (build_dirs / "build" / "nuitka-stage" / "cpython" / "flet-client" / sidecar.name).read_text(encoding="ascii") == expected
+    # A cache from before the sidecar gets one; a re-download never keeps the old one, even one
+    # that names the new archive's size
+    sidecar.unlink()
+    nuitka._flet_client_archive(cfg)
+    assert sidecar.read_text(encoding="ascii") == expected
+    import io
+    import tarfile
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as t:
+        member = tarfile.TarInfo("flet/flet")
+        member.size = 14
+        t.addfile(member, io.BytesIO(b"another client"))
+    fresh = buffer.getvalue()
+    sidecar.write_text(f"{'0' * 64} {len(fresh)}", encoding="ascii")
+    sidecar.with_name(FakeUv.ARCHIVE).write_bytes(b"damaged")
+    monkeypatch.setattr(nuitka.urllib.request, "urlopen", lambda url, timeout=0: _http_response(fresh))
+    nuitka._flet_client_archive(cfg)
+    assert sidecar.read_text(encoding="ascii") == f"{hashlib.sha256(fresh).hexdigest()} {len(fresh)}"
+
+
 def test_nuitka_bundles_the_flet_client(build_dirs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Nuitka cannot follow flet's lazy controls (module __getattr__ + importlib), and the
     # flet-desktop wheel has no Flutter client (the app would download it at its first start):
@@ -154,7 +221,13 @@ def test_nuitka_bundles_the_flet_client(build_dirs: Path, monkeypatch: pytest.Mo
     assert urls == [f"https://github.com/flet-dev/flet/releases/download/v{FakeUv.VERSION}/{FakeUv.ARCHIVE}"]
     assert archive.read_bytes() == client
     assert "--include-package=flet" in fake.argv and "--include-package=flet_desktop" in fake.argv
-    assert f"--include-data-files={archive}=flet_desktop/app/{FakeUv.ARCHIVE}" in fake.argv
+    # relative to the stage (Nuitka's cwd): Nuitka splits an absolute source at ',' and '='
+    assert f"--include-data-files=flet-client/{FakeUv.ARCHIVE}=flet_desktop/app/{FakeUv.ARCHIVE}" in fake.argv
+    assert (build_dirs / "build" / "nuitka-stage" / "cpython" / "flet-client" / FakeUv.ARCHIVE).read_bytes() == client
+    # ft.Icons reads icons.json through importlib.resources: without it the app died at its
+    # first icon (FileNotFoundError), and Nuitka bundles no package data by default
+    assert "--include-package-data=flet.controls.material:icons.json" in fake.argv
+    assert "--include-package-data=flet.controls.cupertino:cupertino_icons.json" in fake.argv
     # Downloaded once: the next build takes the cached archive
     nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
     assert len(urls) == 1 and fake.queries == 2

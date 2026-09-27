@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_nvim, nvimtest, proc  # noqa: E402
+from runner import cmd_nvim, nvimtest, proc, project  # noqa: E402
 from runner.ui import DeployError  # noqa: E402
 
 # lazyvim.json exactly as LazyVim 16 writes it on first start (util/json.lua: sorted keys,
@@ -196,6 +196,66 @@ def test_extras_dry_run_and_bad_files(tmp_path: Path) -> None:
         cmd_nvim.enable_extras(path)
 
 
+def test_extras_in_a_config_that_cannot_be_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A read-only config (a Nix store, another user's file, chattr +i) ended `nvim extras` in an
+    # internal-error traceback, and a failed write of lazyvim.json left its .bak behind
+    path = tmp_path / "lazyvim.json"
+    path.write_text(FRESH_LAZYVIM_JSON, encoding="utf-8", newline="\n")
+
+    def denied(target: Path, data: bytes) -> None:
+        raise PermissionError(1, "Operation not permitted", str(target))
+
+    monkeypatch.setattr(cmd_nvim, "write_whole", denied)
+    with pytest.raises(DeployError, match=r"cannot write .*lazyvim.json: Operation not permitted\. Enable the extras by hand .*lang\.python") as e:
+        cmd_nvim.enable_extras(path, stamp="s")
+    assert e.value.code == 3
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["lazyvim.json"]  # no backup left behind
+    assert path.read_text(encoding="utf-8") == FRESH_LAZYVIM_JSON
+    real_write_bytes = Path.write_bytes
+
+    def no_backup(self: Path, data: bytes) -> int:
+        if self.name.endswith(".bak"):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_write_bytes(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", no_backup)
+    with pytest.raises(DeployError, match=r"cannot write .*\.bak: Permission denied"):
+        cmd_nvim.enable_extras(path, stamp="s")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["lazyvim.json"]
+
+
+def test_extras_keep_a_linked_lazyvim_json_a_link(tmp_path: Path) -> None:
+    # dotfiles managers link lazyvim.json into a repository: the file behind the link changes
+    if sys.platform == "win32":
+        pytest.skip("symlinks need a privilege on Windows")
+    real = tmp_path / "dotfiles" / "lazyvim.json"
+    real.parent.mkdir()
+    real.write_text(FRESH_LAZYVIM_JSON, encoding="utf-8", newline="\n")
+    config = tmp_path / "nvim"
+    config.mkdir()
+    (config / "lazyvim.json").symlink_to(real)
+    cmd_nvim.enable_extras(config / "lazyvim.json", stamp="s")
+    assert (config / "lazyvim.json").is_symlink() and json.loads(real.read_text(encoding="utf-8"))["extras"] == list(cmd_nvim.EXTRAS)
+
+
+def test_bootstrap_says_what_to_do_when_the_starter_git_cannot_be_removed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    nv = cmd_nvim.Nvim("nvim", (0, 12, 5), tmp_path / "c", tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    monkeypatch.setattr(cmd_nvim, "which", lambda name: "/usr/bin/git")
+
+    def clone(argv: list[object], **_: object) -> subprocess.CompletedProcess[str]:
+        (nv.config / ".git").mkdir(parents=True)
+        return subprocess.CompletedProcess([str(a) for a in argv], 0, "", "")
+
+    def stuck(path: Path) -> None:
+        raise PermissionError(1, "Operation not permitted", str(path / "objects"))
+
+    monkeypatch.setattr(cmd_nvim.proc, "run", clone)
+    monkeypatch.setattr(cmd_nvim, "remove_tree", stuck)
+    with pytest.raises(DeployError, match=r"the starter is in .*, but its \.git could not be removed .*delete it by hand") as e:
+        cmd_nvim.cmd_bootstrap(nv)
+    assert e.value.code == 3
+
+
 def test_local_spec_off(tmp_path: Path) -> None:
     config = tmp_path / "nvim"
     (config / "lua" / "config").mkdir(parents=True)
@@ -214,6 +274,66 @@ def test_lazyvim_installed(tmp_path: Path) -> None:
     (tmp_path / "d" / "lazy" / "LazyVim").mkdir(parents=True)
     assert nv.lazyvim_installed()
     assert nv.trust_db == tmp_path / "s" / "trust" and nv.lazyvim_json == tmp_path / "c" / "lazyvim.json"
+
+
+# lua/config/lazy.lua of the LazyVim starter (its spec part)
+STARTER_LAZY_LUA = """require("lazy").setup({
+  spec = {
+    -- add LazyVim and import its plugins
+    { "LazyVim/LazyVim", import = "lazyvim.plugins" },
+    -- import/override with your plugins
+    { import = "plugins" },
+  },
+})
+"""
+
+
+def test_lazyvim_is_told_from_the_config_not_from_a_file_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    def nvim(name: str) -> cmd_nvim.Nvim:
+        home = tmp_path / name
+        return cmd_nvim.Nvim("nvim", (0, 12, 5), home / "c", home / "d", home / "s", home / "k")
+
+    # lazy.nvim's own Structured Setup without LazyVim passed as LazyVim (lua/config/lazy.lua),
+    # and doctor, sync and bootstrap then promised an integration that needs LazyVim's extras
+    plain = nvim("plain")
+    (plain.config / "lua" / "config").mkdir(parents=True)
+    (plain.config / "init.lua").write_text('require("config.lazy")\n', encoding="utf-8")
+    (plain.config / "lua" / "config" / "lazy.lua").write_text(
+        'require("lazy").setup({ spec = { { import = "plugins" } } })\n'
+        '-- { "LazyVim/LazyVim", import = "lazyvim.plugins" },\n'
+        '--[[\n{ "LazyVim/LazyVim" }\n]]\n',
+        encoding="utf-8",
+    )
+    (plain.data / "lazy" / "lazy.nvim").mkdir(parents=True)
+    (plain.config / "lazy-lock.json").write_text('{"lazy.nvim": {"branch": "main", "commit": "x"}}', encoding="utf-8")
+    assert not plain.lazyvim_installed()
+    with pytest.raises(DeployError, match="LazyVim is not this Neovim's config .*bootstrap .*lazyvim.github.io") as e:
+        cmd_nvim.cmd_sync(plain)
+    assert e.value.code == 3
+    assert cmd_nvim.cmd_bootstrap(plain) == 0 and "It is not a LazyVim config" in capsys.readouterr().err
+    # LazyVim in one init.lua with its own lazy.nvim root was refused as "not found"
+    custom = nvim("custom")
+    custom.config.mkdir(parents=True)
+    (custom.config / "init.lua").write_text(
+        "require('lazy').setup({ root = vim.fn.stdpath('data') .. '/plugins', spec = { { 'LazyVim/LazyVim', import = 'lazyvim.plugins' } } })\n",
+        encoding="utf-8",
+    )
+    assert custom.lazyvim_installed()
+    # once started, the lockfile names it (a spec kept elsewhere: vim.g.lazyvim_json, a module)
+    locked = nvim("locked")
+    locked.config.mkdir(parents=True)
+    (locked.config / "lazy-lock.json").write_text('{"LazyVim": {"branch": "main", "commit": "x"}}', encoding="utf-8")
+    assert locked.lazyvim_installed()
+    # the starter as bootstrap clones it, before its first start
+    starter = nvim("starter")
+    (starter.config / "lua" / "config").mkdir(parents=True)
+    (starter.config / "lua" / "config" / "lazy.lua").write_text(STARTER_LAZY_LUA, encoding="utf-8")
+    assert starter.lazyvim_installed()
+
+
+def test_nvim_doctor_flags_a_config_without_lazyvim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out = _doctor(tmp_path, monkeypatch, capsys, lazy_lua='require("lazy").setup({ spec = { { import = "plugins" } } })\n')
+    assert code == 1 and "[XX] LazyVim not found" in out and "Start Neovim once" not in out, out
 
 
 def test_remove_tree_read_only(tmp_path: Path) -> None:
@@ -323,7 +443,7 @@ def test_env_isolation(tmp_path: Path) -> None:
 
 def test_default_dir_is_short() -> None:
     d = nvimtest.default_dir()
-    assert d.name in ("nvim", "pt-nvim") and len(str(d)) < 80
+    assert d.name in ("nvim", project.scratch_name("pt-nvim")) and len(str(d)) < 80
 
 
 def test_prepare_dir_refuses_foreign_dirs(tmp_path: Path) -> None:
@@ -336,6 +456,28 @@ def test_prepare_dir_refuses_foreign_dirs(tmp_path: Path) -> None:
     nvimtest._prepare_dir(fresh)
     nvimtest._prepare_dir(fresh)  # reusable: it carries the marker
     assert (fresh.base / nvimtest.DIR_MARKER).is_file()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX owners and modes (Windows %TEMP% is per user)")
+def test_prepare_dir_refuses_a_dir_another_user_can_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The isolated LazyVim runs from --dir: a /tmp/pt-nvim made by another user, or one every
+    user can write, let that user plant code there. The default is per user and made 0700."""
+    assert nvimtest.default_dir().name == project.scratch_name("pt-nvim") != "pt-nvim"
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    with pytest.raises(DeployError, match="written by every user"):
+        nvimtest._prepare_dir(nvimtest.Layout(shared))
+    shared.chmod(0o700)
+    real = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: real + 1)
+    with pytest.raises(DeployError, match="belongs to another user"):
+        nvimtest._prepare_dir(nvimtest.Layout(shared))
+    assert not (shared / nvimtest.DIR_MARKER).exists()
+    monkeypatch.setattr(os, "getuid", lambda: real)
+    fresh = nvimtest.Layout(tmp_path / "fresh" / "dir")
+    nvimtest._prepare_dir(fresh)
+    assert fresh.base.stat().st_mode & 0o777 == 0o700
 
 
 def test_prepare_dir_refuses_a_file(tmp_path: Path) -> None:
@@ -410,6 +552,21 @@ def test_query_reports_an_old_neovim(tmp_path: Path, monkeypatch: pytest.MonkeyP
     nvimtest._check_isolated(nv, layout)
     if old == "0.7.2":
         assert nv.state == nv.data, "no state dir before 0.8: the data dir held what it holds now"
+
+
+def test_an_nvim_that_cannot_run_is_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # ./deploy doctor ended in an internal-error traceback, without its verdict, when the nvim
+    # on PATH has its x bit but cannot be executed: another architecture, a truncated download
+    fake = tmp_path / ("nvim.exe" if sys.platform == "win32" else "nvim")
+    fake.write_bytes(b"\x7fELF\x02\x01\x01\x00garbage")
+    fake.chmod(0o755)
+    with pytest.raises(DeployError, match="cannot run .*nvim") as e:
+        cmd_nvim.headless(str(fake), cmd_nvim.QUERY_LUA)
+    assert e.value.code == 3
+    monkeypatch.setattr(cmd_nvim, "find_nvim", lambda: str(fake))
+    lines: list[tuple[bool | None, str]] = []
+    cmd_nvim.doctor(lambda passed, label, hint="": lines.append((passed, label)))
+    assert len(lines) == 1 and lines[0][0] is None and "cannot run" in lines[0][1], lines  # a [--] note
 
 
 def test_query_lua_needs_no_new_api() -> None:
@@ -923,6 +1080,7 @@ def _doctor(
     tools: dict[str, str] = EVERY_TOOL,
     cc: str | None = "/usr/bin/gcc",
     lazyvim_json: str | None = None,
+    lazy_lua: str = STARTER_LAZY_LUA,
 ) -> tuple[int, str]:
     """nvim doctor with Neovim, the tools, the trust and the project's .venv faked."""
     from types import SimpleNamespace
@@ -932,7 +1090,7 @@ def _doctor(
 
     nv = cmd_nvim.Nvim("nvim", (0, 12, 5), tmp_path / "c", tmp_path / "d", tmp_path / "s", tmp_path / "k")
     (nv.config / "lua" / "config").mkdir(parents=True)
-    (nv.config / "lua" / "config" / "lazy.lua").write_text("", encoding="utf-8")
+    (nv.config / "lua" / "config" / "lazy.lua").write_text(lazy_lua, encoding="utf-8")
     if lazyvim_json is None:
         lazyvim_json = json.dumps({"extras": list(cmd_nvim.EXTRAS), "version": 8})
     if lazyvim_json:
@@ -1002,6 +1160,20 @@ def test_nvim_doctor_tells_an_invalid_lazyvim_json_from_a_missing_one(tmp_path: 
     assert "lazyvim.json not found" in out and code == 0, out
     with pytest.raises(DeployError, match="cannot read it as JSON"):
         cmd_nvim.missing_extras(tmp_path / "c" / "lazyvim.json")
+
+
+def test_extras_entries_that_are_no_module_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # A hand-written {...} or [...] entry in lazyvim.json's extras made set() raise TypeError:
+    # nvim doctor ended in an internal-error traceback before its tools and project sections
+    path = tmp_path / "lazyvim.json"
+    mine = [cmd_nvim.EXTRAS[0], {"import": "x"}, ["y"]]
+    path.write_text(json.dumps({"extras": mine, "version": 8}), encoding="utf-8")
+    assert cmd_nvim.missing_extras(path) == list(cmd_nvim.EXTRAS[1:])
+    added, _ = cmd_nvim.enable_extras(path, stamp="s")
+    assert added == list(cmd_nvim.EXTRAS[1:])
+    assert json.loads(path.read_text(encoding="utf-8"))["extras"][:3] == mine  # the user's entries stay
+    code, out = _doctor(tmp_path / "doctor", monkeypatch, capsys, lazyvim_json=json.dumps({"extras": ["a", {"x": 1}]}))
+    assert code == 0 and "extras not enabled in lazyvim.json" in out and "Neovim integration ready" in out, out
 
 
 def test_c_compiler_skips_the_macos_shims_without_developer_tools(monkeypatch: pytest.MonkeyPatch) -> None:

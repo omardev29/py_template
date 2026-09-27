@@ -57,14 +57,12 @@ import ast
 import bisect
 import contextlib
 import dataclasses
-import errno
 import functools
 import io
 import keyword
 import os
 import re
 import stat
-import tempfile
 import tokenize
 import tomllib
 import warnings
@@ -75,7 +73,7 @@ from typing import Literal
 
 from . import config, envs, presets, proc, render, ui
 from .config import Config
-from .project import DIST, EXT_SUFFIXES, ROOT
+from .project import DIST, EXT_SUFFIXES, ROOT, write_whole
 from .project import ROOT as _RUNNER_CWD  # where the tools run (tests move ROOT, never this)
 from .ui import DeployError
 
@@ -84,8 +82,10 @@ Kind = Literal["pkg", "name", "keep", "skip"]
 _DRY = "(--dry-run: nothing is written)"
 SKIP_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".git", ".flet"}
 PY_SUFFIXES = {".py", ".pyi", ".pyw"}
-# Root files that never get a "this file also mentions the old name" note (rename edits them)
-ROOT_SKIP = {"pytemplate.toml", "pyproject.toml", "uv.lock", "pyrightconfig.json"}
+# Root files that never get a "this file also mentions the old name" note: rename edits them, or
+# they are the template's own (the launchers and CLAUDE.md, whose words such as `app` or `p` are
+# no app name: the note invited editing them by hand)
+ROOT_SKIP = {"pytemplate.toml", "pyproject.toml", "uv.lock", "pyrightconfig.json", "deploy", "deploy.cmd", "deploy.ps1", "CLAUDE.md"}
 # Folders never searched for other mentions of the old name: caches, environments, builds, the
 # runner, Claude Code's state (it holds whole copies of the project in worktrees)
 MENTION_SKIP_DIRS = {*SKIP_DIRS, ".build", "dist", ".pytemplate", ".claude", ".tox", ".nox", ".eggs", ".idea", "node_modules"}
@@ -132,7 +132,8 @@ _PKG_WORD_BEFORE = re.compile(r"(?:^|\W)(?:package|module)[ \t]+$")
 _IMPORT_BEFORE = re.compile(r"(?:^|[^\w.])import[ \t]+$")
 _FROM_BEFORE = re.compile(r"(?:^|[^\w.])from[ \t]+$")
 _IMPORT_AFTER = re.compile(r"[ \t]+import\b")
-_DASH_M_BEFORE = re.compile(r"(?:^|[\s\"'\[(,])-m[\s\"',]+$")  # -m alpha, "-m", "alpha"
+# -m alpha, "-m", "alpha", and a prefixed string after it: "-m", f"alpha.{x}", r"alpha"
+_DASH_M_BEFORE = re.compile(r"(?:^|[\s\"'\[(,])-m[\s\"',]+(?:[rRbBuUfFtT]{1,2}[\"'])?$")
 # TOML: a bare key (`alpha = `, `x.alpha = `) or a table header (`[alpha]`, `[[x.alpha]]`)
 _TOML_KEY_BEFORE = re.compile(r"[ \t]*(?:\[\[?[ \t]*)?(?:[A-Za-z0-9_-]+[ \t]*\.[ \t]*)*")
 _TOML_KEY_AFTER = re.compile(r"[ \t]*[.=\]]")
@@ -144,9 +145,16 @@ _PY_ESCAPES = frozenset("abfnrtvxNuU01234567")
 _BYTES_ESCAPES = frozenset("abfnrtvx01234567")
 _TOML_ESCAPES = frozenset("btnfruUex")  # TOML 1.0, plus \e and \x of TOML 1.1
 _JSON_ESCAPES = frozenset("bfnrtu")
+_YAML_ESCAPES = frozenset("0abtnvfreNLPxuU")  # YAML 1.2, in double-quoted scalars only
 _JSON_STRING = re.compile(r'"(?:[^"\\\n]|\\.)*"?')
-# Data files of src/ and tests/ whose strings have escapes (other text files are plain text)
-DATA_STRINGS = {".toml": "toml", ".json": "json"}
+# Data files of src/ and tests/ whose strings have escapes (other text files are plain text): a
+# notebook is JSON, and YAML's double-quoted strings have escapes (an app named n turned their
+# `\n` into `\b` when renamed to b)
+DATA_STRINGS = {
+    ".toml": "toml",
+    **dict.fromkeys((".json", ".ipynb", ".jsonc", ".geojson", ".jsonl", ".ndjson"), "json"),
+    **dict.fromkeys((".yaml", ".yml"), "yaml"),
+}
 # A format directive in a string ends in one letter: printf's `%d`, `%(k)-5s`, str.format's
 # `{:d}`, `{0:>4x}`, `{!r}` (the text before the letter, and the letters it can end in)
 _PRINTF_BEFORE = re.compile(r"%(?:\([^()\n]*\))?[#0 +\-]*(?:\*|\d+)?(?:\.(?:\*|\d*))?[hlL]?\Z")
@@ -439,26 +447,33 @@ def _python_code(text: str, pkg: str) -> _Code | None:
     regions: list[_Region] = []
     depth = 0
     fstart = 0
+    fforced = False
     last: list[tokenize.TokenInfo] = []  # the last two significant tokens
     # Open brackets: [the called name (for a call), index of the current argument, its keyword]
     brackets: list[list[str | int | None]] = []
+
+    def loader_argument() -> bool:
+        """Whether a string that starts here is a module-name argument of a loader call (LOADERS)."""
+        if not (brackets and last and last[-1].type == tokenize.OP and last[-1].string in ("(", ",", "=")):
+            return False
+        callee, index, keyword = brackets[-1]
+        positions = LOADERS.get(callee, ()) if isinstance(callee, str) else ()
+        return bool(positions) and (keyword in MODULE_ARGUMENTS if keyword is not None else index in positions)
+
     for tok in tokens:
         kind = tokenize.tok_name.get(tok.type, "")
         if kind.endswith("STRING_START"):  # Python 3.12+: f-strings, t-strings (and any later family) are text
             if depth == 0:
-                fstart = offset(tok.start)
+                fstart, fforced = offset(tok.start), loader_argument()  # import_module(f"alpha.{x}") as on 3.11
             depth += 1
         elif kind.endswith("STRING_END"):
             depth -= 1
             if depth == 0:
-                regions.append(_Region(fstart, offset(tok.end), fstring=True))  # {fields} are code, as on 3.11
+                regions.append(_Region(fstart, offset(tok.end), fforced, fstring=True))  # {fields} are code, as on 3.11
         elif depth == 0 and tok.type in (tokenize.STRING, tokenize.COMMENT):
             forced = fstring = False
-            if tok.type == tokenize.STRING and brackets and last and last[-1].type == tokenize.OP and last[-1].string in "(,=":
-                callee, index, keyword = brackets[-1]
-                positions = LOADERS.get(callee, ()) if isinstance(callee, str) else ()
-                forced = bool(positions) and (keyword in MODULE_ARGUMENTS if keyword is not None else index in positions)
             if tok.type == tokenize.STRING:
+                forced = loader_argument()
                 prefix = re.match(r"[A-Za-z]*", tok.string)
                 fstring = prefix is not None and "f" in prefix.group().lower()
             regions.append(_Region(offset(tok.start), offset(tok.end), forced, fstring))
@@ -538,6 +553,20 @@ def _after_src(text: str, start: int) -> bool:
     return not (sep >= 4 and (_is_word(text[sep - 4]) or text[sep - 4] == "-"))
 
 
+def _names_a_file(text: str, start: int, end: int, modules: frozenset[str]) -> bool:
+    """Whether the occurrence names a file after the app (`alpha.png`, `sfx/alpha.wav`,
+    "alpha.json"): `.` and a word that is no module or subpackage of src/<pkg>/ (`modules`),
+    outside an import, `-m` or package context. Such a file keeps its name, so a rewritten
+    reference no longer found it. An artifact the next build names after the new name
+    (`alpha.exe`, `alpha-cpython-exe`) is no such file."""
+    member = re.match(r"\.([A-Za-z0-9_]+)", text[end : end + 65])
+    if member is None or member.group(1) in modules or _ARTIFACT_SUFFIX.match(text, end) or _BACKEND_SUFFIX.match(text, end):
+        return False
+    before = text[max(0, start - 80) : start]
+    contexts = (_IMPORT_BEFORE, _FROM_BEFORE, _DASH_M_BEFORE, _PKG_WORD_BEFORE)
+    return not any(pattern.search(before) for pattern in contexts)
+
+
 def _text_kind(
     text: str, start: int, end: int, word: str, names: Names, *, contextual: bool = False, modules: frozenset[str] | None = None
 ) -> Kind:
@@ -557,8 +586,15 @@ def _text_kind(
         return "keep"  # src/alpha/alpha: a submodule of the package, like alpha.alpha
     if names.old_pkg == "src" and text[end : end + 1] in ("/", "\\") and not _after_src(text, start):
         return "skip"  # an app named src (made by hand: new refuses it): src/src/x is the folder, then the package
+    if not contextual and modules is not None and _names_a_file(text, start, end, modules):
+        return "keep"  # asset("alpha.png"), "alpha.json": the file keeps its name (reported)
     if names.old_name != names.old_pkg:
-        return "pkg" if word == names.old_pkg else "name"
+        if not contextual:
+            return "pkg" if word == names.old_pkg else "name"
+        if word != names.old_pkg:
+            return "name"  # the display name (My-Game): never a package reference
+        # pytemplate.toml: the package spelling goes through the context rules below, as for an
+        # app named like its package (every "auto" value of an app named Auto was rewritten)
     if names.new_name == names.new_pkg and not contextual:
         return "pkg"  # the new name is also the new package: no need to tell them apart
     if _ARTIFACT_SUFFIX.match(text, end) or _BACKEND_SUFFIX.match(text, end):
@@ -641,7 +677,7 @@ def _classify(
             return "keep"
     if not _whole_word(text, start, end):
         return "skip"
-    kind = _text_kind(text, start, end, word, names)
+    kind = _text_kind(text, start, end, word, names, modules=None if region.forced else modules)  # a loader's argument is a module
     return "pkg" if region.forced and kind == "name" else kind
 
 
@@ -668,7 +704,8 @@ def _toml_strings(text: str) -> list[tuple[int, int, bool]]:
 
 
 def _json_strings(text: str) -> list[tuple[int, int, bool]]:
-    """(start, end, False) of every string of a JSON text: a quote starts one only there."""
+    """(start, end, False) of every string of a JSON text: a quote starts one only there. YAML's
+    double-quoted scalars read the same way (on one line: the usual form)."""
     return [(m.start(), m.end(), False) for m in _JSON_STRING.finditer(text)]
 
 
@@ -738,18 +775,19 @@ def rewrite(
     `python`: tell code from strings and comments with the tokenizer. `only_pkg`: change only
     the package references, chosen by context, and report the other occurrences as kept
     (pytemplate.toml). `toml`: TOML keys and table headers never change. `strings` ("toml",
-    "json"; `toml` implies "toml"): the string syntax of a data file, whose escapes are never the
+    "json", "yaml"; `toml` implies "toml"): the string syntax of a data file, whose escapes are never the
     name (other text is plain: `a\\n` has no escape there). `module_keys`: TOML
     keys whose quoted values are module names (a bare old package there is the package).
     `package_modules`: the modules and subpackages of src/<old pkg>/ (only_pkg: `pkg.x` is the
-    package only when x is one of them; `pkg.ico`, `uv.lock` are file names).
+    package only when x is one of them; `pkg.ico`, `uv.lock` are file names; in other text a
+    file named after the app, `asset("pkg.png")`, is kept and reported: _names_a_file).
     """
     code = _python_code(text, names.old_pkg) if python else None
     module_lines = module_value_lines(text, module_keys) if module_keys else set()
     line_starts = [0, *(m.end() for m in re.finditer("\n", text))]
     syntax = "toml" if toml else strings
-    found = _toml_strings(text) if syntax == "toml" else _json_strings(text) if syntax == "json" else []
-    escapes = _JSON_ESCAPES if syntax == "json" else _TOML_ESCAPES
+    found = _toml_strings(text) if syntax == "toml" else _json_strings(text) if syntax in ("json", "yaml") else []
+    escapes = {"json": _JSON_ESCAPES, "yaml": _YAML_ESCAPES}.get(syntax, _TOML_ESCAPES)
     string_starts = [s[0] for s in found]
     pieces: list[str] = []
     last = 0
@@ -884,11 +922,22 @@ def _code_files(root: Path, links: list[str] | None = None) -> Iterator[tuple[st
     """Every regular file of src/ and tests/ (no caches), sorted. Links and junctions are never
     followed (their target may be shared with other projects): they go to `links` (a folder
     with a trailing slash)."""
+    def unlistable(e: OSError) -> None:
+        """A folder that cannot be listed stops the plan, as an unreadable file does: os.walk skipped
+        it, and its files kept the old imports inside the moved package."""
+        where = str(e.filename or "a folder of src/ or tests/")
+        with contextlib.suppress(ValueError):
+            where = Path(where).relative_to(root).as_posix()
+        raise DeployError(
+            f"rename: cannot list {where}/: {e.strerror or e}; nothing was changed.\n"
+            "  Make it readable (or move it out of src/ and tests/) and try again"
+        )
+
     for top in ("src", "tests"):
         base = root / top
         if not base.is_dir():
             continue
-        for dirpath, dirnames, filenames in os.walk(base):
+        for dirpath, dirnames, filenames in os.walk(base, onerror=unlistable):
             here = Path(dirpath)
             kept: list[str] = []
             for d in sorted(dirnames):
@@ -910,9 +959,12 @@ def _code_files(root: Path, links: list[str] | None = None) -> Iterator[tuple[st
 
 
 def _mentions_name(path: Path, pattern: re.Pattern[str]) -> bool:
-    """Whether a text file (at most MENTION_MAX_BYTES) mentions the old name."""
+    """Whether a text file (a regular file of at most MENTION_MAX_BYTES) mentions the old name.
+    A named pipe, a socket or a device is never read: opening a FIFO waits for a writer, and the
+    rename (or apply after an app.name edit, --dry-run too) hung forever."""
     try:
-        if path.stat().st_size > MENTION_MAX_BYTES:
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MENTION_MAX_BYTES:
             return False
         text = _decode(path.read_bytes())
     except OSError:
@@ -920,14 +972,35 @@ def _mentions_name(path: Path, pattern: re.Pattern[str]) -> bool:
     return text is not None and pattern.search(text) is not None
 
 
-def _link_mentions(link: Path, pattern: re.Pattern[str]) -> bool:
-    """Whether a link or junction points through the old name (src/alpha/data: it dangles once the
-    folder moves), or its file, or a text file below its folder, mentions it."""
+def _dangles(link: Path, move: tuple[Path, Path] | None) -> bool:
+    """Whether the link resolves into the package folder that `move` (old, new) moves and no
+    longer resolves to the same file once it moved (tests/data -> ../src/alpha/data). Its target
+    text is never searched for the name: an absolute target through the project's own folder,
+    named like the app, was reported although the link kept working."""
+    if move is None:
+        return False
+    old, new = move
     try:
-        if pattern.search(os.readlink(link)):
-            return True
+        target = os.readlink(link)
     except (OSError, ValueError):
-        pass  # a junction on an old Python, or not readable: look at what it holds
+        return False  # a junction on an old Python, or not readable: what it holds is looked at
+    if target.startswith(("\\\\?\\", "\\??\\")):  # a Windows junction's target
+        target = target[4:]
+    lexical = Path(os.path.normpath(link.parent / target))
+    real, real_old = Path(os.path.realpath(lexical)), Path(os.path.realpath(old))
+    if real != real_old and real_old not in real.parents:
+        return False  # it names nothing the rename moves
+    if lexical != old and old not in lexical.parents:
+        return True  # through another spelling of the folder (a linked parent folder): it stays there
+    parent = new / link.parent.relative_to(old) if old in link.parents else link.parent  # the link moves too
+    return Path(os.path.normpath(parent / target)) != new / lexical.relative_to(old)
+
+
+def _link_mentions(link: Path, pattern: re.Pattern[str], move: tuple[Path, Path] | None = None) -> bool:
+    """Whether a link or junction dangles once the package folder moves (_dangles), or its file,
+    or a text file below its folder, mentions the old name."""
+    if _dangles(link, move):
+        return True
     if not link.is_dir():
         return link.is_file() and _mentions_name(link, pattern)
     seen: set[str] = set()
@@ -1012,6 +1085,19 @@ def _plan_config(root: Path, names: Names) -> TextEdit:
     return TextEdit("pytemplate.toml", old, new, result.count, kept, f'app.name = "{names.new_name}"', bom=raw.startswith(b"\xef\xbb\xbf"))
 
 
+@functools.cache
+def _named_keys() -> frozenset[tuple[str, ...]]:
+    """The keys of the presets' pyproject blocks whose value holds the app's name ({{name}},
+    {{pkg}}), with their table: the only values of the block a rename rewrites."""
+    out: set[tuple[str, ...]] = set()
+    for preset in presets.available():
+        template = str(presets.load(preset).get("pyproject", ""))
+        for stmt in config.scan(template) or []:
+            if stmt.kind == "key" and re.search(r"\{\{(?:name|pkg)\}\}", template[stmt.value[0] : stmt.value[1]]):
+                out.add(stmt.path)
+    return frozenset(out)
+
+
 def _plan_pyproject(root: Path, names: Names) -> TextEdit | None:
     path = root / "pyproject.toml"
     if not path.is_file():
@@ -1029,9 +1115,15 @@ def _plan_pyproject(root: Path, names: Names) -> TextEdit | None:
     end = next((i for i, ln in enumerate(lines) if ln.strip() == presets.EXTRA_END), None)
     count = 0
     if begin is not None and end is not None and end > begin + 1:
-        block = rewrite("\n".join(lines[begin + 1 : end]), names, toml=True)
-        lines[begin + 1 : end] = block.text.split("\n")
-        count = block.count
+        # Only the values the preset writes with the name: flet's org = "com.example" is a
+        # reverse domain, and for an app named com it became "beta.example"
+        block, named, parts, pos = "\n".join(lines[begin + 1 : end]), _named_keys(), [], 0
+        for stmt in config.scan(block) or []:
+            if stmt.kind == "key" and stmt.path in named:
+                value = rewrite(block[stmt.value[0] : stmt.value[1]], names, toml=True)
+                parts += [block[pos : stmt.value[0]], value.text]
+                pos, count = stmt.value[1], count + value.count
+        lines[begin + 1 : end] = "".join([*parts, block[pos:]]).split("\n")
         new = "\n".join(lines)
     try:
         tomllib.loads(new)
@@ -1098,6 +1190,7 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
     unreadable: list[str] = []
     pattern = _pattern(names)
     links: list[str] = []
+    modules = _package_modules(root, names.old_pkg)  # `alpha.core` is the package, `alpha.png` a file
     for rel_path, path in _code_files(root, links):
         try:
             data = path.read_bytes()
@@ -1120,7 +1213,8 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
             if b"\0" not in data and pattern.search(data.decode("latin-1")):
                 unreadable.append(rel_path)
             continue
-        result = rewrite(text, names, python=path.suffix in PY_SUFFIXES, strings=DATA_STRINGS.get(path.suffix.lower(), ""))
+        strings = DATA_STRINGS.get(path.suffix.lower(), "")
+        result = rewrite(text, names, python=path.suffix in PY_SUFFIXES, strings=strings, package_modules=modules)
         if result.count or result.kept:
             try:
                 new = result.text.encode(encoding)
@@ -1138,7 +1232,7 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
         binary=binary,
         mentions=_mentions(root, names, generated),
         unreadable=unreadable,
-        linked=[rel for rel in links if _link_mentions(root / rel, pattern)],
+        linked=[rel for rel in links if _link_mentions(root / rel, pattern, (old_dir, src / names.new_pkg) if move else None)],
     )
 
 
@@ -1163,25 +1257,10 @@ def _move_dir(root: Path, old_rel: str, new_rel: str) -> None:
 
 
 def _replace_bytes(path: Path, data: bytes) -> None:
-    """Write `data` to `path` so that it is never left half-written: the bytes go to a temporary
-    file next to it, which then replaces it (os.replace is atomic). A write that fails midway (disk
-    full, a quota, a file size limit) leaves `path` as it was. The file keeps its permissions, a
-    symlink stays a link, and a read-only file is an error, as with a plain write."""
-    real = Path(os.path.realpath(path))
-    mode = stat.S_IMODE(real.stat().st_mode)
-    if not os.access(real, os.W_OK):
-        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
-    fd, name = tempfile.mkstemp(prefix=f".{real.name}.", suffix=".pt-rename", dir=real.parent)
-    os.close(fd)
-    tmp = Path(name)
-    try:
-        tmp.write_bytes(data)
-        os.chmod(tmp, mode)
-        os.replace(tmp, real)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
+    """Write `data` to `path` so that it is never left half-written, keeping its permissions,
+    owner, group and hard links; a symlink stays a link and a read-only file is an error, as with
+    a plain write (project.write_whole)."""
+    write_whole(path, data)
 
 
 def apply_plan(root: Path, plan_: Plan) -> None:
@@ -1492,17 +1571,19 @@ def report(plan_: Plan, *, dry: bool) -> None:
         ui.info(f"  {edit.path:<16} {edit.detail}{refs}")
         if dry:
             _samples(edit.changes, 2 * SAMPLES)
+    # What the user must review: ui.report, which -q never hides (a kept `return p.core` next to
+    # a renamed `import beta.core` fails at runtime, and -q printed nothing at all)
     kept = [(f.target, line, text) for f in plan_.files for line, text in f.result.kept]
     kept += [(e.path, line, text) for e in (plan_.config, plan_.pyproject) if e is not None for line, text in e.kept]
     if kept:
-        ui.info(f"  left unchanged   {len(kept)} line(s) still mention '{n.old_name}' (not changed; review them):")
+        ui.report(f"  left unchanged   {len(kept)} line(s) still mention '{n.old_name}' (not changed; review them):")
         for path, line, text in kept[:10]:
-            ui.info(f"    {path}:{line}: {_clip(text, 90)}")
+            ui.report(f"    {path}:{line}: {_clip(text, 90)}")
         if len(kept) > 10:
-            ui.info(f"    ... {len(kept) - 10} more")
+            ui.report(f"    ... {len(kept) - 10} more")
     if plan_.mentions:
         shown = ", ".join(plan_.mentions[:10]) + (f" and {len(plan_.mentions) - 10} more" if len(plan_.mentions) > 10 else "")
-        ui.info(f"  not changed      {shown} also mention '{n.old_name}' (edit them by hand if needed)")
+        ui.report(f"  not changed      {shown} also mention '{n.old_name}' (edit them by hand if needed)")
     if plan_.linked:
         paths = ", ".join(_target(p, plan_.move) for p in plan_.linked)
         ui.warn(
@@ -1535,6 +1616,34 @@ def needs_pypi(stderr: str) -> bool:
     return "$ uv lock" in stderr and any(marker in stderr for marker in PYPI_UNREACHABLE)
 
 
+def _check_the_name_is_applied(cfg: Config, new_name: str) -> None:
+    """Refuse what doctor and apply report about the name when src/<pkg>/ of app.name exists: an
+    app.name set by hand to ANOTHER package of src/ (the rename would move that package and
+    leave the app where it is; `rename <that name>` said "nothing to do"), and a pyproject.toml
+    [project] name edited by hand ("nothing to do" while doctor reports it)."""
+    from . import cmd_apply
+
+    try:
+        project_name = cmd_apply.read_project().name
+    except DeployError:
+        return  # check_new_name says what is wrong with pyproject.toml
+    record = cmd_apply.trusted_record(cfg, project_name)
+    other = cmd_apply._other_package(cfg, record, project_name)
+    if other is not None:
+        either = "" if record is not None else f"\n  (or, if pyproject.toml [project] name is the line edited by hand, put back name = \"{cfg.app.name}\" there)"
+        raise DeployError(
+            f"rename: app.name = '{cfg.app.name}' names src/{cfg.pkg}/, another package: the app is '{other}' "
+            f"(src/{package_of(other)}/).\n  Put back app.name = \"{other}\" in pytemplate.toml, then ./deploy rename {new_name}{either}"
+        )
+    if new_name == cfg.app.name and project_name is not None and project_name != cfg.app.name:
+        moved = f"src/{package_of(project_name)}/" if config.APP_NAME.fullmatch(project_name) else "its old folder"
+        raise DeployError(
+            f"rename: the app is already called '{new_name}' (src/{cfg.pkg}/), but pyproject.toml [project] name = "
+            f"'{project_name}'.\n  ./deploy apply writes '{new_name}' there; if src/{cfg.pkg}/ was moved by hand, "
+            f"move it back to {moved} first, then ./deploy rename {new_name} (it rewrites the imports too)"
+        )
+
+
 def cmd_rename(cfg: Config, args: list[str]) -> int:
     """rename NEW_NAME [--force]"""
     from . import cmd_apply
@@ -1562,6 +1671,8 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
             "  If app.name was changed by hand: put the old name back in pytemplate.toml and run "
             f"./deploy rename {new_name} again"
         )
+    else:
+        _check_the_name_is_applied(cfg, new_name)
     if new_name == old_name == cfg.app.name:
         ui.ok(f"the app is already called '{new_name}' (package src/{cfg.pkg}/): nothing to do")
         return 0
@@ -1590,17 +1701,23 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
     record = cmd_apply.project_record(cfg)  # before the rename: its name is still the old one
     clean = tidy_before(cfg, planned)
     apply_plan(ROOT, planned)  # new_cfg: the renamed pytemplate.toml, validated before anything was written
-    try:
-        ensure_lock(new_cfg)
-    except DeployError as e:
-        raise DeployError(f"{e}\n  The files are already renamed: fix the problem above and run ./deploy apply", e.code) from None
-    changed, edited = render.apply(new_cfg)
-    if changed:
-        ui.info(f"render: updated {', '.join(changed)}")
-    if edited:
-        ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./deploy render --force)")
-    tidy_after(new_cfg, planned, clean)
+    # The record follows the files at once (as in apply): named after the old app it is no longer
+    # trusted, and the ./deploy apply that finishes an interrupted rename reads it
     cmd_apply.rename_record(new_name, record)
+    try:
+        try:
+            ensure_lock(new_cfg)
+        except DeployError as e:
+            raise DeployError(f"{e}\n  The files are already renamed: fix the problem above and run ./deploy apply", e.code) from None
+        changed, edited = render.apply(new_cfg)
+        if changed:
+            ui.info(f"render: updated {', '.join(changed)}")
+        if edited:
+            ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./deploy render --force)")
+        tidy_after(new_cfg, planned, clean)
+    except KeyboardInterrupt:  # Ctrl+C, or SIGTERM/SIGHUP passed on to uv (proc.Interrupted)
+        ui.warn("the files are already renamed: run ./deploy apply to finish (uv.lock and the generated files)")
+        raise
     ui.ok(f"renamed '{old_name}' -> '{new_name}' (package src/{new_cfg.pkg}/)")
     ui.info("  Next: ./deploy test all, and review the changes with git diff")
     if DIST.is_dir() and any(DIST.iterdir()):

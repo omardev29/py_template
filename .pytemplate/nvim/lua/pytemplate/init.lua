@@ -23,8 +23,15 @@ function M.native(path)
   return M.is_win and (path:gsub("/", "\\")) or path
 end
 
+---vim.fs.normalize without its $VAR expansion: a project folder named `p$HOME` is a path (the
+---expansion turned it into another folder, and every path of the plugin missed the project).
+local function normalize(path)
+  return vim.fs.normalize(path, { expand_env = false })
+end
+M.normalize = normalize
+
 local function norm(path)
-  local p = vim.fs.normalize(path)
+  local p = normalize(path)
   if M.is_win then
     p = p:lower()
   end
@@ -48,7 +55,7 @@ end
 function M.root()
   if not M.config.root then
     local found = vim.fs.root(uv.cwd() or ".", "pytemplate.toml")
-    M.config.root = found and vim.fs.normalize(found) or nil
+    M.config.root = found and normalize(found) or nil
   end
   return M.config.root
 end
@@ -302,8 +309,24 @@ end
 
 -- --- uv and the runner --------------------------------------------------------------------------
 
-local function glob(pattern)
-  return vim.fn.glob(pattern, true, true)
+---The folders (or links) directly in `parent` whose name starts with `prefix` (case-insensitive
+---on Windows), sorted. Listed, never globbed: vim.fn.glob read [ ], { } and $VAR in the parent's
+---own path as a pattern (and matched nothing), and a backquoted part as a command for 'shell'.
+function M.subdirs(parent, prefix)
+  local out = {}
+  local fs = uv.fs_scandir(parent)
+  while fs do
+    local name, kind = uv.fs_scandir_next(fs)
+    if not name then
+      break
+    end
+    local head = name:sub(1, #prefix)
+    if (kind == "directory" or kind == "link") and (head == prefix or (M.is_win and head:lower() == prefix:lower())) then
+      out[#out + 1] = join(parent, name)
+    end
+  end
+  table.sort(out)
+  return out
 end
 
 ---Candidate uv executables, in the launchers' order.
@@ -316,7 +339,7 @@ function M.uv_candidates()
   local out = {}
   local function add(p)
     if p and p ~= "" then
-      out[#out + 1] = vim.fs.normalize(p)
+      out[#out + 1] = normalize(p)
     end
   end
   local function dir(base, sub)
@@ -339,12 +362,12 @@ function M.uv_candidates()
     local lad = vim.env.LOCALAPPDATA or join(home, "AppData/Local")
     local pf, pd = vim.env.ProgramFiles or vim.env.PROGRAMFILES, vim.env.ProgramData or vim.env.PROGRAMDATA
     dir(lad, "/Microsoft/WinGet/Links")
-    for _, d in ipairs(glob(join(lad, "Microsoft/WinGet/Packages/astral-sh.uv_*"))) do
+    for _, d in ipairs(M.subdirs(join(lad, "Microsoft/WinGet/Packages"), "astral-sh.uv_")) do
       dir(d)
     end
     if pf then
       dir(pf, "/WinGet/Links")
-      for _, d in ipairs(glob(join(pf, "WinGet/Packages/astral-sh.uv_*"))) do
+      for _, d in ipairs(M.subdirs(join(pf, "WinGet/Packages"), "astral-sh.uv_")) do
         dir(d)
       end
     end
@@ -411,7 +434,7 @@ end
 function M.caller_cwd()
   local cwd = uv.cwd()
   if cwd and M.in_root(cwd) then
-    return M.native(vim.fs.normalize(cwd))
+    return M.native(normalize(cwd))
   end
   return M.native(M.root() or ".")
 end
@@ -454,7 +477,11 @@ function M.refresh()
   local lint = package.loaded["lint"]
   if lint then
     -- mypy's arguments depend on the mode (PyPy supported: --python-version)
-    lint.linters.mypy = require("pytemplate.integrations").mypy_linter()
+    local integ = require("pytemplate.integrations")
+    lint.linters.mypy = integ.mypy_linter()
+    if not integ.mypy_available() then
+      integ.forget_mypy() -- mode --typing off: mypy never runs again to replace what it showed
+    end
     local file = vim.api.nvim_buf_get_name(0)
     if vim.bo.filetype == "python" and M.in_root(file) then
       local ctx = { filename = file, dirname = vim.fs.dirname(file) }
@@ -472,7 +499,7 @@ end
 function M.setup(opts)
   M.config = vim.tbl_deep_extend("force", M.config, opts or {})
   if M.config.root then
-    M.config.root = vim.fs.normalize(M.config.root)
+    M.config.root = normalize(M.config.root)
   end
   if M.config.prefix == nil then
     M.config.prefix = type(vim.g.pytemplate_prefix) == "string" and vim.g.pytemplate_prefix or "<leader>j"

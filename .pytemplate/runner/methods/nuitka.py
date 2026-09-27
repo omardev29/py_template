@@ -9,9 +9,11 @@ mypyc backend, your core modules are already compiled by mypyc (Nuitka includes 
 from __future__ import annotations
 
 import gzip
+import hashlib
 import http.client
 import json
 import os
+import re
 import shlex
 import shutil
 import tarfile
@@ -179,6 +181,26 @@ def archive_problem(path: Path, name: str = "") -> str:
         return str(e) or type(e).__name__
 
 
+# flet_desktop names the Linux client from the machine it runs on: the glibc bracket (a distro),
+# the flavor (FLET_DESKTOP_FLAVOR, else [tool.flet] desktop_flavor of a pyproject.toml in its
+# CURRENT folder, else light) and the CPU: flet-linux-<distro>[-light]-<arch>.tar.gz
+_LINUX_CLIENT = re.compile(r"flet-linux-(?P<distro>.+?)(?P<light>-light)?-(?P<arch>[a-z0-9_]+)\.tar\.gz")
+
+
+def flet_client_env(name: str) -> dict[str, str]:
+    """The environment under which the shipped app looks for exactly the bundled archive `name`.
+
+    Linux: the distro and flavor the name was made of. The user's glibc, a pyproject.toml in
+    the folder the app was started from, or their own FLET_* variables named another archive,
+    and the app downloaded its client at its first start (offline: it failed). Windows and macOS
+    have one name each: nothing to pin.
+    """
+    m = _LINUX_CLIENT.fullmatch(name)
+    if not m:
+        return {}
+    return {"FLET_LINUX_DISTRO": m.group("distro"), "FLET_DESKTOP_FLAVOR": "light" if m.group("light") else "full"}
+
+
 def _flet_client_archive(cfg: Config) -> Path:
     """Return the Flet desktop client archive of the locked flet-desktop (downloaded once).
 
@@ -197,13 +219,15 @@ def _flet_client_archive(cfg: Config) -> Path:
     if archive.is_file():
         problem = archive_problem(archive)
         if not problem:
+            _fingerprint(archive)  # a cache from before the sidecar
             return archive
         ui.warn(f"{rel(archive)} is damaged ({problem}): downloading it again")
         archive.unlink()
+    fingerprint_file(archive).unlink(missing_ok=True)  # it names the old bytes
     url = f"https://github.com/flet-dev/flet/releases/download/v{version}/{name}"
     url = os.environ.get("FLET_CLIENT_URL") or url  # flet_desktop's own override (a mirror)
     source = f"{url} (FLET_CLIENT_URL)" if os.environ.get("FLET_CLIENT_URL") else url
-    ui.info(f"  downloading the Flet client for Nuitka: {source}")
+    ui.info(f"  downloading the Flet client to bundle: {source}")
     archive.parent.mkdir(parents=True, exist_ok=True)
     partial = archive.with_suffix(archive.suffix + ".part")
     try:
@@ -226,7 +250,37 @@ def _flet_client_archive(cfg: Config) -> Path:
         partial.unlink(missing_ok=True)
         raise DeployError(f"the Flet client downloaded from {source} is not a whole archive: {problem}. Build again to retry", 3)
     partial.replace(archive)
+    _fingerprint(archive)
     return archive
+
+
+def fingerprint_file(archive: Path) -> Path:
+    """<archive>.sha256, next to the archive in the cache and where it is bundled."""
+    return archive.with_name(archive.name + ".sha256")
+
+
+def _fingerprint(archive: Path) -> None:
+    """Write `<sha256> <size>` into fingerprint_file(archive), as `flet pack` does: flet_desktop
+    reads it at every start instead of hashing the whole client (tens of MB) again, which it
+    did at every start that could not keep its own copy next to the archive (every onefile
+    start, a read-only install). A sidecar that names the current size is kept."""
+    sidecar = fingerprint_file(archive)
+    size = archive.stat().st_size
+    try:
+        digest, recorded = sidecar.read_text(encoding="ascii").split()
+        if recorded == str(size) and len(digest) == 64:
+            return
+    except (OSError, ValueError, UnicodeDecodeError):
+        pass
+    h = hashlib.sha256()
+    with archive.open("rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    sidecar.write_text(f"{h.hexdigest()} {size}", encoding="ascii")
+
+
+# The package data a Flet app reads at runtime (flet_cli/__pyinstaller/hook-flet.py collects the same)
+FLET_PACKAGE_DATA = ("flet.controls.material:icons.json", "flet.controls.cupertino:cupertino_icons.json")
 
 
 def build(req: BuildRequest) -> Path:
@@ -238,11 +292,11 @@ def build(req: BuildRequest) -> Path:
         mypyc.exe_stage(cfg, req.app_dir, stage)
     else:
         if stage.exists():
-            shutil.rmtree(stage)
-        shutil.copytree(req.app_dir, stage, ignore=shutil.ignore_patterns("__pycache__"))
+            mypyc.remove_tree(stage)
+        shutil.copytree(req.app_dir, stage, ignore=shutil.ignore_patterns("__pycache__"), copy_function=mypyc.copy_writable)
     work = BUILD / "nuitka" / req.backend
     if work.exists():
-        shutil.rmtree(work)
+        mypyc.remove_tree(work)
     onefile = req.onefile if req.onefile is not None else cfg.deploy.nuitka.mode == "onefile"
     exe_name = cfg.app.name + (".exe" if IS_WINDOWS else "")
     if not IS_WINDOWS and not onefile and cfg.app.name.lower() == cfg.pkg:
@@ -252,8 +306,11 @@ def build(req: BuildRequest) -> Path:
         # suffix for its intermediate binaries.
         exe_name += ".bin"
 
+    # -P: `python -m` puts the cwd (the stage) first on sys.path, so an app package named like
+    # Nuitka, or like a module Nuitka imports (zstandard...), ran instead ("'nuitka' is a package
+    # and cannot be directly executed"). Nuitka finds the app from the folder of main.py.
     argv: list[str | Path] = [
-        "python", "-m", "nuitka", stage / "main.py",
+        "python", "-P", "-m", "nuitka", stage / "main.py",
         f"--mode={'onefile' if onefile else 'standalone'}",
         f"--output-dir={work}",
         f"--output-filename={exe_name}",
@@ -266,26 +323,54 @@ def build(req: BuildRequest) -> Path:
         argv.append("--python-flag=no_asserts")
     if cfg.deploy.optimize >= 2:
         argv.append("--python-flag=no_docstrings")
+    # Data paths relative to the stage (Nuitka's cwd): Nuitka splits a data source at every ','
+    # and '=' and reads it as a glob, so an absolute path under a folder like `game, v2` left
+    # the Flet client out with only a warning (and '=' or '[' stopped the build)
     assets = cfg.app.assets
     if assets and (stage / assets).is_dir():
-        argv.append(f"--include-data-dir={stage / assets}={assets}")
+        argv.append(f"--include-data-dir={assets}={assets}")
     if cfg.app.gui and IS_WINDOWS:
         argv.append("--windows-console-mode=disable")
     if cfg.deploy.exe.icon and IS_WINDOWS:
         argv.append(f"--windows-icon-from-ico={ROOT / cfg.deploy.exe.icon}")
     argv += [f"--nofollow-import-to={m}" for m in cfg.deploy.exclude_modules]
-    if upx.active(cfg):
-        # Nuitka's plugin packs each binary with --best --lzma (deploy.upx.level does not apply)
-        argv += ["--plugin-enable=upx", f"--upx-binary={upx.find(cfg)}"]
+    use_upx = upx.active(cfg)
+    if use_upx and onefile:
+        # onefile: Nuitka's plugin packs the one binary (--best --lzma: deploy.upx.level does not
+        # apply); the libraries inside its zstd payload are never packed. A standalone folder is
+        # packed when it is done (pack_tree, below): the plugin packed every DLL it copied, the
+        # Python DLL and deploy.upx.exclude included (it has no exclude option)
+        if upx.excluded(cfg, exe_name):
+            ui.info(f"  upx: {exe_name} matches deploy.upx.exclude: not packed")
+        else:
+            argv += ["--plugin-enable=upx", f"--upx-binary={upx.find(cfg)}"]
     if cfg.app.preset == "flet":
         # flet loads its controls lazily (module __getattr__ + importlib), which Nuitka cannot
         # follow; and the flet-desktop wheel has no Flutter client: bundle the release archive
-        # where flet_desktop looks for one (flet_desktop/app/), as `flet pack` does
+        # where flet_desktop looks for one (flet_desktop/app/), as `flet pack` does. Nuitka
+        # bundles no package data by default: ft.Icons and ft.CupertinoIcons read these two
+        # JSON files (flet_cli's own PyInstaller hook adds the same), and without them the app
+        # died with FileNotFoundError at its first icon.
         archive = _flet_client_archive(cfg)
+        sidecar = fingerprint_file(archive)
+        (stage / "flet-client").mkdir(exist_ok=True)
+        for file in (archive, sidecar):
+            shutil.copy2(file, stage / "flet-client" / file.name)
+        linux = flet_client_env(archive.name)
+        # The taskbar identity flet pack's runtime hook sets: on Linux the client window groups
+        # and labels as the app (FLET_APP_ID), not as the shared "flet" binary. Windows wants
+        # the executable's path at runtime (FLET_APP_USER_MODEL_ID), which Nuitka cannot force
+        identity = {"FLET_APP_ID": cfg.app.name} if linux else {}
         argv += [
             "--include-package=flet",
             "--include-package=flet_desktop",
-            f"--include-data-files={archive}=flet_desktop/app/{archive.name}",
+            *(f"--include-package-data={data}" for data in FLET_PACKAGE_DATA),
+            f"--include-data-files=flet-client/{archive.name}=flet_desktop/app/{archive.name}",
+            # flet_desktop reads the fingerprint instead of hashing the client at every start
+            f"--include-data-files=flet-client/{sidecar.name}=flet_desktop/app/{sidecar.name}",
+            # Linux: the app looks for exactly this archive, not for the name of the user's glibc
+            # or of a pyproject.toml in the folder it starts from (it downloaded one at first start)
+            *(f"--force-runtime-environment-variable={k}={v}" for k, v in {**linux, **identity}.items()),
         ]
     argv += optimization_args(cfg)  # before extra_args and the command line: a later --lto wins
     argv += cfg.deploy.nuitka.extra_args + req.extra
@@ -316,5 +401,7 @@ def build(req: BuildRequest) -> Path:
     if dist_dir is None:
         raise DeployError(f"nuitka finished without producing a *.dist folder in {work}")
     shutil.move(str(dist_dir), str(out))
+    if use_upx:
+        upx.pack_tree(cfg, out)  # BUILTIN_EXCLUDE, deploy.upx.exclude and the level apply, as for portable
     ui.info(f"  run: {rel(out / exe_name)}")
     return out

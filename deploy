@@ -146,11 +146,32 @@ _pt_winpath() {
 # --- project root ---------------------------------------------------------------
 
 # $1 = this file as the shell named it. Sets _pt_root when its directory
-# holds .pytemplate/deploy.py.
+# holds .pytemplate/deploy.py. A symlink (~/bin/pdeploy -> proj/deploy) is
+# followed to the launcher it names, at most 40 links; a relative target is
+# joined to its link's folder, and the kernel resolves the '..' in it.
 _pt_from_launcher() {
     _pt_slashes "$1"
-    case $_pt_r in
-        */*) _pt_c=${_pt_r%/*} ;;
+    _pt_link=$_pt_r
+    _pt_n=0
+    while [ -h "$_pt_link" ] && [ "$_pt_n" -lt 40 ]; do
+        _pt_n=$((_pt_n + 1))
+        case $_pt_link in
+            -*) _pt_link=./$_pt_link ;;
+        esac
+        _pt_t=$(readlink "$_pt_link" 2>/dev/null) || _pt_t=
+        _pt_slashes "$_pt_t"
+        case $_pt_r in
+            '') _pt_n=40 ;;
+            /* | [A-Za-z]:/*) _pt_link=$_pt_r ;;
+            *)
+                case $_pt_link in
+                    */*) _pt_link=${_pt_link%/*}/$_pt_r ;;
+                    *) _pt_link=$_pt_r ;;
+                esac ;;
+        esac
+    done
+    case $_pt_link in
+        */*) _pt_c=${_pt_link%/*} ;;
         *) _pt_c=. ;;
     esac
     case $_pt_c in
@@ -164,6 +185,23 @@ _pt_from_launcher() {
     return 1
 }
 
+# $1 = a folder holding .pytemplate/deploy.py, found by walking up from $PWD.
+# Its code is not run when another user owns it: anyone may create
+# /tmp/.pytemplate/deploy.py (on Windows, whose owners are not read here: a
+# drive root, where any user may create folders).
+_pt_foreign() {
+    if [ -n "$_pt_win" ]; then
+        case $1 in
+            / | [A-Za-z]: | [A-Za-z]:/ | /[A-Za-z] | /cygdrive/[A-Za-z]) return 0 ;;
+        esac
+        return 1
+    fi
+    if [ -O "${1%/}/.pytemplate/deploy.py" ]; then
+        return 1
+    fi
+    return 0
+}
+
 _pt_pwd=${PWD:-}
 if [ -z "$_pt_pwd" ]; then
     _pt_pwd=$(pwd 2>/dev/null) || _pt_pwd=
@@ -171,6 +209,7 @@ fi
 _pt_slashes "$_pt_pwd"
 _pt_pwd=$_pt_r
 _pt_root=
+_pt_other=
 
 # bash and niubash name this file in $BASH_SOURCE (niubash's $0 is the
 # caller's); zsh in $_pt_self; everything else in $0; else walk up from $PWD.
@@ -184,7 +223,11 @@ else
     _pt_d=$_pt_pwd
     while :; do
         if [ -f "${_pt_d%/}/.pytemplate/deploy.py" ]; then
-            _pt_root=$_pt_d
+            if _pt_foreign "$_pt_d"; then
+                _pt_other=$_pt_d
+            else
+                _pt_root=$_pt_d
+            fi
             break
         fi
         _pt_n=${_pt_d%/*}
@@ -384,7 +427,10 @@ EOF
 # Errors only set _pt_rc: the one exit at the end runs after the cleanup.
 _pt_rc=
 _pt_uv=
-if [ -z "$_pt_root" ]; then
+if [ -n "$_pt_other" ]; then
+    printf '%s\n' "deploy: ${_pt_other%/}/.pytemplate/deploy.py is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run ${_pt_other%/}/deploy yourself." >&2
+    _pt_rc=2
+elif [ -z "$_pt_root" ]; then
     printf '%s\n' "deploy: no .pytemplate/deploy.py next to this launcher, in $_pt_pwd or in any parent directory." >&2
     _pt_rc=2
 else
@@ -484,9 +530,9 @@ else
 fi
 
 unset -f _pt_slashes _pt_backslashes _pt_drive _pt_winpath _pt_from_launcher \
-    _pt_try_uv _pt_try_dir _pt_find_uv_dirs _pt_expand _pt_uv_in_list \
+    _pt_foreign _pt_try_uv _pt_try_dir _pt_find_uv_dirs _pt_expand _pt_uv_in_list \
     _pt_uv_from_registry
-unset _pt_self _pt_r _pt_s _pt_p _pt_t _pt_d _pt_c _pt_n _pt_pwd _pt_root _pt_win \
+unset _pt_self _pt_r _pt_s _pt_p _pt_t _pt_d _pt_c _pt_n _pt_link _pt_pwd _pt_root _pt_other _pt_win \
     _pt_exe _pt_uv _pt_h _pt_l _pt_f _pt_a _pt_g _pt_v _pt_rest _pt_e _pt_cr _pt_k \
     _pt_o _pt_launcher _pt_script _pt_cwd _pt_rc
 if [ "$#" -eq 1 ]; then

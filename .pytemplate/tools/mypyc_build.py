@@ -121,7 +121,11 @@ def main() -> int:
 
     from mypyc.build import mypycify
 
-    args = ["--config-file", spec["config"], "--cache-dir", spec["cache_dir"]]
+    # --explicit-package-bases: each module is named from the stage (the cwd), as Python imports
+    # it. Without it mypy named a module from the highest folder holding an __init__.py: a
+    # top-level namespace folder's nsx/fast.py became "fast", and pkg/core/bench.py of an app
+    # package without __init__.py "core.bench" (no extension, or a build that could not write it)
+    args = ["--config-file", spec["config"], "--cache-dir", spec["cache_dir"], "--explicit-package-bases"]
     if spec.get("annotate"):
         args += ["-a", spec["annotate"]]
     args += spec["files"]

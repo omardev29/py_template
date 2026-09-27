@@ -496,15 +496,28 @@ def test_import_names_follow_the_installed_packages() -> None:
     assert set(presets.IMPORT_NAMES) <= pinned  # only pinned packages (their pins name them)
 
 
-def test_every_locked_package_name_is_refused() -> None:
+def with_locked(monkeypatch: pytest.MonkeyPatch, extra: tuple[str, ...]) -> None:
+    """uv.lock as the name rules read it (presets._lock_graph), plus `extra` packages that every
+    locked one needs: what a project's own `./deploy add` brings (build, retry -> py)."""
+    graph = presets._lock_graph()
+    grown = {**{k: v | set(extra) for k, v in graph.items()}, **{n: set() for n in extra}}
+    monkeypatch.setattr(presets, "_lock_graph", lambda lock=None: {k: set(v) for k, v in grown.items()})
+
+
+@pytest.mark.parametrize("extra", [(), ("build", "py")], ids=["lock", "lock-with-build-and-py"])
+def test_every_locked_package_name_is_refused(monkeypatch: pytest.MonkeyPatch, extra: tuple[str, ...]) -> None:
     """uv refuses a project that depends on itself, or resolves the dependency to the project
     (section 15.1), also through a dependency of a dependency (rich -> pygments), and on any
-    platform (colorama is win32 only): every name in uv.lock."""
+    platform (colorama is win32 only): every name in uv.lock. A rule checked first may refuse
+    one for its own reason (build is a folder of the project, py a Python command): the test
+    failed in a project that had added build or retry."""
     cfg = config.load(set(cli.COMMANDS))
+    with_locked(monkeypatch, extra)
     locked = presets.locked_names()
     assert locked, "uv.lock is missing or empty"
+    assert locked <= presets._dependency_names(cfg, cfg.app.preset)  # the dependency rule names every one
     for name in sorted(locked):
-        with pytest.raises(DeployError, match="also the name of a dependency|standard library") as e:
+        with pytest.raises(DeployError) as e:
             presets.check_name_free(cfg, cfg.app.preset, name)
         assert e.value.code == 2
     assert presets._norm_name(cfg.app.name) not in locked  # the project itself is not a clash
@@ -799,6 +812,42 @@ def test_copy_template_copies_only_what_git_tracks(tmp_path: Path, monkeypatch: 
     assert "x.spec" not in err and "pyc" not in err  # ignored or skipped: not worth a line
 
 
+@needs_git
+@pytest.mark.skipif(sys.platform != "linux", reason="names that are not UTF-8, a newline or a quote: Linux file systems only")
+def test_copy_template_copies_every_tracked_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], git_env: None) -> None:
+    """`git ls-files -z` was read as UTF-8 text: a Latin-1 name (`caf\\xe9.txt` from an old
+    archive) became U+FFFD, named no file, and was left out without a word; the new project
+    was created with exit 0 and without it. A tracked file deleted in the working tree is
+    still left out, and now said."""
+    src = tmp_path / "template"
+    _fake_template(src)
+    names = [b"caf\xe9.txt", "caf\u00e9-utf8.txt".encode(), b'quo"te.txt', b"back\\slash.txt", b"tab\there.txt", b"new\nline.txt"]
+    docs = os.fsencode(src / "docs")
+    os.mkdir(docs)
+    for name in names:
+        with open(os.path.join(docs, name), "wb") as f:
+            f.write(name)
+    _git(src, "add", "--", "docs")
+    monkeypatch.setattr(presets, "ROOT", src)
+    presets.copy_template(tmp_path / "new")
+    copied = os.fsencode(tmp_path / "new" / "docs")
+    assert sorted(os.listdir(copied)) == sorted(names)
+    assert all(open(os.path.join(copied, n), "rb").read() == n for n in names)
+    assert "not copied (deleted in the working tree): deleted.txt" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("line", "path"),
+    [
+        ("docs/a b.txt", "docs/a b.txt"),
+        ('"docs/caf\\303\\251.txt"', "docs/caf\u00e9.txt"),
+        ('"q\\"uote\\\\back\\ttab\\nline"', 'q"uote\\back\ttab\nline'),
+    ],
+)
+def test_git_path_reads_gits_quoting(line: str, path: str) -> None:
+    assert presets._git_path(line) == path
+
+
 def _links(root: Path) -> None:
     (root / "docs" / "v1").mkdir(parents=True)
     (root / "docs" / "v1" / "index.md").write_text("# v1\n", encoding="utf-8")
@@ -864,6 +913,24 @@ def test_copy_template_without_tracked_files_uses_the_skip_rules(tmp_path: Path,
     assert not {".pytemplate/template-repo", ".github/workflows/template-e2e.yml", ".claude/settings.json", "build/out.txt"} & copied
     assert not any(p.startswith((".git/", ".venv")) or "__pycache__" in p for p in copied)
     assert "git does not track" in capsys.readouterr().err
+
+
+@needs_git
+@pytest.mark.parametrize(("track", "scope"), [(True, "the files git tracks"), (False, "every file, ignored ones included: git does not track")])
+def test_new_dry_run_says_what_the_copy_takes(
+    dry: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], git_env: None, track: bool, scope: str
+) -> None:
+    """`--dry-run new` always said "the files git tracks", while from a project never committed
+    the real run copies every file, the ignored ones (.env, *.spec) included."""
+    src = tmp_path / "template"
+    _fake_template(src, track=track)
+    monkeypatch.setattr(presets, "ROOT", src)
+    monkeypatch.chdir(tmp_path)
+    assert cmd_mode.cmd_new(dry, ["x", "--name", "demo"]) == 0
+    assert f"would copy this template there ({scope}" in capsys.readouterr().err
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    presets.copy_template(tmp_path / "real")
+    assert ((tmp_path / "real" / ".env").exists(), f"copying {scope}" in capsys.readouterr().err) == (not track, not track)
 
 
 def test_copy_template_without_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -990,7 +1057,7 @@ def _new_with_a_fake_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prese
     monkeypatch.setattr(presets, "_git_init", lambda dest: None)
     dest = tmp_path / "demo"
     presets.new(dest, preset, "demo")
-    assert [c[5:7] for c in calls if "__init" in c] == [["__init", preset]]
+    assert [c[c.index("__init") :][:2] for c in calls if "__init" in c] == [["__init", preset]]
     return dest
 
 
@@ -1082,7 +1149,43 @@ def test_new_passes_quiet_and_verbose_to_the_copys_runner(tmp_path: Path, monkey
     monkeypatch.setattr(presets.ui, "VERBOSE", verbose)
     presets.new(tmp_path / "demo", "script", "demo")
     child = next(c for c in calls if "__init" in c)
-    assert child[5 : child.index("__init")] == flags
+    assert child[5 : child.index("__init")] == [*flags, "--no-render"]
+
+
+def test_new_never_warns_about_the_sources_hand_edited_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The copy's runner rendered (render.auto) before `__init`: a `.vscode/settings.json` that
+    VS Code had changed in the source project gave 'not overwriting hand-edited generated files',
+    under -q too, for files init then rendered again with force. The global options new passes
+    skip that step (init still writes every generated file itself)."""
+    cfg = config.load(set(cli.COMMANDS))
+    calls: list[list[str]] = []
+
+    def run(argv: list[Any], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append([str(a) for a in argv])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(presets, "copy_template", _fake_copy)
+    monkeypatch.setattr(presets, "_git_init", lambda dest: None)
+    monkeypatch.setattr(proc, "run", run)
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+    presets.new(tmp_path / "demo", cfg.app.preset, cfg.app.name)
+    child = next(c for c in calls if "__init" in c)
+    options = child[5 : child.index("__init")]  # the copy's runner: uv run --quiet --script deploy.py OPTIONS __init ...
+    monkeypatch.undo()
+    copy_root = tmp_path / "copy"
+    presets.copy_template(copy_root)
+    settings = copy_root / ".vscode" / "settings.json"
+    settings.write_text(settings.read_text(encoding="utf-8").replace("{", '{\n  "editor.fontSize": 13,', 1), encoding="utf-8")
+    init = ("__init", cfg.app.preset, "--name", cfg.app.name, "--force")
+    env = _child_env(tmp_path)
+    r = _deploy(copy_root, "--dry-run", *options, *init, cwd=copy_root, env=env)
+    assert r.returncode == 0, r.stderr
+    assert "hand-edited" not in r.stderr
+    # The __init route itself renders only at its end (cli.INTERNAL never renders first), so a
+    # copy's runner started without new's options, an older new's, stays quiet too
+    r = _deploy(copy_root, "--dry-run", *init, cwd=copy_root, env=env)
+    assert r.returncode == 0, r.stderr
+    assert "hand-edited" not in r.stderr
 
 
 def test_quiet_init_quiets_uv_too(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1141,6 +1244,39 @@ def test_new_says_what_comes_next_in_xonsh(monkeypatch: pytest.MonkeyPatch, laun
         assert setup == "./deploy setup"
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh:niubash")  # niubash's own launcher value wins
     assert presets.next_steps(Path("/p/my proj"))[0] == f"cd {shlex.quote(MY_PROJ)}"
+
+
+def _shell_line(argv: list[str], cwd: Path) -> str:
+    r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False)
+    assert r.returncode == 0, (argv, r.stdout, r.stderr)
+    return r.stdout.strip().splitlines()[-1]
+
+
+@pytest.mark.parametrize("shell", ["pwsh", "xonsh"])
+def test_the_next_step_hint_enters_the_folder_in_its_shell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell: str) -> None:
+    """PowerShell's cd reads [ ] and ` as a wildcard pattern ('Cannot find path'), and xonsh
+    expands $HOME inside a quoted argument: the hint typed in its shell missed the folder."""
+    exe = shutil.which(shell)
+    if exe is None:
+        pytest.skip(f"{shell} not found")
+    monkeypatch.delenv("NU_VERSION", raising=False)
+    if shell == "pwsh":
+        monkeypatch.delenv("XONSH_VERSION", raising=False)
+        monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "ps1:Core:7.6")
+        names = ["game [2]", "tick`b", "it's"]
+    else:
+        monkeypatch.setenv("XONSH_VERSION", "0.24.2")
+        monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "")
+        names = ["a$HOME b", "it's"]
+    for name in names:
+        dest = tmp_path / name
+        dest.mkdir()
+        cd = presets.next_steps(dest)[0]
+        if shell == "pwsh":
+            argv = [exe, "-NoProfile", "-NonInteractive", "-Command", f"$ErrorActionPreference = 'Stop'; {cd}; (Get-Location).ProviderPath"]
+        else:
+            argv = [exe, "--no-rc", "-c", f"{cd}\nimport os\nprint(os.getcwd())"]
+        assert os.path.samefile(_shell_line(argv, tmp_path), dest), cd
 
 
 @pytest.mark.parametrize(
@@ -1202,7 +1338,7 @@ def test_new_removes_the_copy_when_init_fails(tmp_path: Path, monkeypatch: pytes
     with pytest.raises(DeployError, match="half-made project in .* was removed") as e:
         presets.new(dest, "script", "demo")
     assert e.value.code == 1
-    assert [c[5:7] for c in calls] == [["__init", "script"]]  # no git init after a failure
+    assert [c[c.index("__init") :][:2] for c in calls] == [["__init", "script"]]  # no git init after a failure
     if pre_existing:
         assert dest.is_dir() and not any(dest.iterdir())
     else:
@@ -2142,6 +2278,21 @@ def _flet_draw(app: Any) -> tuple[Any, Any, Any, Any]:
     return page, button, image, status
 
 
+@pytest.mark.parametrize("preset", ["raylib", "flet"])
+def test_the_assets_are_the_apps_own_whatever_it_inherits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preset: str) -> None:
+    # An app started by another app of the template (a launcher, a pyz restarting its update)
+    # inherited PYTEMPLATE_ASSETS, which assets_dir() read first: it loaded the parent's assets
+    resources = _skeleton_package(tmp_path, monkeypatch, preset, "demo.resources", {})
+    monkeypatch.setenv("PYTEMPLATE_ASSETS", str(tmp_path / "parent" / "app" / "assets"))
+    monkeypatch.delattr(sys, "_MEIPASS", raising=False)
+    assert resources.assets_dir() == (tmp_path / "src" / "assets").resolve()  # src/, a portable app/ or a pyz
+    packaged = tmp_path / "src" / "demo" / "assets"
+    packaged.mkdir()
+    assert resources.assets_dir() == packaged.resolve()  # a wheel: inside the package
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
+    assert resources.assets_dir() == tmp_path / "bundle" / "assets"  # PyInstaller
+
+
 def test_flet_skeleton_draws_where_no_process_can_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """flet build for the web (Pyodide), Android and iOS: ProcessPoolExecutor raises there, and
     the Draw handler died with the button disabled on 'Computing...'. It draws in-process."""
@@ -2324,6 +2475,59 @@ def test_raylib_stubs_regenerates_the_committed_stub(tmp_path: Path, network: No
     assert out.read_bytes() == committed.read_bytes().replace(b"\r\n", b"\n")
 
 
+def _locked_versions(root: Path) -> dict[str, str]:
+    return {presets._norm_name(e["name"]): e["version"] for e in presets._lock_entries(root / "uv.lock") if not presets._is_project(e)}
+
+
+def _uv_settings(root: Path) -> dict[str, Any]:
+    uv: dict[str, Any] = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8-sig")).get("tool", {}).get("uv", {})
+    return uv
+
+
+def _pin_problems(source: Path, dest: Path, preset: str) -> list[str]:
+    """What `new` promises about versions, from the project it ran in (`source`) to the copy
+    (`dest`): init pins, at the tested version (constraints.txt), every package the source
+    neither locks nor constrains itself, and the pins leave nothing in pyproject.toml (the
+    source's own constraint-dependencies stay). What the source locks keeps its version or
+    moves with the new preset's requirements (a [preset.flet] version applied in the source),
+    and a pin the new project does not need (a dev tool the source removed) is not locked."""
+    settings, copied = _uv_settings(source), _uv_settings(dest)
+    problems = []
+    if copied.get("constraint-dependencies") != settings.get("constraint-dependencies"):
+        problems.append(f"constraint-dependencies {copied.get('constraint-dependencies')}, the source has {settings.get('constraint-dependencies')}")
+    own = {presets._norm_name(re.split(r"[^A-Za-z0-9._-]", str(r), maxsplit=1)[0]) for key in ("constraint-dependencies", "override-dependencies") for r in settings.get(key, [])}
+    before, after = _locked_versions(source), _locked_versions(dest)
+    for name, version in sorted(presets.constraints(preset).items()):
+        if name in after and name not in before and name not in own and after[name] != version:
+            problems.append(f"{name} {after[name]}, tested {version}")
+    return problems
+
+
+def test_pin_problems_follow_what_new_promises(tmp_path: Path) -> None:
+    """The real `new` test wanted every pin locked at the source's version or the tested one,
+    and no constraint-dependencies at all: it failed in a project that had removed debugpy,
+    applied another [preset.flet] version or kept its own constraints."""
+    pins = presets.constraints("script")
+    removed, moved, constrained, pinned = "debugpy", "rich", "pygments", "iniconfig"
+    assert {removed, moved, constrained, pinned} <= set(pins)
+
+    def project(root: Path, constraints: list[str], locked: dict[str, str]) -> Path:
+        root.mkdir()
+        (root / "pyproject.toml").write_text(f'[project]\nname = "p"\n\n[tool.uv]\nconstraint-dependencies = {json.dumps(constraints)}\n', encoding="utf-8")
+        (root / "uv.lock").write_text("".join(f'[[package]]\nname = "{n}"\nversion = "{v}"\n\n' for n, v in locked.items()), encoding="utf-8")
+        return root
+
+    locked = {n: v for n, v in pins.items() if n not in (removed, constrained)}
+    source = project(tmp_path / "source", ["pygments<99"], {**locked, moved: "1.0"})
+    dest = project(tmp_path / "dest", ["pygments<99"], {**locked, moved: "2.0", constrained: "0.1"})
+    assert _pin_problems(source, dest, "script") == []
+    wrong = project(tmp_path / "wrong", [], {**locked, moved: "2.0", removed: "0.1"})
+    assert _pin_problems(source, wrong, "script") == [
+        "constraint-dependencies [], the source has ['pygments<99']",
+        f"{removed} 0.1, tested {pins[removed]}",
+    ]
+
+
 # --- real runs (uv + network) ---------------------------------------------------------------------
 
 
@@ -2343,14 +2547,10 @@ def test_new_creates_a_working_project(preset: str, tmp_path: Path, network: Non
 
     project = tomllib.loads((dest / "pyproject.toml").read_text(encoding="utf-8"))
     assert project["project"]["name"] == name
-    assert "constraint-dependencies" not in project["tool"]["uv"]  # the pins were a one-off
-    locked = {presets._norm_name(e["name"]): e["version"] for e in presets._lock_entries(dest / "uv.lock") if not presets._is_project(e)}
-    pins = presets.constraints(preset)
-    # what this project locks keeps its version (init pins only the packages it lacks)
-    source = {presets._norm_name(e["name"]): e["version"] for e in presets._lock_entries() if not presets._is_project(e)}
-    expected = {n: source.get(n, v) for n, v in pins.items()}
-    assert {n: locked.get(n) for n in pins} == expected, "the new project does not lock the tested versions"
+    assert _pin_problems(ROOT, dest, preset) == [], "the new project does not lock the tested versions"
     if TEMPLATE_REPO:
+        locked = _locked_versions(dest)
+        pins = presets.constraints(preset)
         fresh = sorted(set(locked) - presets.locked_names() - set(pins))
         assert not fresh, (
             f"{preset}: {fresh} were resolved on the day, not pinned: regenerate constraints.txt (CLAUDE.md 11):\n"
@@ -2386,9 +2586,12 @@ def test_new_into_a_folder_with_a_space_and_an_accent(tmp_path: Path, network: N
     assert check.returncode == 0, check.stderr
 
 
-def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: None) -> None:
+@pytest.mark.parametrize("own", [False, True], ids=["pinned", "locked-by-the-project"])
+def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: None, own: bool) -> None:
     """An older pinned version wins over the newest one: the pins are really used, also in a
-    project folder with a space (uv splits a --constraints value at spaces: astral-sh/uv#12639)."""
+    project folder with a space (uv splits a --constraints value at spaces: astral-sh/uv#12639).
+    A package the project already locks keeps its version (init pins only what the lock lacks):
+    the test failed in a project whose own dependency (cryptography) brought pycparser."""
     pins = presets.constraints("raylib")
     if pins.get("pycparser") != "3.0":
         pytest.skip("this check expects the raylib preset to pin pycparser 3.0")
@@ -2398,13 +2601,57 @@ def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: 
     if config.load(set(cli.COMMANDS)).app.preset == "raylib":  # a raylib project: from another preset first
         r = _deploy(copy_root, "__init", "script", "--force", cwd=copy_root, env=env)
         assert r.returncode == 0, r.stderr[-4000:]
+    uv = shutil.which("uv") or "uv"
+    if own:
+        for argv in ([uv, "add", "--frozen", "pycparser==3.0"], [uv, "lock"]):
+            r = subprocess.run(argv, cwd=copy_root, env=env, capture_output=True, text=True, timeout=300, check=False)
+            assert r.returncode == 0, r.stderr[-4000:]
+    before = _locked_versions(copy_root)
+    declared = "pycparser" in (copy_root / "pyproject.toml").read_text(encoding="utf-8")
     constraints = copy_root / ".pytemplate" / "presets" / "raylib" / "constraints.txt"
     constraints.write_text(constraints.read_text(encoding="utf-8").replace("pycparser==3.0", "pycparser==2.22"), encoding="utf-8")
-    r = _deploy(copy_root, "__init", "raylib", cwd=copy_root, env=env)
+    r = _deploy(copy_root, "__init", "raylib", "--force", cwd=copy_root, env=env)  # a project with its own code too
     assert r.returncode == 0, r.stderr[-4000:]
-    locked = {e["name"]: e["version"] for e in presets._lock_entries(copy_root / "uv.lock")}
-    assert locked["pycparser"] == "2.22" and locked["raylib"] == pins["raylib"]
-    assert "pycparser" not in (copy_root / "pyproject.toml").read_text(encoding="utf-8")
+    locked = _locked_versions(copy_root)
+    assert locked["pycparser"] == before.get("pycparser", "2.22") and locked["raylib"] == pins["raylib"]
+    assert ("pycparser" in (copy_root / "pyproject.toml").read_text(encoding="utf-8")) is declared  # the pins leave nothing behind
+
+
+def _round_trip_problem(cfg: Config, root: Path = ROOT) -> str | None:
+    """Why a round trip through the presets cannot give this project back byte for byte (the
+    skip reason), None when it can: the last init writes the preset's skeleton (src/, tests/,
+    typings/ and pytemplate.toml) and pins, at the tested version, what it adds again."""
+    if not presets.pristine(cfg):
+        return "src/, tests/ or typings/ are not the pristine skeleton of the current preset"
+    own = (root / "pytemplate.toml").read_bytes().removeprefix(b"\xef\xbb\xbf").replace(b"\r\n", b"\n")
+    if own != presets.skeleton(cfg.app.preset, cfg.app.name)["pytemplate.toml"]:
+        return "pytemplate.toml is not the preset's own (a mode change, [preset.*] options): init writes the preset's"
+    pins = presets.constraints(cfg.app.preset)
+    moved = sorted(n for n, v in _locked_versions(root).items() if pins.get(n, v) != v)
+    if moved:
+        return f"uv.lock moved past the tested versions ({', '.join(moved)}): init pins what it adds again"
+    return None
+
+
+def test_round_trip_problem_names_what_a_round_trip_changes(tmp_path: Path) -> None:
+    """The round-trip test failed (and `./deploy selftest` with it) in a project after `mode
+    --typing strict`, `mode --supports +pypy`, a [preset.flet] version or a `lock --upgrade`:
+    the last init writes the preset's pytemplate.toml and pins back what it adds again."""
+    cfg = config.load(set(cli.COMMANDS))
+    if not presets.pristine(cfg):
+        pytest.skip("src/, tests/ or typings/ are not the pristine skeleton of the current preset")
+    root = tmp_path / "p"
+    root.mkdir()
+    (root / "pytemplate.toml").write_bytes(presets.skeleton(cfg.app.preset, cfg.app.name)["pytemplate.toml"].replace(b"\n", b"\r\n"))
+    pins = presets.constraints(cfg.app.preset)
+    lock = "".join(f'[[package]]\nname = "{n}"\nversion = "{v}"\n\n' for n, v in pins.items())
+    (root / "uv.lock").write_text(lock + '[[package]]\nname = "httpx"\nversion = "0.28.1"\n', encoding="utf-8")
+    assert _round_trip_problem(cfg, root) is None  # a CRLF checkout and a dependency of the user's own
+    name, version = next(iter(pins.items()))
+    (root / "uv.lock").write_text(lock.replace(f'"{name}"\nversion = "{version}"', f'"{name}"\nversion = "0.0.1"'), encoding="utf-8")
+    assert f"moved past the tested versions ({name})" in str(_round_trip_problem(cfg, root))
+    (root / "pytemplate.toml").write_bytes(presets.skeleton(cfg.app.preset, cfg.app.name)["pytemplate.toml"] + b"\n[typing]\nprofile = \"strict\"\n")
+    assert "pytemplate.toml is not the preset's own" in str(_round_trip_problem(cfg, root))
 
 
 def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, network: None, git_env: None) -> None:
@@ -2412,8 +2659,9 @@ def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, 
     the previous preset's dependencies, tables and files (and the template root is exactly what
     `__init script --name myapp --force` writes)."""
     cfg = config.load(set(cli.COMMANDS))
-    if not presets.pristine(cfg):
-        pytest.skip("src/, tests/ or typings/ are not the pristine skeleton of the current preset")
+    reason = _round_trip_problem(cfg)
+    if reason:
+        pytest.skip(reason)
     env = _child_env(tmp_path)
     copy_root = tmp_path / "copy"
     presets.copy_template(copy_root)
@@ -2435,7 +2683,7 @@ def test_init_that_fails_in_uv_changes_nothing(tmp_path: Path, git_env: None) ->
     presets.copy_template(copy_root)
     before = _snapshot(copy_root)
     target = "raylib" if config.load(set(cli.COMMANDS)).app.preset == "flet" else "flet"
-    r = _deploy(copy_root, "__init", target, cwd=copy_root, env=env)
+    r = _deploy(copy_root, "__init", target, "--force", cwd=copy_root, env=env)  # a project with its own code too
     assert r.returncode != 0
-    assert "init failed: every file is back as it was" in r.stderr
+    assert "init failed: every file is back as it was" in r.stderr, r.stderr
     assert _snapshot(copy_root) == before

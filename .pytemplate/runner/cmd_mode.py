@@ -16,7 +16,7 @@ from typing import Any
 
 from . import config, envs, presets, proc, render, ui
 from .config import BACKENDS, Config
-from .project import CONFIG_FILE, PYPROJECT, ROOT, code_dirs, native_path, rel, user_path
+from .project import CONFIG_FILE, PYPROJECT, ROOT, code_dirs, native_path, rel, user_path, write_whole
 from .ui import DeployError
 
 _DRY = "(--dry-run: nothing is written)"
@@ -34,8 +34,17 @@ def _describe(cfg: Config, title: str = "current mode") -> None:
 
 
 def _parse(parser: argparse.ArgumentParser, args: list[str]) -> argparse.Namespace:
-    """parse_args, but an unknown argument is a clear DeployError instead of argparse's exit."""
-    ns, unknown = parser.parse_known_args(args)
+    """parse_args, but an unknown argument is a clear DeployError instead of argparse's exit.
+
+    An option the parser does not know is refused by name BEFORE parsing: argparse bound the
+    value after it to a positional (`mode --typ strict`: "argument backend: invalid choice:
+    'strict'", never a word about --typ)."""
+    options = args[: args.index("--")] if "--" in args else args
+    known = parser._option_string_actions
+    unknown = [a for a in options if a.startswith("-") and a != "-" and a.split("=", 1)[0] not in known]
+    ns = argparse.Namespace()
+    if not unknown:
+        ns, unknown = parser.parse_known_args(args)
     if unknown:
         raise DeployError(f"{parser.prog}: unknown argument(s): {' '.join(unknown)}  ({parser.prog} -h lists the options)")
     return ns
@@ -142,7 +151,13 @@ def _precheck_py311(cfg: Config) -> None:
     else:
         envs.sync(tool)  # a stale uv.lock or a failed install fails HERE, with uv's own message
     run = ["run", "--locked", "--no-sync"]
-    dirs = code_dirs()
+    # Only the folders that hold Python files, as .mypy.ini's `files` (render._holds_python):
+    # tests/ left with only __pycache__ (the tests removed with `git rm`) stopped mypy with "There
+    # are no .py[i] files in directory 'tests'", while ./deploy check passed
+    dirs = [d for d in code_dirs() if render._holds_python(ROOT / d)]
+    if not dirs:  # ruff without a path would check the whole project
+        ui.ok(f"no Python code in src/ or tests/: nothing to check for Python {version}")
+        return
     # 1) syntax: ruff reports syntax that does not exist in the target version as an error
     r = envs.uv(
         tool,
@@ -194,7 +209,7 @@ def _restore(before: dict[Path, bytes | None]) -> list[str]:
         if data is None:
             path.unlink(missing_ok=True)
         else:
-            path.write_bytes(data)
+            write_whole(path, data)
         restored.append(path.name)
     return restored
 
@@ -311,11 +326,16 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
     if dropped_active:
         ui.info(f"note: {cfg.backend.active} is no longer supported: the active backend becomes {active}")
 
-    adding_pypy = planned.pypy_enabled and not cfg.pypy_enabled
+    # PyPy is new when uv.lock does not resolve for it yet (render.gains_pypy), not only when this
+    # command adds it: after a hand edit of backend.supported, pytemplate.toml already lists it, and
+    # mode locked PyPy in without the Python 3.11 check and without .venv-pypy. The check runs in
+    # ensure_lock, once the re-lock is done (--dry-run: here, read-only).
+    adding_pypy = planned.pypy_enabled and (not cfg.pypy_enabled or render.gains_pypy(planned))
     syncs: list[envs.PyEnv] = []
     if adding_pypy:
         syncs.append(envs.pypy_env(planned))
-        _precheck_py311(cfg)
+        if proc.DRY_RUN:
+            _precheck_py311(cfg)
 
     if proc.DRY_RUN:
         _plan_mode(cfg, planned, changes, syncs)
@@ -344,9 +364,11 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
             ui.warn(done)
             raise
         raise DeployError(f"{e}\n  {done}; fix the problem above and run the command again", e.code) from None
-    changed, _ = render.apply(new_cfg)
+    changed, edited = render.apply(new_cfg)
     if changed:
         ui.info(f"render: updated {', '.join(changed)}")
+    if edited:  # they still describe the old mode (the dry run names them too)
+        ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./deploy render --force)")
     _leftover_envs(cfg, new_cfg)
     _describe(new_cfg)
     return 0
@@ -503,7 +525,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         else:
             git = "and `git init -b main`"
         ui.info(
-            "  would copy this template there (the files git tracks; no .git, environments, builds or "
+            f"  would copy this template there ({presets.copy_scope()}; no .git, environments, builds or "
             f"caches), run `./deploy __init {ns.preset} --name {name} --force` in it {git}"
         )
         if top is not None:

@@ -253,7 +253,9 @@ def test_the_internal_route_is_the_old_init(capsys: pytest.CaptureFixture[str]) 
     command = cli.INTERNAL["__init"]
     func = getattr(importlib.import_module(f"runner.{command.module}"), command.func)
     assert func is cmd_mode.cmd_init
-    assert command.render  # like the old public command: generated files are refreshed first
+    # unlike the old public command it never renders first: it renders with --force at its end, and
+    # rendering the copy first made `new` warn about the source project's hand-edited files
+    assert not command.render
     assert set(cli.INTERNAL).isdisjoint(cli.COMMANDS)
     # A [tasks] name can never shadow an internal route: task names start with a letter
     for name in cli.INTERNAL:
@@ -311,7 +313,7 @@ def test_a_task_named_init_is_allowed(monkeypatch: pytest.MonkeyPatch, cli_state
 
 
 def test_new_runs_the_internal_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """presets.new runs `deploy.py __init PRESET --name N --force` in the copy: a routed name."""
+    """presets.new runs `deploy.py --no-render __init PRESET --name N --force` in the copy: a routed name."""
     calls: list[list[str]] = []
 
     def fake_run(argv: list[Any], **_kw: Any) -> subprocess.CompletedProcess[str]:
@@ -327,8 +329,8 @@ def test_new_runs_the_internal_route(tmp_path: Path, monkeypatch: pytest.MonkeyP
     (argv,) = calls
     assert argv[:4] == ["uv", "run", "--quiet", "--script"]
     assert Path(argv[4]) == dest.resolve() / ".pytemplate" / "deploy.py"
-    assert argv[5:] == ["__init", "raylib", "--name", "demo", "--force"]
-    command = cli.INTERNAL[argv[5]]
+    assert argv[5:] == ["--no-render", "__init", "raylib", "--name", "demo", "--force"]  # init renders itself
+    command = cli.INTERNAL[argv[6]]
     assert getattr(importlib.import_module(f"runner.{command.module}"), command.func) is cmd_mode.cmd_init
 
 
@@ -360,7 +362,7 @@ def test_new_creates_a_project_through_the_internal_route(tmp_path: Path) -> Non
     if r.returncode != 0 and any(marker in r.stderr for marker in rename.PYPI_UNREACHABLE):
         pytest.skip("needs PyPI: `new` adds the preset's requirements with uv")
     assert r.returncode == 0, r.stderr
-    assert re.search(r"deploy\.py __init script --name demo --force", r.stderr), r.stderr
+    assert re.search(r"deploy\.py --no-render __init script --name demo --force", r.stderr), r.stderr
     assert (dest / "src" / "demo" / "__init__.py").is_file() and not (dest / "src" / "myapp").exists()
     text = (dest / "pytemplate.toml").read_text(encoding="utf-8")
     assert tomllib.loads(text)["app"]["name"] == "demo"

@@ -17,7 +17,10 @@ How each method uses it:
     DLLs and Qt plugins, and always adds --lzma. The level goes in the UPX environment
     variable, which upx reads as default options. Windows only: PyInstaller disables UPX on
     every other OS, so there the exe is not packed (exe.size_args warns).
-  - nuitka: Nuitka's upx plugin (it always uses --best --lzma).
+  - nuitka: a standalone folder goes through pack_tree() when it is done, like portable and
+    flet (Nuitka's upx plugin has no exclude option: it packed every DLL it copied); a onefile
+    binary through Nuitka's upx plugin (always --best --lzma), which leaves the libraries inside
+    its payload alone, unless the binary's own name is excluded.
   - portable and flet: pack_tree() on the finished folder.
 Never used: pyz (the zip is already deflated) and wheel.
 
@@ -34,6 +37,7 @@ import hashlib
 import http.client
 import io
 import os
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -111,11 +115,24 @@ def excludes(cfg: Config) -> list[str]:
     return [*BUILTIN_EXCLUDE, *cfg.deploy.upx.exclude]
 
 
+def excluded(cfg: Config, name: str) -> bool:
+    """Whether a file of this name is never packed: BUILTIN_EXCLUDE and deploy.upx.exclude, as
+    case-insensitive globs."""
+    lower = name.lower()
+    return any(fnmatch.fnmatch(lower, p.lower()) for p in excludes(cfg))
+
+
 def _cache_dir() -> Path:
+    """The folder of the pinned download: always absolute. A relative XDG_CACHE_HOME (or
+    LOCALAPPDATA) is ignored, as the XDG spec says and the pyz bootstrap does: it put the download
+    under the caller's folder (src/, which the payloads ship) and handed Nuitka, which runs in its
+    stage, a relative --upx-binary."""
     if IS_WINDOWS:
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        local = os.environ.get("LOCALAPPDATA", "")
+        base = Path(local) if os.path.isabs(local) else Path.home() / "AppData" / "Local"
     else:
-        base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+        xdg = os.environ.get("XDG_CACHE_HOME", "")
+        base = Path(xdg) if os.path.isabs(xdg) else Path.home() / ".cache"
     return base / "pytemplate" / "tools" / f"upx-{VERSION}"
 
 
@@ -170,18 +187,33 @@ def locate(cfg: Config) -> Path | None:
     absolute, and not resolved, because PyInstaller wants <upx-dir>/upx and Nuitka a file named upx.
     """
     if cfg.deploy.upx.path:
-        given = Path(cfg.deploy.upx.path).expanduser()
+        try:
+            given = Path(cfg.deploy.upx.path).expanduser()
+        except RuntimeError as e:  # a ~user of another machine (a shared pytemplate.toml), or no home folder
+            raise DeployError(f"deploy.upx.path = {cfg.deploy.upx.path!r} does not exist here ({e})", 3) from None
         path = given if given.is_absolute() else ROOT / given
         if not path.is_file():
             raise DeployError(
                 f"deploy.upx.path = {cfg.deploy.upx.path!r} does not exist ({path}; a relative path starts at the project root)", 3
             )
+        if os.path.normcase(path.name) != os.path.normcase(_exe_name()):  # tools/upx-5.2.1
+            raise DeployError(
+                f"deploy.upx.path = {cfg.deploy.upx.path!r} must be a file named {_exe_name()} ({path}): Nuitka takes no"
+                f" other name (it searched PATH instead) and PyInstaller looks for <folder>/{_exe_name()}; rename it",
+                2,
+            )
+        if not _runnable(path):  # a checkout from Windows or a zip lost its x bit: pack_file died later
+            raise DeployError(f"deploy.upx.path = {cfg.deploy.upx.path!r} is not executable ({path}): chmod +x {shlex.quote(str(path))}", 3)
         return path
     on_path = shutil.which("upx", path=proc.base_env().get("PATH"))
     if on_path:
-        return Path(on_path)
+        return Path(on_path).absolute()  # a relative PATH entry: the tools run in other folders
     cached = _cache_dir() / _exe_name()
-    return cached if cached.is_file() else None
+    return cached if cached.is_file() and _runnable(cached) else None  # a download that lost its x bit comes again
+
+
+def _runnable(path: Path) -> bool:
+    return IS_WINDOWS or os.access(path, os.X_OK)
 
 
 def find(cfg: Config) -> Path:
@@ -247,14 +279,11 @@ class Result:
 
 def candidates(root: Path, cfg: Config) -> list[Path]:
     """Return the files under `root` UPX may pack (PE files on Windows, ELF executables on Linux)."""
-    patterns = [p.lower() for p in excludes(cfg)]
     out: list[Path] = []
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.is_symlink():
+        if not path.is_file() or path.is_symlink() or excluded(cfg, path.name):
             continue
         name = path.name.lower()
-        if any(fnmatch.fnmatch(name, p) for p in patterns):
-            continue
         if IS_WINDOWS:
             if path.suffix.lower() in PE_SUFFIXES:
                 out.append(path)
@@ -283,15 +312,18 @@ def pack_file(upx: Path, path: Path, flags: list[str]) -> Result:
     before = path.stat().st_size
     if before > MAX_INPUT:
         return Result(path, before, before, "skipped", f"{before / 1_048_576:.0f} MiB is over the {MAX_INPUT // 1_048_576} MiB limit (UPX: 768 MiB)")
-    r = subprocess.run(
-        [str(upx), "-q", "--no-progress", "--compress-icons=0", *flags, str(path)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdin=subprocess.DEVNULL,
-        check=False,
-    )
+    try:
+        r = subprocess.run(
+            [str(upx), "-q", "--no-progress", "--compress-icons=0", *flags, str(path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError as e:  # no x bit, another architecture, gone: the build stops with this, never a traceback
+        raise DeployError(f"upx: cannot run {upx}: {e.strerror or e}", 3) from None
     if r.returncode == 0:
         return Result(path, before, path.stat().st_size, "packed")
     reason = _classify(r.stdout + r.stderr)

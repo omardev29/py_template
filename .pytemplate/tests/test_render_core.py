@@ -246,6 +246,45 @@ def test_diff_shows_the_generated_against_the_current_content(box: Sandbox, caps
     assert "---" not in capsys.readouterr().err  # only with show_diff
 
 
+def test_python_version_is_rewritten_only_for_a_python_uv_can_provide(box: Sandbox, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The launchers start the runner with `uv run --script`, which follows .python-version: a
+    python.cpython typo ("3.41") written there stopped every command, `help` included, and after
+    the fix in pytemplate.toml nothing could write the file again. It is rewritten only once uv
+    has that CPython (envs.ensure_python); a new file (a fresh tree) needs no question."""
+    asked: list[str] = []
+    monkeypatch.setattr(envs, "ensure_python", asked.append)
+    box.files[".python-version"] = "3.13\n"
+    render.apply(CFG)
+    assert asked == [] and box.read(".python-version") == b"3.13\n"  # written fresh
+    box.files[".python-version"] = "3.14\n"
+    render.apply(CFG)
+    assert asked == ["3.14"] and box.read(".python-version") == b"3.14\n"
+    render.apply(CFG)
+    assert asked == ["3.14"]  # unchanged: nothing to ask
+
+    def unavailable(version: str) -> None:
+        raise DeployError(f'python.cpython = "{version}": uv can neither find nor install this CPython (...)', 3)
+
+    monkeypatch.setattr(envs, "ensure_python", unavailable)
+    box.files[".python-version"] = "3.41\n"
+    with pytest.raises(DeployError, match=r'python\.cpython = "3\.41"'):
+        render.apply(CFG)
+    assert box.read(".python-version") == b"3.14\n"  # the launchers still start the runner
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert render.apply(CFG)[0] == [".python-version"]  # --dry-run and --check only report it
+
+
+def test_diff_shows_a_missing_last_line_break(box: Sandbox, capsys: pytest.CaptureFixture[str]) -> None:
+    """An editor that strips the last line break: --check called the file hand-edited, and --diff
+    showed no difference at all (both texts had the same splitlines())."""
+    render.apply(CFG)
+    box.write("b.ini", "[b]\nx = 1")
+    capsys.readouterr()
+    assert render.apply(CFG, check=True, show_diff=True) == ([], ["b.ini"])
+    err = capsys.readouterr().err
+    assert "--- b.ini (generated)\n+++ b.ini (current)\n@@ -1,2 +1,2 @@\n [b]\n-x = 1\n+x = 1\n\\ No newline at end of file" in err, err
+
+
 def test_a_folder_in_the_way_is_a_clear_error(box: Sandbox) -> None:
     (box.root / "b.ini").mkdir()
     with pytest.raises(DeployError, match=r"b\.ini is generated, but a folder"):
@@ -257,7 +296,7 @@ def test_write_failures_are_clear_errors(box: Sandbox, monkeypatch: pytest.Monke
         raise PermissionError(13, "Permission denied")
 
     with monkeypatch.context() as m:
-        m.setattr(Path, "write_text", refuse)
+        m.setattr(Path, "write_bytes", refuse)  # project.write_whole writes a temporary file
         with pytest.raises(DeployError, match="cannot write the generated file gen/a.json: Permission denied"):
             render.apply(CFG)
 
@@ -547,9 +586,25 @@ BROKEN = {
         MANAGED.replace('environments = ["x"]\n', 'environments = ["x"]\n[tool.flet]\norg = "x"\n'),
         "table header",
     ),
+    # a key of the user between the markers: the rewrite dropped it without a word (a private
+    # index, a constraint), although _verify promised that nothing is lost silently
+    "user-key-inside-block": (
+        MANAGED.replace('environments = ["x"]\n', 'environments = ["x"]\nindex-url = "https://pypi.org/simple"\n'),
+        "[tool.uv] index-url is between the",
+    ),
+    "user-keys-inside-block": (
+        MANAGED.replace('environments = ["x"]\n', 'environments = ["x"]\nconstraint-dependencies = ["urllib3>=2.5"]\npackage = false\n'),
+        "[tool.uv] constraint-dependencies, package are between the",
+    ),
     "invalid-toml": ('[project]\nname = "x"\n\n[tool.uv]\nfoo = [\n', "not valid TOML"),
     "no-project-table": ('[tool.uv]\nfoo = 1\n', "[project]"),
 }
+
+
+@pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
+def test_block_keys_hold_every_key_the_managed_block_writes(preset: str, supported: list[str], active: str) -> None:
+    """render.block_keys decides which keys between the markers a rewrite may replace or drop."""
+    assert set(tomllib.loads(render.managed_block(combo_cfg(preset, supported, active)))) <= render.block_keys()
 
 
 @pytest.mark.parametrize(("text", "message"), BROKEN.values(), ids=BROKEN.keys())
@@ -832,6 +887,112 @@ def test_generated_json_never_holds_what_json_cannot(value: object) -> None:
     with pytest.raises(DeployError, match="JSON cannot represent"):
         render.jsonc({"key": [value]})
     assert render.jsonc({"key": [1.5, "x", None, True]}).endswith('\n}\n')
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX file size limit (ulimit -f)")
+def test_a_pyproject_rewrite_cut_short_leaves_the_file_whole(tmp_path: Path) -> None:
+    """A full disk (here the file size limit) during the rewrite of the managed parts left
+    pyproject.toml truncated mid-block, and every later lock and apply refused its broken
+    markers: the rewrite goes through a temporary file now, so the file stays whole."""
+    target = tmp_path / "pyproject.toml"
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    old = re.sub(r'requires-python = "[^"]*"', 'requires-python = ">=3.9"', text, count=1)  # needs a rewrite
+    assert old != text and len(old.encode()) > 1024
+    target.write_text(old, encoding="utf-8", newline="\n")
+    code = (
+        "import resource, signal, sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(ROOT / '.pytemplate')!r})\n"
+        "from runner import config, render\n"
+        "from runner.ui import DeployError\n"
+        "render.PYPROJECT = Path(sys.argv[1])\n"
+        "cfg = config.load(set())\n"
+        "signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\n"
+        "resource.setrlimit(resource.RLIMIT_FSIZE, (512, 512))\n"
+        "try:\n"
+        "    render.write_pyproject(cfg)\n"
+        "    print('written')\n"
+        "except DeployError as e:\n"
+        "    print(e)\n"
+    )
+    r = subprocess.run([sys.executable, "-c", code, str(target)], capture_output=True, text=True, timeout=120, check=False)
+    assert "cannot write pyproject.toml" in r.stdout, r.stdout + r.stderr
+    assert target.read_text(encoding="utf-8") == old
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["pyproject.toml"]  # no temporary file left
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes and symlinks")
+def test_write_whole_keeps_modes_and_links(tmp_path: Path) -> None:
+    from runner.project import write_whole
+
+    script = tmp_path / "run.sh"
+    script.write_text("old\n", encoding="utf-8")
+    script.chmod(0o754)
+    write_whole(script, b"new\n")
+    assert script.read_bytes() == b"new\n" and script.stat().st_mode & 0o777 == 0o754
+    shared = tmp_path / "shared.toml"
+    shared.write_text("a = 1\n", encoding="utf-8")
+    (tmp_path / "link.toml").symlink_to(shared)
+    write_whole(tmp_path / "link.toml", b"a = 2\n")
+    assert (tmp_path / "link.toml").is_symlink() and shared.read_bytes() == b"a = 2\n"
+    mask = os.umask(0o022)
+    try:
+        write_whole(tmp_path / "fresh.json", b"{}\n")
+    finally:
+        os.umask(mask)
+    assert (tmp_path / "fresh.json").read_bytes() == b"{}\n"
+
+
+def test_write_whole_keeps_the_owner_and_the_hard_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new inode drops a file's other hard links (they kept the old text) and takes the
+    runner's owner: root working in a user's bind-mounted project (a dev container, sudo) left
+    pyproject.toml and the generated files root-owned. write_whole gives the new file the old
+    owner, and rewrites a file with other links, or one it cannot give its owner, in place."""
+    from runner import project
+
+    linked = tmp_path / "pyproject.toml"
+    linked.write_bytes(b"a = 1\n")
+    os.link(linked, tmp_path / "twin.toml")
+    project.write_whole(linked, b"a = 2\n")
+    assert (tmp_path / "twin.toml").read_bytes() == b"a = 2\n" and linked.stat().st_nlink == 2
+    own = tmp_path / "state.json"
+    own.write_bytes(b"{}\n")
+    if sys.platform != "win32" and os.geteuid() == 0:  # a real other owner: root can hand it out
+        os.chown(own, 4242, 4243)
+        project.write_whole(own, b'{"a": 1}\n')
+        assert (own.stat().st_uid, own.stat().st_gid) == (4242, 4243) and own.read_bytes() == b'{"a": 1}\n'
+    monkeypatch.setattr(project, "_give_owner", lambda tmp, old: False)  # another user's file, not root
+    inode = own.stat().st_ino
+    project.write_whole(own, b'{"b": 2, "c": 3}\n')
+    assert own.stat().st_ino == inode and own.read_bytes() == b'{"b": 2, "c": 3}\n'
+    project.write_whole(own, b"{}\n")  # shorter: the old tail is cut
+    assert own.read_bytes() == b"{}\n"
+    assert not [p.name for p in tmp_path.iterdir() if p.name.endswith(".pt-tmp")]
+
+
+def test_a_failed_in_place_write_puts_the_old_bytes_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The in-place fallback of write_whole (a hard-linked file) cut short by a full disk: the
+    file and its other names keep the old text, and the error reaches the caller."""
+    from runner import project
+
+    linked = tmp_path / "pyproject.toml"
+    linked.write_bytes(b"[project]\nname = 'old'\n")
+    os.link(linked, tmp_path / "twin.toml")
+    real = project._overwrite
+    calls: list[bytes] = []
+
+    def cut_short(fd: int, data: bytes) -> None:
+        calls.append(data)
+        if len(calls) == 1:  # the new text: half of it lands, then the disk is full
+            real(fd, data[: len(data) // 2])
+            raise OSError(28, "No space left on device")
+        real(fd, data)  # the restore
+
+    monkeypatch.setattr(project, "_overwrite", cut_short)
+    with pytest.raises(OSError, match="No space left"):
+        project.write_whole(linked, b"[project]\nname = 'a much longer new name'\n")
+    assert linked.read_bytes() == (tmp_path / "twin.toml").read_bytes() == b"[project]\nname = 'old'\n"
+    assert len(calls) == 2
 
 
 def test_write_pyproject_under_dry_run_reports_but_writes_nothing(pyproject: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1146,6 +1307,23 @@ def test_ci_template_linux_deps_line_may_be_indented(ci_template: Path) -> None:
     assert render.ci_workflow(raylib) == expected["raylib"]
     assert render.ci_workflow(CFG) == expected["script"]  # without deps the whole line goes
     assert "apt-get" in expected["raylib"] and "apt-get" not in expected["script"]
+
+
+def test_a_template_that_cannot_be_read_is_a_clear_error(profiles: Path, ci_template: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A template the runner may not read (permissions, a lock) ended render.load_profile and
+    render.ci_workflow in an internal-error traceback; the editors' templates said "cannot read"."""
+    real = Path.read_text
+
+    def read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self.name in ("off.toml", "ci.yml"):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    with pytest.raises(DeployError, match=r"cannot read .*off\.toml: Permission denied"):
+        render.load_profile("off")
+    with pytest.raises(DeployError, match=r"cannot read .*ci\.yml: Permission denied"):
+        render.ci_workflow(CFG)
 
 
 def test_ci_template_placeholder_left_is_a_clear_error(ci_template: Path) -> None:

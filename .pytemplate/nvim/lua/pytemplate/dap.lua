@@ -8,10 +8,11 @@ local function has_debugpy(python)
   if not python then
     return false
   end
-  local venv = vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(python)))
-  local site = pt.is_win and { venv .. "/Lib/site-packages" } or vim.fn.glob(venv .. "/lib/python3*/site-packages", true, true)
-  for _, dir in ipairs(site) do
-    if uv.fs_stat(dir .. "/debugpy/__init__.py") then
+  local venv = vim.fs.dirname(vim.fs.dirname(pt.normalize(python)))
+  -- lib/python3.X listed, never globbed: a project path with [ ], { }, $ or backquotes
+  local libs = pt.is_win and { venv .. "/Lib" } or pt.subdirs(venv .. "/lib", "python3")
+  for _, lib in ipairs(libs) do
+    if uv.fs_stat(lib .. "/site-packages/debugpy/__init__.py") then
       return true
     end
   end

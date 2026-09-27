@@ -171,9 +171,46 @@ def test_launcher_path_is_relative_to_the_top(tmp_path: Path) -> None:
     assert repo.prefix == "apps/my app"
     assert repo.launcher == "./apps/my app/deploy"
     assert "_pt_launcher='./apps/my app/deploy'" in hooks.hook_script(repo.launcher)
-    assert hooks.run_line(repo) == "sh './apps/my app/deploy' hooks run || exit $?"
+    assert hooks.run_line(repo) == "[ ! -f './apps/my app/deploy' ] || sh './apps/my app/deploy' hooks run || exit $?"
     assert find(top).launcher == "./deploy"
-    assert hooks.run_line(find(top)) == "sh ./deploy hooks run || exit $?"
+    assert hooks.run_line(find(top)) == "[ ! -f ./deploy ] || sh ./deploy hooks run || exit $?"
+
+
+@needs_git
+@pytest.mark.skipif(IS_WINDOWS, reason="a symlink stands for another spelling of the folder (Windows needs a privilege)")
+def test_a_project_spelled_otherwise_than_git_spells_it_is_found(tmp_path: Path) -> None:
+    """On macOS (case-insensitive APFS) ROOT keeps the case the user typed (`cd ~/projects/myapp`
+    for MyApp: Path.resolve keeps it there), while git's top has the case on disk: the prefix,
+    computed from the two texts, put the project outside its own work tree ("../myapp"), and
+    every hook command failed. A symlink gives the same folder another spelling here. The prefix
+    now comes from git (--show-prefix), and the file system says it names the project's folder."""
+    top, project = make_repo(tmp_path, "apps/p")
+    typed = tmp_path / "typed"
+    typed.symlink_to(project, target_is_directory=True)
+    repo = find(typed, top)
+    assert repo.prefix == "apps/p" and repo.launcher == "./apps/p/deploy"
+    (project / "src").mkdir()
+    (project / "src" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    git(top, "add", "-A")
+    assert hooks.staged_files(repo) == ["src/a.py"]
+
+
+@needs_git
+def test_staged_paths_fold_case_where_git_says_the_disk_does(tmp_path: Path) -> None:
+    """core.ignorecase (git sets it on macOS's default APFS, and on Windows): a staged path spelled
+    otherwise than the project's prefix (Apps/P/x.py for apps/p) was dropped on macOS, where
+    project_paths compared case-sensitively, and `hooks run` said there was nothing to check."""
+    top, project = make_repo(tmp_path, "apps/p")
+    source = tmp_path / "x.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    blob = git(top, "hash-object", "-w", str(source)).stdout.strip()
+    git(top, "update-index", "--add", "--cacheinfo", f"100644,{blob},Apps/P/x.py")
+    git(top, "config", "core.ignorecase", "true")
+    repo = find(project, top)
+    assert hooks.staged_files(repo) == ["x.py"] and repo.ignore_case
+    if not IS_WINDOWS:  # a case-sensitive disk: Apps/P is another folder
+        git(top, "config", "core.ignorecase", "false")
+        assert hooks.staged_files(find(project, top)) == []
 
 
 def test_not_a_git_work_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -773,6 +810,33 @@ def test_calls_means_this_projects_launcher_on_a_live_line(tmp_path: Path, capsy
 
 
 @needs_git
+def test_a_global_hooks_path_line_skips_the_repositories_without_the_launcher(tmp_path: Path) -> None:
+    """A core.hooksPath shared by every repository (a global one): the advised line runs in each
+    of them, and unguarded (`sh ./deploy hooks run || exit $?`) it failed every commit of the
+    others ("cannot open ./deploy"). It skips a checkout without the launcher, and still runs
+    this project's checks."""
+    ghooks = tmp_path / "ghooks"
+    ghooks.mkdir()
+    Path(os.environ["GIT_CONFIG_GLOBAL"]).write_text(f"[core]\n\thooksPath = {ghooks.as_posix()}\n", encoding="utf-8")
+    top, project = make_repo(tmp_path)
+    (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+    repo = find(project, top)
+    assert repo.custom_hooks_path
+    passed, _, hint = hooks._status_line(make(), repo)
+    assert passed is None and hooks.run_line(repo) in hint and "other repositories run it too" in hint, hint
+    hook = ghooks / hooks.HOOK
+    hook.write_bytes(f"#!/bin/sh\n{hooks.run_line(repo)}\n".encode("ascii"))
+    if not IS_WINDOWS:
+        hook.chmod(0o755)
+    assert hooks.classify(hook, repo) == "calls"
+    assert _commit_log(top, tmp_path, "a.txt") == ["./deploy hooks run"]  # this project's checks run
+    other = tmp_path / "other"
+    other.mkdir()
+    git(other, "init", "-q")
+    assert _commit_log(other, tmp_path, "b.txt") == []  # no ./deploy there: skipped, and the commit is made
+
+
+@needs_git
 def test_calls_with_a_project_folder_that_needs_quotes(tmp_path: Path) -> None:
     top, project = make_repo(tmp_path, "my app")
     (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
@@ -781,7 +845,7 @@ def test_calls_with_a_project_folder_that_needs_quotes(tmp_path: Path) -> None:
     shared = top / "hk" / hooks.HOOK
     repo = find(project, top)
     line = hooks.run_line(repo)
-    assert line == "sh './my app/deploy' hooks run || exit $?"
+    assert line == "[ ! -f './my app/deploy' ] || sh './my app/deploy' hooks run || exit $?"
     shared.write_text(f"#!/bin/sh\n{line}\n", encoding="utf-8")
     assert hooks.classify(shared, repo) == "calls"
     shared.write_text('#!/bin/sh\nsh "./my app/deploy" hooks run\n', encoding="utf-8")
@@ -832,6 +896,38 @@ def test_cmd_hooks_routes_every_subcommand(tmp_path: Path, monkeypatch: pytest.M
     assert "no git hook" in capsys.readouterr().err
     with pytest.raises(hooks.NotInGit):
         hooks.cmd_hooks(make(), ["install"])
+
+
+@needs_git
+def test_cmd_hooks_names_a_hook_file_it_cannot_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hooks folder the user may not write (another user's checkout, a read-only mount, chattr
+    +i): `hooks install` and `hooks uninstall` ended in an internal-error traceback."""
+    top, project = make_repo(tmp_path)
+    monkeypatch.setattr(hooks, "ROOT", project)
+    monkeypatch.chdir(project)
+    target = top / ".git" / "hooks" / hooks.HOOK
+    write = hooks._write_hook
+
+    def refused(path: Path, text: str) -> None:
+        raise PermissionError(1, "Operation not permitted", str(path))
+
+    monkeypatch.setattr(hooks, "_write_hook", refused)
+    with pytest.raises(DeployError, match=r"hooks install: cannot change .*pre-commit: Operation not permitted") as e:
+        hooks.cmd_hooks(make(), ["install"])
+    assert e.value.code == 2 and not target.exists()
+    monkeypatch.setattr(hooks, "_write_hook", write)
+    assert hooks.cmd_hooks(make(), ["install"]) == 0 and target.is_file()
+    unlink = Path.unlink
+
+    def refuse_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name == hooks.HOOK:
+            raise PermissionError(1, "Operation not permitted", str(self))
+        unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse_unlink)
+    with pytest.raises(DeployError, match=r"hooks uninstall: cannot change .*pre-commit: Operation not permitted"):
+        hooks.cmd_hooks(make(), ["uninstall"])
+    assert target.is_file()
 
 
 @needs_git
@@ -896,7 +992,7 @@ def test_the_user_git_config_does_not_reach_the_tests(tmp_path: Path, monkeypatc
 def test_git_env_pins_relative_paths(tmp_path: Path) -> None:
     top = tmp_path / "top"
     env = hooks.git_env({"GIT_INDEX_FILE": ".git/index", "GIT_AUTHOR_NAME": "x"}, top)
-    assert env == {"GIT_INDEX_FILE": os.path.normpath(top / ".git" / "index")}
+    assert env == {"GIT_INDEX_FILE": ".git/index"}  # without GIT_DIR git reads it from the top
     absolute = str(tmp_path / "wt" / "index")
     env = hooks.git_env({"GIT_DIR": ".git", "GIT_INDEX_FILE": absolute}, top)
     assert env["GIT_DIR"] == os.path.normpath(top / ".git")
@@ -904,6 +1000,18 @@ def test_git_env_pins_relative_paths(tmp_path: Path) -> None:
     assert env["GIT_WORK_TREE"] == str(top)  # GIT_DIR alone means: the cwd is the top
     assert hooks.git_env({"GIT_DIR": ".git", "GIT_WORK_TREE": "w"}, top)["GIT_WORK_TREE"] == os.path.normpath(top / "w")
     assert hooks.git_env({}, top) == {}
+
+
+def test_a_hook_that_cds_into_the_project_reads_the_real_index(tmp_path: Path) -> None:
+    """README's monorepo form, `cd apps/a && sh ./deploy hooks run`: git hands the hook
+    GIT_INDEX_FILE=.git/index (relative to the top) and it was joined to apps/a, a missing
+    index. The staged files read as none (a first commit passed unchecked) or all deleted."""
+    top, project = make_repo(tmp_path, "apps/a")
+    (project / "x.py").write_text("x = 1\n", encoding="utf-8")
+    git(top, "add", "apps/a/x.py")
+    repo = find(project, top=project, environ={"GIT_INDEX_FILE": ".git/index"})  # the hook's cwd after its cd
+    assert hooks.staged_files(repo) == ["x.py"]
+    assert hooks.staged_files(repo, "D") == []
 
 
 def test_git_calls_are_pinned_against_user_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1079,9 +1187,19 @@ class Tools:
         self.staged_calls.append((str(args[0]), path, data))
         return self.ruff_code, self.ruff_output
 
-    def _lint(self, cfg: Config, files: list[Path]) -> list[str]:
+    def _lint(self, cfg: Config, files: list[Path]) -> list[FakeFinding]:
         self.linted += files
-        return list(self.findings)
+        return [FakeFinding(text) for text in self.findings]
+
+
+class FakeFinding:
+    """A lintc.Finding the hook prints as `text`; `note` findings never block."""
+
+    def __init__(self, text: str, note: bool = False) -> None:
+        self.text, self.note = text, note
+
+    def __str__(self) -> str:
+        return self.text
 
 
 @pytest.fixture
@@ -1244,6 +1362,44 @@ def test_checks_generated_files(tmp_path: Path, tools: Tools) -> None:
     res = results(make(), repo, staged)
     assert res["generated files up to date"].passed is False
     assert "./deploy render" in res["generated files up to date"].hint and ".mypy.ini" in res["generated files up to date"].hint
+    # render rewrites state.json with them: the line names it, or following it blocks the next commit
+    assert "./deploy render, then git add gen.json .pytemplate/state.json" in res["generated files up to date"].hint
+
+
+def test_quiet_keeps_what_a_failed_check_says(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`./deploy -q hooks run` (a form README accepts: the global options may come first) printed
+    "[XX] ruff format: files need formatting" without the file nor the fix: -q hides progress,
+    never the answer (CLAUDE.md 5.3)."""
+    from runner import ui
+
+    monkeypatch.setattr(ui, "QUIET", True)
+    hooks._print(hooks.Result(False, "ruff format: files need formatting", "./deploy fmt, then git add src/p/extra.py", output="Would reformat: src/p/extra.py"))
+    hooks._print(hooks.Result(True, "ruff", output="All checks passed!"))
+    err = capsys.readouterr().err
+    assert "files need formatting" in err and "Would reformat: src/p/extra.py" in err and "./deploy fmt, then git add src/p/extra.py" in err, err
+    assert "All checks passed!" not in err  # a passed check's output stays progress
+
+
+def test_the_hook_reports_preset_options_that_are_not_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A [preset.*] edit that is not applied yet (flet's version leaves no trace in the managed
+    block) blocks the commit: check_lock asks cmd_apply.pending. CLAUDE.md 15.2 said it showed only
+    in doctor: a maintainer reading it learned the opposite of what the hook does."""
+    monkeypatch.setattr(render, "pyproject_outdated", lambda cfg: False)
+    monkeypatch.setattr(hooks, "uv_lock_check", lambda cfg: (0, ""))
+    asked: list[bool] = []
+
+    def pending(cfg: Config, hook: bool = True) -> list[tuple[str, str]]:
+        asked.append(hook)
+        return [("[preset.flet] is not applied to pyproject.toml (add flet==1.0.0)", "./deploy apply")]
+
+    monkeypatch.setattr(cmd_apply, "pending", pending)
+    result = hooks.check_lock(make())
+    assert result.passed is False and "[preset.flet] is not applied" in result.hint and asked == [False]
+    guide = ROOT / "CLAUDE.md"
+    if guide.is_file():
+        text = " ".join(guide.read_text(encoding="utf-8").split())
+        assert "shows only in `doctor`" not in text
+        assert "`doctor` and the pre-commit hook report it (`cmd_apply.pending`" in text
 
 
 @needs_git
@@ -1512,6 +1668,78 @@ def test_real_ruff_accepts_the_hook_arguments(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setenv("UV_OFFLINE", "1")
     code, out = hooks.uv_lock_check(cfg)
     assert code == 0, out
+
+
+NAME_DISPATCH_HOOK = """{shebang}
+. "$(dirname "$0")/helper.sh"
+case $(basename "$0") in
+    pre-commit) check_it ;;
+    *) exit 0 ;;
+esac
+"""
+HELPER = """check_it() {
+    printf '%s\\n' "user check as $(basename "$0")" >> "$PT_HOOK_LOG"
+    exit "${PT_LOCAL_EXIT:-0}"
+}
+"""
+
+
+@needs_git
+@pytest.mark.parametrize("shebang", ["#!/bin/sh", "#!/bin/sh -e", "#!/usr/bin/env bash"])
+def test_a_kept_hook_runs_under_its_own_name(tmp_path: Path, shebang: str) -> None:
+    """husky v4 and yorkie pick their job from `basename "$0"` and source their helpers from
+    `dirname "$0"`: kept as pre-commit.local and run by that name, the user's blocking check
+    silently checked nothing while pytemplate said it ran first."""
+    if "bash" in shebang and shutil.which("bash") is None:
+        pytest.skip("no bash")
+    top, project = make_repo(tmp_path)
+    (project / "deploy").write_bytes(FAKE_LAUNCHER.encode("ascii"))
+    (top / ".topmark").write_text("", encoding="utf-8")
+    (top / ".git" / "info" / "exclude").write_text(".topmark\n", encoding="utf-8")
+    log = tmp_path / "hook.log"
+    env = dict(git_env(), PT_HOOK_LOG=log.as_posix())
+    hooks_dir = top / ".git" / "hooks"
+    (hooks_dir / hooks.HOOK).write_bytes(NAME_DISPATCH_HOOK.format(shebang=shebang).encode("ascii"))
+    (hooks_dir / "helper.sh").write_bytes(HELPER.encode("ascii"))
+    if not IS_WINDOWS:
+        (hooks_dir / hooks.HOOK).chmod(0o755)
+    hooks.install(find(project, top), force=True)
+
+    def commit(name: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        (project / name).write_text(name, encoding="utf-8")
+        git(top, "add", "-A", env=env)
+        return git(top, "commit", "-q", "-m", name, env={**env, **extra}, check=False, timeout=120)
+
+    assert commit("one.txt").returncode == 0
+    assert log.read_text(encoding="utf-8").splitlines() == ["user check as pre-commit", "launcher hooks run from top"]
+    log.unlink()
+    assert commit("two.txt", PT_LOCAL_EXIT="1").returncode != 0  # the user's check still blocks
+    assert log.read_text(encoding="utf-8").splitlines() == ["user check as pre-commit"]
+
+
+@needs_git
+def test_force_leaves_a_non_shell_hook_that_reads_its_name(tmp_path: Path) -> None:
+    """overcommit's Ruby hook picks its job from $0: it cannot be sourced as pre-commit, and
+    run as pre-commit.local it would check nothing. --force leaves it alone and says what line
+    to add to it instead."""
+    top, project = make_repo(tmp_path)
+    target = top / ".git" / "hooks" / hooks.HOOK
+    text = "#!/usr/bin/env ruby\nhook_type = File.basename($0)\nexit 0\n"
+    target.write_text(text, encoding="utf-8")
+    with pytest.raises(DeployError, match=r"reads its own name .*Add this line to it instead:\n  \[ ! -f \./deploy \] \|\| sh \./deploy hooks run \|\| exit \$\?"):
+        hooks.install(find(project, top), force=True)
+    assert target.read_text(encoding="utf-8") == text and not (target.parent / hooks.LOCAL).exists()
+
+
+def test_interpreter_reads_the_hash_bang_line_as_the_hook_does() -> None:
+    assert hooks.interpreter("#!/bin/sh\n") == "sh"
+    assert hooks.interpreter("#! /bin/bash -e\r\n") == "bash"
+    assert hooks.interpreter("#!/usr/bin/env python3\n") == "python3"
+    assert hooks.interpreter("#!/usr/bin/env -S ruby -w\n") == "-S"  # as the hook script: run by its path
+    assert hooks.interpreter("echo no hash bang\n") == "sh"
+    assert not hooks.reads_its_name('#!/bin/sh\ncase $(basename "$0") in *) ;; esac\n')  # sourced: $0 is right
+    assert hooks.reads_its_name("#!/usr/bin/env node\nconst h = process.argv[1]\n")
+    assert not hooks.reads_its_name("#!/usr/bin/env python3\nprint('checks')\n")
 
 
 @needs_git

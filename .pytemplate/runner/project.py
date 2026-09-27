@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path, PurePath
 
@@ -265,3 +269,121 @@ def user_path(raw: str) -> Path:
     if not p.is_absolute():
         p = caller_cwd() / p
     return Path(os.path.normpath(p)) if IS_WINDOWS else p
+
+
+def scratch_name(name: str) -> str:
+    """`name` for a default scratch folder in the system temp dir: per user on POSIX, where
+    /tmp is shared (Windows %TEMP% and macOS $TMPDIR already are per user)."""
+    if sys.platform == "win32":
+        return name
+    else:
+        return f"{name}-{os.getuid()}"
+
+
+def check_private_dir(path: Path, option: str) -> None:
+    """Refuse (POSIX) a scratch folder that another user owns or can write to: the harnesses
+    run code from it as this user, and its owner could put their own there between two steps.
+    Both the path itself (a link planted in a shared /tmp) and the folder it names count."""
+    if sys.platform != "win32" and os.path.lexists(path):
+        uid = os.getuid()
+        for st in (os.lstat(path), os.stat(path)):
+            if st.st_uid != uid:
+                raise DeployError(f"{path} belongs to another user (uid {st.st_uid}): code run from it could be theirs; pick another {option}")
+        mode = os.stat(path).st_mode
+        if mode & 0o002:  # group-writable is the norm with a user-private group (umask 002)
+            raise DeployError(f"{path} can be written by every user (mode {mode & 0o7777:o}): pick another {option}, or chmod o-w it")
+
+
+def _umask() -> int:
+    mask = os.umask(0)  # the only way to read it; at import, before any thread starts
+    os.umask(mask)
+    return mask
+
+
+_UMASK = _umask()
+
+
+def write_whole(path: Path, data: bytes) -> None:
+    """Write `data` to `path` so that it is never left half-written: the bytes go to a temporary
+    file next to it, which then replaces it (os.replace is atomic). A write cut short (a full
+    disk, a quota, a file size limit, Ctrl+C) leaves `path` as it was: an in-place write had
+    truncated pyproject.toml mid-block. The file keeps its permissions, its owner and group
+    (_give_owner: root working in a user's bind-mounted project, a dev container or sudo, left
+    the user's files root-owned) and its other hard links; a symlink stays a link (its target is
+    replaced), a read-only file is an error as with a plain write, and a new file gets the
+    permissions a plain write would give it. A file with other hard links, or one whose owner
+    this process cannot give a new file (another user's), is rewritten in its own inode
+    (_write_in_place), which puts the old bytes back when the write fails."""
+    real = Path(os.path.realpath(path))
+    old: os.stat_result | None = None
+    if real.exists():
+        old = real.stat()
+        mode = stat.S_IMODE(old.st_mode)
+        if not os.access(real, os.W_OK):
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
+        if old.st_nlink > 1:  # a new inode would leave the other names with the old text
+            _write_in_place(real, data)
+            return
+    else:
+        mode = 0o666 & ~_UMASK
+    fd, name = tempfile.mkstemp(prefix=f".{real.name}.", suffix=".pt-tmp", dir=real.parent)
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        tmp.write_bytes(data)
+        if old is not None and not _give_owner(tmp, old):
+            tmp.unlink()
+            _write_in_place(real, data)
+            return
+        os.chmod(tmp, mode)  # after the chown, which may clear the set-id bits
+        os.replace(tmp, real)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def _give_owner(tmp: Path, old: os.stat_result) -> bool:
+    """Give the new file `tmp` the owner and group of the file it replaces (POSIX). False when
+    this process may not: another user's file, a group it is not in (write_whole then rewrites
+    the file in place)."""
+    if sys.platform == "win32":
+        return True
+    else:
+        new = os.stat(tmp)
+        uid = old.st_uid if new.st_uid != old.st_uid else -1
+        gid = old.st_gid if new.st_gid != old.st_gid else -1
+        if uid == -1 and gid == -1:
+            return True
+        try:
+            os.chown(tmp, uid, gid)
+        except OSError:
+            return False
+        return True
+
+
+def _write_in_place(path: Path, data: bytes) -> None:
+    """Rewrite `path` in its own inode (write_whole's fallback). A write that fails (a full disk,
+    Ctrl+C) puts the old bytes back: they fit where they were."""
+    fd = os.open(path, os.O_RDWR | getattr(os, "O_BINARY", 0))
+    try:
+        chunks: list[bytes] = []
+        while chunk := os.read(fd, 1 << 16):
+            chunks.append(chunk)
+        old = b"".join(chunks)
+        try:
+            _overwrite(fd, data)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                _overwrite(fd, old)
+            raise
+    finally:
+        os.close(fd)
+
+
+def _overwrite(fd: int, data: bytes) -> None:
+    os.lseek(fd, 0, os.SEEK_SET)
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view) :]
+    os.ftruncate(fd, len(data))

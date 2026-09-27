@@ -12,17 +12,19 @@ Two profiles:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import shutil
+import stat
 from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import envs, proc, render, ui
 from .config import Config, compiled_paths
-from .imports import imports_of, is_local, local_module, module_name, parse_error
+from .imports import PARSE_ERRORS, imports_of, is_local, local_module, module_name, parse_error
 from .project import BUILD, EXT_SUFFIXES, IS_WINDOWS, SRC, TOOLS, rel
 from .ui import DeployError
 
@@ -157,6 +159,51 @@ def _mypyc_output(path: Path, root: Path, owned: Collection[str]) -> bool:
     return module in owned or module.endswith("__mypyc") or path.with_name(f"{stem}.py").is_file()
 
 
+def _owner_writable(path: str | Path) -> None:
+    """Add the owner's write bit (on Windows: clear the read-only attribute); links are left alone."""
+    mode = os.lstat(path).st_mode
+    if not stat.S_ISLNK(mode):
+        wanted = stat.S_IMODE(mode) | (stat.S_IRWXU if stat.S_ISDIR(mode) else stat.S_IWUSR)
+        if wanted != stat.S_IMODE(mode):
+            os.chmod(path, wanted)
+
+
+def copy_writable(src: str, dst: str) -> str:
+    """shutil.copy2, then owner-writable: a copy of a read-only file of src/ (a Perforce
+    checkout, a link into the Nix store) kept its mode, and the next build could neither replace
+    it once the file changed nor delete it (Windows). For copytree's copy_function too."""
+    shutil.copy2(src, dst)
+    _owner_writable(dst)
+    return dst
+
+
+def make_writable(root: Path) -> None:
+    """Make `root` and everything below it owner-writable (folders: rwx), links neither followed
+    nor changed: copytree also copies a read-only FOLDER's mode, in which nothing can be written
+    or deleted (POSIX)."""
+    if os.path.islink(root):
+        return
+    _owner_writable(root)
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in (*dirnames, *filenames):
+            _owner_writable(os.path.join(dirpath, name))
+
+
+def remove_tree(path: Path) -> None:
+    """shutil.rmtree for a copy of src/ that may hold read-only entries (made by an older
+    ./deploy, see copy_writable): Windows does not delete a read-only file and POSIX does not
+    empty a read-only folder, so what is left is made writable and removed again. A link goes
+    as a link."""
+    if os.path.islink(path):
+        os.unlink(path)
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        make_writable(path)
+        shutil.rmtree(path)
+
+
 def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
     """Copy src -> dst: only what changed; remove what was deleted (except mypyc's extensions).
 
@@ -165,6 +212,8 @@ def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
     copied with their contents; a path that turned from file to folder (or back) is replaced;
     a folder deleted from src goes with its caches (it must not stay importable as a namespace
     package). `owned`: the compiled modules, whose extensions mypyc manages (see _mypyc_output).
+    Every copy is owner-writable (copy_writable), and a read-only one an older ./deploy left is
+    made writable before it is replaced or deleted.
     """
     changed = 0
     dst.mkdir(parents=True, exist_ok=True)
@@ -176,6 +225,7 @@ def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
         if path.is_dir():
             seen.add(target)
             if target.is_symlink() or (target.exists() and not target.is_dir()):  # a file became a folder
+                _owner_writable(target)  # Windows deletes no read-only file
                 target.unlink()
                 changed += 1
             target.mkdir(exist_ok=True)
@@ -185,23 +235,30 @@ def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
             continue
         seen.add(target)
         st = path.stat()
-        if target.is_dir() and not target.is_symlink():  # a folder became a file
-            shutil.rmtree(target)
+        if target.is_symlink():  # never written through (sync_tree makes no links)
+            target.unlink()
+        elif target.is_dir():  # a folder became a file
+            remove_tree(target)
         elif target.is_file():
+            _owner_writable(target)  # a read-only copy an older ./deploy made
             tt = target.stat()
             if tt.st_size == st.st_size and tt.st_mtime_ns == st.st_mtime_ns:
                 continue
-        shutil.copy2(path, target)
+        copy_writable(os.fspath(path), os.fspath(target))
         changed += 1
     for path in sorted(dst.rglob("*"), reverse=True):  # children before their folder
         if path in seen or SKIP_DIRS & set(path.relative_to(dst).parts) or _mypyc_output(path, dst, owned):
             continue
         if path.is_dir() and not path.is_symlink():
             for cache in SKIP_DIRS:
-                shutil.rmtree(path / cache, ignore_errors=True)
+                with contextlib.suppress(OSError):  # best effort: a folder still holding one stays
+                    if (path / cache).is_dir():
+                        remove_tree(path / cache)
             if not any(path.iterdir()):
+                _owner_writable(path)
                 path.rmdir()
         else:
+            _owner_writable(path)  # Windows deletes no read-only file
             path.unlink()
             changed += 1
     return changed
@@ -313,6 +370,17 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
         annotate.parent.mkdir(parents=True, exist_ok=True)
     if compile_c and not proc.DRY_RUN:
         stamp.unlink(missing_ok=True)
+    if spec["force"] and not proc.DRY_RUN:
+        # mypyc reuses the IR of its cache (compile.separate: incremental) and the C files of the
+        # last run for a module whose source did not change: strip_asserts and
+        # strict_dunder_typing are no part of mypy's cache key, so deploy.optimize 0 -> 1 kept
+        # the asserts in the release binary. A forced build starts from neither.
+        for cached in (prof.dir / "mypy_cache", prof.dir / "c"):
+            try:
+                if cached.exists():
+                    shutil.rmtree(cached)
+            except OSError as e:
+                raise DeployError(f"cannot remove {rel(cached)} for a clean rebuild: {e.strerror or e} (delete it, or ./deploy clean)") from None
 
     tool = envs.tool_env(cfg)
     # MSVC/setuptools output is only shown on failure (or with -v). VSLANG=1033: compiler
@@ -404,7 +472,7 @@ def hidden_imports(cfg: Config, stage: Path) -> list[str]:
     for path in sources:
         try:
             names = imports_of(path, module_name(path, SRC), SRC, candidates)
-        except (SyntaxError, ValueError) as e:  # a runner older than the project's syntax
+        except PARSE_ERRORS as e:  # a runner older than the project's syntax, a too deeply nested source
             line, msg = parse_error(e)
             raise DeployError(f"{rel(path)}:{line}: {msg}") from None
         for name in names:
@@ -426,8 +494,8 @@ def hidden_imports(cfg: Config, stage: Path) -> list[str]:
 def exe_stage(cfg: Config, stage: Path, dest: Path) -> Path:
     """Copy the stage WITHOUT the compiled .py files, so the packager can only bundle the binary."""
     if dest.exists():
-        shutil.rmtree(dest)
-    shutil.copytree(stage, dest, ignore=shutil.ignore_patterns(*SKIP_DIRS))
+        remove_tree(dest)
+    shutil.copytree(stage, dest, ignore=shutil.ignore_patterns(*SKIP_DIRS), copy_function=copy_writable)
     for path in compiled_sources(cfg):
         target = dest / path.relative_to(SRC)
         if target.exists():

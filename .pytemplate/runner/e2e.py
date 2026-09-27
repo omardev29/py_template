@@ -55,7 +55,7 @@ from typing import Any
 from . import proc, ui
 from .cmd_build import COMPAT
 from .config import BACKENDS, METHODS, Config
-from .project import CONFIG_FILE, ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, host_arch, host_os, user_path, venv_python
+from .project import CONFIG_FILE, ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, check_private_dir, host_arch, host_os, scratch_name, user_path, venv_python
 from .ui import DeployError
 
 DEFAULT_PRESETS = ("script", "raylib", "flet")
@@ -426,7 +426,7 @@ def parse_args(args: Sequence[str], available: Sequence[str]) -> Options:
     parser.add_argument("--keep", action="store_true", help="keep the base dir even when everything passes")
     parser.add_argument("--reuse", action="store_true", help="reuse <base>/<preset> kept by an earlier run instead of recreating it")
     parser.add_argument("--json", action="store_true", help="print the results as JSON on stdout")
-    parser.add_argument("--base", default="", help="base dir (default: %%TEMP%%\\pt\\e2e on Windows, $TMPDIR/pt-e2e elsewhere)")
+    parser.add_argument("--base", default="", help="base dir (default: %%TEMP%%\\pt\\e2e on Windows, $TMPDIR/pt-e2e-<uid> elsewhere)")
     ns = parser.parse_intermixed_args(list(args))  # `raylib --quick flet` works too
     names = [n for chunk in ns.presets for n in chunk.split(",") if n] or list(DEFAULT_PRESETS)
     unknown = [n for n in names if n not in available]
@@ -659,9 +659,10 @@ def detect_host(gui: str) -> Host:
 
 
 def default_base() -> Path:
-    """A SHORT path: LongPathsEnabled=0 breaks PyPy runtime copies and Flet client extraction."""
+    """A SHORT path: LongPathsEnabled=0 breaks PyPy runtime copies and Flet client extraction.
+    Per user on POSIX (/tmp is shared): `check_private_dir` refuses one another user made."""
     tmp = Path(tempfile.gettempdir())
-    return tmp / "pt" / "e2e" if IS_WINDOWS else tmp / "pt-e2e"
+    return tmp / "pt" / "e2e" if IS_WINDOWS else tmp / scratch_name("pt-e2e")
 
 
 def child_env(base: Path) -> dict[str, str]:
@@ -725,12 +726,23 @@ class Context:
 
 
 def rmtree(path: Path) -> None:
-    """Remove a tree even with read-only files (.git objects) and paths over 260 characters."""
+    """Remove a tree even with read-only files (.git objects) and paths over 260 characters. A
+    symlink or a junction (a --base on another disk) goes as a link, never what it names."""
+    from .cmd_env import _is_link  # imported here: cmd_env imports much this module never needs
+
+    if _is_link(path):
+        os.unlink(path)  # on Windows this also removes a directory symlink or a junction
+        return
     if not path.exists():
         return
-    target = "\\\\?\\" + str(path.resolve()) if IS_WINDOWS else str(path)
+    from .methods.portable import long_path  # \\?\C:\... or, for a share, \\?\UNC\server\...
+
+    target = long_path(path) if IS_WINDOWS else str(path)
 
     def retry(func: Callable[..., object], name: str, exc: object) -> None:
+        error = exc[1] if isinstance(exc, tuple) else exc  # onerror's exc_info (3.11), onexc's exception
+        if isinstance(error, BaseException) and os.path.islink(name):
+            raise error  # chmod follows a link: it made the folder a symlinked base names 0o200
         os.chmod(name, stat.S_IWRITE)
         func(name)
 
@@ -1145,11 +1157,13 @@ def run_preset(ctx: Context, steps: list[Step], into: list[Result] | None = None
                 record(Result(step.preset, step.name, FAIL, round(time.perf_counter() - t0, 1), "interrupted", log.relative_to(ctx.base).as_posix()), step)
                 raise
             result = Result(step.preset, step.name, status, round(time.perf_counter() - t0, 1), detail, log.relative_to(ctx.base).as_posix())
-            ui.info(f"     {status} in {result.seconds:.1f} s" + (f": {detail}" if detail else ""))
+            # A failure and where its log is are results, shown even with -q (ui.report)
+            shown = ui.report if status == FAIL else ui.info
+            shown(f"     {status} in {result.seconds:.1f} s" + (f": {detail}" if detail else "") + (f" ({step.preset}: {step.name})" if status == FAIL else ""))
             if status == FAIL:
                 for line in _tail(log):
-                    ui.info(f"     | {line}")
-                ui.info(f"     full log: {log}")
+                    ui.report(f"     | {line}")
+                ui.report(f"     full log: {log}")
             record(result, step)
             if status == FAIL and step.required:
                 blocked = step.name
@@ -1164,9 +1178,10 @@ def _prepare_base(base: Path) -> None:
         raise DeployError("selftest --e2e: the base dir cannot be inside this template")
     if base.exists() and not base.is_dir():
         raise DeployError(f"selftest --e2e: {base} is not a directory")
+    check_private_dir(base, "--base")
     if base.is_dir() and any(base.iterdir()) and not (base / MARKER).is_file():
         raise DeployError(f"selftest --e2e: {base} is not empty and was not made by selftest --e2e (no {MARKER}): pick another --base")
-    base.mkdir(parents=True, exist_ok=True)
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
     (base / MARKER).write_text("Made by ./deploy selftest --e2e: safe to delete.\n", encoding="utf-8", newline="\n")
 
 
@@ -1180,21 +1195,23 @@ def _cleanup(base: Path, presets: Sequence[str]) -> None:
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
         if {x.name for x in base.iterdir()} <= {MARKER}:
-            rmtree(base)
+            (base / MARKER).unlink(missing_ok=True)  # through a link too: that folder is the user's
+            rmtree(base)  # a symlinked base: only the link goes
     except OSError as e:
         ui.warn(f"could not remove {base}: {e}")
 
 
 def _print_table(results: list[Result], seconds: float) -> None:
+    """The table is the answer: shown even with -q (ui.report), like selftest --shells'."""
     ui.step("e2e results")
     width = max([len(r.step) for r in results] + [4])
-    ui.info(f"  {'preset':<8} {'step':<{width}}  result     time  detail")
+    ui.report(f"  {'preset':<8} {'step':<{width}}  result     time  detail")
     for r in results:
         time_text = f"{r.seconds:.1f}s" if r.status != SKIP else "-"
-        ui.info(f"  {r.preset:<8} {r.step:<{width}}  {r.status:<6} {time_text:>8}  {r.detail}".rstrip())
+        ui.report(f"  {r.preset:<8} {r.step:<{width}}  {r.status:<6} {time_text:>8}  {r.detail}".rstrip())
     counts = {s: sum(1 for r in results if r.status == s) for s in (PASS, FAIL, SKIP)}
     minutes, secs = divmod(int(seconds), 60)
-    ui.info(f"  total: {counts[PASS]} PASS, {counts[FAIL]} FAIL, {counts[SKIP]} SKIP in {minutes}m{secs:02d}s")
+    ui.report(f"  total: {counts[PASS]} PASS, {counts[FAIL]} FAIL, {counts[SKIP]} SKIP in {minutes}m{secs:02d}s")
 
 
 @contextmanager
@@ -1272,7 +1289,7 @@ def selftest(cfg: Config, args: list[str]) -> int:
         _print_table(results, seconds)
     kept = failed or opts.keep
     if kept:
-        ui.info(f"kept for inspection: {base}  (logs in {base / 'logs'})")
+        ui.report(f"kept for inspection: {base}  (logs in {base / 'logs'})")
     else:
         _cleanup(base, opts.presets)
     if opts.as_json:

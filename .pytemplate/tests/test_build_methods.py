@@ -3,9 +3,11 @@ pyz/portable layouts and bootstraps. No network, no packager: the packager calls
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.machinery
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -14,8 +16,8 @@ import sys
 import time
 import tomllib
 from collections.abc import Iterator
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PureWindowsPath
+from typing import Any, cast
 
 import pytest
 
@@ -25,7 +27,7 @@ from runner import cmd_build, config, envs, mypyc, presets, proc, upx  # noqa: E
 from runner.cmd_build import BuildRequest  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.methods import common, exe, nuitka  # noqa: E402
-from runner.project import ROOT  # noqa: E402
+from runner.project import ROOT, SRC  # noqa: E402
 from runner.ui import DeployError  # noqa: E402
 
 IS_WINDOWS = os.name == "nt"
@@ -434,6 +436,34 @@ def test_nuitka_onefile_keeps_the_plain_name_and_moves_the_file(sandbox: Path, m
     assert result == sandbox / "dist" / "myapp-cpython-nuitka" / "myapp" and result.read_bytes() == b"\x7fELF onefile"
 
 
+def test_nuitka_starts_the_compiler_even_for_an_app_named_nuitka(sandbox: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`python -m nuitka` ran in the stage, whose own package nuitka/ came first on sys.path:
+    "'nuitka' is a package and cannot be directly executed". The command the build runs is
+    replayed here with a stand-in compiler on PYTHONPATH (where the tools env keeps Nuitka)."""
+    cfg = make({"app": {"name": "nuitka"}, "compile": {"modules": ["nuitka.core"]}})
+    app = _nuitka_app(sandbox / "payload", cfg.pkg)
+    seen: dict[str, Any] = {}
+
+    def uv(env: object, argv: Any, *, cwd: Path | None = None, **_: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        if "--with" not in args:
+            return _run_locate(args)
+        seen.update(argv=args[args.index("--with") + 2 :], cwd=cwd)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(envs, "uv", uv)
+    with pytest.raises(DeployError):  # the stand-in above builds nothing
+        nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
+    compiler = tmp_path / "site" / "nuitka"
+    compiler.mkdir(parents=True)
+    (compiler / "__init__.py").write_text("", encoding="utf-8")
+    (compiler / "__main__.py").write_text("print('the compiler')\n", encoding="utf-8")
+    assert seen["argv"][0] == "python" and (Path(seen["cwd"]) / "nuitka" / "__init__.py").is_file()
+    env = {**os.environ, "PYTHONPATH": str(tmp_path / "site")}
+    r = subprocess.run([sys.executable, *seen["argv"][1:]], cwd=seen["cwd"], env=env, capture_output=True, text=True, check=False)
+    assert (r.returncode, r.stdout.strip()) == (0, "the compiler"), r.stderr
+
+
 def test_nuitka_without_output_is_a_clear_error(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = make({})
     app = _nuitka_app(sandbox / "payload", cfg.pkg)
@@ -460,10 +490,13 @@ def test_nuitka_argv_follows_the_config(sandbox: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(envs, "uv", fake)
     monkeypatch.setattr(upx, "active", lambda cfg: True)
     monkeypatch.setattr(upx, "find", lambda cfg: Path("/opt/upx/upx"))
-    nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app, extra=["--report=r.xml"]))
+    packed: list[Path] = []
+    monkeypatch.setattr(upx, "pack_tree", lambda cfg, root: packed.append(root) or [])
+    out = nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app, extra=["--report=r.xml"]))
     argv = fake.argv
     stage = sandbox / "build" / "nuitka-stage" / "cpython"
-    assert argv[argv.index(nuitka.NUITKA) + 1 :][:4] == ["python", "-m", "nuitka", str(stage / "main.py")]
+    # -P: the stage (the cwd) is not on Nuitka's own sys.path, so an app named nuitka never runs instead
+    assert argv[argv.index(nuitka.NUITKA) + 1 :][:5] == ["python", "-P", "-m", "nuitka", str(stage / "main.py")]
     assert "--output-filename=myapp.exe" in argv and "--include-package=myapp" in argv
     assert ("--python-flag=no_asserts" in argv) is (optimize >= 1)
     assert ("--python-flag=no_docstrings" in argv) is (optimize >= 2)
@@ -472,10 +505,56 @@ def test_nuitka_argv_follows_the_config(sandbox: Path, monkeypatch: pytest.Monke
     from runner.project import ROOT
 
     assert f"--windows-icon-from-ico={ROOT / 'art' / 'app.ico'}" in argv
-    assert f"--include-data-dir={stage / 'assets'}=assets" in argv
-    assert "--plugin-enable=upx" in argv and f"--upx-binary={Path('/opt/upx/upx')}" in argv
+    assert "--include-data-dir=assets=assets" in argv  # relative to the stage: Nuitka splits a path at ',' and '='
+    assert not any(str(stage) in str(a) for a in argv if str(a).startswith("--include-data"))
+    # a standalone folder is packed when it is done (the excludes apply), never by Nuitka's plugin
+    assert "--plugin-enable=upx" not in argv and packed == [out]
     assert argv[-2:] == ["--lto=no", "--report=r.xml"]  # extra_args, then the command line
     assert not [a for a in argv if a.startswith("--include-module=")]  # cpython: Nuitka follows the imports
+
+
+def test_nuitka_upx_honours_the_excludes(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # Nuitka's upx plugin has no exclude option: in a standalone folder it packed every DLL it
+    # copied, the Python DLL and the files of deploy.upx.exclude (a DLL UPX breaks) included
+    cfg = make({"deploy": {"upx": {"enabled": True, "exclude": ["mylib*.dll"]}}})
+    app = _nuitka_app(sandbox / "payload", cfg.pkg)
+    fake = FakeNuitka(cfg.pkg)
+
+    def nuitka_with_dlls(env: object, argv: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        done = fake(env, argv, **kw)
+        dist = sandbox / "build" / "nuitka" / "cpython" / "main.dist"
+        if dist.is_dir():
+            for name in ("python314.dll", "vcruntime140.dll", "mylib_core.dll", "libssl-3.dll"):
+                (dist / name).write_bytes(b"MZ")
+        return done
+
+    monkeypatch.setattr(envs, "uv", nuitka_with_dlls)
+    monkeypatch.setattr(nuitka, "IS_WINDOWS", True)
+    monkeypatch.setattr(upx, "IS_WINDOWS", True)
+    monkeypatch.setattr(upx, "active", lambda cfg: True)
+    monkeypatch.setattr(upx, "find", lambda cfg: Path("/opt/upx/upx"))
+    packed: list[str] = []
+
+    def pack_file(binary: Path, path: Path, flags: list[str]) -> upx.Result:
+        packed.append(path.name)
+        return upx.Result(path, 2, 1, "packed")
+
+    monkeypatch.setattr(upx, "pack_file", pack_file)
+    nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
+    assert "--plugin-enable=upx" not in fake.argv
+    # never python3*.dll, the C runtime or mylib*; the compiled module FakeNuitka writes is a PE
+    # .pyd, packed like any extension, on Windows only (a .so elsewhere: no PE name)
+    pyd = [f"bench{EXT}"] if EXT.endswith(".pyd") else []
+    assert sorted(packed) == sorted(["libssl-3.dll", "myapp.exe", *pyd])
+    # onefile: the plugin packs the one binary (the libraries inside its payload never)...
+    packed.clear()
+    nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app, onefile=True))
+    assert "--plugin-enable=upx" in fake.argv and f"--upx-binary={Path('/opt/upx/upx')}" in fake.argv and packed == []
+    # ...unless its own name is excluded
+    cfg = make({"deploy": {"upx": {"enabled": True, "exclude": ["MyApp*"]}}})
+    nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app, onefile=True))
+    assert "--plugin-enable=upx" not in fake.argv and packed == []
+    assert "myapp.exe matches deploy.upx.exclude: not packed" in capsys.readouterr().err
 
 
 def test_nuitka_includable_drops_what_the_build_env_cannot_locate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -747,6 +826,16 @@ def run_pyz(pyz_file: Path, env: dict[str, str], *args: str, prelude: str = "") 
     return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=120, check=False)
 
 
+def test_pyz_names_its_own_assets_whatever_it_inherits(tmp_path: Path) -> None:
+    # setdefault kept the PYTEMPLATE_ASSETS of the app that started this one (a launcher, or a
+    # pyz that restarts its updated version)
+    cache = tmp_path / "cache"
+    child = fake_pyz(tmp_path / "child.pyz", build_id="child")
+    r = run_pyz(child, pyz_env(cache, PYTEMPLATE_ASSETS=str(tmp_path / "parent" / "app" / "assets")))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split()[2] == str(pyz_root(cache) / "child" / "pure" / "app" / "assets")
+
+
 def test_pyz_bootstrap_picks_the_flavour(tmp_path: Path) -> None:
     key = _host_key()
     cache = tmp_path / "cache"
@@ -776,6 +865,105 @@ def test_pyz_bootstrap_refuses_an_older_python(tmp_path: Path) -> None:
     r = run_pyz(newer, pyz_env(tmp_path / "cache"))
     assert r.returncode == 1 and "demo: needs Python 3.99 or newer" in r.stderr
     assert not (tmp_path / "cache").exists()  # nothing extracted
+
+
+ABI_NAMES = {
+    "_x.cpython-314-x86_64-linux-gnu.so": "cp314",
+    "_x.cpython-314t-x86_64-linux-gnu.so": "cp314t",  # free-threaded
+    "_x.cpython-313-darwin.so": "cp313",
+    "_x.cp314-win_amd64.pyd": "cp314",
+    "_x.cp314t-win_arm64.pyd": "cp314t",
+    "_x.pypy311-pp73-x86_64-linux-gnu.so": "pypy311_pp73",
+    "_x.pypy311-pp80-darwin.so": "pypy311_pp80",  # PyPy 8.0: a new ABI for the same pp311 key
+    "_x.pypy311-pp73-win_amd64.pyd": "pypy311_pp73",
+    "_x.abi3.so": "",  # any CPython of the platform
+    "_x.so": "",
+    "_x.pyd": "",
+    ".cpython-314-x86_64-linux-gnu.so": "cp314",  # EXT_SUFFIX itself (the bootstrap's _abi)
+    ".cp314-win_amd64.pyd": "cp314",
+    ".pypy311-pp73-x86_64-linux-gnu.so": "pypy311_pp73",
+}
+
+
+def test_abi_tags_agree_with_the_bootstrap() -> None:
+    import sysconfig
+
+    bootstrap = _bootstrap_namespace()
+    for name, tag in ABI_NAMES.items():
+        assert common.abi_tag(name) == tag == bootstrap["abi_tag"](name), name
+    assert bootstrap["ABI_RE"].pattern == common.ABI_RE.pattern
+    assert bootstrap["_abi"]() == common.abi_tag(sysconfig.get_config_var("EXT_SUFFIX") or "") != ""
+
+
+def test_pyz_records_the_abi_of_every_targets_binaries(tmp_path: Path) -> None:
+    from runner.methods import pyz
+
+    root = tmp_path / "root"
+    for name in ("targets/a/lib/dep/_x.pypy311-pp73-x86_64-linux-gnu.so", "targets/a/lib/dep/_y.abi3.so", "targets/b/app/pkg/core.cpython-314-x86_64-linux-gnu.so", "targets/c/lib/dep.py"):
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_bytes(b"")
+    assert pyz._target_abis(root, ["a", "b", "c"]) == {"a": ["pypy311_pp73"], "b": ["cp314"]}
+    # pyz-merge records the ABIs of what it wrote
+    parts = [
+        fake_pyz(tmp_path / "p1.pyz", targets=[LINUX], pure=False, host=LINUX, files={"common/app/main.py": MERGE_MAIN, f"targets/{LINUX}/lib/_d.cpython-314-x86_64-linux-gnu.so": ""}),
+        fake_pyz(tmp_path / "p2.pyz", targets=[WIN], pure=False, host=WIN, files={"common/app/main.py": MERGE_MAIN, f"targets/{WIN}/lib/_d.cp314-win_amd64.pyd": ""}),
+    ]
+    info, _ = _merge(parts, tmp_path / "m.pyz")
+    assert info["abi"] == {LINUX: ["cp314"], WIN: ["cp314"]}
+
+
+@pytest.mark.parametrize("pure", [False, True])
+def test_pyz_bootstrap_takes_no_target_built_for_another_abi(tmp_path: Path, pure: bool) -> None:
+    # PyPy 8.0 (pp80) has the key pp311-... of a PyPy 7.3 build (pp73): it took that target and
+    # died in an ImportError of a dependency; a free-threaded CPython 3.14t likewise
+    import sysconfig
+
+    key = _host_key()
+    mine = common.abi_tag(sysconfig.get_config_var("EXT_SUFFIX") or "")
+    files = {"common/app/main.py": MAIN_WAITS, "common/lib/lazymod.py": "WHERE = 'common'\n", f"targets/{key}/lib/lazymod.py": "WHERE = 'target'\n"}
+    other = fake_pyz(tmp_path / "other.pyz", build_id=f"o{pure}", targets=[key], pure=pure, files=files, abi={key: ["pypy311_pp99"]})
+    r = run_pyz(other, pyz_env(tmp_path / "cache"))
+    if pure:  # a pure build with a compiled overlay: the .py runs
+        assert r.returncode == 0 and r.stdout.split()[:2] == ["ok", "common"], r.stderr
+    else:
+        assert r.returncode == 1 and "Traceback" not in r.stderr
+        assert f"no build for this interpreter and platform ({key}, {mine})" in r.stderr
+        assert f"Built for: {key} (pypy311_pp99)" in r.stderr
+    own = fake_pyz(tmp_path / "own.pyz", build_id=f"w{pure}", targets=[key], pure=pure, files=files, abi={key: [mine, "pypy311_pp99"]})
+    r = run_pyz(own, pyz_env(tmp_path / "cache"))
+    assert r.returncode == 0 and r.stdout.split()[:2] == ["ok", "target"], r.stderr  # its own ABI: the target
+
+
+def _old_pythons() -> list[str]:
+    """Interpreters older than 3.11 on this machine (macOS's /usr/bin/python3 is 3.9)."""
+    found: dict[str, str] = {}
+    for name in ("python3.8", "python3.9", "python3.10", "/usr/bin/python3"):
+        exe = shutil.which(name)
+        if not exe:
+            continue
+        r = subprocess.run([exe, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"], capture_output=True, text=True, timeout=60, check=False)
+        version = r.stdout.strip()
+        if r.returncode == 0 and version and tuple(int(x) for x in version.split(".")) < (3, 11):
+            found.setdefault(version, exe)
+    return sorted(found.values())
+
+
+def test_pyz_bootstrap_reaches_its_version_check_on_an_old_python(tmp_path: Path) -> None:
+    # `def _lock(fd: int) -> bool | None` is evaluated when the module loads: Python 3.9 (macOS's
+    # python3, Debian 11) died with "TypeError: unsupported operand type(s) for |" instead of
+    # "needs Python 3.11 or newer". Nothing before main()'s check may need a newer Python
+    source = (TEMPLATES / "pyz" / "__main__.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, feature_version=(3, 7))
+    futures = {a.name for node in tree.body if isinstance(node, ast.ImportFrom) and node.module == "__future__" for a in node.names}
+    assert "annotations" in futures  # no annotation is evaluated: PEP 604 and list[int] need 3.10 / 3.9
+    old = _old_pythons()
+    if not old:
+        pytest.skip("no Python older than 3.11 here (macOS has one)")
+    app = fake_pyz(tmp_path / "app.pyz", min_python=[3, 11])
+    for exe in old:
+        r = subprocess.run([exe, "-S", str(app)], capture_output=True, text=True, env=pyz_env(tmp_path / "cache"), timeout=120, check=False)
+        assert r.returncode == 1 and "demo: needs Python 3.11 or newer (you have" in r.stderr, (exe, r.stderr)
+        assert "Traceback" not in r.stderr
 
 
 @pytest.mark.parametrize("case", ["no_home", "unwritable"])
@@ -1388,6 +1576,31 @@ def test_pyz_merge_needs_the_host_of_a_pure_part(tmp_path: Path) -> None:
     assert info["targets"] == [LINUX, WIN]
 
 
+def test_pyz_merge_says_how_to_merge_a_merged_pure_file_again(tmp_path: Path) -> None:
+    # CI's merged .pyz (every part pure) merged again with a per-platform part: "an older ./deploy
+    # made it: rebuild it", though this ./deploy made it and a merge cannot be rebuilt
+    from runner.methods import pyz
+
+    first = _pure_part(tmp_path / "linux.pyz", host=LINUX, where="first")
+    second = _pure_part(tmp_path / "win.pyz", host=WIN, where="second")
+    info, _ = _merge([first, second], tmp_path / "all.pyz")
+    assert info["merged"] is True and "host" not in info
+    native = _native_part(tmp_path / "native.pyz")
+    for check in (lambda: pyz.check_parts([tmp_path / "all.pyz", native], tmp_path / "x.pyz"), lambda: _merge([native, tmp_path / "all.pyz"], tmp_path / "x.pyz")):
+        with pytest.raises(DeployError) as e:
+            check()  # --dry-run (check_parts) says it too
+        assert "is a merge of pure parts" in str(e.value) and "pass the parts it was merged from to one ./deploy pyz-merge call" in str(e.value)
+        assert "older ./deploy" not in str(e.value)
+    assert not (tmp_path / "x.pyz").exists()
+    # What it says works: the parts it was merged from, with the other one, in one call
+    info, names = _merge([first, second, native], tmp_path / "x.pyz")
+    assert info["targets"] == sorted([FOREIGN, LINUX, WIN]) and f"targets/{WIN}/lib/dep.py" in names
+    # A merge made before the "merged" key: both causes are named
+    old_merge = fake_pyz(tmp_path / "old-all.pyz", pure=True, files={"common/app/main.py": MERGE_MAIN, "common/lib/dep.py": "WHERE = 'x'\n"})
+    with pytest.raises(DeployError, match="if an earlier pyz-merge made it, pass the parts it was merged from .*; if an older ./deploy built it, rebuild it"):
+        pyz.check_parts([old_merge, native], tmp_path / "y.pyz")
+
+
 @pytest.mark.parametrize("gui", [False, True])
 @pytest.mark.parametrize("backends", [("cpython", "cpython"), ("pypy", "pypy"), ("pypy", "cpython")])
 def test_pyz_merge_writes_the_windows_wrapper(tmp_path: Path, gui: bool, backends: tuple[str, str]) -> None:
@@ -1607,6 +1820,10 @@ def _install_recorder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, fail_f
         env.python.write_text("", encoding="utf-8")
         monkeypatch.setattr(envs, f"{name}_env", lambda cfg, env=env: env)
     monkeypatch.setattr(envs, "uv", fake_uv)
+    def info(python: Any) -> dict[str, object]:
+        return {"impl": "pypy", "version": "3.11.15"} if "pypy" in str(python) else {"impl": "cpython", "version": "3.14.7"}
+
+    monkeypatch.setattr(envs, "interpreter_info", info)
     monkeypatch.setattr(common, "host_os", lambda: "linux")
     monkeypatch.setattr(common, "host_arch", lambda: "x86_64")
     return calls
@@ -1627,7 +1844,9 @@ def test_host_linux_target_gets_the_platform_floor(tmp_path: Path, monkeypatch: 
     ((key, args, _),) = calls
     assert key == "cpython" and _flag(args, "--python") == str(envs.cpython_env(make({})).python)
     assert _flag(args, "--python-platform") == floor
-    assert _flag(args, "--python-version") == ("3.14" if floor else None)
+    # the interpreter's full version: uv read 3.14 as 3.14.0 and dropped a requirement marked
+    # python_full_version >= '3.14.1' from the build for this very 3.14.7 interpreter
+    assert _flag(args, "--python-version") == ("3.14.7" if floor else None)
     assert "--only-binary" not in args  # the host may still build an sdist
 
 
@@ -1761,7 +1980,7 @@ def test_pypy_build_installs_cpython_keys_with_the_tools_env(tmp_path: Path, mon
     common.install_deps(cfg, "pypy", common.parse_key("pp311-linux-x86_64"), tmp_path / "b", req)
     assert calls[0][0] == "cpython" and _flag(calls[0][1], "--python") == str(envs.cpython_env(cfg).python)
     assert calls[1][0] == "pypy" and _flag(calls[1][1], "--python") == str(envs.pypy_env(cfg).python)
-    assert _flag(calls[1][1], "--python-version") == "3.11"
+    assert _flag(calls[1][1], "--python-version") == "3.11.15"  # the interpreter's full version
 
 
 def test_install_deps_removes_uv_junk_but_keeps_native_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2161,6 +2380,26 @@ def test_build_rejects_a_bad_configured_target_key(no_build: None, monkeypatch: 
     assert e.value.code == 2
     # Other methods ignore [deploy.pyz] targets
     assert cmd_build.cmd_build(make({"deploy": {"pyz": {"targets": ["cp315-linux-x86_64"]}}}), ["--method", "portable", "--no-check"]) == 0
+
+
+def test_the_wheel_never_compiles_the_mypyc_stage_it_does_not_use(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`build mypyc --method wheel` compiled the mypyc release stage (a full mypyc and C
+    compile) and then compiled again in the wheel's own project, which reads src/."""
+    seen: list[BuildRequest] = []
+
+    class FakeWheel:
+        @staticmethod
+        def build(req: BuildRequest) -> Path:
+            seen.append(req)
+            out = tmp_path / "p.whl"
+            out.write_bytes(b"x")
+            return out
+
+    monkeypatch.setattr(cmd_build, "payload", lambda cfg, backend: pytest.fail("the payload of a wheel build"))
+    monkeypatch.setattr(cmd_build, "check_lock", lambda cfg: None)
+    monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeWheel)
+    assert cmd_build.cmd_build(make(ALL_BACKENDS), ["mypyc", "--method", "wheel", "--no-check"]) == 0
+    assert seen[-1].app_dir == SRC and seen[-1].compiled
 
 
 def test_build_forwards_extras_to_the_packagers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -2761,6 +3000,66 @@ def test_portable_prune_off_copies_everything_but_the_caches(tmp_path: Path, mon
     assert got == expected
 
 
+class _ResolvesTo:
+    """A path whose resolve() is a Windows path, whatever the host (long_path reads only that)."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def resolve(self) -> PureWindowsPath:
+        return PureWindowsPath(self.text)
+
+
+@pytest.mark.parametrize(
+    ("resolved", "long", "volume", "short"),
+    [
+        (r"C:\p\dist\x", r"\\?\C:\p\dist\x", r"\\?\C:", r"C:\p\dist\x"),
+        (r"\\server\share\p\dist\x", r"\\?\UNC\server\share\p\dist\x", r"\\?\UNC\server\share", r"\\server\share\p\dist\x"),
+        (r"\\?\C:\p", r"\\?\C:\p", r"\\?\C:", r"C:\p"),  # already long
+        (r"\\?\UNC\server\share\p", r"\\?\UNC\server\share\p", r"\\?\UNC\server\share", r"\\server\share\p"),
+    ],
+)
+def test_long_paths_keep_a_network_share_valid(monkeypatch: pytest.MonkeyPatch, resolved: str, long: str, volume: str, short: str) -> None:
+    # A project on a share, or on a mapped drive (resolve() turns Z:\ into \\server\share\): the
+    # bundled portable build copied the interpreter to \\?\\\server\... (WinError 123, blamed on
+    # the 260-character limit), and e2e.rmtree built the same name
+    from runner.methods import portable
+
+    monkeypatch.setattr(portable, "IS_WINDOWS", True)
+    got = portable.long_path(cast(Path, _ResolvesTo(resolved)))
+    assert got == long
+    assert ntpath.splitdrive(got)[0] == volume  # a real volume, never the bare \\?\
+    assert portable.short_path(got) == short
+    monkeypatch.setattr(portable, "IS_WINDOWS", False)
+    assert portable.long_path(tmp := Path("x")) == str(tmp.resolve())  # POSIX: unchanged
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="spells the Windows names on a POSIX file system (a share would be reached)")
+def test_the_runtime_prune_reads_the_folders_of_a_network_share(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # copytree hands the prune callback \\?\UNC\server\share\...: without its UNC prefix it read
+    # UNC\server\..., a relative name that matched no folder of the base, and a runtime on a
+    # share was copied whole (the base's console scripts, tests, Tk...)
+    from runner.methods import portable
+
+    monkeypatch.chdir(tmp_path)
+    base = r"\\server\share\py"  # a relative name here: resolve() puts it in tmp_path
+    monkeypatch.setattr(envs, "interpreter_info", lambda python: {"base_prefix": base, "version": "3.14.7", "impl": "cpython"})
+    monkeypatch.setattr(common, "ensure_env", lambda env: env)
+    monkeypatch.setattr(common, "SRC", tmp_path / "src")
+    (tmp_path / "src").mkdir()
+    monkeypatch.setattr(portable, "long_path", lambda p: portable.LONG_UNC + base[2:] if p == Path(base).resolve() else str(p))
+    seen: dict[str, Any] = {}
+
+    def copytree(src: str, dst: str, ignore: Any, symlinks: bool) -> None:
+        seen.update(src=src, ignore=ignore)
+
+    monkeypatch.setattr(portable.shutil, "copytree", copytree)
+    portable.copy_runtime(make({}), "cpython", tmp_path / "out" / "runtime", lib=tmp_path / "lib")
+    assert seen["src"] == r"\\?\UNC\server\share\py"
+    assert seen["ignore"](seen["src"] + "/bin", ["python3.14", "ruff"]) == {"ruff"}  # bin/: the interpreter only
+    assert seen["ignore"](seen["src"], ["include", "lib"]) == {"include"}
+
+
 @pytest.mark.skipif(IS_WINDOWS, reason="POSIX runtime layouts (symlinks)")
 @pytest.mark.parametrize(
     "dep_code",
@@ -2790,6 +3089,15 @@ def test_portable_prunes_tkinter_when_nothing_imports_it(tmp_path: Path, monkeyp
     assert common.uses_tkinter(lib) is False
     (src / "main.py").write_text("import turtle\n", encoding="utf-8")
     assert common.uses_tkinter(lib) is True  # the app's own import still counts
+
+
+def test_uses_tkinter_keeps_tk_for_a_source_too_deep_to_parse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # ast.parse raises RecursionError on it: an internal runner error, now the safe side
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "table.py").write_text("NAME = 'tkinter'\nx = " + " + ".join(["1"] * 100_000) + "\n", encoding="utf-8")
+    monkeypatch.setattr(common, "SRC", src)
+    assert common.uses_tkinter(tmp_path / "lib") is True
 
 
 def test_portable_keeps_tkinter_imported_in_a_symlinked_src_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3241,6 +3549,60 @@ def test_portable_build_stops_when_the_copied_runtime_has_no_interpreter(sandbox
     assert not proc.run.calls  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("bundled", [True, False])
+def test_a_bundled_portable_flet_app_carries_its_desktop_client(sandbox: Path, monkeypatch: pytest.MonkeyPatch, bundled: bool) -> None:
+    # The flet-desktop wheel has no client: the folder downloaded ~40 MB from GitHub at its
+    # first start and could not start offline (exe and nuitka bundle it)
+    from runner.methods import nuitka, portable
+
+    name = "flet-linux-debian12-light-amd64.tar.gz"
+    archive = sandbox / "cache" / name
+    archive.parent.mkdir()
+    archive.write_bytes(b"client")
+    archive.with_name(name + ".sha256").write_text(f"{'a' * 64} 6", encoding="ascii")  # nuitka._fingerprint
+    cfg = make({"deploy": {"portable": {"archive": False, "runtime": "bundled" if bundled else "system"}}})
+    monkeypatch.setattr(portable, "IS_WINDOWS", False)
+    monkeypatch.setattr(common, "host_target", lambda c, b: common.Target("cp", 3, 14, "linux", "x86_64"))
+    monkeypatch.setattr(common, "export_requirements", lambda c: _requirements(sandbox))
+    monkeypatch.setattr(portable, "_warn_host_only", lambda *a: None)
+
+    def install(c: Config, b: str, t: common.Target, dest: Path, req: Path) -> Path:
+        (dest / "flet_desktop").mkdir(parents=True)
+        (dest / "flet_desktop" / "__init__.py").write_text("", encoding="utf-8")
+        return dest
+
+    def runtime(c: Config, b: str, dest: Path, lib: Path | None = None) -> Path:
+        (dest / "bin").mkdir(parents=True)
+        (dest / "bin" / "python3").write_bytes(b"")
+        return dest / "bin" / "python3"
+
+    monkeypatch.setattr(common, "install_deps", install)
+    monkeypatch.setattr(portable, "copy_runtime", runtime)
+    monkeypatch.setattr(portable, "_smoke_runtime", lambda *a: None)
+    monkeypatch.setattr(nuitka, "_flet_client_archive", lambda c: archive)
+    monkeypatch.setattr(proc, "run", FakeRun("", 0))
+    out = portable.build(BuildRequest(cfg, "cpython", "portable", fake_app(sandbox / "payload")))
+    bundled_client = out / "lib" / "flet_desktop" / "app" / name
+    launcher = (out / "myapp.sh").read_text(encoding="utf-8")
+    if bundled:
+        assert bundled_client.read_bytes() == b"client"  # where flet_desktop looks for one
+        assert bundled_client.with_name(name + ".sha256").is_file()  # read instead of hashing the client
+        # The app looks for exactly that archive: not by the user's glibc or current folder
+        assert "export FLET_LINUX_DISTRO=debian12" in launcher and "export FLET_DESKTOP_FLAVOR=light" in launcher
+        assert "export FLET_APP_ID=myapp" in launcher  # the taskbar groups the window as the app
+    else:  # runtime = "system": a Python of the user's machine, like a pyz (documented)
+        assert not bundled_client.exists() and "FLET_" not in launcher
+
+
+def test_the_flet_client_env_pins_what_the_archive_was_named_for() -> None:
+    from runner.methods import nuitka
+
+    assert nuitka.flet_client_env("flet-linux-ubuntu24.04-light-amd64.tar.gz") == {"FLET_LINUX_DISTRO": "ubuntu24.04", "FLET_DESKTOP_FLAVOR": "light"}
+    assert nuitka.flet_client_env("flet-linux-debian10-arm64.tar.gz") == {"FLET_LINUX_DISTRO": "debian10", "FLET_DESKTOP_FLAVOR": "full"}
+    assert nuitka.flet_client_env("flet-linux-ubuntu22.04-light-arm_7.tar.gz")["FLET_LINUX_DISTRO"] == "ubuntu22.04"
+    assert nuitka.flet_client_env("flet-windows.zip") == nuitka.flet_client_env("flet-macos.tar.gz") == {}
+
+
 @pytest.mark.skipif(IS_WINDOWS, reason="POSIX interpreter layout (symlinks)")
 def test_portable_runtime_smoke_with_real_interpreters(tmp_path: Path) -> None:
     from runner.methods import portable
@@ -3273,10 +3635,57 @@ def test_portable_runtime_smoke_with_real_interpreters(tmp_path: Path) -> None:
 
 # --- flet build ---------------------------------------------------------------------------------------
 
+FLET_LOCK = """version = 1
+
+[[package]]
+name = "fletdemo"
+version = "0.1.0"
+source = { virtual = "." }
+
+[package.metadata]
+requires-dist = [
+    { name = "flet", specifier = "==1.0.1" },
+    { name = "numpy", specifier = ">=2.0,<3" },
+]
+
+[[package]]
+name = "flet"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://files.pythonhosted.org/packages/aa/flet-1.0.1-py3-none-any.whl" }]
+
+[[package]]
+name = "msgpack"
+version = "1.2.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/bb/msgpack-1.2.2.tar.gz" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cc/msgpack-1.2.2-cp314-cp314-manylinux_2_28_x86_64.whl" },
+    { url = "https://files.pythonhosted.org/packages/dd/msgpack-1.2.2-cp314-cp314-win_amd64.whl" },
+]
+
+[[package]]
+name = "numpy"
+version = "2.3.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://files.pythonhosted.org/packages/ee/numpy-2.3.1-cp314-cp314-win_amd64.whl" }]
+
+[[package]]
+name = "docopt"
+version = "0.6.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ff/docopt-0.6.2.tar.gz" }
+
+[[package]]
+name = "mylib"
+version = "0.1.0"
+source = { editable = "libs/mylib" }
+"""
+
 FLET_PYPROJECT ='[project]\nname = "fletdemo"\nversion = "0.1.0"\n\n[tool.flet]\norg = "com.example"\n\n[tool.flet.app]\npath = "src"\nmodule = "main"\n'
 
 
-def _flet_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, backend: str = "cpython", target: str = "host", produce: bool = True, payload_ext: bool = False, **deploy: Any) -> tuple[Path, Recorder]:
+def _flet_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, backend: str = "cpython", target: str = "host", produce: bool = True, payload_ext: bool = False, pins: list[str] | None = None, **deploy: Any) -> tuple[Path, Recorder]:
     from runner.methods import flet
 
     cfg = _flet_cfg(deploy={"flet": {"target": target, "extra_args": ["--build-number", "7"], **deploy}})
@@ -3287,7 +3696,9 @@ def _flet_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, backend: str 
     pyproject = sandbox / "pyproject.toml"
     pyproject.write_text(FLET_PYPROJECT, encoding="utf-8")
     monkeypatch.setattr(flet, "PYPROJECT", pyproject)
-    monkeypatch.setattr(flet, "_pinned_requirements", lambda env: ["flet==1.0.1", "msgpack==1.1.0"])
+    monkeypatch.setattr(flet, "_pinned_requirements", lambda env: list(pins or ["flet==1.0.1", "msgpack==1.1.0"]))
+    (sandbox / "uv.lock").write_text(FLET_LOCK, encoding="utf-8")
+    monkeypatch.setattr(common, "LOCK", sandbox / "uv.lock")
     monkeypatch.setattr(flet, "host_os", lambda: "linux")
 
     def effect(args: list[str], cwd: Path | None) -> None:
@@ -3298,6 +3709,55 @@ def _flet_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, backend: str 
     monkeypatch.setattr(envs, "uv_run", rec)
     out = flet.build(BuildRequest(cfg, backend, "flet", app, extra=["--verbose"]))
     return out, rec
+
+
+FLET_LOCAL_LOCK = """version = 1
+
+[[package]]
+name = "mylib"
+version = "0.1.0"
+source = { editable = "libs/mylib" }
+
+[[package]]
+name = "extlib"
+version = "0.2.0"
+source = { directory = "../extlib" }
+"""
+
+
+def test_flet_build_names_local_libraries_by_absolute_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `uv export` without --no-editable wrote "-e ./libs/mylib ; <markers>" into the build
+    # project's dependencies: no PEP 508 requirement (pip refused it), and relative to the
+    # project where the build stage is two folders deeper
+    from runner.methods import flet
+
+    requirements = pytest.importorskip("packaging.requirements")
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "uv.lock").write_text(FLET_LOCAL_LOCK, encoding="utf-8")
+    monkeypatch.setattr(common, "LOCK", project / "uv.lock")
+    marker = "python_full_version < '3.15' and implementation_name == 'cpython'"
+    exported = f"./libs/mylib ; {marker}\n../extlib ; {marker}\nanyio==4.15.1 ; {marker}\nrich @ https://example.com/rich.whl ; {marker}\n"
+    calls: list[list[str]] = []
+
+    def fake_uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append([str(a) for a in args])
+        return subprocess.CompletedProcess(args, 0, exported, "")
+
+    monkeypatch.setattr(envs, "uv", fake_uv)
+    pins = flet._pinned_requirements(envs.tool_env(make({})))
+    assert "--no-editable" in calls[0]
+    assert pins == [
+        f"mylib @ {(project / 'libs' / 'mylib').resolve().as_uri()} ; {marker}",
+        f"extlib @ {(tmp_path / 'extlib').resolve().as_uri()} ; {marker}",
+        f"anyio==4.15.1 ; {marker}",
+        f"rich @ https://example.com/rich.whl ; {marker}",
+    ]
+    for pin in pins:
+        requirements.Requirement(pin)  # every line is PEP 508
+    monkeypatch.setattr(envs, "uv", lambda env, args, **kw: subprocess.CompletedProcess(args, 0, "./libs/other\n", ""))
+    with pytest.raises(DeployError, match="cannot name the local requirement './libs/other'"):
+        flet._pinned_requirements(envs.tool_env(make({})))
 
 
 def test_flet_build_argv_stage_and_pyproject(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3416,6 +3876,32 @@ def test_flet_build_mobile_and_web_ship_the_py_code(sandbox: Path, monkeypatch: 
     assert "web: compiled extensions are not supported" in capsys.readouterr().err
 
 
+def test_flet_build_leaves_mobile_binaries_to_flets_index(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # flet build installs a mobile or web target's binary packages from Flet's own index
+    # (pypi.flet.dev, --only-binary :all:), which held msgpack 1.1.0 and 1.1.2 only: the exact
+    # msgpack==1.2.2 of a new flet project had no solution and an apk or ipa build failed
+    import tomllib
+
+    requirements = pytest.importorskip("packaging.requirements")
+    marker = "python_full_version < '3.15' and implementation_name == 'cpython'"
+    pins = [f"flet==1.0.1 ; {marker}", f"msgpack==1.2.2 ; {marker}", "numpy==2.3.1", "docopt==0.6.2", f"mylib @ file:///src/libs/mylib ; {marker}"]
+    stage = sandbox / "build" / "flet-build" / "cpython" / "pyproject.toml"
+    for target in ("apk", "ipa", "web"):
+        _flet_build(sandbox, monkeypatch, target=target, pins=pins)
+        deps = tomllib.loads(stage.read_text(encoding="utf-8"))["project"]["dependencies"]
+        # the pure flet keeps its pin, a binary one keeps only the project's own bounds and its
+        # markers, a direct reference stays
+        assert deps == [f"flet==1.0.1 ; {marker}", f"msgpack ; {marker}", "numpy>=2.0,<3", "docopt", f"mylib @ file:///src/libs/mylib ; {marker}"]
+        for dep in deps:
+            requirements.Requirement(dep)
+        err = capsys.readouterr().err
+        assert f"{target}: not pinned to uv.lock's version: msgpack==1.2.2, numpy==2.3.1, docopt==0.6.2" in err and "pypi.flet.dev" in err
+    # a desktop build installs from PyPI: every pin stays
+    _flet_build(sandbox, monkeypatch, target="linux", pins=pins)
+    assert tomllib.loads(stage.read_text(encoding="utf-8"))["project"]["dependencies"] == pins
+    assert "not pinned" not in capsys.readouterr().err
+
+
 def test_flet_build_upx_only_for_desktop_and_missing_output(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     packed: list[Path] = []
     monkeypatch.setattr(upx, "active", lambda cfg: True)
@@ -3487,3 +3973,46 @@ def test_portable_sh_launcher_exit_code_and_environment(tmp_path: Path) -> None:
     r = subprocess.run([str(launcher)], capture_output=True, text=True, env=env, timeout=120, check=False)
     assert r.returncode == 7, r.stderr  # the app's exit code
     assert r.stdout.split() == ["None", "None", "1", "1"]  # caller's PYTHONPATH cleared, UTF-8 on, -O
+
+
+# --- wheel: where the dependencies come from ------------------------------------------------------
+
+
+def test_wheel_declares_git_and_url_sources_as_direct_references() -> None:
+    from runner.methods import wheel
+
+    data = {
+        "project": {"dependencies": ["rich>=15", "Tool_Kit[fast] ; sys_platform == 'linux'", "blob"]},
+        "tool": {"uv": {"sources": {
+            "tool-kit": {"git": "https://github.com/org/toolkit", "tag": "v1.2", "subdirectory": "python"},
+            "blob": {"url": "https://example.com/blob-1.0-py3-none-any.whl"},
+        }}},
+    }
+    assert wheel.dependencies(data) == [
+        "rich>=15",
+        "Tool_Kit[fast] @ git+https://github.com/org/toolkit@v1.2#subdirectory=python ; sys_platform == 'linux'",
+        "blob @ https://example.com/blob-1.0-py3-none-any.whl",
+    ]
+    assert wheel.dependencies({"project": {"dependencies": ["rich"]}}) == ["rich"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [{"workspace": True}, {"path": "libs/b08lib", "editable": True}, {"index": "internal"},
+     {"git": "https://github.com/org/b08lib", "marker": "sys_platform == 'linux'"}, [{"path": "a"}, {"path": "b"}]],
+)
+def test_wheel_refuses_a_source_it_cannot_declare(source: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`./deploy add ./libs/b08lib` puts b08lib in [project] dependencies and its path in
+    [tool.uv.sources]: the wheel's metadata said `Requires-Dist: b08lib`, a PyPI name, so
+    installing it failed or took an unrelated PyPI package of that name (dependency confusion)."""
+    from runner.methods import wheel
+
+    data = {"project": {"dependencies": ["rich", "b08lib"]}, "tool": {"uv": {"sources": {"b08lib": source}}}}
+    with pytest.raises(DeployError, match=r"wheel cannot declare .*b08lib .*--method pyz or portable") as e:
+        wheel.dependencies(data)
+    assert e.value.code == 2
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "p"\ndependencies = ["b08lib"]\n[tool.uv.sources]\nb08lib = { workspace = true }\n', encoding="utf-8")
+    monkeypatch.setattr(wheel, "PYPROJECT", pyproject)
+    with pytest.raises(DeployError, match="b08lib"):
+        wheel.check(make({}))  # cmd_build calls it before the checks and the payload

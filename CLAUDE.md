@@ -65,6 +65,23 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
     (dependency and version, symptom, upstream issue, the workaround by symbol, the test that
     covers it, when it can go). An undocumented workaround counts as our bug. Lines and the
     measurements so far: section 13.4.
+11. `pytemplate.toml` IS A STABLE CONTRACT (set by the owner; never relax it). Once a key or an
+    allowed value (a backend, method, profile, preset or option name) has shipped in a
+    template version, it keeps its name, its place, its meaning and its default:
+    - adding keys and values is fine; renaming, moving or removing one, changing what it
+      means or its default, and bumping `schema` are not;
+    - the only exception is a change that is truly unavoidable (for example a whole backend
+      removed), and only after telling the owner and getting their explicit approval for that
+      very change;
+    - even then the runner keeps reading the old files: a retired key or value is recognised,
+      gives a warning that says what happened and what to do, and is ignored or mapped to its
+      replacement; it never stops a command. Keys that never existed stay errors (typos);
+    - the goal: a user upgrades by taking the new template and bringing their own
+      `pytemplate.toml`, their code (`src/`, `tests/`) and their dependencies (`[project]`
+      dependencies and dependency groups of `pyproject.toml`, `uv.lock` for the versions),
+      without editing any of them.
+    The contract starts with the keys and values of September 2026: the template had no users
+    before, so the CPython JIT keys removed then stay unknown keys (owner decision).
 
 ## 2. What this is
 
@@ -136,7 +153,16 @@ implement the same contract: change them together. The `nu` and `xonsh` snippets
 `shell-setup` (section 4.9) also call uv directly.
 
 1. Find the project root: the directory that holds `.pytemplate/deploy.py`, first from the
-   launcher's own location, else by walking up from the current directory.
+   launcher's own location (a symlink to `deploy` or `deploy.ps1` is followed to the file it
+   names, sections 4.3 and 4.5), else by walking up from the current directory. A walked-up root
+   must be the user's: on POSIX its `.pytemplate/deploy.py` passes `test -O` (anyone may create
+   `/tmp/.pytemplate/deploy.py`, and it ran as the caller); on Windows, whose owners are not read
+   (an Administrators-owned checkout would fail), a drive root is never taken. Otherwise exit 2
+   naming it (`deploy` `_pt_foreign`, `deploy.ps1` through `/bin/sh -c '[ -O $1 ]'`, `deploy.cmd`
+   stops before the drive root; the `shell-setup` snippets do the same, section 4.9;
+   `test_launcher_sh.test_a_launcher_outside_a_project_never_runs_another_users_one`,
+   `test_the_walk_up_never_takes_a_drive_root_on_windows`,
+   `test_shells.test_snippets_never_run_another_users_project`).
 2. Find uv (order below).
 3. Export `PYTEMPLATE_CALLER_CWD` (the caller's cwd; `C:\...` form with an upper-case drive on
    Windows) and `PYTEMPLATE_LAUNCHER`.
@@ -250,7 +276,12 @@ header rules (with detector tests proving each rule fires).
   holds `.pytemplate/deploy.py`: `$PWD` is logical, and below a symlinked folder its `..` is
   not the folder the kernel found `../deploy` in; then the relative path stays (uv resolves it
   physically, like the kernel). A logical parent that is ANOTHER project still wins (fixing
-  that needs `test -ef`, which `shellcheck -s sh` rejects, or a `pwd -P` fork).
+  that needs `test -ef`, which `shellcheck -s sh` rejects, or a `pwd -P` fork). A symlink to
+  the launcher (`~/bin/pdeploy -> proj/deploy`) is followed to the file it names
+  (`_pt_from_launcher`: `[ -h ]`, then `readlink`, at most 40 links; a relative target is
+  joined to its link's folder as text and the kernel resolves its `..`; without `readlink` the
+  link's own folder stays): the link's folder was taken for the launcher's, exit 2
+  (`test_a_launcher_reached_through_a_symlink_finds_its_project`).
 - Windows detection (computed first, before any path helper): `OS=Windows_NT` and no
   `WSL_DISTRO_NAME`; `uname -s` only when `OS` is unset. Never `OSTYPE` (niubash fakes
   `msys`). Never trust the output format of `uname` or `cygpath`: in non-login MSYS2 shells on
@@ -290,7 +321,8 @@ header rules (with detector tests proving each rule fires).
   cmd expands them even on `rem` lines.
 - Root: `%~dp0` has a trailing backslash and can be wrong when cmd found the file through PATH
   from a quoted name: check `%~dp0.pytemplate\deploy.py` first, else walk up from `%CD%` (the
-  start is normalised so a drive root works).
+  start is normalised so a drive root works). A symlink to `deploy.cmd` is not followed (cmd
+  cannot read a link): run from outside the project it finds no project.
 - A `UV` variable that names a folder is rejected. The registry is read with
   `reg query KEY /v Path` (cmd has no MSYS rewriting) into a variable (`set "PT_LIST=%%B"`),
   never passed as `call` arguments: a quoted entry (`"C:\Program Files\x"`) would split them
@@ -333,6 +365,11 @@ header rules (with detector tests proving each rule fires).
   some of them) or the text cannot be read (`test_ps1_keeps_typed_comma_lists_whole`, also
   through the `shell-setup pwsh` function; `test_ps1_passes_array_values_like_a_native_call`
   compares every case with a direct native call, the wrapper that splats a copy included).
+- A `$null` argument (an unset `$env:X`, an optional variable), the `$null` items of an array
+  and a `-X:` whose value is `$null` are dropped, as a native call drops them (`./deploy build
+  $backend` with `$backend` unset gave the runner an empty backend); an empty string passes, and
+  so does a `List[string]`'s null item, as an empty string (PowerShell 7.3+ native passing:
+  `test_ps1_drops_null_arguments_like_a_native_call`).
 - A `.ps1` runs inside the caller's session: never assign `$env:PATH`. The two `PYTEMPLATE_*`
   variables and the removed `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` (the
   `$names` list) are restored in `finally`; a
@@ -402,10 +439,18 @@ header rules (with detector tests proving each rule fires).
   too: the same Core hand-over), plus Windows PowerShell 5.1 on Windows; only the registry
   and cmd tests are Windows-only.
 - Root: `$PSScriptRoot`, else walk up from `Get-Location` (its `ProviderPath` when the provider
-  is FileSystem, else `[Environment]::CurrentDirectory`), which is also the caller cwd.
+  is FileSystem, else `[Environment]::CurrentDirectory`), which is also the caller cwd. A
+  symlink to `deploy.ps1` (`$PSCommandPath` a `ReparsePoint` whose `LinkType` is
+  `SymbolicLink`) is followed to the file its `Target` names first, at most 40 links; off
+  Windows a relative target is joined to the PHYSICAL folder of its link (`/bin/sh`'s
+  `cd -P`/`pwd -P`: .NET folds `..` as text) (`test_ps1_reached_through_a_symlink_finds_its_project`).
 - Execution policy `Restricted`/`AllSigned`, or Mark-of-the-Web on a copy from a downloaded
   zip: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, `Unblock-File .\deploy.ps1`, or
-  use `deploy.cmd`. `shells.doctor` reports the policy of 5.1 and 7 separately.
+  use `deploy.cmd`. `shells.doctor` reports the policy of 5.1 and 7 separately (`PS_EDITIONS`):
+  a blocking one is `[XX]` only for the edition that started the run (`PYTEMPLATE_LAUNCHER`
+  `ps1:<PSEdition>:`), else a note: 5.1 is `Restricted` by default on client Windows, and
+  users of cmd, the POSIX shells, xonsh or the other PowerShell never run deploy.ps1 there
+  (`test_doctor_counts_an_execution_policy_only_for_the_powershell_in_use`).
 - 5.1 started with `-EncodedCommand` prints the calling session's module-loading progress as
   CLIXML on stderr; the launcher silences only its own.
 
@@ -497,7 +542,9 @@ header rules (with detector tests proving each rule fires).
   MSYS2 non-login script mode; the shell's cwd must not change), T5 minimal PATH, T6 stdin, T7
   install hints with uv hidden. Table with ms per test and the launcher each shell reported;
   `--json` to stdout; exit 1 on any FAIL. T7 is SKIP where uv cannot be hidden (PowerShell
-  reads the registry PATH itself; the MSYS2 login profile puts `reg.exe` back on PATH).
+  reads the registry PATH itself; the MSYS2 login profile puts `reg.exe` back on PATH). A WSL
+  distribution without a uv of its own is SKIP as a whole (`shells._wsl_without_uv`: one probe
+  first; the Linux launcher inside it exits 127), never seven FAILs.
 - How the probes reach each shell: POSIX shells get the command in `$PTCMD`
   (`sh -c 'eval "$PTCMD"'`, never in argv: section 4.7), fish `eval $PTCMD`, WSL through
   `WSLENV`, script mode a script file; cmd a hand-built line whose arguments are free of
@@ -512,7 +559,9 @@ header rules (with detector tests proving each rule fires).
   prefix, which names the interpreter of `#!/bin/sh` (Git Bash/MSYS2 without `SHELL`); unknown
   shell exits 2): prints a `deploy` function/alias that works from any subfolder, plus where
   to paste it. Output is ASCII with LF even on Windows (written
-  to `stdout.buffer`: it is appended to rc files); a user's file named in a header that is not
+  to `stdout.buffer`: it is appended to rc files) and starts with a line break (`shells.snippet`:
+  appended to an rc file whose last line had none, the header joined that line and broke
+  it); a user's file named in a header that is not
   ASCII (a `NIU_ENV` or MSYS2 home with an accent) is written `$NIU_ENV` or
   `<MSYS2 root>\home\<you>\.bashrc` instead. bash, zsh, niubash and msys2 share one POSIX
   function whose walk-up stops at `/`, `C:`, `C:/` and at a backslash `PWD` (the old `dirname`
@@ -543,12 +592,16 @@ header rules (with detector tests proving each rule fires).
   executes the fish, pwsh, xonsh and nu snippets in their shells (argv, exit codes, walk-up,
   the xonsh completer, pwsh pipeline input, the nu fallback to the launcher); the nu one only
   where nu is installed (the macOS jobs of template-selftest and template-launchers install
-  nushell).
+  nushell), and each only from the oldest version its header names (`_shell_for_snippet`:
+  fish 3.0, xonsh 0.14, nu 0.87 for `def --wrapped`; older ones skip). The fish function
+  walks up with `string replace`, not `path dirname` (fish 3.5; Ubuntu 22.04 has 3.3:
+  `test_fish_snippet_needs_no_path_builtin`).
 - `shells.doctor(check)` (from `./deploy doctor`): step "launchers": the launcher that started
   the run, then `deploy` (`#!/bin/sh`, LF, ASCII, git mode 100755, exec bit on POSIX),
   `deploy.cmd` (CRLF, ASCII) and `deploy.ps1` (LF, ASCII, no BOM; a mode other than 100755 is
-  only a note), each problem with the command that fixes it. Step "shell" (Windows): `bash` =
-  WSL stub note, the execution policy of 5.1 and 7; WSL info.
+  only a note), each problem with the command that fixes it. Step "shell" (printed only on
+  Windows and in WSL, the only places it has lines): `bash` = WSL stub note, the execution
+  policy of 5.1 and 7; WSL info.
 
 ## 5. Runner architecture
 
@@ -559,15 +612,15 @@ header rules (with detector tests proving each rule fires).
 | `deploy.py` (one level up) | Stops with exit 3 and one `error:` line (no traceback) when uv started it on Python < 3.11 (a `uv run` by hand with an old `UV_PYTHON`), BEFORE importing the runner; reconfigures stdout/stderr to UTF-8, puts its own dir on `sys.path`, calls `runner.cli.main`. |
 | `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `FORWARDS` / `HELP_PASSES_THROUGH` (section 5.2); `INTERNAL` (routes listed nowhere: `__init`). `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main`/`_main` (exception -> exit code, closed stdout), `cmd_help` (commands and `[tasks]` entries), `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
 | `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths` (`import_path`), comment-preserving editor `set_value` / `update_file` (section 6.1), its TOML statement scanner `scan` (render reads pyproject.toml with it, 6.3), `toml_value`. |
-| `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL` (`detect_wsl`: `wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`. |
+| `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL` (`detect_wsl`: `wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`, `scratch_name` and `check_private_dir` (the harnesses' scratch folders), `write_whole` (a file rewritten through a temporary file and `os.replace`, never half-written, owner and hard links kept: `_give_owner`, `_write_in_place`). |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C and passes SIGTERM/SIGHUP on), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`. |
-| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (all groups), `interpreter_info` (with `platform` and `cc`); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
+| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (every group but those `left_out` names), `interpreter_info` (with `platform` and `cc`); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
 | `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `DeployError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `_installed_import_names`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./deploy __init`; with rollback), `copy_template`, `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
-| `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`, `COMPILER_MISSING`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
+| `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`; `copy_writable`, `make_writable`, `remove_tree` for every scratch copy of the app), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`, `COMPILER_MISSING`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
 | `tasks.py` | `[tasks]`: `Placeholders` (lazy `{python}`), `deps` (each once per invocation), cycle detection, `run_task`, `describe`, `list_tasks`. |
@@ -611,15 +664,18 @@ header rules (with detector tests proving each rule fires).
    NAME, or a second one, exits 2. `cli.INTERNAL` routes (`__init`) dispatch like builtins but are
    listed nowhere (help, `editor.json`, the editors' task lists and the shell completion read
    `COMMANDS` only). `init` is no longer a command: unless a `[tasks]` entry took the name, it
-   exits 2 with the hint `./deploy new DIR --preset P`.
+   exits 2 with the hint `./deploy new DIR --preset P` (`cli.INIT_REMOVED`; `help init` too).
 4. Commands with `render=False`: `clean`, `render`, `new`, `pyz-merge`, `tasks`,
    `shell-setup`, `selftest`, `help`, `hooks` (the hook must not rewrite generated files in
    the middle of a commit), `apply` and `setup` (they render at the end: a refused apply, e.g.
    a hand-edited `app.preset`, writes nothing), `rename` (renders after its checks, never with
-   a hand-edited `app.name` before the dirty-tree check). `test_cli_core.NEVER_RENDER` pins
-   this list.
+   a hand-edited `app.name` before the dirty-tree check), and the internal `__init` (it renders
+   with `--force` at its end; rendering the copied configuration first, `new` warned about the
+   source project's hand-edited files). `test_cli_core.NEVER_RENDER` pins this list.
 5. Commands reject unknown arguments with exit 2 (a typo is never silently ignored):
-   argparse commands, `render`/`mode`/`__init`/`new` (`cmd_mode._parse`), `lint`, `fmt`,
+   argparse commands, `render`/`mode`/`__init`/`new` (`cmd_mode._parse`: an unknown option is
+   named before argparse runs, which bound the value after it to a positional: `mode --typ
+   strict` said only "argument backend: invalid choice: 'strict'"), `lint`, `fmt`,
    `clean`, `apply`, `setup` (only `--force`), `doctor`, `tasks` (`cmd_dev.only_flags`), `check` and `sync` (extra
    positionals), `shell-setup`, `help`, a `[tasks]` entry without `cmd`. By design
    (`cli.FORWARDS`): `run`/`test` forward the rest, `build` forwards unknown flags to the
@@ -644,10 +700,16 @@ header rules (with detector tests proving each rule fires).
   by another user: `cli._scratch_denied`); 3 = missing requirement (uv, a uv older than
   `envs.MIN_UV`, a program (or the interpreter a script's `#!` line names: `proc._not_found`),
   a C compiler mypyc cannot start, an interpreter, Neovim/git with `--require`, the runner
-  itself started on Python < 3.11 by `deploy.py`'s check); 130 = Ctrl+C; 143/129 = a SIGTERM/
+  itself started on Python < 3.11 by `deploy.py`'s check; what uv itself reports missing, an
+  interpreter it can neither find nor download or a program `uv run` cannot spawn (a `uv =
+  true` task), ends with uv's code, 2: the runner streams uv's output and cannot tell that
+  error from uv's others, section 15.2); 130 = Ctrl+C; 143/129 = a SIGTERM/
   SIGHUP sent to the runner (POSIX);
   141 = the reader of stdout went away (`./deploy help | head -1`: quiet, no traceback; POSIX
-  only, Windows reports a closed pipe as `OSError` EINVAL, unhandled). `run`, `test BACKEND`
+  only, Windows reports a closed pipe as `OSError` EINVAL, unhandled). A write that finds no
+  room (`./deploy help > /dev/full`, a full disk, a quota: `cli.NO_ROOM`, ENOSPC, EDQUOT, EFBIG)
+  is one `error:` line naming the file when the error does, exit 1, never an internal error
+  (quiet when stderr has no room either). `run`, `test BACKEND`
   (pytest's own code: 5 = no tests collected, 4 = usage error) and tasks return the child's
   exit code (`test all`: 0 or 1, after testing every backend even when one fails to build);
   `proc.CommandFailed` carries the failed child's code. A child killed by signal N gives
@@ -682,7 +744,12 @@ header rules (with detector tests proving each rule fires).
   `selftest --shells` (also with `--list`) and `selftest --e2e`.
 - `-q` hides progress (`ui.step`, `ui.command`, `ui.ok`, `ui.info`), never what was asked for:
   `ui.report` (the `tasks` list, the stderr of a failed query, the `selftest --shells` list,
-  result table and failure/skip lines), warnings, errors and
+  result table, failure/skip lines and the scratch folder `--keep` kept, the `selftest --nvim`
+  table with each FAIL's reason, its SKIP lines, pins and logs folder: `nvimtest._table`, the
+  `selftest --e2e` table, each failed step with its log tail and path, and the kept base, the
+  tool output and hint of a pre-commit check that did not pass: `hooks._print`, and what
+  `rename` and `apply` leave to review: the lines left unchanged and the other files that
+  mention the old name), warnings, errors and
   `check_line` always print, and a dry run ignores `-q` (its output is the plan). Results are
   `ui.report` too, so `-q` keeps them: the `mode` display (`cmd_mode._describe`; only its
   `ui.step` header goes), the paths `render` lists (`cmd_mode.cmd_render`: outdated, updated,
@@ -742,12 +809,13 @@ header rules (with detector tests proving each rule fires).
   pristine, the new `pytemplate.toml` and `pyproject.toml`) and lists each file as `-` deleted,
   `+` new or `~` replaced, the dependencies removed and added, the pinned versions, and what
   happens to `pyproject.toml` and `uv.lock`. `new` checks the destination and the name
-  (format, `check_name_free`) and prints destination, preset, name, the number of pins
-  `__init` would pass (the ones this `uv.lock` lacks, as `plan_init` counts them) and the
+  (format, `check_name_free`) and prints destination, preset, name, what it would copy (the
+  test `copy_template` makes, `presets.copy_scope`: the files git tracks, or every file and
+  why), the number of pins `__init` would pass (the ones this `uv.lock` lacks, as `plan_init` counts them) and the
   `__init` step it would run in the copy, then `git init -b main`, or why not (DIR inside the
   work tree of another repository, `cmd_mode._work_tree_top`, with the CI warning of section
   13.2; no git). `pyz-merge` validates its inputs (`pyz.check_parts`:
-  valid `_pyz.json`, one app, one build) and prints inputs and outputs (the `.pyz` and its
+  valid `_pyz.json`, one app, one build, the platform of a pure part next to per-platform ones) and prints inputs and outputs (the `.pyz` and its
   `.cmd`).
 - `nvim trust`, `extras`, `bootstrap` and `sync` print what they would do.
 - `rename` runs the real checks (a dirty git tree is only a warning) and prints the move, each
@@ -788,7 +856,7 @@ header rules (with detector tests proving each rule fires).
 | `PYTHONUTF8=1` | `proc.base_env`, portable launchers, pyz `.cmd` wrapper, the Neovim mypy linter, every VS Code launch config (`vscode.DEBUG_ENV`) | mypy/mypyc otherwise read files as cp1252; F5 behaves like `./deploy run` |
 | `PYTEMPLATE_BACKEND` | `cmd_dev.test_backend`, `mypyc.runtime_env_vars`, mypyc launch config | Backend under test (conftest) |
 | `PYTEMPLATE_COMPILED` | `mypyc.runtime_env_vars` | Modules that must load from `.pyd/.so` (conftest) |
-| `PYTEMPLATE_ASSETS` | `portable/boot.py`, `pyz/__main__.py` (setdefault) | Assets dir for `resources.assets_dir()` (raylib, flet) |
+| `PYTEMPLATE_ASSETS` | `portable/boot.py`, `pyz/__main__.py` (assigned, never inherited) | The app's assets folder, for the app's own code; `resources.assets_dir()` (raylib, flet) finds the same folder next to its package (section 10) |
 | `VSLANG=1033` | `mypyc.build`, wheel builds | English MSVC messages |
 | `MACOSX_DEPLOYMENT_TARGET` | `methods.common.install_deps` for macOS targets, unless the user set it (`MACOS_FLOOR`, 13.0) | The oldest macOS the pyz/portable wheels must support |
 | `CC`, `CFLAGS`, `CPPFLAGS`, `LDSHARED`, `LDFLAGS`, `ARCHFLAGS`, `CL`, `_CL_` | user | setuptools builds the mypyc extensions with them (a `CFLAGS` REPLACES Python's own: section 9); `mypyc.COMPILER_ENV`, a change forces a rebuild |
@@ -804,7 +872,8 @@ uv 0.12): `UV_PROJECT_ENVIRONMENT` and `UV_PYTHON` (`envs.env_vars` sets both), 
 `UV_NO_PROJECT`, `UV_WORKING_DIR` (another project or none: `--locked` is ignored, relative
 paths move), `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON` (exit 2 next to
 `UV_PYTHON_PREFERENCE`), `UV_ISOLATED` (a throwaway env instead of `.venv`), `UV_NO_DEV`,
-`UV_NO_DEFAULT_GROUPS` (no mypy/ruff/pytest: a PATH-wide one of another version runs) and
+`UV_NO_DEFAULT_GROUPS`, `UV_NO_GROUP` (`=dev` wins over `--all-groups`: sync uninstalled the
+tools; no mypy/ruff/pytest: a PATH-wide one of another version runs) and
 `UV_NO_SYNC` (`.venv` stays empty after `git clean -fdx`). Resolution settings (indexes,
 `UV_EXCLUDE_NEWER`, `UV_RESOLUTION`, `UV_PRERELEASE`), `UV_FROZEN`/`UV_LOCKED` (uv ignores
 `UV_FROZEN` next to `--locked`) and the cache stay: they are the user's, and uv reports when
@@ -819,14 +888,20 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 
 - `./deploy apply` (and `setup`) calls `hooks.ensure_installed(cfg)` when `[hooks] pre_commit`
   is true (the default): it installs the hook or updates this project's own, never fails the
-  command, and is silent outside git (`hooks.NotInGit`: no git, not a work tree). When
+  command, and is silent outside git (`hooks.NotInGit`: not a work tree, or no git and no `.git`
+  in or above the project). With a `.git` but no git on PATH (`hooks.git_missing_here`: a git
+  GUI's own git) apply warns and its summary, doctor's "git hook" line and its `applied` line
+  (without hooks.pre_commit) say the hook was not checked: it said "not a git work tree", left
+  the hook of a `pre_commit = false`, and doctor called hooks.pre_commit applied. When
   `pre_commit` is false, apply removes pytemplate's own hook (`hooks.uninstall`, which restores
   somebody else's `pre-commit.local`) and never touches another one (section 5.8). Any other
   git failure (dubious ownership...) is shown with git's own message: a warning in apply, an
   info line in `doctor` (whose "git hook" line is otherwise info too: missing is not a
   problem; for a project below the repository's top it adds an info line that the generated
   `ci.yml` never runs there, section 13.2). Every git call runs with `LC_ALL=C` (find_repo
-  reads "not a git repository" in English).
+  reads "not a git repository" in English). A hooks folder the user may not change (another
+  user's, read-only, immutable) is a warning in apply and one error naming the file in `hooks
+  install`/`uninstall` (`hooks.cmd_hooks`; it was an internal-error traceback).
 - The hook: `pre-commit` in the folder `git rev-parse --git-path hooks` reports (worktree
   aware), pure ASCII + LF, a marker comment, and `sh <launcher> hooks run` with the POSIX
   launcher path relative to the repository top (the project may be a subfolder of a bigger
@@ -839,8 +914,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `hooks.hook_script` makes installed hooks "outdated": apply/setup rewrite them.
 - Never overwritten: a hook without the marker, or any symlink (writing through a dangling
   link created a file in the work tree). `install --force` renames it to `pre-commit.local` (a
-  link moves as a link; a dangling `.local` counts as existing) and ours runs it first;
-  `uninstall` restores it. A marked hook whose launcher is another live project of the same
+  link moves as a link; a dangling `.local` counts as existing) and ours runs it first, a shell
+  script (`hooks.SHELLS`, its `#!` line read by `hooks.CHAIN_LINES`, flags kept) sourced with
+  `$0` = `<hooks>/pre-commit`: husky v4 and yorkie pick their job from `basename "$0"` and find
+  their helpers next to it, and run as `pre-commit.local` they checked nothing. A hook in
+  another language that reads its own name (`hooks.reads_its_name`: overcommit's Ruby) is left
+  alone by `--force`, which prints the line to add to it instead; `uninstall` restores it. A marked hook whose launcher is another live project of the same
   repository (state "other", a monorepo) is left alone by apply, install and uninstall;
   `install --force` writes a FRESH copy of it as `pre-commit.local` (the script skips
   `pre-commit.local` when it is itself that file; older copies would recurse), so both checks
@@ -860,7 +939,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   counts); another project's command, or a quoted string, is "foreign". A project that
   an enclosing repository ignores (`git check-ignore -q deploy`, which refuses
   `--literal-pathspecs`) gets no hook unless forced. With `core.hooksPath` set nothing is
-  written: install/status/doctor print the line to add (`sh ./deploy hooks run || exit $?`), and
+  written: install/status/doctor print the line to add (`hooks.run_line`: `[ ! -f ./deploy ] ||
+  sh ./deploy hooks run || exit $?`, which skips a checkout without the launcher as our own hook
+  does: in a global hooks folder the unguarded line failed every commit of every other
+  repository; the hint says so for a hooks folder outside the repository), and
   apply's summary says whether that hook already runs it (`hooks.hooks_path_runner`); husky 9
   (`.husky/_` holding `h` or `husky.sh`) is read through `.husky/pre-commit`.
 - `hooks run` checks what the commit contains: staged files (`git diff --cached --name-only
@@ -881,14 +963,27 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `[preset.*]` options) and `uv lock --check`; `pytemplate.toml`,
   `pyproject.toml`, `uv.lock` and the generated files committed together (once any is in the
   commit, none of the three config files may keep unstaged changes; the hints name the dirty
-  config files with the generated ones, so following them never splits a source from its
-  output). `lintc` on staged compiled modules (blocking only under the `mypyc` profile, reads
+  config files with the generated ones, and `.pytemplate/state.json`, which render rewrites with
+  them (`hooks.check_generated`), so following them never splits a source from its output nor
+  blocks the next commit). `lintc` on staged compiled modules (blocking only under the `mypyc` profile, reads
   the working tree). Never mypy (the user's choice: `./deploy check` does it).
+- Paths: `hooks.find_repo` takes the project's prefix from git (`rev-parse --show-prefix`: the
+  folders' case on disk), checked to name the project's folder with `os.path.samefile`
+  (`_same_folder`), and `project_paths` folds case where git says the disk does
+  (`Repo.ignore_case`: core.ignorecase, which git sets on macOS's default APFS; always on
+  Windows). On macOS `project.ROOT` keeps the case typed (`cd ~/projects/myapp` for MyApp): the
+  prefix computed from ROOT against git's top put the project outside its work tree (every hook
+  command failed), and a prefix in another case than git's paths dropped every staged file (the
+  checks were skipped without a word). `test_hooks` stands a symlink in for the other spelling.
 - `hooks._run_bytes` is the module's only process start outside `proc.run`: raw bytes
   (proc.run's text mode turns CRLF into LF) and stdin, for `git cat-file` and ruff on stdin.
 - Git hands hooks a relative `GIT_INDEX_FILE` and, in linked worktrees, `GIT_DIR` without
-  `GIT_WORK_TREE`: `hooks` makes them absolute for its own git calls and removes them before
-  starting uv/ruff (they would point git at the wrong repository for a sub-folder project).
+  `GIT_WORK_TREE`. Without `GIT_DIR`, git reads a relative `GIT_INDEX_FILE` from the top of the
+  work tree wherever it runs, so `hooks.git_env` leaves it as it is (joined to the cwd, a user's
+  hook that runs `cd apps/a && ./deploy hooks run` read a missing index: a first commit passed
+  unchecked); with `GIT_DIR` it makes them absolute against the hook's cwd for its own git calls.
+  `hooks` removes them before starting uv/ruff (they would point git at the wrong repository for
+  a sub-folder project).
 - `test_hooks.py` runs git with `GIT_CONFIG_GLOBAL` at a missing file and
   `GIT_CONFIG_NOSYSTEM=1`: a developer's global core.hooksPath, commit.gpgsign,
   init.templateDir or diff.relative must not change the results.
@@ -911,18 +1006,26 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   failing for another reason (dubious ownership) is refused the same way, never read as "no
   git". Then: move `src/<old_pkg>/` first (the step that can fail on a locked file; case-only
   renames use two moves), write the files (`apply_plan`: each through a temporary file next to
-  it and `os.replace` (`_replace_bytes`: mode kept, a symlink stays a link, a read-only file is
-  an error), so a write cut short (disk full, a quota, `ulimit -f`) never leaves one
-  half-written; a write that fails undoes everything, old bytes back and the folder moved back,
-  and the error names whatever it could not undo), `cmd_env.ensure_lock` (a failure there says
-  "the files are already renamed ... ./deploy apply"), `render.apply`, the ruff tidy-up, and the
-  name of the `applied` record (`cmd_apply.rename_record`, only the project's own record).
+  it and `os.replace` (`_replace_bytes` = `project.write_whole`: mode, owner and group kept, a
+  symlink stays a link, a read-only file is an error; a file with other hard links, or one whose
+  owner the runner cannot give a new file, is rewritten in place with its old bytes put back on
+  failure: a new inode dropped the links and made the files of a bind-mounted project root's),
+  so a write cut short (disk full, a quota, `ulimit -f`) never leaves one half-written; a write that fails undoes everything, old bytes back and the folder moved back,
+  and the error names whatever it could not undo), the name of the `applied` record right away
+  (`cmd_apply.rename_record`, only the project's own record: named after the old app it is no
+  longer trusted), `cmd_env.ensure_lock` (a failure there says "the files are already renamed
+  ... ./deploy apply"), `render.apply` and the ruff tidy-up; a Ctrl+C or SIGTERM during those
+  says the same before it stops the command.
 - After a hand edit of `app.name` (src/<pkg>/ missing, or the very same folder: `alpha` ->
   `Alpha`), rename starts from the name the project really has (`cmd_apply.applied_name`, asked
   first, as apply does: the trusted record, else pyproject `[project] name`, whose package is in
   src/): `rename <the edited name>` finishes the job, `rename OTHER` goes from the real name to
   OTHER; with no such name and src/<pkg>/ missing it exits 2 ("put the old name back"). It never
-  says "nothing to do" while doctor and the hook still report the edit as not applied.
+  says "nothing to do" while doctor and the hook still report the edit as not applied: an app.name
+  set by hand to ANOTHER package of src/ is refused as apply refuses it (`_check_the_name_is_applied`
+  with `cmd_apply._other_package`: `rename other --force` moved that package and left the app
+  where it was), and a pyproject.toml [project] name edited by hand, with NEW_NAME = app.name,
+  exits 2 naming `./deploy apply`.
 - What changes (`rewrite`, whole words only; `myapp_extra` and `my-app-2` never match):
   - Python code (`tokenize`): the first name of `import pkg...`/`from pkg... import`, and, in a
     file that binds the package with `import pkg[.x]` (no `as`), every name that resolves to that
@@ -943,27 +1046,39 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     `\x89`, `\a`...: skipped) and else (`r"\d"`, `r"src\alpha"`, an invalid `"\myapp"`) kept and
     reported, never changed (a new name could turn it into an escape or another regex). The
     same for TOML basic and literal strings (`_toml_strings`: pytemplate.toml, pyproject.toml
-    and the `.toml` files of src/ and tests/) and JSON strings (`_json_strings`, `.json` files:
-    `DATA_STRINGS`); comments and other text files (Markdown, YAML, INI) have no escapes: `a\n`
-    there changes like any word (a JSON fixture's `"a\n"` once became `"a\tool"`). A one-letter occurrence that ends a format directive in a string (`"%d"`,
+    and the `.toml` files of src/ and tests/) and JSON strings (`_json_strings`, `DATA_STRINGS`:
+    `.json` files, notebooks `.ipynb`, `.jsonc`, `.geojson`, `.jsonl`, `.ndjson`; and YAML's
+    double-quoted strings with `_YAML_ESCAPES`: an app named n once turned a notebook's `\n` and
+    YAML's `"hello\n"` into `\b`); comments and other text files (Markdown, INI, YAML's plain and
+    single-quoted scalars) have no escapes: `a\n` there changes like any word (a JSON fixture's
+    `"a\n"` once became `"a\tool"`). A one-letter occurrence that ends a format directive in a string (`"%d"`,
     `"%(k)-s"`, `"{:d}"`, `"{0:,d}"`, `"{!r}"`: `_directive`) is kept and reported too (whether
     the string is ever formatted is unknown). Names of one or two letters are legal, and the
     flet skeleton's PNG signature `b"\x89PNG\r\n..."` once changed silently for `r` and `n`.
-  - Text (strings, comments, other files): every occurrence except `x.pkg` and a path segment
-    right after the package itself (`src/pkg/pkg`, `src\pkg\pkg`: a submodule). For a package
+  - Text (strings, comments, other files): every occurrence except `x.pkg`, a path segment
+    right after the package itself (`src/pkg/pkg`, `src\pkg\pkg`: a submodule) and a file named
+    after the app (`_names_a_file` with `_package_modules`: `pkg.png`, `sfx/pkg.wav`,
+    `"pkg.json"`, a `.` and a word that is no module of src/<pkg>/, outside an import, `-m` or
+    loader argument; the file keeps its name, so the reference is kept and reported: it became
+    `asset("beta.png")`; an artifact name, `pkg.exe`, follows the new name). For a package
     named `src` (a project made by hand: `new` and `rename` refuse the name) a `src/` segment
     that is not right inside another `src/` is the project's own folder and never changes
     (`src/src/x` -> `src/beta/x`; it once became `beta/beta/x`). When the
     old name equals the old package but the new name differs from the new package (`alpha` ->
     `My-Game` / `my_game`): paths, dotted names, `pkg:main`, "package"/"module",
-    `import`/`from`, `-m` and the module-name arguments of loader calls get the package
+    `import`/`from`, `-m` (`_DASH_M_BEFORE`: a prefixed string after it too, `"-m", f"alpha.{x}"`)
+    and the module-name arguments of loader calls get the package
     (`LOADERS`: the name and package of `import_module`/`find_spec`, `__import__`, `files` and
     the other importlib.resources functions, `pkgutil.get_data`, `runpy.run_module`; positional
     or as a `MODULE_ARGUMENTS` keyword, tracked per open bracket: `files(package="alpha")` once
-    got the display name, which is no module name); titles, other prose and artifact names
+    got the display name, which is no module name; an f-string argument too, whose 3.12+ tokens
+    once skipped the rule: `import_module(f"alpha.{x}")`); titles, other prose and artifact names
     (`alpha.exe`, `alpha-cpython-exe`) get the name.
   - `pytemplate.toml`: always by context (`contextual`, even when the new name is a package
-    name). A path there is the package only right inside `src/` (`_after_src`: `src/alpha/data`
+    name, and when the old name is not its package's spelling: for My-Game or Auto the package
+    word goes through the same rules and the display name is prose; `tools/my_game.py` and
+    every `"auto"` value were rewritten, the latter into an invalid file that stopped rename and
+    apply). A path there is the package only right inside `src/` (`_after_src`: `src/alpha/data`
     moves with the folder; `tools/alpha.py`, `assets/alpha.ico` and, for an app named deploy,
     `./deploy apply` are other files), and a dotted word only when it names a module or
     subpackage of src/<pkg>/ (`_package_modules`: `alpha.core`; not `alpha.ico` nor, for an app
@@ -979,20 +1094,28 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     with `config._decode` (UTF-16/ANSI is a clear error) and written back with its own BOM and
     line endings.
   - `pyproject.toml`: `[project] name` (`presets.set_project_name`: the `[project]` table only,
-    either quote style, any indentation; a table it cannot edit stops the plan) and the preset
-    block; mentions in other tables are reported. Read as bytes decoded `utf-8-sig`: its line
+    either quote style, any indentation; a table it cannot edit stops the plan) and, in the
+    preset block, the values the preset writes with the name (`rename._named_keys`: `{{name}}`
+    or `{{pkg}}` in a preset.toml `pyproject`; flet's `org = "com.example"` stays, which for an
+    app named com became `beta.example`); mentions in other tables are reported. Read as bytes decoded `utf-8-sig`: its line
     endings stay (a CRLF checkout used to come back LF), the BOM is not written back.
   - A file of src/ or tests/ that cannot be read (root-owned, locked by another program) stops
     the plan with a DeployError naming it: nothing changed, never an internal-error traceback.
+    So does a folder there that cannot be listed (`_code_files`: os.walk skipped it silently, and
+    its files kept the old imports inside the moved package).
   - A Python file with a PEP 263 cookie is rewritten in its own encoding; other files that are
     not UTF-8 text but mention the old name are a warning (`Plan.unreadable`); binaries show
     only with `-v`. Files outside src/ and tests/ (README.md, scripts/, docs/, your own
     workflows) are only listed (`_mentions`: skips caches, environments, `.build`, `dist`,
-    `.pytemplate`, `.claude`, the generated files and files over 2 MiB).
+    `.pytemplate`, `.claude`, the generated files, the template's own launchers and CLAUDE.md
+    (`ROOT_SKIP`), files over 2 MiB and anything that is not a regular file: `_mentions_name`,
+    since opening a named pipe waited for a writer forever).
   - Symbolic links and Windows junctions in src/ and tests/ are never followed nor rewritten
     (`_code_files` with `cmd_env._is_link`: their target may be shared with other projects, and
-    os.walk enters a junction); those whose target path goes through the old name (it dangles
-    once src/<pkg>/ moves) or whose file or folder mentions it are a warning (`Plan.linked`,
+    os.walk enters a junction); those that dangle once src/<pkg>/ moves (`_dangles`: the target
+    resolves into it, and read from where the link will be it no longer names the same file; the
+    target's text is not searched: an absolute link through the project's own folder, named like
+    the app, was reported) or whose file or folder mentions it are a warning (`Plan.linked`,
     `_link_mentions`, shown in the dry run and the real run): a linked subpackage that imports
     the old package used to break silently. `_mentions` skips links and junctions too.
 - ruff tidy-up (`tidy_before`/`tidy_after`; best effort, never fails the rename): the new name
@@ -1024,16 +1147,19 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   name, or without a record pyproject's, has its own package there: `_other_package`) is
   refused, as `rename` refuses it (`src/<new>/ already exists`); it used to rewrite only
   `[project] name`. A record named like app.name means only pyproject.toml was edited: apply
-  puts its name back. Without a record either line may be the edited one, and the refusal says
+  puts its name back (`_old_name`: also when that name differs only in case or `-`/`_`, so its
+  package is app.name's folder; it was taken for the real name, and a rename myapp -> MyApp
+  rewrote the user's prose). Without a record either line may be the edited one, and the refusal says
   both ways out.
 - Order of `apply`: dirty-tree check (rename only; `--force` skips it) -> the rename
   (`rename.report`, `tidy_before`, `apply_plan`, then the record under the new name: a later
   failure must not leave it naming the old app, which is no longer trusted) or the `[project]
   name` line -> `uv remove --frozen` / `uv add --frozen` of the option-driven requirements (dev
-  group with `--dev`) -> `cmd_env.ensure_lock` -> PyPy newly supported:
-  `cmd_mode._precheck_py311` (it syncs the tools environment with THIS configuration, `uv sync
-  --locked`, so only once pyproject.toml and uv.lock follow it: with a python.cpython change in
-  the same edit uv refused the old lock) -> `save_record` (everything after it can still fail:
+  group with `--dev`) -> `cmd_env.ensure_lock`, whose re-lock, when it first resolves PyPy
+  (`render.gains_pypy`), is followed by `cmd_mode._precheck_py311` (it syncs the tools
+  environment with THIS configuration, `uv sync --locked`, so only once pyproject.toml and
+  uv.lock follow it: with a python.cpython change in the same edit uv refused the old lock) ->
+  `save_record` (everything after it can still fail:
   a record written only at the end kept the old options after a failed sync, and a revert then
   kept both raylib packages) -> `envs.sync` of `cmd_env._envs_for(cfg, "all")` ->
   `cmd_env._fix_exec_bit` -> the hook (`ensure_installed` when `hooks.pre_commit`,
@@ -1044,7 +1170,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   uses, `.venv-jit` of older templates included; never deleted) -> warnings for missing
   references (`reference_problems`: src/<pkg>/, compile.modules (the path `config.import_path`
   gives, which must be a file or hold a `.py`/`.pyi` file: a folder left holding only
-  `__pycache__` is missing), app.assets, deploy.exe.icon, deploy.upx.path; the `--dry-run` of a
+  `__pycache__` is missing), app.assets, deploy.exe.icon, deploy.upx.path (a `~user` this machine
+  lacks is missing too: expanduser's RuntimeError ended doctor and apply in a traceback, and
+  `upx.locate` makes it exit 3); the `--dry-run` of a
   rename looks for them where they are before the move)
   -> a summary. A state.json or pyproject.toml that cannot be written is a `DeployError`
   naming it.
@@ -1067,13 +1195,17 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   keeps it): `{name, preset, dependencies, dev}`, written by `./deploy new` (`presets._record`
   in `__init`: the new project's own, never the copied one), by each apply once the lock follows
   the options, and renamed by rename. It counts only when its name is `app.name` or pyproject
-  `[project] name` (`trusted_record`). The trusted record decides the preset
+  `[project] name`, or its package is in src/ where app.name's is not (`trusted_record`: both
+  lines edited by hand to the new name; apply skipped the rename, recorded the new name and lost
+  the real one). The trusted record decides the preset
   (`_infer_preset`): an app.preset that differs from it was edited by hand, whatever
   pyproject.toml holds (a script project may `./deploy add raylib` or flet). Without one (lost:
   a state.json merge conflict whose sides disagree on it, a deleted file) pyproject.toml's
   traces stand in (`_traced`): a preset's option-driven dependencies by name (with the default
   and current options, and those the managed block was last written with: `_block_options`
-  reads raylib's `no-build-package` back through `_unformat`), its extra tables (flet's
+  reads raylib's `no-build-package` back through `_unformat`, from between the markers only,
+  `Project.block` (`render.managed_values`): a script project's own `no-build-package = ["six"]`
+  outside them read as raylib's `["{package}"]`, a hand switch apply refused), its extra tables (flet's
   `[tool.flet]`). The managed `[tool.uv]` KEYS are never a trace: `render.managed_block` writes
   them from app.preset, so `./deploy lock`, `mode` or `rename` after a hand edit wrote the new
   preset's keys and apply then accepted the switch. app.preset when it shows traces, else a
@@ -1107,10 +1239,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   recursively: list items (`key[i]`), table values (`key.k`; non-bare keys are quoted in the
   path). `Any`-typed values (`[vscode] settings`, `[preset.<p>]` options, mypy override options)
   must be JSON-like: no TOML date/time, `nan`/`inf` (`_check_free`). NUL characters are rejected
-  everywhere.
+  everywhere, in the keys of the open tables too (`_check_key`: a `[vscode.settings]` key reached
+  settings.json as `"a\u0000b"`).
 - `schema` must equal `config.SCHEMA` (1; a missing line means 1). It is checked before the
   other keys, so a file from another template version fails with that reason instead of an
-  unknown key. There is no migration logic.
+  unknown key. There is no migration logic: rule 1.11 allows a bump only with the owner's
+  approval, and then the runner must still read the older layout, with warnings.
 - `[app]`: `name` (`config.APP_NAME`: a letter first, a letter or digit last, PEP 508; `pkg =
   name.replace("-", "_").lower()`), `preset`
   (`config.validate`: `[a-z][a-z0-9_-]*` and `PRESETS/<name>/preset.toml` must exist, checked
@@ -1124,7 +1258,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   8.0 changed the extension ABI to pp80; in September 2026 raylib, numpy and cffi published no
   pp80 wheels. Bump the pin only once the dependencies ship wheels for the new ABI, then
   `./deploy lock`). The removed CPython JIT keys (`jit`, `jit_interpreter`) fail like any
-  unknown key (no compatibility shim: each project carries its own runner). `Config.min_python`
+  unknown key: they went before the template had users, so rule 1.11 does not cover them.
+  `Config.min_python`
   is the lowest minor in use (CPython always, PyPy's `Config.pypy_minor` while supported),
   compared as numbers.
 - `[typing]`: `profile = auto|mypyc|strict|warn|off`, `relaxed = off|warn|strict` (what `auto`
@@ -1133,7 +1268,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (dotted identifiers or `*`, `{pkg}` token); `strict` forbidden: mypy would apply it to ALL
   modules; option names identifier-like, values booleans, numbers, one-line strings or lists of
   them: each becomes a `.mypy.ini` line). `backend.active = "mypyc"` rejects `warn`/`off`.
-- `[compile]`: `modules`, `exclude`, `forbid_imports` (dotted names checked), `annotate` (every
+- `[compile]`: `modules` (without the line: `<pkg>.core` of `app.name`, filled in by
+  `config._build`; the dataclass default, the template's own `myapp.core`, sent every mypyc run
+  of another app to `src/myapp/`), `exclude`, `forbid_imports` (dotted names checked), `annotate` (every
   mypyc build writes the annotate report, section 9), `opt_level "0".."3"`,
   `no_semantic_interposition` (default true: a C flag on Linux gcc/clang, section 9),
   `multi_file`, `separate`, `strict_dunder_typing`. `config._validate_compile` checks the names
@@ -1171,7 +1308,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `deps` required; a non-empty program (`cmd[0]`); `env` names `[A-Za-z_][A-Za-z0-9_]*`; in
   `cmd`, `env` values and `cwd` only bare placeholders (`config.task_format_error`: never `{}`,
   `{0}`, `{root.x}`, `{root!r}`, a lone brace; literal braces doubled `{{ }}`). Checked when
-  the task runs (`tasks.run_task`), not at load: unknown placeholder names, `deps` quoting and
+  the task runs (`tasks.run_task`), not at load: unknown placeholder names (of the task and of
+  every task its deps reach, `tasks._check_texts`: a typo was found only after all the deps
+  had run), `deps` quoting and
   empty entries (all parsed before the first dep runs; `tasks.split_words`: blanks separate,
   quotes group, a backslash is a plain character, as in the plugin's `:Deploy`: POSIX shlex
   passed `C:\data\in.txt` as `C:datain.txt`), `cwd` is a folder (not in a dry run),
@@ -1207,13 +1346,19 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `config.toml_value` escapes DEL and refuses lone surrogates.
 - `config.update_file` applies every change in memory first, writes only when something changed
   and never under `--dry-run`, keeps a UTF-8 BOM and the line endings, and never writes broken
-  TOML. `mode` drops changes whose value is already set, so their spelling stays.
+  TOML; it writes through `project.write_whole`, so a full disk leaves the old file whole, and a
+  file it may not write (read-only, immutable, locked) is a `DeployError` naming it (it was an
+  internal-error traceback; so was a template `render.load_profile` or `ci_workflow` could not
+  read). `mode` drops changes whose value is already set, so their spelling stays.
 - `mode` keeps the old bytes of `pytemplate.toml`, `pyproject.toml` and `uv.lock` (the lock next to
   `pyproject.toml`) and puts them back (`cmd_mode._restore`) when
-  `config.update_file`, `cmd_env.ensure_lock` or the new environment's `envs.sync` fails or is
+  `config.update_file`, `cmd_env.ensure_lock` (its PyPy precheck included) or the new
+  environment's `envs.sync` fails or is
   interrupted, saying which files it restored; the generated files are rendered only after that,
   so a failed mode leaves nothing half-applied and a second run locks again (it used to find
-  nothing to change and report success with a stale `uv.lock`).
+  nothing to change and report success with a stale `uv.lock`). A generated file it leaves
+  untouched because it was edited by hand is named in a warning, as its dry run names it (it
+  still describes the old mode).
 
 ### 6.2 Generated files and `state.json`
 
@@ -1234,7 +1379,9 @@ re-rendering.
   `_digest`), because `* text=auto eol=native` + `core.autocrlf=true` gives CRLF checkouts on
   Windows and editors/PS 5.1 add BOMs. Every runner write uses `newline="\n"`.
 - Current hash == new hash -> skip. Recorded hash in `state.json` != current file -> hand-edited:
-  not written (warning) unless `--force`. Otherwise write (LF) and record the hash.
+  not written (warning) unless `--force`. Otherwise write (LF) and record the hash. `--diff`
+  prints a hand edit as a unified diff (`render._diff`; a lost last line break, which the hash
+  counts, is marked `\ No newline at end of file`: the diff used to be empty).
 - A missing or corrupt `state.json` counts as empty (`render._read_state`/`_load_state`: missing,
   not UTF-8 (PS 5.1 `>` writes UTF-16), not JSON, not an object, or `files` not an object; an
   entry whose value is not a sha256 counts as unrecorded): every generated file is overwritten
@@ -1249,7 +1396,11 @@ re-rendering.
   other top-level key (`./deploy apply` records its own) and the key order. Hashes of files no longer generated stay recorded
   (a file that comes back keeps its hand-edit protection).
 - `--check` and `--dry-run` write nothing. A folder in the way, or a read/write error, is a
-  DeployError naming the file.
+  DeployError naming the file. An existing `.python-version` is rewritten only once uv has that
+  CPython (`envs.ensure_python`: `uv python find`, else `uv python install`, else a DeployError
+  (3) naming python.cpython): the launchers' `uv run --script` follows the file (5.2), and a
+  typo (`3.41`) or a new minor offline written there stopped every command, `help` included, with
+  nothing left to write it again once pytemplate.toml was fixed.
 - `render.auto` runs before most commands and prints one line when something changed; it also
   warns when `pyproject_outdated` (the hint names `./deploy apply`).
 - Changing `render.HEADER` rewrites every generated file (fine: only files whose current hash
@@ -1307,7 +1458,11 @@ Formats:
 - `render._verify` refuses (DeployError, nothing written) a rewrite that would give invalid TOML
   (e.g. a managed key repeated outside the markers), change anything but requires-python and the
   block's keys (a user key or table between the markers), or leave a managed value out of
-  `[tool.uv]`.
+  `[tool.uv]`. The block's keys are those a block can write (`render.block_keys`: its own
+  `BLOCK_KEYS` and every preset's `[uv]` keys, which a preset switch through `__init` drops); any
+  other key between the markers is named and refused ("move it out of the block"): every key
+  found there used to count as managed, and lock, apply, mode and rename dropped a user's
+  `index-url` or constraint without a word.
 - Additive lists (`render.ADDITIVE_KEYS`: `override-dependencies`, `constraint-dependencies`,
   `build-constraint-dependencies`, `no-build-package`, `no-binary-package`,
   `no-build-isolation-package`) belong to the project when its `[tool.uv]` defines them outside
@@ -1324,11 +1479,13 @@ Formats:
   writing, as a preflight for commands that change other files first.
 - `render.auto` only warns (`pyproject_outdated`); `write_pyproject` runs in `lock`, `mode`,
   `apply`/`setup` and `rename` (via `cmd_env.ensure_lock`) and `__init`, because the change
-  needs re-locking. `lock` (`cmd_env.cmd_lock`) puts `pyproject.toml`'s old bytes back when its
-  `uv lock` fails (offline, no solution, Ctrl+C) or writes no `uv.lock`
-  (`cmd_env.LOCK_READ_ONLY`: `--check`, `--locked`, `--check-exists`, `--frozen`, `--dry-run`;
-  `UV_LOCKED`/`UV_FROZEN` set): a rewritten pyproject.toml next to the old lock made every
-  `uv run --locked` fail.
+  needs re-locking. `lock` (`cmd_env.cmd_lock`) puts the old bytes of `pyproject.toml` and
+  `uv.lock` back when its `uv lock` fails (offline, no solution, Ctrl+C, a full disk that cut
+  the new `uv.lock` short) or writes no `uv.lock`
+  (`cmd_env.LOCK_READ_ONLY`: `--check`, `--locked`, `--check-exists`, `--frozen`, `--dry-run`,
+  `--script` (a script's own lock); `UV_LOCKED`/`UV_FROZEN` set): a rewritten pyproject.toml
+  next to the old lock made every `uv run --locked` fail. `-h`/`--help`/`-V`/`--version`
+  (`cmd_env.LOCK_INFO`) go to `uv lock` before pyproject.toml is touched.
 - Not a managed part, but kept in line by `./deploy apply` (section 5.8): the option-driven
   preset requirements in `[project] dependencies` and the dev group (flet's three pins,
   raylib's `{package}=={version}`), through `uv remove/add --frozen` and one `uv lock`.
@@ -1348,11 +1505,23 @@ Formats:
 - Every tool call is `uv run --locked` (syncs when needed, fails on a stale lock; the git
   hook's ruff uses `--frozen`, section 5.6). `cmd_env.ensure_lock` runs `uv lock --check` and
   then `uv lock` if needed; under `--dry-run`, when the managed pyproject parts would change, it
-  echoes `uv lock` instead (the check would read the unwritten file and pass).
+  echoes `uv lock` instead (the check would read the unwritten file and pass). A needed re-lock
+  under the user's `UV_FROZEN` or `UV_LOCKED` is refused, naming the variable
+  (`cmd_env._refuse_a_frozen_lock`): with it `uv lock` writes nothing and exits 0 (UV_FROZEN
+  only checks the lock's validity), and mode, apply and rename went on with a stale uv.lock;
+  refused, they put their files back.
 - `envs.sync` = `uv sync --locked --all-groups` (apply/setup, sync, mode, add, remove): every
   dependency group of `pyproject.toml` is installed, so `./deploy add --group G pkg` survives the
   next sync and reaches a fresh clone (an exact sync of the default groups removed it); `uv run`
-  syncs inexactly and never removes them. `add`/`remove` take `--dev` or `--group G`, not both,
+  syncs inexactly and never removes them. A group `--all-groups` cannot hold there is left out,
+  one `--no-group` each with a note (`envs.left_out`): a non-default group that `[tool.uv]
+  conflicts` pairs with another group of the project (a cpu/gpu split; a set that also names
+  extras counts only its groups: no extra is enabled), and one whose `[tool.uv.dependency-groups]`
+  requires-python excludes the environment's Python (`envs._excludes`, a subset of PEP 440:
+  PyPy's exact X.Y.Z, or every patch release of `python.cpython`'s minor; what it cannot read,
+  uv decides). With `--all-groups` alone uv refused the whole sync, so sync, setup, apply, add
+  and remove failed in such a project while `uv run` worked; the default groups always stay
+  (`uv run` needs them too). `add`/`remove` take `--dev` or `--group G`, not both,
   and run `uv add|remove --no-sync` (it still re-locks), then `envs.sync` of `.venv`: uv's own
   sync after `remove` is exact for the default groups and uninstalled every other group. uv has
   written pyproject.toml and uv.lock before that sync: when it fails (a package that locks but
@@ -1475,8 +1644,11 @@ Formats:
      makes it look for a `python3.11` (`test_mypy_reading_the_generated_ini_alone_flags_what_pypy_lacks`).
   4. `lintc` rules on the compiled sources (when mypyc is supported and `rules`): errors only
      under the `mypyc` profile, warnings otherwise. A file the runner cannot parse is one
-     finding (`imports.parse_error`: a syntax error, or syntax newer than the runner's own
-     Python), never an internal error.
+     finding (`imports.parse_error`: a syntax error, syntax newer than the runner's own
+     Python, or a source nested too deeply for the compiler's stack; `imports.PARSE_ERRORS`,
+     which `mypyc.hidden_imports` and `common.uses_tkinter` catch too), never an internal
+     error. The rules walk the tree without recursion (`lintc._scope_statements`: a generated
+     elif chain of ~1000 branches passed Python's recursion limit).
   5. With `typing.editor = "basedpyright"`: basedpyright (`BASEDPYRIGHT` pin) on
      `.build/cfg/pyright-<profile>.json` (`cmd_dev._run_basedpyright`). Exit 1 is only a
      warning when the profile is not `blocking`; any other code, or pins uv cannot install
@@ -1522,7 +1694,15 @@ Formats:
   vendored native library, which must be `git add -f`ed past `.gitignore`) is app content and
   synced like any file, so `run mypyc` and every payload see what `run cpython` sees.
   `mypyc.build` passes `owned=modules`; `cmd_build.payload` and `methods/flet.py` use the
-  default. Not handled: a case-only rename on a case-insensitive file system.
+  default. Not handled: a case-only rename on a case-insensitive file system. Every copy is
+  owner-writable (`copy_writable`; an unchanged read-only copy an older build left is fixed in
+  place): copy2 kept the mode of a read-only file of `src/` (a Perforce checkout, a link into
+  the Nix store), and once it changed the next build could not replace the copy (Windows: not
+  delete it either). The copies made from the payload or the stage (`common.copy_app`,
+  `exe_stage`, exe and nuitka stages) use `copy_writable` too, the wheel's copies of `src/`
+  also `make_writable` (copytree copies a folder's mode), and the scratch folders are removed
+  with `remove_tree` (what rmtree cannot delete is made writable and removed again; a link
+  goes as a link).
 - `remove_stale_extensions(stage, modules, group, python=, separate=, src=)` runs BEFORE the
   sync (a folder it empties is then removed) and deletes: extensions whose ABI tag
   (`cpython-314-...`, `cp314-...`, a trailing `t` = free-threaded) is not `python.cpython` (old
@@ -1540,7 +1720,11 @@ Formats:
   `annotate`, `compile`, `files`, `force`, plus `env`: the `COMPILER_ENV` variables that are
   set, `CC CFLAGS CPPFLAGS LDSHARED LDFLAGS ARCHFLAGS CL _CL_`), deletes it
   before compiling (a failed or interrupted build forces the next one) and sets
-  `spec["force"]` when it differs: `mypyc_build.py` then passes `build_ext --force`. `report`
+  `spec["force"]` when it differs: `mypyc_build.py` then passes `build_ext --force`, and
+  `mypyc.build` first deletes the profile's `mypy_cache` and generated `c` (with
+  `compile.separate = true` mypyc is incremental and reused its cached IR and C, and
+  `strip_asserts`/`strict_dunder_typing` are no part of mypy's cache key: `deploy.optimize`
+  0 -> 1 kept the asserts in the release binary). `report`
   (`compile_c=False`) and `--dry-run` neither force nor record. A `.build` from before has no
   record: one full rebuild. mypyc dates a new C file 1 s ahead, so a very fast first build is
   redone once by setuptools itself.
@@ -1548,7 +1732,11 @@ Formats:
   paths under MSVC's MAX_PATH.
 - `tools/mypyc_build.py` runs in `.venv` with `VSLANG=1033`: `chdir(stage)`,
   `mypycify(..., group_name, target_dir=../c)`, then `setup(build_ext [--force] --inplace ...
-  --parallel N)`. It uses the mypycify API because `python -m mypyc` cannot set
+  --parallel N)`. mypycify gets `--explicit-package-bases` (the stage, the cwd, is the base):
+  mypy named a module from the highest folder holding an `__init__.py`, so a top-level namespace
+  folder of `compile.modules` (`nsx/fast.py`) compiled as `fast` ("did not generate an extension
+  for: nsx.fast"), and an app package without `__init__.py` as `core.bench` (the C build could
+  not write it); the wheel's `setup.py` does the same with `MYPYPATH=src`. It uses the mypycify API because `python -m mypyc` cannot set
   `strip_asserts`, `group_name` or `multi_file` and always writes to `./build`. When mypycify
   exits or raises (mypy/mypyc rejected the code; the errors are printed) it returns
   `MYPYC_REJECTED` (4, mirrored in `mypyc.py`). When the C build fails (setuptools reports
@@ -1644,6 +1832,16 @@ Formats:
     `attr.attrs`, `typing[_extensions].final`, `mypy_extensions.trait`/`mypyc_attr`): attrs'
     `define`/`frozen`/`mutable` are NOT native, `@attr.s` is; `@mypyc_attr(native_class=False)`
     silences it. A drift test compares the set with the locked mypyc's own source.
+  - Metaclasses and bases (`_non_native_kind`, same message and silencer): a `metaclass=` other
+    than `NATIVE_METACLASSES` (ABCMeta; mirrors mypyc's `is_implicit_extension_class`, drift
+    test), a base in `NON_NATIVE_BASES` (every `enum` class: its metaclass is EnumMeta;
+    NamedTuple; TypedDict), and a subclass of such a class of the same module (a NamedTuple's
+    subclass is a mypyc error of its own). A base imported from another module is not looked
+    into (no types here). A base of `NON_NATIVE_BASES` (and a subclass of one) is a note
+    (`Finding.note`): a warning under every profile, never blocking in `check` nor in the hook
+    (`hooks.check_mypyc`): an Enum, a NamedTuple or a TypedDict works compiled, only slower, and
+    blocking every Enum of a mypyc project was no help; a metaclass of the user's own stays a
+    finding like a foreign decorator.
   - Nested classes and classes inside functions, each reported once (from its nearest class
     or function); t-strings; `if __name__ == "__main__"` (either order) at module level.
   - Module-level `__file__` ONLY when `compile.modules` is one top-level module file, the one
@@ -1656,7 +1854,14 @@ Formats:
     and the rule can go.
   `lintc` does not import `presets` or `mypyc`.
 - With PyPy supported user code must be 3.11 syntax and API (no PEP 695;
-  `typing_extensions.override`, not `typing.override`). `mode --supports +pypy` prechecks it
+  `typing_extensions.override`, not `typing.override`). Every re-lock that first makes uv.lock
+  resolve for PyPy prechecks it, after the re-lock (`cmd_env.ensure_lock` for mode, apply and
+  rename, and `cmd_env.cmd_lock`; both put pyproject.toml and uv.lock back when it fails, so the
+  lock never resolves for PyPy unchecked: rename restores nothing itself, and a failed check there
+  left PyPy locked in, which the next apply then took as checked):
+  `render.gains_pypy` reads the managed block of pyproject.toml, never pytemplate.toml, where a
+  hand edit of backend.supported, then any mode or lock, locked PyPy in unchecked and apply
+  then skipped the check too; mode also syncs .venv-pypy then. The check
   (`cmd_mode._precheck_py311`, named after the default pin: it checks `Config.pypy_minor`, the
   Python of `python.pypy`, so a project pinned to `pypy@3.12.x` may use 3.12 code): it syncs the
   tools env first (a stale `uv.lock` fails in uv's own step; not under `--dry-run`), then ruff
@@ -1664,7 +1869,10 @@ Formats:
   ruff"), then the mypy errors that appear only as that version and not as `python.cpython`
   (`PRECHECK_MYPY_FLAGS`: `--config-file=` so the project's `.mypy.ini` is never read,
   where the default `off` profile sets `ignore_errors`, and `--check-untyped-defs`); a mypy
-  abort (exit 2) is a `DeployError` with mypy's output, never a silent pass.
+  abort (exit 2) is a `DeployError` with mypy's output, never a silent pass. Both tools get the
+  code folders that hold Python files (`render._holds_python`, as `.mypy.ini`'s `files`: a
+  tests/ left with only `__pycache__` stopped mypy with "There are no .py[i] files"); with none,
+  there is nothing to check.
 
 ## 10. Build methods (`cmd_build.py`, `methods/*`)
 
@@ -1692,7 +1900,9 @@ Formats:
   previous output, and in `--dry-run` too (which only names the upx binary or its download).
   Default method from `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs `run_checks` unless
   `--no-check` (a failure is exit 1, like `./deploy check`). `payload`: the mypyc release
-  stage, or `sync_tree(SRC, .build/payload/<backend>)`. A method whose result is missing or an
+  stage, or `sync_tree(SRC, .build/payload/<backend>)`; none for `cmd_build.OWN_PAYLOAD` (the
+  wheel builds its own project from `src/`, and its mypyc backend compiled the release stage
+  for nothing, a second full compile). A method whose result is missing or an
   empty folder is a DeployError, never `ok done` (`build -v`: PyInstaller took `-v` for
   `--version`; the message says that `./deploy`'s `-v`/`-q` go before the command). The `done:
   ... (N MB)` size (`common.tree_bytes`) counts a symlinked file once (a bundled runtime's
@@ -1739,7 +1949,9 @@ Formats:
   the later option wins for that package), which is built here and must come out pure
   (`_built_native`: a platform wheel is a DeployError naming it, build that key on its platform
   and `pyz-merge`); before, every cross target failed for such a package. A HOST target gets
-  the same `--python-platform` floor
+  the same `--python-platform` floor, with the interpreter's full `--python-version X.Y.Z` (uv
+  reads X.Y as X.Y.0: a requirement marked `python_full_version >= 'X.Y.1'` was left out of
+  the build for that very interpreter),
   when this machine can load it (`host_floor`: glibc >= 2.28 x86_64 / 2.35 aarch64, never musl;
   macOS >= `MACOS_FLOOR` 13.0, pinned through `MACOSX_DEPLOYMENT_TARGET` unless the user sets it),
   without `--only-binary`, and falls back to the host's own wheels with a warning when a
@@ -1783,8 +1995,17 @@ Per method:
   pip-installs `flet-desktop` at runtime, bypassing `uv.lock`.
 - **portable**: `dist/<n>-<b>-portable-<key>/` (no `-<key>` with `runtime = "system"`, which
   bundles no interpreter) with `app/`, `lib/` (`uv pip install --target`), `runtime/` (pruned
-  copy of the interpreter's `base_prefix` through `\\?\` extended paths; the `ignore` callback
-  strips that prefix before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. The base's
+  copy of the interpreter's `base_prefix` through `\\?\` extended paths, `portable.long_path`:
+  a share or a mapped drive, which resolve() gives as `\\server\share\...`, takes the
+  `\\?\UNC\server\share\...` form, since `\\?\\\server` is no valid name (WinError 123), as
+  `e2e.rmtree` does; the `ignore` callback reads the folders back with `portable.short_path`
+  before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. A bundled folder whose `lib/` holds
+  `flet_desktop` also carries the Flet client (`portable._bundle_flet_client`: the archive of
+  `nuitka._flet_client_archive` in `lib/flet_desktop/app/`, and `nuitka.flet_client_env` in the
+  launchers: on Linux `FLET_LINUX_DISTRO` and `FLET_DESKTOP_FLAVOR`, the parts of its name, since
+  flet_desktop names the archive it looks for from the user's glibc and CURRENT folder); it
+  downloaded ~40 MB at its first start. `runtime = "system"` (a Python of the user's machine, like
+  a pyz) carries none: documented. The base's
   `__pycache__` folders are never copied. Prunes `include libs Tools share Scripts`, every `bin/` entry but the interpreter (`BIN_KEEP`:
   `python*`, `pypy*`, `libpypy*`; the base's console scripts, e.g. a 24 MB `ruff` installed into
   it, carried the build machine's paths), on Linux the shared `lib/libpython3.X.so*` when the
@@ -1890,10 +2111,21 @@ Per method:
   bootstrap extracts `common/` and `targets/<key>/` into ONE folder, so each `.pyd/.so` lands
   next to its `.py` and the extension loader wins. `_pyz.json`: `name`, `build_id`, `min_python`,
   `targets`, `pure`, `backend`, `host` (the key that built it), `deps`
-  (`common.requirements_digest`: the pin lines of the export, not its header). The archive is
+  (`common.requirements_digest`: the pin lines of the export, not its header), `abi` (per key
+  whose binaries carry one, the extension ABIs of `targets/<key>/`, `pyz._target_abis` with
+  `common.extension_abis`/`abi_tag`: `cp314`, `cp314t`, `pypy311_pp73`; pyz-merge recomputes it).
+  The bootstrap takes a target only when its own ABI (`_abi`, from `EXT_SUFFIX`) is one of them,
+  else the pure flavour or its "no build for this interpreter" refusal naming both: a key does not
+  tell PyPy 7.3 (pp73) from PyPy 8 (pp80), nor CPython 3.14 from 3.14t, and PyPy 8 took a PyPy
+  7.3 build's target and died in an ImportError. The archive is
   written by `pyz._write_archive` (deflate, never zstd: it must open on 3.11 and PyPy;
   `strict_timestamps=False`: a payload file older than 1980, e.g. from the Nix store, used to
-  crash `zipapp`; shebang `/usr/bin/env python3`, mode 0755). The `<n>.cmd` wrapper runs each
+  crash `zipapp`; shebang `/usr/bin/env python3`, mode 0755). Whatever `python3` starts it, the
+  bootstrap must reach its `min_python` check (`<name>: needs Python X.Y or newer`): nothing
+  before `main()` may need a newer Python, hence its `from __future__ import annotations` (a
+  `bool | None` annotation made macOS's python3 3.9 die with a TypeError;
+  `test_pyz_bootstrap_reaches_its_version_check_on_an_old_python` runs every Python older than
+  3.11 it finds). The `<n>.cmd` wrapper runs each
   candidate interpreter with a minimum-version probe, sets `PYTHONUTF8=1`;
   with `app.gui` its run lines are `start "" pyw/pythonw/pypyw` (`common.windowed`). `pyz-merge`
   (>= 2 parts; `_read_info` refuses a part without a valid `_pyz.json`) requires the same app
@@ -1903,14 +2135,21 @@ Per method:
   key, and when parts differ in purity moves each pure part's `common/lib` to
   `targets/<its host>/lib` (an older part without `host`: the single overlay key of a mypyc
   part, else "rebuild it") and keeps no `common/lib`. The merged `targets` come from the
-  folders written; `host` is dropped. It also writes the `<out stem>.cmd` wrapper next to
+  folders written; `host` is dropped and `merged: true` recorded: a merge of pure parts names no
+  platform, so merging it again with a per-platform part is refused, `pyz._part_host`, naming the
+  way that works (its original parts in one call; it blamed "an older ./deploy"). It also writes the `<out stem>.cmd` wrapper next to
   `--out` (`pyz.wrapper_path`; the parts' name and `min_python`, the pypy candidate order only
   when every part is a pypy build; an `--out` ending in `.cmd` is refused, and so is a name the
   ASCII wrapper cannot hold, `pyz._CMD_UNSAFE`: non-ASCII, control characters,
   `% ! " ^ & | < >`; the wrapper text is made before the `.pyz` is written). A part's `name` must be an app name
   (`config.APP_NAME`: the wrapper echoes it unquoted). `pyz.check_parts` runs the part and name
   checks in `--dry-run` too.
-- **wheel**: synthetic build project in `.build/wheel/<b>` (for mypyc a `setup.py` using
+- **wheel**: its `[project] dependencies` go through `wheel.dependencies`: a `[tool.uv.sources]`
+  git or URL source becomes a direct reference (`name @ git+URL@REV`); a path, workspace or
+  editable source, a named index, a marker or several sources is refused before the checks
+  and the payload (`wheel.check`, from `cmd_build`, also in `--dry-run`): copied as a plain
+  name, a local library became a PyPI requirement (an unrelated PyPI package of that name got
+  installed). Synthetic build project in `.build/wheel/<b>` (for mypyc a `setup.py` using
   mypycify with the same `compile.multi_file`, `separate`, `strict_dunder_typing` and extra C
   flags (`no_semantic_interposition`, section 9) as the stage, and a compile `mypy.ini`), built
   with `uv build --wheel --no-build-isolation --python <.venv python>` after
@@ -1929,14 +2168,17 @@ Per method:
   cpython wheel left the module out. `app.gui` -> `[project.gui-scripts]` (no console window on
   Windows), else `[project.scripts]`. mypyc -> platform wheel; cpython/pypy -> `py3-none-any`
   (even with a vendored native library: the wheel is not retagged).
-- **nuitka**: `.build/nuitka-stage/<b>`, `uv run --locked --with nuitka==<NUITKA> python -m
-  nuitka` with cwd = stage; `--include-package=<pkg>`, `--include-module` for the mypyc hidden
+- **nuitka**: `.build/nuitka-stage/<b>`, `uv run --locked --with nuitka==<NUITKA> python -P -m
+  nuitka` with cwd = stage (`-P`: `-m` put the stage first on Nuitka's own `sys.path`, so an app
+  named `nuitka`, or like a module Nuitka imports, ran instead of the compiler; Nuitka finds the
+  app from the folder of `main.py`); `--include-package=<pkg>`, `--include-module` for the mypyc hidden
   imports the tools env can locate (`nuitka.includable`: top-level `find_spec` with the stage on
   `sys.path`, built-ins dropped, compiled modules and extensions always kept; Nuitka stops with
   FATAL on a module it cannot locate, e.g. a platform-guarded `import winreg`),
   `--python-flag=no_asserts/no_docstrings` from the shared `deploy.optimize` (an owner
   decision: no Nuitka-only switch), `--nofollow-import-to` per `deploy.exclude_modules`, the upx
-  plugin when enabled, then `nuitka.optimization_args` BEFORE `deploy.nuitka.extra_args` and the
+  plugin for a onefile build with UPX on (a standalone folder is packed afterwards, `upx.pack_tree`:
+  "Size and UPX" below), then `nuitka.optimization_args` BEFORE `deploy.nuitka.extra_args` and the
   command line (Nuitka takes the last value, so an `--lto` there still wins): always
   `--lto=<deploy.nuitka.lto>`, default `auto`, which Nuitka 4.2.2 resolves to yes for uv's
   python-build-standalone on Linux, Windows (MSVC) and macOS, BUT off when more than 250 modules
@@ -1964,12 +2206,26 @@ Per method:
   prefix (onefile) or `.dist` suffix; none found -> `DeployError`. Builds take minutes (~4-7
   min measured). Flet (verified: runs and starts the client): `flet/__init__.py` loads its
   controls lazily (module `__getattr__` + `importlib`), which Nuitka cannot follow, so the
-  method adds `--include-package=flet --include-package=flet_desktop`; the flet-desktop wheel
+  method adds `--include-package=flet --include-package=flet_desktop` and the package data
+  flet reads at runtime (`nuitka.FLET_PACKAGE_DATA`: `icons.json`, `cupertino_icons.json`;
+  Nuitka bundles no package data by default, and an app using `ft.Icons` died with
+  FileNotFoundError); the flet-desktop wheel
   has NO client, so `nuitka._flet_client_archive` downloads the release archive
   (`flet_desktop.get_artifact_filename()`, the same URL flet uses, or `FLET_CLIENT_URL` when set,
-  as flet_desktop does) once into `.build/flet-client/<version>/` and bundles it at
-  `flet_desktop/app/<archive>`, where flet_desktop looks for a bundled client (and never
-  downloads one: a damaged archive would break the shipped app at its first start). So a
+  as flet_desktop does) once into `.build/flet-client/<version>/`, copies it into the stage
+  (`flet-client/`) and bundles it, named relative to the stage as the assets are (Nuitka splits a
+  data source at `,` and `=` and globs it: under `game, v2` the client was left out with only a
+  warning), at `flet_desktop/app/<archive>`, where flet_desktop looks for a bundled client (and never
+  downloads one: a damaged archive would break the shipped app at its first start), with the
+  name it looks for forced into the binary on Linux (`nuitka.flet_client_env` through
+  `--force-runtime-environment-variable`: `FLET_LINUX_DISTRO`, `FLET_DESKTOP_FLAVOR`; the app
+  computed another name from the user's glibc or a pyproject.toml in its current folder and
+  downloaded the client, section 15.1), its fingerprint `<archive>.sha256` next to it
+  (`nuitka.fingerprint_file`, written by `nuitka._fingerprint` when the archive is cached, as
+  `flet pack` writes one: without it flet_desktop hashed the whole client at every onefile
+  start) and, on Linux, `FLET_APP_ID=<app.name>` (the taskbar identity of flet pack's runtime
+  hook; its Windows one, `FLET_APP_USER_MODEL_ID`, is the executable's path at runtime, which
+  Nuitka cannot force: the window groups as flet there). So a
   download is cached only when it delivered every byte the server announced (Content-Length)
   and the archive reads to its end the way flet_desktop extracts it (`nuitka.archive_problem`:
   zipfile CRCs, or tarfile over gzip and the gzip trailer); a cached archive is checked again
@@ -1980,7 +2236,14 @@ Per method:
   payload and also in `--dry-run`, and again in `build`. The stage `.build/flet-build/<b>` is
   persistent (Flutter cache); stale extensions are deleted from it before this payload's are
   copied (a desktop `.pyd` must not reach a mobile/web build). `flet build` ignores `uv.lock`, so `build_pyproject` pins the
-  `uv export --frozen --no-dev` versions and serialises the PARSED `[tool.flet]` of the
+  `uv export --frozen --no-dev --no-editable` versions (`flet._pinned_requirements`; a local
+  library as `name @ file:///absolute/path`, `common.direct_reference`: editable it was
+  `-e ./libs/x ; <markers>`, which pip refused, relative to the project and not the stage; for a
+  mobile or web target a pin of a package uv.lock has no pure wheel for keeps only the project's
+  own bounds and its markers, `common.unpin_binaries` with `binary_only` and
+  `project_specifiers`, named in a warning: those targets take their binaries from Flet's own
+  index, 15.1) and
+  serialises the PARSED `[tool.flet]` of the
   project `pyproject.toml` (no other table leaks in; `[tool.flet.app]` alone is kept) with
   `app.path` forced to `STAGE_APP` (`src`, where `build` stages the app; another value is
   ignored with a warning: flet looked for `<work>/<path>/main.py` and aborted after installing
@@ -2007,28 +2270,44 @@ Per method:
   reusing another level), Windows only: PyInstaller's `configure.get_config` turns UPX off on
   every other OS (packed `.so` files crash), so there `exe.size_args` passes `--noupx`,
   downloads nothing and warns that the exe is not packed (never set `PYINSTALLER_FORCE_UPX`);
-  nuitka = its upx plugin (hard-codes `--best --lzma`, ignores our
-  excludes: it packed `python314.dll` and the app still ran); portable (before the smoke test,
-  so the packed `.pyd` files are what it loads) and flet = `upx.pack_tree` (PE `.exe/.dll/.pyd`
-  on Windows, ELF executables but no `.so` on Linux, in parallel). Never packed: files over
+  nuitka onefile = its upx plugin (hard-codes `--best --lzma`; it packs the one binary, and the
+  libraries inside the zstd payload never; left out when `upx.excluded` names the binary);
+  nuitka standalone (once `main.dist` is in `dist/`), portable (before the smoke test, so the
+  packed `.pyd` files are what it loads) and flet = `upx.pack_tree` (PE `.exe/.dll/.pyd` on
+  Windows, ELF executables but no `.so` on Linux, in parallel; the level and every exclude
+  apply): the plugin has no exclude option and packed every DLL of a standalone folder,
+  `python314.dll` and `deploy.upx.exclude` included. Never packed: files over
   `MAX_INPUT` (600 MiB; UPX refuses 768 MiB), `BUILTIN_EXCLUDE` (C runtime, API sets,
   `python3*.dll`, `libpython3*`, and `flutter_windows.dll`: a packed Flutter engine hangs the
   app at startup with a 4 MB working set and no window, measured), binaries UPX rejects
   (`GUARD_CF`: never pass `--force`). `upx.find` order: `deploy.upx.path` (absolute, `~`, or
   relative to the project root, never the caller's cwd; handed to the tools absolute but not
-  resolved: PyInstaller wants `<upx-dir>/upx`, Nuitka a file named `upx`), `upx` on PATH, the
-  cache, a download: UPX 5.2.1 once (SHA-256 checked, written as `.part` then renamed so an
-  interrupted write never looks cached) to
-  `%LOCALAPPDATA%\pytemplate\tools\upx-5.2.1` / `$XDG_CACHE_HOME/pytemplate/tools`; macOS
-  is unsupported (`upx.unsupported_reason`). `flet pack` ships Flet's prebuilt FULL client
+  resolved: PyInstaller wants `<upx-dir>/upx`, Nuitka a file named `upx`, so another file name
+  is refused, exit 2: `tools/upx-5.2.1` passed, then Nuitka searched PATH ("No UPX binary
+  found", or another upx) and PyInstaller packed nothing without a word; on POSIX it must have
+  its x bit, `upx._runnable`, or the preflight refuses it with the `chmod +x` line: a checkout
+  from Windows passed it, and the portable build died in `upx.pack_file` with a traceback after
+  the runtime copy; `pack_file` turns a upx that cannot start into a DeployError), `upx` on
+  PATH, the cache (a cached copy without its x bit is downloaded again), a download: UPX 5.2.1
+  once (SHA-256 checked, written as `.part` then renamed so an interrupted write never looks
+  cached) to
+  `%LOCALAPPDATA%\pytemplate\tools\upx-5.2.1` / `$XDG_CACHE_HOME/pytemplate/tools`
+  (`upx._cache_dir`: a relative value is ignored, as the XDG spec says and the pyz bootstrap
+  does: it put the download under the caller's folder, `src/relcache/`, which the payloads
+  ship, and gave Nuitka a relative `--upx-binary`; a upx found through a relative PATH entry is
+  made absolute too); macOS is unsupported (`upx.unsupported_reason`). `flet pack` ships Flet's prebuilt FULL client
   zipped (40.5 MB, libmpv 28 MB inside) and unpacks it on first start into
   `~/.flet/client/flet-desktop-full-<version>-<fingerprint>` (97 MB); the "light" flavor
   exists only for Linux. PyInstaller follows imports inside functions: flet's lazy
   `from PIL import ...` (RawImage) drags Pillow (13 MB) in, hence the preset's
   `exclude_modules = ["PIL"]`.
 - Assets at runtime: `resources.assets_dir()` (raylib and flet presets) tries
-  `$PYTEMPLATE_ASSETS`, then `sys._MEIPASS/assets`, then `<pkg>/assets` (wheel), then
-  `src/assets`. `resources.py` is a boundary module; module-level `__file__` is fine in
+  `sys._MEIPASS/assets` (PyInstaller), then `<pkg>/assets` (wheel), then the `assets` folder
+  next to the package (`src/`, the stage, a portable `app/`, a pyz's extracted `app/`, Nuitka's
+  dist). It never reads `$PYTEMPLATE_ASSETS`, which the portable and pyz bootstraps set (and
+  assign: `setdefault` kept the value an app started by another app inherited, and it read that
+  app's assets first) for the app's own code and for the `resources.py` of projects made before.
+  `resources.py` is a boundary module; module-level `__file__` is fine in
   compiled packages (section 9: only a single top-level compiled module sees a relative one).
 
 ## 11. Presets (`presets.py`, `.pytemplate/presets/<p>/`)
@@ -2116,13 +2395,16 @@ Per method:
   root with `./deploy __init script --name myapp --force` (changes no byte when they already
   match: `test_removals` checks it), or mirror the edit byte for byte.
 - `copy_template(dest)` (used by `new`): in a git work tree only the files git tracks (`git
-  ls-files --cached`, with their working-tree content): untracked files are listed as "not
-  copied", ignored ones stay silent, so `.env`, `.idea/`, `htmlcov/`, `*.spec` never reach a
-  new project. A maintainer's new file must be `git add`ed before `new` or `selftest --e2e`
+  ls-files --cached`, with their working-tree content; its names are read through git's C
+  quoting, `presets._git_path`, so a name that is not UTF-8 keeps its bytes: read as text it
+  named no file and was left out silently): untracked files, and tracked ones deleted from the
+  working tree, are listed as "not copied", ignored ones stay silent, so `.env`, `.idea/`,
+  `htmlcov/`, `*.spec` never reach a new project. A maintainer's new file must be `git add`ed before `new` or `selftest --e2e`
   sees it. A symbolic link is copied as the link git tracks (`presets._copy_link`, dangling
   ones too; where Windows refuses to create one, what it points to, with a warning), never as
   a copy of its target. Without git, or when git does not track `.pytemplate/deploy.py` (a copy inside
-  another repository, a project never committed), it copies every file; a git failure other
+  another repository, a project never committed), it copies every file, and says so and why
+  (`presets._tracked_template`); a git failure other
   than "not a git repository" (dubious ownership...) is a warning first (git runs with
   `LC_ALL=C`). Both skip (`presets._skipped`) `.git`, `.build`, `dist`, caches, `.flet`,
   `.venv*`, `template-repo` at any depth; `build/`, `.claude/`, `README.md` and `LICENSE` at
@@ -2139,7 +2421,9 @@ Per method:
   travel with the copied runner): `presets.TEMPLATE_DOCS`. A project running `new` passes
   those two on as tracked files, and its own root `README.md`/`LICENSE` stay behind. `new`
   then runs the copy's own runner with `__init <preset> --name <n> --force` inside the copy
-  (with this run's `-q` or `-v`; under `-q` init's uv calls get `--quiet` too),
+  (with this run's `-q` or `-v`, and `--no-render`: init renders every generated file itself,
+  and `render.auto` only warned about the source's hand-edited ones; under `-q` init's uv calls
+  get `--quiet` too),
   `git init -b
   main` (the generated CI runs on `main`; git < 2.28: plain `init` + `symbolic-ref HEAD
   refs/heads/main`; no repository inside an existing work tree, where `cmd_mode.cmd_new` then
@@ -2153,9 +2437,11 @@ Per method:
   is written. On success it prints one hint (init prints none: it runs in the copy), `cd
   <dest>` and `./deploy setup` on lines of their own, for the shell of the launcher
   (`presets.next_steps`, in the order of `shells.guess_shell`: the `PYTEMPLATE_LAUNCHER`
-  prefix `ps1:` (PowerShell single quotes) or `nu` (a raw single-quoted nushell string, a
-  double-quoted one for a path with `'`; `deploy setup`, the shell-setup function), then
-  `XONSH_VERSION` (a Python string literal: xonsh reads quoted arguments so), then
+  prefix `ps1:` (PowerShell single quotes; `cd -LiteralPath` for a path with `[ ] * ?` or a
+  backtick, which its cd reads as a wildcard pattern) or `nu` (a raw single-quoted nushell
+  string, a double-quoted one for a path with `'`; `deploy setup`, the shell-setup function),
+  then `XONSH_VERSION` (a Python string literal: xonsh reads quoted arguments so; `cd @(...)`
+  for a path with `$`, which xonsh expands even inside quotes), then
   `NU_VERSION` behind `cmd` (nushell exports it; deploy.cmd serves xonsh and nushell on
   Windows too; `./deploy.cmd setup`), then cmd `cd /d "..."` and `.\deploy`, else
   `shlex.quote`). Behind deploy.cmd a shell that exports neither variable (a nushell that
@@ -2410,11 +2696,20 @@ LazyVim wiring:
   nvim-lint wraps every linter in `cmd.exe /C`, where a quoted absolute path breaks
   with spaces or `& ^ %`: the linter runs the bare name `mypy` with `.venv\Scripts` first on
   PATH. nvim-lint REPLACES the environment when a linter has `env`, so it passes the full
-  environment plus `PYTHONUTF8=1`, minus `VIRTUAL_ENV`.
+  environment plus `PYTHONUTF8=1`, minus `VIRTUAL_ENV`. nvim-lint only replaces a linter's
+  diagnostics when the linter runs, so once mypy no longer runs (`integrations.mypy_available`:
+  the `off` profile, no `.venv` mypy) `integrations.forget_mypy` drops them: `init.refresh` for
+  every buffer, the linter's `condition` for the buffer it is asked about (after `mode --typing
+  off` they stayed until Neovim restarted; `test_mypy_diagnostics_go_once_mypy_is_off`).
 - dap: nvim-dap spawns adapters with raw `uv.spawn` (no PATHEXT), so Mason's `.cmd` shims fail
   on Windows. Adapter order (`dap.adapter`): `.venv` python with debugpy (dev group), the tools
   python, Mason's debugpy venv python, an ephemeral `uv run --no-project --with debugpy`
   adapter; `initialize_timeout_sec = 30` (a cold adapter can take more than the default 4 s).
+  debugpy is looked for by listing `lib/python3*` (`init.subdirs`, as the WinGet folders of the uv
+  search), never with `vim.fn.glob`, and every path goes through `init.normalize`
+  (`vim.fs.normalize` without its `$VAR` expansion): under a project folder named with `[ ]`,
+  `{ }` or `$HOME` the glob matched nothing and the adapter fell back to the network, and a
+  backquoted part ran as a command through 'shell' (`test_the_venv_debugpy_is_found_in_any_project_folder`).
   The program runs on the cpython runtime env. nvim-dap reads `<cwd>/.vscode/launch.json`
   (per-OS blocks lifted, JSONC accepted) and expands `${workspaceFolder}` to the cwd: a
   provider covers a cwd below the root.
@@ -2430,7 +2725,8 @@ LazyVim wiring:
   through `'shell'`: another reason to keep VS Code tasks `process`. Commands that can change
   the mode or `editor.json` (`mode`, `setup`, `apply` (the same `tasks.META` entry as
   `setup`), `sync`, `lock`, `add`, `remove`, `render`, `rename`) get the `pytemplate.refresh`
-  component (re-read `editor.json`, LSP `didChangeConfiguration`, rebuild the mypy linter);
+  component (re-read `editor.json`, LSP `didChangeConfiguration`, rebuild the mypy linter, and
+  drop mypy's diagnostics once mypy is off);
   `mode`, `setup`, `apply`, `lock` and `rename` also open their output. Every task carries
   `unique` (`tasks.components`): `run` and background tasks with `replace = true` (a new run
   restarts them), the rest with `soft = true`, which disposes the FINISHED previous run of the
@@ -2449,7 +2745,10 @@ LazyVim wiring:
   `compile`/`report`, every supported one for a `[tasks]` entry, else the active one; E/W
   without editor.json data; `test_task_diagnostics_follow_the_typing_profile`), reads basedpyright
   `  path:l:c - sev: msg` and `path:l[:c]: [sev: ]msg` (mypy, ruff concise, pytest crash
-  lines); skips notes, `site-packages` and `in <func>` frames. Relative paths resolve against
+  lines); skips notes, `site-packages` and `in <func>` frames, and pytest's `-ra` skip summary
+  (`SKIPPED [1] tests/x.py:11: reason`) and indented warnings summary: a path starts with a
+  non-blank character, as in `vscode._ANY_FILE` (they became errors on files named `SKIPPED [1]
+  tests/x.py` after a green run: `test_parser_ignores_pytest_summary_lines`). Relative paths resolve against
   the root; mypyc prints them relative to its stage (a copy of `src/`: `<pkg>/core/x.py`), so
   a relative path that exists under `src/` but not under the root lands on `src/` (like the VS
   Code MYPYC matcher). A path INTO the stage (`.build[/wsl]/mypyc-{dev,release}/stage/X`,
@@ -2482,9 +2781,16 @@ LazyVim wiring:
   (`test_query_reports_an_old_neovim`, which fakes the old API on the Neovim at hand; the real
   trust test skips below 0.9, which brought `vim.secure`).
 - `doctor` (default; exit 1 on real problems): Neovim >= 0.11.2 (`MIN_LAZYVIM`), LazyVim
-  installed, no `local_spec = false`, the trust of `.lazy.lua`, missing extras in
+  installed (`Nvim.lazyvim_installed`, which `./deploy doctor`, `sync` and `bootstrap` ask too:
+  LazyVim in lazy.nvim's default root `<data>/lazy`, the config's `lazy-lock.json` naming it, or
+  the config's Lua naming the `LazyVim/LazyVim` spec or its `lazyvim.plugins` import outside a
+  comment, `config_names_lazyvim`; read from the files, never by running the user's config, which
+  may install plugins; a `lua/config/lazy.lua` alone passed, and lazy.nvim's own Structured Setup
+  has one without LazyVim, while a LazyVim with its own lazy root was refused), no `local_spec =
+  false`, the trust of `.lazy.lua`, missing extras in
   `lazyvim.json` (an unreadable one is a note naming the JSON error: LazyVim skips it without a
-  word), tools (`cmd_nvim.TOOLS`; required: git, curl, tar, fd or fdfind (venv-selector, from
+  word; `missing_extras` reads the module names only, a hand-written `{...}` entry made it raise
+  TypeError), tools (`cmd_nvim.TOOLS`; required: git, curl, tar, fd or fdfind (venv-selector, from
   the `lang.python` extra `.lazy.lua` imports, raises an error on the first Python buffer
   without it) and a C compiler (nvim-treesitter builds its parsers; LazyVim lists it among its
   requirements), each with the install command of this OS (`cmd_nvim._install_hint`, chosen
@@ -2505,9 +2811,12 @@ LazyVim wiring:
   already skipped the file for that session).
 - `extras` adds exactly the five extras above to `<config>/lazyvim.json` after a timestamped
   `.bak`, in LazyVim's own format; it refuses (exit 3) when there is no config or no
-  `lazyvim.json` yet (start Neovim once). `bootstrap` clones the LazyVim starter (its newest
+  `lazyvim.json` yet (start Neovim once). The file is replaced whole (`project.write_whole`: a
+  dotfiles link stays a link); a config it may not write (a Nix store, another user's file) is
+  exit 3 naming the extras to enable by hand, with no `.bak` left behind (it was a traceback).
+  `bootstrap` clones the LazyVim starter (its newest
   commit, as LazyVim's own install steps do) and deletes its `.git`, only when the config dir
-  does not exist. `sync` = `nvim --headless "+Lazy! install" "+lua dofile(vim.env.PT_NVIM_CHECK)"
+  does not exist (a `.git` it cannot delete: exit 3, delete it by hand). `sync` = `nvim --headless "+Lazy! install" "+lua dofile(vim.env.PT_NVIM_CHECK)"
   +qa` with cwd = ROOT and `NVIM_LOG_FILE` in a temp dir: install only (`Lazy! sync` would also
   update every plugin of the user's config, rewriting their `lazy-lock.json`, and clean the
   plugins its spec does not name). It refuses with exit 3 while `.lazy.lua` is not trusted (the
@@ -2518,7 +2827,9 @@ LazyVim wiring:
   a plugin not installed or no report is exit 1, no lazy.nvim (no `:Lazy`) exit 3, a plugin
   with task errors (`has_errors`: a failed build step) only a warning.
 - `cmd_nvim.doctor(check)` (from `./deploy doctor`): one line, silent without `nvim`, at most
-  one headless call.
+  one headless call. An `nvim` that cannot be executed (another architecture, a truncated
+  download, a noexec mount: `cmd_nvim.headless` turns the OSError into a DeployError, exit 3 in
+  `nvim doctor`) is a `[--]` line there; it ended `./deploy doctor` in a traceback.
 - Only started inside the project: `nvim path/x.py` from elsewhere, or a later `:cd`, does not
   load `.lazy.lua`. `.lazy.lua` edits need a restart (the watcher ignores it).
 
@@ -2543,7 +2854,8 @@ short temp tree and unset `NVIM_APPNAME`.
   .pytemplate/runner .pytemplate/deploy.py`. Both must pass. Needs `.venv` (`./deploy setup`).
   mypy checks the host platform only: add `--platform linux` / `--platform darwin` by hand to
   check the other branches (template-selftest runs it on all three OSes). The exit code is
-  pytest's when it failed, else mypy's (mypy runs either way); `--shells`, `--nvim` and `--e2e`
+  pytest's when it failed, else mypy's (mypy runs either way, but not after pytest's own
+  `-h`/`--help`/`--version`: `cli.SELFTEST_INFO_FLAGS`); `--shells`, `--nvim` and `--e2e`
   return their suite's own code. The arguments are ADDED after `.pytemplate/tests`: a file path
   does not narrow the run (pytest still collects the whole folder); select with `-k EXPR`.
 - It must pass in every project made with `./deploy new` too (its CLAUDE.md says so; any
@@ -2557,7 +2869,13 @@ short temp tree and unset `NVIM_APPNAME`.
   new-project job proves it for a raylib and a flet project (a new project has its own
   README.md; the template's is `.pytemplate/README.md`). Tests that start what they built with
   `sys.executable` skip on an interpreter older than the build's Python
-  (`test_build_methods.skip_when_older_than`: the floor job runs the suite on 3.11).
+  (`test_build_methods.skip_when_older_than`: the floor job runs the suite on 3.11). A real
+  project has code of its own in src/ and tests/: a test that copies the project and runs
+  `__init` there passes `--force` (the copy is no pristine skeleton), and one that reads a plan
+  checks what every project has (`[project] name`), the skeleton's docstring only while it is
+  still there (7 tests failed in every real project;
+  `test_paths.test_the_tests_that_copy_the_project_pass_in_one_with_its_own_code` runs them in a
+  copy with code of its own).
 - `.pytemplate/tests/`: `test_runner.py` (config, render, lintc, imports, target keys),
   `test_no_spanish.py`, `test_launcher_sh.py` (static lint of the `deploy` header rules, `-n`
   syntax checks, `__probe` round-trips per shell found; a caller's `set -eu` in 8 shells,
@@ -2665,7 +2983,9 @@ short temp tree and unset `NVIM_APPNAME`.
   fixture, `test_removals`); everything else in `./deploy selftest` works offline once
   `./deploy setup` has run. Tests that spawn `./deploy` must scrub `UV`, `VIRTUAL_ENV`,
   `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON` and `PYTEMPLATE_*` from the child env (pytest itself
-  runs under `uv run`). Keep them fast: a runner start costs ~0.3 s, and the Windows launcher
+  runs under `uv run`). An environment built from scratch keeps the caller's `LANG`, `LC_ALL`
+  and `LC_CTYPE` (`test_launcher_sh._no_uv_env`): in the C locale yash cannot read a project
+  path that is not ASCII. Keep them fast: a runner start costs ~0.3 s, and the Windows launcher
   and path tests already take 10-40 s under load.
 - `test_runner.py` matches message substrings (`unknown key 'backend.mode'`, `boolean`,
   `is not in backend.supported`, `exact version`, `clashes with`, and the lintc texts `flet`,
@@ -2677,11 +2997,19 @@ short temp tree and unset `NVIM_APPNAME`.
 - `./deploy selftest --shells`: section 4.9.
 - `./deploy selftest --nvim [PRESET,...] [--keep] [--fresh] [--require] [--timeout S]
   [--dir DIR]` (`nvimtest.selftest`): isolated LazyVim under `--dir` (default `%TEMP%\pt\nvim`,
-  `$TMPDIR/pt-nvim` elsewhere): `<dir>/x/{config,data,state,cache}` = the `XDG_*` homes,
+  `$TMPDIR/pt-nvim-<uid>` elsewhere, made 0700; on POSIX an existing `--dir` another user owns,
+  or one every user can write, is refused: `project.check_private_dir`, since code runs from
+  it): `<dir>/x/{config,data,state,cache}` = the `XDG_*` homes,
   `<dir>/base.json` = the base is complete, `<dir>/p/<preset>` = scratch projects,
   `<dir>/logs/` = one log per step. It stops unless Neovim reports every stdpath inside
   `<dir>/x`, refuses a `--dir` inside the template or one that is a file (exit 2), and only
-  wipes a dir carrying its marker `.pytemplate-nvim-test`. Pinned, so a red run is a regression and not upstream drift: the
+  wipes a dir carrying its marker `.pytemplate-nvim-test`. Its `./deploy` steps get
+  `e2e.isolate_git` (the ceiling at the `--dir`'s parent, no global or system git config), as
+  those of `--e2e`: with a `--dir` inside the user's work tree `new` skipped `git init` and, with
+  `core.filemode = false`, staged the scratch launchers in that repository, where they stayed
+  (`test_nvim_deploy_steps_never_touch_a_repository_around_the_dir`); a `--dir` that would hide
+  the template's own repository is refused (`e2e.hidden_template_repository`). Neovim keeps the
+  user's git config (lazy.nvim clones with it). Pinned, so a red run is a regression and not upstream drift: the
   LazyVim starter is cloned in full and checked out at `cmd_nvim.STARTER_REV`, and the plugins
   come from `nvimtest.LOCK` (`.pytemplate/nvim/tests/lazy-lock.json`, a green run's lock),
   copied into the isolated config before every Neovim run that installs (lazy.nvim rewrites the
@@ -2706,7 +3034,10 @@ short temp tree and unset `NVIM_APPNAME`.
   `nvim --headless -c "doautocmd UIEnter" -c "luafile .pytemplate/nvim/tests/smoke.lua"` with
   `PT_ROOT=<project>` (timeout 600 s). Every child runs in its own session: a timeout or Ctrl+C
   kills the whole tree (`nvimtest.kill_tree`: SIGTERM to the group, so Neovim can stop its
-  jobstart jobs, then SIGKILL after 5 s; `taskkill /T` on Windows). Per-preset table with
+  jobstart jobs, then SIGKILL after 5 s; `taskkill /T` on Windows), and so do SIGTERM and SIGHUP
+  (`e2e.termination_as_interrupt`, as for `--e2e`: they never reached a step's session, and its
+  Neovim went on as an orphan writing into `--dir`): `interrupted`, 130, the logs folder
+  named (`test_selftest_harness.test_nvim_termination_signal_kills_the_running_step`). Per-preset table with
   timings; exit 1 on any FAIL, non-zero exit, timeout, a missing `DONE` line, a result count
   that differs from it, or a mypy check that did not run with a typing profile
   (`nvimtest.smoke_problem`). Without `nvim`/`git`: SKIP with exit 0, or exit 3 with
@@ -2779,8 +3110,13 @@ short temp tree and unset `NVIM_APPNAME`.
   the template's own repository (a template in a subfolder of a bigger repository, the base
   next to it) is refused (`hidden_template_repository`: `new` would copy untracked files).
   Layout: `<base>/<preset>`, `<base>/logs/<preset>/NN-step.log`, `<base>/work/<preset>`
-  (smoke scratch); default base `%TEMP%\pt\e2e` / `$TMPDIR/pt-e2e`; only a base carrying
-  `.pytemplate-e2e` is wiped. Steps run with stdin closed and per-step timeouts (`TIMEOUTS`,
+  (smoke scratch); default base `%TEMP%\pt\e2e` / `$TMPDIR/pt-e2e-<uid>` (made 0700; on POSIX
+  a base another user owns, or one every user can write, is refused: `project.check_private_dir`;
+  every step runs code from it, and a shared /tmp/pt-e2e let another user swap a project in
+  between two steps); only a base carrying
+  `.pytemplate-e2e` is wiped, and a symlinked or junctioned base loses only its link and marker
+  (`e2e.rmtree` removes a link as a link and never chmods through one: a passing run left the
+  folder it named at 0o200). Steps run with stdin closed and per-step timeouts (`TIMEOUTS`,
   `BUILD_TIMEOUTS`) that kill the whole process tree (each step in its own session on POSIX);
   a failed `new`, `setup` or host `mode` skips the rest of its preset; a row with `after`
   needs that row to PASS. Exit codes: 0; 1 on any FAIL; 2 usage; 130 interrupted: Ctrl+C, and
@@ -2907,11 +3243,17 @@ short temp tree and unset `NVIM_APPNAME`.
   stable) deletes `.pytemplate/nvim/tests/lazy-lock.json` and always uploads the logs with the
   resolved `lazy-lock.json` and `starter-commit.txt`, the next pins after a green run (13.1).
 - **[template repo]** `template-launchers.yml` (Linux/macOS shells + shellcheck, Windows with
-  MSYS2, Cygwin and busybox-w32, optional WSL job; `selftest --shells` plus user-style
+  MSYS2, Cygwin and busybox-w32 (one release, `BUSYBOX: busybox-w64-FRP-<n>-g<commit>.exe`, the
+  build scoop, Chocolatey and winget install, checked against its pinned `BUSYBOX_SHA256`
+  before it runs; a new release takes its line of frippery.org's `SHA256SUM`. The rolling
+  `busybox64u.exe` ran unchecked whatever the server held that day:
+  `test_workflows.test_every_downloaded_file_is_checked_against_a_pinned_sha256`), optional WSL job; `selftest --shells` plus user-style
   invocations; a gate job checks the marker file), `template-nvim.yml` (Ubuntu + Windows,
   Neovim pinned (above), `fd` (venv-selector from LazyVim's `lang.python` errors on the first Python
   buffer without it), `selftest --nvim --require --dir $RUNNER_TEMP/pt-nvim` (the `runner`
-  context is not allowed in a job-level `env`, hence the step env), logs on failure),
+  context is not allowed in a job-level `env`, hence the step env), logs on failure or
+  cancellation, as for e2e and in the nvim job of template-ci-image.yml
+  (`test_workflows.test_logs_of_a_job_that_timed_out_are_uploaded`)),
   `template-e2e.yml` (gate job, then 3 OS x 3 presets: `--quick` on pushes and pull requests
   that touch what `new` copies (`.pytemplate/**`, the launchers, `pyproject.toml`, `uv.lock`,
   `pytemplate.toml`, `.python-version`, `src/**`, `tests/**`, `.gitignore`, `.gitattributes`,
@@ -2938,13 +3280,14 @@ in a local build of the image, as `docker run --init --user 1001` with the check
 (September 2026, behind a TLS-intercepting proxy: the image's `ca` secret path runs only in
 such a local build, CI passes no secret), with the skip list of the hosted Ubuntu selftest
 minus its PyPy test. Untested anywhere so far:
-PowerShell 6.x-7.2, a UNC current folder, uv found only in `ProgramFiles` or chocolatey, the
+PowerShell 6.x-7.2, a UNC current folder or a project on a share (its long-path names are only
+simulated: `test_long_paths_keep_a_network_share_valid`), uv found only in `ProgramFiles` or chocolatey, the
 install prompt on Windows (POSIX `deploy` and pwsh
 `deploy.ps1` answer it on a pseudo-terminal), Neovim 0.11 on Windows, pyright via Mason, VS
 Code itself (buttons, Problems panel: only simulated), `flet build` outside Windows (verified by
 hand there, section 10; no CI job installs Flutter), bundled PyPy portable builds on CI, Ctrl+C
-handling of the nvim harness (its tree kill only simulated; `selftest --e2e`'s runs in
-`test_e2e_run.py` on POSIX), `[deploy.nuitka]` lto/pgo outside Linux (measured with Nuitka
+handling of the nvim harness (its tree kill only simulated; SIGTERM and SIGHUP run for real on
+POSIX, as `selftest --e2e`'s do in `test_e2e_run.py`), `[deploy.nuitka]` lto/pgo outside Linux (measured with Nuitka
 4.2.2 and gcc 13 only: PGO with MSVC and an ~800-module LTO link are unmeasured). The launcher
 changes of
 September 2026 were developed on Linux (pwsh 7.6 for `deploy.ps1`; niubash simulated by
@@ -2992,8 +3335,21 @@ template-launchers; real niubash only on the maintainer's machine).
     adversarial review of every branch, whose findings on the fixes themselves (about 40, 2 of
     them critical) were fixed too. All 66 counted and 62 minor defects are fixed but one counted
     notable, only partly: a project inside another git repository keeps a generated CI that
-    GitHub never runs (`new` and `doctor` now say so; section 15.2). Not measured again yet:
-    until a new measurement says otherwise, the project is not at the bar.
+    GitHub never runs (`new` and `doctor` now say so; section 15.2).
+  - 2026-09-26, commit e3c3703 (those fixes, and the CI image's stage 1), 18,207 lines: two
+    independent teams of 10 hunters again, this time without the verifier and the skeptic (owner
+    decision): each finding was reproduced by whoever fixed it, with a regression test that
+    fails without the fix. Team A reported 60 findings (6 critical, 32 notable, 22 minor), team B
+    71 (6 critical, 33 notable, 32 minor); merged across the teams, 11 critical (one found by
+    both: the shared `/tmp` default of `selftest --e2e`), 55 notable and 47 minor distinct
+    defects, none rejected. Counted: 66, 1 per 276 lines. Capture-recapture on the counted: A 39,
+    B 41, both 14: about 111 (Chapman), 1 per 164 lines. UNACCEPTABLE, as at 87e28f9 (the code
+    had grown by 2,700 lines, the CI image and the fixes, and new code is where many finds
+    were). Fixed since: the 11 critical ones by hand, one commit each; the other 108 findings,
+    the minor ones included, by two fixers (areas 1-5 and 6-10, one branch each), each with its
+    regression test, then merged and checked together (`./deploy selftest`, `--shells`,
+    `--nvim`, `--e2e --quick`). Not measured again yet: until a new measurement says otherwise,
+    the project is not at the bar.
 
 ## 14. Conventions and recipes
 
@@ -3013,6 +3369,12 @@ Runner code:
   harnesses (`shells`, `nvimtest`, `e2e`) use `subprocess` directly with stdin closed, output
   to log files and timeouts that kill the process tree; `hooks._run_bytes` too, for raw bytes
   and stdin (section 5.6).
+- A project file the user may have edited (pyproject.toml, pytemplate.toml, state.json, the
+  generated files, a restored uv.lock) is rewritten with `project.write_whole`, never in place: a
+  write cut short (a full disk, a quota) left pyproject.toml truncated mid-block. It keeps the
+  file's mode, owner and group (`_give_owner`: root in a dev container left a user's files
+  root-owned) and its other hard links; a file with other links, or one whose owner it cannot
+  give a new file, is rewritten in place (`_write_in_place`, the old bytes back on failure).
 - Text files: `encoding="utf-8", newline="\n"`; write `"\ufeff"`, never a literal BOM; read
   `pytemplate.toml` with `config.read_text` (a bad encoding becomes a clear config error);
   read `pyproject.toml`, `uv.lock` and the preset files (`preset.toml`, `constraints.txt`) as
@@ -3108,10 +3470,11 @@ uv:
   never.
 - **The user's uv variables move the runner's calls** (LIMITATION): `UV_PROJECT`,
   `UV_NO_PROJECT`, `UV_WORKING_DIR`, `UV_ISOLATED`, `UV_NO_DEV`, `UV_NO_DEFAULT_GROUPS`,
-  `UV_NO_SYNC` change the project, environment or groups of `uv run --locked`;
+  `UV_NO_GROUP`, `UV_NO_SYNC` change the project, environment or groups of `uv run --locked`;
   `UV_MANAGED_PYTHON`/`UV_NO_MANAGED_PYTHON` next to `UV_PYTHON_PREFERENCE` exit 2. Fix:
   `proc.base_env` drops `proc.UV_SELECTION` (5.5). Test:
   `test_cli_core.py::test_base_env_drops_what_would_move_uv_or_python`,
+  `test_a_user_uv_no_group_never_reaches_uv`,
   `test_uv_runs_in_the_projects_environment_whatever_the_user_exported`. Goes: never.
 - **`uv run --script` exports its throwaway environment** (LIMITATION): `VIRTUAL_ENV`, its
   `bin/`/`Scripts/` first on PATH and `UV` reach every child, which then took the runner's
@@ -3147,11 +3510,15 @@ uv:
   `test_fixes.py::test_uv_run_pins_the_project_outside_the_root`. Goes: never.
 - **`uv sync` is exact for the groups it installs** (LIMITATION): it removed a group added with
   `./deploy add --group G`, and so did the sync `uv remove` runs itself (`./deploy remove idna`
-  uninstalled the packages of every non-default group). Fix: `envs.sync` passes `--all-groups`;
-  `cmd_env._add_remove` runs `uv add|remove --no-sync`, then `envs.sync`, and puts
-  pyproject.toml and uv.lock back when that sync fails or is interrupted (uv's own rollback
-  covers only its own sync) (7). Test:
+  uninstalled the packages of every non-default group); `--all-groups` enables every group, so
+  uv refuses it for a pair of `[tool.uv] conflicts` or a group whose requires-python excludes
+  the interpreter. Fix: `envs.sync` passes `--all-groups`, minus a `--no-group` for each group
+  `envs.left_out` names; `cmd_env._add_remove` runs `uv add|remove --no-sync`, then
+  `envs.sync`, and puts pyproject.toml and uv.lock back when that sync fails or is interrupted
+  (uv's own rollback covers only its own sync) (7). Test:
   `test_envs_core.py::test_sync_installs_every_dependency_group`,
+  `test_sync_leaves_out_the_groups_uv_cannot_install_there`,
+  `test_sync_with_real_uv_installs_what_the_groups_allow`,
   `test_remove_keeps_the_packages_of_every_group`,
   `test_a_failed_sync_puts_pyproject_and_the_lock_back`. Goes: never.
 - **An old uv knows only the interpreters of its release** (LIMITATION): < 0.10.12 cannot
@@ -3196,6 +3563,12 @@ uv:
   `test_presets.py::test_init_passes_the_pins_by_a_path_without_spaces`,
   `test_init_pins_steer_the_resolution`. Goes: when uv takes the value whole (the relative
   path can stay).
+- **uv writes `uv.lock` in place** (LIMITATION): a `uv lock` stopped by a full disk or a quota
+  left `uv.lock` cut short (invalid TOML) next to the old pyproject.toml, and every `uv run
+  --locked` and the next lock failed on it. Fix: `cmd_env.cmd_lock` snapshots both files and puts
+  them back when `uv lock` fails (`_snapshot`, `_put_back`, 6.3), as `mode`, `apply` and
+  `add`/`remove` do. Test: `test_envs_core.py::test_a_lock_cut_short_puts_uv_lock_back_too`.
+  Goes: never.
 - **uv writes normalized names** (LIMITATION, PEP 503): `raylib_sdl` became `raylib-sdl`, and a
   verbatim comparison never matched. Fix: `cmd_apply.req_key` (5.8). Test:
   `test_apply.py::test_req_key_normalizes_like_uv`. Goes: never.
@@ -3403,10 +3776,13 @@ mypy and mypyc:
   it fails once mypyc fixes it),
   `test_lintc_flags_module_level_file_for_a_single_top_level_module`. Goes: when that pin fails.
 - **What mypyc compiles badly or not at all** (LIMITATION): a class decorator outside its native
-  list makes a slow Python class; nested classes, classes in functions, t-strings and a
-  module-level `if __name__ == "__main__"` are unsupported. Fix: the `lintc` rules,
-  `lintc.NATIVE_CLASS_DECORATORS` (9). Test:
+  list, a metaclass other than ABCMeta (every Enum), a NamedTuple or a TypedDict make a slow
+  Python class; nested classes, classes in functions, t-strings and a module-level `if __name__
+  == "__main__"` are unsupported. Fix: the `lintc` rules, `lintc.NATIVE_CLASS_DECORATORS`,
+  `lintc.NATIVE_METACLASSES`, `lintc.NON_NATIVE_BASES` (9). Test:
   `test_mypyc_core.py::test_lintc_native_decorators_follow_the_locked_mypyc`,
+  `test_lintc_native_metaclasses_follow_the_locked_mypyc`,
+  `test_lintc_flags_classes_mypyc_compiles_as_python_classes_for_their_metaclass`,
   `test_lintc_flags_t_strings`, `test_runner.py::test_lintc_rules`. Goes: per rule, when mypyc
   supports it.
 - **`librt` comes only with mypy** (LIMITATION): compiled code that imports mypyc's runtime
@@ -3455,6 +3831,12 @@ setuptools:
   and `build_ext --force` (9). Test:
   `test_mypyc_core.py::test_build_forces_a_rebuild_for_every_binary_option`,
   `test_build_forces_a_rebuild_when_the_compiler_environment_changes`. Goes: never.
+- **mypyc's incremental cache ignores its own options** (LIMITATION, mypyc 2.3.1): with
+  `compile.separate = true` (incremental) an unchanged module's IR and C came from the cache,
+  so a new `strip_asserts` (`deploy.optimize`) or `strict_dunder_typing` never reached the
+  binary. Fix: a forced build (`mypyc.COMPILED_STAMP`) deletes the profile's `mypy_cache` and
+  `c` first (9). Test: `test_mypyc_core.py::test_a_forced_build_starts_without_the_cached_ir_and_c`
+  (reproduced with a real compile). Goes: when mypyc keys its cache on those options.
 - **A `CFLAGS` environment variable replaces Python's own C flags** (LIMITATION): it drops
   `-fno-strict-overflow` (i64/i32 wrap-around becomes undefined behaviour) and `-DNDEBUG`. Fix:
   `tools/mypyc_build.py` `extra_cflags` always adds `-fno-strict-overflow`; the wheel's
@@ -3515,6 +3897,12 @@ Nuitka:
   POSIX standalone builds when `app.name.lower() == pkg` (`nuitka.build`, 10). Test:
   `test_build_methods.py::test_nuitka_standalone_binary_never_clashes_with_the_package`. Goes:
   when Nuitka reports or avoids the clash.
+- **Its upx plugin has no exclude option** (LIMITATION): in a standalone build it packs every DLL
+  it copies (only `vcruntime140*` is skipped), `python3*.dll` and the files of
+  `deploy.upx.exclude` (a DLL that packing breaks) included. Fix: a standalone folder goes
+  through `upx.pack_tree` once it is in `dist/`; onefile keeps the plugin, which packs only the
+  binary, unless `upx.excluded` names it (`nuitka.build`, 10). Test:
+  `test_build_methods.py::test_nuitka_upx_honours_the_excludes`. Goes: never.
 - **Python support lags** (LIMITATION): 4.2.2 stops with FATAL on 3.15 and only warns on later
   minors, then fails obscurely in the C compile. Fix: `nuitka.NUITKA_PYTHON`,
   `nuitka.check_python` (10). Test:
@@ -3533,10 +3921,38 @@ Flet (flet, flet-desktop, flet pack, flet build):
   flet-desktop of another version is pip-installed at runtime, bypassing uv.lock. Fix: one
   `[preset.flet] version` for flet, flet-desktop and flet-cli (5.8); exe through `flet pack`
   (`exe._flet_pack`); `nuitka._flet_client_archive` bundles flet_desktop's own release archive
-  at `flet_desktop/app/`, from the same URL (or its `FLET_CLIENT_URL` override, a mirror) (10).
-  Test: `test_apply.py::test_flet_version_change_replaces_the_three_pins`,
+  at `flet_desktop/app/`, from the same URL (or its `FLET_CLIENT_URL` override, a mirror), for
+  the nuitka method and a bundled portable folder (`portable._bundle_flet_client`), with
+  `nuitka.flet_client_env` pinning the Linux name it looks for (10). Test:
+  `test_apply.py::test_flet_version_change_replaces_the_three_pins`,
   `test_workarounds.py::test_nuitka_bundles_the_flet_client`,
-  `test_the_flet_client_follows_flet_client_url`. Goes: never.
+  `test_the_flet_client_follows_flet_client_url`,
+  `test_build_methods.py::test_a_bundled_portable_flet_app_carries_its_desktop_client`. Goes:
+  never.
+- **flet_desktop names the client it looks for from the machine and folder the app runs in**
+  (LIMITATION, Flet 1.0.1): on Linux `flet-linux-<distro>[-light]-<arch>.tar.gz`, the distro from
+  the user's glibc bracket (`FLET_LINUX_DISTRO` overrides it) and the flavor from
+  `FLET_DESKTOP_FLAVOR`, else `[tool.flet] desktop_flavor` of a pyproject.toml in its CURRENT
+  folder, else light. A bundled archive of another name is ignored and the client downloaded at
+  the first start (offline: the app cannot start). Fix: `nuitka.flet_client_env` reads both
+  parts back from the bundled name, and nuitka forces them into the binary
+  (`--force-runtime-environment-variable`), a bundled portable folder into its launchers (10).
+  Test: `test_workarounds.py::test_nuitka_pins_the_client_name_the_app_looks_for`,
+  `test_build_methods.py::test_the_flet_client_env_pins_what_the_archive_was_named_for`. Goes:
+  never (flet pack's own exe does not pin it: another glibc bracket downloads its client).
+- **flet_desktop hashes a bundled client without its fingerprint, and names the window "flet"**
+  (LIMITATION, Flet 1.0.1): it keys its client cache by the archive's SHA-256, read from
+  `<archive>.sha256` (`flet pack` writes it) or hashed at every start that cannot keep one next to
+  the archive (onefile, a read-only folder); and the taskbar groups the client window as the shared
+  `flet` unless `FLET_APP_ID` (Linux) or `FLET_APP_USER_MODEL_ID` (Windows) is set, which flet
+  pack's PyInstaller runtime hook does. Fix: `nuitka._fingerprint` writes the sidecar with the
+  cached archive, and nuitka and a bundled portable folder ship it; Linux gets `FLET_APP_ID`
+  (forced by nuitka, exported by the portable launcher); Windows' ID must be the executable's path
+  at runtime, which neither can set: not done (10). Test:
+  `test_workarounds.py::test_nuitka_bundles_the_client_fingerprint_flet_pack_writes`,
+  `test_nuitka_pins_the_client_name_the_app_looks_for`,
+  `test_build_methods.py::test_a_bundled_portable_flet_app_carries_its_desktop_client`. Goes:
+  never.
 - **flet loads its controls lazily** (LIMITATION): module `__getattr__` + `importlib`, which
   Nuitka cannot follow. Fix: `--include-package=flet --include-package=flet_desktop` in
   `nuitka.build` (10). Test: `test_workarounds.py::test_nuitka_bundles_the_flet_client`. Goes:
@@ -3561,6 +3977,14 @@ Flet (flet, flet-desktop, flet pack, flet build):
   Fix: `methods.flet.build_pyproject` pins the exported versions and `requires-python =
   "==X.Y.*"` (10). Test: `test_build_methods.py::test_flet_build_pins_the_python_minor`,
   `test_fixes.py::test_flet_build_pyproject_takes_only_tool_flet`. Goes: never.
+- **`flet build` takes a mobile or web target's binary packages from Flet's own index**
+  (LIMITATION, flet-cli 1.0.1 with serious_python): pip runs with `--only-binary :all:` and
+  `--extra-index-url https://pypi.flet.dev`, which holds other releases than PyPI (msgpack 1.1.0
+  and 1.1.2, where a new flet project locks 1.2.2 from PyPI, which has no Android or iOS wheel):
+  the exact pin had no solution and an `apk`, `aab` or `ipa` build failed. Fix:
+  `common.unpin_binaries` in `methods.flet.build` (10). Test:
+  `test_build_methods.py::test_flet_build_leaves_mobile_binaries_to_flets_index`. Goes: never
+  (Flet's index follows its own schedule).
 - **`flet build` looks for `<work>/<path>/main.py`** (LIMITATION): another `[tool.flet.app]
   path` aborted after installing Flutter. Fix: `methods.flet.build_pyproject` forces
   `methods.flet.STAGE_APP` with a warning (10). Test:
@@ -3620,8 +4044,10 @@ UPX:
   `test_build_methods.py::test_exe_size_args_say_why_upx_is_off_on_macos`. Goes: per case, when
   UPX supports it.
 - **The packagers look for UPX differently** (LIMITATION): PyInstaller wants `<upx-dir>/upx`,
-  Nuitka a file named `upx`. Fix: `upx.find` hands them an absolute, unresolved path (10). Test:
-  `test_upx.py::test_relative_upx_path_resolves_against_the_project_root`. Goes: never.
+  Nuitka a file named `upx` (any other name: it searches PATH). Fix: `upx.find` hands them an
+  absolute, unresolved path, and `upx.locate` refuses a `deploy.upx.path` of another name (10).
+  Test: `test_upx.py::test_relative_upx_path_resolves_against_the_project_root`,
+  `test_a_upx_path_not_named_upx_is_refused_before_any_work`. Goes: never.
 
 ruff:
 - **`ruff format --check` prints nothing for stdin** (LIMITATION): a staged file fed on stdin
@@ -3769,10 +4195,11 @@ git and husky:
   dropped every staged path. Fix: `-c diff.relative=false` on every git call of `hooks` (5.6).
   Test: `test_hooks.py::test_staged_and_unstaged_files_ignore_diff_relative`. Goes: never.
 - **The hook's environment** (LIMITATION): git exports a relative `GIT_INDEX_FILE` and, in a
-  linked worktree, `GIT_DIR` without `GIT_WORK_TREE`. Fix: `hooks.git_env` makes them absolute;
+  linked worktree, `GIT_DIR` without `GIT_WORK_TREE`. Fix: `hooks.git_env` makes them absolute
+  when `GIT_DIR` is set and leaves a relative index alone otherwise (git reads it from the top);
   `hooks.run` removes them for uv and ruff (5.6). Test:
-  `test_hooks.py::test_git_env_pins_relative_paths`, `test_install_in_a_linked_worktree`. Goes:
-  never.
+  `test_hooks.py::test_git_env_pins_relative_paths`, `test_install_in_a_linked_worktree`,
+  `test_a_hook_that_cds_into_the_project_reads_the_real_index`. Goes: never.
 - **`git check-ignore` refuses `--literal-pathspecs`** (LIMITATION): Fix: `hooks._git(...,
   literal=False)` for it (5.6). Test:
   `test_hooks.py::test_ensure_installed_skips_an_ignored_project`. Goes: never.
@@ -4165,6 +4592,12 @@ Behaviour:
   eaten by PowerShell.
 - Tasks: a task with `backend = "mypyc"` runs interpreted in `.venv` unless it goes through a
   `deps` entry such as `compile` and runs the stage.
+- Exit 3 is a requirement the runner checks itself. One uv reports missing (an interpreter it
+  can neither find nor download: `python.pypy` pinned to a PyPy not installed, with
+  `UV_PYTHON_DOWNLOADS=never`; a program a `uv = true` task names that `uv run` cannot spawn)
+  ends with uv's own code, 2, after uv's message: the runner streams uv's output and 2 is uv's
+  code for its other errors too (the same program with `uv = false` is the runner's exit 3).
+  README's exit codes say so (`test_docs.test_the_manual_says_which_code_uv_s_missing_requirements_end_with`).
 - Ctrl+C waits for the running child (section 5.3): a child that ignores SIGINT keeps the
   runner waiting (Ctrl+\ ends both; closing the terminal passes SIGHUP on), as with `uv run`.
   Windows: a closed stdout pipe is `OSError` EINVAL there, so `./deploy help | more` quitting
@@ -4184,8 +4617,9 @@ Behaviour:
 - `./deploy lock` re-locks without applying `[preset.*]`: after a `[preset.raylib] package`
   switch it moves `no-build-package` to the new name and keeps the old dependency until
   `./deploy apply` runs (every mismatch hint names apply). A `[preset.flet] version` edit that
-  is not applied yet shows only in `doctor` (`cmd_apply.pending`): `render.auto` and the
-  pre-commit hook compare the managed block, where flet leaves no trace.
+  is not applied yet is missed only by `render.auto`, which compares the managed block, where
+  flet leaves no trace: `doctor` and the pre-commit hook report it (`cmd_apply.pending`, which
+  `hooks.check_lock` asks too).
 - Without a trusted `applied` record (lost: a `state.json` merge conflict whose sides disagree
   on it, resolved with `./deploy render`; a deleted file) apply reads the options applied last
   back from the managed block (`cmd_apply._block_options`: raylib's `no-build-package`) and the
@@ -4218,6 +4652,12 @@ Behaviour:
   arguments cmd.exe would change (6.1); PowerShell drops a bare `--`; xonsh `-c` exits 1 on any failing command
   (the child's real code is in its `CalledProcessError`).
 - `uv build` drops a `.gitignore` into `dist/<n>-<b>-wheel/`.
+- A Flet app built as a pyz, a wheel or a portable folder with `runtime = "system"` carries no
+  Flet client: its first start downloads ~40 MB from GitHub (`FLET_CLIENT_URL`: a mirror), so it
+  needs the network once (README troubleshooting). They run on a Python of the user's machine,
+  whatever its OS: one client per OS would weigh 40-90 MB each (a CI pyz merges three). exe,
+  nuitka and a bundled portable folder carry it; on Linux the build machine's (glibc bracket and
+  flavor), so they need that glibc or newer, as the nuitka binary does anyway.
 - A project inside a bigger git repository (supported: `new` skips `git init`, the hook finds
   the repository top) still gets its generated CI at `<project>/.github/workflows/ci.yml`, which
   GitHub never runs (it reads `<top>/.github/workflows/` only), and whose steps expect the
@@ -4300,9 +4740,11 @@ Code coupling (rename together):
   `.pytemplate/tests/test_no_spanish.py` by path (it needs `offending_lines`, `ALLOWED_PATHS`,
   `BINARY_SUFFIXES`, and only `pytest.mark` at module level); `rename` calls the private
   `config._build`, `config._decode`, `config._string_end` (with `config._ScanError`, for
-  `_toml_strings`), `presets._norm_name` and, lazily, `cmd_env._is_link`; `cmd_apply` calls the
+  `_toml_strings`), `presets._norm_name` and, lazily, `cmd_env._is_link` and
+  `cmd_apply._other_package`; `cmd_apply` calls the
   private `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311`,
-  `rename._plan_pyproject`, `render._holds_python` and `render._read_state`; `rename` and
+  `rename._plan_pyproject`, `render._holds_python` and `render._read_state`, and
+  `cmd_mode._precheck_py311` that same `render._holds_python`; `rename` and
   `cmd_env` import `cmd_apply` lazily (it imports both at module level).
 - Which path a `compile.modules` entry names is decided once, by `config.import_path`
   (`config.compiled_paths`): `mypyc.compiled_sources`, the pyright strict list,
@@ -4315,9 +4757,12 @@ Code coupling (rename together):
   `config`); `config._check_preset_tables` reads `preset.toml` `[options]` itself, like
   `config._presets` mirrors `presets.available`; `render.managed_block` needs `pypy_minor`
   (PyPy's environment) and `min_python` (requires-python) to stay distinct.
-- `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`;
+- `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`, and
+  `e2e.rmtree` lazily `cmd_env._is_link`;
   `cmd_mode._work_tree_top` calls the private `presets._git_env` (the same git environment as
   `presets._git_init`, whose "inside a work tree" rule it mirrors for `new`);
+  `nvimtest.selftest` imports `e2e.termination_as_interrupt`, `isolate_git` and
+  `hidden_template_repository` lazily (one rule for both harnesses);
   `e2e.flet_build_reason` imports `methods.flet._developer_mode`, and its Flutter size and the
   flet method's docstring follow the manual (`test_docs.test_the_runner_gives_the_manuals_flutter_size`);
   `upx.uses` imports `methods.flet.MOBILE_WEB` lazily (`methods.flet` imports `upx`);
@@ -4327,6 +4772,8 @@ Code coupling (rename together):
   `render.managed_block` wrote with `presets.uv_extras` (`str.format_map`, reversed by
   `cmd_apply._unformat`): a template with a format spec or conversion is never read back.
 - `RULES_RE` / `tasks.parse_line` <-> `ui.error`, `ui.warn`, `str(lintc.Finding)` (5.3).
+- `common.ABI_RE`/`abi_tag` <-> the pyz bootstrap's own copies (`templates/pyz/__main__.py` is
+  standalone; `test_abi_tags_agree_with_the_bootstrap`).
 - mypyc internals mirrored by the runner (checked by `test_mypyc_core` against the locked
   mypy): `lintc.NATIVE_CLASS_DECORATORS` <-> mypyc's native decorators;
   `lintc.relative_file_at_import` <-> when mypyc builds no shared lib; `mypyc.remove_stale_extensions`
