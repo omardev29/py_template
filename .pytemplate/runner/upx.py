@@ -17,7 +17,10 @@ How each method uses it:
     DLLs and Qt plugins, and always adds --lzma. The level goes in the UPX environment
     variable, which upx reads as default options. Windows only: PyInstaller disables UPX on
     every other OS, so there the exe is not packed (exe.size_args warns).
-  - nuitka: Nuitka's upx plugin (it always uses --best --lzma).
+  - nuitka: a standalone folder goes through pack_tree() when it is done, like portable and
+    flet (Nuitka's upx plugin has no exclude option: it packed every DLL it copied); a onefile
+    binary through Nuitka's upx plugin (always --best --lzma), which leaves the libraries inside
+    its payload alone, unless the binary's own name is excluded.
   - portable and flet: pack_tree() on the finished folder.
 Never used: pyz (the zip is already deflated) and wheel.
 
@@ -109,6 +112,13 @@ def env_value(cfg: Config) -> str:
 
 def excludes(cfg: Config) -> list[str]:
     return [*BUILTIN_EXCLUDE, *cfg.deploy.upx.exclude]
+
+
+def excluded(cfg: Config, name: str) -> bool:
+    """Whether a file of this name is never packed: BUILTIN_EXCLUDE and deploy.upx.exclude, as
+    case-insensitive globs."""
+    lower = name.lower()
+    return any(fnmatch.fnmatch(lower, p.lower()) for p in excludes(cfg))
 
 
 def _cache_dir() -> Path:
@@ -247,14 +257,11 @@ class Result:
 
 def candidates(root: Path, cfg: Config) -> list[Path]:
     """Return the files under `root` UPX may pack (PE files on Windows, ELF executables on Linux)."""
-    patterns = [p.lower() for p in excludes(cfg)]
     out: list[Path] = []
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.is_symlink():
+        if not path.is_file() or path.is_symlink() or excluded(cfg, path.name):
             continue
         name = path.name.lower()
-        if any(fnmatch.fnmatch(name, p) for p in patterns):
-            continue
         if IS_WINDOWS:
             if path.suffix.lower() in PE_SUFFIXES:
                 out.append(path)

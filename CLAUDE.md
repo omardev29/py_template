@@ -2061,7 +2061,8 @@ Per method:
   FATAL on a module it cannot locate, e.g. a platform-guarded `import winreg`),
   `--python-flag=no_asserts/no_docstrings` from the shared `deploy.optimize` (an owner
   decision: no Nuitka-only switch), `--nofollow-import-to` per `deploy.exclude_modules`, the upx
-  plugin when enabled, then `nuitka.optimization_args` BEFORE `deploy.nuitka.extra_args` and the
+  plugin for a onefile build with UPX on (a standalone folder is packed afterwards, `upx.pack_tree`:
+  "Size and UPX" below), then `nuitka.optimization_args` BEFORE `deploy.nuitka.extra_args` and the
   command line (Nuitka takes the last value, so an `--lto` there still wins): always
   `--lto=<deploy.nuitka.lto>`, default `auto`, which Nuitka 4.2.2 resolves to yes for uv's
   python-build-standalone on Linux, Windows (MSVC) and macOS, BUT off when more than 250 modules
@@ -2153,10 +2154,13 @@ Per method:
   reusing another level), Windows only: PyInstaller's `configure.get_config` turns UPX off on
   every other OS (packed `.so` files crash), so there `exe.size_args` passes `--noupx`,
   downloads nothing and warns that the exe is not packed (never set `PYINSTALLER_FORCE_UPX`);
-  nuitka = its upx plugin (hard-codes `--best --lzma`, ignores our
-  excludes: it packed `python314.dll` and the app still ran); portable (before the smoke test,
-  so the packed `.pyd` files are what it loads) and flet = `upx.pack_tree` (PE `.exe/.dll/.pyd`
-  on Windows, ELF executables but no `.so` on Linux, in parallel). Never packed: files over
+  nuitka onefile = its upx plugin (hard-codes `--best --lzma`; it packs the one binary, and the
+  libraries inside the zstd payload never; left out when `upx.excluded` names the binary);
+  nuitka standalone (once `main.dist` is in `dist/`), portable (before the smoke test, so the
+  packed `.pyd` files are what it loads) and flet = `upx.pack_tree` (PE `.exe/.dll/.pyd` on
+  Windows, ELF executables but no `.so` on Linux, in parallel; the level and every exclude
+  apply): the plugin has no exclude option and packed every DLL of a standalone folder,
+  `python314.dll` and `deploy.upx.exclude` included. Never packed: files over
   `MAX_INPUT` (600 MiB; UPX refuses 768 MiB), `BUILTIN_EXCLUDE` (C runtime, API sets,
   `python3*.dll`, `libpython3*`, and `flutter_windows.dll`: a packed Flutter engine hangs the
   app at startup with a 4 MB working set and no window, measured), binaries UPX rejects
@@ -3698,6 +3702,12 @@ Nuitka:
   POSIX standalone builds when `app.name.lower() == pkg` (`nuitka.build`, 10). Test:
   `test_build_methods.py::test_nuitka_standalone_binary_never_clashes_with_the_package`. Goes:
   when Nuitka reports or avoids the clash.
+- **Its upx plugin has no exclude option** (LIMITATION): in a standalone build it packs every DLL
+  it copies (only `vcruntime140*` is skipped), `python3*.dll` and the files of
+  `deploy.upx.exclude` (a DLL that packing breaks) included. Fix: a standalone folder goes
+  through `upx.pack_tree` once it is in `dist/`; onefile keeps the plugin, which packs only the
+  binary, unless `upx.excluded` names it (`nuitka.build`, 10). Test:
+  `test_build_methods.py::test_nuitka_upx_honours_the_excludes`. Goes: never.
 - **Python support lags** (LIMITATION): 4.2.2 stops with FATAL on 3.15 and only warns on later
   minors, then fails obscurely in the C compile. Fix: `nuitka.NUITKA_PYTHON`,
   `nuitka.check_python` (10). Test:

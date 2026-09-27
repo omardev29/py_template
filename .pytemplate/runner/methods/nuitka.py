@@ -334,9 +334,16 @@ def build(req: BuildRequest) -> Path:
     if cfg.deploy.exe.icon and IS_WINDOWS:
         argv.append(f"--windows-icon-from-ico={ROOT / cfg.deploy.exe.icon}")
     argv += [f"--nofollow-import-to={m}" for m in cfg.deploy.exclude_modules]
-    if upx.active(cfg):
-        # Nuitka's plugin packs each binary with --best --lzma (deploy.upx.level does not apply)
-        argv += ["--plugin-enable=upx", f"--upx-binary={upx.find(cfg)}"]
+    use_upx = upx.active(cfg)
+    if use_upx and onefile:
+        # onefile: Nuitka's plugin packs the one binary (--best --lzma: deploy.upx.level does not
+        # apply); the libraries inside its zstd payload are never packed. A standalone folder is
+        # packed when it is done (pack_tree, below): the plugin packed every DLL it copied, the
+        # Python DLL and deploy.upx.exclude included (it has no exclude option)
+        if upx.excluded(cfg, exe_name):
+            ui.info(f"  upx: {exe_name} matches deploy.upx.exclude: not packed")
+        else:
+            argv += ["--plugin-enable=upx", f"--upx-binary={upx.find(cfg)}"]
     if cfg.app.preset == "flet":
         # flet loads its controls lazily (module __getattr__ + importlib), which Nuitka cannot
         # follow; and the flet-desktop wheel has no Flutter client: bundle the release archive
@@ -394,5 +401,7 @@ def build(req: BuildRequest) -> Path:
     if dist_dir is None:
         raise DeployError(f"nuitka finished without producing a *.dist folder in {work}")
     shutil.move(str(dist_dir), str(out))
+    if use_upx:
+        upx.pack_tree(cfg, out)  # BUILTIN_EXCLUDE, deploy.upx.exclude and the level apply, as for portable
     ui.info(f"  run: {rel(out / exe_name)}")
     return out

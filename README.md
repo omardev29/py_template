@@ -964,9 +964,10 @@ Size settings (each method ignores what does not apply to it):
 slower; `exclude` adds file-name globs. The exe method uses PyInstaller's own UPX step, on
 Windows only (PyInstaller turns UPX off on other systems, where packed `.so` files crash: the
 build warns that the exe is not packed); every binary is packed before bundling, also in
-onefile mode, and PyInstaller always uses LZMA and skips Control Flow Guard DLLs. Nuitka uses its
-upx plugin (always `--best --lzma`), and the portable and flet builds are packed when they are
-done (the portable smoke test then loads the packed modules). Never packed: files over 600 MiB
+onefile mode, and PyInstaller always uses LZMA and skips Control Flow Guard DLLs. A Nuitka
+standalone folder and the portable and flet builds are packed when they are done (the portable
+smoke test then loads the packed modules); a Nuitka onefile binary goes through Nuitka's upx
+plugin (always `--best --lzma`), which packs that one file and never the libraries inside it. Never packed: files over 600 MiB
 (UPX refuses anything over 768 MiB), binaries UPX rejects (Control Flow Guard), the C runtime,
 `python3*.dll`, `libpython3*` and `flutter_windows.dll` (a packed Flutter engine hangs the app at
 startup). UPX 5.2.1 is downloaded once (SHA-256 checked) to `%LOCALAPPDATA%\pytemplate\tools`

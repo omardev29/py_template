@@ -490,7 +490,9 @@ def test_nuitka_argv_follows_the_config(sandbox: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(envs, "uv", fake)
     monkeypatch.setattr(upx, "active", lambda cfg: True)
     monkeypatch.setattr(upx, "find", lambda cfg: Path("/opt/upx/upx"))
-    nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app, extra=["--report=r.xml"]))
+    packed: list[Path] = []
+    monkeypatch.setattr(upx, "pack_tree", lambda cfg, root: packed.append(root) or [])
+    out = nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app, extra=["--report=r.xml"]))
     argv = fake.argv
     stage = sandbox / "build" / "nuitka-stage" / "cpython"
     # -P: the stage (the cwd) is not on Nuitka's own sys.path, so an app named nuitka never runs instead
@@ -505,9 +507,51 @@ def test_nuitka_argv_follows_the_config(sandbox: Path, monkeypatch: pytest.Monke
     assert f"--windows-icon-from-ico={ROOT / 'art' / 'app.ico'}" in argv
     assert "--include-data-dir=assets=assets" in argv  # relative to the stage: Nuitka splits a path at ',' and '='
     assert not any(str(stage) in str(a) for a in argv if str(a).startswith("--include-data"))
-    assert "--plugin-enable=upx" in argv and f"--upx-binary={Path('/opt/upx/upx')}" in argv
+    # a standalone folder is packed when it is done (the excludes apply), never by Nuitka's plugin
+    assert "--plugin-enable=upx" not in argv and packed == [out]
     assert argv[-2:] == ["--lto=no", "--report=r.xml"]  # extra_args, then the command line
     assert not [a for a in argv if a.startswith("--include-module=")]  # cpython: Nuitka follows the imports
+
+
+def test_nuitka_upx_honours_the_excludes(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # Nuitka's upx plugin has no exclude option: in a standalone folder it packed every DLL it
+    # copied, the Python DLL and the files of deploy.upx.exclude (a DLL UPX breaks) included
+    cfg = make({"deploy": {"upx": {"enabled": True, "exclude": ["mylib*.dll"]}}})
+    app = _nuitka_app(sandbox / "payload", cfg.pkg)
+    fake = FakeNuitka(cfg.pkg)
+
+    def nuitka_with_dlls(env: object, argv: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        done = fake(env, argv, **kw)
+        dist = sandbox / "build" / "nuitka" / "cpython" / "main.dist"
+        if dist.is_dir():
+            for name in ("python314.dll", "vcruntime140.dll", "mylib_core.dll", "libssl-3.dll"):
+                (dist / name).write_bytes(b"MZ")
+        return done
+
+    monkeypatch.setattr(envs, "uv", nuitka_with_dlls)
+    monkeypatch.setattr(nuitka, "IS_WINDOWS", True)
+    monkeypatch.setattr(upx, "IS_WINDOWS", True)
+    monkeypatch.setattr(upx, "active", lambda cfg: True)
+    monkeypatch.setattr(upx, "find", lambda cfg: Path("/opt/upx/upx"))
+    packed: list[str] = []
+
+    def pack_file(binary: Path, path: Path, flags: list[str]) -> upx.Result:
+        packed.append(path.name)
+        return upx.Result(path, 2, 1, "packed")
+
+    monkeypatch.setattr(upx, "pack_file", pack_file)
+    nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
+    assert "--plugin-enable=upx" not in fake.argv
+    assert sorted(packed) == ["libssl-3.dll", "myapp.exe"]  # never python3*.dll, the C runtime or mylib*
+    # onefile: the plugin packs the one binary (the libraries inside its payload never)...
+    packed.clear()
+    nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app, onefile=True))
+    assert "--plugin-enable=upx" in fake.argv and f"--upx-binary={Path('/opt/upx/upx')}" in fake.argv and packed == []
+    # ...unless its own name is excluded
+    cfg = make({"deploy": {"upx": {"enabled": True, "exclude": ["MyApp*"]}}})
+    nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app, onefile=True))
+    assert "--plugin-enable=upx" not in fake.argv and packed == []
+    assert "myapp.exe matches deploy.upx.exclude: not packed" in capsys.readouterr().err
 
 
 def test_nuitka_includable_drops_what_the_build_env_cannot_locate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
