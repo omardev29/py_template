@@ -726,6 +726,25 @@ def test_doctor_names_who_runs_the_runner(monkeypatch: pytest.MonkeyPatch) -> No
     assert lines[0][1] == "this run was started by: nu"
 
 
+@pytest.mark.parametrize(("windows", "wsl"), [(False, False), (False, True), (True, False)])
+def test_doctor_prints_the_shell_step_only_with_something_under_it(
+    windows: bool, wsl: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """On plain Linux and macOS `==> shell` was followed at once by the next step's header."""
+    monkeypatch.setattr(shells, "IS_WINDOWS", windows)
+    monkeypatch.setattr(shells, "IS_WSL", wsl)
+    monkeypatch.setattr(shells, "_git_modes", lambda names: {})
+    monkeypatch.setattr(shells, "_ps_policies", lambda: [])
+    lines: list[str] = []
+    shells.doctor(lambda ok, label, hint: lines.append(label))
+    err = capsys.readouterr().err
+    if windows or wsl:
+        assert "==> shell" in err
+    else:
+        assert "==> shell" not in err and "==> launchers" in err, err
+    assert ("WSL on a Windows checkout" in " ".join(lines)) == wsl
+
+
 def test_launcher_problems() -> None:
     good_sh = b"#!/bin/sh\nexec uv run\n"
     assert shells.launcher_problems("deploy", good_sh, "100755") == []

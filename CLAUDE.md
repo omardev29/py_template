@@ -572,8 +572,9 @@ header rules (with detector tests proving each rule fires).
 - `shells.doctor(check)` (from `./deploy doctor`): step "launchers": the launcher that started
   the run, then `deploy` (`#!/bin/sh`, LF, ASCII, git mode 100755, exec bit on POSIX),
   `deploy.cmd` (CRLF, ASCII) and `deploy.ps1` (LF, ASCII, no BOM; a mode other than 100755 is
-  only a note), each problem with the command that fixes it. Step "shell" (Windows): `bash` =
-  WSL stub note, the execution policy of 5.1 and 7; WSL info.
+  only a note), each problem with the command that fixes it. Step "shell" (printed only on
+  Windows and in WSL, the only places it has lines): `bash` = WSL stub note, the execution
+  policy of 5.1 and 7; WSL info.
 
 ## 5. Runner architecture
 

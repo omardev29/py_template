@@ -187,6 +187,8 @@ def doctor(check: Check) -> None:
     ui.step("launchers")
     _check_launchers(check)
 
+    if not (IS_WINDOWS or IS_WSL):
+        return  # the shell checks are Windows' (the bash stub, execution policies) and WSL's
     ui.step("shell")
     if IS_WINDOWS:
         bash = shutil.which("bash") or ""
