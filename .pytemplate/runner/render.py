@@ -542,7 +542,8 @@ def apply(cfg: Config, *, force: bool = False, check: bool = False, show_diff: b
         changed.append(path)
         if not check:
             if path == ".python-version" and target.is_file():
-                # the launchers follow it: a version uv cannot provide locked every command out
+                # uv run by hand and the editors follow it: never a version uv cannot provide
+                # (the project's commands need that CPython anyway: cli._restart)
                 envs.ensure_python(content.strip())
             _write(path, target, content)
             new_state[path] = new_hash

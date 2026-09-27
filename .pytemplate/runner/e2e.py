@@ -65,7 +65,11 @@ MARKER = ".pytemplate-e2e"  # in the base dir: only a dir carrying it is ever wi
 # runner's own environment or interpreter, or leak the outer launcher's state (PYTEMPLATE_*).
 # Every GIT_* goes too (the GIT_DIR/GIT_INDEX_FILE of a hook the suite runs from, a user's
 # GIT_CONFIG_*): isolate_git sets the ones the children get.
-SCRUBBED = frozenset({"VIRTUAL_ENV", "UV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "PYTHONHOME", "PYTHONPATH"})
+# (UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON: uv refuses them next to the --python-preference of
+# the launchers' uv call, which the launchers drop them for)
+SCRUBBED = frozenset(
+    {"VIRTUAL_ENV", "UV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "UV_MANAGED_PYTHON", "UV_NO_MANAGED_PYTHON", "PYTHONHOME", "PYTHONPATH"}
+)
 SCRUBBED_PREFIXES = ("PYTEMPLATE_", "GIT_")
 
 # Seconds per step kind (builds: per method). Generous: the first run downloads interpreters,
@@ -832,8 +836,8 @@ def call(argv: Sequence[str], cwd: Path, env: Mapping[str, str], log: Path, time
 
 
 def runner_argv(uv: str, root: Path, args: Sequence[str]) -> list[str]:
-    """./pyt ARGS of the project at `root`, the way its launchers run it."""
-    return [uv, "run", "--quiet", "--script", str(root / ".pytemplate" / "pyt.py"), *args]
+    """./pyt ARGS of the project at `root`, the way its launchers run it (proc.runner_argv)."""
+    return proc.runner_argv(uv, root, args)
 
 
 def _log_note(log: Path, text: str) -> None:

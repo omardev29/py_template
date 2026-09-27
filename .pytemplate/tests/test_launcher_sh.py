@@ -165,7 +165,9 @@ LINT_RULES = [
     # (An arithmetic expansion, _pt_n=$((_pt_n + 1)), runs no command.)
     (r"^(?!.*\|\|).*\b_pt_\w+=\$\((?!\()", "a command substitution needs `|| _pt_x=` (a caller's set -e)"),
 ]
-PREFIX_ONLY = {"IFS", "MSYS_NO_PATHCONV", "MSYS2_ARG_CONV_EXCL", "UV_PYTHON", "PYTHONHOME", "PYTHONPATH", "UV_WORKING_DIR"}  # only as `NAME=value command`
+PREFIX_ONLY = {
+    "IFS", "MSYS_NO_PATHCONV", "MSYS2_ARG_CONV_EXCL", "UV_PYTHON", "UV_MANAGED_PYTHON", "UV_NO_MANAGED_PYTHON", "PYTHONHOME", "PYTHONPATH", "UV_WORKING_DIR",
+}  # only as `NAME=value command`
 EXPORTED = {"PYTEMPLATE_CALLER_CWD", "PYTEMPLATE_LAUNCHER", "PYTEMPLATE_GLOBAL"}
 FUNCTION = re.compile(r"^\s*([A-Za-z_]\w*)\s*\(\)\s*\{")
 
@@ -865,8 +867,9 @@ def test_in_process_run_leaves_no_name_behind(name: str, case: str, tmp_path: Pa
     report = (
         "printf 'LEFT:'; set | grep '^_pt_' | tr '\\n' ' '; printf '\\n'; "
         f"for f in {' '.join(FUNCTIONS)}; do if command -v \"$f\" >/dev/null 2>&1; then printf 'FUNC:%s\\n' \"$f\"; fi; done; "
-        "printf 'VARS:%s|%s|%s|%s|%s|%s|%s\\n' \"${PYTEMPLATE_LAUNCHER-unset}\" \"${PYTEMPLATE_CALLER_CWD-unset}\" "
-        "\"${PYTEMPLATE_GLOBAL-unset}\" \"${UV_PYTHON-unset}\" \"${PYTHONHOME-unset}\" \"${PYTHONPATH-unset}\" \"${UV_WORKING_DIR-unset}\""
+        "printf 'VARS:%s|%s|%s|%s|%s|%s|%s|%s|%s\\n' \"${PYTEMPLATE_LAUNCHER-unset}\" \"${PYTEMPLATE_CALLER_CWD-unset}\" "
+        "\"${PYTEMPLATE_GLOBAL-unset}\" \"${UV_PYTHON-unset}\" \"${PYTHONHOME-unset}\" \"${PYTHONPATH-unset}\" \"${UV_WORKING_DIR-unset}\" "
+        "\"${UV_MANAGED_PYTHON-unset}\" \"${UV_NO_MANAGED_PYTHON-unset}\""
     )
     ptcmd = f"trap {q(report)} EXIT; set -- __probe {code} 0 x; . {q(str(launcher))}"
     run = Run([*argv, "-c", 'eval "$PTCMD"'], cwd, {**env, "PTCMD": ptcmd})
@@ -917,13 +920,17 @@ def test_launcher_clears_the_callers_uv_python(tmp_path: Path) -> None:
 
 def _python_traps(tmp: Path) -> dict[str, str]:
     """What a caller may export that breaks the Python uv starts the runner on (a PYTHONHOME
-    without a stdlib, a PYTHONPATH module shadowing one the runner imports) or moves the folder
-    uv starts it in (UV_WORKING_DIR)."""
+    without a stdlib, a PYTHONPATH module shadowing one the runner imports), moves the folder
+    uv starts it in (UV_WORKING_DIR), or stops uv itself: UV_MANAGED_PYTHON and
+    UV_NO_MANAGED_PYTHON next to the launchers' --python-preference ("cannot be used with")."""
     shadow = tmp / "shadow"
     shadow.mkdir(exist_ok=True)
     (shadow / "tomllib.py").write_text('raise SystemExit("shadowed tomllib")\n', encoding="utf-8")
     (tmp / "elsewhere").mkdir(exist_ok=True)
-    return {"PYTHONHOME": str(tmp / "no-home"), "PYTHONPATH": str(shadow), "UV_WORKING_DIR": str(tmp / "elsewhere")}
+    return {
+        "PYTHONHOME": str(tmp / "no-home"), "PYTHONPATH": str(shadow), "UV_WORKING_DIR": str(tmp / "elsewhere"),
+        "UV_MANAGED_PYTHON": "1", "UV_NO_MANAGED_PYTHON": "1",
+    }  # fmt: skip
 
 
 @needs_posix
@@ -994,6 +1001,53 @@ def test_runner_runs_on_python_cpython_whatever_the_caller_pins(launcher: str, t
     assert run.rc == 0 and run.probe, run.out + run.err
     assert run.probe["argv"] == ["x"] and Path(str(run.probe["root"])) == ROOT
     assert str(run.probe["python"]).startswith(pinned + "."), (run.probe["python"], pinned)
+
+
+# --- the Python the runner starts on (project.launcher_python) --------------------------------------
+
+
+def _request_of(argv: list[str | Path], project: Path, tmp: Path) -> str:
+    """The --python= request a launcher gives uv (a fake uv that prints its arguments)."""
+    fake = tmp / "fake-uv"
+    fake.write_text('#!/bin/sh\nfor a in "$@"; do printf \'ARG:%s\\n\' "$a"; done\n', encoding="ascii")
+    fake.chmod(0o755)
+    run = Run([*argv, "help"], project, _clean_env(UV=str(fake)))
+    args = [ln[4:] for ln in run.out.splitlines() if ln.startswith("ARG:")]
+    assert run.rc == 0 and args[:2] == ["run", "--quiet"] and args[2].startswith("--python="), run.out + run.err
+    assert args[3:6] == ["--python-preference", "managed", "--script"], args
+    return args[2].removeprefix("--python=")
+
+
+@needs_posix
+@pytest.mark.parametrize("launcher", ["pyt", "pyt.ps1"])
+def test_the_runner_starts_on_python_cpython_once_the_project_has_an_environment(launcher: str, tmp_path: Path) -> None:
+    """The launchers make the --python= request of project.launcher_python: none (an empty
+    value) while the project has an environment, so uv follows .python-version (python.cpython)
+    as it always did; else ">=3.11", any CPython 3.11 or newer, where the runner moves the
+    commands that need python.cpython onto it. The environment counts when its interpreter is
+    there: .venv-wsl too (WSL on a Windows checkout), never a dangling link (its Python is gone)."""
+    sys.path.insert(0, str(ROOT / ".pytemplate"))
+    from runner import project as runner_project
+
+    proj = _copy_project(tmp_path / "p")
+    shutil.copyfile(ROOT / "pyt.ps1", proj / "pyt.ps1")
+    argv: list[str | Path] = ["/bin/sh", proj / "pyt"] if launcher == "pyt" else [_pwsh(), "-NoProfile", "-NonInteractive", "-File", proj / "pyt.ps1"]
+    venv, wsl = proj / ".venv" / "bin" / "python", proj / ".venv-wsl" / "bin" / "python"
+
+    def expect(request: str) -> None:
+        assert _request_of(argv, proj, tmp_path) == request == runner_project.launcher_python(proj)
+
+    expect(">=3.11")
+    venv.parent.mkdir(parents=True)
+    venv.symlink_to(tmp_path / "gone" / "python")  # dangling
+    expect(">=3.11")
+    venv.unlink()
+    venv.symlink_to(sys.executable)
+    expect("")
+    venv.unlink()
+    wsl.parent.mkdir(parents=True)
+    wsl.symlink_to(sys.executable)
+    expect("")
 
 
 # --- the Windows-only helpers are plain sh: run them in every POSIX shell ---------------------------
@@ -1280,7 +1334,7 @@ def test_install_prompt_through_a_terminal(launcher: str, answer: str, tmp_path:
     argv: list[str | Path] = ["/bin/sh", LAUNCHER, "help"] if launcher == "pyt" else [_pwsh(), "-NoProfile", "-File", ROOT / "pyt.ps1", "help"]
     rc, out = _pty_run(argv, env, None if answer == "CI" else answer.encode() + b"\r")
     if answer == "y":
-        assert rc == 0 and "installer ran" in out and "FAKEUV run --quiet --script" in out, out
+        assert rc == 0 and "installer ran" in out and re.search(r"FAKEUV run --quiet --python=\S* --python-preference managed --script ", out), out
         assert out.rstrip().endswith("help"), out
     else:
         assert rc == 127 and "installer ran" not in out and "curl -LsSf" in out and "brew install uv" in out, out

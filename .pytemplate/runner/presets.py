@@ -1315,8 +1315,21 @@ def _set_description(text: str, description: str) -> str:
         return text
 
 
-def new(dest: Path, preset: str, name: str | None) -> None:
-    """`./pyt new`: copy the template to `dest` and run `init` in the copy.
+def preset_python(preset: str) -> str:
+    """python.cpython of a new project of `preset`: its skeleton's pytemplate.toml says it (the
+    field's default without one). `new` makes sure uv has it (the new project's lock needs it)."""
+    from . import config
+
+    data = _read_toml(PRESETS / preset / "files" / "pytemplate.toml", f"preset {preset}: files/pytemplate.toml")
+    table = data.get("python")
+    version = table.get("cpython", config.PythonConfig.cpython) if isinstance(table, dict) else config.PythonConfig.cpython
+    return str(version)
+
+
+def new(dest: Path, preset: str, name: str | None, python: Path | None = None) -> None:
+    """`./pyt new`: copy the template to `dest` and run `init` in the copy, on `python` (the
+    preset's python.cpython, which the caller made sure uv has: envs.ensure_python), else on the
+    Python the launchers would pick there.
 
     When anything fails (a name uv refuses, no network, Ctrl+C...), what this call created is
     removed: the folder and the parents it had to create, or only its content when it existed
@@ -1338,12 +1351,11 @@ def new(dest: Path, preset: str, name: str | None) -> None:
     try:
         copy_template(dest)
         _make_own(dest, preset, app_name)
-        pyt_py = dest / ".pytemplate" / "pyt.py"
         loud = ["-q"] if ui.QUIET else ["-v"] if ui.VERBOSE else []  # the copy's runner, as quiet as this one
         # --no-render: init renders every generated file itself (force=True); render.auto first
         # warned about the source's hand-edited ones, which the new project never had
         init = ["--no-render", "__init", preset, "--name", app_name, "--force"]
-        proc.run([proc.find_uv(), "run", "--quiet", "--script", pyt_py, *loud, *init], cwd=dest)
+        proc.run(proc.runner_argv(proc.find_uv(), dest, [*loud, *init], python=python), cwd=dest)
     except BaseException as e:
         if top is not None:
             left = [] if _remove(top) else [str(top)]

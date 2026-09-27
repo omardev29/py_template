@@ -82,17 +82,27 @@ set "PYTEMPLATE_LAUNCHER_FILE=%~f0"
 rem The installed template runs in its global mode; a project's runner never
 rem does (an empty value removes the variable).
 set "PYTEMPLATE_GLOBAL=%PT_GLOBAL%"
-rem The runner runs on the project's Python (.python-version next to it), in
-rem the caller's folder: a UV_PYTHON of the caller must not choose that Python,
-rem a PYTHONHOME or PYTHONPATH must not break it, a UV_WORKING_DIR must not
-rem move it (setlocal keeps this local).
+rem The Python the runner starts on. While the project has an environment,
+rem the one uv reads from .python-version (python.cpython, which that
+rem environment was made with), as always: --python= with no value is no
+rem request. Else any CPython 3.11 or newer that uv finds; the runner moves
+rem the commands that need python.cpython onto it itself.
+set "PT_PY=>=3.11"
+if exist "%PT_ROOT%.venv\Scripts\python.exe" set "PT_PY="
+rem The runner starts on that Python, in the caller's folder: a UV_PYTHON of
+rem the caller must not choose another one, a UV_MANAGED_PYTHON or
+rem UV_NO_MANAGED_PYTHON must not stop uv (it refuses them next to
+rem --python-preference), a PYTHONHOME or PYTHONPATH must not break it, a
+rem UV_WORKING_DIR must not move it (setlocal keeps this local).
 set "UV_PYTHON="
+set "UV_MANAGED_PYTHON="
+set "UV_NO_MANAGED_PYTHON="
 set "PYTHONHOME="
 set "PYTHONPATH="
 set "UV_WORKING_DIR="
 rem cmd expands the whole line before running it: the helper variables are
 rem cleared for the runner while uv still gets their values.
-set "PT_ROOT=" & set "PT_UV=" & set "PT_ENTRY=" & set "PT_GLOBAL=" & "%PT_UV%" run --quiet --script "%PT_ROOT%.pytemplate\%PT_ENTRY%" %*
+set "PT_ROOT=" & set "PT_UV=" & set "PT_ENTRY=" & set "PT_GLOBAL=" & set "PT_PY=" & "%PT_UV%" run --quiet "--python=%PT_PY%" --python-preference managed --script "%PT_ROOT%.pytemplate\%PT_ENTRY%" %*
 exit /b %ERRORLEVEL%
 
 :no_root

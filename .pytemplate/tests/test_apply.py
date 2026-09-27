@@ -175,6 +175,8 @@ class FakeUv:
             return subprocess.CompletedProcess(["uv", *argv], 0, "", "")
         code = 0
         pyproject = self.root / "pyproject.toml"
+        if argv[:2] == ["python", "find"]:  # envs.find_cpython: every CPython is installed here
+            return subprocess.CompletedProcess(["uv", *argv], 0, f"/uv/cpython-{argv[-1]}/bin/python{argv[-1]}\n", "")
         if argv[:2] == ["lock", "--check"]:
             code = 1 if "lock" in self.fail or pyproject.read_bytes() != self.locked else 0
         elif argv[0] in self.fail:
@@ -998,7 +1000,7 @@ def test_commands_table() -> None:
         assert (command.render, command.group, command.usage) == (False, "Environment", "[--force]")
     assert cli.COMMANDS["apply"].module == "cmd_apply" and cli.COMMANDS["setup"].func == "cmd_setup"
     assert cli.COMMANDS["rename"].render is False  # rename renders at the end, never before its checks
-    assert "cmd_apply.doctor(cfg, check)" in inspect.getsource(cmd_env._project)  # doctor's project steps
+    assert "cmd_apply.doctor(cfg, check)" in inspect.getsource(cmd_env._project_files)  # doctor's project steps
 
 
 @pytest.mark.parametrize(
@@ -1312,7 +1314,7 @@ def test_the_mismatch_hints_name_apply(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(render, "apply", lambda cfg, **kw: ([], []))
     assert cmd_mode.cmd_render(_cfg("raylib"), ["--check"]) == 1
     assert "does not match pytemplate.toml: ./pyt apply" in capsys.readouterr().err
-    assert '"pyproject.toml matches pytemplate.toml", "./pyt apply"' in inspect.getsource(cmd_env._project)
+    assert '"pyproject.toml matches pytemplate.toml", "./pyt apply"' in inspect.getsource(cmd_env._project_files)
 
 
 # --- the git hook ------------------------------------------------------------------------------------

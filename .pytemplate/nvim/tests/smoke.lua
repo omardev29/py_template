@@ -153,7 +153,9 @@ check("pyt argv never uses 'shell'", function()
   local cmd = pt.pyt_cmd({ "help" })
   assert(pt.uv(), "uv not found by the plugin")
   assert(cmd[1] == pt.uv() and vim.fn.executable(cmd[1]) == 1, vim.inspect(cmd))
-  assert(cmd[2] == "run" and cmd[4] == "--script" and cmd[#cmd] == "help", vim.inspect(cmd))
+  assert(cmd[2] == "run" and cmd[5] == "--python-preference" and cmd[7] == "--script", vim.inspect(cmd))
+  -- the project has its .venv (synced above): no request, uv follows its .python-version
+  assert(pt.tool("python") and cmd[4] == "--python=" and cmd[#cmd] == "help", vim.inspect(cmd))
   local saved = { vim.o.shell, vim.o.shellcmdflag }
   local ok, err = pcall(function()
     for _, sh in ipairs({ "xonsh", "niu", "/nonexistent/sh" }) do

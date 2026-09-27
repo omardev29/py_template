@@ -57,7 +57,7 @@ SMOKE_TYPING = "strict"
 
 # The inner ./pyt runs as if typed in a fresh shell: nothing from this runner's own
 # `uv run --script` environment, nor from a shell's stale PYTEMPLATE_* exports.
-RUNNER_DROP = frozenset({"VIRTUAL_ENV", "UV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON"})
+RUNNER_DROP = frozenset({"VIRTUAL_ENV", "UV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "UV_MANAGED_PYTHON", "UV_NO_MANAGED_PYTHON"})
 # Anything that could make Neovim read the user's own config, data or server.
 NVIM_DROP = frozenset({"NVIM", "NVIM_APPNAME", "NVIM_LISTEN_ADDRESS", "NVIM_LOG_FILE", "VIMINIT", "EXINIT", "MYVIMRC", "MYGVIMRC"})
 XDG_HOMES = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")
@@ -554,7 +554,7 @@ def run_preset(
     def pyt(script_root: Path, cwd: Path, *args: str | Path) -> None:
         ui.command("./pyt " + proc.show([str(a) for a in args]))
         _step(
-            [uv, "run", "--quiet", "--script", script_root / ".pytemplate" / "pyt.py", *args],
+            proc.runner_argv(uv, script_root, args),
             cwd=cwd, env=renv, log=logs / f"{args[0]}.log", timeout=STEP_TIMEOUT, what=f"./pyt {args[0]} ({preset})",
         )
 

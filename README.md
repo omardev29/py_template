@@ -45,8 +45,12 @@ Measured on the maintainer's machine (Windows 11, CPython 3.14.7, PyPy 7.3.23, m
   `pipx upgrade uv`, `winget upgrade astral-sh.uv`, `scoop update uv`). When uv is missing, the
   launchers print how to install it; `pyt` and `pyt.ps1` also offer to run the official
   installer in an interactive terminal (never when `CI` is set).
-- No Python installation is needed: uv downloads the interpreters (`python.cpython`,
-  `python.pypy`). The runner itself runs on the project's CPython, which must be 3.11 or newer.
+- No Python installation is needed: uv downloads the interpreters the project uses
+  (`python.cpython`, `python.pypy`) the first time a command needs them (CPython: about 30 MB).
+  The project's commands run on the CPython of `python.cpython` that uv installs, never on
+  another Python of the machine, even one of the same version: a platform without uv-managed
+  CPython builds, such as Android (Termux), runs `help`, `doctor`, `install` and `uninstall`
+  only ([Where pyt runs](#where-pyt-runs)).
 - A C compiler for the `mypyc` backend (every preset supports it): MSVC Build Tools on Windows
   (`./pyt doctor` prints the `winget` command), gcc or clang on Linux, the Xcode Command Line
   Tools on macOS (`xcode-select --install`).
@@ -57,6 +61,37 @@ Measured on the maintainer's machine (Windows 11, CPython 3.14.7, PyPy 7.3.23, m
 - The Neovim integration needs Neovim 0.11.2 or newer with LazyVim.
 - Network access for the first `./pyt setup` (interpreters and packages) and whenever
   `uv.lock` is re-locked.
+
+### Where pyt runs
+
+`./pyt` starts in two steps. Once the project has its environment (`.venv`), the launchers
+(and the Neovim plugin) let uv start the runner on `python.cpython`, the version
+`.python-version` names; while it has none yet, on any CPython 3.11 or newer that uv finds: one
+uv installed, else one of the machine (a distribution's `python3`, Termux's `python`). `help`,
+`doctor`, `install` and `uninstall` run on that Python. Every other command runs on `python.cpython`: started on another Python, the runner
+starts itself again on it (`./pyt -v` shows that command line), after uv installs it when it is
+missing (once, about 30 MB, only into uv's own folder: no `python3.14` on PATH, no registry
+entry). `new` installs the new project's `python.cpython` the same way before it copies
+anything: the new project's `uv.lock` is made with it.
+
+So the project's commands need a platform uv has CPython builds for: Windows (x86_64, x86,
+ARM64), macOS (Apple silicon, Intel) and Linux with glibc (x86_64, aarch64, armv7, ppc64le,
+riscv64, s390x) or musl (x86_64, aarch64); `uv python list --only-downloads` lists what uv can
+install on a machine. On a platform without them, such as Android (Termux), FreeBSD and the other
+BSDs, `help`, `doctor`, `install` and `uninstall` still run on the Python there (3.11 or newer),
+`doctor` shows the one problem, and every other command, `new` included, stops before it changes
+anything (exit 3):
+
+```
+error: python.cpython = "3.14": uv installs no CPython on this platform (Android (linux aarch64)).
+  The project's commands run on the CPython of python.cpython, which uv installs: here pyt
+  runs help, doctor, install and uninstall only, on any Python 3.11 or newer.
+  Work on the project on Windows, macOS or Linux (README: "Where pyt runs")
+```
+
+A Python of the machine never runs the project's commands, not even at the right version: the
+environments, `uv.lock` and the builds are made with the CPython uv manages, the same one on
+every machine and CI runner.
 
 What a user of the finished program needs depends on the build method. An `exe`, `nuitka`,
 `flet` or bundled `portable` build carries its own Python and dependencies, and runs only on the
@@ -340,9 +375,10 @@ and uv's environment selection (`UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PROJE
 `UV_NO_PROJECT`, `UV_WORKING_DIR`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`, `UV_ISOLATED`,
 `UV_NO_DEV`, `UV_NO_DEFAULT_GROUPS`, `UV_NO_GROUP`, `UV_NO_SYNC`): its tools always run in the project's
 environments. uv's resolution settings (indexes, `UV_EXCLUDE_NEWER`, `UV_RESOLUTION`,
-`UV_PRERELEASE`) and its cache pass through. The runner itself starts on the project's Python
-in the folder where the command was typed: the launchers remove `UV_PYTHON`, `PYTHONHOME`,
-`PYTHONPATH` and `UV_WORKING_DIR` before uv starts it.
+`UV_PRERELEASE`) and its cache pass through. The runner itself starts on the Python the
+launchers ask uv for ([Where pyt runs](#where-pyt-runs)), in the folder where the command was
+typed: the launchers remove `UV_PYTHON`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`,
+`PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` before uv starts it.
 
 ### Custom tasks
 
@@ -536,7 +572,7 @@ file must be UTF-8 (a BOM is fine); `schema = 1` is the layout this runner reads
 | `app.assets` | `""` (raylib, flet: `"assets"`) | `"assets"` bundles `src/assets/` with the app, `""` bundles nothing (no other name) |
 | `backend.active` | `"cpython"` (raylib: `"pypy"`) | the backend of `run`, `test`, `check` and `build` when none is given |
 | `backend.supported` | `["cpython", "mypyc"]` (raylib: all three) | the environments, `uv.lock` and the CI matrix |
-| `python.cpython` | `"3.14"` | the CPython minor version (uv picks the patch); the runner runs on it too |
+| `python.cpython` | `"3.14"` | the CPython minor version (uv picks the patch), 3.11 or newer; the project's commands run on it ([Where pyt runs](#where-pyt-runs)) |
 | `python.pypy` | `"pypy@3.11.15"` | the exact PyPy version ([PyPy](#pypy)) |
 | `typing.profile` | `"auto"` | `auto` (`mypyc` on the mypyc backend, else `typing.relaxed`), `mypyc`, `strict`, `warn` or `off` |
 | `typing.relaxed` | `"off"` | what `auto` means on cpython and pypy: `off`, `warn` or `strict` |
@@ -1291,9 +1327,10 @@ into Neovim:
   commands that change the mode or the name (`mode`, `apply`, `setup`, `sync`, `lock`, `add`,
   `remove`, `render`, `rename`) refresh the editor.
 
-The plugin runs `uv run --quiet --script .pytemplate/pyt.py ARGS` as a list of arguments:
-Neovim's `'shell'` (xonsh, niubash...) is never used. Without uv it runs the launcher
-(`/bin/sh pyt`, or `pyt.cmd` on Windows), which prints how to install uv.
+The plugin runs `./pyt` as the launchers do ([Where pyt runs](#where-pyt-runs)):
+`uv run --quiet --python=REQUEST --python-preference managed --script .pytemplate/pyt.py ARGS`,
+as a list of arguments: Neovim's `'shell'` (xonsh, niubash...) is never used. Without uv it runs the
+launcher (`/bin/sh pyt`, or `pyt.cmd` on Windows), which prints how to install uv.
 
 | Keys | Action | Keys | Action |
 |---|---|---|---|
@@ -1496,7 +1533,8 @@ only deletes files is checked too).
 
 ## Troubleshooting
 
-- **`./pyt doctor`** checks uv, the environments, the C compiler, the generated files,
+- **`./pyt doctor`** checks uv, `python.cpython` (installed, or whether uv can install it here),
+  the environments, the C compiler, the generated files,
   `pyproject.toml`, `uv.lock`, the changes `./pyt apply` has not applied yet, the launchers,
   the shell, the git hook and Neovim, each problem with the command that fixes it. It exits 1
   when a line is `[XX]` (a C compiler is required whenever mypyc is supported).
@@ -1518,13 +1556,26 @@ only deletes files is checked too).
 - **uv settings of your own**: the runner overrides uv's environment selection for its calls
   ([Output, exit codes and environment](#output-exit-codes-and-environment)). A `UV_EXCLUDE_NEWER`,
   `UV_RESOLUTION` or `UV_PRERELEASE` that disagrees with `uv.lock` makes `uv run --locked` fail:
-  unset it for the project. The launchers need the Python of `.python-version` (`python.cpython`):
-  with `UV_NO_MANAGED_PYTHON`, `UV_PYTHON_PREFERENCE=only-system` or `UV_PYTHON_DOWNLOADS=never`
-  set, unset them or run `uv python install <python.cpython>`.
-- **`python.cpython = "3.41": uv can neither find nor install this CPython`**: a typo in
-  `python.cpython`, or a new minor while offline. `./pyt` rewrites `.python-version` (which the
-  launchers follow) only once uv has that CPython, so it still starts: fix the value in
-  `pytemplate.toml`, or reconnect.
+  unset it for the project. `UV_NO_MANAGED_PYTHON`, `UV_MANAGED_PYTHON` and
+  `UV_PYTHON_PREFERENCE` never choose the runner's Python ([Where pyt runs](#where-pyt-runs)).
+- **`python.cpython = "3.14": uv installs no CPython on this platform`** (exit 3, from every
+  command but `help`, `doctor`, `install` and `uninstall`): uv has no CPython builds for this
+  machine at all (Android/Termux, FreeBSD and the other BSDs), and the project's commands run on
+  the one uv installs; a Python of the machine is not used, even at that version. Work on the
+  project on Windows, macOS or Linux ([Where pyt runs](#where-pyt-runs)).
+- **`python.cpython = "3.14": uv has no CPython 3.14 for this platform`**: uv has other versions
+  here (`uv python list --only-downloads`): set `python.cpython` to one of them and run
+  `./pyt apply`, or work on the project on another machine.
+- **`python.cpython = "3.41": uv knows no CPython 3.41 for any platform`**: a typo in
+  `python.cpython`: fix it in `pytemplate.toml` (`help`, `doctor`, `install` and `uninstall`
+  still run).
+- **`python.cpython = "3.14": uv could not install CPython 3.14`** (uv says why just above): uv
+  downloads it once, about 30 MB. Check the network (behind a proxy uv needs `HTTPS_PROXY`), or
+  install it by hand with `uv python install 3.14`. With `UV_PYTHON_DOWNLOADS=never`, or
+  `python-downloads = "never"` in a `uv.toml`, uv installs no Python at all: set it to `manual`.
+- **"runner needs Python 3.11 or newer, but uv started Python 3.10"**: a `UV_PYTHON`
+  set for a `uv run` by hand, or a `.venv` made by hand with an older Python (the launchers start
+  the runner on the Python of `.venv`): delete `.venv` (`./pyt setup` makes it again).
 - **PyPy: "No interpreter found for PyPy 3.11.15 in managed installations"** after a uv update: that
   uv no longer downloads the pinned PyPy. Pick a version from
   `uv python list --only-downloads --all-versions pypy`, set `python.pypy`, and run

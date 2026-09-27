@@ -11,10 +11,10 @@ import subprocess
 import sys
 import threading
 from collections.abc import Iterator, Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from . import ui
-from .project import IS_WINDOWS, ROOT, rel
+from .project import IS_WINDOWS, ROOT, launcher_python, rel
 from .ui import PytError
 
 DRY_RUN = False
@@ -115,10 +115,7 @@ def base_env() -> dict[str, str]:
     env = dict(os.environ)
     for key in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH", "PYTEMPLATE_GLOBAL", *UV_SELECTION):
         env.pop(key, None)
-    parts = [p for p in env.get("PATH", "").split(os.pathsep) if p]
-    if sys.prefix != sys.base_prefix:
-        own = os.path.normcase(str(Path(sys.prefix) / ("Scripts" if IS_WINDOWS else "bin")))
-        parts = [p for p in parts if os.path.normcase(p) != own]
+    parts = _without_own_bin(env.get("PATH", ""))
     if IS_WINDOWS:
         vs = vs_installer_dir()
         if vs and os.path.normcase(str(vs)) not in {os.path.normcase(p) for p in parts}:
@@ -128,9 +125,41 @@ def base_env() -> dict[str, str]:
     return env
 
 
+def _without_own_bin(path: str) -> list[str]:
+    """The entries of a PATH value, without the bin/ (Scripts/) of the virtual environment this
+    runner runs in (the one `uv run --script` made for it and put first on PATH)."""
+    parts = [p for p in path.split(os.pathsep) if p]
+    if sys.prefix != sys.base_prefix:
+        own = os.path.normcase(str(Path(sys.prefix) / ("Scripts" if IS_WINDOWS else "bin")))
+        parts = [p for p in parts if os.path.normcase(p) != own]
+    return parts
+
+
+def runner_env() -> dict[str, str]:
+    """The environment of a second runner process (cli._restart): this runner's own, as the
+    launcher handed it over, without the virtual environment `uv run --script` made for this one
+    (VIRTUAL_ENV, its bin/ on PATH), which is no environment of the other's."""
+    env = dict(os.environ)
+    env.pop("VIRTUAL_ENV", None)
+    env["PATH"] = os.pathsep.join(_without_own_bin(env.get("PATH", "")))
+    return env
+
+
+def runner_argv(uv: str, root: Path, args: Sequence[str | Path], python: str | Path | None = None) -> list[str]:
+    """`./pyt ARGS` of the project at `root` as its launchers run it (CLAUDE.md 4.1): uv run
+    --script with the launchers' --python= request (project.launcher_python: empty, so uv follows
+    .python-version, while the project has an environment, else any CPython 3.11 or newer), or
+    `python` itself. `--python-preference managed` wins over the project's only-managed: a system
+    CPython serves where uv has none to download. The environment must hold no UV_MANAGED_PYTHON
+    nor UV_NO_MANAGED_PYTHON (uv refuses them next to that option): base_env drops them."""
+    request = str(python) if python is not None else launcher_python(root)
+    entry = root / ".pytemplate" / "pyt.py"
+    return [uv, "run", "--quiet", f"--python={request}", "--python-preference", "managed", "--script", str(entry), *map(str, args)]
+
+
 def show(argv: Sequence[str | Path]) -> str:
     """The command line for display (never for running it): paths inside the project relative
-    to it, a program outside it by its bare name (uv.exe -> uv)."""
+    to it, a program outside it by its bare name (uv.exe -> uv; python3.14 stays python3.14)."""
     out: list[str] = []
     for i, a in enumerate(argv):
         s = str(a)
@@ -139,7 +168,8 @@ def show(argv: Sequence[str | Path]) -> str:
                 s = Path(s).relative_to(ROOT).as_posix()
             except ValueError:
                 if i == 0:
-                    s = Path(s).stem
+                    name = PurePath(s).name
+                    s = PurePath(s).stem if name.lower().endswith((".exe", ".cmd", ".bat", ".com")) else name
         out.append(s if s and not any(c in s for c in " \t\"'&|<>^;") else shlex.quote(s))
     return " ".join(out)
 

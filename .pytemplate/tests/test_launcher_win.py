@@ -48,8 +48,9 @@ PS_ARGS = [
 ]  # fmt: skip
 QUOTES = ("'", "\u2018", "\u2019", "\u201a", "\u201b")  # what PowerShell reads as a single quote
 # What the launchers keep from the runner's start: the caller's interpreter choice, a PYTHONHOME or
-# PYTHONPATH that breaks the runner's Python, and the folder uv would move to.
-CLEARED = {"UV_PYTHON", "PYTHONHOME", "PYTHONPATH", "UV_WORKING_DIR"}
+# PYTHONPATH that breaks the runner's Python, the folder uv would move to, and the flags uv refuses
+# next to the launchers' --python-preference.
+CLEARED = {"UV_PYTHON", "PYTHONHOME", "PYTHONPATH", "UV_WORKING_DIR", "UV_MANAGED_PYTHON", "UV_NO_MANAGED_PYTHON"}
 
 
 def _ps_literal(s: str) -> str:
@@ -98,7 +99,7 @@ def test_cmd_has_no_blocks_and_no_delayed_expansion() -> None:
 
 def test_cmd_forwards_arguments_only_on_the_uv_line() -> None:
     lines = [line for line in _text_lines(CMD) if "%*" in line]
-    assert len(lines) == 1 and "run --quiet --script" in lines[0], lines
+    assert len(lines) == 1 and 'run --quiet "--python=%PT_PY%" --python-preference managed --script' in lines[0], lines
     assert not [line for line in _text_lines(CMD) if re.match(r"(?i)\s*rem\b", line) and "%" in line], (
         "cmd expands % even on rem lines"
     )
@@ -144,6 +145,26 @@ def test_ps1_has_no_param_block_and_leaves_path_alone() -> None:
     assert not re.search(r"(?im)^\s*(param\s*\(|\[CmdletBinding)", text), "a param() block turns -v, -h, -q into parameters"
     assert not re.search(r"(?i)\$env:path\s*\+?=(?!=)", text)
     assert not re.search(r"(?i)SetEnvironmentVariable\(\s*['\"]path['\"]|(Set|New|Remove)-Item\s+\S*env:path\b", text)
+
+
+def test_every_launcher_starts_the_runner_on_the_same_python() -> None:
+    """pyt, pyt.cmd, pyt.ps1 and the Neovim plugin start the runner the same way (CLAUDE.md 4.1):
+    `uv run --python=REQUEST --python-preference managed --script`, where REQUEST is empty (no
+    request: uv follows .python-version) while the project has an environment (.venv, or
+    .venv-wsl on POSIX), else ">=3.11" (project.launcher_python; test_launcher_sh runs pyt and
+    pyt.ps1 against it). One word, --python=: Windows PowerShell 5.1 drops an empty argument."""
+    sh = (ROOT / "pyt").read_text(encoding="ascii")
+    cmd = CMD.read_bytes().decode("ascii")
+    ps1 = PS1.read_text(encoding="ascii")
+    lua = (ROOT / ".pytemplate" / "nvim" / "lua" / "pytemplate" / "init.lua").read_text(encoding="utf-8")
+    for name, text in (("pyt", sh), ("pyt.cmd", cmd), ("pyt.ps1", ps1), ("init.lua", lua)):
+        assert ">=3.11" in text and "--python-preference" in text and "managed" in text, name
+    assert "_pt_py='>=3.11'" in sh and '"--python=$_pt_py" --python-preference managed --script' in sh
+    assert ".venv/Scripts/python.exe" in sh and ".venv-wsl/bin/python" in sh and ".venv/bin/python" in sh
+    assert 'set "PT_PY=>=3.11"' in cmd and 'if exist "%PT_ROOT%.venv\\Scripts\\python.exe" set "PT_PY="\r\n' in cmd
+    assert "'.venv\\Scripts\\python.exe'" in ps1 and "'.venv-wsl/bin/python', '.venv/bin/python'" in ps1
+    assert "'--python-preference', 'managed'" in ps1 and ps1.count('"--python=$python"') == 3 and "$python = ''" in ps1
+    assert 'M.tool("python") and "" or ">=3.11"' in lua and '"--python=" .. python' in lua
 
 
 def test_ps1_restores_every_variable_it_sets() -> None:
@@ -529,14 +550,15 @@ def test_cmd_hands_the_runner_only_its_own_variables(tmp_path: Path) -> None:
 @windows_only
 def test_cmd_clears_the_callers_uv_python(tmp_path: Path) -> None:
     """A UV_PYTHON (here a missing interpreter, which uv would refuse) never picks the runner's
-    Python; a PYTHONHOME or PYTHONPATH never breaks it, a UV_WORKING_DIR never moves it."""
+    Python; a PYTHONHOME or PYTHONPATH never breaks it, a UV_WORKING_DIR never moves it, and a
+    UV_MANAGED_PYTHON or UV_NO_MANAGED_PYTHON never stops uv (refused next to --python-preference)."""
     shadow = tmp_path / "shadow"
     shadow.mkdir()
     (shadow / "tomllib.py").write_text('raise SystemExit("shadowed tomllib")\n', encoding="utf-8")
     (tmp_path / "elsewhere").mkdir()
     env = _clean_env(
         UV_PYTHON=str(tmp_path / "no" / "python.exe"), PYTHONHOME=str(tmp_path / "no-home"), PYTHONPATH=str(shadow),
-        UV_WORKING_DIR=str(tmp_path / "elsewhere"),
+        UV_WORKING_DIR=str(tmp_path / "elsewhere"), UV_MANAGED_PYTHON="1", UV_NO_MANAGED_PYTHON="1",
     )  # fmt: skip
     r = _run([str(CMD), "__probe", "0", "0", "x"], SUB, env)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -907,7 +929,10 @@ def test_ps1_clears_the_callers_uv_python_and_restores_it(name: str, tmp_path: P
     shadow.mkdir()
     (shadow / "tomllib.py").write_text('raise SystemExit("shadowed tomllib")\n', encoding="utf-8")
     (tmp_path / "elsewhere").mkdir()
-    values = {"UV_PYTHON": missing, "PYTHONHOME": str(tmp_path / "no-home"), "PYTHONPATH": str(shadow), "UV_WORKING_DIR": str(tmp_path / "elsewhere")}
+    values = {
+        "UV_PYTHON": missing, "PYTHONHOME": str(tmp_path / "no-home"), "PYTHONPATH": str(shadow), "UV_WORKING_DIR": str(tmp_path / "elsewhere"),
+        "UV_MANAGED_PYTHON": "1", "UV_NO_MANAGED_PYTHON": "1",
+    }  # fmt: skip
     assert set(values) == CLEARED
     body = "\n".join([
         *[f"$env:{k} = {_ps_literal(v)}" for k, v in values.items()],

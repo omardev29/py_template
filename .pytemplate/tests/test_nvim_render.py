@@ -284,6 +284,17 @@ check(":Pyt", vim.fn.exists(":Pyt") == 2, "missing")
 check("keymap", vim.fn.maparg("<leader>jr", "n") ~= "", "missing <leader>jr")
 local cmd = pt.pyt_cmd({ "help" })
 check("pyt argv", cmd[#cmd] == "help" and (cmd[2] == "run" or #cmd == 2), vim.inspect(cmd))
+-- the Python the runner starts on, as the launchers pick it: no request (uv follows .python-version)
+-- while the project has an environment, else any 3.11+
+if cmd[2] == "run" then
+  local want = "--python=" .. (pt.tool("python") and "" or ">=3.11")
+  check(
+    "pyt argv python",
+    cmd[3] == "--quiet" and cmd[4] == want and cmd[5] == "--python-preference" and cmd[6] == "managed"
+      and cmd[7] == "--script",
+    vim.inspect(cmd)
+  )
+end
 local bad = pt.sanitize({ schema = 1, backend = { active = "x", supported = { "calc.exe" } }, envs = { tools = "C:/w" } })
 check("sanitize", bad.backend.active == "cpython" and bad.envs.tools == ".venv", vim.inspect(bad))
 local p = require("pytemplate.tasks").parse_line
@@ -318,11 +329,14 @@ end
 
 -- the runner never runs on the caller's UV_PYTHON, PYTHONHOME, PYTHONPATH (uv and Python read an
 -- empty one as unset) nor in its UV_WORKING_DIR (uv refuses an empty one: "." is the job's folder),
--- and never in global mode (a PYTEMPLATE_GLOBAL=1 Neovim inherited: "needs a project" for every task)
+-- its UV_MANAGED_PYTHON / UV_NO_MANAGED_PYTHON never stop uv (refused next to --python-preference,
+-- and empty: "false" is an unset flag), and never in global mode (a PYTEMPLATE_GLOBAL=1 Neovim
+-- inherited: "needs a project" for every task)
 local denv = pt.pyt_env({ X = "1" })
 check(
   "pyt env",
   denv.UV_PYTHON == "" and denv.PYTHONHOME == "" and denv.PYTHONPATH == "" and denv.UV_WORKING_DIR == "."
+    and denv.UV_MANAGED_PYTHON == "false" and denv.UV_NO_MANAGED_PYTHON == "false"
     and denv.PYTEMPLATE_GLOBAL == "" and denv.PYTEMPLATE_LAUNCHER == "nvim" and denv.X == "1",
   vim.inspect(denv)
 )

@@ -2005,3 +2005,221 @@ def test_librt_is_forbidden_only_while_pypy_is_supported(tmp_path: Path, monkeyp
     pyproject.write_text('[project]\nname = "x"\ndependencies = ["librt>=0.15"]\n', encoding="utf-8")
     monkeypatch.setattr(lintc, "PYPROJECT", pyproject)
     assert not [f for f in lintc.lint_file(make({}), module) if "librt" in f.message]
+
+
+# --- the Python the commands run on: cli._restart (CLAUDE.md 5.2) --------------------------------
+
+
+def _toml(monkeypatch: pytest.MonkeyPatch, text: str | Exception) -> None:
+    """pytemplate.toml as _python_needed reads it (config.read_text)."""
+
+    def read() -> str:
+        if isinstance(text, Exception):
+            raise text
+        return text
+
+    monkeypatch.setattr(config, "read_text", read)
+
+
+PROJECT_TOML = '[python]\ncpython = "3.14"\n\n[tasks.ci]\ncmd = ["x"]\n\n[tasks.install]\ncmd = ["y"]\n'
+
+
+@pytest.mark.parametrize(
+    ("line", "needs"),
+    [
+        ([], None),
+        (["help", "run"], None),
+        (["doctor"], None),
+        (["new", "d"], None),
+        (["install"], "3.14"),  # the project's [tasks] entry named install: a task
+        (["uninstall"], None),
+        (["__init", "script"], None),
+        (["check", "-h"], None),  # ./pyt help check
+        (["run", "-h"], "3.14"),  # -h goes to the app
+        (["run"], "3.14"),
+        (["tasks"], "3.14"),
+        (["render", "--check"], "3.14"),
+        (["hooks", "run"], "3.14"),
+        (["ci"], "3.14"),  # a [tasks] entry
+        (["bogus"], None),  # dispatch says it is no command, on any Python
+        (["init"], None),
+        (["shell-setup"], None),
+    ],
+)
+def test_the_commands_that_need_python_cpython(monkeypatch: pytest.MonkeyPatch, line: list[str], needs: str | None) -> None:
+    """help, doctor, new, install, uninstall (the builtins) and __init run on the Python the
+    launchers started the runner on; every other command and task runs on python.cpython."""
+    monkeypatch.setattr(cli.project, "GLOBAL", False)
+    _toml(monkeypatch, PROJECT_TOML)
+    assert cli._python_needed(line) == needs
+
+
+@pytest.mark.parametrize(
+    ("text", "needs"),
+    [
+        ('[python]\ncpython = "3.13"\n', "3.13"),
+        ("", "3.14"),  # the field's default
+        ('[python]\npypy = "pypy@3.11.15"\n', "3.14"),
+        ('[python]\ncpython = "3.x"\n', None),  # config.validate names it
+        ('[python]\ncpython = "3.10"\n', None),
+        ('[python]\ncpython = 3.14\n', None),
+        ("python = 3\n", "3.14"),
+        ("[python\n", None),  # not TOML: dispatch says so
+        (PytError("pytemplate.toml is not UTF-8"), None),
+        (OSError("gone"), None),
+    ],
+)
+def test_the_python_cpython_a_command_runs_on(monkeypatch: pytest.MonkeyPatch, text: str | Exception, needs: str | None) -> None:
+    monkeypatch.setattr(cli.project, "GLOBAL", False)
+    _toml(monkeypatch, text)
+    assert cli._python_needed(["run"]) == needs
+
+
+def test_global_mode_never_restarts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Outside a project only help, doctor, new, install and uninstall run: never a restart."""
+    monkeypatch.setattr(cli.project, "GLOBAL", True)
+    _toml(monkeypatch, PROJECT_TOML)
+    assert cli._python_needed(["run"]) is None and cli._python_needed(["new", "x"]) is None
+
+
+def test_started_by_uv_is_the_virtual_environment_of_this_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`uv run --script` starts the runner in a virtual environment of its own and names it in
+    VIRTUAL_ENV. A runner started on a Python by hand, by a test, or by _restart (runner_env drops
+    VIRTUAL_ENV) is not: it runs where it was started, and never restarts twice."""
+    monkeypatch.setattr(cli.sys, "prefix", str(tmp_path / "env"))
+    monkeypatch.setattr(cli.sys, "base_prefix", str(tmp_path / "base"))
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "env"))
+    assert cli._started_by_uv()
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "another"))
+    assert not cli._started_by_uv()
+    monkeypatch.delenv("VIRTUAL_ENV")
+    assert not cli._started_by_uv()
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "env"))
+    monkeypatch.setattr(cli.sys, "base_prefix", str(tmp_path / "env"))  # a base interpreter
+    assert not cli._started_by_uv()
+
+
+class Restart:
+    """cli._restart with uv's start faked: python.cpython 3.99 (never this Python's), and the
+    second runner recorded."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        self.python = tmp_path / "uv" / "cpython-3.99" / "bin" / "python3.99"
+        self.calls: list[tuple[list[str], Path | None, dict[str, str]]] = []
+        self.result: int | BaseException = 7
+        monkeypatch.setattr(cli, "_started_by_uv", lambda: True)
+        monkeypatch.setattr(cli, "_python_needed", lambda rest: "3.99")
+        monkeypatch.setattr(envs, "ensure_python", lambda version: self.python)
+        monkeypatch.setattr(proc, "run", self._run)
+        own_bin = str(Path(sys.prefix) / ("Scripts" if IS_WINDOWS else "bin"))
+        monkeypatch.setenv("PATH", os.pathsep.join([own_bin, str(tmp_path / "tools")]))
+        monkeypatch.setenv("VIRTUAL_ENV", sys.prefix)
+        monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh")
+
+    def _run(self, argv: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        assert kw["echo"] is False and kw["check"] is False  # not skipped by --dry-run: it runs the dry run
+        self.calls.append(([str(a) for a in argv], kw.get("cwd"), dict(kw["env"])))
+        if isinstance(self.result, BaseException):
+            raise self.result
+        return subprocess.CompletedProcess(argv, self.result, None, None)
+
+
+def test_a_command_moves_onto_python_cpython(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The launchers started the runner on another Python: the command runs in a second runner
+    on python.cpython, with the same arguments (global options too), in the same folder, and its
+    exit code is this run's. That runner gets the launcher's variables but no VIRTUAL_ENV (not
+    started by uv: no second restart) and no bin/ of this runner's environment on PATH."""
+    box = Restart(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli.sys, "dont_write_bytecode", False)
+    assert cli._restart(["-v", "run", "a b"], ["run", "a b"]) == 7
+    ((argv, cwd, env),) = box.calls
+    assert argv == [str(box.python), "-s", str(TEMPLATE_DIR / "pyt.py"), "-v", "run", "a b"]
+    assert cwd == Path.cwd()
+    assert "VIRTUAL_ENV" not in env and env["PATH"] == str(tmp_path / "tools") and env["PYTEMPLATE_LAUNCHER"] == "sh"
+    monkeypatch.setattr(cli.sys, "dont_write_bytecode", True)  # python -B: the second runner writes no bytecode either
+    cli._restart(["run"], ["run"])
+    assert box.calls[-1][0][:3] == [str(box.python), "-s", "-B"]
+
+
+@pytest.mark.parametrize(("code", "expected"), [(130, 130), (143, 143), (proc.STATUS_CONTROL_C_EXIT, 130), (0, 0)])
+def test_a_restarted_command_that_was_interrupted_reports_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], code: int, expected: int) -> None:
+    """Ctrl+C (or a SIGTERM passed on) reached the second runner too, which said so: this one only
+    passes its exit code on (no second `error: interrupted`)."""
+    box = Restart(monkeypatch, tmp_path)
+    box.result = proc.Interrupted(code)
+    assert cli._restart(["run"], ["run"]) == expected
+    assert capsys.readouterr().err == ""
+
+
+def test_no_restart_on_python_cpython_nor_for_what_runs_anywhere(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    box = Restart(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_python_needed", lambda rest: "%d.%d" % sys.version_info[:2])  # this very Python
+    assert cli._restart(["run"], ["run"]) is None
+    monkeypatch.setattr(cli, "_python_needed", lambda rest: None)  # help, doctor, new...
+    assert cli._restart(["help"], ["help"]) is None
+    monkeypatch.setattr(cli, "_python_needed", lambda rest: "3.99")
+    monkeypatch.setattr(cli, "_started_by_uv", lambda: False)  # by hand, a test, or already restarted
+    assert cli._restart(["run"], ["run"]) is None
+    assert box.calls == []
+
+
+def test_python_cpython_uv_cannot_install_stops_the_command(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Android/Termux: uv installs no CPython there. The command stops with exit 3 and why,
+    before anything of it ran."""
+    Restart(monkeypatch, tmp_path)
+
+    def unavailable(version: str) -> Path:
+        raise PytError(f'python.cpython = "{version}": uv installs no CPython on this platform (Android (linux aarch64)).', 3)
+
+    monkeypatch.setattr(envs, "ensure_python", unavailable)
+    monkeypatch.setattr(cli, "dispatch", fail)
+    assert cli.main(["run"], entry=True) == 3
+    assert 'python.cpython = "3.99": uv installs no CPython' in capsys.readouterr().err
+
+
+def test_only_the_entry_point_restarts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """.pytemplate/pyt.py runs main(entry=True); a caller in this process (these tests) runs the
+    command on its own Python."""
+    box = Restart(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "dispatch", lambda rest: 5)
+    assert cli.main(["run"]) == 5 and box.calls == []
+    assert cli.main(["run"], entry=True) == 7 and len(box.calls) == 1
+    assert "entry=True" in PYT_PY.read_text(encoding="utf-8")
+
+
+def _another_cpython() -> str:
+    """A uv-managed or system CPython 3.11+ other than python.cpython, for uv's --python."""
+    pinned = config.load(set()).python.cpython
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv not found")
+    for minor in range(11, 20):
+        version = f"3.{minor}"
+        if version == pinned:
+            continue
+        r = subprocess.run([uv, "python", "find", "--system", version], env=child_env(), capture_output=True, text=True, timeout=60, check=False)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip().splitlines()[-1]
+    pytest.skip(f"no CPython 3.11+ but python.cpython {pinned} here")
+
+
+@needs_uv
+def test_a_runner_started_on_another_python_moves_project_commands(tmp_path: Path) -> None:
+    """For real: the launchers let uv start the runner on any CPython 3.11+ (here another one than
+    python.cpython). `help` runs there; `tasks` runs in a second runner on python.cpython, which
+    -v shows, and its output and exit code are this run's."""
+    other = _another_cpython()
+    uv = os.environ.get("UV") or shutil.which("uv")
+    assert uv
+    start = [uv, "run", "--quiet", f"--python={other}", "--python-preference", "managed", "--script", str(PYT_PY)]
+    env = child_env()
+    helped = subprocess.run([*start, "-v", "help"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=300, check=False)
+    assert helped.returncode == 0 and "Development:" in helped.stdout, helped.stderr
+    assert "pyt.py -v help" not in helped.stderr  # no second runner
+    listed = subprocess.run([*start, "-v", "tasks"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=300, check=False)
+    assert listed.returncode == 0, listed.stdout + listed.stderr
+    assert re.search(r"\$ python\S* -s .*pyt\.py -v tasks", listed.stderr), listed.stderr  # Windows: python.exe
+    pinned = config.load(set()).python.cpython
+    assert f"python{pinned}" in listed.stderr or IS_WINDOWS, listed.stderr
+    code = subprocess.run([*start, "bogus-command"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=300, check=False)
+    assert code.returncode == 2 and "unknown command: bogus-command" in code.stderr, code.stderr

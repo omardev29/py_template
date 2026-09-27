@@ -274,39 +274,98 @@ def test_sync_with_real_uv_installs_what_the_groups_allow(tmp_path: Path, monkey
     assert env.python.is_file()
 
 
-@pytest.mark.parametrize(("find", "install"), [(0, None), (2, 0), (2, 2)])
-def test_ensure_python_finds_or_installs_the_version_or_says_why(monkeypatch: pytest.MonkeyPatch, find: int, install: int | None) -> None:
+@pytest.mark.parametrize(("find", "downloads", "install"), [(0, None, None), (2, "here", 0), (2, "here", 2), (2, "nowhere", None)])
+def test_ensure_python_finds_or_installs_the_version_or_says_why(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], find: int, downloads: str | None, install: int | None
+) -> None:
+    """python.cpython's interpreter: found (never a virtual environment's: --system), else
+    installed when uv has a download of it here (without a python3.X link in ~/.local/bin or a
+    registry entry), else a PytError(3) that says why; nothing is installed for a version uv has
+    no download of."""
     seen: list[list[str]] = []
+    installed = [False]
 
     def fake(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
         argv = [str(a) for a in args]
         seen.append(argv)
-        assert env.request == "3.41" and env.preference == "only-managed"
-        code = find if argv[1] == "find" else install
-        return done(argv, code or 0, "", "error: No download found for request: cpython-3.41-linux-x86_64-gnu\n" if code else "")
+        assert env.preference == "only-managed"
+        if argv[1] == "find":
+            ok = find == 0 or installed[0]
+            return done(argv, 0 if ok else 2, "/uv/cpython-3.41/bin/python3.41\n" if ok else "", "" if ok else "error: No interpreter found\n")
+        if argv[1] == "list":
+            here = downloads == "here"
+            return done(argv, 0, "cpython-3.41.0-linux-x86_64-gnu    <download available>\n" if here else "", "")
+        assert kw.get("echo") is False and kw.get("capture") is not True  # uv's progress shows; --dry-run too
+        installed[0] = install == 0
+        return done(argv, install or 0, "", "")
 
     monkeypatch.setattr(envs, "uv", fake)
-    if install == 2:
+    if install == 2 or downloads == "nowhere":
         with pytest.raises(PytError) as e:
             envs.ensure_python("3.41")
-        assert e.value.code == 3 and 'python.cpython = "3.41"' in str(e.value) and "No download found" in str(e.value)
-        assert ".python-version keeps its old value" in str(e.value)
+        assert e.value.code == 3 and 'python.cpython = "3.41"' in str(e.value)
+        if install == 2:
+            assert "could not install CPython 3.41" in str(e.value) and "uv python install 3.41" in str(e.value)
+        else:
+            assert "uv knows no CPython 3.41 for any platform" in str(e.value)
     else:
-        envs.ensure_python("3.41")
-    assert seen == [["python", "find", "3.41"], *([["python", "install", "3.41"]] if find else [])]
+        assert envs.ensure_python("3.41") == Path("/uv/cpython-3.41/bin/python3.41")
+    finds = [a for a in seen if a[1] == "find"]
+    assert finds and all(a == ["python", "find", "--system", "3.41"] for a in finds)
+    installs = [a for a in seen if a[1] == "install"]
+    assert installs == ([["python", "install", "--no-bin", "--no-registry", "3.41"]] if downloads == "here" else [])
+    if installs:
+        assert "uv installs it (once" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("here", "anywhere", "any_cpython", "says"),
+    [
+        (False, False, True, "uv knows no CPython 3.41 for any platform: fix python.cpython"),
+        (False, True, True, "uv has no CPython 3.41 for this platform"),
+        (False, True, False, "uv installs no CPython on this platform"),
+    ],
+)
+def test_no_download_problem_says_why_and_what_runs_here(monkeypatch: pytest.MonkeyPatch, here: bool, anywhere: bool, any_cpython: bool, says: str) -> None:
+    """Android/Termux (uv has no CPython for it at all), a platform that lacks this version, and a
+    version no platform has (a typo) each get their own reason and way out."""
+
+    def downloads(request: str, *, everywhere: bool = False) -> bool:
+        if request == "cpython":
+            return any_cpython
+        return anywhere if everywhere else here
+
+    monkeypatch.setattr(envs, "cpython_downloads", downloads)
+    text = envs.no_download_problem("3.41")
+    assert text.startswith('python.cpython = "3.41": ') and says in text, text
+    if anywhere:
+        assert envs.RUNS_ON_ANY_PYTHON in text and envs.this_platform() in text, text
+
+
+def test_this_platform_names_android(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(envs.sys, "getandroidapilevel", lambda: 24, raising=False)
+    assert envs.this_platform().startswith("Android (")
+    monkeypatch.delattr(envs.sys, "getandroidapilevel")
+    assert not envs.this_platform().startswith("Android")
 
 
 def test_ensure_python_with_real_uv_refuses_a_version_that_does_not_exist(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Real uv, offline: a typo such as 3.41 has no download (uv knows its downloads offline)."""
+    """Real uv, offline: a typo such as 3.41 has no download anywhere (uv knows its downloads
+    offline), so nothing is installed and the error says to fix python.cpython."""
     try:
         proc.find_uv()
     except PytError:
         pytest.skip("uv not found")
     monkeypatch.setenv("UV_OFFLINE", "1")
-    with pytest.raises(PytError, match=r'python\.cpython = "3\.41": uv can neither find nor install') as e:
+    with pytest.raises(PytError, match=r'python\.cpython = "3\.41": uv knows no CPython 3\.41 for any platform') as e:
         envs.ensure_python("3.41")
     assert e.value.code == 3
-    envs.ensure_python("%d.%d" % sys.version_info[:2])  # the runner's own: found, nothing installed
+    here = "%d.%d" % sys.version_info[:2]
+    found = envs.find_cpython(here)
+    if found is None:
+        pytest.skip(f"uv has no managed CPython {here} installed here")
+    assert envs.ensure_python(here) == found  # the runner's own: found, nothing installed
+    assert ".venv" not in found.parts  # uv's own interpreter, never a virtual environment's
 
 
 def test_quiet_hides_uvs_own_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1242,6 +1301,10 @@ class Doctor:
         }
         self.compiler_platforms: list[str] = []
         self.compiler_ccs: list[str] = []
+        # python.cpython: installed at this path (None: not installed), and whether uv can
+        # download it for this platform when it is not
+        self.cpython: Path | None = tmp_path / "uv-python" / "cpython-3.14" / "bin" / "python3.14"
+        self.downloads: bool | None = True
         self.cp = envs.PyEnv("cpython", tmp_path / ".venv", "3.14", "only-managed")
         self.pp = envs.PyEnv("pypy", tmp_path / ".venv-pypy", "pypy@3.11.15", "only-managed")
         for env in (self.cp, self.pp):
@@ -1254,6 +1317,9 @@ class Doctor:
         monkeypatch.setattr(cmd_env.envs, "pypy_env", lambda cfg: self.pp)
         monkeypatch.setattr(cmd_env.envs, "interpreter_info", self._info)
         monkeypatch.setattr(cmd_env.envs, "uv", self._uv)
+        monkeypatch.setattr(cmd_env.envs, "find_cpython", lambda version: self.cpython)
+        monkeypatch.setattr(cmd_env.envs, "cpython_downloads", lambda request, everywhere=False: self.downloads)
+        monkeypatch.setattr(cmd_env.envs, "no_download_problem", lambda version: f"no CPython {version} for this platform")
         monkeypatch.setattr(cmd_env.render, "apply", lambda cfg, **kw: self.render_result)
         monkeypatch.setattr(cmd_env.render, "pyproject_outdated", lambda cfg: False)
         monkeypatch.setattr(cmd_env, "_c_compiler", self._compiler)
@@ -1303,6 +1369,28 @@ def test_doctor_all_good(doctor: Doctor, capsys: pytest.CaptureFixture[str]) -> 
     assert "all good" in capsys.readouterr().err
     assert doctor.line("uv: uv 0.12.19")[0] is True
     assert doctor.compiler_platforms == ["linux-x86_64"]  # the .venv's platform picks the MSVC tools
+
+
+def test_doctor_says_where_python_cpython_is(doctor: Doctor) -> None:
+    """The line about python.cpython, the CPython the project's commands run on: where uv has it,
+    a note while uv can still install it, and the one problem where it cannot (Android/Termux),
+    which also skips the checks that need it (the environments, uv lock --check) instead of
+    failing each of them."""
+    assert cmd_env.cmd_doctor(make(PYPY), []) == 0
+    assert doctor.line("(python.cpython)") == (True, f"CPython 3.14 (python.cpython): {doctor.cpython}", "")
+    doctor.lines.clear()
+    doctor.cpython = None
+    assert cmd_env.cmd_doctor(make(PYPY), []) == 0
+    passed, label, hint = doctor.line("(python.cpython)")
+    assert passed is None and "not installed yet: uv installs it" in label and "uv python install 3.14" in hint
+    doctor.lines.clear()
+    doctor.downloads = False
+    doctor.lock = 2  # never asked: uv lock --check needs python.cpython
+    assert cmd_env.cmd_doctor(make(PYPY), []) == 1
+    assert doctor.problems() == [(False, "CPython 3.14 (python.cpython): uv cannot install it here", "no CPython 3.14 for this platform")]
+    assert doctor.line("environments not checked")[0] is None and doctor.line("uv.lock not checked")[0] is None
+    assert not [line for line in doctor.lines if line[1].startswith(("CPython 3.14.7 in", "PyPy", "C compiler", "uv.lock up to date"))]
+    assert doctor.reached == ["apply", "shells", "hooks", "nvim", "install"] * 3  # the other checks still run
 
 
 def test_doctor_missing_environment(doctor: Doctor, capsys: pytest.CaptureFixture[str]) -> None:

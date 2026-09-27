@@ -197,19 +197,45 @@ implement the same contract: change them together.
    Neovim that inherited it ran every task in global mode, exit 2). `pyt.cmd` also exports
    `PYTEMPLATE_LAUNCHER_FILE`, its own path: cmd reads it again once uv returns, so the runner's
    install and uninstall must know it (section 4.4).
-4. Run `uv run --quiet --script <root>/.pytemplate/pyt.py ARGS...` with argv untouched and
-   propagate its exit code, with the caller's `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and
-   `UV_WORKING_DIR` removed for uv only (`pyt`: `unset` before `exec`, prefix assignments
-   for niubash; `pyt.cmd`: `set "X="` under `setlocal`; `pyt.ps1`: removed and restored
-   like the `PYTEMPLATE_*` pair; plugin: values in the job's environment). Where
-   a value must stand in for "unset" (niubash, plugin), the first three are empty (uv reads
-   an empty `UV_PYTHON` as unset, CPython an empty `PYTHONHOME`/`PYTHONPATH`) and
+4. Run `uv run --quiet --python=REQUEST --python-preference managed --script
+   <root>/.pytemplate/pyt.py ARGS...` with argv untouched and propagate its exit code. REQUEST
+   (`project.launcher_python`, which the launchers mirror: `pyt` `_pt_py`, `pyt.cmd` `PT_PY`,
+   `pyt.ps1` `$python`, plugin `M.tool("python")`) is empty while the project has an
+   environment (its interpreter is there: POSIX `.venv-wsl/bin/python` or `.venv/bin/python`, a
+   link to its base Python that must not dangle; Windows `.venv\Scripts\python.exe`): an empty
+   `--python=` is no request (uv 0.10.12 and 0.12.19, as for an empty `UV_PYTHON`), so uv
+   follows the `.python-version` it finds from the script's folder upward, `python.cpython`, as
+   the launchers always did. Without an environment it is `>=3.11` (`project.ANY_RUNNER_PYTHON`:
+   any CPython 3.11 or newer; a version request never matches PyPy nor a pre-release), where
+   `.python-version` would stop every command on a machine uv has no such CPython for
+   (Android/Termux, the BSDs: section 15.1). `--python-preference managed` overrides the
+   project's `only-managed`: uv then also takes a system CPython. The runner moves the commands
+   that need `python.cpython` onto it itself (`cli._restart`, section 5.2). One word,
+   `--python=`: Windows PowerShell 5.1 drops an empty argument. The environment decides, never
+   `>=3.11` alone: uv reuses the cached environment of a script whenever its interpreter
+   satisfies the request, so the first CPython a machine offered (a distribution's 3.12) stayed
+   the runner's for good, and every command paid a restart; `.python-version` makes uv re-create
+   it on `python.cpython`. Nor the environment's interpreter as a path: on Windows that file is
+   there even when its base Python was uninstalled, and uv stopped every command, `setup`
+   included, on it.
+   The caller's `UV_PYTHON`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`, `PYTHONHOME`,
+   `PYTHONPATH` and `UV_WORKING_DIR` are removed for uv only (`pyt`: `unset` before `exec`,
+   prefix assignments for niubash; `pyt.cmd`: `set "X="` under `setlocal`; `pyt.ps1`: removed
+   and restored like the `PYTEMPLATE_*` pair; plugin: values in the job's environment). Where
+   a value must stand in for "unset" (niubash, plugin), `UV_PYTHON`, `PYTHONHOME` and
+   `PYTHONPATH` are empty (uv reads an empty `UV_PYTHON` as unset, CPython an empty
+   `PYTHONHOME`/`PYTHONPATH`), the two flags are `false` (uv refuses an empty one, "expected a
+   boolish value", and either one set next to `--python-preference`: "cannot be used with") and
    `UV_WORKING_DIR` is `.` (uv refuses an empty one: "a value is required for '--directory'").
-   The runner then always runs on the project's Python, started cleanly (a `PYTHONHOME` made
+   The runner then always starts on the Python chosen here, started cleanly (a `PYTHONHOME` made
    every command die with `Failed to import encodings module`, a `PYTHONPATH` could shadow the
    stdlib), in the caller's folder (`UV_WORKING_DIR` moved it, and `new DIR` or `pyz-merge`
    paths with it) (section 5.2); its own tools never used them anyway (`proc.base_env`).
-   Launchers never `cd`; besides the uv search and the install hints they contain no logic.
+   `proc.runner_argv` builds the same call for the runner's own starts of a runner (`new`'s
+   `__init`, `selftest --e2e` and `--nvim`). Launchers never `cd`; besides the uv search, the
+   install hints and the choice of REQUEST they contain no logic
+   (`test_launcher_sh.test_the_runner_starts_on_python_cpython_once_the_project_has_an_environment`,
+   `test_launcher_win.test_every_launcher_starts_the_runner_on_the_same_python`).
 
 Every launcher carries a `pytemplate-launcher:` line in its header (`#`, `rem` in `pyt.cmd`):
 `./pyt install` overwrites, and `uninstall` removes, only a file of uv's tool bin folder that
@@ -652,13 +678,13 @@ header rules (with detector tests proving each rule fires).
 
 | Module | Responsibility |
 |---|---|
-| `pyt.py` (one level up) | Stops with exit 3 and one `error:` line (no traceback) when uv started it on Python < 3.11 (a `uv run` by hand with an old `UV_PYTHON`), BEFORE importing the runner; reconfigures stdout/stderr to UTF-8; in global mode (the same rule as `project.detect_global`) sends the bytecode cache of the runner's modules to `<user cache>/pytemplate/pycache` (`sys.pycache_prefix`; `_user_cache`: `LOCALAPPDATA`, an absolute `XDG_CACHE_HOME`, `~/.cache`; none: `sys.dont_write_bytecode`), so nothing is written into the installed template; puts its own dir on `sys.path`, calls `runner.cli.main`. |
-| `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `FORWARDS` / `HELP_PASSES_THROUGH` (section 5.2); `INTERNAL` (routes listed nowhere: `__init`); global mode: `GLOBAL_COMMANDS`, `GLOBAL_SUMMARIES`, `_dispatch_outside_a_project`, `_outside_a_project`/`_unknown_outside`/`INIT_OUTSIDE` (the exit-2 messages), `_help_outside_a_project`, `_prog`. `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main`/`_main` (exception -> exit code, closed stdout), `cmd_help` (commands and `[tasks]` entries), `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
+| `pyt.py` (one level up) | Stops with exit 3 and one `error:` line (no traceback) when uv started it on Python < 3.11 (a `uv run` by hand with an old `UV_PYTHON`, a `.venv` made by hand with an older Python), BEFORE importing the runner; reconfigures stdout/stderr to UTF-8; in global mode (the same rule as `project.detect_global`) sends the bytecode cache of the runner's modules to `<user cache>/pytemplate/pycache` (`sys.pycache_prefix`; `_user_cache`: `LOCALAPPDATA`, an absolute `XDG_CACHE_HOME`, `~/.cache`; none: `sys.dont_write_bytecode`), so nothing is written into the installed template; puts its own dir on `sys.path`, calls `runner.cli.main(argv, entry=True)` (the restart on `python.cpython`, section 5.2). |
+| `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `FORWARDS` / `HELP_PASSES_THROUGH` (section 5.2); `INTERNAL` (routes listed nowhere: `__init`); global mode: `GLOBAL_COMMANDS`, `GLOBAL_SUMMARIES`, `_dispatch_outside_a_project`, `_outside_a_project`/`_unknown_outside`/`INIT_OUTSIDE` (the exit-2 messages), `_help_outside_a_project`, `_prog`. `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main`/`_main` (exception -> exit code, closed stdout), the restart on `python.cpython` (`RUNS_ON_ANY_PYTHON`, `_started_by_uv`, `_python_needed`, `_restart`: section 5.2), `cmd_help` (commands and `[tasks]` entries), `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
 | `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths` (`import_path`), comment-preserving editor `set_value` / `update_file` (section 6.1), its TOML statement scanner `scan` (render reads pyproject.toml with it, 6.3), `toml_value`. |
-| `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `GLOBAL` (`detect_global`, `INSTALL_RECORD`: section 5.2), `IS_WINDOWS/IS_MACOS/IS_WSL` (`detect_wsl`: `wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`, `scratch_name` and `check_private_dir` (the harnesses' scratch folders), `write_whole` (a file rewritten through a temporary file and `os.replace`, never half-written, owner and hard links kept: `_give_owner`, `_write_in_place`). |
+| `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `GLOBAL` (`detect_global`, `INSTALL_RECORD`: section 5.2), `IS_WINDOWS/IS_MACOS/IS_WSL` (`detect_wsl`: `wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `launcher_python`/`ANY_RUNNER_PYTHON` (the Python the launchers start the runner on: section 4.1), `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`, `scratch_name` and `check_private_dir` (the harnesses' scratch folders), `write_whole` (a file rewritten through a temporary file and `os.replace`, never half-written, owner and hard links kept: `_give_owner`, `_write_in_place`). |
 | `ui.py` | All runner output to stderr; `PytError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
-| `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`, no `PYTEMPLATE_GLOBAL`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C and passes SIGTERM/SIGHUP on), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`. |
-| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (every group but those `left_out` names), `interpreter_info` (with `platform` and `cc`); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
+| `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`, no `PYTEMPLATE_GLOBAL`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C and passes SIGTERM/SIGHUP on), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`; a second runner: `runner_argv` (the launchers' uv call), `runner_env` (cli._restart's). |
+| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (every group but those `left_out` names), `interpreter_info` (with `platform` and `cc`); python.cpython's interpreter (`find_cpython`, `cpython_downloads`, `ensure_python`, `no_download_problem`, `this_platform`, `RUNS_ON_ANY_PYTHON`: section 5.2); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
@@ -684,15 +710,38 @@ header rules (with detector tests proving each rule fires).
 
 ### 5.2 Call flow
 
-1. Launcher -> `uv run --quiet --script .pytemplate/pyt.py ARGS` (the caller's `UV_PYTHON`,
-   `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` removed, section 4.1). uv reads the
-   `.python-version` found from the script's folder upward (the project's, i.e.
-   `python.cpython`) and the managed `python-preference`, so the runner runs on the project's
-   managed CPython (in a cached ephemeral env, maybe downloaded first)
-   whatever the caller's cwd or a `.python-version` there says (measured with uv 0.8 and
-   0.12; `test_launcher_sh.test_runner_runs_on_python_cpython_whatever_the_caller_pins`), and
-   uv exports `UV`. Changing `python.cpython` changes the runner's Python too: the runner must
-   stay 3.11 code (the PEP 723 floor) and work on newer versions.
+1. Launcher -> `uv run --quiet --python=REQUEST --python-preference managed --script
+   .pytemplate/pyt.py ARGS` (section 4.1: no request while the project has an environment, so
+   uv reads the project's `.python-version`, `python.cpython`, found from the script's folder
+   upward whatever the caller's folder or a `.python-version` there says; else any CPython
+   3.11+; the caller's `UV_PYTHON`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`, `PYTHONHOME`,
+   `PYTHONPATH` and `UV_WORKING_DIR` removed)
+   (`test_launcher_sh.test_runner_runs_on_python_cpython_whatever_the_caller_pins`); uv runs
+   the runner in a cached environment of its own (`VIRTUAL_ENV`) and exports `UV`. The runner
+   must stay 3.11 code (the PEP 723 floor) and work on newer versions.
+   Then the runner itself (`pyt.py` calls `cli.main(argv, entry=True)`; `cli._main` runs
+   `_restart` after `_parse_globals`): the commands of `cli.RUNS_ON_ANY_PYTHON` (`help`,
+   `doctor`, `new`, `install`, `uninstall` as builtins, the internal `__init`), a builtin's `-h`
+   (its help), a name that is no command (dispatch says so), global mode, and a pytemplate.toml
+   that does not read or names no valid `python.cpython` (dispatch reports it) run on that
+   Python (`cli._python_needed`, which reads pytemplate.toml with tomllib, never config.load:
+   its warnings would print twice). Any other command or `[tasks]` entry (a task named `install`
+   too) runs on `python.cpython` (CPython, that minor): started by uv on another Python
+   (`cli._started_by_uv`: `VIRTUAL_ENV` is this runner's own environment), the runner asks
+   `envs.ensure_python` for it (`uv python find --system`, else `uv python install --no-bin
+   --no-registry`, else PytError 3: `envs.no_download_problem` for a platform or version uv has
+   no build of, the network or `UV_PYTHON_DOWNLOADS=never` for a failed install) and runs
+   `<python.cpython> -s [-B] .pytemplate/pyt.py ARGS` (the whole command line, global options
+   included) through `proc.run` (`echo=False`: it runs under `--dry-run` too, which the second
+   runner then does; `-v` shows it), in the caller's folder, with `proc.runner_env()` (the
+   launcher's environment without this runner's `VIRTUAL_ENV` and bin/ on PATH: the second
+   runner is not "started by uv", so it never restarts again). Its exit code is this run's; a
+   Ctrl+C or SIGTERM it got too is reported by it alone (`proc.Interrupted` -> its code, 130 for
+   `STATUS_CONTROL_C_EXIT`). A caller in the same process (the tests) calls `main(argv)` and
+   never restarts, and so does a runner started by hand on a Python (`python pyt.py ...`, the
+   test harnesses' `sys.executable`), so the python-floor CI job keeps running project
+   commands on 3.11 (`test_cli_core.test_a_runner_started_on_another_python_moves_project_commands`
+   does it for real through uv).
 2. `cli.main`: `__probe` short-circuit, then `_parse_globals` (global flags must come BEFORE the
    command: `-v/--verbose`, `-q/--quiet`, `--dry-run`, `--no-render`, `-h/--help`; `-h` keeps
    the command: `./pyt -h run` = `help run`; `--dry-run` switches `-q` off), then
@@ -895,7 +944,9 @@ header rules (with detector tests proving each rule fires).
   pristine, the new `pytemplate.toml` and `pyproject.toml`) and lists each file as `-` deleted,
   `+` new or `~` replaced, the dependencies removed and added, the pinned versions, and what
   happens to `pyproject.toml` and `uv.lock`. `new` checks the destination and the name
-  (format, `check_name_free`) and prints destination, preset, name, what it would copy (the
+  (format, `check_name_free`), fails where uv cannot install the new project's `python.cpython`
+  as the real run does (`envs.no_download_problem`), and prints destination, preset, name, that
+  Python (where it is, or that uv would install it), what it would copy (the
   test `copy_template` makes, `presets.copy_scope`: the files git tracks, or every file and
   why), the number of pins `__init` would pass (the ones this `uv.lock` lacks, as `plan_init` counts them) and the
   `__init` step it would run in the copy, then `git init -b main`, or why not (DIR inside the
@@ -2632,7 +2683,11 @@ Per method:
   then runs the copy's own runner with `__init <preset> --name <n> --force` inside the copy
   (with this run's `-q` or `-v`, and `--no-render`: init renders every generated file itself,
   and `render.auto` only warned about the source's hand-edited ones; under `-q` init's uv calls
-  get `--quiet` too),
+  get `--quiet` too), on the new project's `python.cpython` (`presets.preset_python`: the
+  skeleton's pytemplate.toml), which `cmd_mode.cmd_new` asks `envs.ensure_python` for before it
+  copies anything (the new `uv.lock` is made with it; where uv cannot install it, Android/Termux,
+  `new` stops there, exit 3, nothing written; `proc.runner_argv` with that interpreter, so uv's
+  cached environment of the copy's runner holds it from the start),
   `git init -b
   main` (the generated CI runs on `main`; git < 2.28: plain `init` + `symbolic-ref HEAD
   refs/heads/main`; no repository inside an existing work tree, where `cmd_mode.cmd_new` then
@@ -2864,12 +2919,15 @@ Files:
   `overseer/component/pytemplate/refresh.lua`.
 
 Runner contract from Lua (the fourth caller of section 4.1): argv `{<absolute uv>, "run",
-"--quiet", "--script", <root>/.pytemplate/pyt.py, ...}` (`init.pyt_cmd`) through overseer
-/ `jobstart` with a LIST, env `PYTEMPLATE_CALLER_CWD=<cwd>`, `PYTEMPLATE_LAUNCHER=nvim`,
-`PYTEMPLATE_GLOBAL=""`, `UV_PYTHON=""`, `PYTHONHOME=""`, `PYTHONPATH=""` and `UV_WORKING_DIR=.`
-(`init.pyt_env`; uv and CPython read those empty values as unset, and the runner reads only `1`
-as global mode, `.` is the job's folder, so the runner runs on the project's Python, as the
-project's runner, like with the launchers). Never a string command (it would go through
+"--quiet", "--python=" .. REQUEST, "--python-preference", "managed", "--script",
+<root>/.pytemplate/pyt.py, ...}` (`init.pyt_cmd`; REQUEST is empty, no request, while the tools
+environment's interpreter exists, `M.tool("python")`, else `>=3.11`, as the launchers pick it)
+through overseer / `jobstart` with a LIST, env `PYTEMPLATE_CALLER_CWD=<cwd>`, `PYTEMPLATE_LAUNCHER=nvim`,
+`PYTEMPLATE_GLOBAL=""`, `UV_PYTHON=""`, `UV_MANAGED_PYTHON=false`, `UV_NO_MANAGED_PYTHON=false`,
+`PYTHONHOME=""`, `PYTHONPATH=""` and `UV_WORKING_DIR=.` (`init.pyt_env`; uv and CPython read
+those empty values as unset and `false` as an unset flag, and the runner reads only `1` as
+global mode, `.` is the job's folder, so the runner starts where the launchers would start it,
+as the project's runner). Never a string command (it would go through
 `'shell'`, which may be xonsh or niubash) and never `pyt.cmd`/`pyt` unless uv is nowhere
 (the launcher prints the install hints; on POSIX it runs as `/bin/sh <root>/pyt`, like the
 VS Code tasks and the git hook, so a checkout without the exec bit still gets them). The uv
@@ -3170,10 +3228,13 @@ short temp tree and unset `NVIM_APPNAME`.
   a bogus argument, `proc.run` dry-run/errors/signals/threads, `base_env` per variable, Ctrl+C
   and a SIGTERM/SIGHUP passed on, with real children that trap them, a closed stdout, `[tasks]`
   deps/cycles/placeholders/cwd/env/uv modes/arguments, `check`/`test`/`lint`/`report` semantics
-  and their dry runs, the mypyc tests' pythonpath, and exit codes through `pyt.py` in a
-  throwaway copy), `test_envs_core.py` (the section 7 contract, `MIN_UV`, clean, sync/add/remove/lock
-  command lines, `ensure_lock`, exec bits in a throwaway git repository, compiler checks, doctor
-  lines and exit code; real uv only offline in `.venv`), `test_hooks.py` (the hook in throwaway
+  and their dry runs, the mypyc tests' pythonpath, exit codes through `pyt.py` in a
+  throwaway copy, and the restart on `python.cpython`: which commands need it, the second
+  runner's command line, folder, environment and exit code, with uv faked, and for real through
+  uv on another CPython), `test_envs_core.py` (the section 7 contract, `MIN_UV`, clean,
+  sync/add/remove/lock command lines, `ensure_lock`, `python.cpython`'s interpreter (found,
+  installed, or why not: `no_download_problem`), exec bits in a throwaway git repository, compiler
+  checks, doctor lines and exit code; real uv only offline in `.venv`), `test_hooks.py` (the hook in throwaway
   repositories, git runs it for real; the real ruff/uv command lines against `.venv`),
   `test_install.py` (`./pyt install`/`uninstall` with the runner of a throwaway clone of the
   template and HOME, XDG_DATA_HOME, LOCALAPPDATA and UV_TOOL_BIN_DIR in tmp_path: what the
@@ -3795,6 +3856,44 @@ uv:
   `test_launcher_sh.py::test_launcher_clears_the_callers_uv_python`,
   `test_user_uv_python_older_than_3_11`, `test_entry_refuses_python_older_than_3_11`,
   `test_launcher_win.py::test_ps1_clears_the_callers_uv_python_and_restores_it`. Goes: never.
+- **uv has no CPython for some platforms** (LIMITATION): no Android (Termux) nor BSD builds at
+  all (uv 0.12.19; `uv python list --only-downloads` is empty there), and a pinned request
+  (`.python-version`) under the project's `only-managed` stopped every command, `help`
+  included: Termux's own Python 3.13 was never used. Fix: without an environment of the project
+  the launchers request `>=3.11` with `--python-preference managed` (a system CPython serves;
+  with one, an empty `--python=`, no request: uv follows `.python-version` as before),
+  `cli._restart` moves the commands that need `python.cpython` onto it, and
+  `envs.no_download_problem` says why they cannot run there; `new` asks for the new project's
+  `python.cpython` before it copies anything (`uv lock` needs it: `envs.ensure_python` in
+  `cmd_mode.cmd_new`) (4.1, 5.2). Test:
+  `test_cli_core.py::test_python_cpython_uv_cannot_install_stops_the_command`,
+  `test_envs_core.py::test_no_download_problem_says_why_and_what_runs_here`,
+  `test_doctor_says_where_python_cpython_is`,
+  `test_presets.py::test_new_asks_for_python_cpython_before_it_copies_anything`. Goes: never
+  (the restart stays; the platforms may come).
+- **`uv run --script` reuses a script's cached environment while its interpreter satisfies the
+  request** (LIMITATION, `environments-v2`; `--isolated` changes nothing for a script): with a
+  plain `>=3.11` the first CPython a machine offered (a distribution's 3.12) stayed the
+  runner's for good, and every project command paid a restart. Fix: once the project has an
+  environment the launchers make no request, and uv re-creates that environment on the
+  `python.cpython` of `.python-version` (4.1). Test:
+  `test_launcher_sh.py::test_the_runner_starts_on_python_cpython_once_the_project_has_an_environment`,
+  `test_runner_runs_on_python_cpython_whatever_the_caller_pins`. Goes: never.
+- **uv refuses `UV_MANAGED_PYTHON` and `UV_NO_MANAGED_PYTHON` next to `--python-preference`**
+  (LIMITATION: "cannot be used with"), and an empty one ("expected a boolish value"): a caller
+  that exported either could not start the runner at all. Fix: the launchers remove both for uv,
+  niubash and the plugin pass `false` (4.1). Test:
+  `test_launcher_sh.py::test_launcher_ignores_the_callers_python_home_path_and_uv_working_dir`,
+  `test_in_process_run_leaves_no_name_behind`,
+  `test_launcher_win.py::test_ps1_clears_the_callers_uv_python_and_restores_it`,
+  `test_cmd_clears_the_callers_uv_python` (Windows),
+  `test_nvim_render.py::test_lua_modules_in_headless_neovim`. Goes: never.
+- **`uv python install` writes outside uv's folder** (LIMITATION, uv 0.8+): a `python3.X` link
+  in `~/.local/bin` (and a warning that it is not on PATH) and, on Windows, a PEP 514 registry
+  entry; uv's automatic downloads write neither. Fix: `envs.ensure_python` passes `--no-bin
+  --no-registry` (5.2). Test:
+  `test_envs_core.py::test_ensure_python_finds_or_installs_the_version_or_says_why`. Goes:
+  never.
 - **`uv run --script` hands the runner the caller's `PYTHONHOME`, `PYTHONPATH` and
   `UV_WORKING_DIR`** (LIMITATION): every command died with `Fatal Python error: Failed to import
   encodings module` under a `PYTHONHOME`, a `PYTHONPATH` module could shadow the stdlib the
@@ -4974,6 +5073,19 @@ macOS:
 ### 15.2 Our open issues and fragile points
 
 Behaviour:
+- Platforms uv has no CPython builds for (Android/Termux, FreeBSD and the other BSDs) run
+  `help`, `doctor`, `install` and `uninstall` only (on any Python 3.11+ there): every other
+  command, `new` included, stops with exit 3 and why (`envs.no_download_problem`). By design
+  (the owner's choice, September 2026): the environments, `uv.lock` and the builds are made with
+  the CPython uv manages. Untested on a real Android or BSD: simulated with an empty
+  `UV_PYTHON_DOWNLOADS_JSON_URL` list and a system CPython on PATH.
+- A project with no environment yet (a fresh clone, after `clean --envs`) starts the runner on
+  whatever CPython 3.11+ uv's cached environment of it holds, or finds: each project command
+  then pays one more Python start (the restart on `python.cpython`, about 50 ms on Linux) until
+  `setup` makes `.venv`. A runner older than this restart (a `deploy.py` project, or `pyt.py`
+  from before September 27, 2026) started by a newer installed `pyt` in a project without
+  `.venv` runs its project commands on that Python (it has no restart); with `.venv` it runs on
+  `python.cpython`, as before.
 - `cmd_dev.split_backend` treats a first argument equal to `cpython`, `pypy` or `mypyc` (and
   `all` for `test`/`check`) as the backend: an app argument with that value must be preceded
   by an explicit backend (`./pyt run cpython mypyc`). By design: the usual fix, `--`, is

@@ -306,9 +306,24 @@ if ($legacy) {
 $fromPipe = [bool]$MyInvocation.ExpectingInput
 if ($fromPipe) { $pipeIn = $ExecutionContext.SessionState.PSVariable.GetValue('input') }
 
+# The Python the runner starts on. While the project has an environment, the one uv reads from
+# .python-version (python.cpython, which that environment was made with), as always: --python=
+# with no value is no request. Else any CPython 3.11 or newer that uv finds, a system one too (uv
+# has none to download on Android or the BSDs); the runner moves the commands that need
+# python.cpython onto it itself. On Linux/macOS the environment's python is a link to its base
+# Python, which must exist too (.NET's Exists takes a dangling link for a file: resolved first;
+# without ResolveLinkTarget, PowerShell < 7.2, the link counts).
+$python = '>=3.11'
+$venvs = if ($onWindows) { , '.venv\Scripts\python.exe' } else { '.venv-wsl/bin/python', '.venv/bin/python' }
+foreach ($p in $venvs) {
+    $f = [IO.FileInfo]::new([IO.Path]::Combine($root, $p))
+    try { if ($f.LinkTarget) { $f = $f.ResolveLinkTarget($true) } } catch { $f = $null }
+    if ($f -and $f.Exists) { $python = ''; break }
+}
+
 # --- hand over, restoring the caller's environment afterwards
 $loc = Get-Location
-$names = 'PYTEMPLATE_CALLER_CWD', 'PYTEMPLATE_LAUNCHER', 'PYTEMPLATE_GLOBAL', 'UV_PYTHON', 'PYTHONHOME', 'PYTHONPATH', 'UV_WORKING_DIR'
+$names = 'PYTEMPLATE_CALLER_CWD', 'PYTEMPLATE_LAUNCHER', 'PYTEMPLATE_GLOBAL', 'UV_PYTHON', 'UV_MANAGED_PYTHON', 'UV_NO_MANAGED_PYTHON', 'PYTHONHOME', 'PYTHONPATH', 'UV_WORKING_DIR'
 $saved = @{}
 foreach ($n in $names) { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
 $code = 1
@@ -317,23 +332,24 @@ try {
     $env:PYTEMPLATE_LAUNCHER = "ps1:$($PSVersionTable.PSEdition):$($v.Major).$($v.Minor)"
     # The installed template runs in its global mode; a project's runner never does.
     if ($globalMode) { $env:PYTEMPLATE_GLOBAL = '1' } else { Remove-Item -LiteralPath Env:PYTEMPLATE_GLOBAL -ErrorAction Ignore }
-    # The runner runs on the project's Python (.python-version next to it), in the caller's
-    # folder: a UV_PYTHON of the caller must not choose that Python, a PYTHONHOME or PYTHONPATH
-    # must not break it, a UV_WORKING_DIR must not move it (its own tools never get them either).
-    Remove-Item -LiteralPath Env:UV_PYTHON, Env:PYTHONHOME, Env:PYTHONPATH, Env:UV_WORKING_DIR -ErrorAction Ignore
+    # The runner starts on $python, in the caller's folder: a UV_PYTHON of the caller must not
+    # choose another one, a UV_MANAGED_PYTHON or UV_NO_MANAGED_PYTHON must not stop uv (it refuses
+    # them next to --python-preference), a PYTHONHOME or PYTHONPATH must not break it, a
+    # UV_WORKING_DIR must not move it (its own tools never get them either).
+    Remove-Item -LiteralPath Env:UV_PYTHON, Env:UV_MANAGED_PYTHON, Env:UV_NO_MANAGED_PYTHON, Env:PYTHONHOME, Env:PYTHONPATH, Env:UV_WORKING_DIR -ErrorAction Ignore
     if ($PSVersionTable.PSEdition -eq 'Core') {
         # PowerShell 7 rewrites native arguments that are not quoted literals, splatted ones
         # included: it globs '*' (Linux/macOS) and expands '~', '~/x' ('~\x' on Windows). Run
         # the call rebuilt from single-quoted words so argv reaches uv untouched.
         $q = [Management.Automation.Language.CodeGeneration]
-        $words = foreach ($a in @($uv, 'run', '--quiet', '--script', $entry) + $argv) { "'" + $q::EscapeSingleQuotedStringContent($a) + "'" }
+        $words = foreach ($a in @($uv, 'run', '--quiet', "--python=$python", '--python-preference', 'managed', '--script', $entry) + $argv) { "'" + $q::EscapeSingleQuotedStringContent($a) + "'" }
         $call = '& ' + ($words -join ' ')
         if ($fromPipe) { $call = '$pipeIn | ' + $call }
         Invoke-Expression $call
     } elseif ($fromPipe) {
-        $pipeIn | & $uv run --quiet --script $entry @argv
+        $pipeIn | & $uv run --quiet "--python=$python" --python-preference managed --script $entry @argv
     } else {
-        & $uv run --quiet --script $entry @argv
+        & $uv run --quiet "--python=$python" --python-preference managed --script $entry @argv
     }
     $code = $LASTEXITCODE
 } catch {

@@ -119,6 +119,28 @@ def venv_python(env_dir: Path) -> Path:
     return env_dir / "bin" / "python"
 
 
+# The --python= request of the launchers when the project has no environment yet: any CPython
+# 3.11 or newer uv finds (a version request never matches PyPy or a pre-release), a system one
+# too: uv has no CPython to download on Android, the BSDs and other platforms.
+ANY_RUNNER_PYTHON = ">=3.11"
+
+
+def launcher_python(root: Path) -> str:
+    """The `uv run --python=` request of the launchers for the runner of the project at `root`
+    (CLAUDE.md 4.1). Empty while the project has an environment: an empty --python= is no
+    request, so uv follows the project's .python-version (python.cpython, which that environment
+    was made with), as the launchers always did. Else ANY_RUNNER_PYTHON, and the runner moves the
+    commands that need python.cpython onto it (cli._restart). The environment counts when its
+    interpreter is there: `.venv-wsl` (WSL on a Windows checkout) or `.venv`, on Linux and macOS
+    a link to its base Python, which must exist too. The three launchers and the Neovim plugin
+    decide the same way."""
+    if IS_WINDOWS:
+        candidates = [root / ".venv" / "Scripts" / "python.exe"]
+    else:
+        candidates = [root / ".venv-wsl" / "bin" / "python", root / ".venv" / "bin" / "python"]
+    return "" if any(python.is_file() for python in candidates) else ANY_RUNNER_PYTHON
+
+
 def host_os() -> str:
     """windows | linux | macos"""
     if IS_WINDOWS:

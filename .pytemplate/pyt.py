@@ -6,16 +6,20 @@
 
 Uses only the standard library: uv runs it in an isolated environment, without touching
 the project's .venv. All the logic lives in the `runner/` package next to this file.
+The launchers let uv start it on the Python of the project's environment, else on any
+CPython 3.11 or newer; the runner moves the commands that need python.cpython onto it.
 """
 
 import sys
 
-# A UV_PYTHON (the launchers clear it; `uv run` by hand does not) or a python.cpython below
-# 3.11 makes uv start an older Python, which would crash on tomllib and blame the runner.
+# An older Python would crash on tomllib and blame the runner: a UV_PYTHON (the launchers
+# clear it; `uv run` by hand does not), or a .venv made by hand with an older Python (the
+# launchers start the runner on the Python of the project's environment).
 if sys.version_info < (3, 11):
     sys.stderr.write(
         f"error: the ./pyt runner needs Python 3.11 or newer, but uv started Python {sys.version.split()[0]}"
-        f" ({sys.executable}). Unset UV_PYTHON (or point it at 3.11+) and check python.cpython in pytemplate.toml.\n"
+        f" ({sys.executable}). Unset UV_PYTHON (or point it at 3.11+); a .venv made with an older Python:"
+        " delete it (./pyt setup makes it again).\n"
     )
     raise SystemExit(3)
 
@@ -54,4 +58,4 @@ sys.path.insert(0, str(_here))
 
 from runner.cli import main  # noqa: E402
 
-raise SystemExit(main(sys.argv[1:]))
+raise SystemExit(main(sys.argv[1:], entry=True))
