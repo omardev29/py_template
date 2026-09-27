@@ -1181,8 +1181,11 @@ def test_new_never_warns_about_the_sources_hand_edited_files(tmp_path: Path, mon
     r = _deploy(copy_root, "--dry-run", *options, *init, cwd=copy_root, env=env)
     assert r.returncode == 0, r.stderr
     assert "hand-edited" not in r.stderr
+    # The __init route itself renders only at its end (cli.INTERNAL never renders first), so a
+    # copy's runner started without new's options, an older new's, stays quiet too
     r = _deploy(copy_root, "--dry-run", *init, cwd=copy_root, env=env)
-    assert "hand-edited" in r.stderr  # what those options leave out
+    assert r.returncode == 0, r.stderr
+    assert "hand-edited" not in r.stderr
 
 
 def test_quiet_init_quiets_uv_too(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
