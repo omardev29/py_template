@@ -24,6 +24,6 @@ def _prepend_sitedir(path: Path) -> None:
 
 _prepend_sitedir(HERE / "lib")
 sys.path.insert(0, str(APP))
-os.environ.setdefault("PYTEMPLATE_ASSETS", str(APP / "assets"))
+os.environ["PYTEMPLATE_ASSETS"] = str(APP / "assets")  # this app's: an inherited one names another app's
 sys.argv[0] = str(APP / "main.py")
 runpy.run_path(str(APP / "main.py"), run_name="__main__")

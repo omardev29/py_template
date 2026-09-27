@@ -778,6 +778,16 @@ def run_pyz(pyz_file: Path, env: dict[str, str], *args: str, prelude: str = "") 
     return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=120, check=False)
 
 
+def test_pyz_names_its_own_assets_whatever_it_inherits(tmp_path: Path) -> None:
+    # setdefault kept the PYTEMPLATE_ASSETS of the app that started this one (a launcher, or a
+    # pyz that restarts its updated version)
+    cache = tmp_path / "cache"
+    child = fake_pyz(tmp_path / "child.pyz", build_id="child")
+    r = run_pyz(child, pyz_env(cache, PYTEMPLATE_ASSETS=str(tmp_path / "parent" / "app" / "assets")))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split()[2] == str(pyz_root(cache) / "child" / "pure" / "app" / "assets")
+
+
 def test_pyz_bootstrap_picks_the_flavour(tmp_path: Path) -> None:
     key = _host_key()
     cache = tmp_path / "cache"

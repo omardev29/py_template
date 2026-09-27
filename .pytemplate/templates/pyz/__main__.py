@@ -291,7 +291,7 @@ def main() -> None:
     if (dest / "lib").is_dir():
         _prepend_sitedir(dest / "lib")
     sys.path.insert(0, str(app))
-    os.environ.setdefault("PYTEMPLATE_ASSETS", str(app / "assets"))
+    os.environ["PYTEMPLATE_ASSETS"] = str(app / "assets")  # this app's: an inherited one names another app's
     sys.argv[0] = str(app / "main.py")
     runpy.run_path(str(app / "main.py"), run_name="__main__")
 

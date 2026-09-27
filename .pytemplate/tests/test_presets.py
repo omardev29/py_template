@@ -2275,6 +2275,21 @@ def _flet_draw(app: Any) -> tuple[Any, Any, Any, Any]:
     return page, button, image, status
 
 
+@pytest.mark.parametrize("preset", ["raylib", "flet"])
+def test_the_assets_are_the_apps_own_whatever_it_inherits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preset: str) -> None:
+    # An app started by another app of the template (a launcher, a pyz restarting its update)
+    # inherited PYTEMPLATE_ASSETS, which assets_dir() read first: it loaded the parent's assets
+    resources = _skeleton_package(tmp_path, monkeypatch, preset, "demo.resources", {})
+    monkeypatch.setenv("PYTEMPLATE_ASSETS", str(tmp_path / "parent" / "app" / "assets"))
+    monkeypatch.delattr(sys, "_MEIPASS", raising=False)
+    assert resources.assets_dir() == (tmp_path / "src" / "assets").resolve()  # src/, a portable app/ or a pyz
+    packaged = tmp_path / "src" / "demo" / "assets"
+    packaged.mkdir()
+    assert resources.assets_dir() == packaged.resolve()  # a wheel: inside the package
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
+    assert resources.assets_dir() == tmp_path / "bundle" / "assets"  # PyInstaller
+
+
 def test_flet_skeleton_draws_where_no_process_can_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """flet build for the web (Pyodide), Android and iOS: ProcessPoolExecutor raises there, and
     the Draw handler died with the button disabled on 'Computing...'. It draws in-process."""

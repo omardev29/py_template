@@ -233,9 +233,10 @@ Environment variables the runner and the launchers read: `UV` (the uv binary, lo
 skips GUI runs on Windows and macOS CI), `NO_COLOR` and `TERM`, the compiler variables of mypyc
 (`CC`, `CFLAGS`, `CPPFLAGS`, `LDSHARED`, `LDFLAGS`, `ARCHFLAGS`, `CL`, `_CL_`),
 `MACOSX_DEPLOYMENT_TARGET` (the oldest macOS the pyz and portable wheels support, 13.0 by default),
-`LOCALAPPDATA` and `XDG_CACHE_HOME` (the pyz and UPX caches). At runtime, the app's
-`resources.assets_dir()` (raylib and flet presets) reads `PYTEMPLATE_ASSETS`, which the portable and
-pyz launchers set.
+`LOCALAPPDATA` and `XDG_CACHE_HOME` (the pyz and UPX caches). At runtime, the portable and pyz
+launchers set `PYTEMPLATE_ASSETS` to the app's own assets folder (whatever value the app inherited
+from the program that started it); the presets' `resources.assets_dir()` finds that folder next to
+its package.
 
 The runner ignores an activated virtual environment (`VIRTUAL_ENV`, `PYTHONHOME`, `PYTHONPATH`)
 and uv's environment selection (`UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PROJECT`,

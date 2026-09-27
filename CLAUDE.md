@@ -815,7 +815,7 @@ header rules (with detector tests proving each rule fires).
 | `PYTHONUTF8=1` | `proc.base_env`, portable launchers, pyz `.cmd` wrapper, the Neovim mypy linter, every VS Code launch config (`vscode.DEBUG_ENV`) | mypy/mypyc otherwise read files as cp1252; F5 behaves like `./deploy run` |
 | `PYTEMPLATE_BACKEND` | `cmd_dev.test_backend`, `mypyc.runtime_env_vars`, mypyc launch config | Backend under test (conftest) |
 | `PYTEMPLATE_COMPILED` | `mypyc.runtime_env_vars` | Modules that must load from `.pyd/.so` (conftest) |
-| `PYTEMPLATE_ASSETS` | `portable/boot.py`, `pyz/__main__.py` (setdefault) | Assets dir for `resources.assets_dir()` (raylib, flet) |
+| `PYTEMPLATE_ASSETS` | `portable/boot.py`, `pyz/__main__.py` (assigned, never inherited) | The app's assets folder, for the app's own code; `resources.assets_dir()` (raylib, flet) finds the same folder next to its package (section 10) |
 | `VSLANG=1033` | `mypyc.build`, wheel builds | English MSVC messages |
 | `MACOSX_DEPLOYMENT_TARGET` | `methods.common.install_deps` for macOS targets, unless the user set it (`MACOS_FLOOR`, 13.0) | The oldest macOS the pyz/portable wheels must support |
 | `CC`, `CFLAGS`, `CPPFLAGS`, `LDSHARED`, `LDFLAGS`, `ARCHFLAGS`, `CL`, `_CL_` | user | setuptools builds the mypyc extensions with them (a `CFLAGS` REPLACES Python's own: section 9); `mypyc.COMPILER_ENV`, a change forces a rebuild |
@@ -2135,8 +2135,12 @@ Per method:
   `from PIL import ...` (RawImage) drags Pillow (13 MB) in, hence the preset's
   `exclude_modules = ["PIL"]`.
 - Assets at runtime: `resources.assets_dir()` (raylib and flet presets) tries
-  `$PYTEMPLATE_ASSETS`, then `sys._MEIPASS/assets`, then `<pkg>/assets` (wheel), then
-  `src/assets`. `resources.py` is a boundary module; module-level `__file__` is fine in
+  `sys._MEIPASS/assets` (PyInstaller), then `<pkg>/assets` (wheel), then the `assets` folder
+  next to the package (`src/`, the stage, a portable `app/`, a pyz's extracted `app/`, Nuitka's
+  dist). It never reads `$PYTEMPLATE_ASSETS`, which the portable and pyz bootstraps set (and
+  assign: `setdefault` kept the value an app started by another app inherited, and it read that
+  app's assets first) for the app's own code and for the `resources.py` of projects made before.
+  `resources.py` is a boundary module; module-level `__file__` is fine in
   compiled packages (section 9: only a single top-level compiled module sees a relative one).
 
 ## 11. Presets (`presets.py`, `.pytemplate/presets/<p>/`)
