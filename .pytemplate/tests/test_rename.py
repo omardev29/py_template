@@ -95,6 +95,36 @@ def test_rename_reproduces_the_skeleton_of_the_new_name(tmp_path: Path, preset: 
     assert not planned.config.kept and all(not f.result.kept for f in planned.files)
 
 
+@pytest.mark.parametrize("old", ["Auto", "Off", "Best", "Pylance", "False", "Strict"])
+def test_config_values_named_like_the_package_stay_when_the_name_differs(tmp_path: Path, old: str) -> None:
+    """An app whose name is not its package spelling (Auto: package auto) lost the context rules
+    of pytemplate.toml: every "auto" value (typing.profile, deploy.exe.console, lto) became the
+    new package, and the renamed file was invalid, so rename and apply refused."""
+    _write_project(tmp_path, "script", old)
+    before = tomllib.loads((tmp_path / "pytemplate.toml").read_text(encoding="utf-8"))
+    planned = rename.plan(tmp_path, old, "Zeta")
+    after = tomllib.loads(planned.config.new)
+    rename.validate_config(planned.config.new)
+    assert after["app"]["name"] == "Zeta" and after["compile"]["modules"] == ["zeta.core"]
+    before["app"]["name"], before["compile"]["modules"] = "Zeta", ["zeta.core"]
+    assert after == before
+
+
+def test_file_names_in_pytemplate_toml_stay_when_the_name_differs(tmp_path: Path) -> None:
+    """My-Game (package my_game) renamed: `assets/my_game.ico` and a task's `tools/my_game.py`
+    were rewritten although the files keep their names (the task failed, the exe lost its icon)."""
+    _write_project(tmp_path, "script", "My-Game")
+    text = (tmp_path / "pytemplate.toml").read_text(encoding="utf-8")
+    text = config.set_value(text, "deploy.exe", "icon", "assets/my_game.ico")
+    text += '\n[tasks.gen]\ncmd = ["{python}", "tools/my_game.py"]\n'
+    (tmp_path / "pytemplate.toml").write_text(text, encoding="utf-8", newline="\n")
+    planned = rename.plan(tmp_path, "My-Game", "Other")
+    data = tomllib.loads(planned.config.new)
+    assert data["deploy"]["exe"]["icon"] == "assets/my_game.ico" and data["tasks"]["gen"]["cmd"][1] == "tools/my_game.py"
+    assert [line.split(" #")[0].strip() for _, line in planned.config.kept] == ['icon = "assets/my_game.ico"', 'cmd = ["{python}", "tools/my_game.py"]']
+    assert data["compile"]["modules"] == ["other.core"]
+
+
 def test_the_pyproject_preset_block_is_renamed(tmp_path: Path) -> None:
     _write_project(tmp_path, "flet", "alpha")
     _rename(tmp_path, "alpha", "My-Game")

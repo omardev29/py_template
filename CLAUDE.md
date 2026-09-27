@@ -1015,7 +1015,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     once skipped the rule: `import_module(f"alpha.{x}")`); titles, other prose and artifact names
     (`alpha.exe`, `alpha-cpython-exe`) get the name.
   - `pytemplate.toml`: always by context (`contextual`, even when the new name is a package
-    name). A path there is the package only right inside `src/` (`_after_src`: `src/alpha/data`
+    name, and when the old name is not its package's spelling: for My-Game or Auto the package
+    word goes through the same rules and the display name is prose; `tools/my_game.py` and
+    every `"auto"` value were rewritten, the latter into an invalid file that stopped rename and
+    apply). A path there is the package only right inside `src/` (`_after_src`: `src/alpha/data`
     moves with the folder; `tools/alpha.py`, `assets/alpha.ico` and, for an app named deploy,
     `./deploy apply` are other files), and a dotted word only when it names a module or
     subpackage of src/<pkg>/ (`_package_modules`: `alpha.core`; not `alpha.ico` nor, for an app

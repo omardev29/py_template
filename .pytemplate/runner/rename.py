@@ -590,7 +590,12 @@ def _text_kind(
     if not contextual and modules is not None and _names_a_file(text, start, end, modules):
         return "keep"  # asset("alpha.png"), "alpha.json": the file keeps its name (reported)
     if names.old_name != names.old_pkg:
-        return "pkg" if word == names.old_pkg else "name"
+        if not contextual:
+            return "pkg" if word == names.old_pkg else "name"
+        if word != names.old_pkg:
+            return "name"  # the display name (My-Game): never a package reference
+        # pytemplate.toml: the package spelling goes through the context rules below, as for an
+        # app named like its package (every "auto" value of an app named Auto was rewritten)
     if names.new_name == names.new_pkg and not contextual:
         return "pkg"  # the new name is also the new package: no need to tell them apart
     if _ARTIFACT_SUFFIX.match(text, end) or _BACKEND_SUFFIX.match(text, end):
