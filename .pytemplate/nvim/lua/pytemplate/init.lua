@@ -477,7 +477,11 @@ function M.refresh()
   local lint = package.loaded["lint"]
   if lint then
     -- mypy's arguments depend on the mode (PyPy supported: --python-version)
-    lint.linters.mypy = require("pytemplate.integrations").mypy_linter()
+    local integ = require("pytemplate.integrations")
+    lint.linters.mypy = integ.mypy_linter()
+    if not integ.mypy_available() then
+      integ.forget_mypy() -- mode --typing off: mypy never runs again to replace what it showed
+    end
     local file = vim.api.nvim_buf_get_name(0)
     if vim.bo.filetype == "python" and M.in_root(file) then
       local ctx = { filename = file, dirname = vim.fs.dirname(file) }

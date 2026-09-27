@@ -662,6 +662,76 @@ def test_mypy_linter_follows_a_venv_created_later(tmp_path: Path) -> None:
     assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
 
 
+STALE_MYPY_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+package.loaded["lint.linters.mypy"] = { parser = function() return {} end }
+-- nvim-lint as far as the plugin uses it: one namespace per linter, which only a run replaces
+local lint = { linters = {}, linters_by_ft = { python = { "mypy" } }, namespaces = {} }
+function lint.get_namespace(name)
+  lint.namespaces[name] = lint.namespaces[name] or vim.api.nvim_create_namespace("pt-test-lint." .. name)
+  return lint.namespaces[name]
+end
+function lint.try_lint() end
+package.loaded["lint"] = lint
+local root = vim.env.PT_TEST_ROOT
+local pt = require("pytemplate")
+pt.config.root = root
+local integ = require("pytemplate.integrations")
+local errors = {}
+local function check(name, ok, msg)
+  if not ok then errors[#errors + 1] = name .. ": " .. vim.inspect(msg) end
+end
+local ns = lint.get_namespace("mypy")
+local file = root .. "/src/bad.py"
+vim.cmd.edit(vim.fn.fnameescape(file))
+local buf = vim.api.nvim_get_current_buf()
+local other = vim.api.nvim_create_buf(true, false)
+vim.api.nvim_buf_set_name(other, root .. "/src/other.py")
+local function shown(b)
+  return #vim.diagnostic.get(b, { namespace = ns })
+end
+local function mypy_ran()
+  for _, b in ipairs({ buf, other }) do
+    vim.diagnostic.set(ns, b, { { lnum = 0, col = 0, message = "Incompatible return value type" } })
+  end
+end
+local path = root .. "/.pytemplate/editor.json"
+local data = vim.json.decode(table.concat(vim.fn.readfile(path), "\n"))
+local function mode(profile)  -- what `./deploy mode --typing P` and its refresh component do
+  data.typing.profile = profile
+  vim.fn.writefile({ vim.json.encode(data) }, path)
+  pt.refresh()
+end
+lint.linters.mypy = integ.mypy_linter()
+local ctx = { filename = file, dirname = vim.fs.dirname(file) }
+mypy_ran()
+check("mypy runs under strict", lint.linters.mypy.condition(ctx) and shown(buf) == 1, shown(buf))
+mode("off")
+check("mode --typing off drops what mypy showed", shown(buf) == 0 and shown(other) == 0, { shown(buf), shown(other) })
+mode("strict")
+mypy_ran()
+check("a refresh with mypy on keeps them", shown(buf) == 1 and shown(other) == 1, { shown(buf), shown(other) })
+vim.fn.delete(pt.tool("mypy"))  -- ./deploy clean --envs in a terminal: no refresh, then a save lints
+check("no mypy without .venv", not lint.linters.mypy.condition(ctx), "still enabled")
+check("the linted buffer loses them", shown(buf) == 0 and shown(other) == 1, { shown(buf), shown(other) })
+io.stdout:write(#errors == 0 and "PTLUA OK\n" or ("PTLUA FAIL\n" .. table.concat(errors, "\n") .. "\n"))
+vim.cmd(#errors == 0 and "qa!" or "cq!")
+"""
+
+
+def test_mypy_diagnostics_go_once_mypy_is_off(tmp_path: Path) -> None:
+    """nvim-lint only replaces a linter's diagnostics when the linter runs: after `:Deploy mode
+    --typing off` (a refresh command) or a removed .venv, mypy never ran again and its last
+    errors stayed on screen until Neovim restarted."""
+    project = _project(tmp_path, profile="strict", mypy=True)
+    mypy = project / ".venv" / ("Scripts/mypy.exe" if sys.platform == "win32" else "bin/mypy")
+    mypy.parent.mkdir(parents=True)
+    mypy.write_bytes(b"")
+    (project / "src" / "bad.py").write_text("def f() -> str:\n    return 1\n", encoding="utf-8")
+    r = _headless_lua(tmp_path, STALE_MYPY_CHECK, project)
+    assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
 DEBUGPY_CHECK = r"""
 vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
 local pt = require("pytemplate")

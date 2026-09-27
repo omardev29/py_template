@@ -2580,7 +2580,11 @@ LazyVim wiring:
   nvim-lint wraps every linter in `cmd.exe /C`, where a quoted absolute path breaks
   with spaces or `& ^ %`: the linter runs the bare name `mypy` with `.venv\Scripts` first on
   PATH. nvim-lint REPLACES the environment when a linter has `env`, so it passes the full
-  environment plus `PYTHONUTF8=1`, minus `VIRTUAL_ENV`.
+  environment plus `PYTHONUTF8=1`, minus `VIRTUAL_ENV`. nvim-lint only replaces a linter's
+  diagnostics when the linter runs, so once mypy no longer runs (`integrations.mypy_available`:
+  the `off` profile, no `.venv` mypy) `integrations.forget_mypy` drops them: `init.refresh` for
+  every buffer, the linter's `condition` for the buffer it is asked about (after `mode --typing
+  off` they stayed until Neovim restarted; `test_mypy_diagnostics_go_once_mypy_is_off`).
 - dap: nvim-dap spawns adapters with raw `uv.spawn` (no PATHEXT), so Mason's `.cmd` shims fail
   on Windows. Adapter order (`dap.adapter`): `.venv` python with debugpy (dev group), the tools
   python, Mason's debugpy venv python, an ephemeral `uv run --no-project --with debugpy`
@@ -2605,7 +2609,8 @@ LazyVim wiring:
   through `'shell'`: another reason to keep VS Code tasks `process`. Commands that can change
   the mode or `editor.json` (`mode`, `setup`, `apply` (the same `tasks.META` entry as
   `setup`), `sync`, `lock`, `add`, `remove`, `render`, `rename`) get the `pytemplate.refresh`
-  component (re-read `editor.json`, LSP `didChangeConfiguration`, rebuild the mypy linter);
+  component (re-read `editor.json`, LSP `didChangeConfiguration`, rebuild the mypy linter, and
+  drop mypy's diagnostics once mypy is off);
   `mode`, `setup`, `apply`, `lock` and `rename` also open their output. Every task carries
   `unique` (`tasks.components`): `run` and background tasks with `replace = true` (a new run
   restarts them), the rest with `soft = true`, which disposes the FINISHED previous run of the
