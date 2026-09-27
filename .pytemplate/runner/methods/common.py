@@ -478,6 +478,23 @@ def _local_names(lock: Path) -> dict[str, str]:
     return out
 
 
+def direct_reference(line: str, *, lock: Path | None = None) -> str:
+    """A line of `uv export --no-editable` as a PEP 508 requirement: a local library, which it
+    writes as a bare path relative to the project (`./libs/x ; <markers>`) or a `file:` URL, becomes
+    `name @ file:///absolute/path ; <markers>` (its name from uv.lock). Pins and direct references
+    stay as they are. A path uv.lock does not name is a DeployError."""
+    lock_file = LOCK if lock is None else lock
+    requirement, marked, marker = line.partition(" ;")  # PEP 508: a URL needs a blank before ;
+    requirement = requirement.strip()
+    if not requirement or _PIN_RE.match(requirement) or _DIRECT_RE.match(requirement):
+        return line
+    name = _local_names(lock_file).get(_local_key(lock_file.parent, requirement))
+    if name is None:
+        raise DeployError(f"cannot name the local requirement {requirement!r}: uv.lock has no package from there (./deploy lock)")
+    url = requirement if requirement.startswith("file:") else (lock_file.parent / requirement).resolve().as_uri()
+    return f"{name} @ {url}" + (f" ;{marker}" if marked else "")
+
+
 def skipped_requirements(requirements: Path, site: Path, *, lock: Path | None = None) -> list[str]:
     """Return the locked requirements that were NOT installed into `site`: their markers
     (sys_platform, python_version, implementation_name...) exclude that target's platform or

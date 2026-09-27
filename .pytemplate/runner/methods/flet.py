@@ -26,6 +26,7 @@ from ..cmd_build import BuildRequest, dist_path
 from ..config import Config, toml_value
 from ..project import BUILD, IS_WINDOWS, PYPROJECT, SRC, host_os
 from ..ui import DeployError
+from . import common
 
 MOBILE_WEB = {"apk", "aab", "ipa", "ios-simulator", "web"}
 STAGE_APP = "src"  # build() stages the app in <work>/src: [tool.flet.app] path must point there
@@ -46,13 +47,19 @@ def _developer_mode() -> bool:
 
 
 def _pinned_requirements(cfg_tool: envs.PyEnv) -> list[str]:
+    """The locked runtime requirements, for the build project's [project] dependencies.
+
+    --no-editable, and a local library as `name @ file:///absolute/path` (common.direct_reference):
+    exported editable it was `-e ./libs/x ; <markers>`, no PEP 508 requirement (pip refused it),
+    and a relative path would point into the build stage, not the project.
+    """
     out = envs.uv(
         cfg_tool,
-        ["export", "--frozen", "--no-dev", "--no-emit-project", "--no-hashes", "--no-header", "--no-annotate", "--format", "requirements.txt"],
+        ["export", "--frozen", "--no-dev", "--no-editable", "--no-emit-project", "--no-hashes", "--no-header", "--no-annotate", "--format", "requirements.txt"],
         capture=True,
         echo=False,
     ).stdout
-    return [ln.strip() for ln in out.splitlines() if ln.strip() and not ln.startswith("#")]
+    return [common.direct_reference(ln.strip()) for ln in out.splitlines() if ln.strip() and not ln.startswith("#")]
 
 
 def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:

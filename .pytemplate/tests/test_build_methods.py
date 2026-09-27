@@ -3615,6 +3615,55 @@ def _flet_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, backend: str 
     return out, rec
 
 
+FLET_LOCAL_LOCK = """version = 1
+
+[[package]]
+name = "mylib"
+version = "0.1.0"
+source = { editable = "libs/mylib" }
+
+[[package]]
+name = "extlib"
+version = "0.2.0"
+source = { directory = "../extlib" }
+"""
+
+
+def test_flet_build_names_local_libraries_by_absolute_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `uv export` without --no-editable wrote "-e ./libs/mylib ; <markers>" into the build
+    # project's dependencies: no PEP 508 requirement (pip refused it), and relative to the
+    # project where the build stage is two folders deeper
+    from runner.methods import flet
+
+    requirements = pytest.importorskip("packaging.requirements")
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "uv.lock").write_text(FLET_LOCAL_LOCK, encoding="utf-8")
+    monkeypatch.setattr(common, "LOCK", project / "uv.lock")
+    marker = "python_full_version < '3.15' and implementation_name == 'cpython'"
+    exported = f"./libs/mylib ; {marker}\n../extlib ; {marker}\nanyio==4.15.1 ; {marker}\nrich @ https://example.com/rich.whl ; {marker}\n"
+    calls: list[list[str]] = []
+
+    def fake_uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append([str(a) for a in args])
+        return subprocess.CompletedProcess(args, 0, exported, "")
+
+    monkeypatch.setattr(envs, "uv", fake_uv)
+    pins = flet._pinned_requirements(envs.tool_env(make({})))
+    assert "--no-editable" in calls[0]
+    assert pins == [
+        f"mylib @ {(project / 'libs' / 'mylib').resolve().as_uri()} ; {marker}",
+        f"extlib @ {(tmp_path / 'extlib').resolve().as_uri()} ; {marker}",
+        f"anyio==4.15.1 ; {marker}",
+        f"rich @ https://example.com/rich.whl ; {marker}",
+    ]
+    for pin in pins:
+        requirements.Requirement(pin)  # every line is PEP 508
+    monkeypatch.setattr(envs, "uv", lambda env, args, **kw: subprocess.CompletedProcess(args, 0, "./libs/other\n", ""))
+    with pytest.raises(DeployError, match="cannot name the local requirement './libs/other'"):
+        flet._pinned_requirements(envs.tool_env(make({})))
+
+
 def test_flet_build_argv_stage_and_pyproject(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import tomllib
 

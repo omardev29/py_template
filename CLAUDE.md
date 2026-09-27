@@ -2119,7 +2119,10 @@ Per method:
   payload and also in `--dry-run`, and again in `build`. The stage `.build/flet-build/<b>` is
   persistent (Flutter cache); stale extensions are deleted from it before this payload's are
   copied (a desktop `.pyd` must not reach a mobile/web build). `flet build` ignores `uv.lock`, so `build_pyproject` pins the
-  `uv export --frozen --no-dev` versions and serialises the PARSED `[tool.flet]` of the
+  `uv export --frozen --no-dev --no-editable` versions (`flet._pinned_requirements`; a local
+  library as `name @ file:///absolute/path`, `common.direct_reference`: editable it was
+  `-e ./libs/x ; <markers>`, which pip refused, relative to the project and not the stage) and
+  serialises the PARSED `[tool.flet]` of the
   project `pyproject.toml` (no other table leaks in; `[tool.flet.app]` alone is kept) with
   `app.path` forced to `STAGE_APP` (`src`, where `build` stages the app; another value is
   ignored with a warning: flet looked for `<work>/<path>/main.py` and aborted after installing
