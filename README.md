@@ -354,6 +354,8 @@ name). What changes:
   other text files there: package paths, dotted names, `-m` arguments, `pkg:function`
   references and module-name arguments (`import_module("<pkg>")`, `resources.files(package=...)`,
   `pkgutil.get_data`, `runpy.run_module`) get the package; titles and other prose get the name.
+  A file named after the app (`asset("<name>.png")`, `"<name>.json"`) keeps its name, so the
+  reference is reported, not changed.
   String prefixes, escapes and format directives are never the name: an app named `f`, `n`, `r`
   or `d` keeps `f"..."`, `"\n"`, `b"\r"`, `"%d"` and `f"{x:d}"`. A name right after a single
   backslash that makes no escape (a raw string: `r"\d"`, `r"src\alpha"`; an invalid escape:

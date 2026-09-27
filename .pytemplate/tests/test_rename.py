@@ -260,6 +260,39 @@ def test_module_name_arguments_of_loader_calls_get_the_package(text: str, expect
     assert rewrite(text + "\n", AMBIGUOUS, python=True).text == expected + "\n"
 
 
+@pytest.mark.parametrize(
+    ("text", "expected", "kept"),
+    [
+        ('ICON = asset("rocks.png")', None, True),
+        ('SOUND = asset("sfx/rocks.wav")', None, True),
+        ('SAVE = Path.home() / "rocks.json"', None, True),
+        ("# the level files are rocks.lvl", None, True),
+        ("from rocks.resources import asset", "from stone.resources import asset", False),
+        ('m = "rocks.core.bench"', 'm = "stone.core.bench"', False),  # a module of the package
+        ('mods = ["rocks.*"]', 'mods = ["stone.*"]', False),
+        ('p = "dist/rocks.exe"', 'p = "dist/stone.exe"', False),  # an artifact: the next build names it after the new name
+        ('cmd = ["python", "-m", "rocks.tool"]', 'cmd = ["python", "-m", "stone.tool"]', False),  # -m: a module
+        ('m = importlib.import_module("rocks.plugins")', 'm = importlib.import_module("stone.plugins")', False),  # a loader: a module
+        ('title = "Welcome to rocks."', 'title = "Welcome to stone."', False),  # the end of a sentence
+    ],
+)
+def test_file_names_in_code_keep_the_name_of_the_file(text: str, expected: str | None, kept: bool) -> None:
+    """A file named after the app keeps its name, so a reference to it must keep it too: asset(
+    "rocks.png") became asset("stone.png") and the game no longer found its image. It is kept and
+    reported, as in pytemplate.toml; `rocks.<x>` is the package when x is a module of it."""
+    out = rewrite(text + "\n", Names("rocks", "stone"), python=True, package_modules=frozenset({"core", "resources"}))
+    assert out.text == (text if expected is None else expected) + "\n"
+    assert bool(out.kept) is kept
+
+
+def test_a_data_file_named_after_the_app_is_reported_by_the_plan(tmp_path: Path) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    (tmp_path / "src" / "alpha" / "data.py").write_text('SAVE = "alpha.json"\nICON = "sprites/alpha.png"\n', encoding="utf-8")
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    edit = next(f for f in planned.files if f.path == "src/alpha/data.py")
+    assert edit.new == edit.old and edit.result.kept == [(1, 'SAVE = "alpha.json"'), (2, 'ICON = "sprites/alpha.png"')]
+
+
 def test_fstrings_tell_fields_from_text() -> None:
     src = 'import myapp\nprint(f"{myapp.core} {{myapp}}: myapp")\n'
     out = rewrite(src, AMBIGUOUS, python=True)

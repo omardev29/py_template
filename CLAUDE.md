@@ -990,8 +990,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     `"%(k)-s"`, `"{:d}"`, `"{0:,d}"`, `"{!r}"`: `_directive`) is kept and reported too (whether
     the string is ever formatted is unknown). Names of one or two letters are legal, and the
     flet skeleton's PNG signature `b"\x89PNG\r\n..."` once changed silently for `r` and `n`.
-  - Text (strings, comments, other files): every occurrence except `x.pkg` and a path segment
-    right after the package itself (`src/pkg/pkg`, `src\pkg\pkg`: a submodule). For a package
+  - Text (strings, comments, other files): every occurrence except `x.pkg`, a path segment
+    right after the package itself (`src/pkg/pkg`, `src\pkg\pkg`: a submodule) and a file named
+    after the app (`_names_a_file` with `_package_modules`: `pkg.png`, `sfx/pkg.wav`,
+    `"pkg.json"`, a `.` and a word that is no module of src/<pkg>/, outside an import, `-m` or
+    loader argument; the file keeps its name, so the reference is kept and reported: it became
+    `asset("beta.png")`; an artifact name, `pkg.exe`, follows the new name). For a package
     named `src` (a project made by hand: `new` and `rename` refuse the name) a `src/` segment
     that is not right inside another `src/` is the project's own folder and never changes
     (`src/src/x` -> `src/beta/x`; it once became `beta/beta/x`). When the

@@ -545,6 +545,20 @@ def _after_src(text: str, start: int) -> bool:
     return not (sep >= 4 and (_is_word(text[sep - 4]) or text[sep - 4] == "-"))
 
 
+def _names_a_file(text: str, start: int, end: int, modules: frozenset[str]) -> bool:
+    """Whether the occurrence names a file after the app (`alpha.png`, `sfx/alpha.wav`,
+    "alpha.json"): `.` and a word that is no module or subpackage of src/<pkg>/ (`modules`),
+    outside an import, `-m` or package context. Such a file keeps its name, so a rewritten
+    reference no longer found it. An artifact the next build names after the new name
+    (`alpha.exe`, `alpha-cpython-exe`) is no such file."""
+    member = re.match(r"\.([A-Za-z0-9_]+)", text[end : end + 65])
+    if member is None or member.group(1) in modules or _ARTIFACT_SUFFIX.match(text, end) or _BACKEND_SUFFIX.match(text, end):
+        return False
+    before = text[max(0, start - 80) : start]
+    contexts = (_IMPORT_BEFORE, _FROM_BEFORE, _DASH_M_BEFORE, _PKG_WORD_BEFORE)
+    return not any(pattern.search(before) for pattern in contexts)
+
+
 def _text_kind(
     text: str, start: int, end: int, word: str, names: Names, *, contextual: bool = False, modules: frozenset[str] | None = None
 ) -> Kind:
@@ -564,6 +578,8 @@ def _text_kind(
         return "keep"  # src/alpha/alpha: a submodule of the package, like alpha.alpha
     if names.old_pkg == "src" and text[end : end + 1] in ("/", "\\") and not _after_src(text, start):
         return "skip"  # an app named src (made by hand: new refuses it): src/src/x is the folder, then the package
+    if not contextual and modules is not None and _names_a_file(text, start, end, modules):
+        return "keep"  # asset("alpha.png"), "alpha.json": the file keeps its name (reported)
     if names.old_name != names.old_pkg:
         return "pkg" if word == names.old_pkg else "name"
     if names.new_name == names.new_pkg and not contextual:
@@ -648,7 +664,7 @@ def _classify(
             return "keep"
     if not _whole_word(text, start, end):
         return "skip"
-    kind = _text_kind(text, start, end, word, names)
+    kind = _text_kind(text, start, end, word, names, modules=None if region.forced else modules)  # a loader's argument is a module
     return "pkg" if region.forced and kind == "name" else kind
 
 
@@ -749,7 +765,8 @@ def rewrite(
     name (other text is plain: `a\\n` has no escape there). `module_keys`: TOML
     keys whose quoted values are module names (a bare old package there is the package).
     `package_modules`: the modules and subpackages of src/<old pkg>/ (only_pkg: `pkg.x` is the
-    package only when x is one of them; `pkg.ico`, `uv.lock` are file names).
+    package only when x is one of them; `pkg.ico`, `uv.lock` are file names; in other text a
+    file named after the app, `asset("pkg.png")`, is kept and reported: _names_a_file).
     """
     code = _python_code(text, names.old_pkg) if python else None
     module_lines = module_value_lines(text, module_keys) if module_keys else set()
@@ -1148,6 +1165,7 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
     unreadable: list[str] = []
     pattern = _pattern(names)
     links: list[str] = []
+    modules = _package_modules(root, names.old_pkg)  # `alpha.core` is the package, `alpha.png` a file
     for rel_path, path in _code_files(root, links):
         try:
             data = path.read_bytes()
@@ -1170,7 +1188,8 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
             if b"\0" not in data and pattern.search(data.decode("latin-1")):
                 unreadable.append(rel_path)
             continue
-        result = rewrite(text, names, python=path.suffix in PY_SUFFIXES, strings=DATA_STRINGS.get(path.suffix.lower(), ""))
+        strings = DATA_STRINGS.get(path.suffix.lower(), "")
+        result = rewrite(text, names, python=path.suffix in PY_SUFFIXES, strings=strings, package_modules=modules)
         if result.count or result.kept:
             try:
                 new = result.text.encode(encoding)
