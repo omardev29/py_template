@@ -1274,12 +1274,16 @@ def next_steps(dest: Path) -> list[str]:
     launcher = os.environ.get("PYTEMPLATE_LAUNCHER", "")
     path = str(dest)
     if launcher.startswith("ps1"):
-        # PowerShell reads the typographic single quotes as quotes too: each is doubled
-        return ["cd '" + re.sub("['\u2018-\u201b]", lambda m: m.group() * 2, path) + "'", "./deploy setup"]
+        # PowerShell reads the typographic single quotes as quotes too: each is doubled. Its cd
+        # (Set-Location -Path) reads [ ] * ? and ` as a wildcard pattern: -LiteralPath then
+        literal = "-LiteralPath " if re.search(r"[\[\]*?`]", path) else ""
+        return [f"cd {literal}'" + re.sub("['\u2018-\u201b]", lambda m: m.group() * 2, path) + "'", "./deploy setup"]
     cmd = launcher.startswith("cmd")
     nushell = launcher == "nu"
     if not nushell and not launcher.startswith("sh:niubash") and os.environ.get("XONSH_VERSION"):
-        return [f"cd {path!r}", "./deploy setup"]  # xonsh reads a quoted argument as a Python string
+        # xonsh reads a quoted argument as a Python string, but expands $NAME in it: @(...) is a
+        # Python expression, passed as it is
+        return [f"cd @({path!r})" if "$" in path else f"cd {path!r}", "./deploy setup"]
     if nushell or (cmd and os.environ.get("NU_VERSION")):
         # nushell: a single-quoted string is raw, a double-quoted one has the escapes \\ and \";
         # the launcher value nu is the shell-setup function `deploy`, else Windows' deploy.cmd

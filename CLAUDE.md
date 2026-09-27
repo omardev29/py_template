@@ -2211,9 +2211,11 @@ Per method:
   is written. On success it prints one hint (init prints none: it runs in the copy), `cd
   <dest>` and `./deploy setup` on lines of their own, for the shell of the launcher
   (`presets.next_steps`, in the order of `shells.guess_shell`: the `PYTEMPLATE_LAUNCHER`
-  prefix `ps1:` (PowerShell single quotes) or `nu` (a raw single-quoted nushell string, a
-  double-quoted one for a path with `'`; `deploy setup`, the shell-setup function), then
-  `XONSH_VERSION` (a Python string literal: xonsh reads quoted arguments so), then
+  prefix `ps1:` (PowerShell single quotes; `cd -LiteralPath` for a path with `[ ] * ?` or a
+  backtick, which its cd reads as a wildcard pattern) or `nu` (a raw single-quoted nushell
+  string, a double-quoted one for a path with `'`; `deploy setup`, the shell-setup function),
+  then `XONSH_VERSION` (a Python string literal: xonsh reads quoted arguments so; `cd @(...)`
+  for a path with `$`, which xonsh expands even inside quotes), then
   `NU_VERSION` behind `cmd` (nushell exports it; deploy.cmd serves xonsh and nushell on
   Windows too; `./deploy.cmd setup`), then cmd `cd /d "..."` and `.\deploy`, else
   `shlex.quote`). Behind deploy.cmd a shell that exports neither variable (a nushell that

@@ -1194,6 +1194,39 @@ def test_new_says_what_comes_next_in_xonsh(monkeypatch: pytest.MonkeyPatch, laun
     assert presets.next_steps(Path("/p/my proj"))[0] == f"cd {shlex.quote(MY_PROJ)}"
 
 
+def _shell_line(argv: list[str], cwd: Path) -> str:
+    r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False)
+    assert r.returncode == 0, (argv, r.stdout, r.stderr)
+    return r.stdout.strip().splitlines()[-1]
+
+
+@pytest.mark.parametrize("shell", ["pwsh", "xonsh"])
+def test_the_next_step_hint_enters_the_folder_in_its_shell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell: str) -> None:
+    """PowerShell's cd reads [ ] and ` as a wildcard pattern ('Cannot find path'), and xonsh
+    expands $HOME inside a quoted argument: the hint typed in its shell missed the folder."""
+    exe = shutil.which(shell)
+    if exe is None:
+        pytest.skip(f"{shell} not found")
+    monkeypatch.delenv("NU_VERSION", raising=False)
+    if shell == "pwsh":
+        monkeypatch.delenv("XONSH_VERSION", raising=False)
+        monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "ps1:Core:7.6")
+        names = ["game [2]", "tick`b", "it's"]
+    else:
+        monkeypatch.setenv("XONSH_VERSION", "0.24.2")
+        monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "")
+        names = ["a$HOME b", "it's"]
+    for name in names:
+        dest = tmp_path / name
+        dest.mkdir()
+        cd = presets.next_steps(dest)[0]
+        if shell == "pwsh":
+            argv = [exe, "-NoProfile", "-NonInteractive", "-Command", f"$ErrorActionPreference = 'Stop'; {cd}; (Get-Location).ProviderPath"]
+        else:
+            argv = [exe, "--no-rc", "-c", f"{cd}\nimport os\nprint(os.getcwd())"]
+        assert os.path.samefile(_shell_line(argv, tmp_path), dest), cd
+
+
 @pytest.mark.parametrize(
     ("launcher", "nu_version", "setup"), [("cmd", "0.106.1", "./deploy.cmd setup"), ("nu", "", "deploy setup")]
 )
