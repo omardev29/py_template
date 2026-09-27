@@ -2852,7 +2852,10 @@ short temp tree and unset `NVIM_APPNAME`.
   `nvim --headless -c "doautocmd UIEnter" -c "luafile .pytemplate/nvim/tests/smoke.lua"` with
   `PT_ROOT=<project>` (timeout 600 s). Every child runs in its own session: a timeout or Ctrl+C
   kills the whole tree (`nvimtest.kill_tree`: SIGTERM to the group, so Neovim can stop its
-  jobstart jobs, then SIGKILL after 5 s; `taskkill /T` on Windows). Per-preset table with
+  jobstart jobs, then SIGKILL after 5 s; `taskkill /T` on Windows), and so do SIGTERM and SIGHUP
+  (`e2e.termination_as_interrupt`, as for `--e2e`: they never reached a step's session, and its
+  Neovim went on as an orphan writing into `--dir`): `interrupted`, 130, the logs folder
+  named (`test_selftest_harness.test_nvim_termination_signal_kills_the_running_step`). Per-preset table with
   timings; exit 1 on any FAIL, non-zero exit, timeout, a missing `DONE` line, a result count
   that differs from it, or a mypy check that did not run with a typing profile
   (`nvimtest.smoke_problem`). Without `nvim`/`git`: SKIP with exit 0, or exit 3 with
@@ -3094,8 +3097,8 @@ install prompt on Windows (POSIX `deploy` and pwsh
 `deploy.ps1` answer it on a pseudo-terminal), Neovim 0.11 on Windows, pyright via Mason, VS
 Code itself (buttons, Problems panel: only simulated), `flet build` outside Windows (verified by
 hand there, section 10; no CI job installs Flutter), bundled PyPy portable builds on CI, Ctrl+C
-handling of the nvim harness (its tree kill only simulated; `selftest --e2e`'s runs in
-`test_e2e_run.py` on POSIX), `[deploy.nuitka]` lto/pgo outside Linux (measured with Nuitka
+handling of the nvim harness (its tree kill only simulated; SIGTERM and SIGHUP run for real on
+POSIX, as `selftest --e2e`'s do in `test_e2e_run.py`), `[deploy.nuitka]` lto/pgo outside Linux (measured with Nuitka
 4.2.2 and gcc 13 only: PGO with MSVC and an ~800-module LTO link are unmeasured). The launcher
 changes of
 September 2026 were developed on Linux (pwsh 7.6 for `deploy.ps1`; niubash simulated by
@@ -4497,6 +4500,8 @@ Code coupling (rename together):
 - `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`;
   `cmd_mode._work_tree_top` calls the private `presets._git_env` (the same git environment as
   `presets._git_init`, whose "inside a work tree" rule it mirrors for `new`);
+  `nvimtest.selftest` imports `e2e.termination_as_interrupt` lazily (one SIGTERM/SIGHUP rule for
+  both harnesses);
   `e2e.flet_build_reason` imports `methods.flet._developer_mode`, and its Flutter size and the
   flet method's docstring follow the manual (`test_docs.test_the_runner_gives_the_manuals_flutter_size`);
   `upx.uses` imports `methods.flet.MOBILE_WEB` lazily (`methods.flet` imports `upx`);

@@ -667,8 +667,23 @@ def selftest(cfg: Config, args: list[str]) -> int:
         ui.warn(msg + ": skipped")
         return 0
     exe = cmd_nvim.which("nvim") or "nvim"
-
     layout = Layout(user_path(ns.dir) if ns.dir else default_dir())
+    from .e2e import termination_as_interrupt
+
+    # Every step runs in a session of its own (kill_tree), so a SIGTERM or SIGHUP sent to this
+    # run's process group (`timeout`, a closed terminal) never reaches it: the runner died at once
+    # and the step's Neovim, git and uv went on as orphans, writing into --dir. They now stop the
+    # run like Ctrl+C, and _wait kills the running step's tree first.
+    with termination_as_interrupt():
+        try:
+            return _run(ns, names, exe, layout)
+        except KeyboardInterrupt:
+            if layout.logs.is_dir():
+                ui.report(f"  logs of the interrupted run: {layout.logs}")
+            raise
+
+
+def _run(ns: argparse.Namespace, names: list[str], exe: str, layout: Layout) -> int:
     _prepare_dir(layout)
     _remove(layout.logs)  # logs of the previous run
     layout.logs.mkdir(parents=True)

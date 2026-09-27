@@ -215,7 +215,9 @@ Exit codes:
 - 141: the reader of stdout went away (`./deploy help | head -1`; Linux and macOS).
 - 143 (129): the runner got a SIGTERM (a SIGHUP) of its own, from `kill`, a supervisor or
   `docker stop` (Linux and macOS). It passes the signal on to the app, waits for it and stops
-  like after Ctrl+C: the app's code, or 143 (129) when the app exited with 0.
+  like after Ctrl+C: the app's code, or 143 (129) when the app exited with 0. `selftest --nvim`
+  and `selftest --e2e` take either signal for a Ctrl+C: they kill the step that runs, with
+  everything it started, and exit with 130.
 - 128 + N: a program killed by signal N.
 - `run`, `test BACKEND` and tasks return their program's exit code (pytest: 5 when no test was
   collected, 4 for a usage error). `test all` tests every backend, even after a failure, and

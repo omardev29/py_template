@@ -9,8 +9,10 @@ test_e2e_plan.py.)"""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -296,3 +298,77 @@ def test_nvim_dir_that_is_a_file_is_a_usage_error(nvim_run: dict[str, Any], tmp_
     with pytest.raises(DeployError, match="is not a folder") as e:
         nvimtest.selftest(make(), ["script", "--dir", str(afile)])
     assert e.value.code == 2 and nvim_run["ran"] == []
+
+
+def _gone(pid: int, within: float = 10.0) -> bool:
+    """True once `pid` runs no more (a zombie waiting for its parent counts as gone)."""
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return True
+        stat = Path(f"/proc/{pid}/stat")
+        try:
+            if stat.is_file() and stat.read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                return True
+        except OSError:
+            return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.1)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM/SIGHUP and process groups are POSIX")
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
+def test_nvim_termination_signal_kills_the_running_step(tmp_path: Path, signame: str) -> None:
+    """`timeout 30m ./deploy selftest --nvim`, a closed terminal, `kill <pid>`: the runner died at
+    once and the running step (a headless Neovim with its git, Mason and uv jobs), in a session of
+    its own, went on as an orphan writing into --dir. Now the run stops like Ctrl+C: the step's
+    tree is killed, `error: interrupted`, exit 130."""
+    import signal
+
+    pidfile = tmp_path / "step.pid"
+    step = f"import os, pathlib, time; pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(120)"
+    x = tmp_path / "w" / "x"
+    script = "\n".join(
+        [
+            "import os, sys",
+            "from pathlib import Path",
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})",
+            "from runner import cli, cmd_nvim, nvimtest",
+            f"x = Path({str(x)!r})",
+            "nv = cmd_nvim.Nvim('nvim', (0, 12, 5), x / 'config', x / 'data', x / 'state', x / 'cache')",
+            "cmd_nvim.which = lambda name: '/x/' + name",
+            "cmd_nvim.query = lambda exe=None, *, env=None: nv",
+            "nvimtest.uv_dirs = lambda env: {}",
+            "nvimtest.prepare_base = lambda layout, exe, env, *, fresh: (nv, None)",
+            "def run_preset(preset, layout, nv, **_):",
+            f"    nvimtest._run_logged([sys.executable, '-c', {step!r}], cwd=layout.base, env=os.environ, log=layout.logs / 'step.log', timeout=300)",
+            "    return nvimtest.Row(preset)",
+            "nvimtest.run_preset = run_preset",
+            f"sys.exit(cli.main(['selftest', '--nvim', 'script', '--dir', {str(tmp_path / 'w')!r}]))",
+        ]
+    )
+    log = tmp_path / "runner.log"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEMPLATE_")}
+    with log.open("wb") as out:
+        runner = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env)
+    child = 0
+    try:
+        deadline = time.monotonic() + 60
+        while not (pidfile.is_file() and pidfile.read_text()):
+            assert runner.poll() is None, log.read_text()
+            assert time.monotonic() < deadline, log.read_text()
+            time.sleep(0.05)
+        child = int(pidfile.read_text())
+        runner.send_signal(getattr(signal, signame))
+        assert runner.wait(timeout=60) == 130, log.read_text()
+        text = log.read_text()
+        assert "error: interrupted" in text and f"logs of the interrupted run: {tmp_path / 'w' / 'logs'}" in text, text
+        assert _gone(child), "the step outlived the runner"
+    finally:
+        if runner.poll() is None:
+            runner.kill()
+        if child and not _gone(child, within=0):
+            os.kill(child, signal.SIGKILL)
