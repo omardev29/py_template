@@ -781,6 +781,14 @@ def test_parse_options() -> None:
             shells.parse_options(bad)
 
 
+@pytest.mark.parametrize("args", [["--tests", ","], ["--tests=, ,"], ["sh", "--tests", " "]])
+def test_a_test_list_that_names_no_test_is_a_usage_error(args: list[str]) -> None:
+    """`--tests ,` left no test and the suite reported `ok ... 0 passed, 0 failed`, exit 0."""
+    with pytest.raises(DeployError, match="names no test") as err:
+        shells.parse_options(args)
+    assert err.value.code == 2
+
+
 # --- quick real probes (the full matrix is ./deploy selftest --shells) --------------------------------
 
 

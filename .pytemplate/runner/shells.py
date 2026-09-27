@@ -1457,9 +1457,12 @@ def parse_options(args: Sequence[str]) -> Options:
         elif key == "--project":
             opts.project = value()
         elif key == "--tests":
-            tests = [t.strip().upper() for t in value().split(",") if t.strip()]
+            raw = value()
+            tests = [t.strip().upper() for t in raw.split(",") if t.strip()]
             if bad := [t for t in tests if t not in TESTS]:
                 raise DeployError(f"unknown test(s): {', '.join(bad)}  (T1..T7)")
+            if not tests:  # a suite that tests nothing must not report success
+                raise DeployError(f"--tests {raw!r} names no test  (T1..T7)")
             opts.tests = [t for t in TESTS if t in tests]
         elif key in ("--jobs", "-j", "--timeout"):
             raw = value()
