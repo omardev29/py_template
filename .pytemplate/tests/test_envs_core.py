@@ -803,6 +803,40 @@ def test_lock_that_first_resolves_pypy_checks_the_code_or_puts_both_files_back(
     assert cmd_env.cmd_lock(make(PYPY), ["--upgrade"]) == 0 and len(checked) == 1  # resolves PyPy already
 
 
+def test_a_relock_whose_pypy_check_fails_puts_both_files_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """rename puts nothing back when ensure_lock fails (its files are renamed by then): a failed
+    PyPy check there left uv.lock resolving for PyPy, and the next apply, which checks the code
+    only when the lock does not resolve for PyPy yet, skipped the check. ensure_lock puts both
+    files back itself."""
+    pyproject, lock = tmp_path / "pyproject.toml", tmp_path / "uv.lock"
+    pyproject.write_text(NO_PYPY_PYPROJECT, encoding="utf-8")
+    lock.write_text("version = 1\n", encoding="utf-8")
+    for module in (render, cmd_env):
+        monkeypatch.setattr(module, "PYPROJECT", pyproject)
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    for name in cmd_env.LOCK_READ_ONLY_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+    def uv(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if list(args) == ["lock"]:
+            lock.write_text("version = 1\n# resolves for pypy too\n", encoding="utf-8")
+        return done(args, 1 if list(args) == ["lock", "--check"] else 0)
+
+    monkeypatch.setattr(envs, "uv", uv)
+
+    def refused(cfg: Config) -> None:
+        raise DeployError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
+
+    monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", refused)
+    with pytest.raises(DeployError, match="Python 3.11"):
+        cmd_env.ensure_lock(make(PYPY))
+    assert pyproject.read_text(encoding="utf-8") == NO_PYPY_PYPROJECT and lock.read_text(encoding="utf-8") == "version = 1\n"
+    assert "put back as they were (the code is not ready for PyPy yet)" in capsys.readouterr().err
+    assert render.gains_pypy(make(PYPY))  # so the next re-lock (apply) checks the code again
+
+
 @pytest.mark.parametrize("name", ["UV_FROZEN", "UV_LOCKED"])
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_ensure_lock_refuses_a_relock_the_environment_makes_a_no_op(monkeypatch: pytest.MonkeyPatch, name: str, dry_run: bool) -> None:

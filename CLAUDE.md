@@ -1773,7 +1773,9 @@ Formats:
 - With PyPy supported user code must be 3.11 syntax and API (no PEP 695;
   `typing_extensions.override`, not `typing.override`). Every re-lock that first makes uv.lock
   resolve for PyPy prechecks it, after the re-lock (`cmd_env.ensure_lock` for mode, apply and
-  rename, and `cmd_env.cmd_lock`, which puts pyproject.toml and uv.lock back when it fails):
+  rename, and `cmd_env.cmd_lock`; both put pyproject.toml and uv.lock back when it fails, so the
+  lock never resolves for PyPy unchecked: rename restores nothing itself, and a failed check there
+  left PyPy locked in, which the next apply then took as checked):
   `render.gains_pypy` reads the managed block of pyproject.toml, never pytemplate.toml, where a
   hand edit of backend.supported, then any mode or lock, locked PyPy in unchecked and apply
   then skipped the check too; mode also syncs .venv-pypy then. The check

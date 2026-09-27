@@ -44,11 +44,15 @@ def ensure_lock(cfg: Config) -> None:
 
     When the rewrite makes uv.lock resolve for PyPy for the first time (render.gains_pypy), the
     code must pass the Python 3.11 check first (cmd_apply.cmd_mode_precheck), after the re-lock:
-    it syncs the tools environment with this configuration. A failure raises, and the caller
-    puts pyproject.toml and uv.lock back. Deciding "PyPy is new" from pytemplate.toml let a hand
+    it syncs the tools environment with this configuration. A failure puts pyproject.toml and
+    uv.lock back as they were here, then raises: whatever the caller restores itself (mode and
+    apply do, rename does not: its files are renamed already), uv.lock never resolves for PyPy
+    unchecked, and the next re-lock checks again (apply after a failed rename skipped the check,
+    PyPy being in the lock already). Deciding "PyPy is new" from pytemplate.toml let a hand
     edit of backend.supported, then any mode, rename or lock, lock PyPy in unchecked."""
     tool = envs.tool_env(cfg)
     gains_pypy = render.gains_pypy(cfg)
+    before = _snapshot((PYPROJECT, PYPROJECT.with_name("uv.lock"))) if gains_pypy else {}
     if render.write_pyproject(cfg):
         ui.info(render.pyproject_message())
         if proc.DRY_RUN:
@@ -62,7 +66,14 @@ def ensure_lock(cfg: Config) -> None:
         _refuse_a_frozen_lock()
         envs.uv(tool, ["lock"])
     if gains_pypy and not proc.DRY_RUN:
-        _pypy_precheck(cfg)
+        try:
+            _pypy_precheck(cfg)
+        except BaseException:
+            restored = _put_back(before)
+            if restored:
+                they = "it was" if len(restored) == 1 else "they were"
+                ui.info(f"{' and '.join(restored)}: put back as {they} (the code is not ready for PyPy yet)")
+            raise
 
 
 def _pypy_precheck(cfg: Config) -> None:
