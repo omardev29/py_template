@@ -1392,7 +1392,7 @@ def test_rename_to_the_same_name_is_not_done_while_pyproject_differs(command_pro
     root = command_project
     pyproject = root / "pyproject.toml"
     pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "foo"', 1), encoding="utf-8")
-    with pytest.raises(DeployError, match=r"pyproject.toml \[project\] name = 'foo' was changed by hand: ./deploy apply"):
+    with pytest.raises(DeployError, match=r"pyproject.toml \[project\] name = 'foo'.\n  ./deploy apply writes 'alpha' there; if src/alpha/ was moved by hand, move it back to src/foo/"):
         rename.cmd_rename(_load(root), ["alpha"])
     assert rename.cmd_rename(_load(root), ["beta"]) == 0  # a real rename writes the name there too
     assert presets.project_name(pyproject.read_text(encoding="utf-8")) == "beta"

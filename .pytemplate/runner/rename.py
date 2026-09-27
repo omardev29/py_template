@@ -1591,9 +1591,11 @@ def _check_the_name_is_applied(cfg: Config, new_name: str) -> None:
             f"(src/{package_of(other)}/).\n  Put back app.name = \"{other}\" in pytemplate.toml, then ./deploy rename {new_name}{either}"
         )
     if new_name == cfg.app.name and project_name is not None and project_name != cfg.app.name:
+        moved = f"src/{package_of(project_name)}/" if config.APP_NAME.fullmatch(project_name) else "its old folder"
         raise DeployError(
             f"rename: the app is already called '{new_name}' (src/{cfg.pkg}/), but pyproject.toml [project] name = "
-            f"'{project_name}' was changed by hand: ./deploy apply puts the app's name back there"
+            f"'{project_name}'.\n  ./deploy apply writes '{new_name}' there; if src/{cfg.pkg}/ was moved by hand, "
+            f"move it back to {moved} first, then ./deploy rename {new_name} (it rewrites the imports too)"
         )
 
 
