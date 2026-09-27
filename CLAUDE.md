@@ -153,7 +153,8 @@ implement the same contract: change them together. The `nu` and `xonsh` snippets
 `shell-setup` (section 4.9) also call uv directly.
 
 1. Find the project root: the directory that holds `.pytemplate/deploy.py`, first from the
-   launcher's own location, else by walking up from the current directory. A walked-up root
+   launcher's own location (a symlink to `deploy` or `deploy.ps1` is followed to the file it
+   names, sections 4.3 and 4.5), else by walking up from the current directory. A walked-up root
    must be the user's: on POSIX its `.pytemplate/deploy.py` passes `test -O` (anyone may create
    `/tmp/.pytemplate/deploy.py`, and it ran as the caller); on Windows, whose owners are not read
    (an Administrators-owned checkout would fail), a drive root is never taken. Otherwise exit 2
@@ -275,7 +276,12 @@ header rules (with detector tests proving each rule fires).
   holds `.pytemplate/deploy.py`: `$PWD` is logical, and below a symlinked folder its `..` is
   not the folder the kernel found `../deploy` in; then the relative path stays (uv resolves it
   physically, like the kernel). A logical parent that is ANOTHER project still wins (fixing
-  that needs `test -ef`, which `shellcheck -s sh` rejects, or a `pwd -P` fork).
+  that needs `test -ef`, which `shellcheck -s sh` rejects, or a `pwd -P` fork). A symlink to
+  the launcher (`~/bin/pdeploy -> proj/deploy`) is followed to the file it names
+  (`_pt_from_launcher`: `[ -h ]`, then `readlink`, at most 40 links; a relative target is
+  joined to its link's folder as text and the kernel resolves its `..`; without `readlink` the
+  link's own folder stays): the link's folder was taken for the launcher's, exit 2
+  (`test_a_launcher_reached_through_a_symlink_finds_its_project`).
 - Windows detection (computed first, before any path helper): `OS=Windows_NT` and no
   `WSL_DISTRO_NAME`; `uname -s` only when `OS` is unset. Never `OSTYPE` (niubash fakes
   `msys`). Never trust the output format of `uname` or `cygpath`: in non-login MSYS2 shells on
@@ -315,7 +321,8 @@ header rules (with detector tests proving each rule fires).
   cmd expands them even on `rem` lines.
 - Root: `%~dp0` has a trailing backslash and can be wrong when cmd found the file through PATH
   from a quoted name: check `%~dp0.pytemplate\deploy.py` first, else walk up from `%CD%` (the
-  start is normalised so a drive root works).
+  start is normalised so a drive root works). A symlink to `deploy.cmd` is not followed (cmd
+  cannot read a link): run from outside the project it finds no project.
 - A `UV` variable that names a folder is rejected. The registry is read with
   `reg query KEY /v Path` (cmd has no MSYS rewriting) into a variable (`set "PT_LIST=%%B"`),
   never passed as `call` arguments: a quoted entry (`"C:\Program Files\x"`) would split them
@@ -427,7 +434,11 @@ header rules (with detector tests proving each rule fires).
   too: the same Core hand-over), plus Windows PowerShell 5.1 on Windows; only the registry
   and cmd tests are Windows-only.
 - Root: `$PSScriptRoot`, else walk up from `Get-Location` (its `ProviderPath` when the provider
-  is FileSystem, else `[Environment]::CurrentDirectory`), which is also the caller cwd.
+  is FileSystem, else `[Environment]::CurrentDirectory`), which is also the caller cwd. A
+  symlink to `deploy.ps1` (`$PSCommandPath` a `ReparsePoint` whose `LinkType` is
+  `SymbolicLink`) is followed to the file its `Target` names first, at most 40 links; off
+  Windows a relative target is joined to the PHYSICAL folder of its link (`/bin/sh`'s
+  `cd -P`/`pwd -P`: .NET folds `..` as text) (`test_ps1_reached_through_a_symlink_finds_its_project`).
 - Execution policy `Restricted`/`AllSigned`, or Mark-of-the-Web on a copy from a downloaded
   zip: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, `Unblock-File .\deploy.ps1`, or
   use `deploy.cmd`. `shells.doctor` reports the policy of 5.1 and 7 separately (`PS_EDITIONS`):

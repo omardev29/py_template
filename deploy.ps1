@@ -103,8 +103,26 @@ function Find-Uv {
     return Find-UvIn $dirs
 }
 
-# --- project root: this file's folder, else walk up from the current location.
+# --- project root: this file's folder, else walk up from the current location. A symlink to
+# this file (~/bin/pdeploy.ps1 -> proj/deploy.ps1) is followed to the launcher it names.
 $root = $PSScriptRoot
+$self = $PSCommandPath
+for ($hops = 0; $self -and $hops -lt 40; $hops++) {
+    $link = try {
+        if ([IO.File]::GetAttributes($self) -band [IO.FileAttributes]::ReparsePoint) {
+            $item = Get-Item -LiteralPath $self -Force -ErrorAction Stop
+            if ($item.LinkType -eq 'SymbolicLink') { @($item.Target)[0] }
+        }
+    } catch { $null }
+    if (-not $link) { break }
+    $dir = [IO.Path]::GetDirectoryName($self)
+    if (-not $onWindows -and -not [IO.Path]::IsPathRooted($link)) {
+        # Relative to the PHYSICAL folder of the link (.NET folds '..' as text, the kernel does not).
+        $dir = & /bin/sh -c 'CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P' sh $dir
+    }
+    $self = [IO.Path]::Combine([string]$dir, $link)
+    $root = [IO.Path]::GetDirectoryName($self)
+}
 if (-not ($root -and [IO.File]::Exists([IO.Path]::Combine($root, '.pytemplate', 'deploy.py')))) {
     $root = $null
     $loc = Get-Location

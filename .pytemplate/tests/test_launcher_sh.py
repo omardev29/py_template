@@ -161,7 +161,8 @@ LINT_RULES = [
     (r"(^|[\s;&|(])set\s+-o\s+(errexit|nounset)", "no set -e / set -u (bash 3.2, niubash in-process)"),
     (r"(^|[\s;&|(])cd(\s|$)", "the launcher never changes directory (niubash would move the caller)"),
     # `x=$(cmd)` takes cmd's status: a caller's set -e (sh -e deploy, niubash) would stop there.
-    (r"^(?!.*\|\|).*\b_pt_\w+=\$\(", "a command substitution needs `|| _pt_x=` (a caller's set -e)"),
+    # (An arithmetic expansion, _pt_n=$((_pt_n + 1)), runs no command.)
+    (r"^(?!.*\|\|).*\b_pt_\w+=\$\((?!\()", "a command substitution needs `|| _pt_x=` (a caller's set -e)"),
 ]
 PREFIX_ONLY = {"IFS", "MSYS_NO_PATHCONV", "MSYS2_ARG_CONV_EXCL", "UV_PYTHON", "PYTHONHOME", "PYTHONPATH", "UV_WORKING_DIR"}  # only as `NAME=value command`
 EXPORTED = {"PYTEMPLATE_CALLER_CWD", "PYTEMPLATE_LAUNCHER"}
@@ -354,7 +355,7 @@ def test_lint_detects(snippet: str, why: str) -> None:
 
 
 def test_lint_accepts_a_clean_launcher() -> None:
-    code = "#!/bin/sh\n_pt_ok() {\n    return 0\n}\n_pt_v=$(printf '%s' \"$1\") || _pt_v=\nIFS= read -r _pt_v || :\n"
+    code = "#!/bin/sh\n_pt_ok() {\n    return 0\n}\n_pt_v=$(printf '%s' \"$1\") || _pt_v=\nIFS= read -r _pt_v || :\n_pt_v=$((1 + 1))\n"
     tail = "\nunset -f _pt_ok\nunset _pt_v\nif [ \"$#\" -eq 1 ]; then\n    exit \"$1\"\nfi\nUV_PYTHON='' \"$@\"\nexec \"$@\"\n"
     assert lint(code + tail) == []
 
@@ -601,6 +602,41 @@ def test_relative_launcher_from_a_symlinked_subfolder(tmp_path: Path, via: str) 
     assert Path(str(run.probe["root"])) == ROOT
     assert run.probe["caller_cwd_raw"] == str(link)
     assert run.probe["caller_cwd"] == str(link)
+
+
+def _launcher_links(tmp_path: Path) -> dict[str, Path]:
+    """Links to ./deploy from folders outside the project: an absolute one in a bin folder, a
+    relative one to that link, and a relative one seen through a symlinked folder (~/bin ->
+    /opt/tools/bin: its '..' is the physical folder's, as the kernel resolves it)."""
+    bindir, chain, tools, home = tmp_path / "bin", tmp_path / "chain", tmp_path / "tools" / "bin", tmp_path / "home"
+    for folder in (bindir, chain, tools, home):
+        folder.mkdir(parents=True)
+    (bindir / "pdeploy").symlink_to(LAUNCHER)
+    (chain / "rel").symlink_to(Path("..") / "bin" / "pdeploy")
+    (tmp_path / "tools" / "proj").symlink_to(ROOT, target_is_directory=True)
+    (tools / "pdeploy").symlink_to(Path("..") / "proj" / "deploy")
+    (home / "bin").symlink_to(tools, target_is_directory=True)
+    return {"absolute": bindir / "pdeploy", "relative, to a link": chain / "rel", "relative, in a linked folder": home / "bin" / "pdeploy"}
+
+
+@needs_posix
+@pytest.mark.parametrize("name", POSIX_SHELLS)
+def test_a_launcher_reached_through_a_symlink_finds_its_project(name: str, tmp_path: Path) -> None:
+    """A link to ./deploy in a folder on PATH (~/bin/pdeploy -> proj/deploy), run from outside the
+    project, said there was no .pytemplate/deploy.py next to this launcher (exit 2): the folder of
+    the link was taken for the launcher's. The link is followed to the file it names."""
+    argv = _shell_argv(name)
+    away = tmp_path / "away"
+    away.mkdir()
+    links = _launcher_links(tmp_path)
+    runs = {how: Run([*argv, link, "__probe", "5", "0", *ARGS], away, _clean_env()) for how, link in links.items()}
+    if name == "sh" and os.access(LAUNCHER, os.X_OK):
+        runs["executed"] = Run([links["absolute"], "__probe", "5", "0", *ARGS], away, _clean_env())
+    for how, run in runs.items():
+        try:
+            run.check(5, away)
+        except AssertionError as e:
+            raise AssertionError(f"{how}: {e}") from None
 
 
 def _copy_project(dest: Path) -> Path:

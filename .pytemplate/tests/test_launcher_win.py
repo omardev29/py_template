@@ -448,6 +448,37 @@ def _ps_session(launcher: str, legacy: bool) -> str:
 
 
 @pytest.mark.parametrize("name", PS_NAMES)
+def test_ps1_reached_through_a_symlink_finds_its_project(name: str, tmp_path: Path) -> None:
+    """A link to deploy.ps1 in a folder on PATH (~/bin/pdeploy.ps1 -> proj/deploy.ps1), run from
+    outside the project: $PSScriptRoot is the link's folder, and the launcher said there was no
+    .pytemplate/deploy.py next to it (exit 2). The link is followed to the file it names."""
+    exe = _ps_exe(name)
+    bindir, chain = tmp_path / "bin", tmp_path / "chain"
+    links = {"absolute": bindir / "pdeploy.ps1", "relative, to a link": chain / "rel.ps1"}
+    try:
+        for folder in (bindir, chain):
+            folder.mkdir()
+        links["absolute"].symlink_to(PS1)
+        links["relative, to a link"].symlink_to(Path("..") / "bin" / "pdeploy.ps1")
+        if not IS_WINDOWS:  # a relative target seen through a symlinked folder: the kernel's '..'
+            tools = tmp_path / "tools" / "bin"
+            tools.mkdir(parents=True)
+            (tmp_path / "tools" / "proj").symlink_to(ROOT, target_is_directory=True)
+            (tools / "pdeploy.ps1").symlink_to(Path("..") / "proj" / "deploy.ps1")
+            (tmp_path / "home").mkdir()
+            (tmp_path / "home" / "bin").symlink_to(tools, target_is_directory=True)
+            links["relative, in a linked folder"] = tmp_path / "home" / "bin" / "pdeploy.ps1"
+    except OSError as e:  # Windows without Developer Mode or admin rights
+        pytest.skip(f"cannot create a symlink here: {e}")
+    away = tmp_path / "away"
+    away.mkdir()
+    for how, link in links.items():
+        r = _session(exe, f"& {_ps_literal(str(link))} __probe 5 0 x\nexit $LASTEXITCODE", away)
+        assert r.returncode == 5, (how, r.stdout, r.stderr)
+        _check(_probes(r)[0], away, "ps1:", ["x"])
+
+
+@pytest.mark.parametrize("name", PS_NAMES)
 def test_ps1_round_trip_in_a_session(name: str) -> None:
     exe = _ps_exe(name)
     legacy = name == "pwsh"  # also with $PSNativeCommandArgumentPassing = 'Legacy' (5.1 always is)

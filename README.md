@@ -1263,7 +1263,10 @@ the enclosing project from any subfolder, with a comment saying where to paste i
 tasks), `pwsh`, `powershell`; without a name it guesses the shell. The xonsh alias and the nu
 function run uv directly (no `deploy.cmd` and its argument limits; on Windows only a real
 `uv.exe`, never a `uv.cmd` shim); the pwsh function passes
-pipeline input on. Print the xonsh snippet again to complete commands added later.
+pipeline input on. Print the xonsh snippet again to complete commands added later. A symlink to
+a project's `deploy` (or `deploy.ps1`) in a folder on PATH also works from any folder: the
+launcher follows it to its project (`ln -s ~/code/game/deploy ~/bin/game`); `deploy.cmd` cannot
+be linked that way.
 
 ```sh
 ./deploy shell-setup niubash    # niubash reads ~/.niubashrc, but `niu -c` and scripts read $NIU_ENV
