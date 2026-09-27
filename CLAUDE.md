@@ -1987,7 +1987,12 @@ Per method:
   (`common.requirements_digest`: the pin lines of the export, not its header). The archive is
   written by `pyz._write_archive` (deflate, never zstd: it must open on 3.11 and PyPy;
   `strict_timestamps=False`: a payload file older than 1980, e.g. from the Nix store, used to
-  crash `zipapp`; shebang `/usr/bin/env python3`, mode 0755). The `<n>.cmd` wrapper runs each
+  crash `zipapp`; shebang `/usr/bin/env python3`, mode 0755). Whatever `python3` starts it, the
+  bootstrap must reach its `min_python` check (`<name>: needs Python X.Y or newer`): nothing
+  before `main()` may need a newer Python, hence its `from __future__ import annotations` (a
+  `bool | None` annotation made macOS's python3 3.9 die with a TypeError;
+  `test_pyz_bootstrap_reaches_its_version_check_on_an_old_python` runs every Python older than
+  3.11 it finds). The `<n>.cmd` wrapper runs each
   candidate interpreter with a minimum-version probe, sets `PYTHONUTF8=1`;
   with `app.gui` its run lines are `start "" pyw/pythonw/pypyw` (`common.windowed`). `pyz-merge`
   (>= 2 parts; `_read_info` refuses a part without a valid `_pyz.json`) requires the same app

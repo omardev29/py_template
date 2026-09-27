@@ -15,6 +15,10 @@ usable cache (no home folder, a read-only one) the .pyz extracts into a private 
 folder for this run only.
 """
 
+# Never evaluated annotations: an older Python must get as far as main()'s version check
+# (`bool | None` raised TypeError before it on 3.9, the system python3 of macOS)
+from __future__ import annotations
+
 import atexit
 import errno
 import json

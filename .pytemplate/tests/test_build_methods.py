@@ -3,6 +3,7 @@ pyz/portable layouts and bootstraps. No network, no packager: the packager calls
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.machinery
 import json
@@ -817,6 +818,38 @@ def test_pyz_bootstrap_refuses_an_older_python(tmp_path: Path) -> None:
     r = run_pyz(newer, pyz_env(tmp_path / "cache"))
     assert r.returncode == 1 and "demo: needs Python 3.99 or newer" in r.stderr
     assert not (tmp_path / "cache").exists()  # nothing extracted
+
+
+def _old_pythons() -> list[str]:
+    """Interpreters older than 3.11 on this machine (macOS's /usr/bin/python3 is 3.9)."""
+    found: dict[str, str] = {}
+    for name in ("python3.8", "python3.9", "python3.10", "/usr/bin/python3"):
+        exe = shutil.which(name)
+        if not exe:
+            continue
+        r = subprocess.run([exe, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"], capture_output=True, text=True, timeout=60, check=False)
+        version = r.stdout.strip()
+        if r.returncode == 0 and version and tuple(int(x) for x in version.split(".")) < (3, 11):
+            found.setdefault(version, exe)
+    return sorted(found.values())
+
+
+def test_pyz_bootstrap_reaches_its_version_check_on_an_old_python(tmp_path: Path) -> None:
+    # `def _lock(fd: int) -> bool | None` is evaluated when the module loads: Python 3.9 (macOS's
+    # python3, Debian 11) died with "TypeError: unsupported operand type(s) for |" instead of
+    # "needs Python 3.11 or newer". Nothing before main()'s check may need a newer Python
+    source = (TEMPLATES / "pyz" / "__main__.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, feature_version=(3, 7))
+    futures = {a.name for node in tree.body if isinstance(node, ast.ImportFrom) and node.module == "__future__" for a in node.names}
+    assert "annotations" in futures  # no annotation is evaluated: PEP 604 and list[int] need 3.10 / 3.9
+    old = _old_pythons()
+    if not old:
+        pytest.skip("no Python older than 3.11 here (macOS has one)")
+    app = fake_pyz(tmp_path / "app.pyz", min_python=[3, 11])
+    for exe in old:
+        r = subprocess.run([exe, "-S", str(app)], capture_output=True, text=True, env=pyz_env(tmp_path / "cache"), timeout=120, check=False)
+        assert r.returncode == 1 and "demo: needs Python 3.11 or newer (you have" in r.stderr, (exe, r.stderr)
+        assert "Traceback" not in r.stderr
 
 
 @pytest.mark.parametrize("case", ["no_home", "unwritable"])
