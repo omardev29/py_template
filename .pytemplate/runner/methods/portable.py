@@ -438,12 +438,14 @@ def _bundle_flet_client(cfg: Config, lib: Path) -> dict[str, str]:
     the app looks for exactly that archive (nuitka.flet_client_env)."""
     if not (lib / "flet_desktop").is_dir():
         return {}
-    from .nuitka import _flet_client_archive, flet_client_env
+    from .nuitka import _flet_client_archive, fingerprint_file, flet_client_env
 
     archive = _flet_client_archive(cfg)
     (lib / "flet_desktop" / "app").mkdir(exist_ok=True)
-    shutil.copy2(archive, lib / "flet_desktop" / "app" / archive.name)
-    return flet_client_env(archive.name)
+    for file in (archive, fingerprint_file(archive)):  # the fingerprint: no hashing at every start
+        shutil.copy2(file, lib / "flet_desktop" / "app" / file.name)
+    linux = flet_client_env(archive.name)
+    return {**linux, "FLET_APP_ID": cfg.app.name} if linux else {}  # the taskbar groups it as the app
 
 
 def _warn_host_only(key: str, requirements: Path, lib: Path) -> None:

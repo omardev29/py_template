@@ -9,6 +9,7 @@ mypyc backend, your core modules are already compiled by mypyc (Nuitka includes 
 from __future__ import annotations
 
 import gzip
+import hashlib
 import http.client
 import json
 import os
@@ -218,9 +219,11 @@ def _flet_client_archive(cfg: Config) -> Path:
     if archive.is_file():
         problem = archive_problem(archive)
         if not problem:
+            _fingerprint(archive)  # a cache from before the sidecar
             return archive
         ui.warn(f"{rel(archive)} is damaged ({problem}): downloading it again")
         archive.unlink()
+    fingerprint_file(archive).unlink(missing_ok=True)  # it names the old bytes
     url = f"https://github.com/flet-dev/flet/releases/download/v{version}/{name}"
     url = os.environ.get("FLET_CLIENT_URL") or url  # flet_desktop's own override (a mirror)
     source = f"{url} (FLET_CLIENT_URL)" if os.environ.get("FLET_CLIENT_URL") else url
@@ -247,7 +250,33 @@ def _flet_client_archive(cfg: Config) -> Path:
         partial.unlink(missing_ok=True)
         raise DeployError(f"the Flet client downloaded from {source} is not a whole archive: {problem}. Build again to retry", 3)
     partial.replace(archive)
+    _fingerprint(archive)
     return archive
+
+
+def fingerprint_file(archive: Path) -> Path:
+    """<archive>.sha256, next to the archive in the cache and where it is bundled."""
+    return archive.with_name(archive.name + ".sha256")
+
+
+def _fingerprint(archive: Path) -> None:
+    """Write `<sha256> <size>` into fingerprint_file(archive), as `flet pack` does: flet_desktop
+    reads it at every start instead of hashing the whole client (tens of MB) again, which it
+    did at every start that could not keep its own copy next to the archive (every onefile
+    start, a read-only install). A sidecar that names the current size is kept."""
+    sidecar = fingerprint_file(archive)
+    size = archive.stat().st_size
+    try:
+        digest, recorded = sidecar.read_text(encoding="ascii").split()
+        if recorded == str(size) and len(digest) == 64:
+            return
+    except (OSError, ValueError, UnicodeDecodeError):
+        pass
+    h = hashlib.sha256()
+    with archive.open("rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    sidecar.write_text(f"{h.hexdigest()} {size}", encoding="ascii")
 
 
 # The package data a Flet app reads at runtime (flet_cli/__pyinstaller/hook-flet.py collects the same)
@@ -316,16 +345,25 @@ def build(req: BuildRequest) -> Path:
         # JSON files (flet_cli's own PyInstaller hook adds the same), and without them the app
         # died with FileNotFoundError at its first icon.
         archive = _flet_client_archive(cfg)
+        sidecar = fingerprint_file(archive)
         (stage / "flet-client").mkdir(exist_ok=True)
-        shutil.copy2(archive, stage / "flet-client" / archive.name)
+        for file in (archive, sidecar):
+            shutil.copy2(file, stage / "flet-client" / file.name)
+        linux = flet_client_env(archive.name)
+        # The taskbar identity flet pack's runtime hook sets: on Linux the client window groups
+        # and labels as the app (FLET_APP_ID), not as the shared "flet" binary. Windows wants
+        # the executable's path at runtime (FLET_APP_USER_MODEL_ID), which Nuitka cannot force
+        identity = {"FLET_APP_ID": cfg.app.name} if linux else {}
         argv += [
             "--include-package=flet",
             "--include-package=flet_desktop",
             *(f"--include-package-data={data}" for data in FLET_PACKAGE_DATA),
             f"--include-data-files=flet-client/{archive.name}=flet_desktop/app/{archive.name}",
+            # flet_desktop reads the fingerprint instead of hashing the client at every start
+            f"--include-data-files=flet-client/{sidecar.name}=flet_desktop/app/{sidecar.name}",
             # Linux: the app looks for exactly this archive, not for the name of the user's glibc
             # or of a pyproject.toml in the folder it starts from (it downloaded one at first start)
-            *(f"--force-runtime-environment-variable={k}={v}" for k, v in flet_client_env(archive.name).items()),
+            *(f"--force-runtime-environment-variable={k}={v}" for k, v in {**linux, **identity}.items()),
         ]
     argv += optimization_args(cfg)  # before extra_args and the command line: a later --lto wins
     argv += cfg.deploy.nuitka.extra_args + req.extra

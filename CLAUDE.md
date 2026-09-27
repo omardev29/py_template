@@ -2102,7 +2102,12 @@ Per method:
   name it looks for forced into the binary on Linux (`nuitka.flet_client_env` through
   `--force-runtime-environment-variable`: `FLET_LINUX_DISTRO`, `FLET_DESKTOP_FLAVOR`; the app
   computed another name from the user's glibc or a pyproject.toml in its current folder and
-  downloaded the client, section 15.1). So a
+  downloaded the client, section 15.1), its fingerprint `<archive>.sha256` next to it
+  (`nuitka.fingerprint_file`, written by `nuitka._fingerprint` when the archive is cached, as
+  `flet pack` writes one: without it flet_desktop hashed the whole client at every onefile
+  start) and, on Linux, `FLET_APP_ID=<app.name>` (the taskbar identity of flet pack's runtime
+  hook; its Windows one, `FLET_APP_USER_MODEL_ID`, is the executable's path at runtime, which
+  Nuitka cannot force: the window groups as flet there). So a
   download is cached only when it delivered every byte the server announced (Content-Length)
   and the archive reads to its end the way flet_desktop extracts it (`nuitka.archive_problem`:
   zipfile CRCs, or tarfile over gzip and the gzip trailer); a cached archive is checked again
@@ -3720,6 +3725,19 @@ Flet (flet, flet-desktop, flet pack, flet build):
   Test: `test_workarounds.py::test_nuitka_pins_the_client_name_the_app_looks_for`,
   `test_build_methods.py::test_the_flet_client_env_pins_what_the_archive_was_named_for`. Goes:
   never (flet pack's own exe does not pin it: another glibc bracket downloads its client).
+- **flet_desktop hashes a bundled client without its fingerprint, and names the window "flet"**
+  (LIMITATION, Flet 1.0.1): it keys its client cache by the archive's SHA-256, read from
+  `<archive>.sha256` (`flet pack` writes it) or hashed at every start that cannot keep one next to
+  the archive (onefile, a read-only folder); and the taskbar groups the client window as the shared
+  `flet` unless `FLET_APP_ID` (Linux) or `FLET_APP_USER_MODEL_ID` (Windows) is set, which flet
+  pack's PyInstaller runtime hook does. Fix: `nuitka._fingerprint` writes the sidecar with the
+  cached archive, and nuitka and a bundled portable folder ship it; Linux gets `FLET_APP_ID`
+  (forced by nuitka, exported by the portable launcher); Windows' ID must be the executable's path
+  at runtime, which neither can set: not done (10). Test:
+  `test_workarounds.py::test_nuitka_bundles_the_client_fingerprint_flet_pack_writes`,
+  `test_nuitka_pins_the_client_name_the_app_looks_for`,
+  `test_build_methods.py::test_a_bundled_portable_flet_app_carries_its_desktop_client`. Goes:
+  never.
 - **flet loads its controls lazily** (LIMITATION): module `__getattr__` + `importlib`, which
   Nuitka cannot follow. Fix: `--include-package=flet --include-package=flet_desktop` in
   `nuitka.build` (10). Test: `test_workarounds.py::test_nuitka_bundles_the_flet_client`. Goes:

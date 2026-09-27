@@ -3512,6 +3512,7 @@ def test_a_bundled_portable_flet_app_carries_its_desktop_client(sandbox: Path, m
     archive = sandbox / "cache" / name
     archive.parent.mkdir()
     archive.write_bytes(b"client")
+    archive.with_name(name + ".sha256").write_text(f"{'a' * 64} 6", encoding="ascii")  # nuitka._fingerprint
     cfg = make({"deploy": {"portable": {"archive": False, "runtime": "bundled" if bundled else "system"}}})
     monkeypatch.setattr(portable, "IS_WINDOWS", False)
     monkeypatch.setattr(common, "host_target", lambda c, b: common.Target("cp", 3, 14, "linux", "x86_64"))
@@ -3538,8 +3539,10 @@ def test_a_bundled_portable_flet_app_carries_its_desktop_client(sandbox: Path, m
     launcher = (out / "myapp.sh").read_text(encoding="utf-8")
     if bundled:
         assert bundled_client.read_bytes() == b"client"  # where flet_desktop looks for one
+        assert bundled_client.with_name(name + ".sha256").is_file()  # read instead of hashing the client
         # The app looks for exactly that archive: not by the user's glibc or current folder
         assert "export FLET_LINUX_DISTRO=debian12" in launcher and "export FLET_DESKTOP_FLAVOR=light" in launcher
+        assert "export FLET_APP_ID=myapp" in launcher  # the taskbar groups the window as the app
     else:  # runtime = "system": a Python of the user's machine, like a pyz (documented)
         assert not bundled_client.exists() and "FLET_" not in launcher
 
