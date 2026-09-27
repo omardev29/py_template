@@ -1573,6 +1573,32 @@ def test_rewritten_files_keep_their_mode_and_links(tmp_path: Path) -> None:
     assert (root / "pytemplate.toml").is_symlink() and 'name = "beta"' in shared.read_text(encoding="utf-8")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX owners and hard links")
+def test_rewritten_files_keep_their_owner_and_hard_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rewrite through a temporary file made a new inode: a hard link kept the old text, and
+    root renaming a bind-mounted project (a dev container) left the user's files root-owned."""
+    linked = tmp_path / "x.py"
+    linked.write_bytes(b"import rocks\n")
+    os.link(linked, tmp_path / "hard.py")
+    rename._replace_bytes(linked, b"import stone\n")
+    assert (tmp_path / "hard.py").read_bytes() == b"import stone\n" and linked.stat().st_nlink == 2
+    own = tmp_path / "own.py"
+    own.write_bytes(b"import rocks\n")
+    inode = own.stat().st_ino
+    rename._replace_bytes(own, b"import stone\n")  # the runner's own file: through a temporary file
+    assert own.read_bytes() == b"import stone\n" and own.stat().st_ino != inode
+    if os.geteuid() == 0:  # a real other owner (root can hand the file to another user)
+        os.chown(own, 4242, 4242)
+    else:
+        monkeypatch.setattr(os, "geteuid", lambda: own.stat().st_uid + 1)
+    owner, inode = (own.stat().st_uid, own.stat().st_gid), own.stat().st_ino
+    rename._replace_bytes(own, b"import pebble, stone\n")
+    assert own.read_bytes() == b"import pebble, stone\n"
+    assert (own.stat().st_uid, own.stat().st_gid) == owner and own.stat().st_ino == inode
+    rename._replace_bytes(own, b"import s\n")  # shorter: the old tail is cut
+    assert own.read_bytes() == b"import s\n"
+
+
 def test_a_restore_that_fails_is_never_called_undone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_project(tmp_path, "script", "alpha")
     planned = rename.plan(tmp_path, "alpha", "beta")

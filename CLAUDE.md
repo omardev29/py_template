@@ -947,7 +947,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   git". Then: move `src/<old_pkg>/` first (the step that can fail on a locked file; case-only
   renames use two moves), write the files (`apply_plan`: each through a temporary file next to
   it and `os.replace` (`_replace_bytes`: mode kept, a symlink stays a link, a read-only file is
-  an error), so a write cut short (disk full, a quota, `ulimit -f`) never leaves one
+  an error; a file with other hard links, or of another owner or group, is written in place with
+  its old bytes put back on failure, `_keeps_inode`: a new inode dropped the links and made the
+  files of a bind-mounted project root's), so a write cut short (disk full, a quota, `ulimit -f`) never leaves one
   half-written; a write that fails undoes everything, old bytes back and the folder moved back,
   and the error names whatever it could not undo), `cmd_env.ensure_lock` (a failure there says
   "the files are already renamed ... ./deploy apply"), `render.apply`, the ruff tidy-up, and the

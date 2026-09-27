@@ -55,6 +55,7 @@ from __future__ import annotations
 import argparse
 import ast
 import bisect
+import contextlib
 import dataclasses
 import functools
 import io
@@ -62,6 +63,7 @@ import keyword
 import os
 import re
 import stat
+import sys
 import tokenize
 import tomllib
 import warnings
@@ -1210,12 +1212,44 @@ def _move_dir(root: Path, old_rel: str, new_rel: str) -> None:
         ) from None
 
 
+def _keeps_inode(path: Path) -> bool:
+    """Whether `path` must be rewritten in place (POSIX): a new file would drop its other hard
+    links, or take the runner's owner and group (root renaming a bind-mounted project in a
+    container left the user's files root-owned)."""
+    if sys.platform == "win32":
+        return False
+    else:
+        try:
+            info = os.stat(path)
+        except OSError:
+            return False
+        return info.st_nlink > 1 or info.st_uid != os.geteuid() or info.st_gid != os.getegid()
+
+
 def _replace_bytes(path: Path, data: bytes) -> None:
     """Write `data` to `path` so that it is never left half-written: the bytes go to a temporary
     file next to it, which then replaces it (os.replace is atomic). A write that fails midway (disk
     full, a quota, a file size limit) leaves `path` as it was. The file keeps its permissions, a
-    symlink stays a link, and a read-only file is an error, as with a plain write."""
-    write_whole(path, data)
+    symlink stays a link, and a read-only file is an error, as with a plain write. A file with
+    other hard links, or owned by another user or group (_keeps_inode), is written in place
+    instead, and its old bytes are put back when that write fails."""
+    if not _keeps_inode(path):
+        write_whole(path, data)
+        return
+    with open(path, "r+b") as f:
+        old = f.read()
+        try:
+            f.seek(0)
+            f.write(data)
+            f.truncate()
+            f.flush()
+        except BaseException:
+            with contextlib.suppress(OSError):
+                f.seek(0)
+                f.write(old)
+                f.truncate()
+                f.flush()
+            raise
 
 
 def apply_plan(root: Path, plan_: Plan) -> None:
