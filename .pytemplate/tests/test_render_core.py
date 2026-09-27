@@ -1202,6 +1202,23 @@ def test_ci_template_linux_deps_line_may_be_indented(ci_template: Path) -> None:
     assert "apt-get" in expected["raylib"] and "apt-get" not in expected["script"]
 
 
+def test_a_template_that_cannot_be_read_is_a_clear_error(profiles: Path, ci_template: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A template the runner may not read (permissions, a lock) ended render.load_profile and
+    render.ci_workflow in an internal-error traceback; the editors' templates said "cannot read"."""
+    real = Path.read_text
+
+    def read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self.name in ("off.toml", "ci.yml"):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    with pytest.raises(DeployError, match=r"cannot read .*off\.toml: Permission denied"):
+        render.load_profile("off")
+    with pytest.raises(DeployError, match=r"cannot read .*ci\.yml: Permission denied"):
+        render.ci_workflow(CFG)
+
+
 def test_ci_template_placeholder_left_is_a_clear_error(ci_template: Path) -> None:
     ci_template.write_text(ci_template.read_text(encoding="utf-8").replace("\n__LINUX_DEPS__\n", "\n      - run: x __LINUX_DEPS__\n"), encoding="utf-8")
     with pytest.raises(DeployError, match="__LINUX_DEPS__ not replaced"):

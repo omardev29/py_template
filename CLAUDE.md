@@ -1284,7 +1284,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `config.toml_value` escapes DEL and refuses lone surrogates.
 - `config.update_file` applies every change in memory first, writes only when something changed
   and never under `--dry-run`, keeps a UTF-8 BOM and the line endings, and never writes broken
-  TOML; it writes through `project.write_whole`, so a full disk leaves the old file whole. `mode` drops changes whose value is already set, so their spelling stays.
+  TOML; it writes through `project.write_whole`, so a full disk leaves the old file whole, and a
+  file it may not write (read-only, immutable, locked) is a `DeployError` naming it (it was an
+  internal-error traceback; so was a template `render.load_profile` or `ci_workflow` could not
+  read). `mode` drops changes whose value is already set, so their spelling stays.
 - `mode` keeps the old bytes of `pytemplate.toml`, `pyproject.toml` and `uv.lock` (the lock next to
   `pyproject.toml`) and puts them back (`cmd_mode._restore`) when
   `config.update_file`, `cmd_env.ensure_lock` or the new environment's `envs.sync` fails or is

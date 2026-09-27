@@ -985,6 +985,36 @@ def test_update_file_never_writes_a_broken_file(cfg_file: Path, monkeypatch: pyt
     assert cfg_file.read_bytes() == VALID.encode("utf-8")
 
 
+def test_update_file_names_a_file_it_cannot_write(cfg_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A read-only, immutable or locked pytemplate.toml ended `mode` in a traceback labelled
+    "internal runner error"; it is a config error naming the file, as for pyproject.toml."""
+
+    def refused(path: Path, data: bytes) -> None:
+        raise PermissionError(1, "Operation not permitted", str(path))
+
+    monkeypatch.setattr(config, "write_whole", refused)
+    with pytest.raises(DeployError, match="cannot write pytemplate.toml: Operation not permitted") as info:
+        config.update_file([("typing", "relaxed", "warn")])
+    assert info.value.code == 2
+    assert cfg_file.read_bytes() == VALID.encode("utf-8")
+
+
+def test_mode_on_a_config_it_cannot_write_is_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = config.load(set())
+    fake = _Relock(tmp_path, monkeypatch, "none")
+
+    def refused(path: Path, data: bytes) -> None:
+        raise PermissionError(30, "Read-only file system", str(path))
+
+    monkeypatch.setattr(config, "write_whole", refused)
+    other = "pylance" if cfg.typing.editor == "basedpyright" else "basedpyright"
+    with pytest.raises(DeployError) as info:  # never an OSError: that was an internal-error traceback
+        cmd_mode.cmd_mode(cfg, ["--editor", other])
+    assert "cannot write pytemplate.toml: Read-only file system" in str(info.value)
+    assert "the mode did not change" in str(info.value) and info.value.code == 2
+    assert fake.snapshot() == fake.before
+
+
 def test_update_file_round_trip_is_byte_identical(cfg_file: Path) -> None:
     config.update_file([("backend", "supported", ["cpython", "pypy", "mypyc"]), ("backend", "active", "pypy")])
     config.update_file([("backend", "supported", ["cpython", "mypyc"]), ("backend", "active", "cpython")])

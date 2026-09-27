@@ -54,6 +54,8 @@ def load_profile(name: str) -> dict[str, Any]:
         raise DeployError(f"typing profile not found: {rel(path)}")
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    except OSError as e:
+        raise DeployError(f"cannot read {rel(path)}: {e.strerror or e}") from None
     except UnicodeDecodeError:
         raise DeployError(f"{rel(path)} is not UTF-8 text: save it as UTF-8") from None
     except tomllib.TOMLDecodeError as e:
@@ -344,6 +346,8 @@ def ci_workflow(cfg: Config) -> str:
     path = TEMPLATES / "ci.yml"
     try:
         text = _norm(path.read_text(encoding="utf-8"))
+    except OSError as e:
+        raise DeployError(f"cannot read {rel(path)}: {e.strerror or e}") from None
     except UnicodeDecodeError:
         raise DeployError(f"{rel(path)} is not UTF-8 text: save it as UTF-8") from None
     builds = [b for b in ("mypyc", "cpython") if cfg.supports(b)]

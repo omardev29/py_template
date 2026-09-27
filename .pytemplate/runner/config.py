@@ -1085,4 +1085,7 @@ def update_file(changes: list[tuple[str, str, Any]]) -> None:
     except tomllib.TOMLDecodeError as e:  # set_value checks each edit; this guards the sum
         raise DeployError(f"pytemplate.toml: the change would break the file ({e}); nothing was written") from None
     if new != old and not proc.DRY_RUN:
-        write_whole(CONFIG_FILE, (("\ufeff" if bom else "") + new).encode("utf-8"))
+        try:
+            write_whole(CONFIG_FILE, (("\ufeff" if bom else "") + new).encode("utf-8"))
+        except OSError as e:  # read-only, locked, another user's: it ended in an internal-error traceback
+            raise DeployError(f"cannot write pytemplate.toml: {e.strerror or e}") from None
