@@ -707,7 +707,7 @@ header rules (with detector tests proving each rule fires).
 | `cmd_nvim.py` | `./pyt nvim ...` and `doctor(check)` (section 12.2). |
 | `nvimtest.py` | `selftest --nvim` (section 13.1). |
 | `e2e.py` | `selftest --e2e` (section 13.1). |
-| `mutation.py` | `selftest --mutation` (section 13.1): `OPERATORS`, `test_map`/`ordered`/`junit_seconds`, `changed_lines`/`parse_diff`, `select`/`skipped_spans`, `classify`, `Driver` (tools/mutation_cr.py), `list_mutants` (the snapshot), the workers (`make_copy`, `worker_env`, `set_mtime`, `Runs`, `kill_run`/`descendants`, `run_all`), `Report`/`print_report`, the base (`default_base`, `prepare_base`, `base_lock`). |
+| `mutation.py` | `selftest --mutation` (section 13.1): `OPERATORS`, `test_map`/`ordered`/`junit_seconds`, `changed_lines`/`parse_diff`, `select`/`skipped_spans`/`handler_classes`, `own_mutant` (ExceptionReplacer's), `made` (what is skipped), `classify`, `Driver` (tools/mutation_cr.py), `list_mutants` (the snapshot), the workers (`make_copy`, `worker_env`, `set_mtime`, `Runs`, `kill_run`/`descendants`, `run_all`), `Report`/`print_report`, `deferred_interrupts`, the base (`default_base`, `prepare_base`, `base_lock`). |
 | `hooks.py` | `./pyt hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (apply/setup), `doctor`: the native git pre-commit hook (section 5.6); `find_repo` (`NotInGit`), `classify` (`runs_checks`), `hook_state`/`own_local` (a copy chained after another project's hook), `hook_script`/`launcher_of`, `install`/`uninstall` (apply removes the hook when `hooks.pre_commit = false`), `chain_hint`/`chain_advice`, `hooks_path_runner`, `checks`. |
 | `cmd_install.py` | `./pyt install` / `uninstall` and doctor's "pyt install" step (section 5.9): where things go (`data_home`, `snapshot_dir`, `bin_dir`), `MARKER`/`is_launcher`/`not_ours`/`not_an_install`, the record (`read_record`, `recorded_bin`, `source_state`, `describe`, `age`), PATH (`on_path`, `path_state`, `path_problem`, `first_pyt`, `shadowing`), Windows (`pathext_shadows`, `policy_notes`), `make_plan` (every refusal before the first write, in one message: `_refuse`), `_Swap` + `install` (all or nothing; `_new_folder`, `_terminations_interrupt`), `_remove_earlier`, `remove_leftovers`, `remove_installed`, `cmd_uninstall`, `doctor`. |
 | `rename.py` | `./pyt rename NEW_NAME [--force]` and the rename step of apply: pure `plan` / `apply_plan` (undoes itself when a write fails) / `rewrite` (tokenizer + `ast` scopes + context rules, `MODULE_KEYS`), `check_new_name` (`locked_names`), `git_changes`, `dirty_tree_message`, `validate_config`, `tidy_before`/`tidy_after` (ruff, `Tidy`), `report`, `cmd_rename` (section 5.7). |
@@ -3297,12 +3297,15 @@ short temp tree and unset `NVIM_APPNAME`.
   with pytest and mypy faked, `--shells` with the probes faked but `_run_all` and the table
   real, `--nvim` with Neovim, the base and the smoke runs faked: 0, 1 on any FAIL, 2 usage, 3
   with `--require`), `test_mutation.py` (`selftest --mutation`: the options, the test map and
-  its order, junit times, diffs and the lines they change, where no mutant is made, the verdict
-  of every way pytest ends, a fake Cosmic Ray side, the snapshot, the base and its lock, the
-  workers' environment and copies, real pytest runs over their limit or stopped with their
-  whole process tree (sessions of its own too), the threads, the report and the exit code;
-  every operator against the real Cosmic Ray and one real run of a toy module, skipped without
-  Cosmic Ray's environment), `test_workflows.py` (template repository only: the promises of the
+  its order, junit times, diffs and the lines they change (whatever the user's git settings),
+  where no mutant is made, the exception-handler mutants the runner makes (run: the exception
+  goes through), the mutants skipped, the verdict of every way pytest ends (colours and
+  subtests too), a fake Cosmic Ray side, the snapshot, the base and its lock, the workers'
+  environment and copies, real pytest runs over their limit or stopped with their whole process
+  tree (sessions of its own too), the threads, deferred signals, the report, an error after it,
+  and the exit code; every operator and the pins of Cosmic Ray's defects against the real Cosmic
+  Ray, and one real run of a toy module, skipped without Cosmic Ray's environment),
+  `test_workflows.py` (template repository only: the promises of the
   template-*.yml workflows, the keepalive covering every scheduled one, the gates, `-latest`
   labels, pinned actions, and actionlint on every workflow when installed; the CI image: the
   pins `pins.py` reads from the code, what its tag hashes and that a change moves it (CRLF and
@@ -3487,32 +3490,47 @@ short temp tree and unset `NVIM_APPNAME`.
     symbol, the one that moves a boundary or turns a test around; never `/` -> `*`, which in the
     runner joins paths), NumberReplacer's +1 only, none in an annotation, in the test or body of
     `if TYPE_CHECKING:` or on a line with `# pragma: no mutate` (`select`, `skipped_spans`:
-    parso counts columns in characters, ast in UTF-8 bytes). With `--diff BASE` only the mutants
-    on the lines `git diff BASE` adds or replaces in the runner (`changed_lines`: the working
-    tree against BASE, uncommitted changes included, and every line of an untracked module;
-    `--relative`, so a project below its repository's top works, and explicit prefixes whatever
-    the user's diff settings). The runner holds about 10,600 mutants (September 2026).
+    parso counts columns in characters, ast in UTF-8 bytes). ExceptionReplacer's mutants are
+    the runner's own (`own_mutant`, 15.1): one per exception class an except clause names
+    (`handler_classes`: the whole expression, or each element of a tuple; `select` gives the
+    mutant the class's span), which becomes `()` (an empty tuple: the handler catches nothing),
+    or `*()` in a tuple (no element in its place: Python refuses a tuple inside it). A mutant
+    that is no valid Python, the module unchanged, or one Cosmic Ray cannot make is skipped
+    (`made`, with the reason in the JSON): pytest would stop at the import, which reads as a
+    kill. With `--diff BASE` only the mutants on the lines `git diff BASE` adds or replaces in
+    the runner (`changed_lines`: the working tree against BASE, uncommitted changes included,
+    and every line of an untracked module; `--relative`, so a project below its repository's
+    top works; every option that shapes the output given, whatever the user's git settings:
+    prefixes, no colour, no textconv, `--inter-hunk-context=0` (merged hunks counted the lines
+    between them as changed); `parse_diff` reads names in git's C quotes, `presets._git_path`,
+    and ends a line at git's own line breaks only). The runner holds about 10,600 mutants
+    (September 2026).
   - which tests: the test files of `.pytemplate/tests` that import the module (`test_map`:
     `from runner import x`, `from runner.x import y`, `import runner.x`), the likeliest to fail
     soon first (`ordered`: mentions of the module per second of its baseline, `junit_seconds`),
-    run with `-x -q -p no:cacheprovider --hypothesis-seed=0`. The mutants of a module no test
-    file imports are untested.
+    run with `-x -q -p no:cacheprovider --color=no --hypothesis-seed=0` and without the user's
+    `PYTEST_ADDOPTS` and `PYTEST_PLUGINS` (`mutation.PYTEST_VARIABLES`: `-n auto` or `--lf` would
+    change what every run means). The mutants of a module no test file imports are untested.
   - where: N workers (`--jobs`, default half the CPUs, at most 8), each a throwaway copy of the
     project in the scratch base (`make_copy`: the files `git ls-files --cached --others
     --exclude-standard` lists, with their working-tree content, committed into a repository of
     its own; the modules to mutate from the snapshot `list_mutants` takes, which Cosmic Ray
     reads for every mutant too, so the checkout may change meanwhile), with its own `.venv`
-    (`uv sync --locked --all-groups`), home, XDG and temp folders (`worker_env`: whatever a
-    mutant makes a test write outside tmp_path lands there; `nvimtest.uv_dirs` keeps uv's cache,
-    Pythons and tools), no bytecode written, and a new mtime for every write of a module
-    (`set_mtime`: a `.pyc` a child wrote never passes for another version of it).
+    (`uv sync --locked --all-groups`, one `--quiet`: uv's errors stay), home, XDG and temp
+    folders (`worker_env`: whatever a mutant makes a test write outside tmp_path lands there;
+    `nvimtest.uv_dirs` keeps uv's cache, Pythons and tools through their UV_* variables, which the
+    tests' own child environments keep too: `test_cli_core.child_env`, the `_uv_dirs` helpers),
+    no bytecode written, and a new mtime for every write of a module (`set_mtime`: after the one
+    before and after the clock, so a `.pyc` a child wrote never passes for another version of
+    it, not even one of the copy the clock wrote).
   - the baselines: each module's tests first run as they are (`BASELINE_TIMEOUT`, an hour) and
     must pass (a FAIL leaves its mutants not run, and the command exits 1); their time sets each
     mutant's limit, `TIMEOUT_FACTOR` x baseline + `TIMEOUT_EXTRA` (2 x + 60 s). A mutant over it
     is a timeout, which counts as a kill.
   - the verdict (`classify`): a kill needs pytest's own summary line with failed or erroring
-    tests (exit 1 or 2), a survivor the summary with none (exit 0); any other end (no summary: a
-    crash, a Python that did not start) is an error, never a kill, and keeps its log. A run the
+    tests (exit 1 or 2; "subtests failed" counts, "xfailed" never), a survivor the summary with
+    none (exit 0); any other end (no summary: a crash, a Python that did not start) is an error,
+    never a kill, and keeps its log. Colour codes are read through (`pytest_counts`). A run the
     suite stopped (Ctrl+C, SIGTERM, SIGHUP: `e2e.termination_as_interrupt`) proves nothing and
     is not run, whatever it returned (`Runs.run` gives None: stop() may kill it before its own
     loop sees the stop, and on Windows the tests get the Ctrl+C too). A run over its limit or
@@ -3524,16 +3542,22 @@ short temp tree and unset `NVIM_APPNAME`.
     with its line, operator and change. Exit 0 when every mutant was judged (survivors are the
     report, not a failure), 1 on a failed baseline or an error, 2 usage (`--jobs` below 1, an
     empty `--diff`, a BASE that names no commit), 3 without git, uv or Cosmic Ray's environment
-    (offline it must be in uv's cache), 130 interrupted (the report of what ran).
+    (offline it must be in uv's cache), 130 interrupted (the report of what ran). What stops a
+    run (a worker whose `uv sync` failed, Cosmic Ray's side gone: `Report.error`) comes after
+    the report of what ran, with its own message and code. A Ctrl+C, SIGTERM or SIGHUP during
+    the cleanup or the report waits for it (`deferred_interrupts`) and makes the run interrupted.
   - the scratch base: `mutation.default_base` (`%TEMP%\pt\mut`, `$TMPDIR/pt-mutation-<uid>`,
     0700, `project.check_private_dir`), never inside the project, wiped only with its marker
     `.pytemplate-mutation`, one run at a time (`base_lock` on `<base>/lock`). The workers'
     folders and the snapshot always go; the logs (`<base>/logs`: Cosmic Ray's, each worker's last
     run, the junit times, each failed baseline, each error) stay after an interrupt, a failed
-    baseline or an error, and otherwise go with the base.
+    baseline or an error, and otherwise go, while the lock is still held. The base itself stays
+    with its marker and lock file (removed, it could vanish under a second run that just
+    prepared it).
   Measured (Linux, `--jobs 3`, September 2026): a module's baseline 1.5 to 3 minutes, a killed
   mutant about 5 s; a survivor costs a whole run of its module's tests, so a pass of the whole
-  runner takes a day of CPU or more.
+  runner takes a day of CPU or more. `--diff origin/main` on the branch that added the suite
+  (mutation.py new, a few lines elsewhere): 531 mutants in 54 minutes.
 - `./pyt render --check` (exit 1 when something is outdated or hand-edited) and
   `./pyt doctor`.
 - Manual end-to-end: `./pyt new C:\t\p1 --preset <p> --name <n>`, then in the copy
@@ -3636,14 +3660,18 @@ short temp tree and unset `NVIM_APPNAME`.
   installs). uv-floor, the e2e rows, the nvim canary, template-flet.yml's two builds and every
   Windows and macOS job stay on bare runners. A pull request from another repository that
   changes an input of the image gets no Linux jobs (15.2). Its job `mutation` (pull requests
-  only; a measure, not a gate) runs `./pyt selftest --mutation --diff "origin/$BASE_REF" --jobs 3
-  --json` in the image after a checkout of the whole history without a persisted token, under
+  only; a measure, not a gate) runs `./pyt selftest --mutation --diff HEAD^1 --jobs 3 --json` in
+  the image: HEAD is the merge commit GitHub made for the pull request (checked out with its
+  parents, `fetch-depth: 2`, no persisted token), HEAD^1 the base branch it was made on (the
+  branch itself may have moved since: its new lines would count as the pull request's). Under
   `timeout -k 5m -s TERM 70m` in a 90-minute job: when the budget ends (timeout's 124) the report
   holds the mutants that ran, with a warning; the job is red only when the suite could not judge
   (exit 1: a failed baseline, an error) or did not run; `mutation.json` is always uploaded
-  (`mutation-report`). The image's `warm` step makes Cosmic Ray's environment with the Driver's
-  own uv flags (`mutation_cr.py check`), and `pins.py` hashes the script and its lock
-  (`pins.data_files`). A pass of the whole runner never runs in CI (a day of CPU or more).
+  (`mutation-report`). The image's `warm` step makes Cosmic Ray's environment once
+  (`mutation_cr.py check`, with the Driver's uv flags), which leaves its wheels in the image's uv
+  cache: uv keys a script's environment by the script's path, so the job makes its own from that
+  cache, without the network. `pins.py` hashes the script and its lock (`pins.data_files`). A
+  pass of the whole runner never runs in CI (a day of CPU or more).
 - **[template repo]** `template-launchers.yml` also runs weekly and installs xonsh 0.24.2 on
   pushes and pull requests but the newest xonsh on the schedule (a red scheduled run with no
   commit behind it is upstream drift; the shell versions are logged: xonsh, fish, pwsh,
@@ -4623,6 +4651,30 @@ ruff:
   the rename tidy-up (5.7). Test: `test_rename.py::test_ruff_tidy_after_a_rename`. Goes: when
   the dev group requires ruff >= 0.16.
 
+Cosmic Ray (selftest --mutation, 13.1):
+- **ExceptionReplacer names a class the mutated module never sees, and fails on dotted ones**
+  (DEFECT, Cosmic Ray 8.7.0): it writes `CosmicRayTestingException`, which only
+  `cosmic_ray.exceptions` defines, in place of the class, so every exception that reaches the
+  handler becomes a NameError: a test that expects another exception to go through (or an outer
+  handler to catch it) killed a mutant that only switched a handler off. On a dotted class in a
+  tuple (`except (OSError, subprocess.TimeoutExpired):`, 45 mutants of the runner) it stops with
+  AttributeError, and on a lone dotted class it replaces the dot
+  (`subprocessCosmicRayTestingExceptionTimeoutExpired`). Up: none found. Fix:
+  `mutation.own_mutant` makes these mutants itself: the class (`mutation.handler_classes`)
+  becomes `()`, or `*()` in a tuple, and `mutation.select` gives each class one mutant with its
+  span; a mutant Cosmic Ray still fails to make is skipped (`tools/mutation_cr.py` answers
+  `cannot`, `mutation.made`). Test: `test_mutation.py::test_an_exception_handler_mutant_catches_nothing`,
+  `test_select_gives_each_exception_class_one_mutant_with_its_whole_span`,
+  `test_cosmic_rays_defects_that_the_runner_works_around` (a pin: it fails once Cosmic Ray's
+  own mutant lets the exception through), `test_a_real_run_kills_what_the_tests_check_and_finds_what_they_miss`.
+  Goes: when that pin fails.
+- **Some mutants are no valid Python** (DEFECT, Cosmic Ray 8.7.0): Pow_Mul turns the `**` of a
+  dict display into `*` (`{**extra, "k": 1}` -> `{*extra, "k": 1}`), AddNot puts `not` before a
+  walrus (`if not x := f():`); pytest then stopped at the import, which read as a kill (35 and 4
+  mutants of the runner). Up: none found. Fix: `mutation.made` compiles every mutant and skips
+  one that does not compile, with the reason (13.1). Test: `test_mutation.py::test_made`,
+  `test_cosmic_rays_defects_that_the_runner_works_around`. Goes: never (a cheap check).
+
 VS Code, its extensions, pyright and basedpyright:
 - **Shell tasks run in the user's terminal profile** (LIMITATION): xonsh, niubash or MSYS2 as
   the default profile broke `"type": "shell"` tasks. Fix: every task is `"type": "process"`
@@ -5353,12 +5405,12 @@ Behaviour:
   be one such a test would kill); the mutants of Windows- or macOS-only code survive where their
   tests skip, and are listed as survivors, not as untested; a test that fails by itself under
   the workers' load (a timing) counts as a kill; the workers' tests get another home, so the
-  user's uv.toml and git configuration never reach them (uv's cache, Pythons and tools do); a
-  process a test started in a session of its own stays when a mutant made the test leave it and
-  pytest then ended by itself (the tests' own children end within two minutes; `kill_run` only
-  runs for a run over its limit or stopped). Cosmic Ray's ExceptionReplacer writes `except
-  CosmicRayTestingException:`, a name the mutated module does not define: an exception that
-  reaches that handler becomes a NameError (the handler is off either way). A pass of the whole
+  user's uv.toml and git configuration never reach them (uv's cache, Pythons and tools do, by
+  their UV_* variables: a test that drops those starts uv on an empty cache in the worker's
+  home, which downloads what it needs, and offline fails the module's baseline; the suite's
+  own tests keep them); a process a test started in a session of its own stays when a mutant
+  made the test leave it and pytest then ended by itself (the tests' own children end within
+  two minutes; `kill_run` only runs for a run over its limit or stopped). A pass of the whole
   runner (a day of CPU or more) is local only: CI tests the lines a pull request changes, within
   70 minutes (13.2).
 
@@ -5476,10 +5528,14 @@ Code coupling (rename together):
   (`cosmic_ray.ast.ast_nodes`/`get_ast`, `ASTQuery.get_definition_name`, `plugins.get_operator`,
   an operator's `mutation_positions`, `mutating.mutate_code` and the pre-order count of its
   MutationVisitor, which OCCURRENCE must match), and `mutation.OPERATORS` <-> its operator names:
-  a new release must pass `test_mutation.test_every_operator_is_one_of_cosmic_rays_and_makes_its_mutant`
-  and the real run; `mutation.Driver`'s uv flags <-> the CI image's `warm` (the same cached
-  environment); `mutation.pytest_counts` <-> pytest's summary line; `mutation.junit_seconds` <->
-  the classname pytest's JUnit XML gives a test (its file's path, dotted).
+  a new release must pass `test_mutation.test_every_operator_is_one_of_cosmic_rays_and_makes_its_mutant`,
+  the pins of `test_cosmic_rays_defects_that_the_runner_works_around` and the real run;
+  `mutation.select` <-> where Cosmic Ray's ExceptionReplacer lists its mutants (inside the class
+  `handler_classes` gives); `mutation.Driver`'s uv flags <-> the CI image's `warm` (the same
+  interpreter and lock: the wheels the job needs are in the image's cache);
+  `mutation.pytest_counts` <-> pytest's summary line; `mutation.junit_seconds` <-> the classname
+  pytest's JUnit XML gives a test (its file's path, dotted); `mutation.parse_diff` calls the
+  private `presets._git_path` (git's C quotes).
 - `editor.json` `typing.basedpyright` <-> `cmd_dev.BASEDPYRIGHT` and `typing.basedpyright_node`
   <-> `cmd_dev.BASEDPYRIGHT_NODE` (bumping a pin changes a generated file: re-render); the Lua
   whitelists `BACKENDS`, `PROFILES`, `EDITORS`,

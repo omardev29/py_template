@@ -18,7 +18,10 @@ runner are not used (CLAUDE.md, section 15.1).
                          END_COLUMN, DEFINITION], ...]}
     {"op": "mutate", "path": P, "operator": NAME, "occurrence": N}
         -> {"code": the whole mutated module, or null when there is no such mutant}
-    a request that fails -> {"error": MESSAGE}
+        -> {"code": null, "cannot": MESSAGE} when Cosmic Ray fails to make that mutant (the
+           runner skips it; its ExceptionReplacer, which failed on a dotted name in a tuple, is
+           never asked: the runner makes those mutants itself)
+    a request that fails otherwise -> {"error": MESSAGE}
 
 OCCURRENCE is Cosmic Ray's own: the mutant's rank among those of its operator in the module, in
 the order of a pre-order walk of the parso tree, which is also the order MutationVisitor counts
@@ -59,12 +62,16 @@ def _list(path: str, names: list[str]) -> list[list[Any]]:
     return found
 
 
-def _mutate(path: str, name: str, occurrence: int) -> str | None:
+def _mutate(path: str, name: str, occurrence: int) -> dict[str, Any]:
     from cosmic_ray import plugins
     from cosmic_ray.mutating import mutate_code
 
-    code: str | None = mutate_code(_source(path), plugins.get_operator(name)(), occurrence)
-    return code
+    source, operator = _source(path), plugins.get_operator(name)()
+    try:
+        code: str | None = mutate_code(source, operator, occurrence)
+    except Exception as e:  # noqa: BLE001 - Cosmic Ray's own failure to make this one mutant
+        return {"code": None, "cannot": f"{type(e).__name__}: {e}"}
+    return {"code": code}
 
 
 def _answer(request: dict[str, Any]) -> dict[str, Any]:
@@ -76,7 +83,7 @@ def _answer(request: dict[str, Any]) -> dict[str, Any]:
     if op == "list":
         return {"mutants": _list(str(request["path"]), [str(n) for n in request["operators"]])}
     if op == "mutate":
-        return {"code": _mutate(str(request["path"]), str(request["operator"]), int(request["occurrence"]))}
+        return _mutate(str(request["path"]), str(request["operator"]), int(request["occurrence"]))
     return {"error": f"unknown request {op!r}"}
 
 

@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -177,6 +178,16 @@ def test_parse_diff() -> None:
     # git ends the name of a file that holds a blank with a tab (as GNU diff does, for patch)
     spaced = "--- a/x y.py\t\n+++ b/x y.py\t\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
     assert mutation.parse_diff(spaced) == {"x y.py": {1}}
+    # and a name with a byte above 0x7f in C quotes (core.quotePath), octal escapes for its UTF-8
+    quoted = '--- "a/caf\\303\\251.py"\n+++ "b/caf\\303\\251.py"\n@@ -1 +1 @@\n-x = 1\n+x = 2\n'
+    assert mutation.parse_diff(quoted) == {"caf\u00e9.py": {1}}
+
+
+def test_parse_diff_ends_a_line_at_gits_line_breaks_only() -> None:
+    """A form feed in a changed line split it in two for str.splitlines: the hunk ended one line
+    early, and an added line that reads like a file header then moved the next hunk to it."""
+    diff = "+++ b/a.py\n@@ -0,0 +1,2 @@\n+x = 1  # \x0c\n+++ b/other.py\n@@ -9 +9 @@\n-y = 1\n+y = 2\n"
+    assert mutation.parse_diff(diff) == {"a.py": {1, 2, 9}}
 
 
 @needs_git
@@ -195,6 +206,27 @@ def test_changed_lines_against_a_commit(tmp_path: Path) -> None:
     with pytest.raises(PytError, match="'nope' names no commit here") as e:
         mutation.changed_lines(root, "nope", env)
     assert e.value.code == 2
+
+
+@needs_git
+def test_changed_lines_ignore_the_users_diff_configuration(tmp_path: Path) -> None:
+    """The user's git configuration never shapes the diff: diff.interHunkContext merged the hunks
+    of lines 2 and 8 and counted 3 to 7 as changed; no prefixes, colours or a textconv filter
+    (it adds a line on top: every line moved by one) either."""
+    env = _git_env(tmp_path)
+    root = _write(tmp_path / "p", {".pytemplate/runner/a.py": "".join(f"v{i} = {i}\n" for i in range(1, 13))})
+    _git(root, env, "init", "-q")
+    _git(root, env, "add", "-A")
+    _git(root, env, "commit", "-q", "-m", "one")
+    for key, value in (("diff.interHunkContext", "10"), ("diff.noprefix", "true"), ("color.diff", "always"), ("diff.mnemonicPrefix", "true")):
+        _git(root, env, "config", key, value)
+    if sys.platform != "win32":
+        shift = _write(tmp_path, {"shift.sh": '#!/bin/sh\necho "# a line on top"\ncat "$1"\n'}) / "shift.sh"
+        shift.chmod(0o755)
+        _git(root, env, "config", "diff.shift.textconv", str(shift))
+        _write(root, {".git/info/attributes": "*.py diff=shift\n"})
+    _write(root, {".pytemplate/runner/a.py": "".join(f"v{i} = {i * 10 if i in (2, 8) else i}\n" for i in range(1, 13))})
+    assert mutation.changed_lines(root, "HEAD", env) == {".pytemplate/runner/a.py": {2, 8}}
 
 
 SOURCE = '''\
@@ -249,12 +281,164 @@ def test_select_skips_annotations_type_checking_blocks_pragmas_and_the_minus_one
     assert mutation.select(rel, listed, SOURCE, set()) == []
 
 
+HANDLERS = """\
+import subprocess
+
+\u00c9RR = ValueError
+
+
+def catch(error):
+    try:
+        raise error
+    except (\u00c9RR, OSError, subprocess.TimeoutExpired):
+        return "caught"
+    except subprocess.CalledProcessError as e:
+        return f"called {e.returncode}"
+"""
+
+
+def _classes(source: str) -> list[str]:
+    lines = source.splitlines()
+    return [lines[a[0] - 1][a[1] : b[1]] for a, b in mutation.handler_classes(source)]
+
+
+def test_handler_classes_are_the_classes_an_except_clause_names() -> None:
+    assert _classes(HANDLERS) == ["\u00c9RR", "OSError", "subprocess.TimeoutExpired", "subprocess.CalledProcessError"]
+    assert list(mutation.handler_classes(HANDLERS).values()) == ["*()", "*()", "*()", "()"]  # in a tuple: no element left
+    assert _classes("try:\n    pass\nexcept:\n    pass\nexcept (OSError):\n    pass\n") == ["OSError"]
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="`except A, B:` is Python 3.14 syntax (PEP 758)")
+def test_a_tuple_without_parentheses_is_left_to_cosmic_ray() -> None:
+    """There `*()` would read as `except*`: `except *(), B:` catches exception groups."""
+    clauses = ("OSError, ValueError", "(OSError), ValueError", "(OSError), (ValueError)", "(KeyError, IndexError)")
+    source = "try:\n    pass\n" + "".join(f"except {c}:\n    pass\n" for c in clauses)
+    assert _classes(source) == ["KeyError", "IndexError"]
+
+
+def test_an_element_in_parentheses_of_its_own_goes_with_them() -> None:
+    """`((*()), B)` is no valid Python: `(( OSError ), B)` loses the whole `( OSError )`."""
+    source = "try:\n    raise OSError\nexcept (\n    (( OSError )),  # the first\n    ValueError,  # the last\n):\n    pass\n"
+    assert _classes(source) == ["(( OSError ))", "ValueError"]
+    m = _handler_mutant(source, "(( OSError ))")
+    code = mutation.own_mutant(m, source)
+    assert code == source.replace("(( OSError ))", "*()") and mutation.made({"code": code}, source.encode(), "m.py")[0] == NOT_RUN
+    with pytest.raises(OSError):
+        exec(compile(code, "m.py", "exec"), {})
+
+
+def test_select_gives_each_exception_class_one_mutant_with_its_whole_span() -> None:
+    """Cosmic Ray names a part of a dotted class (the dot of `a.B`, the first name of `(a.b.C)`,
+    sometimes twice): the mutant takes the class's span, once."""
+    line = HANDLERS.splitlines()[8]
+    at = line.index("subprocess.TimeoutExpired")
+    listed = [
+        _entry("core/ExceptionReplacer", 0, 0, (9, line.index("OSError")), 7, "catch"),
+        _entry("core/ExceptionReplacer", 1, 0, (9, at + len("subprocess")), 1, "catch"),  # its dot
+        _entry("core/ExceptionReplacer", 2, 0, (9, at), 10, "catch"),  # the same class again
+    ]
+    kept = mutation.select(".pytemplate/runner/m.py", listed, HANDLERS, None)
+    assert [(m.line, m.column, m.end_line, m.end_column, m.occurrence) for m in kept] == [
+        (9, line.index("OSError"), 9, line.index("OSError") + 7, 0), (9, at, 9, at + len("subprocess.TimeoutExpired"), 1),
+    ]  # fmt: skip
+
+
+def _handler_mutant(source: str, text: str) -> Mutant:
+    """The ExceptionReplacer mutant of the class `text` (on an except line, if it is on several)."""
+    lines = source.splitlines()
+    rows = [i for i, x in enumerate(lines, 1) if text in x]
+    row = next((i for i in rows if lines[i - 1].lstrip().startswith("except")), rows[0])
+    column = lines[row - 1].index(text)
+    return Mutant("m.py", mutation.EXCEPTION_REPLACER, 0, row, column, row, column + len(text), "catch")
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_an_exception_handler_mutant_catches_nothing(newline: str) -> None:
+    """The class is switched off (`()`, or `*()` in a tuple): the exception goes on as it is.
+    Cosmic Ray's own mutant turned it into a NameError, which killed a mutant whose tests expect
+    the exception to pass through."""
+    source = HANDLERS.replace("\n", newline)
+
+    def run(code: str, error: BaseException) -> str:
+        scope: dict[str, Any] = {}
+        exec(compile(code, "m.py", "exec"), scope)
+        return str(scope["catch"](error))
+
+    timeout = subprocess.TimeoutExpired("x", 1)
+    assert run(source, OSError()) == run(source, timeout) == run(source, ValueError()) == "caught"
+    for text, passes in (("OSError", OSError()), ("subprocess.TimeoutExpired", timeout), ("\u00c9RR", ValueError())):
+        code = mutation.own_mutant(_handler_mutant(source, text), source)
+        assert code is not None and code.count(newline) == source.count(newline)
+        assert code.replace("*()", text, 1) == source  # the one class, and only it
+        with pytest.raises(type(passes)):
+            run(code, passes)
+        assert {run(code, e) for e in (OSError(), timeout, ValueError()) if type(e) is not type(passes)} == {"caught"}
+    one = "try:\n    raise OSError\nexcept (OSError,):\n    pass\n"
+    code = mutation.own_mutant(Mutant("m.py", mutation.EXCEPTION_REPLACER, 0, 3, 8, 3, 15, None), one)
+    assert code == "try:\n    raise OSError\nexcept (*(),):\n    pass\n"
+    with pytest.raises(OSError):
+        exec(compile(code, "m.py", "exec"), {})
+    code = mutation.own_mutant(_handler_mutant(source, "subprocess.CalledProcessError"), source)
+    assert code is not None and "except () as e:" in code
+    with pytest.raises(subprocess.CalledProcessError):
+        run(code, subprocess.CalledProcessError(3, "x"))
+    other = _handler_mutant(source, "OSError")
+    assert mutation.own_mutant(Mutant(**{**other.__dict__, "operator": "core/AddNot"}), source) is None  # Cosmic Ray's
+    assert mutation.own_mutant(Mutant(**{**other.__dict__, "end_column": other.end_column - 1}), source) is None  # no class there
+
+
 def test_skipped_spans_count_characters_not_bytes() -> None:
     """ast's columns count UTF-8 bytes, parso's (Cosmic Ray's) characters."""
     source = 'def f(x: str = "\u00e9\u00e9", y: int | None = None) -> None:\n    pass\n'  # two 2-byte characters before `int`
     spans = mutation.skipped_spans(source)
     line = source.splitlines()[0]
     assert ((1, line.index("int")), (1, line.index(" = None"))) in spans
+
+
+@pytest.mark.parametrize(
+    ("answer", "status", "detail"),
+    [
+        ({"code": "x = 2\n"}, NOT_RUN, ""),
+        ({"code": "x = 'a' is 'b'\n"}, NOT_RUN, ""),  # a SyntaxWarning is no verdict, not even with -W error
+        ({"error": "boom"}, mutation.ERROR, "Cosmic Ray's side failed: boom"),
+        ({"code": None, "cannot": "AttributeError: no value"}, mutation.SKIPPED, "Cosmic Ray cannot make this mutant: AttributeError: no value"),
+        ({"code": None}, mutation.ERROR, "Cosmic Ray made no mutant at an occurrence its list named"),
+        ({"code": "x = 1\n"}, mutation.SKIPPED, "the mutant is the module unchanged"),
+        ({"code": 'd = {*extra, "k": 1}\n'}, mutation.SKIPPED, "the mutant is no valid Python: "),  # Pow_Mul on `{**extra, "k": 1}`
+        ({"code": "if not x := f():\n    pass\n"}, mutation.SKIPPED, "the mutant is no valid Python: "),  # AddNot before a walrus
+        ({"code": "x = 1\0\n"}, mutation.SKIPPED, "the mutant is no valid Python: "),
+    ],
+)
+def test_made(answer: dict[str, Any], status: str, detail: str) -> None:
+    """A mutant that is no valid Python never runs: pytest would stop at the import, which reads
+    as a kill."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        got = mutation.made(answer, b"x = 1\n", "m.py")
+    assert got[0] == status and got[1].startswith(detail) and (detail != "" or got[1] == "")
+    assert got[2] == (answer.get("code") if status == NOT_RUN or detail.startswith("the mutant is no valid") else None)
+
+
+def test_made_leaves_the_warning_filters_of_every_thread_as_they_were() -> None:
+    """made() runs in the worker threads, and warnings.catch_warnings is not thread safe: two of
+    them that overlap put back each other's filters, and an "ignore" stayed for good."""
+    import warnings
+
+    before = list(warnings.filters)
+    code = "x = 'a' is 'b'\n" * 300  # a SyntaxWarning each, and time to overlap
+
+    def work() -> None:
+        for _ in range(40):
+            assert mutation.made({"code": code}, b"", "m.py")[0] == NOT_RUN
+
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert warnings.filters == before
 
 
 def test_mutant_diff() -> None:
@@ -277,6 +461,12 @@ def test_mutant_diff() -> None:
         (1, "3 passed in 1.00s\n", mutation.ERROR, "exit code 1: 3 passed in 1.00s"),
         (3, "INTERNALERROR> boom\n1 passed in 0.10s\n", mutation.ERROR, "exit code 3: 1 passed in 0.10s"),
         (-9, "", mutation.ERROR, "exit code 137 without pytest's summary line: no output"),
+        # FORCE_COLOR or PY_COLORS colour pytest's lines: read through
+        (1, "\x1b[31mFAILED\x1b[0m t.py::test_x\n\x1b[31m1 failed\x1b[0m, \x1b[32m1 passed\x1b[0m\x1b[31m in 1.00s\x1b[0m\n", KILLED, "FAILED t.py::test_x"),
+        (0, "\x1b[32m\x1b[1m4 passed\x1b[0m\x1b[32m in 0.12s\x1b[0m\n", SURVIVED, ""),
+        (1, "2 passed, 1 subtests failed, 3 subtests passed in 1.00s\n", KILLED, "2 passed, 1 subtests failed, 3 subtests passed in 1.00s"),
+        (0, "3 passed, 1 xfailed, 1 xpassed in 1.00s\n", SURVIVED, ""),  # an expected failure is none
+        (1, "ERROR t.py::test_x - OSError\n1 passed, 2 errors in 1.00s\n", KILLED, "ERROR t.py::test_x - OSError"),
     ],
 )
 def test_classify(code: int, output: str, status: str, detail: str) -> None:
@@ -294,6 +484,7 @@ def test_classify_a_run_that_was_ended() -> None:
 
 def test_pytest_counts() -> None:
     assert mutation.pytest_counts("x\n1 failed, 2 errors, 3 passed, 1 warning in 2.00s (0:00:02)\n") == {"failed": 1, "error": 2, "passed": 3, "warning": 1}
+    assert mutation.pytest_counts("1 passed, 2 subtests passed in 0.1s\n") == {"passed": 1, "subtests passed": 2}
     assert mutation.pytest_counts("12 passed in 3s\nlater noise\n") == {"passed": 12}
     assert mutation.pytest_counts("collected 3 items\n") is None
 
@@ -418,11 +609,14 @@ def test_one_run_at_a_time_per_base(tmp_path: Path) -> None:
 
 
 def test_worker_env_moves_home_and_temp_but_keeps_uv(tmp_path: Path) -> None:
-    base_env = {"PATH": os.pathsep.join(["/usr/bin", "/bin"]), "HOME": "/home/me", "XDG_DATA_HOME": "/home/me/.data", "KEEP": "1"}
+    base_env = {
+        "PATH": os.pathsep.join(["/usr/bin", "/bin"]), "HOME": "/home/me", "XDG_DATA_HOME": "/home/me/.data", "KEEP": "1",
+        "PYTEST_ADDOPTS": "-n auto --lf", "PYTEST_PLUGINS": "mine",  # they would change what every run means
+    }  # fmt: skip
     keep = {"UV_CACHE_DIR": "/home/me/.cache/uv", "UV_PYTHON_INSTALL_DIR": "/home/me/.local/share/uv/python"}
     copy, home, tmp = tmp_path / "w0", tmp_path / "h0", tmp_path / "t0"
     env = mutation.worker_env(copy, home, tmp, base_env, keep, _cfg(), "/opt/uv")
-    assert env["HOME"] == str(home) and not any(k.startswith("XDG_") for k in env) and env["KEEP"] == "1"
+    assert env["HOME"] == str(home) and not any(k.startswith(("XDG_", "PYTEST_")) for k in env) and env["KEEP"] == "1"
     assert env["UV_CACHE_DIR"] == keep["UV_CACHE_DIR"] and env["UV_PYTHON_INSTALL_DIR"] == keep["UV_PYTHON_INSTALL_DIR"]
     assert (env["TEMP"] if os.name == "nt" else env["TMPDIR"]) == str(tmp)
     assert env["PATH"].split(os.pathsep)[0] == str(mutation.venv_python(copy / ".venv").parent)
@@ -439,6 +633,18 @@ def test_every_write_of_a_module_gets_a_time_of_its_own(tmp_path: Path) -> None:
         mutation.write_module(path, data)
         times.append(int(path.stat().st_mtime))
     assert times[0] < times[1] < times[2] and path.read_bytes() == b"x = 1\n"
+
+
+def test_a_modules_time_comes_after_every_write_of_the_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The copy of the project is written by the clock: a mutant of the same size written in that
+    very second would pass for it, and a .pyc of the module then for the mutant's."""
+    later = time.time() + 1000  # a clock ahead of every time handed out so far
+    monkeypatch.setattr(mutation, "time", SimpleNamespace(time=lambda: later))
+    path = tmp_path / "m.py"
+    path.write_bytes(b"x = 1\n")
+    os.utime(path, (later, later))  # written by that clock
+    mutation.write_module(path, b"x = 2\n")
+    assert int(path.stat().st_mtime) > int(later)
 
 
 @needs_git
@@ -475,6 +681,15 @@ def test_run_reports_pytests_result(tmp_path: Path) -> None:
     assert mutation.junit_seconds(tmp_path / "junit.xml", ["test_ok.py"]).keys() == {"test_ok.py"}
     code, output, _ = runs.run(worker, ["test_ok.py", "test_bad.py"], 120)
     assert mutation.classify(code, output)[0] == KILLED
+
+
+def test_run_reads_pytest_whatever_colours_the_user_asked_for(tmp_path: Path) -> None:
+    worker = _worker(tmp_path, {"test_ok.py": "def test_ok():\n    assert True\n", "test_bad.py": "def test_bad():\n    assert 1 == 2\n"})
+    worker.env.update(FORCE_COLOR="1", PY_COLORS="1")
+    runs = Runs()
+    assert mutation.classify(*runs.run(worker, ["test_ok.py"], 120)[:2]) == (SURVIVED, "")
+    status, detail = mutation.classify(*runs.run(worker, ["test_bad.py"], 120)[:2])
+    assert status == KILLED and detail.startswith("FAILED test_bad.py::test_bad")
 
 
 def test_run_ends_a_run_over_its_time_and_on_stop(tmp_path: Path) -> None:
@@ -702,6 +917,77 @@ def test_selftest_exit_code(
     assert data["ok"] is (code == 0) and data["interrupted"] is interrupted
 
 
+def test_selftest_prints_the_report_before_the_error_that_stopped_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A worker that could not be made (its uv sync failed: a PytError) stopped the run after 50
+    mutants: their report comes first, then the error with its own exit code."""
+    report = _report(tmp_path, [KILLED, SURVIVED])
+    report.error = PytError("uv sync failed in the copy", 3)
+    monkeypatch.setattr(mutation, "run", lambda *a: report)
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+    with pytest.raises(PytError, match="uv sync failed") as e:
+        mutation.selftest(_cfg(), ["--json"])
+    assert e.value.code == 3
+    out, err = capsys.readouterr()
+    data = json.loads(out)
+    assert data["ok"] is False and data["error"] == "PytError: uv sync failed in the copy" and "survived (1):" in err
+
+
+def _toy(tmp_path: Path) -> Path:
+    return _write(tmp_path / "toy", {".pytemplate/runner/__init__.py": "", ".pytemplate/runner/calc.py": "x = 1\n", ".pytemplate/tests/test_calc.py": ""})
+
+
+def test_a_run_that_fails_keeps_its_report_and_logs_and_removes_the_workers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base = tmp_path / "base"
+
+    def fails(cfg: Config, opts: Options, uv: str, root: Path, base: Path, files: Any, changed: Any, tests: Any, report: Report) -> None:
+        (base / "logs").mkdir()
+        (base / "w0" / ".venv").mkdir(parents=True)
+        report.mutants = [Mutant(".pytemplate/runner/calc.py", "core/AddNot", 0, 1, 4, 1, 5, None, KILLED)]
+        raise PytError("uv sync failed in the copy", 3)
+
+    monkeypatch.setattr(mutation, "_run_locked", fails)
+    report = mutation.run(_cfg(), Options(None, 1, False), "uv", _toy(tmp_path), base)
+    assert isinstance(report.error, PytError) and report.failed() and report.kept and not report.interrupted
+    assert len(report.mutants) == 1 and sorted(p.name for p in base.iterdir()) == sorted([mutation.MARKER, "lock", "logs"])
+
+
+def test_an_interrupt_during_the_cleanup_waits_for_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second Ctrl+C (or a SIGTERM) while the workers' folders go: they still go, the report
+    comes back and says interrupted, and the logs stay."""
+    import signal
+
+    base = tmp_path / "base"
+    removed: list[bool] = []
+
+    def passes(cfg: Config, opts: Options, uv: str, root: Path, base: Path, files: Any, changed: Any, tests: Any, report: Report) -> None:
+        (base / "logs").mkdir()
+
+    def remove_workers(base: Path) -> None:
+        signal.raise_signal(signal.SIGINT)
+        removed.append(True)
+
+    monkeypatch.setattr(mutation, "_run_locked", passes)
+    monkeypatch.setattr(mutation, "_remove_workers", remove_workers)
+    report = mutation.run(_cfg(), Options(None, 1, False), "uv", _toy(tmp_path), base)
+    assert removed == [True] and report.interrupted and report.kept and (base / "logs").is_dir()
+
+
+@pytest.mark.parametrize("name", ["SIGINT", "SIGTERM", "SIGHUP"])
+def test_deferred_interrupts_wait_for_the_block_and_put_the_handlers_back(name: str) -> None:
+    import signal
+
+    number = getattr(signal, name, None)
+    if number is None:
+        pytest.skip(f"no {name} here")
+    before = signal.getsignal(number)
+    with mutation.deferred_interrupts() as got:
+        signal.raise_signal(number)
+        time.sleep(0.01)  # a signal's Python handler runs between two bytecodes
+    assert got == [number] and signal.getsignal(number) == before
+
+
 def test_nothing_changed_starts_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mutation, "changed_lines", lambda *a: {".pytemplate/runner/not_there.py": {1}})
     monkeypatch.setattr(mutation, "Driver", None)  # never started
@@ -775,8 +1061,67 @@ def test_every_operator_is_one_of_cosmic_rays_and_makes_its_mutant(cosmic_ray: A
     assert "error" in cosmic_ray.ask({"op": "list", "path": str(sample), "operators": ["core/NoSuchOperator"]})
 
 
+PASS_THROUGH = """\
+import subprocess
+
+
+def f():
+    try:
+        raise KeyError("k")
+    except OSError:
+        return "caught"
+
+
+def g():
+    try:
+        raise KeyError("k")
+    except (OSError, subprocess.TimeoutExpired):
+        return "caught"
+
+
+def h(extra):
+    return {**extra, "k": 1}
+"""
+
+
+def test_cosmic_rays_defects_that_the_runner_works_around(cosmic_ray: Any, tmp_path: Path) -> None:
+    """Pins of Cosmic Ray 8.7.0's defects (CLAUDE.md 15.1): its ExceptionReplacer turns an exception
+    that goes through the handler into a NameError, and fails on a dotted class in a tuple (the
+    runner makes those mutants itself: own_mutant); its Pow_Mul makes invalid Python of a dict
+    display (made skips it). A pin that fails means Cosmic Ray changed: see whether its
+    workaround can go."""
+    sample = _write(tmp_path, {"sample.py": PASS_THROUGH}) / "sample.py"
+    names = [mutation.EXCEPTION_REPLACER, "core/ReplaceBinaryOperator_Pow_Mul"]
+    listed = cosmic_ray.ask({"op": "list", "path": str(sample), "operators": names})["mutants"]
+
+    def call(code: str, name: str) -> Any:
+        scope: dict[str, Any] = {}
+        exec(compile(code, "sample.py", "exec"), scope)
+        return scope[name]()
+
+    theirs = cosmic_ray.ask({"op": "mutate", "path": str(sample), "operator": mutation.EXCEPTION_REPLACER, "occurrence": 0})
+    with pytest.raises(NameError):  # f's KeyError was to go through
+        call(theirs["code"], "f")
+    dotted = cosmic_ray.ask({"op": "mutate", "path": str(sample), "operator": mutation.EXCEPTION_REPLACER, "occurrence": 2})
+    assert dotted["code"] is None and dotted["cannot"].startswith("AttributeError"), dotted
+    kept = mutation.select("sample.py", listed, PASS_THROUGH, None)
+    handlers = [m for m in kept if m.operator == mutation.EXCEPTION_REPLACER]
+    assert [(m.function, PASS_THROUGH.splitlines()[m.line - 1][m.column : m.end_column]) for m in handlers] == [
+        ("f", "OSError"), ("g", "OSError"), ("g", "subprocess.TimeoutExpired"),
+    ]  # fmt: skip
+    for m in handlers:
+        ours = mutation.own_mutant(m, PASS_THROUGH)
+        assert ours is not None and mutation.made({"code": ours}, PASS_THROUGH.encode(), "sample.py")[0] == NOT_RUN
+        with pytest.raises(KeyError):
+            call(ours, str(m.function))
+    power = next(m for m in kept if m.operator == "core/ReplaceBinaryOperator_Pow_Mul")
+    answer = cosmic_ray.ask({"op": "mutate", "path": str(sample), "operator": power.operator, "occurrence": power.occurrence})
+    status, detail, _ = mutation.made(answer, PASS_THROUGH.encode(), "sample.py")
+    assert (status, detail.split(":")[0]) == (mutation.SKIPPED, "the mutant is no valid Python"), answer
+
+
 CALC = '''\
-"""A toy runner module: its tests leave two boundaries untested."""
+"""A toy runner module: its tests leave two boundaries and a handler untested."""
 
 
 def clamp(x: int, low: int, high: int) -> int:
@@ -792,10 +1137,19 @@ def total(items: list[int]) -> int:
     for item in items:
         result += item
     return result
+
+
+def parse(text: str | None) -> int:
+    try:
+        return int(text)  # None: a TypeError, which the handler lets through
+    except ValueError:
+        return 0
 '''
 TEST_CALC = '''\
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -810,11 +1164,16 @@ def test_clamp() -> None:
 
 def test_total() -> None:
     assert calc.total([1, 2]) == 3
+
+
+def test_parse_lets_a_type_error_through() -> None:
+    with pytest.raises(TypeError):
+        calc.parse(None)
 '''
 
 
 @needs_git
-def test_a_real_run_kills_what_the_tests_check_and_finds_the_two_boundaries(tmp_path: Path) -> None:
+def test_a_real_run_kills_what_the_tests_check_and_finds_what_they_miss(tmp_path: Path) -> None:
     try:
         uv = proc.find_uv()
     except PytError:
@@ -844,6 +1203,10 @@ def test_a_real_run_kills_what_the_tests_check_and_finds_the_two_boundaries(tmp_
         (7, "ReplaceComparisonOperator_Gt_GtE", SURVIVED),  # nor clamp(10, 0, 10)
         (13, "NumberReplacer", KILLED),
         (14, "ZeroIterationForLoop", KILLED),
+        # no test asks for a ValueError: switched off, the handler is missed by no test. Cosmic Ray's
+        # own mutant turned the TypeError into a NameError, and test_parse... killed it
+        (22, "ExceptionReplacer", SURVIVED),
+        (23, "NumberReplacer", SURVIVED),
     ], [(m.where, m.operator, m.status, m.detail) for m in report.mutants]
     assert report.baselines["runner.calc"].status == mutation.PASS and report.workers == 2 and report.cosmic_ray
     assert (toy / ".pytemplate/runner/calc.py").read_text(encoding="utf-8") == CALC  # the project itself is never touched
@@ -851,4 +1214,6 @@ def test_a_real_run_kills_what_the_tests_check_and_finds_the_two_boundaries(tmp_
     assert survivor.diff == ["-    if x < low:", "+    if x <= low:"] and survivor.function == "clamp"
     killer = next(m for m in report.mutants if m.status == KILLED)
     assert killer.detail.startswith("FAILED .pytemplate/tests/test_calc.py::")
-    assert not report.kept and not base.exists()  # nothing to read: the base is gone
+    handler = next(m for m in report.mutants if m.operator == mutation.EXCEPTION_REPLACER)
+    assert handler.diff == ["-    except ValueError:", "+    except ():"]
+    assert not report.kept and sorted(p.name for p in base.iterdir()) == sorted([mutation.MARKER, "lock"])  # nothing to read

@@ -465,13 +465,14 @@ def test_ci_image_workflow_builds_publishes_and_runs_the_linux_jobs() -> None:
 
 
 def test_mutation_job_measures_the_lines_a_pull_request_changes() -> None:
-    """template-ci-image.yml's mutation job: pull requests only, against their base branch (the
-    whole history fetched), within a budget that leaves the report of what ran (a warning, never
-    a red job), and red when the suite cannot judge; the JSON report is always uploaded."""
+    """template-ci-image.yml's mutation job: pull requests only, against the base their merge
+    commit was made on (HEAD^1: the base branch may have moved since), within a budget that
+    leaves the report of what ran (a warning, never a red job), and red when the suite cannot
+    judge; the JSON report is always uploaded."""
     body = jobs(_text("template-ci-image.yml"))["mutation"]
-    assert "github.event_name == 'pull_request'" in body
-    assert "fetch-depth: 0" in body and "persist-credentials: false" in body
-    assert "BASE_REF: ${{ github.base_ref }}" in body and '--mutation --diff "origin/$BASE_REF"' in body and "--json > mutation.json" in body
+    assert "github.event_name == 'pull_request'" in body and not re.search(r"^\s+ref:", body, re.M)  # checkout: the merge commit
+    assert "fetch-depth: 2" in body and "persist-credentials: false" in body
+    assert "--mutation --diff HEAD^1 " in body and "--json > mutation.json" in body and "base_ref" not in body
     budget = re.search(r"timeout -k (\d+)m -s TERM (\d+)m \./pyt selftest --mutation", body)
     job = re.search(r"timeout-minutes: (\d+)", body)
     assert budget and job and int(budget[1]) + int(budget[2]) + 10 <= int(job[1])  # the report is written before the job's end

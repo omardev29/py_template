@@ -9,7 +9,9 @@ the mutants on the lines changed since BASE (`git diff BASE`: uncommitted change
 
 How (CLAUDE.md 13.1):
   * the mutants: the operators of OPERATORS (NumberReplacer's +1 only), none in an annotation, in
-    the test or body of `if TYPE_CHECKING:` or on a line marked `# pragma: no mutate`;
+    the test or body of `if TYPE_CHECKING:` or on a line marked `# pragma: no mutate`; the runner
+    makes ExceptionReplacer's itself (own_mutant: the class becomes `()`, `*()` in a tuple, so
+    the handler lets it through), and skips a mutant that is no valid Python (made);
   * the tests of a module: the test files that import it (test_map), those likeliest to fail
     soon first (ordered: mentions of the module per second of baseline), with -x: the first
     failure ends the run;
@@ -18,7 +20,8 @@ How (CLAUDE.md 13.1):
     written into the copy, its tests run there, and the module gets its own bytes back;
   * the workers' tests run with a home, XDG and temp folders of their own (worker_env): a mutant
     can break the very code a test counts on to keep its writes in tmp_path, and they land
-    there instead of in the user's folders; uv keeps its cache, Pythons and tools;
+    there instead of in the user's folders; uv keeps its cache and Pythons (the UV_* variables
+    that name them: a test that drops those sees the worker's empty home);
   * a module's tests first run once as they are (its baseline): they must pass, and their time
     sets the limit of each of its mutants (TIMEOUT_FACTOR, TIMEOUT_EXTRA);
   * a run counts only with pytest's own summary line in its output (classify): one that ends
@@ -33,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import bisect
 import difflib
 import io
 import itertools
@@ -47,6 +51,7 @@ import tempfile
 import threading
 import time
 import tokenize
+import warnings
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -57,6 +62,7 @@ from typing import IO, Any
 from . import envs, proc, ui
 from .config import Config
 from .e2e import child_env, kill_tree, rmtree, scrub_env, termination_as_interrupt
+from .presets import _git_path
 from .project import IS_WINDOWS, ROOT, TOOLS, check_private_dir, scratch_name, venv_python
 from .ui import PytError
 
@@ -84,6 +90,7 @@ OPERATORS = (
     *(f"core/ReplaceBinaryOperator_{b}" for b in _BINARY),
     *(f"core/{o}" for o in _OTHERS),
 )
+EXCEPTION_REPLACER = "core/ExceptionReplacer"  # its mutants are the runner's own (own_mutant)
 PRAGMA = re.compile(r"#\s*pragma:\s*no mutate\b")
 TIMEOUT_FACTOR, TIMEOUT_EXTRA = 2, 60.0  # a mutant's tests: twice their baseline time, plus a minute
 BASELINE_TIMEOUT = 3600.0  # one module's tests as they are
@@ -91,6 +98,8 @@ KILLED, TIMEOUT, SURVIVED, ERROR, UNTESTED, SKIPPED, NOT_RUN = "killed", "timeou
 STATUSES = (KILLED, TIMEOUT, SURVIVED, ERROR, UNTESTED, SKIPPED, NOT_RUN)
 PASS, FAIL = "PASS", "FAIL"
 GIT_IDENTITY = ("-c", "user.name=pytemplate mutation", "-c", "user.email=mutation@example.invalid")
+# a user's PYTEST_ADDOPTS (-n auto, --lf...) and PYTEST_PLUGINS would change what every run means
+PYTEST_VARIABLES = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS")
 
 
 # --- options ------------------------------------------------------------------------------------
@@ -224,17 +233,20 @@ _HUNK = re.compile(r"@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 def parse_diff(text: str) -> dict[str, set[int]]:
     """`git diff --unified=0` output -> the lines (numbered in the new file) each file added or
     replaced. A deletion alone changes no line that is still there. A hunk's lines are counted
-    off its header, so an added line that reads like a file header ("+++ x") stays a line."""
+    off its header, so an added line that reads like a file header ("+++ x") stays a line; only
+    git's own line breaks end a line (a changed line may hold a form feed). A name comes as git
+    writes it: in C quotes when it holds a byte above 0x7f or a control character, and followed
+    by a tab when it holds a blank."""
     changed: dict[str, set[int]] = {}
     current: set[int] | None = None
     left = 0  # lines of the current hunk still to come
-    for line in text.splitlines():
+    for line in text.split("\n"):
         if left > 0:
-            if line[:1] in "+- ":
+            if line.startswith(("+", "-", " ")):
                 left -= 1
             continue
         if line.startswith("+++ "):
-            target = line[4:].removesuffix("\t")  # git ends a name that holds a blank with a tab
+            target = _git_path(line[4:].removesuffix("\t"))
             current = None if target == "/dev/null" else changed.setdefault(target.removeprefix("b/"), set())
         elif m := _HUNK.match(line):
             removed, start = int(m[1]) if m[1] is not None else 1, int(m[2])
@@ -267,12 +279,14 @@ def root_env() -> dict[str, str]:
 
 def changed_lines(root: Path, base: str, env: Mapping[str, str]) -> dict[str, set[int]]:
     """The runner's lines changed since the commit `base`: tracked files against the working
-    tree (uncommitted changes included), and every line of an untracked module."""
+    tree (uncommitted changes included), and every line of an untracked module. The options
+    that shape the output are all given, whatever the user's git configuration says (hunks
+    merged by diff.interHunkContext would count the lines between them as changed)."""
     if _git(root, env, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}", check=False).returncode != 0:
         raise PytError(f"selftest --mutation --diff: {base!r} names no commit here (fetch it first, e.g. git fetch origin main)")
     text = _git(
-        root, env, "diff", "--relative", "--no-color", "--no-ext-diff", "--no-renames", "--unified=0",
-        "--src-prefix=a/", "--dst-prefix=b/", base, "--", SCOPE,
+        root, env, "diff", "--relative", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=0",
+        "--inter-hunk-context=0", "--src-prefix=a/", "--dst-prefix=b/", base, "--", SCOPE,
     ).stdout.decode("utf-8", errors="replace")  # fmt: skip
     changed = {path: lines for path, lines in parse_diff(text).items() if path.endswith(".py")}
     untracked = _git(root, env, "ls-files", "-z", "--others", "--exclude-standard", "--", SCOPE).stdout
@@ -293,14 +307,19 @@ def _lines(source: str) -> list[str]:
 Position = tuple[int, int]  # (line from 1, column from 0 in characters), as parso gives them
 
 
+def _char_pos(lines: Sequence[str], line: int, byte_col: int) -> Position:
+    """ast's (line, column in UTF-8 bytes) -> a Position (column in characters)."""
+    text = lines[line - 1] if 0 < line <= len(lines) else ""
+    return line, len(text.encode("utf-8")[:byte_col].decode("utf-8", errors="ignore"))
+
+
 def skipped_spans(source: str) -> list[tuple[Position, Position]]:
     """Where no mutant is made: annotations (never evaluated: every runner module has `from
     __future__ import annotations`) and the test and body of `if TYPE_CHECKING:` (never run)."""
     lines = _lines(source)
 
-    def pos(line: int, byte_col: int) -> Position:  # ast's columns count UTF-8 bytes
-        text = lines[line - 1] if 0 < line <= len(lines) else ""
-        return line, len(text.encode("utf-8")[:byte_col].decode("utf-8", errors="ignore"))
+    def pos(line: int, byte_col: int) -> Position:
+        return _char_pos(lines, line, byte_col)
 
     spans: list[tuple[Position, Position]] = []
     for node in ast.walk(ast.parse(source)):
@@ -321,6 +340,66 @@ def skipped_spans(source: str) -> list[tuple[Position, Position]]:
 
 def _is_type_checking(test: ast.expr) -> bool:
     return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")
+
+
+def handler_classes(source: str) -> dict[tuple[Position, Position], str]:
+    """Where the exception classes of the except clauses are written, each with the text that
+    switches it off (an ExceptionReplacer mutant): the whole expression (`OSError`,
+    `subprocess.TimeoutExpired`) becomes `()`, an empty tuple, which catches nothing; an element
+    of a tuple (`except (OSError, ValueError):` names two) becomes `*()`, which leaves no element
+    in its place (Python refuses a tuple inside that tuple: a TypeError when it is matched), with
+    the parentheses of its own it may have (`((OSError), B)`: `(*())` is no valid Python). The
+    elements of a tuple without parentheses (`except A, B:`, Python 3.14) are left out: there
+    `*()` would read as `except*`."""
+    lines = _lines(source)
+    starts = _line_starts(source)
+    classes: dict[tuple[Position, Position], str] = {}
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ExceptHandler) and node.type is not None:
+            t = node.type
+            if isinstance(t, ast.Tuple) and not _parenthesized(ast.get_source_segment(source, t) or ""):
+                continue
+            for e in t.elts if isinstance(t, ast.Tuple) else [t]:
+                span = _char_pos(lines, e.lineno, e.col_offset), _char_pos(lines, e.end_lineno or e.lineno, e.end_col_offset or 0)
+                if isinstance(t, ast.Tuple):  # with the parentheses of its own
+                    begin, end = (starts[line - 1] + column for line, column in span)
+                    while True:
+                        before, after = _skip_blanks(source, begin - 1, -1), _skip_blanks(source, end, 1)
+                        if before < 0 or source[before] != "(" or source[after : after + 1] != ")":
+                            break
+                        begin, end = before, after + 1
+                    span = _position(starts, begin), _position(starts, end)
+                classes[span] = "*()" if isinstance(t, ast.Tuple) else "()"
+    return classes
+
+
+def _line_starts(source: str) -> list[int]:
+    """Where each line starts in `source`, as _lines counts them."""
+    return [0] + [m.end() for m in re.finditer(r"\r\n|\r|\n", source)]
+
+
+def _position(starts: Sequence[int], offset: int) -> Position:
+    line = bisect.bisect_right(starts, offset)
+    return line, offset - starts[line - 1]
+
+
+def _skip_blanks(source: str, index: int, step: int) -> int:
+    """The first index from `index` on (going by `step`) that holds no blank, line break or line
+    continuation; -1 or len(source) past an end."""
+    while 0 <= index < len(source) and source[index] in " \t\f\r\n\\":
+        index += step
+    return index
+
+
+def _parenthesized(text: str) -> bool:
+    """Whether a tuple's text is in parentheses of its own: `(A, B)`, not `(A), (B)`."""
+    if not (text.startswith("(") and text.endswith(")")):
+        return False
+    try:
+        ast.parse("[" + text[1:-1] + "\n]", mode="eval")  # the line break ends a comment on the last line
+    except SyntaxError:
+        return False
+    return True
 
 
 # --- mutants ------------------------------------------------------------------------------------
@@ -353,15 +432,26 @@ class Mutant:
 def select(file: str, listed: Iterable[Sequence[Any]], source: str, changed: set[int] | None) -> list[Mutant]:
     """Cosmic Ray's list for `file` -> the mutants to test: NumberReplacer's +1 only (its -1 is
     the same finding again), none in skipped_spans or on a line with the pragma, and with a set
-    of `changed` lines (--diff) only the mutants that touch one of them."""
+    of `changed` lines (--diff) only the mutants that touch one of them. An ExceptionReplacer
+    mutant takes the span of the exception class it is in (handler_classes: Cosmic Ray names a
+    part of a dotted one), one mutant per class."""
     spans = skipped_spans(source)
+    classes = handler_classes(source)
     lines = _lines(source)
     out: list[Mutant] = []
+    seen: set[tuple[Position, Position]] = set()
     for item in listed:
         name, function = str(item[0]), None if item[7] is None else str(item[7])
         occurrence, index, line, column, end_line, end_column = (int(x) for x in item[1:7])
         if name == "core/NumberReplacer" and index != 0:
             continue
+        if name == EXCEPTION_REPLACER:
+            span = next(((a, b) for a, b in classes if a <= (line, column) < b), None)
+            if span is not None:
+                if span in seen:
+                    continue
+                seen.add(span)
+                (line, column), (end_line, end_column) = span
         if any(a <= (line, column) <= b for a, b in spans):
             continue
         if 0 < line <= len(lines) and PRAGMA.search(lines[line - 1]):
@@ -372,20 +462,69 @@ def select(file: str, listed: Iterable[Sequence[Any]], source: str, changed: set
     return out
 
 
+def own_mutant(m: Mutant, source: str) -> str | None:
+    """The mutant the runner makes itself, None for one Cosmic Ray makes. ExceptionReplacer: the
+    exception class at the mutant's span is switched off (handler_classes), so its handler no
+    longer catches it and the exception goes on. Cosmic Ray writes CosmicRayTestingException
+    there, a class only its own package defines: every exception that reached the handler became
+    a NameError, which fails a test that expects another exception to pass through (a kill that
+    says nothing about the handler), and a dotted name in a tuple made it fail (CLAUDE.md 15.1).
+    A span that is no exception class (select could not place Cosmic Ray's) is left to it."""
+    span = ((m.line, m.column), (m.end_line, m.end_column))
+    off = handler_classes(source).get(span) if m.operator == EXCEPTION_REPLACER else None
+    if off is None:
+        return None
+    starts = _line_starts(source)
+    begin, end = (starts[line - 1] + column for line, column in span)
+    return source[:begin] + off + source[end:]
+
+
+_COMPILE_LOCK = threading.Lock()  # warnings.catch_warnings changes the filters of every thread
+
+
+def made(answer: Mapping[str, Any], original: bytes, file: str) -> tuple[str, str, str | None]:
+    """Cosmic Ray's answer to a mutate request -> (status, detail, the mutated module). NOT_RUN
+    with the module: a mutant to test. SKIPPED: one no test run can judge: Cosmic Ray cannot make
+    it, it is the module unchanged, or it is no valid Python (pytest would stop at collection,
+    which reads as a kill: `**` of a dict display turned into `*`, `not` before a walrus). ERROR:
+    an answer that makes no sense, a problem of the harness."""
+    if "error" in answer:
+        return ERROR, f"Cosmic Ray's side failed: {answer['error']}", None
+    if answer.get("cannot"):
+        return SKIPPED, f"Cosmic Ray cannot make this mutant: {answer['cannot']}", None
+    code = answer.get("code")
+    if not isinstance(code, str):
+        return ERROR, "Cosmic Ray made no mutant at an occurrence its list named", None
+    if code.encode("utf-8") == original:
+        return SKIPPED, "the mutant is the module unchanged", None
+    try:
+        with _COMPILE_LOCK, warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # SyntaxWarnings of a mutant are no verdict
+            compile(code, file, "exec", dont_inherit=True)
+    except SyntaxError as e:
+        return SKIPPED, f"the mutant is no valid Python: {e.msg} (line {e.lineno})", code
+    except ValueError as e:  # a NUL byte
+        return SKIPPED, f"the mutant is no valid Python: {e}", code
+    return NOT_RUN, "", code
+
+
 def mutant_diff(original: str, mutated: str, limit: int = 12) -> list[str]:
     """The lines the mutant changes, `-` before and `+` after."""
     changed = difflib.unified_diff(_lines(original), _lines(mutated), lineterm="", n=0)
     return [line for line in changed if line[:1] in "+-" and not line.startswith(("+++", "---"))][:limit]
 
 
-_SUMMARY = re.compile(r"^=*\s*(\d+ [a-z]+(?:, \d+ [a-z]+)*) in \d+(?:\.\d+)?s\b")
+_ITEM = r"\d+ [a-z]+(?: [a-z]+)*"  # "12 passed", "3 subtests passed"
+_SUMMARY = re.compile(rf"^=*\s*({_ITEM}(?:, {_ITEM})*) in \d+(?:\.\d+)?s\b")
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
 def pytest_counts(output: str) -> dict[str, int] | None:
     """The counts of pytest's last summary line ("1 failed, 12 passed in 3.2s"), or None when
-    the output has none: pytest did not get to the end."""
+    the output has none: pytest did not get to the end. Colours are read through (a FORCE_COLOR
+    or PY_COLORS the runs did not turn off would colour the line)."""
     for line in reversed(output.splitlines()):
-        m = _SUMMARY.match(line.strip())
+        m = _SUMMARY.match(_ANSI.sub("", line).strip())
         if m:
             counts: dict[str, int] = {}
             for part in m[1].split(", "):
@@ -394,6 +533,11 @@ def pytest_counts(output: str) -> dict[str, int] | None:
                 counts[word] = counts.get(word, 0) + int(number)
             return counts
     return None
+
+
+def _failures(counts: Mapping[str, int]) -> int:
+    """Failed and erroring tests, subtests included ("2 subtests failed"); never "xfailed"."""
+    return sum(n for words, n in counts.items() if words.split()[-1] in ("failed", "error", "errors"))
 
 
 def _first_failure(output: str) -> str:
@@ -419,10 +563,11 @@ def classify(code: int | None, output: str, *, stopped: bool = False) -> tuple[s
         return NOT_RUN, "interrupted"
     if code is None:
         return TIMEOUT, ""
+    output = _ANSI.sub("", output)
     counts = pytest_counts(output)
     if counts is None:
         return ERROR, f"exit code {proc.exit_code(code)} without pytest's summary line: {_last_line(output)}"
-    failures = counts.get("failed", 0) + counts.get("error", 0)
+    failures = _failures(counts)
     if code == 0 and failures == 0:
         return SURVIVED, ""
     if code in (1, 2) and failures:
@@ -634,7 +779,7 @@ def worker_env(worker_copy: Path, home: Path, tmp: Path, base_env: Mapping[str, 
     XDG ones default below its home): whatever a mutant makes a test write there stays in the
     base. `keep` holds uv's own folders as uv resolves them outside (nvimtest.uv_dirs: its cache,
     Pythons and tools), which the moved home would otherwise take away."""
-    env = {k: v for k, v in base_env.items() if not k.upper().startswith("XDG_")}
+    env = {k: v for k, v in base_env.items() if not k.upper().startswith("XDG_") and k.upper() not in PYTEST_VARIABLES}
     env["HOME"] = str(home)
     if IS_WINDOWS:
         env.update(USERPROFILE=str(home), LOCALAPPDATA=str(home / "AppData" / "Local"), APPDATA=str(home / "AppData" / "Roaming"))
@@ -652,15 +797,18 @@ def worker_env(worker_copy: Path, home: Path, tmp: Path, base_env: Mapping[str, 
     return env
 
 
-_MTIMES = itertools.count(int(time.time()) + 1)
+_last_mtime = 0
 _MTIME_LOCK = threading.Lock()
 
 
 def set_mtime(path: Path) -> None:
-    """A time no earlier write had (whole seconds, as a .pyc records it): a .pyc made from one
-    version of a module never passes for another of the same size."""
+    """A time no earlier write had (whole seconds, as a .pyc records it): each one after the one
+    before and after the clock, so never the time of a write made by the clock either (the copy
+    of the project): a .pyc made from one version of a module never passes for another of the
+    same size."""
+    global _last_mtime
     with _MTIME_LOCK:
-        seconds = next(_MTIMES)
+        _last_mtime = seconds = max(_last_mtime + 1, int(time.time()) + 1)
     os.utime(path, ns=(seconds * 10**9, seconds * 10**9))
 
 
@@ -745,7 +893,7 @@ class Runs:
         """pytest on `tests` in the worker's copy: (exit code or None when ended, output, seconds).
         The same seed for Hypothesis every time: a mutant is judged on the inputs its baseline had."""
         argv = [
-            str(worker.python), "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider", f"--basetemp={worker.tmp}",
+            str(worker.python), "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider", "--color=no", f"--basetemp={worker.tmp}",
             "--hypothesis-seed=0", *([f"--junitxml={junit}"] if junit else []), *tests,
         ]  # fmt: skip
         start = time.perf_counter()
@@ -831,6 +979,7 @@ class Report:
     workers: int = 0
     note: str = ""  # why there is no mutant to test
     kept: bool = False  # the logs stay in the base
+    error: BaseException | None = None  # what stopped the run (selftest raises it after the report)
 
     def counts(self) -> dict[str, int]:
         found = Counter(m.status for m in self.mutants)
@@ -843,13 +992,18 @@ class Report:
         return (c[KILLED] + c[TIMEOUT]) / judged if judged else None
 
     def failed(self) -> bool:
-        return any(b.status == FAIL for b in self.baselines.values()) or any(m.status == ERROR for m in self.mutants)
+        return (
+            self.error is not None
+            or any(b.status == FAIL for b in self.baselines.values())
+            or any(m.status == ERROR for m in self.mutants)
+        )
 
     def as_json(self, opts: Options) -> dict[str, Any]:
         score = self.score()
         return {
             "ok": not (self.interrupted or self.failed()),
             "interrupted": self.interrupted,
+            "error": None if self.error is None else f"{type(self.error).__name__}: {self.error}",
             "base": str(self.base),
             "kept": self.kept,
             "seconds": round(self.seconds, 1),
@@ -866,6 +1020,8 @@ class Report:
 def print_report(report: Report) -> None:
     """The answer, shown even with -q (ui.report): a line per file, the score, then every mutant
     no test noticed with its change, and the ones that could not be judged."""
+    if not report.mutants and report.error is not None:
+        return  # nothing was listed: the error says why
     ui.step("mutation results")
     if not report.mutants:
         ui.report(f"  no mutant to test: {report.note or 'the runner has no module'}")
@@ -909,12 +1065,15 @@ def selftest(cfg: Config, args: list[str]) -> int:
     opts = parse_args(args)
     uv = proc.find_uv()
     report = run(cfg, opts, uv, ROOT, default_base())
-    print_report(report)
-    if opts.as_json:
-        print(json.dumps(report.as_json(opts), indent=2))
-    if report.kept:
-        ui.report(f"logs kept for inspection: {report.base / 'logs'}")
-    if report.interrupted:
+    with deferred_interrupts() as got:  # the report is what the run was for: it is written whole
+        print_report(report)
+        if opts.as_json:
+            print(json.dumps(report.as_json(opts), indent=2), flush=True)
+        if report.kept:
+            ui.report(f"logs kept for inspection: {report.base / 'logs'}")
+    if report.error is not None:
+        raise report.error  # its own message and exit code (a traceback for a runner bug)
+    if report.interrupted or got:
         ui.error("interrupted")
         return 130
     if report.failed():
@@ -925,9 +1084,11 @@ def selftest(cfg: Config, args: list[str]) -> int:
 
 
 def run(cfg: Config, opts: Options, uv: str, root: Path, base: Path) -> Report:
-    """List the mutants, make the workers, run the baselines, then the mutants. The workers'
-    copies always go; the base keeps its logs when they are worth reading (an interrupt, a failed
-    baseline, an error, and whatever stopped the run), and goes otherwise."""
+    """List the mutants, make the workers, run the baselines, then the mutants. What stops the
+    run (an interrupt, an exception: `report.error`) leaves the report of what ran. The workers'
+    folders always go; the logs stay when they are worth reading (an interrupt, a failed
+    baseline, an error), and go otherwise. The base itself stays, with its marker and lock file
+    only (removed, it could vanish under a second run that just prepared it)."""
     env = root_env()
     changed = changed_lines(root, opts.diff, env) if opts.diff else None
     scope = scope_files(root)
@@ -939,20 +1100,43 @@ def run(cfg: Config, opts: Options, uv: str, root: Path, base: Path) -> Report:
     tests = test_map(root, {module_of(f) for f in scope})
     prepare_base(base, root)
     t0 = time.perf_counter()
-    try:
-        with base_lock(base), termination_as_interrupt():
-            try:
-                _run_locked(cfg, opts, uv, root, base, files, changed, tests, report)
-            except KeyboardInterrupt:
-                report.interrupted = True
-            finally:
+    with base_lock(base), termination_as_interrupt():
+        try:
+            _run_locked(cfg, opts, uv, root, base, files, changed, tests, report)
+        except KeyboardInterrupt:
+            report.interrupted = True
+        except Exception as e:  # noqa: BLE001 - the report of what ran comes first, then the error
+            report.error = e
+        finally:
+            with deferred_interrupts() as got:  # the cleanup, whatever comes now (then the report)
+                report.seconds = time.perf_counter() - t0
                 _remove_workers(base)
-    finally:
-        report.seconds = time.perf_counter() - t0
-    report.kept = report.interrupted or report.failed()
-    if not report.kept:
-        _remove_base(base)
+                report.kept = report.interrupted or report.failed() or bool(got)
+                if not report.kept:
+                    _remove_logs(base)
+            report.interrupted = report.interrupted or bool(got)
     return report
+
+
+@contextmanager
+def deferred_interrupts() -> Iterator[list[int]]:
+    """Ctrl+C, SIGTERM and SIGHUP wait while the block runs (a cleanup, the report): the list
+    gets each one that came, and the old handlers come back at its end. Main thread only: other
+    threads never get a signal."""
+    import signal
+
+    got: list[int] = []
+    saved: list[tuple[int, Any]] = []
+    if threading.current_thread() is threading.main_thread():
+        for name in ("SIGINT", "SIGTERM", "SIGHUP"):
+            number = getattr(signal, name, None)  # no SIGHUP on Windows
+            if number is not None:
+                saved.append((number, signal.signal(number, lambda signum, frame: got.append(signum))))
+    try:
+        yield got
+    finally:
+        for number, handler in saved:
+            signal.signal(number, signal.SIG_DFL if handler is None else handler)
 
 
 def _run_locked(cfg: Config, opts: Options, uv: str, root: Path, base: Path, files: Sequence[str], changed: Mapping[str, set[int]] | None,
@@ -996,7 +1180,8 @@ def _test(cfg: Config, opts: Options, uv: str, root: Path, base: Path, tests: Ma
         make_copy(root, copy, files, env, originals)
         venv = envs.PyEnv("cpython", copy / ".venv", cfg.python.cpython, "only-managed")
         no_groups = [a for group, _ in envs.left_out(venv) for a in ("--no-group", group)]
-        envs.uv(venv, ["--quiet", "sync", "--locked", "--all-groups", *no_groups], cwd=copy)  # the copy is the project
+        # one --quiet whatever ./pyt's -q says: uv's progress goes, its errors stay (-qq hid them)
+        envs.uv(venv, ["--quiet", "sync", "--locked", "--all-groups", *no_groups], cwd=copy, quiet=False)  # the copy is the project
         for d in (home, *((home / "AppData" / "Local", home / "AppData" / "Roaming") if IS_WINDOWS else ()), scratch / "tmp", scratch / "pytest"):
             d.mkdir(parents=True)
         wenv = worker_env(copy, home, scratch / "tmp", env, keep, cfg, uv)
@@ -1031,32 +1216,29 @@ def _test(cfg: Config, opts: Options, uv: str, root: Path, base: Path, tests: Ma
     errors = itertools.count(1)
 
     def mutant(worker: Worker, m: Mutant) -> None:
-        answer = driver.ask({"op": "mutate", "path": str(snapshot / m.file), "operator": m.operator, "occurrence": m.occurrence})
         original = originals[m.file]
-        code_text = answer.get("code")
-        if "error" in answer or not isinstance(code_text, str):
-            m.status, m.detail = ERROR, f"Cosmic Ray made no mutant: {answer.get('error', 'none at this occurrence')}"
-        else:
-            mutated = code_text.encode("utf-8")
-            if mutated == original:
-                m.status, m.detail = SKIPPED, "the mutant is the module unchanged"
-            else:
-                m.diff = mutant_diff(original.decode("utf-8"), code_text)
-                target = worker.copy / m.file
-                b = report.baselines[m.module]
-                limit = TIMEOUT_FACTOR * b.seconds + TIMEOUT_EXTRA
-                try:
-                    write_module(target, mutated)
-                    code, output, m.seconds = runs.run(worker, b.tests, limit)
-                finally:
-                    write_module(target, original)
-                m.status, m.detail = classify(code, output, stopped=runs.stopped.is_set())
-                if m.status == TIMEOUT:
-                    m.detail = f"no result after {limit:.0f} s"
-                elif m.status == ERROR:
-                    saved = base / "logs" / f"error-{next(errors)}.log"
-                    shutil.copyfile(worker.log, saved)
-                    m.detail += f"  (log: {saved})"
+        own = own_mutant(m, original.decode("utf-8"))
+        request = {"op": "mutate", "path": str(snapshot / m.file), "operator": m.operator, "occurrence": m.occurrence}
+        answer = {"code": own} if own is not None else driver.ask(request)
+        m.status, m.detail, code_text = made(answer, original, m.file)
+        if code_text is not None:
+            m.diff = mutant_diff(original.decode("utf-8"), code_text)
+        if code_text is not None and m.status == NOT_RUN:
+            target = worker.copy / m.file
+            b = report.baselines[m.module]
+            limit = TIMEOUT_FACTOR * b.seconds + TIMEOUT_EXTRA
+            try:
+                write_module(target, code_text.encode("utf-8"))
+                code, output, m.seconds = runs.run(worker, b.tests, limit)
+            finally:
+                write_module(target, original)
+            m.status, m.detail = classify(code, output, stopped=runs.stopped.is_set())
+            if m.status == TIMEOUT:
+                m.detail = f"no result after {limit:.0f} s"
+            elif m.status == ERROR:
+                saved = base / "logs" / f"error-{next(errors)}.log"
+                shutil.copyfile(worker.log, saved)
+                m.detail += f"  (log: {saved})"
         if m.status != NOT_RUN:
             _progress(lock, done, len(ready), m)
 
@@ -1076,13 +1258,9 @@ def _remove_workers(base: Path) -> None:
         ui.warn(f"could not remove the workers' folders in {base}: {e}")
 
 
-def _remove_base(base: Path) -> None:
-    """The rest, once the run is over and nothing in its logs is worth reading."""
+def _remove_logs(base: Path) -> None:
+    """The logs, once nothing in them is worth reading (the lock is still held)."""
     try:
         rmtree(base / "logs")
-        for name in (MARKER, "lock"):
-            (base / name).unlink(missing_ok=True)
-        if not any(base.iterdir()):
-            base.rmdir()
     except OSError as e:
-        ui.warn(f"could not remove {base}: {e}")
+        ui.warn(f"could not remove {base / 'logs'}: {e}")

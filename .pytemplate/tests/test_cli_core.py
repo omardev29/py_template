@@ -61,12 +61,25 @@ def unchecked(data: dict[str, Any]) -> Config:
     return cfg
 
 
+# where the user's uv keeps its cache and its Pythons: theirs, not the uv run's. Dropped, a child
+# in a home of its own (the workers of selftest --mutation) downloaded CPython, or offline failed
+UV_FOLDERS = ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR")
+
+
 def child_env() -> dict[str, str]:
     """The environment of a child ./pyt: nothing of the uv run that started pytest."""
     drop = ("UV", "VIRTUAL_ENV", "PYTHONUNBUFFERED", "PYTHONPATH", "PYTHONHOME")
-    env = {k: v for k, v in os.environ.items() if k not in drop and not k.startswith(("PYTEMPLATE_", "UV_"))}
+    env = {k: v for k, v in os.environ.items() if k not in drop and (k in UV_FOLDERS or not k.startswith(("PYTEMPLATE_", "UV_")))}
     env.update(NO_COLOR="1", PYTHONDONTWRITEBYTECODE="1")
     return env
+
+
+def test_child_env_keeps_where_uv_keeps_its_cache_and_pythons(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, value in (("UV_CACHE_DIR", "/c"), ("UV_PYTHON_INSTALL_DIR", "/p"), ("UV_PROJECT_ENVIRONMENT", "/v"), ("UV_PYTHON", "3.14")):
+        monkeypatch.setenv(name, value)
+    env = child_env()
+    assert env["UV_CACHE_DIR"] == "/c" and env["UV_PYTHON_INSTALL_DIR"] == "/p"
+    assert "UV_PROJECT_ENVIRONMENT" not in env and "UV_PYTHON" not in env
 
 
 def fail(*_a: Any, **_kw: Any) -> Any:

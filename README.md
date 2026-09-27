@@ -1737,9 +1737,11 @@ regenerate the root (CLAUDE.md, section 11).
   8) tests in a throwaway copy of the project with its own git repository, `.venv` and home
   folder, in a short temporary folder, never in your checkout. The modules' tests must pass as
   they are first (their time sets each mutant's limit). A line marked `# pragma: no mutate` gets
-  no mutant. It exits 0 when every mutant was judged (survivors are the report, not a failure)
-  and 1 when a module's tests fail without a mutant or a run could not be judged; Ctrl+C prints
-  the report of what ran (130).
+  no mutant; a mutant that is no valid Python, or one Cosmic Ray cannot make, is skipped (the
+  JSON report says why). It exits 0 when every mutant was judged (survivors are the report, not
+  a failure) and 1 when a module's tests fail without a mutant or a run could not be judged;
+  Ctrl+C prints the report of what ran (130), and so does an error that stops the run, before
+  its own message.
 - `./pyt render --check` and `./pyt doctor` must pass too.
 
 **(template repository)** The template's own CI, in `.github/workflows/template-*.yml` (not

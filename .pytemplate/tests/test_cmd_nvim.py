@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -442,8 +443,13 @@ def test_env_isolation(tmp_path: Path) -> None:
 
 
 def test_default_dir_is_short() -> None:
+    """Right in the temp folder, whatever that is (selftest --mutation's workers move it deeper:
+    below macOS's own it passed 80 characters), and short on Windows (MAX_PATH)."""
     d = nvimtest.default_dir()
-    assert d.name in ("nvim", project.scratch_name("pt-nvim")) and len(str(d)) < 80
+    temp = Path(tempfile.gettempdir())
+    assert d.name in ("nvim", project.scratch_name("pt-nvim")) and d.parent in (temp, temp / "pt")
+    if project.IS_WINDOWS:
+        assert len(str(d)) < 80
 
 
 def test_prepare_dir_refuses_foreign_dirs(tmp_path: Path) -> None:

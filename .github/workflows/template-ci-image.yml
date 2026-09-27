@@ -337,15 +337,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0 # the base branch, for --diff
+          fetch-depth: 2 # HEAD^1, for --diff
           persist-credentials: false # the mutants run code: no token in .git/config
       - name: selftest --mutation of the runner lines this pull request changes
-        env:
-          BASE_REF: ${{ github.base_ref }}
         run: |
+          # HEAD is the merge commit GitHub made for the pull request, HEAD^1 the base branch it was
+          # made on: the base branch itself may have moved since, and its new lines would count
           # timeout: SIGTERM ends the suite like Ctrl+C (exit 130, the report of what ran), then 124
           set +e
-          timeout -k 5m -s TERM 70m ./pyt selftest --mutation --diff "origin/$BASE_REF" --jobs 3 --json > mutation.json
+          timeout -k 5m -s TERM 70m ./pyt selftest --mutation --diff HEAD^1 --jobs 3 --json > mutation.json
           code=$?
           set -e
           if [ "$code" -eq 124 ]; then echo "::warning::selftest --mutation ran out of its 70 minutes: the report holds the mutants that ran"; exit 0; fi
