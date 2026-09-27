@@ -4396,8 +4396,9 @@ Behaviour:
 - `./deploy lock` re-locks without applying `[preset.*]`: after a `[preset.raylib] package`
   switch it moves `no-build-package` to the new name and keeps the old dependency until
   `./deploy apply` runs (every mismatch hint names apply). A `[preset.flet] version` edit that
-  is not applied yet shows only in `doctor` (`cmd_apply.pending`): `render.auto` and the
-  pre-commit hook compare the managed block, where flet leaves no trace.
+  is not applied yet is missed only by `render.auto`, which compares the managed block, where
+  flet leaves no trace: `doctor` and the pre-commit hook report it (`cmd_apply.pending`, which
+  `hooks.check_lock` asks too).
 - Without a trusted `applied` record (lost: a `state.json` merge conflict whose sides disagree
   on it, resolved with `./deploy render`; a deleted file) apply reads the options applied last
   back from the managed block (`cmd_apply._block_options`: raylib's `no-build-package`) and the

@@ -1333,6 +1333,28 @@ def test_quiet_keeps_what_a_failed_check_says(monkeypatch: pytest.MonkeyPatch, c
     assert "All checks passed!" not in err  # a passed check's output stays progress
 
 
+def test_the_hook_reports_preset_options_that_are_not_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A [preset.*] edit that is not applied yet (flet's version leaves no trace in the managed
+    block) blocks the commit: check_lock asks cmd_apply.pending. CLAUDE.md 15.2 said it showed only
+    in doctor: a maintainer reading it learned the opposite of what the hook does."""
+    monkeypatch.setattr(render, "pyproject_outdated", lambda cfg: False)
+    monkeypatch.setattr(hooks, "uv_lock_check", lambda cfg: (0, ""))
+    asked: list[bool] = []
+
+    def pending(cfg: Config, hook: bool = True) -> list[tuple[str, str]]:
+        asked.append(hook)
+        return [("[preset.flet] is not applied to pyproject.toml (add flet==1.0.0)", "./deploy apply")]
+
+    monkeypatch.setattr(cmd_apply, "pending", pending)
+    result = hooks.check_lock(make())
+    assert result.passed is False and "[preset.flet] is not applied" in result.hint and asked == [False]
+    guide = ROOT / "CLAUDE.md"
+    if guide.is_file():
+        text = " ".join(guide.read_text(encoding="utf-8").split())
+        assert "shows only in `doctor`" not in text
+        assert "`doctor` and the pre-commit hook report it (`cmd_apply.pending`" in text
+
+
 @needs_git
 def test_checks_lock(tmp_path: Path, tools: Tools) -> None:
     repo, staged = staged_project(
