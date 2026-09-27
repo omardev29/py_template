@@ -820,6 +820,73 @@ def test_pyz_bootstrap_refuses_an_older_python(tmp_path: Path) -> None:
     assert not (tmp_path / "cache").exists()  # nothing extracted
 
 
+ABI_NAMES = {
+    "_x.cpython-314-x86_64-linux-gnu.so": "cp314",
+    "_x.cpython-314t-x86_64-linux-gnu.so": "cp314t",  # free-threaded
+    "_x.cpython-313-darwin.so": "cp313",
+    "_x.cp314-win_amd64.pyd": "cp314",
+    "_x.cp314t-win_arm64.pyd": "cp314t",
+    "_x.pypy311-pp73-x86_64-linux-gnu.so": "pypy311_pp73",
+    "_x.pypy311-pp80-darwin.so": "pypy311_pp80",  # PyPy 8.0: a new ABI for the same pp311 key
+    "_x.pypy311-pp73-win_amd64.pyd": "pypy311_pp73",
+    "_x.abi3.so": "",  # any CPython of the platform
+    "_x.so": "",
+    "_x.pyd": "",
+    ".cpython-314-x86_64-linux-gnu.so": "cp314",  # EXT_SUFFIX itself (the bootstrap's _abi)
+    ".cp314-win_amd64.pyd": "cp314",
+    ".pypy311-pp73-x86_64-linux-gnu.so": "pypy311_pp73",
+}
+
+
+def test_abi_tags_agree_with_the_bootstrap() -> None:
+    import sysconfig
+
+    bootstrap = _bootstrap_namespace()
+    for name, tag in ABI_NAMES.items():
+        assert common.abi_tag(name) == tag == bootstrap["abi_tag"](name), name
+    assert bootstrap["ABI_RE"].pattern == common.ABI_RE.pattern
+    assert bootstrap["_abi"]() == common.abi_tag(sysconfig.get_config_var("EXT_SUFFIX") or "") != ""
+
+
+def test_pyz_records_the_abi_of_every_targets_binaries(tmp_path: Path) -> None:
+    from runner.methods import pyz
+
+    root = tmp_path / "root"
+    for name in ("targets/a/lib/dep/_x.pypy311-pp73-x86_64-linux-gnu.so", "targets/a/lib/dep/_y.abi3.so", "targets/b/app/pkg/core.cpython-314-x86_64-linux-gnu.so", "targets/c/lib/dep.py"):
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_bytes(b"")
+    assert pyz._target_abis(root, ["a", "b", "c"]) == {"a": ["pypy311_pp73"], "b": ["cp314"]}
+    # pyz-merge records the ABIs of what it wrote
+    parts = [
+        fake_pyz(tmp_path / "p1.pyz", targets=[LINUX], pure=False, host=LINUX, files={"common/app/main.py": MERGE_MAIN, f"targets/{LINUX}/lib/_d.cpython-314-x86_64-linux-gnu.so": ""}),
+        fake_pyz(tmp_path / "p2.pyz", targets=[WIN], pure=False, host=WIN, files={"common/app/main.py": MERGE_MAIN, f"targets/{WIN}/lib/_d.cp314-win_amd64.pyd": ""}),
+    ]
+    info, _ = _merge(parts, tmp_path / "m.pyz")
+    assert info["abi"] == {LINUX: ["cp314"], WIN: ["cp314"]}
+
+
+@pytest.mark.parametrize("pure", [False, True])
+def test_pyz_bootstrap_takes_no_target_built_for_another_abi(tmp_path: Path, pure: bool) -> None:
+    # PyPy 8.0 (pp80) has the key pp311-... of a PyPy 7.3 build (pp73): it took that target and
+    # died in an ImportError of a dependency; a free-threaded CPython 3.14t likewise
+    import sysconfig
+
+    key = _host_key()
+    mine = common.abi_tag(sysconfig.get_config_var("EXT_SUFFIX") or "")
+    files = {"common/app/main.py": MAIN_WAITS, "common/lib/lazymod.py": "WHERE = 'common'\n", f"targets/{key}/lib/lazymod.py": "WHERE = 'target'\n"}
+    other = fake_pyz(tmp_path / "other.pyz", build_id=f"o{pure}", targets=[key], pure=pure, files=files, abi={key: ["pypy311_pp99"]})
+    r = run_pyz(other, pyz_env(tmp_path / "cache"))
+    if pure:  # a pure build with a compiled overlay: the .py runs
+        assert r.returncode == 0 and r.stdout.split()[:2] == ["ok", "common"], r.stderr
+    else:
+        assert r.returncode == 1 and "Traceback" not in r.stderr
+        assert f"no build for this interpreter and platform ({key}, {mine})" in r.stderr
+        assert f"Built for: {key} (pypy311_pp99)" in r.stderr
+    own = fake_pyz(tmp_path / "own.pyz", build_id=f"w{pure}", targets=[key], pure=pure, files=files, abi={key: [mine, "pypy311_pp99"]})
+    r = run_pyz(own, pyz_env(tmp_path / "cache"))
+    assert r.returncode == 0 and r.stdout.split()[:2] == ["ok", "target"], r.stderr  # its own ABI: the target
+
+
 def _old_pythons() -> list[str]:
     """Interpreters older than 3.11 on this machine (macOS's /usr/bin/python3 is 3.9)."""
     found: dict[str, str] = {}

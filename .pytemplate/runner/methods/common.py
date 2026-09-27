@@ -395,6 +395,28 @@ def _platform_wheel(wheel: Path) -> bool:
     return False
 
 
+# The extension ABI in a file name (templates/pyz/__main__.py has the same ABI_RE and abi_tag,
+# which read the running interpreter's EXT_SUFFIX with it): cpython-314[t], cp314[t] (Windows),
+# pypy311-pp73. A target key does not tell PyPy 7.3 (pp73) from PyPy 8 (pp80), nor CPython 3.14
+# from its free-threaded build (3.14t)
+ABI_RE = re.compile(r"\.(cpython-(\d+t?)|cp(\d+t?)|pypy(\d+)-(pp\d+))[-.]")
+
+
+def abi_tag(name: str) -> str:
+    """cp314, cp314t or pypy311_pp73 (as wheel tags name them), "" when `name` carries none."""
+    m = ABI_RE.search(name)
+    if not m:
+        return ""
+    return f"cp{m.group(2) or m.group(3)}" if m.group(4) is None else f"pypy{m.group(4)}_{m.group(5)}"
+
+
+def extension_abis(folder: Path) -> list[str]:
+    """The ABIs the extension modules below `folder` were built for (abi3 and an untagged
+    .so/.pyd name none: any interpreter of the platform loads them)."""
+    tags = {abi_tag(p.name) for p in folder.rglob("*") if p.name.endswith(EXT_SUFFIXES) and p.is_file()}
+    return sorted(tags - {""})
+
+
 def has_native(path: Path) -> bool:
     """True when a lib/ is platform-specific: a platform wheel (read from its WHEEL tags, which
     also catches pure-Python wheels that ship an executable, such as imageio-ffmpeg) or a binary."""

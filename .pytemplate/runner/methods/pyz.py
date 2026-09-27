@@ -181,6 +181,7 @@ def build(req: BuildRequest) -> Path:
         "backend": req.backend,
         "host": host.key,  # pyz-merge: the platform a pure part's common/lib was resolved for
         "deps": common.requirements_digest(requirements),  # pyz-merge: parts of one build lock the same set
+        "abi": _target_abis(root, target_keys),  # the bootstrap: a key alone misses PyPy 8, 3.14t
     }
     (root / "_pyz.json").write_text(json.dumps(info, indent=2), encoding="utf-8", newline="\n")
     shutil.copy2(TEMPLATES / "pyz" / "__main__.py", root / "__main__.py")
@@ -209,6 +210,14 @@ def build(req: BuildRequest) -> Path:
             )
     ui.info(f"  run: python {rel(pyz)}   (on Windows also {rel(out_dir / (cfg.app.name + '.cmd'))})")
     return pyz
+
+
+def _target_abis(root: Path, keys: list[str]) -> dict[str, list[str]]:
+    """_pyz.json "abi": the extension ABIs of each target's binaries (lib/ and the mypyc overlay),
+    for the keys that hold any. The bootstrap takes a target only when its interpreter has one of
+    them: a PyPy 8 (pp80) took the pp311 target of a PyPy 7.3 build (pp73) and died in an
+    ImportError, where a missing build gives a clear message."""
+    return {key: abis for key in keys if (abis := common.extension_abis(root / "targets" / key))}
 
 
 # --- pyz-merge ------------------------------------------------------------------------------------
@@ -377,7 +386,7 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
                         modes[name] = stat.S_IMODE(item.external_attr >> 16)
         targets = sorted(p.name for p in (root / "targets").iterdir()) if (root / "targets").is_dir() else []
         merged = {k: v for k, v in infos[0].items() if k != "host"}
-        merged.update({"targets": targets, "pure": pure, "build_id": _build_id(root), "merged": True})
+        merged.update({"targets": targets, "pure": pure, "build_id": _build_id(root), "merged": True, "abi": _target_abis(root, targets)})
         (root / "_pyz.json").write_text(json.dumps(merged, indent=2), encoding="utf-8", newline="\n")
         out.parent.mkdir(parents=True, exist_ok=True)
         _write_archive(root, out, modes)

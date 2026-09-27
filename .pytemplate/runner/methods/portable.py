@@ -437,9 +437,11 @@ def _warn_host_only(key: str, requirements: Path, lib: Path) -> None:
     reasons = ["native dependencies"] if common.has_native(lib) else []
     if skipped:
         reasons.append(f"dependencies for other platforms or Python versions ({', '.join(skipped)})")
+    abis = common.extension_abis(lib)  # the key does not tell PyPy 7.3 (pp73) from PyPy 8 (pp80)
     if reasons:
         ui.warn(
-            f'runtime = "system" with {" and ".join(reasons)}: lib/ only fits {key}, and the launchers '
+            f'runtime = "system" with {" and ".join(reasons)}: lib/ only fits {key}'
+            f"{' (' + ', '.join(abis) + ')' if abis else ''}, and the launchers "
             "start it on any OS and Python version. Build the folder on each platform, or use "
             "--method pyz with [deploy.pyz] targets"
         )

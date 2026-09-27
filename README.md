@@ -830,7 +830,9 @@ How far a pyz reaches depends on its dependencies; the build prints which case i
 - **Not pure** (`runs on: <keys>`): native dependencies (raylib, flet, any platform wheel), or a
   dependency (a pin, a local library, a URL) that a marker leaves out on some target. It carries the dependencies of each target key and runs
   only there: the exact CPython minor of the lock (`cp314` wheels load only in 3.14, so a Python
-  3.13 or 3.15 gets `this .pyz has no build for this interpreter and platform`), on Windows, Linux
+  3.13 or 3.15 gets `this .pyz has no build for this interpreter and platform`, and so does
+  another extension ABI of the same version: a free-threaded 3.14t, or PyPy 8 for a build made
+  with PyPy 7.3), on Windows, Linux
   or macOS, x86_64 or aarch64 (Linux: glibc 2.28 on x86_64 or 2.35 on aarch64, or newer; macOS 13 or
   newer). There are no musl or Android targets. The architecture is the Python's, not the
   machine's: an x64 Python on Windows on ARM uses the `windows-x86_64` binaries.

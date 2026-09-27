@@ -1984,7 +1984,13 @@ Per method:
   bootstrap extracts `common/` and `targets/<key>/` into ONE folder, so each `.pyd/.so` lands
   next to its `.py` and the extension loader wins. `_pyz.json`: `name`, `build_id`, `min_python`,
   `targets`, `pure`, `backend`, `host` (the key that built it), `deps`
-  (`common.requirements_digest`: the pin lines of the export, not its header). The archive is
+  (`common.requirements_digest`: the pin lines of the export, not its header), `abi` (per key
+  whose binaries carry one, the extension ABIs of `targets/<key>/`, `pyz._target_abis` with
+  `common.extension_abis`/`abi_tag`: `cp314`, `cp314t`, `pypy311_pp73`; pyz-merge recomputes it).
+  The bootstrap takes a target only when its own ABI (`_abi`, from `EXT_SUFFIX`) is one of them,
+  else the pure flavour or its "no build for this interpreter" refusal naming both: a key does not
+  tell PyPy 7.3 (pp73) from PyPy 8 (pp80), nor CPython 3.14 from 3.14t, and PyPy 8 took a PyPy
+  7.3 build's target and died in an ImportError. The archive is
   written by `pyz._write_archive` (deflate, never zstd: it must open on 3.11 and PyPy;
   `strict_timestamps=False`: a payload file older than 1980, e.g. from the Nix store, used to
   crash `zipapp`; shebang `/usr/bin/env python3`, mode 0755). Whatever `python3` starts it, the
@@ -4477,6 +4483,8 @@ Code coupling (rename together):
   `render.managed_block` wrote with `presets.uv_extras` (`str.format_map`, reversed by
   `cmd_apply._unformat`): a template with a format spec or conversion is never read back.
 - `RULES_RE` / `tasks.parse_line` <-> `ui.error`, `ui.warn`, `str(lintc.Finding)` (5.3).
+- `common.ABI_RE`/`abi_tag` <-> the pyz bootstrap's own copies (`templates/pyz/__main__.py` is
+  standalone; `test_abi_tags_agree_with_the_bootstrap`).
 - mypyc internals mirrored by the runner (checked by `test_mypyc_core` against the locked
   mypy): `lintc.NATIVE_CLASS_DECORATORS` <-> mypyc's native decorators;
   `lintc.relative_file_at_import` <-> when mypyc builds no shared lib; `mypyc.remove_stale_extensions`
