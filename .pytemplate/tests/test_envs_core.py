@@ -139,6 +139,141 @@ def test_sync_installs_every_dependency_group(tmp_path: Path, monkeypatch: pytes
     assert calls.argvs == [["uv", "sync", "--locked", "--all-groups"]]
 
 
+GROUPS_PYPROJECT = """\
+[project]
+name = "My_App"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest"]
+Cpu = ["torch==2.8.0"]
+gpu = ["torch==2.8.0"]
+docs = ["mkdocs"]
+lint = ["ruff"]
+bench = ["pyperf"]
+tools = ["pre-commit"]
+
+[tool.uv]
+conflicts = [
+    [{ group = "CPU" }, { package = "my-app", group = "gpu" }],
+    [{ group = "lint" }, { extra = "fast" }],
+    [{ package = "other-member", group = "docs" }, { group = "bench" }],
+    [{ group = "dev" }, { group = "tools" }],
+]
+
+[tool.uv.dependency-groups]
+docs = { requires-python = ">=3.12" }
+bench = { requires-python = "==3.14.*" }
+"""
+
+
+def _no_groups(*groups: str) -> list[str]:
+    return [a for g in groups for a in ("--no-group", g)]
+
+
+def test_sync_leaves_out_the_groups_uv_cannot_install_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`uv sync --all-groups` refused the whole sync in a project whose [tool.uv] conflicts pairs
+    two groups (a cpu/gpu split: "Groups `cpu` and `gpu` are incompatible"), and in .venv-pypy
+    with a group whose own requires-python needs 3.12: sync, setup and apply exited 2 and every
+    `./deploy add` was rolled back, while `uv run --locked` (the default groups) worked. Those
+    groups are left out, each with a note; the default groups stay, and so do a group paired
+    with an extra only (--all-groups enables no extra) and one paired with another package's."""
+    monkeypatch.setattr(envs, "ROOT", tmp_path)
+    (tmp_path / "pyproject.toml").write_text(GROUPS_PYPROJECT, encoding="utf-8")
+    calls = Calls(monkeypatch)
+    cfg = make(PYPY)
+    envs.sync(envs.cpython_env(cfg))
+    envs.sync(envs.pypy_env(cfg))
+    assert calls.argvs == [
+        ["uv", "sync", "--locked", "--all-groups", *_no_groups("cpu", "gpu", "tools")],
+        ["uv", "sync", "--locked", "--all-groups", *_no_groups("cpu", "gpu", "docs", "bench", "tools")],
+    ]
+    err = capsys.readouterr().err
+    assert "dependency group 'cpu' not installed ([tool.uv] conflicts pairs it with 'gpu')" in err
+    assert "dependency group 'tools' not installed ([tool.uv] conflicts pairs it with 'dev')" in err
+    assert "dependency group 'docs' not installed (its requires-python '>=3.12' excludes Python 3.11.15)" in err
+    assert "'bench' not installed (its requires-python '==3.14.*' excludes Python 3.11.15)" in err
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        None,  # no pyproject.toml
+        "[project\n",  # broken: uv says what is wrong with it
+        GROUPS_PYPROJECT.replace("[tool.uv]\n", '[tool.uv]\ndefault-groups = "all"\n'),  # uv run needs them all too
+        GROUPS_PYPROJECT.replace("conflicts", "no-conflicts").replace("[tool.uv.dependency-groups]", "[x]"),
+    ],
+)
+def test_sync_leaves_nothing_out_without_a_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str | None) -> None:
+    monkeypatch.setattr(envs, "ROOT", tmp_path)
+    if text is not None:
+        (tmp_path / "pyproject.toml").write_text(text, encoding="utf-8")
+    calls = Calls(monkeypatch)
+    envs.sync(envs.pypy_env(make(PYPY)))
+    assert calls.argvs == [["uv", "sync", "--locked", "--all-groups"]]
+
+
+@pytest.mark.parametrize(
+    ("spec", "version", "excluded"),
+    [
+        (">=3.12", (3, 11, 15), True),
+        (">=3.12", (3, 14), False),
+        (">= 3.11 , <4", (3, 11, 15), False),
+        ("<3.12", (3, 14), True),
+        ("==3.13.*", (3, 14), True),
+        ("==3.14.*", (3, 14), False),
+        ("!=3.14.*", (3, 14), True),
+        ("!=3.14", (3, 14), False),  # 3.14.1 and later
+        (">=3.14.2", (3, 14), False),  # a later patch release fits: uv decides
+        (">3.14.0,<3.14.5", (3, 14), False),
+        ("==3.14.3", (3, 14), False),
+        ("==3.14.3", (3, 14, 7), True),
+        (">3.14.7", (3, 14, 7), True),
+        ("~=3.12", (3, 11, 15), True),
+        ("~=3.12", (3, 14), False),
+        ("~=3.12.1", (3, 13), True),
+        ("~=3", (3, 14), False),  # not PEP 440: uv decides
+        (">=3.12.0rc1", (3, 11, 15), False),  # outside the subset: uv decides
+        ("", (3, 11, 15), False),
+    ],
+)
+def test_group_requires_python(spec: str, version: tuple[int, ...], excluded: bool) -> None:
+    assert envs._excludes(spec, version) is excluded
+
+
+def test_sync_with_real_uv_installs_what_the_groups_allow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real uv, offline, in a project of empty groups: `--all-groups` alone is refused (the pair
+    of [tool.uv] conflicts, a group whose requires-python no interpreter meets), envs.sync is not."""
+    try:
+        proc.find_uv()
+    except DeployError:
+        pytest.skip("uv not found")
+    here = "%d.%d" % sys.version_info[:2]
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "p"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = []\n\n'
+        "[dependency-groups]\ndev = []\ncpu = []\ngpu = []\nfuture = []\n\n"
+        '[tool.uv]\nconflicts = [[{ group = "cpu" }, { group = "gpu" }]]\n\n'
+        '[tool.uv.dependency-groups]\nfuture = { requires-python = ">=3.99" }\n',
+        encoding="utf-8",
+    )
+    for module in (envs, proc):
+        monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    env = envs.cpython_env(make({"python": {"cpython": here}}))
+    if envs.uv(env, ["lock"], check=False, capture=True, echo=False).returncode:
+        pytest.skip(f"uv cannot lock offline with a managed CPython {here}")
+    plain = envs.uv(env, ["sync", "--locked", "--all-groups"], check=False, capture=True, echo=False)
+    assert plain.returncode == 2 and "requires-python" in plain.stderr, plain.stderr
+    plain = envs.uv(env, ["sync", "--locked", "--all-groups", "--no-group", "future"], check=False, capture=True, echo=False)
+    assert plain.returncode == 2 and "incompatible with the conflicts" in plain.stderr, plain.stderr
+    envs.sync(env)
+    assert env.python.is_file()
+
+
 def test_quiet_hides_uvs_own_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """README: -q prints no progress lines. `./deploy -q sync` still printed uv's `Resolved 26
     packages` and `Checked 21 packages`."""
@@ -326,6 +461,7 @@ def fake_uv(monkeypatch: pytest.MonkeyPatch, code_for: dict[tuple[str, ...], int
         return done(args, (code_for or {}).get(tuple(calls[-1]), 0))
 
     monkeypatch.setattr(envs, "uv", run)
+    monkeypatch.setattr(envs, "left_out", lambda env: [])  # the project's own groups never change these argvs
     return calls
 
 

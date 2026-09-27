@@ -615,7 +615,7 @@ header rules (with detector tests proving each rule fires).
 | `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL` (`detect_wsl`: `wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`, `scratch_name` and `check_private_dir` (the harnesses' scratch folders), `write_whole` (a file rewritten through a temporary file and `os.replace`, never half-written). |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C and passes SIGTERM/SIGHUP on), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`. |
-| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (all groups), `interpreter_info` (with `platform` and `cc`); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
+| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (every group but those `left_out` names), `interpreter_info` (with `platform` and `cc`); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
@@ -1430,7 +1430,15 @@ Formats:
 - `envs.sync` = `uv sync --locked --all-groups` (apply/setup, sync, mode, add, remove): every
   dependency group of `pyproject.toml` is installed, so `./deploy add --group G pkg` survives the
   next sync and reaches a fresh clone (an exact sync of the default groups removed it); `uv run`
-  syncs inexactly and never removes them. `add`/`remove` take `--dev` or `--group G`, not both,
+  syncs inexactly and never removes them. A group `--all-groups` cannot hold there is left out,
+  one `--no-group` each with a note (`envs.left_out`): a non-default group that `[tool.uv]
+  conflicts` pairs with another group of the project (a cpu/gpu split; a set that also names
+  extras counts only its groups: no extra is enabled), and one whose `[tool.uv.dependency-groups]`
+  requires-python excludes the environment's Python (`envs._excludes`, a subset of PEP 440:
+  PyPy's exact X.Y.Z, or every patch release of `python.cpython`'s minor; what it cannot read,
+  uv decides). With `--all-groups` alone uv refused the whole sync, so sync, setup, apply, add
+  and remove failed in such a project while `uv run` worked; the default groups always stay
+  (`uv run` needs them too). `add`/`remove` take `--dev` or `--group G`, not both,
   and run `uv add|remove --no-sync` (it still re-locks), then `envs.sync` of `.venv`: uv's own
   sync after `remove` is exact for the default groups and uninstalled every other group. uv has
   written pyproject.toml and uv.lock before that sync: when it fails (a package that locks but
@@ -3253,11 +3261,15 @@ uv:
   `test_fixes.py::test_uv_run_pins_the_project_outside_the_root`. Goes: never.
 - **`uv sync` is exact for the groups it installs** (LIMITATION): it removed a group added with
   `./deploy add --group G`, and so did the sync `uv remove` runs itself (`./deploy remove idna`
-  uninstalled the packages of every non-default group). Fix: `envs.sync` passes `--all-groups`;
-  `cmd_env._add_remove` runs `uv add|remove --no-sync`, then `envs.sync`, and puts
-  pyproject.toml and uv.lock back when that sync fails or is interrupted (uv's own rollback
-  covers only its own sync) (7). Test:
+  uninstalled the packages of every non-default group); `--all-groups` enables every group, so
+  uv refuses it for a pair of `[tool.uv] conflicts` or a group whose requires-python excludes
+  the interpreter. Fix: `envs.sync` passes `--all-groups`, minus a `--no-group` for each group
+  `envs.left_out` names; `cmd_env._add_remove` runs `uv add|remove --no-sync`, then
+  `envs.sync`, and puts pyproject.toml and uv.lock back when that sync fails or is interrupted
+  (uv's own rollback covers only its own sync) (7). Test:
   `test_envs_core.py::test_sync_installs_every_dependency_group`,
+  `test_sync_leaves_out_the_groups_uv_cannot_install_there`,
+  `test_sync_with_real_uv_installs_what_the_groups_allow`,
   `test_remove_keeps_the_packages_of_every_group`,
   `test_a_failed_sync_puts_pyproject_and_the_lock_back`. Goes: never.
 - **An old uv knows only the interpreters of its release** (LIMITATION): < 0.10.12 cannot
