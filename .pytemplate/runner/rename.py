@@ -1709,17 +1709,23 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
     record = cmd_apply.project_record(cfg)  # before the rename: its name is still the old one
     clean = tidy_before(cfg, planned)
     apply_plan(ROOT, planned)  # new_cfg: the renamed pytemplate.toml, validated before anything was written
-    try:
-        ensure_lock(new_cfg)
-    except DeployError as e:
-        raise DeployError(f"{e}\n  The files are already renamed: fix the problem above and run ./deploy apply", e.code) from None
-    changed, edited = render.apply(new_cfg)
-    if changed:
-        ui.info(f"render: updated {', '.join(changed)}")
-    if edited:
-        ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./deploy render --force)")
-    tidy_after(new_cfg, planned, clean)
+    # The record follows the files at once (as in apply): named after the old app it is no longer
+    # trusted, and the ./deploy apply that finishes an interrupted rename reads it
     cmd_apply.rename_record(new_name, record)
+    try:
+        try:
+            ensure_lock(new_cfg)
+        except DeployError as e:
+            raise DeployError(f"{e}\n  The files are already renamed: fix the problem above and run ./deploy apply", e.code) from None
+        changed, edited = render.apply(new_cfg)
+        if changed:
+            ui.info(f"render: updated {', '.join(changed)}")
+        if edited:
+            ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./deploy render --force)")
+        tidy_after(new_cfg, planned, clean)
+    except KeyboardInterrupt:  # Ctrl+C, or SIGTERM/SIGHUP passed on to uv (proc.Interrupted)
+        ui.warn("the files are already renamed: run ./deploy apply to finish (uv.lock and the generated files)")
+        raise
     ui.ok(f"renamed '{old_name}' -> '{new_name}' (package src/{new_cfg.pkg}/)")
     ui.info("  Next: ./deploy test all, and review the changes with git diff")
     if DIST.is_dir() and any(DIST.iterdir()):

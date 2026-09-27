@@ -1405,6 +1405,25 @@ def test_same_name_with_missing_package_is_an_error(command_project: Path) -> No
     assert rename.cmd_rename(_load(root), ["alpha"]) == 0  # the package exists: still "nothing to do"
 
 
+def test_an_interrupted_rename_says_how_to_finish(command_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A SIGTERM or Ctrl+C while uv locked left the files renamed, uv.lock stale, the generated
+    files and the record behind, with only `error: terminated`: now it says ./deploy apply, and
+    the record already follows the files (apply trusts it)."""
+    from runner import cmd_apply
+
+    def interrupted(cfg: Config) -> None:
+        raise proc.Interrupted(143, 15)
+
+    monkeypatch.setattr(cmd_env, "ensure_lock", interrupted)
+    record = {"name": "alpha", "preset": "script", "dependencies": [], "dev": []}
+    cmd_apply.save_record(record)
+    with pytest.raises(proc.Interrupted):
+        rename.cmd_rename(_load(command_project), ["beta"])
+    assert "the files are already renamed: run ./deploy apply" in capsys.readouterr().err
+    assert (command_project / "src" / "beta").is_dir()
+    assert cmd_apply.load_record() == {**record, "name": "beta"}
+
+
 @pytest.mark.parametrize("new", ["helpers", "other"])
 def test_rename_refuses_an_app_name_set_to_another_package(command_project: Path, new: str) -> None:
     """app.name set by hand to another package of src/ (src/helpers/): `rename helpers` said

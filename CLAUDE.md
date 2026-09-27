@@ -951,9 +951,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   its old bytes put back on failure, `_keeps_inode`: a new inode dropped the links and made the
   files of a bind-mounted project root's), so a write cut short (disk full, a quota, `ulimit -f`) never leaves one
   half-written; a write that fails undoes everything, old bytes back and the folder moved back,
-  and the error names whatever it could not undo), `cmd_env.ensure_lock` (a failure there says
-  "the files are already renamed ... ./deploy apply"), `render.apply`, the ruff tidy-up, and the
-  name of the `applied` record (`cmd_apply.rename_record`, only the project's own record).
+  and the error names whatever it could not undo), the name of the `applied` record right away
+  (`cmd_apply.rename_record`, only the project's own record: named after the old app it is no
+  longer trusted), `cmd_env.ensure_lock` (a failure there says "the files are already renamed
+  ... ./deploy apply"), `render.apply` and the ruff tidy-up; a Ctrl+C or SIGTERM during those
+  says the same before it stops the command.
 - After a hand edit of `app.name` (src/<pkg>/ missing, or the very same folder: `alpha` ->
   `Alpha`), rename starts from the name the project really has (`cmd_apply.applied_name`, asked
   first, as apply does: the trusted record, else pyproject `[project] name`, whose package is in
