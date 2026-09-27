@@ -232,6 +232,23 @@ def test_nvim_exit_code_follows_the_presets(nvim_run: dict[str, Any], failed: tu
     assert nvim_run["ran"] == ["script", "raylib", "flet"]  # a failed preset does not stop the others
 
 
+def test_quiet_keeps_what_selftest_nvim_was_asked_for(
+    nvim_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """-q hides progress, never the answer (CLAUDE.md 5.3): `-q selftest --nvim` printed only
+    `error: script: FAIL b`, without the table, the reason, the SKIP lines or where the logs are."""
+    from runner import ui
+
+    monkeypatch.setattr(ui, "QUIET", True)
+    row = nvimtest.Row("script", smoke=nvimtest.Smoke(passed=["a"], failed=[("b", "the reason it failed")], skipped=["c (no network)"], expected=3), code=1)
+    monkeypatch.setattr(nvimtest, "run_preset", lambda preset, layout, nv, **_: row)
+    assert nvimtest.selftest(make(), ["script", *nvim_run["args"]]) == 1
+    err = capsys.readouterr().err
+    assert "  script   FAIL" in err and "    the reason it failed" in err and "script: SKIP c (no network)" in err, err
+    assert "isolated LazyVim: reused (cached)" in err and "pinned to: the pins" in err and "logs: " in err, err
+    assert "preset script" not in err  # the progress lines stay hidden
+
+
 @pytest.mark.parametrize("missing", ["nvim", "git"])
 def test_nvim_missing_tool_skips_or_fails_with_require(nvim_run: dict[str, Any], missing: str) -> None:
     del nvim_run["which"][missing]

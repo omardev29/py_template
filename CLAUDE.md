@@ -744,7 +744,9 @@ header rules (with detector tests proving each rule fires).
   `selftest --shells` (also with `--list`) and `selftest --e2e`.
 - `-q` hides progress (`ui.step`, `ui.command`, `ui.ok`, `ui.info`), never what was asked for:
   `ui.report` (the `tasks` list, the stderr of a failed query, the `selftest --shells` list,
-  result table, failure/skip lines and the scratch folder `--keep` kept), warnings, errors and
+  result table, failure/skip lines and the scratch folder `--keep` kept, the `selftest --nvim`
+  table with each FAIL's reason, its SKIP lines, pins and logs folder: `nvimtest._table`),
+  warnings, errors and
   `check_line` always print, and a dry run ignores `-q` (its output is the plan). Results are
   `ui.report` too, so `-q` keeps them: the `mode` display (`cmd_mode._describe`; only its
   `ui.step` header goes), the paths `render` lists (`cmd_mode.cmd_render`: outdated, updated,

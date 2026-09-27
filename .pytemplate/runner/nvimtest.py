@@ -611,15 +611,18 @@ def run_preset(
 
 
 def _table(rows: Sequence[Row], base_seconds: float | None) -> None:
+    """The results, with the reason of each FAIL and the SKIP lines: `ui.report`, as `selftest
+    --shells` prints its own (`-q` hides progress, never what was asked for; it left a bare
+    `script: FAIL <check>` with no reason and no table)."""
     ui.step("selftest --nvim results")
     base = "reused (cached)" if base_seconds is None else f"installed in {base_seconds:.0f} s"
-    ui.info(f"  isolated LazyVim: {base}")
-    ui.info(f"  {'preset':<8} {'result':<6} {'ok':>3} {'fail':>4} {'skip':>4} {'exit':>4} {'new+sync':>9} {'trust+lazy':>10} {'smoke':>6} {'total':>6}")
+    ui.report(f"  isolated LazyVim: {base}")
+    ui.report(f"  {'preset':<8} {'result':<6} {'ok':>3} {'fail':>4} {'skip':>4} {'exit':>4} {'new+sync':>9} {'trust+lazy':>10} {'smoke':>6} {'total':>6}")
     for r in rows:
         s = r.smoke or Smoke()
         exit_text = "-" if r.code is None else str(r.code)
         new, lazy, smoke = (f"{r.times[k]:.0f}s" if k in r.times else "-" for k in PHASES)
-        ui.info(
+        ui.report(
             f"  {r.preset:<8} {'PASS' if r.ok else 'FAIL':<6} {len(s.passed):>3} {len(s.failed):>4} {len(s.skipped):>4} {exit_text:>4} "
             f"{new:>9} {lazy:>10} {smoke:>6} {sum(r.times.values()):>5.0f}s"
         )
@@ -628,9 +631,9 @@ def _table(rows: Sequence[Row], base_seconds: float | None) -> None:
         for name, detail in s.failed:
             ui.error(f"{r.preset}: FAIL {name}")
             for line in detail.splitlines():
-                ui.info(f"    {line}")
+                ui.report(f"    {line}")
         for name in s.skipped:
-            ui.info(f"  {r.preset}: SKIP {name}")
+            ui.report(f"  {r.preset}: SKIP {name}")
         if r.error:
             ui.error(f"{r.preset}: {r.error}")
         elif r.code not in (0, None) and not s.failed:
@@ -691,8 +694,8 @@ def selftest(cfg: Config, args: list[str]) -> int:
     # run without LOCK)
     pins = record_pins(layout, nv)
     _table(rows, base_seconds)
-    ui.info(f"  pinned to: {pins}")
-    ui.info(f"  logs: {layout.logs}" + (f"   projects: {layout.projects}" if ns.keep else "   (--keep keeps the projects)"))
+    ui.report(f"  pinned to: {pins}")
+    ui.report(f"  logs: {layout.logs}" + (f"   projects: {layout.projects}" if ns.keep else "   (--keep keeps the projects)"))
     if all(r.ok for r in rows):
         ui.ok(f"selftest --nvim: {len(rows)} preset(s) passed")
         return 0
