@@ -1,11 +1,11 @@
 # pytemplate.toml: project configuration and working "mode" (raylib preset).
 #
-# After editing it, run ./deploy apply: it brings the whole project in line (app.name
+# After editing it, run ./pyt apply: it brings the whole project in line (app.name
 # renames src/<pkg>/ and its imports, [preset.raylib] replaces the raylib dependency,
 # [backend] and [python] re-lock uv.lock and sync the environments, [hooks] installs or
 # removes the git hook, and .mypy.ini, pyrightconfig.json, .ruff.toml and .vscode/ are
-# regenerated: those also update by themselves on any ./deploy command). ./deploy mode edits
-# this file for you. app.preset cannot change in place: ./deploy new DIR --preset P.
+# regenerated: those also update by themselves on any ./pyt command). ./pyt mode edits
+# this file for you. app.preset cannot change in place: ./pyt new DIR --preset P.
 schema = 1
 
 [app]
@@ -29,7 +29,7 @@ profile = "auto"      # "mypyc" with the mypyc backend; with cpython/pypy, whate
 relaxed = "off"       # off | warn | strict
 editor = "pylance"
 
-# typings/raylib is the corrected raylib stub (./deploy stubs): not checked as your own code
+# typings/raylib is the corrected raylib stub (./pyt stubs): not checked as your own code
 [[typing.mypy_overrides]]
 module = ["raylib", "raylib.*"]
 ignore_errors = true
@@ -80,17 +80,17 @@ exclude = []     # extra file-name globs never packed (C runtime and python3*.dl
 # path = "tools/upx"   # a UPX binary, relative to the project root (default: PATH, then a pinned download)
 
 [preset.raylib]
-# ./deploy apply replaces the dependency in pyproject.toml with {package}=={version} and re-locks
+# ./pyt apply replaces the dependency in pyproject.toml with {package}=={version} and re-locks
 package = "raylib"   # raylib (GLFW) | raylib_sdl (SDL3) | raylib_software
 version = "6.0.1.0"
 
 [hooks]
-# true: ./deploy apply (and setup) installs a git pre-commit hook that runs ./deploy hooks run
-# (ruff, format, generated files, lock); false: ./deploy apply removes pytemplate's hook
+# true: ./pyt apply (and setup) installs a git pre-commit hook that runs ./pyt hooks run
+# (ruff, format, generated files, lock); false: ./pyt apply removes pytemplate's hook
 pre_commit = true
 
 [vscode]
-# Status bar buttons (VS Code extension actboy168.tasks): ./deploy commands or [tasks] names
+# Status bar buttons (VS Code extension actboy168.tasks): ./pyt commands or [tasks] names
 buttons = ["run", "bunnymark", "test", "build"]
 
 [tasks.stubs]
@@ -99,8 +99,8 @@ cmd = ["python", ".pytemplate/presets/raylib/tools/raylib_stubs.py", "typings/ra
 backend = "cpython"
 
 [tasks.bunnymark]
-help = "Measure FPS with 30,000 bunnies and 900 frames (other backend: ./deploy run mypyc --frames 900 --bunnies 30000)"
-deps = ["run --frames 900 --bunnies 30000"]   # a ./deploy command: with mypyc, it compiles first
+help = "Measure FPS with 30,000 bunnies and 900 frames (other backend: ./pyt run mypyc --frames 900 --bunnies 30000)"
+deps = ["run --frames 900 --bunnies 30000"]   # a ./pyt command: with mypyc, it compiles first
 
 [tasks.ci]
 help = "Same as CI: check and tests on every backend"

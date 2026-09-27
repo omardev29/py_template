@@ -1,6 +1,6 @@
-# Launcher matrix of the TEMPLATE repository (not rendered, and `./deploy new` does not copy
-# template-*.yml workflows): ./deploy, deploy.cmd and deploy.ps1 through every shell the
-# runners have, with `./deploy selftest --shells` (T1 argv, T2 exit code, T3 cwd, T4 the
+# Launcher matrix of the TEMPLATE repository (not rendered, and `./pyt new` does not copy
+# template-*.yml workflows): ./pyt, pyt.cmd and pyt.ps1 through every shell the
+# runners have, with `./pyt selftest --shells` (T1 argv, T2 exit code, T3 cwd, T4 the
 # xonsh-shell-kit route, T5 minimal PATH, T6 stdin, T7 install hints) plus the invocations a
 # user types, on macOS and Windows (and WSL). The Linux job, with shellcheck, runs in the CI
 # image: template-ci-image.yml. The runner's test suite runs in template-selftest.yml. The
@@ -13,9 +13,9 @@ name: template-launchers
 
 on:
   push:
-    paths: [deploy, deploy.cmd, deploy.ps1, ".pytemplate/**", ".github/workflows/template-launchers.yml"]
+    paths: [pyt, pyt.cmd, pyt.ps1, ".pytemplate/**", ".github/workflows/template-launchers.yml"]
   pull_request:
-    paths: [deploy, deploy.cmd, deploy.ps1, ".pytemplate/**", ".github/workflows/template-launchers.yml"]
+    paths: [pyt, pyt.cmd, pyt.ps1, ".pytemplate/**", ".github/workflows/template-launchers.yml"]
   schedule:
     - cron: "53 4 * * 1" # weekly, Monday 04:53 UTC
   workflow_dispatch:
@@ -62,16 +62,16 @@ jobs:
       - name: uv also in ~/.local/bin (the launchers' fallback discovery, T5)
         run: mkdir -p ~/.local/bin && cp "$(command -v uv)" ~/.local/bin/
       - name: selftest --shells
-        run: ./deploy selftest --shells
+        run: ./pyt selftest --shells
       - name: User-style invocations
         run: |
-          for s in /bin/sh bash dash zsh; do "$s" ./deploy help >/dev/null || exit; echo "$s ok"; done
-          (cd src && ../deploy help >/dev/null)
-          (cd /tmp && "$GITHUB_WORKSPACE/deploy" help >/dev/null)
-          env -u UV PATH=/usr/bin:/bin ./deploy help >/dev/null
-          /bin/bash ./deploy help >/dev/null; /bin/zsh ./deploy help >/dev/null
-          pwsh -NoProfile -Command "./deploy.ps1 help > \$null; exit \$LASTEXITCODE"
-          set +e; ./deploy no-such-command; test $? -eq 2
+          for s in /bin/sh bash dash zsh; do "$s" ./pyt help >/dev/null || exit; echo "$s ok"; done
+          (cd src && ../pyt help >/dev/null)
+          (cd /tmp && "$GITHUB_WORKSPACE/pyt" help >/dev/null)
+          env -u UV PATH=/usr/bin:/bin ./pyt help >/dev/null
+          /bin/bash ./pyt help >/dev/null; /bin/zsh ./pyt help >/dev/null
+          pwsh -NoProfile -Command "./pyt.ps1 help > \$null; exit \$LASTEXITCODE"
+          set +e; ./pyt no-such-command; test $? -eq 2
 
   windows:
     needs: gate
@@ -127,31 +127,31 @@ jobs:
         env:
           MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
           CYGWIN_ROOT: 'C:\cygwin'
-        run: ./deploy.ps1 selftest --shells
+        run: ./pyt.ps1 selftest --shells
       - shell: cmd
-        run: "call deploy.cmd help >nul || exit /b 1\r\ncd src && call ..\\deploy.cmd help >nul"
+        run: "call pyt.cmd help >nul || exit /b 1\r\ncd src && call ..\\pyt.cmd help >nul"
       - shell: pwsh
-        run: "./deploy.ps1 help > $null; Set-Location src; ../deploy.ps1 help > $null"
+        run: "./pyt.ps1 help > $null; Set-Location src; ../pyt.ps1 help > $null"
       - shell: powershell
-        run: ".\\deploy.ps1 help > $null; exit $LASTEXITCODE"
+        run: ".\\pyt.ps1 help > $null; exit $LASTEXITCODE"
       - shell: bash
-        run: "./deploy help >/dev/null && (cd src && ../deploy help >/dev/null) && sh ./deploy help >/dev/null && dash ./deploy help >/dev/null"
+        run: "./pyt help >/dev/null && (cd src && ../pyt help >/dev/null) && sh ./pyt help >/dev/null && dash ./pyt help >/dev/null"
       - name: MSYS2 login shells, minimal PATH (uv not on PATH)
         shell: msys2 {0}
         run: |
           pacman -Q msys2-runtime dash
           if command -v uv; then echo "uv unexpectedly on PATH"; exit 1; fi
-          for m in MSYS UCRT64 MINGW64 CLANG64; do MSYSTEM=$m bash -lc './deploy help >/dev/null' || exit; echo "$m ok"; done
-          dash ./deploy help >/dev/null
-          (cd src && ../deploy help >/dev/null)
-          rc=0; out=$(env -u UV USERPROFILE=/nonexistent LOCALAPPDATA=/nonexistent PATH=/usr/bin ./deploy help 2>&1 </dev/null) || rc=$?
+          for m in MSYS UCRT64 MINGW64 CLANG64; do MSYSTEM=$m bash -lc './pyt help >/dev/null' || exit; echo "$m ok"; done
+          dash ./pyt help >/dev/null
+          (cd src && ../pyt help >/dev/null)
+          rc=0; out=$(env -u UV USERPROFILE=/nonexistent LOCALAPPDATA=/nonexistent PATH=/usr/bin ./pyt help 2>&1 </dev/null) || rc=$?
           test "$rc" -eq 127; printf '%s' "$out" | grep -q winget; ! printf '%s' "$out" | grep -q curl
       - name: Cygwin login, no Windows PATH
         shell: pwsh
         env: {CHERE_INVOKING: '1', CYGWIN_NOWINPATH: '1'}
-        run: C:\cygwin\bin\bash.exe --login -o igncr -c 'uname -sr && ./deploy help >/dev/null && dash ./deploy help >/dev/null && cd src && ../deploy help >/dev/null'
+        run: C:\cygwin\bin\bash.exe --login -o igncr -c 'uname -sr && ./pyt help >/dev/null && dash ./pyt help >/dev/null && cd src && ../pyt help >/dev/null'
       - shell: pwsh
-        run: "busybox sh -c './deploy help >/dev/null && cd src && ../deploy help >/dev/null'"
+        run: "busybox sh -c './pyt help >/dev/null && cd src && ../pyt help >/dev/null'"
 
   wsl:
     needs: gate
@@ -164,7 +164,7 @@ jobs:
       - uses: Vampire/setup-wsl@v7
         with: {distribution: Ubuntu-24.04, additional-packages: curl dash zsh}
       - shell: wsl-bash {0}
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh && ./deploy help >/dev/null && dash ./deploy help >/dev/null
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh && ./pyt help >/dev/null && dash ./pyt help >/dev/null
       - name: selftest --shells through wsl.exe
         shell: pwsh
-        run: ./deploy.ps1 selftest --shells wsl
+        run: ./pyt.ps1 selftest --shells wsl

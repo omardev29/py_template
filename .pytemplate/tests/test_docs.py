@@ -1,7 +1,7 @@
 """The manual (README.md) against the code: checks that fail when the documentation drifts.
 
 The manual is README.md in the template repository and .pytemplate/README.md in a project made
-with `./deploy new` (the template's README of that version, next to the runner it describes).
+with `./pyt new` (the template's README of that version, next to the runner it describes).
 It must name every command with its exact usage, every pytemplate.toml key, the build methods
 and backends the runner knows, the pinned versions, and nothing that is internal or removed.
 It is also read inside projects, so its links are absolute or in-page. Fast and offline.
@@ -34,7 +34,7 @@ from runner.project import PRESETS, ROOT, TEMPLATE  # noqa: E402
 def _manual_path() -> Path | None:
     if (TEMPLATE / "template-repo").is_file():
         return ROOT / "README.md"
-    copy = ROOT / presets.TEMPLATE_DOCS["README.md"]  # a project made with ./deploy new
+    copy = ROOT / presets.TEMPLATE_DOCS["README.md"]  # a project made with ./pyt new
     return copy if copy.is_file() else None
 
 
@@ -44,7 +44,7 @@ FENCE = re.compile(r"^```[^\n]*\n.*?^```[ \t]*$", re.M | re.S)
 TOML_FENCE = re.compile(r"^```toml\n(.*?)^```[ \t]*$", re.M | re.S)
 SPAN = re.compile(r"`([^`\n]+)`")
 TOP_TABLES = {f.name for f in dataclasses.fields(Config)}
-# The last part of a span such as `app.py` or `deploy.cmd`: a file name, not a key path
+# The last part of a span such as `app.py` or `pyt.cmd`: a file name, not a key path
 FILE_SUFFIXES = {"py", "pyi", "json", "toml", "lua", "cmd", "ps1", "sh", "pyz", "whl", "md", "yml", "exe", "dll", "so", "pyd"}
 
 
@@ -133,7 +133,7 @@ def test_the_manual_is_ascii() -> None:
 
 
 def test_the_commands_table_is_the_cli_with_its_usages() -> None:
-    table = _table(_text(), "Command (as `./deploy help COMMAND` shows it)")
+    table = _table(_text(), "Command (as `./pyt help COMMAND` shows it)")
     shown = [_unquote(row[0]) for row in table[1:]]
     names = [s.split()[0] for s in shown]
     assert len(names) == len(set(names)), f"a command is listed twice: {names}"
@@ -143,28 +143,28 @@ def test_the_commands_table_is_the_cli_with_its_usages() -> None:
     for line in shown:
         name = line.split()[0]
         expected = f"{name} {cli.COMMANDS[name].usage}".strip()
-        assert line == expected, f"the usage of {name} differs from `./deploy help {name}`: {line!r} != {expected!r}"
+        assert line == expected, f"the usage of {name} differs from `./pyt help {name}`: {line!r} != {expected!r}"
 
 
 def test_nothing_internal_or_removed_is_documented() -> None:
     text = _text()
     for name in [*cli.INTERNAL, "__probe"]:
         assert name not in text, f"{name} is an internal route: it must not be documented"
-    for removed in ("./deploy init", "PYTHON_JIT", ".venv-jit", "--jit", "python.jit", "jit_interpreter", "CPython JIT"):
+    for removed in ("./pyt init", "PYTHON_JIT", ".venv-jit", "--jit", "python.jit", "jit_interpreter", "CPython JIT"):
         assert removed not in text, f"{removed!r}: the feature was removed"
     bad = [s for s in _spans(text) if s == "init" or s.startswith("init ")]
-    assert not bad, f"init is not a command (./deploy new DIR --preset P): {bad}"
+    assert not bad, f"init is not a command (./pyt new DIR --preset P): {bad}"
 
 
-def test_every_deploy_word_is_a_command_or_a_task() -> None:
+def test_every_pyt_word_is_a_command_or_a_task() -> None:
     text = _text()
     tasks = {name for block in TOML_FENCE.findall(text) for name in tomllib.loads(block).get("tasks", {})}
     for preset in presets.available():
         data = tomllib.loads((PRESETS / preset / "files" / "pytemplate.toml").read_text(encoding="utf-8-sig"))
         tasks |= set(data.get("tasks", {}))
-    words = re.findall(r"(?:\./|\.\./|\.\\)deploy((?:\s+-{1,2}[a-z][\w-]*)*)\s+([A-Za-z_][\w-]*)", text)
+    words = re.findall(r"(?:\./|\.\./|\.\\)pyt((?:\s+-{1,2}[a-z][\w-]*)*)\s+([A-Za-z_][\w-]*)", text)
     unknown = sorted({w for _, w in words if not w.isupper() and w not in cli.COMMANDS and w not in tasks})
-    assert not unknown, f"./deploy WORD that is neither a command nor a task: {unknown}"
+    assert not unknown, f"./pyt WORD that is neither a command nor a task: {unknown}"
 
 
 def test_the_custom_tasks_section_names_every_key_and_placeholder() -> None:
@@ -254,7 +254,7 @@ def test_every_pytemplate_key_the_manual_names_exists() -> None:
 
 def test_the_toml_examples_are_valid_pytemplate_toml() -> None:
     for block in TOML_FENCE.findall(_text()):
-        config._build(Config, tomllib.loads(block), "")  # DeployError on an unknown key or a wrong type
+        config._build(Config, tomllib.loads(block), "")  # PytError on an unknown key or a wrong type
 
 
 def _leaf_paths() -> list[str]:
@@ -469,7 +469,7 @@ def test_the_keymaps_are_the_plugins() -> None:
     assert documented == keys, f"README keymaps differ from tasks.KEYS: {sorted(documented ^ keys)}"
     plugin_readme = TEMPLATE / "nvim" / "README.md"
     if plugin_readme.is_file():
-        keymaps = _section(plugin_readme.read_text(encoding="utf-8"), 'Keymaps (`<leader>j`, which-key group "deploy")')
+        keymaps = _section(plugin_readme.read_text(encoding="utf-8"), 'Keymaps (`<leader>j`, which-key group "pyt")')
         listed = {s for row in _tables(keymaps)[0][1:] for cell in row[::2] for s in re.findall(r"`([^`]+)`", cell)}
         assert listed == keys, f".pytemplate/nvim/README.md keymaps differ from tasks.KEYS: {sorted(listed ^ keys)}"
 

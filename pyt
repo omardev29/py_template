@@ -1,14 +1,14 @@
 #!/bin/sh
-# ./deploy: POSIX launcher of the pytemplate runner.
+# ./pyt: POSIX launcher of the pytemplate runner.
 #
 # Finds the project root and uv, then hands every argument to
-# .pytemplate/deploy.py, where all the logic lives. It must keep working under
+# .pytemplate/pyt.py, where all the logic lives. It must keep working under
 # dash, bash 3.2+, zsh, busybox ash and ksh on Linux, macOS and WSL, and under
 # Git Bash, MSYS2 (any MSYSTEM, login or not), Cygwin, busybox-w32 and niubash
 # on Windows. CLAUDE.md ("Launchers") explains each rule:
 #   * POSIX sh only: no arrays, [[ ]], ${v//a/b}, local, $'..', set -e/-u.
 #     printf '%s\n', never echo, for anything that may hold a backslash.
-#   * A caller's set -e / set -u must not stop it (sh -eu deploy, niubash with
+#   * A caller's set -e / set -u must not stop it (sh -eu pyt, niubash with
 #     errexit): ${v:-} for variables that may be unset, and every command that
 #     may fail sits in a condition or ends in `|| :` / `|| _pt_x=`.
 #   * niubash runs this file inside the calling shell: $0 is the caller's,
@@ -146,7 +146,7 @@ _pt_winpath() {
 # --- project root ---------------------------------------------------------------
 
 # $1 = this file as the shell named it. Sets _pt_root when its directory
-# holds .pytemplate/deploy.py. A symlink (~/bin/pdeploy -> proj/deploy) is
+# holds .pytemplate/pyt.py. A symlink (~/bin/mypyt -> proj/pyt) is
 # followed to the launcher it names, at most 40 links; a relative target is
 # joined to its link's folder, and the kernel resolves the '..' in it.
 _pt_from_launcher() {
@@ -178,16 +178,16 @@ _pt_from_launcher() {
         '') _pt_c=/ ;;
         [A-Za-z]:) _pt_c=$_pt_c/ ;;
     esac
-    if [ -f "${_pt_c%/}/.pytemplate/deploy.py" ]; then
+    if [ -f "${_pt_c%/}/.pytemplate/pyt.py" ]; then
         _pt_root=$_pt_c
         return 0
     fi
     return 1
 }
 
-# $1 = a folder holding .pytemplate/deploy.py, found by walking up from $PWD.
+# $1 = a folder holding .pytemplate/pyt.py, found by walking up from $PWD.
 # Its code is not run when another user owns it: anyone may create
-# /tmp/.pytemplate/deploy.py (on Windows, whose owners are not read here: a
+# /tmp/.pytemplate/pyt.py (on Windows, whose owners are not read here: a
 # drive root, where any user may create folders).
 _pt_foreign() {
     if [ -n "$_pt_win" ]; then
@@ -196,7 +196,7 @@ _pt_foreign() {
         esac
         return 1
     fi
-    if [ -O "${1%/}/.pytemplate/deploy.py" ]; then
+    if [ -O "${1%/}/.pytemplate/pyt.py" ]; then
         return 1
     fi
     return 0
@@ -222,7 +222,7 @@ elif _pt_from_launcher "$0"; then
 else
     _pt_d=$_pt_pwd
     while :; do
-        if [ -f "${_pt_d%/}/.pytemplate/deploy.py" ]; then
+        if [ -f "${_pt_d%/}/.pytemplate/pyt.py" ]; then
             if _pt_foreign "$_pt_d"; then
                 _pt_other=$_pt_d
             else
@@ -245,7 +245,7 @@ fi
 case $_pt_root in
     '' | /* | [A-Za-z]:/*) ;;
     *)
-        # Relative (./deploy, ../deploy, deploy): resolve against $PWD.
+        # Relative (./pyt, ../pyt, pyt): resolve against $PWD.
         _pt_d=${_pt_pwd%/}
         _pt_c=${_pt_root#./}
         while :; do
@@ -265,7 +265,7 @@ case $_pt_root in
         # $PWD is logical: below a symlink its '..' is not the folder the
         # kernel found this file in. Then keep the relative path, which uv
         # resolves the way the kernel did (the launcher never changes folder).
-        if [ -f "${_pt_t%/}/.pytemplate/deploy.py" ]; then
+        if [ -f "${_pt_t%/}/.pytemplate/pyt.py" ]; then
             _pt_root=$_pt_t
         fi ;;
 esac
@@ -428,10 +428,10 @@ EOF
 _pt_rc=
 _pt_uv=
 if [ -n "$_pt_other" ]; then
-    printf '%s\n' "deploy: ${_pt_other%/}/.pytemplate/deploy.py is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run ${_pt_other%/}/deploy yourself." >&2
+    printf '%s\n' "pyt: ${_pt_other%/}/.pytemplate/pyt.py is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run ${_pt_other%/}/pyt yourself." >&2
     _pt_rc=2
 elif [ -z "$_pt_root" ]; then
-    printf '%s\n' "deploy: no .pytemplate/deploy.py next to this launcher, in $_pt_pwd or in any parent directory." >&2
+    printf '%s\n' "pyt: no .pytemplate/pyt.py next to this launcher, in $_pt_pwd or in any parent directory." >&2
     _pt_rc=2
 else
     if [ -n "${UV:-}" ]; then
@@ -455,7 +455,7 @@ else
     fi
 
     if [ -z "$_pt_uv" ]; then
-        printf '%s\n' "deploy: uv not found (https://docs.astral.sh/uv/getting-started/installation/)." >&2
+        printf '%s\n' "pyt: uv not found (https://docs.astral.sh/uv/getting-started/installation/)." >&2
         if [ -t 0 ] && [ -t 2 ] && [ -z "${CI:-}" ]; then
             printf '%s' "Install it now with the official installer? [y/N] " >&2
             _pt_t=
@@ -515,7 +515,7 @@ else
         _pt_launcher=$_pt_launcher:cygwin
     fi
 
-    _pt_script=${_pt_root%/}/.pytemplate/deploy.py
+    _pt_script=${_pt_root%/}/.pytemplate/pyt.py
     _pt_cwd=$_pt_pwd
     if [ -n "$_pt_win" ]; then
         _pt_winpath "$_pt_script"

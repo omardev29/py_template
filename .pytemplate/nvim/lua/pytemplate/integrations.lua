@@ -20,13 +20,13 @@ end
 function M.which_key(_, opts)
   opts.spec = tbl(opts.spec)
   local prefix = type(vim.g.pytemplate_prefix) == "string" and vim.g.pytemplate_prefix or "<leader>j"
-  table.insert(opts.spec, { prefix, group = "deploy", mode = "n" })
+  table.insert(opts.spec, { prefix, group = "pyt", mode = "n" })
 end
 
 -- --- overseer ----------------------------------------------------------------------------------
 
 ---Our template provider (lua/overseer/template/pytemplate.lua) replaces the tasks.json one: same
----tasks without duplicate labels, typed parameters, the [tasks] entries, and no deploy.cmd.
+---tasks without duplicate labels, typed parameters, the [tasks] entries, and no pyt.cmd.
 function M.overseer(_, opts)
   opts.disable_template_modules = tbl(opts.disable_template_modules)
   if not vim.tbl_contains(opts.disable_template_modules, "overseer.template.vscode") then
@@ -45,7 +45,7 @@ function M.lsp_cmd(name)
   local uvbin = pt.uv()
   if name == "basedpyright" and uvbin then
     -- uvx: a cached, isolated basedpyright (bundles its own Node.js); never touches the project.
-    -- The versions ./deploy check pins (editor.json), basedpyright's Node.js wheel included:
+    -- The versions ./pyt check pins (editor.json), basedpyright's Node.js wheel included:
     -- an unpinned request re-resolves to the newest (a new Node can raise the glibc/macOS floor).
     local typing = pt.info().typing
     local argv = { uvbin, "tool", "run", "--from", typing.basedpyright or "basedpyright" }
@@ -67,7 +67,7 @@ function M.lsp(_, opts)
   if cmd then
     s.cmd, s.mason = cmd, false
   end
-  -- ruff from .venv: the version pinned in uv.lock, the same one ./deploy check runs
+  -- ruff from .venv: the version pinned in uv.lock, the same one ./pyt check runs
   local ruff = server(opts, "ruff")
   ruff.enabled = true
   local exe = pt.tool("ruff")
@@ -82,7 +82,7 @@ end
 local S = vim.diagnostic.severity
 local SEVERITY = { Error = S.ERROR, Warning = S.WARN, Information = S.INFO, Hint = S.HINT }
 
----mypy arguments, mirroring ./deploy check (render.mypy_cli_args) with nvim-lint's output format.
+---mypy arguments, mirroring ./pyt check (render.mypy_cli_args) with nvim-lint's output format.
 function M.mypy_args()
   local info = pt.info()
   local args = {
@@ -105,7 +105,7 @@ local function mypy_env()
   local env = vim.fn.environ()
   env.PYTHONUTF8 = "1" -- like the runner (proc.base_env)
   env.VIRTUAL_ENV = nil
-  -- the path even before .venv exists: the linter is built once, ./deploy setup may come later
+  -- the path even before .venv exists: the linter is built once, ./pyt setup may come later
   local mypy = pt.venv_exe(pt.info().envs.tools, "mypy")
   if pt.is_win and mypy then
     -- nvim-lint runs `cmd.exe /C <cmd> ...` on Windows: a quoted absolute path breaks cmd's

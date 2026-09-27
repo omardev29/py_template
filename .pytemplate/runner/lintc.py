@@ -296,7 +296,7 @@ def lint_file(cfg: Config, path: Path) -> list[Finding]:
                     add(
                         node,
                         "librt is only installed with mypy (dev group), so pyz/portable/wheel builds lack it: "
-                        "add it to the app with ./deploy add librt --cpython-only",
+                        "add it to the app with ./pyt add librt --cpython-only",
                     )
         elif isinstance(node, ast.ClassDef):
             decorators = node.decorator_list

@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from runner import cmd_dev, cmd_env, config, envs, mypyc, presets, tasks  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.methods import flet, nuitka, portable, pyz, wheel  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 IS_WINDOWS = os.name == "nt"
 windows_only = pytest.mark.skipif(not IS_WINDOWS, reason="needs cmd.exe")
@@ -164,7 +164,7 @@ def test_tasks_do_not_resolve_the_python_unless_needed(monkeypatch: pytest.Monke
     )
 
     def no_python(_cfg: Config, _backend: str) -> envs.PyEnv:
-        raise DeployError("no python", 3)
+        raise PytError("no python", 3)
 
     calls: list[list[str]] = []
 
@@ -176,9 +176,9 @@ def test_tasks_do_not_resolve_the_python_unless_needed(monkeypatch: pytest.Monke
     monkeypatch.setattr(tasks.proc, "run", fake_run)
     assert tasks.run_task(cfg, "plain", ["x"], lambda _argv: 0) == 0
     assert calls[-1][0] == "tool" and calls[-1][2:] == ["cpython", "x"]
-    with pytest.raises(DeployError, match="no python"):
+    with pytest.raises(PytError, match="no python"):
         tasks.run_task(cfg, "needs", [], lambda _argv: 0)
-    with pytest.raises(DeployError, match="unknown placeholder 'nope'"):
+    with pytest.raises(PytError, match="unknown placeholder 'nope'"):
         tasks.run_task(cfg, "typo", [], lambda _argv: 0)
 
 
@@ -276,7 +276,7 @@ def test_compile_annotate_writes_the_report_on_every_build(tmp_path: Path, monke
         assert html.parent.is_dir()
     mypyc.build(make({}), "dev")
     assert specs[-1]["annotate"] == ""
-    other = tmp_path / "other.html"  # ./deploy report passes its own path: it wins
+    other = tmp_path / "other.html"  # ./pyt report passes its own path: it wins
     mypyc.build(make({"compile": {"annotate": True}}), "dev", annotate=other, compile_c=False)
     assert specs[-1]["annotate"] == str(other)
 
@@ -336,16 +336,16 @@ def test_portable_env_values_are_quoted() -> None:
     assert "export SQ='it'\"'\"'s'" in sh_lines
     cmd_cfg = make({"deploy": {"portable": {"env": TRICKY}}})
     assert 'set "PCT=50%% %%PATH%%"' in portable._env_lines(cmd_cfg, windows=True)
-    with pytest.raises(DeployError, match="deploy.portable.env.DQ"):
+    with pytest.raises(PytError, match="deploy.portable.env.DQ"):
         portable._env_lines(cfg, windows=True)  # a double quote cannot be written to a .cmd
 
 
 def test_portable_env_names_are_validated() -> None:
-    with pytest.raises(DeployError, match="invalid environment variable name"):
+    with pytest.raises(PytError, match="invalid environment variable name"):
         make({"deploy": {"portable": {"env": {"A B": "1"}}}})
-    with pytest.raises(DeployError, match="must be of type string"):
+    with pytest.raises(PytError, match="must be of type string"):
         make({"deploy": {"portable": {"env": {"N": 1}}}})
-    with pytest.raises(DeployError, match="must be of type string"):
+    with pytest.raises(PytError, match="must be of type string"):
         make({"tasks": {"t": {"cmd": ["x"], "env": {"N": 1}}}})
 
 
@@ -431,7 +431,7 @@ def test_commands_reject_unknown_arguments(tmp_path: Path, monkeypatch: pytest.M
         (cmd_env.cmd_sync, ["pypy", "extra"], "extra"),
     ]
     for func, args, bad in cases:
-        with pytest.raises(DeployError, match=f"unrecognized arguments: {re.escape(bad)}") as e:
+        with pytest.raises(PytError, match=f"unrecognized arguments: {re.escape(bad)}") as e:
             func(cfg, args)
         assert e.value.code == 2
 
@@ -456,9 +456,9 @@ def test_lint_and_fmt_pass_their_flags(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_app_preset_must_exist() -> None:
     assert make({"app": {"preset": "raylib"}}).app.preset == "raylib"
-    with pytest.raises(DeployError, match="is not a preset of this template"):
+    with pytest.raises(PytError, match="is not a preset of this template"):
         make({"app": {"preset": "nope"}})
-    with pytest.raises(DeployError, match="is not a preset of this template"):
+    with pytest.raises(PytError, match="is not a preset of this template"):
         make({"app": {"preset": "../presets/script"}})
 
 

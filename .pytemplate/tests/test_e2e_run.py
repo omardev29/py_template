@@ -1,4 +1,4 @@
-"""Running parts of `./deploy selftest --e2e` (runner/e2e.py), without a real project or build.
+"""Running parts of `./pyt selftest --e2e` (runner/e2e.py), without a real project or build.
 
 Logged steps (output, exit code, timeout that kills the whole tree), the outcome of a step, the
 base-dir guards and cleanup, the step kinds on small fake projects (verify, commit, smoke of a
@@ -27,7 +27,7 @@ from runner import config, e2e, presets  # noqa: E402
 from runner.e2e import FAIL, PASS, SKIP, Context, Host, Options, PresetInfo, Step  # noqa: E402
 from runner.hooks import MARKER as HOOK_MARKER  # noqa: E402
 from runner.project import ROOT  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 POSIX = pytest.mark.skipif(sys.platform == "win32", reason="POSIX processes, signals and symlinks")
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not found")
@@ -129,17 +129,17 @@ def test_call_outcomes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result: 
 
 def test_prepare_base_refuses_what_it_must_not_wipe(tmp_path: Path) -> None:
     for inside in (ROOT, ROOT / "x" / "y"):
-        with pytest.raises(DeployError, match="inside this template"):
+        with pytest.raises(PytError, match="inside this template"):
             e2e._prepare_base(inside)
     assert not (ROOT / "x").exists()
     a_file = tmp_path / "file"
     a_file.write_text("x", encoding="utf-8")
-    with pytest.raises(DeployError, match="not a directory"):
+    with pytest.raises(PytError, match="not a directory"):
         e2e._prepare_base(a_file)
     mine = tmp_path / "mine"
     mine.mkdir()
     (mine / "notes.txt").write_text("x", encoding="utf-8")
-    with pytest.raises(DeployError, match="not empty"):
+    with pytest.raises(PytError, match="not empty"):
         e2e._prepare_base(mine)
     assert not (mine / e2e.MARKER).exists()
     fresh = tmp_path / "a" / "b"
@@ -150,7 +150,7 @@ def test_prepare_base_refuses_what_it_must_not_wipe(tmp_path: Path) -> None:
     if sys.platform != "win32":
         link = tmp_path / "link"
         link.symlink_to(ROOT / ".pytemplate", target_is_directory=True)
-        with pytest.raises(DeployError, match="inside this template"):
+        with pytest.raises(PytError, match="inside this template"):
             e2e._prepare_base(link / "e2e")
 
 
@@ -224,14 +224,14 @@ def test_a_round_trip_must_restore_the_projects_files(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(e2e, "_execute", fake_execute)
     log = ctx.logs / "step.log"
-    assert e2e.execute(ctx, Step("script", "there", "deploy", snapshot="there"), log) == (PASS, "")
-    assert e2e.execute(ctx, Step("script", "back", "deploy", restores="there"), log) == (PASS, "")
-    status, detail = e2e.execute(ctx, Step("script", "broken back", "deploy", restores="there"), log)
+    assert e2e.execute(ctx, Step("script", "there", "pyt", snapshot="there"), log) == (PASS, "")
+    assert e2e.execute(ctx, Step("script", "back", "pyt", restores="there"), log) == (PASS, "")
+    status, detail = e2e.execute(ctx, Step("script", "broken back", "pyt", restores="there"), log)
     assert status == FAIL and detail == "the project changed since 'there': ~ pytemplate.toml"
     assert "~ pytemplate.toml" in log.read_text(encoding="utf-8")
     (ctx.project / "pytemplate.toml").write_text("before", encoding="utf-8")
-    assert e2e.execute(ctx, Step("script", "same", "deploy", snapshot="same", restores="same"), log) == (PASS, "")
-    status, detail = e2e.execute(ctx, Step("script", "same", "deploy", restores="missing"), log)
+    assert e2e.execute(ctx, Step("script", "same", "pyt", snapshot="same", restores="same"), log) == (PASS, "")
+    status, detail = e2e.execute(ctx, Step("script", "same", "pyt", restores="missing"), log)
     assert status == FAIL and "bug" in detail
 
 
@@ -242,7 +242,7 @@ def test_verify_checks_what_new_made(tmp_path: Path) -> None:
     info = e2e.preset_info(config.load(set()).app.preset)
     ctx = make_ctx(tmp_path, info, env=isolated_git_env(base))
     p = ctx.project
-    for launcher in ("deploy", "deploy.ps1"):
+    for launcher in ("pyt", "pyt.ps1"):
         (p / launcher).write_text("#!/bin/sh\n", encoding="utf-8")
     shutil.copyfile(presets.LOCK, p / "uv.lock")  # the template's own versions
     description = str(presets.load(info.name)["description"])
@@ -256,20 +256,20 @@ def test_verify_checks_what_new_made(tmp_path: Path) -> None:
             shutil.copyfile(source, p / target)
     git = ["git", "-C", str(p)]
     subprocess.run([*git, "init", "-q"], check=True, env=ctx.env)
-    subprocess.run([*git, "add", "--chmod=+x", "deploy", "deploy.ps1"], check=True, env=ctx.env)
+    subprocess.run([*git, "add", "--chmod=+x", "pyt", "pyt.ps1"], check=True, env=ctx.env)
     ctx.results["new"] = PASS
     (p / ".build" / "init").mkdir(parents=True)  # __init's own scratch (the pins it hands to uv)
     (p / ".build" / "init" / "constraints.txt").write_text("raylib==6.0.1.0\n", encoding="utf-8")
     step = Step(info.name, "verify copy", "verify", timeout=60)
     log = ctx.logs / "verify.log"
     assert e2e.do_verify(ctx, step, log) == (PASS, ""), log.read_text(encoding="utf-8")
-    subprocess.run([*git, "update-index", "--chmod=-x", "deploy.ps1"], check=True, env=ctx.env)
+    subprocess.run([*git, "update-index", "--chmod=-x", "pyt.ps1"], check=True, env=ctx.env)
     (p / ".venv").mkdir()
     (p / ".build" / "cfg").mkdir()  # not made by __init: copied from the template
     (p / "LICENSE").write_text("MIT\n", encoding="utf-8")
     status, detail = e2e.do_verify(ctx, step, log)
     assert status == FAIL
-    assert "git mode of deploy.ps1 is 100644, not 100755" in detail and "LICENSE in the project root" in detail
+    assert "git mode of pyt.ps1 is 100644, not 100755" in detail and "LICENSE in the project root" in detail
     assert "copied .venv/" in detail and "copied .build/" in detail
     e2e.rmtree(p / ".git")  # git objects are read-only on Windows
     assert "no git repository (new runs git init)" in e2e.do_verify(ctx, step, log)[1]
@@ -386,7 +386,7 @@ def test_build_size_counts_a_symlinked_file_once(tmp_path: Path, monkeypatch: py
 
 
 def test_an_option_edit_is_applied_and_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """[preset.raylib] package = raylib_sdl through `./deploy apply`: pyproject.toml and uv.lock
+    """[preset.raylib] package = raylib_sdl through `./pyt apply`: pyproject.toml and uv.lock
     must follow (the new requirement declared and locked at its version, the old one gone)."""
     raylib = PresetInfo("raylib", ("cpython", "pypy", "mypyc"), {}, gui=True, active="pypy")
     ctx = make_ctx(tmp_path, info=raylib)
@@ -513,7 +513,7 @@ def test_selftest_refuses_a_selection_that_tests_nothing(tmp_path: Path, faked: 
     _, ran = faked
     base = tmp_path / "base"
     for argv in (["script", "--backends", "pypy"], ["script", "--quick", "--methods", "nuitka"]):
-        with pytest.raises(DeployError, match="selects no") as e:
+        with pytest.raises(PytError, match="selects no") as e:
             e2e.selftest(None, [*argv, "--base", str(base)])  # type: ignore[arg-type]
         assert e.value.code == 2
     assert not base.exists() and not ran, "refused before anything is created"

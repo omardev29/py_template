@@ -1,8 +1,8 @@
-"""`./deploy rename NEW_NAME` (runner/rename.py).
+"""`./pyt rename NEW_NAME` (runner/rename.py).
 
 The acceptance test renames every preset skeleton rendered for one name and checks that the
 result is byte-identical to the skeleton rendered for the new name: exactly what
-`./deploy new --name NEW` would have written. The rest covers the tricky text cases, the
+`./pyt new --name NEW` would have written. The rest covers the tricky text cases, the
 safety checks and the command itself (dry run and a real run in a throwaway copy).
 """
 
@@ -31,7 +31,7 @@ from runner import cli, cmd_dev, cmd_env, config, envs, presets, proc, project, 
 from runner.config import Config  # noqa: E402
 from runner.project import ROOT  # noqa: E402
 from runner.rename import Names, package_of, rewrite  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 needs_uv = pytest.mark.skipif(shutil.which("uv") is None and not os.environ.get("UV"), reason="uv not found")
 
@@ -511,10 +511,10 @@ def test_pytemplate_toml_keeps_file_names_and_other_folders(tmp_path: Path, new:
 
 
 @pytest.mark.parametrize("preset", ["script", "raylib", "flet"])
-@pytest.mark.parametrize("old", ["deploy", "uv", "src", "tools"])
+@pytest.mark.parametrize("old", ["pyt", "uv", "src", "tools"])
 def test_pytemplate_toml_comments_of_an_app_named_like_a_path_word(tmp_path: Path, preset: str, old: str) -> None:
-    """`./deploy apply`, `uv.lock` and `src/<pkg>/` in the comments are not the package of an app
-    named deploy, uv or src: the renamed pytemplate.toml is the new name's skeleton."""
+    """`./pyt apply`, `uv.lock` and `src/<pkg>/` in the comments are not the package of an app
+    named pyt, uv or src: the renamed pytemplate.toml is the new name's skeleton."""
     _write_project(tmp_path, preset, old)
     planned = rename.plan(tmp_path, old, "beta")
     assert planned.config.new == presets.skeleton(preset, "beta")["pytemplate.toml"].decode("utf-8")
@@ -542,13 +542,13 @@ def test_root_files_that_mention_the_name_are_reported(tmp_path: Path) -> None:
 
 def test_missing_or_taken_package_folders(tmp_path: Path) -> None:
     _write_project(tmp_path, "script", "alpha")
-    with pytest.raises(DeployError, match=r"src/other/ not found"):
+    with pytest.raises(PytError, match=r"src/other/ not found"):
         rename.plan(tmp_path, "other", "beta")
     (tmp_path / "src" / "beta").mkdir()
-    with pytest.raises(DeployError, match=r"src/beta/ already exists"):
+    with pytest.raises(PytError, match=r"src/beta/ already exists"):
         rename.plan(tmp_path, "alpha", "beta")
     (tmp_path / "src" / "gamma.py").write_text("", encoding="utf-8")
-    with pytest.raises(DeployError, match=r"src/gamma.py exists"):
+    with pytest.raises(PytError, match=r"src/gamma.py exists"):
         rename.plan(tmp_path, "alpha", "gamma")
 
 
@@ -593,7 +593,7 @@ def _cfg(preset: str) -> Config:
     ],
 )
 def test_bad_new_names(preset: str, name: str, message: str) -> None:
-    with pytest.raises(DeployError, match=message) as e:
+    with pytest.raises(PytError, match=message) as e:
         rename.check_new_name(_cfg(preset), name)
     assert e.value.code == 2
 
@@ -603,12 +603,12 @@ def test_good_new_names() -> None:
         rename.check_new_name(_cfg("script"), name)
 
 
-def _deploy(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _pyt(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     drop = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "PYTEMPLATE_CALLER_CWD", "PYTEMPLATE_LAUNCHER")
     env = {k: v for k, v in os.environ.items() if k not in drop}
     env.update(NO_COLOR="1", PYTHONDONTWRITEBYTECODE="1", PYTHONUTF8="1")
     return subprocess.run(
-        [sys.executable, "-B", str(root / ".pytemplate" / "deploy.py"), *args],
+        [sys.executable, "-B", str(root / ".pytemplate" / "pyt.py"), *args],
         cwd=root,
         env=env,
         capture_output=True,
@@ -638,13 +638,13 @@ def project_copy(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @needs_uv
 def test_command_dry_run_then_real_run(project_copy: Path) -> None:
     root = project_copy
-    # the copy's own package (a project made with ./deploy new has its own name and preset)
+    # the copy's own package (a project made with ./pyt new has its own name and preset)
     name = tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8-sig"))["app"]["name"]
     old = package_of(name)
     if old == "my_game":
         pytest.skip("this project is already called my_game")
     before = _snapshot(root)
-    r = _deploy(root, "--dry-run", "rename", "My-Game")
+    r = _pyt(root, "--dry-run", "rename", "My-Game")
     assert r.returncode == 0, r.stderr
     assert f"would move       src/{old}/ -> src/my_game/" in r.stderr, r.stderr
     assert "uv.lock          would re-lock" in r.stderr
@@ -654,14 +654,14 @@ def test_command_dry_run_then_real_run(project_copy: Path) -> None:
         assert "src/my_game/__init__.py" in r.stderr and '+ """My-Game"""' in r.stderr
     assert _snapshot(root) == before, "--dry-run wrote files"
 
-    r = _deploy(root, "rename", "My-Game", "--bogus")
+    r = _pyt(root, "rename", "My-Game", "--bogus")
     assert r.returncode == 2 and "unknown argument(s): --bogus" in r.stderr
 
-    r = _deploy(root, "rename", "My-Game")
+    r = _pyt(root, "rename", "My-Game")
     if r.returncode != 0 and rename.needs_pypi(r.stderr):
         # The rename itself happened; only the re-lock needs the package index
         assert (root / "src" / "my_game" / "__init__.py").is_file() and not (root / "src" / old).exists()
-        assert "The files are already renamed" in r.stderr and "./deploy apply" in r.stderr, r.stderr
+        assert "The files are already renamed" in r.stderr and "./pyt apply" in r.stderr, r.stderr
         pytest.skip("needs PyPI: uv lock could not reach the package index (offline, blocked proxy, or UV_OFFLINE with a cold cache)")
     assert r.returncode == 0, r.stderr
     assert not (root / "src" / old).exists()
@@ -670,10 +670,10 @@ def test_command_dry_run_then_real_run(project_copy: Path) -> None:
     assert "my-game" in {p["name"] for p in lock["package"]}
     editor = (root / ".pytemplate" / "editor.json").read_text(encoding="utf-8")
     assert '"pkg": "my_game"' in editor
-    check = _deploy(root, "render", "--check")
+    check = _pyt(root, "render", "--check")
     assert check.returncode == 0, check.stderr
 
-    r = _deploy(root, "rename", "My-Game")
+    r = _pyt(root, "rename", "My-Game")
     assert r.returncode == 0 and "nothing to do" in r.stderr
 
 
@@ -994,7 +994,7 @@ def test_links_in_src_and_tests_are_reported_never_rewritten(tmp_path: Path, cap
 
 def test_only_links_the_move_breaks_are_reported(tmp_path: Path) -> None:
     """The name was searched in the link's target text: an absolute link through the project's
-    own folder, named like the app (what `./deploy new alpha` makes), was reported as pointing
+    own folder, named like the app (what `./pyt new alpha` makes), was reported as pointing
     through the old name although it kept working. What counts is whether it dangles once
     src/alpha/ moves."""
     root = tmp_path / "alpha"  # the project folder, named like the app
@@ -1029,13 +1029,13 @@ def test_a_folder_that_cannot_be_listed_stops_the_plan(tmp_path: Path, monkeypat
         return real(path)
 
     monkeypatch.setattr(os, "scandir", scandir)
-    with pytest.raises(DeployError, match=r"cannot list src/alpha/secret/: Permission denied; nothing was changed") as e:
+    with pytest.raises(PytError, match=r"cannot list src/alpha/secret/: Permission denied; nothing was changed") as e:
         rename.plan(tmp_path, "alpha", "beta")
     assert e.value.code == 2
 
 
 def test_quiet_still_lists_what_must_be_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    """-q hides progress, never what the user must act on: `./deploy -q rename beta` printed
+    """-q hides progress, never what the user must act on: `./pyt -q rename beta` printed
     nothing and left `return alpha.core` (kept: the module rebinds alpha) next to the renamed
     `import beta.core`, a NameError at runtime, without a word."""
     _write_project(tmp_path, "script", "alpha")
@@ -1111,9 +1111,9 @@ def test_mentions_outside_src_and_tests_are_reported(tmp_path: Path) -> None:
         "big.txt": "alpha\n" + "x" * (rename.MENTION_MAX_BYTES + 1),
         # the template's own files: their words are no app name (they were listed to edit by hand)
         "CLAUDE.md": "# the alpha of the runner\n",
-        "deploy": "#!/bin/sh\n# alpha\n",
-        "deploy.cmd": "rem alpha\r\n",
-        "deploy.ps1": "# alpha\n",
+        "pyt": "#!/bin/sh\n# alpha\n",
+        "pyt.cmd": "rem alpha\r\n",
+        "pyt.ps1": "# alpha\n",
     }
     for rel_path, text in files.items():
         (tmp_path / rel_path).parent.mkdir(parents=True, exist_ok=True)
@@ -1158,7 +1158,7 @@ def test_a_pytemplate_toml_that_is_not_utf8_is_a_clear_error(tmp_path: Path) -> 
     _write_project(tmp_path, "script", "alpha")
     path = tmp_path / "pytemplate.toml"
     path.write_bytes(path.read_text(encoding="utf-8").encode("utf-16"))
-    with pytest.raises(DeployError, match="UTF-16") as e:
+    with pytest.raises(PytError, match="UTF-16") as e:
         rename.plan(tmp_path, "alpha", "beta")
     assert e.value.code == 2
 
@@ -1184,7 +1184,7 @@ def test_set_project_name_only_touches_the_project_table(text: str) -> None:
 
 @pytest.mark.parametrize("text", ['[tool.x]\nname = "alpha"\n', '[project]\nversion = "0.1.0"\n', 'project.name = "alpha"\n', "[project\n"])
 def test_set_project_name_refuses_what_it_cannot_edit(text: str) -> None:
-    with pytest.raises(DeployError, match=r"\[project\] name") as e:
+    with pytest.raises(PytError, match=r"\[project\] name") as e:
         presets.set_project_name(text, "beta")
     assert e.value.code == 2
 
@@ -1212,7 +1212,7 @@ def test_a_file_that_cannot_be_read_is_a_clear_error(tmp_path: Path, monkeypatch
         return real(self)
 
     monkeypatch.setattr(Path, "read_bytes", read_bytes)
-    with pytest.raises(DeployError, match=r"rename: cannot read tests/data.txt: Permission denied") as e:
+    with pytest.raises(PytError, match=r"rename: cannot read tests/data.txt: Permission denied") as e:
         rename.plan(tmp_path, "alpha", "beta")
     assert e.value.code == 2 and "nothing was changed" in str(e.value)
 
@@ -1230,7 +1230,7 @@ def test_a_pyproject_without_project_name_stops_the_plan(tmp_path: Path) -> None
     path = tmp_path / "pyproject.toml"
     path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"\n', "", 1), encoding="utf-8", newline="\n")
     before = _tree(tmp_path)
-    with pytest.raises(DeployError, match="nothing was changed"):
+    with pytest.raises(PytError, match="nothing was changed"):
         rename.plan(tmp_path, "alpha", "beta")
     assert _tree(tmp_path) == before
 
@@ -1249,10 +1249,10 @@ def test_every_locked_package_name_is_refused(monkeypatch: pytest.MonkeyPatch, e
     monkeypatch.setattr(presets, "_lock_graph", lambda lock=None: {**{k: v | set(extra) for k, v in graph.items()}, **{n: set() for n in extra}})
     monkeypatch.setattr(rename, "locked_names", lambda root: names | set(extra))
     for name in sorted(names | set(extra)):
-        with pytest.raises(DeployError) as e:
+        with pytest.raises(PytError) as e:
             rename.check_new_name(cfg, name)
         assert e.value.code == 2
-    with pytest.raises(DeployError, match=r"\(iniconfig, "):
+    with pytest.raises(PytError, match=r"\(iniconfig, "):
         rename.check_new_name(cfg, "IniConfig")  # normalized like uv
 
 
@@ -1260,7 +1260,7 @@ def test_every_locked_package_name_is_refused(monkeypatch: pytest.MonkeyPatch, e
 def test_backend_names_are_refused(name: str) -> None:
     # src/mypyc/ would shadow the compiler in the mypyc stage, and a later rename away from a
     # backend name would rewrite tests/conftest.py's `BACKEND != "mypyc"`
-    with pytest.raises(DeployError, match="name of a backend") as e:
+    with pytest.raises(PytError, match="name of a backend") as e:
         rename.check_new_name(_cfg("script"), name)
     assert e.value.code == 2
 
@@ -1285,7 +1285,7 @@ def test_case_only_rename_of_the_project_is_not_a_lock_clash() -> None:
 @pytest.mark.parametrize("name", ["compression", "annotationlib", "imp", "asyncore", "distutils", "sre_parse"])
 def test_stdlib_names_do_not_depend_on_the_runner(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     monkeypatch.setattr(sys, "stdlib_module_names", frozenset({"json"}))
-    with pytest.raises(DeployError, match="standard library") as e:
+    with pytest.raises(PytError, match="standard library") as e:
         rename.check_new_name(_cfg("script"), name)
     assert e.value.code == 2
     assert presets.shadows_stdlib(name) and presets.shadows_stdlib("json") and not presets.shadows_stdlib("beta")
@@ -1358,8 +1358,8 @@ def test_git_changes_reads_git_in_english(tmp_path: Path, monkeypatch: pytest.Mo
 def test_dirty_tree_message() -> None:
     assert rename.dirty_tree_message(None, "rename", "x") is None
     assert rename.dirty_tree_message([], "rename", "x") is None
-    many = rename.dirty_tree_message([f"f{i}" for i in range(7)], "rename", "./deploy rename b --force")
-    assert many is not None and "7 path(s): f0, f1, f2, f3, f4 and 2 more" in many and "./deploy rename b --force" in many
+    many = rename.dirty_tree_message([f"f{i}" for i in range(7)], "rename", "./pyt rename b --force")
+    assert many is not None and "7 path(s): f0, f1, f2, f3, f4 and 2 more" in many and "./pyt rename b --force" in many
     broken = rename.dirty_tree_message("fatal: detected dubious ownership", "rename", "x")
     assert broken is not None and broken.startswith("could not check for uncommitted changes in git (fatal: detected dubious")
 
@@ -1471,7 +1471,7 @@ def test_same_name_with_missing_package_is_an_error(command_project: Path) -> No
     pyproject = root / "pyproject.toml"
     pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "beta"', 1), encoding="utf-8")
     before = _tree(root)
-    with pytest.raises(DeployError, match=r"src/beta/ not found[\s\S]*changed by hand") as e:
+    with pytest.raises(PytError, match=r"src/beta/ not found[\s\S]*changed by hand") as e:
         rename.cmd_rename(_load(root), ["beta"])
     assert e.value.code == 2 and _tree(root) == before
     (root / "pytemplate.toml").write_text(text, encoding="utf-8", newline="\n")
@@ -1481,7 +1481,7 @@ def test_same_name_with_missing_package_is_an_error(command_project: Path) -> No
 
 def test_an_interrupted_rename_says_how_to_finish(command_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """A SIGTERM or Ctrl+C while uv locked left the files renamed, uv.lock stale, the generated
-    files and the record behind, with only `error: terminated`: now it says ./deploy apply, and
+    files and the record behind, with only `error: terminated`: now it says ./pyt apply, and
     the record already follows the files (apply trusts it)."""
     from runner import cmd_apply
 
@@ -1493,7 +1493,7 @@ def test_an_interrupted_rename_says_how_to_finish(command_project: Path, monkeyp
     cmd_apply.save_record(record)
     with pytest.raises(proc.Interrupted):
         rename.cmd_rename(_load(command_project), ["beta"])
-    assert "the files are already renamed: run ./deploy apply" in capsys.readouterr().err
+    assert "the files are already renamed: run ./pyt apply" in capsys.readouterr().err
     assert (command_project / "src" / "beta").is_dir()
     assert cmd_apply.load_record() == {**record, "name": "beta"}
 
@@ -1509,7 +1509,7 @@ def test_rename_refuses_an_app_name_set_to_another_package(command_project: Path
     text = (root / "pytemplate.toml").read_text(encoding="utf-8")
     (root / "pytemplate.toml").write_text(config.set_value(text, "app", "name", "helpers"), encoding="utf-8", newline="\n")
     before = _tree(root)
-    with pytest.raises(DeployError, match=r"names src/helpers/, another package: the app is 'alpha'[\s\S]*Put back app.name = \"alpha\"") as e:
+    with pytest.raises(PytError, match=r"names src/helpers/, another package: the app is 'alpha'[\s\S]*Put back app.name = \"alpha\"") as e:
         rename.cmd_rename(_load(root), [new, "--force"])
     assert e.value.code == 2 and _tree(root) == before
 
@@ -1518,7 +1518,7 @@ def test_rename_to_the_same_name_is_not_done_while_pyproject_differs(command_pro
     root = command_project
     pyproject = root / "pyproject.toml"
     pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "foo"', 1), encoding="utf-8")
-    with pytest.raises(DeployError, match=r"pyproject.toml \[project\] name = 'foo'.\n  ./deploy apply writes 'alpha' there; if src/alpha/ was moved by hand, move it back to src/foo/"):
+    with pytest.raises(PytError, match=r"pyproject.toml \[project\] name = 'foo'.\n  ./pyt apply writes 'alpha' there; if src/alpha/ was moved by hand, move it back to src/foo/"):
         rename.cmd_rename(_load(root), ["alpha"])
     assert rename.cmd_rename(_load(root), ["beta"]) == 0  # a real rename writes the name there too
     assert presets.project_name(pyproject.read_text(encoding="utf-8")) == "beta"
@@ -1578,9 +1578,9 @@ def test_dirty_tree_is_refused_forced_and_only_warned_in_a_dry_run(command_proje
     (root / "src" / "main.py").write_text("# edited\n", encoding="utf-8")
     render.apply(_load(root), force=True)  # generated files never count as changes
     before = _tree(root)
-    with pytest.raises(DeployError, match=r"uncommitted changes in git \(1 path\(s\): src/main.py\)") as e:
+    with pytest.raises(PytError, match=r"uncommitted changes in git \(1 path\(s\): src/main.py\)") as e:
         rename.cmd_rename(_load(root), ["beta"])
-    assert e.value.code == 2 and "./deploy rename beta --force" in str(e.value) and _tree(root) == before
+    assert e.value.code == 2 and "./pyt rename beta --force" in str(e.value) and _tree(root) == before
     monkeypatch.setattr(proc, "DRY_RUN", True)
     assert rename.cmd_rename(_load(root), ["beta"]) == 0
     assert "warning: uncommitted changes in git" in capsys.readouterr().err and _tree(root) == before
@@ -1598,7 +1598,7 @@ def test_a_failed_move_changes_nothing(tmp_path: Path, monkeypatch: pytest.Monke
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(Path, "rename", locked)
-    with pytest.raises(DeployError, match="Nothing was changed") as e:
+    with pytest.raises(PytError, match="Nothing was changed") as e:
         rename.apply_plan(tmp_path, planned)
     assert e.value.code == 2 and _tree(tmp_path) == before
 
@@ -1626,7 +1626,7 @@ def test_a_failed_write_undoes_the_rename(tmp_path: Path, monkeypatch: pytest.Mo
         return real(self, data)
 
     monkeypatch.setattr(Path, "write_bytes", flaky)
-    with pytest.raises(DeployError, match=r"could not write .*Permission denied\. The rename was undone") as e:
+    with pytest.raises(PytError, match=r"could not write .*Permission denied\. The rename was undone") as e:
         rename.apply_plan(tmp_path, planned)
     monkeypatch.setattr(Path, "write_bytes", real)
     assert e.value.code == 2
@@ -1651,7 +1651,7 @@ def test_a_write_that_fails_midway_leaves_the_file_whole(tmp_path: Path, monkeyp
         return real(self, data)
 
     monkeypatch.setattr(Path, "write_bytes", disk_full)
-    with pytest.raises(DeployError, match=r"could not write tests/report.txt: No space left on device\. The rename was undone"):
+    with pytest.raises(PytError, match=r"could not write tests/report.txt: No space left on device\. The rename was undone"):
         rename.apply_plan(tmp_path, planned)
     monkeypatch.setattr(Path, "write_bytes", real)
     assert _everything(tmp_path) == before
@@ -1668,14 +1668,14 @@ def test_a_write_cut_short_by_the_file_size_limit_leaves_the_file_whole(tmp_path
         "from pathlib import Path\n"
         f"sys.path.insert(0, {str(TEMPLATE_DIR)!r})\n"
         "from runner import rename\n"
-        "from runner.ui import DeployError\n"
+        "from runner.ui import PytError\n"
         "root = Path(sys.argv[1])\n"
         "planned = rename.plan(root, 'alpha', 'beta')\n"
         "signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\n"
         "resource.setrlimit(resource.RLIMIT_FSIZE, (65536, 65536))\n"
         "try:\n"
         "    rename.apply_plan(root, planned)\n"
-        "except DeployError as e:\n"
+        "except PytError as e:\n"
         "    print(e)\n"
     )
     r = subprocess.run([sys.executable, "-c", code, str(tmp_path)], capture_output=True, text=True, timeout=120, check=False)
@@ -1740,7 +1740,7 @@ def test_a_restore_that_fails_is_never_called_undone(tmp_path: Path, monkeypatch
         real(path, data)
 
     monkeypatch.setattr(rename, "_replace_bytes", flaky)
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         rename.apply_plan(tmp_path, planned)
     first = calls[0].relative_to(tmp_path).as_posix().replace("src/beta/", "src/alpha/", 1)  # where it is now
     message = str(e.value)
@@ -1753,7 +1753,7 @@ def test_a_broken_pyproject_is_a_clear_error_not_a_traceback(tmp_path: Path, mon
     _write_project(tmp_path, "script", "alpha")
     (tmp_path / "pyproject.toml").write_text("[project\n", encoding="utf-8")
     monkeypatch.setattr(presets, "PYPROJECT", tmp_path / "pyproject.toml")
-    with pytest.raises(DeployError, match="pyproject.toml is not valid TOML: .*: fix it first") as e:
+    with pytest.raises(PytError, match="pyproject.toml is not valid TOML: .*: fix it first") as e:
         rename.check_new_name(_cfg("script"), "beta")
     assert e.value.code == 2
 
@@ -1764,18 +1764,18 @@ def test_name_checks_tolerate_a_bom_and_do_not_depend_on_the_runner(tmp_path: Pa
     monkeypatch.setattr(presets, "PYPROJECT", target)
     assert presets._declared(None) == {"rich"} and presets._declared("dev") == {"pytest"}
     rename.check_new_name(_cfg("script"), "beta")  # a BOM (an editor, PowerShell 5.1) is fine
-    with pytest.raises(DeployError, match="dependency"):
+    with pytest.raises(PytError, match="dependency"):
         rename.check_new_name(_cfg("script"), "rich")
     monkeypatch.setattr(sys, "stdlib_module_names", frozenset({"json"}))
     for name in ("compression", "annotationlib", "imp", "distutils"):  # `new` and `__init` too
-        with pytest.raises(DeployError, match="standard library") as e:
+        with pytest.raises(PytError, match="standard library") as e:
             presets.check_name_free(None, "script", name)
         assert e.value.code == 2
 
 
 def test_arguments(command_project: Path) -> None:
     cfg = _load(command_project)
-    with pytest.raises(DeployError, match=r"unknown argument\(s\): --dry-run") as e:
+    with pytest.raises(PytError, match=r"unknown argument\(s\): --dry-run") as e:
         rename.cmd_rename(cfg, ["beta", "--dry-run"])  # a global flag after the command
     assert e.value.code == 2
     with pytest.raises(SystemExit) as exit_:
@@ -1784,9 +1784,9 @@ def test_arguments(command_project: Path) -> None:
 
 
 def test_the_renamed_config_is_validated_before_anything_is_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    with pytest.raises(DeployError, match=r"^rename: the renamed pytemplate.toml would be invalid .*nothing was changed"):
+    with pytest.raises(PytError, match=r"^rename: the renamed pytemplate.toml would be invalid .*nothing was changed"):
         rename.validate_config('[app]\nname = "beta"\nbogus = 1\n')
-    with pytest.raises(DeployError, match="would not be valid TOML"):
+    with pytest.raises(PytError, match="would not be valid TOML"):
         rename.validate_config("[app\n")
 
 
@@ -1823,7 +1823,7 @@ def test_random_names_reproduce_the_skeleton_and_round_trip(tmp_path: Path, pres
 def test_ruff_tidy_after_a_rename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Imports sorted and lines re-wrapped with the project's profile, only where the user had them so."""
     if not envs.tool_env(_cfg("script")).python.is_file():
-        pytest.skip("no .venv with ruff (./deploy setup)")
+        pytest.skip("no .venv with ruff (./pyt setup)")
     root = tmp_path / "p"
     root.mkdir()
     _write_project(root, "script", "zzz")

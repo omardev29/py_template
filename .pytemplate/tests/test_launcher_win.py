@@ -1,9 +1,9 @@
-"""The launchers deploy.cmd and deploy.ps1 (run them with `./deploy selftest`).
+"""The launchers pyt.cmd and pyt.ps1 (run them with `./pyt selftest`).
 
 Static rules are checked everywhere. The behavioural tests call the hidden runner command
 `__probe EXIT STDIN(0|1) ARGS...` through each launcher, which prints one PTPROBE{json} line
-(argv, caller cwd, launcher, stdin, root) and exits with EXIT. deploy.cmd needs Windows;
-deploy.ps1 runs wherever PowerShell 7 (pwsh) is installed, Linux and macOS included (the same
+(argv, caller cwd, launcher, stdin, root) and exits with EXIT. pyt.cmd needs Windows;
+pyt.ps1 runs wherever PowerShell 7 (pwsh) is installed, Linux and macOS included (the same
 Core hand-over), and Windows PowerShell 5.1 is added on Windows. A cmd start costs about 0.3 s
 and a PowerShell one 1-2 s, so each PowerShell process checks several things.
 """
@@ -23,8 +23,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-CMD = ROOT / "deploy.cmd"
-PS1 = ROOT / "deploy.ps1"
+CMD = ROOT / "pyt.cmd"
+PS1 = ROOT / "pyt.ps1"
 # A folder below the root to call the launchers from (src/ may be missing in a new project).
 SUB = ROOT / "src" if (ROOT / "src").is_dir() else ROOT / ".pytemplate"
 IS_WINDOWS = sys.platform == "win32"
@@ -33,7 +33,7 @@ posix_only = pytest.mark.skipif(IS_WINDOWS, reason="exec bits and fake #!/bin/sh
 PS_NAMES = ["pwsh", "powershell"]
 
 NON_ASCII = "\u00e9\u00f1"
-# cmd parses its own command line: no % ! " ^ & | < > in these (see the deploy.cmd header).
+# cmd parses its own command line: no % ! " ^ & | < > in these (see the pyt.cmd header).
 CMD_ARGS = ["plain", "a b", "", "tr\\", "sp tr\\", NON_ASCII, "--flag=x", "-v", "--"]
 # PowerShell also keeps quotes (the typographic single quotes are quotes for PowerShell too), $,
 # * and commas. A bare -- is removed by PowerShell itself, so the session scripts pass it quoted
@@ -63,19 +63,19 @@ def _code_lines_cmd() -> list[str]:
     return [line.strip() for line in _text_lines(CMD) if line.strip() and not re.match(r"(?i)rem\b|::", line.strip())]
 
 
-# --- deploy.cmd: static ------------------------------------------------------------------------
+# --- pyt.cmd: static ------------------------------------------------------------------------
 
 
 def test_cmd_is_ascii_with_crlf() -> None:
     data = CMD.read_bytes()
-    assert data.isascii(), "deploy.cmd must be ASCII (cmd reads it in the OEM code page)"
-    assert data.count(b"\n") == data.count(b"\r\n") > 0, "deploy.cmd needs CRLF line endings (labels break with LF)"
+    assert data.isascii(), "pyt.cmd must be ASCII (cmd reads it in the OEM code page)"
+    assert data.count(b"\n") == data.count(b"\r\n") > 0, "pyt.cmd needs CRLF line endings (labels break with LF)"
 
 
 def test_cmd_has_no_blocks_and_no_delayed_expansion() -> None:
     for line in _code_lines_cmd():
-        assert not line.endswith("("), f"( ) block in deploy.cmd: {line}"
-        assert not re.search(r"\)\s*else\b", line, re.IGNORECASE), f"else block in deploy.cmd: {line}"
+        assert not line.endswith("("), f"( ) block in pyt.cmd: {line}"
+        assert not re.search(r"\)\s*else\b", line, re.IGNORECASE), f"else block in pyt.cmd: {line}"
     text = CMD.read_bytes().decode("ascii")
     assert re.search(r"(?im)^setlocal\b.*\bDisableDelayedExpansion\b", text)
     assert not re.search(r"(?i)\bEnableDelayedExpansion\b", text)
@@ -100,13 +100,13 @@ def test_cmd_keeps_the_registry_path_out_of_call_arguments() -> None:
         assert f'set "{name}="' in before, name
 
 
-# --- deploy.ps1: static ------------------------------------------------------------------------
+# --- pyt.ps1: static ------------------------------------------------------------------------
 
 
 def test_ps1_is_ascii_lf_without_bom() -> None:
     data = PS1.read_bytes()
-    assert data.isascii(), "deploy.ps1 must be ASCII (no BOM: xonsh and Unix kernels read the shebang)"
-    assert b"\r" not in data, "deploy.ps1 needs LF line endings"
+    assert data.isascii(), "pyt.ps1 must be ASCII (no BOM: xonsh and Unix kernels read the shebang)"
+    assert b"\r" not in data, "pyt.ps1 needs LF line endings"
     assert data.startswith(b"#!/usr/bin/env pwsh\n")
 
 
@@ -122,7 +122,7 @@ def test_ps1_restores_every_variable_it_sets() -> None:
     assigned = {m.upper() for m in re.findall(r"(?i)\$env:(\w+)\s*=(?!=)", text)}
     removed = {m.upper() for line in re.findall(r"(?im)^\s*Remove-Item\s+-LiteralPath\s+(Env:.*)$", text) for m in re.findall(r"Env:(\w+)", line)}
     names = re.search(r"(?m)^\$names = (.+)$", text)
-    assert names, "deploy.ps1 lists the variables it restores in `$names = ...`"
+    assert names, "pyt.ps1 lists the variables it restores in `$names = ...`"
     restored = {m.upper() for m in re.findall(r"'(\w+)'", names[1])}
     assert assigned and assigned <= restored, f"set but not restored: {assigned - restored}"
     assert removed == CLEARED and removed <= restored, f"removed but not restored: {removed - restored}"
@@ -138,10 +138,10 @@ def test_ps1_is_executable_in_git() -> None:
     git = shutil.which("git")
     if not git:
         pytest.skip("git not installed")
-    r = subprocess.run([git, "ls-files", "-s", "--", "deploy.ps1"], cwd=ROOT, capture_output=True, text=True, check=False)
+    r = subprocess.run([git, "ls-files", "-s", "--", "pyt.ps1"], cwd=ROOT, capture_output=True, text=True, check=False)
     if r.returncode != 0 or not r.stdout.strip():
-        pytest.skip("deploy.ps1 is not tracked by git here")
-    assert r.stdout.split()[0] == "100755", "git update-index --chmod=+x deploy.ps1 (for ./deploy.ps1 on Linux/macOS)"
+        pytest.skip("pyt.ps1 is not tracked by git here")
+    assert r.stdout.split()[0] == "100755", "git update-index --chmod=+x pyt.ps1 (for ./pyt.ps1 on Linux/macOS)"
 
 
 def _powershells() -> list[str]:
@@ -309,7 +309,7 @@ def _check_uv_outside_path(launcher: list[str], tmp: Path, prefix: str) -> None:
     _check(_probes(r)[0], ROOT, prefix, ["r"])
 
 
-# --- deploy.cmd (Windows) ------------------------------------------------------------------------
+# --- pyt.cmd (Windows) ------------------------------------------------------------------------
 
 
 @windows_only
@@ -336,7 +336,7 @@ def test_cmd_from_a_subfolder_through_cmd(tmp_path: Path) -> None:
 
 @windows_only
 def test_cmd_walks_up_from_the_current_folder(tmp_path: Path) -> None:
-    copy = tmp_path / "deploy.cmd"
+    copy = tmp_path / "pyt.cmd"
     shutil.copyfile(CMD, copy)
     r = _run([str(copy), "__probe", "0", "0", "w"], SUB)
     assert r.returncode == 0, r.stderr
@@ -359,14 +359,14 @@ def test_cmd_prints_install_hints_without_uv(tmp_path: Path) -> None:
 def test_cmd_hands_the_runner_only_its_two_variables(tmp_path: Path) -> None:
     project = tmp_path / "p"
     (project / ".pytemplate").mkdir(parents=True)
-    (project / ".pytemplate" / "deploy.py").write_text(
+    (project / ".pytemplate" / "pyt.py").write_text(
         "import json, os\nprint('ENV' + json.dumps({k.upper(): v for k, v in os.environ.items() if k.upper().startswith(('PT_', 'PYTEMPLATE_'))}))\n",
         encoding="utf-8", newline="\n",
     )
-    shutil.copyfile(CMD, project / "deploy.cmd")
+    shutil.copyfile(CMD, project / "pyt.cmd")
     env = _clean_env()
     before = {k.upper() for k in env if k.upper().startswith("PT_")}
-    r = _run([str(project / "deploy.cmd")], project, env)
+    r = _run([str(project / "pyt.cmd")], project, env)
     seen = [json.loads(line[3:]) for line in r.stdout.splitlines() if line.startswith("ENV")]
     assert r.returncode == 0 and len(seen) == 1, r.stdout + r.stderr
     assert set(seen[0]) == before | {"PYTEMPLATE_CALLER_CWD", "PYTEMPLATE_LAUNCHER"}
@@ -418,7 +418,7 @@ def test_cmd_registry_path_with_quoted_entries(tmp_path: Path) -> None:
     _assert_hints(_run([str(CMD), "__probe", "0", "0"], ROOT, _hidden_env(tmp_path, str(fake))))
 
 
-# --- deploy.ps1 (pwsh everywhere, Windows PowerShell 5.1 on Windows) ---------------------------------
+# --- pyt.ps1 (pwsh everywhere, Windows PowerShell 5.1 on Windows) ---------------------------------
 
 
 def _ps_session(launcher: str, legacy: bool) -> str:
@@ -449,25 +449,25 @@ def _ps_session(launcher: str, legacy: bool) -> str:
 
 @pytest.mark.parametrize("name", PS_NAMES)
 def test_ps1_reached_through_a_symlink_finds_its_project(name: str, tmp_path: Path) -> None:
-    """A link to deploy.ps1 in a folder on PATH (~/bin/pdeploy.ps1 -> proj/deploy.ps1), run from
+    """A link to pyt.ps1 in a folder on PATH (~/bin/mypyt.ps1 -> proj/pyt.ps1), run from
     outside the project: $PSScriptRoot is the link's folder, and the launcher said there was no
-    .pytemplate/deploy.py next to it (exit 2). The link is followed to the file it names."""
+    .pytemplate/pyt.py next to it (exit 2). The link is followed to the file it names."""
     exe = _ps_exe(name)
     bindir, chain = tmp_path / "bin", tmp_path / "chain"
-    links = {"absolute": bindir / "pdeploy.ps1", "relative, to a link": chain / "rel.ps1"}
+    links = {"absolute": bindir / "mypyt.ps1", "relative, to a link": chain / "rel.ps1"}
     try:
         for folder in (bindir, chain):
             folder.mkdir()
         links["absolute"].symlink_to(PS1)
-        links["relative, to a link"].symlink_to(Path("..") / "bin" / "pdeploy.ps1")
+        links["relative, to a link"].symlink_to(Path("..") / "bin" / "mypyt.ps1")
         if not IS_WINDOWS:  # a relative target seen through a symlinked folder: the kernel's '..'
             tools = tmp_path / "tools" / "bin"
             tools.mkdir(parents=True)
             (tmp_path / "tools" / "proj").symlink_to(ROOT, target_is_directory=True)
-            (tools / "pdeploy.ps1").symlink_to(Path("..") / "proj" / "deploy.ps1")
+            (tools / "mypyt.ps1").symlink_to(Path("..") / "proj" / "pyt.ps1")
             (tmp_path / "home").mkdir()
             (tmp_path / "home" / "bin").symlink_to(tools, target_is_directory=True)
-            links["relative, in a linked folder"] = tmp_path / "home" / "bin" / "pdeploy.ps1"
+            links["relative, in a linked folder"] = tmp_path / "home" / "bin" / "mypyt.ps1"
     except OSError as e:  # Windows without Developer Mode or admin rights
         pytest.skip(f"cannot create a symlink here: {e}")
     away = tmp_path / "away"
@@ -575,9 +575,9 @@ def test_ps1_keeps_typed_colon_arguments_whole(name: str) -> None:
     """A typed -X:v reaches a script split in two ('-X:' plus v): the launcher joins it again, as
     PowerShell does for a native program. A quoted '-X:' and a colon-less -X stay as typed."""
     exe = _ps_exe(name)
-    body = f"& ./deploy.ps1 __probe 0 0 {COLON_TYPED}\n"
+    body = f"& ./pyt.ps1 __probe 0 0 {COLON_TYPED}\n"
     if name == "pwsh":  # also the legacy pre-quoting path that 5.1 always takes
-        body += f"$PSNativeCommandArgumentPassing = 'Legacy'\n& ./deploy.ps1 __probe 0 0 {COLON_TYPED}\n"
+        body += f"$PSNativeCommandArgumentPassing = 'Legacy'\n& ./pyt.ps1 __probe 0 0 {COLON_TYPED}\n"
     r = _session(exe, body + "exit 0\n")
     assert r.returncode == 0, r.stdout + r.stderr
     probes = _probes(r)
@@ -600,7 +600,7 @@ def test_ps1_keeps_typed_comma_lists_whole(name: str) -> None:
     from runner import shells
 
     function = shells.PWSH_SNIPPET
-    body =f"& ./deploy.ps1 __probe 0 0 {COMMA_TYPED}\n{function}\nSet-Location {_ps_literal(str(SUB))}\ndeploy __probe 0 0 {COMMA_TYPED}\n"
+    body =f"& ./pyt.ps1 __probe 0 0 {COMMA_TYPED}\n{function}\nSet-Location {_ps_literal(str(SUB))}\npyt __probe 0 0 {COMMA_TYPED}\n"
     if name == "pwsh":  # also the legacy pre-quoting path that 5.1 always takes
         body += f"$PSNativeCommandArgumentPassing = 'Legacy'\n& {_ps_literal(str(PS1))} __probe 0 0 {COMMA_TYPED}\n"
     r = _session(exe, body + "exit 0\n")
@@ -626,7 +626,7 @@ NATIVE_COPY_ARGV = [*COPY_ARGV[:-2], "c", "d", "z"]
 
 @pytest.mark.parametrize("name", PS_NAMES)
 def test_ps1_passes_array_values_like_a_native_call(name: str) -> None:
-    """`./deploy run $files` gives the app the items of $files as separate arguments, like a direct
+    """`./pyt run $files` gives the app the items of $files as separate arguments, like a direct
     native call in the same session, while a typed a,b stays one argument; also when the call is
     forwarded with @args (the shell-setup function, a wrapper that adds words of its own), and with
     legacy argument passing. A wrapper that splats a copy of $args gets what a native program
@@ -638,14 +638,14 @@ def test_ps1_passes_array_values_like_a_native_call(name: str) -> None:
     uv = os.environ.get("UV") or shutil.which("uv")
     assert uv
     ps1 = _ps_literal(str(PS1))
-    direct = f"& {_ps_literal(uv)} run --quiet --script {_ps_literal(str(ROOT / '.pytemplate' / 'deploy.py'))}"
+    direct = f"& {_ps_literal(uv)} run --quiet --script {_ps_literal(str(ROOT / '.pytemplate' / 'pyt.py'))}"
     body = "\n".join([
         VALUES_SETUP,
         f"{direct} __probe 0 0 {VALUES_TYPED}",
         f"& {ps1} __probe 0 0 {VALUES_TYPED}",
         shells.PWSH_SNIPPET,
         f"Set-Location {_ps_literal(str(SUB))}",
-        f"deploy __probe 0 0 {VALUES_TYPED}",
+        f"pyt __probe 0 0 {VALUES_TYPED}",
         f"function drun {{ & {ps1} __probe 0 0 @args }}",
         f"function outer {{ drun @args }}",
         f"outer {VALUES_TYPED}",
@@ -679,8 +679,8 @@ NULLS_ARGV = ["x", "a", "b", "a", "b", "", "l", "", "y"]
 
 @pytest.mark.parametrize("name", PS_NAMES)
 def test_ps1_drops_null_arguments_like_a_native_call(name: str) -> None:
-    """`./deploy build $backend` with $backend unset gave the runner an empty argument ("unknown
-    backend ''"), and `./deploy check $env:UNSET` "unrecognized arguments": a native call drops a
+    """`./pyt build $backend` with $backend unset gave the runner an empty argument ("unknown
+    backend ''"), and `./pyt check $env:UNSET` "unrecognized arguments": a native call drops a
     $null. Also through the shell-setup function, and with legacy argument passing (whose native
     calls drop empty strings as well: the launcher keeps those, as PowerShell 7.3+ does)."""
     exe = _ps_exe(name)
@@ -690,7 +690,7 @@ def test_ps1_drops_null_arguments_like_a_native_call(name: str) -> None:
     uv = os.environ.get("UV") or shutil.which("uv")
     assert uv
     ps1 = _ps_literal(str(PS1))
-    direct = f"& {_ps_literal(uv)} run --quiet --script {_ps_literal(str(ROOT / '.pytemplate' / 'deploy.py'))}"
+    direct = f"& {_ps_literal(uv)} run --quiet --script {_ps_literal(str(ROOT / '.pytemplate' / 'pyt.py'))}"
     body = "\n".join([
         "Remove-Item Env:PT_NOT_SET_ANYWHERE -ErrorAction Ignore",
         NULLS_SETUP,
@@ -698,7 +698,7 @@ def test_ps1_drops_null_arguments_like_a_native_call(name: str) -> None:
         f"& {ps1} __probe 0 0 {NULLS_TYPED}",
         shells.PWSH_SNIPPET,
         f"Set-Location {_ps_literal(str(SUB))}",
-        f"deploy __probe 0 0 {NULLS_TYPED}",
+        f"pyt __probe 0 0 {NULLS_TYPED}",
         "$PSNativeCommandArgumentPassing = 'Legacy'",
         f"& {ps1} __probe 0 0 {NULLS_TYPED}",
     ])  # fmt: skip
@@ -713,13 +713,13 @@ def test_ps1_drops_null_arguments_like_a_native_call(name: str) -> None:
 
 @pytest.mark.parametrize("name", PS_NAMES)
 def test_ps1_forwards_pipeline_input_and_keeps_raw_stdin(name: str) -> None:
-    """'x' | ./deploy.ps1 run gives uv the pipeline, like a native call; without a pipeline uv keeps
+    """'x' | ./pyt.ps1 run gives uv the pipeline, like a native call; without a pipeline uv keeps
     the process stdin; @() gives it EOF. Exit codes still come through."""
     exe = _ps_exe(name)
     ps1 = _ps_literal(str(PS1))
     uv = os.environ.get("UV") or shutil.which("uv")
     assert uv
-    direct = f"& {_ps_literal(uv)} run --quiet --script {_ps_literal(str(ROOT / '.pytemplate' / 'deploy.py'))}"
+    direct = f"& {_ps_literal(uv)} run --quiet --script {_ps_literal(str(ROOT / '.pytemplate' / 'pyt.py'))}"
     body = "\n".join([
         "$OutputEncoding = New-Object System.Text.UTF8Encoding $false",
         f"& {ps1} __probe 0 1",
@@ -788,7 +788,7 @@ def test_ps1_clears_the_callers_uv_python_and_restores_it(name: str, tmp_path: P
 @pytest.mark.parametrize("name", PS_NAMES)
 def test_ps1_constrained_language_gives_one_clear_error(name: str) -> None:
     """AppLocker/WDAC policies run unsigned scripts in ConstrainedLanguage mode, which blocks the
-    launcher's .NET calls: one error that names deploy.cmd, exit 126, no cascade."""
+    launcher's .NET calls: one error that names pyt.cmd, exit 126, no cascade."""
     exe = _ps_exe(name)
     body = "\n".join([
         "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'",
@@ -800,7 +800,7 @@ def test_ps1_constrained_language_gives_one_clear_error(name: str) -> None:
     r = _session(exe, body)
     out = [ln for ln in r.stdout.splitlines() if ln.startswith("OUT=")]
     assert "RC=126" in r.stdout, r.stdout + r.stderr
-    assert len(out) == 1 and "ConstrainedLanguage" in out[0] and "deploy.cmd" in out[0], r.stdout
+    assert len(out) == 1 and "ConstrainedLanguage" in out[0] and "pyt.cmd" in out[0], r.stdout
     assert "PTPROBE" not in r.stdout and "Cannot invoke method" not in r.stdout + r.stderr
 
 
@@ -813,7 +813,7 @@ def _any_powershell() -> str:
 
 def test_ps1_walks_up_and_passes_file_arguments(tmp_path: Path) -> None:
     exe = _any_powershell()
-    copy = tmp_path / "deploy.ps1"
+    copy = tmp_path / "pyt.ps1"
     shutil.copyfile(PS1, copy)
     base = [exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(copy), "__probe"]
     r = _run([*base, "5", "0", "a b", "", "tr\\"], SUB)
@@ -841,7 +841,7 @@ def test_ps1_prints_install_hints_without_uv(tmp_path: Path) -> None:
         lines = [line for line in lines if line not in registry]
     elif any(Path(d, "uv").exists() for d in ("/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin")):
         pytest.skip("uv is installed in a system folder the launcher always searches")
-    copy = tmp_path / "nouv" / "deploy.ps1"
+    copy = tmp_path / "nouv" / "pyt.ps1"
     copy.parent.mkdir()
     copy.write_text("\n".join(lines) + "\n", encoding="ascii", newline="\n")
     _assert_hints(_run([*base, str(copy), "__probe", "0", "0"], ROOT, _no_uv_env(tmp_path)))
@@ -850,7 +850,7 @@ def test_ps1_prints_install_hints_without_uv(tmp_path: Path) -> None:
 @posix_only
 def test_ps1_uv_that_cannot_start_gives_one_line(tmp_path: Path) -> None:
     """A uv that exists with its x bit but cannot run (a broken download): exit 126 and one line
-    `deploy: cannot run <uv>: <reason>`, without the Invoke-Expression position text."""
+    `pyt: cannot run <uv>: <reason>`, without the Invoke-Expression position text."""
     exe = _ps_exe("pwsh")
     broken = tmp_path / "uv"
     broken.write_bytes(b"\x00\x01garbage, not a program\n")
@@ -858,13 +858,13 @@ def test_ps1_uv_that_cannot_start_gives_one_line(tmp_path: Path) -> None:
     r = _run([exe, "-NoProfile", "-NonInteractive", "-File", str(PS1), "__probe", "0", "0"], ROOT, _clean_env(UV=str(broken), CI="1"))
     lines = [ln for ln in r.stderr.splitlines() if ln.strip()]
     assert r.returncode == 126, (r.returncode, r.stdout, r.stderr)
-    assert len(lines) == 1 and lines[0].startswith(f"deploy: cannot run {broken}: "), r.stderr
+    assert len(lines) == 1 and lines[0].startswith(f"pyt: cannot run {broken}: "), r.stderr
     assert "At line:" not in r.stderr and "char:" not in r.stderr, r.stderr
 
 
 @posix_only
 def test_ps1_skips_a_uv_without_exec_bit(tmp_path: Path) -> None:
-    """Like `test -x` in ./deploy: a uv without x bit ($UV, PATH, an install folder) is skipped."""
+    """Like `test -x` in ./pyt: a uv without x bit ($UV, PATH, an install folder) is skipped."""
     exe = _ps_exe("pwsh")
     home = tmp_path / "home"
     broken = [tmp_path / "path" / "uv", home / ".local" / "bin" / "uv"]

@@ -1,6 +1,6 @@
 """mypyc build script. Runs INSIDE the project's .venv (needs mypy and setuptools).
 
-Usage (called by ./deploy): python mypyc_build.py <spec.json>
+Usage (called by ./pyt): python mypyc_build.py <spec.json>
 
 We call mypycify() instead of `python -m mypyc` because the CLI does not allow
 strip_asserts, group_name or multi_file, and it always writes to ./build. The C flags of

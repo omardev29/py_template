@@ -1,8 +1,8 @@
 @echo off
-rem ./deploy launcher for cmd.exe and for every Windows program that can only
+rem ./pyt launcher for cmd.exe and for every Windows program that can only
 rem start PATHEXT files: xonsh, nushell, Python's subprocess, VS Code
 rem "process" tasks. It finds the project root and uv and hands every
-rem argument to .pytemplate\deploy.py, where all the logic lives.
+rem argument to .pytemplate\pyt.py, where all the logic lives.
 rem Rules (CLAUDE.md, "Launchers"):
 rem   * ASCII only (cmd reads this file in the OEM code page) and CRLF endings
 rem     (labels and goto misbehave with LF).
@@ -14,7 +14,7 @@ rem     expand it a second time.
 rem   * cmd parses the arguments itself: percent, "!", double quote, caret and
 rem     unquoted ampersand, pipe or angle brackets do not survive. Programs that
 rem     quote argv for CreateProcess (Python, xonsh) cannot protect them either:
-rem     use ./deploy or deploy.ps1 for such values.
+rem     use ./pyt or pyt.ps1 for such values.
 rem   * Ctrl+C: cmd asks "Terminate batch job (Y/N)?" once uv has exited.
 rem   * A UNC current folder is not supported (cmd.exe replaces it).
 rem Exit codes: 2 = no project found, 127 = no uv, anything else = the runner's.
@@ -24,14 +24,14 @@ rem --- project root: this file's folder, else walk up from the current one
 rem (the folder of this file is wrong when cmd found it through PATH from a
 rem quoted name).
 set "PT_ROOT=%~dp0"
-if exist "%PT_ROOT%.pytemplate\deploy.py" goto :find_uv
+if exist "%PT_ROOT%.pytemplate\pyt.py" goto :find_uv
 for %%I in ("%CD%\x") do set "PT_ROOT=%%~dpI"
 rem A drive root is never the project found this way: any user may create
-rem folders there, so its .pytemplate\deploy.py could be anybody's.
+rem folders there, so its .pytemplate\pyt.py could be anybody's.
 :walk_up
 for %%I in ("%PT_ROOT%.") do set "PT_PARENT=%%~dpI"
 if /i "%PT_PARENT%"=="%PT_ROOT%" goto :no_root
-if exist "%PT_ROOT%.pytemplate\deploy.py" goto :find_uv
+if exist "%PT_ROOT%.pytemplate\pyt.py" goto :find_uv
 set "PT_ROOT=%PT_PARENT%"
 goto :walk_up
 
@@ -56,15 +56,15 @@ set "PYTHONPATH="
 set "UV_WORKING_DIR="
 rem cmd expands the whole line before running it: the helper variables are
 rem cleared for the runner while uv still gets their values.
-set "PT_ROOT=" & set "PT_UV=" & "%PT_UV%" run --quiet --script "%PT_ROOT%.pytemplate\deploy.py" %*
+set "PT_ROOT=" & set "PT_UV=" & "%PT_UV%" run --quiet --script "%PT_ROOT%.pytemplate\pyt.py" %*
 exit /b %ERRORLEVEL%
 
 :no_root
->&2 echo deploy: no .pytemplate\deploy.py next to this launcher, in the current folder or in any parent folder.
+>&2 echo pyt: no .pytemplate\pyt.py next to this launcher, in the current folder or in any parent folder.
 exit /b 2
 
 :no_uv
->&2 echo deploy: uv not found (https://docs.astral.sh/uv/getting-started/installation/).
+>&2 echo pyt: uv not found (https://docs.astral.sh/uv/getting-started/installation/).
 >&2 echo Install it with one of these, then open a new terminal:
 >&2 echo   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 >&2 echo   winget install --id=astral-sh.uv -e

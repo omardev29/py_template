@@ -1,4 +1,4 @@
-"""Exit codes of the selftest harnesses the template's CI trusts: plain `./deploy selftest`
+"""Exit codes of the selftest harnesses the template's CI trusts: plain `./pyt selftest`
 (cli.cmd_selftest), `selftest --shells` (shells.selftest) and `selftest --nvim`
 (nvimtest.selftest). A harness that returned 0 after a FAIL would keep every workflow green.
 
@@ -25,7 +25,7 @@ from runner import cli, cmd_nvim, config, e2e, envs, nvimtest, shells  # noqa: E
 from runner.config import Config  # noqa: E402
 from runner.project import TEMPLATE  # noqa: E402
 from runner.shells import Result, Shell  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 
 PREPARE_BASE = nvimtest.prepare_base  # the real one: the nvim_run fixture fakes it
@@ -37,7 +37,7 @@ def make() -> Config:
     return cfg
 
 
-# --- plain ./deploy selftest: pytest, then mypy --strict ----------------------------------------------
+# --- plain ./pyt selftest: pytest, then mypy --strict ----------------------------------------------
 
 
 class FakeUvRun:
@@ -65,12 +65,12 @@ def test_plain_selftest_fails_when_pytest_or_mypy_fails(monkeypatch: pytest.Monk
     assert pt_argv[:5] == ["python", "-m", "pytest", "-q", "-p"] and pt_argv[-3:] == [str(TEMPLATE / "tests"), "-k", "x"]
     assert my_argv[:3] == ["mypy", "--strict", "--no-incremental"] and "--python-version" in my_argv
     assert my_argv[my_argv.index("--python-version") + 1] == "3.11"  # the runner's floor
-    assert my_argv[-2:] == [str(TEMPLATE / "runner"), str(TEMPLATE / "deploy.py")]
+    assert my_argv[-2:] == [str(TEMPLATE / "runner"), str(TEMPLATE / "pyt.py")]
 
 
 @pytest.mark.parametrize("flag", ["-h", "--help", "--version", "-V"])
 def test_plain_selftest_help_runs_no_mypy(monkeypatch: pytest.MonkeyPatch, flag: str) -> None:
-    """`./deploy selftest --help` printed pytest's help, then ran mypy --strict of the whole runner
+    """`./pyt selftest --help` printed pytest's help, then ran mypy --strict of the whole runner
     (seconds, more on Windows) and took mypy's exit code."""
     fake = FakeUvRun(0)
     monkeypatch.setattr(envs, "uv_run", fake)
@@ -183,14 +183,14 @@ def test_quiet_keeps_where_the_kept_scratch_files_are(
 
 
 def test_shells_refuse_what_cannot_run(probes: dict[tuple[str, str], str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    with pytest.raises(DeployError, match="not found here: fish") as e:
+    with pytest.raises(PytError, match="not found here: fish") as e:
         shells.selftest(make(), ["fish"])
     assert e.value.code == 2
-    with pytest.raises(DeployError, match="no .pytemplate/deploy.py there") as e:
+    with pytest.raises(PytError, match="no .pytemplate/pyt.py there") as e:
         shells.selftest(make(), ["--project", str(tmp_path)])
     assert e.value.code == 2
     monkeypatch.setattr(shells, "discover", lambda *a, **k: [])
-    with pytest.raises(DeployError, match="no shell found") as e:
+    with pytest.raises(PytError, match="no shell found") as e:
         shells.selftest(make(), [])
     assert e.value.code == 2
 
@@ -256,7 +256,7 @@ def test_quiet_keeps_what_selftest_nvim_was_asked_for(
 def test_nvim_missing_tool_skips_or_fails_with_require(nvim_run: dict[str, Any], missing: str) -> None:
     del nvim_run["which"][missing]
     assert nvimtest.selftest(make(), ["script", *nvim_run["args"]]) == 0  # a developer machine: SKIP
-    with pytest.raises(DeployError, match=f"{missing} not found") as e:
+    with pytest.raises(PytError, match=f"{missing} not found") as e:
         nvimtest.selftest(make(), ["script", "--require", *nvim_run["args"]])  # CI: fail loudly
     assert e.value.code == 3 and nvim_run["ran"] == []
 
@@ -265,7 +265,7 @@ def test_nvim_older_than_lazyvims_minimum_skips_or_fails_with_require(nvim_run: 
     major, minor, patch = cmd_nvim.MIN_LAZYVIM
     nvim_run["version"] = (major, minor, patch - 1) if patch else (major, minor - 1, 99)
     assert nvimtest.selftest(make(), ["script", *nvim_run["args"]]) == 0
-    with pytest.raises(DeployError, match="older than LazyVim's minimum") as e:
+    with pytest.raises(PytError, match="older than LazyVim's minimum") as e:
         nvimtest.selftest(make(), ["script", "--require", *nvim_run["args"]])
     assert e.value.code == 3 and nvim_run["ran"] == []
     nvim_run["version"] = cmd_nvim.MIN_LAZYVIM  # the minimum itself runs
@@ -273,7 +273,7 @@ def test_nvim_older_than_lazyvims_minimum_skips_or_fails_with_require(nvim_run: 
 
 
 def test_nvim_unknown_preset_is_a_usage_error(nvim_run: dict[str, Any]) -> None:
-    with pytest.raises(DeployError, match="unknown preset") as e:
+    with pytest.raises(PytError, match="unknown preset") as e:
         nvimtest.selftest(make(), ["script,nosuch", *nvim_run["args"]])
     assert e.value.code == 2 and nvim_run["ran"] == []
 
@@ -288,7 +288,7 @@ def test_nvim_base_that_cannot_be_installed_fails_the_suite(nvim_run: dict[str, 
         return 128
 
     monkeypatch.setattr(nvimtest, "_run_logged", run_logged)
-    with pytest.raises(DeployError, match="clone the LazyVim starter: exit code 128") as e:
+    with pytest.raises(PytError, match="clone the LazyVim starter: exit code 128") as e:
         nvimtest.selftest(make(), ["script", *nvim_run["args"]])
     assert e.value.code == 1 and nvim_run["ran"] == []
 
@@ -296,18 +296,18 @@ def test_nvim_base_that_cannot_be_installed_fails_the_suite(nvim_run: dict[str, 
 def test_nvim_dir_that_is_a_file_is_a_usage_error(nvim_run: dict[str, Any], tmp_path: Path) -> None:
     afile = tmp_path / "afile"
     afile.write_text("x", encoding="utf-8")
-    with pytest.raises(DeployError, match="is not a folder") as e:
+    with pytest.raises(PytError, match="is not a folder") as e:
         nvimtest.selftest(make(), ["script", "--dir", str(afile)])
     assert e.value.code == 2 and nvim_run["ran"] == []
 
 
-def test_nvim_deploy_steps_never_touch_a_repository_around_the_dir(nvim_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_nvim_pyt_steps_never_touch_a_repository_around_the_dir(nvim_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A --dir inside the user's git work tree with core.filemode = false (Git for Windows; a
-    default %TEMP% under a dotfiles repository): the harness's `./deploy new` saw that repository,
+    default %TEMP% under a dotfiles repository): the harness's `./pyt new` saw that repository,
     skipped git init and staged the scratch project's launchers there (`git add --chmod=+x`); the
     project was deleted afterwards and the user's next commit recorded two files of a folder that
     no longer existed. The step here runs the real presets._git_init in a child with the
-    environment the harness gives its ./deploy steps."""
+    environment the harness gives its ./pyt steps."""
     git = shutil.which("git")
     if git is None:
         pytest.skip("needs git")
@@ -321,7 +321,7 @@ def test_nvim_deploy_steps_never_touch_a_repository_around_the_dir(nvim_run: dic
     def run_preset(preset: str, layout: nvimtest.Layout, nv: cmd_nvim.Nvim, *, renv: dict[str, str], venv: dict[str, str], **_: Any) -> nvimtest.Row:
         proj = layout.projects / preset
         proj.mkdir(parents=True)
-        for name in ("deploy", "deploy.ps1"):
+        for name in ("pyt", "pyt.ps1"):
             (proj / name).write_text("#!/bin/sh\n", encoding="utf-8")
         code = "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from runner import presets; presets._git_init(Path(sys.argv[2]))"
         subprocess.run([sys.executable, "-c", code, str(TEMPLATE), str(proj)], env=renv, stdin=subprocess.DEVNULL, capture_output=True, check=True)
@@ -349,7 +349,7 @@ def test_nvim_dir_that_would_hide_the_templates_repository_is_refused(nvim_run: 
         return "/big"
 
     monkeypatch.setattr(e2e, "hidden_template_repository", hidden)
-    with pytest.raises(DeployError, match="inside its git repository /big") as e:
+    with pytest.raises(PytError, match="inside its git repository /big") as e:
         nvimtest.selftest(make(), ["script", *nvim_run["args"]])
     assert e.value.code == 2 and nvim_run["ran"] == [] and not (tmp_path / "w").exists()
     assert asked == [str((tmp_path / "w").resolve().parent)]
@@ -377,7 +377,7 @@ def _gone(pid: int, within: float = 10.0) -> bool:
 @pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM/SIGHUP and process groups are POSIX")
 @pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
 def test_nvim_termination_signal_kills_the_running_step(tmp_path: Path, signame: str) -> None:
-    """`timeout 30m ./deploy selftest --nvim`, a closed terminal, `kill <pid>`: the runner died at
+    """`timeout 30m ./pyt selftest --nvim`, a closed terminal, `kill <pid>`: the runner died at
     once and the running step (a headless Neovim with its git, Mason and uv jobs), in a session of
     its own, went on as an orphan writing into --dir. Now the run stops like Ctrl+C: the step's
     tree is killed, `error: interrupted`, exit 130."""

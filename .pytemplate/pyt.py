@@ -2,7 +2,7 @@
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""Entry point of ./deploy (the launchers run it with `uv run --script`).
+"""Entry point of ./pyt (the launchers run it with `uv run --script`).
 
 Uses only the standard library: uv runs it in an isolated environment, without touching
 the project's .venv. All the logic lives in the `runner/` package next to this file.
@@ -14,7 +14,7 @@ import sys
 # 3.11 makes uv start an older Python, which would crash on tomllib and blame the runner.
 if sys.version_info < (3, 11):
     sys.stderr.write(
-        f"error: the ./deploy runner needs Python 3.11 or newer, but uv started Python {sys.version.split()[0]}"
+        f"error: the ./pyt runner needs Python 3.11 or newer, but uv started Python {sys.version.split()[0]}"
         f" ({sys.executable}). Unset UV_PYTHON (or point it at 3.11+) and check python.cpython in pytemplate.toml.\n"
     )
     raise SystemExit(3)

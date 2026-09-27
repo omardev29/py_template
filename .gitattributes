@@ -3,11 +3,11 @@
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
 *.sh  text eol=lf
-# ./deploy launchers (they go AFTER: in git the last matching line wins).
+# ./pyt launchers (they go AFTER: in git the last matching line wins).
 # The sh one always needs LF; so does the .ps1, because xonsh uses its shebang
 # (PowerShell 5.1 reads LF just fine).
-deploy     text eol=lf
-deploy.ps1 text eol=lf
+pyt        text eol=lf
+pyt.ps1    text eol=lf
 # Neovim trusts .lazy.lua by the hash of its bytes: CRLF on checkout would untrust it
 .lazy.lua  text eol=lf
 # Binaries

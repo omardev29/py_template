@@ -34,10 +34,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from runner import cmd_env, cmd_mode, config, envs, imports, lintc, mypyc, proc, render, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import ENV_SUFFIX, PRESETS, ROOT, TOOLS, venv_python  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 TOOL_PYTHON = venv_python(ROOT / f".venv{ENV_SUFFIX}")
-needs_venv = pytest.mark.skipif(not TOOL_PYTHON.is_file(), reason="needs .venv (./deploy setup)")
+needs_venv = pytest.mark.skipif(not TOOL_PYTHON.is_file(), reason="needs .venv (./pyt setup)")
 EXT = importlib.machinery.EXTENSION_SUFFIXES[0]  # this interpreter's own extension suffix
 LINUX_EXT = ".cpython-314-x86_64-linux-gnu.so"
 
@@ -63,7 +63,7 @@ def _has_c_compiler() -> bool:
 
 
 needs_compiler = pytest.mark.skipif(
-    not (_has_mypyc() and _has_c_compiler()), reason="needs mypyc (run through ./deploy selftest) and a C compiler"
+    not (_has_mypyc() and _has_c_compiler()), reason="needs mypyc (run through ./pyt selftest) and a C compiler"
 )
 
 
@@ -154,7 +154,7 @@ def test_precheck_checks_the_python_of_the_pinned_pypy(monkeypatch: pytest.Monke
     err = capsys.readouterr().err
     assert "valid on Python 3.12 (required by PyPy)" in err and "ok the code is valid on Python 3.12" in err
     FakeTools(ruff=1).install(monkeypatch)
-    with pytest.raises(DeployError, match=r"syntax that does not exist in Python 3\.12"):
+    with pytest.raises(PytError, match=r"syntax that does not exist in Python 3\.12"):
         cmd_mode._precheck_py311(cfg)
 
 
@@ -178,14 +178,14 @@ def test_precheck_dry_run_without_venv_is_skipped(monkeypatch: pytest.MonkeyPatc
 def test_precheck_ruff_that_cannot_run_is_not_a_syntax_error(monkeypatch: pytest.MonkeyPatch, fake_venv: Path, dry: bool) -> None:
     FakeTools(ruff=2).install(monkeypatch)
     monkeypatch.setattr(proc, "DRY_RUN", dry)
-    with pytest.raises(DeployError, match=r"could not run ruff .*exit code 2") as err:
+    with pytest.raises(PytError, match=r"could not run ruff .*exit code 2") as err:
         cmd_mode._precheck_py311(make({}))
     assert "syntax" not in str(err.value)
 
 
 def test_precheck_ruff_findings_are_syntax_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     tools = FakeTools(ruff=1).install(monkeypatch)
-    with pytest.raises(DeployError, match="syntax that does not exist in Python 3.11"):
+    with pytest.raises(PytError, match="syntax that does not exist in Python 3.11"):
         cmd_mode._precheck_py311(make({}))
     assert not [c for c in tools.calls if "mypy" in c]  # stops at the syntax step
 
@@ -194,7 +194,7 @@ def test_precheck_ruff_findings_are_syntax_errors(monkeypatch: pytest.MonkeyPatc
 def test_precheck_mypy_that_aborts_never_passes(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], version: str) -> None:
     same = 'tests/__init__.py: error: Duplicate module named "tests"'
     FakeTools(mypy={version: (2, same)}).install(monkeypatch)
-    with pytest.raises(DeployError, match=f"mypy could not check the code as Python {version} .exit code 2"):
+    with pytest.raises(PytError, match=f"mypy could not check the code as Python {version} .exit code 2"):
         cmd_mode._precheck_py311(make({}))
     assert "Duplicate module" in capsys.readouterr().err  # the reason is shown
 
@@ -203,7 +203,7 @@ def test_precheck_reports_only_the_errors_new_at_311(monkeypatch: pytest.MonkeyP
     both = "src/myapp/a.py:3: error: Incompatible types in assignment"
     new = 'src/myapp/b.py:1: error: Module "typing" has no attribute "override"  [attr-defined]'
     FakeTools(mypy={"3.11": (1, f"{both}\n{new}\n"), "3.14": (1, both + "\n")}).install(monkeypatch)
-    with pytest.raises(DeployError, match="APIs that do not exist in Python 3.11"):
+    with pytest.raises(PytError, match="APIs that do not exist in Python 3.11"):
         cmd_mode._precheck_py311(make({}))
     err = capsys.readouterr().err
     assert f"error: {new}" in err and "Incompatible types" not in err
@@ -217,7 +217,7 @@ def test_precheck_checks_only_the_code_folders_that_hold_python(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """tests/ left with only __pycache__ (the tests removed with `git rm`): mypy stopped with "There
-    are no .py[i] files in directory 'tests'" and PyPy could not be enabled, while ./deploy check
+    are no .py[i] files in directory 'tests'" and PyPy could not be enabled, while ./pyt check
     passed (.mypy.ini's `files` leaves such a folder out, render._holds_python)."""
     src, tests = tmp_path / "src", tmp_path / "tests"
     (src / "app").mkdir(parents=True)
@@ -271,7 +271,7 @@ def test_precheck_real_mypy_catches_new_apis_with_the_off_profile(
     (code / "newapi.py").write_text(NEW_APIS, encoding="utf-8")
     monkeypatch.setattr(cmd_mode, "code_dirs", lambda: [str(code)])
     monkeypatch.setattr(proc, "DRY_RUN", True)  # uv run --no-sync: .venv is never touched
-    with pytest.raises(DeployError, match="APIs that do not exist in Python 3.11"):
+    with pytest.raises(PytError, match="APIs that do not exist in Python 3.11"):
         cmd_mode._precheck_py311(make({}))
     err = capsys.readouterr().err
     assert 'Module "typing" has no attribute "override"' in err
@@ -596,7 +596,7 @@ def test_lintc_librt_needs_a_runtime_dependency(
         assert len(messages) == 2 and all(expected in m for m in messages), messages
         assert sorted(f.line for f in found) == [1, 2]  # never the local `.librt`
         if not pypy:
-            assert all("./deploy add librt --cpython-only" in m for m in messages)
+            assert all("./pyt add librt --cpython-only" in m for m in messages)
 
 
 @pytest.mark.parametrize("text", ["", "not toml [", "[project]\ndependencies = 'librt'\n", "[project]\ndependencies = [1, 2]\n"])
@@ -740,7 +740,7 @@ def test_parse_error_names_the_runner_python() -> None:
     ],
 )
 def test_validate_rejects_compile_mistakes(compile_: dict[str, Any], message: str) -> None:
-    with pytest.raises(DeployError, match=message) as err:
+    with pytest.raises(PytError, match=message) as err:
         make({"compile": compile_})
     assert err.value.code == 2
 
@@ -806,10 +806,10 @@ def test_compile_exclude_takes_modules_and_subpackages(src_tree: Path) -> None:
     assert modules(["myapp.core.sub"]) == ["myapp.core.a", "myapp.core.subx.k"]
     assert modules(["myapp.core.empty"]) == everything  # exists: harmless
     for bad in (["myapp.core.nothere"], ["myapp.core.su"], ["myapp.core.a.b"], ["myapp.core.sub.m", "myapp.core.typo"]):
-        with pytest.raises(DeployError, match="matches no module in compile.modules") as err:
+        with pytest.raises(PytError, match="matches no module in compile.modules") as err:
             modules(bad)
         assert repr(bad[-1]) in str(err.value) and err.value.code == 2
-    with pytest.raises(DeployError, match="no .py file to compile"):
+    with pytest.raises(PytError, match="no .py file to compile"):
         modules(["myapp.core.a", "myapp.core.sub", "myapp.core.subx"])
 
 
@@ -817,7 +817,7 @@ def test_compiled_sources_of_modules_files_and_missing_entries(src_tree: Path) -
     _project(src_tree, {**CORE_TREE, "solo.py": "X = 1\n"})
     cfg = make({"compile": {"modules": ["myapp.core.sub", "solo", "myapp.core.a"]}})
     assert mypyc.compiled_modules(cfg) == ["myapp.core.sub.m", "myapp.core.sub.n", "solo", "myapp.core.a"]
-    with pytest.raises(DeployError, match="compile.modules: neither src/myapp/nope.py nor src/myapp/nope/ exists"):
+    with pytest.raises(PytError, match="compile.modules: neither src/myapp/nope.py nor src/myapp/nope/ exists"):
         mypyc.compiled_sources(make({"compile": {"modules": ["myapp.nope"]}}))
 
 
@@ -846,7 +846,7 @@ def test_a_module_file_wins_over_a_folder_that_is_no_package(src_tree: Path) -> 
     assert config.compiled_paths(cfg) == ["myapp/core/bench", "myapp/core/a.py"]
     assert mypyc.compiled_modules(cfg) == ["myapp.core.bench.k", "myapp.core.a"]
     # a folder that holds no module and no bench.py: nothing to compile, said as such
-    with pytest.raises(DeployError, match="neither src/myapp/core/data.py nor src/myapp/core/data/ holds a module to compile"):
+    with pytest.raises(PytError, match="neither src/myapp/core/data.py nor src/myapp/core/data/ holds a module to compile"):
         mypyc.compiled_sources(make({"compile": {"modules": ["myapp.core.data"]}}))
 
 
@@ -877,7 +877,7 @@ def test_hook_reports_an_unparsable_module_and_a_bad_exclude(src_tree: Path) -> 
 
 def test_a_note_of_the_mypyc_rules_never_blocks(src_tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An Enum in compiled code works (mypyc compiles it as a regular Python class): under the
-    mypyc profile it made the pre-commit hook and `./deploy check` fail, where a warning says
+    mypyc profile it made the pre-commit hook and `./pyt check` fail, where a warning says
     all there is to say. A metaclass of the user's own still blocks there."""
     from runner import cmd_dev, hooks
 
@@ -1029,7 +1029,7 @@ def test_sync_tree_copies_of_read_only_files_stay_replaceable(tmp_path: Path) ->
     dst = tmp_path / "dst"
     mypyc.sync_tree(src, dst)
     assert _writable(dst) == []
-    # Read-only copies an older ./deploy left: replaced, deleted, or made writable in place
+    # Read-only copies an older ./pyt left: replaced, deleted, or made writable in place
     for f in (dst / "pkg").iterdir():
         f.chmod(0o444)
     notice = src / "pkg" / "NOTICE.txt"
@@ -1216,14 +1216,14 @@ def test_build_forces_a_rebuild_when_compile_options_change(fake_build: FakeComp
     assert not fake_build.force
     mypyc.build(o0, "dev")
     assert fake_build.force  # each profile has its own record
-    # ./deploy report (compile_c=False) neither forces nor records
+    # ./pyt report (compile_c=False) neither forces nor records
     mypyc.build(o3, "dev", compile_c=False)
     assert not fake_build.force
     mypyc.build(o3, "dev")
     assert fake_build.force
     # a failed build leaves no record: the next one forces again
     fake_build.code = 1
-    with pytest.raises(DeployError):
+    with pytest.raises(PytError):
         mypyc.build(o0, "release")
     fake_build.code = 0
     mypyc.build(o0, "release")
@@ -1386,7 +1386,7 @@ def test_build_fails_when_an_extension_is_missing(fake_build: FakeCompiler, src_
     assert stamp.is_file()
     (src_tree / "myapp" / "core" / "n.py").write_text("Y = 2\n", encoding="utf-8")
     fake_build.skip = {"myapp.core.n"}
-    with pytest.raises(DeployError, match=r"mypyc did not generate an extension for: myapp\.core\.n$"):
+    with pytest.raises(PytError, match=r"mypyc did not generate an extension for: myapp\.core\.n$"):
         mypyc.build(cfg, "dev")
     assert not stamp.exists()  # the next build is forced
 
@@ -1431,7 +1431,7 @@ def test_build_compiler_hint_only_when_the_c_step_failed(
 ) -> None:
     monkeypatch.setattr(ui, "VERBOSE", verbose)
     fake_build.code, fake_build.stdout, fake_build.stderr = code, stdout, stderr
-    with pytest.raises(DeployError) as err:
+    with pytest.raises(PytError) as err:
         mypyc.build(make({}), "dev")
     assert fake_build.captures[-1] is not verbose
     assert (mypyc.has_compiler_hint() in str(err.value)) is hint
@@ -1441,10 +1441,10 @@ def test_build_compiler_hint_only_when_the_c_step_failed(
 
 
 def test_build_a_compiler_that_cannot_start_is_a_missing_requirement(fake_build: FakeCompiler) -> None:
-    """README and CLAUDE.md 5.3: a missing compiler exits 3. `./deploy compile` without `cc`
+    """README and CLAUDE.md 5.3: a missing compiler exits 3. `./pyt compile` without `cc`
     (or with CC naming a missing program) exited 1, like a failed compile."""
     fake_build.code = mypyc.COMPILER_MISSING
-    with pytest.raises(DeployError) as err:
+    with pytest.raises(PytError) as err:
         mypyc.build(make({}), "dev")
     assert err.value.code == 3
     assert "the C compiler cannot start" in str(err.value) and mypyc.has_compiler_hint() in str(err.value)
@@ -1458,7 +1458,7 @@ def test_build_compiler_hint_names_the_tools_of_the_venv_platform(fake_build: Fa
     monkeypatch.setattr(mypyc.envs, "interpreter_info", lambda python: {"platform": "win-arm64"})
     monkeypatch.setattr(mypyc, "has_compiler_hint", lambda platform="win-amd64": platforms.append(platform) or "HINT")
     fake_build.code = mypyc.C_BUILD_FAILED
-    with pytest.raises(DeployError, match="HINT"):
+    with pytest.raises(PytError, match="HINT"):
         mypyc.build(make({}), "dev")
     assert platforms == ["win-arm64"]
 
@@ -1651,13 +1651,13 @@ def test_build_script_reads_the_developer_folder_like_doctor(tmp_path: Path, mon
 
 
 @needs_venv
-@pytest.mark.skipif(not _has_mypyc() or os.name == "nt", reason="needs mypyc (run through ./deploy selftest); CC is not MSVC")
+@pytest.mark.skipif(not _has_mypyc() or os.name == "nt", reason="needs mypyc (run through ./pyt selftest); CC is not MSVC")
 def test_real_compile_with_a_missing_cc_is_a_missing_requirement(src_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The measured case: CC=clang-99 -> `No such file or directory: 'clang-99'` and exit 1."""
     _project(src_tree, {"main.py": "", "pkg/__init__.py": "", "pkg/core/__init__.py": "", "pkg/core/m.py": "X = 1\n"})
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
     monkeypatch.setenv("CC", "/nonexistent/clang-99")
-    with pytest.raises(DeployError) as err:
+    with pytest.raises(PytError) as err:
         mypyc.build(make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}}), "dev")
     assert err.value.code == 3 and "the C compiler cannot start" in str(err.value)
 
@@ -1691,7 +1691,7 @@ def test_build_script_reports_a_failed_c_build_with_its_own_exit_code(
     assert stderr in capsys.readouterr().err
 
 
-@pytest.mark.skipif(not _has_mypyc(), reason="needs mypyc (run through ./deploy selftest)")
+@pytest.mark.skipif(not _has_mypyc(), reason="needs mypyc (run through ./pyt selftest)")
 def test_build_script_exits_with_rejected_on_type_errors(tmp_path: Path) -> None:
     """The real mypyc: a type error is MYPYC_REJECTED (no compiler involved), valid code is 0."""
     stage = tmp_path / "stage"
@@ -1784,9 +1784,9 @@ def test_hidden_imports_keep_everything_when_the_check_cannot_run(
     ],
     ids=["syntax-error", "too-deep"],
 )
-def test_hidden_imports_of_an_unparsable_file_is_a_deploy_error(src_tree: Path, tmp_path: Path, source: str | bytes, line: int) -> None:
+def test_hidden_imports_of_an_unparsable_file_is_a_pyt_error(src_tree: Path, tmp_path: Path, source: str | bytes, line: int) -> None:
     _project(src_tree, {"myapp/__init__.py": "", "myapp/core/__init__.py": "", "myapp/core/m.py": source})
-    with pytest.raises(DeployError, match=rf"src[/\\]myapp[/\\]core[/\\]m\.py:{line}: cannot parse it with the runner's Python") as err:
+    with pytest.raises(PytError, match=rf"src[/\\]myapp[/\\]core[/\\]m\.py:{line}: cannot parse it with the runner's Python") as err:
         mypyc.hidden_imports(make({}), tmp_path / "stage")
     assert err.value.code == 2
 
@@ -1964,7 +1964,7 @@ def test_compile_mypy_ini_finds_typings_in_any_project_folder(tmp_path: Path, mo
 def test_mypy_ini_checks_as_min_python_while_pypy_is_supported(supported: list[str], tmp_path: Path) -> None:
     """VS Code's mypy extension reads .mypy.ini and passes no --python-version: without
     python_version there it checked as the .venv's Python and missed the 3.11 API errors that
-    `./deploy check` (render.mypy_cli_args) and the Neovim linter report."""
+    `./pyt check` (render.mypy_cli_args) and the Neovim linter report."""
     cfg = make({"backend": {"supported": supported}})
     expected = cfg.min_python if cfg.pypy_enabled else None
     assert (expected == "3.11") is ("pypy" in supported)
@@ -2280,7 +2280,7 @@ def test_wheel_names_a_missing_lock_entry(wheel_project: Path) -> None:
 
     lock = wheel.PYPROJECT.parent / "uv.lock"
     lock.write_text('version = 1\n[[package]]\nname = "mypy"\nversion = "2.3.1"\n', encoding="utf-8")
-    with pytest.raises(DeployError, match=r"setuptools is not in uv.lock.*\./deploy add setuptools --dev --cpython-only"):
+    with pytest.raises(PytError, match=r"setuptools is not in uv.lock.*\./pyt add setuptools --dev --cpython-only"):
         wheel._pyproject(_wheel_cfg(), False)
 
 
@@ -2499,7 +2499,7 @@ def test_build_script_adds_nothing_for_msvc(tmp_path: Path, monkeypatch: pytest.
 
 
 def test_build_script_without_compile_never_looks_for_a_compiler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """./deploy report (spec compile = false) needs no C compiler: none is looked up."""
+    """./pyt report (spec compile = false) needs no C compiler: none is looked up."""
     _, extensions, setups = _run_build_script(tmp_path, monkeypatch, compiler="none", compile=False)
     assert setups == [] and extensions[0].extra_compile_args == ["-O3", "-Werror"]
 

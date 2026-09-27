@@ -1,5 +1,5 @@
 """Paranoid tests of render.py's core: render.apply / auto and state.json, the exit codes of
-./deploy render, the managed parts of pyproject.toml, the typing profiles and the generated CI.
+./pyt render, the managed parts of pyproject.toml, the typing profiles and the generated CI.
 
 Everything runs in process against a sandbox (render.ROOT, STATE_FILE, PYPROJECT and outputs
 monkeypatched to a tmp dir); the real generators are rendered for every preset and backend set.
@@ -32,7 +32,7 @@ from runner.config import BACKENDS, Config  # noqa: E402
 from runner.editors import nvim  # noqa: E402
 from runner.methods import pyz  # noqa: E402
 from runner.project import PRESETS, ROOT, TEMPLATES  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 COMMANDS = set(cli.COMMANDS)
 PRESET_NAMES = ("script", "raylib", "flet")
@@ -263,11 +263,11 @@ def test_python_version_is_rewritten_only_for_a_python_uv_can_provide(box: Sandb
     assert asked == ["3.14"]  # unchanged: nothing to ask
 
     def unavailable(version: str) -> None:
-        raise DeployError(f'python.cpython = "{version}": uv can neither find nor install this CPython (...)', 3)
+        raise PytError(f'python.cpython = "{version}": uv can neither find nor install this CPython (...)', 3)
 
     monkeypatch.setattr(envs, "ensure_python", unavailable)
     box.files[".python-version"] = "3.41\n"
-    with pytest.raises(DeployError, match=r'python\.cpython = "3\.41"'):
+    with pytest.raises(PytError, match=r'python\.cpython = "3\.41"'):
         render.apply(CFG)
     assert box.read(".python-version") == b"3.14\n"  # the launchers still start the runner
     monkeypatch.setattr(proc, "DRY_RUN", True)
@@ -287,7 +287,7 @@ def test_diff_shows_a_missing_last_line_break(box: Sandbox, capsys: pytest.Captu
 
 def test_a_folder_in_the_way_is_a_clear_error(box: Sandbox) -> None:
     (box.root / "b.ini").mkdir()
-    with pytest.raises(DeployError, match=r"b\.ini is generated, but a folder"):
+    with pytest.raises(PytError, match=r"b\.ini is generated, but a folder"):
         render.apply(CFG)
 
 
@@ -297,7 +297,7 @@ def test_write_failures_are_clear_errors(box: Sandbox, monkeypatch: pytest.Monke
 
     with monkeypatch.context() as m:
         m.setattr(Path, "write_bytes", refuse)  # project.write_whole writes a temporary file
-        with pytest.raises(DeployError, match="cannot write the generated file gen/a.json: Permission denied"):
+        with pytest.raises(PytError, match="cannot write the generated file gen/a.json: Permission denied"):
             render.apply(CFG)
 
 
@@ -359,7 +359,7 @@ APPLIED = {"name": "game", "preset": "raylib", "dependencies": ["raylib_sdl==6.0
 
 def _conflicted(box: Sandbox, *, base: bool, eol: str, applied_theirs: dict[str, Any] | None = None) -> str:
     """state.json as `git merge` leaves it when both branches rendered: the hashes of one file
-    differ (a conflict hunk), the `applied` record of ./deploy apply sits outside the hunk."""
+    differ (a conflict hunk), the `applied` record of ./pyt apply sits outside the hunk."""
     render.apply(CFG)
     data = json.loads(box.state.read_text(encoding="utf-8"))
     data["applied"] = APPLIED
@@ -383,7 +383,7 @@ def _conflicted(box: Sandbox, *, base: bool, eol: str, applied_theirs: dict[str,
 @pytest.mark.parametrize("base", [False, True], ids=["merge", "diff3"])
 @pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_a_conflicted_state_keeps_the_applied_record(box: Sandbox, base: bool, eol: str) -> None:
-    """README's procedure after a conflict in state.json is `./deploy render`: it wrote a fresh
+    """README's procedure after a conflict in state.json is `./pyt render`: it wrote a fresh
     state.json without the `applied` record, and a later apply refused with a false 'app.preset was
     changed from script'."""
     _conflicted(box, base=base, eol=eol)
@@ -397,7 +397,7 @@ def test_a_conflicted_state_keeps_the_applied_record(box: Sandbox, base: bool, e
 def test_a_conflict_inside_a_record_drops_only_that_record(box: Sandbox) -> None:
     _conflicted(box, base=False, eol="\n", applied_theirs={**APPLIED, "preset": "script"})
     render.apply(CFG)
-    assert "applied" not in json.loads(box.state.read_text(encoding="utf-8"))  # ./deploy apply records it again
+    assert "applied" not in json.loads(box.state.read_text(encoding="utf-8"))  # ./pyt apply records it again
 
 
 @pytest.mark.parametrize("bom", [b"", b"\xef\xbb\xbf"], ids=["no-bom", "bom"])
@@ -419,7 +419,7 @@ def test_stale_entries_stay_recorded(box: Sandbox) -> None:
     assert box.recorded()[".c"] == sha(GENERATED[".c"])
 
 
-# --- ./deploy render and render.auto ---------------------------------------------------------------
+# --- ./pyt render and render.auto ---------------------------------------------------------------
 
 
 def _render(args: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, str]:
@@ -554,11 +554,11 @@ def test_preset_markers_are_never_taken_for_the_managed_ones(pyproject: Path) ->
     begin = next(i for i, ln in enumerate(lines) if ln.startswith(render.MARK_BEGIN + ":"))
     end = next(i for i, ln in enumerate(lines) if ln.endswith("  " + render.MARK_END))
     _write(pyproject, "\n".join(lines[: begin + 1] + lines[end + 1 :]) + "\n")
-    with pytest.raises(DeployError, match="closing marker"):
+    with pytest.raises(PytError, match="closing marker"):
         render.write_pyproject(cfg)
     # The closing marker lost: an error, never a silent loss of [tool.flet]
     _write(pyproject, whole.replace("  " + render.MARK_END + "\n", "\n"))
-    with pytest.raises(DeployError):
+    with pytest.raises(PytError):
         render.write_pyproject(cfg)
     assert tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["flet"] == flet
 
@@ -610,12 +610,12 @@ def test_block_keys_hold_every_key_the_managed_block_writes(preset: str, support
 @pytest.mark.parametrize(("text", "message"), BROKEN.values(), ids=BROKEN.keys())
 def test_unusable_pyproject_is_a_clear_error_and_untouched(pyproject: Path, text: str, message: str) -> None:
     _write(pyproject, text)
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         render.write_pyproject(CFG)
     assert e.value.code == 2 and "pyproject.toml" in str(e.value) and message in str(e.value), str(e.value)
     assert pyproject.read_bytes() == text.encode("utf-8")  # nothing written
     assert render.pyproject_outdated(CFG) is True  # auto, doctor and the hook warn, never crash
-    with pytest.raises(DeployError):
+    with pytest.raises(PytError):
         render.check_pyproject(CFG)  # the preflight says the same without writing
 
 
@@ -738,7 +738,7 @@ def test_bom_and_crlf_pyproject(pyproject: Path) -> None:
 def test_unreadable_pyproject(pyproject: Path, content: bytes | None, message: str) -> None:
     if content is not None:
         pyproject.write_bytes(content)
-    with pytest.raises(DeployError, match=message):
+    with pytest.raises(PytError, match=message):
         render.write_pyproject(CFG)
     assert render.pyproject_outdated(CFG) is True
 
@@ -770,7 +770,7 @@ def test_a_project_keeps_its_own_override_dependencies(pyproject: Path) -> None:
     _write(pyproject, text)
     assert render.pyproject_outdated(CFG) is False and render.write_pyproject(CFG) is False
     # PyPy needs the cffi override: the project's list must hold it, and the error says so
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         render.check_pyproject(PYPY_CFG)
     assert "override-dependencies" in str(e.value) and f'"{CFFI}"' in str(e.value) and "outside the" in str(e.value)
     assert render.pyproject_outdated(PYPY_CFG) is True
@@ -802,7 +802,7 @@ def test_a_repeated_additive_key_is_repaired(pyproject: Path) -> None:
     # only that clash: a block broken some other way is the user's to fix, never rewritten
     broken = pyproject_text(PYPY_CFG).replace("required-version = ", "required-version = = ")
     _write(pyproject, broken)
-    with pytest.raises(DeployError, match="not valid TOML"):
+    with pytest.raises(PytError, match="not valid TOML"):
         render.write_pyproject(PYPY_CFG)
     assert pyproject.read_text(encoding="utf-8") == broken
 
@@ -812,7 +812,7 @@ def test_a_raylib_project_keeps_its_own_no_build_package(pyproject: Path, packag
     cfg = preset_cfg("raylib", {"preset": {"raylib": {"package": package}}})
     base = pyproject_text(cfg)
     _write(pyproject, _own_list(base.replace(f'no-build-package = ["{package}"]\n', ""), 'no-build-package = ["numpy"]'))
-    with pytest.raises(DeployError, match=f'(?s)no-build-package .*"{package}"'):
+    with pytest.raises(PytError, match=f'(?s)no-build-package .*"{package}"'):
         render.write_pyproject(cfg)
     other = package.replace("_", "-").upper()  # uv normalizes names: the same package
     _write(pyproject, _own_list(base.replace(f'no-build-package = ["{package}"]\n', ""), f'no-build-package = ["numpy", "{other}"]'))
@@ -865,26 +865,26 @@ def test_a_key_tomllib_refuses_is_invalid_toml_never_a_traceback(pyproject: Path
     assert config.scan(text) is None
     _write(pyproject, text)
     assert render.pyproject_outdated(CFG) is True
-    with pytest.raises(DeployError, match="pyproject.toml is not valid TOML") as e:
+    with pytest.raises(PytError, match="pyproject.toml is not valid TOML") as e:
         render.write_pyproject(CFG)
     assert e.value.code == 2
-    with pytest.raises(DeployError, match="pyproject.toml is not valid TOML"):
+    with pytest.raises(PytError, match="pyproject.toml is not valid TOML"):
         render.check_pyproject(CFG)
 
 
 def test_verify_requires_the_managed_values_in_tool_uv() -> None:
     # A safety net behind the marker checks: whatever the rewrite did, uv must find the values
     text = pyproject_text(CFG)
-    with pytest.raises(DeployError, match=r"did not end up in \[tool\.uv\]"):
+    with pytest.raises(PytError, match=r"did not end up in \[tool\.uv\]"):
         render._verify(CFG, text, text.replace("< '3.15'", "< '3.99'"))
-    with pytest.raises(DeployError, match="would also change other settings"):
+    with pytest.raises(PytError, match="would also change other settings"):
         render._verify(CFG, text, text.replace("[tool.uv]\n", "[tool.other]\n"))
     render._verify(CFG, text, text)
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), datetime.date(2026, 1, 1), {1, 2}])
 def test_generated_json_never_holds_what_json_cannot(value: object) -> None:
-    with pytest.raises(DeployError, match="JSON cannot represent"):
+    with pytest.raises(PytError, match="JSON cannot represent"):
         render.jsonc({"key": [value]})
     assert render.jsonc({"key": [1.5, "x", None, True]}).endswith('\n}\n')
 
@@ -904,7 +904,7 @@ def test_a_pyproject_rewrite_cut_short_leaves_the_file_whole(tmp_path: Path) -> 
         "from pathlib import Path\n"
         f"sys.path.insert(0, {str(ROOT / '.pytemplate')!r})\n"
         "from runner import config, render\n"
-        "from runner.ui import DeployError\n"
+        "from runner.ui import PytError\n"
         "render.PYPROJECT = Path(sys.argv[1])\n"
         "cfg = config.load(set())\n"
         "signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\n"
@@ -912,7 +912,7 @@ def test_a_pyproject_rewrite_cut_short_leaves_the_file_whole(tmp_path: Path) -> 
         "try:\n"
         "    render.write_pyproject(cfg)\n"
         "    print('written')\n"
-        "except DeployError as e:\n"
+        "except PytError as e:\n"
         "    print(e)\n"
     )
     r = subprocess.run([sys.executable, "-c", code, str(target)], capture_output=True, text=True, timeout=120, check=False)
@@ -1038,16 +1038,16 @@ def test_profiles_tolerate_a_bom_and_crlf(profiles: Path, name: str) -> None:
 def test_bad_profiles_are_clear_errors(profiles: Path, content: str, message: str) -> None:
     # a wrong type would otherwise crash deep inside a generator (e.g. "x".get(...))
     (profiles / "x.toml").write_text(content, encoding="utf-8")
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         render.load_profile("x")
     assert e.value.code == 2 and "x.toml" in str(e.value) and message in str(e.value), str(e.value)
 
 
 def test_profile_not_utf8_or_missing(profiles: Path) -> None:
     (profiles / "off.toml").write_bytes(b"\xff\xfed\x00")
-    with pytest.raises(DeployError, match=r"off\.toml is not UTF-8"):
+    with pytest.raises(PytError, match=r"off\.toml is not UTF-8"):
         render.load_profile("off")
-    with pytest.raises(DeployError, match="typing profile not found: .*nope.toml"):
+    with pytest.raises(PytError, match="typing profile not found: .*nope.toml"):
         render.load_profile("nope")
 
 
@@ -1236,11 +1236,11 @@ def test_ci_workflow_for_every_preset_and_backend_set(preset: str, supported: li
         assert backends == [b for b in supported if b != drop], row
     steps = test["steps"]
     runs = [s["run"] for s in steps if "run" in s]
-    assert runs[0] == "./deploy render --check"  # before anything else can render
+    assert runs[0] == "./pyt render --check"  # before anything else can render
     assert [s["uses"].partition("@")[0] for s in steps[:2]] == ["actions/checkout", "astral-sh/setup-uv"]
     apt = [s for s in steps if "apt-get" in s.get("run", "")]
     assert len(apt) == (preset == "raylib") and all(s["if"] == "runner.os == 'Linux'" for s in apt)
-    build = next(r for r in runs if r.startswith("./deploy build "))
+    build = next(r for r in runs if r.startswith("./pyt build "))
     backend = build.split()[2]
     assert backend == next((b for b in ("mypyc", "cpython") if b in supported), active)
     assert all(backend in r["backends"].split() for r in rows)  # every OS synced what it builds
@@ -1320,15 +1320,15 @@ def test_a_template_that_cannot_be_read_is_a_clear_error(profiles: Path, ci_temp
         return real(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", read_text)
-    with pytest.raises(DeployError, match=r"cannot read .*off\.toml: Permission denied"):
+    with pytest.raises(PytError, match=r"cannot read .*off\.toml: Permission denied"):
         render.load_profile("off")
-    with pytest.raises(DeployError, match=r"cannot read .*ci\.yml: Permission denied"):
+    with pytest.raises(PytError, match=r"cannot read .*ci\.yml: Permission denied"):
         render.ci_workflow(CFG)
 
 
 def test_ci_template_placeholder_left_is_a_clear_error(ci_template: Path) -> None:
     ci_template.write_text(ci_template.read_text(encoding="utf-8").replace("\n__LINUX_DEPS__\n", "\n      - run: x __LINUX_DEPS__\n"), encoding="utf-8")
-    with pytest.raises(DeployError, match="__LINUX_DEPS__ not replaced"):
+    with pytest.raises(PytError, match="__LINUX_DEPS__ not replaced"):
         render.ci_workflow(CFG)
 
 

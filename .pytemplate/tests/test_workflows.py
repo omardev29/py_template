@@ -1,6 +1,6 @@
 """The template repository's own workflows (.github/workflows/template-*.yml): what its CI
-promises (every OS, the floors, projects made with ./deploy new, pinned Neovim) and what keeps
-the scheduled ones running. Template repository only: `./deploy new` copies neither these
+promises (every OS, the floors, projects made with ./pyt new, pinned Neovim) and what keeps
+the scheduled ones running. Template repository only: `./pyt new` copies neither these
 workflows nor the marker. Text checks (the runner is stdlib only, no YAML parser); actionlint,
 when installed, validates the files themselves."""
 
@@ -121,20 +121,20 @@ def test_selftest_workflow_covers_every_os_and_both_floors() -> None:
     found = jobs(text)
     main = found["selftest"]
     assert "os: [macos-latest, windows-latest]" in main
-    assert 0 < main.index("./deploy render --check") < main.index("./deploy setup") < main.index("run: ./deploy selftest -rs")
-    assert "./deploy.ps1 selftest -rs" in main and "MSYS2_ROOT" in main  # Windows: MSYS2 found by the launcher tests
+    assert 0 < main.index("./pyt render --check") < main.index("./pyt setup") < main.index("run: ./pyt selftest -rs")
+    assert "./pyt.ps1 selftest -rs" in main and "MSYS2_ROOT" in main  # Windows: MSYS2 found by the launcher tests
     assert "rhysd/action-setup-vim@v1" in main and "xonsh==" in main
     uv_floor = found["uv-floor"]
-    assert "resolution-strategy: lowest" in uv_floor and "MIN_UV" in uv_floor and "./deploy selftest" in uv_floor
+    assert "resolution-strategy: lowest" in uv_floor and "MIN_UV" in uv_floor and "./pyt selftest" in uv_floor
     assert envs.MIN_UV in (ROOT / "pyproject.toml").read_text(encoding="utf-8")  # what setup-uv resolves "lowest" from
     image = jobs(_text("template-ci-image.yml"))
     linux = image["selftest"]
-    assert 0 < linux.index("./deploy render --check") < linux.index("./deploy setup") < linux.index("run: ./deploy selftest -rs")
+    assert 0 < linux.index("./pyt render --check") < linux.index("./pyt setup") < linux.index("run: ./pyt selftest -rs")
     floor = image["python-floor"]
     assert "--python 3.11 --with \"$pytest\" python -m pytest" in floor and ".pytemplate/tests" in floor
-    assert "uv run --quiet --python 3.11 --script .pytemplate/deploy.py help" in floor
+    assert "uv run --quiet --python 3.11 --script .pytemplate/pyt.py help" in floor
     new = image["new-project"]
-    assert "preset: [raylib, flet]" in new and "./deploy new" in new and "./deploy selftest" in new
+    assert "preset: [raylib, flet]" in new and "./pyt new" in new and "./pyt selftest" in new
 
 
 def test_linux_jobs_run_in_the_ci_image() -> None:
@@ -150,7 +150,7 @@ def test_linux_jobs_run_in_the_ci_image() -> None:
     image = jobs(_text("template-ci-image.yml"))
     for job in ("selftest", "python-floor", "new-project", "launchers", "nvim"):
         assert "image: ${{ needs.image.outputs.ref }}" in image[job], job
-    assert "shellcheck -s sh deploy" in image["launchers"]
+    assert "shellcheck -s sh pyt" in image["launchers"]
 
 
 def test_readme_tells_when_the_selftest_workflow_runs() -> None:
@@ -367,7 +367,7 @@ def test_ci_image_tag_follows_its_inputs(tmp_path: Path) -> None:
     (Windows, core.autocrlf) gives the same one."""
     pins = _pins()
     files = [f".github/workflows/template-ci-image/{n}" for n in pins.IMAGE_FILES] + pins.data_files()
-    files += [".pytemplate/runner/cmd_nvim.py", ".pytemplate/deploy.py", ".pytemplate/tests/test_render_core.py"]
+    files += [".pytemplate/runner/cmd_nvim.py", ".pytemplate/pyt.py", ".pytemplate/tests/test_render_core.py"]
     files += [".pytemplate/runner/cmd_dev.py", ".pytemplate/runner/upx.py"]
     for rel in files:
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)

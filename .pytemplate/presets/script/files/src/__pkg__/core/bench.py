@@ -1,6 +1,6 @@
 """Pure CPU work: the ideal case for mypyc and for PyPy.
 
-Rules for mypyc to generate fast code (./deploy report checks them):
+Rules for mypyc to generate fast code (./pyt report checks them):
 - Constants with Final: a global without Final is looked up in a dict on every access.
 - No Any: with Any, mypyc uses generic operations (it can be slower than CPython).
 - Concrete types: list[bool] compiles to direct accesses; bytearray takes the generic

@@ -10,7 +10,7 @@
         "editor.defaultFormatter": "charliermarsh.ruff"
     },
     "files.associations": {
-        "deploy": "shellscript"
+        "pyt": "shellscript"
     },
     "files.exclude": {
         "**/__pycache__": true,

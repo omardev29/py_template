@@ -1,9 +1,9 @@
-# Test suite of the TEMPLATE repository (not rendered, and `./deploy new` does not copy
-# template-*.yml workflows): `./deploy selftest` (pytest + mypy --strict of the runner, whose
+# Test suite of the TEMPLATE repository (not rendered, and `./pyt new` does not copy
+# template-*.yml workflows): `./pyt selftest` (pytest + mypy --strict of the runner, whose
 # sys.platform branches mypy checks on the OS it runs on) on macOS and Windows, with the shells
 # and tools its tests look for, so few of them skip, and the whole suite with the oldest uv
 # pyproject.toml accepts (envs.MIN_UV). The Linux jobs (selftest, the runner's tests on its floor
-# Python 3.11, and the suite inside projects made with `./deploy new`) run in the CI image:
+# Python 3.11, and the suite inside projects made with `./pyt new`) run in the CI image:
 # template-ci-image.yml. Weekly without a push as well (the newest uv, Python patch releases and
 # runner images), kept enabled by template-keepalive.yml. The gate job skips everything in
 # repositories made from the template.
@@ -59,7 +59,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
       # First, before any command renders: a generated file committed stale fails here
       - name: Generated files match their sources
-        run: ./deploy render --check
+        run: ./pyt render --check
       - uses: rhysd/action-setup-vim@v1
         with:
           neovim: true
@@ -81,7 +81,7 @@ jobs:
           uv tool install --python 3.14 xonsh==0.24.2
           uv tool dir --bin >> "$GITHUB_PATH"
       - name: Runner environment
-        run: ./deploy setup
+        run: ./pyt setup
       - name: Tool versions
         run: |
           uv --version; nvim --version | sed -n 1p; pwsh --version || true; node --version || true
@@ -96,13 +96,13 @@ jobs:
           "$py" -c "import sys; sys.path.insert(0, '.pytemplate'); from runner import config, upx; print(upx.find(config.load(set())))"
       - name: selftest (macOS)
         if: runner.os == 'macOS'
-        run: ./deploy selftest -rs
-      - name: selftest (Windows, through deploy.ps1; short temp paths for MAX_PATH)
+        run: ./pyt selftest -rs
+      - name: selftest (Windows, through pyt.ps1; short temp paths for MAX_PATH)
         if: runner.os == 'Windows'
         shell: pwsh
         env:
           MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
-        run: ./deploy.ps1 selftest -rs "--basetemp=$env:RUNNER_TEMP\pt"; exit $LASTEXITCODE
+        run: ./pyt.ps1 selftest -rs "--basetemp=$env:RUNNER_TEMP\pt"; exit $LASTEXITCODE
 
   uv-floor:
     name: selftest with the oldest supported uv
@@ -122,8 +122,8 @@ jobs:
           uv --version
           test -n "$want" && test "$(uv --version | cut -d' ' -f2)" = "$want"
       - name: Runner environment
-        run: ./deploy setup
+        run: ./pyt setup
       # After a preset round trip uv 0.10.12 writes redundant markers into uv.lock (0.12 does
       # not): the same lock, other bytes, which only that test's byte comparison notices
       - name: selftest
-        run: ./deploy selftest -rs --deselect .pytemplate/tests/test_presets.py::test_init_round_trip_through_every_preset_is_byte_identical
+        run: ./pyt selftest -rs --deselect .pytemplate/tests/test_presets.py::test_init_round_trip_through_every_preset_is_byte_identical

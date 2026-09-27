@@ -16,7 +16,7 @@ Layout of the work directory (short on purpose: Windows MAX_PATH, deep plugin tr
 
     <dir>/x/{config,data,state,cache}   XDG_*_HOME of every Neovim call (LazyVim + plugins)
     <dir>/base.json                     marker: the base above is complete (reused while pinned)
-    <dir>/p/<preset>                    scratch projects (./deploy new), removed unless --keep
+    <dir>/p/<preset>                    scratch projects (./pyt new), removed unless --keep
     <dir>/logs/                         output of every step of the last run (+ the resolved pins)
 """
 
@@ -40,7 +40,7 @@ from pathlib import Path
 from . import cmd_nvim, presets, proc, ui
 from .config import Config
 from .project import IS_WINDOWS, ROOT, check_private_dir, scratch_name, user_path
-from .ui import DeployError
+from .ui import PytError
 
 DEFAULT_PRESETS = ("script", "raylib", "flet")
 SMOKE = ".pytemplate/nvim/tests/smoke.lua"  # relative to the project (the cwd of the smoke run)
@@ -55,7 +55,7 @@ PHASES = ("new+sync", "trust+lazy", "smoke")
 # The smoke's mypy check needs a typing profile: every preset defaults to typing.relaxed = off.
 SMOKE_TYPING = "strict"
 
-# The inner ./deploy runs as if typed in a fresh shell: nothing from this runner's own
+# The inner ./pyt runs as if typed in a fresh shell: nothing from this runner's own
 # `uv run --script` environment, nor from a shell's stale PYTEMPLATE_* exports.
 RUNNER_DROP = frozenset({"VIRTUAL_ENV", "UV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON"})
 # Anything that could make Neovim read the user's own config, data or server.
@@ -106,7 +106,7 @@ def _key(name: str) -> str:
 
 
 def runner_env(source: Mapping[str, str]) -> dict[str, str]:
-    """Environment of the inner ./deploy calls: `source` minus VIRTUAL_ENV, UV*, PYTEMPLATE_*."""
+    """Environment of the inner ./pyt calls: `source` minus VIRTUAL_ENV, UV*, PYTEMPLATE_*."""
     return {k: v for k, v in source.items() if _key(k) not in RUNNER_DROP and not _key(k).startswith("PYTEMPLATE_")}
 
 
@@ -265,7 +265,7 @@ def _run_logged(
                 start_new_session=not IS_WINDOWS,
             )  # fmt: skip
         except FileNotFoundError:
-            raise DeployError(f"program not found: {args[0]}", 3) from None
+            raise PytError(f"program not found: {args[0]}", 3) from None
         return _wait(p, timeout)
 
 
@@ -273,7 +273,7 @@ def _remove(path: Path) -> None:
     try:
         cmd_nvim.remove_tree(path)
     except OSError as e:
-        raise DeployError(f"cannot remove {path}: {e}\n  Is a Neovim (or git/tar/curl) process still using it?", FAILED) from None
+        raise PytError(f"cannot remove {path}: {e}\n  Is a Neovim (or git/tar/curl) process still using it?", FAILED) from None
 
 
 def _tail(log: Path, lines: int = 15) -> str:
@@ -284,10 +284,10 @@ def _tail(log: Path, lines: int = 15) -> str:
     return "\n".join(text.rstrip().splitlines()[-lines:])
 
 
-def _failed(message: str, log: Path) -> DeployError:
+def _failed(message: str, log: Path) -> PytError:
     """A step of the suite that failed: exit 1 (a FAIL), with the end of its log."""
     tail = _tail(log)
-    return DeployError(f"{message} (log: {log})" + (f"\n{tail}" if tail else ""), FAILED)
+    return PytError(f"{message} (log: {log})" + (f"\n{tail}" if tail else ""), FAILED)
 
 
 def _step(argv: Sequence[str | Path], *, cwd: Path, env: Mapping[str, str], log: Path, timeout: float, what: str) -> None:
@@ -302,24 +302,24 @@ def _check_isolated(nv: cmd_nvim.Nvim, layout: Layout) -> None:
     root = os.path.normcase(str(layout.xdg.resolve()))
     for path in (nv.config, nv.data, nv.state, nv.cache):
         if not os.path.normcase(str(path.resolve())).startswith(root + os.sep):
-            raise DeployError(f"isolation check failed: Neovim reports {path}, outside {layout.xdg}", 3)
+            raise PytError(f"isolation check failed: Neovim reports {path}, outside {layout.xdg}", 3)
 
 
 def _prepare_dir(layout: Layout) -> None:
     base = layout.base
     resolved = base.resolve()
     if resolved == ROOT or ROOT in resolved.parents:
-        raise DeployError(f"--dir must be outside the template ({base}): Neovim would find its .lazy.lua")
+        raise PytError(f"--dir must be outside the template ({base}): Neovim would find its .lazy.lua")
     if base.exists() and not base.is_dir():
-        raise DeployError(f"--dir {base} is not a folder: pick another --dir")
+        raise PytError(f"--dir {base} is not a folder: pick another --dir")
     check_private_dir(base, "--dir")
     if base.exists() and any(base.iterdir()) and not (base / DIR_MARKER).is_file():
-        raise DeployError(f"{base} is not empty and was not created by selftest --nvim: pick another --dir")
+        raise PytError(f"{base} is not empty and was not created by selftest --nvim: pick another --dir")
     try:
         base.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError as e:  # a parent that is a file, no permission
-        raise DeployError(f"cannot create --dir {base}: {e.strerror or e}") from None
-    (base / DIR_MARKER).write_text("work directory of ./deploy selftest --nvim (safe to delete)\n", encoding="utf-8", newline="\n")
+        raise PytError(f"cannot create --dir {base}: {e.strerror or e}") from None
+    (base / DIR_MARKER).write_text("work directory of ./pyt selftest --nvim (safe to delete)\n", encoding="utf-8", newline="\n")
 
 
 def base_info(nv: cmd_nvim.Nvim, lock: Path | None) -> dict[str, str]:
@@ -369,7 +369,7 @@ def _check_pins(lock: Path | None, nv: cmd_nvim.Nvim, what: str, log: Path) -> N
     if lock:
         drift = lock_drift(lock, nv.config / "lazy-lock.json")
         if drift:
-            raise DeployError(
+            raise PytError(
                 f"{what} left plugins off the pinned commits of {rel_lock()}: {'; '.join(drift)} "
                 f"(log: {log}; --fresh reinstalls the isolated LazyVim)",
                 FAILED,
@@ -526,7 +526,7 @@ def smoke_problem(s: Smoke) -> str:
     names = [*s.passed, *(n for n, _ in s.failed), *s.skipped]
     mypy = [n for n in names if n.startswith("mypy diagnostics")]
     if not mypy or mypy[0].endswith("(profile off)"):
-        return f"the mypy diagnostics check did not run with a typing profile (./deploy mode --typing {SMOKE_TYPING})"
+        return f"the mypy diagnostics check did not run with a typing profile (./pyt mode --typing {SMOKE_TYPING})"
     return ""
 
 
@@ -551,21 +551,21 @@ def run_preset(
         finally:
             row.times[name] = time.perf_counter() - start
 
-    def deploy(script_root: Path, cwd: Path, *args: str | Path) -> None:
-        ui.command("./deploy " + proc.show([str(a) for a in args]))
+    def pyt(script_root: Path, cwd: Path, *args: str | Path) -> None:
+        ui.command("./pyt " + proc.show([str(a) for a in args]))
         _step(
-            [uv, "run", "--quiet", "--script", script_root / ".pytemplate" / "deploy.py", *args],
-            cwd=cwd, env=renv, log=logs / f"{args[0]}.log", timeout=STEP_TIMEOUT, what=f"./deploy {args[0]} ({preset})",
+            [uv, "run", "--quiet", "--script", script_root / ".pytemplate" / "pyt.py", *args],
+            cwd=cwd, env=renv, log=logs / f"{args[0]}.log", timeout=STEP_TIMEOUT, what=f"./pyt {args[0]} ({preset})",
         )
 
     def new() -> None:
         _remove(proj)
         proj.parent.mkdir(parents=True, exist_ok=True)
         # from THIS template; not named after the preset: a project "flet" cannot depend on flet
-        deploy(ROOT, layout.base, "new", proj, "--preset", preset, "--name", f"pt-{preset}")
-        deploy(proj, proj, "sync", "cpython")  # .venv: ruff, mypy, debugpy for the editor
+        pyt(ROOT, layout.base, "new", proj, "--preset", preset, "--name", f"pt-{preset}")
+        pyt(proj, proj, "sync", "cpython")  # .venv: ruff, mypy, debugpy for the editor
         # every preset ships typing.relaxed = off: the mypy linter would never run
-        deploy(proj, proj, "mode", "--typing", SMOKE_TYPING)
+        pyt(proj, proj, "mode", "--typing", SMOKE_TYPING)
 
     def lazy() -> None:
         lazy_lua = proj / ".lazy.lua"
@@ -573,7 +573,7 @@ def run_preset(
         cmd_nvim.trust_file(nv.exe, lazy_lua, env=venv, cwd=proj)
         state = cmd_nvim.trust_status(nv.trust_db, lazy_lua)
         if state.state != "trusted":
-            raise DeployError(f"{lazy_lua} is {state.state} after vim.secure.trust")
+            raise PytError(f"{lazy_lua} is {state.state} after vim.secure.trust")
         # install, not sync: only what .lazy.lua adds (never an update), at the locked commits
         # (one round: LazyVim is installed, so the startup install knows every plugin at once)
         lock = LOCK if LOCK.is_file() else None
@@ -605,7 +605,7 @@ def run_preset(
     try:
         for name, func in zip(PHASES, (new, lazy, smoke), strict=True):
             timed(name, func)
-    except DeployError as e:
+    except PytError as e:
         row.error = str(e)
     return row
 
@@ -641,7 +641,7 @@ def _table(rows: Sequence[Row], base_seconds: float | None) -> None:
 
 
 def _parse_args(args: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="./deploy selftest --nvim")
+    parser = argparse.ArgumentParser(prog="./pyt selftest --nvim")
     parser.add_argument("presets", nargs="?", default=",".join(DEFAULT_PRESETS), help="comma-separated presets (default: script,raylib,flet)")
     parser.add_argument("--keep", action="store_true", help="keep the scratch projects")
     parser.add_argument("--fresh", action="store_true", help="reinstall the isolated LazyVim (clone the starter, install and restore the pinned plugins)")
@@ -657,13 +657,13 @@ def selftest(cfg: Config, args: list[str]) -> int:
     names = [p.strip() for p in ns.presets.split(",") if p.strip()]
     unknown = [p for p in names if p not in presets.available()]
     if unknown or not names:
-        raise DeployError(f"selftest --nvim: unknown preset(s) {', '.join(unknown) or '(none)'} (available: {', '.join(presets.available())})")
+        raise PytError(f"selftest --nvim: unknown preset(s) {', '.join(unknown) or '(none)'} (available: {', '.join(presets.available())})")
 
     missing = [t for t in ("nvim", "git") if not cmd_nvim.which(t)]
     if missing:
         msg = f"selftest --nvim: {' and '.join(missing)} not found in PATH"
         if ns.require:
-            raise DeployError(msg + " (--require)", 3)
+            raise PytError(msg + " (--require)", 3)
         ui.warn(msg + ": skipped")
         return 0
     exe = cmd_nvim.which("nvim") or "nvim"
@@ -690,16 +690,16 @@ def _run(ns: argparse.Namespace, names: list[str], exe: str, layout: Layout) -> 
     # Neovim keeps the user's git configuration: lazy.nvim clones the plugins with it (a proxy,
     # url.*.insteadOf)
     venv = nvim_env(layout, renv, uv_dirs(renv))
-    # The ./deploy steps work in --dir only, as those of selftest --e2e: git there never sees a
+    # The ./pyt steps work in --dir only, as those of selftest --e2e: git there never sees a
     # repository around --dir (`new` skipped git init there and, with core.filemode = false, staged
     # its launchers in the user's repository, which kept them once the scratch project was gone),
     # nor the user's global or system git configuration.
     isolate_git(renv, layout.base)
     hidden = hidden_template_repository(renv)
     if hidden:
-        raise DeployError(
+        raise PytError(
             f"selftest --nvim: --dir {layout.base} is next to this template inside its git repository {hidden}: "
-            "git in --dir must not see a repository around it (./deploy new would skip git init), which would "
+            "git in --dir must not see a repository around it (./pyt new would skip git init), which would "
             "hide the template's own. Pick a --dir outside that repository"
         )
     _prepare_dir(layout)
@@ -709,7 +709,7 @@ def _run(ns: argparse.Namespace, names: list[str], exe: str, layout: Layout) -> 
     if version is not None and version.version < cmd_nvim.MIN_LAZYVIM:
         msg = f"selftest --nvim: Neovim {version.version_text} is older than LazyVim's minimum {cmd_nvim.version_str(cmd_nvim.MIN_LAZYVIM)}"
         if ns.require:
-            raise DeployError(msg, 3)
+            raise PytError(msg, 3)
         ui.warn(msg + ": skipped")
         return 0
     nv, base_seconds = prepare_base(layout, exe, venv, fresh=ns.fresh)

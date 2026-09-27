@@ -20,7 +20,7 @@ from pathlib import Path
 from . import proc, ui
 from .config import Config
 from .project import ENV_SUFFIX, ROOT, venv_python
-from .ui import DeployError
+from .ui import PytError
 
 # The oldest uv this project works with. What sets it (bump it when one of them moves):
 # - pypy@3.11.15, the python.pypy pin of every preset: uv 0.10.12 is the first that can download
@@ -83,7 +83,7 @@ def uv_error(out: str) -> str:
 
 
 def require_min_uv(uv_path: str) -> None:
-    """Raise DeployError(3) if `uv_path` is older than MIN_UV (asked once per process).
+    """Raise PytError(3) if `uv_path` is older than MIN_UV (asked once per process).
 
     Called before uv creates an environment: that is where an old uv first goes wrong (it
     cannot download the pinned PyPy, or it installs a CPython prerelease without a word).
@@ -92,11 +92,11 @@ def require_min_uv(uv_path: str) -> None:
         return
     try:
         text = proc.run([uv_path, "--version"], capture=True, check=False, echo=False).stdout
-    except DeployError:
+    except PytError:
         return  # uv cannot even start: the real call reports it
     problem = uv_problem(text)
     if problem:
-        raise DeployError(
+        raise PytError(
             f"{problem} (older ones cannot install the interpreters it pins: CPython 3.14 final, "
             f"PyPy 3.11.15).\n  Update it: {UV_UPDATE}",
             3,
@@ -138,9 +138,9 @@ def runtime_env(cfg: Config, backend: str) -> PyEnv:
 
 def ensure_supported(cfg: Config, backend: str) -> None:
     if not cfg.supports(backend):
-        raise DeployError(
+        raise PytError(
             f"backend '{backend}' is not in backend.supported {cfg.backend.supported}.\n"
-            f"  Enable it with: ./deploy mode --supports +{backend}"
+            f"  Enable it with: ./pyt mode --supports +{backend}"
             + ("  (lowers the syntax to Python 3.11 and re-locks uv.lock)" if backend == "pypy" else "")
         )
 
@@ -166,7 +166,7 @@ def uv(
     echo: bool = True,
     quiet: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    """`quiet=False`: a uv command the user drives with their own arguments (`./deploy lock
+    """`quiet=False`: a uv command the user drives with their own arguments (`./pyt lock
     ARGS`, the `uv add|remove` of add/remove) keeps its output under -q."""
     uv_path = proc.find_uv()
     if not env.dir.exists():  # uv is about to create it (and maybe download its interpreter)
@@ -211,7 +211,7 @@ def uv_run(
 
 def sync(env: PyEnv) -> None:
     """`uv sync --locked --all-groups`: the environment gets EVERY dependency group of
-    pyproject.toml, not only uv's default ones (dev), so a package added with `./deploy add
+    pyproject.toml, not only uv's default ones (dev), so a package added with `./pyt add
     --group G` survives the next sync/setup and reaches a fresh clone. (`uv run` never removes
     packages: it syncs inexactly.) Minus the groups uv cannot install there (`left_out`, one
     `--no-group` each, with a note): with them uv refused the whole sync."""
@@ -333,16 +333,16 @@ def ensure_python(version: str) -> None:
     --script`, which follows .python-version: a version uv can neither find nor download (a typo
     such as "3.41", a new minor while offline) stopped every command, `help` included, and
     nothing could write the file again once pytemplate.toml was fixed. Installs it when missing
-    (the next `uv run` would have), else raises DeployError(3) naming python.cpython."""
+    (the next `uv run` would have), else raises PytError(3) naming python.cpython."""
     env = PyEnv("cpython", ROOT / f".venv{ENV_SUFFIX}", version, "only-managed")
     if uv(env, ["python", "find", version], check=False, capture=True, echo=False).returncode == 0:
         return
     r = uv(env, ["python", "install", version], check=False, capture=True)
     if r.returncode != 0:
         why = uv_error((r.stdout or "") + (r.stderr or "")) or f"exit code {r.returncode}"
-        raise DeployError(
+        raise PytError(
             f'python.cpython = "{version}": uv can neither find nor install this CPython ({why}).\n'
-            "  .python-version keeps its old value, so ./deploy still starts: fix python.cpython in "
+            "  .python-version keeps its old value, so ./pyt still starts: fix python.cpython in "
             "pytemplate.toml (or reconnect, if the version is right and uv must download it)",
             3,
         )

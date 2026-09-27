@@ -1,4 +1,4 @@
-"""Mode and template commands: mode, render, new, and the internal init step (./deploy __init).
+"""Mode and template commands: mode, render, new, and the internal init step (./pyt __init).
 
 Under --dry-run each of them prints what it would do and writes nothing: no pytemplate.toml,
 pyproject.toml, uv.lock or generated file, no environment synced, no project copied.
@@ -17,7 +17,7 @@ from typing import Any
 from . import config, envs, presets, proc, render, ui
 from .config import BACKENDS, Config
 from .project import CONFIG_FILE, PYPROJECT, ROOT, code_dirs, native_path, rel, user_path, write_whole
-from .ui import DeployError
+from .ui import PytError
 
 _DRY = "(--dry-run: nothing is written)"
 
@@ -34,7 +34,7 @@ def _describe(cfg: Config, title: str = "current mode") -> None:
 
 
 def _parse(parser: argparse.ArgumentParser, args: list[str]) -> argparse.Namespace:
-    """parse_args, but an unknown argument is a clear DeployError instead of argparse's exit.
+    """parse_args, but an unknown argument is a clear PytError instead of argparse's exit.
 
     An option the parser does not know is refused by name BEFORE parsing: argparse bound the
     value after it to a positional (`mode --typ strict`: "argument backend: invalid choice:
@@ -46,7 +46,7 @@ def _parse(parser: argparse.ArgumentParser, args: list[str]) -> argparse.Namespa
     if not unknown:
         ns, unknown = parser.parse_known_args(args)
     if unknown:
-        raise DeployError(f"{parser.prog}: unknown argument(s): {' '.join(unknown)}  ({parser.prog} -h lists the options)")
+        raise PytError(f"{parser.prog}: unknown argument(s): {' '.join(unknown)}  ({parser.prog} -h lists the options)")
     return ns
 
 
@@ -55,7 +55,7 @@ def _config_from_text(text: str, where: str) -> Config:
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        raise DeployError(f"{where}: not valid TOML: {e}") from None
+        raise PytError(f"{where}: not valid TOML: {e}") from None
     cfg: Config = config._build(Config, data, "")
     config.validate(cfg)
     return cfg
@@ -75,10 +75,10 @@ def _supports_after(cfg: Config, spec: str, backend: str | None = None) -> list[
     """
     tokens = [t.strip() for t in spec.split(",") if t.strip()]  # "+pypy," and " +pypy" are fine
     if not tokens:
-        raise DeployError(_NEEDS_VALUE)
+        raise PytError(_NEEDS_VALUE)
     signed = [t[:1] in ("+", "-") for t in tokens]
     if any(signed) and not all(signed):
-        raise DeployError(
+        raise PytError(
             f"mode --supports {spec}: mixes changes (+name, -name) with plain names; give every "
             "change its sign (+pypy,-mypyc) or the full list (cpython,pypy,mypyc)"
         )
@@ -88,27 +88,27 @@ def _supports_after(cfg: Config, spec: str, backend: str | None = None) -> list[
         for token in tokens:
             sign, name = token[0], token[1:].strip()
             if name not in BACKENDS:
-                raise DeployError(f"mode --supports: unknown backend '{name}' in '{token}' ({known})")
+                raise PytError(f"mode --supports: unknown backend '{name}' in '{token}' ({known})")
             if signs.setdefault(name, sign) != sign:
-                raise DeployError(f"mode --supports {spec}: {name} is both added and removed")
+                raise PytError(f"mode --supports {spec}: {name} is both added and removed")
         dropped = {n for n, s in signs.items() if s == "-"}
         wanted = {*cfg.backend.supported, *(n for n, s in signs.items() if s == "+")} - dropped
     else:
         for name in tokens:
             if name not in BACKENDS:
-                raise DeployError(f"mode --supports: unknown backend '{name}' ({known})")
+                raise PytError(f"mode --supports: unknown backend '{name}' ({known})")
         dropped = set(BACKENDS) - set(tokens)
         wanted = set(tokens)
     if backend:
         if backend in dropped:
             how = "removes it" if all(signed) else "leaves it out of the list"
-            raise DeployError(
+            raise PytError(
                 f"mode {backend} --supports {spec}: {backend} would be the active backend, but --supports {how}"
             )
         wanted.add(backend)
     out = [b for b in BACKENDS if b in wanted]
     if not out:
-        raise DeployError(f"mode --supports {spec}: at least one backend must stay supported")
+        raise PytError(f"mode --supports {spec}: at least one backend must stay supported")
     return out
 
 
@@ -144,7 +144,7 @@ def _precheck_py311(cfg: Config) -> None:
     tool = envs.tool_env(cfg)
     dry = proc.DRY_RUN
     if dry and not tool.python.is_file():
-        ui.info(f"  (--dry-run) skipped: {rel(tool.dir)} does not exist yet (./deploy setup), and creating it is a side effect")
+        ui.info(f"  (--dry-run) skipped: {rel(tool.dir)} does not exist yet (./pyt setup), and creating it is a side effect")
         return
     if dry:
         ui.info(f"  (--dry-run) running the read-only checks: ruff and mypy as Python {version}, with uv run --no-sync")
@@ -153,7 +153,7 @@ def _precheck_py311(cfg: Config) -> None:
     run = ["run", "--locked", "--no-sync"]
     # Only the folders that hold Python files, as .mypy.ini's `files` (render._holds_python):
     # tests/ left with only __pycache__ (the tests removed with `git rm`) stopped mypy with "There
-    # are no .py[i] files in directory 'tests'", while ./deploy check passed
+    # are no .py[i] files in directory 'tests'", while ./pyt check passed
     dirs = [d for d in code_dirs() if render._holds_python(ROOT / d)]
     if not dirs:  # ruff without a path would check the whole project
         ui.ok(f"no Python code in src/ or tests/: nothing to check for Python {version}")
@@ -166,9 +166,9 @@ def _precheck_py311(cfg: Config) -> None:
         echo=not dry,  # proc.run skips echoed commands under --dry-run
     )
     if r.returncode == 1:  # ruff: 1 = findings
-        raise DeployError(f"the code uses syntax that does not exist in Python {version} (see above); fix it before enabling PyPy")
+        raise PytError(f"the code uses syntax that does not exist in Python {version} (see above); fix it before enabling PyPy")
     if r.returncode != 0:  # 2 = ruff (or uv starting it) failed: nothing was checked
-        raise DeployError(f"could not run ruff for the Python {version} check (exit code {r.returncode}, see above)")
+        raise PytError(f"could not run ruff for the Python {version} check (exit code {r.returncode}, see above)")
 
     # 2) APIs: mypy errors that appear ONLY when checking as that version (e.g. typing.override)
     def mypy_errors(version: str) -> set[str]:
@@ -179,14 +179,14 @@ def _precheck_py311(cfg: Config) -> None:
         r = envs.uv(tool, argv, capture=True, check=False, echo=False)
         if r.returncode not in (0, 1):  # 2 = mypy (or uv starting it) aborted: nothing was checked
             ui.info(((r.stdout or "") + (r.stderr or "")).rstrip())
-            raise DeployError(f"mypy could not check the code as Python {version} (exit code {r.returncode}, see above)")
+            raise PytError(f"mypy could not check the code as Python {version} (exit code {r.returncode}, see above)")
         return {ln.strip() for ln in (r.stdout or "").splitlines() if ": error:" in ln}
 
     new = sorted(mypy_errors(version) - mypy_errors(cfg.python.cpython))
     if new:
         for line in new:
             ui.error(line)
-        raise DeployError(
+        raise PytError(
             f"the code uses APIs that do not exist in Python {version} (above). Fix it before enabling PyPy "
             "(e.g. typing.override -> typing_extensions.override)"
         )
@@ -227,7 +227,7 @@ def _leftover_envs(cfg: Config, new_cfg: Config) -> None:
     if names:
         ui.info(
             f"note: {', '.join(names)} {'is' if len(names) == 1 else 'are'} no longer used: "
-            "./deploy clean --envs removes the .venv* environments (./deploy setup recreates the ones in use)"
+            "./pyt clean --envs removes the .venv* environments (./pyt setup recreates the ones in use)"
         )
 
 
@@ -266,7 +266,7 @@ def _plan_mode(cfg: Config, new_cfg: Config, changes: list[tuple[str, str, objec
 def cmd_mode(cfg: Config, args: list[str]) -> int:
     """mode [BACKEND] [--supports +pypy|-pypy|a,b] [--typing off|warn|strict|auto] [--editor pylance|basedpyright]"""
     # allow_abbrev=False: `--typ` is an unknown argument, never a silent alias of --typing
-    parser = argparse.ArgumentParser(prog="./deploy mode", allow_abbrev=False)
+    parser = argparse.ArgumentParser(prog="./pyt mode", allow_abbrev=False)
     parser.add_argument("backend", nargs="?", choices=BACKENDS)
     parser.add_argument("--supports", help="+pypy, -pypy or a full list (cpython,mypyc)")
     parser.add_argument("--typing", choices=("auto", "off", "warn", "strict", "mypyc"))
@@ -278,17 +278,17 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
         if a == "--supports":
             spec = next(it, "")
             if spec.startswith("--"):  # `--supports --typing strict`: the value is missing
-                raise DeployError(_NEEDS_VALUE)
+                raise PytError(_NEEDS_VALUE)
             fixed.append(f"--supports={spec}")
         else:
             fixed.append(a)
     options = [a.split("=", 1)[0] for a in fixed if a.startswith("--")]
     repeated = sorted({o for o in options if options.count(o) > 1})
     if repeated:  # argparse would silently keep the last one
-        raise DeployError(f"mode: {', '.join(repeated)} given more than once; give each option once")
+        raise PytError(f"mode: {', '.join(repeated)} given more than once; give each option once")
     ns = _parse(parser, fixed)
     if ns.supports is not None and not ns.supports.strip():
-        raise DeployError("mode --supports needs a value: +pypy, -pypy or a list such as cpython,mypyc")
+        raise PytError("mode --supports needs a value: +pypy, -pypy or a list such as cpython,mypyc")
     if not any((ns.backend, ns.supports, ns.typing, ns.editor)):
         _describe(cfg)
         return 0
@@ -360,15 +360,15 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
     except BaseException as e:
         restored = _restore(before)
         done = f"{', '.join(restored)} restored: the mode did not change" if restored else "the mode did not change"
-        if not isinstance(e, DeployError):
+        if not isinstance(e, PytError):
             ui.warn(done)
             raise
-        raise DeployError(f"{e}\n  {done}; fix the problem above and run the command again", e.code) from None
+        raise PytError(f"{e}\n  {done}; fix the problem above and run the command again", e.code) from None
     changed, edited = render.apply(new_cfg)
     if changed:
         ui.info(f"render: updated {', '.join(changed)}")
     if edited:  # they still describe the old mode (the dry run names them too)
-        ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./deploy render --force)")
+        ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./pyt render --force)")
     _leftover_envs(cfg, new_cfg)
     _describe(new_cfg)
     return 0
@@ -379,7 +379,7 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
 
 def cmd_render(cfg: Config, args: list[str]) -> int:
     """render [--check] [--diff] [--force]: regenerate the configuration files."""
-    parser = argparse.ArgumentParser(prog="./deploy render")
+    parser = argparse.ArgumentParser(prog="./pyt render")
     parser.add_argument("--check", action="store_true", help="only report outdated files (exit code 1)")
     parser.add_argument("--diff", action="store_true", help="show how hand-edited files differ")
     parser.add_argument("--force", action="store_true", help="also overwrite hand-edited generated files")
@@ -391,7 +391,7 @@ def cmd_render(cfg: Config, args: list[str]) -> int:
     for path in edited:
         ui.warn(f"hand-edited (left untouched without --force): {path}")
     if render.pyproject_outdated(cfg):
-        ui.warn("pyproject.toml does not match pytemplate.toml: ./deploy apply")
+        ui.warn("pyproject.toml does not match pytemplate.toml: ./pyt apply")
         if ns.check:
             return 1
     if ns.check and (changed or edited):
@@ -446,8 +446,8 @@ def _plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> No
 
 
 def cmd_init(cfg: Config, args: list[str]) -> int:
-    """__init PRESET [--name NAME] [--force]: convert this project to the preset (internal: ./deploy new)."""
-    parser = argparse.ArgumentParser(prog="./deploy __init")
+    """__init PRESET [--name NAME] [--force]: convert this project to the preset (internal: ./pyt new)."""
+    parser = argparse.ArgumentParser(prog="./pyt __init")
     parser.add_argument("preset", choices=presets.available())
     parser.add_argument("--name")
     parser.add_argument("--force", action="store_true")
@@ -487,7 +487,7 @@ def _monorepo_note(dest: Path, top: Path) -> None:
 
 def cmd_new(cfg: Config, args: list[str]) -> int:
     """new DIR [--preset P] [--name NAME]: copy the template to a new project."""
-    parser = argparse.ArgumentParser(prog="./deploy new")
+    parser = argparse.ArgumentParser(prog="./pyt new")
     parser.add_argument("dest")
     parser.add_argument("--preset", default="script", choices=presets.available())
     parser.add_argument("--name")
@@ -495,15 +495,15 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
     dest = user_path(ns.dest)
     resolved = dest.resolve()
     if resolved == ROOT or ROOT in resolved.parents:
-        raise DeployError("new: the destination folder cannot be inside this template")
+        raise PytError("new: the destination folder cannot be inside this template")
     if dest.exists() and not dest.is_dir():
-        raise DeployError(f"new: {dest} exists and is not a folder")
+        raise PytError(f"new: {dest} exists and is not a folder")
     if dest.is_dir() and any(dest.iterdir()):
-        raise DeployError(f"new: {dest} already exists and is not empty")
+        raise PytError(f"new: {dest} already exists and is not empty")
     # Checked here, before copying (and under --dry-run): a copy whose `init` fails is removed
     name = ns.name or presets.name_from_folder(resolved.name)
     if not config.APP_NAME.fullmatch(name):
-        raise DeployError(
+        raise PytError(
             f"new: '{name}' is not a valid app name (it may only contain {config.NAME_RULE}). "
             "Choose one with --name NAME"
         )
@@ -526,7 +526,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
             git = "and `git init -b main`"
         ui.info(
             f"  would copy this template there ({presets.copy_scope()}; no .git, environments, builds or "
-            f"caches), run `./deploy __init {ns.preset} --name {name} --force` in it {git}"
+            f"caches), run `./pyt __init {ns.preset} --name {name} --force` in it {git}"
         )
         if top is not None:
             _monorepo_note(dest, top)

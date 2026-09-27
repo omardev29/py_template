@@ -1,7 +1,7 @@
 """Tests for runner/shells.py: quoting per shell family, PTPROBE parsing, shell discovery, the
 shell-setup snippets, the launcher checks of doctor, the report and two quick real probes.
 
-The full shell x test matrix is `./deploy selftest --shells`, not pytest.
+The full shell x test matrix is `./pyt selftest --shells`, not pytest.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from runner import config, shells  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import IS_WINDOWS, ROOT  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 ALL_ARGS = shells.BASE_ARGS + shells.EXTRA_ARGS
 
@@ -70,7 +70,7 @@ def test_cmd_quote() -> None:
 def test_powershell_quote_and_encoding() -> None:
     assert shells.ps_quote("a'b") == "'a''b'"
     assert shells.ps_quote("") == "''"
-    code = "& './deploy' 'x'\nexit $LASTEXITCODE\n"
+    code = "& './pyt' 'x'\nexit $LASTEXITCODE\n"
     assert base64.b64decode(shells.ps_encoded(code)).decode("utf-16-le") == code
 
 
@@ -91,24 +91,24 @@ def test_argsets() -> None:
 def test_command_text_per_family(tmp_path: Path) -> None:
     project = tmp_path / "proj"
     posix = shells.Shell("git-dash", "posix", ("dash.exe",), interp=("C:/g/dash.exe",), mixed=True)
-    assert shells.command_text(posix, project, "root", ["a b"]) == "'C:/g/dash.exe' ./deploy 'a b'"
-    assert shells.command_text(posix, project, "sub", []).endswith("../deploy")
-    assert shells.command_text(posix, project, "abs", []).endswith(shells.sh_quote(str(project / "deploy").replace("\\", "/")))
+    assert shells.command_text(posix, project, "root", ["a b"]) == "'C:/g/dash.exe' ./pyt 'a b'"
+    assert shells.command_text(posix, project, "sub", []).endswith("../pyt")
+    assert shells.command_text(posix, project, "abs", []).endswith(shells.sh_quote(str(project / "pyt").replace("\\", "/")))
     assert shells.command_text(posix, project, "root", [], "/usr/bin:/bin").startswith("PATH=/usr/bin:/bin; export PATH; ")
 
     cmd = shells.Shell("cmd", "cmd", ("cmd.exe",))
-    assert shells.command_text(cmd, project, "root", ["with space", ""]) == '.\\deploy "with space" ""'
-    assert shells.command_text(cmd, project, "abs", []) == f'"{project / "deploy"}"'
+    assert shells.command_text(cmd, project, "root", ["with space", ""]) == '.\\pyt "with space" ""'
+    assert shells.command_text(cmd, project, "abs", []) == f'"{project / "pyt"}"'
 
     ps = shells.Shell("pwsh", "powershell", ("pwsh",))
     text = shells.command_text(ps, project, "root", ["--", "a'b"])
-    word = "./deploy" if IS_WINDOWS else "./deploy.ps1"  # on Windows ./deploy resolves to deploy.ps1
+    word = "./pyt" if IS_WINDOWS else "./pyt.ps1"  # on Windows ./pyt resolves to pyt.ps1
     assert f"& '{word}' '--' 'a''b'" in text and text.rstrip().endswith("exit $LASTEXITCODE")
-    assert shells.ps_quote(str(project / "deploy.ps1")) in shells.command_text(ps, project, "abs", [])
+    assert shells.ps_quote(str(project / "pyt.ps1")) in shells.command_text(ps, project, "abs", [])
 
     xonsh = shells.Shell("xonsh", "xonsh", ("xonsh", "--no-rc"))
     text = shells.command_text(xonsh, project, "root", ["\u00fcn", 'q"x'])
-    assert "![./deploy @(['\\xfcn', 'q\"x'])]" in text and "except subprocess.CalledProcessError" in text
+    assert "![./pyt @(['\\xfcn', 'q\"x'])]" in text and "except subprocess.CalledProcessError" in text
     assert "XONSH_SUBPROC" not in text and "RAISE" not in text  # no setting whose name xonsh changes
     assert text.isascii()
 
@@ -126,7 +126,7 @@ def test_xonsh_probe_exit_code_ignores_raise_settings(tmp_path: Path) -> None:
         pytest.skip("xonsh not installed")
     project = tmp_path / "proj"
     project.mkdir()
-    launcher = project / "deploy"
+    launcher = project / "pyt"
     launcher.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8", newline="\n")
     launcher.chmod(0o755)
     body = shells.command_text(shells.Shell("xonsh", "xonsh", (xonsh,)), project, "abs", [])
@@ -142,16 +142,16 @@ def test_invocation(tmp_path: Path) -> None:
     posix = shells.Shell("sh", "posix", ("/bin/sh",))
     inv = shells.invocation(posix, project, "root", ["__probe", "0", "0", "back\\slash"], cwd=project, scripts=tmp_path, tag="t")
     assert inv.argv == ["/bin/sh", "-c", 'eval "$PTCMD"']  # never the command itself: Cygwin mangles argv
-    assert inv.env["PTCMD"] == "./deploy '__probe' '0' '0' 'back\\slash'"
+    assert inv.env["PTCMD"] == "./pyt '__probe' '0' '0' 'back\\slash'"
 
     script = shells.Shell("niubash-shx", "posix", ("niu",), mode="script", mixed=True)
     inv = shells.invocation(script, project, "sub", ["__probe"], cwd=project, scripts=tmp_path, tag="s")
     assert inv.script is not None and inv.argv == ["niu", str(inv.script)]
-    assert inv.script.read_bytes() == b"../deploy '__probe'\n"
+    assert inv.script.read_bytes() == b"../pyt '__probe'\n"
 
     cmd = shells.Shell("cmd", "cmd", ("C:\\Windows\\system32\\cmd.exe", "/d", "/s", "/c"))
     inv = shells.invocation(cmd, project, "root", ["__probe", "with space"], cwd=project, scripts=tmp_path, tag="c")
-    assert inv.argv == 'C:\\Windows\\system32\\cmd.exe /d /s /c ".\\deploy __probe "with space""'
+    assert inv.argv == 'C:\\Windows\\system32\\cmd.exe /d /s /c ".\\pyt __probe "with space""'
 
     wsl = shells.Shell("wsl-u", "wsl", ("wsl.exe", "-d", "U"))
     inv = shells.invocation(wsl, project, "root", ["x"], cwd=tmp_path, scripts=tmp_path, tag="w")
@@ -266,11 +266,11 @@ def test_discover_posix_with_fake_which(tmp_path: Path) -> None:
 
 
 def test_describe_names_every_word_the_launcher_runs_with(tmp_path: Path) -> None:
-    """--list and the --json report said `busybox ./deploy` while the probes run `busybox sh ./deploy`."""
+    """--list and the --json report said `busybox ./pyt` while the probes run `busybox sh ./pyt`."""
     found = {"busybox": _touch(tmp_path / "busybox"), "dash": _touch(tmp_path / "dash")}
     got = {s.name: s for s in shells.discover({}, windows=False, which=found.get)}
-    assert "launcher run as `busybox sh ./deploy`" in got["busybox"].describe()
-    assert "launcher run as `dash ./deploy`" in got["dash"].describe()
+    assert "launcher run as `busybox sh ./pyt`" in got["busybox"].describe()
+    assert "launcher run as `dash ./pyt`" in got["dash"].describe()
 
 
 def test_select() -> None:
@@ -278,7 +278,7 @@ def test_select() -> None:
     assert [s.name for s in shells.select(found, ["msys2"])] == ["msys2-msys", "msys2-ucrt64"]
     assert [s.name for s in shells.select(found, ["niubash-shx", "cmd"])] == ["cmd", "niubash-shx"]
     assert len(shells.select(found, [])) == 5
-    with pytest.raises(DeployError, match="not found here: fish"):
+    with pytest.raises(PytError, match="not found here: fish"):
         shells.select(found, ["fish"])
 
 
@@ -307,15 +307,15 @@ def test_snippets_are_ascii_and_say_where_to_paste(monkeypatch: pytest.MonkeyPat
         text = shells.snippet(shell, cfg)
         assert text.isascii(), shell
         assert "\r" not in text and text.endswith("\n")
-        assert "deploy" in text and ("Paste" in text or "Save as" in text), shell
-    with pytest.raises(DeployError, match="unknown shell"):
+        assert "pyt" in text and ("Paste" in text or "Save as" in text), shell
+    with pytest.raises(PytError, match="unknown shell"):
         shells.snippet("tcsh")
 
 
 def test_a_snippet_appended_to_an_rc_file_never_joins_its_last_line(tmp_path: Path) -> None:
-    """`./deploy shell-setup bash >> ~/.bashrc` on an rc file without a final newline (VS Code and
+    """`./pyt shell-setup bash >> ~/.bashrc` on an rc file without a final newline (VS Code and
     Notepad save them so): the snippet's first comment joined the user's last line, its backticks
-    ran `deploy` and every new shell printed errors."""
+    ran `pyt` and every new shell printed errors."""
     for shell in shells.SETUP_SHELLS:
         assert shells.snippet(shell).startswith("\n"), shell
     sh = posix_sh()
@@ -323,8 +323,8 @@ def test_a_snippet_appended_to_an_rc_file_never_joins_its_last_line(tmp_path: Pa
         pytest.skip("no POSIX sh here")
     rc = tmp_path / "rc"
     rc.write_bytes(b"PT_KEEP=kept" + shells.snippet("bash").encode("ascii"))
-    r = subprocess.run([*sh, "-c", '. "$1" && printf "%s|" "$PT_KEEP" && command -v deploy', "sh", str(rc)], capture_output=True, text=True, timeout=60, check=False)
-    assert (r.stdout, r.stderr) == ("kept|deploy\n", ""), (r.stdout, r.stderr)
+    r = subprocess.run([*sh, "-c", '. "$1" && printf "%s|" "$PT_KEEP" && command -v pyt', "sh", str(rc)], capture_output=True, text=True, timeout=60, check=False)
+    assert (r.stdout, r.stderr) == ("kept|pyt\n", ""), (r.stdout, r.stderr)
 
 
 def test_snippets_stay_ascii_with_non_ascii_user_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -360,7 +360,7 @@ def test_xonsh_snippet_words_and_syntax() -> None:
     assert "--shells" in choices["selftest"] and "niubash" in choices["shell-setup"]
     assert "--method" in flags["build"]
     compile(text.replace("${...}", "{}"), "snippet", "exec")
-    assert "add_one_completer" in text and 'aliases["deploy"]' in text
+    assert "add_one_completer" in text and 'aliases["pyt"]' in text
 
 
 def _xonsh_words(cfg: Config | None) -> list[object]:
@@ -393,7 +393,7 @@ def _xonsh_completer(monkeypatch: pytest.MonkeyPatch, cfg: Config | None = None)
 
     text = shells.snippet("xonsh", cfg).replace("${...}", "{}")
     exec(compile(text, "snippet", "exec"), {"aliases": Aliases()})
-    return registered["deploy"]
+    return registered["pyt"]
 
 
 def _complete(completer: Any, line: str) -> list[str]:
@@ -408,21 +408,21 @@ def _complete(completer: Any, line: str) -> list[str]:
 
 def test_xonsh_completer_after_hooks_help_and_global_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     """hooks' subcommands (a nested [--force] in its usage), command names after `help` or `-h`,
-    and the command after global flags (`deploy -v --dry-run test <TAB>`)."""
+    and the command after global flags (`pyt -v --dry-run test <TAB>`)."""
     cfg = make({"tasks": {"gen": {"cmd": ["python", "gen.py"]}, "gen_docs": {"cmd": ["python", "docs.py"]}}})
     first, choices, _ = shells.completion_words(cfg)
     assert choices["hooks"] == ["install", "uninstall", "run", "status"]
     assert {"build", "test", "gen", "gen_docs"} <= set(choices["help"])  # task names may hold "_"
     assert set(first) - {"-v", "-q", "--dry-run", "--no-render"} <= set(choices["help"])
     complete = _xonsh_completer(monkeypatch, cfg)
-    assert _complete(complete, "deploy hooks ") == ["install", "run", "status", "uninstall"]
-    assert _complete(complete, "deploy hooks install --") == ["--force"]
-    assert "build" in _complete(complete, "deploy help ") and _complete(complete, "deploy help g") == ["gen", "gen_docs"]
-    assert "build" in _complete(complete, "deploy -h b")
-    assert _complete(complete, "deploy -v --dry-run te") == ["test"]
-    assert {"all", "cpython"} <= set(_complete(complete, "deploy -q test "))
-    assert _complete(complete, "deploy --no-render build --me") == ["--method"]
-    assert "test" in _complete(complete, "deploy te") and _complete(complete, "deploy test cpython x") == []
+    assert _complete(complete, "pyt hooks ") == ["install", "run", "status", "uninstall"]
+    assert _complete(complete, "pyt hooks install --") == ["--force"]
+    assert "build" in _complete(complete, "pyt help ") and _complete(complete, "pyt help g") == ["gen", "gen_docs"]
+    assert "build" in _complete(complete, "pyt -h b")
+    assert _complete(complete, "pyt -v --dry-run te") == ["test"]
+    assert {"all", "cpython"} <= set(_complete(complete, "pyt -q test "))
+    assert _complete(complete, "pyt --no-render build --me") == ["--method"]
+    assert "test" in _complete(complete, "pyt te") and _complete(complete, "pyt test cpython x") == []
     # the skipped options are exactly the global options the runner takes before a command
     from runner import cli, proc, ui
 
@@ -431,7 +431,7 @@ def test_xonsh_completer_after_hooks_help_and_global_flags(monkeypatch: pytest.M
     monkeypatch.setitem(cli._OPTS, "no_render", False)
     for flag in shells.GLOBAL_OPTIONS:
         assert cli._parse_globals([flag, "x"])[-1] == "x", flag
-    with pytest.raises(DeployError):
+    with pytest.raises(PytError):
         cli._parse_globals(["--nope", "x"])
 
 
@@ -493,7 +493,7 @@ def test_snippets_keep_the_launcher_contract() -> None:
     assert "PYTHONHOME: ''" in nu and "PYTHONPATH: ''" in nu and "UV_WORKING_DIR: '.'" in nu
     assert "^$uv run --quiet --script $script ...$rest" in nu
     # Windows: only a real uv.exe (a uv.cmd/uv.bat shim would go through cmd.exe), else the launcher
-    assert "let uv = if $windows { 'uv.exe' } else { 'uv' }" in nu and "deploy.cmd" in nu
+    assert "let uv = if $windows { 'uv.exe' } else { 'uv' }" in nu and "pyt.cmd" in nu
     xonsh = shells.snippet("xonsh")
     assert '[uv, "run", "--quiet", "--script", str(script), *args]' in xonsh
 
@@ -515,7 +515,7 @@ def test_xonsh_snippet_says_which_variables_it_keeps() -> None:
 def test_xonsh_snippet_takes_only_a_real_uv_exe_on_windows(windows: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     """On Windows shutil.which('uv') tries every PATHEXT in each folder, so a uv.cmd shim in an
     earlier folder won and cmd.exe parsed the arguments again: the alias asks for uv.exe (like
-    the launchers and the Neovim plugin) and falls back to deploy.cmd without one."""
+    the launchers and the Neovim plugin) and falls back to pyt.cmd without one."""
     import types
 
     text = shells.snippet("xonsh").split("\n\nif hasattr(aliases")[0].replace("${...}", "_PT_ENV")
@@ -531,14 +531,14 @@ def test_xonsh_snippet_takes_only_a_real_uv_exe_on_windows(windows: bool, monkey
     namespace["_pt_os"] = types.SimpleNamespace(name="nt" if windows else "posix", pathsep=";" if windows else ":", getuid=lambda: uid)
     namespace["_pt_shutil"] = types.SimpleNamespace(which=which)
     monkeypatch.chdir(ROOT)
-    argv_of = namespace["_pt_deploy_argv"]
+    argv_of = namespace["_pt_pyt_argv"]
     assert callable(argv_of)
     found: str | None = "C:\\bin\\uv.exe" if windows else "/usr/bin/uv"
     argv, why = argv_of(["x"])
     assert asked == ["uv.exe" if windows else "uv"] and argv[:2] == [found, "run"] and not why, (asked, argv)
     found = None
     argv, why = argv_of(["x"])
-    assert argv == [str(ROOT / ("deploy.cmd" if windows else "deploy")), "x"], argv
+    assert argv == [str(ROOT / ("pyt.cmd" if windows else "pyt")), "x"], argv
 
 
 # --- the snippets, executed in their own shells (skipped where a shell is missing) -----------------
@@ -631,8 +631,8 @@ def test_fish_snippet_runs(tmp_path: Path) -> None:
     sub = _sub()
     q = shells.fish_quote
     code = (
-        f"source {q(str(snip))}; cd {q(str(sub))}; deploy __probe 7 0 'a b' '' '$HOME'; echo RC=$status; "
-        f"cd {q(str(_away(tmp_path)))}; deploy x; echo RC2=$status"
+        f"source {q(str(snip))}; cd {q(str(sub))}; pyt __probe 7 0 'a b' '' '$HOME'; echo RC=$status; "
+        f"cd {q(str(_away(tmp_path)))}; pyt x; echo RC2=$status"
     )
     r = _snippet_run([fish, "--no-config", "-c", code], tmp_path)
     probes = _probe_lines(r.stdout)
@@ -643,7 +643,7 @@ def test_fish_snippet_runs(tmp_path: Path) -> None:
 
 def test_fish_snippet_needs_no_path_builtin(tmp_path: Path) -> None:
     """fish before 3.5 (Ubuntu 22.04's 3.3, Debian 11's 3.1) has no `path` builtin: the walk-up
-    never left the first folder, and `deploy` from src/ said there was no project. A `path` that
+    never left the first folder, and `pyt` from src/ said there was no project. A `path` that
     fails stands in for such a fish."""
     if IS_WINDOWS:
         pytest.skip("fish runs in MSYS2/Cygwin on Windows")
@@ -653,7 +653,7 @@ def test_fish_snippet_needs_no_path_builtin(tmp_path: Path) -> None:
     q = shells.fish_quote
     code = (
         "function path; echo 'fish: Unknown command: path' >&2; return 127; end; "
-        f"source {q(str(snip))}; cd {q(str(sub))}; deploy __probe 7 0 x; echo RC=$status"
+        f"source {q(str(snip))}; cd {q(str(sub))}; pyt __probe 7 0 x; echo RC=$status"
     )
     r = _snippet_run([fish, "--no-config", "-c", code], tmp_path)
     probes = _probe_lines(r.stdout)
@@ -671,11 +671,11 @@ def test_pwsh_snippet_runs(tmp_path: Path) -> None:
     code = "\n".join([
         f". {shells.ps_quote(str(snip))}",
         f"Set-Location -LiteralPath {shells.ps_quote(str(sub))}",
-        "deploy __probe 7 0 'a b' '' '*' -X:utf8",
+        "pyt __probe 7 0 'a b' '' '*' -X:utf8",
         "'RC=' + $LASTEXITCODE",
-        "'ping', 'two' | deploy __probe 0 1 piped",
+        "'ping', 'two' | pyt __probe 0 1 piped",
         f"Set-Location -LiteralPath {shells.ps_quote(str(_away(tmp_path)))}",
-        "deploy x",
+        "pyt x",
         "'RC2=' + $LASTEXITCODE",
         "exit 0",
     ])  # fmt: skip
@@ -699,14 +699,14 @@ def test_xonsh_snippet_runs_and_completes(tmp_path: Path) -> None:
         "$XONSH_SUBPROC_RAISE_ERROR = False",
         f"source {ascii(str(snip))}",
         f"cd {ascii(str(sub))}",
-        "_pt_r = ![deploy __probe 7 0 'a b' '']",
+        "_pt_r = ![pyt __probe 7 0 'a b' '']",
         "print('RC=' + str(_pt_r.returncode))",
         "from xonsh.completer import Completer",
-        "for _pt_line in ('deploy te', 'deploy test ', 'deploy build --'):",
+        "for _pt_line in ('pyt te', 'pyt test ', 'pyt build --'):",
         "    _pt_c, _ = Completer().complete(_pt_line.split(' ')[-1], _pt_line, len(_pt_line) - len(_pt_line.split(' ')[-1]), len(_pt_line), {}, multiline_text=_pt_line, cursor_index=len(_pt_line))",
         "    print('COMP ' + _pt_line + ' => ' + ' '.join(sorted(str(c) for c in _pt_c)))",
         f"cd {ascii(str(_away(tmp_path)))}",
-        "_pt_r = ![deploy x]",
+        "_pt_r = ![pyt x]",
         "print('RC2=' + str(_pt_r.returncode))",
     ])  # fmt: skip
     r = _snippet_run([xonsh, "--no-rc", "-c", code], tmp_path)
@@ -715,9 +715,9 @@ def test_xonsh_snippet_runs_and_completes(tmp_path: Path) -> None:
     _assert_probe(probes[0], ["a b", ""], sub)
     assert "RC=7" in r.stdout and "RC2=2" in r.stdout, r.stdout + r.stderr
     comps = {line.split(" => ")[0][5:]: line.split(" => ")[1].split() for line in r.stdout.splitlines() if line.startswith("COMP ")}
-    assert "test" in comps["deploy te"] and "gen" not in comps["deploy te"], comps
-    assert {"all", "cpython", "mypyc", "pypy"} <= set(comps["deploy test "]), comps
-    assert "--method" in comps["deploy build --"], comps
+    assert "test" in comps["pyt te"] and "gen" not in comps["pyt te"], comps
+    assert {"all", "cpython", "mypyc", "pypy"} <= set(comps["pyt test "]), comps
+    assert "--method" in comps["pyt build --"], comps
 
 
 def test_nu_snippet_runs(tmp_path: Path) -> None:
@@ -725,20 +725,20 @@ def test_nu_snippet_runs(tmp_path: Path) -> None:
     nu = _shell_for_snippet("nu", (0, 87))
     snip = _snippet_file(tmp_path, "nu", ".nu")
     sub = _sub()
-    run = [nu, "--no-config-file", "-c", f"source {shells.nu_quote(str(snip))}; cd {shells.nu_quote(str(sub))}; deploy __probe 7 0 'a b' ''"]
+    run = [nu, "--no-config-file", "-c", f"source {shells.nu_quote(str(snip))}; cd {shells.nu_quote(str(sub))}; pyt __probe 7 0 'a b' ''"]
     r = _snippet_run(run, tmp_path, _python_traps(tmp_path))
     probes = _probe_lines(r.stdout)
     assert len(probes) == 1 and r.returncode == 7, r.stdout + r.stderr
     _assert_probe(probes[0], ["a b", ""], sub)
     assert probes[0]["launcher"] == "nu"
-    r = _snippet_run([nu, "--no-config-file", "-c", f"source {shells.nu_quote(str(snip))}; cd {shells.nu_quote(str(_away(tmp_path)))}; deploy x"], tmp_path)
+    r = _snippet_run([nu, "--no-config-file", "-c", f"source {shells.nu_quote(str(snip))}; cd {shells.nu_quote(str(_away(tmp_path)))}; pyt x"], tmp_path)
     assert r.returncode != 0 and "no .pytemplate" in r.stdout + r.stderr, r.stdout + r.stderr
     if IS_WINDOWS or any(Path(d, "uv").exists() for d in ("/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin")):
         return  # uv cannot be hidden from the launcher here
     # no uv on PATH: the launcher (it searches the install folders, then prints how to install uv)
     home = tmp_path / "home"
     home.mkdir()
-    code = f"source {shells.nu_quote(str(snip))}; cd {shells.nu_quote(str(sub))}; deploy __probe 3 0 x"
+    code = f"source {shells.nu_quote(str(snip))}; cd {shells.nu_quote(str(sub))}; pyt __probe 3 0 x"
     r = subprocess.run([nu, "--no-config-file", "-c", code], env={"PATH": "/usr/bin:/bin", "HOME": str(home), "CI": "1"}, capture_output=True, text=True, timeout=180, check=False)
     assert r.returncode == 127 and "uv not found" in r.stderr, r.stdout + r.stderr
 
@@ -748,7 +748,7 @@ def test_posix_function_stops_at_the_top(pwd: str) -> None:
     sh = posix_sh()
     if sh is None:
         pytest.skip("no POSIX sh here")
-    code = shells.POSIX_FUNCTION + f"\nPWD={shells.sh_quote(pwd)}\ndeploy x\nprintf 'rc=%s\\n' \"$?\"\n"
+    code = shells.POSIX_FUNCTION + f"\nPWD={shells.sh_quote(pwd)}\npyt x\nprintf 'rc=%s\\n' \"$?\"\n"
     r = subprocess.run([*sh, "-c", 'eval "$PTCMD"'], env=dict(os.environ, PTCMD=code), capture_output=True, timeout=30)
     assert b"rc=2" in r.stdout, r.stderr
 
@@ -757,14 +757,14 @@ def test_posix_function_runs_the_enclosing_launcher(tmp_path: Path) -> None:
     sh = posix_sh()
     if sh is None:
         pytest.skip("no POSIX sh here")
-    _touch(tmp_path / "proj" / ".pytemplate" / "deploy.py")
+    _touch(tmp_path / "proj" / ".pytemplate" / "pyt.py")
     nested = tmp_path / "proj" / "src" / "pkg"
     nested.mkdir(parents=True)
-    launcher = tmp_path / "proj" / "deploy"
+    launcher = tmp_path / "proj" / "pyt"
     launcher.write_bytes(b"#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n")
     launcher.chmod(0o755)
     mixed = str(nested).replace("\\", "/")
-    code = shells.POSIX_FUNCTION + f"\nPWD={shells.sh_quote(mixed)}\ndeploy 'a b' ''\n"
+    code = shells.POSIX_FUNCTION + f"\nPWD={shells.sh_quote(mixed)}\npyt 'a b' ''\n"
     r = subprocess.run([*sh, "-c", 'eval "$PTCMD"'], env=dict(os.environ, PTCMD=code), capture_output=True, timeout=30, cwd=nested)
     assert r.stdout.decode().splitlines() == ["<a b>", "<>"], r.stderr
 
@@ -820,7 +820,7 @@ def test_doctor_counts_an_execution_policy_only_for_the_powershell_in_use(
     launcher: str | None, expected: list[bool | None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Windows PowerShell 5.1 is Restricted by default on client Windows: doctor exited 1 there for
-    every user of cmd, Git Bash, xonsh or PowerShell 7, and the hint's own way out (.\\deploy.cmd)
+    every user of cmd, Git Bash, xonsh or PowerShell 7, and the hint's own way out (.\\pyt.cmd)
     never cleared it. Only the PowerShell that started this run counts; the other is a note."""
     monkeypatch.setattr(shells, "IS_WINDOWS", True)
     monkeypatch.setattr(shells, "IS_WSL", False)
@@ -835,10 +835,10 @@ def test_doctor_counts_an_execution_policy_only_for_the_powershell_in_use(
     shells.doctor(lambda ok, label, hint: lines.append((ok, label, hint)))
     policy = [(ok, label, hint) for ok, label, hint in lines if "ExecutionPolicy" in label]
     assert [ok for ok, _, _ in policy] == expected, policy
-    assert "Set-ExecutionPolicy" in policy[0][2] and "deploy.cmd" in policy[0][2]
+    assert "Set-ExecutionPolicy" in policy[0][2] and "pyt.cmd" in policy[0][2]
 
 
-def test_ps_policies_name_the_edition_deploy_ps1_reports() -> None:
+def test_ps_policies_name_the_edition_pyt_ps1_reports() -> None:
     """The editions doctor compares with PYTEMPLATE_LAUNCHER are $PSVersionTable.PSEdition's."""
     pwsh = shutil.which("pwsh")
     if not pwsh:
@@ -850,21 +850,21 @@ def test_ps_policies_name_the_edition_deploy_ps1_reports() -> None:
 
 def test_launcher_problems() -> None:
     good_sh = b"#!/bin/sh\nexec uv run\n"
-    assert shells.launcher_problems("deploy", good_sh, "100755") == []
-    assert shells.launcher_problems("deploy", good_sh, None) == []
-    problems = dict(shells.launcher_problems("deploy", b"#!/usr/bin/env bash\r\nx\r\n", "100644"))
+    assert shells.launcher_problems("pyt", good_sh, "100755") == []
+    assert shells.launcher_problems("pyt", good_sh, None) == []
+    problems = dict(shells.launcher_problems("pyt", b"#!/usr/bin/env bash\r\nx\r\n", "100644"))
     assert set(problems) == {"CRLF line endings", "the first line is not #!/bin/sh", "git mode 100644"}
-    assert problems["git mode 100644"] == "git update-index --chmod=+x deploy"
+    assert problems["git mode 100644"] == "git update-index --chmod=+x pyt"
     assert "git add --renormalize ." in problems["CRLF line endings"]
-    assert shells.launcher_problems("deploy.cmd", b"@echo off\r\nexit /b 0\r\n", None) == []
-    assert [p for p, _ in shells.launcher_problems("deploy.cmd", b"@echo off\nexit\r\n", None)] == ["not CRLF (labels and goto break with LF)"]
-    assert shells.launcher_problems("deploy.ps1", b"#!/usr/bin/env pwsh\n", "100755") == []
-    bom = [p for p, _ in shells.launcher_problems("deploy.ps1", b"\xef\xbb\xbf# x\n", "100755")]
+    assert shells.launcher_problems("pyt.cmd", b"@echo off\r\nexit /b 0\r\n", None) == []
+    assert [p for p, _ in shells.launcher_problems("pyt.cmd", b"@echo off\nexit\r\n", None)] == ["not CRLF (labels and goto break with LF)"]
+    assert shells.launcher_problems("pyt.ps1", b"#!/usr/bin/env pwsh\n", "100755") == []
+    bom = [p for p, _ in shells.launcher_problems("pyt.ps1", b"\xef\xbb\xbf# x\n", "100755")]
     assert bom == ["non-ASCII bytes (a UTF-8 BOM)"]
 
 
 def test_real_launchers_pass_the_content_checks() -> None:
-    for name in ("deploy", "deploy.cmd", "deploy.ps1"):
+    for name in ("pyt", "pyt.cmd", "pyt.ps1"):
         problems = shells.launcher_problems(name, (ROOT / name).read_bytes(), None)
         assert problems == [], (name, problems)
 
@@ -899,7 +899,7 @@ def test_parse_options() -> None:
     assert (opts.jobs, opts.timeout, opts.as_json, opts.keep, opts.list_only) == (2, 5.0, True, True, False)
     assert shells.parse_options(["--project", "x"]).project == "x"
     for bad in (["--tests", "T9"], ["--jobs", "0"], ["--nope"], ["--project"]):
-        with pytest.raises(DeployError):
+        with pytest.raises(PytError):
             shells.parse_options(bad)
 
 
@@ -907,7 +907,7 @@ def test_parse_options() -> None:
 @pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "1e400", "NaN"])
 def test_a_number_that_is_not_finite_is_a_usage_error(key: str, raw: str) -> None:
     """`--jobs nan` (or inf, 1e400) passed float() and ended in an internal-error traceback."""
-    with pytest.raises(DeployError, match="not a finite number") as err:
+    with pytest.raises(PytError, match="not a finite number") as err:
         shells.parse_options([key, raw])
     assert err.value.code == 2
 
@@ -915,19 +915,19 @@ def test_a_number_that_is_not_finite_is_a_usage_error(key: str, raw: str) -> Non
 def test_a_timeout_the_waits_cannot_hold_is_a_usage_error() -> None:
     """Windows waits take a 32-bit count of milliseconds: a bigger timeout raised OverflowError."""
     assert shells.parse_options(["--timeout", str(shells.MAX_TIMEOUT)]).timeout == shells.MAX_TIMEOUT
-    with pytest.raises(DeployError, match="at most"):
+    with pytest.raises(PytError, match="at most"):
         shells.parse_options(["--timeout", "5e6"])
 
 
 @pytest.mark.parametrize("args", [["--tests", ","], ["--tests=, ,"], ["sh", "--tests", " "]])
 def test_a_test_list_that_names_no_test_is_a_usage_error(args: list[str]) -> None:
     """`--tests ,` left no test and the suite reported `ok ... 0 passed, 0 failed`, exit 0."""
-    with pytest.raises(DeployError, match="names no test") as err:
+    with pytest.raises(PytError, match="names no test") as err:
         shells.parse_options(args)
     assert err.value.code == 2
 
 
-# --- quick real probes (the full matrix is ./deploy selftest --shells) --------------------------------
+# --- quick real probes (the full matrix is ./pyt selftest --shells) --------------------------------
 
 
 def _context(tmp_path: Path) -> shells.Context:
@@ -956,7 +956,7 @@ def test_a_wsl_distribution_without_its_own_uv_is_skipped(tmp_path: Path) -> Non
     its own (installed for other work) the Linux launcher printed the install hints and exited
     127, and every test FAILed (exit 1). It is SKIP with the reason; one with uv is tested."""
     no_uv = tmp_path / "wsl-no-uv"
-    no_uv.write_text("#!/bin/sh\nprintf '%s\\n' 'deploy: uv not found (https://docs.astral.sh/uv/).' >&2\nexit 127\n", encoding="utf-8")
+    no_uv.write_text("#!/bin/sh\nprintf '%s\\n' 'pyt: uv not found (https://docs.astral.sh/uv/).' >&2\nexit 127\n", encoding="utf-8")
     # `wsl -d NAME --cd DIR -e sh -c CMD`: run it here, where uv is
     with_uv = tmp_path / "wsl-uv"
     with_uv.write_text('#!/bin/sh\nshift 2\nif [ "$1" = --cd ]; then cd "$2" || exit 9; shift 2; fi\nif [ "$1" = -e ]; then shift; fi\nexec "$@"\n', encoding="utf-8")
@@ -999,15 +999,15 @@ def test_probe_reads_stdin_bytes(tmp_path: Path) -> None:
 
 def _planted_project(tmp_path: Path) -> Path:
     """A folder another user (nobody) owns and everybody can write, holding their own
-    .pytemplate/deploy.py and launchers: what anyone can make of /tmp/.pytemplate."""
+    .pytemplate/pyt.py and launchers: what anyone can make of /tmp/.pytemplate."""
     import pwd
 
     nobody = pwd.getpwnam("nobody")
     shared = tmp_path / "shared"
     (shared / ".pytemplate").mkdir(parents=True)
-    (shared / ".pytemplate" / "deploy.py").write_text("print('PWNED by the planted deploy.py')\n", encoding="utf-8")
-    (shared / "deploy").write_text("#!/bin/sh\necho 'PWNED by the planted deploy'\n", encoding="utf-8")
-    (shared / "deploy.ps1").write_text("Write-Output 'PWNED by the planted deploy.ps1'\n", encoding="utf-8")
+    (shared / ".pytemplate" / "pyt.py").write_text("print('PWNED by the planted pyt.py')\n", encoding="utf-8")
+    (shared / "pyt").write_text("#!/bin/sh\necho 'PWNED by the planted pyt'\n", encoding="utf-8")
+    (shared / "pyt.ps1").write_text("Write-Output 'PWNED by the planted pyt.ps1'\n", encoding="utf-8")
     for path in (shared, shared / ".pytemplate", *shared.rglob("*")):
         os.chown(path, nobody.pw_uid, nobody.pw_gid)
     shared.chmod(0o777)
@@ -1019,21 +1019,21 @@ def _planted_project(tmp_path: Path) -> Path:
 @pytest.mark.skipif(IS_WINDOWS or not hasattr(os, "geteuid") or os.geteuid() != 0, reason="needs root to make files another user owns")
 def test_snippets_never_run_another_users_project(tmp_path: Path) -> None:
     """The shell-setup functions walk up from the current folder: from a folder of the user's
-    own below /tmp they ran the /tmp/.pytemplate/deploy.py (or ./deploy) another user had
+    own below /tmp they ran the /tmp/.pytemplate/pyt.py (or ./pyt) another user had
     planted there, as this user. A project another user owns is refused, with how to run it."""
     victim = _planted_project(tmp_path)
     runs: dict[str, list[str]] = {}
     for shell in ("bash", "zsh", "dash"):
         if shutil.which(shell):
             snip = _snippet_file(tmp_path, "bash", ".sh")
-            runs[shell] = [shell, "-c", f". {shlex.quote(str(snip))}; deploy x; echo RC=$?"]
+            runs[shell] = [shell, "-c", f". {shlex.quote(str(snip))}; pyt x; echo RC=$?"]
     if shutil.which("fish"):
         snip = _snippet_file(tmp_path, "fish", ".fish")
-        runs["fish"] = ["fish", "--no-config", "-c", f"source {shells.fish_quote(str(snip))}; deploy x; echo RC=$status"]
+        runs["fish"] = ["fish", "--no-config", "-c", f"source {shells.fish_quote(str(snip))}; pyt x; echo RC=$status"]
     if shutil.which("pwsh"):
         snip = tmp_path / "snippet.ps1"
         snip.write_bytes(shells.snippet("pwsh").encode("ascii"))
-        runs["pwsh"] = ["pwsh", "-NoProfile", "-NonInteractive", "-Command", f". {shells.ps_quote(str(snip))}; deploy x; 'RC=' + $LASTEXITCODE"]
+        runs["pwsh"] = ["pwsh", "-NoProfile", "-NonInteractive", "-Command", f". {shells.ps_quote(str(snip))}; pyt x; 'RC=' + $LASTEXITCODE"]
     assert runs
     for shell, argv in runs.items():
         r = _snippet_run(argv, victim)

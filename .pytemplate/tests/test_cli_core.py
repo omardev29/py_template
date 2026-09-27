@@ -33,9 +33,9 @@ sys.path.insert(0, str(TEMPLATE_DIR))
 from runner import cli, cmd_dev, cmd_env, cmd_mode, config, e2e, envs, lintc, mypyc, nvimtest, presets, proc, render, shells, tasks, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import BUILD, DIST, ROOT, SRC  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
-DEPLOY_PY = TEMPLATE_DIR / "deploy.py"
+PYT_PY = TEMPLATE_DIR / "pyt.py"
 IS_WINDOWS = os.name == "nt"
 posix = pytest.mark.skipif(IS_WINDOWS, reason="POSIX signals, pipes and exec bits")
 needs_uv = pytest.mark.skipif(shutil.which("uv") is None and not os.environ.get("UV"), reason="uv not found")
@@ -49,7 +49,7 @@ def make(data: dict[str, Any]) -> Config:
 
 def own(data: dict[str, Any]) -> Config:
     """make() with this project's app name and compile.modules: code that reads src/ (the
-    compiled modules) finds them in any project made with ./deploy new, not only in myapp."""
+    compiled modules) finds them in any project made with ./pyt new, not only in myapp."""
     real = config.load(set())
     app = {"name": real.app.name, **data.get("app", {})}
     return make({**data, "app": app, "compile": {"modules": list(real.compile.modules), **data.get("compile", {})}})
@@ -62,7 +62,7 @@ def unchecked(data: dict[str, Any]) -> Config:
 
 
 def child_env() -> dict[str, str]:
-    """The environment of a child ./deploy: nothing of the uv run that started pytest."""
+    """The environment of a child ./pyt: nothing of the uv run that started pytest."""
     drop = ("UV", "VIRTUAL_ENV", "PYTHONUNBUFFERED", "PYTHONPATH", "PYTHONHOME")
     env = {k: v for k, v in os.environ.items() if k not in drop and not k.startswith(("PYTEMPLATE_", "UV_"))}
     env.update(NO_COLOR="1", PYTHONDONTWRITEBYTECODE="1")
@@ -108,7 +108,7 @@ def test_global_options_only_before_the_command() -> None:
 
 @pytest.mark.parametrize("flag", ["--method", "-x", "--verbose=1", "-vq", "-"])
 def test_an_unknown_global_option_is_a_usage_error(flag: str) -> None:
-    with pytest.raises(DeployError, match="AFTER the command") as e:
+    with pytest.raises(PytError, match="AFTER the command") as e:
         cli._parse_globals([flag, "build"])
     assert e.value.code == 2
 
@@ -144,8 +144,8 @@ def test_quiet_without_a_dry_run() -> None:
 @pytest.mark.parametrize(
     ("raised", "code", "stderr"),
     [
-        (DeployError("bad config"), 2, "error: bad config"),
-        (DeployError("no uv", 3), 3, "error: no uv"),
+        (PytError("bad config"), 2, "error: bad config"),
+        (PytError("no uv", 3), 3, "error: no uv"),
         (proc.CommandFailed(["uv", "sync"], 7), 7, "error: failed (exit code 7): uv sync"),
         (proc.CommandFailed(["x"], -9), 137, "failed (exit code 137)"),
         (KeyboardInterrupt(), 130, "error: interrupted"),
@@ -189,7 +189,7 @@ def test_main_maps_every_outcome_to_its_exit_code(
 def test_a_scratch_folder_another_user_left_is_a_clear_error(
     filename: Path, code: int, stderr: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`sudo ./deploy check` leaves .build/cfg owned by root: the next `./deploy check` crashed
+    """`sudo ./pyt check` leaves .build/cfg owned by root: the next `./pyt check` crashed
     with a PermissionError traceback and "internal runner error"."""
 
     def dispatch(_argv: list[str]) -> int:
@@ -201,7 +201,7 @@ def test_a_scratch_folder_another_user_left_is_a_clear_error(
     assert stderr in err
     assert ("Traceback" in err) is (code == 1)
     if code == 2:
-        assert "./deploy clean" in err and "sudo" in err
+        assert "./pyt clean" in err and "sudo" in err
 
 
 @posix
@@ -252,7 +252,7 @@ def test_probe_needs_no_config(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
 # apply/setup render themselves at the end (a refused apply writes nothing); rename renders only
 # after its checks, never with a hand-edited app.name before the dirty-tree check; the internal
 # __init renders with --force at its end (rendering the copy first, `new` warned about the source
-# project's hand-edited .vscode/settings.json: "use ./deploy render --force")
+# project's hand-edited .vscode/settings.json: "use ./pyt render --force")
 NEVER_RENDER = {"clean", "render", "new", "pyz-merge", "tasks", "shell-setup", "selftest", "help", "hooks", "setup", "apply", "rename", "__init"}
 
 
@@ -285,21 +285,21 @@ def test_render_runs_before_builtins_and_tasks_unless_disabled(monkeypatch: pyte
 
 def test_an_unknown_command_is_a_usage_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config, "load", lambda *_a, **_kw: make({"tasks": {"ci": {"deps": ["check"]}}}))
-    with pytest.raises(DeployError, match="unknown command: sycn") as e:
+    with pytest.raises(PytError, match="unknown command: sycn") as e:
         cli.dispatch(["sycn"])
     assert e.value.code == 2
 
 
 def test_help_needs_no_valid_config(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     def broken(*_a: Any, **_kw: Any) -> Config:
-        raise DeployError("pytemplate.toml is not valid TOML: x")
+        raise PytError("pytemplate.toml is not valid TOML: x")
 
     monkeypatch.setattr(config, "load", broken)
     assert cli.dispatch([]) == 0  # the full help, without the [tasks] block
     assert "Development:" in capsys.readouterr().out
     assert cli.dispatch(["check", "--help"]) == 0
-    assert capsys.readouterr().out.startswith("./deploy check ")
-    with pytest.raises(DeployError, match="not valid TOML"):  # it cannot tell whether 'ci' is a task
+    assert capsys.readouterr().out.startswith("./pyt check ")
+    with pytest.raises(PytError, match="not valid TOML"):  # it cannot tell whether 'ci' is a task
         cli.cmd_help(None, ["ci"])
 
 
@@ -311,7 +311,7 @@ def test_help_for_every_command(name: str, monkeypatch: pytest.MonkeyPatch, caps
     monkeypatch.setattr(config, "load", fail)  # a builtin's help needs no config
     assert cli.cmd_help(None, [name]) == 0
     c = cli.COMMANDS[name]
-    assert capsys.readouterr().out.splitlines()[:2] == [f"./deploy {name} {c.usage}".rstrip(), f"  {c.summary}"]
+    assert capsys.readouterr().out.splitlines()[:2] == [f"./pyt {name} {c.usage}".rstrip(), f"  {c.summary}"]
 
 
 def _help_cases() -> list[tuple[str, list[str]]]:
@@ -329,7 +329,7 @@ def test_the_help_option_after_a_command_shows_its_help(
 ) -> None:
     monkeypatch.setattr(config, "load", fail)  # nothing runs, not even the config load
     assert cli.main([name, *args]) == 0
-    assert capsys.readouterr().out.splitlines()[0] == f"./deploy {name} {cli.COMMANDS[name].usage}".rstrip()
+    assert capsys.readouterr().out.splitlines()[0] == f"./pyt {name} {cli.COMMANDS[name].usage}".rstrip()
 
 
 @pytest.mark.parametrize("name", sorted(cli.HELP_PASSES_THROUGH))
@@ -350,7 +350,7 @@ def test_the_help_option_after_a_task(monkeypatch: pytest.MonkeyPatch, capsys: p
     ran: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(tasks, "run_task", lambda _cfg, name, args, _dispatch: ran.append((name, args)) or 0)
     assert cli.dispatch(["ci", "--help"]) == 0  # deps only: nothing to pass -h on to
-    assert capsys.readouterr().out.startswith("./deploy ci\n")
+    assert capsys.readouterr().out.startswith("./pyt ci\n")
     assert ran == []
     assert cli.dispatch(["gen", "-h"]) == 0  # a task with a cmd passes it on to its program
     assert ran == [("gen", ["-h"])]
@@ -368,12 +368,12 @@ def test_help_for_a_task(capsys: pytest.CaptureFixture[str]) -> None:
     )
     assert cli.cmd_help(cfg, ["ci"]) == 0
     out = capsys.readouterr().out
-    assert out.splitlines()[0] == "./deploy ci"
+    assert out.splitlines()[0] == "./pyt ci"
     assert "check all, test all" in out and "no arguments" in out
     assert "Development:" not in out  # not the full help
     assert cli.cmd_help(cfg, ["gen"]) == 0
     out = capsys.readouterr().out
-    assert out.splitlines()[:2] == ["./deploy gen [args...]", "  Generate the assets"]
+    assert out.splitlines()[:2] == ["./pyt gen [args...]", "  Generate the assets"]
     for text in ("python gen.py {backend} 'a b'", "(uv = false)", "cwd      src", "env      SEED=42"):
         assert text in out
     assert cli.cmd_help(cfg, ["dev"]) == 0
@@ -397,16 +397,16 @@ def test_the_full_help_describes_every_task(monkeypatch: pytest.MonkeyPatch, cap
 )
 def test_help_never_ignores_a_typo(args: list[str], message: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config, "load", lambda *_a, **_kw: make({"tasks": {"ci": {"deps": ["check"]}}}))
-    with pytest.raises(DeployError, match=re.escape(message)) as e:
+    with pytest.raises(PytError, match=re.escape(message)) as e:
         cli.cmd_help(None, args)
     assert e.value.code == 2
 
 
 def test_help_init_gives_the_hint_of_init(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`./deploy help init` said only "unknown command", while `./deploy init` names the way out;
+    """`./pyt help init` said only "unknown command", while `./pyt init` names the way out;
     a [tasks] entry named init is described instead."""
     monkeypatch.setattr(config, "load", lambda *_a, **_kw: make({}))
-    with pytest.raises(DeployError, match=re.escape("./deploy new DIR --preset P")) as e:
+    with pytest.raises(PytError, match=re.escape("./pyt new DIR --preset P")) as e:
         cli.cmd_help(None, ["init"])
     assert e.value.code == 2 and "unknown command" not in str(e.value)
     monkeypatch.setattr(config, "load", lambda *_a, **_kw: make({"tasks": {"init": {"cmd": ["python", "-c", "pass"]}}}))
@@ -415,7 +415,7 @@ def test_help_init_gives_the_hint_of_init(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_help_of_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.cmd_help(None, ["-h"]) == 0
-    assert capsys.readouterr().out.startswith("./deploy help [COMMAND]\n")
+    assert capsys.readouterr().out.startswith("./pyt help [COMMAND]\n")
 
 
 # === 5. every command rejects what it does not understand ============================================
@@ -489,13 +489,13 @@ def test_a_dry_run_never_starts_a_selftest_suite(suite: str, monkeypatch: pytest
     for module in (shells, nvimtest, e2e):
         monkeypatch.setattr(module, "selftest", fail)
     monkeypatch.setattr(proc, "DRY_RUN", True)
-    with pytest.raises(DeployError, match="has no --dry-run") as e:
+    with pytest.raises(PytError, match="has no --dry-run") as e:
         cli.cmd_selftest(make({}), [suite, "script"])
     assert e.value.code == 2
 
 
 def test_the_tasks_command_takes_no_arguments() -> None:
-    with pytest.raises(DeployError, match="tasks: unrecognized arguments: ci") as e:
+    with pytest.raises(PytError, match="tasks: unrecognized arguments: ci") as e:
         cli.cmd_tasks(make({}), ["ci"])
     assert e.value.code == 2
 
@@ -548,7 +548,7 @@ def test_a_signal_death_is_128_plus_n(sig: str, tmp_path: Path) -> None:
 
 
 def test_a_missing_program_is_a_missing_requirement(tmp_path: Path) -> None:
-    with pytest.raises(DeployError, match="program not found") as e:
+    with pytest.raises(PytError, match="program not found") as e:
         proc.run([str(tmp_path / "no-such-program")], echo=False)
     assert e.value.code == 3
 
@@ -564,7 +564,7 @@ def test_a_program_that_cannot_start_is_a_clear_error(tmp_path: Path) -> None:
     folder = tmp_path / "folder"
     folder.mkdir()
     for program in (noexec, noshebang, folder):
-        with pytest.raises(DeployError) as e:
+        with pytest.raises(PytError) as e:
             proc.run([str(program)], echo=False)
         assert e.value.code == 2
         assert "cannot run" in str(e.value) and program.name in str(e.value)
@@ -580,22 +580,22 @@ def test_a_script_whose_interpreter_is_missing_names_it(tmp_path: Path) -> None:
     bad.write_text("#!/nonexistent/interp -x\necho hi\n", encoding="utf-8")
     bad.chmod(0o755)
     for argv, cwd in (([str(bad)], None), (["tools/bad.sh"], tmp_path)):  # absolute, and relative to cwd
-        with pytest.raises(DeployError) as e:
+        with pytest.raises(PytError) as e:
             proc.run(argv, cwd=cwd, echo=False)
         assert e.value.code == 3
         assert "the interpreter of its #! line was not found: /nonexistent/interp" in str(e.value)
     env = proc.base_env()
     env["PATH"] = f"{tools}{os.pathsep}{env['PATH']}"
-    with pytest.raises(DeployError, match=r"cannot run bad\.sh: the interpreter of its #! line was not found"):
+    with pytest.raises(PytError, match=r"cannot run bad\.sh: the interpreter of its #! line was not found"):
         proc.run(["bad.sh"], env=env, echo=False)  # found on the child's PATH
-    with pytest.raises(DeployError, match="program not found: no-such-tool"):
+    with pytest.raises(PytError, match="program not found: no-such-tool"):
         proc.run(["no-such-tool"], env=env, echo=False)
 
 
 @pytest.mark.parametrize(("name", "message"), [("missing", "folder not found"), ("a-file", "not a folder")])
 def test_a_bad_working_folder_is_named(name: str, message: str, tmp_path: Path) -> None:
     (tmp_path / "a-file").write_text("x", encoding="utf-8")
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         proc.run([sys.executable, "-V"], cwd=tmp_path / name, echo=False)
     assert e.value.code == 2
     assert message in str(e.value) and name in str(e.value)
@@ -612,7 +612,7 @@ def test_run_restores_the_sigint_handler(tmp_path: Path) -> None:
     before = signal.getsignal(signal.SIGINT)
     proc.run([sys.executable, "-c", "pass"], echo=False, cwd=tmp_path)
     assert signal.getsignal(signal.SIGINT) is before
-    with pytest.raises(DeployError):
+    with pytest.raises(PytError):
         proc.run([str(tmp_path / "missing")], echo=False)
     assert signal.getsignal(signal.SIGINT) is before
 
@@ -636,7 +636,7 @@ def test_find_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert proc.find_uv() == "/elsewhere/uv"
     monkeypatch.delenv("UV")
     monkeypatch.setattr(proc.shutil, "which", lambda _name: None)
-    with pytest.raises(DeployError, match="uv not found") as e:
+    with pytest.raises(PytError, match="uv not found") as e:
         proc.find_uv()
     assert e.value.code == 3
 
@@ -677,7 +677,7 @@ def test_the_selection_variables_include_the_known_conflicts() -> None:
 
 def test_a_user_uv_no_group_never_reaches_uv() -> None:
     """UV_NO_GROUP=dev (left over from a production or Docker setup) wins over `--all-groups`:
-    `./deploy sync` uninstalled mypy, ruff and pytest, `check` ran PATH-wide ones and `test` found
+    `./pyt sync` uninstalled mypy, ruff and pytest, `check` ran PATH-wide ones and `test` found
     no pytest. It moves the groups like UV_NO_DEV, so the runner drops it too."""
     assert {"UV_NO_DEV", "UV_NO_DEFAULT_GROUPS", "UV_NO_GROUP"} <= set(proc.UV_SELECTION)
 
@@ -701,7 +701,7 @@ def test_uv_runs_in_the_projects_environment_whatever_the_user_exported(name: st
     # UV_ISOLATED -> a throwaway environment instead of .venv
     tool = envs.tool_env(config.load())
     if not tool.python.exists():
-        pytest.skip(f"{tool.dir} does not exist (./deploy setup)")
+        pytest.skip(f"{tool.dir} does not exist (./pyt setup)")
     monkeypatch.setenv(name, str(tmp_path) if name in ("UV_PROJECT", "UV_WORKING_DIR") else "1")
     probe = "import os, sys; print(sys.prefix); print(os.getcwd())"
     r = envs.uv(tool, ["run", "--locked", "python", "-c", probe], check=False, capture=True, echo=False)
@@ -754,7 +754,7 @@ raise SystemExit(cli.main(["x"]))
 
 def _terminal_signals() -> None:
     """In the driver before exec: the signals as a terminal session has them. A suite started
-    in the background (`./deploy selftest &` in a script, nohup) ignores SIGINT (SIGHUP), the
+    in the background (`./pyt selftest &` in a script, nohup) ignores SIGINT (SIGHUP), the
     runner rightly keeps an inherited SIG_IGN, and these tests are about the terminal case."""
     for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(s, signal.SIG_DFL)
@@ -878,7 +878,7 @@ def test_an_ignored_sigint_is_passed_on_to_the_child() -> None:
     assert r.stdout.strip() == "True", r.stderr
 
 
-# === 8. a closed stdout (./deploy help | head -1) ==================================================
+# === 8. a closed stdout (./pyt help | head -1) ==================================================
 
 
 @posix
@@ -892,7 +892,7 @@ def test_a_closed_stdout_is_not_a_runner_bug(args: list[str], unbuffered: bool) 
     os.close(read_end)  # no reader: every write to stdout fails with EPIPE
     try:
         r = subprocess.run(
-            [sys.executable, "-B", str(DEPLOY_PY), *args],
+            [sys.executable, "-B", str(PYT_PY), *args],
             stdin=subprocess.DEVNULL,
             stdout=write_end,
             stderr=subprocess.PIPE,
@@ -919,7 +919,7 @@ class _NoRoom(io.StringIO):
 
 @pytest.mark.parametrize("args", [["help"], ["help", "build"]])
 def test_a_write_that_finds_no_room_is_one_error_line(args: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    """`./deploy help > /dev/full` (or a full disk under `shell-setup >> ~/.bashrc`) printed a
+    """`./pyt help > /dev/full` (or a full disk under `shell-setup >> ~/.bashrc`) printed a
     traceback and called it a bug in the runner."""
     monkeypatch.setattr(sys, "stdout", _NoRoom())
     assert cli.main(args) == 1
@@ -934,7 +934,7 @@ def test_a_write_that_finds_no_room_is_one_error_line(args: list[str], monkeypat
 def test_output_to_dev_full_is_no_runner_bug(args: list[str]) -> None:
     with open("/dev/full", "wb") as full:
         r = subprocess.run(
-            [sys.executable, "-B", str(DEPLOY_PY), *args], stdin=subprocess.DEVNULL, stdout=full, stderr=subprocess.PIPE,
+            [sys.executable, "-B", str(PYT_PY), *args], stdin=subprocess.DEVNULL, stdout=full, stderr=subprocess.PIPE,
             env=child_env(), text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
         )  # fmt: skip
     for text in ("Traceback", "internal runner error", "Exception ignored"):
@@ -988,7 +988,7 @@ def test_deps_run_in_order_then_the_cmd_with_the_extra_arguments(rec: Recorder) 
 def test_a_backslash_in_a_dep_is_a_plain_character(rec: Recorder) -> None:
     """A Windows path in a deps entry reaches the command as typed (POSIX shlex turned
     C:\\data\\in.txt into C:datain.txt); quotes still group words, as for [vscode] buttons and
-    the Neovim plugin's :Deploy."""
+    the Neovim plugin's :Pyt."""
     deps = [r"run cpython C:\data\in.txt", r'run cpython "C:\My Data\x" a\b', r"other 'say \"hi\"'"]
     cfg = make({"tasks": {"t": {"deps": deps}, "other": {"cmd": ["o"], "uv": False}}})
     assert tasks.run_task(cfg, "t", [], rec.dispatch) == 0
@@ -1021,7 +1021,7 @@ def test_the_cmds_exit_code_is_the_tasks(rec: Recorder) -> None:
     ],
 )
 def test_task_cycles_are_reported(spec: dict[str, Any], start: str, cycle: str, rec: Recorder) -> None:
-    with pytest.raises(DeployError, match=f"task cycle: {re.escape(cycle)}$") as e:
+    with pytest.raises(PytError, match=f"task cycle: {re.escape(cycle)}$") as e:
         tasks.run_task(make({"tasks": spec}), start, [], rec.dispatch)
     assert e.value.code == 2
 
@@ -1029,11 +1029,11 @@ def test_task_cycles_are_reported(spec: dict[str, Any], start: str, cycle: str, 
 def test_a_deps_only_task_rejects_arguments_before_anything_runs(rec: Recorder) -> None:
     cfg = make({"tasks": {"ci": {"deps": ["check all", "test all"]}, "outer": {"deps": ["check", "ci --help"]}}})
     for extra in (["--help"], ["mypyc"], ["a b"]):
-        with pytest.raises(DeployError, match="only runs its deps .check all, test all. and takes no arguments") as e:
+        with pytest.raises(PytError, match="only runs its deps .check all, test all. and takes no arguments") as e:
             tasks.run_task(cfg, "ci", extra, rec.dispatch)
         assert e.value.code == 2 and shlex.join(extra) in str(e.value)
     assert rec.dispatched == []
-    with pytest.raises(DeployError, match="takes no arguments: --help"):
+    with pytest.raises(PytError, match="takes no arguments: --help"):
         tasks.run_task(cfg, "outer", [], rec.dispatch)  # a deps entry that passes arguments to it
     assert rec.dispatched == [["check"]]
     rec.dispatched.clear()
@@ -1096,7 +1096,7 @@ def _bad_task(where: str, bad: str) -> dict[str, Any]:
 @pytest.mark.parametrize("where", ["cmd", "env", "cwd"])
 @pytest.mark.parametrize("bad", BAD_BRACES)
 def test_bad_braces_are_config_errors(where: str, bad: str) -> None:
-    with pytest.raises(DeployError, match=rf"tasks\.t\.{where}") as e:
+    with pytest.raises(PytError, match=rf"tasks\.t\.{where}") as e:
         make({"tasks": {"t": _bad_task(where, bad)}})
     assert e.value.code == 2 and "{{ and }}" in str(e.value)
 
@@ -1105,7 +1105,7 @@ def test_bad_braces_are_config_errors(where: str, bad: str) -> None:
 @pytest.mark.parametrize("bad", BAD_BRACES)
 def test_bad_braces_never_crash_a_task(where: str, bad: str, rec: Recorder) -> None:
     cfg = unchecked({"tasks": {"t": _bad_task(where, bad)}})  # a Config that skipped validate
-    with pytest.raises(DeployError, match="task 't'") as e:
+    with pytest.raises(PytError, match="task 't'") as e:
         tasks.run_task(cfg, "t", [], rec.dispatch)
     assert e.value.code == 2 and "{{ and }}" in str(e.value)
     assert rec.runs == []
@@ -1113,7 +1113,7 @@ def test_bad_braces_never_crash_a_task(where: str, bad: str, rec: Recorder) -> N
 
 def test_an_unknown_placeholder_is_reported_when_the_task_runs(rec: Recorder) -> None:
     cfg = make({"tasks": {"t": {"cmd": ["{nope}"], "uv": False}, "ok": {"cmd": ["x"]}}})  # it loads
-    with pytest.raises(DeployError, match="unknown placeholder 'nope'") as e:
+    with pytest.raises(PytError, match="unknown placeholder 'nope'") as e:
         tasks.run_task(cfg, "t", [], rec.dispatch)
     assert e.value.code == 2 and "{python}" in str(e.value)
 
@@ -1135,7 +1135,7 @@ def test_an_unknown_placeholder_is_refused_before_any_dep_runs(rec: Recorder, ba
         "gen": {"cmd": ["g"], "uv": False},
         "inner": {"cmd": ["i", "{pkgs}"], "uv": False},
     }})  # fmt: skip
-    with pytest.raises(DeployError, match=f"task '{where}': unknown placeholder") as e:
+    with pytest.raises(PytError, match=f"task '{where}': unknown placeholder") as e:
         tasks.run_task(cfg, "badph", [], rec.dispatch)
     assert e.value.code == 2
     assert rec.runs == [] and rec.dispatched == []  # neither gen nor check all ran
@@ -1143,14 +1143,14 @@ def test_an_unknown_placeholder_is_refused_before_any_dep_runs(rec: Recorder, ba
 
 @pytest.mark.parametrize("key", ["A=B", "", "1X", "A B", "A-B", chr(0xE9)])
 def test_task_env_names_are_validated(key: str) -> None:
-    with pytest.raises(DeployError, match=r"tasks\.t\.env'?: invalid environment variable name") as e:
+    with pytest.raises(PytError, match=r"tasks\.t\.env'?: invalid environment variable name") as e:
         make({"tasks": {"t": {"cmd": ["x"], "env": {key: "v"}}}})
     assert e.value.code == 2
 
 
 @pytest.mark.parametrize("cmd", [[""], ["  ", "x"]])
 def test_a_task_program_cannot_be_empty(cmd: list[str]) -> None:
-    with pytest.raises(DeployError, match=r"tasks\.t\.cmd: the program"):
+    with pytest.raises(PytError, match=r"tasks\.t\.cmd: the program"):
         make({"tasks": {"t": {"cmd": cmd}}})
 
 
@@ -1158,7 +1158,7 @@ def test_a_task_program_cannot_be_empty(cmd: list[str]) -> None:
 def test_a_bad_deps_entry_is_reported_before_anything_runs(dep: str, message: str, rec: Recorder) -> None:
     # Loads (vscode.scan renders such a task), fails when the task runs: before its first dep
     cfg = make({"tasks": {"t": {"cmd": ["x"], "deps": ["check", dep]}}})
-    with pytest.raises(DeployError, match=message) as e:
+    with pytest.raises(PytError, match=message) as e:
         tasks.run_task(cfg, "t", [], rec.dispatch)
     assert e.value.code == 2 and "task 't'" in str(e.value)
     assert rec.dispatched == [] and rec.runs == []
@@ -1168,7 +1168,7 @@ def test_a_bad_deps_entry_is_reported_before_anything_runs(dep: str, message: st
 @pytest.mark.parametrize("cwd", ["no-such-dir-xyz", "pyproject.toml"])
 def test_a_task_cwd_must_be_a_folder(cwd: str, uv: bool, rec: Recorder) -> None:
     cfg = make({"tasks": {"t": {"cmd": ["python", "-V"], "cwd": cwd, "uv": uv}}})
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         tasks.run_task(cfg, "t", [], rec.dispatch)
     assert e.value.code == 2
     assert cwd in str(e.value) and "program not found" not in str(e.value)
@@ -1196,7 +1196,7 @@ def test_a_task_backend_must_be_supported_where_its_environment_is_used(rec: Rec
         }
     )
     for name in ("uvrun", "needs"):
-        with pytest.raises(DeployError, match=r"mode --supports \+pypy") as e:
+        with pytest.raises(PytError, match=r"mode --supports \+pypy") as e:
             tasks.run_task(cfg, name, [], rec.dispatch)
         assert e.value.code == 2
     assert rec.runs == []
@@ -1320,7 +1320,7 @@ def test_a_batch_file_gets_only_arguments_cmd_passes_unchanged(
     rec: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arg: str, refused: str | None
 ) -> None:
     """Windows runs a .cmd/.bat through cmd.exe, which re-parses the command line list2cmdline
-    builds: `./deploy web react@^18` installed react@18 (an unquoted ^ is cmd's escape), `a&b`
+    builds: `./pyt web react@^18` installed react@18 (an unquoted ^ is cmd's escape), `a&b`
     ran `b`, and %VAR% expands even inside quotes. Such an argument is refused (exit 2) instead
     of reaching the program changed; one that list2cmdline quotes (a space) is passed."""
     monkeypatch.setattr(tasks, "IS_WINDOWS", True)
@@ -1332,7 +1332,7 @@ def test_a_batch_file_gets_only_arguments_cmd_passes_unchanged(
             tasks.run_task(cfg, task, [arg], rec.dispatch)
             assert rec.runs[-1][-1] == arg
             continue
-        with pytest.raises(DeployError) as e:
+        with pytest.raises(PytError) as e:
             tasks.run_task(cfg, task, [arg], rec.dispatch)
         assert e.value.code == 2 and len(rec.runs) == before  # nothing ran
         assert f"{refused!r}" in str(e.value) and "cmd.exe" in str(e.value)
@@ -1423,7 +1423,7 @@ def test_check_all_runs_each_profile_once_and_the_mypyc_rules_once(checks: FakeC
 
 def test_check_rejects_extra_arguments_and_unsupported_backends(checks: FakeChecks) -> None:
     for args, message in ((["all", "extra"], "unrecognized arguments: extra"), (["foo"], "unrecognized arguments: foo"), (["pypy"], "not in backend.supported")):
-        with pytest.raises(DeployError, match=message) as e:
+        with pytest.raises(PytError, match=message) as e:
             cmd_dev.cmd_check(make({}), args)
         assert e.value.code == 2
     assert checks.calls == []
@@ -1605,7 +1605,7 @@ class FakeTests:
 
     def build(self, _cfg: Config, _profile: str, **_kw: Any) -> Path:
         if isinstance(self.codes.get("build"), int):
-            raise DeployError("mypyc failed (exit code 1)", 1)
+            raise PytError("mypyc failed (exit code 1)", 1)
         return self.stage
 
 
@@ -1717,13 +1717,13 @@ def test_test_returns_pytests_code_for_one_backend(fake_tests: FakeTests, capsys
 
 def test_test_all_goes_on_after_a_backend_that_cannot_build(fake_tests: FakeTests, capsys: pytest.CaptureFixture[str]) -> None:
     cfg = make({"backend": {"active": "cpython", "supported": ["mypyc", "cpython"]}})
-    fake_tests.codes["build"] = 1  # the mypyc build raises DeployError
+    fake_tests.codes["build"] = 1  # the mypyc build raises PytError
     assert cmd_dev.cmd_test(cfg, ["all"]) == 1
     assert [c[2]["PYTEMPLATE_BACKEND"] for c in fake_tests.calls] == ["cpython"]  # cpython still ran
     err = capsys.readouterr().err
     assert "error: test mypyc: mypyc failed" in err
     assert "[XX] mypyc" in err and "[ok] cpython" in err
-    with pytest.raises(DeployError, match="mypyc failed"):  # one backend: the error is the answer
+    with pytest.raises(PytError, match="mypyc failed"):  # one backend: the error is the answer
         cmd_dev.cmd_test(cfg, ["mypyc"])
 
 
@@ -1734,13 +1734,13 @@ def test_run_returns_the_apps_code(fake_tests: FakeTests) -> None:
     assert fake_tests.calls[-1][1] == ["python", str(SRC / "main.py"), "--frames", "3"]
     assert cmd_dev.cmd_run(cfg, ["mypyc", "x"]) == 7
     assert fake_tests.calls[-1][1] == ["python", str(fake_tests.stage / "main.py"), "x"]
-    with pytest.raises(DeployError, match="not in backend.supported"):
+    with pytest.raises(PytError, match="not in backend.supported"):
         cmd_dev.cmd_run(cfg, ["pypy"])
 
 
 @pytest.mark.usefixtures("fake_tests")
 def test_report_needs_mypyc_and_never_opens_a_browser_in_a_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    with pytest.raises(DeployError, match="report comes from mypyc"):
+    with pytest.raises(PytError, match="report comes from mypyc"):
         cmd_dev.cmd_report(make({"backend": {"supported": ["cpython"]}}), [])
     monkeypatch.setattr(cmd_dev.webbrowser, "open", fail)
     monkeypatch.setattr(cmd_dev, "_profile_file", lambda _cfg, _profile, _kind: Path("mypy.ini"))
@@ -1785,11 +1785,11 @@ def test_a_dry_run_of_test_all_still_fails_when_a_backend_fails_its_checks(
     fake_tests: FakeTests, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The dry run makes the real checks (CLAUDE.md 5.4): a `compile.exclude` naming nothing
-    stops `test mypyc` with a DeployError there too. `--dry-run test all` printed that error and
+    stops `test mypyc` with a PytError there too. `--dry-run test all` printed that error and
     still exited 0 (it returned before looking at the results); the failed backend is listed
     and the exit code is 1, while no [ok] row claims a test that did not run."""
     monkeypatch.setattr(proc, "DRY_RUN", True)
-    fake_tests.codes["build"] = 1  # the mypyc step raises DeployError
+    fake_tests.codes["build"] = 1  # the mypyc step raises PytError
     cfg = make({"backend": {"supported": ["cpython", "mypyc"]}})
     assert cmd_dev.cmd_test(cfg, ["all"]) == 1
     err = capsys.readouterr().err
@@ -1797,7 +1797,7 @@ def test_a_dry_run_of_test_all_still_fails_when_a_backend_fails_its_checks(
     assert "[ok]" not in err and "cpython" not in err.split("test summary", 1)[1]
 
 
-# === 11. end to end: the exit codes cross deploy.py (a throwaway copy, no uv needed) ==============
+# === 11. end to end: the exit codes cross pyt.py (a throwaway copy, no uv needed) ==============
 
 
 @pytest.fixture(scope="module")
@@ -1846,9 +1846,9 @@ uv = false
     return dest
 
 
-def _deploy(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _pyt(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "-B", str(root / ".pytemplate" / "deploy.py"), *args],
+        [sys.executable, "-B", str(root / ".pytemplate" / "pyt.py"), *args],
         cwd=root,
         env=child_env(),
         stdin=subprocess.DEVNULL,
@@ -1874,17 +1874,17 @@ def _deploy(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         pytest.param(["killed"], 137, "", marks=posix),
     ],
 )
-def test_task_exit_codes_cross_deploy_py(tasks_project: Path, args: list[str], code: int, stderr: str) -> None:
-    r = _deploy(tasks_project, "--no-render", *args)
+def test_task_exit_codes_cross_pyt_py(tasks_project: Path, args: list[str], code: int, stderr: str) -> None:
+    r = _pyt(tasks_project, "--no-render", *args)
     assert r.returncode == code, r.stderr
     assert stderr in r.stderr
     assert "SHOULD-NOT-RUN" not in r.stdout and "Traceback" not in r.stderr
 
 
 def test_quiet_keeps_what_was_asked_for(tasks_project: Path) -> None:
-    r = _deploy(tasks_project, "-q", "--no-render", "tasks")
+    r = _pyt(tasks_project, "-q", "--no-render", "tasks")
     assert r.returncode == 0 and "  exit7" in r.stderr and "==>" not in r.stderr
-    r = _deploy(tasks_project, "-q", "--no-render", "--dry-run", "cyc-b", "--x")  # the plan's error still shows
+    r = _pyt(tasks_project, "-q", "--no-render", "--dry-run", "cyc-b", "--x")  # the plan's error still shows
     assert r.returncode == 2 and "takes no arguments" in r.stderr
 
 
@@ -1893,7 +1893,7 @@ uv_on_path = pytest.mark.skipif(shutil.which("uv") is None, reason="uv not on PA
 
 @uv_on_path
 def test_quiet_does_not_hide_a_dry_runs_plan(tasks_project: Path) -> None:
-    r = _deploy(tasks_project, "-q", "--no-render", "--dry-run", "sync", "cpython")
+    r = _pyt(tasks_project, "-q", "--no-render", "--dry-run", "sync", "cpython")
     assert r.returncode == 0, r.stderr
     assert "$ uv sync --locked" in r.stderr
     assert not (tasks_project / ".venv").exists()
@@ -1903,7 +1903,7 @@ def test_quiet_does_not_hide_a_dry_runs_plan(tasks_project: Path) -> None:
 def test_a_dry_run_of_sync_and_add_changes_nothing(tasks_project: Path) -> None:
     files = {name: (tasks_project / name).read_bytes() for name in ("pyproject.toml", "uv.lock")}
     for args in (["sync", "cpython"], ["add", "requests"], ["remove", "rich"]):
-        r = _deploy(tasks_project, "--no-render", "--dry-run", *args)
+        r = _pyt(tasks_project, "--no-render", "--dry-run", *args)
         assert r.returncode == 0, r.stderr
         assert f"$ uv {args[0]}" in r.stderr
     assert {name: (tasks_project / name).read_bytes() for name in files} == files
@@ -1914,9 +1914,9 @@ def test_a_dry_run_of_sync_and_add_changes_nothing(tasks_project: Path) -> None:
 @uv_on_path
 @pytest.mark.parametrize(("task", "code"), [("exit7", 7), ("killed", 137), ("ci --x", 2)])
 def test_task_exit_codes_cross_the_sh_launcher(tasks_project: Path, task: str, code: int) -> None:
-    # deploy -> uv run --script -> deploy.py: nothing on the way may change the code
+    # pyt -> uv run --script -> pyt.py: nothing on the way may change the code
     r = subprocess.run(
-        ["sh", str(tasks_project / "deploy"), "--no-render", *task.split()],
+        ["sh", str(tasks_project / "pyt"), "--no-render", *task.split()],
         cwd=tasks_project,
         env=child_env(),
         stdin=subprocess.DEVNULL,
@@ -1948,7 +1948,7 @@ def test_update_file_never_writes_broken_toml(tmp_path: Path, monkeypatch: pytes
 
 @pytest.mark.parametrize(("preset", "name"), [("script", "json"), ("script", "class"), ("script", "rich"), ("flet", "Flet")])
 def test_names_that_would_break_the_project(preset: str, name: str) -> None:
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         presets.check_name_free(None, preset, name)
     assert e.value.code == 2 and "--name" in str(e.value)
     presets.check_name_free(None, preset, "my-app")

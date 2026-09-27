@@ -3,7 +3,7 @@
     [tasks.gen]
     help = "Generate the assets"
     cmd = ["python", "scripts/gen.py", "{backend}"]   # argv, no shell: the same in every shell
-    deps = ["check"]                                   # other tasks or ./deploy commands
+    deps = ["check"]                                   # other tasks or ./pyt commands
     env = { SEED = "42" }
     backend = "pypy"   # environment it runs in (empty = active backend; "mypyc" = the .venv,
                        # interpreted: add deps = ["compile"] and run the stage to use the binaries)
@@ -12,8 +12,8 @@
 Placeholders in cmd/env/cwd: {root} {src} {build} {dist} {backend} {name} {pkg} {python}; write
 a literal brace doubled ({{ and }}). {python} (the backend's interpreter) is only resolved when
 used; with uv = false its environment is synced first if it does not exist yet (a fresh clone,
-git clean -fdx). Extra arguments to `./deploy <task> ...` are appended to the end of cmd; a task
-without cmd (deps only) takes none (exit 2). Every dependency runs at most once per ./deploy
+git clean -fdx). Extra arguments to `./pyt <task> ...` are appended to the end of cmd; a task
+without cmd (deps only) takes none (exit 2). Every dependency runs at most once per ./pyt
 invocation, like just: a dependency shared by two others (a diamond) runs once. With uv = false
 a relative program with a folder in it (tools/gen.sh) runs from the task's cwd on every OS, and
 on Windows a bare name is found on PATH with PATHEXT, as in a shell (npm -> npm.cmd). Windows
@@ -31,7 +31,7 @@ from collections.abc import Callable, Mapping
 from . import config, envs, proc, ui
 from .config import Config, TaskConfig
 from .project import BUILD, DIST, IS_WINDOWS, ROOT, SRC
-from .ui import DeployError
+from .ui import PytError
 
 Dispatcher = Callable[[list[str]], int]
 
@@ -90,7 +90,7 @@ def split_words(text: str) -> list[str]:
     separate them, single or double quotes group them, and a backslash is a plain character, so
     a Windows path such as C:\\data\\in.txt stays whole (POSIX shlex took it for an escape and
     passed C:datain.txt). A quote inside a word needs the other kind around it: 'say "hi"'. The
-    Neovim plugin's tasks.split_args splits :Deploy arguments the same way. Unbalanced quotes
+    Neovim plugin's tasks.split_args splits :Pyt arguments the same way. Unbalanced quotes
     raise ValueError."""
     lex = shlex.shlex(text, posix=True)
     lex.whitespace_split = True
@@ -103,9 +103,9 @@ def _dep_argv(name: str, dep: str) -> list[str]:
     try:
         argv = split_words(dep)
     except ValueError as e:  # unbalanced quotes
-        raise DeployError(f"task '{name}': deps entry {dep!r}: {e}") from None
+        raise PytError(f"task '{name}': deps entry {dep!r}: {e}") from None
     if not argv:
-        raise DeployError(f"task '{name}': empty deps entry")
+        raise PytError(f"task '{name}': empty deps entry")
     return argv
 
 
@@ -129,12 +129,12 @@ def _format(name: str, text: str, values: Mapping[str, str]) -> str:
     # '{root.x}' are never a traceback.
     problem = config.task_format_error(text)
     if problem:
-        raise DeployError(f"task '{name}': {text!r}: {problem}")
+        raise PytError(f"task '{name}': {text!r}: {problem}")
     try:
         return text.format_map(values)
     except KeyError as e:
         known = " ".join("{" + p + "}" for p in config.TASK_PLACEHOLDERS)
-        raise DeployError(f"task '{name}': unknown placeholder {e} in {text!r} (placeholders: {known}; {config.BRACES_HINT})") from None
+        raise PytError(f"task '{name}': unknown placeholder {e} in {text!r} (placeholders: {known}; {config.BRACES_HINT})") from None
 
 
 def run_task(
@@ -151,12 +151,12 @@ def run_task(
     `done` holds the deps that already succeeded in this invocation: each runs at most once.
     """
     if name in stack:
-        raise DeployError(f"task cycle: {' -> '.join((*stack, name))}")
+        raise PytError(f"task cycle: {' -> '.join((*stack, name))}")
     task = cfg.tasks[name]
     if extra and not task.cmd:
-        # Checked before any dep runs: `./deploy ci --help` must not start the whole CI, and
-        # `./deploy bunnymark mypyc` must not measure the active backend instead
-        raise DeployError(f"task '{name}' only runs its deps ({', '.join(task.deps)}) and takes no arguments: {shlex.join(extra)}")
+        # Checked before any dep runs: `./pyt ci --help` must not start the whole CI, and
+        # `./pyt bunnymark mypyc` must not measure the active backend instead
+        raise PytError(f"task '{name}' only runs its deps ({', '.join(task.deps)}) and takes no arguments: {shlex.join(extra)}")
     if done is None:
         done = set()
         _check_texts(cfg, name, set())
@@ -181,7 +181,7 @@ def run_task(
     extra_env = {k: _format(name, v, values) for k, v in task.env.items()}
     cwd = ROOT / _format(name, task.cwd, values) if task.cwd else ROOT
     if not proc.DRY_RUN and not cwd.is_dir():  # a dep may create it (a dry run skips the deps)
-        raise DeployError(f"task '{name}': cwd {task.cwd!r} is not a folder ({cwd})")
+        raise PytError(f"task '{name}': cwd {task.cwd!r} is not a folder ({cwd})")
     if task.uv:
         env = _task_env(cfg, backend)
         ui.step(f"task {name}")
@@ -207,7 +207,7 @@ def run_task(
         for arg in argv[1:]:
             char = _batch_problem(arg)
             if char is not None:
-                raise DeployError(
+                raise PytError(
                     f"task '{name}': {os.path.basename(argv[0])} is a batch file, which Windows runs through cmd.exe, "
                     f"and cmd.exe would change the argument {arg!r} ({char!r}) before the program sees it. "
                     "Pass it without that character (an argument with a space is quoted, so ^ & | < > are "

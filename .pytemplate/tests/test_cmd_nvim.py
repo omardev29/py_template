@@ -1,4 +1,4 @@
-"""Tests for ./deploy nvim (cmd_nvim) and the selftest --nvim harness (nvimtest)."""
+"""Tests for ./pyt nvim (cmd_nvim) and the selftest --nvim harness (nvimtest)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from runner import cmd_nvim, nvimtest, proc, project  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 # lazyvim.json exactly as LazyVim 16 writes it on first start (util/json.lua: sorted keys,
 # 2-space indent, an empty list as "[\n\n  ]", no final newline)
@@ -189,10 +189,10 @@ def test_extras_dry_run_and_bad_files(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == FRESH_LAZYVIM_JSON
     assert cmd_nvim.missing_extras(tmp_path / "absent.json") is None
     path.write_text("[1, 2]", encoding="utf-8")
-    with pytest.raises(DeployError, match="JSON object"):
+    with pytest.raises(PytError, match="JSON object"):
         cmd_nvim.enable_extras(path)
     path.write_text('{"extras": "lang.python"}', encoding="utf-8")
-    with pytest.raises(DeployError, match="not a list"):
+    with pytest.raises(PytError, match="not a list"):
         cmd_nvim.enable_extras(path)
 
 
@@ -206,7 +206,7 @@ def test_extras_in_a_config_that_cannot_be_written(tmp_path: Path, monkeypatch: 
         raise PermissionError(1, "Operation not permitted", str(target))
 
     monkeypatch.setattr(cmd_nvim, "write_whole", denied)
-    with pytest.raises(DeployError, match=r"cannot write .*lazyvim.json: Operation not permitted\. Enable the extras by hand .*lang\.python") as e:
+    with pytest.raises(PytError, match=r"cannot write .*lazyvim.json: Operation not permitted\. Enable the extras by hand .*lang\.python") as e:
         cmd_nvim.enable_extras(path, stamp="s")
     assert e.value.code == 3
     assert sorted(p.name for p in tmp_path.iterdir()) == ["lazyvim.json"]  # no backup left behind
@@ -219,7 +219,7 @@ def test_extras_in_a_config_that_cannot_be_written(tmp_path: Path, monkeypatch: 
         return real_write_bytes(self, data)
 
     monkeypatch.setattr(Path, "write_bytes", no_backup)
-    with pytest.raises(DeployError, match=r"cannot write .*\.bak: Permission denied"):
+    with pytest.raises(PytError, match=r"cannot write .*\.bak: Permission denied"):
         cmd_nvim.enable_extras(path, stamp="s")
     assert sorted(p.name for p in tmp_path.iterdir()) == ["lazyvim.json"]
 
@@ -251,7 +251,7 @@ def test_bootstrap_says_what_to_do_when_the_starter_git_cannot_be_removed(tmp_pa
 
     monkeypatch.setattr(cmd_nvim.proc, "run", clone)
     monkeypatch.setattr(cmd_nvim, "remove_tree", stuck)
-    with pytest.raises(DeployError, match=r"the starter is in .*, but its \.git could not be removed .*delete it by hand") as e:
+    with pytest.raises(PytError, match=r"the starter is in .*, but its \.git could not be removed .*delete it by hand") as e:
         cmd_nvim.cmd_bootstrap(nv)
     assert e.value.code == 3
 
@@ -307,7 +307,7 @@ def test_lazyvim_is_told_from_the_config_not_from_a_file_name(tmp_path: Path, mo
     (plain.data / "lazy" / "lazy.nvim").mkdir(parents=True)
     (plain.config / "lazy-lock.json").write_text('{"lazy.nvim": {"branch": "main", "commit": "x"}}', encoding="utf-8")
     assert not plain.lazyvim_installed()
-    with pytest.raises(DeployError, match="LazyVim is not this Neovim's config .*bootstrap .*lazyvim.github.io") as e:
+    with pytest.raises(PytError, match="LazyVim is not this Neovim's config .*bootstrap .*lazyvim.github.io") as e:
         cmd_nvim.cmd_sync(plain)
     assert e.value.code == 3
     assert cmd_nvim.cmd_bootstrap(plain) == 0 and "It is not a LazyVim config" in capsys.readouterr().err
@@ -353,7 +353,7 @@ def test_parse_smoke() -> None:
     out = (
         "\nok   pytemplate.nvim loaded from .lazy.lua\r\n"
         "\nFAIL overseer templates\n"
-        "...smoke.lua:12: duplicate deploy: run\n"
+        "...smoke.lua:12: duplicate pyt: run\n"
         "stack traceback:\n"
         "\t[C]: in function 'error'\n"
         "\nSKIP mypy lint (profile off)\n"
@@ -365,7 +365,7 @@ def test_parse_smoke() -> None:
     assert s.passed == ["pytemplate.nvim loaded from .lazy.lua", "parser"]
     assert s.skipped == ["mypy lint (profile off)"]
     assert [name for name, _ in s.failed] == ["overseer templates"]
-    assert s.failed[0][1].splitlines()[0] == "...smoke.lua:12: duplicate deploy: run"
+    assert s.failed[0][1].splitlines()[0] == "...smoke.lua:12: duplicate pyt: run"
     assert "stack traceback:" in s.failed[0][1] and not s.failed[0][1].endswith("\n")
     assert s.other == ["random noise"]
     assert (s.total, s.expected, s.complete) == (4, 4, True)
@@ -426,7 +426,7 @@ def test_env_isolation(tmp_path: Path) -> None:
     layout = nvimtest.Layout(tmp_path / "w")
     renv = nvimtest.runner_env(user)
     assert not {"VIRTUAL_ENV", "UV", "UV_PROJECT_ENVIRONMENT", "PYTEMPLATE_CALLER_CWD", "PYTEMPLATE_LAUNCHER"} & set(renv)
-    assert renv["XDG_CACHE_HOME"] == "/home/me/.cache"  # uv's own caches keep working for ./deploy
+    assert renv["XDG_CACHE_HOME"] == "/home/me/.cache"  # uv's own caches keep working for ./pyt
 
     env = nvimtest.nvim_env(layout, user, {"UV_CACHE_DIR": "/ignored", "UV_PYTHON_INSTALL_DIR": "/home/me/.local/share/uv/python"})
     for key in nvimtest.XDG_HOMES:
@@ -448,9 +448,9 @@ def test_default_dir_is_short() -> None:
 
 def test_prepare_dir_refuses_foreign_dirs(tmp_path: Path) -> None:
     (tmp_path / "mine.txt").write_text("x", encoding="utf-8")
-    with pytest.raises(DeployError, match="not created by selftest"):
+    with pytest.raises(PytError, match="not created by selftest"):
         nvimtest._prepare_dir(nvimtest.Layout(tmp_path))
-    with pytest.raises(DeployError, match="outside the template"):
+    with pytest.raises(PytError, match="outside the template"):
         nvimtest._prepare_dir(nvimtest.Layout(Path(__file__).resolve().parents[2] / ".build" / "nvim"))
     fresh = nvimtest.Layout(tmp_path / "work")
     nvimtest._prepare_dir(fresh)
@@ -466,12 +466,12 @@ def test_prepare_dir_refuses_a_dir_another_user_can_change(tmp_path: Path, monke
     shared = tmp_path / "shared"
     shared.mkdir()
     shared.chmod(0o777)
-    with pytest.raises(DeployError, match="written by every user"):
+    with pytest.raises(PytError, match="written by every user"):
         nvimtest._prepare_dir(nvimtest.Layout(shared))
     shared.chmod(0o700)
     real = os.getuid()
     monkeypatch.setattr(os, "getuid", lambda: real + 1)
-    with pytest.raises(DeployError, match="belongs to another user"):
+    with pytest.raises(PytError, match="belongs to another user"):
         nvimtest._prepare_dir(nvimtest.Layout(shared))
     assert not (shared / nvimtest.DIR_MARKER).exists()
     monkeypatch.setattr(os, "getuid", lambda: real)
@@ -485,7 +485,7 @@ def test_prepare_dir_refuses_a_file(tmp_path: Path) -> None:
     afile = tmp_path / "afile"
     afile.write_text("x", encoding="utf-8")
     for base in (afile, afile / "sub"):
-        with pytest.raises(DeployError, match="is not a folder|cannot create") as e:
+        with pytest.raises(PytError, match="is not a folder|cannot create") as e:
             nvimtest._prepare_dir(nvimtest.Layout(base))
         assert e.value.code == 2 and str(base) in str(e.value)
     assert afile.read_text(encoding="utf-8") == "x"
@@ -495,7 +495,7 @@ def test_a_failed_step_is_a_suite_fail(tmp_path: Path) -> None:
     """A failed clone, Lazy! install or restore fails the suite (exit 1), not the usage (2)."""
     log = tmp_path / "logs" / "clone.log"
     argv = [sys.executable, "-c", "import sys; print('fatal: unable to access'); sys.exit(128)"]
-    with pytest.raises(DeployError, match=r"clone the LazyVim starter: exit code 128 \(log: .*clone\.log\)\n.*fatal: unable to access") as e:
+    with pytest.raises(PytError, match=r"clone the LazyVim starter: exit code 128 \(log: .*clone\.log\)\n.*fatal: unable to access") as e:
         nvimtest._step(argv, cwd=tmp_path, env=dict(os.environ), log=log, timeout=60, what="clone the LazyVim starter")
     assert e.value.code == 1
 
@@ -505,7 +505,7 @@ def test_a_tree_that_cannot_be_removed_is_a_suite_fail(tmp_path: Path, monkeypat
         raise PermissionError(13, "Permission denied", str(path))
 
     monkeypatch.setattr(cmd_nvim, "remove_tree", remove_tree)
-    with pytest.raises(DeployError, match=r"(?s)cannot remove .*still using it") as e:
+    with pytest.raises(PytError, match=r"(?s)cannot remove .*still using it") as e:
         nvimtest._remove(tmp_path / "x")
     assert e.value.code == 1
 
@@ -555,12 +555,12 @@ def test_query_reports_an_old_neovim(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 def test_an_nvim_that_cannot_run_is_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # ./deploy doctor ended in an internal-error traceback, without its verdict, when the nvim
+    # ./pyt doctor ended in an internal-error traceback, without its verdict, when the nvim
     # on PATH has its x bit but cannot be executed: another architecture, a truncated download
     fake = tmp_path / ("nvim.exe" if sys.platform == "win32" else "nvim")
     fake.write_bytes(b"\x7fELF\x02\x01\x01\x00garbage")
     fake.chmod(0o755)
-    with pytest.raises(DeployError, match="cannot run .*nvim") as e:
+    with pytest.raises(PytError, match="cannot run .*nvim") as e:
         cmd_nvim.headless(str(fake), cmd_nvim.QUERY_LUA)
     assert e.value.code == 3
     monkeypatch.setattr(cmd_nvim, "find_nvim", lambda: str(fake))
@@ -634,7 +634,7 @@ def test_run_logged_ctrl_c_kills_the_whole_tree(tmp_path: Path, monkeypatch: pyt
         _kill(pid)
 
 
-# --- ./deploy nvim sync: install only, never an update or a clean ---------------------------------------
+# --- ./pyt nvim sync: install only, never an update or a clean ---------------------------------------
 
 
 def _nvim_in(tmp_path: Path) -> cmd_nvim.Nvim:
@@ -698,7 +698,7 @@ def test_nvim_sync_fails_when_a_plugin_is_not_installed(tmp_path: Path, monkeypa
     `Lazy! install` decides, never the exit code alone."""
     nv = _trusted_nvim(tmp_path)
     _record_runs(monkeypatch, report)
-    with pytest.raises(DeployError, match=re.escape(message)) as e:
+    with pytest.raises(PytError, match=re.escape(message)) as e:
         cmd_nvim.cmd_sync(nv)
     assert e.value.code == code
 
@@ -751,7 +751,7 @@ def test_real_nvim_sync_checks_the_plugins(tmp_path: Path, monkeypatch: pytest.M
         assert cmd_nvim.cmd_sync(nv) == 0
         assert "lazy.nvim reported errors for: flaky" in capsys.readouterr().err
         return
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         cmd_nvim.cmd_sync(nv)
     if case == "broken":
         assert e.value.code == 1 and "could not install: broken" in str(e.value) and "good" not in str(e.value)
@@ -769,14 +769,14 @@ def test_nvim_sync_refuses_an_untrusted_lazy_lua(tmp_path: Path, monkeypatch: py
     nv.trust_db.write_text({"untrusted": "", "changed": f"{'0' * 64} {real}\n", "denied": f"! {real}\n"}[state], encoding="utf-8")
     assert cmd_nvim.trust_status(nv.trust_db, cmd_nvim.LAZY_LUA).state == state
     runs = _record_runs(monkeypatch)
-    with pytest.raises(DeployError, match="nvim trust") as e:
+    with pytest.raises(PytError, match="nvim trust") as e:
         cmd_nvim.cmd_sync(nv)
     assert e.value.code == 3 and runs == []
 
 
 def test_nvim_sync_needs_lazyvim(tmp_path: Path) -> None:
     nv = cmd_nvim.Nvim("nvim", (0, 12, 5), tmp_path / "c", tmp_path / "d", tmp_path / "s", tmp_path / "k")
-    with pytest.raises(DeployError, match="bootstrap") as e:
+    with pytest.raises(PytError, match="bootstrap") as e:
         cmd_nvim.cmd_sync(nv)
     assert e.value.code == 3
 
@@ -924,7 +924,7 @@ def test_prepare_base_fails_when_a_pin_does_not_hold(tmp_path: Path, monkeypatch
     """A plugin left off its locked commit would make the pinned run test something else."""
     base = Base(tmp_path, monkeypatch, lock=True)
     base.stuck = {"nvim-treesitter"}
-    with pytest.raises(DeployError, match=r"nvim-treesitter at f{12}, pinned c{12}") as e:
+    with pytest.raises(PytError, match=r"nvim-treesitter at f{12}, pinned c{12}") as e:
         base.run()
     assert "base-restore.log" in str(e.value)
     assert e.value.code == 1, "a FAIL of the suite, not a usage error"
@@ -940,7 +940,7 @@ def test_prepare_base_fails_when_lazyvim_is_missing(tmp_path: Path, monkeypatch:
         cmd_nvim.remove_tree(base.nv.data / "lazy" / "LazyVim")  # Lazy! exited 0 but installed nothing
 
     monkeypatch.setattr(base, "lazy", lazy)
-    with pytest.raises(DeployError, match="LazyVim was not installed") as e:
+    with pytest.raises(PytError, match="LazyVim was not installed") as e:
         base.run()
     assert e.value.code == 1 and not base.layout.marker.is_file()
 
@@ -1028,7 +1028,7 @@ def test_the_shipped_pins_are_complete() -> None:
 
 
 def _preset_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stuck: set[str]) -> tuple[Base, nvimtest.Row]:
-    """run_preset after a pinned base, with ./deploy, the trust and the smoke run faked."""
+    """run_preset after a pinned base, with ./pyt, the trust and the smoke run faked."""
     base = Base(tmp_path, monkeypatch, lock=True)
     base.run()
     base.steps.clear()
@@ -1053,9 +1053,9 @@ def _preset_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stuck: set[str]
 def test_run_preset_uses_a_typing_profile_and_the_locked_plugins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     base, row = _preset_run(tmp_path, monkeypatch, stuck=set())
     assert row.ok, row
-    deploys = [s[5:] for s in base.steps if s[:4] == ["uv", "run", "--quiet", "--script"]]
-    assert [d[0] for d in deploys] == ["new", "sync", "mode"], deploys
-    assert deploys[-1] == ["mode", "--typing", nvimtest.SMOKE_TYPING], deploys
+    runs = [s[5:] for s in base.steps if s[:4] == ["uv", "run", "--quiet", "--script"]]
+    assert [d[0] for d in runs] == ["new", "sync", "mode"], runs
+    assert runs[-1] == ["mode", "--typing", nvimtest.SMOKE_TYPING], runs
     assert [a for s in base.steps for a in s if a.startswith("+Lazy! ")] == ["+Lazy! install"]
     assert base.lock_at_lazy == [LOCKED], "the lock (pruned by the base run) goes back before Lazy! install"
     assert base.installed["overseer.nvim"] == "b" * 40, "the extras' plugins come at their locked commits"
@@ -1112,7 +1112,7 @@ def _doctor(
 def test_nvim_doctor_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     code, out = _doctor(tmp_path, monkeypatch, capsys)
     assert code == 0 and "Neovim integration ready" in out, out
-    # the plugin runs ./deploy (and basedpyright: uv tool run) with the uv it finds itself, never uvx
+    # the plugin runs ./pyt (and basedpyright: uv tool run) with the uv it finds itself, never uvx
     assert "[ok] uv: /opt/uv/bin/uv" in out and "uvx" not in out, out
 
 
@@ -1158,7 +1158,7 @@ def test_nvim_doctor_tells_an_invalid_lazyvim_json_from_a_missing_one(tmp_path: 
     assert code == 0, "a note: LazyVim ignores it, .lazy.lua imports the extras anyway"
     code, out = _doctor(tmp_path / "fresh", monkeypatch, capsys, lazyvim_json="")
     assert "lazyvim.json not found" in out and code == 0, out
-    with pytest.raises(DeployError, match="cannot read it as JSON"):
+    with pytest.raises(PytError, match="cannot read it as JSON"):
         cmd_nvim.missing_extras(tmp_path / "c" / "lazyvim.json")
 
 

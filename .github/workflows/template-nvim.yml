@@ -1,5 +1,5 @@
 # CI of the template repository only (the template- prefix keeps it out of projects made
-# with ./deploy new): the LazyVim integration, headless, in an isolated LazyVim (XDG_* under
+# with ./pyt new): the LazyVim integration, headless, in an isolated LazyVim (XDG_* under
 # a temp dir). For each preset it creates a project, trusts its .lazy.lua through Neovim's
 # API, installs the plugins and runs .pytemplate/nvim/tests/smoke.lua.
 #
@@ -19,7 +19,7 @@ on:
     paths:
       - ".lazy.lua"
       - ".pytemplate/**"
-      - "deploy*"
+      - "pyt*"
       - "pytemplate.toml"
       - "pyproject.toml"
       - "uv.lock"
@@ -28,7 +28,7 @@ on:
     paths:
       - ".lazy.lua"
       - ".pytemplate/**"
-      - "deploy*"
+      - "pyt*"
       - "pytemplate.toml"
       - "pyproject.toml"
       - "uv.lock"
@@ -81,13 +81,13 @@ jobs:
       - name: fd
         run: choco install fd -y --no-progress
       - name: Runner environment
-        run: ./deploy setup
+        run: ./pyt setup
       - name: LazyVim smoke test (script, raylib, flet)
         env:
           # short work dir outside the checkout (Windows MAX_PATH; no .lazy.lua above it).
           # The runner context exists only at step level, not in the job's env.
           PT_NVIM_DIR: ${{ runner.temp }}/pt-nvim
-        run: ./deploy selftest --nvim --require --dir "$PT_NVIM_DIR"
+        run: ./pyt selftest --nvim --require --dir "$PT_NVIM_DIR"
       - name: Logs of the smoke test
         if: failure() || cancelled()  # a job over its timeout-minutes is cancelled, not failed
         uses: actions/upload-artifact@v7
@@ -114,14 +114,14 @@ jobs:
       - name: fd (Ubuntu names it fdfind)
         run: sudo apt-get update && sudo apt-get install -y fd-find
       - name: Runner environment
-        run: ./deploy setup
+        run: ./pyt setup
       # Without the lock, selftest --nvim takes the starter HEAD and the newest plugins
       - name: Unpin
         run: rm .pytemplate/nvim/tests/lazy-lock.json
       - name: LazyVim smoke test on the latest of everything
         env:
           PT_NVIM_DIR: ${{ runner.temp }}/pt-nvim
-        run: ./deploy selftest --nvim --require --dir "$PT_NVIM_DIR"
+        run: ./pyt selftest --nvim --require --dir "$PT_NVIM_DIR"
       - name: Logs, the resolved lazy-lock.json and starter-commit.txt
         if: always()
         uses: actions/upload-artifact@v7

@@ -50,7 +50,7 @@ from pathlib import Path
 from . import proc, ui
 from .config import Config
 from .project import IS_MACOS, IS_WINDOWS, ROOT, host_arch, rel
-from .ui import DeployError
+from .ui import PytError
 
 VERSION = "5.2.1"  # pinned: bump VERSION and the SHA-256 values together
 URL = "https://github.com/upx/upx/releases/download/v{version}/{asset}"
@@ -153,10 +153,10 @@ def _download(dest: Path) -> Path:
         with urllib.request.urlopen(url, timeout=120) as r:  # noqa: S310 (fixed https URL)
             data = r.read()
     except (OSError, http.client.HTTPException) as e:  # a connection closed halfway: IncompleteRead, no OSError
-        raise DeployError(f"upx: cannot download {url}: {e}\n  Install it yourself (scoop/winget/apt) or set deploy.upx.path", 3) from None
+        raise PytError(f"upx: cannot download {url}: {e}\n  Install it yourself (scoop/winget/apt) or set deploy.upx.path", 3) from None
     digest = hashlib.sha256(data).hexdigest()
     if digest != sha256:
-        raise DeployError(f"upx: {asset} has SHA-256 {digest}, expected {sha256}: not using it", 3)
+        raise PytError(f"upx: {asset} has SHA-256 {digest}, expected {sha256}: not using it", 3)
     binary: bytes | None = None
     if asset.endswith(".zip"):
         with zipfile.ZipFile(io.BytesIO(data)) as z:
@@ -168,7 +168,7 @@ def _download(dest: Path) -> Path:
             extracted = t.extractfile(info) if info else None
             binary = extracted.read() if extracted else None
     if binary is None:
-        raise DeployError(f"upx: {asset} has no {_exe_name()} binary", 3)
+        raise PytError(f"upx: {asset} has no {_exe_name()} binary", 3)
     dest.mkdir(parents=True, exist_ok=True)
     target = dest / _exe_name()
     partial = target.with_name(target.name + ".part")  # an interrupted write must never look cached
@@ -190,20 +190,20 @@ def locate(cfg: Config) -> Path | None:
         try:
             given = Path(cfg.deploy.upx.path).expanduser()
         except RuntimeError as e:  # a ~user of another machine (a shared pytemplate.toml), or no home folder
-            raise DeployError(f"deploy.upx.path = {cfg.deploy.upx.path!r} does not exist here ({e})", 3) from None
+            raise PytError(f"deploy.upx.path = {cfg.deploy.upx.path!r} does not exist here ({e})", 3) from None
         path = given if given.is_absolute() else ROOT / given
         if not path.is_file():
-            raise DeployError(
+            raise PytError(
                 f"deploy.upx.path = {cfg.deploy.upx.path!r} does not exist ({path}; a relative path starts at the project root)", 3
             )
         if os.path.normcase(path.name) != os.path.normcase(_exe_name()):  # tools/upx-5.2.1
-            raise DeployError(
+            raise PytError(
                 f"deploy.upx.path = {cfg.deploy.upx.path!r} must be a file named {_exe_name()} ({path}): Nuitka takes no"
                 f" other name (it searched PATH instead) and PyInstaller looks for <folder>/{_exe_name()}; rename it",
                 2,
             )
         if not _runnable(path):  # a checkout from Windows or a zip lost its x bit: pack_file died later
-            raise DeployError(f"deploy.upx.path = {cfg.deploy.upx.path!r} is not executable ({path}): chmod +x {shlex.quote(str(path))}", 3)
+            raise PytError(f"deploy.upx.path = {cfg.deploy.upx.path!r} is not executable ({path}): chmod +x {shlex.quote(str(path))}", 3)
         return path
     on_path = shutil.which("upx", path=proc.base_env().get("PATH"))
     if on_path:
@@ -323,7 +323,7 @@ def pack_file(upx: Path, path: Path, flags: list[str]) -> Result:
             check=False,
         )
     except OSError as e:  # no x bit, another architecture, gone: the build stops with this, never a traceback
-        raise DeployError(f"upx: cannot run {upx}: {e.strerror or e}", 3) from None
+        raise PytError(f"upx: cannot run {upx}: {e.strerror or e}", 3) from None
     if r.returncode == 0:
         return Result(path, before, path.stat().st_size, "packed")
     reason = _classify(r.stdout + r.stderr)
@@ -338,7 +338,7 @@ def pack_tree(cfg: Config, root: Path) -> list[Result]:
         return []
     flags = level_flags(cfg)
     ui.step(f"upx {' '.join(flags)}: {len(files)} binaries in {rel(root)}")
-    if proc.DRY_RUN:  # never reached from ./deploy build (a dry run stops before any method builds)
+    if proc.DRY_RUN:  # never reached from ./pyt build (a dry run stops before any method builds)
         return []
     upx = find(cfg)  # resolved by preflight() before the build, except for a runtime = "system" portable build
     with ThreadPoolExecutor(max_workers=max(1, (os.cpu_count() or 2))) as pool:

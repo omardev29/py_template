@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from runner import config, upx  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.methods import exe  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 WINDOWS = sys.platform == "win32"
 
@@ -36,9 +36,9 @@ def test_level_flags_and_pyinstaller_env() -> None:
 
 
 def test_invalid_level_and_module_names_are_rejected() -> None:
-    with pytest.raises(DeployError, match="deploy.upx.level"):
+    with pytest.raises(PytError, match="deploy.upx.level"):
         make({"upx": {"level": "max"}})
-    with pytest.raises(DeployError, match="exclude_modules"):
+    with pytest.raises(PytError, match="exclude_modules"):
         make({"exclude_modules": ["not a module"]})
 
 
@@ -78,7 +78,7 @@ def test_builtin_excludes_and_assets_are_pinned() -> None:
 
 
 def test_relative_upx_path_resolves_against_the_project_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # "tools/upx" was checked against the caller's cwd (./deploy typed from src/ failed) and
+    # "tools/upx" was checked against the caller's cwd (./pyt typed from src/ failed) and
     # reached flet pack and Nuitka relative while they run in their own folders
     root = tmp_path / "proj"
     fake = root / "tools" / ("upx.exe" if WINDOWS else "upx")
@@ -103,7 +103,7 @@ def test_relative_upx_path_resolves_against_the_project_root(monkeypatch: pytest
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     assert upx.find(make({"upx": {"path": f"~/elsewhere/{absolute.name}"}})) == absolute
-    with pytest.raises(DeployError, match="relative path starts at the project root") as e:
+    with pytest.raises(PytError, match="relative path starts at the project root") as e:
         upx.find(make({"upx": {"path": "tools/missing"}}))
     assert e.value.code == 3
 
@@ -151,7 +151,7 @@ def test_a_upx_path_not_named_upx_is_refused_before_any_work(monkeypatch: pytest
         tool = root / "tools" / name
         tool.write_bytes(b"")
         tool.chmod(0o755)
-        with pytest.raises(DeployError, match=f"must be a file named {upx._exe_name()} ") as e:
+        with pytest.raises(PytError, match=f"must be a file named {upx._exe_name()} ") as e:
             upx.preflight(make({"upx": {"enabled": True, "path": f"tools/{name}"}}), "nuitka")
         assert e.value.code == 2
     good = root / "tools" / (upx._exe_name().upper() if WINDOWS else upx._exe_name())  # Windows: any case
@@ -173,7 +173,7 @@ def test_a_upx_without_its_x_bit_is_refused_before_any_work(monkeypatch: pytest.
     monkeypatch.setattr(upx, "ROOT", root)
     monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
     cfg = make({"upx": {"enabled": True, "path": "tools/upx"}})
-    with pytest.raises(DeployError, match=r"deploy.upx.path = 'tools/upx' is not executable .*: chmod \+x ") as e:
+    with pytest.raises(PytError, match=r"deploy.upx.path = 'tools/upx' is not executable .*: chmod \+x ") as e:
         upx.preflight(cfg, "portable")
     assert e.value.code == 3
     # a cached download that lost its x bit is downloaded again, never handed to the tools
@@ -187,7 +187,7 @@ def test_a_upx_without_its_x_bit_is_refused_before_any_work(monkeypatch: pytest.
     # and a upx that cannot start while packing stops the build with its reason, not a traceback
     target = tmp_path / "app.bin"
     target.write_bytes(b"\x7fELF")
-    with pytest.raises(DeployError, match="upx: cannot run .*: Permission denied") as e:
+    with pytest.raises(PytError, match="upx: cannot run .*: Permission denied") as e:
         upx.pack_file(tool, target, ["-1"])
     assert e.value.code == 3
 
@@ -332,7 +332,7 @@ def test_download_failures_are_clear_and_leave_nothing(monkeypatch: pytest.Monke
 
         monkeypatch.setattr(upx.urllib.request, "urlopen", offline)
         message = "cannot download"
-    with pytest.raises(DeployError, match=message) as e:
+    with pytest.raises(PytError, match=message) as e:
         upx._download(tmp_path / "tools")
     assert e.value.code == 3
     assert not (tmp_path / "tools").exists() or not any((tmp_path / "tools").iterdir())
@@ -409,6 +409,6 @@ def test_a_upx_path_of_a_user_this_machine_lacks_is_a_clear_error() -> None:
     """deploy.upx.path = "~builder/bin/upx" of a shared pytemplate.toml, on a machine without that
     user: expanduser raised RuntimeError (POSIX), and a build ended in an internal-error traceback.
     (Windows guesses such a folder next to the home folder: it is not there either.)"""
-    with pytest.raises(DeployError, match="does not exist") as e:
+    with pytest.raises(PytError, match="does not exist") as e:
         upx.locate(make({"upx": {"enabled": True, "path": "~pt-no-such-user-here/bin/upx"}}))
     assert e.value.code == 3

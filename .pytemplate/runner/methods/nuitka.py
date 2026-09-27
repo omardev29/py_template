@@ -27,7 +27,7 @@ from .. import envs, mypyc, proc, ui, upx
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
 from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT, rel
-from ..ui import DeployError
+from ..ui import PytError
 from .common import remove_output
 
 # Nuitka is not in uv.lock (`uv run --with`), so it is pinned here to keep builds reproducible:
@@ -55,7 +55,7 @@ def check_python(cfg: Config, args: Sequence[str]) -> None:
     )
     if _minor(wanted) <= _minor(NUITKA_PYTHON) or experimental:
         return
-    raise DeployError(
+    raise PytError(
         f"python.cpython = {wanted!r}, but {NUITKA} only supports CPython up to {NUITKA_PYTHON}.\n"
         f"  Bump NUITKA and NUITKA_PYTHON in .pytemplate/runner/methods/nuitka.py to a Nuitka release\n"
         f"  that supports {wanted}, or try the pinned one anyway with --experimental={flag}",
@@ -95,14 +95,14 @@ def check_options(cfg: Config, backend: str) -> None:
     if not cfg.deploy.nuitka.pgo:
         return
     if backend == "mypyc":
-        raise DeployError(
+        raise PytError(
             "deploy.nuitka.pgo does not work with the mypyc backend: Nuitka's profiling run starts the app "
             "before main.dist holds the compiled extension modules, so they fail to import (ImportError) "
-            "while Nuitka still reports success. Use ./deploy build cpython --method nuitka, or set pgo = false",
+            "while Nuitka still reports success. Use ./pyt build cpython --method nuitka, or set pgo = false",
             2,
         )
     if IS_MACOS:
-        raise DeployError(
+        raise PytError(
             "deploy.nuitka.pgo is not available on macOS: Nuitka 4.2.2 has no clang profdata step there. "
             "Set pgo = false, or build on Linux or Windows",
             2,
@@ -149,7 +149,7 @@ def includable(cfg: Config, stage: Path, names: Sequence[str]) -> list[str]:
         out = envs.uv(envs.tool_env(cfg), argv, capture=True, echo=False).stdout
         line = next((ln for ln in out.splitlines() if ln.startswith("PTLOCATE")), None)
         if line is None:
-            raise DeployError(f"could not check the imports of the compiled modules: {out.strip()!r}")
+            raise PytError(f"could not check the imports of the compiled modules: {out.strip()!r}")
         keep = set(json.loads(line[len("PTLOCATE") :]))
         dropped = [n for n in imported if n not in keep]
         if dropped:
@@ -213,7 +213,7 @@ def _flet_client_archive(cfg: Config) -> Path:
     query = "import flet_desktop, flet_desktop.version as v; print(flet_desktop.get_artifact_filename(), v.version)"
     out = envs.uv(envs.tool_env(cfg), ["run", "--locked", "python", "-c", query], capture=True, echo=False).stdout.split()
     if len(out) != 2:
-        raise DeployError(f"could not ask flet_desktop for its client archive: {' '.join(out)!r}")
+        raise PytError(f"could not ask flet_desktop for its client archive: {' '.join(out)!r}")
     name, version = out
     archive = BUILD / "flet-client" / version / name
     if archive.is_file():
@@ -245,10 +245,10 @@ def _flet_client_archive(cfg: Config) -> Path:
             problem = archive_problem(partial, name)
     except (OSError, ValueError, http.client.HTTPException) as e:  # IncompleteRead is no OSError
         partial.unlink(missing_ok=True)
-        raise DeployError(f"cannot download the Flet client {source}: {str(e) or type(e).__name__}", 3) from None
+        raise PytError(f"cannot download the Flet client {source}: {str(e) or type(e).__name__}", 3) from None
     if problem:
         partial.unlink(missing_ok=True)
-        raise DeployError(f"the Flet client downloaded from {source} is not a whole archive: {problem}. Build again to retry", 3)
+        raise PytError(f"the Flet client downloaded from {source} is not a whole archive: {problem}. Build again to retry", 3)
     partial.replace(archive)
     _fingerprint(archive)
     return archive
@@ -383,7 +383,7 @@ def build(req: BuildRequest) -> Path:
     try:
         envs.uv(envs.tool_env(cfg), ["run", "--locked", "--with", NUITKA, *argv], cwd=stage)
     except proc.CommandFailed as e:
-        raise DeployError(
+        raise PytError(
             f"{e}\n  Nuitka is pinned to {NUITKA} (NUITKA in .pytemplate/runner/methods/nuitka.py): if it says"
             f" Python {cfg.python.cpython} is not supported, bump it to a release that supports it",
             e.code,
@@ -393,13 +393,13 @@ def build(req: BuildRequest) -> Path:
     if onefile:
         exe = next((p for p in produced if p.is_file() and p.name.startswith(cfg.app.name)), None)
         if exe is None:
-            raise DeployError(f"nuitka finished without producing {cfg.app.name}* in {work}")
+            raise PytError(f"nuitka finished without producing {cfg.app.name}* in {work}")
         out.mkdir(parents=True)
         shutil.move(str(exe), str(out / exe.name))
         return out / exe.name
     dist_dir = next((p for p in produced if p.is_dir() and p.name.endswith(".dist")), None)
     if dist_dir is None:
-        raise DeployError(f"nuitka finished without producing a *.dist folder in {work}")
+        raise PytError(f"nuitka finished without producing a *.dist folder in {work}")
     shutil.move(str(dist_dir), str(out))
     if use_upx:
         upx.pack_tree(cfg, out)  # BUILTIN_EXCLUDE, deploy.upx.exclude and the level apply, as for portable

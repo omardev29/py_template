@@ -2,9 +2,9 @@
 
 - `python.jit` / `python.jit_interpreter` are unknown keys: the loader's normal error (exit 2).
 - Nothing the runner generates or starts sets PYTHON_JIT or points at a .venv-jit environment.
-- `./deploy init ...` exits 2 with a hint (./deploy new DIR --preset P). The preset step lives on
-  as the internal route `__init`: `./deploy new` runs it in the fresh copy, and the template
-  maintainer regenerates the template root with it (./deploy __init script --name myapp --force).
+- `./pyt init ...` exits 2 with a hint (./pyt new DIR --preset P). The preset step lives on
+  as the internal route `__init`: `./pyt new` runs it in the fresh copy, and the template
+  maintainer regenerates the template root with it (./pyt __init script --name myapp --force).
 """
 
 from __future__ import annotations
@@ -30,9 +30,9 @@ from runner.config import Config  # noqa: E402
 from runner.editors import nvim, vscode  # noqa: E402
 from runner.methods import portable, pyz  # noqa: E402
 from runner.project import ENV_SUFFIX, PRESETS, ROOT, TEMPLATE  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
-HINT = "./deploy new DIR --preset P"
+HINT = "./pyt new DIR --preset P"
 JIT_KEYS = ("jit", "jit_interpreter")
 # Each preset's real pytemplate.toml, as `new` renders it (the root is the script one as "myapp")
 PRESET_NAMES = sorted(p.name for p in PRESETS.iterdir() if (p / "preset.toml").is_file())
@@ -70,7 +70,7 @@ def cli_state(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def child_env(**extra: str) -> dict[str, str]:
-    """A ./deploy child: no UV/VIRTUAL_ENV/UV_PROJECT_ENVIRONMENT/UV_PYTHON/PYTEMPLATE_*, no git config.
+    """A ./pyt child: no UV/VIRTUAL_ENV/UV_PROJECT_ENVIRONMENT/UV_PYTHON/PYTEMPLATE_*, no git config.
 
     The uv that runs this suite stays first on PATH, so the child uses the same one.
     """
@@ -85,9 +85,9 @@ def child_env(**extra: str) -> dict[str, str]:
     return env
 
 
-def deploy(root: Path, *args: str, cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def pyt(root: Path, *args: str, cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "-B", str(root / ".pytemplate" / "deploy.py"), *args],
+        [sys.executable, "-B", str(root / ".pytemplate" / "pyt.py"), *args],
         cwd=cwd or root,
         env=env or child_env(),
         capture_output=True,
@@ -117,7 +117,7 @@ def snapshot(root: Path, *, eol: bool = True) -> dict[str, str]:
 
 @pytest.mark.parametrize(("key", "value"), [("jit", True), ("jit", False), ("jit_interpreter", "/usr/bin/python3.14")])
 def test_jit_keys_are_unknown_keys(key: str, value: object) -> None:
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         make({"python": {key: value}})
     assert f"unknown key 'python.{key}'" in str(e.value)
     assert "(valid: cpython, pypy)" in str(e.value)  # the loader's normal message, no special case
@@ -133,7 +133,7 @@ def test_a_pytemplate_toml_that_still_has_jit_fails_to_load(tmp_path: Path, monk
     path = tmp_path / "pytemplate.toml"
     path.write_text(old, encoding="utf-8")
     monkeypatch.setattr(config, "CONFIG_FILE", path)
-    with pytest.raises(DeployError, match=r"unknown key 'python\.jit'") as e:
+    with pytest.raises(PytError, match=r"unknown key 'python\.jit'") as e:
         config.load(set(cli.COMMANDS))
     assert e.value.code == 2
     assert cli.main(["mode"]) == 2
@@ -147,7 +147,7 @@ def test_no_pytemplate_toml_mentions_the_jit_keys(path: str) -> None:
     assert set(data["python"]) <= {"cpython", "pypy"}
     assert not re.search(r"(?m)^\s*jit(_interpreter)?\s*=", text)
     assert "python.org" not in text and "PYTHON_JIT" not in text
-    assert "./deploy init" not in text
+    assert "./pyt init" not in text
 
 
 @pytest.mark.parametrize("args", [["--jit", "on"], ["--jit", "off"], ["mypyc", "--jit=on"], ["--jit=off"]])
@@ -233,14 +233,14 @@ def test_init_is_not_listed_anywhere(capsys: pytest.CaptureFixture[str]) -> None
     assert cli.cmd_help(None, []) == 0
     listed = capsys.readouterr().out
     assert not re.search(r"(?m)^\s+_*init\b", listed), listed
-    assert "./deploy init" not in listed
+    assert "./pyt init" not in listed
     # editor.json (VS Code/Neovim task lists and pickers), the xonsh completion, VS Code's tasks
     cfg = make({})
     assert {"init", "__init"}.isdisjoint(c["name"] for c in nvim.commands())
     first, choices, flags = shells.completion_words(cfg)
     assert {"init", "__init"}.isdisjoint(first) and {"init", "__init"}.isdisjoint({*choices, *flags})
     labels = [t["label"] for t in vscode.tasks(cfg)["tasks"]]
-    assert not any(re.fullmatch(r"deploy: _*init\b.*", label) for label in labels), labels
+    assert not any(re.fullmatch(r"pyt: _*init\b.*", label) for label in labels), labels
     committed = json.loads((ROOT / ".pytemplate" / "editor.json").read_text(encoding="utf-8"))
     assert {"init", "__init"}.isdisjoint(c["name"] for c in committed["commands"])
     # The Neovim plugin's per-command metadata (refresh after it, open its output) went too
@@ -259,17 +259,17 @@ def test_the_internal_route_is_the_old_init(capsys: pytest.CaptureFixture[str]) 
     assert set(cli.INTERNAL).isdisjoint(cli.COMMANDS)
     # A [tasks] name can never shadow an internal route: task names start with a letter
     for name in cli.INTERNAL:
-        with pytest.raises(DeployError, match="invalid task name"):
+        with pytest.raises(PytError, match="invalid task name"):
             make({"tasks": {name: {"cmd": ["x"]}}})
     # `help __init` does not document it (internal: like any unknown name, exit 2), and
     # `__init -h` is argparse's help
-    with pytest.raises(DeployError, match="unknown command: __init"):
+    with pytest.raises(PytError, match="unknown command: __init"):
         cli.cmd_help(None, ["__init"])
     assert "__init" not in capsys.readouterr().out
     with pytest.raises(SystemExit) as e:
         cmd_mode.cmd_init(make({}), ["-h"])
     assert e.value.code == 0
-    assert "./deploy __init" in capsys.readouterr().out
+    assert "./pyt __init" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -282,7 +282,7 @@ def test_the_internal_route_is_the_old_init(capsys: pytest.CaptureFixture[str]) 
         ["-q", "init", "--help"],
     ],
 )
-def test_deploy_init_exits_2_with_a_hint(argv: list[str], monkeypatch: pytest.MonkeyPatch, cli_state: None, capsys: pytest.CaptureFixture[str]) -> None:
+def test_pyt_init_exits_2_with_a_hint(argv: list[str], monkeypatch: pytest.MonkeyPatch, cli_state: None, capsys: pytest.CaptureFixture[str]) -> None:
     def never(*_a: object, **_k: object) -> None:
         raise AssertionError("init must not run")
 
@@ -291,7 +291,7 @@ def test_deploy_init_exits_2_with_a_hint(argv: list[str], monkeypatch: pytest.Mo
     monkeypatch.setattr(render, "auto", never)  # refused before the generated files are touched
     assert cli.main(argv) == 2
     err = capsys.readouterr().err
-    assert "init is no longer a ./deploy command" in err
+    assert "init is no longer a ./pyt command" in err
     assert HINT in err
     assert "unknown command" not in err
 
@@ -313,7 +313,7 @@ def test_a_task_named_init_is_allowed(monkeypatch: pytest.MonkeyPatch, cli_state
 
 
 def test_new_runs_the_internal_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """presets.new runs `deploy.py --no-render __init PRESET --name N --force` in the copy: a routed name."""
+    """presets.new runs `pyt.py --no-render __init PRESET --name N --force` in the copy: a routed name."""
     calls: list[list[str]] = []
 
     def fake_run(argv: list[Any], **_kw: Any) -> subprocess.CompletedProcess[str]:
@@ -328,7 +328,7 @@ def test_new_runs_the_internal_route(tmp_path: Path, monkeypatch: pytest.MonkeyP
     presets.new(dest, "raylib", None)
     (argv,) = calls
     assert argv[:4] == ["uv", "run", "--quiet", "--script"]
-    assert Path(argv[4]) == dest.resolve() / ".pytemplate" / "deploy.py"
+    assert Path(argv[4]) == dest.resolve() / ".pytemplate" / "pyt.py"
     assert argv[5:] == ["--no-render", "__init", "raylib", "--name", "demo", "--force"]  # init renders itself
     command = cli.INTERNAL[argv[6]]
     assert getattr(importlib.import_module(f"runner.{command.module}"), command.func) is cmd_mode.cmd_init
@@ -340,15 +340,15 @@ def test_new_dry_run_names_the_internal_step(tmp_path: Path, monkeypatch: pytest
     monkeypatch.chdir(tmp_path)
     assert cmd_mode.cmd_new(config.load(set(cli.COMMANDS)), ["p1", "--preset", "flet", "--name", "demo"]) == 0
     err = capsys.readouterr().err
-    assert "./deploy __init flet --name demo --force" in err
-    assert "./deploy init" not in err
+    assert "./pyt __init flet --name demo --force" in err
+    assert "./pyt init" not in err
     assert not (tmp_path / "p1").exists()
 
 
 def test_preset_hint_in_validate_names_new() -> None:
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         make({"app": {"preset": "nope"}})
-    assert HINT in str(e.value) and "./deploy init" not in str(e.value)
+    assert HINT in str(e.value) and "./pyt init" not in str(e.value)
     assert e.value.code == 2
 
 
@@ -358,28 +358,28 @@ def test_preset_hint_in_validate_names_new() -> None:
 @needs_uv
 def test_new_creates_a_project_through_the_internal_route(tmp_path: Path) -> None:
     dest = tmp_path / "demo"
-    r = deploy(ROOT, "new", str(dest), "--preset", "script", cwd=tmp_path, env=child_env(GIT_CEILING_DIRECTORIES=str(tmp_path)))
+    r = pyt(ROOT, "new", str(dest), "--preset", "script", cwd=tmp_path, env=child_env(GIT_CEILING_DIRECTORIES=str(tmp_path)))
     if r.returncode != 0 and any(marker in r.stderr for marker in rename.PYPI_UNREACHABLE):
         pytest.skip("needs PyPI: `new` adds the preset's requirements with uv")
     assert r.returncode == 0, r.stderr
-    assert re.search(r"deploy\.py --no-render __init script --name demo --force", r.stderr), r.stderr
+    assert re.search(r"pyt\.py --no-render __init script --name demo --force", r.stderr), r.stderr
     assert (dest / "src" / "demo" / "__init__.py").is_file() and not (dest / "src" / "myapp").exists()
     text = (dest / "pytemplate.toml").read_text(encoding="utf-8")
     assert tomllib.loads(text)["app"]["name"] == "demo"
     assert not (dest / ".pytemplate" / "template-repo").exists()
     if shutil.which("git"):
         assert (dest / ".git").is_dir()
-    check = deploy(dest, "render", "--check")
+    check = pyt(dest, "render", "--check")
     assert check.returncode == 0, check.stderr
     # The new project's own runner refuses the old command with the same hint
     before = snapshot(dest)
-    refused = deploy(dest, "init", "flet")
+    refused = pyt(dest, "init", "flet")
     assert refused.returncode == 2 and HINT in refused.stderr, refused.stderr
     assert snapshot(dest) == before
 
 
 @needs_uv
-@pytest.mark.skipif(not (TEMPLATE / "template-repo").is_file(), reason="about the template repository (a project made with ./deploy new has its own name)")
+@pytest.mark.skipif(not (TEMPLATE / "template-repo").is_file(), reason="about the template repository (a project made with ./pyt new has its own name)")
 def test_maintainer_route_regenerates_the_root_pristine(tmp_path: Path) -> None:
     """The template root IS the script preset as "myapp": regenerating it changes no byte."""
     root_cfg = config.load(set(cli.COMMANDS))
@@ -390,14 +390,14 @@ def test_maintainer_route_regenerates_the_root_pristine(tmp_path: Path) -> None:
     presets.copy_template(copy)
     before = snapshot(copy)
 
-    dry = deploy(copy, "--dry-run", "__init", "script", "--name", "myapp")
+    dry = pyt(copy, "--dry-run", "__init", "script", "--name", "myapp")
     assert dry.returncode == 0, dry.stderr
     marks = [ln for ln in dry.stderr.splitlines() if re.match(r"\s{4}[-+~] ", ln)]
     assert "identical):" in dry.stderr and not marks, dry.stderr
     assert snapshot(copy) == before
 
     before = snapshot(copy, eol=False)
-    real = deploy(copy, "__init", "script", "--name", "myapp", "--force")
+    real = pyt(copy, "__init", "script", "--name", "myapp", "--force")
     assert real.returncode == 0, real.stderr
     after = snapshot(copy, eol=False)
     changed = sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
@@ -406,6 +406,6 @@ def test_maintainer_route_regenerates_the_root_pristine(tmp_path: Path) -> None:
     # Without --force it still refuses an edited src/, and the hint names the internal route
     app = copy / "src" / "myapp" / "app.py"
     app.write_text(app.read_text(encoding="utf-8") + "\n# edited\n", encoding="utf-8")
-    refused = deploy(copy, "__init", "script")
+    refused = pyt(copy, "__init", "script")
     assert refused.returncode == 2, refused.stderr
-    assert "__init script --force" in refused.stderr and "./deploy init" not in refused.stderr
+    assert "__init script --force" in refused.stderr and "./pyt init" not in refused.stderr

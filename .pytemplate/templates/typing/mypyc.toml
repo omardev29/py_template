@@ -1,7 +1,7 @@
 # Typing profile "mypyc": the strictest one. Applied only with backend.active = "mypyc"
-# (and always in `./deploy check mypyc`, `test mypyc` and `build mypyc`).
+# (and always in `./pyt check mypyc`, `test mypyc` and `build mypyc`).
 #
-# ./deploy turns these variants into .mypy.ini, pyrightconfig.json, .ruff.toml and
+# ./pyt turns these variants into .mypy.ini, pyrightconfig.json, .ruff.toml and
 # .vscode/settings.json. You can edit them here; never edit the generated files.
 #
 # Why so strict: mypyc compiles your types to C. Wherever there is Any (or a global without

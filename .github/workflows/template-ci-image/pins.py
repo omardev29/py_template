@@ -1,6 +1,6 @@
 """Pins of the Linux CI image of the TEMPLATE repository (template-ci-image.yml), and its tag.
 
-Template repository only: `./deploy new` never copies `.github/workflows/template-*`. This file
+Template repository only: `./pyt new` never copies `.github/workflows/template-*`. This file
 is the only home of the pins that exist for the image alone (the base, the apt snapshot, uv,
 Neovim, PowerShell, actionlint, xonsh, the user id); the pins the project already owns are read
 from their files by text, as the workflows read them, never copied. The tag is a hash of every
@@ -70,7 +70,7 @@ def from_code() -> dict[str, str]:
     major, minor, patch = re.findall(r"\d+", _one(r"^MIN_LAZYVIM = (\(\d+, \d+, \d+\))", ".pytemplate/runner/cmd_nvim.py"))
     return {
         "CPYTHON": _read(".python-version").strip(),
-        "PYTHON_FLOOR": _one(r'^# requires-python = ">=(\d+\.\d+)"$', ".pytemplate/deploy.py"),
+        "PYTHON_FLOOR": _one(r'^# requires-python = ">=(\d+\.\d+)"$', ".pytemplate/pyt.py"),
         "NVIM_MIN": f"v{major}.{minor}.{patch}",
         "TAPLO": _one(r'"(taplo==[0-9.]+)"', ".pytemplate/tests/test_render_core.py"),
         "BASEDPYRIGHT": _one(r'^BASEDPYRIGHT = "(.*)"', ".pytemplate/runner/cmd_dev.py"),

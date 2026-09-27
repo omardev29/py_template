@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from runner import cmd_apply, cmd_env, cmd_nvim, config, envs, hooks, project, proc, render, shells  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, venv_python  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 PYPY = {"backend": {"active": "cpython", "supported": ["cpython", "pypy", "mypyc"]}}
@@ -130,7 +130,7 @@ def test_uv_run_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_sync_installs_every_dependency_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`./deploy add --group docs mkdocs` installs mkdocs; an exact `uv sync` of the default
+    """`./pyt add --group docs mkdocs` installs mkdocs; an exact `uv sync` of the default
     groups removed it again on the next sync/setup, and a fresh clone never got it."""
     monkeypatch.setattr(envs, "ROOT", tmp_path)
     (tmp_path / ".venv").mkdir()
@@ -179,7 +179,7 @@ def test_sync_leaves_out_the_groups_uv_cannot_install_there(
     """`uv sync --all-groups` refused the whole sync in a project whose [tool.uv] conflicts pairs
     two groups (a cpu/gpu split: "Groups `cpu` and `gpu` are incompatible"), and in .venv-pypy
     with a group whose own requires-python needs 3.12: sync, setup and apply exited 2 and every
-    `./deploy add` was rolled back, while `uv run --locked` (the default groups) worked. Those
+    `./pyt add` was rolled back, while `uv run --locked` (the default groups) worked. Those
     groups are left out, each with a note; the default groups stay, and so do a group paired
     with an extra only (--all-groups enables no extra) and one paired with another package's."""
     monkeypatch.setattr(envs, "ROOT", tmp_path)
@@ -250,7 +250,7 @@ def test_sync_with_real_uv_installs_what_the_groups_allow(tmp_path: Path, monkey
     of [tool.uv] conflicts, a group whose requires-python no interpreter meets), envs.sync is not."""
     try:
         proc.find_uv()
-    except DeployError:
+    except PytError:
         pytest.skip("uv not found")
     here = "%d.%d" % sys.version_info[:2]
     (tmp_path / "pyproject.toml").write_text(
@@ -287,7 +287,7 @@ def test_ensure_python_finds_or_installs_the_version_or_says_why(monkeypatch: py
 
     monkeypatch.setattr(envs, "uv", fake)
     if install == 2:
-        with pytest.raises(DeployError) as e:
+        with pytest.raises(PytError) as e:
             envs.ensure_python("3.41")
         assert e.value.code == 3 and 'python.cpython = "3.41"' in str(e.value) and "No download found" in str(e.value)
         assert ".python-version keeps its old value" in str(e.value)
@@ -300,17 +300,17 @@ def test_ensure_python_with_real_uv_refuses_a_version_that_does_not_exist(monkey
     """Real uv, offline: a typo such as 3.41 has no download (uv knows its downloads offline)."""
     try:
         proc.find_uv()
-    except DeployError:
+    except PytError:
         pytest.skip("uv not found")
     monkeypatch.setenv("UV_OFFLINE", "1")
-    with pytest.raises(DeployError, match=r'python\.cpython = "3\.41": uv can neither find nor install') as e:
+    with pytest.raises(PytError, match=r'python\.cpython = "3\.41": uv can neither find nor install') as e:
         envs.ensure_python("3.41")
     assert e.value.code == 3
     envs.ensure_python("%d.%d" % sys.version_info[:2])  # the runner's own: found, nothing installed
 
 
 def test_quiet_hides_uvs_own_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """README: -q prints no progress lines. `./deploy -q sync` still printed uv's `Resolved 26
+    """README: -q prints no progress lines. `./pyt -q sync` still printed uv's `Resolved 26
     packages` and `Checked 21 packages`."""
     monkeypatch.setattr(envs, "ROOT", tmp_path)
     (tmp_path / ".venv").mkdir()
@@ -333,7 +333,7 @@ def test_quiet_hides_uvs_own_progress(tmp_path: Path, monkeypatch: pytest.Monkey
 
 
 def test_quiet_keeps_the_output_of_the_uv_commands_the_user_drives(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """uv --quiet also hides uv's warnings and change summaries: `./deploy -q add 'idna[nope]'`
+    """uv --quiet also hides uv's warnings and change summaries: `./pyt -q add 'idna[nope]'`
     wrote the bogus extra without uv's `does not have an extra named nope`, and `-q lock
     --upgrade` / `lock --dry-run` printed nothing of what they changed or would change. The uv
     commands that take the user's own arguments keep their output; syncs and runs stay quiet."""
@@ -361,10 +361,10 @@ def test_a_polluted_uv_environment_still_selects_the_project_env(monkeypatch: py
     or VIRTUAL_ENV (another project, an activated venv) never reaches uv."""
     tool = envs.tool_env(make())
     if not tool.python.is_file():
-        pytest.skip("no .venv (./deploy setup)")
+        pytest.skip("no .venv (./pyt setup)")
     try:
         proc.find_uv()
-    except DeployError:
+    except PytError:
         pytest.skip("uv not found")
     for key, value in {**POLLUTED, "UV_PYTHON": "3.99", "UV_OFFLINE": "1"}.items():
         monkeypatch.setenv(key, value)
@@ -431,7 +431,7 @@ def test_an_old_uv_is_refused_before_it_creates_an_environment(tmp_path: Path, m
     monkeypatch.setattr(envs, "ROOT", tmp_path)  # no .venv there yet
     calls = Calls(monkeypatch, version="uv 0.8.17")
     env = envs.cpython_env(make())
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         envs.sync(env)
     assert e.value.code == 3
     assert "uv 0.8.17 is too old" in str(e.value) and envs.MIN_UV in str(e.value) and "uv self update" in str(e.value)
@@ -473,10 +473,10 @@ def test_sync_targets() -> None:
     assert names(cmd_env._envs_for(pp, "all")) == [".venv", ".venv-pypy"]
     assert names(cmd_env._envs_for(pp, "cpython")) == names(cmd_env._envs_for(pp, "mypyc")) == [".venv"]
     assert names(cmd_env._envs_for(pp, "pypy")) == [".venv-pypy"]
-    with pytest.raises(DeployError, match=r"--supports \+pypy") as e:
+    with pytest.raises(PytError, match=r"--supports \+pypy") as e:
         cmd_env._envs_for(cfg, "pypy")
     assert e.value.code == 2
-    with pytest.raises(DeployError, match="unknown target 'jython'"):
+    with pytest.raises(PytError, match="unknown target 'jython'"):
         cmd_env._envs_for(cfg, "jython")
 
 
@@ -535,8 +535,8 @@ def test_add_remove_argv(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capture
 
 
 def test_remove_keeps_the_packages_of_every_group(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`uv remove` syncs EXACTLY for the default groups: `./deploy remove idna` uninstalled six,
-    added with `./deploy add --group docs six`. The environment is synced like setup and sync do
+    """`uv remove` syncs EXACTLY for the default groups: `./pyt remove idna` uninstalled six,
+    added with `./pyt add --group docs six`. The environment is synced like setup and sync do
     (every group), never by uv add/remove themselves."""
     calls = fake_uv(monkeypatch)
     cmd_env.cmd_remove(make(), ["idna"])
@@ -676,7 +676,7 @@ def test_a_lock_cut_short_puts_uv_lock_back_too(lock_project: Path, monkeypatch:
 
 @pytest.mark.parametrize("args", [["--check"], ["--locked"], ["--dry-run"], ["--upgrade", "--dry-run"], ["--frozen"], ["--check-exists"]])
 def test_a_read_only_lock_puts_pyproject_back(lock_project: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]) -> None:
-    """`./deploy lock --dry-run` (a preview) rewrote pyproject.toml, uv wrote no uv.lock, and the
+    """`./pyt lock --dry-run` (a preview) rewrote pyproject.toml, uv wrote no uv.lock, and the
     project was left with a pyproject.toml its uv.lock does not match."""
     calls = fake_uv(monkeypatch)
     assert cmd_env.cmd_lock(make(), args) == 0
@@ -686,7 +686,7 @@ def test_a_read_only_lock_puts_pyproject_back(lock_project: Path, monkeypatch: p
 
 @pytest.mark.parametrize("args", [["--help"], ["-h"], ["--upgrade", "-h"], ["--version"], ["-V"]])
 def test_lock_help_changes_nothing(lock_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], args: list[str]) -> None:
-    """`./deploy lock --help` (help passes through to uv) rewrote the managed parts of
+    """`./pyt lock --help` (help passes through to uv) rewrote the managed parts of
     pyproject.toml, then `uv lock --help` wrote no uv.lock and nothing put pyproject.toml back:
     every `uv run --locked` failed until the next real lock."""
     calls = fake_uv(monkeypatch)
@@ -789,10 +789,10 @@ def test_lock_that_first_resolves_pypy_checks_the_code_or_puts_both_files_back(
     fake_uv(monkeypatch)
 
     def refused(cfg: Config) -> None:
-        raise DeployError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
+        raise PytError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
 
     monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", refused)
-    with pytest.raises(DeployError, match="Python 3.11"):
+    with pytest.raises(PytError, match="Python 3.11"):
         cmd_env.cmd_lock(make(PYPY), [])
     assert pyproject.read_text(encoding="utf-8") == NO_PYPY_PYPROJECT and lock.read_text(encoding="utf-8") == "version = 1\n"
     assert "put back as it was (the code is not ready for PyPy yet)" in capsys.readouterr().err
@@ -827,10 +827,10 @@ def test_a_relock_whose_pypy_check_fails_puts_both_files_back(
     monkeypatch.setattr(envs, "uv", uv)
 
     def refused(cfg: Config) -> None:
-        raise DeployError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
+        raise PytError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
 
     monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", refused)
-    with pytest.raises(DeployError, match="Python 3.11"):
+    with pytest.raises(PytError, match="Python 3.11"):
         cmd_env.ensure_lock(make(PYPY))
     assert pyproject.read_text(encoding="utf-8") == NO_PYPY_PYPROJECT and lock.read_text(encoding="utf-8") == "version = 1\n"
     assert "put back as they were (the code is not ready for PyPy yet)" in capsys.readouterr().err
@@ -847,7 +847,7 @@ def test_ensure_lock_refuses_a_relock_the_environment_makes_a_no_op(monkeypatch:
     monkeypatch.setattr(render, "write_pyproject", lambda cfg: True)
     calls = fake_uv(monkeypatch, {("lock", "--check"): 1})
     monkeypatch.setenv(name, "1")
-    with pytest.raises(DeployError, match=f"{name} is set") as e:
+    with pytest.raises(PytError, match=f"{name} is set") as e:
         cmd_env.ensure_lock(make())
     assert e.value.code == 2 and ["lock"] not in calls
     monkeypatch.setenv(name, "0")  # a false value is no read-only lock
@@ -915,7 +915,7 @@ def test_clean_reports_a_folder_it_could_not_remove(tree: Path, monkeypatch: pyt
     monkeypatch.setattr(cmd_env.shutil, "rmtree", locked)
     assert cmd_env.cmd_clean(make(), ["--envs"]) == 1
     err = capsys.readouterr().err
-    assert "error: could not remove .venv completely" in err and "Close" in err and "./deploy clean --envs" in err
+    assert "error: could not remove .venv completely" in err and "Close" in err and "./pyt clean --envs" in err
     assert not (tree / ".venv-pypy").exists() and not (tree / "dist").exists()  # the others still go
 
 
@@ -1010,16 +1010,16 @@ def git(cwd: Path, *args: str) -> str:
 
 
 def launcher_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """deploy, deploy.ps1 and deploy.cmd committed without the exec bit (from Windows) and
+    """pyt, pyt.ps1 and pyt.cmd committed without the exec bit (from Windows) and
     checked out without it: what setup repairs."""
     isolate_git(monkeypatch, tmp_path)
     root = tmp_path / "repo"
     root.mkdir()
     git(root, "init", "-q")
-    for name in ("deploy", "deploy.ps1", "deploy.cmd"):
+    for name in ("pyt", "pyt.ps1", "pyt.cmd"):
         (root / name).write_text("#!/bin/sh\n", encoding="utf-8")
         os.chmod(root / name, 0o644)
-    git(root, "add", "--chmod=-x", "deploy", "deploy.ps1", "deploy.cmd")
+    git(root, "add", "--chmod=-x", "pyt", "pyt.ps1", "pyt.cmd")
     monkeypatch.setattr(proc, "ROOT", root)
     monkeypatch.setattr(cmd_env, "ROOT", root)
     monkeypatch.setattr(proc, "DRY_RUN", False)
@@ -1034,17 +1034,17 @@ def index_mode(root: Path, name: str) -> str:
 def test_fix_exec_bit_repairs_the_index_and_the_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = launcher_repo(tmp_path, monkeypatch)
     cmd_env._fix_exec_bit()
-    assert index_mode(root, "deploy") == index_mode(root, "deploy.ps1") == "100755"
-    assert index_mode(root, "deploy.cmd") == "100644"
+    assert index_mode(root, "pyt") == index_mode(root, "pyt.ps1") == "100755"
+    assert index_mode(root, "pyt.cmd") == "100644"
     if not IS_WINDOWS:
-        assert os.access(root / "deploy", os.X_OK) and os.access(root / "deploy.ps1", os.X_OK)
-        assert not os.access(root / "deploy.cmd", os.X_OK)
+        assert os.access(root / "pyt", os.X_OK) and os.access(root / "pyt.ps1", os.X_OK)
+        assert not os.access(root / "pyt.cmd", os.X_OK)
         # core.filemode=true: the next `git add` records the file's mode, which must be 755 now
-        git(root, "add", "deploy", "deploy.ps1")
-        assert index_mode(root, "deploy") == index_mode(root, "deploy.ps1") == "100755"
+        git(root, "add", "pyt", "pyt.ps1")
+        assert index_mode(root, "pyt") == index_mode(root, "pyt.ps1") == "100755"
         assert git(root, "diff", "--name-only") == ""
     cmd_env._fix_exec_bit()  # idempotent
-    assert index_mode(root, "deploy") == "100755"
+    assert index_mode(root, "pyt") == "100755"
 
 
 @pytest.mark.skipif(IS_WINDOWS, reason="exec bits are POSIX")
@@ -1053,14 +1053,14 @@ def test_fix_exec_bit_outside_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     isolate_git(monkeypatch, tmp_path)
     root = tmp_path / "plain"
     root.mkdir()
-    (root / "deploy").write_text("#!/bin/sh\n", encoding="utf-8")
-    os.chmod(root / "deploy", 0o644)
+    (root / "pyt").write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(root / "pyt", 0o644)
     monkeypatch.setattr(proc, "ROOT", root)
     monkeypatch.setattr(cmd_env, "ROOT", root)
     monkeypatch.setattr(proc, "DRY_RUN", False)
     cmd_env._fix_exec_bit()
-    assert os.access(root / "deploy", os.X_OK)
-    assert not (root / "deploy.ps1").exists()  # a missing launcher is not created
+    assert os.access(root / "pyt", os.X_OK)
+    assert not (root / "pyt.ps1").exists()  # a missing launcher is not created
 
 
 @needs_git
@@ -1080,9 +1080,9 @@ def test_fix_exec_bit_warns_when_the_file_is_not_ours(tmp_path: Path, monkeypatc
     monkeypatch.setattr(Path, "chmod", not_the_owner)
     cmd_env._fix_exec_bit()  # no exception
     err = capsys.readouterr().err
-    assert "warning: cannot make deploy executable: Operation not permitted" in err and "chmod +x deploy" in err
-    assert "deploy.ps1" in err
-    assert index_mode(root, "deploy") == index_mode(root, "deploy.ps1") == "100755"  # the git part still ran
+    assert "warning: cannot make pyt executable: Operation not permitted" in err and "chmod +x pyt" in err
+    assert "pyt.ps1" in err
+    assert index_mode(root, "pyt") == index_mode(root, "pyt.ps1") == "100755"  # the git part still ran
 
 
 @needs_git
@@ -1090,11 +1090,11 @@ def test_fix_exec_bit_dry_run_changes_nothing(tmp_path: Path, monkeypatch: pytes
     root = launcher_repo(tmp_path, monkeypatch)
     monkeypatch.setattr(proc, "DRY_RUN", True)
     cmd_env._fix_exec_bit()
-    assert index_mode(root, "deploy") == "100644"
+    assert index_mode(root, "pyt") == "100644"
     err = capsys.readouterr().err
-    assert "$ git update-index --chmod=+x deploy" in err
+    assert "$ git update-index --chmod=+x pyt" in err
     if not IS_WINDOWS:
-        assert not os.access(root / "deploy", os.X_OK) and "$ chmod +x deploy" in err
+        assert not os.access(root / "pyt", os.X_OK) and "$ chmod +x pyt" in err
 
 
 # --- the C compiler ------------------------------------------------------------------------------------
@@ -1116,7 +1116,7 @@ def test_c_compiler_rejects_macos_xcode_shims(tmp_path: Path, monkeypatch: pytes
     def fake_run(argv: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
         calls.append([str(a) for a in argv])
         if answer.get("missing"):
-            raise DeployError("program not found: /usr/bin/xcode-select", 3)
+            raise PytError("program not found: /usr/bin/xcode-select", 3)
         return done(argv, answer["rc"], answer["out"])
 
     monkeypatch.setattr(cmd_env.proc, "run", fake_run)
@@ -1259,7 +1259,7 @@ class Doctor:
         monkeypatch.setattr(cmd_env, "_c_compiler", self._compiler)
         monkeypatch.setattr(cmd_env, "_long_paths", lambda: True)
         # cmd_apply.doctor reads the real project (src/<pkg>/, pyproject.toml): in a project made
-        # with ./deploy new it would compare that project with the Config the test built
+        # with ./pyt new it would compare that project with the Config the test built
         # (test_apply covers it)
         monkeypatch.setattr(cmd_apply, "doctor", lambda cfg, check: self.reached.append("apply"))
         monkeypatch.setattr(shells, "doctor", lambda check: self.reached.append("shells"))
@@ -1327,7 +1327,7 @@ def test_doctor_reports_a_broken_interpreter(doctor: Doctor, capsys: pytest.Capt
     assert cmd_env.cmd_doctor(make(PYPY), []) == 1
     env = doctor.cp if broken == "cpython" else doctor.pp
     assert [line[1] for line in doctor.problems()] == [f"environment {project.rel(env.dir)} is broken (its Python does not start)"]
-    assert "./deploy setup" in doctor.problems()[0][2] and "&&" not in doctor.problems()[0][2]  # PowerShell 5.1 has no &&
+    assert "./pyt setup" in doctor.problems()[0][2] and "&&" not in doctor.problems()[0][2]  # PowerShell 5.1 has no &&
     assert doctor.reached == ["apply", "shells", "hooks", "nvim"]
     assert "error: 1 problem(s)" in capsys.readouterr().err
 
@@ -1342,7 +1342,7 @@ def test_doctor_counts_each_generated_file_problem_once(doctor: Doctor, changed:
     assert len(doctor.problems()) == expected
     for path in edited:
         passed, label, hint = doctor.line(f"{path} hand-edited")
-        assert passed is False and "pytemplate.toml" in hint and "./deploy render --force" in hint
+        assert passed is False and "pytemplate.toml" in hint and "./pyt render --force" in hint
     if not changed:  # the "update with any command" hint is false for a hand-edited file
         assert all("any command" not in hint for _, _, hint in doctor.problems())
     else:
@@ -1364,9 +1364,9 @@ def test_doctor_lock_line_says_what_uv_said(doctor: Doctor) -> None:
     doctor.lock = 1
     assert cmd_env.cmd_doctor(make(), []) == 1
     passed, label, hint = doctor.line("uv.lock up to date")
-    assert passed is False and "needs to be updated, but `--check` was provided." in hint and "./deploy lock" in hint
+    assert passed is False and "needs to be updated, but `--check` was provided." in hint and "./pyt lock" in hint
     doctor.lines.clear()
-    doctor.lock = DeployError("uv 0.8.17 is too old: this project needs uv 0.10.12 or newer", 3)
+    doctor.lock = PytError("uv 0.8.17 is too old: this project needs uv 0.10.12 or newer", 3)
     assert cmd_env.cmd_doctor(make(), []) == 1  # reported, not a crash
     assert "too old" in doctor.line("uv lock --check did not run")[2]
     assert doctor.reached[-3:] == ["shells", "hooks", "nvim"]

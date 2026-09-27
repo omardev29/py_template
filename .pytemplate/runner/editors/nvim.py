@@ -15,7 +15,7 @@ from typing import Any
 from .. import render
 from ..config import METHODS, Config
 from ..project import TEMPLATES, rel
-from ..ui import DeployError
+from ..ui import PytError
 
 LAZY_TEMPLATE = TEMPLATES / "nvim" / "lazy.lua"
 LAZY_LUA = ".lazy.lua"
@@ -45,7 +45,7 @@ def task_severity(cfg: Config) -> dict[str, dict[str, str]]:
 
 
 def commands() -> list[dict[str, str]]:
-    """Return the ./deploy commands (name, usage, summary, group) for the editor's task list."""
+    """Return the ./pyt commands (name, usage, summary, group) for the editor's task list."""
     from ..cli import COMMANDS
 
     return [{"name": n, "usage": c.usage, "summary": c.summary, "group": c.group} for n, c in COMMANDS.items()]
@@ -74,7 +74,7 @@ def editor_data(cfg: Config, profile: str) -> dict[str, Any]:
             "mypy_severity": severity,
             # Same as render.mypy_cli_args: with PyPy supported mypy checks the 3.11 syntax
             "python_version": cfg.min_python if cfg.pypy_enabled else None,
-            # the plugin's uvx language server runs the basedpyright ./deploy check pins, on the
+            # the plugin's uvx language server runs the basedpyright ./pyt check pins, on the
             # same Node.js (basedpyright asks for nodejs-wheel-binaries>=20.13.1: it floats)
             "basedpyright": BASEDPYRIGHT,
             "basedpyright_node": BASEDPYRIGHT_NODE,
@@ -104,7 +104,7 @@ def lazy_lua() -> str:
     try:
         text = LAZY_TEMPLATE.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError:
-        raise DeployError(f"{rel(LAZY_TEMPLATE)} is not UTF-8 text: save it as UTF-8") from None
+        raise PytError(f"{rel(LAZY_TEMPLATE)} is not UTF-8 text: save it as UTF-8") from None
     except OSError as e:
-        raise DeployError(f"cannot read {rel(LAZY_TEMPLATE)}: {e.strerror or e}") from None
+        raise PytError(f"cannot read {rel(LAZY_TEMPLATE)}: {e.strerror or e}") from None
     return text.lstrip(BOM).replace("\r\n", "\n")

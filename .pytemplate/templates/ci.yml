@@ -1,15 +1,15 @@
 # __HEADER__
 #
 # CI: on Windows, Linux and macOS it checks that the generated files and the managed parts of
-# pyproject.toml match pytemplate.toml (./deploy render --check), syncs the backends that OS
-# supports (./deploy sync, never setup), runs ./deploy check all and ./deploy test per backend,
+# pyproject.toml match pytemplate.toml (./pyt render --check), syncs the backends that OS
+# supports (./pyt sync, never setup), runs ./pyt check all and ./pyt test per backend,
 # and builds one .pyz per OS. mypyc does not compile for other OSes, so each runner contributes
 # its binaries and the "pyz" job merges them into a single .pyz that uses the binaries of each OS
 # (the compiled modules fall back to their .py on any other interpreter; native dependencies run
 # only where they have binaries), uploaded with the .cmd wrapper that starts it on Windows.
 #
 # Moving parts on purpose: setup-uv installs the newest uv that satisfies required-version in
-# pyproject.toml (the floor ./deploy needs; a pinned uv cannot download Pythons released after
+# pyproject.toml (the floor ./pyt needs; a pinned uv cannot download Pythons released after
 # it), and the runner labels are -latest (GitHub keeps two GA images per OS and retires the
 # oldest label about six months after a newer one is GA, so a pinned label stops working for
 # certain; -latest only moves, and this workflow needs little more than bash, git and uv).
@@ -37,20 +37,20 @@ __MATRIX__
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.2.0
-      # A pytemplate.toml edit committed without running ./deploy (no hook, the web editor)
+      # A pytemplate.toml edit committed without running ./pyt (no hook, the web editor)
       - name: Generated files match pytemplate.toml
-        run: ./deploy render --check
+        run: ./pyt render --check
 __LINUX_DEPS__
       # Only this OS's backends (e.g. raylib publishes no PyPy wheels for macOS arm64);
       # `sync` never re-locks: a stale uv.lock fails here, as it should in CI
       - name: Backend environments
-        run: for b in ${{ matrix.backends }}; do ./deploy sync "$b" || exit 1; done
+        run: for b in ${{ matrix.backends }}; do ./pyt sync "$b" || exit 1; done
       - name: Types and lint (typing profile of each backend)
-        run: ./deploy check all
+        run: ./pyt check all
       - name: Tests on every backend
-        run: for b in ${{ matrix.backends }}; do ./deploy test "$b" || exit 1; done
+        run: for b in ${{ matrix.backends }}; do ./pyt test "$b" || exit 1; done
       - name: pyz with the compiled core for this OS
-        run: ./deploy build __BUILD_BACKEND__ --method pyz --no-check
+        run: ./pyt build __BUILD_BACKEND__ --method pyz --no-check
       - uses: actions/upload-artifact@v7
         with:
           name: pyz-${{ matrix.os }}
@@ -70,7 +70,7 @@ __LINUX_DEPS__
         with:
           path: pyz-parts
       - name: Merge the binaries of every OS into a single .pyz
-        run: ./deploy --no-render pyz-merge pyz-parts/*/*.pyz --out dist/__NAME__.pyz
+        run: ./pyt --no-render pyz-merge pyz-parts/*/*.pyz --out dist/__NAME__.pyz
       - uses: actions/upload-artifact@v7
         with:
           name: __NAME__-pyz

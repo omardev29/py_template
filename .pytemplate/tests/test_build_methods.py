@@ -28,7 +28,7 @@ from runner.cmd_build import BuildRequest  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.methods import common, exe, nuitka  # noqa: E402
 from runner.project import ROOT, SRC  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 IS_WINDOWS = os.name == "nt"
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
@@ -269,7 +269,7 @@ def _flet_pack(sandbox: Path, monkeypatch: pytest.MonkeyPatch, cfg: Config, back
 def test_flet_pack_onedir_linux_keeps_internal(sandbox: Path, monkeypatch: pytest.MonkeyPatch, name: str, backend: str) -> None:
     # With --contents-directory=. the executable dist/<name>/<name> was a FILE exactly where the
     # package folder dist/<name>/<pkg>/core/*.so had to go (app.name == pkg, the default of
-    # ./deploy new): PyInstaller's COLLECT failed with NotADirectoryError
+    # ./pyt new): PyInstaller's COLLECT failed with NotADirectoryError
     argv = _flet_pack(sandbox, monkeypatch, _flet_cfg(name), backend, windows=False, macos=False).argv
     assert argv[:3] == ["flet", "pack", str(sandbox / "build" / "exe-stage" / backend / "main.py")]
     assert "--onedir" in argv
@@ -326,7 +326,7 @@ def test_an_output_in_use_is_a_clear_error_before_the_packager_runs(sandbox: Pat
     monkeypatch.setattr(nuitka, "IS_WINDOWS", True)
     app = fake_app(sandbox / "payload", cfg.pkg)
     module = nuitka if method == "nuitka" else exe
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         module.build(BuildRequest(cfg, "cpython", "nuitka" if method == "nuitka" else "exe", app))
     assert f"dist{os.sep}{name}" in str(e.value) or f"dist/{name}" in str(e.value)
     assert "still running" in str(e.value) and "app.exe" in str(e.value)
@@ -336,7 +336,7 @@ def test_an_output_in_use_is_a_clear_error_before_the_packager_runs(sandbox: Pat
 @pytest.mark.parametrize(("console", "expected"), [("auto", False), ("yes", True), ("no", False)])
 def test_flet_pack_console_and_utf8(sandbox: Path, monkeypatch: pytest.MonkeyPatch, console: str, expected: bool) -> None:
     # flet pack always adds --noconsole unless --debug-console has a value: deploy.exe.console
-    # was ignored. And the exe ran without UTF-8 mode, unlike ./deploy run and PyInstaller.
+    # was ignored. And the exe ran without UTF-8 mode, unlike ./pyt run and PyInstaller.
     argv = _flet_pack(sandbox, monkeypatch, _flet_cfg(console=console), "cpython", windows=True, macos=False).argv
     assert ("--debug-console=true" in argv) is expected
     assert "--pyinstaller-build-args=--python-option=X utf8" in argv
@@ -405,7 +405,7 @@ def test_nuitka_standalone_binary_never_clashes_with_the_package(
     sandbox: Path, monkeypatch: pytest.MonkeyPatch, name: str, windows: bool, backend: str
 ) -> None:
     # Nuitka standalone writes main.dist/<output-filename> NEXT TO main.dist/<pkg>/ (mypyc
-    # extensions): with app.name == pkg (the default of ./deploy new) and no .exe the binary
+    # extensions): with app.name == pkg (the default of ./pyt new) and no .exe the binary
     # was a FILE where the package folder had to go -> NotADirectoryError after minutes of work
     cfg = make({"app": {"name": name}, "compile": {"modules": [f"{name.replace('-', '_').lower()}.core"]}})
     app = _nuitka_app(sandbox / "payload", cfg.pkg)
@@ -452,7 +452,7 @@ def test_nuitka_starts_the_compiler_even_for_an_app_named_nuitka(sandbox: Path, 
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(envs, "uv", uv)
-    with pytest.raises(DeployError):  # the stand-in above builds nothing
+    with pytest.raises(PytError):  # the stand-in above builds nothing
         nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
     compiler = tmp_path / "site" / "nuitka"
     compiler.mkdir(parents=True)
@@ -468,9 +468,9 @@ def test_nuitka_without_output_is_a_clear_error(sandbox: Path, monkeypatch: pyte
     cfg = make({})
     app = _nuitka_app(sandbox / "payload", cfg.pkg)
     monkeypatch.setattr(envs, "uv", FakeNuitka(cfg.pkg, produce=False))
-    with pytest.raises(DeployError, match=r"\*\.dist folder"):
+    with pytest.raises(PytError, match=r"\*\.dist folder"):
         nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
-    with pytest.raises(DeployError, match="without producing myapp"):
+    with pytest.raises(PytError, match="without producing myapp"):
         nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app, onefile=True))
 
 
@@ -584,7 +584,7 @@ def test_nuitka_includable_drops_what_the_build_env_cannot_locate(tmp_path: Path
 def test_nuitka_includable_reports_a_broken_resolver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mypyc, "compiled_modules", lambda cfg: [])
     monkeypatch.setattr(envs, "uv", lambda *a, **k: subprocess.CompletedProcess([], 0, "a .pth file printed this\n", ""))
-    with pytest.raises(DeployError, match="could not check the imports"):
+    with pytest.raises(PytError, match="could not check the imports"):
         nuitka.includable(make({}), tmp_path, ["json"])
 
 
@@ -606,7 +606,7 @@ def test_nuitka_python_newer_than_the_pin_is_refused_before_any_work(monkeypatch
     monkeypatch.setattr(cmd_build, "check_lock", lambda cfg: None)  # uv would download a CPython 3.15
     cfg = make({"python": {"cpython": "3.15"}})
     if not extra:
-        with pytest.raises(DeployError) as e:
+        with pytest.raises(PytError) as e:
             cmd_build.cmd_build(cfg, ["cpython", "--method", "nuitka"])
         assert e.value.code == 3
         assert nuitka.NUITKA in str(e.value) and "nuitka.py" in str(e.value) and "3.15" in str(e.value)
@@ -625,7 +625,7 @@ def test_nuitka_failure_names_the_pin(sandbox: Path, monkeypatch: pytest.MonkeyP
         raise proc.CommandFailed(["uv", "run"], 1)
 
     monkeypatch.setattr(envs, "uv", failing)
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
     assert e.value.code == 1 and nuitka.NUITKA in str(e.value) and "methods/nuitka.py" in str(e.value)
 
@@ -700,7 +700,7 @@ def test_nuitka_pgo_flags(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ],
 )
 def test_nuitka_options_config_rules(data: dict[str, Any], message: str) -> None:
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         make(data)
     assert message in str(e.value) and e.value.code == 2
 
@@ -716,11 +716,11 @@ def test_nuitka_pgo_refuses_mypyc_and_macos_before_any_work(no_build: None, monk
     monkeypatch.setattr(proc, "DRY_RUN", dry_run)
     monkeypatch.setattr(nuitka, "IS_MACOS", False)
     cfg = make({**CONSOLE_APP, "deploy": {"nuitka": {"pgo": True}}})
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         cmd_build.cmd_build(cfg, ["mypyc", "--method", "nuitka"])
     assert e.value.code == 2 and "mypyc backend" in str(e.value) and "ImportError" in str(e.value) and "reports success" in str(e.value)
     monkeypatch.setattr(nuitka, "IS_MACOS", True)
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         cmd_build.cmd_build(cfg, ["cpython", "--method", "nuitka"])
     assert e.value.code == 2 and "macOS" in str(e.value) and "profdata" in str(e.value)
     # Without pgo neither rule applies (the stand-in stops at the checks)
@@ -731,11 +731,11 @@ def test_nuitka_pgo_refuses_mypyc_and_macos_before_any_work(no_build: None, monk
 def test_nuitka_build_itself_refuses_pgo_with_mypyc(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # nuitka.build checks too (the method can be called without cmd_build, as the tests do)
     cfg = make({**CONSOLE_APP, "deploy": {"nuitka": {"pgo": True}}})
-    with pytest.raises(DeployError, match="mypyc backend"):
+    with pytest.raises(PytError, match="mypyc backend"):
         _nuitka_argv(sandbox, monkeypatch, cfg, backend="mypyc")
     monkeypatch.setattr(nuitka, "IS_MACOS", True)
     app = _nuitka_app(sandbox / "payload2", cfg.pkg)
-    with pytest.raises(DeployError, match="not available on macOS"):
+    with pytest.raises(PytError, match="not available on macOS"):
         nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
 
 
@@ -1432,7 +1432,7 @@ def _pure_part(
     files = {"common/app/main.py": MERGE_MAIN, "common/lib/dep.py": f"WHERE = {where!r}\n"}
     if compiled:
         files[f"targets/{key}/app/overlay.txt"] = "pure"
-    if record_host:  # an older ./deploy did not record it
+    if record_host:  # an older ./pyt did not record it
         info["host"] = key
     return fake_pyz(path, targets=[key] if compiled else [], pure=True, files=files, backend="mypyc" if compiled else "cpython", **info)
 
@@ -1519,7 +1519,7 @@ def test_pyz_merge_refuses_invalid_parts(tmp_path: Path) -> None:
         z.writestr("_pyz.json", json.dumps({"name": "demo", "build_id": "x", "min_python": "3.11", "targets": [], "pure": True}))
     out = tmp_path / "out.pyz"
     for bad in (no_info, broken, partial, wrong_type):
-        with pytest.raises(DeployError, match="no valid _pyz.json"):  # was a KeyError traceback
+        with pytest.raises(PytError, match="no valid _pyz.json"):  # was a KeyError traceback
             _merge([good, bad], out)
     assert not out.exists()
     # A member name that climbs out of the scratch folder is refused, never written
@@ -1528,7 +1528,7 @@ def test_pyz_merge_refuses_invalid_parts(tmp_path: Path) -> None:
         for item in src.infolist():
             dst.writestr(item, src.read(item.filename))
         dst.writestr(f"targets/{FOREIGN}/lib/../../../../escaped.py", "x")
-    with pytest.raises(DeployError, match="unsafe member name"):
+    with pytest.raises(PytError, match="unsafe member name"):
         _merge([evil, _native_part(tmp_path / "other.pyz", key=LINUX)], out)
     assert not out.exists() and not list(tmp_path.parent.glob("escaped.py"))
 
@@ -1536,7 +1536,7 @@ def test_pyz_merge_refuses_invalid_parts(tmp_path: Path) -> None:
 def test_pyz_merge_refuses_two_compiled_apps_for_one_platform(tmp_path: Path) -> None:
     a = _native_part(tmp_path / "a.pyz", compiled=True)
     b = _native_part(tmp_path / "b.pyz", compiled=True)
-    with pytest.raises(DeployError, match="one part per platform"):
+    with pytest.raises(PytError, match="one part per platform"):
         _merge([a, b], tmp_path / "m.pyz")
     assert not (tmp_path / "m.pyz").exists()
 
@@ -1547,16 +1547,16 @@ def test_pyz_merge_refuses_parts_of_different_builds(tmp_path: Path) -> None:
     info, _ = _merge([a, crlf], tmp_path / "ok.pyz")  # a CRLF checkout (Windows CI) is not another build
     assert info["targets"] == [LINUX, WIN]
     other_code = _native_part(tmp_path / "v2.pyz", key=WIN, deps="d1", main=MERGE_MAIN + "# v2\n")
-    with pytest.raises(DeployError, match="other app code"):
+    with pytest.raises(PytError, match="other app code"):
         _merge([a, other_code], tmp_path / "m.pyz")
     other_deps = _native_part(tmp_path / "deps.pyz", key=WIN, deps="d2")
-    with pytest.raises(DeployError, match="different dependencies"):
+    with pytest.raises(PytError, match="different dependencies"):
         _merge([a, other_deps], tmp_path / "m.pyz")
     other_min = _native_part(tmp_path / "min.pyz", key=WIN, deps="d1", min_python=[3, 12])
-    with pytest.raises(DeployError, match="minimum Python"):
+    with pytest.raises(PytError, match="minimum Python"):
         _merge([a, other_min], tmp_path / "m.pyz")
     renamed = _native_part(tmp_path / "other.pyz", key=WIN, name="other")
-    with pytest.raises(DeployError, match="different apps"):
+    with pytest.raises(PytError, match="different apps"):
         _merge([a, renamed], tmp_path / "m.pyz")
     assert not (tmp_path / "m.pyz").exists()
 
@@ -1564,7 +1564,7 @@ def test_pyz_merge_refuses_parts_of_different_builds(tmp_path: Path) -> None:
 def test_pyz_merge_needs_the_host_of_a_pure_part(tmp_path: Path) -> None:
     native = _native_part(tmp_path / "native.pyz")
     old = _pure_part(tmp_path / "old.pyz", record_host=False)
-    with pytest.raises(DeployError, match="rebuild it"):
+    with pytest.raises(PytError, match="rebuild it"):
         _merge([native, old], tmp_path / "m.pyz")
     assert not (tmp_path / "m.pyz").exists()
     # An older pure mypyc part names its host through its single overlay target
@@ -1577,8 +1577,8 @@ def test_pyz_merge_needs_the_host_of_a_pure_part(tmp_path: Path) -> None:
 
 
 def test_pyz_merge_says_how_to_merge_a_merged_pure_file_again(tmp_path: Path) -> None:
-    # CI's merged .pyz (every part pure) merged again with a per-platform part: "an older ./deploy
-    # made it: rebuild it", though this ./deploy made it and a merge cannot be rebuilt
+    # CI's merged .pyz (every part pure) merged again with a per-platform part: "an older ./pyt
+    # made it: rebuild it", though this ./pyt made it and a merge cannot be rebuilt
     from runner.methods import pyz
 
     first = _pure_part(tmp_path / "linux.pyz", host=LINUX, where="first")
@@ -1587,17 +1587,17 @@ def test_pyz_merge_says_how_to_merge_a_merged_pure_file_again(tmp_path: Path) ->
     assert info["merged"] is True and "host" not in info
     native = _native_part(tmp_path / "native.pyz")
     for check in (lambda: pyz.check_parts([tmp_path / "all.pyz", native], tmp_path / "x.pyz"), lambda: _merge([native, tmp_path / "all.pyz"], tmp_path / "x.pyz")):
-        with pytest.raises(DeployError) as e:
+        with pytest.raises(PytError) as e:
             check()  # --dry-run (check_parts) says it too
-        assert "is a merge of pure parts" in str(e.value) and "pass the parts it was merged from to one ./deploy pyz-merge call" in str(e.value)
-        assert "older ./deploy" not in str(e.value)
+        assert "is a merge of pure parts" in str(e.value) and "pass the parts it was merged from to one ./pyt pyz-merge call" in str(e.value)
+        assert "older ./pyt" not in str(e.value)
     assert not (tmp_path / "x.pyz").exists()
     # What it says works: the parts it was merged from, with the other one, in one call
     info, names = _merge([first, second, native], tmp_path / "x.pyz")
     assert info["targets"] == sorted([FOREIGN, LINUX, WIN]) and f"targets/{WIN}/lib/dep.py" in names
     # A merge made before the "merged" key: both causes are named
     old_merge = fake_pyz(tmp_path / "old-all.pyz", pure=True, files={"common/app/main.py": MERGE_MAIN, "common/lib/dep.py": "WHERE = 'x'\n"})
-    with pytest.raises(DeployError, match="if an earlier pyz-merge made it, pass the parts it was merged from .*; if an older ./deploy built it, rebuild it"):
+    with pytest.raises(PytError, match="if an earlier pyz-merge made it, pass the parts it was merged from .*; if an older ./pyt built it, rebuild it"):
         pyz.check_parts([old_merge, native], tmp_path / "y.pyz")
 
 
@@ -1631,7 +1631,7 @@ def test_pyz_merge_refuses_an_output_its_wrapper_would_replace(tmp_path: Path) -
     a = _native_part(tmp_path / "a.pyz", key=LINUX)
     b = _native_part(tmp_path / "b.pyz", key=WIN)
     for name in ("merged.cmd", "merged.CMD"):  # any case: macOS and Windows folders ignore it
-        with pytest.raises(DeployError, match="its own .cmd wrapper"):
+        with pytest.raises(PytError, match="its own .cmd wrapper"):
             pyz.merge([a, b], tmp_path / name, make({}))
     assert not list(tmp_path.glob("merged.*"))
     assert pyz.wrapper_path(Path("x/app")) == Path("x/app.cmd") and pyz.wrapper_path(Path("app.pyz")) == Path("app.cmd")
@@ -1647,13 +1647,13 @@ def test_pyz_merge_refuses_an_output_name_its_wrapper_cannot_hold(tmp_path: Path
     a = _native_part(tmp_path / "a.pyz", key=LINUX)
     b = _native_part(tmp_path / "b.pyz", key=WIN)
     out = tmp_path / "out" / name
-    with pytest.raises(DeployError, match="wrapper") as e:
+    with pytest.raises(PytError, match="wrapper") as e:
         pyz.merge([a, b], out, make({}))
     assert e.value.code == 2
     assert not (tmp_path / "out").exists()  # nothing written
     monkeypatch.setattr(proc, "DRY_RUN", True)
     monkeypatch.setattr(cmd_build, "user_path", lambda raw: Path(raw))
-    with pytest.raises(DeployError, match="wrapper"):
+    with pytest.raises(PytError, match="wrapper"):
         cmd_build.cmd_pyz_merge(make({}), [str(a), str(b), "--out", str(out)])
 
 
@@ -1684,7 +1684,7 @@ def test_pyz_merge_refuses_an_app_name_that_is_no_app_name(tmp_path: Path) -> No
     # The part's name goes into the wrapper's unquoted `echo <name>: needs Python...`
     a = _native_part(tmp_path / "a.pyz", key=LINUX, name="demo & calc")
     b = _native_part(tmp_path / "b.pyz", key=WIN, name="demo & calc")
-    with pytest.raises(DeployError, match="no valid _pyz.json"):
+    with pytest.raises(PytError, match="no valid _pyz.json"):
         _merge([a, b], tmp_path / "m.pyz")
     assert not (tmp_path / "m.pyz").exists()
 
@@ -1701,9 +1701,9 @@ def test_pyz_merge_dry_run_checks_the_parts(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(proc, "DRY_RUN", True)
     monkeypatch.setattr(cmd_build, "user_path", lambda raw: Path(raw))
     cfg = make({})
-    with pytest.raises(DeployError, match="different apps"):
+    with pytest.raises(PytError, match="different apps"):
         cmd_build.cmd_pyz_merge(cfg, [str(a), str(other), "--out", str(tmp_path / "m.pyz")])
-    with pytest.raises(DeployError, match="no valid _pyz.json"):
+    with pytest.raises(PytError, match="no valid _pyz.json"):
         cmd_build.cmd_pyz_merge(cfg, [str(a), str(no_info), "--out", str(tmp_path / "m.pyz")])
     capsys.readouterr()
     b = _native_part(tmp_path / "b.pyz", key=WIN)
@@ -1770,7 +1770,7 @@ def test_target_keys_the_lock_cannot_serve_are_refused(monkeypatch: pytest.Monke
     monkeypatch.setattr(common, "host_os", lambda: "linux")
     monkeypatch.setattr(common, "host_arch", lambda: "x86_64")
     cfg = make({"backend": {"supported": supported}})
-    with pytest.raises(DeployError, match=message) as e:
+    with pytest.raises(PytError, match=message) as e:
         common.check_key(cfg, backend, key)
     assert e.value.code == 2
 
@@ -1786,7 +1786,7 @@ def test_target_keys_the_lock_cannot_serve_are_refused(monkeypatch: pytest.Monke
     ],
 )
 def test_parse_key_takes_exactly_the_documented_form(key: str) -> None:
-    with pytest.raises(DeployError, match="invalid platform key") as e:
+    with pytest.raises(PytError, match="invalid platform key") as e:
         common.parse_key(key)
     assert e.value.code == 2
     assert common.parse_key("cp314-linux-x86_64") == common.Target("cp", 3, 14, "linux", "x86_64")
@@ -1921,7 +1921,7 @@ wheels = [{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.wh
 @pytest.mark.parametrize(("docopt_tag", "error"), [("py3-none-any", None), ("cp314-cp314-linux_x86_64", "docopt")])
 def test_cross_target_builds_a_package_that_publishes_no_wheel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, docopt_tag: str, error: str | None) -> None:
     # --only-binary :all: refused docopt (an sdist only, pure Python) for every other OS, so no pyz
-    # with a --target could be built; a workspace library (./deploy add ./libs/x) the same
+    # with a --target could be built; a workspace library (./pyt add ./libs/x) the same
     calls = _install_recorder(tmp_path, monkeypatch)
     lock = tmp_path / "uv.lock"
     lock.write_text(SOURCE_ONLY_LOCK, encoding="utf-8")
@@ -1940,7 +1940,7 @@ def test_cross_target_builds_a_package_that_publishes_no_wheel(tmp_path: Path, m
     if error is None:
         common.install_deps(make({}), "cpython", common.parse_key(WIN), tmp_path / "site", req)
     else:
-        with pytest.raises(DeployError, match=f"{error}.*{WIN}.*pyz-merge") as e:
+        with pytest.raises(PytError, match=f"{error}.*{WIN}.*pyz-merge") as e:
             common.install_deps(make({}), "cpython", common.parse_key(WIN), tmp_path / "site", req)
         assert e.value.code == 2
     ((_key, args, _),) = calls
@@ -1959,7 +1959,7 @@ def test_cross_target_builds_a_pure_sdist_for_real(tmp_path: Path, monkeypatch: 
     if probe.returncode != 0:
         pytest.skip(f"needs PyPI (uv could not resolve docopt): {probe.stderr.strip()[-200:]}")
     if not envs.tool_env(make({})).python.is_file():
-        pytest.skip("needs .venv (./deploy setup)")
+        pytest.skip("needs .venv (./pyt setup)")
     lock = tmp_path / "uv.lock"
     lock.write_text(SOURCE_ONLY_LOCK, encoding="utf-8")
     monkeypatch.setattr(common, "LOCK", lock)
@@ -2242,7 +2242,7 @@ def test_skipped_requirements_reads_a_real_export_of_a_local_library_behind_a_ma
 
 
 def _workspace_project(root: Path, *, marked: str = "") -> Path:
-    """A project that depends on a local library the way `./deploy add ./libs/mylib` leaves it
+    """A project that depends on a local library the way `./pyt add ./libs/mylib` leaves it
     (a uv workspace member, which uv installs editable), locked offline (static metadata).
     `marked` adds a second library, a dependency on win32 only."""
     libs = ["mylib", marked] if marked else ["mylib"]
@@ -2367,7 +2367,7 @@ def test_build_rejects_arguments_the_method_would_ignore(no_build: None, monkeyp
     # They were all silently dropped (pyz, portable and wheel read no extra argument): a typo'd
     # --target built a host-only .pyz, `build --dry-run` REALLY built, `build mypy` built cpython
     monkeypatch.setattr(proc, "DRY_RUN", dry_run)
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         cmd_build.cmd_build(make(ALL_BACKENDS), args)
     assert message in str(e.value)
     assert e.value.code == 2
@@ -2375,7 +2375,7 @@ def test_build_rejects_arguments_the_method_would_ignore(no_build: None, monkeyp
 
 def test_build_rejects_a_bad_configured_target_key(no_build: None, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proc, "DRY_RUN", True)
-    with pytest.raises(DeployError, match="only resolves CPython 3.14") as e:
+    with pytest.raises(PytError, match="only resolves CPython 3.14") as e:
         cmd_build.cmd_build(make({"deploy": {"pyz": {"targets": ["host", "cp315-linux-x86_64"]}}}), ["--method", "pyz"])
     assert e.value.code == 2
     # Other methods ignore [deploy.pyz] targets
@@ -2453,7 +2453,7 @@ def test_build_refuses_what_the_method_would_refuse_before_any_work(
     no_build: None, monkeypatch: pytest.MonkeyPatch, data: dict[str, Any], args: list[str], message: str, code: int, dry_run: bool
 ) -> None:
     monkeypatch.setattr(proc, "DRY_RUN", dry_run)
-    with pytest.raises(DeployError, match=re.escape(message)) as e:
+    with pytest.raises(PytError, match=re.escape(message)) as e:
         cmd_build.cmd_build(make(data), args)
     assert e.value.code == code
 
@@ -2465,23 +2465,23 @@ def test_build_refuses_flet_build_without_developer_mode_before_any_work(no_buil
     monkeypatch.setattr(flet, "_developer_mode", lambda: False)
     monkeypatch.setattr(flet, "host_os", lambda: "windows")
     monkeypatch.setattr(proc, "DRY_RUN", True)
-    with pytest.raises(DeployError, match="Developer Mode") as e:
+    with pytest.raises(PytError, match="Developer Mode") as e:
         cmd_build.cmd_build(_flet_cfg(), ["--method", "flet"])
     assert e.value.code == 3
 
 
 def test_build_check_failure_is_exit_code_1(monkeypatch: pytest.MonkeyPatch) -> None:
-    # "check failed" exited 2 (usage/config) while ./deploy check exits 1 for the same findings
+    # "check failed" exited 2 (usage/config) while ./pyt check exits 1 for the same findings
     monkeypatch.setattr(cmd_build, "run_checks", lambda cfg, backend: False)
     monkeypatch.setattr(cmd_build, "payload", lambda *a: pytest.fail("no payload after a failed check"))
-    with pytest.raises(DeployError, match="check failed") as e:
+    with pytest.raises(PytError, match="check failed") as e:
         cmd_build.cmd_build(make({}), ["--method", "pyz"])
     assert e.value.code == 1
 
 
 @pytest.mark.parametrize(("output", "extra"), [("missing", ["-v"]), ("empty folder", [])])
 def test_build_without_output_never_reports_done(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], output: str, extra: list[str]) -> None:
-    # `./deploy build -v`: PyInstaller read -v as --version, printed it and made nothing, and the
+    # `./pyt build -v`: PyInstaller read -v as --version, printed it and made nothing, and the
     # build said "ok done: dist/p-cpython-exe (0.0 MB)" with exit 0
     class FakeMethod:
         @staticmethod
@@ -2493,7 +2493,7 @@ def test_build_without_output_never_reports_done(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(cmd_build, "payload", lambda cfg, backend: tmp_path)
     monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeMethod)
-    with pytest.raises(DeployError, match="no output") as e:
+    with pytest.raises(PytError, match="no output") as e:
         cmd_build.cmd_build(make({}), ["--method", "exe", "--no-check", *extra])
     assert ("before the command" in str(e.value)) is bool(extra)
     assert "done:" not in capsys.readouterr().err
@@ -2507,13 +2507,13 @@ def test_flet_method_refuses_before_any_work(no_build: None, monkeypatch: pytest
 
     monkeypatch.setattr(proc, "DRY_RUN", dry_run)
     monkeypatch.setattr(flet, "IS_WINDOWS", False)
-    with pytest.raises(DeployError, match="for the flet preset") as e:
+    with pytest.raises(PytError, match="for the flet preset") as e:
         cmd_build.cmd_build(make({}), ["cpython", "--method", "flet"])
     assert e.value.code == 2
     monkeypatch.setattr(flet, "IS_WINDOWS", True)
     monkeypatch.setattr(flet, "host_os", lambda: "windows")
     monkeypatch.setattr(flet, "_developer_mode", lambda: False)
-    with pytest.raises(DeployError, match="Developer Mode") as e:
+    with pytest.raises(PytError, match="Developer Mode") as e:
         cmd_build.cmd_build(_flet_cfg(), ["cpython", "--method", "flet"])
     assert e.value.code == 3
     # A web build needs no Developer Mode, nor does a machine that has it on: they go on
@@ -2558,7 +2558,7 @@ def test_upx_is_resolved_before_any_work(
     deploy = {**UPX_MISSING["deploy"], **cfg_data.get("deploy", {})}
     cfg = make({**cfg_data, "deploy": deploy})
     if packs:
-        with pytest.raises(DeployError, match="deploy.upx.path = 'tools/upx-missing' does not exist") as e:
+        with pytest.raises(PytError, match="deploy.upx.path = 'tools/upx-missing' does not exist") as e:
             cmd_build.cmd_build(cfg, ["cpython", "--method", method])
         assert e.value.code == 3
     elif dry_run:
@@ -2575,7 +2575,7 @@ def test_upx_download_happens_before_the_work_and_never_in_a_dry_run(
 
     def download(dest: Path) -> Path:
         downloads.append(dest)
-        raise DeployError("upx: cannot download it (offline)", 3)
+        raise PytError("upx: cannot download it (offline)", 3)
 
     monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
     monkeypatch.setattr(upx, "_cache_dir", lambda: tmp_path / "cache")
@@ -2584,7 +2584,7 @@ def test_upx_download_happens_before_the_work_and_never_in_a_dry_run(
     monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(tmp_path / "empty")})
     cfg = make({"deploy": {"upx": {"enabled": True}}})
     # Real build: the download fails before the checks and the payload
-    with pytest.raises(DeployError, match="offline"):
+    with pytest.raises(PytError, match="offline"):
         cmd_build.cmd_build(cfg, ["cpython", "--method", "portable"])
     assert downloads == [tmp_path / "cache"]
     # Dry run: it names the download instead of doing it
@@ -2614,7 +2614,7 @@ def test_a_system_runtime_portable_downloads_upx_only_for_a_binary_to_pack(
 
     def download(dest: Path) -> Path:
         downloads.append(dest)
-        raise DeployError("upx: cannot download it (offline)", 3)
+        raise PytError("upx: cannot download it (offline)", 3)
 
     monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
     monkeypatch.setattr(upx, "IS_WINDOWS", windows)
@@ -2640,13 +2640,13 @@ def test_a_system_runtime_portable_downloads_upx_only_for_a_binary_to_pack(
     (out / "lib").mkdir()
     (out / "lib" / ("tool.pyd" if windows else "tool")).write_bytes(b"\x7fELF" + b"\0" * 60)
     (out / "lib" / ("tool.pyd" if windows else "tool")).chmod(0o755)
-    with pytest.raises(DeployError, match="offline"):
+    with pytest.raises(PytError, match="offline"):
         upx.pack_tree(cfg, out)
     assert downloads == [tmp_path / "cache"]
     # A deploy.upx.path that does not exist is a config error whatever the build holds
     downloads.clear()
     cfg = make({"deploy": {"upx": {"enabled": True, "path": "tools/upx-missing"}, "portable": {"runtime": "system"}}})
-    with pytest.raises(DeployError, match="does not exist") as e:
+    with pytest.raises(PytError, match="does not exist") as e:
         cmd_build.cmd_build(cfg, ["cpython", "--method", "portable"])
     assert e.value.code == 3 and downloads == []
 
@@ -2659,7 +2659,7 @@ def test_build_dry_run_stops_after_the_argument_checks(no_build: None, monkeypat
 
 @pytest.mark.parametrize(("method", "reason"), [("exe", "PyInstaller does not support PyPy"), ("nuitka", "Nuitka only compiles for CPython"), ("flet", "flet build embeds CPython")])
 def test_build_refuses_methods_without_pypy(no_build: None, method: str, reason: str) -> None:
-    with pytest.raises(DeployError, match=reason) as e:
+    with pytest.raises(PytError, match=reason) as e:
         cmd_build.cmd_build(make(ALL_BACKENDS), ["pypy", "--method", method])
     assert e.value.code == 2
 
@@ -2670,7 +2670,7 @@ def test_build_default_method_per_backend(no_build: None, monkeypatch: pytest.Mo
     for backend, method in (("cpython", "exe"), ("mypyc", "exe"), ("pypy", "portable")):
         assert cmd_build.cmd_build(cfg, [backend, "--no-check"]) == 0
         assert f"build {backend} -> {method}: would output" in capsys.readouterr().err
-    with pytest.raises(DeployError, match="not in backend.supported"):
+    with pytest.raises(PytError, match="not in backend.supported"):
         cmd_build.cmd_build(make({}), ["pypy", "--no-check"])
 
 
@@ -3225,7 +3225,7 @@ def _system_portable(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, fail: bo
 
     def install(c: Config, b: str, t: common.Target, dest: Path, req: Path) -> Path:
         if fail:
-            raise DeployError("simulated failure")
+            raise PytError("simulated failure")
         dest.mkdir(parents=True, exist_ok=True)
         return dest
 
@@ -3285,7 +3285,7 @@ def test_a_previous_output_in_use_is_left_whole(tmp_path: Path, monkeypatch: pyt
         raise PermissionError(13, "The process cannot access the file because it is being used by another process", str(src))
 
     monkeypatch.setattr(common, "_move", in_use)
-    with pytest.raises(DeployError, match="in use") as e:
+    with pytest.raises(PytError, match="in use") as e:
         common.remove_output(out)
     assert e.value.code == 1 and "x-cpython-pyz" in str(e.value)
     assert sorted(p.name for p in out.iterdir()) == ["x.cmd", "x.pyz"]  # nothing deleted
@@ -3340,7 +3340,7 @@ def test_a_previous_portable_output_in_use_is_left_whole_with_its_archives(
         real_move(src, dst)
 
     monkeypatch.setattr(common, "_move", move)
-    with pytest.raises(DeployError, match="in use") as e:
+    with pytest.raises(PytError, match="in use") as e:
         _system_portable(sandbox, monkeypatch)
     assert e.value.code == 1 and fails in str(e.value)
     assert _tree_bytes(dist) == before  # every previous file where it was, no scratch folder left
@@ -3359,7 +3359,7 @@ def test_remove_output_names_what_it_could_not_put_back(tmp_path: Path, monkeypa
         real_move(src, dst)
 
     monkeypatch.setattr(common, "_move", move)
-    with pytest.raises(DeployError, match="x-cpython-portable.tar.gz: it is in use or read-only"):
+    with pytest.raises(PytError, match="x-cpython-portable.tar.gz: it is in use or read-only"):
         common.remove_output(folder, archive)
     aside = [p for p in tmp_path.iterdir() if p.name.startswith(".x-cpython-portable.old-")]
     assert len(aside) == 1 and (aside[0] / folder.name).is_dir() and archive.read_bytes() == b"old"
@@ -3403,21 +3403,21 @@ def test_build_refuses_a_stale_lock_before_any_work(no_build: None, monkeypatch:
 
     monkeypatch.setattr(envs, "uv", uv)
     monkeypatch.setattr(proc, "DRY_RUN", dry_run)
-    with pytest.raises(DeployError, match="uv.lock does not match pyproject.toml") as e:
+    with pytest.raises(PytError, match="uv.lock does not match pyproject.toml") as e:
         cmd_build.cmd_build(make({}), ["cpython", "--method", method, "--no-check"])
     assert asked == [["lock", "--check"]]
-    assert e.value.code == 2 and "./deploy lock" in str(e.value)
+    assert e.value.code == 2 and "./pyt lock" in str(e.value)
     assert "(The lockfile at `uv.lock` needs to be updated" in str(e.value)  # uv's reason, without a second "error:"
 
 
 def test_a_lock_uv_cannot_check_is_not_called_stale(no_build: None, monkeypatch: pytest.MonkeyPatch) -> None:
     """uv lock --check without an answer (offline, no interpreter to download: the Windows runner's
-    DNS failed) said "uv.lock does not match pyproject.toml" and advised ./deploy lock."""
+    DNS failed) said "uv.lock does not match pyproject.toml" and advised ./pyt lock."""
     offline = "error: Request failed after 3 retries\n  Caused by: dns error"
     monkeypatch.setattr(envs, "uv", lambda env, args, **kw: subprocess.CompletedProcess(args, 2, "", offline + "\n"))
-    with pytest.raises(DeployError, match="cannot check uv.lock against pyproject.toml: Request failed") as e:
+    with pytest.raises(PytError, match="cannot check uv.lock against pyproject.toml: Request failed") as e:
         cmd_build.cmd_build(make({}), ["cpython", "--method", "pyz", "--no-check"])
-    assert e.value.code == 3 and "does not match" not in str(e.value) and "./deploy lock" not in str(e.value)
+    assert e.value.code == 3 and "does not match" not in str(e.value) and "./pyt lock" not in str(e.value)
 
 
 def test_check_lock_reads_the_real_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3429,7 +3429,7 @@ def test_check_lock_reads_the_real_lock(tmp_path: Path, monkeypatch: pytest.Monk
     # A change uv can check offline, whatever its cache holds (a new PyPI dependency could not be
     # resolved there, and that is "cannot check", not a stale lock)
     (project / "pyproject.toml").write_text(text.replace('["mylib"]', "[]"), encoding="utf-8")
-    with pytest.raises(DeployError, match="uv.lock does not match pyproject.toml"):
+    with pytest.raises(PytError, match="uv.lock does not match pyproject.toml"):
         cmd_build.check_lock(make({}))
 
 
@@ -3442,7 +3442,7 @@ def test_portable_build_removes_the_previous_archive(sandbox: Path, monkeypatch:
     for suffix in (".zip", ".tar.gz"):
         (dist / f"x-cpython-portable{suffix}").write_text("old build", encoding="utf-8")
     if fail:
-        with pytest.raises(DeployError, match="simulated"):
+        with pytest.raises(PytError, match="simulated"):
             _system_portable(sandbox, monkeypatch, fail=True)
     else:
         assert _system_portable(sandbox, monkeypatch) == dist / "x-cpython-portable"
@@ -3525,7 +3525,7 @@ def test_portable_runtime_smoke_refuses_a_broken_runtime(tmp_path: Path, monkeyp
     out = tmp_path / "out"
     python = _runtime_python(out)
     monkeypatch.setattr(proc, "run", FakeRun(stdout.format(mark=portable.PREFIX_MARK, out=out), code, "boom"))
-    with pytest.raises(DeployError, match=re.escape(message)):
+    with pytest.raises(PytError, match=re.escape(message)):
         portable._smoke_runtime(make({}), python, out)
 
 
@@ -3544,7 +3544,7 @@ def test_portable_build_stops_when_the_copied_runtime_has_no_interpreter(sandbox
     monkeypatch.setattr(common, "install_deps", install)
     monkeypatch.setattr(portable, "copy_runtime", lambda c, b, dest, lib=None: dest / "bin" / "python3")
     monkeypatch.setattr(proc, "run", FakeRun("", 0))
-    with pytest.raises(DeployError, match="layout"):
+    with pytest.raises(PytError, match="layout"):
         portable.build(BuildRequest(cfg, "cpython", "portable", fake_app(sandbox / "payload")))
     assert not proc.run.calls  # type: ignore[attr-defined]
 
@@ -3621,7 +3621,7 @@ def test_portable_runtime_smoke_with_real_interpreters(tmp_path: Path) -> None:
     bad = tmp_path / "bad"
     (bad / "runtime" / "bin").mkdir(parents=True)
     (bad / "runtime" / "bin" / "python3").symlink_to(real)
-    with pytest.raises(DeployError, match="only work on this machine"):
+    with pytest.raises(PytError, match="only work on this machine"):
         portable._smoke_runtime(make({}), bad / "runtime" / "bin" / "python3", bad)
     # One that does not start at all
     broken = tmp_path / "broken"
@@ -3629,7 +3629,7 @@ def test_portable_runtime_smoke_with_real_interpreters(tmp_path: Path) -> None:
     script = broken / "runtime" / "bin" / "python3"
     script.write_text("#!/bin/sh\necho 'cannot start' >&2\nexit 7\n", encoding="utf-8", newline="\n")
     script.chmod(0o755)
-    with pytest.raises(DeployError, match=r"exit code 7"):
+    with pytest.raises(PytError, match=r"exit code 7"):
         portable._smoke_runtime(make({}), script, broken)
 
 
@@ -3756,7 +3756,7 @@ def test_flet_build_names_local_libraries_by_absolute_url(tmp_path: Path, monkey
     for pin in pins:
         requirements.Requirement(pin)  # every line is PEP 508
     monkeypatch.setattr(envs, "uv", lambda env, args, **kw: subprocess.CompletedProcess(args, 0, "./libs/other\n", ""))
-    with pytest.raises(DeployError, match="cannot name the local requirement './libs/other'"):
+    with pytest.raises(PytError, match="cannot name the local requirement './libs/other'"):
         flet._pinned_requirements(envs.tool_env(make({})))
 
 
@@ -3793,7 +3793,7 @@ def test_flet_build_cleanup_false_turns_flets_own_cleanup_off(sandbox: Path, mon
     off = make({"deploy": {"flet": {"cleanup": False}}})
     data = tomllib.loads('[project]\nname = "a"\nversion = "1"\n\n[tool.flet.cleanup]\npackages = true\n')
     assert tomllib.loads(flet.build_pyproject(off, data, []))["tool"]["flet"]["cleanup"] == {"packages": True, "app": False}
-    with pytest.raises(DeployError, match=r"\[tool.flet.cleanup\]"):
+    with pytest.raises(PytError, match=r"\[tool.flet.cleanup\]"):
         flet.build_pyproject(off, tomllib.loads('[project]\nname = "a"\nversion = "1"\n\n[tool.flet]\ncleanup = true\n'), [])
     # cleanup = true (the default) passes the flags and adds no table
     assert "cleanup" not in tomllib.loads(flet.build_pyproject(make({}), data | {"tool": {}}, []))["tool"]["flet"]
@@ -3852,10 +3852,10 @@ def test_flet_build_needs_developer_mode_on_windows(sandbox: Path, monkeypatch: 
     monkeypatch.setattr(flet, "_developer_mode", lambda: False)
     monkeypatch.setattr(flet, "host_os", lambda: "windows")
     monkeypatch.setattr(envs, "uv_run", lambda *a, **k: pytest.fail("flet build must not start"))
-    with pytest.raises(DeployError, match="Developer Mode") as e:
+    with pytest.raises(PytError, match="Developer Mode") as e:
         flet.build(BuildRequest(_flet_cfg(), "cpython", "flet", fake_app(sandbox / "p", "fletdemo")))
     assert e.value.code == 3
-    with pytest.raises(DeployError, match="flet preset"):
+    with pytest.raises(PytError, match="flet preset"):
         flet.build(BuildRequest(make({}), "cpython", "flet", sandbox / "p"))
 
 
@@ -3910,7 +3910,7 @@ def test_flet_build_upx_only_for_desktop_and_missing_output(sandbox: Path, monke
     assert packed == [out]
     _flet_build(sandbox, monkeypatch, target="apk")
     assert packed == [out]  # mobile/web output is not packed
-    with pytest.raises(DeployError, match="without producing the output"):
+    with pytest.raises(PytError, match="without producing the output"):
         _flet_build(sandbox, monkeypatch, target="macos", produce=False)
 
 
@@ -4002,17 +4002,17 @@ def test_wheel_declares_git_and_url_sources_as_direct_references() -> None:
      {"git": "https://github.com/org/b08lib", "marker": "sys_platform == 'linux'"}, [{"path": "a"}, {"path": "b"}]],
 )
 def test_wheel_refuses_a_source_it_cannot_declare(source: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`./deploy add ./libs/b08lib` puts b08lib in [project] dependencies and its path in
+    """`./pyt add ./libs/b08lib` puts b08lib in [project] dependencies and its path in
     [tool.uv.sources]: the wheel's metadata said `Requires-Dist: b08lib`, a PyPI name, so
     installing it failed or took an unrelated PyPI package of that name (dependency confusion)."""
     from runner.methods import wheel
 
     data = {"project": {"dependencies": ["rich", "b08lib"]}, "tool": {"uv": {"sources": {"b08lib": source}}}}
-    with pytest.raises(DeployError, match=r"wheel cannot declare .*b08lib .*--method pyz or portable") as e:
+    with pytest.raises(PytError, match=r"wheel cannot declare .*b08lib .*--method pyz or portable") as e:
         wheel.dependencies(data)
     assert e.value.code == 2
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text('[project]\nname = "p"\ndependencies = ["b08lib"]\n[tool.uv.sources]\nb08lib = { workspace = true }\n', encoding="utf-8")
     monkeypatch.setattr(wheel, "PYPROJECT", pyproject)
-    with pytest.raises(DeployError, match="b08lib"):
+    with pytest.raises(PytError, match="b08lib"):
         wheel.check(make({}))  # cmd_build calls it before the checks and the payload

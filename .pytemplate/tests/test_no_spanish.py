@@ -1,7 +1,7 @@
 """Language guard: the template repository must stay English-only.
 
 Runs only in the template repository (marker file .pytemplate/template-repo, which
-`./deploy new` does not copy): projects created from the template may use any language.
+`./pyt new` does not copy): projects created from the template may use any language.
 To allow a line on purpose, put `lang: allow` anywhere on it (in a comment).
 """
 

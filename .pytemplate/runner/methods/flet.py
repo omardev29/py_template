@@ -27,7 +27,7 @@ from .. import envs, mypyc, proc, render, ui, upx
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config, toml_value
 from ..project import BUILD, IS_WINDOWS, PYPROJECT, SRC, host_os
-from ..ui import DeployError
+from ..ui import PytError
 from . import common
 
 MOBILE_WEB = {"apk", "aab", "ipa", "ios-simulator", "web"}
@@ -80,14 +80,14 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     tool_flet = copy.deepcopy(data.get("tool", {}).get("flet") or {})
     app = tool_flet.setdefault("app", {})
     if not isinstance(app, dict):
-        raise DeployError("pyproject.toml: [tool.flet] app must be a table ([tool.flet.app])")
+        raise PytError("pyproject.toml: [tool.flet] app must be a table ([tool.flet.app])")
     if app.get("path", STAGE_APP) != STAGE_APP:
-        ui.warn(f"[tool.flet.app] path = {app['path']!r} is ignored: ./deploy build stages the app in {STAGE_APP}/")
+        ui.warn(f"[tool.flet.app] path = {app['path']!r} is ignored: ./pyt build stages the app in {STAGE_APP}/")
     app["path"] = STAGE_APP
     if not cfg.deploy.flet.cleanup:
         cleanup = tool_flet.setdefault("cleanup", {})
         if not isinstance(cleanup, dict):
-            raise DeployError("pyproject.toml: [tool.flet] cleanup must be a table ([tool.flet.cleanup])")
+            raise PytError("pyproject.toml: [tool.flet] cleanup must be a table ([tool.flet.cleanup])")
         cleanup.setdefault("app", False)
         cleanup.setdefault("packages", False)
     description = project.get("description")
@@ -117,12 +117,12 @@ def check_options(cfg: Config) -> None:
     """Refuse a flet build that cannot work, before any work: cmd_build calls this before the
     checks and the payload (also in --dry-run), build() again."""
     if cfg.app.preset != "flet":
-        raise DeployError("--method flet is for the flet preset (pytemplate.toml app.preset)")
+        raise PytError("--method flet is for the flet preset (pytemplate.toml app.preset)")
     if IS_WINDOWS and build_target(cfg) == "windows" and not _developer_mode():
-        raise DeployError(
+        raise PytError(
             "flet build on Windows needs Developer Mode (Flutter uses symlinks):\n"
             "  Settings > System > For developers > Developer Mode. Meanwhile, use\n"
-            "  `./deploy build` (flet pack), which does not need it.",
+            "  `./pyt build` (flet pack), which does not need it.",
             3,
         )
 
@@ -145,7 +145,7 @@ def build(req: BuildRequest) -> Path:
     # sync_tree keeps extensions: drop those of a previous build (a desktop build's .pyd must
     # not reach a mobile/web one), then copy this payload's binaries
     for stale in mypyc.extension_files(work / STAGE_APP):
-        mypyc.make_writable(stale)  # a read-only copy an older ./deploy made: Windows deletes none
+        mypyc.make_writable(stale)  # a read-only copy an older ./pyt made: Windows deletes none
         stale.unlink()
     for ext in mypyc.extension_files(app_dir):
         target_ext = work / STAGE_APP / ext.relative_to(app_dir)
@@ -174,7 +174,7 @@ def build(req: BuildRequest) -> Path:
     argv += cfg.deploy.flet.extra_args + req.extra
     envs.uv_run(envs.tool_env(cfg), argv, cwd=work)  # FLET_* variables pass through (base_env copies os.environ)
     if not out.exists() and not proc.DRY_RUN:
-        raise DeployError("flet build finished without producing the output")
+        raise PytError("flet build finished without producing the output")
     if target not in MOBILE_WEB and upx.active(cfg):
         upx.pack_tree(cfg, out)  # most Flutter/CPython DLLs are Control Flow Guard: skipped
     return out

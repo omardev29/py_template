@@ -1,6 +1,6 @@
 """pytemplate.toml: the loader, every validate rule, set_value/update_file and real `mode` runs.
 
-Run them with `./deploy selftest` (or `./deploy selftest -q .pytemplate/tests/test_config_rules.py`).
+Run them with `./pyt selftest` (or `./pyt selftest -q .pytemplate/tests/test_config_rules.py`).
 Each rule has a positive and a negative case. The `mode` runs work in a throwaway copy of this
 project. The file stays ASCII: accented letters are built with chr() (language guard).
 """
@@ -31,7 +31,7 @@ sys.path.insert(0, str(TEMPLATE_DIR))
 from runner import cli, cmd_build, cmd_mode, config, presets, proc, render  # noqa: E402
 from runner.config import Config, set_value, toml_value  # noqa: E402
 from runner.editors import nvim, vscode  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 ROOT = TEMPLATE_DIR.parent
 COMMANDS = set(cli.COMMANDS)
@@ -50,9 +50,9 @@ def make(data: dict[str, Any], commands: set[str] | None = COMMANDS) -> Config:
     return cfg
 
 
-def fails(data: dict[str, Any], message: str, commands: set[str] | None = COMMANDS) -> DeployError:
-    """The config error of `data`: a DeployError (never another exception), code 2, `message` in it."""
-    with pytest.raises(DeployError) as info:
+def fails(data: dict[str, Any], message: str, commands: set[str] | None = COMMANDS) -> PytError:
+    """The config error of `data`: a PytError (never another exception), code 2, `message` in it."""
+    with pytest.raises(PytError) as info:
         make(data, commands)
     assert message in str(info.value), str(info.value)
     assert info.value.code == 2
@@ -236,7 +236,7 @@ def test_schema_must_match_the_runner() -> None:
         fails({"schema": bad}, f"schema = {bad} is not supported by this runner")
     # Checked before the keys: a newer layout's unknown keys must not hide the real reason
     fails({"schema": 2, "future": {"x": 1}}, "schema = 2 is not supported")
-    with pytest.raises(DeployError, match="schema = 7"):
+    with pytest.raises(PytError, match="schema = 7"):
         config.validate(Config(schema=7))
 
 
@@ -254,7 +254,7 @@ def test_app_preset() -> None:
     assert make({"app": {"preset": "flet"}}).app.preset == "flet"
     err = fails({"app": {"preset": "nope"}}, "is not a preset of this template")
     # every command (new included) stops on this error: the hint is an edit of the file
-    assert "set app.preset in pytemplate.toml back to" in str(err) and "Use: ./deploy" not in str(err)
+    assert "set app.preset in pytemplate.toml back to" in str(err) and "Use: ./pyt" not in str(err)
 
 
 @pytest.mark.parametrize("assets", ["", "assets"])
@@ -280,8 +280,8 @@ def test_backend_active() -> None:
     assert make({"backend": {"active": "mypyc"}}).backend.active == "mypyc"
     fails({"backend": {"active": "jython"}}, "'backend.active' = 'jython' is not valid")
     err = fails({"backend": {"active": "pypy", "supported": ["cpython"]}}, "is not in backend.supported")
-    # `./deploy mode` loads the same file first and stops with the same error: never suggest it
-    assert "./deploy mode" not in str(err)
+    # `./pyt mode` loads the same file first and stops with the same error: never suggest it
+    assert "./pyt mode" not in str(err)
     assert "add it to backend.supported, or set backend.active to one of them, in pytemplate.toml" in str(err)
 
 
@@ -591,7 +591,7 @@ def test_toml_value_other_types() -> None:
     for bad in (1.5, {"a": 1}, None, ("a",)):
         with pytest.raises(TypeError):
             toml_value(bad)
-    with pytest.raises(DeployError, match="lone surrogate"):
+    with pytest.raises(PytError, match="lone surrogate"):
         toml_value("a\ud800b")  # TOML cannot hold it: the write would fail with UnicodeEncodeError
 
 
@@ -614,7 +614,7 @@ TAPLO = (
     "\n"
     "[deploy]\n"
     "optimize = 1 # 0 | 1 | 2: bytecode -O level; with >= 1 mypyc also strips asserts\n"
-    'default = { cpython = "exe", mypyc = "exe", pypy = "portable" } # ./deploy build method\n'
+    'default = { cpython = "exe", mypyc = "exe", pypy = "portable" } # ./pyt build method\n'
     "exclude_modules = [\n"
     '  "PIL",\n'
     "] # flet imports Pillow only for RawImage: -13 MB (remove it if you use it)\n"
@@ -638,7 +638,7 @@ TAPLO_EDITS = [
     ("deploy", "exclude_modules", [], " # flet imports Pillow"),
     ("deploy.pyz", "targets", ["host", "cp314-linux-x86_64"], ' # add keys like "cp314'),
     ("deploy.upx", "exclude", ["libx*.so"], " # extra file-name globs"),
-    ("deploy", "default", ["not", "a", "table"], " # ./deploy build method"),
+    ("deploy", "default", ["not", "a", "table"], " # ./pyt build method"),
 ]
 
 
@@ -846,13 +846,13 @@ def test_set_value_is_idempotent() -> None:
     ],
 )
 def test_set_value_refuses_what_it_cannot_edit(text: str, table: str, key: str) -> None:
-    with pytest.raises(DeployError, match=r"could not set .* automatically.*set it by hand") as info:
+    with pytest.raises(PytError, match=r"could not set .* automatically.*set it by hand") as info:
         set_value(text, table, key, "x")
     assert info.value.code == 2
 
 
 def test_set_value_needs_valid_toml() -> None:
-    with pytest.raises(DeployError, match="not valid TOML"):
+    with pytest.raises(PytError, match="not valid TOML"):
         set_value("[backend\nactive = 1\n", "backend", "active", "x")
 
 
@@ -892,7 +892,7 @@ def test_a_config_that_is_not_utf8_is_a_config_error(cfg_file: Path, label: str,
     # A UnicodeDecodeError traceback blamed the runner ("internal runner error"), exit 1
     cfg_file.write_bytes(data)
     for call in (lambda: config.load(COMMANDS), config.read_text, lambda: config.update_file([("typing", "relaxed", "warn")])):
-        with pytest.raises(DeployError) as info:
+        with pytest.raises(PytError) as info:
             call()
         assert message in str(info.value), str(info.value)
         assert "save it as UTF-8" in str(info.value) and "-Encoding utf8" in str(info.value)
@@ -903,19 +903,19 @@ def test_a_config_that_is_not_utf8_is_a_config_error(cfg_file: Path, label: str,
 def test_the_line_of_a_bad_byte_counts_from_the_text(cfg_file: Path) -> None:
     # utf-8-sig counted the error offset after the BOM: one line off
     cfg_file.write_bytes(b"\xef\xbb\xbfa = 1\nbb = 2\n\xe9\n")
-    with pytest.raises(DeployError, match="on line 3"):
+    with pytest.raises(PytError, match="on line 3"):
         config.read_text()
     cfg_file.write_bytes(b"a = 1\n\xe9\n")
-    with pytest.raises(DeployError, match="on line 2"):
+    with pytest.raises(PytError, match="on line 2"):
         config.read_text()
 
 
 def test_missing_unreadable_and_invalid_configs(cfg_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg_file.write_bytes(b"[backend\n")
-    with pytest.raises(DeployError, match="pytemplate.toml is not valid TOML"):
+    with pytest.raises(PytError, match="pytemplate.toml is not valid TOML"):
         config.load(COMMANDS)
     cfg_file.unlink()
-    with pytest.raises(DeployError, match="pytemplate.toml not found"):
+    with pytest.raises(PytError, match="pytemplate.toml not found"):
         config.load(COMMANDS)
 
     class Locked:
@@ -928,7 +928,7 @@ def test_missing_unreadable_and_invalid_configs(cfg_file: Path, monkeypatch: pyt
             raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(config, "CONFIG_FILE", Locked())
-    with pytest.raises(DeployError, match="cannot read pytemplate.toml: Permission denied"):
+    with pytest.raises(PytError, match="cannot read pytemplate.toml: Permission denied"):
         config.load(COMMANDS)
 
 
@@ -979,12 +979,12 @@ def test_update_file_writes_nothing_without_a_change(cfg_file: Path, monkeypatch
 
 def test_update_file_never_writes_a_broken_file(cfg_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg_file.write_bytes(b'backend = { active = "cpython" }\n')
-    with pytest.raises(DeployError, match="could not set backend.active"):
+    with pytest.raises(PytError, match="could not set backend.active"):
         config.update_file([("typing", "relaxed", "warn"), ("backend", "active", "mypyc")])
     assert cfg_file.read_bytes() == b'backend = { active = "cpython" }\n'  # the first edit was not written either
     cfg_file.write_bytes(VALID.encode("utf-8"))
     monkeypatch.setattr(config, "set_value", lambda text, table, key, value: text + "[[broken\n")
-    with pytest.raises(DeployError, match="would break the file"):
+    with pytest.raises(PytError, match="would break the file"):
         config.update_file([("typing", "relaxed", "warn")])
     assert cfg_file.read_bytes() == VALID.encode("utf-8")
 
@@ -997,7 +997,7 @@ def test_update_file_names_a_file_it_cannot_write(cfg_file: Path, monkeypatch: p
         raise PermissionError(1, "Operation not permitted", str(path))
 
     monkeypatch.setattr(config, "write_whole", refused)
-    with pytest.raises(DeployError, match="cannot write pytemplate.toml: Operation not permitted") as info:
+    with pytest.raises(PytError, match="cannot write pytemplate.toml: Operation not permitted") as info:
         config.update_file([("typing", "relaxed", "warn")])
     assert info.value.code == 2
     assert cfg_file.read_bytes() == VALID.encode("utf-8")
@@ -1012,7 +1012,7 @@ def test_mode_on_a_config_it_cannot_write_is_a_clear_error(tmp_path: Path, monke
 
     monkeypatch.setattr(config, "write_whole", refused)
     other = "pylance" if cfg.typing.editor == "basedpyright" else "basedpyright"
-    with pytest.raises(DeployError) as info:  # never an OSError: that was an internal-error traceback
+    with pytest.raises(PytError) as info:  # never an OSError: that was an internal-error traceback
         cmd_mode.cmd_mode(cfg, ["--editor", other])
     assert "cannot write pytemplate.toml: Read-only file system" in str(info.value)
     assert "the mode did not change" in str(info.value) and info.value.code == 2
@@ -1067,7 +1067,7 @@ def test_supports_specs(spec: str, backend: str | None, expected: list[str]) -> 
     ],
 )
 def test_bad_supports_specs(spec: str, backend: str | None, message: str) -> None:
-    with pytest.raises(DeployError) as info:
+    with pytest.raises(PytError) as info:
         cmd_mode._supports_after(make({}), spec, backend)
     assert message in str(info.value)
     assert info.value.code == 2
@@ -1096,7 +1096,7 @@ def dry(monkeypatch: pytest.MonkeyPatch) -> Config:
     ],
 )
 def test_mode_rejects_contradictory_arguments(dry: Config, args: list[str], message: str) -> None:
-    with pytest.raises(DeployError) as info:
+    with pytest.raises(PytError) as info:
         cmd_mode.cmd_mode(dry, args)
     assert message in str(info.value)
     assert info.value.code == 2
@@ -1198,7 +1198,7 @@ def test_mode_puts_everything_back_when_the_relock_or_the_sync_fails(
             cmd_mode.cmd_mode(cfg, ["--supports", "+pypy"])
         assert "pytemplate.toml, pyproject.toml restored: the mode did not change" in capsys.readouterr().err
     else:
-        with pytest.raises(DeployError) as info:
+        with pytest.raises(PytError) as info:
             cmd_mode.cmd_mode(cfg, ["--supports", "+pypy"])
         restored = "pytemplate.toml, pyproject.toml, uv.lock" if fail == "sync" else "pytemplate.toml, pyproject.toml"
         assert f"{restored} restored: the mode did not change" in str(info.value)
@@ -1215,7 +1215,7 @@ def test_mode_under_uv_frozen_refuses_the_relock_and_puts_everything_back(tmp_pa
         pytest.skip("the test adds PyPy support")
     fake = _Relock(tmp_path, monkeypatch, "none")  # a `uv lock` that would write the new lock
     monkeypatch.setenv("UV_FROZEN", "1")
-    with pytest.raises(DeployError) as info:
+    with pytest.raises(PytError) as info:
         cmd_mode.cmd_mode(cfg, ["--supports", "+pypy"])
     assert "UV_FROZEN is set" in str(info.value) and "the mode did not change" in str(info.value), info.value
     assert fake.snapshot() == fake.before and fake.synced == []
@@ -1262,7 +1262,7 @@ def test_mode_names_the_hand_edited_files_it_leaves_as_they_were(
     assert cmd_mode.cmd_mode(cfg, ["--editor", other]) == 0
     err = capsys.readouterr().err
     assert "render: updated .vscode/extensions.json" in err
-    assert "not overwriting hand-edited generated files: .vscode/settings.json (./deploy render --force)" in err
+    assert "not overwriting hand-edited generated files: .vscode/settings.json (./pyt render --force)" in err
 
 
 # --- mode: real runs in a throwaway copy of this project ----------------------------------------------
@@ -1279,11 +1279,11 @@ def project(tmp_path: Path) -> Path:
     return dest
 
 
-def _deploy(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _pyt(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     env = {k: v for k, v in os.environ.items() if k not in _SCRUB and not k.startswith("PYTEMPLATE_")}
     env.update(NO_COLOR="1", PYTHONDONTWRITEBYTECODE="1", PYTHONUTF8="1")
     return subprocess.run(
-        [sys.executable, "-B", str(root / ".pytemplate" / "deploy.py"), *args],
+        [sys.executable, "-B", str(root / ".pytemplate" / "pyt.py"), *args],
         cwd=root,
         env=env,
         capture_output=True,
@@ -1295,8 +1295,8 @@ def _deploy(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _ok(root: Path, *args: str) -> str:
-    r = _deploy(root, *args)
-    assert r.returncode == 0, f"./deploy {' '.join(args)}: {r.stderr}"
+    r = _pyt(root, *args)
+    assert r.returncode == 0, f"./pyt {' '.join(args)}: {r.stderr}"
     return r.stderr
 
 
@@ -1365,7 +1365,7 @@ def test_mode_refuses_a_damaged_pyproject_before_writing(project: Path) -> None:
     path.write_text(text.replace("  # <<< pytemplate\n", "\n"), encoding="utf-8", newline="\n")
     original = (project / "pytemplate.toml").read_bytes()
     editor = "basedpyright" if _toml(project)["typing"].get("editor", "pylance") == "pylance" else "pylance"
-    r = _deploy(project, "mode", "--editor", editor)
+    r = _pyt(project, "mode", "--editor", editor)
     assert r.returncode == 2 and "pytemplate" in r.stderr, r.stderr
     assert (project / "pytemplate.toml").read_bytes() == original
 
@@ -1419,9 +1419,9 @@ def test_every_command_reports_a_config_that_is_not_utf8(project: Path, encoding
     text = path.read_bytes().replace(b"\r\n", b"\n").decode("utf-8") + "# caf" + E_ACUTE + "\n"
     path.write_bytes(text.replace("\n", "\r\n").encode(encoding))
     for args in (["doctor"], ["tasks"], ["mode", "--typing", "strict"]):  # every command loads it the same way
-        r = _deploy(project, *args)
+        r = _pyt(project, *args)
         assert r.returncode == 2, (args, r.stderr)
         assert message in r.stderr and "save it as UTF-8" in r.stderr, (args, r.stderr)
         assert "Traceback" not in r.stderr and "internal runner error" not in r.stderr, (args, r.stderr)
-    r = _deploy(project, "help")
+    r = _pyt(project, "help")
     assert r.returncode == 0 and "BACKEND = cpython" in r.stdout

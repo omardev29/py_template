@@ -16,7 +16,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path, PurePath
 
 from . import ui
-from .ui import DeployError
+from .ui import PytError
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE = ROOT / ".pytemplate"
@@ -140,7 +140,7 @@ def code_dirs() -> list[str]:
 
 # --- paths typed by the user ------------------------------------------------------------------
 #
-# Every path the RUNNER takes from the command line (./deploy new DEST, pyz-merge ... --out X)
+# Every path the RUNNER takes from the command line (./pyt new DEST, pyz-merge ... --out X)
 # goes through user_path(). Arguments forwarded to the app or to pytest are never touched.
 
 _DRIVE_ABS = re.compile(r"[A-Za-z]:[\\/]")
@@ -228,7 +228,7 @@ def native_path(raw: str) -> str:
 
 
 def caller_cwd() -> Path:
-    """Return the directory ./deploy was typed in (the shell's logical path when known).
+    """Return the directory ./pyt was typed in (the shell's logical path when known).
 
     The launchers export it in PYTEMPLATE_CALLER_CWD. It is trusted only while it still names
     the process cwd (`uv run --script` never changes the cwd): niubash sessions keep stale
@@ -237,7 +237,7 @@ def caller_cwd() -> Path:
     try:
         cwd = Path.cwd()
     except OSError:
-        raise DeployError("the current directory no longer exists") from None
+        raise PytError("the current directory no longer exists") from None
     raw = os.environ.get("PYTEMPLATE_CALLER_CWD", "")
     if raw:
         p = Path(native_path(raw))
@@ -256,7 +256,7 @@ def user_path(raw: str) -> Path:
     the result is normalized (C:\\a\\..\\b -> C:\\b, as Windows itself would read it).
     """
     if not raw.strip():
-        raise DeployError("empty path argument")
+        raise PytError("empty path argument")
     native = native_path(raw)
     if IS_WINDOWS and native.startswith("/") and os.environ.get("PYTEMPLATE_LAUNCHER", "").endswith(
         tuple(_POSIX_RUNTIMES)
@@ -265,7 +265,7 @@ def user_path(raw: str) -> Path:
     try:
         p = Path(native).expanduser()
     except RuntimeError as e:  # ~ without HOME/USERPROFILE
-        raise DeployError(f"{raw}: {e}") from None
+        raise PytError(f"{raw}: {e}") from None
     if not p.is_absolute():
         p = caller_cwd() / p
     return Path(os.path.normpath(p)) if IS_WINDOWS else p
@@ -288,10 +288,10 @@ def check_private_dir(path: Path, option: str) -> None:
         uid = os.getuid()
         for st in (os.lstat(path), os.stat(path)):
             if st.st_uid != uid:
-                raise DeployError(f"{path} belongs to another user (uid {st.st_uid}): code run from it could be theirs; pick another {option}")
+                raise PytError(f"{path} belongs to another user (uid {st.st_uid}): code run from it could be theirs; pick another {option}")
         mode = os.stat(path).st_mode
         if mode & 0o002:  # group-writable is the norm with a user-private group (umask 002)
-            raise DeployError(f"{path} can be written by every user (mode {mode & 0o7777:o}): pick another {option}, or chmod o-w it")
+            raise PytError(f"{path} can be written by every user (mode {mode & 0o7777:o}): pick another {option}, or chmod o-w it")
 
 
 def _umask() -> int:

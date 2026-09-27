@@ -1,5 +1,5 @@
 # Typing profile "warn": types are optional and problems are reported as WARNINGS.
-# Never blocks `./deploy check` or `build`. Enable it with typing.relaxed = "warn".
+# Never blocks `./pyt check` or `build`. Enable it with typing.relaxed = "warn".
 
 description = "Optional types; problems are shown as warnings and never block"
 blocking = false

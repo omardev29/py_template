@@ -1,4 +1,4 @@
-"""Tests for the ./deploy runner (run them with `./deploy selftest`)."""
+"""Tests for the ./pyt runner (run them with `./pyt selftest`)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from runner import config, imports, lintc, render  # noqa: E402
 from runner.config import Config, set_value  # noqa: E402
 from runner.methods.common import parse_key  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 
 def make(data: dict[str, object]) -> Config:
@@ -34,27 +34,27 @@ def test_defaults_are_valid() -> None:
 
 
 def test_unknown_key_is_an_error() -> None:
-    with pytest.raises(DeployError, match="unknown key 'backend.mode'"):
+    with pytest.raises(PytError, match="unknown key 'backend.mode'"):
         make({"backend": {"mode": "pypy"}})
 
 
 def test_wrong_type_is_an_error() -> None:
-    with pytest.raises(DeployError, match="boolean"):
+    with pytest.raises(PytError, match="boolean"):
         make({"app": {"gui": "yes"}})
 
 
 def test_active_must_be_supported() -> None:
-    with pytest.raises(DeployError, match="is not in backend.supported"):
+    with pytest.raises(PytError, match="is not in backend.supported"):
         make({"backend": {"active": "pypy", "supported": ["cpython"]}})
 
 
 def test_pypy_must_be_exact() -> None:
-    with pytest.raises(DeployError, match="exact version"):
+    with pytest.raises(PytError, match="exact version"):
         make({"python": {"pypy": "pypy@3.11"}})
 
 
 def test_mypyc_forbids_relaxed_typing() -> None:
-    with pytest.raises(DeployError, match="mypyc"):
+    with pytest.raises(PytError, match="mypyc"):
         make({"backend": {"active": "mypyc"}, "typing": {"profile": "off"}})
 
 
@@ -64,7 +64,7 @@ def test_pypy_lowers_min_python() -> None:
 
 
 def test_task_cannot_shadow_builtin() -> None:
-    with pytest.raises(DeployError, match="clashes with"):
+    with pytest.raises(PytError, match="clashes with"):
         cfg: Config = config._build(Config, {"tasks": {"run": {"cmd": ["x"]}}}, "")
         config.validate(cfg, {"run"})
 
@@ -167,5 +167,5 @@ def test_lintc_rules(tmp_path: Path) -> None:
 def test_platform_keys() -> None:
     t = parse_key("cp314-linux-x86_64")
     assert (t.impl, t.version, t.os, t.arch) == ("cp", "3.14", "linux", "x86_64")
-    with pytest.raises(DeployError):
+    with pytest.raises(PytError):
         parse_key("cp314-plan9-x86_64")
