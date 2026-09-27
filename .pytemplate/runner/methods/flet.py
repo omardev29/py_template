@@ -7,8 +7,10 @@
 - Mobile and web (apk, aab, ipa, web): they cannot load custom extensions, so your
   code is packaged as .py (interpreted), even if the backend is mypyc.
 - `flet build` ignores uv.lock: the project it builds carries the EXACT versions
-  exported from uv.lock. It installs the Flutter SDK Flet pins the first time (~3 GB in
-  ~/flutter).
+  exported from uv.lock, but for mobile and web targets a package without a pure wheel (msgpack)
+  keeps only the project's own bounds: flet build takes their binaries from Flet's own index,
+  which may not hold uv.lock's release (common.unpin_binaries). It installs the Flutter SDK Flet
+  pins the first time (~3 GB in ~/flutter).
 - On Windows it needs Visual Studio (C++) and Developer Mode turned on.
 """
 
@@ -16,7 +18,6 @@ from __future__ import annotations
 
 import copy
 import json
-import shutil
 import sys
 import tomllib
 from pathlib import Path
@@ -27,6 +28,7 @@ from ..cmd_build import BuildRequest, dist_path
 from ..config import Config, toml_value
 from ..project import BUILD, IS_WINDOWS, PYPROJECT, SRC, host_os
 from ..ui import DeployError
+from . import common
 
 MOBILE_WEB = {"apk", "aab", "ipa", "ios-simulator", "web"}
 STAGE_APP = "src"  # build() stages the app in <work>/src: [tool.flet.app] path must point there
@@ -47,13 +49,19 @@ def _developer_mode() -> bool:
 
 
 def _pinned_requirements(cfg_tool: envs.PyEnv) -> list[str]:
+    """The locked runtime requirements, for the build project's [project] dependencies.
+
+    --no-editable, and a local library as `name @ file:///absolute/path` (common.direct_reference):
+    exported editable it was `-e ./libs/x ; <markers>`, no PEP 508 requirement (pip refused it),
+    and a relative path would point into the build stage, not the project.
+    """
     out = envs.uv(
         cfg_tool,
-        ["export", "--frozen", "--no-dev", "--no-emit-project", "--no-hashes", "--no-header", "--no-annotate", "--format", "requirements.txt"],
+        ["export", "--frozen", "--no-dev", "--no-editable", "--no-emit-project", "--no-hashes", "--no-header", "--no-annotate", "--format", "requirements.txt"],
         capture=True,
         echo=False,
     ).stdout
-    return [ln.strip() for ln in out.splitlines() if ln.strip() and not ln.startswith("#")]
+    return [common.direct_reference(ln.strip()) for ln in out.splitlines() if ln.strip() and not ln.startswith("#")]
 
 
 def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
@@ -137,14 +145,24 @@ def build(req: BuildRequest) -> Path:
     # sync_tree keeps extensions: drop those of a previous build (a desktop build's .pyd must
     # not reach a mobile/web one), then copy this payload's binaries
     for stale in mypyc.extension_files(work / STAGE_APP):
+        mypyc.make_writable(stale)  # a read-only copy an older ./deploy made: Windows deletes none
         stale.unlink()
     for ext in mypyc.extension_files(app_dir):
         target_ext = work / STAGE_APP / ext.relative_to(app_dir)
         target_ext.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ext, target_ext)
+        mypyc.copy_writable(str(ext), str(target_ext))
 
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))  # an editor or PS 5.1 may add a BOM
-    text = build_pyproject(cfg, data, _pinned_requirements(envs.tool_env(cfg)))
+    pins = _pinned_requirements(envs.tool_env(cfg))
+    if target in MOBILE_WEB:
+        pins, relaxed = common.unpin_binaries(pins)
+        if relaxed:
+            ui.warn(
+                f"{target}: not pinned to uv.lock's version: {', '.join(relaxed)} (flet build installs the binary "
+                "packages of this target from Flet's own index, pypi.flet.dev, which may not hold it: pip picks a "
+                "release that fits every package's bounds)"
+            )
+    text = build_pyproject(cfg, data, pins)
     (work / "pyproject.toml").write_text(text, encoding="utf-8", newline="\n")
 
     out = dist_path(req, f"-{target}")

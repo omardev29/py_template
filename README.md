@@ -237,9 +237,10 @@ Environment variables the runner and the launchers read: `UV` (the uv binary, lo
 skips GUI runs on Windows and macOS CI), `NO_COLOR` and `TERM`, the compiler variables of mypyc
 (`CC`, `CFLAGS`, `CPPFLAGS`, `LDSHARED`, `LDFLAGS`, `ARCHFLAGS`, `CL`, `_CL_`),
 `MACOSX_DEPLOYMENT_TARGET` (the oldest macOS the pyz and portable wheels support, 13.0 by default),
-`LOCALAPPDATA` and `XDG_CACHE_HOME` (the pyz and UPX caches). At runtime, the app's
-`resources.assets_dir()` (raylib and flet presets) reads `PYTEMPLATE_ASSETS`, which the portable and
-pyz launchers set.
+`LOCALAPPDATA` and `XDG_CACHE_HOME` (the pyz and UPX caches). At runtime, the portable and pyz
+launchers set `PYTEMPLATE_ASSETS` to the app's own assets folder (whatever value the app inherited
+from the program that started it); the presets' `resources.assets_dir()` finds that folder next to
+its package.
 
 The runner ignores an activated virtual environment (`VIRTUAL_ENV`, `PYTHONHOME`, `PYTHONPATH`)
 and uv's environment selection (`UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PROJECT`,
@@ -358,13 +359,15 @@ name). What changes:
   other text files there: package paths, dotted names, `-m` arguments, `pkg:function`
   references and module-name arguments (`import_module("<pkg>")`, `resources.files(package=...)`,
   `pkgutil.get_data`, `runpy.run_module`) get the package; titles and other prose get the name.
+  A file named after the app (`asset("<name>.png")`, `"<name>.json"`) keeps its name, so the
+  reference is reported, not changed.
   String prefixes, escapes and format directives are never the name: an app named `f`, `n`, `r`
   or `d` keeps `f"..."`, `"\n"`, `b"\r"`, `"%d"` and `f"{x:d}"`. A name right after a single
   backslash that makes no escape (a raw string: `r"\d"`, `r"src\alpha"`; an invalid escape:
   `"\myapp"`) and a one-letter name that ends a format directive (`"%d"`, `"{:d}"`) are
-  reported, not changed. Escapes exist only in the strings of Python, TOML and JSON files:
-  comments and other text files (Markdown, YAML, INI...) are plain text, where `a\n` changes
-  like any other word.
+  reported, not changed. Escapes exist only in the strings of Python, TOML and JSON files
+  (notebooks `.ipynb` included) and in YAML's double-quoted strings: comments and other text
+  files (Markdown, INI...) are plain text, where `a\n` changes like any other word.
 - `pytemplate.toml`: `app.name` and every package reference (`compile.modules`, `exclude`,
   `forbid_imports`, the mypy overrides, `hidden_imports`, `exclude_modules`, the wheel entry,
   `src/<pkg>/` paths and `<pkg>.<module>` names); other mentions are reported, among them file
@@ -541,7 +544,8 @@ again.
 - **Native classes**: typed attributes, and only these class decorators: `@dataclass`,
   `@attr.s` (`@attr.attrs`), `@final`, `@trait` and `@mypyc_attr`. Any other one, attrs'
   `@define`, `@frozen` and `@mutable` included, turns the class into a slower regular Python
-  class (mark it `@mypyc_attr(native_class=False)` when that is intended).
+  class (mark it `@mypyc_attr(native_class=False)` when that is intended). So do a metaclass other
+  than `ABCMeta` (every `Enum` has one) and a `NamedTuple` or `TypedDict` class.
 - **Concrete types**: `list[bool]` compiles to direct accesses, `bytearray` takes the generic
   path (sieve: 4.2x vs 1.9x).
 - `./deploy report --open` marks every generic operation in red ("make it Final", "Generic `*`").
@@ -549,8 +553,8 @@ again.
   that report to `.build/reports/mypyc-annotate.html` (the same report as `./deploy report`, without
   mypy's `Any` reports).
 - `./deploy check` adds rules for the compiled modules that mypy does not check: imports listed in
-  `compile.forbid_imports`, class decorators that make a class non-native, nested classes and
-  classes defined inside functions, t-strings, `if __name__ == "__main__"`, `librt` while PyPy is
+  `compile.forbid_imports`, class decorators, metaclasses and bases (`Enum`, `NamedTuple`,
+  `TypedDict`) that make a class non-native, nested classes and classes defined inside functions, t-strings, `if __name__ == "__main__"`, `librt` while PyPy is
   supported, and a module-level `__file__` when `compile.modules` is a single top-level module
   (there it is a relative path). Compiled code that imports `librt` needs it as an app dependency:
   `./deploy add librt --cpython-only` (mypy installs it only in the dev group).
@@ -834,7 +838,9 @@ How far a pyz reaches depends on its dependencies; the build prints which case i
 - **Not pure** (`runs on: <keys>`): native dependencies (raylib, flet, any platform wheel), or a
   dependency (a pin, a local library, a URL) that a marker leaves out on some target. It carries the dependencies of each target key and runs
   only there: the exact CPython minor of the lock (`cp314` wheels load only in 3.14, so a Python
-  3.13 or 3.15 gets `this .pyz has no build for this interpreter and platform`), on Windows, Linux
+  3.13 or 3.15 gets `this .pyz has no build for this interpreter and platform`, and so does
+  another extension ABI of the same version: a free-threaded 3.14t, or PyPy 8 for a build made
+  with PyPy 7.3), on Windows, Linux
   or macOS, x86_64 or aarch64 (Linux: glibc 2.28 on x86_64 or 2.35 on aarch64, or newer; macOS 13 or
   newer). There are no musl or Android targets. The architecture is the Python's, not the
   machine's: an x64 Python on Windows on ARM uses the `windows-x86_64` binaries.
@@ -850,7 +856,8 @@ How far a pyz reaches depends on its dependencies; the build prints which case i
   `./deploy pyz-merge A.pyz B.pyz... --out all.pyz` joins pyz files built on several machines from
   one commit (the same app, minimum Python, locked dependencies and code) into one file with every
   platform's binaries, and also writes `all.cmd` next to it (so the `--out` name must be ASCII,
-  without `% ! " ^ & | < >`).
+  without `% ! " ^ & | < >`). Pass every part in one call: a merged file of pure parts records no
+  platform, so it cannot be merged again with a part built for one platform.
 - On Linux the dependencies of pyz and portable builds target glibc 2.28 (x86_64) or 2.35
   (aarch64) when the build machine can use those wheels (else its own, with a warning); on macOS,
   macOS 13 or newer (`MACOSX_DEPLOYMENT_TARGET` changes it).
@@ -912,6 +919,11 @@ about 7 minutes, the next ones about 3.
   reads `[tool.flet]` and the `[project] description` of `pyproject.toml`, where `org`,
   `company` and `copyright` are placeholders that end up in the app; `[tool.flet.app] path` is
   always `src`.
+- Mobile and web apps take their binary packages (msgpack, numpy: those without a pure-Python
+  wheel) from Flet's own index, `pypi.flet.dev`, which holds other releases than PyPI. For those
+  targets such a package is not pinned to `uv.lock`'s version (a new flet project locks msgpack
+  1.2.2, and Flet's index has 1.1.x): it keeps the bounds your `pyproject.toml` gives it, pip picks
+  a release that fits them, and the build names it in a warning.
 - `cleanup` (default `true`): `--cleanup-app --cleanup-packages`. `false` turns both off: Flet
   cleans the packages unless told not to, so the build project gets `app = false` and
   `packages = false` in `[tool.flet.cleanup]` (values your own `[tool.flet.cleanup]` sets stay).
@@ -960,16 +972,18 @@ Size settings (each method ignores what does not apply to it):
 slower; `exclude` adds file-name globs. The exe method uses PyInstaller's own UPX step, on
 Windows only (PyInstaller turns UPX off on other systems, where packed `.so` files crash: the
 build warns that the exe is not packed); every binary is packed before bundling, also in
-onefile mode, and PyInstaller always uses LZMA and skips Control Flow Guard DLLs. Nuitka uses its
-upx plugin (always `--best --lzma`), and the portable and flet builds are packed when they are
-done (the portable smoke test then loads the packed modules). Never packed: files over 600 MiB
+onefile mode, and PyInstaller always uses LZMA and skips Control Flow Guard DLLs. A Nuitka
+standalone folder and the portable and flet builds are packed when they are done (the portable
+smoke test then loads the packed modules); a Nuitka onefile binary goes through Nuitka's upx
+plugin (always `--best --lzma`), which packs that one file and never the libraries inside it. Never packed: files over 600 MiB
 (UPX refuses anything over 768 MiB), binaries UPX rejects (Control Flow Guard), the C runtime,
 `python3*.dll`, `libpython3*` and `flutter_windows.dll` (a packed Flutter engine hangs the app at
 startup). UPX 5.2.1 is downloaded once (SHA-256 checked) to `%LOCALAPPDATA%\pytemplate\tools`
-(`$XDG_CACHE_HOME/pytemplate/tools` or `~/.cache/pytemplate/tools` elsewhere), unless `upx` is on
+(`$XDG_CACHE_HOME/pytemplate/tools` when that is an absolute path, else `~/.cache/pytemplate/tools`
+elsewhere), unless `upx` is on
 PATH or `deploy.upx.path` names one (absolute, `~`, or relative to the project root; the file is
-named `upx` or `upx.exe`); `build` finds (or downloads) it before any other work, so a wrong
-path or no network fails at once. A portable build with `runtime = "system"` bundles no
+named `upx` or `upx.exe`, and on Linux it must be executable: `chmod +x`); `build` finds (or
+downloads) it before any other work, so a wrong path or no network fails at once. A portable build with `runtime = "system"` bundles no
 interpreter, so it downloads UPX only when its folder holds a binary to pack (a native
 dependency, a mypyc extension on Windows): a pure-Python one builds offline. macOS is not
 supported. The price: every start unpacks the
@@ -1186,7 +1200,10 @@ details.
 ./deploy nvim sync        # install the plugins the project adds (Lazy! install)
 ```
 
-`./deploy nvim` alone is `nvim doctor`. `bootstrap` never touches an existing config. `extras`
+`./deploy nvim` alone is `nvim doctor`. A config counts as LazyVim when its Lua names the
+`LazyVim/LazyVim` spec (the starter's `lua/config/lazy.lua` does), its `lazy-lock.json` names
+LazyVim, or lazy.nvim installed LazyVim in `stdpath("data")/lazy`; a plain lazy.nvim config is not
+(the extras the project imports are LazyVim's). `bootstrap` never touches an existing config. `extras`
 backs up `lazyvim.json` before changing it, and refuses (exit 3) until LazyVim has created that
 file (start Neovim once). `sync` installs only (it never updates or removes your plugins) and
 needs the trust first (exit 3 otherwise); it then asks lazy.nvim whether every plugin is
@@ -1417,8 +1434,14 @@ only deletes files is checked too).
 - **raylib on a minimal Linux** (containers, WSL, CI) needs the GL and X11 libraries:
   `libgl1 libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6` (Debian/Ubuntu names; desktops have
   them).
-- **Flet downloads its client or pip-installs packages when it starts**: `flet` and
-  `flet-desktop` must have the same version. Set `[preset.flet] version` and run `./deploy apply`.
+- **Flet downloads its client when it first starts**: that is normal for `./deploy run`, a pyz, a
+  wheel and a portable folder with `runtime = "system"`. The `flet-desktop` package holds no
+  client: the first start downloads it once from GitHub (about 40 MB; `FLET_CLIENT_URL` names a
+  mirror) into `~/.flet/client` and reuses it from then on, so their first start needs the
+  network. `exe`, `nuitka` and a bundled portable folder carry the client (on Linux the one for
+  the build machine's glibc: build them on the oldest Linux you support).
+- **Flet pip-installs `flet-desktop` when it starts**: `flet` and `flet-desktop` have different
+  versions. Set `[preset.flet] version` and run `./deploy apply`.
 - **`flet build` on Windows** needs Developer Mode (Settings > System > For developers) and the
   Visual Studio C++ tools; `./deploy build --method flet` says so when Developer Mode is off.
 - **An app that uses `flet.auth`**: run `./deploy add "httpx<1"`. Flet 1.0.1 accepts any httpx

@@ -116,9 +116,30 @@ local function mypy_env()
   return env
 end
 
-function M.mypy_enabled(filename)
+---mypy runs in this project: editor.json's typing says so and .venv has it.
+function M.mypy_available()
   local info = pt.info()
-  return info.typing.mypy and info.typing.profile ~= "off" and pt.tool("mypy") ~= nil and pt.in_root(filename)
+  return info.typing.mypy and info.typing.profile ~= "off" and pt.tool("mypy") ~= nil
+end
+
+function M.mypy_enabled(filename)
+  return M.mypy_available() and pt.in_root(filename)
+end
+
+---Drop the mypy diagnostics of the buffer of `filename` (of every buffer without one) once mypy
+---no longer runs for it: nvim-lint only replaces a linter's diagnostics when the linter runs, so
+---after `mode --typing off` or a removed .venv the last ones stayed until Neovim restarted.
+function M.forget_mypy(filename)
+  local ok, lint = pcall(require, "lint")
+  if not ok or type(lint) ~= "table" or type(lint.get_namespace) ~= "function" then
+    return
+  end
+  local ns = lint.get_namespace("mypy")
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if filename == nil or pt.same_path(vim.api.nvim_buf_get_name(buf), filename) then
+      vim.diagnostic.reset(ns, buf)
+    end
+  end
 end
 
 function M.mypy_linter()
@@ -139,7 +160,11 @@ function M.mypy_linter()
     cwd = pt.root(), -- finds .mypy.ini and prints paths relative to it (the parser needs that)
     env = mypy_env(),
     condition = function(ctx)
-      return M.mypy_enabled(ctx.filename)
+      local on = M.mypy_enabled(ctx.filename)
+      if not on then
+        M.forget_mypy(ctx.filename)
+      end
+      return on
     end,
     parser = function(output, bufnr, cwd)
       local out = base.parser(output, bufnr, cwd)

@@ -3,7 +3,8 @@
 Python cannot import extensions (.pyd/.so) from inside a zip, so the first time the
 contents are extracted to a cache versioned per build and run from there. If this interpreter
 and OS have their own build (_pyz.json "targets": binaries, or dependencies that differ per
-platform), it is used; otherwise the pure Python version is used (if the app allows it).
+platform, whose extension ABI, "abi", must be this interpreter's: PyPy 8 is no PyPy 7.3), it is
+used; otherwise the pure Python version is used (if the app allows it).
 
 Executables (an app's helper script, a dependency's binary) keep their x bit.
 
@@ -15,11 +16,16 @@ usable cache (no home folder, a read-only one) the .pyz extracts into a private 
 folder for this run only.
 """
 
+# Never evaluated annotations: an older Python must get as far as main()'s version check
+# (`bool | None` raised TypeError before it on 3.9, the system python3 of macOS)
+from __future__ import annotations
+
 import atexit
 import errno
 import json
 import os
 import platform
+import re
 import runpy
 import shutil
 import site
@@ -59,6 +65,25 @@ def _arch() -> str:
 def _key() -> str:
     impl = {"cpython": "cp", "pypy": "pp"}.get(sys.implementation.name, sys.implementation.name)
     return f"{impl}{sys.version_info[0]}{sys.version_info[1]}-{OS.get(sys.platform, sys.platform)}-{_arch()}"
+
+
+# The extension ABI in a file name or suffix (methods/common.py ABI_RE): cpython-314[t], cp314[t]
+# (Windows), pypy311-pp73; abi3 and an untagged .so/.pyd load in any interpreter of the platform
+ABI_RE = re.compile(r"\.(cpython-(\d+t?)|cp(\d+t?)|pypy(\d+)-(pp\d+))[-.]")
+
+
+def abi_tag(name: str) -> str:
+    """cp314, cp314t or pypy311_pp73 (as wheel tags name them), "" when `name` carries none."""
+    m = ABI_RE.search(name)
+    if not m:
+        return ""
+    return f"cp{m.group(2) or m.group(3)}" if m.group(4) is None else f"pypy{m.group(4)}_{m.group(5)}"
+
+
+def _abi() -> str:
+    """The extension ABI of THIS interpreter: its key does not tell PyPy 7.3 (pp73) from PyPy 8
+    (pp80), nor CPython 3.14 from its free-threaded build (3.14t)."""
+    return abi_tag(sysconfig.get_config_var("EXT_SUFFIX") or "")
 
 
 def _cache_root(name: str) -> Path:
@@ -256,14 +281,18 @@ def main() -> None:
         if sys.version_info[:2] < need:
             sys.exit(f"{info['name']}: needs Python {need[0]}.{need[1]} or newer (you have {platform.python_version()})")
         key = _key()
-        if key in info["targets"]:
+        abis = info.get("abi") or {}  # the extension ABIs of each target's binaries
+        mine = _abi()
+        if key in info["targets"] and (not abis.get(key) or not mine or mine in abis[key]):
             flavour, prefixes = key, ["common/", f"targets/{key}/"]
         elif info["pure"]:
-            flavour, prefixes = "pure", ["common/"]
+            flavour, prefixes = "pure", ["common/"]  # the .py of a compiled module works everywhere
         else:
+            built = [t + (f" ({', '.join(abis[t])})" if abis.get(t) else "") for t in info["targets"]]
             sys.exit(
-                f"{info['name']}: this .pyz has no build for this interpreter and platform ({key}).\n"
-                f"  Built for: {', '.join(info['targets'])}"
+                f"{info['name']}: this .pyz has no build for this interpreter and platform "
+                f"({key}{', ' + mine if key in info['targets'] and mine else ''}).\n"
+                f"  Built for: {', '.join(built)}"
             )
         cached = True
         try:
@@ -291,7 +320,7 @@ def main() -> None:
     if (dest / "lib").is_dir():
         _prepend_sitedir(dest / "lib")
     sys.path.insert(0, str(app))
-    os.environ.setdefault("PYTEMPLATE_ASSETS", str(app / "assets"))
+    os.environ["PYTEMPLATE_ASSETS"] = str(app / "assets")  # this app's: an inherited one names another app's
     sys.argv[0] = str(app / "main.py")
     runpy.run_path(str(app / "main.py"), run_name="__main__")
 

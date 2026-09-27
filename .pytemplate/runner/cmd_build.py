@@ -31,6 +31,7 @@ PASSTHROUGH = ("exe", "nuitka", "flet")
 ONEFILE_METHODS = ("exe", "nuitka")  # --onefile / --onedir
 TARGET_METHODS = ("pyz",)  # --target: the other methods build for this OS only
 GLOBAL_FLAGS = ("--dry-run", "--no-render")  # ./deploy's own options: they go before the command
+OWN_PAYLOAD = ("wheel",)  # builds its own project from src/: no payload (no mypyc release stage)
 
 
 @dataclass
@@ -175,7 +176,9 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
                 ui.info(nuitka_method.PGO_NOTE)
         return 0
 
-    app_dir = payload(cfg, backend)
+    # The wheel builds its own project from src/ (its setup.py compiles with mypyc): the mypyc
+    # release stage of the payload was compiled for nothing, at twice the build time
+    app_dir = SRC if method in OWN_PAYLOAD else payload(cfg, backend)
     onefile = True if ns.onefile else False if ns.onedir else None
     req = BuildRequest(cfg, backend, method, app_dir, onefile, ns.target, extra)
     ui.step(f"build {backend} -> {method}")

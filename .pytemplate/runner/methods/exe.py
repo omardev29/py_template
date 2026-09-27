@@ -31,8 +31,8 @@ def _stage(req: BuildRequest) -> Path:
     if req.compiled:
         return mypyc.exe_stage(req.cfg, req.app_dir, dest)
     if dest.exists():
-        shutil.rmtree(dest)
-    shutil.copytree(req.app_dir, dest, ignore=shutil.ignore_patterns("__pycache__"))
+        mypyc.remove_tree(dest)
+    shutil.copytree(req.app_dir, dest, ignore=shutil.ignore_patterns("__pycache__"), copy_function=mypyc.copy_writable)
     return dest
 
 
@@ -126,7 +126,7 @@ def _flet_pack(req: BuildRequest) -> Path:
     stage = _stage(req)
     work = BUILD / "flet-pack" / req.backend
     if work.exists():
-        shutil.rmtree(work)
+        mypyc.remove_tree(work)
     work.mkdir(parents=True)
     out = dist_path(req)
     remove_output(out)  # flet pack's own -y removal ignores errors: a running app is refused here

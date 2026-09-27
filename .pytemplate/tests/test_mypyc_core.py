@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -383,6 +384,72 @@ def test_lintc_a_class_in_a_function_sees_that_functions_imports(tmp_path: Path)
     source = "def f():\n    from dataclasses import dataclass\n\n    @dataclass\n    class P:\n        x: int = 0\n\n    return P\n"
     found = _lint(tmp_path, source)
     assert [("uses @" in f.message, "inside a function" in f.message) for f in found] == [(False, True)]
+
+
+@pytest.mark.parametrize(("last", "native"), [("from dataclasses import dataclass", True), ("from attrs import define as dataclass", False)])
+def test_lintc_reads_a_long_elif_chain(tmp_path: Path, last: str, native: bool) -> None:
+    """The blocks of a scope were walked recursively, one level per `elif`: a generated dispatch
+    table of ~1000 branches crashed `check`, `build` and the pre-commit hook with an internal
+    runner error (RecursionError). The import in the chain's last `else` still decides."""
+    branches = "".join(f"elif sys.argv[0] == '{i}':\n    pass\n" for i in range(1, 3000))
+    source = f"import sys\n\nif sys.argv[0] == '0':\n    pass\n{branches}else:\n    {last}\n\n\n@dataclass\nclass P:\n    x: int = 0\n"
+    found = _lint(tmp_path, source)
+    assert (found == []) is native, [f.message for f in found]
+
+
+def test_lintc_reports_a_source_nested_too_deeply_for_the_compiler(tmp_path: Path) -> None:
+    # ast.parse itself raises RecursionError ("during ast construction", "Stack overflow ...
+    # during compilation"): one finding, like a syntax error, never an internal error
+    found = _lint(tmp_path, "x = " + " + ".join(["1"] * 100_000) + "\n")
+    assert len(found) == 1 and "cannot parse" in found[0].message and "skipped this file" in found[0].message
+
+
+# mypyc 2.3.1 compiles these as regular Python classes without a word (is_implicit_extension_class:
+# a metaclass other than ABCMeta, TypedDict, NamedTuple); every case was compiled to check it
+METACLASS_CASES = [
+    ("from enum import Enum\n\n\nclass P(Enum):\n    A = 1\n", "is an Enum (metaclass EnumMeta)"),
+    ("import enum\n\n\nclass P(enum.IntFlag):\n    A = 1\n", "is an Enum (metaclass EnumMeta)"),
+    ("from enum import *\n\n\nclass P(StrEnum):\n    A = 'a'\n", "is an Enum (metaclass EnumMeta)"),
+    ("from typing import NamedTuple\n\n\nclass P(NamedTuple):\n    x: int\n", "is a NamedTuple"),
+    ("from typing_extensions import TypedDict\n\n\nclass P(TypedDict):\n    x: int\n", "is a TypedDict"),
+    ("from .meta import Meta\n\n\nclass P(metaclass=Meta):\n    x: int = 0\n", "has the metaclass Meta"),
+    ("from .meta import Meta\n\n\nclass B(metaclass=Meta):\n    x: int = 0\n\n\nclass P(B):\n    y: int = 0\n", "inherits from 'B', which has the metaclass Meta"),
+    ("from abc import ABC\n\n\nclass P(ABC):\n    x: int = 0\n", None),
+    ("import abc\n\n\nclass P(metaclass=abc.ABCMeta):\n    x: int = 0\n", None),
+    ("from typing import Generic, TypeVar\n\nT = TypeVar('T')\n\n\nclass P(Generic[T]):\n    x: int = 0\n", None),
+    ("from enum import Enum\nfrom mypy_extensions import mypyc_attr\n\n\n@mypyc_attr(native_class=False)\nclass P(Enum):\n    A = 1\n", None),
+    ("from .mylib import Enum\n\n\nclass P(Enum):\n    A = 1\n", None),  # not the stdlib's Enum
+]
+
+
+@pytest.mark.parametrize(("source", "kind"), METACLASS_CASES)
+def test_lintc_flags_classes_mypyc_compiles_as_python_classes_for_their_metaclass(tmp_path: Path, source: str, kind: str | None) -> None:
+    """Only the decorators were checked: an Enum, a NamedTuple, a TypedDict or a class with its
+    own metaclass silently became a slow Python class under mypyc, with no finding."""
+    found = [f.message for f in _lint(tmp_path, source) if "class 'P'" in f.message]
+    expected = [] if kind is None else [f"class 'P' {kind}: mypyc compiles it as a regular (slow) Python class"]
+    assert [m.split(". Move it")[0] for m in found] == expected
+
+
+@needs_venv
+def test_lintc_native_metaclasses_follow_the_locked_mypyc() -> None:
+    """A mypy bump that changes what mypyc accepts as the metaclass of a native class, or drops
+    its TypedDict and NamedTuple exceptions, must fail selftest."""
+    code = (
+        "import importlib.util, pathlib\n"
+        "origin = pathlib.Path(importlib.util.find_spec('mypyc.irbuild.util').origin)\n"
+        "print((origin.parent / 'util.py').read_text(encoding='utf-8'))\n"
+    )
+    text = subprocess.run([str(TOOL_PYTHON), "-I", "-c", code], capture_output=True, text=True, check=True).stdout
+    function = next(n for n in ast.walk(ast.parse(text)) if isinstance(n, ast.FunctionDef) and n.name == "is_implicit_extension_class")
+    tuples = [
+        {e.value for e in n.comparators[0].elts if isinstance(e, ast.Constant)}
+        for n in ast.walk(function)
+        if isinstance(n, ast.Compare) and isinstance(n.ops[0], ast.NotIn) and isinstance(n.comparators[0], ast.Tuple)
+    ]
+    assert tuples == [set(lintc.NATIVE_METACLASSES)]
+    source = ast.unparse(function)
+    assert "typeddict_type" in source and "is_named_tuple" in source
 
 
 @needs_venv
@@ -914,6 +981,81 @@ def test_sync_tree_payload_never_takes_a_stray_build_without_its_shared_lib(tmp_
     dst = tmp_path / "payload"
     mypyc.sync_tree(src, dst)
     assert _snapshot(dst) == {"pkg": None, "pkg/x.py": b"X = 1\n", "pkg/libz" + LINUX_EXT: b"z"}
+
+
+def _writable(root: Path) -> list[str]:
+    """What below `root` (itself included) is not owner-writable."""
+    return sorted(p.relative_to(root).as_posix() for p in [root, *root.rglob("*")] if not p.stat().st_mode & stat.S_IWUSR)
+
+
+def test_sync_tree_copies_of_read_only_files_stay_replaceable(tmp_path: Path) -> None:
+    # A read-only file of src/ (a Perforce checkout, a link into the Nix store): copy2 kept its
+    # mode, and once the file changed the next build could not replace the copy ("cannot write
+    # .build/payload/...: Permission denied"; Windows could not delete one either)
+    src = _project(tmp_path / "src", {"pkg/NOTICE.txt": "version 1", "pkg/gone.txt": "x", "pkg/same.txt": "s"})
+    for f in (src / "pkg").iterdir():
+        f.chmod(0o444)
+    dst = tmp_path / "dst"
+    mypyc.sync_tree(src, dst)
+    assert _writable(dst) == []
+    # Read-only copies an older ./deploy left: replaced, deleted, or made writable in place
+    for f in (dst / "pkg").iterdir():
+        f.chmod(0o444)
+    notice = src / "pkg" / "NOTICE.txt"
+    notice.chmod(0o644)
+    notice.write_text("version 2, longer", encoding="utf-8")
+    notice.chmod(0o444)
+    (src / "pkg" / "gone.txt").chmod(0o644)  # Windows deletes no read-only file either
+    (src / "pkg" / "gone.txt").unlink()
+    assert mypyc.sync_tree(src, dst) == 2
+    assert (dst / "pkg" / "NOTICE.txt").read_text(encoding="utf-8") == "version 2, longer"
+    assert not (dst / "pkg" / "gone.txt").exists()
+    assert _writable(dst) == []  # same.txt, unchanged, too
+
+
+def test_remove_tree_removes_read_only_copies_and_only_a_link(tmp_path: Path) -> None:
+    tree = _project(tmp_path / "t", {"a/b.txt": "x", "a/c/d.txt": "y"})
+    for path in (tree / "a" / "b.txt", tree / "a" / "c" / "d.txt"):
+        path.chmod(0o444)
+    for folder in (tree / "a" / "c", tree / "a"):
+        folder.chmod(0o555)  # copytree copies a folder's mode too: POSIX empties no read-only folder
+    mypyc.remove_tree(tree)
+    assert not tree.exists()
+    target = _project(tmp_path / "target", {"keep.txt": "k"})
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("no symbolic links here")
+    mypyc.remove_tree(link)
+    assert not os.path.lexists(link) and (target / "keep.txt").is_file()
+
+
+def test_the_wheel_copies_read_only_sources_writable(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, src_tree: Path) -> None:
+    # copytree from src/ kept read-only files AND folders: build_ext --inplace writes next to the
+    # sources, and the next build could not delete the work folder
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    def fake_uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        argv = [str(a) for a in args]
+        out = Path(argv[argv.index("--out-dir") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "pkg-0.1.0-py3-none-any.whl").write_bytes(b"")
+        return _done(argv)
+
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.envs, "uv", fake_uv)
+    read_only = [src_tree / "pkg" / "data" / "x.json", src_tree / "assets" / "img.txt", src_tree / "pkg" / "data", src_tree / "assets"]
+    try:
+        for path in read_only:
+            path.chmod(0o555 if path.is_dir() else 0o444)
+        for _ in range(2):  # the second build deletes the first one's work folder
+            wheel.build(BuildRequest(_wheel_cfg(), "mypyc", "wheel", src_tree))
+            assert _writable(wheel_project / ".build" / "wheel" / "mypyc" / "src") == []
+    finally:
+        for path in read_only:
+            path.chmod(0o755 if path.is_dir() else 0o644)
 
 
 # --- 6. stale extensions -------------------------------------------------------------------------
@@ -1603,9 +1745,17 @@ def test_hidden_imports_keep_everything_when_the_check_cannot_run(
     assert "html.parser" not in hidden  # candidates need the check
 
 
-def test_hidden_imports_of_an_unparsable_file_is_a_deploy_error(src_tree: Path, tmp_path: Path) -> None:
-    _project(src_tree, {"myapp/__init__.py": "", "myapp/core/__init__.py": "", "myapp/core/m.py": b"import json\n\ndef f(:\n"})
-    with pytest.raises(DeployError, match=r"src[/\\]myapp[/\\]core[/\\]m\.py:3: cannot parse it with the runner's Python") as err:
+@pytest.mark.parametrize(
+    ("source", "line"),
+    [
+        (b"import json\n\ndef f(:\n", 3),
+        ("x = " + " + ".join(["1"] * 100_000) + "\n", 1),  # too deep for the compiler's stack: RecursionError
+    ],
+    ids=["syntax-error", "too-deep"],
+)
+def test_hidden_imports_of_an_unparsable_file_is_a_deploy_error(src_tree: Path, tmp_path: Path, source: str | bytes, line: int) -> None:
+    _project(src_tree, {"myapp/__init__.py": "", "myapp/core/__init__.py": "", "myapp/core/m.py": source})
+    with pytest.raises(DeployError, match=rf"src[/\\]myapp[/\\]core[/\\]m\.py:{line}: cannot parse it with the runner's Python") as err:
         mypyc.hidden_imports(make({}), tmp_path / "stage")
     assert err.value.code == 2
 
@@ -1674,6 +1824,31 @@ def test_real_compile_roundtrip(src_tree: Path, tmp_path: Path, monkeypatch: pyt
     size = lib.stat().st_size
     mypyc.build(make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "opt_level": "0"}}), "dev")
     assert lib.stat().st_size != size  # -O0 really rebuilt the shared lib
+
+
+@needs_venv
+@needs_compiler
+def test_real_compile_names_namespace_modules_as_python_imports_them(src_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A top-level namespace folder in compile.modules, and an app package without __init__.py
+    (PEP 420): mypy named each module from the highest folder holding an __init__.py
+    (nsx/fast.py -> fast, pkg/core/bench.py -> core.bench): "mypyc did not generate an extension
+    for: nsx.fast", and setuptools could not create core/bench.<ext> (blamed on the C compiler)."""
+    _project(
+        src_tree,
+        {
+            "main.py": "",
+            "pkg/core/__init__.py": "",
+            "pkg/core/bench.py": "def twice(x: int) -> int:\n    return 2 * x\n",
+            "nsx/fast.py": "def three() -> int:\n    return 3\n",
+        },
+    )
+    monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
+    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core", "nsx"]}})
+    stage = mypyc.build(cfg, "dev")
+    stems = sorted(p.relative_to(stage).as_posix().split(".")[0] for p in mypyc.extension_files(stage))
+    assert stems == ["nsx/fast", "pkg/core/bench", "pkg__mypyc"]
+    code = "import pkg.core.bench as b, nsx.fast as f; print(b.twice(f.three()), type(f.three).__name__)"
+    assert _import_from(stage, code, tmp_path) == "6 builtin_function_or_method"  # compiled, not the .py
 
 
 @needs_venv
@@ -2179,6 +2354,28 @@ def test_real_mypyc_wheel_compiles_a_top_level_module(wheel_project: Path, monke
     out = _import_from(site, "import fastbench, other.core.calc as c; print(fastbench.__file__); print(fastbench.twice(c.add(1, 2)))", wheel_project)
     file, result = out.splitlines()
     assert file.endswith(tuple(importlib.machinery.EXTENSION_SUFFIXES)) and result == "6"
+
+
+@needs_venv
+@needs_compiler
+def test_real_mypyc_wheel_compiles_a_namespace_folder(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # nsx/ (no __init__.py) in compile.modules: the wheel's setup.py named nsx/fast.py "fast",
+    # a top-level module the wheel does not have where nsx.fast is imported
+    import zipfile
+
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    _project(wheel_project / "src", {"nsx/fast.py": "def three() -> int:\n    return 3\n"})
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["nsx"]}})
+    built = wheel.build(BuildRequest(cfg, "mypyc", "wheel", wheel_project / "src"))
+    site = wheel_project / "site"
+    with zipfile.ZipFile(built) as z:
+        assert [n for n in z.namelist() if n.startswith("nsx/fast.") and n.endswith((".so", ".pyd"))], z.namelist()
+        z.extractall(site)
+    out = _import_from(site, "import nsx.fast as f; print(f.three(), type(f.three).__name__)", wheel_project)
+    assert out == "3 builtin_function_or_method"
 
 
 def _wheel_names(wheel_file: Path) -> list[str]:

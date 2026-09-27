@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -83,6 +84,7 @@ def test_relative_upx_path_resolves_against_the_project_root(monkeypatch: pytest
     fake = root / "tools" / ("upx.exe" if WINDOWS else "upx")
     fake.parent.mkdir(parents=True)
     fake.write_bytes(b"")
+    fake.chmod(0o755)
     (root / "src").mkdir()
     monkeypatch.setattr(upx, "ROOT", root)
     cfg = make({"upx": {"enabled": True, "path": f"tools/{fake.name}"}})
@@ -93,13 +95,14 @@ def test_relative_upx_path_resolves_against_the_project_root(monkeypatch: pytest
     monkeypatch.setattr(exe, "IS_WINDOWS", True)
     monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
     assert f"--upx-dir={fake.parent}" in exe.size_args(cfg)[0]
-    absolute = tmp_path / "elsewhere" / "upx"
+    absolute = tmp_path / "elsewhere" / upx._exe_name()
     absolute.parent.mkdir()
     absolute.write_bytes(b"")
+    absolute.chmod(0o755)
     assert upx.find(make({"upx": {"path": str(absolute)}})) == absolute
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    assert upx.find(make({"upx": {"path": "~/elsewhere/upx"}})) == absolute
+    assert upx.find(make({"upx": {"path": f"~/elsewhere/{absolute.name}"}})) == absolute
     with pytest.raises(DeployError, match="relative path starts at the project root") as e:
         upx.find(make({"upx": {"path": "tools/missing"}}))
     assert e.value.code == 3
@@ -120,6 +123,7 @@ def test_find_order_path_setting_then_path_then_cache_then_download(monkeypatch:
     cached = cache / upx._exe_name()
     cache.mkdir()
     cached.write_bytes(b"")
+    cached.chmod(0o755)
     assert upx.find(make({})) == cached and len(downloads) == 1  # the cache, no second download
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -128,10 +132,89 @@ def test_find_order_path_setting_then_path_then_cache_then_download(monkeypatch:
     tool.chmod(0o755)
     monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(bindir)})
     assert Path(upx.find(make({}))).resolve() == tool.resolve()  # PATH beats the cache
-    explicit = tmp_path / "explicit" / "upx"
+    explicit = tmp_path / "explicit" / upx._exe_name()
     explicit.parent.mkdir()
     explicit.write_bytes(b"")
+    explicit.chmod(0o755)
     assert upx.find(make({"upx": {"path": str(explicit)}})) == explicit  # the setting beats PATH
+
+
+def test_a_upx_path_not_named_upx_is_refused_before_any_work(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Nuitka takes --upx-binary only as a file named upx (else it searched PATH: "No UPX binary
+    # found, please use --upx-binary", or another upx), and PyInstaller looks for
+    # <upx-dir>/upx.exe (it packed nothing, silently): tools/upx-5.2.1 passed the preflight
+    root = tmp_path / "proj"
+    (root / "tools").mkdir(parents=True)
+    monkeypatch.setattr(upx, "ROOT", root)
+    monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
+    for name in ("upx-5.2.1", "upx-5.2.1.exe", "upx.exe" if not WINDOWS else "upx"):
+        tool = root / "tools" / name
+        tool.write_bytes(b"")
+        tool.chmod(0o755)
+        with pytest.raises(DeployError, match=f"must be a file named {upx._exe_name()} ") as e:
+            upx.preflight(make({"upx": {"enabled": True, "path": f"tools/{name}"}}), "nuitka")
+        assert e.value.code == 2
+    good = root / "tools" / (upx._exe_name().upper() if WINDOWS else upx._exe_name())  # Windows: any case
+    good.write_bytes(b"")
+    good.chmod(0o755)
+    assert upx.locate(make({"upx": {"enabled": True, "path": f"tools/{good.name}"}})) == good
+
+
+@pytest.mark.skipif(WINDOWS, reason="Windows files have no x bit")
+def test_a_upx_without_its_x_bit_is_refused_before_any_work(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # tools/upx committed from Windows (100644) or unpacked by a zip tool passed the preflight;
+    # a portable build then copied and compiled the runtime and died in pack_file with an
+    # "internal runner error" traceback, its folder left without the smoke test
+    root = tmp_path / "proj"
+    tool = root / "tools" / "upx"
+    tool.parent.mkdir(parents=True)
+    tool.write_bytes(b"#!/bin/sh\nexit 0\n")
+    tool.chmod(0o644)
+    monkeypatch.setattr(upx, "ROOT", root)
+    monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
+    cfg = make({"upx": {"enabled": True, "path": "tools/upx"}})
+    with pytest.raises(DeployError, match=r"deploy.upx.path = 'tools/upx' is not executable .*: chmod \+x ") as e:
+        upx.preflight(cfg, "portable")
+    assert e.value.code == 3
+    # a cached download that lost its x bit is downloaded again, never handed to the tools
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "upx").write_bytes(b"")
+    (cache / "upx").chmod(0o644)
+    monkeypatch.setattr(upx, "_cache_dir", lambda: cache)
+    monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(tmp_path / "empty")})
+    assert upx.locate(make({"upx": {"enabled": True}})) is None
+    # and a upx that cannot start while packing stops the build with its reason, not a traceback
+    target = tmp_path / "app.bin"
+    target.write_bytes(b"\x7fELF")
+    with pytest.raises(DeployError, match="upx: cannot run .*: Permission denied") as e:
+        upx.pack_file(tool, target, ["-1"])
+    assert e.value.code == 3
+
+
+def test_the_upx_cache_and_a_upx_on_path_are_absolute(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A relative XDG_CACHE_HOME put the download under the caller's folder (src/relcache/..., which
+    # the payloads ship) and handed Nuitka, which runs in its stage, a relative --upx-binary
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.chdir(tmp_path)
+    for variable in ("XDG_CACHE_HOME", "LOCALAPPDATA"):
+        monkeypatch.setenv(variable, "relcache")
+    cache = upx._cache_dir()
+    assert cache.is_absolute() and "relcache" not in cache.parts
+    assert cache == (home / "AppData" / "Local" if WINDOWS else home / ".cache") / "pytemplate" / "tools" / f"upx-{upx.VERSION}"
+    for variable in ("XDG_CACHE_HOME", "LOCALAPPDATA"):
+        monkeypatch.setenv(variable, str(tmp_path / "abs"))
+    assert upx._cache_dir() == tmp_path / "abs" / "pytemplate" / "tools" / f"upx-{upx.VERSION}"
+    # a upx found through a relative PATH entry reaches the tools absolute
+    (tmp_path / "bin").mkdir()
+    tool = tmp_path / "bin" / upx._exe_name()
+    tool.write_bytes(b"")
+    tool.chmod(0o755)
+    monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": "bin"})
+    found = upx.locate(make({"upx": {"enabled": True}}))
+    assert found is not None and found.is_absolute() and os.path.normcase(found) == os.path.normcase(tool)
 
 
 # --- the pinned download, with crafted archives (no network) -----------------------------------------

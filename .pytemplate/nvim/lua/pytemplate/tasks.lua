@@ -87,21 +87,21 @@ local function absolute(file)
   local staged = root and in_stage(file)
   if staged then
     -- land on the src/ file: an edit made in the stage copy is overwritten by the next sync
-    local src = vim.fs.normalize(root .. "/src/" .. staged)
+    local src = pt.normalize(root .. "/src/" .. staged)
     if vim.uv.fs_stat(src) then
       return src
     end
   end
   if file:match("^%a:/") or file:sub(1, 1) == "/" then
-    return vim.fs.normalize(file)
+    return pt.normalize(file)
   end
   if not root then
     return file
   end
-  local path = vim.fs.normalize(root .. "/" .. file)
+  local path = pt.normalize(root .. "/" .. file)
   -- mypyc runs in its stage (a copy of src/) and prints stage-relative paths: map them to src/
   if not vim.uv.fs_stat(path) then
-    local src = vim.fs.normalize(root .. "/src/" .. file)
+    local src = pt.normalize(root .. "/src/" .. file)
     if vim.uv.fs_stat(src) then
       return src
     end
@@ -142,7 +142,14 @@ function M.parse_line(line, sev)
     end
     return { filename = absolute(file), lnum = tonumber(lnum), col = tonumber(col), text = msg, type = k }
   end
-  file, lnum, col, rest = line:match("^(%a?:?[^:]+%.pyi?):(%d+):(%d*):?%s*(.*)$")
+  -- pytest's `-ra` summary (`SKIPPED [1] tests/x.py:11: reason`) and its indented warnings
+  -- summary (`  /abs/tests/x.py:7: DeprecationWarning: ...`) are no problems: they became errors
+  -- on files named `SKIPPED [1] tests/x.py` and `  /abs/...` after a green run. A path starts
+  -- with a non-blank character, as in the VS Code matchers (vscode._ANY_FILE)
+  if line:match("^SKIPPED %[%d+%] ") then
+    return nil
+  end
+  file, lnum, col, rest = line:match("^(%a?:?[^:%s][^:]*%.pyi?):(%d+):(%d*):?%s*(.*)$")
   if not file or file:find("site-packages", 1, true) or rest:match("^in ") or rest == "" then
     return nil
   end
@@ -523,7 +530,7 @@ function M.setup(cfg)
       pattern = "pytemplate.toml",
       desc = "pytemplate: ./deploy render",
       callback = function(ev)
-        if pt.same_path(vim.fs.dirname(vim.fs.normalize(ev.match)), pt.root()) then
+        if pt.same_path(vim.fs.dirname(pt.normalize(ev.match)), pt.root()) then
           M.run({ "render" })
         end
       end,

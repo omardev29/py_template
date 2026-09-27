@@ -414,6 +414,18 @@ def test_the_template_workflows_are_named() -> None:
     assert not missing, f"template workflows the manual does not name: {missing}"
 
 
+def test_the_flet_client_download_is_not_blamed_on_the_versions() -> None:
+    # Every flet project downloads its client at its first start (the flet-desktop wheel holds
+    # none, CLAUDE.md 10); only a pip install of flet-desktop means the versions differ. The
+    # manual sent a user whose versions matched to fix them.
+    bullets = re.findall(r"^- \*\*(.+?)\*\*:(.*?)(?=^- |^#|\Z)", _text(), re.M | re.S)
+    download = [body for title, body in bullets if "downloads its client" in title]
+    install = [body for title, body in bullets if "pip-installs" in title]
+    assert download and install, "the troubleshooting entries on the Flet client and its pip install are gone"
+    assert all("[preset.flet]" not in body and "~/.flet/client" in body for body in download)
+    assert all("[preset.flet] version" in body for body in install)
+
+
 def test_the_manual_says_what_a_new_project_gets() -> None:
     text = _text()
     for target in presets.TEMPLATE_DOCS.values():

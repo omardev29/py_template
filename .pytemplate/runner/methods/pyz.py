@@ -27,7 +27,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .. import ui
+from .. import mypyc, ui
 from ..cmd_build import BuildRequest, dist_path
 from ..config import APP_NAME, Config
 from ..project import BUILD, EXT_SUFFIXES, IS_WINDOWS, TEMPLATES, rel
@@ -143,7 +143,7 @@ def build(req: BuildRequest) -> Path:
     work = BUILD / "pyz" / req.backend
     root = work / "root"
     if root.exists():
-        shutil.rmtree(root)
+        mypyc.remove_tree(root)
     root.mkdir(parents=True)
 
     # Pure code (no .pyd): works on any interpreter >= the minimum version
@@ -181,6 +181,7 @@ def build(req: BuildRequest) -> Path:
         "backend": req.backend,
         "host": host.key,  # pyz-merge: the platform a pure part's common/lib was resolved for
         "deps": common.requirements_digest(requirements),  # pyz-merge: parts of one build lock the same set
+        "abi": _target_abis(root, target_keys),  # the bootstrap: a key alone misses PyPy 8, 3.14t
     }
     (root / "_pyz.json").write_text(json.dumps(info, indent=2), encoding="utf-8", newline="\n")
     shutil.copy2(TEMPLATES / "pyz" / "__main__.py", root / "__main__.py")
@@ -209,6 +210,14 @@ def build(req: BuildRequest) -> Path:
             )
     ui.info(f"  run: python {rel(pyz)}   (on Windows also {rel(out_dir / (cfg.app.name + '.cmd'))})")
     return pyz
+
+
+def _target_abis(root: Path, keys: list[str]) -> dict[str, list[str]]:
+    """_pyz.json "abi": the extension ABIs of each target's binaries (lib/ and the mypyc overlay),
+    for the keys that hold any. The bootstrap takes a target only when its interpreter has one of
+    them: a PyPy 8 (pp80) took the pp311 target of a PyPy 7.3 build (pp73) and died in an
+    ImportError, where a missing build gives a clear message."""
+    return {key: abis for key in keys if (abis := common.extension_abis(root / "targets" / key))}
 
 
 # --- pyz-merge ------------------------------------------------------------------------------------
@@ -240,7 +249,14 @@ def _part_host(part: Path, info: dict[str, Any]) -> str:
         return host
     if info.get("backend") == "mypyc" and len(info["targets"]) == 1:
         return str(info["targets"][0])  # a pure mypyc part only carries its host's overlay
-    raise DeployError(f"pyz-merge: {part} does not record the platform that built it (an older ./deploy made it): rebuild it")
+    again = "pass the parts it was merged from to one ./deploy pyz-merge call, with the others"
+    if info.get("merged"):
+        # Pure parts of several machines: its dependencies name no platform to place them under
+        raise DeployError(f"pyz-merge: {part} is a merge of pure parts, which records no platform that built it: {again}")
+    raise DeployError(
+        f"pyz-merge: {part} does not record the platform that built it: if an earlier pyz-merge made it, "
+        f"{again}; if an older ./deploy built it, rebuild it"
+    )
 
 
 def _app_digest(archive: zipfile.ZipFile) -> str:
@@ -282,6 +298,10 @@ def check_parts(parts: list[Path], out: Path) -> list[dict[str, Any]]:
         raise DeployError("pyz-merge: the parts need different minimum Python versions: they come from different builds")
     if len({i["deps"] for i in infos if i.get("deps")}) > 1:
         raise DeployError("pyz-merge: the parts lock different dependencies: they come from different builds (rebuild them from one commit)")
+    if not all(bool(i["pure"]) for i in infos):
+        for part, info in zip(parts, infos, strict=True):
+            if info["pure"]:
+                _part_host(part, info)  # a pure part next to per-platform ones: its lib goes to its platform
     return infos
 
 
@@ -366,7 +386,7 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
                         modes[name] = stat.S_IMODE(item.external_attr >> 16)
         targets = sorted(p.name for p in (root / "targets").iterdir()) if (root / "targets").is_dir() else []
         merged = {k: v for k, v in infos[0].items() if k != "host"}
-        merged.update({"targets": targets, "pure": pure, "build_id": _build_id(root)})
+        merged.update({"targets": targets, "pure": pure, "build_id": _build_id(root), "merged": True, "abi": _target_abis(root, targets)})
         (root / "_pyz.json").write_text(json.dumps(merged, indent=2), encoding="utf-8", newline="\n")
         out.parent.mkdir(parents=True, exist_ok=True)
         _write_archive(root, out, modes)

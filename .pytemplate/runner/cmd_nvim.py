@@ -13,6 +13,7 @@ write anything, and only when the user runs them.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import ntpath
@@ -32,7 +33,7 @@ from typing import Any
 
 from . import envs, proc, ui
 from .config import Config
-from .project import IS_MACOS, IS_WINDOWS, ROOT
+from .project import IS_MACOS, IS_WINDOWS, ROOT, write_whole
 from .ui import DeployError
 
 Check = Callable[[bool | None, str, str], None]
@@ -115,7 +116,11 @@ class Nvim:
         return self.state / "trust"
 
     def lazyvim_installed(self) -> bool:
-        return (self.config / "lua" / "config" / "lazy.lua").is_file() or (self.data / "lazy" / "LazyVim").is_dir()
+        """LazyVim is this Neovim's config: its plugin in lazy.nvim's default root, the config's
+        lazy-lock.json naming it (a config with its own lazy root, once started), or the config's
+        Lua naming its spec (a starter before its first start). A lua/config/lazy.lua alone
+        proves nothing: lazy.nvim's own Structured Setup has one, without LazyVim."""
+        return (self.data / "lazy" / "LazyVim").is_dir() or lock_names_lazyvim(self.config) or config_names_lazyvim(self.config)
 
 
 def which(name: str) -> str | None:
@@ -178,6 +183,8 @@ def headless(
             )
         except FileNotFoundError:
             raise DeployError(f"program not found: {exe}", 3) from None
+        except OSError as e:  # another architecture, a truncated download, a noexec mount
+            raise DeployError(f"cannot run {exe}: {e.strerror or e}", 3) from None
         except subprocess.TimeoutExpired:
             raise DeployError(f"Neovim did not answer in {timeout:.0f} s: {proc.show(argv)}", 3) from None
     data = parse_marker(r.stdout)
@@ -310,20 +317,41 @@ def trust_file(
 
 
 _LOCAL_SPEC_OFF = re.compile(r"\blocal_spec\s*=\s*false\b")
+_LAZYVIM_SPEC = re.compile(r"""["']LazyVim/LazyVim["']|["']lazyvim\.plugins["']""")
+_BLOCK_COMMENT = re.compile(r"--\[(=*)\[.*?\]\1\]", re.S)
+
+
+def _config_code(config: Path) -> list[tuple[Path, list[str]]]:
+    """The Lua files of a config (init.lua, lua/**) as lines without their comments."""
+    files = [config / "init.lua", *sorted((config / "lua").rglob("*.lua"))] if config.is_dir() else []
+    out: list[tuple[Path, list[str]]] = []
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        out.append((f, [line.split("--", 1)[0] for line in _BLOCK_COMMENT.sub("", text).splitlines()]))
+    return out
 
 
 def local_spec_off(config: Path) -> list[Path]:
     """Return the config files that set lazy.nvim's `local_spec = false` (.lazy.lua ignored)."""
-    files = [config / "init.lua", *sorted((config / "lua").rglob("*.lua"))] if config.is_dir() else []
-    found: list[Path] = []
-    for f in files:
-        try:
-            lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
-        if any(_LOCAL_SPEC_OFF.search(line.split("--", 1)[0]) for line in lines):
-            found.append(f)
-    return found
+    return [f for f, lines in _config_code(config) if any(_LOCAL_SPEC_OFF.search(line) for line in lines)]
+
+
+def config_names_lazyvim(config: Path) -> bool:
+    """Whether the config's Lua names LazyVim's spec ("LazyVim/LazyVim" or its "lazyvim.plugins"
+    import) outside a comment."""
+    return any(_LAZYVIM_SPEC.search(line) for _, lines in _config_code(config) for line in lines)
+
+
+def lock_names_lazyvim(config: Path) -> bool:
+    """Whether lazy.nvim's lockfile (its default place, <config>/lazy-lock.json) names LazyVim."""
+    try:
+        data = json.loads((config / "lazy-lock.json").read_bytes().decode("utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and "LazyVim" in data
 
 
 def load_lazyvim_json(path: Path) -> dict[str, Any]:
@@ -344,7 +372,8 @@ def missing_extras(path: Path, wanted: Sequence[str] = EXTRAS) -> list[str] | No
         return None
     data = load_lazyvim_json(path)
     extras = data.get("extras")
-    have = set(extras) if isinstance(extras, list) else set()
+    # the module names only: a hand-written {...} entry made set() raise TypeError (a traceback)
+    have = {e for e in extras if isinstance(e, str)} if isinstance(extras, list) else set()
     return [e for e in wanted if e not in have]
 
 
@@ -372,7 +401,9 @@ def enable_extras(
 ) -> tuple[list[str], Path | None]:
     """Add the missing extras to lazyvim.json after a timestamped backup; return (added, backup).
 
-    Nothing is written (no backup either) when every extra is already there or under dry_run.
+    Nothing is written (no backup either) when every extra is already there or under dry_run. The
+    file is replaced whole (project.write_whole: a link stays a link); a config it may not write
+    (a Nix store, another user's file) is a DeployError that leaves no backup behind.
     """
     raw = path.read_bytes()
     data = load_lazyvim_json(path)
@@ -385,8 +416,16 @@ def enable_extras(
     while backup.exists():
         n += 1
         backup = path.with_name(f"{path.name}.{stamp}-{n}.bak")
-    backup.write_bytes(raw)
-    path.write_text(lazyvim_json_text(data), encoding="utf-8", newline="\n")
+    try:
+        backup.write_bytes(raw)
+        write_whole(path, lazyvim_json_text(data).encode("utf-8"))
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            backup.unlink(missing_ok=True)  # ours (a new name): a failed write leaves nothing behind
+        names = ", ".join(short_extra(x) for x in added)
+        raise DeployError(
+            f"cannot write {e.filename or path}: {e.strerror or e}. Enable the extras by hand (:LazyExtras, or {path}): {names}", 3
+        ) from None
     return added, backup
 
 
@@ -556,7 +595,7 @@ def cmd_doctor(cfg: Config) -> int:
     installed = nv.lazyvim_installed()
     check(
         installed,
-        "LazyVim installed" if installed else f"LazyVim not found ({nv.config / 'lua' / 'config' / 'lazy.lua'})",
+        "LazyVim installed" if installed else f"LazyVim not found: {nv.config} names no LazyVim/LazyVim spec",
         "./deploy nvim bootstrap   (clones the LazyVim starter; an existing config is never touched)",
     )
     off = local_spec_off(nv.config) if installed else []
@@ -689,7 +728,10 @@ def cmd_bootstrap(nv: Nvim) -> int:
     if proc.DRY_RUN:
         ui.info(f"would remove {nv.config / '.git'}")
         return 0
-    remove_tree(nv.config / ".git")  # LazyVim's install steps: the config becomes your own
+    try:
+        remove_tree(nv.config / ".git")  # LazyVim's install steps: the config becomes your own
+    except OSError as e:
+        raise DeployError(f"the starter is in {nv.config}, but its .git could not be removed ({e}): delete it by hand", 3) from None
     ui.ok(f"LazyVim starter installed in {nv.config}")
     ui.info("  Next: start nvim once (LazyVim installs its plugins), then ./deploy nvim trust && ./deploy nvim sync")
     return 0
@@ -702,7 +744,11 @@ def cmd_sync(nv: Nvim) -> int:
     (rewriting lazy-lock.json) and clean the plugins its spec does not name.
     """
     if not nv.lazyvim_installed():
-        raise DeployError("LazyVim is not installed: ./deploy nvim bootstrap", 3)
+        raise DeployError(
+            f"LazyVim is not this Neovim's config ({nv.config}): ./deploy nvim bootstrap installs the starter where"
+            " there is no config; to switch an existing one, see https://lazyvim.github.io/installation",
+            3,
+        )
     trust = trust_status(nv.trust_db, LAZY_LUA)
     if trust.state == "missing":
         raise DeployError(".lazy.lua not found: ./deploy render generates it")

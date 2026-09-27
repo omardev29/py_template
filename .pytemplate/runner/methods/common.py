@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import configparser
+import contextlib
 import hashlib
 import json
 import os
@@ -15,10 +16,11 @@ import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .. import envs, proc, ui
 from ..config import Config
-from ..imports import iter_runtime_nodes, parse
+from ..imports import PARSE_ERRORS, iter_runtime_nodes, parse
 from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, SRC, host_os, rel
 from ..ui import DeployError
 
@@ -297,6 +299,82 @@ def source_only(lock: Path) -> list[str]:
     return sorted(names)
 
 
+def _lock_packages(lock: Path) -> list[dict[str, Any]]:
+    try:
+        data = tomllib.loads(lock.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return []
+    packages = data.get("package", [])
+    return [p for p in packages if isinstance(p, dict) and isinstance(p.get("name"), str)] if isinstance(packages, list) else []
+
+
+def binary_only(lock: Path) -> set[str]:
+    """The normalized names of the index packages of uv.lock that publish no pure wheel
+    (`-none-any`): native packages (msgpack, numpy) and sdist-only releases."""
+    out: set[str] = set()
+    for package in _lock_packages(lock):
+        source = package.get("source")
+        if not isinstance(source, dict) or "registry" not in source:
+            continue  # the project, a path, git or URL source: never a name==version pin
+        wheels = package.get("wheels")
+        files = [str(w.get("url") or w.get("path") or w.get("filename") or "") for w in wheels if isinstance(w, dict)] if isinstance(wheels, list) else []
+        if not any(f.rsplit("/", 1)[-1].endswith("-none-any.whl") for f in files):
+            out.add(_norm_name(package["name"]))
+    return out
+
+
+def project_specifiers(lock: Path) -> dict[str, str]:
+    """The version bounds the project itself declares for its runtime dependencies (its
+    requires-dist in uv.lock), by normalized name; a name declared twice with other bounds (per
+    marker) is left out."""
+    out: dict[str, str] = {}
+    seen: set[str] = set()
+    for package in _lock_packages(lock):
+        source = package.get("source")
+        if not isinstance(source, dict) or "." not in (source.get("virtual"), source.get("editable")):
+            continue
+        metadata = package.get("metadata")
+        requires = metadata.get("requires-dist") if isinstance(metadata, dict) else None
+        for entry in requires if isinstance(requires, list) else []:
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                continue
+            name, specifier = _norm_name(entry["name"]), entry.get("specifier")
+            text = specifier if isinstance(specifier, str) else ""
+            if name in seen and out.get(name) != text:
+                out.pop(name, None)
+                continue
+            if name not in seen:
+                out[name] = text
+            seen.add(name)
+    return out
+
+
+def unpin_binaries(pins: list[str], *, lock: Path | None = None) -> tuple[list[str], list[str]]:
+    """For `flet build` of a mobile or web target: the `name==version` pins of the packages
+    uv.lock has no pure wheel for (`binary_only`) lose uv.lock's version and keep the project's own
+    bounds (`project_specifiers`) and their markers. flet build installs those targets' binaries
+    from Flet's own index (pypi.flet.dev, `--only-binary :all:`), which holds other releases than
+    PyPI (msgpack 1.1.x, where a new flet project locks 1.2.2): the exact pin had no solution, and
+    pip now picks a release that fits every package's bounds. Returns the requirements and the
+    pins it relaxed."""
+    lock_file = LOCK if lock is None else lock
+    binary = binary_only(lock_file)
+    own = project_specifiers(lock_file) if binary else {}
+    out: list[str] = []
+    relaxed: list[str] = []
+    for pin in pins:
+        requirement, marked, marker = pin.partition(" ;")
+        m = _PIN_RE.match(requirement.strip())
+        name = _norm_name(m[1]) if m else ""
+        loose = f"{m[1]}{own.get(name, '')}" if m else ""
+        if not m or name not in binary or loose == requirement.strip():
+            out.append(pin)
+            continue
+        relaxed.append(f"{m[1]}=={m[2]}")
+        out.append(loose + (f" ;{marker}" if marked else ""))
+    return out, relaxed
+
+
 def _built_native(site: Path, names: list[str]) -> list[str]:
     """Which of `names` got a platform-specific wheel in `site` (a native sdist built here)."""
     wanted = {_norm_name(n) for n in names}
@@ -394,6 +472,28 @@ def _platform_wheel(wheel: Path) -> bool:
     return False
 
 
+# The extension ABI in a file name (templates/pyz/__main__.py has the same ABI_RE and abi_tag,
+# which read the running interpreter's EXT_SUFFIX with it): cpython-314[t], cp314[t] (Windows),
+# pypy311-pp73. A target key does not tell PyPy 7.3 (pp73) from PyPy 8 (pp80), nor CPython 3.14
+# from its free-threaded build (3.14t)
+ABI_RE = re.compile(r"\.(cpython-(\d+t?)|cp(\d+t?)|pypy(\d+)-(pp\d+))[-.]")
+
+
+def abi_tag(name: str) -> str:
+    """cp314, cp314t or pypy311_pp73 (as wheel tags name them), "" when `name` carries none."""
+    m = ABI_RE.search(name)
+    if not m:
+        return ""
+    return f"cp{m.group(2) or m.group(3)}" if m.group(4) is None else f"pypy{m.group(4)}_{m.group(5)}"
+
+
+def extension_abis(folder: Path) -> list[str]:
+    """The ABIs the extension modules below `folder` were built for (abi3 and an untagged
+    .so/.pyd name none: any interpreter of the platform loads them)."""
+    tags = {abi_tag(p.name) for p in folder.rglob("*") if p.name.endswith(EXT_SUFFIXES) and p.is_file()}
+    return sorted(tags - {""})
+
+
 def has_native(path: Path) -> bool:
     """True when a lib/ is platform-specific: a platform wheel (read from its WHEEL tags, which
     also catches pure-Python wheels that ship an executable, such as imageio-ffmpeg) or a binary."""
@@ -453,6 +553,23 @@ def _local_names(lock: Path) -> dict[str, str]:
             if isinstance(source.get(kind), str):
                 out[_local_key(lock.parent, source[kind])] = package["name"]
     return out
+
+
+def direct_reference(line: str, *, lock: Path | None = None) -> str:
+    """A line of `uv export --no-editable` as a PEP 508 requirement: a local library, which it
+    writes as a bare path relative to the project (`./libs/x ; <markers>`) or a `file:` URL, becomes
+    `name @ file:///absolute/path ; <markers>` (its name from uv.lock). Pins and direct references
+    stay as they are. A path uv.lock does not name is a DeployError."""
+    lock_file = LOCK if lock is None else lock
+    requirement, marked, marker = line.partition(" ;")  # PEP 508: a URL needs a blank before ;
+    requirement = requirement.strip()
+    if not requirement or _PIN_RE.match(requirement) or _DIRECT_RE.match(requirement):
+        return line
+    name = _local_names(lock_file).get(_local_key(lock_file.parent, requirement))
+    if name is None:
+        raise DeployError(f"cannot name the local requirement {requirement!r}: uv.lock has no package from there (./deploy lock)")
+    url = requirement if requirement.startswith("file:") else (lock_file.parent / requirement).resolve().as_uri()
+    return f"{name} @ {url}" + (f" ;{marker}" if marked else "")
 
 
 def skipped_requirements(requirements: Path, site: Path, *, lock: Path | None = None) -> list[str]:
@@ -542,6 +659,12 @@ def remove_output(path: Path, *also: Path) -> None:
             raise DeployError(f"cannot replace {rel(p)}: {what} ({_why(e)}){hint}", 1) from None
         moved.append(p)
     shutil.rmtree(aside, ignore_errors=True)
+    if aside.exists():  # read-only files an older build copied from src/ (Windows deletes none)
+        from ..mypyc import make_writable
+
+        with contextlib.suppress(OSError):
+            make_writable(aside)
+        shutil.rmtree(aside, ignore_errors=True)
     if aside.exists():
         ui.warn(f"could not delete all of the previous output, moved to {rel(aside)}: delete it by hand")
 
@@ -553,8 +676,10 @@ def _why(e: OSError) -> str:
 
 def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:
     """Copy the payload. extensions=False keeps only the .py files (pure fallback)."""
+    from ..mypyc import copy_writable, remove_tree  # read-only files of src/: see copy_writable
+
     if dest.exists():
-        shutil.rmtree(dest)
+        remove_tree(dest)
 
     def ignore(directory: str, names: list[str]) -> set[str]:
         skip = {n for n in names if n in {"__pycache__", ".mypy_cache"}}
@@ -562,7 +687,7 @@ def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:
             skip |= {n for n in names if n.endswith(EXT_SUFFIXES)}
         return skip
 
-    shutil.copytree(app_dir, dest, ignore=ignore)
+    shutil.copytree(app_dir, dest, ignore=ignore, copy_function=copy_writable)
 
 
 def uses_tkinter(*extra: Path) -> bool:
@@ -587,7 +712,7 @@ def uses_tkinter(*extra: Path) -> bool:
                 tree = parse(path)
             except OSError:
                 continue
-            except (SyntaxError, ValueError):
+            except PARSE_ERRORS:
                 return True  # mentions tkinter but this Python cannot parse it: keep Tk (safe side)
             for node in iter_runtime_nodes(tree):
                 names: list[str] = []

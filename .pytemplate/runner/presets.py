@@ -1029,22 +1029,65 @@ def _git_env() -> dict[str, str]:
     return env
 
 
+_GIT_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def _git_path(line: str) -> str:
+    """A path as git prints it with core.quotePath (a name holding a control character, a quote,
+    a backslash or a byte above 0x7f is written in double quotes with C escapes, octal for the
+    bytes) as the file system names it: os.fsdecode keeps the bytes of a name that is not UTF-8
+    (a Latin-1 `caf\\351.txt` from an old archive), which text decoding turned into U+FFFD."""
+    if not (len(line) >= 2 and line.startswith('"') and line.endswith('"')):
+        return line
+    raw = bytearray()
+    i = 1
+    while i < len(line) - 1:
+        if line[i] != "\\":
+            raw += line[i].encode("utf-8")
+            i += 1
+        elif line[i + 1] in _GIT_ESCAPES:
+            raw.append(_GIT_ESCAPES[line[i + 1]])
+            i += 2
+        else:
+            raw.append(int(line[i + 1 : i + 4], 8))
+            i += 4
+    return os.fsdecode(bytes(raw))
+
+
 def _git_files(*args: str) -> list[str] | None:
-    """`git ls-files -z ARGS` in ROOT (paths relative to it); None without git or a work tree.
-    Any other git failure (dubious ownership, a broken repository) is said out loud: the copy then
-    takes every file, untracked ones included."""
+    """`git ls-files ARGS` in ROOT (paths relative to it, _git_path); None without git or a work
+    tree. Any other git failure (dubious ownership, a broken repository) is said out loud: the
+    copy then takes every file, untracked ones included."""
     git = shutil.which("git")
     if git is None:
         return None
     env = {**_git_env(), "LC_ALL": "C"}  # git's messages in English: "not a git repository"
-    r = proc.run([git, "ls-files", "-z", *args], cwd=ROOT, env=env, capture=True, check=False, echo=False)
+    # One quoted ASCII line per path, whatever core.quotePath says: the output is read as text
+    argv = [git, "-c", "core.quotePath=true", "ls-files", *args]
+    r = proc.run(argv, cwd=ROOT, env=env, capture=True, check=False, echo=False)
     if r.returncode != 0:
         reason = (r.stderr or r.stdout or "").strip()
         if "not a git repository" not in reason:
             first = reason.splitlines()[0] if reason else f"exit code {r.returncode}"
             ui.warn(f"git ls-files failed in {ROOT} ({first}): the copy includes files git does not track")
         return None
-    return [p for p in r.stdout.split("\0") if p]
+    return [_git_path(line) for line in r.stdout.split("\n") if line]
+
+
+def _tracked_template() -> tuple[list[str] | None, str]:
+    """The files copy_template copies: git's tracked files, or None for every file (ignored ones
+    included), with how it picks them (the real run and the dry run of `new` say it alike)."""
+    tracked = _git_files("--cached")
+    if tracked is not None and ".pytemplate/deploy.py" in tracked:
+        return tracked, "the files git tracks"
+    if tracked is not None:
+        return None, "every file, ignored ones included: git does not track this project's files (never committed?)"
+    return None, "every file, ignored ones included: " + ("git not found" if shutil.which("git") is None else "not a git work tree")
+
+
+def copy_scope() -> str:
+    """What copy_template would copy from here (`new --dry-run`)."""
+    return _tracked_template()[1]
 
 
 def copy_template(dest: Path) -> None:
@@ -1060,13 +1103,13 @@ def copy_template(dest: Path) -> None:
     """
     if dest.exists() and any(dest.iterdir()):
         raise DeployError(f"{dest} already exists and is not empty")
-    tracked = _git_files("--cached")
-    if tracked is None or ".pytemplate/deploy.py" not in tracked:
-        if tracked is not None:
-            ui.info("  git does not track this project's files (never committed?): copying every file")
+    tracked, how = _tracked_template()
+    if tracked is None:
+        ui.info(f"  copying {how}")
         shutil.copytree(ROOT, dest, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
         return
     dest.mkdir(parents=True, exist_ok=True)
+    deleted: list[str] = []
     for rel_path in tracked:
         if _skipped(rel_path):
             continue
@@ -1076,13 +1119,16 @@ def copy_template(dest: Path) -> None:
             _copy_link(src, dest / rel_path, rel_path)
         elif src.is_dir():  # a submodule
             shutil.copytree(src, dest / rel_path, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
-        elif src.exists():  # a tracked file deleted in the working tree is not copied
+        elif src.exists():
             (dest / rel_path).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest / rel_path)
+        else:  # the working tree is what is copied: a tracked file deleted there stays out
+            deleted.append(rel_path)
     untracked = [p for p in _git_files("--others", "--exclude-standard") or [] if not _skipped(p)]
-    if untracked:
-        more = f" and {len(untracked) - 5} more" if len(untracked) > 5 else ""
-        ui.info(f"  not copied (not tracked by git): {', '.join(untracked[:5])}{more}")
+    for what, paths in (("deleted in the working tree", deleted), ("not tracked by git", untracked)):
+        if paths:
+            more = f" and {len(paths) - 5} more" if len(paths) > 5 else ""
+            ui.info(f"  not copied ({what}): {', '.join(paths[:5])}{more}")
 
 
 def _copy_link(src: Path, target: Path, rel_path: str) -> None:
@@ -1226,7 +1272,10 @@ def new(dest: Path, preset: str, name: str | None) -> None:
         _make_own(dest, preset, app_name)
         deploy_py = dest / ".pytemplate" / "deploy.py"
         loud = ["-q"] if ui.QUIET else ["-v"] if ui.VERBOSE else []  # the copy's runner, as quiet as this one
-        proc.run([proc.find_uv(), "run", "--quiet", "--script", deploy_py, *loud, "__init", preset, "--name", app_name, "--force"], cwd=dest)
+        # --no-render: init renders every generated file itself (force=True); render.auto first
+        # warned about the source's hand-edited ones, which the new project never had
+        init = ["--no-render", "__init", preset, "--name", app_name, "--force"]
+        proc.run([proc.find_uv(), "run", "--quiet", "--script", deploy_py, *loud, *init], cwd=dest)
     except BaseException as e:
         if top is not None:
             left = [] if _remove(top) else [str(top)]
@@ -1256,12 +1305,16 @@ def next_steps(dest: Path) -> list[str]:
     launcher = os.environ.get("PYTEMPLATE_LAUNCHER", "")
     path = str(dest)
     if launcher.startswith("ps1"):
-        # PowerShell reads the typographic single quotes as quotes too: each is doubled
-        return ["cd '" + re.sub("['\u2018-\u201b]", lambda m: m.group() * 2, path) + "'", "./deploy setup"]
+        # PowerShell reads the typographic single quotes as quotes too: each is doubled. Its cd
+        # (Set-Location -Path) reads [ ] * ? and ` as a wildcard pattern: -LiteralPath then
+        literal = "-LiteralPath " if re.search(r"[\[\]*?`]", path) else ""
+        return [f"cd {literal}'" + re.sub("['\u2018-\u201b]", lambda m: m.group() * 2, path) + "'", "./deploy setup"]
     cmd = launcher.startswith("cmd")
     nushell = launcher == "nu"
     if not nushell and not launcher.startswith("sh:niubash") and os.environ.get("XONSH_VERSION"):
-        return [f"cd {path!r}", "./deploy setup"]  # xonsh reads a quoted argument as a Python string
+        # xonsh reads a quoted argument as a Python string, but expands $NAME in it: @(...) is a
+        # Python expression, passed as it is
+        return [f"cd @({path!r})" if "$" in path else f"cd {path!r}", "./deploy setup"]
     if nushell or (cmd and os.environ.get("NU_VERSION")):
         # nushell: a single-quoted string is raw, a double-quoted one has the escapes \\ and \";
         # the launcher value nu is the shell-setup function `deploy`, else Windows' deploy.cmd

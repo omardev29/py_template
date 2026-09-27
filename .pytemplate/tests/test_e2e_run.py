@@ -16,7 +16,8 @@ import shutil
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from typing import cast
 
 import pytest
 
@@ -276,6 +277,48 @@ def test_verify_checks_what_new_made(tmp_path: Path) -> None:
     assert e2e.do_verify(ctx, step, log)[0] == SKIP, "--reuse: nothing new to verify"
 
 
+@POSIX
+def test_cleanup_of_a_symlinked_base_never_touches_the_folder_it_names(tmp_path: Path) -> None:
+    # rmtree(link) called the retry hook with os.path.islink: its chmod followed the link and
+    # made the real folder 0o200, and the next run as a normal user died with a traceback
+    import stat
+
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    (real / e2e.MARKER).write_text("x", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    e2e._cleanup(link, ["script"])
+    assert stat.S_IMODE(real.stat().st_mode) == 0o700
+    assert not os.path.lexists(link) and real.is_dir() and not any(real.iterdir())  # the link and the marker went
+    (real / "keep").write_text("k", encoding="utf-8")
+    link.symlink_to(real, target_is_directory=True)
+    e2e.rmtree(link)  # a link goes as a link
+    assert not os.path.lexists(link) and (real / "keep").is_file() and stat.S_IMODE(real.stat().st_mode) == 0o700
+
+
+def test_rmtree_reaches_a_base_on_a_network_share(monkeypatch: pytest.MonkeyPatch) -> None:
+    # It removed \\?\\\server\share\... (no valid name) for a --base on a share or a mapped drive
+    from runner.methods import portable
+
+    class Share:
+        def exists(self) -> bool:
+            return True
+
+        def resolve(self) -> PureWindowsPath:
+            return PureWindowsPath(r"\\server\share\pt\e2e")
+
+    from runner import cmd_env
+
+    removed: list[str] = []
+    monkeypatch.setattr(cmd_env, "_is_link", lambda path: False)  # never asks the (made-up) share
+    monkeypatch.setattr(e2e, "IS_WINDOWS", True)
+    monkeypatch.setattr(portable, "IS_WINDOWS", True)
+    monkeypatch.setattr(e2e.shutil, "rmtree", lambda target, **kwargs: removed.append(target))
+    e2e.rmtree(cast(Path, Share()))
+    assert removed == [r"\\?\UNC\server\share\pt\e2e"]
+
+
 @needs_git
 def test_commit_goes_through_the_projects_hook(tmp_path: Path) -> None:
     base = tmp_path / "base"
@@ -448,6 +491,22 @@ def test_selftest_exit_codes_and_json_report(tmp_path: Path, faked: tuple[dict[s
     assert e2e.selftest(None, argv) == 1  # type: ignore[arg-type]
     statuses = [r["status"] for r in json.loads(capsys.readouterr().out)["results"]]
     assert statuses[statuses.index(FAIL) + 1 :] and set(statuses[statuses.index(FAIL) + 1 :]) == {SKIP}
+
+
+def test_quiet_keeps_the_results_of_a_failed_run(tmp_path: Path, faked: tuple[dict[str, object], list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # -q hid the table, the failed step, its log and the kept base: the only line said
+    # "some steps failed (table above)" about a table that was never printed
+    outcomes, _ = faked
+    outcomes["check all"] = (FAIL, "exit code 1")
+    monkeypatch.setattr(e2e.ui, "QUIET", True)
+    base = tmp_path / "base"
+    assert e2e.selftest(None, ["script", "--quick", "--base", str(base)]) == 1  # type: ignore[arg-type]
+    err = capsys.readouterr().err
+    row = next(line for line in err.splitlines() if line.split()[:2] == ["script", "check"])
+    assert "FAIL" in row and "exit code 1" in row and "total: " in err  # the table
+    assert "FAIL in " in err and "(script: check all)" in err and "full log: " in err and "check-all.log" in err
+    assert f"kept for inspection: {base}" in err
+    assert "PASS in " not in err and "==> " not in err  # progress stays hidden
 
 
 def test_selftest_refuses_a_selection_that_tests_nothing(tmp_path: Path, faked: tuple[dict[str, object], list[str]]) -> None:

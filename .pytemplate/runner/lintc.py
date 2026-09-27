@@ -9,6 +9,7 @@ module-level `__file__` where mypyc runs the module body with a relative one.
 from __future__ import annotations
 
 import ast
+import itertools
 import re
 import tomllib
 from collections.abc import Iterator
@@ -16,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config, compiled_paths
-from .imports import iter_runtime_nodes, module_name, parse, parse_error
+from .imports import PARSE_ERRORS, iter_runtime_nodes, module_name, parse, parse_error
 from .project import PYPROJECT, SRC
 
 # The class decorators that keep a class native, by FULL name, as mypyc (2.3.1) decides it:
@@ -34,6 +35,16 @@ NATIVE_CLASS_DECORATORS = frozenset(
         "mypy_extensions.mypyc_attr",
     }
 )
+# The metaclasses a native class may have (irbuild/util.py is_implicit_extension_class): any
+# other one, and a NamedTuple or TypedDict class, make mypyc compile the class as a regular
+# Python class without a word. Every Enum has one (EnumMeta). test_mypyc_core checks the set
+# against the locked mypyc.
+NATIVE_METACLASSES = frozenset({"abc.ABCMeta", "typing.TypingMeta", "typing.GenericMeta"})
+NON_NATIVE_BASES = {
+    **{f"enum.{name}": "an Enum (metaclass EnumMeta)" for name in ("Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "ReprEnum")},
+    **{f"{module}.NamedTuple": "a NamedTuple" for module in ("typing", "typing_extensions")},
+    **{f"{module}.TypedDict": "a TypedDict" for module in ("typing", "typing_extensions", "mypy_extensions")},
+}
 
 
 @dataclass(frozen=True)
@@ -74,7 +85,7 @@ def _add_import(aliases: dict[str, str], node: ast.Import | ast.ImportFrom) -> N
     elif not node.level and node.module:
         for a in node.names:
             if a.name == "*":  # mypy resolves star imports too
-                for full in NATIVE_CLASS_DECORATORS:
+                for full in (*NATIVE_CLASS_DECORATORS, *NATIVE_METACLASSES, *NON_NATIVE_BASES):
                     module, _, name = full.rpartition(".")
                     if module == node.module:
                         aliases.setdefault(name, full)
@@ -84,17 +95,21 @@ def _add_import(aliases: dict[str, str], node: ast.Import | ast.ImportFrom) -> N
 
 def _scope_statements(body: list[ast.stmt]) -> Iterator[ast.stmt]:
     """The statements that run in the scope of `body`, in source order: those in its if/try/with/
-    for/while/match blocks too, never those of a nested function or class body."""
-    for stmt in body:
+    for/while/match blocks too, never those of a nested function or class body. Iterative: an
+    elif chain nests one `orelse` per branch, and 1000 of them (a generated dispatch table)
+    passed Python's recursion limit."""
+    stack: list[Iterator[ast.stmt]] = [iter(body)]
+    while stack:
+        stmt = next(stack[-1], None)
+        if stmt is None:
+            stack.pop()
+            continue
         yield stmt
         if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             continue
-        for name in ("body", "orelse", "finalbody"):
-            inner = getattr(stmt, name, None)
-            if isinstance(inner, list):
-                yield from _scope_statements(inner)
-        for block in (*getattr(stmt, "handlers", ()), *getattr(stmt, "cases", ())):
-            yield from _scope_statements(block.body)
+        blocks = [inner for name in ("body", "orelse", "finalbody") if isinstance(inner := getattr(stmt, name, None), list)]
+        blocks += [block.body for block in (*getattr(stmt, "handlers", ()), *getattr(stmt, "cases", ()))]
+        stack.append(itertools.chain.from_iterable(blocks))
 
 
 def _import_aliases(tree: ast.Module) -> dict[ast.ClassDef, dict[str, str]]:
@@ -129,6 +144,46 @@ def _is_explicitly_non_native(node: ast.expr) -> bool:
         and _decorator_name(node).rpartition(".")[2] == "mypyc_attr"
         and any(k.arg == "native_class" and isinstance(k.value, ast.Constant) and k.value.value is False for k in node.keywords)
     )
+
+
+def _non_native_kind(node: ast.ClassDef, aliases: dict[str, str], local: dict[str, str]) -> str | None:
+    """What makes mypyc compile the class as a regular Python class through its metaclass or its
+    bases (NATIVE_METACLASSES, NON_NATIVE_BASES), None when nothing does. `local`: the classes of
+    the module seen so far whose subclasses are such a class too (a metaclass is inherited, and
+    a subclass of a TypedDict is one; a subclass of a NamedTuple is a mypyc error of its own).
+    A base imported from another module is not looked into."""
+    for keyword in node.keywords:
+        if keyword.arg == "metaclass":
+            written = _decorator_name(keyword.value)
+            if not written or _full_name(written, aliases) not in NATIVE_METACLASSES:
+                return f"has the metaclass {written or '<expression>'}"
+    for base in node.bases:
+        written = _decorator_name(base.value if isinstance(base, ast.Subscript) else base)
+        full = _full_name(written, aliases)
+        if full in NON_NATIVE_BASES:
+            return f"is {NON_NATIVE_BASES[full]}"
+        if written in local:
+            return f"inherits from '{written}', which {local[written]}"
+    return None
+
+
+def _non_native_kinds(tree: ast.Module, aliases: dict[ast.ClassDef, dict[str, str]]) -> dict[ast.ClassDef, str]:
+    """_non_native_kind of every class, the module's own classes read in source order."""
+    kinds: dict[ast.ClassDef, str] = {}
+    local: dict[str, str] = {}
+    for stmt in _scope_statements(tree.body):
+        if isinstance(stmt, ast.ClassDef):
+            kind = _non_native_kind(stmt, aliases.get(stmt, {}), local)
+            if kind:
+                kinds[stmt] = kind
+                if kind != "is a NamedTuple":  # a subclass says what its base class is
+                    local[stmt.name] = kind.split("', which ", 1)[1] if kind.startswith("inherits from '") else kind
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node not in kinds:
+            kind = _non_native_kind(node, aliases.get(node, {}), local)
+            if kind:
+                kinds[node] = kind
+    return kinds
 
 
 def _within(name: str, package: str) -> bool:
@@ -214,11 +269,12 @@ def lint_file(cfg: Config, path: Path) -> list[Finding]:
 
     try:
         tree = parse(path)
-    except (SyntaxError, ValueError) as e:  # ruff and mypy report the real syntax error
+    except PARSE_ERRORS as e:  # ruff and mypy report a real syntax error
         line, msg = parse_error(e)
         return [Finding(path, line, f"{msg} (the mypyc rules skipped this file)")]
 
     aliases = _import_aliases(tree)
+    kinds = _non_native_kinds(tree, aliases)
     for node in iter_runtime_nodes(tree):
         if isinstance(node, ast.Import | ast.ImportFrom):
             if isinstance(node, ast.Import):
@@ -247,10 +303,11 @@ def lint_file(cfg: Config, path: Path) -> list[Finding]:
                 written = [_decorator_name(d) for d in decorators]
                 scope = aliases.get(node, {})
                 bad = [w or "<expression>" for w in written if _full_name(w, scope) not in NATIVE_CLASS_DECORATORS]
-                if bad:
+                why = f"uses @{bad[0]}" if bad else kinds.get(node)
+                if why:
                     add(
                         node,
-                        f"class '{node.name}' uses @{bad[0]}: mypyc compiles it as a regular (slow) Python class. "
+                        f"class '{node.name}' {why}: mypyc compiles it as a regular (slow) Python class. "
                         "Move it to a boundary module, or mark it @mypyc_attr(native_class=False) if intended",
                     )
             for inner in _own_classes(node):

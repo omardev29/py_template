@@ -121,6 +121,18 @@ def test_portable_boot_puts_lib_before_site_packages(tmp_path: Path) -> None:
     assert _run_with_shadow(out / "boot.py", _shadow(tmp_path), tmp_path) == "from=lib arg"
 
 
+def test_portable_boot_names_its_own_assets_whatever_it_inherits(tmp_path: Path) -> None:
+    # setdefault kept the PYTEMPLATE_ASSETS of the app that started this one (a launcher)
+    out = tmp_path / "out"
+    (out / "app").mkdir(parents=True)
+    shutil.copy2(TEMPLATES / "portable" / "boot.py", out / "boot.py")
+    (out / "app" / "main.py").write_text("import os\nprint(os.environ['PYTEMPLATE_ASSETS'])\n")
+    env = {**os.environ, "PYTEMPLATE_ASSETS": str(tmp_path / "parent" / "app" / "assets")}
+    r = subprocess.run([sys.executable, "-s", str(out / "boot.py")], cwd=tmp_path, capture_output=True, text=True, env=env, timeout=120, check=False)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == str((out / "app" / "assets").resolve())
+
+
 def test_pyz_main_puts_lib_before_site_packages(tmp_path: Path) -> None:
     root = tmp_path / "root"
     (root / "common" / "app").mkdir(parents=True)
