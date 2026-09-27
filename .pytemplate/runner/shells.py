@@ -295,12 +295,14 @@ function deploy {
 """
 
 FISH_SNIPPET = r"""
-# `deploy` in fish from any folder of a pytemplate project (fish 3.5 or later).
+# `deploy` in fish from any folder of a pytemplate project (fish 3.0 or later).
 # Save as ~/.config/fish/functions/deploy.fish, then open a new shell.
 function deploy --description 'Run ./deploy of the enclosing pytemplate project'
     set -l dir $PWD
     while not test -f "$dir/.pytemplate/deploy.py"
-        set -l parent (path dirname -- $dir)
+        # the parent folder (`path dirname` needs fish 3.5; Ubuntu 22.04 has 3.3)
+        set -l parent (string replace -r '/[^/]*$' '' -- $dir)
+        test -z "$parent"; and set parent /
         if test "$parent" = "$dir"
             echo "deploy: no .pytemplate/deploy.py in $PWD or any parent folder" >&2
             return 2

@@ -593,10 +593,40 @@ def _away(tmp_path: Path) -> Path:
     return away
 
 
+def _version(argv: list[str]) -> tuple[int, ...]:
+    """The first dotted version a `--version` prints (`fish, version 3.7.0`, `xonsh/0.24.2`,
+    nu's `0.99.1`); () when there is none."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=60, check=False, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    m = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", r.stdout + r.stderr)
+    return tuple(int(n) for n in m.groups() if n is not None) if m else ()
+
+
+def _shell_for_snippet(name: str, oldest: tuple[int, ...]) -> str:
+    """The shell `name`, or a skip: missing, or older than the oldest its snippet supports (the
+    header says which: a distribution's older one must skip, not fail, CLAUDE.md 13.1)."""
+    exe = shutil.which(name)
+    if not exe:
+        pytest.skip(f"{name} not installed")
+    found = _version([exe, "--version"])
+    if found < oldest:
+        pytest.skip(f"{name} {'.'.join(map(str, found)) or '?'} is older than the snippet's {'.'.join(map(str, oldest))}")
+    return exe
+
+
+def test_snippet_headers_name_the_oldest_shell_the_tests_accept() -> None:
+    """The versions the snippet tests skip below are the ones the snippets promise."""
+    assert "(fish 3.0 or later)" in shells.snippet("fish")
+    assert "(xonsh 0.14 or later)" in shells.snippet("xonsh")
+    assert "def --wrapped" in shells.snippet("nu")  # nushell 0.87 brought it
+
+
 def test_fish_snippet_runs(tmp_path: Path) -> None:
-    fish = shutil.which("fish")
-    if not fish or IS_WINDOWS:
-        pytest.skip("fish not installed")
+    if IS_WINDOWS:
+        pytest.skip("fish runs in MSYS2/Cygwin on Windows")
+    fish = _shell_for_snippet("fish", (3, 0))
     snip = _snippet_file(tmp_path, "fish", ".fish")
     sub = _sub()
     q = shells.fish_quote
@@ -609,6 +639,26 @@ def test_fish_snippet_runs(tmp_path: Path) -> None:
     assert len(probes) == 1, r.stdout + r.stderr
     _assert_probe(probes[0], ["a b", "", "$HOME"], sub)
     assert "RC=7" in r.stdout and "RC2=2" in r.stdout and "no .pytemplate" in r.stderr, r.stdout + r.stderr
+
+
+def test_fish_snippet_needs_no_path_builtin(tmp_path: Path) -> None:
+    """fish before 3.5 (Ubuntu 22.04's 3.3, Debian 11's 3.1) has no `path` builtin: the walk-up
+    never left the first folder, and `deploy` from src/ said there was no project. A `path` that
+    fails stands in for such a fish."""
+    if IS_WINDOWS:
+        pytest.skip("fish runs in MSYS2/Cygwin on Windows")
+    fish = _shell_for_snippet("fish", (3, 0))
+    snip = _snippet_file(tmp_path, "fish", ".fish")
+    sub = _sub()
+    q = shells.fish_quote
+    code = (
+        "function path; echo 'fish: Unknown command: path' >&2; return 127; end; "
+        f"source {q(str(snip))}; cd {q(str(sub))}; deploy __probe 7 0 x; echo RC=$status"
+    )
+    r = _snippet_run([fish, "--no-config", "-c", code], tmp_path)
+    probes = _probe_lines(r.stdout)
+    assert len(probes) == 1 and "RC=7" in r.stdout, r.stdout + r.stderr
+    _assert_probe(probes[0], ["x"], sub)
 
 
 def test_pwsh_snippet_runs(tmp_path: Path) -> None:
@@ -639,9 +689,7 @@ def test_pwsh_snippet_runs(tmp_path: Path) -> None:
 
 
 def test_xonsh_snippet_runs_and_completes(tmp_path: Path) -> None:
-    xonsh = shutil.which("xonsh")
-    if not xonsh:
-        pytest.skip("xonsh not installed")
+    xonsh = _shell_for_snippet("xonsh", (0, 14))
     cfg = make({"tasks": {"gen": {"cmd": ["python", "gen.py"]}}})
     snip = tmp_path / "snippet.xsh"
     snip.write_bytes(shells.snippet("xonsh", cfg).encode("ascii"))
@@ -674,9 +722,7 @@ def test_xonsh_snippet_runs_and_completes(tmp_path: Path) -> None:
 
 def test_nu_snippet_runs(tmp_path: Path) -> None:
     """Not run on the machines the template was developed on (no nushell): skipped without nu."""
-    nu = shutil.which("nu")
-    if not nu:
-        pytest.skip("nu not installed")
+    nu = _shell_for_snippet("nu", (0, 87))
     snip = _snippet_file(tmp_path, "nu", ".nu")
     sub = _sub()
     run = [nu, "--no-config-file", "-c", f"source {shells.nu_quote(str(snip))}; cd {shells.nu_quote(str(sub))}; deploy __probe 7 0 'a b' ''"]

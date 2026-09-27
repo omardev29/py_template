@@ -576,7 +576,10 @@ header rules (with detector tests proving each rule fires).
   executes the fish, pwsh, xonsh and nu snippets in their shells (argv, exit codes, walk-up,
   the xonsh completer, pwsh pipeline input, the nu fallback to the launcher); the nu one only
   where nu is installed (the macOS jobs of template-selftest and template-launchers install
-  nushell).
+  nushell), and each only from the oldest version its header names (`_shell_for_snippet`:
+  fish 3.0, xonsh 0.14, nu 0.87 for `def --wrapped`; older ones skip). The fish function
+  walks up with `string replace`, not `path dirname` (fish 3.5; Ubuntu 22.04 has 3.3:
+  `test_fish_snippet_needs_no_path_builtin`).
 - `shells.doctor(check)` (from `./deploy doctor`): step "launchers": the launcher that started
   the run, then `deploy` (`#!/bin/sh`, LF, ASCII, git mode 100755, exec bit on POSIX),
   `deploy.cmd` (CRLF, ASCII) and `deploy.ps1` (LF, ASCII, no BOM; a mode other than 100755 is
