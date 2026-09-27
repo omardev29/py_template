@@ -1,10 +1,10 @@
 """selftest --e2e: end-to-end test of the template.
 
-    ./deploy selftest --e2e [PRESET ...] [--backends B,..] [--methods M,..] [--quick | --full]
+    ./pyt selftest --e2e [PRESET ...] [--backends B,..] [--methods M,..] [--quick | --full]
                             [--gui auto|on|off] [--keep] [--reuse] [--json] [--base DIR]
 
 For each preset (default: script, raylib, flet) it creates <base>/<preset> with THIS
-template's `./deploy new`, checks what `new` made (verify: what it must and must not copy, the
+template's `./pyt new`, checks what `new` made (verify: what it must and must not copy, the
 git repository, the pinned versions, the project's own README), then works in it the way a
 user does: setup, the first commit (through the pre-commit hook setup installs), check, test,
 run and build (every artifact in dist/ is checked, the cheap headless ones are run, a portable
@@ -15,9 +15,9 @@ user's git configuration (isolate_git).
 
 - --quick:  one build per backend (its deploy.default method): what every push runs.
 - default:  every (backend, method) pair that cmd_build.COMPAT allows except nuitka (slow),
-            `./deploy selftest` in the project, a usage error, and a rename round trip.
+            `./pyt selftest` in the project, a usage error, and a rename round trip.
 - --full:   adds nuitka, a pypy round trip (`mode --supports +pypy`, test, and back) and a
-            [preset.*] option edit applied with `./deploy apply` (another version: network).
+            [preset.*] option edit applied with `./pyt apply` (another version: network).
 - `flet build` (Flutter SDK + Windows Developer Mode) is SKIP unless both are detected.
 
 Every step is one PASS/FAIL/SKIP row with its time; its output goes to
@@ -56,7 +56,7 @@ from . import proc, ui
 from .cmd_build import COMPAT
 from .config import BACKENDS, METHODS, Config
 from .project import CONFIG_FILE, ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, check_private_dir, host_arch, host_os, scratch_name, user_path, venv_python
-from .ui import DeployError
+from .ui import PytError
 
 DEFAULT_PRESETS = ("script", "raylib", "flet")
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
@@ -101,7 +101,7 @@ SMOKE: dict[str, tuple[tuple[str, ...], str]] = {
 COMPILED_MARK = {"script": "mypyc (compiled)", "raylib": "mypyc/"}
 SMOKE_METHODS = ("exe", "portable", "pyz", "wheel", "nuitka")  # `flet build`: files only
 # The test projects are named e2e-<preset>, except these, named like their package (e2escript,
-# no hyphen: like most `./deploy new DIR` projects and the template's own myapp). Only then do
+# no hyphen: like most `./pyt new DIR` projects and the template's own myapp). Only then do
 # an executable and the package folder of the same name meet in one folder (nuitka standalone,
 # onedir builds: nuitka names its binary <app>.bin there); the hyphenated ones cover name !=
 # package (rename's context rules). The rename round trip flips the shape (renamed_app) and
@@ -117,7 +117,7 @@ HOST_GAPS: dict[tuple[str, str], dict[str, str]] = {
     ("raylib", "macos-aarch64"): {"pypy": "raylib publishes no PyPy wheels for macOS arm64"},
     ("raylib", "linux-aarch64"): {"pypy": "raylib publishes no PyPy wheels for Linux arm64"},
 }
-# --full: one [preset.<name>] edit per preset that has options, applied with `./deploy apply`
+# --full: one [preset.<name>] edit per preset that has options, applied with `./pyt apply`
 # (another package or version: the network). raylib_sdl ships the same wheels as raylib (PyPy
 # on x86_64, CPython everywhere), so the host gaps stay the same.
 OPTION_EDITS: dict[str, tuple[str, str]] = {"raylib": ("package", "raylib_sdl"), "flet": ("version", "1.0.0")}
@@ -177,8 +177,8 @@ class PresetInfo:
 class Step:
     preset: str
     name: str  # row label, unique within the preset
-    kind: str  # new | verify | deploy | commit | option | build | smoke | unsupported
-    # ./deploy arguments (deploy, build); (table, key, value) for option; (message,) for commit
+    kind: str  # new | verify | pyt | commit | option | build | smoke | unsupported
+    # ./pyt arguments (pyt, build); (table, key, value) for option; (message,) for commit
     args: tuple[str, ...] = ()
     timeout: float = 600
     skip: str = ""  # SKIP with this reason, never run
@@ -195,8 +195,8 @@ class Step:
     scope: str = ""  # folder of the project the snapshot covers ("" = all of it)
 
 
-def _deploy(preset: str, name: str, args: tuple[str, ...], *, kind: str = "", **kw: Any) -> Step:
-    return Step(preset, name, "deploy", args, timeout=TIMEOUTS.get(kind or args[0], 600), **kw)
+def _pyt(preset: str, name: str, args: tuple[str, ...], *, kind: str = "", **kw: Any) -> Step:
+    return Step(preset, name, "pyt", args, timeout=TIMEOUTS.get(kind or args[0], 600), **kw)
 
 
 def expected_output(preset: str, backend: str) -> tuple[str, ...]:
@@ -219,11 +219,11 @@ def run_step(info: PresetInfo, backend: str, host: Host) -> Step:
     name = f"run {backend}"
     smoke = SMOKE.get(info.name)
     if smoke is None and info.gui:
-        return Step(info.name, name, "deploy", skip="GUI app that does not close itself: `test` covers its core", backend=backend)
+        return Step(info.name, name, "pyt", skip="GUI app that does not close itself: `test` covers its core", backend=backend)
     args = smoke[0] if smoke else ()
     skip = host.display if info.gui else ""
     wrap = host.gui_wrap if info.gui and not skip else ()
-    return _deploy(info.name, name, ("run", backend, *args), skip=skip, wrap=wrap, expect=expected_output(info.name, backend), backend=backend)
+    return _pyt(info.name, name, ("run", backend, *args), skip=skip, wrap=wrap, expect=expected_output(info.name, backend), backend=backend)
 
 
 def build_methods(info: PresetInfo, backend: str, opts: Options, host: Host) -> list[tuple[str, str]]:
@@ -258,10 +258,10 @@ def rename_round_trip(info: PresetInfo, targets: Sequence[str], wheel: str = "")
     dry = f"rename {new} (dry run)"
     commit = f"commit ({new})"
     steps = [
-        _deploy(p, dry, ("--dry-run", "rename", new), kind="rename", snapshot=dry, restores=dry),
-        _deploy(p, head, ("rename", new), after="first commit", snapshot=head),
-        _deploy(p, f"render --check ({new})", ("render", "--check"), after=head),
-        *[_deploy(p, f"test {t} ({new})", ("test", t), after=head, backend="" if t == "all" else t) for t in targets],
+        _pyt(p, dry, ("--dry-run", "rename", new), kind="rename", snapshot=dry, restores=dry),
+        _pyt(p, head, ("rename", new), after="first commit", snapshot=head),
+        _pyt(p, f"render --check ({new})", ("render", "--check"), after=head),
+        *[_pyt(p, f"test {t} ({new})", ("test", t), after=head, backend="" if t == "all" else t) for t in targets],
     ]
     if wheel:
         build = f"build {wheel} wheel ({new})"
@@ -271,7 +271,7 @@ def rename_round_trip(info: PresetInfo, targets: Sequence[str], wheel: str = "")
         ]
     return steps + [
         Step(p, commit, "commit", (f"Rename the app to {new}",), timeout=TIMEOUTS["commit"], after=head),
-        _deploy(p, f"rename {old} (back)", ("rename", old), after=commit, restores=head),
+        _pyt(p, f"rename {old} (back)", ("rename", old), after=commit, restores=head),
     ]
 
 
@@ -290,15 +290,15 @@ def pypy_round_trip(info: PresetInfo) -> list[Step]:
     head = f"round trip: {' '.join(first)}"
     test = ("test", "all") if has else ("test", "pypy")
     return [
-        _deploy(p, head, first, snapshot=head, backend="pypy"),
-        _deploy(p, f"round trip: {' '.join(test)}", test, after=head, backend="pypy"),
-        _deploy(p, f"round trip: {' '.join(back)}", back, after=head, restores=head, backend="pypy"),
-        _deploy(p, "round trip: render --check", ("render", "--check"), after=head, backend="pypy"),
+        _pyt(p, head, first, snapshot=head, backend="pypy"),
+        _pyt(p, f"round trip: {' '.join(test)}", test, after=head, backend="pypy"),
+        _pyt(p, f"round trip: {' '.join(back)}", back, after=head, restores=head, backend="pypy"),
+        _pyt(p, "round trip: render --check", ("render", "--check"), after=head, backend="pypy"),
     ]
 
 
 def option_edit(info: PresetInfo) -> list[Step]:
-    """--full: edit an [preset.<name>] option (OPTION_EDITS), `./deploy apply` it (pyproject.toml
+    """--full: edit an [preset.<name>] option (OPTION_EDITS), `./pyt apply` it (pyproject.toml
     and uv.lock must follow), then doctor must be clean and a second apply must change nothing."""
     edit = OPTION_EDITS.get(info.name)
     if edit is None:
@@ -309,8 +309,8 @@ def option_edit(info: PresetInfo) -> list[Step]:
     again = "apply again (no change)"
     return [
         Step(p, head, "option", (f"preset.{p}", key, value), timeout=TIMEOUTS["apply"]),
-        _deploy(p, "doctor (option applied)", ("doctor",), after=head),
-        _deploy(p, again, ("apply",), after=head, snapshot=again, restores=again),
+        _pyt(p, "doctor (option applied)", ("doctor",), after=head),
+        _pyt(p, again, ("apply",), after=head, snapshot=again, restores=again),
     ]
 
 
@@ -328,36 +328,36 @@ def plan(info: PresetInfo, opts: Options, host: Host) -> list[Step]:
         Step(p, "verify copy", "verify", timeout=TIMEOUTS["verify"]),
         # `__init` refuses (without --force) a project whose src/, tests/ and typings/ are not
         # exactly the preset's skeleton with this name: its dry run checks what `new` left
-        _deploy(p, "pristine skeleton", ("--dry-run", "__init", p, "--name", info.app), kind="pristine"),
-        _deploy(p, "render --check", ("render", "--check")),
+        _pyt(p, "pristine skeleton", ("--dry-run", "__init", p, "--name", info.app), kind="pristine"),
+        _pyt(p, "render --check", ("render", "--check")),
     ]
     gaps = host_gaps(info, host)
     keep = [b for b in info.supported if b not in gaps]
     if gaps:
         # `mode` BACKEND also moves the active backend off a gap (raylib's is pypy)
-        steps.append(_deploy(p, f"mode --supports {','.join(keep)}", ("mode", keep[0], "--supports", ",".join(keep)), required=True))
+        steps.append(_pyt(p, f"mode --supports {','.join(keep)}", ("mode", keep[0], "--supports", ",".join(keep)), required=True))
     steps += [
-        _deploy(p, "setup", ("setup",), required=True),
-        _deploy(p, "doctor", ("doctor",)),
-        _deploy(p, "fmt --check", ("fmt", "--check")),
+        _pyt(p, "setup", ("setup",), required=True),
+        _pyt(p, "doctor", ("doctor",)),
+        _pyt(p, "fmt --check", ("fmt", "--check")),
         # `git add -A` + `git commit` through the hook setup installed: the user's first commit
         Step(p, "first commit", "commit", ("First commit",), timeout=TIMEOUTS["commit"]),
     ]
     if "stubs" in info.tasks:  # raylib: the generator must reproduce the shipped stub byte for byte
-        steps.append(_deploy(p, "stubs (typings/ unchanged)", ("stubs",), snapshot="stubs", restores="stubs", scope="typings"))
+        steps.append(_pyt(p, "stubs (typings/ unchanged)", ("stubs",), snapshot="stubs", restores="stubs", scope="typings"))
     backends = [b for b in keep if not opts.backends or b in opts.backends]
     targets = backends if opts.backends else ["all"]
     for verb in ("check", "test"):
-        steps += [_deploy(p, f"{verb} {t}", (verb, t), backend="" if t == "all" else t) for t in targets]
+        steps += [_pyt(p, f"{verb} {t}", (verb, t), backend="" if t == "all" else t) for t in targets]
     steps += [run_step(info, b, host) for b in backends]
-    steps += [Step(p, f"{b} (every step)", "deploy", skip=why, backend=b) for b, why in gaps.items() if not opts.backends or b in opts.backends]
+    steps += [Step(p, f"{b} (every step)", "pyt", skip=why, backend=b) for b, why in gaps.items() if not opts.backends or b in opts.backends]
     trip = opts.full and "pypy" not in gaps and (not opts.backends or "pypy" in opts.backends)
     for b in opts.backends:
         if b not in info.supported and not (trip and b == "pypy"):
             extra = " (--full adds it for a round trip)" if b == "pypy" and not opts.full else ""
             steps.append(Step(p, f"{b} (not supported)", "unsupported", skip=f"the {p} preset does not support {b}{extra}", backend=b))
     if not opts.quick and targets:
-        steps.append(_deploy(p, "selftest in the project", ("selftest",)))
+        steps.append(_pyt(p, "selftest in the project", ("selftest",)))
     wheel = ""  # the first backend whose wheel is built and run: the rename builds it again
     planned = 0
     for b in backends:
@@ -375,7 +375,7 @@ def plan(info: PresetInfo, opts: Options, host: Host) -> list[Step]:
         steps.append(Step(p, "build (none selected)", "unsupported", skip=why + (" (--quick: only deploy.default methods)" if opts.quick else "")))
     if not opts.quick and backends:
         # the runner refuses a typo (a method without --method) instead of building the default
-        steps.append(_deploy(p, f"usage error: build {backends[0]} pyz", ("build", backends[0], "pyz"), kind="usage", expect_code=2))
+        steps.append(_pyt(p, f"usage error: build {backends[0]} pyz", ("build", backends[0], "pyz"), kind="usage", expect_code=2))
     if not opts.quick and targets:
         steps += rename_round_trip(info, targets, wheel)
     if trip:
@@ -410,12 +410,12 @@ def _csv(raw: str, allowed: Sequence[str], flag: str) -> tuple[str, ...]:
     names = [n.strip() for n in raw.split(",") if n.strip()]
     bad = [n for n in names if n not in allowed]
     if bad:
-        raise DeployError(f"selftest --e2e {flag}: unknown {', '.join(bad)} (valid: {', '.join(allowed)})")
+        raise PytError(f"selftest --e2e {flag}: unknown {', '.join(bad)} (valid: {', '.join(allowed)})")
     return tuple(dict.fromkeys(names))
 
 
 def parse_args(args: Sequence[str], available: Sequence[str]) -> Options:
-    parser = argparse.ArgumentParser(prog="./deploy selftest --e2e", description="End-to-end test: ./deploy new + setup/check/test/run/build per preset.")
+    parser = argparse.ArgumentParser(prog="./pyt selftest --e2e", description="End-to-end test: ./pyt new + setup/check/test/run/build per preset.")
     parser.add_argument("presets", nargs="*", metavar="PRESET", help="presets to test, spaces or commas (default: script raylib flet)")
     parser.add_argument("--backends", default="", help="only these backends, e.g. cpython,mypyc")
     parser.add_argument("--methods", default="", help="only these build methods, e.g. exe,pyz (naming nuitka runs it without --full)")
@@ -431,7 +431,7 @@ def parse_args(args: Sequence[str], available: Sequence[str]) -> Options:
     names = [n for chunk in ns.presets for n in chunk.split(",") if n] or list(DEFAULT_PRESETS)
     unknown = [n for n in names if n not in available]
     if unknown:
-        raise DeployError(f"selftest --e2e: unknown preset {', '.join(unknown)} (available: {', '.join(available)})")
+        raise PytError(f"selftest --e2e: unknown preset {', '.join(unknown)} (available: {', '.join(available)})")
     return Options(
         presets=tuple(dict.fromkeys(names)),
         backends=_csv(ns.backends, BACKENDS, "--backends"),
@@ -832,8 +832,8 @@ def call(argv: Sequence[str], cwd: Path, env: Mapping[str, str], log: Path, time
 
 
 def runner_argv(uv: str, root: Path, args: Sequence[str]) -> list[str]:
-    """./deploy ARGS of the project at `root`, the way its launchers run it."""
-    return [uv, "run", "--quiet", "--script", str(root / ".pytemplate" / "deploy.py"), *args]
+    """./pyt ARGS of the project at `root`, the way its launchers run it."""
+    return [uv, "run", "--quiet", "--script", str(root / ".pytemplate" / "pyt.py"), *args]
 
 
 def _log_note(log: Path, text: str) -> None:
@@ -859,7 +859,7 @@ def do_new(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
 
 
 def do_verify(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
-    """What `new` must (not) copy, its git repository with ./deploy and deploy.ps1 executable,
+    """What `new` must (not) copy, its git repository with ./pyt and pyt.ps1 executable,
     the versions it locked (lock_problems) and what makes the project its own (docs_problems)."""
     from . import presets
 
@@ -876,18 +876,18 @@ def do_verify(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
             made = MADE_BY_INIT.get(name)
             if made is None or not (p / name).is_dir() or not set(os.listdir(p / name)) <= made:
                 problems.append(f"copied {name}/")
-    if not (p / "deploy").is_file():
-        problems.append("no ./deploy launcher")
+    if not (p / "pyt").is_file():
+        problems.append("no ./pyt launcher")
     git = shutil.which("git")
     if git is None:
         notes.append("git not found: the repository and the exec bits are not checked")
     elif not (p / ".git").exists():
         problems.append("no git repository (new runs git init)")
     else:
-        r = subprocess.run([git, "ls-files", "-s", "--", "deploy", "deploy.ps1"], cwd=p, env=ctx.env, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False, timeout=step.timeout)
-        _log_note(log, f"git ls-files -s deploy deploy.ps1:\n{r.stdout.strip() or r.stderr.strip()}")
+        r = subprocess.run([git, "ls-files", "-s", "--", "pyt", "pyt.ps1"], cwd=p, env=ctx.env, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False, timeout=step.timeout)
+        _log_note(log, f"git ls-files -s pyt pyt.ps1:\n{r.stdout.strip() or r.stderr.strip()}")
         modes = {line.split("\t", 1)[1]: line.split()[0] for line in r.stdout.splitlines() if "\t" in line}
-        for launcher in ("deploy", "deploy.ps1"):
+        for launcher in ("pyt", "pyt.ps1"):
             mode = modes.get(launcher, "missing from the index")
             if mode != "100755":
                 problems.append(f"git mode of {launcher} is {mode}, not 100755")
@@ -976,7 +976,7 @@ def requirement_problems(project: Path, before: Mapping[str, str], after: Mappin
 
 def do_option(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
     """Edit an [preset.<name>] option like a user (config.set_value keeps the layout), run
-    `./deploy apply`, and check that pyproject.toml and uv.lock follow."""
+    `./pyt apply`, and check that pyproject.toml and uv.lock follow."""
     from . import config
 
     table, key, value = step.args
@@ -1150,7 +1150,7 @@ def run_preset(ctx: Context, steps: list[Step], into: list[Result] | None = None
             t0 = time.perf_counter()
             try:
                 status, detail = execute(ctx, step, log)
-            except (OSError, subprocess.SubprocessError, DeployError, tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+            except (OSError, subprocess.SubprocessError, PytError, tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
                 status, detail = FAIL, f"{type(e).__name__}: {e}"
                 _log_note(log, detail)
             except KeyboardInterrupt:
@@ -1175,14 +1175,14 @@ def run_preset(ctx: Context, steps: list[Step], into: list[Result] | None = None
 
 def _prepare_base(base: Path) -> None:
     if base.resolve() == ROOT or ROOT in base.resolve().parents:
-        raise DeployError("selftest --e2e: the base dir cannot be inside this template")
+        raise PytError("selftest --e2e: the base dir cannot be inside this template")
     if base.exists() and not base.is_dir():
-        raise DeployError(f"selftest --e2e: {base} is not a directory")
+        raise PytError(f"selftest --e2e: {base} is not a directory")
     check_private_dir(base, "--base")
     if base.is_dir() and any(base.iterdir()) and not (base / MARKER).is_file():
-        raise DeployError(f"selftest --e2e: {base} is not empty and was not made by selftest --e2e (no {MARKER}): pick another --base")
+        raise PytError(f"selftest --e2e: {base} is not empty and was not made by selftest --e2e (no {MARKER}): pick another --base")
     base.mkdir(mode=0o700, parents=True, exist_ok=True)
-    (base / MARKER).write_text("Made by ./deploy selftest --e2e: safe to delete.\n", encoding="utf-8", newline="\n")
+    (base / MARKER).write_text("Made by ./pyt selftest --e2e: safe to delete.\n", encoding="utf-8", newline="\n")
 
 
 def _cleanup(base: Path, presets: Sequence[str]) -> None:
@@ -1258,13 +1258,13 @@ def selftest(cfg: Config, args: list[str]) -> int:
     plans = [(info, plan(info, opts, host)) for info in (preset_info(name) for name in opts.presets)]
     problem = selection_problem(plans, opts)
     if problem:  # before anything is created
-        raise DeployError(f"selftest --e2e: {problem}")
+        raise PytError(f"selftest --e2e: {problem}")
     env = child_env(base)
     hidden = hidden_template_repository(env)
     if hidden:
-        raise DeployError(
+        raise PytError(
             f"selftest --e2e: the base {base} is next to this template inside its git repository {hidden}: "
-            "git in the base must not see a repository around it (./deploy new would skip git init), which would "
+            "git in the base must not see a repository around it (./pyt new would skip git init), which would "
             "hide the template's own. Pick a --base outside that repository"
         )
     _prepare_base(base)

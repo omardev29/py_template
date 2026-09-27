@@ -1,4 +1,4 @@
--- overseer template provider (found on 'runtimepath'): one "deploy: X" template per ./deploy
+-- overseer template provider (found on 'runtimepath'): one "pyt: X" template per ./pyt
 -- command in .pytemplate/editor.json and per pytemplate.toml [tasks] entry. It replaces the
 -- tasks.json provider in pytemplate projects (see pytemplate.integrations.overseer).
 local ARGS = {
@@ -48,7 +48,7 @@ local function generator(search)
     local required = cmd.usage ~= "" and not cmd.usage:match("^%[")
     params.args = vim.tbl_extend("force", ARGS, { optional = not required, desc = cmd.usage ~= "" and cmd.usage or ARGS.desc })
     out[#out + 1] = {
-      name = "deploy: " .. cmd.name,
+      name = "pyt: " .. cmd.name,
       desc = cmd.summary ~= "" and cmd.summary or nil,
       tags = meta.tag and { TAG[meta.tag] } or nil,
       params = params,
@@ -68,7 +68,7 @@ local function generator(search)
   end
   for _, t in ipairs(info.tasks) do
     out[#out + 1] = {
-      name = "deploy: " .. t.name,
+      name = "pyt: " .. t.name,
       desc = t.help ~= "" and t.help or nil,
       tags = t.background and { TAG.RUN } or nil,
       params = { args = ARGS },

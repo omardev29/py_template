@@ -9,7 +9,7 @@ __pycache__/
 # Environments (one per backend: .venv, .venv-pypy, and their -wsl variants)
 .venv*/
 
-# ./deploy outputs (mypyc stage, PyInstaller, runtimes, reports) and artifacts
+# ./pyt outputs (mypyc stage, PyInstaller, runtimes, reports) and artifacts
 .build/
 dist/
 build/

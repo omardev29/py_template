@@ -1,5 +1,5 @@
--- ./deploy as editor tasks: task definitions (overseer, or a terminal split without it), the
--- output parser, pickers, the <leader>j keymaps, :Deploy and render-on-save.
+-- ./pyt as editor tasks: task definitions (overseer, or a terminal split without it), the
+-- output parser, pickers, the <leader>j keymaps, :Pyt and render-on-save.
 local pt = require("pytemplate")
 local M = {}
 
@@ -32,14 +32,15 @@ M.META = {
   help = { show = true },
   tasks = { show = true },
   nvim = { show = true },
-  ["shell-setup"] = { show = true },
   selftest = { show = true },
+  install = { show = true },
+  uninstall = { show = true },
 }
 
--- Used when editor.json is missing or unreadable (./deploy render fixes it).
+-- Used when editor.json is missing or unreadable (./pyt render fixes it).
 local FALLBACK_COMMANDS = { "run", "test", "check", "lint", "fmt", "build", "mode", "setup", "sync", "render", "doctor", "help" }
 
----The ./deploy commands the editor offers: {name, usage, summary} (report/compile need mypyc).
+---The ./pyt commands the editor offers: {name, usage, summary} (report/compile need mypyc).
 function M.commands()
   local info = pt.info()
   local out = {}
@@ -109,7 +110,7 @@ local function absolute(file)
   return path
 end
 
----Parse one output line of ./deploy into a quickfix item, or nil. Understands
+---Parse one output line of ./pyt into a quickfix item, or nil. Understands
 --- mypy       src/pkg/x.py:12: error: Incompatible types  [assignment]   (and :12:5:)
 --- ruff       src\pkg\x.py:3:8: F401 [*] `os` imported but unused           (concise format)
 --- pytest     tests/test_x.py:14: AssertionError                             (not "in func" frames)
@@ -172,7 +173,7 @@ end
 
 -- --- task definitions ---------------------------------------------------------------------------
 
----The backends whose typing profiles `./deploy ARGS` checks with (like vscode.scan).
+---The backends whose typing profiles `./pyt ARGS` checks with (like vscode.scan).
 function M.task_backends(args)
   local info = pt.info()
   local name, first = args[1], args[2]
@@ -189,7 +190,7 @@ function M.task_backends(args)
   return { info.backend.active }
 end
 
----{ mypy = "E"|"W", ruff = "E"|"W" } for the output of `./deploy ARGS`: the strictest of its
+---{ mypy = "E"|"W", ruff = "E"|"W" } for the output of `./pyt ARGS`: the strictest of its
 ---backends' typing profiles (editor.json typing.task_severity), as in the VS Code matchers.
 function M.severity(args)
   local levels = pt.info().typing.task_severity
@@ -205,7 +206,7 @@ function M.severity(args)
   return known and out or vim.deepcopy(DEFAULT_SEVERITY)
 end
 
----overseer components for a ./deploy task (o.severity: M.severity of its arguments).
+---overseer components for a ./pyt task (o.severity: M.severity of its arguments).
 function M.components(name, o)
   local info = pt.info()
   local meta = M.META[name] or {}
@@ -247,7 +248,7 @@ function M.project_task(name)
   end
 end
 
----overseer task definition for `./deploy ARGS...`.
+---overseer task definition for `./pyt ARGS...`.
 function M.definition(args, o)
   o = vim.tbl_extend("force", {}, o or {})
   local recipe = M.project_task(args[1])
@@ -265,16 +266,16 @@ function M.definition(args, o)
     o.severity = M.severity(args)
   end
   return {
-    name = "deploy " .. table.concat(args, " "),
-    cmd = pt.deploy_cmd(args),
+    name = "pyt " .. table.concat(args, " "),
+    cmd = pt.pyt_cmd(args),
     cwd = pt.caller_cwd(),
-    env = pt.deploy_env(parse and { RUFF_OUTPUT_FORMAT = "concise" } or nil),
+    env = pt.pyt_env(parse and { RUFF_OUTPUT_FORMAT = "concise" } or nil),
     components = M.components(args[1], o),
     metadata = { pytemplate = true, args = vim.deepcopy(args) },
   }
 end
 
----Run `./deploy ARGS...` as an overseer task, or in a terminal split without overseer.
+---Run `./pyt ARGS...` as an overseer task, or in a terminal split without overseer.
 function M.run(args, o)
   if not pt.root() then
     return vim.notify("pytemplate: not inside a pytemplate project", vim.log.levels.WARN)
@@ -343,8 +344,8 @@ function M.mode()
 end
 
 function M.with_args(cmd)
-  M.pick_backend("./deploy " .. cmd, cmd == "test" or cmd == "check", function(b)
-    vim.ui.input({ prompt = ("./deploy %s %s "):format(cmd, b) }, function(s)
+  M.pick_backend("./pyt " .. cmd, cmd == "test" or cmd == "check", function(b)
+    vim.ui.input({ prompt = ("./pyt %s %s "):format(cmd, b) }, function(s)
       if s then
         M.run(vim.list_extend({ cmd, b }, M.split_args(s)))
       end
@@ -405,7 +406,7 @@ function M.pick()
     vim.list_extend(names, vim.tbl_map(function(t)
       return t.name
     end, pt.info().tasks))
-    vim.ui.select(names, { prompt = "./deploy" }, function(n)
+    vim.ui.select(names, { prompt = "./pyt" }, function(n)
       if n then
         M.run({ n })
       end
@@ -423,7 +424,7 @@ local function names()
   return out
 end
 
----The words argument `argn` (1 = the first) of `./deploy NAME` can take, from the command's
+---The words argument `argn` (1 = the first) of `./pyt NAME` can take, from the command's
 ---usage in editor.json (and tasks.META): BACKEND (+ `all`), a first choice group such as
 ---`[doctor|trust|...]`, and the flags anywhere (`--flag a|b` as `--flag=a`, `--flag=b`).
 ---A [tasks] entry forwards its arguments: nothing to offer.
@@ -471,7 +472,7 @@ function M.argument_words(name, argn)
   end, out)
 end
 
----Completion for :Deploy: command and [tasks] names, then what that command takes.
+---Completion for :Pyt: command and [tasks] names, then what that command takes.
 function M.complete(lead, line)
   local typed = vim.split(vim.trim(line), "%s+")
   local nargs = #typed - (line:match("%s$") and 0 or 1)
@@ -481,10 +482,10 @@ function M.complete(lead, line)
   end, words)
 end
 
--- --- keymaps, :Deploy, render on save ---------------------------------------------------------
+-- --- keymaps, :Pyt, render on save ---------------------------------------------------------
 
 M.KEYS = {
-  { "j", M.pick, "Pick a deploy task" },
+  { "j", M.pick, "Pick a pyt task" },
   { "r", { "run" }, "Run" },
   { "R", function() M.with_args("run") end, "Run on backend..." },
   { "t", { "test" }, "Test" },
@@ -503,7 +504,7 @@ M.KEYS = {
   { "S", { "setup" }, "Setup" },
   { "D", { "doctor" }, "Doctor" },
   { "w", "<cmd>OverseerToggle!<cr>", "Task list" },
-  { "x", M.stop, "Stop deploy tasks" },
+  { "x", M.stop, "Stop pyt tasks" },
 }
 
 function M.setup(cfg)
@@ -518,17 +519,17 @@ function M.setup(cfg)
     end
     vim.keymap.set("n", prefix .. k[1], rhs, { desc = k[3] })
   end
-  vim.api.nvim_create_user_command("Deploy", function(a)
+  vim.api.nvim_create_user_command("Pyt", function(a)
     -- quotes group words ("a b" is one argument), like the <leader>jR prompt
     local args = M.split_args(a.args)
     M.run(#args > 0 and args or { "help" }, { show = true })
-  end, { nargs = "*", complete = M.complete, desc = "./deploy ARGS (through uv, never 'shell')" })
+  end, { nargs = "*", complete = M.complete, desc = "./pyt ARGS (through uv, never 'shell')" })
   local group = vim.api.nvim_create_augroup("pytemplate", { clear = true })
   if cfg.render_on_save then
     vim.api.nvim_create_autocmd("BufWritePost", {
       group = group,
       pattern = "pytemplate.toml",
-      desc = "pytemplate: ./deploy render",
+      desc = "pytemplate: ./pyt render",
       callback = function(ev)
         if pt.same_path(vim.fs.dirname(pt.normalize(ev.match)), pt.root()) then
           M.run({ "render" })

@@ -26,10 +26,10 @@ from . import envs, proc, render, ui
 from .config import Config, compiled_paths
 from .imports import PARSE_ERRORS, imports_of, is_local, local_module, module_name, parse_error
 from .project import BUILD, EXT_SUFFIXES, IS_WINDOWS, SRC, TOOLS, rel
-from .ui import DeployError
+from .ui import PytError
 
 SKIP_DIRS = {"__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
-# The annotated HTML report (slow lines): ./deploy report, and every build with compile.annotate
+# The annotated HTML report (slow lines): ./pyt report, and every build with compile.annotate
 ANNOTATE_HTML = BUILD / "reports" / "mypyc-annotate.html"
 # Exit codes of tools/mypyc_build.py: mypy/mypyc rejected the code (no C compiler ran yet);
 # the C build failed because setuptools cannot start the C compiler (a missing requirement:
@@ -113,11 +113,11 @@ def compiled_sources(cfg: Config) -> list[Path]:
         if path.is_dir():
             candidates = sorted(p for p in walk(path) if p.suffix == ".py" and p.name != "__init__.py" and p.is_file())
             if not candidates:  # an entry that compiles nothing is a mistake, never skipped silently
-                raise DeployError(f"compile.modules: neither src/{stem}.py nor src/{stem}/ holds a module to compile")
+                raise PytError(f"compile.modules: neither src/{stem}.py nor src/{stem}/ holds a module to compile")
         elif path.is_file():
             candidates = [path]
         else:
-            raise DeployError(f"compile.modules: neither src/{stem}.py nor src/{stem}/ exists")
+            raise PytError(f"compile.modules: neither src/{stem}.py nor src/{stem}/ exists")
         for p in candidates:
             name = module_name(p, SRC)
             hits = {ex for ex in cfg.compile.exclude if name == ex or name.startswith(ex + ".")}
@@ -126,12 +126,12 @@ def compiled_sources(cfg: Config) -> list[Path]:
                 files.append(p)
     unknown = [ex for ex in dict.fromkeys(cfg.compile.exclude) if ex not in matched and not local_module(SRC, ex)]
     if unknown:
-        raise DeployError(
+        raise PytError(
             f"compile.exclude: {', '.join(map(repr, unknown))} matches no module in compile.modules "
             f"(use modules or subpackages of those packages, e.g. \"{cfg.pkg}.core.slow\")"
         )
     if not files:
-        raise DeployError("compile.modules contains no .py file to compile")
+        raise PytError("compile.modules contains no .py file to compile")
     return list(dict.fromkeys(files))
 
 
@@ -191,7 +191,7 @@ def make_writable(root: Path) -> None:
 
 def remove_tree(path: Path) -> None:
     """shutil.rmtree for a copy of src/ that may hold read-only entries (made by an older
-    ./deploy, see copy_writable): Windows does not delete a read-only file and POSIX does not
+    ./pyt, see copy_writable): Windows does not delete a read-only file and POSIX does not
     empty a read-only folder, so what is left is made writable and removed again. A link goes
     as a link."""
     if os.path.islink(path):
@@ -212,7 +212,7 @@ def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
     copied with their contents; a path that turned from file to folder (or back) is replaced;
     a folder deleted from src goes with its caches (it must not stay importable as a namespace
     package). `owned`: the compiled modules, whose extensions mypyc manages (see _mypyc_output).
-    Every copy is owner-writable (copy_writable), and a read-only one an older ./deploy left is
+    Every copy is owner-writable (copy_writable), and a read-only one an older ./pyt left is
     made writable before it is replaced or deleted.
     """
     changed = 0
@@ -240,7 +240,7 @@ def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
         elif target.is_dir():  # a folder became a file
             remove_tree(target)
         elif target.is_file():
-            _owner_writable(target)  # a read-only copy an older ./deploy made
+            _owner_writable(target)  # a read-only copy an older ./pyt made
             tt = target.stat()
             if tt.st_size == st.st_size and tt.st_mtime_ns == st.st_mtime_ns:
                 continue
@@ -380,7 +380,7 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
                 if cached.exists():
                     shutil.rmtree(cached)
             except OSError as e:
-                raise DeployError(f"cannot remove {rel(cached)} for a clean rebuild: {e.strerror or e} (delete it, or ./deploy clean)") from None
+                raise PytError(f"cannot remove {rel(cached)} for a clean rebuild: {e.strerror or e} (delete it, or ./pyt clean)") from None
 
     tool = envs.tool_env(cfg)
     # MSVC/setuptools output is only shown on failure (or with -v). VSLANG=1033: compiler
@@ -392,14 +392,14 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
         if not ui.VERBOSE:
             ui.info((result.stdout or "") + (result.stderr or ""))
         if result.returncode == MYPYC_REJECTED:  # mypy/mypyc rejected the code: no compiler involved
-            raise DeployError("mypyc failed (exit code 1): fix the errors above", 1)
+            raise PytError("mypyc failed (exit code 1): fix the errors above", 1)
         if result.returncode == COMPILER_MISSING:
             hint = has_compiler_hint(_venv_platform(tool))
-            raise DeployError(f"mypyc failed: the C compiler cannot start (above)\n{hint}", 3)
+            raise PytError(f"mypyc failed: the C compiler cannot start (above)\n{hint}", 3)
         if result.returncode == C_BUILD_FAILED:
-            raise DeployError(f"mypyc failed (exit code 1)\n{has_compiler_hint(_venv_platform(tool))}", 1)
+            raise PytError(f"mypyc failed (exit code 1)\n{has_compiler_hint(_venv_platform(tool))}", 1)
         # uv, or Python before the script ran (a stale uv.lock: uv's error is above)
-        raise DeployError(f"mypyc failed (exit code {result.returncode}): see the error above", result.returncode)
+        raise PytError(f"mypyc failed (exit code {result.returncode}): see the error above", result.returncode)
     if annotate and result.stdout:
         ui.detail(result.stdout)
     if from_config and annotate and not proc.DRY_RUN:
@@ -410,7 +410,7 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
     built = {_ext_module(p, prof.stage) for p in extension_files(prof.stage)}
     missing = [m for m in modules if m not in built]
     if missing:
-        raise DeployError(f"mypyc did not generate an extension for: {', '.join(missing)}")
+        raise PytError(f"mypyc did not generate an extension for: {', '.join(missing)}")
     stamp.write_text(json.dumps(options, indent=2, sort_keys=True), encoding="utf-8", newline="\n")
     ui.ok(f"compiled in {rel(prof.stage)}")
     return prof.stage
@@ -474,7 +474,7 @@ def hidden_imports(cfg: Config, stage: Path) -> list[str]:
             names = imports_of(path, module_name(path, SRC), SRC, candidates)
         except PARSE_ERRORS as e:  # a runner older than the project's syntax, a too deeply nested source
             line, msg = parse_error(e)
-            raise DeployError(f"{rel(path)}:{line}: {msg}") from None
+            raise PytError(f"{rel(path)}:{line}: {msg}") from None
         for name in names:
             if not is_local(SRC, name):
                 external.add(name)
@@ -510,7 +510,7 @@ def _venv_platform(tool: envs.PyEnv) -> str:
         return ""
     try:
         return str(envs.interpreter_info(tool.python)["platform"])
-    except (OSError, ValueError, KeyError, proc.CommandFailed, DeployError):
+    except (OSError, ValueError, KeyError, proc.CommandFailed, PytError):
         return ""
 
 

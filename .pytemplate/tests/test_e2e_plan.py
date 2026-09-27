@@ -1,4 +1,4 @@
-"""Planning logic of `./deploy selftest --e2e` (runner/e2e.py): no project is created here.
+"""Planning logic of `./pyt selftest --e2e` (runner/e2e.py): no project is created here.
 
 The pure parts: the plan per preset and depth, the option parser, the selection checks, the
 environment scrub and git isolation, the artifact lookup, the lock/pin, docs and file-state
@@ -25,7 +25,7 @@ from runner.cmd_build import COMPAT  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.e2e import Host, Options, PresetInfo, Step  # noqa: E402
 from runner.project import PRESETS, ROOT  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 AVAILABLE = ["flet", "raylib", "script"]
 HOST = Host("windows")  # a display, no Flutter restriction
@@ -194,7 +194,7 @@ def test_renamed_app_flips_name_equals_package() -> None:
 
 
 def test_one_test_project_is_named_like_its_package_and_one_is_not() -> None:
-    """name == package (the default of `./deploy new DIR`) is what makes nuitka name its binary
+    """name == package (the default of `./pyt new DIR`) is what makes nuitka name its binary
     <app>.bin and put the package folder next to the executables; name != package is what the
     rename context rules and hyphenated scripts need. The e2e covers both."""
     apps = [e2e.preset_info(n).app for n in e2e.DEFAULT_PRESETS]
@@ -392,13 +392,13 @@ def test_prepare_base_refuses_a_base_another_user_can_change(tmp_path: Path, mon
     shared = tmp_path / "shared"
     shared.mkdir()
     shared.chmod(0o777)
-    with pytest.raises(DeployError, match="written by every user"):
+    with pytest.raises(PytError, match="written by every user"):
         e2e._prepare_base(shared)
     assert not (shared / e2e.MARKER).exists()
     shared.chmod(0o700)
     real = os.getuid()
     monkeypatch.setattr(os, "getuid", lambda: real + 1)  # the folder now belongs to someone else
-    with pytest.raises(DeployError, match="belongs to another user"):
+    with pytest.raises(PytError, match="belongs to another user"):
         e2e._prepare_base(shared)
     monkeypatch.setattr(os, "getuid", lambda: real)
     fresh = tmp_path / "fresh" / "base"
@@ -417,9 +417,9 @@ def test_parse_args() -> None:
     assert opts.backends == ("cpython", "mypyc")
     assert e2e.parse_args(["script,script"], AVAILABLE).presets == ("script",)
     assert e2e.parse_args(["raylib", "--quick", "flet"], AVAILABLE).presets == ("raylib", "flet")
-    with pytest.raises(DeployError, match="unknown preset"):
+    with pytest.raises(PytError, match="unknown preset"):
         e2e.parse_args(["nope"], AVAILABLE)
-    with pytest.raises(DeployError, match="--methods"):
+    with pytest.raises(PytError, match="--methods"):
         e2e.parse_args(["--methods", "exe,zip"], AVAILABLE)
     with pytest.raises(SystemExit):
         e2e.parse_args(["--quick", "--full"], AVAILABLE)
@@ -652,7 +652,7 @@ def test_project_state_and_its_changes(tmp_path: Path) -> None:
     assert e2e.project_state(tmp_path / "missing") == {}
 
 
-# --- template-e2e.yml (template repository only: ./deploy new does not copy template-*.yml) --------
+# --- template-e2e.yml (template repository only: ./pyt new does not copy template-*.yml) --------
 
 
 def _paths(text: str, event: str) -> list[str]:
@@ -701,7 +701,7 @@ def test_e2e_workflow_triggers_on_what_new_copies() -> None:
     """A new project inherits the runner, the launchers, the root lock and pyproject (tool
     versions), pytemplate.toml, src/ and tests/: a change to any of them must run the e2e."""
     text = WORKFLOW.read_text(encoding="utf-8")
-    wanted = {".pytemplate/**", "deploy", "deploy.cmd", "deploy.ps1", "pyproject.toml", "uv.lock", "pytemplate.toml", ".python-version", "src/**", "tests/**", ".gitignore", ".gitattributes", ".github/workflows/template-e2e.yml"}
+    wanted = {".pytemplate/**", "pyt", "pyt.cmd", "pyt.ps1", "pyproject.toml", "uv.lock", "pytemplate.toml", ".python-version", "src/**", "tests/**", ".gitignore", ".gitattributes", ".github/workflows/template-e2e.yml"}
     for event in ("push", "pull_request"):
         assert wanted <= set(_paths(text, event)), event
     assert "needs: gate" in text and ".pytemplate/template-repo" in text, "skipped in repositories made from the template"

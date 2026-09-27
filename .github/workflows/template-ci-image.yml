@@ -1,5 +1,5 @@
 # Linux CI image of the TEMPLATE repository (the template- prefix keeps it, and the folder
-# template-ci-image/, out of projects made with ./deploy new): an Ubuntu image with every tool
+# template-ci-image/, out of projects made with ./pyt new): an Ubuntu image with every tool
 # the Linux jobs install on a bare runner (the shells, uv, Neovim, PowerShell, actionlint, a C
 # compiler, xonsh) at pinned versions, and their downloads (managed Pythons, the wheels of the
 # locks, taplo, basedpyright, UPX) already in its caches, so a Linux job depends on one image
@@ -8,10 +8,12 @@
 # image to ghcr.io/<owner>/<repo>-ci. A run pushes a tag only when the registry says it is
 # missing (two runs that build the same new tag at once may both push it, from the same inputs).
 #
-# Stage 1 (CLAUDE.md 13.2): the jobs below run the Linux jobs of template-selftest,
-# template-launchers and template-nvim in the image, next to them, which stay the gates.
-# Pull requests from another repository cannot push: the image is built and checked, and the
-# jobs that run in it are skipped. Weekly the image is rebuilt from scratch (not pushed unless
+# Stage 2 (CLAUDE.md 13.2): the Linux jobs of template-selftest (selftest, the runner's tests on
+# Python 3.11, the suite in new raylib and flet projects), template-launchers and template-nvim
+# (its two pinned rows) run here only, in the image: they are the Linux gates. uv-floor, the e2e
+# rows, the nvim canary and every Windows and macOS job stay on bare runners. Pull requests from
+# another repository cannot push: when they change an input of the image, it is built and
+# checked, and the jobs that would run in it are skipped (no Linux jobs for such a pull request). Weekly the image is rebuilt from scratch (not pushed unless
 # its tag is missing): red with no commit behind it means a pinned download is gone, or an
 # unpinned dependency of a pin moved. template-keepalive.yml keeps the schedule alive. The gate
 # job skips everything in repositories made from the template.
@@ -113,8 +115,8 @@ jobs:
           if docker manifest inspect "$REF" > /dev/null 2>&1; then echo "published meanwhile: not pushed"; else docker push "$REF"; fi
           echo "pushed=true" >> "$GITHUB_OUTPUT"
 
-  # The Linux jobs of the other workflows, in the image. Each keeps the steps of the job it
-  # mirrors, minus what the image already holds.
+  # The Linux jobs of template-selftest, template-launchers and template-nvim: the steps those
+  # workflows run on macOS and Windows, minus what the image already holds.
   selftest:
     name: selftest (image)
     needs: [gate, image]
@@ -139,15 +141,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Generated files match their sources
-        run: ./deploy render --check
+        run: ./pyt render --check
       - name: Runner environment
-        run: ./deploy setup
+        run: ./pyt setup
       - name: Tool versions
         run: |
           id; uv --version; nvim --version | sed -n 1p; pwsh --version; node --version; fish --version; xonsh --version
           actionlint --version | sed -n 1p; shellcheck --version | sed -n 2p
       - name: selftest
-        run: ./deploy selftest -rs
+        run: ./pyt selftest -rs
 
   python-floor:
     name: runner tests on Python 3.11 (image)
@@ -172,9 +174,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Runner environment
-        run: ./deploy setup
+        run: ./pyt setup
       - name: The runner starts on Python 3.11
-        run: uv run --quiet --python 3.11 --script .pytemplate/deploy.py help > /dev/null
+        run: uv run --quiet --python 3.11 --script .pytemplate/pyt.py help > /dev/null
       - name: The runner's tests on Python 3.11
         run: |
           pytest=$(uv export --frozen --only-group dev --no-hashes --no-annotate --no-header | grep '^pytest==' | sed 's/ *;.*//')
@@ -206,14 +208,14 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      - name: ./deploy new
+      - name: ./pyt new
         env:
           PRESET: ${{ matrix.preset }}
-        run: ./deploy new "$RUNNER_TEMP/p" --preset "$PRESET" --name "Pt-$PRESET"
+        run: ./pyt new "$RUNNER_TEMP/p" --preset "$PRESET" --name "Pt-$PRESET"
       - name: Runner environment
-        run: cd "$RUNNER_TEMP/p" && ./deploy setup
+        run: cd "$RUNNER_TEMP/p" && ./pyt setup
       - name: selftest
-        run: cd "$RUNNER_TEMP/p" && ./deploy selftest -rs
+        run: cd "$RUNNER_TEMP/p" && ./pyt selftest -rs
 
   launchers:
     name: launchers (image)
@@ -242,20 +244,20 @@ jobs:
           xonsh --version; fish --version; pwsh --version; uv --version
           (busybox 2>&1 || true) | sed -n 1p; shellcheck --version | sed -n 2p
       - name: shellcheck
-        run: shellcheck -s sh deploy
+        run: shellcheck -s sh pyt
       - name: uv also in ~/.local/bin (the launchers' fallback discovery, T5)
         run: mkdir -p ~/.local/bin && cp "$(command -v uv)" ~/.local/bin/
       - name: selftest --shells
-        run: ./deploy selftest --shells
+        run: ./pyt selftest --shells
       - name: User-style invocations
         run: |
-          for s in /bin/sh bash dash zsh; do "$s" ./deploy help >/dev/null || exit; echo "$s ok"; done
-          (cd src && ../deploy help >/dev/null)
-          (cd /tmp && "$GITHUB_WORKSPACE/deploy" help >/dev/null)
-          env -u UV PATH=/usr/bin:/bin ./deploy help >/dev/null
-          busybox sh ./deploy help >/dev/null
-          pwsh -NoProfile -Command "./deploy.ps1 help > \$null; exit \$LASTEXITCODE"
-          set +e; ./deploy no-such-command; test $? -eq 2
+          for s in /bin/sh bash dash zsh; do "$s" ./pyt help >/dev/null || exit; echo "$s ok"; done
+          (cd src && ../pyt help >/dev/null)
+          (cd /tmp && "$GITHUB_WORKSPACE/pyt" help >/dev/null)
+          env -u UV PATH=/usr/bin:/bin ./pyt help >/dev/null
+          busybox sh ./pyt help >/dev/null
+          pwsh -NoProfile -Command "./pyt.ps1 help > \$null; exit \$LASTEXITCODE"
+          set +e; ./pyt no-such-command; test $? -eq 2
 
   nvim:
     name: nvim (image, ${{ matrix.nvim }})
@@ -290,12 +292,12 @@ jobs:
       - name: Neovim version
         run: nvim --version
       - name: Runner environment
-        run: ./deploy setup
+        run: ./pyt setup
       # a folder of the container itself (short, no .lazy.lua above it): in a container job the
       # runner.temp context is a host path, which the runner translates only in step inputs
       # and environment values, never in the text of a run step
       - name: LazyVim smoke test (script, raylib, flet)
-        run: ./deploy selftest --nvim --require --dir /tmp/pt-nvim
+        run: ./pyt selftest --nvim --require --dir /tmp/pt-nvim
       - name: Logs of the smoke test
         if: failure() || cancelled()  # a job over its timeout-minutes is cancelled, not failed
         uses: actions/upload-artifact@v7

@@ -21,9 +21,9 @@ cd "$work/t"
 
 case "${1:-}" in
 template)
-    ./deploy setup
+    ./pyt setup
     # the python-floor job: the runner started on the floor Python, pytest of uv.lock on it
-    uv run --quiet --python "$PYTHON_FLOOR" --script .pytemplate/deploy.py help > /dev/null
+    uv run --quiet --python "$PYTHON_FLOOR" --script .pytemplate/pyt.py help > /dev/null
     pytest=$(uv export --frozen --only-group dev --no-hashes --no-annotate --no-header | grep '^pytest==' | sed 's/ *;.*//')
     uv run --no-project --python "$PYTHON_FLOOR" --with "$pytest" python -c ''
     # test_upx's real run: the pinned UPX of the runner's own download (upx.find: SHA-256)
@@ -36,8 +36,8 @@ template)
 presets)
     # what template-selftest's new-project job does (its names too), so its wheels are cached
     for preset in raylib flet; do
-        ./deploy new "$work/$preset" --preset "$preset" --name "Pt-$preset"
-        (cd "$work/$preset" && ./deploy setup)
+        ./pyt new "$work/$preset" --preset "$preset" --name "Pt-$preset"
+        (cd "$work/$preset" && ./pyt setup)
     done
     ;;
 *)

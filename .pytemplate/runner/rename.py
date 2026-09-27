@@ -2,11 +2,11 @@
 
 Renames src/<pkg>/ and rewrites every reference to the old name/package in src/, tests/,
 pytemplate.toml and pyproject.toml, then re-locks uv.lock and regenerates the generated files.
-`./deploy apply` runs the same plan when app.name was changed by hand in pytemplate.toml.
+`./pyt apply` runs the same plan when app.name was changed by hand in pytemplate.toml.
 
 The pure part (`plan`, `apply_plan` and `rewrite` for one text) works on any project folder
 and needs no uv: the tests rename each preset skeleton rendered for one name and compare the
-result, byte for byte, with the skeleton rendered for the new name (what `./deploy new --name
+result, byte for byte, with the skeleton rendered for the new name (what `./pyt new --name
 NEW` writes).
 
 Which occurrences change (whole words only: `myapp_extra` and `my-app-2` never match):
@@ -36,7 +36,7 @@ Which occurrences change (whole words only: `myapp_extra` and `my-app-2` never m
   (`alpha.exe`, `alpha.pyz`, `alpha-cpython-exe`...).
 - pytemplate.toml: app.name (its comment is kept) and package references only, always chosen
   by context, never a TOML key or table header. A path is the package only right inside src/
-  (`src/alpha/data`; not `tools/alpha.py`, `assets/alpha.ico`, `./deploy`), a dotted word only
+  (`src/alpha/data`; not `tools/alpha.py`, `assets/alpha.ico`, `./pyt`), a dotted word only
   when it names a module of src/<pkg>/ (`alpha.core`; not `alpha.ico`, `uv.lock`). The values
   of the keys that hold module names (MODULE_KEYS: compile.modules, [[typing.mypy_overrides]]
   module, deploy.exe.hidden_imports...) are package references even when bare
@@ -75,7 +75,7 @@ from . import config, envs, presets, proc, render, ui
 from .config import Config
 from .project import DIST, EXT_SUFFIXES, ROOT, write_whole
 from .project import ROOT as _RUNNER_CWD  # where the tools run (tests move ROOT, never this)
-from .ui import DeployError
+from .ui import PytError
 
 Kind = Literal["pkg", "name", "keep", "skip"]
 
@@ -85,7 +85,7 @@ PY_SUFFIXES = {".py", ".pyi", ".pyw"}
 # Root files that never get a "this file also mentions the old name" note: rename edits them, or
 # they are the template's own (the launchers and CLAUDE.md, whose words such as `app` or `p` are
 # no app name: the note invited editing them by hand)
-ROOT_SKIP = {"pytemplate.toml", "pyproject.toml", "uv.lock", "pyrightconfig.json", "deploy", "deploy.cmd", "deploy.ps1", "CLAUDE.md"}
+ROOT_SKIP = {"pytemplate.toml", "pyproject.toml", "uv.lock", "pyrightconfig.json", "pyt", "pyt.cmd", "pyt.ps1", "CLAUDE.md"}
 # Folders never searched for other mentions of the old name: caches, environments, builds, the
 # runner, Claude Code's state (it holds whole copies of the project in worktrees)
 MENTION_SKIP_DIRS = {*SKIP_DIRS, ".build", "dist", ".pytemplate", ".claude", ".tox", ".nox", ".eggs", ".idea", "node_modules"}
@@ -130,6 +130,7 @@ _BACKEND_SUFFIX = re.compile(r"-(?:cpython|pypy|mypyc)\b")  # dist/<name>-<backe
 _PKG_WORD_AFTER = re.compile(r"[ \t]+(?:package|module)\b")
 _PKG_WORD_BEFORE = re.compile(r"(?:^|\W)(?:package|module)[ \t]+$")
 _IMPORT_BEFORE = re.compile(r"(?:^|[^\w.])import[ \t]+$")
+_LAUNCHER_BEFORE = re.compile(r"(?:^|[^\w.])\.[/\\]$")  # ./ or .\ as a path's start: `./pyt report`
 _FROM_BEFORE = re.compile(r"(?:^|[^\w.])from[ \t]+$")
 _IMPORT_AFTER = re.compile(r"[ \t]+import\b")
 # -m alpha, "-m", "alpha", and a prefixed string after it: "-m", f"alpha.{x}", r"alpha"
@@ -575,13 +576,15 @@ def _text_kind(
     `contextual`: decide by context even when the new name is also a package name (pytemplate.toml,
     where `[app]`, `editor = ` or a button named like the app must never change). There a path is
     the package only right inside `src/` (the folder the rename moves: `tools/alpha.py`,
-    `assets/alpha.ico` and `./deploy` stay) and, when `modules` (the modules and subpackages of
+    `assets/alpha.ico` and `./pyt` stay) and, when `modules` (the modules and subpackages of
     src/<pkg>/) is given, a dotted word only when it names one of them (`alpha.core`; not
     `alpha.ico` or `uv.lock`).
     """
     prev = text[start - 1 : start]
     if prev == "." and start >= 2 and _is_word(text[start - 2]):
         return "keep"  # x.alpha: a submodule or an attribute, never the top-level package
+    if word in presets.LAUNCHER_NAMES and _LAUNCHER_BEFORE.search(text[max(0, start - 3) : start]) and text[end : end + 1] not in ("/", "\\"):
+        return "keep"  # an app named pyt (new refuses the name now): `./pyt report` is the launcher
     if prev in ("/", "\\") and _inside_package(text, start, names.old_pkg):
         return "keep"  # src/alpha/alpha: a submodule of the package, like alpha.alpha
     if names.old_pkg == "src" and text[end : end + 1] in ("/", "\\") and not _after_src(text, start):
@@ -928,7 +931,7 @@ def _code_files(root: Path, links: list[str] | None = None) -> Iterator[tuple[st
         where = str(e.filename or "a folder of src/ or tests/")
         with contextlib.suppress(ValueError):
             where = Path(where).relative_to(root).as_posix()
-        raise DeployError(
+        raise PytError(
             f"rename: cannot list {where}/: {e.strerror or e}; nothing was changed.\n"
             "  Make it readable (or move it out of src/ and tests/) and try again"
         )
@@ -1071,7 +1074,7 @@ def _plan_config(root: Path, names: Names) -> TextEdit:
     try:
         raw = path.read_bytes()
     except OSError as e:
-        raise DeployError(f"rename: cannot read pytemplate.toml: {e.strerror or e}") from None
+        raise PytError(f"rename: cannot read pytemplate.toml: {e.strerror or e}") from None
     old = config._decode(raw, "pytemplate.toml")  # a clear error for UTF-16/ANSI; CRLF kept
     modules = _package_modules(root, names.old_pkg)
     result = rewrite(old, names, only_pkg=True, toml=True, module_keys=MODULE_KEYS, package_modules=modules)
@@ -1079,7 +1082,7 @@ def _plan_config(root: Path, names: Names) -> TextEdit:
     try:
         tomllib.loads(new)
     except tomllib.TOMLDecodeError as e:
-        raise DeployError(f"rename: the new pytemplate.toml would not be valid TOML ({e}); nothing was changed") from None
+        raise PytError(f"rename: the new pytemplate.toml would not be valid TOML ({e}); nothing was changed") from None
     renamed = {n for n, _, _ in _line_changes(result.text, new)}
     kept = [(n, line) for n, line in result.kept if n not in renamed]  # app.name itself
     return TextEdit("pytemplate.toml", old, new, result.count, kept, f'app.name = "{names.new_name}"', bom=raw.startswith(b"\xef\xbb\xbf"))
@@ -1105,11 +1108,11 @@ def _plan_pyproject(root: Path, names: Names) -> TextEdit | None:
     try:  # bytes, so its line endings stay (a CRLF checkout); a BOM is dropped (written back without it)
         old = path.read_bytes().decode("utf-8-sig")
     except (OSError, UnicodeDecodeError) as e:
-        raise DeployError(f"rename: cannot read pyproject.toml ({e}); nothing was changed") from None
+        raise PytError(f"rename: cannot read pyproject.toml ({e}); nothing was changed") from None
     try:
         new = presets.set_project_name(old, names.new_name)
-    except DeployError as e:
-        raise DeployError(f"rename: {e}; nothing was changed") from None
+    except PytError as e:
+        raise PytError(f"rename: {e}; nothing was changed") from None
     lines = new.split("\n")
     begin = next((i for i, ln in enumerate(lines) if ln.strip() == presets.EXTRA_BEGIN), None)
     end = next((i for i, ln in enumerate(lines) if ln.strip() == presets.EXTRA_END), None)
@@ -1128,7 +1131,7 @@ def _plan_pyproject(root: Path, names: Names) -> TextEdit | None:
     try:
         tomllib.loads(new)
     except tomllib.TOMLDecodeError as e:
-        raise DeployError(f"rename: the new pyproject.toml would not be valid TOML ({e}); nothing was changed") from None
+        raise PytError(f"rename: the new pyproject.toml would not be valid TOML ({e}); nothing was changed") from None
     # What is left (other tables: [tool.coverage] source = ["alpha"]...) is only reported
     rest = rewrite(new, names, only_pkg=True, toml=True)
     left = {n for n, _, _ in rest.changes} | {n for n, _ in rest.kept}
@@ -1174,16 +1177,16 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
     src = root / "src"
     old_dir = package_dir(src, names.old_pkg)
     if old_dir is None:
-        raise DeployError(
+        raise PytError(
             f"rename: src/{names.old_pkg}/ not found (app.name = '{old_name}' says the package is there)"
         )
     move: tuple[str, str] | None = None
     if old_dir.name != names.new_pkg:
         new_dir = src / names.new_pkg
         if new_dir.exists() and not same_file(old_dir, new_dir):
-            raise DeployError(f"rename: src/{names.new_pkg}/ already exists: move or delete it first")
+            raise PytError(f"rename: src/{names.new_pkg}/ already exists: move or delete it first")
         if (src / f"{names.new_pkg}.py").exists():
-            raise DeployError(f"rename: src/{names.new_pkg}.py exists: the package src/{names.new_pkg}/ would clash with it")
+            raise PytError(f"rename: src/{names.new_pkg}.py exists: the package src/{names.new_pkg}/ would clash with it")
         move = (f"src/{old_dir.name}", f"src/{names.new_pkg}")
     files: list[FileEdit] = []
     binary: list[str] = []
@@ -1195,7 +1198,7 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
         try:
             data = path.read_bytes()
         except OSError as e:  # a root-owned file (a container run), a file another program locks
-            raise DeployError(
+            raise PytError(
                 f"rename: cannot read {rel_path}: {e.strerror or e}; nothing was changed.\n"
                 "  Make it readable (or move it out of src/ and tests/) and try again"
             ) from None
@@ -1250,7 +1253,7 @@ def _move_dir(root: Path, old_rel: str, new_rel: str) -> None:
         else:
             old.rename(new)
     except OSError as e:
-        raise DeployError(
+        raise PytError(
             f"rename: could not move {old_rel}/ to {new_rel}/: {e.strerror or e}. Nothing was changed.\n"
             "  Close the programs that use files in it (a running app, a terminal inside it) and try again"
         ) from None
@@ -1292,7 +1295,7 @@ def apply_plan(root: Path, plan_: Plan) -> None:
                 try:
                     _move_dir(root, plan_.move[1], plan_.move[0])
                     back = (plan_.move[1], plan_.move[0])
-                except DeployError:
+                except PytError:
                     pass
             problems = [f"{_target(p, back)} could not be restored" for p in reversed(lost)]
             if plan_.move is not None and back is None:
@@ -1302,7 +1305,7 @@ def apply_plan(root: Path, plan_: Plan) -> None:
                 if problems
                 else "The rename was undone (the files written so far were restored)"
             )
-            raise DeployError(
+            raise PytError(
                 f"rename: could not write {path.relative_to(root).as_posix()}: {e.strerror or e}. {undone}.\n"
                 "  Close the programs that use it (or make it writable, or free some disk space) and try again"
             ) from None
@@ -1330,29 +1333,29 @@ def locked_names(root: Path) -> set[str]:
     return names
 
 
-def check_new_name(cfg: Config, new_name: str, *, who: str = "rename", retry: str = "./deploy rename OTHER_NAME") -> None:
+def check_new_name(cfg: Config, new_name: str, *, who: str = "rename", retry: str = "./pyt rename OTHER_NAME") -> None:
     """Reject names that cannot work: format, keywords, stdlib modules, dependencies (uv.lock too)."""
     if not config.APP_NAME.fullmatch(new_name):
-        raise DeployError(f"{who}: the name may only contain {config.NAME_RULE}")
+        raise PytError(f"{who}: the name may only contain {config.NAME_RULE}")
     pkg = package_of(new_name)
     if keyword.iskeyword(pkg):
-        raise DeployError(f"{who}: the package '{pkg}' would be a Python keyword (import {pkg} is a syntax error)")
+        raise PytError(f"{who}: the package '{pkg}' would be a Python keyword (import {pkg} is a syntax error)")
     if presets.shadows_stdlib(pkg):
-        raise DeployError(f"{who}: src/{pkg}/ would shadow the standard library module '{pkg}'. Choose another name: {retry}")
+        raise PytError(f"{who}: src/{pkg}/ would shadow the standard library module '{pkg}'. Choose another name: {retry}")
     if pkg in config.BACKENDS:  # src/mypyc/ shadows mypy's compiler; tests/conftest.py and [backend] use these words
-        raise DeployError(f"{who}: '{new_name}' is the name of a backend ({', '.join(config.BACKENDS)}). Choose another name: {retry}")
+        raise PytError(f"{who}: '{new_name}' is the name of a backend ({', '.join(config.BACKENDS)}). Choose another name: {retry}")
     try:  # check_name_free reads it: a broken file is not a problem of the name
         presets.read_pyproject()
-    except DeployError as e:
-        raise DeployError(f"{who}: {e}: fix it first; nothing was changed") from None
+    except PytError as e:
+        raise PytError(f"{who}: {e}: fix it first; nothing was changed") from None
     try:
         presets.check_name_free(cfg, cfg.app.preset, new_name)
-    except DeployError as e:
+    except PytError as e:
         reason = str(e).splitlines()[0]
-        raise DeployError(f"{who}: {reason}\n  Choose another name: {retry}") from None
+        raise PytError(f"{who}: {reason}\n  Choose another name: {retry}") from None
     clash = presets._norm_name(new_name)
     if clash in locked_names(ROOT):
-        raise DeployError(
+        raise PytError(
             f"{who}: '{new_name}' is also the name of a package in uv.lock ({clash}, a dependency of a dependency): "
             f"uv would refuse the project or resolve that dependency to the project itself, and src/{pkg}/ "
             f"would shadow the library.\n  Choose another name: {retry}"
@@ -1394,7 +1397,7 @@ def git_changes(root: Path) -> list[str] | str | None:
 
     try:
         r = proc.run(["git", "rev-parse", "--show-prefix"], cwd=root, env=env, capture=True, check=False, echo=False)
-    except DeployError:  # git not installed
+    except PytError:  # git not installed
         return None
     if r.returncode != 0:
         return failure(r.returncode, r.stderr)
@@ -1432,9 +1435,9 @@ def validate_config(text: str) -> Config:
         new_cfg: Config = config._build(Config, data, "")
         config.validate(new_cfg, set(COMMANDS))
     except tomllib.TOMLDecodeError as e:
-        raise DeployError(f"rename: the renamed pytemplate.toml would not be valid TOML ({e}); nothing was changed") from None
-    except DeployError as e:
-        raise DeployError(f"rename: the renamed pytemplate.toml would be invalid ({e}); nothing was changed") from None
+        raise PytError(f"rename: the renamed pytemplate.toml would not be valid TOML ({e}); nothing was changed") from None
+    except PytError as e:
+        raise PytError(f"rename: the renamed pytemplate.toml would be invalid ({e}); nothing was changed") from None
     return new_cfg
 
 
@@ -1489,7 +1492,7 @@ def tidy_before(cfg: Config, plan_: Plan, root: Path | None = None) -> Tidy | No
         config_file = _profile_file(cfg, cfg.profile_for(), "ruff")
         fmt_code, fmt_out = _ruff(cfg, ["format", "--check", "--config", config_file, "--force-exclude", "--output-format", "concise"], paths)
         lint_code, lint_out = _ruff(cfg, ["check", "--config", config_file, "--force-exclude", "--no-fix", "--output-format", "concise"], paths)
-    except (DeployError, OSError):
+    except (PytError, OSError):
         return None
     unformatted = {_same_path(m.group("old") or m.group("path")) for m in _UNFORMATTED.finditer(fmt_out)}
     if fmt_code not in (0, 1) or (fmt_code == 1 and not unformatted):
@@ -1511,7 +1514,7 @@ def tidy_after(cfg: Config, plan_: Plan, clean: Tidy | None, root: Path | None =
     edits = _python_edits(plan_)
     if not edits:
         return
-    hint = "the new name can change import order and line wrapping: ./deploy lint --fix and ./deploy fmt"
+    hint = "the new name can change import order and line wrapping: ./pyt lint --fix and ./pyt fmt"
     if clean is None:
         ui.info(f"  note: {hint}")
         return
@@ -1524,7 +1527,7 @@ def tidy_after(cfg: Config, plan_: Plan, clean: Tidy | None, root: Path | None =
             _ruff(cfg, ["check", "--config", config_file, "--force-exclude", "--fix-only", "--fixable", "I001", "--quiet"], sortable)
         if formatted:
             _ruff(cfg, ["format", "--config", config_file, "--force-exclude", "--quiet"], formatted)
-    except (DeployError, OSError) as e:
+    except (PytError, OSError) as e:
         ui.warn(f"ruff could not tidy the renamed files ({e}): {hint}")
         return
     touched = sorted(t.relative_to(root).as_posix() for t, data in before.items() if t.is_file() and t.read_bytes() != data)
@@ -1606,13 +1609,13 @@ def _lock_forecast(new_cfg: Config, old_name: str, new_name: str) -> str:
         return "would re-lock (uv lock): the managed parts of pyproject.toml change"
     try:
         r = envs.uv(envs.tool_env(new_cfg), ["lock", "--check"], cwd=ROOT, check=False, capture=True, echo=False)
-    except DeployError as e:
+    except PytError as e:
         return f"cannot tell: uv lock --check could not run ({e})"
     return "up to date (uv lock --check)" if r.returncode == 0 else "would re-lock (uv lock): uv.lock is not up to date"
 
 
 def needs_pypi(stderr: str) -> bool:
-    """Whether a failed `./deploy rename` failed only because its `uv lock` could not reach the index."""
+    """Whether a failed `./pyt rename` failed only because its `uv lock` could not reach the index."""
     return "$ uv lock" in stderr and any(marker in stderr for marker in PYPI_UNREACHABLE)
 
 
@@ -1625,22 +1628,22 @@ def _check_the_name_is_applied(cfg: Config, new_name: str) -> None:
 
     try:
         project_name = cmd_apply.read_project().name
-    except DeployError:
+    except PytError:
         return  # check_new_name says what is wrong with pyproject.toml
     record = cmd_apply.trusted_record(cfg, project_name)
     other = cmd_apply._other_package(cfg, record, project_name)
     if other is not None:
         either = "" if record is not None else f"\n  (or, if pyproject.toml [project] name is the line edited by hand, put back name = \"{cfg.app.name}\" there)"
-        raise DeployError(
+        raise PytError(
             f"rename: app.name = '{cfg.app.name}' names src/{cfg.pkg}/, another package: the app is '{other}' "
-            f"(src/{package_of(other)}/).\n  Put back app.name = \"{other}\" in pytemplate.toml, then ./deploy rename {new_name}{either}"
+            f"(src/{package_of(other)}/).\n  Put back app.name = \"{other}\" in pytemplate.toml, then ./pyt rename {new_name}{either}"
         )
     if new_name == cfg.app.name and project_name is not None and project_name != cfg.app.name:
         moved = f"src/{package_of(project_name)}/" if config.APP_NAME.fullmatch(project_name) else "its old folder"
-        raise DeployError(
+        raise PytError(
             f"rename: the app is already called '{new_name}' (src/{cfg.pkg}/), but pyproject.toml [project] name = "
-            f"'{project_name}'.\n  ./deploy apply writes '{new_name}' there; if src/{cfg.pkg}/ was moved by hand, "
-            f"move it back to {moved} first, then ./deploy rename {new_name} (it rewrites the imports too)"
+            f"'{project_name}'.\n  ./pyt apply writes '{new_name}' there; if src/{cfg.pkg}/ was moved by hand, "
+            f"move it back to {moved} first, then ./pyt rename {new_name} (it rewrites the imports too)"
         )
 
 
@@ -1648,12 +1651,12 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
     """rename NEW_NAME [--force]"""
     from . import cmd_apply
 
-    parser = argparse.ArgumentParser(prog="./deploy rename", description="Rename the app and its package src/<pkg>/ everywhere.")
+    parser = argparse.ArgumentParser(prog="./pyt rename", description="Rename the app and its package src/<pkg>/ everywhere.")
     parser.add_argument("new_name", metavar="NEW_NAME")
     parser.add_argument("--force", action="store_true", help="rename even with uncommitted changes in git")
     ns, unknown = parser.parse_known_args(args)
     if unknown:
-        raise DeployError(f"./deploy rename: unknown argument(s): {' '.join(unknown)}  (./deploy rename -h lists the options)")
+        raise PytError(f"./pyt rename: unknown argument(s): {' '.join(unknown)}  (./pyt rename -h lists the options)")
     new_name: str = ns.new_name
     old_name = cfg.app.name
     generated = render.outputs(cfg)
@@ -1666,10 +1669,10 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
         old_name = applied
         ignore.add("pytemplate.toml")  # dirty by definition
     elif package_dir(ROOT / "src", cfg.pkg) is None:
-        raise DeployError(
+        raise PytError(
             f"rename: src/{cfg.pkg}/ not found (app.name = '{cfg.app.name}' says the package is there).\n"
             "  If app.name was changed by hand: put the old name back in pytemplate.toml and run "
-            f"./deploy rename {new_name} again"
+            f"./pyt rename {new_name} again"
         )
     else:
         _check_the_name_is_applied(cfg, new_name)
@@ -1680,10 +1683,10 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
     changes = git_changes(ROOT)
     if isinstance(changes, list):
         changes = [p for p in changes if p not in ignore]
-    message = dirty_tree_message(changes, "rename", f"./deploy rename {new_name} --force")
+    message = dirty_tree_message(changes, "rename", f"./pyt rename {new_name} --force")
     if message and not ns.force:
         if not proc.DRY_RUN:
-            raise DeployError(message)
+            raise PytError(message)
         ui.warn(message)
     planned = plan(ROOT, old_name, new_name, generated=generated)
     new_cfg = validate_config(planned.config.new)
@@ -1702,24 +1705,24 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
     clean = tidy_before(cfg, planned)
     apply_plan(ROOT, planned)  # new_cfg: the renamed pytemplate.toml, validated before anything was written
     # The record follows the files at once (as in apply): named after the old app it is no longer
-    # trusted, and the ./deploy apply that finishes an interrupted rename reads it
+    # trusted, and the ./pyt apply that finishes an interrupted rename reads it
     cmd_apply.rename_record(new_name, record)
     try:
         try:
             ensure_lock(new_cfg)
-        except DeployError as e:
-            raise DeployError(f"{e}\n  The files are already renamed: fix the problem above and run ./deploy apply", e.code) from None
+        except PytError as e:
+            raise PytError(f"{e}\n  The files are already renamed: fix the problem above and run ./pyt apply", e.code) from None
         changed, edited = render.apply(new_cfg)
         if changed:
             ui.info(f"render: updated {', '.join(changed)}")
         if edited:
-            ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./deploy render --force)")
+            ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./pyt render --force)")
         tidy_after(new_cfg, planned, clean)
     except KeyboardInterrupt:  # Ctrl+C, or SIGTERM/SIGHUP passed on to uv (proc.Interrupted)
-        ui.warn("the files are already renamed: run ./deploy apply to finish (uv.lock and the generated files)")
+        ui.warn("the files are already renamed: run ./pyt apply to finish (uv.lock and the generated files)")
         raise
     ui.ok(f"renamed '{old_name}' -> '{new_name}' (package src/{new_cfg.pkg}/)")
-    ui.info("  Next: ./deploy test all, and review the changes with git diff")
+    ui.info("  Next: ./pyt test all, and review the changes with git diff")
     if DIST.is_dir() and any(DIST.iterdir()):
-        ui.info(f"  dist/ still holds the artifacts built as '{old_name}' (./deploy clean removes dist/ and .build/)")
+        ui.info(f"  dist/ still holds the artifacts built as '{old_name}' (./pyt clean removes dist/ and .build/)")
     return 0

@@ -1,20 +1,21 @@
-# Launcher matrix of the TEMPLATE repository (not rendered, and `./deploy new` does not copy
-# template-*.yml workflows): ./deploy, deploy.cmd and deploy.ps1 through every shell the
-# runners have, with `./deploy selftest --shells` (T1 argv, T2 exit code, T3 cwd, T4 the
+# Launcher matrix of the TEMPLATE repository (not rendered, and `./pyt new` does not copy
+# template-*.yml workflows): ./pyt, pyt.cmd and pyt.ps1 through every shell the
+# runners have, with `./pyt selftest --shells` (T1 argv, T2 exit code, T3 cwd, T4 the
 # xonsh-shell-kit route, T5 minimal PATH, T6 stdin, T7 install hints) plus the invocations a
-# user types. The runner's test suite runs in template-selftest.yml. The shells come from the
-# runner images and their package managers (the newest of each), except xonsh, pinned for
-# pushes and pull requests; the weekly run takes the newest xonsh too, so a red scheduled run
-# with no commit behind it means a shell changed (the versions are logged).
+# user types, on macOS and Windows (and WSL). The Linux job, with shellcheck, runs in the CI
+# image: template-ci-image.yml. The runner's test suite runs in template-selftest.yml. The
+# shells come from the runner images and their package managers (the newest of each), except
+# xonsh, pinned for pushes and pull requests; the weekly run takes the newest xonsh too, so a
+# red scheduled run with no commit behind it means a shell changed (the versions are logged).
 # template-keepalive.yml keeps the schedule alive. The gate job skips everything in
 # repositories made from the template.
 name: template-launchers
 
 on:
   push:
-    paths: [deploy, deploy.cmd, deploy.ps1, ".pytemplate/**", ".github/workflows/template-launchers.yml"]
+    paths: [pyt, pyt.cmd, pyt.ps1, ".pytemplate/**", ".github/workflows/template-launchers.yml"]
   pull_request:
-    paths: [deploy, deploy.cmd, deploy.ps1, ".pytemplate/**", ".github/workflows/template-launchers.yml"]
+    paths: [pyt, pyt.cmd, pyt.ps1, ".pytemplate/**", ".github/workflows/template-launchers.yml"]
   schedule:
     - cron: "53 4 * * 1" # weekly, Monday 04:53 UTC
   workflow_dispatch:
@@ -41,7 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -51,41 +52,37 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           XONSH: ${{ github.event_name == 'schedule' && 'xonsh' || 'xonsh==0.24.2' }}
         run: |
-          if [ "$RUNNER_OS" = Linux ]; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends dash zsh busybox ksh mksh yash fish
-          else
-            brew install fish nushell
-          fi
+          brew install fish nushell
           uv tool install --python 3.14 "$XONSH"
           uv tool dir --bin >> "$GITHUB_PATH"
       - name: Shell versions
         run: |
           xonsh --version; fish --version; pwsh --version; uv --version
-          if [ "$RUNNER_OS" = Linux ]; then (busybox 2>&1 || true) | sed -n 1p; shellcheck --version | sed -n 2p; fi
-          if [ "$RUNNER_OS" = macOS ]; then nu --version; /bin/bash --version | sed -n 1p; fi
-      - name: shellcheck
-        if: runner.os == 'Linux'
-        run: shellcheck -s sh deploy
+          nu --version; /bin/bash --version | sed -n 1p
       - name: uv also in ~/.local/bin (the launchers' fallback discovery, T5)
         run: mkdir -p ~/.local/bin && cp "$(command -v uv)" ~/.local/bin/
       - name: selftest --shells
-        run: ./deploy selftest --shells
+        run: ./pyt selftest --shells
       - name: User-style invocations
         run: |
-          for s in /bin/sh bash dash zsh; do "$s" ./deploy help >/dev/null || exit; echo "$s ok"; done
-          (cd src && ../deploy help >/dev/null)
-          (cd /tmp && "$GITHUB_WORKSPACE/deploy" help >/dev/null)
-          env -u UV PATH=/usr/bin:/bin ./deploy help >/dev/null
-          if [ "$RUNNER_OS" = Linux ]; then busybox sh ./deploy help >/dev/null; fi
-          if [ "$RUNNER_OS" = macOS ]; then /bin/bash ./deploy help >/dev/null; /bin/zsh ./deploy help >/dev/null; fi
-          pwsh -NoProfile -Command "./deploy.ps1 help > \$null; exit \$LASTEXITCODE"
-          set +e; ./deploy no-such-command; test $? -eq 2
+          for s in /bin/sh bash dash zsh; do "$s" ./pyt help >/dev/null || exit; echo "$s ok"; done
+          (cd src && ../pyt help >/dev/null)
+          (cd /tmp && "$GITHUB_WORKSPACE/pyt" help >/dev/null)
+          env -u UV PATH=/usr/bin:/bin ./pyt help >/dev/null
+          /bin/bash ./pyt help >/dev/null; /bin/zsh ./pyt help >/dev/null
+          pwsh -NoProfile -Command "./pyt.ps1 help > \$null; exit \$LASTEXITCODE"
+          set +e; ./pyt no-such-command; test $? -eq 2
 
   windows:
     needs: gate
     if: needs.gate.outputs.template == 'true'
     runs-on: windows-latest
+    env:
+      # busybox-w32: the 64-bit build scoop, Chocolatey and winget install. A new release: its
+      # file name and its line of https://frippery.org/files/busybox/SHA256SUM (the rolling
+      # busybox64u.exe ran whatever frippery.org served that day, unchecked).
+      BUSYBOX: busybox-w64-FRP-6075-g169694ebd.exe
+      BUSYBOX_SHA256: 07bb1e5b095b00d68a695481f9240879f33c5724b40aa2308f999d54ed78f075
     steps:
       - run: git config --global core.autocrlf input
       - uses: actions/checkout@v7
@@ -98,27 +95,37 @@ jobs:
         with: {msystem: UCRT64, release: false, update: false, path-type: minimal, install: dash}
       - uses: cygwin/cygwin-install-action@v6
         with: {install-dir: 'C:\cygwin', packages: dash, add-to-path: false}
+      # frippery.org, busybox-w32's only host, is often unreachable from the runners (four tries
+      # in a row timed out): the pinned file is kept in the cache, and checked either way
+      - id: busybox
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}\busybox
+          key: busybox-w32-${{ env.BUSYBOX }}-${{ env.BUSYBOX_SHA256 }}
       - name: busybox-w32 (a pinned release, SHA-256 checked)
         shell: pwsh
-        env:
-          # The 64-bit build scoop, Chocolatey and winget install. A new release: its file name
-          # and its line of https://frippery.org/files/busybox/SHA256SUM (the rolling
-          # busybox64u.exe ran whatever frippery.org served that day, unchecked).
-          BUSYBOX: busybox-w64-FRP-6075-g169694ebd.exe
-          BUSYBOX_SHA256: 07bb1e5b095b00d68a695481f9240879f33c5724b40aa2308f999d54ed78f075
         run: |
-          $out = "$env:RUNNER_TEMP\busybox.exe"
-          # frippery.org sometimes times out: retry a few times before failing the job
-          for ($i = 1; ; $i++) {
-            try { Invoke-WebRequest "https://frippery.org/files/busybox/$env:BUSYBOX" -OutFile $out; break }
-            catch { if ($i -ge 4) { throw }; Write-Host "busybox download failed (try $i): $_"; Start-Sleep -Seconds (15 * $i) }
+          $dir = "$env:RUNNER_TEMP\busybox"
+          $out = "$dir\busybox.exe"
+          if (-not (Test-Path $out)) {
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            # frippery.org sometimes times out: retry a few times before failing the job
+            for ($i = 1; ; $i++) {
+              try { Invoke-WebRequest "https://frippery.org/files/busybox/$env:BUSYBOX" -OutFile $out; break }
+              catch { if ($i -ge 4) { throw }; Write-Host "busybox download failed (try $i): $_"; Start-Sleep -Seconds (15 * $i) }
+            }
           }
           $hash = (Get-FileHash -Algorithm SHA256 $out).Hash.ToLowerInvariant()
           if ($hash -ne $env:BUSYBOX_SHA256) {
             Remove-Item $out
             throw "$env:BUSYBOX has SHA-256 $hash, not the pinned $env:BUSYBOX_SHA256"
           }
-          Add-Content $env:GITHUB_PATH $env:RUNNER_TEMP
+          Add-Content $env:GITHUB_PATH $dir
+      - if: steps.busybox.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}\busybox
+          key: ${{ steps.busybox.outputs.cache-primary-key }}
       - name: xonsh
         shell: bash
         env:
@@ -136,31 +143,31 @@ jobs:
         env:
           MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
           CYGWIN_ROOT: 'C:\cygwin'
-        run: ./deploy.ps1 selftest --shells
+        run: ./pyt.ps1 selftest --shells
       - shell: cmd
-        run: "call deploy.cmd help >nul || exit /b 1\r\ncd src && call ..\\deploy.cmd help >nul"
+        run: "call pyt.cmd help >nul || exit /b 1\r\ncd src && call ..\\pyt.cmd help >nul"
       - shell: pwsh
-        run: "./deploy.ps1 help > $null; Set-Location src; ../deploy.ps1 help > $null"
+        run: "./pyt.ps1 help > $null; Set-Location src; ../pyt.ps1 help > $null"
       - shell: powershell
-        run: ".\\deploy.ps1 help > $null; exit $LASTEXITCODE"
+        run: ".\\pyt.ps1 help > $null; exit $LASTEXITCODE"
       - shell: bash
-        run: "./deploy help >/dev/null && (cd src && ../deploy help >/dev/null) && sh ./deploy help >/dev/null && dash ./deploy help >/dev/null"
+        run: "./pyt help >/dev/null && (cd src && ../pyt help >/dev/null) && sh ./pyt help >/dev/null && dash ./pyt help >/dev/null"
       - name: MSYS2 login shells, minimal PATH (uv not on PATH)
         shell: msys2 {0}
         run: |
           pacman -Q msys2-runtime dash
           if command -v uv; then echo "uv unexpectedly on PATH"; exit 1; fi
-          for m in MSYS UCRT64 MINGW64 CLANG64; do MSYSTEM=$m bash -lc './deploy help >/dev/null' || exit; echo "$m ok"; done
-          dash ./deploy help >/dev/null
-          (cd src && ../deploy help >/dev/null)
-          rc=0; out=$(env -u UV USERPROFILE=/nonexistent LOCALAPPDATA=/nonexistent PATH=/usr/bin ./deploy help 2>&1 </dev/null) || rc=$?
+          for m in MSYS UCRT64 MINGW64 CLANG64; do MSYSTEM=$m bash -lc './pyt help >/dev/null' || exit; echo "$m ok"; done
+          dash ./pyt help >/dev/null
+          (cd src && ../pyt help >/dev/null)
+          rc=0; out=$(env -u UV USERPROFILE=/nonexistent LOCALAPPDATA=/nonexistent PATH=/usr/bin ./pyt help 2>&1 </dev/null) || rc=$?
           test "$rc" -eq 127; printf '%s' "$out" | grep -q winget; ! printf '%s' "$out" | grep -q curl
       - name: Cygwin login, no Windows PATH
         shell: pwsh
         env: {CHERE_INVOKING: '1', CYGWIN_NOWINPATH: '1'}
-        run: C:\cygwin\bin\bash.exe --login -o igncr -c 'uname -sr && ./deploy help >/dev/null && dash ./deploy help >/dev/null && cd src && ../deploy help >/dev/null'
+        run: C:\cygwin\bin\bash.exe --login -o igncr -c 'uname -sr && ./pyt help >/dev/null && dash ./pyt help >/dev/null && cd src && ../pyt help >/dev/null'
       - shell: pwsh
-        run: "busybox sh -c './deploy help >/dev/null && cd src && ../deploy help >/dev/null'"
+        run: "busybox sh -c './pyt help >/dev/null && cd src && ../pyt help >/dev/null'"
 
   wsl:
     needs: gate
@@ -173,7 +180,7 @@ jobs:
       - uses: Vampire/setup-wsl@v7
         with: {distribution: Ubuntu-24.04, additional-packages: curl dash zsh}
       - shell: wsl-bash {0}
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh && ./deploy help >/dev/null && dash ./deploy help >/dev/null
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh && ./pyt help >/dev/null && dash ./pyt help >/dev/null
       - name: selftest --shells through wsl.exe
         shell: pwsh
-        run: ./deploy.ps1 selftest --shells wsl
+        run: ./pyt.ps1 selftest --shells wsl

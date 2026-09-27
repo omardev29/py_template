@@ -1,5 +1,5 @@
 # check=skip=InvalidDefaultArgInFrom
-# Linux CI image of the TEMPLATE repository (template-ci-image.yml; `./deploy new` never copies
+# Linux CI image of the TEMPLATE repository (template-ci-image.yml; `./pyt new` never copies
 # .github/workflows/template-*). No version is written here: they come from pins.py, whose `env`
 # output the build script puts next to this file as pins.env. Build it with `sh build`, never
 # `docker build` alone: the context is the template's tracked files, prepared by that script.

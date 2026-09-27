@@ -1,16 +1,16 @@
 # pytemplate.toml: project configuration and working "mode".
 #
-# After editing it, run ./deploy apply: it brings the whole project in line (app.name
+# After editing it, run ./pyt apply: it brings the whole project in line (app.name
 # renames src/<pkg>/ and its imports, [backend] and [python] re-lock uv.lock and sync the
 # environments, [hooks] installs or removes the git hook, and .mypy.ini, pyrightconfig.json,
-# .ruff.toml and .vscode/ are regenerated: those also update by themselves on any ./deploy
-# command). ./deploy mode edits this file for you. app.preset cannot change in place:
-# create another project with ./deploy new DIR --preset P.
+# .ruff.toml and .vscode/ are regenerated: those also update by themselves on any ./pyt
+# command). ./pyt mode edits this file for you. app.preset cannot change in place:
+# create another project with ./pyt new DIR --preset P.
 schema = 1
 
 [app]
 name = "{{name}}"   # executable name; the Python package is src/{{pkg}}/
-preset = "script"   # script | raylib | flet   (another preset: ./deploy new DIR --preset P)
+preset = "script"   # script | raylib | flet   (another preset: ./pyt new DIR --preset P)
 gui = false         # true: executable without a console and launchers with pythonw/pypyw
 assets = ""         # "assets": bundle src/assets/ with the app; "" = none (no other folder name works)
 
@@ -19,7 +19,7 @@ assets = ""         # "assets": bundle src/assets/ with the app; "" = none (no o
 # pypy:    JIT compiler. Best for pure Python and cffi libraries (raylib). 3.11 syntax.
 # mypyc:   compiles compile.modules to C (AOT). Strict typing; Any forbidden in compiled code.
 active = "cpython"
-supported = ["cpython", "mypyc"]   # to add PyPy: ./deploy mode --supports +pypy
+supported = ["cpython", "mypyc"]   # to add PyPy: ./pyt mode --supports +pypy
 
 [python]
 cpython = "3.14"        # minor version; uv manages the patch
@@ -34,7 +34,7 @@ editor = "pylance"   # pylance | basedpyright (the latter also flags Any in the 
 modules = ["{{pkg}}.core"]   # what mypyc compiles: packages or modules of src/
 exclude = []                 # modules or subpackages inside those packages that stay interpreted
 forbid_imports = []          # imports forbidden in compiled code (e.g. UI libraries)
-annotate = false             # HTML report of slow lines on every compile (or ./deploy report)
+annotate = false             # HTML report of slow lines on every compile (or ./pyt report)
 # opt_level: mypyc's C optimization. MSVC: 1, 2 and 3 are all /O2
 opt_level = "3"              # 0 (debug only, slower than CPython) | 1 | 2 | 3 (default)
 no_semantic_interposition = true   # Linux gcc/clang: calls between compiled functions may be inlined
@@ -43,7 +43,7 @@ no_semantic_interposition = true   # Linux gcc/clang: calls between compiled fun
 # optimize: Python's -O level of the exe, nuitka and portable builds (higher = MORE stripped,
 # not faster); with mypyc, 1 and 2 also strip the compiled modules' asserts in every method
 optimize = 1   # 0 keep asserts | 1 strip asserts | 2 also docstrings
-default = { cpython = "exe", mypyc = "exe", pypy = "portable" }   # ./deploy build method
+default = { cpython = "exe", mypyc = "exe", pypy = "portable" }   # ./pyt build method
 exclude_modules = []   # never bundled by exe/nuitka even if imported, e.g. "ssl" without HTTPS
 
 [deploy.exe]
@@ -74,15 +74,15 @@ exclude = []     # extra file-name globs never packed (C runtime and python3*.dl
 # path = "tools/upx"   # a UPX binary, relative to the project root (default: PATH, then a pinned download)
 
 [hooks]
-# true: ./deploy apply (and setup) installs a git pre-commit hook that runs ./deploy hooks run
-# (ruff, format, generated files, lock); false: ./deploy apply removes pytemplate's hook
+# true: ./pyt apply (and setup) installs a git pre-commit hook that runs ./pyt hooks run
+# (ruff, format, generated files, lock); false: ./pyt apply removes pytemplate's hook
 pre_commit = true
 
 [vscode]
-# Status bar buttons (VS Code extension actboy168.tasks): ./deploy commands or [tasks] names
+# Status bar buttons (VS Code extension actboy168.tasks): ./pyt commands or [tasks] names
 buttons = ["run", "test", "check", "build"]
 
-# Custom Justfile-style recipes: ./deploy <name> [args...]
+# Custom Justfile-style recipes: ./pyt <name> [args...]
 [tasks.ci]
 help = "Same as CI: check and tests on every backend"
 deps = ["check all", "test all"]

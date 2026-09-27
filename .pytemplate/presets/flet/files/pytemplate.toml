@@ -1,11 +1,11 @@
 # pytemplate.toml: project configuration and working "mode" (flet preset).
 #
-# After editing it, run ./deploy apply: it brings the whole project in line (app.name
+# After editing it, run ./pyt apply: it brings the whole project in line (app.name
 # renames src/<pkg>/ and its imports, [preset.flet] re-pins flet, flet-desktop and flet-cli,
 # [backend] and [python] re-lock uv.lock and sync the environments, [hooks] installs or
 # removes the git hook, and .mypy.ini, pyrightconfig.json, .ruff.toml and .vscode/ are
-# regenerated: those also update by themselves on any ./deploy command). ./deploy mode edits
-# this file for you. app.preset cannot change in place: ./deploy new DIR --preset P.
+# regenerated: those also update by themselves on any ./pyt command). ./pyt mode edits
+# this file for you. app.preset cannot change in place: ./pyt new DIR --preset P.
 schema = 1
 
 [app]
@@ -75,7 +75,7 @@ pgo = false     # profile-guided C: needs app.gui = false and no assets (the bui
 pgo_args = []   # the app's arguments for that profiling run
 
 [deploy.flet]
-target = "host"   # `./deploy build --method flet`: host | windows | macos | linux | apk | aab | ipa | web
+target = "host"   # `./pyt build --method flet`: host | windows | macos | linux | apk | aab | ipa | web
 cleanup = true   # --cleanup-app --cleanup-packages: no tests, docs... in the bundle
 exclude = []     # app files/folders left out of `flet build` (--exclude)
 
@@ -90,16 +90,16 @@ exclude = []     # extra file-name globs never packed (C runtime and python3*.dl
 # path = "tools/upx"   # a UPX binary, relative to the project root (default: PATH, then a pinned download)
 
 [preset.flet]
-# ./deploy apply pins flet, flet-desktop and flet-cli to this version in pyproject.toml and re-locks
+# ./pyt apply pins flet, flet-desktop and flet-cli to this version in pyproject.toml and re-locks
 version = "1.0.1"   # flet, flet-desktop and flet-cli always at the same version
 
 [hooks]
-# true: ./deploy apply (and setup) installs a git pre-commit hook that runs ./deploy hooks run
-# (ruff, format, generated files, lock); false: ./deploy apply removes pytemplate's hook
+# true: ./pyt apply (and setup) installs a git pre-commit hook that runs ./pyt hooks run
+# (ruff, format, generated files, lock); false: ./pyt apply removes pytemplate's hook
 pre_commit = true
 
 [vscode]
-# Status bar buttons (VS Code extension actboy168.tasks): ./deploy commands or [tasks] names
+# Status bar buttons (VS Code extension actboy168.tasks): ./pyt commands or [tasks] names
 buttons = ["dev", "run", "test", "build"]
 
 [tasks.dev]

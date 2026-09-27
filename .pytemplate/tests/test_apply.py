@@ -1,16 +1,16 @@
-"""`./deploy apply` / `./deploy setup` (runner/cmd_apply.py): bring the project in line with
+"""`./pyt apply` / `./pyt setup` (runner/cmd_apply.py): bring the project in line with
 pytemplate.toml.
 
 Most tests build a throwaway project in tmp_path (a preset skeleton plus the pyproject.toml
-`./deploy new` would write) and run the runner in-process with a fake uv that edits
-pyproject.toml exactly like `uv add/remove --frozen` do. A few run the real `./deploy` in a
+`./pyt new` would write) and run the runner in-process with a fake uv that edits
+pyproject.toml exactly like `uv add/remove --frozen` do. A few run the real `./pyt` in a
 throwaway copy of the template; the one that re-locks skips when the package index cannot be
 reached, and `test_uv_frozen_edits_only_pyproject` checks, offline, the uv behaviour the fake
 imitates.
 
 The matrix: after editing each key of pytemplate.toml, what apply does.
   app.name                  the rename flow (src/<pkg>/, imports, pytemplate.toml, pyproject.toml)
-  app.preset                refused (exit 2): ./deploy new DIR --preset P
+  app.preset                refused (exit 2): ./pyt new DIR --preset P
   [preset.<name>]           uv remove/add --frozen of the option-driven requirements + one uv lock
   backend.supported/python  managed pyproject parts + uv lock (+ the PyPy 3.11 precheck when new)
   hooks.pre_commit          hook installed (true) / pytemplate's own hook removed (false)
@@ -41,7 +41,7 @@ from runner import cli, cmd_apply, cmd_dev, cmd_env, config, envs, hooks, preset
 from runner import project as project_module  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import ROOT  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 needs_uv = pytest.mark.skipif(shutil.which("uv") is None and not os.environ.get("UV"), reason="uv not found")
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not found")
@@ -84,7 +84,7 @@ def _preset_requirements() -> set[str]:
 
 
 def _pyproject(preset: str, name: str) -> str:
-    """pyproject.toml as `./deploy new NAME --preset PRESET` writes it (managed block included),
+    """pyproject.toml as `./pyt new NAME --preset PRESET` writes it (managed block included),
     from this project's pyproject.toml without the requirements its own preset added."""
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8").replace("\r\n", "\n")
     data = tomllib.loads(text)
@@ -286,7 +286,7 @@ def test_option_dependencies_are_only_the_templated_ones() -> None:
     assert presets.option_dependencies("raylib", presets.default_options("raylib")) == (["raylib==6.0.1.0"], [])
     assert presets.option_dependencies("raylib", {"package": "raylib_sdl", "version": "6.0.1.0"}) == (["raylib_sdl==6.0.1.0"], [])
     assert presets.option_dependencies("flet", {"version": "1.0.0"}) == (["flet==1.0.0", "flet-desktop==1.0.0"], ["flet-cli==1.0.0"])
-    with pytest.raises(DeployError, match=r"cannot format") as e:
+    with pytest.raises(PytError, match=r"cannot format") as e:
         presets.option_dependencies("flet", {})
     assert e.value.code == 2
 
@@ -298,10 +298,10 @@ def test_read_project_tolerates_a_bom_and_reports_broken_toml(tmp_path: Path) ->
     assert (project.name, project.deps, project.dev) == ("x", {"rich": "Rich>=13"}, {"pytest": "pytest"})
     assert not project.pypy_locked
     path.write_text("[project\n", encoding="utf-8")
-    with pytest.raises(DeployError, match="not valid TOML") as e:
+    with pytest.raises(PytError, match="not valid TOML") as e:
         cmd_apply.read_project(path)
     assert e.value.code == 2
-    with pytest.raises(DeployError, match="cannot be read"):
+    with pytest.raises(PytError, match="cannot be read"):
         cmd_apply.read_project(tmp_path / "missing.toml")
     path.write_text("[tool.uv]\nenvironments = [\"implementation_name == 'pypy' and x\"]\n", encoding="utf-8")
     assert cmd_apply.read_project(path).pypy_locked
@@ -360,7 +360,7 @@ def test_a_malformed_record_is_ignored_and_replaced(tmp_path: Path, content: str
 @pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_a_record_outside_a_merge_conflict_is_read(tmp_path: Path, eol: str) -> None:
     """`git merge` left conflict markers in the hashes of state.json, the record intact below
-    them: `./deploy apply` run before any rendering command read no record and refused with a
+    them: `./pyt apply` run before any rendering command read no record and refused with a
     false 'app.preset was changed' (render already salvages it: render._unconflicted)."""
     state = tmp_path / "state.json"
     ours = json.dumps({"comment": "x", "files": {"a": "1" * 64}, "applied": RECORD}, indent=2).split("\n")
@@ -392,7 +392,7 @@ def test_rename_record_changes_only_the_name(tmp_path: Path, monkeypatch: pytest
 
 
 def test_a_foreign_record_is_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`./deploy new` copies the template's state.json: its record (myapp, script) does not describe
+    """`./pyt new` copies the template's state.json: its record (myapp, script) does not describe
     the new project and must not steer apply (only a record named like the project counts)."""
     project, uv = _project(tmp_path, monkeypatch, "flet")
     state = project.root / ".pytemplate" / "state.json"
@@ -440,7 +440,7 @@ def _declared(deps: list[str], dev: list[str] | None = None) -> cmd_apply.Projec
         ("flet", {"version": "1.0.0"}, FLET_DEPS, FLET_DEV, None, "flet"),
         # the dependencies were removed by hand: the record says it is still that preset
         ("flet", {}, [], [], {"preset": "flet"}, "flet"),
-        # the record decides, whatever pyproject.toml declares (`./deploy new` writes the new
+        # the record decides, whatever pyproject.toml declares (`./pyt new` writes the new
         # project's own record, so a copy of the template's never stands for it)
         ("flet", {}, FLET_DEPS, FLET_DEV, {"preset": "script"}, "script"),
         ("raylib", {}, ["raylib==6.0.1.0"], [], {"preset": "script"}, "script"),
@@ -476,7 +476,7 @@ OWN_NO_BUILD_SIX = {"tool": {"uv": {"no-build-package": ["six"]}}}  # a project'
         ("script", {}, ["rich>=15.0.0"], {"tool": {"flet": {"org": "com.example"}}}, {}, "flet"),
         ("flet", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, NO_BUILD_RAYLIB_SDL, "raylib"),
         ("script", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, NO_BUILD_RAYLIB_SDL, "raylib"),
-        # the managed block follows app.preset (`./deploy lock` after a hand switch writes the
+        # the managed block follows app.preset (`./pyt lock` after a hand switch writes the
         # new preset's keys): never a trace of it; putting app.preset back is accepted
         ("raylib", {}, ["rich>=15.0.0"], NO_BUILD_RAYLIB, NO_BUILD_RAYLIB, "script"),
         ("script", {}, ["rich>=15.0.0"], NO_BUILD_RAYLIB, NO_BUILD_RAYLIB, "script"),
@@ -536,7 +536,7 @@ def test_unformat_reads_the_options_back(template: str, text: str, expected: dic
 
 @pytest.mark.parametrize("made_with", ["script", "flet"])
 def test_a_hand_switch_stays_refused_after_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, made_with: str) -> None:
-    """`./deploy lock` (mode and rename too) writes the managed [tool.uv] block from app.preset: after
+    """`./pyt lock` (mode and rename too) writes the managed [tool.uv] block from app.preset: after
     a hand switch to raylib it holds raylib's no-build-package. That is no trace of the preset the
     project was made with: apply stays refused, doctor names the recorded preset, and putting
     app.preset back is accepted."""
@@ -547,7 +547,7 @@ def test_a_hand_switch_stays_refused_after_lock(tmp_path: Path, monkeypatch: pyt
     project.edit("app", "preset", "raylib")
     assert cmd_env.cmd_lock(project.cfg(), []) == 0
     assert project.pyproject()["tool"]["uv"]["no-build-package"] == ["raylib"]
-    with pytest.raises(DeployError, match=f"changed from '{made_with}' to 'raylib'") as e:
+    with pytest.raises(PytError, match=f"changed from '{made_with}' to 'raylib'") as e:
         _run(project)
     assert e.value.code == 2 and "Put back app.preset = \"" + made_with + '"' in str(e.value)
     assert cmd_apply.pending(project.cfg())[0][0] == f"app.preset = 'raylib' but the project was made with the '{made_with}' preset"
@@ -567,12 +567,12 @@ def test_a_record_names_the_preset_of_a_script_project_with_raylib(tmp_path: Pat
     uv.locked = (project.root / "pyproject.toml").read_bytes()
     for switched in ("flet", "raylib"):
         project.edit("app", "preset", switched)
-        with pytest.raises(DeployError, match=f"changed from 'script' to '{switched}'"):
+        with pytest.raises(PytError, match=f"changed from 'script' to '{switched}'"):
             _run(project)
 
 
 def test_a_script_project_may_depend_on_raylib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`./deploy add raylib` in a script project that was applied (its record says script):
+    """`./pyt add raylib` in a script project that was applied (its record says script):
     apply, setup and doctor take it for what it is, not for a hand-switched raylib project."""
     project, uv = _project(tmp_path, monkeypatch, "script")
     assert _run(project) == 0  # the record: script
@@ -586,14 +586,14 @@ def test_a_script_project_may_depend_on_raylib(tmp_path: Path, monkeypatch: pyte
 
 
 def _as_new(project: Project) -> None:
-    """What `./deploy new` leaves: the new project's own record (presets.init writes it)."""
+    """What `./pyt new` leaves: the new project's own record (presets.init writes it)."""
     cmd_apply.save_record(cmd_apply.record_of(project.cfg()), cmd_apply.state_file(project.root))
 
 
 @pytest.mark.parametrize("added", [["raylib==6.0.1.0"], FLET_DEPS])
 def test_a_new_script_project_may_depend_on_raylib_before_its_first_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, added: list[str]) -> None:
-    """`./deploy new DIR --preset script`, `./deploy add raylib` (or flet), then the first
-    `./deploy setup`: the project's own record (written by new) says script."""
+    """`./pyt new DIR --preset script`, `./pyt add raylib` (or flet), then the first
+    `./pyt setup`: the project's own record (written by new) says script."""
     project, uv = _project(tmp_path, monkeypatch, "script")
     _as_new(project)
     uv(envs.tool_env(project.cfg()), ["add", "--frozen", *added])
@@ -612,7 +612,7 @@ def test_a_raylib_package_swapped_by_hand_before_the_first_apply(tmp_path: Path,
     uv(envs.tool_env(project.cfg()), ["add", "--frozen", "raylib_sdl==6.0.1.0"])
     assert cmd_apply.applied_state(project.cfg(), cmd_apply.read_project()).preset == "raylib"
     # the one thing to fix is [preset.raylib] (it wins over a hand `uv add`), not app.preset
-    assert cmd_apply.pending(project.cfg()) == [("[preset.raylib] is not applied to pyproject.toml (add raylib==6.0.1.0)", "./deploy apply")]
+    assert cmd_apply.pending(project.cfg()) == [("[preset.raylib] is not applied to pyproject.toml (add raylib==6.0.1.0)", "./pyt apply")]
     project.edit("preset.raylib", "package", "raylib_sdl")
     assert cmd_apply.pending(project.cfg()) == []
     assert _run(project) == 0
@@ -647,13 +647,13 @@ def test_a_guessed_preset_says_it_is_a_guess(tmp_path: Path, monkeypatch: pytest
     project, uv = _project(tmp_path, monkeypatch, "raylib")
     uv(envs.tool_env(project.cfg()), ["remove", "--frozen", "raylib"])
     uv(envs.tool_env(project.cfg()), ["add", "--frozen", "raylib_sdl==6.0.1.0"])
-    with pytest.raises(DeployError, match="changed from 'script' to 'raylib'") as e:
+    with pytest.raises(PytError, match="changed from 'script' to 'raylib'") as e:
         _run(project)
     assert "no record of the last apply, and pyproject.toml holds no trace of the raylib preset" in str(e.value)
-    assert "./deploy add raylib==6.0.1.0" in str(e.value) and "[preset.raylib]" in str(e.value)
+    assert "./pyt add raylib==6.0.1.0" in str(e.value) and "[preset.raylib]" in str(e.value)
     [(label, hint)] = cmd_apply.pending(project.cfg())
     assert label == "app.preset = 'raylib', but pyproject.toml holds no trace of that preset (and there is no record of the last apply)"
-    assert "./deploy add raylib==6.0.1.0" in hint
+    assert "./pyt add raylib==6.0.1.0" in hint
     # following the hint: set [preset.raylib] to what pyproject.toml declares
     project.edit("preset.raylib", "package", "raylib_sdl")
     assert cmd_apply.pending(project.cfg()) == [] and _run(project) == 0
@@ -768,9 +768,9 @@ def test_a_failed_lock_restores_pyproject(tmp_path: Path, monkeypatch: pytest.Mo
     original = (project.root / "pyproject.toml").read_bytes()
     project.edit("preset.flet", "version", "9.9.9")  # a version that does not exist
     uv.fail.add("lock")
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         _run(project)
-    assert "pyproject.toml was restored" in str(e.value) and "./deploy apply again" in str(e.value)
+    assert "pyproject.toml was restored" in str(e.value) and "./pyt apply again" in str(e.value)
     assert e.value.code == 1  # uv's exit code
     assert (project.root / "pyproject.toml").read_bytes() == original
     assert cmd_apply.load_record() is None  # nothing recorded as applied
@@ -787,7 +787,7 @@ def test_a_failed_add_restores_pyproject_too(tmp_path: Path, monkeypatch: pytest
     original = (project.root / "pyproject.toml").read_bytes()
     project.edit("preset.raylib", "package", "raylib_sdl")
     uv.fail.add("add")  # e.g. an option value uv cannot parse: the remove already happened
-    with pytest.raises(DeployError, match="pyproject.toml was restored") as e:
+    with pytest.raises(PytError, match="pyproject.toml was restored") as e:
         _run(project)
     assert e.value.code == 1
     assert ["remove", "--frozen", "raylib"] in uv.calls
@@ -801,7 +801,7 @@ def test_the_record_follows_the_lock_when_a_later_step_fails(tmp_path: Path, mon
     assert _run(project) == 0
     project.edit("preset.raylib", "package", "raylib_software")
     uv.fail.add("sync")
-    with pytest.raises(DeployError, match="sync"):
+    with pytest.raises(PytError, match="sync"):
         _run(project)
     assert [r for r in project.pyproject()["project"]["dependencies"] if r.startswith("raylib")] == ["raylib-software==6.0.1.0"]
     assert cmd_apply.load_record() == {"name": "alpha", "preset": "raylib", "dependencies": ["raylib_software==6.0.1.0"], "dev": []}
@@ -820,7 +820,7 @@ def test_the_record_follows_a_rename_when_the_lock_fails(tmp_path: Path, monkeyp
     assert _run(project) == 0
     project.edit("app", "name", "beta")
     uv.fail.add("lock")
-    with pytest.raises(DeployError, match="the app is already renamed"):
+    with pytest.raises(PytError, match="the app is already renamed"):
         _run(project)
     uv.fail.clear()
     assert cmd_apply.load_record() == {"name": "beta", "preset": "raylib", "dependencies": ["raylib_sdl==6.0.1.0"], "dev": []}
@@ -857,11 +857,11 @@ def test_a_failed_python_311_check_restores_pyproject_and_the_lock(tmp_path: Pat
     project.edit("backend", "supported", ["cpython", "pypy", "mypyc"])
 
     def precheck(cfg: Config) -> None:
-        raise DeployError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
+        raise PytError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
 
     monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", precheck)
     count = len(uv.calls)
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         _run(project)
     assert "pyproject.toml and uv.lock were restored" in str(e.value) and e.value.code == 2
     assert {n: (project.root / n).read_bytes() for n in ("pyproject.toml", "uv.lock")} == before
@@ -891,7 +891,7 @@ def test_dry_run_with_pypy_new_and_a_stale_lock(tmp_path: Path, monkeypatch: pyt
 def test_a_state_file_that_cannot_be_written_is_a_clear_error(tmp_path: Path) -> None:
     state = tmp_path / "state.json"
     state.mkdir()  # a folder in the way: unwritable on every OS, even for root
-    with pytest.raises(DeployError, match="cannot write") as e:
+    with pytest.raises(PytError, match="cannot write") as e:
         cmd_apply.save_record(RECORD, state)
     assert e.value.code == 2
 
@@ -908,7 +908,7 @@ def test_a_pyproject_that_cannot_be_written_is_a_clear_error(tmp_path: Path, mon
         return real(self, data)
 
     monkeypatch.setattr(Path, "write_bytes", write_bytes)
-    with pytest.raises(DeployError, match="cannot write pyproject.toml: Permission denied") as e:
+    with pytest.raises(PytError, match="cannot write pyproject.toml: Permission denied") as e:
         _run(project)
     assert e.value.code == 2
 
@@ -978,7 +978,7 @@ def test_setup_is_the_same_operation(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert cmd_env.cmd_setup(project.cfg(), []) == 0
     assert ["add", "--frozen", "--dev", "flet-cli==1.0.0"] in uv.calls
     err = capsys.readouterr().err
-    assert "==> setup" in err and "done. Try: ./deploy run" in err
+    assert "==> setup" in err and "done. Try: ./pyt run" in err
 
 
 @pytest.mark.parametrize("command", ["apply", "setup"])
@@ -986,7 +986,7 @@ def test_unknown_arguments_are_refused_before_anything(tmp_path: Path, monkeypat
     project, uv = _project(tmp_path, monkeypatch)
     before = project.snapshot()
     for bad in (["--frce"], ["cpython"], ["--force", "x"]):
-        with pytest.raises(DeployError, match=f"{command}: unrecognized arguments") as e:
+        with pytest.raises(PytError, match=f"{command}: unrecognized arguments") as e:
             _run(project, *bad, command=command)
         assert e.value.code == 2
     assert project.snapshot() == before and uv.calls == []
@@ -998,7 +998,7 @@ def test_commands_table() -> None:
         assert (command.render, command.group, command.usage) == (False, "Environment", "[--force]")
     assert cli.COMMANDS["apply"].module == "cmd_apply" and cli.COMMANDS["setup"].func == "cmd_setup"
     assert cli.COMMANDS["rename"].render is False  # rename renders at the end, never before its checks
-    assert "cmd_apply.doctor(cfg, check)" in inspect.getsource(cmd_env.cmd_doctor)
+    assert "cmd_apply.doctor(cfg, check)" in inspect.getsource(cmd_env._project)  # doctor's project steps
 
 
 @pytest.mark.parametrize(
@@ -1043,7 +1043,7 @@ def test_a_dropped_backend_leaves_a_note(tmp_path: Path, monkeypatch: pytest.Mon
     project.edit("backend", "supported", ["cpython", "mypyc"])
     assert _run(project) == 0
     err = capsys.readouterr().err
-    assert "note: .venv-pypy is not used by this configuration" in err and "./deploy clean --envs" in err
+    assert "note: .venv-pypy is not used by this configuration" in err and "./pyt clean --envs" in err
     assert (project.root / ".venv-pypy").is_dir()  # never deleted by apply
     assert ["sync", "--locked", "--all-groups"] in uv.calls and "environments     synced .venv\n" in err
 
@@ -1065,7 +1065,7 @@ def test_a_hand_edited_name_is_renamed(tmp_path: Path, monkeypatch: pytest.Monke
     project.edit("app", "name", new)
     assert cmd_apply.pending(project.cfg())[0] == (
         f"app.name = '{new}' is not applied: the package is still src/{rename.package_of(old)}/",
-        f"./deploy apply  (renames '{old}' -> '{new}')",
+        f"./pyt apply  (renames '{old}' -> '{new}')",
     )
     assert _run(project) == 0
     skeleton = presets.skeleton(preset, new)
@@ -1087,7 +1087,7 @@ def test_only_the_pyproject_name_differs(tmp_path: Path, monkeypatch: pytest.Mon
     path.write_text(path.read_text(encoding="utf-8").replace('"alpha"', '"other"'), encoding="utf-8", newline="\n")
     uv.locked = path.read_bytes()  # uv.lock was made with that name
     assert project.pyproject()["tool"]["flet"]["product"] == "other"
-    assert cmd_apply.pending(project.cfg()) == [("pyproject.toml [project] name = 'other', but app.name = 'alpha'", "./deploy apply")]
+    assert cmd_apply.pending(project.cfg()) == [("pyproject.toml [project] name = 'other', but app.name = 'alpha'", "./pyt apply")]
     assert _run(project) == 0
     data = project.pyproject()
     assert data["project"]["name"] == "alpha" and data["tool"]["flet"]["product"] == "alpha"
@@ -1110,7 +1110,7 @@ def test_a_pyproject_name_that_differs_only_in_spelling_is_put_back(tmp_path: Pa
     uv.locked = path.read_bytes()
     cfg = project.cfg()
     assert cmd_apply.applied_name(cfg) is None  # what rename starts from: app.name itself
-    assert cmd_apply.pending(cfg) == [("pyproject.toml [project] name = 'myapp', but app.name = 'MyApp'", "./deploy apply")]
+    assert cmd_apply.pending(cfg) == [("pyproject.toml [project] name = 'myapp', but app.name = 'MyApp'", "./pyt apply")]
     assert _run(project) == 0
     assert project.pyproject()["project"]["name"] == "MyApp" and cmd_apply.pending(project.cfg()) == []
     assert prose.read_text(encoding="utf-8") == "# welcome to myapp, the best app\n"  # no rename touched it
@@ -1128,7 +1128,7 @@ def test_both_names_edited_by_hand_are_renamed(tmp_path: Path, monkeypatch: pyte
     path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "beta"', 1), encoding="utf-8", newline="\n")
     cfg = project.cfg()
     assert cmd_apply.applied_name(cfg) == "alpha"
-    assert cmd_apply.pending(cfg)[0] == ("app.name = 'beta' is not applied: the package is still src/alpha/", "./deploy apply  (renames 'alpha' -> 'beta')")
+    assert cmd_apply.pending(cfg)[0] == ("app.name = 'beta' is not applied: the package is still src/alpha/", "./pyt apply  (renames 'alpha' -> 'beta')")
     assert _run(project) == 0
     skeleton = presets.skeleton("script", "beta")
     assert _owned(project.root) == {k: v for k, v in skeleton.items() if k.split("/")[0] in ("src", "tests", "typings")}
@@ -1140,7 +1140,7 @@ def test_both_names_edited_by_hand_are_renamed(tmp_path: Path, monkeypatch: pyte
 def test_a_name_of_another_package_in_src_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: bool) -> None:
     """app.name set by hand to the name of another package of the project (src/helpers/): apply
     rewrote only pyproject.toml [project] name and said "applied", the app still in src/alpha/.
-    It refuses, as `./deploy rename helpers` does, and writes nothing."""
+    It refuses, as `./pyt rename helpers` does, and writes nothing."""
     project, uv = _project(tmp_path, monkeypatch)
     assert _run(project) == 0
     if not record:  # pyproject.toml [project] name alone says what the app is
@@ -1152,7 +1152,7 @@ def test_a_name_of_another_package_in_src_is_refused(tmp_path: Path, monkeypatch
     before, count = project.snapshot(), len(uv.calls)
     for dry in (False, True):
         monkeypatch.setattr(proc, "DRY_RUN", dry)
-        with pytest.raises(DeployError, match=r"src/helpers/ already exists and is not the app's package") as e:
+        with pytest.raises(PytError, match=r"src/helpers/ already exists and is not the app's package") as e:
             _run(project)
         assert e.value.code == 2 and 'Put back app.name = "alpha"' in str(e.value)
     assert project.snapshot() == before and uv.changing(count) == []
@@ -1174,14 +1174,14 @@ def test_a_pyproject_name_edited_to_another_package_is_put_back(tmp_path: Path, 
     path = project.root / "pyproject.toml"
     path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "engine"', 1), encoding="utf-8", newline="\n")
     uv.locked = path.read_bytes()
-    assert cmd_apply.pending(project.cfg()) == [("pyproject.toml [project] name = 'engine', but app.name = 'alpha'", "./deploy apply")]
+    assert cmd_apply.pending(project.cfg()) == [("pyproject.toml [project] name = 'engine', but app.name = 'alpha'", "./pyt apply")]
     assert _run(project) == 0
     assert project.pyproject()["project"]["name"] == "alpha" and cmd_apply.pending(project.cfg()) == []
     assert (project.root / "src" / "alpha").is_dir() and engine.is_dir()
     # without a record either line may be the edited one: refused, and the message says both ways
     path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "engine"', 1), encoding="utf-8", newline="\n")
     (project.root / ".pytemplate" / "state.json").write_text("{}", encoding="utf-8")
-    with pytest.raises(DeployError, match="src/alpha/ already exists and is not the app's package") as e:
+    with pytest.raises(PytError, match="src/alpha/ already exists and is not the app's package") as e:
         _run(project)
     assert 'put back name = "alpha" there' in str(e.value)
     assert 'put back name = "alpha" there' in cmd_apply.pending(project.cfg())[0][1]
@@ -1192,18 +1192,18 @@ def test_a_pyproject_name_edited_to_another_package_is_put_back(tmp_path: Path, 
 def test_a_hand_edited_preset_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old: str, new: str, record: bool) -> None:
     project, uv = _project(tmp_path, monkeypatch, old)
     if record:
-        _as_new(project)  # the record `./deploy new` writes (else: it was lost)
+        _as_new(project)  # the record `./pyt new` writes (else: it was lost)
     project.edit("app", "preset", new)
     before = project.snapshot()
     for command in ("apply", "setup"):
-        with pytest.raises(DeployError) as e:
+        with pytest.raises(PytError) as e:
             _run(project, command=command)
         assert e.value.code == 2
         message = str(e.value)
         assert f"changed from '{old}' to '{new}' by hand" in message
-        assert f'Put back app.preset = "{old}"' in message and f"./deploy new DIR --preset {new}" in message
+        assert f'Put back app.preset = "{old}"' in message and f"./pyt new DIR --preset {new}" in message
     monkeypatch.setattr(proc, "DRY_RUN", True)
-    with pytest.raises(DeployError, match="by hand"):
+    with pytest.raises(PytError, match="by hand"):
         _run(project)
     assert project.snapshot() == before and uv.calls == []
     label = cmd_apply.pending(project.cfg())[0][0]
@@ -1218,7 +1218,7 @@ def test_an_invalid_hand_edited_name_is_refused_before_anything(tmp_path: Path, 
     before = project.snapshot()
     for bad, message in (("rich", "dependency"), ("json", "standard library"), ("compression", "standard library"), ("class", "keyword")):
         project.edit("app", "name", bad)
-        with pytest.raises(DeployError, match=message) as e:
+        with pytest.raises(PytError, match=message) as e:
             _run(project)
         assert e.value.code == 2 and str(e.value).startswith("app.name: ")
     project.edit("app", "name", "alpha")
@@ -1261,7 +1261,7 @@ def test_a_broken_managed_block_is_refused_before_anything(tmp_path: Path, monke
     before = project.snapshot()
     for dry in (False, True):
         monkeypatch.setattr(proc, "DRY_RUN", dry)
-        with pytest.raises(DeployError, match="pytemplate") as e:
+        with pytest.raises(PytError, match="pytemplate") as e:
             _run(project)
         assert e.value.code == 2
     assert project.snapshot() == before and uv.calls == []
@@ -1276,7 +1276,7 @@ def test_a_project_name_that_cannot_be_set_is_refused_before_anything(tmp_path: 
     before = project.snapshot()
     for dry in (True, False):  # planned: --dry-run says it too, and the real run writes nothing
         monkeypatch.setattr(proc, "DRY_RUN", dry)
-        with pytest.raises(DeployError, match=r'could not set \[project\] name = "alpha"') as e:
+        with pytest.raises(PytError, match=r'could not set \[project\] name = "alpha"') as e:
             _run(project)
         assert e.value.code == 2
     assert project.snapshot() == before and uv.calls == []
@@ -1300,7 +1300,7 @@ def test_unused_environments_are_named_never_deleted(tmp_path: Path, monkeypatch
 
 
 def test_the_mismatch_hints_name_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    """`./deploy lock` applies the managed block but not [preset.*]: after a raylib package switch
+    """`./pyt lock` applies the managed block but not [preset.*]: after a raylib package switch
     it moved no-build-package to raylib_sdl and kept the raylib dependency. Every hint for a
     pyproject.toml that does not match pytemplate.toml names apply."""
     from runner import cmd_mode
@@ -1308,11 +1308,11 @@ def test_the_mismatch_hints_name_apply(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(render, "pyproject_outdated", lambda cfg: True)
     monkeypatch.setattr(hooks, "uv_lock_check", lambda cfg: (0, ""))
     result = hooks.check_lock(_cfg("raylib"))
-    assert result.passed is False and "does not match pytemplate.toml: ./deploy apply" in result.hint and "lock" not in result.hint
+    assert result.passed is False and "does not match pytemplate.toml: ./pyt apply" in result.hint and "lock" not in result.hint
     monkeypatch.setattr(render, "apply", lambda cfg, **kw: ([], []))
     assert cmd_mode.cmd_render(_cfg("raylib"), ["--check"]) == 1
-    assert "does not match pytemplate.toml: ./deploy apply" in capsys.readouterr().err
-    assert '"pyproject.toml matches pytemplate.toml", "./deploy apply"' in inspect.getsource(cmd_env.cmd_doctor)
+    assert "does not match pytemplate.toml: ./pyt apply" in capsys.readouterr().err
+    assert '"pyproject.toml matches pytemplate.toml", "./pyt apply"' in inspect.getsource(cmd_env._project)
 
 
 # --- the git hook ------------------------------------------------------------------------------------
@@ -1355,7 +1355,7 @@ def test_git_refusing_the_repository_is_said_not_hidden(tmp_path: Path, monkeypa
     project, _ = _project(tmp_path, monkeypatch)
 
     def refuse(*args: Any, **kwargs: Any) -> hooks.Repo:
-        raise DeployError(f"git cannot use the repository of {project.root}:\n  fatal: detected dubious ownership in repository", 2)
+        raise PytError(f"git cannot use the repository of {project.root}:\n  fatal: detected dubious ownership in repository", 2)
 
     monkeypatch.setattr(hooks, "find_repo", refuse)
     assert _run(project) == 0
@@ -1412,7 +1412,7 @@ def test_every_hook_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsy
     project, _ = _project(tmp_path, monkeypatch)
     _git(project.root, "init", "-q")
     hook = project.root / ".git" / "hooks" / "pre-commit"
-    ours = hooks.hook_script("./deploy")
+    ours = hooks.hook_script("./pyt")
 
     def run(dry: bool) -> str:
         monkeypatch.setattr(proc, "DRY_RUN", dry)
@@ -1426,7 +1426,7 @@ def test_every_hook_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsy
         (True, ours, "installed", "already installed"),
         (True, ours.replace("hooks run", "hooks run  "), "would update the pre-commit hook", "updated"),
         (True, "#!/bin/sh\necho mine\n", "another tool's hook: left alone", "another tool's hook: left alone"),
-        (True, "#!/bin/sh\nsh ./deploy hooks run || exit $?\n", "a hook that runs ./deploy hooks run: left alone", "a hook that runs ./deploy hooks run: left alone"),
+        (True, "#!/bin/sh\nsh ./pyt hooks run || exit $?\n", "a hook that runs ./pyt hooks run: left alone", "a hook that runs ./pyt hooks run: left alone"),
         (False, ours, "would remove pytemplate's pre-commit hook", "removed (hooks.pre_commit = false)"),
         (False, None, "not installed (hooks.pre_commit = false)", "not installed (hooks.pre_commit = false)"),
         (False, "#!/bin/sh\necho mine\n", "another tool's hook: left alone", "another tool's hook: left alone"),
@@ -1449,8 +1449,8 @@ def test_every_hook_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsy
     assert run(False).startswith("core.hooksPath is set: nothing installed") and not hook.exists()
     # that folder's hook already runs the checks: said so, not "nothing installed"
     (project.root / ".githooks").mkdir()
-    (project.root / ".githooks" / "pre-commit").write_text("#!/bin/sh\nsh ./deploy hooks run || exit $?\n", encoding="utf-8")
-    assert run(True) == run(False) == "core.hooksPath is set: .githooks/pre-commit runs ./deploy hooks run"
+    (project.root / ".githooks" / "pre-commit").write_text("#!/bin/sh\nsh ./pyt hooks run || exit $?\n", encoding="utf-8")
+    assert run(True) == run(False) == "core.hooksPath is set: .githooks/pre-commit runs ./pyt hooks run"
 
 
 @needs_git
@@ -1465,7 +1465,7 @@ def test_apply_and_a_chained_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     q = tmp_path / "q"
     q.mkdir()
     for folder in (project.root, q):  # live projects: their launchers exist
-        (folder / "deploy").write_text("#!/bin/sh\n", encoding="utf-8")
+        (folder / "pyt").write_text("#!/bin/sh\n", encoding="utf-8")
     rp, rq = (hooks.find_repo(d, environ={}, cwd=tmp_path) for d in (project.root, q))
     target, local = tmp_path / ".git" / "hooks" / "pre-commit", tmp_path / ".git" / "hooks" / "pre-commit.local"
 
@@ -1492,9 +1492,9 @@ def test_apply_and_a_chained_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert not local.exists() and target.read_bytes() == q_hook  # q's own hook is never touched
     assert not [p for p, _ in cmd_apply.pending(project.cfg()) if "hook" in p]
     project.edit("hooks", "pre_commit", True)
-    assert row(False) == "another project's hook of this repository: left alone (./deploy hooks install --force runs both)"
+    assert row(False) == "another project's hook of this repository: left alone (./pyt hooks install --force runs both)"
     local.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")  # a third hook there: --force would fail
-    assert row(False) == "another project's hook of this repository: left alone (pre-commit.local is taken too: ./deploy hooks status says what to do)"
+    assert row(False) == "another project's hook of this repository: left alone (pre-commit.local is taken too: ./pyt hooks status says what to do)"
     local.unlink()
     # chained again, then q goes away: its stale hook is replaced by p's, and p's copy goes
     hooks.uninstall(rq)
@@ -1571,7 +1571,7 @@ def test_the_hook_blocks_a_commit_of_changes_apply_has_not_applied(tmp_path: Pat
     assert not render.pyproject_outdated(project.cfg())
     result = hooks.check_lock(project.cfg())
     assert result.passed is False
-    assert "[preset.raylib] is not applied to pyproject.toml (add raylib==6.0.2.0): ./deploy apply" in result.hint
+    assert "[preset.raylib] is not applied to pyproject.toml (add raylib==6.0.2.0): ./pyt apply" in result.hint
 
 
 def test_reference_problems(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1612,7 +1612,7 @@ def test_render_auto_points_at_apply(monkeypatch: pytest.MonkeyPatch, capsys: py
     monkeypatch.setattr(render, "pyproject_outdated", lambda cfg: True)
     render.auto(_cfg("script"))
     err = capsys.readouterr().err
-    assert "./deploy apply" in err and "./deploy lock" not in err
+    assert "./pyt apply" in err and "./pyt lock" not in err
 
 
 def _table(text: str, header: str) -> str:
@@ -1623,25 +1623,25 @@ def _table(text: str, header: str) -> str:
 def test_config_comments_say_how_changes_are_applied(preset: str) -> None:
     text = (ROOT / ".pytemplate" / "presets" / preset / "files" / "pytemplate.toml").read_text(encoding="utf-8")
     head = text.split("\nschema = 1\n", 1)[0]
-    assert "run ./deploy apply" in head and "./deploy new DIR --preset P" in head
-    assert "run any ./deploy command" not in head and "./deploy lock" not in text
-    assert "./deploy apply" in _table(text, "[hooks]") and "false" in _table(text, "[hooks]")
+    assert "run ./pyt apply" in head and "./pyt new DIR --preset P" in head
+    assert "run any ./pyt command" not in head and "./pyt lock" not in text
+    assert "./pyt apply" in _table(text, "[hooks]") and "false" in _table(text, "[hooks]")
     if preset != "script":
-        assert "./deploy apply" in _table(text, f"[preset.{preset}]")
+        assert "./pyt apply" in _table(text, f"[preset.{preset}]")
     if (TEMPLATE_DIR / "template-repo").is_file():  # the template's root is the script preset as myapp
         root = (ROOT / "pytemplate.toml").read_bytes().replace(b"\r\n", b"\n")  # a CRLF checkout (Windows)
         assert root == presets.skeleton("script", "myapp")["pytemplate.toml"]
 
 
-# --- the real ./deploy in a throwaway copy ----------------------------------------------------------------
+# --- the real ./pyt in a throwaway copy ----------------------------------------------------------------
 
 
-def _deploy(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _pyt(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     drop = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "PYTEMPLATE_CALLER_CWD", "PYTEMPLATE_LAUNCHER")
     env = {k: v for k, v in os.environ.items() if k not in drop}
     env.update(NO_COLOR="1", PYTHONDONTWRITEBYTECODE="1", PYTHONUTF8="1")
     return subprocess.run(
-        [sys.executable, "-B", str(root / ".pytemplate" / "deploy.py"), *args],
+        [sys.executable, "-B", str(root / ".pytemplate" / "pyt.py"), *args],
         cwd=root, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, check=False,
     )
 
@@ -1669,7 +1669,7 @@ def _edit_copy(root: Path, table: str, key: str, value: Any) -> None:
 
 
 def _copy_app(root: Path) -> dict[str, Any]:
-    """[app] of the copy: a project made with ./deploy new has its own name and preset."""
+    """[app] of the copy: a project made with ./pyt new has its own name and preset."""
     app: dict[str, Any] = tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8-sig"))["app"]
     return app
 
@@ -1679,7 +1679,7 @@ def test_real_dry_run_in_a_copy(copy: Path) -> None:
     _edit_copy(copy, "app", "name", "beta")
     _edit_copy(copy, "hooks", "pre_commit", False)
     before = _tree(copy)
-    r = _deploy(copy, "--dry-run", "apply")
+    r = _pyt(copy, "--dry-run", "apply")
     assert r.returncode == 0, r.stderr
     assert f"would rename '{old}' -> 'beta'" in r.stderr and re.search(r"\+ name = [\"']beta[\"']", r.stderr), r.stderr
     init = copy / "src" / rename.package_of(old) / "__init__.py"
@@ -1687,7 +1687,7 @@ def test_real_dry_run_in_a_copy(copy: Path) -> None:
         assert '+ """beta"""' in r.stderr
     assert "git hook         not a git work tree: nothing to do" in r.stderr
     assert _tree(copy) == before, "--dry-run wrote files"
-    r = _deploy(copy, "apply", "--bogus")
+    r = _pyt(copy, "apply", "--bogus")
     assert r.returncode == 2 and "apply: unrecognized arguments: --bogus" in r.stderr
     assert _tree(copy) == before
 
@@ -1698,9 +1698,9 @@ def test_real_hand_edited_preset_is_refused(copy: Path) -> None:
     _edit_copy(copy, "app", "preset", new)
     before = _tree(copy)
     for command in ("apply", "setup"):
-        r = _deploy(copy, command)
+        r = _pyt(copy, command)
         assert r.returncode == 2, r.stderr
-        assert f"changed from '{old}' to '{new}' by hand" in r.stderr and f"./deploy new DIR --preset {new}" in r.stderr
+        assert f"changed from '{old}' to '{new}' by hand" in r.stderr and f"./pyt new DIR --preset {new}" in r.stderr
     assert _tree(copy) == before
 
 
@@ -1713,11 +1713,11 @@ def test_real_apply_after_a_hand_edited_name(copy: Path) -> None:
     _git(copy, "commit", "-q", "-m", "init", "--no-verify")
     _edit_copy(copy, "app", "name", "beta")  # pytemplate.toml is dirty by definition: not refused
     (copy / "src" / "notes.txt").write_text("mine\n", encoding="utf-8")
-    r = _deploy(copy, "apply")
+    r = _pyt(copy, "apply")
     assert r.returncode == 2 and "uncommitted changes in git (1 path(s): src/notes.txt)" in r.stderr, r.stderr
-    assert "./deploy apply --force" in r.stderr and (copy / "src" / old).is_dir()
+    assert "./pyt apply --force" in r.stderr and (copy / "src" / old).is_dir()
     (copy / "src" / "notes.txt").unlink()
-    r = _deploy(copy, "apply")
+    r = _pyt(copy, "apply")
     if r.returncode != 0 and rename.needs_pypi(r.stderr):
         pytest.skip("needs PyPI: uv lock could not reach the package index")
     assert r.returncode == 0, r.stderr
@@ -1725,9 +1725,9 @@ def test_real_apply_after_a_hand_edited_name(copy: Path) -> None:
     assert tomllib.loads((copy / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"] == "beta"
     assert "beta" in {p["name"] for p in tomllib.loads((copy / "uv.lock").read_text(encoding="utf-8"))["package"]}
     assert (copy / ".git" / "hooks" / "pre-commit").is_file()
-    assert _deploy(copy, "render", "--check").returncode == 0
+    assert _pyt(copy, "render", "--check").returncode == 0
     before = _tree(copy)
-    r = _deploy(copy, "apply")
+    r = _pyt(copy, "apply")
     assert r.returncode == 0, r.stderr
     summary = r.stderr.split("==> summary")[1]
     assert "app.name" not in summary and "uv.lock" not in summary and "generated files" not in summary

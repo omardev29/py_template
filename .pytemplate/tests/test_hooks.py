@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from runner import cmd_apply, cmd_dev, config, envs, hooks, lintc, mypyc, proc, render  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import IS_WINDOWS, ROOT, TEMPLATE  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 GUARD = TEMPLATE / "tests" / "test_no_spanish.py"
@@ -92,14 +92,14 @@ def find(project: Path, top: Path | None = None, environ: dict[str, str] | None 
 
 
 def test_hook_script_is_ascii_lf_and_marked() -> None:
-    text = hooks.hook_script("./deploy")
+    text = hooks.hook_script("./pyt")
     assert text.isascii()
     assert "\r" not in text
     assert text.startswith("#!/bin/sh\n")
     assert hooks.MARKER in text
-    assert "./deploy hooks uninstall" in text
+    assert "./pyt hooks uninstall" in text
     assert "git commit --no-verify" in text
-    assert "_pt_launcher='./deploy'" in text
+    assert "_pt_launcher='./pyt'" in text
     assert "exec " not in text  # the script outlives the launcher: it explains a launcher failure
     assert '\nsh "$_pt_launcher" hooks run\n_pt_rc=$?\n' in text
     assert text.rstrip().endswith('exit "$_pt_rc"')
@@ -110,7 +110,7 @@ def test_hook_script_is_ascii_lf_and_marked() -> None:
 
 @pytest.mark.parametrize(
     "launcher",
-    ["./deploy", "./apps/my app/deploy", "./it's/deploy", "./caf\u00e9 50%/x\\y/deploy", "./\u65e5\u672c/'q'/deploy"],
+    ["./pyt", "./apps/my app/pyt", "./it's/pyt", "./caf\u00e9 50%/x\\y/pyt", "./\u65e5\u672c/'q'/pyt"],
 )
 def test_launcher_of_reads_back_every_launcher(launcher: str) -> None:
     assert hooks.launcher_of(hooks.hook_script(launcher)) == launcher
@@ -118,7 +118,7 @@ def test_launcher_of_reads_back_every_launcher(launcher: str) -> None:
 
 def test_launcher_of_rejects_what_it_does_not_know() -> None:
     assert hooks.launcher_of("#!/bin/sh\necho hi\n") is None
-    assert hooks.launcher_of("_pt_launcher=./deploy\n") is None  # unquoted: never written by us
+    assert hooks.launcher_of("_pt_launcher=./pyt\n") is None  # unquoted: never written by us
     assert hooks.launcher_of("_pt_launcher=\"$(printf '\\377')\"\n") is None  # not UTF-8
 
 
@@ -127,7 +127,7 @@ def test_hook_script_passes_shellcheck(tmp_path: Path) -> None:
     if shellcheck is None:
         pytest.skip("shellcheck is not installed")
     files = []
-    for i, launcher in enumerate(["./deploy", "./caf\u00e9 50%/it's/deploy"]):
+    for i, launcher in enumerate(["./pyt", "./caf\u00e9 50%/it's/pyt"]):
         f = tmp_path / f"hook{i}.sh"
         f.write_bytes(hooks.hook_script(launcher).encode("ascii"))
         files.append(str(f))
@@ -136,11 +136,11 @@ def test_hook_script_passes_shellcheck(tmp_path: Path) -> None:
 
 
 def test_sh_literal() -> None:
-    assert hooks.sh_literal("./a b/deploy") == "'./a b/deploy'"
+    assert hooks.sh_literal("./a b/pyt") == "'./a b/pyt'"
     assert hooks.sh_literal("it's") == "'it'\\''s'"
-    quoted = hooks.sh_literal("./caf\u00e9/deploy")
+    quoted = hooks.sh_literal("./caf\u00e9/pyt")
     assert quoted.isascii()
-    assert quoted == "\"$(printf './caf\\303\\251/deploy')\""
+    assert quoted == "\"$(printf './caf\\303\\251/pyt')\""
     assert hooks.sh_literal("50%\\x\u00e9").isascii()
 
 
@@ -159,7 +159,7 @@ def test_sh_literal_round_trip_in_sh() -> None:
     sh = posix_sh()
     if sh is None:
         pytest.skip("no POSIX sh")
-    text = "./caf\u00e9 50%/it's \\n/deploy"
+    text = "./caf\u00e9 50%/it's \\n/pyt"
     r = subprocess.run([sh, "-c", f"printf '%s' {hooks.sh_literal(text)}"], capture_output=True, check=True)
     assert r.stdout.decode("utf-8") == text
 
@@ -169,11 +169,11 @@ def test_launcher_path_is_relative_to_the_top(tmp_path: Path) -> None:
     top, project = make_repo(tmp_path, "apps/my app")
     repo = find(project, top)
     assert repo.prefix == "apps/my app"
-    assert repo.launcher == "./apps/my app/deploy"
-    assert "_pt_launcher='./apps/my app/deploy'" in hooks.hook_script(repo.launcher)
-    assert hooks.run_line(repo) == "[ ! -f './apps/my app/deploy' ] || sh './apps/my app/deploy' hooks run || exit $?"
-    assert find(top).launcher == "./deploy"
-    assert hooks.run_line(find(top)) == "[ ! -f ./deploy ] || sh ./deploy hooks run || exit $?"
+    assert repo.launcher == "./apps/my app/pyt"
+    assert "_pt_launcher='./apps/my app/pyt'" in hooks.hook_script(repo.launcher)
+    assert hooks.run_line(repo) == "[ ! -f './apps/my app/pyt' ] || sh './apps/my app/pyt' hooks run || exit $?"
+    assert find(top).launcher == "./pyt"
+    assert hooks.run_line(find(top)) == "[ ! -f ./pyt ] || sh ./pyt hooks run || exit $?"
 
 
 @needs_git
@@ -188,7 +188,7 @@ def test_a_project_spelled_otherwise_than_git_spells_it_is_found(tmp_path: Path)
     typed = tmp_path / "typed"
     typed.symlink_to(project, target_is_directory=True)
     repo = find(typed, top)
-    assert repo.prefix == "apps/p" and repo.launcher == "./apps/p/deploy"
+    assert repo.prefix == "apps/p" and repo.launcher == "./apps/p/pyt"
     (project / "src").mkdir()
     (project / "src" / "a.py").write_text("x = 1\n", encoding="utf-8")
     git(top, "add", "-A")
@@ -238,7 +238,7 @@ def test_find_repo_reports_other_git_errors(tmp_path: Path, monkeypatch: pytest.
         return subprocess.CompletedProcess(["git", *args], 128, "", said)
 
     monkeypatch.setattr(hooks, "_git", dubious)
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         find(tmp_path)
     assert not isinstance(e.value, hooks.NotInGit)
     assert "dubious ownership" in str(e.value) and "git init" not in str(e.value)
@@ -247,7 +247,7 @@ def test_find_repo_reports_other_git_errors(tmp_path: Path, monkeypatch: pytest.
     lines: list[tuple[bool | None, str, str]] = []
     hooks.doctor(make(), lambda passed, label, hint="": lines.append((passed, label, hint)), tmp_path)
     assert len(lines) == 1 and lines[0][0] is None and "dubious ownership" in lines[0][2]
-    with pytest.raises(DeployError, match="dubious ownership"):
+    with pytest.raises(PytError, match="dubious ownership"):
         hooks.show_status(make(), tmp_path)
 
 
@@ -263,12 +263,12 @@ def test_install_update_uninstall(tmp_path: Path) -> None:
     assert hooks.classify(target, repo) == "missing"
     assert "installed" in hooks.install(repo)
     data = target.read_bytes()
-    assert data == hooks.hook_script("./deploy").encode("ascii")
+    assert data == hooks.hook_script("./pyt").encode("ascii")
     if not IS_WINDOWS:
         assert target.stat().st_mode & 0o777 == 0o755
     assert hooks.classify(target, repo) == "installed"
     assert "already installed" in hooks.install(repo)
-    target.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./old/deploy hooks run\n", encoding="utf-8")
+    target.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./old/pyt hooks run\n", encoding="utf-8")
     assert hooks.classify(target, repo) == "outdated"
     assert "updated" in hooks.install(repo)
     assert target.read_bytes() == data
@@ -295,7 +295,7 @@ def test_foreign_hook_is_preserved_and_chained(tmp_path: Path) -> None:
     foreign = b"#!/bin/sh\necho mine\n"
     target.write_bytes(foreign)
     assert hooks.classify(target, repo) == "foreign"
-    with pytest.raises(DeployError, match="--force"):
+    with pytest.raises(PytError, match="--force"):
         hooks.install(repo)
     assert target.read_bytes() == foreign
     msg = hooks.install(repo, force=True)
@@ -309,7 +309,7 @@ def test_foreign_hook_is_preserved_and_chained(tmp_path: Path) -> None:
     assert not local.exists()
     # both files there already: never overwrite either
     local.write_bytes(b"#!/bin/sh\necho older\n")
-    with pytest.raises(DeployError, match="merge them by hand"):
+    with pytest.raises(PytError, match="merge them by hand"):
         hooks.install(repo, force=True)
     assert target.read_bytes() == foreign
 
@@ -319,7 +319,7 @@ def test_a_hook_that_already_calls_hooks_run(tmp_path: Path) -> None:
     top, project = make_repo(tmp_path)
     repo = find(project)
     target = repo.default_dir / hooks.HOOK
-    target.write_text("#!/bin/sh\nnpm test || exit 1\nsh ./deploy hooks run\n", encoding="utf-8")
+    target.write_text("#!/bin/sh\nnpm test || exit 1\nsh ./pyt hooks run\n", encoding="utf-8")
     assert hooks.classify(target, repo) == "calls"
     assert "already runs" in hooks.install(repo)
     assert "left alone" in hooks.uninstall(repo)
@@ -340,9 +340,9 @@ def test_symlinked_hook_is_never_written_through(tmp_path: Path, capsys: pytest.
     link = "../../tools/hooks/pre-commit"
     target.symlink_to(link)
     assert hooks.classify(target, repo) == "foreign"
-    hooks.ensure_installed(make(), project)  # the ./deploy setup path leaves it alone
+    hooks.ensure_installed(make(), project)  # the ./pyt setup path leaves it alone
     assert "another tool's hook" in capsys.readouterr().err
-    with pytest.raises(DeployError, match="--force"):
+    with pytest.raises(PytError, match="--force"):
         hooks.install(repo)
     assert list((top / "tools" / "hooks").iterdir()) == []
     assert target.is_symlink() and os.readlink(target) == link
@@ -356,29 +356,29 @@ def test_symlinked_hook_is_never_written_through(tmp_path: Path, capsys: pytest.
     (repo.default_dir / hooks.LOCAL).symlink_to("../../nowhere")
     target.unlink()
     target.write_bytes(b"#!/bin/sh\necho mine\n")
-    with pytest.raises(DeployError, match="merge them by hand"):
+    with pytest.raises(PytError, match="merge them by hand"):
         hooks.install(repo, force=True)
     (repo.default_dir / hooks.LOCAL).unlink()
     target.unlink()
     target.symlink_to(link)
     # the link's folder missing too: an error with the --force hint, no traceback, nothing written
     shutil.rmtree(top / "tools")
-    with pytest.raises(DeployError, match="--force"):
+    with pytest.raises(PytError, match="--force"):
         hooks.install(repo)
     # a live link to a script that runs `hooks run` (even one with the MARKER) is never rewritten
     (top / "tools" / "hooks").mkdir(parents=True)
     shared = top / "tools" / "hooks" / "pre-commit"
-    shared.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./deploy hooks run\n", encoding="utf-8")
+    shared.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./pyt hooks run\n", encoding="utf-8")
     before = shared.read_bytes()
     assert hooks.classify(target, repo) == "calls"
     hooks.install(repo)
     hooks.ensure_installed(make(), project)
     assert shared.read_bytes() == before and target.is_symlink()
     # ...nor one that runs another launcher's checks: not this project's, and still not written through
-    shared.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./old/deploy hooks run\n", encoding="utf-8")
+    shared.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./old/pyt hooks run\n", encoding="utf-8")
     before = shared.read_bytes()
     assert hooks.classify(target, repo) == "foreign"
-    with pytest.raises(DeployError, match="--force"):
+    with pytest.raises(PytError, match="--force"):
         hooks.install(repo)
     hooks.ensure_installed(make(), project)
     assert shared.read_bytes() == before and target.is_symlink()
@@ -391,16 +391,16 @@ def test_core_hooks_path_is_respected(tmp_path: Path) -> None:
     repo = find(project, top)
     assert repo.custom_hooks_path
     assert repo.hooks_dir == Path(os.path.normpath(top / "hk"))
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         hooks.install(repo, force=True)
     assert "core.hooksPath = 'hk'" in str(e.value)
-    assert "sh ./proj/deploy hooks run || exit $?" in str(e.value)
+    assert "sh ./proj/pyt hooks run || exit $?" in str(e.value)
     assert not (repo.default_dir / hooks.HOOK).exists()
     assert not (top / "hk").exists()
     passed, label, hint = hooks._status_line(make(), repo)
-    assert passed is None and "core.hooksPath" in label and "sh ./proj/deploy hooks run" in hint
+    assert passed is None and "core.hooksPath" in label and "sh ./proj/pyt hooks run" in hint
     (top / "hk").mkdir()
-    (top / "hk" / hooks.HOOK).write_text("#!/bin/sh\nsh ./proj/deploy hooks run || exit $?\n", encoding="utf-8")
+    (top / "hk" / hooks.HOOK).write_text("#!/bin/sh\nsh ./proj/pyt hooks run || exit $?\n", encoding="utf-8")
     assert "already runs" in hooks.install(repo)
     assert hooks._status_line(make(), repo)[0] is True
     # core.hooksPath naming the default folder is not a custom one
@@ -425,7 +425,7 @@ def test_core_hooks_path_husky_layout(tmp_path: Path, capsys: pytest.CaptureFixt
     assert "husky runs it" in hint
     hooks.ensure_installed(make(), project)
     assert "core.hooksPath is set" in capsys.readouterr().err
-    (husky / hooks.HOOK).write_text("npm test\nsh ./deploy hooks run || exit $?\n", encoding="utf-8")
+    (husky / hooks.HOOK).write_text("npm test\nsh ./pyt hooks run || exit $?\n", encoding="utf-8")
     assert hooks._status_line(make(), repo)[0] is True
     assert "already runs" in hooks.install(repo)
     hooks.ensure_installed(make(), project)  # the checks run: nothing to say
@@ -462,9 +462,9 @@ def test_ensure_installed(tmp_path: Path, capsys: pytest.CaptureFixture[str], mo
     hooks.ensure_installed(make(), project)  # already there: silent
     assert capsys.readouterr().err == ""
     # this project's hook from an older template version: updated in place
-    target.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./deploy hooks run\n", encoding="utf-8")
+    target.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./pyt hooks run\n", encoding="utf-8")
     hooks.ensure_installed(make(), project)
-    assert target.read_bytes() == hooks.hook_script("./deploy").encode("ascii")
+    assert target.read_bytes() == hooks.hook_script("./pyt").encode("ascii")
     assert "updated" in capsys.readouterr().err
     target.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
     hooks.ensure_installed(make(), project)
@@ -490,35 +490,35 @@ def test_ensure_installed_skips_an_ignored_project(tmp_path: Path, capsys: pytes
     commits never contain the project, so no hook (unless forced)."""
     top, project = make_repo(tmp_path, "code/p")
     (top / ".gitignore").write_text("*\n!.gitignore\n", encoding="utf-8")
-    (project / "deploy").write_text("#!/bin/sh\n", encoding="utf-8")
+    (project / "pyt").write_text("#!/bin/sh\n", encoding="utf-8")
     target = top / ".git" / "hooks" / hooks.HOOK
     repo = find(project, top)
     assert repo.ignored()
     hooks.ensure_installed(make(), project)
     assert not target.exists()
     assert "ignores this project" in capsys.readouterr().err
-    with pytest.raises(DeployError, match="ignores this project"):
+    with pytest.raises(PytError, match="ignores this project"):
         hooks.install(repo)
     passed, label, hint = hooks._status_line(make(), repo)
     assert passed is None and "ignores this project" in label and "git init" in hint
     # another project's hook there (the enclosing repository's own): still "ignored" is the news
-    (top / "deploy").write_text("#!/bin/sh\n", encoding="utf-8")
-    target.write_bytes(hooks.hook_script("./deploy").encode("ascii"))
+    (top / "pyt").write_text("#!/bin/sh\n", encoding="utf-8")
+    target.write_bytes(hooks.hook_script("./pyt").encode("ascii"))
     assert hooks.classify(target, repo) == "other"
     hooks.ensure_installed(make(), project)
     err = capsys.readouterr().err
     assert "ignores this project" in err and "another project" not in err
     assert "ignores this project" in hooks._status_line(make(), repo)[1]
     target.unlink()
-    (top / "deploy").unlink()
+    (top / "pyt").unlink()
     assert "installed" in hooks.install(repo, force=True)
     assert hooks._status_line(make(), repo)[0] is True
     hooks.ensure_installed(make(), project)  # installed on purpose: nothing to say
     assert capsys.readouterr().err == ""
     # tracked files are never "ignored", whatever the patterns say; nor is a repository's own top
-    git(top, "add", "-f", "code/p/deploy")
+    git(top, "add", "-f", "code/p/pyt")
     assert not find(project, top).ignored()
-    (top / "deploy").write_text("#!/bin/sh\n", encoding="utf-8")
+    (top / "pyt").write_text("#!/bin/sh\n", encoding="utf-8")
     assert not find(top).ignored()
 
 
@@ -531,17 +531,17 @@ def test_doctor_lines(tmp_path: Path) -> None:
         lines.append((passed, label, hint))
 
     hooks.doctor(make(), check, project)
-    assert lines[-1][0] is None and "not installed" in lines[-1][1] and lines[-1][2].startswith("./deploy hooks install")
+    assert lines[-1][0] is None and "not installed" in lines[-1][1] and lines[-1][2].startswith("./pyt hooks install")
     hooks.install(find(project))
     hooks.doctor(make(), check, project)
     assert lines[-1][0] is True
     target = top / ".git" / "hooks" / hooks.HOOK
-    target.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./deploy hooks run\n", encoding="utf-8")
+    target.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./pyt hooks run\n", encoding="utf-8")
     hooks.doctor(make(), check, project)  # an older template version's hook: setup updates it
-    assert lines[-1][0] is None and "outdated" in lines[-1][1] and lines[-1][2] == "./deploy hooks install"
-    target.write_text("#!/bin/sh\nnpm test\nsh ./deploy hooks run || exit $?\n", encoding="utf-8")
+    assert lines[-1][0] is None and "outdated" in lines[-1][1] and lines[-1][2] == "./pyt hooks install"
+    target.write_text("#!/bin/sh\nnpm test\nsh ./pyt hooks run || exit $?\n", encoding="utf-8")
     hooks.doctor(make(), check, project)
-    assert lines[-1][0] is True and "runs ./deploy hooks run" in lines[-1][1]
+    assert lines[-1][0] is True and "runs ./pyt hooks run" in lines[-1][1]
     target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     hooks.doctor(make(), check, project)
     assert lines[-1][0] is None and "another tool" in lines[-1][1]
@@ -603,7 +603,7 @@ def test_second_project_does_not_steal_the_hook(tmp_path: Path, capsys: pytest.C
     q = top / "apps" / "q"
     q.mkdir(parents=True)
     for project in (p, q):
-        (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+        (project / "pyt").write_bytes(NAMED_LAUNCHER.encode("ascii"))
     rp, rq = find(p, top), find(q, top)
     target = rp.default_dir / hooks.HOOK
     local = rp.default_dir / hooks.LOCAL
@@ -611,18 +611,18 @@ def test_second_project_does_not_steal_the_hook(tmp_path: Path, capsys: pytest.C
     p_hook = target.read_bytes()
     assert hooks.classify(target, rp) == "installed"
     assert hooks.classify(target, rq) == "other"
-    hooks.ensure_installed(make(), q)  # q's ./deploy setup
+    hooks.ensure_installed(make(), q)  # q's ./pyt setup
     assert target.read_bytes() == p_hook
     assert "another project" in capsys.readouterr().err
-    with pytest.raises(DeployError, match="--force"):
+    with pytest.raises(PytError, match="--force"):
         hooks.install(rq)
     assert "left alone" in hooks.uninstall(rq) and target.read_bytes() == p_hook
     passed, label, hint = hooks._status_line(make(), rq)
-    assert passed is None and "./apps/p/deploy" in label and "--force" in hint
+    assert passed is None and "./apps/p/pyt" in label and "--force" in hint
     # --force: q's hook runs a fresh copy of p's first (which never chains itself)
     hooks.install(rq, force=True)
     assert hooks.classify(target, rq) == "installed"
-    assert local.read_bytes() == hooks.hook_script("./apps/p/deploy").encode("ascii")
+    assert local.read_bytes() == hooks.hook_script("./apps/p/pyt").encode("ascii")
     assert hooks._status_line(make(), rp)[0] is True  # p's checks still run, from pre-commit.local
     capsys.readouterr()
     hooks.ensure_installed(make(), p)  # p's setup: nothing to change, nothing to say
@@ -632,7 +632,7 @@ def test_second_project_does_not_steal_the_hook(tmp_path: Path, capsys: pytest.C
     (p / "a.txt").write_text("a\n", encoding="utf-8")
     git(top, "add", "-A", env=env)
     assert git(top, "commit", "-q", "-m", "one", env=env, check=False, timeout=120).returncode == 0
-    assert log.read_text(encoding="utf-8").splitlines() == ["./apps/p/deploy hooks run", "./apps/q/deploy hooks run"]
+    assert log.read_text(encoding="utf-8").splitlines() == ["./apps/p/pyt hooks run", "./apps/q/pyt hooks run"]
     # uninstall in q gives p its hook back
     assert "restored" in hooks.uninstall(rq)
     assert target.read_bytes() == p_hook and not local.exists()
@@ -662,7 +662,7 @@ def test_a_chained_hook_stays_this_projects(tmp_path: Path, capsys: pytest.Captu
     q = top / "apps" / "q"
     q.mkdir(parents=True)
     for project in (p, q):
-        (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+        (project / "pyt").write_bytes(NAMED_LAUNCHER.encode("ascii"))
     rp, rq = find(p, top), find(q, top)
     target, local = rp.default_dir / hooks.HOOK, rp.default_dir / hooks.LOCAL
     hooks.install(rp)
@@ -678,7 +678,7 @@ def test_a_chained_hook_stays_this_projects(tmp_path: Path, capsys: pytest.Captu
     msg = hooks.uninstall(rp)
     assert "removed" in msg and hooks.LOCAL in msg and "left alone" in msg
     assert not local.exists() and target.read_bytes() == q_hook
-    assert _commit_log(top, tmp_path, "one.txt") == ["./apps/q/deploy hooks run"]
+    assert _commit_log(top, tmp_path, "one.txt") == ["./apps/q/pyt hooks run"]
     # chained again, then q goes away: p's install replaces q's stale hook and drops the copy
     hooks.uninstall(rq)
     hooks.install(rp)
@@ -689,18 +689,107 @@ def test_a_chained_hook_stays_this_projects(tmp_path: Path, capsys: pytest.Captu
     capsys.readouterr()
     hooks.ensure_installed(make(), p)
     assert "a copy of this project's hook" in capsys.readouterr().err
-    assert target.read_bytes() == hooks.hook_script("./apps/p/deploy").encode("ascii") and not local.exists()
-    assert _commit_log(top, tmp_path, "two.txt") == ["./apps/p/deploy hooks run"]  # once, not twice
+    assert target.read_bytes() == hooks.hook_script("./apps/p/pyt").encode("ascii") and not local.exists()
+    assert _commit_log(top, tmp_path, "two.txt") == ["./apps/p/pyt hooks run"]  # once, not twice
     # a project left in that state by an older runner: status says so, install and setup repair it
-    local.write_bytes(hooks.hook_script("./apps/p/deploy").encode("ascii"))
+    local.write_bytes(hooks.hook_script("./apps/p/pyt").encode("ascii"))
     passed, label, hint = hooks._status_line(make(), rp)
-    assert passed is None and "run twice" in label and hint == "./deploy hooks install"
+    assert passed is None and "run twice" in label and hint == "./pyt hooks install"
     hooks.ensure_installed(make(), p)
     assert not local.exists() and hooks._status_line(make(), rp)[0] is True
     # uninstall never restores this project's own copy as pre-commit (it would run with pre_commit = false)
-    local.write_bytes(hooks.hook_script("./apps/p/deploy").encode("ascii"))
+    local.write_bytes(hooks.hook_script("./apps/p/pyt").encode("ascii"))
     assert "a copy of this project's hook" in hooks.uninstall(rp)
     assert not target.exists() and not local.exists()
+
+
+@needs_git
+@pytest.mark.parametrize("sub", ["", "apps/p"])
+@pytest.mark.parametrize("old_launcher_left", [False, True])
+def test_a_hook_that_calls_the_launcher_by_its_old_name_is_updated(tmp_path: Path, capsys: pytest.CaptureFixture[str], sub: str, old_launcher_left: bool) -> None:
+    """The hook of a project made before the launchers were renamed calls `deploy`: it is this
+    project's outdated hook, whether that file is gone or still next to `pyt` (it was taken for
+    another project's, left alone, and the checks were skipped), and setup rewrites it."""
+    top, project = make_repo(tmp_path, sub)
+    (project / "pyt").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+    if old_launcher_left:
+        (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+    repo = find(project, top)
+    target = repo.default_dir / hooks.HOOK
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(hooks.hook_script(f"./{sub}/deploy" if sub else "./deploy").encode("ascii"))
+    assert hooks.hook_state(repo) == "outdated"
+    passed, label, hint = hooks._status_line(make(), repo)
+    assert passed is None and "outdated" in label and hint == "./pyt hooks install"
+    capsys.readouterr()
+    hooks.ensure_installed(make(), project)  # ./pyt setup
+    assert "pre-commit hook updated" in capsys.readouterr().err
+    assert target.read_bytes() == hooks.hook_script(repo.launcher).encode("ascii")
+    assert _commit_log(top, tmp_path, "one.txt") == [f"{repo.launcher} hooks run"]
+
+
+@needs_git
+def test_a_chained_copy_that_calls_the_launcher_by_its_old_name_is_updated(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """p's hook, chained after q's by a runner from before the rename, calls ./apps/p/deploy: it
+    is still p's own copy, reported outdated (its checks are skipped), and p's setup brings it
+    up to date in place: q's hook stays, and each project's checks run once."""
+    top, p = make_repo(tmp_path, "apps/p")
+    q = top / "apps" / "q"
+    q.mkdir(parents=True)
+    for project in (p, q):
+        (project / "pyt").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+    rp, rq = find(p, top), find(q, top)
+    target, local = rp.default_dir / hooks.HOOK, rp.default_dir / hooks.LOCAL
+    hooks.install(rq)
+    q_hook = target.read_bytes()
+    old_copy = hooks.hook_script("./apps/p/deploy").encode("ascii")
+    local.write_bytes(old_copy)
+    if not IS_WINDOWS:
+        local.chmod(0o755)
+    assert (hooks.hook_state(rp), hooks.own_local(rp), hooks.hook_state(rq)) == ("chained", True, "installed")
+    passed, label, hint = hooks._status_line(make(), rp)
+    assert passed is None and "outdated" in label and hint == "./pyt hooks install"
+    assert _commit_log(top, tmp_path, "one.txt") == ["./apps/q/pyt hooks run"]  # p's checks skipped
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert "would be updated" in hooks.install(rp)
+    assert local.read_bytes() == old_copy
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    capsys.readouterr()
+    hooks.ensure_installed(make(), p)  # p's ./pyt setup
+    assert "pre-commit hook updated" in capsys.readouterr().err
+    assert local.read_bytes() == hooks.hook_script("./apps/p/pyt").encode("ascii") and target.read_bytes() == q_hook
+    assert hooks._status_line(make(), rp)[0] is True
+    assert "already runs this project's checks" in hooks.install(rp)
+    assert _commit_log(top, tmp_path, "two.txt") == ["./apps/p/pyt hooks run", "./apps/q/pyt hooks run"]
+
+
+@needs_git
+def test_another_projects_hook_by_the_old_launcher_name_is_left_alone(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """In a monorepo, p was made before the launchers were renamed (its hook calls
+    ./apps/p/deploy) and upgraded in place (./apps/p/pyt now): q's setup took that hook for a
+    gone project's and replaced it, and p's then said its checks were another project's. q
+    leaves it alone; p brings it up to date itself."""
+    top, p = make_repo(tmp_path, "apps/p")
+    q = top / "apps" / "q"
+    q.mkdir(parents=True)
+    for project in (p, q):
+        (project / "pyt").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+        (project / ".pytemplate").mkdir()
+        (project / ".pytemplate" / "pyt.py").write_bytes(b"")
+    rp, rq = find(p, top), find(q, top)
+    target = rp.default_dir / hooks.HOOK
+    target.parent.mkdir(parents=True, exist_ok=True)
+    old = hooks.hook_script("./apps/p/deploy").encode("ascii")
+    target.write_bytes(old)
+    assert (hooks.hook_state(rq), hooks.hook_state(rp)) == ("other", "outdated")
+    capsys.readouterr()
+    hooks.ensure_installed(make(), q)  # q's ./pyt setup
+    assert target.read_bytes() == old and "pre-commit hook updated" not in capsys.readouterr().err
+    hooks.ensure_installed(make(), p)  # p's
+    assert target.read_bytes() == hooks.hook_script("./apps/p/pyt").encode("ascii")
+    (p / ".pytemplate" / "pyt.py").unlink()  # a project that is gone: its stale hook may be replaced
+    (p / "pyt").unlink()
+    assert hooks.hook_state(rq) != "other"
 
 
 @needs_git
@@ -711,17 +800,17 @@ def test_a_third_project_is_not_told_to_force(tmp_path: Path, capsys: pytest.Cap
     others = [top / "apps" / n for n in ("q", "r")]
     for project in (p, *others):
         project.mkdir(parents=True, exist_ok=True)
-        (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+        (project / "pyt").write_bytes(NAMED_LAUNCHER.encode("ascii"))
     rp, rq, rr = find(p, top), *(find(o, top) for o in others)
     hooks.install(rq)
     hooks.install(rr, force=True)  # r on top, q's copy as pre-commit.local
     passed, label, hint = hooks._status_line(make(), rp)
-    assert passed is None and "./apps/r/deploy" in label
+    assert passed is None and "./apps/r/pyt" in label
     assert "exists as well" in hint and "merge the two by hand" in hint
-    with pytest.raises(DeployError, match="exists as well") as e:
+    with pytest.raises(PytError, match="exists as well") as e:
         hooks.install(rp)
     assert "keeps it as" not in str(e.value)
-    with pytest.raises(DeployError, match="merge them by hand"):
+    with pytest.raises(PytError, match="merge them by hand"):
         hooks.install(rp, force=True)
     hooks.ensure_installed(make(), p)
     err = capsys.readouterr().err
@@ -737,59 +826,59 @@ def test_calls_means_this_projects_launcher_on_a_live_line(tmp_path: Path, capsy
     b = top / "apps" / "b"
     b.mkdir(parents=True)
     for project in (a, b):
-        (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+        (project / "pyt").write_bytes(NAMED_LAUNCHER.encode("ascii"))
     git(top, "config", "core.hooksPath", "hk")
     (top / "hk").mkdir()
     shared = top / "hk" / hooks.HOOK
     ra = find(a, top)
     not_ours = [
-        "sh ./apps/b/deploy hooks run || exit $?",
-        "# sh ./apps/a/deploy hooks run || exit $?\nexit 0",
-        "  # TODO: sh ./apps/a/deploy hooks run",
-        "sh ./apps/a/deploy hooks runner",
-        "sh ./apps/a/redeploy hooks run",
-        "sh ./deploy hooks run",  # the top's launcher: not this project's
-        "cd apps/b && ./deploy hooks run",  # b's, reached through a cd
-        "cd apps/a && ../b/deploy hooks run",
-        "(cd apps/a)\n./deploy hooks run",  # the cd stayed in its subshell
-        "(cd apps/a)\n(./deploy hooks run)",  # ...and the next subshell starts at the top again
-        "sh ./apps/a/deploy -q status hooks run",  # not the hooks command
-        "echo 'sh ./apps/a/deploy hooks run'",  # a string, not a call
-        "sh ./apps/a/deploy hooks run-all",
+        "sh ./apps/b/pyt hooks run || exit $?",
+        "# sh ./apps/a/pyt hooks run || exit $?\nexit 0",
+        "  # TODO: sh ./apps/a/pyt hooks run",
+        "sh ./apps/a/pyt hooks runner",
+        "sh ./apps/a/mypyt hooks run",
+        "sh ./pyt hooks run",  # the top's launcher: not this project's
+        "cd apps/b && ./pyt hooks run",  # b's, reached through a cd
+        "cd apps/a && ../b/pyt hooks run",
+        "(cd apps/a)\n./pyt hooks run",  # the cd stayed in its subshell
+        "(cd apps/a)\n(./pyt hooks run)",  # ...and the next subshell starts at the top again
+        "sh ./apps/a/pyt -q status hooks run",  # not the hooks command
+        "echo 'sh ./apps/a/pyt hooks run'",  # a string, not a call
+        "sh ./apps/a/pyt hooks run-all",
     ]
     for body in not_ours:
         shared.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
         assert hooks.classify(shared, ra) == "foreign", body
         passed, label, hint = hooks._status_line(make(), ra)
-        assert passed is None and "not in" in label and "sh ./apps/a/deploy hooks run || exit $?" in hint, body
-        with pytest.raises(DeployError, match="core.hooksPath"):
+        assert passed is None and "not in" in label and "sh ./apps/a/pyt hooks run || exit $?" in hint, body
+        with pytest.raises(PytError, match="core.hooksPath"):
             hooks.install(ra)
     ours = [
         hooks.run_line(ra),
-        "npm test && sh ./apps/a/deploy hooks run",
-        'sh "./apps/a/deploy" hooks run',
-        "sh apps/a/deploy hooks run",
-        f'sh "{(a / "deploy").as_posix()}" hooks run',
-        'sh "$(git rev-parse --show-toplevel)/apps/a/deploy" hooks run',  # cannot tell: counts
-        "sh ./apps/b/deploy hooks run || exit $?\nsh ./apps/a/deploy hooks run || exit $?",
-        # global options go before the command (./deploy -q hooks run)
-        "sh ./apps/a/deploy -q hooks run || exit $?",
-        "sh ./apps/a/deploy --verbose --no-render hooks run",
+        "npm test && sh ./apps/a/pyt hooks run",
+        'sh "./apps/a/pyt" hooks run',
+        "sh apps/a/pyt hooks run",
+        f'sh "{(a / "pyt").as_posix()}" hooks run',
+        'sh "$(git rev-parse --show-toplevel)/apps/a/pyt" hooks run',  # cannot tell: counts
+        "sh ./apps/b/pyt hooks run || exit $?\nsh ./apps/a/pyt hooks run || exit $?",
+        # global options go before the command (./pyt -q hooks run)
+        "sh ./apps/a/pyt -q hooks run || exit $?",
+        "sh ./apps/a/pyt --verbose --no-render hooks run",
         # a word made of an expansion and a path is one word, and it cannot be resolved: counts
-        'sh "$(git rev-parse --show-toplevel)"/apps/a/deploy hooks run',
-        'sh "$ROOT"/apps/a/deploy hooks run',
-        "sh $(git rev-parse --show-toplevel)/apps/a/deploy hooks run",
-        "sh `git rev-parse --show-toplevel`/apps/a/deploy hooks run",
+        'sh "$(git rev-parse --show-toplevel)"/apps/a/pyt hooks run',
+        'sh "$ROOT"/apps/a/pyt hooks run',
+        "sh $(git rev-parse --show-toplevel)/apps/a/pyt hooks run",
+        "sh `git rev-parse --show-toplevel`/apps/a/pyt hooks run",
         # a relative launcher after a cd: resolved from there (git runs hooks from the top)
-        "cd apps/a && ./deploy hooks run",
-        "cd apps\ncd a\nsh deploy hooks run",
-        "cd ./apps/b && cd ../a && sh ./deploy hooks run",
-        '(cd apps/b && ./deploy hooks run)\n./apps/a/deploy hooks run',  # a subshell's cd stays there
-        'cd "$(dirname "$0")/../apps/a" && ./deploy hooks run',  # cannot be resolved: counts
-        "{ cd apps/a; ./deploy hooks run; }",  # a group is no subshell: its cd holds
-        "if cd apps/a; then sh ./deploy -q hooks run; fi",
-        "exec sh ./apps/a/deploy hooks run",
-        "sh ./apps/a/deploy hooks run; status=$?",
+        "cd apps/a && ./pyt hooks run",
+        "cd apps\ncd a\nsh pyt hooks run",
+        "cd ./apps/b && cd ../a && sh ./pyt hooks run",
+        '(cd apps/b && ./pyt hooks run)\n./apps/a/pyt hooks run',  # a subshell's cd stays there
+        'cd "$(dirname "$0")/../apps/a" && ./pyt hooks run',  # cannot be resolved: counts
+        "{ cd apps/a; ./pyt hooks run; }",  # a group is no subshell: its cd holds
+        "if cd apps/a; then sh ./pyt -q hooks run; fi",
+        "exec sh ./apps/a/pyt hooks run",
+        "sh ./apps/a/pyt hooks run; status=$?",
     ]
     for body in ours:
         shared.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
@@ -800,26 +889,26 @@ def test_calls_means_this_projects_launcher_on_a_live_line(tmp_path: Path, capsy
     git(top, "config", "--unset", "core.hooksPath")
     ra = find(a, top)
     target = ra.default_dir / hooks.HOOK
-    target.write_text("#!/bin/sh\nsh ./apps/b/deploy hooks run || exit $?\n", encoding="utf-8")
+    target.write_text("#!/bin/sh\nsh ./apps/b/pyt hooks run || exit $?\n", encoding="utf-8")
     if not IS_WINDOWS:
         target.chmod(0o755)  # a hook of the user's is executable
     assert hooks.classify(target, ra) == "foreign"
     hooks.install(ra, force=True)  # chained: both run
     assert hooks.classify(target, ra) == "installed" and (ra.default_dir / hooks.LOCAL).is_file()
-    assert _commit_log(top, tmp_path, "c.txt") == ["./apps/b/deploy hooks run", "./apps/a/deploy hooks run"]
+    assert _commit_log(top, tmp_path, "c.txt") == ["./apps/b/pyt hooks run", "./apps/a/pyt hooks run"]
 
 
 @needs_git
 def test_a_global_hooks_path_line_skips_the_repositories_without_the_launcher(tmp_path: Path) -> None:
     """A core.hooksPath shared by every repository (a global one): the advised line runs in each
-    of them, and unguarded (`sh ./deploy hooks run || exit $?`) it failed every commit of the
-    others ("cannot open ./deploy"). It skips a checkout without the launcher, and still runs
+    of them, and unguarded (`sh ./pyt hooks run || exit $?`) it failed every commit of the
+    others ("cannot open ./pyt"). It skips a checkout without the launcher, and still runs
     this project's checks."""
     ghooks = tmp_path / "ghooks"
     ghooks.mkdir()
     Path(os.environ["GIT_CONFIG_GLOBAL"]).write_text(f"[core]\n\thooksPath = {ghooks.as_posix()}\n", encoding="utf-8")
     top, project = make_repo(tmp_path)
-    (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+    (project / "pyt").write_bytes(NAMED_LAUNCHER.encode("ascii"))
     repo = find(project, top)
     assert repo.custom_hooks_path
     passed, _, hint = hooks._status_line(make(), repo)
@@ -829,35 +918,35 @@ def test_a_global_hooks_path_line_skips_the_repositories_without_the_launcher(tm
     if not IS_WINDOWS:
         hook.chmod(0o755)
     assert hooks.classify(hook, repo) == "calls"
-    assert _commit_log(top, tmp_path, "a.txt") == ["./deploy hooks run"]  # this project's checks run
+    assert _commit_log(top, tmp_path, "a.txt") == ["./pyt hooks run"]  # this project's checks run
     other = tmp_path / "other"
     other.mkdir()
     git(other, "init", "-q")
-    assert _commit_log(other, tmp_path, "b.txt") == []  # no ./deploy there: skipped, and the commit is made
+    assert _commit_log(other, tmp_path, "b.txt") == []  # no ./pyt there: skipped, and the commit is made
 
 
 @needs_git
 def test_calls_with_a_project_folder_that_needs_quotes(tmp_path: Path) -> None:
     top, project = make_repo(tmp_path, "my app")
-    (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+    (project / "pyt").write_bytes(NAMED_LAUNCHER.encode("ascii"))
     git(top, "config", "core.hooksPath", "hk")
     (top / "hk").mkdir()
     shared = top / "hk" / hooks.HOOK
     repo = find(project, top)
     line = hooks.run_line(repo)
-    assert line == "[ ! -f './my app/deploy' ] || sh './my app/deploy' hooks run || exit $?"
+    assert line == "[ ! -f './my app/pyt' ] || sh './my app/pyt' hooks run || exit $?"
     shared.write_text(f"#!/bin/sh\n{line}\n", encoding="utf-8")
     assert hooks.classify(shared, repo) == "calls"
-    shared.write_text('#!/bin/sh\nsh "./my app/deploy" hooks run\n', encoding="utf-8")
+    shared.write_text('#!/bin/sh\nsh "./my app/pyt" hooks run\n', encoding="utf-8")
     assert hooks.classify(shared, repo) == "calls"
 
 
 def test_cmd_hooks_rejects_bad_arguments() -> None:
-    with pytest.raises(DeployError, match="unknown subcommand"):
+    with pytest.raises(PytError, match="unknown subcommand"):
         hooks.cmd_hooks(make(), ["instal"])
-    with pytest.raises(DeployError, match="unrecognized arguments"):
+    with pytest.raises(PytError, match="unrecognized arguments"):
         hooks.cmd_hooks(make(), ["install", "--forse"])
-    with pytest.raises(DeployError, match="unrecognized arguments"):
+    with pytest.raises(PytError, match="unrecognized arguments"):
         hooks.cmd_hooks(make(), ["run", "src"])
 
 
@@ -912,7 +1001,7 @@ def test_cmd_hooks_names_a_hook_file_it_cannot_change(tmp_path: Path, monkeypatc
         raise PermissionError(1, "Operation not permitted", str(path))
 
     monkeypatch.setattr(hooks, "_write_hook", refused)
-    with pytest.raises(DeployError, match=r"hooks install: cannot change .*pre-commit: Operation not permitted") as e:
+    with pytest.raises(PytError, match=r"hooks install: cannot change .*pre-commit: Operation not permitted") as e:
         hooks.cmd_hooks(make(), ["install"])
     assert e.value.code == 2 and not target.exists()
     monkeypatch.setattr(hooks, "_write_hook", write)
@@ -925,7 +1014,7 @@ def test_cmd_hooks_names_a_hook_file_it_cannot_change(tmp_path: Path, monkeypatc
         unlink(self, missing_ok=missing_ok)
 
     monkeypatch.setattr(Path, "unlink", refuse_unlink)
-    with pytest.raises(DeployError, match=r"hooks uninstall: cannot change .*pre-commit: Operation not permitted"):
+    with pytest.raises(PytError, match=r"hooks uninstall: cannot change .*pre-commit: Operation not permitted"):
         hooks.cmd_hooks(make(), ["uninstall"])
     assert target.is_file()
 
@@ -935,7 +1024,7 @@ def test_install_in_a_linked_worktree(tmp_path: Path) -> None:
     """A linked worktree shares the main repository's hooks folder: install writes there and
     git runs the hook from the worktree's top."""
     top, project = make_repo(tmp_path)
-    (project / "deploy").write_bytes(FAKE_LAUNCHER.encode("ascii"))
+    (project / "pyt").write_bytes(FAKE_LAUNCHER.encode("ascii"))
     (top / ".git" / "info" / "exclude").write_text(".topmark\n", encoding="utf-8")
     git(top, "add", "-A")
     git(top, "commit", "-q", "--no-verify", "-m", "base")
@@ -1003,7 +1092,7 @@ def test_git_env_pins_relative_paths(tmp_path: Path) -> None:
 
 
 def test_a_hook_that_cds_into_the_project_reads_the_real_index(tmp_path: Path) -> None:
-    """README's monorepo form, `cd apps/a && sh ./deploy hooks run`: git hands the hook
+    """README's monorepo form, `cd apps/a && sh ./pyt hooks run`: git hands the hook
     GIT_INDEX_FILE=.git/index (relative to the top) and it was joined to apps/a, a missing
     index. The staged files read as none (a first commit passed unchecked) or all deleted."""
     top, project = make_repo(tmp_path, "apps/a")
@@ -1032,10 +1121,10 @@ def test_git_calls_are_pinned_against_user_config(monkeypatch: pytest.MonkeyPatc
 
 
 def test_project_paths() -> None:
-    names = ["a.py", "apps/p/src/x.py", "apps/p/deploy", "apps/pp/y.py", "apps/p", "", "Apps/P/z.py"]
-    assert hooks.project_paths("", names, ignore_case=False) == ["a.py", "apps/p/src/x.py", "apps/p/deploy", "apps/pp/y.py", "apps/p", "Apps/P/z.py"]
-    assert hooks.project_paths("apps/p", names, ignore_case=False) == ["src/x.py", "deploy"]
-    assert hooks.project_paths("apps/p/", names, ignore_case=True) == ["src/x.py", "deploy", "z.py"]
+    names = ["a.py", "apps/p/src/x.py", "apps/p/pyt", "apps/pp/y.py", "apps/p", "", "Apps/P/z.py"]
+    assert hooks.project_paths("", names, ignore_case=False) == ["a.py", "apps/p/src/x.py", "apps/p/pyt", "apps/pp/y.py", "apps/p", "Apps/P/z.py"]
+    assert hooks.project_paths("apps/p", names, ignore_case=False) == ["src/x.py", "pyt"]
+    assert hooks.project_paths("apps/p/", names, ignore_case=True) == ["src/x.py", "pyt", "z.py"]
 
 
 def test_python_files() -> None:
@@ -1072,7 +1161,7 @@ def test_staged_files_from_a_subfolder_project(tmp_path: Path) -> None:
     for environ in ({"GIT_INDEX_FILE": ".git/index"}, {"GIT_DIR": ".git", "GIT_INDEX_FILE": ".git/index"}):
         hooked = find(project, top, environ)
         assert sorted(hooks.staged_files(hooked)) == ["new.py", "renamed.txt", "src/a.py"]
-        assert hooked.launcher == "./apps/p/deploy"
+        assert hooked.launcher == "./apps/p/pyt"
 
 
 @needs_git
@@ -1131,14 +1220,14 @@ def test_staged_blob_is_the_staged_version_as_checked_out(tmp_path: Path) -> Non
     top, project = make_repo(tmp_path, "p")
     (top / ".gitattributes").write_text("*.cmd text eol=crlf\n", encoding="utf-8")
     (project / "x.py").write_bytes(b"x = 1\n")
-    (project / "deploy.cmd").write_bytes(b"@echo off\r\n")
+    (project / "pyt.cmd").write_bytes(b"@echo off\r\n")
     if not IS_WINDOWS:  # no ":" in Windows file names
         (project / "1:odd.py").write_bytes(b"odd = 1\n")
     git(top, "add", "-A")
     (project / "x.py").write_bytes(b"x = 2\n")  # unstaged
     repo = find(project, top)
     assert hooks.staged_blob(repo, "x.py") == b"x = 1\n"
-    assert hooks.staged_blob(repo, "deploy.cmd") == b"@echo off\r\n"  # the index stores LF
+    assert hooks.staged_blob(repo, "pyt.cmd") == b"@echo off\r\n"  # the index stores LF
     if not IS_WINDOWS:
         assert hooks.staged_blob(repo, "1:odd.py") == b"odd = 1\n"  # not "stage 1 of odd.py"
     assert hooks.staged_blob(repo, "missing.py") is None
@@ -1271,7 +1360,7 @@ def test_checks_report_ruff_failures_and_exit_zero(tmp_path: Path, tools: Tools)
     tools.ruff_code, tools.ruff_output = 1, "src/a.py:1:7: F821 Undefined name `y`\nFound 1 error."
     res = results(make(), repo, staged)
     assert res["ruff check"].passed is False and "F821" in res["ruff check"].output
-    assert res["ruff format"].passed is False and "./deploy fmt" in res["ruff format"].hint
+    assert res["ruff format"].passed is False and "./pyt fmt" in res["ruff format"].hint
     tools.ruff_calls.clear()
     tools.ruff_code = 0
     res = results(make({"typing": {"relaxed": "warn"}}), repo, staged)
@@ -1283,13 +1372,13 @@ def test_checks_report_ruff_failures_and_exit_zero(tmp_path: Path, tools: Tools)
 @pytest.mark.parametrize("code", [2, 127, -9])
 def test_ruff_that_cannot_run_is_not_a_format_failure(tmp_path: Path, tools: Tools, code: int) -> None:
     """uv could not start ruff (a stale lock with --locked, no uv, a crash): that is not a
-    formatting problem, and ./deploy fmt would not fix it."""
+    formatting problem, and ./pyt fmt would not fix it."""
     repo, staged = staged_project(tmp_path, {"src/a.py": b"x = 1\n"})
     tools.ruff_code, tools.ruff_output = code, "error: Failed to spawn: `ruff`"
     res = results(make(), repo, staged)
     for key in ("ruff check", "ruff format"):
         assert res[key].passed is False and "could not run ruff" in res[key].label
-        assert "Failed to spawn" in res[key].output and "./deploy" not in res[key].hint
+        assert "Failed to spawn" in res[key].output and "./pyt" not in res[key].hint
 
 
 def test_ruff_uses_the_lock_as_it_is(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1317,7 +1406,7 @@ def test_ruff_uses_the_lock_as_it_is(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @needs_git
 def test_partially_staged_python_file_is_checked_as_staged(tmp_path: Path, tools: Tools) -> None:
-    """`./deploy fmt` after a failed commit, then `git commit` again without `git add`: the
+    """`./pyt fmt` after a failed commit, then `git commit` again without `git add`: the
     working tree is formatted but the commit is not. The hook must check what is committed
     (and not block good staged content for bad unstaged edits)."""
     repo, staged = staged_project(tmp_path, {"src/a.py": b"x=1\n", "src/b.py": b"y = 2\n"})
@@ -1361,22 +1450,22 @@ def test_checks_generated_files(tmp_path: Path, tools: Tools) -> None:
     tools.render_result = (["gen.json"], [".mypy.ini"])
     res = results(make(), repo, staged)
     assert res["generated files up to date"].passed is False
-    assert "./deploy render" in res["generated files up to date"].hint and ".mypy.ini" in res["generated files up to date"].hint
+    assert "./pyt render" in res["generated files up to date"].hint and ".mypy.ini" in res["generated files up to date"].hint
     # render rewrites state.json with them: the line names it, or following it blocks the next commit
-    assert "./deploy render, then git add gen.json .pytemplate/state.json" in res["generated files up to date"].hint
+    assert "./pyt render, then git add gen.json .pytemplate/state.json" in res["generated files up to date"].hint
 
 
 def test_quiet_keeps_what_a_failed_check_says(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    """`./deploy -q hooks run` (a form README accepts: the global options may come first) printed
+    """`./pyt -q hooks run` (a form README accepts: the global options may come first) printed
     "[XX] ruff format: files need formatting" without the file nor the fix: -q hides progress,
     never the answer (CLAUDE.md 5.3)."""
     from runner import ui
 
     monkeypatch.setattr(ui, "QUIET", True)
-    hooks._print(hooks.Result(False, "ruff format: files need formatting", "./deploy fmt, then git add src/p/extra.py", output="Would reformat: src/p/extra.py"))
+    hooks._print(hooks.Result(False, "ruff format: files need formatting", "./pyt fmt, then git add src/p/extra.py", output="Would reformat: src/p/extra.py"))
     hooks._print(hooks.Result(True, "ruff", output="All checks passed!"))
     err = capsys.readouterr().err
-    assert "files need formatting" in err and "Would reformat: src/p/extra.py" in err and "./deploy fmt, then git add src/p/extra.py" in err, err
+    assert "files need formatting" in err and "Would reformat: src/p/extra.py" in err and "./pyt fmt, then git add src/p/extra.py" in err, err
     assert "All checks passed!" not in err  # a passed check's output stays progress
 
 
@@ -1390,7 +1479,7 @@ def test_the_hook_reports_preset_options_that_are_not_applied(monkeypatch: pytes
 
     def pending(cfg: Config, hook: bool = True) -> list[tuple[str, str]]:
         asked.append(hook)
-        return [("[preset.flet] is not applied to pyproject.toml (add flet==1.0.0)", "./deploy apply")]
+        return [("[preset.flet] is not applied to pyproject.toml (add flet==1.0.0)", "./pyt apply")]
 
     monkeypatch.setattr(cmd_apply, "pending", pending)
     result = hooks.check_lock(make())
@@ -1437,7 +1526,7 @@ def test_config_lock_and_generated_files_are_committed_together(tmp_path: Path, 
         git(p, "reset", "-q")
         git(p, "checkout", "-q", "--", ".")
 
-    # 1. `./deploy add six` rewrote both, only uv.lock staged
+    # 1. `./pyt add six` rewrote both, only uv.lock staged
     (p / "pyproject.toml").write_bytes(b"[project]\ndependencies = ['six']\n")
     (p / "uv.lock").write_bytes(b"v2\n")
     git(p, "add", "uv.lock")
@@ -1545,15 +1634,15 @@ def test_checks_mypyc_rules_only_on_staged_compiled_modules(tmp_path: Path, tool
 
 @needs_git
 def test_checks_launchers(tmp_path: Path, tools: Tools) -> None:
-    repo, staged = staged_project(tmp_path, {"deploy": b"#!/bin/sh\r\necho hi\r\n", "deploy.cmd": b"@echo off\r\n"})
+    repo, staged = staged_project(tmp_path, {"pyt": b"#!/bin/sh\r\necho hi\r\n", "pyt.cmd": b"@echo off\r\n"})
     res = results(make(), repo, staged)
     launchers = next(r for k, r in res.items() if k.startswith("launchers"))
     assert launchers.passed is False
-    assert "deploy: CRLF line endings" in launchers.label
+    assert "pyt: CRLF line endings" in launchers.label
     assert "git mode 100644" in launchers.label  # staged without the exec bit
-    assert "git update-index --chmod=+x deploy" in launchers.hint
-    (repo.project / "deploy").write_bytes(b"#!/bin/sh\necho hi\n")
-    git(repo.project, "add", "--chmod=+x", "deploy")
+    assert "git update-index --chmod=+x pyt" in launchers.hint
+    (repo.project / "pyt").write_bytes(b"#!/bin/sh\necho hi\n")
+    git(repo.project, "add", "--chmod=+x", "pyt")
     res = results(make(), repo, hooks.staged_files(repo))
     assert res["launchers"].passed is True
 
@@ -1562,13 +1651,13 @@ def test_checks_launchers(tmp_path: Path, tools: Tools) -> None:
 def test_launchers_are_checked_as_staged(tmp_path: Path, tools: Tools) -> None:
     """The commit holds the staged launcher: a fixed working tree must not hide a broken staged
     file (and a broken working tree must not block a good staged one)."""
-    repo, staged = staged_project(tmp_path, {"deploy.cmd": b"@echo off\n"})  # LF: breaks cmd's labels
-    (repo.project / "deploy.cmd").write_bytes(b"@echo off\r\n")  # fixed, not staged
+    repo, staged = staged_project(tmp_path, {"pyt.cmd": b"@echo off\n"})  # LF: breaks cmd's labels
+    (repo.project / "pyt.cmd").write_bytes(b"@echo off\r\n")  # fixed, not staged
     res = results(make(), repo, staged)
     launchers = next(r for k, r in res.items() if k.startswith("launchers"))
     assert launchers.passed is False and "not CRLF" in launchers.label
-    git(repo.project, "add", "deploy.cmd")
-    (repo.project / "deploy.cmd").write_bytes(b"@echo off\n")  # broken again, not staged
+    git(repo.project, "add", "pyt.cmd")
+    (repo.project / "pyt.cmd").write_bytes(b"@echo off\n")  # broken again, not staged
     res = results(make(), repo, hooks.staged_files(repo))
     assert res["launchers"].passed is True
 
@@ -1636,10 +1725,10 @@ def test_real_ruff_accepts_the_hook_arguments(tmp_path: Path, monkeypatch: pytes
     ruff or uv release that renamed a flag would otherwise block every commit of every project
     with no failing test."""
     if not _venv_ruff().is_file():
-        pytest.skip("no ruff in .venv (./deploy setup)")
+        pytest.skip("no ruff in .venv (./pyt setup)")
     try:
         proc.find_uv()
-    except DeployError:
+    except PytError:
         pytest.skip("uv not found")
     monkeypatch.setattr(cmd_dev, "BUILD", tmp_path / "build")  # _profile_file writes its ruff config there
     cfg = make()
@@ -1693,7 +1782,7 @@ def test_a_kept_hook_runs_under_its_own_name(tmp_path: Path, shebang: str) -> No
     if "bash" in shebang and shutil.which("bash") is None:
         pytest.skip("no bash")
     top, project = make_repo(tmp_path)
-    (project / "deploy").write_bytes(FAKE_LAUNCHER.encode("ascii"))
+    (project / "pyt").write_bytes(FAKE_LAUNCHER.encode("ascii"))
     (top / ".topmark").write_text("", encoding="utf-8")
     (top / ".git" / "info" / "exclude").write_text(".topmark\n", encoding="utf-8")
     log = tmp_path / "hook.log"
@@ -1726,7 +1815,7 @@ def test_force_leaves_a_non_shell_hook_that_reads_its_name(tmp_path: Path) -> No
     target = top / ".git" / "hooks" / hooks.HOOK
     text = "#!/usr/bin/env ruby\nhook_type = File.basename($0)\nexit 0\n"
     target.write_text(text, encoding="utf-8")
-    with pytest.raises(DeployError, match=r"reads its own name .*Add this line to it instead:\n  \[ ! -f \./deploy \] \|\| sh \./deploy hooks run \|\| exit \$\?"):
+    with pytest.raises(PytError, match=r"reads its own name .*Add this line to it instead:\n  \[ ! -f \./pyt \] \|\| sh \./pyt hooks run \|\| exit \$\?"):
         hooks.install(find(project, top), force=True)
     assert target.read_text(encoding="utf-8") == text and not (target.parent / hooks.LOCAL).exists()
 
@@ -1749,7 +1838,7 @@ def test_git_runs_the_hook(tmp_path: Path, sub: str) -> None:
     kept foreign hook first, blocks the commit on failure, explains a launcher that could not
     run the checks, and --no-verify skips it."""
     top, project = make_repo(tmp_path, sub)
-    (project / "deploy").write_bytes(FAKE_LAUNCHER.encode("ascii"))  # no exec bit needed: the hook uses sh
+    (project / "pyt").write_bytes(FAKE_LAUNCHER.encode("ascii"))  # no exec bit needed: the hook uses sh
     (top / ".topmark").write_text("", encoding="utf-8")
     (top / ".git" / "info" / "exclude").write_text(".topmark\n", encoding="utf-8")
     log = tmp_path / "hook.log"
@@ -1782,7 +1871,7 @@ def test_git_runs_the_hook(tmp_path: Path, sub: str) -> None:
     log.unlink()
     assert commit("four.txt", "--no-verify", PT_HOOK_EXIT="1").returncode == 0
     assert not log.exists()
-    (project / "deploy").unlink()  # a checkout without the launcher: the checks are skipped
+    (project / "pyt").unlink()  # a checkout without the launcher: the checks are skipped
     (hooks_dir / hooks.LOCAL).unlink()
     assert commit("five.txt").returncode == 0
     assert git(top, "log", "--format=%s", env=env).stdout.split() == ["five.txt", "four.txt", "one.txt"]

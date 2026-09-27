@@ -3,12 +3,12 @@
 A native git hook (no pre-commit framework: only uv is needed). `install` writes a small sh
 script, `pre-commit`, into the directory git runs hooks from (`git rev-parse --git-path
 hooks`, which also handles linked worktrees). The script runs `sh <launcher> hooks run`, with
-the POSIX launcher `deploy` given relative to the top of the work tree: git runs pre-commit
+the POSIX launcher `pyt` given relative to the top of the work tree: git runs pre-commit
 hooks from there, whatever client makes the commit (Git Bash, cmd, PowerShell, xonsh, VS Code,
 lazygit...), and on Windows it runs them with Git's own sh.exe. `sh` is explicit so the exec
-bit of `deploy` does not matter. When the launcher cannot run the checks (exit code > 1: uv not
+bit of `pyt` does not matter. When the launcher cannot run the checks (exit code > 1: uv not
 found from a GUI client, a broken pytemplate.toml, a runner without `hooks run`), the script
-says so and how to commit anyway. `./deploy setup` installs the hook when `hooks.pre_commit`
+says so and how to commit anyway. `./pyt setup` installs the hook when `hooks.pre_commit`
 is true in pytemplate.toml (the default).
 
 - A pre-commit hook that is not pytemplate's (no MARKER), or a symlink, is never overwritten:
@@ -24,7 +24,7 @@ is true in pytemplate.toml (the default).
   and runs THIS project's launcher with `hooks run` (runs_checks: global options may come
   between, a relative launcher is read from the top or the folder a `cd` moved to, a launcher
   built from an expansion cannot be resolved and counts; another project's command does not).
-- A project the enclosing repository ignores (`git check-ignore deploy`) gets no hook unless
+- A project the enclosing repository ignores (`git check-ignore pyt`) gets no hook unless
   forced: that repository's commits never contain it.
 - With `core.hooksPath` set (husky, a shared hooks folder...) git ignores `.git/hooks`: the
   hook is not installed there; `install` and `status` print the line to add to that setup
@@ -35,7 +35,7 @@ is true in pytemplate.toml (the default).
   `git commit --no-verify`.
 
 `hooks run` checks what the commit contains (`git diff --cached`, deletions included), fast,
-so no mypy (that stays in `./deploy check`, the editors and CI):
+so no mypy (that stays in `./pyt check`, the editors and CI):
   1. ruff check (the active backend's typing profile, like `check`) and ruff format --check
      on the staged .py/.pyi files under src/ and tests/. A file with unstaged changes is
      checked in its STAGED version (fed to ruff on stdin), and a staged file deleted from the
@@ -79,14 +79,14 @@ from . import envs, lintc, mypyc, proc, render, ui
 from .cmd_dev import _profile_file, only_flags
 from .config import Config
 from .project import IS_WINDOWS, ROOT, STATE_FILE, TEMPLATE, native_path
-from .ui import DeployError
+from .ui import PytError
 
 Check = Callable[[bool | None, str, str], None]
 
 HOOK = "pre-commit"
 LOCAL = "pre-commit.local"  # a foreign hook moved aside by `install --force`; ours runs it first
 MARKER = "pytemplate pre-commit hook"
-LAUNCHERS = ("deploy", "deploy.cmd", "deploy.ps1")
+LAUNCHERS = ("pyt", "pyt.cmd", "pyt.ps1")
 PY_SUFFIXES = (".py", ".pyi")
 USAGE = "install [--force] | uninstall | run | status"
 # Repository variables git exports to hooks, possibly relative to the top of the work tree
@@ -100,9 +100,9 @@ CONFIG_FILES = ("pytemplate.toml", "pyproject.toml", "uv.lock")
 STAGED = "ACMRT"
 
 
-class NotInGit(DeployError):
+class NotInGit(PytError):
     """git is missing, or the project is not inside a git work tree: the hook does not apply
-    (setup and doctor stay silent). Any other git failure is a plain DeployError."""
+    (setup and doctor stay silent). Any other git failure is a plain PytError."""
 
 
 NO_GIT = "git not found in PATH"  # NotInGit's message (code 3) when git is missing
@@ -125,7 +125,7 @@ def git_env(environ: Mapping[str, str], cwd: Path) -> dict[str, str]:
     Without GIT_DIR git finds the repository itself and reads a relative GIT_INDEX_FILE (or
     object directory) from the top of the work tree, wherever it runs: those stay as they are.
     git hands a plain commit's hook GIT_INDEX_FILE=.git/index, and a user's hook that runs `cd
-    apps/a && ./deploy hooks run` joined it to apps/a: every git call read a missing, empty
+    apps/a && ./pyt hooks run` joined it to apps/a: every git call read a missing, empty
     index, and a first commit passed unchecked. GIT_DIR (a linked worktree) is read from the
     cwd, and GIT_DIR without GIT_WORK_TREE means "cwd is the top of the work tree": then the
     relative values are joined to `cwd` and GIT_WORK_TREE is pinned to it, so git calls from
@@ -172,7 +172,7 @@ def _run_bytes(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], data: 
     try:
         return subprocess.run(list(argv), cwd=cwd, env=dict(env), input=data, capture_output=True, check=False)
     except OSError as e:
-        raise DeployError(f"cannot run {argv[0]}: {e}", 3) from None
+        raise PytError(f"cannot run {argv[0]}: {e}", 3) from None
 
 
 def _same(a: Path, b: Path) -> bool:
@@ -204,7 +204,7 @@ def _drive(path: Path) -> str:
 
 @dataclass(frozen=True)
 class Repo:
-    project: Path  # the project root (where ./deploy is)
+    project: Path  # the project root (where ./pyt is)
     top: Path  # top of the git work tree
     hooks_dir: Path  # where git runs hooks from (core.hooksPath, or <common dir>/hooks)
     default_dir: Path  # <common dir>/hooks: where `install` writes
@@ -219,7 +219,7 @@ class Repo:
     @property
     def launcher(self) -> str:
         """The POSIX launcher relative to the top of the work tree, as the hook calls it."""
-        return f"./{self.prefix}/deploy" if self.prefix else "./deploy"
+        return f"./{self.prefix}/pyt" if self.prefix else "./pyt"
 
     def git(self, *args: str) -> subprocess.CompletedProcess[str]:
         return _git(args, self.project, self.env)
@@ -233,7 +233,7 @@ class Repo:
         if not self.prefix:
             return False
         # exit 0: ignored and untracked (a tracked file is never reported); 1: not; 128: an error
-        return _git(["check-ignore", "-q", "deploy"], self.project, self.env, literal=False).returncode == 0
+        return _git(["check-ignore", "-q", "pyt"], self.project, self.env, literal=False).returncode == 0
 
     @functools.cached_property
     def ignore_case(self) -> bool:
@@ -248,7 +248,7 @@ class Repo:
 
 def find_repo(project: Path = ROOT, environ: Mapping[str, str] | None = None, cwd: Path | None = None) -> Repo:
     """Return the git repository of `project`. NotInGit when git is missing (3) or the project
-    is not inside a git work tree (2); DeployError with git's own message for any other git
+    is not inside a git work tree (2); PytError with git's own message for any other git
     failure (dubious ownership, a broken .git...)."""
     if shutil.which("git") is None:
         raise NotInGit(NO_GIT, 3)
@@ -257,7 +257,7 @@ def find_repo(project: Path = ROOT, environ: Mapping[str, str] | None = None, cw
     lines = r.stdout.splitlines()
     if r.returncode != 0 and "not a git repository" not in r.stderr:
         said = r.stderr.strip().splitlines() or [f"exit code {r.returncode}"]
-        raise DeployError(f"git cannot use the repository of {project}:\n" + "\n".join(f"  {ln}" for ln in said), 2)
+        raise PytError(f"git cannot use the repository of {project}:\n" + "\n".join(f"  {ln}" for ln in said), 2)
     if r.returncode != 0 or len(lines) not in (3, 4):  # the prefix line is empty at the top
         raise NotInGit(f"{project} is not inside a git work tree (git init first)", 2)
     top = Path(native_path(lines[0]))  # MSYS2's own git prints /c/...
@@ -267,7 +267,7 @@ def find_repo(project: Path = ROOT, environ: Mapping[str, str] | None = None, cw
     # tree, and every hook command failed.
     prefix = lines[3].strip("/") if len(lines) == 4 else ""
     if not _same_folder(top / prefix, project):
-        raise DeployError(f"the project {project} is not inside its git work tree {top}", 2)
+        raise PytError(f"the project {project} is not inside its git work tree {top}", 2)
     lines = [native_path(ln) for ln in lines[:3]]
     return Repo(
         project=project,
@@ -366,10 +366,10 @@ def hook_script(launcher: str) -> str:
     """Return the pre-commit hook: pure ASCII, LF, runs `sh <launcher> hooks run` from the top."""
     lines = [
         "#!/bin/sh",
-        f"# {MARKER}: written by ./deploy hooks install (it rewrites this file: do not edit)",
-        "# Runs `./deploy hooks run`: fast checks of the staged files (ruff, ruff format,",
-        "# generated files, uv.lock, mypyc rules, launchers). mypy runs in ./deploy check.",
-        "#   remove it:    ./deploy hooks uninstall",
+        f"# {MARKER}: written by ./pyt hooks install (it rewrites this file: do not edit)",
+        "# Runs `./pyt hooks run`: fast checks of the staged files (ruff, ruff format,",
+        "# generated files, uv.lock, mypyc rules, launchers). mypy runs in ./pyt check.",
+        "#   remove it:    ./pyt hooks uninstall",
         "#   skip it once: git commit --no-verify",
         f"# A hook that was here before is kept as {LOCAL} and runs first (unless this file is",
         f"# itself the {LOCAL} of another project's hook).",
@@ -386,7 +386,7 @@ def hook_script(launcher: str) -> str:
         "_pt_rc=$?",
         'if [ "$_pt_rc" -gt 1 ]; then',
         "    printf '%s\\n' \"pytemplate pre-commit: $_pt_launcher could not check this commit (exit code $_pt_rc).\" \\",
-        "        '  Commit without the checks: git commit --no-verify   Remove the hook: ./deploy hooks uninstall' >&2",
+        "        '  Commit without the checks: git commit --no-verify   Remove the hook: ./pyt hooks uninstall' >&2",
         "fi",
         'exit "$_pt_rc"',
     ]
@@ -396,8 +396,8 @@ def hook_script(launcher: str) -> str:
 def run_line(repo: Repo) -> str:
     """The line to add to a hook that pytemplate does not manage (core.hooksPath). It skips a
     checkout without the launcher, as pytemplate's own hook does (another branch): the unguarded
-    `sh ./deploy hooks run || exit $?` in a global hooks folder failed every commit of every
-    other repository ("cannot open ./deploy")."""
+    `sh ./pyt hooks run || exit $?` in a global hooks folder failed every commit of every
+    other repository ("cannot open ./pyt")."""
     word = repo.launcher if re.fullmatch(r"[A-Za-z0-9_./-]+", repo.launcher) else sh_literal(repo.launcher)
     return f"[ ! -f {word} ] || sh {word} hooks run || exit $?"
 
@@ -409,21 +409,32 @@ def _read(path: Path) -> str:
         return ""
 
 
+def _in_this_project(launcher: str, repo: Repo) -> bool:
+    """Whether the launcher a pytemplate hook calls (relative to the top, as the hook calls it) is
+    in this project's folder, whatever its file name: a hook written before the launchers were
+    renamed calls `deploy`, and it is this project's (outdated) hook, never another project's."""
+    folder = (repo.top / launcher).parent  # samefile follows `..` as the kernel does
+    try:
+        return os.path.samefile(folder, repo.project)
+    except OSError:
+        return _same(folder, repo.project)
+
+
 def _other_project(repo: Repo, launcher: str) -> bool:
-    """Whether `launcher` (relative to the top, as a hook calls it) is another live project's."""
+    """Whether `launcher` (relative to the top, as a hook calls it) is another live project's:
+    the file is there, or its folder still holds a runner (a project upgraded in place since the
+    launchers were renamed: its hook calls `deploy`, and that project brings it up to date)."""
     if launcher == repo.launcher:
         return False
-    path = repo.top / launcher
-    if not path.is_file():
+    target = repo.top / launcher
+    runner = target.parent / ".pytemplate"
+    if not target.is_file() and not any((runner / entry).is_file() for entry in ("pyt.py", "deploy.py")):
         return False  # a project that is gone (moved, renamed): its stale hook may be replaced
-    try:
-        return not os.path.samefile(path, repo.project / "deploy")
-    except OSError:
-        return True
+    return not _in_this_project(launcher, repo)
 
 
 def _unresolved(word: str) -> bool:
-    """A word with a shell expansion ("$ROOT/deploy", husky's "$(dirname ...)", `...`, ~)."""
+    """A word with a shell expansion ("$ROOT/pyt", husky's "$(dirname ...)", `...`, ~)."""
     return any(c in word for c in "$`") or word.startswith("~")
 
 
@@ -574,7 +585,7 @@ def _shell_commands(text: str) -> list[tuple[tuple[int, ...], list[str]]]:
     return commands
 
 
-# ./deploy's global options, which come before the command (`sh ./deploy -q hooks run`)
+# ./pyt's global options, which come before the command (`sh ./pyt -q hooks run`)
 _GLOBAL_OPTIONS = frozenset({"-v", "--verbose", "-q", "--quiet", "--no-render", "--dry-run"})
 # Words that may come before a `cd` in the same command: `{ cd x; ...; }`, `if cd x; then ...`
 _BEFORE_CD = frozenset({"{", "}", "!", "if", "then", "else", "elif", "do", "while", "until", "builtin", "command"})
@@ -590,8 +601,8 @@ def _cd(words: list[str], cwd: Path | None) -> Path | None:
 
 
 def _calls_launcher(words: list[str], repo: Repo, cwd: Path | None) -> bool:
-    """Whether a command calls this project's launcher with `hooks run` (`sh ./deploy hooks run`,
-    `./deploy -q hooks run`: the launcher's global options come before the command)."""
+    """Whether a command calls this project's launcher with `hooks run` (`sh ./pyt hooks run`,
+    `./pyt -q hooks run`: the launcher's global options come before the command)."""
     for i in range(1, len(words) - 1):
         if words[i : i + 2] != ["hooks", "run"]:
             continue
@@ -655,7 +666,13 @@ def own_local(repo: Repo) -> bool:
         return False
     text = _read(local)
     launcher = launcher_of(text) if MARKER in text else None
-    return launcher is not None and _is_this_launcher(launcher, repo, repo.top)
+    return launcher is not None and _in_this_project(launcher, repo)
+
+
+def _own_local_outdated(repo: Repo) -> bool:
+    """Whether this project's own pre-commit.local (own_local) is not its current hook: written
+    by an older runner, or calling the launcher by its old name, `deploy`."""
+    return _read(repo.default_dir / LOCAL) != hook_script(repo.launcher)
 
 
 def hook_state(repo: Repo) -> str:
@@ -698,7 +715,7 @@ def _hooks_path_hint(repo: Repo) -> str:
 
 def _ignored_message(repo: Repo) -> str:
     return (
-        f"the git repository at {repo.top} ignores this project (git check-ignore deploy): its commits "
+        f"the git repository at {repo.top} ignores this project (git check-ignore pyt): its commits "
         "never contain it. git init the project to give it its own repository"
     )
 
@@ -710,13 +727,13 @@ def _write_hook(path: Path, text: str) -> None:
 
 
 def install(repo: Repo, *, force: bool = False) -> str:
-    """Install or update the hook; return the message to print (DeployError if it cannot)."""
+    """Install or update the hook; return the message to print (PytError if it cannot)."""
     if repo.custom_hooks_path:
         hook = _hooks_path_file(repo)
         state = classify(hook, repo)
         if state in ("calls", "installed"):
-            return f"{_show(hook, repo)} already runs ./deploy hooks run (core.hooksPath)"
-        raise DeployError(
+            return f"{_show(hook, repo)} already runs ./pyt hooks run (core.hooksPath)"
+        raise PytError(
             f"core.hooksPath = {repo.hooks_path_value()!r}: git runs the hooks in {_show(repo.hooks_dir, repo)}, "
             "not in the default folder, so pytemplate does not install its hook there.\n"
             + "\n".join(f"  {line}" for line in _hooks_path_hint(repo).splitlines())
@@ -726,29 +743,34 @@ def install(repo: Repo, *, force: bool = False) -> str:
     script = hook_script(repo.launcher)
     state = classify(target, repo)
     if state == "missing" and not force and repo.ignored():
-        raise DeployError(f"{_ignored_message(repo)} (or: ./deploy hooks install --force)")
+        raise PytError(f"{_ignored_message(repo)} (or: ./pyt hooks install --force)")
     other = launcher_of(_read(target)) if state == "other" else None
     if other is not None and own_local(repo):
-        return f"{_show(target, repo)} ({other}) already runs this project's checks from {_show(local, repo)}"
+        if not _own_local_outdated(repo):
+            return f"{_show(target, repo)} ({other}) already runs this project's checks from {_show(local, repo)}"
+        if not proc.DRY_RUN:  # the other project's hook runs it: brought up to date in place
+            _write_hook(local, script)
+        verb = "would be updated" if proc.DRY_RUN else "updated"
+        return f"pre-commit hook {verb}: {_show(local, repo)} -> sh {repo.launcher} hooks run (run first by {_show(target, repo)}, the hook of {other})"
     # this project's own copy as pre-commit.local (its chain's first hook went away): with this
     # project's hook back in pre-commit, it would run the checks twice
     drop = state in ("missing", "outdated", "installed") and own_local(repo)
     moved = False
     if state in ("foreign", "calls", "other"):
         if state == "calls" and not force:
-            return f"{_show(target, repo)} already runs ./deploy hooks run (not pytemplate's file: left alone)"
+            return f"{_show(target, repo)} already runs ./pyt hooks run (not pytemplate's file: left alone)"
         if not force:
             if other is not None:
-                raise DeployError(
+                raise PytError(
                     f"{_show(target, repo)} runs the checks of another project of this repository ({other}): left alone.\n"
                     f"  {chain_hint(repo)}"
                 )
-            raise DeployError(f"{_show(target, repo)} already exists and is not pytemplate's hook: left alone.\n  {chain_hint(repo)}")
+            raise PytError(f"{_show(target, repo)} already exists and is not pytemplate's hook: left alone.\n  {chain_hint(repo)}")
         if os.path.lexists(local):  # lexists: a dangling link there is somebody's too
-            raise DeployError(f"both {_show(target, repo)} and {_show(local, repo)} exist: merge them by hand, then ./deploy hooks install")
+            raise PytError(f"both {_show(target, repo)} and {_show(local, repo)} exist: merge them by hand, then ./pyt hooks install")
         text = _read(target)
         if state == "foreign" and reads_its_name(text):
-            raise DeployError(
+            raise PytError(
                 f"{_show(target, repo)} is a {interpreter(text)} script that reads its own name ($0): kept as {LOCAL} "
                 f"it would not run its checks, so it was left alone. Add this line to it instead:\n  {run_line(repo)}"
             )
@@ -822,49 +844,51 @@ def _status_line(cfg: Config, repo: Repo) -> tuple[bool | None, str, str]:
         state = classify(hook, repo)
         where = _show(hook, repo)
         if state in ("installed", "calls"):
-            return True, f"git pre-commit hook: {where} runs ./deploy hooks run (core.hooksPath)", ""
+            return True, f"git pre-commit hook: {where} runs ./pyt hooks run (core.hooksPath)", ""
         return None, f"git pre-commit hook: core.hooksPath = {repo.hooks_path_value()!r}, pytemplate's checks are not in {where}", _hooks_path_hint(repo)
     target = repo.default_dir / HOOK
     local = repo.default_dir / LOCAL
     state = classify(target, repo)
     chained = local.is_file()
     if state == "installed" and own_local(repo):
-        return None, f"git pre-commit hook installed, but {LOCAL} is a copy of it: the checks run twice", "./deploy hooks install"
+        return None, f"git pre-commit hook installed, but {LOCAL} is a copy of it: the checks run twice", "./pyt hooks install"
     if state == "installed":
         extra = f" (runs {LOCAL} first)" if chained else ""
         return True, f"git pre-commit hook installed: {_show(target, repo)} -> sh {repo.launcher} hooks run{extra}", ""
     if state == "outdated":
-        return None, "git pre-commit hook outdated (another launcher path or template version)", "./deploy hooks install"
+        return None, "git pre-commit hook outdated (another launcher path or template version)", "./pyt hooks install"
     if state == "calls":
-        return True, f"git pre-commit hook: {_show(target, repo)} runs ./deploy hooks run", ""
+        return True, f"git pre-commit hook: {_show(target, repo)} runs ./pyt hooks run", ""
     other = launcher_of(_read(target)) if state == "other" else None
     if other is not None and own_local(repo):
+        if _own_local_outdated(repo):
+            return None, f"git pre-commit hook outdated: {LOCAL}, this project's hook that {_show(target, repo)} ({other}) runs first", "./pyt hooks install"
         return True, f"git pre-commit hook: {_show(target, repo)} runs this project's checks ({LOCAL}), then those of {other}", ""
     if repo.ignored():  # missing, foreign or another project's: none of ours, and this is why
         return None, f"git pre-commit hook not installed: the repository at {repo.top} ignores this project", (
-            "git init the project to give it its own repository (or ./deploy hooks install --force)"
+            "git init the project to give it its own repository (or ./pyt hooks install --force)"
         )
     if other is not None:
         return None, f"git pre-commit hook: {_show(target, repo)} runs the checks of another project ({other}), not this one's", chain_hint(repo)
     if state == "foreign":
         return None, f"git pre-commit hook: {_show(target, repo)} is another tool's hook", chain_hint(repo)
-    off = "" if cfg.hooks.pre_commit else "   (hooks.pre_commit = false: ./deploy setup does not install it)"
-    return None, "git pre-commit hook not installed", "./deploy hooks install" + off
+    off = "" if cfg.hooks.pre_commit else "   (hooks.pre_commit = false: ./pyt setup does not install it)"
+    return None, "git pre-commit hook not installed", "./pyt hooks install" + off
 
 
 def chain_hint(repo: Repo) -> str:
     """How to add this project's checks to a pre-commit hook that is not its own."""
     local = repo.default_dir / LOCAL
     if os.path.lexists(local):  # install --force would refuse: it chains one hook only
-        return f"{_show(local, repo)} exists as well, so ./deploy hooks install --force cannot chain it: merge the two by hand, then ./deploy hooks install --force"
-    return f"./deploy hooks install --force keeps it as {LOCAL} (it runs first) and adds this project's checks"
+        return f"{_show(local, repo)} exists as well, so ./pyt hooks install --force cannot chain it: merge the two by hand, then ./pyt hooks install --force"
+    return f"./pyt hooks install --force keeps it as {LOCAL} (it runs first) and adds this project's checks"
 
 
 def chain_advice(repo: Repo) -> str:
     """chain_hint in a few words, for the one-line messages of apply and setup."""
     if os.path.lexists(repo.default_dir / LOCAL):
-        return f"{LOCAL} is taken too: ./deploy hooks status says what to do"
-    return "./deploy hooks install --force runs both"
+        return f"{LOCAL} is taken too: ./pyt hooks status says what to do"
+    return "./pyt hooks install --force runs both"
 
 
 def show_status(cfg: Config, project: Path = ROOT) -> int:
@@ -877,12 +901,12 @@ def show_status(cfg: Config, project: Path = ROOT) -> int:
     passed, label, hint = _status_line(cfg, repo)
     ui.check_line(passed, label, hint)
     if repo.custom_hooks_path and classify(repo.default_dir / HOOK, repo) in ("installed", "outdated"):
-        ui.check_line(None, f"{_show(repo.default_dir / HOOK, repo)} is pytemplate's but inactive (core.hooksPath)", "./deploy hooks uninstall removes it")
+        ui.check_line(None, f"{_show(repo.default_dir / HOOK, repo)} is pytemplate's but inactive (core.hooksPath)", "./pyt hooks uninstall removes it")
     return 0
 
 
 def ensure_installed(cfg: Config, project: Path = ROOT) -> None:
-    """Called by ./deploy setup: install the hook if hooks.pre_commit and it is missing (or
+    """Called by ./pyt setup: install the hook if hooks.pre_commit and it is missing (or
     update this project's own). Prints at most one line and never fails setup."""
     if not cfg.hooks.pre_commit:
         return
@@ -890,20 +914,20 @@ def ensure_installed(cfg: Config, project: Path = ROOT) -> None:
         repo = find_repo(project)
     except NotInGit:
         return  # no git, or not a git work tree: nothing to do
-    except DeployError as e:  # git refuses the repository (dubious ownership...): say why
+    except PytError as e:  # git refuses the repository (dubious ownership...): say why
         ui.warn(f"git pre-commit hook not installed: {e}")
         return
     try:
         if repo.custom_hooks_path:
             if classify(_hooks_path_file(repo), repo) not in ("installed", "calls"):
-                ui.info("git pre-commit hook: core.hooksPath is set, not installed (./deploy hooks status says what to add)")
+                ui.info("git pre-commit hook: core.hooksPath is set, not installed (./pyt hooks status says what to add)")
             return
         target = repo.default_dir / HOOK
         state = classify(target, repo)
         own_copy = own_local(repo)
         if state in ("missing", "foreign", "other") and not own_copy and repo.ignored():  # nothing of ours there: why
-            ui.info(f"git pre-commit hook: not installed: {_ignored_message(repo)} (or: ./deploy hooks install --force)")
-        elif state in ("missing", "outdated") or (state == "installed" and own_copy):
+            ui.info(f"git pre-commit hook: not installed: {_ignored_message(repo)} (or: ./pyt hooks install --force)")
+        elif state in ("missing", "outdated") or (state == "installed" and own_copy) or (state == "other" and own_copy and _own_local_outdated(repo)):
             lines = install(repo).splitlines()
             ui.ok("\n".join(lines if own_copy else lines[:1]))  # the removed copy is news
         elif state == "foreign":
@@ -913,12 +937,12 @@ def ensure_installed(cfg: Config, project: Path = ROOT) -> None:
                 f"git pre-commit hook: it runs the checks of another project of this repository "
                 f"({launcher_of(_read(target))}), left alone ({chain_advice(repo)})"
             )
-    except (DeployError, OSError) as e:
+    except (PytError, OSError) as e:
         ui.warn(f"git pre-commit hook not installed: {e}")
 
 
 def doctor(cfg: Config, check: Check, project: Path = ROOT) -> None:
-    """One line for ./deploy doctor: whether the hook is installed (nothing outside git)."""
+    """One line for ./pyt doctor: whether the hook is installed (nothing outside git)."""
     try:
         repo = find_repo(project)
     except NotInGit:
@@ -926,7 +950,7 @@ def doctor(cfg: Config, check: Check, project: Path = ROOT) -> None:
             ui.step("git hook")
             check(None, f"{NO_GIT}: the pre-commit hook of this repository is not checked", "put git on PATH (a git GUI's own git is often not on it)")
         return
-    except DeployError as e:  # git refuses the repository (dubious ownership...): show why
+    except PytError as e:  # git refuses the repository (dubious ownership...): show why
         ui.step("git hook")
         first, _, rest = str(e).partition("\n")
         check(None, first, rest)
@@ -981,7 +1005,7 @@ def staged_files(repo: Repo, diff_filter: str = STAGED) -> list[str]:
     --no-renames: a rename is its deletion plus its addition, so both paths are seen."""
     r = repo.git("diff", "--cached", "--name-only", "--no-renames", f"--diff-filter={diff_filter}", "-z")
     if r.returncode != 0:
-        raise DeployError(f"git diff --cached failed: {r.stderr.strip()}")
+        raise PytError(f"git diff --cached failed: {r.stderr.strip()}")
     return project_paths(repo.prefix, r.stdout.split("\0"), ignore_case=repo.ignore_case)
 
 
@@ -1010,7 +1034,7 @@ def staged_blob(repo: Repo, path: str) -> bytes | None:
     spec = ":0:" + (f"{repo.prefix}/{path}" if repo.prefix else path)
     try:
         r = _run_bytes(["git", *GIT_CONFIG, "cat-file", "--filters", spec], cwd=repo.project, env=_git_process_env(repo.env))
-    except DeployError:
+    except PytError:
         return None
     return r.stdout if r.returncode == 0 else None
 
@@ -1046,7 +1070,7 @@ def ruff(cfg: Config, args: Sequence[str | Path], files: Sequence[str]) -> tuple
     for batch in _batches(files):
         try:
             r = envs.uv(envs.tool_env(cfg), [*RUFF, *args, *batch], capture=True, check=False, echo=False)
-        except DeployError as e:  # uv missing or too old
+        except PytError as e:  # uv missing or too old
             return e.code, str(e)
         code = max(code, r.returncode if r.returncode in (0, 1) else 2)  # 2: did not run (uv, a crash, a signal)
         out += [t.strip() for t in (r.stdout, r.stderr) if t.strip()]
@@ -1063,7 +1087,7 @@ def ruff_staged(cfg: Config, args: Sequence[str | Path], path: str, data: bytes)
             envs.require_min_uv(uv_path)
         argv = [uv_path, *RUFF, *(str(a) for a in args), "--stdin-filename", path, "-"]
         r = _run_bytes(argv, cwd=ROOT, env=envs.env_vars(env), data=data)
-    except DeployError as e:
+    except PytError as e:
         return e.code, str(e)
     out = [t.decode("utf-8", errors="replace").strip() for t in (r.stdout, r.stderr)]
     return r.returncode, "\n".join(t for t in out if t)
@@ -1072,7 +1096,7 @@ def ruff_staged(cfg: Config, args: Sequence[str | Path], path: str, data: bytes)
 def uv_lock_check(cfg: Config) -> tuple[int, str]:
     try:
         r = envs.uv(envs.tool_env(cfg), ["lock", "--check"], capture=True, check=False, echo=False)
-    except DeployError as e:  # uv missing or too old
+    except PytError as e:  # uv missing or too old
         return e.code, str(e)
     return r.returncode, (r.stderr.strip() or r.stdout.strip())
 
@@ -1120,14 +1144,14 @@ def check_ruff(cfg: Config, files: Sequence[str], as_staged: Mapping[str, bytes]
     elif code == 0:
         yield Result(True, f"ruff check: {n} (profile '{profile}'{note})")
     else:
-        yield Result(False, f"ruff check: {n} (profile '{profile}'{note})", "./deploy lint --fix fixes some; then git add" + partial_hint, output=out)
+        yield Result(False, f"ruff check: {n} (profile '{profile}'{note})", "./pyt lint --fix fixes some; then git add" + partial_hint, output=out)
     code, out = _run_ruff(cfg, ["format", "--check", *common], whole, staged_)
     if code > 1:
         yield Result(False, "ruff format: could not run ruff (the output says why)", output=out)
     elif code == 0:
         yield Result(True, f"ruff format: {n} formatted" + (f" ({note[2:]})" if note else ""))
     else:
-        yield Result(False, "ruff format: files need formatting", "./deploy fmt, then git add" + partial_hint, output=out)
+        yield Result(False, "ruff format: files need formatting", "./pyt fmt, then git add" + partial_hint, output=out)
 
 
 def check_generated(cfg: Config, generated: Sequence[str], dirty: set[str]) -> Iterator[Result]:
@@ -1143,9 +1167,9 @@ def check_generated(cfg: Config, generated: Sequence[str], dirty: set[str]) -> I
             # render records their hashes in state.json too: left out of the line, the next commit
             # stopped at "generated files staged: unstaged: .pytemplate/state.json"
             state = STATE_FILE.relative_to(ROOT).as_posix()
-            hints.append(f"outdated: {', '.join(changed)}\n./deploy render, then git add {' '.join([*sources, *changed, state])}")
+            hints.append(f"outdated: {', '.join(changed)}\n./pyt render, then git add {' '.join([*sources, *changed, state])}")
         if edited:
-            hints.append(f"hand-edited: {', '.join(edited)}\nchange pytemplate.toml or .pytemplate/templates (./deploy render --diff), or ./deploy render --force")
+            hints.append(f"hand-edited: {', '.join(edited)}\nchange pytemplate.toml or .pytemplate/templates (./pyt render --diff), or ./pyt render --force")
         yield Result(False, "generated files up to date", "\n".join(hints))
     else:
         yield Result(True, "generated files up to date")
@@ -1160,17 +1184,17 @@ def check_generated(cfg: Config, generated: Sequence[str], dirty: set[str]) -> I
 def check_lock(cfg: Config) -> Result:
     """pyproject.toml matches pytemplate.toml and uv.lock matches pyproject.toml (working tree).
 
-    "Matches" includes what only ./deploy apply brings in line (a hand-edited app.name, the
+    "Matches" includes what only ./pyt apply brings in line (a hand-edited app.name, the
     [preset.*] options, a hand-edited app.preset): cmd_apply.pending, without its git check."""
     from . import cmd_apply  # lazy: cmd_apply imports this module
 
     hints: list[str] = []
     if render.pyproject_outdated(cfg):
-        hints.append("pyproject.toml does not match pytemplate.toml: ./deploy apply")
+        hints.append("pyproject.toml does not match pytemplate.toml: ./pyt apply")
     hints += [f"{problem}: {hint}" for problem, hint in cmd_apply.pending(cfg, hook=False)]
     code, out = uv_lock_check(cfg)
     if code != 0:
-        hints.append(f"uv lock --check: {envs.uv_error(out) or f'exit code {code}'}\n./deploy lock")
+        hints.append(f"uv lock --check: {envs.uv_error(out) or f'exit code {code}'}\n./pyt lock")
     if hints:
         return Result(False, "pyproject.toml and uv.lock", "\n".join(hints))
     return Result(True, "pyproject.toml and uv.lock up to date")
@@ -1203,7 +1227,7 @@ def check_mypyc(cfg: Config, project: Path, staged: set[str]) -> Result:
         return Result(None, "mypyc rules: mypyc is not in backend.supported")
     try:
         sources = mypyc.compiled_sources(cfg)
-    except DeployError as e:
+    except PytError as e:
         return Result(False, "mypyc rules", str(e))
     files = [p for p in sources if _within(p, project) in staged]
     if not files:
@@ -1256,7 +1280,7 @@ def check_launchers(repo: Repo, staged: set[str], content: Callable[[str], bytes
         data = read(name)
         if data is None:
             continue
-        for problem, fix in launcher_problems(name, data, modes.get(name) if name == "deploy" else None):
+        for problem, fix in launcher_problems(name, data, modes.get(name) if name == "pyt" else None):
             problems.append(f"{name}: {problem}")
             fixes.append(fix)
     if problems:
@@ -1278,7 +1302,7 @@ def load_language_guard(path: Path) -> types.ModuleType:
     """Import .pytemplate/tests/test_no_spanish.py (it imports pytest, which the runner lacks)."""
     spec = importlib.util.spec_from_file_location("_pytemplate_language_guard", path)
     if spec is None or spec.loader is None:
-        raise DeployError(f"cannot load {path}")
+        raise PytError(f"cannot load {path}")
     module = importlib.util.module_from_spec(spec)
     shim = "pytest" not in sys.modules and importlib.util.find_spec("pytest") is None
     if shim:
@@ -1367,7 +1391,7 @@ def checks(
 
 def _print(result: Result) -> None:
     """The check line, then the tool output, then how to fix it. A check that did not pass keeps
-    its output and hint under -q, which hides progress, never the answer: `./deploy -q hooks run`
+    its output and hint under -q, which hides progress, never the answer: `./pyt -q hooks run`
     (the global options may come first) said which check failed, not which file nor the fix."""
     ui.check_line(result.passed, result.label)
     out = ui.info if result.passed is True else ui.report
@@ -1421,7 +1445,7 @@ def cmd_hooks(cfg: Config, args: list[str]) -> int:
     sub, rest = (args[0], args[1:]) if args else ("status", [])
     allowed: dict[str, tuple[str, ...]] = {"install": ("--force",), "uninstall": (), "run": (), "status": ()}
     if sub not in allowed:
-        raise DeployError(f"hooks: unknown subcommand {sub!r}  ({USAGE})")
+        raise PytError(f"hooks: unknown subcommand {sub!r}  ({USAGE})")
     flags = only_flags(f"hooks {sub}", rest, allowed[sub])
     if sub == "status":
         return show_status(cfg, ROOT)  # explicit: a default argument is bound at import time
@@ -1435,5 +1459,5 @@ def cmd_hooks(cfg: Config, args: list[str]) -> int:
             ui.info(uninstall(repo))
     except OSError as e:  # a hooks folder the user may not write (another user's, read-only, immutable)
         name = e.filename or (repo.default_dir / HOOK)
-        raise DeployError(f"hooks {sub}: cannot change {name}: {e.strerror or e}") from None
+        raise PytError(f"hooks {sub}: cannot change {name}: {e.strerror or e}") from None
     return 0

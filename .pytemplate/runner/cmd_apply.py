@@ -1,6 +1,6 @@
 """apply [--force] and setup [--force]: bring the whole project in line with pytemplate.toml.
 
-pytemplate.toml is the single source of truth. Most keys take effect on the next ./deploy
+pytemplate.toml is the single source of truth. Most keys take effect on the next ./pyt
 command (the generated files are re-rendered before each one), but some need work that only a
 command can do: renaming src/<pkg>/, changing dependencies, re-locking, syncing environments,
 installing or removing the git hook. `apply` does all of it, and only what is needed: a second
@@ -12,12 +12,12 @@ prints the plan and stops):
   1. What the project really is ("applied"): the app name whose package is in src/, the preset,
      the option-driven requirements (flet==V, raylib's {package}=={version}) applied last time.
      The record `applied` in .pytemplate/state.json says what the last apply, rename or
-     `./deploy new` wrote (new writes the project's own, never the copied one); it counts only
+     `./pyt new` wrote (new writes the project's own, never the copied one); it counts only
      when its name is app.name or pyproject.toml [project] name. Without one (lost to a merge
      conflict) pyproject.toml stands in: the preset's traces, and the options the managed
      [tool.uv] block was last written with.
   2. app.preset changed by hand: refused (exit 2). A preset decides src/, tests/, the
-     dependencies and pyproject.toml: it cannot be switched in place (./deploy new DIR --preset P).
+     dependencies and pyproject.toml: it cannot be switched in place (./pyt new DIR --preset P).
      The managed pyproject parts must be rewritable (render.check_pyproject).
   3. app.name changed by hand: the rename flow (rename.plan/apply_plan) from the applied name,
      refused on a dirty git tree without --force (pytemplate.toml and the generated files do not
@@ -53,7 +53,7 @@ from . import cmd_env, envs, hooks, presets, proc, render, rename, ui
 from .cmd_dev import only_flags
 from .config import Config, import_path
 from .project import PYPROJECT, ROOT, STATE_FILE, rel, write_whole
-from .ui import DeployError
+from .ui import PytError
 
 Check = Callable[[bool | None, str, str], None]
 
@@ -104,15 +104,15 @@ def _requirements(value: object) -> dict[str, str]:
 
 
 def read_project(path: Path | None = None) -> Project:
-    """Parse pyproject.toml (a BOM is tolerated); DeployError when it is missing or not TOML."""
+    """Parse pyproject.toml (a BOM is tolerated); PytError when it is missing or not TOML."""
     path = path or ROOT / PYPROJECT.name
     try:
         text = path.read_text(encoding="utf-8-sig")
         data = tomllib.loads(text)
     except OSError as e:
-        raise DeployError(f"pyproject.toml cannot be read: {e.strerror or e}") from None
+        raise PytError(f"pyproject.toml cannot be read: {e.strerror or e}") from None
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
-        raise DeployError(f"pyproject.toml is not valid TOML: {e}") from None
+        raise PytError(f"pyproject.toml is not valid TOML: {e}") from None
     project = data.get("project") if isinstance(data.get("project"), dict) else {}
     groups = data.get("dependency-groups") if isinstance(data.get("dependency-groups"), dict) else {}
     name = project.get("name") if isinstance(project, dict) else None
@@ -178,7 +178,7 @@ def save_record(record: dict[str, Any], path: Path | None = None) -> bool:
         path.parent.mkdir(parents=True, exist_ok=True)
         write_whole(path, (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
     except OSError as e:  # read-only, owned by another user, a folder in the way...
-        raise DeployError(f"cannot write {rel(path)}: {e.strerror or e}") from None
+        raise PytError(f"cannot write {rel(path)}: {e.strerror or e}") from None
     return True
 
 
@@ -189,7 +189,7 @@ def record_of(cfg: Config) -> dict[str, Any]:
 
 
 def rename_record(name: str, record: dict[str, Any] | None) -> None:
-    """After `./deploy rename`: the record read before it keeps its preset and requirements
+    """After `./pyt rename`: the record read before it keeps its preset and requirements
     (rename applies neither), with the new name. No record: nothing to update."""
     if record is not None and record["name"] != name:
         save_record({**record, "name": name})
@@ -265,7 +265,7 @@ def _onto_another_package(cfg: Config, old: str, record: dict[str, Any] | None) 
     text = (
         f"app.name: src/{cfg.pkg}/ already exists and is not the app's package (the app is '{old}', in "
         f"src/{rename.package_of(old)}/): the app is not renamed onto another package.\n"
-        f"  Put back app.name = \"{old}\" in pytemplate.toml, or move or delete src/{cfg.pkg}/ first, then ./deploy apply"
+        f"  Put back app.name = \"{old}\" in pytemplate.toml, or move or delete src/{cfg.pkg}/ first, then ./pyt apply"
     )
     return text if record is not None else f"{text}\n  ({_pyproject_edited_too(cfg)})"
 
@@ -288,7 +288,7 @@ def trusted_record(cfg: Config, project_name: str | None) -> dict[str, Any] | No
 def _project_name() -> str | None:
     try:
         return read_project().name
-    except DeployError:
+    except PytError:
         return None
 
 
@@ -329,7 +329,7 @@ def _has_table(data: dict[str, Any], path: tuple[str, ...]) -> bool:
 
 def _marks(preset: str) -> set[tuple[str, ...]]:
     """What only `preset` writes into pyproject.toml besides its dependencies, and only when the
-    project is made (`./deploy new`): its extra tables (flet's [tool.flet])."""
+    project is made (`./pyt new`): its extra tables (flet's [tool.flet])."""
     try:
         extra = tomllib.loads(presets.extra_tables(preset, "x"))  # only the table paths count
     except tomllib.TOMLDecodeError:
@@ -388,7 +388,7 @@ def _traced(cfg: Config, project: Project) -> list[str]:
     """The presets whose traces pyproject.toml holds: an option-driven requirement (by name: any
     version; with the default options, app.preset's current ones, and those the managed block was
     last written with) or an extra table. The managed [tool.uv] keys themselves are no trace:
-    render.managed_block writes them from app.preset, so `./deploy lock` after a hand edit of
+    render.managed_block writes them from app.preset, so `./pyt lock` after a hand edit of
     app.preset writes the NEW preset's keys."""
     declared = set(project.deps) | set(project.dev)
 
@@ -407,7 +407,7 @@ def _traced(cfg: Config, project: Project) -> list[str]:
 def _infer_preset(cfg: Config, project: Project, record: dict[str, Any] | None) -> tuple[str, bool]:
     """(the preset the project was made with, whether that is a guess).
 
-    The trusted record decides: the last apply, rename or `./deploy new` wrote it, so an app.preset
+    The trusted record decides: the last apply, rename or `./pyt new` wrote it, so an app.preset
     that differs from it was changed by hand, whatever pyproject.toml holds (a script project may
     depend on raylib or flet). Without one (it was lost: a state.json merge conflict whose sides
     disagree on it, a deleted file), pyproject.toml's traces (_traced): app.preset when it shows
@@ -472,10 +472,10 @@ def _restore_hint(cfg: Config) -> str:
     """How to keep app.preset when its requirements were replaced by hand (a guessed preset)."""
     try:
         deps, dev = presets.option_dependencies(cfg.app.preset, presets.options(cfg))
-    except DeployError:  # [preset.<name>] cannot format them: pending reports that on its own line
+    except PytError:  # [preset.<name>] cannot format them: pending reports that on its own line
         deps, dev = [], []
-    adds = [f"./deploy add {' '.join(deps)}"] if deps else []
-    adds += [f"./deploy add --dev {' '.join(dev)}"] if dev else []
+    adds = [f"./pyt add {' '.join(deps)}"] if deps else []
+    adds += [f"./pyt add --dev {' '.join(dev)}"] if dev else []
     restore = f"restore them ({' and '.join(adds)}) or " if adds else ""
     return f"{restore}set [preset.{cfg.app.preset}] in pytemplate.toml to the ones pyproject.toml declares"
 
@@ -485,7 +485,7 @@ def preset_message(cfg: Config, applied: str, *, guessed: bool = False) -> str:
         f"app.preset was changed from '{applied}' to '{cfg.app.preset}' by hand: a project cannot switch presets in place\n"
         f"  (the preset decides src/, tests/, the dependencies and pyproject.toml). Put back app.preset = \"{applied}\" in\n"
         f"  pytemplate.toml; to use the {cfg.app.preset} preset, create a new project and move your code there:\n"
-        f"    ./deploy new DIR --preset {cfg.app.preset}"
+        f"    ./pyt new DIR --preset {cfg.app.preset}"
     )
     if guessed:
         text += (
@@ -505,7 +505,7 @@ def missing_package(cfg: Config) -> tuple[str, str] | None:
     found = f"; src/ has {', '.join(p + '/' for p in here)}" if here else ""
     return (
         f"src/{cfg.pkg}/ does not exist (app.name = '{cfg.app.name}'{found}): run, test and build need the app package",
-        "if app.name was changed by hand, put the old name back and run ./deploy rename NEW_NAME",
+        "if app.name was changed by hand, put the old name back and run ./pyt rename NEW_NAME",
     )
 
 
@@ -522,7 +522,7 @@ def _project_name_text(cfg: Config, project: Project) -> str:
         text = (ROOT / PYPROJECT.name).read_text(encoding="utf-8-sig")
         return presets.set_project_name(text, cfg.app.name)
     except OSError as e:
-        raise DeployError(f"pyproject.toml cannot be read: {e.strerror or e}") from None
+        raise PytError(f"pyproject.toml cannot be read: {e.strerror or e}") from None
 
 
 # --- the plan ------------------------------------------------------------------------------------
@@ -546,20 +546,20 @@ def make_plan(cfg: Config) -> Plan:
     project = read_project()
     applied = applied_state(cfg, project)
     if applied.preset != cfg.app.preset:
-        raise DeployError(preset_message(cfg, applied.preset, guessed=applied.guessed))
+        raise PytError(preset_message(cfg, applied.preset, guessed=applied.guessed))
     render.check_pyproject(cfg)  # broken markers, a managed key outside them...: before any change
     plan = Plan(cfg, project, applied, dependency_changes(cfg, applied, project))
     plan.pypy_new = cfg.pypy_enabled and not project.pypy_locked
     if applied.renamed_from is not None:
-        rename.check_new_name(cfg, cfg.app.name, who="app.name", retry="another app.name in pytemplate.toml, then ./deploy apply")
+        rename.check_new_name(cfg, cfg.app.name, who="app.name", retry="another app.name in pytemplate.toml, then ./pyt apply")
         plan.generated = render.outputs(cfg)
         plan.rename_plan = rename.plan(ROOT, applied.renamed_from, cfg.app.name, generated=plan.generated)
         plan.new_cfg = rename.validate_config(plan.rename_plan.config.new)
     elif project.name != cfg.app.name and rename.package_dir(_src(), cfg.pkg) is not None:
         other = _other_package(cfg, applied.record, project.name)
         if other is not None:  # `rename` refuses the same: src/<new>/ exists
-            raise DeployError(_onto_another_package(cfg, other, applied.record))
-        rename.check_new_name(cfg, cfg.app.name, who="app.name", retry="another app.name in pytemplate.toml, then ./deploy apply")
+            raise PytError(_onto_another_package(cfg, other, applied.record))
+        rename.check_new_name(cfg, cfg.app.name, who="app.name", retry="another app.name in pytemplate.toml, then ./pyt apply")
         plan.name_text = _project_name_text(cfg, project)
     return plan
 
@@ -572,10 +572,10 @@ def _dirty(plan: Plan, command: str, force: bool) -> None:
     if isinstance(changes, list):
         ignore = rename.derived_paths(plan.generated or render.outputs(plan.cfg)) | {"pytemplate.toml"}
         changes = [p for p in changes if p not in ignore]
-    message = rename.dirty_tree_message(changes, "renaming the app", f"./deploy {command} --force")
+    message = rename.dirty_tree_message(changes, "renaming the app", f"./pyt {command} --force")
     if message:
         if not proc.DRY_RUN:
-            raise DeployError(message)
+            raise PytError(message)
         ui.warn(message)
 
 
@@ -595,7 +595,7 @@ def _repo() -> hooks.Repo | str | None:
         return hooks.find_repo(ROOT)
     except hooks.NotInGit:
         return hooks.NO_GIT if hooks.git_missing_here(ROOT) else None
-    except DeployError as e:
+    except PytError as e:
         return " ".join(line.strip() for line in str(e).splitlines())
 
 
@@ -620,7 +620,7 @@ def _left_alone(state: str, repo: hooks.Repo) -> str | None:
     if state == "foreign":
         return f"another tool's hook: left alone ({hooks.chain_advice(repo)})"
     if state == "calls":
-        return "a hook that runs ./deploy hooks run: left alone"
+        return "a hook that runs ./pyt hooks run: left alone"
     if state == "other":
         return f"another project's hook of this repository: left alone ({hooks.chain_advice(repo)})"
     return None
@@ -630,8 +630,8 @@ def _hooks_path_summary(repo: hooks.Repo) -> str:
     """hooks.pre_commit with core.hooksPath set: nothing is installed; does that hook run the checks?"""
     runner = hooks.hooks_path_runner(repo)
     if runner is not None:
-        return f"core.hooksPath is set: {runner} runs ./deploy hooks run"
-    return "core.hooksPath is set: nothing installed (./deploy hooks status says what to add)"
+        return f"core.hooksPath is set: {runner} runs ./pyt hooks run"
+    return "core.hooksPath is set: nothing installed (./pyt hooks status says what to add)"
 
 
 def _apply_hook(cfg: Config) -> str:
@@ -641,7 +641,7 @@ def _apply_hook(cfg: Config) -> str:
     if repo is None:
         return "not a git work tree: nothing to do"
     if isinstance(repo, str):
-        again = " (put it on PATH and run ./deploy apply again)" if repo == hooks.NO_GIT else ""
+        again = " (put it on PATH and run ./pyt apply again)" if repo == hooks.NO_GIT else ""
         ui.warn(f"git pre-commit hook not checked: {repo}{again}")
         return f"not checked: {_unchecked(repo)} (see above)"
     before, copy_before = hooks.hook_state(repo), hooks.own_local(repo)
@@ -652,7 +652,7 @@ def _apply_hook(cfg: Config) -> str:
         try:
             ui.ok(hooks.uninstall(repo))
         except OSError as e:
-            ui.warn(f"could not remove the git pre-commit hook: {e} (./deploy hooks uninstall)")
+            ui.warn(f"could not remove the git pre-commit hook: {e} (./pyt hooks uninstall)")
             return "not removed (see above)"
     after, copy_after = hooks.hook_state(repo), hooks.own_local(repo)
     dropped = " (and removed pre-commit.local, a copy of this project's hook)" if copy_before and not copy_after else ""
@@ -696,7 +696,7 @@ def _hook_plan(cfg: Config) -> str:
     if state == "installed":
         return "would remove pre-commit.local, a copy of this project's hook (the checks run twice)" if copy else "installed"
     if state == "missing" and not copy and repo.ignored():
-        return "not installed: the enclosing git repository ignores this project (./deploy hooks status)"
+        return "not installed: the enclosing git repository ignores this project (./pyt hooks status)"
     return "would update the pre-commit hook" if state == "outdated" else "would install the pre-commit hook"
 
 
@@ -749,10 +749,10 @@ def pending(cfg: Config, *, hook: bool = True) -> list[tuple[str, str]]:
     try:
         project = read_project()
         applied = applied_state(cfg, project)
-    except DeployError as e:
-        return [(str(e).splitlines()[0], "fix it, then ./deploy apply")]
+    except PytError as e:
+        return [(str(e).splitlines()[0], "fix it, then ./pyt apply")]
     if applied.preset != cfg.app.preset:
-        put_back = f"put back app.preset = \"{applied.preset}\" (a preset cannot change in place: ./deploy new DIR --preset {cfg.app.preset})"
+        put_back = f"put back app.preset = \"{applied.preset}\" (a preset cannot change in place: ./pyt new DIR --preset {cfg.app.preset})"
         if applied.guessed:
             return [
                 (
@@ -764,11 +764,11 @@ def pending(cfg: Config, *, hook: bool = True) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     if applied.renamed_from is not None:
         old = applied.renamed_from
-        out.append((f"app.name = '{cfg.app.name}' is not applied: the package is still src/{rename.package_of(old)}/", f"./deploy apply  (renames '{old}' -> '{cfg.app.name}')"))
+        out.append((f"app.name = '{cfg.app.name}' is not applied: the package is still src/{rename.package_of(old)}/", f"./pyt apply  (renames '{old}' -> '{cfg.app.name}')"))
     elif (missing := missing_package(cfg)) is not None:
         out.append(missing)
     elif project.name != cfg.app.name and (other := _other_package(cfg, applied.record, project.name)):
-        hint = f"put back app.name = \"{other}\" (or move src/{cfg.pkg}/ away, then ./deploy apply)"
+        hint = f"put back app.name = \"{other}\" (or move src/{cfg.pkg}/ away, then ./pyt apply)"
         out.append(
             (
                 f"app.name = '{cfg.app.name}' names src/{cfg.pkg}/, another package: the app is '{other}' (src/{rename.package_of(other)}/)",
@@ -776,21 +776,21 @@ def pending(cfg: Config, *, hook: bool = True) -> list[tuple[str, str]]:
             )
         )
     elif project.name != cfg.app.name:
-        out.append((f"pyproject.toml [project] name = '{project.name}', but app.name = '{cfg.app.name}'", "./deploy apply"))
+        out.append((f"pyproject.toml [project] name = '{project.name}', but app.name = '{cfg.app.name}'", "./pyt apply"))
     try:
         changes = dependency_changes(cfg, applied, project)
-    except DeployError as e:
+    except PytError as e:
         changes = DepChanges()
         out.append((str(e).splitlines()[0], f"fix [preset.{cfg.app.preset}] in pytemplate.toml"))
     if changes:
-        out.append((f"[preset.{cfg.app.preset}] is not applied to pyproject.toml ({changes.describe()})", "./deploy apply"))
+        out.append((f"[preset.{cfg.app.preset}] is not applied to pyproject.toml ({changes.describe()})", "./pyt apply"))
     if hook and not cfg.hooks.pre_commit and _hook_state(cfg) in OURS:
-        out.append(("hooks.pre_commit = false, but pytemplate's git pre-commit hook is installed", "./deploy apply  (or ./deploy hooks uninstall)"))
+        out.append(("hooks.pre_commit = false, but pytemplate's git pre-commit hook is installed", "./pyt apply  (or ./pyt hooks uninstall)"))
     return out
 
 
 def doctor(cfg: Config, check: Check) -> None:
-    """The ./deploy doctor lines about pytemplate.toml changes that are not applied yet."""
+    """The ./pyt doctor lines about pytemplate.toml changes that are not applied yet."""
     problems = pending(cfg)
     if not problems:
         # hooks.pre_commit only where git could read the hook (the "git hook" line says why not)
@@ -912,7 +912,7 @@ def _leftover_note(cfg: Config) -> None:
     if names:
         ui.info(
             f"note: {', '.join(names)} {'is' if len(names) == 1 else 'are'} not used by this configuration: "
-            "./deploy clean --envs removes the .venv* environments (./deploy apply recreates the ones in use)"
+            "./pyt clean --envs removes the .venv* environments (./pyt apply recreates the ones in use)"
         )
 
 
@@ -941,7 +941,7 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
         try:
             write_whole(ROOT / PYPROJECT.name, plan.name_text.encode("utf-8"))
         except OSError as e:
-            raise DeployError(f"cannot write pyproject.toml: {e.strerror or e}") from None
+            raise PytError(f"cannot write pyproject.toml: {e.strerror or e}") from None
         summary.append(("app.name", f"pyproject.toml [project] name = \"{cfg.app.name}\""))
 
     pyproject_before = _read_bytes(ROOT / PYPROJECT.name)
@@ -959,11 +959,11 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
             for name, before in ((PYPROJECT.name, pyproject_before), ("uv.lock", lock_before))
             if _restore(ROOT / name, before)
         ]
-        if not isinstance(e, DeployError):
+        if not isinstance(e, PytError):
             raise
         notes = ["the app is already renamed" if plan.rename_plan is not None else "", f"{' and '.join(restored)} {'was' if len(restored) == 1 else 'were'} restored" if restored else ""]
         done = "; ".join(x for x in notes if x)
-        raise DeployError(f"{e}\n  {done + ': ' if done else ''}fix the problem above and run ./deploy {command} again", e.code) from None
+        raise PytError(f"{e}\n  {done + ': ' if done else ''}fix the problem above and run ./pyt {command} again", e.code) from None
     # pyproject.toml and uv.lock now follow [preset.*]: record it before the steps that can still
     # fail (a sync, the hook, render), or the next apply would not know what to remove
     save_record(record_of(cfg))
@@ -987,7 +987,7 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
         ui.info(f"render: updated {', '.join(changed)}")
         summary.append(("generated files", f"updated {', '.join(changed)}"))
     if edited:
-        ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./deploy render --force)")
+        ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./pyt render --force)")
     if plan.rename_plan is not None:
         rename.tidy_after(cfg, plan.rename_plan, clean)
     _leftover_note(cfg)
@@ -1001,7 +1001,7 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
     if problems:
         ui.info(f"  {'warnings':<16} {len(problems)} (above)")
     if command == "setup":
-        ui.ok("done. Try: ./deploy run  |  ./deploy test  |  ./deploy doctor")
+        ui.ok("done. Try: ./pyt run  |  ./pyt test  |  ./pyt doctor")
     else:
         ui.ok("pytemplate.toml applied")
     return 0

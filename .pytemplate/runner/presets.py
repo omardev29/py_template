@@ -7,7 +7,7 @@ Each preset lives in .pytemplate/presets/<name>/:
   constraints.txt  optional: the versions the template was tested with for every package a
                    project of the preset locks, its whole tested tree (see `constraints`).
 
-`./deploy new` copies the template (`copy_template`) and runs `init` in the copy: `init` is its
+`./pyt new` copies the template (`copy_template`) and runs `init` in the copy: `init` is its
 internal step (and how the template maintainer regenerates the template root).
 """
 
@@ -31,8 +31,8 @@ from typing import TYPE_CHECKING, Any
 
 from . import proc, ui
 from .config import APP_NAME, BACKENDS, NAME_RULE
-from .project import BUILD, PRESETS, PYPROJECT, ROOT, TEMPLATE, rel, write_whole
-from .ui import DeployError
+from .project import BUILD, INSTALL_RECORD, PRESETS, PYPROJECT, ROOT, TEMPLATE, rel, write_whole
+from .ui import PytError
 
 if TYPE_CHECKING:
     from .config import Config
@@ -64,10 +64,14 @@ WINDOWS_DEVICES = frozenset({"con", "prn", "aux", "nul", *(f"{d}{i}" for d in ("
 # portable.cmd_launcher, common.windowed): cmd.exe looks in the current folder first, so an app
 # called python started its own python.cmd again and again instead of Python
 INTERPRETER_COMMANDS = frozenset({"py", "pyw", "python", "python3", "pythonw", "pypy", "pypy3", "pypyw"})
+# The launcher's name (./pyt) and the command `pyt install` puts on PATH: the app's own `pyt`
+# (the console script of its wheel) would take that place, and every ./pyt of its code and docs
+# reads like the app's name (rename rewrote them)
+LAUNCHER_NAMES = frozenset({"pyt"})
 # The top-level modules a pinned package (constraints.txt of any preset) installs under another
 # name than its own (normalized, '_' for '-'), read from the wheels' RECORD files; names that
 # cannot be an app package (_pytest, _yaml, cffi-stubs...) are left out. src/<pkg>/ with such a
-# name shadows the library: a project named py failed ./deploy test at once (pytest imports its
+# name shadows the library: a project named py failed ./pyt test at once (pytest imports its
 # `py` shim), one named markdown-it broke rich.markdown. Compared in lower case (PIL and src/pil/
 # merge on a case-insensitive file system). test_import_names_follow_the_installed_packages
 # checks it against what .venv installs.
@@ -108,26 +112,26 @@ def _holds(value: Any, kind: str) -> bool:
 
 def load(name: str) -> dict[str, Any]:
     """preset.toml of `name`, read like every file the template ships (a BOM is fine). A file
-    that cannot be read, is not TOML or holds an unknown key or a wrong type is a DeployError
+    that cannot be read, is not TOML or holds an unknown key or a wrong type is a PytError
     naming it: render (the managed [tool.uv] block) and new read it on every run."""
     path = PRESETS / name / "preset.toml"
     if not path.is_file():
-        raise DeployError(f"unknown preset '{name}' (available: {', '.join(available())})")
+        raise PytError(f"unknown preset '{name}' (available: {', '.join(available())})")
     where = rel(path)
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     except UnicodeDecodeError as e:
-        raise DeployError(f"{where} is not UTF-8 text (byte {e.start}): save it as UTF-8") from None
+        raise PytError(f"{where} is not UTF-8 text (byte {e.start}): save it as UTF-8") from None
     except OSError as e:
-        raise DeployError(f"cannot read {where}: {e.strerror or e}") from None
+        raise PytError(f"cannot read {where}: {e.strerror or e}") from None
     except tomllib.TOMLDecodeError as e:
-        raise DeployError(f"{where} is not valid TOML: {e}") from None
+        raise PytError(f"{where} is not valid TOML: {e}") from None
     for key, value in data.items():
         kind = PRESET_KEYS.get(key)
         if kind is None:
-            raise DeployError(f"{where}: unknown key '{key}' (known: {', '.join(PRESET_KEYS)})")
+            raise PytError(f"{where}: unknown key '{key}' (known: {', '.join(PRESET_KEYS)})")
         if not _holds(value, kind):
-            raise DeployError(f"{where}: '{key}' must be {kind}")
+            raise PytError(f"{where}: '{key}' must be {kind}")
     return data
 
 
@@ -223,7 +227,7 @@ def pristine(cfg: Config) -> bool:
 
 
 def name_from_folder(folder: str) -> str:
-    """The app name `./deploy new DIR` derives from the folder name: accents dropped (NFKD, then
+    """The app name `./pyt new DIR` derives from the folder name: accents dropped (NFKD, then
     the combining marks: an accented e becomes e), every run of other characters, letters
     without an ASCII form included (a sharp s, an o with stroke), -> '-' (no '--'), and no '-'
     or '_' at either end (uv refuses a name that does not end with a letter or digit)."""
@@ -241,22 +245,22 @@ def _read_text(path: Path, what: str) -> str:
     try:
         return path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
-        raise DeployError(f"{what} not found: {path}") from None
+        raise PytError(f"{what} not found: {path}") from None
     except UnicodeDecodeError as e:
-        raise DeployError(f"{what} is not UTF-8 text (byte {e.start}): save it as UTF-8") from None
+        raise PytError(f"{what} is not UTF-8 text (byte {e.start}): save it as UTF-8") from None
     except OSError as e:
-        raise DeployError(f"cannot read {what}: {e.strerror or e}") from None
+        raise PytError(f"cannot read {what}: {e.strerror or e}") from None
 
 
 def _read_toml(path: Path, what: str) -> dict[str, Any]:
     try:
         return tomllib.loads(_read_text(path, what))
     except tomllib.TOMLDecodeError as e:
-        raise DeployError(f"{what} is not valid TOML: {e}") from None
+        raise PytError(f"{what} is not valid TOML: {e}") from None
 
 
 def read_pyproject() -> dict[str, Any]:
-    """pyproject.toml, parsed (a BOM is fine); a DeployError that names the problem otherwise."""
+    """pyproject.toml, parsed (a BOM is fine); a PytError that names the problem otherwise."""
     return _read_toml(PYPROJECT, "pyproject.toml")
 
 
@@ -371,7 +375,7 @@ def constraints(preset: str) -> dict[str, str]:
     (the template's own packages it keeps, the preset's dependencies and what they pull in), at
     the versions the template was tested with. `init` hands the ones the project does not lock
     yet to `uv add --constraints`: a one-off, nothing is written into pyproject.toml, and
-    `./deploy lock --upgrade` moves on later. The name check reads it too: from a project whose
+    `./pyt lock --upgrade` moves on later. The name check reads it too: from a project whose
     uv.lock lacks the preset's tree, it is the only place that names that tree (a project named
     mdurl made from a raylib project got markdown-it-py's mdurl resolved to itself). How to
     regenerate it: CLAUDE.md section 11.
@@ -382,9 +386,9 @@ def constraints(preset: str) -> dict[str, str]:
     try:
         text = path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError as e:
-        raise DeployError(f"{rel(path)} is not UTF-8 text (byte {e.start}): regenerate it (CLAUDE.md section 11)") from None
+        raise PytError(f"{rel(path)} is not UTF-8 text (byte {e.start}): regenerate it (CLAUDE.md section 11)") from None
     except OSError as e:
-        raise DeployError(f"cannot read {rel(path)}: {e.strerror or e}") from None
+        raise PytError(f"cannot read {rel(path)}: {e.strerror or e}") from None
     pins: dict[str, str] = {}
     for number, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
@@ -392,7 +396,7 @@ def constraints(preset: str) -> dict[str, str]:
             continue
         m = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*([A-Za-z0-9][A-Za-z0-9._+!-]*)", line)
         if m is None:
-            raise DeployError(f"{rel(path)}:{number}: expected name==version, found {line!r}")
+            raise PytError(f"{rel(path)}:{number}: expected name==version, found {line!r}")
         pins[_norm_name(m.group(1))] = m.group(2)
     return pins
 
@@ -408,7 +412,7 @@ def constraints_text(preset: str, project_lock: Path) -> str:
             versions.setdefault(_norm_name(entry["name"]), set()).add(str(entry.get("version", "")))
     lines = [
         f"# Versions the template was tested with for every package a project of the {preset} preset",
-        "# locks. `./deploy new` hands the ones the source project does not lock yet to `uv add",
+        "# locks. `./pyt new` hands the ones the source project does not lock yet to `uv add",
         "# --constraints` (a one-off: pyproject.toml keeps plain bounds), and the name check refuses",
         "# them all. Regenerate it, never edit it: CLAUDE.md section 11.",
         *(f"{name}=={next(iter(v))}" for name, v in sorted(versions.items()) if len(v) == 1 and "" not in v),
@@ -498,35 +502,40 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
     of a dependency to the project itself when its version fits, section 15.1 of CLAUDE.md; and
     src/<pkg>/ would shadow the library), or a module such a package installs under another
     name (IMPORT_NAMES for the presets' pins: pytest's py, raylib's pyray; the environments of
-    the project for the rest: beautifulsoup4's bs4 once `./deploy add` installed it).
+    the project for the rest: beautifulsoup4's bs4 once `./pyt add` installed it).
     new, init, their dry runs and rename (which keeps the first line) call it."""
     pkg = name.replace("-", "_").lower()
     hint = "\n  Choose another name with --name NAME"
     if not APP_NAME.fullmatch(name):
-        raise DeployError(f"'{name}' is not a valid app name: it may only contain {NAME_RULE}.{hint}")
+        raise PytError(f"'{name}' is not a valid app name: it may only contain {NAME_RULE}.{hint}")
     if keyword.iskeyword(pkg):
-        raise DeployError(f"the package '{pkg}' would be a Python keyword (`import {pkg}` is a syntax error).{hint}")
+        raise PytError(f"the package '{pkg}' would be a Python keyword (`import {pkg}` is a syntax error).{hint}")
     if shadows_stdlib(pkg):  # every Python the project can run on, not only the runner's
-        raise DeployError(f"src/{pkg}/ would shadow the standard library module '{pkg}'.{hint}")
-    if pkg in BACKENDS:  # src/mypyc/ would shadow mypy's compiler; `./deploy run pypy` reads a backend
-        raise DeployError(f"'{name}' is the name of a backend ({', '.join(BACKENDS)}).{hint}")
+        raise PytError(f"src/{pkg}/ would shadow the standard library module '{pkg}'.{hint}")
+    if pkg in BACKENDS:  # src/mypyc/ would shadow mypy's compiler; `./pyt run pypy` reads a backend
+        raise PytError(f"'{name}' is the name of a backend ({', '.join(BACKENDS)}).{hint}")
     if pkg in WINDOWS_DEVICES:
-        raise DeployError(
+        raise PytError(
             f"src/{pkg}/ cannot exist on Windows: '{pkg}' is a reserved device name there (CON, PRN, "
             f"AUX, NUL, COM0-9, LPT0-9) and a repository holding it cannot be checked out.{hint}"
         )
+    if name.lower() in LAUNCHER_NAMES:
+        raise PytError(
+            f"'{name}' is the name of the ./pyt launcher and of the `pyt` command that pyt install puts on PATH: "
+            f"the app's own `{name}` command would take its place.{hint}"
+        )
     if name.lower() in INTERPRETER_COMMANDS:
-        raise DeployError(
+        raise PytError(
             f"'{name}' is the name of a Python command: the Windows launchers of the pyz and portable "
             f"builds ({name}.cmd) call it by name, and cmd.exe would start {name}.cmd itself again and again.{hint}"
         )
     taken = {**_skeleton_src_names(preset), **RESERVED_PACKAGES}
     if pkg in taken:
-        raise DeployError(f"src/{pkg}/ would collide with the project's own {taken[pkg]}.{hint}")
+        raise PytError(f"src/{pkg}/ would collide with the project's own {taken[pkg]}.{hint}")
     clash = _norm_name(name)
     names = _dependency_names(cfg, preset)
     if clash in names:
-        raise DeployError(
+        raise PytError(
             f"the app name '{name}' is also the name of a dependency of the '{preset}' preset "
             f"({clash}, direct or indirect): uv would refuse the project or resolve that dependency "
             f"to the project itself, and src/{pkg}/ would shadow the library.{hint}"
@@ -536,7 +545,7 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
         modules = sorted({*IMPORT_NAMES.get(dist, ()), *installed.get(dist, ())})
         module = next((m for m in modules if m.lower() == pkg), None)
         if module is not None:
-            raise DeployError(
+            raise PytError(
                 f"src/{pkg}/ would shadow the module '{module}' of {dist}, a dependency of the "
                 f"'{preset}' preset (direct or indirect): `import {module}` would find the app.{hint}"
             )
@@ -582,7 +591,7 @@ def _set_project_name(text: str, name: str) -> str:
 
 
 def _extra_bounds(lines: list[str]) -> tuple[int, int] | None:
-    """The lines of the preset markers (None: no preset block); DeployError when they are damaged."""
+    """The lines of the preset markers (None: no preset block); PytError when they are damaged."""
     begins = [i for i, ln in enumerate(lines) if ln.strip() == EXTRA_BEGIN]
     ends = [i for i, ln in enumerate(lines) if ln.strip() == EXTRA_END]
     if not begins and not ends:
@@ -590,7 +599,7 @@ def _extra_bounds(lines: list[str]) -> tuple[int, int] | None:
     if len(begins) == 1 and len(ends) == 1 and begins[0] < ends[0]:
         return begins[0], ends[0]
     order = " (the closing one comes first)" if len(begins) == len(ends) == 1 else ""
-    raise DeployError(
+    raise PytError(
         f"pyproject.toml: the preset's tables sit between one '{EXTRA_BEGIN}' line and one "
         f"'{EXTRA_END}' line; found {len(begins)} and {len(ends)}{order}.\n"
         "  Restore the markers around those tables (or delete the markers with the tables), then try again"
@@ -616,7 +625,7 @@ def extra_tables(preset: str, name: str) -> str:
     return str(load(preset).get("pyproject", "")).replace("{{name}}", name).replace("{{pkg}}", pkg)
 
 
-# --- names and option-driven dependencies (./deploy apply, ./deploy rename) ------------------------
+# --- names and option-driven dependencies (./pyt apply, ./pyt rename) ------------------------
 
 # Top-level standard-library modules of only SOME of the Pythons a project can run on (PyPy 3.11
 # ... the newest CPython). sys.stdlib_module_names only knows the runner's own version: the
@@ -642,11 +651,11 @@ def shadows_stdlib(pkg: str) -> bool:
 
 
 def set_project_name(text: str, name: str) -> str:
-    """`text` (a pyproject.toml) with [project] name = `name` (_set_project_name). DeployError when
+    """`text` (a pyproject.toml) with [project] name = `name` (_set_project_name). PytError when
     the result does not say so, so no caller reports a change it did not make (apply, rename)."""
     new = _set_project_name(text, name)
     if project_name(new) != name:
-        raise DeployError(f'could not set [project] name = "{name}" in pyproject.toml: edit that line by hand and try again')
+        raise PytError(f'could not set [project] name = "{name}" in pyproject.toml: edit that line by hand and try again')
     return new
 
 
@@ -667,7 +676,7 @@ def default_options(preset: str) -> dict[str, Any]:
 def option_dependencies(preset: str, opts: dict[str, Any]) -> tuple[list[str], list[str]]:
     """Return the preset requirements that use an option ({version}, {package}), formatted with
     `opts`: (dependencies, dev group). pytemplate.toml [preset.<name>] keeps them in sync; the
-    plain ones (rich, types-cffi) belong to the project after `init` (./deploy add/remove)."""
+    plain ones (rich, types-cffi) belong to the project after `init` (./pyt add/remove)."""
     data = load(preset)
     out: list[list[str]] = []
     for key in ("dependencies", "dev_dependencies"):
@@ -678,7 +687,7 @@ def option_dependencies(preset: str, opts: dict[str, Any]) -> tuple[list[str], l
             try:
                 reqs.append(str(template).format_map(opts))
             except (KeyError, IndexError, ValueError) as e:
-                raise DeployError(f"preset {preset}: cannot format {template!r} with [preset.{preset}] ({e!r})") from None
+                raise PytError(f"preset {preset}: cannot format {template!r} with [preset.{preset}] ({e!r})") from None
         out.append(reqs)
     return out[0], out[1]
 
@@ -692,9 +701,9 @@ def _contains(data: Any, part: Any) -> bool:
 
 def pyproject_after_init(cfg: Config, preset: str, name: str) -> str:
     """pyproject.toml as `init` writes it for the new configuration `cfg`: the old preset's tables
-    out, the project name and the managed parts in, then the new preset's tables. DeployError when
+    out, the project name and the managed parts in, then the new preset's tables. PytError when
     the result would not be valid TOML (a table of the preset also defined outside the markers)
-    or would not hold all of them; damaged markers are a DeployError too."""
+    or would not hold all of them; damaged markers are a PytError too."""
     from . import render
 
     text = _read_text(PYPROJECT, "pyproject.toml").replace("\r\n", "\n")
@@ -702,22 +711,22 @@ def pyproject_after_init(cfg: Config, preset: str, name: str) -> str:
     try:
         wanted = tomllib.loads(extra)
     except tomllib.TOMLDecodeError as e:
-        raise DeployError(f"{rel(PRESETS / preset / 'preset.toml')}: the pyproject tables are not valid TOML ({e})") from None
+        raise PytError(f"{rel(PRESETS / preset / 'preset.toml')}: the pyproject tables are not valid TOML ({e})") from None
     hint = f"fix the '{EXTRA_BEGIN}' / '{EXTRA_END}' and '# >>> pytemplate' markers of pyproject.toml and try again"
     try:
         managed = render.pyproject_expected(cfg, _set_extra_tables(_set_project_name(text, name), ""))
         text = _set_extra_tables(managed, extra)
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        raise DeployError(
+        raise PytError(
             f"pyproject.toml would not be valid TOML with the tables of the '{preset}' preset ({e}).\n"
             f"  One of them is probably defined outside the markers: {hint}"
         ) from None
     project = data.get("project")
     if not isinstance(project, dict) or project.get("name") != name:
-        raise DeployError(f"pyproject.toml: the [project] table has no name = \"...\" line to set to '{name}': add one")
+        raise PytError(f"pyproject.toml: the [project] table has no name = \"...\" line to set to '{name}': add one")
     if not _contains(data, wanted) or render.pyproject_expected(cfg, text) != text:
-        raise DeployError(f"pyproject.toml: the tables of the '{preset}' preset or the managed [tool.uv] block did not land: {hint}")
+        raise PytError(f"pyproject.toml: the tables of the '{preset}' preset or the managed [tool.uv] block did not land: {hint}")
     return text
 
 
@@ -770,22 +779,22 @@ def plan_init(cfg: Config, preset: str, name: str | None, *, force: bool) -> Ini
     check_name_free(cfg, preset, new_name)  # the format too
     target = load(preset)
     if not force and not pristine(cfg):
-        raise DeployError(
+        raise PytError(
             "src/, tests/ or typings/ have changes compared to the skeleton of the current preset "
-            f"('{cfg.app.preset}'). init would replace them.\n  If you are sure: ./deploy __init {preset} --force"
+            f"('{cfg.app.preset}'). init would replace them.\n  If you are sure: ./pyt __init {preset} --force"
         )
     files = skeleton(preset, new_name)
     where = f"preset {preset}: files/pytemplate.toml"
     if "pytemplate.toml" not in files:
-        raise DeployError(f"{where} is missing")
+        raise PytError(f"{where} is missing")
     try:
         data = tomllib.loads(files["pytemplate.toml"].decode("utf-8-sig"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
-        raise DeployError(f"{where} is not valid TOML: {e}") from None
+        raise PytError(f"{where} is not valid TOML: {e}") from None
     new_cfg: Config = config._build(config.Config, data, "")
     config.validate(new_cfg)
     if (new_cfg.app.name, new_cfg.app.preset) != (new_name, preset):
-        raise DeployError(f"{where}: [app] must say name = \"{{{{name}}}}\" and preset = \"{preset}\"")
+        raise PytError(f"{where}: [app] must say name = \"{{{{name}}}}\" and preset = \"{preset}\"")
     # The managed parts of pyproject.toml can be rewritten for the new configuration (broken
     # markers, a managed key repeated outside them...): refused here, before anything changes
     render.check_pyproject(new_cfg)
@@ -909,7 +918,7 @@ def _swap_dependencies(plan: InitPlan, undo: _Undo) -> None:
     # The name check knows the tested tree (constraints.txt); this catches what it cannot know
     needs = _self_dependents(plan.name)
     if needs:
-        raise DeployError(
+        raise PytError(
             f"the app name '{plan.name}' is also the name of a package the '{plan.preset}' preset needs "
             f"({', '.join(needs)} depend{'s' if len(needs) == 1 else ''} on {_norm_name(plan.name)}): uv "
             "resolved it to the project itself, so the library would be missing.\n"
@@ -927,7 +936,7 @@ def _swap_files(plan: InitPlan, undo: _Undo) -> None:
             try:
                 (ROOT / d).rename(undo.aside / d)
             except OSError as e:
-                raise DeployError(
+                raise PytError(
                     f"init cannot move {d}/ aside ({e.strerror or e}): close the programs that use it "
                     "(an editor, a terminal in it, OneDrive, an antivirus) and try again"
                 ) from None
@@ -940,14 +949,14 @@ def _swap_files(plan: InitPlan, undo: _Undo) -> None:
         path.write_bytes(data)
         ui.detail(f"  + {rel_path}")
     if os.name != "nt":
-        for script in ("deploy", "deploy.ps1"):
+        for script in ("pyt", "pyt.ps1"):
             p = ROOT / script
             if p.exists():
                 p.chmod(p.stat().st_mode | 0o111)
 
 
 def _record(plan: InitPlan, undo: _Undo) -> None:
-    """The project's own `applied` record (cmd_apply): what init wrote is what `./deploy apply`
+    """The project's own `applied` record (cmd_apply): what init wrote is what `./pyt apply`
     finds applied. The record copied from the template, or from the project `new` ran in, must
     never stand for the new project: one named like it would trust it, and apply took the copied
     preset for the project's own."""
@@ -959,7 +968,7 @@ def _record(plan: InitPlan, undo: _Undo) -> None:
 
 
 def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
-    """Convert the project to `preset`: the internal step of `./deploy new`.
+    """Convert the project to `preset`: the internal step of `./pyt new`.
 
     Every check runs first (plan_init). Then pyproject.toml and uv.lock change (uv: the only
     step that needs the network), then src/, tests/, typings/ and pytemplate.toml are swapped,
@@ -983,7 +992,7 @@ def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
             ui.info("init failed: every file is back as it was")
         if isinstance(e, OSError):  # a full disk, permissions, a name the file system refuses
             where = f" {rel(e.filename)}" if isinstance(e.filename, str) and e.filename else ""
-            raise DeployError(f"init could not write{where}: {e.strerror or e}") from None
+            raise PytError(f"init could not write{where}: {e.strerror or e}") from None
         raise
     undo.discard()
     render.apply(plan.cfg, force=True)
@@ -999,7 +1008,7 @@ SKIP_ANYWHERE = frozenset(
 # PyInstaller/Flet leftovers, Claude Code state (settings, agent worktrees), and the page and
 # license of the program this is: a project made with `new` is another program (TEMPLATE_DOCS)
 SKIP_AT_ROOT = frozenset({"build", ".claude", "README.md", "LICENSE"})
-# Where a project keeps the template repository's README (the manual of ./deploy, of the
+# Where a project keeps the template repository's README (the manual of ./pyt, of the
 # version it was made from) and LICENSE (the notice the MIT license asks for, for the copied
 # runner). A project copies them on like any tracked file when it runs `new` itself.
 TEMPLATE_DOCS = {"README.md": ".pytemplate/README.md", "LICENSE": ".pytemplate/LICENSE"}
@@ -1010,6 +1019,8 @@ def _skipped(rel_path: str) -> bool:
     """Whether `new` leaves this path (relative to ROOT, '/'-separated) out of the copy."""
     parts = rel_path.split("/")
     if any(p in SKIP_ANYWHERE or p.startswith(".venv") for p in parts) or parts[0] in SKIP_AT_ROOT:
+        return True
+    if rel_path == INSTALL_RECORD:  # the record of `pyt install` in its copy of the template
         return True
     # CI of the template repository itself (template-*.yml), not of the new project
     return len(parts) >= 3 and parts[:2] == [".github", "workflows"] and parts[2].startswith("template-")
@@ -1074,11 +1085,28 @@ def _git_files(*args: str) -> list[str] | None:
     return [_git_path(line) for line in r.stdout.split("\n") if line]
 
 
+def _installed() -> bool:
+    """Whether `new` copies the installed template (global mode: project.GLOBAL)."""
+    from . import project  # the name `project` is a local variable elsewhere in this module
+
+    return project.GLOBAL
+
+
+def source_name() -> str:
+    """What `new` copies, for its messages."""
+    return f"the installed template ({ROOT})" if _installed() else "this template"
+
+
 def _tracked_template() -> tuple[list[str] | None, str]:
     """The files copy_template copies: git's tracked files, or None for every file (ignored ones
-    included), with how it picks them (the real run and the dry run of `new` say it alike)."""
+    included), with how it picks them (the real run and the dry run of `new` say it alike).
+    The installed template (global mode) is a clean copy of a template's tracked files made by
+    `pyt install`, with no .git: every file, without asking a git (the folder may even lie in
+    a repository of the user's, such as a home folder kept in git)."""
+    if _installed():
+        return None, "every file"
     tracked = _git_files("--cached")
-    if tracked is not None and ".pytemplate/deploy.py" in tracked:
+    if tracked is not None and ".pytemplate/pyt.py" in tracked:
         return tracked, "the files git tracks"
     if tracked is not None:
         return None, "every file, ignored ones included: git does not track this project's files (never committed?)"
@@ -1090,6 +1118,35 @@ def copy_scope() -> str:
     return _tracked_template()[1]
 
 
+def _copy_entry(src: Path, target: Path, rel_path: str, errors: list[tuple[str, str, str]]) -> None:
+    """One entry of the template into the new project: a link as the link (_copy_link), a folder
+    with what it holds (copytree: a folder of ROOT, or a submodule), a file with copy2. What
+    fails goes to `errors` as (source, target, why), the tuples shutil.Error holds."""
+    try:
+        if src.is_symlink():
+            _copy_link(src, target, rel_path)
+        elif src.is_dir():
+            shutil.copytree(src, target, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
+        else:
+            shutil.copy2(src, target)
+    except shutil.Error as e:
+        found = e.args[0] if e.args else None
+        if isinstance(found, list):
+            errors.extend((str(t[0]), str(t[1]), str(t[2])) for t in found if isinstance(t, tuple) and len(t) == 3)
+        else:
+            errors.append((str(src), str(target), str(e)))
+    except OSError as e:
+        errors.append((str(src), str(target), str(e)))
+
+
+def _raise_copy_errors(dest: Path, errors: list[tuple[str, str, str]]) -> None:
+    """A copy that failed, as lines a person reads: shutil.Error printed its list of tuples."""
+    if errors:
+        lines = [re.sub(r"^\[(?:Errno|WinError) -?\d+\] ", "", why) for _src, _target, why in errors[:5]]
+        more = f"\n  and {len(errors) - 5} more" if len(errors) > 5 else ""
+        raise PytError(f"could not copy the template into {dest}:\n  " + "\n  ".join(lines) + more, 1)
+
+
 def copy_template(dest: Path) -> None:
     """Copy the template to `dest`, without history, environments, builds, caches or the
     template repository's own files (_skipped).
@@ -1097,33 +1154,43 @@ def copy_template(dest: Path) -> None:
     In a git work tree only what git tracks is copied (with its working-tree content):
     untracked and ignored files (.env secrets, .idea/, htmlcov/, *.spec...) stay behind, and the
     untracked ones are listed. Without git, or when git does not track the template (a copy
-    inside another repository), every file but the _skipped ones is copied. A symbolic link is
+    inside another repository), every file but the _skipped ones is copied, and so from the
+    installed template (global mode), without a word about it. A symbolic link is
     copied as a link, as git tracks it (a link to a folder is not the folder's content, and a
-    dangling one is still a tracked file).
+    dangling one is still a tracked file). A copy that fails is a PytError (exit 1) naming what
+    failed.
     """
     if dest.exists() and any(dest.iterdir()):
-        raise DeployError(f"{dest} already exists and is not empty")
+        raise PytError(f"{dest} already exists and is not empty")
     tracked, how = _tracked_template()
-    if tracked is None:
-        ui.info(f"  copying {how}")
-        shutil.copytree(ROOT, dest, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
-        return
+    # `dest` itself only ever gets mkdir: its mode, owner and times stay those of the folder it
+    # is (or of a new one). copytree(ROOT, dest) also copied ROOT's own mode and times onto it
+    # (copystat): from the installed template, whose folder was 0700, every project folder became
+    # 0700, an empty folder given to `new` lost its mode (a setgid 2775 became 700), and one the
+    # user does not own refused the chmod, which failed `new` with a list of tuples.
     dest.mkdir(parents=True, exist_ok=True)
+    errors: list[tuple[str, str, str]] = []
+    if tracked is None:
+        if not _installed():  # a clean copy by construction: nothing to say about it
+            ui.info(f"  copying {how}")
+        names = sorted(os.listdir(ROOT))
+        left_out = _ignore(str(ROOT), names)
+        for name in names:
+            if name not in left_out:
+                _copy_entry(ROOT / name, dest / name, name, errors)
+        _raise_copy_errors(dest, errors)
+        return
     deleted: list[str] = []
     for rel_path in tracked:
         if _skipped(rel_path):
             continue
         src = ROOT / rel_path
-        if src.is_symlink():  # git tracks the link itself (mode 120000)
+        if os.path.lexists(src):  # git tracks a link itself (mode 120000); a folder: a submodule
             (dest / rel_path).parent.mkdir(parents=True, exist_ok=True)
-            _copy_link(src, dest / rel_path, rel_path)
-        elif src.is_dir():  # a submodule
-            shutil.copytree(src, dest / rel_path, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
-        elif src.exists():
-            (dest / rel_path).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest / rel_path)
+            _copy_entry(src, dest / rel_path, rel_path, errors)
         else:  # the working tree is what is copied: a tracked file deleted there stays out
             deleted.append(rel_path)
+    _raise_copy_errors(dest, errors)
     untracked = [p for p in _git_files("--others", "--exclude-standard") or [] if not _skipped(p)]
     for what, paths in (("deleted in the working tree", deleted), ("not tracked by git", untracked)):
         if paths:
@@ -1131,9 +1198,10 @@ def copy_template(dest: Path) -> None:
             ui.info(f"  not copied ({what}): {', '.join(paths[:5])}{more}")
 
 
-def _copy_link(src: Path, target: Path, rel_path: str) -> None:
+def _copy_link(src: Path, target: Path, rel_path: str, command: str = "new") -> None:
     """A symbolic link copied as the link (its target text). Where no link can be made (Windows
-    without the symlink privilege) what it points to is copied instead, with a warning."""
+    without the symlink privilege) what it points to is copied instead, with a warning naming
+    `command` (`new`, or `install` for the installed template)."""
     try:
         target.symlink_to(os.readlink(src), target_is_directory=src.is_dir())
         return
@@ -1144,9 +1212,9 @@ def _copy_link(src: Path, target: Path, rel_path: str) -> None:
     elif src.exists():
         shutil.copy2(src, target)
     else:
-        ui.warn(f"new: could not copy the link {rel_path} ({reason}); it points nowhere: left out")
+        ui.warn(f"{command}: could not copy the link {rel_path} ({reason}); it points nowhere: left out")
         return
-    ui.warn(f"new: could not copy the link {rel_path} ({reason}): copied what it points to")
+    ui.warn(f"{command}: could not copy the link {rel_path} ({reason}): copied what it points to")
 
 
 def _outermost_missing(path: Path) -> Path | None:
@@ -1158,8 +1226,8 @@ def _outermost_missing(path: Path) -> Path | None:
 
 
 def _git_init(dest: Path) -> None:
-    """A git repository on branch main (the branch the generated CI runs on), with deploy and
-    deploy.ps1 executable. Inside a work tree (a monorepo) no repository; only where that one
+    """A git repository on branch main (the branch the generated CI runs on), with pyt and
+    pyt.ps1 executable. Inside a work tree (a monorepo) no repository; only where that one
     has core.filemode = false (Git for Windows) the two launchers are staged executable: a
     later `git add` would record them as 100644, and the pre-commit hook refuses that."""
     git = shutil.which("git")
@@ -1174,7 +1242,7 @@ def _git_init(dest: Path) -> None:
         # --bool: git's own reading of the value (off, no and 0 are false too); every git has it
         filemode = proc.run([git, "config", "--bool", "--get", "core.filemode"], cwd=dest, env=env, capture=True, check=False, echo=False)
         if filemode.stdout.strip() == "false":  # an ignored folder: git refuses, and that is fine
-            proc.run([git, "add", "--chmod=+x", "--", "deploy", "deploy.ps1"], cwd=dest, env=env, capture=True, check=False)
+            proc.run([git, "add", "--chmod=+x", "--", "pyt", "pyt.ps1"], cwd=dest, env=env, capture=True, check=False)
         return
     if (dest / ".git").exists():
         return
@@ -1186,28 +1254,28 @@ def _git_init(dest: Path) -> None:
     if r.returncode != 0:
         ui.warn(f"git init failed ({(r.stderr or r.stdout).strip()}): the project is not a git repository")
         return
-    proc.run([git, "add", "--chmod=+x", "deploy", "deploy.ps1"], cwd=dest, env=env, check=False)
+    proc.run([git, "add", "--chmod=+x", "pyt", "pyt.ps1"], cwd=dest, env=env, check=False)
 
 
 def project_readme(name: str, preset: str, *, manual: bool) -> str:
     """The README.md of a project made with `new` (the template's own is its .pytemplate/README.md)."""
     description = str(load(preset).get("description", "")).rstrip(".")
     where = (
-        "The manual of `./deploy` and `pytemplate.toml` is `.pytemplate/README.md`: the py_template\n"
+        "The manual of `./pyt` and `pytemplate.toml` is `.pytemplate/README.md`: the py_template\n"
         "README of the version this project was made from."
         if manual
-        else f"The manual of `./deploy` and `pytemplate.toml` is the py_template README: {TEMPLATE_URL}"
+        else f"The manual of `./pyt` and `pytemplate.toml` is the py_template README: {TEMPLATE_URL}"
     )
     return (
         f"# {name}\n\n{description}. Made from [py_template]({TEMPLATE_URL}).\n\n"
         "## Getting started\n\n"
         "```sh\n"
-        "./deploy setup    # interpreters, environments, uv.lock, git hook, editor configs\n"
-        "./deploy run      # run the app with the active backend (pytemplate.toml)\n"
-        "./deploy test     # pytest\n"
-        "./deploy build    # package the app into dist/\n"
+        "./pyt setup    # interpreters, environments, uv.lock, git hook, editor configs\n"
+        "./pyt run      # run the app with the active backend (pytemplate.toml)\n"
+        "./pyt test     # pytest\n"
+        "./pyt build    # package the app into dist/\n"
         "```\n\n"
-        f"`./deploy help` lists every command. {where}\n"
+        f"`./pyt help` lists every command. {where}\n"
     )
 
 
@@ -1242,13 +1310,13 @@ def _set_description(text: str, description: str) -> str:
         return text  # init says what is wrong with it
     try:
         return config.set_value(text, "project", "description", description)
-    except DeployError:
+    except PytError:
         ui.warn("new: could not set [project] description in the copy's pyproject.toml: set it by hand")
         return text
 
 
 def new(dest: Path, preset: str, name: str | None) -> None:
-    """`./deploy new`: copy the template to `dest` and run `init` in the copy.
+    """`./pyt new`: copy the template to `dest` and run `init` in the copy.
 
     When anything fails (a name uv refuses, no network, Ctrl+C...), what this call created is
     removed: the folder and the parents it had to create, or only its content when it existed
@@ -1256,26 +1324,26 @@ def new(dest: Path, preset: str, name: str | None) -> None:
     """
     dest = dest.resolve()
     if dest == ROOT or ROOT in dest.parents:
-        raise DeployError("new: the destination folder cannot be inside this template")
+        raise PytError(f"new: the destination folder cannot be inside {source_name()}")
     app_name = name or name_from_folder(dest.name)
     if not APP_NAME.fullmatch(app_name):
-        raise DeployError(f"'{app_name}' is not a valid app name: it may only contain {NAME_RULE}.\n  Choose one with --name NAME")
+        raise PytError(f"'{app_name}' is not a valid app name: it may only contain {NAME_RULE}.\n  Choose one with --name NAME")
     load(preset)
     if os.path.lexists(dest) and not dest.is_dir():
-        raise DeployError(f"{dest} exists and is not a folder")
+        raise PytError(f"{dest} exists and is not a folder")
     if dest.is_dir() and any(dest.iterdir()):
-        raise DeployError(f"{dest} already exists and is not empty")
+        raise PytError(f"{dest} already exists and is not empty")
     top = _outermost_missing(dest)
     ui.step(f"new project in {dest}")
     try:
         copy_template(dest)
         _make_own(dest, preset, app_name)
-        deploy_py = dest / ".pytemplate" / "deploy.py"
+        pyt_py = dest / ".pytemplate" / "pyt.py"
         loud = ["-q"] if ui.QUIET else ["-v"] if ui.VERBOSE else []  # the copy's runner, as quiet as this one
         # --no-render: init renders every generated file itself (force=True); render.auto first
         # warned about the source's hand-edited ones, which the new project never had
         init = ["--no-render", "__init", preset, "--name", app_name, "--force"]
-        proc.run([proc.find_uv(), "run", "--quiet", "--script", deploy_py, *loud, *init], cwd=dest)
+        proc.run([proc.find_uv(), "run", "--quiet", "--script", pyt_py, *loud, *init], cwd=dest)
     except BaseException as e:
         if top is not None:
             left = [] if _remove(top) else [str(top)]
@@ -1289,7 +1357,7 @@ def new(dest: Path, preset: str, name: str | None) -> None:
         if not isinstance(e, Exception):  # Ctrl+C: cleaned up, stop as asked
             ui.error(note)
             raise
-        raise DeployError(f"{e}\n  {note}", e.code if isinstance(e, DeployError) else 1) from e
+        raise PytError(f"{e}\n  {note}", e.code if isinstance(e, PytError) else 1) from e
     _git_init(dest)
     ui.ok(f"project created in {dest}. Next:")
     for line in next_steps(dest):
@@ -1298,29 +1366,30 @@ def new(dest: Path, preset: str, name: str | None) -> None:
 
 def next_steps(dest: Path) -> list[str]:
     """The commands to type after `new`, each on its own line (cmd and Windows PowerShell 5.1
-    have no `&&`), quoted for the calling shell, told as shells.guess_shell tells it: the
-    launcher (PYTEMPLATE_LAUNCHER: ps1:, nu, sh:niubash), then XONSH_VERSION. deploy.cmd also
-    serves xonsh and nushell on Windows: behind it NU_VERSION (nushell exports it) names
-    nushell, and cmd's syntax is for the rest (cmd, a Python subprocess, a VS Code task)."""
+    have no `&&`): `cd` to the project, quoted for the calling shell, then the launcher that shell
+    runs. The shell: PowerShell from the launcher (PYTEMPLATE_LAUNCHER ps1:), then xonsh and
+    nushell, which export XONSH_VERSION and NU_VERSION to what they start (niubash's own launcher
+    value sh:niubash wins over an inherited one), then cmd's syntax behind pyt.cmd (cmd itself, a
+    Python subprocess, a VS Code task), else a POSIX shell's. xonsh and nushell on Windows start
+    pyt.cmd too: `./pyt.cmd` there."""
     launcher = os.environ.get("PYTEMPLATE_LAUNCHER", "")
     path = str(dest)
     if launcher.startswith("ps1"):
         # PowerShell reads the typographic single quotes as quotes too: each is doubled. Its cd
         # (Set-Location -Path) reads [ ] * ? and ` as a wildcard pattern: -LiteralPath then
         literal = "-LiteralPath " if re.search(r"[\[\]*?`]", path) else ""
-        return [f"cd {literal}'" + re.sub("['\u2018-\u201b]", lambda m: m.group() * 2, path) + "'", "./deploy setup"]
+        return [f"cd {literal}'" + re.sub("['\u2018-\u201b]", lambda m: m.group() * 2, path) + "'", "./pyt setup"]
     cmd = launcher.startswith("cmd")
-    nushell = launcher == "nu"
-    if not nushell and not launcher.startswith("sh:niubash") and os.environ.get("XONSH_VERSION"):
+    niubash = launcher.startswith("sh:niubash")
+    setup = "./pyt.cmd setup" if cmd else "./pyt setup"
+    if not niubash and os.environ.get("XONSH_VERSION"):
         # xonsh reads a quoted argument as a Python string, but expands $NAME in it: @(...) is a
         # Python expression, passed as it is
-        return [f"cd @({path!r})" if "$" in path else f"cd {path!r}", "./deploy setup"]
-    if nushell or (cmd and os.environ.get("NU_VERSION")):
-        # nushell: a single-quoted string is raw, a double-quoted one has the escapes \\ and \";
-        # the launcher value nu is the shell-setup function `deploy`, else Windows' deploy.cmd
+        return [f"cd @({path!r})" if "$" in path else f"cd {path!r}", setup]
+    if not niubash and os.environ.get("NU_VERSION"):
+        # nushell: a single-quoted string is raw, a double-quoted one has the escapes \\ and \"
         escaped = path.replace("\\", "\\\\").replace('"', '\\"')
-        cd = f"cd '{path}'" if "'" not in path else f'cd "{escaped}"'
-        return [cd, "deploy setup" if nushell else "./deploy.cmd setup"]
+        return [f"cd '{path}'" if "'" not in path else f'cd "{escaped}"', setup]
     if cmd:
-        return [f'cd /d "{path}"', r".\deploy setup"]  # a Windows path never holds a double quote
-    return [f"cd {shlex.quote(path)}", "./deploy setup"]
+        return [f'cd /d "{path}"', r".\pyt setup"]  # a Windows path never holds a double quote
+    return [f"cd {shlex.quote(path)}", "./pyt setup"]

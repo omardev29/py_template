@@ -1,1 +1,1 @@
-"""Deploy methods: each module exposes build(req: BuildRequest) -> Path."""
+"""Build methods: each module exposes build(req: BuildRequest) -> Path."""

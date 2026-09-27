@@ -1,6 +1,6 @@
 """Shared pytest configuration for every backend.
 
-With `./deploy test mypyc` the tests run against the COMPILED modules: this checks that
+With `./pyt test mypyc` the tests run against the COMPILED modules: this checks that
 the .pyd/.so files were really loaded instead of the .py files (otherwise the tests would
 pass without exercising the binary, which is where runtime TypeErrors show up).
 """

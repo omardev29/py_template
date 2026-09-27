@@ -1,4 +1,4 @@
-"""User paths, console colors and --dry-run (run them with `./deploy selftest`).
+"""User paths, console colors and --dry-run (run them with `./pyt selftest`).
 
 - native_path / caller_cwd / user_path: every spelling a Windows or POSIX shell can hand over.
 - ui colors: NO_COLOR / TERM=dumb / not a terminal, and the Windows console mode (no cmd.exe).
@@ -30,7 +30,7 @@ sys.path.insert(0, str(TEMPLATE_DIR))
 from runner import cmd_build, cmd_mode, config, presets, proc, project, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import caller_cwd, native_path, user_path  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 windows = pytest.mark.skipif(os.name != "nt", reason="Windows path rules")
 posix = pytest.mark.skipif(os.name == "nt", reason="POSIX path rules")
@@ -355,7 +355,7 @@ def test_user_path_relative_to_the_callers_cwd(tmp_path: Path, monkeypatch: pyte
     assert user_path("~") == Path.home()
     assert user_path("~/x") == Path.home() / "x"
     for empty in ("", "  "):
-        with pytest.raises(DeployError, match="empty path"):
+        with pytest.raises(PytError, match="empty path"):
             user_path(empty)
 
 
@@ -397,7 +397,7 @@ def test_ui_never_spawns_cmd_for_colors() -> None:
         n for n in ast.walk(tree)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("system", "popen")
     ]
-    assert not calls, "ui.py must not start a shell (os.system('') ran cmd.exe on every ./deploy)"
+    assert not calls, "ui.py must not start a shell (os.system('') ran cmd.exe on every ./pyt)"
 
 
 def test_no_color_rules(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -497,11 +497,11 @@ def _snapshot(root: Path) -> dict[str, str]:
     return out
 
 
-def _deploy(root: Path, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _pyt(root: Path, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     env = {k: v for k, v in os.environ.items() if k not in (*_LAUNCHER_VARS, "VIRTUAL_ENV")}
     env.update(NO_COLOR="1", PYTHONDONTWRITEBYTECODE="1", PYTHONUTF8="1")
     return subprocess.run(
-        [sys.executable, "-B", str(root / ".pytemplate" / "deploy.py"), *args],
+        [sys.executable, "-B", str(root / ".pytemplate" / "pyt.py"), *args],
         cwd=cwd or root,
         env=env,
         capture_output=True,
@@ -513,7 +513,7 @@ def _deploy(root: Path, *args: str, cwd: Path | None = None) -> subprocess.Compl
 
 
 def _copy_config(root: Path) -> dict[str, Any]:
-    """The copy's pytemplate.toml: a project made with ./deploy new has its own preset and backends."""
+    """The copy's pytemplate.toml: a project made with ./pyt new has its own preset and backends."""
     return tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8-sig"))
 
 
@@ -542,14 +542,14 @@ def unchanged(project_copy: Path) -> Iterator[Path]:
 def test_dry_run_writes_nothing(unchanged: Path, args: list[str], expected: str) -> None:
     if args[:2] == ["__init", "raylib"] and _copy_config(unchanged)["app"]["preset"] == "raylib":
         args, expected = ["__init", "script", "--force"], "- typings/raylib/__init__.pyi"  # a raylib project: the other way
-    r = _deploy(unchanged, "--dry-run", *args)
+    r = _pyt(unchanged, "--dry-run", *args)
     assert r.returncode == 0, r.stderr
     assert expected in r.stderr, r.stderr
 
 
 @needs_uv
 def test_the_tests_that_copy_the_project_pass_in_one_with_its_own_code(tmp_path: Path) -> None:
-    """CLAUDE.md 13.1: the suite must pass in every project made with ./deploy new, whose src/
+    """CLAUDE.md 13.1: the suite must pass in every project made with ./pyt new, whose src/
     and tests/ hold its own code. The tests that copy the project and run `__init`, `apply` or
     `rename` in the copy assumed the pristine skeleton: `__init` refused the copy ("have changes
     compared to the skeleton") and the plans lacked the skeleton's docstring, so 7 tests failed
@@ -589,7 +589,7 @@ def test_the_tests_that_copy_the_project_pass_in_one_with_its_own_code(tmp_path:
 def test_dry_run_mode_supports_pypy(unchanged: Path) -> None:
     if "pypy" in _copy_config(unchanged)["backend"]["supported"]:
         pytest.skip("this project already supports PyPy (the raylib preset): +pypy changes nothing")
-    r = _deploy(unchanged, "--dry-run", "mode", "--supports", "+pypy")
+    r = _pyt(unchanged, "--dry-run", "mode", "--supports", "+pypy")
     assert r.returncode == 0, r.stderr
     assert "pyproject.toml   would rewrite the managed parts" in r.stderr
     assert "uv.lock          would re-lock" in r.stderr
@@ -604,7 +604,7 @@ def test_dry_run_render_reports_would_update(unchanged: Path) -> None:
     original = ruff.read_bytes()
     ruff.write_bytes(original + b"# hand edit\n")
     try:
-        r = _deploy(unchanged, "--dry-run", "render", "--force")
+        r = _pyt(unchanged, "--dry-run", "render", "--force")
         assert r.returncode == 0, r.stderr
         assert "would update: .ruff.toml" in r.stderr
         assert ruff.read_bytes() == original + b"# hand edit\n"
@@ -614,7 +614,7 @@ def test_dry_run_render_reports_would_update(unchanged: Path) -> None:
 
 @needs_uv
 def test_dry_run_new_copies_nothing(unchanged: Path, tmp_path: Path) -> None:
-    r = _deploy(unchanged, "--dry-run", "new", "p1", "--preset", "raylib", cwd=tmp_path)
+    r = _pyt(unchanged, "--dry-run", "new", "p1", "--preset", "raylib", cwd=tmp_path)
     assert r.returncode == 0, r.stderr
     assert str(tmp_path / "p1") in r.stderr and "raylib" in r.stderr
     assert not (tmp_path / "p1").exists()
@@ -644,7 +644,7 @@ def dry(monkeypatch: pytest.MonkeyPatch) -> Config:
     ],
 )
 def test_bad_arguments_are_clear_errors(dry: Config, command: str, args: list[str], message: str) -> None:
-    with pytest.raises(DeployError) as e:
+    with pytest.raises(PytError) as e:
         getattr(cmd_mode, command)(dry, args)
     assert message in str(e.value)
     assert e.value.code == 2
@@ -652,11 +652,11 @@ def test_bad_arguments_are_clear_errors(dry: Config, command: str, args: list[st
 
 def test_new_checks_the_app_name_before_copying(dry: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(DeployError, match="--name NAME"):
+    with pytest.raises(PytError, match="--name NAME"):
         cmd_mode.cmd_new(dry, ["1game"])
     (tmp_path / "full").mkdir()
     (tmp_path / "full" / "x").write_text("", encoding="utf-8")
-    with pytest.raises(DeployError, match="not empty"):
+    with pytest.raises(PytError, match="not empty"):
         cmd_mode.cmd_new(dry, ["full"])
     assert sorted(p.name for p in tmp_path.iterdir()) == ["full"]
 
@@ -708,10 +708,10 @@ def test_pyz_merge_resolves_paths_against_the_callers_cwd(tmp_path: Path, monkey
         names = set(archive.namelist())
     assert info["targets"] == ["cp314-linux-x86_64", "cp314-windows-x86_64"]
     assert {"targets/cp314-linux-x86_64/lib/native.txt", "targets/cp314-windows-x86_64/lib/native.txt"} <= names
-    with pytest.raises(DeployError, match="not found"):
+    with pytest.raises(PytError, match="not found"):
         cmd_build.cmd_pyz_merge(cfg, ["../in/a.pyz", "../in/missing.pyz", "--out", "x.pyz"])
-    with pytest.raises(DeployError, match="not a .pyz"):
+    with pytest.raises(PytError, match="not a .pyz"):
         cmd_build.cmd_pyz_merge(cfg, ["../in/a.pyz", "../in/a-src/_pyz.json", "--out", "x.pyz"])
-    with pytest.raises(DeployError, match="at least two"):
+    with pytest.raises(PytError, match="at least two"):
         cmd_build.cmd_pyz_merge(cfg, ["../in/a.pyz", "--out", "x.pyz"])
     assert not (work / "x.pyz").exists()

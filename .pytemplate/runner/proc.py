@@ -15,7 +15,7 @@ from pathlib import Path
 
 from . import ui
 from .project import IS_WINDOWS, ROOT, rel
-from .ui import DeployError
+from .ui import PytError
 
 DRY_RUN = False
 
@@ -59,7 +59,7 @@ def exit_code(code: int) -> int:
     return 128 - code if code < 0 else code
 
 
-class CommandFailed(DeployError):
+class CommandFailed(PytError):
     def __init__(self, argv: Sequence[str | Path], code: int) -> None:
         code = exit_code(code)
         super().__init__(f"failed (exit code {code}): {show(argv)}", code)
@@ -87,7 +87,7 @@ def find_uv() -> str:
         return uv
     found = shutil.which("uv")
     if not found:
-        raise DeployError("uv not found in PATH", 3)
+        raise PytError("uv not found in PATH", 3)
     return found
 
 
@@ -106,12 +106,14 @@ def base_env() -> dict[str, str]:
       exports them and they would confuse the project's `uv`); no PYTHONHOME/PYTHONPATH.
     - None of the user's uv variables in UV_SELECTION: the runner picks the project, the
       interpreter and the environment of every uv call itself (envs.env_vars).
+    - No PYTEMPLATE_GLOBAL: the global mode of this runner (project.GLOBAL) is its own; the
+      project `new` makes runs its `__init` as a project, and no tool may take it on.
     - PYTHONUTF8=1: mypy/mypyc open files with the locale encoding (cp1252 on Windows).
     - On Windows, the Visual Studio installer in PATH: VS 2026's vcvarsall.bat calls
       vswhere.exe without a path and, if that fails, setuptools cannot find the compiler.
     """
     env = dict(os.environ)
-    for key in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH", *UV_SELECTION):
+    for key in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH", "PYTEMPLATE_GLOBAL", *UV_SELECTION):
         env.pop(key, None)
     parts = [p for p in env.get("PATH", "").split(os.pathsep) if p]
     if sys.prefix != sys.base_prefix:
@@ -179,7 +181,7 @@ def _wait_through_signals() -> Iterator[_Waiter]:
     uv and the app running as orphans that never got the signal. They are passed on to the
     child, like uv run does, and the child is waited for. (A signal sent to the whole process
     group reaches the app more than once: from the group, and again from each process between
-    that passes it on: 3 times through ./deploy and `uv run`, twice under a plain `uv run`. The
+    that passes it on: 3 times through ./pyt and `uv run`, twice under a plain `uv run`. The
     runner cannot tell a group signal from its own, and a child in a group of its own would
     lose the terminal's Ctrl+C.)
 
@@ -247,7 +249,7 @@ def run(
     - Ctrl+C: the child is waited for (it got the Ctrl+C too and may clean up), then
       Interrupted stops the command. SIGTERM/SIGHUP (POSIX): passed on to the child, the same.
     - A missing working folder, a missing program or one that cannot be started (no exec bit,
-      no #! line, a folder) are DeployErrors, never tracebacks.
+      no #! line, a folder) are PytErrors, never tracebacks.
     """
     args = [str(a) for a in argv]
     where = f"   (in {rel(cwd)})" if cwd is not None and cwd.resolve() != ROOT else ""
@@ -262,7 +264,7 @@ def run(
         # Checked before the spawn: its error would blame the program (FileNotFoundError names
         # the cwd on POSIX, and Windows raises NotADirectoryError for it)
         what = "not a folder" if workdir.exists() else "folder not found"
-        raise DeployError(f"{what}: {rel(workdir)}  (the working folder of {show(args[:1])})")
+        raise PytError(f"{what}: {rel(workdir)}  (the working folder of {show(args[:1])})")
     pipe = subprocess.PIPE if capture else None
     child_env = dict(env) if env is not None else base_env()
     with _wait_through_signals() as waiter:
@@ -278,11 +280,11 @@ def run(
                 errors="replace",
             )
         except FileNotFoundError:
-            raise DeployError(_not_found(args[0], workdir, child_env), 3) from None
+            raise PytError(_not_found(args[0], workdir, child_env), 3) from None
         except OSError as e:  # PermissionError (no exec bit, a folder), ENOEXEC (no #! line), WinError 193
-            raise DeployError(f"cannot run {args[0]}: {e.strerror or e}  (is it executable? a script needs a #! line)") from None
+            raise PytError(f"cannot run {args[0]}: {e.strerror or e}  (is it executable? a script needs a #! line)") from None
         except ValueError as e:  # an argument or environment value subprocess cannot pass (NUL, '=' in a name)
-            raise DeployError(f"cannot run {args[0]}: {e}") from None
+            raise PytError(f"cannot run {args[0]}: {e}") from None
         with child:  # what subprocess.run does, with the child known to the signal handlers
             waiter.started(child)
             try:

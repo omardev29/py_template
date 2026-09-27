@@ -15,7 +15,7 @@ from typing import Any
 from . import envs, lintc, mypyc, proc, render, ui
 from .config import BACKENDS, Config
 from .project import BUILD, ROOT, SRC, code_dirs, rel
-from .ui import DeployError
+from .ui import PytError
 
 # basedpyright is not in uv.lock (`uv run --with`; the VS Code extension ships its own), so it
 # is pinned here to keep `check` reproducible: the latest release on PyPI in September 2026.
@@ -33,7 +33,7 @@ def only_flags(command: str, args: list[str], allowed: tuple[str, ...]) -> set[s
     unknown = [a for a in args if a not in allowed]
     if unknown:
         valid = f"valid: {' '.join(allowed)}" if allowed else "it takes no arguments"
-        raise DeployError(f"{command}: unrecognized arguments: {' '.join(unknown)}  ({valid})", 2)
+        raise PytError(f"{command}: unrecognized arguments: {' '.join(unknown)}  ({valid})", 2)
     return set(args)
 
 
@@ -74,11 +74,11 @@ def cmd_run(cfg: Config, args: list[str]) -> int:
 
 def cmd_compile(cfg: Config, args: list[str]) -> int:
     """compile [--release]: build the mypyc stage without running it (debuggers, editors)."""
-    parser = argparse.ArgumentParser(prog="./deploy compile")
+    parser = argparse.ArgumentParser(prog="./pyt compile")
     parser.add_argument("--release", action="store_true", help="the release stage (asserts stripped per deploy.optimize)")
     ns = parser.parse_args(args)
     if not cfg.supports("mypyc"):
-        raise DeployError("compile: 'mypyc' is not in backend.supported")
+        raise PytError("compile: 'mypyc' is not in backend.supported")
     stage = mypyc.build(cfg, "release" if ns.release else "dev")
     if proc.DRY_RUN:
         ui.info(f"(--dry-run) would compile the stage: {rel(stage)}")
@@ -174,7 +174,7 @@ def cmd_check(cfg: Config, args: list[str]) -> int:
     """check [BACKEND|all]: ruff + mypy (the backend's profile) + mypyc rules."""
     target, rest = split_backend(cfg, args, allow_all=True)
     if rest:
-        raise DeployError(f"check: unrecognized arguments: {' '.join(rest)}")
+        raise PytError(f"check: unrecognized arguments: {' '.join(rest)}")
     targets = cfg.backend.supported if target == "all" else [target]
     # Each profile is checked only once (cpython and pypy usually share it), and the mypyc rules
     # only once, with the strictest profile (otherwise every finding shows up twice)
@@ -318,7 +318,7 @@ def cmd_test(cfg: Config, args: list[str]) -> int:
     for b in cfg.backend.supported:
         try:
             results[b] = test_backend(cfg, b, rest)
-        except DeployError as e:  # Ctrl+C (a KeyboardInterrupt) still stops everything
+        except PytError as e:  # Ctrl+C (a KeyboardInterrupt) still stops everything
             ui.error(f"test {b}: {e}")
             results[b] = e.code or 1
             reasons[b] = str(e).splitlines()[0] if str(e) else f"exit code {results[b]}"
@@ -339,12 +339,12 @@ def cmd_test(cfg: Config, args: list[str]) -> int:
 
 def cmd_report(cfg: Config, args: list[str]) -> int:
     """report [--open]: mypyc HTML report (slow lines) + mypy Any reports."""
-    parser = argparse.ArgumentParser(prog="./deploy report", add_help=True)
+    parser = argparse.ArgumentParser(prog="./pyt report", add_help=True)
     parser.add_argument("--open", action="store_true", help="open the report in the browser")
     parser.add_argument("--no-mypy", action="store_true", help="only the mypyc report")
     ns = parser.parse_args(args)
     if not cfg.supports("mypyc"):
-        raise DeployError("the report comes from mypyc, and 'mypyc' is not in backend.supported")
+        raise PytError("the report comes from mypyc, and 'mypyc' is not in backend.supported")
     html = mypyc.ANNOTATE_HTML
     reports = html.parent
     # The report is generated before compiling C: no compiler needed

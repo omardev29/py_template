@@ -3,7 +3,7 @@ name = "myapp"
 version = "0.1.0"
 description = "Multi-backend uv template: CPython, PyPy and mypyc"
 readme = "README.md"
-# Managed by ./deploy from pytemplate.toml: ">=3.11" if PyPy is supported
+# Managed by ./pyt from pytemplate.toml: ">=3.11" if PyPy is supported
 requires-python = ">=3.14"
 dependencies = [
     "mypy-extensions>=1.1.0",
@@ -29,9 +29,9 @@ pythonpath = ["src"]
 addopts = ["-ra"]
 
 [tool.uv]
-# >>> pytemplate: generated from pytemplate.toml by ./deploy; do not edit up to the closing marker
+# >>> pytemplate: generated from pytemplate.toml by ./pyt; do not edit up to the closing marker
 # uv.lock only resolves for the pinned minor version (e.g. without the 3.15 branch, where
-# libraries such as raylib have no wheels yet). To change it: python.cpython + ./deploy lock
+# libraries such as raylib have no wheels yet). To change it: python.cpython + ./pyt lock
 environments = [
     "implementation_name == 'cpython' and python_full_version >= '3.14' and python_full_version < '3.15'",
 ]

@@ -1,5 +1,5 @@
 # Keeps the scheduled workflows of the TEMPLATE repository running (the template- prefix keeps
-# it out of projects made with ./deploy new). In a public repository GitHub disables a workflow
+# it out of projects made with ./pyt new). In a public repository GitHub disables a workflow
 # with a schedule after 60 days without repository activity, and a disabled workflow does not
 # run at all, not even on a push, until someone enables it again. Every week this job enables,
 # through the REST API, each template-*.yml whose triggers include `schedule:` (itself too),

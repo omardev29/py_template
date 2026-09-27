@@ -32,7 +32,7 @@ function M.check()
   end
   local info = pt.info()
   if info.schema ~= 1 then
-    h.warn("cannot read .pytemplate/editor.json", { "Run ./deploy render (any ./deploy command does it)" })
+    h.warn("cannot read .pytemplate/editor.json", { "Run ./pyt render (any ./pyt command does it)" })
   else
     h.ok(
       ("preset %s, backend %s (supported: %s), typing %s, editor %s"):format(
@@ -54,22 +54,22 @@ function M.check()
       pt.is_win and "winget install --id=astral-sh.uv -e   (or: scoop install main/uv)" or "curl -LsSf https://astral.sh/uv/install.sh | sh",
     })
   end
-  h.ok("./deploy runs as: " .. table.concat(pt.deploy_cmd({ "ARGS" }), " "))
-  h.info("'shell' is not used (" .. vim.o.shell .. "): ./deploy always runs as an argv list")
+  h.ok("./pyt runs as: " .. table.concat(pt.pyt_cmd({ "ARGS" }), " "))
+  h.info("'shell' is not used (" .. vim.o.shell .. "): ./pyt always runs as an argv list")
 
   h.start("pytemplate: environments")
   local py = pt.python("cpython")
   if py then
     h.ok("CPython env: " .. py)
   else
-    h.warn("no " .. info.envs.cpython .. " yet", { "Run ./deploy setup (or ./deploy sync cpython), then restart Neovim" })
+    h.warn("no " .. info.envs.cpython .. " yet", { "Run ./pyt setup (or ./pyt sync cpython), then restart Neovim" })
   end
   if info.backend.active == "pypy" or vim.tbl_contains(info.backend.supported, "pypy") then
     local pypy = pt.python("pypy")
     if pypy then
       h.ok("PyPy env: " .. pypy)
     else
-      h.info("no " .. info.envs.pypy .. " yet (./deploy sync pypy)")
+      h.info("no " .. info.envs.pypy .. " yet (./pyt sync pypy)")
     end
   end
   for _, tool in ipairs({ "ruff", "mypy" }) do
@@ -77,7 +77,7 @@ function M.check()
     if exe then
       h.ok(tool .. ": " .. exe)
     else
-      h.warn(tool .. " not in " .. info.envs.tools, { "Run ./deploy setup" })
+      h.warn(tool .. " not in " .. info.envs.tools, { "Run ./pyt setup" })
     end
   end
   local mypy_on = info.typing.mypy and info.typing.profile ~= "off"
@@ -102,7 +102,7 @@ function M.check()
   if acmd then
     h.ok("debugpy adapter (" .. asource .. "): " .. table.concat(acmd, " "))
   else
-    h.warn("no debugpy: run ./deploy setup (debugpy is in the dev group) or :MasonInstall debugpy")
+    h.warn("no debugpy: run ./pyt setup (debugpy is in the dev group) or :MasonInstall debugpy")
   end
 
   h.start("pytemplate: plugins")

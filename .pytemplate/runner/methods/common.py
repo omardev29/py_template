@@ -22,7 +22,7 @@ from .. import envs, proc, ui
 from ..config import Config
 from ..imports import PARSE_ERRORS, iter_runtime_nodes, parse
 from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, SRC, host_os, rel
-from ..ui import DeployError
+from ..ui import PytError
 
 NATIVE_SUFFIXES = (*EXT_SUFFIXES, ".dll", ".dylib")
 LOCK = PYPROJECT.parent / "uv.lock"
@@ -88,7 +88,7 @@ class Target:
 def parse_key(key: str) -> Target:
     m = KEY_RE.fullmatch(key)
     if not m:
-        raise DeployError(
+        raise PytError(
             f"invalid platform key: {key!r} (format: cp314-linux-x86_64, cp314-windows-x86_64...)"
         )
     impl, major, minor, os_name, arch = m.groups()
@@ -136,16 +136,16 @@ def check_key(cfg: Config, backend: str, key: str) -> Target:
     t = parse_key(key)
     if t.impl == "cp" and t.version != cfg.python.cpython:
         locked = "cp" + cfg.python.cpython.replace(".", "")
-        raise DeployError(
+        raise PytError(
             f"{key}: uv.lock only resolves CPython {cfg.python.cpython} (python.cpython): use "
-            f"{locked}-{t.os}-{t.arch}, or change python.cpython and run ./deploy lock",
+            f"{locked}-{t.os}-{t.arch}, or change python.cpython and run ./pyt lock",
             2,
         )
     if t.impl == "pp" and t.key != config_host_key(cfg, backend):
-        raise DeployError(
+        raise PytError(
             f"{key}: PyPy dependencies only come from a pypy build on that machine "
-            "(./deploy build pypy --method pyz): uv cannot resolve PyPy wheels from CPython or for "
-            "another OS. Join the parts with ./deploy pyz-merge",
+            "(./pyt build pypy --method pyz): uv cannot resolve PyPy wheels from CPython or for "
+            "another OS. Join the parts with ./pyt pyz-merge",
             2,
         )
     return t
@@ -168,7 +168,7 @@ def export_requirements(cfg: Config) -> Path:
     --locked, never --frozen: a uv.lock older than pyproject.toml (a dependency added by hand, a
     merge) is refused like every `uv run --locked`; --frozen exported the old lock and the pyz or
     portable build shipped without the new dependency. --no-editable: a workspace or path
-    dependency (`./deploy add ./libs/x`) is exported as a path and installed as a real package;
+    dependency (`./pyt add ./libs/x`) is exported as a path and installed as a real package;
     editable, `uv pip install --target` left only a .pth naming this machine's source folder.
     """
     out = BUILD / "deploy" / "requirements.txt"
@@ -251,10 +251,10 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
         envs.uv(env, argv, extra_env=extra_env)
         native = _built_native(dest, build_here)
         if native:
-            raise DeployError(
+            raise PytError(
                 f"{target.key}: {', '.join(native)} publishes no wheel, and building it here gives this machine's "
-                f"binaries: build the pyz for {target.key} on that platform (./deploy build ... --method pyz there) "
-                "and join the parts with ./deploy pyz-merge",
+                f"binaries: build the pyz for {target.key} on that platform (./pyt build ... --method pyz there) "
+                "and join the parts with ./pyt pyz-merge",
                 2,
             )
     else:
@@ -349,19 +349,20 @@ def project_specifiers(lock: Path) -> dict[str, str]:
     return out
 
 
-def unpin_binaries(pins: list[str], *, lock: Path | None = None) -> tuple[list[str], list[str]]:
+def unpin_binaries(pins: list[str], *, lock: Path | None = None) -> tuple[list[str], list[tuple[str, str]]]:
     """For `flet build` of a mobile or web target: the `name==version` pins of the packages
     uv.lock has no pure wheel for (`binary_only`) lose uv.lock's version and keep the project's own
     bounds (`project_specifiers`) and their markers. flet build installs those targets' binaries
-    from Flet's own index (pypi.flet.dev, `--only-binary :all:`), which holds other releases than
-    PyPI (msgpack 1.1.x, where a new flet project locks 1.2.2): the exact pin had no solution, and
-    pip now picks a release that fits every package's bounds. Returns the requirements and the
-    pins it relaxed."""
+    from Flet's own index (pypi.flet.dev, `--only-binary :all:`; for the web also the packages of
+    its Pyodide release), which holds other releases than PyPI (msgpack 1.1.x, where a new flet
+    project locks 1.2.2): the exact pin had no solution, and pip now picks a release that fits
+    every package's bounds. Returns the requirements and, for each pin it relaxed, the pin and
+    the requirement written instead (without its markers)."""
     lock_file = LOCK if lock is None else lock
     binary = binary_only(lock_file)
     own = project_specifiers(lock_file) if binary else {}
     out: list[str] = []
-    relaxed: list[str] = []
+    relaxed: list[tuple[str, str]] = []
     for pin in pins:
         requirement, marked, marker = pin.partition(" ;")
         m = _PIN_RE.match(requirement.strip())
@@ -370,7 +371,7 @@ def unpin_binaries(pins: list[str], *, lock: Path | None = None) -> tuple[list[s
         if not m or name not in binary or loose == requirement.strip():
             out.append(pin)
             continue
-        relaxed.append(f"{m[1]}=={m[2]}")
+        relaxed.append((f"{m[1]}=={m[2]}", loose))
         out.append(loose + (f" ;{marker}" if marked else ""))
     return out, relaxed
 
@@ -559,7 +560,7 @@ def direct_reference(line: str, *, lock: Path | None = None) -> str:
     """A line of `uv export --no-editable` as a PEP 508 requirement: a local library, which it
     writes as a bare path relative to the project (`./libs/x ; <markers>`) or a `file:` URL, becomes
     `name @ file:///absolute/path ; <markers>` (its name from uv.lock). Pins and direct references
-    stay as they are. A path uv.lock does not name is a DeployError."""
+    stay as they are. A path uv.lock does not name is a PytError."""
     lock_file = LOCK if lock is None else lock
     requirement, marked, marker = line.partition(" ;")  # PEP 508: a URL needs a blank before ;
     requirement = requirement.strip()
@@ -567,7 +568,7 @@ def direct_reference(line: str, *, lock: Path | None = None) -> str:
         return line
     name = _local_names(lock_file).get(_local_key(lock_file.parent, requirement))
     if name is None:
-        raise DeployError(f"cannot name the local requirement {requirement!r}: uv.lock has no package from there (./deploy lock)")
+        raise PytError(f"cannot name the local requirement {requirement!r}: uv.lock has no package from there (./pyt lock)")
     url = requirement if requirement.startswith("file:") else (lock_file.parent / requirement).resolve().as_uri()
     return f"{name} @ {url}" + (f" ;{marker}" if marked else "")
 
@@ -656,7 +657,7 @@ def remove_output(path: Path, *also: Path) -> None:
             if not any(aside.iterdir()):
                 aside.rmdir()
             what = "a file in it is in use" if p.is_dir() and not p.is_symlink() else "it is in use or read-only"
-            raise DeployError(f"cannot replace {rel(p)}: {what} ({_why(e)}){hint}", 1) from None
+            raise PytError(f"cannot replace {rel(p)}: {what} ({_why(e)}){hint}", 1) from None
         moved.append(p)
     shutil.rmtree(aside, ignore_errors=True)
     if aside.exists():  # read-only files an older build copied from src/ (Windows deletes none)

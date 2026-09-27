@@ -27,7 +27,7 @@ from runner.cmd_build import BuildRequest  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.methods import common, nuitka, portable  # noqa: E402
 from runner.project import ROOT  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 PRESETS = ROOT / ".pytemplate" / "presets"
 PLUGIN = ROOT / ".pytemplate" / "nvim"
@@ -238,7 +238,7 @@ def test_nuitka_bundles_the_flet_client(build_dirs: Path, monkeypatch: pytest.Mo
         raise OSError("no network")
 
     monkeypatch.setattr(nuitka.urllib.request, "urlopen", offline)
-    with pytest.raises(DeployError) as info:
+    with pytest.raises(PytError) as info:
         nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
     assert info.value.code == 3 and "cannot download the Flet client" in str(info.value)
     assert list(archive.parent.iterdir()) == []
@@ -284,7 +284,7 @@ def test_a_flet_client_download_cut_short_is_never_cached(build_dirs: Path, monk
         bad = _http_response(bytes(damaged))
         message = "not a whole archive"
     urls = _serve_client(monkeypatch, [bad, _http_response(client)], name)
-    with pytest.raises(DeployError, match=message) as info:
+    with pytest.raises(PytError, match=message) as info:
         nuitka._flet_client_archive(make({"app": {"preset": "flet"}}))
     assert info.value.code == 3
     folder = build_dirs / "build" / "flet-client" / FakeUv.VERSION
@@ -462,7 +462,7 @@ def test_mypyc_build_asks_msvc_for_english_messages(tmp_path: Path, monkeypatch:
         return subprocess.CompletedProcess([str(a) for a in argv], mypyc.MYPYC_REJECTED, "", "")
 
     monkeypatch.setattr(mypyc.proc, "run", run)
-    with pytest.raises(DeployError):  # the fake compiler rejects the code: the env is what counts
+    with pytest.raises(PytError):  # the fake compiler rejects the code: the env is what counts
         mypyc.build(make({}), "dev")
     assert len(seen) == 1 and seen[0].get("VSLANG") == "1033"
 
@@ -501,7 +501,7 @@ def test_template_workflows_use_contexts_where_actions_allows_them() -> None:
     # (shellcheck and pyflakes off: this is about the workflows, not the scripts in them).
     workflows = sorted((ROOT / ".github" / "workflows").glob("template-*.yml"))
     if not workflows:
-        pytest.skip("no template workflows here (a project made with ./deploy new)")
+        pytest.skip("no template workflows here (a project made with ./pyt new)")
     actionlint = shutil.which("actionlint")
     if actionlint is None:
         pytest.skip("actionlint is not installed")
@@ -555,7 +555,7 @@ def test_ruff_format_check_says_nothing_for_stdin(tmp_path: Path) -> None:
     ruff prints nothing for an unformatted stdin. When this fails, that line can go."""
     ruff = _venv_ruff()
     if ruff is None:
-        pytest.skip("ruff is not in this Python's environment (./deploy setup)")
+        pytest.skip("ruff is not in this Python's environment (./pyt setup)")
     r = subprocess.run(
         [ruff, "format", "--check", "--no-cache", "--stdin-filename", "src/a.py", "-"],
         input="x=1\n", capture_output=True, text=True, cwd=tmp_path, timeout=60, check=False,
@@ -581,7 +581,7 @@ local pt = require("pytemplate")
 pt.config.root = root
 local integ = require("pytemplate.integrations")
 
--- overseer: the .vscode/tasks.json provider would duplicate every label and run deploy.cmd
+-- overseer: the .vscode/tasks.json provider would duplicate every label and run pyt.cmd
 run("overseer", function()
   local opts = { disable_template_modules = { "mine" } }
   integ.overseer(nil, opts)

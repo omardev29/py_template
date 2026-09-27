@@ -31,10 +31,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import envs, proc, ui
+from . import envs, proc, project, ui
 from .config import Config
 from .project import IS_MACOS, IS_WINDOWS, ROOT, write_whole
-from .ui import DeployError
+from .ui import PytError
 
 Check = Callable[[bool | None, str, str], None]
 
@@ -182,15 +182,15 @@ def headless(
                 check=False,
             )
         except FileNotFoundError:
-            raise DeployError(f"program not found: {exe}", 3) from None
+            raise PytError(f"program not found: {exe}", 3) from None
         except OSError as e:  # another architecture, a truncated download, a noexec mount
-            raise DeployError(f"cannot run {exe}: {e.strerror or e}", 3) from None
+            raise PytError(f"cannot run {exe}: {e.strerror or e}", 3) from None
         except subprocess.TimeoutExpired:
-            raise DeployError(f"Neovim did not answer in {timeout:.0f} s: {proc.show(argv)}", 3) from None
+            raise PytError(f"Neovim did not answer in {timeout:.0f} s: {proc.show(argv)}", 3) from None
     data = parse_marker(r.stdout)
     if data is None:
         detail = (r.stderr or r.stdout).strip()
-        raise DeployError(f"Neovim headless call failed (exit code {r.returncode}): {proc.show(argv)}" + (f"\n{detail}" if detail else ""), 3)
+        raise PytError(f"Neovim headless call failed (exit code {r.returncode}): {proc.show(argv)}" + (f"\n{detail}" if detail else ""), 3)
     return data
 
 
@@ -202,7 +202,7 @@ def query(exe: str | None = None, *, env: Mapping[str, str] | None = None) -> Nv
     data = headless(exe, QUERY_LUA, env=env)
     version = parse_version(str(data.get("version", "")))
     if version is None:
-        raise DeployError(f"could not parse the Neovim version: {data.get('version')!r}", 3)
+        raise PytError(f"could not parse the Neovim version: {data.get('version')!r}", 3)
     progpath = str(data.get("progpath") or "")
     return Nvim(
         exe=progpath if progpath and Path(progpath).is_file() else exe,
@@ -217,7 +217,7 @@ def query(exe: str | None = None, *, env: Mapping[str, str] | None = None) -> Nv
 def require_nvim() -> Nvim:
     nv = query()
     if nv is None:
-        raise DeployError("nvim not found in PATH (https://neovim.io; LazyVim needs Neovim >= 0.11.2)", 3)
+        raise PytError("nvim not found in PATH (https://neovim.io; LazyVim needs Neovim >= 0.11.2)", 3)
     return nv
 
 
@@ -237,7 +237,7 @@ class Trust:
             "changed": "changed since it was trusted (Neovim skips it until it is trusted again)",
             "denied": "denied in Neovim's trust database",
             "untrusted": "not trusted yet (Neovim skips it, or asks, until it is)",
-            "missing": "missing (./deploy render generates it)",
+            "missing": "missing (./pyt render generates it)",
         }[self.state]
 
 
@@ -309,7 +309,7 @@ def trust_file(
     full["PT_TRUST_FILE"] = str(file)
     data = headless(exe, TRUST_LUA, env=full, cwd=cwd, timeout=timeout)
     if data.get("ok") is not True:
-        raise DeployError(f"vim.secure.trust failed for {file}: {data.get('msg')}", 3)
+        raise PytError(f"vim.secure.trust failed for {file}: {data.get('msg')}", 3)
     return data
 
 
@@ -358,16 +358,16 @@ def load_lazyvim_json(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_bytes().decode("utf-8-sig"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
-        raise DeployError(f"{path}: cannot read it as JSON ({e})") from None
+        raise PytError(f"{path}: cannot read it as JSON ({e})") from None
     if not isinstance(data, dict):
-        raise DeployError(f"{path}: expected a JSON object")
+        raise PytError(f"{path}: expected a JSON object")
     return data
 
 
 def missing_extras(path: Path, wanted: Sequence[str] = EXTRAS) -> list[str] | None:
     """Return the `wanted` extras absent from lazyvim.json (None if it does not exist).
 
-    An unreadable file raises DeployError (load_lazyvim_json): it is not "missing"."""
+    An unreadable file raises PytError (load_lazyvim_json): it is not "missing"."""
     if not path.is_file():
         return None
     data = load_lazyvim_json(path)
@@ -381,7 +381,7 @@ def merge_extras(data: dict[str, Any], wanted: Sequence[str] = EXTRAS) -> list[s
     """Append the missing `wanted` extras to data["extras"] (in place) and return them."""
     extras = data.get("extras", [])
     if not isinstance(extras, list):
-        raise DeployError("lazyvim.json: 'extras' is not a list")
+        raise PytError("lazyvim.json: 'extras' is not a list")
     added = [e for e in wanted if e not in extras]
     data["extras"] = [*extras, *added]
     return added
@@ -403,7 +403,7 @@ def enable_extras(
 
     Nothing is written (no backup either) when every extra is already there or under dry_run. The
     file is replaced whole (project.write_whole: a link stays a link); a config it may not write
-    (a Nix store, another user's file) is a DeployError that leaves no backup behind.
+    (a Nix store, another user's file) is a PytError that leaves no backup behind.
     """
     raw = path.read_bytes()
     data = load_lazyvim_json(path)
@@ -423,7 +423,7 @@ def enable_extras(
         with contextlib.suppress(OSError):
             backup.unlink(missing_ok=True)  # ours (a new name): a failed write leaves nothing behind
         names = ", ".join(short_extra(x) for x in added)
-        raise DeployError(
+        raise PytError(
             f"cannot write {e.filename or path}: {e.strerror or e}. Enable the extras by hand (:LazyExtras, or {path}): {names}", 3
         ) from None
     return added, backup
@@ -488,23 +488,29 @@ def _has_package(env_dir: Path, package: str) -> bool:
 
 
 def doctor(check: Check) -> None:
-    """One-line Neovim/LazyVim summary for ./deploy doctor (no output when Neovim is absent)."""
+    """One-line Neovim/LazyVim summary for ./pyt doctor (no output when Neovim is absent).
+    Outside a project (global mode) there is no .lazy.lua to trust: Neovim and LazyVim only."""
     exe = find_nvim()
     if not exe:
         return
     ui.step("neovim")
+    details = "details: pyt nvim doctor in a project" if project.GLOBAL else "details: ./pyt nvim doctor"
     try:
         nv = query(exe)
-    except DeployError as e:
-        check(None, f"Neovim: {str(e).splitlines()[0]}", "details: ./deploy nvim doctor")
+    except PytError as e:
+        check(None, f"Neovim: {str(e).splitlines()[0]}", details)
         return
     if nv is None:
         return
     lazyvim = nv.lazyvim_installed()
+    if project.GLOBAL:
+        ready = nv.version >= MIN_LAZYVIM and lazyvim
+        check(True if ready else None, f"Neovim {nv.version_text}, LazyVim {'yes' if lazyvim else 'no'}", details)
+        return
     trust = trust_status(nv.trust_db, LAZY_LUA)
     trusted = {"trusted": "trusted", "missing": "missing"}.get(trust.state, "NOT trusted")
     good = nv.version >= MIN_LAZYVIM and lazyvim and trust.state == "trusted"
-    hint = "details: ./deploy nvim doctor" + ("   (trust it once: ./deploy nvim trust)" if lazyvim and trust.state != "trusted" else "")
+    hint = "details: ./pyt nvim doctor" + ("   (trust it once: ./pyt nvim trust)" if lazyvim and trust.state != "trusted" else "")
     check(
         True if good else None,
         f"Neovim {nv.version_text}, LazyVim {'yes' if lazyvim else 'no'}, .lazy.lua {trusted}",
@@ -584,7 +590,7 @@ def cmd_doctor(cfg: Config) -> int:
     assert nv is not None
     check(nv.version >= MIN_LAZYVIM, f"Neovim {nv.version_text} ({nv.exe})", "LazyVim needs Neovim >= 0.11.2")
     if nv.version < MIN_PATH_TRUST:
-        check(None, "Neovim < 0.12: the trust prompt still has (a)llow; ./deploy nvim trust uses the buffer form", "")
+        check(None, "Neovim < 0.12: the trust prompt still has (a)llow; ./pyt nvim trust uses the buffer form", "")
     appname = os.environ.get("NVIM_APPNAME")
     for label, path in (("config", nv.config), ("data", nv.data), ("state", nv.state)):
         check(None, f"{label:<6} {path}" + ("" if path.is_dir() else "   (does not exist)"), "")
@@ -596,32 +602,32 @@ def cmd_doctor(cfg: Config) -> int:
     check(
         installed,
         "LazyVim installed" if installed else f"LazyVim not found: {nv.config} names no LazyVim/LazyVim spec",
-        "./deploy nvim bootstrap   (clones the LazyVim starter; an existing config is never touched)",
+        "./pyt nvim bootstrap   (clones the LazyVim starter; an existing config is never touched)",
     )
     off = local_spec_off(nv.config) if installed else []
     if off:
         check(
             False,
             "local_spec = false in " + ", ".join(str(p) for p in off) + ": lazy.nvim ignores .lazy.lua",
-            "Remove it (or load .pytemplate/nvim from your own plugin spec and run ./deploy nvim extras)",
+            "Remove it (or load .pytemplate/nvim from your own plugin spec and run ./pyt nvim extras)",
         )
     trust = trust_status(nv.trust_db, LAZY_LUA)
-    check(trust.state == "trusted", f".lazy.lua {trust.describe()}", "./deploy nvim trust   (or open Neovim here: (v)iew, :trust, restart)")
+    check(trust.state == "trusted", f".lazy.lua {trust.describe()}", "./pyt nvim trust   (or open Neovim here: (v)iew, :trust, restart)")
     if trust.state != "missing":
         ui.detail(f"         {trust.path}  sha256 {trust.sha256}  (database: {nv.trust_db})")
     try:
         missing = missing_extras(nv.lazyvim_json)
-    except DeployError as e:  # LazyVim itself skips such a file without a word
+    except PytError as e:  # LazyVim itself skips such a file without a word
         check(None, str(e), "LazyVim ignores an unreadable lazyvim.json (the extras it lists do not load): fix it by hand")
     else:
         if missing is None:
             if installed:
-                check(None, f"{nv.lazyvim_json} not found", "Start Neovim once: LazyVim creates it (then ./deploy nvim extras)")
+                check(None, f"{nv.lazyvim_json} not found", "Start Neovim once: LazyVim creates it (then ./pyt nvim extras)")
         elif missing:
             check(
                 None,
                 "extras not enabled in lazyvim.json: " + ", ".join(short_extra(e) for e in missing),
-                ".lazy.lua imports them anyway; ./deploy nvim extras makes it permanent and silences LazyVim's import-order warning",
+                ".lazy.lua imports them anyway; ./pyt nvim extras makes it permanent and silences LazyVim's import-order warning",
             )
         else:
             check(True, "recommended extras enabled in lazyvim.json", "")
@@ -642,22 +648,22 @@ def cmd_doctor(cfg: Config) -> int:
     try:
         # the one the runner runs on; the plugin searches the same places (init.uv_candidates)
         uv = proc.find_uv()
-    except DeployError:
+    except PytError:
         check(None, "uv not found", "")
     else:
         check(True, f"uv: {uv}", "")
-        ui.detail("         the plugin runs ./deploy with it, and basedpyright (uv tool run) when .venv has none")
+        ui.detail("         the plugin runs ./pyt with it, and basedpyright (uv tool run) when .venv has none")
 
     ui.step("project")
     venv = envs.tool_env(cfg).dir
     if not venv.is_dir():
-        check(False, f"{venv.name} is missing", "./deploy setup")
+        check(False, f"{venv.name} is missing", "./pyt setup")
     else:
         for tool in ("ruff", "mypy"):
             exe_path = _venv_exe(venv, tool)
-            check(exe_path.is_file(), f"{tool} in {venv.name}", "./deploy sync")
+            check(exe_path.is_file(), f"{tool} in {venv.name}", "./pyt sync")
         debugpy = _has_package(venv, "debugpy")
-        check(debugpy, f"debugpy in {venv.name} (nvim-dap)", "./deploy sync   (debugpy is in the dev group, CPython only)")
+        check(debugpy, f"debugpy in {venv.name} (nvim-dap)", "./pyt sync   (debugpy is in the dev group, CPython only)")
         based = _venv_exe(venv, "basedpyright-langserver").is_file()
         check(True if based else None, f"basedpyright in {venv.name}" if based else f"basedpyright not in {venv.name} (optional)", ".lazy.lua falls back to uvx, then to Mason")
 
@@ -676,7 +682,7 @@ def cmd_trust(nv: Nvim) -> int:
     """nvim trust: pre-trust ROOT/.lazy.lua with vim.secure.trust (the same as (v)iew + :trust)."""
     before = trust_status(nv.trust_db, LAZY_LUA)
     if before.state == "missing":
-        raise DeployError(".lazy.lua not found: ./deploy render generates it")
+        raise PytError(".lazy.lua not found: ./pyt render generates it")
     if before.state == "trusted":
         ui.ok(f"already trusted: {before.path}")
         ui.info(f"  sha256 {before.sha256}")
@@ -687,7 +693,7 @@ def cmd_trust(nv: Nvim) -> int:
     trust_file(nv.exe, LAZY_LUA, cwd=ROOT)
     after = trust_status(nv.trust_db, LAZY_LUA)
     if after.state != "trusted":
-        raise DeployError(f"Neovim reported success, but {nv.trust_db} has no matching entry for {after.path} ({after.state})", 3)
+        raise PytError(f"Neovim reported success, but {nv.trust_db} has no matching entry for {after.path} ({after.state})", 3)
     ui.ok(f"trusted {after.path}")
     ui.info(f"  sha256 {after.sha256}\n  database {nv.trust_db}")
     ui.info("  It also lets .lazy.lua load the local plugin .pytemplate/nvim/. Any change to the file needs a new trust.")
@@ -698,9 +704,9 @@ def cmd_extras(nv: Nvim) -> int:
     """nvim extras: enable the recommended LazyVim extras in the user's lazyvim.json."""
     path = nv.lazyvim_json
     if not nv.config.is_dir():
-        raise DeployError(f"no Neovim config in {nv.config}: ./deploy nvim bootstrap installs the LazyVim starter", 3)
+        raise PytError(f"no Neovim config in {nv.config}: ./pyt nvim bootstrap installs the LazyVim starter", 3)
     if not path.is_file():
-        raise DeployError(f"{path} does not exist yet. Start Neovim once (LazyVim creates it), then run ./deploy nvim extras again", 3)
+        raise PytError(f"{path} does not exist yet. Start Neovim once (LazyVim creates it), then run ./pyt nvim extras again", 3)
     added, backup = enable_extras(path, dry_run=proc.DRY_RUN)
     if not added:
         ui.ok(f"every recommended extra is already enabled in {path}")
@@ -722,7 +728,7 @@ def cmd_bootstrap(nv: Nvim) -> int:
         return 0
     git = which("git")
     if not git:
-        raise DeployError("git not found in PATH (needed to clone the starter and by lazy.nvim)", 3)
+        raise PytError("git not found in PATH (needed to clone the starter and by lazy.nvim)", 3)
     ui.step(f"LazyVim starter -> {nv.config}")
     proc.run([git, "clone", "--depth", "1", STARTER, nv.config])
     if proc.DRY_RUN:
@@ -731,9 +737,9 @@ def cmd_bootstrap(nv: Nvim) -> int:
     try:
         remove_tree(nv.config / ".git")  # LazyVim's install steps: the config becomes your own
     except OSError as e:
-        raise DeployError(f"the starter is in {nv.config}, but its .git could not be removed ({e}): delete it by hand", 3) from None
+        raise PytError(f"the starter is in {nv.config}, but its .git could not be removed ({e}): delete it by hand", 3) from None
     ui.ok(f"LazyVim starter installed in {nv.config}")
-    ui.info("  Next: start nvim once (LazyVim installs its plugins), then ./deploy nvim trust && ./deploy nvim sync")
+    ui.info("  Next: start nvim once (LazyVim installs its plugins), then ./pyt nvim trust && ./pyt nvim sync")
     return 0
 
 
@@ -744,18 +750,18 @@ def cmd_sync(nv: Nvim) -> int:
     (rewriting lazy-lock.json) and clean the plugins its spec does not name.
     """
     if not nv.lazyvim_installed():
-        raise DeployError(
-            f"LazyVim is not this Neovim's config ({nv.config}): ./deploy nvim bootstrap installs the starter where"
+        raise PytError(
+            f"LazyVim is not this Neovim's config ({nv.config}): ./pyt nvim bootstrap installs the starter where"
             " there is no config; to switch an existing one, see https://lazyvim.github.io/installation",
             3,
         )
     trust = trust_status(nv.trust_db, LAZY_LUA)
     if trust.state == "missing":
-        raise DeployError(".lazy.lua not found: ./deploy render generates it")
+        raise PytError(".lazy.lua not found: ./pyt render generates it")
     if trust.state != "trusted":
         # Neovim would ask (confirm()), which never returns headless; and from another folder the
         # project's plugins are not in the spec, so there would be nothing to install.
-        raise DeployError(f".lazy.lua is {trust.describe()}: ./deploy nvim trust first, then ./deploy nvim sync", 3)
+        raise PytError(f".lazy.lua is {trust.describe()}: ./pyt nvim trust first, then ./pyt nvim sync", 3)
     # Headless Neovim exits 0 after a Lua error (a clone that failed: "Too many rounds of missing
     # plugins"; no lazy.nvim: "E492: Not an editor command"), so lazy.nvim itself is asked
     # afterwards which plugins are installed (SYNC_CHECK_LUA, run from a file: short argv).
@@ -774,14 +780,14 @@ def cmd_sync(nv: Nvim) -> int:
     if code != 0:
         raise proc.CommandFailed(argv, code)
     if report is None:
-        raise DeployError("Neovim did not say which plugins are installed (see its messages above): run ./deploy nvim sync again", 1)
+        raise PytError("Neovim did not say which plugins are installed (see its messages above): run ./pyt nvim sync again", 1)
     if report.get("lazy") is not True:
-        raise DeployError("lazy.nvim did not start (no :Lazy command; see the messages above): ./deploy nvim doctor", 3)
+        raise PytError("lazy.nvim did not start (no :Lazy command; see the messages above): ./pyt nvim doctor", 3)
     missing, failed = _names(report.get("missing")), _names(report.get("failed"))
     if missing:
-        raise DeployError(
+        raise PytError(
             f"lazy.nvim could not install: {', '.join(missing)} (see the messages above: no network, a proxy?). "
-            "Run ./deploy nvim sync again, or start Neovim in the project",
+            "Run ./pyt nvim sync again, or start Neovim in the project",
             1,
         )
     if failed:
@@ -831,7 +837,7 @@ ACTIONS = ("doctor", "trust", "extras", "bootstrap", "sync")
 def cmd_nvim(cfg: Config, args: list[str]) -> int:
     """nvim [doctor|trust|extras|bootstrap|sync]"""
     parser = argparse.ArgumentParser(
-        prog="./deploy nvim",
+        prog="./pyt nvim",
         description="Neovim/LazyVim integration. doctor (default): check it; trust: pre-trust .lazy.lua; "
         "extras: enable the recommended extras in lazyvim.json; bootstrap: install the LazyVim starter "
         "if there is no config; sync: install the plugins .lazy.lua adds (Lazy! install: nothing is "

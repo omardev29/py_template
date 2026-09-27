@@ -1,4 +1,4 @@
-"""Presets, `./deploy new` and its internal step `__init` (runner/presets.py, cmd_mode.cmd_new/_plan_init).
+"""Presets, `./pyt new` and its internal step `__init` (runner/presets.py, cmd_mode.cmd_new/_plan_init).
 
 - The preset data and skeletons: every preset rendered with several names is complete, valid,
   ruff-clean under every typing profile (a fresh project must pass its own pre-commit hook),
@@ -37,7 +37,7 @@ sys.path.insert(0, str(TEMPLATE_DIR))
 from runner import cli, cmd_mode, config, presets, proc, render  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import ROOT  # noqa: E402
-from runner.ui import DeployError  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 TEMPLATE_REPO = (ROOT / ".pytemplate" / "template-repo").is_file()
 template_repo = pytest.mark.skipif(not TEMPLATE_REPO, reason="an invariant of the template repository itself")
@@ -86,7 +86,7 @@ def _skeleton_config(preset: str, name: str) -> Config:
 
 
 def _child_env(tmp: Path) -> dict[str, str]:
-    """The environment of a child ./deploy: no uv/venv selection, no launcher variables, no
+    """The environment of a child ./pyt: no uv/venv selection, no launcher variables, no
     global or system git config."""
     drop = ("UV", "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")
     env = {k: v for k, v in os.environ.items() if k not in drop and not k.startswith("PYTEMPLATE_")}
@@ -96,9 +96,9 @@ def _child_env(tmp: Path) -> dict[str, str]:
     return env
 
 
-def _deploy(root: Path, *args: str, cwd: Path, env: dict[str, str], timeout: int = 600) -> subprocess.CompletedProcess[str]:
+def _pyt(root: Path, *args: str, cwd: Path, env: dict[str, str], timeout: int = 600) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "-B", str(root / ".pytemplate" / "deploy.py"), *args],
+        [sys.executable, "-B", str(root / ".pytemplate" / "pyt.py"), *args],
         cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False,
     )
 
@@ -139,8 +139,8 @@ def test_template_root_is_the_script_skeleton_named_myapp() -> None:
 @template_repo
 def test_committed_generated_files_are_up_to_date() -> None:
     cfg = config.load(set(cli.COMMANDS))
-    assert render.apply(cfg, check=True) == ([], []), "./deploy render, then commit the generated files"
-    assert not render.pyproject_outdated(cfg), "./deploy lock"
+    assert render.apply(cfg, check=True) == ([], []), "./pyt render, then commit the generated files"
+    assert not render.pyproject_outdated(cfg), "./pyt lock"
 
 
 def test_the_e2e_smoke_texts_are_in_the_skeletons() -> None:
@@ -224,12 +224,12 @@ def test_a_broken_preset_toml_is_a_clear_error(tmp_path: Path, monkeypatch: pyte
     (tmp_path / "p").mkdir()
     (tmp_path / "p" / "preset.toml").write_bytes(raw)
     monkeypatch.setattr(presets, "PRESETS", tmp_path)
-    with pytest.raises(DeployError, match=message) as e:
+    with pytest.raises(PytError, match=message) as e:
         presets.load("p")
     assert e.value.code == 2
     assert "preset.toml" in str(e.value)
     cfg = config._build(Config, {"app": {"name": "demo", "preset": "p"}}, "")
-    with pytest.raises(DeployError, match=message):
+    with pytest.raises(PytError, match=message):
         render.managed_block(cfg)
 
 
@@ -245,7 +245,7 @@ def test_preset_toml_may_carry_a_bom_and_crlf(tmp_path: Path, monkeypatch: pytes
 
 
 def test_unknown_preset_lists_the_available_ones() -> None:
-    with pytest.raises(DeployError, match=r"unknown preset 'nope' \(available: .*script") as e:
+    with pytest.raises(PytError, match=r"unknown preset 'nope' \(available: .*script") as e:
         presets.load("nope")
     assert e.value.code == 2
 
@@ -382,11 +382,14 @@ def test_name_from_folder(folder: str, name: str) -> None:
         # the Windows launchers call these by name: python.cmd in its own folder started itself
         *(("script", n, "is the name of a Python command") for n in ("py", "Pyw", "python", "python3", "pythonw", "pypy3", "pypyw")),
         ("raylib", "Python", "(Python.cmd) call it by name"),
+        # the launcher and the command pyt install puts on PATH (rename took ./pyt for the app)
+        ("script", "pyt", "is the name of the ./pyt launcher"),
+        ("flet", "Pyt", "the app's own `Pyt` command would take its place"),
     ],
 )
 def test_check_name_free_refuses(preset: str, name: str, message: str) -> None:
     for cfg in (None, _skeleton_config("script", "myapp")):
-        with pytest.raises(DeployError, match=re.escape(message)) as e:
+        with pytest.raises(PytError, match=re.escape(message)) as e:
             presets.check_name_free(cfg, preset, name)
         assert e.value.code == 2
         assert str(e.value).endswith("Choose another name with --name NAME")
@@ -399,11 +402,11 @@ def test_check_name_free_accepts_near_misses(name: str) -> None:
 
 @pytest.mark.parametrize(("name", "message"), [("game-", "valid app name|may only contain"), ("g_", "valid app name|may only contain"), ("aux", "Windows"), ("typings", "typings/")])
 def test_rename_refuses_the_names_check_name_free_refuses(name: str, message: str) -> None:
-    """`./deploy rename` goes through check_name_free: a name uv refuses (game-) used to move
+    """`./pyt rename` goes through check_name_free: a name uv refuses (game-) used to move
     src/ and rewrite the project before `uv lock` failed on it."""
     from runner import rename
 
-    with pytest.raises(DeployError, match=message) as e:
+    with pytest.raises(PytError, match=message) as e:
         rename.check_new_name(config.load(set(cli.COMMANDS)), name)
     assert e.value.code == 2
 
@@ -420,7 +423,7 @@ def test_rename_refuses_a_module_a_pinned_dependency_installs() -> None:
     if not found:
         pytest.skip(f"the {cfg.app.preset} preset pins no package with another module name")
     dist, module = found[0]
-    with pytest.raises(DeployError, match=f"module '{module}' of {dist}") as e:
+    with pytest.raises(PytError, match=f"module '{module}' of {dist}") as e:
         rename.check_new_name(cfg, module.lower().replace("_", "-"))
     assert e.value.code == 2
 
@@ -429,7 +432,7 @@ def test_rename_refuses_a_module_a_pinned_dependency_installs() -> None:
 def test_pypy_standard_library_names_are_refused(name: str) -> None:
     """PyPy 3.11 is a supported backend (raylib's default): a project named pypyjit could not
     import itself there (`'pypyjit' is not a package`: the built-in wins over sys.path)."""
-    with pytest.raises(DeployError, match=f"standard library module '{name}'"):
+    with pytest.raises(PytError, match=f"standard library module '{name}'"):
         presets.check_name_free(None, "script", name)
 
 
@@ -468,8 +471,8 @@ def _other_import_names(installed: dict[str, list[str]], pinned: set[str]) -> di
 def test_other_import_names_skip_mypycs_runtime_libraries() -> None:
     """mypy 2.3.1 ships 08ae81f72d5a2b5fa9e0__mypyc (a digit first: skipped as no identifier),
     but the hash changes with every release and may start with a letter (pytokens 0.4.1:
-    fd7dcdb10166ebd4db98__mypyc): after `./deploy lock --upgrade` the test below asked to add
-    it to IMPORT_NAMES and ./deploy selftest failed in every project."""
+    fd7dcdb10166ebd4db98__mypyc): after `./pyt lock --upgrade` the test below asked to add
+    it to IMPORT_NAMES and ./pyt selftest failed in every project."""
     installed = {
         "e3b0c44298fc1c149afb__mypyc": ["mypy"],
         "08ae81f72d5a2b5fa9e0__mypyc": ["mypy"],
@@ -498,7 +501,7 @@ def test_import_names_follow_the_installed_packages() -> None:
 
 def with_locked(monkeypatch: pytest.MonkeyPatch, extra: tuple[str, ...]) -> None:
     """uv.lock as the name rules read it (presets._lock_graph), plus `extra` packages that every
-    locked one needs: what a project's own `./deploy add` brings (build, retry -> py)."""
+    locked one needs: what a project's own `./pyt add` brings (build, retry -> py)."""
     graph = presets._lock_graph()
     grown = {**{k: v | set(extra) for k, v in graph.items()}, **{n: set() for n in extra}}
     monkeypatch.setattr(presets, "_lock_graph", lambda lock=None: {k: set(v) for k, v in grown.items()})
@@ -517,7 +520,7 @@ def test_every_locked_package_name_is_refused(monkeypatch: pytest.MonkeyPatch, e
     assert locked, "uv.lock is missing or empty"
     assert locked <= presets._dependency_names(cfg, cfg.app.preset)  # the dependency rule names every one
     for name in sorted(locked):
-        with pytest.raises(DeployError) as e:
+        with pytest.raises(PytError) as e:
             presets.check_name_free(cfg, cfg.app.preset, name)
         assert e.value.code == 2
     assert presets._norm_name(cfg.app.name) not in locked  # the project itself is not a clash
@@ -540,7 +543,7 @@ def test_every_locked_package_name_is_refused(monkeypatch: pytest.MonkeyPatch, e
     ],
 )
 def test_indirect_dependencies_of_every_preset_are_refused(preset: str, name: str) -> None:
-    with pytest.raises(DeployError, match="also the name of a dependency"):
+    with pytest.raises(PytError, match="also the name of a dependency"):
         presets.check_name_free(config.load(set(cli.COMMANDS)), preset, name)
 
 
@@ -650,7 +653,7 @@ def test_dependency_names_after_switching_presets(tmp_path: Path, monkeypatch: p
     assert {"rich", "mdurl", "pytest", "colorama", "pygments"} <= same and "orphan" not in same
     assert presets._dependency_names(cfg, "pinned") >= {"newpkg", "mdurl", "orphan", "pytest"}
     presets.check_name_free(cfg, "plain", "mdurl")  # accepted: nothing needs it any more
-    with pytest.raises(DeployError, match="dependency"):
+    with pytest.raises(PytError, match="dependency"):
         presets.check_name_free(cfg, "pinned", "mdurl")
 
 
@@ -663,10 +666,10 @@ def test_constraints_parser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert presets.constraints("p") == {"anyio": "4.15.1", "python-dateutil": "2.9.0.post0", "x-y": "1!2.0+local"}
     for bad in ("anyio>=4\n", "anyio\n", "==1.0\n", "anyio==\n"):
         (tmp_path / "p" / "constraints.txt").write_text("ok==1\n" + bad, encoding="utf-8")
-        with pytest.raises(DeployError, match=r"constraints\.txt:2: expected name==version"):
+        with pytest.raises(PytError, match=r"constraints\.txt:2: expected name==version"):
             presets.constraints("p")
     (tmp_path / "p" / "constraints.txt").write_bytes(b"ok==1\nb\xe9==2\n")
-    with pytest.raises(DeployError, match=r"constraints\.txt is not UTF-8 text \(byte 7\): regenerate it") as e:
+    with pytest.raises(PytError, match=r"constraints\.txt is not UTF-8 text \(byte 7\): regenerate it") as e:
         presets.constraints("p")
     assert e.value.code == 2
 
@@ -752,7 +755,7 @@ def git_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 TRACKED = {
     ".gitignore": "*.spec\nhtmlcov/\n.venv*/\n/build/\n",
-    ".pytemplate/deploy.py": "# entry\n",
+    ".pytemplate/pyt.py": "# entry\n",
     ".pytemplate/template-repo": "",
     ".pytemplate/runner/x.py": "X = 1\n",
     "src/app/__init__.py": "",
@@ -760,7 +763,7 @@ TRACKED = {
     ".github/workflows/ci.yml": "name: ci\n",
     ".github/workflows/template-e2e.yml": "name: template\n",
     ".claude/settings.json": "{}\n",
-    "deploy": "#!/bin/sh\n",
+    "pyt": "#!/bin/sh\n",
     "modified.txt": "old\n",
     "deleted.txt": "gone\n",
     "README.md": "# the template\n",
@@ -776,7 +779,7 @@ def _fake_template(root: Path, *, track: bool = True) -> None:
             path = root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
-    (root / "deploy").chmod(0o755)
+    (root / "pyt").chmod(0o755)
     _git(root, "init", "--quiet")
     if track:
         _git(root, "add", "--", *TRACKED)
@@ -797,16 +800,16 @@ def test_copy_template_copies_only_what_git_tracks(tmp_path: Path, monkeypatch: 
     presets.copy_template(dest)
     assert _files(dest) == {
         ".gitignore": TRACKED[".gitignore"],
-        ".pytemplate/deploy.py": "# entry\n",
+        ".pytemplate/pyt.py": "# entry\n",
         ".pytemplate/runner/x.py": "X = 1\n",
         "src/app/__init__.py": "",
         "sub/build/keep.txt": TRACKED["sub/build/keep.txt"],
         ".github/workflows/ci.yml": "name: ci\n",
-        "deploy": "#!/bin/sh\n",
+        "pyt": "#!/bin/sh\n",
         "modified.txt": "new\n",  # the working-tree content
     }
     if os.name != "nt":
-        assert os.access(dest / "deploy", os.X_OK)
+        assert os.access(dest / "pyt", os.X_OK)
     err = capsys.readouterr().err
     assert "not copied (not tracked by git): .env, notes.txt" in err
     assert "x.spec" not in err and "pyc" not in err  # ignored or skipped: not worth a line
@@ -957,7 +960,7 @@ def test_copy_template_says_when_git_fails(tmp_path: Path, monkeypatch: pytest.M
     """Without a list from git the copy takes every file, secrets included: a git failure other
     than "not a repository" (dubious ownership on a shared or copied folder) must say so."""
     src = tmp_path / "t"
-    _write(src, {".pytemplate/deploy.py": b"# entry\n", ".env": b"SECRET=1\n"})
+    _write(src, {".pytemplate/pyt.py": b"# entry\n", ".env": b"SECRET=1\n"})
     monkeypatch.setattr(presets, "ROOT", src)
     monkeypatch.setattr(shutil, "which", lambda name: "git")
     locales: list[str | None] = []
@@ -1016,7 +1019,7 @@ def test_skipped(path: str, skipped: bool) -> None:
 
 def test_copy_template_refuses_a_folder_with_content(tmp_path: Path) -> None:
     (tmp_path / "keep.txt").write_text("user data", encoding="utf-8")
-    with pytest.raises(DeployError, match="not empty"):
+    with pytest.raises(PytError, match="not empty"):
         presets.copy_template(tmp_path)
     assert (tmp_path / "keep.txt").read_text(encoding="utf-8") == "user data"
 
@@ -1032,7 +1035,7 @@ def test_copy_of_the_real_template_is_exactly_its_tracked_files(tmp_path: Path, 
     assert copied == expected
     for rel in (".pytemplate/template-repo", ".claude", ".github/workflows/template-e2e.yml", ".github/workflows/template-ci-image"):
         assert not (dest / rel).exists(), rel
-    assert (dest / "deploy").read_bytes() == (ROOT / "deploy").read_bytes()
+    assert (dest / "pyt").read_bytes() == (ROOT / "pyt").read_bytes()
 
 
 # --- new ---------------------------------------------------------------------------------------
@@ -1040,7 +1043,7 @@ def test_copy_of_the_real_template_is_exactly_its_tracked_files(tmp_path: Path, 
 
 def _fake_copy(dest: Path) -> None:
     (dest / ".pytemplate").mkdir(parents=True, exist_ok=True)
-    (dest / ".pytemplate" / "deploy.py").write_text("# copied\n", encoding="utf-8")
+    (dest / ".pytemplate" / "pyt.py").write_text("# copied\n", encoding="utf-8")
     (dest / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
 
 
@@ -1134,7 +1137,7 @@ def test_make_own_leaves_a_pyproject_without_a_project_table(tmp_path: Path) -> 
 
 @pytest.mark.parametrize(("quiet", "verbose", "flags"), [(False, False, []), (True, False, ["-q"]), (False, True, ["-v"])])
 def test_new_passes_quiet_and_verbose_to_the_copys_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quiet: bool, verbose: bool, flags: list[str]) -> None:
-    """`./deploy -q new` printed the whole __init step (and -v never listed its files)."""
+    """`./pyt -q new` printed the whole __init step (and -v never listed its files)."""
     calls: list[list[str]] = []
 
     def run(argv: list[Any], **_: Any) -> subprocess.CompletedProcess[str]:
@@ -1170,7 +1173,7 @@ def test_new_never_warns_about_the_sources_hand_edited_files(tmp_path: Path, mon
     monkeypatch.setattr(proc, "find_uv", lambda: "uv")
     presets.new(tmp_path / "demo", cfg.app.preset, cfg.app.name)
     child = next(c for c in calls if "__init" in c)
-    options = child[5 : child.index("__init")]  # the copy's runner: uv run --quiet --script deploy.py OPTIONS __init ...
+    options = child[5 : child.index("__init")]  # the copy's runner: uv run --quiet --script pyt.py OPTIONS __init ...
     monkeypatch.undo()
     copy_root = tmp_path / "copy"
     presets.copy_template(copy_root)
@@ -1178,12 +1181,12 @@ def test_new_never_warns_about_the_sources_hand_edited_files(tmp_path: Path, mon
     settings.write_text(settings.read_text(encoding="utf-8").replace("{", '{\n  "editor.fontSize": 13,', 1), encoding="utf-8")
     init = ("__init", cfg.app.preset, "--name", cfg.app.name, "--force")
     env = _child_env(tmp_path)
-    r = _deploy(copy_root, "--dry-run", *options, *init, cwd=copy_root, env=env)
+    r = _pyt(copy_root, "--dry-run", *options, *init, cwd=copy_root, env=env)
     assert r.returncode == 0, r.stderr
     assert "hand-edited" not in r.stderr
     # The __init route itself renders only at its end (cli.INTERNAL never renders first), so a
     # copy's runner started without new's options, an older new's, stays quiet too
-    r = _deploy(copy_root, "--dry-run", *init, cwd=copy_root, env=env)
+    r = _pyt(copy_root, "--dry-run", *init, cwd=copy_root, env=env)
     assert r.returncode == 0, r.stderr
     assert "hand-edited" not in r.stderr
 
@@ -1204,15 +1207,15 @@ MY_PROJ = str(Path("/p/my proj"))  # \p\my proj on Windows: the hint names the n
 @pytest.mark.parametrize(
     ("launcher", "expected"),
     [
-        ("sh:bash", [f"cd {shlex.quote(MY_PROJ)}", "./deploy setup"]),
-        ("", [f"cd {shlex.quote(MY_PROJ)}", "./deploy setup"]),
-        ("cmd", [f'cd /d "{MY_PROJ}"', ".\\deploy setup"]),
-        ("ps1:Desktop:5.1", [f"cd '{MY_PROJ}'", "./deploy setup"]),
+        ("sh:bash", [f"cd {shlex.quote(MY_PROJ)}", "./pyt setup"]),
+        ("", [f"cd {shlex.quote(MY_PROJ)}", "./pyt setup"]),
+        ("cmd", [f'cd /d "{MY_PROJ}"', ".\\pyt setup"]),
+        ("ps1:Desktop:5.1", [f"cd '{MY_PROJ}'", "./pyt setup"]),
     ],
 )
 def test_new_says_what_comes_next_for_the_callers_shell(monkeypatch: pytest.MonkeyPatch, launcher: str, expected: list[str]) -> None:
     """One hint, each command on its own line (cmd and Windows PowerShell 5.1 have no `&&`), the
-    folder quoted (a space broke `cd <dest> && ./deploy setup`), `.\\deploy` in cmd. The
+    folder quoted (a space broke `cd <dest> && ./pyt setup`), `.\\pyt` in cmd. The
     expected paths are the native ones: the test failed on Windows with POSIX literals."""
     monkeypatch.delenv("XONSH_VERSION", raising=False)
     monkeypatch.delenv("NU_VERSION", raising=False)
@@ -1229,11 +1232,12 @@ def test_new_says_what_comes_next_for_the_callers_shell(monkeypatch: pytest.Monk
     assert shlex.split(presets.next_steps(Path(apostrophe))[0]) == ["cd", apostrophe]
 
 
-@pytest.mark.parametrize("launcher", ["cmd", ""])
-def test_new_says_what_comes_next_in_xonsh(monkeypatch: pytest.MonkeyPatch, launcher: str) -> None:
-    """xonsh on Windows runs deploy.cmd (PYTEMPLATE_LAUNCHER=cmd; its shell-setup alias sets
-    none) and got cmd's `cd /d "..."`, which it rejects. It reads a quoted argument as a Python
-    string (backslashes are escapes: `C:\\Users` needs them doubled)."""
+@pytest.mark.parametrize(("launcher", "expected"), [("cmd", "./pyt.cmd setup"), ("sh:bash", "./pyt setup"), ("", "./pyt setup")])
+def test_new_says_what_comes_next_in_xonsh(monkeypatch: pytest.MonkeyPatch, launcher: str, expected: str) -> None:
+    """xonsh on Windows runs pyt.cmd (PYTEMPLATE_LAUNCHER=cmd) and got cmd's `cd /d "..."`,
+    which it rejects, and `.\\pyt`: it gets `./pyt.cmd`. It reads a quoted argument as a Python
+    string (backslashes are escapes: `C:\\Users` needs them doubled). On Linux and macOS its
+    `./pyt` is the sh launcher."""
     monkeypatch.delenv("NU_VERSION", raising=False)
     monkeypatch.setenv("XONSH_VERSION", "0.24.2")
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
@@ -1241,9 +1245,9 @@ def test_new_says_what_comes_next_in_xonsh(monkeypatch: pytest.MonkeyPatch, laun
         path = str(Path(raw))
         cd, setup = presets.next_steps(Path(path))
         assert cd.startswith("cd ") and ast.literal_eval(cd[3:]) == path
-        assert setup == "./deploy setup"
+        assert setup == expected
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh:niubash")  # niubash's own launcher value wins
-    assert presets.next_steps(Path("/p/my proj"))[0] == f"cd {shlex.quote(MY_PROJ)}"
+    assert presets.next_steps(Path("/p/my proj")) == [f"cd {shlex.quote(MY_PROJ)}", "./pyt setup"]
 
 
 def _shell_line(argv: list[str], cwd: Path) -> str:
@@ -1279,32 +1283,43 @@ def test_the_next_step_hint_enters_the_folder_in_its_shell(tmp_path: Path, monke
         assert os.path.samefile(_shell_line(argv, tmp_path), dest), cd
 
 
-@pytest.mark.parametrize(
-    ("launcher", "nu_version", "setup"), [("cmd", "0.106.1", "./deploy.cmd setup"), ("nu", "", "deploy setup")]
-)
-def test_new_says_what_comes_next_in_nushell(monkeypatch: pytest.MonkeyPatch, launcher: str, nu_version: str, setup: str) -> None:
-    """nushell on Windows runs deploy.cmd too, typed `./deploy.cmd` (the shell-setup nu function
-    `deploy` sets `nu`): cmd's `cd /d "..."` is two arguments there. A single-quoted nushell
-    string is raw; a path with a quote goes in a double-quoted one, whose escapes are
-    backslash-backslash and backslash-quote."""
+@pytest.mark.parametrize(("launcher", "setup"), [("cmd", "./pyt.cmd setup"), ("sh", "./pyt setup")])
+def test_new_says_what_comes_next_in_nushell(monkeypatch: pytest.MonkeyPatch, launcher: str, setup: str) -> None:
+    """nushell (it exports NU_VERSION) on Windows runs pyt.cmd too, typed `./pyt.cmd`: cmd's
+    `cd /d "..."` is two arguments there; on Linux and macOS its `./pyt` is the sh launcher. A
+    single-quoted nushell string is raw; a path with a quote goes in a double-quoted one, whose
+    escapes are backslash-backslash and backslash-quote."""
     monkeypatch.delenv("XONSH_VERSION", raising=False)
-    if nu_version:
-        monkeypatch.setenv("NU_VERSION", nu_version)
-    else:
-        monkeypatch.delenv("NU_VERSION", raising=False)
+    monkeypatch.setenv("NU_VERSION", "0.106.1")
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
     assert presets.next_steps(Path("/p/my proj")) == [f"cd '{MY_PROJ}'", setup]
     apostrophe = str(Path("/p/a\\b it's"))
     escaped = apostrophe.replace("\\", "\\\\")
     assert presets.next_steps(Path(apostrophe))[0] == f'cd "{escaped}"'
-    if launcher == "nu":  # the launcher value names the shell, before an inherited XONSH_VERSION
-        monkeypatch.setenv("XONSH_VERSION", "0.24.2")
-        assert presets.next_steps(Path("/p/my proj"))[0] == f"cd '{MY_PROJ}'"
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh:niubash")  # niubash's own launcher value wins
+    assert presets.next_steps(Path("/p/my proj")) == [f"cd {shlex.quote(MY_PROJ)}", "./pyt setup"]
+
+
+@pytest.mark.parametrize("launcher", ["", "sh", "sh:bash:msys", "sh:niubash", "cmd", "ps1:Core:7.6", "ps1:Desktop:5.1", "nvim", "nu"])
+@pytest.mark.parametrize("shell_var", ["", "XONSH_VERSION", "NU_VERSION"])
+def test_the_next_step_runs_a_launcher_never_a_shell_function(monkeypatch: pytest.MonkeyPatch, launcher: str, shell_var: str) -> None:
+    """The hint after `new` names the project's own launcher for the shell it was typed in: the
+    `pyt` functions of `shell-setup` are gone (`pyt install` puts the launchers on PATH), and
+    `pyt setup` in nushell (for the launcher value `nu` of the old function) ran nothing."""
+    for name in ("XONSH_VERSION", "NU_VERSION"):
+        monkeypatch.delenv(name, raising=False)
+    if shell_var:
+        monkeypatch.setenv(shell_var, "1.0")
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
+    cd, setup = presets.next_steps(Path("/p/my proj"))
+    assert cd.startswith("cd ") and setup in ("./pyt setup", ".\\pyt setup", "./pyt.cmd setup"), (cd, setup)
+    assert (setup == "./pyt.cmd setup") == (launcher == "cmd" and shell_var != ""), setup
+    assert (setup == ".\\pyt setup") == (launcher == "cmd" and shell_var == ""), setup
 
 
 def test_new_prints_one_next_step_hint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fake: Fake) -> None:
-    """init (run by new in the copy) printed "Next step: ./deploy setup && ./deploy run", for
-    the wrong folder, before new's own `cd <dest> && ./deploy setup`."""
+    """init (run by new in the copy) printed "Next step: ./pyt setup && ./pyt run", for
+    the wrong folder, before new's own `cd <dest> && ./pyt setup`."""
     presets.init(fake.cfg, "script", "demo", force=True)
     assert "Next" not in capsys.readouterr().err
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh")
@@ -1312,7 +1327,7 @@ def test_new_prints_one_next_step_hint(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(presets, "_git_init", lambda dest: None)
     presets.new(tmp_path / "my proj", "script", "demo")
     err = capsys.readouterr().err
-    assert err.count("Next") == 1 and f"  cd {shlex.quote(str((tmp_path / 'my proj').resolve()))}\n  ./deploy setup\n" in err
+    assert err.count("Next") == 1 and f"  cd {shlex.quote(str((tmp_path / 'my proj').resolve()))}\n  ./pyt setup\n" in err
 
 
 def test_project_readme_without_a_manual_points_at_the_template() -> None:
@@ -1329,13 +1344,13 @@ def test_new_removes_the_copy_when_init_fails(tmp_path: Path, monkeypatch: pytes
 
     def run(argv: list[Any], **_: Any) -> subprocess.CompletedProcess[str]:
         calls.append([str(a) for a in argv])
-        assert (dest / ".pytemplate" / "deploy.py").is_file(), "init ran before the copy"
+        assert (dest / ".pytemplate" / "pyt.py").is_file(), "init ran before the copy"
         raise proc.CommandFailed([str(a) for a in argv], 1)
 
     monkeypatch.setattr(presets, "copy_template", _fake_copy)
     monkeypatch.setattr(proc, "run", run)
     monkeypatch.setattr(proc, "find_uv", lambda: "uv")
-    with pytest.raises(DeployError, match="half-made project in .* was removed") as e:
+    with pytest.raises(PytError, match="half-made project in .* was removed") as e:
         presets.new(dest, "script", "demo")
     assert e.value.code == 1
     assert [c[c.index("__init") :][:2] for c in calls] == [["__init", "script"]]  # no git init after a failure
@@ -1365,7 +1380,7 @@ def test_new_says_what_it_could_not_remove(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(proc, "run", run)
     monkeypatch.setattr(proc, "find_uv", lambda: "uv")
     monkeypatch.setattr(presets, "_remove", lambda path: False)
-    with pytest.raises(DeployError, match="delete .*demo by hand") as e:
+    with pytest.raises(PytError, match="delete .*demo by hand") as e:
         presets.new(tmp_path / "demo", "script", "demo")
     assert e.value.code == 2
 
@@ -1374,12 +1389,12 @@ def test_new_keeps_the_exit_code_of_a_missing_uv(tmp_path: Path, monkeypatch: py
     """uv not found (exit 3, a missing requirement) stays exit 3 after the cleanup."""
 
     def no_uv() -> str:
-        raise DeployError("uv not found", 3)
+        raise PytError("uv not found", 3)
 
     monkeypatch.setattr(presets, "copy_template", _fake_copy)
     monkeypatch.setattr(proc, "find_uv", no_uv)
     monkeypatch.setattr(proc, "run", lambda *a, **k: pytest.fail("ran a command"))
-    with pytest.raises(DeployError, match="(?s)uv not found.*was removed") as e:
+    with pytest.raises(PytError, match="(?s)uv not found.*was removed") as e:
         presets.new(tmp_path / "demo", "script", "demo")
     assert e.value.code == 3
     assert not (tmp_path / "demo").exists()
@@ -1404,7 +1419,7 @@ def test_the_internal_init_rejects_bad_arguments(dry: Config, monkeypatch: pytes
             cmd_mode.cmd_init(dry, args)
         assert exit_info.value.code == code
     else:
-        with pytest.raises(DeployError, match=re.escape(message)) as e:
+        with pytest.raises(PytError, match=re.escape(message)) as e:
             cmd_mode.cmd_init(dry, args)
         assert e.value.code == code
 
@@ -1420,7 +1435,7 @@ def test_new_rejects_bad_arguments_before_anything(dry: Config, tmp_path: Path, 
             cmd_mode.cmd_new(dry, args)
         assert exit_info.value.code == 2
     else:
-        with pytest.raises(DeployError, match=re.escape(message)) as e:
+        with pytest.raises(PytError, match=re.escape(message)) as e:
             cmd_mode.cmd_new(dry, args)
         assert e.value.code == 2
     assert list(tmp_path.iterdir()) == []
@@ -1431,17 +1446,17 @@ def test_new_never_touches_a_folder_with_content(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(presets, "copy_template", lambda dest: pytest.fail("copied"))
     (tmp_path / "p").mkdir()
     (tmp_path / "p" / "keep.txt").write_text("user data", encoding="utf-8")
-    with pytest.raises(DeployError, match="not empty"):
+    with pytest.raises(PytError, match="not empty"):
         presets.new(tmp_path / "p", "script", "demo")
     (tmp_path / "f").write_text("a file", encoding="utf-8")
-    with pytest.raises(DeployError, match="not a folder"):
+    with pytest.raises(PytError, match="not a folder"):
         presets.new(tmp_path / "f", "script", "demo")
     for name, folder in (("app-", "x"), (None, CJK), (None, "_")):
-        with pytest.raises(DeployError, match="--name NAME"):
+        with pytest.raises(PytError, match="--name NAME"):
             presets.new(tmp_path / folder, "script", name)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["f", "p"]
     monkeypatch.setattr(presets, "ROOT", tmp_path.resolve())
-    with pytest.raises(DeployError, match="inside this template"):
+    with pytest.raises(PytError, match="inside this template"):
         presets.new(tmp_path / "sub" / "demo", "script", "demo")
     assert not (tmp_path / "sub").exists()
     assert (tmp_path / "p" / "keep.txt").read_text(encoding="utf-8") == "user data"
@@ -1454,12 +1469,12 @@ def test_git_init_makes_a_main_branch(tmp_path: Path, git_env: None) -> None:
         pytest.skip("the temporary folder is inside a git work tree")
     dest = tmp_path / "proj"
     dest.mkdir()
-    for script in ("deploy", "deploy.ps1"):
+    for script in ("pyt", "pyt.ps1"):
         (dest / script).write_text("#!/bin/sh\n", encoding="utf-8")
     presets._git_init(dest)
     assert _git(dest, "symbolic-ref", "HEAD").strip() == "refs/heads/main"
     modes = {line.split()[3]: line.split()[0] for line in _git(dest, "ls-files", "-s").splitlines()}
-    assert modes == {"deploy": "100755", "deploy.ps1": "100755"}
+    assert modes == {"pyt": "100755", "pyt.ps1": "100755"}
     inner = dest / "sub"  # inside a work tree now: no nested repository
     inner.mkdir()
     presets._git_init(inner)
@@ -1470,7 +1485,7 @@ def test_git_init_makes_a_main_branch(tmp_path: Path, git_env: None) -> None:
 @pytest.mark.parametrize("filemode", ["false", "true", "off", "no", "0", "yes"])
 def test_git_init_in_a_monorepo_stages_the_launchers_executable(tmp_path: Path, git_env: None, filemode: str) -> None:
     """new inside a repository with core.filemode = false (Git for Windows): `git add` recorded
-    deploy as 100644 and the pre-commit hook refused the first commit. Staged 100755 there;
+    pyt as 100644 and the pre-commit hook refused the first commit. Staged 100755 there;
     elsewhere (core.filemode = true) nothing is staged: the files' own x bit is recorded. Every
     spelling git reads as false counts (off, no, 0: only "false" did)."""
     mono = tmp_path / "mono"
@@ -1479,13 +1494,13 @@ def test_git_init_in_a_monorepo_stages_the_launchers_executable(tmp_path: Path, 
     _git(mono, "config", "core.filemode", filemode)  # the throwaway repository's own config
     dest = mono / "apps" / "game"
     dest.mkdir(parents=True)
-    for script in ("deploy", "deploy.ps1", "deploy.cmd"):
+    for script in ("pyt", "pyt.ps1", "pyt.cmd"):
         (dest / script).write_text("#!/bin/sh\n", encoding="utf-8")
         (dest / script).chmod(0o644)
     presets._git_init(dest)
     assert not (dest / ".git").exists()  # no nested repository
     modes = {line.split()[3]: line.split()[0] for line in _git(mono, "ls-files", "-s").splitlines()}
-    executable = {"apps/game/deploy": "100755", "apps/game/deploy.ps1": "100755"}
+    executable = {"apps/game/pyt": "100755", "apps/game/pyt.ps1": "100755"}
     assert modes == (executable if filemode in ("false", "off", "no", "0") else {})
 
 
@@ -1498,7 +1513,7 @@ def test_git_init_in_a_monorepo_that_ignores_the_project(tmp_path: Path, git_env
     (mono / ".gitignore").write_text("apps/\n", encoding="utf-8")
     dest = mono / "apps" / "game"
     dest.mkdir(parents=True)
-    (dest / "deploy").write_text("#!/bin/sh\n", encoding="utf-8")
+    (dest / "pyt").write_text("#!/bin/sh\n", encoding="utf-8")
     presets._git_init(dest)  # git refuses to add an ignored path: nothing staged, no error
     assert _git(mono, "ls-files", "-s") == ""
 
@@ -1522,7 +1537,7 @@ def test_git_init_falls_back_without_b(tmp_path: Path, monkeypatch: pytest.Monke
         ["init", "--quiet", "-b", "main"],
         ["init", "--quiet"],
         ["symbolic-ref", "HEAD", "refs/heads/main"],
-        ["add", "--chmod=+x", "deploy", "deploy.ps1"],
+        ["add", "--chmod=+x", "pyt", "pyt.ps1"],
     ]
 
 
@@ -1551,7 +1566,7 @@ def dry(monkeypatch: pytest.MonkeyPatch) -> Config:
 )
 def test_cmd_new_refuses_before_copying(dry: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str], message: str) -> None:
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(DeployError, match=re.escape(message)) as e:
+    with pytest.raises(PytError, match=re.escape(message)) as e:
         cmd_mode.cmd_new(dry, args)
     assert e.value.code == 2
     assert list(tmp_path.iterdir()) == []
@@ -1714,9 +1729,9 @@ def test_init_removes_the_old_preset_first_and_adds_the_new_one(fake: Fake) -> N
 
 @pytest.mark.parametrize("preset", PRESETS)
 def test_init_writes_the_projects_own_record(fake: Fake, preset: str) -> None:
-    """state.json came with the copy (`./deploy new`): its `applied` record is the template's
+    """state.json came with the copy (`./pyt new`): its `applied` record is the template's
     (myapp, script) and would be trusted by a project named like it. init writes the new
-    project's own, the one `./deploy apply` would write, and keeps the other keys."""
+    project's own, the one `./pyt apply` would write, and keeps the other keys."""
     from runner import cmd_apply
 
     state = fake.root / ".pytemplate" / "state.json"
@@ -1733,7 +1748,7 @@ def test_init_writes_the_projects_own_record(fake: Fake, preset: str) -> None:
 def test_init_puts_the_state_file_back_when_it_cannot_write_the_record(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
     (fake.root / ".pytemplate" / "state.json").mkdir(parents=True)  # a folder in the way
     before = _snapshot(fake.root)
-    with pytest.raises(DeployError, match=r"cannot write .*state\.json"):
+    with pytest.raises(PytError, match=r"cannot write .*state\.json"):
         presets.init(fake.cfg, "raylib", None, force=False)
     assert _snapshot(fake.root) == before and not _left_aside(fake.root)
 
@@ -1782,7 +1797,7 @@ def test_init_puts_everything_back_when_a_folder_cannot_be_moved(fake: Fake, mon
         return real(self, target)
 
     monkeypatch.setattr(Path, "rename", rename)
-    with pytest.raises(DeployError, match="cannot move tests/ aside .*close the programs"):
+    with pytest.raises(PytError, match="cannot move tests/ aside .*close the programs"):
         presets.init(fake.cfg, "raylib", None, force=False)
     assert _snapshot(fake.root) == before
     assert not _left_aside(fake.root)
@@ -1798,7 +1813,7 @@ def test_init_puts_everything_back_when_writing_fails(fake: Fake, monkeypatch: p
         return real(self, data)
 
     monkeypatch.setattr(Path, "write_bytes", write_bytes)
-    with pytest.raises(DeployError, match="init could not write: No space left") as e:  # not "internal runner error"
+    with pytest.raises(PytError, match="init could not write: No space left") as e:  # not "internal runner error"
         presets.init(fake.cfg, "raylib", None, force=False)
     assert e.value.code == 2
     assert _snapshot(fake.root) == before
@@ -1815,7 +1830,7 @@ def test_init_reports_what_it_could_not_put_back(fake: Fake, monkeypatch: pytest
 
     monkeypatch.setattr(Path, "write_bytes", write_bytes)
     monkeypatch.setattr(presets, "_remove", lambda path: False)
-    with pytest.raises(DeployError, match="No space left"):
+    with pytest.raises(PytError, match="No space left"):
         presets.init(fake.cfg, "raylib", None, force=False)
     assert "could not put back: src/ (partly written)" in capsys.readouterr().err
 
@@ -1825,7 +1840,7 @@ def test_init_with_a_name_the_file_system_refuses_puts_everything_back(fake: Fak
     a clear error naming the file, and the project as it was (never an internal-error traceback)."""
     name = "a" * 300
     before = _snapshot(fake.root)
-    with pytest.raises(DeployError, match=r"init could not write .*src[/\\]a{300}\b") as e:
+    with pytest.raises(PytError, match=r"init could not write .*src[/\\]a{300}\b") as e:
         presets.init(fake.cfg, "script", name, force=True)
     assert e.value.code == 2
     assert _snapshot(fake.root) == before
@@ -1835,7 +1850,7 @@ def test_init_with_a_name_the_file_system_refuses_puts_everything_back(fake: Fak
 def test_init_refuses_a_changed_tree_without_force(fake: Fake) -> None:
     (fake.root / "src" / "myapp" / "app.py").write_text("# my code\n", encoding="utf-8")
     before = _snapshot(fake.root)
-    with pytest.raises(DeployError, match="__init raylib --force"):
+    with pytest.raises(PytError, match="__init raylib --force"):
         presets.init(fake.cfg, "raylib", None, force=False)
     assert _snapshot(fake.root) == before and fake.calls == []
 
@@ -1850,7 +1865,7 @@ def test_init_refuses_a_preset_table_outside_the_markers(fake: Fake, extra: str)
     pyproject.write_text(FAKE_PYPROJECT + extra, encoding="utf-8")
     before = _snapshot(fake.root)
     for attempt in (lambda: presets.init(fake.cfg, "flet", None, force=True), lambda: presets.plan_init(fake.cfg, "flet", None, force=True)):
-        with pytest.raises(DeployError, match="pytemplate-preset") as e:
+        with pytest.raises(PytError, match="pytemplate-preset") as e:
             attempt()
         assert e.value.code == 2
     assert _snapshot(fake.root) == before and fake.calls == []
@@ -1906,7 +1921,7 @@ def test_init_checks_the_pyproject_rewrite_before_writing(fake: Fake, pyproject:
     (fake.root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
     before = _snapshot(fake.root)
     for attempt in (lambda: presets.plan_init(fake.cfg, "raylib", None, force=False), lambda: presets.init(fake.cfg, "raylib", None, force=False)):
-        with pytest.raises(DeployError, match=message) as e:
+        with pytest.raises(PytError, match=message) as e:
             attempt()
         assert e.value.code == 2
     assert _snapshot(fake.root) == before and fake.calls == [] and not fake.rendered
@@ -1914,7 +1929,7 @@ def test_init_checks_the_pyproject_rewrite_before_writing(fake: Fake, pyproject:
 
 def test_a_preset_with_broken_pyproject_tables_is_named(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(presets, "extra_tables", lambda preset, name: "[tool.flet\norg = 1\n")
-    with pytest.raises(DeployError, match=r"presets/flet/preset\.toml: the pyproject tables are not valid TOML") as e:
+    with pytest.raises(PytError, match=r"presets/flet/preset\.toml: the pyproject tables are not valid TOML") as e:
         presets.pyproject_after_init(_skeleton_config("flet", "myapp"), "flet", "myapp")
     assert e.value.code == 2
 
@@ -1956,7 +1971,7 @@ def test_set_project_name_only_touches_the_project_table(text: str, expected: st
 def test_damaged_preset_markers_are_refused(text: str) -> None:
     """A lone marker used to append a second block (duplicate tables) or leave the old one."""
     for extra in ("", "[tool.b]\nz = 3\n"):
-        with pytest.raises(DeployError, match="pytemplate-preset") as e:
+        with pytest.raises(PytError, match="pytemplate-preset") as e:
             presets._set_extra_tables(text, extra)
         assert e.value.code == 2
 
@@ -1977,7 +1992,7 @@ def test_set_extra_tables_replaces_only_the_block() -> None:
 
 def test_a_broken_pyproject_is_a_clear_error(fake: Fake) -> None:
     (fake.root / "pyproject.toml").write_text("[project\n", encoding="utf-8")
-    with pytest.raises(DeployError, match="pyproject.toml is not valid TOML") as e:
+    with pytest.raises(PytError, match="pyproject.toml is not valid TOML") as e:
         presets.check_name_free(fake.cfg, "script", "demo")
     assert e.value.code == 2
 
@@ -1985,7 +2000,7 @@ def test_a_broken_pyproject_is_a_clear_error(fake: Fake) -> None:
 @pytest.mark.parametrize("name", ["app-", "app_", "1app", "my app", CAFE])
 def test_init_refuses_names_uv_refuses(fake: Fake, name: str) -> None:
     before = _snapshot(fake.root)
-    with pytest.raises(DeployError, match="not a valid app name"):
+    with pytest.raises(PytError, match="not a valid app name"):
         presets.init(fake.cfg, "raylib", name, force=True)
     assert _snapshot(fake.root) == before and fake.calls == []
 
@@ -2067,7 +2082,7 @@ def test_new_from_a_project_without_the_presets_tree_refuses_its_names(fake: Fak
     accepted: uv then resolved markdown-it-py's mdurl to the project itself, and the library was
     missing from uv.lock, .venv and every build. The pins name the preset's whole tested tree."""
     cfg = _as_raylib_project(fake)
-    with pytest.raises(DeployError, match="also the name of a dependency") as e:
+    with pytest.raises(PytError, match="also the name of a dependency") as e:
         presets.check_name_free(cfg, preset, name)
     assert e.value.code == 2
     # the reason as uv behaves (15.1): it does not always refuse, it may take the project for it
@@ -2084,8 +2099,8 @@ def _install(site: Path, dist_info: str, *paths: str) -> None:
 
 
 def test_name_check_reads_the_import_names_of_installed_dependencies(fake: Fake) -> None:
-    """IMPORT_NAMES only knows the presets' pins: after `./deploy add beautifulsoup4`,
-    `./deploy rename bs4` passed, and src/bs4/ shadowed the library. The environments of the
+    """IMPORT_NAMES only knows the presets' pins: after `./pyt add beautifulsoup4`,
+    `./pyt rename bs4` passed, and src/bs4/ shadowed the library. The environments of the
     project (either layout: lib/pythonX.Y or Windows' Lib) name what each package installs."""
     text = FAKE_PYPROJECT.replace('"rich>=15.0.0",', '"rich>=15.0.0",\n    "beautifulsoup4>=4.13",\n    "python-dateutil",')
     (fake.root / "pyproject.toml").write_text(text, encoding="utf-8")
@@ -2095,7 +2110,7 @@ def test_name_check_reads_the_import_names_of_installed_dependencies(fake: Fake)
     _install(site, "compiled-2.0.dist-info", "fastmod.cpython-314-x86_64-linux-gnu.so", "compiled.pth")
     _install(fake.root / ".venv-pypy" / "Lib" / "site-packages", "python_dateutil-2.9.0.post0.dist-info", "dateutil/__init__.py")
     for name, module, dist in (("bs4", "bs4", "beautifulsoup4"), ("BS4", "bs4", "beautifulsoup4"), ("dateutil", "dateutil", "python-dateutil")):
-        with pytest.raises(DeployError, match=f"would shadow the module '{module}' of {dist}") as e:
+        with pytest.raises(PytError, match=f"would shadow the module '{module}' of {dist}") as e:
             presets.check_name_free(fake.cfg, "script", name)
         assert e.value.code == 2
     for name in ("othermod", "fastmod", "compiled", "bin", "demo"):  # not a dependency of the project, or no module
@@ -2171,7 +2186,7 @@ def test_init_refuses_a_lock_that_resolves_a_dependency_to_the_project(fake: Fak
 
     monkeypatch.setattr(proc, "run", run)
     monkeypatch.setattr(presets, "check_name_free", lambda *a: None)
-    with pytest.raises(DeployError, match=r"(?s)'Demo' is also the name of a package .*markdown-it-py depends on demo.*--name NAME") as e:
+    with pytest.raises(PytError, match=r"(?s)'Demo' is also the name of a package .*markdown-it-py depends on demo.*--name NAME") as e:
         presets.init(fake.cfg, "script", "Demo", force=True)
     assert e.value.code == 2
     assert _snapshot(fake.root) == before and not fake.rendered and not _left_aside(fake.root)
@@ -2536,7 +2551,7 @@ def test_new_creates_a_working_project(preset: str, tmp_path: Path, network: Non
     env = _child_env(tmp_path)
     name = f"pt-{preset}"
     dest = tmp_path / "new" / name  # the parent does not exist yet
-    r = _deploy(ROOT, "new", str(dest), "--preset", preset, cwd=tmp_path, env=env)
+    r = _pyt(ROOT, "new", str(dest), "--preset", preset, cwd=tmp_path, env=env)
     assert r.returncode == 0, r.stderr[-4000:]
 
     for rel, data in presets.skeleton(preset, name).items():  # the skeleton, byte for byte
@@ -2559,14 +2574,14 @@ def test_new_creates_a_working_project(preset: str, tmp_path: Path, network: Non
 
     check = subprocess.run([shutil.which("uv") or "uv", "lock", "--check"], cwd=dest, env=env, capture_output=True, text=True, timeout=300, check=False)
     assert check.returncode == 0, check.stderr
-    render_check = _deploy(dest, "render", "--check", cwd=dest, env=env)
+    render_check = _pyt(dest, "render", "--check", cwd=dest, env=env)
     assert render_check.returncode == 0, render_check.stderr
 
     if shutil.which("git"):
         inside = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=tmp_path, env=env, capture_output=True, text=True, check=False)
         if inside.stdout.strip() != "true":
             assert subprocess.run(["git", "symbolic-ref", "HEAD"], cwd=dest, env=env, capture_output=True, text=True, check=True).stdout.strip() == "refs/heads/main"
-            staged = subprocess.run(["git", "ls-files", "-s", "deploy", "deploy.ps1"], cwd=dest, env=env, capture_output=True, text=True, check=True).stdout
+            staged = subprocess.run(["git", "ls-files", "-s", "pyt", "pyt.ps1"], cwd=dest, env=env, capture_output=True, text=True, check=True).stdout
             assert [line.split()[0] for line in staged.splitlines()] == ["100755", "100755"]
 
 
@@ -2576,13 +2591,13 @@ def test_new_into_a_folder_with_a_space_and_an_accent(tmp_path: Path, network: N
     env = _child_env(tmp_path)
     parent = tmp_path / "my projects"
     parent.mkdir()
-    r = _deploy(ROOT, "new", CAFE, cwd=parent, env={**env, "PYTEMPLATE_CALLER_CWD": str(parent)})
+    r = _pyt(ROOT, "new", CAFE, cwd=parent, env={**env, "PYTEMPLATE_CALLER_CWD": str(parent)})
     assert r.returncode == 0, r.stderr[-4000:]
     dest = parent / CAFE
     assert (dest / "src" / "cafe" / "__init__.py").is_file()
     assert tomllib.loads((dest / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"] == "cafe"
     assert tomllib.loads((dest / "pytemplate.toml").read_text(encoding="utf-8"))["app"]["name"] == "cafe"
-    check = _deploy(dest, "render", "--check", cwd=dest, env=env)
+    check = _pyt(dest, "render", "--check", cwd=dest, env=env)
     assert check.returncode == 0, check.stderr
 
 
@@ -2599,7 +2614,7 @@ def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: 
     copy_root = tmp_path / "my copy"
     presets.copy_template(copy_root)
     if config.load(set(cli.COMMANDS)).app.preset == "raylib":  # a raylib project: from another preset first
-        r = _deploy(copy_root, "__init", "script", "--force", cwd=copy_root, env=env)
+        r = _pyt(copy_root, "__init", "script", "--force", cwd=copy_root, env=env)
         assert r.returncode == 0, r.stderr[-4000:]
     uv = shutil.which("uv") or "uv"
     if own:
@@ -2610,7 +2625,7 @@ def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: 
     declared = "pycparser" in (copy_root / "pyproject.toml").read_text(encoding="utf-8")
     constraints = copy_root / ".pytemplate" / "presets" / "raylib" / "constraints.txt"
     constraints.write_text(constraints.read_text(encoding="utf-8").replace("pycparser==3.0", "pycparser==2.22"), encoding="utf-8")
-    r = _deploy(copy_root, "__init", "raylib", "--force", cwd=copy_root, env=env)  # a project with its own code too
+    r = _pyt(copy_root, "__init", "raylib", "--force", cwd=copy_root, env=env)  # a project with its own code too
     assert r.returncode == 0, r.stderr[-4000:]
     locked = _locked_versions(copy_root)
     assert locked["pycparser"] == before.get("pycparser", "2.22") and locked["raylib"] == pins["raylib"]
@@ -2634,7 +2649,7 @@ def _round_trip_problem(cfg: Config, root: Path = ROOT) -> str | None:
 
 
 def test_round_trip_problem_names_what_a_round_trip_changes(tmp_path: Path) -> None:
-    """The round-trip test failed (and `./deploy selftest` with it) in a project after `mode
+    """The round-trip test failed (and `./pyt selftest` with it) in a project after `mode
     --typing strict`, `mode --supports +pypy`, a [preset.flet] version or a `lock --upgrade`:
     the last init writes the preset's pytemplate.toml and pins back what it adds again."""
     cfg = config.load(set(cli.COMMANDS))
@@ -2667,7 +2682,7 @@ def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, 
     presets.copy_template(copy_root)
     before = _snapshot(copy_root, lf=True)
     for preset in [*(p for p in PRESETS if p != cfg.app.preset), cfg.app.preset]:
-        r = _deploy(copy_root, "__init", preset, "--force", cwd=copy_root, env=env)
+        r = _pyt(copy_root, "__init", preset, "--force", cwd=copy_root, env=env)
         assert r.returncode == 0, f"init {preset}:\n{r.stderr[-4000:]}"
     after = _snapshot(copy_root, lf=True)
     assert sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k)) == []
@@ -2683,7 +2698,7 @@ def test_init_that_fails_in_uv_changes_nothing(tmp_path: Path, git_env: None) ->
     presets.copy_template(copy_root)
     before = _snapshot(copy_root)
     target = "raylib" if config.load(set(cli.COMMANDS)).app.preset == "flet" else "flet"
-    r = _deploy(copy_root, "__init", target, "--force", cwd=copy_root, env=env)  # a project with its own code too
+    r = _pyt(copy_root, "__init", target, "--force", cwd=copy_root, env=env)  # a project with its own code too
     assert r.returncode != 0
     assert "init failed: every file is back as it was" in r.stderr, r.stderr
     assert _snapshot(copy_root) == before

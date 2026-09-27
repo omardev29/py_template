@@ -1,5 +1,5 @@
 -- Headless smoke test of pytemplate.nvim inside a real LazyVim (use an isolated one: XDG_* or
--- NVIM_APPNAME), with the project as the cwd and its .lazy.lua trusted. `./deploy selftest --nvim`
+-- NVIM_APPNAME), with the project as the cwd and its .lazy.lua trusted. `./pyt selftest --nvim`
 -- runs it like this (VeryLazy only fires on UIEnter, which headless Neovim never sends):
 --   nvim --headless -c "doautocmd UIEnter" -c "luafile .pytemplate/nvim/tests/smoke.lua"
 -- PT_ROOT (optional): the project root the caller expects. Output on stdout, one line per check:
@@ -95,7 +95,7 @@ end
 
 local loaded = check("pytemplate.nvim loaded by .lazy.lua", function()
   local plugin = require("lazy.core.config").plugins["pytemplate.nvim"]
-  assert(plugin, "pytemplate.nvim is not in the lazy.nvim spec: is .lazy.lua trusted? (./deploy nvim trust)")
+  assert(plugin, "pytemplate.nvim is not in the lazy.nvim spec: is .lazy.lua trusted? (./pyt nvim trust)")
   assert(plugin._.loaded, "pytemplate.nvim is in the spec but not loaded")
   pt = require("pytemplate")
   tasks = require("pytemplate.tasks")
@@ -149,8 +149,8 @@ end)
 
 -- --- the runner ---------------------------------------------------------------------------------
 
-check("deploy argv never uses 'shell'", function()
-  local cmd = pt.deploy_cmd({ "help" })
+check("pyt argv never uses 'shell'", function()
+  local cmd = pt.pyt_cmd({ "help" })
   assert(pt.uv(), "uv not found by the plugin")
   assert(cmd[1] == pt.uv() and vim.fn.executable(cmd[1]) == 1, vim.inspect(cmd))
   assert(cmd[2] == "run" and cmd[4] == "--script" and cmd[#cmd] == "help", vim.inspect(cmd))
@@ -158,14 +158,14 @@ check("deploy argv never uses 'shell'", function()
   local ok, err = pcall(function()
     for _, sh in ipairs({ "xonsh", "niu", "/nonexistent/sh" }) do
       vim.o.shell, vim.o.shellcmdflag = sh, "-c"
-      local r = vim.system(cmd, { cwd = pt.caller_cwd(), env = pt.deploy_env(), text = true }):wait(120000)
+      local r = vim.system(cmd, { cwd = pt.caller_cwd(), env = pt.pyt_env(), text = true }):wait(120000)
       assert(r.code == 0 and r.stdout:find("Development:", 1, true), sh .. ": exit " .. tostring(r.code) .. "\n" .. (r.stderr or ""))
     end
     -- jobstart, what overseer uses
     local code, out = nil, {}
     local id = vim.fn.jobstart(cmd, {
       cwd = pt.caller_cwd(),
-      env = pt.deploy_env(),
+      env = pt.pyt_env(),
       stdout_buffered = true,
       on_stdout = function(_, data)
         out = data
@@ -187,18 +187,18 @@ end)
 check("launcher fallback without uv", function()
   local saved = pt._uv
   pt._uv = false
-  local cmd = pt.deploy_cmd({ "help" })
+  local cmd = pt.pyt_cmd({ "help" })
   pt._uv = saved
   -- POSIX: through /bin/sh, like the VS Code tasks and the git hook (no exec bit needed)
   assert(#cmd == (pt.is_win and 2 or 3) and cmd[#cmd - 1] == pt.launcher(), vim.inspect(cmd))
-  assert(cmd[#cmd - 1]:match(pt.is_win and "deploy%.cmd$" or "/deploy$"), vim.inspect(cmd))
+  assert(cmd[#cmd - 1]:match(pt.is_win and "pyt%.cmd$" or "/pyt$"), vim.inspect(cmd))
   assert(pt.is_win or cmd[1] == "/bin/sh", vim.inspect(cmd))
   local mode = not pt.is_win and uv.fs_stat(pt.launcher()).mode % 4096 or nil -- permission bits
   if mode then
     uv.fs_chmod(pt.launcher(), 420) -- 0644: a checkout that lost the exec bit
   end
   local ok, r = pcall(function()
-    return vim.system(cmd, { cwd = pt.caller_cwd(), env = pt.deploy_env(), text = true }):wait(120000)
+    return vim.system(cmd, { cwd = pt.caller_cwd(), env = pt.pyt_env(), text = true }):wait(120000)
   end)
   if mode then
     uv.fs_chmod(pt.launcher(), mode)
@@ -226,15 +226,15 @@ check("overseer templates: every command and [tasks] entry, no duplicates", func
   for _, c in ipairs(info.commands) do
     local needs = (tasks.META[c.name] or {}).needs
     local want = not needs or supported(needs)
-    assert((seen["deploy: " .. c.name] ~= nil) == want, "deploy: " .. c.name .. (want and " missing" or " should be hidden"))
+    assert((seen["pyt: " .. c.name] ~= nil) == want, "pyt: " .. c.name .. (want and " missing" or " should be hidden"))
   end
   for _, t in ipairs(info.tasks) do
-    assert(seen["deploy: " .. t.name], "task missing: " .. t.name)
+    assert(seen["pyt: " .. t.name], "task missing: " .. t.name)
   end
-  assert((seen["deploy: report"] ~= nil) == supported("mypyc"), "report must exist only with mypyc")
-  local d = seen["deploy: test"].builder({ backend = "all", args = { "-x" } })
+  assert((seen["pyt: report"] ~= nil) == supported("mypyc"), "report must exist only with mypyc")
+  local d = seen["pyt: test"].builder({ backend = "all", args = { "-x" } })
   assert(vim.deep_equal(vim.list_slice(d.cmd, #d.cmd - 2), { "test", "all", "-x" }), vim.inspect(d.cmd))
-  local b = seen["deploy: build"].builder({ method = "pyz" })
+  local b = seen["pyt: build"].builder({ method = "pyz" })
   assert(vim.deep_equal(vim.list_slice(b.cmd, #b.cmd - 2), { "build", "--method", "pyz" }), vim.inspect(b.cmd))
 end)
 
@@ -300,13 +300,13 @@ check("output parser", function()
   end
 end)
 
-check("a deploy task runs to SUCCESS", function()
+check("a pyt task runs to SUCCESS", function()
   local task = run_task({ "help" })
   assert(task.status == "SUCCESS", task.status .. " (exit " .. tostring(task.exit_code) .. ")\n" .. task_text(task))
   assert(task_text(task):find("Development:", 1, true), "no help text in the task output")
 end)
 
-check("./deploy render task, then the editor refresh", function()
+check("./pyt render task, then the editor refresh", function()
   local task = run_task({ "render" })
   assert(task.status == "SUCCESS", task.status .. "\n" .. task_text(task))
   local ok, err = pcall(pt.refresh)
@@ -314,7 +314,7 @@ check("./deploy render task, then the editor refresh", function()
   assert(pt.info().schema == 1, "editor.json unreadable after render")
 end)
 
-check("task output becomes diagnostics (./deploy lint)", function()
+check("task output becomes diagnostics (./pyt lint)", function()
   local file = root .. "/src/" .. info.pkg .. "/_pt_smoke_lint.py"
   vim.fn.writefile({ "value = undefined_name_smoke" }, file)
   local ok, err = pcall(function()
@@ -334,23 +334,23 @@ end)
 
 -- --- editor integration -------------------------------------------------------------------------
 
-check("keymaps, :Deploy, completion, render on save", function()
+check("keymaps, :Pyt, completion, render on save", function()
   local prefix = pt.config.prefix
   for _, k in ipairs(tasks.KEYS) do
     local m = vim.fn.maparg(prefix .. k[1], "n", false, true)
     assert(m.desc == k[3], "keymap " .. prefix .. k[1] .. ": " .. vim.inspect(m))
   end
-  assert(vim.fn.exists(":Deploy") == 2, ":Deploy missing")
-  assert(vim.tbl_contains(vim.fn.getcompletion("Deploy ", "cmdline"), "run"), "no command completion")
-  assert(vim.tbl_contains(vim.fn.getcompletion("Deploy test ", "cmdline"), "all"), "no backend completion")
+  assert(vim.fn.exists(":Pyt") == 2, ":Pyt missing")
+  assert(vim.tbl_contains(vim.fn.getcompletion("Pyt ", "cmdline"), "run"), "no command completion")
+  assert(vim.tbl_contains(vim.fn.getcompletion("Pyt test ", "cmdline"), "all"), "no backend completion")
   assert(#vim.api.nvim_get_autocmds({ group = "pytemplate", event = "BufWritePost" }) == 1, "no render-on-save autocmd")
   local wk = require("lazy.core.config").plugins["which-key.nvim"]
   if wk then
     local spec = require("lazy.core.plugin").values(wk, "opts", false).spec or {}
     local group = vim.tbl_filter(function(s)
-      return type(s) == "table" and s[1] == prefix and s.group == "deploy"
+      return type(s) == "table" and s[1] == prefix and s.group == "pyt"
     end, spec)
-    assert(#group == 1, "which-key group 'deploy' missing")
+    assert(#group == 1, "which-key group 'pyt' missing")
   end
 end)
 
@@ -415,7 +415,7 @@ local function lsp_file()
 end
 
 check("ruff language server from .venv", function()
-  local ruff = assert(pt.tool("ruff"), "no ruff in .venv (./deploy setup)")
+  local ruff = assert(pt.tool("ruff"), "no ruff in .venv (./pyt setup)")
   vim.cmd.edit(lsp_file())
   local buf = vim.api.nvim_get_current_buf()
   wait(90000, function()
@@ -531,9 +531,9 @@ local function has_c_compiler()
   return pt.is_win and x86 ~= nil and uv.fs_stat(x86 .. "/Microsoft Visual Studio/Installer/vswhere.exe") ~= nil
 end
 
--- The mypyc configuration: overseer runs its preLaunchTask "deploy: compile" (our provider, the
+-- The mypyc configuration: overseer runs its preLaunchTask "pyt: compile" (our provider, the
 -- only one defining it), then debugpy runs the stage's main.py with src <-> stage pathMappings.
-check("mypyc launch config: deploy: compile, then a breakpoint in src/main.py", function()
+check("mypyc launch config: pyt: compile, then a breakpoint in src/main.py", function()
   if not supported("mypyc") then
     skip("mypyc is not in backend.supported")
   end
@@ -548,7 +548,7 @@ check("mypyc launch config: deploy: compile, then a breakpoint in src/main.py", 
     end
   end
   assert(config, "no mypyc configuration in launch.json")
-  assert(config.preLaunchTask == "deploy: compile", vim.inspect(config.preLaunchTask))
+  assert(config.preLaunchTask == "pyt: compile", vim.inspect(config.preLaunchTask))
   config.console = "internalConsole"
   local main = root .. "/src/main.py"
   vim.cmd.edit(main)
@@ -563,7 +563,7 @@ check("mypyc launch config: deploy: compile, then a breakpoint in src/main.py", 
     dap.run(config)
     wait(420000, function()
       return stopped ~= nil
-    end, "deploy: compile, then the breakpoint")
+    end, "pyt: compile, then the breakpoint")
     assert(stopped.reason == "breakpoint", vim.inspect(stopped))
     wait(30000, function()
       return dap.session() ~= nil and dap.session().current_frame ~= nil

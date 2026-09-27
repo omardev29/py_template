@@ -10,15 +10,17 @@ import shutil
 import stat
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
+from typing import Protocol
 
-from . import cmd_nvim, envs, hooks, mypyc, proc, render, shells, ui
+from . import cmd_install, cmd_nvim, envs, hooks, mypyc, proc, project, render, shells, ui
 from .cmd_dev import only_flags
 from .config import Config
 from .project import BUILD, DIST, ENV_SUFFIX, IS_MACOS, IS_WINDOWS, PYPROJECT, ROOT, rel, write_whole
-from .ui import DeployError
+from .ui import PytError
 
-LAUNCHERS_X = ("deploy", "deploy.ps1")  # the launchers that must stay executable (100755)
+LAUNCHERS_X = ("pyt", "pyt.ps1")  # the launchers that must stay executable (100755)
 
 
 def _envs_for(cfg: Config, target: str) -> list[envs.PyEnv]:
@@ -32,7 +34,7 @@ def _envs_for(cfg: Config, target: str) -> list[envs.PyEnv]:
     if target == "pypy":
         envs.ensure_supported(cfg, "pypy")
         return [envs.pypy_env(cfg)]
-    raise DeployError(f"sync: unknown target '{target}' (cpython | pypy | mypyc | all)")
+    raise PytError(f"sync: unknown target '{target}' (cpython | pypy | mypyc | all)")
 
 
 def ensure_lock(cfg: Config) -> None:
@@ -86,27 +88,27 @@ def _refuse_a_frozen_lock() -> None:
     """Refuse a re-lock that the user's UV_FROZEN or UV_LOCKED would turn into a no-op."""
     frozen = _lock_read_only([])
     if frozen:
-        raise DeployError(
+        raise PytError(
             f"uv.lock must follow pyproject.toml, but {frozen} is set, and with it `uv lock` writes "
             f"nothing: unset {frozen} and run the command again"
         )
 
 
 def cmd_setup(cfg: Config, args: list[str]) -> int:
-    """setup [--force]: the first-time name of ./deploy apply (one implementation: cmd_apply.apply)."""
+    """setup [--force]: the first-time name of ./pyt apply (one implementation: cmd_apply.apply)."""
     from . import cmd_apply  # cmd_apply imports this module
 
     return cmd_apply.apply(cfg, args, command="setup")
 
 
 def _fix_exec_bit() -> None:
-    """Keep `deploy` and `deploy.ps1` executable: the files themselves (POSIX) and their git
+    """Keep `pyt` and `pyt.ps1` executable: the files themselves (POSIX) and their git
     mode 100755 (core.filemode=false on Windows loses it).
 
-    deploy.ps1 needs it for `./deploy.ps1` from pwsh on Linux/macOS.
+    pyt.ps1 needs it for `./pyt.ps1` from pwsh on Linux/macOS.
     """
     # The files first, with or without git: a copy or an archive that dropped the mode leaves
-    # ./deploy unusable, and with core.filemode=true an index-only fix is undone by the next
+    # ./pyt unusable, and with core.filemode=true an index-only fix is undone by the next
     # `git add` (it records the file's 100644 again).
     if not IS_WINDOWS:
         for launcher in LAUNCHERS_X:
@@ -118,7 +120,7 @@ def _fix_exec_bit() -> None:
                         path.chmod(path.stat().st_mode | 0o111)
                     except OSError as e:  # another user's file (a shared checkout), a read-only mount
                         # a warning, never a stop: setup/apply still install the hook, render and
-                        # record; `sh ./deploy` works without the bit
+                        # record; `sh ./pyt` works without the bit
                         ui.warn(f"cannot make {launcher} executable: {e.strerror or e}. Its owner can: chmod +x {launcher}")
     # rev-parse, not ROOT/.git: the project may live in a subfolder of a bigger repository
     if not shutil.which("git"):
@@ -134,7 +136,7 @@ def _fix_exec_bit() -> None:
 def cmd_sync(cfg: Config, args: list[str]) -> int:
     """sync [cpython|pypy|mypyc|all]: `uv sync --locked` of the environment(s)."""
     if len(args) > 1:
-        raise DeployError(f"sync: unrecognized arguments: {' '.join(args[1:])}  (one target: cpython | pypy | mypyc | all)")
+        raise PytError(f"sync: unrecognized arguments: {' '.join(args[1:])}  (one target: cpython | pypy | mypyc | all)")
     target = args[0] if args else "all"
     for env in _envs_for(cfg, target):
         envs.sync(env)
@@ -168,7 +170,7 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
     Otherwise the two would disagree and every `uv run --locked` would fail. uv writes uv.lock in
     place: a full disk left it cut short, invalid TOML, next to the old pyproject.toml.
     """
-    if any(a in LOCK_INFO for a in args):  # `./deploy lock --help` shows uv's help, changes nothing
+    if any(a in LOCK_INFO for a in args):  # `./pyt lock --help` shows uv's help, changes nothing
         envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False)
         return 0
     before = _snapshot((PYPROJECT, PYPROJECT.with_name("uv.lock")))
@@ -204,7 +206,7 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
 
 
 def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog=f"./deploy {verb}")
+    parser = argparse.ArgumentParser(prog=f"./pyt {verb}")
     parser.add_argument("packages", nargs="+")
     where = parser.add_mutually_exclusive_group()
     where.add_argument("--dev", action="store_true", help="development group")
@@ -240,12 +242,12 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
         restored = _put_back(before)
         if restored:
             they = "they were" if len(restored) > 1 else "it was"
-            ui.info(f"{', '.join(restored)}: put back as {they} (./deploy {verb} did not finish)")
+            ui.info(f"{', '.join(restored)}: put back as {they} (./pyt {verb} did not finish)")
         raise
     if verb == "add" and cfg.pypy_enabled and not ns.cpython_only:
         ui.info(
             "PyPy is supported: if the package uses the CPython C-API (numpy, pillow, pydantic-core...) "
-            "it will be slow on PyPy; consider `--cpython-only`. Check with: ./deploy sync pypy"
+            "it will be slow on PyPy; consider `--cpython-only`. Check with: ./pyt sync pypy"
         )
     return 0
 
@@ -382,7 +384,7 @@ def cmd_clean(cfg: Config, args: list[str]) -> int:
         if not _remove(t):
             failed.append(_shown(t))
     if failed:
-        again = "./deploy clean --envs" if "--envs" in flags else "./deploy clean"
+        again = "./pyt clean --envs" if "--envs" in flags else "./pyt clean"
         ui.error(
             f"could not remove {', '.join(failed)} completely: a file in it is in use or not writable.\n"
             "  Close what uses it (editors and their language servers, debuggers, the running app), "
@@ -429,7 +431,7 @@ def _xcode_problem() -> str | None:
     Mac they open the install dialog)."""
     try:
         r = proc.run(["/usr/bin/xcode-select", "-p"], capture=True, check=False, echo=False)
-    except DeployError:
+    except PytError:
         return "no xcode-select"
     dev = r.stdout.strip()
     if r.returncode != 0 or not dev:
@@ -465,32 +467,17 @@ def _c_compiler(platform: str = "", cc: str = "") -> tuple[bool, str]:
     return True, found
 
 
-def cmd_doctor(cfg: Config, args: list[str]) -> int:
-    """doctor: check requirements, environments and generated files."""
-    only_flags("doctor", args, ())
-    problems = 0
+class Check(Protocol):
+    """One doctor line: passed (None: a note), label, hint."""
 
-    def check(passed: bool | None, label: str, hint: str = "") -> None:
-        nonlocal problems
-        if passed is False:
-            problems += 1
-        ui.check_line(passed, label, hint)
+    def __call__(self, passed: bool | None, label: str, hint: str = "", /) -> None: ...
 
-    def env_info(env: envs.PyEnv) -> dict[str, object] | None:
-        # A python that exists but cannot start (Windows: its base Python was uninstalled and the
-        # venv launcher exits 103 "No Python at ..."; no exec bit; garbage output) is a problem
-        # to report, not a crash: every later check still runs.
-        try:
-            return envs.interpreter_info(env.python)
-        except (DeployError, OSError, ValueError):  # ValueError: json.JSONDecodeError
-            check(
-                False,
-                f"environment {rel(env.dir)} is broken (its Python does not start)",
-                "./deploy setup   (if it still fails: ./deploy clean --envs, then ./deploy setup)",
-            )
-            return None
 
+def _tools(check: Check) -> None:
+    """uv (envs.MIN_UV) and the Python the runner runs on, in a project and outside one."""
     ui.step("tools")
+    if project.GLOBAL:
+        check(None, f"outside a project: this machine only (the installed template: {project.ROOT})", "A project's own checks: pyt doctor in its folder")
     uv_version = proc.output([proc.find_uv(), "--version"])
     too_old = envs.uv_problem(uv_version)
     if too_old:
@@ -500,6 +487,49 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
     else:
         check(True, f"uv: {uv_version}")
     check(True, f"runner: Python {sys.version.split()[0]} ({sys.executable})")
+
+
+def _machine(check: Check) -> None:
+    """doctor outside a project: git, the C compiler mypyc would use, the launcher of this run and
+    the shell. What is missing is a note: uv is the one requirement of every project, and a
+    project's own doctor says what that project needs."""
+    git = shutil.which("git")
+    if git:
+        version = proc.run([git, "--version"], capture=True, check=False, echo=False).stdout.strip()
+        check(True, f"git: {version or 'found'} ({git})")
+    else:
+        check(None, "git not found: `new` makes no repository, and a project gets no pre-commit hook", "Install git and put it on PATH")
+    # The runner runs on the installed template's python.cpython: what a new project's .venv holds
+    platform = sysconfig.get_platform()
+    found, where = _c_compiler(platform, cc=str(sysconfig.get_config_var("CC") or ""))
+    check(True if found else None, f"C compiler for mypyc: {where}", "" if found else mypyc.has_compiler_hint(platform))
+    if IS_WINDOWS:
+        long_paths = _long_paths()
+        check(
+            True if long_paths else None,
+            "Windows long paths (LongPathsEnabled)" + ("" if long_paths else ": disabled (optional)"),
+            "Avoids MSVC errors when a project is in a very deep path (>260 characters)",
+        )
+    shells.doctor(check, in_project=False)
+
+
+def _project(cfg: Config, check: Check) -> None:
+    """doctor in a project: its backends and environments, the generated files, pyproject.toml,
+    uv.lock, the changes apply has not applied yet, the launchers and the git hook."""
+
+    def env_info(env: envs.PyEnv) -> dict[str, object] | None:
+        # A python that exists but cannot start (Windows: its base Python was uninstalled and the
+        # venv launcher exits 103 "No Python at ..."; no exec bit; garbage output) is a problem
+        # to report, not a crash: every later check still runs.
+        try:
+            return envs.interpreter_info(env.python)
+        except (PytError, OSError, ValueError):  # ValueError: json.JSONDecodeError
+            check(
+                False,
+                f"environment {rel(env.dir)} is broken (its Python does not start)",
+                "./pyt setup   (if it still fails: ./pyt clean --envs, then ./pyt setup)",
+            )
+            return None
 
     ui.step(f"backends (active: {cfg.backend.active}; supported: {', '.join(cfg.backend.supported)})")
     cp = envs.cpython_env(cfg)
@@ -511,14 +541,14 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
             cc = str(info.get("cc") or "")
             check(True, f"CPython {info['version']} in {rel(cp.dir)}")
     else:
-        check(False, f"environment {rel(cp.dir)} is missing", "./deploy setup")
+        check(False, f"environment {rel(cp.dir)} is missing", "./pyt setup")
     if cfg.pypy_enabled:
         pp = envs.pypy_env(cfg)
         if pp.python.is_file():
             if (info := env_info(pp)) is not None:
                 check(info["impl"] == "pypy", f"PyPy ({info['version']}) in {rel(pp.dir)}")
         else:
-            check(False, f"environment {rel(pp.dir)} is missing ({cfg.python.pypy})", "./deploy setup   (or ./deploy sync pypy)")
+            check(False, f"environment {rel(pp.dir)} is missing ({cfg.python.pypy})", "./pyt setup   (or ./pyt sync pypy)")
     if cfg.supports("mypyc"):
         found, where = _c_compiler(platform, cc=cc)
         check(found, f"C compiler for mypyc: {where}", mypyc.has_compiler_hint(platform or "win-amd64"))
@@ -533,27 +563,47 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
     ui.step("project")
     changed, edited = render.apply(cfg, check=True)
     if changed or not edited:  # each hand-edited file gets its own line below: count every problem once
-        check(not changed, "generated files up to date", f"outdated: {', '.join(changed)}\nThey update with any command (or ./deploy render)")
+        check(not changed, "generated files up to date", f"outdated: {', '.join(changed)}\nThey update with any command (or ./pyt render)")
     for path in edited:
         check(
             False,
             f"{path} hand-edited",
             "Move the change into pytemplate.toml (e.g. [vscode] settings) or .pytemplate/templates\n"
-            "(./deploy render --diff shows it), or drop it: ./deploy render --force",
+            "(./pyt render --diff shows it), or drop it: ./pyt render --force",
         )
-    check(not render.pyproject_outdated(cfg), "pyproject.toml matches pytemplate.toml", "./deploy apply")
+    check(not render.pyproject_outdated(cfg), "pyproject.toml matches pytemplate.toml", "./pyt apply")
     from . import cmd_apply  # lazy: cmd_apply imports this module
 
     cmd_apply.doctor(cfg, check)  # app.name, app.preset, [preset.*], hooks.pre_commit edited but not applied
     try:
         r = envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, capture=True, echo=False)
-        check(r.returncode == 0, "uv.lock up to date", "\n".join(filter(None, [envs.uv_error(r.stderr or r.stdout), "./deploy lock"])))
-    except DeployError as e:  # uv too old to create .venv, or it does not start
+        check(r.returncode == 0, "uv.lock up to date", "\n".join(filter(None, [envs.uv_error(r.stderr or r.stdout), "./pyt lock"])))
+    except PytError as e:  # uv too old to create .venv, or it does not start
         check(False, "uv.lock up to date: uv lock --check did not run", str(e))
 
     shells.doctor(check)  # launchers and shells
     hooks.doctor(cfg, check)  # git pre-commit hook
-    cmd_nvim.doctor(check)  # Neovim/LazyVim summary (details: ./deploy nvim doctor)
+
+
+def cmd_doctor(cfg: Config, args: list[str]) -> int:
+    """doctor: check requirements, environments and generated files. Outside a project (global
+    mode) only what this machine has: the project's steps need a project."""
+    only_flags("doctor", args, ())
+    problems = 0
+
+    def check(passed: bool | None, label: str, hint: str = "") -> None:
+        nonlocal problems
+        if passed is False:
+            problems += 1
+        ui.check_line(passed, label, hint)
+
+    _tools(check)
+    if project.GLOBAL:
+        _machine(check)  # git, the C compiler of mypyc, the launcher of this run and the shell
+    else:
+        _project(cfg, check)  # backends, generated files, pyproject.toml, uv.lock, launchers, git hook
+    cmd_nvim.doctor(check)  # Neovim/LazyVim summary (details: ./pyt nvim doctor)
+    cmd_install.doctor(check)  # the `pyt` command of pyt install (notes only)
     ui.info("")
     if problems:
         ui.error(f"{problems} problem(s)")

@@ -1,8 +1,8 @@
-# End-to-end test of the TEMPLATE itself: `./deploy selftest --e2e` creates a project from each
-# preset with ./deploy new and works in it like a user: setup, the first commit through the
+# End-to-end test of the TEMPLATE itself: `./pyt selftest --e2e` creates a project from each
+# preset with ./pyt new and works in it like a user: setup, the first commit through the
 # pre-commit hook, check, test, run, build (and run the headless artifacts), plus in the deeper
 # modes the runner's own tests in the project, a rename round trip, and mode and apply changes.
-# The template- prefix keeps this workflow out of the projects ./deploy new creates, and the gate
+# The template- prefix keeps this workflow out of the projects ./pyt new creates, and the gate
 # job skips everything in repositories made from the template.
 #   push, pull request   quick: one build per backend
 #   weekly (Monday)      default: every build method but nuitka, selftest and rename in the project
@@ -23,14 +23,14 @@ on:
   schedule:
     - cron: "17 4 * * 1" # weekly, Monday 04:17 UTC: default
     - cron: "37 3 1 * *" # monthly, day 1 03:37 UTC: full (the MODE expression below names this string)
-  # what ./deploy new copies into every project: the runner and presets, the launchers, the tool
+  # what ./pyt new copies into every project: the runner and presets, the launchers, the tool
   # versions of the root lock, the skeleton of the script preset and the git settings
   push:
     paths:
       - ".pytemplate/**"
-      - "deploy"
-      - "deploy.cmd"
-      - "deploy.ps1"
+      - "pyt"
+      - "pyt.cmd"
+      - "pyt.ps1"
       - "pyproject.toml"
       - "uv.lock"
       - "pytemplate.toml"
@@ -43,9 +43,9 @@ on:
   pull_request:
     paths:
       - ".pytemplate/**"
-      - "deploy"
-      - "deploy.cmd"
-      - "deploy.ps1"
+      - "pyt"
+      - "pyt.cmd"
+      - "pyt.ps1"
       - "pyproject.toml"
       - "uv.lock"
       - "pytemplate.toml"
@@ -106,7 +106,7 @@ jobs:
             *) args=() ;;
           esac
           echo "selftest --e2e $PRESET: $MODE mode"
-          ./deploy selftest --e2e "$PRESET" "${args[@]}" --json --base "$RUNNER_TEMP/e2e" > "e2e-$PRESET.json"
+          ./pyt selftest --e2e "$PRESET" "${args[@]}" --json --base "$RUNNER_TEMP/e2e" > "e2e-$PRESET.json"
       - name: Upload the JSON report
         if: always()
         uses: actions/upload-artifact@v7

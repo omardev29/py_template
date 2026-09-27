@@ -13,7 +13,7 @@ from . import mypyc, proc, ui
 from .cmd_dev import run_checks, split_backend
 from .config import BACKENDS, METHODS, Config
 from .project import BUILD, DIST, SRC, rel, user_path
-from .ui import DeployError
+from .ui import PytError
 
 # Which backends each method supports (and why not the rest)
 COMPAT: dict[str, dict[str, str]] = {
@@ -30,7 +30,7 @@ COMPAT: dict[str, dict[str, str]] = {
 PASSTHROUGH = ("exe", "nuitka", "flet")
 ONEFILE_METHODS = ("exe", "nuitka")  # --onefile / --onedir
 TARGET_METHODS = ("pyz",)  # --target: the other methods build for this OS only
-GLOBAL_FLAGS = ("--dry-run", "--no-render")  # ./deploy's own options: they go before the command
+GLOBAL_FLAGS = ("--dry-run", "--no-render")  # ./pyt's own options: they go before the command
 OWN_PAYLOAD = ("wheel",)  # builds its own project from src/: no payload (no mypyc release stage)
 
 
@@ -67,10 +67,10 @@ def check_lock(cfg: Config) -> None:
         why = envs.uv_error(r.stderr or r.stdout) or f"uv lock --check: exit code {r.returncode}"
         why = why[len("error:") :].strip() if why.lower().startswith("error:") else why
         if "needs to be updated" not in why:  # no answer (offline, no interpreter): not a stale lock
-            raise DeployError(f"cannot check uv.lock against pyproject.toml: {why}", 3)
-        raise DeployError(
+            raise PytError(f"cannot check uv.lock against pyproject.toml: {why}", 3)
+        raise PytError(
             f"uv.lock does not match pyproject.toml ({why})\n"
-            "  Run ./deploy lock (./deploy apply after a pytemplate.toml edit), then build again"
+            "  Run ./pyt lock (./pyt apply after a pytemplate.toml edit), then build again"
         )
 
 
@@ -91,47 +91,47 @@ def _stray_word(word: str, args: list[str]) -> str:
         close = difflib.get_close_matches(word, BACKENDS, n=1)
         hint = f": did you mean {close[0]}?" if close else ""
         return f"build: unknown backend '{word}'{hint} (backends: {' | '.join(BACKENDS)}; the method goes after --method)"
-    return f"build: unexpected argument '{word}' (usage: ./deploy build [BACKEND] [--method METHOD] [options])"
+    return f"build: unexpected argument '{word}' (usage: ./pyt build [BACKEND] [--method METHOD] [options])"
 
 
 def _check_arguments(method: str, ns: argparse.Namespace, extra: list[str]) -> None:
     """Refuse what the chosen method would silently ignore (before the checks and the payload)."""
     for flag in GLOBAL_FLAGS:
         if flag in extra:
-            raise DeployError(f"build: {flag} is a global option: put it before the command (./deploy {flag} build ...)", 2)
+            raise PytError(f"build: {flag} is a global option: put it before the command (./pyt {flag} build ...)", 2)
     if extra and method not in PASSTHROUGH:
-        raise DeployError(
+        raise PytError(
             f"build --method {method}: unrecognized arguments: {' '.join(extra)}  "
             f"(only {', '.join(PASSTHROUGH)} pass extra arguments to their packager)",
             2,
         )
     if (ns.onefile or ns.onedir) and method not in ONEFILE_METHODS:
         flag = "--onefile" if ns.onefile else "--onedir"
-        raise DeployError(f"build --method {method}: {flag} only applies to --method {' or '.join(ONEFILE_METHODS)}", 2)
+        raise PytError(f"build --method {method}: {flag} only applies to --method {' or '.join(ONEFILE_METHODS)}", 2)
     if ns.target and method not in TARGET_METHODS:
-        raise DeployError(f"build --method {method}: --target only applies to --method pyz ({method} builds for this OS only)", 2)
+        raise PytError(f"build --method {method}: --target only applies to --method pyz ({method} builds for this OS only)", 2)
 
 
 def cmd_build(cfg: Config, args: list[str]) -> int:
     backend, rest = split_backend(cfg, args)
-    parser = argparse.ArgumentParser(prog="./deploy build", allow_abbrev=False)  # --onedri is not --onedir
+    parser = argparse.ArgumentParser(prog="./pyt build", allow_abbrev=False)  # --onedri is not --onedir
     parser.add_argument("--method", choices=METHODS)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--onefile", action="store_true", help="exe and nuitka only")
     mode.add_argument("--onedir", action="store_true", help="exe and nuitka only")
     parser.add_argument("--target", action="append", default=[], help="extra platforms (pyz only), e.g. cp314-linux-x86_64")
-    parser.add_argument("--no-check", action="store_true", help="do not run ./deploy check first")
+    parser.add_argument("--no-check", action="store_true", help="do not run ./pyt check first")
     ns, extra = parser.parse_known_args(rest)
     if extra and not extra[0].startswith("-"):
         # The first leftover can never be a known option's value (argparse consumed those)
-        raise DeployError(_stray_word(extra[0], args), 2)
+        raise PytError(_stray_word(extra[0], args), 2)
     from . import envs
 
     envs.ensure_supported(cfg, backend)
     method = ns.method or cfg.deploy.default.get(backend, "exe")
     reason = COMPAT[method].get(backend)
     if reason:
-        raise DeployError(f"{method} + {backend}: {reason}")
+        raise PytError(f"{method} + {backend}: {reason}")
     _check_arguments(method, ns, extra)
     if method == "nuitka":
         from .methods import nuitka
@@ -162,7 +162,7 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
     upx_line = upx.preflight(cfg, method)  # a bad deploy.upx.path or a failed download fails now
 
     if not ns.no_check and not run_checks(cfg, backend):
-        raise DeployError("check failed: fix it or use --no-check", 1)  # like ./deploy check
+        raise PytError("check failed: fix it or use --no-check", 1)  # like ./pyt check
     if proc.DRY_RUN:
         ui.info(f"(--dry-run) build {backend} -> {method}: would output {rel(DIST)}/{cfg.app.name}-{backend}-{method}*")
         if upx_line:
@@ -174,6 +174,11 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
             ui.info(f"  Nuitka options: {proc.show(options)}")
             if cfg.deploy.nuitka.pgo:
                 ui.info(nuitka_method.PGO_NOTE)
+        if method == "flet":
+            from .methods import flet as flet_method  # the target, and what happens to the pins
+
+            for line in flet_method.plan_lines(cfg):
+                ui.info(f"  {line}")
         return 0
 
     # The wheel builds its own project from src/ (its setup.py compiles with mypyc): the mypyc
@@ -185,11 +190,11 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
     module = importlib.import_module(f"{__package__}.methods.{method}")
     result: Path = module.build(req)
     if not result.exists() or (result.is_dir() and not any(result.iterdir())):
-        # e.g. `./deploy build -v`: PyInstaller read -v as --version, printed it and made nothing
+        # e.g. `./pyt build -v`: PyInstaller read -v as --version, printed it and made nothing
         hint = ""
         if any(arg in ("-v", "--verbose", "-q", "--quiet") for arg in extra):
-            hint = "; ./deploy's own -v and -q go before the command (./deploy -v build ...): after it they reach the packager"
-        raise DeployError(f"build {backend} -> {method}: no output at {rel(result)} (see the packager's output above){hint}")
+            hint = "; ./pyt's own -v and -q go before the command (./pyt -v build ...): after it they reach the packager"
+        raise PytError(f"build {backend} -> {method}: no output at {rel(result)} (see the packager's output above){hint}")
     ui.ok(f"done: {rel(result)}  ({_size(result)})")
     return 0
 
@@ -208,23 +213,23 @@ def dist_path(req: BuildRequest, suffix: str = "") -> Path:
 def cmd_pyz_merge(cfg: Config, args: list[str]) -> int:
     """pyz-merge A.pyz B.pyz ... --out C.pyz: merge the per-OS .pyz files into one.
 
-    The paths are the user's (relative to the folder ./deploy was typed in, /c/x, ~ ...).
+    The paths are the user's (relative to the folder ./pyt was typed in, /c/x, ~ ...).
     """
-    parser = argparse.ArgumentParser(prog="./deploy pyz-merge")
+    parser = argparse.ArgumentParser(prog="./pyt pyz-merge")
     parser.add_argument("parts", nargs="+", metavar="PART.pyz")
     parser.add_argument("--out", required=True, metavar="OUT.pyz")
     ns = parser.parse_args(args)
     parts = [user_path(p) for p in ns.parts]
     out = user_path(ns.out)
     if len(parts) < 2:
-        raise DeployError("pyz-merge needs at least two .pyz files")
+        raise PytError("pyz-merge needs at least two .pyz files")
     for part in parts:
         if not part.is_file():
-            raise DeployError(f"pyz-merge: {part} not found")
+            raise PytError(f"pyz-merge: {part} not found")
         if not zipfile.is_zipfile(part):
-            raise DeployError(f"pyz-merge: {part} is not a .pyz (zip) file")
+            raise PytError(f"pyz-merge: {part} is not a .pyz (zip) file")
     if out.is_dir():
-        raise DeployError(f"pyz-merge: --out {out} is a folder; give the path of the .pyz to write")
+        raise PytError(f"pyz-merge: --out {out} is a folder; give the path of the .pyz to write")
     from .methods import pyz
 
     if proc.DRY_RUN:

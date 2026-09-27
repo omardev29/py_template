@@ -20,9 +20,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import proc
+from . import proc, ui
 from .project import CONFIG_FILE, PRESETS, SRC, rel, write_whole
-from .ui import DeployError
+from .ui import PytError
 
 SCHEMA = 1  # the pytemplate.toml layout this runner reads (`schema = 1`)
 BACKENDS = ("cpython", "pypy", "mypyc")
@@ -35,6 +35,27 @@ METHODS = ("exe", "portable", "pyz", "wheel", "nuitka", "flet")
 EDITORS = ("pylance", "basedpyright")
 # [deploy] default: the build method of each backend; a backend left out of the table keeps its own
 DEFAULT_METHODS = {"cpython": "exe", "mypyc": "exe", "pypy": "portable"}
+# The built-in commands of the first template version under this file's contract (CLAUDE.md rule
+# 1.11, September 2026): a [tasks] entry may not take one of these names. A builtin added since
+# (install, uninstall) never stops a project whose task already had its name: there the task
+# keeps it (cli.dispatch), and the builtin runs outside the project.
+CONTRACT_COMMANDS = frozenset(
+    {
+        "add", "apply", "build", "check", "clean", "compile", "doctor", "fmt", "help", "hooks", "lint", "lock", "mode", "new",
+        "nvim", "pyz-merge", "remove", "rename", "render", "report", "run", "selftest", "setup", "shell-setup", "sync", "tasks",
+        "test",
+    }
+)  # fmt: skip
+# Built-in commands removed since, and what replaced them: a [vscode] buttons entry or a deps
+# entry that names one is left out with a warning (it stopped every command), and typed it says so
+RETIRED_COMMANDS = {"shell-setup": "`pyt install` puts the launchers themselves on PATH"}
+_WARNED: set[str] = set()  # each warning of a retired value once per run (the config loads again in a run)
+
+
+def warn_once(message: str) -> None:
+    if message not in _WARNED:
+        _WARNED.add(message)
+        ui.warn(message)
 
 _DOTTED = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
@@ -73,7 +94,7 @@ class CompileConfig:
     exclude: list[str] = field(default_factory=list)
     forbid_imports: list[str] = field(default_factory=list)
     # True: every mypyc build (run, test, compile, build) also writes the annotated HTML report
-    # of slow lines to .build/reports/mypyc-annotate.html (./deploy report does it on demand)
+    # of slow lines to .build/reports/mypyc-annotate.html (./pyt report does it on demand)
     annotate: bool = False
     opt_level: str = "3"
     # Linux gcc/clang: -fno-semantic-interposition (as CPython itself is built), so the compiler
@@ -175,7 +196,7 @@ class TaskConfig:
 
 @dataclass
 class HooksConfig:
-    pre_commit: bool = True  # ./deploy setup installs the git pre-commit hook (./deploy hooks run)
+    pre_commit: bool = True  # ./pyt setup installs the git pre-commit hook (./pyt hooks run)
 
 
 @dataclass
@@ -283,7 +304,7 @@ def _fields(cls: type[Any]) -> dict[str, Any]:
 
 
 def _check_type(value: Any, hint: Any, where: str) -> None:
-    """Raise DeployError unless `value` (from tomllib) has the schema type `hint`, recursively."""
+    """Raise PytError unless `value` (from tomllib) has the schema type `hint`, recursively."""
     if hint is Any:  # free-form: [vscode] settings, [preset.<p>] options, mypy override options
         _check_free(value, where)
         return
@@ -291,7 +312,7 @@ def _check_type(value: Any, hint: Any, where: str) -> None:
     if origin is list or origin is dict:
         if not isinstance(value, origin):
             wanted = "list" if origin is list else "table"
-            raise DeployError(f"pytemplate.toml: '{where}' must be of type {wanted}, not {_type_name(value)}")
+            raise PytError(f"pytemplate.toml: '{where}' must be of type {wanted}, not {_type_name(value)}")
         item = typing.get_args(hint)[-1]
         if isinstance(value, list):
             for i, v in enumerate(value):
@@ -303,9 +324,9 @@ def _check_type(value: Any, hint: Any, where: str) -> None:
         return
     if not isinstance(value, hint) or (hint is not bool and isinstance(value, bool)):
         name = _TYPE_NAMES.get(hint, getattr(hint, "__name__", str(hint)))
-        raise DeployError(f"pytemplate.toml: '{where}' must be of type {name}, not {_type_name(value)}")
+        raise PytError(f"pytemplate.toml: '{where}' must be of type {name}, not {_type_name(value)}")
     if isinstance(value, str) and "\0" in value:
-        raise DeployError(f"pytemplate.toml: '{where}' contains a NUL character (\\u0000)")
+        raise PytError(f"pytemplate.toml: '{where}' contains a NUL character (\\u0000)")
 
 
 def _check_free(value: Any, where: str) -> None:
@@ -316,12 +337,12 @@ def _check_free(value: Any, where: str) -> None:
     """
     if isinstance(value, str):
         if "\0" in value:
-            raise DeployError(f"pytemplate.toml: '{where}' contains a NUL character (\\u0000)")
+            raise PytError(f"pytemplate.toml: '{where}' contains a NUL character (\\u0000)")
     elif isinstance(value, float):
         if not math.isfinite(value):
-            raise DeployError(f"pytemplate.toml: '{where}' = {value}: only finite numbers are allowed here")
+            raise PytError(f"pytemplate.toml: '{where}' = {value}: only finite numbers are allowed here")
     elif isinstance(value, (datetime.date, datetime.time)):
-        raise DeployError(
+        raise PytError(
             f"pytemplate.toml: '{where}' is a TOML {_type_name(value)}, which the generated files "
             "cannot hold: write it as a string (quoted)"
         )
@@ -338,14 +359,14 @@ def _check_key(key: str, where: str) -> None:
     """The keys of a table the schema leaves open ([vscode.settings]) reach the generated files as
     they are: a NUL character is refused there too (settings.json got "a\\u0000b": 1)."""
     if "\0" in key:
-        raise DeployError(f"pytemplate.toml: '{_join(where, key)}': the key contains a NUL character (\\u0000)")
+        raise PytError(f"pytemplate.toml: '{_join(where, key)}': the key contains a NUL character (\\u0000)")
 
 
 def _check_env_names(env: dict[str, str], where: str) -> None:
     """Names no process environment can hold (subprocess would raise ValueError)."""
     for name in env:
         if not name or "=" in name or "\0" in name:
-            raise DeployError(
+            raise PytError(
                 f"pytemplate.toml: '{where}': invalid environment variable name {name!r} "
                 "(it cannot be empty or contain '=')"
             )
@@ -353,7 +374,7 @@ def _check_env_names(env: dict[str, str], where: str) -> None:
 
 def _check_schema(schema: Any) -> None:
     if isinstance(schema, int) and not isinstance(schema, bool) and schema != SCHEMA:
-        raise DeployError(
+        raise PytError(
             f"pytemplate.toml: schema = {schema} is not supported by this runner, which reads "
             f"schema = {SCHEMA}: the file comes from a different version of the template"
         )
@@ -361,7 +382,7 @@ def _check_schema(schema: Any) -> None:
 
 def _build(cls: type[Any], data: Any, where: str) -> Any:
     if not isinstance(data, dict):
-        raise DeployError(f"pytemplate.toml: '{where}' must be a table")
+        raise PytError(f"pytemplate.toml: '{where}' must be a table")
     if cls is Config:
         _check_schema(data.get("schema", SCHEMA))  # before a newer layout's unknown keys
     hints = _fields(cls)
@@ -371,7 +392,7 @@ def _build(cls: type[Any], data: Any, where: str) -> Any:
         hint = hints.get(key)
         if hint is None:
             valid = ", ".join(sorted(hints))
-            raise DeployError(f"pytemplate.toml: unknown key '{path}' (valid: {valid})")
+            raise PytError(f"pytemplate.toml: unknown key '{path}' (valid: {valid})")
         if isinstance(hint, type) and dataclasses.is_dataclass(hint):
             kwargs[key] = _build(hint, value, path)
         elif key == "tasks" and cls is Config:
@@ -393,13 +414,13 @@ def _build(cls: type[Any], data: Any, where: str) -> Any:
 
 def _table(value: Any, where: str) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise DeployError(f"pytemplate.toml: '{where}' must be a table")
+        raise PytError(f"pytemplate.toml: '{where}' must be a table")
     return value
 
 
 def _one_of(value: str, allowed: tuple[str, ...], where: str) -> None:
     if value not in allowed:
-        raise DeployError(f"pytemplate.toml: '{where}' = {value!r} is not valid ({' | '.join(allowed)})")
+        raise PytError(f"pytemplate.toml: '{where}' = {value!r} is not valid ({' | '.join(allowed)})")
 
 
 def _presets() -> list[str]:
@@ -420,20 +441,20 @@ def _validate_compile(cfg: Config) -> None:
     for i, m in enumerate(modules):
         for other in modules[:i]:
             if m == other:
-                raise DeployError(f"pytemplate.toml: compile.modules lists {m!r} twice")
+                raise PytError(f"pytemplate.toml: compile.modules lists {m!r} twice")
             if _within(m, other) or _within(other, m):
                 inner, outer = (m, other) if _within(m, other) else (other, m)
-                raise DeployError(
+                raise PytError(
                     f"pytemplate.toml: compile.modules: {inner!r} is inside {outer!r}, which already compiles it "
                     f"(mypyc would see the module twice): keep only {outer!r}"
                 )
     for ex in cfg.compile.exclude:
         if ex in modules:
-            raise DeployError(
+            raise PytError(
                 f"pytemplate.toml: compile.exclude: {ex!r} is a whole compile.modules entry: remove it from compile.modules instead"
             )
         if not any(ex.startswith(m + ".") for m in modules):
-            raise DeployError(
+            raise PytError(
                 f"pytemplate.toml: compile.exclude: {ex!r} is not inside compile.modules {modules}: "
                 "list modules or subpackages of those packages"
             )
@@ -474,42 +495,42 @@ def _validate_task(name: str, task: TaskConfig, builtin_commands: set[str] | Non
     editor renderers expect (vscode.scan renders a task whose deps do not parse)."""
     where = f"pytemplate.toml: tasks.{name}"
     if not re.fullmatch(r"[a-z][a-z0-9_-]*", name):
-        raise DeployError(f"pytemplate.toml: invalid task name: {name!r}")
-    if builtin_commands and name in builtin_commands:
-        raise DeployError(f"pytemplate.toml: task '{name}' clashes with the built-in command ./deploy {name}")
+        raise PytError(f"pytemplate.toml: invalid task name: {name!r}")
+    if builtin_commands and name in builtin_commands and name in CONTRACT_COMMANDS:
+        raise PytError(f"pytemplate.toml: task '{name}' clashes with the built-in command ./pyt {name}")
     if not task.cmd and not task.deps:
-        raise DeployError(f"pytemplate.toml: task '{name}' needs 'cmd' or 'deps'")
+        raise PytError(f"pytemplate.toml: task '{name}' needs 'cmd' or 'deps'")
     if task.backend:
         _one_of(task.backend, BACKENDS, f"tasks.{name}.backend")
     if task.cmd and not task.cmd[0].strip():
-        raise DeployError(f"{where}.cmd: the program (its first item) is empty")
+        raise PytError(f"{where}.cmd: the program (its first item) is empty")
     values = [(f"{where}.cmd", item) for item in task.cmd] + [(f"{where}.env.{k}", v) for k, v in task.env.items()]
     if task.cwd:
         values.append((f"{where}.cwd", task.cwd))
     for key_path, value in values:
         problem = task_format_error(value)
         if problem:
-            raise DeployError(f"{key_path}: {value!r}: {problem}")
+            raise PytError(f"{key_path}: {value!r}: {problem}")
     for key in task.env:
         # They become environment variables of the task's process ('=' or '' would crash it)
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-            raise DeployError(f"{where}.env: invalid environment variable name {key!r}")
+            raise PytError(f"{where}.env: invalid environment variable name {key!r}")
 
 
 def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     if not APP_NAME.fullmatch(cfg.app.name):
-        raise DeployError(f"pytemplate.toml: 'app.name' only allows {NAME_RULE}")
+        raise PytError(f"pytemplate.toml: 'app.name' only allows {NAME_RULE}")
     if not re.fullmatch(r"[a-z][a-z0-9_-]*", cfg.app.preset) or not (PRESETS / cfg.app.preset / "preset.toml").is_file():
-        raise DeployError(  # every command validates first: the hint is an edit of the file
+        raise PytError(  # every command validates first: the hint is an edit of the file
             f"pytemplate.toml: app.preset = {cfg.app.preset!r} is not a preset of this template "
             f"(available: {', '.join(_presets()) or 'none'}): set app.preset in pytemplate.toml back to "
             "the preset this project was made from (a project cannot switch presets; for another one, "
-            "./deploy new DIR --preset P works again once this file loads)"
+            "./pyt new DIR --preset P works again once this file loads)"
         )
 
     _check_schema(cfg.schema)
     if cfg.app.assets not in ("", "assets"):
-        raise DeployError(
+        raise PytError(
             f"pytemplate.toml: app.assets = {cfg.app.assets!r} is not supported: use \"assets\" "
             "(bundle src/assets/ with the app) or \"\" (no assets folder). The runtime lookup "
             "(resources.assets_dir) and the portable/pyz bootstraps only know src/assets/"
@@ -517,22 +538,22 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     for b in cfg.backend.supported:
         _one_of(b, BACKENDS, "backend.supported")
     if not cfg.backend.supported:
-        raise DeployError("pytemplate.toml: 'backend.supported' cannot be empty")
+        raise PytError("pytemplate.toml: 'backend.supported' cannot be empty")
     twice = sorted({b for b in cfg.backend.supported if cfg.backend.supported.count(b) > 1})
     if twice:
-        raise DeployError(f"pytemplate.toml: 'backend.supported' lists {', '.join(twice)} more than once")
+        raise PytError(f"pytemplate.toml: 'backend.supported' lists {', '.join(twice)} more than once")
     _one_of(cfg.backend.active, BACKENDS, "backend.active")
     if cfg.backend.active not in cfg.backend.supported:
-        raise DeployError(  # `./deploy mode` loads this file first: the hint is an edit of the file
+        raise PytError(  # `./pyt mode` loads this file first: the hint is an edit of the file
             f"pytemplate.toml: backend.active = {cfg.backend.active!r} is not in backend.supported "
             f"{cfg.backend.supported}: add it to backend.supported, or set backend.active to one of them, "
-            "in pytemplate.toml (then ./deploy apply)"
+            "in pytemplate.toml (then ./pyt apply)"
         )
     # [0-9], never \d: \d also matches other scripts' digits ("\u0663.\u0661\u0664")
     if not re.fullmatch(r"[0-9]+\.[0-9]+", cfg.python.cpython):
-        raise DeployError("pytemplate.toml: 'python.cpython' must be a minor version, e.g. \"3.14\"")
+        raise PytError("pytemplate.toml: 'python.cpython' must be a minor version, e.g. \"3.14\"")
     if not re.fullmatch(r"pypy@[0-9]+\.[0-9]+\.[0-9]+", cfg.python.pypy):
-        raise DeployError(
+        raise PytError(
             f"pytemplate.toml: 'python.pypy' must be an exact version, e.g. \"{PythonConfig.pypy}\": "
             "a loose request picks the newest PyPy, and a new PyPy can change the extension ABI "
             "(7.3 -> 8.0: pp73 -> pp80) that your dependencies must publish wheels for"
@@ -541,19 +562,19 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     _one_of(cfg.typing.relaxed, ("off", "warn", "strict"), "typing.relaxed")
     _one_of(cfg.typing.editor, EDITORS, "typing.editor")
     if cfg.backend.active == "mypyc" and cfg.typing.profile in ("warn", "off"):
-        raise DeployError(
+        raise PytError(
             "pytemplate.toml: with the mypyc backend, typing cannot be 'warn' or 'off' "
             "(mypyc aborts on any mypy error). Use typing.profile = \"auto\"."
         )
     for m in [*cfg.compile.modules, *cfg.compile.exclude, *cfg.compile.forbid_imports]:
         if not _DOTTED.fullmatch(m):  # fullmatch: `$` alone accepts a trailing newline
-            raise DeployError(f"pytemplate.toml: invalid module in [compile]: {m!r}")
+            raise PytError(f"pytemplate.toml: invalid module in [compile]: {m!r}")
     for i, override in enumerate(cfg.typing.mypy_overrides):
         _check_override(override, f"typing.mypy_overrides[{i}]")
     _one_of(cfg.compile.opt_level, ("0", "1", "2", "3"), "compile.opt_level")
     _validate_compile(cfg)
     if cfg.deploy.optimize not in (0, 1, 2):
-        raise DeployError("pytemplate.toml: 'deploy.optimize' must be 0, 1 or 2")
+        raise PytError("pytemplate.toml: 'deploy.optimize' must be 0, 1 or 2")
     for backend, method in cfg.deploy.default.items():
         _one_of(backend, BACKENDS, "deploy.default")
         _one_of(method, METHODS, f"deploy.default.{backend}")
@@ -564,24 +585,33 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     for key in cfg.deploy.portable.env:
         # They become `set "K=v"` / `export K=v` lines of the .cmd/.sh launchers
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-            raise DeployError(f"pytemplate.toml: deploy.portable.env: invalid environment variable name {key!r}")
+            raise PytError(f"pytemplate.toml: deploy.portable.env: invalid environment variable name {key!r}")
     _one_of(cfg.deploy.nuitka.mode, ("standalone", "onefile"), "deploy.nuitka.mode")
     _check_nuitka(cfg)
     _one_of(cfg.deploy.upx.level, ("1", "2", "3", "4", "5", "6", "7", "8", "9", "best", "brute", "ultra-brute"), "deploy.upx.level")
     for where, names in (("deploy.exclude_modules", cfg.deploy.exclude_modules), ("deploy.exe.hidden_imports", cfg.deploy.exe.hidden_imports)):
         for m in names:
             if not _DOTTED.fullmatch(m):
-                raise DeployError(f"pytemplate.toml: invalid module in {where}: {m!r}")
+                raise PytError(f"pytemplate.toml: invalid module in {where}: {m!r}")
     _check_preset_tables(cfg)
     for name, task in cfg.tasks.items():
         _validate_task(name, task, builtin_commands)
     if builtin_commands:
+        kept = []
         for button in cfg.vscode.buttons:
             first = button.split()[0] if button.split() else ""
             if first not in builtin_commands and first not in cfg.tasks:
-                raise DeployError(
-                    f"pytemplate.toml: vscode.buttons: {button!r} is neither a ./deploy command nor a [tasks] name"
+                if first in RETIRED_COMMANDS:
+                    warn_once(
+                        f"pytemplate.toml: vscode.buttons: {button!r} names {first}, which is no longer a ./pyt command "
+                        f"({RETIRED_COMMANDS[first]}): the button is left out; remove it from pytemplate.toml"
+                    )
+                    continue
+                raise PytError(
+                    f"pytemplate.toml: vscode.buttons: {button!r} is neither a ./pyt command nor a [tasks] name"
                 )
+            kept.append(button)
+        cfg.vscode.buttons = kept
 
 
 # A [[typing.mypy_overrides]] table becomes a `[mypy-<module>,...]` section of .mypy.ini
@@ -591,18 +621,18 @@ _OPTION_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 
 def _check_override(override: dict[str, Any], where: str) -> None:
     if "module" not in override:
-        raise DeployError(f"pytemplate.toml: '{where}' needs 'module' (each [[typing.mypy_overrides]] names its modules)")
+        raise PytError(f"pytemplate.toml: '{where}' needs 'module' (each [[typing.mypy_overrides]] names its modules)")
     if "strict" in override:
-        raise DeployError(
+        raise PytError(
             "pytemplate.toml: do not put 'strict' in typing.mypy_overrides "
             "(mypy would apply it to ALL modules); use specific options instead"
         )
     names = override["module"] if isinstance(override["module"], list) else [override["module"]]
     if not names:
-        raise DeployError(f"pytemplate.toml: '{where}.module' is empty: name a module or a pattern")
+        raise PytError(f"pytemplate.toml: '{where}.module' is empty: name a module or a pattern")
     for name in names:
         if not isinstance(name, str) or not _MODULE_PATTERN.fullmatch(name.replace("{pkg}", "pkg")):
-            raise DeployError(
+            raise PytError(
                 f"pytemplate.toml: '{where}.module': {name!r} is not a module name or pattern "
                 "(e.g. \"raylib\", \"raylib.*\", \"{pkg}.ui.*\")"
             )
@@ -610,10 +640,10 @@ def _check_override(override: dict[str, Any], where: str) -> None:
         if key == "module":
             continue
         if not _OPTION_NAME.fullmatch(key):
-            raise DeployError(f"pytemplate.toml: '{where}': {key!r} is not a mypy option name")
+            raise PytError(f"pytemplate.toml: '{where}': {key!r} is not a mypy option name")
         for item in value if isinstance(value, list) else [value]:
             if isinstance(item, (list, dict)) or (isinstance(item, str) and ("\n" in item or "\r" in item)):
-                raise DeployError(
+                raise PytError(
                     f"pytemplate.toml: '{_join(where, key)}' must be a boolean, a number, a one-line "
                     "string or a list of them (it becomes one line of .mypy.ini)"
                 )
@@ -625,17 +655,17 @@ def _check_nuitka(cfg: Config) -> None:
     nuitka = cfg.deploy.nuitka
     _one_of(nuitka.lto, ("auto", "yes", "no"), "deploy.nuitka.lto")
     if nuitka.pgo_args and not nuitka.pgo:
-        raise DeployError(
+        raise PytError(
             "pytemplate.toml: deploy.nuitka.pgo_args is set but deploy.nuitka.pgo is false: they are the "
             "app's arguments for the PGO profiling run (set pgo = true, or remove pgo_args)"
         )
     if nuitka.pgo and cfg.app.gui:
-        raise DeployError(
+        raise PytError(
             "pytemplate.toml: deploy.nuitka.pgo needs app.gui = false: Nuitka's profiling run starts the "
             "app while building, and the build waits, with no timeout, until its window is closed"
         )
     if nuitka.pgo and cfg.app.assets:
-        raise DeployError(
+        raise PytError(
             f"pytemplate.toml: deploy.nuitka.pgo needs app.assets = \"\": Nuitka's profiling run starts the "
             f"app before its data files are in place, so reading src/{cfg.app.assets}/ fails (FileNotFoundError)"
         )
@@ -648,9 +678,9 @@ def _check_default_methods(cfg: Config) -> None:
     for backend, method in cfg.deploy.default.items():
         reason = COMPAT.get(method, {}).get(backend)
         if reason:
-            raise DeployError(f"pytemplate.toml: deploy.default.{backend} = {method!r} cannot package {backend}: {reason}")
+            raise PytError(f"pytemplate.toml: deploy.default.{backend} = {method!r} cannot package {backend}: {reason}")
         if method == "flet" and cfg.app.preset != "flet":
-            raise DeployError(
+            raise PytError(
                 f"pytemplate.toml: deploy.default.{backend} = 'flet': the flet method (flet build) "
                 f"is only for the flet preset (app.preset is {cfg.app.preset!r})"
             )
@@ -662,7 +692,7 @@ def _check_preset_tables(cfg: Config) -> None:
         table = _join("preset", name)
         path = PRESETS / name / "preset.toml"
         if not re.fullmatch(r"[a-z][a-z0-9_-]*", name) or not path.is_file():
-            raise DeployError(
+            raise PytError(
                 f"pytemplate.toml: [{table}]: {name!r} is not a preset of this template "
                 f"(available: {', '.join(_presets()) or 'none'})"
             )
@@ -670,9 +700,9 @@ def _check_preset_tables(cfg: Config) -> None:
         for key, value in options.items():
             if key not in declared:
                 valid = ", ".join(sorted(declared)) or f"none, the {name} preset has no options"
-                raise DeployError(f"pytemplate.toml: unknown key '{_join(table, key)}' (valid: {valid})")
+                raise PytError(f"pytemplate.toml: unknown key '{_join(table, key)}' (valid: {valid})")
             if type(value) is not type(declared[key]):
-                raise DeployError(
+                raise PytError(
                     f"pytemplate.toml: '{_join(table, key)}' must be of type "
                     f"{_type_name(declared[key])}, not {_type_name(value)}"
                 )
@@ -683,7 +713,7 @@ def _preset_options(path: Path) -> dict[str, Any]:
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8-sig"))  # a BOM is fine, as in presets.load
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
-        raise DeployError(f"{rel(path)} cannot be read: {e}") from None
+        raise PytError(f"{rel(path)} cannot be read: {e}") from None
     options = data.get("options", {})
     return options if isinstance(options, dict) else {}
 
@@ -699,19 +729,19 @@ _SAVE_AS_UTF8 = (
 
 
 def _decode(raw: bytes, name: str) -> str:
-    """UTF-8 bytes (with or without a BOM) as text; anything else is a DeployError with the fix."""
+    """UTF-8 bytes (with or without a BOM) as text; anything else is a PytError with the fix."""
     for bom, kind in _WIDE_BOMS:
         if raw.startswith(bom):
-            raise DeployError(f"{name} is {kind} text, not UTF-8: {_SAVE_AS_UTF8}")
+            raise PytError(f"{name} is {kind} text, not UTF-8: {_SAVE_AS_UTF8}")
     body = raw.removeprefix(_UTF8_BOM)  # by hand: the line numbers below count from the text
     if b"\0" in body:  # never in TOML: ASCII text saved as UTF-16 without a BOM
         line = body.count(b"\n", 0, body.index(b"\0")) + 1
-        raise DeployError(f"{name} has NUL bytes (line {line}), like UTF-16 text without a BOM: {_SAVE_AS_UTF8}")
+        raise PytError(f"{name} has NUL bytes (line {line}), like UTF-16 text without a BOM: {_SAVE_AS_UTF8}")
     try:
         return body.decode("utf-8")
     except UnicodeDecodeError as e:
         line = body.count(b"\n", 0, e.start) + 1
-        raise DeployError(
+        raise PytError(
             f"{name} is not UTF-8 (byte 0x{body[e.start]:02X} on line {line}; ANSI/cp1252?): {_SAVE_AS_UTF8}"
         ) from None
 
@@ -721,7 +751,7 @@ def _read() -> tuple[str, bool]:
     try:
         raw = CONFIG_FILE.read_bytes()
     except OSError as e:
-        raise DeployError(f"cannot read {CONFIG_FILE.name}: {e.strerror or e}") from None
+        raise PytError(f"cannot read {CONFIG_FILE.name}: {e.strerror or e}") from None
     return _decode(raw, CONFIG_FILE.name), raw.startswith(_UTF8_BOM)
 
 
@@ -732,11 +762,11 @@ def read_text() -> str:
 
 def load(builtin_commands: set[str] | None = None) -> Config:
     if not CONFIG_FILE.is_file():
-        raise DeployError(f"{CONFIG_FILE.name} not found in the project root")
+        raise PytError(f"{CONFIG_FILE.name} not found in the project root")
     try:
         data = tomllib.loads(read_text())
     except tomllib.TOMLDecodeError as e:
-        raise DeployError(f"pytemplate.toml is not valid TOML: {e}") from None
+        raise PytError(f"pytemplate.toml is not valid TOML: {e}") from None
     cfg: Config = _build(Config, data, "")
     validate(cfg, builtin_commands)
     return cfg
@@ -776,7 +806,7 @@ def toml_value(value: Any) -> str:
         return str(value)
     if isinstance(value, str):
         if any("\ud800" <= c <= "\udfff" for c in value):
-            raise DeployError(f"{value!r} cannot be written to TOML: it holds a lone surrogate (not valid Unicode)")
+            raise PytError(f"{value!r} cannot be written to TOML: it holds a lone surrogate (not valid Unicode)")
         # JSON escapes '"', '\' and U+0000-U+001F the way TOML does; TOML also forbids a raw DEL
         return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
     if isinstance(value, list):
@@ -1040,14 +1070,14 @@ def set_value(text: str, table: str, key: str, value: Any) -> str:
     endings (LF or CRLF) stay. The old value may span several lines (taplo, the TOML formatter,
     expands long arrays): all of it is replaced. A missing key is added after the table's last
     key, a missing table at the end. The result is parsed again: an edit that would change
-    anything but this key (an unusual layout) is refused with a DeployError, never written.
+    anything but this key (an unusual layout) is refused with a PytError, never written.
     """
     path = (*table.split("."), key)
     rendered = toml_value(value)
     try:
         before = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        raise DeployError(f"pytemplate.toml is not valid TOML: {e}") from None
+        raise PytError(f"pytemplate.toml is not valid TOML: {e}") from None
     # A list first in the layout of the old array (its comments kept), else on one line
     for layout in ((value, None) if isinstance(value, list) else (None,)):
         try:
@@ -1056,7 +1086,7 @@ def set_value(text: str, table: str, key: str, value: Any) -> str:
             continue
         if _only_changed(before, new, path, value):
             return new
-    raise DeployError(
+    raise PytError(
         f"pytemplate.toml: could not set {'.'.join(path)} automatically (unusual layout): "
         f"set it by hand to {key} = {rendered} in [{table}]"
     )
@@ -1092,9 +1122,9 @@ def update_file(changes: list[tuple[str, str, Any]]) -> None:
     try:
         tomllib.loads(new)
     except tomllib.TOMLDecodeError as e:  # set_value checks each edit; this guards the sum
-        raise DeployError(f"pytemplate.toml: the change would break the file ({e}); nothing was written") from None
+        raise PytError(f"pytemplate.toml: the change would break the file ({e}); nothing was written") from None
     if new != old and not proc.DRY_RUN:
         try:
             write_whole(CONFIG_FILE, (("\ufeff" if bom else "") + new).encode("utf-8"))
         except OSError as e:  # read-only, locked, another user's: it ended in an internal-error traceback
-            raise DeployError(f"cannot write pytemplate.toml: {e.strerror or e}") from None
+            raise PytError(f"cannot write pytemplate.toml: {e.strerror or e}") from None

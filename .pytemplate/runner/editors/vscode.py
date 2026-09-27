@@ -1,8 +1,8 @@
 """VS Code: .vscode/settings.json, extensions.json, launch.json and tasks.json.
 
 Tasks are `"type": "process"`, so they never go through the user's shell (xonsh, niubash,
-MSYS2...): `/bin/sh <root>/deploy ARGS` by default (no dependence on the exec bit) and
-`<root>\\deploy.cmd ARGS` in the `windows` block. VS Code applies the block of the OS the task
+MSYS2...): `/bin/sh <root>/pyt ARGS` by default (no dependence on the exec bit) and
+`<root>\\pyt.cmd ARGS` in the `windows` block. VS Code applies the block of the OS the task
 runs on (the remote one under Remote-WSL/SSH), and in tasks 2.0.0 a per-OS `args` REPLACES the
 default one, so the same tasks.json works on every OS.
 
@@ -30,7 +30,7 @@ from typing import Any
 from .. import render, tasks as task_runner
 from ..config import BACKENDS, Config, compiled_paths
 from ..project import ROOT, TEMPLATES, rel
-from ..ui import DeployError
+from ..ui import PytError
 
 WS = "${workspaceFolder}"
 # mypyc.profile(cfg, "dev").stage relative to the root. launch.json is committed and shared by
@@ -38,7 +38,7 @@ WS = "${workspaceFolder}"
 # Remote-WSL on a /mnt/* checkout only the CPython and pytest configs (which use the selected
 # interpreter) work; the PyPy and mypyc ones point at the Windows-side paths.
 MYPYC_STAGE = ".build/mypyc-dev/stage"
-COMPILE_LABEL = "deploy: compile"
+COMPILE_LABEL = "pyt: compile"
 
 ICONS = {
     "run": "play",
@@ -179,7 +179,7 @@ def problem_matchers(cfg: Config, kinds: set[str], profiles: list[str]) -> list[
 
 @dataclass(frozen=True)
 class Scan:
-    """What a ./deploy command prints that the Problems panel can use, and whether it runs the app."""
+    """What a ./pyt command prints that the Problems panel can use, and whether it runs the app."""
 
     kinds: frozenset[str]
     profiles: tuple[str, ...]
@@ -219,7 +219,7 @@ def shown(args: Iterable[str]) -> str:
 
 
 def scan(cfg: Config, argv: list[str], stack: tuple[str, ...] = ()) -> Scan:
-    """Return what `./deploy ARGV` runs (a [tasks] entry: the union of its deps)."""
+    """Return what `./pyt ARGV` runs (a [tasks] entry: the union of its deps)."""
     if not argv:
         return Scan(frozenset(), (), False)
     name, rest = argv[0], argv[1:]
@@ -269,10 +269,10 @@ class Entry:
 
     @property
     def label(self) -> str:
-        # The catalog's `report --open` reads "deploy: report"; any other argument stays visible
-        # (`run --open` passes --open to the app: it is not the catalog's "deploy: run").
+        # The catalog's `report --open` reads "pyt: report"; any other argument stays visible
+        # (`run --open` passes --open to the app: it is not the catalog's "pyt: run").
         args = self.args[:1] if self.args == ("report", "--open") else self.args
-        return "deploy: " + shown(args)  # quoted: an argument with a space stays one
+        return "pyt: " + shown(args)  # quoted: an argument with a space stays one
 
 
 def _what_runs(backend: str) -> str:
@@ -349,7 +349,7 @@ def _task(cfg: Config, entry: Entry, button: str | None) -> dict[str, Any]:
     matchers = problem_matchers(cfg, set(found.kinds), list(found.profiles))
     t: dict[str, Any] = {
         "label": entry.label,
-        "detail": f"./deploy {shown(entry.args)}  |  {entry.summary}",
+        "detail": f"./pyt {shown(entry.args)}  |  {entry.summary}",
         "icon": {"id": entry.icon},
     }
     if entry.hide:
@@ -364,8 +364,8 @@ def _task(cfg: Config, entry: Entry, button: str | None) -> dict[str, Any]:
         {
             "type": "process",
             "command": "/bin/sh",
-            "args": [f"{WS}/deploy", *entry.args],
-            "windows": {"command": WS + "\\deploy.cmd", "args": list(entry.args)},
+            "args": [f"{WS}/pyt", *entry.args],
+            "windows": {"command": WS + "\\pyt.cmd", "args": list(entry.args)},
             "options": options,
         }
     )
@@ -389,7 +389,7 @@ def _task(cfg: Config, entry: Entry, button: str | None) -> dict[str, Any]:
 
 
 def _button_text(entry: Entry) -> str:
-    text = entry.label.removeprefix("deploy: ")
+    text = entry.label.removeprefix("pyt: ")
     return text[:1].upper() + text[1:]
 
 
@@ -401,7 +401,7 @@ def tasks(cfg: Config) -> dict[str, Any]:
     for args in dict.fromkeys(tuple(split_words(b)) for b in cfg.vscode.buttons):
         if not args:
             continue
-        match = next((e for e in entries if e.args == args or e.label == f"deploy: {shown(args)}"), None)
+        match = next((e for e in entries if e.args == args or e.label == f"pyt: {shown(args)}"), None)
         if match is None:
             match = _button_entry(cfg, args)
         else:
@@ -416,7 +416,7 @@ def tasks(cfg: Config) -> dict[str, Any]:
 
 # --- launch.json -----------------------------------------------------------------------------
 
-# UTF-8 mode in every debug session, as under ./deploy run/test (proc.base_env) and in the builds:
+# UTF-8 mode in every debug session, as under ./pyt run/test (proc.base_env) and in the builds:
 # without it open() without an encoding reads cp1252 on Windows (Python < 3.15), only under F5.
 DEBUG_ENV = {"PYTHONUTF8": "1"}
 
@@ -512,18 +512,18 @@ def _settings_template() -> dict[str, Any]:
     try:
         data: object = json.loads(path.read_text(encoding="utf-8-sig"))  # an editor may add a BOM
     except OSError as e:
-        raise DeployError(f"cannot read {rel(path)}: {e.strerror or e}") from None
+        raise PytError(f"cannot read {rel(path)}: {e.strerror or e}") from None
     except UnicodeDecodeError:
-        raise DeployError(f"{rel(path)} is not UTF-8 text: save it as UTF-8") from None
+        raise PytError(f"{rel(path)} is not UTF-8 text: save it as UTF-8") from None
     except json.JSONDecodeError as e:
-        raise DeployError(
+        raise PytError(
             f"{rel(path)}: invalid JSON at line {e.lineno}: {e.msg} (plain JSON: no comments, no trailing commas)"
         ) from None
     if not isinstance(data, dict):
-        raise DeployError(f"{rel(path)} must hold a JSON object ({{ ... }})")
+        raise PytError(f"{rel(path)} must hold a JSON object ({{ ... }})")
     problem = _json_problem(data, "settings")
     if problem:
-        raise DeployError(f"{rel(path)}: {problem}")
+        raise PytError(f"{rel(path)}: {problem}")
     return data
 
 
@@ -534,13 +534,13 @@ def settings(cfg: Config, profile: str) -> dict[str, Any]:
     from_profile = render.load_profile(profile).get("vscode", {})
     problem = _json_problem(from_profile, "[vscode]")
     if problem:
-        raise DeployError(f"typing profile '{profile}': {problem}")
+        raise PytError(f"typing profile '{profile}': {problem}")
     base.update(from_profile)
     if cfg.typing.editor == "basedpyright":
         base.update(BASEDPYRIGHT_SETTINGS)
     problem = _json_problem(cfg.vscode.settings, "vscode.settings")
     if problem:
-        raise DeployError(f"pytemplate.toml: {problem}")
+        raise PytError(f"pytemplate.toml: {problem}")
     base.update(cfg.vscode.settings)
     return base
 

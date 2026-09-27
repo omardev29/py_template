@@ -1,5 +1,5 @@
 # Versions the template was tested with for every package a project of the flet preset
-# locks. `./deploy new` hands the ones the source project does not lock yet to `uv add
+# locks. `./pyt new` hands the ones the source project does not lock yet to `uv add
 # --constraints` (a one-off: pyproject.toml keeps plain bounds), and the name check refuses
 # them all. Regenerate it, never edit it: CLAUDE.md section 11.
 altgraph==0.17.5

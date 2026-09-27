@@ -6,7 +6,7 @@ import os
 import sys
 
 
-class DeployError(Exception):
+class PytError(Exception):
     """Expected error: shown without a traceback, and the runner exits with `code`.
 
     Codes: 2 = usage/configuration (also a program that cannot be started, a task cwd that is

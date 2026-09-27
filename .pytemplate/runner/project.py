@@ -16,7 +16,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path, PurePath
 
 from . import ui
-from .ui import DeployError
+from .ui import PytError
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE = ROOT / ".pytemplate"
@@ -31,6 +31,22 @@ STATE_FILE = TEMPLATE / "state.json"
 
 IS_WINDOWS = os.name == "nt"
 IS_MACOS = sys.platform == "darwin"
+
+# `pyt install` copies the template into a folder of the user's (its "snapshot") and records the
+# install there in this file. A project made from the snapshot never carries it (presets._skipped).
+INSTALL_RECORD = ".pytemplate/installed.json"
+
+
+def detect_global(root: Path, environ: Mapping[str, str] = os.environ) -> bool:
+    """GLOBAL: the runner runs the installed template, outside any project. The launchers found no
+    project and set PYTEMPLATE_GLOBAL=1; or the runner's own root is the snapshot (its install
+    record: a command typed inside the snapshot's folder, or its launcher run by its path), which
+    is never a project either. Then only the commands that need no project run (cli.GLOBAL_COMMANDS)
+    and nothing is written into the snapshot (its bytecode cache: .pytemplate/pyt.py)."""
+    return environ.get("PYTEMPLATE_GLOBAL") == "1" or (root / INSTALL_RECORD).is_file()
+
+
+GLOBAL = detect_global(ROOT)
 
 WSL_INTEROP = "/proc/sys/fs/binfmt_misc/WSLInterop"
 _WINDOWS_SOURCE = re.compile(r"[A-Za-z]:|\\\\")  # C:\ (drvfs, 9p) or \\server\share
@@ -140,7 +156,7 @@ def code_dirs() -> list[str]:
 
 # --- paths typed by the user ------------------------------------------------------------------
 #
-# Every path the RUNNER takes from the command line (./deploy new DEST, pyz-merge ... --out X)
+# Every path the RUNNER takes from the command line (./pyt new DEST, pyz-merge ... --out X)
 # goes through user_path(). Arguments forwarded to the app or to pytest are never touched.
 
 _DRIVE_ABS = re.compile(r"[A-Za-z]:[\\/]")
@@ -228,7 +244,7 @@ def native_path(raw: str) -> str:
 
 
 def caller_cwd() -> Path:
-    """Return the directory ./deploy was typed in (the shell's logical path when known).
+    """Return the directory ./pyt was typed in (the shell's logical path when known).
 
     The launchers export it in PYTEMPLATE_CALLER_CWD. It is trusted only while it still names
     the process cwd (`uv run --script` never changes the cwd): niubash sessions keep stale
@@ -237,7 +253,7 @@ def caller_cwd() -> Path:
     try:
         cwd = Path.cwd()
     except OSError:
-        raise DeployError("the current directory no longer exists") from None
+        raise PytError("the current directory no longer exists") from None
     raw = os.environ.get("PYTEMPLATE_CALLER_CWD", "")
     if raw:
         p = Path(native_path(raw))
@@ -256,7 +272,7 @@ def user_path(raw: str) -> Path:
     the result is normalized (C:\\a\\..\\b -> C:\\b, as Windows itself would read it).
     """
     if not raw.strip():
-        raise DeployError("empty path argument")
+        raise PytError("empty path argument")
     native = native_path(raw)
     if IS_WINDOWS and native.startswith("/") and os.environ.get("PYTEMPLATE_LAUNCHER", "").endswith(
         tuple(_POSIX_RUNTIMES)
@@ -265,7 +281,7 @@ def user_path(raw: str) -> Path:
     try:
         p = Path(native).expanduser()
     except RuntimeError as e:  # ~ without HOME/USERPROFILE
-        raise DeployError(f"{raw}: {e}") from None
+        raise PytError(f"{raw}: {e}") from None
     if not p.is_absolute():
         p = caller_cwd() / p
     return Path(os.path.normpath(p)) if IS_WINDOWS else p
@@ -288,10 +304,10 @@ def check_private_dir(path: Path, option: str) -> None:
         uid = os.getuid()
         for st in (os.lstat(path), os.stat(path)):
             if st.st_uid != uid:
-                raise DeployError(f"{path} belongs to another user (uid {st.st_uid}): code run from it could be theirs; pick another {option}")
+                raise PytError(f"{path} belongs to another user (uid {st.st_uid}): code run from it could be theirs; pick another {option}")
         mode = os.stat(path).st_mode
         if mode & 0o002:  # group-writable is the norm with a user-private group (umask 002)
-            raise DeployError(f"{path} can be written by every user (mode {mode & 0o7777:o}): pick another {option}, or chmod o-w it")
+            raise PytError(f"{path} can be written by every user (mode {mode & 0o7777:o}): pick another {option}, or chmod o-w it")
 
 
 def _umask() -> int:

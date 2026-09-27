@@ -2,7 +2,7 @@
 
 `_draw_texture: Final = rl.DrawTexture`: with the Final alias, mypyc calls the function
 directly instead of looking up `rl.DrawTexture` on every iteration. It is valid without
-Any thanks to the fixed stub in typings/raylib (./deploy stubs).
+Any thanks to the fixed stub in typings/raylib (./pyt stubs).
 """
 
 from __future__ import annotations
