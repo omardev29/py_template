@@ -34,8 +34,17 @@ def _describe(cfg: Config, title: str = "current mode") -> None:
 
 
 def _parse(parser: argparse.ArgumentParser, args: list[str]) -> argparse.Namespace:
-    """parse_args, but an unknown argument is a clear DeployError instead of argparse's exit."""
-    ns, unknown = parser.parse_known_args(args)
+    """parse_args, but an unknown argument is a clear DeployError instead of argparse's exit.
+
+    An option the parser does not know is refused by name BEFORE parsing: argparse bound the
+    value after it to a positional (`mode --typ strict`: "argument backend: invalid choice:
+    'strict'", never a word about --typ)."""
+    options = args[: args.index("--")] if "--" in args else args
+    known = parser._option_string_actions
+    unknown = [a for a in options if a.startswith("-") and a != "-" and a.split("=", 1)[0] not in known]
+    ns = argparse.Namespace()
+    if not unknown:
+        ns, unknown = parser.parse_known_args(args)
     if unknown:
         raise DeployError(f"{parser.prog}: unknown argument(s): {' '.join(unknown)}  ({parser.prog} -h lists the options)")
     return ns

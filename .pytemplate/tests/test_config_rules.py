@@ -1043,6 +1043,10 @@ def dry(monkeypatch: pytest.MonkeyPatch) -> Config:
         (["--editor=basedpyright", "--editor", "pylance"], "--editor given more than once"),
         (["--supports", "--typing", "strict"], "--supports needs a value"),
         (["--typ=strict"], "unknown argument(s): --typ=strict"),  # no silent abbreviations
+        # an unknown option with its value apart: argparse bound 'strict' to BACKEND and said only
+        # "argument backend: invalid choice: 'strict'"
+        (["--typ", "strict"], "unknown argument(s): --typ  "),
+        (["mypyc", "--edit", "pylance"], "unknown argument(s): --edit  "),
         (["pypy", "--supports", "-pypy"], "--supports removes it"),
         (["mypyc", "--supports", "cpython"], "leaves it out of the list"),
     ],

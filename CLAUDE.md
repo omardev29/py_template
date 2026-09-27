@@ -673,7 +673,9 @@ header rules (with detector tests proving each rule fires).
    with `--force` at its end; rendering the copied configuration first, `new` warned about the
    source project's hand-edited files). `test_cli_core.NEVER_RENDER` pins this list.
 5. Commands reject unknown arguments with exit 2 (a typo is never silently ignored):
-   argparse commands, `render`/`mode`/`__init`/`new` (`cmd_mode._parse`), `lint`, `fmt`,
+   argparse commands, `render`/`mode`/`__init`/`new` (`cmd_mode._parse`: an unknown option is
+   named before argparse runs, which bound the value after it to a positional: `mode --typ
+   strict` said only "argument backend: invalid choice: 'strict'"), `lint`, `fmt`,
    `clean`, `apply`, `setup` (only `--force`), `doctor`, `tasks` (`cmd_dev.only_flags`), `check` and `sync` (extra
    positionals), `shell-setup`, `help`, a `[tasks]` entry without `cmd`. By design
    (`cli.FORWARDS`): `run`/`test` forward the rest, `build` forwards unknown flags to the
