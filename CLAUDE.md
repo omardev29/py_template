@@ -365,6 +365,11 @@ header rules (with detector tests proving each rule fires).
   some of them) or the text cannot be read (`test_ps1_keeps_typed_comma_lists_whole`, also
   through the `shell-setup pwsh` function; `test_ps1_passes_array_values_like_a_native_call`
   compares every case with a direct native call, the wrapper that splats a copy included).
+- A `$null` argument (an unset `$env:X`, an optional variable), the `$null` items of an array
+  and a `-X:` whose value is `$null` are dropped, as a native call drops them (`./deploy build
+  $backend` with `$backend` unset gave the runner an empty backend); an empty string passes, and
+  so does a `List[string]`'s null item, as an empty string (PowerShell 7.3+ native passing:
+  `test_ps1_drops_null_arguments_like_a_native_call`).
 - A `.ps1` runs inside the caller's session: never assign `$env:PATH`. The two `PYTEMPLATE_*`
   variables and the removed `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` (the
   `$names` list) are restored in `finally`; a

@@ -669,6 +669,48 @@ def test_ps1_passes_array_values_like_a_native_call(name: str) -> None:
         assert probes[6] == VALUES_ARGV
 
 
+# A $null argument (an unset $env:X, an optional variable), the $null items of an array and a -X:
+# whose value is $null never reach a native program; an empty string does (PowerShell 7.3+), and
+# so does a List[string]'s null item, as an empty string.
+NULLS_SETUP = "$none = $null; $withnull = 'a', $null, 'b'; $empty = ''; $list = New-Object 'Collections.Generic.List[string]'; $list.Add('l'); $list.Add($null)"
+NULLS_TYPED = "x $none $env:PT_NOT_SET_ANYWHERE $withnull @withnull $empty $list -X:$none y"
+NULLS_ARGV = ["x", "a", "b", "a", "b", "", "l", "", "y"]
+
+
+@pytest.mark.parametrize("name", PS_NAMES)
+def test_ps1_drops_null_arguments_like_a_native_call(name: str) -> None:
+    """`./deploy build $backend` with $backend unset gave the runner an empty argument ("unknown
+    backend ''"), and `./deploy check $env:UNSET` "unrecognized arguments": a native call drops a
+    $null. Also through the shell-setup function, and with legacy argument passing (whose native
+    calls drop empty strings as well: the launcher keeps those, as PowerShell 7.3+ does)."""
+    exe = _ps_exe(name)
+    sys.path.insert(0, str(ROOT / ".pytemplate"))
+    from runner import shells
+
+    uv = os.environ.get("UV") or shutil.which("uv")
+    assert uv
+    ps1 = _ps_literal(str(PS1))
+    direct = f"& {_ps_literal(uv)} run --quiet --script {_ps_literal(str(ROOT / '.pytemplate' / 'deploy.py'))}"
+    body = "\n".join([
+        "Remove-Item Env:PT_NOT_SET_ANYWHERE -ErrorAction Ignore",
+        NULLS_SETUP,
+        f"{direct} __probe 0 0 {NULLS_TYPED}",
+        f"& {ps1} __probe 0 0 {NULLS_TYPED}",
+        shells.PWSH_SNIPPET,
+        f"Set-Location {_ps_literal(str(SUB))}",
+        f"deploy __probe 0 0 {NULLS_TYPED}",
+        "$PSNativeCommandArgumentPassing = 'Legacy'",
+        f"& {ps1} __probe 0 0 {NULLS_TYPED}",
+    ])  # fmt: skip
+    r = _session(exe, body + "\nexit 0\n")
+    assert r.returncode == 0, r.stdout + r.stderr
+    probes = [p["argv"] for p in _probes(r)]
+    assert len(probes) == 4, r.stdout + r.stderr
+    if name == "pwsh":  # 5.1's native calls drop the empty strings too
+        assert probes[0] == NULLS_ARGV, "a direct native call no longer passes these as expected"
+    assert probes[1:] == [NULLS_ARGV] * 3, probes
+
+
 @pytest.mark.parametrize("name", PS_NAMES)
 def test_ps1_forwards_pipeline_input_and_keeps_raw_stdin(name: str) -> None:
     """'x' | ./deploy.ps1 run gives uv the pipeline, like a native call; without a pipeline uv keeps

@@ -229,15 +229,20 @@ if ($null -ne $typed) {
     }
     if ($typed.Count -ne $args.Count -or $gaps -gt 1) { $typed = $null }
 }
+# A native program never gets a $null argument (an unset $env:X, an optional variable), the
+# $null items of an array, nor a -X: whose value is $null; an empty string it does get.
 $argv = @(for ($i = 0; $i -lt $args.Count; $i++) {
     $a = $args[$i]
+    if ($null -eq $a) { continue }
     if ($a -is [string] -and $a.EndsWith(':') -and $a.PSObject.Properties['<CommandParameterName>'] -and $i + 1 -lt $args.Count) {
         $i++
-        $a + ((@($args[$i]) | ForEach-Object { [string]$_ }) -join ',')
+        if ($null -eq $args[$i]) { continue }
+        $a + ((@($args[$i]) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join ',')
     } elseif ($a -is [array] -and ($null -eq $typed -or $typed[$i])) {
         (@($a) | ForEach-Object { [string]$_ }) -join ','
     } else {
-        foreach ($x in @($a)) { [string]$x }
+        # (a List[string]'s null item is an empty string for a native program too)
+        foreach ($x in @($a)) { if ($null -ne $x -or $a -isnot [array]) { [string]$x } }
     }
 })
 $v = $PSVersionTable.PSVersion
