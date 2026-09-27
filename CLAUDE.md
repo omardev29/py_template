@@ -707,7 +707,8 @@ header rules (with detector tests proving each rule fires).
   `selftest --shells` (also with `--list`) and `selftest --e2e`.
 - `-q` hides progress (`ui.step`, `ui.command`, `ui.ok`, `ui.info`), never what was asked for:
   `ui.report` (the `tasks` list, the stderr of a failed query, the `selftest --shells` list,
-  result table and failure/skip lines, what `rename` and `apply` leave to review: the lines left
+  result table and failure/skip lines, the `selftest --e2e` table, each failed step with its log
+  tail and path, and the kept base, what `rename` and `apply` leave to review: the lines left
   unchanged and the other files that mention the old name), warnings, errors and
   `check_line` always print, and a dry run ignores `-q` (its output is the plan). Results are
   `ui.report` too, so `-q` keeps them: the `mode` display (`cmd_mode._describe`; only its

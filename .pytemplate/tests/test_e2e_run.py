@@ -470,6 +470,22 @@ def test_selftest_exit_codes_and_json_report(tmp_path: Path, faked: tuple[dict[s
     assert statuses[statuses.index(FAIL) + 1 :] and set(statuses[statuses.index(FAIL) + 1 :]) == {SKIP}
 
 
+def test_quiet_keeps_the_results_of_a_failed_run(tmp_path: Path, faked: tuple[dict[str, object], list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # -q hid the table, the failed step, its log and the kept base: the only line said
+    # "some steps failed (table above)" about a table that was never printed
+    outcomes, _ = faked
+    outcomes["check all"] = (FAIL, "exit code 1")
+    monkeypatch.setattr(e2e.ui, "QUIET", True)
+    base = tmp_path / "base"
+    assert e2e.selftest(None, ["script", "--quick", "--base", str(base)]) == 1  # type: ignore[arg-type]
+    err = capsys.readouterr().err
+    row = next(line for line in err.splitlines() if line.split()[:2] == ["script", "check"])
+    assert "FAIL" in row and "exit code 1" in row and "total: " in err  # the table
+    assert "FAIL in " in err and "(script: check all)" in err and "full log: " in err and "check-all.log" in err
+    assert f"kept for inspection: {base}" in err
+    assert "PASS in " not in err and "==> " not in err  # progress stays hidden
+
+
 def test_selftest_refuses_a_selection_that_tests_nothing(tmp_path: Path, faked: tuple[dict[str, object], list[str]]) -> None:
     _, ran = faked
     base = tmp_path / "base"

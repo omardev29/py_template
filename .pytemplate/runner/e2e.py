@@ -1148,11 +1148,13 @@ def run_preset(ctx: Context, steps: list[Step], into: list[Result] | None = None
                 record(Result(step.preset, step.name, FAIL, round(time.perf_counter() - t0, 1), "interrupted", log.relative_to(ctx.base).as_posix()), step)
                 raise
             result = Result(step.preset, step.name, status, round(time.perf_counter() - t0, 1), detail, log.relative_to(ctx.base).as_posix())
-            ui.info(f"     {status} in {result.seconds:.1f} s" + (f": {detail}" if detail else ""))
+            # A failure and where its log is are results, shown even with -q (ui.report)
+            shown = ui.report if status == FAIL else ui.info
+            shown(f"     {status} in {result.seconds:.1f} s" + (f": {detail}" if detail else "") + (f" ({step.preset}: {step.name})" if status == FAIL else ""))
             if status == FAIL:
                 for line in _tail(log):
-                    ui.info(f"     | {line}")
-                ui.info(f"     full log: {log}")
+                    ui.report(f"     | {line}")
+                ui.report(f"     full log: {log}")
             record(result, step)
             if status == FAIL and step.required:
                 blocked = step.name
@@ -1190,15 +1192,16 @@ def _cleanup(base: Path, presets: Sequence[str]) -> None:
 
 
 def _print_table(results: list[Result], seconds: float) -> None:
+    """The table is the answer: shown even with -q (ui.report), like selftest --shells'."""
     ui.step("e2e results")
     width = max([len(r.step) for r in results] + [4])
-    ui.info(f"  {'preset':<8} {'step':<{width}}  result     time  detail")
+    ui.report(f"  {'preset':<8} {'step':<{width}}  result     time  detail")
     for r in results:
         time_text = f"{r.seconds:.1f}s" if r.status != SKIP else "-"
-        ui.info(f"  {r.preset:<8} {r.step:<{width}}  {r.status:<6} {time_text:>8}  {r.detail}".rstrip())
+        ui.report(f"  {r.preset:<8} {r.step:<{width}}  {r.status:<6} {time_text:>8}  {r.detail}".rstrip())
     counts = {s: sum(1 for r in results if r.status == s) for s in (PASS, FAIL, SKIP)}
     minutes, secs = divmod(int(seconds), 60)
-    ui.info(f"  total: {counts[PASS]} PASS, {counts[FAIL]} FAIL, {counts[SKIP]} SKIP in {minutes}m{secs:02d}s")
+    ui.report(f"  total: {counts[PASS]} PASS, {counts[FAIL]} FAIL, {counts[SKIP]} SKIP in {minutes}m{secs:02d}s")
 
 
 @contextmanager
@@ -1276,7 +1279,7 @@ def selftest(cfg: Config, args: list[str]) -> int:
         _print_table(results, seconds)
     kept = failed or opts.keep
     if kept:
-        ui.info(f"kept for inspection: {base}  (logs in {base / 'logs'})")
+        ui.report(f"kept for inspection: {base}  (logs in {base / 'logs'})")
     else:
         _cleanup(base, opts.presets)
     if opts.as_json:
