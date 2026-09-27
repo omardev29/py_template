@@ -421,10 +421,14 @@ def _in_this_project(launcher: str, repo: Repo) -> bool:
 
 
 def _other_project(repo: Repo, launcher: str) -> bool:
-    """Whether `launcher` (relative to the top, as a hook calls it) is another live project's."""
+    """Whether `launcher` (relative to the top, as a hook calls it) is another live project's:
+    the file is there, or its folder still holds a runner (a project upgraded in place since the
+    launchers were renamed: its hook calls `deploy`, and that project brings it up to date)."""
     if launcher == repo.launcher:
         return False
-    if not (repo.top / launcher).is_file():
+    target = repo.top / launcher
+    runner = target.parent / ".pytemplate"
+    if not target.is_file() and not any((runner / entry).is_file() for entry in ("pyt.py", "deploy.py")):
         return False  # a project that is gone (moved, renamed): its stale hook may be replaced
     return not _in_this_project(launcher, repo)
 

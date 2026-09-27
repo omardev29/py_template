@@ -1001,7 +1001,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   their helpers next to it, and run as `pre-commit.local` they checked nothing. A hook in
   another language that reads its own name (`hooks.reads_its_name`: overcommit's Ruby) is left
   alone by `--force`, which prints the line to add to it instead; `uninstall` restores it. A marked hook whose launcher is another live project of the same
-  repository (state "other", a monorepo) is left alone by apply, install and uninstall;
+  repository (state "other", a monorepo; live: the launcher file is there, or its folder still
+  holds `.pytemplate/pyt.py` or `deploy.py`, `hooks._other_project`: a project upgraded in place
+  since the launchers were renamed has a hook that calls `deploy`, which another project's apply
+  took for a gone project's and replaced,
+  `test_hooks.test_another_projects_hook_by_the_old_launcher_name_is_left_alone`) is left alone
+  by apply, install and uninstall;
   `install --force` writes a FRESH copy of it as `pre-commit.local` (the script skips
   `pre-commit.local` when it is itself that file; older copies would recurse), so both checks
   run, once each. That copy stays the chained project's own (`hooks.own_local`; state
@@ -2522,7 +2527,11 @@ Per method:
   `con`, `nul`, `com1`...: the folder cannot exist there and git cannot check it out), a Python
   command (`INTERPRETER_COMMANDS`: `py`, `python`, `python3`, `pyw`, `pythonw`, `pypy3`...: the
   pyz and portable `<name>.cmd` launchers call them by name, and cmd.exe, which looks in the
-  current folder first, found `<name>.cmd` itself and restarted it forever), the
+  current folder first, found `<name>.cmd` itself and restarted it forever), the launcher's
+  name (`LAUNCHER_NAMES`: `pyt`, also the command `pyt install` puts on PATH, where the app's
+  own console script would take its place; renaming such an app rewrote every `./pyt` of the
+  skeleton's text: rename keeps `./pyt` and `.\pyt` of an app named pyt, `rename._LAUNCHER_BEFORE`,
+  `test_rename.test_the_launcher_stays_when_an_app_named_pyt_is_renamed`), the
   project's own folders and files (`RESERVED_PACKAGES`: src (root- and src-relative paths would
   read the same: the VS Code matchers, rename), tests, typings, build, dist, assets; plus the
   preset's `src/` entries such as `main`), and every package the project will lock:

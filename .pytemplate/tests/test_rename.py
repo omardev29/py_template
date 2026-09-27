@@ -189,6 +189,15 @@ def test_crlf_and_bom_are_kept() -> None:
     assert [n for n, _, _ in out.changes] == [1, 2, 3]
 
 
+def test_the_launcher_stays_when_an_app_named_pyt_is_renamed() -> None:
+    """An app named pyt (new refuses the name now): `./pyt report` and `.\\pyt test` in its code
+    and comments are the launcher, which rename rewrote to `./game report` (the skeleton was no
+    longer pristine); its package references change."""
+    text = '"""Run ./pyt report or .\\pyt test mypyc (pyt.exe is a build)."""\nimport pyt.core\nPATH = "src/pyt/core"  # ./pyt/x is a path\n'
+    out = rewrite(text, Names("pyt", "game"), python=True)
+    assert out.text == '"""Run ./pyt report or .\\pyt test mypyc (game.exe is a build)."""\nimport game.core\nPATH = "src/game/core"  # ./game/x is a path\n'
+
+
 def test_cr_only_line_endings_are_line_breaks(tmp_path: Path) -> None:
     """Python runs a file with classic Mac line endings: ast counted the lines, the offsets did not
     (IndexError, an internal-error traceback)."""

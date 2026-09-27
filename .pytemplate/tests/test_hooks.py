@@ -764,6 +764,35 @@ def test_a_chained_copy_that_calls_the_launcher_by_its_old_name_is_updated(tmp_p
 
 
 @needs_git
+def test_another_projects_hook_by_the_old_launcher_name_is_left_alone(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """In a monorepo, p was made before the launchers were renamed (its hook calls
+    ./apps/p/deploy) and upgraded in place (./apps/p/pyt now): q's setup took that hook for a
+    gone project's and replaced it, and p's then said its checks were another project's. q
+    leaves it alone; p brings it up to date itself."""
+    top, p = make_repo(tmp_path, "apps/p")
+    q = top / "apps" / "q"
+    q.mkdir(parents=True)
+    for project in (p, q):
+        (project / "pyt").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+        (project / ".pytemplate").mkdir()
+        (project / ".pytemplate" / "pyt.py").write_bytes(b"")
+    rp, rq = find(p, top), find(q, top)
+    target = rp.default_dir / hooks.HOOK
+    target.parent.mkdir(parents=True, exist_ok=True)
+    old = hooks.hook_script("./apps/p/deploy").encode("ascii")
+    target.write_bytes(old)
+    assert (hooks.hook_state(rq), hooks.hook_state(rp)) == ("other", "outdated")
+    capsys.readouterr()
+    hooks.ensure_installed(make(), q)  # q's ./pyt setup
+    assert target.read_bytes() == old and "pre-commit hook updated" not in capsys.readouterr().err
+    hooks.ensure_installed(make(), p)  # p's
+    assert target.read_bytes() == hooks.hook_script("./apps/p/pyt").encode("ascii")
+    (p / ".pytemplate" / "pyt.py").unlink()  # a project that is gone: its stale hook may be replaced
+    (p / "pyt").unlink()
+    assert hooks.hook_state(rq) != "other"
+
+
+@needs_git
 def test_a_third_project_is_not_told_to_force(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """pre-commit and pre-commit.local both taken: install --force would fail ("merge them by
     hand"), so no message suggests it."""

@@ -64,6 +64,10 @@ WINDOWS_DEVICES = frozenset({"con", "prn", "aux", "nul", *(f"{d}{i}" for d in ("
 # portable.cmd_launcher, common.windowed): cmd.exe looks in the current folder first, so an app
 # called python started its own python.cmd again and again instead of Python
 INTERPRETER_COMMANDS = frozenset({"py", "pyw", "python", "python3", "pythonw", "pypy", "pypy3", "pypyw"})
+# The launcher's name (./pyt) and the command `pyt install` puts on PATH: the app's own `pyt`
+# (the console script of its wheel) would take that place, and every ./pyt of its code and docs
+# reads like the app's name (rename rewrote them)
+LAUNCHER_NAMES = frozenset({"pyt"})
 # The top-level modules a pinned package (constraints.txt of any preset) installs under another
 # name than its own (normalized, '_' for '-'), read from the wheels' RECORD files; names that
 # cannot be an app package (_pytest, _yaml, cffi-stubs...) are left out. src/<pkg>/ with such a
@@ -514,6 +518,11 @@ def check_name_free(cfg: Config | None, preset: str, name: str) -> None:
         raise PytError(
             f"src/{pkg}/ cannot exist on Windows: '{pkg}' is a reserved device name there (CON, PRN, "
             f"AUX, NUL, COM0-9, LPT0-9) and a repository holding it cannot be checked out.{hint}"
+        )
+    if name.lower() in LAUNCHER_NAMES:
+        raise PytError(
+            f"'{name}' is the name of the ./pyt launcher and of the `pyt` command that pyt install puts on PATH: "
+            f"the app's own `{name}` command would take its place.{hint}"
         )
     if name.lower() in INTERPRETER_COMMANDS:
         raise PytError(

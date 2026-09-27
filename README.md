@@ -129,8 +129,8 @@ module, a backend (`cpython`, `pypy`, `mypyc`), a package the project locks (dir
 `markdown_it`, `pyray`, `yaml`...; for a package you added, such as beautifulsoup4's `bs4`, once
 it is installed in `.venv`), one of the project's own names (`src`, `tests`, `typings`,
 `build`, `dist`, `assets`, `main`), a Python command (`py`, `python`, `python3`, `pythonw`,
-`pypy3`...: the Windows `.cmd` launchers call them) or a Windows device name (`con`, `aux`,
-`nul`, `com1`...). So
+`pypy3`...: the Windows `.cmd` launchers call them), `pyt` (the launcher, and the command
+`pyt install` puts on PATH) or a Windows device name (`con`, `aux`, `nul`, `com1`...). So
 `./pyt new ../flet --preset flet` fails: add `--name`.
 
 The preset is fixed when the project is created: to use another one, create a new project with

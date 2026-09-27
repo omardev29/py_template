@@ -382,6 +382,9 @@ def test_name_from_folder(folder: str, name: str) -> None:
         # the Windows launchers call these by name: python.cmd in its own folder started itself
         *(("script", n, "is the name of a Python command") for n in ("py", "Pyw", "python", "python3", "pythonw", "pypy3", "pypyw")),
         ("raylib", "Python", "(Python.cmd) call it by name"),
+        # the launcher and the command pyt install puts on PATH (rename took ./pyt for the app)
+        ("script", "pyt", "is the name of the ./pyt launcher"),
+        ("flet", "Pyt", "the app's own `Pyt` command would take its place"),
     ],
 )
 def test_check_name_free_refuses(preset: str, name: str, message: str) -> None:

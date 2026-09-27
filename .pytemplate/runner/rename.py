@@ -130,6 +130,7 @@ _BACKEND_SUFFIX = re.compile(r"-(?:cpython|pypy|mypyc)\b")  # dist/<name>-<backe
 _PKG_WORD_AFTER = re.compile(r"[ \t]+(?:package|module)\b")
 _PKG_WORD_BEFORE = re.compile(r"(?:^|\W)(?:package|module)[ \t]+$")
 _IMPORT_BEFORE = re.compile(r"(?:^|[^\w.])import[ \t]+$")
+_LAUNCHER_BEFORE = re.compile(r"(?:^|[^\w.])\.[/\\]$")  # ./ or .\ as a path's start: `./pyt report`
 _FROM_BEFORE = re.compile(r"(?:^|[^\w.])from[ \t]+$")
 _IMPORT_AFTER = re.compile(r"[ \t]+import\b")
 # -m alpha, "-m", "alpha", and a prefixed string after it: "-m", f"alpha.{x}", r"alpha"
@@ -582,6 +583,8 @@ def _text_kind(
     prev = text[start - 1 : start]
     if prev == "." and start >= 2 and _is_word(text[start - 2]):
         return "keep"  # x.alpha: a submodule or an attribute, never the top-level package
+    if word in presets.LAUNCHER_NAMES and _LAUNCHER_BEFORE.search(text[max(0, start - 3) : start]) and text[end : end + 1] not in ("/", "\\"):
+        return "keep"  # an app named pyt (new refuses the name now): `./pyt report` is the launcher
     if prev in ("/", "\\") and _inside_package(text, start, names.old_pkg):
         return "keep"  # src/alpha/alpha: a submodule of the package, like alpha.alpha
     if names.old_pkg == "src" and text[end : end + 1] in ("/", "\\") and not _after_src(text, start):
