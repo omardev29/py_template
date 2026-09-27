@@ -2660,7 +2660,13 @@ short temp tree and unset `NVIM_APPNAME`.
   new-project job proves it for a raylib and a flet project (a new project has its own
   README.md; the template's is `.pytemplate/README.md`). Tests that start what they built with
   `sys.executable` skip on an interpreter older than the build's Python
-  (`test_build_methods.skip_when_older_than`: the floor job runs the suite on 3.11).
+  (`test_build_methods.skip_when_older_than`: the floor job runs the suite on 3.11). A real
+  project has code of its own in src/ and tests/: a test that copies the project and runs
+  `__init` there passes `--force` (the copy is no pristine skeleton), and one that reads a plan
+  checks what every project has (`[project] name`), the skeleton's docstring only while it is
+  still there (7 tests failed in every real project;
+  `test_paths.test_the_tests_that_copy_the_project_pass_in_one_with_its_own_code` runs them in a
+  copy with code of its own).
 - `.pytemplate/tests/`: `test_runner.py` (config, render, lintc, imports, target keys),
   `test_no_spanish.py`, `test_launcher_sh.py` (static lint of the `deploy` header rules, `-n`
   syntax checks, `__probe` round-trips per shell found; a caller's `set -eu` in 8 shells,

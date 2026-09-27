@@ -1562,7 +1562,10 @@ def test_real_dry_run_in_a_copy(copy: Path) -> None:
     before = _tree(copy)
     r = _deploy(copy, "--dry-run", "apply")
     assert r.returncode == 0, r.stderr
-    assert f"would rename '{old}' -> 'beta'" in r.stderr and '+ """beta"""' in r.stderr  # every preset's docstring
+    assert f"would rename '{old}' -> 'beta'" in r.stderr and re.search(r"\+ name = [\"']beta[\"']", r.stderr), r.stderr
+    init = copy / "src" / rename.package_of(old) / "__init__.py"
+    if init.is_file() and init.read_text(encoding="utf-8") == f'"""{old}"""\n':  # the skeleton's docstring (a project may have its own)
+        assert '+ """beta"""' in r.stderr
     assert "git hook         not a git work tree: nothing to do" in r.stderr
     assert _tree(copy) == before, "--dry-run wrote files"
     r = _deploy(copy, "apply", "--bogus")

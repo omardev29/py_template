@@ -532,17 +532,57 @@ def unchanged(project_copy: Path) -> Iterator[Path]:
     [
         (["mode", "mypyc"], '[backend] active = "mypyc"'),
         (["mode", "--supports", "-mypyc", "--typing", "strict"], "[typing] relaxed"),
-        (["__init", "raylib"], "+ typings/raylib/__init__.pyi"),
-        (["__init", "flet", "--name", "other"], "as 'other'"),
+        # --force: a project that has its own code in src/ and tests/ (every real one) is refused
+        # without it, and this test is about what --dry-run writes
+        (["__init", "raylib", "--force"], "+ typings/raylib/__init__.pyi"),
+        (["__init", "flet", "--name", "other", "--force"], "as 'other'"),
         (["render", "--force"], "generated files up to date"),
     ],
 )
 def test_dry_run_writes_nothing(unchanged: Path, args: list[str], expected: str) -> None:
-    if args == ["__init", "raylib"] and _copy_config(unchanged)["app"]["preset"] == "raylib":
-        args, expected = ["__init", "script"], "- typings/raylib/__init__.pyi"  # a raylib project: the other way
+    if args[:2] == ["__init", "raylib"] and _copy_config(unchanged)["app"]["preset"] == "raylib":
+        args, expected = ["__init", "script", "--force"], "- typings/raylib/__init__.pyi"  # a raylib project: the other way
     r = _deploy(unchanged, "--dry-run", *args)
     assert r.returncode == 0, r.stderr
     assert expected in r.stderr, r.stderr
+
+
+@needs_uv
+def test_the_tests_that_copy_the_project_pass_in_one_with_its_own_code(tmp_path: Path) -> None:
+    """CLAUDE.md 13.1: the suite must pass in every project made with ./deploy new, whose src/
+    and tests/ hold its own code. The tests that copy the project and run `__init`, `apply` or
+    `rename` in the copy assumed the pristine skeleton: `__init` refused the copy ("have changes
+    compared to the skeleton") and the plans lacked the skeleton's docstring, so 7 tests failed
+    in every real project. They run here in a copy with code of its own (the ones that work
+    offline: the rename's real run then skips, as it does without the package index)."""
+    own = tmp_path / "own"
+    presets.copy_template(own)
+    pkg = str(_copy_config(own)["app"]["name"]).replace("-", "_").lower()
+    (own / "src" / pkg / "__init__.py").write_text('"""My own benchmarks."""\n', encoding="utf-8")
+    (own / "src" / pkg / "extra.py").write_text('"""Mine."""\n\n\ndef double(x: int) -> int:\n    return 2 * x\n', encoding="utf-8")
+    (own / "tests" / "test_extra.py").write_text(
+        f'"""Mine."""\n\nfrom {pkg}.extra import double\n\n\ndef test_double() -> None:\n    assert double(2) == 4\n', encoding="utf-8"
+    )
+    nodes = [
+        "test_paths.py::test_dry_run_writes_nothing",
+        "test_apply.py::test_real_dry_run_in_a_copy",
+        "test_presets.py::test_init_that_fails_in_uv_changes_nothing",
+        "test_rename.py::test_real_run_skips_without_the_index",
+    ]
+    drop = (*_LAUNCHER_VARS, "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--basetemp", str(tmp_path / "t"),
+         *(f".pytemplate/tests/{node}" for node in nodes)],
+        cwd=own,
+        env={k: v for k, v in os.environ.items() if k not in drop},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=900,
+        check=False,
+    )
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
 
 
 @needs_uv

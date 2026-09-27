@@ -538,7 +538,8 @@ def project_copy(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def test_command_dry_run_then_real_run(project_copy: Path) -> None:
     root = project_copy
     # the copy's own package (a project made with ./deploy new has its own name and preset)
-    old = package_of(tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8-sig"))["app"]["name"])
+    name = tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8-sig"))["app"]["name"]
+    old = package_of(name)
     if old == "my_game":
         pytest.skip("this project is already called my_game")
     before = _snapshot(root)
@@ -546,7 +547,10 @@ def test_command_dry_run_then_real_run(project_copy: Path) -> None:
     assert r.returncode == 0, r.stderr
     assert f"would move       src/{old}/ -> src/my_game/" in r.stderr, r.stderr
     assert "uv.lock          would re-lock" in r.stderr
-    assert "src/my_game/__init__.py" in r.stderr and '+ """My-Game"""' in r.stderr  # every preset's docstring
+    assert '+ name = "My-Game"' in r.stderr or "+ name = 'My-Game'" in r.stderr, r.stderr  # [project] name
+    init = root / "src" / old / "__init__.py"
+    if init.is_file() and init.read_text(encoding="utf-8") == f'"""{name}"""\n':  # the skeleton's docstring (a project may have its own)
+        assert "src/my_game/__init__.py" in r.stderr and '+ """My-Game"""' in r.stderr
     assert _snapshot(root) == before, "--dry-run wrote files"
 
     r = _deploy(root, "rename", "My-Game", "--bogus")
