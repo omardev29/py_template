@@ -1399,8 +1399,11 @@ only deletes files is checked too).
 - **raylib on a minimal Linux** (containers, WSL, CI) needs the GL and X11 libraries:
   `libgl1 libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6` (Debian/Ubuntu names; desktops have
   them).
-- **Flet downloads its client or pip-installs packages when it starts**: `flet` and
-  `flet-desktop` must have the same version. Set `[preset.flet] version` and run `./deploy apply`.
+- **Flet downloads its client when it first starts**: that is normal. The `flet-desktop` package
+  holds no client: the first start downloads it once from GitHub (about 40 MB) into
+  `~/.flet/client` and reuses it from then on.
+- **Flet pip-installs `flet-desktop` when it starts**: `flet` and `flet-desktop` have different
+  versions. Set `[preset.flet] version` and run `./deploy apply`.
 - **`flet build` on Windows** needs Developer Mode (Settings > System > For developers) and the
   Visual Studio C++ tools; `./deploy build --method flet` says so when Developer Mode is off.
 - **An app that uses `flet.auth`**: run `./deploy add "httpx<1"`. Flet 1.0.1 accepts any httpx
