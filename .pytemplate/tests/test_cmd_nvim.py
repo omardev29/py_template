@@ -276,6 +276,66 @@ def test_lazyvim_installed(tmp_path: Path) -> None:
     assert nv.trust_db == tmp_path / "s" / "trust" and nv.lazyvim_json == tmp_path / "c" / "lazyvim.json"
 
 
+# lua/config/lazy.lua of the LazyVim starter (its spec part)
+STARTER_LAZY_LUA = """require("lazy").setup({
+  spec = {
+    -- add LazyVim and import its plugins
+    { "LazyVim/LazyVim", import = "lazyvim.plugins" },
+    -- import/override with your plugins
+    { import = "plugins" },
+  },
+})
+"""
+
+
+def test_lazyvim_is_told_from_the_config_not_from_a_file_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    def nvim(name: str) -> cmd_nvim.Nvim:
+        home = tmp_path / name
+        return cmd_nvim.Nvim("nvim", (0, 12, 5), home / "c", home / "d", home / "s", home / "k")
+
+    # lazy.nvim's own Structured Setup without LazyVim passed as LazyVim (lua/config/lazy.lua),
+    # and doctor, sync and bootstrap then promised an integration that needs LazyVim's extras
+    plain = nvim("plain")
+    (plain.config / "lua" / "config").mkdir(parents=True)
+    (plain.config / "init.lua").write_text('require("config.lazy")\n', encoding="utf-8")
+    (plain.config / "lua" / "config" / "lazy.lua").write_text(
+        'require("lazy").setup({ spec = { { import = "plugins" } } })\n'
+        '-- { "LazyVim/LazyVim", import = "lazyvim.plugins" },\n'
+        '--[[\n{ "LazyVim/LazyVim" }\n]]\n',
+        encoding="utf-8",
+    )
+    (plain.data / "lazy" / "lazy.nvim").mkdir(parents=True)
+    (plain.config / "lazy-lock.json").write_text('{"lazy.nvim": {"branch": "main", "commit": "x"}}', encoding="utf-8")
+    assert not plain.lazyvim_installed()
+    with pytest.raises(DeployError, match="LazyVim is not this Neovim's config .*bootstrap .*lazyvim.github.io") as e:
+        cmd_nvim.cmd_sync(plain)
+    assert e.value.code == 3
+    assert cmd_nvim.cmd_bootstrap(plain) == 0 and "It is not a LazyVim config" in capsys.readouterr().err
+    # LazyVim in one init.lua with its own lazy.nvim root was refused as "not found"
+    custom = nvim("custom")
+    custom.config.mkdir(parents=True)
+    (custom.config / "init.lua").write_text(
+        "require('lazy').setup({ root = vim.fn.stdpath('data') .. '/plugins', spec = { { 'LazyVim/LazyVim', import = 'lazyvim.plugins' } } })\n",
+        encoding="utf-8",
+    )
+    assert custom.lazyvim_installed()
+    # once started, the lockfile names it (a spec kept elsewhere: vim.g.lazyvim_json, a module)
+    locked = nvim("locked")
+    locked.config.mkdir(parents=True)
+    (locked.config / "lazy-lock.json").write_text('{"LazyVim": {"branch": "main", "commit": "x"}}', encoding="utf-8")
+    assert locked.lazyvim_installed()
+    # the starter as bootstrap clones it, before its first start
+    starter = nvim("starter")
+    (starter.config / "lua" / "config").mkdir(parents=True)
+    (starter.config / "lua" / "config" / "lazy.lua").write_text(STARTER_LAZY_LUA, encoding="utf-8")
+    assert starter.lazyvim_installed()
+
+
+def test_nvim_doctor_flags_a_config_without_lazyvim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out = _doctor(tmp_path, monkeypatch, capsys, lazy_lua='require("lazy").setup({ spec = { { import = "plugins" } } })\n')
+    assert code == 1 and "[XX] LazyVim not found" in out and "Start Neovim once" not in out, out
+
+
 def test_remove_tree_read_only(tmp_path: Path) -> None:
     obj = tmp_path / "repo" / ".git" / "objects" / "ab" / "cdef"
     obj.parent.mkdir(parents=True)
@@ -1020,6 +1080,7 @@ def _doctor(
     tools: dict[str, str] = EVERY_TOOL,
     cc: str | None = "/usr/bin/gcc",
     lazyvim_json: str | None = None,
+    lazy_lua: str = STARTER_LAZY_LUA,
 ) -> tuple[int, str]:
     """nvim doctor with Neovim, the tools, the trust and the project's .venv faked."""
     from types import SimpleNamespace
@@ -1029,7 +1090,7 @@ def _doctor(
 
     nv = cmd_nvim.Nvim("nvim", (0, 12, 5), tmp_path / "c", tmp_path / "d", tmp_path / "s", tmp_path / "k")
     (nv.config / "lua" / "config").mkdir(parents=True)
-    (nv.config / "lua" / "config" / "lazy.lua").write_text("", encoding="utf-8")
+    (nv.config / "lua" / "config" / "lazy.lua").write_text(lazy_lua, encoding="utf-8")
     if lazyvim_json is None:
         lazyvim_json = json.dumps({"extras": list(cmd_nvim.EXTRAS), "version": 8})
     if lazyvim_json:

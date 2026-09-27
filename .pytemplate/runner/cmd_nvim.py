@@ -116,7 +116,11 @@ class Nvim:
         return self.state / "trust"
 
     def lazyvim_installed(self) -> bool:
-        return (self.config / "lua" / "config" / "lazy.lua").is_file() or (self.data / "lazy" / "LazyVim").is_dir()
+        """LazyVim is this Neovim's config: its plugin in lazy.nvim's default root, the config's
+        lazy-lock.json naming it (a config with its own lazy root, once started), or the config's
+        Lua naming its spec (a starter before its first start). A lua/config/lazy.lua alone
+        proves nothing: lazy.nvim's own Structured Setup has one, without LazyVim."""
+        return (self.data / "lazy" / "LazyVim").is_dir() or lock_names_lazyvim(self.config) or config_names_lazyvim(self.config)
 
 
 def which(name: str) -> str | None:
@@ -313,20 +317,41 @@ def trust_file(
 
 
 _LOCAL_SPEC_OFF = re.compile(r"\blocal_spec\s*=\s*false\b")
+_LAZYVIM_SPEC = re.compile(r"""["']LazyVim/LazyVim["']|["']lazyvim\.plugins["']""")
+_BLOCK_COMMENT = re.compile(r"--\[(=*)\[.*?\]\1\]", re.S)
+
+
+def _config_code(config: Path) -> list[tuple[Path, list[str]]]:
+    """The Lua files of a config (init.lua, lua/**) as lines without their comments."""
+    files = [config / "init.lua", *sorted((config / "lua").rglob("*.lua"))] if config.is_dir() else []
+    out: list[tuple[Path, list[str]]] = []
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        out.append((f, [line.split("--", 1)[0] for line in _BLOCK_COMMENT.sub("", text).splitlines()]))
+    return out
 
 
 def local_spec_off(config: Path) -> list[Path]:
     """Return the config files that set lazy.nvim's `local_spec = false` (.lazy.lua ignored)."""
-    files = [config / "init.lua", *sorted((config / "lua").rglob("*.lua"))] if config.is_dir() else []
-    found: list[Path] = []
-    for f in files:
-        try:
-            lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
-        if any(_LOCAL_SPEC_OFF.search(line.split("--", 1)[0]) for line in lines):
-            found.append(f)
-    return found
+    return [f for f, lines in _config_code(config) if any(_LOCAL_SPEC_OFF.search(line) for line in lines)]
+
+
+def config_names_lazyvim(config: Path) -> bool:
+    """Whether the config's Lua names LazyVim's spec ("LazyVim/LazyVim" or its "lazyvim.plugins"
+    import) outside a comment."""
+    return any(_LAZYVIM_SPEC.search(line) for _, lines in _config_code(config) for line in lines)
+
+
+def lock_names_lazyvim(config: Path) -> bool:
+    """Whether lazy.nvim's lockfile (its default place, <config>/lazy-lock.json) names LazyVim."""
+    try:
+        data = json.loads((config / "lazy-lock.json").read_bytes().decode("utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and "LazyVim" in data
 
 
 def load_lazyvim_json(path: Path) -> dict[str, Any]:
@@ -570,7 +595,7 @@ def cmd_doctor(cfg: Config) -> int:
     installed = nv.lazyvim_installed()
     check(
         installed,
-        "LazyVim installed" if installed else f"LazyVim not found ({nv.config / 'lua' / 'config' / 'lazy.lua'})",
+        "LazyVim installed" if installed else f"LazyVim not found: {nv.config} names no LazyVim/LazyVim spec",
         "./deploy nvim bootstrap   (clones the LazyVim starter; an existing config is never touched)",
     )
     off = local_spec_off(nv.config) if installed else []
@@ -719,7 +744,11 @@ def cmd_sync(nv: Nvim) -> int:
     (rewriting lazy-lock.json) and clean the plugins its spec does not name.
     """
     if not nv.lazyvim_installed():
-        raise DeployError("LazyVim is not installed: ./deploy nvim bootstrap", 3)
+        raise DeployError(
+            f"LazyVim is not this Neovim's config ({nv.config}): ./deploy nvim bootstrap installs the starter where"
+            " there is no config; to switch an existing one, see https://lazyvim.github.io/installation",
+            3,
+        )
     trust = trust_status(nv.trust_db, LAZY_LUA)
     if trust.state == "missing":
         raise DeployError(".lazy.lua not found: ./deploy render generates it")

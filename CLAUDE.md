@@ -2665,7 +2665,13 @@ LazyVim wiring:
   (`test_query_reports_an_old_neovim`, which fakes the old API on the Neovim at hand; the real
   trust test skips below 0.9, which brought `vim.secure`).
 - `doctor` (default; exit 1 on real problems): Neovim >= 0.11.2 (`MIN_LAZYVIM`), LazyVim
-  installed, no `local_spec = false`, the trust of `.lazy.lua`, missing extras in
+  installed (`Nvim.lazyvim_installed`, which `./deploy doctor`, `sync` and `bootstrap` ask too:
+  LazyVim in lazy.nvim's default root `<data>/lazy`, the config's `lazy-lock.json` naming it, or
+  the config's Lua naming the `LazyVim/LazyVim` spec or its `lazyvim.plugins` import outside a
+  comment, `config_names_lazyvim`; read from the files, never by running the user's config, which
+  may install plugins; a `lua/config/lazy.lua` alone passed, and lazy.nvim's own Structured Setup
+  has one without LazyVim, while a LazyVim with its own lazy root was refused), no `local_spec =
+  false`, the trust of `.lazy.lua`, missing extras in
   `lazyvim.json` (an unreadable one is a note naming the JSON error: LazyVim skips it without a
   word; `missing_extras` reads the module names only, a hand-written `{...}` entry made it raise
   TypeError), tools (`cmd_nvim.TOOLS`; required: git, curl, tar, fd or fdfind (venv-selector, from
