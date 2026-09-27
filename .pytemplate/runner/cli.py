@@ -77,7 +77,9 @@ COMMANDS: dict[str, Command] = {
 INTERNAL: dict[str, Command] = {
     # `./deploy new` runs it in the fresh copy; the template maintainer regenerates the template
     # root with it (./deploy __init script --name myapp --force). Users pick a preset with `new`.
-    "__init": Command("cmd_mode", "cmd_init", "Replace src/, tests/, typings/ and pytemplate.toml with a preset's skeleton", "PRESET [--name NAME] [--force]"),
+    # render=False: it renders with --force at its end, and rendering the copied configuration
+    # first only warned about the source project's hand-edited files inside the output of `new`.
+    "__init": Command("cmd_mode", "cmd_init", "Replace src/, tests/, typings/ and pytemplate.toml with a preset's skeleton", "PRESET [--name NAME] [--force]", render=False),
 }
 
 EXAMPLES = """\

@@ -669,8 +669,9 @@ header rules (with detector tests proving each rule fires).
    `shell-setup`, `selftest`, `help`, `hooks` (the hook must not rewrite generated files in
    the middle of a commit), `apply` and `setup` (they render at the end: a refused apply, e.g.
    a hand-edited `app.preset`, writes nothing), `rename` (renders after its checks, never with
-   a hand-edited `app.name` before the dirty-tree check). `test_cli_core.NEVER_RENDER` pins
-   this list.
+   a hand-edited `app.name` before the dirty-tree check), and the internal `__init` (it renders
+   with `--force` at its end; rendering the copied configuration first, `new` warned about the
+   source project's hand-edited files). `test_cli_core.NEVER_RENDER` pins this list.
 5. Commands reject unknown arguments with exit 2 (a typo is never silently ignored):
    argparse commands, `render`/`mode`/`__init`/`new` (`cmd_mode._parse`), `lint`, `fmt`,
    `clean`, `apply`, `setup` (only `--force`), `doctor`, `tasks` (`cmd_dev.only_flags`), `check` and `sync` (extra

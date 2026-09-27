@@ -250,12 +250,15 @@ def test_probe_needs_no_config(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
 # Builtins that never render first (CLAUDE.md 5.2). A new command with render=False fails here
 # until it is added (and documented).
 # apply/setup render themselves at the end (a refused apply writes nothing); rename renders only
-# after its checks, never with a hand-edited app.name before the dirty-tree check
-NEVER_RENDER = {"clean", "render", "new", "pyz-merge", "tasks", "shell-setup", "selftest", "help", "hooks", "setup", "apply", "rename"}
+# after its checks, never with a hand-edited app.name before the dirty-tree check; the internal
+# __init renders with --force at its end (rendering the copy first, `new` warned about the source
+# project's hand-edited .vscode/settings.json: "use ./deploy render --force")
+NEVER_RENDER = {"clean", "render", "new", "pyz-merge", "tasks", "shell-setup", "selftest", "help", "hooks", "setup", "apply", "rename", "__init"}
 
 
 def test_commands_that_never_render() -> None:
-    assert {n for n, c in cli.COMMANDS.items() if not c.render} == NEVER_RENDER & set(cli.COMMANDS)
+    every = {**cli.COMMANDS, **cli.INTERNAL}
+    assert {n for n, c in every.items() if not c.render} == NEVER_RENDER & set(every)
 
 
 def test_render_runs_before_builtins_and_tasks_unless_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
