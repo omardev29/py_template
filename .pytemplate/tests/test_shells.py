@@ -745,6 +745,48 @@ def test_doctor_prints_the_shell_step_only_with_something_under_it(
     assert ("WSL on a Windows checkout" in " ".join(lines)) == wsl
 
 
+@pytest.mark.parametrize(
+    ("launcher", "expected"),
+    [
+        (None, [None, True]),  # uv run by hand, the xonsh alias
+        ("cmd", [None, True]),
+        ("sh:bash:msys", [None, True]),
+        ("ps1:Core:7.6", [None, True]),
+        ("ps1:Desktop:5.1", [False, True]),
+    ],
+)
+def test_doctor_counts_an_execution_policy_only_for_the_powershell_in_use(
+    launcher: str | None, expected: list[bool | None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows PowerShell 5.1 is Restricted by default on client Windows: doctor exited 1 there for
+    every user of cmd, Git Bash, xonsh or PowerShell 7, and the hint's own way out (.\\deploy.cmd)
+    never cleared it. Only the PowerShell that started this run counts; the other is a note."""
+    monkeypatch.setattr(shells, "IS_WINDOWS", True)
+    monkeypatch.setattr(shells, "IS_WSL", False)
+    monkeypatch.setattr(shells, "_git_modes", lambda names: {})
+    policies = [("Windows PowerShell 5.1", "Desktop", "Restricted"), ("PowerShell 7", "Core", "RemoteSigned")]
+    monkeypatch.setattr(shells, "_ps_policies", lambda: policies)
+    if launcher is None:
+        monkeypatch.delenv("PYTEMPLATE_LAUNCHER", raising=False)
+    else:
+        monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
+    lines: list[tuple[bool | None, str, str]] = []
+    shells.doctor(lambda ok, label, hint: lines.append((ok, label, hint)))
+    policy = [(ok, label, hint) for ok, label, hint in lines if "ExecutionPolicy" in label]
+    assert [ok for ok, _, _ in policy] == expected, policy
+    assert "Set-ExecutionPolicy" in policy[0][2] and "deploy.cmd" in policy[0][2]
+
+
+def test_ps_policies_name_the_edition_deploy_ps1_reports() -> None:
+    """The editions doctor compares with PYTEMPLATE_LAUNCHER are $PSVersionTable.PSEdition's."""
+    pwsh = shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("pwsh not installed")
+    got = {label: edition for label, edition, _ in shells._ps_policies()}
+    r = subprocess.run([pwsh, "-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSEdition"], capture_output=True, text=True, timeout=120, check=False)
+    assert got["PowerShell 7"] == r.stdout.strip() == "Core", (got, r.stdout, r.stderr)
+
+
 def test_launcher_problems() -> None:
     good_sh = b"#!/bin/sh\nexec uv run\n"
     assert shells.launcher_problems("deploy", good_sh, "100755") == []

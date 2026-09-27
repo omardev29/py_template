@@ -430,7 +430,11 @@ header rules (with detector tests proving each rule fires).
   is FileSystem, else `[Environment]::CurrentDirectory`), which is also the caller cwd.
 - Execution policy `Restricted`/`AllSigned`, or Mark-of-the-Web on a copy from a downloaded
   zip: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, `Unblock-File .\deploy.ps1`, or
-  use `deploy.cmd`. `shells.doctor` reports the policy of 5.1 and 7 separately.
+  use `deploy.cmd`. `shells.doctor` reports the policy of 5.1 and 7 separately (`PS_EDITIONS`):
+  a blocking one is `[XX]` only for the edition that started the run (`PYTEMPLATE_LAUNCHER`
+  `ps1:<PSEdition>:`), else a note: 5.1 is `Restricted` by default on client Windows, and
+  users of cmd, the POSIX shells, xonsh or the other PowerShell never run deploy.ps1 there
+  (`test_doctor_counts_an_execution_policy_only_for_the_powershell_in_use`).
 - 5.1 started with `-EncodedCommand` prints the calling session's module-loading progress as
   CLIXML on stderr; the launcher silences only its own.
 

@@ -163,9 +163,13 @@ def _check_launchers(check: Check) -> None:
         check(None, f"deploy.ps1: git mode {ps1_mode} (./deploy.ps1 from bash/zsh on Linux and macOS needs 100755)", "git update-index --chmod=+x deploy.ps1")
 
 
-def _ps_policies() -> list[tuple[str, str]]:
-    """Return (PowerShell edition, ExecutionPolicy) for Windows PowerShell 5.1 and PowerShell 7."""
-    found = [(label, exe) for label, exe in (("Windows PowerShell 5.1", shutil.which("powershell")), ("PowerShell 7", shutil.which("pwsh"))) if exe]
+# (label, $PSVersionTable.PSEdition as deploy.ps1 puts it in PYTEMPLATE_LAUNCHER, program)
+PS_EDITIONS = (("Windows PowerShell 5.1", "Desktop", "powershell"), ("PowerShell 7", "Core", "pwsh"))
+
+
+def _ps_policies() -> list[tuple[str, str, str]]:
+    """Return (label, edition, ExecutionPolicy) for Windows PowerShell 5.1 and PowerShell 7."""
+    found = [(label, edition, exe) for label, edition, name in PS_EDITIONS if (exe := shutil.which(name))]
 
     def policy(exe: str) -> str:
         try:
@@ -178,8 +182,8 @@ def _ps_policies() -> list[tuple[str, str]]:
         return r.stdout.strip()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        policies = list(pool.map(policy, [exe for _, exe in found]))
-    return [(label, p) for (label, _), p in zip(found, policies, strict=True) if p]
+        policies = list(pool.map(policy, [exe for _, _, exe in found]))
+    return [(label, edition, p) for (label, edition, _), p in zip(found, policies, strict=True) if p]
 
 
 def doctor(check: Check) -> None:
@@ -198,10 +202,18 @@ def doctor(check: Check) -> None:
                 f"`bash` points to WSL ({bash})",
                 "On Windows use ./deploy from xonsh, pwsh, cmd, Git Bash or MSYS2; in WSL the runner uses separate -wsl environments",
             )
-        for label, policy in _ps_policies():
+        launcher = os.environ.get("PYTEMPLATE_LAUNCHER", "")
+        for label, edition, policy in _ps_policies():
+            if policy not in ("Restricted", "AllSigned"):
+                check(True, f"{label}: ExecutionPolicy = {policy}", "")
+                continue
+            # A problem only for the PowerShell that started this run: Restricted is the default
+            # of 5.1 on client Windows, and whoever uses cmd, a POSIX shell, xonsh or the other
+            # PowerShell (deploy.cmd, deploy) never runs deploy.ps1 there. Otherwise a note.
+            in_use = launcher.startswith(f"ps1:{edition}:")
             check(
-                policy not in ("Restricted", "AllSigned"),
-                f"{label}: ExecutionPolicy = {policy}",
+                False if in_use else None,
+                f"{label}: ExecutionPolicy = {policy} (deploy.ps1 does not run there)",
                 "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned   (or use .\\deploy.cmd)",
             )
     if IS_WSL:
