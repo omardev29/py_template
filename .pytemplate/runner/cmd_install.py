@@ -141,6 +141,67 @@ def not_ours(path: Path) -> str:
     return ""
 
 
+# pyt.cmd names itself here (%~f0): cmd reads a batch file one line at a time, opening it again
+# by name once the command of a line has ended, so the pyt.cmd that started this run must be
+# neither deleted nor replaced under it (it said "The batch file cannot be found.", or ran what
+# the new file held at that offset)
+LAUNCHER_FILE = "PYTEMPLATE_LAUNCHER_FILE"
+# The line cmd reads after the uv call once uninstall put self_deleting() in place: the batch
+# ends ((goto) to no label), then the file is deleted and the exit code is uv's again (a
+# %ERRORLEVEL% of that line is expanded after uv returned)
+SELF_DELETE = b'(goto) 2>nul & del "%~f0" & "%ComSpec%" /d /c exit %ERRORLEVEL%\r\n'
+_LEFTOVER = (
+    b"@echo off\r\n"
+    b"rem pytemplate-launcher: what pyt uninstall left of pyt.cmd while cmd ran it; it deletes itself.\r\n"
+    b'>&2 echo pyt: pyt is not installed (pyt uninstall ran): delete this leftover file, "%~f0"\r\n'
+    b"exit /b 1\r\n"
+)
+
+
+def _read(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def run_by_cmd(path: Path, environ: Mapping[str, str] | None = None) -> bool:
+    """Whether cmd runs `path` for this very run: pyt.cmd hands over its own path (LAUNCHER_FILE)
+    with PYTEMPLATE_LAUNCHER=cmd, and cmd reads that file again when this run ends."""
+    env = os.environ if environ is None else environ
+    running = env.get(LAUNCHER_FILE, "")
+    if not running or not env.get("PYTEMPLATE_LAUNCHER", "").startswith("cmd"):
+        return False
+    try:
+        return os.path.samefile(running, path)
+    except OSError:
+        return False
+
+
+def self_deleting(running: bytes) -> bytes | None:
+    """What uninstall writes in place of the pyt.cmd cmd is running (`running`, its bytes): the
+    same length up to the line after its uv call (the one line with the argument list), where
+    cmd goes on reading, and there SELF_DELETE. Started on its own the file only says what it is
+    (_LEFTOVER), exit 1. None when `running` has no such line where the rest fits before it."""
+    start = running.find(b"%*")
+    end = running.find(b"\n", start) if start >= 0 and running.find(b"%*", start + 2) < 0 else -1
+    if end < 0:
+        return None
+    pad = end + 1 - len(_LEFTOVER)  # bytes of rem lines between _LEFTOVER and SELF_DELETE
+    if pad < 0:
+        return None
+    head = _LEFTOVER
+    if pad < 5:  # shorter than "rem" + CRLF: the marker line takes them as trailing blanks
+        head = head.replace(b"itself.\r\n", b"itself." + b" " * pad + b"\r\n", 1)
+        pad = 0
+    lines = []
+    while pad:
+        size = pad if pad <= 4000 else (4000 if pad - 4000 >= 5 else pad - 5)
+        lines.append(b"rem" + b" " * (size - 5) + b"\r\n")
+        pad -= size
+    return head + b"".join(lines) + SELF_DELETE
+
+
 def read_record(snapshot: Path | None) -> dict[str, object] | None:
     """The record of the installed template: None when there is none (no such folder, or one
     pyt install did not make), {} when it cannot be read."""
@@ -369,6 +430,13 @@ def make_plan() -> Plan:
     if (folder / ".pytemplate").exists():
         raise PytError(f"uv's tool bin folder {folder} is a project's folder (it holds .pytemplate): set UV_TOOL_BIN_DIR to a folder of its own")
     launchers = {name: _launcher_bytes(name) for name in LAUNCHERS}
+    for name in LAUNCHERS:
+        target = folder / name
+        if run_by_cmd(target) and _read(target) != launchers[name]:
+            raise PytError(
+                f"cmd runs {target}, which pyt install would replace, and reads it again once this run ends: "
+                f"run the clone's own launcher instead, .\\pyt.cmd install in {ROOT} (or pyt install from PowerShell)"
+            )
     blocked = [f"{folder / n}: {why}" for n in LAUNCHERS if os.path.lexists(folder / n) and (why := not_ours(folder / n))]
     if blocked:
         lines = "\n  ".join(blocked)
@@ -611,6 +679,29 @@ def _unlink(path: Path) -> bool:
     return True
 
 
+def _retire(path: Path, removed: list[str], left: list[str], failed: list[str]) -> None:
+    """The pyt.cmd cmd runs for this run, last: once everything else is gone, self_deleting() takes
+    its place (cmd reads on from there, deletes it and keeps the exit code). After a failure it is
+    left whole: pyt uninstall can then run again from it."""
+    if failed:
+        left.append(f"left {path}: cmd runs it, and it goes only once the rest is removed")
+        return
+    running = _read(path)
+    stand_in = self_deleting(running) if running is not None else None
+    if stand_in is None:  # no uv line to read on from (not our layout): cmd will not find it
+        if _unlink(path):
+            removed.append(f"removed {path} (cmd, which runs it, may say it cannot find the batch file)")
+        else:
+            failed.append(f"{path}: in use or not writable")
+        return
+    try:
+        project.write_whole(path, stand_in)
+    except OSError as e:
+        failed.append(f"{path}: {e.strerror or e}")
+        return
+    removed.append(f"removed {path} (cmd runs it: it deletes itself as this run ends)")
+
+
 def cmd_uninstall(cfg: Config, args: list[str]) -> int:
     """uninstall: the launchers and the installed template that pyt install wrote, nothing else."""
     only_flags("uninstall", args, ())
@@ -637,6 +728,7 @@ def cmd_uninstall(cfg: Config, args: list[str]) -> int:
         else:
             failed.append(f"{path}: in use or not writable")
 
+    running: Path | None = None  # the pyt.cmd cmd runs for this very run: it goes last
     for folder in _dedupe(folders):
         for name in NAMES:
             path = folder / name
@@ -644,6 +736,8 @@ def cmd_uninstall(cfg: Config, args: list[str]) -> int:
                 why = not_ours(path)
                 if why:
                     left.append(f"left {path}: {why}")
+                elif running is None and not proc.DRY_RUN and run_by_cmd(path):
+                    running = path
                 else:
                     remove(path, str(path), _unlink)
     if snapshot is not None and os.path.lexists(snapshot):
@@ -655,6 +749,8 @@ def cmd_uninstall(cfg: Config, args: list[str]) -> int:
         remove_leftovers(snapshot, folders)
         with contextlib.suppress(OSError):
             snapshot.parent.rmdir()  # <data home>/pytemplate, when nothing else is in it
+    if running is not None:
+        _retire(running, removed, left, failed)
     for line in [*removed, *left]:
         ui.report(f"  {line}")
     if failed:

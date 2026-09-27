@@ -18,12 +18,14 @@ rem   * cmd parses the arguments itself: percent, "!", double quote, caret and
 rem     unquoted ampersand, pipe or angle brackets do not survive. Programs that
 rem     quote argv for CreateProcess (Python, xonsh) cannot protect them either:
 rem     use ./pyt or pyt.ps1 for such values.
-rem   * cmd reads a batch file one line at a time, opening it again by name
-rem     before each line: the uv line ends with "exit /b" (the exit code stays
-rem     uv's), so nothing is read after it. pyt uninstall deletes this file,
-rem     and pyt install replaces it, while it runs. The line after it is for
-rem     arguments with an odd number of double quotes, which swallow the rest
-rem     of the uv line.
+rem   * Nothing follows the argument list on the uv line: an argument with an
+rem     odd number of double quotes swallows the rest of that line. The exit
+rem     code is taken on the next line (a bare "exit /b" gives cmd /c callers
+rem     0, whatever uv returned).
+rem   * cmd reads a batch file one line at a time, opening it again by name:
+rem     PYTEMPLATE_LAUNCHER_FILE names this file for the runner, whose pyt
+rem     uninstall then leaves in its place a file that deletes itself on the
+rem     line cmd reads next, and whose pyt install never replaces it.
 rem   * Ctrl+C: cmd asks "Terminate batch job (Y/N)?" once uv has exited.
 rem   * A UNC current folder is not supported (cmd.exe replaces it).
 rem Exit codes: 2 = no project found, 127 = no uv, anything else = the runner's.
@@ -76,6 +78,7 @@ if not defined PT_UV goto :no_uv
 
 set "PYTEMPLATE_CALLER_CWD=%CD%"
 set "PYTEMPLATE_LAUNCHER=cmd"
+set "PYTEMPLATE_LAUNCHER_FILE=%~f0"
 rem The installed template runs in its global mode; a project's runner never
 rem does (an empty value removes the variable).
 set "PYTEMPLATE_GLOBAL=%PT_GLOBAL%"
@@ -88,9 +91,8 @@ set "PYTHONHOME="
 set "PYTHONPATH="
 set "UV_WORKING_DIR="
 rem cmd expands the whole line before running it: the helper variables are
-rem cleared for the runner while uv still gets their values. The exit /b at
-rem its end keeps uv's exit code and reads no further line (see the header).
-set "PT_ROOT=" & set "PT_UV=" & set "PT_ENTRY=" & set "PT_GLOBAL=" & "%PT_UV%" run --quiet --script "%PT_ROOT%.pytemplate\%PT_ENTRY%" %* & exit /b
+rem cleared for the runner while uv still gets their values.
+set "PT_ROOT=" & set "PT_UV=" & set "PT_ENTRY=" & set "PT_GLOBAL=" & "%PT_UV%" run --quiet --script "%PT_ROOT%.pytemplate\%PT_ENTRY%" %*
 exit /b %ERRORLEVEL%
 
 :no_root

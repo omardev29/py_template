@@ -533,8 +533,8 @@ class Swap:
     def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch, fresh: bool) -> None:
         self.source = tmp / "source"
         (self.source / "sub").mkdir(parents=True)
-        (self.source / "a.txt").write_text("new a\n", encoding="utf-8")
-        (self.source / "sub" / "b.txt").write_text("new b\n", encoding="utf-8")
+        (self.source / "a.txt").write_bytes(b"new a\n")  # bytes: write_text gives CRLF on Windows
+        (self.source / "sub" / "b.txt").write_bytes(b"new b\n")
         monkeypatch.setattr(cmd_install, "ROOT", self.source)
         self.snapshot = tmp / "data" / "pytemplate" / "template"
         self.bin = tmp / "bin"
@@ -678,6 +678,120 @@ def test_every_launcher_carries_the_marker() -> None:
     for name in cmd_install.NAMES:
         head = (ROOT / name).read_bytes()[:4096]
         assert cmd_install.MARKER.search(head), f"{name} has no `pytemplate-launcher` line in its first 4 KiB"
+
+
+# --- the pyt.cmd cmd runs for this very run ---------------------------------------------------------
+
+
+def _uv_line_end(data: bytes) -> int:
+    """Where cmd reads on once the uv call of a pyt.cmd has returned: after the line with the
+    argument list."""
+    return data.index(b"\n", data.index(b"%*")) + 1
+
+
+def test_self_deleting_puts_its_last_line_where_cmd_reads_on() -> None:
+    """cmd reads a batch file one line at a time, opening it again by name at the byte where the
+    last line ended: the stand-in uninstall writes in place of the pyt.cmd cmd runs holds, at the
+    end of pyt.cmd's uv line, the line that ends the batch, deletes the file and exits with uv's
+    code. Started on its own it says what it is (exit 1). ASCII, CRLF, cmd's line limit."""
+    running = (ROOT / "pyt.cmd").read_bytes()
+    data = cmd_install.self_deleting(running)
+    assert data is not None and data.isascii()
+    at = _uv_line_end(running)
+    assert data[at:] == cmd_install.SELF_DELETE and data.index(cmd_install.SELF_DELETE) == at
+    assert data.startswith(b"@echo off\r\n") and cmd_install.MARKER.search(data[:4096])
+    lines = data.split(b"\r\n")
+    assert lines[-1] == b"" and all(b"\n" not in line and len(line) <= 8191 for line in lines)
+    assert b"exit /b 1\r\n" in data[:at] and b"%*" not in data
+
+
+@pytest.mark.parametrize("extra", [0, 1, 2, 3, 4, 5, 6, 4000, 4004, 4005, 9000])
+def test_self_deleting_fills_any_distance(extra: int) -> None:
+    """Rem lines of 5 to 4000 bytes fill the distance; one of 1 to 4 bytes goes to the marker line."""
+    head = len(cmd_install._LEFTOVER)
+    running = b"x" * (head + extra - 4) + b"%*\r\n" + b"exit /b %ERRORLEVEL%\r\n"
+    data = cmd_install.self_deleting(running)
+    assert data is not None and data.index(cmd_install.SELF_DELETE) == head + extra == _uv_line_end(running)
+    assert all(len(line) <= 4000 for line in data.split(b"\r\n"))
+
+
+def test_self_deleting_needs_one_uv_line_it_can_reach() -> None:
+    assert cmd_install.self_deleting(b"@echo off\r\nexit /b 0\r\n") is None  # no argument list
+    assert cmd_install.self_deleting(b"x" * 400 + b"%*\r\n%*\r\n") is None  # two: which one?
+    assert cmd_install.self_deleting(b"%*\r\nexit /b %ERRORLEVEL%\r\n") is None  # the rest does not fit before it
+
+
+def test_run_by_cmd_needs_cmd_and_the_file_it_named(tmp_path: Path) -> None:
+    launcher = tmp_path / "pyt.cmd"
+    launcher.write_bytes(b"@echo off\r\n")
+    other = tmp_path / "other.cmd"
+    other.write_bytes(b"@echo off\r\n")
+    assert cmd_install.run_by_cmd(launcher, {"PYTEMPLATE_LAUNCHER": "cmd", cmd_install.LAUNCHER_FILE: str(launcher)})
+    for env in (
+        {"PYTEMPLATE_LAUNCHER": "ps1:Core:7.6", cmd_install.LAUNCHER_FILE: str(launcher)},  # pyt.ps1 reads itself whole
+        {cmd_install.LAUNCHER_FILE: str(launcher)},
+        {"PYTEMPLATE_LAUNCHER": "cmd"},
+        {"PYTEMPLATE_LAUNCHER": "cmd", cmd_install.LAUNCHER_FILE: str(other)},
+        {"PYTEMPLATE_LAUNCHER": "cmd", cmd_install.LAUNCHER_FILE: str(tmp_path / "gone.cmd")},
+    ):
+        assert not cmd_install.run_by_cmd(launcher, env), env
+
+
+# A pyt.cmd of an earlier install: the marker, and a uv line the stand-in reads on after
+EARLIER_CMD = (
+    b"@echo off\r\nrem pytemplate-launcher: an earlier pyt.cmd\r\n" + b"rem " + b"-" * 300 + b"\r\n"
+    + b'"%PT_UV%" run --quiet --script "%PT_ROOT%.pytemplate\\pyt.py" %*\r\nexit /b %ERRORLEVEL%\r\n'
+)  # fmt: skip
+
+
+@needs_git
+@needs_uv
+def test_install_never_replaces_the_pyt_cmd_cmd_runs(clone: Path, box: Box) -> None:
+    """cmd reads the pyt.cmd it runs again once this run ends, at the byte where its uv line
+    ended: replaced by other bytes, it would run what the new file holds there. So install
+    refuses, before any write, when that file is the launcher it would replace with other
+    bytes, and says how to run it; the same bytes are no change."""
+    assert pyt(clone, box, "install").returncode == 0
+    target = box.bin / cmd_install.LAUNCHERS[0]  # the file cmd would run, as far as this test goes
+    target.write_bytes(EARLIER_CMD)
+    before = (box.launchers(), _files(box.snapshot))
+    via_cmd = {"PYTEMPLATE_LAUNCHER": "cmd", cmd_install.LAUNCHER_FILE: str(target)}
+    r = pyt(clone, box, "install", **via_cmd)
+    assert r.returncode == 2 and f"cmd runs {target}, which pyt install would replace" in r.stderr, r.stderr
+    assert "pyt.cmd install in" in r.stderr and (box.launchers(), _files(box.snapshot)) == before
+    assert pyt(clone, box, "install", **{**via_cmd, "PYTEMPLATE_LAUNCHER": "ps1:Core:7.6"}).returncode == 0
+    assert pyt(clone, box, "install", **{**via_cmd, cmd_install.LAUNCHER_FILE: str(target)}).returncode == 0  # same bytes now
+
+
+@needs_git
+@needs_uv
+def test_uninstall_leaves_a_self_deleting_stand_in_for_the_pyt_cmd_cmd_runs(clone: Path, box: Box) -> None:
+    """Deleted while cmd ran it, a pyt.cmd made cmd say "The batch file cannot be found." (exit 1)
+    after a successful uninstall: uninstall handles it last and puts self_deleting in its place,
+    which cmd then reads on in and deletes (test_launcher_win.test_cmd_goes_on_reading_what_uninstall_leaves)."""
+    assert pyt(clone, box, "install").returncode == 0
+    target = box.bin / cmd_install.LAUNCHERS[0]
+    target.write_bytes(EARLIER_CMD)
+    via_cmd = {"PYTEMPLATE_LAUNCHER": "cmd", cmd_install.LAUNCHER_FILE: str(target)}
+    dry = pyt(clone, box, "--dry-run", "uninstall", **via_cmd)
+    assert dry.returncode == 0 and f"would remove {target}" in dry.stderr and target.read_bytes() == EARLIER_CMD, dry.stderr
+    r = pyt(clone, box, "uninstall", cwd=box.away, **via_cmd)
+    assert r.returncode == 0 and f"removed {target} (cmd runs it: it deletes itself as this run ends)" in r.stderr, r.stderr
+    assert not box.snapshot.exists() and target.read_bytes() == cmd_install.self_deleting(EARLIER_CMD)
+    assert cmd_install.is_launcher(target)  # ours: a later install replaces it, uninstall removes it
+    assert pyt(clone, box, "uninstall").returncode == 0 and not target.exists()
+
+
+def test_the_pyt_cmd_cmd_runs_goes_only_once_the_rest_is_gone(tmp_path: Path) -> None:
+    target = tmp_path / "pyt.cmd"
+    target.write_bytes(EARLIER_CMD)
+    removed: list[str] = []
+    left: list[str] = []
+    cmd_install._retire(target, removed, left, ["somewhere: in use or not writable"])
+    assert target.read_bytes() == EARLIER_CMD and not removed and "cmd runs it" in left[0]
+    target.write_bytes(b"@echo off\r\nrem pytemplate-launcher: no uv line\r\n")
+    cmd_install._retire(target, removed, left, [])
+    assert not target.exists() and "may say it cannot find the batch file" in removed[0]
 
 
 def test_is_launcher_and_not_ours(tmp_path: Path) -> None:

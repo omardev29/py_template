@@ -22,6 +22,10 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from runner import cmd_install  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 CMD = ROOT / "pyt.cmd"
 PS1 = ROOT / "pyt.ps1"
@@ -111,16 +115,18 @@ def test_cmd_keeps_the_registry_path_out_of_call_arguments() -> None:
         assert f'set "{name}="' in before, name
 
 
-def test_cmd_reads_no_line_after_the_uv_line() -> None:
-    """pyt uninstall deletes, and pyt install replaces, the pyt.cmd that runs them: cmd reads a
-    batch file one line at a time, opening it again by name, and said "The batch file cannot
-    be found." (or ran what the new file holds at that offset). The uv line ends the batch file
-    itself (exit /b keeps uv's exit code); the line after it only serves arguments with an odd
-    number of double quotes, which swallow the rest of the uv line."""
+def test_cmd_takes_the_exit_code_on_the_line_after_uv() -> None:
+    """Nothing follows the argument list on the uv line: an argument with an odd number of double
+    quotes (a `"` CreateProcess escapes as `\\"`) swallows the rest of that line, which then
+    reached uv as arguments. The exit code is taken on the next line: a bare `exit /b` after uv
+    on the same line gave every cmd /c caller (VS Code tasks, Python, xonsh, nushell) exit 0.
+    cmd opens the file again for that line, so pyt.cmd names itself for the runner, whose
+    uninstall and install never delete or replace it under cmd (cmd_install.run_by_cmd)."""
     code = _code_lines_cmd()
     uv_line = next(line for line in code if "%*" in line)
-    assert uv_line.endswith("%* & exit /b"), uv_line
+    assert uv_line.endswith("%*"), uv_line
     assert code[code.index(uv_line) + 1] == "exit /b %ERRORLEVEL%"
+    assert 'set "PYTEMPLATE_LAUNCHER_FILE=%~f0"' in code
 
 
 # --- pyt.ps1: static ------------------------------------------------------------------------
@@ -446,31 +452,49 @@ def test_cmd_outside_a_project_runs_the_installed_template(tmp_path: Path) -> No
 
 
 # What the runner does while cmd runs pyt.cmd, in `pyt uninstall` and `pyt install`
+# A runner that does to the pyt.cmd running it what pyt uninstall does (PT_CHANGE=retired: puts
+# cmd_install.self_deleting in its place, PT_STAND_IN) or what nothing may do (deleted), and
+# says whether pyt.cmd named itself (PYTEMPLATE_LAUNCHER_FILE) before the change
 REWRITE_LAUNCHER = """import os, sys
 from pathlib import Path
 target = Path(os.environ["PT_TARGET"])
+try:
+    named = os.path.samefile(os.environ["PYTEMPLATE_LAUNCHER_FILE"], target)
+except (KeyError, OSError):
+    named = False
+print("NAMED=" + ("yes" if named else "no"))
 if os.environ["PT_CHANGE"] == "deleted":
     target.unlink()
 else:
-    target.write_bytes(b"@echo WRONG\\r\\n" * 400)
+    target.write_bytes(Path(os.environ["PT_STAND_IN"]).read_bytes())
 sys.exit(7)
 """
 
 
 @windows_only
-@pytest.mark.parametrize("change", ["deleted", "replaced"])
-def test_cmd_never_reads_itself_again_after_uv(change: str, tmp_path: Path) -> None:
-    """The runner deletes (pyt uninstall) or rewrites (pyt install) the pyt.cmd cmd is running:
-    no "The batch file cannot be found.", nothing of the new file runs, and uv's exit code stays."""
+@pytest.mark.parametrize("change", ["retired", "deleted"])
+def test_cmd_goes_on_reading_what_uninstall_leaves(change: str, tmp_path: Path) -> None:
+    """cmd reads a batch file one line at a time, opening it again by name: a pyt.cmd deleted
+    while it ran made cmd say "The batch file cannot be found." (exit 1). pyt uninstall leaves
+    cmd_install.self_deleting in its place instead, and cmd reads on there: the file deletes
+    itself and the exit code stays the runner's. pyt.cmd names itself for the runner."""
     entry = tmp_path / "local" / "pytemplate" / "template" / ".pytemplate" / "pyt.py"
     entry.parent.mkdir(parents=True)
     entry.write_text(REWRITE_LAUNCHER, encoding="utf-8", newline="\n")
     launcher, away = _outside(tmp_path, CMD)
-    env = _clean_env(LOCALAPPDATA=str(tmp_path / "local"), PT_TARGET=str(launcher), PT_CHANGE=change, **_uv_dirs())
+    stand_in = tmp_path / "stand-in.cmd"
+    data = cmd_install.self_deleting(launcher.read_bytes())
+    assert data is not None
+    stand_in.write_bytes(data)
+    env = _clean_env(LOCALAPPDATA=str(tmp_path / "local"), PT_TARGET=str(launcher), PT_CHANGE=change, PT_STAND_IN=str(stand_in), **_uv_dirs())
     r = _run([str(launcher), "x"], away, env)
     out = r.stdout + r.stderr
-    assert r.returncode == 7 and "cannot be found" not in out and "WRONG" not in out, (r.returncode, out)
-    assert launcher.exists() == (change == "replaced")
+    assert "NAMED=yes" in r.stdout.splitlines(), out
+    if change == "deleted":  # what the stand-in avoids (a canary: cmd reads the file again)
+        assert "cannot be found" in out, (r.returncode, out)
+        return
+    assert r.returncode == 7 and "cannot be found" not in out, (r.returncode, out)
+    assert not launcher.exists()
 
 
 @windows_only
@@ -484,7 +508,7 @@ def test_cmd_prints_install_hints_without_uv(tmp_path: Path) -> None:
 
 
 @windows_only
-def test_cmd_hands_the_runner_only_its_two_variables(tmp_path: Path) -> None:
+def test_cmd_hands_the_runner_only_its_own_variables(tmp_path: Path) -> None:
     project = tmp_path / "p"
     (project / ".pytemplate").mkdir(parents=True)
     (project / ".pytemplate" / "pyt.py").write_text(
@@ -497,8 +521,9 @@ def test_cmd_hands_the_runner_only_its_two_variables(tmp_path: Path) -> None:
     r = _run([str(project / "pyt.cmd")], project, env)
     seen = [json.loads(line[3:]) for line in r.stdout.splitlines() if line.startswith("ENV")]
     assert r.returncode == 0 and len(seen) == 1, r.stdout + r.stderr
-    assert set(seen[0]) == before | {"PYTEMPLATE_CALLER_CWD", "PYTEMPLATE_LAUNCHER"}
+    assert set(seen[0]) == before | {"PYTEMPLATE_CALLER_CWD", "PYTEMPLATE_LAUNCHER", "PYTEMPLATE_LAUNCHER_FILE"}
     assert seen[0]["PYTEMPLATE_LAUNCHER"] == "cmd" and _same(seen[0]["PYTEMPLATE_CALLER_CWD"], project)
+    assert _same(seen[0]["PYTEMPLATE_LAUNCHER_FILE"], project / "pyt.cmd")
 
 
 @windows_only

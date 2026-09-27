@@ -191,7 +191,9 @@ implement the same contract: change them together.
    only: for a project's runner the variable is removed, so a stale export never turns it into
    global mode (`pyt`: `unset`; `pyt.cmd`: `set "PYTEMPLATE_GLOBAL="`; `pyt.ps1`: removed and
    restored like the other two; `test_launcher_sh.test_a_projects_runner_never_runs_in_global_mode`,
-   `test_launcher_win.test_cmd_never_hands_a_project_the_global_mode`).
+   `test_launcher_win.test_cmd_never_hands_a_project_the_global_mode`). `pyt.cmd` also exports
+   `PYTEMPLATE_LAUNCHER_FILE`, its own path: cmd reads it again once uv returns, so the runner's
+   install and uninstall must know it (section 4.4).
 4. Run `uv run --quiet --script <root>/.pytemplate/pyt.py ARGS...` with argv untouched and
    propagate its exit code, with the caller's `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and
    `UV_WORKING_DIR` removed for uv only (`pyt`: `unset` before `exec`, prefix assignments
@@ -381,14 +383,25 @@ header rules (with detector tests proving each rule fires).
   (`set "PT_ROOT=" & set "PT_UV=" & set "PT_ENTRY=" & set "PT_GLOBAL=" & "%PT_UV%" run ...`):
   cmd expands the whole line first, so uv still gets their values and the runner sees only the
   `PYTEMPLATE_*` variables (`PYTEMPLATE_GLOBAL` only for the installed template).
-- cmd reads a batch file one line at a time and opens it again by name for each line, and
-  `pyt uninstall` deletes (`pyt install` replaces) the installed `pyt.cmd` while it runs: the
-  next read said "The batch file cannot be found." (or ran whatever the new file held at that
-  offset). So the uv line ends in `& exit /b` (the exit code stays uv's ERRORLEVEL) and cmd
-  reads nothing after it; the `exit /b %ERRORLEVEL%` line after it serves arguments with an odd
-  number of double quotes, which swallow the rest of the uv line (and get ` & exit /b` appended
-  to their last argument: `"` inside arguments is unsupported anyway, below)
-  (`test_cmd_reads_no_line_after_the_uv_line`, `test_cmd_never_reads_itself_again_after_uv`).
+- Nothing follows `%*` on the uv line, and the exit code is taken on the next line, `exit /b
+  %ERRORLEVEL%` (`test_cmd_takes_the_exit_code_on_the_line_after_uv`): an argument with an odd
+  number of double quotes (a `"` that CreateProcess callers write `\"`) swallows the rest of its
+  line, which then reached uv as arguments, and a bare `exit /b` after uv on the same line gave
+  every `cmd /c` caller (VS Code tasks, Python, xonsh, nushell) exit 0 whatever uv returned
+  (measured on the Windows runners).
+- cmd reads a batch file one line at a time and opens it again by name, at the byte where the
+  last line ended, for each line: deleted while it ran (`pyt uninstall` through the installed
+  `pyt.cmd`), it said "The batch file cannot be found." (exit 1, twice), and replaced (`pyt
+  install`) it would run what the new file holds at that offset. So `pyt.cmd` names itself for
+  the runner, `PYTEMPLATE_LAUNCHER_FILE=%~f0`, and `cmd_install.run_by_cmd` tells the file cmd
+  runs for this very run: uninstall handles it last and writes `cmd_install.self_deleting` in its
+  place (a file that holds, at the end of the old uv line, `(goto) 2>nul & del "%~f0" &
+  "%ComSpec%" /d /c exit %ERRORLEVEL%`: the batch ends, the file goes and the exit code stays
+  uv's; started on its own it says what it is, exit 1), and install refuses before any write to
+  replace it with other bytes (it names `.\pyt.cmd install` in the clone)
+  (`test_launcher_win.test_cmd_goes_on_reading_what_uninstall_leaves`,
+  `test_install.test_uninstall_leaves_a_self_deleting_stand_in_for_the_pyt_cmd_cmd_runs`,
+  `test_install_never_replaces_the_pyt_cmd_cmd_runs`).
 - The installed template (`:installed`, reached when the walk-up hits the drive root):
   `%LOCALAPPDATA%\pytemplate\template\`, else `%USERPROFILE%\AppData\Local\...`; with neither
   variable set it goes straight to `:no_root` (never a path below the current drive root).
@@ -910,6 +923,7 @@ header rules (with detector tests proving each rule fires).
 |---|---|---|
 | `PYTEMPLATE_CALLER_CWD` | launchers, Neovim plugin (`init.caller_cwd`: Neovim's cwd when inside the project, else the root) | Caller's cwd; read only through `project.caller_cwd` |
 | `PYTEMPLATE_LAUNCHER` | launchers, Neovim plugin (`nvim`) | Which launcher/shell ran (section 4.1) |
+| `PYTEMPLATE_LAUNCHER_FILE` | `pyt.cmd` (`%~f0`) | The batch file cmd runs, and reads again once uv returns: `cmd_install.run_by_cmd` (section 4.4) |
 | `PYTEMPLATE_GLOBAL=1` | launchers that find no project (they run the installed template); removed for a project's runner | Global mode (`project.GLOBAL`, read at import, and `pyt.py`; section 5.2); `__probe` reports it; `proc.base_env`, `shells.child_env`, `e2e.scrub_env` and `nvimtest.runner_env` drop it, so no child inherits it |
 | `XDG_DATA_HOME`, `HOME`, `LOCALAPPDATA`, `USERPROFILE` | user, OS | Where `./pyt install` puts the installed template and the launchers look for it (`cmd_install.snapshot_dir`, section 4.1) |
 | `UV_TOOL_BIN_DIR`, `XDG_BIN_HOME` | user | Through `uv tool dir --bin`: where `./pyt install` writes the launchers (`cmd_install.bin_dir`) |
@@ -1334,7 +1348,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 - `uninstall` (anywhere; in the installed template it deletes the files it runs from): the
   launchers with the MARKER in the current bin folder and in the recorded one, the installed
   template when it holds a record, the leftovers, and `<data home>/pytemplate` when empty; it
-  names what it leaves and why. `--dry-run` of both prints and writes nothing.
+  names what it leaves and why. `--dry-run` of both prints and writes nothing. The `pyt.cmd`
+  cmd runs for this very run (`run_by_cmd`) goes last, and only when everything else is gone
+  (`_retire`): `self_deleting` takes its place and deletes itself as cmd reads on (section
+  4.4); install refuses, before any write, to replace that file with other bytes.
 - `doctor(check)` (the last step of `./pyt doctor`, every mode): notes only (`[ok]`/`[--]`,
   never `[XX]`: pyt works without it): not installed, the installed template and its commit,
   older than this clone (`age`, in the template repository), launchers missing, foreign or
@@ -3020,8 +3037,8 @@ short temp tree and unset `NVIM_APPNAME`.
   behaviour tests run wherever pwsh exists: injection safety of the Core hand-over, `--%`,
   `-X:v`, typed comma lists and array values, pipeline input and raw stdin, `UV_PYTHON` and
   the other cleared variables, ConstrainedLanguage, the x bit, the installed template outside
-  projects and `deploy.py` inside old ones; cmd, the registry and cmd re-reading a pyt.cmd that
-  was deleted or replaced while it ran only on Windows),
+  projects and `deploy.py` inside old ones; cmd, the registry, the exit code `cmd /c` callers
+  get and cmd reading on in what uninstall leaves of the pyt.cmd it runs only on Windows),
   `test_paths.py` (path spellings, WSL detection, colours in a hidden console, dry runs in a
   throwaway copy),
   `test_render_core.py` (`render.apply`/`auto` and `state.json` in a sandbox, the render
@@ -3093,9 +3110,10 @@ short temp tree and unset `NVIM_APPNAME`.
   dry runs, uninstall from the clone, a project and the installed template, leftovers, `new`
   copying the same files from the installed template (a dotfiles repository around it too),
   the launcher and the installer agreeing on the folder; the swap in process with a failure or
-  a Ctrl+C injected at every step; the lookup rules, PATH and doctor lines; on Windows the bare
-  `pyt` through cmd, Windows PowerShell and pwsh, and `pyt uninstall` deleting the pyt.cmd cmd
-  runs), `test_apply.py` (`./pyt apply`/`setup` in throwaway projects with a fake uv that edits
+  a Ctrl+C injected at every step; the lookup rules, PATH and doctor lines; the pyt.cmd cmd
+  runs for the run itself: the stand-in uninstall leaves (where cmd reads on), install refusing
+  to replace it; on Windows the bare `pyt` through cmd, Windows PowerShell and pwsh, and `pyt
+  uninstall` through the pyt.cmd it removes), `test_apply.py` (`./pyt apply`/`setup` in throwaway projects with a fake uv that edits
   pyproject.toml like `uv add/remove --frozen`: the per-key matrix, `[preset.*]` changes, the
   record (and when it is written: failed steps after the lock, a rename whose lock fails),
   preset detection by every trace, hand-edited name/preset, refusals before any write, the
@@ -4619,12 +4637,17 @@ cmd.exe and CreateProcess (details: section 4.4):
   `test_fixes.py::test_pyz_wrapper_is_ascii_crlf_without_blocks`. Goes: never.
 - **cmd reads a batch file one line at a time, opening it again by name** (LIMITATION): `pyt
   uninstall` deleted the installed `pyt.cmd` that was running it, and cmd then said "The batch
-  file cannot be found." (after `pyt install` replaced it, cmd would run what the new file holds
-  at the old offset). Fix: the uv line of `pyt.cmd` ends with `& exit /b` (4.4). Test:
-  `test_launcher_win.py::test_cmd_reads_no_line_after_the_uv_line`,
-  `test_cmd_never_reads_itself_again_after_uv` (Windows),
-  `test_install.py::test_the_installed_pyt_runs_from_cmd_powershell_and_pwsh` (Windows). Goes:
-  never.
+  file cannot be found." (exit 1; after `pyt install` replaced it, cmd would run what the new
+  file holds at the old offset). An `exit /b` right after uv on the uv line reads nothing more,
+  but cmd still looked for the file (the same message) and `cmd /c` callers got exit 0 for
+  every run. Fix: `pyt.cmd` names itself (`PYTEMPLATE_LAUNCHER_FILE`), `cmd_install.run_by_cmd`
+  finds it, uninstall writes `cmd_install.self_deleting` in its place, which ends the batch and
+  deletes itself on the line cmd reads next, and install refuses to replace it with other bytes
+  (4.4). Test: `test_launcher_win.py::test_cmd_goes_on_reading_what_uninstall_leaves`,
+  `test_cmd_takes_the_exit_code_on_the_line_after_uv`,
+  `test_install.py::test_the_installed_pyt_runs_from_cmd_powershell_and_pwsh` (Windows),
+  `test_uninstall_leaves_a_self_deleting_stand_in_for_the_pyt_cmd_cmd_runs`,
+  `test_install_never_replaces_the_pyt_cmd_cmd_runs`. Goes: never.
 - **`%~dp0` is wrong when cmd found the file through PATH from a quoted name** (DEFECT): Up:
   none found. Fix: `pyt.cmd` checks `%~dp0.pytemplate\pyt.py`, else walks up from `%CD%`.
   Test: `test_launcher_win.py::test_cmd_walks_up_from_the_current_folder` (Windows). Goes:
