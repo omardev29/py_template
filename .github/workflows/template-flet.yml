@@ -8,16 +8,19 @@
 #            title, and draw when its button is clicked (the core then runs in Pyodide's event
 #            loop: a browser starts no process). The console log and a screenshot are uploaded.
 #   android  target = "apk": built, never run (an owner decision); the .apk must be a valid,
-#            signed zip with the manifest, the Flutter and Python runtimes of every ABI, the app
-#            and the native modules of its dependencies. It is uploaded for a few days.
+#            signed zip with the manifest, the Flutter and Python runtimes of every ABI, the app,
+#            every package the build project requires on Android and the native modules of its
+#            dependencies. It is uploaded for a few days.
 # The jobs run on bare runners: the Android SDK and the JDKs are part of the runner image, and
-# Flet installs its own Flutter (~3 GB), cached per Flet version with its other downloads (saved
-# right after a build that passed, so a red check keeps them). A failed build prints Flutter's
-# or Gradle's output in the job's log.
-# On pushes to main and pull requests that touch what a flet build depends on, weekly and by
-# hand: Flet pins Flutter and the Python and Pyodide builds it bundles, but its package index
-# (pypi.flet.dev), the CDNs the web app loads from, Gradle's repositories and the runner image
-# move, so a red scheduled run with no commit behind it means upstream drift.
+# Flet installs its own Flutter (~3 GB), cached per Flet version with its other downloads (about
+# 5.4 GB for both jobs, of the repository's 10 GB: saved on main only, right after a build that
+# passed, so a red check keeps them; pull requests restore main's). A failed build prints
+# Flutter's or Gradle's output in the job's log.
+# On pushes to main and pull requests that touch the runner, the launchers, the flet preset, the
+# lock or this workflow, weekly and by hand: Flet pins Flutter and the Python and Pyodide builds
+# it bundles, but its package index (pypi.flet.dev), the CDNs the web app loads from, Gradle's
+# repositories and the runner image move, so a red scheduled run with no commit behind it means
+# upstream drift (a cache GitHub evicted after 7 days without use makes it a cold build too).
 # template-keepalive.yml keeps the schedule alive.
 name: template-flet
 
@@ -25,9 +28,10 @@ on:
   push:
     branches: [main]
     paths:
-      - ".pytemplate/runner/methods/flet.py"
-      - ".pytemplate/runner/methods/common.py"
-      - ".pytemplate/runner/cmd_build.py"
+      - ".pytemplate/runner/**"
+      - ".pytemplate/pyt.py"
+      - "pyt"
+      - ".python-version"
       - ".pytemplate/presets/flet/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -35,9 +39,10 @@ on:
       - ".github/workflows/template-flet/**"
   pull_request:
     paths:
-      - ".pytemplate/runner/methods/flet.py"
-      - ".pytemplate/runner/methods/common.py"
-      - ".pytemplate/runner/cmd_build.py"
+      - ".pytemplate/runner/**"
+      - ".pytemplate/pyt.py"
+      - "pyt"
+      - ".python-version"
       - ".pytemplate/presets/flet/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -102,8 +107,9 @@ jobs:
       - name: ./pyt build cpython --method flet
         working-directory: ${{ runner.temp }}/pt-flet
         run: ./pyt build cpython --method flet
-      # Saved once the build passed, before the checks: a red check keeps a cold build's downloads
-      - if: steps.cache.outputs.cache-hit != 'true'
+      # Saved once the build passed, before the checks: a red check keeps a cold build's downloads.
+      # On main only: a pull request restores main's (a copy per branch filled the 10 GB)
+      - if: steps.cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@v6
         with:
           path: |
@@ -142,11 +148,15 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      # A cold build needs about 15 GB: freed only when the runner image leaves less than 30
       - name: Disk space for Flutter, Gradle and three ABIs
         run: |
           df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/.ghcup /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
+          free=$(df -BG --output=avail / | sed -n 2p | tr -dc 0-9)
+          if [ "$free" -lt 30 ]; then
+            sudo rm -rf /usr/share/dotnet /usr/local/.ghcup /opt/ghc /opt/hostedtoolcache/CodeQL
+            df -h /
+          fi
       - name: A new flet project, as a user makes it
         run: ./pyt new "$RUNNER_TEMP/pt-flet" --preset flet
       - name: Runner environment
@@ -171,7 +181,7 @@ jobs:
       - name: ./pyt build cpython --method flet
         working-directory: ${{ runner.temp }}/pt-flet
         run: ./pyt build cpython --method flet
-      - if: steps.cache.outputs.cache-hit != 'true'
+      - if: steps.cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@v6
         with:
           path: |
@@ -182,7 +192,7 @@ jobs:
             ~/.gradle/wrapper
           key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: What the .apk holds
-        run: uv run --no-project --python 3.14 python .github/workflows/template-flet/check.py apk "$RUNNER_TEMP/pt-flet"
+        run: uv run --no-project --python 3.14 --with packaging==26.3 python .github/workflows/template-flet/check.py apk "$RUNNER_TEMP/pt-flet"
       - name: Its signature and manifest (the Android SDK's build tools)
         run: |
           tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)

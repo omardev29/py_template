@@ -753,6 +753,28 @@ def test_nuitka_dry_run_shows_the_flags(no_build: None, monkeypatch: pytest.Monk
     assert "experimental" in err
 
 
+def test_flet_dry_run_shows_the_target_and_the_pins(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`--dry-run build --method flet` names the target and, for a mobile or web one, the markers
+    and pins the build project gets instead of uv.lock's: a real build said so only once it ran."""
+    from runner.methods import flet
+
+    pins = ["flet==1.0.1", "msgpack==1.2.2", "tomli-w==1.2.0 ; sys_platform == 'android'"]
+    monkeypatch.setattr(flet, "_pinned_requirements", lambda env: list(pins))
+    (sandbox / "uv.lock").write_text(FLET_LOCK, encoding="utf-8")
+    monkeypatch.setattr(common, "LOCK", sandbox / "uv.lock")
+    monkeypatch.setattr(flet, "host_os", lambda: "linux")
+    lines = flet.plan_lines(_flet_cfg(deploy={"flet": {"target": "apk"}}))
+    assert lines[0] == "flet build apk" and len(lines) == 3, lines
+    assert lines[1].endswith("tomli-w==1.2.0 ; platform_system == 'Android'") and "msgpack==1.2.2 -> msgpack" in lines[2], lines
+    assert flet.plan_lines(_flet_cfg(deploy={"flet": {"target": "host"}})) == ["flet build linux"]  # desktop: every pin as locked
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    monkeypatch.setattr(cmd_build, "check_lock", lambda cfg: None)
+    monkeypatch.setattr(flet, "_developer_mode", lambda: True)
+    assert cmd_build.cmd_build(_flet_cfg(deploy={"flet": {"target": "apk"}}), ["--method", "flet", "--no-check"]) == 0
+    err = capsys.readouterr().err
+    assert "  flet build apk" in err and "platform_system == 'Android'" in err and "msgpack==1.2.2 -> msgpack" in err
+
+
 def test_nuitka_keys_of_every_preset_load() -> None:
     # The [deploy.nuitka] lines of the four pytemplate.toml files are valid (defaults: auto, no PGO)
     import tomllib

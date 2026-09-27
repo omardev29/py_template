@@ -533,7 +533,9 @@ def test_flet_workflow_builds_for_the_web_and_android() -> None:
     paths = re.findall(r'"(.+)"', lists[0])
     for pattern in paths:  # a renamed file must fail here, not leave a trigger that never fires
         assert (ROOT / pattern[:-3]).is_dir() if pattern.endswith("/**") else (ROOT / pattern).is_file(), pattern
-    wanted = {".pytemplate/runner/methods/flet.py", ".pytemplate/presets/flet/**", "uv.lock", ".github/workflows/template-flet.yml"}
+    # every module a flet build runs (envs, render, mypyc, config... not only methods/flet.py), the
+    # launcher and the runner's Python the jobs start
+    wanted = {".pytemplate/runner/**", ".pytemplate/pyt.py", "pyt", ".python-version", ".pytemplate/presets/flet/**", "uv.lock", ".github/workflows/template-flet.yml"}
     assert wanted | {".github/workflows/template-flet/**"} <= set(paths)
     assert re.search(r"(?m)^permissions:\n  contents: read$", text)
 
@@ -558,7 +560,8 @@ def test_flet_workflow_builds_for_the_web_and_android() -> None:
         assert body.count(f"working-directory: ${{{{ runner.temp }}}}/{FLET_PROJECT}") == 2, job  # setup and the build
         key = f"template-flet-{job}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-flet-${{{{ steps.flet.outputs.version }}}}"
         assert f"key: {key}" in body and "key: ${{ steps.cache.outputs.cache-primary-key }}" in body, job
-        assert "if: steps.cache.outputs.cache-hit != 'true'" in body, job
+        # saved on main only (a pull request restores main's): one copy per branch filled the 10 GB
+        assert body.count("if: steps.cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'") == 1, job
         cached = ["~/flutter", "~/.pub-cache", "~/.flet/cache"] + (["~/.gradle/caches", "~/.gradle/wrapper"] if job == "android" else [])
         assert _cache_paths(body, "actions/cache/restore@v6") == _cache_paths(body, "actions/cache/save@v6") == cached, job
         upload = _step(body, "Upload")
@@ -576,6 +579,8 @@ def test_flet_workflow_builds_for_the_web_and_android() -> None:
     android = found["android"]
     assert re.search(r'uses: actions/setup-java@v6\n        with:\n          distribution: temurin\n          java-version: "17"\n', android)
     apk = f"check.py apk {project}"
+    locked = re.search(r'(?m)^name = "packaging"\nversion = "([^"]+)"$', (ROOT / "uv.lock").read_text(encoding="utf-8"))
+    assert locked and f"--with packaging=={locked[1]} python .github/workflows/template-flet/{apk}" in android  # the markers of the build project
     signature = '"$tools/apksigner" verify --verbose "$apk"'
     folder = f"{FLET_PROJECT}/dist/{FLET_PROJECT}-cpython-flet-apk"
     assert android.index("uses: actions/setup-java@v6") < android.index("run: ./pyt build") < android.index(apk) < android.index(signature)
@@ -679,9 +684,36 @@ def _apk_entries(pkg: str = "pt_flet", minor: str = "3.14") -> dict[str, dict[st
         for lib in ("libflutter.so", "libapp.so", "libdart_bridge.so", f"libpython{minor}.so", "lib_ssl.so", "libmsgpack-_cmsgpack.so"):
             entries[f"lib/{abi}/{lib}"] = b"\x7fELF"
     entries["assets/app.zip"] = {n: b"" for n in ("main.py", f"{pkg}/__init__.py", f"{pkg}/ui/app.py", f"{pkg}/core/fractal.py", f"{pkg}/resources.py")}
-    entries["assets/sitepackages.zip"] = {"flet/__init__.py": b"", "msgpack/_cmsgpack.soref": b"libmsgpack-_cmsgpack.so"}
+    entries["assets/sitepackages.zip"] = {
+        "flet/__init__.py": b"",
+        "msgpack/_cmsgpack.soref": b"libmsgpack-_cmsgpack.so",
+        **{f"{d}.dist-info/METADATA": b"" for d in ("flet-1.0.1", "msgpack-1.1.2", "httpx-0.28.1", "tomli_w-1.2.0", "Typing_Extensions-4.16.0")},
+    }
     entries["assets/stdlib.zip"] = {"os.py": b"", "_ssl.soref": b"lib_ssl.so\n"}
     return entries
+
+
+# The build project `./pyt build cpython --method flet` wrote for an apk: its pins, the relaxed
+# binary one, markers as flet.target_markers writes them
+APK_BUILD_PROJECT = """[project]
+name = "pt-flet"
+dependencies = [
+    "flet==1.0.1 ; python_full_version < '3.15' and implementation_name == 'cpython'",
+    "msgpack ; python_full_version < '3.15'",
+    "httpx==0.28.1 ; python_full_version < '3.15' and platform_system != 'Emscripten'",
+    "pyodide-http==0.2.2 ; platform_system == 'Emscripten'",
+    "tomli-w==1.2.0 ; platform_system == 'Android'",
+    "distro==1.9.0 ; platform_system == 'Linux'",
+    "backports-tarfile==1.2.0 ; python_full_version < '3.12'",
+    "typing-extensions==4.16.0",
+]
+"""
+
+
+def _write_build_project(project: Path, text: str = APK_BUILD_PROJECT) -> None:
+    path = project / ".build" / "flet-build" / "cpython" / "pyproject.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
 
 
 def _write_apk(project: Path, entries: dict[str, dict[str, bytes] | bytes], name: str = "app-release.apk") -> Path:
@@ -695,15 +727,20 @@ def _write_apk(project: Path, entries: dict[str, dict[str, bytes] | bytes], name
 def test_flet_apk_check_reads_serious_pythons_layout(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """check.py apk passes a complete build and names what an incomplete one lacks: a runtime of
     one ABI, a native module of one ABI, the app, the dependencies' native modules, a zip."""
+    pytest.importorskip("packaging.requirements")
     check = _flet_check()
     project = tmp_path / FLET_PROJECT
     _flet_project(project)
+    _write_build_project(project)
     with pytest.raises(check.Failed, match=r"0 \.apk files, not one"):
         check.check_apk(project)
     apk = _write_apk(project, _apk_entries())
     check.check_apk(project)
     out = capsys.readouterr().out
     assert "ok   app-release.apk" in out and "the dependencies' native modules: msgpack/_cmsgpack.soref" in out
+    # the packages that hold on Android: not pyodide-http (the web), distro (Linux) or backports (< 3.12)
+    assert check.android_requirements(project, "3.14") == ["flet", "msgpack", "httpx", "tomli-w", "typing-extensions"]
+    assert "the 5 packages the build project requires on Android" in out
 
     def fails(entries: dict[str, dict[str, bytes] | bytes], reason: str) -> None:
         _write_apk(project, entries)
@@ -714,6 +751,13 @@ def test_flet_apk_check_reads_serious_pythons_layout(tmp_path: Path, capsys: pyt
     entries = _apk_entries()
     del entries["lib/x86_64/libpython3.14.so"]
     fails(entries, "lib/x86_64/ lacks libpython3.14.so")
+    # a dependency of the app missing from the apk (import flet fails on the device)
+    for gone in ("httpx-0.28.1", "tomli_w-1.2.0"):
+        entries = _apk_entries()
+        site = entries["assets/sitepackages.zip"]
+        assert isinstance(site, dict)
+        del site[f"{gone}.dist-info/METADATA"]
+        fails(entries, f"assets/sitepackages.zip lacks {gone.rpartition('-')[0].replace('_', '-')} (no .dist-info)")
     entries = _apk_entries()
     del entries["lib/armeabi-v7a/libmsgpack-_cmsgpack.so"]
     fails(entries, "msgpack/_cmsgpack.soref names libmsgpack-_cmsgpack.so, which lib/armeabi-v7a/ lacks")

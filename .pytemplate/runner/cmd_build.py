@@ -174,6 +174,11 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
             ui.info(f"  Nuitka options: {proc.show(options)}")
             if cfg.deploy.nuitka.pgo:
                 ui.info(nuitka_method.PGO_NOTE)
+        if method == "flet":
+            from .methods import flet as flet_method  # the target, and what happens to the pins
+
+            for line in flet_method.plan_lines(cfg):
+                ui.info(f"  {line}")
         return 0
 
     # The wheel builds its own project from src/ (its setup.py compiles with mypyc): the mypyc

@@ -18,7 +18,9 @@ Usage (Python >= 3.11; `web` also needs Playwright and its Chromium: browser.txt
                                          OUT, pass or fail.
   python check.py apk PROJECT            the .apk (built, never run): a valid zip with the
                                          manifest, the Flutter and Python runtimes of every ABI,
-                                         the app and the native modules of its dependencies.
+                                         the app, every package the build project requires on
+                                         Android (its .dist-info; needs `packaging`) and the
+                                         native modules of its dependencies.
 Exit code 0 when the step passes, 1 when it fails (the reason is printed), 2 on bad usage.
 """
 
@@ -65,6 +67,11 @@ CLICK_AGAIN = 20.0  # no "Computing..." this long after the click: tap the seman
 ABIS = ("arm64-v8a", "armeabi-v7a", "x86_64")
 ABI_LIBS = ("libflutter.so", "libapp.so", "libdart_bridge.so")  # and libpython<minor>.so
 APP_ZIPS = ("assets/app.zip", "assets/sitepackages.zip", "assets/stdlib.zip")
+# What `./pyt build cpython --method flet` gave flet build (methods/flet.py writes it)
+BUILD_PROJECT = Path(".build") / "flet-build" / "cpython" / "pyproject.toml"
+# An Android device as PEP 508 markers see it: the build project's platform markers are
+# platform_system ones (methods/flet.py target_markers), the only one flet build's pip reads
+ANDROID = {"platform_system": "Android", "sys_platform": "android", "os_name": "posix", "implementation_name": "cpython", "platform_python_implementation": "CPython"}
 
 
 class Failed(Exception):
@@ -285,8 +292,38 @@ def _module(names: dict[str, bytes], path: str) -> bool:
     return f"{path}.pyc" in names or f"{path}.py" in names
 
 
+def _norm(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def android_requirements(project: Path, minor: str) -> list[str]:
+    """The normalized names of the requirements of the build project that hold on an Android
+    device with Python `minor`: what the .apk must carry."""
+    from packaging.requirements import Requirement  # the apk step runs with packaging (template-flet.yml)
+
+    path = project / BUILD_PROJECT
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        raise Failed(f"{path}: cannot read the build project flet build got: {e}") from None
+    device = {**ANDROID, "python_version": minor, "python_full_version": f"{minor}.0"}
+    out = []
+    for text in data.get("project", {}).get("dependencies", []):
+        requirement = Requirement(text)
+        if requirement.marker is None or requirement.marker.evaluate(device):
+            out.append(_norm(requirement.name))
+    return out
+
+
+def _distributions(site: dict[str, bytes]) -> set[str]:
+    """The normalized names of the packages a site-packages zip holds (their .dist-info)."""
+    folders = {n.split("/", 1)[0] for n in site if "/" in n}
+    return {_norm(f[: -len(".dist-info")].rpartition("-")[0]) for f in folders if f.endswith(".dist-info")}
+
+
 def check_apk(project: Path) -> None:
     _name, pkg, minor = project_info(project)
+    required = android_requirements(project, minor)
     folder = output_dir(project, "apk")
     apks = sorted(folder.glob("*.apk"))
     if len(apks) != 1:
@@ -324,6 +361,9 @@ def check_apk(project: Path) -> None:
     site = zips.get("assets/sitepackages.zip", {})
     if site and not _module(site, "flet/__init__"):
         problems.append("assets/sitepackages.zip lacks flet")
+    lacking = [n for n in required if n not in _distributions(site)] if site else []
+    if lacking:
+        problems.append(f"assets/sitepackages.zip lacks {', '.join(lacking)} (no .dist-info), which the build project requires on Android")
     # serious_python moves every native module to lib/<abi>/lib<dotted-name>.so and leaves a
     # `.soref` marker holding that name where the module was
     for zip_name in APP_ZIPS[1:]:
@@ -344,7 +384,7 @@ def check_apk(project: Path) -> None:
     print(
         f"ok   {apk.name}: manifest, dex and Flutter's assets; {', '.join(ABIS)} each with Flutter,"
         f" the Dart code, {python_lib}, the Dart bridge and every native module; the app ({pkg}) and"
-        " flet as Python code"
+        f" flet as Python code; the {len(required)} packages the build project requires on Android"
     )
 
 

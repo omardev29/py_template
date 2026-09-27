@@ -822,8 +822,9 @@ rules, `--method flet` outside the flet preset or on Windows without Developer M
 `uv.lock`, and the UPX binary of a method that packs (a missing `deploy.upx.path`, or a failed
 download).
 `./pyt --dry-run build ...` runs the same refusals and prints the output name (for nuitka
-also its options, with UPX the `upx` it would use or download), without building or
-downloading.
+also its options, for flet the target and, for a mobile or web one, the markers and pins its
+build gets instead of `uv.lock`'s, with UPX the `upx` it would use or download), without
+building or downloading.
 
 ### exe
 
@@ -1017,6 +1018,10 @@ about 7 minutes, the next ones about 3.
   than those indexes hold: `./pyt add numpy` writes `numpy>=<the newest release on PyPI>`, and
   Pyodide and Flet's index lag behind. If pip then finds no release, lower the bound in
   `pyproject.toml` (`numpy>=2.4`), then `./pyt lock`.
+- A web build served under a subpath (a GitHub Pages project site, `https://you.github.io/game/`)
+  needs that path: `base_url = "game"` in `[tool.flet.web]` of `pyproject.toml` (the build
+  project takes your whole `[tool.flet]`), or `extra_args = ["--base-url", "game"]` in
+  `[deploy.flet]`. Built for `/` (the default), it shows a blank page there.
 - `cleanup` (default `true`): `--cleanup-app --cleanup-packages`. `false` turns both off: Flet
   cleans the packages unless told not to, so the build project gets `app = false` and
   `packages = false` in `[tool.flet.cleanup]` (values your own `[tool.flet.cleanup]` sets stay).

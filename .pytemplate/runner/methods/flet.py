@@ -170,6 +170,25 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
+def plan_lines(cfg: Config) -> list[str]:
+    """What `./pyt --dry-run build B --method flet` says about the build project: its target
+    and, for a mobile or web one, the markers target_markers writes and the pins
+    common.unpin_binaries relaxes (the warning of a real build). Reads uv.lock (uv export)."""
+    target = build_target(cfg)
+    lines = [f"flet build {target}"]
+    if target not in MOBILE_WEB:
+        return lines
+    pins = _pinned_requirements(envs.tool_env(cfg))
+    marked = target_markers(pins)
+    changed = [new for old, new in zip(pins, marked, strict=True) if old != new]
+    if changed:
+        lines.append(f"{target}: markers written as platform_system ones (what flet build's pip reads): {'; '.join(changed)}")
+    _, relaxed = common.unpin_binaries(marked)
+    if relaxed:
+        lines.append(relaxed_message(target, relaxed))
+    return lines
+
+
 def build_target(cfg: Config) -> str:
     """The `flet build` target: [deploy.flet] target, with "host" as this OS."""
     target = cfg.deploy.flet.target

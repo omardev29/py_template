@@ -864,7 +864,8 @@ header rules (with detector tests proving each rule fires).
   uv.lock fails) and the UPX binary (`upx.preflight`: a missing `deploy.upx.path` fails) as
   a real build does, prints the checks (unless `--no-check`) and `(--dry-run) build B -> M:
   would output dist/<name>-<b>-<m>*` (nuitka: also `Nuitka options: --lto=... [--pgo-c ...]
-  <extras>`; a method that packs with UPX on this host: `upx: <path>` or `upx: would download
+  <extras>`; flet: `flet build <target>` and, for a mobile or web target, the markers and pins
+  the build project gets instead of uv.lock's, `flet.plan_lines`; a method that packs with UPX on this host: `upx: <path>` or `upx: would download
   <url> into <cache>` (`... if the build holds a binary to pack` for a `runtime = "system"`
   portable build), never the download), then stops. `report` builds nothing and never opens
   the browser. No success line for a skipped step: `compile`, `report` and `check` print
@@ -3441,8 +3442,10 @@ short temp tree and unset `NVIM_APPNAME`.
   September 2026 (images ubuntu-24.04, macos-26-arm64, windows-2025-vs2026; uv 0.12, Neovim
   0.12.5).
 - **[template repo]** `template-flet.yml` (gate job; pushes to `main` and pull requests that touch
-  the flet method, `methods/common.py`, `cmd_build.py`, the flet preset, the root
-  `pyproject.toml`/`uv.lock` or the workflow and its folder; weekly and by hand) and its folder
+  the runner (`.pytemplate/runner/**`: a flet build runs some 23 of its modules, envs, render,
+  mypyc and config among them, not only the flet method), `.pytemplate/pyt.py`, the `pyt`
+  launcher, `.python-version`, the flet preset, the root `pyproject.toml`/`uv.lock` or the
+  workflow and its folder; weekly and by hand) and its folder
   `template-flet/`: two jobs on bare `ubuntu-latest` runners (the runner image's Android SDK and
   JDKs; Flet installs its own Flutter), each `./pyt new "$RUNNER_TEMP/pt-flet" --preset flet`
   (app `pt-flet`, package `pt_flet`), `./pyt setup`, `check.py target` (`[deploy.flet] target`
@@ -3458,23 +3461,32 @@ short temp tree and unset `NVIM_APPNAME`.
   the button's centre (a tap of its semantics node after 20 s without "Computing...") and the
   status `N iterations in T s (core: CPython)` (`Draw failed` fails at once); the console log
   (with the server's) and a full-page screenshot are uploaded (`flet-web-browser`,
-  `if: always()`). `android` (75 min): Temurin 17
-  (`actions/setup-java`, the javac Flet asks for), disk freed first (dotnet, GHC, CodeQL), then
-  `check.py apk`: one `.apk` in `dist/pt-flet-cpython-flet-apk/`, every CRC right, the manifest,
+  `if: always()`); the status is set once the core returned the image, which only the
+  screenshot shows (unchecked). `android` (75 min): Temurin 17
+  (`actions/setup-java`, the javac Flet asks for), disk freed only when the image leaves less than
+  30 GB (dotnet, GHC, CodeQL; a cold build needs about 15), then
+  `check.py apk` (with the locked `packaging`, `--with packaging==<uv.lock's>`): one `.apk` in
+  `dist/pt-flet-cpython-flet-apk/`, every CRC right, the manifest,
   `classes.dex`, `resources.arsc`, `assets/flutter_assets/`, per ABI (`arm64-v8a`,
   `armeabi-v7a`, `x86_64`) `libflutter.so`, `libapp.so`, `libdart_bridge.so` and
   `libpython3.14.so`, `assets/app.zip` with the app's modules (`.py` or `.pyc`, no native
-  module), `assets/sitepackages.zip` with flet, and in it and `assets/stdlib.zip` at least one
+  module), `assets/sitepackages.zip` with flet and a `.dist-info` of every requirement of the
+  build project (`.build/flet-build/cpython/pyproject.toml`) whose marker holds on an Android
+  device (`check.android_requirements`: an apk without repath, six or httpx passed, and on a
+  device `import flet` fails), and in it and `assets/stdlib.zip` at least one
   `.soref` marker whose library every ABI holds (serious_python_android 4.7.1's split); then
   `apksigner verify` and `aapt2 dump badging` of the newest build tools, and the `.apk` is
   uploaded for 3 days (`flet-apk`, `if: always()`). The caches (`~/flutter`, `~/.pub-cache`,
-  `~/.flet/cache`, plus Gradle's for Android) are keyed by job, OS, arch and the Flet version,
-  restored with `actions/cache/restore` and saved with `actions/cache/save` right after a build
-  that passed (a red check keeps a cold build's downloads; 15.1). Pinned by
+  `~/.flet/cache`, plus Gradle's for Android; about 1.8 and 3.6 GB) are keyed by job, OS, arch
+  and the Flet version, restored with `actions/cache/restore` and saved with `actions/cache/save`
+  right after a build that passed (a red check keeps a cold build's downloads; 15.1), on `main`
+  only: a pull request restores main's (the first run saved both into the pull request's own
+  scope, and a copy per branch filled the repository's 10 GB). Pinned by
   `test_workflows.test_flet_workflow_builds_for_the_web_and_android` and the other
-  `test_flet_*` tests. Not run on GitHub when it was written (September 2026): the web job
-  passed locally in parts (the same `./pyt` steps, the browser check behind the sandbox proxy
-  with `--ignore-certificate-errors`), the Android job not at all (13.3).
+  `test_flet_*` tests. First run on GitHub on PR #4 (September 2026, runs 36325942984 and
+  36326885602): both jobs passed; the apk build took 6.5 min cold and 3.8 warm (133.7 MB, three
+  ABIs of 63 libraries each), the web build 2.2 and 1.2 min (Python started in Chromium in 3-4 s,
+  a draw 3-6 s).
 
 ### 13.3 Coverage limits
 
@@ -3496,8 +3508,9 @@ install prompt on Windows (POSIX `pyt` and pwsh
 `pyt.ps1` answer it on a pseudo-terminal), Neovim 0.11 on Windows, pyright via Mason, VS
 Code itself (buttons, Problems panel: only simulated), the desktop targets of `flet build`
 outside Windows (verified by hand there, section 10), an Android app on a device or an emulator
-(an owner decision: template-flet.yml only builds the `.apk` and reads it; it was never built
-locally, so its first CI run is the first `apk` build; 13.2), an iOS build, a web build in a
+(an owner decision: template-flet.yml only builds the `.apk` and reads it, 13.2; it was never
+built locally), an iOS build, the web build served under a subpath (`[tool.flet.web]
+base_url`: the check serves it at `/`), a web build in a
 browser other than Chromium, bundled PyPy portable builds on CI, Ctrl+C
 handling of the nvim harness (its tree kill only simulated; SIGTERM and SIGHUP run for real on
 POSIX, as `selftest --e2e`'s do in `test_e2e_run.py`), `[deploy.nuitka]` lto/pgo outside Linux (measured with Nuitka
@@ -4981,8 +4994,10 @@ Behaviour:
   caught. iOS apps and the desktop targets of `flet build` are built in no CI job. The web check
   needs the CDNs the app loads from (jsDelivr for Pyodide, gstatic for CanvasKit and the fonts),
   and both builds need Flet's index (pypi.flet.dev), Flutter's and Gradle's repositories: a red
-  run with no commit behind it may be theirs. Its caches (Flutter, pub, Flet, Gradle) take
-  several GB of the repository's 10 GB, of which GitHub evicts the least recently used. Its bare
+  run with no commit behind it may be theirs. Its caches (Flutter, pub, Flet, Gradle) take about
+  5.4 GB of the repository's 10 GB per Flet version (saved on main only; `~/flutter` twice, once
+  per job), of which GitHub evicts the least recently used, and any not used for 7 days: the
+  weekly run may then build cold (a few minutes more). Its bare
   `ubuntu-latest` runners move: the Android SDK packages and NDK of the runner image, and an
   Ubuntu release the pinned Playwright cannot install its browser's dependencies on (then bump
   `template-flet/browser.txt`). The `.apk` check reads serious_python_android 4.7.1's layout,
