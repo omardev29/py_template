@@ -30,7 +30,7 @@ import pytest
 TEMPLATE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEMPLATE_DIR))
 
-from runner import cli, cmd_dev, cmd_env, cmd_mode, config, e2e, envs, lintc, mypyc, nvimtest, presets, proc, render, shells, tasks, ui  # noqa: E402
+from runner import cli, cmd_dev, cmd_env, cmd_mode, config, e2e, envs, lintc, mypyc, nvimtest, presets, proc, project, render, shells, tasks, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import BUILD, DIST, ROOT, SRC  # noqa: E402
 from runner.ui import PytError  # noqa: E402
@@ -2153,6 +2153,7 @@ def test_a_restarted_command_that_was_interrupted_reports_once(monkeypatch: pyte
 
 def test_no_restart_on_python_cpython_nor_for_what_runs_anywhere(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     box = Restart(monkeypatch, tmp_path)
+    monkeypatch.setattr(project, "launcher_python", lambda root: ("", "only-managed"))  # the project has .venv
     monkeypatch.setattr(cli, "_python_needed", lambda rest: "%d.%d" % sys.version_info[:2])  # this very Python
     assert cli._restart(["run"], ["run"]) is None
     monkeypatch.setattr(cli, "_python_needed", lambda rest: None)  # help, doctor, new...
@@ -2161,6 +2162,34 @@ def test_no_restart_on_python_cpython_nor_for_what_runs_anywhere(monkeypatch: py
     monkeypatch.setattr(cli, "_started_by_uv", lambda: False)  # by hand, a test, or already restarted
     assert cli._restart(["run"], ["run"]) is None
     assert box.calls == []
+
+
+def test_a_python_of_the_right_minor_is_not_python_cpython_unless_uv_manages_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """With the project's environment the launchers asked uv for its own CPython (only-managed):
+    python.cpython's minor is enough. Without it they let uv take a system Python too, so one of
+    that minor (Fedora's or Homebrew's 3.14, Termux's 3.13 for a python.cpython of "3.13") only
+    runs the command when uv names it as its own; else the command moves onto uv's, or stops where
+    uv has none (ensure_python)."""
+    box = Restart(monkeypatch, tmp_path)
+    this = "%d.%d" % sys.version_info[:2]
+    monkeypatch.setattr(cli, "_python_needed", lambda rest: this)
+    asked: list[str] = []
+
+    def found(path: Path | None) -> None:
+        monkeypatch.setattr(envs, "find_cpython", lambda version: asked.append(version) or path)
+
+    found(None)
+    monkeypatch.setattr(project, "launcher_python", lambda root: ("", "only-managed"))
+    assert cli._restart(["run"], ["run"]) is None and asked == [] and box.calls == []
+    monkeypatch.setattr(project, "launcher_python", lambda root: (">=3.11", "managed"))
+    own = Path(sys.base_prefix) / ("python.exe" if IS_WINDOWS else f"bin/python{this}")
+    found(own)  # uv's own CPython of that minor is the one this runner runs on
+    assert cli._restart(["run"], ["run"]) is None and asked == [this] and box.calls == []
+    (tmp_path / "system" / "bin").mkdir(parents=True)
+    found(tmp_path / "system" / "bin" / f"python{this}")  # uv's is another interpreter
+    assert cli._restart(["run"], ["run"]) == 7 and box.calls[-1][0][0] == str(box.python)
+    found(None)  # uv has none of that minor (Termux): ensure_python installs it or says why
+    assert cli._restart(["run"], ["run"]) == 7 and len(box.calls) == 2
 
 
 def test_python_cpython_uv_cannot_install_stops_the_command(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -2206,20 +2235,24 @@ def _another_cpython() -> str:
 @needs_uv
 def test_a_runner_started_on_another_python_moves_project_commands(tmp_path: Path) -> None:
     """For real: the launchers let uv start the runner on any CPython 3.11+ (here another one than
-    python.cpython). `help` runs there; `tasks` runs in a second runner on python.cpython, which
-    -v shows, and its output and exit code are this run's."""
+    python.cpython) while the project has no environment. `help` runs there; `tasks` runs in a
+    second runner on python.cpython, which -v shows, and its output and exit code are this run's.
+    In a throwaway copy: uv makes a script's cached environment again, in the same folder, for
+    another Python, and this checkout's is the one `./pyt selftest` runs in (Windows cannot
+    delete it)."""
     other = _another_cpython()
     uv = os.environ.get("UV") or shutil.which("uv")
     assert uv
-    start = [uv, "run", "--quiet", f"--python={other}", "--python-preference", "managed", "--script", str(PYT_PY)]
+    presets.copy_template(tmp_path)
+    start = [uv, "run", "--quiet", f"--python={other}", "--python-preference", "managed", "--script", str(tmp_path / ".pytemplate" / "pyt.py")]
     env = child_env()
-    helped = subprocess.run([*start, "-v", "help"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=300, check=False)
+    helped = subprocess.run([*start, "-v", "help"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300, check=False)
     assert helped.returncode == 0 and "Development:" in helped.stdout, helped.stderr
     assert "pyt.py -v help" not in helped.stderr  # no second runner
-    listed = subprocess.run([*start, "-v", "tasks"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=300, check=False)
+    listed = subprocess.run([*start, "-v", "tasks"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300, check=False)
     assert listed.returncode == 0, listed.stdout + listed.stderr
     assert re.search(r"\$ python\S* -s .*pyt\.py -v tasks", listed.stderr), listed.stderr  # Windows: python.exe
     pinned = config.load(set()).python.cpython
     assert f"python{pinned}" in listed.stderr or IS_WINDOWS, listed.stderr
-    code = subprocess.run([*start, "bogus-command"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=300, check=False)
+    code = subprocess.run([*start, "bogus-command"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300, check=False)
     assert code.returncode == 2 and "unknown command: bogus-command" in code.stderr, code.stderr

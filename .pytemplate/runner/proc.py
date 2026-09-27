@@ -147,14 +147,14 @@ def runner_env() -> dict[str, str]:
 
 def runner_argv(uv: str, root: Path, args: Sequence[str | Path], python: str | Path | None = None) -> list[str]:
     """`./pyt ARGS` of the project at `root` as its launchers run it (CLAUDE.md 4.1): uv run
-    --script with the launchers' --python= request (project.launcher_python: empty, so uv follows
-    .python-version, while the project has an environment, else any CPython 3.11 or newer), or
-    `python` itself. `--python-preference managed` wins over the project's only-managed: a system
-    CPython serves where uv has none to download. The environment must hold no UV_MANAGED_PYTHON
-    nor UV_NO_MANAGED_PYTHON (uv refuses them next to that option): base_env drops them."""
-    request = str(python) if python is not None else launcher_python(root)
+    --script with the launchers' --python= request and --python-preference
+    (project.launcher_python: none and only-managed, so uv follows .python-version, while the
+    project has an environment; else any CPython 3.11 or newer, a system one too), or on `python`
+    itself. The environment must hold no UV_MANAGED_PYTHON nor UV_NO_MANAGED_PYTHON (uv refuses
+    them next to --python-preference): base_env drops them."""
+    request, preference = (str(python), "managed") if python is not None else launcher_python(root)
     entry = root / ".pytemplate" / "pyt.py"
-    return [uv, "run", "--quiet", f"--python={request}", "--python-preference", "managed", "--script", str(entry), *map(str, args)]
+    return [uv, "run", "--quiet", f"--python={request}", "--python-preference", preference, "--script", str(entry), *map(str, args)]
 
 
 def show(argv: Sequence[str | Path]) -> str:

@@ -99,7 +99,7 @@ def test_cmd_has_no_blocks_and_no_delayed_expansion() -> None:
 
 def test_cmd_forwards_arguments_only_on_the_uv_line() -> None:
     lines = [line for line in _text_lines(CMD) if "%*" in line]
-    assert len(lines) == 1 and 'run --quiet "--python=%PT_PY%" --python-preference managed --script' in lines[0], lines
+    assert len(lines) == 1 and 'run --quiet "--python=%PT_PY%" --python-preference %PT_PREF% --script' in lines[0], lines
     assert not [line for line in _text_lines(CMD) if re.match(r"(?i)\s*rem\b", line) and "%" in line], (
         "cmd expands % even on rem lines"
     )
@@ -149,22 +149,26 @@ def test_ps1_has_no_param_block_and_leaves_path_alone() -> None:
 
 def test_every_launcher_starts_the_runner_on_the_same_python() -> None:
     """pyt, pyt.cmd, pyt.ps1 and the Neovim plugin start the runner the same way (CLAUDE.md 4.1):
-    `uv run --python=REQUEST --python-preference managed --script`, where REQUEST is empty (no
-    request: uv follows .python-version) while the project has an environment (.venv, or
-    .venv-wsl on POSIX), else ">=3.11" (project.launcher_python; test_launcher_sh runs pyt and
-    pyt.ps1 against it). One word, --python=: Windows PowerShell 5.1 drops an empty argument."""
+    `uv run --python=REQUEST --python-preference PREF --script`: while the project has an
+    environment (.venv, or .venv-wsl on POSIX) REQUEST is empty (no request: uv follows
+    .python-version) and PREF only-managed, else ">=3.11" and managed (project.launcher_python;
+    test_launcher_sh runs pyt and pyt.ps1 against it). One word, --python=: Windows PowerShell 5.1
+    drops an empty argument."""
     sh = (ROOT / "pyt").read_text(encoding="ascii")
     cmd = CMD.read_bytes().decode("ascii")
     ps1 = PS1.read_text(encoding="ascii")
     lua = (ROOT / ".pytemplate" / "nvim" / "lua" / "pytemplate" / "init.lua").read_text(encoding="utf-8")
     for name, text in (("pyt", sh), ("pyt.cmd", cmd), ("pyt.ps1", ps1), ("init.lua", lua)):
-        assert ">=3.11" in text and "--python-preference" in text and "managed" in text, name
-    assert "_pt_py='>=3.11'" in sh and '"--python=$_pt_py" --python-preference managed --script' in sh
+        assert ">=3.11" in text and "--python-preference" in text and "only-managed" in text, name
+    assert "_pt_py='>=3.11'" in sh and "_pt_pref=managed" in sh and "_pt_pref=only-managed" in sh
+    assert '"--python=$_pt_py" --python-preference "$_pt_pref" --script' in sh
     assert ".venv/Scripts/python.exe" in sh and ".venv-wsl/bin/python" in sh and ".venv/bin/python" in sh
     assert 'set "PT_PY=>=3.11"' in cmd and 'if exist "%PT_ROOT%.venv\\Scripts\\python.exe" set "PT_PY="\r\n' in cmd
+    assert 'set "PT_PREF=managed"' in cmd and 'if exist "%PT_ROOT%.venv\\Scripts\\python.exe" set "PT_PREF=only-managed"' in cmd
     assert "'.venv\\Scripts\\python.exe'" in ps1 and "'.venv-wsl/bin/python', '.venv/bin/python'" in ps1
-    assert "'--python-preference', 'managed'" in ps1 and ps1.count('"--python=$python"') == 3 and "$python = ''" in ps1
-    assert 'M.tool("python") and "" or ">=3.11"' in lua and '"--python=" .. python' in lua
+    assert "'--python-preference', $preference" in ps1 and ps1.count('"--python=$python"') == 3
+    assert "$python = ''; $preference = 'only-managed'" in ps1 and ps1.count("--python-preference $preference") == 2
+    assert '"--python=" .. (env and "" or ">=3.11")' in lua and 'env and "only-managed" or "managed"' in lua
 
 
 def test_ps1_restores_every_variable_it_sets() -> None:

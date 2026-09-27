@@ -308,17 +308,19 @@ if ($fromPipe) { $pipeIn = $ExecutionContext.SessionState.PSVariable.GetValue('i
 
 # The Python the runner starts on. While the project has an environment, the one uv reads from
 # .python-version (python.cpython, which that environment was made with), as always: --python=
-# with no value is no request. Else any CPython 3.11 or newer that uv finds, a system one too (uv
-# has none to download on Android or the BSDs); the runner moves the commands that need
-# python.cpython onto it itself. On Linux/macOS the environment's python is a link to its base
-# Python, which must exist too (.NET's Exists takes a dangling link for a file: resolved first;
-# without ResolveLinkTarget, PowerShell < 7.2, the link counts).
+# with no value is no request, and only-managed keeps a system Python out (uv makes its cached
+# environment of the runner again when one built it). Else any CPython 3.11 or newer that uv
+# finds, a system one too (uv has none to download on Android or the BSDs); the runner moves the
+# commands that need python.cpython onto it itself. On Linux/macOS the environment's python is
+# a link to its base Python, which must exist too (.NET's Exists takes a dangling link for a
+# file: resolved first; without ResolveLinkTarget, PowerShell < 7.2, the link counts).
 $python = '>=3.11'
+$preference = 'managed'
 $venvs = if ($onWindows) { , '.venv\Scripts\python.exe' } else { '.venv-wsl/bin/python', '.venv/bin/python' }
 foreach ($p in $venvs) {
     $f = [IO.FileInfo]::new([IO.Path]::Combine($root, $p))
     try { if ($f.LinkTarget) { $f = $f.ResolveLinkTarget($true) } } catch { $f = $null }
-    if ($f -and $f.Exists) { $python = ''; break }
+    if ($f -and $f.Exists) { $python = ''; $preference = 'only-managed'; break }
 }
 
 # --- hand over, restoring the caller's environment afterwards
@@ -342,14 +344,14 @@ try {
         # included: it globs '*' (Linux/macOS) and expands '~', '~/x' ('~\x' on Windows). Run
         # the call rebuilt from single-quoted words so argv reaches uv untouched.
         $q = [Management.Automation.Language.CodeGeneration]
-        $words = foreach ($a in @($uv, 'run', '--quiet', "--python=$python", '--python-preference', 'managed', '--script', $entry) + $argv) { "'" + $q::EscapeSingleQuotedStringContent($a) + "'" }
+        $words = foreach ($a in @($uv, 'run', '--quiet', "--python=$python", '--python-preference', $preference, '--script', $entry) + $argv) { "'" + $q::EscapeSingleQuotedStringContent($a) + "'" }
         $call = '& ' + ($words -join ' ')
         if ($fromPipe) { $call = '$pipeIn | ' + $call }
         Invoke-Expression $call
     } elseif ($fromPipe) {
-        $pipeIn | & $uv run --quiet "--python=$python" --python-preference managed --script $entry @argv
+        $pipeIn | & $uv run --quiet "--python=$python" --python-preference $preference --script $entry @argv
     } else {
-        & $uv run --quiet "--python=$python" --python-preference managed --script $entry @argv
+        & $uv run --quiet "--python=$python" --python-preference $preference --script $entry @argv
     }
     $code = $LASTEXITCODE
 } catch {

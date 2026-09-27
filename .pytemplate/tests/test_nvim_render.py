@@ -287,11 +287,11 @@ check("pyt argv", cmd[#cmd] == "help" and (cmd[2] == "run" or #cmd == 2), vim.in
 -- the Python the runner starts on, as the launchers pick it: no request (uv follows .python-version)
 -- while the project has an environment, else any 3.11+
 if cmd[2] == "run" then
-  local want = "--python=" .. (pt.tool("python") and "" or ">=3.11")
+  local env = pt.tool("python") ~= nil
   check(
     "pyt argv python",
-    cmd[3] == "--quiet" and cmd[4] == want and cmd[5] == "--python-preference" and cmd[6] == "managed"
-      and cmd[7] == "--script",
+    cmd[3] == "--quiet" and cmd[4] == "--python=" .. (env and "" or ">=3.11") and cmd[5] == "--python-preference"
+      and cmd[6] == (env and "only-managed" or "managed") and cmd[7] == "--script",
     vim.inspect(cmd)
   )
 end

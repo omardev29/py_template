@@ -197,27 +197,28 @@ implement the same contract: change them together.
    Neovim that inherited it ran every task in global mode, exit 2). `pyt.cmd` also exports
    `PYTEMPLATE_LAUNCHER_FILE`, its own path: cmd reads it again once uv returns, so the runner's
    install and uninstall must know it (section 4.4).
-4. Run `uv run --quiet --python=REQUEST --python-preference managed --script
-   <root>/.pytemplate/pyt.py ARGS...` with argv untouched and propagate its exit code. REQUEST
-   (`project.launcher_python`, which the launchers mirror: `pyt` `_pt_py`, `pyt.cmd` `PT_PY`,
-   `pyt.ps1` `$python`, plugin `M.tool("python")`) is empty while the project has an
-   environment (its interpreter is there: POSIX `.venv-wsl/bin/python` or `.venv/bin/python`, a
-   link to its base Python that must not dangle; Windows `.venv\Scripts\python.exe`): an empty
-   `--python=` is no request (uv 0.10.12 and 0.12.19, as for an empty `UV_PYTHON`), so uv
-   follows the `.python-version` it finds from the script's folder upward, `python.cpython`, as
-   the launchers always did. Without an environment it is `>=3.11` (`project.ANY_RUNNER_PYTHON`:
-   any CPython 3.11 or newer; a version request never matches PyPy nor a pre-release), where
-   `.python-version` would stop every command on a machine uv has no such CPython for
-   (Android/Termux, the BSDs: section 15.1). `--python-preference managed` overrides the
-   project's `only-managed`: uv then also takes a system CPython. The runner moves the commands
-   that need `python.cpython` onto it itself (`cli._restart`, section 5.2). One word,
-   `--python=`: Windows PowerShell 5.1 drops an empty argument. The environment decides, never
-   `>=3.11` alone: uv reuses the cached environment of a script whenever its interpreter
-   satisfies the request, so the first CPython a machine offered (a distribution's 3.12) stayed
-   the runner's for good, and every command paid a restart; `.python-version` makes uv re-create
-   it on `python.cpython`. Nor the environment's interpreter as a path: on Windows that file is
-   there even when its base Python was uninstalled, and uv stopped every command, `setup`
-   included, on it.
+4. Run `uv run --quiet --python=REQUEST --python-preference PREF --script
+   <root>/.pytemplate/pyt.py ARGS...` with argv untouched and propagate its exit code.
+   `project.launcher_python` gives both, and the launchers mirror it (`pyt` `_pt_py`/`_pt_pref`,
+   `pyt.cmd` `PT_PY`/`PT_PREF`, `pyt.ps1` `$python`/`$preference`, plugin `M.tool("python")`).
+   While the project has an environment (its interpreter is there: POSIX
+   `.venv-wsl/bin/python` or `.venv/bin/python`, a link to its base Python that must not dangle;
+   Windows `.venv\Scripts\python.exe`), REQUEST is empty and PREF `only-managed`: an empty
+   `--python=` is no request (uv 0.10.12 and 0.12.19, as for an empty `UV_PYTHON`), so uv follows
+   the `.python-version` it finds from the script's folder upward, `python.cpython`, as the
+   launchers always did, and only its own CPython. Without an environment REQUEST is `>=3.11`
+   (`project.ANY_RUNNER_PYTHON`: any CPython 3.11 or newer; a version request never matches PyPy
+   nor a pre-release) and PREF `managed` (a system CPython too), where `.python-version` would
+   stop every command on a machine uv has no such CPython for (Android/Termux, the BSDs: section
+   15.1). The runner moves the commands that need `python.cpython` onto uv's own CPython of that
+   minor itself (`cli._restart`, section 5.2). One word, `--python=`: Windows PowerShell 5.1
+   drops an empty argument. The environment decides, never `>=3.11` alone: uv reuses the cached
+   environment of a script whenever its interpreter satisfies the request, so the first CPython
+   a machine offered (a distribution's 3.12) stayed the runner's for good, and every command paid
+   a restart; `.python-version` with `only-managed` makes uv make it again on `python.cpython`
+   (`managed` reused one a system 3.14 had built; measured with both uv versions). Nor the
+   environment's interpreter as a path: on Windows that file is there even when its base Python
+   was uninstalled, and uv stopped every command, `setup` included, on it.
    The caller's `UV_PYTHON`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`, `PYTHONHOME`,
    `PYTHONPATH` and `UV_WORKING_DIR` are removed for uv only (`pyt`: `unset` before `exec`,
    prefix assignments for niubash; `pyt.cmd`: `set "X="` under `setlocal`; `pyt.ps1`: removed
@@ -710,11 +711,11 @@ header rules (with detector tests proving each rule fires).
 
 ### 5.2 Call flow
 
-1. Launcher -> `uv run --quiet --python=REQUEST --python-preference managed --script
-   .pytemplate/pyt.py ARGS` (section 4.1: no request while the project has an environment, so
-   uv reads the project's `.python-version`, `python.cpython`, found from the script's folder
-   upward whatever the caller's folder or a `.python-version` there says; else any CPython
-   3.11+; the caller's `UV_PYTHON`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`, `PYTHONHOME`,
+1. Launcher -> `uv run --quiet --python=REQUEST --python-preference PREF --script
+   .pytemplate/pyt.py ARGS` (section 4.1: no request and `only-managed` while the project has an
+   environment, so uv reads the project's `.python-version`, `python.cpython`, found from the
+   script's folder upward whatever the caller's folder or a `.python-version` there says; else
+   any CPython 3.11+, a system one too; the caller's `UV_PYTHON`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`, `PYTHONHOME`,
    `PYTHONPATH` and `UV_WORKING_DIR` removed)
    (`test_launcher_sh.test_runner_runs_on_python_cpython_whatever_the_caller_pins`); uv runs
    the runner in a cached environment of its own (`VIRTUAL_ENV`) and exports `UV`. The runner
@@ -726,7 +727,11 @@ header rules (with detector tests proving each rule fires).
    that does not read or names no valid `python.cpython` (dispatch reports it) run on that
    Python (`cli._python_needed`, which reads pytemplate.toml with tomllib, never config.load:
    its warnings would print twice). Any other command or `[tasks]` entry (a task named `install`
-   too) runs on `python.cpython` (CPython, that minor): started by uv on another Python
+   too) runs on `python.cpython`, the CPython uv manages, never another one of that minor
+   (`cli._runs_on_python_cpython`: with the project's environment the launchers asked uv for its
+   own, `only-managed`; without it `envs.find_cpython` names uv's, compared with `sys.base_prefix`,
+   so Fedora's or Homebrew's 3.14, or Termux's 3.13 for a `python.cpython` of "3.13", never runs
+   the command). Started by uv on another Python
    (`cli._started_by_uv`: `VIRTUAL_ENV` is this runner's own environment), the runner asks
    `envs.ensure_python` for it (`uv python find --system`, else `uv python install --no-bin
    --no-registry`, else PytError 3: `envs.no_download_problem` for a platform or version uv has
@@ -2919,9 +2924,10 @@ Files:
   `overseer/component/pytemplate/refresh.lua`.
 
 Runner contract from Lua (the fourth caller of section 4.1): argv `{<absolute uv>, "run",
-"--quiet", "--python=" .. REQUEST, "--python-preference", "managed", "--script",
-<root>/.pytemplate/pyt.py, ...}` (`init.pyt_cmd`; REQUEST is empty, no request, while the tools
-environment's interpreter exists, `M.tool("python")`, else `>=3.11`, as the launchers pick it)
+"--quiet", "--python=" .. REQUEST, "--python-preference", PREF, "--script",
+<root>/.pytemplate/pyt.py, ...}` (`init.pyt_cmd`; REQUEST empty and PREF `only-managed` while the
+tools environment's interpreter exists, `M.tool("python")`, else `>=3.11` and `managed`, as the
+launchers pick them)
 through overseer / `jobstart` with a LIST, env `PYTEMPLATE_CALLER_CWD=<cwd>`, `PYTEMPLATE_LAUNCHER=nvim`,
 `PYTEMPLATE_GLOBAL=""`, `UV_PYTHON=""`, `UV_MANAGED_PYTHON=false`, `UV_NO_MANAGED_PYTHON=false`,
 `PYTHONHOME=""`, `PYTHONPATH=""` and `UV_WORKING_DIR=.` (`init.pyt_env`; uv and CPython read
@@ -3861,12 +3867,14 @@ uv:
   (`.python-version`) under the project's `only-managed` stopped every command, `help`
   included: Termux's own Python 3.13 was never used. Fix: without an environment of the project
   the launchers request `>=3.11` with `--python-preference managed` (a system CPython serves;
-  with one, an empty `--python=`, no request: uv follows `.python-version` as before),
-  `cli._restart` moves the commands that need `python.cpython` onto it, and
+  with one, an empty `--python=`, no request, and `only-managed`: uv follows `.python-version` as
+  before), `cli._restart` moves the commands that need `python.cpython` onto uv's own CPython of
+  that minor (a system one of it counts as another Python: `cli._runs_on_python_cpython`), and
   `envs.no_download_problem` says why they cannot run there; `new` asks for the new project's
   `python.cpython` before it copies anything (`uv lock` needs it: `envs.ensure_python` in
   `cmd_mode.cmd_new`) (4.1, 5.2). Test:
   `test_cli_core.py::test_python_cpython_uv_cannot_install_stops_the_command`,
+  `test_a_python_of_the_right_minor_is_not_python_cpython_unless_uv_manages_it`,
   `test_envs_core.py::test_no_download_problem_says_why_and_what_runs_here`,
   `test_doctor_says_where_python_cpython_is`,
   `test_presets.py::test_new_asks_for_python_cpython_before_it_copies_anything`. Goes: never
@@ -3874,9 +3882,11 @@ uv:
 - **`uv run --script` reuses a script's cached environment while its interpreter satisfies the
   request** (LIMITATION, `environments-v2`; `--isolated` changes nothing for a script): with a
   plain `>=3.11` the first CPython a machine offered (a distribution's 3.12) stayed the
-  runner's for good, and every project command paid a restart. Fix: once the project has an
-  environment the launchers make no request, and uv re-creates that environment on the
-  `python.cpython` of `.python-version` (4.1). Test:
+  runner's for good, and every project command paid a restart; and one a system Python of
+  `python.cpython`'s minor built satisfies `.python-version` too. Fix: once the project has an
+  environment the launchers make no request, with `only-managed`, and uv makes that environment
+  again on the `python.cpython` of `.python-version` (`managed` kept a system 3.14's; measured with
+  uv 0.10.12 and 0.12.19) (4.1). Test:
   `test_launcher_sh.py::test_the_runner_starts_on_python_cpython_once_the_project_has_an_environment`,
   `test_runner_runs_on_python_cpython_whatever_the_caller_pins`. Goes: never.
 - **uv refuses `UV_MANAGED_PYTHON` and `UV_NO_MANAGED_PYTHON` next to `--python-preference`**
@@ -5078,14 +5088,21 @@ Behaviour:
   command, `new` included, stops with exit 3 and why (`envs.no_download_problem`). By design
   (the owner's choice, September 2026): the environments, `uv.lock` and the builds are made with
   the CPython uv manages. Untested on a real Android or BSD: simulated with an empty
-  `UV_PYTHON_DOWNLOADS_JSON_URL` list and a system CPython on PATH.
+  `UV_PYTHON_DOWNLOADS_JSON_URL` list and a system CPython on PATH. A `.venv` made there by
+  hand (`python -m venv .venv`) counts as the project's environment: the launchers then ask uv
+  for `python.cpython`, `only-managed`, which uv cannot give, and every command, `help`
+  included, stops in uv (delete that `.venv`).
 - A project with no environment yet (a fresh clone, after `clean --envs`) starts the runner on
   whatever CPython 3.11+ uv's cached environment of it holds, or finds: each project command
-  then pays one more Python start (the restart on `python.cpython`, about 50 ms on Linux) until
-  `setup` makes `.venv`. A runner older than this restart (a `deploy.py` project, or `pyt.py`
-  from before September 27, 2026) started by a newer installed `pyt` in a project without
-  `.venv` runs its project commands on that Python (it has no restart); with `.venv` it runs on
-  `python.cpython`, as before.
+  then pays a `uv python find` and, on another Python, one more Python start (the restart on
+  `python.cpython`, about 50 ms on Linux) until `setup` makes `.venv`. The first start after
+  that makes uv build the runner's cached environment again when another Python built it (a
+  newer uv-managed CPython than `python.cpython`, a system one); on Windows a runner still
+  running from it (a long `./pyt run` started before `.venv` existed) keeps its files in use,
+  and that start fails in uv (access denied) until the earlier command ends. A runner older than
+  this restart (a `deploy.py` project, or `pyt.py` from before September 27, 2026) started by a
+  newer installed `pyt` in a project without `.venv` runs its project commands on that Python
+  (it has no restart); with `.venv` it runs on `python.cpython`, as before.
 - `cmd_dev.split_backend` treats a first argument equal to `cpython`, `pypy` or `mypyc` (and
   `all` for `test`/`check`) as the backend: an app argument with that value must be preceded
   by an explicit backend (`./pyt run cpython mypyc`). By design: the usual fix, `--`, is

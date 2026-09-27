@@ -1006,26 +1006,28 @@ def test_runner_runs_on_python_cpython_whatever_the_caller_pins(launcher: str, t
 # --- the Python the runner starts on (project.launcher_python) --------------------------------------
 
 
-def _request_of(argv: list[str | Path], project: Path, tmp: Path) -> str:
-    """The --python= request a launcher gives uv (a fake uv that prints its arguments)."""
+def _request_of(argv: list[str | Path], project: Path, tmp: Path) -> tuple[str, str]:
+    """The --python= request and the --python-preference a launcher gives uv (a fake uv that
+    prints its arguments)."""
     fake = tmp / "fake-uv"
     fake.write_text('#!/bin/sh\nfor a in "$@"; do printf \'ARG:%s\\n\' "$a"; done\n', encoding="ascii")
     fake.chmod(0o755)
     run = Run([*argv, "help"], project, _clean_env(UV=str(fake)))
     args = [ln[4:] for ln in run.out.splitlines() if ln.startswith("ARG:")]
     assert run.rc == 0 and args[:2] == ["run", "--quiet"] and args[2].startswith("--python="), run.out + run.err
-    assert args[3:6] == ["--python-preference", "managed", "--script"], args
-    return args[2].removeprefix("--python=")
+    assert args[3] == "--python-preference" and args[5] == "--script", args
+    return args[2].removeprefix("--python="), args[4]
 
 
 @needs_posix
 @pytest.mark.parametrize("launcher", ["pyt", "pyt.ps1"])
 def test_the_runner_starts_on_python_cpython_once_the_project_has_an_environment(launcher: str, tmp_path: Path) -> None:
-    """The launchers make the --python= request of project.launcher_python: none (an empty
-    value) while the project has an environment, so uv follows .python-version (python.cpython)
-    as it always did; else ">=3.11", any CPython 3.11 or newer, where the runner moves the
-    commands that need python.cpython onto it. The environment counts when its interpreter is
-    there: .venv-wsl too (WSL on a Windows checkout), never a dangling link (its Python is gone)."""
+    """The launchers make the --python= request and --python-preference of
+    project.launcher_python: while the project has an environment, none (an empty value), so uv
+    follows .python-version (python.cpython) as it always did, and only-managed; else ">=3.11",
+    any CPython 3.11 or newer, a system one too (managed), where the runner moves the commands
+    that need python.cpython onto it. The environment counts when its interpreter is there:
+    .venv-wsl too (WSL on a Windows checkout), never a dangling link (its Python is gone)."""
     sys.path.insert(0, str(ROOT / ".pytemplate"))
     from runner import project as runner_project
 
@@ -1034,20 +1036,20 @@ def test_the_runner_starts_on_python_cpython_once_the_project_has_an_environment
     argv: list[str | Path] = ["/bin/sh", proj / "pyt"] if launcher == "pyt" else [_pwsh(), "-NoProfile", "-NonInteractive", "-File", proj / "pyt.ps1"]
     venv, wsl = proj / ".venv" / "bin" / "python", proj / ".venv-wsl" / "bin" / "python"
 
-    def expect(request: str) -> None:
-        assert _request_of(argv, proj, tmp_path) == request == runner_project.launcher_python(proj)
+    def expect(request: str, preference: str) -> None:
+        assert _request_of(argv, proj, tmp_path) == (request, preference) == runner_project.launcher_python(proj)
 
-    expect(">=3.11")
+    expect(">=3.11", "managed")
     venv.parent.mkdir(parents=True)
     venv.symlink_to(tmp_path / "gone" / "python")  # dangling
-    expect(">=3.11")
+    expect(">=3.11", "managed")
     venv.unlink()
     venv.symlink_to(sys.executable)
-    expect("")
+    expect("", "only-managed")
     venv.unlink()
     wsl.parent.mkdir(parents=True)
     wsl.symlink_to(sys.executable)
-    expect("")
+    expect("", "only-managed")
 
 
 # --- the Windows-only helpers are plain sh: run them in every POSIX shell ---------------------------
@@ -1334,7 +1336,7 @@ def test_install_prompt_through_a_terminal(launcher: str, answer: str, tmp_path:
     argv: list[str | Path] = ["/bin/sh", LAUNCHER, "help"] if launcher == "pyt" else [_pwsh(), "-NoProfile", "-File", ROOT / "pyt.ps1", "help"]
     rc, out = _pty_run(argv, env, None if answer == "CI" else answer.encode() + b"\r")
     if answer == "y":
-        assert rc == 0 and "installer ran" in out and re.search(r"FAKEUV run --quiet --python=\S* --python-preference managed --script ", out), out
+        assert rc == 0 and "installer ran" in out and re.search(r"FAKEUV run --quiet --python=\S* --python-preference (only-)?managed --script ", out), out
         assert out.rstrip().endswith("help"), out
     else:
         assert rc == 127 and "installer ran" not in out and "curl -LsSf" in out and "brew install uv" in out, out

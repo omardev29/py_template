@@ -66,13 +66,14 @@ Measured on the maintainer's machine (Windows 11, CPython 3.14.7, PyPy 7.3.23, m
 
 `./pyt` starts in two steps. Once the project has its environment (`.venv`), the launchers
 (and the Neovim plugin) let uv start the runner on `python.cpython`, the version
-`.python-version` names; while it has none yet, on any CPython 3.11 or newer that uv finds: one
-uv installed, else one of the machine (a distribution's `python3`, Termux's `python`). `help`,
-`doctor`, `install` and `uninstall` run on that Python. Every other command runs on `python.cpython`: started on another Python, the runner
-starts itself again on it (`./pyt -v` shows that command line), after uv installs it when it is
-missing (once, about 30 MB, only into uv's own folder: no `python3.14` on PATH, no registry
-entry). `new` installs the new project's `python.cpython` the same way before it copies
-anything: the new project's `uv.lock` is made with it.
+`.python-version` names, as uv installed it; while it has none yet, on any CPython 3.11 or
+newer that uv finds: one uv installed, else one of the machine (a distribution's `python3`,
+Termux's `python`). `help`, `doctor`, `install` and `uninstall` run on that Python. Every other
+command runs on the `python.cpython` uv installs: started on another Python (one of the machine
+of that very version too), the runner starts itself again on it (`./pyt -v` shows that command
+line), after uv installs it when it is missing (once, about 30 MB, only into uv's own folder: no
+`python3.14` on PATH, no registry entry). `new` installs the new project's `python.cpython` the
+same way before it copies anything: the new project's `uv.lock` is made with it.
 
 So the project's commands need a platform uv has CPython builds for: Windows (x86_64, x86,
 ARM64), macOS (Apple silicon, Intel) and Linux with glibc (x86_64, aarch64, armv7, ppc64le,
@@ -1328,7 +1329,7 @@ into Neovim:
   `remove`, `render`, `rename`) refresh the editor.
 
 The plugin runs `./pyt` as the launchers do ([Where pyt runs](#where-pyt-runs)):
-`uv run --quiet --python=REQUEST --python-preference managed --script .pytemplate/pyt.py ARGS`,
+`uv run --quiet --python=REQUEST --python-preference PREF --script .pytemplate/pyt.py ARGS`,
 as a list of arguments: Neovim's `'shell'` (xonsh, niubash...) is never used. Without uv it runs the
 launcher (`/bin/sh pyt`, or `pyt.cmd` on Windows), which prints how to install uv.
 
@@ -1562,7 +1563,8 @@ only deletes files is checked too).
   command but `help`, `doctor`, `install` and `uninstall`): uv has no CPython builds for this
   machine at all (Android/Termux, FreeBSD and the other BSDs), and the project's commands run on
   the one uv installs; a Python of the machine is not used, even at that version. Work on the
-  project on Windows, macOS or Linux ([Where pyt runs](#where-pyt-runs)).
+  project on Windows, macOS or Linux ([Where pyt runs](#where-pyt-runs)). If `help` stops there
+  too, with uv's own error, a `.venv` was made by hand (`python -m venv .venv`): delete it.
 - **`python.cpython = "3.14": uv has no CPython 3.14 for this platform`**: uv has other versions
   here (`uv python list --only-downloads`): set `python.cpython` to one of them and run
   `./pyt apply`, or work on the project on another machine.

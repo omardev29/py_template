@@ -529,20 +529,40 @@ def _python_needed(rest: list[str]) -> str | None:
     return version
 
 
+def _runs_on_python_cpython(version: str) -> bool:
+    """Whether this runner runs on python.cpython `version`: the CPython uv manages, never another
+    one of that minor. With the project's environment the launchers asked uv for its own
+    (only-managed: project.launcher_python); without it they let uv take a system Python too, and
+    uv is asked which interpreter is its own (Fedora's or Homebrew's 3.14, Termux's 3.13 for a
+    python.cpython of "3.13", are not)."""
+    if sys.implementation.name != "cpython" or sys.version_info[:2] != tuple(int(part) for part in version.split(".")):
+        return False
+    if project.launcher_python(project.ROOT)[1] == "only-managed":
+        return True
+    from . import envs
+
+    found = envs.find_cpython(version)
+    if found is None:
+        return False
+    prefix = found.parent if project.IS_WINDOWS else found.parent.parent  # python.exe / bin/python3.X
+    try:
+        return os.path.samefile(prefix, sys.base_prefix)
+    except OSError:
+        return False
+
+
 def _restart(argv: list[str], rest: list[str]) -> int | None:
     """Run the command on python.cpython when the launchers started this runner on another
-    Python (project.launcher_python: the project has no environment yet, so any CPython 3.11+;
-    or python.cpython was edited and .python-version not rendered yet) and the command needs it
-    (_python_needed): a second runner process on it, with the same arguments, in the same folder,
-    whose exit code is this one's. uv installs that CPython first when it is missing, or
-    PytError(3) says why it cannot (Android/Termux: envs.no_download_problem). None: this Python
-    runs the command."""
+    Python (_runs_on_python_cpython; project.launcher_python: the project has no environment yet,
+    so any CPython 3.11+; or python.cpython was edited and .python-version not rendered yet) and
+    the command needs it (_python_needed): a second runner process on it, with the same
+    arguments, in the same folder, whose exit code is this one's. uv installs that CPython first
+    when it is missing, or PytError(3) says why it cannot (Android/Termux:
+    envs.no_download_problem). None: this Python runs the command."""
     if not _started_by_uv():
         return None
     version = _python_needed(rest)
-    if version is None:
-        return None
-    if sys.implementation.name == "cpython" and sys.version_info[:2] == tuple(int(part) for part in version.split(".")):
+    if version is None or _runs_on_python_cpython(version):
         return None
     from . import envs
 
