@@ -390,8 +390,10 @@ def test_lintc_a_class_in_a_function_sees_that_functions_imports(tmp_path: Path)
 def test_lintc_reads_a_long_elif_chain(tmp_path: Path, last: str, native: bool) -> None:
     """The blocks of a scope were walked recursively, one level per `elif`: a generated dispatch
     table of ~1000 branches crashed `check`, `build` and the pre-commit hook with an internal
-    runner error (RecursionError). The import in the chain's last `else` still decides."""
-    branches = "".join(f"elif sys.argv[0] == '{i}':\n    pass\n" for i in range(1, 3000))
+    runner error (RecursionError). The import in the chain's last `else` still decides. 1500
+    branches: past the old walk's recursion limit, and within what Python 3.11 can parse (a
+    3000-branch chain is a "cannot parse" finding there: 3.11 cannot compile it either)."""
+    branches = "".join(f"elif sys.argv[0] == '{i}':\n    pass\n" for i in range(1, 1500))
     source = f"import sys\n\nif sys.argv[0] == '0':\n    pass\n{branches}else:\n    {last}\n\n\n@dataclass\nclass P:\n    x: int = 0\n"
     found = _lint(tmp_path, source)
     assert (found == []) is native, [f.message for f in found]

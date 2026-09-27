@@ -542,7 +542,10 @@ def test_nuitka_upx_honours_the_excludes(sandbox: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(upx, "pack_file", pack_file)
     nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
     assert "--plugin-enable=upx" not in fake.argv
-    assert sorted(packed) == ["libssl-3.dll", "myapp.exe"]  # never python3*.dll, the C runtime or mylib*
+    # never python3*.dll, the C runtime or mylib*; the compiled module FakeNuitka writes is a PE
+    # .pyd, packed like any extension, on Windows only (a .so elsewhere: no PE name)
+    pyd = [f"bench{EXT}"] if EXT.endswith(".pyd") else []
+    assert sorted(packed) == sorted(["libssl-3.dll", "myapp.exe", *pyd])
     # onefile: the plugin packs the one binary (the libraries inside its payload never)...
     packed.clear()
     nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app, onefile=True))
