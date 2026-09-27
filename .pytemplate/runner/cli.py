@@ -8,6 +8,7 @@ Global options go BEFORE the command; everything after it belongs to the command
 
 from __future__ import annotations
 
+import errno
 import importlib
 import os
 import signal
@@ -296,6 +297,18 @@ def _output_closed() -> int:
     return 1 if sys.platform == "win32" else 141
 
 
+# errno of a write that found no room: a full disk, /dev/full, a quota, a file size limit
+NO_ROOM = frozenset(n for n in (getattr(errno, name, None) for name in ("ENOSPC", "EDQUOT", "EFBIG")) if isinstance(n, int))
+
+
+def _no_room(e: OSError) -> str:
+    """The error line for a write that found no room (`./deploy help > /dev/full`, a full disk
+    under a command): no runner bug. A write to an open file (stdout too) names no file."""
+    if e.filename is not None:
+        return f"cannot write {e.filename}: {e.strerror or e}"
+    return f"a write failed: {e.strerror or e} (the disk, or the file the output goes to, is full)"
+
+
 def _system_exit_code(e: SystemExit) -> int:
     """What Python itself would exit with: None -> 0, an int as-is, a message -> printed, 1."""
     if e.code is None:
@@ -349,6 +362,9 @@ def _main(argv: list[str]) -> int:
     except SystemExit as e:  # argparse: -h (0) and usage errors (2)
         return _system_exit_code(e)
     except Exception as e:
+        if isinstance(e, OSError) and e.errno in NO_ROOM:
+            ui.error(_no_room(e))
+            return 1
         scratch = _scratch_denied(e) if isinstance(e, PermissionError) else None
         if scratch is not None:
             ui.error(
@@ -372,6 +388,11 @@ def main(argv: list[str]) -> int:
         return _main(argv)
     except BrokenPipeError:  # stdout or stderr closed, even while an error was being reported
         return _output_closed()
+    except OSError as e:  # no room for the error line either (stderr on a full disk too)
+        if e.errno not in NO_ROOM:
+            raise
+        _output_closed()
+        return 1
     finally:
         try:
             sys.stdout.flush()

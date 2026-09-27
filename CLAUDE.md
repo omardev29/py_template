@@ -700,7 +700,10 @@ header rules (with detector tests proving each rule fires).
   itself started on Python < 3.11 by `deploy.py`'s check); 130 = Ctrl+C; 143/129 = a SIGTERM/
   SIGHUP sent to the runner (POSIX);
   141 = the reader of stdout went away (`./deploy help | head -1`: quiet, no traceback; POSIX
-  only, Windows reports a closed pipe as `OSError` EINVAL, unhandled). `run`, `test BACKEND`
+  only, Windows reports a closed pipe as `OSError` EINVAL, unhandled). A write that finds no
+  room (`./deploy help > /dev/full`, a full disk, a quota: `cli.NO_ROOM`, ENOSPC, EDQUOT, EFBIG)
+  is one `error:` line naming the file when the error does, exit 1, never an internal error
+  (quiet when stderr has no room either). `run`, `test BACKEND`
   (pytest's own code: 5 = no tests collected, 4 = usage error) and tasks return the child's
   exit code (`test all`: 0 or 1, after testing every backend even when one fails to build);
   `proc.CommandFailed` carries the failed child's code. A child killed by signal N gives

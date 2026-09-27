@@ -7,7 +7,9 @@ scrubbed environment, never uv unless marked, and never touch this project's fil
 
 from __future__ import annotations
 
+import errno
 import importlib
+import io
 import json
 import os
 import re
@@ -885,6 +887,38 @@ def test_a_closed_stdout_is_not_a_runner_bug(args: list[str], unbuffered: bool) 
     for text in ("Traceback", "internal runner error", "Exception ignored"):
         assert text not in r.stderr, r.stderr
     assert r.returncode == 141  # 128 + SIGPIPE, what a shell pipeline reports
+
+
+class _NoRoom(io.StringIO):
+    """A stream on a full disk: every write fails with ENOSPC."""
+
+    def write(self, text: str) -> int:
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+
+@pytest.mark.parametrize("args", [["help"], ["help", "build"]])
+def test_a_write_that_finds_no_room_is_one_error_line(args: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`./deploy help > /dev/full` (or a full disk under `shell-setup >> ~/.bashrc`) printed a
+    traceback and called it a bug in the runner."""
+    monkeypatch.setattr(sys, "stdout", _NoRoom())
+    assert cli.main(args) == 1
+    err = capsys.readouterr().err
+    assert "a write failed: " + os.strerror(errno.ENOSPC) in err and "internal runner error" not in err, err
+    monkeypatch.setattr(sys, "stderr", _NoRoom())  # no room for the error line either: exit 1 quietly
+    assert cli.main(args) == 1
+
+
+@pytest.mark.skipif(not Path("/dev/full").exists(), reason="no /dev/full here")
+@pytest.mark.parametrize("args", [["help"], ["shell-setup", "bash"]])
+def test_output_to_dev_full_is_no_runner_bug(args: list[str]) -> None:
+    with open("/dev/full", "wb") as full:
+        r = subprocess.run(
+            [sys.executable, "-B", str(DEPLOY_PY), *args], stdin=subprocess.DEVNULL, stdout=full, stderr=subprocess.PIPE,
+            env=child_env(), text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
+        )  # fmt: skip
+    for text in ("Traceback", "internal runner error", "Exception ignored"):
+        assert text not in r.stderr, r.stderr
+    assert r.returncode == 1 and "a write failed" in r.stderr, r.stderr
 
 
 # === 9. [tasks] =====================================================================================
