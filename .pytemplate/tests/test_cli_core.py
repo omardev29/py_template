@@ -399,6 +399,17 @@ def test_help_never_ignores_a_typo(args: list[str], message: str, monkeypatch: p
     assert e.value.code == 2
 
 
+def test_help_init_gives_the_hint_of_init(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`./deploy help init` said only "unknown command", while `./deploy init` names the way out;
+    a [tasks] entry named init is described instead."""
+    monkeypatch.setattr(config, "load", lambda *_a, **_kw: make({}))
+    with pytest.raises(DeployError, match=re.escape("./deploy new DIR --preset P")) as e:
+        cli.cmd_help(None, ["init"])
+    assert e.value.code == 2 and "unknown command" not in str(e.value)
+    monkeypatch.setattr(config, "load", lambda *_a, **_kw: make({"tasks": {"init": {"cmd": ["python", "-c", "pass"]}}}))
+    assert cli.cmd_help(None, ["init"]) == 0
+
+
 def test_help_of_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.cmd_help(None, ["-h"]) == 0
     assert capsys.readouterr().out.startswith("./deploy help [COMMAND]\n")

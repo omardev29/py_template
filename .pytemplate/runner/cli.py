@@ -131,6 +131,10 @@ def _print_task(name: str, task: TaskConfig) -> None:
         print("  background: a long-running server (editors start it without waiting)")
 
 
+# `./deploy init` and `./deploy help init` (unless a [tasks] entry took the name)
+INIT_REMOVED = "init is no longer a ./deploy command. To start from another preset: ./deploy new DIR --preset P"
+
+
 def cmd_help(cfg: object, args: list[str]) -> int:
     """help [COMMAND]: every command and task, or one of them."""
     from . import config
@@ -151,6 +155,8 @@ def cmd_help(cfg: object, args: list[str]) -> int:
         if name in loaded.tasks:
             _print_task(name, loaded.tasks[name])
             return 0
+        if name == "init":
+            raise DeployError(INIT_REMOVED)
         raise DeployError(f"unknown command: {name}  (./deploy help lists the commands and tasks)")
     print("./deploy [-v|-q] [--dry-run] [--no-render] COMMAND [args...]\n")
     groups: dict[str, list[str]] = {}
@@ -264,7 +270,7 @@ def dispatch(argv: list[str]) -> int:
         task = cfg.tasks.get(name)
         if task is None:
             if name == "init":  # no longer public (it is INTERNAL["__init"]): the preset is chosen by `new`
-                raise DeployError("init is no longer a ./deploy command. To start from another preset: ./deploy new DIR --preset P")
+                raise DeployError(INIT_REMOVED)
             raise DeployError(f"unknown command: {name}  (./deploy help)")
         if not task.cmd and _asks_help(args):
             return cmd_help(cfg, [name])  # a deps-only task has no program to pass -h on to

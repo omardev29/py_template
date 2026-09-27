@@ -664,7 +664,7 @@ header rules (with detector tests proving each rule fires).
    NAME, or a second one, exits 2. `cli.INTERNAL` routes (`__init`) dispatch like builtins but are
    listed nowhere (help, `editor.json`, the editors' task lists and the shell completion read
    `COMMANDS` only). `init` is no longer a command: unless a `[tasks]` entry took the name, it
-   exits 2 with the hint `./deploy new DIR --preset P`.
+   exits 2 with the hint `./deploy new DIR --preset P` (`cli.INIT_REMOVED`; `help init` too).
 4. Commands with `render=False`: `clean`, `render`, `new`, `pyz-merge`, `tasks`,
    `shell-setup`, `selftest`, `help`, `hooks` (the hook must not rewrite generated files in
    the middle of a commit), `apply` and `setup` (they render at the end: a refused apply, e.g.
