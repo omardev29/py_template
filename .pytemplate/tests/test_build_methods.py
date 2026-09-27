@@ -3502,6 +3502,57 @@ def test_portable_build_stops_when_the_copied_runtime_has_no_interpreter(sandbox
     assert not proc.run.calls  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("bundled", [True, False])
+def test_a_bundled_portable_flet_app_carries_its_desktop_client(sandbox: Path, monkeypatch: pytest.MonkeyPatch, bundled: bool) -> None:
+    # The flet-desktop wheel has no client: the folder downloaded ~40 MB from GitHub at its
+    # first start and could not start offline (exe and nuitka bundle it)
+    from runner.methods import nuitka, portable
+
+    name = "flet-linux-debian12-light-amd64.tar.gz"
+    archive = sandbox / "cache" / name
+    archive.parent.mkdir()
+    archive.write_bytes(b"client")
+    cfg = make({"deploy": {"portable": {"archive": False, "runtime": "bundled" if bundled else "system"}}})
+    monkeypatch.setattr(portable, "IS_WINDOWS", False)
+    monkeypatch.setattr(common, "host_target", lambda c, b: common.Target("cp", 3, 14, "linux", "x86_64"))
+    monkeypatch.setattr(common, "export_requirements", lambda c: _requirements(sandbox))
+    monkeypatch.setattr(portable, "_warn_host_only", lambda *a: None)
+
+    def install(c: Config, b: str, t: common.Target, dest: Path, req: Path) -> Path:
+        (dest / "flet_desktop").mkdir(parents=True)
+        (dest / "flet_desktop" / "__init__.py").write_text("", encoding="utf-8")
+        return dest
+
+    def runtime(c: Config, b: str, dest: Path, lib: Path | None = None) -> Path:
+        (dest / "bin").mkdir(parents=True)
+        (dest / "bin" / "python3").write_bytes(b"")
+        return dest / "bin" / "python3"
+
+    monkeypatch.setattr(common, "install_deps", install)
+    monkeypatch.setattr(portable, "copy_runtime", runtime)
+    monkeypatch.setattr(portable, "_smoke_runtime", lambda *a: None)
+    monkeypatch.setattr(nuitka, "_flet_client_archive", lambda c: archive)
+    monkeypatch.setattr(proc, "run", FakeRun("", 0))
+    out = portable.build(BuildRequest(cfg, "cpython", "portable", fake_app(sandbox / "payload")))
+    bundled_client = out / "lib" / "flet_desktop" / "app" / name
+    launcher = (out / "myapp.sh").read_text(encoding="utf-8")
+    if bundled:
+        assert bundled_client.read_bytes() == b"client"  # where flet_desktop looks for one
+        # The app looks for exactly that archive: not by the user's glibc or current folder
+        assert "export FLET_LINUX_DISTRO=debian12" in launcher and "export FLET_DESKTOP_FLAVOR=light" in launcher
+    else:  # runtime = "system": a Python of the user's machine, like a pyz (documented)
+        assert not bundled_client.exists() and "FLET_" not in launcher
+
+
+def test_the_flet_client_env_pins_what_the_archive_was_named_for() -> None:
+    from runner.methods import nuitka
+
+    assert nuitka.flet_client_env("flet-linux-ubuntu24.04-light-amd64.tar.gz") == {"FLET_LINUX_DISTRO": "ubuntu24.04", "FLET_DESKTOP_FLAVOR": "light"}
+    assert nuitka.flet_client_env("flet-linux-debian10-arm64.tar.gz") == {"FLET_LINUX_DISTRO": "debian10", "FLET_DESKTOP_FLAVOR": "full"}
+    assert nuitka.flet_client_env("flet-linux-ubuntu22.04-light-arm_7.tar.gz")["FLET_LINUX_DISTRO"] == "ubuntu22.04"
+    assert nuitka.flet_client_env("flet-windows.zip") == nuitka.flet_client_env("flet-macos.tar.gz") == {}
+
+
 @pytest.mark.skipif(IS_WINDOWS, reason="POSIX interpreter layout (symlinks)")
 def test_portable_runtime_smoke_with_real_interpreters(tmp_path: Path) -> None:
     from runner.methods import portable

@@ -1406,9 +1406,12 @@ only deletes files is checked too).
 - **raylib on a minimal Linux** (containers, WSL, CI) needs the GL and X11 libraries:
   `libgl1 libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6` (Debian/Ubuntu names; desktops have
   them).
-- **Flet downloads its client when it first starts**: that is normal. The `flet-desktop` package
-  holds no client: the first start downloads it once from GitHub (about 40 MB) into
-  `~/.flet/client` and reuses it from then on.
+- **Flet downloads its client when it first starts**: that is normal for `./deploy run`, a pyz, a
+  wheel and a portable folder with `runtime = "system"`. The `flet-desktop` package holds no
+  client: the first start downloads it once from GitHub (about 40 MB; `FLET_CLIENT_URL` names a
+  mirror) into `~/.flet/client` and reuses it from then on, so their first start needs the
+  network. `exe`, `nuitka` and a bundled portable folder carry the client (on Linux the one for
+  the build machine's glibc: build them on the oldest Linux you support).
 - **Flet pip-installs `flet-desktop` when it starts**: `flet` and `flet-desktop` have different
   versions. Set `[preset.flet] version` and run `./deploy apply`.
 - **`flet build` on Windows** needs Developer Mode (Settings > System > For developers) and the

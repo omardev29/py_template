@@ -12,6 +12,7 @@ import gzip
 import http.client
 import json
 import os
+import re
 import shlex
 import shutil
 import tarfile
@@ -179,6 +180,26 @@ def archive_problem(path: Path, name: str = "") -> str:
         return str(e) or type(e).__name__
 
 
+# flet_desktop names the Linux client from the machine it runs on: the glibc bracket (a distro),
+# the flavor (FLET_DESKTOP_FLAVOR, else [tool.flet] desktop_flavor of a pyproject.toml in its
+# CURRENT folder, else light) and the CPU: flet-linux-<distro>[-light]-<arch>.tar.gz
+_LINUX_CLIENT = re.compile(r"flet-linux-(?P<distro>.+?)(?P<light>-light)?-(?P<arch>[a-z0-9_]+)\.tar\.gz")
+
+
+def flet_client_env(name: str) -> dict[str, str]:
+    """The environment under which the shipped app looks for exactly the bundled archive `name`.
+
+    Linux: the distro and flavor the name was made of. The user's glibc, a pyproject.toml in
+    the folder the app was started from, or their own FLET_* variables named another archive,
+    and the app downloaded its client at its first start (offline: it failed). Windows and macOS
+    have one name each: nothing to pin.
+    """
+    m = _LINUX_CLIENT.fullmatch(name)
+    if not m:
+        return {}
+    return {"FLET_LINUX_DISTRO": m.group("distro"), "FLET_DESKTOP_FLAVOR": "light" if m.group("light") else "full"}
+
+
 def _flet_client_archive(cfg: Config) -> Path:
     """Return the Flet desktop client archive of the locked flet-desktop (downloaded once).
 
@@ -203,7 +224,7 @@ def _flet_client_archive(cfg: Config) -> Path:
     url = f"https://github.com/flet-dev/flet/releases/download/v{version}/{name}"
     url = os.environ.get("FLET_CLIENT_URL") or url  # flet_desktop's own override (a mirror)
     source = f"{url} (FLET_CLIENT_URL)" if os.environ.get("FLET_CLIENT_URL") else url
-    ui.info(f"  downloading the Flet client for Nuitka: {source}")
+    ui.info(f"  downloading the Flet client to bundle: {source}")
     archive.parent.mkdir(parents=True, exist_ok=True)
     partial = archive.with_suffix(archive.suffix + ".part")
     try:

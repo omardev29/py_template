@@ -1882,7 +1882,13 @@ Per method:
   a share or a mapped drive, which resolve() gives as `\\server\share\...`, takes the
   `\\?\UNC\server\share\...` form, since `\\?\\\server` is no valid name (WinError 123), as
   `e2e.rmtree` does; the `ignore` callback reads the folders back with `portable.short_path`
-  before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. The base's
+  before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. A bundled folder whose `lib/` holds
+  `flet_desktop` also carries the Flet client (`portable._bundle_flet_client`: the archive of
+  `nuitka._flet_client_archive` in `lib/flet_desktop/app/`, and `nuitka.flet_client_env` in the
+  launchers: on Linux `FLET_LINUX_DISTRO` and `FLET_DESKTOP_FLAVOR`, the parts of its name, since
+  flet_desktop names the archive it looks for from the user's glibc and CURRENT folder); it
+  downloaded ~40 MB at its first start. `runtime = "system"` (a Python of the user's machine, like
+  a pyz) carries none: documented. The base's
   `__pycache__` folders are never copied. Prunes `include libs Tools share Scripts`, every `bin/` entry but the interpreter (`BIN_KEEP`:
   `python*`, `pypy*`, `libpypy*`; the base's console scripts, e.g. a 24 MB `ruff` installed into
   it, carried the build machine's paths), on Linux the shared `lib/libpython3.X.so*` when the
@@ -3691,10 +3697,14 @@ Flet (flet, flet-desktop, flet pack, flet build):
   flet-desktop of another version is pip-installed at runtime, bypassing uv.lock. Fix: one
   `[preset.flet] version` for flet, flet-desktop and flet-cli (5.8); exe through `flet pack`
   (`exe._flet_pack`); `nuitka._flet_client_archive` bundles flet_desktop's own release archive
-  at `flet_desktop/app/`, from the same URL (or its `FLET_CLIENT_URL` override, a mirror) (10).
-  Test: `test_apply.py::test_flet_version_change_replaces_the_three_pins`,
+  at `flet_desktop/app/`, from the same URL (or its `FLET_CLIENT_URL` override, a mirror), for
+  the nuitka method and a bundled portable folder (`portable._bundle_flet_client`), with
+  `nuitka.flet_client_env` pinning the Linux name it looks for (10). Test:
+  `test_apply.py::test_flet_version_change_replaces_the_three_pins`,
   `test_workarounds.py::test_nuitka_bundles_the_flet_client`,
-  `test_the_flet_client_follows_flet_client_url`. Goes: never.
+  `test_the_flet_client_follows_flet_client_url`,
+  `test_build_methods.py::test_a_bundled_portable_flet_app_carries_its_desktop_client`. Goes:
+  never.
 - **flet loads its controls lazily** (LIMITATION): module `__getattr__` + `importlib`, which
   Nuitka cannot follow. Fix: `--include-package=flet --include-package=flet_desktop` in
   `nuitka.build` (10). Test: `test_workarounds.py::test_nuitka_bundles_the_flet_client`. Goes:
@@ -4377,6 +4387,12 @@ Behaviour:
   arguments cmd.exe would change (6.1); PowerShell drops a bare `--`; xonsh `-c` exits 1 on any failing command
   (the child's real code is in its `CalledProcessError`).
 - `uv build` drops a `.gitignore` into `dist/<n>-<b>-wheel/`.
+- A Flet app built as a pyz, a wheel or a portable folder with `runtime = "system"` carries no
+  Flet client: its first start downloads ~40 MB from GitHub (`FLET_CLIENT_URL`: a mirror), so it
+  needs the network once (README troubleshooting). They run on a Python of the user's machine,
+  whatever its OS: one client per OS would weigh 40-90 MB each (a CI pyz merges three). exe,
+  nuitka and a bundled portable folder carry it; on Linux the build machine's (glibc bracket and
+  flavor), so they need that glibc or newer, as the nuitka binary does anyway.
 - A project inside a bigger git repository (supported: `new` skips `git init`, the hook finds
   the repository top) still gets its generated CI at `<project>/.github/workflows/ci.yml`, which
   GitHub never runs (it reads `<top>/.github/workflows/` only), and whose steps expect the
