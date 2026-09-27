@@ -647,7 +647,9 @@ class Shell:
     def describe(self) -> str:
         parts = [self.family if self.mode == "c" else f"{self.family}, script mode"]
         if self.interp:
-            parts.append("launcher run as `" + Path(self.interp[0]).name + " ./deploy`")
+            # every word the probes run: `busybox sh ./deploy`, not `busybox ./deploy`
+            words = [Path(self.interp[0]).name, *self.interp[1:]]
+            parts.append("launcher run as `" + " ".join(words) + " ./deploy`")
         parts += [f"{k}={v}" for k, v in self.env]
         if self.note:
             parts.append(self.note)

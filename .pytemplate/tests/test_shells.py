@@ -265,6 +265,14 @@ def test_discover_posix_with_fake_which(tmp_path: Path) -> None:
     assert "dash" not in got and "pwsh" not in got
 
 
+def test_describe_names_every_word_the_launcher_runs_with(tmp_path: Path) -> None:
+    """--list and the --json report said `busybox ./deploy` while the probes run `busybox sh ./deploy`."""
+    found = {"busybox": _touch(tmp_path / "busybox"), "dash": _touch(tmp_path / "dash")}
+    got = {s.name: s for s in shells.discover({}, windows=False, which=found.get)}
+    assert "launcher run as `busybox sh ./deploy`" in got["busybox"].describe()
+    assert "launcher run as `dash ./deploy`" in got["dash"].describe()
+
+
 def test_select() -> None:
     found = [shells.Shell(n, "posix", ("x",)) for n in ("cmd", "msys2-msys", "msys2-ucrt64", "niubash", "niubash-shx")]
     assert [s.name for s in shells.select(found, ["msys2"])] == ["msys2-msys", "msys2-ucrt64"]
