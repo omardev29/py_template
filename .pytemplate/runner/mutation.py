@@ -98,6 +98,10 @@ KILLED, TIMEOUT, SURVIVED, ERROR, UNTESTED, SKIPPED, NOT_RUN = "killed", "timeou
 STATUSES = (KILLED, TIMEOUT, SURVIVED, ERROR, UNTESTED, SKIPPED, NOT_RUN)
 PASS, FAIL = "PASS", "FAIL"
 GIT_IDENTITY = ("-c", "user.name=pytemplate mutation", "-c", "user.email=mutation@example.invalid")
+if sys.platform == "win32":  # a test run's process group: it ignores the console's Ctrl+C (Runs.run)
+    NEW_GROUP = subprocess.CREATE_NEW_PROCESS_GROUP
+else:
+    NEW_GROUP = 0
 # a user's PYTEST_ADDOPTS (-n auto, --lf...) and PYTEST_PLUGINS would change what every run means
 PYTEST_VARIABLES = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS")
 
@@ -567,13 +571,13 @@ def _last_line(output: str) -> str:
 
 def classify(code: int | None, output: str, *, stopped: bool = False) -> tuple[str, str]:
     """A test run -> (status, detail). `stopped`: the whole run was stopped (an interrupt) while
-    this one ran, which then proves nothing, whatever it returned (on Windows a Ctrl+C reaches
-    the tests too, and pytest ends with its own code 2). `code` None: the run was ended by its
-    time limit. A kill needs pytest's word for it: exit code 1 or 2 with failed or erroring tests
-    in its summary, or exit code 2 with its KeyboardInterrupt banner (not the suite's stop, which
-    is `stopped`: the tests' own, which the mutant caused, such as a signal handler it switched
-    off; pytest counts no failure then); a survivor its summary with none; any other end (no
-    summary: a crash, a lost child, a Python that did not start) proves neither and is an error."""
+    this one ran, which then proves nothing, whatever it returned (stop() kills it). `code`
+    None: the run was ended by its time limit. A kill needs pytest's word for it: exit code 1
+    or 2 with failed or erroring tests in its summary, or exit code 2 with its KeyboardInterrupt
+    banner (not the suite's stop, which is `stopped`: the tests' own, which the mutant caused,
+    such as a signal handler it switched off; pytest counts no failure then); a survivor its
+    summary with none; any other end (no summary: a crash, a lost child, a Python that did not
+    start) proves neither and is an error."""
     if stopped:
         return NOT_RUN, "interrupted"
     if code is None:
@@ -790,11 +794,12 @@ def make_copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, st
 
 
 def sync_copy(venv: envs.PyEnv, copy: Path) -> None:
-    """The copy's .venv as envs.sync makes the project's (the copy is the project: its cwd), with
-    one --quiet whatever ./pyt's -q says: uv's progress goes, its errors stay (`uv -qq` fails
-    without a word)."""
+    """The copy's .venv as envs.sync makes the project's (the copy is the project: its cwd).
+    uv's output is captured, and shown when the sync fails (proc.run: even under -q). A --quiet
+    would hide why: `uv -qq` fails without a word, and so does `uv --quiet sync --locked` of a
+    stale lock with uv 0.10.12, the oldest the project takes."""
     no_groups = [a for group, _ in envs.left_out(venv) for a in ("--no-group", group)]
-    envs.uv(venv, ["--quiet", "sync", "--locked", "--all-groups", *no_groups], cwd=copy, quiet=False)
+    envs.uv(venv, ["sync", "--locked", "--all-groups", *no_groups], cwd=copy, capture=True)
 
 
 def worker_env(worker_copy: Path, home: Path, tmp: Path, base_env: Mapping[str, str], keep: Mapping[str, str], cfg: Config, uv: str) -> dict[str, str]:
@@ -901,7 +906,10 @@ def kill_run(child: subprocess.Popen[bytes]) -> None:
 
 class Runs:
     """The pytest runs of the workers: started with a time limit, and killed, tree and all, when
-    it passes or on stop() (an interrupt)."""
+    it passes or on stop() (an interrupt). The terminal's Ctrl+C never reaches a run (a session
+    of its own on POSIX, a process group of its own on Windows, NEW_GROUP): it reaches the
+    runner, whose stop() ends the runs. So a run whose tests a KeyboardInterrupt ended was
+    ended by the tests themselves, which is the mutant's doing (classify)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -929,7 +937,7 @@ class Runs:
                 return None, "", 0.0
             child = subprocess.Popen(
                 argv, cwd=worker.copy, env=worker.env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                start_new_session=not IS_WINDOWS,
+                start_new_session=not IS_WINDOWS, creationflags=NEW_GROUP,
             )  # fmt: skip
             with self._lock:
                 self._children[worker.index] = child

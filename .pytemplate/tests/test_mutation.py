@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,7 +26,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import config, mutation, proc  # noqa: E402
+from runner import config, mutation, nvimtest, proc  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.mutation import KILLED, NOT_RUN, SURVIVED, TIMEOUT, Baseline, Mutant, Options, Report, Runs, Worker  # noqa: E402
 from runner.project import ROOT  # noqa: E402
@@ -306,6 +307,26 @@ def test_handler_classes_are_the_classes_an_except_clause_names() -> None:
     assert _classes(HANDLERS) == ["\u00c9RR", "OSError", "subprocess.TimeoutExpired", "subprocess.CalledProcessError"]
     assert list(mutation.handler_classes(HANDLERS).values()) == ["*()", "*()", "*()", "()"]  # in a tuple: no element left
     assert _classes("try:\n    pass\nexcept:\n    pass\nexcept (OSError):\n    pass\n") == ["OSError"]
+    assert _classes("try:\n    pass\nexcept OSError: pass") == ["OSError"]  # on the last line, without a line break
+
+
+def test_a_class_written_over_two_lines_is_one_span() -> None:
+    source = "try:\n    pass\nexcept (OSError, subprocess\n        .TimeoutExpired):\n    pass\n"
+    assert mutation.handler_classes(source) == {((3, 8), (3, 15)): "*()", ((3, 17), (4, 23)): "*()"}
+    m = Mutant("m.py", mutation.EXCEPTION_REPLACER, 1, 3, 17, 4, 23, None)
+    assert mutation.own_mutant(m, source) == "try:\n    pass\nexcept (OSError, *()):\n    pass\n"
+
+
+@pytest.mark.parametrize(
+    ("text", "parenthesized"),
+    [
+        ("(A, B)", True), ("(A,)", True), ("((A), (B))", True), ("(A, (B))", True), ("(A, b.C)", True),
+        ("(\n    A,  # the first\n    B,  # the last\n)", True),
+        ("(A), (B)", False), ("(A), B", False), ("A, (B)", False), ("AB, CD", False), ("A, B", False),
+    ],
+)  # fmt: skip
+def test_parenthesized_is_a_tuple_in_parentheses_of_its_own(text: str, parenthesized: bool) -> None:
+    assert mutation._parenthesized(text) is parenthesized
 
 
 @pytest.mark.skipif(sys.version_info < (3, 14), reason="`except A, B:` is Python 3.14 syntax (PEP 758)")
@@ -332,14 +353,17 @@ def test_select_gives_each_exception_class_one_mutant_with_its_whole_span() -> N
     sometimes twice): the mutant takes the class's span, once."""
     line = HANDLERS.splitlines()[8]
     at = line.index("subprocess.TimeoutExpired")
+    called = HANDLERS.splitlines()[10].index("subprocess.CalledProcessError")
     listed = [
         _entry("core/ExceptionReplacer", 0, 0, (9, line.index("OSError")), 7, "catch"),
         _entry("core/ExceptionReplacer", 1, 0, (9, at + len("subprocess")), 1, "catch"),  # its dot
         _entry("core/ExceptionReplacer", 2, 0, (9, at), 10, "catch"),  # the same class again
+        _entry("core/ExceptionReplacer", 3, 0, (11, called), 10, "catch"),  # the next one
     ]
     kept = mutation.select(".pytemplate/runner/m.py", listed, HANDLERS, None)
     assert [(m.line, m.column, m.end_line, m.end_column, m.occurrence) for m in kept] == [
         (9, line.index("OSError"), 9, line.index("OSError") + 7, 0), (9, at, 9, at + len("subprocess.TimeoutExpired"), 1),
+        (11, called, 11, called + len("subprocess.CalledProcessError"), 3),
     ]  # fmt: skip
 
 
@@ -481,7 +505,7 @@ def test_classify(code: int, output: str, status: str, detail: str) -> None:
 def test_classify_a_run_that_was_ended() -> None:
     assert mutation.classify(None, "...") == (TIMEOUT, "")
     assert mutation.classify(None, "...", stopped=True) == (NOT_RUN, "interrupted")
-    # a Ctrl+C reached pytest too (Windows: one console): its own end proves nothing either way
+    # once the suite was stopped (stop() killed the run), what the run gave back proves nothing
     stopped_by_ctrl_c = "!!! KeyboardInterrupt !!!\n3 passed in 1.00s\n"
     assert mutation.classify(2, stopped_by_ctrl_c, stopped=True) == (NOT_RUN, "interrupted")
     assert mutation.classify(1, "FAILED t.py::test_x\n1 failed in 1.00s\n", stopped=True) == (NOT_RUN, "interrupted")
@@ -654,7 +678,8 @@ def test_a_modules_time_comes_after_every_write_of_the_clock(tmp_path: Path, mon
 
 def test_a_copy_whose_sync_fails_says_why_even_under_q(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]) -> None:
     """`./pyt -q selftest --mutation` added its own --quiet to the sync's: `uv -qq` fails without
-    a word (a worker that could not be made, and no reason)."""
+    a word (a worker that could not be made, and no reason). The uv of this run: the CI runs the
+    suite with the newest uv and with the oldest the project takes."""
     try:
         proc.find_uv()
     except PytError:
@@ -667,6 +692,39 @@ def test_a_copy_whose_sync_fails_says_why_even_under_q(tmp_path: Path, monkeypat
     with pytest.raises(proc.CommandFailed):
         mutation.sync_copy(venv, copy)
     assert "--locked" in capfd.readouterr().err  # uv's own error: the lock needs to be updated
+
+
+OLD_UV = """\
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("uv 0.10.12 (as it answers)")
+elif any(a in ("--quiet", "-q", "-qq") for a in sys.argv[1:]):
+    sys.exit(1)  # a stale lock under --quiet: exit 1, and no word
+else:
+    print("Resolved 1 package in 3ms", file=sys.stderr)
+    print("The lockfile at `uv.lock` needs to be updated, but `--locked` was provided.", file=sys.stderr)
+    sys.exit(1)
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake uv is a #! script")
+def test_a_copy_whose_sync_fails_says_why_with_the_oldest_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]) -> None:
+    """uv 0.10.12, the oldest the project takes, says nothing about a stale lock under one
+    --quiet (as this fake does): the sync runs without it, its output captured and shown when it
+    fails, with -q too."""
+    fake = tmp_path / "uv"
+    fake.write_text(f"#!{sys.executable}\n{OLD_UV}", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("UV", str(fake))
+    monkeypatch.setattr(mutation.ui, "QUIET", True)
+    monkeypatch.setattr(mutation.envs, "left_out", lambda env: [])
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    venv = mutation.envs.PyEnv("cpython", copy / ".venv", _cfg().python.cpython, "only-managed")
+    with pytest.raises(proc.CommandFailed):
+        mutation.sync_copy(venv, copy)
+    assert "`--locked` was provided" in capfd.readouterr().err
 
 
 @needs_git
@@ -717,6 +775,27 @@ def test_a_test_run_that_a_keyboard_interrupt_ends_is_a_kill(tmp_path: Path) -> 
         code, output, _ = runs.run(worker, [name], 120)
         status, detail = mutation.classify(code, output, stopped=runs.stopped.is_set())
         assert (code, status) == (2, KILLED) and detail.endswith(f"{name}:{line}: KeyboardInterrupt"), output
+
+
+def test_the_terminals_ctrl_c_never_reaches_a_test_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run has a session of its own on POSIX and a process group of its own on Windows, which
+    ignores the console's Ctrl+C: the Ctrl+C reaches the runner alone, whose stop() ends the run.
+    One that reached pytest ended it with the KeyboardInterrupt banner and exit code 2, which
+    reads as a kill when the runner's own interrupt came a moment later."""
+    worker = _worker(tmp_path, {"test_ok.py": "def test_ok():\n    pass\n"})
+    seen: dict[str, Any] = {}
+    real = subprocess.Popen
+
+    def popen(*args: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mutation.subprocess, "Popen", popen)
+    assert mutation.classify(*Runs().run(worker, ["test_ok.py"], 120)[:2]) == (SURVIVED, "")
+    if sys.platform == "win32":
+        assert seen["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP and not seen["start_new_session"]
+    else:
+        assert seen["start_new_session"] is True and seen["creationflags"] == 0
 
 
 def test_run_reads_pytest_whatever_colours_the_user_asked_for(tmp_path: Path) -> None:
@@ -899,6 +978,74 @@ def test_run_all_goes_on_as_an_interrupt(tmp_path: Path) -> None:
     assert runs.stopped.is_set() and len(done) < 50
 
 
+def test_each_mutant_runs_in_a_workers_copy_within_its_baselines_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """_test with the copies, uv, Cosmic Ray and pytest faked: each mutant runs in a worker's
+    copy of its module, within TIMEOUT_FACTOR x its baseline + TIMEOUT_EXTRA, and the copy gets
+    the module's own bytes back; a mutant that is no valid Python never runs; only an error keeps
+    its log."""
+    rel = ".pytemplate/runner/calc.py"
+    original = "def f(x):\n    return x + 1\n"
+    answers = {  # Cosmic Ray's mutant of each occurrence: its comment says what its tests make of it
+        0: "def f(x):\n    return x - 1  # killed\n",
+        1: "def f(x):\n    return x + 2  # survived\n",
+        2: "def f(x):\n    return x * 1  # crashed\n",
+        3: "def f(x):\n    return x +\n",  # no valid Python: never run
+        4: "def f(x):\n    return x // 1  # slow\n",
+    }
+    outputs: dict[str, tuple[int | None, str]] = {
+        "killed": (1, "FAILED t.py::test_f - assert 0 == 2\n1 failed in 0.10s\n"),
+        "survived": (0, "3 passed in 0.10s\n"),
+        "crashed": (1, "Fatal Python error: Segmentation fault\n"),
+        "slow": (None, ""),
+    }
+    ran: list[tuple[str, float]] = []
+    base = tmp_path / "base"
+    (base / "logs").mkdir(parents=True)
+
+    class FakeDriver(mutation.Driver):
+        def __init__(self) -> None:  # no Cosmic Ray
+            pass
+
+        def ask(self, request: Mapping[str, Any]) -> dict[str, Any]:
+            return {"code": answers[int(request["occurrence"])]}
+
+    def run(self: Runs, worker: Worker, tests: Sequence[str], timeout: float, junit: Path | None = None) -> tuple[int | None, str, float]:
+        text = (worker.copy / rel).read_text(encoding="utf-8")
+        ran.append((text, timeout))
+        code, output = next((outputs[k] for k in outputs if f"# {k}" in text), (0, "3 passed in 5.00s\n"))
+        worker.log.write_text(output, encoding="utf-8")
+        return code, output, 5.0 if text == original else 0.1
+
+    def copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, str], contents: Mapping[str, bytes] | None = None) -> None:
+        for name, data in (contents or {}).items():
+            (dest / name).parent.mkdir(parents=True, exist_ok=True)
+            (dest / name).write_bytes(data)
+
+    monkeypatch.setattr(mutation, "child_env", lambda base: dict(os.environ))
+    monkeypatch.setattr(nvimtest, "uv_dirs", lambda env: {})
+    monkeypatch.setattr(mutation, "listed_files", lambda root, env: [])
+    monkeypatch.setattr(mutation, "make_copy", copy)
+    monkeypatch.setattr(mutation, "sync_copy", lambda venv, copy: None)
+    monkeypatch.setattr(mutation, "worker_env", lambda *a: {})
+    monkeypatch.setattr(Runs, "run", run)
+    todo = [Mutant(rel, "core/AddNot", i, 2, 11, 2, 16, "f") for i in answers]
+    report = Report(list(todo), {}, base)
+    tests = {"runner.calc": {".pytemplate/tests/test_calc.py": 1}}
+    mutation._test(_cfg(), Options(None, 2, False), "uv", ROOT, base, tests, todo, {rel: original.encode()}, base / "snapshot", FakeDriver(), report)
+    by = {m.occurrence: m for m in report.mutants}
+    assert {i: m.status for i, m in by.items()} == {0: KILLED, 1: SURVIVED, 2: mutation.ERROR, 3: mutation.SKIPPED, 4: TIMEOUT}
+    assert report.workers == 2 and report.baselines["runner.calc"].status == mutation.PASS
+    limit = mutation.TIMEOUT_FACTOR * 5.0 + mutation.TIMEOUT_EXTRA
+    assert sorted(t for text, t in ran if text != original) == [limit] * 4 and answers[3] not in [text for text, _ in ran]
+    assert [t for text, t in ran if text == original] == [mutation.BASELINE_TIMEOUT]
+    assert by[4].detail == f"no result after {limit:.0f} s" and by[3].detail.startswith("the mutant is no valid Python")
+    saved = base / "logs" / "error-1.log"
+    assert by[2].detail.endswith(f"  (log: {saved})") and saved.read_text(encoding="utf-8") == outputs["crashed"][1]
+    assert sorted(p.name for p in (base / "logs").glob("error-*")) == ["error-1.log"]
+    assert not any("(log:" in by[i].detail for i in (0, 1, 3, 4))
+    assert [(base / f"w{i}" / rel).read_text(encoding="utf-8") for i in range(2)] == [original] * 2  # the module's own bytes back
+
+
 # --- the report and the exit code -------------------------------------------------------------------
 
 
@@ -946,11 +1093,14 @@ def test_selftest_exit_code(
 ) -> None:
     report = _report(tmp_path, statuses, baseline)
     report.interrupted = interrupted
+    report.kept = code != 0  # as run() decides it
     monkeypatch.setattr(mutation, "run", lambda *a: report)
     monkeypatch.setattr(proc, "find_uv", lambda: "uv")
     assert mutation.selftest(_cfg(), ["--json"]) == code
-    data = json.loads(capsys.readouterr().out)
+    out, err = capsys.readouterr()
+    data = json.loads(out)
     assert data["ok"] is (code == 0) and data["interrupted"] is interrupted
+    assert (f"logs kept for inspection: {tmp_path / 'logs'}" in err) is report.kept
 
 
 def test_selftest_prints_the_report_before_the_error_that_stopped_the_run(
@@ -989,6 +1139,26 @@ def test_a_run_that_fails_keeps_its_report_and_logs_and_removes_the_workers(tmp_
     assert len(report.mutants) == 1 and sorted(p.name for p in base.iterdir()) == sorted([mutation.MARKER, "lock", "logs"])
 
 
+def test_an_interrupt_keeps_the_report_of_what_ran(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Ctrl+C (or a SIGTERM, a SIGHUP) in the middle of the run: the report of what ran comes
+    back and says interrupted and how long the run took, the workers' folders go, the logs stay."""
+    base = tmp_path / "base"
+
+    def interrupted(cfg: Config, opts: Options, uv: str, root: Path, base: Path, files: Any, changed: Any, tests: Any, report: Report) -> None:
+        (base / "logs").mkdir()
+        (base / "w0" / ".venv").mkdir(parents=True)
+        report.mutants = [Mutant(".pytemplate/runner/calc.py", "core/AddNot", 0, 1, 4, 1, 5, None, KILLED)]
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(mutation, "_run_locked", interrupted)
+    start = time.perf_counter()
+    report = mutation.run(_cfg(), Options(None, 1, False), "uv", _toy(tmp_path), base)
+    took = time.perf_counter() - start
+    assert report.interrupted and report.kept and report.error is None and not report.failed()
+    assert len(report.mutants) == 1 and sorted(p.name for p in base.iterdir()) == sorted([mutation.MARKER, "lock", "logs"])
+    assert 0 <= report.seconds <= took
+
+
 def test_an_interrupt_during_the_cleanup_waits_for_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A second Ctrl+C (or a SIGTERM) while the workers' folders go: they still go, the report
     comes back and says interrupted, and the logs stay."""
@@ -1012,16 +1182,26 @@ def test_an_interrupt_during_the_cleanup_waits_for_it(tmp_path: Path, monkeypatc
 
 @pytest.mark.parametrize("name", ["SIGINT", "SIGTERM", "SIGHUP"])
 def test_deferred_interrupts_wait_for_the_block_and_put_the_handlers_back(name: str) -> None:
+    """The handler before the block is one of the test's own: the one an earlier test left may be
+    the default, which a restore that always put the default back matched (an earlier test that
+    ran such a mutant through selftest() left it there)."""
     import signal
 
     number = getattr(signal, name, None)
     if number is None:
         pytest.skip(f"no {name} here")
-    before = signal.getsignal(number)
-    with mutation.deferred_interrupts() as got:
-        signal.raise_signal(number)
-        time.sleep(0.01)  # a signal's Python handler runs between two bytecodes
-    assert got == [number] and signal.getsignal(number) == before
+
+    def mine(signum: int, frame: Any) -> None:
+        raise AssertionError(f"{name} reached the handler of before the block")
+
+    before = signal.signal(number, mine)
+    try:
+        with mutation.deferred_interrupts() as got:
+            signal.raise_signal(number)
+            time.sleep(0.01)  # a signal's Python handler runs between two bytecodes
+        assert got == [number] and signal.getsignal(number) is mine
+    finally:
+        signal.signal(number, signal.SIG_DFL if before is None else before)
 
 
 def test_nothing_changed_starts_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

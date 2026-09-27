@@ -3513,34 +3513,37 @@ short temp tree and unset `NVIM_APPNAME`.
     change what every run means). The mutants of a module no test file imports are untested.
   - where: N workers (`--jobs`, default half the CPUs, at most 8), each a throwaway copy of the
     project in the scratch base (`make_copy`: the files `git ls-files --cached --others
-    --exclude-standard` lists, with their working-tree content, committed into a repository of
-    its own; the modules to mutate from the snapshot `list_mutants` takes, which Cosmic Ray
-    reads for every mutant too, so the checkout may change meanwhile), with its own `.venv`
-    (`sync_copy`: `uv sync --locked --all-groups` with one `--quiet` whatever `-q` says, since
-    `uv -qq` fails without a word), home, XDG and temp folders (`worker_env`: whatever a mutant
-    makes a test write outside tmp_path lands there; `nvimtest.uv_dirs` keeps uv's cache, Pythons
-    and tools through their UV_* variables, which the tests' own child environments keep too:
+    --exclude-standard` lists, with their working-tree content, committed into a repository of its
+    own; the modules to mutate from the snapshot `list_mutants` takes, which Cosmic Ray reads for
+    every mutant too, so the checkout may change meanwhile), with its own `.venv` (`sync_copy`: `uv
+    sync --locked --all-groups`, its output captured and shown when it fails, even under `-q`: a
+    `--quiet` hides why, `uv -qq` always and one `--quiet` with uv 0.10.12, the oldest the project
+    takes, for a stale lock), home, XDG and temp folders (`worker_env`: whatever a mutant makes a
+    test write outside tmp_path lands there; `nvimtest.uv_dirs` keeps uv's cache, Pythons and tools
+    through their UV_* variables, which the tests' own child environments keep too:
     `test_cli_core.child_env`, the `_uv_dirs` helpers), no bytecode written, and a new mtime for
-    every write of a module (`set_mtime`: after the one before and after the clock, so a `.pyc`
-    a child wrote never passes for another version of it, not even one of the copy the clock
-    wrote).
+    every write of a module (`set_mtime`: after the one before and after the clock, so a `.pyc` a
+    child wrote never passes for another version of it, not even one of the copy the clock wrote).
   - the baselines: each module's tests first run as they are (`BASELINE_TIMEOUT`, an hour) and
     must pass (a FAIL leaves its mutants not run, and the command exits 1); their time sets each
     mutant's limit, `TIMEOUT_FACTOR` x baseline + `TIMEOUT_EXTRA` (2 x + 60 s). A mutant over it
     is a timeout, which counts as a kill.
-  - the verdict (`classify`): a kill needs pytest's own summary line with failed or erroring
-    tests (exit 1 or 2; "subtests failed" counts, "xfailed" never), or its KeyboardInterrupt
-    banner with exit 2 in a run the suite did not stop (the tests' own interrupt, which the
-    mutant caused: one that switched a signal handler off; pytest counts no failure then, and
-    its summary may be "no tests ran"); a survivor the summary with none (exit 0); any other end
-    (no summary: a crash, a Python that did not start) is an error, never a kill, and keeps its
-    log. Colour codes are read through (`pytest_counts`). A run the
-    suite stopped (Ctrl+C, SIGTERM, SIGHUP: `e2e.termination_as_interrupt`) proves nothing and
-    is not run, whatever it returned (`Runs.run` gives None: stop() may kill it before its own
-    loop sees the stop, and on Windows the tests get the Ctrl+C too). A run over its limit or
-    stopped dies with its whole tree (`kill_run`: on POSIX also every process below pytest in a
-    session of its own, which a signal to pytest's group never reaches, found through /proc or
-    `ps` before the kill: once pytest is dead, init owns them).
+  - the verdict (`classify`): a kill needs pytest's own summary line with failed or erroring tests
+    (exit 1 or 2; "subtests failed" counts, "xfailed" never), or its KeyboardInterrupt banner with
+    exit 2 in a run the suite did not stop (the tests' own interrupt, which the mutant caused: one
+    that switched a signal handler off; pytest counts no failure then, and its summary may be "no
+    tests ran"); a survivor the summary with none (exit 0); any other end (no summary: a crash, a
+    Python that did not start) is an error, never a kill, and keeps its log. Colour codes are read
+    through (`pytest_counts`). A run the suite stopped (Ctrl+C, SIGTERM, SIGHUP:
+    `e2e.termination_as_interrupt`) proves nothing and is not run, whatever it returned (`Runs.run`
+    gives None: stop() may kill it before its own loop sees the stop). The terminal's Ctrl+C never
+    reaches a run, which has a session of its own on POSIX and a process group of its own on
+    Windows (`NEW_GROUP`, which ignores the console's Ctrl+C): a pytest that the console's Ctrl+C
+    ended printed the KeyboardInterrupt banner with exit code 2, a kill when the runner's own
+    interrupt came a moment later. A run over its limit or stopped dies with its whole tree
+    (`kill_run`: on POSIX also every process below pytest in a session of its own, which a signal
+    to pytest's group never reaches, found through /proc or `ps` before the kill: once pytest is
+    dead, init owns them).
   - the report (`print_report`; `Report.as_json` with `--json`, on stdout): the counts per file,
     the score (the killed and timed-out share of the judged mutants), every survivor and error
     with its line, operator and change. Exit 0 when every mutant was judged (survivors are the
@@ -3794,8 +3797,8 @@ only with `./pyt selftest` and `selftest --shells` on Windows (template-selftest
 template-launchers; real niubash only on the maintainer's machine). `selftest --mutation` was
 developed and run on Linux only (September 2026): on Windows and macOS only its tests run
 (template-selftest), which fake or skip what differs there (the lock of `msvcrt`, `ps` instead
-of /proc, taskkill, a Ctrl+C that reaches the tests); its CI job had not run on GitHub when it
-was written.
+of /proc, taskkill, the process group of each test run); its CI job had not run on GitHub when
+it was written.
 
 ### 13.4 Bug density (rule 1.10)
 
@@ -4173,6 +4176,16 @@ uv:
   deselects `test_presets.py::test_init_round_trip_through_every_preset_is_byte_identical`
   (13.2). Test: `test_workflows.py::test_what_the_selftest_workflow_reads_by_text_exists`.
   Goes: when `envs.MIN_UV` reaches a uv that writes the same bytes.
+- **uv 0.10.12 (the floor) says nothing about a stale lock under `--quiet`** (LIMITATION: it
+  prints "The lockfile at `uv.lock` needs to be updated" as plain output, which `--quiet` hides;
+  0.12.19 prints it as an `error:`; `-qq` hides every error in any uv): `uv --quiet sync
+  --locked` exited 1 without a word, and a worker of `selftest --mutation` could not be made with
+  no reason given. Fix: `mutation.sync_copy` runs the copies' sync without `--quiet`, its output
+  captured and shown when it fails, even under `-q` (13.1). Test:
+  `test_mutation.py::test_a_copy_whose_sync_fails_says_why_with_the_oldest_uv` (a fake uv that
+  answers as 0.10.12 does), `test_a_copy_whose_sync_fails_says_why_even_under_q` (the real uv:
+  the newest, and the oldest in the `uv-floor` job). Goes: never (a captured sync says why with
+  any uv).
 
 CPython and its standard library:
 - **`subprocess.run` kills the child 0.25 s after Ctrl+C** (LIMITATION, 3.7+): an app's cleanup
