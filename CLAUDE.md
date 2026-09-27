@@ -1288,7 +1288,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `config.update_file`, `cmd_env.ensure_lock` or the new environment's `envs.sync` fails or is
   interrupted, saying which files it restored; the generated files are rendered only after that,
   so a failed mode leaves nothing half-applied and a second run locks again (it used to find
-  nothing to change and report success with a stale `uv.lock`).
+  nothing to change and report success with a stale `uv.lock`). A generated file it leaves
+  untouched because it was edited by hand is named in a warning, as its dry run names it (it
+  still describes the old mode).
 
 ### 6.2 Generated files and `state.json`
 

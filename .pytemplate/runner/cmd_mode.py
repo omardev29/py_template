@@ -353,9 +353,11 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
             ui.warn(done)
             raise
         raise DeployError(f"{e}\n  {done}; fix the problem above and run the command again", e.code) from None
-    changed, _ = render.apply(new_cfg)
+    changed, edited = render.apply(new_cfg)
     if changed:
         ui.info(f"render: updated {', '.join(changed)}")
+    if edited:  # they still describe the old mode (the dry run names them too)
+        ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./deploy render --force)")
     _leftover_envs(cfg, new_cfg)
     _describe(new_cfg)
     return 0

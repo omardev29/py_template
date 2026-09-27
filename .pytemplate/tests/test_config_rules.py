@@ -1177,6 +1177,22 @@ def test_mode_under_uv_frozen_refuses_the_relock_and_puts_everything_back(tmp_pa
     assert fake.snapshot() == fake.before and fake.synced == []
 
 
+def test_mode_names_the_hand_edited_files_it_leaves_as_they_were(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real run dropped render.apply's list of hand-edited files: after `mode --editor
+    basedpyright` a hand-edited .vscode/settings.json kept the old editor's settings without a
+    word, while the dry run said "hand-edited, left untouched"."""
+    cfg = config.load(set())
+    _Relock(tmp_path, monkeypatch, "none")
+    monkeypatch.setattr(render, "apply", lambda *a, **k: ([".vscode/extensions.json"], [".vscode/settings.json"]))
+    other = "pylance" if cfg.typing.editor == "basedpyright" else "basedpyright"
+    assert cmd_mode.cmd_mode(cfg, ["--editor", other]) == 0
+    err = capsys.readouterr().err
+    assert "render: updated .vscode/extensions.json" in err
+    assert "not overwriting hand-edited generated files: .vscode/settings.json (./deploy render --force)" in err
+
+
 # --- mode: real runs in a throwaway copy of this project ----------------------------------------------
 
 needs_uv = pytest.mark.skipif(shutil.which("uv") is None, reason="uv not found")
