@@ -1288,6 +1288,44 @@ def test_git_refusing_the_repository_is_said_not_hidden(tmp_path: Path, monkeypa
 
 
 @needs_git
+def test_git_missing_from_path_is_said_not_taken_for_no_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """git not on PATH (GitHub Desktop, Fork and SourceTree bring their own): apply said "not a git
+    work tree: nothing to do", left pytemplate's hook installed with hooks.pre_commit = false,
+    and doctor called hooks.pre_commit applied."""
+    project, _ = _project(tmp_path, monkeypatch)
+    _git(project.root, "init", "-q")
+    assert _run(project) == 0
+    hook = project.root / ".git" / "hooks" / "pre-commit"
+    assert hook.is_file()
+    project.edit("hooks", "pre_commit", False)
+    capsys.readouterr()
+    which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **kw: None if name == "git" else which(name, *a, **kw))
+    assert _run(project) == 0
+    err = capsys.readouterr().err
+    assert "warning: git pre-commit hook not checked: git not found in PATH (put it on PATH" in err, err
+    assert "git hook         not checked: git not found in PATH (see above)" in err, err
+    assert hook.is_file()  # nothing could remove it, and nothing says it was
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert _run(project) == 0
+    assert "git hook         not checked: git not found in PATH" in capsys.readouterr().err
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    lines: list[tuple[bool | None, str]] = []
+
+    def check(passed: bool | None, label: str, hint: str = "") -> None:
+        lines.append((passed, label))
+
+    cmd_apply.doctor(project.cfg(), check)
+    hooks.doctor(project.cfg(), check, project.root)
+    assert (True, "pytemplate.toml applied (app.name, app.preset, [preset.*])") in lines, lines
+    assert any(passed is None and label.startswith("git not found in PATH: the pre-commit hook") for passed, label in lines), lines
+    if not any((d / ".git").exists() for d in project.root.parents):  # no repository at all: no news
+        shutil.rmtree(project.root / ".git")
+        assert _run(project) == 0
+        assert "git hook         not a git work tree: nothing to do" in capsys.readouterr().err
+
+
+@needs_git
 def test_every_hook_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """What apply does, and what its --dry-run says, for each state of the hooks folder."""
     project, _ = _project(tmp_path, monkeypatch)

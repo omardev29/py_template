@@ -884,7 +884,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 
 - `./deploy apply` (and `setup`) calls `hooks.ensure_installed(cfg)` when `[hooks] pre_commit`
   is true (the default): it installs the hook or updates this project's own, never fails the
-  command, and is silent outside git (`hooks.NotInGit`: no git, not a work tree). When
+  command, and is silent outside git (`hooks.NotInGit`: not a work tree, or no git and no `.git`
+  in or above the project). With a `.git` but no git on PATH (`hooks.git_missing_here`: a git
+  GUI's own git) apply warns and its summary, doctor's "git hook" line and its `applied` line
+  (without hooks.pre_commit) say the hook was not checked: it said "not a git work tree", left
+  the hook of a `pre_commit = false`, and doctor called hooks.pre_commit applied. When
   `pre_commit` is false, apply removes pytemplate's own hook (`hooks.uninstall`, which restores
   somebody else's `pre-commit.local`) and never touches another one (section 5.8). Any other
   git failure (dubious ownership...) is shown with git's own message: a warning in apply, an

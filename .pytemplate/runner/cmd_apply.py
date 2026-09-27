@@ -572,14 +572,20 @@ OURS = ("installed", "outdated", "chained")
 
 
 def _repo() -> hooks.Repo | str | None:
-    """The git repository of the project: None outside git, git's refusal (dubious ownership, a
-    broken .git...) as one line."""
+    """The git repository of the project: None outside git, why the hook cannot be read as one
+    line: git's refusal (dubious ownership, a broken .git...), or hooks.NO_GIT when git is not on
+    PATH in a project that has a .git (in or above it: hooks.git_missing_here)."""
     try:
         return hooks.find_repo(ROOT)
     except hooks.NotInGit:
-        return None
+        return hooks.NO_GIT if hooks.git_missing_here(ROOT) else None
     except DeployError as e:
         return " ".join(line.strip() for line in str(e).splitlines())
+
+
+def _unchecked(repo: str) -> str:
+    """Why the hook was not checked (a _repo() string), for the summary line."""
+    return hooks.NO_GIT if repo == hooks.NO_GIT else "git refuses the repository"
 
 
 def _hook_state(cfg: Config) -> str | None:
@@ -619,8 +625,9 @@ def _apply_hook(cfg: Config) -> str:
     if repo is None:
         return "not a git work tree: nothing to do"
     if isinstance(repo, str):
-        ui.warn(f"git pre-commit hook not checked: {repo}")
-        return "not checked: git refuses the repository (see above)"
+        again = " (put it on PATH and run ./deploy apply again)" if repo == hooks.NO_GIT else ""
+        ui.warn(f"git pre-commit hook not checked: {repo}{again}")
+        return f"not checked: {_unchecked(repo)} (see above)"
     before, copy_before = hooks.hook_state(repo), hooks.own_local(repo)
     ours = before in OURS or (copy_before and before == "missing")  # what hooks.uninstall removes
     if cfg.hooks.pre_commit:
@@ -655,7 +662,7 @@ def _hook_plan(cfg: Config) -> str:
     if repo is None:
         return "not a git work tree: nothing to do"
     if isinstance(repo, str):
-        return f"not checked: git refuses the repository ({repo})"
+        return f"not checked: {hooks.NO_GIT}" if repo == hooks.NO_GIT else f"not checked: git refuses the repository ({repo})"
     state, copy = hooks.hook_state(repo), hooks.own_local(repo)
     if not cfg.hooks.pre_commit:
         if state == "chained":
@@ -767,7 +774,9 @@ def doctor(cfg: Config, check: Check) -> None:
     """The ./deploy doctor lines about pytemplate.toml changes that are not applied yet."""
     problems = pending(cfg)
     if not problems:
-        check(True, "pytemplate.toml applied (app.name, app.preset, [preset.*], hooks.pre_commit)", "")
+        # hooks.pre_commit only where git could read the hook (the "git hook" line says why not)
+        read = not isinstance(_repo(), str)
+        check(True, f"pytemplate.toml applied (app.name, app.preset, [preset.*]{', hooks.pre_commit' if read else ''})", "")
     for label, hint in problems:
         check(False, label, hint)
     for problem in reference_problems(cfg, package=False):

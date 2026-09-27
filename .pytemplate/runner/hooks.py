@@ -104,6 +104,17 @@ class NotInGit(DeployError):
     (setup and doctor stay silent). Any other git failure is a plain DeployError."""
 
 
+NO_GIT = "git not found in PATH"  # NotInGit's message (code 3) when git is missing
+
+
+def git_missing_here(project: Path = ROOT) -> bool:
+    """git is not on PATH, yet a `.git` in the project or a folder above it says it lives in a
+    repository: the hook can be neither checked nor installed nor removed (GitHub Desktop, Fork
+    and SourceTree bring a git of their own, often not on PATH). apply said "not a git work
+    tree: nothing to do" and doctor called hooks.pre_commit applied."""
+    return shutil.which("git") is None and any((d / ".git").exists() for d in (project, *project.parents))
+
+
 # --- the repository ------------------------------------------------------------------------------
 
 
@@ -220,7 +231,7 @@ def find_repo(project: Path = ROOT, environ: Mapping[str, str] | None = None, cw
     is not inside a git work tree (2); DeployError with git's own message for any other git
     failure (dubious ownership, a broken .git...)."""
     if shutil.which("git") is None:
-        raise NotInGit("git not found in PATH", 3)
+        raise NotInGit(NO_GIT, 3)
     env = git_env(os.environ if environ is None else environ, cwd or Path(os.getcwd()))
     r = _git(["rev-parse", "--show-toplevel", "--git-common-dir", "--git-path", "hooks"], project, env)
     lines = [native_path(ln) for ln in r.stdout.splitlines()]  # MSYS2's own git prints /c/...
@@ -881,6 +892,9 @@ def doctor(cfg: Config, check: Check, project: Path = ROOT) -> None:
     try:
         repo = find_repo(project)
     except NotInGit:
+        if git_missing_here(project):
+            ui.step("git hook")
+            check(None, f"{NO_GIT}: the pre-commit hook of this repository is not checked", "put git on PATH (a git GUI's own git is often not on it)")
         return
     except DeployError as e:  # git refuses the repository (dubious ownership...): show why
         ui.step("git hook")
