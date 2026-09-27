@@ -13,11 +13,13 @@ template (this project's files, as the install contract says) with PYTEMPLATE_GL
 
 from __future__ import annotations
 
+import errno
 import functools
 import hashlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import types
@@ -314,6 +316,82 @@ def test_new_outside_a_project_copies_every_file_without_asking_git(tmp_path: Pa
     assert capsys.readouterr().err == ""
     assert presets.copy_scope() == "every file"
     assert presets.source_name() == f"the installed template ({snap})"
+
+
+def _fake_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    snap = tmp_path / "installed"
+    for rel in (".pytemplate/pyt.py", "pytemplate.toml", "src/app/x.py", "src/app/y.py"):
+        (snap / rel).parent.mkdir(parents=True, exist_ok=True)
+        (snap / rel).write_text(rel, encoding="utf-8")
+    monkeypatch.setattr(project, "GLOBAL", True)
+    monkeypatch.setattr(presets, "ROOT", snap)
+    return snap
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX modes")
+def test_new_outside_a_project_never_changes_the_projects_own_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """copytree(ROOT, dest) also gave `dest` the installed template's own mode and times: every
+    project made outside a project got its 0700 (tempfile.mkdtemp's), an empty folder given to
+    `new` lost its mode (a setgid 2775 became 700), and in one the user does not own the chmod
+    failed and `new` with it. The folder only gets mkdir: its mode is its own, or a new folder's."""
+    snap = _fake_snapshot(tmp_path, monkeypatch)
+    snap.chmod(0o700)  # the installed template's folder, as tempfile.mkdtemp made it
+    old = os.umask(0o022)
+    try:
+        fresh = tmp_path / "fresh" / "demo"
+        presets.copy_template(fresh)
+        assert stat.S_IMODE(fresh.stat().st_mode) & 0o777 == 0o755
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        shared.chmod(0o2775)
+        real = shutil.copystat
+
+        def copystat(src: Any, dst: Any, *, follow_symlinks: bool = True) -> None:
+            if Path(dst) == shared:  # another user's folder: the user may not chmod it
+                raise PermissionError(errno.EPERM, "Operation not permitted", os.fsdecode(dst))
+            real(src, dst, follow_symlinks=follow_symlinks)
+
+        monkeypatch.setattr(shutil, "copystat", copystat)
+        presets.copy_template(shared)
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o2775
+    assert sorted(p.relative_to(shared).as_posix() for p in shared.rglob("*.py")) == [".pytemplate/pyt.py", "src/app/x.py", "src/app/y.py"]
+
+
+def test_a_copy_that_fails_says_what_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file that cannot be copied inside a folder of the template made `new` print shutil's
+    list of (source, target, error) tuples: now one readable line per failure, exit 1."""
+    _fake_snapshot(tmp_path, monkeypatch)
+    real = shutil.copyfile
+
+    def copyfile(src: Any, dst: Any, *, follow_symlinks: bool = True) -> Any:
+        if os.path.basename(os.fsdecode(src)) == "x.py":
+            raise PermissionError(errno.EACCES, "Permission denied", os.fsdecode(dst))
+        return real(src, dst, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(shutil, "copyfile", copyfile)
+    dest = tmp_path / "demo"
+    with pytest.raises(ui.PytError) as e:
+        presets.copy_template(dest)
+    message = str(e.value)
+    assert e.value.code == 1 and message.startswith(f"could not copy the template into {dest}:\n  Permission denied: "), message
+    assert "x.py" in message and "[(" not in message and "Errno" not in message, message
+
+
+@pytest.mark.parametrize(("global_mode", "prog"), [(True, "pyt new"), (False, "./pyt new")])
+def test_new_names_the_command_as_it_was_typed(global_mode: bool, prog: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Outside a project `pyt new` printed usage errors for `./pyt new`, a command that does not
+    exist there (`pyt help new` said `pyt new`)."""
+    monkeypatch.setattr(project, "GLOBAL", global_mode)
+    monkeypatch.setattr(config, "load", lambda *_a, **_kw: make({}))
+    monkeypatch.setattr(render, "auto", lambda *_a, **_kw: None)
+    assert cli.main(["new"]) == 2
+    err = capsys.readouterr().err
+    assert f"usage: {prog} [-h]" in err and f"{prog}: error: the following arguments are required: dest" in err, err
+    assert ("./pyt" in err) == (not global_mode), err
+    assert cli.main(["new", "a", "b"]) == 2
+    assert f"error: {prog}: unknown argument(s): b  ({prog} -h lists the options)" in capsys.readouterr().err
 
 
 # --- real runs of an installed template ------------------------------------------------------------

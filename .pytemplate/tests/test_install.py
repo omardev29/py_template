@@ -14,6 +14,7 @@ import errno
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from collections.abc import Callable
@@ -647,6 +648,21 @@ def test_a_complete_install_replaces_everything(tmp_path: Path, monkeypatch: pyt
     assert _files(swap.snapshot) == {"a.txt": b"new a\n", "sub/b.txt": b"new b\n", cmd_install.RECORD: b'{\n  "schema": 1,\n  "commit": "new"\n}\n'}
     assert _files(swap.bin) == {"pyt": NEW_LAUNCHER, "pyt.cmd": NEW_LAUNCHER}
     assert sorted(p.name for p in swap.snapshot.parent.iterdir()) == ["template"]
+
+
+@posix_only
+@pytest.mark.parametrize("fresh", [False, True], ids=["over an install", "first install"])
+def test_the_installed_template_has_the_mode_of_a_plain_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fresh: bool) -> None:
+    """The new copy's folder came from tempfile.mkdtemp (0700), and the installed template kept that
+    mode: `pyt new` from it gave every project folder 0700 (copy_template copied the root's mode
+    then). It gets what a plain mkdir gives: 0777 minus the umask."""
+    swap = Swap(tmp_path, monkeypatch, fresh=fresh)
+    old = os.umask(0o022)
+    try:
+        cmd_install.install(swap.plan())
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(swap.snapshot.stat().st_mode) & 0o777 == 0o755
 
 
 # --- where things go --------------------------------------------------------------------------------

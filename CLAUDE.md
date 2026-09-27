@@ -662,7 +662,7 @@ header rules (with detector tests proving each rule fires).
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
-| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `PytError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `_installed_import_names`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./pyt __init`; with rollback), `copy_template` (`_tracked_template`: git's tracked files, or in the installed template `_installed_files`, `INSTALL_RECORD`), `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
+| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `PytError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `_installed_import_names`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./pyt __init`; with rollback), `copy_template` (`_tracked_template`: git's tracked files, or every file of the installed template, `_installed`, never its `INSTALL_RECORD`; `_copy_entry` per entry, `_raise_copy_errors`), `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
 | `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`; `copy_writable`, `make_writable`, `remove_tree` for every scratch copy of the app), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`, `COMPILER_MISSING`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
@@ -755,9 +755,13 @@ header rules (with detector tests proving each rule fires).
    `[tasks]` are the template's and are never read); `init` has its own hint (`INIT_OUTSIDE`).
    `help` lists what runs there and the project commands (`_help_outside_a_project`), `help X`
    and `X -h` (after `run`/`test`/`lock`/`selftest` too) print X's usage, prefixed `pyt`, plus
-   "Needs a project" where it does. Nothing is written into the snapshot: `pyt.py` sends the
+   "Needs a project" where it does; so do the usage errors of `new` (its argparse `prog` is
+   `cli._prog()`'s: they said `./pyt new`). Nothing is written into the snapshot: `pyt.py` sends the
    runner's bytecode cache to the user's cache folder (5.1), `new` copies it (every file, no git
-   asked, no note: `presets._installed`; never the install record: `presets._skipped`) and runs
+   asked, no note: `presets._installed`; never the install record: `presets._skipped`; the
+   snapshot's entries one by one, so the project's folder never takes the snapshot's own mode
+   and times, as copytree's copystat of the root gave it: 0700, a setgid folder's bit lost, EPERM
+   in a folder the user does not own) and runs
    the copy's `__init` as a project (`proc.base_env` drops `PYTEMPLATE_GLOBAL`, and so do
    `shells.child_env`, `e2e.scrub_env` and `nvimtest.runner_env`), `doctor` checks the machine
    only (`cmd_env._machine`: git, the C compiler of mypyc from the runner's own sysconfig, the
@@ -1327,9 +1331,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `.pytemplate/installed.json` (`presets.INSTALL_RECORD`, `RECORD`): schema, commit, `dirty`
   (uncommitted changes in tracked files), source folder, bin folder, launchers, UTC time; it is
   written only there, and `presets._skipped` keeps it out of every project. In the installed
-  template `copy_template` copies that folder's own files (`presets._installed_files`), never
-  git's: a dotfiles repository around the data folder tracked some of them
-  (`test_install.test_the_installed_template_copies_what_the_clone_copies`).
+  template `copy_template` copies every file of that folder (`presets._installed`: git is never
+  asked), never git's list: a dotfiles repository around the data folder tracked some of them
+  (`test_install.test_the_installed_template_copies_what_the_clone_copies`). Its folder has
+  the mode a plain mkdir gives (`_new_folder`; tempfile.mkdtemp's 0700 became every new
+  project's while copy_template still copied the root's mode, section 5.2).
 - The launchers: `LAUNCHERS` (`pyt`; on Windows also `pyt.cmd` and `pyt.ps1`, section 4.2) into
   `uv tool dir --bin` (`bin_dir`; a relative answer, from a relative `UV_TOOL_BIN_DIR`, is refused),
   byte for byte, mode 0755, each checked like doctor checks it (`shells.launcher_problems`) and
@@ -3052,7 +3058,9 @@ short temp tree and unset `NVIM_APPNAME`.
   pinned basedpyright when the uv cache has them), `test_shells.py` (quoting per shell family,
   discovery, the launcher and shell lines of doctor, quick real probes), `test_global.py` (global
   mode, 5.2: the commands that run outside a project and the exit-2 hints of the others, help,
-  doctor's machine steps, what no child inherits; real runs of a fake installed template's
+  doctor's machine steps, what no child inherits; `new`'s copy leaving the project folder's own
+  mode (setgid, another user's folder) and naming a failed copy, its usage errors as `pyt new`;
+  real runs of a fake installed template's
   `pyt.py` that must leave it byte for byte unchanged, and `new` from it, with uv faked and, where
   uv reaches the package index, for real: the copy then runs as a project), `test_vscode.py` (also real
   tool output through each task's matchers and a Node `RegExp` cross-check),
@@ -3903,6 +3911,17 @@ CPython and its standard library:
   `test_presets.py::test_remove_deletes_read_only_entries`,
   `test_envs_core.py::test_clean_retries_read_only_contents`. Goes: the switch once the runner
   needs 3.12; the retry never.
+- **`shutil.copytree(src, dst)` gives `dst` itself `src`'s mode and times, and
+  `tempfile.mkdtemp` makes a 0700 folder** (LIMITATION, both documented): the installed
+  template's folder came from mkdtemp, and `pyt new` from it (copytree of that folder) made every
+  project folder 0700, took the mode of an empty folder it was given (a setgid 2775 became 700)
+  and failed in one the user does not own (EPERM, printed as shutil.Error's list of tuples).
+  Fix: `cmd_install._new_folder` (os.mkdir: 0777 minus the umask) and `presets.copy_template`,
+  which copies the entries of the root one by one (`_copy_entry`) and names what failed
+  (`_raise_copy_errors`) (5.2, 5.9). Test:
+  `test_install.py::test_the_installed_template_has_the_mode_of_a_plain_folder`,
+  `test_global.py::test_new_outside_a_project_never_changes_the_projects_own_folder`,
+  `test_a_copy_that_fails_says_what_failed`. Goes: never.
 - **`Path.is_symlink()` is False for a Windows junction** (LIMITATION; `Path.is_junction` from
   3.12): `clean --envs` would have deleted what a junctioned `.venv` points to, and os.walk,
   which stops only where os.path.islink says so, entered a junction in src/: rename rewrote

@@ -28,6 +28,7 @@ import contextlib
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -523,6 +524,27 @@ def remove_leftovers(snapshot: Path, folders: Iterable[Path]) -> list[Path]:
     return gone
 
 
+def _free_name(parent: Path, prefix: str) -> Path:
+    """A path in `parent` that holds nothing yet: `prefix` and a random suffix."""
+    while True:
+        path = parent / f"{prefix}{secrets.token_hex(4)}"
+        if not os.path.lexists(path):
+            return path
+
+
+def _new_folder(parent: Path, prefix: str) -> Path:
+    """A new empty folder in `parent` with the mode a plain mkdir gives (0o777 minus the umask).
+    tempfile.mkdtemp makes it 0o700, and so the installed template's own folder was: `pyt new`
+    from it gave every new project that mode (copy_template copied the folder's mode then)."""
+    while True:
+        path = _free_name(parent, prefix)
+        try:
+            os.mkdir(path)
+        except FileExistsError:  # made by someone else in between
+            continue
+        return path
+
+
 class _Swap:
     """install's writes, each one undone when a later one fails (Ctrl+C too)."""
 
@@ -540,7 +562,8 @@ class _Swap:
         parent = plan.snapshot.parent
         self.made_parent = not parent.exists()
         parent.mkdir(parents=True, exist_ok=True)
-        self.fresh = Path(tempfile.mkdtemp(prefix=NEW, dir=parent))
+        # Noted only once it exists: undo reads a missing self.fresh as renamed into place
+        self.fresh = _new_folder(parent, NEW)
         _copy_files(plan.files, self.fresh)
         record = self.fresh / RECORD
         record.parent.mkdir(parents=True, exist_ok=True)

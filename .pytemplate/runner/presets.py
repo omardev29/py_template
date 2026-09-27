@@ -1109,6 +1109,35 @@ def copy_scope() -> str:
     return _tracked_template()[1]
 
 
+def _copy_entry(src: Path, target: Path, rel_path: str, errors: list[tuple[str, str, str]]) -> None:
+    """One entry of the template into the new project: a link as the link (_copy_link), a folder
+    with what it holds (copytree: a folder of ROOT, or a submodule), a file with copy2. What
+    fails goes to `errors` as (source, target, why), the tuples shutil.Error holds."""
+    try:
+        if src.is_symlink():
+            _copy_link(src, target, rel_path)
+        elif src.is_dir():
+            shutil.copytree(src, target, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
+        else:
+            shutil.copy2(src, target)
+    except shutil.Error as e:
+        found = e.args[0] if e.args else None
+        if isinstance(found, list):
+            errors.extend((str(t[0]), str(t[1]), str(t[2])) for t in found if isinstance(t, tuple) and len(t) == 3)
+        else:
+            errors.append((str(src), str(target), str(e)))
+    except OSError as e:
+        errors.append((str(src), str(target), str(e)))
+
+
+def _raise_copy_errors(dest: Path, errors: list[tuple[str, str, str]]) -> None:
+    """A copy that failed, as lines a person reads: shutil.Error printed its list of tuples."""
+    if errors:
+        lines = [re.sub(r"^\[(?:Errno|WinError) -?\d+\] ", "", why) for _src, _target, why in errors[:5]]
+        more = f"\n  and {len(errors) - 5} more" if len(errors) > 5 else ""
+        raise PytError(f"could not copy the template into {dest}:\n  " + "\n  ".join(lines) + more, 1)
+
+
 def copy_template(dest: Path) -> None:
     """Copy the template to `dest`, without history, environments, builds, caches or the
     template repository's own files (_skipped).
@@ -1119,32 +1148,40 @@ def copy_template(dest: Path) -> None:
     inside another repository), every file but the _skipped ones is copied, and so from the
     installed template (global mode), without a word about it. A symbolic link is
     copied as a link, as git tracks it (a link to a folder is not the folder's content, and a
-    dangling one is still a tracked file).
+    dangling one is still a tracked file). A copy that fails is a PytError (exit 1) naming what
+    failed.
     """
     if dest.exists() and any(dest.iterdir()):
         raise PytError(f"{dest} already exists and is not empty")
     tracked, how = _tracked_template()
+    # `dest` itself only ever gets mkdir: its mode, owner and times stay those of the folder it
+    # is (or of a new one). copytree(ROOT, dest) also copied ROOT's own mode and times onto it
+    # (copystat): from the installed template, whose folder was 0700, every project folder became
+    # 0700, an empty folder given to `new` lost its mode (a setgid 2775 became 700), and one the
+    # user does not own refused the chmod, which failed `new` with a list of tuples.
+    dest.mkdir(parents=True, exist_ok=True)
+    errors: list[tuple[str, str, str]] = []
     if tracked is None:
         if not _installed():  # a clean copy by construction: nothing to say about it
             ui.info(f"  copying {how}")
-        shutil.copytree(ROOT, dest, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
+        names = sorted(os.listdir(ROOT))
+        left_out = _ignore(str(ROOT), names)
+        for name in names:
+            if name not in left_out:
+                _copy_entry(ROOT / name, dest / name, name, errors)
+        _raise_copy_errors(dest, errors)
         return
-    dest.mkdir(parents=True, exist_ok=True)
     deleted: list[str] = []
     for rel_path in tracked:
         if _skipped(rel_path):
             continue
         src = ROOT / rel_path
-        if src.is_symlink():  # git tracks the link itself (mode 120000)
+        if os.path.lexists(src):  # git tracks a link itself (mode 120000); a folder: a submodule
             (dest / rel_path).parent.mkdir(parents=True, exist_ok=True)
-            _copy_link(src, dest / rel_path, rel_path)
-        elif src.is_dir():  # a submodule
-            shutil.copytree(src, dest / rel_path, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
-        elif src.exists():
-            (dest / rel_path).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest / rel_path)
+            _copy_entry(src, dest / rel_path, rel_path, errors)
         else:  # the working tree is what is copied: a tracked file deleted there stays out
             deleted.append(rel_path)
+    _raise_copy_errors(dest, errors)
     untracked = [p for p in _git_files("--others", "--exclude-standard") or [] if not _skipped(p)]
     for what, paths in (("deleted in the working tree", deleted), ("not tracked by git", untracked)):
         if paths:
