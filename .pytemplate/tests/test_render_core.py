@@ -246,6 +246,17 @@ def test_diff_shows_the_generated_against_the_current_content(box: Sandbox, caps
     assert "---" not in capsys.readouterr().err  # only with show_diff
 
 
+def test_diff_shows_a_missing_last_line_break(box: Sandbox, capsys: pytest.CaptureFixture[str]) -> None:
+    """An editor that strips the last line break: --check called the file hand-edited, and --diff
+    showed no difference at all (both texts had the same splitlines())."""
+    render.apply(CFG)
+    box.write("b.ini", "[b]\nx = 1")
+    capsys.readouterr()
+    assert render.apply(CFG, check=True, show_diff=True) == ([], ["b.ini"])
+    err = capsys.readouterr().err
+    assert "--- b.ini (generated)\n+++ b.ini (current)\n@@ -1,2 +1,2 @@\n [b]\n-x = 1\n+x = 1\n\\ No newline at end of file" in err, err
+
+
 def test_a_folder_in_the_way_is_a_clear_error(box: Sandbox) -> None:
     (box.root / "b.ini").mkdir()
     with pytest.raises(DeployError, match=r"b\.ini is generated, but a folder"):

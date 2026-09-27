@@ -1317,7 +1317,9 @@ re-rendering.
   `_digest`), because `* text=auto eol=native` + `core.autocrlf=true` gives CRLF checkouts on
   Windows and editors/PS 5.1 add BOMs. Every runner write uses `newline="\n"`.
 - Current hash == new hash -> skip. Recorded hash in `state.json` != current file -> hand-edited:
-  not written (warning) unless `--force`. Otherwise write (LF) and record the hash.
+  not written (warning) unless `--force`. Otherwise write (LF) and record the hash. `--diff`
+  prints a hand edit as a unified diff (`render._diff`; a lost last line break, which the hash
+  counts, is marked `\ No newline at end of file`: the diff used to be empty).
 - A missing or corrupt `state.json` counts as empty (`render._read_state`/`_load_state`: missing,
   not UTF-8 (PS 5.1 `>` writes UTF-16), not JSON, not an object, or `files` not an object; an
   entry whose value is not a sha256 counts as unrecorded): every generated file is overwritten

@@ -496,6 +496,22 @@ def _write(path: str, target: Path, content: str) -> None:
         raise DeployError(f"cannot write the generated file {path}: {e.strerror or e}") from None
 
 
+def _diff(path: str, generated: str, current: str) -> str:
+    """The unified diff of a hand-edited file, with the usual `\\ No newline at end of file` mark:
+    a file whose only change is its last line break (an editor that strips it) showed an empty
+    diff, while --check called it hand-edited."""
+    def with_ends(text: str) -> list[str]:  # "\n" only breaks a line (as _split)
+        parts = text.split("\n")
+        return [p + "\n" for p in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
+
+    lines: list[str] = []
+    for line in difflib.unified_diff(with_ends(generated), with_ends(current), f"{path} (generated)", f"{path} (current)"):
+        lines.append(line.removesuffix("\n"))
+        if not line.endswith("\n"):
+            lines.append("\\ No newline at end of file")
+    return "\n".join(lines)
+
+
 def apply(cfg: Config, *, force: bool = False, check: bool = False, show_diff: bool = False) -> tuple[list[str], list[str]]:
     """Write the outdated files. Return (changed, hand_edited). --dry-run behaves like `check`."""
     check = check or proc.DRY_RUN
@@ -521,10 +537,7 @@ def apply(cfg: Config, *, force: bool = False, check: bool = False, show_diff: b
             if recorded is not None and recorded != current_hash and not force:
                 edited.append(path)
                 if show_diff:
-                    diff = difflib.unified_diff(
-                        content.splitlines(), _norm(current).splitlines(), f"{path} (generated)", f"{path} (current)", lineterm=""
-                    )
-                    ui.report("\n".join(diff))  # --diff: shown even with -q
+                    ui.report(_diff(path, content, _norm(current)))  # --diff: shown even with -q
                 continue
         changed.append(path)
         if not check:
