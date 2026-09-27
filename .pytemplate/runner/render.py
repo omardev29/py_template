@@ -26,7 +26,7 @@ from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
-from . import config, presets, proc, ui
+from . import config, envs, presets, proc, ui
 from .config import Config, compiled_paths
 from .envs import MIN_UV
 from .project import PYPROJECT, ROOT, STATE_FILE, TEMPLATES, rel, write_whole
@@ -541,6 +541,9 @@ def apply(cfg: Config, *, force: bool = False, check: bool = False, show_diff: b
                 continue
         changed.append(path)
         if not check:
+            if path == ".python-version" and target.is_file():
+                # the launchers follow it: a version uv cannot provide locked every command out
+                envs.ensure_python(content.strip())
             _write(path, target, content)
             new_state[path] = new_hash
     if not check and new_state != state:

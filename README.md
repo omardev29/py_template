@@ -1389,6 +1389,10 @@ only deletes files is checked too).
   unset it for the project. The launchers need the Python of `.python-version` (`python.cpython`):
   with `UV_NO_MANAGED_PYTHON`, `UV_PYTHON_PREFERENCE=only-system` or `UV_PYTHON_DOWNLOADS=never`
   set, unset them or run `uv python install <python.cpython>`.
+- **`python.cpython = "3.41": uv can neither find nor install this CPython`**: a typo in
+  `python.cpython`, or a new minor while offline. `./deploy` rewrites `.python-version` (which the
+  launchers follow) only once uv has that CPython, so it still starts: fix the value in
+  `pytemplate.toml`, or reconnect.
 - **PyPy: "No interpreter found for PyPy 3.11.15 in managed installations"** after a uv update: that
   uv no longer downloads the pinned PyPy. Pick a version from
   `uv python list --only-downloads --all-versions pypy`, set `python.pypy`, and run

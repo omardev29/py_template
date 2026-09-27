@@ -1336,7 +1336,11 @@ re-rendering.
   other top-level key (`./deploy apply` records its own) and the key order. Hashes of files no longer generated stay recorded
   (a file that comes back keeps its hand-edit protection).
 - `--check` and `--dry-run` write nothing. A folder in the way, or a read/write error, is a
-  DeployError naming the file.
+  DeployError naming the file. An existing `.python-version` is rewritten only once uv has that
+  CPython (`envs.ensure_python`: `uv python find`, else `uv python install`, else a DeployError
+  (3) naming python.cpython): the launchers' `uv run --script` follows the file (5.2), and a
+  typo (`3.41`) or a new minor offline written there stopped every command, `help` included, with
+  nothing left to write it again once pytemplate.toml was fixed.
 - `render.auto` runs before most commands and prints one line when something changed; it also
   warns when `pyproject_outdated` (the hint names `./deploy apply`).
 - Changing `render.HEADER` rewrites every generated file (fine: only files whose current hash

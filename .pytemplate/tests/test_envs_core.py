@@ -274,6 +274,41 @@ def test_sync_with_real_uv_installs_what_the_groups_allow(tmp_path: Path, monkey
     assert env.python.is_file()
 
 
+@pytest.mark.parametrize(("find", "install"), [(0, None), (2, 0), (2, 2)])
+def test_ensure_python_finds_or_installs_the_version_or_says_why(monkeypatch: pytest.MonkeyPatch, find: int, install: int | None) -> None:
+    seen: list[list[str]] = []
+
+    def fake(env: envs.PyEnv, args: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        argv = [str(a) for a in args]
+        seen.append(argv)
+        assert env.request == "3.41" and env.preference == "only-managed"
+        code = find if argv[1] == "find" else install
+        return done(argv, code or 0, "", "error: No download found for request: cpython-3.41-linux-x86_64-gnu\n" if code else "")
+
+    monkeypatch.setattr(envs, "uv", fake)
+    if install == 2:
+        with pytest.raises(DeployError) as e:
+            envs.ensure_python("3.41")
+        assert e.value.code == 3 and 'python.cpython = "3.41"' in str(e.value) and "No download found" in str(e.value)
+        assert ".python-version keeps its old value" in str(e.value)
+    else:
+        envs.ensure_python("3.41")
+    assert seen == [["python", "find", "3.41"], *([["python", "install", "3.41"]] if find else [])]
+
+
+def test_ensure_python_with_real_uv_refuses_a_version_that_does_not_exist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real uv, offline: a typo such as 3.41 has no download (uv knows its downloads offline)."""
+    try:
+        proc.find_uv()
+    except DeployError:
+        pytest.skip("uv not found")
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    with pytest.raises(DeployError, match=r'python\.cpython = "3\.41": uv can neither find nor install') as e:
+        envs.ensure_python("3.41")
+    assert e.value.code == 3
+    envs.ensure_python("%d.%d" % sys.version_info[:2])  # the runner's own: found, nothing installed
+
+
 def test_quiet_hides_uvs_own_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """README: -q prints no progress lines. `./deploy -q sync` still printed uv's `Resolved 26
     packages` and `Checked 21 packages`."""

@@ -246,6 +246,34 @@ def test_diff_shows_the_generated_against_the_current_content(box: Sandbox, caps
     assert "---" not in capsys.readouterr().err  # only with show_diff
 
 
+def test_python_version_is_rewritten_only_for_a_python_uv_can_provide(box: Sandbox, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The launchers start the runner with `uv run --script`, which follows .python-version: a
+    python.cpython typo ("3.41") written there stopped every command, `help` included, and after
+    the fix in pytemplate.toml nothing could write the file again. It is rewritten only once uv
+    has that CPython (envs.ensure_python); a new file (a fresh tree) needs no question."""
+    asked: list[str] = []
+    monkeypatch.setattr(envs, "ensure_python", asked.append)
+    box.files[".python-version"] = "3.13\n"
+    render.apply(CFG)
+    assert asked == [] and box.read(".python-version") == b"3.13\n"  # written fresh
+    box.files[".python-version"] = "3.14\n"
+    render.apply(CFG)
+    assert asked == ["3.14"] and box.read(".python-version") == b"3.14\n"
+    render.apply(CFG)
+    assert asked == ["3.14"]  # unchanged: nothing to ask
+
+    def unavailable(version: str) -> None:
+        raise DeployError(f'python.cpython = "{version}": uv can neither find nor install this CPython (...)', 3)
+
+    monkeypatch.setattr(envs, "ensure_python", unavailable)
+    box.files[".python-version"] = "3.41\n"
+    with pytest.raises(DeployError, match=r'python\.cpython = "3\.41"'):
+        render.apply(CFG)
+    assert box.read(".python-version") == b"3.14\n"  # the launchers still start the runner
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert render.apply(CFG)[0] == [".python-version"]  # --dry-run and --check only report it
+
+
 def test_diff_shows_a_missing_last_line_break(box: Sandbox, capsys: pytest.CaptureFixture[str]) -> None:
     """An editor that strips the last line break: --check called the file hand-edited, and --diff
     showed no difference at all (both texts had the same splitlines())."""

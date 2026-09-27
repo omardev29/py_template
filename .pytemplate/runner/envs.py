@@ -327,6 +327,27 @@ def _excludes(spec: str, version: tuple[int, ...]) -> bool:
     return not any(all(_holds(op, number, star, v) for op, number, star in clauses) for v in candidates)
 
 
+def ensure_python(version: str) -> None:
+    """Make sure uv has the managed CPython `version` before .python-version names it (render
+    calls it before it rewrites that file). The launchers start the runner with `uv run
+    --script`, which follows .python-version: a version uv can neither find nor download (a typo
+    such as "3.41", a new minor while offline) stopped every command, `help` included, and
+    nothing could write the file again once pytemplate.toml was fixed. Installs it when missing
+    (the next `uv run` would have), else raises DeployError(3) naming python.cpython."""
+    env = PyEnv("cpython", ROOT / f".venv{ENV_SUFFIX}", version, "only-managed")
+    if uv(env, ["python", "find", version], check=False, capture=True, echo=False).returncode == 0:
+        return
+    r = uv(env, ["python", "install", version], check=False, capture=True)
+    if r.returncode != 0:
+        why = uv_error((r.stdout or "") + (r.stderr or "")) or f"exit code {r.returncode}"
+        raise DeployError(
+            f'python.cpython = "{version}": uv can neither find nor install this CPython ({why}).\n'
+            "  .python-version keeps its old value, so ./deploy still starts: fix python.cpython in "
+            "pytemplate.toml (or reconnect, if the version is right and uv must download it)",
+            3,
+        )
+
+
 def interpreter_info(python: str | Path) -> dict[str, object]:
     """Return interpreter data (impl, version, platform, prefix) without importing anything from
     the project. `platform` is sysconfig.get_platform(): setuptools picks the MSVC tools by it;
