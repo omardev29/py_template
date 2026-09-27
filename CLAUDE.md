@@ -2899,7 +2899,8 @@ short temp tree and unset `NVIM_APPNAME`.
   discovery, the launcher and shell lines of doctor, quick real probes), `test_global.py` (global
   mode, 5.2: the commands that run outside a project and the exit-2 hints of the others, help,
   doctor's machine steps, what no child inherits; real runs of a fake installed template's
-  `pyt.py` that must leave it byte for byte unchanged, and `new` from it with uv faked), `test_vscode.py` (also real
+  `pyt.py` that must leave it byte for byte unchanged, and `new` from it, with uv faked and, where
+  uv reaches the package index, for real: the copy then runs as a project), `test_vscode.py` (also real
   tool output through each task's matchers and a Node `RegExp` cross-check),
   `test_nvim_render.py` (also loads the Lua modules in `nvim --headless --clean`: parser (stage
   paths, terminal escapes, the profile's severities), uv lookup, launcher fallback, sanitize
@@ -2983,7 +2984,7 @@ short temp tree and unset `NVIM_APPNAME`.
   Linux/macOS CI), and so must tests that need the network: the real runs in `test_rename.py`
   and `test_apply.py` re-lock with `uv lock` and SKIP with "needs PyPI" when uv cannot reach
   the index (`rename.needs_pypi`), and so do the real `new` runs (`test_presets`' `network`
-  fixture, `test_removals`); everything else in `./pyt selftest` works offline once
+  fixture, `test_removals`, `test_global._offline_reason`); everything else in `./pyt selftest` works offline once
   `./pyt setup` has run. Tests that spawn `./pyt` must scrub `UV`, `VIRTUAL_ENV`,
   `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON` and `PYTEMPLATE_*` from the child env (pytest itself
   runs under `uv run`). An environment built from scratch keeps the caller's `LANG`, `LC_ALL`

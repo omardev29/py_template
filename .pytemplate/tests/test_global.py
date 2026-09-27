@@ -13,6 +13,7 @@ template (this project's files, as the install contract says) with PYTEMPLATE_GL
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
 import re
@@ -439,3 +440,43 @@ def test_new_outside_a_project_makes_a_project_of_the_installed_template(tmp_pat
     if TEMPLATE_REPO:
         assert (dest / ".pytemplate" / "README.md").read_bytes() == (snap / "README.md").read_bytes()
         assert (dest / ".pytemplate" / "LICENSE").read_bytes() == (snap / "LICENSE").read_bytes()
+
+
+@functools.cache
+def _offline_reason() -> str | None:
+    """None when uv can resolve from the package index now, else why not (a skip reason)."""
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if uv is None:
+        return "uv not found"
+    argv = [uv, "pip", "compile", "--no-cache", "--quiet", "--python-version", "3.12", "--python-platform", "linux", "-"]
+    try:
+        r = subprocess.run(argv, input="iniconfig\n", capture_output=True, text=True, timeout=120, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return "uv could not reach the package index"
+    return None if r.returncode == 0 else "no network: uv cannot reach the package index"
+
+
+def test_the_copy_new_makes_outside_a_project_is_a_project(tmp_path: Path) -> None:
+    """The real `new` from an installed template (its `__init` needs the package index): the copy's
+    runner runs as a project, never in global mode, and makes the preset's skeleton there."""
+    reason = _offline_reason()
+    if reason:
+        pytest.skip(reason)
+    snap = _installed_template(tmp_path)
+    away = tmp_path / "away"
+    away.mkdir()
+    env = _global_env(tmp_path)
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if uv and "UV_CACHE_DIR" not in env:  # uv's cache would move with XDG_CACHE_HOME: keep the warm one
+        env["UV_CACHE_DIR"] = subprocess.run([uv, "cache", "dir"], capture_output=True, text=True, timeout=60, check=True).stdout.strip()
+    before = _tree(snap)
+    r = _run(snap, ["new", "demo-app", "--preset", "raylib"], away, env)
+    assert r.returncode == 0, r.stdout + r.stderr[-4000:]
+    assert _tree(snap) == before
+    dest = away / "demo-app"
+    for rel, data in presets.skeleton("raylib", "demo-app").items():
+        assert (dest / rel).read_bytes() == data, rel
+    assert (dest / "uv.lock").is_file() and not (dest / project.INSTALL_RECORD).exists()
+    env.pop("PYTEMPLATE_GLOBAL")
+    check = _run(dest, ["render", "--check"], dest, env)  # the copy's runner, as a project
+    assert check.returncode == 0, check.stdout + check.stderr
