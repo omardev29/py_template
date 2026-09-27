@@ -7,7 +7,9 @@ scrubbed environment, never uv unless marked, and never touch this project's fil
 
 from __future__ import annotations
 
+import errno
 import importlib
+import io
 import json
 import os
 import re
@@ -248,12 +250,15 @@ def test_probe_needs_no_config(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
 # Builtins that never render first (CLAUDE.md 5.2). A new command with render=False fails here
 # until it is added (and documented).
 # apply/setup render themselves at the end (a refused apply writes nothing); rename renders only
-# after its checks, never with a hand-edited app.name before the dirty-tree check
-NEVER_RENDER = {"clean", "render", "new", "pyz-merge", "tasks", "shell-setup", "selftest", "help", "hooks", "setup", "apply", "rename"}
+# after its checks, never with a hand-edited app.name before the dirty-tree check; the internal
+# __init renders with --force at its end (rendering the copy first, `new` warned about the source
+# project's hand-edited .vscode/settings.json: "use ./deploy render --force")
+NEVER_RENDER = {"clean", "render", "new", "pyz-merge", "tasks", "shell-setup", "selftest", "help", "hooks", "setup", "apply", "rename", "__init"}
 
 
 def test_commands_that_never_render() -> None:
-    assert {n for n, c in cli.COMMANDS.items() if not c.render} == NEVER_RENDER & set(cli.COMMANDS)
+    every = {**cli.COMMANDS, **cli.INTERNAL}
+    assert {n for n, c in every.items() if not c.render} == NEVER_RENDER & set(every)
 
 
 def test_render_runs_before_builtins_and_tasks_unless_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -395,6 +400,17 @@ def test_help_never_ignores_a_typo(args: list[str], message: str, monkeypatch: p
     with pytest.raises(DeployError, match=re.escape(message)) as e:
         cli.cmd_help(None, args)
     assert e.value.code == 2
+
+
+def test_help_init_gives_the_hint_of_init(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`./deploy help init` said only "unknown command", while `./deploy init` names the way out;
+    a [tasks] entry named init is described instead."""
+    monkeypatch.setattr(config, "load", lambda *_a, **_kw: make({}))
+    with pytest.raises(DeployError, match=re.escape("./deploy new DIR --preset P")) as e:
+        cli.cmd_help(None, ["init"])
+    assert e.value.code == 2 and "unknown command" not in str(e.value)
+    monkeypatch.setattr(config, "load", lambda *_a, **_kw: make({"tasks": {"init": {"cmd": ["python", "-c", "pass"]}}}))
+    assert cli.cmd_help(None, ["init"]) == 0
 
 
 def test_help_of_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -659,6 +675,13 @@ def test_the_selection_variables_include_the_known_conflicts() -> None:
     assert "UV_INDEX_URL" not in proc.UV_SELECTION and "UV_CACHE_DIR" not in proc.UV_SELECTION
 
 
+def test_a_user_uv_no_group_never_reaches_uv() -> None:
+    """UV_NO_GROUP=dev (left over from a production or Docker setup) wins over `--all-groups`:
+    `./deploy sync` uninstalled mypy, ruff and pytest, `check` ran PATH-wide ones and `test` found
+    no pytest. It moves the groups like UV_NO_DEV, so the runner drops it too."""
+    assert {"UV_NO_DEV", "UV_NO_DEFAULT_GROUPS", "UV_NO_GROUP"} <= set(proc.UV_SELECTION)
+
+
 def test_base_env_removes_the_runners_own_bin_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     own = tmp_path / "script-env"
     bin_dir = own / ("Scripts" if IS_WINDOWS else "bin")
@@ -887,6 +910,38 @@ def test_a_closed_stdout_is_not_a_runner_bug(args: list[str], unbuffered: bool) 
     assert r.returncode == 141  # 128 + SIGPIPE, what a shell pipeline reports
 
 
+class _NoRoom(io.StringIO):
+    """A stream on a full disk: every write fails with ENOSPC."""
+
+    def write(self, text: str) -> int:
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+
+@pytest.mark.parametrize("args", [["help"], ["help", "build"]])
+def test_a_write_that_finds_no_room_is_one_error_line(args: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`./deploy help > /dev/full` (or a full disk under `shell-setup >> ~/.bashrc`) printed a
+    traceback and called it a bug in the runner."""
+    monkeypatch.setattr(sys, "stdout", _NoRoom())
+    assert cli.main(args) == 1
+    err = capsys.readouterr().err
+    assert "a write failed: " + os.strerror(errno.ENOSPC) in err and "internal runner error" not in err, err
+    monkeypatch.setattr(sys, "stderr", _NoRoom())  # no room for the error line either: exit 1 quietly
+    assert cli.main(args) == 1
+
+
+@pytest.mark.skipif(not Path("/dev/full").exists(), reason="no /dev/full here")
+@pytest.mark.parametrize("args", [["help"], ["shell-setup", "bash"]])
+def test_output_to_dev_full_is_no_runner_bug(args: list[str]) -> None:
+    with open("/dev/full", "wb") as full:
+        r = subprocess.run(
+            [sys.executable, "-B", str(DEPLOY_PY), *args], stdin=subprocess.DEVNULL, stdout=full, stderr=subprocess.PIPE,
+            env=child_env(), text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
+        )  # fmt: skip
+    for text in ("Traceback", "internal runner error", "Exception ignored"):
+        assert text not in r.stderr, r.stderr
+    assert r.returncode == 1 and "a write failed" in r.stderr, r.stderr
+
+
 # === 9. [tasks] =====================================================================================
 
 
@@ -1061,6 +1116,29 @@ def test_an_unknown_placeholder_is_reported_when_the_task_runs(rec: Recorder) ->
     with pytest.raises(DeployError, match="unknown placeholder 'nope'") as e:
         tasks.run_task(cfg, "t", [], rec.dispatch)
     assert e.value.code == 2 and "{python}" in str(e.value)
+
+
+@pytest.mark.parametrize(
+    ("bad", "where"),
+    [
+        ({"cmd": ["echo", "{roots}"]}, "badph"),
+        ({"cmd": ["echo"], "env": {"X": "{srcs}"}}, "badph"),
+        ({"cmd": ["echo"], "cwd": "{bulid}"}, "badph"),
+        ({"cmd": ["echo"], "deps": ["gen", "check all", "inner"]}, "inner"),  # a task the deps reach
+    ],
+)
+def test_an_unknown_placeholder_is_refused_before_any_dep_runs(rec: Recorder, bad: dict[str, Any], where: str) -> None:
+    """A typo in a placeholder of a task with deps (`ci` with check all and test all) was reported
+    only after every dep had run, which can take minutes."""
+    cfg = make({"tasks": {
+        "badph": {"deps": ["gen", "check all"], "uv": False, **bad},
+        "gen": {"cmd": ["g"], "uv": False},
+        "inner": {"cmd": ["i", "{pkgs}"], "uv": False},
+    }})  # fmt: skip
+    with pytest.raises(DeployError, match=f"task '{where}': unknown placeholder") as e:
+        tasks.run_task(cfg, "badph", [], rec.dispatch)
+    assert e.value.code == 2
+    assert rec.runs == [] and rec.dispatched == []  # neither gen nor check all ran
 
 
 @pytest.mark.parametrize("key", ["A=B", "", "1X", "A B", "A-B", chr(0xE9)])

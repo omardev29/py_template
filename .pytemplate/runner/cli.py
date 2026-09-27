@@ -8,6 +8,7 @@ Global options go BEFORE the command; everything after it belongs to the command
 
 from __future__ import annotations
 
+import errno
 import importlib
 import os
 import signal
@@ -76,7 +77,9 @@ COMMANDS: dict[str, Command] = {
 INTERNAL: dict[str, Command] = {
     # `./deploy new` runs it in the fresh copy; the template maintainer regenerates the template
     # root with it (./deploy __init script --name myapp --force). Users pick a preset with `new`.
-    "__init": Command("cmd_mode", "cmd_init", "Replace src/, tests/, typings/ and pytemplate.toml with a preset's skeleton", "PRESET [--name NAME] [--force]"),
+    # render=False: it renders with --force at its end, and rendering the copied configuration
+    # first only warned about the source project's hand-edited files inside the output of `new`.
+    "__init": Command("cmd_mode", "cmd_init", "Replace src/, tests/, typings/ and pytemplate.toml with a preset's skeleton", "PRESET [--name NAME] [--force]", render=False),
 }
 
 EXAMPLES = """\
@@ -102,6 +105,8 @@ FORWARDS = frozenset({"run", "test", "lock", "selftest", "build"})
 # shows `./deploy help COMMAND` (also after a [tasks] entry that only has deps).
 HELP_PASSES_THROUGH = frozenset({"run", "test", "lock", "selftest"})
 HELP_FLAGS = ("-h", "--help")
+# pytest options that only print (plain `selftest` then skips its mypy step)
+SELFTEST_INFO_FLAGS = (*HELP_FLAGS, "--version", "-V")
 
 
 def _asks_help(args: list[str]) -> bool:
@@ -128,6 +133,10 @@ def _print_task(name: str, task: TaskConfig) -> None:
         print("  background: a long-running server (editors start it without waiting)")
 
 
+# `./deploy init` and `./deploy help init` (unless a [tasks] entry took the name)
+INIT_REMOVED = "init is no longer a ./deploy command. To start from another preset: ./deploy new DIR --preset P"
+
+
 def cmd_help(cfg: object, args: list[str]) -> int:
     """help [COMMAND]: every command and task, or one of them."""
     from . import config
@@ -148,6 +157,8 @@ def cmd_help(cfg: object, args: list[str]) -> int:
         if name in loaded.tasks:
             _print_task(name, loaded.tasks[name])
             return 0
+        if name == "init":
+            raise DeployError(INIT_REMOVED)
         raise DeployError(f"unknown command: {name}  (./deploy help lists the commands and tasks)")
     print("./deploy [-v|-q] [--dry-run] [--no-render] COMMAND [args...]\n")
     groups: dict[str, list[str]] = {}
@@ -207,6 +218,8 @@ def cmd_selftest(cfg: object, args: list[str]) -> int:
         return suites[args[0]](cfg, args[1:])
     tool = envs.tool_env(cfg)
     code = envs.uv_run(tool, ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", TEMPLATE / "tests", *args], check=False).returncode
+    if any(a in SELFTEST_INFO_FLAGS for a in args):
+        return code  # pytest printed its help or version: no mypy of the whole runner after it
     typed = envs.uv_run(
         tool,
         ["mypy", "--strict", "--no-incremental", "--python-version", "3.11", "--config-file", TEMPLATE / "tests" / "mypy-runner.ini", TEMPLATE / "runner", TEMPLATE / "deploy.py"],
@@ -259,7 +272,7 @@ def dispatch(argv: list[str]) -> int:
         task = cfg.tasks.get(name)
         if task is None:
             if name == "init":  # no longer public (it is INTERNAL["__init"]): the preset is chosen by `new`
-                raise DeployError("init is no longer a ./deploy command. To start from another preset: ./deploy new DIR --preset P")
+                raise DeployError(INIT_REMOVED)
             raise DeployError(f"unknown command: {name}  (./deploy help)")
         if not task.cmd and _asks_help(args):
             return cmd_help(cfg, [name])  # a deps-only task has no program to pass -h on to
@@ -290,6 +303,18 @@ def _output_closed() -> int:
         except (OSError, ValueError):  # no file descriptor (a replaced stream)
             pass
     return 1 if sys.platform == "win32" else 141
+
+
+# errno of a write that found no room: a full disk, /dev/full, a quota, a file size limit
+NO_ROOM = frozenset(n for n in (getattr(errno, name, None) for name in ("ENOSPC", "EDQUOT", "EFBIG")) if isinstance(n, int))
+
+
+def _no_room(e: OSError) -> str:
+    """The error line for a write that found no room (`./deploy help > /dev/full`, a full disk
+    under a command): no runner bug. A write to an open file (stdout too) names no file."""
+    if e.filename is not None:
+        return f"cannot write {e.filename}: {e.strerror or e}"
+    return f"a write failed: {e.strerror or e} (the disk, or the file the output goes to, is full)"
 
 
 def _system_exit_code(e: SystemExit) -> int:
@@ -345,6 +370,9 @@ def _main(argv: list[str]) -> int:
     except SystemExit as e:  # argparse: -h (0) and usage errors (2)
         return _system_exit_code(e)
     except Exception as e:
+        if isinstance(e, OSError) and e.errno in NO_ROOM:
+            ui.error(_no_room(e))
+            return 1
         scratch = _scratch_denied(e) if isinstance(e, PermissionError) else None
         if scratch is not None:
             ui.error(
@@ -368,6 +396,11 @@ def main(argv: list[str]) -> int:
         return _main(argv)
     except BrokenPipeError:  # stdout or stderr closed, even while an error was being reported
         return _output_closed()
+    except OSError as e:  # no room for the error line either (stderr on a full disk too)
+        if e.errno not in NO_ROOM:
+            raise
+        _output_closed()
+        return 1
     finally:
         try:
             sys.stdout.flush()

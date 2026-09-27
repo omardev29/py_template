@@ -141,8 +141,8 @@ it and move the code over.
 | `setup [--force]` | The first run on a fresh clone: the same operation as `apply` |
 | `apply [--force]` | Applies every `pytemplate.toml` change: rename, dependencies, `uv.lock`, environments, git hook, generated files ([details](#after-editing-pytemplatetoml)) |
 | `doctor` | Checks uv, the environments, the C compiler, the generated files, `pyproject.toml`, `uv.lock`, the changes `apply` has not applied yet, the launchers, the shell, the git hook and Neovim; exit 1 when a line is `[XX]` |
-| `sync [cpython\|pypy\|mypyc\|all]` | `uv sync --locked --all-groups` of one environment or of all (default); it never re-locks |
-| `lock [--upgrade] [--upgrade-package PKG]` | Rewrites the managed parts of `pyproject.toml` and re-locks `uv.lock`; its other arguments go to `uv lock`. When `uv lock` fails or writes nothing (`--check`, `--dry-run`), `pyproject.toml` is put back as it was. It does not apply `[preset.*]`: `apply` does |
+| `sync [cpython\|pypy\|mypyc\|all]` | `uv sync --locked --all-groups` of one environment or of all (default); it never re-locks. A group uv cannot install there is left out with a note (`--no-group`): one that `[tool.uv] conflicts` pairs with another group, or whose own `requires-python` (`[tool.uv.dependency-groups]`) excludes that environment's Python; the default groups always stay |
+| `lock [--upgrade] [--upgrade-package PKG]` | Rewrites the managed parts of `pyproject.toml` and re-locks `uv.lock`; its other arguments go to `uv lock`. When `uv lock` fails or writes nothing (`--check`, `--dry-run`), `pyproject.toml` is put back as it was; `--help` changes nothing. It does not apply `[preset.*]`: `apply` does |
 | `add PKG... [--dev\|--group G] [--cpython-only]` | `uv add`, then `uv sync --locked --all-groups` of `.venv`; `--cpython-only` adds the marker `implementation_name == 'cpython'` (C-API libraries that are slow or missing on PyPy). When the sync fails (a package that locks but cannot be built) or is interrupted, `pyproject.toml` and `uv.lock` are put back as they were |
 | `remove PKG... [--dev\|--group G]` | `uv remove`, then `uv sync --locked --all-groups` of `.venv` (the packages of every group stay installed); a failed sync puts `pyproject.toml` and `uv.lock` back, as for `add` |
 | `clean [--envs]` | Deletes `.build/` and `dist/`; `--envs` also this side's `.venv*` environments (`setup` recreates the ones in use) |
@@ -207,13 +207,17 @@ Exit codes:
   user left behind with `sudo ./deploy ...`).
 - 3: a missing requirement: uv, a uv older than 0.10.12, a program, a compiler, an interpreter,
   Neovim or git for `selftest --nvim --require`, or the runner started on a Python older than
-  3.11.
+  3.11. A requirement that uv itself reports missing (an interpreter it can neither find nor
+  download, a program `uv run` cannot start: a `[tasks]` entry with `uv = true`) ends with
+  uv's own code, 2, and uv's message.
 - 130: Ctrl+C. The runner waits for the app to finish its own cleanup, then stops without
   running the next step; it exits with the app's code, or 130 when the app exited with 0.
 - 141: the reader of stdout went away (`./deploy help | head -1`; Linux and macOS).
 - 143 (129): the runner got a SIGTERM (a SIGHUP) of its own, from `kill`, a supervisor or
   `docker stop` (Linux and macOS). It passes the signal on to the app, waits for it and stops
-  like after Ctrl+C: the app's code, or 143 (129) when the app exited with 0.
+  like after Ctrl+C: the app's code, or 143 (129) when the app exited with 0. `selftest --nvim`
+  and `selftest --e2e` take either signal for a Ctrl+C: they kill the step that runs, with
+  everything it started, and exit with 130.
 - 128 + N: a program killed by signal N.
 - `run`, `test BACKEND` and tasks return their program's exit code (pytest: 5 when no test was
   collected, 4 for a usage error). `test all` tests every backend, even after a failure, and
@@ -240,7 +244,7 @@ pyz launchers set.
 The runner ignores an activated virtual environment (`VIRTUAL_ENV`, `PYTHONHOME`, `PYTHONPATH`)
 and uv's environment selection (`UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PROJECT`,
 `UV_NO_PROJECT`, `UV_WORKING_DIR`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`, `UV_ISOLATED`,
-`UV_NO_DEV`, `UV_NO_DEFAULT_GROUPS`, `UV_NO_SYNC`): its tools always run in the project's
+`UV_NO_DEV`, `UV_NO_DEFAULT_GROUPS`, `UV_NO_GROUP`, `UV_NO_SYNC`): its tools always run in the project's
 environments. uv's resolution settings (indexes, `UV_EXCLUDE_NEWER`, `UV_RESOLUTION`,
 `UV_PRERELEASE`) and its cache pass through. The runner itself starts on the project's Python
 in the folder where the command was typed: the launchers remove `UV_PYTHON`, `PYTHONHOME`,
@@ -407,7 +411,9 @@ commands regenerate them first and say which changed; `./deploy render` does onl
   `# <<< pytemplate` (the Python versions `uv.lock` resolves for, the uv version floor,
   uv-managed interpreters only, and preset keys such as raylib's `no-build-package`). A TOML
   formatter may reformat them (only the meaning is compared), but the markers must stay; broken
-  markers are an error that says how to fix them. The rest of `pyproject.toml` is yours. Your own
+  markers are an error that says how to fix them. A setting of yours between the markers
+  (`index-url`, a constraint) is named and refused until you move it out of the block: it would
+  be lost at the next rewrite. The rest of `pyproject.toml` is yours. Your own
   `[tool.uv]` lists that only add constraints (`override-dependencies`, `constraint-dependencies`,
   `no-build-package`, `no-binary-package`...) go outside the markers: the block then leaves that
   key to you, and your list must also hold the block's entries (PyPy's cffi override, the raylib
@@ -648,8 +654,10 @@ cpython and pypy test runs cannot catch a wrap-around.
 `./deploy mode --supports +pypy` enables PyPy (the raylib preset has it): it checks that the code
 is valid on the Python of `python.pypy`, 3.11 by default (ruff's syntax rules for it, and the
 mypy errors that appear only on it, whatever the typing profile), lowers `requires-python` to
-`>=3.11`, re-locks `uv.lock` and creates `.venv-pypy`. `./deploy apply` runs the same check when
-`backend.supported` gains PyPy.
+`>=3.11`, re-locks `uv.lock` and creates `.venv-pypy`. The same check runs whenever `uv.lock` is
+re-locked for PyPy for the first time, whatever does it: `apply` after you add `pypy` to
+`backend.supported` by hand, and also `mode`, `rename` or `lock` after such an edit (when the
+check fails, `pyproject.toml` and `uv.lock` are put back).
 
 - While PyPy is supported, the code must be Python 3.11 in syntax and API: no `class C[T]` generics
   (PEP 695), and `from typing_extensions import override`, not `from typing import override`.
@@ -1263,10 +1271,14 @@ the enclosing project from any subfolder, with a comment saying where to paste i
 tasks), `pwsh`, `powershell`; without a name it guesses the shell. The xonsh alias and the nu
 function run uv directly (no `deploy.cmd` and its argument limits; on Windows only a real
 `uv.exe`, never a `uv.cmd` shim); the pwsh function passes
-pipeline input on. Print the xonsh snippet again to complete commands added later.
+pipeline input on. Print the xonsh snippet again to complete commands added later. A symlink to
+a project's `deploy` (or `deploy.ps1`) in a folder on PATH also works from any folder: the
+launcher follows it to its project (`ln -s ~/code/game/deploy ~/bin/game`); `deploy.cmd` cannot
+be linked that way.
 
 ```sh
 ./deploy shell-setup niubash    # niubash reads ~/.niubashrc, but `niu -c` and scripts read $NIU_ENV
+./deploy shell-setup bash >> ~/.bashrc   # appending is safe: the output starts with a line break
 ```
 
 **Known limits.**
@@ -1330,8 +1342,10 @@ only deletes files is checked too).
   keeps it as `pre-commit.local` and runs it first (a shell script still sees its own name,
   `pre-commit`, as husky v4 and yorkie need); `uninstall` puts it back. A hook in another
   language that reads its own name is left alone: add the line below to it instead. With
-  `core.hooksPath` set, nothing is written: add `sh ./deploy hooks run || exit $?` to your own hook
-  (husky 9: `.husky/pre-commit`).
+  `core.hooksPath` set, nothing is written: add
+  `[ ! -f ./deploy ] || sh ./deploy hooks run || exit $?` to your own hook (husky 9:
+  `.husky/pre-commit`); it skips a checkout without `./deploy`, so a global hooks folder that
+  every repository runs keeps working in the others.
 - A project in a subfolder of a bigger repository: the hook goes into that repository's hooks
   folder and checks the project's staged files. Two projects in one repository: `apply` leaves
   the other project's hook alone, and `./deploy hooks install --force` runs both (the first
@@ -1379,6 +1393,10 @@ only deletes files is checked too).
   unset it for the project. The launchers need the Python of `.python-version` (`python.cpython`):
   with `UV_NO_MANAGED_PYTHON`, `UV_PYTHON_PREFERENCE=only-system` or `UV_PYTHON_DOWNLOADS=never`
   set, unset them or run `uv python install <python.cpython>`.
+- **`python.cpython = "3.41": uv can neither find nor install this CPython`**: a typo in
+  `python.cpython`, or a new minor while offline. `./deploy` rewrites `.python-version` (which the
+  launchers follow) only once uv has that CPython, so it still starts: fix the value in
+  `pytemplate.toml`, or reconnect.
 - **PyPy: "No interpreter found for PyPy 3.11.15 in managed installations"** after a uv update: that
   uv no longer downloads the pinned PyPy. Pick a version from
   `uv python list --only-downloads --all-versions pypy`, set `python.pypy`, and run
@@ -1496,10 +1514,12 @@ regenerate the root (CLAUDE.md, section 11).
 - `--shells [NAME,...] [--list] [--json] [--keep]`
   `[--project DIR] [--tests T1,...] [--jobs N] [--timeout S]`: seven probes per shell (arguments,
   exit code, folders, a temporary script like xonsh-shell-kit's `!` lines, a minimal PATH, stdin, uv
-  install hints). `--list` shows the shells it found; `msys2` selects every `msys2-*` shell.
+  install hints). `--list` shows the shells it found; `msys2` selects every `msys2-*` shell. A WSL
+  distribution is tested only when it has a uv of its own (otherwise its row is skipped).
 - `--nvim [PRESET,...] [--keep] [--fresh] [--require] [--timeout S] [--dir DIR]`: creates each
   preset with `./deploy new` and runs a headless smoke test in Neovim folders of its own, never
-  yours, with LazyVim and its plugins at pinned commits (minutes the first time). `--fresh`
+  yours, with LazyVim and its plugins at pinned commits (minutes the first time). Its projects
+  get git repositories of their own, even when `--dir` is inside one of yours. `--fresh`
   reinstalls that LazyVim; `--require` fails instead of skipping when nvim or git is missing.
 - `--e2e [PRESET ...] [--backends B,..] [--methods M,..] [--quick|--full]`
   `[--gui auto|on|off] [--keep] [--reuse] [--json] [--base DIR]`: creates a project of each preset

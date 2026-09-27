@@ -297,7 +297,7 @@ jobs:
       - name: LazyVim smoke test (script, raylib, flet)
         run: ./deploy selftest --nvim --require --dir /tmp/pt-nvim
       - name: Logs of the smoke test
-        if: failure()
+        if: failure() || cancelled()  # a job over its timeout-minutes is cancelled, not failed
         uses: actions/upload-artifact@v7
         with:
           name: nvim-image-logs-${{ matrix.nvim }}

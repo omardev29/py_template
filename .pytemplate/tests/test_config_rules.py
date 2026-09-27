@@ -178,6 +178,10 @@ def test_schema_types_come_from_the_dataclasses() -> None:
         {"tasks": {"t": {"cmd": ["echo", "a\0b"]}}},
         {"vscode": {"settings": {"k": ["ok", "a\0"]}}},
         {"app": {"preset": "flet"}, "preset": {"flet": {"version": "1\0"}}},
+        # keys too: `"a\u0000b" = 1` under [vscode.settings] reached settings.json
+        {"vscode": {"settings": {"a\0b": 1}}},
+        {"vscode": {"settings": {"[python]": {"editor.x\0": 1}}}},
+        {"typing": {"mypy_overrides": [{"module": "a", "opt": {"k\0": 1}}]}},
     ],
 )
 def test_nul_characters_are_rejected(data: dict[str, Any]) -> None:
@@ -336,6 +340,16 @@ def test_compile_module_names(key: str) -> None:
     # forbid_imports was never checked: "flet, flet_desktop" or "flet " silently disabled the rule
     for bad in ["a b", "flet, flet_desktop", "flet ", "a.", ".a", "a..b", "1a", "", "myapp.core\n"]:
         fails({"compile": {key: [bad]}}, "invalid module in [compile]")
+
+
+def test_compile_modules_defaults_to_the_apps_own_package() -> None:
+    """CLAUDE.md 2: compile.modules defaults to <pkg>.core. Without the line the default was the
+    template's own myapp.core: in a project named p, mode showed "mypyc compiles myapp.core" and
+    every mypyc run failed with "neither src/myapp/core.py nor src/myapp/core/ exists"."""
+    assert make({"app": {"name": "My-Game"}}).compile.modules == ["my_game.core"]
+    assert make({"app": {"name": "p"}, "compile": {"opt_level": "2"}}).compile.modules == ["p.core"]
+    assert make({"app": {"name": "p"}, "compile": {"modules": ["p.fast"]}}).compile.modules == ["p.fast"]  # written: kept
+    assert make({}).compile.modules == ["myapp.core"]
 
 
 def test_compile_opt_level() -> None:
@@ -975,6 +989,36 @@ def test_update_file_never_writes_a_broken_file(cfg_file: Path, monkeypatch: pyt
     assert cfg_file.read_bytes() == VALID.encode("utf-8")
 
 
+def test_update_file_names_a_file_it_cannot_write(cfg_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A read-only, immutable or locked pytemplate.toml ended `mode` in a traceback labelled
+    "internal runner error"; it is a config error naming the file, as for pyproject.toml."""
+
+    def refused(path: Path, data: bytes) -> None:
+        raise PermissionError(1, "Operation not permitted", str(path))
+
+    monkeypatch.setattr(config, "write_whole", refused)
+    with pytest.raises(DeployError, match="cannot write pytemplate.toml: Operation not permitted") as info:
+        config.update_file([("typing", "relaxed", "warn")])
+    assert info.value.code == 2
+    assert cfg_file.read_bytes() == VALID.encode("utf-8")
+
+
+def test_mode_on_a_config_it_cannot_write_is_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = config.load(set())
+    fake = _Relock(tmp_path, monkeypatch, "none")
+
+    def refused(path: Path, data: bytes) -> None:
+        raise PermissionError(30, "Read-only file system", str(path))
+
+    monkeypatch.setattr(config, "write_whole", refused)
+    other = "pylance" if cfg.typing.editor == "basedpyright" else "basedpyright"
+    with pytest.raises(DeployError) as info:  # never an OSError: that was an internal-error traceback
+        cmd_mode.cmd_mode(cfg, ["--editor", other])
+    assert "cannot write pytemplate.toml: Read-only file system" in str(info.value)
+    assert "the mode did not change" in str(info.value) and info.value.code == 2
+    assert fake.snapshot() == fake.before
+
+
 def test_update_file_round_trip_is_byte_identical(cfg_file: Path) -> None:
     config.update_file([("backend", "supported", ["cpython", "pypy", "mypyc"]), ("backend", "active", "pypy")])
     config.update_file([("backend", "supported", ["cpython", "mypyc"]), ("backend", "active", "cpython")])
@@ -1043,6 +1087,10 @@ def dry(monkeypatch: pytest.MonkeyPatch) -> Config:
         (["--editor=basedpyright", "--editor", "pylance"], "--editor given more than once"),
         (["--supports", "--typing", "strict"], "--supports needs a value"),
         (["--typ=strict"], "unknown argument(s): --typ=strict"),  # no silent abbreviations
+        # an unknown option with its value apart: argparse bound 'strict' to BACKEND and said only
+        # "argument backend: invalid choice: 'strict'"
+        (["--typ", "strict"], "unknown argument(s): --typ  "),
+        (["mypyc", "--edit", "pylance"], "unknown argument(s): --edit  "),
         (["pypy", "--supports", "-pypy"], "--supports removes it"),
         (["mypyc", "--supports", "cpython"], "leaves it out of the list"),
     ],
@@ -1157,6 +1205,64 @@ def test_mode_puts_everything_back_when_the_relock_or_the_sync_fails(
         assert info.value.code == (2 if fail == "sync" else 1)
     assert fake.snapshot() == fake.before  # every byte back: a second run locks again
     assert fake.synced == (["pypy"] if fail == "sync" else [])
+
+
+def test_mode_under_uv_frozen_refuses_the_relock_and_puts_everything_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With UV_FROZEN=1 exported, `uv lock` only checks the lock's validity and exits 0: mode
+    printed the new mode while uv.lock stayed stale, and every `uv run --locked` failed."""
+    cfg = config.load(set())
+    if cfg.pypy_enabled:
+        pytest.skip("the test adds PyPy support")
+    fake = _Relock(tmp_path, monkeypatch, "none")  # a `uv lock` that would write the new lock
+    monkeypatch.setenv("UV_FROZEN", "1")
+    with pytest.raises(DeployError) as info:
+        cmd_mode.cmd_mode(cfg, ["--supports", "+pypy"])
+    assert "UV_FROZEN is set" in str(info.value) and "the mode did not change" in str(info.value), info.value
+    assert fake.snapshot() == fake.before and fake.synced == []
+
+
+def test_mode_after_a_hand_edit_that_adds_pypy_checks_the_code_and_creates_its_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The documented edit-then-apply flow: backend.supported gained pypy by hand, then any mode
+    (here --editor). mode decided "PyPy is new" from the edited pytemplate.toml, so it re-locked
+    for PyPy without the Python 3.11 check and without .venv-pypy, and apply then found PyPy in
+    the lock and skipped the check too: code that does not parse on 3.11 got PyPy."""
+    from runner import envs
+
+    if config.load(set()).pypy_enabled:
+        pytest.skip("this project already supports PyPy (the raylib preset)")
+    _Relock(tmp_path, monkeypatch, "none")
+    cfg_file = tmp_path / "pytemplate.toml"
+    base = config.load(set())
+    supported = [b for b in ("cpython", "pypy", "mypyc") if b == "pypy" or b in base.backend.supported]
+    cfg_file.write_text(config.set_value(cfg_file.read_text(encoding="utf-8"), "backend", "supported", supported), encoding="utf-8", newline="\n")
+    cfg = config.load(set())
+    checked: list[str] = []
+    synced: list[str] = []
+    monkeypatch.setattr(cmd_mode, "_precheck_py311", lambda c: checked.append((tmp_path / "uv.lock").read_text(encoding="utf-8")))
+    monkeypatch.setattr(envs, "sync", lambda env: synced.append(env.key))
+    monkeypatch.setattr(render, "apply", lambda *a, **k: ([], []))
+    other = "pylance" if cfg.typing.editor == "basedpyright" else "basedpyright"
+    assert cmd_mode.cmd_mode(cfg, ["--editor", other]) == 0
+    assert checked == ["# re-locked\n"]  # once uv.lock resolves for PyPy
+    assert synced == ["pypy"]
+
+
+def test_mode_names_the_hand_edited_files_it_leaves_as_they_were(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real run dropped render.apply's list of hand-edited files: after `mode --editor
+    basedpyright` a hand-edited .vscode/settings.json kept the old editor's settings without a
+    word, while the dry run said "hand-edited, left untouched"."""
+    cfg = config.load(set())
+    _Relock(tmp_path, monkeypatch, "none")
+    monkeypatch.setattr(render, "apply", lambda *a, **k: ([".vscode/extensions.json"], [".vscode/settings.json"]))
+    other = "pylance" if cfg.typing.editor == "basedpyright" else "basedpyright"
+    assert cmd_mode.cmd_mode(cfg, ["--editor", other]) == 0
+    err = capsys.readouterr().err
+    assert "render: updated .vscode/extensions.json" in err
+    assert "not overwriting hand-edited generated files: .vscode/settings.json (./deploy render --force)" in err
 
 
 # --- mode: real runs in a throwaway copy of this project ----------------------------------------------

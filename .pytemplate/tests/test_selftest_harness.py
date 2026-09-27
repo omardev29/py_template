@@ -9,8 +9,11 @@ test_e2e_plan.py.)"""
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +66,16 @@ def test_plain_selftest_fails_when_pytest_or_mypy_fails(monkeypatch: pytest.Monk
     assert my_argv[:3] == ["mypy", "--strict", "--no-incremental"] and "--python-version" in my_argv
     assert my_argv[my_argv.index("--python-version") + 1] == "3.11"  # the runner's floor
     assert my_argv[-2:] == [str(TEMPLATE / "runner"), str(TEMPLATE / "deploy.py")]
+
+
+@pytest.mark.parametrize("flag", ["-h", "--help", "--version", "-V"])
+def test_plain_selftest_help_runs_no_mypy(monkeypatch: pytest.MonkeyPatch, flag: str) -> None:
+    """`./deploy selftest --help` printed pytest's help, then ran mypy --strict of the whole runner
+    (seconds, more on Windows) and took mypy's exit code."""
+    fake = FakeUvRun(0)
+    monkeypatch.setattr(envs, "uv_run", fake)
+    assert cli.cmd_selftest(make(), [flag]) == 0
+    assert [argv[:3] for _, argv, _ in fake.calls] == [["python", "-m", "pytest"]]
 
 
 @pytest.mark.parametrize("suite", ["--shells", "--nvim", "--e2e"])
@@ -152,6 +165,23 @@ def test_quiet_keeps_what_selftest_shells_was_asked_for(
     assert "dash: FAIL T2" not in err  # the per-shell progress lines stay hidden
 
 
+def test_quiet_keeps_where_the_kept_scratch_files_are(
+    probes: dict[tuple[str, str], str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """--keep was asked for, and the folder has a random name: `-q selftest --shells --keep` kept it
+    without saying where."""
+    import tempfile
+
+    from runner import ui
+
+    monkeypatch.setattr(ui, "QUIET", True)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    assert shells.selftest(make(), ["--keep", "--tests", "T2"]) == 0
+    kept = list(tmp_path.glob("pts-*"))
+    err = capsys.readouterr().err
+    assert len(kept) == 1 and f"scratch files kept in {kept[0]}" in err, err
+
+
 def test_shells_refuse_what_cannot_run(probes: dict[tuple[str, str], str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     with pytest.raises(DeployError, match="not found here: fish") as e:
         shells.selftest(make(), ["fish"])
@@ -205,6 +235,23 @@ def test_nvim_exit_code_follows_the_presets(nvim_run: dict[str, Any], failed: tu
     assert nvim_run["ran"] == ["script", "raylib", "flet"]  # a failed preset does not stop the others
 
 
+def test_quiet_keeps_what_selftest_nvim_was_asked_for(
+    nvim_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """-q hides progress, never the answer (CLAUDE.md 5.3): `-q selftest --nvim` printed only
+    `error: script: FAIL b`, without the table, the reason, the SKIP lines or where the logs are."""
+    from runner import ui
+
+    monkeypatch.setattr(ui, "QUIET", True)
+    row = nvimtest.Row("script", smoke=nvimtest.Smoke(passed=["a"], failed=[("b", "the reason it failed")], skipped=["c (no network)"], expected=3), code=1)
+    monkeypatch.setattr(nvimtest, "run_preset", lambda preset, layout, nv, **_: row)
+    assert nvimtest.selftest(make(), ["script", *nvim_run["args"]]) == 1
+    err = capsys.readouterr().err
+    assert "  script   FAIL" in err and "    the reason it failed" in err and "script: SKIP c (no network)" in err, err
+    assert "isolated LazyVim: reused (cached)" in err and "pinned to: the pins" in err and "logs: " in err, err
+    assert "preset script" not in err  # the progress lines stay hidden
+
+
 @pytest.mark.parametrize("missing", ["nvim", "git"])
 def test_nvim_missing_tool_skips_or_fails_with_require(nvim_run: dict[str, Any], missing: str) -> None:
     del nvim_run["which"][missing]
@@ -252,3 +299,131 @@ def test_nvim_dir_that_is_a_file_is_a_usage_error(nvim_run: dict[str, Any], tmp_
     with pytest.raises(DeployError, match="is not a folder") as e:
         nvimtest.selftest(make(), ["script", "--dir", str(afile)])
     assert e.value.code == 2 and nvim_run["ran"] == []
+
+
+def test_nvim_deploy_steps_never_touch_a_repository_around_the_dir(nvim_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A --dir inside the user's git work tree with core.filemode = false (Git for Windows; a
+    default %TEMP% under a dotfiles repository): the harness's `./deploy new` saw that repository,
+    skipped git init and staged the scratch project's launchers there (`git add --chmod=+x`); the
+    project was deleted afterwards and the user's next commit recorded two files of a folder that
+    no longer existed. The step here runs the real presets._git_init in a child with the
+    environment the harness gives its ./deploy steps."""
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("needs git")
+    genv = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "no-gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    subprocess.run([git, "init", "-q"], cwd=outer, env=genv, check=True)
+    subprocess.run([git, "config", "core.filemode", "false"], cwd=outer, env=genv, check=True)
+    seen: dict[str, dict[str, str]] = {}
+
+    def run_preset(preset: str, layout: nvimtest.Layout, nv: cmd_nvim.Nvim, *, renv: dict[str, str], venv: dict[str, str], **_: Any) -> nvimtest.Row:
+        proj = layout.projects / preset
+        proj.mkdir(parents=True)
+        for name in ("deploy", "deploy.ps1"):
+            (proj / name).write_text("#!/bin/sh\n", encoding="utf-8")
+        code = "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from runner import presets; presets._git_init(Path(sys.argv[2]))"
+        subprocess.run([sys.executable, "-c", code, str(TEMPLATE), str(proj)], env=renv, stdin=subprocess.DEVNULL, capture_output=True, check=True)
+        seen.update(renv=renv, venv=venv)
+        return _row(preset, True)
+
+    monkeypatch.setattr(nvimtest, "run_preset", run_preset)
+    assert nvimtest.selftest(make(), ["script", "--keep", "--dir", str(outer / "nvt")]) == 0
+    staged = subprocess.run([git, "diff", "--cached", "--name-only"], cwd=outer, env=genv, capture_output=True, text=True, check=True).stdout
+    assert staged == "", f"the scratch project's files were staged in the repository around --dir: {staged}"
+    assert (outer / "nvt" / "p" / "script" / ".git").is_dir()  # the project's own repository instead
+    # Neovim keeps the user's git configuration (lazy.nvim clones the plugins with it)
+    assert seen["venv"].get("GIT_CONFIG_GLOBAL") == os.environ.get("GIT_CONFIG_GLOBAL")
+    assert seen["renv"]["GIT_CONFIG_NOSYSTEM"] == "1"
+
+
+def test_nvim_dir_that_would_hide_the_templates_repository_is_refused(nvim_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A --dir next to a template that is a subfolder of a bigger repository: git there must not
+    see a repository around --dir, which hides the template's own (new would copy its untracked
+    files). Refused before anything is created, as for selftest --e2e."""
+    asked: list[str] = []
+
+    def hidden(env: dict[str, str]) -> str:
+        asked.append(env["GIT_CEILING_DIRECTORIES"])
+        return "/big"
+
+    monkeypatch.setattr(e2e, "hidden_template_repository", hidden)
+    with pytest.raises(DeployError, match="inside its git repository /big") as e:
+        nvimtest.selftest(make(), ["script", *nvim_run["args"]])
+    assert e.value.code == 2 and nvim_run["ran"] == [] and not (tmp_path / "w").exists()
+    assert asked == [str((tmp_path / "w").resolve().parent)]
+
+
+def _gone(pid: int, within: float = 10.0) -> bool:
+    """True once `pid` runs no more (a zombie waiting for its parent counts as gone)."""
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return True
+        stat = Path(f"/proc/{pid}/stat")
+        try:
+            if stat.is_file() and stat.read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                return True
+        except OSError:
+            return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.1)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM/SIGHUP and process groups are POSIX")
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
+def test_nvim_termination_signal_kills_the_running_step(tmp_path: Path, signame: str) -> None:
+    """`timeout 30m ./deploy selftest --nvim`, a closed terminal, `kill <pid>`: the runner died at
+    once and the running step (a headless Neovim with its git, Mason and uv jobs), in a session of
+    its own, went on as an orphan writing into --dir. Now the run stops like Ctrl+C: the step's
+    tree is killed, `error: interrupted`, exit 130."""
+    import signal
+
+    pidfile = tmp_path / "step.pid"
+    step = f"import os, pathlib, time; pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(120)"
+    x = tmp_path / "w" / "x"
+    script = "\n".join(
+        [
+            "import os, sys",
+            "from pathlib import Path",
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})",
+            "from runner import cli, cmd_nvim, nvimtest",
+            f"x = Path({str(x)!r})",
+            "nv = cmd_nvim.Nvim('nvim', (0, 12, 5), x / 'config', x / 'data', x / 'state', x / 'cache')",
+            "cmd_nvim.which = lambda name: '/x/' + name",
+            "cmd_nvim.query = lambda exe=None, *, env=None: nv",
+            "nvimtest.uv_dirs = lambda env: {}",
+            "nvimtest.prepare_base = lambda layout, exe, env, *, fresh: (nv, None)",
+            "def run_preset(preset, layout, nv, **_):",
+            f"    nvimtest._run_logged([sys.executable, '-c', {step!r}], cwd=layout.base, env=os.environ, log=layout.logs / 'step.log', timeout=300)",
+            "    return nvimtest.Row(preset)",
+            "nvimtest.run_preset = run_preset",
+            f"sys.exit(cli.main(['selftest', '--nvim', 'script', '--dir', {str(tmp_path / 'w')!r}]))",
+        ]
+    )
+    log = tmp_path / "runner.log"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEMPLATE_")}
+    with log.open("wb") as out:
+        runner = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env)
+    child = 0
+    try:
+        deadline = time.monotonic() + 60
+        while not (pidfile.is_file() and pidfile.read_text()):
+            assert runner.poll() is None, log.read_text()
+            assert time.monotonic() < deadline, log.read_text()
+            time.sleep(0.05)
+        child = int(pidfile.read_text())
+        runner.send_signal(getattr(signal, signame))
+        assert runner.wait(timeout=60) == 130, log.read_text()
+        text = log.read_text()
+        assert "error: interrupted" in text and f"logs of the interrupted run: {tmp_path / 'w' / 'logs'}" in text, text
+        assert _gone(child), "the step outlived the runner"
+    finally:
+        if runner.poll() is None:
+            runner.kill()
+        if child and not _gone(child, within=0):
+            os.kill(child, signal.SIGKILL)

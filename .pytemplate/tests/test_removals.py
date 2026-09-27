@@ -253,7 +253,9 @@ def test_the_internal_route_is_the_old_init(capsys: pytest.CaptureFixture[str]) 
     command = cli.INTERNAL["__init"]
     func = getattr(importlib.import_module(f"runner.{command.module}"), command.func)
     assert func is cmd_mode.cmd_init
-    assert command.render  # like the old public command: generated files are refreshed first
+    # unlike the old public command it never renders first: it renders with --force at its end, and
+    # rendering the copy first made `new` warn about the source project's hand-edited files
+    assert not command.render
     assert set(cli.INTERNAL).isdisjoint(cli.COMMANDS)
     # A [tasks] name can never shadow an internal route: task names start with a letter
     for name in cli.INTERNAL:

@@ -461,36 +461,59 @@ def test_applied_preset(preset: str, options: dict[str, str], deps: list[str], d
 
 NO_BUILD_RAYLIB = {"tool": {"uv": {"no-build-package": ["raylib"]}}}  # the managed block of a raylib project
 NO_BUILD_RAYLIB_SDL = {"tool": {"uv": {"no-build-package": ["raylib_sdl"]}}}  # ...applied with package = "raylib_sdl"
+OWN_NO_BUILD_SIX = {"tool": {"uv": {"no-build-package": ["six"]}}}  # a project's own list, outside the markers
 
 
 @pytest.mark.parametrize(
-    ("preset", "options", "deps", "data", "expected"),
+    ("preset", "options", "deps", "data", "block", "expected"),
     [
         # no record (a lost state.json): the package the managed block was last written with
-        ("raylib", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, "raylib"),
-        ("raylib", {"package": "raylib_software"}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, "raylib"),
+        ("raylib", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, NO_BUILD_RAYLIB_SDL, "raylib"),
+        ("raylib", {"package": "raylib_software"}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, NO_BUILD_RAYLIB_SDL, "raylib"),
         # every flet dependency removed: [tool.flet] is still there
-        ("flet", {}, [], {"tool": {"flet": {"org": "com.example"}, "uv": {}}}, "flet"),
+        ("flet", {}, [], {"tool": {"flet": {"org": "com.example"}, "uv": {}}}, {}, "flet"),
         # hand switches without a record: another preset's traces
-        ("script", {}, ["rich>=15.0.0"], {"tool": {"flet": {"org": "com.example"}}}, "flet"),
-        ("flet", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, "raylib"),
-        ("script", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, "raylib"),
+        ("script", {}, ["rich>=15.0.0"], {"tool": {"flet": {"org": "com.example"}}}, {}, "flet"),
+        ("flet", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, NO_BUILD_RAYLIB_SDL, "raylib"),
+        ("script", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB_SDL, NO_BUILD_RAYLIB_SDL, "raylib"),
         # the managed block follows app.preset (`./deploy lock` after a hand switch writes the
         # new preset's keys): never a trace of it; putting app.preset back is accepted
-        ("raylib", {}, ["rich>=15.0.0"], NO_BUILD_RAYLIB, "script"),
-        ("script", {}, ["rich>=15.0.0"], NO_BUILD_RAYLIB, "script"),
+        ("raylib", {}, ["rich>=15.0.0"], NO_BUILD_RAYLIB, NO_BUILD_RAYLIB, "script"),
+        ("script", {}, ["rich>=15.0.0"], NO_BUILD_RAYLIB, NO_BUILD_RAYLIB, "script"),
         # no trace of any preset in pyproject.toml: only a preset without traces made it (a
         # guess, which the refusal says: raylib replaced by hand, not through [preset.raylib])
-        ("raylib", {}, ["raylib-sdl==6.0.1.0"], {}, "script"),
-        ("raylib", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB, "script"),
-        ("flet", {}, [], {"tool": {"uv": {"environments": []}}}, "script"),
-        # the project's own no-build-package list outside the markers (render._adopted): no option read
-        ("raylib", {}, ["raylib-sdl==6.0.1.0"], {"tool": {"uv": {"no-build-package": ["raylib_sdl", "numpy"]}}}, "script"),
+        ("raylib", {}, ["raylib-sdl==6.0.1.0"], {}, {}, "script"),
+        ("raylib", {}, ["raylib-sdl==6.0.1.0"], NO_BUILD_RAYLIB, NO_BUILD_RAYLIB, "script"),
+        ("flet", {}, [], {"tool": {"uv": {"environments": []}}}, {"tool": {"uv": {"environments": []}}}, "script"),
+        # the project's own no-build-package list outside the markers (render._adopted): no
+        # option read, whatever its length (["six"] once read as raylib's {package})
+        ("raylib", {}, ["raylib-sdl==6.0.1.0"], {"tool": {"uv": {"no-build-package": ["raylib_sdl", "numpy"]}}}, {}, "script"),
+        ("script", {}, ["six==1.17.0"], OWN_NO_BUILD_SIX, {}, "script"),
+        ("raylib", {}, ["six==1.17.0"], OWN_NO_BUILD_SIX, {}, "script"),
     ],
 )
-def test_applied_preset_reads_every_trace(preset: str, options: dict[str, str], deps: list[str], data: dict[str, Any], expected: str) -> None:
-    project = cmd_apply.Project(data, "alpha", {cmd_apply.req_key(r)[0]: r for r in deps}, {})
+def test_applied_preset_reads_every_trace(
+    preset: str, options: dict[str, str], deps: list[str], data: dict[str, Any], block: dict[str, Any], expected: str
+) -> None:
+    project = cmd_apply.Project(data, "alpha", {cmd_apply.req_key(r)[0]: r for r in deps}, {}, block=block.get("tool", {}).get("uv", {}))
     assert cmd_apply._applied_preset(_cfg(preset, **options), project, None) == expected
+
+
+def test_the_projects_own_no_build_package_is_no_preset_trace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A script project that keeps its own `no-build-package = ["six"]` in [tool.uv], outside the
+    markers (render._adopted), then loses the `applied` record: the one-entry list read as raylib's
+    ["{package}"], so apply refused a hand switch from raylib, doctor and the hook reported it, and
+    putting app.preset = "raylib" back failed too."""
+    monkeypatch.setattr(cmd_apply, "load_record", lambda: None)  # the record is lost
+    cfg = _cfg("script")
+    base = '[project]\nname = "alpha"\nversion = "0.1.0"\ndependencies = ["six==1.17.0"]\n\n[tool.uv]\n# our own: never build six\nno-build-package = ["six"]\n'
+    path = tmp_path / "pyproject.toml"
+    path.write_text(render.pyproject_expected(cfg, base), encoding="utf-8")
+    project = cmd_apply.read_project(path)
+    assert project.data["tool"]["uv"]["no-build-package"] == ["six"]
+    assert cmd_apply._applied_preset(cfg, project, None) == "script"
+    assert cmd_apply.applied_state(cfg, project).preset == "script"
+    assert "no-build-package" not in project.block and project.block["python-preference"] == "only-managed"  # the block itself is read
 
 
 @pytest.mark.parametrize(
@@ -1072,6 +1095,47 @@ def test_only_the_pyproject_name_differs(tmp_path: Path, monkeypatch: pytest.Mon
     assert ["lock"] in uv.changing() and cmd_apply.pending(project.cfg()) == []
 
 
+def test_a_pyproject_name_that_differs_only_in_spelling_is_put_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """app.name = "MyApp" (src/myapp/, the record MyApp) and only pyproject.toml [project] name
+    changed to "myapp" (by hand, or a tool that lowercases it): the record says app.name is
+    current, so apply puts that line back. It took "myapp" for the real name: doctor and the hook
+    reported app.name as not applied, apply wanted a clean tree for a rename myapp -> MyApp that
+    rewrote the user's prose, and `rename Other` started from "myapp"."""
+    project, uv = _project(tmp_path, monkeypatch, "script", "MyApp")
+    assert _run(project) == 0  # the record: MyApp
+    prose = project.root / "tests" / "test_prose.py"
+    prose.write_text("# welcome to myapp, the best app\n", encoding="utf-8")
+    path = project.root / "pyproject.toml"
+    path.write_text(path.read_text(encoding="utf-8").replace('name = "MyApp"', 'name = "myapp"', 1), encoding="utf-8", newline="\n")
+    uv.locked = path.read_bytes()
+    cfg = project.cfg()
+    assert cmd_apply.applied_name(cfg) is None  # what rename starts from: app.name itself
+    assert cmd_apply.pending(cfg) == [("pyproject.toml [project] name = 'myapp', but app.name = 'MyApp'", "./deploy apply")]
+    assert _run(project) == 0
+    assert project.pyproject()["project"]["name"] == "MyApp" and cmd_apply.pending(project.cfg()) == []
+    assert prose.read_text(encoding="utf-8") == "# welcome to myapp, the best app\n"  # no rename touched it
+
+
+def test_both_names_edited_by_hand_are_renamed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """app.name and pyproject.toml [project] name both edited to the new name: the record (the old
+    name) matched neither, so apply skipped the rename, recorded the new name (the real one lost),
+    warned that src/beta/ does not exist and said "applied". The record's package is still in
+    src/: it is this project's record, and apply renames from it."""
+    project, _ = _project(tmp_path, monkeypatch, "script", "alpha")
+    assert _run(project) == 0  # the record: alpha
+    project.edit("app", "name", "beta")
+    path = project.root / "pyproject.toml"
+    path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "beta"', 1), encoding="utf-8", newline="\n")
+    cfg = project.cfg()
+    assert cmd_apply.applied_name(cfg) == "alpha"
+    assert cmd_apply.pending(cfg)[0] == ("app.name = 'beta' is not applied: the package is still src/alpha/", "./deploy apply  (renames 'alpha' -> 'beta')")
+    assert _run(project) == 0
+    skeleton = presets.skeleton("script", "beta")
+    assert _owned(project.root) == {k: v for k, v in skeleton.items() if k.split("/")[0] in ("src", "tests", "typings")}
+    record = cmd_apply.load_record()
+    assert record is not None and record["name"] == "beta" and cmd_apply.pending(project.cfg()) == []
+
+
 @pytest.mark.parametrize("record", [True, False])
 def test_a_name_of_another_package_in_src_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: bool) -> None:
     """app.name set by hand to the name of another package of the project (src/helpers/): apply
@@ -1159,6 +1223,23 @@ def test_an_invalid_hand_edited_name_is_refused_before_anything(tmp_path: Path, 
         assert e.value.code == 2 and str(e.value).startswith("app.name: ")
     project.edit("app", "name", "alpha")
     assert project.snapshot() == before and uv.calls == []
+
+
+def test_a_upx_path_of_a_user_this_machine_lacks_is_a_note_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A shared pytemplate.toml with deploy.upx.path = "~builder/bin/upx": on a machine without
+    that user, expanduser raises RuntimeError, and doctor (no line at all) and the end of apply
+    ended in an internal-error traceback."""
+    project, _ = _project(tmp_path, monkeypatch)
+    project.edit("deploy.upx", "path", "~pt-no-such-user-here/bin/upx")
+    problems = cmd_apply.reference_problems(project.cfg())
+    assert "deploy.upx.path = '~pt-no-such-user-here/bin/upx' does not exist: builds with UPX fail" in problems
+    lines: list[tuple[bool | None, str]] = []
+    cmd_apply.doctor(project.cfg(), lambda passed, label, hint="": lines.append((passed, label)))
+    assert (None, "deploy.upx.path = '~pt-no-such-user-here/bin/upx' does not exist: builds with UPX fail") in lines
+    assert _run(project) == 0
+    assert "deploy.upx.path = '~pt-no-such-user-here/bin/upx' does not exist" in capsys.readouterr().err
 
 
 def test_missing_package_is_a_warning_not_a_crash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1285,6 +1366,44 @@ def test_git_refusing_the_repository_is_said_not_hidden(tmp_path: Path, monkeypa
     assert _run(project) == 0
     assert "git hook         not checked: git refuses the repository (git cannot use" in capsys.readouterr().err
     assert not [p for p, _ in cmd_apply.pending(project.cfg()) if "hook" in p]
+
+
+@needs_git
+def test_git_missing_from_path_is_said_not_taken_for_no_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """git not on PATH (GitHub Desktop, Fork and SourceTree bring their own): apply said "not a git
+    work tree: nothing to do", left pytemplate's hook installed with hooks.pre_commit = false,
+    and doctor called hooks.pre_commit applied."""
+    project, _ = _project(tmp_path, monkeypatch)
+    _git(project.root, "init", "-q")
+    assert _run(project) == 0
+    hook = project.root / ".git" / "hooks" / "pre-commit"
+    assert hook.is_file()
+    project.edit("hooks", "pre_commit", False)
+    capsys.readouterr()
+    which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **kw: None if name == "git" else which(name, *a, **kw))
+    assert _run(project) == 0
+    err = capsys.readouterr().err
+    assert "warning: git pre-commit hook not checked: git not found in PATH (put it on PATH" in err, err
+    assert "git hook         not checked: git not found in PATH (see above)" in err, err
+    assert hook.is_file()  # nothing could remove it, and nothing says it was
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert _run(project) == 0
+    assert "git hook         not checked: git not found in PATH" in capsys.readouterr().err
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    lines: list[tuple[bool | None, str]] = []
+
+    def check(passed: bool | None, label: str, hint: str = "") -> None:
+        lines.append((passed, label))
+
+    cmd_apply.doctor(project.cfg(), check)
+    hooks.doctor(project.cfg(), check, project.root)
+    assert (True, "pytemplate.toml applied (app.name, app.preset, [preset.*])") in lines, lines
+    assert any(passed is None and label.startswith("git not found in PATH: the pre-commit hook") for passed, label in lines), lines
+    if not any((d / ".git").exists() for d in project.root.parents):  # no repository at all: no news
+        shutil.rmtree(project.root / ".git")
+        assert _run(project) == 0
+        assert "git hook         not a git work tree: nothing to do" in capsys.readouterr().err
 
 
 @needs_git
@@ -1562,7 +1681,10 @@ def test_real_dry_run_in_a_copy(copy: Path) -> None:
     before = _tree(copy)
     r = _deploy(copy, "--dry-run", "apply")
     assert r.returncode == 0, r.stderr
-    assert f"would rename '{old}' -> 'beta'" in r.stderr and '+ """beta"""' in r.stderr  # every preset's docstring
+    assert f"would rename '{old}' -> 'beta'" in r.stderr and re.search(r"\+ name = [\"']beta[\"']", r.stderr), r.stderr
+    init = copy / "src" / rename.package_of(old) / "__init__.py"
+    if init.is_file() and init.read_text(encoding="utf-8") == f'"""{old}"""\n':  # the skeleton's docstring (a project may have its own)
+        assert '+ """beta"""' in r.stderr
     assert "git hook         not a git work tree: nothing to do" in r.stderr
     assert _tree(copy) == before, "--dry-run wrote files"
     r = _deploy(copy, "apply", "--bogus")

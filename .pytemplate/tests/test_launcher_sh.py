@@ -161,7 +161,8 @@ LINT_RULES = [
     (r"(^|[\s;&|(])set\s+-o\s+(errexit|nounset)", "no set -e / set -u (bash 3.2, niubash in-process)"),
     (r"(^|[\s;&|(])cd(\s|$)", "the launcher never changes directory (niubash would move the caller)"),
     # `x=$(cmd)` takes cmd's status: a caller's set -e (sh -e deploy, niubash) would stop there.
-    (r"^(?!.*\|\|).*\b_pt_\w+=\$\(", "a command substitution needs `|| _pt_x=` (a caller's set -e)"),
+    # (An arithmetic expansion, _pt_n=$((_pt_n + 1)), runs no command.)
+    (r"^(?!.*\|\|).*\b_pt_\w+=\$\((?!\()", "a command substitution needs `|| _pt_x=` (a caller's set -e)"),
 ]
 PREFIX_ONLY = {"IFS", "MSYS_NO_PATHCONV", "MSYS2_ARG_CONV_EXCL", "UV_PYTHON", "PYTHONHOME", "PYTHONPATH", "UV_WORKING_DIR"}  # only as `NAME=value command`
 EXPORTED = {"PYTEMPLATE_CALLER_CWD", "PYTEMPLATE_LAUNCHER"}
@@ -354,7 +355,7 @@ def test_lint_detects(snippet: str, why: str) -> None:
 
 
 def test_lint_accepts_a_clean_launcher() -> None:
-    code = "#!/bin/sh\n_pt_ok() {\n    return 0\n}\n_pt_v=$(printf '%s' \"$1\") || _pt_v=\nIFS= read -r _pt_v || :\n"
+    code = "#!/bin/sh\n_pt_ok() {\n    return 0\n}\n_pt_v=$(printf '%s' \"$1\") || _pt_v=\nIFS= read -r _pt_v || :\n_pt_v=$((1 + 1))\n"
     tail = "\nunset -f _pt_ok\nunset _pt_v\nif [ \"$#\" -eq 1 ]; then\n    exit \"$1\"\nfi\nUV_PYTHON='' \"$@\"\nexec \"$@\"\n"
     assert lint(code + tail) == []
 
@@ -546,6 +547,15 @@ def _system_uv() -> str | None:
     return next((d for d in SYSTEM_UV_DIRS if Path(d, "uv").exists()), None)
 
 
+def _no_uv_env(home: Path, **extra: str) -> dict[str, str]:
+    """An environment built from scratch where no uv can be found, with the caller's locale like
+    every other case: in the C locale yash cannot read a path that is not ASCII (a project in
+    `My Game e-acute`), prints `failed to set $PWD` and runs nothing."""
+    locale = {k: v for k, v in os.environ.items() if k in ("LANG", "LC_ALL", "LC_CTYPE")}
+    # PATH keeps /usr/bin:/bin: yash runs `[` only when it is found on PATH.
+    return {"PATH": "/usr/bin:/bin", "HOME": str(home), **locale, **extra}
+
+
 @needs_posix
 @pytest.mark.parametrize("case", ["uv-off-path", "stale-UV", "no-uv"])
 @pytest.mark.parametrize("name", POSIX_SHELLS)
@@ -555,8 +565,7 @@ def test_launcher_survives_caller_errexit(name: str, case: str, tmp_path: Path) 
     if case == "no-uv":
         if _system_uv():
             pytest.skip("uv is installed in a system folder the launcher always searches")
-        # PATH keeps /usr/bin:/bin: yash runs `[` only when it is found on PATH.
-        run = Run([*argv, "deploy", "help"], ROOT, {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
+        run = Run([*argv, "deploy", "help"], ROOT, _no_uv_env(tmp_path))
         assert run.rc == 127 and "uv not found" in run.err and "curl" in run.err, run.out + run.err
         return
     uv = shutil.which("uv", path=_clean_env().get("PATH"))
@@ -593,6 +602,41 @@ def test_relative_launcher_from_a_symlinked_subfolder(tmp_path: Path, via: str) 
     assert Path(str(run.probe["root"])) == ROOT
     assert run.probe["caller_cwd_raw"] == str(link)
     assert run.probe["caller_cwd"] == str(link)
+
+
+def _launcher_links(tmp_path: Path) -> dict[str, Path]:
+    """Links to ./deploy from folders outside the project: an absolute one in a bin folder, a
+    relative one to that link, and a relative one seen through a symlinked folder (~/bin ->
+    /opt/tools/bin: its '..' is the physical folder's, as the kernel resolves it)."""
+    bindir, chain, tools, home = tmp_path / "bin", tmp_path / "chain", tmp_path / "tools" / "bin", tmp_path / "home"
+    for folder in (bindir, chain, tools, home):
+        folder.mkdir(parents=True)
+    (bindir / "pdeploy").symlink_to(LAUNCHER)
+    (chain / "rel").symlink_to(Path("..") / "bin" / "pdeploy")
+    (tmp_path / "tools" / "proj").symlink_to(ROOT, target_is_directory=True)
+    (tools / "pdeploy").symlink_to(Path("..") / "proj" / "deploy")
+    (home / "bin").symlink_to(tools, target_is_directory=True)
+    return {"absolute": bindir / "pdeploy", "relative, to a link": chain / "rel", "relative, in a linked folder": home / "bin" / "pdeploy"}
+
+
+@needs_posix
+@pytest.mark.parametrize("name", POSIX_SHELLS)
+def test_a_launcher_reached_through_a_symlink_finds_its_project(name: str, tmp_path: Path) -> None:
+    """A link to ./deploy in a folder on PATH (~/bin/pdeploy -> proj/deploy), run from outside the
+    project, said there was no .pytemplate/deploy.py next to this launcher (exit 2): the folder of
+    the link was taken for the launcher's. The link is followed to the file it names."""
+    argv = _shell_argv(name)
+    away = tmp_path / "away"
+    away.mkdir()
+    links = _launcher_links(tmp_path)
+    runs = {how: Run([*argv, link, "__probe", "5", "0", *ARGS], away, _clean_env()) for how, link in links.items()}
+    if name == "sh" and os.access(LAUNCHER, os.X_OK):
+        runs["executed"] = Run([links["absolute"], "__probe", "5", "0", *ARGS], away, _clean_env())
+    for how, run in runs.items():
+        try:
+            run.check(5, away)
+        except AssertionError as e:
+            raise AssertionError(f"{how}: {e}") from None
 
 
 def _copy_project(dest: Path) -> Path:
@@ -647,7 +691,7 @@ def test_in_process_run_leaves_no_name_behind(name: str, case: str, tmp_path: Pa
         if _system_uv():
             pytest.skip("uv is installed in a system folder the launcher always searches")
         code = 127
-        env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "__RUBASH_SHELL_NAME": "1", **keep}
+        env = _no_uv_env(tmp_path, __RUBASH_SHELL_NAME="1", **keep)
     report = (
         "printf 'LEFT:'; set | grep '^_pt_' | tr '\\n' ' '; printf '\\n'; "
         f"for f in {' '.join(FUNCTIONS)}; do if command -v \"$f\" >/dev/null 2>&1; then printf 'FUNC:%s\\n' \"$f\"; fi; done; "
@@ -664,6 +708,27 @@ def test_in_process_run_leaves_no_name_behind(name: str, case: str, tmp_path: Pa
     if case == "ok":
         assert run.probe and run.probe["launcher"] == "sh:niubash" and run.probe["argv"] == ["x"], where
         assert run.probe["cwd"] == str(ROOT), where  # not UV_WORKING_DIR
+
+
+@needs_posix
+def test_the_no_uv_case_runs_in_a_folder_that_is_not_ascii(tmp_path: Path) -> None:
+    """`./deploy selftest` must pass in a project folder that is not ASCII (`My Game e-acute`):
+    the no-uv cases build their environment from scratch, and without the caller's locale yash
+    could not read the launcher's path in PTCMD, ran nothing and exited 0."""
+    import locale
+
+    if locale.nl_langinfo(locale.CODESET).upper().replace("-", "") != "UTF8":
+        pytest.skip("this test process does not run in a UTF-8 locale")
+    argv = _shell_argv("yash")
+    if _system_uv():
+        pytest.skip("uv is installed in a system folder the launcher always searches")
+    project = tmp_path / "My Game \u00e9" / "p"
+    (project / ".pytemplate").mkdir(parents=True)
+    (project / ".pytemplate" / "deploy.py").write_text("", encoding="utf-8")
+    shutil.copyfile(LAUNCHER, project / "deploy")
+    ptcmd = f"set -- __probe 127 0 x; . {q(str(project / 'deploy'))}"
+    run = Run([*argv, "-c", 'eval "$PTCMD"'], project, {**_no_uv_env(tmp_path, __RUBASH_SHELL_NAME="1"), "PTCMD": ptcmd})
+    assert run.rc == 127 and "uv not found" in run.err, f"stdout={run.out!r} stderr={run.err!r}"
 
 
 # --- UV_PYTHON never picks the runner's Python ---------------------------------------------------------

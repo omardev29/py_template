@@ -88,14 +88,14 @@ class Project:
     name: str | None  # [project] name
     deps: dict[str, str]  # normalized name -> requirement ([project] dependencies)
     dev: dict[str, str]  # the same for [dependency-groups] dev
+    # [tool.uv] between the pytemplate markers (render.managed_values): the project's own keys
+    # outside them never count as what the block was written with
+    block: dict[str, Any] = field(default_factory=dict)
 
     @property
     def pypy_locked(self) -> bool:
         """Whether uv.lock already resolves for PyPy (tool.uv environments, the managed block)."""
-        tool = self.data.get("tool")
-        uv = tool.get("uv") if isinstance(tool, dict) else None
-        found = uv.get("environments", []) if isinstance(uv, dict) else []
-        return any("implementation_name == 'pypy'" in e for e in found if isinstance(e, str)) if isinstance(found, list) else False
+        return render.resolves_pypy(self.data)
 
 
 def _requirements(value: object) -> dict[str, str]:
@@ -107,7 +107,8 @@ def read_project(path: Path | None = None) -> Project:
     """Parse pyproject.toml (a BOM is tolerated); DeployError when it is missing or not TOML."""
     path = path or ROOT / PYPROJECT.name
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+        text = path.read_text(encoding="utf-8-sig")
+        data = tomllib.loads(text)
     except OSError as e:
         raise DeployError(f"pyproject.toml cannot be read: {e.strerror or e}") from None
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
@@ -120,6 +121,7 @@ def read_project(path: Path | None = None) -> Project:
         name=name if isinstance(name, str) else None,
         deps=_requirements(project.get("dependencies") if isinstance(project, dict) else None),
         dev=_requirements(groups.get("dev") if isinstance(groups, dict) else None),
+        block=render.managed_values(text),
     )
 
 
@@ -221,12 +223,17 @@ def _src() -> Path:
     return ROOT / "src"
 
 
-def _old_name(cfg: Config, candidates: list[str | None]) -> str | None:
-    """The app name to rename from after a hand edit of app.name: the first candidate (the
-    record, pyproject.toml [project] name) whose package is in src/, when app.name's own package
-    is not (or is the very same folder: MyApp for myapp, or my-app for my_app)."""
+def _old_name(cfg: Config, record_name: str | None, project_name: str | None = None) -> str | None:
+    """The app name to rename from after a hand edit of app.name: the record's name, else
+    pyproject.toml [project] name, whose package is in src/, when app.name's own package is not
+    (or is the very same folder: MyApp for myapp, or my-app for my_app). A record named like
+    app.name says app.name was not edited: only [project] name was (in case or -/_ at most, so
+    its package is app.name's folder), and apply puts that line back: None. It took pyproject's
+    name for the real one and planned a rename that rewrote the user's prose."""
+    if record_name is not None and record_name == cfg.app.name:
+        return None
     here = rename.package_dir(_src(), rename.package_of(cfg.app.name))
-    for old in candidates:
+    for old in (record_name, project_name):
         if not old or old == cfg.app.name or not _APP_NAME.fullmatch(old):
             continue
         folder = rename.package_dir(_src(), rename.package_of(old))
@@ -265,12 +272,17 @@ def _onto_another_package(cfg: Config, old: str, record: dict[str, Any] | None) 
 
 def trusted_record(cfg: Config, project_name: str | None) -> dict[str, Any] | None:
     """The `applied` record, when it describes this project: its name is app.name or pyproject.toml
-    [project] name (a hand edit changes only one of them). Anything else is foreign, e.g. the
-    template's own record in a project that `./deploy new` just made: ignored."""
+    [project] name (a hand edit of one of them), or its package is in src/ where app.name's is not
+    (or is that very folder: _old_name): both lines were edited by hand to the new name, and apply
+    skipped the rename, recorded the new name and lost the real one. Anything else is foreign,
+    e.g. the template's own record in a copy of it: ignored."""
     record = load_record()
-    if record is None or record["name"] not in (cfg.app.name, project_name):
+    if record is None:
         return None
-    return record
+    name = record["name"]
+    if name in (cfg.app.name, project_name) or _old_name(cfg, name) == name:
+        return record
+    return None
 
 
 def _project_name() -> str | None:
@@ -289,7 +301,7 @@ def applied_name(cfg: Config) -> str | None:
     """The name the project really has when app.name was changed by hand (None: no such case)."""
     project_name = _project_name()
     record = trusted_record(cfg, project_name)
-    return _old_name(cfg, [record["name"] if record else None, project_name])
+    return _old_name(cfg, record["name"] if record else None, project_name)
 
 
 def _option_names(preset: str, opts: dict[str, Any]) -> set[str]:
@@ -350,14 +362,15 @@ def _unformat(template: str, text: str) -> dict[str, str] | None:
 def _block_options(preset: str, project: Project) -> dict[str, str]:
     """The [preset.<name>] options the managed [tool.uv] block was last written with, read back
     from the values of the preset's own keys there (raylib's no-build-package = ["{package}"]: the
-    package of the last apply, or lock). Empty: the block holds no key of the preset (it follows
-    app.preset), or a value its template does not give (the project's own list outside the markers,
-    render._adopted)."""
-    tool = project.data.get("tool")
-    uv = tool.get("uv") if isinstance(tool, dict) else None
+    package of the last apply, or lock). Only the block counts (Project.block, between the
+    markers): the project's own list outside them (render._adopted) is no preset's, and a script
+    project's no-build-package = ["six"] once read as raylib's package, a hand switch to refuse.
+    Empty: the block holds no key of the preset (it follows app.preset), or a value its template
+    does not give."""
+    uv = project.block
     found: dict[str, str] = {}
     for key, template in presets.load(preset).get("uv", {}).items():
-        value = uv.get(key) if isinstance(uv, dict) else None
+        value = uv.get(key)
         if isinstance(template, str) and isinstance(value, str):
             pairs = [(template, value)]
         elif isinstance(template, list) and isinstance(value, list) and len(template) == len(value):
@@ -428,7 +441,7 @@ def applied_state(cfg: Config, project: Project) -> Applied:
     else:  # no record: the options the managed block was last written with, else init's defaults
         options = {**presets.default_options(preset), **_block_options(preset, project)}
         deps, dev = presets.option_dependencies(preset, options)
-    renamed_from = _old_name(cfg, [record["name"] if record else None, project.name])
+    renamed_from = _old_name(cfg, record["name"] if record else None, project.name)
     return Applied(preset, deps, dev, renamed_from, record, guessed)
 
 
@@ -575,14 +588,20 @@ OURS = ("installed", "outdated", "chained")
 
 
 def _repo() -> hooks.Repo | str | None:
-    """The git repository of the project: None outside git, git's refusal (dubious ownership, a
-    broken .git...) as one line."""
+    """The git repository of the project: None outside git, why the hook cannot be read as one
+    line: git's refusal (dubious ownership, a broken .git...), or hooks.NO_GIT when git is not on
+    PATH in a project that has a .git (in or above it: hooks.git_missing_here)."""
     try:
         return hooks.find_repo(ROOT)
     except hooks.NotInGit:
-        return None
+        return hooks.NO_GIT if hooks.git_missing_here(ROOT) else None
     except DeployError as e:
         return " ".join(line.strip() for line in str(e).splitlines())
+
+
+def _unchecked(repo: str) -> str:
+    """Why the hook was not checked (a _repo() string), for the summary line."""
+    return hooks.NO_GIT if repo == hooks.NO_GIT else "git refuses the repository"
 
 
 def _hook_state(cfg: Config) -> str | None:
@@ -622,8 +641,9 @@ def _apply_hook(cfg: Config) -> str:
     if repo is None:
         return "not a git work tree: nothing to do"
     if isinstance(repo, str):
-        ui.warn(f"git pre-commit hook not checked: {repo}")
-        return "not checked: git refuses the repository (see above)"
+        again = " (put it on PATH and run ./deploy apply again)" if repo == hooks.NO_GIT else ""
+        ui.warn(f"git pre-commit hook not checked: {repo}{again}")
+        return f"not checked: {_unchecked(repo)} (see above)"
     before, copy_before = hooks.hook_state(repo), hooks.own_local(repo)
     ours = before in OURS or (copy_before and before == "missing")  # what hooks.uninstall removes
     if cfg.hooks.pre_commit:
@@ -658,7 +678,7 @@ def _hook_plan(cfg: Config) -> str:
     if repo is None:
         return "not a git work tree: nothing to do"
     if isinstance(repo, str):
-        return f"not checked: git refuses the repository ({repo})"
+        return f"not checked: {hooks.NO_GIT}" if repo == hooks.NO_GIT else f"not checked: git refuses the repository ({repo})"
     state, copy = hooks.hook_state(repo), hooks.own_local(repo)
     if not cfg.hooks.pre_commit:
         if state == "chained":
@@ -711,8 +731,11 @@ def reference_problems(cfg: Config, *, package: bool = True, move: tuple[str, st
     if cfg.deploy.exe.icon and not now(ROOT / cfg.deploy.exe.icon).is_file():
         out.append(f"deploy.exe.icon = '{cfg.deploy.exe.icon}' does not exist (relative to the project root): exe and nuitka builds fail")
     if cfg.deploy.upx.path:
-        upx = Path(cfg.deploy.upx.path).expanduser()
-        if not (upx if upx.is_absolute() else now(ROOT / upx)).is_file():
+        try:
+            upx: Path | None = Path(cfg.deploy.upx.path).expanduser()
+        except RuntimeError:  # a ~user of another machine (a shared pytemplate.toml), or no home folder
+            upx = None
+        if upx is None or not (upx if upx.is_absolute() else now(ROOT / upx)).is_file():
             out.append(f"deploy.upx.path = '{cfg.deploy.upx.path}' does not exist: builds with UPX fail")
     return out
 
@@ -770,7 +793,9 @@ def doctor(cfg: Config, check: Check) -> None:
     """The ./deploy doctor lines about pytemplate.toml changes that are not applied yet."""
     problems = pending(cfg)
     if not problems:
-        check(True, "pytemplate.toml applied (app.name, app.preset, [preset.*], hooks.pre_commit)", "")
+        # hooks.pre_commit only where git could read the hook (the "git hook" line says why not)
+        read = not isinstance(_repo(), str)
+        check(True, f"pytemplate.toml applied (app.name, app.preset, [preset.*]{', hooks.pre_commit' if read else ''})", "")
     for label, hint in problems:
         check(False, label, hint)
     for problem in reference_problems(cfg, package=False):
@@ -923,13 +948,11 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
     lock_before = _read_bytes(ROOT / "uv.lock")
     try:
         _edit_dependencies(cfg, plan.deps)
+        # With PyPy new (plan.pypy_new) ensure_lock runs the PyPy precheck once the re-lock is
+        # done: it syncs the tools environment (`uv sync --locked`) with THIS configuration (a
+        # python.cpython change in the same edit made uv refuse the old lock); when it fails,
+        # pyproject.toml and uv.lock get their old bytes back below.
         cmd_env.ensure_lock(cfg)
-        if plan.pypy_new:
-            # The PyPy precheck of `mode --supports +pypy`. It syncs the tools environment
-            # (`uv sync --locked`) with THIS configuration, so it runs once pyproject.toml and
-            # uv.lock follow it (a python.cpython change in the same edit made uv refuse the old
-            # lock); when it fails, both get their old bytes back below.
-            cmd_mode_precheck(cfg)
     except BaseException as e:  # restore pyproject.toml and uv.lock: nothing half-applied
         restored = [
             name

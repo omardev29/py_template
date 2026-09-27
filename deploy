@@ -146,11 +146,32 @@ _pt_winpath() {
 # --- project root ---------------------------------------------------------------
 
 # $1 = this file as the shell named it. Sets _pt_root when its directory
-# holds .pytemplate/deploy.py.
+# holds .pytemplate/deploy.py. A symlink (~/bin/pdeploy -> proj/deploy) is
+# followed to the launcher it names, at most 40 links; a relative target is
+# joined to its link's folder, and the kernel resolves the '..' in it.
 _pt_from_launcher() {
     _pt_slashes "$1"
-    case $_pt_r in
-        */*) _pt_c=${_pt_r%/*} ;;
+    _pt_link=$_pt_r
+    _pt_n=0
+    while [ -h "$_pt_link" ] && [ "$_pt_n" -lt 40 ]; do
+        _pt_n=$((_pt_n + 1))
+        case $_pt_link in
+            -*) _pt_link=./$_pt_link ;;
+        esac
+        _pt_t=$(readlink "$_pt_link" 2>/dev/null) || _pt_t=
+        _pt_slashes "$_pt_t"
+        case $_pt_r in
+            '') _pt_n=40 ;;
+            /* | [A-Za-z]:/*) _pt_link=$_pt_r ;;
+            *)
+                case $_pt_link in
+                    */*) _pt_link=${_pt_link%/*}/$_pt_r ;;
+                    *) _pt_link=$_pt_r ;;
+                esac ;;
+        esac
+    done
+    case $_pt_link in
+        */*) _pt_c=${_pt_link%/*} ;;
         *) _pt_c=. ;;
     esac
     case $_pt_c in
@@ -511,7 +532,7 @@ fi
 unset -f _pt_slashes _pt_backslashes _pt_drive _pt_winpath _pt_from_launcher \
     _pt_foreign _pt_try_uv _pt_try_dir _pt_find_uv_dirs _pt_expand _pt_uv_in_list \
     _pt_uv_from_registry
-unset _pt_self _pt_r _pt_s _pt_p _pt_t _pt_d _pt_c _pt_n _pt_pwd _pt_root _pt_other _pt_win \
+unset _pt_self _pt_r _pt_s _pt_p _pt_t _pt_d _pt_c _pt_n _pt_link _pt_pwd _pt_root _pt_other _pt_win \
     _pt_exe _pt_uv _pt_h _pt_l _pt_f _pt_a _pt_g _pt_v _pt_rest _pt_e _pt_cr _pt_k \
     _pt_o _pt_launcher _pt_script _pt_cwd _pt_rc
 if [ "$#" -eq 1 ]; then

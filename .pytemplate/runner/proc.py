@@ -30,8 +30,9 @@ STATUS_CONTROL_C_EXIT = 0xC000013A
 # - UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON: uv refuses them next to the UV_PYTHON_PREFERENCE
 #   that envs.env_vars sets (exit 2 on every call);
 # - UV_ISOLATED: a throwaway environment instead of .venv on every call;
-# - UV_NO_DEV, UV_NO_DEFAULT_GROUPS: an environment without the dev group (no mypy, ruff,
-#   pytest; a PATH-wide ruff or mypy of another version runs instead);
+# - UV_NO_DEV, UV_NO_DEFAULT_GROUPS, UV_NO_GROUP (=dev: it wins over --all-groups, and sync
+#   uninstalled mypy, ruff and pytest): an environment without the dev group (a PATH-wide ruff
+#   or mypy of another version runs instead, `test` finds no pytest);
 # - UV_NO_SYNC: nothing is synced, so .venv stays empty after git clean -fdx and `add` never
 #   reaches the environment.
 # Resolution settings (indexes, UV_EXCLUDE_NEWER, UV_RESOLUTION, UV_PRERELEASE...) are the
@@ -47,6 +48,7 @@ UV_SELECTION = (
     "UV_ISOLATED",
     "UV_NO_DEV",
     "UV_NO_DEFAULT_GROUPS",
+    "UV_NO_GROUP",
     "UV_NO_SYNC",
 )
 

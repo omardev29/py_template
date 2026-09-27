@@ -611,15 +611,18 @@ def run_preset(
 
 
 def _table(rows: Sequence[Row], base_seconds: float | None) -> None:
+    """The results, with the reason of each FAIL and the SKIP lines: `ui.report`, as `selftest
+    --shells` prints its own (`-q` hides progress, never what was asked for; it left a bare
+    `script: FAIL <check>` with no reason and no table)."""
     ui.step("selftest --nvim results")
     base = "reused (cached)" if base_seconds is None else f"installed in {base_seconds:.0f} s"
-    ui.info(f"  isolated LazyVim: {base}")
-    ui.info(f"  {'preset':<8} {'result':<6} {'ok':>3} {'fail':>4} {'skip':>4} {'exit':>4} {'new+sync':>9} {'trust+lazy':>10} {'smoke':>6} {'total':>6}")
+    ui.report(f"  isolated LazyVim: {base}")
+    ui.report(f"  {'preset':<8} {'result':<6} {'ok':>3} {'fail':>4} {'skip':>4} {'exit':>4} {'new+sync':>9} {'trust+lazy':>10} {'smoke':>6} {'total':>6}")
     for r in rows:
         s = r.smoke or Smoke()
         exit_text = "-" if r.code is None else str(r.code)
         new, lazy, smoke = (f"{r.times[k]:.0f}s" if k in r.times else "-" for k in PHASES)
-        ui.info(
+        ui.report(
             f"  {r.preset:<8} {'PASS' if r.ok else 'FAIL':<6} {len(s.passed):>3} {len(s.failed):>4} {len(s.skipped):>4} {exit_text:>4} "
             f"{new:>9} {lazy:>10} {smoke:>6} {sum(r.times.values()):>5.0f}s"
         )
@@ -628,9 +631,9 @@ def _table(rows: Sequence[Row], base_seconds: float | None) -> None:
         for name, detail in s.failed:
             ui.error(f"{r.preset}: FAIL {name}")
             for line in detail.splitlines():
-                ui.info(f"    {line}")
+                ui.report(f"    {line}")
         for name in s.skipped:
-            ui.info(f"  {r.preset}: SKIP {name}")
+            ui.report(f"  {r.preset}: SKIP {name}")
         if r.error:
             ui.error(f"{r.preset}: {r.error}")
         elif r.code not in (0, None) and not s.failed:
@@ -664,13 +667,44 @@ def selftest(cfg: Config, args: list[str]) -> int:
         ui.warn(msg + ": skipped")
         return 0
     exe = cmd_nvim.which("nvim") or "nvim"
-
     layout = Layout(user_path(ns.dir) if ns.dir else default_dir())
+    from .e2e import termination_as_interrupt
+
+    # Every step runs in a session of its own (kill_tree), so a SIGTERM or SIGHUP sent to this
+    # run's process group (`timeout`, a closed terminal) never reaches it: the runner died at once
+    # and the step's Neovim, git and uv went on as orphans, writing into --dir. They now stop the
+    # run like Ctrl+C, and _wait kills the running step's tree first.
+    with termination_as_interrupt():
+        try:
+            return _run(ns, names, exe, layout)
+        except KeyboardInterrupt:
+            if layout.logs.is_dir():
+                ui.report(f"  logs of the interrupted run: {layout.logs}")
+            raise
+
+
+def _run(ns: argparse.Namespace, names: list[str], exe: str, layout: Layout) -> int:
+    from .e2e import hidden_template_repository, isolate_git
+
+    renv = runner_env(proc.base_env())
+    # Neovim keeps the user's git configuration: lazy.nvim clones the plugins with it (a proxy,
+    # url.*.insteadOf)
+    venv = nvim_env(layout, renv, uv_dirs(renv))
+    # The ./deploy steps work in --dir only, as those of selftest --e2e: git there never sees a
+    # repository around --dir (`new` skipped git init there and, with core.filemode = false, staged
+    # its launchers in the user's repository, which kept them once the scratch project was gone),
+    # nor the user's global or system git configuration.
+    isolate_git(renv, layout.base)
+    hidden = hidden_template_repository(renv)
+    if hidden:
+        raise DeployError(
+            f"selftest --nvim: --dir {layout.base} is next to this template inside its git repository {hidden}: "
+            "git in --dir must not see a repository around it (./deploy new would skip git init), which would "
+            "hide the template's own. Pick a --dir outside that repository"
+        )
     _prepare_dir(layout)
     _remove(layout.logs)  # logs of the previous run
     layout.logs.mkdir(parents=True)
-    renv = runner_env(proc.base_env())
-    venv = nvim_env(layout, renv, uv_dirs(renv))
     version = cmd_nvim.query(exe, env=venv)
     if version is not None and version.version < cmd_nvim.MIN_LAZYVIM:
         msg = f"selftest --nvim: Neovim {version.version_text} is older than LazyVim's minimum {cmd_nvim.version_str(cmd_nvim.MIN_LAZYVIM)}"
@@ -691,8 +725,8 @@ def selftest(cfg: Config, args: list[str]) -> int:
     # run without LOCK)
     pins = record_pins(layout, nv)
     _table(rows, base_seconds)
-    ui.info(f"  pinned to: {pins}")
-    ui.info(f"  logs: {layout.logs}" + (f"   projects: {layout.projects}" if ns.keep else "   (--keep keeps the projects)"))
+    ui.report(f"  pinned to: {pins}")
+    ui.report(f"  logs: {layout.logs}" + (f"   projects: {layout.projects}" if ns.keep else "   (--keep keeps the projects)"))
     if all(r.ok for r in rows):
         ui.ok(f"selftest --nvim: {len(rows)} preset(s) passed")
         return 0

@@ -2400,7 +2400,7 @@ def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: 
         assert r.returncode == 0, r.stderr[-4000:]
     constraints = copy_root / ".pytemplate" / "presets" / "raylib" / "constraints.txt"
     constraints.write_text(constraints.read_text(encoding="utf-8").replace("pycparser==3.0", "pycparser==2.22"), encoding="utf-8")
-    r = _deploy(copy_root, "__init", "raylib", cwd=copy_root, env=env)
+    r = _deploy(copy_root, "__init", "raylib", "--force", cwd=copy_root, env=env)  # a project with its own code too
     assert r.returncode == 0, r.stderr[-4000:]
     locked = {e["name"]: e["version"] for e in presets._lock_entries(copy_root / "uv.lock")}
     assert locked["pycparser"] == "2.22" and locked["raylib"] == pins["raylib"]
@@ -2435,7 +2435,7 @@ def test_init_that_fails_in_uv_changes_nothing(tmp_path: Path, git_env: None) ->
     presets.copy_template(copy_root)
     before = _snapshot(copy_root)
     target = "raylib" if config.load(set(cli.COMMANDS)).app.preset == "flet" else "flet"
-    r = _deploy(copy_root, "__init", target, cwd=copy_root, env=env)
+    r = _deploy(copy_root, "__init", target, "--force", cwd=copy_root, env=env)  # a project with its own code too
     assert r.returncode != 0
-    assert "init failed: every file is back as it was" in r.stderr
+    assert "init failed: every file is back as it was" in r.stderr, r.stderr
     assert _snapshot(copy_root) == before

@@ -92,7 +92,7 @@ jobs:
           PT_NVIM_DIR: ${{ runner.temp }}/pt-nvim
         run: ./deploy selftest --nvim --require --dir "$PT_NVIM_DIR"
       - name: Logs of the smoke test
-        if: failure()
+        if: failure() || cancelled()  # a job over its timeout-minutes is cancelled, not failed
         uses: actions/upload-artifact@v7
         with:
           name: nvim-logs-${{ matrix.os }}-${{ matrix.nvim }}

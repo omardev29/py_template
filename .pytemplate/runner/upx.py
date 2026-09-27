@@ -170,7 +170,10 @@ def locate(cfg: Config) -> Path | None:
     absolute, and not resolved, because PyInstaller wants <upx-dir>/upx and Nuitka a file named upx.
     """
     if cfg.deploy.upx.path:
-        given = Path(cfg.deploy.upx.path).expanduser()
+        try:
+            given = Path(cfg.deploy.upx.path).expanduser()
+        except RuntimeError as e:  # a ~user of another machine (a shared pytemplate.toml), or no home folder
+            raise DeployError(f"deploy.upx.path = {cfg.deploy.upx.path!r} does not exist here ({e})", 3) from None
         path = given if given.is_absolute() else ROOT / given
         if not path.is_file():
             raise DeployError(

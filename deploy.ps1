@@ -103,8 +103,26 @@ function Find-Uv {
     return Find-UvIn $dirs
 }
 
-# --- project root: this file's folder, else walk up from the current location.
+# --- project root: this file's folder, else walk up from the current location. A symlink to
+# this file (~/bin/pdeploy.ps1 -> proj/deploy.ps1) is followed to the launcher it names.
 $root = $PSScriptRoot
+$self = $PSCommandPath
+for ($hops = 0; $self -and $hops -lt 40; $hops++) {
+    $link = try {
+        if ([IO.File]::GetAttributes($self) -band [IO.FileAttributes]::ReparsePoint) {
+            $item = Get-Item -LiteralPath $self -Force -ErrorAction Stop
+            if ($item.LinkType -eq 'SymbolicLink') { @($item.Target)[0] }
+        }
+    } catch { $null }
+    if (-not $link) { break }
+    $dir = [IO.Path]::GetDirectoryName($self)
+    if (-not $onWindows -and -not [IO.Path]::IsPathRooted($link)) {
+        # Relative to the PHYSICAL folder of the link (.NET folds '..' as text, the kernel does not).
+        $dir = & /bin/sh -c 'CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P' sh $dir
+    }
+    $self = [IO.Path]::Combine([string]$dir, $link)
+    $root = [IO.Path]::GetDirectoryName($self)
+}
 if (-not ($root -and [IO.File]::Exists([IO.Path]::Combine($root, '.pytemplate', 'deploy.py')))) {
     $root = $null
     $loc = Get-Location
@@ -211,15 +229,20 @@ if ($null -ne $typed) {
     }
     if ($typed.Count -ne $args.Count -or $gaps -gt 1) { $typed = $null }
 }
+# A native program never gets a $null argument (an unset $env:X, an optional variable), the
+# $null items of an array, nor a -X: whose value is $null; an empty string it does get.
 $argv = @(for ($i = 0; $i -lt $args.Count; $i++) {
     $a = $args[$i]
+    if ($null -eq $a) { continue }
     if ($a -is [string] -and $a.EndsWith(':') -and $a.PSObject.Properties['<CommandParameterName>'] -and $i + 1 -lt $args.Count) {
         $i++
-        $a + ((@($args[$i]) | ForEach-Object { [string]$_ }) -join ',')
+        if ($null -eq $args[$i]) { continue }
+        $a + ((@($args[$i]) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join ',')
     } elseif ($a -is [array] -and ($null -eq $typed -or $typed[$i])) {
         (@($a) | ForEach-Object { [string]$_ }) -join ','
     } else {
-        foreach ($x in @($a)) { [string]$x }
+        # (a List[string]'s null item is an empty string for a native program too)
+        foreach ($x in @($a)) { if ($null -ne $x -or $a -isnot [array]) { [string]$x } }
     }
 })
 $v = $PSVersionTable.PSVersion

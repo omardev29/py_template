@@ -246,6 +246,45 @@ def test_diff_shows_the_generated_against_the_current_content(box: Sandbox, caps
     assert "---" not in capsys.readouterr().err  # only with show_diff
 
 
+def test_python_version_is_rewritten_only_for_a_python_uv_can_provide(box: Sandbox, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The launchers start the runner with `uv run --script`, which follows .python-version: a
+    python.cpython typo ("3.41") written there stopped every command, `help` included, and after
+    the fix in pytemplate.toml nothing could write the file again. It is rewritten only once uv
+    has that CPython (envs.ensure_python); a new file (a fresh tree) needs no question."""
+    asked: list[str] = []
+    monkeypatch.setattr(envs, "ensure_python", asked.append)
+    box.files[".python-version"] = "3.13\n"
+    render.apply(CFG)
+    assert asked == [] and box.read(".python-version") == b"3.13\n"  # written fresh
+    box.files[".python-version"] = "3.14\n"
+    render.apply(CFG)
+    assert asked == ["3.14"] and box.read(".python-version") == b"3.14\n"
+    render.apply(CFG)
+    assert asked == ["3.14"]  # unchanged: nothing to ask
+
+    def unavailable(version: str) -> None:
+        raise DeployError(f'python.cpython = "{version}": uv can neither find nor install this CPython (...)', 3)
+
+    monkeypatch.setattr(envs, "ensure_python", unavailable)
+    box.files[".python-version"] = "3.41\n"
+    with pytest.raises(DeployError, match=r'python\.cpython = "3\.41"'):
+        render.apply(CFG)
+    assert box.read(".python-version") == b"3.14\n"  # the launchers still start the runner
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert render.apply(CFG)[0] == [".python-version"]  # --dry-run and --check only report it
+
+
+def test_diff_shows_a_missing_last_line_break(box: Sandbox, capsys: pytest.CaptureFixture[str]) -> None:
+    """An editor that strips the last line break: --check called the file hand-edited, and --diff
+    showed no difference at all (both texts had the same splitlines())."""
+    render.apply(CFG)
+    box.write("b.ini", "[b]\nx = 1")
+    capsys.readouterr()
+    assert render.apply(CFG, check=True, show_diff=True) == ([], ["b.ini"])
+    err = capsys.readouterr().err
+    assert "--- b.ini (generated)\n+++ b.ini (current)\n@@ -1,2 +1,2 @@\n [b]\n-x = 1\n+x = 1\n\\ No newline at end of file" in err, err
+
+
 def test_a_folder_in_the_way_is_a_clear_error(box: Sandbox) -> None:
     (box.root / "b.ini").mkdir()
     with pytest.raises(DeployError, match=r"b\.ini is generated, but a folder"):
@@ -547,9 +586,25 @@ BROKEN = {
         MANAGED.replace('environments = ["x"]\n', 'environments = ["x"]\n[tool.flet]\norg = "x"\n'),
         "table header",
     ),
+    # a key of the user between the markers: the rewrite dropped it without a word (a private
+    # index, a constraint), although _verify promised that nothing is lost silently
+    "user-key-inside-block": (
+        MANAGED.replace('environments = ["x"]\n', 'environments = ["x"]\nindex-url = "https://pypi.org/simple"\n'),
+        "[tool.uv] index-url is between the",
+    ),
+    "user-keys-inside-block": (
+        MANAGED.replace('environments = ["x"]\n', 'environments = ["x"]\nconstraint-dependencies = ["urllib3>=2.5"]\npackage = false\n'),
+        "[tool.uv] constraint-dependencies, package are between the",
+    ),
     "invalid-toml": ('[project]\nname = "x"\n\n[tool.uv]\nfoo = [\n', "not valid TOML"),
     "no-project-table": ('[tool.uv]\nfoo = 1\n', "[project]"),
 }
+
+
+@pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
+def test_block_keys_hold_every_key_the_managed_block_writes(preset: str, supported: list[str], active: str) -> None:
+    """render.block_keys decides which keys between the markers a rewrite may replace or drop."""
+    assert set(tomllib.loads(render.managed_block(combo_cfg(preset, supported, active)))) <= render.block_keys()
 
 
 @pytest.mark.parametrize(("text", "message"), BROKEN.values(), ids=BROKEN.keys())
@@ -1200,6 +1255,23 @@ def test_ci_template_linux_deps_line_may_be_indented(ci_template: Path) -> None:
     assert render.ci_workflow(raylib) == expected["raylib"]
     assert render.ci_workflow(CFG) == expected["script"]  # without deps the whole line goes
     assert "apt-get" in expected["raylib"] and "apt-get" not in expected["script"]
+
+
+def test_a_template_that_cannot_be_read_is_a_clear_error(profiles: Path, ci_template: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A template the runner may not read (permissions, a lock) ended render.load_profile and
+    render.ci_workflow in an internal-error traceback; the editors' templates said "cannot read"."""
+    real = Path.read_text
+
+    def read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self.name in ("off.toml", "ci.yml"):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    with pytest.raises(DeployError, match=r"cannot read .*off\.toml: Permission denied"):
+        render.load_profile("off")
+    with pytest.raises(DeployError, match=r"cannot read .*ci\.yml: Permission denied"):
+        render.ci_workflow(CFG)
 
 
 def test_ci_template_placeholder_left_is_a_clear_error(ci_template: Path) -> None:

@@ -62,6 +62,7 @@ the git calls made here, and `run` removes them from the environment of every ot
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import os
 import re
@@ -102,6 +103,17 @@ STAGED = "ACMRT"
 class NotInGit(DeployError):
     """git is missing, or the project is not inside a git work tree: the hook does not apply
     (setup and doctor stay silent). Any other git failure is a plain DeployError."""
+
+
+NO_GIT = "git not found in PATH"  # NotInGit's message (code 3) when git is missing
+
+
+def git_missing_here(project: Path = ROOT) -> bool:
+    """git is not on PATH, yet a `.git` in the project or a folder above it says it lives in a
+    repository: the hook can be neither checked nor installed nor removed (GitHub Desktop, Fork
+    and SourceTree bring a git of their own, often not on PATH). apply said "not a git work
+    tree: nothing to do" and doctor called hooks.pre_commit applied."""
+    return shutil.which("git") is None and any((d / ".git").exists() for d in (project, *project.parents))
 
 
 # --- the repository ------------------------------------------------------------------------------
@@ -167,6 +179,15 @@ def _same(a: Path, b: Path) -> bool:
     return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
 
 
+def _same_folder(a: Path, b: Path) -> bool:
+    """Whether `a` and `b` are one folder, however each is spelled (case on a case-insensitive
+    disk, a symlink on the way): the file system decides, never the text."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return _same(a, b)
+
+
 def _within(path: Path, parent: Path) -> str | None:
     """Return `path` relative to `parent` as a POSIX string ("" for the same folder), or None."""
     rel = os.path.relpath(os.path.normpath(path), os.path.normpath(parent)) if _drive(path) == _drive(parent) else ".."
@@ -214,25 +235,40 @@ class Repo:
         # exit 0: ignored and untracked (a tracked file is never reported); 1: not; 128: an error
         return _git(["check-ignore", "-q", "deploy"], self.project, self.env, literal=False).returncode == 0
 
+    @functools.cached_property
+    def ignore_case(self) -> bool:
+        """Whether paths of the work tree match whatever their case: always on Windows, and where
+        git says the file system folds case (core.ignorecase, which git sets on macOS's default
+        APFS). project_paths compared case-sensitively there, and a staged path spelled otherwise
+        than the prefix was dropped: the checks were skipped without a word."""
+        if IS_WINDOWS:
+            return True
+        return self.git("config", "--bool", "core.ignorecase").stdout.strip() == "true"
+
 
 def find_repo(project: Path = ROOT, environ: Mapping[str, str] | None = None, cwd: Path | None = None) -> Repo:
     """Return the git repository of `project`. NotInGit when git is missing (3) or the project
     is not inside a git work tree (2); DeployError with git's own message for any other git
     failure (dubious ownership, a broken .git...)."""
     if shutil.which("git") is None:
-        raise NotInGit("git not found in PATH", 3)
+        raise NotInGit(NO_GIT, 3)
     env = git_env(os.environ if environ is None else environ, cwd or Path(os.getcwd()))
-    r = _git(["rev-parse", "--show-toplevel", "--git-common-dir", "--git-path", "hooks"], project, env)
-    lines = [native_path(ln) for ln in r.stdout.splitlines()]  # MSYS2's own git prints /c/...
+    r = _git(["rev-parse", "--show-toplevel", "--git-common-dir", "--git-path", "hooks", "--show-prefix"], project, env)
+    lines = r.stdout.splitlines()
     if r.returncode != 0 and "not a git repository" not in r.stderr:
         said = r.stderr.strip().splitlines() or [f"exit code {r.returncode}"]
         raise DeployError(f"git cannot use the repository of {project}:\n" + "\n".join(f"  {ln}" for ln in said), 2)
-    if r.returncode != 0 or len(lines) != 3:
+    if r.returncode != 0 or len(lines) not in (3, 4):  # the prefix line is empty at the top
         raise NotInGit(f"{project} is not inside a git work tree (git init first)", 2)
-    top = Path(lines[0])
-    prefix = _within(project, top)
-    if prefix is None:
+    top = Path(native_path(lines[0]))  # MSYS2's own git prints /c/...
+    # The prefix as git spells it (the folders' case on disk), checked to name the project's folder:
+    # computed from ROOT (the spelling typed, which Path.resolve keeps on macOS) against git's top,
+    # a cwd typed in another case on a case-insensitive disk put the project outside its own work
+    # tree, and every hook command failed.
+    prefix = lines[3].strip("/") if len(lines) == 4 else ""
+    if not _same_folder(top / prefix, project):
         raise DeployError(f"the project {project} is not inside its git work tree {top}", 2)
+    lines = [native_path(ln) for ln in lines[:3]]
     return Repo(
         project=project,
         top=top,
@@ -358,9 +394,12 @@ def hook_script(launcher: str) -> str:
 
 
 def run_line(repo: Repo) -> str:
-    """The line to add to a hook that pytemplate does not manage (core.hooksPath)."""
+    """The line to add to a hook that pytemplate does not manage (core.hooksPath). It skips a
+    checkout without the launcher, as pytemplate's own hook does (another branch): the unguarded
+    `sh ./deploy hooks run || exit $?` in a global hooks folder failed every commit of every
+    other repository ("cannot open ./deploy")."""
     word = repo.launcher if re.fullmatch(r"[A-Za-z0-9_./-]+", repo.launcher) else sh_literal(repo.launcher)
-    return f"sh {word} hooks run || exit $?"
+    return f"[ ! -f {word} ] || sh {word} hooks run || exit $?"
 
 
 def _read(path: Path) -> str:
@@ -649,9 +688,11 @@ def _hooks_path_file(repo: Repo) -> Path:
 def _hooks_path_hint(repo: Repo) -> str:
     target = _hooks_path_file(repo)
     runs = "husky runs it" if target.parent != repo.hooks_dir else "a sh script; git runs it from the top of the work tree"
+    inside = any(_same_folder(folder, repo.top) for folder in (repo.hooks_dir, *repo.hooks_dir.parents))
+    shared = "" if inside else "\n(that folder is outside this repository: other repositories run it too, and the line skips those without the launcher)"
     return (
         f"Add this line to {_show(target, repo)} ({runs}),\n"
-        f"or run it from the tool that manages that folder:\n    {run_line(repo)}"
+        f"or run it from the tool that manages that folder:\n    {run_line(repo)}{shared}"
     )
 
 
@@ -881,6 +922,9 @@ def doctor(cfg: Config, check: Check, project: Path = ROOT) -> None:
     try:
         repo = find_repo(project)
     except NotInGit:
+        if git_missing_here(project):
+            ui.step("git hook")
+            check(None, f"{NO_GIT}: the pre-commit hook of this repository is not checked", "put git on PATH (a git GUI's own git is often not on it)")
         return
     except DeployError as e:  # git refuses the repository (dubious ownership...): show why
         ui.step("git hook")
@@ -938,7 +982,7 @@ def staged_files(repo: Repo, diff_filter: str = STAGED) -> list[str]:
     r = repo.git("diff", "--cached", "--name-only", "--no-renames", f"--diff-filter={diff_filter}", "-z")
     if r.returncode != 0:
         raise DeployError(f"git diff --cached failed: {r.stderr.strip()}")
-    return project_paths(repo.prefix, r.stdout.split("\0"))
+    return project_paths(repo.prefix, r.stdout.split("\0"), ignore_case=repo.ignore_case)
 
 
 def unstaged_files(repo: Repo, paths: Sequence[str]) -> list[str]:
@@ -949,14 +993,14 @@ def unstaged_files(repo: Repo, paths: Sequence[str]) -> list[str]:
     diff = repo.git("diff", "--name-only", "-z", "--", *paths)
     others = repo.git("ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--", *paths)
     names = diff.stdout.split("\0") + others.stdout.split("\0")
-    return sorted(set(project_paths(repo.prefix, names)))
+    return sorted(set(project_paths(repo.prefix, names, ignore_case=repo.ignore_case)))
 
 
 def worktree_changes(repo: Repo) -> set[str]:
     """Return the project files whose working tree differs from the index (unstaged edits and
     files deleted from the working tree), relative to the project."""
     r = repo.git("diff", "--name-only", "--no-renames", "-z")
-    return set(project_paths(repo.prefix, r.stdout.split("\0")))
+    return set(project_paths(repo.prefix, r.stdout.split("\0"), ignore_case=repo.ignore_case))
 
 
 def staged_blob(repo: Repo, path: str) -> bytes | None:
@@ -1096,7 +1140,10 @@ def check_generated(cfg: Config, generated: Sequence[str], dirty: set[str]) -> I
     if changed or edited:
         hints = []
         if changed:
-            hints.append(f"outdated: {', '.join(changed)}\n./deploy render, then git add {' '.join([*sources, *changed])}")
+            # render records their hashes in state.json too: left out of the line, the next commit
+            # stopped at "generated files staged: unstaged: .pytemplate/state.json"
+            state = STATE_FILE.relative_to(ROOT).as_posix()
+            hints.append(f"outdated: {', '.join(changed)}\n./deploy render, then git add {' '.join([*sources, *changed, state])}")
         if edited:
             hints.append(f"hand-edited: {', '.join(edited)}\nchange pytemplate.toml or .pytemplate/templates (./deploy render --diff), or ./deploy render --force")
         yield Result(False, "generated files up to date", "\n".join(hints))
@@ -1316,17 +1363,20 @@ def checks(
 
 
 def _print(result: Result) -> None:
-    """The check line, then the tool output, then how to fix it."""
+    """The check line, then the tool output, then how to fix it. A check that did not pass keeps
+    its output and hint under -q, which hides progress, never the answer: `./deploy -q hooks run`
+    (the global options may come first) said which check failed, not which file nor the fix."""
     ui.check_line(result.passed, result.label)
+    out = ui.info if result.passed is True else ui.report
     for line in result.output.splitlines():
-        ui.info(f"         {line}".rstrip())
+        out(f"         {line}".rstrip())
     for w in result.warnings:
         ui.warn(w)
     for e in result.errors:
         ui.error(e)
     if result.passed is not True:
         for line in result.hint.splitlines():
-            ui.info(f"         {line}")
+            ui.report(f"         {line}")
 
 
 def run(cfg: Config, repo: Repo) -> int:
@@ -1375,8 +1425,12 @@ def cmd_hooks(cfg: Config, args: list[str]) -> int:
     repo = find_repo(ROOT)
     if sub == "run":
         return run(cfg, repo)
-    if sub == "install":
-        ui.ok(install(repo, force="--force" in flags))
-    else:
-        ui.info(uninstall(repo))
+    try:
+        if sub == "install":
+            ui.ok(install(repo, force="--force" in flags))
+        else:
+            ui.info(uninstall(repo))
+    except OSError as e:  # a hooks folder the user may not write (another user's, read-only, immutable)
+        name = e.filename or (repo.default_dir / HOOK)
+        raise DeployError(f"hooks {sub}: cannot change {name}: {e.strerror or e}") from None
     return 0

@@ -98,13 +98,25 @@ jobs:
         with: {msystem: UCRT64, release: false, update: false, path-type: minimal, install: dash}
       - uses: cygwin/cygwin-install-action@v6
         with: {install-dir: 'C:\cygwin', packages: dash, add-to-path: false}
-      - name: busybox-w32
+      - name: busybox-w32 (a pinned release, SHA-256 checked)
         shell: pwsh
+        env:
+          # The 64-bit build scoop, Chocolatey and winget install. A new release: its file name
+          # and its line of https://frippery.org/files/busybox/SHA256SUM (the rolling
+          # busybox64u.exe ran whatever frippery.org served that day, unchecked).
+          BUSYBOX: busybox-w64-FRP-6075-g169694ebd.exe
+          BUSYBOX_SHA256: 07bb1e5b095b00d68a695481f9240879f33c5724b40aa2308f999d54ed78f075
         run: |
+          $out = "$env:RUNNER_TEMP\busybox.exe"
           # frippery.org sometimes times out: retry a few times before failing the job
           for ($i = 1; ; $i++) {
-            try { Invoke-WebRequest https://frippery.org/files/busybox/busybox64u.exe -OutFile "$env:RUNNER_TEMP\busybox.exe"; break }
+            try { Invoke-WebRequest "https://frippery.org/files/busybox/$env:BUSYBOX" -OutFile $out; break }
             catch { if ($i -ge 4) { throw }; Write-Host "busybox download failed (try $i): $_"; Start-Sleep -Seconds (15 * $i) }
+          }
+          $hash = (Get-FileHash -Algorithm SHA256 $out).Hash.ToLowerInvariant()
+          if ($hash -ne $env:BUSYBOX_SHA256) {
+            Remove-Item $out
+            throw "$env:BUSYBOX has SHA-256 $hash, not the pinned $env:BUSYBOX_SHA256"
           }
           Add-Content $env:GITHUB_PATH $env:RUNNER_TEMP
       - name: xonsh

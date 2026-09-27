@@ -36,18 +36,60 @@ def _envs_for(cfg: Config, target: str) -> list[envs.PyEnv]:
 
 
 def ensure_lock(cfg: Config) -> None:
-    """Apply the managed parts of pyproject and re-lock if needed."""
+    """Apply the managed parts of pyproject and re-lock if needed.
+
+    A UV_FROZEN or UV_LOCKED of the user's keeps `uv lock` from writing uv.lock (under UV_FROZEN
+    it only checks the lock's validity and exits 0): a needed re-lock is then refused, so the
+    caller (mode, apply, rename) puts its files back instead of leaving uv.lock stale.
+
+    When the rewrite makes uv.lock resolve for PyPy for the first time (render.gains_pypy), the
+    code must pass the Python 3.11 check first (cmd_apply.cmd_mode_precheck), after the re-lock:
+    it syncs the tools environment with this configuration. A failure puts pyproject.toml and
+    uv.lock back as they were here, then raises: whatever the caller restores itself (mode and
+    apply do, rename does not: its files are renamed already), uv.lock never resolves for PyPy
+    unchecked, and the next re-lock checks again (apply after a failed rename skipped the check,
+    PyPy being in the lock already). Deciding "PyPy is new" from pytemplate.toml let a hand
+    edit of backend.supported, then any mode, rename or lock, lock PyPy in unchecked."""
     tool = envs.tool_env(cfg)
+    gains_pypy = render.gains_pypy(cfg)
+    before = _snapshot((PYPROJECT, PYPROJECT.with_name("uv.lock"))) if gains_pypy else {}
     if render.write_pyproject(cfg):
         ui.info(render.pyproject_message())
         if proc.DRY_RUN:
             # Nothing was written, so `uv lock --check` would read the old pyproject.toml and
             # pass: show the re-lock the real run makes (echoed, skipped under --dry-run).
+            _refuse_a_frozen_lock()
             envs.uv(tool, ["lock"])
             return
     r = envs.uv(tool, ["lock", "--check"], check=False, capture=True, echo=False)
     if r.returncode != 0:
+        _refuse_a_frozen_lock()
         envs.uv(tool, ["lock"])
+    if gains_pypy and not proc.DRY_RUN:
+        try:
+            _pypy_precheck(cfg)
+        except BaseException:
+            restored = _put_back(before)
+            if restored:
+                they = "it was" if len(restored) == 1 else "they were"
+                ui.info(f"{' and '.join(restored)}: put back as {they} (the code is not ready for PyPy yet)")
+            raise
+
+
+def _pypy_precheck(cfg: Config) -> None:
+    from . import cmd_apply  # cmd_apply imports this module
+
+    cmd_apply.cmd_mode_precheck(cfg)
+
+
+def _refuse_a_frozen_lock() -> None:
+    """Refuse a re-lock that the user's UV_FROZEN or UV_LOCKED would turn into a no-op."""
+    frozen = _lock_read_only([])
+    if frozen:
+        raise DeployError(
+            f"uv.lock must follow pyproject.toml, but {frozen} is set, and with it `uv lock` writes "
+            f"nothing: unset {frozen} and run the command again"
+        )
 
 
 def cmd_setup(cfg: Config, args: list[str]) -> int:
@@ -100,14 +142,17 @@ def cmd_sync(cfg: Config, args: list[str]) -> int:
 
 
 # `uv lock` arguments (and the variables uv reads for them) that make it write no uv.lock
-LOCK_READ_ONLY = ("--check", "--locked", "--check-exists", "--frozen", "--dry-run")
+LOCK_READ_ONLY = ("--check", "--locked", "--check-exists", "--frozen", "--dry-run", "--script")
 LOCK_READ_ONLY_ENV = ("UV_LOCKED", "UV_FROZEN")
+# uv lock only prints: answered before pyproject.toml is touched
+LOCK_INFO = ("-h", "--help", "-V", "--version")
 
 
 def _lock_read_only(args: list[str]) -> str:
-    """The argument or variable that keeps `uv lock` from writing uv.lock, or ""."""
+    """The argument or variable that keeps `uv lock` from writing uv.lock, or "" (--script
+    locks a script's own `<script>.lock`)."""
     for a in args:
-        if a in LOCK_READ_ONLY:
+        if a.split("=", 1)[0] in LOCK_READ_ONLY:
             return a
     for name in LOCK_READ_ONLY_ENV:  # uv's boolean variables: 1/true/yes/on
         if os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on", "y", "t"):
@@ -123,7 +168,11 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
     Otherwise the two would disagree and every `uv run --locked` would fail. uv writes uv.lock in
     place: a full disk left it cut short, invalid TOML, next to the old pyproject.toml.
     """
+    if any(a in LOCK_INFO for a in args):  # `./deploy lock --help` shows uv's help, changes nothing
+        envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False)
+        return 0
     before = _snapshot((PYPROJECT, PYPROJECT.with_name("uv.lock")))
+    gains_pypy = render.gains_pypy(cfg)
     changed = render.write_pyproject(cfg)
     if changed:
         ui.info(render.pyproject_message())
@@ -144,6 +193,12 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
     read_only = _lock_read_only(args)
     if read_only:
         restore(f"uv lock with {read_only} writes no uv.lock")
+    elif gains_pypy and not proc.DRY_RUN:  # uv.lock resolves for PyPy now: as ensure_lock does
+        try:
+            _pypy_precheck(cfg)
+        except BaseException:
+            restore("the code is not ready for PyPy yet")
+            raise
     render.apply(cfg)
     return 0
 

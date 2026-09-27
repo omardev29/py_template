@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
 import shutil
@@ -162,9 +163,13 @@ def _check_launchers(check: Check) -> None:
         check(None, f"deploy.ps1: git mode {ps1_mode} (./deploy.ps1 from bash/zsh on Linux and macOS needs 100755)", "git update-index --chmod=+x deploy.ps1")
 
 
-def _ps_policies() -> list[tuple[str, str]]:
-    """Return (PowerShell edition, ExecutionPolicy) for Windows PowerShell 5.1 and PowerShell 7."""
-    found = [(label, exe) for label, exe in (("Windows PowerShell 5.1", shutil.which("powershell")), ("PowerShell 7", shutil.which("pwsh"))) if exe]
+# (label, $PSVersionTable.PSEdition as deploy.ps1 puts it in PYTEMPLATE_LAUNCHER, program)
+PS_EDITIONS = (("Windows PowerShell 5.1", "Desktop", "powershell"), ("PowerShell 7", "Core", "pwsh"))
+
+
+def _ps_policies() -> list[tuple[str, str, str]]:
+    """Return (label, edition, ExecutionPolicy) for Windows PowerShell 5.1 and PowerShell 7."""
+    found = [(label, edition, exe) for label, edition, name in PS_EDITIONS if (exe := shutil.which(name))]
 
     def policy(exe: str) -> str:
         try:
@@ -177,8 +182,8 @@ def _ps_policies() -> list[tuple[str, str]]:
         return r.stdout.strip()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        policies = list(pool.map(policy, [exe for _, exe in found]))
-    return [(label, p) for (label, _), p in zip(found, policies, strict=True) if p]
+        policies = list(pool.map(policy, [exe for _, _, exe in found]))
+    return [(label, edition, p) for (label, edition, _), p in zip(found, policies, strict=True) if p]
 
 
 def doctor(check: Check) -> None:
@@ -186,6 +191,8 @@ def doctor(check: Check) -> None:
     ui.step("launchers")
     _check_launchers(check)
 
+    if not (IS_WINDOWS or IS_WSL):
+        return  # the shell checks are Windows' (the bash stub, execution policies) and WSL's
     ui.step("shell")
     if IS_WINDOWS:
         bash = shutil.which("bash") or ""
@@ -195,10 +202,18 @@ def doctor(check: Check) -> None:
                 f"`bash` points to WSL ({bash})",
                 "On Windows use ./deploy from xonsh, pwsh, cmd, Git Bash or MSYS2; in WSL the runner uses separate -wsl environments",
             )
-        for label, policy in _ps_policies():
+        launcher = os.environ.get("PYTEMPLATE_LAUNCHER", "")
+        for label, edition, policy in _ps_policies():
+            if policy not in ("Restricted", "AllSigned"):
+                check(True, f"{label}: ExecutionPolicy = {policy}", "")
+                continue
+            # A problem only for the PowerShell that started this run: Restricted is the default
+            # of 5.1 on client Windows, and whoever uses cmd, a POSIX shell, xonsh or the other
+            # PowerShell (deploy.cmd, deploy) never runs deploy.ps1 there. Otherwise a note.
+            in_use = launcher.startswith(f"ps1:{edition}:")
             check(
-                policy not in ("Restricted", "AllSigned"),
-                f"{label}: ExecutionPolicy = {policy}",
+                False if in_use else None,
+                f"{label}: ExecutionPolicy = {policy} (deploy.ps1 does not run there)",
                 "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned   (or use .\\deploy.cmd)",
             )
     if IS_WSL:
@@ -280,12 +295,14 @@ function deploy {
 """
 
 FISH_SNIPPET = r"""
-# `deploy` in fish from any folder of a pytemplate project (fish 3.5 or later).
+# `deploy` in fish from any folder of a pytemplate project (fish 3.0 or later).
 # Save as ~/.config/fish/functions/deploy.fish, then open a new shell.
 function deploy --description 'Run ./deploy of the enclosing pytemplate project'
     set -l dir $PWD
     while not test -f "$dir/.pytemplate/deploy.py"
-        set -l parent (path dirname -- $dir)
+        # the parent folder (`path dirname` needs fish 3.5; Ubuntu 22.04 has 3.3)
+        set -l parent (string replace -r '/[^/]*$' '' -- $dir)
+        test -z "$parent"; and set parent /
         if test "$parent" = "$dir"
             echo "deploy: no .pytemplate/deploy.py in $PWD or any parent folder" >&2
             return 2
@@ -556,18 +573,23 @@ def _posix_header(shell: str) -> str:
 
 
 def snippet(shell: str, cfg: Config | None = None) -> str:
-    """Return the shell-setup snippet for `shell` (ASCII, with where to paste it on top)."""
+    """Return the shell-setup snippet for `shell` (ASCII, with where to paste it on top).
+
+    It starts with a line break: appended (>>) to an rc file whose last line has none (VS Code
+    and Notepad save files so), its first comment would join that line and break it."""
     if shell in ("bash", "zsh", "niubash", "msys2"):
-        return _posix_header(shell) + "\n" + POSIX_FUNCTION.strip("\n") + "\n"
-    if shell in ("pwsh", "powershell"):
-        return PWSH_SNIPPET.strip("\n") + "\n"
-    if shell == "fish":
-        return FISH_SNIPPET.strip("\n") + "\n"
-    if shell == "nu":
-        return NU_SNIPPET.strip("\n") + "\n"
-    if shell == "xonsh":
-        return xonsh_snippet(cfg).strip("\n") + "\n"
-    raise DeployError(f"shell-setup: unknown shell '{shell}' ({' | '.join(SETUP_SHELLS)})")
+        body = _posix_header(shell) + "\n" + POSIX_FUNCTION.strip("\n")
+    elif shell in ("pwsh", "powershell"):
+        body = PWSH_SNIPPET.strip("\n")
+    elif shell == "fish":
+        body = FISH_SNIPPET.strip("\n")
+    elif shell == "nu":
+        body = NU_SNIPPET.strip("\n")
+    elif shell == "xonsh":
+        body = xonsh_snippet(cfg).strip("\n")
+    else:
+        raise DeployError(f"shell-setup: unknown shell '{shell}' ({' | '.join(SETUP_SHELLS)})")
+    return "\n" + body + "\n"
 
 
 def guess_shell(env: Mapping[str, str]) -> str | None:
@@ -647,7 +669,9 @@ class Shell:
     def describe(self) -> str:
         parts = [self.family if self.mode == "c" else f"{self.family}, script mode"]
         if self.interp:
-            parts.append("launcher run as `" + Path(self.interp[0]).name + " ./deploy`")
+            # every word the probes run: `busybox sh ./deploy`, not `busybox ./deploy`
+            words = [Path(self.interp[0]).name, *self.interp[1:]]
+            parts.append("launcher run as `" + " ".join(words) + " ./deploy`")
         parts += [f"{k}={v}" for k, v in self.env]
         if self.note:
             parts.append(self.note)
@@ -1365,8 +1389,25 @@ def run_test(ctx: Context, sh: Shell, test: str) -> Result:
     return Result(sh.name, test, "fail" if why else "pass", ms or run.ms, why, launcher if isinstance(launcher, str) else "")
 
 
+def _wsl_without_uv(ctx: Context, sh: Shell) -> str:
+    """Why a WSL distribution cannot be tested ('' when it can): inside it runs the Linux
+    launcher, which needs a uv of its own there and exits 127 with the install hints without one
+    (a distribution installed for other work). That is SKIP, not seven FAILs."""
+    run = run_probe(ctx, sh, "root", ["0", "0", "uv"], cwd=ctx.project, tag=f"{sh.name}-uv")
+    if run.data is None and run.rc == 127:
+        return f"no uv inside {sh.note or sh.name} (the launcher there exited 127): install uv in it to test it"
+    return ""
+
+
 def run_shell(ctx: Context, sh: Shell, tests: Sequence[str]) -> list[Result]:
     out: list[Result] = []
+    if sh.family == "wsl":
+        try:
+            why = _wsl_without_uv(ctx, sh)
+        except OSError:
+            why = ""  # the tests report it
+        if why:
+            return [Result(sh.name, test, "skip", 0, why) for test in tests]
     for test in tests:
         try:
             out.append(run_test(ctx, sh, test))
@@ -1419,6 +1460,7 @@ def report_json(project: Path, shells: Sequence[Shell], results: Sequence[Result
     }
 
 
+MAX_TIMEOUT = 86400  # a day per probe
 SELFTEST_USAGE = "./deploy selftest --shells [NAME,...] [--list] [--json] [--keep] [--project DIR] [--tests T1,...] [--jobs N] [--timeout S]"
 
 
@@ -1455,9 +1497,12 @@ def parse_options(args: Sequence[str]) -> Options:
         elif key == "--project":
             opts.project = value()
         elif key == "--tests":
-            tests = [t.strip().upper() for t in value().split(",") if t.strip()]
+            raw = value()
+            tests = [t.strip().upper() for t in raw.split(",") if t.strip()]
             if bad := [t for t in tests if t not in TESTS]:
                 raise DeployError(f"unknown test(s): {', '.join(bad)}  (T1..T7)")
+            if not tests:  # a suite that tests nothing must not report success
+                raise DeployError(f"--tests {raw!r} names no test  (T1..T7)")
             opts.tests = [t for t in TESTS if t in tests]
         elif key in ("--jobs", "-j", "--timeout"):
             raw = value()
@@ -1465,8 +1510,12 @@ def parse_options(args: Sequence[str]) -> Options:
                 number = float(raw)
             except ValueError:
                 raise DeployError(f"{key}: not a number: {raw}") from None
+            if not math.isfinite(number):  # nan, inf, 1e400: int() and the waits would raise
+                raise DeployError(f"{key}: not a finite number: {raw}")
             if number <= 0:
                 raise DeployError(f"{key} must be greater than 0")
+            if key == "--timeout" and number > MAX_TIMEOUT:  # Windows waits take 32-bit milliseconds
+                raise DeployError(f"--timeout must be at most {MAX_TIMEOUT} (seconds)")
             if key == "--timeout":
                 opts.timeout = number
             else:
@@ -1546,8 +1595,8 @@ def selftest(cfg: Config, args: list[str]) -> int:
     try:
         results = _run_all(ctx, shells, opts.tests, opts.jobs)
     finally:
-        if opts.keep:
-            ui.info(f"scratch files kept in {tmp}")
+        if opts.keep:  # asked for, and a random name: shown even with -q
+            ui.report(f"scratch files kept in {tmp}")
         else:
             shutil.rmtree(tmp, ignore_errors=True)
     seconds = time.perf_counter() - started
