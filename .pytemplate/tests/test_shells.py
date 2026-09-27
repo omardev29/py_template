@@ -889,6 +889,26 @@ def test_real_probe_argv_through_sh(tmp_path: Path) -> None:
     assert result.status == "pass", result.detail
 
 
+@pytest.mark.skipif(IS_WINDOWS, reason="a POSIX stand-in for wsl.exe")
+def test_a_wsl_distribution_without_its_own_uv_is_skipped(tmp_path: Path) -> None:
+    """On Windows every WSL distribution is a shell of selftest --shells; in one without a uv of
+    its own (installed for other work) the Linux launcher printed the install hints and exited
+    127, and every test FAILed (exit 1). It is SKIP with the reason; one with uv is tested."""
+    no_uv = tmp_path / "wsl-no-uv"
+    no_uv.write_text("#!/bin/sh\nprintf '%s\\n' 'deploy: uv not found (https://docs.astral.sh/uv/).' >&2\nexit 127\n", encoding="utf-8")
+    # `wsl -d NAME --cd DIR -e sh -c CMD`: run it here, where uv is
+    with_uv = tmp_path / "wsl-uv"
+    with_uv.write_text('#!/bin/sh\nshift 2\nif [ "$1" = --cd ]; then cd "$2" || exit 9; shift 2; fi\nif [ "$1" = -e ]; then shift; fi\nexec "$@"\n', encoding="utf-8")
+    for fake in (no_uv, with_uv):
+        fake.chmod(0o755)
+    ctx = _context(tmp_path)
+    skipped = shells.run_shell(ctx, shells.Shell("wsl-ubuntu", "wsl", (str(no_uv), "-d", "Ubuntu"), note="WSL Ubuntu"), list(shells.TESTS))
+    assert [r.status for r in skipped] == ["skip"] * len(shells.TESTS), skipped
+    assert "no uv inside WSL Ubuntu" in skipped[0].detail
+    tested = shells.run_shell(ctx, shells.Shell("wsl-debian", "wsl", (str(with_uv), "-d", "Debian"), note="WSL Debian"), ["T2"])
+    assert [(r.test, r.status) for r in tested] == [("T2", "pass")], tested
+
+
 @pytest.mark.skipif(not IS_WINDOWS, reason="cmd.exe is Windows only")
 def test_real_probe_exit_code_through_cmd(tmp_path: Path) -> None:
     result = shells.run_test(_context(tmp_path), _real_shell(("cmd",)), "T2")

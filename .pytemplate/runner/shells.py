@@ -1382,8 +1382,25 @@ def run_test(ctx: Context, sh: Shell, test: str) -> Result:
     return Result(sh.name, test, "fail" if why else "pass", ms or run.ms, why, launcher if isinstance(launcher, str) else "")
 
 
+def _wsl_without_uv(ctx: Context, sh: Shell) -> str:
+    """Why a WSL distribution cannot be tested ('' when it can): inside it runs the Linux
+    launcher, which needs a uv of its own there and exits 127 with the install hints without one
+    (a distribution installed for other work). That is SKIP, not seven FAILs."""
+    run = run_probe(ctx, sh, "root", ["0", "0", "uv"], cwd=ctx.project, tag=f"{sh.name}-uv")
+    if run.data is None and run.rc == 127:
+        return f"no uv inside {sh.note or sh.name} (the launcher there exited 127): install uv in it to test it"
+    return ""
+
+
 def run_shell(ctx: Context, sh: Shell, tests: Sequence[str]) -> list[Result]:
     out: list[Result] = []
+    if sh.family == "wsl":
+        try:
+            why = _wsl_without_uv(ctx, sh)
+        except OSError:
+            why = ""  # the tests report it
+        if why:
+            return [Result(sh.name, test, "skip", 0, why) for test in tests]
     for test in tests:
         try:
             out.append(run_test(ctx, sh, test))

@@ -526,7 +526,9 @@ header rules (with detector tests proving each rule fires).
   MSYS2 non-login script mode; the shell's cwd must not change), T5 minimal PATH, T6 stdin, T7
   install hints with uv hidden. Table with ms per test and the launcher each shell reported;
   `--json` to stdout; exit 1 on any FAIL. T7 is SKIP where uv cannot be hidden (PowerShell
-  reads the registry PATH itself; the MSYS2 login profile puts `reg.exe` back on PATH).
+  reads the registry PATH itself; the MSYS2 login profile puts `reg.exe` back on PATH). A WSL
+  distribution without a uv of its own is SKIP as a whole (`shells._wsl_without_uv`: one probe
+  first; the Linux launcher inside it exits 127), never seven FAILs.
 - How the probes reach each shell: POSIX shells get the command in `$PTCMD`
   (`sh -c 'eval "$PTCMD"'`, never in argv: section 4.7), fish `eval $PTCMD`, WSL through
   `WSLENV`, script mode a script file; cmd a hand-built line whose arguments are free of

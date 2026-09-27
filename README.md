@@ -1496,7 +1496,8 @@ regenerate the root (CLAUDE.md, section 11).
 - `--shells [NAME,...] [--list] [--json] [--keep]`
   `[--project DIR] [--tests T1,...] [--jobs N] [--timeout S]`: seven probes per shell (arguments,
   exit code, folders, a temporary script like xonsh-shell-kit's `!` lines, a minimal PATH, stdin, uv
-  install hints). `--list` shows the shells it found; `msys2` selects every `msys2-*` shell.
+  install hints). `--list` shows the shells it found; `msys2` selects every `msys2-*` shell. A WSL
+  distribution is tested only when it has a uv of its own (otherwise its row is skipped).
 - `--nvim [PRESET,...] [--keep] [--fresh] [--require] [--timeout S] [--dir DIR]`: creates each
   preset with `./deploy new` and runs a headless smoke test in Neovim folders of its own, never
   yours, with LazyVim and its plugins at pinned commits (minutes the first time). `--fresh`
