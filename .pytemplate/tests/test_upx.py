@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -189,6 +190,31 @@ def test_a_upx_without_its_x_bit_is_refused_before_any_work(monkeypatch: pytest.
     with pytest.raises(DeployError, match="upx: cannot run .*: Permission denied") as e:
         upx.pack_file(tool, target, ["-1"])
     assert e.value.code == 3
+
+
+def test_the_upx_cache_and_a_upx_on_path_are_absolute(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A relative XDG_CACHE_HOME put the download under the caller's folder (src/relcache/..., which
+    # the payloads ship) and handed Nuitka, which runs in its stage, a relative --upx-binary
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.chdir(tmp_path)
+    for variable in ("XDG_CACHE_HOME", "LOCALAPPDATA"):
+        monkeypatch.setenv(variable, "relcache")
+    cache = upx._cache_dir()
+    assert cache.is_absolute() and "relcache" not in cache.parts
+    assert cache == (home / "AppData" / "Local" if WINDOWS else home / ".cache") / "pytemplate" / "tools" / f"upx-{upx.VERSION}"
+    for variable in ("XDG_CACHE_HOME", "LOCALAPPDATA"):
+        monkeypatch.setenv(variable, str(tmp_path / "abs"))
+    assert upx._cache_dir() == tmp_path / "abs" / "pytemplate" / "tools" / f"upx-{upx.VERSION}"
+    # a upx found through a relative PATH entry reaches the tools absolute
+    (tmp_path / "bin").mkdir()
+    tool = tmp_path / "bin" / upx._exe_name()
+    tool.write_bytes(b"")
+    tool.chmod(0o755)
+    monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": "bin"})
+    found = upx.locate(make({"upx": {"enabled": True}}))
+    assert found is not None and found.is_absolute() and os.path.normcase(found) == os.path.normcase(tool)
 
 
 # --- the pinned download, with crafted archives (no network) -----------------------------------------

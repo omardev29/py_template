@@ -971,7 +971,8 @@ plugin (always `--best --lzma`), which packs that one file and never the librari
 (UPX refuses anything over 768 MiB), binaries UPX rejects (Control Flow Guard), the C runtime,
 `python3*.dll`, `libpython3*` and `flutter_windows.dll` (a packed Flutter engine hangs the app at
 startup). UPX 5.2.1 is downloaded once (SHA-256 checked) to `%LOCALAPPDATA%\pytemplate\tools`
-(`$XDG_CACHE_HOME/pytemplate/tools` or `~/.cache/pytemplate/tools` elsewhere), unless `upx` is on
+(`$XDG_CACHE_HOME/pytemplate/tools` when that is an absolute path, else `~/.cache/pytemplate/tools`
+elsewhere), unless `upx` is on
 PATH or `deploy.upx.path` names one (absolute, `~`, or relative to the project root; the file is
 named `upx` or `upx.exe`, and on Linux it must be executable: `chmod +x`); `build` finds (or
 downloads) it before any other work, so a wrong path or no network fails at once. A portable build with `runtime = "system"` bundles no

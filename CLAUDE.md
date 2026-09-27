@@ -2175,8 +2175,11 @@ Per method:
   PATH, the cache (a cached copy without its x bit is downloaded again), a download: UPX 5.2.1
   once (SHA-256 checked, written as `.part` then renamed so an interrupted write never looks
   cached) to
-  `%LOCALAPPDATA%\pytemplate\tools\upx-5.2.1` / `$XDG_CACHE_HOME/pytemplate/tools`; macOS
-  is unsupported (`upx.unsupported_reason`). `flet pack` ships Flet's prebuilt FULL client
+  `%LOCALAPPDATA%\pytemplate\tools\upx-5.2.1` / `$XDG_CACHE_HOME/pytemplate/tools`
+  (`upx._cache_dir`: a relative value is ignored, as the XDG spec says and the pyz bootstrap
+  does: it put the download under the caller's folder, `src/relcache/`, which the payloads
+  ship, and gave Nuitka a relative `--upx-binary`; a upx found through a relative PATH entry is
+  made absolute too); macOS is unsupported (`upx.unsupported_reason`). `flet pack` ships Flet's prebuilt FULL client
   zipped (40.5 MB, libmpv 28 MB inside) and unpacks it on first start into
   `~/.flet/client/flet-desktop-full-<version>-<fingerprint>` (97 MB); the "light" flavor
   exists only for Linux. PyInstaller follows imports inside functions: flet's lazy

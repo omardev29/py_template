@@ -123,10 +123,16 @@ def excluded(cfg: Config, name: str) -> bool:
 
 
 def _cache_dir() -> Path:
+    """The folder of the pinned download: always absolute. A relative XDG_CACHE_HOME (or
+    LOCALAPPDATA) is ignored, as the XDG spec says and the pyz bootstrap does: it put the download
+    under the caller's folder (src/, which the payloads ship) and handed Nuitka, which runs in its
+    stage, a relative --upx-binary."""
     if IS_WINDOWS:
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        local = os.environ.get("LOCALAPPDATA", "")
+        base = Path(local) if os.path.isabs(local) else Path.home() / "AppData" / "Local"
     else:
-        base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+        xdg = os.environ.get("XDG_CACHE_HOME", "")
+        base = Path(xdg) if os.path.isabs(xdg) else Path.home() / ".cache"
     return base / "pytemplate" / "tools" / f"upx-{VERSION}"
 
 
@@ -198,7 +204,7 @@ def locate(cfg: Config) -> Path | None:
         return path
     on_path = shutil.which("upx", path=proc.base_env().get("PATH"))
     if on_path:
-        return Path(on_path)
+        return Path(on_path).absolute()  # a relative PATH entry: the tools run in other folders
     cached = _cache_dir() / _exe_name()
     return cached if cached.is_file() and _runnable(cached) else None  # a download that lost its x bit comes again
 
