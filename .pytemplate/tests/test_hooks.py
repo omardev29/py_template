@@ -835,6 +835,38 @@ def test_cmd_hooks_routes_every_subcommand(tmp_path: Path, monkeypatch: pytest.M
 
 
 @needs_git
+def test_cmd_hooks_names_a_hook_file_it_cannot_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hooks folder the user may not write (another user's checkout, a read-only mount, chattr
+    +i): `hooks install` and `hooks uninstall` ended in an internal-error traceback."""
+    top, project = make_repo(tmp_path)
+    monkeypatch.setattr(hooks, "ROOT", project)
+    monkeypatch.chdir(project)
+    target = top / ".git" / "hooks" / hooks.HOOK
+    write = hooks._write_hook
+
+    def refused(path: Path, text: str) -> None:
+        raise PermissionError(1, "Operation not permitted", str(path))
+
+    monkeypatch.setattr(hooks, "_write_hook", refused)
+    with pytest.raises(DeployError, match=r"hooks install: cannot change .*pre-commit: Operation not permitted") as e:
+        hooks.cmd_hooks(make(), ["install"])
+    assert e.value.code == 2 and not target.exists()
+    monkeypatch.setattr(hooks, "_write_hook", write)
+    assert hooks.cmd_hooks(make(), ["install"]) == 0 and target.is_file()
+    unlink = Path.unlink
+
+    def refuse_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name == hooks.HOOK:
+            raise PermissionError(1, "Operation not permitted", str(self))
+        unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse_unlink)
+    with pytest.raises(DeployError, match=r"hooks uninstall: cannot change .*pre-commit: Operation not permitted"):
+        hooks.cmd_hooks(make(), ["uninstall"])
+    assert target.is_file()
+
+
+@needs_git
 def test_install_in_a_linked_worktree(tmp_path: Path) -> None:
     """A linked worktree shares the main repository's hooks folder: install writes there and
     git runs the hook from the worktree's top."""

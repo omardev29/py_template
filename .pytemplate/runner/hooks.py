@@ -1389,8 +1389,12 @@ def cmd_hooks(cfg: Config, args: list[str]) -> int:
     repo = find_repo(ROOT)
     if sub == "run":
         return run(cfg, repo)
-    if sub == "install":
-        ui.ok(install(repo, force="--force" in flags))
-    else:
-        ui.info(uninstall(repo))
+    try:
+        if sub == "install":
+            ui.ok(install(repo, force="--force" in flags))
+        else:
+            ui.info(uninstall(repo))
+    except OSError as e:  # a hooks folder the user may not write (another user's, read-only, immutable)
+        name = e.filename or (repo.default_dir / HOOK)
+        raise DeployError(f"hooks {sub}: cannot change {name}: {e.strerror or e}") from None
     return 0

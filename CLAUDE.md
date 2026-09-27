@@ -895,7 +895,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   info line in `doctor` (whose "git hook" line is otherwise info too: missing is not a
   problem; for a project below the repository's top it adds an info line that the generated
   `ci.yml` never runs there, section 13.2). Every git call runs with `LC_ALL=C` (find_repo
-  reads "not a git repository" in English).
+  reads "not a git repository" in English). A hooks folder the user may not change (another
+  user's, read-only, immutable) is a warning in apply and one error naming the file in `hooks
+  install`/`uninstall` (`hooks.cmd_hooks`; it was an internal-error traceback).
 - The hook: `pre-commit` in the folder `git rev-parse --git-path hooks` reports (worktree
   aware), pure ASCII + LF, a marker comment, and `sh <launcher> hooks run` with the POSIX
   launcher path relative to the repository top (the project may be a subfolder of a bigger
