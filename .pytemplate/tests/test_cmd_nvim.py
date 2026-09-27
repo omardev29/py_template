@@ -196,6 +196,66 @@ def test_extras_dry_run_and_bad_files(tmp_path: Path) -> None:
         cmd_nvim.enable_extras(path)
 
 
+def test_extras_in_a_config_that_cannot_be_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A read-only config (a Nix store, another user's file, chattr +i) ended `nvim extras` in an
+    # internal-error traceback, and a failed write of lazyvim.json left its .bak behind
+    path = tmp_path / "lazyvim.json"
+    path.write_text(FRESH_LAZYVIM_JSON, encoding="utf-8", newline="\n")
+
+    def denied(target: Path, data: bytes) -> None:
+        raise PermissionError(1, "Operation not permitted", str(target))
+
+    monkeypatch.setattr(cmd_nvim, "write_whole", denied)
+    with pytest.raises(DeployError, match=r"cannot write .*lazyvim.json: Operation not permitted\. Enable the extras by hand .*lang\.python") as e:
+        cmd_nvim.enable_extras(path, stamp="s")
+    assert e.value.code == 3
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["lazyvim.json"]  # no backup left behind
+    assert path.read_text(encoding="utf-8") == FRESH_LAZYVIM_JSON
+    real_write_bytes = Path.write_bytes
+
+    def no_backup(self: Path, data: bytes) -> int:
+        if self.name.endswith(".bak"):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_write_bytes(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", no_backup)
+    with pytest.raises(DeployError, match=r"cannot write .*\.bak: Permission denied"):
+        cmd_nvim.enable_extras(path, stamp="s")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["lazyvim.json"]
+
+
+def test_extras_keep_a_linked_lazyvim_json_a_link(tmp_path: Path) -> None:
+    # dotfiles managers link lazyvim.json into a repository: the file behind the link changes
+    if sys.platform == "win32":
+        pytest.skip("symlinks need a privilege on Windows")
+    real = tmp_path / "dotfiles" / "lazyvim.json"
+    real.parent.mkdir()
+    real.write_text(FRESH_LAZYVIM_JSON, encoding="utf-8", newline="\n")
+    config = tmp_path / "nvim"
+    config.mkdir()
+    (config / "lazyvim.json").symlink_to(real)
+    cmd_nvim.enable_extras(config / "lazyvim.json", stamp="s")
+    assert (config / "lazyvim.json").is_symlink() and json.loads(real.read_text(encoding="utf-8"))["extras"] == list(cmd_nvim.EXTRAS)
+
+
+def test_bootstrap_says_what_to_do_when_the_starter_git_cannot_be_removed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    nv = cmd_nvim.Nvim("nvim", (0, 12, 5), tmp_path / "c", tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    monkeypatch.setattr(cmd_nvim, "which", lambda name: "/usr/bin/git")
+
+    def clone(argv: list[object], **_: object) -> subprocess.CompletedProcess[str]:
+        (nv.config / ".git").mkdir(parents=True)
+        return subprocess.CompletedProcess([str(a) for a in argv], 0, "", "")
+
+    def stuck(path: Path) -> None:
+        raise PermissionError(1, "Operation not permitted", str(path / "objects"))
+
+    monkeypatch.setattr(cmd_nvim.proc, "run", clone)
+    monkeypatch.setattr(cmd_nvim, "remove_tree", stuck)
+    with pytest.raises(DeployError, match=r"the starter is in .*, but its \.git could not be removed .*delete it by hand") as e:
+        cmd_nvim.cmd_bootstrap(nv)
+    assert e.value.code == 3
+
+
 def test_local_spec_off(tmp_path: Path) -> None:
     config = tmp_path / "nvim"
     (config / "lua" / "config").mkdir(parents=True)

@@ -2689,9 +2689,12 @@ LazyVim wiring:
   already skipped the file for that session).
 - `extras` adds exactly the five extras above to `<config>/lazyvim.json` after a timestamped
   `.bak`, in LazyVim's own format; it refuses (exit 3) when there is no config or no
-  `lazyvim.json` yet (start Neovim once). `bootstrap` clones the LazyVim starter (its newest
+  `lazyvim.json` yet (start Neovim once). The file is replaced whole (`project.write_whole`: a
+  dotfiles link stays a link); a config it may not write (a Nix store, another user's file) is
+  exit 3 naming the extras to enable by hand, with no `.bak` left behind (it was a traceback).
+  `bootstrap` clones the LazyVim starter (its newest
   commit, as LazyVim's own install steps do) and deletes its `.git`, only when the config dir
-  does not exist. `sync` = `nvim --headless "+Lazy! install" "+lua dofile(vim.env.PT_NVIM_CHECK)"
+  does not exist (a `.git` it cannot delete: exit 3, delete it by hand). `sync` = `nvim --headless "+Lazy! install" "+lua dofile(vim.env.PT_NVIM_CHECK)"
   +qa` with cwd = ROOT and `NVIM_LOG_FILE` in a temp dir: install only (`Lazy! sync` would also
   update every plugin of the user's config, rewriting their `lazy-lock.json`, and clean the
   plugins its spec does not name). It refuses with exit 3 while `.lazy.lua` is not trusted (the

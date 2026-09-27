@@ -13,6 +13,7 @@ write anything, and only when the user runs them.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import ntpath
@@ -32,7 +33,7 @@ from typing import Any
 
 from . import envs, proc, ui
 from .config import Config
-from .project import IS_MACOS, IS_WINDOWS, ROOT
+from .project import IS_MACOS, IS_WINDOWS, ROOT, write_whole
 from .ui import DeployError
 
 Check = Callable[[bool | None, str, str], None]
@@ -375,7 +376,9 @@ def enable_extras(
 ) -> tuple[list[str], Path | None]:
     """Add the missing extras to lazyvim.json after a timestamped backup; return (added, backup).
 
-    Nothing is written (no backup either) when every extra is already there or under dry_run.
+    Nothing is written (no backup either) when every extra is already there or under dry_run. The
+    file is replaced whole (project.write_whole: a link stays a link); a config it may not write
+    (a Nix store, another user's file) is a DeployError that leaves no backup behind.
     """
     raw = path.read_bytes()
     data = load_lazyvim_json(path)
@@ -388,8 +391,16 @@ def enable_extras(
     while backup.exists():
         n += 1
         backup = path.with_name(f"{path.name}.{stamp}-{n}.bak")
-    backup.write_bytes(raw)
-    path.write_text(lazyvim_json_text(data), encoding="utf-8", newline="\n")
+    try:
+        backup.write_bytes(raw)
+        write_whole(path, lazyvim_json_text(data).encode("utf-8"))
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            backup.unlink(missing_ok=True)  # ours (a new name): a failed write leaves nothing behind
+        names = ", ".join(short_extra(x) for x in added)
+        raise DeployError(
+            f"cannot write {e.filename or path}: {e.strerror or e}. Enable the extras by hand (:LazyExtras, or {path}): {names}", 3
+        ) from None
     return added, backup
 
 
@@ -692,7 +703,10 @@ def cmd_bootstrap(nv: Nvim) -> int:
     if proc.DRY_RUN:
         ui.info(f"would remove {nv.config / '.git'}")
         return 0
-    remove_tree(nv.config / ".git")  # LazyVim's install steps: the config becomes your own
+    try:
+        remove_tree(nv.config / ".git")  # LazyVim's install steps: the config becomes your own
+    except OSError as e:
+        raise DeployError(f"the starter is in {nv.config}, but its .git could not be removed ({e}): delete it by hand", 3) from None
     ui.ok(f"LazyVim starter installed in {nv.config}")
     ui.info("  Next: start nvim once (LazyVim installs its plugins), then ./deploy nvim trust && ./deploy nvim sync")
     return 0
