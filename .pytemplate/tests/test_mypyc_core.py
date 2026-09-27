@@ -1790,6 +1790,31 @@ def test_real_compile_roundtrip(src_tree: Path, tmp_path: Path, monkeypatch: pyt
 
 @needs_venv
 @needs_compiler
+def test_real_compile_names_namespace_modules_as_python_imports_them(src_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A top-level namespace folder in compile.modules, and an app package without __init__.py
+    (PEP 420): mypy named each module from the highest folder holding an __init__.py
+    (nsx/fast.py -> fast, pkg/core/bench.py -> core.bench): "mypyc did not generate an extension
+    for: nsx.fast", and setuptools could not create core/bench.<ext> (blamed on the C compiler)."""
+    _project(
+        src_tree,
+        {
+            "main.py": "",
+            "pkg/core/__init__.py": "",
+            "pkg/core/bench.py": "def twice(x: int) -> int:\n    return 2 * x\n",
+            "nsx/fast.py": "def three() -> int:\n    return 3\n",
+        },
+    )
+    monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
+    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core", "nsx"]}})
+    stage = mypyc.build(cfg, "dev")
+    stems = sorted(p.relative_to(stage).as_posix().split(".")[0] for p in mypyc.extension_files(stage))
+    assert stems == ["nsx/fast", "pkg/core/bench", "pkg__mypyc"]
+    code = "import pkg.core.bench as b, nsx.fast as f; print(b.twice(f.three()), type(f.three).__name__)"
+    assert _import_from(stage, code, tmp_path) == "6 builtin_function_or_method"  # compiled, not the .py
+
+
+@needs_venv
+@needs_compiler
 def test_real_compile_separate_names_one_lib_per_module(src_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """compile.separate = true: mypyc builds `<module>__mypyc` next to each shim (the names
     remove_stale_extensions keeps); a second build deletes none of them."""
@@ -2291,6 +2316,28 @@ def test_real_mypyc_wheel_compiles_a_top_level_module(wheel_project: Path, monke
     out = _import_from(site, "import fastbench, other.core.calc as c; print(fastbench.__file__); print(fastbench.twice(c.add(1, 2)))", wheel_project)
     file, result = out.splitlines()
     assert file.endswith(tuple(importlib.machinery.EXTENSION_SUFFIXES)) and result == "6"
+
+
+@needs_venv
+@needs_compiler
+def test_real_mypyc_wheel_compiles_a_namespace_folder(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # nsx/ (no __init__.py) in compile.modules: the wheel's setup.py named nsx/fast.py "fast",
+    # a top-level module the wheel does not have where nsx.fast is imported
+    import zipfile
+
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    _project(wheel_project / "src", {"nsx/fast.py": "def three() -> int:\n    return 3\n"})
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["nsx"]}})
+    built = wheel.build(BuildRequest(cfg, "mypyc", "wheel", wheel_project / "src"))
+    site = wheel_project / "site"
+    with zipfile.ZipFile(built) as z:
+        assert [n for n in z.namelist() if n.startswith("nsx/fast.") and n.endswith((".so", ".pyd"))], z.namelist()
+        z.extractall(site)
+    out = _import_from(site, "import nsx.fast as f; print(f.three(), type(f.three).__name__)", wheel_project)
+    assert out == "3 builtin_function_or_method"
 
 
 def _wheel_names(wheel_file: Path) -> list[str]:

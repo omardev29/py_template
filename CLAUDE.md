@@ -1629,7 +1629,11 @@ Formats:
   paths under MSVC's MAX_PATH.
 - `tools/mypyc_build.py` runs in `.venv` with `VSLANG=1033`: `chdir(stage)`,
   `mypycify(..., group_name, target_dir=../c)`, then `setup(build_ext [--force] --inplace ...
-  --parallel N)`. It uses the mypycify API because `python -m mypyc` cannot set
+  --parallel N)`. mypycify gets `--explicit-package-bases` (the stage, the cwd, is the base):
+  mypy named a module from the highest folder holding an `__init__.py`, so a top-level namespace
+  folder of `compile.modules` (`nsx/fast.py`) compiled as `fast` ("did not generate an extension
+  for: nsx.fast"), and an app package without `__init__.py` as `core.bench` (the C build could
+  not write it); the wheel's `setup.py` does the same with `MYPYPATH=src`. It uses the mypycify API because `python -m mypyc` cannot set
   `strip_asserts`, `group_name` or `multi_file` and always writes to `./build`. When mypycify
   exits or raises (mypy/mypyc rejected the code; the errors are printed) it returns
   `MYPYC_REJECTED` (4, mirrored in `mypyc.py`). When the C build fails (setuptools reports
