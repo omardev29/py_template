@@ -1029,8 +1029,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     `.pytemplate`, `.claude`, the generated files and files over 2 MiB).
   - Symbolic links and Windows junctions in src/ and tests/ are never followed nor rewritten
     (`_code_files` with `cmd_env._is_link`: their target may be shared with other projects, and
-    os.walk enters a junction); those whose target path goes through the old name (it dangles
-    once src/<pkg>/ moves) or whose file or folder mentions it are a warning (`Plan.linked`,
+    os.walk enters a junction); those that dangle once src/<pkg>/ moves (`_dangles`: the target
+    resolves into it, and read from where the link will be it no longer names the same file; the
+    target's text is not searched: an absolute link through the project's own folder, named like
+    the app, was reported) or whose file or folder mentions it are a warning (`Plan.linked`,
     `_link_mentions`, shown in the dry run and the real run): a linked subpackage that imports
     the old package used to break silently. `_mentions` skips links and junctions too.
 - ruff tidy-up (`tidy_before`/`tidy_after`; best effort, never fails the rename): the new name

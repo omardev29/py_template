@@ -924,14 +924,35 @@ def _mentions_name(path: Path, pattern: re.Pattern[str]) -> bool:
     return text is not None and pattern.search(text) is not None
 
 
-def _link_mentions(link: Path, pattern: re.Pattern[str]) -> bool:
-    """Whether a link or junction points through the old name (src/alpha/data: it dangles once the
-    folder moves), or its file, or a text file below its folder, mentions it."""
+def _dangles(link: Path, move: tuple[Path, Path] | None) -> bool:
+    """Whether the link resolves into the package folder that `move` (old, new) moves and no
+    longer resolves to the same file once it moved (tests/data -> ../src/alpha/data). Its target
+    text is never searched for the name: an absolute target through the project's own folder,
+    named like the app, was reported although the link kept working."""
+    if move is None:
+        return False
+    old, new = move
     try:
-        if pattern.search(os.readlink(link)):
-            return True
+        target = os.readlink(link)
     except (OSError, ValueError):
-        pass  # a junction on an old Python, or not readable: look at what it holds
+        return False  # a junction on an old Python, or not readable: what it holds is looked at
+    if target.startswith(("\\\\?\\", "\\??\\")):  # a Windows junction's target
+        target = target[4:]
+    lexical = Path(os.path.normpath(link.parent / target))
+    real, real_old = Path(os.path.realpath(lexical)), Path(os.path.realpath(old))
+    if real != real_old and real_old not in real.parents:
+        return False  # it names nothing the rename moves
+    if lexical != old and old not in lexical.parents:
+        return True  # through another spelling of the folder (a linked parent folder): it stays there
+    parent = new / link.parent.relative_to(old) if old in link.parents else link.parent  # the link moves too
+    return Path(os.path.normpath(parent / target)) != new / lexical.relative_to(old)
+
+
+def _link_mentions(link: Path, pattern: re.Pattern[str], move: tuple[Path, Path] | None = None) -> bool:
+    """Whether a link or junction dangles once the package folder moves (_dangles), or its file,
+    or a text file below its folder, mentions the old name."""
+    if _dangles(link, move):
+        return True
     if not link.is_dir():
         return link.is_file() and _mentions_name(link, pattern)
     seen: set[str] = set()
@@ -1161,7 +1182,7 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
         binary=binary,
         mentions=_mentions(root, names, generated),
         unreadable=unreadable,
-        linked=[rel for rel in links if _link_mentions(root / rel, pattern)],
+        linked=[rel for rel in links if _link_mentions(root / rel, pattern, (old_dir, src / names.new_pkg) if move else None)],
     )
 
 

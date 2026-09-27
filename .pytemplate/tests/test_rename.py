@@ -910,6 +910,27 @@ def test_links_in_src_and_tests_are_reported_never_rewritten(tmp_path: Path, cap
     assert (root / "src" / "beta" / "ext").is_symlink()
 
 
+def test_only_links_the_move_breaks_are_reported(tmp_path: Path) -> None:
+    """The name was searched in the link's target text: an absolute link through the project's
+    own folder, named like the app (what `./deploy new alpha` makes), was reported as pointing
+    through the old name although it kept working. What counts is whether it dangles once
+    src/alpha/ moves."""
+    root = tmp_path / "alpha"  # the project folder, named like the app
+    root.mkdir()
+    _write_project(root, "script", "alpha")
+    (root / "shared").mkdir()
+    (root / "shared" / "readme.txt").write_text("x\n", encoding="utf-8")
+    (root / "src" / "alpha" / "data").mkdir()
+    (root / "src" / "alpha" / "data" / "x.txt").write_text("x\n", encoding="utf-8")
+    _symlink_or_skip(root / "tests" / "fixtures", str(root / "shared"), directory=True)  # absolute, keeps working
+    _symlink_or_skip(root / "src" / "alpha" / "assets", "data", directory=True)  # moves with the package
+    _symlink_or_skip(root / "tests" / "data", str(root / "src" / "alpha" / "data"), directory=True)  # dangles
+    _symlink_or_skip(root / "src" / "alpha" / "back", "../alpha/data", directory=True)  # dangles: through the old name
+    planned = rename.plan(root, "alpha", "beta")
+    assert planned.linked == ["src/alpha/back/", "tests/data/"]
+    assert rename.plan(root, "alpha", "Alpha").linked == []  # the package does not move
+
+
 def test_a_windows_junction_in_src_is_never_followed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """os.walk enters a junction (os.path.islink is False for it) and the files behind it were
     rewritten, outside the project; now it is a link like any other: reported, never rewritten."""
