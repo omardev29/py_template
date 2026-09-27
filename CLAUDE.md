@@ -1688,6 +1688,12 @@ Formats:
     `attr.attrs`, `typing[_extensions].final`, `mypy_extensions.trait`/`mypyc_attr`): attrs'
     `define`/`frozen`/`mutable` are NOT native, `@attr.s` is; `@mypyc_attr(native_class=False)`
     silences it. A drift test compares the set with the locked mypyc's own source.
+  - Metaclasses and bases (`_non_native_kind`, same message and silencer): a `metaclass=` other
+    than `NATIVE_METACLASSES` (ABCMeta; mirrors mypyc's `is_implicit_extension_class`, drift
+    test), a base in `NON_NATIVE_BASES` (every `enum` class: its metaclass is EnumMeta;
+    NamedTuple; TypedDict), and a subclass of such a class of the same module (a NamedTuple's
+    subclass is a mypyc error of its own). A base imported from another module is not looked
+    into (no types here).
   - Nested classes and classes inside functions, each reported once (from its nearest class
     or function); t-strings; `if __name__ == "__main__"` (either order) at module level.
   - Module-level `__file__` ONLY when `compile.modules` is one top-level module file, the one
@@ -3482,10 +3488,13 @@ mypy and mypyc:
   it fails once mypyc fixes it),
   `test_lintc_flags_module_level_file_for_a_single_top_level_module`. Goes: when that pin fails.
 - **What mypyc compiles badly or not at all** (LIMITATION): a class decorator outside its native
-  list makes a slow Python class; nested classes, classes in functions, t-strings and a
-  module-level `if __name__ == "__main__"` are unsupported. Fix: the `lintc` rules,
-  `lintc.NATIVE_CLASS_DECORATORS` (9). Test:
+  list, a metaclass other than ABCMeta (every Enum), a NamedTuple or a TypedDict make a slow
+  Python class; nested classes, classes in functions, t-strings and a module-level `if __name__
+  == "__main__"` are unsupported. Fix: the `lintc` rules, `lintc.NATIVE_CLASS_DECORATORS`,
+  `lintc.NATIVE_METACLASSES`, `lintc.NON_NATIVE_BASES` (9). Test:
   `test_mypyc_core.py::test_lintc_native_decorators_follow_the_locked_mypyc`,
+  `test_lintc_native_metaclasses_follow_the_locked_mypyc`,
+  `test_lintc_flags_classes_mypyc_compiles_as_python_classes_for_their_metaclass`,
   `test_lintc_flags_t_strings`, `test_runner.py::test_lintc_rules`. Goes: per rule, when mypyc
   supports it.
 - **`librt` comes only with mypy** (LIMITATION): compiled code that imports mypyc's runtime

@@ -535,7 +535,8 @@ again.
 - **Native classes**: typed attributes, and only these class decorators: `@dataclass`,
   `@attr.s` (`@attr.attrs`), `@final`, `@trait` and `@mypyc_attr`. Any other one, attrs'
   `@define`, `@frozen` and `@mutable` included, turns the class into a slower regular Python
-  class (mark it `@mypyc_attr(native_class=False)` when that is intended).
+  class (mark it `@mypyc_attr(native_class=False)` when that is intended). So do a metaclass other
+  than `ABCMeta` (every `Enum` has one) and a `NamedTuple` or `TypedDict` class.
 - **Concrete types**: `list[bool]` compiles to direct accesses, `bytearray` takes the generic
   path (sieve: 4.2x vs 1.9x).
 - `./deploy report --open` marks every generic operation in red ("make it Final", "Generic `*`").
@@ -543,8 +544,8 @@ again.
   that report to `.build/reports/mypyc-annotate.html` (the same report as `./deploy report`, without
   mypy's `Any` reports).
 - `./deploy check` adds rules for the compiled modules that mypy does not check: imports listed in
-  `compile.forbid_imports`, class decorators that make a class non-native, nested classes and
-  classes defined inside functions, t-strings, `if __name__ == "__main__"`, `librt` while PyPy is
+  `compile.forbid_imports`, class decorators, metaclasses and bases (`Enum`, `NamedTuple`,
+  `TypedDict`) that make a class non-native, nested classes and classes defined inside functions, t-strings, `if __name__ == "__main__"`, `librt` while PyPy is
   supported, and a module-level `__file__` when `compile.modules` is a single top-level module
   (there it is a relative path). Compiled code that imports `librt` needs it as an app dependency:
   `./deploy add librt --cpython-only` (mypy installs it only in the dev group).

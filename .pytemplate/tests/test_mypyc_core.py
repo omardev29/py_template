@@ -365,6 +365,54 @@ def test_lintc_reports_a_source_nested_too_deeply_for_the_compiler(tmp_path: Pat
     assert len(found) == 1 and "cannot parse" in found[0].message and "skipped this file" in found[0].message
 
 
+# mypyc 2.3.1 compiles these as regular Python classes without a word (is_implicit_extension_class:
+# a metaclass other than ABCMeta, TypedDict, NamedTuple); every case was compiled to check it
+METACLASS_CASES = [
+    ("from enum import Enum\n\n\nclass P(Enum):\n    A = 1\n", "is an Enum (metaclass EnumMeta)"),
+    ("import enum\n\n\nclass P(enum.IntFlag):\n    A = 1\n", "is an Enum (metaclass EnumMeta)"),
+    ("from enum import *\n\n\nclass P(StrEnum):\n    A = 'a'\n", "is an Enum (metaclass EnumMeta)"),
+    ("from typing import NamedTuple\n\n\nclass P(NamedTuple):\n    x: int\n", "is a NamedTuple"),
+    ("from typing_extensions import TypedDict\n\n\nclass P(TypedDict):\n    x: int\n", "is a TypedDict"),
+    ("from .meta import Meta\n\n\nclass P(metaclass=Meta):\n    x: int = 0\n", "has the metaclass Meta"),
+    ("from .meta import Meta\n\n\nclass B(metaclass=Meta):\n    x: int = 0\n\n\nclass P(B):\n    y: int = 0\n", "inherits from 'B', which has the metaclass Meta"),
+    ("from abc import ABC\n\n\nclass P(ABC):\n    x: int = 0\n", None),
+    ("import abc\n\n\nclass P(metaclass=abc.ABCMeta):\n    x: int = 0\n", None),
+    ("from typing import Generic, TypeVar\n\nT = TypeVar('T')\n\n\nclass P(Generic[T]):\n    x: int = 0\n", None),
+    ("from enum import Enum\nfrom mypy_extensions import mypyc_attr\n\n\n@mypyc_attr(native_class=False)\nclass P(Enum):\n    A = 1\n", None),
+    ("from .mylib import Enum\n\n\nclass P(Enum):\n    A = 1\n", None),  # not the stdlib's Enum
+]
+
+
+@pytest.mark.parametrize(("source", "kind"), METACLASS_CASES)
+def test_lintc_flags_classes_mypyc_compiles_as_python_classes_for_their_metaclass(tmp_path: Path, source: str, kind: str | None) -> None:
+    """Only the decorators were checked: an Enum, a NamedTuple, a TypedDict or a class with its
+    own metaclass silently became a slow Python class under mypyc, with no finding."""
+    found = [f.message for f in _lint(tmp_path, source) if "class 'P'" in f.message]
+    expected = [] if kind is None else [f"class 'P' {kind}: mypyc compiles it as a regular (slow) Python class"]
+    assert [m.split(". Move it")[0] for m in found] == expected
+
+
+@needs_venv
+def test_lintc_native_metaclasses_follow_the_locked_mypyc() -> None:
+    """A mypy bump that changes what mypyc accepts as the metaclass of a native class, or drops
+    its TypedDict and NamedTuple exceptions, must fail selftest."""
+    code = (
+        "import importlib.util, pathlib\n"
+        "origin = pathlib.Path(importlib.util.find_spec('mypyc.irbuild.util').origin)\n"
+        "print((origin.parent / 'util.py').read_text(encoding='utf-8'))\n"
+    )
+    text = subprocess.run([str(TOOL_PYTHON), "-I", "-c", code], capture_output=True, text=True, check=True).stdout
+    function = next(n for n in ast.walk(ast.parse(text)) if isinstance(n, ast.FunctionDef) and n.name == "is_implicit_extension_class")
+    tuples = [
+        {e.value for e in n.comparators[0].elts if isinstance(e, ast.Constant)}
+        for n in ast.walk(function)
+        if isinstance(n, ast.Compare) and isinstance(n.ops[0], ast.NotIn) and isinstance(n.comparators[0], ast.Tuple)
+    ]
+    assert tuples == [set(lintc.NATIVE_METACLASSES)]
+    source = ast.unparse(function)
+    assert "typeddict_type" in source and "is_named_tuple" in source
+
+
 @needs_venv
 def test_lintc_native_decorators_follow_the_locked_mypyc() -> None:
     """A mypy bump that changes mypyc's list of native decorators must fail selftest."""
