@@ -349,19 +349,20 @@ def project_specifiers(lock: Path) -> dict[str, str]:
     return out
 
 
-def unpin_binaries(pins: list[str], *, lock: Path | None = None) -> tuple[list[str], list[str]]:
+def unpin_binaries(pins: list[str], *, lock: Path | None = None) -> tuple[list[str], list[tuple[str, str]]]:
     """For `flet build` of a mobile or web target: the `name==version` pins of the packages
     uv.lock has no pure wheel for (`binary_only`) lose uv.lock's version and keep the project's own
     bounds (`project_specifiers`) and their markers. flet build installs those targets' binaries
-    from Flet's own index (pypi.flet.dev, `--only-binary :all:`), which holds other releases than
-    PyPI (msgpack 1.1.x, where a new flet project locks 1.2.2): the exact pin had no solution, and
-    pip now picks a release that fits every package's bounds. Returns the requirements and the
-    pins it relaxed."""
+    from Flet's own index (pypi.flet.dev, `--only-binary :all:`; for the web also the packages of
+    its Pyodide release), which holds other releases than PyPI (msgpack 1.1.x, where a new flet
+    project locks 1.2.2): the exact pin had no solution, and pip now picks a release that fits
+    every package's bounds. Returns the requirements and, for each pin it relaxed, the pin and
+    the requirement written instead (without its markers)."""
     lock_file = LOCK if lock is None else lock
     binary = binary_only(lock_file)
     own = project_specifiers(lock_file) if binary else {}
     out: list[str] = []
-    relaxed: list[str] = []
+    relaxed: list[tuple[str, str]] = []
     for pin in pins:
         requirement, marked, marker = pin.partition(" ;")
         m = _PIN_RE.match(requirement.strip())
@@ -370,7 +371,7 @@ def unpin_binaries(pins: list[str], *, lock: Path | None = None) -> tuple[list[s
         if not m or name not in binary or loose == requirement.strip():
             out.append(pin)
             continue
-        relaxed.append(f"{m[1]}=={m[2]}")
+        relaxed.append((f"{m[1]}=={m[2]}", loose))
         out.append(loose + (f" ;{marker}" if marked else ""))
     return out, relaxed
 

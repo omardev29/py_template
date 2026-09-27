@@ -3894,12 +3894,24 @@ def test_flet_build_leaves_mobile_binaries_to_flets_index(sandbox: Path, monkeyp
         assert deps == [f"flet==1.0.1 ; {marker}", f"msgpack ; {marker}", "numpy>=2.0,<3", "docopt", f"mylib @ file:///src/libs/mylib ; {marker}"]
         for dep in deps:
             requirements.Requirement(dep)
-        err = capsys.readouterr().err
-        assert f"{target}: not pinned to uv.lock's version: msgpack==1.2.2, numpy==2.3.1, docopt==0.6.2" in err and "pypi.flet.dev" in err
+        err = " ".join(capsys.readouterr().err.split())
+        assert "msgpack==1.2.2 -> msgpack, numpy==2.3.1 -> numpy>=2.0,<3, docopt==0.6.2 -> docopt" in err, err
+        # where pip looks: the web's binaries come from its Pyodide release first
+        assert ("the packages of its Pyodide release and Flet's own index" in err) == (target == "web") and "pypi.flet.dev" in err
+        # a lower bound the project keeps may be newer than those hold (./pyt add writes the newest)
+        assert "a lower bound may be newer than it holds (numpy>=2.0,<3:" in err and "lower it in pyproject.toml, then ./pyt lock" in err
     # a desktop build installs from PyPI: every pin stays
     _flet_build(sandbox, monkeypatch, target="linux", pins=pins)
     assert tomllib.loads(stage.read_text(encoding="utf-8"))["project"]["dependencies"] == pins
-    assert "not pinned" not in capsys.readouterr().err
+    assert "uv.lock's versions" not in capsys.readouterr().err
+
+
+def test_flet_relaxed_message_hints_at_a_lower_bound_only_when_one_is_kept() -> None:
+    from runner.methods import flet
+
+    assert "lower it" not in flet.relaxed_message("apk", [("msgpack==1.2.2", "msgpack"), ("numpy==2.3.1", "numpy<3,!=2.1.0")])
+    for kept in ("numpy>=2.5.3", "numpy~=2.5", "numpy==2.5.3", "numpy>2"):
+        assert f"({kept}: `./pyt add` writes" in flet.relaxed_message("apk", [("numpy==2.5.3", kept)]), kept
 
 
 FLET_DESKTOP_LOCK = """version = 1
@@ -4000,47 +4012,75 @@ def test_flet_build_leaves_the_desktop_client_out(tmp_path: Path, monkeypatch: p
     assert flet._pinned_requirements(envs.tool_env(make({}))) == pins
 
 
-@pytest.mark.parametrize(
-    ("pin", "web"),
-    [
-        ("httpx==0.28.1 ; sys_platform != 'emscripten'", "httpx==0.28.1 ; platform_system != 'Emscripten'"),
-        ('pyodide-http==0.2.2 ; sys_platform == "emscripten"', "pyodide-http==0.2.2 ; platform_system == 'Emscripten'"),
-        (
-            "oauthlib==3.3.1 ; python_full_version < '3.15' and sys_platform != 'emscripten'",
-            "oauthlib==3.3.1 ; python_full_version < '3.15' and platform_system != 'Emscripten'",
-        ),
-        ("colorama==0.4.6 ; sys_platform == 'win32'", None),
-        ("flet==1.0.1", None),
-        ("mylib @ file:///src/emscripten ; sys_platform != 'linux'", None),
-    ],
-)
-def test_flet_web_markers_say_what_flets_pip_reads(pin: str, web: str | None) -> None:
-    # uv writes flet's `platform_system != "Emscripten"` as `sys_platform != 'emscripten'`, and
-    # the pip of flet build (serious_python) runs on the build machine with only platform.system()
-    # faked: every web app got httpx and its tree, which flet leaves out in the browser
+# The platform each mobile or web target is, as the device's Python sees it (sys.platform,
+# platform.system()), and what serious_python's pip sees on a build machine: platform.system()
+# faked for the target, the rest the build machine's own
+FLET_DEVICES = {"web": ("emscripten", "Emscripten"), "apk": ("android", "Android"), "ipa": ("ios", "iOS")}
+BUILD_MACHINES = {"linux": ("linux", "posix"), "windows": ("win32", "nt"), "macos": ("darwin", "posix")}
+TARGET_PINS = [
+    ("httpx==0.28.1 ; sys_platform != 'emscripten'", "httpx==0.28.1 ; platform_system != 'Emscripten'"),
+    ('pyodide-http==0.2.2 ; sys_platform == "emscripten"', "pyodide-http==0.2.2 ; platform_system == 'Emscripten'"),
+    (
+        "oauthlib==3.3.1 ; python_full_version < '3.15' and sys_platform != 'emscripten'",
+        "oauthlib==3.3.1 ; python_full_version < '3.15' and platform_system != 'Emscripten'",
+    ),
+    ("tomli-w==1.2.0 ; sys_platform == 'android'", "tomli-w==1.2.0 ; platform_system == 'Android'"),
+    ("distro==1.9.0 ; sys_platform == 'linux'", "distro==1.9.0 ; platform_system == 'Linux'"),
+    ("colorama==0.4.6 ; sys_platform == 'win32'", "colorama==0.4.6 ; platform_system == 'Windows'"),
+    ("pyobjc-core==11.0 ; sys_platform == 'darwin'", "pyobjc-core==11.0 ; platform_system == 'Darwin'"),
+    ("rubicon-objc==0.5.0 ; sys_platform == 'ios'", "rubicon-objc==0.5.0 ; platform_system == 'iOS'"),
+    ("pywin32==311 ; os_name == 'nt'", "pywin32==311 ; platform_system == 'Windows'"),
+    ("uvloop==0.21.0 ; os_name != 'nt'", "uvloop==0.21.0 ; platform_system != 'Windows'"),
+    ("ptyprocess==0.7.0 ; os_name == 'posix'", "ptyprocess==0.7.0 ; platform_system != 'Windows'"),
+    ("pywinpty==2.0.15 ; os_name != 'posix'", "pywinpty==2.0.15 ; platform_system == 'Windows'"),
+    (
+        "evdev==1.9.2 ; (sys_platform == 'linux' or sys_platform == 'darwin') and python_version >= '3.11'",
+        "evdev==1.9.2 ; (platform_system == 'Linux' or platform_system == 'Darwin') and python_version >= '3.11'",
+    ),
+    ("cygwin-only==1.0 ; sys_platform == 'cygwin'", None),  # platform.system() has no fixed name for it
+    ("flet==1.0.1", None),
+    ("mylib @ file:///src/emscripten/sys_platform ; sys_platform != 'linux'", "mylib @ file:///src/emscripten/sys_platform ; platform_system != 'Linux'"),
+]
+
+
+@pytest.mark.parametrize(("pin", "written"), TARGET_PINS)
+def test_flet_target_markers_say_what_flets_pip_reads(pin: str, written: str | None) -> None:
+    """uv writes a `platform_system` marker as a `sys_platform` one (flet's `platform_system !=
+    "Emscripten"`, a user's `platform_system == "Android"`), and the pip of flet build
+    (serious_python) runs on the build machine with only platform.system() faked for the target:
+    every web app got httpx and its tree, an apk lacked its Android-only requirement and got the
+    Linux-only one. On every target, from every build machine, pip now reads each marker as the
+    device's Python would."""
     from runner.methods import flet
 
-    assert flet.web_markers([pin]) == [web or pin]
+    assert flet.target_markers([pin]) == [written or pin]
     markers = pytest.importorskip("packaging.markers")
     requirements = pytest.importorskip("packaging.requirements")
     marker = requirements.Requirement(pin).marker
-    if marker is None or web is None:
+    if marker is None:
         return
-    browser = {"sys_platform": "emscripten", "platform_system": "Emscripten", "python_full_version": "3.14.7"}
-    build_machine = browser | {"sys_platform": "linux"}  # what that pip sees
-    wanted = marker.evaluate(browser)
-    assert markers.Marker(web.partition(";")[2]).evaluate(build_machine) == wanted
-    assert marker.evaluate(build_machine) != wanted  # what went wrong without it
+    rewritten = markers.Marker((written or pin).partition(" ;")[2])
+    wrong = []
+    for target, (platform, system) in FLET_DEVICES.items():
+        device = {"sys_platform": platform, "platform_system": system, "os_name": "posix", "python_full_version": "3.14.7", "python_version": "3.14"}
+        wanted = marker.evaluate(device)
+        for host, (host_platform, host_os) in BUILD_MACHINES.items():
+            pip = device | {"sys_platform": host_platform, "os_name": host_os}
+            assert rewritten.evaluate(pip) == wanted, (target, host)
+            if marker.evaluate(pip) != wanted:
+                wrong.append((target, host))
+    assert bool(wrong) == (written is not None), wrong  # what went wrong without it
 
 
-def test_flet_build_web_rewrites_only_the_web_pins(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    pins = ["flet==1.0.1", "httpx==0.28.1 ; sys_platform != 'emscripten'"]
+def test_flet_build_rewrites_the_markers_of_mobile_and_web_pins(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pins = ["flet==1.0.1", "httpx==0.28.1 ; sys_platform != 'emscripten'", "tomli-w==1.2.0 ; sys_platform == 'android'"]
+    written = ["flet==1.0.1", "httpx==0.28.1 ; platform_system != 'Emscripten'", "tomli-w==1.2.0 ; platform_system == 'Android'"]
     stage = sandbox / "build" / "flet-build" / "cpython" / "pyproject.toml"
-    _flet_build(sandbox, monkeypatch, target="web", pins=pins)
-    assert tomllib.loads(stage.read_text(encoding="utf-8"))["project"]["dependencies"] == ["flet==1.0.1", "httpx==0.28.1 ; platform_system != 'Emscripten'"]
-    for target in ("apk", "linux"):  # neither the build machine nor the app is a browser there: the marker reads right
+    for target in ("web", "apk", "aab", "ipa", "ios-simulator"):
         _flet_build(sandbox, monkeypatch, target=target, pins=pins)
-        assert tomllib.loads(stage.read_text(encoding="utf-8"))["project"]["dependencies"] == pins, target
+        assert tomllib.loads(stage.read_text(encoding="utf-8"))["project"]["dependencies"] == written, target
+    _flet_build(sandbox, monkeypatch, target="linux", pins=pins)  # a desktop app is built on its own OS: pip reads it right
+    assert tomllib.loads(stage.read_text(encoding="utf-8"))["project"]["dependencies"] == pins
 
 
 def test_flet_build_upx_only_for_desktop_and_missing_output(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:

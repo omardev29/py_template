@@ -10,9 +10,9 @@
   exported from uv.lock, but for mobile and web targets a package without a pure wheel (msgpack)
   keeps only the project's own bounds: flet build takes their binaries from Flet's own index,
   which may not hold uv.lock's release (common.unpin_binaries). flet-desktop is left out (no
-  flet build app starts that client), and for the web the Emscripten markers are written the way
-  flet build's pip reads them (web_markers). It installs the Flutter SDK Flet pins the first
-  time (~3 GB in ~/flutter).
+  flet build app starts that client), and for mobile and web targets the platform markers are
+  written the way flet build's pip reads them (target_markers). It installs the Flutter SDK Flet
+  pins the first time (~3 GB in ~/flutter).
 - On Windows it needs Visual Studio (C++) and Developer Mode turned on.
 """
 
@@ -36,7 +36,10 @@ from . import common
 MOBILE_WEB = {"apk", "aab", "ipa", "ios-simulator", "web"}
 STAGE_APP = "src"  # build() stages the app in <work>/src: [tool.flet.app] path must point there
 DESKTOP_CLIENT = "flet-desktop"  # the client `flet run` and `flet pack` start: no flet build app does
-_EMSCRIPTEN_MARKER = re.compile(r"\bsys_platform\s*(==|!=)\s*(['\"])emscripten\2")
+# sys.platform values as platform.system() names the same platform: what target_markers writes
+PLATFORM_SYSTEM = {"android": "Android", "darwin": "Darwin", "emscripten": "Emscripten", "ios": "iOS", "linux": "Linux", "win32": "Windows"}
+_SYS_PLATFORM_MARKER = re.compile(r"\bsys_platform\s*(==|!=)\s*(['\"])([^'\"]*)\2")
+_OS_NAME_MARKER = re.compile(r"\bos_name\s*(==|!=)\s*(['\"])(nt|posix)\2")
 
 
 def _developer_mode() -> bool:
@@ -73,16 +76,55 @@ def _pinned_requirements(cfg_tool: envs.PyEnv) -> list[str]:
     return [common.direct_reference(ln.strip()) for ln in out.splitlines() if ln.strip() and not ln.startswith("#")]
 
 
-def web_markers(pins: list[str]) -> list[str]:
-    """For the web target: `sys_platform` markers about Emscripten as `platform_system` ones.
+def target_markers(pins: list[str]) -> list[str]:
+    """For a mobile or web target: the `sys_platform` and `os_name` markers of the pins as
+    `platform_system` ones, which mean the same on the target (every mobile and web target is
+    POSIX: `os_name == 'nt'` is Windows).
 
-    uv writes flet's `platform_system != "Emscripten"` (httpx, oauthlib: flet leaves them out in
-    the browser) as `sys_platform != 'emscripten'`, and serious_python, which runs flet build's
-    pip on the build machine, fakes only `platform.system()` for the target: pip read the build
-    machine's sys_platform and put httpx and its tree into every web app (1.2 of the 5.6 MB of
-    its app.zip). In Pyodide both markers mean the same (CLAUDE.md 15.1).
+    serious_python runs flet build's pip on the build machine with only `platform.system()` faked
+    for the target (bin/sitecustomize.dart), and uv writes a `platform_system` marker as a
+    `sys_platform` one (flet's `platform_system != "Emscripten"`, a user's `platform_system ==
+    "Android"`): pip read the build machine's sys_platform and os_name. Every web app got httpx and
+    its tree, which flet leaves out in the browser; an app's Android-only requirement was left out
+    of the .apk, and a Linux-only one went in (a native one failed the build: no Android wheel).
+    A value platform.system() has no fixed name for (`cygwin`, `freebsd14`) stays (CLAUDE.md 15.1).
     """
-    return [_EMSCRIPTEN_MARKER.sub(lambda m: f"platform_system {m[1]} 'Emscripten'", pin) for pin in pins]
+
+    def system(m: re.Match[str]) -> str:
+        name = PLATFORM_SYSTEM.get(m[3])
+        return f"platform_system {m[1]} '{name}'" if name else m[0]
+
+    def windows(m: re.Match[str]) -> str:
+        same = (m[1] == "==") == (m[3] == "nt")  # os_name == 'nt' <=> platform_system == 'Windows'
+        return f"platform_system {'==' if same else '!='} 'Windows'"
+
+    out = []
+    for pin in pins:
+        requirement, marked, marker = pin.partition(" ;")
+        if marked:
+            marker = _OS_NAME_MARKER.sub(windows, _SYS_PLATFORM_MARKER.sub(system, marker))
+        out.append(requirement + marked + marker)
+    return out
+
+
+_LOWER_BOUND = re.compile(r">=|~=|==|>(?!=)")
+
+
+def relaxed_message(target: str, relaxed: list[tuple[str, str]]) -> str:
+    """What `common.unpin_binaries` did for a mobile or web target, and where pip looks instead:
+    Flet's own index (pypi.flet.dev), and for the web first the packages of the Pyodide release
+    flet build uses (serious_python serves them to pip). A lower bound the project keeps may be
+    newer than they hold: `./pyt add numpy` writes `numpy>=<the newest release on PyPI>`."""
+    source = "the packages of its Pyodide release and Flet's own index, pypi.flet.dev" if target == "web" else "Flet's own index, pypi.flet.dev"
+    shown = ", ".join(f"{old} -> {new}" for old, new in relaxed)
+    bounded = [new for _, new in relaxed if _LOWER_BOUND.search(new)]
+    hint = (
+        f"; a lower bound may be newer than it holds ({', '.join(bounded)}: `./pyt add` writes the newest release on PyPI as one):"
+        " if pip finds no release, lower it in pyproject.toml, then ./pyt lock"
+        if bounded
+        else ""
+    )
+    return f"{target}: flet build takes this target's binary packages from {source}, which may not hold uv.lock's versions: {shown} (pip picks a release that fits every package's bounds{hint})"
 
 
 def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
@@ -175,16 +217,11 @@ def build(req: BuildRequest) -> Path:
 
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))  # an editor or PS 5.1 may add a BOM
     pins = _pinned_requirements(envs.tool_env(cfg))
-    if target == "web":
-        pins = web_markers(pins)
     if target in MOBILE_WEB:
+        pins = target_markers(pins)
         pins, relaxed = common.unpin_binaries(pins)
         if relaxed:
-            ui.warn(
-                f"{target}: not pinned to uv.lock's version: {', '.join(relaxed)} (flet build installs the binary "
-                "packages of this target from Flet's own index, pypi.flet.dev, which may not hold it: pip picks a "
-                "release that fits every package's bounds)"
-            )
+            ui.warn(relaxed_message(target, relaxed))
     text = build_pyproject(cfg, data, pins)
     (work / "pyproject.toml").write_text(text, encoding="utf-8", newline="\n")
 

@@ -2376,10 +2376,14 @@ Per method:
   `-e ./libs/x ; <markers>`, which pip refused, relative to the project and not the stage; for a
   mobile or web target a pin of a package uv.lock has no pure wheel for keeps only the project's
   own bounds and its markers, `common.unpin_binaries` with `binary_only` and
-  `project_specifiers`, named in a warning: those targets take their binaries from Flet's own
-  index, 15.1; for the web `flet.web_markers` writes uv's `sys_platform` markers about
-  Emscripten as `platform_system` ones, the only one flet build's pip reads for the target:
-  httpx and its tree were 1.2 MB more, 15.1) and
+  `project_specifiers`, named with what is written instead in a warning
+  (`flet.relaxed_message`, which also names a kept lower bound: `./pyt add numpy` writes the
+  newest release on PyPI as one): those targets take their binaries from Flet's own index, and
+  the web from its Pyodide release first, 15.1; for every mobile and web target
+  `flet.target_markers` writes uv's `sys_platform` markers (and `os_name`) as `platform_system`
+  ones, the only one flet build's pip reads for the target: every web app carried httpx and its
+  tree, 1.2 MB more, and an apk lacked an Android-only requirement and got a Linux-only one,
+  15.1) and
   serialises the PARSED `[tool.flet]` of the
   project `pyproject.toml` (no other table leaks in; `[tool.flet.app]` alone is kept) with
   `app.path` forced to `STAGE_APP` (`src`, where `build` stages the app; another value is
@@ -4194,13 +4198,18 @@ Flet (flet, flet-desktop, flet pack, flet build):
   "==X.Y.*"` (10). Test: `test_build_methods.py::test_flet_build_pins_the_python_minor`,
   `test_fixes.py::test_flet_build_pyproject_takes_only_tool_flet`. Goes: never.
 - **`flet build` takes a mobile or web target's binary packages from Flet's own index**
-  (LIMITATION, flet-cli 1.0.1 with serious_python): pip runs with `--only-binary :all:` and
-  `--extra-index-url https://pypi.flet.dev`, which holds other releases than PyPI (msgpack 1.1.0
-  and 1.1.2, where a new flet project locks 1.2.2 from PyPI, which has no Android or iOS wheel):
-  the exact pin had no solution and an `apk`, `aab` or `ipa` build failed. Fix:
-  `common.unpin_binaries` in `methods.flet.build` (10). Test:
-  `test_build_methods.py::test_flet_build_leaves_mobile_binaries_to_flets_index`. Goes: never
-  (Flet's index follows its own schedule).
+  (LIMITATION, flet-cli 1.0.1 with serious_python 4.7.1): pip runs with `--only-binary :all:`
+  and `--extra-index-url https://pypi.flet.dev` (for the web also a local index of the packages
+  of its Pyodide release, where numpy and msgpack come from: pypi.flet.dev has no Emscripten
+  wheel of them), which hold other releases than PyPI (msgpack 1.1.0 and 1.1.2, where a new flet
+  project locks 1.2.2 from PyPI, which has no Android or iOS wheel; Pyodide 314.0.7 has numpy
+  2.4.6): the exact pin had no solution and an `apk`, `aab` or `ipa` build failed. Fix:
+  `common.unpin_binaries` in `methods.flet.build` (10); a lower bound the project itself keeps
+  can still be newer than those hold (`./pyt add numpy` writes `numpy>=<the newest on PyPI>`),
+  so `flet.relaxed_message` names it and says to lower it in pyproject.toml. Test:
+  `test_build_methods.py::test_flet_build_leaves_mobile_binaries_to_flets_index`,
+  `test_flet_relaxed_message_hints_at_a_lower_bound_only_when_one_is_kept`. Goes: never
+  (Flet's index and Pyodide follow their own schedule).
 - **`flet build` looks for `<work>/<path>/main.py`** (LIMITATION): another `[tool.flet.app]
   path` aborted after installing Flutter. Fix: `methods.flet.build_pyproject` forces
   `methods.flet.STAGE_APP` with a warning (10). Test:
@@ -4218,18 +4227,26 @@ Flet (flet, flet-desktop, flet pack, flet build):
   `test_build_methods.py::test_flet_build_needs_developer_mode_on_windows`,
   `test_flet_method_refuses_before_any_work`, `test_flet_build_mobile_and_web_ship_the_py_code`.
   Goes: never.
-- **`flet build web` reads a `sys_platform` marker for the build machine** (DEFECT, flet-cli
-  1.0.1 with serious_python 4.7.1): its pip runs on the build machine with only
-  `platform.system()` faked for the target (serious_python's pip `sitecustomize`), and uv writes
-  flet's `platform_system != 'Emscripten'` (httpx, oauthlib: flet leaves them out in a browser)
-  as `sys_platform != 'emscripten'`, the same marker for uv (astral-sh/uv#9949). Every web app
-  carried httpx and its tree, 1.2 MB of the skeleton's 5.6 MB `app.zip`. Up: none found (cf. the
-  flet 0.85.1 release notes, which moved those markers to `platform_system` so that flet build's
-  pip reads them). Fix: `methods.flet.web_markers` writes the Emscripten `sys_platform` markers of
-  a web build's pins as `platform_system` ones, which mean the same in Pyodide (10). Test:
-  `test_build_methods.py::test_flet_web_markers_say_what_flets_pip_reads` (through `packaging`'s
-  marker evaluation), `test_flet_build_web_rewrites_only_the_web_pins`. Goes: when flet build's
-  pip reads the target's `sys_platform` (or uv keeps such a marker as written).
+- **`flet build` reads `sys_platform` and `os_name` markers for the build machine on mobile and
+  web targets** (DEFECT, flet-cli 1.0.1 with serious_python 4.7.1): its pip runs on the build
+  machine with only `platform.system()` faked for the target (serious_python's pip
+  `sitecustomize`, bin/sitecustomize.dart: `Android`, `iOS`, `Emscripten`), and uv writes a
+  `platform_system` marker as a `sys_platform` one, the same marker for uv (astral-sh/uv#9949):
+  flet's `platform_system != 'Emscripten'` (httpx, oauthlib: flet leaves them out in a browser),
+  a user's `platform_system == 'Android'` or `'Linux'`. Every web app carried httpx and its tree,
+  1.2 MB of the skeleton's 5.6 MB `app.zip`; an apk lacked its Android-only requirements and got
+  the Linux-only ones (a native one failed the build: no Android wheel); from a Windows build
+  machine `os_name == 'nt'` held too. Up: none found (cf. the flet 0.85.1 release notes, which
+  moved flet's own markers to `platform_system` so that flet build's pip reads them). Fix:
+  `methods.flet.target_markers` writes the `sys_platform` markers of a mobile or web build's pins
+  as `platform_system` ones (`flet.PLATFORM_SYSTEM`: android, darwin, emscripten, ios, linux,
+  win32; another value, `cygwin`, stays), and `os_name` ones too (every such target is POSIX),
+  which mean the same on the device (10). A `platform_machine` marker is still the build
+  machine's (serious_python runs pip once per ABI with the same requirements): not handled.
+  Test: `test_build_methods.py::test_flet_target_markers_say_what_flets_pip_reads` (through
+  `packaging`'s marker evaluation, every target from every build machine),
+  `test_flet_build_rewrites_the_markers_of_mobile_and_web_pins`. Goes: when flet build's pip
+  reads the target's `sys_platform` (or uv keeps such a marker as written).
 - **Flutter web draws the app on a canvas** (LIMITATION): the page's DOM holds no text or button
   of the app; Flutter's semantics tree (its accessibility DOM, `flt-semantics-host`) does, once
   a screen reader or a click on its `flt-semantics-placeholder` turns it on. Fix:

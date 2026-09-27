@@ -1002,11 +1002,21 @@ about 7 minutes, the next ones about 3.
   also leaves out what Flet does not use in a browser (httpx, oauthlib). The skeleton's web
   build, measured on Linux in September 2026: 12.6 MB, of which the zip of the app and its
   Python packages is 1.2 MB (5.6 MB with those packages).
-- Mobile and web apps take their binary packages (msgpack, numpy: those without a pure-Python
-  wheel) from Flet's own index, `pypi.flet.dev`, which holds other releases than PyPI. For those
-  targets such a package is not pinned to `uv.lock`'s version (a new flet project locks msgpack
-  1.2.2, and Flet's index has 1.1.x): it keeps the bounds your `pyproject.toml` gives it, pip picks
-  a release that fits them, and the build names it in a warning.
+- Platform markers: Flet's pip installs a mobile or web app's packages on the build machine, and
+  reads only `platform_system` for the target. The build writes your requirements'
+  `sys_platform` and `os_name` markers (uv turns `platform_system == "Android"` into
+  `sys_platform == 'android'`) as `platform_system` ones, so a requirement marked for Android goes
+  into the apk and one marked for Linux does not. A `platform_machine` marker is still read for
+  the build machine.
+- Mobile apps take their binary packages (msgpack, numpy: those without a pure-Python wheel) from
+  Flet's own index, `pypi.flet.dev`, and web apps from the packages of the Pyodide release Flet
+  uses (then `pypi.flet.dev`); both hold other releases than PyPI. For those targets such a
+  package is not pinned to `uv.lock`'s version (a new flet project locks msgpack 1.2.2, and
+  Flet's index has 1.1.x): it keeps the bounds your `pyproject.toml` gives it, pip picks a
+  release that fits them, and the build names it in a warning. A lower bound there may be newer
+  than those indexes hold: `./pyt add numpy` writes `numpy>=<the newest release on PyPI>`, and
+  Pyodide and Flet's index lag behind. If pip then finds no release, lower the bound in
+  `pyproject.toml` (`numpy>=2.4`), then `./pyt lock`.
 - `cleanup` (default `true`): `--cleanup-app --cleanup-packages`. `false` turns both off: Flet
   cleans the packages unless told not to, so the build project gets `app = false` and
   `packages = false` in `[tool.flet.cleanup]` (values your own `[tool.flet.cleanup]` sets stay).
