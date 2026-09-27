@@ -18,8 +18,9 @@ its record, and says what it left and why.
 
 Neither ever edits PATH, a shell's startup files or the registry: when the bin folder is not
 on PATH they say so and name `uv tool update-shell`. Every refusal comes before the first
-write; the new copy is written into a folder of its own and swapped in whole, and a failure at
-any step (Ctrl+C too) puts the old copy and the old launchers back.
+write, all of them in one message; the new copy is written into a folder of its own and
+swapped in whole, and a failure at any step (Ctrl+C, SIGTERM and SIGHUP too) puts the old copy
+and the old launchers back.
 """
 
 from __future__ import annotations
@@ -30,11 +31,14 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import stat
 import subprocess
+import sys
 import tempfile
+import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -92,6 +96,11 @@ def snapshot_dir(environ: Mapping[str, str] | None = None, windows: bool = IS_WI
     return home / "pytemplate" / "template" if home is not None else None
 
 
+def data_home_names() -> str:
+    """The variables that name the user data folder (data_home), for a message when none does."""
+    return "LOCALAPPDATA (or USERPROFILE)" if IS_WINDOWS else "HOME (or an absolute XDG_DATA_HOME)"
+
+
 def bin_dir() -> Path:
     """uv's tool bin folder (`uv tool dir --bin`: UV_TOOL_BIN_DIR, XDG_BIN_HOME,
     XDG_DATA_HOME/../bin or ~/.local/bin), where `uv tool install` puts its commands."""
@@ -140,6 +149,97 @@ def not_ours(path: Path) -> str:
     if not is_launcher(path):
         return "not a pytemplate launcher (no `pytemplate-launcher` line)"
     return ""
+
+
+def _is_link(path: Path) -> bool:
+    """A symbolic link, or a Windows junction (cmd_env._is_link: os.path.islink misses those)."""
+    from .cmd_env import _is_link  # cmd_env imports this module
+
+    return _is_link(path)
+
+
+def not_an_install(snapshot: Path) -> str:
+    """Why pyt install may not replace (nor uninstall delete) what is at `snapshot`, the folder of
+    the installed template: "" when it is the copy an earlier install made there. A link is never
+    followed: the folder it names is not pyt install's to replace or delete (a link to a real
+    install was refused as one that "holds no" record, which it did hold)."""
+    if _is_link(snapshot):
+        try:
+            target = f" to {os.readlink(snapshot)}"
+        except (OSError, ValueError):
+            target = ""
+        return f"it is a symbolic link{target} (pyt install never makes one, nor writes through one)"
+    if not snapshot.is_dir():
+        return "it is not a folder (pyt install did not make it)"
+    if read_record(snapshot) is None:
+        return f"it holds no {RECORD} (pyt install did not make it)"
+    return ""
+
+
+def _same_folder(a: Path, b: Path) -> bool:
+    """Whether two paths name one folder (spelled differently, or through a link, too)."""
+    if _norm(a) == _norm(b):
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return False
+
+
+def recorded_bin(record: Mapping[str, object] | None) -> Path | None:
+    """The bin folder an install record names (where that install wrote its launchers)."""
+    value = record.get("bin") if record else None
+    return Path(value) if isinstance(value, str) and value and os.path.isabs(value) else None
+
+
+# PATHEXT without a PATHEXT variable: cmd's own default order
+DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC"
+
+
+def pathext_shadows(folder: Path, environ: Mapping[str, str] | None = None) -> list[Path]:
+    """Windows: the files of `folder` that a bare `pyt` runs instead of pyt.cmd. cmd, xonsh,
+    nushell and Python's subprocess take the first pyt<ext> of a folder in PATHEXT order, and
+    .COM, .EXE and .BAT come before .CMD: another tool's pyt.exe there (`uv tool install
+    python-taint` puts one) won in them, and nothing said so. PowerShell takes pyt.ps1 first."""
+    if not IS_WINDOWS:
+        return []
+    env = os.environ if environ is None else environ
+    pathext = next((v for k, v in env.items() if k.upper() == "PATHEXT"), "") or DEFAULT_PATHEXT
+    exts = [e.strip().lower() for e in pathext.split(";") if e.strip().startswith(".")]
+    before = exts[: exts.index(".cmd")] if ".cmd" in exts else exts
+    return [folder / f"pyt{ext}" for ext in dict.fromkeys(before) if os.path.lexists(folder / f"pyt{ext}")]
+
+
+SHADOW_FIX = (
+    "remove such a file: another tool's command (`uv tool list` names the tool, `uv tool uninstall "
+    "TOOL` removes it), or set UV_TOOL_BIN_DIR to a folder of its own and run ./pyt install again"
+)
+
+
+def _shadow_problem(folder: Path, shadows: list[Path]) -> str:
+    names = ", ".join(p.name for p in shadows)
+    which = "it comes" if len(shadows) == 1 else "they come"
+    return (
+        f"{names} in {folder} would run instead of pyt.cmd: cmd, xonsh, nushell and Python start the "
+        f"first pyt<ext> of a folder in PATHEXT order, and {which} before .cmd"
+    )
+
+
+def policy_notes() -> list[tuple[str, str]]:
+    """Windows: (what, what to do) for each PowerShell whose execution policy blocks scripts. A
+    bare `pyt` there runs pyt.ps1 (PowerShell takes it before pyt.cmd), which then does not
+    start: Restricted is Windows PowerShell 5.1's default on client Windows (shells.doctor reads
+    the same policies)."""
+    if not IS_WINDOWS or "pyt.ps1" not in LAUNCHERS:
+        return []
+    return [
+        (
+            f"{label}: ExecutionPolicy = {policy}: a bare `pyt` there runs pyt.ps1, which this policy does not let run",
+            "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned, or type pyt.cmd in that PowerShell",
+        )
+        for label, _edition, policy in shells.ps_policies()
+        if policy in shells.BLOCKING_POLICIES
+    ]
 
 
 # pyt.cmd names itself here (%~f0): cmd reads a batch file one line at a time, opening it again
@@ -371,6 +471,9 @@ class Plan:
     launchers: dict[str, bytes]  # launcher -> its bytes
     replaced: list[str] = field(default_factory=list)  # launchers of an earlier install it rewrites
     left_out: list[tuple[str, list[str]]] = field(default_factory=list)  # (why, paths) not copied
+    # The launchers of the earlier install in the bin folder its record names, when uv's tool bin
+    # folder is another one now (UV_TOOL_BIN_DIR changed): removed once the swap has succeeded
+    earlier: list[Path] = field(default_factory=list)
 
 
 def _template_ci(rel_path: str) -> bool:
@@ -389,6 +492,8 @@ def _inside(path: Path, folder: Path) -> bool:
 
 
 def _refuse_elsewhere() -> None:
+    if os.environ.get("PYTEMPLATE_GLOBAL") == "1":  # typed outside any project: a launcher ran the installed template
+        raise PytError(f"outside a project pyt install installs nothing: to install or update pyt, run {FROM_A_CLONE}")
     if installed_here():
         raise PytError(f"this is the installed copy of the template ({ROOT}): {FROM_A_CLONE} updates it")
     if not (TEMPLATE / "template-repo").is_file():
@@ -410,38 +515,60 @@ def _launcher_bytes(name: str) -> bytes:
     return data
 
 
+def _refuse(problems: list[str]) -> None:
+    """Every refusal of one run in one message (each on its own line when there are several)."""
+    if len(problems) == 1:
+        raise PytError(problems[0])
+    if problems:
+        lines = "\n".join("  - " + p.replace("\n", "\n    ") for p in problems)
+        raise PytError(f"pyt install writes nothing, for {len(problems)} reasons:\n{lines}")
+
+
 def make_plan() -> Plan:
-    """Everything install writes, and every refusal, before the first write."""
+    """Everything install writes, and every refusal, before the first write. What stops it is
+    gathered and said in one message: fixing one thing, then meeting the next on the next run,
+    took a run per problem. Only what makes the rest uncheckable stops it at once (this is no
+    clone of the template; no data folder; uv cannot name its bin folder: exit 3)."""
     _refuse_elsewhere()
     snapshot = snapshot_dir()
     if snapshot is None:
-        where = "LOCALAPPDATA (or USERPROFILE)" if IS_WINDOWS else "HOME (or an absolute XDG_DATA_HOME)"
-        raise PytError(f"no user data folder to install the template into: {where} is not set", 3)
+        raise PytError(f"no user data folder to install the template into: {data_home_names()} is not set", 3)
+    folder = bin_dir()
+    problems: list[str] = []
     if _inside(snapshot, ROOT) or _inside(ROOT, snapshot):
-        raise PytError(f"the installed template would be {snapshot}, which overlaps this clone ({ROOT}): set another data folder")
-    if os.path.lexists(snapshot) and (os.path.islink(snapshot) or not snapshot.is_dir() or read_record(snapshot) is None):
-        raise PytError(f"{snapshot} exists and pyt install did not make it (it holds no {RECORD}): move it away, then run ./pyt install again")
+        problems.append(f"the installed template would be {snapshot}, which overlaps this clone ({ROOT}): set another data folder")
+    elif os.path.lexists(snapshot) and (why := not_an_install(snapshot)):
+        problems.append(f"{snapshot}: {why}: move it away (or set another data folder), then run ./pyt install again")
     tracked, how = presets._tracked_template()
     if tracked is None:
-        raise PytError(f"pyt install copies the files git tracks in the template, and here it cannot tell which ({how}): use a git clone ({presets.TEMPLATE_URL})")
-    folder = bin_dir()
+        problems.append(f"pyt install copies the files git tracks in the template, and here it cannot tell which ({how}): use a git clone ({presets.TEMPLATE_URL})")
     for inside in (ROOT, snapshot.parent):
         if _inside(folder, inside):
-            raise PytError(f"uv's tool bin folder {folder} is inside {inside}: set UV_TOOL_BIN_DIR to a folder of its own")
+            problems.append(f"uv's tool bin folder {folder} is inside {inside}: set UV_TOOL_BIN_DIR to a folder of its own")
     if (folder / ".pytemplate").exists():
-        raise PytError(f"uv's tool bin folder {folder} is a project's folder (it holds .pytemplate): set UV_TOOL_BIN_DIR to a folder of its own")
-    launchers = {name: _launcher_bytes(name) for name in LAUNCHERS}
+        problems.append(f"uv's tool bin folder {folder} is a project's folder (it holds .pytemplate): set UV_TOOL_BIN_DIR to a folder of its own")
+    launchers: dict[str, bytes] = {}
     for name in LAUNCHERS:
+        try:
+            launchers[name] = _launcher_bytes(name)
+        except PytError as e:
+            problems.append(str(e))
+    for name, data in launchers.items():
         target = folder / name
-        if run_by_cmd(target) and _read(target) != launchers[name]:
-            raise PytError(
+        if run_by_cmd(target) and _read(target) != data:
+            problems.append(
                 f"cmd runs {target}, which pyt install would replace, and reads it again once this run ends: "
                 f"run the clone's own launcher instead, .\\pyt.cmd install in {ROOT} (or pyt install from PowerShell)"
             )
     blocked = [f"{folder / n}: {why}" for n in LAUNCHERS if os.path.lexists(folder / n) and (why := not_ours(folder / n))]
     if blocked:
         lines = "\n  ".join(blocked)
-        raise PytError(f"pyt install never overwrites a file it did not write:\n  {lines}\n  Move it away (or set UV_TOOL_BIN_DIR), then run ./pyt install again")
+        problems.append(f"pyt install never overwrites a file it did not write:\n  {lines}\n  Move it away (or set UV_TOOL_BIN_DIR), then run ./pyt install again")
+    shadows = pathext_shadows(folder)
+    if shadows:
+        problems.append(f"{_shadow_problem(folder, shadows)}:\n  {SHADOW_FIX}")
+    _refuse(problems)
+    assert tracked is not None  # a refusal otherwise
     untracked = [p for p in presets._git_files("--others", "--exclude-standard") or [] if not _template_ci(p)]
     deleted = [p for p in tracked if not os.path.lexists(ROOT / p)]
     commit, dirty = source_state()
@@ -454,15 +581,18 @@ def make_plan() -> Plan:
         "launchers": list(LAUNCHERS),
         "installed": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    old = read_record(snapshot)
+    earlier = recorded_bin(old)
     return Plan(
         snapshot=snapshot,
         bin=folder,
         files=[p for p in tracked if not _template_ci(p) and p != RECORD and os.path.lexists(ROOT / p)],
         record=record,
-        old=read_record(snapshot),
+        old=old,
         launchers=launchers,
         replaced=[n for n in LAUNCHERS if is_launcher(folder / n)],
         left_out=[(why, paths) for why, paths in (("deleted in the working tree", deleted), ("not tracked by git", untracked)) if paths],
+        earlier=[earlier / n for n in NAMES if is_launcher(earlier / n)] if earlier is not None and not _same_folder(earlier, folder) else [],
     )
 
 
@@ -506,21 +636,26 @@ def _copy_files(files: Iterable[str], dest: Path) -> None:
             shutil.copy2(src, target)
 
 
-def remove_leftovers(snapshot: Path, folders: Iterable[Path]) -> list[Path]:
-    """What an interrupted install left: `.template-new-*`/`.template-old-*` next to the
-    installed template, and staged launchers in the bin folders. Returns what it removed."""
+def remove_leftovers(snapshot: Path, folders: Iterable[Path], stuck: list[Path] | None = None) -> list[Path]:
+    """What an unfinished install or uninstall left: `.template-new-*`/`.template-old-*` next to
+    the installed template, and staged launchers in the bin folders. Returns what it removed;
+    what it could not remove goes to `stuck` (a file in use)."""
     gone: list[Path] = []
     with contextlib.suppress(OSError):
         for entry in snapshot.parent.iterdir():
-            if entry.name.startswith((NEW, OLD)) and presets._remove(entry):
-                gone.append(entry)
+            if entry.name.startswith((NEW, OLD)):
+                if presets._remove(entry):
+                    gone.append(entry)
+                elif stuck is not None:
+                    stuck.append(entry)
     for folder in folders:
         with contextlib.suppress(OSError):
             for entry in folder.iterdir():
                 if STAGED.match(entry.name) and is_launcher(entry):
-                    with contextlib.suppress(OSError):
-                        entry.unlink()
+                    if _unlink(entry):
                         gone.append(entry)
+                    elif stuck is not None:
+                        stuck.append(entry)
     return gone
 
 
@@ -580,21 +715,38 @@ class _Swap:
             tmp, target = self.staged[0]
             # Recorded before the replace: an interrupt right after it must still undo it
             self.replaced.append((target, target.read_bytes() if os.path.lexists(target) else None))
-            os.replace(tmp, target)
+            try:
+                os.replace(tmp, target)
+            except OSError as e:
+                # Nothing was replaced (os.replace is all or nothing): undo has nothing to put back
+                # there (it said "could not put back" for a launcher that never changed), and the
+                # error names the launcher, not the staged file (its filename)
+                self.replaced.pop()
+                if e.errno is None:
+                    raise
+                raise OSError(e.errno, e.strerror or os.strerror(e.errno), str(target)) from e
             self.staged.pop(0)
 
     def undo(self) -> list[str]:
         """Put every launcher and the old copy back; return what could not be."""
         failed: list[str] = []
         for target, before in reversed(self.replaced):
+            if before is not None and _read(target) == before:
+                continue  # the replace never happened (or put the same bytes there)
+            staged: Path | None = None
             try:
                 if before is None:
                     with contextlib.suppress(FileNotFoundError):  # the replace never happened
                         target.unlink()
                 else:
-                    os.replace(_stage(target.parent, target.name, before), target)
+                    staged = _stage(target.parent, target.name, before)
+                    os.replace(staged, target)
+                    staged = None
             except OSError as e:
                 failed.append(f"{target} ({e.strerror or e})")
+            finally:
+                if staged is not None:  # its replace failed: never a staged file left behind
+                    _unlink(staged)
         for tmp, _target in self.staged:
             with contextlib.suppress(OSError):
                 tmp.unlink()
@@ -628,23 +780,77 @@ class _Swap:
             ui.warn(f"could not delete the old copy {self.aside} completely (a file in it is in use?): delete it by hand")
 
 
+@contextlib.contextmanager
+def _terminations_interrupt() -> Iterator[None]:
+    """While the swap runs, SIGTERM and SIGHUP (POSIX) stop it like Ctrl+C: proc.Interrupted, so
+    its undo runs, and cli.main ends the command as it ends every interrupted one (`error:
+    terminated (SIGTERM)`, 128 + N). Their default action killed the runner at once and left a
+    whole `.template-new-*` copy next to the installed template. The first one also ignores the
+    next ones, so the undo is never cut short. Only in the main thread, and only while the
+    signal has its default handler (under nohup it stays ignored), as proc.run does."""
+    installed: list[int] = []
+    if sys.platform != "win32" and threading.current_thread() is threading.main_thread():
+        watched = (signal.SIGTERM, signal.SIGHUP)
+
+        def interrupt(signum: int, _frame: object) -> None:
+            for sig in installed:
+                signal.signal(sig, signal.SIG_IGN)
+            raise proc.Interrupted(0, signum)
+
+        for sig in watched:
+            if signal.getsignal(sig) is signal.SIG_DFL:
+                signal.signal(sig, interrupt)
+                installed.append(sig)
+    try:
+        yield
+    finally:
+        for signum in installed:
+            signal.signal(signum, signal.SIG_DFL)
+
+
 def install(plan: Plan) -> None:
-    """Write the installed template and the launchers: all or nothing."""
+    """Write the installed template and the launchers: all or nothing. Then the launchers of the
+    earlier install in another bin folder go (Plan.earlier)."""
     remove_leftovers(plan.snapshot, [plan.bin])
     swap = _Swap(plan)
-    try:
-        swap.run()
-    except BaseException as e:
-        failed = swap.undo()
-        note = "nothing was changed" if not failed else "could not put back: " + ", ".join(failed)
-        if isinstance(e, PytError):
-            raise PytError(f"{e}\n  {note}", e.code) from e
-        if isinstance(e, OSError):
-            where = f"{e.filename}: " if e.filename else ""
-            raise PytError(f"pyt install failed: {where}{e.strerror or e}\n  {note}", 1) from e
-        ui.error(note)  # Ctrl+C (or a bug: its traceback follows)
-        raise
+    with _terminations_interrupt():
+        try:
+            swap.run()
+        except BaseException as e:
+            failed = swap.undo()
+            note = "nothing was changed" if not failed else "could not put back: " + ", ".join(failed)
+            if isinstance(e, PytError):
+                raise PytError(f"{e}\n  {note}", e.code) from e
+            if isinstance(e, OSError):
+                where = f"{e.filename}: " if e.filename else ""
+                raise PytError(f"pyt install failed: {where}{e.strerror or e}\n  {note}", 1) from e
+            ui.error(note)  # Ctrl+C, SIGTERM, SIGHUP (or a bug: its traceback follows)
+            raise
     swap.finish()
+    _remove_earlier(plan)
+
+
+def _remove_earlier(plan: Plan) -> None:
+    """The launchers the earlier install wrote into another bin folder (UV_TOOL_BIN_DIR changed
+    since): they stayed on PATH, and neither uninstall (it reads the new record) nor doctor looked
+    there any more. Only files with the MARKER (Plan.earlier: never a link); the pyt.cmd cmd runs
+    for this very run gets its self-deleting stand-in (_retire)."""
+    if not plan.earlier:
+        return
+    ui.report(f"  the earlier install's launchers in {plan.earlier[0].parent} (uv's tool bin folder is {plan.bin} now):")
+    for path in plan.earlier:
+        removed: list[str] = []
+        failed: list[str] = []
+        if run_by_cmd(path):
+            _retire(path, removed, [], failed)
+        elif _unlink(path):
+            removed.append(f"removed {path}")
+        else:
+            failed.append(f"{path}: in use or not writable")
+        for line in removed:
+            ui.report(f"    {line}")
+        for line in failed:
+            ui.warn(f"could not remove the earlier install's launcher {line}: delete it by hand")
 
 
 def _say_plan(plan: Plan) -> None:
@@ -655,16 +861,23 @@ def _say_plan(plan: Plan) -> None:
     for why, paths in plan.left_out:
         more = f" and {len(paths) - 5} more" if len(paths) > 5 else ""
         ui.info(f"  not copied ({why}): {', '.join(paths[:5])}{more}")
+    if plan.earlier:
+        names = ", ".join(p.name for p in plan.earlier)
+        ui.info(f"  the earlier install's launchers in {plan.earlier[0].parent} ({names}) go once the new ones are in place")
 
 
-def _say_path(folder: Path) -> None:
+def _say_notes(folder: Path) -> None:
+    """What stands between the user and a bare `pyt`: PATH, another pyt before it, and on Windows
+    a PowerShell whose execution policy blocks pyt.ps1."""
     problem = path_problem(folder)
     if problem is not None:
         ui.warn(f"{problem[0]}: {problem[1]}")
-        return
-    other = shadowing(folder)
-    if other:
-        ui.warn(f"another pyt comes first on PATH: {other} (it runs instead of the installed one: remove it, or move {folder} before it)")
+    else:
+        other = shadowing(folder)
+        if other:
+            ui.warn(f"another pyt comes first on PATH: {other} (it runs instead of the installed one: remove it, or move {folder} before it)")
+    for what, fix in policy_notes():
+        ui.warn(f"{what}: {fix}")
 
 
 def cmd_install(cfg: Config, args: list[str]) -> int:
@@ -674,12 +887,13 @@ def cmd_install(cfg: Config, args: list[str]) -> int:
     _say_plan(plan)
     if proc.DRY_RUN:
         targets = ", ".join(str(plan.bin / n) for n in plan.launchers)
-        ui.report(f"(--dry-run) would copy {len(plan.files)} files into {plan.snapshot} and write {targets}")
-        _say_path(plan.bin)
+        also = f", and remove {', '.join(str(p) for p in plan.earlier)}" if plan.earlier else ""
+        ui.report(f"(--dry-run) would copy {len(plan.files)} files into {plan.snapshot} and write {targets}{also}")
+        _say_notes(plan.bin)
         return 0
     install(plan)
     ui.ok("pyt is installed: in a project `pyt` runs that project's runner; elsewhere the installed template (pyt new DIR --preset P, pyt help)")
-    _say_path(plan.bin)
+    _say_notes(plan.bin)
     return 0
 
 
@@ -725,6 +939,46 @@ def _retire(path: Path, removed: list[str], left: list[str], failed: list[str]) 
     removed.append(f"removed {path} (cmd runs it: it deletes itself as this run ends)")
 
 
+def remove_installed(snapshot: Path) -> Path | None:
+    """Delete the installed template so that whatever a failure leaves is still known as pyt
+    install's; return what is left (None: all gone). It moves aside first (`.template-old-*`,
+    which remove_leftovers deletes on the next uninstall or install) and goes from there; where
+    it cannot move (Windows: a terminal's current folder inside it) it is deleted in place, its
+    record last. Deleted in place in any order, the record could go first: a file in use then
+    left a folder that the next uninstall called the user's own and install refused."""
+    aside = _free_name(snapshot.parent, OLD)
+    try:
+        _rename(snapshot, aside)
+    except OSError:
+        return _remove_in_place(snapshot)
+    return None if presets._remove(aside) else aside
+
+
+def _remove_in_place(snapshot: Path) -> Path | None:
+    """The installed template deleted where it is, its record (RECORD) last."""
+    record = snapshot / RECORD
+    done = True
+    try:
+        entries = list(snapshot.iterdir())
+    except OSError:
+        return snapshot
+    for entry in entries:
+        if entry == record.parent and entry.is_dir() and not _is_link(entry):
+            try:
+                inside = list(entry.iterdir())
+            except OSError:
+                done = False
+                continue
+            for sub in inside:
+                if sub.name != record.name:
+                    done = presets._remove(sub) and done
+        else:
+            done = presets._remove(entry) and done
+    if not done:
+        return snapshot  # the record stays: the next uninstall finds the folder by it
+    return None if presets._remove(snapshot) else snapshot
+
+
 def cmd_uninstall(cfg: Config, args: list[str]) -> int:
     """uninstall: the launchers and the installed template that pyt install wrote, nothing else."""
     only_flags("uninstall", args, ())
@@ -736,20 +990,12 @@ def cmd_uninstall(cfg: Config, args: list[str]) -> int:
         folders.append(bin_dir())
     except PytError as e:
         ui.warn(f"{e}: no launcher is looked for there")
-    recorded = record.get("bin") if record else None
-    if isinstance(recorded, str) and recorded:
-        folders.append(Path(recorded))
+    recorded = recorded_bin(record)
+    if recorded is not None:
+        folders.append(recorded)
     removed: list[str] = []
     left: list[str] = []
     failed: list[str] = []
-
-    def remove(path: Path, label: str, delete: Callable[[Path], bool]) -> None:
-        if proc.DRY_RUN:
-            removed.append(f"would remove {label}")
-        elif delete(path):
-            removed.append(f"removed {label}")
-        else:
-            failed.append(f"{path}: in use or not writable")
 
     running: Path | None = None  # the pyt.cmd cmd runs for this very run: it goes last
     for folder in _dedupe(folders):
@@ -761,23 +1007,42 @@ def cmd_uninstall(cfg: Config, args: list[str]) -> int:
                     left.append(f"left {path}: {why}")
                 elif running is None and not proc.DRY_RUN and run_by_cmd(path):
                     running = path
+                elif proc.DRY_RUN:
+                    removed.append(f"would remove {path}")
+                elif _unlink(path):
+                    removed.append(f"removed {path}")
                 else:
-                    remove(path, str(path), _unlink)
+                    failed.append(f"{path}: in use or not writable")
     if snapshot is not None and os.path.lexists(snapshot):
-        if record is None:
-            left.append(f"left {snapshot}: it holds no {RECORD}, so pyt install did not make it")
+        why = not_an_install(snapshot)
+        if why:
+            left.append(f"left {snapshot}: {why}")
+        elif proc.DRY_RUN:
+            removed.append(f"would remove {snapshot} (the installed template)")
         else:
-            remove(snapshot, f"{snapshot} (the installed template)", presets._remove)
+            stuck = remove_installed(snapshot)
+            if stuck is None:
+                removed.append(f"removed {snapshot} (the installed template)")
+            else:
+                failed.append(f"{stuck}: in use or not writable")
     if snapshot is not None and not proc.DRY_RUN:
-        remove_leftovers(snapshot, folders)
+        stuck_leftovers: list[Path] = []
+        for gone in remove_leftovers(snapshot, folders, stuck_leftovers):
+            removed.append(f"removed {gone} (left by an unfinished install or uninstall)")
+        failed.extend(f"{p}: in use or not writable" for p in stuck_leftovers)
         with contextlib.suppress(OSError):
             snapshot.parent.rmdir()  # <data home>/pytemplate, when nothing else is in it
+    failed = list(dict.fromkeys(failed))  # a folder left aside above is a leftover too
     if running is not None:
         _retire(running, removed, left, failed)
     for line in [*removed, *left]:
         ui.report(f"  {line}")
     if failed:
-        raise PytError("could not remove:\n  " + "\n  ".join(failed) + "\n  Close what uses them, then run pyt uninstall again", 1)
+        raise PytError(
+            "could not remove:\n  " + "\n  ".join(failed) + "\n  Close what uses them, then run pyt uninstall again"
+            " (once the `pyt` command is gone: ./pyt uninstall in a project or in a clone of the template)",
+            1,
+        )
     if not removed:
         ui.ok("pyt is not installed: nothing to remove")
     elif not proc.DRY_RUN:
@@ -811,11 +1076,14 @@ def _doctor(check: Check) -> None:
     foreign = [folder / n for n in LAUNCHERS if folder is not None and os.path.lexists(folder / n) and n not in ours]
     for path in foreign:
         check(None, f"{path} is not a pytemplate launcher (pyt install leaves it alone)", "move it away before ./pyt install")
+    for path in pathext_shadows(folder) if folder is not None else []:
+        check(None, _shadow_problem(path.parent, [path]), SHADOW_FIX)
     if record is None and not ours:
         check(None, "pyt is not installed: outside projects there is no `pyt` command", f"to install it: {FROM_A_CLONE}")
         return
     if record is None:
-        check(None, f"launchers in {folder}, but no installed template in {snapshot}: outside projects they only say how to install it", FROM_A_CLONE)
+        where = f"in {snapshot}" if snapshot is not None else f"(no user data folder: {data_home_names()} is not set)"
+        check(None, f"launchers in {folder}, but no installed template {where}: outside projects they only say how to install it", FROM_A_CLONE)
     else:
         check(True, f"installed template: {snapshot} ({describe(record)})", "")
         older = age(record)
@@ -823,14 +1091,26 @@ def _doctor(check: Check) -> None:
             check(None, older, "./pyt install updates it")
     if folder is None:
         return
+    earlier = recorded_bin(record)
+    if earlier is not None and not _same_folder(earlier, folder):
+        left = [n for n in NAMES if is_launcher(earlier / n)]
+        if left:
+            check(
+                None,
+                f"{', '.join(left)} in {earlier}: the launchers of this install, but uv's tool bin folder is {folder} now",
+                f"pyt uninstall removes them; {FROM_A_CLONE} writes them into {folder} (and removes these)",
+            )
     missing = [n for n in LAUNCHERS if n not in ours]
     stale = [n for n in ours if snapshot is not None and (snapshot / n).is_file() and (snapshot / n).read_bytes() != (folder / n).read_bytes()]
     if missing:
         check(None, f"no launcher {', '.join(missing)} in {folder}", FROM_A_CLONE)
     elif stale:
-        check(None, f"{', '.join(stale)} in {folder} differ from the installed template's", FROM_A_CLONE)
+        check(None, f"{', '.join(stale)} in {folder} {'differs' if len(stale) == 1 else 'differ'} from the installed template's", FROM_A_CLONE)
     else:
         check(True, f"launchers in {folder}: {', '.join(ours)}", "")
+    if "pyt.ps1" in ours:
+        for what, fix in policy_notes():
+            check(None, what, fix)
     problem = path_problem(folder)
     if problem is not None:
         check(None, problem[0], problem[1])

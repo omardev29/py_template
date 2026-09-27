@@ -14,6 +14,7 @@ import errno
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -325,6 +326,180 @@ def test_install_runs_only_in_a_clone_of_the_template(template: Path, box: Box, 
     r = pyt(box.snapshot, box, "install", cwd=box.away)
     assert r.returncode == 2 and "this is the installed copy of the template" in r.stderr, r.stderr
     assert _files(box.root) == before
+    # typed outside any project (a launcher ran the installed template): it says how, and never
+    # "this is the installed copy" of a folder the user never named
+    r = pyt(box.snapshot, box, "install", cwd=box.away, PYTEMPLATE_GLOBAL="1")
+    assert r.returncode == 2 and "outside a project pyt install installs nothing" in r.stderr and cmd_install.FROM_A_CLONE in r.stderr, r.stderr
+    assert _files(box.root) == before
+
+
+@needs_git
+@needs_uv
+def test_install_into_another_bin_folder_removes_the_earlier_launchers(clone: Path, box: Box) -> None:
+    """Installed with UV_TOOL_BIN_DIR=A, then again with B: A's launchers stayed (they ran the new
+    copy, uninstall only looked in B, and doctor said there was no pyt). Now the second install
+    removes them once its own are in place, and says so."""
+    first, second = box.root / "bin-a", box.root / "bin-b"
+    assert pyt(clone, box, "install", UV_TOOL_BIN_DIR=str(first)).returncode == 0
+    assert sorted(p.name for p in first.iterdir()) == sorted(cmd_install.LAUNCHERS)
+    dry = pyt(clone, box, "--dry-run", "install", UV_TOOL_BIN_DIR=str(second))
+    assert dry.returncode == 0 and f"and remove {first / 'pyt'}" in dry.stderr and (first / "pyt").is_file(), dry.stderr
+    r = pyt(clone, box, "install", UV_TOOL_BIN_DIR=str(second))
+    assert r.returncode == 0, r.stderr
+    assert f"the earlier install's launchers in {first}" in r.stderr and f"removed {first / 'pyt'}" in r.stderr, r.stderr
+    assert list(first.iterdir()) == [] and sorted(p.name for p in second.iterdir()) == sorted(cmd_install.LAUNCHERS)
+    assert _record(box.snapshot)["bin"] == str(second)
+    r = pyt(clone, box, "uninstall", UV_TOOL_BIN_DIR=str(second))
+    assert r.returncode == 0 and list(second.iterdir()) == [] and not box.snapshot.exists(), r.stderr
+
+
+# --- make_plan in process -----------------------------------------------------------------------------
+
+
+class Planner:
+    """make_plan in process: the installed template and uv's bin folder in tmp_path, the clone's
+    git answers faked, every launcher's bytes NEW_LAUNCHER."""
+
+    def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.tmp = tmp
+        self.snapshot = tmp / "data" / "pytemplate" / "template"
+        self.bin = tmp / "bin"
+        self.bin.mkdir()
+        monkeypatch.setattr(cmd_install, "_refuse_elsewhere", lambda: None)
+        monkeypatch.setattr(cmd_install, "snapshot_dir", lambda environ=None, windows=IS_WINDOWS: self.snapshot)
+        monkeypatch.setattr(cmd_install, "bin_dir", lambda: self.bin)
+        monkeypatch.setattr(cmd_install, "_launcher_bytes", lambda name: NEW_LAUNCHER)
+        monkeypatch.setattr(cmd_install, "source_state", lambda: ("0123456789", False))
+        monkeypatch.setattr(presets, "_tracked_template", lambda: (["a.txt"], "the files git tracks"))
+        monkeypatch.setattr(presets, "_git_files", lambda *args: [])
+        monkeypatch.delenv(cmd_install.LAUNCHER_FILE, raising=False)
+
+    def installed(self, bin: Path) -> None:
+        """An earlier install here, its record naming `bin`."""
+        (self.snapshot / ".pytemplate").mkdir(parents=True)
+        (self.snapshot / cmd_install.RECORD).write_text(json.dumps({"schema": 1, "bin": str(bin)}), encoding="utf-8")
+
+    def refusal(self) -> str:
+        before = _files(self.tmp)
+        with pytest.raises(PytError) as e:
+            cmd_install.make_plan()
+        assert e.value.code == 2 and _files(self.tmp) == before  # before any write
+        return str(e.value)
+
+
+def test_every_refusal_comes_in_one_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A data folder install did not make and a file of the bin folder it did not write: the
+    first run named one, and the next run the other."""
+    p = Planner(tmp_path, monkeypatch)
+    (p.snapshot / "mine").mkdir(parents=True)
+    (p.bin / "pyt").write_text("#!/bin/sh\necho another tool\n", encoding="utf-8")
+    message = p.refusal()
+    assert "pyt install writes nothing, for 2 reasons:" in message, message
+    assert f"{p.snapshot}: it holds no {cmd_install.RECORD} (pyt install did not make it)" in message
+    assert "never overwrites a file it did not write" in message and "pyt: not a pytemplate launcher" in message
+
+
+def test_a_linked_data_folder_is_refused_as_a_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A data folder that is a link to a real install was refused because it "holds no"
+    installed.json, which it did hold: it is refused as the link it is."""
+    p = Planner(tmp_path, monkeypatch)
+    real = tmp_path / "elsewhere"
+    (real / ".pytemplate").mkdir(parents=True)
+    (real / cmd_install.RECORD).write_text("{}\n", encoding="utf-8")
+    p.snapshot.parent.mkdir(parents=True)
+    try:
+        p.snapshot.symlink_to(real, target_is_directory=True)
+    except OSError as e:
+        pytest.skip(f"cannot create a symlink here: {e}")
+    message = p.refusal()
+    assert f"{p.snapshot}: it is a symbolic link to " in message and "never makes one, nor writes through one" in message, message
+    assert "holds no" not in message
+
+
+def test_the_earlier_launchers_are_only_marked_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What install removes from the bin folder of the earlier install: launchers with the MARKER,
+    never another file there nor a link (even to a launcher)."""
+    p = Planner(tmp_path, monkeypatch)
+    earlier = tmp_path / "earlier-bin"
+    earlier.mkdir()
+    p.installed(earlier)
+    (earlier / "pyt").write_bytes(OLD_LAUNCHER)
+    (earlier / "pyt.cmd").write_text("@echo off\r\nrem another tool\r\n", encoding="utf-8")
+    linked = True
+    try:
+        (earlier / "pyt.ps1").symlink_to(earlier / "pyt")
+    except OSError:
+        linked = False
+    assert cmd_install.make_plan().earlier == [earlier / "pyt"]
+    monkeypatch.setattr(cmd_install, "bin_dir", lambda: earlier)  # the same folder: nothing to remove
+    (earlier / "pyt.cmd").unlink()
+    if linked:
+        (earlier / "pyt.ps1").unlink()
+    assert cmd_install.make_plan().earlier == []
+
+
+@pytest.mark.parametrize(
+    ("pathext", "refused"),
+    [(None, ["pyt.exe", "pyt.bat"]), (".COM;.EXE;.BAT;.CMD;.PY", ["pyt.exe", "pyt.bat"]), (".CMD;.EXE", [])],
+    ids=["default PATHEXT", "PATHEXT with .PY", ".CMD first"],
+)
+def test_on_windows_a_pyt_that_runs_before_pyt_cmd_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pathext: str | None, refused: list[str]
+) -> None:
+    """cmd, xonsh, nushell and Python's subprocess take the first pyt<ext> of a folder in PATHEXT
+    order, and .COM, .EXE and .BAT come before .CMD: another tool's pyt.exe in uv's bin folder
+    (`uv tool install python-taint`) ran instead of the installed pyt.cmd, and nothing said so."""
+    monkeypatch.setattr(cmd_install, "IS_WINDOWS", True)
+    if pathext is None:
+        monkeypatch.delenv("PATHEXT", raising=False)
+    else:
+        monkeypatch.setenv("PATHEXT", pathext)
+    p = Planner(tmp_path, monkeypatch)
+    for name in ("pyt.exe", "pyt.bat", "pyt.py"):
+        (p.bin / name).write_bytes(b"MZ another tool\n")
+    if not refused:
+        assert cmd_install.make_plan().bin == p.bin
+        return
+    message = p.refusal()
+    assert f"{', '.join(refused)} in {p.bin} would run instead of pyt.cmd" in message and "PATHEXT" in message, message
+    assert "uv tool uninstall" in message and "pyt.py" not in message
+    d = Doctor(tmp_path / "doctor", monkeypatch)
+    for name in refused:
+        (d.bin / name).write_bytes(b"MZ another tool\n")
+    d.run()
+    assert [n for n in d.notes() if "would run instead of pyt.cmd" in n] == [
+        f"{name} in {d.bin} would run instead of pyt.cmd: cmd, xonsh, nushell and Python start the first pyt<ext> of a "
+        f"folder in PATHEXT order, and it comes before .cmd | {cmd_install.SHADOW_FIX}"
+        for name in refused
+    ], d.lines
+
+
+def test_on_windows_install_and_doctor_note_a_powershell_that_blocks_pyt_ps1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Windows PowerShell 5.1 is Restricted by default on client Windows: a bare `pyt` there runs
+    the installed pyt.ps1 (PowerShell takes it before pyt.cmd), which does not start, and install
+    gave no hint. Install and doctor's `pyt install` step now note each blocking policy."""
+    monkeypatch.setattr(cmd_install, "IS_WINDOWS", True)
+    monkeypatch.setattr(cmd_install, "LAUNCHERS", cmd_install.NAMES)
+    policies = [("Windows PowerShell 5.1", "Desktop", "Restricted"), ("PowerShell 7", "Core", "RemoteSigned")]
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    monkeypatch.setenv("PATH", str(folder))
+    monkeypatch.setattr(cmd_install.shells, "registry_path_dirs", lambda env=None: [], raising=False)
+    monkeypatch.setattr(cmd_install.shells, "_ps_policies", lambda: policies)
+    note = ("Windows PowerShell 5.1: ExecutionPolicy = Restricted: a bare `pyt` there runs pyt.ps1, which this policy does not let run",
+            "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned, or type pyt.cmd in that PowerShell")  # fmt: skip
+    assert cmd_install.policy_notes() == [note]
+    cmd_install._say_notes(folder)
+    assert f"warning: {note[0]}: {note[1]}" in capsys.readouterr().err
+    d = Doctor(tmp_path / "doctor", monkeypatch)
+    monkeypatch.setattr(cmd_install.shells, "_ps_policies", lambda: policies)  # Doctor stubs it out
+    d.install()
+    d.run()
+    assert f"{note[0]} | {note[1]}" in d.notes(), d.lines
+    monkeypatch.setattr(cmd_install.shells, "_ps_policies", lambda: [("Windows PowerShell 5.1", "Desktop", "RemoteSigned")])
+    assert cmd_install.policy_notes() == []
 
 
 # --- uninstall ----------------------------------------------------------------------------------
@@ -392,6 +567,89 @@ def test_leftovers_of_an_interrupted_install_are_cleaned_up(template: Path, box:
     (parent / (cmd_install.NEW + "x3")).mkdir()
     assert pyt(template, box, "uninstall").returncode == 0
     assert not parent.exists() and box.launchers() == {".pyt-install-xyz": b"not a launcher\n"}
+
+
+NO_CFG: Any = None  # install and uninstall read nothing of the Config
+
+
+class Installed:
+    """An installed template (its record naming the bin folder) and a launcher in tmp_path, for
+    uninstall in process; `stuck` names a file of it that cannot be deleted while it is True."""
+
+    def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.snapshot = tmp / "data" / "pytemplate" / "template"
+        self.bin = tmp / "bin"
+        (self.snapshot / ".pytemplate").mkdir(parents=True)
+        (self.snapshot / "src").mkdir()
+        for rel in (".pytemplate/pyt.py", "src/a.py", "in-use.txt", "z.txt"):
+            (self.snapshot / rel).write_bytes(b"x\n")
+        (self.snapshot / cmd_install.RECORD).write_text(json.dumps({"schema": 1, "bin": str(self.bin)}), encoding="utf-8")
+        self.bin.mkdir()
+        (self.bin / "pyt").write_bytes(NEW_LAUNCHER)
+        monkeypatch.setattr(cmd_install, "snapshot_dir", lambda environ=None, windows=IS_WINDOWS: self.snapshot)
+        monkeypatch.setattr(cmd_install, "bin_dir", lambda: self.bin)
+        monkeypatch.delenv(cmd_install.LAUNCHER_FILE, raising=False)
+        self.stuck = True
+        real = os.unlink
+
+        def unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+            if self.stuck and os.path.basename(os.fsdecode(path)) == "in-use.txt":
+                raise PermissionError(errno.EACCES, "Permission denied", os.fsdecode(path))
+            real(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "unlink", unlink)
+        monkeypatch.setattr(os, "remove", unlink)
+
+
+@pytest.mark.parametrize("movable", [True, False], ids=["moved aside first", "deleted in place"])
+def test_a_failed_uninstall_can_be_finished(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, movable: bool) -> None:
+    """A file of the installed template that cannot be deleted (in use on Windows, chattr +i):
+    rmtree deleted the record first and left the folder, which the next uninstall then called
+    the user's own ("holds no installed.json") and install refused, although both said to run
+    uninstall again. Now it moves aside first (a leftover the next uninstall or install deletes),
+    or, where it cannot move (Windows: a terminal's folder inside it), goes in place with its
+    record last: either way the next uninstall finishes the job."""
+    inst = Installed(tmp_path, monkeypatch)
+    if not movable:
+        real = cmd_install._rename
+
+        def rename(src: Path, dst: Path) -> None:
+            if src == inst.snapshot:
+                raise PermissionError(errno.EACCES, "Permission denied", str(src))
+            real(src, dst)
+
+        monkeypatch.setattr(cmd_install, "_rename", rename)
+    with pytest.raises(PytError, match="could not remove") as e:
+        cmd_install.cmd_uninstall(NO_CFG, [])
+    assert e.value.code == 1 and "run pyt uninstall again" in str(e.value)
+    assert not (inst.bin / "pyt").exists()
+    if movable:
+        left = list(inst.snapshot.parent.iterdir())
+        assert len(left) == 1 and left[0].name.startswith(cmd_install.OLD), left
+        assert sorted(p.name for p in left[0].iterdir()) == ["in-use.txt"] and f"{left[0]}: in use" in str(e.value)
+        assert not inst.snapshot.exists()  # install is free to write a new one there
+    else:
+        assert cmd_install.read_record(inst.snapshot) is not None and cmd_install.not_an_install(inst.snapshot) == ""
+        assert sorted(p.relative_to(inst.snapshot).as_posix() for p in inst.snapshot.rglob("*")) == [".pytemplate", cmd_install.RECORD, "in-use.txt"]
+    inst.stuck = False  # the program that held the file has ended
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    assert not inst.snapshot.parent.exists()
+
+
+def test_uninstall_leaves_a_linked_data_folder_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A data folder that is a link to an install elsewhere: uninstall neither deletes through the
+    link nor removes it, and says why (install refuses it for the same reason)."""
+    inst = Installed(tmp_path, monkeypatch)
+    inst.stuck = False
+    real = tmp_path / "elsewhere"
+    inst.snapshot.rename(real)
+    try:
+        inst.snapshot.symlink_to(real, target_is_directory=True)
+    except OSError as e:
+        pytest.skip(f"cannot create a symlink here: {e}")
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    assert f"left {inst.snapshot}: it is a symbolic link to " in capsys.readouterr().err
+    assert inst.snapshot.is_symlink() and (real / cmd_install.RECORD).is_file()
 
 
 # --- the installed template in use ----------------------------------------------------------------
@@ -665,6 +923,66 @@ def test_the_installed_template_has_the_mode_of_a_plain_folder(tmp_path: Path, m
     assert stat.S_IMODE(swap.snapshot.stat().st_mode) & 0o777 == 0o755
 
 
+@posix_only
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
+@pytest.mark.parametrize("step", list(FAILURES))
+def test_a_termination_signal_during_install_changes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, signame: str) -> None:
+    """SIGTERM or SIGHUP (kill PID, a closed terminal, a supervisor) during the swap killed the
+    runner at once and left a whole `.template-new-*` copy next to the installed template: while
+    the swap runs they stop it like Ctrl+C (proc.Interrupted: cli.main then says `terminated`
+    and exits 128 + N), so its undo runs. Sent from inside every step."""
+    signum = getattr(signal, signame)
+    if signal.getsignal(signum) is not signal.SIG_DFL:
+        pytest.skip(f"{signame} is not at its default handler in this process (the runner leaves such a one alone)")
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+    name, when = FAILURES[step]
+    calls: list[int] = []
+
+    def sending(real: Callable[..., Any]) -> Callable[..., Any]:
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            calls.append(1)
+            if len(calls) == when:
+                # At its default action the signal would end this test process itself
+                assert signal.getsignal(signum) is not signal.SIG_DFL, f"the swap runs with {signame} at its default action"
+                os.kill(os.getpid(), signum)  # its Python handler runs within this step
+            return real(*args, **kwargs)
+
+        return wrapper
+
+    if name == "replace":
+        monkeypatch.setattr(os, "replace", sending(os.replace))
+    else:
+        monkeypatch.setattr(cmd_install, name, sending(getattr(cmd_install, name)))
+    with pytest.raises(proc.Interrupted) as e:
+        cmd_install.install(swap.plan())
+    assert e.value.signum == signum and e.value.code == 0
+    assert swap.state() == swap.before
+    assert signal.getsignal(signum) is signal.SIG_DFL  # given back once the undo is done
+
+
+@pytest.mark.parametrize("locked", ["pyt", "pyt.cmd"], ids=["the first launcher", "the second launcher"])
+def test_a_launcher_that_cannot_be_replaced_is_named_and_nothing_leaks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, locked: str) -> None:
+    """A launcher the user may not replace (chattr +i, another user's file): the error named the
+    staged temporary file instead of the launcher, the undo said "could not put back" a launcher
+    that never changed, and it left a staged `.pyt-install-*` file behind."""
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+    target = swap.bin / locked
+    real = os.replace
+
+    def replace(src: str | Path, dst: str | Path) -> None:
+        if Path(dst) == target:
+            raise PermissionError(errno.EPERM, "Operation not permitted", os.fsdecode(src), None, os.fsdecode(dst))
+        real(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+    with pytest.raises(PytError) as e:
+        cmd_install.install(swap.plan())
+    message = str(e.value)
+    assert f"pyt install failed: {target}: Operation not permitted" in message, message
+    assert "nothing was changed" in message and "could not put back" not in message and ".pyt-install-" not in message, message
+    assert swap.state() == swap.before  # the first launcher put back, no staged file left
+
+
 # --- where things go --------------------------------------------------------------------------------
 
 
@@ -903,6 +1221,7 @@ class Doctor:
         monkeypatch.setattr(cmd_install, "age", lambda record: "")
         monkeypatch.setenv("PATH", str(self.bin))
         monkeypatch.setattr(cmd_install.shells, "registry_path_dirs", lambda env=None: [], raising=False)
+        monkeypatch.setattr(cmd_install.shells, "_ps_policies", lambda: [])  # never this machine's PowerShells
 
     def install(self) -> None:
         (self.snapshot / ".pytemplate").mkdir(parents=True)
@@ -932,7 +1251,7 @@ def test_doctor_lines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert "commit 0123456" in lines[0][1] and f"{d.bin} is on PATH" in lines[2][1]
     (d.bin / "pyt").write_bytes(OLD_LAUNCHER)  # an earlier install's launcher
     d.run()
-    assert any("differ from the installed template's" in n for n in d.notes()), d.lines
+    assert any(f"pyt in {d.bin} differs from the installed template's" in n for n in d.notes()), d.lines
     (d.bin / "pyt").write_text("#!/bin/sh\necho another tool\n", encoding="utf-8")
     d.run()
     assert any("is not a pytemplate launcher" in n for n in d.notes()) and any("no launcher pyt in" in n for n in d.notes()), d.lines
@@ -958,3 +1277,31 @@ def test_doctor_without_uv_is_a_note(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(cmd_install, "bin_dir", no_uv)
     d.run()
     assert any("uv not found" in n for n in d.notes()), d.lines
+
+
+def test_doctor_without_a_data_folder_says_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """HOME unset (and no absolute XDG_DATA_HOME): "no installed template in None"."""
+    d = Doctor(tmp_path, monkeypatch)
+    d.install()
+    d.snapshot = None  # type: ignore[assignment]
+    d.run()
+    assert any(f"but no installed template (no user data folder: {cmd_install.data_home_names()} is not set)" in n for n in d.notes()), d.lines
+    assert not any("None" in label for _, label, _ in d.lines), d.lines
+
+
+def test_doctor_notes_the_launchers_left_in_the_recorded_bin_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """uv's tool bin folder moved since the install (UV_TOOL_BIN_DIR): its launchers are in the
+    folder its record names, and doctor says so (and how they go) instead of only "no pyt"."""
+    d = Doctor(tmp_path, monkeypatch)
+    d.install()
+    recorded = tmp_path / "old-bin"
+    recorded.mkdir()
+    (recorded / "pyt").write_bytes(NEW_LAUNCHER)
+    (recorded / "pyt.cmd").write_text("@echo off\r\nrem another tool\r\n", encoding="utf-8")  # not ours: never named
+    (d.snapshot / cmd_install.RECORD).write_text(json.dumps({"commit": "0123456789", "bin": str(recorded)}), encoding="utf-8")
+    d.run()
+    expected = f"pyt in {recorded}: the launchers of this install, but uv's tool bin folder is {d.bin} now"
+    assert any(n.startswith(expected) and "pyt uninstall removes them" in n for n in d.notes()), d.lines
+    (d.snapshot / cmd_install.RECORD).write_text(json.dumps({"commit": "0123456789", "bin": str(d.bin)}), encoding="utf-8")
+    d.run()
+    assert not any(str(recorded) in n for n in d.notes()), d.lines

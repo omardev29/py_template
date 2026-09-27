@@ -394,6 +394,19 @@ def test_new_names_the_command_as_it_was_typed(global_mode: bool, prog: str, mon
     assert f"error: {prog}: unknown argument(s): b  ({prog} -h lists the options)" in capsys.readouterr().err
 
 
+@pytest.mark.usefixtures("outside")
+def test_install_outside_a_project_says_how_to_install(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`pyt help` listed install among what runs outside a project, and `pyt install` there said
+    "this is the installed copy of the template" of a folder the user never named: install runs
+    only in a clone, and outside a project it says so."""
+    monkeypatch.setenv("PYTEMPLATE_GLOBAL", "1")
+    assert cli.main(["help"]) == 0
+    assert f"  install      {cli.GLOBAL_SUMMARIES['install']}" in capsys.readouterr().out
+    with pytest.raises(ui.PytError) as e:
+        cmd_install.cmd_install(make({}), [])
+    assert "outside a project pyt install installs nothing" in str(e.value) and cmd_install.FROM_A_CLONE in str(e.value)
+
+
 # --- real runs of an installed template ------------------------------------------------------------
 
 

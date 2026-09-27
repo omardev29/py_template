@@ -189,6 +189,21 @@ def _ps_policies() -> list[tuple[str, str, str]]:
     return [(label, edition, p) for (label, edition, _), p in zip(found, policies, strict=True) if p]
 
 
+# The execution policies under which an unsigned pyt.ps1 does not run
+BLOCKING_POLICIES = ("Restricted", "AllSigned")
+_POLICIES: dict[object, list[tuple[str, str, str]]] = {}
+
+
+def ps_policies() -> list[tuple[str, str, str]]:
+    """_ps_policies, asked once per run: doctor's shell step and its `pyt install` step both read
+    them, and each query starts both PowerShells (seconds on Windows). Keyed by the query itself,
+    so a test that replaces _ps_policies gets that replacement's answer."""
+    query = _ps_policies
+    if query not in _POLICIES:
+        _POLICIES[query] = query()
+    return _POLICIES[query]
+
+
 def doctor(check: Check, *, in_project: bool = True) -> None:
     """Launcher and shell checks for ./pyt doctor (it prints its own step headers). Outside a
     project (global mode, `in_project` false) only the launcher that started the run and the
@@ -211,8 +226,8 @@ def doctor(check: Check, *, in_project: bool = True) -> None:
                 "On Windows use ./pyt from xonsh, pwsh, cmd, Git Bash or MSYS2; in WSL the runner uses separate -wsl environments",
             )
         launcher = os.environ.get("PYTEMPLATE_LAUNCHER", "")
-        for label, edition, policy in _ps_policies():
-            if policy not in ("Restricted", "AllSigned"):
+        for label, edition, policy in ps_policies():
+            if policy not in BLOCKING_POLICIES:
                 check(True, f"{label}: ExecutionPolicy = {policy}", "")
                 continue
             # A problem only for the PowerShell that started this run: Restricted is the default
