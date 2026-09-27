@@ -1057,7 +1057,7 @@ def _new_with_a_fake_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prese
     monkeypatch.setattr(presets, "_git_init", lambda dest: None)
     dest = tmp_path / "demo"
     presets.new(dest, preset, "demo")
-    assert [c[5:7] for c in calls if "__init" in c] == [["__init", preset]]
+    assert [c[c.index("__init") :][:2] for c in calls if "__init" in c] == [["__init", preset]]
     return dest
 
 
@@ -1335,7 +1335,7 @@ def test_new_removes_the_copy_when_init_fails(tmp_path: Path, monkeypatch: pytes
     with pytest.raises(DeployError, match="half-made project in .* was removed") as e:
         presets.new(dest, "script", "demo")
     assert e.value.code == 1
-    assert [c[5:7] for c in calls] == [["__init", "script"]]  # no git init after a failure
+    assert [c[c.index("__init") :][:2] for c in calls] == [["__init", "script"]]  # no git init after a failure
     if pre_existing:
         assert dest.is_dir() and not any(dest.iterdir())
     else:
