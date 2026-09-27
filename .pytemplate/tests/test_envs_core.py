@@ -513,6 +513,26 @@ def test_a_read_only_lock_puts_pyproject_back(lock_project: Path, monkeypatch: p
     assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
 
 
+@pytest.mark.parametrize("args", [["--help"], ["-h"], ["--upgrade", "-h"], ["--version"], ["-V"]])
+def test_lock_help_changes_nothing(lock_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], args: list[str]) -> None:
+    """`./deploy lock --help` (help passes through to uv) rewrote the managed parts of
+    pyproject.toml, then `uv lock --help` wrote no uv.lock and nothing put pyproject.toml back:
+    every `uv run --locked` failed until the next real lock."""
+    calls = fake_uv(monkeypatch)
+    assert cmd_env.cmd_lock(make(), args) == 0
+    assert calls == [["lock", *args]]
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"  # never rewritten
+    assert "pyproject.toml" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("args", [["--script", "tool.py"], ["--script=tool.py"]])
+def test_a_script_lock_puts_pyproject_back(lock_project: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]) -> None:
+    """`uv lock --script X` writes X's own lock, never uv.lock: pyproject.toml must not move past it."""
+    fake_uv(monkeypatch)
+    assert cmd_env.cmd_lock(make(), args) == 0
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
+
+
 @pytest.mark.parametrize("name", ["UV_LOCKED", "UV_FROZEN"])
 def test_a_lock_made_read_only_by_the_environment_puts_pyproject_back(lock_project: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     fake_uv(monkeypatch)

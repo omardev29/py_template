@@ -116,14 +116,17 @@ def cmd_sync(cfg: Config, args: list[str]) -> int:
 
 
 # `uv lock` arguments (and the variables uv reads for them) that make it write no uv.lock
-LOCK_READ_ONLY = ("--check", "--locked", "--check-exists", "--frozen", "--dry-run")
+LOCK_READ_ONLY = ("--check", "--locked", "--check-exists", "--frozen", "--dry-run", "--script")
 LOCK_READ_ONLY_ENV = ("UV_LOCKED", "UV_FROZEN")
+# uv lock only prints: answered before pyproject.toml is touched
+LOCK_INFO = ("-h", "--help", "-V", "--version")
 
 
 def _lock_read_only(args: list[str]) -> str:
-    """The argument or variable that keeps `uv lock` from writing uv.lock, or ""."""
+    """The argument or variable that keeps `uv lock` from writing uv.lock, or "" (--script
+    locks a script's own `<script>.lock`)."""
     for a in args:
-        if a in LOCK_READ_ONLY:
+        if a.split("=", 1)[0] in LOCK_READ_ONLY:
             return a
     for name in LOCK_READ_ONLY_ENV:  # uv's boolean variables: 1/true/yes/on
         if os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on", "y", "t"):
@@ -139,6 +142,9 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
     Otherwise the two would disagree and every `uv run --locked` would fail. uv writes uv.lock in
     place: a full disk left it cut short, invalid TOML, next to the old pyproject.toml.
     """
+    if any(a in LOCK_INFO for a in args):  # `./deploy lock --help` shows uv's help, changes nothing
+        envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False)
+        return 0
     before = _snapshot((PYPROJECT, PYPROJECT.with_name("uv.lock")))
     changed = render.write_pyproject(cfg)
     if changed:

@@ -1393,9 +1393,10 @@ Formats:
   needs re-locking. `lock` (`cmd_env.cmd_lock`) puts the old bytes of `pyproject.toml` and
   `uv.lock` back when its `uv lock` fails (offline, no solution, Ctrl+C, a full disk that cut
   the new `uv.lock` short) or writes no `uv.lock`
-  (`cmd_env.LOCK_READ_ONLY`: `--check`, `--locked`, `--check-exists`, `--frozen`, `--dry-run`;
-  `UV_LOCKED`/`UV_FROZEN` set): a rewritten pyproject.toml next to the old lock made every
-  `uv run --locked` fail.
+  (`cmd_env.LOCK_READ_ONLY`: `--check`, `--locked`, `--check-exists`, `--frozen`, `--dry-run`,
+  `--script` (a script's own lock); `UV_LOCKED`/`UV_FROZEN` set): a rewritten pyproject.toml
+  next to the old lock made every `uv run --locked` fail. `-h`/`--help`/`-V`/`--version`
+  (`cmd_env.LOCK_INFO`) go to `uv lock` before pyproject.toml is touched.
 - Not a managed part, but kept in line by `./deploy apply` (section 5.8): the option-driven
   preset requirements in `[project] dependencies` and the dev group (flet's three pins,
   raylib's `{package}=={version}`), through `uv remove/add --frozen` and one `uv lock`.
