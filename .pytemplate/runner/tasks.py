@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from . import config, envs, proc, ui
 from .config import Config, TaskConfig
@@ -109,7 +109,21 @@ def _dep_argv(name: str, dep: str) -> list[str]:
     return argv
 
 
-def _format(name: str, text: str, values: Placeholders) -> str:
+def _check_texts(cfg: Config, name: str, seen: set[str]) -> None:
+    """The placeholders of `name` and of every task its deps reach, before anything runs: a typo
+    ({roots}) was reported only once all the deps had run, which can take minutes."""
+    seen.add(name)
+    task = cfg.tasks[name]
+    every = dict.fromkeys(config.TASK_PLACEHOLDERS, "")  # {python} is resolved when the task runs
+    for text in (*task.cmd, *task.env.values(), *([task.cwd] if task.cwd else [])):
+        _format(name, text, every)
+    for dep in task.deps:
+        first = _dep_argv(name, dep)[0]
+        if first in cfg.tasks and first not in seen:
+            _check_texts(cfg, first, seen)
+
+
+def _format(name: str, text: str, values: Mapping[str, str]) -> str:
     # The syntax is checked first (config.validate does it at load, this also covers a Config
     # built without it), so format_map can only miss a name: '{}', '{0}', a lone '{' and
     # '{root.x}' are never a traceback.
@@ -145,6 +159,7 @@ def run_task(
         raise DeployError(f"task '{name}' only runs its deps ({', '.join(task.deps)}) and takes no arguments: {shlex.join(extra)}")
     if done is None:
         done = set()
+        _check_texts(cfg, name, set())
     deps = [(dep, _dep_argv(name, dep)) for dep in task.deps]  # all parsed before the first runs
     for dep, argv in deps:
         key = tuple(argv)

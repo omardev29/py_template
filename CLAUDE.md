@@ -1238,7 +1238,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `deps` required; a non-empty program (`cmd[0]`); `env` names `[A-Za-z_][A-Za-z0-9_]*`; in
   `cmd`, `env` values and `cwd` only bare placeholders (`config.task_format_error`: never `{}`,
   `{0}`, `{root.x}`, `{root!r}`, a lone brace; literal braces doubled `{{ }}`). Checked when
-  the task runs (`tasks.run_task`), not at load: unknown placeholder names, `deps` quoting and
+  the task runs (`tasks.run_task`), not at load: unknown placeholder names (of the task and of
+  every task its deps reach, `tasks._check_texts`: a typo was found only after all the deps
+  had run), `deps` quoting and
   empty entries (all parsed before the first dep runs; `tasks.split_words`: blanks separate,
   quotes group, a backslash is a plain character, as in the plugin's `:Deploy`: POSIX shlex
   passed `C:\data\in.txt` as `C:datain.txt`), `cwd` is a folder (not in a dry run),

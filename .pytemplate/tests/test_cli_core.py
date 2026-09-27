@@ -1115,6 +1115,29 @@ def test_an_unknown_placeholder_is_reported_when_the_task_runs(rec: Recorder) ->
     assert e.value.code == 2 and "{python}" in str(e.value)
 
 
+@pytest.mark.parametrize(
+    ("bad", "where"),
+    [
+        ({"cmd": ["echo", "{roots}"]}, "badph"),
+        ({"cmd": ["echo"], "env": {"X": "{srcs}"}}, "badph"),
+        ({"cmd": ["echo"], "cwd": "{bulid}"}, "badph"),
+        ({"cmd": ["echo"], "deps": ["gen", "check all", "inner"]}, "inner"),  # a task the deps reach
+    ],
+)
+def test_an_unknown_placeholder_is_refused_before_any_dep_runs(rec: Recorder, bad: dict[str, Any], where: str) -> None:
+    """A typo in a placeholder of a task with deps (`ci` with check all and test all) was reported
+    only after every dep had run, which can take minutes."""
+    cfg = make({"tasks": {
+        "badph": {"deps": ["gen", "check all"], "uv": False, **bad},
+        "gen": {"cmd": ["g"], "uv": False},
+        "inner": {"cmd": ["i", "{pkgs}"], "uv": False},
+    }})  # fmt: skip
+    with pytest.raises(DeployError, match=f"task '{where}': unknown placeholder") as e:
+        tasks.run_task(cfg, "badph", [], rec.dispatch)
+    assert e.value.code == 2
+    assert rec.runs == [] and rec.dispatched == []  # neither gen nor check all ran
+
+
 @pytest.mark.parametrize("key", ["A=B", "", "1X", "A B", "A-B", chr(0xE9)])
 def test_task_env_names_are_validated(key: str) -> None:
     with pytest.raises(DeployError, match=r"tasks\.t\.env'?: invalid environment variable name") as e:
