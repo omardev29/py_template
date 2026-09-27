@@ -370,7 +370,7 @@ def test_shell_setup_is_listed_nowhere() -> None:
 
 
 @pytest.mark.parametrize("outside", [False, True], ids=["project", "outside"])
-def test_shell_setup_is_an_unknown_command(outside: bool, monkeypatch: pytest.MonkeyPatch, cli_state: None, capsys: pytest.CaptureFixture[str]) -> None:
+def test_shell_setup_says_what_replaced_it(outside: bool, monkeypatch: pytest.MonkeyPatch, cli_state: None, capsys: pytest.CaptureFixture[str]) -> None:
     def never(*_a: object, **_k: object) -> None:
         raise AssertionError("nothing may run or render")
 
@@ -379,7 +379,8 @@ def test_shell_setup_is_an_unknown_command(outside: bool, monkeypatch: pytest.Mo
     monkeypatch.setattr(render, "auto", never)
     monkeypatch.setattr(tasks, "run_task", never)
     assert cli.main(["shell-setup", "bash"]) == 2
-    assert "unknown command: shell-setup" in capsys.readouterr().err
+    prog = "pyt" if outside else "./pyt"
+    assert f"shell-setup is no longer a {prog} command: `pyt install` puts the launchers themselves on PATH" in capsys.readouterr().err
 
 
 # --- the real thing, in throwaway copies ---------------------------------------------------------

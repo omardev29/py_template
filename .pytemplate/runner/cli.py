@@ -119,11 +119,22 @@ INIT_OUTSIDE = "init is no longer a pyt command: create a project with pyt new D
 
 def _outside_a_project(name: str) -> str:
     """The error of `pyt NAME` in global mode, for a NAME that is not a GLOBAL_COMMANDS one."""
+    from . import config
+
     if name == "init":
         return INIT_OUTSIDE
+    if name in config.RETIRED_COMMANDS:
+        return _retired(name)
     if name in COMMANDS or name in INTERNAL:
         return f"`pyt {name}` needs a project: {NEEDS_A_PROJECT}"
     return _unknown_outside(name)
+
+
+def _retired(name: str) -> str:
+    """The error of a command removed since the pytemplate.toml contract began (rule 1.11)."""
+    from . import config
+
+    return f"{name} is no longer a {_prog()} command: {config.RETIRED_COMMANDS[name]}"
 
 
 def _unknown_outside(name: str) -> str:
@@ -363,7 +374,7 @@ def dispatch(argv: list[str]) -> int:
             if name == "init":  # no longer public (it is INTERNAL["__init"]): the preset is chosen by `new`
                 raise PytError(INIT_REMOVED)
             if name in config.RETIRED_COMMANDS:
-                raise PytError(f"{name} is no longer a ./pyt command: {config.RETIRED_COMMANDS[name]}")
+                raise PytError(_retired(name))
             raise PytError(f"unknown command: {name}  (./pyt help)")
         if not task.cmd and _asks_help(args):
             return cmd_help(cfg, [name])  # a deps-only task has no program to pass -h on to
