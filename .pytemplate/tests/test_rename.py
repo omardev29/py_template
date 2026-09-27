@@ -194,6 +194,11 @@ def test_without_import_a_bare_name_is_a_variable() -> None:
         ('p = "src\\\\myapp\\\\core"', 'p = "src\\\\my_game\\\\core"'),
         ('cmd = "python -m myapp"', 'cmd = "python -m my_game"'),
         ('cmd = ["python", "-m", "myapp"]', 'cmd = ["python", "-m", "my_game"]'),
+        # a prefixed string after -m: the prefix letter hid the -m (python -m My-Game failed)
+        ('cmd = [sys.executable, "-m", f"myapp.{mod}"]', 'cmd = [sys.executable, "-m", f"my_game.{mod}"]'),
+        ('cmd = [sys.executable, "-m", f"myapp"]', 'cmd = [sys.executable, "-m", f"my_game"]'),
+        ("cmd = [sys.executable, '-m', r'myapp']", "cmd = [sys.executable, '-m', r'my_game']"),
+        ('cmd = ["python", "-m",\n    rb"myapp"]', 'cmd = ["python", "-m",\n    rb"my_game"]'),
         ('title = "myapp: ready"', 'title = "My-Game: ready"'),
         ('entry = "myapp:main"', 'entry = "my_game:main"'),
         ('mods = ["myapp.*"]', 'mods = ["my_game.*"]'),

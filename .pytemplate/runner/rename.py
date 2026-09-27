@@ -128,7 +128,8 @@ _PKG_WORD_BEFORE = re.compile(r"(?:^|\W)(?:package|module)[ \t]+$")
 _IMPORT_BEFORE = re.compile(r"(?:^|[^\w.])import[ \t]+$")
 _FROM_BEFORE = re.compile(r"(?:^|[^\w.])from[ \t]+$")
 _IMPORT_AFTER = re.compile(r"[ \t]+import\b")
-_DASH_M_BEFORE = re.compile(r"(?:^|[\s\"'\[(,])-m[\s\"',]+$")  # -m alpha, "-m", "alpha"
+# -m alpha, "-m", "alpha", and a prefixed string after it: "-m", f"alpha.{x}", r"alpha"
+_DASH_M_BEFORE = re.compile(r"(?:^|[\s\"'\[(,])-m[\s\"',]+(?:[rRbBuUfFtT]{1,2}[\"'])?$")
 # TOML: a bare key (`alpha = `, `x.alpha = `) or a table header (`[alpha]`, `[[x.alpha]]`)
 _TOML_KEY_BEFORE = re.compile(r"[ \t]*(?:\[\[?[ \t]*)?(?:[A-Za-z0-9_-]+[ \t]*\.[ \t]*)*")
 _TOML_KEY_AFTER = re.compile(r"[ \t]*[.=\]]")

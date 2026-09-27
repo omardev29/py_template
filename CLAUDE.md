@@ -990,7 +990,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     (`src/src/x` -> `src/beta/x`; it once became `beta/beta/x`). When the
     old name equals the old package but the new name differs from the new package (`alpha` ->
     `My-Game` / `my_game`): paths, dotted names, `pkg:main`, "package"/"module",
-    `import`/`from`, `-m` and the module-name arguments of loader calls get the package
+    `import`/`from`, `-m` (`_DASH_M_BEFORE`: a prefixed string after it too, `"-m", f"alpha.{x}"`)
+    and the module-name arguments of loader calls get the package
     (`LOADERS`: the name and package of `import_module`/`find_spec`, `__import__`, `files` and
     the other importlib.resources functions, `pkgutil.get_data`, `runpy.run_module`; positional
     or as a `MODULE_ARGUMENTS` keyword, tracked per open bracket: `files(package="alpha")` once
