@@ -83,6 +83,7 @@ def test_relative_upx_path_resolves_against_the_project_root(monkeypatch: pytest
     fake = root / "tools" / ("upx.exe" if WINDOWS else "upx")
     fake.parent.mkdir(parents=True)
     fake.write_bytes(b"")
+    fake.chmod(0o755)
     (root / "src").mkdir()
     monkeypatch.setattr(upx, "ROOT", root)
     cfg = make({"upx": {"enabled": True, "path": f"tools/{fake.name}"}})
@@ -96,6 +97,7 @@ def test_relative_upx_path_resolves_against_the_project_root(monkeypatch: pytest
     absolute = tmp_path / "elsewhere" / "upx"
     absolute.parent.mkdir()
     absolute.write_bytes(b"")
+    absolute.chmod(0o755)
     assert upx.find(make({"upx": {"path": str(absolute)}})) == absolute
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
@@ -120,6 +122,7 @@ def test_find_order_path_setting_then_path_then_cache_then_download(monkeypatch:
     cached = cache / upx._exe_name()
     cache.mkdir()
     cached.write_bytes(b"")
+    cached.chmod(0o755)
     assert upx.find(make({})) == cached and len(downloads) == 1  # the cache, no second download
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -131,7 +134,40 @@ def test_find_order_path_setting_then_path_then_cache_then_download(monkeypatch:
     explicit = tmp_path / "explicit" / "upx"
     explicit.parent.mkdir()
     explicit.write_bytes(b"")
+    explicit.chmod(0o755)
     assert upx.find(make({"upx": {"path": str(explicit)}})) == explicit  # the setting beats PATH
+
+
+@pytest.mark.skipif(WINDOWS, reason="Windows files have no x bit")
+def test_a_upx_without_its_x_bit_is_refused_before_any_work(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # tools/upx committed from Windows (100644) or unpacked by a zip tool passed the preflight;
+    # a portable build then copied and compiled the runtime and died in pack_file with an
+    # "internal runner error" traceback, its folder left without the smoke test
+    root = tmp_path / "proj"
+    tool = root / "tools" / "upx"
+    tool.parent.mkdir(parents=True)
+    tool.write_bytes(b"#!/bin/sh\nexit 0\n")
+    tool.chmod(0o644)
+    monkeypatch.setattr(upx, "ROOT", root)
+    monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
+    cfg = make({"upx": {"enabled": True, "path": "tools/upx"}})
+    with pytest.raises(DeployError, match=r"deploy.upx.path = 'tools/upx' is not executable .*: chmod \+x ") as e:
+        upx.preflight(cfg, "portable")
+    assert e.value.code == 3
+    # a cached download that lost its x bit is downloaded again, never handed to the tools
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "upx").write_bytes(b"")
+    (cache / "upx").chmod(0o644)
+    monkeypatch.setattr(upx, "_cache_dir", lambda: cache)
+    monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(tmp_path / "empty")})
+    assert upx.locate(make({"upx": {"enabled": True}})) is None
+    # and a upx that cannot start while packing stops the build with its reason, not a traceback
+    target = tmp_path / "app.bin"
+    target.write_bytes(b"\x7fELF")
+    with pytest.raises(DeployError, match="upx: cannot run .*: Permission denied") as e:
+        upx.pack_file(tool, target, ["-1"])
+    assert e.value.code == 3
 
 
 # --- the pinned download, with crafted archives (no network) -----------------------------------------

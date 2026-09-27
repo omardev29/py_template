@@ -2166,9 +2166,13 @@ Per method:
   app at startup with a 4 MB working set and no window, measured), binaries UPX rejects
   (`GUARD_CF`: never pass `--force`). `upx.find` order: `deploy.upx.path` (absolute, `~`, or
   relative to the project root, never the caller's cwd; handed to the tools absolute but not
-  resolved: PyInstaller wants `<upx-dir>/upx`, Nuitka a file named `upx`), `upx` on PATH, the
-  cache, a download: UPX 5.2.1 once (SHA-256 checked, written as `.part` then renamed so an
-  interrupted write never looks cached) to
+  resolved: PyInstaller wants `<upx-dir>/upx`, Nuitka a file named `upx`; on POSIX it must have
+  its x bit, `upx._runnable`, or the preflight refuses it with the `chmod +x` line: a checkout
+  from Windows passed it, and the portable build died in `upx.pack_file` with a traceback after
+  the runtime copy; `pack_file` turns a upx that cannot start into a DeployError), `upx` on
+  PATH, the cache (a cached copy without its x bit is downloaded again), a download: UPX 5.2.1
+  once (SHA-256 checked, written as `.part` then renamed so an interrupted write never looks
+  cached) to
   `%LOCALAPPDATA%\pytemplate\tools\upx-5.2.1` / `$XDG_CACHE_HOME/pytemplate/tools`; macOS
   is unsupported (`upx.unsupported_reason`). `flet pack` ships Flet's prebuilt FULL client
   zipped (40.5 MB, libmpv 28 MB inside) and unpacks it on first start into

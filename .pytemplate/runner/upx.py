@@ -37,6 +37,7 @@ import hashlib
 import http.client
 import io
 import os
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -186,12 +187,18 @@ def locate(cfg: Config) -> Path | None:
             raise DeployError(
                 f"deploy.upx.path = {cfg.deploy.upx.path!r} does not exist ({path}; a relative path starts at the project root)", 3
             )
+        if not _runnable(path):  # a checkout from Windows or a zip lost its x bit: pack_file died later
+            raise DeployError(f"deploy.upx.path = {cfg.deploy.upx.path!r} is not executable ({path}): chmod +x {shlex.quote(str(path))}", 3)
         return path
     on_path = shutil.which("upx", path=proc.base_env().get("PATH"))
     if on_path:
         return Path(on_path)
     cached = _cache_dir() / _exe_name()
-    return cached if cached.is_file() else None
+    return cached if cached.is_file() and _runnable(cached) else None  # a download that lost its x bit comes again
+
+
+def _runnable(path: Path) -> bool:
+    return IS_WINDOWS or os.access(path, os.X_OK)
 
 
 def find(cfg: Config) -> Path:
@@ -290,15 +297,18 @@ def pack_file(upx: Path, path: Path, flags: list[str]) -> Result:
     before = path.stat().st_size
     if before > MAX_INPUT:
         return Result(path, before, before, "skipped", f"{before / 1_048_576:.0f} MiB is over the {MAX_INPUT // 1_048_576} MiB limit (UPX: 768 MiB)")
-    r = subprocess.run(
-        [str(upx), "-q", "--no-progress", "--compress-icons=0", *flags, str(path)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdin=subprocess.DEVNULL,
-        check=False,
-    )
+    try:
+        r = subprocess.run(
+            [str(upx), "-q", "--no-progress", "--compress-icons=0", *flags, str(path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError as e:  # no x bit, another architecture, gone: the build stops with this, never a traceback
+        raise DeployError(f"upx: cannot run {upx}: {e.strerror or e}", 3) from None
     if r.returncode == 0:
         return Result(path, before, path.stat().st_size, "packed")
     reason = _classify(r.stdout + r.stderr)
