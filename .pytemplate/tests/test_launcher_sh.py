@@ -546,6 +546,15 @@ def _system_uv() -> str | None:
     return next((d for d in SYSTEM_UV_DIRS if Path(d, "uv").exists()), None)
 
 
+def _no_uv_env(home: Path, **extra: str) -> dict[str, str]:
+    """An environment built from scratch where no uv can be found, with the caller's locale like
+    every other case: in the C locale yash cannot read a path that is not ASCII (a project in
+    `My Game e-acute`), prints `failed to set $PWD` and runs nothing."""
+    locale = {k: v for k, v in os.environ.items() if k in ("LANG", "LC_ALL", "LC_CTYPE")}
+    # PATH keeps /usr/bin:/bin: yash runs `[` only when it is found on PATH.
+    return {"PATH": "/usr/bin:/bin", "HOME": str(home), **locale, **extra}
+
+
 @needs_posix
 @pytest.mark.parametrize("case", ["uv-off-path", "stale-UV", "no-uv"])
 @pytest.mark.parametrize("name", POSIX_SHELLS)
@@ -555,8 +564,7 @@ def test_launcher_survives_caller_errexit(name: str, case: str, tmp_path: Path) 
     if case == "no-uv":
         if _system_uv():
             pytest.skip("uv is installed in a system folder the launcher always searches")
-        # PATH keeps /usr/bin:/bin: yash runs `[` only when it is found on PATH.
-        run = Run([*argv, "deploy", "help"], ROOT, {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
+        run = Run([*argv, "deploy", "help"], ROOT, _no_uv_env(tmp_path))
         assert run.rc == 127 and "uv not found" in run.err and "curl" in run.err, run.out + run.err
         return
     uv = shutil.which("uv", path=_clean_env().get("PATH"))
@@ -647,7 +655,7 @@ def test_in_process_run_leaves_no_name_behind(name: str, case: str, tmp_path: Pa
         if _system_uv():
             pytest.skip("uv is installed in a system folder the launcher always searches")
         code = 127
-        env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "__RUBASH_SHELL_NAME": "1", **keep}
+        env = _no_uv_env(tmp_path, __RUBASH_SHELL_NAME="1", **keep)
     report = (
         "printf 'LEFT:'; set | grep '^_pt_' | tr '\\n' ' '; printf '\\n'; "
         f"for f in {' '.join(FUNCTIONS)}; do if command -v \"$f\" >/dev/null 2>&1; then printf 'FUNC:%s\\n' \"$f\"; fi; done; "
@@ -664,6 +672,27 @@ def test_in_process_run_leaves_no_name_behind(name: str, case: str, tmp_path: Pa
     if case == "ok":
         assert run.probe and run.probe["launcher"] == "sh:niubash" and run.probe["argv"] == ["x"], where
         assert run.probe["cwd"] == str(ROOT), where  # not UV_WORKING_DIR
+
+
+@needs_posix
+def test_the_no_uv_case_runs_in_a_folder_that_is_not_ascii(tmp_path: Path) -> None:
+    """`./deploy selftest` must pass in a project folder that is not ASCII (`My Game e-acute`):
+    the no-uv cases build their environment from scratch, and without the caller's locale yash
+    could not read the launcher's path in PTCMD, ran nothing and exited 0."""
+    import locale
+
+    if locale.nl_langinfo(locale.CODESET).upper().replace("-", "") != "UTF8":
+        pytest.skip("this test process does not run in a UTF-8 locale")
+    argv = _shell_argv("yash")
+    if _system_uv():
+        pytest.skip("uv is installed in a system folder the launcher always searches")
+    project = tmp_path / "My Game \u00e9" / "p"
+    (project / ".pytemplate").mkdir(parents=True)
+    (project / ".pytemplate" / "deploy.py").write_text("", encoding="utf-8")
+    shutil.copyfile(LAUNCHER, project / "deploy")
+    ptcmd = f"set -- __probe 127 0 x; . {q(str(project / 'deploy'))}"
+    run = Run([*argv, "-c", 'eval "$PTCMD"'], project, {**_no_uv_env(tmp_path, __RUBASH_SHELL_NAME="1"), "PTCMD": ptcmd})
+    assert run.rc == 127 and "uv not found" in run.err, f"stdout={run.out!r} stderr={run.err!r}"
 
 
 # --- UV_PYTHON never picks the runner's Python ---------------------------------------------------------

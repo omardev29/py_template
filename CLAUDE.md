@@ -2729,7 +2729,9 @@ short temp tree and unset `NVIM_APPNAME`.
   fixture, `test_removals`); everything else in `./deploy selftest` works offline once
   `./deploy setup` has run. Tests that spawn `./deploy` must scrub `UV`, `VIRTUAL_ENV`,
   `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON` and `PYTEMPLATE_*` from the child env (pytest itself
-  runs under `uv run`). Keep them fast: a runner start costs ~0.3 s, and the Windows launcher
+  runs under `uv run`). An environment built from scratch keeps the caller's `LANG`, `LC_ALL`
+  and `LC_CTYPE` (`test_launcher_sh._no_uv_env`): in the C locale yash cannot read a project
+  path that is not ASCII. Keep them fast: a runner start costs ~0.3 s, and the Windows launcher
   and path tests already take 10-40 s under load.
 - `test_runner.py` matches message substrings (`unknown key 'backend.mode'`, `boolean`,
   `is not in backend.supported`, `exact version`, `clashes with`, and the lintc texts `flet`,
