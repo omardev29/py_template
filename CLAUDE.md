@@ -2935,7 +2935,9 @@ short temp tree and unset `NVIM_APPNAME`.
   a base another user owns, or one every user can write, is refused: `project.check_private_dir`;
   every step runs code from it, and a shared /tmp/pt-e2e let another user swap a project in
   between two steps); only a base carrying
-  `.pytemplate-e2e` is wiped. Steps run with stdin closed and per-step timeouts (`TIMEOUTS`,
+  `.pytemplate-e2e` is wiped, and a symlinked or junctioned base loses only its link and marker
+  (`e2e.rmtree` removes a link as a link and never chmods through one: a passing run left the
+  folder it named at 0o200). Steps run with stdin closed and per-step timeouts (`TIMEOUTS`,
   `BUILD_TIMEOUTS`) that kill the whole process tree (each step in its own session on POSIX);
   a failed `new`, `setup` or host `mode` skips the rest of its preset; a row with `after`
   needs that row to PASS. Exit codes: 0; 1 on any FAIL; 2 usage; 130 interrupted: Ctrl+C, and
@@ -4525,7 +4527,8 @@ Code coupling (rename together):
   `config`); `config._check_preset_tables` reads `preset.toml` `[options]` itself, like
   `config._presets` mirrors `presets.available`; `render.managed_block` needs `pypy_minor`
   (PyPy's environment) and `min_python` (requires-python) to stay distinct.
-- `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`;
+- `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`, and
+  `e2e.rmtree` lazily `cmd_env._is_link`;
   `cmd_mode._work_tree_top` calls the private `presets._git_env` (the same git environment as
   `presets._git_init`, whose "inside a work tree" rule it mirrors for `new`);
   `e2e.flet_build_reason` imports `methods.flet._developer_mode`, and its Flutter size and the

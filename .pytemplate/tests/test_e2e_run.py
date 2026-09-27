@@ -277,6 +277,26 @@ def test_verify_checks_what_new_made(tmp_path: Path) -> None:
     assert e2e.do_verify(ctx, step, log)[0] == SKIP, "--reuse: nothing new to verify"
 
 
+@POSIX
+def test_cleanup_of_a_symlinked_base_never_touches_the_folder_it_names(tmp_path: Path) -> None:
+    # rmtree(link) called the retry hook with os.path.islink: its chmod followed the link and
+    # made the real folder 0o200, and the next run as a normal user died with a traceback
+    import stat
+
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    (real / e2e.MARKER).write_text("x", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    e2e._cleanup(link, ["script"])
+    assert stat.S_IMODE(real.stat().st_mode) == 0o700
+    assert not os.path.lexists(link) and real.is_dir() and not any(real.iterdir())  # the link and the marker went
+    (real / "keep").write_text("k", encoding="utf-8")
+    link.symlink_to(real, target_is_directory=True)
+    e2e.rmtree(link)  # a link goes as a link
+    assert not os.path.lexists(link) and (real / "keep").is_file() and stat.S_IMODE(real.stat().st_mode) == 0o700
+
+
 def test_rmtree_reaches_a_base_on_a_network_share(monkeypatch: pytest.MonkeyPatch) -> None:
     # It removed \\?\\\server\share\... (no valid name) for a --base on a share or a mapped drive
     from runner.methods import portable
@@ -288,7 +308,10 @@ def test_rmtree_reaches_a_base_on_a_network_share(monkeypatch: pytest.MonkeyPatc
         def resolve(self) -> PureWindowsPath:
             return PureWindowsPath(r"\\server\share\pt\e2e")
 
+    from runner import cmd_env
+
     removed: list[str] = []
+    monkeypatch.setattr(cmd_env, "_is_link", lambda path: False)  # never asks the (made-up) share
     monkeypatch.setattr(e2e, "IS_WINDOWS", True)
     monkeypatch.setattr(portable, "IS_WINDOWS", True)
     monkeypatch.setattr(e2e.shutil, "rmtree", lambda target, **kwargs: removed.append(target))

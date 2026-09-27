@@ -726,7 +726,13 @@ class Context:
 
 
 def rmtree(path: Path) -> None:
-    """Remove a tree even with read-only files (.git objects) and paths over 260 characters."""
+    """Remove a tree even with read-only files (.git objects) and paths over 260 characters. A
+    symlink or a junction (a --base on another disk) goes as a link, never what it names."""
+    from .cmd_env import _is_link  # imported here: cmd_env imports much this module never needs
+
+    if _is_link(path):
+        os.unlink(path)  # on Windows this also removes a directory symlink or a junction
+        return
     if not path.exists():
         return
     from .methods.portable import long_path  # \\?\C:\... or, for a share, \\?\UNC\server\...
@@ -734,6 +740,9 @@ def rmtree(path: Path) -> None:
     target = long_path(path) if IS_WINDOWS else str(path)
 
     def retry(func: Callable[..., object], name: str, exc: object) -> None:
+        error = exc[1] if isinstance(exc, tuple) else exc  # onerror's exc_info (3.11), onexc's exception
+        if isinstance(error, BaseException) and os.path.islink(name):
+            raise error  # chmod follows a link: it made the folder a symlinked base names 0o200
         os.chmod(name, stat.S_IWRITE)
         func(name)
 
@@ -1186,7 +1195,8 @@ def _cleanup(base: Path, presets: Sequence[str]) -> None:
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
         if {x.name for x in base.iterdir()} <= {MARKER}:
-            rmtree(base)
+            (base / MARKER).unlink(missing_ok=True)  # through a link too: that folder is the user's
+            rmtree(base)  # a symlinked base: only the link goes
     except OSError as e:
         ui.warn(f"could not remove {base}: {e}")
 
