@@ -190,6 +190,21 @@ def _print_task(name: str, task: TaskConfig) -> None:
         print("  background: a long-running server (editors start it without waiting)")
 
 
+def _task_named_like(cfg: object, name: str) -> TaskConfig | None:
+    """The project's [tasks] entry named like a builtin added after the contract (config.
+    CONTRACT_COMMANDS), which keeps the name in its project; None otherwise, outside a project,
+    and when pytemplate.toml does not load (the builtin's help then)."""
+    from . import config
+
+    if name not in COMMANDS or name in config.CONTRACT_COMMANDS or project.GLOBAL:
+        return None
+    try:
+        loaded = cfg if isinstance(cfg, config.Config) else config.load(set(COMMANDS))
+    except PytError:
+        return None
+    return loaded.tasks.get(name)
+
+
 # `./pyt init` and `./pyt help init` (unless a [tasks] entry took the name)
 INIT_REMOVED = "init is no longer a ./pyt command. To start from another preset: ./pyt new DIR --preset P"
 
@@ -204,6 +219,11 @@ def cmd_help(cfg: object, args: list[str]) -> int:
         raise PytError(f"help: unrecognized arguments: {' '.join(names[1:])}  ({_prog()} help [COMMAND])")
     if names:
         name = names[0]
+        shadowing = _task_named_like(cfg, name)
+        if shadowing is not None:  # a builtin added after the contract: this project's task keeps the name
+            _print_task(name, shadowing)
+            print(f"  (this project's [tasks] entry: the built-in `pyt {name}` runs outside the project: {COMMANDS[name].summary})")
+            return 0
         if name in COMMANDS:
             c = COMMANDS[name]
             print(f"{_prog()} {name} {c.usage}".rstrip())
@@ -240,7 +260,8 @@ def cmd_help(cfg: object, args: list[str]) -> int:
         if loaded.tasks:
             print("Custom tasks (pytemplate.toml [tasks]):")
             for name, task in loaded.tasks.items():
-                print(f"  {name:<12} {tasks.describe(task)}")
+                note = "  (runs instead of the built-in command here)" if name in COMMANDS else ""
+                print(f"  {name:<12} {tasks.describe(task)}{note}")
             print()
     except PytError as e:  # help still prints (stdout); say why the tasks are missing (stderr)
         ui.warn(f"{e}\n  (so the custom tasks of pytemplate.toml are not listed)")
@@ -331,14 +352,18 @@ def dispatch(argv: list[str]) -> int:
     if project.GLOBAL:
         return _dispatch_outside_a_project(name, args)
     command = COMMANDS.get(name) or INTERNAL.get(name)
-    if name in COMMANDS and name not in HELP_PASSES_THROUGH and _asks_help(args):
-        return cmd_help(None, [name])  # the same as `./pyt help NAME` (no config needed)
+    if name in COMMANDS and name not in HELP_PASSES_THROUGH and _asks_help(args) and _task_named_like(None, name) is None:
+        return cmd_help(None, [name])  # the same as `./pyt help NAME` (a builtin of the contract needs no config)
     cfg = config.load(set(COMMANDS))
+    if name in cfg.tasks:
+        command = None  # a builtin added after the contract (install): the project's own task had the name first
     if command is None:
         task = cfg.tasks.get(name)
         if task is None:
             if name == "init":  # no longer public (it is INTERNAL["__init"]): the preset is chosen by `new`
                 raise PytError(INIT_REMOVED)
+            if name in config.RETIRED_COMMANDS:
+                raise PytError(f"{name} is no longer a ./pyt command: {config.RETIRED_COMMANDS[name]}")
             raise PytError(f"unknown command: {name}  (./pyt help)")
         if not task.cmd and _asks_help(args):
             return cmd_help(cfg, [name])  # a deps-only task has no program to pass -h on to

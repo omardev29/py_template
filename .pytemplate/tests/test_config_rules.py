@@ -507,6 +507,33 @@ def test_tasks_rules() -> None:
     fails({"tasks": {"t": {"cmd": ["x"], "backend": "jython"}}}, "tasks.t.backend")
 
 
+def test_a_task_keeps_a_name_a_later_builtin_took() -> None:
+    """Rule 1.11: a pytemplate.toml of the first contract version stays valid. `install` and
+    `uninstall` became builtins after it, and a [tasks] entry of that name (valid then) stopped
+    every command: it loads (the task keeps the name in its project, cli.dispatch), and a builtin
+    of the contract still clashes."""
+    assert set(config.CONTRACT_COMMANDS) - COMMANDS == set(config.RETIRED_COMMANDS) == {"shell-setup"}
+    cfg = make({"tasks": {"install": {"cmd": ["x"]}, "uninstall": {"deps": ["check"]}, "shell-setup": {"cmd": ["y"]}}})
+    assert set(cfg.tasks) == {"install", "uninstall", "shell-setup"}
+    for name in sorted(config.CONTRACT_COMMANDS & COMMANDS):
+        fails({"tasks": {name: {"cmd": ["x"]}}}, "clashes with")
+
+
+def test_a_button_of_a_retired_command_is_left_out_with_a_warning(capsys: pytest.CaptureFixture[str]) -> None:
+    """Rule 1.11: `shell-setup` was a builtin of the first contract version, then removed; a
+    button naming it stopped every command. It is left out with a warning, once per run."""
+    config._WARNED.clear()
+    cfg = make({"vscode": {"buttons": ["run", "shell-setup", "test"]}})
+    assert cfg.vscode.buttons == ["run", "test"]
+    err = capsys.readouterr().err
+    assert "vscode.buttons: 'shell-setup' names shell-setup, which is no longer a ./pyt command (`pyt install`" in err
+    assert "remove it from pytemplate.toml" in err
+    make({"vscode": {"buttons": ["shell-setup"]}})
+    assert capsys.readouterr().err == ""  # once per run: the configuration loads again within one
+    assert make({"vscode": {"buttons": ["shell-setup"]}, "tasks": {"shell-setup": {"cmd": ["x"]}}}).vscode.buttons == ["shell-setup"]
+    fails({"vscode": {"buttons": ["init"]}}, "vscode.buttons: 'init' is neither")  # removed before the contract
+
+
 def test_vscode_buttons() -> None:
     assert make({"vscode": {"buttons": ["run", "build --method pyz", "t"]}, "tasks": {"t": {"cmd": ["x"]}}})
     fails({"vscode": {"buttons": ["nope"]}}, "vscode.buttons: 'nope' is neither")

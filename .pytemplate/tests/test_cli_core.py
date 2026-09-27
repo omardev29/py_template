@@ -283,6 +283,40 @@ def test_render_runs_before_builtins_and_tasks_unless_disabled(monkeypatch: pyte
     assert calls == [("lint", ["--fix"]), ("t", ["x"]), ("clean", []), ("lint", []), ("t", [])]
 
 
+def test_a_projects_task_keeps_a_name_a_later_builtin_took(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Rule 1.11: a [tasks.install] of a project made before `pyt install` existed stopped every
+    command. There the task runs for `./pyt install` (-h goes to its program), `help install`
+    describes it and says where the builtin runs; a builtin of the contract keeps its help."""
+    cfg = make({"tasks": {"install": {"cmd": ["tool"]}}})
+    config.validate(cfg, set(cli.COMMANDS))
+    monkeypatch.setattr(config, "load", lambda *_a, **_kw: cfg)
+    monkeypatch.setattr(render, "auto", lambda _cfg: None)
+    ran: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(tasks, "run_task", lambda _cfg, name, args, _dispatch: ran.append((name, args)) or 0)
+    assert cli.dispatch(["install", "-h"]) == 0 and cli.dispatch(["install"]) == 0
+    assert ran == [("install", ["-h"]), ("install", [])]
+    assert cli.cmd_help(None, ["install"]) == 0
+    out = capsys.readouterr().out
+    assert "./pyt install [args...]" in out and "the built-in `pyt install` runs outside the project" in out
+    assert cli.cmd_help(None, []) == 0 and "runs instead of the built-in command here" in capsys.readouterr().out
+    assert cli.dispatch(["uninstall", "-h"]) == 0 and "pyt uninstall" in capsys.readouterr().out  # no such task: the builtin's help
+    assert ran == [("install", ["-h"]), ("install", [])]
+    with pytest.raises(PytError, match=r"shell-setup is no longer a ./pyt command: `pyt install` puts") as e:
+        cli.dispatch(["shell-setup"])
+    assert e.value.code == 2
+
+
+def test_a_retired_command_in_deps_is_skipped_with_a_warning(capsys: pytest.CaptureFixture[str]) -> None:
+    """Rule 1.11: a deps entry naming a builtin removed since the first contract version is left
+    out with a warning; it stopped the task."""
+    config._WARNED.clear()
+    cfg = make({"tasks": {"ci": {"deps": ["shell-setup bash", "check"]}}})
+    seen: list[list[str]] = []
+    assert tasks.run_task(cfg, "ci", [], lambda argv: seen.append(argv) or 0) == 0
+    assert seen == [["check"]]
+    assert "task 'ci': deps entry 'shell-setup bash' names shell-setup, which is no longer a ./pyt command" in capsys.readouterr().err
+
+
 def test_an_unknown_command_is_a_usage_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config, "load", lambda *_a, **_kw: make({"tasks": {"ci": {"deps": ["check"]}}}))
     with pytest.raises(PytError, match="unknown command: sycn") as e:
@@ -306,9 +340,15 @@ def test_help_needs_no_valid_config(monkeypatch: pytest.MonkeyPatch, capsys: pyt
 # === 4. help ========================================================================================
 
 
+def _broken(*_a: Any, **_kw: Any) -> Config:
+    raise PytError("pytemplate.toml is not valid TOML: x")
+
+
 @pytest.mark.parametrize("name", sorted(cli.COMMANDS))
 def test_help_for_every_command(name: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    monkeypatch.setattr(config, "load", fail)  # a builtin's help needs no config
+    # a builtin's help needs no config; one added after the contract looks for a [tasks] entry of
+    # its name first (it keeps the name in its project), and a config that does not load is none
+    monkeypatch.setattr(config, "load", fail if name in config.CONTRACT_COMMANDS else _broken)
     assert cli.cmd_help(None, [name]) == 0
     c = cli.COMMANDS[name]
     assert capsys.readouterr().out.splitlines()[:2] == [f"./pyt {name} {c.usage}".rstrip(), f"  {c.summary}"]
@@ -327,7 +367,7 @@ def _help_cases() -> list[tuple[str, list[str]]]:
 def test_the_help_option_after_a_command_shows_its_help(
     name: str, args: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(config, "load", fail)  # nothing runs, not even the config load
+    monkeypatch.setattr(config, "load", fail if name in config.CONTRACT_COMMANDS else _broken)  # nothing runs, not even the config load
     assert cli.main([name, *args]) == 0
     assert capsys.readouterr().out.splitlines()[0] == f"./pyt {name} {cli.COMMANDS[name].usage}".rstrip()
 

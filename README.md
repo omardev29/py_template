@@ -365,8 +365,10 @@ env = { SEED = "42" }
 Placeholders in `cmd`, `env` values and `cwd`: `{root}`, `{src}`, `{build}`, `{dist}`,
 `{backend}`, `{name}`, `{pkg}` and `{python}` (the backend's interpreter). They are bare names;
 a literal brace is written twice (`"d = {{}}"`). Task names are lower-case letters, digits, `-`
-and `_`, start with a letter, and are never a `./pyt` command. Tasks also show up in
-`./pyt help`, in VS Code and in Neovim.
+and `_`, start with a letter, and are never a `./pyt` command. A task named like a command that
+came later (`install`, `uninstall`) keeps its name in its project: `./pyt install` runs the task
+there, and the command runs outside the project. Tasks also show up in `./pyt help`, in VS Code
+and in Neovim.
 
 ## Configuration
 

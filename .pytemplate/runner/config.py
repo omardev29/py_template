@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import proc
+from . import proc, ui
 from .project import CONFIG_FILE, PRESETS, SRC, rel, write_whole
 from .ui import PytError
 
@@ -35,6 +35,27 @@ METHODS = ("exe", "portable", "pyz", "wheel", "nuitka", "flet")
 EDITORS = ("pylance", "basedpyright")
 # [deploy] default: the build method of each backend; a backend left out of the table keeps its own
 DEFAULT_METHODS = {"cpython": "exe", "mypyc": "exe", "pypy": "portable"}
+# The built-in commands of the first template version under this file's contract (CLAUDE.md rule
+# 1.11, September 2026): a [tasks] entry may not take one of these names. A builtin added since
+# (install, uninstall) never stops a project whose task already had its name: there the task
+# keeps it (cli.dispatch), and the builtin runs outside the project.
+CONTRACT_COMMANDS = frozenset(
+    {
+        "add", "apply", "build", "check", "clean", "compile", "doctor", "fmt", "help", "hooks", "lint", "lock", "mode", "new",
+        "nvim", "pyz-merge", "remove", "rename", "render", "report", "run", "selftest", "setup", "shell-setup", "sync", "tasks",
+        "test",
+    }
+)  # fmt: skip
+# Built-in commands removed since, and what replaced them: a [vscode] buttons entry or a deps
+# entry that names one is left out with a warning (it stopped every command), and typed it says so
+RETIRED_COMMANDS = {"shell-setup": "`pyt install` puts the launchers themselves on PATH"}
+_WARNED: set[str] = set()  # each warning of a retired value once per run (the config loads again in a run)
+
+
+def warn_once(message: str) -> None:
+    if message not in _WARNED:
+        _WARNED.add(message)
+        ui.warn(message)
 
 _DOTTED = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
@@ -475,7 +496,7 @@ def _validate_task(name: str, task: TaskConfig, builtin_commands: set[str] | Non
     where = f"pytemplate.toml: tasks.{name}"
     if not re.fullmatch(r"[a-z][a-z0-9_-]*", name):
         raise PytError(f"pytemplate.toml: invalid task name: {name!r}")
-    if builtin_commands and name in builtin_commands:
+    if builtin_commands and name in builtin_commands and name in CONTRACT_COMMANDS:
         raise PytError(f"pytemplate.toml: task '{name}' clashes with the built-in command ./pyt {name}")
     if not task.cmd and not task.deps:
         raise PytError(f"pytemplate.toml: task '{name}' needs 'cmd' or 'deps'")
@@ -576,12 +597,21 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     for name, task in cfg.tasks.items():
         _validate_task(name, task, builtin_commands)
     if builtin_commands:
+        kept = []
         for button in cfg.vscode.buttons:
             first = button.split()[0] if button.split() else ""
             if first not in builtin_commands and first not in cfg.tasks:
+                if first in RETIRED_COMMANDS:
+                    warn_once(
+                        f"pytemplate.toml: vscode.buttons: {button!r} names {first}, which is no longer a ./pyt command "
+                        f"({RETIRED_COMMANDS[first]}): the button is left out; remove it from pytemplate.toml"
+                    )
+                    continue
                 raise PytError(
                     f"pytemplate.toml: vscode.buttons: {button!r} is neither a ./pyt command nor a [tasks] name"
                 )
+            kept.append(button)
+        cfg.vscode.buttons = kept
 
 
 # A [[typing.mypy_overrides]] table becomes a `[mypy-<module>,...]` section of .mypy.ini

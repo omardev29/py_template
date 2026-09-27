@@ -166,6 +166,12 @@ def run_task(
         if key in done:
             ui.info(f"task {name}: {dep!r} already ran")
             continue
+        if argv[0] in config.RETIRED_COMMANDS and argv[0] not in cfg.tasks:  # rule 1.11: never stops the task
+            config.warn_once(
+                f"pytemplate.toml: task '{name}': deps entry {dep!r} names {argv[0]}, which is no longer a ./pyt "
+                f"command ({config.RETIRED_COMMANDS[argv[0]]}): skipped; remove it from pytemplate.toml"
+            )
+            continue
         if argv[0] in cfg.tasks:
             code = run_task(cfg, argv[0], argv[1:], dispatch, (*stack, name), done)
         else:

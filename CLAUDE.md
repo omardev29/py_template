@@ -697,7 +697,11 @@ header rules (with detector tests proving each rule fires).
 3. `dispatch`: `help` needs no config. `-h`/`--help` anywhere after a builtin prints `help
    COMMAND` (no config load, nothing runs), except after `cli.HELP_PASSES_THROUGH` (`run`,
    `test`, `lock`, `selftest`), where it goes to the app, pytest, uv or the suite. Otherwise
-   `config.load(set(COMMANDS))` (validates; task names may not shadow builtins). Builtins run
+   `config.load(set(COMMANDS))` (validates; a task may not take the name of a builtin of the
+   contract, `config.CONTRACT_COMMANDS`: rule 1.11's first version; one a later builtin took,
+   `install` or `uninstall`, stays the project's: dispatch runs the task, `-h` goes to it and
+   `help NAME` describes it (`cli._task_named_like`), and the builtin runs outside the project;
+   `./pyt shell-setup` says what replaced it, `config.RETIRED_COMMANDS`). Builtins run
    `render.auto(cfg)` first when `Command.render` is true and `--no-render` is not set, then
    `module.func(cfg, args)`. Names in `[tasks]` run `render.auto` and
    `tasks.run_task(cfg, name, args, dispatch)`; `-h` after a deps-only task prints its help.
@@ -1461,7 +1465,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 - `[vscode]`: `settings` (merged into `.vscode/settings.json`; keys NOT validated, values must be
   JSON values: a TOML date/time, nan/inf or NUL is a config error naming the key, from the loader
   (`config._check_free`) and again from `vscode.settings`), `buttons` (each first word must be a
-  builtin command or a `[tasks]` name: `config.validate`).
+  builtin command or a `[tasks]` name: `config.validate`; one that names a command removed
+  since the contract, `config.RETIRED_COMMANDS` (`shell-setup`), is left out with a warning, once
+  per run, `config.warn_once`, and so is such a `deps` entry in `tasks.run_task`: they stopped
+  every command, a break of rule 1.11:
+  `test_config_rules.test_a_button_of_a_retired_command_is_left_out_with_a_warning`,
+  `test_a_task_keeps_a_name_a_later_builtin_took`).
 - `config.set_value(text, table, key, value)` edits the TOML text itself: a small scanner
   (`config._statements`: the four string kinds, multi-line arrays and inline tables, comments,
   dotted and quoted keys) finds the value's span, which may cover several lines (taplo, the
