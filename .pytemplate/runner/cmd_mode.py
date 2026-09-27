@@ -411,7 +411,7 @@ def _owned_now() -> dict[str, bytes]:
         base = ROOT / d
         if base.is_dir():
             for path in base.rglob("*"):
-                if path.is_file() and not any(p in path.parts for p in ("__pycache__", ".pytest_cache")):
+                if path.is_file() and not any(p in path.parts for p in ("__pycache__", ".pytest_cache", ".hypothesis")):
                     out[path.relative_to(ROOT).as_posix()] = path.read_bytes().replace(b"\r\n", b"\n")
     return out
 

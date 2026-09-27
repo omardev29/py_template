@@ -134,7 +134,8 @@ typings/                          project stubs (raylib preset: the corrected ra
 .pytemplate/nvim/                 local Neovim plugin pytemplate.nvim (lua/, tests/smoke.lua,
                                   tests/lazy-lock.json: the plugin commits selftest --nvim pins,
                                   README.md: setup, keymaps, options)
-.pytemplate/tests/                runner tests (pytest) + mypy-runner.ini
+.pytemplate/tests/                runner tests (pytest; conftest.py: the Hypothesis profiles) +
+                                  mypy-runner.ini
 .pytemplate/editor.json           generated data file for the Neovim plugin
 .pytemplate/state.json            hashes of the generated files + the `applied` record (committed)
 .pytemplate/template-repo         [template repo] marker, not copied by ./pyt new
@@ -1282,9 +1283,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   only on the files ruff accepted BEFORE the rename (`Tidy`: a file kept unformatted or unsorted
   stays so), with the active profile's `.build/cfg/ruff-*.toml` (`cmd_dev._profile_file`), like
   the hook.
-- Invariant (tested for the 3 presets, LF and CRLF, 7 name pairs, random names and the round
-  trip A -> B -> A): renaming the skeleton of name A to B is byte-identical to the skeleton of B,
-  so `presets.pristine` stays true.
+- Invariant (tested for the 3 presets, LF and CRLF, 7 name pairs, names Hypothesis makes up and
+  the round trip A -> B -> A): renaming the skeleton of name A to B is byte-identical to the
+  skeleton of B, so `presets.pristine` stays true.
 - Common words as names (`app`, `game`, `core`) also rewrite prose in src/ and tests/: that is
   why the tree must be clean and `--dry-run` shows sample lines.
 
@@ -1813,7 +1814,8 @@ Formats:
   (section 6.3).
 - Dev group (`pyproject.toml [dependency-groups] dev`): `debugpy`, `mypy` (needs the Rust
   `ast-serialize`: no PyPy wheels), `pyinstaller`, `ruff` and `setuptools` carry
-  `implementation_name == 'cpython'`; `.venv-pypy` only gets the app deps plus pytest.
+  `implementation_name == 'cpython'`; `.venv-pypy` only gets the app deps plus pytest and
+  hypothesis (the runner's property tests need it, a project's own tests may).
 - WSL on a Windows checkout (`project.IS_WSL`): separate `.venv*-wsl` envs and `.build/wsl`, so
   the Windows `.venv` is not turned into a Linux one (and `clean --envs` keeps the other side's).
   WSL is read from the kernel (`project.wsl_kernel`: a `microsoft` release or WSL's
@@ -3154,6 +3156,23 @@ short temp tree and unset `NVIM_APPNAME`.
   still there (7 tests failed in every real project;
   `test_paths.test_the_tests_that_copy_the_project_pass_in_one_with_its_own_code` runs them in a
   copy with code of its own).
+- Property-based tests (Hypothesis, the dev group's pin): `.pytemplate/tests/conftest.py` loads
+  the profile `pytemplate` (no example database, so a run depends on the code, the profile and
+  the seed only; no deadline; a failure prints its replay blob) on top of the profile Hypothesis
+  picked itself, `ci` on a CI (derandomized: the same inputs every run), and registers
+  `pytemplate-deep` (2000 examples: `./pyt selftest --hypothesis-profile=pytemplate-deep`). They
+  cover `config.toml_value` and `config.set_value` (test_config_rules), button labels read back
+  (test_vscode), `envs._excludes` against packaging's PEP 440 (test_envs_core),
+  `presets.name_from_folder` (test_presets), the rename invariant with made-up names
+  (test_rename) and argv through `pyt` and `pyt.ps1` (test_launcher_sh, test_launcher_win). An
+  example that starts a process gets fewer examples, `settings.default.max_examples // N` (read
+  at collection, after the profile is loaded), and a test that needs a folder per example makes
+  it with `tempfile` (Hypothesis refuses a function-scoped fixture without
+  `HealthCheck.function_scoped_fixture`). Hypothesis writes `.hypothesis/` where pytest runs
+  even without a database (its charmap and the constants of the code under test, the app's
+  strings among them): `.gitignore`, `presets.SKIP_ANYWHERE`, `rename.SKIP_DIRS`,
+  `mypyc.SKIP_DIRS`, `presets.pristine` and the dry run of `__init`, `e2e.STATE_SKIP_DIRS` and
+  the language guard skip it like the other tool caches.
 - `.pytemplate/tests/`: `test_runner.py` (config, render, lintc, imports, target keys),
   `test_no_spanish.py`, `test_launcher_sh.py` (static lint of the `pyt` header rules, `-n`
   syntax checks, `__probe` round-trips per shell found; a caller's `set -eu` in 8 shells,
@@ -3486,12 +3505,12 @@ short temp tree and unset `NVIM_APPNAME`.
   in the CI image (`template-ci-image.yml`, stage 2): the suite (dash, zsh, ksh, mksh, yash,
   busybox, fish, xonsh, Neovim, actionlint, taplo and the basedpyright pins are in the image),
   `python-floor` (the runner starts on 3.11, `uv run --python 3.11 --script`, and the suite runs
-  in process on 3.11, `uv run --no-project --python 3.11 --with pytest==<locked>`: the runner
-  code itself on its floor; the tools the tests start stay in `.venv`. Not on PyPy: uv never
-  starts the runner there, and PyPy only changes harness details (it resets an inherited
-  SIG_IGN of SIGINT, no PEP 538 locale coercion)) and `new-project` (`./pyt new` of a raylib
-  and a flet project named `Pt-<preset>`, then setup and selftest there). About 4 min in the
-  image, 4-6 on macOS and 5-6 on Windows (September 2026).
+  in process on 3.11, `uv run --no-project --python 3.11` with the locked pytest and hypothesis
+  (`--with`): the runner code itself on its floor; the tools the tests start stay in `.venv`.
+  Not on PyPy: uv never starts the runner there, and PyPy only changes harness details (it
+  resets an inherited SIG_IGN of SIGINT, no PEP 538 locale coercion)) and `new-project` (`./pyt
+  new` of a raylib and a flet project named `Pt-<preset>`, then setup and selftest there). About
+  4 min in the image, 4-6 on macOS and 5-6 on Windows (September 2026).
 - **[template repo]** `template-keepalive.yml` (weekly and by hand; the gate): in a public
   repository GitHub disables a workflow that has a schedule after 60 days without repository
   activity, and then none of its triggers run, pushes included, until it is enabled again. The
@@ -5352,10 +5371,11 @@ Code coupling (rename together):
   the nvim matrix of template-ci-image.yml (`test_ci_image_workflow_builds_publishes_and_runs_the_linux_jobs`)
   and the xonsh, Neovim and actionlint literals of the other template workflows
   (`test_workflow_literals_follow_the_ci_image_pins`) repeat its pins.
-- template-selftest.yml reads pins from the code by text: `envs.MIN_UV` (`MIN_UV = "..."`),
-  `cmd_dev.BASEDPYRIGHT`, the taplo pin of `test_render_core.py` and the pytest pin of
-  `uv.lock`; it deselects `test_init_round_trip_through_every_preset_is_byte_identical` by
-  name in the uv-floor job. `test_workflows.py` checks the workflow texts it relies on.
+- template-selftest.yml reads `envs.MIN_UV` (`MIN_UV = "..."`) from the code by text and
+  deselects `test_init_round_trip_through_every_preset_is_byte_identical` by name in the uv-floor
+  job; the python-floor job of template-ci-image.yml and the image's `warm` take the pytest and
+  hypothesis pins of `uv.lock` (`uv export`). `test_workflows.py` checks the workflow texts they
+  rely on.
 - `editor.json` `typing.basedpyright` <-> `cmd_dev.BASEDPYRIGHT` and `typing.basedpyright_node`
   <-> `cmd_dev.BASEDPYRIGHT_NODE` (bumping a pin changes a generated file: re-render); the Lua
   whitelists `BACKENDS`, `PROFILES`, `EDITORS`,

@@ -639,7 +639,10 @@ def test_docs_problems(tmp_path: Path) -> None:
 
 
 def test_project_state_and_its_changes(tmp_path: Path) -> None:
-    for rel_path in ("src/app/core.py", "pyproject.toml", ".git/index", ".venv/pyvenv.cfg", ".venv-pypy/x", "dist/a.whl", "src/app/__pycache__/core.pyc", "src/app/core.so"):
+    for rel_path in (
+        "src/app/core.py", "pyproject.toml", ".git/index", ".venv/pyvenv.cfg", ".venv-pypy/x", "dist/a.whl",
+        "src/app/__pycache__/core.pyc", "src/app/core.so", ".hypothesis/constants/0a1b",
+    ):  # fmt: skip
         (tmp_path / rel_path).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel_path).write_text(rel_path, encoding="utf-8")
     before = e2e.project_state(tmp_path)

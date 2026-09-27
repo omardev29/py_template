@@ -240,6 +240,10 @@ def test_preset_skeleton_copies_binary_files_verbatim(tmp_path: Path, monkeypatc
     monkeypatch.setattr(presets, "ROOT", root)
     cfg: Config = config._build(Config, {"app": {"name": "My-App", "preset": "p"}}, "")
     assert presets.pristine(cfg)
+    for cache in ("__pycache__/mod.cpython-314.pyc", ".pytest_cache/v/x", ".hypothesis/constants/0a1b"):
+        (root / "src" / cache).parent.mkdir(parents=True, exist_ok=True)  # pytest (and Hypothesis) run from src/
+        (root / "src" / cache).write_text("x", encoding="utf-8")
+    assert presets.pristine(cfg)
     (root / "src" / "my_app" / "blob").write_bytes(binary.replace(b"\r\n", b"\n"))
     assert not presets.pristine(cfg)
 

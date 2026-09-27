@@ -137,7 +137,8 @@ def test_selftest_workflow_covers_every_os_and_both_floors() -> None:
     linux = image["selftest"]
     assert 0 < linux.index("./pyt render --check") < linux.index("./pyt setup") < linux.index("run: ./pyt selftest -rs")
     floor = image["python-floor"]
-    assert "--python 3.11 --with \"$pytest\" python -m pytest" in floor and ".pytemplate/tests" in floor
+    assert "--python 3.11 --with \"$pytest\" --with \"$hypothesis\" python -m pytest" in floor and ".pytemplate/tests" in floor
+    assert "grep '^hypothesis==' " in floor  # the locked Hypothesis: the property tests need it
     assert "uv run --quiet --python 3.11 --script .pytemplate/pyt.py help" in floor
     new = image["new-project"]
     assert "preset: [raylib, flet]" in new and "./pyt new" in new and "./pyt selftest" in new
@@ -387,7 +388,7 @@ def test_ci_image_pins_come_from_the_code() -> None:
 def test_ci_image_reads_only_its_pins() -> None:
     """Every $NAME the image's scripts read comes from pins.env (or is their own)."""
     keys = set(_pins().values())
-    own = {"ca", "tmp", "work", "pytest", "preset", "serial", "here", "root", "python", "ref", "source", "ctx", "image", "base"}
+    own = {"ca", "tmp", "work", "pytest", "hypothesis", "preset", "serial", "here", "root", "python", "ref", "source", "ctx", "image", "base"}
     for name in ("system", "warm"):
         text = (IMAGE / name).read_text(encoding="utf-8")
         used = set(re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", text)) - {"HOME", "PATH", "PYTHON"}

@@ -131,7 +131,9 @@ NEVER_COPIED = (".build", "dist", "build", ".claude")
 MADE_BY_INIT = {".build": frozenset({"init"})}
 # What a round trip must restore: every file of the project but what .gitignore leaves out
 # (environments, builds, caches, compiled extensions) and .git (commits change the index)
-STATE_SKIP_DIRS = frozenset({".git", ".build", "dist", "build", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".flet", ".claude"})
+STATE_SKIP_DIRS = frozenset(
+    {".git", ".build", "dist", "build", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".hypothesis", ".flet", ".claude"}
+)
 STATE_SKIP_SUFFIXES = (".pyc", ".pyo", ".so", ".pyd", ".spec")
 GIT_IDENTITY = ("-c", "user.name=pytemplate e2e", "-c", "user.email=e2e@example.invalid")
 

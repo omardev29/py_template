@@ -22,10 +22,11 @@ cd "$work/t"
 case "${1:-}" in
 template)
     ./pyt setup
-    # the python-floor job: the runner started on the floor Python, pytest of uv.lock on it
+    # the python-floor job: the runner started on the floor Python, pytest and hypothesis of uv.lock on it
     uv run --quiet --python "$PYTHON_FLOOR" --script .pytemplate/pyt.py help > /dev/null
     pytest=$(uv export --frozen --only-group dev --no-hashes --no-annotate --no-header | grep '^pytest==' | sed 's/ *;.*//')
-    uv run --no-project --python "$PYTHON_FLOOR" --with "$pytest" python -c ''
+    hypothesis=$(uv export --frozen --only-group dev --no-hashes --no-annotate --no-header | grep '^hypothesis==' | sed 's/ *;.*//')
+    uv run --no-project --python "$PYTHON_FLOOR" --with "$pytest" --with "$hypothesis" python -c ''
     # test_upx's real run: the pinned UPX of the runner's own download (upx.find: SHA-256)
     .venv/bin/python -c "import sys; sys.path.insert(0, '.pytemplate'); from runner import config, upx; print(upx.find(config.load(set())))"
     uv tool install --python "$CPYTHON" "$XONSH"

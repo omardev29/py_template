@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEMPLATE_DIR))
@@ -889,6 +891,117 @@ def test_set_value_refuses_what_it_cannot_edit(text: str, table: str, key: str) 
 def test_set_value_needs_valid_toml() -> None:
     with pytest.raises(PytError, match="not valid TOML"):
         set_value("[backend\nactive = 1\n", "backend", "active", "x")
+
+
+# --- toml_value and set_value on generated input (Hypothesis) ---------------------------------------
+
+TOML_INTS = st.integers(min_value=-(2**63), max_value=2**63 - 1)  # TOML integers are 64-bit
+TOML_VALUES = st.recursive(st.one_of(st.booleans(), TOML_INTS, st.text()), lambda inner: st.lists(inner, max_size=4), max_leaves=10)
+
+
+def _typed(value: Any) -> Any:
+    """`value` with the type of every item, so that a True read back never passes for a 1."""
+    if isinstance(value, list):
+        return ("list", [_typed(v) for v in value])
+    return (type(value).__name__, value)
+
+
+@given(TOML_VALUES)
+def test_toml_value_reads_back_as_the_value_it_wrote(value: Any) -> None:
+    """Any bool, 64-bit integer, string (every character but a lone surrogate) and list of them is
+    one line of TOML that tomllib reads back as the same value, of the same types."""
+    text = toml_value(value)
+    assert "\n" not in text and "\r" not in text
+    assert _typed(tomllib.loads(f"k = {text}\n")["k"]) == _typed(value)
+
+
+@given(st.text(), st.integers(min_value=0xD800, max_value=0xDFFF).map(chr), st.text())
+def test_toml_value_refuses_a_lone_surrogate_anywhere(head: str, surrogate: str, tail: str) -> None:
+    with pytest.raises(PytError, match="lone surrogate"):
+        toml_value(head + surrogate + tail)
+
+
+_BARE = st.from_regex(r"[a-z][a-z0-9_]{0,5}", fullmatch=True)
+_NEW = st.from_regex(r"NEW_[A-Z]{1,3}", fullmatch=True)  # never one of the _BARE names
+_SMALL = st.one_of(st.booleans(), st.integers(-(10**6), 10**6), st.text(max_size=10), st.lists(st.one_of(st.integers(0, 99), st.text(max_size=5)), max_size=3))
+_COMMENT = st.text(st.characters(exclude_categories=("Cc", "Cs")), max_size=10)  # TOML comments hold no control character
+_BEFORE = st.lists(st.one_of(st.just(""), _COMMENT.map(lambda c: f"# {c}")), max_size=2)  # blank and comment lines
+_ENTRY = st.tuples(_BARE, _SMALL, st.sampled_from(["", " ", "  "]), st.sampled_from(["", " ", "\t"]), st.none() | _COMMENT, _BEFORE)
+_TABLE = st.tuples(_BARE, st.lists(_ENTRY, max_size=4, unique_by=lambda e: e[0]))
+_DOC = st.tuples(st.lists(_TABLE, min_size=1, max_size=3, unique_by=lambda t: t[0]), st.sampled_from(["\n", "\r\n"]), st.booleans(), _BEFORE)
+
+
+def _document(doc: Any) -> tuple[str, str]:
+    """A pytemplate.toml-like text of `doc` and its line ending: the values as toml_value writes
+    them, spaced and commented in many ways, with LF or CRLF, with or without a line ending at the
+    end. A text of one line without one has no line ending of its own: set_value writes LF."""
+    tables, eol, final, lead = doc
+    lines = [*lead]
+    for name, entries in tables:
+        lines.append(f"[{name}]")
+        for key, value, before_eq, after_eq, comment, before in entries:
+            lines += before
+            lines.append(f"{key}{before_eq}={after_eq}{toml_value(value)}" + ("" if comment is None else f" # {comment}"))
+    text = eol.join(lines) + (eol if final else "")
+    return text, eol if eol in text else "\n"
+
+
+@given(_DOC, st.data())
+def test_set_value_changes_one_value_and_puts_the_old_one_back_byte_for_byte(doc: Any, data: st.DataObject) -> None:
+    """set_value replaces only the value (the spacing, the comments, the other lines and the line
+    endings stay): setting it back gives the very same bytes, and a second set changes nothing."""
+    text, _ = _document(doc)
+    tables = [t for t in doc[0] if t[1]]
+    if not tables:
+        return
+    table, entries = data.draw(st.sampled_from(tables))
+    key, old, *_ = data.draw(st.sampled_from(entries))
+    value = data.draw(_SMALL)
+    out = _check_edit(text, table, key, value)
+    assert set_value(out, table, key, value) == out
+    assert set_value(out, table, key, old) == text
+
+
+@given(_DOC, st.data())
+def test_set_value_adds_a_missing_key_as_one_line_of_its_table(doc: Any, data: st.DataObject) -> None:
+    text, eol = _document(doc)
+    table = data.draw(st.sampled_from([t[0] for t in doc[0]]))
+    key, value = data.draw(_NEW), data.draw(_SMALL)
+    out = _check_edit(text, table, key, value)
+    added = f"{key} = {toml_value(value)}{eol}"
+    assert out.count(added) == 1
+    assert out.replace(added, "", 1) in (text, text + eol)  # + eol: the file's last line had none
+
+
+@given(_DOC, _NEW, _SMALL)
+def test_set_value_adds_a_missing_table_at_the_end(doc: Any, table: str, value: Any) -> None:
+    text, eol = _document(doc)
+    out = _check_edit(text, table, "k", value)
+    assert out.startswith(text)
+    e = re.escape(eol)
+    assert re.fullmatch(rf"(?:{e})*\[{table}\]{e}k = {re.escape(toml_value(value))}{e}", out[len(text) :]), out[len(text) :]
+
+
+_WORD = st.text(alphabet="abcdefghij", min_size=1, max_size=4)
+
+
+@given(st.lists(_WORD, min_size=1, max_size=5, unique=True), st.data(), st.sampled_from(["\n", "\r\n"]))
+def test_set_value_keeps_the_comments_of_the_array_elements_that_stay(old: list[str], data: st.DataObject, eol: str) -> None:
+    """A multi-line array with comments (taplo's layout): an element that stays keeps its line with
+    the comment on it and the comment line above it, a new one gets a line of its own, one that
+    goes takes its comments with it (config._array_lines)."""
+    text = eol.join(["[t]", "k = [", *(f'  # above {w}{eol}  "{w}", # on {w}' for w in old), "]", ""])
+    kept = data.draw(st.lists(st.sampled_from(old), unique=True))
+    new = data.draw(st.lists(_WORD.map(str.upper), max_size=3, unique=True))  # never an old one
+    value = data.draw(st.permutations([*kept, *new]))
+    out = _check_edit(text, "t", "k", value)
+    lines = out.split(eol)
+    for w in old:
+        assert (f"  # above {w}" in lines and f'  "{w}", # on {w}' in lines) is (w in kept), (w, out)
+    for w in new:
+        assert f'  "{w}",' in lines, (w, out)
+    order = [line for line in lines if line.startswith('  "')]
+    assert [line.split('"')[1] for line in order] == value
 
 
 # --- reading pytemplate.toml ------------------------------------------------------------------------

@@ -25,6 +25,8 @@ import time
 from pathlib import Path
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
@@ -482,6 +484,18 @@ def test_posix_shell_runs_the_launcher(name: str) -> None:
     shell = _need(shell if shell and shell.is_file() else None, name)
     argv: list[str | Path] = [shell, "sh"] if name == "busybox" else [shell]
     Run([*argv, "../pyt", "__probe", "5", "0", *ARGS], SRC, _clean_env()).check(5, SRC)
+
+
+# Any word an argv can hold (Unicode without NUL), mixed with the ones known to be hard.
+ANY_ARGS = st.lists(st.one_of(st.sampled_from(ARGS), st.text(st.characters(codec="utf-8", exclude_characters="\x00"))), max_size=50)
+
+
+@needs_posix
+@settings(max_examples=max(3, settings.default.max_examples // 20))  # a runner start each
+@given(ANY_ARGS)
+def test_any_arguments_reach_the_runner_unchanged(args: list[str]) -> None:
+    """Words at random reach the runner as they are, however many."""
+    Run(["/bin/sh", "../pyt", "__probe", "5", "0", *args], SRC, _clean_env()).check(5, SRC, args=args)
 
 
 @needs_posix

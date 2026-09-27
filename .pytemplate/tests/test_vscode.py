@@ -22,10 +22,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from runner import cli, config, lintc, presets, render, ui  # noqa: E402
+from runner import tasks as task_runner  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.editors import vscode  # noqa: E402
 from runner.project import PRESETS, SRC, TEMPLATES  # noqa: E402
@@ -290,6 +293,16 @@ def test_labels_quote_only_what_would_not_read_back_as_one_word() -> None:
     assert shown[2]["args"][1:] == ["run", "cpython", "it's"]
     for t in shown:  # every label reads back as the task's own arguments
         assert vscode.split_words(t["label"].removeprefix("pyt: ")) == t["args"][1:]
+
+
+@given(st.lists(st.text()))
+def test_any_arguments_read_back_from_their_label(words: list[str]) -> None:
+    """vscode.shown quotes an argument only where split_words would not read it back as one word:
+    whatever the words (blanks of any kind, quotes of both kinds, backslashes, empty ones), the
+    label reads back as them, so two buttons with different arguments never share a label."""
+    label = vscode.shown(words)
+    assert task_runner.split_words(label) == words
+    assert vscode.split_words(label) == words
 
 
 def test_task_cycles_and_bad_deps_do_not_break_rendering() -> None:

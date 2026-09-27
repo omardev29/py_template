@@ -5,6 +5,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.hypothesis/
 
 # Environments (one per backend: .venv, .venv-pypy, and their -wsl variants)
 .venv*/

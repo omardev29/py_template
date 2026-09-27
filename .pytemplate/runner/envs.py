@@ -284,7 +284,7 @@ def _request_version(request: str) -> tuple[int, ...] | None:
     return tuple(int(x) for x in m.groups() if x is not None) if m else None
 
 
-_CLAUSE = re.compile(r"(~=|==|!=|<=|>=|<|>)\s*(\d+(?:\.\d+)*)(\.\*)?")
+_CLAUSE = re.compile(r"(~=|==|!=|<=|>=|<|>)\s*([0-9]+(?:\.[0-9]+)*)(\.\*)?")  # PEP 440: ASCII digits only
 _LAST_PATCH = 1 << 20  # beyond every real patch release
 
 
@@ -308,13 +308,17 @@ def _holds(op: str, spec: tuple[int, ...], star: bool, version: tuple[int, ...])
 def _excludes(spec: str, version: tuple[int, ...]) -> bool:
     """Whether the requires-python `spec` rules out `version`: X.Y.Z, or X.Y, which stands for
     every patch release of that minor (only those it rules out all). False for what this
-    subset of PEP 440 cannot read (a pre-release, `===`...): uv decides then."""
+    subset of PEP 440 cannot read (a pre-release, `===`, a number too long for int()...): uv
+    decides then."""
     clauses: list[tuple[str, tuple[int, ...], bool]] = []
     for part in spec.split(","):
         m = _CLAUSE.fullmatch(part.strip())
         if m is None:
             return False
-        number = tuple(int(x) for x in m[2].split("."))
+        try:
+            number = tuple(int(x) for x in m[2].split("."))
+        except ValueError:  # over sys.get_int_max_str_digits() digits
+            return False
         if (m[3] and m[1] not in ("==", "!=")) or (m[1] == "~=" and len(number) < 2):
             return False
         clauses.append((m[1], number, bool(m[3])))

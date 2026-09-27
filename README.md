@@ -811,7 +811,7 @@ check fails, `pyproject.toml` and `uv.lock` are put back).
   7.3.23 (uv takes the newest PyPy build of that Python version). A later uv may stop offering
   it (uv 0.12 no longer offers 3.11.11 and 3.11.13): see [Troubleshooting](#troubleshooting).
 - The tools (mypy, ruff, PyInstaller, debugpy) run on CPython: `.venv-pypy` holds the app's
-  dependencies and pytest.
+  dependencies, pytest and Hypothesis.
 - CPython C-API libraries (numpy, pillow, pydantic-core) are slow on PyPy: add them with
   `./pyt add numpy --cpython-only`. cffi libraries (raylib) are fast: the JIT also compiles the
   cffi calls.
@@ -1631,7 +1631,7 @@ src/main.py                      entry point (never compiled)
 src/<pkg>/core/                  what mypyc compiles (compile.modules)
 src/<pkg>/*.py                   the interpreted boundary (UI, I/O, poorly typed libraries)
 src/assets/                      data bundled with the app (app.assets = "assets")
-tests/                           pytest (conftest.py checks that mypyc's binaries were loaded)
+tests/                           pytest, Hypothesis too (conftest.py checks that mypyc's binaries were loaded)
 typings/                         the project's stubs (raylib: the corrected raylib stub)
 .python-version, .mypy.ini, .ruff.toml, pyrightconfig.json, .vscode/, .lazy.lua   generated
 .github/workflows/ci.yml         the project's CI (generated)
@@ -1699,6 +1699,10 @@ regenerate the root (CLAUDE.md, section 11).
 - `selftest` needs `.venv` (`./pyt setup` once). Its arguments are added to the whole suite
   (select tests with `-k EXPR`). The tests that need the network (re-locks and real
   `./pyt new` runs of a copy, a few real builds) are skipped when it is unreachable.
+- Some of its tests are property-based ([Hypothesis](https://hypothesis.works)): they make up
+  inputs at random (a hundred per test, a few where each costs a runner or PowerShell start; on a
+  CI the same ones every run) and a failure prints the smallest input it found.
+  `./pyt selftest --hypothesis-profile=pytemplate-deep` tries 20 times as many.
 - `--shells [NAME,...] [--list] [--json] [--keep]`
   `[--project DIR] [--tests T1,...] [--jobs N] [--timeout S]`: seven probes per shell (arguments,
   exit code, folders, a temporary script like xonsh-shell-kit's `!` lines, a minimal PATH, stdin, uv

@@ -19,7 +19,7 @@ MARKER = ROOT / ".pytemplate" / "template-repo"
 PRAGMA = "lang: allow"
 ALLOWED_PATHS = frozenset({".pytemplate/tests/test_no_spanish.py", "uv.lock"})
 BINARY_SUFFIXES = frozenset({".png", ".ico", ".jpg", ".gif", ".pyz", ".whl", ".zip", ".gz", ".pyd", ".so", ".dll", ".exe"})
-SKIP_DIRS = frozenset({".git", ".build", "dist", "build", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".flet"})
+SKIP_DIRS = frozenset({".git", ".build", "dist", "build", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".hypothesis", ".flet"})
 
 # Escaped so this file stays ASCII: a e i o u with acute accent (lower and upper case), n with
 # tilde, u with diaeresis, and the inverted question and exclamation marks.

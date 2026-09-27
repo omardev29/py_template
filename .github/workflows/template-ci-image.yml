@@ -180,7 +180,8 @@ jobs:
       - name: The runner's tests on Python 3.11
         run: |
           pytest=$(uv export --frozen --only-group dev --no-hashes --no-annotate --no-header | grep '^pytest==' | sed 's/ *;.*//')
-          uv run --no-project --python 3.11 --with "$pytest" python -m pytest -q -p no:cacheprovider -rs .pytemplate/tests
+          hypothesis=$(uv export --frozen --only-group dev --no-hashes --no-annotate --no-header | grep '^hypothesis==' | sed 's/ *;.*//')
+          uv run --no-project --python 3.11 --with "$pytest" --with "$hypothesis" python -m pytest -q -p no:cacheprovider -rs .pytemplate/tests
 
   new-project:
     name: selftest in a new ${{ matrix.preset }} project (image)
