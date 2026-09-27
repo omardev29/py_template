@@ -964,6 +964,14 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   them (`hooks.check_generated`), so following them never splits a source from its output nor
   blocks the next commit). `lintc` on staged compiled modules (blocking only under the `mypyc` profile, reads
   the working tree). Never mypy (the user's choice: `./deploy check` does it).
+- Paths: `hooks.find_repo` takes the project's prefix from git (`rev-parse --show-prefix`: the
+  folders' case on disk), checked to name the project's folder with `os.path.samefile`
+  (`_same_folder`), and `project_paths` folds case where git says the disk does
+  (`Repo.ignore_case`: core.ignorecase, which git sets on macOS's default APFS; always on
+  Windows). On macOS `project.ROOT` keeps the case typed (`cd ~/projects/myapp` for MyApp): the
+  prefix computed from ROOT against git's top put the project outside its work tree (every hook
+  command failed), and a prefix in another case than git's paths dropped every staged file (the
+  checks were skipped without a word). `test_hooks` stands a symlink in for the other spelling.
 - `hooks._run_bytes` is the module's only process start outside `proc.run`: raw bytes
   (proc.run's text mode turns CRLF into LF) and stdin, for `git cat-file` and ruff on stdin.
 - Git hands hooks a relative `GIT_INDEX_FILE` and, in linked worktrees, `GIT_DIR` without

@@ -176,6 +176,43 @@ def test_launcher_path_is_relative_to_the_top(tmp_path: Path) -> None:
     assert hooks.run_line(find(top)) == "[ ! -f ./deploy ] || sh ./deploy hooks run || exit $?"
 
 
+@needs_git
+@pytest.mark.skipif(IS_WINDOWS, reason="a symlink stands for another spelling of the folder (Windows needs a privilege)")
+def test_a_project_spelled_otherwise_than_git_spells_it_is_found(tmp_path: Path) -> None:
+    """On macOS (case-insensitive APFS) ROOT keeps the case the user typed (`cd ~/projects/myapp`
+    for MyApp: Path.resolve keeps it there), while git's top has the case on disk: the prefix,
+    computed from the two texts, put the project outside its own work tree ("../myapp"), and
+    every hook command failed. A symlink gives the same folder another spelling here. The prefix
+    now comes from git (--show-prefix), and the file system says it names the project's folder."""
+    top, project = make_repo(tmp_path, "apps/p")
+    typed = tmp_path / "typed"
+    typed.symlink_to(project, target_is_directory=True)
+    repo = find(typed, top)
+    assert repo.prefix == "apps/p" and repo.launcher == "./apps/p/deploy"
+    (project / "src").mkdir()
+    (project / "src" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    git(top, "add", "-A")
+    assert hooks.staged_files(repo) == ["src/a.py"]
+
+
+@needs_git
+def test_staged_paths_fold_case_where_git_says_the_disk_does(tmp_path: Path) -> None:
+    """core.ignorecase (git sets it on macOS's default APFS, and on Windows): a staged path spelled
+    otherwise than the project's prefix (Apps/P/x.py for apps/p) was dropped on macOS, where
+    project_paths compared case-sensitively, and `hooks run` said there was nothing to check."""
+    top, project = make_repo(tmp_path, "apps/p")
+    source = tmp_path / "x.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    blob = git(top, "hash-object", "-w", str(source)).stdout.strip()
+    git(top, "update-index", "--add", "--cacheinfo", f"100644,{blob},Apps/P/x.py")
+    git(top, "config", "core.ignorecase", "true")
+    repo = find(project, top)
+    assert hooks.staged_files(repo) == ["x.py"] and repo.ignore_case
+    if not IS_WINDOWS:  # a case-sensitive disk: Apps/P is another folder
+        git(top, "config", "core.ignorecase", "false")
+        assert hooks.staged_files(find(project, top)) == []
+
+
 def test_not_a_git_work_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     if shutil.which("git") is None:
         with pytest.raises(hooks.NotInGit) as e:
