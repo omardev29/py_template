@@ -1016,6 +1016,19 @@ def _plan_config(root: Path, names: Names) -> TextEdit:
     return TextEdit("pytemplate.toml", old, new, result.count, kept, f'app.name = "{names.new_name}"', bom=raw.startswith(b"\xef\xbb\xbf"))
 
 
+@functools.cache
+def _named_keys() -> frozenset[tuple[str, ...]]:
+    """The keys of the presets' pyproject blocks whose value holds the app's name ({{name}},
+    {{pkg}}), with their table: the only values of the block a rename rewrites."""
+    out: set[tuple[str, ...]] = set()
+    for preset in presets.available():
+        template = str(presets.load(preset).get("pyproject", ""))
+        for stmt in config.scan(template) or []:
+            if stmt.kind == "key" and re.search(r"\{\{(?:name|pkg)\}\}", template[stmt.value[0] : stmt.value[1]]):
+                out.add(stmt.path)
+    return frozenset(out)
+
+
 def _plan_pyproject(root: Path, names: Names) -> TextEdit | None:
     path = root / "pyproject.toml"
     if not path.is_file():
@@ -1033,9 +1046,15 @@ def _plan_pyproject(root: Path, names: Names) -> TextEdit | None:
     end = next((i for i, ln in enumerate(lines) if ln.strip() == presets.EXTRA_END), None)
     count = 0
     if begin is not None and end is not None and end > begin + 1:
-        block = rewrite("\n".join(lines[begin + 1 : end]), names, toml=True)
-        lines[begin + 1 : end] = block.text.split("\n")
-        count = block.count
+        # Only the values the preset writes with the name: flet's org = "com.example" is a
+        # reverse domain, and for an app named com it became "beta.example"
+        block, named, parts, pos = "\n".join(lines[begin + 1 : end]), _named_keys(), [], 0
+        for stmt in config.scan(block) or []:
+            if stmt.kind == "key" and stmt.path in named:
+                value = rewrite(block[stmt.value[0] : stmt.value[1]], names, toml=True)
+                parts += [block[pos : stmt.value[0]], value.text]
+                pos, count = stmt.value[1], count + value.count
+        lines[begin + 1 : end] = "".join([*parts, block[pos:]]).split("\n")
         new = "\n".join(lines)
     try:
         tomllib.loads(new)

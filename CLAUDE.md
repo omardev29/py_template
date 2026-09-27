@@ -1015,8 +1015,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     with `config._decode` (UTF-16/ANSI is a clear error) and written back with its own BOM and
     line endings.
   - `pyproject.toml`: `[project] name` (`presets.set_project_name`: the `[project]` table only,
-    either quote style, any indentation; a table it cannot edit stops the plan) and the preset
-    block; mentions in other tables are reported. Read as bytes decoded `utf-8-sig`: its line
+    either quote style, any indentation; a table it cannot edit stops the plan) and, in the
+    preset block, the values the preset writes with the name (`rename._named_keys`: `{{name}}`
+    or `{{pkg}}` in a preset.toml `pyproject`; flet's `org = "com.example"` stays, which for an
+    app named com became `beta.example`); mentions in other tables are reported. Read as bytes decoded `utf-8-sig`: its line
     endings stay (a CRLF checkout used to come back LF), the BOM is not written back.
   - A file of src/ or tests/ that cannot be read (root-owned, locked by another program) stops
     the plan with a DeployError naming it: nothing changed, never an internal-error traceback.

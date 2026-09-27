@@ -102,6 +102,16 @@ def test_the_pyproject_preset_block_is_renamed(tmp_path: Path) -> None:
     assert data["tool"]["flet"]["product"] == data["tool"]["flet"]["company"] == "My-Game"
 
 
+@pytest.mark.parametrize(("old", "new"), [("com", "beta"), ("com", "My-Game"), ("example", "beta")])
+def test_the_preset_block_keeps_what_is_not_the_name(tmp_path: Path, old: str, new: str) -> None:
+    """Only the values the preset writes with the name follow a rename: flet's org =
+    "com.example" (a reverse domain) became "beta.example" for an app named com."""
+    _write_project(tmp_path, "flet", old)
+    _rename(tmp_path, old, new)
+    assert _tree(tmp_path) == presets.skeleton("flet", new)
+    assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == _pyproject("flet", new)
+
+
 def test_plan_writes_nothing(tmp_path: Path) -> None:
     _write_project(tmp_path, "raylib", "alpha")
     before = {k: hashlib.sha256(v).hexdigest() for k, v in _tree(tmp_path).items()}
