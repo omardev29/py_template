@@ -215,18 +215,23 @@ def build(req: BuildRequest) -> Path:
         raise DeployError(f"wheel: package src/{cfg.pkg}/ not found")
     work = BUILD / "wheel" / req.backend
     if work.exists():
-        shutil.rmtree(work)
+        mypyc.remove_tree(work)
     (work / "src").mkdir(parents=True)
-    shutil.copytree(package, work / "src" / cfg.pkg, ignore=_skip)
+    # Copies from src/ itself: owner-writable (mypyc.copy_writable, and make_writable for the
+    # folders, whose modes copytree copies too): build_ext --inplace writes next to the sources,
+    # and the next build must be able to delete them
+    copy = mypyc.copy_writable
+    shutil.copytree(package, work / "src" / cfg.pkg, ignore=_skip, copy_function=copy)
     for top in _outside_package(cfg):  # compile.modules outside the package (a lone module)
         if (SRC / top).is_dir():
-            shutil.copytree(SRC / top, work / "src" / top, ignore=_skip)
+            shutil.copytree(SRC / top, work / "src" / top, ignore=_skip, copy_function=copy)
         else:
-            shutil.copy2(SRC / top, work / "src" / top)
+            copy(str(SRC / top), str(work / "src" / top))
     assets = cfg.app.assets
     if assets and (SRC / assets).is_dir():
         # In a wheel the assets travel inside the package (resources.py looks for them there)
-        shutil.copytree(SRC / assets, work / "src" / cfg.pkg / "assets", ignore=_skip, dirs_exist_ok=True)
+        shutil.copytree(SRC / assets, work / "src" / cfg.pkg / "assets", ignore=_skip, dirs_exist_ok=True, copy_function=copy)
+    mypyc.make_writable(work / "src")
     (work / "pyproject.toml").write_text(_pyproject(cfg, req.compiled), encoding="utf-8", newline="\n")
     if req.compiled:
         (work / "mypy.ini").write_text(render.mypy_ini(cfg, "mypyc", for_compile=work), encoding="utf-8", newline="\n")

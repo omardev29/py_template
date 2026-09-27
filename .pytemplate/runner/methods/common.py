@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import configparser
+import contextlib
 import hashlib
 import json
 import os
@@ -542,6 +543,12 @@ def remove_output(path: Path, *also: Path) -> None:
             raise DeployError(f"cannot replace {rel(p)}: {what} ({_why(e)}){hint}", 1) from None
         moved.append(p)
     shutil.rmtree(aside, ignore_errors=True)
+    if aside.exists():  # read-only files an older build copied from src/ (Windows deletes none)
+        from ..mypyc import make_writable
+
+        with contextlib.suppress(OSError):
+            make_writable(aside)
+        shutil.rmtree(aside, ignore_errors=True)
     if aside.exists():
         ui.warn(f"could not delete all of the previous output, moved to {rel(aside)}: delete it by hand")
 
@@ -553,8 +560,10 @@ def _why(e: OSError) -> str:
 
 def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:
     """Copy the payload. extensions=False keeps only the .py files (pure fallback)."""
+    from ..mypyc import copy_writable, remove_tree  # read-only files of src/: see copy_writable
+
     if dest.exists():
-        shutil.rmtree(dest)
+        remove_tree(dest)
 
     def ignore(directory: str, names: list[str]) -> set[str]:
         skip = {n for n in names if n in {"__pycache__", ".mypy_cache"}}
@@ -562,7 +571,7 @@ def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:
             skip |= {n for n in names if n.endswith(EXT_SUFFIXES)}
         return skip
 
-    shutil.copytree(app_dir, dest, ignore=ignore)
+    shutil.copytree(app_dir, dest, ignore=ignore, copy_function=copy_writable)
 
 
 def uses_tkinter(*extra: Path) -> bool:

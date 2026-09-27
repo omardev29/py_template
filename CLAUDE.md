@@ -592,7 +592,7 @@ header rules (with detector tests proving each rule fires).
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
 | `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `DeployError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `_installed_import_names`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./deploy __init`; with rollback), `copy_template`, `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
-| `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`, `COMPILER_MISSING`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
+| `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`; `copy_writable`, `make_writable`, `remove_tree` for every scratch copy of the app), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`, `COMPILER_MISSING`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
 | `tasks.py` | `[tasks]`: `Placeholders` (lazy `{python}`), `deps` (each once per invocation), cycle detection, `run_task`, `describe`, `list_tasks`. |
@@ -1591,7 +1591,15 @@ Formats:
   vendored native library, which must be `git add -f`ed past `.gitignore`) is app content and
   synced like any file, so `run mypyc` and every payload see what `run cpython` sees.
   `mypyc.build` passes `owned=modules`; `cmd_build.payload` and `methods/flet.py` use the
-  default. Not handled: a case-only rename on a case-insensitive file system.
+  default. Not handled: a case-only rename on a case-insensitive file system. Every copy is
+  owner-writable (`copy_writable`; an unchanged read-only copy an older build left is fixed in
+  place): copy2 kept the mode of a read-only file of `src/` (a Perforce checkout, a link into
+  the Nix store), and once it changed the next build could not replace the copy (Windows: not
+  delete it either). The copies made from the payload or the stage (`common.copy_app`,
+  `exe_stage`, exe and nuitka stages) use `copy_writable` too, the wheel's copies of `src/`
+  also `make_writable` (copytree copies a folder's mode), and the scratch folders are removed
+  with `remove_tree` (what rmtree cannot delete is made writable and removed again; a link
+  goes as a link).
 - `remove_stale_extensions(stage, modules, group, python=, separate=, src=)` runs BEFORE the
   sync (a folder it empties is then removed) and deletes: extensions whose ABI tag
   (`cpython-314-...`, `cp314-...`, a trailing `t` = free-threaded) is not `python.cpython` (old

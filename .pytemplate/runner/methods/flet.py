@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import copy
 import json
-import shutil
 import sys
 import tomllib
 from pathlib import Path
@@ -137,11 +136,12 @@ def build(req: BuildRequest) -> Path:
     # sync_tree keeps extensions: drop those of a previous build (a desktop build's .pyd must
     # not reach a mobile/web one), then copy this payload's binaries
     for stale in mypyc.extension_files(work / STAGE_APP):
+        mypyc.make_writable(stale)  # a read-only copy an older ./deploy made: Windows deletes none
         stale.unlink()
     for ext in mypyc.extension_files(app_dir):
         target_ext = work / STAGE_APP / ext.relative_to(app_dir)
         target_ext.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ext, target_ext)
+        mypyc.copy_writable(str(ext), str(target_ext))
 
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))  # an editor or PS 5.1 may add a BOM
     text = build_pyproject(cfg, data, _pinned_requirements(envs.tool_env(cfg)))

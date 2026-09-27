@@ -27,7 +27,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .. import ui
+from .. import mypyc, ui
 from ..cmd_build import BuildRequest, dist_path
 from ..config import APP_NAME, Config
 from ..project import BUILD, EXT_SUFFIXES, IS_WINDOWS, TEMPLATES, rel
@@ -143,7 +143,7 @@ def build(req: BuildRequest) -> Path:
     work = BUILD / "pyz" / req.backend
     root = work / "root"
     if root.exists():
-        shutil.rmtree(root)
+        mypyc.remove_tree(root)
     root.mkdir(parents=True)
 
     # Pure code (no .pyd): works on any interpreter >= the minimum version

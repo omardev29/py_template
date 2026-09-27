@@ -242,11 +242,11 @@ def build(req: BuildRequest) -> Path:
         mypyc.exe_stage(cfg, req.app_dir, stage)
     else:
         if stage.exists():
-            shutil.rmtree(stage)
-        shutil.copytree(req.app_dir, stage, ignore=shutil.ignore_patterns("__pycache__"))
+            mypyc.remove_tree(stage)
+        shutil.copytree(req.app_dir, stage, ignore=shutil.ignore_patterns("__pycache__"), copy_function=mypyc.copy_writable)
     work = BUILD / "nuitka" / req.backend
     if work.exists():
-        shutil.rmtree(work)
+        mypyc.remove_tree(work)
     onefile = req.onefile if req.onefile is not None else cfg.deploy.nuitka.mode == "onefile"
     exe_name = cfg.app.name + (".exe" if IS_WINDOWS else "")
     if not IS_WINDOWS and not onefile and cfg.app.name.lower() == cfg.pkg:

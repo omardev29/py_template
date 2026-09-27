@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -942,6 +943,81 @@ def test_sync_tree_payload_never_takes_a_stray_build_without_its_shared_lib(tmp_
     dst = tmp_path / "payload"
     mypyc.sync_tree(src, dst)
     assert _snapshot(dst) == {"pkg": None, "pkg/x.py": b"X = 1\n", "pkg/libz" + LINUX_EXT: b"z"}
+
+
+def _writable(root: Path) -> list[str]:
+    """What below `root` (itself included) is not owner-writable."""
+    return sorted(p.relative_to(root).as_posix() for p in [root, *root.rglob("*")] if not p.stat().st_mode & stat.S_IWUSR)
+
+
+def test_sync_tree_copies_of_read_only_files_stay_replaceable(tmp_path: Path) -> None:
+    # A read-only file of src/ (a Perforce checkout, a link into the Nix store): copy2 kept its
+    # mode, and once the file changed the next build could not replace the copy ("cannot write
+    # .build/payload/...: Permission denied"; Windows could not delete one either)
+    src = _project(tmp_path / "src", {"pkg/NOTICE.txt": "version 1", "pkg/gone.txt": "x", "pkg/same.txt": "s"})
+    for f in (src / "pkg").iterdir():
+        f.chmod(0o444)
+    dst = tmp_path / "dst"
+    mypyc.sync_tree(src, dst)
+    assert _writable(dst) == []
+    # Read-only copies an older ./deploy left: replaced, deleted, or made writable in place
+    for f in (dst / "pkg").iterdir():
+        f.chmod(0o444)
+    notice = src / "pkg" / "NOTICE.txt"
+    notice.chmod(0o644)
+    notice.write_text("version 2, longer", encoding="utf-8")
+    notice.chmod(0o444)
+    (src / "pkg" / "gone.txt").chmod(0o644)  # Windows deletes no read-only file either
+    (src / "pkg" / "gone.txt").unlink()
+    assert mypyc.sync_tree(src, dst) == 2
+    assert (dst / "pkg" / "NOTICE.txt").read_text(encoding="utf-8") == "version 2, longer"
+    assert not (dst / "pkg" / "gone.txt").exists()
+    assert _writable(dst) == []  # same.txt, unchanged, too
+
+
+def test_remove_tree_removes_read_only_copies_and_only_a_link(tmp_path: Path) -> None:
+    tree = _project(tmp_path / "t", {"a/b.txt": "x", "a/c/d.txt": "y"})
+    for path in (tree / "a" / "b.txt", tree / "a" / "c" / "d.txt"):
+        path.chmod(0o444)
+    for folder in (tree / "a" / "c", tree / "a"):
+        folder.chmod(0o555)  # copytree copies a folder's mode too: POSIX empties no read-only folder
+    mypyc.remove_tree(tree)
+    assert not tree.exists()
+    target = _project(tmp_path / "target", {"keep.txt": "k"})
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("no symbolic links here")
+    mypyc.remove_tree(link)
+    assert not os.path.lexists(link) and (target / "keep.txt").is_file()
+
+
+def test_the_wheel_copies_read_only_sources_writable(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, src_tree: Path) -> None:
+    # copytree from src/ kept read-only files AND folders: build_ext --inplace writes next to the
+    # sources, and the next build could not delete the work folder
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    def fake_uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        argv = [str(a) for a in args]
+        out = Path(argv[argv.index("--out-dir") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "pkg-0.1.0-py3-none-any.whl").write_bytes(b"")
+        return _done(argv)
+
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.envs, "uv", fake_uv)
+    read_only = [src_tree / "pkg" / "data" / "x.json", src_tree / "assets" / "img.txt", src_tree / "pkg" / "data", src_tree / "assets"]
+    try:
+        for path in read_only:
+            path.chmod(0o555 if path.is_dir() else 0o444)
+        for _ in range(2):  # the second build deletes the first one's work folder
+            wheel.build(BuildRequest(_wheel_cfg(), "mypyc", "wheel", src_tree))
+            assert _writable(wheel_project / ".build" / "wheel" / "mypyc" / "src") == []
+    finally:
+        for path in read_only:
+            path.chmod(0o755 if path.is_dir() else 0o644)
 
 
 # --- 6. stale extensions -------------------------------------------------------------------------
