@@ -240,7 +240,14 @@ def _part_host(part: Path, info: dict[str, Any]) -> str:
         return host
     if info.get("backend") == "mypyc" and len(info["targets"]) == 1:
         return str(info["targets"][0])  # a pure mypyc part only carries its host's overlay
-    raise DeployError(f"pyz-merge: {part} does not record the platform that built it (an older ./deploy made it): rebuild it")
+    again = "pass the parts it was merged from to one ./deploy pyz-merge call, with the others"
+    if info.get("merged"):
+        # Pure parts of several machines: its dependencies name no platform to place them under
+        raise DeployError(f"pyz-merge: {part} is a merge of pure parts, which records no platform that built it: {again}")
+    raise DeployError(
+        f"pyz-merge: {part} does not record the platform that built it: if an earlier pyz-merge made it, "
+        f"{again}; if an older ./deploy built it, rebuild it"
+    )
 
 
 def _app_digest(archive: zipfile.ZipFile) -> str:
@@ -282,6 +289,10 @@ def check_parts(parts: list[Path], out: Path) -> list[dict[str, Any]]:
         raise DeployError("pyz-merge: the parts need different minimum Python versions: they come from different builds")
     if len({i["deps"] for i in infos if i.get("deps")}) > 1:
         raise DeployError("pyz-merge: the parts lock different dependencies: they come from different builds (rebuild them from one commit)")
+    if not all(bool(i["pure"]) for i in infos):
+        for part, info in zip(parts, infos, strict=True):
+            if info["pure"]:
+                _part_host(part, info)  # a pure part next to per-platform ones: its lib goes to its platform
     return infos
 
 
@@ -366,7 +377,7 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
                         modes[name] = stat.S_IMODE(item.external_attr >> 16)
         targets = sorted(p.name for p in (root / "targets").iterdir()) if (root / "targets").is_dir() else []
         merged = {k: v for k, v in infos[0].items() if k != "host"}
-        merged.update({"targets": targets, "pure": pure, "build_id": _build_id(root)})
+        merged.update({"targets": targets, "pure": pure, "build_id": _build_id(root), "merged": True})
         (root / "_pyz.json").write_text(json.dumps(merged, indent=2), encoding="utf-8", newline="\n")
         out.parent.mkdir(parents=True, exist_ok=True)
         _write_archive(root, out, modes)

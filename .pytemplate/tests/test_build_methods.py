@@ -1419,6 +1419,31 @@ def test_pyz_merge_needs_the_host_of_a_pure_part(tmp_path: Path) -> None:
     assert info["targets"] == [LINUX, WIN]
 
 
+def test_pyz_merge_says_how_to_merge_a_merged_pure_file_again(tmp_path: Path) -> None:
+    # CI's merged .pyz (every part pure) merged again with a per-platform part: "an older ./deploy
+    # made it: rebuild it", though this ./deploy made it and a merge cannot be rebuilt
+    from runner.methods import pyz
+
+    first = _pure_part(tmp_path / "linux.pyz", host=LINUX, where="first")
+    second = _pure_part(tmp_path / "win.pyz", host=WIN, where="second")
+    info, _ = _merge([first, second], tmp_path / "all.pyz")
+    assert info["merged"] is True and "host" not in info
+    native = _native_part(tmp_path / "native.pyz")
+    for check in (lambda: pyz.check_parts([tmp_path / "all.pyz", native], tmp_path / "x.pyz"), lambda: _merge([native, tmp_path / "all.pyz"], tmp_path / "x.pyz")):
+        with pytest.raises(DeployError) as e:
+            check()  # --dry-run (check_parts) says it too
+        assert "is a merge of pure parts" in str(e.value) and "pass the parts it was merged from to one ./deploy pyz-merge call" in str(e.value)
+        assert "older ./deploy" not in str(e.value)
+    assert not (tmp_path / "x.pyz").exists()
+    # What it says works: the parts it was merged from, with the other one, in one call
+    info, names = _merge([first, second, native], tmp_path / "x.pyz")
+    assert info["targets"] == sorted([FOREIGN, LINUX, WIN]) and f"targets/{WIN}/lib/dep.py" in names
+    # A merge made before the "merged" key: both causes are named
+    old_merge = fake_pyz(tmp_path / "old-all.pyz", pure=True, files={"common/app/main.py": MERGE_MAIN, "common/lib/dep.py": "WHERE = 'x'\n"})
+    with pytest.raises(DeployError, match="if an earlier pyz-merge made it, pass the parts it was merged from .*; if an older ./deploy built it, rebuild it"):
+        pyz.check_parts([old_merge, native], tmp_path / "y.pyz")
+
+
 @pytest.mark.parametrize("gui", [False, True])
 @pytest.mark.parametrize("backends", [("cpython", "cpython"), ("pypy", "pypy"), ("pypy", "cpython")])
 def test_pyz_merge_writes_the_windows_wrapper(tmp_path: Path, gui: bool, backends: tuple[str, str]) -> None:

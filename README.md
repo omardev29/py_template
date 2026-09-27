@@ -845,7 +845,8 @@ How far a pyz reaches depends on its dependencies; the build prints which case i
   `./deploy pyz-merge A.pyz B.pyz... --out all.pyz` joins pyz files built on several machines from
   one commit (the same app, minimum Python, locked dependencies and code) into one file with every
   platform's binaries, and also writes `all.cmd` next to it (so the `--out` name must be ASCII,
-  without `% ! " ^ & | < >`).
+  without `% ! " ^ & | < >`). Pass every part in one call: a merged file of pure parts records no
+  platform, so it cannot be merged again with a part built for one platform.
 - On Linux the dependencies of pyz and portable builds target glibc 2.28 (x86_64) or 2.35
   (aarch64) when the build machine can use those wheels (else its own, with a warning); on macOS,
   macOS 13 or newer (`MACOSX_DEPLOYMENT_TARGET` changes it).

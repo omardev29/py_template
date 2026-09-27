@@ -774,7 +774,7 @@ header rules (with detector tests proving each rule fires).
   `__init` step it would run in the copy, then `git init -b main`, or why not (DIR inside the
   work tree of another repository, `cmd_mode._work_tree_top`, with the CI warning of section
   13.2; no git). `pyz-merge` validates its inputs (`pyz.check_parts`:
-  valid `_pyz.json`, one app, one build) and prints inputs and outputs (the `.pyz` and its
+  valid `_pyz.json`, one app, one build, the platform of a pure part next to per-platform ones) and prints inputs and outputs (the `.pyz` and its
   `.cmd`).
 - `nvim trust`, `extras`, `bootstrap` and `sync` print what they would do.
 - `rename` runs the real checks (a dirty git tree is only a warning) and prints the move, each
@@ -1989,7 +1989,9 @@ Per method:
   key, and when parts differ in purity moves each pure part's `common/lib` to
   `targets/<its host>/lib` (an older part without `host`: the single overlay key of a mypyc
   part, else "rebuild it") and keeps no `common/lib`. The merged `targets` come from the
-  folders written; `host` is dropped. It also writes the `<out stem>.cmd` wrapper next to
+  folders written; `host` is dropped and `merged: true` recorded: a merge of pure parts names no
+  platform, so merging it again with a per-platform part is refused, `pyz._part_host`, naming the
+  way that works (its original parts in one call; it blamed "an older ./deploy"). It also writes the `<out stem>.cmd` wrapper next to
   `--out` (`pyz.wrapper_path`; the parts' name and `min_python`, the pypy candidate order only
   when every part is a pypy build; an `--out` ending in `.cmd` is refused, and so is a name the
   ASCII wrapper cannot hold, `pyz._CMD_UNSAFE`: non-ASCII, control characters,
