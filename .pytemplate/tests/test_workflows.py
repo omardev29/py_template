@@ -250,15 +250,23 @@ def test_every_downloaded_file_is_checked_against_a_pinned_sha256() -> None:
     which installs the newest uv on purpose, as setup-uv does everywhere else."""
     checked = []
     for path in sorted(WORKFLOWS.glob("template-*.yml")):
-        steps = path.read_text(encoding="utf-8").split("\n      - ")
-        for step in steps:
-            if re.search(r"-OutFile\b|curl [^\n|]*-o ", step):
-                assert re.search(r"\b[0-9a-f]{64}\b", step) and ("sha256sum -c" in step or "Get-FileHash" in step), (path.name, step)
-                checked.append(path.name)
+        for job, body in jobs(path.read_text(encoding="utf-8")).items():
+            for step in body.split("\n      - "):
+                if re.search(r"-OutFile\b|curl [^\n|]*-o ", step):
+                    # the pinned hash in the step, or in the job's env the step checks against
+                    assert re.search(r"\b[0-9a-f]{64}\b", step) or re.search(r"(?m)^      [A-Z0-9_]*SHA256: [0-9a-f]{64}$", body), (path.name, job, step)
+                    assert "sha256sum -c" in step or "Get-FileHash" in step, (path.name, job, step)
+                    checked.append(path.name)
     assert "template-launchers.yml" in checked  # busybox-w32 (the CI image checks its own downloads)
+    windows = jobs(_text("template-launchers.yml"))["windows"]
+    assert re.search(r"(?m)^      BUSYBOX: busybox-w64-FRP-\d+-g[0-9a-f]+\.exe$", windows), windows
     step = _step(_text("template-launchers.yml"), "busybox-w32")
-    assert re.search(r"(?m)^          BUSYBOX: busybox-w64-FRP-\d+-g[0-9a-f]+\.exe$", step), step
     assert '"https://frippery.org/files/busybox/$env:BUSYBOX"' in step  # never a rolling busybox64u.exe
+    # frippery.org is often unreachable from the runners: the pinned file is cached, keyed by its
+    # name and hash, saved right after it passed the check, and checked again when restored
+    key = "key: busybox-w32-${{ env.BUSYBOX }}-${{ env.BUSYBOX_SHA256 }}"
+    assert windows.index("uses: actions/cache/restore@v6") < windows.index(key) < windows.index("name: busybox-w32") < windows.index("uses: actions/cache/save@v6")
+    assert "if: steps.busybox.outputs.cache-hit != 'true'" in windows
 
 
 def test_the_busybox_step_refuses_a_file_that_is_not_the_pinned_one(tmp_path: Path) -> None:
@@ -274,7 +282,7 @@ def test_the_busybox_step_refuses_a_file_that_is_not_the_pinned_one(tmp_path: Pa
     step = _step(_text("template-launchers.yml"), "busybox-w32")
     body = step.split("        run: |\n", 1)[1]
     script = "\n".join(line[10:] for line in body.splitlines())
-    name = re.search(r"BUSYBOX: (\S+)", step)
+    name = re.search(r"BUSYBOX: (\S+)", jobs(_text("template-launchers.yml"))["windows"])
     assert name and "https://frippery.org/files/busybox/$env:BUSYBOX" in script
     served = tmp_path / "served"
     served.mkdir()
@@ -291,18 +299,28 @@ def test_the_busybox_step_refuses_a_file_that_is_not_the_pinned_one(tmp_path: Pa
         ps1 = tmp_path / "step.ps1"
         ps1.write_text("$ErrorActionPreference = 'stop'\n" + script.replace("https://frippery.org/files/busybox/", url), encoding="utf-8")
         env = {k: v for k, v in os.environ.items() if "proxy" not in k.lower()}
-        for digest, ok in ((hashlib.sha256(b"not really busybox\n").hexdigest(), True), ("0" * 64, False)):
-            temp = tmp_path / ("ok" if ok else "bad")
-            temp.mkdir()
-            gh_path = tmp_path / f"path-{ok}"
+        good = hashlib.sha256(b"not really busybox\n").hexdigest()
+        for case, digest, cached, ok in (
+            ("downloaded", good, None, True),
+            ("other file", "0" * 64, None, False),
+            ("cached", good, b"not really busybox\n", True),  # the cache's copy: no download
+            ("damaged cache", good, b"damaged\n", False),
+        ):
+            temp = tmp_path / case
+            (temp / "busybox").mkdir(parents=True)
+            if cached is not None:
+                (temp / "busybox" / "busybox.exe").write_bytes(cached)
+                (served / name[1]).unlink(missing_ok=True)  # the server has nothing: only the cache can pass
+            gh_path = tmp_path / f"path-{case}"
             run_env = {**env, "BUSYBOX": name[1], "BUSYBOX_SHA256": digest, "RUNNER_TEMP": str(temp), "GITHUB_PATH": str(gh_path)}
             r = subprocess.run([pwsh, "-NoProfile", "-NonInteractive", "-File", str(ps1)], env=run_env, capture_output=True, text=True, timeout=120, check=False)
-            assert (r.returncode == 0) is ok, r.stdout + r.stderr
-            assert (temp / "busybox.exe").is_file() is ok
+            assert (r.returncode == 0) is ok, (case, r.stdout + r.stderr)
+            assert (temp / "busybox" / "busybox.exe").is_file() is ok, case
             if ok:
-                assert gh_path.read_text(encoding="utf-8").strip() == str(temp)
+                # the step's Windows path; pwsh on Linux and macOS reads its `\` as `/` too
+                assert gh_path.read_text(encoding="utf-8").strip().replace("\\", "/") == str(temp / "busybox").replace("\\", "/"), case
             else:
-                assert "not the pinned" in r.stdout + r.stderr and not gh_path.exists()
+                assert "not the pinned" in r.stdout + r.stderr and not gh_path.exists(), case
     finally:
         server.shutdown()
         server.server_close()

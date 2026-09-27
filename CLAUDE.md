@@ -3439,7 +3439,9 @@ short temp tree and unset `NVIM_APPNAME`.
   build scoop, Chocolatey and winget install, checked against its pinned `BUSYBOX_SHA256`
   before it runs; a new release takes its line of frippery.org's `SHA256SUM`. The rolling
   `busybox64u.exe` ran unchecked whatever the server held that day:
-  `test_workflows.test_every_downloaded_file_is_checked_against_a_pinned_sha256`), optional WSL job; `selftest --shells` plus user-style
+  `test_workflows.test_every_downloaded_file_is_checked_against_a_pinned_sha256`; the file is
+  kept in the Actions cache, keyed by its name and hash and checked again when restored, 15.1),
+  optional WSL job; `selftest --shells` plus user-style
   invocations; a gate job checks the marker file; its Linux job, with shellcheck, in the CI
   image), `template-nvim.yml` (Windows here, Linux in the CI image, Neovim pinned (above),
   `fd` (venv-selector from LazyVim's `lang.python` errors on the first Python buffer without
@@ -4757,6 +4759,14 @@ xonsh:
   setting forced on), `test_command_text_per_family`. Goes: never.
 
 MSYS2, Cygwin, Git Bash and busybox-w32 (details: section 4.7):
+- **frippery.org, busybox-w32's only host, is often unreachable from GitHub's runners**
+  (LIMITATION): four downloads in a row timed out and failed template-launchers' Windows job
+  (September 2026). Fix: its `windows` job keeps the pinned file in the Actions cache
+  (`actions/cache/restore`, key `busybox-w32-<file>-<sha256>`, saved right after it passed the
+  SHA-256 check) and checks the restored copy again (13.2). Test:
+  `test_workflows.py::test_the_busybox_step_refuses_a_file_that_is_not_the_pinned_one` (a cached
+  copy runs without the server; a damaged one fails),
+  `test_every_downloaded_file_is_checked_against_a_pinned_sha256`. Goes: never.
 - **A minimal PATH** (LIMITATION): MSYS2 login shells (`MSYS2_PATH_TYPE=minimal`) and Cygwin
   with `CYGWIN_NOWINPATH` hide uv, and a console opened before uv was installed has the old
   PATH. Fix: the launchers search the install folders, then the PATH stored in the registry
