@@ -178,6 +178,8 @@ def headless(
             )
         except FileNotFoundError:
             raise DeployError(f"program not found: {exe}", 3) from None
+        except OSError as e:  # another architecture, a truncated download, a noexec mount
+            raise DeployError(f"cannot run {exe}: {e.strerror or e}", 3) from None
         except subprocess.TimeoutExpired:
             raise DeployError(f"Neovim did not answer in {timeout:.0f} s: {proc.show(argv)}", 3) from None
     data = parse_marker(r.stdout)

@@ -2701,7 +2701,9 @@ LazyVim wiring:
   a plugin not installed or no report is exit 1, no lazy.nvim (no `:Lazy`) exit 3, a plugin
   with task errors (`has_errors`: a failed build step) only a warning.
 - `cmd_nvim.doctor(check)` (from `./deploy doctor`): one line, silent without `nvim`, at most
-  one headless call.
+  one headless call. An `nvim` that cannot be executed (another architecture, a truncated
+  download, a noexec mount: `cmd_nvim.headless` turns the OSError into a DeployError, exit 3 in
+  `nvim doctor`) is a `[--]` line there; it ended `./deploy doctor` in a traceback.
 - Only started inside the project: `nvim path/x.py` from elsewhere, or a later `:cd`, does not
   load `.lazy.lua`. `.lazy.lua` edits need a restart (the watcher ignores it).
 

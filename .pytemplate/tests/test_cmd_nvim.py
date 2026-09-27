@@ -434,6 +434,21 @@ def test_query_reports_an_old_neovim(tmp_path: Path, monkeypatch: pytest.MonkeyP
         assert nv.state == nv.data, "no state dir before 0.8: the data dir held what it holds now"
 
 
+def test_an_nvim_that_cannot_run_is_a_clear_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # ./deploy doctor ended in an internal-error traceback, without its verdict, when the nvim
+    # on PATH has its x bit but cannot be executed: another architecture, a truncated download
+    fake = tmp_path / ("nvim.exe" if sys.platform == "win32" else "nvim")
+    fake.write_bytes(b"\x7fELF\x02\x01\x01\x00garbage")
+    fake.chmod(0o755)
+    with pytest.raises(DeployError, match="cannot run .*nvim") as e:
+        cmd_nvim.headless(str(fake), cmd_nvim.QUERY_LUA)
+    assert e.value.code == 3
+    monkeypatch.setattr(cmd_nvim, "find_nvim", lambda: str(fake))
+    lines: list[tuple[bool | None, str]] = []
+    cmd_nvim.doctor(lambda passed, label, hint="": lines.append((passed, label)))
+    assert len(lines) == 1 and lines[0][0] is None and "cannot run" in lines[0][1], lines  # a [--] note
+
+
 def test_query_lua_needs_no_new_api() -> None:
     assert "tostring(vim.version())" not in cmd_nvim.QUERY_LUA and "pcall(vim.fn.stdpath, 'state')" in cmd_nvim.QUERY_LUA
     assert '"' not in cmd_nvim.QUERY_LUA, "the -c snippet crosses the Windows command line"
