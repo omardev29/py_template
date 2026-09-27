@@ -647,6 +647,23 @@ def test_a_modules_time_comes_after_every_write_of_the_clock(tmp_path: Path, mon
     assert int(path.stat().st_mtime) > int(later)
 
 
+def test_a_copy_whose_sync_fails_says_why_even_under_q(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]) -> None:
+    """`./pyt -q selftest --mutation` added its own --quiet to the sync's: `uv -qq` fails without
+    a word (a worker that could not be made, and no reason)."""
+    try:
+        proc.find_uv()
+    except PytError:
+        pytest.skip("uv not found")
+    copy = _write(tmp_path / "copy", {"pyproject.toml": '[project]\nname = "toy"\nversion = "0"\nrequires-python = ">=3.11"\ndependencies = []\n'})
+    (copy / "uv.lock").write_text('version = 1\nrequires-python = ">=3.9"\n', encoding="utf-8")  # stale: another requires-python
+    monkeypatch.setattr(mutation.ui, "QUIET", True)
+    monkeypatch.setattr(mutation.envs, "left_out", lambda env: [])
+    venv = mutation.envs.PyEnv("cpython", copy / ".venv", _cfg().python.cpython, "only-managed")
+    with pytest.raises(proc.CommandFailed):
+        mutation.sync_copy(venv, copy)
+    assert "--locked" in capfd.readouterr().err  # uv's own error: the lock needs to be updated
+
+
 @needs_git
 def test_make_copy_is_a_repository_of_the_listed_files(tmp_path: Path) -> None:
     env = _git_env(tmp_path)

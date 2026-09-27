@@ -707,7 +707,7 @@ header rules (with detector tests proving each rule fires).
 | `cmd_nvim.py` | `./pyt nvim ...` and `doctor(check)` (section 12.2). |
 | `nvimtest.py` | `selftest --nvim` (section 13.1). |
 | `e2e.py` | `selftest --e2e` (section 13.1). |
-| `mutation.py` | `selftest --mutation` (section 13.1): `OPERATORS`, `test_map`/`ordered`/`junit_seconds`, `changed_lines`/`parse_diff`, `select`/`skipped_spans`/`handler_classes`, `own_mutant` (ExceptionReplacer's), `made` (what is skipped), `classify`, `Driver` (tools/mutation_cr.py), `list_mutants` (the snapshot), the workers (`make_copy`, `worker_env`, `set_mtime`, `Runs`, `kill_run`/`descendants`, `run_all`), `Report`/`print_report`, `deferred_interrupts`, the base (`default_base`, `prepare_base`, `base_lock`). |
+| `mutation.py` | `selftest --mutation` (section 13.1): `OPERATORS`, `test_map`/`ordered`/`junit_seconds`, `changed_lines`/`parse_diff`, `select`/`skipped_spans`/`handler_classes`, `own_mutant` (ExceptionReplacer's), `made` (what is skipped), `classify`, `Driver` (tools/mutation_cr.py), `list_mutants` (the snapshot), the workers (`make_copy`, `sync_copy`, `worker_env`, `set_mtime`, `Runs`, `kill_run`/`descendants`, `run_all`), `Report`/`print_report`, `deferred_interrupts`, the base (`default_base`, `prepare_base`, `base_lock`). |
 | `hooks.py` | `./pyt hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (apply/setup), `doctor`: the native git pre-commit hook (section 5.6); `find_repo` (`NotInGit`), `classify` (`runs_checks`), `hook_state`/`own_local` (a copy chained after another project's hook), `hook_script`/`launcher_of`, `install`/`uninstall` (apply removes the hook when `hooks.pre_commit = false`), `chain_hint`/`chain_advice`, `hooks_path_runner`, `checks`. |
 | `cmd_install.py` | `./pyt install` / `uninstall` and doctor's "pyt install" step (section 5.9): where things go (`data_home`, `snapshot_dir`, `bin_dir`), `MARKER`/`is_launcher`/`not_ours`/`not_an_install`, the record (`read_record`, `recorded_bin`, `source_state`, `describe`, `age`), PATH (`on_path`, `path_state`, `path_problem`, `first_pyt`, `shadowing`), Windows (`pathext_shadows`, `policy_notes`), `make_plan` (every refusal before the first write, in one message: `_refuse`), `_Swap` + `install` (all or nothing; `_new_folder`, `_terminations_interrupt`), `_remove_earlier`, `remove_leftovers`, `remove_installed`, `cmd_uninstall`, `doctor`. |
 | `rename.py` | `./pyt rename NEW_NAME [--force]` and the rename step of apply: pure `plan` / `apply_plan` (undoes itself when a write fails) / `rewrite` (tokenizer + `ast` scopes + context rules, `MODULE_KEYS`), `check_new_name` (`locked_names`), `git_changes`, `dirty_tree_message`, `validate_config`, `tidy_before`/`tidy_after` (ruff, `Tidy`), `report`, `cmd_rename` (section 5.7). |
@@ -3516,13 +3516,14 @@ short temp tree and unset `NVIM_APPNAME`.
     --exclude-standard` lists, with their working-tree content, committed into a repository of
     its own; the modules to mutate from the snapshot `list_mutants` takes, which Cosmic Ray
     reads for every mutant too, so the checkout may change meanwhile), with its own `.venv`
-    (`uv sync --locked --all-groups`, one `--quiet`: uv's errors stay), home, XDG and temp
-    folders (`worker_env`: whatever a mutant makes a test write outside tmp_path lands there;
-    `nvimtest.uv_dirs` keeps uv's cache, Pythons and tools through their UV_* variables, which the
-    tests' own child environments keep too: `test_cli_core.child_env`, the `_uv_dirs` helpers),
-    no bytecode written, and a new mtime for every write of a module (`set_mtime`: after the one
-    before and after the clock, so a `.pyc` a child wrote never passes for another version of
-    it, not even one of the copy the clock wrote).
+    (`sync_copy`: `uv sync --locked --all-groups` with one `--quiet` whatever `-q` says, since
+    `uv -qq` fails without a word), home, XDG and temp folders (`worker_env`: whatever a mutant
+    makes a test write outside tmp_path lands there; `nvimtest.uv_dirs` keeps uv's cache, Pythons
+    and tools through their UV_* variables, which the tests' own child environments keep too:
+    `test_cli_core.child_env`, the `_uv_dirs` helpers), no bytecode written, and a new mtime for
+    every write of a module (`set_mtime`: after the one before and after the clock, so a `.pyc`
+    a child wrote never passes for another version of it, not even one of the copy the clock
+    wrote).
   - the baselines: each module's tests first run as they are (`BASELINE_TIMEOUT`, an hour) and
     must pass (a FAIL leaves its mutants not run, and the command exits 1); their time sets each
     mutant's limit, `TIMEOUT_FACTOR` x baseline + `TIMEOUT_EXTRA` (2 x + 60 s). A mutant over it

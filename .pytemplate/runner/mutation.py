@@ -771,6 +771,14 @@ def make_copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, st
     _git(dest, env, *GIT_IDENTITY, "commit", "-q", "--no-verify", "-m", "selftest --mutation")
 
 
+def sync_copy(venv: envs.PyEnv, copy: Path) -> None:
+    """The copy's .venv as envs.sync makes the project's (the copy is the project: its cwd), with
+    one --quiet whatever ./pyt's -q says: uv's progress goes, its errors stay (`uv -qq` fails
+    without a word)."""
+    no_groups = [a for group, _ in envs.left_out(venv) for a in ("--no-group", group)]
+    envs.uv(venv, ["--quiet", "sync", "--locked", "--all-groups", *no_groups], cwd=copy, quiet=False)
+
+
 def worker_env(worker_copy: Path, home: Path, tmp: Path, base_env: Mapping[str, str], keep: Mapping[str, str], cfg: Config, uv: str) -> dict[str, str]:
     """What `./pyt selftest` gives pytest (uv run in the project's environment), for the copy:
     its .venv first on PATH, VIRTUAL_ENV, UV and the variables of envs.env_vars. No bytecode
@@ -1179,9 +1187,7 @@ def _test(cfg: Config, opts: Options, uv: str, root: Path, base: Path, tests: Ma
         ui.info(f"worker {i}: a copy of the project in {copy}")
         make_copy(root, copy, files, env, originals)
         venv = envs.PyEnv("cpython", copy / ".venv", cfg.python.cpython, "only-managed")
-        no_groups = [a for group, _ in envs.left_out(venv) for a in ("--no-group", group)]
-        # one --quiet whatever ./pyt's -q says: uv's progress goes, its errors stay (-qq hid them)
-        envs.uv(venv, ["--quiet", "sync", "--locked", "--all-groups", *no_groups], cwd=copy, quiet=False)  # the copy is the project
+        sync_copy(venv, copy)
         for d in (home, *((home / "AppData" / "Local", home / "AppData" / "Roaming") if IS_WINDOWS else ()), scratch / "tmp", scratch / "pytest"):
             d.mkdir(parents=True)
         wenv = worker_env(copy, home, scratch / "tmp", env, keep, cfg, uv)
