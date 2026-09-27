@@ -190,8 +190,11 @@ implement the same contract: change them together.
    Windows) and `PYTEMPLATE_LAUNCHER`, and `PYTEMPLATE_GLOBAL=1` for the installed template
    only: for a project's runner the variable is removed, so a stale export never turns it into
    global mode (`pyt`: `unset`; `pyt.cmd`: `set "PYTEMPLATE_GLOBAL="`; `pyt.ps1`: removed and
-   restored like the other two; `test_launcher_sh.test_a_projects_runner_never_runs_in_global_mode`,
-   `test_launcher_win.test_cmd_never_hands_a_project_the_global_mode`). `pyt.cmd` also exports
+   restored like the other two; plugin: an empty value, which the runner reads as unset, like
+   the three below; `test_launcher_sh.test_a_projects_runner_never_runs_in_global_mode`,
+   `test_launcher_win.test_cmd_never_hands_a_project_the_global_mode`,
+   `test_nvim_render.test_a_neovim_that_inherited_the_global_mode_runs_the_projects_runner`: a
+   Neovim that inherited it ran every task in global mode, exit 2). `pyt.cmd` also exports
    `PYTEMPLATE_LAUNCHER_FILE`, its own path: cmd reads it again once uv returns, so the runner's
    install and uninstall must know it (section 4.4).
 4. Run `uv run --quiet --script <root>/.pytemplate/pyt.py ARGS...` with argv untouched and
@@ -924,7 +927,7 @@ header rules (with detector tests proving each rule fires).
 | `PYTEMPLATE_CALLER_CWD` | launchers, Neovim plugin (`init.caller_cwd`: Neovim's cwd when inside the project, else the root) | Caller's cwd; read only through `project.caller_cwd` |
 | `PYTEMPLATE_LAUNCHER` | launchers, Neovim plugin (`nvim`) | Which launcher/shell ran (section 4.1) |
 | `PYTEMPLATE_LAUNCHER_FILE` | `pyt.cmd` (`%~f0`) | The batch file cmd runs, and reads again once uv returns: `cmd_install.run_by_cmd` (section 4.4) |
-| `PYTEMPLATE_GLOBAL=1` | launchers that find no project (they run the installed template); removed for a project's runner | Global mode (`project.GLOBAL`, read at import, and `pyt.py`; section 5.2); `__probe` reports it; `proc.base_env`, `shells.child_env`, `e2e.scrub_env` and `nvimtest.runner_env` drop it, so no child inherits it |
+| `PYTEMPLATE_GLOBAL=1` | launchers that find no project (they run the installed template); removed for a project's runner (the Neovim plugin empties it: `init.pyt_env`) | Global mode (`project.GLOBAL`, read at import, and `pyt.py`; section 5.2); `__probe` reports it; `proc.base_env`, `shells.child_env`, `e2e.scrub_env` and `nvimtest.runner_env` drop it, so no child inherits it |
 | `XDG_DATA_HOME`, `HOME`, `LOCALAPPDATA`, `USERPROFILE` | user, OS | Where `./pyt install` puts the installed template and the launchers look for it (`cmd_install.snapshot_dir`, section 4.1) |
 | `UV_TOOL_BIN_DIR`, `XDG_BIN_HOME` | user | Through `uv tool dir --bin`: where `./pyt install` writes the launchers (`cmd_install.bin_dir`) |
 | `UV` | uv | uv's own path; `proc.find_uv` and the launchers use it |
@@ -2799,9 +2802,10 @@ Files:
 Runner contract from Lua (the fourth caller of section 4.1): argv `{<absolute uv>, "run",
 "--quiet", "--script", <root>/.pytemplate/pyt.py, ...}` (`init.pyt_cmd`) through overseer
 / `jobstart` with a LIST, env `PYTEMPLATE_CALLER_CWD=<cwd>`, `PYTEMPLATE_LAUNCHER=nvim`,
-`UV_PYTHON=""`, `PYTHONHOME=""`, `PYTHONPATH=""` and `UV_WORKING_DIR=.` (`init.pyt_env`; uv
-and CPython read those empty values as unset, `.` is the job's folder, so the runner runs on
-the project's Python like with the launchers). Never a string command (it would go through
+`PYTEMPLATE_GLOBAL=""`, `UV_PYTHON=""`, `PYTHONHOME=""`, `PYTHONPATH=""` and `UV_WORKING_DIR=.`
+(`init.pyt_env`; uv and CPython read those empty values as unset, and the runner reads only `1`
+as global mode, `.` is the job's folder, so the runner runs on the project's Python, as the
+project's runner, like with the launchers). Never a string command (it would go through
 `'shell'`, which may be xonsh or niubash) and never `pyt.cmd`/`pyt` unless uv is nowhere
 (the launcher prints the install hints; on POSIX it runs as `/bin/sh <root>/pyt`, like the
 VS Code tasks and the git hook, so a checkout without the exec bit still gets them). The uv
@@ -3055,7 +3059,8 @@ short temp tree and unset `NVIM_APPNAME`.
   `test_nvim_render.py` (also loads the Lua modules in `nvim --headless --clean`: parser (stage
   paths, terminal escapes, the profile's severities), uv lookup, launcher fallback, sanitize
   round trip, the mypy linter, `tasks.META`, `unique` on every task, `:Pyt` and its
-  completion; the pinned `.lazy.lua` hash), `test_cmd_nvim.py` (`nvim` subcommands with fake
+  completion, a Neovim with PYTEMPLATE_GLOBAL=1 running the project's runner as a project; the
+  pinned `.lazy.lua` hash), `test_cmd_nvim.py` (`nvim` subcommands with fake
   Neovims, `nvim doctor`'s lines, `nvim sync`'s plugin check (also in a real Neovim with a fake
   lazy.nvim), the query of an old Neovim, the `selftest --nvim` harness: pins, base reuse,
   smoke parsing, tree kill), `test_fixes.py` (regression tests of the
