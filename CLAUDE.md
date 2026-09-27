@@ -136,10 +136,13 @@ typings/                          project stubs (raylib preset: the corrected ra
 .pytemplate/template-repo         [template repo] marker, not copied by ./pyt new
 .github/workflows/ci.yml          generated CI of the project
 .github/workflows/template-*.yml  [template repo] selftest, launchers, nvim, e2e CI, the
-                                  Linux CI image and the keepalive of their schedules (section
-                                  13.2); not copied
+                                  Linux CI image, the flet builds and the keepalive of their
+                                  schedules (section 13.2); not copied
 .github/workflows/template-ci-image/  [template repo] the Linux CI image: Dockerfile, pins.py
                                   (its pins and tag), system, warm, build; not copied
+.github/workflows/template-flet/  [template repo] template-flet.yml's steps: check.py (the
+                                  target edit, the Flet version, the browser and .apk checks),
+                                  browser.txt (the pinned Playwright); not copied
 ignored: .venv*/ .build/ dist/ build/ *.spec *.pyd *.so .flet/ tool caches,
          .claude/worktrees/ .claude/settings.local.json
 ```
@@ -2232,13 +2235,19 @@ Per method:
   payload and also in `--dry-run`, and again in `build`. The stage `.build/flet-build/<b>` is
   persistent (Flutter cache); stale extensions are deleted from it before this payload's are
   copied (a desktop `.pyd` must not reach a mobile/web build). `flet build` ignores `uv.lock`, so `build_pyproject` pins the
-  `uv export --frozen --no-dev --no-editable` versions (`flet._pinned_requirements`; a local
+  `uv export --frozen --no-dev --no-editable --prune flet-desktop` versions
+  (`flet._pinned_requirements`; `flet.DESKTOP_CLIENT` goes with what only it needs, rich and
+  pygments: a flet build app runs embedded, `FLET_PLATFORM` set by its Flutter host or Pyodide on
+  the web, and never starts the desktop client, which was 3.1 of the 5.6 MB of the skeleton's web
+  `app.zip`; what the app requires itself stays; a local
   library as `name @ file:///absolute/path`, `common.direct_reference`: editable it was
   `-e ./libs/x ; <markers>`, which pip refused, relative to the project and not the stage; for a
   mobile or web target a pin of a package uv.lock has no pure wheel for keeps only the project's
   own bounds and its markers, `common.unpin_binaries` with `binary_only` and
   `project_specifiers`, named in a warning: those targets take their binaries from Flet's own
-  index, 15.1) and
+  index, 15.1; for the web `flet.web_markers` writes uv's `sys_platform` markers about
+  Emscripten as `platform_system` ones, the only one flet build's pip reads for the target:
+  httpx and its tree were 1.2 MB more, 15.1) and
   serialises the PARSED `[tool.flet]` of the
   project `pyproject.toml` (no other table leaks in; `[tool.flet.app]` alone is kept) with
   `app.path` forced to `STAGE_APP` (`src`, where `build` stages the app; another value is
@@ -2256,6 +2265,11 @@ Per method:
   Windows (Developer Mode on): Flet 1.0.1 downloads ITS pinned Flutter (3.44.8, ~3 GB in
   `~/flutter`, ignoring a scoop Flutter) and a Python build (`~/.flet`); first build ~7 min,
   next ~3 min; 97 MB folder, 78 MB with cleanup + UPX, 38 MB zipped, no unpacking at start.
+  Web, verified on Linux (September 2026, the skeleton): 122 s the first build once Flutter was
+  there (its download ~100 s), 68 s the next; 12.6 MB (`app.zip` 1.2 MB; Pyodide 3.14 and
+  CanvasKit come from CDNs), and in a headless Chromium its Python started in 5 s and Draw drew.
+  template-flet.yml builds web and `apk` on Linux on every change to this method (13.2);
+  Android apps are built, never run (an owner decision), and iOS apps are not built anywhere.
   `uv run` MUST get `--project <ROOT>` here (`envs.uv_run` does it when `cwd != ROOT`): the
   stage has its own `pyproject.toml`, which uv otherwise takes for the project ("Unable to
   find lockfile at uv.lock").
@@ -2917,7 +2931,9 @@ short temp tree and unset `NVIM_APPNAME`.
   template-e2e.yml's triggers and depths), `test_e2e_run.py` (its running parts with the steps
   faked: logs, timeouts that kill the tree, exit codes, the JSON report, SIGTERM/SIGHUP, the
   step kinds on small fake projects), `test_build_methods.py` (argv and
-  output discovery of exe, flet pack, Nuitka and flet build with the packager recorded;
+  output discovery of exe, flet pack, Nuitka and flet build with the packager recorded; the
+  flet build's pins (flet-desktop pruned by the real uv, offline, on a hand-written lock; the
+  web markers, also through `packaging`'s marker evaluation);
   `cmd_build` argument checks; target keys, `install_deps` floors and junk; the pyz layout,
   `pyz-merge` and the real bootstrap run in subprocesses with the cache redirected; one REAL
   host pyz build run with `python -S`, skipped when uv cannot install offline; portable prune,
@@ -2974,7 +2990,11 @@ short temp tree and unset `NVIM_APPNAME`.
   a BOM do not), its workflow's build, push and container rules, the workflow literals that
   repeat its pins, shellcheck of its scripts, mypy --strict of pins.py, and, inside the image
   only (`CI_IMAGE_INPUTS`), that it holds this checkout's inputs and every tool the suites look
-  for).
+  for; the flet builds: template-flet.yml's triggers, steps, caches and uploads, the exact
+  browser pins, and its `check.py`: the skeleton's texts it looks for, the runner's output
+  folders, the target edit through the project's own runner, the .apk layout on fake APKs, the
+  browser steps on a fake page with a clock of its own, the static server's types, its command
+  line and mypy --strict).
 - **[template repo]** Language guard `test_no_spanish.py`: skipped unless
   `.pytemplate/template-repo` exists. Scans `git ls-files --cached --others --exclude-standard`
   (so new untracked files count) for accented Spanish letters and a list of Spanish words
@@ -3234,9 +3254,9 @@ short temp tree and unset `NVIM_APPNAME`.
   also ran in its image job (the image's skips a subset of the bare job's: 70 of the selftest's
   72, 95 of python-floor's 185), those passed, and the image workflow finished no later than the
   bare jobs it replaced (its container start, about 30 s a job, against their apt and tool
-  installs). uv-floor, the e2e rows, the nvim canary and every Windows and macOS job stay on
-  bare runners. A pull request from another repository that changes an input of the image gets
-  no Linux jobs (15.2).
+  installs). uv-floor, the e2e rows, the nvim canary, template-flet.yml's two builds and every
+  Windows and macOS job stay on bare runners. A pull request from another repository that
+  changes an input of the image gets no Linux jobs (15.2).
 - **[template repo]** `template-launchers.yml` also runs weekly and installs xonsh 0.24.2 on
   pushes and pull requests but the newest xonsh on the schedule (a red scheduled run with no
   commit behind it is upstream drift; the shell versions are logged: xonsh, fish, pwsh,
@@ -3271,6 +3291,41 @@ short temp tree and unset `NVIM_APPNAME`.
   logs condition). First run on GitHub in
   September 2026 (images ubuntu-24.04, macos-26-arm64, windows-2025-vs2026; uv 0.12, Neovim
   0.12.5).
+- **[template repo]** `template-flet.yml` (gate job; pushes to `main` and pull requests that touch
+  the flet method, `methods/common.py`, `cmd_build.py`, the flet preset, the root
+  `pyproject.toml`/`uv.lock` or the workflow and its folder; weekly and by hand) and its folder
+  `template-flet/`: two jobs on bare `ubuntu-latest` runners (the runner image's Android SDK and
+  JDKs; Flet installs its own Flutter), each `./pyt new "$RUNNER_TEMP/pt-flet" --preset flet`
+  (app `pt-flet`, package `pt_flet`), `./pyt setup`, `check.py target` (`[deploy.flet] target`
+  set through the project's own runner, `config.update_file`), `check.py flet` (the Flet version
+  uv.lock holds: the cache key) and `./pyt build cpython --method flet`. `web` (45 min): then
+  the pinned Playwright's headless Chromium (`browser.txt`; `playwright install` with
+  `--with-deps --only-shell chromium`) and `check.py web`: the build served on 127.0.0.1 by a
+  plain static server (`check._Site`: JavaScript and wasm types; no cross-origin isolation
+  headers, which `flet serve` adds and the app needs none of), then python.js's
+  `Python worker initialized` console line (`Python worker init error` fails at once),
+  Flutter's semantics tree turned on (`flt-semantics-placeholder`), the skeleton's first status
+  `Core: CPython. Press Draw.`, its Draw button and the window title `pt-flet`, a mouse click at
+  the button's centre (a tap of its semantics node after 20 s without "Computing...") and the
+  status `N iterations in T s (core: CPython)` (`Draw failed` fails at once); the console log
+  (with the server's) and a full-page screenshot are uploaded (`flet-web-browser`,
+  `if: always()`). `android` (75 min): Temurin 17
+  (`actions/setup-java`, the javac Flet asks for), disk freed first (dotnet, GHC, CodeQL), then
+  `check.py apk`: one `.apk` in `dist/pt-flet-cpython-flet-apk/`, every CRC right, the manifest,
+  `classes.dex`, `resources.arsc`, `assets/flutter_assets/`, per ABI (`arm64-v8a`,
+  `armeabi-v7a`, `x86_64`) `libflutter.so`, `libapp.so`, `libdart_bridge.so` and
+  `libpython3.14.so`, `assets/app.zip` with the app's modules (`.py` or `.pyc`, no native
+  module), `assets/sitepackages.zip` with flet, and in it and `assets/stdlib.zip` at least one
+  `.soref` marker whose library every ABI holds (serious_python_android 4.7.1's split); then
+  `apksigner verify` and `aapt2 dump badging` of the newest build tools, and the `.apk` is
+  uploaded for 3 days (`flet-apk`, `if: always()`). The caches (`~/flutter`, `~/.pub-cache`,
+  `~/.flet/cache`, plus Gradle's for Android) are keyed by job, OS, arch and the Flet version,
+  restored with `actions/cache/restore` and saved with `actions/cache/save` right after a build
+  that passed (a red check keeps a cold build's downloads; 15.1). Pinned by
+  `test_workflows.test_flet_workflow_builds_for_the_web_and_android` and the other
+  `test_flet_*` tests. Not run on GitHub when it was written (September 2026): the web job
+  passed locally in parts (the same `./pyt` steps, the browser check behind the sandbox proxy
+  with `--ignore-certificate-errors`), the Android job not at all (13.3).
 
 ### 13.3 Coverage limits
 
@@ -3290,8 +3345,11 @@ PowerShell 6.x-7.2, a UNC current folder or a project on a share (its long-path 
 simulated: `test_long_paths_keep_a_network_share_valid`), uv found only in `ProgramFiles` or chocolatey, the
 install prompt on Windows (POSIX `pyt` and pwsh
 `pyt.ps1` answer it on a pseudo-terminal), Neovim 0.11 on Windows, pyright via Mason, VS
-Code itself (buttons, Problems panel: only simulated), `flet build` outside Windows (verified by
-hand there, section 10; no CI job installs Flutter), bundled PyPy portable builds on CI, Ctrl+C
+Code itself (buttons, Problems panel: only simulated), the desktop targets of `flet build`
+outside Windows (verified by hand there, section 10), an Android app on a device or an emulator
+(an owner decision: template-flet.yml only builds the `.apk` and reads it; it was never built
+locally, so its first CI run is the first `apk` build; 13.2), an iOS build, a web build in a
+browser other than Chromium, bundled PyPy portable builds on CI, Ctrl+C
 handling of the nvim harness (its tree kill only simulated; SIGTERM and SIGHUP run for real on
 POSIX, as `selftest --e2e`'s do in `test_e2e_run.py`), `[deploy.nuitka]` lto/pgo outside Linux (measured with Nuitka
 4.2.2 and gcc 13 only: PGO with MSVC and an ~800-module LTO link are unmeasured). The launcher
@@ -3307,8 +3365,9 @@ template-launchers; real niubash only on the maintainer's machine).
   `.pytemplate/runner/**/*.py`, `.pytemplate/pyt.py`, `.pytemplate/tools/*.py`, `pyt`,
   `pyt.cmd`, `pyt.ps1`, `.pytemplate/nvim/**/*.lua` (not its `tests/`),
   `.pytemplate/templates/**`, the preset skeletons and tools (`.py`, `.pyi`, `.toml`; not
-  `typings/`), `.github/workflows/template-*.yml` and the CI image's `Dockerfile`, `pins.py`,
-  `system`, `warm` and `build` (`.github/workflows/template-ci-image/`). Tests (`.pytemplate/tests/`,
+  `typings/`), `.github/workflows/template-*.yml`, the CI image's `Dockerfile`, `pins.py`,
+  `system`, `warm` and `build` (`.github/workflows/template-ci-image/`) and the flet builds'
+  `check.py` (`.github/workflows/template-flet/`). Tests (`.pytemplate/tests/`,
   `.pytemplate/nvim/tests/`) are not in the denominator; a test defect counts as a bug only when
   it breaks `./pyt selftest` for a user or hides a product bug.
 - Measure with a bug hunt on a fixed commit: every finding reproduced and confirmed by an
@@ -4010,6 +4069,25 @@ Flet (flet, flet-desktop, flet pack, flet build):
   `test_build_methods.py::test_flet_build_needs_developer_mode_on_windows`,
   `test_flet_method_refuses_before_any_work`, `test_flet_build_mobile_and_web_ship_the_py_code`.
   Goes: never.
+- **`flet build web` reads a `sys_platform` marker for the build machine** (DEFECT, flet-cli
+  1.0.1 with serious_python 4.7.1): its pip runs on the build machine with only
+  `platform.system()` faked for the target (serious_python's pip `sitecustomize`), and uv writes
+  flet's `platform_system != 'Emscripten'` (httpx, oauthlib: flet leaves them out in a browser)
+  as `sys_platform != 'emscripten'`, the same marker for uv (astral-sh/uv#9949). Every web app
+  carried httpx and its tree, 1.2 MB of the skeleton's 5.6 MB `app.zip`. Up: none found (cf. the
+  flet 0.85.1 release notes, which moved those markers to `platform_system` so that flet build's
+  pip reads them). Fix: `methods.flet.web_markers` writes the Emscripten `sys_platform` markers of
+  a web build's pins as `platform_system` ones, which mean the same in Pyodide (10). Test:
+  `test_build_methods.py::test_flet_web_markers_say_what_flets_pip_reads` (through `packaging`'s
+  marker evaluation), `test_flet_build_web_rewrites_only_the_web_pins`. Goes: when flet build's
+  pip reads the target's `sys_platform` (or uv keeps such a marker as written).
+- **Flutter web draws the app on a canvas** (LIMITATION): the page's DOM holds no text or button
+  of the app; Flutter's semantics tree (its accessibility DOM, `flt-semantics-host`) does, once
+  a screen reader or a click on its `flt-semantics-placeholder` turns it on. Fix:
+  template-flet/check.py (`SEMANTICS_JS`, `TEXTS_JS`, `BUTTON_JS`) turns it on, reads the texts
+  and the button's box there, clicks the box with the mouse and, when nothing starts within
+  `CLICK_AGAIN` seconds, taps the semantics node itself (13.2). Test:
+  `test_workflows.py::test_flet_web_check_drives_the_app` (a fake page). Goes: never.
 
 cffi and raylib:
 - **The raylib stub does not match the runtime** (DEFECT, raylib 6.0.1.0): returns, fields and
@@ -4287,6 +4365,12 @@ GitHub Actions and hosted runners:
 - **WSL setup on hosted runners is slow and sometimes fails** (LIMITATION): Fix: the WSL job of
   `template-launchers.yml` is `continue-on-error`. Test: untested (CI only). Goes: when it is
   reliable.
+- **`actions/cache` saves its cache only at the end of a job that passed** (LIMITATION,
+  documented): a check that failed after a cold flet build (Flutter, Gradle and Flet's
+  downloads, several GB) threw them away, and every red run downloaded them again. Fix:
+  template-flet.yml restores with `actions/cache/restore` and saves with `actions/cache/save`
+  right after the build step, before the checks (13.2). Test:
+  `test_workflows.py::test_flet_workflow_builds_for_the_web_and_android`. Goes: never.
 - **A container job runs as the image's USER (root for most images: the runner passes no
   `--user`), with `tail -f /dev/null` as PID 1 and `HOME=/github/home`, and `${{ runner.temp }}`
   is a host path, translated only in step inputs and environment values** (LIMITATION): as
@@ -4702,6 +4786,17 @@ Behaviour:
   its Linux or macOS targets (`--target`), or of a script in `src/`, are not runnable where it is
   extracted; the generated CI builds each OS's part on that OS, and `pyz-merge` keeps the parts'
   modes (an app file is executable when it is in any part).
+- **[template repo]** template-flet.yml (13.2) builds and reads the `.apk`, never runs it (an owner
+  decision): a failure on a device (a native module that does not load, a crash at start) is not
+  caught. iOS apps and the desktop targets of `flet build` are built in no CI job. The web check
+  needs the CDNs the app loads from (jsDelivr for Pyodide, gstatic for CanvasKit and the fonts),
+  and both builds need Flet's index (pypi.flet.dev), Flutter's and Gradle's repositories: a red
+  run with no commit behind it may be theirs. Its caches (Flutter, pub, Flet, Gradle) take
+  several GB of the repository's 10 GB, of which GitHub evicts the least recently used. Its bare
+  `ubuntu-latest` runners move: the Android SDK packages and NDK of the runner image, and an
+  Ubuntu release the pinned Playwright cannot install its browser's dependencies on (then bump
+  `template-flet/browser.txt`). The `.apk` check reads serious_python_android 4.7.1's layout,
+  which a Flet release may change (a red check naming what it misses).
 
 Editors:
 - VS Code problem matchers and the Neovim parser depend on tool output formats (ruff, mypy,
@@ -4817,3 +4912,12 @@ Code coupling (rename together):
   (`test_lua_whitelists_match_the_runner`); `nvimtest.LOCK` <-> `cmd_nvim.STARTER_REV` (refresh
   both from one green run, 13.1); `.lazy.lua`'s bytes <-> `test_nvim_render.LAZY_LUA_SHA256`;
   `tasks.META.apply` <-> `tasks.META.setup` (one operation, two names).
+- **[template repo]** `template-flet/check.py` <-> the flet skeleton's `ui/app.py` (`SKELETON`,
+  `READY`, `DONE`, `BUTTON`: `test_workflows.test_flet_check_follows_the_skeleton`),
+  `cmd_build.dist_path` and flet's `-<target>` (`output_dir`:
+  `test_flet_check_names_the_runners_output_folders`), `config.update_file` and `ui.PytError`
+  (`set_target`), python.js of Flet's web template (`PYTHON_STARTED`, `PYTHON_FAILED`), Flutter's
+  semantics DOM (`flt-semantics-*`) and serious_python_android 4.7.1's APK layout (`ABIS`,
+  `ABI_LIBS`, `APP_ZIPS`, the `.soref` markers); template-flet.yml's `pt-flet` paths <->
+  `presets.name_from_folder` and `BuildRequest.out_name`; `methods.flet.DESKTOP_CLIENT` <-> the
+  flet preset's `flet-desktop` requirement.

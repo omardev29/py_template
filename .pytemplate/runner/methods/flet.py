@@ -9,8 +9,10 @@
 - `flet build` ignores uv.lock: the project it builds carries the EXACT versions
   exported from uv.lock, but for mobile and web targets a package without a pure wheel (msgpack)
   keeps only the project's own bounds: flet build takes their binaries from Flet's own index,
-  which may not hold uv.lock's release (common.unpin_binaries). It installs the Flutter SDK Flet
-  pins the first time (~3 GB in ~/flutter).
+  which may not hold uv.lock's release (common.unpin_binaries). flet-desktop is left out (no
+  flet build app starts that client), and for the web the Emscripten markers are written the way
+  flet build's pip reads them (web_markers). It installs the Flutter SDK Flet pins the first
+  time (~3 GB in ~/flutter).
 - On Windows it needs Visual Studio (C++) and Developer Mode turned on.
 """
 
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -32,6 +35,8 @@ from . import common
 
 MOBILE_WEB = {"apk", "aab", "ipa", "ios-simulator", "web"}
 STAGE_APP = "src"  # build() stages the app in <work>/src: [tool.flet.app] path must point there
+DESKTOP_CLIENT = "flet-desktop"  # the client `flet run` and `flet pack` start: no flet build app does
+_EMSCRIPTEN_MARKER = re.compile(r"\bsys_platform\s*(==|!=)\s*(['\"])emscripten\2")
 
 
 def _developer_mode() -> bool:
@@ -53,15 +58,31 @@ def _pinned_requirements(cfg_tool: envs.PyEnv) -> list[str]:
 
     --no-editable, and a local library as `name @ file:///absolute/path` (common.direct_reference):
     exported editable it was `-e ./libs/x ; <markers>`, no PEP 508 requirement (pip refused it),
-    and a relative path would point into the build stage, not the project.
+    and a relative path would point into the build stage, not the project. Without
+    `DESKTOP_CLIENT` and what only it needs (`--prune`: what the app requires itself stays): a
+    flet build app runs embedded in its own Flutter host (Pyodide on the web), which never starts
+    the client of `flet run` and `flet pack`; with rich and pygments it was 3.1 of the 5.6 MB of
+    a web build's app.zip.
     """
     out = envs.uv(
         cfg_tool,
-        ["export", "--frozen", "--no-dev", "--no-editable", "--no-emit-project", "--no-hashes", "--no-header", "--no-annotate", "--format", "requirements.txt"],
+        ["export", "--frozen", "--no-dev", "--no-editable", "--no-emit-project", "--prune", DESKTOP_CLIENT, "--no-hashes", "--no-header", "--no-annotate", "--format", "requirements.txt"],
         capture=True,
         echo=False,
     ).stdout
     return [common.direct_reference(ln.strip()) for ln in out.splitlines() if ln.strip() and not ln.startswith("#")]
+
+
+def web_markers(pins: list[str]) -> list[str]:
+    """For the web target: `sys_platform` markers about Emscripten as `platform_system` ones.
+
+    uv writes flet's `platform_system != "Emscripten"` (httpx, oauthlib: flet leaves them out in
+    the browser) as `sys_platform != 'emscripten'`, and serious_python, which runs flet build's
+    pip on the build machine, fakes only `platform.system()` for the target: pip read the build
+    machine's sys_platform and put httpx and its tree into every web app (1.2 of the 5.6 MB of
+    its app.zip). In Pyodide both markers mean the same (CLAUDE.md 15.1).
+    """
+    return [_EMSCRIPTEN_MARKER.sub(lambda m: f"platform_system {m[1]} 'Emscripten'", pin) for pin in pins]
 
 
 def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
@@ -154,6 +175,8 @@ def build(req: BuildRequest) -> Path:
 
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))  # an editor or PS 5.1 may add a BOM
     pins = _pinned_requirements(envs.tool_env(cfg))
+    if target == "web":
+        pins = web_markers(pins)
     if target in MOBILE_WEB:
         pins, relaxed = common.unpin_binaries(pins)
         if relaxed:

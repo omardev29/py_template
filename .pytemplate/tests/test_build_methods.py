@@ -3902,6 +3902,147 @@ def test_flet_build_leaves_mobile_binaries_to_flets_index(sandbox: Path, monkeyp
     assert "not pinned" not in capsys.readouterr().err
 
 
+FLET_DESKTOP_LOCK = """version = 1
+revision = 3
+requires-python = ">=3.11"
+
+[[package]]
+name = "app"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "flet" },
+    { name = "flet-desktop" },
+    { name = "pygments" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "flet", specifier = "==1.0.1" },
+    { name = "flet-desktop", specifier = "==1.0.1" },
+    { name = "pygments", specifier = "==2.19.2" },
+]
+
+[[package]]
+name = "flet"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx", marker = "sys_platform != 'emscripten'" },
+]
+wheels = [{ url = "https://files.pythonhosted.org/packages/aa/flet-1.0.1-py3-none-any.whl", hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }]
+
+[[package]]
+name = "flet-desktop"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "flet" },
+    { name = "rich" },
+]
+wheels = [{ url = "https://files.pythonhosted.org/packages/bb/flet_desktop-1.0.1-py3-none-any.whl", hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }]
+
+[[package]]
+name = "httpx"
+version = "0.28.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://files.pythonhosted.org/packages/cc/httpx-0.28.1-py3-none-any.whl", hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }]
+
+[[package]]
+name = "pygments"
+version = "2.19.2"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://files.pythonhosted.org/packages/dd/pygments-2.19.2-py3-none-any.whl", hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }]
+
+[[package]]
+name = "rich"
+version = "14.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pygments" },
+]
+wheels = [{ url = "https://files.pythonhosted.org/packages/ee/rich-14.1.0-py3-none-any.whl", hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000" }]
+"""
+
+
+def test_flet_build_leaves_the_desktop_client_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A flet build app runs embedded in its own Flutter host (FLET_PLATFORM set, or Pyodide on the
+    # web) and never starts the desktop client of `flet run` and `flet pack`: flet-desktop and
+    # what only it needs (rich, pygments...) were 56% of a web app's Python download. The real
+    # uv (the uv-floor job runs this with the oldest one), offline, on a hand-written lock: what
+    # the app needs itself stays, and a project without flet-desktop exports as before
+    from runner.methods import flet
+
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if not uv:
+        pytest.skip("uv not found")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("UV_PROJECT", "VIRTUAL_ENV"))} | {"UV_OFFLINE": "1"}
+    calls: list[list[str]] = []
+
+    def real_uv(tool: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append([str(a) for a in args])
+        r = subprocess.run([uv, *calls[-1]], cwd=tmp_path, env=env, capture_output=True, text=True, check=False)
+        assert r.returncode == 0, r.stderr
+        return r
+
+    monkeypatch.setattr(envs, "uv", real_uv)
+    monkeypatch.setattr(common, "LOCK", tmp_path / "uv.lock")
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "app"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n', encoding="utf-8")
+    (tmp_path / "uv.lock").write_text(FLET_DESKTOP_LOCK, encoding="utf-8")
+    pins = flet._pinned_requirements(envs.tool_env(make({})))
+    assert calls[0][calls[0].index("--prune") + 1] == flet.DESKTOP_CLIENT == "flet-desktop"
+    preset = tomllib.loads((ROOT / ".pytemplate" / "presets" / "flet" / "preset.toml").read_text(encoding="utf-8"))
+    assert f"{flet.DESKTOP_CLIENT}=={{version}}" in preset["dependencies"]  # the requirement the prune names
+    assert pins == ["flet==1.0.1", "httpx==0.28.1 ; sys_platform != 'emscripten'", "pygments==2.19.2"]
+    without = FLET_DESKTOP_LOCK.replace('    { name = "flet-desktop" },\n', "")
+    without = without[: without.index('[[package]]\nname = "flet-desktop"')] + without[without.index('[[package]]\nname = "httpx"') :]
+    (tmp_path / "uv.lock").write_text(without, encoding="utf-8")
+    assert flet._pinned_requirements(envs.tool_env(make({}))) == pins
+
+
+@pytest.mark.parametrize(
+    ("pin", "web"),
+    [
+        ("httpx==0.28.1 ; sys_platform != 'emscripten'", "httpx==0.28.1 ; platform_system != 'Emscripten'"),
+        ('pyodide-http==0.2.2 ; sys_platform == "emscripten"', "pyodide-http==0.2.2 ; platform_system == 'Emscripten'"),
+        (
+            "oauthlib==3.3.1 ; python_full_version < '3.15' and sys_platform != 'emscripten'",
+            "oauthlib==3.3.1 ; python_full_version < '3.15' and platform_system != 'Emscripten'",
+        ),
+        ("colorama==0.4.6 ; sys_platform == 'win32'", None),
+        ("flet==1.0.1", None),
+        ("mylib @ file:///src/emscripten ; sys_platform != 'linux'", None),
+    ],
+)
+def test_flet_web_markers_say_what_flets_pip_reads(pin: str, web: str | None) -> None:
+    # uv writes flet's `platform_system != "Emscripten"` as `sys_platform != 'emscripten'`, and
+    # the pip of flet build (serious_python) runs on the build machine with only platform.system()
+    # faked: every web app got httpx and its tree, which flet leaves out in the browser
+    from runner.methods import flet
+
+    assert flet.web_markers([pin]) == [web or pin]
+    markers = pytest.importorskip("packaging.markers")
+    requirements = pytest.importorskip("packaging.requirements")
+    marker = requirements.Requirement(pin).marker
+    if marker is None or web is None:
+        return
+    browser = {"sys_platform": "emscripten", "platform_system": "Emscripten", "python_full_version": "3.14.7"}
+    build_machine = browser | {"sys_platform": "linux"}  # what that pip sees
+    wanted = marker.evaluate(browser)
+    assert markers.Marker(web.partition(";")[2]).evaluate(build_machine) == wanted
+    assert marker.evaluate(build_machine) != wanted  # what went wrong without it
+
+
+def test_flet_build_web_rewrites_only_the_web_pins(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pins = ["flet==1.0.1", "httpx==0.28.1 ; sys_platform != 'emscripten'"]
+    stage = sandbox / "build" / "flet-build" / "cpython" / "pyproject.toml"
+    _flet_build(sandbox, monkeypatch, target="web", pins=pins)
+    assert tomllib.loads(stage.read_text(encoding="utf-8"))["project"]["dependencies"] == ["flet==1.0.1", "httpx==0.28.1 ; platform_system != 'Emscripten'"]
+    for target in ("apk", "linux"):  # neither the build machine nor the app is a browser there: the marker reads right
+        _flet_build(sandbox, monkeypatch, target=target, pins=pins)
+        assert tomllib.loads(stage.read_text(encoding="utf-8"))["project"]["dependencies"] == pins, target
+
+
 def test_flet_build_upx_only_for_desktop_and_missing_output(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     packed: list[Path] = []
     monkeypatch.setattr(upx, "active", lambda cfg: True)
