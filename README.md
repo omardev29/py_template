@@ -240,7 +240,7 @@ pyz launchers set.
 The runner ignores an activated virtual environment (`VIRTUAL_ENV`, `PYTHONHOME`, `PYTHONPATH`)
 and uv's environment selection (`UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PROJECT`,
 `UV_NO_PROJECT`, `UV_WORKING_DIR`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`, `UV_ISOLATED`,
-`UV_NO_DEV`, `UV_NO_DEFAULT_GROUPS`, `UV_NO_SYNC`): its tools always run in the project's
+`UV_NO_DEV`, `UV_NO_DEFAULT_GROUPS`, `UV_NO_GROUP`, `UV_NO_SYNC`): its tools always run in the project's
 environments. uv's resolution settings (indexes, `UV_EXCLUDE_NEWER`, `UV_RESOLUTION`,
 `UV_PRERELEASE`) and its cache pass through. The runner itself starts on the project's Python
 in the folder where the command was typed: the launchers remove `UV_PYTHON`, `PYTHONHOME`,

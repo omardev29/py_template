@@ -860,7 +860,8 @@ uv 0.12): `UV_PROJECT_ENVIRONMENT` and `UV_PYTHON` (`envs.env_vars` sets both), 
 `UV_NO_PROJECT`, `UV_WORKING_DIR` (another project or none: `--locked` is ignored, relative
 paths move), `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON` (exit 2 next to
 `UV_PYTHON_PREFERENCE`), `UV_ISOLATED` (a throwaway env instead of `.venv`), `UV_NO_DEV`,
-`UV_NO_DEFAULT_GROUPS` (no mypy/ruff/pytest: a PATH-wide one of another version runs) and
+`UV_NO_DEFAULT_GROUPS`, `UV_NO_GROUP` (`=dev` wins over `--all-groups`: sync uninstalled the
+tools; no mypy/ruff/pytest: a PATH-wide one of another version runs) and
 `UV_NO_SYNC` (`.venv` stays empty after `git clean -fdx`). Resolution settings (indexes,
 `UV_EXCLUDE_NEWER`, `UV_RESOLUTION`, `UV_PRERELEASE`), `UV_FROZEN`/`UV_LOCKED` (uv ignores
 `UV_FROZEN` next to `--locked`) and the cache stay: they are the user's, and uv reports when
@@ -3207,10 +3208,11 @@ uv:
   never.
 - **The user's uv variables move the runner's calls** (LIMITATION): `UV_PROJECT`,
   `UV_NO_PROJECT`, `UV_WORKING_DIR`, `UV_ISOLATED`, `UV_NO_DEV`, `UV_NO_DEFAULT_GROUPS`,
-  `UV_NO_SYNC` change the project, environment or groups of `uv run --locked`;
+  `UV_NO_GROUP`, `UV_NO_SYNC` change the project, environment or groups of `uv run --locked`;
   `UV_MANAGED_PYTHON`/`UV_NO_MANAGED_PYTHON` next to `UV_PYTHON_PREFERENCE` exit 2. Fix:
   `proc.base_env` drops `proc.UV_SELECTION` (5.5). Test:
   `test_cli_core.py::test_base_env_drops_what_would_move_uv_or_python`,
+  `test_a_user_uv_no_group_never_reaches_uv`,
   `test_uv_runs_in_the_projects_environment_whatever_the_user_exported`. Goes: never.
 - **`uv run --script` exports its throwaway environment** (LIMITATION): `VIRTUAL_ENV`, its
   `bin/`/`Scripts/` first on PATH and `UV` reach every child, which then took the runner's

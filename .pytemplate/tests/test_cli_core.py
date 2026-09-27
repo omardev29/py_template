@@ -672,6 +672,13 @@ def test_the_selection_variables_include_the_known_conflicts() -> None:
     assert "UV_INDEX_URL" not in proc.UV_SELECTION and "UV_CACHE_DIR" not in proc.UV_SELECTION
 
 
+def test_a_user_uv_no_group_never_reaches_uv() -> None:
+    """UV_NO_GROUP=dev (left over from a production or Docker setup) wins over `--all-groups`:
+    `./deploy sync` uninstalled mypy, ruff and pytest, `check` ran PATH-wide ones and `test` found
+    no pytest. It moves the groups like UV_NO_DEV, so the runner drops it too."""
+    assert {"UV_NO_DEV", "UV_NO_DEFAULT_GROUPS", "UV_NO_GROUP"} <= set(proc.UV_SELECTION)
+
+
 def test_base_env_removes_the_runners_own_bin_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     own = tmp_path / "script-env"
     bin_dir = own / ("Scripts" if IS_WINDOWS else "bin")
