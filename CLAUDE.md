@@ -1101,10 +1101,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (`rename.report`, `tidy_before`, `apply_plan`, then the record under the new name: a later
   failure must not leave it naming the old app, which is no longer trusted) or the `[project]
   name` line -> `uv remove --frozen` / `uv add --frozen` of the option-driven requirements (dev
-  group with `--dev`) -> `cmd_env.ensure_lock` -> PyPy newly supported:
-  `cmd_mode._precheck_py311` (it syncs the tools environment with THIS configuration, `uv sync
-  --locked`, so only once pyproject.toml and uv.lock follow it: with a python.cpython change in
-  the same edit uv refused the old lock) -> `save_record` (everything after it can still fail:
+  group with `--dev`) -> `cmd_env.ensure_lock`, whose re-lock, when it first resolves PyPy
+  (`render.gains_pypy`), is followed by `cmd_mode._precheck_py311` (it syncs the tools
+  environment with THIS configuration, `uv sync --locked`, so only once pyproject.toml and
+  uv.lock follow it: with a python.cpython change in the same edit uv refused the old lock) ->
+  `save_record` (everything after it can still fail:
   a record written only at the end kept the old options after a failed sync, and a revert then
   kept both raylib packages) -> `envs.sync` of `cmd_env._envs_for(cfg, "all")` ->
   `cmd_env._fix_exec_bit` -> the hook (`ensure_installed` when `hooks.pre_commit`,
@@ -1291,7 +1292,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   read). `mode` drops changes whose value is already set, so their spelling stays.
 - `mode` keeps the old bytes of `pytemplate.toml`, `pyproject.toml` and `uv.lock` (the lock next to
   `pyproject.toml`) and puts them back (`cmd_mode._restore`) when
-  `config.update_file`, `cmd_env.ensure_lock` or the new environment's `envs.sync` fails or is
+  `config.update_file`, `cmd_env.ensure_lock` (its PyPy precheck included) or the new
+  environment's `envs.sync` fails or is
   interrupted, saying which files it restored; the generated files are rendered only after that,
   so a failed mode leaves nothing half-applied and a second run locks again (it used to find
   nothing to change and report success with a stale `uv.lock`). A generated file it leaves
@@ -1763,7 +1765,12 @@ Formats:
     and the rule can go.
   `lintc` does not import `presets` or `mypyc`.
 - With PyPy supported user code must be 3.11 syntax and API (no PEP 695;
-  `typing_extensions.override`, not `typing.override`). `mode --supports +pypy` prechecks it
+  `typing_extensions.override`, not `typing.override`). Every re-lock that first makes uv.lock
+  resolve for PyPy prechecks it, after the re-lock (`cmd_env.ensure_lock` for mode, apply and
+  rename, and `cmd_env.cmd_lock`, which puts pyproject.toml and uv.lock back when it fails):
+  `render.gains_pypy` reads the managed block of pyproject.toml, never pytemplate.toml, where a
+  hand edit of backend.supported, then any mode or lock, locked PyPy in unchecked and apply
+  then skipped the check too; mode also syncs .venv-pypy then. The check
   (`cmd_mode._precheck_py311`, named after the default pin: it checks `Config.pypy_minor`, the
   Python of `python.pypy`, so a project pinned to `pypy@3.12.x` may use 3.12 code): it syncs the
   tools env first (a stale `uv.lock` fails in uv's own step; not under `--dry-run`), then ruff

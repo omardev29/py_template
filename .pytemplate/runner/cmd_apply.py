@@ -92,10 +92,7 @@ class Project:
     @property
     def pypy_locked(self) -> bool:
         """Whether uv.lock already resolves for PyPy (tool.uv environments, the managed block)."""
-        tool = self.data.get("tool")
-        uv = tool.get("uv") if isinstance(tool, dict) else None
-        found = uv.get("environments", []) if isinstance(uv, dict) else []
-        return any("implementation_name == 'pypy'" in e for e in found if isinstance(e, str)) if isinstance(found, list) else False
+        return render.resolves_pypy(self.data)
 
 
 def _requirements(value: object) -> dict[str, str]:
@@ -923,13 +920,11 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
     lock_before = _read_bytes(ROOT / "uv.lock")
     try:
         _edit_dependencies(cfg, plan.deps)
+        # With PyPy new (plan.pypy_new) ensure_lock runs the PyPy precheck once the re-lock is
+        # done: it syncs the tools environment (`uv sync --locked`) with THIS configuration (a
+        # python.cpython change in the same edit made uv refuse the old lock); when it fails,
+        # pyproject.toml and uv.lock get their old bytes back below.
         cmd_env.ensure_lock(cfg)
-        if plan.pypy_new:
-            # The PyPy precheck of `mode --supports +pypy`. It syncs the tools environment
-            # (`uv sync --locked`) with THIS configuration, so it runs once pyproject.toml and
-            # uv.lock follow it (a python.cpython change in the same edit made uv refuse the old
-            # lock); when it fails, both get their old bytes back below.
-            cmd_mode_precheck(cfg)
     except BaseException as e:  # restore pyproject.toml and uv.lock: nothing half-applied
         restored = [
             name

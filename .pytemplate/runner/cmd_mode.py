@@ -326,11 +326,16 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
     if dropped_active:
         ui.info(f"note: {cfg.backend.active} is no longer supported: the active backend becomes {active}")
 
-    adding_pypy = planned.pypy_enabled and not cfg.pypy_enabled
+    # PyPy is new when uv.lock does not resolve for it yet (render.gains_pypy), not only when this
+    # command adds it: after a hand edit of backend.supported, pytemplate.toml already lists it, and
+    # mode locked PyPy in without the Python 3.11 check and without .venv-pypy. The check runs in
+    # ensure_lock, once the re-lock is done (--dry-run: here, read-only).
+    adding_pypy = planned.pypy_enabled and (not cfg.pypy_enabled or render.gains_pypy(planned))
     syncs: list[envs.PyEnv] = []
     if adding_pypy:
         syncs.append(envs.pypy_env(planned))
-        _precheck_py311(cfg)
+        if proc.DRY_RUN:
+            _precheck_py311(cfg)
 
     if proc.DRY_RUN:
         _plan_mode(cfg, planned, changes, syncs)

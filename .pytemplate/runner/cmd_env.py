@@ -40,8 +40,15 @@ def ensure_lock(cfg: Config) -> None:
 
     A UV_FROZEN or UV_LOCKED of the user's keeps `uv lock` from writing uv.lock (under UV_FROZEN
     it only checks the lock's validity and exits 0): a needed re-lock is then refused, so the
-    caller (mode, apply, rename) puts its files back instead of leaving uv.lock stale."""
+    caller (mode, apply, rename) puts its files back instead of leaving uv.lock stale.
+
+    When the rewrite makes uv.lock resolve for PyPy for the first time (render.gains_pypy), the
+    code must pass the Python 3.11 check first (cmd_apply.cmd_mode_precheck), after the re-lock:
+    it syncs the tools environment with this configuration. A failure raises, and the caller
+    puts pyproject.toml and uv.lock back. Deciding "PyPy is new" from pytemplate.toml let a hand
+    edit of backend.supported, then any mode, rename or lock, lock PyPy in unchecked."""
     tool = envs.tool_env(cfg)
+    gains_pypy = render.gains_pypy(cfg)
     if render.write_pyproject(cfg):
         ui.info(render.pyproject_message())
         if proc.DRY_RUN:
@@ -54,6 +61,14 @@ def ensure_lock(cfg: Config) -> None:
     if r.returncode != 0:
         _refuse_a_frozen_lock()
         envs.uv(tool, ["lock"])
+    if gains_pypy and not proc.DRY_RUN:
+        _pypy_precheck(cfg)
+
+
+def _pypy_precheck(cfg: Config) -> None:
+    from . import cmd_apply  # cmd_apply imports this module
+
+    cmd_apply.cmd_mode_precheck(cfg)
 
 
 def _refuse_a_frozen_lock() -> None:
@@ -146,6 +161,7 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
         envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False)
         return 0
     before = _snapshot((PYPROJECT, PYPROJECT.with_name("uv.lock")))
+    gains_pypy = render.gains_pypy(cfg)
     changed = render.write_pyproject(cfg)
     if changed:
         ui.info(render.pyproject_message())
@@ -166,6 +182,12 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
     read_only = _lock_read_only(args)
     if read_only:
         restore(f"uv lock with {read_only} writes no uv.lock")
+    elif gains_pypy and not proc.DRY_RUN:  # uv.lock resolves for PyPy now: as ensure_lock does
+        try:
+            _pypy_precheck(cfg)
+        except BaseException:
+            restore("the code is not ready for PyPy yet")
+            raise
     render.apply(cfg)
     return 0
 

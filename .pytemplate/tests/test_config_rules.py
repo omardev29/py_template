@@ -1221,6 +1221,34 @@ def test_mode_under_uv_frozen_refuses_the_relock_and_puts_everything_back(tmp_pa
     assert fake.snapshot() == fake.before and fake.synced == []
 
 
+def test_mode_after_a_hand_edit_that_adds_pypy_checks_the_code_and_creates_its_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The documented edit-then-apply flow: backend.supported gained pypy by hand, then any mode
+    (here --editor). mode decided "PyPy is new" from the edited pytemplate.toml, so it re-locked
+    for PyPy without the Python 3.11 check and without .venv-pypy, and apply then found PyPy in
+    the lock and skipped the check too: code that does not parse on 3.11 got PyPy."""
+    from runner import envs
+
+    if config.load(set()).pypy_enabled:
+        pytest.skip("this project already supports PyPy (the raylib preset)")
+    _Relock(tmp_path, monkeypatch, "none")
+    cfg_file = tmp_path / "pytemplate.toml"
+    base = config.load(set())
+    supported = [b for b in ("cpython", "pypy", "mypyc") if b == "pypy" or b in base.backend.supported]
+    cfg_file.write_text(config.set_value(cfg_file.read_text(encoding="utf-8"), "backend", "supported", supported), encoding="utf-8", newline="\n")
+    cfg = config.load(set())
+    checked: list[str] = []
+    synced: list[str] = []
+    monkeypatch.setattr(cmd_mode, "_precheck_py311", lambda c: checked.append((tmp_path / "uv.lock").read_text(encoding="utf-8")))
+    monkeypatch.setattr(envs, "sync", lambda env: synced.append(env.key))
+    monkeypatch.setattr(render, "apply", lambda *a, **k: ([], []))
+    other = "pylance" if cfg.typing.editor == "basedpyright" else "basedpyright"
+    assert cmd_mode.cmd_mode(cfg, ["--editor", other]) == 0
+    assert checked == ["# re-locked\n"]  # once uv.lock resolves for PyPy
+    assert synced == ["pypy"]
+
+
 def test_mode_names_the_hand_edited_files_it_leaves_as_they_were(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

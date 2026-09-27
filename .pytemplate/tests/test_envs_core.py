@@ -716,6 +716,58 @@ def test_ensure_lock_relocks_only_when_the_check_fails(
     assert (["lock"] in calls) is relocks
 
 
+NO_PYPY_PYPROJECT = '[project]\nname = "p"\nversion = "0.1.0"\nrequires-python = ">=3.14"\ndependencies = []\n'
+
+
+def test_a_relock_that_first_resolves_pypy_checks_the_code_after_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """backend.supported gained pypy by hand: mode (another change), rename and lock re-locked
+    for PyPy without the Python 3.11 check, which ran only when mode itself added PyPy, and apply
+    then found PyPy in the lock and skipped it too. ensure_lock runs it once uv.lock resolves for
+    PyPy for the first time, after the re-lock (it syncs the tools environment with it)."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(NO_PYPY_PYPROJECT, encoding="utf-8")
+    monkeypatch.setattr(render, "PYPROJECT", pyproject)
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    calls = fake_uv(monkeypatch, {("lock", "--check"): 1})
+    checked: list[list[list[str]]] = []
+    monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", lambda cfg: checked.append(list(calls)))
+    cmd_env.ensure_lock(make(PYPY))
+    assert checked == [[["lock", "--check"], ["lock"]]]  # after the re-lock
+    assert render.resolves_pypy(tomllib.loads(pyproject.read_text(encoding="utf-8")))
+    cmd_env.ensure_lock(make(PYPY))  # the lock resolves PyPy already: no second check
+    cmd_env.ensure_lock(make())  # PyPy leaves: nothing to check
+    assert len(checked) == 1
+
+
+def test_lock_that_first_resolves_pypy_checks_the_code_or_puts_both_files_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pyproject, lock = tmp_path / "pyproject.toml", tmp_path / "uv.lock"
+    pyproject.write_text(NO_PYPY_PYPROJECT, encoding="utf-8")
+    lock.write_text("version = 1\n", encoding="utf-8")
+    for module in (render, cmd_env):
+        monkeypatch.setattr(module, "PYPROJECT", pyproject)
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    for name in cmd_env.LOCK_READ_ONLY_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(render, "apply", lambda cfg, **kw: ([], []))
+    fake_uv(monkeypatch)
+
+    def refused(cfg: Config) -> None:
+        raise DeployError("the code uses syntax that does not exist in Python 3.11 (see above); fix it before enabling PyPy")
+
+    monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", refused)
+    with pytest.raises(DeployError, match="Python 3.11"):
+        cmd_env.cmd_lock(make(PYPY), [])
+    assert pyproject.read_text(encoding="utf-8") == NO_PYPY_PYPROJECT and lock.read_text(encoding="utf-8") == "version = 1\n"
+    assert "put back as it was (the code is not ready for PyPy yet)" in capsys.readouterr().err
+    checked: list[Config] = []
+    monkeypatch.setattr(cmd_apply, "cmd_mode_precheck", checked.append)
+    assert cmd_env.cmd_lock(make(PYPY), ["--dry-run"]) == 0 and checked == []  # writes no uv.lock: nothing to check
+    assert cmd_env.cmd_lock(make(PYPY), []) == 0 and len(checked) == 1
+    assert cmd_env.cmd_lock(make(PYPY), ["--upgrade"]) == 0 and len(checked) == 1  # resolves PyPy already
+
+
 @pytest.mark.parametrize("name", ["UV_FROZEN", "UV_LOCKED"])
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_ensure_lock_refuses_a_relock_the_environment_makes_a_no_op(monkeypatch: pytest.MonkeyPatch, name: str, dry_run: bool) -> None:

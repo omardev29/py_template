@@ -880,6 +880,28 @@ def _verify(cfg: Config, text: str, new: str) -> None:
             )
 
 
+def resolves_pypy(data: dict[str, Any]) -> bool:
+    """Whether the parsed pyproject.toml makes uv.lock resolve for PyPy: a PyPy entry in the
+    [tool.uv] environments of the managed block."""
+    tool = data.get("tool")
+    uv = tool.get("uv") if isinstance(tool, dict) else None
+    found = uv.get("environments", []) if isinstance(uv, dict) else []
+    return isinstance(found, list) and any("implementation_name == 'pypy'" in e for e in found if isinstance(e, str))
+
+
+def gains_pypy(cfg: Config) -> bool:
+    """Whether writing the managed parts for `cfg` makes uv.lock resolve for PyPy for the first
+    time: the Python 3.11 check of the code (cmd_mode._precheck_py311) must pass first, whatever
+    rewrites the block (mode, apply, rename, lock). A pyproject.toml that cannot be read counts as
+    not resolving PyPy (write_pyproject then says what is wrong with it)."""
+    if not cfg.pypy_enabled:
+        return False
+    try:
+        return not resolves_pypy(tomllib.loads(_read_pyproject()))
+    except (DeployError, tomllib.TOMLDecodeError):
+        return True
+
+
 def _read_pyproject() -> str:
     try:
         return _norm(PYPROJECT.read_text(encoding="utf-8"))

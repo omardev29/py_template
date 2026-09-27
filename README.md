@@ -652,8 +652,10 @@ cpython and pypy test runs cannot catch a wrap-around.
 `./deploy mode --supports +pypy` enables PyPy (the raylib preset has it): it checks that the code
 is valid on the Python of `python.pypy`, 3.11 by default (ruff's syntax rules for it, and the
 mypy errors that appear only on it, whatever the typing profile), lowers `requires-python` to
-`>=3.11`, re-locks `uv.lock` and creates `.venv-pypy`. `./deploy apply` runs the same check when
-`backend.supported` gains PyPy.
+`>=3.11`, re-locks `uv.lock` and creates `.venv-pypy`. The same check runs whenever `uv.lock` is
+re-locked for PyPy for the first time, whatever does it: `apply` after you add `pypy` to
+`backend.supported` by hand, and also `mode`, `rename` or `lock` after such an edit (when the
+check fails, `pyproject.toml` and `uv.lock` are put back).
 
 - While PyPy is supported, the code must be Python 3.11 in syntax and API: no `class C[T]` generics
   (PEP 695), and `from typing_extensions import override`, not `from typing import override`.
