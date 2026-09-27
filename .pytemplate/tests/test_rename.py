@@ -16,6 +16,7 @@ import random
 import shutil
 import subprocess
 import sys
+import threading
 import tokenize
 import tomllib
 from pathlib import Path
@@ -929,6 +930,27 @@ def test_only_links_the_move_breaks_are_reported(tmp_path: Path) -> None:
     planned = rename.plan(root, "alpha", "beta")
     assert planned.linked == ["src/alpha/back/", "tests/data/"]
     assert rename.plan(root, "alpha", "Alpha").linked == []  # the package does not move
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes: POSIX")
+def test_a_named_pipe_is_never_read(tmp_path: Path) -> None:
+    """A FIFO outside src/ and tests/ (a dev script's run/app.fifo): the search for other files
+    that mention the old name opened it, and open() waits for a writer: rename, and apply after
+    an app.name edit (--dry-run too), hung forever."""
+    _write_project(tmp_path, "script", "alpha")
+    (tmp_path / "run").mkdir()
+    fifo = tmp_path / "run" / "app.fifo"
+    os.mkfifo(fifo)
+    (tmp_path / "notes.md").write_text("Run alpha.\n", encoding="utf-8")
+    planned: list[rename.Plan] = []
+    worker = threading.Thread(target=lambda: planned.append(rename.plan(tmp_path, "alpha", "beta")), daemon=True)
+    worker.start()
+    worker.join(30)
+    if worker.is_alive():  # it waits for a writer: give it one, then fail
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        worker.join(10)
+        pytest.fail("rename.plan hung on a named pipe")
+    assert planned[0].mentions == ["notes.md"]
 
 
 def test_a_windows_junction_in_src_is_never_followed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -61,6 +61,7 @@ import io
 import keyword
 import os
 import re
+import stat
 import tokenize
 import tomllib
 import warnings
@@ -914,9 +915,12 @@ def _code_files(root: Path, links: list[str] | None = None) -> Iterator[tuple[st
 
 
 def _mentions_name(path: Path, pattern: re.Pattern[str]) -> bool:
-    """Whether a text file (at most MENTION_MAX_BYTES) mentions the old name."""
+    """Whether a text file (a regular file of at most MENTION_MAX_BYTES) mentions the old name.
+    A named pipe, a socket or a device is never read: opening a FIFO waits for a writer, and the
+    rename (or apply after an app.name edit, --dry-run too) hung forever."""
     try:
-        if path.stat().st_size > MENTION_MAX_BYTES:
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MENTION_MAX_BYTES:
             return False
         text = _decode(path.read_bytes())
     except OSError:
