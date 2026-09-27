@@ -34,7 +34,11 @@ the section you need before touching a file. Cite code by symbol (`render.apply`
 7. Keep scratch paths short (`C:\t\p1`, `%TEMP%\pt\...`): with `LongPathsEnabled=0` deep paths
    break MSVC (mypyc), PyPy runtime copies, `compileall` and the Flet client extraction.
 8. Never touch user-global state from tests or tools: shell rc files, the user's Neovim
-   config/data/state, PATH, the registry, installed programs.
+   config/data/state, PATH, the registry, installed programs. The one exception is what the
+   user asks for by name: `./pyt install` writes the installed template into the user data
+   folder and the launchers into uv's tool bin folder, and `uninstall` removes exactly those
+   (section 5.9); neither ever edits PATH, an rc file or the registry, and their tests move
+   HOME, XDG_DATA_HOME, LOCALAPPDATA and UV_TOOL_BIN_DIR into tmp_path.
 9. Calling `./pyt` from an agent on Windows: a Git Bash tool runs `pyt` (sh); a
    PowerShell tool resolves `./pyt` to `pyt.ps1`; in cmd, Claude Code sessions set
    `NoDefaultCurrentDirectoryInExePath=1`, so type `.\pyt.cmd`, never a bare `pyt`.
@@ -134,6 +138,8 @@ typings/                          project stubs (raylib preset: the corrected ra
 .pytemplate/editor.json           generated data file for the Neovim plugin
 .pytemplate/state.json            hashes of the generated files + the `applied` record (committed)
 .pytemplate/template-repo         [template repo] marker, not copied by ./pyt new
+.pytemplate/installed.json        never tracked: the record `./pyt install` writes into the
+                                  installed template only (section 5.9); `new` never copies it
 .github/workflows/ci.yml          generated CI of the project
 .github/workflows/template-*.yml  [template repo] selftest, launchers, nvim, e2e CI, the
                                   Linux CI image and the keepalive of their schedules (section
@@ -154,7 +160,10 @@ implement the same contract: change them together. The `nu` and `xonsh` snippets
 
 1. Find the project root: the directory that holds `.pytemplate/pyt.py`, first from the
    launcher's own location (a symlink to `pyt` or `pyt.ps1` is followed to the file it
-   names, sections 4.3 and 4.5), else by walking up from the current directory. A walked-up root
+   names, sections 4.3 and 4.5), else by walking up from the current directory. A project made
+   before the launchers were renamed holds `.pytemplate/deploy.py` instead: that is its runner
+   (a folder with both runs `pyt.py`; `pyt` `_pt_entry_in`, `pyt.ps1` `Get-Entry`, `pyt.cmd`
+   `PT_ENTRY`). A walked-up root
    must be the user's: on POSIX its `.pytemplate/pyt.py` passes `test -O` (anyone may create
    `/tmp/.pytemplate/pyt.py`, and it ran as the caller); on Windows, whose owners are not read
    (an Administrators-owned checkout would fail), a drive root is never taken. Otherwise exit 2
@@ -163,9 +172,25 @@ implement the same contract: change them together. The `nu` and `xonsh` snippets
    `test_launcher_sh.test_a_launcher_outside_a_project_never_runs_another_users_one`,
    `test_the_walk_up_never_takes_a_drive_root_on_windows`,
    `test_shells.test_snippets_never_run_another_users_project`).
+   No project found: the installed template of `./pyt install` (section 5.9), where
+   `cmd_install.snapshot_dir` puts it: `%LOCALAPPDATA%\pytemplate\template` on Windows (else
+   below `%USERPROFILE%\AppData\Local`; neither set: none), elsewhere
+   `$XDG_DATA_HOME/pytemplate/template` for an absolute `XDG_DATA_HOME` (the XDG spec ignores a
+   relative one), else `$HOME/.local/share/pytemplate/template` for an absolute `HOME` (`pyt`
+   `_pt_installed`, the `$data` of `pyt.ps1`, `pyt.cmd` `:installed`). It runs, in global mode,
+   only when its `.pytemplate/pyt.py` passes the same ownership rule (it lives where the
+   environment says). Without it: exit 2 with the no-project line and how to install pyt
+   (`test_launcher_sh.test_outside_a_project_the_launcher_runs_the_installed_template`,
+   `test_the_installed_template_of_another_user_is_never_run`,
+   `test_launcher_win.test_ps1_outside_a_project_runs_the_installed_template`,
+   `test_cmd_outside_a_project_runs_the_installed_template`).
 2. Find uv (order below).
 3. Export `PYTEMPLATE_CALLER_CWD` (the caller's cwd; `C:\...` form with an upper-case drive on
-   Windows) and `PYTEMPLATE_LAUNCHER`.
+   Windows) and `PYTEMPLATE_LAUNCHER`, and `PYTEMPLATE_GLOBAL=1` for the installed template
+   only: for a project's runner the variable is removed, so a stale export never turns it into
+   global mode (`pyt`: `unset`; `pyt.cmd`: `set "PYTEMPLATE_GLOBAL="`; `pyt.ps1`: removed and
+   restored like the other two; `test_launcher_sh.test_a_projects_runner_never_runs_in_global_mode`,
+   `test_launcher_win.test_cmd_never_hands_a_project_the_global_mode`).
 4. Run `uv run --quiet --script <root>/.pytemplate/pyt.py ARGS...` with argv untouched and
    propagate its exit code, with the caller's `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and
    `UV_WORKING_DIR` removed for uv only (`pyt`: `unset` before `exec`, prefix assignments
@@ -180,9 +205,14 @@ implement the same contract: change them together. The `nu` and `xonsh` snippets
    paths with it) (section 5.2); its own tools never used them anyway (`proc.base_env`).
    Launchers never `cd`; besides the uv search and the install hints they contain no logic.
 
-Launcher exit codes: 2 = no project found, 127 = uv not found (after the install hints),
-126 = `pyt.ps1` could not start uv, or PowerShell runs it in ConstrainedLanguage mode;
-anything else comes from the runner (3 when uv started it on a Python older than 3.11).
+Every launcher carries a `pytemplate-launcher:` line in its header (`#`, `rem` in `pyt.cmd`):
+`./pyt install` overwrites, and `uninstall` removes, only a file of uv's tool bin folder that
+has it (`cmd_install.MARKER`; `test_install.test_every_launcher_carries_the_marker`).
+
+Launcher exit codes: 2 = no project found (and no installed template), 127 = uv not found
+(after the install hints), 126 = `pyt.ps1` could not start uv, or PowerShell runs it in
+ConstrainedLanguage mode; anything else comes from the runner (3 when uv started it on a Python
+older than 3.11).
 
 uv search order (the same in all three launchers and the plugin, `init.uv_candidates`;
 `test_launcher_sh.test_uv_search_order` walks it with fake uvs for `pyt` and `pyt.ps1`):
@@ -238,6 +268,16 @@ extensionless sh launcher, which Windows hands to its file association (no assoc
 no output). Type `C:\proj\pyt.ps1`. On Linux/macOS the extensionless file is the sh launcher
 itself, so pwsh users type `./pyt.ps1`.
 
+The installed launchers (`./pyt install`, section 5.9) sit together in uv's tool bin folder:
+`pyt` alone on Linux/macOS; on Windows `pyt`, `pyt.cmd` and `pyt.ps1`, as npm's cmd-shim lays
+out its commands. A bare `pyt` then runs `pyt.cmd` in cmd (PATHEXT; cmd never takes an
+extensionless file), `pyt.ps1` in PowerShell (its command discovery looks for `pyt.ps1` before
+`pyt` plus each PATHEXT extension and the bare name; 7.x folder by folder, 5.1 pattern by
+pattern across the whole PATH, so there a `pyt.ps1` anywhere on PATH wins) and the sh launcher
+in Git Bash, MSYS2 and the other POSIX shells. Each installed launcher finds the project it runs
+in by walking up (its own folder holds none), else the installed template
+(`test_install.test_the_installed_pyt_runs_from_cmd_powershell_and_pwsh`, Windows only).
+
 ### 4.3 `pyt` (POSIX sh)
 
 Every rule below exists because of a verified failure; `test_launcher_sh.lint` enforces the
@@ -267,9 +307,17 @@ header rules (with detector tests proving each rule fires).
 - niubash is detected by `__RUBASH_SHELL_NAME`. There uv runs WITHOUT `exec` (exec would only
   end the in-process script) as `if UV_PYTHON='' PYTHONHOME='' PYTHONPATH='' UV_WORKING_DIR=.
   "$@"` (errexit-proof; the session keeps its own values), then the launcher unsets
-  `PYTEMPLATE_CALLER_CWD` and `PYTEMPLATE_LAUNCHER` and exits with uv's code, so nothing leaks
-  into the calling session. Elsewhere it runs `unset UV_PYTHON PYTHONHOME PYTHONPATH
-  UV_WORKING_DIR` and `exec "$@"`.
+  `PYTEMPLATE_CALLER_CWD`, `PYTEMPLATE_LAUNCHER` and `PYTEMPLATE_GLOBAL` and exits with uv's
+  code, so nothing leaks into the calling session. Elsewhere it runs `unset UV_PYTHON
+  PYTHONHOME PYTHONPATH UV_WORKING_DIR` and `exec "$@"`. `PYTEMPLATE_GLOBAL` is exported as 1
+  for the installed template and unset for a project's runner before either (a stale export of
+  the session never reaches a project).
+- The runner: `_pt_entry_in` sets `_pt_entry` to `pyt.py`, else `deploy.py` (a project made
+  before the launchers were renamed), for the launcher's own folder and each walked-up one;
+  `_pt_foreign` and the relative-path folding check that entry. When the walk-up finds nothing
+  (and no other user's project), `_pt_installed` names the installed template (section 4.1,
+  empty when nothing names it) and `_pt_global=1` goes with it, under the same `_pt_foreign`
+  rule.
 - Root discovery: `$BASH_SOURCE` -> zsh `${(%):-%x}` (read through `eval` so dash never parses
   it) -> `$0` -> walk up from `$PWD`. The walk stops at `/`, `C:` and `C:/`; relative
   candidates (`./`, `../`) are folded against `$PWD`, but the folded path is used only when it
@@ -331,8 +379,20 @@ header rules (with detector tests proving each rule fires).
   expands `REG_EXPAND_SZ` values (`test_cmd_registry_path_with_quoted_entries`, a fake
   `reg.cmd` on PATH, Windows only).
 - The helper variables are cleared on the uv line itself
-  (`set "PT_ROOT=" & set "PT_UV=" & "%PT_UV%" run ...`): cmd expands the whole line first, so
-  uv still gets their values and the runner sees only the two `PYTEMPLATE_*` variables.
+  (`set "PT_ROOT=" & set "PT_UV=" & set "PT_ENTRY=" & set "PT_GLOBAL=" & "%PT_UV%" run ...`):
+  cmd expands the whole line first, so uv still gets their values and the runner sees only the
+  `PYTEMPLATE_*` variables (`PYTEMPLATE_GLOBAL` only for the installed template).
+- cmd reads a batch file one line at a time and opens it again by name for each line, and
+  `pyt uninstall` deletes (`pyt install` replaces) the installed `pyt.cmd` while it runs: the
+  next read said "The batch file cannot be found." (or ran whatever the new file held at that
+  offset). So the uv line ends in `& exit /b` (the exit code stays uv's ERRORLEVEL) and cmd
+  reads nothing after it; the `exit /b %ERRORLEVEL%` line after it serves arguments with an odd
+  number of double quotes, which swallow the rest of the uv line (and get ` & exit /b` appended
+  to their last argument: `"` inside arguments is unsupported anyway, below)
+  (`test_cmd_reads_no_line_after_the_uv_line`, `test_cmd_never_reads_itself_again_after_uv`).
+- The installed template (`:installed`, reached when the walk-up hits the drive root):
+  `%LOCALAPPDATA%\pytemplate\template\`, else `%USERPROFILE%\AppData\Local\...`; with neither
+  variable set it goes straight to `:no_root` (never a path below the current drive root).
 - cmd re-parses `%*`: `% ! " ^` and unquoted `& | < >` inside arguments do not survive. Every
   caller that starts a `.cmd` through CreateProcess/`list2cmdline` inherits this (xonsh on
   Windows, Python `subprocess`, VS Code tasks): the BatBadBut class. Never design CLI syntax
@@ -371,8 +431,9 @@ header rules (with detector tests proving each rule fires).
   $backend` with `$backend` unset gave the runner an empty backend); an empty string passes, and
   so does a `List[string]`'s null item, as an empty string (PowerShell 7.3+ native passing:
   `test_ps1_drops_null_arguments_like_a_native_call`).
-- A `.ps1` runs inside the caller's session: never assign `$env:PATH`. The two `PYTEMPLATE_*`
-  variables and the removed `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` (the
+- A `.ps1` runs inside the caller's session: never assign `$env:PATH`. The three `PYTEMPLATE_*`
+  variables (`PYTEMPLATE_GLOBAL` set for the installed template, removed for a project's
+  runner) and the removed `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` (the
   `$names` list) are restored in `finally`; a
   variable that did not exist before is removed with
   `Remove-Item Env:NAME`, never `[Environment]::SetEnvironmentVariable($n, $null)`: PowerShell
@@ -445,6 +506,10 @@ header rules (with detector tests proving each rule fires).
   `SymbolicLink`) is followed to the file its `Target` names first, at most 40 links; off
   Windows a relative target is joined to the PHYSICAL folder of its link (`/bin/sh`'s
   `cd -P`/`pwd -P`: .NET folds `..` as text) (`test_ps1_reached_through_a_symlink_finds_its_project`).
+  `Get-Entry` takes `.pytemplate/pyt.py`, else `.pytemplate/deploy.py`; `Test-Foreign` is the
+  ownership rule. No project: the installed template (`$data`: `$env:LOCALAPPDATA` or
+  `USERPROFILE\AppData\Local` on Windows, an absolute `$env:XDG_DATA_HOME` or `$env:HOME` (never
+  the session's `$HOME`, which does not follow a changed `$env:HOME`) elsewhere), in global mode.
 - Execution policy `Restricted`/`AllSigned`, or Mark-of-the-Web on a copy from a downloaded
   zip: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, `Unblock-File .\pyt.ps1`, or
   use `pyt.cmd`. `shells.doctor` reports the policy of 5.1 and 7 separately (`PS_EDITIONS`):
@@ -527,8 +592,9 @@ header rules (with detector tests proving each rule fires).
 - `./pyt __probe EXIT STDIN(0|1) ARGS...` (`shells.probe`; `cli.main` routes it before
   `_parse_globals`: no config load, no render, not in help). Prints ONE line `PTPROBE{json}`
   to stdout (ASCII JSON with keys `argv`, `cwd`, `caller_cwd_raw`, `caller_cwd`, `launcher`,
-  `stdin_tty`, `stdin`, `root`, `python` (the runner's interpreter version)) and exits with
-  EXIT. Launcher tests use it: keep the keys.
+  `stdin_tty`, `stdin`, `root`, `python` (the runner's interpreter version), `global` (the
+  `PYTEMPLATE_GLOBAL` the launcher handed over: `1` for the installed template, else empty)) and
+  exits with EXIT. Launcher tests use it: keep the keys.
   The stdin line is read as BYTES and decoded UTF-8 with surrogateescape whatever the locale:
   a raw non-UTF-8 byte shows up as `\udcXX`, PowerShell's re-encoded text as U+FFFD.
 - `./pyt selftest --shells [NAME,...] [--list] [--json] [--keep] [--project DIR]
@@ -620,7 +686,7 @@ header rules (with detector tests proving each rule fires).
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
-| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `PytError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `_installed_import_names`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./pyt __init`; with rollback), `copy_template`, `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
+| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `PytError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `_installed_import_names`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./pyt __init`; with rollback), `copy_template` (`_tracked_template`: git's tracked files, or in the installed template `_installed_files`, `INSTALL_RECORD`), `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
 | `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`; `copy_writable`, `make_writable`, `remove_tree` for every scratch copy of the app), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`, `COMPILER_MISSING`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
@@ -636,6 +702,7 @@ header rules (with detector tests proving each rule fires).
 | `nvimtest.py` | `selftest --nvim` (section 13.1). |
 | `e2e.py` | `selftest --e2e` (section 13.1). |
 | `hooks.py` | `./pyt hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (apply/setup), `doctor`: the native git pre-commit hook (section 5.6); `find_repo` (`NotInGit`), `classify` (`runs_checks`), `hook_state`/`own_local` (a copy chained after another project's hook), `hook_script`/`launcher_of`, `install`/`uninstall` (apply removes the hook when `hooks.pre_commit = false`), `chain_hint`/`chain_advice`, `hooks_path_runner`, `checks`. |
+| `cmd_install.py` | `./pyt install` / `uninstall` and doctor's "pyt install" step (section 5.9): where things go (`data_home`, `snapshot_dir`, `bin_dir`), `MARKER`/`is_launcher`/`not_ours`, the record (`read_record`, `source_state`, `describe`, `age`), PATH (`on_path`, `path_state`, `path_problem`, `first_pyt`, `shadowing`), `make_plan` (every refusal before the first write), `_Swap` + `install` (all or nothing), `remove_leftovers`, `cmd_uninstall`, `doctor`. |
 | `rename.py` | `./pyt rename NEW_NAME [--force]` and the rename step of apply: pure `plan` / `apply_plan` (undoes itself when a write fails) / `rewrite` (tokenizer + `ast` scopes + context rules, `MODULE_KEYS`), `check_new_name` (`locked_names`), `git_changes`, `dirty_tree_message`, `validate_config`, `tidy_before`/`tidy_after` (ruff, `Tidy`), `report`, `cmd_rename` (section 5.7). |
 | `upx.py` | Optional UPX packing: pinned download (`VERSION`, `ASSETS` with SHA-256), `locate`, `find`, `uses`, `preflight` (from `cmd_build`, before any work), `active`, `level_flags`, `env_value`, `excludes`, `candidates`, `pack_file`, `pack_tree`, `MAX_INPUT` (section 10). |
 
@@ -666,7 +733,7 @@ header rules (with detector tests proving each rule fires).
    listed nowhere (help, `editor.json`, the editors' task lists and the shell completion read
    `COMMANDS` only). `init` is no longer a command: unless a `[tasks]` entry took the name, it
    exits 2 with the hint `./pyt new DIR --preset P` (`cli.INIT_REMOVED`; `help init` too).
-4. Commands with `render=False`: `clean`, `render`, `new`, `pyz-merge`, `tasks`,
+4. Commands with `render=False`: `clean`, `render`, `new`, `install`, `uninstall`, `pyz-merge`, `tasks`,
    `shell-setup`, `selftest`, `help`, `hooks` (the hook must not rewrite generated files in
    the middle of a commit), `apply` and `setup` (they render at the end: a refused apply, e.g.
    a hand-edited `app.preset`, writes nothing), `rename` (renders after its checks, never with
@@ -677,7 +744,8 @@ header rules (with detector tests proving each rule fires).
    argparse commands, `render`/`mode`/`__init`/`new` (`cmd_mode._parse`: an unknown option is
    named before argparse runs, which bound the value after it to a positional: `mode --typ
    strict` said only "argument backend: invalid choice: 'strict'"), `lint`, `fmt`,
-   `clean`, `apply`, `setup` (only `--force`), `doctor`, `tasks` (`cmd_dev.only_flags`), `check` and `sync` (extra
+   `clean`, `apply`, `setup` (only `--force`), `doctor`, `tasks`, `install`, `uninstall`
+   (`cmd_dev.only_flags`), `check` and `sync` (extra
    positionals), `shell-setup`, `help`, a `[tasks]` entry without `cmd`. By design
    (`cli.FORWARDS`): `run`/`test` forward the rest, `build` forwards unknown flags to the
    packager of exe, nuitka and flet only (`cmd_build.PASSTHROUGH`; pyz, portable and wheel
@@ -852,6 +920,9 @@ header rules (with detector tests proving each rule fires).
 |---|---|---|
 | `PYTEMPLATE_CALLER_CWD` | launchers, Neovim plugin (`init.caller_cwd`: Neovim's cwd when inside the project, else the root), nu snippet | Caller's cwd; read only through `project.caller_cwd` |
 | `PYTEMPLATE_LAUNCHER` | launchers, Neovim plugin (`nvim`), nu snippet (`nu`) | Which launcher/shell ran (section 4.1) |
+| `PYTEMPLATE_GLOBAL` | launchers: `1` when they found no project and run the installed template; removed for a project's runner | The runner's global mode (section 4.1); `__probe` reports it |
+| `XDG_DATA_HOME`, `HOME`, `LOCALAPPDATA`, `USERPROFILE` | user, OS | Where `./pyt install` puts the installed template and the launchers look for it (`cmd_install.snapshot_dir`, section 4.1) |
+| `UV_TOOL_BIN_DIR`, `XDG_BIN_HOME` | user | Through `uv tool dir --bin`: where `./pyt install` writes the launchers (`cmd_install.bin_dir`) |
 | `UV` | uv | uv's own path; `proc.find_uv` and the launchers use it |
 | `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PYTHON_PREFERENCE` | `envs.env_vars` | Environment selection (section 7). The caller's own `UV_PYTHON` does not reach the runner: the launchers, the Neovim plugin and the nu snippet remove or empty it (section 4.1; the xonsh alias of `shell-setup` cannot, 4.9); a `uv run` by hand or that alias with a pre-3.11 one stops in `pyt.py` (exit 3) |
 | `PYTHONUTF8=1` | `proc.base_env`, portable launchers, pyz `.cmd` wrapper, the Neovim mypy linter, every VS Code launch config (`vscode.DEBUG_ENV`) | mypy/mypyc otherwise read files as cp1252; F5 behaves like `./pyt run` |
@@ -1233,6 +1304,51 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `render --check`, the pre-commit hook) names `./pyt apply`: `./pyt lock` applies only
   the managed block, so after a `[preset.raylib] package` switch it moved no-build-package to
   the new name and kept the old dependency.
+
+### 5.9 Installing `pyt` (`cmd_install.py`)
+
+- `./pyt install` runs only in a clone of the template (the `template-repo` marker) and never
+  in the installed template (`installed_here`: its record, or the folder `snapshot_dir` names):
+  exit 2, naming `./pyt install in a clone of the template` (`FROM_A_CLONE`). It takes nothing
+  from the Config (it runs in the installed template's global mode too).
+- The installed template (`snapshot_dir`, the lookup of section 4.1): the files git tracks
+  (`presets._tracked_template`), with their working-tree content as `new` reads them, minus
+  `.github/workflows/template-*`; the marker, `README.md` and `LICENSE` stay (so `new` from
+  there copies `.pytemplate/README.md` and `LICENSE` as from the clone). Tracked links stay
+  links (`presets._copy_link`), a submodule is copied as a folder. Untracked files and tracked
+  ones deleted from the working tree are listed, not copied. Its record
+  `.pytemplate/installed.json` (`presets.INSTALL_RECORD`, `RECORD`): schema, commit, `dirty`
+  (uncommitted changes in tracked files), source folder, bin folder, launchers, UTC time; it is
+  written only there, and `presets._skipped` keeps it out of every project. In the installed
+  template `copy_template` copies that folder's own files (`presets._installed_files`), never
+  git's: a dotfiles repository around the data folder tracked some of them
+  (`test_install.test_the_installed_template_copies_what_the_clone_copies`).
+- The launchers: `LAUNCHERS` (`pyt`; on Windows also `pyt.cmd` and `pyt.ps1`, section 4.2) into
+  `uv tool dir --bin` (`bin_dir`; a relative answer, from a relative `UV_TOOL_BIN_DIR`, is refused),
+  byte for byte, mode 0755, each checked like doctor checks it (`shells.launcher_problems`) and
+  for its MARKER line. A file there without the MARKER, a symbolic link (`not_ours`), a bin
+  folder inside the clone or the data folder, or one that holds `.pytemplate`, and a data folder
+  that exists without a record are refused before the first write, all of them in one message.
+- All or nothing (`_Swap`, `install`): the new copy is written into `.template-new-*` next to the
+  installed template and the launchers are staged as `.pyt-install-*` in the bin folder; then
+  the old copy moves aside (`.template-old-*`), the new one takes its name and the launchers are
+  replaced one by one (their old bytes noted first). Any failure or Ctrl+C undoes every step
+  (`_Swap.undo`: the launchers' old bytes, the old copy back, the staged and new files deleted;
+  a rename cut short is read back from the folders); what it could not undo is named.
+  `remove_leftovers` deletes what a killed install left (only staged files with the MARKER).
+  Windows renames are retried for a few seconds (a scanner holding a new file).
+- It never edits PATH, an rc file or the registry: `path_problem` says when the bin folder is
+  not on this process's PATH (`uv tool update-shell`) or only on the registry's (a console
+  opened before the change), and `shadowing` names another `pyt` earlier on PATH (`first_pyt`:
+  never the current folder, which shutil.which searches first on Windows).
+- `uninstall` (anywhere; in the installed template it deletes the files it runs from): the
+  launchers with the MARKER in the current bin folder and in the recorded one, the installed
+  template when it holds a record, the leftovers, and `<data home>/pytemplate` when empty; it
+  names what it leaves and why. `--dry-run` of both prints and writes nothing.
+- `doctor(check)` (the last step of `./pyt doctor`, every mode): notes only (`[ok]`/`[--]`,
+  never `[XX]`: pyt works without it): not installed, the installed template and its commit,
+  older than this clone (`age`, in the template repository), launchers missing, foreign or
+  differing from the installed template's, PATH.
 
 ## 6. Configuration and generated files
 
@@ -2891,12 +3007,16 @@ short temp tree and unset `NVIM_APPNAME`.
   sourcing (no `_pt_` name left on any exit path), `UV_PYTHON` and the runner's Python, a
   caller's `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR`, the
   Windows-only sh helpers and a fake `reg.exe` in every POSIX shell, the uv search order with
-  fake uvs for `pyt` and `pyt.ps1`, the install prompt on a pseudo-terminal),
+  fake uvs for `pyt` and `pyt.ps1`, the install prompt on a pseudo-terminal; outside any
+  project the installed template in every shell, found through XDG_DATA_HOME or HOME, never
+  another user's, a stale PYTEMPLATE_GLOBAL never reaching a project, a project's
+  `.pytemplate/deploy.py`),
   `test_launcher_win.py` (static rules on every OS, a PowerShell parser check; the pyt.ps1
   behaviour tests run wherever pwsh exists: injection safety of the Core hand-over, `--%`,
   `-X:v`, typed comma lists and array values, pipeline input and raw stdin, `UV_PYTHON` and
-  the other cleared variables, ConstrainedLanguage, the x bit; cmd and the registry only on
-  Windows),
+  the other cleared variables, ConstrainedLanguage, the x bit, the installed template outside
+  projects and `deploy.py` inside old ones; cmd, the registry and cmd re-reading a pyt.cmd that
+  was deleted or replaced while it ran only on Windows),
   `test_paths.py` (path spellings, WSL detection, colours in a hidden console, dry runs in a
   throwaway copy),
   `test_render_core.py` (`render.apply`/`auto` and `state.json` in a sandbox, the render
@@ -2956,7 +3076,15 @@ short temp tree and unset `NVIM_APPNAME`.
   command lines, `ensure_lock`, exec bits in a throwaway git repository, compiler checks, doctor
   lines and exit code; real uv only offline in `.venv`), `test_hooks.py` (the hook in throwaway
   repositories, git runs it for real; the real ruff/uv command lines against `.venv`),
-  `test_apply.py` (`./pyt apply`/`setup` in throwaway projects with a fake uv that edits
+  `test_install.py` (`./pyt install`/`uninstall` with the runner of a throwaway clone of the
+  template and HOME, XDG_DATA_HOME, LOCALAPPDATA and UV_TOOL_BIN_DIR in tmp_path: what the
+  installed template holds, a second install swapping it whole, every refusal before a write,
+  dry runs, uninstall from the clone, a project and the installed template, leftovers, `new`
+  copying the same files from the installed template (a dotfiles repository around it too),
+  the launcher and the installer agreeing on the folder; the swap in process with a failure or
+  a Ctrl+C injected at every step; the lookup rules, PATH and doctor lines; on Windows the bare
+  `pyt` through cmd, Windows PowerShell and pwsh, and `pyt uninstall` deleting the pyt.cmd cmd
+  runs), `test_apply.py` (`./pyt apply`/`setup` in throwaway projects with a fake uv that edits
   pyproject.toml like `uv add/remove --frozen`: the per-key matrix, `[preset.*]` changes, the
   record (and when it is written: failed steps after the lock, a rename whose lock fails),
   preset detection by every trace, hand-edited name/preset, refusals before any write, the
@@ -3622,6 +3750,10 @@ uv:
   `test_cli_core.py::test_tools_are_pinned_exactly`, `test_basedpyright_runs_with_every_pin`,
   `test_nvim_render.py::test_editor_json_is_data_without_machine_paths`,
   `test_lua_modules_in_headless_neovim`. Goes: never (bump the pins deliberately).
+- **`uv tool dir --bin` prints a relative `UV_TOOL_BIN_DIR` as it is** (LIMITATION): `./pyt
+  install` would have written the launchers below the folder it ran in. Fix: `cmd_install.bin_dir`
+  refuses a relative answer (5.9). Test: `test_install.py::test_bin_dir_needs_an_absolute_folder`.
+  Goes: never.
 - **uv's caches follow `XDG_*`** (LIMITATION): the isolated Neovim tree moves `XDG_CACHE_HOME`
   and `XDG_DATA_HOME`, and uv then started from empty caches. Fix: `nvimtest.nvim_env` keeps
   `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`, `UV_TOOL_DIR` as uv resolved them
@@ -4408,6 +4540,14 @@ cmd.exe and CreateProcess (details: section 4.4):
   `test_cmd_has_no_blocks_and_no_delayed_expansion`,
   `test_cmd_forwards_arguments_only_on_the_uv_line`,
   `test_fixes.py::test_pyz_wrapper_is_ascii_crlf_without_blocks`. Goes: never.
+- **cmd reads a batch file one line at a time, opening it again by name** (LIMITATION): `pyt
+  uninstall` deleted the installed `pyt.cmd` that was running it, and cmd then said "The batch
+  file cannot be found." (after `pyt install` replaced it, cmd would run what the new file holds
+  at the old offset). Fix: the uv line of `pyt.cmd` ends with `& exit /b` (4.4). Test:
+  `test_launcher_win.py::test_cmd_reads_no_line_after_the_uv_line`,
+  `test_cmd_never_reads_itself_again_after_uv` (Windows),
+  `test_install.py::test_the_installed_pyt_runs_from_cmd_powershell_and_pwsh` (Windows). Goes:
+  never.
 - **`%~dp0` is wrong when cmd found the file through PATH from a quoted name** (DEFECT): Up:
   none found. Fix: `pyt.cmd` checks `%~dp0.pytemplate\pyt.py`, else walks up from `%CD%`.
   Test: `test_launcher_win.py::test_cmd_walks_up_from_the_current_folder` (Windows). Goes:
@@ -4580,6 +4720,12 @@ Windows:
   `test_wsl_kernel_needs_no_wsl_distro_name`,
   `test_is_wsl_at_import_follows_the_kernel_and_the_mount_of_the_root`,
   `test_nvim_render.py::test_lua_wsl_environments_follow_the_runner`. Goes: never.
+- **A console keeps the PATH it started with** (LIMITATION): after `uv tool update-shell`, a
+  terminal opened before it still does not find the installed `pyt`. Fix:
+  `cmd_install.path_state` also reads the PATH stored in the registry
+  (`shells.registry_path_dirs`) and then says to open a new terminal (5.9). Test:
+  `test_install.py::test_path_state_reads_the_registry_path_on_windows` (the registry faked).
+  Goes: never.
 - **`wsl -l -q` prints UTF-16** (LIMITATION): Fix: `shells.wsl_distros` decodes it. Test:
   `test_workarounds.py::test_wsl_distros_are_read_as_utf16`. Goes: never.
 
@@ -4663,6 +4809,11 @@ Behaviour:
   arguments cmd.exe would change (6.1); PowerShell drops a bare `--`; xonsh `-c` exits 1 on any failing command
   (the child's real code is in its `CalledProcessError`).
 - `uv build` drops a `.gitignore` into `dist/<n>-<b>-wheel/`.
+- The installed template (`./pyt install`, 5.9) is a copy: it moves only when `./pyt install`
+  runs again in the clone (doctor notes, in the clone, when it is older). On Windows niubash runs
+  the installed `pyt` in-process, and whether it keeps that file open, so that an install run
+  through it cannot replace it, is not verified (the install would then undo itself and say so;
+  `./pyt install` in the clone does not go through it).
 - A Flet app built as a pyz, a wheel or a portable folder with `runtime = "system"` carries no
   Flet client: its first start downloads ~40 MB from GitHub (`FLET_CLIENT_URL`: a mirror), so it
   needs the network once (README troubleshooting). They run on a Python of the user's machine,

@@ -53,6 +53,8 @@ COMMANDS: dict[str, Command] = {
     "render": Command("cmd_mode", "cmd_render", "Regenerate the files derived from pytemplate.toml (.mypy.ini, .ruff.toml, pyrightconfig.json, .vscode/, .lazy.lua, editor.json, ci.yml)", "[--check] [--diff] [--force]", render=False, group="Mode"),
     "rename": Command("rename", "cmd_rename", "Rename the app: src/<pkg>, imports, pytemplate.toml, pyproject.toml, uv.lock", "NEW_NAME [--force]", render=False, group="Mode"),
     "new": Command("cmd_mode", "cmd_new", "Create a new project from this template", "DIR [--preset P] [--name NAME]", render=False, group="Mode"),
+    "install": Command("cmd_install", "cmd_install", "Install the `pyt` command for use in any folder (run it in a clone of the template)", render=False, group="Mode"),
+    "uninstall": Command("cmd_install", "cmd_uninstall", "Remove the `pyt` command and the copy of the template that install made", render=False, group="Mode"),
     # development
     "run": Command("cmd_dev", "cmd_run", "Run the app (mypyc: compile first)", "[BACKEND] [app args...]", group="Development"),
     "check": Command("cmd_dev", "cmd_check", "Run ruff + mypy with the backend's typing profile + mypyc rules", "[BACKEND|all]", group="Development"),

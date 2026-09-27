@@ -2,7 +2,10 @@
 rem ./pyt launcher for cmd.exe and for every Windows program that can only
 rem start PATHEXT files: xonsh, nushell, Python's subprocess, VS Code
 rem "process" tasks. It finds the project root and uv and hands every
-rem argument to .pytemplate\pyt.py, where all the logic lives.
+rem argument to .pytemplate\pyt.py, where all the logic lives. Outside any
+rem project it runs the copy of the template that pyt install made, in its
+rem global mode (PYTEMPLATE_GLOBAL=1).
+rem pytemplate-launcher: pyt install copies this file into uv's tool bin folder and pyt uninstall removes it.
 rem Rules (CLAUDE.md, "Launchers"):
 rem   * ASCII only (cmd reads this file in the OEM code page) and CRLF endings
 rem     (labels and goto misbehave with LF).
@@ -15,6 +18,12 @@ rem   * cmd parses the arguments itself: percent, "!", double quote, caret and
 rem     unquoted ampersand, pipe or angle brackets do not survive. Programs that
 rem     quote argv for CreateProcess (Python, xonsh) cannot protect them either:
 rem     use ./pyt or pyt.ps1 for such values.
+rem   * cmd reads a batch file one line at a time, opening it again by name
+rem     before each line: the uv line ends with "exit /b" (the exit code stays
+rem     uv's), so nothing is read after it. pyt uninstall deletes this file,
+rem     and pyt install replaces it, while it runs. The line after it is for
+rem     arguments with an odd number of double quotes, which swallow the rest
+rem     of the uv line.
 rem   * Ctrl+C: cmd asks "Terminate batch job (Y/N)?" once uv has exited.
 rem   * A UNC current folder is not supported (cmd.exe replaces it).
 rem Exit codes: 2 = no project found, 127 = no uv, anything else = the runner's.
@@ -22,18 +31,39 @@ setlocal EnableExtensions DisableDelayedExpansion
 
 rem --- project root: this file's folder, else walk up from the current one
 rem (the folder of this file is wrong when cmd found it through PATH from a
-rem quoted name).
+rem quoted name). A project made before the launchers were renamed holds
+rem .pytemplate\deploy.py instead (pyt.py first when a folder has both).
+set "PT_GLOBAL="
 set "PT_ROOT=%~dp0"
+set "PT_ENTRY=pyt.py"
 if exist "%PT_ROOT%.pytemplate\pyt.py" goto :find_uv
+set "PT_ENTRY=deploy.py"
+if exist "%PT_ROOT%.pytemplate\deploy.py" goto :find_uv
 for %%I in ("%CD%\x") do set "PT_ROOT=%%~dpI"
 rem A drive root is never the project found this way: any user may create
 rem folders there, so its .pytemplate\pyt.py could be anybody's.
 :walk_up
 for %%I in ("%PT_ROOT%.") do set "PT_PARENT=%%~dpI"
-if /i "%PT_PARENT%"=="%PT_ROOT%" goto :no_root
+if /i "%PT_PARENT%"=="%PT_ROOT%" goto :installed
+set "PT_ENTRY=pyt.py"
 if exist "%PT_ROOT%.pytemplate\pyt.py" goto :find_uv
+set "PT_ENTRY=deploy.py"
+if exist "%PT_ROOT%.pytemplate\deploy.py" goto :find_uv
 set "PT_ROOT=%PT_PARENT%"
 goto :walk_up
+
+:installed
+rem No project: the copy of the template that pyt install made, in its
+rem global mode (pyt new...): LOCALAPPDATA\pytemplate\template.
+set "PT_ENTRY=pyt.py"
+rem Neither variable set: no folder is named (never one below the current
+rem drive root, where any user may create folders).
+if not defined LOCALAPPDATA if not defined USERPROFILE goto :no_root
+set "PT_ROOT=%LOCALAPPDATA%"
+if not defined LOCALAPPDATA set "PT_ROOT=%USERPROFILE%\AppData\Local"
+set "PT_ROOT=%PT_ROOT%\pytemplate\template\"
+if not exist "%PT_ROOT%.pytemplate\pyt.py" goto :no_root
+set "PT_GLOBAL=1"
 
 :find_uv
 set "PT_PARENT="
@@ -46,6 +76,9 @@ if not defined PT_UV goto :no_uv
 
 set "PYTEMPLATE_CALLER_CWD=%CD%"
 set "PYTEMPLATE_LAUNCHER=cmd"
+rem The installed template runs in its global mode; a project's runner never
+rem does (an empty value removes the variable).
+set "PYTEMPLATE_GLOBAL=%PT_GLOBAL%"
 rem The runner runs on the project's Python (.python-version next to it), in
 rem the caller's folder: a UV_PYTHON of the caller must not choose that Python,
 rem a PYTHONHOME or PYTHONPATH must not break it, a UV_WORKING_DIR must not
@@ -55,12 +88,14 @@ set "PYTHONHOME="
 set "PYTHONPATH="
 set "UV_WORKING_DIR="
 rem cmd expands the whole line before running it: the helper variables are
-rem cleared for the runner while uv still gets their values.
-set "PT_ROOT=" & set "PT_UV=" & "%PT_UV%" run --quiet --script "%PT_ROOT%.pytemplate\pyt.py" %*
+rem cleared for the runner while uv still gets their values. The exit /b at
+rem its end keeps uv's exit code and reads no further line (see the header).
+set "PT_ROOT=" & set "PT_UV=" & set "PT_ENTRY=" & set "PT_GLOBAL=" & "%PT_UV%" run --quiet --script "%PT_ROOT%.pytemplate\%PT_ENTRY%" %* & exit /b
 exit /b %ERRORLEVEL%
 
 :no_root
 >&2 echo pyt: no .pytemplate\pyt.py next to this launcher, in the current folder or in any parent folder.
+>&2 echo To run pyt outside a project, install it: .\pyt install in a clone of the template, https://github.com/omardev29/py_template
 exit /b 2
 
 :no_uv

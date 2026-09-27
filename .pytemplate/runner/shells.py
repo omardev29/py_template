@@ -72,6 +72,8 @@ def probe(argv: list[str]) -> int:
         "root": str(ROOT),
         # the interpreter uv started the runner on: python.cpython (.python-version next to it)
         "python": ".".join(str(n) for n in sys.version_info[:3]),
+        # "1" when a launcher found no project and ran the installed template (pyt install)
+        "global": os.environ.get("PYTEMPLATE_GLOBAL", ""),
     }
     print("PTPROBE" + json.dumps(data, ensure_ascii=True), flush=True)
     return code

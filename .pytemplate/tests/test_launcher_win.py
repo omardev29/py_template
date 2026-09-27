@@ -100,6 +100,18 @@ def test_cmd_keeps_the_registry_path_out_of_call_arguments() -> None:
         assert f'set "{name}="' in before, name
 
 
+def test_cmd_reads_no_line_after_the_uv_line() -> None:
+    """pyt uninstall deletes, and pyt install replaces, the pyt.cmd that runs them: cmd reads a
+    batch file one line at a time, opening it again by name, and said "The batch file cannot
+    be found." (or ran what the new file holds at that offset). The uv line ends the batch file
+    itself (exit /b keeps uv's exit code); the line after it only serves arguments with an odd
+    number of double quotes, which swallow the rest of the uv line."""
+    code = _code_lines_cmd()
+    uv_line = next(line for line in code if "%*" in line)
+    assert uv_line.endswith("%* & exit /b"), uv_line
+    assert code[code.index(uv_line) + 1] == "exit /b %ERRORLEVEL%"
+
+
 # --- pyt.ps1: static ------------------------------------------------------------------------
 
 
@@ -224,6 +236,49 @@ def _check(p: dict[str, object], cwd: Path, launcher: str, argv: list[str] | Non
     assert str(p["launcher"]).startswith(launcher), p
 
 
+INSTALL_HINT = "To run pyt outside a project, install it"
+
+
+def _nothing_installed(tmp: Path) -> dict[str, str]:
+    """Where the launchers look for the installed template (pyt install), moved to an empty
+    folder: a real installed pyt of the user never answers a test that expects no project."""
+    return {"XDG_DATA_HOME": str(tmp / "no-data"), "LOCALAPPDATA": str(tmp / "no-data")}
+
+
+def _runner_copy(dest: Path) -> Path:
+    """.pytemplate/pyt.py and the runner (enough for __probe) in `dest`."""
+    (dest / ".pytemplate").mkdir(parents=True)
+    shutil.copyfile(ROOT / ".pytemplate" / "pyt.py", dest / ".pytemplate" / "pyt.py")
+    shutil.copytree(ROOT / ".pytemplate" / "runner", dest / ".pytemplate" / "runner", ignore=shutil.ignore_patterns("__pycache__"))
+    return dest
+
+
+def _outside(tmp: Path, launcher: Path) -> tuple[Path, Path]:
+    """A copy of `launcher` in a bin folder (where pyt install puts it), and a folder outside
+    any project to run it from."""
+    (tmp / "bin").mkdir(exist_ok=True)
+    copy = tmp / "bin" / launcher.name
+    shutil.copyfile(launcher, copy)
+    (tmp / "away").mkdir(exist_ok=True)
+    return copy, tmp / "away"
+
+
+def _uv_dirs() -> dict[str, str]:
+    """uv's cache and Python folders as this environment resolves them: with LOCALAPPDATA or
+    XDG_DATA_HOME moved, uv would start from empty ones (and download CPython)."""
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if not uv:
+        pytest.skip("uv not found")
+    found: dict[str, str] = {}
+    for key, args in (("UV_CACHE_DIR", ["cache", "dir"]), ("UV_PYTHON_INSTALL_DIR", ["python", "dir"])):
+        r = subprocess.run([uv, *args], env=_clean_env(), capture_output=True, text=True, timeout=60, check=False)
+        lines = r.stdout.strip().splitlines()
+        if r.returncode != 0 or not lines:
+            pytest.skip(f"uv {' '.join(args)} failed: {r.stderr.strip()}")
+        found[key] = lines[-1]
+    return found
+
+
 def _minimal_path() -> str:
     root = os.environ.get("SystemRoot", r"C:\Windows")
     return f"{root}\\System32;{root}"
@@ -341,8 +396,70 @@ def test_cmd_walks_up_from_the_current_folder(tmp_path: Path) -> None:
     r = _run([str(copy), "__probe", "0", "0", "w"], SUB)
     assert r.returncode == 0, r.stderr
     _check(_probes(r)[0], SUB, "cmd", ["w"])
-    r = _run([str(copy), "__probe", "0", "0"], tmp_path)
-    assert r.returncode == 2 and "no .pytemplate" in r.stderr, (r.returncode, r.stderr)
+    r = _run([str(copy), "__probe", "0", "0"], tmp_path, _clean_env(**_nothing_installed(tmp_path)))
+    assert r.returncode == 2 and "no .pytemplate" in r.stderr and INSTALL_HINT in r.stderr, (r.returncode, r.stderr)
+
+
+@windows_only
+def test_cmd_never_hands_a_project_the_global_mode() -> None:
+    """A PYTEMPLATE_GLOBAL=1 of the caller (a stale export) never turns a project's runner into
+    the installed template's global mode."""
+    r = _run([str(CMD), "__probe", "0", "0", "g"], ROOT, {**_clean_env(), "PYTEMPLATE_GLOBAL": "1"})
+    assert r.returncode == 0, r.stderr
+    p = _probes(r)[0]
+    _check(p, ROOT, "cmd", ["g"])
+    assert p["global"] == "", p
+
+
+@windows_only
+def test_cmd_outside_a_project_runs_the_installed_template(tmp_path: Path) -> None:
+    """No project: the installed template (pyt install) in %LOCALAPPDATA%\\pytemplate\\template,
+    else below %USERPROFILE%\\AppData\\Local, in its global mode; with neither variable no folder
+    is named (never one below the current drive root, where any user may create folders)."""
+    installed = _runner_copy(tmp_path / "local" / "pytemplate" / "template")
+    home = tmp_path / "home"
+    by_profile = _runner_copy(home / "AppData" / "Local" / "pytemplate" / "template")
+    launcher, away = _outside(tmp_path, CMD)
+    uv = _uv_dirs()
+    for env, root in (
+        (_clean_env(LOCALAPPDATA=str(tmp_path / "local"), **uv), installed),
+        (_clean_env(LOCALAPPDATA=None, USERPROFILE=str(home), **uv), by_profile),
+    ):
+        r = _run([str(launcher), "__probe", "5", "0", "x"], away, env)
+        assert r.returncode == 5, (r.stdout, r.stderr)
+        p = _probes(r)[0]
+        assert _same(p["root"], root) and p["global"] == "1" and p["launcher"] == "cmd" and p["argv"] == ["x"], p
+        assert _same(p["caller_cwd"], away), p
+    r = _run([str(launcher), "__probe", "5", "0", "x"], away, _clean_env(LOCALAPPDATA=None, USERPROFILE=None))
+    assert r.returncode == 2 and INSTALL_HINT in r.stderr and "PTPROBE" not in r.stdout, (r.stdout, r.stderr)
+
+
+# What the runner does while cmd runs pyt.cmd, in `pyt uninstall` and `pyt install`
+REWRITE_LAUNCHER = """import os, sys
+from pathlib import Path
+target = Path(os.environ["PT_TARGET"])
+if os.environ["PT_CHANGE"] == "deleted":
+    target.unlink()
+else:
+    target.write_bytes(b"@echo WRONG\\r\\n" * 400)
+sys.exit(7)
+"""
+
+
+@windows_only
+@pytest.mark.parametrize("change", ["deleted", "replaced"])
+def test_cmd_never_reads_itself_again_after_uv(change: str, tmp_path: Path) -> None:
+    """The runner deletes (pyt uninstall) or rewrites (pyt install) the pyt.cmd cmd is running:
+    no "The batch file cannot be found.", nothing of the new file runs, and uv's exit code stays."""
+    entry = tmp_path / "local" / "pytemplate" / "template" / ".pytemplate" / "pyt.py"
+    entry.parent.mkdir(parents=True)
+    entry.write_text(REWRITE_LAUNCHER, encoding="utf-8", newline="\n")
+    launcher, away = _outside(tmp_path, CMD)
+    env = _clean_env(LOCALAPPDATA=str(tmp_path / "local"), PT_TARGET=str(launcher), PT_CHANGE=change, **_uv_dirs())
+    r = _run([str(launcher), "x"], away, env)
+    out = r.stdout + r.stderr
+    assert r.returncode == 7 and "cannot be found" not in out and "WRONG" not in out, (r.returncode, out)
+    assert launcher.exists() == (change == "replaced")
 
 
 @windows_only
@@ -819,8 +936,51 @@ def test_ps1_walks_up_and_passes_file_arguments(tmp_path: Path) -> None:
     r = _run([*base, "5", "0", "a b", "", "tr\\"], SUB)
     assert r.returncode == 5, r.stderr
     _check(_probes(r)[0], SUB, "ps1:", ["a b", "", "tr\\"])
-    r = _run([*base, "0", "0"], tmp_path)
-    assert r.returncode == 2 and "no .pytemplate" in r.stderr, (r.returncode, r.stderr)
+    r = _run([*base, "0", "0"], tmp_path, _clean_env(**_nothing_installed(tmp_path)))
+    assert r.returncode == 2 and "no .pytemplate" in r.stderr and INSTALL_HINT in r.stderr, (r.returncode, r.stderr)
+
+
+@pytest.mark.parametrize("name", PS_NAMES)
+def test_ps1_outside_a_project_runs_the_installed_template(name: str, tmp_path: Path) -> None:
+    """No project: the installed template (pyt install; %LOCALAPPDATA% on Windows, an absolute
+    XDG_DATA_HOME elsewhere) runs in its global mode. Inside a project made before the launchers
+    were renamed, its .pytemplate/deploy.py runs, never in global mode. The caller's own
+    PYTEMPLATE_GLOBAL (a stale 1) comes back after each run, or stays absent."""
+    exe = _ps_exe(name)
+    data = tmp_path / "data"
+    installed = _runner_copy(data / "pytemplate" / "template")
+    old = _runner_copy(tmp_path / "old")
+    (old / ".pytemplate" / "pyt.py").rename(old / ".pytemplate" / "deploy.py")
+    (old / "src").mkdir()
+    launcher, away = _outside(tmp_path, PS1)
+    ps1 = _ps_literal(str(launcher))
+    body = "\n".join([
+        "$env:PYTEMPLATE_GLOBAL = '1'",  # a stale export: never for a project's runner
+        f"& {ps1} __probe 5 0 x",
+        "'RC=' + $LASTEXITCODE",
+        f"Set-Location -LiteralPath {_ps_literal(str(old / 'src'))}",
+        f"& {ps1} __probe 6 0 y",
+        "'RC=' + $LASTEXITCODE",
+        "'AFTER=' + $env:PYTEMPLATE_GLOBAL",
+        "Remove-Item Env:PYTEMPLATE_GLOBAL",
+        f"Set-Location -LiteralPath {_ps_literal(str(away))}",
+        f"& {ps1} __probe 7 0 z",
+        "'EXISTS=' + (Test-Path Env:PYTEMPLATE_GLOBAL)",
+        "exit 0",
+    ])  # fmt: skip
+    r = _session(exe, body, away, _clean_env(XDG_DATA_HOME=str(data), LOCALAPPDATA=str(data), **_uv_dirs()))
+    probes = _probes(r)
+    assert [p["argv"] for p in probes] == [["x"], ["y"], ["z"]], r.stdout + r.stderr
+    assert _same(probes[0]["root"], installed) and probes[0]["global"] == "1", probes[0]
+    assert _same(probes[0]["caller_cwd"], away) and str(probes[0]["launcher"]).startswith("ps1:"), probes[0]
+    assert _same(probes[1]["root"], old) and probes[1]["global"] == "", probes[1]
+    assert _same(probes[2]["root"], installed) and probes[2]["global"] == "1", probes[2]
+    lines = r.stdout.splitlines()
+    assert [ln for ln in lines if ln.startswith("RC=")] == ["RC=5", "RC=6"], r.stdout
+    assert "AFTER=1" in lines and "EXISTS=False" in lines, r.stdout
+    empty = tmp_path / "empty"
+    r = _session(exe, f"& {ps1} __probe 5 0 x\nexit $LASTEXITCODE", away, _clean_env(**_nothing_installed(empty)))
+    assert r.returncode == 2 and INSTALL_HINT in r.stderr and "PTPROBE" not in r.stdout, (r.stdout, r.stderr)
 
 
 @windows_only

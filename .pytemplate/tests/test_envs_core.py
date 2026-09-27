@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_apply, cmd_env, cmd_nvim, config, envs, hooks, project, proc, render, shells  # noqa: E402
+from runner import cmd_apply, cmd_env, cmd_install, cmd_nvim, config, envs, hooks, project, proc, render, shells  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, venv_python  # noqa: E402
 from runner.ui import PytError  # noqa: E402
@@ -1265,6 +1265,7 @@ class Doctor:
         monkeypatch.setattr(shells, "doctor", lambda check: self.reached.append("shells"))
         monkeypatch.setattr(hooks, "doctor", lambda cfg, check: self.reached.append("hooks"))
         monkeypatch.setattr(cmd_nvim, "doctor", lambda check: self.reached.append("nvim"))
+        monkeypatch.setattr(cmd_install, "doctor", lambda check: self.reached.append("install"))
 
     def _info(self, python: str | Path) -> dict[str, object]:
         key = "pypy" if Path(python) == self.pp.python else "cpython"
@@ -1298,7 +1299,7 @@ def doctor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Doctor:
 
 def test_doctor_all_good(doctor: Doctor, capsys: pytest.CaptureFixture[str]) -> None:
     assert cmd_env.cmd_doctor(make(PYPY), []) == 0
-    assert doctor.problems() == [] and doctor.reached == ["apply", "shells", "hooks", "nvim"]
+    assert doctor.problems() == [] and doctor.reached == ["apply", "shells", "hooks", "nvim", "install"]
     assert "all good" in capsys.readouterr().err
     assert doctor.line("uv: uv 0.12.19")[0] is True
     assert doctor.compiler_platforms == ["linux-x86_64"]  # the .venv's platform picks the MSVC tools
@@ -1328,7 +1329,7 @@ def test_doctor_reports_a_broken_interpreter(doctor: Doctor, capsys: pytest.Capt
     env = doctor.cp if broken == "cpython" else doctor.pp
     assert [line[1] for line in doctor.problems()] == [f"environment {project.rel(env.dir)} is broken (its Python does not start)"]
     assert "./pyt setup" in doctor.problems()[0][2] and "&&" not in doctor.problems()[0][2]  # PowerShell 5.1 has no &&
-    assert doctor.reached == ["apply", "shells", "hooks", "nvim"]
+    assert doctor.reached == ["apply", "shells", "hooks", "nvim", "install"]
     assert "error: 1 problem(s)" in capsys.readouterr().err
 
 
@@ -1369,7 +1370,7 @@ def test_doctor_lock_line_says_what_uv_said(doctor: Doctor) -> None:
     doctor.lock = PytError("uv 0.8.17 is too old: this project needs uv 0.10.12 or newer", 3)
     assert cmd_env.cmd_doctor(make(), []) == 1  # reported, not a crash
     assert "too old" in doctor.line("uv lock --check did not run")[2]
-    assert doctor.reached[-3:] == ["shells", "hooks", "nvim"]
+    assert doctor.reached[-4:] == ["shells", "hooks", "nvim", "install"]
 
 
 def test_doctor_passes_the_venv_platform_to_the_compiler_check(doctor: Doctor) -> None:

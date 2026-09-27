@@ -1004,12 +1004,17 @@ SKIP_AT_ROOT = frozenset({"build", ".claude", "README.md", "LICENSE"})
 # runner). A project copies them on like any tracked file when it runs `new` itself.
 TEMPLATE_DOCS = {"README.md": ".pytemplate/README.md", "LICENSE": ".pytemplate/LICENSE"}
 TEMPLATE_URL = "https://github.com/omardev29/py_template"
+# The record `pyt install` writes into the copy of the template it installs (cmd_install): it
+# marks that copy, whose files are the template's tracked ones, and never reaches a project.
+INSTALL_RECORD = ".pytemplate/installed.json"
 
 
 def _skipped(rel_path: str) -> bool:
     """Whether `new` leaves this path (relative to ROOT, '/'-separated) out of the copy."""
     parts = rel_path.split("/")
     if any(p in SKIP_ANYWHERE or p.startswith(".venv") for p in parts) or parts[0] in SKIP_AT_ROOT:
+        return True
+    if rel_path == INSTALL_RECORD:
         return True
     # CI of the template repository itself (template-*.yml), not of the new project
     return len(parts) >= 3 and parts[:2] == [".github", "workflows"] and parts[2].startswith("template-")
@@ -1074,9 +1079,32 @@ def _git_files(*args: str) -> list[str] | None:
     return [_git_path(line) for line in r.stdout.split("\n") if line]
 
 
+def _installed_files() -> list[str]:
+    """Every file and link of the copy of the template that `pyt install` made (its files are
+    the template's tracked ones), whatever a git repository around the user data folder (a
+    dotfiles repository in HOME) tracks there; a link to a folder counts as one entry, as git
+    tracks it."""
+    out: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        here = Path(dirpath).relative_to(ROOT).as_posix()
+        prefix = "" if here == "." else here + "/"
+        keep: list[str] = []
+        for d in dirnames:
+            if os.path.islink(os.path.join(dirpath, d)):
+                out.append(prefix + d)
+            elif not _skipped(prefix + d):
+                keep.append(d)
+        dirnames[:] = keep
+        out += [prefix + f for f in filenames]
+    return sorted(out)
+
+
 def _tracked_template() -> tuple[list[str] | None, str]:
     """The files copy_template copies: git's tracked files, or None for every file (ignored ones
-    included), with how it picks them (the real run and the dry run of `new` say it alike)."""
+    included), with how it picks them (the real run and the dry run of `new` say it alike). In
+    the installed template (pyt install) its own files, never git's."""
+    if (ROOT / INSTALL_RECORD).is_file():
+        return _installed_files(), "the files of the installed template"
     tracked = _git_files("--cached")
     if tracked is not None and ".pytemplate/pyt.py" in tracked:
         return tracked, "the files git tracks"
@@ -1124,16 +1152,18 @@ def copy_template(dest: Path) -> None:
             shutil.copy2(src, dest / rel_path)
         else:  # the working tree is what is copied: a tracked file deleted there stays out
             deleted.append(rel_path)
-    untracked = [p for p in _git_files("--others", "--exclude-standard") or [] if not _skipped(p)]
+    installed = (ROOT / INSTALL_RECORD).is_file()  # no git there (_tracked_template)
+    untracked = [] if installed else [p for p in _git_files("--others", "--exclude-standard") or [] if not _skipped(p)]
     for what, paths in (("deleted in the working tree", deleted), ("not tracked by git", untracked)):
         if paths:
             more = f" and {len(paths) - 5} more" if len(paths) > 5 else ""
             ui.info(f"  not copied ({what}): {', '.join(paths[:5])}{more}")
 
 
-def _copy_link(src: Path, target: Path, rel_path: str) -> None:
+def _copy_link(src: Path, target: Path, rel_path: str, command: str = "new") -> None:
     """A symbolic link copied as the link (its target text). Where no link can be made (Windows
-    without the symlink privilege) what it points to is copied instead, with a warning."""
+    without the symlink privilege) what it points to is copied instead, with a warning naming
+    `command` (`new`, or `install` for the installed template)."""
     try:
         target.symlink_to(os.readlink(src), target_is_directory=src.is_dir())
         return
@@ -1144,9 +1174,9 @@ def _copy_link(src: Path, target: Path, rel_path: str) -> None:
     elif src.exists():
         shutil.copy2(src, target)
     else:
-        ui.warn(f"new: could not copy the link {rel_path} ({reason}); it points nowhere: left out")
+        ui.warn(f"{command}: could not copy the link {rel_path} ({reason}); it points nowhere: left out")
         return
-    ui.warn(f"new: could not copy the link {rel_path} ({reason}): copied what it points to")
+    ui.warn(f"{command}: could not copy the link {rel_path} ({reason}): copied what it points to")
 
 
 def _outermost_missing(path: Path) -> Path | None:
