@@ -151,7 +151,13 @@ def _precheck_py311(cfg: Config) -> None:
     else:
         envs.sync(tool)  # a stale uv.lock or a failed install fails HERE, with uv's own message
     run = ["run", "--locked", "--no-sync"]
-    dirs = code_dirs()
+    # Only the folders that hold Python files, as .mypy.ini's `files` (render._holds_python):
+    # tests/ left with only __pycache__ (the tests removed with `git rm`) stopped mypy with "There
+    # are no .py[i] files in directory 'tests'", while ./deploy check passed
+    dirs = [d for d in code_dirs() if render._holds_python(ROOT / d)]
+    if not dirs:  # ruff without a path would check the whole project
+        ui.ok(f"no Python code in src/ or tests/: nothing to check for Python {version}")
+        return
     # 1) syntax: ruff reports syntax that does not exist in the target version as an error
     r = envs.uv(
         tool,

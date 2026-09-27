@@ -212,6 +212,44 @@ def test_precheck_reports_only_the_errors_new_at_311(monkeypatch: pytest.MonkeyP
     assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
 
 
+def test_precheck_checks_only_the_code_folders_that_hold_python(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """tests/ left with only __pycache__ (the tests removed with `git rm`): mypy stopped with "There
+    are no .py[i] files in directory 'tests'" and PyPy could not be enabled, while ./deploy check
+    passed (.mypy.ini's `files` leaves such a folder out, render._holds_python)."""
+    src, tests = tmp_path / "src", tmp_path / "tests"
+    (src / "app").mkdir(parents=True)
+    (src / "app" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tests / "__pycache__").mkdir(parents=True)
+    (tests / "__pycache__" / "test_a.cpython-314.pyc").write_bytes(b"")
+    monkeypatch.setattr(cmd_mode, "code_dirs", lambda: [str(src), str(tests)])
+    tools = FakeTools().install(monkeypatch)
+    cmd_mode._precheck_py311(make({}))
+    runs = [c for c in tools.calls if c[0] != "sync"]
+    assert len(runs) == 3 and all(c[-1] == str(src) and str(tests) not in c for c in runs), runs
+    # no Python code at all: nothing to check (ruff without a path would check the whole project)
+    shutil.rmtree(src)
+    tools = FakeTools().install(monkeypatch)
+    cmd_mode._precheck_py311(make({}))
+    assert [c for c in tools.calls if c[0] != "sync"] == []
+    assert "no Python code in src/ or tests/: nothing to check for Python 3.11" in capsys.readouterr().err
+
+
+@needs_venv
+def test_precheck_real_mypy_with_a_test_folder_without_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    src, tests = tmp_path / "src", tmp_path / "tests"
+    src.mkdir()
+    (src / "a.py").write_text("x: int = 1\n", encoding="utf-8")
+    (tests / "__pycache__").mkdir(parents=True)
+    monkeypatch.setattr(cmd_mode, "code_dirs", lambda: [str(src), str(tests)])
+    monkeypatch.setattr(proc, "DRY_RUN", True)  # uv run --no-sync: .venv is never touched
+    cmd_mode._precheck_py311(make({}))
+    assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
+
+
 NEW_APIS = (
     "import itertools\n"
     "from typing import override\n\n\n"

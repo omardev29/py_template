@@ -1759,7 +1759,10 @@ Formats:
   ruff"), then the mypy errors that appear only as that version and not as `python.cpython`
   (`PRECHECK_MYPY_FLAGS`: `--config-file=` so the project's `.mypy.ini` is never read,
   where the default `off` profile sets `ignore_errors`, and `--check-untyped-defs`); a mypy
-  abort (exit 2) is a `DeployError` with mypy's output, never a silent pass.
+  abort (exit 2) is a `DeployError` with mypy's output, never a silent pass. Both tools get the
+  code folders that hold Python files (`render._holds_python`, as `.mypy.ini`'s `files`: a
+  tests/ left with only `__pycache__` stopped mypy with "There are no .py[i] files"); with none,
+  there is nothing to check.
 
 ## 10. Build methods (`cmd_build.py`, `methods/*`)
 
@@ -4450,7 +4453,8 @@ Code coupling (rename together):
   `config._build`, `config._decode`, `config._string_end` (with `config._ScanError`, for
   `_toml_strings`), `presets._norm_name` and, lazily, `cmd_env._is_link`; `cmd_apply` calls the
   private `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311`,
-  `rename._plan_pyproject`, `render._holds_python` and `render._read_state`; `rename` and
+  `rename._plan_pyproject`, `render._holds_python` and `render._read_state`, and
+  `cmd_mode._precheck_py311` that same `render._holds_python`; `rename` and
   `cmd_env` import `cmd_apply` lazily (it imports both at module level).
 - Which path a `compile.modules` entry names is decided once, by `config.import_path`
   (`config.compiled_paths`): `mypyc.compiled_sources`, the pyright strict list,
