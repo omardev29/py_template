@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import sysconfig
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -489,7 +490,30 @@ def _tools(check: Check) -> None:
     check(True, f"runner: Python {sys.version.split()[0]} ({sys.executable})")
 
 
-def _machine(check: Check) -> None:
+def _python_cpython(cfg: Config, check: Check) -> tuple[bool, Path | None]:
+    """The line about python.cpython, the uv-managed CPython the project's commands run on (in
+    global mode: the one of new projects, which `new` locks with). Returns whether uv has it or
+    can install it, and its interpreter when installed. On a platform uv has no CPython for
+    (Android/Termux) it is the one problem that explains every other: ./pyt runs help, doctor,
+    install and uninstall only there."""
+    version = cfg.python.cpython
+    label = f"CPython {version} (python.cpython{' of new projects' if project.GLOBAL else ''})"
+    try:
+        found = envs.find_cpython(version)
+        if found is not None:
+            check(True, f"{label}: {found}")
+            return True, found
+        if envs.cpython_downloads(version) is False:
+            check(False, f"{label}: uv cannot install it here", envs.no_download_problem(version))
+            return False, None
+    except PytError as e:  # uv too old (the uv line says so) or it does not start
+        check(None, f"{label}: not checked ({e})")
+        return True, None
+    check(None, f"{label} is not installed yet: uv installs it for the first command that needs it", f"Or now: uv python install {version}")
+    return True, None
+
+
+def _machine(check: Check, python: Path | None = None) -> None:
     """doctor outside a project: git, the C compiler mypyc would use, the launcher of this run and
     the shell. What is missing is a note: uv is the one requirement of every project, and a
     project's own doctor says what that project needs."""
@@ -499,9 +523,16 @@ def _machine(check: Check) -> None:
         check(True, f"git: {version or 'found'} ({git})")
     else:
         check(None, "git not found: `new` makes no repository, and a project gets no pre-commit hook", "Install git and put it on PATH")
-    # The runner runs on the installed template's python.cpython: what a new project's .venv holds
-    platform = sysconfig.get_platform()
-    found, where = _c_compiler(platform, cc=str(sysconfig.get_config_var("CC") or ""))
+    # What a new project's .venv holds: python.cpython (`python`, when uv has it installed), else
+    # the Python this runner runs on (any 3.11+ outside a project)
+    platform, cc = sysconfig.get_platform(), str(sysconfig.get_config_var("CC") or "")
+    if python is not None:
+        try:
+            info = envs.interpreter_info(python)
+            platform, cc = str(info.get("platform", platform)), str(info.get("cc") or "")
+        except (PytError, OSError, ValueError):  # ValueError: json.JSONDecodeError
+            pass
+    found, where = _c_compiler(platform, cc=cc)
     check(True if found else None, f"C compiler for mypyc: {where}", "" if found else mypyc.has_compiler_hint(platform))
     if IS_WINDOWS:
         long_paths = _long_paths()
@@ -513,9 +544,11 @@ def _machine(check: Check) -> None:
     shells.doctor(check, in_project=False)
 
 
-def _project(cfg: Config, check: Check) -> None:
+def _project(cfg: Config, check: Check, python_ok: bool = True) -> None:
     """doctor in a project: its backends and environments, the generated files, pyproject.toml,
-    uv.lock, the changes apply has not applied yet, the launchers and the git hook."""
+    uv.lock, the changes apply has not applied yet, the launchers and the git hook. Without
+    python.cpython (`python_ok` False: uv cannot install it here) the environments and uv.lock
+    are not checked: they need it, and its own line says why it is missing."""
 
     def env_info(env: envs.PyEnv) -> dict[str, object] | None:
         # A python that exists but cannot start (Windows: its base Python was uninstalled and the
@@ -532,6 +565,15 @@ def _project(cfg: Config, check: Check) -> None:
             return None
 
     ui.step(f"backends (active: {cfg.backend.active}; supported: {', '.join(cfg.backend.supported)})")
+    if not python_ok:
+        check(None, "environments not checked: they are made with python.cpython (above)")
+    else:
+        _environments(cfg, check, env_info)
+    _project_files(cfg, check, python_ok)
+
+
+def _environments(cfg: Config, check: Check, env_info: Callable[[envs.PyEnv], dict[str, object] | None]) -> None:
+    """doctor's backends step: each environment and its interpreter, the C compiler of mypyc."""
     cp = envs.cpython_env(cfg)
     platform = ""  # the .venv Python's sysconfig platform: which MSVC tools mypyc needs
     cc = ""  # and its sysconfig CC: the compiler setuptools runs when $CC is not set
@@ -560,6 +602,10 @@ def _project(cfg: Config, check: Check) -> None:
             "Avoids MSVC errors when the project is in a very deep path (>260 characters)",
         )
 
+
+def _project_files(cfg: Config, check: Check, python_ok: bool) -> None:
+    """doctor's project step: generated files, pyproject.toml, uv.lock, unapplied changes,
+    launchers and the git hook."""
     ui.step("project")
     changed, edited = render.apply(cfg, check=True)
     if changed or not edited:  # each hand-edited file gets its own line below: count every problem once
@@ -575,11 +621,14 @@ def _project(cfg: Config, check: Check) -> None:
     from . import cmd_apply  # lazy: cmd_apply imports this module
 
     cmd_apply.doctor(cfg, check)  # app.name, app.preset, [preset.*], hooks.pre_commit edited but not applied
-    try:
-        r = envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, capture=True, echo=False)
-        check(r.returncode == 0, "uv.lock up to date", "\n".join(filter(None, [envs.uv_error(r.stderr or r.stdout), "./pyt lock"])))
-    except PytError as e:  # uv too old to create .venv, or it does not start
-        check(False, "uv.lock up to date: uv lock --check did not run", str(e))
+    if not python_ok:  # uv lock needs the interpreter of the project
+        check(None, "uv.lock not checked: uv lock --check needs python.cpython (above)")
+    else:
+        try:
+            r = envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, capture=True, echo=False)
+            check(r.returncode == 0, "uv.lock up to date", "\n".join(filter(None, [envs.uv_error(r.stderr or r.stdout), "./pyt lock"])))
+        except PytError as e:  # uv too old to create .venv, or it does not start
+            check(False, "uv.lock up to date: uv lock --check did not run", str(e))
 
     shells.doctor(check)  # launchers and shells
     hooks.doctor(cfg, check)  # git pre-commit hook
@@ -598,10 +647,11 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
         ui.check_line(passed, label, hint)
 
     _tools(check)
+    python_ok, python = _python_cpython(cfg, check)
     if project.GLOBAL:
-        _machine(check)  # git, the C compiler of mypyc, the launcher of this run and the shell
+        _machine(check, python)  # git, the C compiler of mypyc, the launcher of this run and the shell
     else:
-        _project(cfg, check)  # backends, generated files, pyproject.toml, uv.lock, launchers, git hook
+        _project(cfg, check, python_ok)  # backends, generated files, pyproject.toml, uv.lock, launchers, git hook
     cmd_nvim.doctor(check)  # Neovim/LazyVim summary (details: ./pyt nvim doctor)
     cmd_install.doctor(check)  # the `pyt` command of pyt install (notes only)
     ui.info("")

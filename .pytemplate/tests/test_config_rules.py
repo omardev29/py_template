@@ -285,7 +285,7 @@ def test_backend_active() -> None:
     assert "add it to backend.supported, or set backend.active to one of them, in pytemplate.toml" in str(err)
 
 
-@pytest.mark.parametrize("version", ["3.14", "3.9", "3.100", "4.0"])
+@pytest.mark.parametrize("version", ["3.14", "3.11", "3.100", "4.0"])
 def test_python_cpython_valid(version: str) -> None:
     assert make({"python": {"cpython": version}}).python.cpython == version
 
@@ -565,7 +565,7 @@ def test_min_python_is_the_oldest_interpreter() -> None:
     assert make({}).min_python == "3.14"
     assert make({"backend": {"supported": ["cpython", "pypy"]}}).min_python == "3.11"
     assert make({"backend": {"active": "pypy", "supported": ["pypy"]}}).min_python == "3.11"  # tools run on CPython
-    assert make({"python": {"cpython": "3.9"}}).min_python == "3.9"
+    assert make({"python": {"cpython": "3.11"}}).min_python == "3.11"
     # Numbers, not strings: "3.100" < "3.11" as text
     assert make({"python": {"cpython": "3.100"}, "backend": {"supported": ["cpython", "pypy"]}}).min_python == "3.11"
     pypy312 = {"python": {"cpython": "3.11", "pypy": "pypy@3.12.1"}, "backend": {"supported": ["cpython", "pypy"]}}
@@ -573,14 +573,22 @@ def test_min_python_is_the_oldest_interpreter() -> None:
 
 
 def test_older_cpython_than_pypy_keeps_both_environments() -> None:
-    # min_python took PyPy's 3.11 and requires-python excluded the CPython 3.10 environment
-    cfg = make({"python": {"cpython": "3.10"}, "backend": {"supported": ["cpython", "pypy"]}})
-    assert (cfg.min_python, cfg.pypy_minor) == ("3.10", "3.11")
+    # min_python took PyPy's minor and requires-python excluded the older CPython environment
+    cfg = make({"python": {"cpython": "3.11", "pypy": "pypy@3.12.1"}, "backend": {"supported": ["cpython", "pypy"]}})
+    assert (cfg.min_python, cfg.pypy_minor) == ("3.11", "3.12")
     block = render.managed_block(cfg)
-    assert "implementation_name == 'cpython' and python_full_version >= '3.10' and python_full_version < '3.11'" in block
-    assert "implementation_name == 'pypy' and python_full_version >= '3.11' and python_full_version < '3.12'" in block
-    text = '[project]\nname = "x"\nrequires-python = ">=3.11"\n\n[tool.uv]\n'
-    assert 'requires-python = ">=3.10"' in render.pyproject_expected(cfg, text)
+    assert "implementation_name == 'cpython' and python_full_version >= '3.11' and python_full_version < '3.12'" in block
+    assert "implementation_name == 'pypy' and python_full_version >= '3.12' and python_full_version < '3.13'" in block
+    text = '[project]\nname = "x"\nrequires-python = ">=3.12"\n\n[tool.uv]\n'
+    assert 'requires-python = ">=3.11"' in render.pyproject_expected(cfg, text)
+
+
+@pytest.mark.parametrize("version", ["3.10", "3.9", "2.7", "3.0"])
+def test_python_cpython_older_than_3_11_is_refused(version: str) -> None:
+    """The project's commands run on python.cpython (cli._restart) and the runner needs 3.11:
+    an older one never started even `help` (the launchers ran the runner on it), and is now one
+    clear error."""
+    fails({"python": {"cpython": version}}, "is too old: ./pyt and its tools need CPython 3.11 or newer")
 
 
 # --- toml_value -------------------------------------------------------------------------------------

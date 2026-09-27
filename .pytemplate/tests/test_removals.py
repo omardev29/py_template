@@ -327,10 +327,10 @@ def test_new_runs_the_internal_route(tmp_path: Path, monkeypatch: pytest.MonkeyP
     dest = tmp_path / "demo"
     presets.new(dest, "raylib", None)
     (argv,) = calls
-    assert argv[:4] == ["uv", "run", "--quiet", "--script"]
-    assert Path(argv[4]) == dest.resolve() / ".pytemplate" / "pyt.py"
-    assert argv[5:] == ["--no-render", "__init", "raylib", "--name", "demo", "--force"]  # init renders itself
-    command = cli.INTERNAL[argv[6]]
+    assert argv[:7] == ["uv", "run", "--quiet", "--python=>=3.11", "--python-preference", "managed", "--script"]
+    assert Path(argv[7]) == dest.resolve() / ".pytemplate" / "pyt.py"
+    assert argv[8:] == ["--no-render", "__init", "raylib", "--name", "demo", "--force"]  # init renders itself
+    command = cli.INTERNAL[argv[9]]
     assert getattr(importlib.import_module(f"runner.{command.module}"), command.func) is cmd_mode.cmd_init
 
 

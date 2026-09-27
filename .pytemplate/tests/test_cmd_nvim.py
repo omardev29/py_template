@@ -1053,7 +1053,8 @@ def _preset_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stuck: set[str]
 def test_run_preset_uses_a_typing_profile_and_the_locked_plugins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     base, row = _preset_run(tmp_path, monkeypatch, stuck=set())
     assert row.ok, row
-    runs = [s[5:] for s in base.steps if s[:4] == ["uv", "run", "--quiet", "--script"]]
+    launch = [s for s in base.steps if s[:3] == ["uv", "run", "--quiet"] and s[3].startswith("--python=") and s[4] == "--python-preference" and s[6] == "--script"]
+    runs = [s[8:] for s in launch]
     assert [d[0] for d in runs] == ["new", "sync", "mode"], runs
     assert runs[-1] == ["mode", "--typing", nvimtest.SMOKE_TYPING], runs
     assert [a for s in base.steps for a in s if a.startswith("+Lazy! ")] == ["+Lazy! install"]

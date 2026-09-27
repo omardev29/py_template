@@ -552,6 +552,9 @@ def validate(cfg: Config, builtin_commands: set[str] | None = None) -> None:
     # [0-9], never \d: \d also matches other scripts' digits ("\u0663.\u0661\u0664")
     if not re.fullmatch(r"[0-9]+\.[0-9]+", cfg.python.cpython):
         raise PytError("pytemplate.toml: 'python.cpython' must be a minor version, e.g. \"3.14\"")
+    if tuple(int(part) for part in cfg.python.cpython.split(".")) < (3, 11):
+        # The runner runs the project's commands on it (cli._restart), and needs 3.11 (tomllib)
+        raise PytError(f"pytemplate.toml: python.cpython = {cfg.python.cpython!r} is too old: ./pyt and its tools need CPython 3.11 or newer")
     if not re.fullmatch(r"pypy@[0-9]+\.[0-9]+\.[0-9]+", cfg.python.pypy):
         raise PytError(
             f"pytemplate.toml: 'python.pypy' must be an exact version, e.g. \"{PythonConfig.pypy}\": "

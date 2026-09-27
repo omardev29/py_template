@@ -10,8 +10,10 @@ silently recreates the environment with the wrong interpreter.
 from __future__ import annotations
 
 import json
+import platform
 import re
 import subprocess
+import sys
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -327,25 +329,93 @@ def _excludes(spec: str, version: tuple[int, ...]) -> bool:
     return not any(all(_holds(op, number, star, v) for op, number, star in clauses) for v in candidates)
 
 
-def ensure_python(version: str) -> None:
-    """Make sure uv has the managed CPython `version` before .python-version names it (render
-    calls it before it rewrites that file). The launchers start the runner with `uv run
-    --script`, which follows .python-version: a version uv can neither find nor download (a typo
-    such as "3.41", a new minor while offline) stopped every command, `help` included, and
-    nothing could write the file again once pytemplate.toml was fixed. Installs it when missing
-    (the next `uv run` would have), else raises PytError(3) naming python.cpython."""
-    env = PyEnv("cpython", ROOT / f".venv{ENV_SUFFIX}", version, "only-managed")
-    if uv(env, ["python", "find", version], check=False, capture=True, echo=False).returncode == 0:
-        return
-    r = uv(env, ["python", "install", version], check=False, capture=True)
+def _python_env(version: str) -> PyEnv:
+    """The uv calls about the CPython of python.cpython (find, list, install) run like the ones
+    of the project's environment: only uv-managed Pythons."""
+    return PyEnv("cpython", ROOT / f".venv{ENV_SUFFIX}", version, "only-managed")
+
+
+def find_cpython(version: str) -> Path | None:
+    """The uv-managed CPython `version` (python.cpython) itself, never the interpreter of a
+    virtual environment made from it (--system: .venv is not it), or None when uv has none."""
+    r = uv(_python_env(version), ["python", "find", "--system", version], check=False, capture=True, echo=False)
+    lines = (r.stdout or "").strip().splitlines()
+    return Path(lines[-1].strip()) if r.returncode == 0 and lines else None
+
+
+def cpython_downloads(request: str, *, everywhere: bool = False) -> bool | None:
+    """Whether uv can download a CPython for `request` (a version such as "3.14", or "cpython"
+    for any) for this platform, or with `everywhere` for any platform; None when uv cannot say.
+    uv knows its downloads without the network."""
+    args = ["python", "list", request, "--only-downloads", *(["--all-platforms"] if everywhere else [])]
+    r = uv(_python_env(request), args, check=False, capture=True, echo=False)
     if r.returncode != 0:
-        why = uv_error((r.stdout or "") + (r.stderr or "")) or f"exit code {r.returncode}"
+        return None
+    return bool((r.stdout or "").strip())
+
+
+def this_platform() -> str:
+    """This machine as the messages name it: `Android (linux aarch64)` in Termux."""
+    machine = f"{sys.platform} {platform.machine() or 'unknown'}"
+    return f"Android ({machine})" if hasattr(sys, "getandroidapilevel") else machine
+
+
+# What runs where (README, "Where pyt runs"): the launchers start the runner on any CPython 3.11
+# or newer, and only these commands stay there; the others, and `new`'s lock, need python.cpython.
+RUNS_ON_ANY_PYTHON = "help, doctor, install and uninstall"
+
+
+def no_download_problem(version: str) -> str:
+    """Why uv cannot give python.cpython `version` on this machine, when it has no download of it
+    here: a version no platform has (a typo), one this platform lacks, or a platform without any
+    uv-managed CPython (Android/Termux, the BSDs)."""
+    head = f'python.cpython = "{version}": '
+    if cpython_downloads(version, everywhere=True) is False:
+        return (
+            head + f"uv knows no CPython {version} for any platform: fix python.cpython in pytemplate.toml\n"
+            "  (uv python list --only-downloads lists the ones uv can install here)"
+        )
+    if cpython_downloads("cpython"):
+        return (
+            head + f"uv has no CPython {version} for this platform ({this_platform()}).\n"
+            "  The project's commands run on the CPython of python.cpython, which uv installs: set it to a\n"
+            "  version uv has here (uv python list --only-downloads), or work on the project on another\n"
+            f"  machine. Here pyt runs {RUNS_ON_ANY_PYTHON} only"
+        )
+    return (
+        head + f"uv installs no CPython on this platform ({this_platform()}).\n"
+        "  The project's commands run on the CPython of python.cpython, which uv installs: here pyt\n"
+        f"  runs {RUNS_ON_ANY_PYTHON} only, on any Python 3.11 or newer.\n"
+        '  Work on the project on Windows, macOS or Linux (README: "Where pyt runs")'
+    )
+
+
+def ensure_python(version: str) -> Path:
+    """The uv-managed CPython `version` (python.cpython), installed when missing: the project's
+    commands run on it (cli._restart), `new` locks the new project with it, and render asks for
+    it before .python-version names it (uv run by hand and the editors follow that file). When
+    uv cannot give it, PytError(3) says why and what to do: nothing to download for this
+    platform or version (no_download_problem), or an install that failed (offline, downloads
+    turned off). The install is not an echoed command, so a --dry-run gets the Python it needs."""
+    found = find_cpython(version)
+    if found is not None:
+        return found
+    if cpython_downloads(version) is False:
+        raise PytError(no_download_problem(version), 3)
+    ui.info(f"CPython {version} (python.cpython) is not installed: uv installs it (once, about 30 MB)")
+    # --no-bin --no-registry: nothing outside uv's own folder (no python3.X in ~/.local/bin, no Windows
+    # registry entry), as when uv downloads an interpreter itself
+    r = uv(_python_env(version), ["python", "install", "--no-bin", "--no-registry", version], check=False, echo=False)
+    found = find_cpython(version) if r.returncode == 0 else None
+    if found is None:
         raise PytError(
-            f'python.cpython = "{version}": uv can neither find nor install this CPython ({why}).\n'
-            "  .python-version keeps its old value, so ./pyt still starts: fix python.cpython in "
-            "pytemplate.toml (or reconnect, if the version is right and uv must download it)",
+            f'python.cpython = "{version}": uv could not install CPython {version} (uv says why above).\n'
+            "  The project's commands run on it, and uv downloads it once: check the network (a proxy needs\n"
+            f"  HTTPS_PROXY), or install it by hand: uv python install {version}. With UV_PYTHON_DOWNLOADS=never\n"
+            '  (or python-downloads = "never" in a uv.toml) uv installs no Python at all: allow "manual"',
             3,
         )
+    return found
 
 
 def interpreter_info(python: str | Path) -> dict[str, object]:

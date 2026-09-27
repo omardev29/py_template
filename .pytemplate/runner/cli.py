@@ -12,6 +12,7 @@ from __future__ import annotations
 import errno
 import importlib
 import os
+import re
 import signal
 import sys
 import textwrap
@@ -478,9 +479,109 @@ def _signal_name(signum: int) -> str:
         return f"signal {signum}"
 
 
-def _main(argv: list[str]) -> int:
+# The commands that run on any Python 3.11 or newer, the one the launchers started the runner on
+# (project.launcher_python): they read no code of the project's and need no environment of it.
+# Every other command, and a [tasks] entry (install and uninstall may be one), runs on
+# python.cpython (_restart). `new` needs python.cpython too, for the new project's lock: it asks
+# uv for it itself (envs.ensure_python), and its __init step then runs on it.
+RUNS_ON_ANY_PYTHON = frozenset({"help", "doctor", "new", "install", "uninstall", "__init"})
+
+
+def _started_by_uv() -> bool:
+    """Whether this runner runs in the virtual environment `uv run --script` made for it (the
+    launchers' start; VIRTUAL_ENV names it). A runner started on a given Python by hand, a test
+    harness or _restart (runner_env drops VIRTUAL_ENV) runs there: no second restart, ever."""
+    venv = os.environ.get("VIRTUAL_ENV", "")
+    if not venv or sys.prefix == sys.base_prefix:
+        return False
+    return os.path.normcase(os.path.realpath(venv)) == os.path.normcase(os.path.realpath(sys.prefix))
+
+
+def _python_needed(rest: list[str]) -> str | None:
+    """The python.cpython the command line `rest` (after the global options) must run on, or None
+    when this Python will do: help, doctor, new... (RUNS_ON_ANY_PYTHON), a builtin's -h, a name
+    that is no command (dispatch says so), global mode, and a pytemplate.toml that does not read
+    or names no valid python.cpython (dispatch reports it, on any Python). Read without
+    config.load: its warnings would print twice, here and in the restarted runner."""
+    import tomllib
+
+    from . import config
+
+    if project.GLOBAL or not rest:
+        return None
+    name, args = rest[0], rest[1:]
     try:
-        code = proc.exit_code(dispatch(_parse_globals(argv)))
+        data = tomllib.loads(config.read_text())
+    except (PytError, OSError, tomllib.TOMLDecodeError):
+        return None
+    tasks = data.get("tasks")
+    if not (isinstance(tasks, dict) and name in tasks):
+        if name not in COMMANDS and name not in INTERNAL or name in RUNS_ON_ANY_PYTHON:
+            return None
+        if name in COMMANDS and name not in HELP_PASSES_THROUGH and _asks_help(args):
+            return None  # `./pyt help NAME`
+    table = data.get("python")
+    version = table.get("cpython", config.PythonConfig.cpython) if isinstance(table, dict) else config.PythonConfig.cpython
+    if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+", version):
+        return None
+    if tuple(int(part) for part in version.split(".")) < (3, 11):
+        return None  # config.validate refuses it
+    return version
+
+
+def _runs_on_python_cpython(version: str) -> bool:
+    """Whether this runner runs on python.cpython `version`: the CPython uv manages, never another
+    one of that minor. With the project's environment the launchers asked uv for its own
+    (only-managed: project.launcher_python); without it they let uv take a system Python too, and
+    uv is asked which interpreter is its own (Fedora's or Homebrew's 3.14, Termux's 3.13 for a
+    python.cpython of "3.13", are not)."""
+    if sys.implementation.name != "cpython" or sys.version_info[:2] != tuple(int(part) for part in version.split(".")):
+        return False
+    if project.launcher_python(project.ROOT)[1] == "only-managed":
+        return True
+    from . import envs
+
+    found = envs.find_cpython(version)
+    if found is None:
+        return False
+    prefix = found.parent if project.IS_WINDOWS else found.parent.parent  # python.exe / bin/python3.X
+    try:
+        return os.path.samefile(prefix, sys.base_prefix)
+    except OSError:
+        return False
+
+
+def _restart(argv: list[str], rest: list[str]) -> int | None:
+    """Run the command on python.cpython when the launchers started this runner on another
+    Python (_runs_on_python_cpython; project.launcher_python: the project has no environment yet,
+    so any CPython 3.11+; or python.cpython was edited and .python-version not rendered yet) and
+    the command needs it (_python_needed): a second runner process on it, with the same
+    arguments, in the same folder, whose exit code is this one's. uv installs that CPython first
+    when it is missing, or PytError(3) says why it cannot (Android/Termux:
+    envs.no_download_problem). None: this Python runs the command."""
+    if not _started_by_uv():
+        return None
+    version = _python_needed(rest)
+    if version is None or _runs_on_python_cpython(version):
+        return None
+    from . import envs
+
+    python = envs.ensure_python(version)
+    flags = ["-s", *(["-B"] if sys.dont_write_bytecode else [])]  # no user site: none in uv's environment either
+    try:
+        done = proc.run([python, *flags, project.TEMPLATE / "pyt.py", *argv], cwd=Path.cwd(), env=proc.runner_env(), check=False, echo=False)
+    except proc.Interrupted as e:  # the other runner had the Ctrl+C (or the signal passed on) too, and said so
+        return 128 + int(signal.SIGINT) if e.code == proc.STATUS_CONTROL_C_EXIT else e.code
+    return done.returncode
+
+
+def _main(argv: list[str], entry: bool = False) -> int:
+    try:
+        rest = _parse_globals(argv)
+        restarted = _restart(argv, rest) if entry else None
+        if restarted is not None:
+            return restarted
+        code = proc.exit_code(dispatch(rest))
         sys.stdout.flush()  # inside the try: a closed pipe is reported by main, not as a bug
         return code
     except BrokenPipeError:
@@ -513,14 +614,16 @@ def _main(argv: list[str]) -> int:
         return 1
 
 
-def main(argv: list[str]) -> int:
-    """Run one ./pyt command line; return the exit code (section 5.3 of CLAUDE.md)."""
+def main(argv: list[str], *, entry: bool = False) -> int:
+    """Run one ./pyt command line; return the exit code (section 5.3 of CLAUDE.md). `entry`: the
+    command line of .pytemplate/pyt.py, whose runner may move the command onto python.cpython
+    (_restart); a caller in this process (the tests) runs it on this Python."""
     if argv[:1] == ["__probe"]:  # launcher self-test target: no config, no render, not in help
         from . import shells
 
         return shells.probe(argv[1:])
     try:
-        return _main(argv)
+        return _main(argv, entry)
     except BrokenPipeError:  # stdout or stderr closed, even while an error was being reported
         return _output_closed()
     except OSError as e:  # no room for the error line either (stderr on a full disk too)

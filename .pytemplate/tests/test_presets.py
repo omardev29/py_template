@@ -1152,7 +1152,7 @@ def test_new_passes_quiet_and_verbose_to_the_copys_runner(tmp_path: Path, monkey
     monkeypatch.setattr(presets.ui, "VERBOSE", verbose)
     presets.new(tmp_path / "demo", "script", "demo")
     child = next(c for c in calls if "__init" in c)
-    assert child[5 : child.index("__init")] == [*flags, "--no-render"]
+    assert child[child.index("--script") + 2 : child.index("__init")] == [*flags, "--no-render"]
 
 
 def test_new_never_warns_about_the_sources_hand_edited_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1173,7 +1173,7 @@ def test_new_never_warns_about_the_sources_hand_edited_files(tmp_path: Path, mon
     monkeypatch.setattr(proc, "find_uv", lambda: "uv")
     presets.new(tmp_path / "demo", cfg.app.preset, cfg.app.name)
     child = next(c for c in calls if "__init" in c)
-    options = child[5 : child.index("__init")]  # the copy's runner: uv run --quiet --script pyt.py OPTIONS __init ...
+    options = child[child.index("--script") + 2 : child.index("__init")]  # uv run ... --script pyt.py OPTIONS __init ...
     monkeypatch.undo()
     copy_root = tmp_path / "copy"
     presets.copy_template(copy_root)
@@ -1439,6 +1439,68 @@ def test_new_rejects_bad_arguments_before_anything(dry: Config, tmp_path: Path, 
             cmd_mode.cmd_new(dry, args)
         assert e.value.code == 2
     assert list(tmp_path.iterdir()) == []
+
+
+def test_new_asks_for_python_cpython_before_it_copies_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """The new project's uv.lock is made with its python.cpython (uv lock needs the interpreter),
+    and its __init runs on it. Where uv cannot install it (Android/Termux: no CPython builds at
+    all) `new` stops before it copies anything, with why; --dry-run says the same, or where the
+    interpreter is, or that uv would install it."""
+    from runner import envs
+
+    cfg = config.load(set())
+    version = presets.preset_python("script")
+    asked: list[str] = []
+
+    def unavailable(v: str) -> Path:
+        asked.append(v)
+        raise PytError(f'python.cpython = "{v}": uv installs no CPython on this platform (Android (linux aarch64)).', 3)
+
+    monkeypatch.setattr(envs, "ensure_python", unavailable)
+    monkeypatch.setattr(presets, "copy_template", lambda dest: pytest.fail("copied"))
+    monkeypatch.setattr(presets, "new", lambda *a, **k: pytest.fail("made a project"))
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(PytError, match="uv installs no CPython on this platform") as e:
+        cmd_mode.cmd_new(cfg, ["demo", "--preset", "script"])
+    assert e.value.code == 3 and asked == [version] and list(tmp_path.iterdir()) == []
+
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    monkeypatch.setattr(envs, "find_cpython", lambda v: None)
+    monkeypatch.setattr(envs, "cpython_downloads", lambda request, everywhere=False: everywhere)
+    with pytest.raises(PytError, match=f'python.cpython = "{version}"') as e:
+        cmd_mode.cmd_new(cfg, ["demo", "--preset", "script"])
+    assert e.value.code == 3 and list(tmp_path.iterdir()) == []
+    monkeypatch.setattr(envs, "cpython_downloads", lambda request, everywhere=False: True)
+    capsys.readouterr()
+    assert cmd_mode.cmd_new(cfg, ["demo", "--preset", "script"]) == 0
+    assert f"python  CPython {version}: not installed, uv would install it (uv python install {version})" in capsys.readouterr().err
+    monkeypatch.setattr(envs, "find_cpython", lambda v: tmp_path / "uv" / "python3")
+    assert cmd_mode.cmd_new(cfg, ["demo", "--preset", "script"]) == 0
+    assert f"python  CPython {version}: {tmp_path / 'uv' / 'python3'}" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_new_runs_the_copys_init_on_the_python_cpython_uv_gave(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The copy's runner starts on the interpreter envs.ensure_python returned: its __init runs
+    there, and uv's cached environment of the new project's runner holds python.cpython from
+    the start (its first `./pyt setup` needs no restart)."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(presets, "copy_template", lambda dest: dest.mkdir(parents=True))
+    monkeypatch.setattr(presets, "_make_own", lambda dest, preset, name: None)
+    monkeypatch.setattr(presets, "_git_init", lambda dest: None)
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+    monkeypatch.setattr(proc, "run", lambda argv, **kw: calls.append([str(a) for a in argv]) or subprocess.CompletedProcess(argv, 0, "", ""))
+    python = tmp_path / "uv" / "cpython-3.14" / "bin" / "python3.14"
+    presets.new(tmp_path / "demo", "script", "demo", python=python)
+    ((argv),) = calls
+    assert argv[:7] == ["uv", "run", "--quiet", f"--python={python}", "--python-preference", "managed", "--script"]
+    assert argv[8:] == ["--no-render", "__init", "script", "--name", "demo", "--force"]
+
+
+def test_every_preset_names_its_python_cpython() -> None:
+    for preset in presets.available():
+        version = presets.preset_python(preset)
+        assert re.fullmatch(r"3\.[0-9]+", version) and tuple(map(int, version.split("."))) >= (3, 11), (preset, version)
 
 
 def test_new_never_touches_a_folder_with_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

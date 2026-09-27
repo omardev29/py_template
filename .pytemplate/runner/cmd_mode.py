@@ -511,10 +511,17 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         )
     presets.check_name_free(cfg, ns.preset, name)
     top = _work_tree_top(dest)
+    # The new project's python.cpython: its lock needs it (uv lock), and its __init runs on it.
+    # Asked before the copy: where uv cannot install it (Android/Termux), nothing is written.
+    version = presets.preset_python(ns.preset)
     if proc.DRY_RUN:
+        found = envs.find_cpython(version)
+        if found is None and envs.cpython_downloads(version) is False:
+            raise PytError(envs.no_download_problem(version), 3)
         ui.step(f"new project in {dest} {_DRY}")
         ui.info(f"  preset  {ns.preset}")
         ui.info(f"  name    {name}  (package src/{name.replace('-', '_').lower()}/)")
+        ui.info(f"  python  CPython {version}: {found if found is not None else f'not installed, uv would install it (uv python install {version})'}")
         # what __init pins in the copy: the packages its uv.lock (this one) does not have yet
         locked = presets.locked_names()
         pins = [n for n in presets.constraints(ns.preset) if n not in locked]
@@ -533,7 +540,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         if top is not None:
             _monorepo_note(dest, top)
         return 0
-    presets.new(dest, ns.preset, name)
+    presets.new(dest, ns.preset, name, python=envs.ensure_python(version))
     if top is not None:
         _monorepo_note(dest, top)
     return 0

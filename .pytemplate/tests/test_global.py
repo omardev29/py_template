@@ -224,8 +224,11 @@ def test_the_probe_runs_outside_a_project(monkeypatch: pytest.MonkeyPatch, capsy
 
 
 def _doctor_lines(monkeypatch: pytest.MonkeyPatch) -> list[tuple[bool | None, str, str]]:
+    """doctor's lines, with python.cpython not installed yet but downloadable (a note)."""
     lines: list[tuple[bool | None, str, str]] = []
     monkeypatch.setattr(ui, "check_line", lambda passed, label, hint="": lines.append((passed, label, hint)))
+    monkeypatch.setattr(envs, "find_cpython", lambda version: None)
+    monkeypatch.setattr(envs, "cpython_downloads", lambda request, everywhere=False: True)
     return lines
 
 
@@ -251,7 +254,10 @@ def test_doctor_outside_a_project_checks_this_machine_only(monkeypatch: pytest.M
     assert notes["C compiler for mypyc: cc not found (the CC of the .venv Python: 'cc')"] is None
     assert "this run was started by: sh" in labels
     assert "pyt install: (its own lines)" in labels
-    machine = ("outside a project", "uv: ", "runner: ", "git", "C compiler for mypyc: ", "Windows long paths", "this run was started by: ", "pyt install: ")
+    assert notes["CPython 3.14 (python.cpython of new projects) is not installed yet: uv installs it for the first command that needs it"] is None
+    machine = (
+        "outside a project", "uv: ", "runner: ", "CPython ", "git", "C compiler for mypyc: ", "Windows long paths", "this run was started by: ", "pyt install: ",
+    )  # fmt: skip
     assert not [label for label in labels if not label.startswith(machine)], labels  # no project step
 
 
@@ -273,12 +279,13 @@ def test_doctor_ends_with_the_same_steps_in_both_modes(global_mode: bool, monkey
     monkeypatch.setattr(project, "GLOBAL", global_mode)
     calls: list[str] = []
     monkeypatch.setattr(cmd_env, "_tools", lambda check: calls.append("tools"))
-    monkeypatch.setattr(cmd_env, "_machine", lambda check: calls.append("machine"))
-    monkeypatch.setattr(cmd_env, "_project", lambda cfg, check: calls.append("project"))
+    monkeypatch.setattr(cmd_env, "_python_cpython", lambda cfg, check: (calls.append("python.cpython"), (True, None))[1])
+    monkeypatch.setattr(cmd_env, "_machine", lambda check, python: calls.append("machine"))
+    monkeypatch.setattr(cmd_env, "_project", lambda cfg, check, python_ok: calls.append("project"))
     monkeypatch.setattr(cmd_nvim, "doctor", lambda check: calls.append("neovim"))
     monkeypatch.setattr(cmd_install, "doctor", lambda check: calls.append("pyt install"))
     assert cmd_env.cmd_doctor(make({}), []) == 0
-    assert calls == ["tools", "machine" if global_mode else "project", "neovim", "pyt install"]
+    assert calls == ["tools", "python.cpython", "machine" if global_mode else "project", "neovim", "pyt install"]
 
 
 @pytest.mark.parametrize("lazyvim", [True, False])
@@ -515,7 +522,14 @@ def test_new_outside_a_project_makes_a_project_of_the_installed_template(tmp_pat
     snap = _installed_template(tmp_path)
     record = tmp_path / "uv-call"
     fake = tmp_path / "fake-uv"
-    fake.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" > "$PT_FAKE_UV.argv"\nenv > "$PT_FAKE_UV.env"\n', encoding="utf-8")
+    fake.write_text(
+        '#!/bin/sh\ncase "$1 $2" in\n'
+        '  "python find") echo /fake/cpython-3.14/bin/python3.14; exit 0 ;;\n'  # new asks for python.cpython first
+        '  "--version ") echo "uv 0.12.19"; exit 0 ;;\n'
+        'esac\n'
+        'printf \'%s\\n\' "$@" > "$PT_FAKE_UV.argv"\nenv > "$PT_FAKE_UV.env"\n',
+        encoding="utf-8",
+    )
     fake.chmod(0o755)
     away = tmp_path / "away"
     away.mkdir()
@@ -526,7 +540,11 @@ def test_new_outside_a_project_makes_a_project_of_the_installed_template(tmp_pat
     assert _tree(snap) == before
     dest = away / "demo"
     argv = record.with_suffix(".argv").read_text(encoding="utf-8").splitlines()
-    assert argv == ["run", "--quiet", "--script", str(dest / ".pytemplate" / "pyt.py"), "--no-render", "__init", "script", "--name", "demo", "--force"]
+    # the copy's __init runs on the new project's python.cpython (what `uv python find` named)
+    assert argv == [
+        "run", "--quiet", "--python=/fake/cpython-3.14/bin/python3.14", "--python-preference", "managed", "--script",
+        str(dest / ".pytemplate" / "pyt.py"), "--no-render", "__init", "script", "--name", "demo", "--force",
+    ]  # fmt: skip
     assert not re.search(r"(?m)^PYTEMPLATE_GLOBAL=", record.with_suffix(".env").read_text(encoding="utf-8"))
     for text in ("copying every file", "not a git work tree", "not copied", "git does not track"):
         assert text not in r.stderr, r.stderr

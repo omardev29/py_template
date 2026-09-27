@@ -36,11 +36,15 @@ LazyVim's import-order warning and keeps their plugins installed when you work e
 | Tests | neotest runs pytest with the active backend's interpreter (`.venv`, `.venv-pypy`); mypyc and "all backends" runs go through `pyt: test`. |
 | Health | `:checkhealth pytemplate` |
 
-`./pyt` always runs as `uv run --quiet --script .pytemplate/pyt.py ARGS` (an argument
-list): Neovim's `'shell'` is never used, so xonsh, niubash or PowerShell as `'shell'` do not matter.
-Like the launchers, the plugin keeps your `UV_PYTHON`, `PYTHONHOME`, `PYTHONPATH`,
-`UV_WORKING_DIR` and `PYTEMPLATE_GLOBAL` away from it (the runner runs on the project's Python,
-in Neovim's folder, as the project's runner: never in the global mode of the installed `pyt`).
+`./pyt` always runs as an argument list,
+`uv run --quiet --python=REQUEST --python-preference PREF --script .pytemplate/pyt.py ARGS`,
+where REQUEST is empty (uv then follows `.python-version`, `python.cpython`) and PREF
+`only-managed` once the project has its `.venv`, else `>=3.11` and `managed`, as the launchers
+pick them: Neovim's `'shell'` is never used, so
+xonsh, niubash or PowerShell as `'shell'` do not matter. Like the launchers, the plugin keeps
+your `UV_PYTHON`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`, `PYTHONHOME`, `PYTHONPATH`,
+`UV_WORKING_DIR` and `PYTEMPLATE_GLOBAL` away from it (the runner starts where the launchers start it, in Neovim's
+folder, as the project's runner: never in the global mode of the installed `pyt`).
 Only when uv is nowhere does it run the launcher (`/bin/sh pyt`, or `pyt.cmd` on
 Windows), which prints how to install uv.
 

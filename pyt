@@ -578,6 +578,24 @@ else
 
     _pt_script=${_pt_root%/}/.pytemplate/$_pt_entry
     _pt_cwd=$_pt_pwd
+    # The Python the runner starts on. While the project has an environment, the one uv reads
+    # from .python-version (python.cpython, which that environment was made with), as always:
+    # --python= with no value is no request, and only-managed keeps a system Python out (uv makes
+    # its cached environment of the runner again when one built it). Else any CPython 3.11 or
+    # newer that uv finds, a system one too (uv has none to download on Android or the BSDs); the
+    # runner moves the commands that need python.cpython onto it itself. On Linux/macOS the
+    # environment's python is a link to its base Python, which must exist too (-f follows it).
+    _pt_py='>=3.11'
+    _pt_pref=managed
+    if [ -n "$_pt_win" ]; then
+        if [ -f "${_pt_root%/}/.venv/Scripts/python.exe" ]; then
+            _pt_py=
+            _pt_pref=only-managed
+        fi
+    elif [ -f "${_pt_root%/}/.venv-wsl/bin/python" ] || [ -f "${_pt_root%/}/.venv/bin/python" ]; then
+        _pt_py=
+        _pt_pref=only-managed
+    fi
     if [ -n "$_pt_win" ]; then
         _pt_winpath "$_pt_script"
         _pt_script=$_pt_r
@@ -594,7 +612,7 @@ else
     else
         unset PYTEMPLATE_GLOBAL
     fi
-    set -- "$_pt_uv" run --quiet --script "$_pt_script" "$@"
+    set -- "$_pt_uv" run --quiet "--python=$_pt_py" --python-preference "$_pt_pref" --script "$_pt_script" "$@"
 fi
 
 unset -f _pt_slashes _pt_backslashes _pt_drive _pt_winpath _pt_entry_in _pt_from_launcher \
@@ -602,22 +620,24 @@ unset -f _pt_slashes _pt_backslashes _pt_drive _pt_winpath _pt_entry_in _pt_from
     _pt_uv_from_registry
 unset _pt_self _pt_r _pt_s _pt_p _pt_t _pt_d _pt_c _pt_n _pt_link _pt_pwd _pt_root _pt_other _pt_win \
     _pt_entry _pt_global _pt_exe _pt_uv _pt_h _pt_l _pt_f _pt_a _pt_g _pt_v _pt_rest _pt_e _pt_cr _pt_k \
-    _pt_o _pt_launcher _pt_script _pt_cwd _pt_rc
+    _pt_o _pt_launcher _pt_script _pt_cwd _pt_py _pt_pref _pt_rc
 if [ "$#" -eq 1 ]; then
     # An error above (no project, no uv): $1 is its exit code.
     exit "$1"
 fi
-# The runner runs on the project's Python (.python-version next to it), in the
-# caller's folder: a UV_PYTHON of the caller must not choose that Python, a
-# PYTHONHOME or PYTHONPATH must not break it, a UV_WORKING_DIR must not move it
-# (the runner's own tools never get them either).
+# The runner starts on the Python chosen above, in the caller's folder: a
+# UV_PYTHON of the caller must not choose another one, a UV_MANAGED_PYTHON or
+# UV_NO_MANAGED_PYTHON must not stop uv (it refuses them next to
+# --python-preference), a PYTHONHOME or PYTHONPATH must not break it, a
+# UV_WORKING_DIR must not move it (the runner's own tools never get them either).
 if [ -n "${__RUBASH_SHELL_NAME:-}" ]; then
     # niubash runs this file inside the calling shell and `exec` only ends the
     # file: run uv, then drop the PYTEMPLATE_ exports so the session keeps no
     # stale copy. The session keeps its own values: uv reads an empty UV_PYTHON
-    # as unset, Python an empty PYTHONHOME/PYTHONPATH, and uv refuses an empty
-    # UV_WORKING_DIR (. is the caller's folder).
-    if UV_PYTHON='' PYTHONHOME='' PYTHONPATH='' UV_WORKING_DIR=. "$@"; then
+    # as unset and false as an unset flag, Python an empty PYTHONHOME or
+    # PYTHONPATH, and uv refuses an empty UV_WORKING_DIR (. is the caller's
+    # folder) or flag.
+    if UV_PYTHON='' UV_MANAGED_PYTHON=false UV_NO_MANAGED_PYTHON=false PYTHONHOME='' PYTHONPATH='' UV_WORKING_DIR=. "$@"; then
         set -- 0
     else
         set -- "$?"
@@ -625,5 +645,5 @@ if [ -n "${__RUBASH_SHELL_NAME:-}" ]; then
     unset PYTEMPLATE_CALLER_CWD PYTEMPLATE_LAUNCHER PYTEMPLATE_GLOBAL
     exit "$1"
 fi
-unset UV_PYTHON PYTHONHOME PYTHONPATH UV_WORKING_DIR
+unset UV_PYTHON UV_MANAGED_PYTHON UV_NO_MANAGED_PYTHON PYTHONHOME PYTHONPATH UV_WORKING_DIR
 exec "$@"

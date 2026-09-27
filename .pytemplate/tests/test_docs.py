@@ -189,6 +189,17 @@ def test_the_manual_says_which_code_uv_s_missing_requirements_end_with() -> None
     assert "uv itself reports missing" in section and "ends with uv's own code, 2" in section, section
 
 
+def test_the_manual_shows_what_termux_prints(monkeypatch: pytest.MonkeyPatch) -> None:
+    """"Where pyt runs" quotes the error of a platform uv has no CPython for (Android/Termux)
+    word for word, and names the commands that still run there."""
+    monkeypatch.setattr(envs, "this_platform", lambda: "Android (linux aarch64)")
+    monkeypatch.setattr(envs, "cpython_downloads", lambda request, everywhere=False: everywhere and request != "cpython")
+    section = _section(_text(), "Where pyt runs")
+    assert "error: " + envs.no_download_problem("3.14") in section, section
+    assert f"`{'`, `'.join(envs.RUNS_ON_ANY_PYTHON.replace(' and ', ', ').split(', '))}`" in " ".join(section.split()).replace(" and `", ", `")
+    assert set(envs.RUNS_ON_ANY_PYTHON.replace(" and ", ", ").split(", ")) == cli.RUNS_ON_ANY_PYTHON - {"new", "__init"}
+
+
 # --- pytemplate.toml -----------------------------------------------------------------------------
 
 
