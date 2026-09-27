@@ -94,14 +94,14 @@ def test_relative_upx_path_resolves_against_the_project_root(monkeypatch: pytest
     monkeypatch.setattr(exe, "IS_WINDOWS", True)
     monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
     assert f"--upx-dir={fake.parent}" in exe.size_args(cfg)[0]
-    absolute = tmp_path / "elsewhere" / "upx"
+    absolute = tmp_path / "elsewhere" / upx._exe_name()
     absolute.parent.mkdir()
     absolute.write_bytes(b"")
     absolute.chmod(0o755)
     assert upx.find(make({"upx": {"path": str(absolute)}})) == absolute
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    assert upx.find(make({"upx": {"path": "~/elsewhere/upx"}})) == absolute
+    assert upx.find(make({"upx": {"path": f"~/elsewhere/{absolute.name}"}})) == absolute
     with pytest.raises(DeployError, match="relative path starts at the project root") as e:
         upx.find(make({"upx": {"path": "tools/missing"}}))
     assert e.value.code == 3
@@ -131,11 +131,32 @@ def test_find_order_path_setting_then_path_then_cache_then_download(monkeypatch:
     tool.chmod(0o755)
     monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(bindir)})
     assert Path(upx.find(make({}))).resolve() == tool.resolve()  # PATH beats the cache
-    explicit = tmp_path / "explicit" / "upx"
+    explicit = tmp_path / "explicit" / upx._exe_name()
     explicit.parent.mkdir()
     explicit.write_bytes(b"")
     explicit.chmod(0o755)
     assert upx.find(make({"upx": {"path": str(explicit)}})) == explicit  # the setting beats PATH
+
+
+def test_a_upx_path_not_named_upx_is_refused_before_any_work(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Nuitka takes --upx-binary only as a file named upx (else it searched PATH: "No UPX binary
+    # found, please use --upx-binary", or another upx), and PyInstaller looks for
+    # <upx-dir>/upx.exe (it packed nothing, silently): tools/upx-5.2.1 passed the preflight
+    root = tmp_path / "proj"
+    (root / "tools").mkdir(parents=True)
+    monkeypatch.setattr(upx, "ROOT", root)
+    monkeypatch.setattr(upx, "unsupported_reason", lambda: "")
+    for name in ("upx-5.2.1", "upx-5.2.1.exe", "upx.exe" if not WINDOWS else "upx"):
+        tool = root / "tools" / name
+        tool.write_bytes(b"")
+        tool.chmod(0o755)
+        with pytest.raises(DeployError, match=f"must be a file named {upx._exe_name()} ") as e:
+            upx.preflight(make({"upx": {"enabled": True, "path": f"tools/{name}"}}), "nuitka")
+        assert e.value.code == 2
+    good = root / "tools" / (upx._exe_name().upper() if WINDOWS else upx._exe_name())  # Windows: any case
+    good.write_bytes(b"")
+    good.chmod(0o755)
+    assert upx.locate(make({"upx": {"enabled": True, "path": f"tools/{good.name}"}})) == good
 
 
 @pytest.mark.skipif(WINDOWS, reason="Windows files have no x bit")

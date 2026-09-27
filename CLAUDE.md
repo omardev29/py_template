@@ -2166,7 +2166,9 @@ Per method:
   app at startup with a 4 MB working set and no window, measured), binaries UPX rejects
   (`GUARD_CF`: never pass `--force`). `upx.find` order: `deploy.upx.path` (absolute, `~`, or
   relative to the project root, never the caller's cwd; handed to the tools absolute but not
-  resolved: PyInstaller wants `<upx-dir>/upx`, Nuitka a file named `upx`; on POSIX it must have
+  resolved: PyInstaller wants `<upx-dir>/upx`, Nuitka a file named `upx`, so another file name
+  is refused, exit 2: `tools/upx-5.2.1` passed, then Nuitka searched PATH ("No UPX binary
+  found", or another upx) and PyInstaller packed nothing without a word; on POSIX it must have
   its x bit, `upx._runnable`, or the preflight refuses it with the `chmod +x` line: a checkout
   from Windows passed it, and the portable build died in `upx.pack_file` with a traceback after
   the runtime copy; `pack_file` turns a upx that cannot start into a DeployError), `upx` on
@@ -3853,8 +3855,10 @@ UPX:
   `test_build_methods.py::test_exe_size_args_say_why_upx_is_off_on_macos`. Goes: per case, when
   UPX supports it.
 - **The packagers look for UPX differently** (LIMITATION): PyInstaller wants `<upx-dir>/upx`,
-  Nuitka a file named `upx`. Fix: `upx.find` hands them an absolute, unresolved path (10). Test:
-  `test_upx.py::test_relative_upx_path_resolves_against_the_project_root`. Goes: never.
+  Nuitka a file named `upx` (any other name: it searches PATH). Fix: `upx.find` hands them an
+  absolute, unresolved path, and `upx.locate` refuses a `deploy.upx.path` of another name (10).
+  Test: `test_upx.py::test_relative_upx_path_resolves_against_the_project_root`,
+  `test_a_upx_path_not_named_upx_is_refused_before_any_work`. Goes: never.
 
 ruff:
 - **`ruff format --check` prints nothing for stdin** (LIMITATION): a staged file fed on stdin

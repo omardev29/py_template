@@ -187,6 +187,12 @@ def locate(cfg: Config) -> Path | None:
             raise DeployError(
                 f"deploy.upx.path = {cfg.deploy.upx.path!r} does not exist ({path}; a relative path starts at the project root)", 3
             )
+        if os.path.normcase(path.name) != os.path.normcase(_exe_name()):  # tools/upx-5.2.1
+            raise DeployError(
+                f"deploy.upx.path = {cfg.deploy.upx.path!r} must be a file named {_exe_name()} ({path}): Nuitka takes no"
+                f" other name (it searched PATH instead) and PyInstaller looks for <folder>/{_exe_name()}; rename it",
+                2,
+            )
         if not _runnable(path):  # a checkout from Windows or a zip lost its x bit: pack_file died later
             raise DeployError(f"deploy.upx.path = {cfg.deploy.upx.path!r} is not executable ({path}): chmod +x {shlex.quote(str(path))}", 3)
         return path
