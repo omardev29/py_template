@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
 import shutil
@@ -1421,6 +1422,7 @@ def report_json(project: Path, shells: Sequence[Shell], results: Sequence[Result
     }
 
 
+MAX_TIMEOUT = 86400  # a day per probe
 SELFTEST_USAGE = "./deploy selftest --shells [NAME,...] [--list] [--json] [--keep] [--project DIR] [--tests T1,...] [--jobs N] [--timeout S]"
 
 
@@ -1470,8 +1472,12 @@ def parse_options(args: Sequence[str]) -> Options:
                 number = float(raw)
             except ValueError:
                 raise DeployError(f"{key}: not a number: {raw}") from None
+            if not math.isfinite(number):  # nan, inf, 1e400: int() and the waits would raise
+                raise DeployError(f"{key}: not a finite number: {raw}")
             if number <= 0:
                 raise DeployError(f"{key} must be greater than 0")
+            if key == "--timeout" and number > MAX_TIMEOUT:  # Windows waits take 32-bit milliseconds
+                raise DeployError(f"--timeout must be at most {MAX_TIMEOUT} (seconds)")
             if key == "--timeout":
                 opts.timeout = number
             else:

@@ -781,6 +781,22 @@ def test_parse_options() -> None:
             shells.parse_options(bad)
 
 
+@pytest.mark.parametrize("key", ["--jobs", "-j", "--timeout"])
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "1e400", "NaN"])
+def test_a_number_that_is_not_finite_is_a_usage_error(key: str, raw: str) -> None:
+    """`--jobs nan` (or inf, 1e400) passed float() and ended in an internal-error traceback."""
+    with pytest.raises(DeployError, match="not a finite number") as err:
+        shells.parse_options([key, raw])
+    assert err.value.code == 2
+
+
+def test_a_timeout_the_waits_cannot_hold_is_a_usage_error() -> None:
+    """Windows waits take a 32-bit count of milliseconds: a bigger timeout raised OverflowError."""
+    assert shells.parse_options(["--timeout", str(shells.MAX_TIMEOUT)]).timeout == shells.MAX_TIMEOUT
+    with pytest.raises(DeployError, match="at most"):
+        shells.parse_options(["--timeout", "5e6"])
+
+
 @pytest.mark.parametrize("args", [["--tests", ","], ["--tests=, ,"], ["sh", "--tests", " "]])
 def test_a_test_list_that_names_no_test_is_a_usage_error(args: list[str]) -> None:
     """`--tests ,` left no test and the suite reported `ok ... 0 passed, 0 failed`, exit 0."""
