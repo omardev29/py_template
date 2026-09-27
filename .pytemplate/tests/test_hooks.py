@@ -1288,6 +1288,8 @@ def test_checks_generated_files(tmp_path: Path, tools: Tools) -> None:
     res = results(make(), repo, staged)
     assert res["generated files up to date"].passed is False
     assert "./deploy render" in res["generated files up to date"].hint and ".mypy.ini" in res["generated files up to date"].hint
+    # render rewrites state.json with them: the line names it, or following it blocks the next commit
+    assert "./deploy render, then git add gen.json .pytemplate/state.json" in res["generated files up to date"].hint
 
 
 @needs_git

@@ -956,8 +956,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `[preset.*]` options) and `uv lock --check`; `pytemplate.toml`,
   `pyproject.toml`, `uv.lock` and the generated files committed together (once any is in the
   commit, none of the three config files may keep unstaged changes; the hints name the dirty
-  config files with the generated ones, so following them never splits a source from its
-  output). `lintc` on staged compiled modules (blocking only under the `mypyc` profile, reads
+  config files with the generated ones, and `.pytemplate/state.json`, which render rewrites with
+  them (`hooks.check_generated`), so following them never splits a source from its output nor
+  blocks the next commit). `lintc` on staged compiled modules (blocking only under the `mypyc` profile, reads
   the working tree). Never mypy (the user's choice: `./deploy check` does it).
 - `hooks._run_bytes` is the module's only process start outside `proc.run`: raw bytes
   (proc.run's text mode turns CRLF into LF) and stdin, for `git cat-file` and ruff on stdin.

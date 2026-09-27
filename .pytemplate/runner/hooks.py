@@ -1110,7 +1110,10 @@ def check_generated(cfg: Config, generated: Sequence[str], dirty: set[str]) -> I
     if changed or edited:
         hints = []
         if changed:
-            hints.append(f"outdated: {', '.join(changed)}\n./deploy render, then git add {' '.join([*sources, *changed])}")
+            # render records their hashes in state.json too: left out of the line, the next commit
+            # stopped at "generated files staged: unstaged: .pytemplate/state.json"
+            state = STATE_FILE.relative_to(ROOT).as_posix()
+            hints.append(f"outdated: {', '.join(changed)}\n./deploy render, then git add {' '.join([*sources, *changed, state])}")
         if edited:
             hints.append(f"hand-edited: {', '.join(edited)}\nchange pytemplate.toml or .pytemplate/templates (./deploy render --diff), or ./deploy render --force")
         yield Result(False, "generated files up to date", "\n".join(hints))
