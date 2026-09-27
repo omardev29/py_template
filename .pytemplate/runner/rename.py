@@ -435,26 +435,33 @@ def _python_code(text: str, pkg: str) -> _Code | None:
     regions: list[_Region] = []
     depth = 0
     fstart = 0
+    fforced = False
     last: list[tokenize.TokenInfo] = []  # the last two significant tokens
     # Open brackets: [the called name (for a call), index of the current argument, its keyword]
     brackets: list[list[str | int | None]] = []
+
+    def loader_argument() -> bool:
+        """Whether a string that starts here is a module-name argument of a loader call (LOADERS)."""
+        if not (brackets and last and last[-1].type == tokenize.OP and last[-1].string in ("(", ",", "=")):
+            return False
+        callee, index, keyword = brackets[-1]
+        positions = LOADERS.get(callee, ()) if isinstance(callee, str) else ()
+        return bool(positions) and (keyword in MODULE_ARGUMENTS if keyword is not None else index in positions)
+
     for tok in tokens:
         kind = tokenize.tok_name.get(tok.type, "")
         if kind.endswith("STRING_START"):  # Python 3.12+: f-strings, t-strings (and any later family) are text
             if depth == 0:
-                fstart = offset(tok.start)
+                fstart, fforced = offset(tok.start), loader_argument()  # import_module(f"alpha.{x}") as on 3.11
             depth += 1
         elif kind.endswith("STRING_END"):
             depth -= 1
             if depth == 0:
-                regions.append(_Region(fstart, offset(tok.end), fstring=True))  # {fields} are code, as on 3.11
+                regions.append(_Region(fstart, offset(tok.end), fforced, fstring=True))  # {fields} are code, as on 3.11
         elif depth == 0 and tok.type in (tokenize.STRING, tokenize.COMMENT):
             forced = fstring = False
-            if tok.type == tokenize.STRING and brackets and last and last[-1].type == tokenize.OP and last[-1].string in "(,=":
-                callee, index, keyword = brackets[-1]
-                positions = LOADERS.get(callee, ()) if isinstance(callee, str) else ()
-                forced = bool(positions) and (keyword in MODULE_ARGUMENTS if keyword is not None else index in positions)
             if tok.type == tokenize.STRING:
+                forced = loader_argument()
                 prefix = re.match(r"[A-Za-z]*", tok.string)
                 fstring = prefix is not None and "f" in prefix.group().lower()
             regions.append(_Region(offset(tok.start), offset(tok.end), forced, fstring))

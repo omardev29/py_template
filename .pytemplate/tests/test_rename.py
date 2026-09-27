@@ -227,12 +227,20 @@ def test_text_occurrences_are_the_package_or_the_name(text: str, expected: str) 
         ("print(import_module, 'myapp')", "print(import_module, 'My-Game')"),  # not a call of it
         ("x = f(importlib.import_module('a'), 'myapp')", "x = f(importlib.import_module('a'), 'My-Game')"),  # after the call closed
         ("d = {'myapp': 1}[importlib.import_module('myapp').x]", "d = {'My-Game': 1}[importlib.import_module('my_game').x]"),
+        # f-strings: one STRING token on 3.11, FSTRING_START..END from 3.12 (the display name there)
+        ('m = importlib.import_module(f"myapp.{name}")', 'm = importlib.import_module(f"my_game.{name}")'),
+        ('m = importlib.import_module(f"myapp")', 'm = importlib.import_module(f"my_game")'),
+        ('m = importlib.import_module(name=f"myapp.{name}")', 'm = importlib.import_module(name=f"my_game.{name}")'),
+        ('f = resources.files(f"myapp")', 'f = resources.files(f"my_game")'),
+        ('g = runpy.run_module(f"myapp", run_name=f"myapp {x}")', 'g = runpy.run_module(f"my_game", run_name=f"My-Game {x}")'),
+        ('print(f"myapp", importlib.import_module("myapp"))', 'print(f"My-Game", importlib.import_module("my_game"))'),
     ],
 )
 def test_module_name_arguments_of_loader_calls_get_the_package(text: str, expected: str) -> None:
     """A display name is not a module name: import_module(name=...), the package argument of
     import_module/find_spec, files(package=...), the resources functions, pkgutil.get_data and
-    runpy.run_module get the package, like the first argument of import_module always did."""
+    runpy.run_module get the package, like the first argument of import_module always did; an
+    f-string argument too, on every Python (from 3.12 it got the display name)."""
     assert rewrite(text + "\n", AMBIGUOUS, python=True).text == expected + "\n"
 
 

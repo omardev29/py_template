@@ -994,7 +994,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     (`LOADERS`: the name and package of `import_module`/`find_spec`, `__import__`, `files` and
     the other importlib.resources functions, `pkgutil.get_data`, `runpy.run_module`; positional
     or as a `MODULE_ARGUMENTS` keyword, tracked per open bracket: `files(package="alpha")` once
-    got the display name, which is no module name); titles, other prose and artifact names
+    got the display name, which is no module name; an f-string argument too, whose 3.12+ tokens
+    once skipped the rule: `import_module(f"alpha.{x}")`); titles, other prose and artifact names
     (`alpha.exe`, `alpha-cpython-exe`) get the name.
   - `pytemplate.toml`: always by context (`contextual`, even when the new name is a package
     name). A path there is the package only right inside `src/` (`_after_src`: `src/alpha/data`
