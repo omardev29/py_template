@@ -27,7 +27,7 @@ import pytest
 TEMPLATE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEMPLATE_DIR))
 
-from runner import cli, cmd_dev, cmd_env, config, envs, presets, proc, render, rename  # noqa: E402
+from runner import cli, cmd_dev, cmd_env, config, envs, presets, proc, project, render, rename  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import ROOT  # noqa: E402
 from runner.rename import Names, package_of, rewrite  # noqa: E402
@@ -1702,7 +1702,8 @@ def test_rewritten_files_keep_their_mode_and_links(tmp_path: Path) -> None:
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX owners and hard links")
 def test_rewritten_files_keep_their_owner_and_hard_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The rewrite through a temporary file made a new inode: a hard link kept the old text, and
-    root renaming a bind-mounted project (a dev container) left the user's files root-owned."""
+    root renaming a bind-mounted project (a dev container) left the user's files root-owned
+    (project.write_whole now keeps both, for every file the runner rewrites)."""
     linked = tmp_path / "x.py"
     linked.write_bytes(b"import rocks\n")
     os.link(linked, tmp_path / "hard.py")
@@ -1713,10 +1714,11 @@ def test_rewritten_files_keep_their_owner_and_hard_links(tmp_path: Path, monkeyp
     inode = own.stat().st_ino
     rename._replace_bytes(own, b"import stone\n")  # the runner's own file: through a temporary file
     assert own.read_bytes() == b"import stone\n" and own.stat().st_ino != inode
-    if os.geteuid() == 0:  # a real other owner (root can hand the file to another user)
+    if os.geteuid() == 0:  # a real other owner: root gives the new file the old owner
         os.chown(own, 4242, 4242)
-    else:
-        monkeypatch.setattr(os, "geteuid", lambda: own.stat().st_uid + 1)
+        rename._replace_bytes(own, b"import pebble\n")
+        assert (own.stat().st_uid, own.stat().st_gid) == (4242, 4242) and own.read_bytes() == b"import pebble\n"
+    monkeypatch.setattr(project, "_give_owner", lambda tmp, old: False)  # an owner this process cannot give
     owner, inode = (own.stat().st_uid, own.stat().st_gid), own.stat().st_ino
     rename._replace_bytes(own, b"import pebble, stone\n")
     assert own.read_bytes() == b"import pebble, stone\n"

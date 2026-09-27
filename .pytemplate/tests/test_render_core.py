@@ -943,6 +943,58 @@ def test_write_whole_keeps_modes_and_links(tmp_path: Path) -> None:
     assert (tmp_path / "fresh.json").read_bytes() == b"{}\n"
 
 
+def test_write_whole_keeps_the_owner_and_the_hard_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new inode drops a file's other hard links (they kept the old text) and takes the
+    runner's owner: root working in a user's bind-mounted project (a dev container, sudo) left
+    pyproject.toml and the generated files root-owned. write_whole gives the new file the old
+    owner, and rewrites a file with other links, or one it cannot give its owner, in place."""
+    from runner import project
+
+    linked = tmp_path / "pyproject.toml"
+    linked.write_bytes(b"a = 1\n")
+    os.link(linked, tmp_path / "twin.toml")
+    project.write_whole(linked, b"a = 2\n")
+    assert (tmp_path / "twin.toml").read_bytes() == b"a = 2\n" and linked.stat().st_nlink == 2
+    own = tmp_path / "state.json"
+    own.write_bytes(b"{}\n")
+    if sys.platform != "win32" and os.geteuid() == 0:  # a real other owner: root can hand it out
+        os.chown(own, 4242, 4243)
+        project.write_whole(own, b'{"a": 1}\n')
+        assert (own.stat().st_uid, own.stat().st_gid) == (4242, 4243) and own.read_bytes() == b'{"a": 1}\n'
+    monkeypatch.setattr(project, "_give_owner", lambda tmp, old: False)  # another user's file, not root
+    inode = own.stat().st_ino
+    project.write_whole(own, b'{"b": 2, "c": 3}\n')
+    assert own.stat().st_ino == inode and own.read_bytes() == b'{"b": 2, "c": 3}\n'
+    project.write_whole(own, b"{}\n")  # shorter: the old tail is cut
+    assert own.read_bytes() == b"{}\n"
+    assert not [p.name for p in tmp_path.iterdir() if p.name.endswith(".pt-tmp")]
+
+
+def test_a_failed_in_place_write_puts_the_old_bytes_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The in-place fallback of write_whole (a hard-linked file) cut short by a full disk: the
+    file and its other names keep the old text, and the error reaches the caller."""
+    from runner import project
+
+    linked = tmp_path / "pyproject.toml"
+    linked.write_bytes(b"[project]\nname = 'old'\n")
+    os.link(linked, tmp_path / "twin.toml")
+    real = project._overwrite
+    calls: list[bytes] = []
+
+    def cut_short(fd: int, data: bytes) -> None:
+        calls.append(data)
+        if len(calls) == 1:  # the new text: half of it lands, then the disk is full
+            real(fd, data[: len(data) // 2])
+            raise OSError(28, "No space left on device")
+        real(fd, data)  # the restore
+
+    monkeypatch.setattr(project, "_overwrite", cut_short)
+    with pytest.raises(OSError, match="No space left"):
+        project.write_whole(linked, b"[project]\nname = 'a much longer new name'\n")
+    assert linked.read_bytes() == (tmp_path / "twin.toml").read_bytes() == b"[project]\nname = 'old'\n"
+    assert len(calls) == 2
+
+
 def test_write_pyproject_under_dry_run_reports_but_writes_nothing(pyproject: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write(pyproject, BASE)
     monkeypatch.setattr(proc, "DRY_RUN", True)

@@ -612,7 +612,7 @@ header rules (with detector tests proving each rule fires).
 | `deploy.py` (one level up) | Stops with exit 3 and one `error:` line (no traceback) when uv started it on Python < 3.11 (a `uv run` by hand with an old `UV_PYTHON`), BEFORE importing the runner; reconfigures stdout/stderr to UTF-8, puts its own dir on `sys.path`, calls `runner.cli.main`. |
 | `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `FORWARDS` / `HELP_PASSES_THROUGH` (section 5.2); `INTERNAL` (routes listed nowhere: `__init`). `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main`/`_main` (exception -> exit code, closed stdout), `cmd_help` (commands and `[tasks]` entries), `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
 | `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths` (`import_path`), comment-preserving editor `set_value` / `update_file` (section 6.1), its TOML statement scanner `scan` (render reads pyproject.toml with it, 6.3), `toml_value`. |
-| `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL` (`detect_wsl`: `wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`, `scratch_name` and `check_private_dir` (the harnesses' scratch folders), `write_whole` (a file rewritten through a temporary file and `os.replace`, never half-written). |
+| `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `IS_WINDOWS/IS_MACOS/IS_WSL` (`detect_wsl`: `wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`, `scratch_name` and `check_private_dir` (the harnesses' scratch folders), `write_whole` (a file rewritten through a temporary file and `os.replace`, never half-written, owner and hard links kept: `_give_owner`, `_write_in_place`). |
 | `ui.py` | All runner output to stderr; `DeployError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C and passes SIGTERM/SIGHUP on), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`. |
 | `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (every group but those `left_out` names), `interpreter_info` (with `platform` and `cc`); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
@@ -1006,11 +1006,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   failing for another reason (dubious ownership) is refused the same way, never read as "no
   git". Then: move `src/<old_pkg>/` first (the step that can fail on a locked file; case-only
   renames use two moves), write the files (`apply_plan`: each through a temporary file next to
-  it and `os.replace` (`_replace_bytes`: mode kept, a symlink stays a link, a read-only file is
-  an error; a file with other hard links, or of another owner or group, is written in place with
-  its old bytes put back on failure, `_keeps_inode`: a new inode dropped the links and made the
-  files of a bind-mounted project root's), so a write cut short (disk full, a quota, `ulimit -f`) never leaves one
-  half-written; a write that fails undoes everything, old bytes back and the folder moved back,
+  it and `os.replace` (`_replace_bytes` = `project.write_whole`: mode, owner and group kept, a
+  symlink stays a link, a read-only file is an error; a file with other hard links, or one whose
+  owner the runner cannot give a new file, is rewritten in place with its old bytes put back on
+  failure: a new inode dropped the links and made the files of a bind-mounted project root's),
+  so a write cut short (disk full, a quota, `ulimit -f`) never leaves one half-written; a write that fails undoes everything, old bytes back and the folder moved back,
   and the error names whatever it could not undo), the name of the `applied` record right away
   (`cmd_apply.rename_record`, only the project's own record: named after the old app it is no
   longer trusted), `cmd_env.ensure_lock` (a failure there says "the files are already renamed
@@ -3354,7 +3354,10 @@ Runner code:
   and stdin (section 5.6).
 - A project file the user may have edited (pyproject.toml, pytemplate.toml, state.json, the
   generated files, a restored uv.lock) is rewritten with `project.write_whole`, never in place: a
-  write cut short (a full disk, a quota) left pyproject.toml truncated mid-block.
+  write cut short (a full disk, a quota) left pyproject.toml truncated mid-block. It keeps the
+  file's mode, owner and group (`_give_owner`: root in a dev container left a user's files
+  root-owned) and its other hard links; a file with other links, or one whose owner it cannot
+  give a new file, is rewritten in place (`_write_in_place`, the old bytes back on failure).
 - Text files: `encoding="utf-8", newline="\n"`; write `"\ufeff"`, never a literal BOM; read
   `pytemplate.toml` with `config.read_text` (a bad encoding becomes a clear config error);
   read `pyproject.toml`, `uv.lock` and the preset files (`preset.toml`, `constraints.txt`) as
