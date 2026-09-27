@@ -1292,6 +1292,20 @@ def test_checks_generated_files(tmp_path: Path, tools: Tools) -> None:
     assert "./deploy render, then git add gen.json .pytemplate/state.json" in res["generated files up to date"].hint
 
 
+def test_quiet_keeps_what_a_failed_check_says(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`./deploy -q hooks run` (a form README accepts: the global options may come first) printed
+    "[XX] ruff format: files need formatting" without the file nor the fix: -q hides progress,
+    never the answer (CLAUDE.md 5.3)."""
+    from runner import ui
+
+    monkeypatch.setattr(ui, "QUIET", True)
+    hooks._print(hooks.Result(False, "ruff format: files need formatting", "./deploy fmt, then git add src/p/extra.py", output="Would reformat: src/p/extra.py"))
+    hooks._print(hooks.Result(True, "ruff", output="All checks passed!"))
+    err = capsys.readouterr().err
+    assert "files need formatting" in err and "Would reformat: src/p/extra.py" in err and "./deploy fmt, then git add src/p/extra.py" in err, err
+    assert "All checks passed!" not in err  # a passed check's output stays progress
+
+
 @needs_git
 def test_checks_lock(tmp_path: Path, tools: Tools) -> None:
     repo, staged = staged_project(

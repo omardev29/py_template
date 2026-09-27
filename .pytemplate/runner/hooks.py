@@ -1333,17 +1333,20 @@ def checks(
 
 
 def _print(result: Result) -> None:
-    """The check line, then the tool output, then how to fix it."""
+    """The check line, then the tool output, then how to fix it. A check that did not pass keeps
+    its output and hint under -q, which hides progress, never the answer: `./deploy -q hooks run`
+    (the global options may come first) said which check failed, not which file nor the fix."""
     ui.check_line(result.passed, result.label)
+    out = ui.info if result.passed is True else ui.report
     for line in result.output.splitlines():
-        ui.info(f"         {line}".rstrip())
+        out(f"         {line}".rstrip())
     for w in result.warnings:
         ui.warn(w)
     for e in result.errors:
         ui.error(e)
     if result.passed is not True:
         for line in result.hint.splitlines():
-            ui.info(f"         {line}")
+            ui.report(f"         {line}")
 
 
 def run(cfg: Config, repo: Repo) -> int:
