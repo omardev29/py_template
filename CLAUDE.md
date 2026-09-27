@@ -936,7 +936,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   counts); another project's command, or a quoted string, is "foreign". A project that
   an enclosing repository ignores (`git check-ignore -q deploy`, which refuses
   `--literal-pathspecs`) gets no hook unless forced. With `core.hooksPath` set nothing is
-  written: install/status/doctor print the line to add (`sh ./deploy hooks run || exit $?`), and
+  written: install/status/doctor print the line to add (`hooks.run_line`: `[ ! -f ./deploy ] ||
+  sh ./deploy hooks run || exit $?`, which skips a checkout without the launcher as our own hook
+  does: in a global hooks folder the unguarded line failed every commit of every other
+  repository; the hint says so for a hooks folder outside the repository), and
   apply's summary says whether that hook already runs it (`hooks.hooks_path_runner`); husky 9
   (`.husky/_` holding `h` or `husky.sh`) is read through `.husky/pre-commit`.
 - `hooks run` checks what the commit contains: staged files (`git diff --cached --name-only

@@ -171,9 +171,9 @@ def test_launcher_path_is_relative_to_the_top(tmp_path: Path) -> None:
     assert repo.prefix == "apps/my app"
     assert repo.launcher == "./apps/my app/deploy"
     assert "_pt_launcher='./apps/my app/deploy'" in hooks.hook_script(repo.launcher)
-    assert hooks.run_line(repo) == "sh './apps/my app/deploy' hooks run || exit $?"
+    assert hooks.run_line(repo) == "[ ! -f './apps/my app/deploy' ] || sh './apps/my app/deploy' hooks run || exit $?"
     assert find(top).launcher == "./deploy"
-    assert hooks.run_line(find(top)) == "sh ./deploy hooks run || exit $?"
+    assert hooks.run_line(find(top)) == "[ ! -f ./deploy ] || sh ./deploy hooks run || exit $?"
 
 
 def test_not_a_git_work_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -773,6 +773,33 @@ def test_calls_means_this_projects_launcher_on_a_live_line(tmp_path: Path, capsy
 
 
 @needs_git
+def test_a_global_hooks_path_line_skips_the_repositories_without_the_launcher(tmp_path: Path) -> None:
+    """A core.hooksPath shared by every repository (a global one): the advised line runs in each
+    of them, and unguarded (`sh ./deploy hooks run || exit $?`) it failed every commit of the
+    others ("cannot open ./deploy"). It skips a checkout without the launcher, and still runs
+    this project's checks."""
+    ghooks = tmp_path / "ghooks"
+    ghooks.mkdir()
+    Path(os.environ["GIT_CONFIG_GLOBAL"]).write_text(f"[core]\n\thooksPath = {ghooks.as_posix()}\n", encoding="utf-8")
+    top, project = make_repo(tmp_path)
+    (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
+    repo = find(project, top)
+    assert repo.custom_hooks_path
+    passed, _, hint = hooks._status_line(make(), repo)
+    assert passed is None and hooks.run_line(repo) in hint and "other repositories run it too" in hint, hint
+    hook = ghooks / hooks.HOOK
+    hook.write_bytes(f"#!/bin/sh\n{hooks.run_line(repo)}\n".encode("ascii"))
+    if not IS_WINDOWS:
+        hook.chmod(0o755)
+    assert hooks.classify(hook, repo) == "calls"
+    assert _commit_log(top, tmp_path, "a.txt") == ["./deploy hooks run"]  # this project's checks run
+    other = tmp_path / "other"
+    other.mkdir()
+    git(other, "init", "-q")
+    assert _commit_log(other, tmp_path, "b.txt") == []  # no ./deploy there: skipped, and the commit is made
+
+
+@needs_git
 def test_calls_with_a_project_folder_that_needs_quotes(tmp_path: Path) -> None:
     top, project = make_repo(tmp_path, "my app")
     (project / "deploy").write_bytes(NAMED_LAUNCHER.encode("ascii"))
@@ -781,7 +808,7 @@ def test_calls_with_a_project_folder_that_needs_quotes(tmp_path: Path) -> None:
     shared = top / "hk" / hooks.HOOK
     repo = find(project, top)
     line = hooks.run_line(repo)
-    assert line == "sh './my app/deploy' hooks run || exit $?"
+    assert line == "[ ! -f './my app/deploy' ] || sh './my app/deploy' hooks run || exit $?"
     shared.write_text(f"#!/bin/sh\n{line}\n", encoding="utf-8")
     assert hooks.classify(shared, repo) == "calls"
     shared.write_text('#!/bin/sh\nsh "./my app/deploy" hooks run\n', encoding="utf-8")
@@ -1630,7 +1657,7 @@ def test_force_leaves_a_non_shell_hook_that_reads_its_name(tmp_path: Path) -> No
     target = top / ".git" / "hooks" / hooks.HOOK
     text = "#!/usr/bin/env ruby\nhook_type = File.basename($0)\nexit 0\n"
     target.write_text(text, encoding="utf-8")
-    with pytest.raises(DeployError, match=r"reads its own name .*Add this line to it instead:\n  sh \./deploy hooks run \|\| exit \$\?"):
+    with pytest.raises(DeployError, match=r"reads its own name .*Add this line to it instead:\n  \[ ! -f \./deploy \] \|\| sh \./deploy hooks run \|\| exit \$\?"):
         hooks.install(find(project, top), force=True)
     assert target.read_text(encoding="utf-8") == text and not (target.parent / hooks.LOCAL).exists()
 

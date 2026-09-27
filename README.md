@@ -1342,8 +1342,10 @@ only deletes files is checked too).
   keeps it as `pre-commit.local` and runs it first (a shell script still sees its own name,
   `pre-commit`, as husky v4 and yorkie need); `uninstall` puts it back. A hook in another
   language that reads its own name is left alone: add the line below to it instead. With
-  `core.hooksPath` set, nothing is written: add `sh ./deploy hooks run || exit $?` to your own hook
-  (husky 9: `.husky/pre-commit`).
+  `core.hooksPath` set, nothing is written: add
+  `[ ! -f ./deploy ] || sh ./deploy hooks run || exit $?` to your own hook (husky 9:
+  `.husky/pre-commit`); it skips a checkout without `./deploy`, so a global hooks folder that
+  every repository runs keeps working in the others.
 - A project in a subfolder of a bigger repository: the hook goes into that repository's hooks
   folder and checks the project's staged files. Two projects in one repository: `apply` leaves
   the other project's hook alone, and `./deploy hooks install --force` runs both (the first

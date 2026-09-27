@@ -369,9 +369,12 @@ def hook_script(launcher: str) -> str:
 
 
 def run_line(repo: Repo) -> str:
-    """The line to add to a hook that pytemplate does not manage (core.hooksPath)."""
+    """The line to add to a hook that pytemplate does not manage (core.hooksPath). It skips a
+    checkout without the launcher, as pytemplate's own hook does (another branch): the unguarded
+    `sh ./deploy hooks run || exit $?` in a global hooks folder failed every commit of every
+    other repository ("cannot open ./deploy")."""
     word = repo.launcher if re.fullmatch(r"[A-Za-z0-9_./-]+", repo.launcher) else sh_literal(repo.launcher)
-    return f"sh {word} hooks run || exit $?"
+    return f"[ ! -f {word} ] || sh {word} hooks run || exit $?"
 
 
 def _read(path: Path) -> str:
@@ -660,9 +663,14 @@ def _hooks_path_file(repo: Repo) -> Path:
 def _hooks_path_hint(repo: Repo) -> str:
     target = _hooks_path_file(repo)
     runs = "husky runs it" if target.parent != repo.hooks_dir else "a sh script; git runs it from the top of the work tree"
+    shared = (
+        ""
+        if _within(repo.hooks_dir, repo.top) is not None
+        else "\n(that folder is outside this repository: other repositories run it too, and the line skips those without the launcher)"
+    )
     return (
         f"Add this line to {_show(target, repo)} ({runs}),\n"
-        f"or run it from the tool that manages that folder:\n    {run_line(repo)}"
+        f"or run it from the tool that manages that folder:\n    {run_line(repo)}{shared}"
     )
 
 
