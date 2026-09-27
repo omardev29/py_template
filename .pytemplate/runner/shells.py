@@ -571,18 +571,23 @@ def _posix_header(shell: str) -> str:
 
 
 def snippet(shell: str, cfg: Config | None = None) -> str:
-    """Return the shell-setup snippet for `shell` (ASCII, with where to paste it on top)."""
+    """Return the shell-setup snippet for `shell` (ASCII, with where to paste it on top).
+
+    It starts with a line break: appended (>>) to an rc file whose last line has none (VS Code
+    and Notepad save files so), its first comment would join that line and break it."""
     if shell in ("bash", "zsh", "niubash", "msys2"):
-        return _posix_header(shell) + "\n" + POSIX_FUNCTION.strip("\n") + "\n"
-    if shell in ("pwsh", "powershell"):
-        return PWSH_SNIPPET.strip("\n") + "\n"
-    if shell == "fish":
-        return FISH_SNIPPET.strip("\n") + "\n"
-    if shell == "nu":
-        return NU_SNIPPET.strip("\n") + "\n"
-    if shell == "xonsh":
-        return xonsh_snippet(cfg).strip("\n") + "\n"
-    raise DeployError(f"shell-setup: unknown shell '{shell}' ({' | '.join(SETUP_SHELLS)})")
+        body = _posix_header(shell) + "\n" + POSIX_FUNCTION.strip("\n")
+    elif shell in ("pwsh", "powershell"):
+        body = PWSH_SNIPPET.strip("\n")
+    elif shell == "fish":
+        body = FISH_SNIPPET.strip("\n")
+    elif shell == "nu":
+        body = NU_SNIPPET.strip("\n")
+    elif shell == "xonsh":
+        body = xonsh_snippet(cfg).strip("\n")
+    else:
+        raise DeployError(f"shell-setup: unknown shell '{shell}' ({' | '.join(SETUP_SHELLS)})")
+    return "\n" + body + "\n"
 
 
 def guess_shell(env: Mapping[str, str]) -> str | None:

@@ -1267,6 +1267,7 @@ pipeline input on. Print the xonsh snippet again to complete commands added late
 
 ```sh
 ./deploy shell-setup niubash    # niubash reads ~/.niubashrc, but `niu -c` and scripts read $NIU_ENV
+./deploy shell-setup bash >> ~/.bashrc   # appending is safe: the output starts with a line break
 ```
 
 **Known limits.**

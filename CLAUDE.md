@@ -543,7 +543,9 @@ header rules (with detector tests proving each rule fires).
   prefix, which names the interpreter of `#!/bin/sh` (Git Bash/MSYS2 without `SHELL`); unknown
   shell exits 2): prints a `deploy` function/alias that works from any subfolder, plus where
   to paste it. Output is ASCII with LF even on Windows (written
-  to `stdout.buffer`: it is appended to rc files); a user's file named in a header that is not
+  to `stdout.buffer`: it is appended to rc files) and starts with a line break (`shells.snippet`:
+  appended to an rc file whose last line had none, the header joined that line and broke
+  it); a user's file named in a header that is not
   ASCII (a `NIU_ENV` or MSYS2 home with an accent) is written `$NIU_ENV` or
   `<MSYS2 root>\home\<you>\.bashrc` instead. bash, zsh, niubash and msys2 share one POSIX
   function whose walk-up stops at `/`, `C:`, `C:/` and at a backslash `PWD` (the old `dirname`

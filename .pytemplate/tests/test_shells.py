@@ -312,6 +312,21 @@ def test_snippets_are_ascii_and_say_where_to_paste(monkeypatch: pytest.MonkeyPat
         shells.snippet("tcsh")
 
 
+def test_a_snippet_appended_to_an_rc_file_never_joins_its_last_line(tmp_path: Path) -> None:
+    """`./deploy shell-setup bash >> ~/.bashrc` on an rc file without a final newline (VS Code and
+    Notepad save them so): the snippet's first comment joined the user's last line, its backticks
+    ran `deploy` and every new shell printed errors."""
+    for shell in shells.SETUP_SHELLS:
+        assert shells.snippet(shell).startswith("\n"), shell
+    sh = posix_sh()
+    if sh is None:
+        pytest.skip("no POSIX sh here")
+    rc = tmp_path / "rc"
+    rc.write_bytes(b"PT_KEEP=kept" + shells.snippet("bash").encode("ascii"))
+    r = subprocess.run([*sh, "-c", '. "$1" && printf "%s|" "$PT_KEEP" && command -v deploy', "sh", str(rc)], capture_output=True, text=True, timeout=60, check=False)
+    assert (r.stdout, r.stderr) == ("kept|deploy\n", ""), (r.stdout, r.stderr)
+
+
 def test_snippets_stay_ascii_with_non_ascii_user_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The niubash and msys2 headers name the user's files: a NIU_ENV or user name with an accent
     must not put non-ASCII bytes into the snippet (it is appended to rc files)."""
