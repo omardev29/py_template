@@ -233,7 +233,7 @@ Exit codes:
 - 1: check, test or doctor failures, or an internal runner error (a traceback is printed).
 - 2: a usage or configuration error (also a program without its executable bit or `#!` line, a
   working folder that does not exist, a bad `[tasks]` entry, a `.build/` or `dist/` that another
-  user left behind with `sudo ./pyt ...`).
+  user left behind with `sudo ./pyt ...`, a command that needs a project typed outside one).
 - 3: a missing requirement: uv, a uv older than 0.10.12, a program, a compiler, an interpreter,
   Neovim or git for `selftest --nvim --require`, or the runner started on a Python older than
   3.11. A requirement that uv itself reports missing (an interpreter it can neither find nor

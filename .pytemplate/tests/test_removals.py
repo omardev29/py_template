@@ -1,10 +1,12 @@
-"""What the removals leave behind: no CPython JIT support and no public `init` command.
+"""What the removals leave behind: no CPython JIT support, no public `init`, no `shell-setup`.
 
 - `python.jit` / `python.jit_interpreter` are unknown keys: the loader's normal error (exit 2).
 - Nothing the runner generates or starts sets PYTHON_JIT or points at a .venv-jit environment.
 - `./pyt init ...` exits 2 with a hint (./pyt new DIR --preset P). The preset step lives on
   as the internal route `__init`: `./pyt new` runs it in the fresh copy, and the template
   maintainer regenerates the template root with it (./pyt __init script --name myapp --force).
+- `shell-setup` (a pyt function or alias per shell) is an unknown command, listed nowhere:
+  `pyt install` puts the launchers themselves on PATH.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cli, cmd_mode, config, envs, presets, proc, rename, render, tasks, ui  # noqa: E402
+from runner import cli, cmd_mode, config, envs, presets, proc, project, rename, render, shells, tasks, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.editors import nvim, vscode  # noqa: E402
 from runner.methods import portable, pyz  # noqa: E402
@@ -348,6 +350,36 @@ def test_preset_hint_in_validate_names_new() -> None:
         make({"app": {"preset": "nope"}})
     assert HINT in str(e.value) and "./pyt init" not in str(e.value)
     assert e.value.code == 2
+
+
+# --- shell-setup: gone (`pyt install` puts the launchers themselves on PATH) ----------------------
+
+
+def test_shell_setup_is_listed_nowhere() -> None:
+    assert "shell-setup" not in cli.COMMANDS and "shell-setup" not in cli.INTERNAL
+    # its snippets and their helpers went with it (selftest --shells, __probe and doctor stay)
+    for name in ("cmd_shell_setup", "snippet", "guess_shell", "xonsh_snippet", "completion_words", "SETUP_SHELLS"):
+        assert not hasattr(shells, name), f"shells.{name} is left over from shell-setup"
+    # editor.json (VS Code/Neovim task lists and pickers), VS Code's tasks, the plugin's metadata
+    assert "shell-setup" not in {c["name"] for c in nvim.commands()}
+    committed = json.loads((ROOT / ".pytemplate" / "editor.json").read_text(encoding="utf-8"))
+    assert "shell-setup" not in {c["name"] for c in committed["commands"]}
+    labels = [t["label"] for t in vscode.tasks(make({}))["tasks"]]
+    assert not any("shell-setup" in label for label in labels), labels
+    assert "shell-setup" not in (TEMPLATE / "nvim" / "lua" / "pytemplate" / "tasks.lua").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("outside", [False, True], ids=["project", "outside"])
+def test_shell_setup_is_an_unknown_command(outside: bool, monkeypatch: pytest.MonkeyPatch, cli_state: None, capsys: pytest.CaptureFixture[str]) -> None:
+    def never(*_a: object, **_k: object) -> None:
+        raise AssertionError("nothing may run or render")
+
+    monkeypatch.setattr(project, "GLOBAL", outside)
+    monkeypatch.setattr(config, "load", lambda *_a: make({}))
+    monkeypatch.setattr(render, "auto", never)
+    monkeypatch.setattr(tasks, "run_task", never)
+    assert cli.main(["shell-setup", "bash"]) == 2
+    assert "unknown command: shell-setup" in capsys.readouterr().err
 
 
 # --- the real thing, in throwaway copies ---------------------------------------------------------
