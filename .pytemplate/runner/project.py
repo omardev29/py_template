@@ -32,6 +32,22 @@ STATE_FILE = TEMPLATE / "state.json"
 IS_WINDOWS = os.name == "nt"
 IS_MACOS = sys.platform == "darwin"
 
+# `pyt install` copies the template into a folder of the user's (its "snapshot") and records the
+# install there in this file. A project made from the snapshot never carries it (presets._skipped).
+INSTALL_RECORD = ".pytemplate/installed.json"
+
+
+def detect_global(root: Path, environ: Mapping[str, str] = os.environ) -> bool:
+    """GLOBAL: the runner runs the installed template, outside any project. The launchers found no
+    project and set PYTEMPLATE_GLOBAL=1; or the runner's own root is the snapshot (its install
+    record: a command typed inside the snapshot's folder, or its launcher run by its path), which
+    is never a project either. Then only the commands that need no project run (cli.GLOBAL_COMMANDS)
+    and nothing is written into the snapshot (its bytecode cache: .pytemplate/pyt.py)."""
+    return environ.get("PYTEMPLATE_GLOBAL") == "1" or (root / INSTALL_RECORD).is_file()
+
+
+GLOBAL = detect_global(ROOT)
+
 WSL_INTEROP = "/proc/sys/fs/binfmt_misc/WSLInterop"
 _WINDOWS_SOURCE = re.compile(r"[A-Za-z]:|\\\\")  # C:\ (drvfs, 9p) or \\server\share
 

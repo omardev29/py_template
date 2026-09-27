@@ -106,12 +106,14 @@ def base_env() -> dict[str, str]:
       exports them and they would confuse the project's `uv`); no PYTHONHOME/PYTHONPATH.
     - None of the user's uv variables in UV_SELECTION: the runner picks the project, the
       interpreter and the environment of every uv call itself (envs.env_vars).
+    - No PYTEMPLATE_GLOBAL: the global mode of this runner (project.GLOBAL) is its own; the
+      project `new` makes runs its `__init` as a project, and no tool may take it on.
     - PYTHONUTF8=1: mypy/mypyc open files with the locale encoding (cp1252 on Windows).
     - On Windows, the Visual Studio installer in PATH: VS 2026's vcvarsall.bat calls
       vswhere.exe without a path and, if that fails, setuptools cannot find the compiler.
     """
     env = dict(os.environ)
-    for key in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH", *UV_SELECTION):
+    for key in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH", "PYTEMPLATE_GLOBAL", *UV_SELECTION):
         env.pop(key, None)
     parts = [p for p in env.get("PATH", "").split(os.pathsep) if p]
     if sys.prefix != sys.base_prefix:

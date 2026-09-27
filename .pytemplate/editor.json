@@ -190,12 +190,6 @@
       "group": "Other"
     },
     {
-      "name": "shell-setup",
-      "usage": "[xonsh|pwsh|powershell|bash|zsh|niubash|msys2|fish|nu]",
-      "summary": "Print a `pyt` function/alias for your shell (works from any subfolder)",
-      "group": "Other"
-    },
-    {
       "name": "nvim",
       "usage": "[doctor|trust|extras|bootstrap|sync]",
       "summary": "Neovim/LazyVim integration: check it, trust .lazy.lua, enable extras, sync plugins",

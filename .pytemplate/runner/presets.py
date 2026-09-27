@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import proc, ui
 from .config import APP_NAME, BACKENDS, NAME_RULE
-from .project import BUILD, PRESETS, PYPROJECT, ROOT, TEMPLATE, rel, write_whole
+from .project import BUILD, INSTALL_RECORD, PRESETS, PYPROJECT, ROOT, TEMPLATE, rel, write_whole
 from .ui import PytError
 
 if TYPE_CHECKING:
@@ -1011,6 +1011,8 @@ def _skipped(rel_path: str) -> bool:
     parts = rel_path.split("/")
     if any(p in SKIP_ANYWHERE or p.startswith(".venv") for p in parts) or parts[0] in SKIP_AT_ROOT:
         return True
+    if rel_path == INSTALL_RECORD:  # the record of `pyt install` in its copy of the template
+        return True
     # CI of the template repository itself (template-*.yml), not of the new project
     return len(parts) >= 3 and parts[:2] == [".github", "workflows"] and parts[2].startswith("template-")
 
@@ -1074,9 +1076,26 @@ def _git_files(*args: str) -> list[str] | None:
     return [_git_path(line) for line in r.stdout.split("\n") if line]
 
 
+def _installed() -> bool:
+    """Whether `new` copies the installed template (global mode: project.GLOBAL)."""
+    from . import project  # the name `project` is a local variable elsewhere in this module
+
+    return project.GLOBAL
+
+
+def source_name() -> str:
+    """What `new` copies, for its messages."""
+    return f"the installed template ({ROOT})" if _installed() else "this template"
+
+
 def _tracked_template() -> tuple[list[str] | None, str]:
     """The files copy_template copies: git's tracked files, or None for every file (ignored ones
-    included), with how it picks them (the real run and the dry run of `new` say it alike)."""
+    included), with how it picks them (the real run and the dry run of `new` say it alike).
+    The installed template (global mode) is a clean copy of a template's tracked files made by
+    `pyt install`, with no .git: every file, without asking a git (the folder may even lie in
+    a repository of the user's, such as a home folder kept in git)."""
+    if _installed():
+        return None, "every file"
     tracked = _git_files("--cached")
     if tracked is not None and ".pytemplate/pyt.py" in tracked:
         return tracked, "the files git tracks"
@@ -1097,7 +1116,8 @@ def copy_template(dest: Path) -> None:
     In a git work tree only what git tracks is copied (with its working-tree content):
     untracked and ignored files (.env secrets, .idea/, htmlcov/, *.spec...) stay behind, and the
     untracked ones are listed. Without git, or when git does not track the template (a copy
-    inside another repository), every file but the _skipped ones is copied. A symbolic link is
+    inside another repository), every file but the _skipped ones is copied, and so from the
+    installed template (global mode), without a word about it. A symbolic link is
     copied as a link, as git tracks it (a link to a folder is not the folder's content, and a
     dangling one is still a tracked file).
     """
@@ -1105,7 +1125,8 @@ def copy_template(dest: Path) -> None:
         raise PytError(f"{dest} already exists and is not empty")
     tracked, how = _tracked_template()
     if tracked is None:
-        ui.info(f"  copying {how}")
+        if not _installed():  # a clean copy by construction: nothing to say about it
+            ui.info(f"  copying {how}")
         shutil.copytree(ROOT, dest, symlinks=True, ignore=_ignore, dirs_exist_ok=True)
         return
     dest.mkdir(parents=True, exist_ok=True)
@@ -1256,7 +1277,7 @@ def new(dest: Path, preset: str, name: str | None) -> None:
     """
     dest = dest.resolve()
     if dest == ROOT or ROOT in dest.parents:
-        raise PytError("new: the destination folder cannot be inside this template")
+        raise PytError(f"new: the destination folder cannot be inside {source_name()}")
     app_name = name or name_from_folder(dest.name)
     if not APP_NAME.fullmatch(app_name):
         raise PytError(f"'{app_name}' is not a valid app name: it may only contain {NAME_RULE}.\n  Choose one with --name NAME")
@@ -1298,10 +1319,12 @@ def new(dest: Path, preset: str, name: str | None) -> None:
 
 def next_steps(dest: Path) -> list[str]:
     """The commands to type after `new`, each on its own line (cmd and Windows PowerShell 5.1
-    have no `&&`), quoted for the calling shell, told as shells.guess_shell tells it: the
-    launcher (PYTEMPLATE_LAUNCHER: ps1:, nu, sh:niubash), then XONSH_VERSION. pyt.cmd also
-    serves xonsh and nushell on Windows: behind it NU_VERSION (nushell exports it) names
-    nushell, and cmd's syntax is for the rest (cmd, a Python subprocess, a VS Code task)."""
+    have no `&&`): `cd` to the project, quoted for the calling shell, then the launcher that shell
+    runs. The shell: PowerShell from the launcher (PYTEMPLATE_LAUNCHER ps1:), then xonsh and
+    nushell, which export XONSH_VERSION and NU_VERSION to what they start (niubash's own launcher
+    value sh:niubash wins over an inherited one), then cmd's syntax behind pyt.cmd (cmd itself, a
+    Python subprocess, a VS Code task), else a POSIX shell's. xonsh and nushell on Windows start
+    pyt.cmd too: `./pyt.cmd` there."""
     launcher = os.environ.get("PYTEMPLATE_LAUNCHER", "")
     path = str(dest)
     if launcher.startswith("ps1"):
@@ -1310,17 +1333,16 @@ def next_steps(dest: Path) -> list[str]:
         literal = "-LiteralPath " if re.search(r"[\[\]*?`]", path) else ""
         return [f"cd {literal}'" + re.sub("['\u2018-\u201b]", lambda m: m.group() * 2, path) + "'", "./pyt setup"]
     cmd = launcher.startswith("cmd")
-    nushell = launcher == "nu"
-    if not nushell and not launcher.startswith("sh:niubash") and os.environ.get("XONSH_VERSION"):
+    niubash = launcher.startswith("sh:niubash")
+    setup = "./pyt.cmd setup" if cmd else "./pyt setup"
+    if not niubash and os.environ.get("XONSH_VERSION"):
         # xonsh reads a quoted argument as a Python string, but expands $NAME in it: @(...) is a
         # Python expression, passed as it is
-        return [f"cd @({path!r})" if "$" in path else f"cd {path!r}", "./pyt setup"]
-    if nushell or (cmd and os.environ.get("NU_VERSION")):
-        # nushell: a single-quoted string is raw, a double-quoted one has the escapes \\ and \";
-        # the launcher value nu is the shell-setup function `pyt`, else Windows' pyt.cmd
+        return [f"cd @({path!r})" if "$" in path else f"cd {path!r}", setup]
+    if not niubash and os.environ.get("NU_VERSION"):
+        # nushell: a single-quoted string is raw, a double-quoted one has the escapes \\ and \"
         escaped = path.replace("\\", "\\\\").replace('"', '\\"')
-        cd = f"cd '{path}'" if "'" not in path else f'cd "{escaped}"'
-        return [cd, "pyt setup" if nushell else "./pyt.cmd setup"]
+        return [f"cd '{path}'" if "'" not in path else f'cd "{escaped}"', setup]
     if cmd:
         return [f'cd /d "{path}"', r".\pyt setup"]  # a Windows path never holds a double quote
     return [f"cd {shlex.quote(path)}", "./pyt setup"]

@@ -495,7 +495,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
     dest = user_path(ns.dest)
     resolved = dest.resolve()
     if resolved == ROOT or ROOT in resolved.parents:
-        raise PytError("new: the destination folder cannot be inside this template")
+        raise PytError(f"new: the destination folder cannot be inside {presets.source_name()}")
     if dest.exists() and not dest.is_dir():
         raise PytError(f"new: {dest} exists and is not a folder")
     if dest.is_dir() and any(dest.iterdir()):
@@ -525,7 +525,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
         else:
             git = "and `git init -b main`"
         ui.info(
-            f"  would copy this template there ({presets.copy_scope()}; no .git, environments, builds or "
+            f"  would copy {presets.source_name()} there ({presets.copy_scope()}; no .git, environments, builds or "
             f"caches), run `./pyt __init {ns.preset} --name {name} --force` in it {git}"
         )
         if top is not None:

@@ -3,7 +3,8 @@
     ./pyt [-v|-q] [--dry-run] [--no-render] COMMAND [args...]
 
 Global options go BEFORE the command; everything after it belongs to the command
-(and for `run`/`test`, to your app or to pytest).
+(and for `run`/`test`, to your app or to pytest). Outside a project (global mode: the `pyt`
+that `pyt install` puts on PATH, run from a folder of no project) only GLOBAL_COMMANDS run.
 """
 
 from __future__ import annotations
@@ -13,13 +14,14 @@ import importlib
 import os
 import signal
 import sys
+import textwrap
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import proc, ui
+from . import proc, project, ui
 from .project import BUILD, DIST, rel
 from .ui import PytError
 
@@ -66,14 +68,13 @@ COMMANDS: dict[str, Command] = {
     "pyz-merge": Command("cmd_build", "cmd_pyz_merge", "Merge the .pyz files of each OS (e.g. from CI) into a cross-platform one", "A.pyz B.pyz... --out C.pyz", render=False, group="Distribution"),
     # other
     "tasks": Command("cli", "cmd_tasks", "List the custom tasks in pytemplate.toml [tasks]", render=False, group="Other"),
-    "shell-setup": Command("shells", "cmd_shell_setup", "Print a `pyt` function/alias for your shell (works from any subfolder)", "[xonsh|pwsh|powershell|bash|zsh|niubash|msys2|fish|nu]", render=False, group="Other"),
     "nvim": Command("cmd_nvim", "cmd_nvim", "Neovim/LazyVim integration: check it, trust .lazy.lua, enable extras, sync plugins", "[doctor|trust|extras|bootstrap|sync]", group="Other"),
     "selftest": Command("cli", "cmd_selftest", "Run the runner's own tests and mypy --strict (.pytemplate)", "[--shells|--nvim|--e2e] [args...]", render=False, group="Other"),
     "help": Command("cli", "cmd_help", "Show this help (or a command's help)", "[COMMAND]", render=False, group="Other"),
 }
 
 # Internal routes: dispatched like COMMANDS but never listed (help, editor.json, the editors'
-# task lists and the shell completion read COMMANDS only). Task names cannot start with "_".
+# task lists and their completion read COMMANDS only). Task names cannot start with "_".
 INTERNAL: dict[str, Command] = {
     # `./pyt new` runs it in the fresh copy; the template maintainer regenerates the template
     # root with it (./pyt __init script --name myapp --force). Users pick a preset with `new`.
@@ -95,6 +96,60 @@ Examples:
   ./pyt build pypy            # portable folder with PyPy bundled
   ./pyt build cpython --method pyz
   ./pyt nvim doctor           # check the LazyVim integration (./pyt nvim trust once)"""
+
+# Global mode (project.GLOBAL: the launchers found no project and run the installed template):
+# the commands that run there, in the order `pyt help` lists them. install and uninstall put the
+# launchers on PATH and take them off again. Every other command, internal route and name (a
+# project's [tasks] entry) exits 2: it needs a project (_outside_a_project).
+GLOBAL_COMMANDS = ("new", "doctor", "install", "uninstall", "help")
+# What a global command does outside a project, where it differs from its summary
+GLOBAL_SUMMARIES = {"doctor": "Check this machine: uv, the runner's Python, git, the C compiler of mypyc, Neovim"}
+NEEDS_A_PROJECT = "run it in a project folder (any subfolder works), or create one: pyt new DIR [--preset P]"
+
+
+def _prog() -> str:
+    """How the user started this run: `pyt` (on PATH) outside a project, `./pyt` in one."""
+    return "pyt" if project.GLOBAL else "./pyt"
+
+
+INIT_OUTSIDE = "init is no longer a pyt command: create a project with pyt new DIR [--preset P]"
+
+
+def _outside_a_project(name: str) -> str:
+    """The error of `pyt NAME` in global mode, for a NAME that is not a GLOBAL_COMMANDS one."""
+    if name == "init":
+        return INIT_OUTSIDE
+    if name in COMMANDS or name in INTERNAL:
+        return f"`pyt {name}` needs a project: {NEEDS_A_PROJECT}"
+    return _unknown_outside(name)
+
+
+def _unknown_outside(name: str) -> str:
+    """A name that is no command: a [tasks] entry of some project (never looked up outside one:
+    the installed template's own tasks are not the user's), or a typo."""
+    here = " | ".join(n for n in GLOBAL_COMMANDS if n in COMMANDS)
+    return f"unknown command: {name}  (outside a project pyt runs {here}; a project's [tasks] entries run in its folder, any subfolder works)"
+
+
+def _help_outside_a_project() -> int:
+    """`pyt help` in global mode: what runs here, and the commands that need a project."""
+    from . import presets
+
+    print("pyt [-v|-q] [--dry-run] COMMAND [args...]   (outside a project)\n")
+    print("Outside a project, pyt runs:")
+    for name in (n for n in GLOBAL_COMMANDS if n in COMMANDS):
+        print(f"  {name:<12} {GLOBAL_SUMMARIES.get(name, COMMANDS[name].summary)}")
+    print()
+    print("Every other command needs a project: run pyt in a project folder (any subfolder works),")
+    print("or create one first (their help: pyt help COMMAND):")
+    others = " ".join(n for n in COMMANDS if n not in GLOBAL_COMMANDS)
+    print(textwrap.fill(others, width=92, initial_indent="  ", subsequent_indent="  "))
+    print()
+    print("Examples:")
+    print("  pyt new game                   # a new project in ./game (the script preset)")
+    print(f"  pyt new game --preset raylib   # another preset: {' | '.join(presets.available())}")
+    print("  pyt doctor                     # what this machine has for pytemplate projects")
+    return 0
 
 
 # Commands whose extra arguments belong to someone else: `run` -> the app, `test` -> pytest,
@@ -138,19 +193,24 @@ INIT_REMOVED = "init is no longer a ./pyt command. To start from another preset:
 
 
 def cmd_help(cfg: object, args: list[str]) -> int:
-    """help [COMMAND]: every command and task, or one of them."""
+    """help [COMMAND]: every command and task, or one of them. Outside a project (global mode)
+    the commands that run there; a project command's help then says it needs a project."""
     from . import config
 
     names = [a for a in args if a not in HELP_FLAGS] or (["help"] if args else [])  # help -h: this one
     if len(names) > 1:
-        raise PytError(f"help: unrecognized arguments: {' '.join(names[1:])}  (./pyt help [COMMAND])")
+        raise PytError(f"help: unrecognized arguments: {' '.join(names[1:])}  ({_prog()} help [COMMAND])")
     if names:
         name = names[0]
         if name in COMMANDS:
             c = COMMANDS[name]
-            print(f"./pyt {name} {c.usage}".rstrip())
-            print(f"  {c.summary}")
+            print(f"{_prog()} {name} {c.usage}".rstrip())
+            print(f"  {GLOBAL_SUMMARIES.get(name, c.summary) if project.GLOBAL else c.summary}")
+            if project.GLOBAL and name not in GLOBAL_COMMANDS:
+                print(f"  Needs a project: {NEEDS_A_PROJECT}")
             return 0
+        if project.GLOBAL:  # the installed template's own [tasks] are not the user's: never read
+            raise PytError(INIT_OUTSIDE if name == "init" else _unknown_outside(name))
         # Not a builtin: a [tasks] entry, a typo, or a pytemplate.toml that does not load (that
         # error is the answer then: it says why the task is unknown)
         loaded = cfg if isinstance(cfg, config.Config) else config.load(set(COMMANDS))
@@ -160,6 +220,8 @@ def cmd_help(cfg: object, args: list[str]) -> int:
         if name == "init":
             raise PytError(INIT_REMOVED)
         raise PytError(f"unknown command: {name}  (./pyt help lists the commands and tasks)")
+    if project.GLOBAL:
+        return _help_outside_a_project()
     print("./pyt [-v|-q] [--dry-run] [--no-render] COMMAND [args...]\n")
     groups: dict[str, list[str]] = {}
     for name, c in COMMANDS.items():
@@ -264,6 +326,8 @@ def dispatch(argv: list[str]) -> int:
     if not argv or argv[0] == "help":
         return cmd_help(None, argv[1:])
     name, args = argv[0], argv[1:]
+    if project.GLOBAL:
+        return _dispatch_outside_a_project(name, args)
     command = COMMANDS.get(name) or INTERNAL.get(name)
     if name in COMMANDS and name not in HELP_PASSES_THROUGH and _asks_help(args):
         return cmd_help(None, [name])  # the same as `./pyt help NAME` (no config needed)
@@ -281,6 +345,27 @@ def dispatch(argv: list[str]) -> int:
         return tasks.run_task(cfg, name, args, dispatch)
     if command.render and not _OPTS["no_render"]:
         render.auto(cfg)
+    module = importlib.import_module(f"{__package__}.{command.module}")
+    func: Callable[[object, list[str]], int] = getattr(module, command.func)
+    return func(cfg, args)
+
+
+def _dispatch_outside_a_project(name: str, args: list[str]) -> int:
+    """Global mode: only GLOBAL_COMMANDS run, never after render.auto (nothing is written into the
+    installed template) and never a [tasks] entry (the installed template's own are the template's,
+    not the user's). `-h` after any command is its help, which says whether it needs a project
+    (the app, pytest or uv that `run`, `test` or `lock` would hand it to are a project's too)."""
+    from . import config
+
+    if name in COMMANDS and _asks_help(args):
+        return cmd_help(None, [name])
+    if name not in COMMANDS or name not in GLOBAL_COMMANDS:
+        raise PytError(_outside_a_project(name))
+    try:
+        cfg = config.load(set(COMMANDS))  # the template's own: `new` checks names against its lock
+    except PytError as e:
+        raise PytError(f"the installed template in {project.ROOT}: {e}", e.code) from None
+    command = COMMANDS[name]
     module = importlib.import_module(f"{__package__}.{command.module}")
     func: Callable[[object, list[str]], int] = getattr(module, command.func)
     return func(cfg, args)

@@ -1229,11 +1229,12 @@ def test_new_says_what_comes_next_for_the_callers_shell(monkeypatch: pytest.Monk
     assert shlex.split(presets.next_steps(Path(apostrophe))[0]) == ["cd", apostrophe]
 
 
-@pytest.mark.parametrize("launcher", ["cmd", ""])
-def test_new_says_what_comes_next_in_xonsh(monkeypatch: pytest.MonkeyPatch, launcher: str) -> None:
-    """xonsh on Windows runs pyt.cmd (PYTEMPLATE_LAUNCHER=cmd; its shell-setup alias sets
-    none) and got cmd's `cd /d "..."`, which it rejects. It reads a quoted argument as a Python
-    string (backslashes are escapes: `C:\\Users` needs them doubled)."""
+@pytest.mark.parametrize(("launcher", "expected"), [("cmd", "./pyt.cmd setup"), ("sh:bash", "./pyt setup"), ("", "./pyt setup")])
+def test_new_says_what_comes_next_in_xonsh(monkeypatch: pytest.MonkeyPatch, launcher: str, expected: str) -> None:
+    """xonsh on Windows runs pyt.cmd (PYTEMPLATE_LAUNCHER=cmd) and got cmd's `cd /d "..."`,
+    which it rejects, and `.\\pyt`: it gets `./pyt.cmd`. It reads a quoted argument as a Python
+    string (backslashes are escapes: `C:\\Users` needs them doubled). On Linux and macOS its
+    `./pyt` is the sh launcher."""
     monkeypatch.delenv("NU_VERSION", raising=False)
     monkeypatch.setenv("XONSH_VERSION", "0.24.2")
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
@@ -1241,9 +1242,9 @@ def test_new_says_what_comes_next_in_xonsh(monkeypatch: pytest.MonkeyPatch, laun
         path = str(Path(raw))
         cd, setup = presets.next_steps(Path(path))
         assert cd.startswith("cd ") and ast.literal_eval(cd[3:]) == path
-        assert setup == "./pyt setup"
+        assert setup == expected
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh:niubash")  # niubash's own launcher value wins
-    assert presets.next_steps(Path("/p/my proj"))[0] == f"cd {shlex.quote(MY_PROJ)}"
+    assert presets.next_steps(Path("/p/my proj")) == [f"cd {shlex.quote(MY_PROJ)}", "./pyt setup"]
 
 
 def _shell_line(argv: list[str], cwd: Path) -> str:
@@ -1279,27 +1280,38 @@ def test_the_next_step_hint_enters_the_folder_in_its_shell(tmp_path: Path, monke
         assert os.path.samefile(_shell_line(argv, tmp_path), dest), cd
 
 
-@pytest.mark.parametrize(
-    ("launcher", "nu_version", "setup"), [("cmd", "0.106.1", "./pyt.cmd setup"), ("nu", "", "pyt setup")]
-)
-def test_new_says_what_comes_next_in_nushell(monkeypatch: pytest.MonkeyPatch, launcher: str, nu_version: str, setup: str) -> None:
-    """nushell on Windows runs pyt.cmd too, typed `./pyt.cmd` (the shell-setup nu function
-    `pyt` sets `nu`): cmd's `cd /d "..."` is two arguments there. A single-quoted nushell
-    string is raw; a path with a quote goes in a double-quoted one, whose escapes are
-    backslash-backslash and backslash-quote."""
+@pytest.mark.parametrize(("launcher", "setup"), [("cmd", "./pyt.cmd setup"), ("sh", "./pyt setup")])
+def test_new_says_what_comes_next_in_nushell(monkeypatch: pytest.MonkeyPatch, launcher: str, setup: str) -> None:
+    """nushell (it exports NU_VERSION) on Windows runs pyt.cmd too, typed `./pyt.cmd`: cmd's
+    `cd /d "..."` is two arguments there; on Linux and macOS its `./pyt` is the sh launcher. A
+    single-quoted nushell string is raw; a path with a quote goes in a double-quoted one, whose
+    escapes are backslash-backslash and backslash-quote."""
     monkeypatch.delenv("XONSH_VERSION", raising=False)
-    if nu_version:
-        monkeypatch.setenv("NU_VERSION", nu_version)
-    else:
-        monkeypatch.delenv("NU_VERSION", raising=False)
+    monkeypatch.setenv("NU_VERSION", "0.106.1")
     monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
     assert presets.next_steps(Path("/p/my proj")) == [f"cd '{MY_PROJ}'", setup]
     apostrophe = str(Path("/p/a\\b it's"))
     escaped = apostrophe.replace("\\", "\\\\")
     assert presets.next_steps(Path(apostrophe))[0] == f'cd "{escaped}"'
-    if launcher == "nu":  # the launcher value names the shell, before an inherited XONSH_VERSION
-        monkeypatch.setenv("XONSH_VERSION", "0.24.2")
-        assert presets.next_steps(Path("/p/my proj"))[0] == f"cd '{MY_PROJ}'"
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "sh:niubash")  # niubash's own launcher value wins
+    assert presets.next_steps(Path("/p/my proj")) == [f"cd {shlex.quote(MY_PROJ)}", "./pyt setup"]
+
+
+@pytest.mark.parametrize("launcher", ["", "sh", "sh:bash:msys", "sh:niubash", "cmd", "ps1:Core:7.6", "ps1:Desktop:5.1", "nvim", "nu"])
+@pytest.mark.parametrize("shell_var", ["", "XONSH_VERSION", "NU_VERSION"])
+def test_the_next_step_runs_a_launcher_never_a_shell_function(monkeypatch: pytest.MonkeyPatch, launcher: str, shell_var: str) -> None:
+    """The hint after `new` names the project's own launcher for the shell it was typed in: the
+    `pyt` functions of `shell-setup` are gone (`pyt install` puts the launchers on PATH), and
+    `pyt setup` in nushell (for the launcher value `nu` of the old function) ran nothing."""
+    for name in ("XONSH_VERSION", "NU_VERSION"):
+        monkeypatch.delenv(name, raising=False)
+    if shell_var:
+        monkeypatch.setenv(shell_var, "1.0")
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", launcher)
+    cd, setup = presets.next_steps(Path("/p/my proj"))
+    assert cd.startswith("cd ") and setup in ("./pyt setup", ".\\pyt setup", "./pyt.cmd setup"), (cd, setup)
+    assert (setup == "./pyt.cmd setup") == (launcher == "cmd" and shell_var != ""), setup
+    assert (setup == ".\\pyt setup") == (launcher == "cmd" and shell_var == ""), setup
 
 
 def test_new_prints_one_next_step_hint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fake: Fake) -> None:

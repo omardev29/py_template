@@ -150,7 +150,7 @@ def test_nothing_internal_or_removed_is_documented() -> None:
     text = _text()
     for name in [*cli.INTERNAL, "__probe"]:
         assert name not in text, f"{name} is an internal route: it must not be documented"
-    for removed in ("./pyt init", "PYTHON_JIT", ".venv-jit", "--jit", "python.jit", "jit_interpreter", "CPython JIT"):
+    for removed in ("./pyt init", "PYTHON_JIT", ".venv-jit", "--jit", "python.jit", "jit_interpreter", "CPython JIT", "shell-setup"):
         assert removed not in text, f"{removed!r}: the feature was removed"
     bad = [s for s in _spans(text) if s == "init" or s.startswith("init ")]
     assert not bad, f"init is not a command (./pyt new DIR --preset P): {bad}"

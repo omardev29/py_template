@@ -64,9 +64,6 @@ jobs:
         with:
           neovim: true
           version: v0.12.5
-      - name: Shells (macOS)
-        if: runner.os == 'macOS'
-        run: brew install fish nushell
       - id: msys2
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
@@ -85,8 +82,6 @@ jobs:
       - name: Tool versions
         run: |
           uv --version; nvim --version | sed -n 1p; pwsh --version || true; node --version || true
-          if [ "$RUNNER_OS" != Windows ]; then fish --version || true; fi
-          if [ "$RUNNER_OS" = macOS ]; then nu --version; fi
       # test_upx's real run takes the UPX upx.find finds: the pinned download (SHA-256 checked) on
       # Windows, as in the CI image (macOS has none: upx does not support it)
       - name: The pinned UPX in the runner's cache (Windows)

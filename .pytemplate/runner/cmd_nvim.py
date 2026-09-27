@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import envs, proc, ui
+from . import envs, proc, project, ui
 from .config import Config
 from .project import IS_MACOS, IS_WINDOWS, ROOT, write_whole
 from .ui import PytError
@@ -488,19 +488,25 @@ def _has_package(env_dir: Path, package: str) -> bool:
 
 
 def doctor(check: Check) -> None:
-    """One-line Neovim/LazyVim summary for ./pyt doctor (no output when Neovim is absent)."""
+    """One-line Neovim/LazyVim summary for ./pyt doctor (no output when Neovim is absent).
+    Outside a project (global mode) there is no .lazy.lua to trust: Neovim and LazyVim only."""
     exe = find_nvim()
     if not exe:
         return
     ui.step("neovim")
+    details = "details: pyt nvim doctor in a project" if project.GLOBAL else "details: ./pyt nvim doctor"
     try:
         nv = query(exe)
     except PytError as e:
-        check(None, f"Neovim: {str(e).splitlines()[0]}", "details: ./pyt nvim doctor")
+        check(None, f"Neovim: {str(e).splitlines()[0]}", details)
         return
     if nv is None:
         return
     lazyvim = nv.lazyvim_installed()
+    if project.GLOBAL:
+        ready = nv.version >= MIN_LAZYVIM and lazyvim
+        check(True if ready else None, f"Neovim {nv.version_text}, LazyVim {'yes' if lazyvim else 'no'}", details)
+        return
     trust = trust_status(nv.trust_db, LAZY_LUA)
     trusted = {"trusted": "trusted", "missing": "missing"}.get(trust.state, "NOT trusted")
     good = nv.version >= MIN_LAZYVIM and lazyvim and trust.state == "trusted"
