@@ -253,7 +253,7 @@ def test_probe_needs_no_config(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
 # after its checks, never with a hand-edited app.name before the dirty-tree check; the internal
 # __init renders with --force at its end (rendering the copy first, `new` warned about the source
 # project's hand-edited .vscode/settings.json: "use ./pyt render --force")
-NEVER_RENDER = {"clean", "render", "new", "pyz-merge", "tasks", "shell-setup", "selftest", "help", "hooks", "setup", "apply", "rename", "__init"}
+NEVER_RENDER = {"clean", "render", "new", "pyz-merge", "tasks", "selftest", "help", "hooks", "setup", "apply", "rename", "__init"}
 
 
 def test_commands_that_never_render() -> None:
@@ -444,7 +444,6 @@ MINIMAL: dict[str, tuple[list[str], bool]] = {
     "compile": ([], False),
     "pyz-merge": (["a.pyz", "b.pyz", "--out", "c.pyz"], False),
     "tasks": ([], False),
-    "shell-setup": (["bash"], False),
     "nvim": (["doctor"], False),
     "help": (["run"], False),
 }
@@ -883,7 +882,7 @@ def test_an_ignored_sigint_is_passed_on_to_the_child() -> None:
 
 @posix
 @pytest.mark.parametrize("unbuffered", [False, True])
-@pytest.mark.parametrize("args", [["help"], ["help", "build"], ["shell-setup", "bash"]])
+@pytest.mark.parametrize("args", [["help"], ["help", "build"]])
 def test_a_closed_stdout_is_not_a_runner_bug(args: list[str], unbuffered: bool) -> None:
     env = child_env()
     if unbuffered:
@@ -919,7 +918,7 @@ class _NoRoom(io.StringIO):
 
 @pytest.mark.parametrize("args", [["help"], ["help", "build"]])
 def test_a_write_that_finds_no_room_is_one_error_line(args: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    """`./pyt help > /dev/full` (or a full disk under `shell-setup >> ~/.bashrc`) printed a
+    """`./pyt help > /dev/full` (or a full disk under `./pyt help >> notes.txt`) printed a
     traceback and called it a bug in the runner."""
     monkeypatch.setattr(sys, "stdout", _NoRoom())
     assert cli.main(args) == 1
@@ -930,7 +929,7 @@ def test_a_write_that_finds_no_room_is_one_error_line(args: list[str], monkeypat
 
 
 @pytest.mark.skipif(not Path("/dev/full").exists(), reason="no /dev/full here")
-@pytest.mark.parametrize("args", [["help"], ["shell-setup", "bash"]])
+@pytest.mark.parametrize("args", [["help"], ["help", "build"]])
 def test_output_to_dev_full_is_no_runner_bug(args: list[str]) -> None:
     with open("/dev/full", "wb") as full:
         r = subprocess.run(

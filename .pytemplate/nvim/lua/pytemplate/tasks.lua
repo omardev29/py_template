@@ -32,7 +32,6 @@ M.META = {
   help = { show = true },
   tasks = { show = true },
   nvim = { show = true },
-  ["shell-setup"] = { show = true },
   selftest = { show = true },
 }
 

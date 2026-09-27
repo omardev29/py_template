@@ -87,6 +87,12 @@ shows one. On a Mac with Apple Silicon or on Linux ARM64, a raylib project first
 The template repository is itself a project of the script preset: `./pyt setup` also works
 in a plain clone.
 
+### Install `pyt`
+
+`pyt install` puts the launchers on PATH: `pyt` then works in any folder, in a project (any
+subfolder) as its `./pyt`, and outside one on the installed copy of the template
+([Outside a project](#outside-a-project)). `pyt uninstall` takes them off again.
+
 ### New projects
 
 `./pyt new DIR [--preset P] [--name NAME]` creates a project in `DIR`, a new or empty folder
@@ -116,6 +122,10 @@ When a step fails (a name uv refuses, no network, Ctrl+C), `new` removes what it
 Dependencies added with `./pyt add` and tracked files of your own (docs, scripts) come along
 into the copy: for a clean project, run `new` from an untouched clone of the template.
 
+Outside a project, `pyt new DIR` ([Install `pyt`](#install-pyt)) makes the same copy of the
+installed template, `DIR` relative to the folder it was typed in: every file of it (it has no
+git), without the same files and without the record of the install.
+
 The app name is the folder name unless `--name` is given (accents are dropped, other characters
 become `-`). It is the executable's name; the Python package is the name in lower case with `_`
 for `-` (`My-Game` -> `src/my_game/`). A name has letters, digits, `-` and `_`, starts with a
@@ -140,7 +150,7 @@ it and move the code over.
 |---|---|
 | `setup [--force]` | The first run on a fresh clone: the same operation as `apply` |
 | `apply [--force]` | Applies every `pytemplate.toml` change: rename, dependencies, `uv.lock`, environments, git hook, generated files ([details](#after-editing-pytemplatetoml)) |
-| `doctor` | Checks uv, the environments, the C compiler, the generated files, `pyproject.toml`, `uv.lock`, the changes `apply` has not applied yet, the launchers, the shell, the git hook and Neovim; exit 1 when a line is `[XX]` |
+| `doctor` | Checks uv, the environments, the C compiler, the generated files, `pyproject.toml`, `uv.lock`, the changes `apply` has not applied yet, the launchers, the shell, the git hook and Neovim; exit 1 when a line is `[XX]`. Outside a project: uv, the runner's Python, git, the C compiler and Neovim only |
 | `sync [cpython\|pypy\|mypyc\|all]` | `uv sync --locked --all-groups` of one environment or of all (default); it never re-locks. A group uv cannot install there is left out with a note (`--no-group`): one that `[tool.uv] conflicts` pairs with another group, or whose own `requires-python` (`[tool.uv.dependency-groups]`) excludes that environment's Python; the default groups always stay |
 | `lock [--upgrade] [--upgrade-package PKG]` | Rewrites the managed parts of `pyproject.toml` and re-locks `uv.lock`; its other arguments go to `uv lock`. When `uv lock` fails or writes nothing (`--check`, `--dry-run`), `pyproject.toml` is put back as it was; `--help` changes nothing. It does not apply `[preset.*]`: `apply` does |
 | `add PKG... [--dev\|--group G] [--cpython-only]` | `uv add`, then `uv sync --locked --all-groups` of `.venv`; `--cpython-only` adds the marker `implementation_name == 'cpython'` (C-API libraries that are slow or missing on PyPy). When the sync fails (a package that locks but cannot be built) or is interrupted, `pyproject.toml` and `uv.lock` are put back as they were |
@@ -161,7 +171,6 @@ it and move the code over.
 | `build [BACKEND] [--method exe\|portable\|pyz\|wheel\|nuitka\|flet] [--onefile\|--onedir] [--target KEY]... [--no-check]` | Runs `check`, then packages the app into `dist/` ([details](#distribution)) |
 | `pyz-merge A.pyz B.pyz... --out C.pyz` | Merges the `.pyz` files built on several OSes into one |
 | `tasks` | Lists the `[tasks]` entries of `pytemplate.toml` |
-| `shell-setup [xonsh\|pwsh\|powershell\|bash\|zsh\|niubash\|msys2\|fish\|nu]` | Prints a `pyt` function for a shell ([details](#shells)) |
 | `nvim [doctor\|trust\|extras\|bootstrap\|sync]` | The Neovim/LazyVim integration ([details](#neovim-lazyvim)) |
 | `selftest [--shells\|--nvim\|--e2e] [args...]` | The template's own tests ([details](#testing-the-template)) |
 | `help [COMMAND]` | Every command and task, or one of them |
@@ -191,10 +200,30 @@ where it goes to the app, pytest, uv or the suite; `./pyt -h COMMAND` works too.
 project's files, but still writes scratch files under `.build/` (tool configurations, the mypyc
 stage). `selftest --shells`, `--nvim` and `--e2e` refuse it.
 
+### Outside a project
+
+`pyt` on PATH ([Install `pyt`](#install-pyt)), typed in a folder that belongs to no project,
+runs the installed copy of the template. There only `new`, `doctor`, `help`, `install` and
+`uninstall` run, with the same global options:
+
+- `pyt new DIR [--preset P] [--name NAME]` creates a project in `DIR`, relative to the folder it
+  was typed in ([New projects](#new-projects)).
+- `pyt doctor` checks what every project needs of the computer: uv, the Python the runner runs
+  on, git, the C compiler mypyc would use and Neovim. Only an old uv fails it (exit 1): uv is
+  the one requirement, and a project's own `doctor` says what else it needs.
+- `pyt help` lists what runs there; `pyt help COMMAND` shows any command's help, and whether it
+  needs a project.
+
+Every other command stops with exit 2 and says what to do: run it in a project folder (any
+subfolder works), or create a project with `pyt new DIR`. A name that is no command (a
+project's `[tasks]` entry) is unknown there. Nothing is written into the installed template,
+not even Python's bytecode cache of the runner, which goes to your cache folder
+(`LOCALAPPDATA`, `XDG_CACHE_HOME` or `~/.cache`) instead.
+
 ### Output, exit codes and environment
 
 The runner writes its own messages to stderr, so stdout belongs to the app
-(`./pyt run > out.txt` captures only the app). `help`, `shell-setup` and the `--json` reports
+(`./pyt run > out.txt` captures only the app). `help` and the `--json` reports
 of `selftest --shells` and `selftest --e2e` write to stdout, for pipes. Colours are used only on a
 terminal, and never with `NO_COLOR` (any non-empty value) or `TERM=dumb`.
 
@@ -237,7 +266,8 @@ Environment variables the runner and the launchers read: `UV` (the uv binary, lo
 skips GUI runs on Windows and macOS CI), `NO_COLOR` and `TERM`, the compiler variables of mypyc
 (`CC`, `CFLAGS`, `CPPFLAGS`, `LDSHARED`, `LDFLAGS`, `ARCHFLAGS`, `CL`, `_CL_`),
 `MACOSX_DEPLOYMENT_TARGET` (the oldest macOS the pyz and portable wheels support, 13.0 by default),
-`LOCALAPPDATA` and `XDG_CACHE_HOME` (the pyz and UPX caches). At runtime, the portable and pyz
+`LOCALAPPDATA` and `XDG_CACHE_HOME` (the pyz and UPX caches, and outside a project the runner's
+bytecode cache). At runtime, the portable and pyz
 launchers set `PYTEMPLATE_ASSETS` to the app's own assets folder (whatever value the app inherited
 from the program that started it); the presets' `resources.assets_dir()` finds that folder next to
 its package.
@@ -249,9 +279,7 @@ and uv's environment selection (`UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PROJE
 environments. uv's resolution settings (indexes, `UV_EXCLUDE_NEWER`, `UV_RESOLUTION`,
 `UV_PRERELEASE`) and its cache pass through. The runner itself starts on the project's Python
 in the folder where the command was typed: the launchers remove `UV_PYTHON`, `PYTHONHOME`,
-`PYTHONPATH` and `UV_WORKING_DIR` before uv starts it, except the xonsh alias of
-[`shell-setup`](#shells), which hands uv only an argument list (unset them there, or use
-`./pyt`).
+`PYTHONPATH` and `UV_WORKING_DIR` before uv starts it.
 
 ### Custom tasks
 
@@ -1260,14 +1288,13 @@ is typed the same way everywhere:
 | xonsh, fish, nushell, PowerShell 7 on Linux/macOS | `pyt` | through its `#!/bin/sh` (in PowerShell, `./pyt.ps1` works too) |
 | cmd | `pyt.cmd` | `.\pyt ...` (a bare `pyt ...` too while `NoDefaultCurrentDirectoryInExePath` is unset) |
 | xonsh on Windows | `pyt.cmd` | xonsh starts only PATHEXT files: `./pyt` resolves to `pyt.cmd` |
-| nushell on Windows | `pyt.cmd` | type `./pyt.cmd`, or use the `shell-setup nu` function |
+| nushell on Windows | `pyt.cmd` | type `./pyt.cmd` |
 | PowerShell 7 / Windows PowerShell 5.1 on Windows | `pyt.ps1` | `./pyt` resolves to `pyt.ps1`. If the execution policy blocks it: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (a copy from a downloaded zip also needs `Unblock-File .\pyt.ps1`), or use `.\pyt.cmd` |
 
 Editors do not depend on the shell: VS Code tasks run `/bin/sh pyt` (`pyt.cmd` on
 Windows) and Neovim runs uv directly. The launchers ignore a `UV_PYTHON`, `PYTHONHOME`,
 `PYTHONPATH` or `UV_WORKING_DIR` you export: the runner always runs on the project's
-`python.cpython`, in the folder where the command was typed (the xonsh alias of `shell-setup`
-keeps them: it can only hand uv an argument list). `./pyt` works under a caller's `set -eu`.
+`python.cpython`, in the folder where the command was typed. `./pyt` works under a caller's `set -eu`.
 `./pyt doctor` shows which launcher started it and checks that the launchers kept their line
 endings and executable bit.
 
@@ -1276,36 +1303,25 @@ fails, walk up from the current folder: `../pyt test` from `src/`, or the full p
 launcher from anywhere, works (from a symlinked folder too). A project found by walking up must
 be yours: one another user owns (anyone may create `/tmp/.pytemplate`) is never run, and on
 Windows a drive root never counts; run such a project's launcher by its path if you trust it.
-The `shell-setup` functions below follow the same rule. Paths given to the runner itself
+Paths given to the runner itself
 (`./pyt new ../game`, `./pyt pyz-merge a.pyz b.pyz --out all.pyz`) are relative to the
 folder where the command was typed; `~` works everywhere, and on Windows `/c/Users/...`,
 `/cygdrive/c/...` and `C:/...` are accepted too. Arguments passed on to the app or to pytest are
 relative to the project root
 ([Output, exit codes and environment](#output-exit-codes-and-environment)).
 
-**Without `./`.** `./pyt shell-setup SHELL` prints a `pyt` function (or alias) that finds
-the enclosing project from any subfolder, with a comment saying where to paste it. Shells:
-`bash`, `zsh`, `niubash`, `msys2`, `fish`, `nu`, `xonsh` (with completion of the commands and
-tasks), `pwsh`, `powershell`; without a name it guesses the shell. The xonsh alias and the nu
-function run uv directly (no `pyt.cmd` and its argument limits; on Windows only a real
-`uv.exe`, never a `uv.cmd` shim); the pwsh function passes
-pipeline input on. Print the xonsh snippet again to complete commands added later. A symlink to
-a project's `pyt` (or `pyt.ps1`) in a folder on PATH also works from any folder: the
-launcher follows it to its project (`ln -s ~/code/game/pyt ~/bin/game`); `pyt.cmd` cannot
-be linked that way.
-
-```sh
-./pyt shell-setup niubash    # niubash reads ~/.niubashrc, but `niu -c` and scripts read $NIU_ENV
-./pyt shell-setup bash >> ~/.bashrc   # appending is safe: the output starts with a line break
-```
+**Without `./`.** `pyt install` puts `pyt` on PATH ([Install `pyt`](#install-pyt)): typed in
+any folder of a project it runs that project's launcher, and outside a project the installed
+template ([Outside a project](#outside-a-project)). A symlink to a project's `pyt` (or
+`pyt.ps1`) in a folder on PATH also works from any folder: the launcher follows it to its
+project (`ln -s ~/code/game/pyt ~/bin/game`); `pyt.cmd` cannot be linked that way.
 
 **Known limits.**
 
 - cmd re-parses the arguments of every `.cmd` file: `% ! " ^` and unquoted `& | < >` inside an
   argument do not survive when the call goes through `pyt.cmd` (cmd itself, xonsh and nushell
   on Windows, VS Code tasks on Windows, Python's `subprocess`), even when the calling program
-  quotes them. For such arguments use PowerShell, Git Bash, or the xonsh or nu `pyt` of
-  `shell-setup` (they call uv directly).
+  quotes them. For such arguments use PowerShell or Git Bash.
 - In a `.bat` or `.cmd` script, write `call pyt ...`: without `call`, cmd does not come back to
   the script after `pyt.cmd`.
 - PowerShell removes a bare `--` before any script sees it (5.1 and 7 alike): quote it (`'--'`)
@@ -1316,7 +1332,7 @@ be linked that way.
   space, arrives as `-X:v`), the items of an array (`./pyt run $files`) are separate
   arguments, `--%` passes through literally, and pipeline input reaches the app
   (`Get-Content data.txt | ./pyt run`). The launcher tells a typed list from an array by
-  reading the command you typed (through the `shell-setup pwsh` function and any wrapper that
+  reading the command you typed (through a function or any other wrapper of yours that
   forwards `@args` too; a splatted `@files`, or a wrapper that splats a copy of `$args`, passes
   items separately, as for a native program). Where it cannot (a call that splats two variables,
   a wrapper that binds some of the words with `param()`), an array arrives as ONE argument with

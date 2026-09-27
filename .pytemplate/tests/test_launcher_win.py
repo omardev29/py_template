@@ -55,6 +55,17 @@ def _ps_literal(s: str) -> str:
     return "'" + s + "'"
 
 
+# A profile function of the kind users write around the launcher: it forwards its words with @args
+# (and pipeline input like a native call). pyt.ps1 reads the words typed where that caller was
+# called. (`./pyt shell-setup pwsh` used to print one like it: `pyt install` replaced it.)
+PWSH_WRAPPER = (
+    "function pyt {\n"
+    f"    $ps1 = {_ps_literal(str(PS1))}\n"
+    "    if ($MyInvocation.ExpectingInput) { $input | & $ps1 @args } else { & $ps1 @args }\n"
+    "}"
+)
+
+
 def _text_lines(path: Path) -> list[str]:
     return path.read_bytes().decode("ascii").splitlines()
 
@@ -594,13 +605,10 @@ COMMA_ARGV = ["mode", "cpython", "--supports", "cpython,mypyc", "--opt=x,y", "a,
 def test_ps1_keeps_typed_comma_lists_whole(name: str) -> None:
     """PowerShell hands a script a typed comma list (cpython,mypyc) as an array: the launcher joins
     it again, as PowerShell does for a native program, so the documented `--supports cpython,mypyc`
-    and `--tests T1,T2` reach the runner as one argument. Also through the shell-setup function."""
+    and `--tests T1,T2` reach the runner as one argument. Also through a wrapper function that
+    forwards them with @args."""
     exe = _ps_exe(name)
-    sys.path.insert(0, str(ROOT / ".pytemplate"))
-    from runner import shells
-
-    function = shells.PWSH_SNIPPET
-    body =f"& ./pyt.ps1 __probe 0 0 {COMMA_TYPED}\n{function}\nSet-Location {_ps_literal(str(SUB))}\npyt __probe 0 0 {COMMA_TYPED}\n"
+    body = f"& ./pyt.ps1 __probe 0 0 {COMMA_TYPED}\n{PWSH_WRAPPER}\nSet-Location {_ps_literal(str(SUB))}\npyt __probe 0 0 {COMMA_TYPED}\n"
     if name == "pwsh":  # also the legacy pre-quoting path that 5.1 always takes
         body += f"$PSNativeCommandArgumentPassing = 'Legacy'\n& {_ps_literal(str(PS1))} __probe 0 0 {COMMA_TYPED}\n"
     r = _session(exe, body + "exit 0\n")
@@ -628,14 +636,11 @@ NATIVE_COPY_ARGV = [*COPY_ARGV[:-2], "c", "d", "z"]
 def test_ps1_passes_array_values_like_a_native_call(name: str) -> None:
     """`./pyt run $files` gives the app the items of $files as separate arguments, like a direct
     native call in the same session, while a typed a,b stays one argument; also when the call is
-    forwarded with @args (the shell-setup function, a wrapper that adds words of its own), and with
+    forwarded with @args (a profile function, a wrapper that adds words of its own), and with
     legacy argument passing. A wrapper that splats a copy of $args gets what a native program
     gets through the same wrapper: the arrays' items one by one."""
     exe = _ps_exe(name)
-    sys.path.insert(0, str(ROOT / ".pytemplate"))
-    from runner import shells
-
-    uv = os.environ.get("UV") or shutil.which("uv")
+    uv =os.environ.get("UV") or shutil.which("uv")
     assert uv
     ps1 = _ps_literal(str(PS1))
     direct = f"& {_ps_literal(uv)} run --quiet --script {_ps_literal(str(ROOT / '.pytemplate' / 'pyt.py'))}"
@@ -643,7 +648,7 @@ def test_ps1_passes_array_values_like_a_native_call(name: str) -> None:
         VALUES_SETUP,
         f"{direct} __probe 0 0 {VALUES_TYPED}",
         f"& {ps1} __probe 0 0 {VALUES_TYPED}",
-        shells.PWSH_SNIPPET,
+        PWSH_WRAPPER,
         f"Set-Location {_ps_literal(str(SUB))}",
         f"pyt __probe 0 0 {VALUES_TYPED}",
         f"function drun {{ & {ps1} __probe 0 0 @args }}",
@@ -681,13 +686,10 @@ NULLS_ARGV = ["x", "a", "b", "a", "b", "", "l", "", "y"]
 def test_ps1_drops_null_arguments_like_a_native_call(name: str) -> None:
     """`./pyt build $backend` with $backend unset gave the runner an empty argument ("unknown
     backend ''"), and `./pyt check $env:UNSET` "unrecognized arguments": a native call drops a
-    $null. Also through the shell-setup function, and with legacy argument passing (whose native
+    $null. Also through a wrapper function, and with legacy argument passing (whose native
     calls drop empty strings as well: the launcher keeps those, as PowerShell 7.3+ does)."""
     exe = _ps_exe(name)
-    sys.path.insert(0, str(ROOT / ".pytemplate"))
-    from runner import shells
-
-    uv = os.environ.get("UV") or shutil.which("uv")
+    uv =os.environ.get("UV") or shutil.which("uv")
     assert uv
     ps1 = _ps_literal(str(PS1))
     direct = f"& {_ps_literal(uv)} run --quiet --script {_ps_literal(str(ROOT / '.pytemplate' / 'pyt.py'))}"
@@ -696,7 +698,7 @@ def test_ps1_drops_null_arguments_like_a_native_call(name: str) -> None:
         NULLS_SETUP,
         f"{direct} __probe 0 0 {NULLS_TYPED}",
         f"& {ps1} __probe 0 0 {NULLS_TYPED}",
-        shells.PWSH_SNIPPET,
+        PWSH_WRAPPER,
         f"Set-Location {_ps_literal(str(SUB))}",
         f"pyt __probe 0 0 {NULLS_TYPED}",
         "$PSNativeCommandArgumentPassing = 'Legacy'",

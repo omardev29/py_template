@@ -10,9 +10,11 @@ import shutil
 import stat
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
+from typing import Protocol
 
-from . import cmd_nvim, envs, hooks, mypyc, proc, render, shells, ui
+from . import cmd_nvim, envs, hooks, mypyc, proc, project, render, shells, ui
 from .cmd_dev import only_flags
 from .config import Config
 from .project import BUILD, DIST, ENV_SUFFIX, IS_MACOS, IS_WINDOWS, PYPROJECT, ROOT, rel, write_whole
@@ -465,16 +467,55 @@ def _c_compiler(platform: str = "", cc: str = "") -> tuple[bool, str]:
     return True, found
 
 
-def cmd_doctor(cfg: Config, args: list[str]) -> int:
-    """doctor: check requirements, environments and generated files."""
-    only_flags("doctor", args, ())
-    problems = 0
+class Check(Protocol):
+    """One doctor line: passed (None: a note), label, hint."""
 
-    def check(passed: bool | None, label: str, hint: str = "") -> None:
-        nonlocal problems
-        if passed is False:
-            problems += 1
-        ui.check_line(passed, label, hint)
+    def __call__(self, passed: bool | None, label: str, hint: str = "", /) -> None: ...
+
+
+def _tools(check: Check) -> None:
+    """uv (envs.MIN_UV) and the Python the runner runs on, in a project and outside one."""
+    ui.step("tools")
+    if project.GLOBAL:
+        check(None, f"outside a project: this machine only (the installed template: {project.ROOT})", "A project's own checks: pyt doctor in its folder")
+    uv_version = proc.output([proc.find_uv(), "--version"])
+    too_old = envs.uv_problem(uv_version)
+    if too_old:
+        check(False, f"uv: {uv_version}", f"{too_old}\nUpdate it: {envs.UV_UPDATE}")
+    elif envs.uv_version(uv_version) is None:
+        check(None, f"uv: {uv_version} (version not recognised; this project needs uv {envs.MIN_UV} or newer)")
+    else:
+        check(True, f"uv: {uv_version}")
+    check(True, f"runner: Python {sys.version.split()[0]} ({sys.executable})")
+
+
+def _machine(check: Check) -> None:
+    """doctor outside a project: git, the C compiler mypyc would use, the launcher of this run and
+    the shell. What is missing is a note: uv is the one requirement of every project, and a
+    project's own doctor says what that project needs."""
+    git = shutil.which("git")
+    if git:
+        version = proc.run([git, "--version"], capture=True, check=False, echo=False).stdout.strip()
+        check(True, f"git: {version or 'found'} ({git})")
+    else:
+        check(None, "git not found: `new` makes no repository, and a project gets no pre-commit hook", "Install git and put it on PATH")
+    # The runner runs on the installed template's python.cpython: what a new project's .venv holds
+    platform = sysconfig.get_platform()
+    found, where = _c_compiler(platform, cc=str(sysconfig.get_config_var("CC") or ""))
+    check(True if found else None, f"C compiler for mypyc: {where}", "" if found else mypyc.has_compiler_hint(platform))
+    if IS_WINDOWS:
+        long_paths = _long_paths()
+        check(
+            True if long_paths else None,
+            "Windows long paths (LongPathsEnabled)" + ("" if long_paths else ": disabled (optional)"),
+            "Avoids MSVC errors when a project is in a very deep path (>260 characters)",
+        )
+    shells.doctor(check, in_project=False)
+
+
+def _project(cfg: Config, check: Check) -> None:
+    """doctor in a project: its backends and environments, the generated files, pyproject.toml,
+    uv.lock, the changes apply has not applied yet, the launchers and the git hook."""
 
     def env_info(env: envs.PyEnv) -> dict[str, object] | None:
         # A python that exists but cannot start (Windows: its base Python was uninstalled and the
@@ -489,17 +530,6 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
                 "./pyt setup   (if it still fails: ./pyt clean --envs, then ./pyt setup)",
             )
             return None
-
-    ui.step("tools")
-    uv_version = proc.output([proc.find_uv(), "--version"])
-    too_old = envs.uv_problem(uv_version)
-    if too_old:
-        check(False, f"uv: {uv_version}", f"{too_old}\nUpdate it: {envs.UV_UPDATE}")
-    elif envs.uv_version(uv_version) is None:
-        check(None, f"uv: {uv_version} (version not recognised; this project needs uv {envs.MIN_UV} or newer)")
-    else:
-        check(True, f"uv: {uv_version}")
-    check(True, f"runner: Python {sys.version.split()[0]} ({sys.executable})")
 
     ui.step(f"backends (active: {cfg.backend.active}; supported: {', '.join(cfg.backend.supported)})")
     cp = envs.cpython_env(cfg)
@@ -553,6 +583,25 @@ def cmd_doctor(cfg: Config, args: list[str]) -> int:
 
     shells.doctor(check)  # launchers and shells
     hooks.doctor(cfg, check)  # git pre-commit hook
+
+
+def cmd_doctor(cfg: Config, args: list[str]) -> int:
+    """doctor: check requirements, environments and generated files. Outside a project (global
+    mode) only what this machine has: the project's steps need a project."""
+    only_flags("doctor", args, ())
+    problems = 0
+
+    def check(passed: bool | None, label: str, hint: str = "") -> None:
+        nonlocal problems
+        if passed is False:
+            problems += 1
+        ui.check_line(passed, label, hint)
+
+    _tools(check)
+    if project.GLOBAL:
+        _machine(check)  # git, the C compiler of mypyc, the launcher of this run and the shell
+    else:
+        _project(cfg, check)  # backends, generated files, pyproject.toml, uv.lock, launchers, git hook
     cmd_nvim.doctor(check)  # Neovim/LazyVim summary (details: ./pyt nvim doctor)
     ui.info("")
     if problems:

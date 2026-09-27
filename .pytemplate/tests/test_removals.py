@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cli, cmd_mode, config, envs, presets, proc, rename, render, shells, tasks, ui  # noqa: E402
+from runner import cli, cmd_mode, config, envs, presets, proc, rename, render, tasks, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.editors import nvim, vscode  # noqa: E402
 from runner.methods import portable, pyz  # noqa: E402
@@ -234,11 +234,9 @@ def test_init_is_not_listed_anywhere(capsys: pytest.CaptureFixture[str]) -> None
     listed = capsys.readouterr().out
     assert not re.search(r"(?m)^\s+_*init\b", listed), listed
     assert "./pyt init" not in listed
-    # editor.json (VS Code/Neovim task lists and pickers), the xonsh completion, VS Code's tasks
+    # editor.json (VS Code/Neovim task lists and pickers), VS Code's tasks
     cfg = make({})
     assert {"init", "__init"}.isdisjoint(c["name"] for c in nvim.commands())
-    first, choices, flags = shells.completion_words(cfg)
-    assert {"init", "__init"}.isdisjoint(first) and {"init", "__init"}.isdisjoint({*choices, *flags})
     labels = [t["label"] for t in vscode.tasks(cfg)["tasks"]]
     assert not any(re.fullmatch(r"pyt: _*init\b.*", label) for label in labels), labels
     committed = json.loads((ROOT / ".pytemplate" / "editor.json").read_text(encoding="utf-8"))

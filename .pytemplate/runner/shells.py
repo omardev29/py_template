@@ -1,4 +1,4 @@
-"""Shells: the hidden `__probe` command, doctor checks, shell-setup snippets and `selftest --shells`.
+"""Shells: the hidden `__probe` command, the launcher and shell checks of doctor, and `selftest --shells`.
 
 The launchers (pyt, pyt.cmd, pyt.ps1) only find the project root and uv, export
 PYTEMPLATE_CALLER_CWD and PYTEMPLATE_LAUNCHER, and hand every argument to
@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import proc, ui
-from .config import BACKENDS, Config
+from .config import Config
 from .project import IS_WINDOWS, IS_WSL, ROOT, caller_cwd, native_path, user_path
 from .ui import PytError
 
@@ -132,16 +132,17 @@ def launcher_problems(name: str, data: bytes, mode: str | None) -> list[tuple[st
     return out
 
 
-def _check_launchers(check: Check) -> None:
+def _started_by(check: Check) -> None:
+    """The launcher that started this run, as it says in PYTEMPLATE_LAUNCHER."""
     launcher = os.environ.get("PYTEMPLATE_LAUNCHER")
     if launcher:
         check(None, f"this run was started by: {launcher}", "")
     else:
-        check(
-            None,
-            "this run was started by: unknown (PYTEMPLATE_LAUNCHER is not set)",
-            "An older launcher, the shell-setup xonsh alias (it runs uv directly), or uv run by hand",
-        )
+        check(None, "this run was started by: unknown (PYTEMPLATE_LAUNCHER is not set)", "An older launcher, or uv run by hand")
+
+
+def _check_launchers(check: Check) -> None:
+    _started_by(check)
     labels = {"pyt": "#!/bin/sh, LF, ASCII", "pyt.cmd": "CRLF, ASCII", "pyt.ps1": "LF, ASCII, no BOM"}
     modes = _git_modes(list(labels))
     for name, label in labels.items():
@@ -186,12 +187,17 @@ def _ps_policies() -> list[tuple[str, str, str]]:
     return [(label, edition, p) for (label, edition, _), p in zip(found, policies, strict=True) if p]
 
 
-def doctor(check: Check) -> None:
-    """Launcher and shell checks for ./pyt doctor (it prints its own step headers)."""
+def doctor(check: Check, *, in_project: bool = True) -> None:
+    """Launcher and shell checks for ./pyt doctor (it prints its own step headers). Outside a
+    project (global mode, `in_project` false) only the launcher that started the run and the
+    shell: the files of the installed template are no project's launchers."""
     ui.step("launchers")
-    _check_launchers(check)
-
-    if not (IS_WINDOWS or IS_WSL):
+    if in_project:
+        _check_launchers(check)
+    else:
+        _started_by(check)
+    wsl = IS_WSL and in_project  # a project's checkout on a Windows drive
+    if not (IS_WINDOWS or wsl):
         return  # the shell checks are Windows' (the bash stub, execution policies) and WSL's
     ui.step("shell")
     if IS_WINDOWS:
@@ -216,421 +222,8 @@ def doctor(check: Check) -> None:
                 f"{label}: ExecutionPolicy = {policy} (pyt.ps1 does not run there)",
                 "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned   (or use .\\pyt.cmd)",
             )
-    if IS_WSL:
+    if wsl:
         check(None, "WSL on a Windows checkout: .venv*-wsl environments and .build/wsl kept separate from Windows", "")
-
-
-# --- shell-setup ---------------------------------------------------------------------------------
-
-SETUP_SHELLS = ("xonsh", "pwsh", "powershell", "bash", "zsh", "niubash", "msys2", "fish", "nu")
-
-POSIX_FUNCTION = r"""
-# Walks up from $PWD to the folder that holds .pytemplate/pyt.py and runs its ./pyt
-# (POSIX sh: C:/x, /c/x and / roots alike; it stops at the top instead of looping).
-unalias pyt 2>/dev/null || true
-pyt() {
-    _pt_d=${PWD:-$(pwd)}
-    while [ ! -f "${_pt_d%/}/.pytemplate/pyt.py" ]; do
-        _pt_n=${_pt_d%/*}
-        case $_pt_n in
-            '') _pt_n=/ ;;
-            [A-Za-z]:) _pt_n=$_pt_n/ ;;
-        esac
-        if [ "$_pt_n" = "$_pt_d" ]; then
-            printf '%s\n' "pyt: no .pytemplate/pyt.py in $PWD or any parent folder" >&2
-            unset _pt_d _pt_n
-            return 2
-        fi
-        _pt_d=$_pt_n
-    done
-    # Its code is not run when another user owns it (anyone may create /tmp/.pytemplate);
-    # on Windows, whose owners are not read here, never at a drive root.
-    _pt_n=
-    if [ "${OS:-}" = Windows_NT ] && [ -z "${WSL_DISTRO_NAME:-}" ]; then
-        case $_pt_d in / | [A-Za-z]: | [A-Za-z]:/ | /[A-Za-z] | /cygdrive/[A-Za-z]) _pt_n=1 ;; esac
-    elif [ ! -O "${_pt_d%/}/.pytemplate/pyt.py" ]; then
-        _pt_n=1
-    fi
-    if [ -n "$_pt_n" ]; then
-        printf '%s\n' "pyt: ${_pt_d%/}/.pytemplate/pyt.py is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run ${_pt_d%/}/pyt yourself." >&2
-        unset _pt_d _pt_n
-        return 2
-    fi
-    set -- "${_pt_d%/}/pyt" "$@"
-    unset _pt_d _pt_n
-    "$@"
-}
-"""
-
-PWSH_SNIPPET = r"""
-# `pyt` in PowerShell from any folder of a pytemplate project (7.x and Windows 5.1).
-# Paste into your profile, the file named by $PROFILE (5.1 and 7 each have their own), then
-# open a new shell. Keep it ASCII: Windows PowerShell 5.1 reads BOM-less files as ANSI.
-# PowerShell drops a bare -- before any function or script sees it: quote it ('--').
-function pyt {
-    $dir = (Get-Location).ProviderPath
-    while ($dir -and -not [IO.File]::Exists([IO.Path]::Combine($dir, '.pytemplate', 'pyt.py'))) {
-        $parent = [IO.Path]::GetDirectoryName($dir)
-        if ($parent -eq $dir) { $parent = $null }
-        $dir = $parent
-    }
-    if (-not $dir) {
-        [Console]::Error.WriteLine('pyt: no .pytemplate/pyt.py in this folder or any parent folder')
-        $global:LASTEXITCODE = 2
-        return
-    }
-    $ps1 = [IO.Path]::Combine($dir, 'pyt.ps1')
-    # Its code is not run when another user owns it (anyone may create /tmp/.pytemplate);
-    # on Windows, whose owners are not read here, never at a drive root.
-    $script = [IO.Path]::Combine($dir, '.pytemplate', 'pyt.py')
-    $foreign = if ($env:OS -eq 'Windows_NT') { [IO.Path]::GetPathRoot($dir) -eq $dir } else { & /bin/sh -c 'set -f; IFS=; [ -O $1 ]' sh $script; $LASTEXITCODE -ne 0 }
-    if ($foreign) {
-        [Console]::Error.WriteLine("pyt: $script is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run $ps1 yourself.")
-        $global:LASTEXITCODE = 2
-        return
-    }
-    # Pipeline input ('x' | pyt run) goes on to the runner, like a native call.
-    if ($MyInvocation.ExpectingInput) { $input | & $ps1 @args } else { & $ps1 @args }
-}
-"""
-
-FISH_SNIPPET = r"""
-# `pyt` in fish from any folder of a pytemplate project (fish 3.0 or later).
-# Save as ~/.config/fish/functions/pyt.fish, then open a new shell.
-function pyt --description 'Run ./pyt of the enclosing pytemplate project'
-    set -l dir $PWD
-    while not test -f "$dir/.pytemplate/pyt.py"
-        # the parent folder (`path dirname` needs fish 3.5; Ubuntu 22.04 has 3.3)
-        set -l parent (string replace -r '/[^/]*$' '' -- $dir)
-        test -z "$parent"; and set parent /
-        if test "$parent" = "$dir"
-            echo "pyt: no .pytemplate/pyt.py in $PWD or any parent folder" >&2
-            return 2
-        end
-        set dir $parent
-    end
-    # Its code is not run when another user owns it (anyone may create /tmp/.pytemplate);
-    # on Windows, whose owners are not read here, never at a drive root.
-    set -l foreign 0
-    if test "$OS" = Windows_NT; and test -z "$WSL_DISTRO_NAME"
-        string match -qr '^(/|[A-Za-z]:/?|/[A-Za-z]|/cygdrive/[A-Za-z])$' -- $dir; and set foreign 1
-    else if not test -O "$dir/.pytemplate/pyt.py"
-        set foreign 1
-    end
-    if test $foreign = 1
-        echo "pyt: $dir/.pytemplate/pyt.py is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run $dir/pyt yourself." >&2
-        return 2
-    end
-    "$dir/pyt" $argv
-end
-"""
-
-NU_SNIPPET = r"""
-# `pyt` in nushell from any folder of a pytemplate project.
-# Paste into your config.nu (`$nu.config-path` prints where it is), then open a new shell.
-# It runs .pytemplate/pyt.py with the uv on PATH (on Windows only a real uv.exe: a uv.cmd
-# shim would go through cmd.exe), else the launcher. Like the launchers it keeps your UV_PYTHON,
-# PYTHONHOME, PYTHONPATH and UV_WORKING_DIR away from the runner (uv and Python read an empty
-# value as unset; uv refuses an empty UV_WORKING_DIR).
-def --wrapped pyt [...rest] {
-    mut dir = $env.PWD
-    while not ($dir | path join '.pytemplate' 'pyt.py' | path exists) {
-        let parent = ($dir | path dirname)
-        if $parent == $dir {
-            error make {msg: $"pyt: no .pytemplate/pyt.py in ($env.PWD) or any parent folder"}
-        }
-        $dir = $parent
-    }
-    let root = $dir
-    let script = ($root | path join '.pytemplate' 'pyt.py')
-    let windows = ($nu.os-info.name == 'windows')
-    # Its code is not run when another user owns it (anyone may create /tmp/.pytemplate);
-    # on Windows, whose owners are not read here, never at a drive root.
-    let foreign = if $windows { ($root | path dirname) == $root } else { (^/bin/sh -c '[ -O "$1" ]' sh $script | complete).exit_code != 0 }
-    if $foreign {
-        error make {msg: $"pyt: ($script) is not yours, another user owns it or it is at a drive root: not run. If you trust it, run ($root | path join 'pyt') yourself."}
-    }
-    let uv = if $windows { 'uv.exe' } else { 'uv' }
-    if (which $uv | is-empty) {
-        # The launcher searches uv's usual install folders and prints how to install it.
-        if $windows { ^($root | path join 'pyt.cmd') ...$rest } else { ^sh ($root | path join 'pyt') ...$rest }
-    } else {
-        with-env {PYTEMPLATE_CALLER_CWD: $env.PWD, PYTEMPLATE_LAUNCHER: 'nu', UV_PYTHON: '', PYTHONHOME: '', PYTHONPATH: '', UV_WORKING_DIR: '.'} { ^$uv run --quiet --script $script ...$rest }
-    }
-}
-"""
-
-XONSH_TEMPLATE = r'''
-# `pyt` in xonsh from any folder of a pytemplate project (xonsh 0.14 or later).
-# Paste into ~/.xonshrc, then open a new shell. It runs .pytemplate/pyt.py with uv
-# directly (on Windows only a real uv.exe: a uv.cmd shim would go through cmd.exe; falling
-# back to the launcher when there is none on $PATH): on Windows ./pyt goes through
-# pyt.cmd, and cmd.exe cannot pass & | < > ^ % inside arguments. Unlike the
-# launchers it keeps the UV_PYTHON, PYTHONHOME, PYTHONPATH and UV_WORKING_DIR of your
-# session (an alias hands uv only an argument list): a UV_PYTHON must name Python 3.11 or
-# newer, a PYTHONHOME or PYTHONPATH can stop the runner's Python before it starts, and a
-# UV_WORKING_DIR moves it to another folder. Unset them for pyt, or use ./pyt.
-# The completion words were taken from this project by `./pyt shell-setup xonsh`.
-import os as _pt_os
-import shutil as _pt_shutil
-import subprocess as _pt_subprocess
-import sys as _pt_sys
-from pathlib import Path as _PtPath
-
-_PT_WORDS = @WORDS@
-_PT_CHOICES = @CHOICES@
-_PT_FLAGS = @FLAGS@
-_PT_GLOBALS = @GLOBALS@
-_PT_MISSING = "pyt: no .pytemplate/pyt.py in this folder or any parent folder"
-_PT_FOREIGN = "pyt: {} is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run {} yourself."
-
-
-def _pt_pyt_argv(args):
-    """(argv, "") or (None, why not)."""
-    here = _PtPath.cwd()
-    for d in (here, *here.parents):
-        script = d / ".pytemplate" / "pyt.py"
-        if script.is_file():
-            launcher = d / ("pyt.cmd" if _pt_os.name == "nt" else "pyt")
-            # Its code is not run when another user owns it (anyone may create /tmp/.pytemplate);
-            # on Windows, whose owners are not read here, never at a drive root.
-            if d == _PtPath(d.anchor) if _pt_os.name == "nt" else script.stat().st_uid != _pt_os.getuid():
-                return None, _PT_FOREIGN.format(script, launcher)
-            path = _pt_os.pathsep.join(str(p) for p in ${...}.get("PATH", []))
-            uv = _pt_shutil.which("uv.exe" if _pt_os.name == "nt" else "uv", path=path)
-            if uv:
-                return [uv, "run", "--quiet", "--script", str(script), *args], ""
-            return [str(launcher), *args], ""
-    return None, _PT_MISSING
-
-
-if hasattr(aliases, "return_command"):
-    # Newer xonsh: the alias becomes a real command (pipes, redirects and $(...) work).
-    @aliases.return_command
-    def _pt_pyt(args, **_):
-        argv, why = _pt_pyt_argv(args)
-        if argv is None:
-            return [_pt_sys.executable, "-c", "import sys; print(%r, file=sys.stderr); sys.exit(2)" % why]
-        return argv
-
-else:
-    from xonsh.tools import unthreadable as _pt_unthreadable
-
-    @_pt_unthreadable
-    def _pt_pyt(args, stdin=None):
-        argv, why = _pt_pyt_argv(args)
-        if argv is None:
-            print(why, file=_pt_sys.stderr)
-            return 2
-        return _pt_subprocess.call(argv)
-
-
-aliases["pyt"] = _pt_pyt
-
-try:
-    from xonsh.completers.completer import add_one_completer as _pt_add_completer
-    from xonsh.completers.tools import contextual_command_completer as _pt_command_completer
-except ImportError:  # xonsh without contextual completers: no completion
-    pass
-else:
-
-    @_pt_command_completer
-    def _pt_pyt_complete(command):
-        """./pyt commands, tasks, backends and options"""
-        if not command.args or _PtPath(command.args[0].value).name.lower() not in ("pyt", "pyt.cmd", "pyt.ps1"):
-            return None
-        at = 1  # the command comes after the global options (pyt -v --dry-run test)
-        while at < command.arg_index and at < len(command.args) and command.args[at].value in _PT_GLOBALS:
-            at += 1
-        if command.arg_index == at:
-            words = _PT_WORDS
-        elif command.arg_index > at and len(command.args) > at:
-            name = command.args[at].value
-            if name in ("-h", "--help"):
-                name = "help"
-            if command.prefix.startswith("-"):
-                words = _PT_FLAGS.get(name, [])
-            else:
-                words = _PT_CHOICES.get(name, []) if command.arg_index == at + 1 else []
-        else:
-            return None
-        return {w for w in words if w.startswith(command.prefix)} or None
-
-    _pt_add_completer("pyt", _pt_pyt_complete, "start")
-'''
-
-
-# The global options of cli._parse_globals (before the command): the completer skips them.
-GLOBAL_OPTIONS = ("-v", "--verbose", "-q", "--quiet", "--dry-run", "--no-render", "-h", "--help")
-
-
-def _first_group(usage: str) -> str | None:
-    """The leading [...] group of a usage line without its nested groups:
-    `[install [--force]|uninstall|run|status]` -> `install |uninstall|run|status`."""
-    if not usage.startswith("["):
-        return None
-    depth = 0
-    for end, ch in enumerate(usage):
-        depth += {"[": 1, "]": -1}.get(ch, 0)
-        if depth == 0:
-            break
-    else:
-        return None  # unbalanced
-    inner = usage[1:end]
-    while (flat := re.sub(r"\[[^\[\]]*\]", "", inner)) != inner:
-        inner = flat
-    return inner
-
-
-def completion_words(cfg: Config | None) -> tuple[list[str], dict[str, list[str]], dict[str, list[str]]]:
-    """Return (first words, choices of the 2nd word, --options) per command, from cli.COMMANDS."""
-    from .cli import COMMANDS
-
-    tasks = sorted(cfg.tasks) if cfg is not None else []
-    names = sorted(COMMANDS) + [t for t in tasks if t not in COMMANDS]
-    first = names + ["-v", "-q", "--dry-run", "--no-render"]
-    choices: dict[str, list[str]] = {}
-    flags: dict[str, list[str]] = {}
-    for name, command in COMMANDS.items():
-        group = _first_group(command.usage)
-        if group is not None:
-            words: list[str] = []
-            for word in (w.strip() for w in group.split("|")):
-                words += list(BACKENDS) if word == "BACKEND" else names if word == "COMMAND" else [word]
-            # the words of a command, a task (its names may hold "_") or an option
-            choices[name] = list(dict.fromkeys(w for w in words if re.fullmatch(r"-{0,2}[a-z][a-z0-9_-]*", w)))
-        options = list(dict.fromkeys(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", command.usage)))
-        if options:
-            flags[name] = options
-    return first, choices, flags
-
-
-def _py_words(words: Sequence[str], indent: str = "    ", width: int = 88) -> str:
-    """Return a Python expression for a word list: '"a b c".split()', wrapped under `width`."""
-    lines: list[str] = []
-    current = ""
-    for word in words:
-        if current and len(indent) + len(current) + len(word) + 4 > width:
-            lines.append(current)
-            current = ""
-        current = f"{current} {word}" if current else word
-    lines.append(current)
-    if len(lines) == 1:
-        return f'"{lines[0]}".split()'
-    body = "\n".join(f'{indent}"{line} "' for line in lines[:-1]) + f'\n{indent}"{lines[-1]}"'
-    return f"(\n{body}\n).split()"
-
-
-def _py_word_map(data: Mapping[str, Sequence[str]]) -> str:
-    rows = [f'    "{k}": "{" ".join(v)}".split(),' for k, v in data.items() if v]
-    return "{\n" + "\n".join(rows) + "\n}" if rows else "{}"
-
-
-def xonsh_snippet(cfg: Config | None) -> str:
-    first, choices, flags = completion_words(cfg)
-    return (
-        XONSH_TEMPLATE.replace("@WORDS@", _py_words(first))
-        .replace("@CHOICES@", _py_word_map(choices))
-        .replace("@FLAGS@", _py_word_map(flags))
-        .replace("@GLOBALS@", repr(GLOBAL_OPTIONS))
-    )
-
-
-# The snippets are ASCII (they are appended to rc files): a path of the user's that is not
-# (C:\Users\Jos<e-acute>) is named by its generic form instead.
-def _msys2_bashrc() -> str:
-    user = os.environ.get("USERNAME") or os.environ.get("USER") or "<you>"
-    for root in _msys2_roots(dict(os.environ), standard=True):
-        path = str(root / "home" / user / ".bashrc")
-        if path.isascii():
-            return path
-    return "<MSYS2 root>\\home\\<you>\\.bashrc"
-
-
-def _posix_header(shell: str) -> str:
-    if shell == "bash":
-        return "# `pyt` in bash from any folder of a pytemplate project.\n# Paste into ~/.bashrc (Git Bash on Windows: %USERPROFILE%\\.bashrc), then open a new shell."
-    if shell == "zsh":
-        return "# `pyt` in zsh from any folder of a pytemplate project.\n# Paste into ~/.zshrc, then open a new shell."
-    if shell == "niubash":
-        niu_env = os.environ.get("NIU_ENV") or "(unset: set NIU_ENV to a file first)"
-        if not niu_env.isascii():
-            niu_env = "$NIU_ENV"  # `echo $NIU_ENV` in niubash names it
-        return (
-            "# `pyt` in niubash from any folder of a pytemplate project.\n"
-            "# Paste it into BOTH of these files, then open a new shell:\n"
-            "#   ~/.niubashrc  (interactive niubash)\n"
-            f"#   {niu_env}  (the file named by $NIU_ENV: `niu -c`, niu scripts and xonsh `!`\n"
-            "#   lines read only that one; the xonsh-shell-kit mirrors aliases, not functions)"
-        )
-    return (
-        "# `pyt` in MSYS2 (any MSYSTEM) from any folder of a pytemplate project.\n"
-        f"# Paste into ~/.bashrc inside MSYS2 ({_msys2_bashrc()}) ABOVE the line\n"
-        '#   [[ "$-" != *i* ]] && return\n'
-        "# so non-interactive shells that source it get it too. xonsh `!m` lines run a non-login,\n"
-        "# non-interactive bash: add BASH_ENV=<that .bashrc> to the msys2 env of the xonsh-shell-kit."
-    )
-
-
-def snippet(shell: str, cfg: Config | None = None) -> str:
-    """Return the shell-setup snippet for `shell` (ASCII, with where to paste it on top).
-
-    It starts with a line break: appended (>>) to an rc file whose last line has none (VS Code
-    and Notepad save files so), its first comment would join that line and break it."""
-    if shell in ("bash", "zsh", "niubash", "msys2"):
-        body = _posix_header(shell) + "\n" + POSIX_FUNCTION.strip("\n")
-    elif shell in ("pwsh", "powershell"):
-        body = PWSH_SNIPPET.strip("\n")
-    elif shell == "fish":
-        body = FISH_SNIPPET.strip("\n")
-    elif shell == "nu":
-        body = NU_SNIPPET.strip("\n")
-    elif shell == "xonsh":
-        body = xonsh_snippet(cfg).strip("\n")
-    else:
-        raise PytError(f"shell-setup: unknown shell '{shell}' ({' | '.join(SETUP_SHELLS)})")
-    return "\n" + body + "\n"
-
-
-def guess_shell(env: Mapping[str, str]) -> str | None:
-    """Guess the calling shell from PYTEMPLATE_LAUNCHER, XONSH_VERSION and SHELL.
-
-    ps1:, nu (the shell-setup nu function) and sh:niubash name the caller (niubash runs the
-    launcher in-process). sh:bash/sh:zsh only name the interpreter of `#!/bin/sh` (bash on
-    macOS, Fedora, Arch), not the user's shell: they are the last resort after XONSH_VERSION
-    and $SHELL (Git Bash/MSYS2 without it).
-    """
-    launcher = env.get("PYTEMPLATE_LAUNCHER", "")
-    if launcher.startswith("ps1:"):
-        return "pwsh"
-    if launcher == "nu":
-        return "nu"
-    if launcher.startswith("sh:niubash"):
-        return "niubash"
-    if env.get("XONSH_VERSION"):
-        return "xonsh"
-    name = re.split(r"[\\/]", env.get("SHELL", ""))[-1].lower()  # C:\x\zsh.exe on any host
-    name = name[:-4] if name.endswith(".exe") else name
-    if name in ("bash", "zsh", "fish", "nu", "pwsh"):
-        return name
-    for prefix, shell in (("sh:zsh", "zsh"), ("sh:bash", "bash")):
-        if launcher.startswith(prefix):
-            return shell
-    return None
-
-
-def cmd_shell_setup(cfg: Config, args: list[str]) -> int:
-    """shell-setup [xonsh|pwsh|powershell|bash|zsh|niubash|msys2|fish|nu]: print a `pyt` alias/function."""
-    if len(args) > 1 or (args and args[0].startswith("-")):
-        raise PytError(f"usage: ./pyt shell-setup [{'|'.join(SETUP_SHELLS)}]")
-    shell = args[0] if args else guess_shell(os.environ)
-    if shell is None:
-        raise PytError(f"shell-setup: which shell? ./pyt shell-setup {'|'.join(SETUP_SHELLS)}")
-    # LF even on Windows: the snippet is often appended to an rc file (bash rejects CRLF).
-    sys.stdout.flush()
-    sys.stdout.buffer.write(snippet(shell, cfg).encode("utf-8"))
-    sys.stdout.buffer.flush()
-    return 0
 
 
 # --- selftest --shells: discovery ------------------------------------------------------------------
