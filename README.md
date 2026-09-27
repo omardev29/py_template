@@ -1618,8 +1618,11 @@ The owner's bar for this template, set in `CLAUDE.md` (rule 1.10 and section 13.
   the bar. Since then every one of those defects is fixed, each with a regression test, but one
   that is only partly fixed (a project inside another git repository keeps a generated CI that
   GitHub never runs; `new` and `doctor` say so), and an adversarial review of the fixes found
-  about 40 more problems in them, fixed too. A new measurement will say where the template
-  stands now.
+  about 40 more problems in them, fixed too. A second measurement, on 2026-09-26 at commit
+  e3c3703 (18,207 lines; two independent hunts of 10 agents, whose findings were reproduced by
+  the fixers), counted 66 defects (11 critical, 55 notable): 1 per 276 lines, about 1 per 164 by
+  capture-recapture. UNACCEPTABLE again. All of them, and its 47 minor ones, are fixed since,
+  each with a regression test. A new measurement will say where the template stands now.
 
 The template is MIT-licensed (`LICENSE`). A project made with `./deploy new` keeps that notice as
 `.pytemplate/LICENSE`, next to the copied runner, and has no root `LICENSE` of its own.

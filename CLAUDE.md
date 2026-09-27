@@ -3335,8 +3335,21 @@ template-launchers; real niubash only on the maintainer's machine).
     adversarial review of every branch, whose findings on the fixes themselves (about 40, 2 of
     them critical) were fixed too. All 66 counted and 62 minor defects are fixed but one counted
     notable, only partly: a project inside another git repository keeps a generated CI that
-    GitHub never runs (`new` and `doctor` now say so; section 15.2). Not measured again yet:
-    until a new measurement says otherwise, the project is not at the bar.
+    GitHub never runs (`new` and `doctor` now say so; section 15.2).
+  - 2026-09-26, commit e3c3703 (those fixes, and the CI image's stage 1), 18,207 lines: two
+    independent teams of 10 hunters again, this time without the verifier and the skeptic (owner
+    decision): each finding was reproduced by whoever fixed it, with a regression test that
+    fails without the fix. Team A reported 60 findings (6 critical, 32 notable, 22 minor), team B
+    71 (6 critical, 33 notable, 32 minor); merged across the teams, 11 critical (one found by
+    both: the shared `/tmp` default of `selftest --e2e`), 55 notable and 47 minor distinct
+    defects, none rejected. Counted: 66, 1 per 276 lines. Capture-recapture on the counted: A 39,
+    B 41, both 14: about 111 (Chapman), 1 per 164 lines. UNACCEPTABLE, as at 87e28f9 (the code
+    had grown by 2,700 lines, the CI image and the fixes, and new code is where many finds
+    were). Fixed since: the 11 critical ones by hand, one commit each; the other 108 findings,
+    the minor ones included, by two fixers (areas 1-5 and 6-10, one branch each), each with its
+    regression test, then merged and checked together (`./deploy selftest`, `--shells`,
+    `--nvim`, `--e2e --quick`). Not measured again yet: until a new measurement says otherwise,
+    the project is not at the bar.
 
 ## 14. Conventions and recipes
 
