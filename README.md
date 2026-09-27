@@ -1192,7 +1192,10 @@ details.
 ./deploy nvim sync        # install the plugins the project adds (Lazy! install)
 ```
 
-`./deploy nvim` alone is `nvim doctor`. `bootstrap` never touches an existing config. `extras`
+`./deploy nvim` alone is `nvim doctor`. A config counts as LazyVim when its Lua names the
+`LazyVim/LazyVim` spec (the starter's `lua/config/lazy.lua` does), its `lazy-lock.json` names
+LazyVim, or lazy.nvim installed LazyVim in `stdpath("data")/lazy`; a plain lazy.nvim config is not
+(the extras the project imports are LazyVim's). `bootstrap` never touches an existing config. `extras`
 backs up `lazyvim.json` before changing it, and refuses (exit 3) until LazyVim has created that
 file (start Neovim once). `sync` installs only (it never updates or removes your plugins) and
 needs the trust first (exit 3 otherwise); it then asks lazy.nvim whether every plugin is
