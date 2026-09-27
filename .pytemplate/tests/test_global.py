@@ -371,6 +371,9 @@ def test_a_copy_that_fails_says_what_failed(tmp_path: Path, monkeypatch: pytest.
         return real(src, dst, follow_symlinks=follow_symlinks)
 
     monkeypatch.setattr(shutil, "copyfile", copyfile)
+    winapi = getattr(shutil, "_winapi", None)
+    if winapi is not None and hasattr(winapi, "CopyFile2"):
+        monkeypatch.delattr(winapi, "CopyFile2")  # Windows: copy2 copies through copyfile then, as elsewhere
     dest = tmp_path / "demo"
     with pytest.raises(ui.PytError) as e:
         presets.copy_template(dest)
