@@ -496,15 +496,28 @@ def test_import_names_follow_the_installed_packages() -> None:
     assert set(presets.IMPORT_NAMES) <= pinned  # only pinned packages (their pins name them)
 
 
-def test_every_locked_package_name_is_refused() -> None:
+def with_locked(monkeypatch: pytest.MonkeyPatch, extra: tuple[str, ...]) -> None:
+    """uv.lock as the name rules read it (presets._lock_graph), plus `extra` packages that every
+    locked one needs: what a project's own `./deploy add` brings (build, retry -> py)."""
+    graph = presets._lock_graph()
+    grown = {**{k: v | set(extra) for k, v in graph.items()}, **{n: set() for n in extra}}
+    monkeypatch.setattr(presets, "_lock_graph", lambda lock=None: {k: set(v) for k, v in grown.items()})
+
+
+@pytest.mark.parametrize("extra", [(), ("build", "py")], ids=["lock", "lock-with-build-and-py"])
+def test_every_locked_package_name_is_refused(monkeypatch: pytest.MonkeyPatch, extra: tuple[str, ...]) -> None:
     """uv refuses a project that depends on itself, or resolves the dependency to the project
     (section 15.1), also through a dependency of a dependency (rich -> pygments), and on any
-    platform (colorama is win32 only): every name in uv.lock."""
+    platform (colorama is win32 only): every name in uv.lock. A rule checked first may refuse
+    one for its own reason (build is a folder of the project, py a Python command): the test
+    failed in a project that had added build or retry."""
     cfg = config.load(set(cli.COMMANDS))
+    with_locked(monkeypatch, extra)
     locked = presets.locked_names()
     assert locked, "uv.lock is missing or empty"
+    assert locked <= presets._dependency_names(cfg, cfg.app.preset)  # the dependency rule names every one
     for name in sorted(locked):
-        with pytest.raises(DeployError, match="also the name of a dependency|standard library") as e:
+        with pytest.raises(DeployError) as e:
             presets.check_name_free(cfg, cfg.app.preset, name)
         assert e.value.code == 2
     assert presets._norm_name(cfg.app.name) not in locked  # the project itself is not a clash

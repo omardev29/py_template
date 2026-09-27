@@ -1046,12 +1046,18 @@ def test_a_pyproject_without_project_name_stops_the_plan(tmp_path: Path) -> None
 # --- names: indirect dependencies, the standard library of every Python ---------------------------------
 
 
-def test_every_locked_package_name_is_refused() -> None:
+@pytest.mark.parametrize("extra", [(), ("build", "py")], ids=["lock", "lock-with-build-and-py"])
+def test_every_locked_package_name_is_refused(monkeypatch: pytest.MonkeyPatch, extra: tuple[str, ...]) -> None:
+    """Any refusal counts: a rule checked first may give its own reason (build is a folder of
+    the project, py a Python command), and the test failed in a project that had added them."""
     cfg = _cfg("script")
     names = rename.locked_names(ROOT)
     assert {"iniconfig", "pluggy", "packaging", "pygments"} <= names  # pytest's and rich's own dependencies
-    for name in sorted(names):
-        with pytest.raises(DeployError, match="package in uv.lock|also the name of a dependency|standard library") as e:
+    graph = presets._lock_graph()
+    monkeypatch.setattr(presets, "_lock_graph", lambda lock=None: {**{k: v | set(extra) for k, v in graph.items()}, **{n: set() for n in extra}})
+    monkeypatch.setattr(rename, "locked_names", lambda root: names | set(extra))
+    for name in sorted(names | set(extra)):
+        with pytest.raises(DeployError) as e:
             rename.check_new_name(cfg, name)
         assert e.value.code == 2
     with pytest.raises(DeployError, match=r"\(iniconfig, "):
