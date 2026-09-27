@@ -152,6 +152,23 @@ def test_quiet_keeps_what_selftest_shells_was_asked_for(
     assert "dash: FAIL T2" not in err  # the per-shell progress lines stay hidden
 
 
+def test_quiet_keeps_where_the_kept_scratch_files_are(
+    probes: dict[tuple[str, str], str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """--keep was asked for, and the folder has a random name: `-q selftest --shells --keep` kept it
+    without saying where."""
+    import tempfile
+
+    from runner import ui
+
+    monkeypatch.setattr(ui, "QUIET", True)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    assert shells.selftest(make(), ["--keep", "--tests", "T2"]) == 0
+    kept = list(tmp_path.glob("pts-*"))
+    err = capsys.readouterr().err
+    assert len(kept) == 1 and f"scratch files kept in {kept[0]}" in err, err
+
+
 def test_shells_refuse_what_cannot_run(probes: dict[tuple[str, str], str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     with pytest.raises(DeployError, match="not found here: fish") as e:
         shells.selftest(make(), ["fish"])

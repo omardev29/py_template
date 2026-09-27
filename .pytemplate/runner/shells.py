@@ -1557,8 +1557,8 @@ def selftest(cfg: Config, args: list[str]) -> int:
     try:
         results = _run_all(ctx, shells, opts.tests, opts.jobs)
     finally:
-        if opts.keep:
-            ui.info(f"scratch files kept in {tmp}")
+        if opts.keep:  # asked for, and a random name: shown even with -q
+            ui.report(f"scratch files kept in {tmp}")
         else:
             shutil.rmtree(tmp, ignore_errors=True)
     seconds = time.perf_counter() - started
