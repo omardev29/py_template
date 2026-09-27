@@ -87,21 +87,21 @@ local function absolute(file)
   local staged = root and in_stage(file)
   if staged then
     -- land on the src/ file: an edit made in the stage copy is overwritten by the next sync
-    local src = vim.fs.normalize(root .. "/src/" .. staged)
+    local src = pt.normalize(root .. "/src/" .. staged)
     if vim.uv.fs_stat(src) then
       return src
     end
   end
   if file:match("^%a:/") or file:sub(1, 1) == "/" then
-    return vim.fs.normalize(file)
+    return pt.normalize(file)
   end
   if not root then
     return file
   end
-  local path = vim.fs.normalize(root .. "/" .. file)
+  local path = pt.normalize(root .. "/" .. file)
   -- mypyc runs in its stage (a copy of src/) and prints stage-relative paths: map them to src/
   if not vim.uv.fs_stat(path) then
-    local src = vim.fs.normalize(root .. "/src/" .. file)
+    local src = pt.normalize(root .. "/src/" .. file)
     if vim.uv.fs_stat(src) then
       return src
     end
@@ -523,7 +523,7 @@ function M.setup(cfg)
       pattern = "pytemplate.toml",
       desc = "pytemplate: ./deploy render",
       callback = function(ev)
-        if pt.same_path(vim.fs.dirname(vim.fs.normalize(ev.match)), pt.root()) then
+        if pt.same_path(vim.fs.dirname(pt.normalize(ev.match)), pt.root()) then
           M.run({ "render" })
         end
       end,

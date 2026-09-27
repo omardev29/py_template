@@ -662,6 +662,56 @@ def test_mypy_linter_follows_a_venv_created_later(tmp_path: Path) -> None:
     assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
 
 
+DEBUGPY_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+local pt = require("pytemplate")
+local errors = {}
+local function check(name, ok, msg)
+  if not ok then errors[#errors + 1] = name .. ": " .. tostring(msg) end
+end
+for _, root in ipairs(vim.split(vim.env.PT_ROOTS, "\n", { trimempty = true })) do
+  pt.config.root = root
+  local py, source = require("pytemplate.dap").adapter()
+  check("the .venv debugpy of " .. root, source == ".venv" and py ~= nil, vim.inspect({ py, source }))
+end
+-- the WinGet package folders of the uv search: listed the same way
+local parent = vim.env.PT_TMP .. "/W [1]{a}$HOME"
+local found = vim.tbl_map(vim.fs.basename, pt.subdirs(parent, "astral-sh.uv_"))
+local want = pt.is_win and { "Astral-sh.uv_b", "astral-sh.uv_a" } or { "astral-sh.uv_a" }
+check("subdirs", vim.deep_equal(found, want), vim.inspect(found))
+check("subdirs of a missing folder", #pt.subdirs(parent .. "/missing", "x") == 0, "not empty")
+io.stdout:write(#errors == 0 and "PTLUA OK\n" or ("PTLUA FAIL\n" .. table.concat(errors, "\n") .. "\n"))
+vim.cmd(#errors == 0 and "qa!" or "cq!")
+"""
+
+
+def test_the_venv_debugpy_is_found_in_any_project_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """dap.has_debugpy put the project path into vim.fn.glob(): under a folder named with [ ],
+    { } or $VAR it matched nothing (the adapter fell back to an ephemeral `uv run --with debugpy`,
+    which needs the network), and a backquoted part ran as a command through 'shell'."""
+    names = ["plain", "p [x]", "p{1}", "p$HOME"] + ([] if sys.platform == "win32" else ["a`touch PWNED`b"])
+    roots = []
+    for name in names:
+        project = _project(tmp_path / "roots" / name)
+        if sys.platform == "win32":
+            python, site = project / ".venv" / "Scripts" / "python.exe", project / ".venv" / "Lib" / "site-packages"
+        else:
+            python, site = project / ".venv" / "bin" / "python", project / ".venv" / "lib" / "python3.14" / "site-packages"
+        python.parent.mkdir(parents=True)
+        python.write_bytes(b"")
+        (site / "debugpy").mkdir(parents=True)
+        (site / "debugpy" / "__init__.py").write_text("", encoding="utf-8")
+        roots.append(project.as_posix())
+    parent = tmp_path / "W [1]{a}$HOME"
+    for entry in ("astral-sh.uv_a", "Astral-sh.uv_b", "other"):
+        (parent / entry).mkdir(parents=True)
+    (parent / "astral-sh.uv_file").write_text("", encoding="utf-8")
+    monkeypatch.setenv("PT_ROOTS", "\n".join(roots))
+    r = _headless_lua(tmp_path, DEBUGPY_CHECK, tmp_path)
+    assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+    assert not list(tmp_path.rglob("PWNED")), "a command in the folder name ran"
+
+
 LUA_PRELUDE = r"""
 vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
 local root = vim.env.PT_TEST_ROOT

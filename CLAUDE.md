@@ -2585,6 +2585,11 @@ LazyVim wiring:
   on Windows. Adapter order (`dap.adapter`): `.venv` python with debugpy (dev group), the tools
   python, Mason's debugpy venv python, an ephemeral `uv run --no-project --with debugpy`
   adapter; `initialize_timeout_sec = 30` (a cold adapter can take more than the default 4 s).
+  debugpy is looked for by listing `lib/python3*` (`init.subdirs`, as the WinGet folders of the uv
+  search), never with `vim.fn.glob`, and every path goes through `init.normalize`
+  (`vim.fs.normalize` without its `$VAR` expansion): under a project folder named with `[ ]`,
+  `{ }` or `$HOME` the glob matched nothing and the adapter fell back to the network, and a
+  backquoted part ran as a command through 'shell' (`test_the_venv_debugpy_is_found_in_any_project_folder`).
   The program runs on the cpython runtime env. nvim-dap reads `<cwd>/.vscode/launch.json`
   (per-OS blocks lifted, JSONC accepted) and expands `${workspaceFolder}` to the cwd: a
   provider covers a cwd below the root.
