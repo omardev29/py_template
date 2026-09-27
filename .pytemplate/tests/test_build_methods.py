@@ -434,6 +434,34 @@ def test_nuitka_onefile_keeps_the_plain_name_and_moves_the_file(sandbox: Path, m
     assert result == sandbox / "dist" / "myapp-cpython-nuitka" / "myapp" and result.read_bytes() == b"\x7fELF onefile"
 
 
+def test_nuitka_starts_the_compiler_even_for_an_app_named_nuitka(sandbox: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`python -m nuitka` ran in the stage, whose own package nuitka/ came first on sys.path:
+    "'nuitka' is a package and cannot be directly executed". The command the build runs is
+    replayed here with a stand-in compiler on PYTHONPATH (where the tools env keeps Nuitka)."""
+    cfg = make({"app": {"name": "nuitka"}, "compile": {"modules": ["nuitka.core"]}})
+    app = _nuitka_app(sandbox / "payload", cfg.pkg)
+    seen: dict[str, Any] = {}
+
+    def uv(env: object, argv: Any, *, cwd: Path | None = None, **_: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        if "--with" not in args:
+            return _run_locate(args)
+        seen.update(argv=args[args.index("--with") + 2 :], cwd=cwd)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(envs, "uv", uv)
+    with pytest.raises(DeployError):  # the stand-in above builds nothing
+        nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
+    compiler = tmp_path / "site" / "nuitka"
+    compiler.mkdir(parents=True)
+    (compiler / "__init__.py").write_text("", encoding="utf-8")
+    (compiler / "__main__.py").write_text("print('the compiler')\n", encoding="utf-8")
+    assert seen["argv"][0] == "python" and (Path(seen["cwd"]) / "nuitka" / "__init__.py").is_file()
+    env = {**os.environ, "PYTHONPATH": str(tmp_path / "site")}
+    r = subprocess.run([sys.executable, *seen["argv"][1:]], cwd=seen["cwd"], env=env, capture_output=True, text=True, check=False)
+    assert (r.returncode, r.stdout.strip()) == (0, "the compiler"), r.stderr
+
+
 def test_nuitka_without_output_is_a_clear_error(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = make({})
     app = _nuitka_app(sandbox / "payload", cfg.pkg)
@@ -463,7 +491,8 @@ def test_nuitka_argv_follows_the_config(sandbox: Path, monkeypatch: pytest.Monke
     nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app, extra=["--report=r.xml"]))
     argv = fake.argv
     stage = sandbox / "build" / "nuitka-stage" / "cpython"
-    assert argv[argv.index(nuitka.NUITKA) + 1 :][:4] == ["python", "-m", "nuitka", str(stage / "main.py")]
+    # -P: the stage (the cwd) is not on Nuitka's own sys.path, so an app named nuitka never runs instead
+    assert argv[argv.index(nuitka.NUITKA) + 1 :][:5] == ["python", "-P", "-m", "nuitka", str(stage / "main.py")]
     assert "--output-filename=myapp.exe" in argv and "--include-package=myapp" in argv
     assert ("--python-flag=no_asserts" in argv) is (optimize >= 1)
     assert ("--python-flag=no_docstrings" in argv) is (optimize >= 2)

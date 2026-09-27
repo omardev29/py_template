@@ -1977,8 +1977,10 @@ Per method:
   cpython wheel left the module out. `app.gui` -> `[project.gui-scripts]` (no console window on
   Windows), else `[project.scripts]`. mypyc -> platform wheel; cpython/pypy -> `py3-none-any`
   (even with a vendored native library: the wheel is not retagged).
-- **nuitka**: `.build/nuitka-stage/<b>`, `uv run --locked --with nuitka==<NUITKA> python -m
-  nuitka` with cwd = stage; `--include-package=<pkg>`, `--include-module` for the mypyc hidden
+- **nuitka**: `.build/nuitka-stage/<b>`, `uv run --locked --with nuitka==<NUITKA> python -P -m
+  nuitka` with cwd = stage (`-P`: `-m` put the stage first on Nuitka's own `sys.path`, so an app
+  named `nuitka`, or like a module Nuitka imports, ran instead of the compiler; Nuitka finds the
+  app from the folder of `main.py`); `--include-package=<pkg>`, `--include-module` for the mypyc hidden
   imports the tools env can locate (`nuitka.includable`: top-level `find_spec` with the stage on
   `sys.path`, built-ins dropped, compiled modules and extensions always kept; Nuitka stops with
   FATAL on a module it cannot locate, e.g. a platform-guarded `import winreg`),

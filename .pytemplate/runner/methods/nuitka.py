@@ -256,8 +256,11 @@ def build(req: BuildRequest) -> Path:
         # suffix for its intermediate binaries.
         exe_name += ".bin"
 
+    # -P: `python -m` puts the cwd (the stage) first on sys.path, so an app package named like
+    # Nuitka, or like a module Nuitka imports (zstandard...), ran instead ("'nuitka' is a package
+    # and cannot be directly executed"). Nuitka finds the app from the folder of main.py.
     argv: list[str | Path] = [
-        "python", "-m", "nuitka", stage / "main.py",
+        "python", "-P", "-m", "nuitka", stage / "main.py",
         f"--mode={'onefile' if onefile else 'standalone'}",
         f"--output-dir={work}",
         f"--output-filename={exe_name}",
