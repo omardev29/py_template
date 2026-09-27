@@ -911,6 +911,11 @@ about 7 minutes, the next ones about 3.
   reads `[tool.flet]` and the `[project] description` of `pyproject.toml`, where `org`,
   `company` and `copyright` are placeholders that end up in the app; `[tool.flet.app] path` is
   always `src`.
+- Mobile and web apps take their binary packages (msgpack, numpy: those without a pure-Python
+  wheel) from Flet's own index, `pypi.flet.dev`, which holds other releases than PyPI. For those
+  targets such a package is not pinned to `uv.lock`'s version (a new flet project locks msgpack
+  1.2.2, and Flet's index has 1.1.x): it keeps the bounds your `pyproject.toml` gives it, pip picks
+  a release that fits them, and the build names it in a warning.
 - `cleanup` (default `true`): `--cleanup-app --cleanup-packages`. `false` turns both off: Flet
   cleans the packages unless told not to, so the build project gets `app = false` and
   `packages = false` in `[tool.flet.cleanup]` (values your own `[tool.flet.cleanup]` sets stay).

@@ -2121,7 +2121,11 @@ Per method:
   copied (a desktop `.pyd` must not reach a mobile/web build). `flet build` ignores `uv.lock`, so `build_pyproject` pins the
   `uv export --frozen --no-dev --no-editable` versions (`flet._pinned_requirements`; a local
   library as `name @ file:///absolute/path`, `common.direct_reference`: editable it was
-  `-e ./libs/x ; <markers>`, which pip refused, relative to the project and not the stage) and
+  `-e ./libs/x ; <markers>`, which pip refused, relative to the project and not the stage; for a
+  mobile or web target a pin of a package uv.lock has no pure wheel for keeps only the project's
+  own bounds and its markers, `common.unpin_binaries` with `binary_only` and
+  `project_specifiers`, named in a warning: those targets take their binaries from Flet's own
+  index, 15.1) and
   serialises the PARSED `[tool.flet]` of the
   project `pyproject.toml` (no other table leaks in; `[tool.flet.app]` alone is kept) with
   `app.path` forced to `STAGE_APP` (`src`, where `build` stages the app; another value is
@@ -3768,6 +3772,14 @@ Flet (flet, flet-desktop, flet pack, flet build):
   Fix: `methods.flet.build_pyproject` pins the exported versions and `requires-python =
   "==X.Y.*"` (10). Test: `test_build_methods.py::test_flet_build_pins_the_python_minor`,
   `test_fixes.py::test_flet_build_pyproject_takes_only_tool_flet`. Goes: never.
+- **`flet build` takes a mobile or web target's binary packages from Flet's own index**
+  (LIMITATION, flet-cli 1.0.1 with serious_python): pip runs with `--only-binary :all:` and
+  `--extra-index-url https://pypi.flet.dev`, which holds other releases than PyPI (msgpack 1.1.0
+  and 1.1.2, where a new flet project locks 1.2.2 from PyPI, which has no Android or iOS wheel):
+  the exact pin had no solution and an `apk`, `aab` or `ipa` build failed. Fix:
+  `common.unpin_binaries` in `methods.flet.build` (10). Test:
+  `test_build_methods.py::test_flet_build_leaves_mobile_binaries_to_flets_index`. Goes: never
+  (Flet's index follows its own schedule).
 - **`flet build` looks for `<work>/<path>/main.py`** (LIMITATION): another `[tool.flet.app]
   path` aborted after installing Flutter. Fix: `methods.flet.build_pyproject` forces
   `methods.flet.STAGE_APP` with a warning (10). Test:

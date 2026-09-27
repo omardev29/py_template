@@ -3588,10 +3588,57 @@ def test_portable_runtime_smoke_with_real_interpreters(tmp_path: Path) -> None:
 
 # --- flet build ---------------------------------------------------------------------------------------
 
+FLET_LOCK = """version = 1
+
+[[package]]
+name = "fletdemo"
+version = "0.1.0"
+source = { virtual = "." }
+
+[package.metadata]
+requires-dist = [
+    { name = "flet", specifier = "==1.0.1" },
+    { name = "numpy", specifier = ">=2.0,<3" },
+]
+
+[[package]]
+name = "flet"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://files.pythonhosted.org/packages/aa/flet-1.0.1-py3-none-any.whl" }]
+
+[[package]]
+name = "msgpack"
+version = "1.2.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/bb/msgpack-1.2.2.tar.gz" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cc/msgpack-1.2.2-cp314-cp314-manylinux_2_28_x86_64.whl" },
+    { url = "https://files.pythonhosted.org/packages/dd/msgpack-1.2.2-cp314-cp314-win_amd64.whl" },
+]
+
+[[package]]
+name = "numpy"
+version = "2.3.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [{ url = "https://files.pythonhosted.org/packages/ee/numpy-2.3.1-cp314-cp314-win_amd64.whl" }]
+
+[[package]]
+name = "docopt"
+version = "0.6.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ff/docopt-0.6.2.tar.gz" }
+
+[[package]]
+name = "mylib"
+version = "0.1.0"
+source = { editable = "libs/mylib" }
+"""
+
 FLET_PYPROJECT ='[project]\nname = "fletdemo"\nversion = "0.1.0"\n\n[tool.flet]\norg = "com.example"\n\n[tool.flet.app]\npath = "src"\nmodule = "main"\n'
 
 
-def _flet_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, backend: str = "cpython", target: str = "host", produce: bool = True, payload_ext: bool = False, **deploy: Any) -> tuple[Path, Recorder]:
+def _flet_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, backend: str = "cpython", target: str = "host", produce: bool = True, payload_ext: bool = False, pins: list[str] | None = None, **deploy: Any) -> tuple[Path, Recorder]:
     from runner.methods import flet
 
     cfg = _flet_cfg(deploy={"flet": {"target": target, "extra_args": ["--build-number", "7"], **deploy}})
@@ -3602,7 +3649,9 @@ def _flet_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, backend: str 
     pyproject = sandbox / "pyproject.toml"
     pyproject.write_text(FLET_PYPROJECT, encoding="utf-8")
     monkeypatch.setattr(flet, "PYPROJECT", pyproject)
-    monkeypatch.setattr(flet, "_pinned_requirements", lambda env: ["flet==1.0.1", "msgpack==1.1.0"])
+    monkeypatch.setattr(flet, "_pinned_requirements", lambda env: list(pins or ["flet==1.0.1", "msgpack==1.1.0"]))
+    (sandbox / "uv.lock").write_text(FLET_LOCK, encoding="utf-8")
+    monkeypatch.setattr(common, "LOCK", sandbox / "uv.lock")
     monkeypatch.setattr(flet, "host_os", lambda: "linux")
 
     def effect(args: list[str], cwd: Path | None) -> None:
@@ -3778,6 +3827,32 @@ def test_flet_build_mobile_and_web_ship_the_py_code(sandbox: Path, monkeypatch: 
     assert out.name == "fletdemo-mypyc-flet-web"
     assert not [p for p in stage.rglob("*") if p.name.endswith((".so", ".pyd"))]
     assert "web: compiled extensions are not supported" in capsys.readouterr().err
+
+
+def test_flet_build_leaves_mobile_binaries_to_flets_index(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # flet build installs a mobile or web target's binary packages from Flet's own index
+    # (pypi.flet.dev, --only-binary :all:), which held msgpack 1.1.0 and 1.1.2 only: the exact
+    # msgpack==1.2.2 of a new flet project had no solution and an apk or ipa build failed
+    import tomllib
+
+    requirements = pytest.importorskip("packaging.requirements")
+    marker = "python_full_version < '3.15' and implementation_name == 'cpython'"
+    pins = [f"flet==1.0.1 ; {marker}", f"msgpack==1.2.2 ; {marker}", "numpy==2.3.1", "docopt==0.6.2", f"mylib @ file:///src/libs/mylib ; {marker}"]
+    stage = sandbox / "build" / "flet-build" / "cpython" / "pyproject.toml"
+    for target in ("apk", "ipa", "web"):
+        _flet_build(sandbox, monkeypatch, target=target, pins=pins)
+        deps = tomllib.loads(stage.read_text(encoding="utf-8"))["project"]["dependencies"]
+        # the pure flet keeps its pin, a binary one keeps only the project's own bounds and its
+        # markers, a direct reference stays
+        assert deps == [f"flet==1.0.1 ; {marker}", f"msgpack ; {marker}", "numpy>=2.0,<3", "docopt", f"mylib @ file:///src/libs/mylib ; {marker}"]
+        for dep in deps:
+            requirements.Requirement(dep)
+        err = capsys.readouterr().err
+        assert f"{target}: not pinned to uv.lock's version: msgpack==1.2.2, numpy==2.3.1, docopt==0.6.2" in err and "pypi.flet.dev" in err
+    # a desktop build installs from PyPI: every pin stays
+    _flet_build(sandbox, monkeypatch, target="linux", pins=pins)
+    assert tomllib.loads(stage.read_text(encoding="utf-8"))["project"]["dependencies"] == pins
+    assert "not pinned" not in capsys.readouterr().err
 
 
 def test_flet_build_upx_only_for_desktop_and_missing_output(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:

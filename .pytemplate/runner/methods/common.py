@@ -16,6 +16,7 @@ import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .. import envs, proc, ui
 from ..config import Config
@@ -296,6 +297,82 @@ def source_only(lock: Path) -> list[str]:
             continue  # the project itself
         names.add(package["name"])
     return sorted(names)
+
+
+def _lock_packages(lock: Path) -> list[dict[str, Any]]:
+    try:
+        data = tomllib.loads(lock.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return []
+    packages = data.get("package", [])
+    return [p for p in packages if isinstance(p, dict) and isinstance(p.get("name"), str)] if isinstance(packages, list) else []
+
+
+def binary_only(lock: Path) -> set[str]:
+    """The normalized names of the index packages of uv.lock that publish no pure wheel
+    (`-none-any`): native packages (msgpack, numpy) and sdist-only releases."""
+    out: set[str] = set()
+    for package in _lock_packages(lock):
+        source = package.get("source")
+        if not isinstance(source, dict) or "registry" not in source:
+            continue  # the project, a path, git or URL source: never a name==version pin
+        wheels = package.get("wheels")
+        files = [str(w.get("url") or w.get("path") or w.get("filename") or "") for w in wheels if isinstance(w, dict)] if isinstance(wheels, list) else []
+        if not any(f.rsplit("/", 1)[-1].endswith("-none-any.whl") for f in files):
+            out.add(_norm_name(package["name"]))
+    return out
+
+
+def project_specifiers(lock: Path) -> dict[str, str]:
+    """The version bounds the project itself declares for its runtime dependencies (its
+    requires-dist in uv.lock), by normalized name; a name declared twice with other bounds (per
+    marker) is left out."""
+    out: dict[str, str] = {}
+    seen: set[str] = set()
+    for package in _lock_packages(lock):
+        source = package.get("source")
+        if not isinstance(source, dict) or "." not in (source.get("virtual"), source.get("editable")):
+            continue
+        metadata = package.get("metadata")
+        requires = metadata.get("requires-dist") if isinstance(metadata, dict) else None
+        for entry in requires if isinstance(requires, list) else []:
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                continue
+            name, specifier = _norm_name(entry["name"]), entry.get("specifier")
+            text = specifier if isinstance(specifier, str) else ""
+            if name in seen and out.get(name) != text:
+                out.pop(name, None)
+                continue
+            if name not in seen:
+                out[name] = text
+            seen.add(name)
+    return out
+
+
+def unpin_binaries(pins: list[str], *, lock: Path | None = None) -> tuple[list[str], list[str]]:
+    """For `flet build` of a mobile or web target: the `name==version` pins of the packages
+    uv.lock has no pure wheel for (`binary_only`) lose uv.lock's version and keep the project's own
+    bounds (`project_specifiers`) and their markers. flet build installs those targets' binaries
+    from Flet's own index (pypi.flet.dev, `--only-binary :all:`), which holds other releases than
+    PyPI (msgpack 1.1.x, where a new flet project locks 1.2.2): the exact pin had no solution, and
+    pip now picks a release that fits every package's bounds. Returns the requirements and the
+    pins it relaxed."""
+    lock_file = LOCK if lock is None else lock
+    binary = binary_only(lock_file)
+    own = project_specifiers(lock_file) if binary else {}
+    out: list[str] = []
+    relaxed: list[str] = []
+    for pin in pins:
+        requirement, marked, marker = pin.partition(" ;")
+        m = _PIN_RE.match(requirement.strip())
+        name = _norm_name(m[1]) if m else ""
+        loose = f"{m[1]}{own.get(name, '')}" if m else ""
+        if not m or name not in binary or loose == requirement.strip():
+            out.append(pin)
+            continue
+        relaxed.append(f"{m[1]}=={m[2]}")
+        out.append(loose + (f" ;{marker}" if marked else ""))
+    return out, relaxed
 
 
 def _built_native(site: Path, names: list[str]) -> list[str]:

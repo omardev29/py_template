@@ -7,8 +7,10 @@
 - Mobile and web (apk, aab, ipa, web): they cannot load custom extensions, so your
   code is packaged as .py (interpreted), even if the backend is mypyc.
 - `flet build` ignores uv.lock: the project it builds carries the EXACT versions
-  exported from uv.lock. It installs the Flutter SDK Flet pins the first time (~3 GB in
-  ~/flutter).
+  exported from uv.lock, but for mobile and web targets a package without a pure wheel (msgpack)
+  keeps only the project's own bounds: flet build takes their binaries from Flet's own index,
+  which may not hold uv.lock's release (common.unpin_binaries). It installs the Flutter SDK Flet
+  pins the first time (~3 GB in ~/flutter).
 - On Windows it needs Visual Studio (C++) and Developer Mode turned on.
 """
 
@@ -151,7 +153,16 @@ def build(req: BuildRequest) -> Path:
         mypyc.copy_writable(str(ext), str(target_ext))
 
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))  # an editor or PS 5.1 may add a BOM
-    text = build_pyproject(cfg, data, _pinned_requirements(envs.tool_env(cfg)))
+    pins = _pinned_requirements(envs.tool_env(cfg))
+    if target in MOBILE_WEB:
+        pins, relaxed = common.unpin_binaries(pins)
+        if relaxed:
+            ui.warn(
+                f"{target}: not pinned to uv.lock's version: {', '.join(relaxed)} (flet build installs the binary "
+                "packages of this target from Flet's own index, pypi.flet.dev, which may not hold it: pip picks a "
+                "release that fits every package's bounds)"
+            )
+    text = build_pyproject(cfg, data, pins)
     (work / "pyproject.toml").write_text(text, encoding="utf-8", newline="\n")
 
     out = dist_path(req, f"-{target}")
