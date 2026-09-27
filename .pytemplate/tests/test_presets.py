@@ -2568,9 +2568,12 @@ def test_new_into_a_folder_with_a_space_and_an_accent(tmp_path: Path, network: N
     assert check.returncode == 0, check.stderr
 
 
-def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: None) -> None:
+@pytest.mark.parametrize("own", [False, True], ids=["pinned", "locked-by-the-project"])
+def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: None, own: bool) -> None:
     """An older pinned version wins over the newest one: the pins are really used, also in a
-    project folder with a space (uv splits a --constraints value at spaces: astral-sh/uv#12639)."""
+    project folder with a space (uv splits a --constraints value at spaces: astral-sh/uv#12639).
+    A package the project already locks keeps its version (init pins only what the lock lacks):
+    the test failed in a project whose own dependency (cryptography) brought pycparser."""
     pins = presets.constraints("raylib")
     if pins.get("pycparser") != "3.0":
         pytest.skip("this check expects the raylib preset to pin pycparser 3.0")
@@ -2580,13 +2583,20 @@ def test_init_pins_steer_the_resolution(tmp_path: Path, network: None, git_env: 
     if config.load(set(cli.COMMANDS)).app.preset == "raylib":  # a raylib project: from another preset first
         r = _deploy(copy_root, "__init", "script", "--force", cwd=copy_root, env=env)
         assert r.returncode == 0, r.stderr[-4000:]
+    uv = shutil.which("uv") or "uv"
+    if own:
+        for argv in ([uv, "add", "--frozen", "pycparser==3.0"], [uv, "lock"]):
+            r = subprocess.run(argv, cwd=copy_root, env=env, capture_output=True, text=True, timeout=300, check=False)
+            assert r.returncode == 0, r.stderr[-4000:]
+    before = _locked_versions(copy_root)
+    declared = "pycparser" in (copy_root / "pyproject.toml").read_text(encoding="utf-8")
     constraints = copy_root / ".pytemplate" / "presets" / "raylib" / "constraints.txt"
     constraints.write_text(constraints.read_text(encoding="utf-8").replace("pycparser==3.0", "pycparser==2.22"), encoding="utf-8")
     r = _deploy(copy_root, "__init", "raylib", cwd=copy_root, env=env)
     assert r.returncode == 0, r.stderr[-4000:]
-    locked = {e["name"]: e["version"] for e in presets._lock_entries(copy_root / "uv.lock")}
-    assert locked["pycparser"] == "2.22" and locked["raylib"] == pins["raylib"]
-    assert "pycparser" not in (copy_root / "pyproject.toml").read_text(encoding="utf-8")
+    locked = _locked_versions(copy_root)
+    assert locked["pycparser"] == before.get("pycparser", "2.22") and locked["raylib"] == pins["raylib"]
+    assert ("pycparser" in (copy_root / "pyproject.toml").read_text(encoding="utf-8")) is declared  # the pins leave nothing behind
 
 
 def test_init_round_trip_through_every_preset_is_byte_identical(tmp_path: Path, network: None, git_env: None) -> None:
