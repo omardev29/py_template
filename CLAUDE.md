@@ -1124,7 +1124,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   uses, `.venv-jit` of older templates included; never deleted) -> warnings for missing
   references (`reference_problems`: src/<pkg>/, compile.modules (the path `config.import_path`
   gives, which must be a file or hold a `.py`/`.pyi` file: a folder left holding only
-  `__pycache__` is missing), app.assets, deploy.exe.icon, deploy.upx.path; the `--dry-run` of a
+  `__pycache__` is missing), app.assets, deploy.exe.icon, deploy.upx.path (a `~user` this machine
+  lacks is missing too: expanduser's RuntimeError ended doctor and apply in a traceback, and
+  `upx.locate` makes it exit 3); the `--dry-run` of a
   rename looks for them where they are before the move)
   -> a summary. A state.json or pyproject.toml that cannot be written is a `DeployError`
   naming it.

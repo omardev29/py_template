@@ -320,3 +320,12 @@ def test_real_upx_packs_a_binary_that_still_runs(tmp_path: Path) -> None:
     assert result.status == "packed" and result.after < before
     r = subprocess.run([str(target), "--version"], capture_output=True, text=True, check=False)
     assert r.returncode == 0 and "upx" in r.stdout.lower()
+
+
+def test_a_upx_path_of_a_user_this_machine_lacks_is_a_clear_error() -> None:
+    """deploy.upx.path = "~builder/bin/upx" of a shared pytemplate.toml, on a machine without that
+    user: expanduser raised RuntimeError (POSIX), and a build ended in an internal-error traceback.
+    (Windows guesses such a folder next to the home folder: it is not there either.)"""
+    with pytest.raises(DeployError, match="does not exist") as e:
+        upx.locate(make({"upx": {"enabled": True, "path": "~pt-no-such-user-here/bin/upx"}}))
+    assert e.value.code == 3

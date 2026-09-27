@@ -1225,6 +1225,23 @@ def test_an_invalid_hand_edited_name_is_refused_before_anything(tmp_path: Path, 
     assert project.snapshot() == before and uv.calls == []
 
 
+def test_a_upx_path_of_a_user_this_machine_lacks_is_a_note_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A shared pytemplate.toml with deploy.upx.path = "~builder/bin/upx": on a machine without
+    that user, expanduser raises RuntimeError, and doctor (no line at all) and the end of apply
+    ended in an internal-error traceback."""
+    project, _ = _project(tmp_path, monkeypatch)
+    project.edit("deploy.upx", "path", "~pt-no-such-user-here/bin/upx")
+    problems = cmd_apply.reference_problems(project.cfg())
+    assert "deploy.upx.path = '~pt-no-such-user-here/bin/upx' does not exist: builds with UPX fail" in problems
+    lines: list[tuple[bool | None, str]] = []
+    cmd_apply.doctor(project.cfg(), lambda passed, label, hint="": lines.append((passed, label)))
+    assert (None, "deploy.upx.path = '~pt-no-such-user-here/bin/upx' does not exist: builds with UPX fail") in lines
+    assert _run(project) == 0
+    assert "deploy.upx.path = '~pt-no-such-user-here/bin/upx' does not exist" in capsys.readouterr().err
+
+
 def test_missing_package_is_a_warning_not_a_crash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     project, uv = _project(tmp_path, monkeypatch)
     shutil.rmtree(project.root / "src" / "alpha")

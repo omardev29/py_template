@@ -731,8 +731,11 @@ def reference_problems(cfg: Config, *, package: bool = True, move: tuple[str, st
     if cfg.deploy.exe.icon and not now(ROOT / cfg.deploy.exe.icon).is_file():
         out.append(f"deploy.exe.icon = '{cfg.deploy.exe.icon}' does not exist (relative to the project root): exe and nuitka builds fail")
     if cfg.deploy.upx.path:
-        upx = Path(cfg.deploy.upx.path).expanduser()
-        if not (upx if upx.is_absolute() else now(ROOT / upx)).is_file():
+        try:
+            upx: Path | None = Path(cfg.deploy.upx.path).expanduser()
+        except RuntimeError:  # a ~user of another machine (a shared pytemplate.toml), or no home folder
+            upx = None
+        if upx is None or not (upx if upx.is_absolute() else now(ROOT / upx)).is_file():
             out.append(f"deploy.upx.path = '{cfg.deploy.upx.path}' does not exist: builds with UPX fail")
     return out
 
