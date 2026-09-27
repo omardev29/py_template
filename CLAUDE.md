@@ -1390,7 +1390,11 @@ Formats:
 - `render._verify` refuses (DeployError, nothing written) a rewrite that would give invalid TOML
   (e.g. a managed key repeated outside the markers), change anything but requires-python and the
   block's keys (a user key or table between the markers), or leave a managed value out of
-  `[tool.uv]`.
+  `[tool.uv]`. The block's keys are those a block can write (`render.block_keys`: its own
+  `BLOCK_KEYS` and every preset's `[uv]` keys, which a preset switch through `__init` drops); any
+  other key between the markers is named and refused ("move it out of the block"): every key
+  found there used to count as managed, and lock, apply, mode and rename dropped a user's
+  `index-url` or constraint without a word.
 - Additive lists (`render.ADDITIVE_KEYS`: `override-dependencies`, `constraint-dependencies`,
   `build-constraint-dependencies`, `no-build-package`, `no-binary-package`,
   `no-build-isolation-package`) belong to the project when its `[tool.uv]` defines them outside

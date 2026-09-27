@@ -547,9 +547,25 @@ BROKEN = {
         MANAGED.replace('environments = ["x"]\n', 'environments = ["x"]\n[tool.flet]\norg = "x"\n'),
         "table header",
     ),
+    # a key of the user between the markers: the rewrite dropped it without a word (a private
+    # index, a constraint), although _verify promised that nothing is lost silently
+    "user-key-inside-block": (
+        MANAGED.replace('environments = ["x"]\n', 'environments = ["x"]\nindex-url = "https://pypi.org/simple"\n'),
+        "[tool.uv] index-url is between the",
+    ),
+    "user-keys-inside-block": (
+        MANAGED.replace('environments = ["x"]\n', 'environments = ["x"]\nconstraint-dependencies = ["urllib3>=2.5"]\npackage = false\n'),
+        "[tool.uv] constraint-dependencies, package are between the",
+    ),
     "invalid-toml": ('[project]\nname = "x"\n\n[tool.uv]\nfoo = [\n', "not valid TOML"),
     "no-project-table": ('[tool.uv]\nfoo = 1\n', "[project]"),
 }
+
+
+@pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
+def test_block_keys_hold_every_key_the_managed_block_writes(preset: str, supported: list[str], active: str) -> None:
+    """render.block_keys decides which keys between the markers a rewrite may replace or drop."""
+    assert set(tomllib.loads(render.managed_block(combo_cfg(preset, supported, active)))) <= render.block_keys()
 
 
 @pytest.mark.parametrize(("text", "message"), BROKEN.values(), ids=BROKEN.keys())

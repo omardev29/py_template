@@ -764,6 +764,21 @@ def _table(data: Any, *keys: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+# The keys managed_block writes itself; with every preset's [uv] keys (block_keys) they are the
+# keys a rewrite may replace or drop (a preset switch through __init leaves the old preset's out).
+BLOCK_KEYS = frozenset({"environments", "override-dependencies", "required-version", "python-preference"})
+
+
+def block_keys() -> set[str]:
+    """Every key a managed block can hold, for any preset."""
+    keys = set(BLOCK_KEYS)
+    for name in presets.available():
+        extra = presets.load(name).get("uv")
+        if isinstance(extra, dict):
+            keys |= set(extra)
+    return keys
+
+
 def _without_managed(data: dict[str, Any], uv_keys: set[str]) -> dict[str, Any]:
     """`data` without [project] requires-python and the given [tool.uv] keys (empty tables dropped)."""
     out = copy.deepcopy(data)
@@ -807,6 +822,16 @@ def _verify(cfg: Config, text: str, new: str) -> None:
                 old_keys = set(tomllib.loads("\n".join(lines[bounds[0] : bounds[1] + 1])))
             except tomllib.TOMLDecodeError:
                 pass  # the comparison below reports it
+            # Only the keys a block writes may go; any other key there is the user's and the
+            # rewrite would drop it (an index-url, a constraint: gone without a word)
+            yours = sorted(old_keys - block_keys())
+            if yours:
+                they = "it" if len(yours) == 1 else "them"
+                raise DeployError(
+                    f"pyproject.toml: [tool.uv] {', '.join(yours)} {'is' if len(yours) == 1 else 'are'} between the "
+                    f"'{MARK_BEGIN}' markers,\n  where ./deploy writes the managed block again and would lose {they}: "
+                    f"move {they} out of the block (after its closing marker), then run the command again"
+                )
     managed = tomllib.loads(managed_block(cfg))
     adopted = _adopted(cfg, lines, bounds)
     written = set(managed) - adopted
