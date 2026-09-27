@@ -8,10 +8,12 @@
 # image to ghcr.io/<owner>/<repo>-ci. A run pushes a tag only when the registry says it is
 # missing (two runs that build the same new tag at once may both push it, from the same inputs).
 #
-# Stage 1 (CLAUDE.md 13.2): the jobs below run the Linux jobs of template-selftest,
-# template-launchers and template-nvim in the image, next to them, which stay the gates.
-# Pull requests from another repository cannot push: the image is built and checked, and the
-# jobs that run in it are skipped. Weekly the image is rebuilt from scratch (not pushed unless
+# Stage 2 (CLAUDE.md 13.2): the Linux jobs of template-selftest (selftest, the runner's tests on
+# Python 3.11, the suite in new raylib and flet projects), template-launchers and template-nvim
+# (its two pinned rows) run here only, in the image: they are the Linux gates. uv-floor, the e2e
+# rows, the nvim canary and every Windows and macOS job stay on bare runners. Pull requests from
+# another repository cannot push: when they change an input of the image, it is built and
+# checked, and the jobs that would run in it are skipped (no Linux jobs for such a pull request). Weekly the image is rebuilt from scratch (not pushed unless
 # its tag is missing): red with no commit behind it means a pinned download is gone, or an
 # unpinned dependency of a pin moved. template-keepalive.yml keeps the schedule alive. The gate
 # job skips everything in repositories made from the template.
@@ -113,8 +115,8 @@ jobs:
           if docker manifest inspect "$REF" > /dev/null 2>&1; then echo "published meanwhile: not pushed"; else docker push "$REF"; fi
           echo "pushed=true" >> "$GITHUB_OUTPUT"
 
-  # The Linux jobs of the other workflows, in the image. Each keeps the steps of the job it
-  # mirrors, minus what the image already holds.
+  # The Linux jobs of template-selftest, template-launchers and template-nvim: the steps those
+  # workflows run on macOS and Windows, minus what the image already holds.
   selftest:
     name: selftest (image)
     needs: [gate, image]

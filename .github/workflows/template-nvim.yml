@@ -4,12 +4,12 @@
 # API, installs the plugins and runs .pytemplate/nvim/tests/smoke.lua.
 #
 # Pushes and pull requests test pinned versions, so a red run is a regression, not upstream
-# drift: Neovim v0.12.5 and v0.11.2 (cmd_nvim.MIN_LAZYVIM, the documented minimum), the LazyVim
-# starter at cmd_nvim.STARTER_REV and the plugins of .pytemplate/nvim/tests/lazy-lock.json. The
-# canary (weekly, or by hand) runs the latest of everything: Neovim stable, the starter HEAD
-# and the newest plugins. Red there with no commit behind it means upstream changed; green
-# uploads the lazy-lock.json and starter-commit.txt that can become the new pins (CLAUDE.md
-# 13.1). template-keepalive.yml keeps the schedule alive. The gate job skips everything in
+# drift: Neovim v0.12.5 on Windows here, and v0.12.5 and v0.11.2 (cmd_nvim.MIN_LAZYVIM, the
+# documented minimum) on Linux in the CI image (template-ci-image.yml), with the LazyVim starter
+# at cmd_nvim.STARTER_REV and the plugins of .pytemplate/nvim/tests/lazy-lock.json. The canary
+# (weekly, or by hand) runs the latest of everything: Neovim stable, the starter HEAD and the
+# newest plugins. Red there with no commit behind it means upstream changed; green uploads the
+# lazy-lock.json and starter-commit.txt that can become the new pins (CLAUDE.md 13.1). template-keepalive.yml keeps the schedule alive. The gate job skips everything in
 # repositories made from the template.
 name: template-nvim
 
@@ -61,9 +61,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {os: ubuntu-latest, nvim: v0.12.5}
-          - {os: windows-latest, nvim: v0.12.5}
-          - {os: ubuntu-latest, nvim: v0.11.2} # cmd_nvim.MIN_LAZYVIM
+          - {os: windows-latest, nvim: v0.12.5} # Linux, with cmd_nvim.MIN_LAZYVIM too: the CI image
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     defaults:
@@ -79,10 +77,9 @@ jobs:
       - name: Neovim version
         run: nvim --version
       # venv-selector (LazyVim's lang.python extra) raises an error on the first Python buffer
-      # without fd, which fails every smoke check that opens one. Ubuntu names it fdfind.
+      # without fd, which fails every smoke check that opens one (the CI image has it)
       - name: fd
-        run: |
-          if [ "$RUNNER_OS" = Windows ]; then choco install fd -y --no-progress; else sudo apt-get update && sudo apt-get install -y fd-find; fi
+        run: choco install fd -y --no-progress
       - name: Runner environment
         run: ./deploy setup
       - name: LazyVim smoke test (script, raylib, flet)
@@ -114,7 +111,7 @@ jobs:
           version: stable
       - name: Neovim version
         run: nvim --version
-      - name: fd
+      - name: fd (Ubuntu names it fdfind)
         run: sudo apt-get update && sudo apt-get install -y fd-find
       - name: Runner environment
         run: ./deploy setup

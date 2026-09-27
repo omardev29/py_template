@@ -1507,7 +1507,7 @@ Pinned, and moved on purpose:
 | UPX | `upx.VERSION` and the SHA-256 values of `upx.ASSETS` | together |
 | GitHub actions | `.pytemplate/templates/ci.yml` and `.github/workflows/template-*.yml` | edit the template, then `./deploy render`; never edit the generated `ci.yml` |
 | the Neovim test | `cmd_nvim.STARTER_REV` and `.pytemplate/nvim/tests/lazy-lock.json` | from one green run without the lock (CLAUDE.md, section 13.1) |
-| the Linux CI image | `.github/workflows/template-ci-image/pins.py`: its base, apt snapshot, uv, Neovim, PowerShell, actionlint, xonsh (the other versions it reads from the files above) | edit the pin (and its SHA-256 where it has one; a new base needs a later apt snapshot too); a new Neovim, xonsh or actionlint also goes into the other `template-*.yml` workflows, a new Neovim into the image workflow's `nvim:` matrix (the workflow tests check both); the next push to `main` or pull request builds and publishes the new tag |
+| the Linux CI image | `.github/workflows/template-ci-image/pins.py`: its base, apt snapshot, uv, Neovim, PowerShell, actionlint, xonsh (the other versions it reads from the files above) | edit the pin (and its SHA-256 where it has one; a new base needs a later apt snapshot too); a new Neovim or xonsh also goes into the other `template-*.yml` workflows (their macOS and Windows jobs), a new Neovim into the image workflow's `nvim:` matrix (the workflow tests check both); the next push to `main` or pull request builds and publishes the new tag |
 
 Not pinned: uv itself (the generated CI and the template's jobs on bare runners take the latest,
 never older than the floor; only the template's Linux CI image pins it) and the GitHub runner
@@ -1559,22 +1559,22 @@ regenerate the root (CLAUDE.md, section 11).
 **(template repository)** The template's own CI, in `.github/workflows/template-*.yml` (not
 copied into projects):
 
-- `template-selftest.yml` runs `./deploy selftest` on Linux, macOS and Windows, the runner's
-  tests on Python 3.11 (its floor), the suite with the oldest uv that `required-version`
-  accepts, and `./deploy selftest` inside new raylib and flet projects; on pushes to `main`, pull
-  requests, weekly and by hand.
-- `template-launchers.yml` runs `selftest --shells` and `shellcheck` (weekly with the newest
+- `template-selftest.yml` runs `./deploy selftest` on macOS and Windows and the suite with the
+  oldest uv that `required-version` accepts; on pushes to `main`, pull requests, weekly and by
+  hand. Its Linux jobs run in the CI image (`template-ci-image.yml`, below).
+- `template-launchers.yml` runs `selftest --shells` on macOS and Windows (weekly with the newest
   xonsh too).
-- `template-nvim.yml` runs `selftest --nvim` with Neovim 0.12.5 and 0.11.2 and pinned plugins,
+- `template-nvim.yml` runs `selftest --nvim` on Windows with Neovim 0.12.5 and pinned plugins,
   plus a weekly canary with the newest Neovim, LazyVim and plugins.
 - `template-e2e.yml` runs `selftest --e2e` for the three presets on the three systems (`--quick`
   on pushes and pull requests, the default depth weekly, `--full` monthly).
 - `template-ci-image.yml` builds the Linux CI image (Ubuntu with every tool the Linux jobs
-  install, pinned, and their downloads already cached: `template-ci-image/pins.py`), publishes it
-  to `ghcr.io/<owner>/<repo>-ci` under a tag that is a hash of its inputs, and runs
-  template-selftest's Linux selftest, python-floor and new-project jobs, template-launchers'
-  Linux job and template-nvim's two Linux rows in it, next to them (uv-floor, the nvim canary and
-  the e2e rows stay on bare runners); weekly it rebuilds the image from scratch.
+  need, pinned, and their downloads already cached: `template-ci-image/pins.py`), publishes it
+  to `ghcr.io/<owner>/<repo>-ci` under a tag that is a hash of its inputs, and runs the Linux
+  jobs in it: `./deploy selftest`, the runner's tests on Python 3.11 (its floor),
+  `./deploy selftest` inside new raylib and flet projects, `selftest --shells` with
+  `shellcheck`, and `selftest --nvim` with Neovim 0.12.5 and 0.11.2 (uv-floor, the nvim canary
+  and the e2e rows stay on bare runners); weekly it rebuilds the image from scratch.
 - `template-keepalive.yml` re-enables the scheduled ones every week: GitHub disables a scheduled
   workflow after 60 days without activity in the repository.
 

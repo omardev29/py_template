@@ -306,7 +306,8 @@ header rules (with detector tests proving each rule fires).
   MSYS2 dash +40 ms, MSYS2 `bash -lc` +44 ms, Git sh +52 ms, niubash script +78 ms, niubash
   `-c` +124 ms; the registry fallback adds ~80 ms; a project under an MSYS-root path adds two
   `cygpath` calls (60-100 ms). Under heavy machine load expect 5-10x.
-- **[template repo]** CI runs `shellcheck -s sh deploy` (`template-launchers.yml`, Linux). It
+- **[template repo]** CI runs `shellcheck -s sh deploy` (the launchers job of `template-ci-image.yml`,
+  in the CI image). It
   passes with shellcheck 0.8-0.11 and NO `# shellcheck disable=` directive: keep it so.
 - Testing launcher code without writing files: pass it through the environment,
   `sh -c 'eval "$PT_CODE"'` (section 4.7: Cygwin mangles argv). Syntax checks: `dash -n`,
@@ -3162,25 +3163,23 @@ short temp tree and unset `NVIM_APPNAME`.
   it for a project that sits in one (section 15.2).
 - **[template repo]** `template-selftest.yml` (push to `main`, pull requests, weekly and by
   hand; the gate): `./deploy render --check` first, then `setup` and `./deploy selftest` on
-  ubuntu, macos and windows-latest (Windows through `deploy.ps1`, `--basetemp` in
-  `RUNNER_TEMP`, git's default CRLF checkout), with what the tests look for: dash, zsh, ksh,
-  mksh, yash, busybox, fish (apt); fish and nushell (brew); MSYS2 with dash and uv copied to
-  `~\.local\bin` (the login-shell test); xonsh 0.24.2 and Neovim v0.12.5 everywhere; actionlint
-  1.7.12 (SHA-256 checked) on Linux; the UPX `upx.find` finds (apt's `/usr/bin/upx` of the
-  Linux runner image, the pinned download on Windows); taplo and the basedpyright pins in the uv
-  cache (their tests run offline). Job
-  `python-floor`: the runner starts on 3.11 (`uv run --python 3.11 --script`), and the suite
-  runs in process on 3.11 (`uv run --no-project --python 3.11 --with pytest==<locked>`: the
-  runner code itself on its floor; the tools the tests start stay in `.venv`). Not on PyPy:
-  uv never starts the runner there, and PyPy only changes harness details (it resets an
-  inherited SIG_IGN of SIGINT, no PEP 538 locale coercion). Job `uv-floor`: setup-uv with
-  `resolution-strategy: lowest` takes the oldest uv the `required-version` accepts, checked
-  against `envs.MIN_UV`, then setup and the suite, minus
+  macos and windows-latest (Windows through `deploy.ps1`, `--basetemp` in `RUNNER_TEMP`, git's
+  default CRLF checkout), with what the tests look for: fish and nushell (brew); MSYS2 with dash
+  and uv copied to `~\.local\bin` (the login-shell test); xonsh 0.24.2 and Neovim v0.12.5; the
+  UPX `upx.find` finds (the pinned download on Windows). Job `uv-floor` (a bare Linux runner):
+  setup-uv with `resolution-strategy: lowest` takes the oldest uv the `required-version`
+  accepts, checked against `envs.MIN_UV`, then setup and the suite, minus
   `test_init_round_trip_through_every_preset_is_byte_identical` (uv 0.10.12 writes redundant
-  markers into uv.lock after a preset round trip: the same lock, other bytes). Job
-  `new-project`: `./deploy new` of a raylib and a flet project named `Pt-<preset>`, then setup
-  and selftest there. About 5 min on Linux, 8 on macOS, 15-20 on Windows (estimates: not run
-  on GitHub yet).
+  markers into uv.lock after a preset round trip: the same lock, other bytes). Its Linux jobs run
+  in the CI image (`template-ci-image.yml`, stage 2): the suite (dash, zsh, ksh, mksh, yash,
+  busybox, fish, xonsh, Neovim, actionlint, taplo and the basedpyright pins are in the image),
+  `python-floor` (the runner starts on 3.11, `uv run --python 3.11 --script`, and the suite runs
+  in process on 3.11, `uv run --no-project --python 3.11 --with pytest==<locked>`: the runner
+  code itself on its floor; the tools the tests start stay in `.venv`. Not on PyPy: uv never
+  starts the runner there, and PyPy only changes harness details (it resets an inherited
+  SIG_IGN of SIGINT, no PEP 538 locale coercion)) and `new-project` (`./deploy new` of a raylib
+  and a flet project named `Pt-<preset>`, then setup and selftest there). About 4 min in the
+  image, 4-6 on macOS and 5-6 on Windows (September 2026).
 - **[template repo]** `template-keepalive.yml` (weekly and by hand; the gate): in a public
   repository GitHub disables a workflow that has a schedule after 60 days without repository
   activity, and then none of its triggers run, pushes included, until it is enabled again. The
@@ -3219,38 +3218,41 @@ short temp tree and unset `NVIM_APPNAME`.
   tool versions, and pushes a tag only when the registry says it is missing ("manifest unknown",
   "denied"; any other answer fails the job, and the push step asks again first; two runs that
   build one new tag at once may both push it, from the same inputs), and only from this
-  repository (a fork's pull request gets a token that cannot push). Stage 1 (now): its other jobs run
-  template-selftest's Linux selftest, python-floor and new-project, template-launchers' Linux
-  posix job and template-nvim's two Linux rows in the image, as GitHub container jobs, whenever
-  the image is usable (published, or pushed by this run); they are not gates. `options: --init
-  --user 1001` (the uid of the image's `USER runner`, the runner's uid, which owns the checkout;
-  an init reaps orphaned processes), `HOME: /home/runner` (where the caches are), and the nvim
-  job's `--dir /tmp/pt-nvim` (`${{ runner.temp }}` is a host path, translated only in step
-  inputs and environment values). The package is private when first pushed: the jobs pull with
-  the job token (`packages: read`). Stage 2, once every test that runs in a bare Linux job also
-  runs in its image job (the image's skips are a subset of the bare job's: python-floor and
-  new-project run more there, having Neovim, the shells, xonsh, actionlint, taplo and
-  basedpyright), those pass, and the image jobs are no slower: the Linux jobs move into the
-  image, and uv-floor, the e2e rows, the nvim canary and every Windows and macOS job stay on bare
-  runners.
+  repository (a fork's pull request gets a token that cannot push). Stage 2 (September 2026):
+  its other jobs are the Linux jobs of template-selftest (selftest, python-floor, new-project),
+  template-launchers (with `shellcheck -s sh deploy`) and template-nvim (its two pinned rows),
+  as GitHub container jobs, whenever the image is usable (published, or pushed by this run); no
+  bare Linux job repeats them (`test_workflows.test_linux_jobs_run_in_the_ci_image`).
+  `options: --init --user 1001` (the uid of the image's `USER runner`, the runner's uid, which
+  owns the checkout; an init reaps orphaned processes), `HOME: /home/runner` (where the caches
+  are), and the nvim job's `--dir /tmp/pt-nvim` (`${{ runner.temp }}` is a host path,
+  translated only in step inputs and environment values). The package is private when first pushed: the jobs pull
+  with the job token (`packages: read`). Stage 2 was taken once every test of a bare Linux job
+  also ran in its image job (the image's skips a subset of the bare job's: 70 of the selftest's
+  72, 95 of python-floor's 185), those passed, and the image workflow finished no later than the
+  bare jobs it replaced (its container start, about 30 s a job, against their apt and tool
+  installs). uv-floor, the e2e rows, the nvim canary and every Windows and macOS job stay on
+  bare runners. A pull request from another repository that changes an input of the image gets
+  no Linux jobs (15.2).
 - **[template repo]** `template-launchers.yml` also runs weekly and installs xonsh 0.24.2 on
   pushes and pull requests but the newest xonsh on the schedule (a red scheduled run with no
   commit behind it is upstream drift; the shell versions are logged: xonsh, fish, pwsh,
   busybox, MSYS2 runtime, Cygwin), xonsh on Windows too, and nushell on macOS.
-  `template-nvim.yml` pins Neovim v0.12.5 (Ubuntu, Windows) and v0.11.2
-  (`cmd_nvim.MIN_LAZYVIM`, Ubuntu: passed for the three presets when added) for pushes and
-  pull requests, one log artifact per row; its canary job (weekly and by hand, Ubuntu, Neovim
+  `template-nvim.yml` pins Neovim v0.12.5 on Windows (the Linux rows, v0.12.5 and v0.11.2 =
+  `cmd_nvim.MIN_LAZYVIM`, run in the CI image) for pushes and pull requests, one log artifact
+  per row; its canary job (weekly and by hand, Ubuntu, Neovim
   stable) deletes `.pytemplate/nvim/tests/lazy-lock.json` and always uploads the logs with the
   resolved `lazy-lock.json` and `starter-commit.txt`, the next pins after a green run (13.1).
-- **[template repo]** `template-launchers.yml` (Linux/macOS shells + shellcheck, Windows with
+- **[template repo]** `template-launchers.yml` (macOS shells, Windows with
   MSYS2, Cygwin and busybox-w32 (one release, `BUSYBOX: busybox-w64-FRP-<n>-g<commit>.exe`, the
   build scoop, Chocolatey and winget install, checked against its pinned `BUSYBOX_SHA256`
   before it runs; a new release takes its line of frippery.org's `SHA256SUM`. The rolling
   `busybox64u.exe` ran unchecked whatever the server held that day:
   `test_workflows.test_every_downloaded_file_is_checked_against_a_pinned_sha256`), optional WSL job; `selftest --shells` plus user-style
-  invocations; a gate job checks the marker file), `template-nvim.yml` (Ubuntu + Windows,
-  Neovim pinned (above), `fd` (venv-selector from LazyVim's `lang.python` errors on the first Python
-  buffer without it), `selftest --nvim --require --dir $RUNNER_TEMP/pt-nvim` (the `runner`
+  invocations; a gate job checks the marker file; its Linux job, with shellcheck, in the CI
+  image), `template-nvim.yml` (Windows here, Linux in the CI image, Neovim pinned (above),
+  `fd` (venv-selector from LazyVim's `lang.python` errors on the first Python buffer without
+  it), `selftest --nvim --require --dir $RUNNER_TEMP/pt-nvim` (the `runner`
   context is not allowed in a job-level `env`, hence the step env), logs on failure or
   cancellation, as for e2e and in the nvim job of template-ci-image.yml
   (`test_workflows.test_logs_of_a_job_that_timed_out_are_uploaded`)),
@@ -3279,7 +3281,8 @@ they were written. Nor had template-ci-image.yml (stage 1): its seven jobs passe
 in a local build of the image, as `docker run --init --user 1001` with the checkout mounted
 (September 2026, behind a TLS-intercepting proxy: the image's `ca` secret path runs only in
 such a local build, CI passes no secret), with the skip list of the hosted Ubuntu selftest
-minus its PyPy test. Untested anywhere so far:
+minus its PyPy test; on GitHub they then passed for weeks next to the bare jobs before stage 2
+made them the only Linux jobs. Untested anywhere so far:
 PowerShell 6.x-7.2, a UNC current folder or a project on a share (its long-path names are only
 simulated: `test_long_paths_keep_a_network_share_valid`), uv found only in `ProgramFiles` or chocolatey, the
 install prompt on Windows (POSIX `deploy` and pwsh
@@ -4180,7 +4183,8 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   `test_workarounds.py::test_nvim_plugin_workarounds[overseer]`. Goes: never.
 - **venv-selector (LazyVim's `lang.python`) needs `fd`** (LIMITATION, documented): without it it
   raises an error on the first Python buffer, which failed every smoke check that opens one.
-  Fix: `template-nvim.yml` installs `fd` (`fdfind` on Ubuntu) (13.2); `./deploy nvim doctor`
+  Fix: the CI image holds `fd`, and `template-nvim.yml` installs it on Windows and in the canary
+  (`fdfind` on Ubuntu) (13.2); `./deploy nvim doctor`
   counts a missing fd as a problem, with the install command (`cmd_nvim.TOOLS`, 12.2). Test:
   `test_cmd_nvim.py::test_nvim_doctor_needs_fd`; CI (that workflow's smoke run fails without
   it). Goes: never.
@@ -4687,12 +4691,14 @@ Behaviour:
   distribution name is refused). `./deploy add` syncs `.venv`, so the usual order is covered.
 - **[template repo]** The CI image (13.2) freezes the Linux tool versions of its jobs per tag (uv
   0.12.19, xonsh, noble's shells, git 2.43 and Node 18, PowerShell 7.6.6): the newest ones show
-  up in the jobs on bare runners (Windows, macOS, the e2e rows, the nvim canary, and until stage
-  2 the Linux jobs that still run bare); its Ubuntu stays 24.04 when ubuntu-latest moves. Its
+  up in the jobs on bare runners (Windows, macOS, uv-floor, the e2e rows, the nvim canary); its
+  Ubuntu stays 24.04 when ubuntu-latest moves. Its
   jobs still reach PyPI (the resolution of `./deploy new`, test_presets' `uv pip compile
   --no-cache`) and GitHub (the LazyVim starter and plugins of `selftest --nvim`), and the pull
   of the image counts toward each job's timeout. A fork's pull request that changes one of its
-  inputs skips the jobs in the image. Old tags pile up in GHCR: nothing prunes them.
+  inputs gets no Linux jobs at all (stage 2: the image cannot be pushed from it, and no bare job
+  repeats them): run them after merging it, or from a branch of this repository. Old tags pile
+  up in GHCR: nothing prunes them.
 - A pyz built on Windows stores no x bit (Windows files have no Unix mode), so the executables of
   its Linux or macOS targets (`--target`), or of a script in `src/`, are not runnable where it is
   extracted; the generated CI builds each OS's part on that OS, and `pyz-merge` keeps the parts'

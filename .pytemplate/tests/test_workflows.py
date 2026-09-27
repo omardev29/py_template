@@ -114,22 +114,43 @@ def test_template_workflows_skip_projects_made_from_the_template(name: str) -> N
 
 
 def test_selftest_workflow_covers_every_os_and_both_floors() -> None:
+    """macOS and Windows here, the oldest uv on a bare runner; Linux (the suite, the runner's
+    tests on its floor Python and the suite in new projects) in the CI image (stage 2)."""
     text = _text("template-selftest.yml")
     assert triggers(text) == {"push", "pull_request", "schedule", "workflow_dispatch"}
     found = jobs(text)
     main = found["selftest"]
-    assert "os: [ubuntu-latest, macos-latest, windows-latest]" in main
+    assert "os: [macos-latest, windows-latest]" in main
     assert 0 < main.index("./deploy render --check") < main.index("./deploy setup") < main.index("run: ./deploy selftest -rs")
     assert "./deploy.ps1 selftest -rs" in main and "MSYS2_ROOT" in main  # Windows: MSYS2 found by the launcher tests
-    assert "rhysd/action-setup-vim@v1" in main and "actionlint" in main and "xonsh==" in main
-    floor = found["python-floor"]
-    assert "--python 3.11 --with \"$pytest\" python -m pytest" in floor and ".pytemplate/tests" in floor
-    assert "uv run --quiet --python 3.11 --script .pytemplate/deploy.py help" in floor
+    assert "rhysd/action-setup-vim@v1" in main and "xonsh==" in main
     uv_floor = found["uv-floor"]
     assert "resolution-strategy: lowest" in uv_floor and "MIN_UV" in uv_floor and "./deploy selftest" in uv_floor
     assert envs.MIN_UV in (ROOT / "pyproject.toml").read_text(encoding="utf-8")  # what setup-uv resolves "lowest" from
-    new = found["new-project"]
+    image = jobs(_text("template-ci-image.yml"))
+    linux = image["selftest"]
+    assert 0 < linux.index("./deploy render --check") < linux.index("./deploy setup") < linux.index("run: ./deploy selftest -rs")
+    floor = image["python-floor"]
+    assert "--python 3.11 --with \"$pytest\" python -m pytest" in floor and ".pytemplate/tests" in floor
+    assert "uv run --quiet --python 3.11 --script .pytemplate/deploy.py help" in floor
+    new = image["new-project"]
     assert "preset: [raylib, flet]" in new and "./deploy new" in new and "./deploy selftest" in new
+
+
+def test_linux_jobs_run_in_the_ci_image() -> None:
+    """Stage 2 of the CI image (CLAUDE.md 13.2): outside template-ci-image.yml a Linux job is only
+    a gate, uv-floor (the oldest uv), the nvim canary (the newest of everything) or an e2e row;
+    the other Linux jobs run in the image, which holds their tools at pinned versions."""
+    allowed = {("template-selftest.yml", "uv-floor"), ("template-nvim.yml", "canary")}
+    linux = re.compile(r"(?m)^\s+(?:runs-on: ubuntu|os: \[[^\]]*ubuntu|- \{os: ubuntu)")
+    for name in ("template-selftest.yml", "template-launchers.yml", "template-nvim.yml"):
+        for job, body in jobs(_text(name)).items():
+            if job != "gate" and linux.search(body):
+                assert (name, job) in allowed, f"{name}: the Linux job {job} belongs in the CI image"
+    image = jobs(_text("template-ci-image.yml"))
+    for job in ("selftest", "python-floor", "new-project", "launchers", "nvim"):
+        assert "image: ${{ needs.image.outputs.ref }}" in image[job], job
+    assert "shellcheck -s sh deploy" in image["launchers"]
 
 
 def test_readme_tells_when_the_selftest_workflow_runs() -> None:
@@ -145,20 +166,12 @@ def test_readme_tells_when_the_selftest_workflow_runs() -> None:
 
 
 def test_what_the_selftest_workflow_reads_by_text_exists() -> None:
-    """The workflow greps pins out of the code and deselects one test by name: a rename must
-    fail here, not turn a CI step into `--from ""` or a deselect that matches nothing."""
-    from runner import cmd_dev
-
+    """The workflow greps envs.MIN_UV out of the code and deselects one test by name: a rename
+    must fail here, not turn a CI step into an empty check or a deselect that matches nothing."""
     text = _text("template-selftest.yml")
     tests, runner = ROOT / ".pytemplate" / "tests", ROOT / ".pytemplate" / "runner"
     assert "sed -n 's/^MIN_UV = \"\\([0-9.]*\\)\".*/\\1/p' .pytemplate/runner/envs.py" in text
     assert re.findall(r'(?m)^MIN_UV = "([0-9.]*)"', (runner / "envs.py").read_text(encoding="utf-8")) == [envs.MIN_UV]
-    assert "sed -n 's/^BASEDPYRIGHT = \"\\(.*\\)\".*/\\1/p' .pytemplate/runner/cmd_dev.py" in text
-    assert re.findall(r'(?m)^BASEDPYRIGHT = "(.*)"', (runner / "cmd_dev.py").read_text(encoding="utf-8")) == [cmd_dev.BASEDPYRIGHT]
-    assert "sed -n 's/^BASEDPYRIGHT_NODE = \"\\(.*\\)\".*/\\1/p' .pytemplate/runner/cmd_dev.py" in text
-    assert re.findall(r'(?m)^BASEDPYRIGHT_NODE = "(.*)"', (runner / "cmd_dev.py").read_text(encoding="utf-8")) == [cmd_dev.BASEDPYRIGHT_NODE]
-    assert "grep -m1 -o 'taplo==[0-9.]*' .pytemplate/tests/test_render_core.py" in text
-    assert re.search(r'"taplo==[0-9.]+"', (tests / "test_render_core.py").read_text(encoding="utf-8"))
     deselected = re.findall(r"--deselect \.pytemplate/tests/(test_\w+\.py)::(\w+)", text)
     assert deselected, "the uv-floor job deselects its one test by node id"
     for file, name in deselected:
@@ -171,7 +184,8 @@ def test_nvim_workflow_pins_neovim_and_runs_a_canary() -> None:
     pinned, canary = found["nvim"], found["canary"]
     minimum = "v" + cmd_nvim.version_str(cmd_nvim.MIN_LAZYVIM)
     rows = re.findall(r"- \{os: ([\w-]+), nvim: (v[\d.]+)\}", pinned)
-    assert ("ubuntu-latest", "v0.12.5") in rows and ("windows-latest", "v0.12.5") in rows and ("ubuntu-latest", minimum) in rows
+    assert rows == [("windows-latest", "v0.12.5")]  # Linux: both versions, in the CI image
+    assert f"nvim: [v0.12.5, {minimum}]" in jobs(_text("template-ci-image.yml"))["nvim"]
     assert "version: ${{ matrix.nvim }}" in pinned and "github.event_name != 'schedule'" in pinned
     assert "name: nvim-logs-${{ matrix.os }}-${{ matrix.nvim }}" in pinned  # one artifact per row
     assert "version: stable" in canary and "github.event_name == 'schedule'" in canary
@@ -233,7 +247,7 @@ def test_every_downloaded_file_is_checked_against_a_pinned_sha256() -> None:
             if re.search(r"-OutFile\b|curl [^\n|]*-o ", step):
                 assert re.search(r"\b[0-9a-f]{64}\b", step) and ("sha256sum -c" in step or "Get-FileHash" in step), (path.name, step)
                 checked.append(path.name)
-    assert {"template-launchers.yml", "template-selftest.yml"} <= set(checked)
+    assert "template-launchers.yml" in checked  # busybox-w32 (the CI image checks its own downloads)
     step = _step(_text("template-launchers.yml"), "busybox-w32")
     assert re.search(r"(?m)^          BUSYBOX: busybox-w64-FRP-\d+-g[0-9a-f]+\.exe$", step), step
     assert '"https://frippery.org/files/busybox/$env:BUSYBOX"' in step  # never a rolling busybox64u.exe
@@ -413,9 +427,6 @@ def test_workflow_literals_follow_the_ci_image_pins() -> None:
             assert spec == pins.XONSH, (path.name, spec)
         for version in re.findall(r"(?:version|nvim): (v\d+\.\d+\.\d+)", text):
             assert version in {pins.NVIM, minimum}, (path.name, version)
-    selftest = _text("template-selftest.yml")
-    assert f"download/v{pins.ACTIONLINT}/actionlint_{pins.ACTIONLINT}_linux_amd64.tar.gz" in selftest
-    assert pins.ACTIONLINT_SHA256 in selftest
 
 
 def test_ci_image_scripts_pass_shellcheck() -> None:

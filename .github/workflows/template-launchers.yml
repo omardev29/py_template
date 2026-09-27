@@ -2,10 +2,11 @@
 # template-*.yml workflows): ./deploy, deploy.cmd and deploy.ps1 through every shell the
 # runners have, with `./deploy selftest --shells` (T1 argv, T2 exit code, T3 cwd, T4 the
 # xonsh-shell-kit route, T5 minimal PATH, T6 stdin, T7 install hints) plus the invocations a
-# user types. The runner's test suite runs in template-selftest.yml. The shells come from the
-# runner images and their package managers (the newest of each), except xonsh, pinned for
-# pushes and pull requests; the weekly run takes the newest xonsh too, so a red scheduled run
-# with no commit behind it means a shell changed (the versions are logged).
+# user types, on macOS and Windows (and WSL). The Linux job, with shellcheck, runs in the CI
+# image: template-ci-image.yml. The runner's test suite runs in template-selftest.yml. The
+# shells come from the runner images and their package managers (the newest of each), except
+# xonsh, pinned for pushes and pull requests; the weekly run takes the newest xonsh too, so a
+# red scheduled run with no commit behind it means a shell changed (the versions are logged).
 # template-keepalive.yml keeps the schedule alive. The gate job skips everything in
 # repositories made from the template.
 name: template-launchers
@@ -41,7 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -51,22 +52,13 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           XONSH: ${{ github.event_name == 'schedule' && 'xonsh' || 'xonsh==0.24.2' }}
         run: |
-          if [ "$RUNNER_OS" = Linux ]; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends dash zsh busybox ksh mksh yash fish
-          else
-            brew install fish nushell
-          fi
+          brew install fish nushell
           uv tool install --python 3.14 "$XONSH"
           uv tool dir --bin >> "$GITHUB_PATH"
       - name: Shell versions
         run: |
           xonsh --version; fish --version; pwsh --version; uv --version
-          if [ "$RUNNER_OS" = Linux ]; then (busybox 2>&1 || true) | sed -n 1p; shellcheck --version | sed -n 2p; fi
-          if [ "$RUNNER_OS" = macOS ]; then nu --version; /bin/bash --version | sed -n 1p; fi
-      - name: shellcheck
-        if: runner.os == 'Linux'
-        run: shellcheck -s sh deploy
+          nu --version; /bin/bash --version | sed -n 1p
       - name: uv also in ~/.local/bin (the launchers' fallback discovery, T5)
         run: mkdir -p ~/.local/bin && cp "$(command -v uv)" ~/.local/bin/
       - name: selftest --shells
@@ -77,8 +69,7 @@ jobs:
           (cd src && ../deploy help >/dev/null)
           (cd /tmp && "$GITHUB_WORKSPACE/deploy" help >/dev/null)
           env -u UV PATH=/usr/bin:/bin ./deploy help >/dev/null
-          if [ "$RUNNER_OS" = Linux ]; then busybox sh ./deploy help >/dev/null; fi
-          if [ "$RUNNER_OS" = macOS ]; then /bin/bash ./deploy help >/dev/null; /bin/zsh ./deploy help >/dev/null; fi
+          /bin/bash ./deploy help >/dev/null; /bin/zsh ./deploy help >/dev/null
           pwsh -NoProfile -Command "./deploy.ps1 help > \$null; exit \$LASTEXITCODE"
           set +e; ./deploy no-such-command; test $? -eq 2
 
