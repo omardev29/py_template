@@ -1771,7 +1771,9 @@ Formats:
   previous output, and in `--dry-run` too (which only names the upx binary or its download).
   Default method from `deploy.default`; `COMPAT` rejects exe/nuitka/flet with pypy. Runs `run_checks` unless
   `--no-check` (a failure is exit 1, like `./deploy check`). `payload`: the mypyc release
-  stage, or `sync_tree(SRC, .build/payload/<backend>)`. A method whose result is missing or an
+  stage, or `sync_tree(SRC, .build/payload/<backend>)`; none for `cmd_build.OWN_PAYLOAD` (the
+  wheel builds its own project from `src/`, and its mypyc backend compiled the release stage
+  for nothing, a second full compile). A method whose result is missing or an
   empty folder is a DeployError, never `ok done` (`build -v`: PyInstaller took `-v` for
   `--version`; the message says that `./deploy`'s `-v`/`-q` go before the command). The `done:
   ... (N MB)` size (`common.tree_bytes`) counts a symlinked file once (a bundled runtime's

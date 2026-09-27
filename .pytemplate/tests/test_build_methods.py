@@ -25,7 +25,7 @@ from runner import cmd_build, config, envs, mypyc, presets, proc, upx  # noqa: E
 from runner.cmd_build import BuildRequest  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.methods import common, exe, nuitka  # noqa: E402
-from runner.project import ROOT  # noqa: E402
+from runner.project import ROOT, SRC  # noqa: E402
 from runner.ui import DeployError  # noqa: E402
 
 IS_WINDOWS = os.name == "nt"
@@ -2197,6 +2197,26 @@ def test_build_rejects_a_bad_configured_target_key(no_build: None, monkeypatch: 
     assert e.value.code == 2
     # Other methods ignore [deploy.pyz] targets
     assert cmd_build.cmd_build(make({"deploy": {"pyz": {"targets": ["cp315-linux-x86_64"]}}}), ["--method", "portable", "--no-check"]) == 0
+
+
+def test_the_wheel_never_compiles_the_mypyc_stage_it_does_not_use(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`build mypyc --method wheel` compiled the mypyc release stage (a full mypyc and C
+    compile) and then compiled again in the wheel's own project, which reads src/."""
+    seen: list[BuildRequest] = []
+
+    class FakeWheel:
+        @staticmethod
+        def build(req: BuildRequest) -> Path:
+            seen.append(req)
+            out = tmp_path / "p.whl"
+            out.write_bytes(b"x")
+            return out
+
+    monkeypatch.setattr(cmd_build, "payload", lambda cfg, backend: pytest.fail("the payload of a wheel build"))
+    monkeypatch.setattr(cmd_build, "check_lock", lambda cfg: None)
+    monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeWheel)
+    assert cmd_build.cmd_build(make(ALL_BACKENDS), ["mypyc", "--method", "wheel", "--no-check"]) == 0
+    assert seen[-1].app_dir == SRC and seen[-1].compiled
 
 
 def test_build_forwards_extras_to_the_packagers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
