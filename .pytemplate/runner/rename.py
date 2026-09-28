@@ -116,6 +116,10 @@ LOADERS: dict[str, tuple[int, ...]] = {
     "run_module": (0,),  # runpy.run_module(mod_name)
 }
 MODULE_ARGUMENTS = frozenset({"name", "package", "anchor", "mod_name"})
+# The loaders of LOADERS whose names a helper of the project may have too (read_text(name),
+# path(name), contents(name)...): their argument is the package only when it names no file or
+# folder named after the app (`read_text("alpha.txt")` keeps its file's name: _classify)
+RESOURCE_FUNCTIONS = frozenset({"files", "read_text", "read_binary", "open_text", "open_binary", "path", "is_resource", "contents", "get_data"})
 SAMPLES = 3  # sample lines per file in the --dry-run plan
 # pytemplate.toml keys whose values are module names: a bare "alpha" there is the package
 MODULE_KEYS = frozenset(
@@ -218,6 +222,7 @@ class _Region:
     end: int
     forced: bool = False  # argument of import_module() & co.: a module name
     fstring: bool = False  # an f-string or t-string: its {fields} are code, their format specs syntax
+    resource: bool = False  # forced by a loader of RESOURCE_FUNCTIONS (or a helper of that name)
 
 
 class _Positions:
@@ -594,36 +599,37 @@ def _python_code(text: str, pkg: str) -> _Code | None:
     regions: list[_Region] = []
     depth = 0
     fstart = 0
-    fforced = False
+    floader = ""
     last: list[tokenize.TokenInfo] = []  # the last two significant tokens
     # Open brackets: [the called name (for a call), index of the current argument, its keyword]
     brackets: list[list[str | int | None]] = []
 
-    def loader_argument() -> bool:
-        """Whether a string that starts here is a module-name argument of a loader call (LOADERS)."""
+    def loader_argument() -> str:
+        """The loader (LOADERS) whose module-name argument a string that starts here is, else ""."""
         if not (brackets and last and last[-1].type == tokenize.OP and last[-1].string in ("(", ",", "=")):
-            return False
+            return ""
         callee, index, keyword = brackets[-1]
         positions = LOADERS.get(callee, ()) if isinstance(callee, str) else ()
-        return bool(positions) and (keyword in MODULE_ARGUMENTS if keyword is not None else index in positions)
+        found = bool(positions) and (keyword in MODULE_ARGUMENTS if keyword is not None else index in positions)
+        return str(callee) if found else ""
 
     for tok in tokens:
         kind = tokenize.tok_name.get(tok.type, "")
         if kind.endswith("STRING_START"):  # Python 3.12+: f-strings, t-strings (and any later family) are text
             if depth == 0:
-                fstart, fforced = offset(tok.start), loader_argument()  # import_module(f"alpha.{x}") as on 3.11
+                fstart, floader = offset(tok.start), loader_argument()  # import_module(f"alpha.{x}") as on 3.11
             depth += 1
         elif kind.endswith("STRING_END"):
             depth -= 1
-            if depth == 0:
-                regions.append(_Region(fstart, offset(tok.end), fforced, fstring=True))  # {fields} are code, as on 3.11
+            if depth == 0:  # {fields} are code, as on 3.11
+                regions.append(_Region(fstart, offset(tok.end), bool(floader), fstring=True, resource=floader in RESOURCE_FUNCTIONS))
         elif depth == 0 and tok.type in (tokenize.STRING, tokenize.COMMENT):
-            forced = fstring = False
+            loader, fstring = "", False
             if tok.type == tokenize.STRING:
-                forced = loader_argument()
+                loader = loader_argument()
                 prefix = re.match(r"[A-Za-z]*", tok.string)
                 fstring = prefix is not None and "f" in prefix.group().lower()
-            regions.append(_Region(offset(tok.start), offset(tok.end), forced, fstring))
+            regions.append(_Region(offset(tok.start), offset(tok.end), bool(loader), fstring, resource=loader in RESOURCE_FUNCTIONS))
         elif depth == 0 and tok.type == tokenize.OP:
             if tok.string in "([{":
                 called = tok.string == "(" and last and last[-1].type == tokenize.NAME
@@ -876,6 +882,10 @@ def _classify(
     if not _whole_word(text, start, end):
         return "skip"
     if region.forced:  # a loader's argument is a module
+        if region.resource and _text_kind(text, start, end, word, names, modules=modules, entries=entries) == "keep":
+            # read_text("alpha.txt"), contents("alpha/data"): a helper of the project named like a
+            # loader, reading a file or folder named after the app, which keeps its name
+            return "keep"
         return "pkg" if (kind := _text_kind(text, start, end, word, names)) == "name" else kind
     return _text_kind(text, start, end, word, names, modules=modules, entries=entries)
 

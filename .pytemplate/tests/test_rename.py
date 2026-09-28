@@ -329,6 +329,37 @@ def test_file_names_in_code_keep_the_name_of_the_file(text: str, expected: str |
 
 
 @pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('intro = read_text("rocks.txt")', None),  # a helper of the project: the file keeps its name
+        ('cfg = contents("rocks.json")', None),
+        ('data = get_data("rocks.bin")', None),
+        ('logo = path("rocks/logo.png")', None),  # a folder named after the app, not the package
+        ('f = files(f"rocks.txt")', None),
+        ('t = resources.read_text("rocks", "data.txt")', 't = resources.read_text("stone", "data.txt")'),  # the package
+        ('f = resources.files("rocks.core")', 'f = resources.files("stone.core")'),  # a module of it
+        ('p = path("rocks/core/x.py")', 'p = path("stone/core/x.py")'),  # into the package
+        ('m = importlib.import_module("rocks.plugins")', 'm = importlib.import_module("stone.plugins")'),  # a module loader: a module
+    ],
+)
+def test_a_file_passed_to_a_helper_named_like_a_loader_keeps_its_name(text: str, expected: str | None) -> None:
+    """The string argument of ANY call named like an importlib.resources or pkgutil loader was
+    taken for a module name, past the file and folder rules: a helper of the project called
+    read_text, contents, path or get_data reading "<name>.txt" got the new name while the file
+    kept its own (FileNotFoundError), and the line was not reported. A file or folder named
+    after the app keeps its name there too; the package and its modules still change."""
+    out = rewrite(
+        text + "\n",
+        Names("rocks", "stone"),
+        python=True,
+        package_modules=frozenset({"core", "resources"}),
+        package_entries=frozenset({"__init__.py", "core", "resources.py"}),
+    )
+    assert out.text == (text if expected is None else expected) + "\n"
+    assert bool(out.kept) is (expected is None)
+
+
+@pytest.mark.parametrize(
     ("old", "text", "expected"),
     [
         ("alpha", 'DATA = Path("tests/alpha/data/sample.json")', None),  # tests/alpha/ is not moved

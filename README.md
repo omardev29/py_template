@@ -510,7 +510,8 @@ name). What changes:
   other text files there: package paths, dotted names, `-m` arguments, `pkg:function`
   references and module-name arguments (`import_module("<pkg>")`, `resources.files(package=...)`,
   `pkgutil.get_data`, `runpy.run_module`) get the package; titles and other prose get the name.
-  A file named after the app (`asset("<name>.png")`, `"<name>.json"`) keeps its name, so the
+  A file named after the app (`asset("<name>.png")`, `"<name>.json"`, also passed to a helper
+  named like a loader: `read_text("<name>.txt")`) keeps its name, so the
   reference is reported, not changed; so does a folder named after the app outside `src/`
   (`tests/<pkg>/data`, `asset("<pkg>/logo.png")` for `src/assets/<pkg>/`): only `src/<pkg>/`
   moves. A path is the package right inside `src/` (`src/<pkg>/data`), or when it starts with

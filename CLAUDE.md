@@ -1411,7 +1411,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     the other importlib.resources functions, `pkgutil.get_data`, `runpy.run_module`; positional
     or as a `MODULE_ARGUMENTS` keyword, tracked per open bracket: `files(package="alpha")` once
     got the display name, which is no module name; an f-string argument too, whose 3.12+ tokens
-    once skipped the rule: `import_module(f"alpha.{x}")`); titles, other prose and artifact names
+    once skipped the rule: `import_module(f"alpha.{x}")`; the names of the resource loaders,
+    `RESOURCE_FUNCTIONS`: `read_text`, `path`, `contents`..., are a project helper's too, so
+    their argument keeps the file and folder rules above first: `read_text("alpha.txt")` got the
+    new name while the file kept its own,
+    `test_rename.test_a_file_passed_to_a_helper_named_like_a_loader_keeps_its_name`); titles, other prose and artifact names
     (`alpha.exe`, `alpha-cpython-exe`) get the name.
   - `pytemplate.toml`: always by context (`contextual`, even when the new name is a package
     name, and when the old name is not its package's spelling: for My-Game or Auto the package
