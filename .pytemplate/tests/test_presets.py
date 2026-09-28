@@ -1272,6 +1272,27 @@ def test_new_says_what_comes_next_for_the_callers_shell(monkeypatch: pytest.Monk
     apostrophe = str(Path("/p/it's"))
     assert presets.next_steps(Path(apostrophe))[0] == f"cd {shlex.quote(apostrophe)}"
     assert shlex.split(presets.next_steps(Path(apostrophe))[0]) == ["cd", apostrophe]
+    # cmd expands %NAME% of a typed line inside quotes too: each % goes outside them, as ^%
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "cmd")
+    base = str(Path("/p"))
+    assert presets.next_steps(Path("/p/a%OS%b 50%"))[0] == f'cd /d "{base}{os.sep}a"^%"OS"^%"b 50"^%'
+    assert presets.next_steps(Path("/p/%%x"))[0] == f'cd /d "{base}{os.sep}"^%^%"x"'
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe reads the hint")
+def test_the_cmd_hint_enters_a_folder_whose_name_holds_percent_signs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The line new prints for cmd, run by cmd (/c parses a line as a typed one: an undefined
+    %NAME% stays): `cd /d "...\\a%OS%b"` went to ...\\aWindows_NTb."""
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "cmd")
+    monkeypatch.delenv("XONSH_VERSION", raising=False)
+    monkeypatch.delenv("NU_VERSION", raising=False)
+    comspec = os.environ.get("ComSpec", "cmd.exe")
+    for name in ("a%OS%b", "50%", "%%x", "x %PATH% y", "p&q %OS%^"):
+        folder = tmp_path / name
+        folder.mkdir()
+        line = presets.next_steps(folder)[0]
+        r = subprocess.run(f'"{comspec}" /d /s /c "{line} && cd"', cwd=tmp_path, capture_output=True, text=True, timeout=60, check=False)
+        assert r.returncode == 0 and os.path.samefile(r.stdout.strip(), folder), (line, r.stdout, r.stderr)
 
 
 @pytest.mark.parametrize(("launcher", "expected"), [("cmd", "./pyt.cmd setup"), ("sh:bash", "./pyt setup"), ("", "./pyt setup")])

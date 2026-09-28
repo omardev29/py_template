@@ -1473,5 +1473,14 @@ def next_steps(dest: Path) -> list[str]:
         escaped = path.replace("\\", "\\\\").replace('"', '\\"')
         return [f"cd '{path}'" if "'" not in path else f'cd "{escaped}"', setup]
     if cmd:
-        return [f'cd /d "{path}"', r".\pyt setup"]  # a Windows path never holds a double quote
+        return [f"cd /d {cmd_path(path)}", r".\pyt setup"]
     return [f"cd {shlex.quote(path)}", "./pyt setup"]
+
+
+def cmd_path(path: str) -> str:
+    """`path` as cmd reads it on a typed line: in double quotes (a Windows path never holds one),
+    each `%` outside them as `^%`. cmd expands %NAME% of a typed line inside quotes too (a folder
+    `a%OS%b` named `aWindows_NTb`), but leaves one whose name is no variable: the name between
+    two `%` then ends in `^` (or starts with a quote), and the caret, outside the quotes, is
+    dropped after that expansion. cd strips the quotes."""
+    return "^%".join(f'"{part}"' if part else "" for part in path.split("%"))

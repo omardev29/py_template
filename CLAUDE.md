@@ -2755,7 +2755,9 @@ Per method:
   xonsh reads quoted arguments so; `cd @(...)` for a path with `$`, which xonsh expands even
   inside quotes) and `NU_VERSION` (a raw single-quoted nushell string, a double-quoted one for a
   path with `'`), which those shells export: `./pyt.cmd setup` behind `cmd` (pyt.cmd serves
-  xonsh and nushell on Windows too), `./pyt setup` elsewhere; then cmd `cd /d "..."` and
+  xonsh and nushell on Windows too), `./pyt setup` elsewhere; then cmd `cd /d "..."` (each `%`
+  outside the quotes as `^%`, `presets.cmd_path`: cmd expands %NAME% of a typed line inside
+  quotes too, and `a%OS%b` led to `aWindows_NTb`) and
   `.\pyt`, else `shlex.quote` and `./pyt setup`). Never a shell function's `pyt setup`
   (`test_the_next_step_runs_a_launcher_never_a_shell_function`). Behind pyt.cmd a shell that
   exports neither variable (a nushell that stops exporting `NU_VERSION`, nushell/nushell#15533)
