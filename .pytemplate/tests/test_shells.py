@@ -377,6 +377,25 @@ def test_doctor_counts_an_execution_policy_only_for_the_powershell_in_use(
     assert "Set-ExecutionPolicy" in policy[0][2] and "pyt.cmd" in policy[0][2]
 
 
+def test_ps_policies_answer_what_a_new_window_gets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session started with -ExecutionPolicy Bypass (a way around a blocked pyt.ps1, the VS
+    Code PowerShell console) hands its children PSExecutionPolicyPreference=Bypass, the Process
+    scope: asked with it, both PowerShells said Bypass, and doctor and install hid the Restricted
+    policy of every new window. The query leaves it out (fake PowerShells print it, else
+    Restricted, the policy their "new window" has)."""
+    for name in ("powershell", "pwsh"):
+        if IS_WINDOWS:
+            text = "@if defined PSExecutionPolicyPreference (echo %PSExecutionPolicyPreference%) else (echo Restricted)\r\n"
+            (tmp_path / f"{name}.cmd").write_text(text, encoding="ascii", newline="")
+        else:
+            fake = tmp_path / name
+            fake.write_text('#!/bin/sh\nprintf "%s\\n" "${PSExecutionPolicyPreference:-Restricted}"\n', encoding="ascii")
+            fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("PSExecutionPolicyPreference", "Bypass")
+    assert shells._ps_policies() == [("Windows PowerShell 5.1", "Desktop", "Restricted"), ("PowerShell 7", "Core", "Restricted")]
+
+
 def test_ps_policies_name_the_edition_pyt_ps1_reports() -> None:
     """The editions doctor compares with PYTEMPLATE_LAUNCHER are $PSVersionTable.PSEdition's."""
     pwsh = shutil.which("pwsh")

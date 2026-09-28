@@ -171,14 +171,18 @@ PS_EDITIONS = (("Windows PowerShell 5.1", "Desktop", "powershell"), ("PowerShell
 
 
 def _ps_policies() -> list[tuple[str, str, str]]:
-    """Return (label, edition, ExecutionPolicy) for Windows PowerShell 5.1 and PowerShell 7."""
+    """Return (label, edition, ExecutionPolicy) for Windows PowerShell 5.1 and PowerShell 7: the
+    policy a new window gets. A session started with -ExecutionPolicy X (a way around a blocked
+    pyt.ps1, the VS Code PowerShell console) hands its children PSExecutionPolicyPreference=X, its
+    Process scope, which then won over a Restricted CurrentUser or LocalMachine policy."""
     found = [(label, edition, exe) for label, edition, name in PS_EDITIONS if (exe := shutil.which(name))]
+    env = {k: v for k, v in os.environ.items() if k.upper() != "PSEXECUTIONPOLICYPREFERENCE"}
 
     def policy(exe: str) -> str:
         try:
             r = subprocess.run(
                 [exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Get-ExecutionPolicy"],
-                capture_output=True, text=True, timeout=60, check=False, stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=60, check=False, stdin=subprocess.DEVNULL, env=env,
             )
         except (OSError, subprocess.SubprocessError):
             return ""

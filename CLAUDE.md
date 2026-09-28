@@ -596,7 +596,11 @@ header rules (with detector tests proving each rule fires).
   a blocking one is `[XX]` only for the edition that started the run (`PYTEMPLATE_LAUNCHER`
   `ps1:<PSEdition>:`), else a note: 5.1 is `Restricted` by default on client Windows, and
   users of cmd, the POSIX shells, xonsh or the other PowerShell never run pyt.ps1 there
-  (`test_doctor_counts_an_execution_policy_only_for_the_powershell_in_use`).
+  (`test_doctor_counts_an_execution_policy_only_for_the_powershell_in_use`). The policy is the
+  one a new window gets: `shells._ps_policies` asks without the caller's
+  `PSExecutionPolicyPreference`, the Process scope a session started with `-ExecutionPolicy
+  Bypass` (the VS Code PowerShell console) hands its children, which won over a Restricted one
+  and hid it from doctor and install (`test_ps_policies_answer_what_a_new_window_gets`).
 - 5.1 started with `-EncodedCommand` prints the calling session's module-loading progress as
   CLIXML on stderr; the launcher silences only its own.
 
