@@ -1419,6 +1419,32 @@ def test_mode_names_the_hand_edited_files_it_leaves_as_they_were(
     assert "not overwriting hand-edited generated files: .vscode/settings.json (./pyt render --force)" in err
 
 
+def test_mode_leaves_out_a_button_of_a_retired_command_as_every_command_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rule 1.11: a [vscode] button of a retired command (shell-setup) is left out with a warning
+    by every command, but mode validated the new configuration (and its dry run's plan) without
+    the builtin commands: it rendered a `pyt: shell-setup` task into tasks.json, which render
+    --check, the generated CI and the pre-commit hook then refused."""
+    _Relock(tmp_path, monkeypatch, "none")
+    cfg_file = tmp_path / "pytemplate.toml"
+    buttons = [*config.load(COMMANDS).vscode.buttons, "shell-setup"]
+    cfg_file.write_text(config.set_value(cfg_file.read_text(encoding="utf-8"), "vscode", "buttons", buttons), encoding="utf-8", newline="\n")
+    cfg = config.load(COMMANDS)  # as dispatch loads it: the button is left out
+    assert "shell-setup" not in cfg.vscode.buttons
+    rendered: list[list[str]] = []
+
+    def apply(new_cfg: Config, *_a: Any, **_k: Any) -> tuple[list[str], list[str]]:
+        rendered.append(list(new_cfg.vscode.buttons))
+        return [], []
+
+    monkeypatch.setattr(render, "apply", apply)
+    other = "pylance" if cfg.typing.editor == "basedpyright" else "basedpyright"
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert cmd_mode.cmd_mode(cfg, ["--editor", other]) == 0
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    assert cmd_mode.cmd_mode(cfg, ["--editor", other]) == 0
+    assert rendered == [cfg.vscode.buttons, cfg.vscode.buttons]  # the plan, then the real render
+
+
 # --- mode: real runs in a throwaway copy of this project ----------------------------------------------
 
 needs_uv = pytest.mark.skipif(shutil.which("uv") is None, reason="uv not found")

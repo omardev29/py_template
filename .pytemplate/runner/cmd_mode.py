@@ -50,6 +50,15 @@ def _parse(parser: argparse.ArgumentParser, args: list[str]) -> argparse.Namespa
     return ns
 
 
+def _builtins() -> set[str]:
+    """The builtin commands, as dispatch validates with them: a [vscode] button of a retired
+    command (config.RETIRED_COMMANDS) is left out only then, and mode rendered it into
+    tasks.json, which render --check and the pre-commit hook then refused."""
+    from .cli import COMMANDS  # lazy: cli imports this module through its COMMANDS table
+
+    return set(COMMANDS)
+
+
 def _config_from_text(text: str, where: str) -> Config:
     """Validate a pytemplate.toml text in memory (what config.load does with the file)."""
     try:
@@ -57,7 +66,7 @@ def _config_from_text(text: str, where: str) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise PytError(f"{where}: not valid TOML: {e}") from None
     cfg: Config = config._build(Config, data, "")
-    config.validate(cfg)
+    config.validate(cfg, _builtins())
     return cfg
 
 
@@ -349,7 +358,7 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
     before = {path: _read_bytes(path) for path in (CONFIG_FILE, PYPROJECT, PYPROJECT.with_name("uv.lock"))}
     try:
         config.update_file(changes)
-        new_cfg = config.load()
+        new_cfg = config.load(_builtins())
         heavy = supported != cfg.backend.supported
         if heavy or render.pyproject_outdated(new_cfg):
             from .cmd_env import ensure_lock

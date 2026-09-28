@@ -1695,7 +1695,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   per run, `config.warn_once`, and so is such a `deps` entry in `tasks.run_task`: they stopped
   every command, a break of rule 1.11:
   `test_config_rules.test_a_button_of_a_retired_command_is_left_out_with_a_warning`,
-  `test_a_task_keeps_a_name_a_later_builtin_took`).
+  `test_a_task_keeps_a_name_a_later_builtin_took`). Only a validation given the builtin
+  commands leaves it out, so `mode` validates its new configuration with them too
+  (`cmd_mode._builtins`: it rendered a `pyt: shell-setup` task into tasks.json, which `render
+  --check` and the hook refused:
+  `test_mode_leaves_out_a_button_of_a_retired_command_as_every_command_does`).
 - `config.set_value(text, table, key, value)` edits the TOML text itself: a small scanner
   (`config._statements`: the four string kinds, multi-line arrays and inline tables, comments,
   dotted and quoted keys) finds the value's span, which may cover several lines (taplo, the
