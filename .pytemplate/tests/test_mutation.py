@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -59,7 +60,15 @@ def _write(root: Path, files: dict[str, str]) -> Path:
 def test_options() -> None:
     assert mutation.parse_args([]) == Options(diff=None, jobs=mutation.default_jobs(), as_json=False)
     assert mutation.parse_args(["--diff", "origin/main", "--jobs", "3", "--json"]) == Options("origin/main", 3, True)
+    assert mutation.parse_args(["--jobs", "1"]).jobs == 1  # one worker is a number of workers
     assert 1 <= mutation.default_jobs() <= 8
+
+
+@pytest.mark.parametrize(("cpus", "jobs"), [(None, 1), (1, 1), (3, 1), (4, 2), (7, 3), (16, 8), (64, 8)])
+def test_default_jobs_are_half_the_cpus_and_at_most_8(monkeypatch: pytest.MonkeyPatch, cpus: int | None, jobs: int) -> None:
+    """A whole number: the workers are made with range(jobs). os.cpu_count() may not know (None)."""
+    monkeypatch.setattr(mutation.os, "cpu_count", lambda: cpus)
+    assert mutation.default_jobs() == jobs and type(mutation.default_jobs()) is int
 
 
 @pytest.mark.parametrize("args", [["--jobs", "0"], ["--jobs", "-2"], ["--diff", " "]])
@@ -91,7 +100,34 @@ def test_scope_and_module_names(tmp_path: Path) -> None:
     assert [mutation.module_of(f) for f in mutation.scope_files(tmp_path)] == ["runner", "runner.cli", "runner.methods", "runner.methods.common"]
 
 
-def test_test_map_finds_every_import_and_counts_the_mentions(tmp_path: Path) -> None:
+def _nul_as_up_to_python_3_11_3(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The parser of Python 3.11.3 and older: a ValueError for a NUL byte, a SyntaxError from 3.11.4
+    on (uv installs the newest 3.11). The runner started by hand on a Python of the system meets
+    it: Debian 12 has 3.11.2."""
+    import ast
+
+    real_parse, real_compile = ast.parse, compile
+
+    def refuse_nul(source: Any) -> None:
+        if (b"\0" if isinstance(source, bytes) else "\0") in source:
+            raise ValueError("source code string cannot contain null bytes")
+
+    def parse(source: Any, *args: Any, **kwargs: Any) -> Any:
+        refuse_nul(source)
+        return real_parse(source, *args, **kwargs)
+
+    def old_compile(source: Any, *args: Any, **kwargs: Any) -> Any:
+        refuse_nul(source)
+        return real_compile(source, *args, **kwargs)
+
+    monkeypatch.setattr(mutation.ast, "parse", parse)
+    monkeypatch.setattr(mutation, "compile", old_compile, raising=False)
+
+
+@pytest.mark.parametrize("old_parser", [False, True])
+def test_test_map_finds_every_import_and_counts_the_mentions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old_parser: bool) -> None:
+    if old_parser:
+        _nul_as_up_to_python_3_11_3(monkeypatch)
     _write(tmp_path, {
         ".pytemplate/tests/test_a.py": (
             "from runner import alpha, beta as b\nfrom runner.gamma import thing\nimport runner.delta\n"
@@ -99,7 +135,9 @@ def test_test_map_finds_every_import_and_counts_the_mentions(tmp_path: Path) -> 
             "    from runner.methods import common\n    common.x()\n"
         ),
         ".pytemplate/tests/test_b.py": "from runner import alpha\n" + "alpha.f()\n" * 9,
-        ".pytemplate/tests/test_broken.py": "from runner import alpha\ndef (\n",  # pytest says what is wrong with it
+        # pytest says what is wrong with them; the files after them still count
+        ".pytemplate/tests/test_0broken.py": "from runner import alpha\ndef (\n",
+        ".pytemplate/tests/test_0nul.py": "from runner import alpha\nx = 1\0\n",  # a NUL byte: the parser refuses it
         ".pytemplate/tests/helper.py": "from runner import eps\n",  # not a test file
     })  # fmt: skip
     modules = {"runner.alpha", "runner.beta", "runner.gamma", "runner.delta", "runner.eps", "runner.methods", "runner.methods.common"}
@@ -123,12 +161,12 @@ def test_junit_seconds(tmp_path: Path) -> None:
     xml = tmp_path / "junit.xml"
     xml.write_text(
         '<testsuites><testsuite>'
+        '<testcase classname=".pytemplate.tests.test_b" name="t0" time="bad"/>'  # no time: the cases after it still count
         '<testcase classname=".pytemplate.tests.test_a" name="t1" time="1.5"/>'
         '<testcase classname=".pytemplate.tests.test_a.TestK" name="t2" time="0.5"/>'
         '<testcase classname=".pytemplate.tests.test_b" name="t3" time="2"/>'
         '<testcase classname=".pytemplate.tests.test_ab" name="t4" time="7"/>'
         '<testcase classname="elsewhere" name="t5" time="9"/>'
-        '<testcase classname=".pytemplate.tests.test_b" name="t6" time="bad"/>'
         '</testsuite></testsuites>',
         encoding="utf-8",
     )  # fmt: skip
@@ -230,6 +268,42 @@ def test_changed_lines_ignore_the_users_diff_configuration(tmp_path: Path) -> No
     assert mutation.changed_lines(root, "HEAD", env) == {".pytemplate/runner/a.py": {2, 8}}
 
 
+@needs_git
+def test_a_git_that_fails_or_cannot_run_is_a_missing_requirement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exit 3 with git's own reason, or its exit code when it gives none; check=False gives the
+    result back instead."""
+    env = {**_git_env(tmp_path), "GIT_CEILING_DIRECTORIES": str(tmp_path)}
+    nowhere = tmp_path / "nowhere"
+    nowhere.mkdir()
+    with pytest.raises(PytError, match="git rev-parse HEAD failed in .*nowhere: fatal: not a git repository") as e:
+        mutation._git(nowhere, env, "rev-parse", "HEAD")
+    assert e.value.code == 3
+    assert mutation._git(nowhere, env, "rev-parse", "HEAD", check=False).returncode == 128
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, env, "init", "-q")
+    with pytest.raises(PytError, match="git rev-parse --verify failed in .*repo: exit code 1$"):  # --quiet: not a word
+        mutation._git(repo, env, "rev-parse", "--verify", "--quiet", "nope")
+    broken = _write(tmp_path, {"git-that-cannot-start": "not a program\n"}) / "git-that-cannot-start"
+    monkeypatch.setattr(mutation.shutil, "which", lambda name, *a, **k: str(broken))
+    with pytest.raises(PytError, match="git rev-parse HEAD did not run in") as e:
+        mutation._git(repo, env, "rev-parse", "HEAD")
+    assert e.value.code == 3
+
+    def hangs(*args: Any, **kwargs: Any) -> Any:
+        raise subprocess.TimeoutExpired(args[0], 600)
+
+    monkeypatch.setattr(mutation.shutil, "which", lambda name, *a, **k: "git")
+    monkeypatch.setattr(mutation.subprocess, "run", hangs)
+    with pytest.raises(PytError, match="git rev-parse HEAD did not run in .*timed out after 600 seconds") as e:
+        mutation._git(repo, env, "rev-parse", "HEAD")
+    assert e.value.code == 3
+    monkeypatch.setattr(mutation.shutil, "which", lambda name, *a, **k: None)
+    with pytest.raises(PytError, match="needs git") as e:
+        mutation._git(repo, env, "rev-parse", "HEAD")
+    assert e.value.code == 3
+
+
 SOURCE = '''\
 from __future__ import annotations
 
@@ -267,10 +341,11 @@ def test_select_skips_annotations_type_checking_blocks_pragmas_and_the_minus_one
         _entry("core/NumberReplacer", 1, 1, _at(8, "3")),  # NumberReplacer's -1: dropped
         _entry("core/AddNot", 0, 0, _at(5, "TYPE_CHECKING"), 13),  # `if TYPE_CHECKING:` never runs otherwise
         _entry("core/ReplaceBinaryOperator_BitOr_BitAnd", 0, 0, _at(11, "|"), 1, "f"),  # an argument's annotation
+        _entry("core/ReplaceBinaryOperator_BitOr_BitAnd", 2, 0, _at(11, "int"), 3, "f"),  # at an annotation's first character
         _entry("core/NumberReplacer", 2, 0, _at(11, "1"), 1, "f"),  # kept: a default value
         _entry("core/ReplaceBinaryOperator_BitOr_BitAnd", 1, 0, _at(11, "|", 1), 1, "f"),  # the return annotation
-        _entry("core/ReplaceComparisonOperator_Is_IsNot", 0, 0, _at(12, "is"), 2, "f"),  # kept
         _entry("core/ReplaceBinaryOperator_Add_Sub", 0, 0, _at(14, "+"), 1, "f"),  # its line has the pragma
+        _entry("core/ReplaceComparisonOperator_Is_IsNot", 0, 0, _at(12, "is"), 2, "f"),  # kept: a skipped one ends nothing
     ]
     rel = ".pytemplate/runner/m.py"
     kept = mutation.select(rel, listed, SOURCE, None)
@@ -280,6 +355,50 @@ def test_select_skips_annotations_type_checking_blocks_pragmas_and_the_minus_one
     assert kept[2].function == "f" and kept[0].function is None and kept[2].module == "runner.m" and kept[2].where == f"{rel}:12"
     assert [m.line for m in mutation.select(rel, listed, SOURCE, {12, 30})] == [12]  # --diff: the changed lines only
     assert mutation.select(rel, listed, SOURCE, set()) == []
+    assert mutation.select(rel, listed, SOURCE.removesuffix("\n"), None) == kept  # the pragma on a last line without a line break
+
+
+BLOCKS = """\
+import typing
+from typing import TYPE_CHECKING
+
+if typing.TYPE_CHECKING:
+    X = 1
+    Y = (
+        2 + 3
+    )
+if TYPE_CHECKING:
+    Z = 4 + 5
+if options.verbose:
+    W = 6
+
+
+def g(
+    a: Literal[
+        7,
+    ] = 8,
+) -> None:
+    pass
+"""
+
+
+def test_select_skips_whole_blocks_and_annotations_over_several_lines() -> None:
+    """`if typing.TYPE_CHECKING:` is one too, and a block or an annotation ends where its last
+    line does (not where its last statement starts, nor at the start of that line); another
+    attribute is a plain condition."""
+    lines = BLOCKS.splitlines()
+
+    def at(line: int, text: str) -> tuple[int, int]:
+        return line, lines[line - 1].index(text)
+
+    listed = [
+        _entry("core/NumberReplacer", 0, 0, at(5, "1")), _entry("core/NumberReplacer", 1, 0, at(7, "2")),
+        _entry("core/ReplaceBinaryOperator_Add_Sub", 0, 0, at(7, "+")), _entry("core/NumberReplacer", 2, 0, at(10, "5")),
+        _entry("core/AddNot", 0, 0, at(11, "options.verbose"), 15), _entry("core/NumberReplacer", 3, 0, at(12, "6")),
+        _entry("core/NumberReplacer", 4, 0, at(17, "7"), 1, "g"), _entry("core/NumberReplacer", 5, 0, at(18, "8"), 1, "g"),
+    ]  # fmt: skip
+    kept = mutation.select(".pytemplate/runner/m.py", listed, BLOCKS, None)
+    assert [(m.line, m.operator.split("/")[-1]) for m in kept] == [(11, "AddNot"), (12, "NumberReplacer"), (18, "NumberReplacer")]
 
 
 HANDLERS = """\
@@ -445,6 +564,13 @@ def test_made(answer: dict[str, Any], status: str, detail: str) -> None:
     assert got[2] == (answer.get("code") if status == NOT_RUN or detail.startswith("the mutant is no valid") else None)
 
 
+def test_made_on_a_python_that_refuses_a_nul_byte_with_a_value_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _nul_as_up_to_python_3_11_3(monkeypatch)
+    assert mutation.made({"code": "x = 1\0\n"}, b"x = 1\n", "m.py") == (
+        mutation.SKIPPED, "the mutant is no valid Python: source code string cannot contain null bytes", "x = 1\0\n",
+    )  # fmt: skip
+
+
 def test_made_leaves_the_warning_filters_of_every_thread_as_they_were() -> None:
     """made() runs in the worker threads, and warnings.catch_warnings is not thread safe: two of
     them that overlap put back each other's filters, and an "ignore" stayed for good."""
@@ -563,13 +689,75 @@ def test_driver_answers_and_stops(tmp_path: Path) -> None:
         driver.close()
 
 
+def test_driver_closes_cleanly_and_a_driver_that_stopped_stays_an_error(tmp_path: Path) -> None:
+    """close() ends Cosmic Ray's side by closing its input (it is never left to be killed after
+    30 s); a worker that asks after the side died (a broken pipe) or after close() (a closed
+    file) gets the same PytError as the first one."""
+    driver = _driver(tmp_path)
+    assert driver.ask({"op": "version"}) == {"version": "9.9.9"}
+    start = time.monotonic()
+    driver.close()
+    assert driver._child.returncode == 0 and time.monotonic() - start < 20
+    with pytest.raises(PytError, match=r"stopped \(exit code 0\)") as e:
+        driver.ask({"op": "version"})
+    assert e.value.code == 3
+    driver = _driver(tmp_path)
+    try:
+        for _ in range(2):  # the second one writes into a pipe nobody reads
+            with pytest.raises(PytError, match=r"stopped \(exit code 7\): fake driver: stopping") as e:
+                driver.ask({"op": "die"})
+            assert e.value.code == 3
+    finally:
+        driver.close()
+
+
+def test_driver_close_ends_one_that_died_or_hangs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    driver = _driver(tmp_path)
+    driver._child.kill()
+    driver._child.wait()
+    assert driver._child.stdin is not None
+    driver._child.stdin.write("{}")  # buffered: close() flushes it into a pipe nobody reads
+    driver.close()
+    hangs = mutation.Driver("uv", _cfg(), tmp_path / "hangs.log", argv=[sys.executable, "-c", "import time; time.sleep(600)"])
+    real = hangs._child.wait
+
+    def wait(timeout: float | None = None) -> int:
+        if timeout is not None:
+            raise subprocess.TimeoutExpired("driver", timeout)  # it did not end within 30 s of its input closing
+        return real()
+
+    monkeypatch.setattr(hangs._child, "wait", wait)
+    try:
+        hangs.close()
+    finally:
+        if hangs._child.poll() is None:  # close() failed: never leave it running
+            hangs._child.kill()
+            real()
+    assert hangs._child.returncode is not None  # killed
+
+
+def test_driver_log_tail(tmp_path: Path) -> None:
+    """The last line of Cosmic Ray's log goes into the error of a side that stopped."""
+    driver = mutation.Driver.__new__(mutation.Driver)
+    driver.log = tmp_path / "gone.log"
+    assert driver._tail() == "no log"
+    driver.log = _write(tmp_path, {"empty.log": "\n  \n"}) / "empty.log"
+    assert driver._tail() == "no output"
+    driver.log = _write(tmp_path, {"cr.log": "first\n  Traceback: the last one  \n\n"}) / "cr.log"
+    assert driver._tail() == "Traceback: the last one"
+
+
 def test_driver_that_cannot_start(tmp_path: Path) -> None:
     with pytest.raises(PytError, match="cannot start uv") as e:
         mutation.Driver("uv", _cfg(), tmp_path / "driver.log", argv=[str(tmp_path / "missing")])
     assert e.value.code == 3
 
 
-def test_list_mutants_turns_a_bad_answer_into_an_error(tmp_path: Path) -> None:
+@pytest.mark.parametrize("old_parser", [False, True])
+def test_list_mutants_turns_a_bad_answer_into_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old_parser: bool) -> None:
+    if old_parser:
+        _nul_as_up_to_python_3_11_3(monkeypatch)
+
     class Fake:
         def __init__(self, answer: dict[str, Any]) -> None:
             self.answer = answer
@@ -582,8 +770,12 @@ def test_list_mutants_turns_a_bad_answer_into_an_error(tmp_path: Path) -> None:
     for answer in ({"error": "boom"}, {"mutants": "no list"}):
         with pytest.raises(PytError, match="could not list the mutants of m.py"):
             mutation.list_mutants(Fake(answer), tmp_path, ["m.py"], None, snap)  # type: ignore[arg-type]
-    with pytest.raises(PytError, match="bad.py is no Python the runner can read"):
-        mutation.list_mutants(Fake({"mutants": []}), tmp_path, ["bad.py"], None, snap)  # type: ignore[arg-type]
+    (tmp_path / "latin1.py").write_bytes(b"x = '\xe9'\n")  # not UTF-8
+    (tmp_path / "nul.py").write_bytes(b"x = 1\0\n")  # a NUL byte: the parser refuses it
+    for name in ("bad.py", "latin1.py", "nul.py"):
+        with pytest.raises(PytError, match=f"{name} is no Python the runner can read") as e:
+            mutation.list_mutants(Fake({"mutants": []}), tmp_path, [name], None, snap)  # type: ignore[arg-type]
+        assert e.value.code == 1
     fake = Fake({"mutants": [["core/NumberReplacer", 0, 0, 1, 4, 1, 5, None]]})
     mutants, originals = mutation.list_mutants(fake, tmp_path, ["m.py"], None, snap)  # type: ignore[arg-type]
     assert [(m.file, m.line, m.column) for m in mutants] == [("m.py", 1, 4)] and originals == {"m.py": b"x = 1\n"}
@@ -626,6 +818,18 @@ def test_prepare_base(tmp_path: Path) -> None:
     mutation.prepare_base(base, root)
     mutation.prepare_base(base, root)  # its own marker: reused
     assert (base / mutation.MARKER).is_file()
+    mutation.prepare_base(tmp_path / "pt" / "mut", root)  # its parent made too (Windows' default: %TEMP%\pt\mut)
+    assert (tmp_path / "pt" / "mut" / mutation.MARKER).is_file()
+
+
+def test_default_base_is_short_and_per_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    tmp = Path(tempfile.gettempdir())
+    monkeypatch.setattr(mutation, "IS_WINDOWS", True)
+    assert mutation.default_base() == tmp / "pt" / "mut"  # MAX_PATH
+    monkeypatch.setattr(mutation, "IS_WINDOWS", False)
+    assert mutation.default_base() == tmp / mutation.scratch_name("pt-mutation")
+    if sys.platform != "win32":  # a shared /tmp: another user's base is never this one's
+        assert mutation.default_base().name == f"pt-mutation-{os.getuid()}"
 
 
 def test_one_run_at_a_time_per_base(tmp_path: Path) -> None:
@@ -730,17 +934,71 @@ def test_a_copy_whose_sync_fails_says_why_with_the_oldest_uv(tmp_path: Path, mon
 @needs_git
 def test_make_copy_is_a_repository_of_the_listed_files(tmp_path: Path) -> None:
     env = _git_env(tmp_path)
-    root = _write(tmp_path / "p", {"a.py": "x\n", "sub/b.txt": "y\n", ".gitignore": "ignored/\n", "ignored/c.txt": "z\n"})
+    root = _write(tmp_path / "p", {
+        "a.py": "x\n", "sub/b.txt": "y\n", "deep/er/c.txt": "w\n", ".gitignore": "ignored/\n", "ignored/c.txt": "z\n",
+        "module/x.txt": "a submodule's file\n",
+    })  # fmt: skip
     _git(root, env, "init", "-q")
     _git(root, env, "add", "a.py", ".gitignore")
     _write(root, {"a.py": "changed\n"})  # the working tree's content, not the commit's
     files = mutation.listed_files(root, env)
-    assert files == [".gitignore", "a.py", "sub/b.txt"]  # untracked but not ignored counts; ignored does not
+    assert files == [".gitignore", "a.py", "deep/er/c.txt", "module/x.txt", "sub/b.txt"]  # untracked but not ignored counts
     copy = tmp_path / "copy"
-    mutation.make_copy(root, copy, [*files, "deleted.py"], env)
+    # deleted from the working tree, and a submodule (git lists its folder): left out, and the rest still copied
+    mutation.make_copy(root, copy, ["deleted.py", "module", *(f for f in files if not f.startswith("module/"))], env)
     assert (copy / "a.py").read_text(encoding="utf-8") == "changed\n" and not (copy / "ignored").exists()
+    assert (copy / "deep" / "er" / "c.txt").read_text(encoding="utf-8") == "w\n" and not (copy / "module").exists()
     status = subprocess.run(["git", "status", "--porcelain"], cwd=copy, env=env, capture_output=True, text=True, check=True).stdout
     assert status == ""  # every file committed
+
+
+def _symlinks(root: Path) -> None:
+    try:
+        os.symlink("a.py", root / "link.py")
+        os.symlink("sub", root / "linkdir", target_is_directory=True)
+    except OSError as e:  # Windows without the right to make links
+        pytest.skip(f"cannot make a symbolic link here: {e}")
+
+
+@needs_git
+def test_make_copy_keeps_links_as_links(tmp_path: Path) -> None:
+    env = _git_env(tmp_path)
+    root = _write(tmp_path / "p", {"a.py": "x\n", "sub/b.txt": "y\n"})
+    _symlinks(root)
+    _git(root, env, "init", "-q")
+    files = ["a.py", "link.py", "linkdir", "sub/b.txt"]
+    if sys.platform != "win32":  # Git for Windows may read links as it reads core.symlinks
+        assert mutation.listed_files(root, env) == files  # a link to a folder is one file for git
+    copy = tmp_path / "copy"
+    mutation.make_copy(root, copy, files, env)
+    assert os.readlink(copy / "link.py") == "a.py" and os.readlink(copy / "linkdir") == "sub"
+
+
+@needs_git
+def test_make_copy_copies_what_a_link_names_where_links_cannot_be_made(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows without the right to make links: the file or the folder a link names takes its
+    place (a folder was copied as a file: an error). Any other file that cannot be copied stops
+    the copy."""
+    env = _git_env(tmp_path)
+    root = _write(tmp_path / "p", {"a.py": "x\n", "sub/b.txt": "y\n"})
+    _symlinks(root)
+    real = shutil.copy2
+
+    def copy2(src: Any, dst: Any, *, follow_symlinks: bool = True) -> Any:
+        if Path(src).is_symlink() and not follow_symlinks:
+            raise OSError("A required privilege is not held by the client")
+        if Path(src).name == "locked.py":
+            raise PermissionError(f"in use by another process: {src}")
+        return real(src, dst, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(mutation.shutil, "copy2", copy2)
+    copy = tmp_path / "copy"
+    mutation.make_copy(root, copy, ["a.py", "link.py", "linkdir", "sub/b.txt"], env)
+    assert not (copy / "link.py").is_symlink() and (copy / "link.py").read_text(encoding="utf-8") == "x\n"
+    assert not (copy / "linkdir").is_symlink() and (copy / "linkdir" / "b.txt").read_text(encoding="utf-8") == "y\n"
+    _write(root, {"locked.py": "y\n"})
+    with pytest.raises(PermissionError, match="in use"):
+        mutation.make_copy(root, tmp_path / "copy2", ["a.py", "locked.py"], env)
 
 
 # --- running tests: time limits, a stop, the threads --------------------------------------------------
@@ -756,8 +1014,9 @@ def _worker(tmp_path: Path, tests: dict[str, str]) -> Worker:
 def test_run_reports_pytests_result(tmp_path: Path) -> None:
     worker = _worker(tmp_path, {"test_ok.py": "def test_ok():\n    assert True\n", "test_bad.py": "def test_bad():\n    assert 1 == 2\n"})
     runs = Runs()
+    start = time.perf_counter()
     code, output, seconds = runs.run(worker, ["test_ok.py"], 120, junit=tmp_path / "junit.xml")
-    assert mutation.classify(code, output) == (SURVIVED, "") and seconds > 0
+    assert mutation.classify(code, output) == (SURVIVED, "") and 0 < seconds <= time.perf_counter() - start
     assert mutation.junit_seconds(tmp_path / "junit.xml", ["test_ok.py"]).keys() == {"test_ok.py"}
     code, output, _ = runs.run(worker, ["test_ok.py", "test_bad.py"], 120)
     assert mutation.classify(code, output)[0] == KILLED
@@ -819,6 +1078,51 @@ def test_run_ends_a_run_over_its_time_and_on_stop(tmp_path: Path) -> None:
     assert code is None and time.monotonic() - start < 60
     assert mutation.classify(code, output, stopped=runs.stopped.is_set()) == (NOT_RUN, "interrupted")
     assert runs.run(worker, ["test_slow.py"], 600)[0] is None  # stopped: nothing starts any more
+
+
+def test_stop_ends_the_running_runs_itself(tmp_path: Path) -> None:
+    """stop() kills every run there and then (an interrupt: the terminal is waiting), before the
+    run's own loop sees the stop."""
+    worker = _worker(tmp_path, {"test_slow.py": "import time\n\ndef test_slow():\n    time.sleep(120)\n"})
+    runs = Runs()
+    got: list[tuple[int | None, str, float]] = []
+    thread = threading.Thread(target=lambda: got.append(runs.run(worker, ["test_slow.py"], 600)))
+    thread.start()
+    deadline = time.monotonic() + 60
+    while not runs._children and time.monotonic() < deadline:
+        time.sleep(0.01)
+    child = runs._children[worker.index]
+    runs.stop()
+    assert child.poll() is not None
+    thread.join(60)
+    assert got[0][0] is None
+
+
+def test_a_run_that_fails_while_it_waits_leaves_no_test_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whatever goes wrong while a run waits for pytest, pytest does not go on alone."""
+    worker = _worker(tmp_path, {"test_slow.py": "import time\n\ndef test_slow():\n    time.sleep(120)\n"})
+    started: list[subprocess.Popen[bytes]] = []
+
+    class Popen(subprocess.Popen[bytes]):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            started.append(self)
+
+        def wait(self, timeout: float | None = None) -> int:
+            if timeout == 0.5:  # the run's own wait
+                raise RuntimeError("boom")
+            return super().wait(timeout)
+
+    monkeypatch.setattr(mutation.subprocess, "Popen", Popen)
+    try:
+        with pytest.raises(RuntimeError, match="boom"):
+            Runs().run(worker, ["test_slow.py"], 600)
+        assert started[0].poll() is not None
+    finally:
+        for child in started:
+            if child.poll() is None:
+                child.kill()
+                subprocess.Popen.wait(child)
 
 
 posix = pytest.mark.skipif(sys.platform == "win32", reason="sessions and signals of POSIX")
@@ -883,10 +1187,26 @@ def tree(tmp_path: Path) -> Any:
 
 
 @posix
-def test_descendants_cross_sessions(tree: Any) -> None:
+def test_descendants_cross_sessions(tree: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     child, pids = tree
+    if sys.platform.startswith("linux"):  # /proc answers, never ps
+        monkeypatch.setattr(mutation.shutil, "which", lambda name, *a, **k: None)
     assert set(pids) <= set(mutation.descendants(child.pid))
     assert child.pid not in mutation.descendants(child.pid)
+
+
+def _no_proc(monkeypatch: pytest.MonkeyPatch, first: str | None = None) -> None:
+    """/proc cannot be listed, or (`first`) lists a process that ends before it is read first."""
+    real = os.scandir
+
+    def scandir(path: Any = ".") -> Any:
+        if str(path) != "/proc":
+            return real(path)
+        if first is None:
+            raise PermissionError("[Errno 13] Permission denied: '/proc'")
+        return [SimpleNamespace(name=first), *real(path)]
+
+    monkeypatch.setattr(mutation.os, "scandir", scandir)
 
 
 @posix
@@ -895,9 +1215,61 @@ def test_descendants_through_ps(tree: Any, monkeypatch: pytest.MonkeyPatch) -> N
     """Where there is no /proc (macOS, the BSDs), ps answers."""
     child, pids = tree
     monkeypatch.setattr(mutation.sys, "platform", "darwin")
+    _no_proc(monkeypatch)
     found = mutation.descendants(child.pid)
     monkeypatch.undo()
     assert set(pids) <= set(found)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc of Linux")
+def test_descendants_through_proc_pass_over_what_they_cannot_read(tree: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    child, pids = tree
+    _no_proc(monkeypatch, first="4194305")  # above pid_max: a process that ended between the listing and the reading
+    found = mutation.descendants(child.pid)
+    _no_proc(monkeypatch)
+    none = mutation.descendants(child.pid)
+    monkeypatch.undo()
+    assert set(pids) <= set(found) and none == []
+
+
+def _ps(monkeypatch: pytest.MonkeyPatch, out: bytes = b"", code: int = 0, error: BaseException | None = None) -> None:
+    """descendants' ps (macOS, the BSDs), faked: what it prints and how it ends."""
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        assert argv[1:] == ["-A", "-o", "pid=", "-o", "ppid="]
+        if error is not None:
+            raise error
+        done = subprocess.CompletedProcess(argv, code, out, b"")
+        if kwargs.get("check"):
+            done.check_returncode()
+        return done
+
+    monkeypatch.setattr(mutation.sys, "platform", "darwin")
+    monkeypatch.setattr(mutation.shutil, "which", lambda name, *a, **k: "/bin/ps")
+    monkeypatch.setattr(mutation.subprocess, "run", run)
+
+
+def test_descendants_read_ps_line_by_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each line is a pid and its parent's; any other line is passed over. A pid met twice is one
+    process, and one that comes back to where the walk began (a pid reused meanwhile) ends it."""
+    lines = b"  100     1\n  200   100\n  300   200\n  300   200\n    x   100\n  400\n  500   300 extra\n  600   999\n"
+    _ps(monkeypatch, lines, code=1)  # what ps could read, even when it says some process escaped it
+    assert mutation.descendants(100) == [200, 300]
+    _ps(monkeypatch, b"200 100\n300 200\n100 300\n")
+    assert mutation.descendants(100) == [200, 300]
+    for error in (OSError("ps: cannot run"), subprocess.TimeoutExpired("ps", 30)):
+        _ps(monkeypatch, error=error)
+        assert mutation.descendants(100) == []
+    monkeypatch.setattr(mutation.shutil, "which", lambda name, *a, **k: None)
+    assert mutation.descendants(100) == []  # no ps: none found
+
+
+@posix
+def test_kill_run_passes_over_a_process_that_ended_meanwhile(tree: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    child, pids = tree
+    monkeypatch.setattr(mutation, "descendants", lambda pid: [2**31 - 1, *pids])  # no such process: it ended
+    mutation.kill_run(child)
+    assert child.poll() is not None and _stopped(pids)
 
 
 @posix
@@ -938,8 +1310,10 @@ def _workers(n: int, tmp_path: Path) -> list[Worker]:
     return [Worker(i, tmp_path, Path(sys.executable), tmp_path, tmp_path / f"w{i}.log", {}) for i in range(n)]
 
 
-def test_run_all_gives_every_item_to_one_worker(tmp_path: Path) -> None:
+def test_run_all_gives_every_item_to_one_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[tuple[int, int]] = []
+    crashed: list[Any] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: crashed.append(args.exc_type))
 
     def handle(worker: Worker, item: int) -> None:
         time.sleep(0.01)
@@ -947,6 +1321,7 @@ def test_run_all_gives_every_item_to_one_worker(tmp_path: Path) -> None:
 
     mutation.run_all(_workers(3, tmp_path), list(range(20)), handle, Runs())
     assert sorted(item for _, item in seen) == list(range(20)) and len({w for w, _ in seen}) > 1
+    assert crashed == []  # a worker that finds nothing left to do ends quietly
 
 
 def test_run_all_stops_at_the_first_failure(tmp_path: Path) -> None:
@@ -963,19 +1338,39 @@ def test_run_all_stops_at_the_first_failure(tmp_path: Path) -> None:
 
 
 def test_run_all_goes_on_as_an_interrupt(tmp_path: Path) -> None:
-    """Ctrl+C reaches the main thread only: the runs stop, the workers end, the interrupt goes on."""
+    """Ctrl+C reaches the main thread only: the runs stop, the workers end (a mutant written into
+    a copy gets its module's bytes back), and then the interrupt goes on."""
     runs = Runs()
     done: list[int] = []
+    busy: set[int] = set()
 
     def handle(worker: Worker, item: int) -> None:
+        busy.add(item)
         if item == 0:
             _thread.interrupt_main()
         time.sleep(0.2)
         done.append(item)
+        busy.discard(item)
 
     with pytest.raises(KeyboardInterrupt):
         mutation.run_all(_workers(2, tmp_path), list(range(50)), handle, runs)
-    assert runs.stopped.is_set() and len(done) < 50
+    assert runs.stopped.is_set() and len(done) < 50 and busy == set()
+
+
+def _fake_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_test's workers without git, uv or a real environment: a copy holds the modules only."""
+
+    def copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, str], contents: Mapping[str, bytes] | None = None) -> None:
+        for name, data in (contents or {}).items():
+            (dest / name).parent.mkdir(parents=True, exist_ok=True)
+            (dest / name).write_bytes(data)
+
+    monkeypatch.setattr(mutation, "child_env", lambda base: dict(os.environ))
+    monkeypatch.setattr(nvimtest, "uv_dirs", lambda env: {})
+    monkeypatch.setattr(mutation, "listed_files", lambda root, env: [])
+    monkeypatch.setattr(mutation, "make_copy", copy)
+    monkeypatch.setattr(mutation, "sync_copy", lambda venv, copy: None)
+    monkeypatch.setattr(mutation, "worker_env", lambda *a: {})
 
 
 def test_each_mutant_runs_in_a_workers_copy_within_its_baselines_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1016,17 +1411,7 @@ def test_each_mutant_runs_in_a_workers_copy_within_its_baselines_time(tmp_path: 
         worker.log.write_text(output, encoding="utf-8")
         return code, output, 5.0 if text == original else 0.1
 
-    def copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, str], contents: Mapping[str, bytes] | None = None) -> None:
-        for name, data in (contents or {}).items():
-            (dest / name).parent.mkdir(parents=True, exist_ok=True)
-            (dest / name).write_bytes(data)
-
-    monkeypatch.setattr(mutation, "child_env", lambda base: dict(os.environ))
-    monkeypatch.setattr(nvimtest, "uv_dirs", lambda env: {})
-    monkeypatch.setattr(mutation, "listed_files", lambda root, env: [])
-    monkeypatch.setattr(mutation, "make_copy", copy)
-    monkeypatch.setattr(mutation, "sync_copy", lambda venv, copy: None)
-    monkeypatch.setattr(mutation, "worker_env", lambda *a: {})
+    _fake_workers(monkeypatch)
     monkeypatch.setattr(Runs, "run", run)
     todo = [Mutant(rel, "core/AddNot", i, 2, 11, 2, 16, "f") for i in answers]
     report = Report(list(todo), {}, base)
@@ -1035,7 +1420,7 @@ def test_each_mutant_runs_in_a_workers_copy_within_its_baselines_time(tmp_path: 
     by = {m.occurrence: m for m in report.mutants}
     assert {i: m.status for i, m in by.items()} == {0: KILLED, 1: SURVIVED, 2: mutation.ERROR, 3: mutation.SKIPPED, 4: TIMEOUT}
     assert report.workers == 2 and report.baselines["runner.calc"].status == mutation.PASS
-    limit = mutation.TIMEOUT_FACTOR * 5.0 + mutation.TIMEOUT_EXTRA
+    limit = 2 * 5.0 + 60.0  # twice the baseline's time, plus a minute (CLAUDE.md 13.1)
     assert sorted(t for text, t in ran if text != original) == [limit] * 4 and answers[3] not in [text for text, _ in ran]
     assert [t for text, t in ran if text == original] == [mutation.BASELINE_TIMEOUT]
     assert by[4].detail == f"no result after {limit:.0f} s" and by[3].detail.startswith("the mutant is no valid Python")
@@ -1044,6 +1429,106 @@ def test_each_mutant_runs_in_a_workers_copy_within_its_baselines_time(tmp_path: 
     assert sorted(p.name for p in (base / "logs").glob("error-*")) == ["error-1.log"]
     assert not any("(log:" in by[i].detail for i in (0, 1, 3, 4))
     assert [(base / f"w{i}" / rel).read_text(encoding="utf-8") for i in range(2)] == [original] * 2  # the module's own bytes back
+
+
+def test_a_failed_baseline_keeps_its_mutants_from_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """_test with a module whose tests fail without a mutant, one whose tests never end and one
+    whose tests pass: the first two FAIL, with pytest's word or the time limit, and keep their
+    log; their mutants never run and say why; the passing module's do, each with a progress line.
+    The workers' folders start empty, whatever a killed run left there."""
+    files = {name: f".pytemplate/runner/{name}.py" for name in ("bad", "slow", "good")}
+    originals = {rel: f"def {name}():\n    return 1\n".encode() for name, rel in files.items()}
+    baselines: dict[str, tuple[int | None, str]] = {
+        "bad": (1, "FAILED .pytemplate/tests/test_bad.py::test_x - assert 0\n1 failed in 0.10s\n"),
+        "slow": (None, "...."),
+        "good": (0, "3 passed in 0.10s\n"),
+    }
+
+    class FakeDriver(mutation.Driver):
+        def __init__(self) -> None:  # no Cosmic Ray
+            pass
+
+        def ask(self, request: Mapping[str, Any]) -> dict[str, Any]:
+            return {"code": f"def good():\n    return 2  # {'killed' if request['occurrence'] == 0 else 'survived'}\n"}
+
+    def run(self: Runs, worker: Worker, tests: Sequence[str], timeout: float, junit: Path | None = None) -> tuple[int | None, str, float]:
+        (name,) = [n for n in files if list(tests) == [f".pytemplate/tests/test_{n}.py"]]
+        text = (worker.copy / files[name]).read_bytes()
+        if text == originals[files[name]]:
+            code, output = baselines[name]
+        else:
+            code, output = (1, "FAILED t.py::test_good\n1 failed in 0.10s\n") if b"# killed" in text else (0, "3 passed in 0.10s\n")
+        worker.log.write_text(output, encoding="utf-8")
+        return code, output, 1.0
+
+    _fake_workers(monkeypatch)
+    monkeypatch.setattr(Runs, "run", run)
+    monkeypatch.setattr(mutation.ui, "QUIET", False)
+    base = _write(tmp_path / "base", {"logs/cosmic-ray.log": "", "w0/stale.py": "a killed run's\n", "h0/.cache/x": "", "t1/tmp/x": ""})
+    todo = [Mutant(files[name], "core/NumberReplacer", occurrence, 2, 11, 2, 12, name) for name, occurrence in (("bad", 0), ("slow", 0), ("good", 0), ("good", 1))]
+    report = Report(list(todo), {}, base)
+    tests = {f"runner.{name}": {f".pytemplate/tests/test_{name}.py": 1} for name in files}
+    mutation._test(_cfg(), Options(None, 2, False), "uv", ROOT, base, tests, todo, originals, base / "snapshot", FakeDriver(), report)
+    b = report.baselines
+    assert (b["runner.bad"].status, b["runner.bad"].detail) == (mutation.FAIL, "FAILED .pytemplate/tests/test_bad.py::test_x - assert 0")
+    assert b["runner.bad"].log == str(base / "logs" / "baseline-runner.bad.log") and Path(b["runner.bad"].log).read_text(encoding="utf-8") == baselines["bad"][1]
+    assert (b["runner.slow"].status, b["runner.slow"].detail) == (mutation.FAIL, "no result after 3600 s")
+    assert (b["runner.good"].status, b["runner.good"].log) == (mutation.PASS, "") and not (base / "logs" / "baseline-runner.good.log").exists()
+    assert [(m.status, m.detail) for m in todo[:2]] == [(NOT_RUN, "its module's tests fail without a mutant")] * 2
+    assert [m.status for m in todo[2:]] == [KILLED, SURVIVED]
+    progress = [line for line in capsys.readouterr().err.splitlines() if line.startswith(("[1/2] ", "[2/2] "))]
+    assert sorted(line[:6] for line in progress) == ["[1/2] ", "[2/2] "] and sorted(line.split()[1] for line in progress) == ["killed", "survived"]
+    assert not (base / "w0" / "stale.py").exists() and not (base / "h0" / ".cache").exists()
+    assert all((base / d).is_dir() for d in ("h0", "h1", "t0/tmp", "t0/pytest", "t1/tmp", "t1/pytest"))
+    assert (base / "h0" / "AppData" / "Local").is_dir() is mutation.IS_WINDOWS  # LOCALAPPDATA and APPDATA of the Windows workers
+
+
+def test_run_locked_starts_clean_and_says_what_it_tests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """The logs and the snapshot a killed run left go first; the mutants of a module no test file
+    imports are untested (never given to the workers); the step line names the --diff base, and
+    a run without mutants says why."""
+    rel, lonely = ".pytemplate/runner/calc.py", ".pytemplate/runner/lonely.py"
+    closed: list[bool] = []
+    tested: list[list[Mutant]] = []
+    listed: list[Mutant] = []
+
+    class FakeDriver:
+        def __init__(self, uv: str, cfg: Config, log: Path) -> None:  # no Cosmic Ray
+            pass
+
+        def ask(self, request: Mapping[str, Any]) -> dict[str, Any]:
+            return {"version": "8.7.0"}
+
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(mutation, "Driver", FakeDriver)
+    monkeypatch.setattr(mutation, "list_mutants", lambda driver, root, files, changed, snapshot: (list(listed), {}))
+    monkeypatch.setattr(mutation, "_test", lambda *args: tested.append(list(args[6])))
+    monkeypatch.setattr(mutation.ui, "QUIET", False)
+    base = _write(tmp_path / "base", {"logs/old.log": "a killed run's\n", "snapshot/.pytemplate/runner/calc.py": "x = 0\n"})
+    tests = {"runner.calc": {".pytemplate/tests/test_calc.py": 1}}
+
+    def run(diff: str | None) -> Report:
+        report = Report([], {}, base)
+        mutation._run_locked(_cfg(), Options(diff, 1, False), "uv", ROOT, base, [rel, lonely], None, tests, report)
+        return report
+
+    listed[:] = [Mutant(rel, "core/AddNot", 0, 1, 4, 1, 5, None), Mutant(lonely, "core/AddNot", 0, 1, 4, 1, 5, None), Mutant(rel, "core/AddNot", 1, 2, 4, 2, 5, None)]
+    report = run("HEAD")
+    assert (base / "logs").is_dir() and not (base / "logs" / "old.log").exists() and not (base / "snapshot").exists()
+    assert [(m.file, m.status, m.detail) for m in report.mutants] == [
+        (rel, NOT_RUN, ""), (lonely, mutation.UNTESTED, "no test file imports this module"), (rel, NOT_RUN, ""),
+    ]  # fmt: skip
+    assert [[m.occurrence for m in todo] for todo in tested] == [[0, 1]] and closed == [True]
+    assert report.note == "" and report.cosmic_ray == "8.7.0"
+    assert f"==> selftest --mutation: 3 mutants in 2 files changed since HEAD, Cosmic Ray 8.7.0, in {base}" in capsys.readouterr().err
+    listed.clear()
+    for diff, note in (("HEAD", "the changed lines hold nothing Cosmic Ray mutates here"), (None, "no mutant in the runner")):
+        report = run(diff)
+        assert report.mutants == [] and report.note == note and len(tested) == 1
+        step = [line for line in capsys.readouterr().err.splitlines() if "selftest --mutation:" in line]
+        assert step == [f"==> selftest --mutation: 0 mutants in 2 files{' changed since HEAD' if diff else ''}, Cosmic Ray 8.7.0, in {base}"]
 
 
 # --- the report and the exit code -------------------------------------------------------------------
@@ -1074,9 +1559,26 @@ def test_print_report_shows_the_survivors_with_their_change(tmp_path: Path, caps
     mutation.print_report(_report(tmp_path, [KILLED, SURVIVED, SURVIVED]))
     err = capsys.readouterr().err
     assert "score: 33.3% (1 of 3 judged mutants killed)" in err and "survived (2):" in err
-    assert ".pytemplate/runner/m.py:11 in f: AddNot" in err and "      +    if not x12:" in err
+    assert ".pytemplate/runner/m.py:11 in f: AddNot\n" in err and "      +    if not x12:" in err  # no detail: nothing after it
     mutation.print_report(Report([], {}, tmp_path, note="no runner line changed since origin/main"))
     assert "no mutant to test: no runner line changed since origin/main" in capsys.readouterr().err
+
+
+def test_print_report_counts_each_file_the_timeouts_and_the_failed_baselines(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    report = _report(tmp_path, [KILLED, TIMEOUT, SURVIVED, SURVIVED, mutation.ERROR])
+    report.mutants[4].detail = "exit code 3: INTERNALERROR>"
+    report.mutants.append(Mutant(".pytemplate/runner/cli.py", "core/NumberReplacer", 0, 7, 4, 7, 5, None, KILLED))
+    report.baselines["runner.b"] = Baseline("runner.b", ["tb.py"], mutation.FAIL, 1.0, "FAILED tb.py::test_x - assert 0", "/base/logs/baseline-runner.b.log")
+    mutation.print_report(report)
+    lines = capsys.readouterr().err.splitlines()
+    assert [line.split() for line in lines if line.startswith("  file") or line.startswith("  .pytemplate/")][:3] == [
+        ["file", "killed", "timeout", "survived", "error"], [".pytemplate/runner/cli.py", "1", "0", "0", "0"],
+        [".pytemplate/runner/m.py", "1", "1", "2", "1"],
+    ]  # fmt: skip
+    assert "  score: 60.0% (3 of 5 judged mutants killed), 6 mutants in 1m15s, 2 workers" in lines  # a timeout is a kill
+    failed = [line for line in lines if "baseline FAILED" in line]
+    assert failed == ["  baseline FAILED: the tests of runner.b fail without a mutant: FAILED tb.py::test_x - assert 0  (log: /base/logs/baseline-runner.b.log)"]
+    assert "errors (1):" in lines and "  .pytemplate/runner/m.py:14 in f: AddNot  (exit code 3: INTERNALERROR>)" in lines
 
 
 @pytest.mark.parametrize(
@@ -1213,6 +1715,24 @@ def test_nothing_changed_starts_nothing(tmp_path: Path, monkeypatch: pytest.Monk
     base = tmp_path / "base"
     report = mutation.run(_cfg(), Options("HEAD", 1, False), "uv", ROOT, base)
     assert report.mutants == [] and report.note == "no runner line changed since HEAD" and not base.exists()
+    assert report.kept is False  # no logs to point at
+
+
+def test_a_cleanup_that_fails_is_a_warning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A folder in use (Windows: an antivirus scan, a process a test left) never loses the report."""
+    base = tmp_path / "base"
+    for d in ("w0", "logs"):
+        (base / d).mkdir(parents=True)
+
+    def in_use(path: Path) -> None:
+        raise PermissionError(f"in use: {path.name}")
+
+    monkeypatch.setattr(mutation, "rmtree", in_use)
+    mutation._remove_workers(base)
+    mutation._remove_logs(base)
+    err = capsys.readouterr().err
+    assert f"warning: could not remove the workers' folders in {base}: in use: w0" in err
+    assert f"warning: could not remove {base / 'logs'}: in use: logs" in err
 
 
 # --- a real run: Cosmic Ray, the workers and pytest, on a toy project ---------------------------------

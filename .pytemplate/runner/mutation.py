@@ -507,7 +507,7 @@ def made(answer: Mapping[str, Any], original: bytes, file: str) -> tuple[str, st
             compile(code, file, "exec", dont_inherit=True)
     except SyntaxError as e:
         return SKIPPED, f"the mutant is no valid Python: {e.msg} (line {e.lineno})", code
-    except ValueError as e:  # a NUL byte
+    except ValueError as e:  # a NUL byte, up to Python 3.11.3 (a SyntaxError since)
         return SKIPPED, f"the mutant is no valid Python: {e}", code
     return NOT_RUN, "", code
 
@@ -682,7 +682,7 @@ def list_mutants(driver: Driver, root: Path, files: Sequence[str], changed: Mapp
             raise PytError(f"selftest --mutation: Cosmic Ray could not list the mutants of {rel}: {answer.get('error', answer)}", 1)
         try:
             chosen = select(rel, listed, data.decode("utf-8"), None if changed is None else changed.get(rel, set()))
-        except (SyntaxError, UnicodeDecodeError, ValueError) as e:
+        except (SyntaxError, ValueError) as e:  # not UTF-8 (a UnicodeDecodeError is one), a NUL byte up to Python 3.11.3
             raise PytError(f"selftest --mutation: {rel} is no Python the runner can read: {e}", 1) from None
         originals[rel] = data
         mutants += chosen
@@ -768,8 +768,9 @@ def listed_files(root: Path, env: Mapping[str, str]) -> list[str]:
 
 def make_copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, str], contents: Mapping[str, bytes] | None = None) -> None:
     """A copy of the project with a git repository of its own (one commit of every file), so the
-    tests that ask git about the project find one. Links stay links. The files `contents` names
-    hold its bytes (list_mutants' snapshot), not the working tree's."""
+    tests that ask git about the project find one. Links stay links (where no link can be made,
+    Windows without the right, the file or folder a link names takes its place). The files
+    `contents` names hold its bytes (list_mutants' snapshot), not the working tree's."""
     contents = contents or {}
     for rel, data in contents.items():
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -787,7 +788,10 @@ def make_copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, st
         except OSError:
             if not src.is_symlink():
                 raise
-            shutil.copy2(src, target)  # Windows without the right to make links: what it names
+            if src.is_dir():  # Windows without the right to make links: what it names
+                shutil.copytree(src, target)
+            else:
+                shutil.copy2(src, target)
     _git(dest, env, "init", "-q")
     _git(dest, env, "add", "-A")
     _git(dest, env, *GIT_IDENTITY, "commit", "-q", "--no-verify", "-m", "selftest --mutation")
