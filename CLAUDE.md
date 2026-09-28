@@ -1766,13 +1766,20 @@ re-rendering.
   other top-level key (`./pyt apply` records its own) and the key order. Hashes of files no longer generated stay recorded
   (a file that comes back keeps its hand-edit protection).
 - `--check` and `--dry-run` write nothing. A folder in the way, or a read/write error, is a
-  PytError naming the file. An existing `.python-version` is rewritten only once uv has that
-  CPython (`envs.ensure_python`: `uv python find`, else `uv python install`, else a PytError
-  (3) naming python.cpython): the launchers' `uv run --script` follows the file (5.2), and a
-  typo (`3.41`) or a new minor offline written there stopped every command, `help` included, with
-  nothing left to write it again once pytemplate.toml was fixed.
+  PytError naming the file. `.python-version` is written (a missing one too: a generated file
+  deleted by hand) only once uv has that CPython (`envs.ensure_python`: `uv python find`, else
+  `uv python install`, else a PytError (3) naming python.cpython), and before any other file:
+  the launchers' `uv run --script` follows the file (5.2), and a typo (`3.41`) or a new minor
+  offline written there stopped every command, `help` included, with nothing left to write it
+  again once pytemplate.toml was fixed. When uv cannot provide it, `render.apply` raises
+  `render.NoPython` (a PytError, 3) before its first write, so nothing is rendered.
 - `render.auto` runs before most commands and prints one line when something changed; it also
-  warns when `pyproject_outdated` (the hint names `./pyt apply`).
+  warns when `pyproject_outdated` (the hint names `./pyt apply`). On `render.NoPython` it renders
+  nothing, warns (`generated files not rendered: ...`) and lets the command run: doctor, which
+  runs on any Python (5.2), then reports the unusable python.cpython with its other checks, as
+  README promises (it stopped with exit 3 before any check, and wrote the typo into a deleted
+  `.python-version`: `test_render_core.test_doctor_runs_when_python_cpython_cannot_be_provided`);
+  the other commands that render first need that CPython and stop in `cli._restart`.
 - Changing `render.HEADER` rewrites every generated file (fine: only files whose current hash
   differs from the recorded one are protected).
 - Templates are read as `utf-8-sig` (a BOM is fine); errors are PytErrors naming the file:

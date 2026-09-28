@@ -246,32 +246,72 @@ def test_diff_shows_the_generated_against_the_current_content(box: Sandbox, caps
     assert "---" not in capsys.readouterr().err  # only with show_diff
 
 
-def test_python_version_is_rewritten_only_for_a_python_uv_can_provide(box: Sandbox, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The launchers start the runner with `uv run --script`, which follows .python-version: a
-    python.cpython typo ("3.41") written there stopped every command, `help` included, and after
-    the fix in pytemplate.toml nothing could write the file again. It is rewritten only once uv
-    has that CPython (envs.ensure_python); a new file (a fresh tree) needs no question."""
+def _unavailable(version: str) -> None:
+    raise PytError(f'python.cpython = "{version}": uv can neither find nor install this CPython (...)', 3)
+
+
+def test_python_version_is_written_only_for_a_python_uv_can_provide(box: Sandbox, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The launchers start the runner with `uv run --script`, which follows .python-version once
+    the project has .venv: a python.cpython typo ("3.41") written there stopped every command,
+    `help` and `render` included, and after the fix in pytemplate.toml nothing could write the
+    file again. It is written only once uv has that CPython (envs.ensure_python), a missing file
+    too (deleted by hand: `./pyt doctor` then wrote the typo into it), and before any other file."""
     asked: list[str] = []
     monkeypatch.setattr(envs, "ensure_python", asked.append)
     box.files[".python-version"] = "3.13\n"
     render.apply(CFG)
-    assert asked == [] and box.read(".python-version") == b"3.13\n"  # written fresh
+    assert asked == ["3.13"] and box.read(".python-version") == b"3.13\n"  # a missing file is asked too
     box.files[".python-version"] = "3.14\n"
     render.apply(CFG)
-    assert asked == ["3.14"] and box.read(".python-version") == b"3.14\n"
+    assert asked == ["3.13", "3.14"] and box.read(".python-version") == b"3.14\n"
     render.apply(CFG)
-    assert asked == ["3.14"]  # unchanged: nothing to ask
+    assert asked == ["3.13", "3.14"]  # unchanged: nothing to ask
 
-    def unavailable(version: str) -> None:
-        raise PytError(f'python.cpython = "{version}": uv can neither find nor install this CPython (...)', 3)
-
-    monkeypatch.setattr(envs, "ensure_python", unavailable)
+    monkeypatch.setattr(envs, "ensure_python", _unavailable)
     box.files[".python-version"] = "3.41\n"
-    with pytest.raises(PytError, match=r'python\.cpython = "3\.41"'):
+    box.files["gen/a.json"] = "changed\n"  # before .python-version in the outputs: still not written
+    with pytest.raises(render.NoPython, match=r'python\.cpython = "3\.41"') as e:
         render.apply(CFG)
+    assert e.value.code == 3
     assert box.read(".python-version") == b"3.14\n"  # the launchers still start the runner
+    assert box.read("gen/a.json") == GENERATED["gen/a.json"].encode()  # nothing is rendered
+    (box.root / ".python-version").unlink()
+    with pytest.raises(render.NoPython):
+        render.apply(CFG)
+    assert not (box.root / ".python-version").exists()  # never the typo, a missing file included
     monkeypatch.setattr(proc, "DRY_RUN", True)
-    assert render.apply(CFG)[0] == [".python-version"]  # --dry-run and --check only report it
+    assert render.apply(CFG)[0] == [".python-version", "gen/a.json"]  # --dry-run and --check only report it
+
+
+def test_doctor_runs_when_python_cpython_cannot_be_provided(box: Sandbox, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """README: with a python.cpython uv cannot provide (a typo; Termux or a BSD after an edit),
+    doctor still runs and reports it with its other checks. doctor runs on any Python, but
+    dispatch renders first, and render's question about .python-version ended it with exit 3
+    before any check. render.auto now renders nothing, says why, and the command runs; an
+    explicit `render` still stops (exit 3)."""
+    from runner import cmd_env
+
+    monkeypatch.setattr(envs, "ensure_python", lambda _version: None)
+    box.files[".python-version"] = "3.14\n"
+    render.apply(CFG)  # a project rendered on 3.14
+    monkeypatch.setattr(envs, "ensure_python", _unavailable)
+    box.files[".python-version"] = "3.41\n"  # then python.cpython = "3.41" (a typo)
+    box.files["gen/a.json"] = "changed\n"
+    monkeypatch.setattr(config, "load", lambda *_a, **_kw: CFG)
+    ran: list[list[str]] = []
+    monkeypatch.setattr(cmd_env, "cmd_doctor", lambda _cfg, args: ran.append(args) or 1)
+    before = box.age()
+    capsys.readouterr()
+    assert cli.dispatch(["doctor"]) == 1 and ran == [[]]  # doctor ran: its checks report the typo
+    assert 'warning: generated files not rendered: python.cpython = "3.41"' in capsys.readouterr().err
+    assert box.untouched(before)  # nothing rendered: the launchers still start the runner
+    (box.root / ".python-version").unlink()  # a generated file deleted by hand
+    before = box.age()
+    assert cli.dispatch(["doctor"]) == 1 and ran == [[], []]
+    assert box.untouched(before)  # the typo is never written into a missing .python-version either
+    with pytest.raises(PytError, match=r'python\.cpython = "3\.41"') as e:
+        cli.dispatch(["render"])
+    assert e.value.code == 3
 
 
 def test_diff_shows_a_missing_last_line_break(box: Sandbox, capsys: pytest.CaptureFixture[str]) -> None:

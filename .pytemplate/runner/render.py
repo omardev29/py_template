@@ -538,14 +538,21 @@ def _diff(path: str, generated: str, current: str) -> str:
     return "\n".join(lines)
 
 
+class NoPython(PytError):
+    """python.cpython names a CPython uv can neither find nor install here (envs.ensure_python
+    says why): .python-version is never written with it, so nothing is rendered."""
+
+
 def apply(cfg: Config, *, force: bool = False, check: bool = False, show_diff: bool = False) -> tuple[list[str], list[str]]:
-    """Write the outdated files. Return (changed, hand_edited). --dry-run behaves like `check`."""
+    """Write the outdated files. Return (changed, hand_edited). --dry-run behaves like `check`.
+    NoPython before the first write when .python-version would name a CPython uv cannot provide."""
     check = check or proc.DRY_RUN
     state = _load_state()
     changed: list[str] = []
     edited: list[str] = []
     new_state = dict(state)
-    for path, content in outputs(cfg).items():
+    # .python-version first: the question it may need (below) comes before any other write
+    for path, content in sorted(outputs(cfg).items(), key=lambda item: item[0] != ".python-version"):
         target = ROOT / path
         new_hash = _digest(content)
         if target.exists() and not target.is_file():
@@ -567,10 +574,15 @@ def apply(cfg: Config, *, force: bool = False, check: bool = False, show_diff: b
                 continue
         changed.append(path)
         if not check:
-            if path == ".python-version" and target.is_file():
-                # uv run by hand and the editors follow it: never a version uv cannot provide
-                # (the project's commands need that CPython anyway: cli._restart)
-                envs.ensure_python(content.strip())
+            if path == ".python-version":
+                # The launchers (once the project has .venv), uv run by hand and the editors follow
+                # it: never a version uv cannot provide, a missing file included (deleted by hand:
+                # a python.cpython typo written into it stopped every command, help and render
+                # included). The project's commands need that CPython anyway (cli._restart).
+                try:
+                    envs.ensure_python(content.strip())
+                except PytError as e:
+                    raise NoPython(str(e), e.code) from None
             _write(path, target, content)
             new_state[path] = new_hash
     if not check and new_state != state:
@@ -579,8 +591,15 @@ def apply(cfg: Config, *, force: bool = False, check: bool = False, show_diff: b
 
 
 def auto(cfg: Config, *, force: bool = False) -> None:
-    """Silently render before every command: print one line if something changed."""
-    changed, edited = apply(cfg, force=force)
+    """Silently render before every command: print one line if something changed. A
+    python.cpython uv cannot provide (NoPython) renders nothing and never stops the command:
+    doctor, which runs on any Python, then reports it with its other checks (it stopped with
+    exit 3 before any check); a command that needs that CPython stops on its own (cli._restart)."""
+    try:
+        changed, edited = apply(cfg, force=force)
+    except NoPython as e:
+        ui.warn(f"generated files not rendered: {e}")
+        changed, edited = [], []
     if changed:
         ui.info(f"render: {'would update' if proc.DRY_RUN else 'updated'} {', '.join(changed)}")
     if edited:
