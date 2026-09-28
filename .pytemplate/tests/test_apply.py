@@ -58,6 +58,13 @@ def _norm(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def _parts(requirement: str) -> tuple[str, str, str, str]:
+    """(normalized name, [extras], version specifier, marker) of a PEP 508 requirement."""
+    m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*([^;]*)(?:;(.*))?", requirement)
+    assert m is not None, requirement
+    return _norm(m.group(1)), m.group(2) or "", re.sub(r"\s+", "", m.group(3)), (m.group(4) or "").strip()
+
+
 def _set_array(text: str, key: str, values: Sequence[str]) -> str:
     """Rewrite the multi-line array `key = [...]` that starts a line (the pyproject layout)."""
     body = "".join(f'    "{v}",\n' for v in values)
@@ -148,8 +155,11 @@ class Project:
 
 class FakeUv:
     """envs.uv: records every call; `add/remove --frozen` edit pyproject.toml the way uv does
-    (normalized names, a requirement replaced in place, a missing one refused), `lock --check`
-    compares with the last `lock`, and --dry-run skips the echoed calls like proc.run."""
+    (normalized names, a requirement replaced in place only by one with the same marker, its
+    extras kept, else appended; `remove` drops every requirement of the name, a missing one is
+    refused), `lock` finds no solution for two different pins of one package in a group,
+    `lock --check` compares with the last `lock`, and --dry-run skips the echoed calls like
+    proc.run (test_uv_frozen_edits_only_pyproject checks uv itself)."""
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -183,12 +193,25 @@ class FakeUv:
             code = 1
         elif argv[0] in ("add", "remove"):
             self._edit(argv)
+        elif argv[0] == "lock" and self._conflict():
+            code = 1  # "No solution found": two different pins of one package
         elif argv[0] == "lock":
             self.locked = pyproject.read_bytes()
             (self.root / "uv.lock").write_text(f"# locked {hashlib.sha256(self.locked).hexdigest()}\n", encoding="utf-8")
         if check and code:
             raise proc.CommandFailed(["uv", *argv], code)
         return subprocess.CompletedProcess(["uv", *argv], code, "", "")
+
+    def _conflict(self) -> bool:
+        data = tomllib.loads((self.root / "pyproject.toml").read_text(encoding="utf-8"))
+        for group in (data["project"].get("dependencies", []), data.get("dependency-groups", {}).get("dev", [])):
+            pins: dict[str, set[str]] = {}
+            for requirement in group:
+                name, _, spec, _ = _parts(requirement)
+                pins.setdefault(name, set()).add(spec)
+            if any(len(specs) > 1 for specs in pins.values()):
+                return True
+        return False
 
     def _edit(self, argv: list[str]) -> None:
         dev = "--dev" in argv
@@ -197,15 +220,18 @@ class FakeUv:
         data = tomllib.loads(text)
         current: list[str] = list(data["dependency-groups"]["dev"] if dev else data["project"]["dependencies"])
         for item in (a for a in argv[1:] if not a.startswith("--")):
-            name, spec = cmd_apply.req_key(item)
-            at = next((i for i, r in enumerate(current) if cmd_apply.req_key(r)[0] == name), None)
-            if argv[0] == "remove":
-                assert at is not None, f"uv: the dependency {name} could not be found"
-                del current[at]
-            elif at is None:
-                current.append(name + spec)
+            name, extras, spec, marker = _parts(item)
+            if argv[0] == "remove":  # every requirement of that name, whatever its marker
+                assert any(_parts(r)[0] == name for r in current), f"uv: the dependency {name} could not be found"
+                current = [r for r in current if _parts(r)[0] != name]
+                continue
+            # uv compares the markers by meaning; the same text, blanks aside, is enough here
+            at = next((i for i, r in enumerate(current) if _parts(r)[0] == name and _parts(r)[3].replace(" ", "") == marker.replace(" ", "")), None)
+            new = name + (_parts(current[at])[1] if at is not None else extras) + spec + (f" ; {marker}" if marker else "")
+            if at is None:
+                current.append(new)
             else:
-                current[at] = name + spec
+                current[at] = new
         path.write_text(_set_array(text, "dev" if dev else "dependencies", current), encoding="utf-8", newline="\n")
 
     def changing(self, since: int = 0) -> list[list[str]]:
@@ -718,6 +744,25 @@ def test_the_old_name_is_removed_only_when_the_options_produced_it() -> None:
     assert changes.remove == ["raylib-sdl"]
 
 
+def test_a_marked_requirement_keeps_its_marker() -> None:
+    """uv replaces a requirement only with one of the same marker: `uv add --frozen
+    flet-desktop==1.0.0` appended a second flet-desktop next to the declared
+    `flet-desktop==1.0.1; sys_platform != 'emscripten'`, the lock had no solution, and the version
+    change could never be applied. The requirement added carries the declared marker (uv keeps the
+    extras itself), and a package switch carries the marker of the package it replaces."""
+    marked = "flet-desktop==1.0.1; sys_platform != 'emscripten'"
+    changes = cmd_apply.dependency_changes(
+        _cfg("flet", version="1.0.0"), _applied("flet"), _declared(["flet[all]==1.0.1", marked], ["flet-cli[x] == 1.0.1 ; python_version >= '3.11'"])
+    )
+    assert changes.add == ["flet==1.0.0", "flet-desktop==1.0.0; sys_platform != 'emscripten'"]
+    assert changes.add_dev == ["flet-cli==1.0.0; python_version >= '3.11'"]
+    assert changes.describe() == "add flet==1.0.0, \"flet-desktop==1.0.0; sys_platform != 'emscripten'\", \"flet-cli==1.0.0; python_version >= '3.11'\" (dev)"
+    machine = "platform_machine == 'x86_64' or platform_machine == 'AMD64'"
+    changes = cmd_apply.dependency_changes(_cfg("raylib", package="raylib_sdl"), _applied("raylib"), _declared([f"raylib==6.0.1.0; {machine}"]))
+    assert (changes.remove, changes.add) == (["raylib"], [f"raylib_sdl==6.0.1.0; {machine}"])
+    assert cmd_apply.req_marker(f"raylib==6.0.1.0 ;{machine} ") == machine and cmd_apply.req_marker("flet[all]==1.0.1") == ""
+
+
 # --- apply, in-process ---------------------------------------------------------------------------------
 
 
@@ -763,6 +808,41 @@ def test_apply_raylib_package_switch(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert _run(project) == 0
     assert uv.changing(count)[:3] == [["remove", "--frozen", "raylib-sdl"], ["add", "--frozen", "raylib_software==6.0.1.0"], ["lock"]]
     assert [r for r in project.pyproject()["project"]["dependencies"] if r.startswith("raylib")] == ["raylib-software==6.0.1.0"]
+
+
+def _mark(project: Project, requirement: str, marker: str) -> None:
+    """Give a requirement of pyproject.toml a marker by hand (uv.lock locked with it)."""
+    path = project.root / "pyproject.toml"
+    text = path.read_text(encoding="utf-8")
+    assert f'"{requirement}",' in text
+    path.write_text(text.replace(f'"{requirement}",', f'"{requirement}; {marker}",', 1), encoding="utf-8", newline="\n")
+
+
+@pytest.mark.parametrize("preset", ["flet", "raylib"])
+def test_apply_keeps_the_marker_of_an_option_driven_requirement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preset: str) -> None:
+    """A [preset.*] change of a requirement that carries a marker: a version change added an
+    unmarked second pin (no solution: pyproject.toml restored, never applicable, and doctor and
+    the hook reported it forever), and a package switch dropped the marker without a word."""
+    project, uv = _project(tmp_path, monkeypatch, preset)
+    if preset == "flet":
+        marker = "sys_platform != 'emscripten'"
+        _mark(project, "flet-desktop==1.0.1", marker)
+        _mark(project, "flet-cli==1.0.1", marker)
+        project.edit("preset.flet", "version", "1.0.0")
+        expected = {"flet-desktop": f"flet-desktop==1.0.0 ; {marker}", "flet-cli": f"flet-cli==1.0.0 ; {marker}", "flet": "flet==1.0.0"}
+    else:
+        marker = "platform_machine == 'x86_64' or platform_machine == 'AMD64'"
+        _mark(project, "raylib==6.0.1.0", marker)
+        project.edit("preset.raylib", "package", "raylib_sdl")
+        expected = {"raylib-sdl": f"raylib-sdl==6.0.1.0 ; {marker}"}
+    uv.locked = (project.root / "pyproject.toml").read_bytes()
+    assert _run(project) == 0
+    data = project.pyproject()
+    declared = [*data["project"]["dependencies"], *data["dependency-groups"]["dev"]]
+    for name, requirement in expected.items():
+        assert [r for r in declared if _parts(r)[0] == name] == [requirement]
+    assert not any(_parts(r)[0] == "raylib" for r in declared)
+    assert cmd_apply.pending(project.cfg()) == []
 
 
 def test_a_failed_lock_restores_pyproject(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1795,3 +1875,31 @@ def test_uv_frozen_edits_only_pyproject(tmp_path: Path) -> None:
     assert data["dependency-groups"]["dev"] == ["flet-cli==1.0.0"]
     assert (tmp_path / "uv.lock").read_text(encoding="utf-8") == "untouched\n"
     assert not (tmp_path / ".venv").exists()
+
+
+def test_uv_frozen_replaces_a_marked_requirement_only_with_its_marker(tmp_path: Path) -> None:
+    """The uv behaviour cmd_apply.dependency_changes relies on, offline: `add --frozen` replaces a
+    requirement that has a marker only with one of the same marker (and keeps its extras), and
+    appends a second requirement otherwise; `remove --frozen` drops every requirement of the name."""
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if not uv:
+        pytest.skip("uv not found")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "p"\nversion = "0"\nrequires-python = ">=3.11"\ndependencies = [\n'
+        "    \"Flet_Desktop[x] == 1.0.1; sys_platform != 'emscripten'\",\n"
+        "    \"raylib==6.0.1.0; sys_platform == 'linux'\",\n    \"raylib==6.0.0.0; sys_platform == 'win32'\",\n]\n",
+        encoding="utf-8",
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("UV_PROJECT", "VIRTUAL_ENV"))} | {"UV_OFFLINE": "1"}
+
+    def run(*args: str) -> list[str]:
+        r = subprocess.run([uv, *args], cwd=tmp_path, env=env, capture_output=True, text=True, check=False)
+        assert r.returncode == 0, r.stderr
+        deps: list[str] = tomllib.loads((tmp_path / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
+        return deps
+
+    deps = run("add", "--frozen", "flet-desktop==1.0.0; sys_platform != 'emscripten'")  # what apply adds
+    assert [_parts(r) for r in deps if _parts(r)[0] == "flet-desktop"] == [("flet-desktop", "[x]", "==1.0.0", "sys_platform != 'emscripten'")]
+    deps = run("add", "--frozen", "flet-desktop==1.0.2")  # no marker: a second requirement
+    assert sorted(_parts(r)[2] for r in deps if _parts(r)[0] == "flet-desktop") == ["==1.0.0", "==1.0.2"]
+    assert not any(_parts(r)[0] == "raylib" for r in run("remove", "--frozen", "raylib"))

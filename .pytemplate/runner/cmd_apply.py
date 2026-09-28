@@ -81,6 +81,17 @@ def req_key(requirement: str) -> tuple[str, str]:
     return re.sub(r"[-_.]+", "-", m.group(1)).lower(), re.sub(r"\s+", "", m.group(2))
 
 
+def req_marker(requirement: str) -> str:
+    """The environment marker of a PEP 508 requirement ("" without one): `sys_platform != 'x'`."""
+    m = _REQ.match(requirement)
+    rest = requirement[m.end() :].strip() if m is not None else ""
+    return rest[1:].strip() if rest.startswith(";") else ""
+
+
+def _with_marker(requirement: str, marker: str) -> str:
+    return f"{requirement}; {marker}" if marker else requirement
+
+
 @dataclass
 class Project:
     """What pyproject.toml says (read once)."""
@@ -141,7 +152,8 @@ class DepChanges:
     def describe(self) -> str:
         parts = [f"remove {', '.join(self.remove + [f'{n} (dev)' for n in self.remove_dev])}"] if self.remove or self.remove_dev else []
         if self.add or self.add_dev:
-            parts.append(f"add {', '.join(self.add + [f'{r} (dev)' for r in self.add_dev])}")
+            shown = [f'"{r}"' if ";" in r else r for r in self.add] + [f'"{r}" (dev)' if ";" in r else f"{r} (dev)" for r in self.add_dev]
+            parts.append(f"add {', '.join(shown)}")
         return "; ".join(parts) or "none"
 
 
@@ -452,7 +464,13 @@ def applied_state(cfg: Config, project: Project) -> Applied:
 def dependency_changes(cfg: Config, applied: Applied, project: Project) -> DepChanges:
     """Compare [preset.<name>] with what pyproject.toml declares (by name and version, never
     verbatim: uv writes raylib_sdl as raylib-sdl). A requirement the options no longer produce is
-    removed only when the last applied options produced it."""
+    removed only when the last applied options produced it.
+
+    A declared requirement keeps its marker: `uv add --frozen` replaces a requirement only with
+    one of the same marker (and keeps its extras), and appended a second, unmarked pin next to
+    `flet-desktop==1.0.1; sys_platform != 'emscripten'` (no solution: the change could never be
+    applied). A package switch carries the marker of the requirement the same preset entry
+    produced before (`{package}=={version}`: raylib -> raylib_sdl)."""
     want_deps, want_dev = presets.option_dependencies(cfg.app.preset, presets.options(cfg))
     changes = DepChanges()
     groups = (
@@ -465,10 +483,14 @@ def dependency_changes(cfg: Config, applied: Applied, project: Project) -> DepCh
             name = req_key(requirement)[0]
             if name not in keep and name in declared and name not in remove:
                 remove.append(name)
-        for requirement in want:
+        for i, requirement in enumerate(want):
             name, spec = req_key(requirement)
-            if name not in declared or req_key(declared[name])[1] != spec:
-                add.append(requirement)
+            if name in declared:
+                if req_key(declared[name])[1] != spec:
+                    add.append(_with_marker(requirement, req_marker(declared[name])))
+                continue
+            before = req_key(old[i])[0] if len(old) == len(want) else None  # the same preset entry, last time
+            add.append(_with_marker(requirement, req_marker(declared[before]) if before in declared else ""))
     return changes
 
 

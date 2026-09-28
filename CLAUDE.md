@@ -1352,7 +1352,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (`presets.option_dependencies`: flet's `flet`, `flet-desktop`, dev `flet-cli` `=={version}`;
   raylib's `{package}=={version}`), compared with pyproject by normalized name and version
   (`req_key`: uv writes `raylib_sdl` as `raylib-sdl`; extras and markers ignored), never
-  verbatim. Plain preset dependencies (`rich`, `types-cffi`) belong to the project after `new`.
+  verbatim. What `uv add --frozen` gets keeps the declared requirement's marker (`req_marker`:
+  uv replaces a requirement only with one of the same marker, keeping its extras, and appended
+  an unmarked second pin, which no lock could solve, 15.1); a package switch carries the marker
+  of the package it replaces. Plain preset dependencies (`rich`, `types-cffi`) belong to the project after `new`.
   An old value is removed only when the last applied options produced it (a `raylib` the user
   added next to `raylib_sdl` stays). `[preset.<name>]` wins over a hand `./pyt add flet==X`.
 - The `applied` record (top-level key of `.pytemplate/state.json`, committed; `render._save_state`
@@ -4135,6 +4138,17 @@ uv:
 - **uv writes normalized names** (LIMITATION, PEP 503): `raylib_sdl` became `raylib-sdl`, and a
   verbatim comparison never matched. Fix: `cmd_apply.req_key` (5.8). Test:
   `test_apply.py::test_req_key_normalizes_like_uv`. Goes: never.
+- **`uv add` replaces a requirement only with one of the same marker** (LIMITATION: a name may
+  have one requirement per marker): `uv add --frozen flet-desktop==1.0.0` appended a second pin
+  next to a declared `flet-desktop==1.0.1; sys_platform != 'emscripten'`, the one `uv lock` had no
+  solution, and a `[preset.flet] version` change could never be applied; `uv remove` drops every
+  requirement of the name, so a package switch lost the marker. Fix:
+  `cmd_apply.dependency_changes` adds the requirement with the declared marker
+  (`cmd_apply.req_marker`; uv keeps the extras itself), a switch with the replaced package's
+  (5.8). Test: `test_apply.py::test_a_marked_requirement_keeps_its_marker`,
+  `test_apply_keeps_the_marker_of_an_option_driven_requirement`,
+  `test_uv_frozen_replaces_a_marked_requirement_only_with_its_marker` (the real uv, offline).
+  Goes: never.
 - **`uv pip install --target` leaves build-machine files** (DEFECT for the `.lock`, LIMITATION
   for the rest): a `.lock`, `_virtualenv*`, console-script wrappers whose shebang or `.exe`
   trampoline names this machine's `.venv`, and for a local library (installed for real since
