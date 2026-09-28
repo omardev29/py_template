@@ -663,6 +663,43 @@ def test_a_failed_uninstall_can_be_finished(tmp_path: Path, monkeypatch: pytest.
     assert not inst.snapshot.parent.exists()
 
 
+def test_a_folder_that_cannot_go_keeps_the_record_of_the_installed_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows: `pyt uninstall` typed in the installed template's own folder, the runner's current
+    folder, which can neither move nor be deleted while every file in it can. The rounds deleted
+    all but the record, then rmtree took the record and failed on the folder itself: an empty
+    folder was left, which the next uninstall called the user's own ("nothing to remove") and
+    install refused. The record goes back where the folder stays, and the next uninstall
+    finishes. Simulated: the rename and the rmdir of that folder fail, nothing else."""
+    inst = Installed(tmp_path, monkeypatch)
+    inst.stuck = False
+    held = [True]
+    real_rename, real_rmdir = cmd_install._rename, os.rmdir
+
+    def rename(src: Path, dst: Path) -> None:
+        if held[0] and src == inst.snapshot:
+            raise PermissionError(errno.EACCES, "Permission denied", str(src))
+        real_rename(src, dst)
+
+    def rmdir(path: Any, *args: Any, **kwargs: Any) -> None:
+        # rmtree removes the top folder by its full path (dir_fd None), the others by name
+        if held[0] and kwargs.get("dir_fd") is None and os.path.abspath(os.fsdecode(path)) == str(inst.snapshot):
+            raise PermissionError(errno.EACCES, "Permission denied", os.fsdecode(path))
+        real_rmdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(cmd_install, "_rename", rename)
+    monkeypatch.setattr(os, "rmdir", rmdir)
+    with pytest.raises(PytError, match="could not remove") as e:
+        cmd_install.cmd_uninstall(NO_CFG, [])
+    assert f"{inst.snapshot}: in use or not writable" in str(e.value)
+    assert str(e.value).endswith("then run ./pyt uninstall in a project or in a clone of the template")
+    left = sorted(p.relative_to(inst.snapshot).as_posix() for p in inst.snapshot.rglob("*"))
+    assert left == [".pytemplate", cmd_install.RECORD]
+    assert cmd_install.not_an_install(inst.snapshot) == ""  # still pyt install's: install may replace it
+    held[0] = False  # the terminal left the folder
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    assert not inst.snapshot.parent.exists()
+
+
 def test_uninstall_leaves_a_linked_data_folder_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """A data folder that is a link to an install elsewhere: uninstall neither deletes through the
     link nor removes it, and says why (install refuses it for the same reason)."""

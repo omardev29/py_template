@@ -1578,7 +1578,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   of the runner and `pytemplate.toml`, then its record. rmtree deleted the record first, and a
   file in use then left a folder that the next uninstall called the user's own and install
   refused, while both said to run uninstall again; and a file in use of the first round now
-  leaves the runner whole (`_runs_pyt`: its `ENTRY` is there). `--dry-run` of both
+  leaves the runner whole (`_runs_pyt`: its `ENTRY` is there). Where only the folder itself
+  cannot go (the current folder of a process, `pyt uninstall` typed in it), rmtree still takes
+  the record before it fails, so the record is written back (`_remove_last`;
+  `test_install.test_a_folder_that_cannot_go_keeps_the_record_of_the_installed_template`: the
+  empty folder it left was that same dead end). `--dry-run` of both
   prints and writes nothing. The `pyt.cmd` cmd runs for this very run (`run_by_cmd`) goes last
   (`_retire`): after a failure it stays whole only while the installed template's runner does
   (`pyt uninstall` then runs again from it; kept without it, it said "install it"), else

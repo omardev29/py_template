@@ -1007,7 +1007,24 @@ def _remove_in_place(snapshot: Path) -> Path | None:
             done = presets._remove(path) and done
         if not done:
             return snapshot  # the record stays: the next uninstall finds the folder by it
-    return None if presets._remove(snapshot) else snapshot
+    return None if _remove_last(snapshot, record) else snapshot
+
+
+def _remove_last(snapshot: Path, record: Path) -> bool:
+    """The record and the folder itself, once nothing else is left; whether they are gone. rmtree
+    deletes the record before it tries the folder: where only the folder cannot go (Windows: some
+    process's current folder, `pyt uninstall` typed in it, while every file in it can go) the
+    record is written back, so the next uninstall still finds the folder by it and install
+    replaces it. It left an empty folder, which the next uninstall called the user's own
+    ("nothing to remove") and install refused."""
+    data = _read(record)
+    if presets._remove(snapshot):
+        return True
+    if data is not None and not os.path.lexists(record):
+        with contextlib.suppress(OSError):
+            record.parent.mkdir(parents=True, exist_ok=True)
+            record.write_bytes(data)
+    return False
 
 
 def cmd_uninstall(cfg: Config, args: list[str]) -> int:
