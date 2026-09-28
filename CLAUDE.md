@@ -2589,6 +2589,11 @@ Per method:
   the build folder): `lib/` and `app/` at levels 0 and `deploy.optimize`, the bundled stdlib
   (`runtime_stdlib`: `lib/pythonX.Y`, `lib/pypyX.Y` or `Lib`) only at the launchers' level,
   `-x` skipping PyPy's broken `lib2to3/tests` data: a read-only install never recompiles.
+  What they cannot compile is reported (`portable._precompile`): compileall's own lines (each
+  file and why, even with `-q`; the first `REPORTED_LINES`), a file of `app/` apart (the app
+  fails where it imports it: a syntax error a `--no-check` build let through), and the
+  260-character hint on Windows only; it said "paths longer than 260 characters? The app still
+  works" on every OS and named no file (`test_portable_names_the_files_it_could_not_precompile`).
   The previous `<out>.zip`/`<out>.tar.gz` goes with the previous folder, all or nothing
   (`common.remove_output`; it was deleted first, and kept deleted when the folder was in use);
   `archive` writes gztar on POSIX and,

@@ -956,7 +956,8 @@ A folder that runs the app with its own interpreter:
 
 A bundled folder runs only on the OS and CPU it was built on (the key in its name): build it on
 each OS, or use a pyz. The build precompiles the standard library, `lib/` and `app/`, so a
-read-only install starts fast, and it starts the copied interpreter before it reports success
+read-only install starts fast (a file that does not compile is named with Python's reason, and
+a warning says when it is one of the app's own), and it starts the copied interpreter before it reports success
 (for mypyc also the compiled modules). With `archive = true` (default) a `.zip` (Windows) or
 `.tar.gz` (Linux, macOS) of the folder is written next to it.
 

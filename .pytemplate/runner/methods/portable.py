@@ -10,6 +10,7 @@ The only standalone option for PyPy (PyInstaller and Nuitka only support CPython
 
 from __future__ import annotations
 
+import ast
 import re
 import shlex
 import shutil
@@ -351,6 +352,58 @@ def compile_calls(cfg: Config, python: Path, out: Path, version: str) -> list[li
     return calls
 
 
+# compileall's line for a file it could not compile (with -q; the name is a repr)
+_NOT_COMPILED = re.compile(r"^\*\*\* Error compiling (.+)\.\.\.$", re.MULTILINE)
+REPORTED_LINES = 40  # of compileall's output: under a too deep folder every file fails (Windows)
+
+
+def _not_compiled(output: str) -> list[Path]:
+    """The files compileall's `output` names as not compiled."""
+    files: list[Path] = []
+    for quoted in _NOT_COMPILED.findall(output):
+        try:
+            name = ast.literal_eval(quoted)
+        except (ValueError, SyntaxError):
+            continue
+        if isinstance(name, str):
+            files.append(Path(name))
+    return files
+
+
+def _precompile(cfg: Config, python: Path, out: Path, version: str) -> None:
+    """Run compile_calls and say what they could not compile: compileall's own lines (each file
+    and why, even with -q), then what it means. It said only "paths longer than 260 characters?"
+    (Windows' limit alone) and "The app still works", naming no file, also for a syntax error
+    in app/ that a --no-check build let through: that app never started."""
+    outputs: list[str] = []
+    codes: list[int] = []
+    for argv in compile_calls(cfg, python, out, version):
+        compiled = proc.run(argv, check=False, capture=True)
+        if compiled.returncode != 0:
+            codes.append(compiled.returncode)
+            outputs.append(((compiled.stdout or "") + (compiled.stderr or "")).strip())
+    if not codes:
+        return
+    lines = "\n".join(o for o in outputs if o).splitlines()
+    if len(lines) > REPORTED_LINES:
+        lines = [*lines[:REPORTED_LINES], f"... ({len(lines) - REPORTED_LINES} more lines)"]
+    if lines:
+        ui.report("\n".join(lines))
+    hint = " (paths longer than 260 characters? Shorten the project folder or enable LongPathsEnabled)" if IS_WINDOWS else ""
+    files = _not_compiled("\n".join(outputs))
+    app = [f for f in files if f.is_relative_to(out / "app")]
+    if app:
+        names = ", ".join(f.relative_to(out).as_posix() for f in app)
+        ui.warn(f"{len(app)} file(s) of the app do not compile (see above){hint}: the app fails where it imports them: {names}")
+    if len(files) > len(app):
+        ui.warn(
+            f"could not precompile {len(files) - len(app)} file(s) of lib/ or the runtime to .pyc (see above){hint}: "
+            "Python compiles them when the app first imports them, and an import of one that does not compile fails"
+        )
+    if not files:
+        ui.warn(f"compileall failed (exit code {codes[0]}, see above): the app compiles its modules when it first imports them")
+
+
 def make_archive(out: Path, fmt: str) -> Path:
     """Archive the folder `out` next to it and return the archive (gztar keeps modes and mtimes).
 
@@ -405,16 +458,7 @@ def build(req: BuildRequest) -> Path:
 
     if console_python is not None:
         _check_interpreter(console_python)
-        failed = 0
-        for argv in compile_calls(cfg, console_python, out, host.version):
-            compiled = proc.run(argv, check=False, capture=True)
-            if compiled.returncode != 0:
-                failed += max(1, compiled.stdout.count("*** Error compiling"))
-        if failed:
-            ui.warn(
-                f"could not precompile {failed} file(s) to .pyc (paths longer than 260 characters?). "
-                "The app still works; it just starts a bit slower the first time."
-            )
+        _precompile(cfg, console_python, out, host.version)
 
     if upx.active(cfg):
         upx.pack_tree(cfg, out)  # before the smoke tests, so that they load the packed binaries

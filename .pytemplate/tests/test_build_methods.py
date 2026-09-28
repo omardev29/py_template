@@ -3775,6 +3775,39 @@ def test_portable_precompiles_the_stdlib_at_the_launcher_level(tmp_path: Path, o
         assert str(out).encode() not in data, pyc  # -s: this machine's folder is not embedded
 
 
+@pytest.mark.parametrize("windows", [False, True])
+def test_portable_names_the_files_it_could_not_precompile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], windows: bool) -> None:
+    # compileall's output was captured and dropped: the warning named no file, blamed paths longer
+    # than 260 characters on every OS, and said "The app still works" for a syntax error in app/
+    # that a --no-check build let through, while the app did not start
+    from runner import ui
+    from runner.methods import portable
+
+    monkeypatch.setattr(ui, "QUIET", True)  # compileall's lines are the reason: -q keeps them
+    monkeypatch.setattr(portable, "IS_WINDOWS", windows)
+    out = tmp_path / "out"
+    for name, text in {
+        "app/pkg/__init__.py": "",
+        "app/pkg/app.py": "def main() -> int\n    return 0\n",
+        "lib/dep/__init__.py": "",
+        "lib/dep/old.py": "print 'python 2'\n",
+    }.items():
+        (out / name).parent.mkdir(parents=True, exist_ok=True)
+        (out / name).write_text(text, encoding="utf-8")
+    portable._precompile(make({}), Path(sys.executable), out, "0.0")
+    err = capsys.readouterr().err
+    assert "Error compiling" in err and "SyntaxError" in err  # compileall's own lines
+    assert "1 file(s) of the app do not compile" in err and "the app fails where it imports them: app/pkg/app.py" in err
+    assert "could not precompile 1 file(s) of lib/ or the runtime" in err
+    assert "still works" not in err
+    assert ("260 characters" in err) == windows  # Windows' own limit
+    capsys.readouterr()
+    (out / "app" / "pkg" / "app.py").write_text("def main() -> int:\n    return 0\n", encoding="utf-8")
+    (out / "lib" / "dep" / "old.py").write_text("X = 1\n", encoding="utf-8")
+    portable._precompile(make({}), Path(sys.executable), out, "0.0")
+    assert "compile" not in capsys.readouterr().err  # nothing to say
+
+
 def test_portable_pycs_survive_a_zip_round_trip(tmp_path: Path) -> None:
     # Timestamp .pyc went stale after the Windows zip (2-second DOS times, local time zone)
     import importlib.util
