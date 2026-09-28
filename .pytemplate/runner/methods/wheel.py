@@ -30,8 +30,20 @@ from ..ui import PytError
 from . import common
 
 
+def _read_toml(path: Path) -> dict[str, Any]:
+    """pyproject.toml or uv.lock, read as uv reads them (a BOM is fine). One that cannot be read
+    or is no valid TOML is a PytError naming it: wheel.check reads pyproject.toml before
+    cmd_build.check_lock, and a broken one ended in an internal-error traceback."""
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    except OSError as e:
+        raise PytError(f"wheel: cannot read {path.name}: {e.strerror or e}") from None
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise PytError(f"wheel: {path.name} is not valid TOML: {e}") from None
+
+
 def _locked_version(package: str) -> str:
-    lock = tomllib.loads((PYPROJECT.parent / "uv.lock").read_text(encoding="utf-8-sig"))
+    lock = _read_toml(PYPROJECT.parent / "uv.lock")
     for pkg in lock.get("package", []):
         if pkg.get("name") == package:
             return str(pkg["version"])
@@ -111,7 +123,7 @@ def dependencies(data: dict[str, Any]) -> list[str]:
 
 def check(cfg: Config) -> None:
     """What the wheel cannot build, refused before the checks and the payload (also --dry-run)."""
-    dependencies(tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig")))
+    dependencies(_read_toml(PYPROJECT))
 
 
 def _package_data(package: Path) -> list[str]:
@@ -138,7 +150,7 @@ def _package_data(package: Path) -> list[str]:
 
 def _pyproject(cfg: Config, compiled: bool, src: Path | None = None) -> str:
     """The build project's pyproject.toml; `src`: its src/ folder, whose hidden files are listed."""
-    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))
+    data = _read_toml(PYPROJECT)
     project = data["project"]
     outside = _outside_package(cfg)
     modules = [top.removesuffix(".py") for top in outside if top.endswith(".py")]

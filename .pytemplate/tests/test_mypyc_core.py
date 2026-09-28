@@ -2519,6 +2519,24 @@ def test_wheel_names_a_missing_lock_entry(wheel_project: Path) -> None:
         wheel._pyproject(_wheel_cfg(), False)
 
 
+def test_wheel_names_a_pyproject_or_lock_that_is_not_toml(wheel_project: Path) -> None:
+    # wheel.check reads pyproject.toml before cmd_build.check_lock: a broken one ended every
+    # wheel build, --dry-run included, in an internal-error traceback
+    from runner.methods import wheel
+
+    good = wheel.PYPROJECT.read_bytes()
+    with wheel.PYPROJECT.open("ab") as f:
+        f.write(b"x = [\n")
+    for step in (lambda: wheel.check(_wheel_cfg()), lambda: wheel._pyproject(_wheel_cfg(), False)):
+        with pytest.raises(PytError, match=r"^wheel: pyproject.toml is not valid TOML: ") as caught:
+            step()
+        assert caught.value.code == 2
+    wheel.PYPROJECT.write_bytes(good)
+    (wheel.PYPROJECT.parent / "uv.lock").write_bytes(b"\xff\xfe")
+    with pytest.raises(PytError, match=r"^wheel: uv.lock is not valid TOML: "):
+        wheel._pyproject(_wheel_cfg(), True)
+
+
 def test_wheel_copies_the_package_files(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from runner.cmd_build import BuildRequest
     from runner.methods import wheel

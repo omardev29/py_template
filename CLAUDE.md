@@ -2703,7 +2703,9 @@ Per method:
   editable source, a named index, a marker or several sources is refused before the checks
   and the payload (`wheel.check`, from `cmd_build`, also in `--dry-run`): copied as a plain
   name, a local library became a PyPI requirement (an unrelated PyPI package of that name got
-  installed). Synthetic build project in `.build/wheel/<b>` (for mypyc a `setup.py` using
+  installed). A pyproject.toml or uv.lock that is not valid TOML is one error naming it
+  (`wheel._read_toml`, exit 2): `wheel.check` reads it before `check_lock`, and it was an
+  internal-error traceback. Synthetic build project in `.build/wheel/<b>` (for mypyc a `setup.py` using
   mypycify with the same `compile.multi_file`, `separate`, `strict_dunder_typing` and extra C
   flags (`no_semantic_interposition`, section 9) as the stage, and a compile `mypy.ini`), built
   with `uv build --wheel --no-build-isolation --python <.venv python>` after
