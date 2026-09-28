@@ -1263,7 +1263,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   project; the generated files and `state.json` (`derived_paths`) never count, nor, after a
   hand edit, `pytemplate.toml`) refuses without `--force` (a warning under `--dry-run`); git
   failing for another reason (dubious ownership) is refused the same way, never read as "no
-  git". Then: move `src/<old_pkg>/` first (the step that can fail on a locked file; case-only
+  git", and so is a `.git` in or above the project with no git on PATH (`hooks.NO_GIT`,
+  `hooks.git_missing_here`: a git GUI's own git; it was read as no repository, and a dirty tree
+  was renamed without a word: `test_rename.test_git_changes_refuses_a_repository_git_is_missing_for`).
+  Then: move `src/<old_pkg>/` first (the step that can fail on a locked file; case-only
   renames use two moves), write the files (`apply_plan`: each through a temporary file next to
   it and `os.replace` (`_replace_bytes` = `project.write_whole`: mode, owner and group kept, a
   symlink stays a link, a read-only file is an error; a file with other hard links, or one whose

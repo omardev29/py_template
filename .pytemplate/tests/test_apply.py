@@ -1580,6 +1580,26 @@ def test_git_missing_from_path_is_said_not_taken_for_no_repository(tmp_path: Pat
         assert "git hook         not a git work tree: nothing to do" in capsys.readouterr().err
 
 
+def test_a_rename_refuses_a_tree_git_cannot_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A .git and no git on PATH (a git GUI's own git): the rename of a hand-edited app.name went
+    ahead on a tree nobody could check for uncommitted changes; it refuses as for a git failure
+    (a warning in the dry run), and --force goes ahead."""
+    project, _ = _project(tmp_path, monkeypatch)
+    (project.root / ".git").mkdir()
+    project.edit("app", "name", "beta")
+    no_git = tmp_path / "bin"
+    no_git.mkdir()
+    monkeypatch.setenv("PATH", str(no_git))
+    before = project.snapshot()
+    with pytest.raises(PytError, match=r"could not check for uncommitted changes in git \(git not found in PATH\)") as e:
+        _run(project)
+    assert "./pyt apply --force" in str(e.value) and project.snapshot() == before
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert _run(project) == 0
+    assert "warning: could not check for uncommitted changes in git (git not found in PATH)" in capsys.readouterr().err
+    assert project.snapshot() == before
+
+
 @needs_git
 def test_every_hook_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """What apply does, and what its --dry-run says, for each state of the hooks folder."""

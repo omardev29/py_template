@@ -1458,6 +1458,40 @@ def _git(cwd: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProc
     )
 
 
+def test_git_changes_refuses_a_repository_git_is_missing_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """GitHub Desktop, Fork and SourceTree bring a git of their own, often not on PATH: in a
+    repository (a .git in or above the project) git_changes answered "not in git", and rename and
+    the rename of apply rewrote a dirty tree without a word (the dry run warned of nothing). Now
+    the tree could not be checked, which refuses like a git failure (--force goes ahead)."""
+    project = tmp_path / "repo" / "p"
+    project.mkdir(parents=True)
+    no_git = tmp_path / "bin"
+    no_git.mkdir()
+    monkeypatch.setenv("PATH", str(no_git))
+    if any((d / ".git").exists() for d in (project, *project.parents)):
+        pytest.skip("a .git above the test folder")
+    assert rename.git_changes(project) is None  # no repository at all: nothing to protect
+    (tmp_path / "repo" / ".git").mkdir()
+    changes = rename.git_changes(project)
+    assert changes == "git not found in PATH"
+    message = rename.dirty_tree_message(changes, "rename", "./pyt rename beta --force")
+    assert message is not None and message.startswith("could not check for uncommitted changes in git (git not found in PATH)")
+    assert message.endswith("To go ahead anyway: ./pyt rename beta --force")
+
+
+def test_rename_refuses_when_git_cannot_check_the_tree(command_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The command: refused before anything is written, a warning in the dry run."""
+    root = command_project
+    (root / ".git").mkdir()
+    no_git = root.parent / "bin"
+    no_git.mkdir()
+    monkeypatch.setenv("PATH", str(no_git))
+    before = _tree(root)
+    with pytest.raises(PytError, match=r"could not check for uncommitted changes in git \(git not found in PATH\)") as e:
+        rename.cmd_rename(_load(root), ["beta"])
+    assert e.value.code == 2 and _tree(root) == before
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not found")
 def test_git_changes_no_repo_clean_dirty_subfolder_and_broken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env = _git_env(tmp_path)

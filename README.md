@@ -529,9 +529,10 @@ the old name; `dist/` and `.build/` keep the old name until the next build (`./p
 Symbolic links and junctions in `src/` and `tests/` are never followed: a warning lists those
 that mention the old name or point through it, to edit by hand.
 It refuses uncommitted changes without `--force` (a project fresh from `./pyt new` has no
-commit yet: commit first), and the names `new` refuses. A write that fails puts every file back
-(each file is written to a temporary file first, so a full disk never leaves one half-written),
-and says so when it could not.
+commit yet: commit first), also when it cannot check them (the project is in a git repository,
+but git is not on PATH: a git GUI's own git), and the names `new` refuses. A write that fails
+puts every file back (each file is written to a temporary file first, so a full disk never
+leaves one half-written), and says so when it could not.
 When the old name is a common word (`app`, `game`, `core`), matching words in comments and
 strings change too: review `git diff`.
 

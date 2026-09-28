@@ -1490,9 +1490,12 @@ def _porcelain_paths(out: str, prefix: str) -> list[str]:
 def git_changes(root: Path) -> list[str] | str | None:
     """The paths (relative to `root`, POSIX) that `git status` reports as changed or untracked.
 
-    None: git is not installed or `root` is not in a git work tree. A str (git's first error
-    line): git failed for another reason (dubious ownership, a corrupt index...), so the tree
-    could not be checked. git runs with LC_ALL=C so "not a git repository" is never translated.
+    None: `root` is not in a git work tree (or git is not installed and no `.git` is in or above
+    it). A str (git's first error line): git failed for another reason (dubious ownership, a
+    corrupt index...), or git is not on PATH in a repository (hooks.NO_GIT: GitHub Desktop, Fork
+    and SourceTree bring a git of their own, and rename rewrote a dirty tree without a word), so
+    the tree could not be checked. git runs with LC_ALL=C so "not a git repository" is never
+    translated.
     """
     env = {k: v for k, v in proc.base_env().items() if k not in ("LANGUAGE", "LANG", "LC_ALL", "LC_MESSAGES")}
     env["LC_ALL"] = "C"
@@ -1505,8 +1508,10 @@ def git_changes(root: Path) -> list[str] | str | None:
 
     try:
         r = proc.run(["git", "rev-parse", "--show-prefix"], cwd=root, env=env, capture=True, check=False, echo=False)
-    except PytError:  # git not installed
-        return None
+    except PytError:  # git not installed, or not on PATH
+        from . import hooks  # hooks imports lintc and mypyc: only here
+
+        return hooks.NO_GIT if hooks.git_missing_here(root) else None
     if r.returncode != 0:
         return failure(r.returncode, r.stderr)
     prefix = r.stdout.strip()
