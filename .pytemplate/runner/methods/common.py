@@ -257,6 +257,13 @@ def host_floor(target: Target) -> str | None:
     return None
 
 
+# What uv says when a locked package has no wheel (and no sdist) for the --python-platform of a
+# host target's floor: from a pylock.toml (uv 0.10.12 to 0.12.19), and from a requirements file
+_NO_FLOOR_WHEEL = re.compile(
+    r"doesn't have a source distribution or wheel for the current platform|has no wheels with a matching platform tag"
+)
+
+
 def _runs_on(target: Target) -> str:
     if target.os == "linux":
         return f"glibc {platform.libc_ver()[1]}"
@@ -312,19 +319,28 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
         # The interpreter's full version: uv reads 3.14 as 3.14.0, and a requirement marked
         # python_full_version >= '3.14.1' was left out of the build for this very interpreter
         version = str(envs.interpreter_info(python)["version"])
-        try:
-            # no --only-binary: the host can still build an sdist
-            envs.uv(env, [*base, "--python-platform", floor, "--python-version", version] if floor else base, extra_env=extra_env)
-        except proc.CommandFailed:
-            if not floor:
-                raise
-            ui.warn(
-                f"{target.key}: a dependency has no wheel for {floor} (see above); using the wheels this "
-                f"machine prefers, so the build needs {_runs_on(target)} or newer where it runs"
-            )
-            shutil.rmtree(dest)
-            dest.mkdir(parents=True)
+        if not floor:
             envs.uv(env, base, extra_env=extra_env)
+        else:
+            # no --only-binary: the host can still build an sdist. Captured: only uv's "no wheel for
+            # this platform" drops the floor; any other failure (the network, an index, a hash, a
+            # failed build) is raised as it is, and a transient one never loses the floor silently
+            tried = envs.uv(env, [*base, "--python-platform", floor, "--python-version", version], extra_env=extra_env, capture=True, check=False)
+            output = ((tried.stderr or "") + (tried.stdout or "")).rstrip()
+            if tried.returncode != 0:
+                if output:
+                    ui.report(output)  # uv's reason, shown even with -q
+                if not _NO_FLOOR_WHEEL.search(output):
+                    raise proc.CommandFailed(tried.args, tried.returncode)
+                ui.warn(
+                    f"{target.key}: a dependency has no wheel for {floor} (see above); using the wheels this "
+                    f"machine prefers, so the build needs {_runs_on(target)} or newer where it runs"
+                )
+                shutil.rmtree(dest)
+                dest.mkdir(parents=True)
+                envs.uv(env, base, extra_env=extra_env)
+            elif output:
+                ui.report(output)  # a warning of a successful install
     drop_install_junk(dest)
     return dest
 

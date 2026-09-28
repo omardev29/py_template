@@ -1826,14 +1826,17 @@ def test_target_keys_of_the_locked_minor_work_everywhere(monkeypatch: pytest.Mon
     assert [t.key for t in common.targets_for(cfg, "pypy", ["pp311-linux-x86_64", WIN, LINUX])] == ["pp311-linux-x86_64", WIN, LINUX]
 
 
-def _install_recorder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, fail_first: bool = False) -> list[tuple[str, list[str], dict[str, str]]]:
+def _install_recorder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, fail_first: str = "") -> list[tuple[str, list[str], dict[str, str]]]:
+    """Record the uv calls of install_deps; `fail_first`: uv's error for the first one."""
     calls: list[tuple[str, list[str], dict[str, str]]] = []
 
-    def fake_uv(env: envs.PyEnv, argv: Any, *, extra_env: Any = None, **_: Any) -> subprocess.CompletedProcess[str]:
+    def fake_uv(env: envs.PyEnv, argv: Any, *, extra_env: Any = None, check: bool = True, **_: Any) -> subprocess.CompletedProcess[str]:
         args = [str(a) for a in argv]
         calls.append((env.key, args, dict(extra_env or {})))
         if fail_first and len(calls) == 1:
-            raise proc.CommandFailed(["uv", *args], 1)
+            if check:
+                raise proc.CommandFailed(["uv", *args], 2)
+            return subprocess.CompletedProcess(["uv", *args], 2, "", fail_first)
         return subprocess.CompletedProcess(args, 0, "", "")
 
     for name in ("cpython", "pypy"):
@@ -1884,14 +1887,52 @@ def test_host_and_cross_builds_share_one_floor(tmp_path: Path, monkeypatch: pyte
     assert _flag(cross_args, "--only-binary") == ":all:"
 
 
+# What uv (0.10.12 and 0.12.19) says when a locked package has no wheel for the platform floor
+NO_FLOOR_WHEEL = (
+    "error: Package `newglibc` can't be installed because it doesn't have a source distribution or wheel for the current platform\n\n"
+    "hint: You're on Linux (`manylinux_2_28_x86_64`), but `newglibc` (v1.0) only has wheels for the following platform: `manylinux_2_34_x86_64`"
+)
+
+
 def test_host_floor_falls_back_to_the_host_wheels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    calls = _install_recorder(tmp_path, monkeypatch, fail_first=True)
+    calls = _install_recorder(tmp_path, monkeypatch, fail_first=NO_FLOOR_WHEEL)
     monkeypatch.setattr(common.platform, "libc_ver", lambda *a, **k: ("glibc", "2.39"))
     site = tmp_path / "site"
     common.install_deps(make({}), "cpython", common.parse_key(LINUX), site, _requirements(tmp_path, "rich==15.0.0"))
     assert len(calls) == 2 and "--python-platform" in calls[0][1] and "--python-platform" not in calls[1][1]
-    assert "needs glibc 2.39 or newer" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "needs glibc 2.39 or newer" in err and "only has wheels for the following platform" in err  # uv's reason, then the fallback
     assert site.is_dir()
+
+
+def test_host_floor_falls_back_for_real_on_uvs_own_words(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """The fallback reads uv's error: pinned with the real uv (the uv-floor job runs the oldest), a
+    locked package that only has a manylinux_2_34 wheel, on a host whose glibc loads it."""
+    libc, version = common.platform.libc_ver()
+    have = common._version_tuple(version) if libc == "glibc" else None
+    if common.host_os() != "linux" or common.host_arch() != "x86_64" or have is None or have < (2, 34):
+        pytest.skip("needs Linux x86_64 with glibc 2.34 or newer")
+    requirements = _explicit_index_project(tmp_path, monkeypatch, {"newglibc": "cp314-cp314-manylinux_2_34_x86_64", "ptdemo": "py3-none-any"})
+    host = common.Target("cp", 3, 14, "linux", "x86_64")
+    site = common.install_deps(make({}), "cpython", host, tmp_path / "site", requirements)
+    assert common.installed(site) == {("newglibc", "1.0"), ("ptdemo", "1.0")}
+    err = capsys.readouterr().err
+    assert "a dependency has no wheel for x86_64-manylinux_2_28" in err and "newglibc" in err
+
+
+def test_host_floor_is_kept_when_the_install_fails_for_another_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # Any failure of the floor install (the network, an index, a hash, a failed sdist build) was
+    # blamed on a missing floor wheel and retried without the floor: the same error twice with a
+    # false explanation between them, and after a transient error a build that silently needed
+    # this machine's glibc although the floor's wheels existed
+    network = "error: Failed to download `rich==15.0.0`\n  Caused by: Network connectivity is disabled, but the requested data wasn't found in the cache"
+    calls = _install_recorder(tmp_path, monkeypatch, fail_first=network)
+    monkeypatch.setattr(common.platform, "libc_ver", lambda *a, **k: ("glibc", "2.39"))
+    with pytest.raises(proc.CommandFailed) as failed:
+        common.install_deps(make({}), "cpython", common.parse_key(LINUX), tmp_path / "site", _requirements(tmp_path, "rich==15.0.0"))
+    assert failed.value.code == 2 and len(calls) == 1  # uv's own exit code, no second try
+    err = capsys.readouterr().err
+    assert "Network connectivity is disabled" in err and "no wheel for" not in err and "needs glibc" not in err
 
 
 def test_macos_targets_pin_the_deployment_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2336,18 +2377,19 @@ def test_export_ships_path_dependencies_and_refuses_a_stale_lock(tmp_path: Path,
         common.export_requirements(make({}))
 
 
-def _wheel_file(folder: Path, name: str, version: str) -> Path:
-    """A minimal pure wheel (a flat index for uv: a folder of wheel files)."""
+def _wheel_file(folder: Path, name: str, version: str, tag: str = "py3-none-any") -> Path:
+    """A minimal wheel (a flat index for uv: a folder of wheel files)."""
     import zipfile
 
     folder.mkdir(parents=True, exist_ok=True)
     info = f"{name}-{version}.dist-info"
+    pure = "true" if tag.endswith("-none-any") else "false"
     files = {
         f"{name}/__init__.py": "VALUE = 1\n",
         f"{info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
-        f"{info}/WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        f"{info}/WHEEL": f"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: {pure}\nTag: {tag}\n",
     }
-    whl = folder / f"{name}-{version}-py3-none-any.whl"
+    whl = folder / f"{name}-{version}-{tag}.whl"
     with zipfile.ZipFile(whl, "w") as z:
         for member, text in files.items():
             z.writestr(member, text)
@@ -2355,22 +2397,21 @@ def _wheel_file(folder: Path, name: str, version: str) -> Path:
     return whl
 
 
-def test_pyz_and_portable_install_a_package_of_an_explicit_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # `explicit = true` plus a [tool.uv.sources] `{ index = "name" }`, uv's way to take a package
-    # from a private index or PyTorch's: the requirements.txt export keeps no index and uv pip reads
-    # no sources, so `uv pip install -r requirements.txt` looked for it elsewhere ("No solution
-    # found") for every target, although README and the wheel's refusal sent such projects to pyz
-    # and portable. The real uv, offline: a flat index of one wheel
+def _explicit_index_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wheels: dict[str, str]) -> Path:
+    """A project whose dependencies (name: wheel tag, version 1.0) all come from an `explicit =
+    true` flat index, locked offline with the real uv; the runner works on it from here (offline),
+    and the return value is its export (common.export_requirements)."""
     if not envs.tool_env(make({})).python.is_file():
         pytest.skip("needs .venv (./pyt setup)")
     project = tmp_path / "proj"
     index = tmp_path / "index"
-    _wheel_file(index, "ptdemo", "1.0")
+    for name, tag in wheels.items():
+        _wheel_file(index, name, "1.0", tag)
     project.mkdir()
     (project / "pyproject.toml").write_text(
-        '[project]\nname = "xapp"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = ["ptdemo"]\n\n'
+        f'[project]\nname = "xapp"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = {json.dumps(list(wheels))}\n\n'
         f'[[tool.uv.index]]\nname = "local"\nurl = {json.dumps(index.as_uri())}\nformat = "flat"\nexplicit = true\n\n'
-        '[tool.uv.sources]\nptdemo = { index = "local" }\n',
+        "[tool.uv.sources]\n" + "".join(f'{name} = {{ index = "local" }}\n' for name in wheels),
         encoding="utf-8",
     )
     env = {k: v for k, v in proc.base_env().items() if not k.startswith(("UV_PROJECT", "UV_PYTHON"))}
@@ -2381,7 +2422,16 @@ def test_pyz_and_portable_install_a_package_of_an_explicit_index(tmp_path: Path,
     monkeypatch.setattr(common, "BUILD", tmp_path / "build")
     monkeypatch.setattr(common, "LOCK", project / "uv.lock")
     monkeypatch.setenv("UV_OFFLINE", "1")
-    requirements = common.export_requirements(make({}))
+    return common.export_requirements(make({}))
+
+
+def test_pyz_and_portable_install_a_package_of_an_explicit_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `explicit = true` plus a [tool.uv.sources] `{ index = "name" }`, uv's way to take a package
+    # from a private index or PyTorch's: the requirements.txt export keeps no index and uv pip reads
+    # no sources, so `uv pip install -r requirements.txt` looked for it elsewhere ("No solution
+    # found") for every target, although README and the wheel's refusal sent such projects to pyz
+    # and portable. The real uv, offline: a flat index of one wheel
+    requirements = _explicit_index_project(tmp_path, monkeypatch, {"ptdemo": "py3-none-any"})
     host = common.Target("cp", 3, 14, common.host_os(), common.host_arch())
     cross = common.parse_key(WIN if common.host_os() != "windows" else LINUX)
     for target in (host, cross):
