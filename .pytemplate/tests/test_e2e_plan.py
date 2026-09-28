@@ -441,6 +441,18 @@ def test_a_base_another_user_makes_after_the_check_is_refused(harness: str, tmp_
     assert not any(base.iterdir())  # no marker: nothing runs from it
 
 
+def test_a_base_it_cannot_create_is_one_error_line(tmp_path: Path) -> None:
+    """A --base below a file (or in a folder it may not write) ended in an internal-error
+    traceback, exit 1: one error line, exit 2, as nvimtest's --dir says it."""
+    afile = tmp_path / "afile"
+    afile.write_text("x", encoding="utf-8")
+    base = afile / "e2e"
+    with pytest.raises(PytError, match=re.escape(f"selftest --e2e: cannot create --base {base}: Not a directory")) as e:
+        e2e._prepare_base(base)
+    assert e.value.code == 2
+    assert afile.read_text(encoding="utf-8") == "x"
+
+
 # --- options -----------------------------------------------------------------------------------
 
 
