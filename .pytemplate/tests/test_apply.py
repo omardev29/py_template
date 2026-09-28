@@ -19,6 +19,7 @@ The matrix: after editing each key of pytemplate.toml, what apply does.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import inspect
 import json
@@ -1393,6 +1394,35 @@ def test_missing_package_is_a_warning_not_a_crash(tmp_path: Path, monkeypatch: p
     err = capsys.readouterr().err
     assert "warning: src/alpha/ does not exist" in err and "compile.modules: alpha.core not found" in err
     assert cmd_apply.pending(project.cfg())[0][0].startswith("src/alpha/ does not exist")
+
+
+def test_an_entry_of_src_that_cannot_be_read_is_no_missing_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A link in src/ that cannot be followed (a loop, a dead mount, a folder the user may not
+    enter) made doctor say `src/alpha/ does not exist (... src/ has alpha/)`, the hook blocked every
+    commit with it, and on a Python 3.11 runner Path.is_dir raised for the link (EACCES): doctor
+    ended in an internal error."""
+    project, _ = _project(tmp_path, monkeypatch)
+    src = project.root / "src"
+    try:
+        (src / "loop").symlink_to("loop")
+    except OSError as e:
+        if sys.platform != "win32":
+            raise
+        print(f"no symlink here ({e})")
+    cfg = project.cfg()
+    assert cmd_apply.missing_package(cfg) is None and cmd_apply.pending(cfg) == []
+    (src / "alpha").rename(src / "other")  # now the app package is missing for real
+    (src / "data").mkdir()
+    real = Path.is_dir
+
+    def is_dir(self: Path, *args: Any, **kwargs: Any) -> bool:
+        if self == src / "data":  # what Python 3.11 does for a link into a folder the user may not enter
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+    missing = cmd_apply.missing_package(cfg)
+    assert missing is not None and "src/alpha/ does not exist (app.name = 'alpha'; src/ has other/)" in missing[0]
 
 
 def test_a_broken_managed_block_is_refused_before_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

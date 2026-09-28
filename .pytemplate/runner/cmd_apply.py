@@ -42,6 +42,7 @@ prints the plan and stops):
 from __future__ import annotations
 
 import json
+import os
 import re
 import string
 import tomllib
@@ -527,7 +528,12 @@ def missing_package(cfg: Config) -> tuple[str, str] | None:
     src = _src()
     if rename.package_dir(src, cfg.pkg) is not None:
         return None
-    here = sorted(p.name for p in src.iterdir() if p.is_dir() and (p / "__init__.py").is_file()) if src.is_dir() else []
+    try:  # os.path: an entry it cannot stat (a link into a folder the user may not enter) is no
+        # package; Python 3.11's Path.is_dir raised for it, and doctor ended in an internal error
+        entries = list(src.iterdir()) if os.path.isdir(src) else []
+    except OSError:
+        entries = []
+    here = sorted(p.name for p in entries if os.path.isdir(p) and os.path.isfile(p / "__init__.py"))
     found = f"; src/ has {', '.join(p + '/' for p in here)}" if here else ""
     return (
         f"src/{cfg.pkg}/ does not exist (app.name = '{cfg.app.name}'{found}): run, test and build need the app package",

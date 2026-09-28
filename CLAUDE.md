@@ -1369,7 +1369,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   - A file of src/ or tests/ that cannot be read (root-owned, locked by another program) stops
     the plan with a PytError naming it: nothing changed, never an internal-error traceback.
     So does a folder there that cannot be listed (`_code_files`: os.walk skipped it silently, and
-    its files kept the old imports inside the moved package).
+    its files kept the old imports inside the moved package). An entry of src/ that cannot be
+    stat'ed (a link loop, a dead mount, a link into a folder the user may not enter, one Windows
+    cannot follow) is no folder (`rename._is_dir`, in `package_dir` and `_package_modules`;
+    `cmd_apply.missing_package` asks `os.path`): one such link hid the app package from doctor,
+    the hook, rename and apply
+    (`test_rename.test_an_entry_of_src_that_cannot_be_read_never_hides_the_package`).
   - A Python file with a PEP 263 cookie is rewritten in its own encoding; other files that are
     not UTF-8 text but mention the old name are a warning (`Plan.unreadable`; a UTF-16 or UTF-32
     file, PowerShell 5.1's `>` and Out-File, is searched through its BOM, `_bom_text`, as

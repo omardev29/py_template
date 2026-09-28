@@ -1107,13 +1107,26 @@ def same_file(a: Path, b: Path) -> bool:
         return False
 
 
+def _is_dir(entry: os.DirEntry[str]) -> bool:
+    """os.DirEntry.is_dir() that says no, as os.path.isdir does, for an entry it cannot stat: a
+    link loop, a dead mount, a link into a folder the user may not enter, a link Windows cannot
+    follow (WinError 123); is_dir() itself ignores only a missing target."""
+    try:
+        return entry.is_dir()
+    except OSError:
+        return False
+
+
 def package_dir(src: Path, pkg: str) -> Path | None:
-    """Return src/<pkg>/ as spelled on disk (a case-insensitive file system may hold src/Alpha/)."""
+    """Return src/<pkg>/ as spelled on disk (a case-insensitive file system may hold src/Alpha/).
+    An entry of src/ that cannot be stat'ed is no folder (_is_dir): one such link hid the app
+    package from doctor, the hook, rename and apply."""
     try:
         with os.scandir(src) as it:
-            dirs = [Path(e.path) for e in it if e.is_dir()]
+            entries = list(it)
     except OSError:
         return None
+    dirs = [Path(e.path) for e in entries if _is_dir(e)]
     for d in dirs:
         if d.name == pkg:
             return d
@@ -1141,11 +1154,8 @@ def _package_modules(root: Path, pkg: str) -> frozenset[str]:
         stem = entry.name.partition(".")[0]
         if entry.name in SKIP_DIRS or not stem.isidentifier():
             continue
-        try:
-            is_dir = entry.is_dir()
-        except OSError:  # a link Windows cannot follow (WinError 123): it names no folder here
-            is_dir = False
-        if is_dir or Path(entry.name).suffix in PY_SUFFIXES or entry.name.endswith(EXT_SUFFIXES):
+        # a link Windows cannot follow (WinError 123) names no folder here
+        if _is_dir(entry) or Path(entry.name).suffix in PY_SUFFIXES or entry.name.endswith(EXT_SUFFIXES):
             out.add(stem)
     return frozenset(out)
 

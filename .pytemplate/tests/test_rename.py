@@ -1068,6 +1068,43 @@ def test_a_link_windows_cannot_follow_is_no_module(tmp_path: Path, monkeypatch: 
     assert "ext" not in rename._package_modules(tmp_path, "alpha") and "core" in rename._package_modules(tmp_path, "alpha")
 
 
+def test_an_entry_of_src_that_cannot_be_read_never_hides_the_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """os.DirEntry.is_dir() raises for a link loop (ELOOP), a link into a folder the user may not
+    enter (EACCES), a dead network mount or a link Windows cannot follow (WinError 123): one such
+    entry in src/ made package_dir answer "no src/alpha/", so doctor reported the app package
+    missing, the hook blocked every commit, rename refused and apply skipped a pending rename."""
+    _write_project(tmp_path, "script", "alpha")
+    src = tmp_path / "src"
+    try:
+        (src / "loop").symlink_to("loop")  # a link to itself: stat says ELOOP
+    except OSError as e:
+        if sys.platform != "win32":
+            raise
+        print(f"no symlink here ({e}): only the faked entry below")
+    assert rename.package_dir(src, "alpha") == src / "alpha"
+    real = os.scandir
+
+    class Odd:
+        name, path = "ext", str(src / "ext")
+
+        def is_dir(self) -> bool:
+            raise OSError(22, "The filename, directory name, or volume label syntax is incorrect", self.path)
+
+    class Listing:
+        def __init__(self, path: Any) -> None:
+            self.entries = [*real(path), Odd()]
+
+        def __enter__(self) -> list[Any]:
+            return self.entries
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(rename.os, "scandir", lambda path: Listing(path) if Path(path) == src else real(path))
+    assert rename.package_dir(src, "alpha") == src / "alpha"
+    assert rename.package_dir(src, "ext") is None
+
+
 def test_links_in_src_and_tests_are_reported_never_rewritten(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A linked subpackage or module is neither rewritten (its target may be shared with other
     projects) nor silently skipped: the rename warns, so its old imports do not break unnoticed."""
