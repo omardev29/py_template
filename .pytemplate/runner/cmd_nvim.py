@@ -55,6 +55,23 @@ EXTRA_PREFIX = "lazyvim.plugins.extras."
 LAZY_LUA = ROOT / ".lazy.lua"
 MARK = "PTNVIM"  # prefix of the JSON line the headless snippets print
 
+# Neovim reads every 'runtimepath' entry as a file glob: `[ ] { }` are wildcards, a comma
+# separates entries, a backslash escapes, a backtick is command substitution, a single quote
+# sends the entry through 'shell', and a `$NAME` is expanded. A project path holding one of these
+# cannot carry the plugin on the runtimepath (require fails, E79), so spec.lua skips the whole
+# integration there and names the character; this reports it for `nvim doctor` and `nvim trust`.
+RTP_UNSAFE = "[]{},\\`'$"
+RTP_UNSAFE_TEXT = "[ ] { } , \\ ` ' or $"
+
+
+def rtp_unsafe_char(path: Path) -> str | None:
+    """The first character of `path` Neovim cannot hold on its runtimepath, or None. `as_posix`
+    so a backslash counts only where it is a name character (POSIX), not a separator (Windows)."""
+    for ch in path.as_posix():
+        if ch in RTP_UNSAFE:
+            return ch
+    return None
+
 # `-c` snippets: one line each, no double quotes (they go through the Windows command line).
 # QUERY_LUA must work on ANY Neovim, so an old one is reported as too old (doctor) or skipped
 # (selftest --nvim): vim.version() is a plain table before 0.10 (tostring gives "table: 0x..."),
@@ -509,8 +526,12 @@ def doctor(check: Check) -> None:
         return
     trust = trust_status(nv.trust_db, LAZY_LUA)
     trusted = {"trusted": "trusted", "missing": "missing"}.get(trust.state, "NOT trusted")
-    good = nv.version >= MIN_LAZYVIM and lazyvim and trust.state == "trusted"
-    hint = "details: ./pyt nvim doctor" + ("   (trust it once: ./pyt nvim trust)" if lazyvim and trust.state != "trusted" else "")
+    unsafe = rtp_unsafe_char(ROOT)
+    good = nv.version >= MIN_LAZYVIM and lazyvim and trust.state == "trusted" and not unsafe
+    if unsafe:
+        hint = f"details: ./pyt nvim doctor   (the path holds `{unsafe}`: move the project)"
+    else:
+        hint = "details: ./pyt nvim doctor" + ("   (trust it once: ./pyt nvim trust)" if lazyvim and trust.state != "trusted" else "")
     check(
         True if good else None,
         f"Neovim {nv.version_text}, LazyVim {'yes' if lazyvim else 'no'}, .lazy.lua {trusted}",
@@ -615,6 +636,13 @@ def cmd_doctor(cfg: Config) -> int:
     check(trust.state == "trusted", f".lazy.lua {trust.describe()}", "./pyt nvim trust   (or open Neovim here: (v)iew, :trust, restart)")
     if trust.state != "missing":
         ui.detail(f"         {trust.path}  sha256 {trust.sha256}  (database: {nv.trust_db})")
+    unsafe = rtp_unsafe_char(ROOT)
+    if unsafe:
+        check(
+            False,
+            f"the project path holds `{unsafe}`: Neovim cannot put it on 'runtimepath', so the ./pyt integration cannot load here",
+            f"move the project to a path without {RTP_UNSAFE_TEXT}",
+        )
     try:
         missing = missing_extras(nv.lazyvim_json)
     except PytError as e:  # LazyVim itself skips such a file without a word
@@ -633,10 +661,18 @@ def cmd_doctor(cfg: Config) -> int:
             check(True, "recommended extras enabled in lazyvim.json", "")
 
     ui.step("tools")
+    xcode_problem = None
+    if IS_MACOS:
+        from .cmd_env import _xcode_problem  # cmd_env imports this module: import it lazily
+
+        xcode_problem = _xcode_problem()
     for names, required, why, hint in TOOLS:
         found = _which_any(names)
         if found and IS_WINDOWS and "windowsapps" in found.lower() and names[-1] == "python":
             check(None, f"python is the Microsoft Store alias ({found})", "Install a real Python (scoop install python, or python.org) for Mason's PyPI packages")
+            continue
+        if found and xcode_problem is not None and names[0] in ("git", "python3", "python") and os.path.dirname(found) == "/usr/bin":
+            check(False if required else None, f"{names[0]} is the /usr/bin stub without the developer tools ({found}): {xcode_problem}", "xcode-select --install")
             continue
         if found:
             check(True, f"{names[0]}: {found}", "")
@@ -683,6 +719,13 @@ def cmd_trust(nv: Nvim) -> int:
     before = trust_status(nv.trust_db, LAZY_LUA)
     if before.state == "missing":
         raise PytError(".lazy.lua not found: ./pyt render generates it")
+    bad = rtp_unsafe_char(ROOT)
+    if bad:
+        raise PytError(
+            f"the project path holds `{bad}`, which Neovim cannot put on its 'runtimepath': the "
+            f"./pyt integration cannot load here even once trusted. Move the project to a path "
+            f"without {RTP_UNSAFE_TEXT}"
+        )
     if before.state == "trusted":
         ui.ok(f"already trusted: {before.path}")
         ui.info(f"  sha256 {before.sha256}")

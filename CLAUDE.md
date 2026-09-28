@@ -3108,16 +3108,29 @@ Files:
   `loadstring`. It MUST stay static (identical bytes in every mode and preset;
   `test_nvim_render.py` checks 6 configs): Neovim trusts it by the sha256 of its raw bytes,
   keyed by its real path, in `stdpath('state')/trust`. Any byte change (CRLF, a BOM, an edit)
-  or moving the folder = untrusted again. Hence `.gitattributes` `.lazy.lua text eol=lf` and
-  all logic in the plugin. Editing the template forces every user to re-trust: avoid it
-  (`test_lazy_lua_bytes_are_pinned` pins the sha256 in `LAZY_LUA_SHA256`, so a change is
-  always deliberate; projects already made keep their own copy). Its unguarded read of
-  lazy.nvim's internal `spec.modules` is an open fragile point (section 15).
-- `loadstring` gives the chunk no path: the root is found with
-  `vim.fs.root(vim.uv.cwd(), "pytemplate.toml")`.
-- Trusting `.lazy.lua` also trusts `.pytemplate/nvim/**`, loaded as a local plugin
+  or moving the folder = untrusted again. Hence `.gitattributes` `.lazy.lua text eol=lf`. It is a
+  thin loader: `root = vim.fs.root(vim.uv.cwd(), ".lazy.lua")` (the folder of THIS trusted file,
+  the one lazy.nvim read, not a nearer `pytemplate.toml`), then `dofile(root ..
+  "/.pytemplate/nvim/spec.lua")(root)`. All the logic (extras, the plugin spec, the guarded read
+  of lazy.nvim's `spec.modules`) lives in `spec.lua` and the plugin, which trusting `.lazy.lua`
+  already trusts (`.pytemplate/nvim/**`), so a fix there needs no re-trust; only a change to the
+  loader itself does (`test_lazy_lua_bytes_are_pinned` pins the sha256 in `LAZY_LUA_SHA256`, so
+  it is always deliberate; projects already made keep their own copy).
+- `spec.lua` (`.pytemplate/nvim/spec.lua`, `dofile`'d with `root`): normalizes `root`, and returns
+  `{}` unless it holds `pytemplate.toml` and `.pytemplate/nvim/lua/pytemplate/init.lua` (a folder
+  cloned, vendored or added as a submodule inside a trusted project, with its own `pytemplate.toml`
+  but no `.lazy.lua`, is never `root`, so its code and its `.venv` tools never run without a trust
+  of its own). It also returns `{}`, with one `vim.notify`, when `root` holds a character Neovim
+  reads as a `runtimepath` glob (`[ ] { } , \ ` `'` or a `$` it expands): the plugin cannot go on
+  the runtimepath from such a path (require fails, E79), so the whole integration is skipped and
+  the other LazyVim plugins whose `opts` delegate to it keep working. `cmd_nvim.rtp_unsafe_char`
+  names the same characters, and `nvim doctor` (a problem line) and `nvim trust` (refused) report
+  them. The `call` delegates are wrapped in `pcall` so a module that fails to load never breaks
+  another plugin's config.
+- Trusting `.lazy.lua` also trusts `.pytemplate/nvim/**` (`spec.lua` and the plugin), loaded as a
+  local plugin
   (`{ dir = root .. "/.pytemplate/nvim", name = "pytemplate.nvim", lazy = false, priority =
-  900, main = "pytemplate", opts = { root = root } }`) and never re-hashed. `.lazy.lua` also
+  900, main = "pytemplate", opts = { root = root } }`) and never re-hashed. `spec.lua` also
   declares `optional = true` specs whose `opts`/`config` delegate to the plugin: which-key,
   overseer, nvim-lspconfig, nvim-lint, neotest, nvim-dap, nvim-dap-python, venv-selector.
 - `.pytemplate/editor.json` (`editors/nvim.editor_data`, schema 1): ASCII data only, relative
@@ -3242,7 +3255,8 @@ LazyVim wiring:
   strips ANSI (CSI, and OSC ended by BEL or by ST `ESC \`: ruff links its rule codes with OSC 8
   in terminals it recognises, `VTE_VERSION`, `WT_SESSION`, iTerm..., and overseer's own cleanup
   keeps them; `test_parser_strips_every_terminal_escape`), honours the `error: `/`warning: `
-  prefixes, types mypy's `error:` lines and ruff's findings by the task's typing profiles like
+  prefixes, types mypy's `error:` lines and ruff's findings (a coded rule `F401` or a hyphenated
+  name `invalid-syntax`, as the VS Code RUFF matcher accepts) by the task's typing profiles like
   the VS Code matchers (`tasks.severity`: the strictest `typing.task_severity` of the backends
   the task checks, `tasks.task_backends`: its BACKEND argument, `all`, mypyc for
   `compile`/`report`, every supported one for a `[tasks]` entry, else the active one; E/W
@@ -3297,7 +3311,9 @@ LazyVim wiring:
   the `lang.python` extra `.lazy.lua` imports, raises an error on the first Python buffer
   without it) and a C compiler (nvim-treesitter builds its parsers; LazyVim lists it among its
   requirements), each with the install command of this OS (`cmd_nvim._install_hint`, chosen
-  when doctor runs); optional: rg, tree-sitter, python, node), the uv the
+  when doctor runs; on macOS a `/usr/bin` `git` or `python3`/`python` is an xcrun stub that only
+  opens the install dialog while `cmd_env._xcode_problem` finds no clang, so it counts as missing
+  with `xcode-select --install`, as `c_compiler` treats `/usr/bin/cc`); optional: rg, tree-sitter, python, node), the uv the
   runner runs on (the plugin runs `./pyt` and the uvx basedpyright with the uv it finds in
   the same places, never `uvx`), and ruff, mypy, debugpy in `.venv` (basedpyright optional)
   (`test_nvim_doctor_needs_fd`, `test_nvim_doctor_needs_a_c_compiler`,
@@ -5034,6 +5050,15 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   `test_nvim_render.py::test_lazy_lua_is_identical_in_every_mode`,
   `test_lazy_lua_bytes_are_pinned`, `test_gitattributes_keeps_lazy_lua_lf`,
   `test_cmd_nvim.py::test_trust_macos_paths_ignore_case_and_unicode_form`. Goes: never.
+- **Neovim reads a 'runtimepath' entry as a file glob** (LIMITATION): `[ ] { }` are wildcards, a
+  comma separates entries, a backslash escapes, a backtick is command substitution, a single quote
+  sends it through 'shell' and a `$NAME` is expanded (vim.secure expands it too), so in a project
+  folder whose path holds one of these the plugin cannot be put on the runtimepath (require fails,
+  E79), and because the optional plugins' `opts` delegate to it their config broke too (no LSP, no
+  lint, no tasks). Up: none found. Fix: `spec.lua` refuses such a root (returns `{}` with one
+  `vim.notify`, so the other plugins keep working); `cmd_nvim.rtp_unsafe_char` names the character
+  and `nvim doctor`/`nvim trust` report it (12.2). Test:
+  `test_nvim_render.py::test_lazy_lua_refuses_a_runtimepath_unsafe_root`. Goes: never.
 - **`vim.secure.trust`** (LIMITATION): the `path` form exists from 0.12 only (0.11 needs a
   buffer), and it writes its database with `io.open(<state>/trust, "w")`, which fails while the
   state folder does not exist. Fix: the trust snippet of `cmd_nvim.trust_file` creates the
@@ -5762,16 +5787,12 @@ Editors:
   `vim.g.lazyvim_json` override.
 - `selftest --nvim` does not pre-install the treesitter python parser or warm basedpyright:
   on a cold cache those smoke checks SKIP and the first run is slow.
-- `.lazy.lua` reads lazy.nvim's internal `require("lazy.core.config").spec.modules` without a
-  guard (LazyVim reads the same field in several places, and lazy.nvim has not changed it
-  since 2023): if it ever changes, lazy.nvim reports "Failed to load `.lazy.lua`" and the
-  whole integration is missing. It also names the five extras and the plugins' repositories.
-  Fixing any of it changes `.lazy.lua`'s bytes (a re-trust; projects already made keep their
-  own copy). Recommended in one go: make `.lazy.lua` a minimal loader that finds the root and
-  returns `dofile(root .. "/.pytemplate/nvim/spec.lua")(root)` (no pcall: lazy.nvim reports
-  its errors), with today's body in `spec.lua` and the internal read guarded
-  (`pcall(require, ...)`, `type(...) == "table"`, else no extras). `.pytemplate/nvim/**` is
-  already trusted with `.lazy.lua`, so later fixes there need no re-trust.
+- `spec.lua` reads lazy.nvim's internal `require("lazy.core.config").spec.modules`, now guarded
+  (`pcall(require, ...)`, `type(...) == "table"`, else no extras): if lazy.nvim ever drops that
+  field the integration loses only the extra imports, never errors. It lives in `spec.lua` (not
+  in `.lazy.lua`, which is a static loader), and it names the five extras and the plugins'
+  repositories, so a later fix there needs no re-trust (`.pytemplate/nvim/**` is trusted with
+  `.lazy.lua`); only editing the loader itself does.
 - The pinned `selftest --nvim` (`nvimtest.LOCK`, `cmd_nvim.STARTER_REV`) stays green while
   upstream moves: only a run without the lock (template-nvim's weekly canary) shows drift coming, and
   users' LazyVim follows its own `lazy-lock.json`.
@@ -5846,7 +5867,7 @@ Code coupling (rename together):
   <-> setuptools' `_find_vc2017` component choice (`test_msvc_component_matches_setuptools`)
   and `mypyc.has_compiler_hint(platform)` (the winget `--add` component).
 - `editor.json` <-> `cli.COMMANDS` (6.2); `cmd_nvim.EXTRAS` <-> the extras list in
-  `templates/nvim/lazy.lua` (`test_lazy_lua_extras_match_cmd_nvim`); `vscode.MYPYC_STAGE` /
+  `.pytemplate/nvim/spec.lua` (`test_lazy_lua_extras_match_cmd_nvim`); `vscode.MYPYC_STAGE` /
   `editor.json` `mypyc_stage` / `vscode._STAGE` (the pytest stage matcher) <->
   `mypyc.profile(cfg, ...).stage` (`test_editor_json_stage_matches_the_runner`); the CI pyz path
   <-> `BuildRequest.out_name` and the merged upload's `.cmd` <-> `pyz.wrapper_path` (10;

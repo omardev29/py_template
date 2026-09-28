@@ -20,9 +20,16 @@ and how to install it.
    the project does the same.
 4. Start Neovim from the project folder (lazy.nvim only reads `.lazy.lua` from the cwd upward).
 
-`.lazy.lua` imports the LazyVim extras `lang.python`, `lang.toml`, `dap.core`, `test.core` and
-`editor.overseer`. `./pyt nvim extras` enables them in your own `lazyvim.json`, which avoids
+The integration imports the LazyVim extras `lang.python`, `lang.toml`, `dap.core`, `test.core`
+and `editor.overseer`. `./pyt nvim extras` enables them in your own `lazyvim.json`, which avoids
 LazyVim's import-order warning and keeps their plugins installed when you work elsewhere.
+
+`.lazy.lua` is a thin, static loader: it finds the folder of the trusted file lazy.nvim read and
+runs `.pytemplate/nvim/spec.lua`, so all the logic lives in `.pytemplate/nvim/` (trusted with
+`.lazy.lua`) and a later fix there needs no re-trust. Because Neovim reads a runtimepath entry as
+a file glob, a project path holding `[ ] { } , \ ` `` ` `` `'` or `$` cannot carry the plugin: the
+integration is skipped with one message so your other plugins keep working (`./pyt nvim doctor`
+names the character; move the project to a plain path).
 
 ## What you get
 
@@ -74,6 +81,7 @@ vim.g.pytemplate_render_on_save = false   -- default true
 
 ## Files
 
+- `spec.lua`: the body of `.lazy.lua` (`dofile`'d with the project root): the LazyVim extras and the plugin spec, skipped when the path is runtimepath-unsafe.
 - `lua/pytemplate/init.lua`: project root, `.pytemplate/editor.json` (validated data), environments, uv lookup, the runner argv.
 - `lua/pytemplate/tasks.lua`: task definitions, output parser, pickers, keymaps, `:Pyt`.
 - `lua/pytemplate/integrations.lua`: opts for nvim-lspconfig, nvim-lint, neotest, overseer, which-key, venv-selector.

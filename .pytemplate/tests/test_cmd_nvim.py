@@ -1017,14 +1017,15 @@ def test_prepare_base_is_rebuilt_when_neovim_or_the_pins_change(tmp_path: Path, 
 
 
 def test_the_shipped_pins_are_complete() -> None:
-    """The lock pins LazyVim, lazy.nvim, every plugin .lazy.lua configures and the ones its extras
+    """The lock pins LazyVim, lazy.nvim, every plugin spec.lua configures and the ones its extras
     bring (neotest-python): an unpinned one would be installed at its newest commit."""
     assert re.fullmatch(r"[0-9a-f]{40}", cmd_nvim.STARTER_REV)
     if not nvimtest.LOCK.is_file():
         pytest.skip("no pinned lazy-lock.json (a run without it takes the latest of everything)")
     lock = json.loads(nvimtest.LOCK.read_text(encoding="utf-8"))
     assert isinstance(lock, dict)
-    configured = re.findall(r'\{ "[\w.-]+/([\w.-]+)", optional = true', (cmd_nvim.ROOT / ".pytemplate" / "templates" / "nvim" / "lazy.lua").read_text(encoding="utf-8"))
+    # the plugin specs live in spec.lua now (.lazy.lua is a thin loader that dofile's it)
+    configured = re.findall(r'\{ "[\w.-]+/([\w.-]+)", optional = true', (cmd_nvim.ROOT / ".pytemplate" / "nvim" / "spec.lua").read_text(encoding="utf-8"))
     assert len(configured) >= 8, configured
     for name in ("LazyVim", "lazy.nvim", "neotest-python", *configured):
         entry = lock.get(name)
@@ -1200,3 +1201,23 @@ def test_c_compiler_skips_the_macos_shims_without_developer_tools(monkeypatch: p
     monkeypatch.setattr(cmd_nvim, "IS_MACOS", False)  # Linux: /usr/bin is a real compiler
     monkeypatch.setattr(cmd_env, "_xcode_problem", lambda: "never asked")
     assert cmd_nvim.c_compiler() == "/usr/bin/gcc"
+
+
+def test_nvim_doctor_flags_the_macos_git_and_python_stubs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """/usr/bin/git and /usr/bin/python3 are xcrun stubs that only open the install dialog while
+    cmd_env._xcode_problem finds no developer tools: they count as missing (xcode-select --install),
+    as c_compiler treats /usr/bin/cc; a real /usr/bin curl and tar stay ok, and with the tools
+    installed git is ok again."""
+    from runner import cmd_env
+
+    monkeypatch.setattr(cmd_nvim, "IS_WINDOWS", False)
+    monkeypatch.setattr(cmd_nvim, "IS_MACOS", True)
+    monkeypatch.setattr(cmd_env, "_xcode_problem", lambda: "no developer tools (xcode-select -p fails)")
+    code, out = _doctor(tmp_path, monkeypatch, capsys, cc=None)
+    assert code == 1, out
+    assert "[XX] git is the /usr/bin stub" in out and "xcode-select --install" in out, out
+    assert "[XX] python3 is the /usr/bin stub" in out or "[--] python3 is the /usr/bin stub" in out, out
+    assert "[ok] curl: /usr/bin/curl" in out and "[ok] tar: /usr/bin/tar" in out, out
+    monkeypatch.setattr(cmd_env, "_xcode_problem", lambda: None)  # developer tools installed
+    _, out = _doctor(tmp_path / "ok", monkeypatch, capsys)
+    assert "[ok] git: /usr/bin/git" in out, out

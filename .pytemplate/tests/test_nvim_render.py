@@ -27,9 +27,10 @@ from runner.ui import PytError  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / ".pytemplate" / "nvim"
+SPEC_LUA = PLUGIN / "spec.lua"  # the logic .lazy.lua (a thin loader) dofile's; trusted with the plugin
 # Neovim trusts .lazy.lua by the sha256 of its bytes: changing them forces every user of every
 # project to trust it again. Update this only on purpose (and say so in the release notes).
-LAZY_LUA_SHA256 = "08894628ac537240b2ed9fbb385e9fe8ea2ee41398b52efc08aee2a69b2e8f57"
+LAZY_LUA_SHA256 = "b71471a56869d932d2581f739d8e9978967d3e73c6c72d7d304e02188b6cc7c3"
 
 VARIANTS: dict[str, dict[str, Any]] = {
     "script": {},
@@ -76,9 +77,12 @@ def test_lazy_lua_is_identical_in_every_mode() -> None:
     assert "\r" not in text and text.endswith("\n")
     assert text.isascii()
     assert "\ufeff" not in text
+    # A thin loader: the extras and the plugin spec live in spec.lua (trusted with the plugin).
+    assert ".pytemplate/nvim/spec.lua" in text and "dofile(spec)(root)" in text
+    spec = SPEC_LUA.read_text(encoding="utf-8")
     for extra in ("lang.python", "lang.toml", "dap.core", "test.core", "editor.overseer"):
-        assert f'"lazyvim.plugins.extras.{extra}"' in text
-    assert 'name = "pytemplate.nvim"' in text
+        assert f'"lazyvim.plugins.extras.{extra}"' in spec
+    assert 'name = "pytemplate.nvim"' in spec
 
 
 def test_lazy_lua_matches_the_template() -> None:
@@ -110,8 +114,8 @@ def test_lazy_lua_template_in_another_encoding_is_a_clear_error(tmp_path: Path, 
 
 
 def test_lazy_lua_extras_match_cmd_nvim() -> None:
-    """./pyt nvim extras enables exactly what .lazy.lua imports."""
-    extras = re.findall(r'"(lazyvim\.plugins\.extras\.[\w.]+)"', nvim.LAZY_TEMPLATE.read_text(encoding="utf-8"))
+    """./pyt nvim extras enables exactly what spec.lua imports (the loader dofile's it)."""
+    extras = re.findall(r'"(lazyvim\.plugins\.extras\.[\w.]+)"', SPEC_LUA.read_text(encoding="utf-8"))
     assert extras == list(cmd_nvim.EXTRAS)
 
 
@@ -306,13 +310,8 @@ check("parse note", p("src/x.py:5: note: see") == nil, "note not ignored")
 local tmpl = require("overseer.template.pytemplate")
 check("overseer provider", type(tmpl.generator) == "function", vim.inspect(tmpl))
 
--- mypyc prints paths relative to its stage (a copy of src/): they land on src/
-local pkg = pt.info().pkg
-local core = root .. "/src/" .. pkg .. "/core/__init__.py"
-m = p(pkg .. "/core/__init__.py:2: error: Incompatible types in assignment  [assignment]")
-check("parse mypyc stage path", m and m.type == "E" and pt.same_path(m.filename, core), vim.inspect(m))
-m = p("src/" .. pkg .. "/core/__init__.py:2: error: x  [misc]")
-check("parse mypy src path", m and pt.same_path(m.filename, core), vim.inspect(m))
+-- a relative path with no file under src/ stays root-relative; the stage->src mapping needs a
+-- real src/<pkg>/core, so it is checked hermetically in test_parser_maps_mypyc_stage_paths_to_src
 m = p("nowhere/x.py:1: error: y")
 check("parse a path found nowhere", m and pt.same_path(m.filename, root .. "/nowhere/x.py"), vim.inspect(m))
 
@@ -483,7 +482,7 @@ def test_a_neovim_that_inherited_the_global_mode_runs_the_projects_runner(tmp_pa
     assert "PTRC 0\n./pyt [-v|-q]" in out and "Outside a project" not in out, out + r.stderr
 
 
-def _headless_lua(tmp_path: Path, lua: str, test_root: Path) -> subprocess.CompletedProcess[str]:
+def _headless_lua(tmp_path: Path, lua: str, test_root: Path, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """Run `lua` in `nvim --headless --clean` with isolated XDG dirs (never the user's Neovim)."""
     exe = _nvim()
     if not exe:
@@ -494,6 +493,7 @@ def _headless_lua(tmp_path: Path, lua: str, test_root: Path) -> subprocess.Compl
     for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
         env[var] = str(tmp_path / var.lower())
     env.update(NVIM_LOG_FILE=str(tmp_path / "nvim.log"), PT_TEST_ROOT=test_root.as_posix(), PT_PLUGIN=PLUGIN.as_posix(), PT_TMP=tmp_path.as_posix())
+    env.update(env_extra or {})
     return subprocess.run(  # the script quits itself; `cq!` only runs after a Lua error in it
         [exe, "--headless", "--clean", "-n", "-i", "NONE", "-c", f"luafile {script.as_posix()}", "-c", "cq!"],
         cwd=tmp_path, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
@@ -694,6 +694,81 @@ def _project(tmp_path: Path, **typing: Any) -> Path:
     return project
 
 
+def _lay_out_project(dest: Path) -> None:
+    """A real project the .lazy.lua loader can run against: the shipped .lazy.lua, the plugin and
+    an empty pytemplate.toml (spec.lua needs both the config and the plugin to accept the folder)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(PLUGIN, dest / ".pytemplate" / "nvim")
+    shutil.copy2(ROOT / ".lazy.lua", dest / ".lazy.lua")
+    (dest / "pytemplate.toml").write_text("", encoding="utf-8")
+
+
+# lazy.nvim reads the file with loadstring (no chunk path); the loader finds its root from the cwd
+LAZY_LUA_ROOT_CHECK = r"""
+local a = vim.fs.normalize(vim.env.PT_TMP .. "/outer")
+package.loaded["lazy.core.config"] = { spec = { modules = {} } }
+vim.uv.chdir(a .. "/vendored/inner")
+local ok, spec = pcall(loadfile(a .. "/.lazy.lua"))
+local plugin
+for _, s in ipairs(ok and spec or {}) do
+  if s.name == "pytemplate.nvim" then plugin = s end
+end
+-- root is the folder of the trusted .lazy.lua (a), never the nested pytemplate.toml (a/vendored/inner)
+local good = plugin ~= nil and vim.fs.normalize(plugin.dir) == a .. "/.pytemplate/nvim"
+  and vim.fs.normalize(plugin.opts.root) == a
+io.stdout:write((good and "PTOK" or ("PTFAIL " .. vim.inspect({ ok = ok, plugin = plugin }))) .. "\n")
+vim.cmd(ok and "qa!" or "cq!")
+"""
+
+
+def test_lazy_lua_root_is_the_trusted_files_folder(tmp_path: Path) -> None:
+    """.lazy.lua's root is the folder of the .lazy.lua lazy.nvim read and trusted, never a nearer
+    pytemplate.toml: a folder cloned or vendored inside the project, with its own pytemplate.toml
+    but no .lazy.lua, must not become the root (its plugin code would run untrusted)."""
+    outer = tmp_path / "outer"
+    _lay_out_project(outer)
+    inner = outer / "vendored" / "inner"
+    (inner / ".pytemplate" / "nvim" / "lua" / "pytemplate").mkdir(parents=True)
+    (inner / "pytemplate.toml").write_text("", encoding="utf-8")
+    (inner / ".pytemplate" / "nvim" / "lua" / "pytemplate" / "init.lua").write_text("return {}\n", encoding="utf-8")
+    r = _headless_lua(tmp_path, LAZY_LUA_ROOT_CHECK, ROOT)
+    assert "PTOK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
+# spec.lua schedules the notify, so vim.wait pumps the loop until it fires
+LAZY_LUA_UNSAFE_CHECK = r"""
+local a = vim.fs.normalize(vim.env.PT_UNSAFE_ROOT)
+package.loaded["lazy.core.config"] = { spec = { modules = { "lazyvim.plugins" } } }
+vim.uv.chdir(a)
+local notified
+vim.notify = function(msg) notified = msg end
+local ok, spec = pcall(loadfile(a .. "/.lazy.lua"))
+local bad
+for _, s in ipairs(ok and spec or {}) do
+  if s.name == "pytemplate.nvim" or s.import then bad = s end
+end
+vim.wait(1000, function() return notified ~= nil end)
+-- the integration is skipped (no plugin, no extras) with one notify, so the LazyVim plugins keep working
+local good = ok and bad == nil and type(notified) == "string" and notified:find("[", 1, true) ~= nil
+io.stdout:write((good and "PTOK" or ("PTFAIL " .. vim.inspect({ ok = ok, bad = bad, notified = notified }))) .. "\n")
+vim.cmd(ok and "qa!" or "cq!")
+"""
+
+
+def test_lazy_lua_refuses_a_runtimepath_unsafe_root(tmp_path: Path) -> None:
+    r"""A `[ ] { } , \ ` ' $` in the project path is a 'runtimepath' glob: the plugin cannot load
+    there (require fails, E79), so spec.lua returns {} with one notify and the LazyVim plugins whose
+    opts call into it keep working. cmd_nvim.rtp_unsafe_char names the character for doctor/trust."""
+    root = tmp_path / "q[x]z"
+    _lay_out_project(root)
+    r = _headless_lua(tmp_path, LAZY_LUA_UNSAFE_CHECK, ROOT, {"PT_UNSAFE_ROOT": root.as_posix()})
+    assert "PTOK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+    assert cmd_nvim.rtp_unsafe_char(Path("/tmp/q[x]z")) == "["
+    assert cmd_nvim.rtp_unsafe_char(Path("/tmp/a,b")) == ","
+    assert cmd_nvim.rtp_unsafe_char(Path("/tmp/a`b")) == "`"
+    assert cmd_nvim.rtp_unsafe_char(Path("/tmp/plain")) is None
+
+
 def test_mypy_linter_follows_a_venv_created_later(tmp_path: Path) -> None:
     """nvim-lint's mypy is built when Neovim starts; `./pyt setup` (or any `uv run --locked`)
     may create .venv afterwards: the locked mypy must run then, not a mypy found on PATH."""
@@ -841,6 +916,12 @@ end
 
 STAGE_PATHS_CHECK = LUA_PRELUDE + r"""
 local src = root .. "/src/demo/app.py"
+-- mypyc prints paths relative to its stage (a copy of src/): a bare relative path whose file
+-- exists under src/ lands on src/, and a src/ path stays (like the VS Code MYPYC matcher)
+local m = p("demo/app.py:2: error: Incompatible types in assignment  [assignment]")
+check("bare relative maps to src", m and m.type == "E" and pt.same_path(m.filename, src) and m.lnum == 2, vim.inspect(m))
+m = p("src/demo/app.py:3: error: x  [misc]")
+check("src path stays", m and pt.same_path(m.filename, src), vim.inspect(m))
 local stages = {
   ".build/mypyc-dev/stage/", ".build/mypyc-release/stage/", ".build/wsl/mypyc-dev/stage/",
   ".build\\mypyc-dev\\stage\\", root .. "/.build/mypyc-dev/stage/", root .. "/.build/wsl/mypyc-release/stage/",
@@ -850,7 +931,7 @@ for _, stage in ipairs(stages) do
   local m = p(stage .. "demo/app.py:45: ValueError")
   check("stage " .. stage, m and pt.same_path(m.filename, src) and m.lnum == 45 and m.text == "ValueError", vim.inspect(m))
 end
-local m = p(".build/mypyc-dev/stage/main.py:5: KeyError")
+m = p(".build/mypyc-dev/stage/main.py:5: KeyError")
 check("stage main.py", m and pt.same_path(m.filename, root .. "/src/main.py"), vim.inspect(m))
 m = p("x.build/mypyc-dev/stage/main.py:5: KeyError")
 check("x.build is no stage", m and pt.same_path(m.filename, root .. "/x.build/mypyc-dev/stage/main.py"), vim.inspect(m))
@@ -986,6 +1067,11 @@ m = p("tests/test_x.py:14: AssertionError", lenient)
 check("pytest crash lines stay errors", m and m.type == "E", vim.inspect(m))
 m = p("  /r/src/x.py:3:5 - warning: y", { mypy = "E", ruff = "E" })
 check("basedpyright keeps its own", m and m.type == "W", vim.inspect(m))
+-- ruff's syntax errors are a hyphenated name (invalid-syntax), not a coded rule: still ruff, so
+-- they follow the profile like F401 (the VS Code RUFF matcher accepts both), never always "E"
+local syntax_line = "src/p/_bad.py:2:1: invalid-syntax: unexpected EOF while parsing"
+check("invalid-syntax follows the profile", (p(syntax_line, lenient) or {}).type == "W" and (p(syntax_line, { mypy = "E", ruff = "E" }) or {}).type == "E", vim.inspect(p(syntax_line, lenient)))
+check("invalid-syntax keeps its text", (p(syntax_line, lenient) or {}).text == "invalid-syntax: unexpected EOF while parsing", vim.inspect(p(syntax_line, lenient)))
 
 -- editor.json of this project: cpython (active) on the warn profile, mypyc on its own
 local E, W = { mypy = "E", ruff = "E" }, { mypy = "W", ruff = "W" }
