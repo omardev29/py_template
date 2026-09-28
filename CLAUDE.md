@@ -2846,9 +2846,12 @@ Per method:
   removes what it created (the folder and the parents it made, or only the content of the
   empty folder it was given) and says so ("nothing was written" when the copy failed before it
   made anything: it said it had removed a project it never made); a folder with content is
-  refused before anything is written, and so are a folder it cannot list and a path below a file
-  (`presets.check_destination`, in `cmd_mode.cmd_new` and its dry run too: an internal-error
-  traceback, and a bare `[Errno 20] Not a directory`). On success it prints one hint (init prints none: it runs in the copy), `cd
+  refused before anything is written, and so are a destination it may not look into (below a
+  folder it may not enter, a name too long: "cannot access"), a folder it cannot list and a path
+  below a file (`presets.check_destination`, in `cmd_mode.cmd_new` and its dry run too: Path.exists
+  raised the PermissionError on Python 3.11-3.13, an internal-error traceback, 3.14 read the folder
+  as missing and git's start said "cannot run git", and a path below a file got a bare `[Errno 20]
+  Not a directory`). On success it prints one hint (init prints none: it runs in the copy), `cd
   <dest>` and the launcher's `setup` on lines of their own, for the shell of the launcher
   (`presets.next_steps`: the `PYTEMPLATE_LAUNCHER` prefix `ps1:` (PowerShell single quotes;
   `cd -LiteralPath` for a path with `[ ] * ?` or a backtick, which its cd reads as a wildcard

@@ -1543,6 +1543,80 @@ def test_new_asks_for_python_cpython_before_it_copies_anything(tmp_path: Path, m
     assert list(tmp_path.iterdir()) == []
 
 
+def _new_stops_before_any_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    from runner import envs
+
+    monkeypatch.setattr(cmd_mode, "_work_tree_top", lambda dest: pytest.fail("git asked"))
+    monkeypatch.setattr(envs, "ensure_python", lambda version: pytest.fail("python.cpython asked"))
+    monkeypatch.setattr(presets, "new", lambda *a, **k: pytest.fail("made a project"))
+
+
+def test_new_names_a_destination_it_cannot_look_into(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`pyt new /root/proj` as a user who may not enter /root: Path.exists raised the
+    PermissionError on Python 3.11-3.13 (an internal error and its traceback), and on 3.14, which
+    reads such a folder as missing, git's start in /root said "cannot run git: Permission denied
+    (is it executable?...)". A folder new may not list, and a name too long for the file system,
+    ended in the same traceback. One error names the destination, exit 2, before any other step.
+    Simulated here (root enters every folder): the next test does it for real."""
+    cfg = config.load(set())
+    locked, unlistable = tmp_path / "locked", tmp_path / "unlistable"
+    locked.mkdir()
+    unlistable.mkdir()
+    real_stat, real_iterdir = os.stat, Path.iterdir
+
+    def fake_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if isinstance(path, (str, os.PathLike)) and Path(path) != locked and Path(path).is_relative_to(locked):
+            raise PermissionError(13, "Permission denied", str(path))  # EACCES: search permission on `locked`
+        return real_stat(path, *args, **kwargs)
+
+    def fake_iterdir(self: Path) -> Any:
+        if self == unlistable:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    _new_stops_before_any_step(monkeypatch)
+    monkeypatch.setattr(os, "stat", fake_stat)
+    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
+    for dest, what in ((locked / "proj", "cannot access"), (locked / "a" / "proj", "cannot access"), (unlistable, "cannot read the folder")):
+        with pytest.raises(PytError, match=re.escape(f"new: {what} {dest}: Permission denied")) as e:
+            cmd_mode.cmd_new(cfg, [str(dest), "--name", "demo"])
+        assert e.value.code == 2
+    monkeypatch.setattr(os, "stat", real_stat)
+    too_long = tmp_path / ("p" * 300)
+    with pytest.raises(PytError, match=r"new: cannot access .*: File name too long") as e:
+        cmd_mode.cmd_new(cfg, [str(too_long), "--name", "demo"])
+    assert e.value.code == 2
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["locked", "unlistable"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_new_below_a_folder_it_may_not_enter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same for real, where folder permissions hold for the user (not root: CI's container
+    user, macOS)."""
+    cfg = config.load(set())
+    locked, unlistable = tmp_path / "locked", tmp_path / "unlistable"
+    locked.mkdir()
+    unlistable.mkdir()
+    _new_stops_before_any_step(monkeypatch)
+    locked.chmod(0o000)
+    unlistable.chmod(0o300)  # enter and write, but not list
+    try:
+        try:
+            os.listdir(locked)
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("this user enters every folder (root): test_new_names_a_destination_it_cannot_look_into simulates it")
+        for dest, what in ((locked / "proj", "cannot access"), (unlistable, "cannot read the folder")):
+            with pytest.raises(PytError, match=re.escape(f"new: {what} {dest}: Permission denied")) as e:
+                cmd_mode.cmd_new(cfg, [str(dest), "--name", "demo"])
+            assert e.value.code == 2
+    finally:
+        locked.chmod(0o700)
+        unlistable.chmod(0o700)
+    assert not (locked / "proj").exists() and list(unlistable.iterdir()) == []
+
+
 def test_new_runs_the_copys_init_on_the_python_cpython_uv_gave(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The copy's runner starts on the interpreter envs.ensure_python returned: its __init runs
     there, and uv's cached environment of the new project's runner holds python.cpython from

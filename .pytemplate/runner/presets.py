@@ -1372,25 +1372,36 @@ def preset_python(preset: str) -> str:
 
 
 def check_destination(dest: Path, prefix: str = "") -> None:
-    """Refuse, before anything is written, a destination `new` cannot use: something that is not
-    a folder, a folder with content, one it cannot list (it ended in an internal-error traceback),
-    or a path below a file (the copy failed with a bare `[Errno 20] Not a directory`, and new said
-    it had removed a project it never made). `prefix` starts each message."""
-    if os.path.lexists(dest) and not dest.is_dir():
-        raise PytError(f"{prefix}{dest} exists and is not a folder")
-    if dest.is_dir():
-        try:
-            empty = next(iter(dest.iterdir()), None) is None
-        except OSError as e:
-            raise PytError(f"{prefix}cannot read the folder {dest}: {e.strerror or e}") from None
-        if not empty:
-            raise PytError(f"{prefix}{dest} already exists and is not empty")
+    """Refuse, before anything is written, a destination `new` cannot use: one it may not look
+    into (below a folder it may not enter, a name too long: Path.exists raised that
+    PermissionError on Python 3.11-3.13, an internal-error traceback, and 3.14 read the folder as
+    missing, so git's start in the folder above said "cannot run git"), something that is not a
+    folder, a folder with content, one it cannot list (a traceback too), or a path below a file
+    (the copy failed with a bare `[Errno 20] Not a directory`, and new said it had removed a
+    project it never made). `prefix` starts each message."""
+    try:
+        info: os.stat_result | None = os.stat(dest)
+    except (FileNotFoundError, NotADirectoryError):
+        info = None  # missing, or below a file (the parents say which)
+    except OSError as e:
+        raise PytError(f"{prefix}cannot access {dest}: {e.strerror or e}") from None
+    if info is None:
+        if os.path.lexists(dest):  # a symbolic link whose target is gone
+            raise PytError(f"{prefix}{dest} exists and is not a folder")
+        parent = dest.parent
+        while not os.path.lexists(parent) and parent.parent != parent:
+            parent = parent.parent
+        if not parent.is_dir():
+            raise PytError(f"{prefix}{parent} is not a folder: {dest} cannot be made in it")
         return
-    parent = dest.parent
-    while not os.path.lexists(parent) and parent.parent != parent:
-        parent = parent.parent
-    if not parent.is_dir():
-        raise PytError(f"{prefix}{parent} is not a folder: {dest} cannot be made in it")
+    if not stat.S_ISDIR(info.st_mode):
+        raise PytError(f"{prefix}{dest} exists and is not a folder")
+    try:
+        empty = next(iter(dest.iterdir()), None) is None
+    except OSError as e:
+        raise PytError(f"{prefix}cannot read the folder {dest}: {e.strerror or e}") from None
+    if not empty:
+        raise PytError(f"{prefix}{dest} already exists and is not empty")
 
 
 def new(dest: Path, preset: str, name: str | None, python: Path | None = None) -> None:
