@@ -145,7 +145,10 @@ def test_exe_default_argv_and_output(sandbox: Path, monkeypatch: pytest.MonkeyPa
     assert argv[argv.index("--optimize") + 1] == "1"
     assert argv[argv.index("--python-option") + 1] == "X utf8"  # UTF-8 as in development
     assert "--noupx" in argv and "--noconsole" not in argv  # a console app by default
-    assert ["--add-data", f"{stage / 'assets'}:assets"] == argv[argv.index("--add-data") : argv.index("--add-data") + 2]
+    # relative to the folder of the spec, which PyInstaller reads a relative data source from
+    source, dest = argv[argv.index("--add-data") + 1].rsplit(":", 1)
+    spec = Path(argv[argv.index("--specpath") + 1])
+    assert dest == "assets" and (spec / source).resolve() == (stage / "assets").resolve()
     assert "--hidden-import" not in argv  # cpython: PyInstaller sees every import itself
     assert result == sandbox / "dist" / "myapp-cpython-exe" / ("myapp" + (".exe" if IS_WINDOWS else ""))
     assert result.is_file()
@@ -170,6 +173,33 @@ def test_exe_mypyc_hidden_imports_icon_and_extra_args_order(sandbox: Path, monke
     assert argv[-4:] == ["--collect-all", "x", "--log-level", "DEBUG"]  # extra_args, then the command line
     assert "--onedir" in argv
     assert result == sandbox / "dist" / "myapp-mypyc-exe" / "myapp" and result.is_dir()
+
+
+def _pyinstaller_split(value: str, pathsep: str) -> tuple[str, str]:
+    """--add-data SOURCE:DEST as PyInstaller 6.22.3 reads it (makespec.SourceDestAction): the one
+    separator, ':' or os.pathsep, that is not a Windows drive's."""
+    (separator,) = (m for m in re.finditer(rf"(^\w:[/\\])|[:{pathsep}]", value) if not m[1])
+    return value[: separator.start()], value[separator.end() :]
+
+
+@pytest.mark.parametrize("flet", [False, True])
+def test_exe_assets_hold_no_separator_pyinstaller_splits_at(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flet: bool) -> None:
+    # A project in C:\Users\me\games;2026\proj: PyInstaller found two separators in the absolute
+    # source (';' is os.pathsep on Windows) and stopped with "Wrong syntax, should be
+    # --add-data=SOURCE:DEST"; flet pack hands the value to PyInstaller unchanged
+    root = tmp_path / "games;2026"
+    monkeypatch.setattr(exe, "BUILD", root / "build")
+    monkeypatch.setattr(cmd_build, "DIST", root / "dist")
+    if flet:
+        rec = _flet_pack(root, monkeypatch, _flet_cfg(), "cpython", windows=True, macos=False)
+        spec = root / "build" / "flet-pack" / "cpython"  # flet pack writes the spec in its cwd
+    else:
+        _, rec = _pyinstaller(root, monkeypatch, make({}))
+        spec = root / "build" / "pyinstaller" / "cpython"  # --specpath
+    value = rec.argv[rec.argv.index("--add-data") + 1]
+    for pathsep in (":", ";"):  # os.pathsep on POSIX and on Windows
+        source, dest = _pyinstaller_split(value, pathsep)
+        assert dest == "assets" and (spec / source).resolve() == (root / "build" / "exe-stage" / "cpython" / "assets").resolve()
 
 
 def test_exe_without_assets_folder_adds_no_data(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:

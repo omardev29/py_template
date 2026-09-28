@@ -6,6 +6,7 @@ plain PyInstaller the app would download a ~40 MB client on first startup.
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -42,11 +43,20 @@ def _hidden(req: BuildRequest, stage: Path) -> list[str]:
     return sorted(set(hidden))
 
 
-def _data_args(req: BuildRequest, stage: Path) -> list[str]:
+def _data_args(req: BuildRequest, stage: Path, spec_dir: Path) -> list[str]:
+    """--add-data for the assets, the source relative to `spec_dir`, the folder of the .spec file
+    PyInstaller writes and reads a relative data source from (--specpath; flet pack: its cwd):
+    PyInstaller splits SOURCE:DEST at ':' and at os.pathsep, and the absolute source of a project
+    in a folder named with ';' (legal on Windows, where uv works in it) gave it two separators:
+    "Wrong syntax, should be --add-data=SOURCE:DEST"."""
     assets = req.cfg.app.assets
-    if assets and (stage / assets).is_dir():
-        return ["--add-data", f"{stage / assets}:{assets}"]
-    return []
+    if not (assets and (stage / assets).is_dir()):
+        return []
+    try:
+        source = os.path.relpath(stage / assets, spec_dir)
+    except ValueError:  # another drive (Windows): only the absolute path names it
+        source = str(stage / assets)
+    return ["--add-data", f"{source}:{assets}"]
 
 
 def _icon_args(req: BuildRequest) -> list[str]:
@@ -108,7 +118,7 @@ def build(req: BuildRequest) -> Path:
     for h in _hidden(req, stage):
         argv += ["--hidden-import", h]
     size, size_env = size_args(cfg)
-    argv += size + _data_args(req, stage) + _icon_args(req) + cfg.deploy.exe.extra_args + req.extra
+    argv += size + _data_args(req, stage, work) + _icon_args(req) + cfg.deploy.exe.extra_args + req.extra
     remove_output(out)
     envs.uv_run(envs.tool_env(cfg), argv, extra_env=size_env)
     result = out / (cfg.app.name + (".exe" if IS_WINDOWS else "")) if onefile else out / cfg.app.name
@@ -146,9 +156,7 @@ def _flet_pack(req: BuildRequest) -> Path:
         argv.append("--debug-console=true")
     for h in _hidden(req, stage):
         argv += ["--hidden-import", h]
-    assets = cfg.app.assets
-    if assets and (stage / assets).is_dir():
-        argv += ["--add-data", f"{stage / assets}:{assets}"]
+    argv += _data_args(req, stage, work)  # flet pack writes the spec in its cwd, work
     if cfg.deploy.exe.icon:
         argv += ["--icon", str(ROOT / cfg.deploy.exe.icon)]
     size, size_env = size_args(cfg)

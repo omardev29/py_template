@@ -2391,7 +2391,11 @@ Per method:
 - **exe** (PyInstaller): `--python-option "X utf8"` (dev parity with `PYTHONUTF8`),
   `--optimize`, `methods.exe.size_args` (`--noupx`, or UPX below; `--exclude-module` per
   `deploy.exclude_modules`; `--strip`), `--clean`, `--log-level=WARN` unless `-v`, `--hidden-import` for
-  mypyc, `--add-data "<src>:<dest>"` (`:` is PyInstaller's documented separator). The flet
+  mypyc, `--add-data "<src>:<dest>"` (`:` is PyInstaller's documented separator; `exe._data_args`
+  writes `<src>` relative to the folder of the spec, `--specpath` or flet pack's cwd, which
+  PyInstaller reads a relative data source from: it splits the value at `:` AND at `os.pathsep`,
+  and the absolute path of a project in a Windows folder named with `;` gave it two separators,
+  `test_exe_assets_hold_no_separator_pyinstaller_splits_at`). The flet
   preset uses `flet pack` instead (`methods/exe._flet_pack`): it runs from its own cwd
   `.build/flet-pack/<b>` because `flet pack -y` wipes `<cwd>/build` and the distpath, which is
   the final `dist/<n>-<b>-exe` itself (on Linux flet pack writes `<n>.desktop` after PyInstaller,
