@@ -56,8 +56,10 @@ and staged (or stashed). `git commit --no-verify` skips the hook.
 Git runs hooks from the top of the work tree and may export repository variables relative to
 it (GIT_INDEX_FILE=.git/index) or GIT_DIR without GIT_WORK_TREE (linked worktrees: "the cwd is
 the top"). The project may live in a subfolder, so `git_env` pins them as absolute paths for
-the git calls made here, and `run` removes them from the environment of every other tool
-(uv may run git for git dependencies: it must not see the hook's repository).
+the git calls made here (and `_found_from` lets git find a GIT_DIR from the project folder
+itself, whose top a user's hook that ran `cd` first no longer is), and `run` removes them from
+the environment of every other tool (uv may run git for git dependencies: it must not see the
+hook's repository).
 """
 
 from __future__ import annotations
@@ -246,13 +248,31 @@ class Repo:
         return self.git("config", "--bool", "core.ignorecase").stdout.strip() == "true"
 
 
+def _found_from(project: Path, env: dict[str, str], environ: Mapping[str, str]) -> dict[str, str]:
+    """`env` (git_env), or git's own discovery from `project` when that finds the repository git
+    exported as GIT_DIR without GIT_WORK_TREE. git's rule then makes the cwd the top of the work
+    tree: right where git runs a hook (the top), wrong after the `cd` of a hook of the user's
+    (`cd apps/a && ./pyt hooks run`, README) in a checkout whose .git is a file (a linked
+    worktree, a submodule, a --separate-git-dir clone, where git exports an absolute GIT_DIR):
+    the project folder became the top, its staged files read as none and every generated file as
+    untracked, so every commit was refused. From the project folder git finds that very
+    repository through the .git file, and the real top; the index git exported stays."""
+    if "GIT_DIR" not in env or native_path(environ.get("GIT_WORK_TREE", "")):
+        return env
+    found = {k: v for k, v in env.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+    r = _git(["rev-parse", "--absolute-git-dir"], project, found)
+    where = native_path(r.stdout.strip()) if r.returncode == 0 else ""
+    return found if where and _same_folder(Path(where), Path(env["GIT_DIR"])) else env
+
+
 def find_repo(project: Path = ROOT, environ: Mapping[str, str] | None = None, cwd: Path | None = None) -> Repo:
     """Return the git repository of `project`. NotInGit when git is missing (3) or the project
     is not inside a git work tree (2); PytError with git's own message for any other git
     failure (dubious ownership, a broken .git...)."""
     if shutil.which("git") is None:
         raise NotInGit(NO_GIT, 3)
-    env = git_env(os.environ if environ is None else environ, cwd or Path(os.getcwd()))
+    source = os.environ if environ is None else environ
+    env = _found_from(project, git_env(source, cwd or Path(os.getcwd())), source)
     r = _git(["rev-parse", "--show-toplevel", "--git-common-dir", "--git-path", "hooks", "--show-prefix"], project, env)
     lines = r.stdout.splitlines()
     if r.returncode != 0 and "not a git repository" not in r.stderr:

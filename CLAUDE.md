@@ -1209,6 +1209,13 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   work tree wherever it runs, so `hooks.git_env` leaves it as it is (joined to the cwd, a user's
   hook that runs `cd apps/a && ./pyt hooks run` read a missing index: a first commit passed
   unchecked); with `GIT_DIR` it makes them absolute against the hook's cwd for its own git calls.
+  A `GIT_DIR` without `GIT_WORK_TREE` makes the cwd the top of the work tree, which that `cd`
+  moved: in a checkout whose `.git` is a file (a linked worktree, a submodule, a
+  `--separate-git-dir` clone: git exports an absolute `GIT_DIR` and `GIT_INDEX_FILE` there)
+  apps/a became the top, the staged files read as none and every committed file as untracked.
+  So `hooks._found_from` lets git find the repository from the project folder instead, when that
+  finds the very `GIT_DIR` git exported (the index git exported stays); otherwise the cwd rule
+  stays (`test_a_hook_that_cds_into_the_project_finds_the_top_of_a_checkout_whose_git_is_a_file`).
   `hooks` removes them before starting uv/ruff (they would point git at the wrong repository for
   a sub-folder project).
 - `test_hooks.py` runs git with `GIT_CONFIG_GLOBAL` at a missing file and
@@ -4984,11 +4991,15 @@ git and husky:
   dropped every staged path. Fix: `-c diff.relative=false` on every git call of `hooks` (5.6).
   Test: `test_hooks.py::test_staged_and_unstaged_files_ignore_diff_relative`. Goes: never.
 - **The hook's environment** (LIMITATION): git exports a relative `GIT_INDEX_FILE` and, in a
-  linked worktree, `GIT_DIR` without `GIT_WORK_TREE`. Fix: `hooks.git_env` makes them absolute
-  when `GIT_DIR` is set and leaves a relative index alone otherwise (git reads it from the top);
-  `hooks.run` removes them for uv and ruff (5.6). Test:
+  linked worktree, a submodule or a `--separate-git-dir` clone, `GIT_DIR` without
+  `GIT_WORK_TREE`, which makes the cwd the top (wrong after a hook's `cd apps/a`). Fix:
+  `hooks.git_env` makes them absolute when `GIT_DIR` is set and leaves a relative index alone
+  otherwise (git reads it from the top); `hooks._found_from` lets git find that `GIT_DIR` from
+  the project folder; `hooks.run` removes them for uv and ruff (5.6). Test:
   `test_hooks.py::test_git_env_pins_relative_paths`, `test_install_in_a_linked_worktree`,
-  `test_a_hook_that_cds_into_the_project_reads_the_real_index`. Goes: never.
+  `test_a_hook_that_cds_into_the_project_reads_the_real_index`,
+  `test_a_hook_that_cds_into_the_project_finds_the_top_of_a_checkout_whose_git_is_a_file`.
+  Goes: never.
 - **`git check-ignore` refuses `--literal-pathspecs`** (LIMITATION): Fix: `hooks._git(...,
   literal=False)` for it (5.6). Test:
   `test_hooks.py::test_ensure_installed_skips_an_ignored_project`. Goes: never.

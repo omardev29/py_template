@@ -1110,6 +1110,40 @@ def test_a_hook_that_cds_into_the_project_reads_the_real_index(tmp_path: Path) -
     assert hooks.staged_files(repo, "D") == []
 
 
+@needs_git
+@pytest.mark.parametrize("kind", ["worktree", "separate-git-dir"])
+def test_a_hook_that_cds_into_the_project_finds_the_top_of_a_checkout_whose_git_is_a_file(tmp_path: Path, kind: str) -> None:
+    """The same hook in a linked worktree or a --separate-git-dir clone: git hands the hook an
+    absolute GIT_DIR (and GIT_INDEX_FILE) without GIT_WORK_TREE, which makes the cwd, apps/a
+    after the cd, the top of the work tree. The staged files read as none ("ruff: no staged
+    Python file") and every committed file of the project as untracked, so every commit was
+    refused with "generated files staged"."""
+    if kind == "worktree":
+        top, project = make_repo(tmp_path, "apps/a")
+    else:
+        top, project = tmp_path / "repo", tmp_path / "repo" / "apps" / "a"
+        git(tmp_path, "init", "-q", "--separate-git-dir", str(tmp_path / "gitdir"), str(top))
+        project.mkdir(parents=True)
+    (project / "kept.json").write_text("{}\n", encoding="utf-8")
+    git(top, "add", "-A")
+    git(top, "commit", "-q", "--no-verify", "-m", "base")
+    if kind == "worktree":
+        top = tmp_path / "wt"
+        git(tmp_path / "repo", "worktree", "add", "-q", str(top))
+        project = top / "apps" / "a"
+    (project / "x.py").write_text("x = 1\n", encoding="utf-8")
+    git(top, "add", "apps/a/x.py")
+    gitdir = git(top, "rev-parse", "--absolute-git-dir").stdout.strip()
+    exported = {"GIT_DIR": gitdir, "GIT_INDEX_FILE": os.path.join(gitdir, "index"), "GIT_PREFIX": ""}
+    repo = find(project, top=project, environ=exported)  # the hook's cwd after its cd
+    assert os.path.samefile(repo.top, top) and repo.prefix == "apps/a"
+    assert hooks.staged_files(repo) == ["x.py"]
+    assert hooks.unstaged_files(repo, ["kept.json", "x.py"]) == []
+    # where git runs the hook (the top: no cd), the same variables keep working
+    repo = find(project, top=top, environ=exported)
+    assert os.path.samefile(repo.top, top) and repo.prefix == "apps/a" and hooks.staged_files(repo) == ["x.py"]
+
+
 def test_git_calls_are_pinned_against_user_config(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[tuple[list[str], dict[str, str]]] = []
 
