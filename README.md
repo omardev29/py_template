@@ -1570,7 +1570,11 @@ each commit it checks (and prints how long that took):
 - the generated files: up to date, and none left unstaged or untracked;
 - `pyproject.toml`: its managed parts, the `pytemplate.toml` changes that `./pyt apply` has not
   applied yet, and `uv lock --check`;
-- `pytemplate.toml`, `pyproject.toml`, `uv.lock` and the generated files committed together;
+- `pytemplate.toml`, `pyproject.toml`, `uv.lock` and the generated files committed together.
+  These files always belong in the commit: one that a `.gitignore` or your global
+  `core.excludesFile` ignores (a `.vscode/` or `.python-version` rule) still counts as not
+  staged, and so do the changes a `skip-worktree` or `assume-unchanged` flag hides from git (the
+  hint names `git add -f`, or the `git update-index` that clears the flag);
 - the mypyc rules on the staged compiled modules (blocking only with the `mypyc` profile);
 - the launchers' line endings and modes.
 

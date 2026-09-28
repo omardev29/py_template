@@ -43,7 +43,9 @@ so no mypy (that stays in `./pyt check`, the editors and CI):
      on the staged .py/.pyi files under src/ and tests/. A file with unstaged changes is
      checked in its STAGED version (fed to ruff on stdin), and a staged file deleted from the
      working tree is reported;
-  2. the generated files are up to date (`render --check`) and none has unstaged changes;
+  2. the generated files are up to date (`render --check`) and none has unstaged changes (an
+     untracked one that git ignores, or changes a skip-worktree or assume-unchanged flag hides,
+     count too: the commit needs them whatever git is told to overlook);
   3. pyproject.toml matches pytemplate.toml and uv.lock is up to date (`uv lock --check`);
   4. pytemplate.toml, pyproject.toml, uv.lock and the generated files are committed together:
      once one of them is in the commit, none of the three config files may keep unstaged
@@ -1137,15 +1139,90 @@ def staged_files(repo: Repo, diff_filter: str = STAGED) -> list[str]:
     return project_paths(repo.prefix, out.split("\0"), ignore_case=repo.ignore_case)
 
 
-def unstaged_files(repo: Repo, paths: Sequence[str]) -> list[str]:
-    """Return which of `paths` (relative to the project) have unstaged changes or are untracked
-    (and not ignored): a commit made now would miss them."""
+# The index flags that hide a file's changes from `git diff` and `git add`, by the tag `git
+# ls-files -v` gives the entry: S skip-worktree (a sparse checkout, or the trick that keeps local
+# edits of a tracked file out of `git status`), a lower-case tag assume-unchanged, s both
+HIDING_FLAGS = ("skip-worktree", "assume-unchanged")
+
+
+def _hiding_flags(tag: str) -> tuple[str, ...]:
+    return tuple(flag for flag, on in zip(HIDING_FLAGS, (tag in ("S", "s"), tag.islower()), strict=True) if on)
+
+
+@dataclass(frozen=True)
+class Staging:
+    """What a commit made now would miss of some paths (relative to the project)."""
+
+    dirty: frozenset[str]  # unstaged changes, untracked (ignored or not), changes an index flag hides
+    flags: Mapping[str, tuple[str, ...]] = field(default_factory=dict)  # tracked path -> its HIDING_FLAGS
+
+
+def staging(repo: Repo, paths: Sequence[str]) -> Staging:
+    """Which of `paths` (relative to the project) a commit made now would miss, and the index flags
+    that hide the changes of any of them. The paths are files the commit needs (the generated
+    ones, pytemplate.toml, pyproject.toml, uv.lock: CI renders and syncs from them), so neither
+    an ignore rule nor an index flag makes one committed: `--exclude-standard` left out an
+    untracked one that a .gitignore or the user's core.excludesFile (a global `.vscode/` or
+    `.python-version` rule) ignores, `git diff` never shows the changes of a skip-worktree or
+    assume-unchanged entry, and the hook passed a commit CI then failed on every push."""
     if not paths:
-        return []
-    diff = _git_output(repo, "diff", "--name-only", "-z", "--", *paths)
-    others = _git_output(repo, "ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--", *paths)
-    names = diff.split("\0") + others.split("\0")
-    return sorted(set(project_paths(repo.prefix, names, ignore_case=repo.ignore_case)))
+        return Staging(frozenset())
+    names = _git_output(repo, "diff", "--name-only", "-z", "--", *paths).split("\0")
+    index = _git_output(repo, "ls-files", "--others", "--stage", "-v", "-z", "--full-name", "--", *paths)
+    flags: dict[str, tuple[str, ...]] = {}
+    blobs: dict[str, str] = {}
+    for record in index.split("\0"):
+        if record.startswith("? "):  # untracked, whatever an ignore rule says
+            names.append(record[2:])
+            continue
+        meta, _, name = record.partition("\t")
+        fields = meta.split()  # tag, mode, blob, stage
+        hidden = _hiding_flags(fields[0]) if len(fields) == 4 else ()
+        for rel in project_paths(repo.prefix, [name], ignore_case=repo.ignore_case) if hidden else ():
+            flags[rel], blobs[rel] = hidden, fields[2]
+    # git diff never compares a flagged entry with its file: the file's blob tells (the path's
+    # attributes applied, as `git add` would store it); a skip-worktree file missing from the
+    # disk (a sparse checkout) changes nothing in the commit
+    present = [p for p in blobs if (repo.project / p).is_file()]
+    if present:
+        hashes = _git_output(repo, "hash-object", "--", *present).split()
+        head = f"{repo.prefix}/" if repo.prefix else ""
+        names += [head + p for p, blob in zip(present, hashes, strict=False) if blob != blobs[p]]
+    return Staging(frozenset(project_paths(repo.prefix, names, ignore_case=repo.ignore_case)), flags)
+
+
+def unstaged_files(repo: Repo, paths: Sequence[str]) -> list[str]:
+    """Return which of `paths` (relative to the project) a commit made now would miss (staging)."""
+    return sorted(staging(repo, paths).dirty)
+
+
+def add_command(repo: Repo, flags: Mapping[str, tuple[str, ...]], paths: Sequence[str]) -> list[str]:
+    """The lines of a hint that stage `paths` (relative to the project; `flags`: Staging.flags):
+    `git add`, `git add -f` for an untracked path git ignores (git add refuses it otherwise), and
+    first a `git update-index` that clears each flag hiding a path's changes (git add refuses a
+    skip-worktree path, and stages nothing of an assume-unchanged one), then why. A plain `git add
+    a b` when nothing is ignored or flagged (asked only for a hint: the check already failed)."""
+    r = _git(["check-ignore", "--", *paths], repo.project, repo.env, literal=False) if paths else None
+    ignored = set(r.stdout.splitlines()) if r is not None and r.returncode == 0 else set()  # 1: none
+    lines: list[str] = []
+    for flag in HIDING_FLAGS:
+        marked = [p for p in paths if flag in flags.get(p, ())]
+        if marked:
+            lines.append(f"git update-index --no-{flag} {' '.join(marked)}")
+    plain = [p for p in paths if p not in ignored]
+    forced = [p for p in paths if p in ignored]
+    if plain:
+        lines.append(f"git add {' '.join(plain)}")
+    if forced:
+        lines.append(f"git add -f {' '.join(forced)}")
+        lines.append("(git ignores them, by a .gitignore or core.excludesFile, but the commit needs them: CI and every clone render and sync from them)")
+    if any(p in flags for p in paths):
+        lines.append("(an index flag hides their changes from git status and git add: update-index clears it)")
+    return lines
+
+
+def _plain_add(paths: Sequence[str]) -> list[str]:
+    return [f"git add {' '.join(paths)}"]
 
 
 def worktree_changes(repo: Repo) -> set[str]:
@@ -1294,11 +1371,12 @@ def check_ruff(cfg: Config, files: Sequence[str], as_staged: Mapping[str, bytes]
         yield Result(False, "ruff format: files need formatting", "./pyt fmt, then git add" + partial_hint, output=out)
 
 
-def check_generated(cfg: Config, generated: Sequence[str], dirty: set[str]) -> Iterator[Result]:
+def check_generated(cfg: Config, generated: Sequence[str], dirty: set[str], add: Callable[[Sequence[str]], list[str]] = _plain_add) -> Iterator[Result]:
     """The generated files match their sources, and none has unstaged changes. Conservative:
     this blocks even a commit that touches none of them, because the generator also reads the
     runner and the templates. The hints name the config files with unstaged changes too, so
-    following them never commits generated files without their source."""
+    following them never commits generated files without their source. `add`: the command lines
+    that stage some paths (add_command)."""
     changed, edited = render.apply(cfg, check=True)
     sources = [p for p in CONFIG_FILES if p in dirty]
     if changed or edited:
@@ -1307,7 +1385,8 @@ def check_generated(cfg: Config, generated: Sequence[str], dirty: set[str]) -> I
             # render records their hashes in state.json too: left out of the line, the next commit
             # stopped at "generated files staged: unstaged: .pytemplate/state.json"
             state = STATE_FILE.relative_to(ROOT).as_posix()
-            hints.append(f"outdated: {', '.join(changed)}\n./pyt render, then git add {' '.join([*sources, *changed, state])}")
+            first, *rest = add([*sources, *changed, state])
+            hints.append("\n".join([f"outdated: {', '.join(changed)}", f"./pyt render, then {first}", *rest]))
         if edited:
             hints.append(f"hand-edited: {', '.join(edited)}\nchange pytemplate.toml or .pytemplate/templates (./pyt render --diff), or ./pyt render --force")
         yield Result(False, "generated files up to date", "\n".join(hints))
@@ -1316,7 +1395,7 @@ def check_generated(cfg: Config, generated: Sequence[str], dirty: set[str]) -> I
     missed = [p for p in generated if p in dirty]
     if missed:
         also = f" (their source {', '.join(sources)} too)" if sources else ""
-        yield Result(False, "generated files staged", f"unstaged: {', '.join(missed)}{also}\ngit add {' '.join([*sources, *missed])}")
+        yield Result(False, "generated files staged", "\n".join([f"unstaged: {', '.join(missed)}{also}", *add([*sources, *missed])]))
     else:
         yield Result(True, "generated files staged")
 
@@ -1340,12 +1419,14 @@ def check_lock(cfg: Config) -> Result:
     return Result(True, "pyproject.toml and uv.lock up to date")
 
 
-def check_together(group: Sequence[str], touched: set[str], deleted: set[str], dirty: set[str]) -> Result:
+def check_together(
+    group: Sequence[str], touched: set[str], deleted: set[str], dirty: set[str], add: Callable[[Sequence[str]], list[str]] = _plain_add
+) -> Result:
     """Once any file of `group` (the config files and the generated ones) is in the commit, the
     config files are committed together: none may keep unstaged changes, or HEAD pairs a new
     file with an old one (uv.lock without its pyproject.toml fails `uv run --locked`; generated
     files without pytemplate.toml fail `render --check`). Unstaged generated files are
-    check_generated's finding."""
+    check_generated's finding. `add`: the command lines that stage some paths (add_command)."""
     in_commit = [p for p in group if p in touched]
     if not in_commit:
         return Result(None, "config files: not in this commit")
@@ -1355,10 +1436,10 @@ def check_together(group: Sequence[str], touched: set[str], deleted: set[str], d
     hints = [f"in the commit: {', '.join(in_commit)}"]
     kept = [p for p in missed if p in deleted]  # `git rm --cached`: gone from the commit, still on disk
     if kept:
-        hints.append(f"deleted in the commit but still in the working tree: {', '.join(kept)}\ngit add {' '.join(kept)} (or delete them)")
+        hints += [f"deleted in the commit but still in the working tree: {', '.join(kept)} (stage them again, or delete them)", *add(kept)]
     rest = [p for p in missed if p not in deleted]
     if rest:
-        hints.append(f"unstaged changes: {', '.join(rest)} (they are committed together)\ngit add {' '.join(rest)}")
+        hints += [f"unstaged changes: {', '.join(rest)} (they are committed together)", *add(rest)]
     return Result(False, f"config files staged together: {', '.join(missed)} not staged", "\n".join(hints))
 
 
@@ -1522,10 +1603,12 @@ def checks(
         )
     generated = sorted({*render.outputs(cfg), STATE_FILE.relative_to(ROOT).as_posix()})
     group = [*CONFIG_FILES, *generated]
-    dirty = set(unstaged_files(repo, group))
-    yield from check_generated(cfg, generated, dirty)
+    state = staging(repo, group)
+    dirty = set(state.dirty)
+    add = functools.partial(add_command, repo, state.flags)
+    yield from check_generated(cfg, generated, dirty, add)
     yield check_lock(cfg)
-    yield check_together(group, staged_set | set(deleted), set(deleted), dirty)
+    yield check_together(group, staged_set | set(deleted), set(deleted), dirty, add)
     yield check_mypyc(cfg, repo.project, staged_set)
     yield check_launchers(repo, staged_set, content)
     if template_repo:

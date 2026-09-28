@@ -1274,7 +1274,16 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (`shells.launcher_problems`) and the template repo's language guard read the staged content
   too. Project-wide and conservative (they read the working tree, so they may block a commit
   that touches none of their files): generated files up to date (`render.apply(check=True)`)
-  and none unstaged/untracked; managed pyproject parts, what only `./pyt apply` brings in
+  and none unstaged/untracked (`hooks.staging`: these files and the three config files are exact
+  paths the commit needs, so an untracked one counts whatever a .gitignore or the user's
+  core.excludesFile says, `git ls-files --others` without `--exclude-standard`, and so do the
+  changes of a skip-worktree or assume-unchanged entry, which `git diff` never shows:
+  `git hash-object` against its index blob; a global `.vscode/` ignore or `git update-index
+  --skip-worktree` let every such commit pass, and CI's `render --check` failed on each push;
+  `hooks.add_command` then names `git add -f` and the `git update-index --no-<flag>` first, since
+  git add refuses an ignored or skip-worktree path and stages nothing of an assume-unchanged one:
+  `test_hooks.test_a_generated_or_config_file_git_ignores_or_hides_is_never_taken_for_committed`);
+  managed pyproject parts, what only `./pyt apply` brings in
   line (`cmd_apply.pending(hook=False)`: a hand-edited `app.name`/`app.preset`, the
   `[preset.*]` options) and `uv lock --check`; `pytemplate.toml`,
   `pyproject.toml`, `uv.lock` and the generated files committed together (once any is in the

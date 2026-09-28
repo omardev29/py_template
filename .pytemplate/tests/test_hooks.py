@@ -1420,6 +1420,8 @@ def test_staged_files_in_the_first_commit(tmp_path: Path) -> None:
 
 @needs_git
 def test_unstaged_files(tmp_path: Path) -> None:
+    """The paths are files the commit needs: an ignored one on disk that is not in the index is
+    missing from it all the same (test_a_generated_or_config_file_git_ignores_or_hides_...)."""
     top, project = make_repo(tmp_path, "p")
     for name in ("gen.json", "clean.json", "ignored.json"):
         (project / name).write_text("{}\n", encoding="utf-8")
@@ -1430,9 +1432,10 @@ def test_unstaged_files(tmp_path: Path) -> None:
     (project / "new.json").write_text("{}\n", encoding="utf-8")
     repo = find(project, top)
     paths = ["gen.json", "clean.json", "ignored.json", "new.json", "missing.json"]
-    assert hooks.unstaged_files(repo, paths) == ["gen.json", "new.json"]
-    git(top, "add", "p/gen.json")
-    assert hooks.unstaged_files(repo, paths) == ["new.json"]
+    assert hooks.unstaged_files(repo, paths) == ["gen.json", "ignored.json", "new.json"]
+    git(top, "add", "p/gen.json", "p/new.json")
+    git(top, "add", "-f", "p/ignored.json")
+    assert hooks.unstaged_files(repo, paths) == []
     assert hooks.unstaged_files(repo, []) == []
 
 
@@ -1809,6 +1812,61 @@ def test_config_lock_and_generated_files_are_committed_together(tmp_path: Path, 
     git(p, "rm", "-q", "--cached", "uv.lock")
     res = failures(results(make(), repo, hooks.staged_files(repo)))
     assert "deleted in the commit but still in the working tree: uv.lock" in res["config files staged together"].hint
+
+
+def _follow(hint: str, cwd: Path) -> None:
+    """Run the git commands a hint prints, one per line, as the user would type them."""
+    for line in hint.splitlines():
+        command = line.removeprefix("./pyt render, then ").strip()
+        if command.startswith("git "):
+            git(cwd, *command.split()[1:])
+
+
+@needs_git
+@pytest.mark.parametrize("how", ["core.excludesFile", "project .gitignore", "skip-worktree", "assume-unchanged"])
+def test_a_generated_or_config_file_git_ignores_or_hides_is_never_taken_for_committed(tmp_path: Path, tools: Tools, how: str) -> None:
+    """Every generated file, state.json, pytemplate.toml, pyproject.toml and uv.lock belongs in the
+    commit (CI's first step is `./pyt render --check`, then `uv sync --locked`). The hook looked
+    for them with `git ls-files --others --exclude-standard` and `git diff`: an untracked one that
+    a .gitignore or the user's core.excludesFile ignores (a global `.vscode/` or `.python-version`
+    rule), and the changes an index flag hides (skip-worktree, assume-unchanged), counted as
+    committed. The hook passed, and CI failed on every push. The hint must stage them for real:
+    `git add` refuses an ignored or skip-worktree path, and stages nothing of an assume-unchanged one."""
+    base = {"pytemplate.toml": b"a = 1\n", "pyproject.toml": b"[project]\n", "uv.lock": b"v1\n", "gen.json": b"{}\n"}
+    if how == "core.excludesFile":  # the first commit of a project, with a global ignore
+        Path(os.environ["GIT_CONFIG_GLOBAL"]).write_text(f"[core]\n\texcludesFile = {(tmp_path / 'ignore').as_posix()}\n", encoding="utf-8")
+        (tmp_path / "ignore").write_text("gen.json\nuv.lock\n", encoding="utf-8")
+        repo, _ = staged_project(tmp_path, base)
+        p = repo.project
+        assert hooks.staged_files(repo) == ["pyproject.toml", "pytemplate.toml"]  # git add -A left them out
+        missing = ["gen.json", "uv.lock"]
+    else:
+        repo, _ = staged_project(tmp_path, {**base, "src/a.py": b"x = 1\n"}, commit=list(base))
+        p = repo.project
+        if how == "project .gitignore":  # `.vscode/` added to .gitignore and untracked
+            (p / ".gitignore").write_text("gen.json\n", encoding="utf-8")
+            git(p, "rm", "-q", "--cached", "gen.json")
+            git(p, "add", ".gitignore")
+        else:  # the changes of a tracked file hidden from git, then a real edit rendered
+            git(p, "update-index", f"--{how}", "gen.json")
+            (p / "gen.json").write_bytes(b'{"a": 2}\n')
+            (p / "pytemplate.toml").write_bytes(b"a = 2\n")
+            git(p, "add", "pytemplate.toml")
+        missing = ["gen.json"]
+    assert hooks.unstaged_files(repo, list(base)) == missing
+    res = failures(results(make(), repo, hooks.staged_files(repo)))
+    assert "generated files staged" in res, res
+    hint = res["generated files staged"].hint
+    if how == "core.excludesFile":
+        assert "git add -f uv.lock gen.json" in hint
+        assert "git add -f uv.lock" in res["config files staged together"].hint
+    elif how == "project .gitignore":
+        assert "git add -f gen.json" in hint
+    else:
+        assert f"git update-index --no-{how} gen.json\ngit add gen.json" in hint
+    _follow(hint, p)  # the hint, followed as printed, stages what the commit needs
+    assert hooks.unstaged_files(repo, list(base)) == []
+    assert failures(results(make(), repo, hooks.staged_files(repo))) == {}
 
 
 @needs_git
