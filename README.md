@@ -1084,6 +1084,9 @@ holds one (`app$v2`) the build would write outside the project, so it stops befo
   reason. Nuitka calls it experimental; measured: 10-15% faster on pure-Python loops only.
 - `extra_args` are appended, after the `--lto` above: a later `--lto` wins. Asserts and
   docstrings follow `deploy.optimize`.
+- `src/assets/` goes in whole, as with the other methods, files named like code included (a
+  `level1.bin`, a `plugin.dll`, a level script `.py`), which Nuitka's own data-folder option
+  leaves out.
 - Imports Nuitka cannot find (a platform-guarded `import winreg`) are skipped. Flet works: all of
   `flet` is included (it loads its controls lazily, which Nuitka cannot follow) and the Flet
   client archive is bundled, as `flet pack` does. The first build downloads it once into

@@ -358,10 +358,14 @@ def build(req: BuildRequest) -> Path:
         argv.append("--python-flag=no_docstrings")
     # Data paths relative to the stage (Nuitka's cwd): Nuitka splits a data source at every ','
     # and '=' and reads it as a glob, so an absolute path under a folder like `game, v2` left
-    # the Flet client out with only a warning (and '=' or '[' stopped the build)
+    # the Flet client out with only a warning (and '=' or '[' stopped the build).
+    # --include-raw-dir, never --include-data-dir: that one copies only "non-code files" and
+    # left out, without a word, every asset named like code (level1.bin, model.bin, tool.exe,
+    # plugin.dll, libfmod.so, a level script .py: Nuitka 4.2.2's default_ignored_suffixes),
+    # py.typed and .DS_Store, while the other methods ship the whole folder
     assets = cfg.app.assets
     if assets and (stage / assets).is_dir():
-        argv.append(f"--include-data-dir={assets}={assets}")
+        argv.append(f"--include-raw-dir={assets}={assets}")
     if cfg.app.gui and IS_WINDOWS:
         argv.append("--windows-console-mode=disable")
     if cfg.deploy.exe.icon and IS_WINDOWS:

@@ -550,8 +550,9 @@ def test_nuitka_argv_follows_the_config(sandbox: Path, monkeypatch: pytest.Monke
     icon = next(a for a in argv if a.startswith("--windows-icon-from-ico=")).split("=", 1)[1]
     assert icon == "pyt-icon.ico" and "#" not in icon
     assert (stage / icon).read_bytes() == (root / "art" / "app.ico").read_bytes()
-    assert "--include-data-dir=assets=assets" in argv  # relative to the stage: Nuitka splits a path at ',' and '='
-    assert not any(str(stage) in str(a) for a in argv if str(a).startswith("--include-data"))
+    assert "--include-raw-dir=assets=assets" in argv  # relative to the stage: Nuitka splits a path at ',' and '='
+    assert not [a for a in argv if str(a).startswith("--include-data-dir")]  # it leaves out assets named like code
+    assert not any(str(stage) in str(a) for a in argv if str(a).startswith(("--include-data", "--include-raw")))
     # a standalone folder is packed when it is done (the excludes apply), never by Nuitka's plugin
     assert "--plugin-enable=upx" not in argv and packed == [out]
     assert argv[-2:] == ["--lto=no", "--report=r.xml"]  # extra_args, then the command line
@@ -566,6 +567,58 @@ def test_nuitka_names_a_missing_icon_before_it_runs(sandbox: Path, monkeypatch: 
     monkeypatch.setattr(envs, "uv", lambda *a, **k: pytest.fail("Nuitka ran without its icon"))
     with pytest.raises(PytError, match=r"deploy\.exe\.icon = 'art/none\.ico' does not exist"):
         nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
+
+
+# Runs in an environment with the pinned Nuitka, in the stage (Nuitka's cwd): its own option
+# parsing of the data options nuitka.build passes, then its own collection of the data files. The
+# launching process's helper that nuitka/__main__.py installs is given its "no parent" answer.
+_NUITKA_DATA_FILES = r"""
+import json, sys
+import nuitka
+nuitka.getLaunchingNuitkaProcessEnvironmentValue = lambda name: None
+sys.argv = ["nuitka", "--mode=standalone", *sys.argv[1:], "main.py"]
+from nuitka.options import Options
+Options.parseArgs()
+from nuitka.freezer import IncludedDataFiles
+found = sorted(f.dest_path.replace("\\", "/") for f in IncludedDataFiles._addIncludedDataFilesFromFileOptions())
+print("PTDATA" + json.dumps(found))
+"""
+
+
+def test_nuitka_ships_every_asset_whatever_its_suffix(sandbox: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """--include-data-dir copies only what Nuitka calls non-code files: its default_ignored_suffixes
+    (.py .pyw .pyc .pyo .pyi .so .pyd .pyx .dll .dylib .exe .bin and the extension suffixes) left a
+    game's level1.bin, a model.bin, a helper tool.exe, a plugin.dll, libfmod.so or a level script
+    out of every nuitka build, without a word ("ok done"; the app then died on FileNotFoundError).
+    The pinned Nuitka (from uv's cache, offline) parses the data options nuitka.build passes and
+    collects the files itself."""
+    cfg = make({})
+    app = _nuitka_app(sandbox / "payload", cfg.pkg)
+    assets = ["logo.png", "notes.txt", "model.bin", "tool.exe", "plugin.dll", "libfmod.so", "levels/level1.bin", "levels/script.py", "levels/data.pyd"]
+    for name in assets:
+        (app / "assets" / name).parent.mkdir(parents=True, exist_ok=True)
+        (app / "assets" / name).write_bytes(b"x")
+    fake = FakeNuitka(cfg.pkg)
+    monkeypatch.setattr(envs, "uv", fake)
+    nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
+    data = [a for a in fake.argv if a.startswith(("--include-data", "--include-raw"))]
+    assert data == ["--include-raw-dir=assets=assets"]
+    stage = sandbox / "build" / "nuitka-stage" / "cpython"
+    probe = tmp_path / "probe.py"
+    probe.write_text(_NUITKA_DATA_FILES, encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("UV_PROJECT", "UV_PYTHON", "VIRTUAL_ENV", "PYTEMPLATE_"))}
+    with_nuitka = [proc.find_uv(), "run", "--offline", "--no-project", "--python", sys.executable, "--with", nuitka.NUITKA, "python"]
+
+    def run(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([*with_nuitka, *args], cwd=stage, env=env, capture_output=True, text=True, encoding="utf-8", timeout=300, check=False)
+
+    ready = run("-c", "import nuitka")
+    if ready.returncode != 0:
+        pytest.skip(f"{nuitka.NUITKA} is not in the uv cache: {ready.stderr.strip()[-300:]}")
+    r = run(str(probe), *data)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTDATA")), None)
+    assert line is not None, r.stdout[-3000:] + r.stderr[-3000:]
+    assert json.loads(line[len("PTDATA") :]) == sorted(f"assets/{name}" for name in ["logo.txt", *assets])
 
 
 def test_nuitka_upx_honours_the_excludes(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

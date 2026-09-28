@@ -2875,7 +2875,9 @@ Per method:
   relative to it (`nuitka._stage_icon`, `pyt-icon<suffix>`: Nuitka reads what follows the last
   `#` of `--windows-icon-from-ico` as an icon index, and the absolute path of a project under
   `C:\dev\C#\game` stopped every build with an icon; a missing icon is one error before Nuitka
-  runs), `--nofollow-import-to` per `deploy.exclude_modules`, the upx
+  runs), `--include-raw-dir=assets=assets` for `app.assets` (named relative to the stage; never
+  `--include-data-dir`, which leaves out every file named like code, 15.1), `--nofollow-import-to`
+  per `deploy.exclude_modules`, the upx
   plugin for a onefile build with UPX on (a standalone folder is packed afterwards, `upx.pack_tree`:
   "Size and UPX" below), then `nuitka.optimization_args` BEFORE `deploy.nuitka.extra_args` and the
   command line (Nuitka takes the last value, so an `--lto` there still wins): always
@@ -5256,6 +5258,17 @@ Nuitka:
   compiled code stopped the build. Fix: `nuitka.includable` (10). Test:
   `test_build_methods.py::test_nuitka_includable_drops_what_the_build_env_cannot_locate`. Goes:
   never.
+- **`--include-data-dir` copies only "non-code" files** (LIMITATION, Nuitka 4.2.2: its help says
+  "All non-code files are copied", and code is its `default_ignored_suffixes`, `.py .pyw .pyc
+  .pyo .pyi .so .pyd .pyx .dll .dylib .exe .bin` and the extension suffixes, plus `py.typed`,
+  `__pycache__` and site-packages folders; `--include-raw-dir` is "raw", every file): every
+  asset named like code (a game's `level1.bin`, a `model.bin`, a `plugin.dll`, `libfmod.so`, a
+  level script `.py`) was left out of every nuitka build, without a word, while exe, portable,
+  pyz and wheel ship the whole folder. Fix: `nuitka.build` passes `--include-raw-dir` (the same
+  `SRC=DEST` value, every file) (10). Test:
+  `test_build_methods.py::test_nuitka_ships_every_asset_whatever_its_suffix` (the pinned Nuitka's
+  own option parsing and file collection, from uv's cache), `test_nuitka_argv_follows_the_config`.
+  Goes: never.
 - **SCons expands `$NAME` in the paths Nuitka hands it** (DEFECT, Nuitka 4.2.2: it passes the
   absolute `--output-dir` paths to its SCons unescaped, and SCons substitutes `$NAME`, `${...}`,
   `$$`, `$(`, `$)` in them): in a project under `app$v2` the build made
