@@ -203,6 +203,9 @@ function M.info()
     if fd then
       fd:close()
     end
+    if raw:sub(1, 3) == "\239\187\191" then -- a UTF-8 BOM (an editor, PS 5.1): render leaves it (it hashes without it), so accept it
+      raw = raw:sub(4)
+    end
     local ok, data = pcall(vim.json.decode, raw, { luanil = { object = true, array = true } })
     local clean = ok and type(data) == "table" and data.schema == 1 and M.sanitize(data) or nil
     if not clean then

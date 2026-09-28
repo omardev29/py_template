@@ -3151,7 +3151,10 @@ Files:
   missing a new profile, backend or command would silently fall back to a default), and
   `test_lua_whitelists_match_the_runner` compares `BACKENDS`, `PROFILES`, `EDITORS` and
   `SEVERITIES` with the runner's. `init.info` re-reads
-  it when its mtime/size changes; it is regenerated only when `./pyt` runs (render-on-save
+  it when its mtime/size changes, stripping a leading UTF-8 BOM first (an editor or PS 5.1 may
+  add one to the generated file, and `render` leaves it - it hashes without the BOM, 6.2 - so the
+  plugin must accept it, else `info()` falls back: typing off, no commands, an unpinned
+  basedpyright); it is regenerated only when `./pyt` runs (render-on-save
   of `pytemplate.toml` covers edits made in Neovim).
 - Plugin (`.pytemplate/nvim/lua/`, documented in `.pytemplate/nvim/README.md`):
   `pytemplate/init.lua` (root, `info`, environments, uv lookup, `pyt_cmd`, `pyt_env`,
@@ -3228,7 +3231,10 @@ LazyVim wiring:
   backquoted part ran as a command through 'shell' (`test_the_venv_debugpy_is_found_in_any_project_folder`).
   The program runs on the cpython runtime env. nvim-dap reads `<cwd>/.vscode/launch.json`
   (per-OS blocks lifted, JSONC accepted) and expands `${workspaceFolder}` to the cwd: a
-  provider covers a cwd below the root.
+  provider (`dap.launch_configs`) covers a cwd below the root, and feeds `getconfigs` a BOM-free
+  copy when a BOM was added to launch.json (`getconfigs` chokes on one, "Error parsing
+  launch.json"). At the root nvim-dap's own provider reads launch.json and still chokes on a BOM;
+  that path, and mypy reading `.mypy.ini` with a BOM, are out of the plugin's reach.
 - neotest-python: always set `python` explicitly (auto-detection globs `*/pyvenv.cfg`, gets
   two lines with `.venv` + `.venv-pypy` and builds a broken path; its `uv run` fallback also
   syncs); `discovery.filter_dir` skips dot-dirs (`.venv*`, `.build`), `dist`, `build`,

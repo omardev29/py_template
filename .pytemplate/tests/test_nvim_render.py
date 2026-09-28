@@ -777,6 +777,29 @@ def test_mypy_linter_follows_a_venv_created_later(tmp_path: Path) -> None:
     assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
 
 
+BOM_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+local pt = require("pytemplate")
+pt.setup({ root = vim.env.PT_TEST_ROOT })
+local info = pt.info()
+-- schema 1 means editor.json was read; the FALLBACK is schema 0 (typing off, no commands)
+io.stdout:write((info.schema == 1 and "PTOK" or ("PTFAIL " .. vim.inspect(info))) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def test_editor_json_with_a_bom_is_read(tmp_path: Path) -> None:
+    """render leaves a UTF-8 BOM an editor or PS 5.1 added to a generated file (it hashes without
+    one), so the plugin must accept it in editor.json: else info() falls back (typing off, no
+    commands, an unpinned basedpyright) and tells the user to run ./pyt render, which changes
+    nothing."""
+    project = _project(tmp_path)
+    editor_json = project / ".pytemplate" / "editor.json"
+    editor_json.write_bytes(b"\xef\xbb\xbf" + editor_json.read_bytes())
+    r = _headless_lua(tmp_path, BOM_CHECK, project)
+    assert "PTOK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
 STALE_MYPY_CHECK = r"""
 vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
 package.loaded["lint.linters.mypy"] = { parser = function() return {} end }

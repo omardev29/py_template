@@ -107,7 +107,26 @@ function M.launch_configs()
   if not root or pt.same_path(uv.cwd(), root) then
     return {}
   end
-  local ok, cfgs = pcall(require("dap.ext.vscode").getconfigs, root .. "/.vscode/launch.json")
+  local launch = root .. "/.vscode/launch.json"
+  -- getconfigs reads the file itself and chokes on a UTF-8 BOM (an editor, or PS 5.1, added to
+  -- the generated file, which render then leaves - it hashes without the BOM): give it a BOM-free
+  -- copy when there is one. (At the root, nvim-dap's own provider reads launch.json and still
+  -- chokes on a BOM; that path is out of the plugin's reach.)
+  local fd = io.open(launch, "rb")
+  if fd then
+    local raw = fd:read("*a") or ""
+    fd:close()
+    if raw:sub(1, 3) == "\239\187\191" then
+      local tmp = vim.fn.tempname()
+      local out = io.open(tmp, "wb")
+      if out then
+        out:write(raw:sub(4))
+        out:close()
+        launch = tmp
+      end
+    end
+  end
+  local ok, cfgs = pcall(require("dap.ext.vscode").getconfigs, launch)
   if not ok or type(cfgs) ~= "table" then
     return {}
   end
