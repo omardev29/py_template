@@ -558,6 +558,17 @@ def test_selftest_refuses_a_selection_that_tests_nothing(tmp_path: Path, faked: 
         e2e.selftest(None, ["--quick", "--full", "--base", str(base)])  # type: ignore[arg-type]
 
 
+def test_a_base_git_cannot_be_kept_inside_is_refused_before_anything_is_made(tmp_path: Path, faked: tuple[dict[str, object], list[str]]) -> None:
+    """A --base below a folder named with os.pathsep (`a:b`) inside the user's repository: the git
+    ceiling could not hold it, `new` skipped git init and `setup` installed pytemplate's hook in the
+    user's repository, where it stayed (the run failed and kept the base). Refused with exit 2."""
+    _, ran = faked
+    base = tmp_path / f"a{os.pathsep}b" / "e2e"
+    with pytest.raises(PytError, match="GIT_CEILING_DIRECTORIES") as e:
+        e2e.selftest(None, ["script", "--quick", "--base", str(base)])  # type: ignore[arg-type]
+    assert e.value.code == 2 and ran == [] and not base.parent.exists()
+
+
 def test_selftest_interrupted_returns_130_and_keeps_the_base(tmp_path: Path, faked: tuple[dict[str, object], list[str]], capsys: pytest.CaptureFixture[str]) -> None:
     outcomes, _ = faked
     outcomes["test all"] = KeyboardInterrupt()

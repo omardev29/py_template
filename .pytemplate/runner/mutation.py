@@ -61,7 +61,7 @@ from typing import IO, Any
 
 from . import envs, proc, ui
 from .config import Config
-from .e2e import child_env, kill_tree, rmtree, scrub_env, termination_as_interrupt
+from .e2e import check_ceiling, child_env, kill_tree, rmtree, scrub_env, termination_as_interrupt
 from .presets import _git_path
 from .project import IS_WINDOWS, ROOT, TOOLS, check_private_dir, make_private_dir, scratch_name, venv_python
 from .ui import PytError
@@ -734,6 +734,7 @@ def default_base() -> Path:
 def prepare_base(base: Path, root: Path = ROOT) -> None:
     if base.resolve() == root.resolve() or root.resolve() in base.resolve().parents:
         raise PytError("selftest --mutation: the scratch base cannot be inside the project")
+    check_ceiling(base)  # the workers' git is kept inside it (child_env): refused before anything is made
     if base.exists() and not base.is_dir():
         raise PytError(f"selftest --mutation: {base} is not a directory")
     check_private_dir(base, "scratch folder (TMPDIR)")

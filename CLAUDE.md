@@ -3976,7 +3976,13 @@ short temp tree and unset `NVIM_APPNAME`.
   `new` looks from the base), so `new` runs `git init` and `setup` installs the hook in the
   project even under a base inside a work tree (the hook used to land in the outer repository
   and stay there); `GIT_CONFIG_GLOBAL` (a missing file) and `GIT_CONFIG_NOSYSTEM=1` keep a
-  user's core.hooksPath, init.templateDir or commit.gpgsign out. A base whose ceiling would hide
+  user's core.hooksPath, init.templateDir or commit.gpgsign out. A base whose parent path holds
+  `os.pathsep` (`:` on POSIX, where Finder writes a typed `/` as `:`; `;` on Windows) is refused
+  before anything is created (`e2e.check_ceiling`, exit 2; `--nvim --dir` and `--mutation`'s
+  base too, `mutation.prepare_base`): git splits the ceiling list there, with no escape, and saw
+  the user's repository around the base (`new` skipped git init, `setup` installed its hook
+  there, where it stayed: `test_e2e_plan.test_a_base_whose_parent_path_holds_the_path_separator_is_refused`).
+  A base whose ceiling would hide
   the template's own repository (a template in a subfolder of a bigger repository, the base
   next to it) is refused (`hidden_template_repository`: `new` would copy untracked files).
   Layout: `<base>/<preset>`, `<base>/logs/<preset>/NN-step.log`, `<base>/work/<preset>`
@@ -5608,8 +5614,13 @@ git and husky:
 - **`GIT_CEILING_DIRECTORIES` never excludes the current folder** (LIMITATION, documented): with
   the e2e base itself as the ceiling, `new` (it asks git from the base) still found a repository
   around the base and skipped `git init`, and `setup` installed the hook into that repository.
-  Fix: `e2e.isolate_git` puts the ceiling at the base's PARENT (13.1). Test:
-  `test_e2e_plan.py::test_isolated_git_never_sees_a_repository_around_the_base`. Goes: never.
+  And it is a list separated by `os.pathsep` with no escape (documented: a colon-separated list;
+  `;` on Windows): a parent path that holds the separator is no ceiling at all. Fix:
+  `e2e.isolate_git` puts the ceiling at the base's PARENT, and `e2e.check_ceiling` refuses a
+  base whose parent path holds the separator (13.1). Test:
+  `test_e2e_plan.py::test_isolated_git_never_sees_a_repository_around_the_base`,
+  `test_a_base_whose_parent_path_holds_the_path_separator_is_refused`,
+  `test_git_reads_a_ceiling_that_holds_the_path_separator_as_two_folders`. Goes: never.
 - **git's messages follow the locale** (LIMITATION): "not a git repository" was not recognized.
   Fix: `LC_ALL=C` for every git call (`hooks`, `rename.git_changes`, `presets`; 5.6). Test:
   `test_rename.py::test_git_changes_reads_git_in_english`,

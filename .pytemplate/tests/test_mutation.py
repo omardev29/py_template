@@ -873,6 +873,18 @@ def test_prepare_base(tmp_path: Path) -> None:
     assert (tmp_path / "pt" / "mut" / mutation.MARKER).is_file()
 
 
+def test_prepare_base_refuses_a_base_git_cannot_be_kept_inside(tmp_path: Path) -> None:
+    """The workers' git is kept inside the base (e2e.child_env: its parent is the ceiling), which
+    a parent path holding os.pathsep (a TMPDIR below `a:b`) cannot be: refused before anything
+    is made."""
+    root = tmp_path / "project"
+    root.mkdir()
+    base = tmp_path / f"a{os.pathsep}b" / "mut"
+    with pytest.raises(PytError, match="GIT_CEILING_DIRECTORIES") as e:
+        mutation.prepare_base(base, root)
+    assert e.value.code == 2 and not base.parent.exists()
+
+
 def test_default_base_is_short_and_per_user(monkeypatch: pytest.MonkeyPatch) -> None:
     tmp = Path(tempfile.gettempdir())
     monkeypatch.setattr(mutation, "IS_WINDOWS", True)

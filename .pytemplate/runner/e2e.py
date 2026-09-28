@@ -462,6 +462,22 @@ def scrub_env(environ: Mapping[str, str], drop_dirs: Sequence[str] = ()) -> dict
     return env
 
 
+def check_ceiling(base: Path) -> None:
+    """Refuse a scratch folder (the base, --dir) that isolate_git cannot keep git inside:
+    GIT_CEILING_DIRECTORIES is a list of folders separated by os.pathsep (':' on POSIX, ';' on
+    Windows) with no escape, so a parent path that holds it falls apart into pieces that are no
+    parent of the projects, and the ceiling stops nothing: git in the base saw the user's
+    repository around it, `new` skipped git init there and `setup` installed pytemplate's hook in
+    that repository, where it stayed. Called before anything is created."""
+    parent = str(base.resolve().parent)
+    if os.pathsep in parent:
+        raise PytError(
+            f"{base} cannot hold the scratch projects: its parent folder {parent} holds {os.pathsep!r}, which "
+            "GIT_CEILING_DIRECTORIES reads as a separator, so git there would see a repository around it "
+            f"(./pyt new would skip git init, setup would install its hook there). Pick a folder whose path has no {os.pathsep!r}"
+        )
+
+
 def isolate_git(env: dict[str, str], base: Path) -> None:
     """Keep every git the suite starts inside the base, away from the user's configuration.
 
@@ -471,8 +487,9 @@ def isolate_git(env: dict[str, str], base: Path) -> None:
     around the base (the hook stayed behind, or replaced that repository's own).
     GIT_CONFIG_GLOBAL (a file that does not exist) and GIT_CONFIG_NOSYSTEM: a user's
     core.hooksPath, init.templateDir or commit.gpgsign would change what `setup` installs and
-    what the first commit runs.
+    what the first commit runs. A base it cannot keep git inside is refused (check_ceiling).
     """
+    check_ceiling(base)
     env["GIT_CEILING_DIRECTORIES"] = str(base.resolve().parent)
     env["GIT_CONFIG_GLOBAL"] = str(base / "no-global-gitconfig")
     env["GIT_CONFIG_NOSYSTEM"] = "1"

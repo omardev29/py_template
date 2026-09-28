@@ -551,6 +551,33 @@ def test_isolate_git_sets_the_ceiling_above_the_base(tmp_path: Path) -> None:
     assert env["GIT_CONFIG_NOSYSTEM"] == "1" and not Path(env["GIT_CONFIG_GLOBAL"]).exists()
 
 
+def test_a_base_whose_parent_path_holds_the_path_separator_is_refused(tmp_path: Path) -> None:
+    """GIT_CEILING_DIRECTORIES is a list split at os.pathsep (':' on POSIX, where Finder writes a
+    typed '/' as ':'; ';' on Windows) with no escape: the parent `.../a:b` read as `.../a` and `b`,
+    no parent of the projects, and git in the base saw the user's repository around it (`new`
+    skipped git init, `setup` installed its hook there). Refused; the separator in the base's own
+    name is harmless, since the ceiling is its parent."""
+    env: dict[str, str] = {}
+    base = tmp_path / f"a{os.pathsep}b" / "e2e"
+    with pytest.raises(PytError, match=re.escape(f"holds {os.pathsep!r}, which GIT_CEILING_DIRECTORIES reads as a separator")) as e:
+        e2e.isolate_git(env, base)
+    assert e.value.code == 2 and env == {} and not base.parent.exists()
+    e2e.isolate_git(env, tmp_path / f"e2e{os.pathsep}1")
+    assert env["GIT_CEILING_DIRECTORIES"] == str(tmp_path.resolve())
+
+
+@needs_git
+def test_git_reads_a_ceiling_that_holds_the_path_separator_as_two_folders(tmp_path: Path) -> None:
+    """Why check_ceiling refuses such a base: git splits the list, and the parent of a base below
+    `a:b` stops nothing (git 2.43 and Git for Windows alike, with their own separator)."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, env=git_env(tmp_path))
+    below = tmp_path / f"a{os.pathsep}b" / "e2e"
+    below.mkdir(parents=True)
+    env = {**e2e.scrub_env(git_env(tmp_path)), "GIT_CEILING_DIRECTORIES": str(below.resolve().parent)}
+    r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=below, env=env, capture_output=True, text=True, check=False)
+    assert r.returncode == 0 and Path(r.stdout.strip()).resolve() == tmp_path.resolve(), r.stderr
+
+
 def test_child_env_is_scrubbed_and_git_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """What every step gets: no git state of the caller (a hook's GIT_DIR/GIT_INDEX_FILE, a
     user's GIT_CEILING_DIRECTORIES), the base's ceiling, and uv reachable on PATH."""

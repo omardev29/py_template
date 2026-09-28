@@ -457,6 +457,16 @@ def test_nvim_pyt_steps_never_touch_a_repository_around_the_dir(nvim_run: dict[s
     assert seen["renv"]["GIT_CONFIG_NOSYSTEM"] == "1"
 
 
+def test_nvim_dir_git_cannot_be_kept_inside_is_refused(nvim_run: dict[str, Any], tmp_path: Path) -> None:
+    """README promises the scratch projects git repositories of their own even with --dir inside
+    one of the user's: below a folder named with os.pathsep (`a:b`) the git ceiling could not
+    hold it, and `new` skipped git init there. Refused before anything is created."""
+    d = tmp_path / f"a{os.pathsep}b" / "w"
+    with pytest.raises(PytError, match="GIT_CEILING_DIRECTORIES") as e:
+        nvimtest.selftest(make(), ["script", "--dir", str(d)])
+    assert e.value.code == 2 and nvim_run["ran"] == [] and not d.parent.exists()
+
+
 def test_nvim_dir_that_would_hide_the_templates_repository_is_refused(nvim_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A --dir next to a template that is a subfolder of a bigger repository: git there must not
     see a repository around --dir, which hides the template's own (new would copy its untracked
