@@ -4525,6 +4525,15 @@ def test_flet_build_upx_only_for_desktop_and_missing_output(sandbox: Path, monke
 # --- couplings and launcher files ---------------------------------------------------------------------
 
 
+# README/CLAUDE.md 13.2: deleting templates/ci.yml stops CI generation; a project that made that
+# documented change has no template to read here (13.1: selftest must pass in every project).
+needs_ci_template = pytest.mark.skipif(
+    not (TEMPLATES / "ci.yml").is_file(),
+    reason="CI generation stopped (templates/ci.yml deleted)",
+)
+
+
+@needs_ci_template
 def test_ci_uploads_the_pyz_where_the_build_writes_it(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # templates/ci.yml hard-codes dist/__NAME__-__BUILD_BACKEND__-pyz/__NAME__.pyz
     ci = (TEMPLATES / "ci.yml").read_text(encoding="utf-8")

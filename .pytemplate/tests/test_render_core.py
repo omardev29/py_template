@@ -1257,6 +1257,15 @@ def test_the_yaml_reader_is_strict() -> None:
             parse_yaml(bad)
 
 
+# README/CLAUDE.md 13.2: deleting templates/ci.yml stops CI generation; render.ci_workflow then
+# raises, so the CI-template tests skip in a project that made that documented change (13.1).
+needs_ci_template = pytest.mark.skipif(
+    not (TEMPLATES / "ci.yml").is_file(),
+    reason="CI generation stopped (templates/ci.yml deleted): render.ci_workflow raises",
+)
+
+
+@needs_ci_template
 @pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
 def test_ci_workflow_for_every_preset_and_backend_set(preset: str, supported: list[str], active: str) -> None:
     cfg = combo_cfg(preset, supported, active)
@@ -1298,6 +1307,7 @@ def test_ci_workflow_for_every_preset_and_backend_set(preset: str, supported: li
     assert all(re.fullmatch(r"astral-sh/setup-uv@v\d+\.\d+\.\d+", u) for u in uses if "setup-uv" in u)  # no floating tags
 
 
+@needs_ci_template
 @pytest.mark.parametrize(("supported", "active"), backend_sets())
 def test_ci_workflow_leaves_out_an_os_the_preset_package_has_no_wheel_for(supported: list[str], active: str) -> None:
     """[preset.raylib] package = "raylib_software", which the preset offers, publishes wheels for
@@ -1312,6 +1322,7 @@ def test_ci_workflow_leaves_out_an_os_the_preset_package_has_no_wheel_for(suppor
         assert ("macos-latest" in oses) == (macos and supported != ["pypy"]), (package, oses)
 
 
+@needs_ci_template
 @pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
 def test_ci_workflow_keeps_its_moving_parts_on_purpose(preset: str, supported: list[str], active: str) -> None:
     """-latest runner labels (GitHub retires pinned ones) and no uv version (setup-uv takes the
@@ -1326,6 +1337,7 @@ def test_ci_workflow_keeps_its_moving_parts_on_purpose(preset: str, supported: l
     assert "on purpose" in header and "required-version" in header and "-latest" in header
 
 
+@needs_ci_template
 def test_ci_workflows_pass_actionlint(tmp_path: Path) -> None:
     actionlint = shutil.which("actionlint")
     if actionlint is None:
@@ -1347,6 +1359,7 @@ def ci_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path / "ci.yml"
 
 
+@needs_ci_template
 def test_ci_template_bom_and_crlf_do_not_reach_the_workflow(ci_template: Path) -> None:
     expected = render.ci_workflow(CFG)
     lf = ci_template.read_bytes().replace(b"\r\n", b"\n")  # already CRLF in a Windows checkout
@@ -1354,6 +1367,7 @@ def test_ci_template_bom_and_crlf_do_not_reach_the_workflow(ci_template: Path) -
     assert render.ci_workflow(CFG) == expected
 
 
+@needs_ci_template
 def test_ci_template_linux_deps_line_may_be_indented(ci_template: Path) -> None:
     raylib = preset_cfg("raylib")
     expected = {"raylib": render.ci_workflow(raylib), "script": render.ci_workflow(CFG)}
@@ -1380,6 +1394,7 @@ def test_a_template_that_cannot_be_read_is_a_clear_error(profiles: Path, ci_temp
         render.ci_workflow(CFG)
 
 
+@needs_ci_template
 def test_ci_template_placeholder_left_is_a_clear_error(ci_template: Path) -> None:
     ci_template.write_text(ci_template.read_text(encoding="utf-8").replace("\n__LINUX_DEPS__\n", "\n      - run: x __LINUX_DEPS__\n"), encoding="utf-8")
     with pytest.raises(PytError, match="__LINUX_DEPS__ not replaced"):
