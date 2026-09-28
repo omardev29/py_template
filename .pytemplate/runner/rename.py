@@ -1351,7 +1351,7 @@ def _move_dir(root: Path, old_rel: str, new_rel: str) -> None:
     old, new = root / old_rel, root / new_rel
     try:
         if new.exists() and same_file(old, new):  # case-only rename on a case-insensitive file system
-            tmp = old.with_name(f"{old.name}.pt-rename-{os.getpid()}")
+            tmp = _case_tmp(old)
             old.rename(tmp)
             try:
                 tmp.rename(new)
@@ -1367,6 +1367,29 @@ def _move_dir(root: Path, old_rel: str, new_rel: str) -> None:
         ) from None
 
 
+def _case_tmp(old: Path) -> Path:
+    """The temporary name of the package folder during a case-only move (_move_dir)."""
+    return old.with_name(f"{old.name}.pt-rename-{os.getpid()}")
+
+
+def _moved_to(root: Path, move: tuple[str, str]) -> str | None:
+    """Where an interrupt that came as the package folder moved left it: its new name, the
+    temporary one of a case-only move, or None while it keeps its old name. Read from the listing
+    of src/, which spells the names as the disk does (on a case-insensitive file system `alpha`
+    is found under either spelling)."""
+    old, new = root / move[0], root / move[1]
+    try:
+        names = set(os.listdir(old.parent))
+    except OSError:
+        return None
+    tmp = _case_tmp(old)
+    if tmp.name in names:
+        return tmp.relative_to(root).as_posix()
+    if new.name in names and old.name not in names:
+        return move[1]
+    return None
+
+
 def _replace_bytes(path: Path, data: bytes) -> None:
     """Write `data` to `path` so that it is never left half-written, keeping its permissions,
     owner, group and hard links; a symlink stays a link and a read-only file is an error, as with
@@ -1379,45 +1402,68 @@ def apply_plan(root: Path, plan_: Plan) -> None:
 
     A file that cannot be written (read-only, locked by another program, a full disk) undoes what
     was already done: that file is never touched (`_replace_bytes`), the files written so far get
-    their old bytes back and the folder moves back. The error says what could not be undone."""
-    if plan_.move is not None:
-        _move_dir(root, *plan_.move)
+    their old bytes back and the folder moves back. The error says what could not be undone. A
+    Ctrl+C, SIGTERM or SIGHUP is undone the same way, then goes on (SIGTERM and SIGHUP are
+    exceptions only while it writes, as for `pyt install`: their default action ended the runner
+    at once): it left the tree half-renamed with only `error: interrupted`."""
+    from .cmd_install import _terminations_interrupt  # the swap of `pyt install` uses the same
+
     writes: list[tuple[Path, bytes]] = [(root / f.target, f.new) for f in plan_.changed_files]
     for edit in (plan_.config, plan_.pyproject):
         if edit is not None and edit.new != edit.old:
             writes.append((root / edit.path, (("\ufeff" if edit.bom else "") + edit.new).encode("utf-8")))
-    done: list[tuple[Path, bytes]] = []
-    for path, data in writes:
+    done: list[tuple[Path, bytes]] = []  # written, with their old bytes
+    writing: tuple[Path, bytes] | None = None  # the write in progress
+    moved = False
+    with _terminations_interrupt():
         try:
-            old = path.read_bytes()
-            _replace_bytes(path, data)
-        except OSError as e:
-            lost: list[str] = []  # files that kept the new bytes
-            for written, previous in reversed(done):
-                try:
-                    _replace_bytes(written, previous)
-                except OSError:
-                    lost.append(written.relative_to(root).as_posix())
-            back: tuple[str, str] | None = None  # where the lost files are now
             if plan_.move is not None:
-                try:
-                    _move_dir(root, plan_.move[1], plan_.move[0])
-                    back = (plan_.move[1], plan_.move[0])
-                except PytError:
-                    pass
-            problems = [f"{_target(p, back)} could not be restored" for p in reversed(lost)]
-            if plan_.move is not None and back is None:
-                problems.append(f"{plan_.move[1]}/ could not be moved back to {plan_.move[0]}/")
-            undone = (
-                f"The rename was NOT fully undone: {'; '.join(problems)} (fix it by hand: git status shows what changed)"
-                if problems
-                else "The rename was undone (the files written so far were restored)"
-            )
+                _move_dir(root, *plan_.move)  # a PytError there: nothing was changed
+                moved = True
+            for path, data in writes:
+                writing = (path, path.read_bytes())
+                _replace_bytes(path, data)
+                done.append(writing)
+                writing = None
+        except OSError as e:
+            undone = _undo(root, plan_, done, moved)
             raise PytError(
                 f"rename: could not write {path.relative_to(root).as_posix()}: {e.strerror or e}. {undone}.\n"
                 "  Close the programs that use it (or make it writable, or free some disk space) and try again"
             ) from None
-        done.append((path, old))
+        except PytError:
+            raise
+        except BaseException:  # Ctrl+C, SIGTERM, SIGHUP (or a bug: its traceback follows)
+            # the write in progress too: an interrupt may come right after it
+            ui.error(f"rename: interrupted. {_undo(root, plan_, [*done, *([writing] if writing else [])], moved)}")
+            raise
+
+
+def _undo(root: Path, plan_: Plan, done: list[tuple[Path, bytes]], moved: bool) -> str:
+    """Give the written files their old bytes back and move the folder back; say how it went."""
+    lost: list[str] = []  # files that kept the new bytes
+    for written, previous in reversed(done):
+        try:
+            _replace_bytes(written, previous)
+        except OSError:
+            lost.append(written.relative_to(root).as_posix())
+    source: str | None = None  # where the package folder is now, when it moved
+    if plan_.move is not None:
+        # an interrupt as the folder moved, before `moved` was set: the listing says where it is
+        source = plan_.move[1] if moved else _moved_to(root, plan_.move)
+    back: tuple[str, str] | None = None  # where the lost files are now
+    if source is not None and plan_.move is not None:
+        try:
+            _move_dir(root, source, plan_.move[0])
+            back = (plan_.move[1], plan_.move[0])
+        except PytError:
+            pass
+    problems = [f"{_target(p, back)} could not be restored" for p in reversed(lost)]
+    if source is not None and plan_.move is not None and back is None:
+        problems.append(f"{source}/ could not be moved back to {plan_.move[0]}/")
+    if problems:
+        return f"The rename was NOT fully undone: {'; '.join(problems)} (fix it by hand: git status shows what changed)"
+    return "The rename was undone (the files written so far were restored)"
 
 
 # --- checks ----------------------------------------------------------------------------------------

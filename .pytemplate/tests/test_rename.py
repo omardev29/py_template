@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tokenize
 import tomllib
 from pathlib import Path
@@ -1829,6 +1830,76 @@ def test_a_failed_write_undoes_the_rename(tmp_path: Path, monkeypatch: pytest.Mo
     assert e.value.code == 2
     assert _everything(tmp_path) == before  # byte for byte, CRLF included (no temporary file left either)
     assert calls[target].name.startswith((".pyproject.toml.", ".pytemplate.toml.")) or fail_at != "last"
+
+
+@pytest.mark.parametrize(
+    ("stop", "at"),
+    [("ctrl+c", 3), ("ctrl+c", 1), ("ctrl+c", 0), ("sigterm", 3), ("sighup", 2)],
+    ids=["ctrl+c between two writes", "ctrl+c after the first write", "ctrl+c right after the move", "sigterm", "sighup"],
+)
+def test_an_interrupted_rename_is_undone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stop: str, at: int) -> None:
+    """A Ctrl+C, SIGTERM or SIGHUP while the files were written (in process: no child to pass it
+    on to) left src/beta/ moved, some files rewritten and pytemplate.toml naming the old app, with
+    only `error: interrupted`: the next rename said "src/alpha/ not found". It is undone as a
+    write that fails is, then goes on (cli.main ends the command as it ends every interrupted
+    one); the signals are exceptions only while the files are written."""
+    import signal
+
+    if stop != "ctrl+c" and sys.platform == "win32":
+        pytest.skip("SIGTERM and SIGHUP: POSIX")
+    _write_project(tmp_path, "flet", "alpha", crlf=True)
+    before = _everything(tmp_path)
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    real_replace, real_move = rename._replace_bytes, rename._move_dir
+    calls: list[Path] = []
+
+    def interrupt() -> None:
+        if stop == "ctrl+c":
+            raise KeyboardInterrupt
+        signum = signal.SIGTERM if stop == "sigterm" else signal.SIGHUP
+        assert signal.getsignal(signum) is not signal.SIG_DFL, f"{stop} would end the runner at once: the tree half-renamed"
+        os.kill(os.getpid(), signum)  # the runner's handler raises at the next bytecode
+        time.sleep(1)
+
+    def move(root: Path, old: str, new: str) -> None:
+        real_move(root, old, new)
+        if at == 0 and not calls:  # the move of the rename, not the one back
+            calls.append(root / new)
+            interrupt()
+
+    def replace(path: Path, data: bytes) -> None:
+        calls.append(path)
+        real_replace(path, data)
+        if len(calls) == at:
+            interrupt()
+
+    monkeypatch.setattr(rename, "_move_dir", move)
+    monkeypatch.setattr(rename, "_replace_bytes", replace)
+    with pytest.raises(KeyboardInterrupt) as e:
+        rename.apply_plan(tmp_path, planned)
+    assert _everything(tmp_path) == before  # byte for byte: the folder back, every file restored
+    assert "rename: interrupted. The rename was undone" in capsys.readouterr().err
+    if stop != "ctrl+c":
+        assert isinstance(e.value, proc.Interrupted) and e.value.signum == (signal.SIGTERM if stop == "sigterm" else signal.SIGHUP)
+        assert signal.getsignal(e.value.signum) is signal.SIG_DFL  # only while the files are written
+
+
+def test_an_interrupt_in_a_case_only_move_puts_the_folder_back(tmp_path: Path) -> None:
+    """A case-only move (alpha -> Alpha on a case-insensitive file system) goes through a
+    temporary name, and an interrupt between its two steps leaves the package there: the undo
+    reads where the folder is from the listing of src/, as the swap of `pyt install` does."""
+    _write_project(tmp_path, "script", "alpha")
+    before = _everything(tmp_path)
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    src = tmp_path / "src"
+    (src / "alpha").rename(rename._case_tmp(src / "alpha"))  # where the interrupt left it
+    assert rename._undo(tmp_path, planned, [], moved=False) == "The rename was undone (the files written so far were restored)"
+    assert _everything(tmp_path) == before
+    (src / "alpha").rename(src / "beta")  # an interrupt right after a plain move
+    assert rename._undo(tmp_path, planned, [], moved=False).startswith("The rename was undone")
+    assert _everything(tmp_path) == before
+    assert rename._undo(tmp_path, planned, [], moved=False).startswith("The rename was undone")  # not moved: stays
+    assert _everything(tmp_path) == before
 
 
 def test_a_write_that_fails_midway_leaves_the_file_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

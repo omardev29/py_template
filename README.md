@@ -532,7 +532,8 @@ It refuses uncommitted changes without `--force` (a project fresh from `./pyt ne
 commit yet: commit first), also when it cannot check them (the project is in a git repository,
 but git is not on PATH: a git GUI's own git), and the names `new` refuses. A write that fails
 puts every file back (each file is written to a temporary file first, so a full disk never
-leaves one half-written), and says so when it could not.
+leaves one half-written), and so do Ctrl+C, SIGTERM and SIGHUP while it writes; it says so when
+it could not.
 When the old name is a common word (`app`, `game`, `core`), matching words in comments and
 strings change too: review `git diff`.
 

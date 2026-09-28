@@ -772,7 +772,7 @@ header rules (with detector tests proving each rule fires).
 | `mutation.py` | `selftest --mutation` (section 13.1): `OPERATORS`, `test_map`/`ordered`/`junit_seconds`, `changed_lines`/`parse_diff`, `select`/`skipped_spans`/`handler_classes`, `own_mutant` (ExceptionReplacer's), `made` (what is skipped), `classify`, `Driver` (tools/mutation_cr.py), `list_mutants` (the snapshot), the workers (`make_copy`, `sync_copy`, `worker_env`, `set_mtime`, `Runs`, `kill_run`/`descendants`, `run_all`), `Report`/`print_report`, `deferred_interrupts`, the base (`default_base`, `prepare_base`, `base_lock`). |
 | `hooks.py` | `./pyt hooks [install [--force]\|uninstall\|run\|status]`, `ensure_installed` (apply/setup), `doctor`: the native git pre-commit hook (section 5.6); `find_repo` (`NotInGit`), `classify` (`runs_checks`), `hook_state`/`own_local` (a copy chained after another project's hook), `hook_script`/`launcher_of`, `install`/`uninstall` (apply removes the hook when `hooks.pre_commit = false`), `chain_hint`/`chain_advice`, `hooks_path_runner`, `checks`. |
 | `cmd_install.py` | `./pyt install` / `uninstall` and doctor's "pyt install" step (section 5.9): where things go (`data_home`, `snapshot_dir`, `bin_dir`), `MARKER`/`is_launcher`/`not_ours`/`not_an_install`, the record (`read_record`, `recorded_bin`, `source_state`, `describe`, `age`), PATH (`on_path`, `path_state`, `path_problem`, `first_pyt`, `shadowing`), Windows (`pathext_shadows`, `policy_notes`), `make_plan` (every refusal before the first write, in one message: `_refuse`), `_Swap` + `install` (all or nothing; `_new_folder`, `_terminations_interrupt`), `_remove_earlier`, `leftovers`/`remove_leftovers`, `remove_installed` (`_remove_in_place`, `_remove_last`), `cmd_uninstall`, `doctor`. |
-| `rename.py` | `./pyt rename NEW_NAME [--force]` and the rename step of apply: pure `plan` / `apply_plan` (undoes itself when a write fails) / `rewrite` (tokenizer + `ast` scopes + context rules, `MODULE_KEYS`), `check_new_name` (`locked_names`), `git_changes`, `dirty_tree_message`, `validate_config`, `tidy_before`/`tidy_after` (ruff, `Tidy`), `report`, `cmd_rename` (section 5.7). |
+| `rename.py` | `./pyt rename NEW_NAME [--force]` and the rename step of apply: pure `plan` / `apply_plan` (undoes itself when a write fails or it is interrupted: `_undo`, `_moved_to`) / `rewrite` (tokenizer + `ast` scopes + context rules, `MODULE_KEYS`), `check_new_name` (`locked_names`), `git_changes`, `dirty_tree_message`, `validate_config`, `tidy_before`/`tidy_after` (ruff, `Tidy`), `report`, `cmd_rename` (section 5.7). |
 | `upx.py` | Optional UPX packing: pinned download (`VERSION`, `ASSETS` with SHA-256), `locate`, `find`, `uses`, `preflight` (from `cmd_build`, before any work), `active`, `level_flags`, `env_value`, `excludes`, `candidates`, `pack_file`, `pack_tree`, `MAX_INPUT` (section 10). |
 
 ### 5.2 Call flow
@@ -1273,7 +1273,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   owner the runner cannot give a new file, is rewritten in place with its old bytes put back on
   failure: a new inode dropped the links and made the files of a bind-mounted project root's),
   so a write cut short (disk full, a quota, `ulimit -f`) never leaves one half-written; a write that fails undoes everything, old bytes back and the folder moved back,
-  and the error names whatever it could not undo), the name of the `applied` record right away
+  and the error names whatever it could not undo (`_undo`); so does a Ctrl+C, SIGTERM or SIGHUP
+  there, then goes on (`cmd_install._terminations_interrupt` around the move and the writes, as
+  for `pyt install`: in-process work, whose default action ended the runner at once; it left a
+  half-renamed tree with only `error: interrupted`; one that came as the folder moved is read
+  back from the listing of src/, `_moved_to`, the temporary name of a case-only move included:
+  `test_rename.test_an_interrupted_rename_is_undone`)), the name of the `applied` record right away
   (`cmd_apply.rename_record`, only the project's own record: named after the old app it is no
   longer trusted), `cmd_env.ensure_lock` (a failure there says "the files are already renamed
   ... ./pyt apply"), `render.apply` and the ruff tidy-up; a Ctrl+C or SIGTERM during those
@@ -3639,7 +3644,7 @@ short temp tree and unset `NVIM_APPNAME`.
   pairs x LF/CRLF, random names and round trips, every rewrite rule, scopes, TOML keys and
   module keys, string prefixes and escapes (names of one or two letters), loader arguments,
   encodings and line endings, links and junctions, git states, rollback (a write cut short by
-  `ulimit -f` in a child process), the ruff tidy-up, the command in-process and a real run in a
+  `ulimit -f` in a child process; a Ctrl+C, SIGTERM or SIGHUP), the ruff tidy-up, the command in-process and a real run in a
   copy), `test_selftest_harness.py` (the exit codes CI trusts: plain `selftest`
   with pytest and mypy faked, `--shells` with the probes faked but `_run_all` and the table
   real, `--nvim` with Neovim, the base and the smoke runs faked: 0, 1 on any FAIL, 2 usage, 3
@@ -6005,8 +6010,9 @@ Code coupling (rename together):
   `.pytemplate/tests/test_no_spanish.py` by path (it needs `offending_lines`, `ALLOWED_PATHS`,
   `BINARY_SUFFIXES`, and only `pytest.mark` at module level); `rename` calls the private
   `config._build`, `config._decode`, `config._string_end` (with `config._ScanError`, for
-  `_toml_strings`), `presets._norm_name` and, lazily, `cmd_env._is_link` and
-  `cmd_apply._other_package`; `cmd_apply` calls the
+  `_toml_strings`), `presets._norm_name` and, lazily, `cmd_env._is_link`,
+  `cmd_apply._other_package` and `cmd_install._terminations_interrupt` (`apply_plan`: one rule
+  for SIGTERM and SIGHUP in the runner's own writes); `cmd_apply` calls the
   private `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311`,
   `rename._plan_pyproject`, `render._holds_python` and `render._read_state`, and
   `cmd_mode._precheck_py311` that same `render._holds_python`; `rename` and
