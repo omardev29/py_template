@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import configparser
+import glob
 import importlib.machinery
 import importlib.util
 import json
@@ -2726,6 +2727,44 @@ def test_real_pure_wheel(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -
     with zipfile.ZipFile(built) as z:
         entry_points = z.read("pkg-0.1.0.dist-info/entry_points.txt").decode()
     assert "[gui_scripts]" in entry_points and "pkg = pkg.app:main" in entry_points
+
+
+# Files whose path holds a name that starts with a dot, in the package and in src/assets/
+# (relative to src/, and where the wheel puts them); "[" is a glob character
+HIDDEN = {
+    "pkg/data/.keep": "pkg/data/.keep",
+    "pkg/.config/deep/.env": "pkg/.config/deep/.env",
+    "pkg/data/.w[1].txt": "pkg/data/.w[1].txt",
+    "assets/.hidden.txt": "pkg/assets/.hidden.txt",
+    "assets/.fonts/a.ttf": "pkg/assets/.fonts/a.ttf",
+}
+
+
+def test_wheel_package_data_names_every_hidden_file(tmp_path: Path) -> None:
+    # setuptools expands package-data with the stdlib glob, whose "**/*" skips every name that
+    # starts with a dot and every folder that does: those files are named one by one, escaped
+    from runner.methods import wheel
+
+    package = _project(tmp_path / "pkg", {"a.py": "", "data/x.json": "{}", **{k.removeprefix("pkg/"): "x" for k in HIDDEN if k.startswith("pkg/")}})
+    patterns = wheel._package_data(package)
+    assert patterns == ["**/*", ".config/deep/.env", "data/.keep", "data/.w[[]1].txt"]
+    matched = {Path(p).as_posix() for pattern in patterns for p in glob.glob(pattern, root_dir=package, recursive=True) if (package / p).is_file()}
+    assert matched == {"a.py", "data/x.json", ".config/deep/.env", "data/.keep", "data/.w[1].txt"}  # glob as setuptools runs it
+    assert wheel._package_data(_project(tmp_path / "plain", {"a.py": ""})) == ["**/*"]
+
+
+@needs_venv
+def test_real_pure_wheel_holds_hidden_files(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The wheel left out src/assets/.fonts/, data/.keep and every other name that starts with a
+    # dot, without a word, while the other methods ship them
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    _project(wheel_project / "src", dict.fromkeys(HIDDEN, "hidden"))
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    names = _wheel_names(wheel.build(BuildRequest(_wheel_cfg(), "cpython", "wheel", wheel_project / "src")))
+    assert set(HIDDEN.values()) <= set(names), names
+    assert {"pkg/data/x.json", "pkg/assets/img.txt", "pkg/app.py"} <= set(names)  # the others as before
 
 
 @needs_venv

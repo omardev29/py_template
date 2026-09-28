@@ -1031,7 +1031,8 @@ A package for `uv tool install` or pip that installs the command `<name>` (a GUI
 `app.gui = true`: no console window on Windows), from `deploy.wheel.entry` (default
 `<pkg>.app:main`; flet: `<pkg>.ui.app:run`). cpython and pypy build a `py3-none-any` wheel;
 mypyc builds a platform wheel with the compiled modules and their `.py`. It holds every file of
-the package, `src/assets/` (as `<pkg>/assets`) and the other modules and packages of `src/` that
+the package (hidden ones, such as `.keep` or a `.fonts/` folder, too), `src/assets/` (as
+`<pkg>/assets`) and the other modules and packages of `src/` that
 `compile.modules` names (a lone `src/fastbench.py`); any other module of `src/` stays out. It is built offline in the locked `.venv`
 (`uv build --no-build-isolation`). Its dependencies are the version ranges of
 `[project] dependencies`, not the exact versions of `uv.lock`. A mypyc wheel loads only in the

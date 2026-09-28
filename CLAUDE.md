@@ -2715,7 +2715,10 @@ Per method:
   exact locked versions (`wheel._locked_version`: a clear error when missing). Package data =
   every file of the package (`"**/*"`: data files, `py.typed`, vendored native libraries; the
   copy skips caches and stray build outputs: an extension next to its `.py`, `*__mypyc`,
-  `wheel._stray_output`); `wheel._copy_tree` copies it as the stage does (`mypyc.walk`: a
+  `wheel._stray_output`), and each file whose path holds a name that starts with a dot by its own
+  escaped path (`wheel._package_data`: setuptools expands package data with the stdlib glob,
+  whose `**/*` skips them, and the wheel shipped without `src/assets/.fonts/` or `data/.keep`
+  without a word, 15.1); `wheel._copy_tree` copies it as the stage does (`mypyc.walk`: a
   symlinked folder followed, a link back up its own path not, a broken link a warning; a file it
   cannot copy a PytError naming it): shutil.copytree ended on a dangling link or a cycle in an
   internal-error traceback (`test_wheel_copies_through_links_like_the_stage`);
@@ -4955,6 +4958,13 @@ setuptools:
   `tools/mypyc_build.py` `extra_cflags` always adds `-fno-strict-overflow`; the wheel's
   `methods.wheel.SETUP_PY` mirrors it (9). Test: `test_mypyc_core.py::test_extra_cflags`,
   `test_real_compile_adds_the_c_flags_and_inlines_compiled_calls`. Goes: never.
+- **`package-data` patterns skip hidden names** (LIMITATION, setuptools 84: `build_py` expands
+  them with the stdlib `glob`, `include_hidden` off): `"**/*"` matches no name that starts with a
+  dot and enters no folder that does, so the wheel left out `src/assets/.fonts/`, `data/.keep`
+  or a `.env`-style file, silently. Fix: `wheel._package_data` names each such file by its own
+  escaped path next to `"**/*"` (10). Test:
+  `test_mypyc_core.py::test_wheel_package_data_names_every_hidden_file`,
+  `test_real_pure_wheel_holds_hidden_files`. Goes: never.
 
 MSVC and Visual Studio:
 - **VS 2026's `vcvarsall.bat` runs `vswhere.exe` by its bare name** (DEFECT): outside a

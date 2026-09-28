@@ -14,6 +14,7 @@ and mypycify there could not see the project's dependencies.
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -23,7 +24,7 @@ from typing import Any
 
 from .. import envs, mypyc, proc, render, ui
 from ..cmd_build import BuildRequest, dist_path
-from ..config import Config, compiled_paths
+from ..config import Config, compiled_paths, toml_value
 from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, SRC, rel
 from ..ui import PytError
 from . import common
@@ -113,7 +114,30 @@ def check(cfg: Config) -> None:
     dependencies(tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig")))
 
 
-def _pyproject(cfg: Config, compiled: bool) -> str:
+def _package_data(package: Path) -> list[str]:
+    """The package-data patterns that name every file of a package copied into the build project.
+
+    setuptools expands them with the stdlib glob, whose "**/*" matches no name that starts with
+    a dot and enters no folder that does (glob's include_hidden stays off): the wheel left out
+    src/assets/.fonts/, data/.keep or a .env-style file without a word, while every other method
+    ships them. Each such file is named by its own path, escaped: glob returns a literal path that
+    exists, and a pattern whose name starts with a dot matches a hidden one.
+    """
+    patterns = ["**/*"]
+    for folder, dirs, files in os.walk(package):
+        dirs.sort()
+        for name in sorted(files):
+            path = (Path(folder) / name).relative_to(package).as_posix()
+            if not any(part.startswith(".") for part in path.split("/")):
+                continue  # "**/*" matches it
+            if any("\ud800" <= c <= "\udfff" for c in path):
+                raise PytError(f"wheel: {rel(Path(folder) / name)}: its name is not valid UTF-8, which a wheel cannot hold: rename it")
+            patterns.append(glob.escape(path))
+    return patterns
+
+
+def _pyproject(cfg: Config, compiled: bool, src: Path | None = None) -> str:
+    """The build project's pyproject.toml; `src`: its src/ folder, whose hidden files are listed."""
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8-sig"))
     project = data["project"]
     outside = _outside_package(cfg)
@@ -149,7 +173,7 @@ def _pyproject(cfg: Config, compiled: bool) -> str:
         # Every file of the package travels with it: data files, py.typed, vendored native
         # libraries, and the assets (copied into <pkg>/assets, where resources.py looks)
         "[tool.setuptools.package-data]",
-        *(f'{json.dumps(name)} = ["**/*"]' for name in packages),
+        *(f"{json.dumps(name)} = {toml_value(_package_data(src / name) if src else ['**/*'])}" for name in packages),
     ]
     return "\n".join(lines) + "\n"
 
@@ -262,7 +286,7 @@ def build(req: BuildRequest) -> Path:
         # In a wheel the assets travel inside the package (resources.py looks for them there)
         _copy_tree(SRC / assets, work / "src" / cfg.pkg / "assets")
     mypyc.make_writable(work / "src")
-    (work / "pyproject.toml").write_text(_pyproject(cfg, req.compiled), encoding="utf-8", newline="\n")
+    (work / "pyproject.toml").write_text(_pyproject(cfg, req.compiled, work / "src"), encoding="utf-8", newline="\n")
     if req.compiled:
         (work / "mypy.ini").write_text(render.mypy_ini(cfg, "mypyc", for_compile=work), encoding="utf-8", newline="\n")
         (work / "setup.py").write_text(setup_py(cfg), encoding="utf-8", newline="\n")
