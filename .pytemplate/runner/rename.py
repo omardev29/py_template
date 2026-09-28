@@ -55,6 +55,7 @@ from __future__ import annotations
 import argparse
 import ast
 import bisect
+import codecs
 import contextlib
 import dataclasses
 import functools
@@ -905,6 +906,23 @@ def _decode(data: bytes) -> str | None:
         return None
 
 
+# UTF-16 and UTF-32 text, which holds NUL bytes, is known by its BOM (PowerShell 5.1's `>` and
+# Out-File write UTF-16 LE with one); the longest first: FF FE 00 00 is UTF-32 LE
+_BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"), (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"))
+
+
+def _bom_text(data: bytes) -> str | None:
+    """The text of a UTF-16 or UTF-32 file that starts with its BOM (None: another file). It is
+    never rewritten, only searched for the old name: skipped as a binary, it was never named."""
+    for bom, encoding in _BOMS:
+        if data.startswith(bom):
+            try:
+                return data.decode(encoding)
+            except UnicodeDecodeError:
+                return None
+    return None
+
+
 def _source_encoding(data: bytes) -> str | None:
     """The PEP 263 encoding a Python source declares when it is not UTF-8 (None: none usable)."""
     try:
@@ -969,9 +987,12 @@ def _mentions_name(path: Path, pattern: re.Pattern[str]) -> bool:
         info = path.stat()
         if not stat.S_ISREG(info.st_mode) or info.st_size > MENTION_MAX_BYTES:
             return False
-        text = _decode(path.read_bytes())
+        data = path.read_bytes()
     except OSError:
         return False
+    text = _decode(data)
+    if text is None:
+        text = _bom_text(data)
     return text is not None and pattern.search(text) is not None
 
 
@@ -1213,7 +1234,10 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
                     text = None
         if text is None:
             binary.append(rel_path)
-            if b"\0" not in data and pattern.search(data.decode("latin-1")):
+            other = _bom_text(data)  # UTF-16/32 text; else an ANSI file, read byte for byte
+            if other is None and b"\0" not in data:
+                other = data.decode("latin-1")
+            if other is not None and pattern.search(other):
                 unreadable.append(rel_path)
             continue
         strings = DATA_STRINGS.get(path.suffix.lower(), "")

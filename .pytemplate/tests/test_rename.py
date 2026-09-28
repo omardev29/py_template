@@ -945,6 +945,25 @@ def test_undecodable_files_that_mention_the_old_name_are_warned_about(tmp_path: 
     assert "other.txt" not in err and "logo.png" not in err
 
 
+def test_utf16_and_utf32_files_that_mention_the_old_name_are_warned_about(tmp_path: Path) -> None:
+    """A UTF-16 text file (PowerShell 5.1's `>` and Out-File write one) holds NUL bytes, so the
+    name search skipped it as a binary, silently: its encoding's BOM says how to read it."""
+    _write_project(tmp_path, "script", "alpha")
+    tests = tmp_path / "tests"
+    for encoding in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"):
+        bom = "﻿".encode(encoding)
+        (tests / f"expected-{encoding}.txt").write_bytes(bom + "Welcome to alpha\r\n".encode(encoding))
+        (tests / f"other-{encoding}.txt").write_bytes(bom + "caf\xe9\r\n".encode(encoding))
+    (tests / "latin.txt").write_bytes("caf\xe9 alpha\n".encode("latin-1"))
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "notes.txt").write_bytes("﻿about alpha\r\n".encode("utf-16-le"))  # outside src/, tests/: listed
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    expected = [f"tests/expected-{e}.txt" for e in ("utf-16-be", "utf-16-le", "utf-32-be", "utf-32-le")]
+    assert planned.unreadable == [*expected, "tests/latin.txt"]
+    assert all(f"tests/other-{e}.txt" in planned.binary for e in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"))
+    assert "docs/notes.txt" in planned.mentions
+
+
 def _symlink_or_skip(link: Path, target: str, *, directory: bool = False) -> None:
     try:  # native separators: Windows cannot follow a relative target written with forward slashes
         link.symlink_to(target.replace("/", os.sep), target_is_directory=directory)

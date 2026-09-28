@@ -1268,8 +1268,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     So does a folder there that cannot be listed (`_code_files`: os.walk skipped it silently, and
     its files kept the old imports inside the moved package).
   - A Python file with a PEP 263 cookie is rewritten in its own encoding; other files that are
-    not UTF-8 text but mention the old name are a warning (`Plan.unreadable`); binaries show
-    only with `-v`. Files outside src/ and tests/ (README.md, scripts/, docs/, your own
+    not UTF-8 text but mention the old name are a warning (`Plan.unreadable`; a UTF-16 or UTF-32
+    file, PowerShell 5.1's `>` and Out-File, is searched through its BOM, `_bom_text`, as
+    `_mentions` does: its NUL bytes made it a silent binary); binaries show only with `-v`. Files outside src/ and tests/ (README.md, scripts/, docs/, your own
     workflows) are only listed (`_mentions`: skips caches, environments, `.build`, `dist`,
     `.pytemplate`, `.claude`, the generated files, the template's own launchers and CLAUDE.md
     (`ROOT_SKIP`), files over 2 MiB and anything that is not a regular file: `_mentions_name`,
