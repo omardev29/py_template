@@ -43,6 +43,8 @@ def _executor() -> ProcessPoolExecutor | None:
         return ProcessPoolExecutor(max_workers=1)
     except NotImplementedError:  # a Python without working multiprocessing (named semaphores)
         return None
+    except OSError:  # named semaphores that fail when made: no writable /dev/shm (a container)
+        return None
 
 
 async def _render_png(width: int, height: int, max_iter: int) -> bytes:

@@ -2575,7 +2575,16 @@ def test_the_assets_are_the_apps_own_whatever_it_inherits(tmp_path: Path, monkey
     assert resources.assets_dir() == tmp_path / "bundle" / "assets"  # PyInstaller
 
 
-def test_flet_skeleton_draws_where_no_process_can_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "error",
+    [
+        NotImplementedError("This Python build lacks multiprocessing.synchronize"),
+        # sem_open that exists but fails when called: a read-only or missing /dev/shm (some
+        # containers and sandboxes); every Draw ended "Draw failed (see the console)"
+        OSError(30, "Read-only file system"),
+    ],
+)
+def test_flet_skeleton_draws_where_no_process_can_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
     """flet build for the web (Pyodide), Android and iOS: ProcessPoolExecutor raises there, and
     the Draw handler died with the button disabled on 'Computing...'. It draws in-process."""
     import asyncio
@@ -2585,7 +2594,7 @@ def test_flet_skeleton_draws_where_no_process_can_start(tmp_path: Path, monkeypa
     app = _skeleton_package(tmp_path, monkeypatch, "flet", "demo.ui.app", {"flet": _fake_module("flet", **FAKE_FLET)})
 
     def no_processes(*_: Any, **__: Any) -> Any:
-        raise NotImplementedError("This Python build lacks multiprocessing.synchronize")
+        raise error
 
     monkeypatch.setattr(app, "ProcessPoolExecutor", no_processes)
     app._executor.cache_clear()

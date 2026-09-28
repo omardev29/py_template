@@ -2972,8 +2972,10 @@ Per method:
   generator handlers never run, `@ft.component` fails at import, `@ft.control` loses its event
   types; hence `forbid_imports = flet, flet_desktop, flet_cli`. Heavy work runs in a
   `ProcessPoolExecutor` (compiled code does not release the GIL), in the event loop where no
-  process can start (`flet build` for the web, Android, iOS: section 15.1), and the button
-  comes back in a `finally`. mypy overrides relax
+  process can start (`flet build` for the web, Android, iOS: section 15.1) or the pool cannot be
+  made (`_executor`: NotImplementedError without `multiprocessing.synchronize`, OSError where
+  named semaphores fail, a read-only or missing `/dev/shm`; every Draw failed there), and the
+  button comes back in a `finally`. mypy overrides relax
   `{pkg}.ui.*`. Wheel entry `{pkg}.ui.app:run`. Task `dev` (`flet run -d -r`) has
   `background = true`. `[tool.flet]` (read by `flet build` only, which embeds `copyright` in
   the app metadata): `org`, `company` and `copyright = "Copyright (C) {{name}}"` are
