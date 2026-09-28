@@ -2503,7 +2503,10 @@ Formats:
   toolchain it needs, or shipped a binary built here instead of the locked wheel, while `./pyt
   run` used that wheel: `test_host_floor_falls_back_for_a_package_whose_sdist_it_cannot_build`),
   and falls back to the host's own wheels with a warning when a
-  dependency has no wheel for the floor: only when uv says so (its captured error matches
+  dependency has no wheel for the floor (it names what those wheels need, `common._needs`: their
+  `platform_floor`, as `_pyz.json` records it, else this machine's glibc or macOS; it named this
+  machine's, 2.39 on Ubuntu 24.04, for wheels that needed 2.34:
+  `test_host_floor_fallback_names_what_the_wheels_it_took_need`): only when uv says so (its captured error matches
   `common._NO_FLOOR_WHEEL`, shown first: `is marked as --no-build but has no binary
   distribution`, uv's words for it under `--only-binary`); any other failure (the network, an
   index, a hash, a failed build) is raised with uv's code: it was retried without the floor, under

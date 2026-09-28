@@ -1023,8 +1023,9 @@ How far a pyz reaches depends on its dependencies; the build prints which case i
 - On Linux the dependencies of pyz and portable builds target glibc 2.28 (x86_64) or 2.35
   (aarch64) when the build machine can use those wheels; on macOS, macOS 13 or newer
   (`MACOSX_DEPLOYMENT_TARGET` changes it). A dependency without a wheel for that floor makes the
-  build take the wheels the build machine prefers, with a warning, never a build of its sdist; only
-  a dependency that publishes no wheel at all is built on the build machine.
+  build take the wheels the build machine prefers, with a warning that names the glibc (or macOS)
+  they need, never a build of its sdist; only a dependency that publishes no wheel at all is built
+  on the build machine.
 - On Windows, `<name>.cmd` looks for a Python or PyPy that meets the minimum (`py -X.Y`,
   `python3`, `python`, `pypy3`) and runs the pyz with it (`pythonw` for a GUI app).
 

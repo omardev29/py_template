@@ -273,6 +273,16 @@ def _runs_on(target: Target) -> str:
     return f"macOS {platform.mac_ver()[0]}"
 
 
+def _needs(site: Path, target: Target) -> str:
+    """What the wheels installed in `site` need of the machine that loads them, for a warning:
+    their floor, as _pyz.json records it (platform_floor: glibc 2.34, macOS 13.0), else this
+    machine's (a wheel built here says no version)."""
+    family, _, version = platform_floor(site).partition(" ")
+    if not version:
+        return _runs_on(target)
+    return f"{'macOS' if family == 'macos' else family} {version}"
+
+
 def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirements: Path) -> Path:
     """Install the runtime deps for one target (host or cross) with `uv pip install --target`,
     from the pylock.toml export_requirements writes next to `requirements` (each file from the
@@ -348,13 +358,14 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
                     ui.report(output)  # uv's reason, shown even with -q
                 if not _NO_FLOOR_WHEEL.search(output):
                     raise proc.CommandFailed(tried.args, tried.returncode)
-                ui.warn(
-                    f"{target.key}: a dependency has no wheel for {floor} (see above); using the wheels this "
-                    f"machine prefers, so the build needs {_runs_on(target)} or newer where it runs"
-                )
                 shutil.rmtree(dest)
                 dest.mkdir(parents=True)
                 envs.uv(env, base, extra_env=extra_env)
+                # what those wheels need, as _pyz.json records it: it named this machine's glibc
+                ui.warn(
+                    f"{target.key}: a dependency has no wheel for {floor} (see above); using the wheels this "
+                    f"machine prefers, so the build needs {_needs(dest, target)} or newer where it runs"
+                )
             elif output:
                 ui.report(output)  # a warning of a successful install
     drop_install_junk(dest)

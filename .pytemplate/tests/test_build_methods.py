@@ -2150,6 +2150,38 @@ def test_host_floor_falls_back_to_the_host_wheels(tmp_path: Path, monkeypatch: p
     assert site.is_dir()
 
 
+@pytest.mark.parametrize(
+    ("host", "tag", "needs"),
+    [(LINUX, "cp314-cp314-manylinux_2_34_x86_64", "glibc 2.34"), (MAC, "cp314-cp314-macosx_14_0_arm64", "macOS 14.0")],
+)
+def test_host_floor_fallback_names_what_the_wheels_it_took_need(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], host: str, tag: str, needs: str
+) -> None:
+    # The warning named this machine's glibc (2.39 on Ubuntu 24.04) as what the build needs, while
+    # the wheels it took needed 2.34, the floor _pyz.json records: it read as if Ubuntu 22.04 and
+    # Debian 12 were out
+    calls = _install_recorder(tmp_path, monkeypatch, fail_first=NO_FLOOR_BINARY)
+    record = envs.uv  # _install_recorder's
+
+    def install(env: envs.PyEnv, argv: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        done = record(env, argv, **kw)
+        if len(calls) == 2:  # the fallback: this machine's wheels
+            _wheel(Path(str(argv[argv.index("--target") + 1])), "newglibc", "1.0", tag)
+        return done
+
+    monkeypatch.setattr(envs, "uv", install)
+    monkeypatch.setattr(common.platform, "libc_ver", lambda *a, **k: ("glibc", "2.39"))
+    if host == MAC:
+        monkeypatch.delenv("MACOSX_DEPLOYMENT_TARGET", raising=False)
+        monkeypatch.setattr(common, "host_os", lambda: "macos")
+        monkeypatch.setattr(common, "host_arch", lambda: "aarch64")
+        monkeypatch.setattr(common.platform, "mac_ver", lambda *a, **k: ("26.0", ("", "", ""), "arm64"))
+    site = common.install_deps(make({}), "cpython", common.parse_key(host), tmp_path / "site", _requirements(tmp_path, "newglibc==1.0"))
+    err = capsys.readouterr().err
+    assert f"so the build needs {needs} or newer where it runs" in err, err
+    assert common.platform_floor(site) == needs.replace("macOS", "macos")  # what _pyz.json records
+
+
 # What uv (0.10.12 and 0.12.19) says from the floor attempt, which asks for wheels only
 # (--only-binary :all:), when a locked package's wheels all need more than the floor: an sdist it
 # publishes too is no way out
@@ -2192,6 +2224,7 @@ def test_host_floor_falls_back_for_real_on_uvs_own_words(tmp_path: Path, monkeyp
     assert common.installed(site) == {("newglibc", "1.0"), ("ptdemo", "1.0")}
     err = capsys.readouterr().err
     assert "a dependency has no wheel for x86_64-manylinux_2_28" in err and "newglibc" in err
+    assert "so the build needs glibc 2.34 or newer" in err  # what the wheel needs, not this machine's glibc
 
 
 def test_host_floor_falls_back_for_a_package_whose_sdist_it_cannot_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
