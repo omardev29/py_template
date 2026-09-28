@@ -1285,6 +1285,25 @@ def test_mode_rejects_contradictory_arguments(dry: Config, args: list[str], mess
     assert info.value.code == 2
 
 
+@pytest.mark.parametrize(
+    ("command", "args", "repeated"),
+    [
+        ("new", ["{tmp}/p", "--preset", "script", "--preset", "flet"], "--preset"),
+        ("new", ["{tmp}/p", "--name", "a", "--name=bee"], "--name"),
+        ("render", ["--diff", "--diff"], "--diff"),
+        ("__init", ["script", "--name", "a", "--name", "b", "--force"], "--name"),
+    ],
+)
+def test_new_render_and_init_refuse_an_option_given_twice(dry: Config, tmp_path: Path, command: str, args: list[str], repeated: str) -> None:
+    """argparse keeps the last of a repeated option without a word: `new DIR --preset raylib
+    --preset flet --name a --name bee` made a flet project named bee. mode refused it already."""
+    run = {"new": cmd_mode.cmd_new, "render": cmd_mode.cmd_render, "__init": cmd_mode.cmd_init}[command]
+    with pytest.raises(PytError) as info:
+        run(dry, [a.replace("{tmp}", str(tmp_path)) for a in args])
+    assert f"{command}: {repeated} given more than once" in str(info.value) and info.value.code == 2
+    assert not (tmp_path / "p").exists()
+
+
 def test_mode_leaves_values_that_are_already_set(dry: Config, capsys: pytest.CaptureFixture[str]) -> None:
     assert cmd_mode.cmd_mode(dry, ["--editor", dry.typing.editor]) == 0
     assert "pytemplate.toml  unchanged" in capsys.readouterr().err

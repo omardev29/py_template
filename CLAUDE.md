@@ -850,7 +850,9 @@ header rules (with detector tests proving each rule fires).
 5. Commands reject unknown arguments with exit 2 (a typo is never silently ignored):
    argparse commands, `render`/`mode`/`__init`/`new` (`cmd_mode._parse`: an unknown option is
    named before argparse runs, which bound the value after it to a positional: `mode --typ
-   strict` said only "argument backend: invalid choice: 'strict'"), `lint`, `fmt`,
+   strict` said only "argument backend: invalid choice: 'strict'"; an option given twice is
+   refused, where argparse kept the last: `new DIR --preset raylib --preset flet` made a flet
+   project, `test_config_rules.test_new_render_and_init_refuse_an_option_given_twice`), `lint`, `fmt`,
    `clean`, `apply`, `setup` (only `--force`), `doctor`, `tasks`, `install`, `uninstall`
    (`cmd_dev.only_flags`), `check` and `sync` (extra
    positionals), `help`, a `[tasks]` entry without `cmd`. By design

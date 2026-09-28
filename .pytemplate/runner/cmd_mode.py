@@ -38,10 +38,15 @@ def _parse(parser: argparse.ArgumentParser, args: list[str]) -> argparse.Namespa
 
     An option the parser does not know is refused by name BEFORE parsing: argparse bound the
     value after it to a positional (`mode --typ strict`: "argument backend: invalid choice:
-    'strict'", never a word about --typ)."""
+    'strict'", never a word about --typ). So is an option given twice, whose last value argparse
+    keeps without a word (`new DIR --preset raylib --preset flet` made a flet project)."""
     options = args[: args.index("--")] if "--" in args else args
     known = parser._option_string_actions
     unknown = [a for a in options if a.startswith("-") and a != "-" and a.split("=", 1)[0] not in known]
+    names = [a.split("=", 1)[0] for a in options if a.startswith("--") and a.split("=", 1)[0] in known]
+    repeated = sorted({n for n in names if names.count(n) > 1})
+    if repeated and not unknown:
+        raise PytError(f"{parser.prog}: {', '.join(repeated)} given more than once; give each option once")
     ns = argparse.Namespace()
     if not unknown:
         ns, unknown = parser.parse_known_args(args)
@@ -297,11 +302,7 @@ def cmd_mode(cfg: Config, args: list[str]) -> int:
             fixed.append(f"--supports={spec}")
         else:
             fixed.append(a)
-    options = [a.split("=", 1)[0] for a in fixed if a.startswith("--")]
-    repeated = sorted({o for o in options if options.count(o) > 1})
-    if repeated:  # argparse would silently keep the last one
-        raise PytError(f"mode: {', '.join(repeated)} given more than once; give each option once")
-    ns = _parse(parser, fixed)
+    ns = _parse(parser, fixed)  # an option given twice is refused there, as for new, render, __init
     if ns.supports is not None and not ns.supports.strip():
         raise PytError("mode --supports needs a value: +pypy, -pypy or a list such as cpython,mypyc")
     if not any((ns.backend, ns.supports, ns.typing, ns.editor)):
