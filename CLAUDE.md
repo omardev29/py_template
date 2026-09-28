@@ -3584,7 +3584,9 @@ short temp tree and unset `NVIM_APPNAME`.
   3.14, made uv replace the `.venv` of a project on another minor with an empty one under the
   running suite, and dozens of later tests failed (a `python.cpython = "3.13"` project).
   `conftest._the_project_environment_stays` fails the test after which the interpreter of
-  `.venv` (or `.venv-wsl`) changed, naming it.
+  `.venv` (or `.venv-wsl`) changed, naming it. A dry run of `mode` asks for changes the
+  project has not made (`test_paths._another_backend`, `_supports_and_typing`): mode prints only
+  real changes, and after `./pyt mode mypyc` or `./pyt mode --typing strict` it said "unchanged".
 - Property-based tests (Hypothesis, the dev group's pin): `.pytemplate/tests/conftest.py` loads
   the profile `pytemplate` (no example database, so a run depends on the code, the profile and
   the seed only; no deadline; a failure prints its replay blob) on top of the profile Hypothesis

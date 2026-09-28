@@ -528,6 +528,23 @@ def _copy_config(root: Path) -> dict[str, Any]:
     return tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8-sig"))
 
 
+def _another_backend(cfg: dict[str, Any]) -> str:
+    """A backend `mode BACKEND` switches this copy to: mypyc, else another one (never mypyc with
+    a typing.profile of warn or off, which that backend refuses)."""
+    active, profile = cfg["backend"]["active"], cfg.get("typing", {}).get("profile", "auto")
+    candidates = ("mypyc", *cfg["backend"]["supported"], "cpython", "pypy")
+    return next(b for b in candidates if b != active and not (b == "mypyc" and profile in ("warn", "off")))
+
+
+def _supports_and_typing(cfg: dict[str, Any]) -> list[str]:
+    """`mode --supports ... --typing ...` with changes this copy has not made yet (-mypyc, or
+    +mypyc where it is not supported, +cpython where it is the only backend)."""
+    supported = cfg["backend"]["supported"]
+    supports = "+mypyc" if "mypyc" not in supported else "-mypyc" if len(supported) > 1 else "+cpython"
+    relaxed = cfg.get("typing", {}).get("relaxed", "off")
+    return ["mode", "--supports", supports, "--typing", "warn" if relaxed == "strict" else "strict"]
+
+
 @pytest.fixture
 def unchanged(project_copy: Path) -> Iterator[Path]:
     before = _snapshot(project_copy)
@@ -551,8 +568,16 @@ def unchanged(project_copy: Path) -> Iterator[Path]:
     ],
 )
 def test_dry_run_writes_nothing(unchanged: Path, args: list[str], expected: str) -> None:
-    if args[:2] == ["__init", "raylib"] and _copy_config(unchanged)["app"]["preset"] == "raylib":
+    cfg = _copy_config(unchanged)
+    if args[:2] == ["__init", "raylib"] and cfg["app"]["preset"] == "raylib":
         args, expected = ["__init", "script", "--force"], "- typings/raylib/__init__.pyi"  # a raylib project: the other way
+    # mode prints only real changes: in a project where `./pyt mode mypyc` or `./pyt mode --typing
+    # strict` already ran, the plan said "unchanged" or had no typing line, and the test failed
+    if args[0] == "mode" and args[1] != "--supports":
+        target = _another_backend(cfg)
+        args, expected = ["mode", target], f'[backend] active = "{target}"'
+    elif args[0] == "mode":
+        args = _supports_and_typing(cfg)
     r = _pyt(unchanged, "--dry-run", *args)
     assert r.returncode == 0, r.stderr
     assert expected in r.stderr, r.stderr
