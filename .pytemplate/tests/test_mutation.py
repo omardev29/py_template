@@ -1065,7 +1065,7 @@ def test_report_counts_and_score(tmp_path: Path) -> None:
     assert _report(tmp_path, [KILLED, mutation.ERROR]).failed()
     assert _report(tmp_path, [NOT_RUN], baseline=mutation.FAIL).failed()
     data = report.as_json(Options("origin/main", 2, True))
-    assert data["ok"] is True and data["score"] == 0.75 and data["options"] == {"diff": "origin/main", "jobs": 2}
+    assert data["ok"] is True and data["failed"] is False and data["score"] == 0.75 and data["options"] == {"diff": "origin/main", "jobs": 2}
     assert data["mutants"][3]["status"] == SURVIVED and data["mutants"][3]["module"] == "runner.m" and data["mutants"][3]["line"] == 13
     json.dumps(data)
 
@@ -1086,6 +1086,8 @@ def test_print_report_shows_the_survivors_with_their_change(tmp_path: Path, caps
         ([KILLED, mutation.ERROR], mutation.PASS, False, 1),
         ([NOT_RUN], mutation.FAIL, False, 1),
         ([KILLED, NOT_RUN], mutation.PASS, True, 130),
+        # interrupted (CI's timeout) after a baseline failed: 130, and the report's `failed` says it
+        ([NOT_RUN], mutation.FAIL, True, 130),
     ],
 )
 def test_selftest_exit_code(
@@ -1100,6 +1102,7 @@ def test_selftest_exit_code(
     out, err = capsys.readouterr()
     data = json.loads(out)
     assert data["ok"] is (code == 0) and data["interrupted"] is interrupted
+    assert data["failed"] is (baseline == mutation.FAIL or mutation.ERROR in statuses)
     assert (f"logs kept for inspection: {tmp_path / 'logs'}" in err) is report.kept
 
 
@@ -1117,7 +1120,7 @@ def test_selftest_prints_the_report_before_the_error_that_stopped_the_run(
     assert e.value.code == 3
     out, err = capsys.readouterr()
     data = json.loads(out)
-    assert data["ok"] is False and data["error"] == "PytError: uv sync failed in the copy" and "survived (1):" in err
+    assert data["ok"] is False and data["failed"] is True and data["error"] == "PytError: uv sync failed in the copy" and "survived (1):" in err
 
 
 def _toy(tmp_path: Path) -> Path:

@@ -1037,6 +1037,7 @@ class Report:
         return {
             "ok": not (self.interrupted or self.failed()),
             "interrupted": self.interrupted,
+            "failed": self.failed(),  # a failed baseline, an error: what template-ci-image.yml reads after a timeout
             "error": None if self.error is None else f"{type(self.error).__name__}: {self.error}",
             "base": str(self.base),
             "kept": self.kept,

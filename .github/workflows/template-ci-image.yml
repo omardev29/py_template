@@ -348,8 +348,14 @@ jobs:
           timeout -k 5m -s TERM 70m ./pyt selftest --mutation --diff HEAD^1 --jobs 3 --json > mutation.json
           code=$?
           set -e
-          if [ "$code" -eq 124 ]; then echo "::warning::selftest --mutation ran out of its 70 minutes: the report holds the mutants that ran"; exit 0; fi
-          exit "$code"
+          if [ "$code" -ne 124 ]; then exit "$code"; fi
+          # out of time: the report decides, as the suite's exit code does when it ends by itself
+          # (its `failed` key: a failed baseline, a mutant that could not be judged, an error)
+          if ! uv run --no-project python -c 'import json, sys; sys.exit(json.load(open("mutation.json", encoding="utf-8"))["failed"])'; then
+            echo "::error::selftest --mutation ran out of its 70 minutes, and its report holds a failure (a failed baseline, a mutant that could not be judged, an error) or cannot be read"
+            exit 1
+          fi
+          echo "::warning::selftest --mutation ran out of its 70 minutes: the report holds the mutants that ran"
       - name: Mutation report
         if: always()
         uses: actions/upload-artifact@v7

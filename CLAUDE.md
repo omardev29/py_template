@@ -3672,9 +3672,14 @@ short temp tree and unset `NVIM_APPNAME`.
   parents, `fetch-depth: 2`, no persisted token), HEAD^1 the base branch it was made on (the
   branch itself may have moved since: its new lines would count as the pull request's). Under
   `timeout -k 5m -s TERM 70m` in a 90-minute job: when the budget ends (timeout's 124) the report
-  holds the mutants that ran, with a warning; the job is red only when the suite could not judge
-  (exit 1: a failed baseline, an error) or did not run; `mutation.json` is always uploaded
-  (`mutation-report`). The image's `warm` step makes Cosmic Ray's environment once
+  holds the mutants that ran and decides, as the suite's exit code does when it ends by itself: its
+  `failed` key (a failed baseline, a mutant that could not be judged, an error), or a report that
+  cannot be read, turns the job red, else a warning (the first run on GitHub ran out of time with
+  three failed baselines, and was green); the job is red only when the suite could not judge or
+  did not run; `mutation.json` is always uploaded (`mutation-report`). Its workers move HOME, so
+  the image's own check reads the image's caches from its user's passwd home
+  (`test_workflows.test_ci_image_holds_this_checkout_and_its_tools`: read from HOME it failed
+  those baselines). The image's `warm` step makes Cosmic Ray's environment once
   (`mutation_cr.py check`, with the Driver's uv flags), which leaves its wheels in the image's uv
   cache: uv keys a script's environment by the script's path, so the job makes its own from that
   cache, without the network. `pins.py` hashes the script and its lock (`pins.data_files`). A
