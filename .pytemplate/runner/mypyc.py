@@ -445,17 +445,24 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
                 if _mypyc_output(ext, prof.stage, modules):
                     with contextlib.suppress(OSError):  # left in place: setuptools then says why
                         set_aside(ext, prof.stage)
-    if spec["force"] and not proc.DRY_RUN:
-        # mypyc reuses the IR of its cache (compile.separate: incremental) and the C files of the
-        # last run for a module whose source did not change: strip_asserts and
-        # strict_dunder_typing are no part of mypy's cache key, so deploy.optimize 0 -> 1 kept
-        # the asserts in the release binary. A forced build starts from neither.
-        for cached in (prof.dir / "mypy_cache", prof.dir / "c"):
+    # mypyc reuses the IR of its cache (compile.separate: incremental) and the C files of the last
+    # run for a module whose source did not change: strip_asserts and strict_dunder_typing are no
+    # part of mypy's cache key, so deploy.optimize 0 -> 1 kept the asserts in the release binary.
+    # A forced build starts from neither.
+    stale = [prof.dir / "mypy_cache", prof.dir / "c"] if spec["force"] else []
+    if annotate and cfg.compile.separate and not stale:
+        # A module mypy loads from that cache gets no IR, and mypyc annotates only the modules it
+        # built IR for: after an unchanged compile the report was an empty page (and one module
+        # after an edit of one), with the success line. mypyc writes a C file only when its text
+        # changes, so the C compiler still rebuilds nothing that did not change.
+        stale = [prof.dir / "mypy_cache"]
+    if stale and not proc.DRY_RUN:
+        for cached in stale:
             try:
                 if cached.exists():
                     shutil.rmtree(cached)
             except OSError as e:
-                raise PytError(f"cannot remove {rel(cached)} for a clean rebuild: {e.strerror or e} (delete it, or ./pyt clean)") from None
+                raise PytError(f"cannot remove {rel(cached)}, which mypyc must not reuse: {e.strerror or e} (delete it, or ./pyt clean)") from None
 
     tool = envs.tool_env(cfg)
     # MSVC/setuptools output is only shown on failure (or with -v). VSLANG=1033: compiler

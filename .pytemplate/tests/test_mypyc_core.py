@@ -2124,6 +2124,35 @@ def test_real_compile_roundtrip(src_tree: Path, tmp_path: Path, monkeypatch: pyt
 
 
 @needs_venv
+@pytest.mark.skipif(not _has_mypyc(), reason="needs mypyc (run through ./pyt selftest)")
+def test_real_report_with_separate_covers_every_module_every_time(src_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """compile.separate makes mypy incremental: a module it loads from its cache gets no IR, and
+    mypyc annotates only the modules it built IR for. ./pyt report (and compile.annotate) wrote an
+    empty page after an unchanged run, one module after an edit of one, with the success line."""
+    _project(
+        src_tree,
+        {
+            "main.py": "",
+            "pkg/__init__.py": "",
+            "pkg/core/__init__.py": "",
+            "pkg/core/m.py": "def alpha_first() -> int:\n    return 1\n",
+            "pkg/core/n.py": "def beta_second() -> int:\n    return 2\n",
+        },
+    )
+    monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
+    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "separate": True}})
+    html = tmp_path / "report.html"
+    for edit in ("", "\n# edited\n"):  # the later runs find mypy's cache of the earlier ones
+        with (src_tree / "pkg" / "core" / "n.py").open("a", encoding="utf-8") as f:
+            f.write(edit)
+        for _ in range(2):
+            html.unlink(missing_ok=True)
+            mypyc.build(cfg, "dev", annotate=html, compile_c=False)
+            text = html.read_text(encoding="utf-8")
+            assert "alpha_first" in text and "beta_second" in text
+
+
+@needs_venv
 @needs_compiler
 def test_real_compile_names_namespace_modules_as_python_imports_them(src_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A top-level namespace folder in compile.modules, and an app package without __init__.py

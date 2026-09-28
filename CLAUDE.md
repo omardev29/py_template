@@ -2313,7 +2313,13 @@ Formats:
 - After the build every compiled module must have an extension, else `PytError` (and no
   record is written, so the next build is forced).
 - `compile.annotate = true`: every mypyc build (`run`, `test`, `compile`, `build`) also writes
-  `mypyc.ANNOTATE_HTML` (`.build/reports/mypyc-annotate.html`); cost within timing noise.
+  `mypyc.ANNOTATE_HTML` (`.build/reports/mypyc-annotate.html`); cost within timing noise. With
+  `compile.separate = true` a run that annotates (this one, or `report`) starts without mypy's
+  cache (`mypyc.build`): mypy is incremental there, a module it loads from its cache gets no IR,
+  and mypyc annotates only the modules it built IR for, so the report was an empty page after
+  an unchanged compile (one module after an edit of one) with the success line. mypyc rewrites a
+  C file only when its text changes, so the C compiler rebuilds nothing more
+  (`test_real_report_with_separate_covers_every_module_every_time`).
 - `./pyt compile [--release]` builds the stage without running it: the hidden VS Code task
   `pyt: compile` is the `preLaunchTask` of the mypyc debug config.
 - `report` writes the same `ANNOTATE_HTML` with `compile_c=False` (no C compiler needed) plus
