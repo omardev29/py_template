@@ -18,9 +18,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -720,6 +723,30 @@ def test_ps1_hand_over_is_injection_safe(name: str, tmp_path: Path) -> None:
     leaked = [ln for ln in (r.stdout + r.stderr).splitlines() if "PWNED" in ln and not ln.startswith("PTPROBE")]
     assert not leaked, leaked
     assert [ln for ln in r.stdout.splitlines() if ln.startswith("RC=")] == ["RC=0"] * len(probes)
+
+
+# Any word an argv can hold (Unicode without NUL), mixed with the ones known to be hard.
+PS_WORDS = st.one_of(st.sampled_from([*PS_ARGS, *QUOTES, "--%"]), st.text(st.characters(codec="utf-8", exclude_characters="\x00")))
+
+
+@pytest.mark.parametrize("name", PS_NAMES)
+@settings(max_examples=max(2, settings.default.max_examples // 50))  # a PowerShell start each
+@given(args=st.lists(PS_WORDS.filter(lambda a: a != "--"), min_size=1, max_size=50))  # PowerShell removes a bare --
+def test_ps1_hands_any_arguments_to_the_runner_unchanged(name: str, args: list[str]) -> None:
+    """Splatted words at random reach the runner as they are, through the Core hand-over and the
+    legacy pre-quoting alike (pwsh with $PSNativeCommandArgumentPassing = 'Legacy'; 5.1 always)."""
+    exe = _ps_exe(name)
+    with tempfile.TemporaryDirectory() as tmp:  # not tmp_path: one file per example
+        data = Path(tmp) / "args.json"
+        data.write_text(json.dumps(args), encoding="utf-8")
+        call = f"& {_ps_literal(str(PS1))} __probe 0 0 @l\n'RC=' + $LASTEXITCODE\n"
+        body = f"$l = @(Get-Content -Raw -Encoding UTF8 -LiteralPath {_ps_literal(str(data))} | ConvertFrom-Json)\n{call}"
+        if name == "pwsh":
+            body += f"$PSNativeCommandArgumentPassing = 'Legacy'\n{call}"
+        r = _session(exe, body + "exit 0\n")
+    runs = 2 if name == "pwsh" else 1
+    assert [p["argv"] for p in _probes(r)] == [args] * runs, r.stdout + r.stderr
+    assert [ln for ln in r.stdout.splitlines() if ln.startswith("RC=")] == ["RC=0"] * runs
 
 
 STOP_PARSING_ARGS = ["x", "--%", "a b", "%PATH%", "$HOME", "", 'q"x', "*", "~"]

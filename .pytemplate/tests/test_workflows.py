@@ -22,9 +22,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_dev, cmd_mode, cmd_nvim, config, envs, nvimtest, presets, upx  # noqa: E402
+from runner import cmd_dev, cmd_mode, cmd_nvim, config, envs, mutation, nvimtest, presets, proc, upx  # noqa: E402
 from runner.cmd_build import BuildRequest  # noqa: E402
 from runner.project import DIST, ROOT  # noqa: E402
+from runner.ui import PytError  # noqa: E402
 
 WORKFLOWS = ROOT / ".github" / "workflows"
 IMAGE = WORKFLOWS / "template-ci-image"  # the Linux CI image (template-ci-image.yml)
@@ -137,7 +138,8 @@ def test_selftest_workflow_covers_every_os_and_both_floors() -> None:
     linux = image["selftest"]
     assert 0 < linux.index("./pyt render --check") < linux.index("./pyt setup") < linux.index("run: ./pyt selftest -rs")
     floor = image["python-floor"]
-    assert "--python 3.11 --with \"$pytest\" python -m pytest" in floor and ".pytemplate/tests" in floor
+    assert "--python 3.11 --with \"$pytest\" --with \"$hypothesis\" python -m pytest" in floor and ".pytemplate/tests" in floor
+    assert "grep '^hypothesis==' " in floor  # the locked Hypothesis: the property tests need it
     assert "uv run --quiet --python 3.11 --script .pytemplate/pyt.py help" in floor
     new = image["new-project"]
     assert "preset: [raylib, flet]" in new and "./pyt new" in new and "./pyt selftest" in new
@@ -387,7 +389,7 @@ def test_ci_image_pins_come_from_the_code() -> None:
 def test_ci_image_reads_only_its_pins() -> None:
     """Every $NAME the image's scripts read comes from pins.env (or is their own)."""
     keys = set(_pins().values())
-    own = {"ca", "tmp", "work", "pytest", "preset", "serial", "here", "root", "python", "ref", "source", "ctx", "image", "base"}
+    own = {"ca", "tmp", "work", "pytest", "hypothesis", "preset", "serial", "here", "root", "python", "ref", "source", "ctx", "image", "base"}
     for name in ("system", "warm"):
         text = (IMAGE / name).read_text(encoding="utf-8")
         used = set(re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", text)) - {"HOME", "PATH", "PYTHON"}
@@ -405,6 +407,7 @@ def test_ci_image_folder_is_what_the_tag_hashes() -> None:
     for rel in pins.data_files():
         assert (ROOT / rel).is_file() and any(line.endswith(f"  {rel}") for line in lines), rel
     assert {"uv.lock", "pyproject.toml", ".python-version"} <= set(pins.data_files())
+    assert {".pytemplate/tools/mutation_cr.py", ".pytemplate/tools/mutation_cr.py.lock"} <= set(pins.data_files())  # Cosmic Ray
     assert all(any(rel.startswith(f".pytemplate/presets/{p}/") for rel in pins.data_files()) for p in ("script", "raylib", "flet"))
 
 
@@ -452,7 +455,7 @@ def test_ci_image_workflow_builds_publishes_and_runs_the_linux_jobs() -> None:
     assert 'if [ -z "$HEAD_REPO" ] || [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ]' in image
     assert "cat /opt/ci/inputs.txt | diff -" in image  # the image holds what its tag names
     pins = _pins()
-    assert set(found) == {"selftest", "python-floor", "new-project", "launchers", "nvim"}
+    assert set(found) == {"selftest", "python-floor", "new-project", "launchers", "nvim", "mutation"}
     for name, body in found.items():
         assert "needs.image.outputs.usable == 'true'" in body and "packages: read" in body, name
         assert "image: ${{ needs.image.outputs.ref }}" in body and "password: ${{ github.token }}" in body, name
@@ -460,6 +463,84 @@ def test_ci_image_workflow_builds_publishes_and_runs_the_linux_jobs() -> None:
         assert "shell: bash" in body and "setup-uv" not in body and "apt-get" not in body, name
         assert "${{ runner.temp }}" not in body, name  # the host's path inside a container job
     assert f"nvim: [{pins.NVIM}, {pins.from_code()['NVIM_MIN']}]" in found["nvim"]
+
+
+def test_mutation_job_measures_the_lines_a_pull_request_changes() -> None:
+    """template-ci-image.yml's mutation job: pull requests only, against the base their merge
+    commit was made on (HEAD^1: the base branch may have moved since), within a budget that
+    leaves the report of what ran, and red when the suite cannot judge, out of time too (the
+    step's script runs in the next test); the JSON report is always uploaded."""
+    body = jobs(_text("template-ci-image.yml"))["mutation"]
+    assert "github.event_name == 'pull_request'" in body and not re.search(r"^\s+ref:", body, re.M)  # checkout: the merge commit
+    assert "fetch-depth: 2" in body and "persist-credentials: false" in body
+    assert "--mutation --diff HEAD^1 " in body and "--json > mutation.json" in body and "base_ref" not in body
+    budget = re.search(r"timeout -k (\d+)m -s TERM (\d+)m \./pyt selftest --mutation", body)
+    job = re.search(r"timeout-minutes: (\d+)", body)
+    assert budget and job and int(budget[1]) + int(budget[2]) + 10 <= int(job[1])  # the report is written before the job's end
+    assert '["failed"]' in body and "::warning::" in body and "::error::" in body  # out of time: the report decides
+    report = body[body.index("name: Mutation report") :]
+    assert "if: always()" in report and "path: mutation.json" in report
+
+
+def test_the_mutation_step_follows_the_report_when_it_runs_out_of_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The mutation job's own script, `timeout` faked, with the report the suite prints: a suite
+    that ends by itself gives its exit code; one that runs out of time (timeout's 124) is a
+    warning when its report judged what ran, and red when the report holds a failure (its
+    `failed` key: a failed baseline, a mutant that could not be judged, an error) or cannot be
+    read. The first run on GitHub ran out of time with three failed baselines, and the job was
+    green with a warning."""
+    bash = shutil.which("bash")
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if sys.platform == "win32" or bash is None or not uv:
+        pytest.skip("the step runs in the Linux image, with bash and uv")
+    body = _step(_text("template-ci-image.yml"), "selftest --mutation of the runner lines").split("        run: |\n", 1)[1]
+    script = tmp_path / "step.sh"
+    script.write_bytes(("\n".join(line[10:] for line in body.splitlines()) + "\n").encode())
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "timeout").write_bytes(b'#!/bin/sh\ncat "$PT_REPORT"\nexit "$PT_CODE"\n')
+    (fake / "timeout").chmod(0o755)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    shutil.copy2(ROOT / ".python-version", checkout / ".python-version")  # the Python uv takes there
+    # none of these is set in the job's container; offline: the Python uv takes is already there
+    env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "UV_PYTHON_PREFERENCE")}
+    env.update(PATH=os.pathsep.join([str(fake), str(Path(uv).parent), env.get("PATH", "")]), UV_PYTHON_DOWNLOADS="never", UV_OFFLINE="1")
+    monkeypatch.setattr(proc, "find_uv", lambda: uv)
+
+    def printed(status: str = mutation.KILLED, baseline: str = mutation.PASS, error: PytError | None = None, *, interrupted: bool) -> bytes:
+        """What the suite prints on stdout (the step's mutation.json) for a report of one mutant."""
+        mutant = mutation.Mutant(".pytemplate/runner/m.py", "core/AddNot", 0, 10, 4, 10, 9, "f", status, 1.0)
+        report = mutation.Report([mutant], {"runner.m": mutation.Baseline("runner.m", ["t.py"], baseline, 2.0)}, tmp_path, interrupted=interrupted, error=error)
+        monkeypatch.setattr(mutation, "run", lambda *a: report)
+        try:
+            mutation.selftest(SimpleNamespace(), ["--json"])  # type: ignore[arg-type]  # the faked run reads no configuration
+        except PytError:
+            pass  # an error that stopped the run comes after its report
+        return capsys.readouterr().out.encode()
+
+    stopped = PytError("selftest --mutation: Cosmic Ray's side stopped", 3)
+    for case, stdout, code, expected, annotation in (
+        ("ended by itself", printed(interrupted=False), 0, 0, ""),
+        ("ended by itself, a failed baseline", printed(baseline=mutation.FAIL, interrupted=False), 1, 1, ""),
+        ("out of time", printed(interrupted=True), 124, 0, "::warning::"),
+        ("out of time, a failed baseline", printed(baseline=mutation.FAIL, interrupted=True), 124, 1, "::error::"),
+        ("out of time, a mutant not judged", printed(mutation.ERROR, interrupted=True), 124, 1, "::error::"),
+        ("out of time, an error that stopped the run", printed(error=stopped, interrupted=True), 124, 1, "::error::"),
+        ("out of time, no report", b"", 124, 1, "::error::"),
+        ("killed after its grace time", b"", 137, 137, ""),
+    ):
+        (tmp_path / "report").write_bytes(stdout)
+        (checkout / "mutation.json").unlink(missing_ok=True)
+        run_env = {**env, "PT_REPORT": str(tmp_path / "report"), "PT_CODE": str(code)}
+        r = subprocess.run(  # as GitHub runs a `shell: bash` step
+            [bash, "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], cwd=checkout, env=run_env, capture_output=True, text=True, timeout=120, check=False
+        )  # fmt: skip
+        assert r.returncode == expected, (case, r.stdout + r.stderr)
+        assert (annotation in r.stdout) if annotation else "::" not in r.stdout, (case, r.stdout)
+        assert (checkout / "mutation.json").read_bytes() == stdout, case  # what the next step uploads
 
 
 def test_workflow_literals_follow_the_ci_image_pins() -> None:
@@ -491,7 +572,11 @@ def test_ci_image_pins_pass_mypy_strict(tmp_path: Path) -> None:
 @pytest.mark.skipif(not os.environ.get("CI_IMAGE_INPUTS"), reason="runs inside the CI image only")
 def test_ci_image_holds_this_checkout_and_its_tools() -> None:
     """Inside the image: it was built from this checkout's inputs, and every tool the suites look
-    for is there (a missing one would only turn tests into skips)."""
+    for is there (a missing one would only turn tests into skips). Its caches are in its user's
+    home, the one passwd names, whatever HOME says: selftest --mutation's workers move HOME, and
+    read from there this check failed the baselines of three modules in CI."""
+    import pwd  # POSIX only: the image is Linux
+
     pins = _pins()
     assert Path(os.environ["CI_IMAGE_INPUTS"]).read_text(encoding="utf-8") == pins.canonical()
     tools = ("git", "uv", "nvim", "pwsh", "xonsh", "actionlint", "fish", "busybox", "shellcheck", "unzip", "objdump")
@@ -501,7 +586,8 @@ def test_ci_image_holds_this_checkout_and_its_tools() -> None:
     assert out.split()[1] == pins.UV
     for request in (pins.from_code()["CPYTHON"], "3.11"):
         subprocess.run(["uv", "python", "find", "--no-python-downloads", request], capture_output=True, check=True)
-    assert (Path.home() / ".cache" / "pytemplate" / "tools" / f"upx-{pins.from_code()['UPX']}").is_dir()
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    assert (home / ".cache" / "pytemplate" / "tools" / f"upx-{pins.from_code()['UPX']}").is_dir()
 
 
 # --- the flet builds (template-flet.yml and its folder) --------------------------------------

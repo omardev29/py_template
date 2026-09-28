@@ -28,7 +28,7 @@ from .imports import PARSE_ERRORS, imports_of, is_local, local_module, module_na
 from .project import BUILD, EXT_SUFFIXES, IS_WINDOWS, SRC, TOOLS, rel
 from .ui import PytError
 
-SKIP_DIRS = {"__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
+SKIP_DIRS = {"__pycache__", ".mypy_cache", ".pytest_cache", ".hypothesis", ".ruff_cache"}
 # The annotated HTML report (slow lines): ./pyt report, and every build with compile.annotate
 ANNOTATE_HTML = BUILD / "reports" / "mypyc-annotate.html"
 # Exit codes of tools/mypyc_build.py: mypy/mypyc rejected the code (no C compiler ran yet);

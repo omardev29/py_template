@@ -106,8 +106,9 @@ def values() -> dict[str, str]:
 
 
 def data_files() -> list[str]:
-    """The project files whose content decides what the image downloads (lock, presets)."""
+    """The project files whose content decides what the image downloads (locks, presets)."""
     names = ["uv.lock", "pyproject.toml", "pytemplate.toml", ".python-version"]
+    names += [".pytemplate/tools/mutation_cr.py", ".pytemplate/tools/mutation_cr.py.lock"]  # Cosmic Ray's environment
     for preset in sorted(p for p in (ROOT / ".pytemplate" / "presets").iterdir() if p.is_dir()):
         for rel in ("preset.toml", "constraints.txt", "files/pytemplate.toml"):
             if (preset / rel).is_file():

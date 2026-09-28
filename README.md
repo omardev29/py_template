@@ -266,7 +266,7 @@ outside any project exits 2 with how to install pyt.
 | `pyz-merge A.pyz B.pyz... --out C.pyz` | Merges the `.pyz` files built on several OSes into one |
 | `tasks` | Lists the `[tasks]` entries of `pytemplate.toml` |
 | `nvim [doctor\|trust\|extras\|bootstrap\|sync]` | The Neovim/LazyVim integration ([details](#neovim-lazyvim)) |
-| `selftest [--shells\|--nvim\|--e2e] [args...]` | The template's own tests ([details](#testing-the-template)) |
+| `selftest [--shells\|--nvim\|--e2e\|--mutation] [args...]` | The template's own tests ([details](#testing-the-template)) |
 | `help [COMMAND]` | Every command and task, or one of them |
 
 `BACKEND` is `cpython`, `pypy` or `mypyc` (default: `backend.active`). `run`, `test`, `check`
@@ -320,8 +320,9 @@ not even Python's bytecode cache of the runner, which goes to your cache folder
 
 The runner writes its own messages to stderr, so stdout belongs to the app
 (`./pyt run > out.txt` captures only the app). `help` and the `--json` reports
-of `selftest --shells` and `selftest --e2e` write to stdout, for pipes. Colours are used only on a
-terminal, and never with `NO_COLOR` (any non-empty value) or `TERM=dumb`.
+of `selftest --shells`, `selftest --e2e` and `selftest --mutation` write to stdout, for pipes.
+Colours are used only on a terminal, and never with `NO_COLOR` (any non-empty value) or
+`TERM=dumb`.
 
 Exit codes:
 
@@ -340,9 +341,9 @@ Exit codes:
 - 141: the reader of stdout went away (`./pyt help | head -1`; Linux and macOS).
 - 143 (129): the runner got a SIGTERM (a SIGHUP) of its own, from `kill`, a supervisor or
   `docker stop` (Linux and macOS). It passes the signal on to the app, waits for it and stops
-  like after Ctrl+C: the app's code, or 143 (129) when the app exited with 0. `selftest --nvim`
-  and `selftest --e2e` take either signal for a Ctrl+C: they kill the step that runs, with
-  everything it started, and exit with 130.
+  like after Ctrl+C: the app's code, or 143 (129) when the app exited with 0. `selftest --nvim`,
+  `selftest --e2e` and `selftest --mutation` take either signal for a Ctrl+C: they kill the step
+  that runs, with everything it started, and exit with 130.
 - 128 + N: a program killed by signal N.
 - `run`, `test BACKEND` and tasks return their program's exit code (pytest: 5 when no test was
   collected, 4 for a usage error). `test all` tests every backend, even after a failure, and
@@ -811,7 +812,7 @@ check fails, `pyproject.toml` and `uv.lock` are put back).
   7.3.23 (uv takes the newest PyPy build of that Python version). A later uv may stop offering
   it (uv 0.12 no longer offers 3.11.11 and 3.11.13): see [Troubleshooting](#troubleshooting).
 - The tools (mypy, ruff, PyInstaller, debugpy) run on CPython: `.venv-pypy` holds the app's
-  dependencies and pytest.
+  dependencies, pytest and Hypothesis.
 - CPython C-API libraries (numpy, pillow, pydantic-core) are slow on PyPy: add them with
   `./pyt add numpy --cpython-only`. cffi libraries (raylib) are fast: the JIT also compiles the
   cffi calls.
@@ -1631,7 +1632,7 @@ src/main.py                      entry point (never compiled)
 src/<pkg>/core/                  what mypyc compiles (compile.modules)
 src/<pkg>/*.py                   the interpreted boundary (UI, I/O, poorly typed libraries)
 src/assets/                      data bundled with the app (app.assets = "assets")
-tests/                           pytest (conftest.py checks that mypyc's binaries were loaded)
+tests/                           pytest, Hypothesis too (conftest.py checks that mypyc's binaries were loaded)
 typings/                         the project's stubs (raylib: the corrected raylib stub)
 .python-version, .mypy.ini, .ruff.toml, pyrightconfig.json, .vscode/, .lazy.lua   generated
 .github/workflows/ci.yml         the project's CI (generated)
@@ -1668,6 +1669,7 @@ Pinned, and moved on purpose:
 | basedpyright | `cmd_dev.BASEDPYRIGHT` and `cmd_dev.BASEDPYRIGHT_NODE` | together, then `./pyt render` (`editor.json` carries the version) |
 | Nuitka | `methods.nuitka.NUITKA` and `methods.nuitka.NUITKA_PYTHON` | together (a `python.cpython` newer than `NUITKA_PYTHON` needs a newer Nuitka) |
 | UPX | `upx.VERSION` and the SHA-256 values of `upx.ASSETS` | together |
+| Cosmic Ray (`selftest --mutation`) | `.pytemplate/tools/mutation_cr.py` (`cosmic-ray==8.7.0`) and its lock `mutation_cr.py.lock` | edit the pin, then `uv lock --script .pytemplate/tools/mutation_cr.py`; `mutation.OPERATORS` names Cosmic Ray's operators (a new release may rename them: `test_mutation.py` checks each one against it) |
 | GitHub actions | `.pytemplate/templates/ci.yml` and `.github/workflows/template-*.yml` | edit the template, then `./pyt render`; never edit the generated `ci.yml` |
 | the Neovim test | `cmd_nvim.STARTER_REV` and `.pytemplate/nvim/tests/lazy-lock.json` | from one green run without the lock (CLAUDE.md, section 13.1) |
 | the flet builds' browser | `.github/workflows/template-flet/browser.txt`: Playwright and its dependencies | together (a Playwright release installs its own Chromium build); a new Ubuntu runner image may need a newer Playwright |
@@ -1694,11 +1696,16 @@ regenerate the root (CLAUDE.md, section 11).
 ./pyt selftest --shells   # every launcher through every shell installed here
 ./pyt selftest --nvim     # the LazyVim integration, per preset, in an isolated LazyVim
 ./pyt selftest --e2e      # each preset end to end: new, setup, check, test, run and builds
+./pyt selftest --mutation --diff origin/main   # the runner's changed lines: changes no test notices
 ```
 
 - `selftest` needs `.venv` (`./pyt setup` once). Its arguments are added to the whole suite
   (select tests with `-k EXPR`). The tests that need the network (re-locks and real
   `./pyt new` runs of a copy, a few real builds) are skipped when it is unreachable.
+- Some of its tests are property-based ([Hypothesis](https://hypothesis.works)): they make up
+  inputs at random (a hundred per test, a few where each costs a runner or PowerShell start; on a
+  CI the same ones every run) and a failure prints the smallest input it found.
+  `./pyt selftest --hypothesis-profile=pytemplate-deep` tries 20 times as many.
 - `--shells [NAME,...] [--list] [--json] [--keep]`
   `[--project DIR] [--tests T1,...] [--jobs N] [--timeout S]`: seven probes per shell (arguments,
   exit code, folders, a temporary script like xonsh-shell-kit's `!` lines, a minimal PATH, stdin, uv
@@ -1718,6 +1725,23 @@ regenerate the root (CLAUDE.md, section 11).
   and back; `--quick` builds only each backend's default method and skips those three; `--full`
   adds Nuitka, a PyPy round trip and a `[preset.*]` edit applied with `./pyt apply`. It prints a
   PASS/FAIL/SKIP table (`--json` for CI) and exits 1 on any FAIL.
+- `--mutation [--diff BASE] [--jobs N] [--json]`: mutation testing of the runner with [Cosmic
+  Ray](https://cosmic-ray.readthedocs.io) 8.7.0 (in an environment of its own, from the lock next
+  to `.pytemplate/tools/mutation_cr.py`). Each mutant is one small change of one runner module (a
+  comparison turned around, a condition negated, a number moved by one, an exception handler
+  switched off...); the test files that import the module run against it. A failure kills it; a
+  mutant that passes every test SURVIVED: a change no test notices, which the report lists with
+  its line and its diff. `--diff BASE` tests only the mutants on the lines changed since the
+  commit BASE (uncommitted changes and new modules count too); without it, every module (about
+  10,600 mutants: a day of CPU or more). Each of the N workers (default: half the CPUs, at most
+  8) tests in a throwaway copy of the project with its own git repository, `.venv` and home
+  folder, in a short temporary folder, never in your checkout. The modules' tests must pass as
+  they are first (their time sets each mutant's limit). A line marked `# pragma: no mutate` gets
+  no mutant; a mutant that is no valid Python, or one Cosmic Ray cannot make, is skipped (the
+  JSON report says why). It exits 0 when every mutant was judged (survivors are the report, not
+  a failure) and 1 when a module's tests fail without a mutant or a run could not be judged;
+  Ctrl+C prints the report of what ran (130), and so does an error that stops the run, before
+  its own message.
 - `./pyt render --check` and `./pyt doctor` must pass too.
 
 **(template repository)** The template's own CI, in `.github/workflows/template-*.yml` (not
@@ -1743,7 +1767,10 @@ copied into projects):
   jobs in it: `./pyt selftest`, the runner's tests on Python 3.11 (its floor),
   `./pyt selftest` inside new raylib and flet projects, `selftest --shells` with
   `shellcheck`, and `selftest --nvim` with Neovim 0.12.5 and 0.11.2 (uv-floor, the nvim canary
-  and the e2e rows stay on bare runners); weekly it rebuilds the image from scratch.
+  and the e2e rows stay on bare runners); weekly it rebuilds the image from scratch. For a pull
+  request it also runs `selftest --mutation --diff` on the runner lines it changes, within 70
+  minutes: a measure, not a gate (it fails only when the mutants could not be judged; the JSON
+  report is uploaded).
 - `template-keepalive.yml` re-enables the scheduled ones every week: GitHub disables a scheduled
   workflow after 60 days without activity in the repository.
 

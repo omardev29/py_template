@@ -25,11 +25,14 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEMPLATE_DIR))
@@ -340,6 +343,21 @@ def test_app_name_rule_refuses(name: str) -> None:
 def test_name_from_folder(folder: str, name: str) -> None:
     assert presets.name_from_folder(folder) == name
     assert name == "" or name[0].isdigit() or config.APP_NAME.fullmatch(name)
+
+
+@given(st.text())
+def test_any_folder_name_gives_the_same_words_as_an_app_name(folder: str) -> None:
+    """Whatever the folder name: letters, digits, '-' and '_' only, no '--', no '-' or '_' at
+    either end (a name uv takes, unless nothing is left or it starts with a digit: `new` then
+    asks for --name), the words of ASCII letters and digits the folder holds once its accents are
+    dropped, in their order, and an app name gives itself back."""
+    name = presets.name_from_folder(folder)
+    assert re.fullmatch(r"[A-Za-z0-9_-]*", name) and "--" not in name
+    assert not name.startswith(("-", "_")) and not name.endswith(("-", "_"))
+    assert name == "" or name[0].isdigit() or config.APP_NAME.fullmatch(name)
+    plain = "".join(c for c in unicodedata.normalize("NFKD", folder) if not unicodedata.combining(c))
+    assert re.findall(r"[A-Za-z0-9]+", name) == re.findall(r"[A-Za-z0-9]+", plain)
+    assert presets.name_from_folder(name) == name
 
 
 @pytest.mark.parametrize(
@@ -992,6 +1010,8 @@ def test_copy_template_says_when_git_fails(tmp_path: Path, monkeypatch: pytest.M
         ("dist/x.whl", True),
         ("src/app/__pycache__/m.pyc", True),
         (".mypy_cache/x", True),
+        (".hypothesis/constants/0a1b", True),
+        ("tests/.hypothesis/unicode_data/charmap.json.gz", True),
         (".flet/x", True),
         (".pytemplate/template-repo", True),
         ("build/x", True),
@@ -2256,10 +2276,14 @@ def test_init_refuses_a_lock_that_resolves_a_dependency_to_the_project(fake: Fak
 
 def test_plan_init_writes_nothing_and_the_dry_run_prints_it(fake: Fake, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(cmd_mode, "ROOT", fake.root)
+    for cache in (".pytest_cache/v/x", ".hypothesis/constants/0a1b"):  # pytest and Hypothesis run from tests/
+        (fake.root / "tests" / cache).parent.mkdir(parents=True, exist_ok=True)
+        (fake.root / "tests" / cache).write_text("x", encoding="utf-8")
     before = _snapshot(fake.root)
     cmd_mode._plan_init(fake.cfg, "flet", "Other", force=True)
     err = capsys.readouterr().err
     assert "init flet (" in err and "as 'Other'" in err
+    assert "_cache" not in err and ".hypothesis" not in err  # caches: no file init replaces
     assert "remove rich>=15.0.0; add flet==1.0.1, flet-desktop==1.0.1" in err
     assert "+ src/other/ui/app.py" in err and "- src/myapp/core/bench.py" in err
     if presets.constraints("flet"):

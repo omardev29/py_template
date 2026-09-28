@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -239,10 +241,83 @@ def test_sync_leaves_nothing_out_without_a_reason(tmp_path: Path, monkeypatch: p
         ("~=3", (3, 14), False),  # not PEP 440: uv decides
         (">=3.12.0rc1", (3, 11, 15), False),  # outside the subset: uv decides
         ("", (3, 11, 15), False),
+        (">\u0663", (2, 7, 18), False),  # an Arabic-Indic 3: PEP 440 has ASCII digits only
+        (">=3." + "1" * 5000, (3, 14), False),  # more digits than int() reads: no ValueError
     ],
 )
 def test_group_requires_python(spec: str, version: tuple[int, ...], excluded: bool) -> None:
     assert envs._excludes(spec, version) is excluded
+
+
+def _pep440() -> tuple[Any, Any]:
+    """packaging's SpecifierSet and Version: PEP 440 as pip implements it (pytest depends on it)."""
+    specifiers = pytest.importorskip("packaging.specifiers")
+    version = pytest.importorskip("packaging.version")
+    return specifiers.SpecifierSet, version.Version
+
+
+_SPEC_NUMBERS = (st.integers(2, 4), st.integers(0, 4), st.integers(0, 6), st.integers(0, 2))  # small: they meet
+_PATCH_RELEASES = st.tuples(*_SPEC_NUMBERS[:3])
+_MINORS = st.tuples(*_SPEC_NUMBERS[:2])
+
+
+@st.composite
+def _readable_requires_python(draw: st.DrawFn) -> str:
+    """A requires-python of the subset envs._excludes reads: 1 to 3 clauses of every operator,
+    a `.*` only after == and !=, two numbers or more after ~=, blanks and leading zeros where
+    PEP 440 allows them."""
+    clauses = []
+    for _ in range(draw(st.integers(1, 3))):
+        op = draw(st.sampled_from(("==", "!=", "<=", ">=", "<", ">", "~=")))
+        size = draw(st.integers(2 if op == "~=" else 1, len(_SPEC_NUMBERS)))
+        numbers = ".".join(draw(st.sampled_from(("{}", "0{}"))).format(draw(n)) for n in _SPEC_NUMBERS[:size])
+        star = ".*" if op in ("==", "!=") and draw(st.booleans()) else ""
+        blanks = [draw(st.sampled_from(("", " ", "\t"))) for _ in range(3)]
+        clauses.append(f"{blanks[0]}{op}{blanks[1]}{numbers}{star}{blanks[2]}")
+    return ",".join(clauses)
+
+
+@given(_readable_requires_python(), _PATCH_RELEASES)
+def test_group_requires_python_follows_pep_440_for_a_patch_release(spec: str, version: tuple[int, ...]) -> None:
+    """A PyPy environment asks for one release (pypy@3.11.15): excluded exactly when PEP 440
+    rules it out, for every operator, alone or with others."""
+    specifier_set, parse = _pep440()
+    assert envs._excludes(spec, version) is (parse(".".join(map(str, version))) not in specifier_set(spec))
+
+
+@given(_readable_requires_python(), _MINORS)
+def test_group_requires_python_excludes_a_minor_only_when_no_patch_release_fits(spec: str, minor: tuple[int, ...]) -> None:
+    """python.cpython names a minor (3.14): uv may pick any of its patch releases, so a group is
+    left out only when PEP 440 rules out every one of them. The specs name patch releases up to
+    6, and from 7 on each answer stays the same: 0..15 and a huge one cover them."""
+    specifier_set, parse = _pep440()
+    allowed = specifier_set(spec)
+    releases = [parse(".".join(map(str, (*minor, patch)))) for patch in (*range(16), 1 << 30)]
+    assert envs._excludes(spec, minor) is all(r not in allowed for r in releases)
+
+
+_SPEC_TOKENS = st.sampled_from(
+    [
+        *("==", "!=", "<=", ">=", "<", ">", "~=", "===", "=", "~", "!"),  # operators and near misses
+        *("3", "11", "0", "07", "9" * 30, "\u0663", "\u0661\u0662"),  # numbers, Arabic-Indic digits too
+        *(".", ".*", "*", ",", " ", "\t", "\n", "\u00a0", "\u2003"),  # separators and blanks
+        *("rc1", "a0", ".post1", ".dev0", "+local", "v", "1!", ";", "(", ")"),  # outside the subset
+    ]
+)
+_SPEC_TEXT = st.one_of(st.text(), st.lists(_SPEC_TOKENS, max_size=12).map("".join))
+
+
+@given(_SPEC_TEXT, st.one_of(_PATCH_RELEASES, _MINORS))
+def test_group_requires_python_leaves_a_group_out_only_for_what_pep_440_rules_out(spec: str, version: tuple[int, ...]) -> None:
+    """Whatever the text, no exception, and a group is left out only when PEP 440 reads the
+    requires-python (packaging raises InvalidSpecifier otherwise) and rules the version out, or
+    for a minor every patch release tried; any other text is uv's to decide."""
+    if not envs._excludes(spec, version):
+        return
+    specifier_set, parse = _pep440()
+    allowed = specifier_set(spec)
+    patches = version[2:] or (*range(16), 1 << 30)
+    assert all(parse(".".join(map(str, (*version[:2], patch)))) not in allowed for patch in patches)
 
 
 def test_sync_with_real_uv_installs_what_the_groups_allow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

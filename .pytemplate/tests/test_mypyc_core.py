@@ -977,6 +977,16 @@ def test_sync_tree_handles_type_changes_and_removed_packages(tmp_path: Path) -> 
     assert (dst / "pkg" / "__pycache__").is_dir()  # the caches of live folders are kept
 
 
+def test_sync_tree_leaves_the_tool_caches_out(tmp_path: Path) -> None:
+    """pytest, Hypothesis, mypy or ruff run from inside src/ leave their caches there: the stage
+    and the payloads (what the builds ship) never get them."""
+    caches = [".pytest_cache/v/x", ".hypothesis/constants/0a1b", "pkg/.mypy_cache/x.json", ".ruff_cache/x"]
+    src = _project(tmp_path / "src", {"pkg/m.py": "X = 1\n", **dict.fromkeys(caches, "cache")})
+    dst = tmp_path / "dst"
+    mypyc.sync_tree(src, dst)
+    assert _snapshot(dst) == {"pkg": None, "pkg/m.py": b"X = 1\n"}
+
+
 def test_sync_tree_keeps_user_native_files_and_skips_mypyc_outputs(tmp_path: Path) -> None:
     natives = ["libfoo.so", "libbar.so.1", "foo.dll", "foo.dylib", "_vend" + LINUX_EXT, "_v.cp314-win_amd64.pyd"]
     src = _project(

@@ -13,9 +13,11 @@ dependencies = [
 
 [dependency-groups]
 # CPython-only tools: mypy depends on ast-serialize (Rust, no wheels for
-# PyPy) and PyInstaller does not support PyPy. The PyPy environment only gets pytest.
+# PyPy) and PyInstaller does not support PyPy. The PyPy environment only gets the test
+# tools, pytest and hypothesis (property-based tests), for `./pyt test pypy`.
 dev = [
     "debugpy>=1.8.22; implementation_name == 'cpython'",
+    "hypothesis>=6.168.2",
     "mypy>=2.3.1; implementation_name == 'cpython'",
     "pyinstaller>=6.22.3; implementation_name == 'cpython'",
     "pytest>=9.1",

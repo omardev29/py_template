@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -378,9 +379,13 @@ def test_detect_host_gui_modes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_default_base_is_short() -> None:
+    """Right in the temp folder, whatever that is (selftest --mutation's workers move it deeper:
+    below macOS's own it passed 80 characters), and short on Windows (MAX_PATH)."""
     base = e2e.default_base()
-    assert base.name in ("e2e", project.scratch_name("pt-e2e"))
-    assert len(str(base)) < 80
+    temp = Path(tempfile.gettempdir())
+    assert base.name in ("e2e", project.scratch_name("pt-e2e")) and base.parent in (temp, temp / "pt")
+    if project.IS_WINDOWS:
+        assert len(str(base)) < 80
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX owners and modes (Windows %TEMP% is per user)")
@@ -639,7 +644,10 @@ def test_docs_problems(tmp_path: Path) -> None:
 
 
 def test_project_state_and_its_changes(tmp_path: Path) -> None:
-    for rel_path in ("src/app/core.py", "pyproject.toml", ".git/index", ".venv/pyvenv.cfg", ".venv-pypy/x", "dist/a.whl", "src/app/__pycache__/core.pyc", "src/app/core.so"):
+    for rel_path in (
+        "src/app/core.py", "pyproject.toml", ".git/index", ".venv/pyvenv.cfg", ".venv-pypy/x", "dist/a.whl",
+        "src/app/__pycache__/core.pyc", "src/app/core.so", ".hypothesis/constants/0a1b",
+    ):  # fmt: skip
         (tmp_path / rel_path).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel_path).write_text(rel_path, encoding="utf-8")
     before = e2e.project_state(tmp_path)

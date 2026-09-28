@@ -80,7 +80,7 @@ from .ui import PytError
 Kind = Literal["pkg", "name", "keep", "skip"]
 
 _DRY = "(--dry-run: nothing is written)"
-SKIP_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".git", ".flet"}
+SKIP_DIRS = {"__pycache__", ".pytest_cache", ".hypothesis", ".mypy_cache", ".ruff_cache", ".git", ".flet"}
 PY_SUFFIXES = {".py", ".pyi", ".pyw"}
 # Root files that never get a "this file also mentions the old name" note: rename edits them, or
 # they are the template's own (the launchers and CLAUDE.md, whose words such as `app` or `p` are

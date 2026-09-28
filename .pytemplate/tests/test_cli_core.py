@@ -30,7 +30,7 @@ import pytest
 TEMPLATE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEMPLATE_DIR))
 
-from runner import cli, cmd_dev, cmd_env, cmd_mode, config, e2e, envs, lintc, mypyc, nvimtest, presets, proc, project, render, shells, tasks, ui  # noqa: E402
+from runner import cli, cmd_dev, cmd_env, cmd_mode, config, e2e, envs, lintc, mutation, mypyc, nvimtest, presets, proc, project, render, shells, tasks, ui  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import BUILD, DIST, ROOT, SRC  # noqa: E402
 from runner.ui import PytError  # noqa: E402
@@ -61,12 +61,25 @@ def unchecked(data: dict[str, Any]) -> Config:
     return cfg
 
 
+# where the user's uv keeps its cache and its Pythons: theirs, not the uv run's. Dropped, a child
+# in a home of its own (the workers of selftest --mutation) downloaded CPython, or offline failed
+UV_FOLDERS = ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR")
+
+
 def child_env() -> dict[str, str]:
     """The environment of a child ./pyt: nothing of the uv run that started pytest."""
     drop = ("UV", "VIRTUAL_ENV", "PYTHONUNBUFFERED", "PYTHONPATH", "PYTHONHOME")
-    env = {k: v for k, v in os.environ.items() if k not in drop and not k.startswith(("PYTEMPLATE_", "UV_"))}
+    env = {k: v for k, v in os.environ.items() if k not in drop and (k in UV_FOLDERS or not k.startswith(("PYTEMPLATE_", "UV_")))}
     env.update(NO_COLOR="1", PYTHONDONTWRITEBYTECODE="1")
     return env
+
+
+def test_child_env_keeps_where_uv_keeps_its_cache_and_pythons(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, value in (("UV_CACHE_DIR", "/c"), ("UV_PYTHON_INSTALL_DIR", "/p"), ("UV_PROJECT_ENVIRONMENT", "/v"), ("UV_PYTHON", "3.14")):
+        monkeypatch.setenv(name, value)
+    env = child_env()
+    assert env["UV_CACHE_DIR"] == "/c" and env["UV_PYTHON_INSTALL_DIR"] == "/p"
+    assert "UV_PROJECT_ENVIRONMENT" not in env and "UV_PYTHON" not in env
 
 
 def fail(*_a: Any, **_kw: Any) -> Any:
@@ -518,16 +531,16 @@ def test_every_command_rejects_an_unknown_argument(name: str, bogus: str, monkey
     assert "Traceback" not in err
 
 
-@pytest.mark.parametrize("suite", ["--shells", "--nvim", "--e2e"])
+@pytest.mark.parametrize("suite", ["--shells", "--nvim", "--e2e", "--mutation"])
 @pytest.mark.usefixtures("no_processes")
 def test_the_selftest_suites_reject_an_unknown_option(suite: str) -> None:
     assert cli.main(["selftest", suite, "--pt-bogus-flag"]) == 2
 
 
-@pytest.mark.parametrize("suite", ["--shells", "--nvim", "--e2e"])
+@pytest.mark.parametrize("suite", ["--shells", "--nvim", "--e2e", "--mutation"])
 @pytest.mark.usefixtures("no_processes")
 def test_a_dry_run_never_starts_a_selftest_suite(suite: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    for module in (shells, nvimtest, e2e):
+    for module in (shells, nvimtest, e2e, mutation):
         monkeypatch.setattr(module, "selftest", fail)
     monkeypatch.setattr(proc, "DRY_RUN", True)
     with pytest.raises(PytError, match="has no --dry-run") as e:

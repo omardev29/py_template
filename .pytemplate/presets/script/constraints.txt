@@ -6,6 +6,7 @@ altgraph==0.17.5
 ast-serialize==0.11.2
 colorama==0.4.6
 debugpy==1.8.22
+hypothesis==6.168.2
 iniconfig==2.3.0
 librt==0.15.0
 macholib==1.16.4
@@ -25,4 +26,5 @@ pywin32-ctypes==0.2.3
 rich==15.0.0
 ruff==0.16.9
 setuptools==84.0.0
+sortedcontainers==2.4.0
 typing-extensions==4.16.0

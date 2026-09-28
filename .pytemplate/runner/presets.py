@@ -209,7 +209,7 @@ def _owned_files() -> dict[str, bytes]:
         if not base.is_dir():
             continue
         for path in base.rglob("*"):
-            if path.is_file() and not any(p in path.parts for p in ("__pycache__", ".pytest_cache")):
+            if path.is_file() and not any(p in path.parts for p in ("__pycache__", ".pytest_cache", ".hypothesis")):
                 data = path.read_bytes()
                 if _text_of(path, data) is not None:  # git may check text files out with CRLF
                     data = data.replace(b"\r\n", b"\n")
@@ -1003,7 +1003,7 @@ def init(cfg: Config, preset: str, name: str | None, *, force: bool) -> None:
 
 # Never copied by `new`: history, builds, caches and the marker of the template repository itself
 SKIP_ANYWHERE = frozenset(
-    {".git", ".build", "dist", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".flet", "template-repo"}
+    {".git", ".build", "dist", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".hypothesis", ".flet", "template-repo"}
 )
 # PyInstaller/Flet leftovers, Claude Code state (settings, agent worktrees), and the page and
 # license of the program this is: a project made with `new` is another program (TEMPLATE_DOCS)

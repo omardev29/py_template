@@ -12,10 +12,10 @@ import errno
 import hashlib
 import json
 import os
-import random
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import tokenize
 import tomllib
@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEMPLATE_DIR))
@@ -1118,6 +1120,8 @@ def test_mentions_outside_src_and_tests_are_reported(tmp_path: Path) -> None:
         ".pytemplate/editor.json": '{"name": "alpha"}\n',
         ".claude/worktrees/x/src/alpha/app.py": "import alpha\n",
         "big.txt": "alpha\n" + "x" * (rename.MENTION_MAX_BYTES + 1),
+        ".hypothesis/constants/0a1b2c3d": "['alpha', 'alpha.core']\n",  # Hypothesis's cache of the code's strings
+        "tests/.hypothesis/constants/0a1b2c3d": "['alpha']\n",  # the same, pytest run from tests/
         # the template's own files: their words are no app name (they were listed to edit by hand)
         "CLAUDE.md": "# the alpha of the runner\n",
         "pyt": "#!/bin/sh\n# alpha\n",
@@ -1135,6 +1139,8 @@ def test_mentions_outside_src_and_tests_are_reported(tmp_path: Path) -> None:
     assert [line for _, line in planned.pyproject.kept] == ['source = ["alpha"]', 'include = ["src/alpha/*"]']
     rename.apply_plan(tmp_path, planned)
     assert (tmp_path / "scripts" / "gen.py").read_text(encoding="utf-8") == files["scripts/gen.py"]  # listed, not changed
+    cache = "tests/.hypothesis/constants/0a1b2c3d"
+    assert (tmp_path / cache).read_text(encoding="utf-8") == files[cache]  # a cache, never rewritten
     assert 'source = ["alpha"]' in pyproject.read_text(encoding="utf-8")
 
 
@@ -1802,31 +1808,28 @@ def test_the_renamed_config_is_validated_before_anything_is_written(tmp_path: Pa
 # --- names at random: the skeleton invariant and the round trip ----------------------------------------
 
 
-def _random_names(count: int) -> list[str]:
-    rng = random.Random(20260926)
-    alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    out: list[str] = []
-    while len(out) < count:
-        name = "zq" + "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 6)))
-        if rng.random() < 0.5:
-            name += rng.choice("-_") + "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 4)))
-        if name not in out and package_of(name) not in {package_of(n) for n in out}:
-            out.append(name)
-    return out
+_NAME_WORD = st.text("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", min_size=1, max_size=6)
+# "zq" first: no skeleton holds such a word of its own, which a rename would change too
+_ZQ_NAMES = st.tuples(_NAME_WORD, st.one_of(st.just(""), st.tuples(st.sampled_from("-_"), _NAME_WORD).map("".join)))
 
 
 @pytest.mark.parametrize("preset", ["script", "raylib", "flet"])
-def test_random_names_reproduce_the_skeleton_and_round_trip(tmp_path: Path, preset: str) -> None:
-    names = _random_names(6)
-    for i, (a, b) in enumerate(zip(names, names[1:], strict=False)):
-        root = tmp_path / f"r{i}"
-        root.mkdir()
-        _write_project(root, preset, a)
-        original = _tree(root)
-        _rename(root, a, b)
-        assert _tree(root) == presets.skeleton(preset, b), (a, b)
-        _rename(root, b, a)
-        assert _tree(root) == original, (b, a)
+@settings(max_examples=max(5, settings.default.max_examples // 5), suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(names=st.tuples(_ZQ_NAMES, _ZQ_NAMES).map(lambda ab: tuple("zq" + "".join(n) for n in ab)).filter(lambda ab: ab[0] != ab[1]))
+def test_any_names_reproduce_the_skeleton_and_round_trip(tmp_path: Path, preset: str, names: tuple[str, str]) -> None:
+    """Two names at random (the same package too: zqAb and zqab-c differ in case or '-'): the
+    skeleton of the first renamed is the skeleton of the second, and renamed back it is the
+    first one again, byte for byte."""
+    a, b = names
+    root = Path(tempfile.mkdtemp(dir=tmp_path))  # one project per example: tmp_path is the test's
+    _write_project(root, preset, a)
+    original = _tree(root)
+    _rename(root, a, b)
+    assert _tree(root) == presets.skeleton(preset, b)
+    assert (root / "pyproject.toml").read_text(encoding="utf-8") == _pyproject(preset, b)
+    _rename(root, b, a)
+    assert _tree(root) == original
+    assert (root / "pyproject.toml").read_text(encoding="utf-8") == _pyproject(preset, a)
 
 
 def test_ruff_tidy_after_a_rename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

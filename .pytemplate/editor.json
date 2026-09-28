@@ -209,7 +209,7 @@
     },
     {
       "name": "selftest",
-      "usage": "[--shells|--nvim|--e2e] [args...]",
+      "usage": "[--shells|--nvim|--e2e|--mutation] [args...]",
       "summary": "Run the runner's own tests and mypy --strict (.pytemplate)",
       "group": "Other"
     },

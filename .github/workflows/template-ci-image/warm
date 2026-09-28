@@ -4,7 +4,8 @@
 # locks, the uv tools) goes into uv's and the runner's DEFAULT folders under HOME, as on the
 # hosted runner, by running what those jobs run with the image's uv. The image has no system
 # upx (the hosted runner has apt's), so upx.find caches the pinned one and test_upx packs with it.
-#   warm template   the template's own environment, the floor Python, UPX, xonsh, taplo, basedpyright
+#   warm template   the template's own environment, the floor Python, Cosmic Ray, UPX, xonsh, taplo,
+#                   basedpyright
 #   warm presets    a new raylib and flet project each, set up (PyPy and their wheels)
 # /src is the build context (the template's tracked files), mounted read-only for the step.
 set -eu
@@ -22,10 +23,13 @@ cd "$work/t"
 case "${1:-}" in
 template)
     ./pyt setup
-    # the python-floor job: the runner started on the floor Python, pytest of uv.lock on it
+    # the python-floor job: the runner started on the floor Python, pytest and hypothesis of uv.lock on it
     uv run --quiet --python "$PYTHON_FLOOR" --script .pytemplate/pyt.py help > /dev/null
     pytest=$(uv export --frozen --only-group dev --no-hashes --no-annotate --no-header | grep '^pytest==' | sed 's/ *;.*//')
-    uv run --no-project --python "$PYTHON_FLOOR" --with "$pytest" python -c ''
+    hypothesis=$(uv export --frozen --only-group dev --no-hashes --no-annotate --no-header | grep '^hypothesis==' | sed 's/ *;.*//')
+    uv run --no-project --python "$PYTHON_FLOOR" --with "$pytest" --with "$hypothesis" python -c ''
+    # selftest --mutation: Cosmic Ray's environment, from the lock next to its script
+    uv run --quiet --locked --python "$CPYTHON" --python-preference only-managed --script .pytemplate/tools/mutation_cr.py check
     # test_upx's real run: the pinned UPX of the runner's own download (upx.find: SHA-256)
     .venv/bin/python -c "import sys; sys.path.insert(0, '.pytemplate'); from runner import config, upx; print(upx.find(config.load(set())))"
     uv tool install --python "$CPYTHON" "$XONSH"
