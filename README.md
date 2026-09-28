@@ -425,7 +425,9 @@ env = { SEED = "42" }
   Windows runs a `.cmd`/`.bat` program (npm, yarn, mvn) through cmd.exe, which parses its
   arguments again, so there an argument cmd.exe would change is refused (exit 2) instead of
   reaching the program changed: one with `%`, `"` or a line break, and one with `^ & | < >`
-  and no space (`npm install react@^18` would install `react@18`: cmd.exe drops the `^`).
+  and no space (`npm install react@^18` would install `react@18`: cmd.exe drops the `^`). So is
+  a batch file whose own path holds such a character (`C:\R&D\bin\eslint.cmd` reached cmd.exe as
+  `C:\R` and a second command): move it, or run the program behind it.
 - `help`: the line that `./pyt tasks` and `./pyt help` show.
 - `background`: a long-running server (flet's `dev`): the editors start it without waiting.
 
