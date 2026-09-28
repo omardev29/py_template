@@ -154,6 +154,7 @@ if (-not $entry) {
     $loc = Get-Location
     $dir = if ($loc.Provider.Name -eq 'FileSystem') { $loc.ProviderPath } else { [Environment]::CurrentDirectory }
     $other = $null
+    $walked = $dir
     while ($dir) {
         $parent = [IO.Path]::GetDirectoryName($dir)
         $top = -not $parent -or $parent -eq $dir
@@ -163,7 +164,18 @@ if (-not $entry) {
             if (Test-Foreign $candidate $top) { $other = $candidate } else { $root = $dir; $entry = $candidate }
             break
         }
-        if ($top) { break }
+        if ($top) {
+            # The location is logical: from a folder reached through a symlink into a project
+            # (~/game-src -> ~/code/game/src) no logical parent holds it. Walk up again from the
+            # physical folder, where the kernel is (POSIX only).
+            $dir = $null
+            if (-not $onWindows -and $walked) {
+                $physical = (& /bin/sh -c 'CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P' sh $walked) -join "`n"
+                if ($physical -and $physical -ne $walked) { $dir = $physical }
+                $walked = $null
+            }
+            continue
+        }
         $dir = $parent
     }
     if (-not $root -and -not $other) {

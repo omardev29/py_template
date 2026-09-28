@@ -1443,7 +1443,11 @@ endings and executable bit.
 
 **From subfolders.** The launchers find the project from their own location and, when that
 fails, walk up from the current folder: `../pyt test` from `src/`, or the full path of the
-launcher from anywhere, works (from a symlinked folder too). A project found by walking up must
+launcher from anywhere, works (from a symlinked folder too). On Linux and macOS, when no folder
+above the current one holds a project, they walk up from its physical folder too, as git does:
+from `~/game-src`, a symlink to `~/code/game/src`, `pyt test` runs that project (on Windows a
+folder reached through a junction or a symlink counts only by the path you typed: `cd` to the
+folder it points to). A project found by walking up must
 be yours: one another user owns (anyone may create `/tmp/.pytemplate`) is never run, and on
 Windows a drive root never counts; run such a project's launcher by its path if you trust it.
 Paths given to the runner itself

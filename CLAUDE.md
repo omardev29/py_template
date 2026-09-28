@@ -165,7 +165,12 @@ implement the same contract: change them together.
 
 1. Find the project root: the directory that holds `.pytemplate/pyt.py`, first from the
    launcher's own location (a symlink to `pyt` or `pyt.ps1` is followed to the file it
-   names, sections 4.3 and 4.5), else by walking up from the current directory. A project made
+   names, sections 4.3 and 4.5), else by walking up from the current directory; on POSIX, when
+   no logical parent holds one, again from its physical folder (`pwd -P`), as git finds its
+   repository: from `~/game-src -> ~/code/game/src` the logical walk found no project (`pyt`
+   `_pt_walk`, `pyt.ps1` `$walked`; Windows walks the logical path only, section 15.2;
+   `test_launcher_sh.test_a_folder_reached_through_a_symlink_into_a_project_finds_it`,
+   `test_the_walk_up_from_the_physical_folder_keeps_the_ownership_rule`). A project made
    before the launchers were renamed holds `.pytemplate/deploy.py` instead: that is its runner
    (a folder with both runs `pyt.py`; `pyt` `_pt_entry_in`, `pyt.ps1` `Get-Entry`, `pyt.cmd`
    `PT_ENTRY`). A walked-up root
@@ -358,7 +363,8 @@ header rules (with detector tests proving each rule fires).
   rule.
 - Root discovery: the first name the shell gives for this file, zsh `${(%):-%x}` (read through
   `eval` so dash never parses it), else `$BASH_SOURCE`, else `$0`; when its folder holds no
-  runner, walk up from `$PWD`. Only that first name counts, and it must name a file there
+  runner, walk up from `$PWD` (`_pt_walk`), then, when no folder there holds one and the shell
+  is no Windows one, from `pwd -P` (section 4.1). Only that first name counts, and it must name a file there
   (`_pt_from_launcher`): in a run inside the calling shell (niubash, a sourced file) `$0` is the
   caller's (`niu` under `-c`, or a script of another project), and its folder was taken for the
   launcher's without the walk-up's ownership rule: at `C:\` a `.pytemplate\pyt.py` any user may
@@ -416,7 +422,9 @@ header rules (with detector tests proving each rule fires).
 - Root: `%~dp0` has a trailing backslash and can be wrong when cmd found the file through PATH
   from a quoted name: check `%~dp0.pytemplate\pyt.py` first, else walk up from `%CD%` (the
   start is normalised so a drive root works). A symlink to `pyt.cmd` is not followed (cmd
-  cannot read a link): run from outside the project it finds no project.
+  cannot read a link): run from outside the project it finds no project. `%CD%` is logical, and
+  it is walked only as typed: from a folder reached through a junction into a project the
+  project is not found (section 15.2).
 - A `UV` variable that names a folder is rejected. The registry is read with
   `reg query KEY /v Path` (cmd has no MSYS rewriting) into a variable (`set "PT_LIST=%%B"`),
   never passed as `call` arguments: a quoted entry (`"C:\Program Files\x"`) would split them
@@ -557,7 +565,9 @@ header rules (with detector tests proving each rule fires).
   too: the same Core hand-over), plus Windows PowerShell 5.1 on Windows; only the registry
   and cmd tests are Windows-only.
 - Root: `$PSScriptRoot`, else walk up from `Get-Location` (its `ProviderPath` when the provider
-  is FileSystem, else `[Environment]::CurrentDirectory`), which is also the caller cwd. A
+  is FileSystem, else `[Environment]::CurrentDirectory`), which is also the caller cwd, and off
+  Windows, when no folder there holds a project, from its physical folder (`$walked`, `/bin/sh`'s
+  `cd -P`/`pwd -P`: the location is logical, section 4.1). A
   symlink to `pyt.ps1` (`$PSCommandPath` a `ReparsePoint` whose `LinkType` is
   `SymbolicLink`) is followed to the file its `Target` names first, at most 40 links; off
   Windows a relative target is joined to the PHYSICAL folder of its link (`/bin/sh`'s
@@ -5418,6 +5428,12 @@ Behaviour:
   do not reach the runner, so `/home/...`-style paths typed for `new`/`pyz-merge` fall back to
   the current drive with a warning. Fix idea: the launcher exports the Windows path of
   `/usr/bin/cygpath` and `find_cygpath` checks it first.
+- On Windows the walk-up of the launchers follows the path typed (section 4.1): from a folder
+  reached through a junction or a directory symlink into a project (`mklink /J C:\g
+  C:\code\game\src`) no parent holds it, and the command finds no project there (`pyt.cmd`'s
+  `%CD%`, `pyt.ps1`'s location and the MSYS2/Git Bash `pyt` are logical; resolving the reparse
+  point of each folder is not done). cd to the folder it points to. Linux and macOS walk up
+  from the physical folder too.
 - niubash: the generated portable `.sh` launcher leaks `HERE` and its exported variables into
   the calling session (niubash runs sh scripts in-process; its `_pt_*` helpers are unset). Its
   `cd -P`/`pwd -P`/`CDPATH=''` symlink resolution is verified with dash, bash, zsh, ksh, mksh,

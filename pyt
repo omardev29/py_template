@@ -227,6 +227,32 @@ _pt_foreign() {
     return 0
 }
 
+# $1 = a folder: walk up from it to the first folder that holds a runner
+# (_pt_entry_in). Sets _pt_root, or _pt_other when it is not the caller's
+# (_pt_foreign); returns 1 when no folder up to the root holds one.
+_pt_walk() {
+    _pt_d=$1
+    while :; do
+        if _pt_entry_in "$_pt_d"; then
+            if _pt_foreign "$_pt_d"; then
+                _pt_other=$_pt_d
+            else
+                _pt_root=$_pt_d
+            fi
+            return 0
+        fi
+        _pt_n=${_pt_d%/*}
+        case $_pt_n in
+            '') _pt_n=/ ;;
+            [A-Za-z]:) _pt_n=$_pt_n/ ;;
+        esac
+        if [ "$_pt_n" = "$_pt_d" ]; then
+            return 1
+        fi
+        _pt_d=$_pt_n
+    done
+}
+
 # The copy of the template that `pyt install` made (the runner's
 # cmd_install.snapshot_dir): %LOCALAPPDATA%\pytemplate\template on Windows,
 # else $XDG_DATA_HOME/pytemplate/template (an absolute XDG_DATA_HOME only) or
@@ -280,26 +306,19 @@ fi
 if _pt_from_launcher "$_pt_t"; then
     :
 else
-    _pt_d=$_pt_pwd
-    while :; do
-        if _pt_entry_in "$_pt_d"; then
-            if _pt_foreign "$_pt_d"; then
-                _pt_other=$_pt_d
-            else
-                _pt_root=$_pt_d
-            fi
-            break
-        fi
-        _pt_n=${_pt_d%/*}
-        case $_pt_n in
-            '') _pt_n=/ ;;
-            [A-Za-z]:) _pt_n=$_pt_n/ ;;
+    _pt_walk "$_pt_pwd" || :
+    # $PWD is logical: from a folder reached through a symlink into a project
+    # (~/game-src -> ~/code/game/src) no logical parent holds it. Walk up
+    # again from the physical folder, where the kernel is (POSIX only).
+    if [ -z "$_pt_root" ] && [ -z "$_pt_other" ] && [ -z "$_pt_win" ]; then
+        _pt_t=$(pwd -P 2>/dev/null) || _pt_t=
+        case $_pt_t in
+            /*)
+                if [ "$_pt_t" != "$_pt_pwd" ]; then
+                    _pt_walk "$_pt_t" || :
+                fi ;;
         esac
-        if [ "$_pt_n" = "$_pt_d" ]; then
-            break
-        fi
-        _pt_d=$_pt_n
-    done
+    fi
     # No project: the installed template, in its global mode (pyt new...),
     # under the same ownership rule as a folder found by walking up.
     if [ -z "$_pt_root" ] && [ -z "$_pt_other" ]; then
@@ -630,7 +649,7 @@ else
 fi
 
 unset -f _pt_slashes _pt_backslashes _pt_drive _pt_winpath _pt_entry_in _pt_from_launcher \
-    _pt_foreign _pt_installed _pt_try_uv _pt_try_dir _pt_find_uv_dirs _pt_expand _pt_uv_in_list \
+    _pt_foreign _pt_walk _pt_installed _pt_try_uv _pt_try_dir _pt_find_uv_dirs _pt_expand _pt_uv_in_list \
     _pt_uv_from_registry
 unset _pt_self _pt_r _pt_s _pt_p _pt_t _pt_d _pt_c _pt_n _pt_link _pt_pwd _pt_root _pt_other _pt_win \
     _pt_entry _pt_global _pt_exe _pt_uv _pt_h _pt_l _pt_f _pt_a _pt_g _pt_v _pt_rest _pt_e _pt_cr _pt_k \

@@ -663,6 +663,64 @@ def test_a_launcher_reached_through_a_symlink_finds_its_project(name: str, tmp_p
             raise AssertionError(f"{how}: {e}") from None
 
 
+def _through_a_link(tmp: Path, name: str, project: Path, env: dict[str, str]) -> tuple[Run, Path]:
+    """The launcher of a bin folder (where pyt install puts it), run by the shell `name` (or
+    pwsh) from `<tmp>/game-src/pkg`, where game-src is a symlink to the project's src/: a folder
+    that physically lies in the project, and whose logical parents never reach it."""
+    (project / "src" / "pkg").mkdir(exist_ok=True)
+    link = tmp / "game-src"
+    link.symlink_to(project / "src", target_is_directory=True)
+    cwd = link / "pkg"
+    (tmp / "bin").mkdir()
+    if name == "pwsh":
+        ps1 = tmp / "bin" / "pyt.ps1"
+        shutil.copyfile(ROOT / "pyt.ps1", ps1)
+        here, script = (str(p).replace("'", "''") for p in (cwd, ps1))
+        # Set-Location keeps the location logical, as a user's cd does.
+        code = f"Set-Location -LiteralPath '{here}'; & '{script}' __probe 5 0 x 'a b'; exit $LASTEXITCODE"
+        return Run([_pwsh(), "-NoProfile", "-NonInteractive", "-EncodedCommand", _ps_encoded(code)], tmp, env), cwd
+    launcher = tmp / "bin" / "pyt"
+    shutil.copyfile(LAUNCHER, launcher)
+    shell = " ".join(q(str(a)) for a in _shell_argv(name))
+    # cd in the calling shell keeps $PWD logical (a subprocess cwd would be physical), and the
+    # shell `name` takes it from the environment, as it does from a user's terminal.
+    code = f"cd {q(str(cwd))} && export PWD && {shell} {q(str(launcher))} __probe 5 0 x 'a b'"
+    return Run(["/bin/sh", "-c", 'eval "$PTCMD"'], tmp, {**env, "PTCMD": code}), cwd
+
+
+@needs_posix
+@pytest.mark.parametrize("name", [*POSIX_SHELLS, "pwsh"])
+def test_a_folder_reached_through_a_symlink_into_a_project_finds_it(name: str, tmp_path: Path) -> None:
+    """The installed pyt (its own folder holds no project) walked up the logical $PWD only: from
+    ~/game-src -> ~/code/game/src no logical parent holds the project, and it said there was
+    none (exit 2), or ran the installed template, whose commands need a project, where git finds
+    the repository. When the logical walk finds nothing, it walks up from the physical folder."""
+    project = _copy_project(tmp_path / "code" / "game")
+    run, cwd = _through_a_link(tmp_path, name, project, _clean_env(**_nothing_installed(tmp_path)))
+    where = f"stdout={run.out!r} stderr={run.err!r}"
+    assert run.rc == 5 and run.probe and run.probe["argv"] == ["x", "a b"], where
+    assert Path(str(run.probe["root"])).resolve() == project.resolve(), where
+    assert run.probe["global"] == "", where
+    assert run.probe["caller_cwd_raw"] == str(cwd) and run.probe["caller_cwd"] == str(cwd), where
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not hasattr(os, "geteuid") or os.geteuid() != 0, reason="needs root to make files another user owns")
+@pytest.mark.parametrize("name", ["sh", "bash", "pwsh"])
+def test_the_walk_up_from_the_physical_folder_keeps_the_ownership_rule(name: str, tmp_path: Path) -> None:
+    """A symlink into a folder of another user's project (anyone may create one pointing there)
+    leads the physical walk-up to that project: its runner is refused as on the logical walk."""
+    import pwd
+
+    nobody = pwd.getpwnam("nobody")
+    project = _copy_project(tmp_path / "theirs")
+    (project / "src" / "pkg").mkdir()
+    (project / ".pytemplate" / "pyt.py").write_text("print('PWNED')\n", encoding="utf-8")
+    for path in (project, project / ".pytemplate", project / ".pytemplate" / "pyt.py"):
+        os.chown(path, nobody.pw_uid, nobody.pw_gid)
+    run, _ = _through_a_link(tmp_path, name, project, _clean_env(**_nothing_installed(tmp_path)))
+    assert run.rc == 2 and "is not yours" in run.err and "PWNED" not in run.out + run.err, run.out + run.err
+
+
 def _copy_project(dest: Path) -> Path:
     """The launcher and the runner (enough for __probe) in `dest`."""
     (dest / ".pytemplate").mkdir(parents=True)
