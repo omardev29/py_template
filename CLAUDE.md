@@ -4900,6 +4900,15 @@ CPython and its standard library:
   `test_workarounds.py::test_a_flet_client_download_cut_short_is_never_cached`,
   `test_a_damaged_cached_flet_client_is_downloaded_again`,
   `test_upx.py::test_download_failures_are_clear_and_leave_nothing`. Goes: never.
+- **A free-threaded CPython lists `.abi3.so` among its extension suffixes but runs no GIL
+  build's abi3 extension** (LIMITATION, CPython 3.14t: the free-threaded build supports neither
+  the limited API nor the stable ABI, and the import of bcrypt's abi3 extension crashed it with a
+  segmentation fault): an abi3 file names no Python version, so a pyz whose only native
+  dependency was abi3 recorded no ABI, and 3.14t took its target. Fix: `pyz._target_abis` reads
+  the WHEEL tags too (`common.wheel_abis`: an abi3 wheel stands for the key's own CPython), and
+  the bootstrap refuses that target on 3.14t with its message (10). Test:
+  `test_build_methods.py::test_pyz_records_an_abi3_wheel_as_the_keys_own_cpython`. Goes: never
+  (a free-threaded stable ABI would carry a tag of its own).
 
 PyPy:
 - **PyPy 8.0 changed the extension ABI to pp80** (LIMITATION): a loose request picked the newest
