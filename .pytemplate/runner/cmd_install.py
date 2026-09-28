@@ -268,14 +268,22 @@ def _read(path: Path) -> bytes | None:
 
 def run_by_cmd(path: Path, environ: Mapping[str, str] | None = None) -> bool:
     """Whether cmd runs `path` for this very run: pyt.cmd hands over its own path (LAUNCHER_FILE)
-    with PYTEMPLATE_LAUNCHER=cmd, and cmd reads that file again when this run ends."""
+    with PYTEMPLATE_LAUNCHER=cmd, and cmd reads that file again, by that name, when this run ends.
+    The same name spelled otherwise (another case, an 8.3 short name) is it; another name of the
+    same file (a hard link, made by hand to put a project's pyt.cmd on PATH) is not: cmd reads on
+    in its own name, which removing or replacing this one leaves alone (one inode for both, and
+    the stand-in _retire wrote into it replaced the project's pyt.cmd, which cmd then deleted)."""
     env = os.environ if environ is None else environ
     running = env.get(LAUNCHER_FILE, "")
     if not running or not env.get("PYTEMPLATE_LAUNCHER", "").startswith("cmd"):
         return False
     try:
-        return os.path.samefile(running, path)
-    except OSError:
+        if not os.path.samefile(running, path):
+            return False
+        if os.stat(path).st_nlink <= 1:
+            return True  # one name: the one cmd reads, whatever its spelling
+        return os.path.normcase(os.path.realpath(running)) == os.path.normcase(os.path.realpath(path))
+    except (OSError, ValueError):
         return False
 
 
@@ -945,11 +953,19 @@ def _retire(path: Path, removed: list[str], left: list[str], failed: list[str], 
         else:
             failed.append(f"{path}: in use or not writable")
         return False
+    # A NEW file takes the name, as install's own swap does: never written in place, through the
+    # file's other names (a hard link of a project's pyt.cmd got the stand-in, and cmd deleted it)
+    staged: Path | None = None
     try:
-        project.write_whole(path, stand_in)
+        staged = _stage(path.parent, path.name, stand_in)
+        os.replace(staged, path)
+        staged = None
     except OSError as e:
         failed.append(f"{path}: {e.strerror or e}")
         return False
+    finally:
+        if staged is not None:
+            _unlink(staged)
     removed.append(f"removed {path} (cmd runs it: it deletes itself as this run ends)")
     return False
 

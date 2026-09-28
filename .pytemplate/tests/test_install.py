@@ -1250,6 +1250,51 @@ def test_the_pyt_cmd_cmd_runs_goes_only_once_the_rest_is_gone(tmp_path: Path) ->
     assert not target.exists() and "may say it cannot find the batch file" in removed[1]
 
 
+def test_run_by_cmd_tells_the_names_of_a_hard_link_apart(tmp_path: Path) -> None:
+    """Two names of one file (a hard link): cmd reads on in the name it was given, so only that
+    name is the file cmd runs; os.path.samefile said yes for both."""
+    project, linked = tmp_path / "proj" / "pyt.cmd", tmp_path / "bin" / "pyt.cmd"
+    for folder in (project.parent, linked.parent):
+        folder.mkdir()
+    project.write_bytes(EARLIER_CMD)
+    try:
+        os.link(project, linked)
+    except OSError as e:
+        pytest.skip(f"cannot make a hard link here: {e}")
+    via = {"PYTEMPLATE_LAUNCHER": "cmd"}
+    assert cmd_install.run_by_cmd(linked, {**via, cmd_install.LAUNCHER_FILE: str(linked)})
+    assert cmd_install.run_by_cmd(project, {**via, cmd_install.LAUNCHER_FILE: str(project)})
+    assert not cmd_install.run_by_cmd(linked, {**via, cmd_install.LAUNCHER_FILE: str(project)})
+    assert not cmd_install.run_by_cmd(project, {**via, cmd_install.LAUNCHER_FILE: str(linked)})
+
+
+@pytest.mark.parametrize("runs", ["project", "bin"], ids=["cmd runs the project's name", "cmd runs the bin folder's name"])
+def test_uninstall_never_writes_through_a_hard_link_of_the_pyt_cmd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runs: str) -> None:
+    """The pyt.cmd of uv's tool bin folder was a hard link of a project's pyt.cmd (made by hand to
+    put pyt on PATH): uninstall took it for the file cmd runs when cmd ran the project's own name,
+    and wrote the self-deleting stand-in into their one inode: the project's tracked pyt.cmd held
+    it, and cmd then deleted it (del "%~f0"). The bin folder's name goes, or, when cmd runs that
+    very name, a new file takes it: the project's pyt.cmd keeps its bytes either way."""
+    inst = Installed(tmp_path, monkeypatch)
+    inst.stuck = False
+    project = tmp_path / "proj" / "pyt.cmd"
+    (project.parent / ".pytemplate").mkdir(parents=True)
+    project.write_bytes(EARLIER_CMD)
+    linked = inst.bin / "pyt.cmd"
+    try:
+        os.link(project, linked)
+    except OSError as e:
+        pytest.skip(f"cannot make a hard link here: {e}")
+    _run_by_cmd(monkeypatch, project if runs == "project" else linked)
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    assert project.read_bytes() == EARLIER_CMD and os.stat(project).st_nlink == 1
+    if runs == "project":
+        assert not linked.exists()
+    else:  # cmd reads on in the stand-in, a file of its own
+        assert linked.read_bytes() == cmd_install.self_deleting(EARLIER_CMD) and not os.path.samefile(linked, project)
+    assert [p.name for p in inst.bin.iterdir() if cmd_install.STAGED.match(p.name)] == []
+
+
 def _run_by_cmd(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
     """This run, as pyt.cmd hands it over when cmd runs it (run_by_cmd)."""
     path.write_bytes(EARLIER_CMD)

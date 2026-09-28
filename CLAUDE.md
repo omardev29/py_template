@@ -472,8 +472,13 @@ header rules (with detector tests proving each rule fires).
   `pyt.cmd`), it said "The batch file cannot be found." (exit 1, twice), and replaced (`pyt
   install`) it would run what the new file holds at that offset. So `pyt.cmd` names itself for
   the runner, `PYTEMPLATE_LAUNCHER_FILE=%~f0`, and `cmd_install.run_by_cmd` tells the file cmd
-  runs for this very run: uninstall handles it last and writes `cmd_install.self_deleting` in its
-  place (a file that holds, at the end of the old uv line, `(goto) 2>nul & del "%~f0" &
+  runs for this very run (by its name: another spelling of it counts, another name of the same
+  file, a hard link, does not): uninstall handles it last and puts `cmd_install.self_deleting` in
+  its place as a new file that takes that name (`_retire`: written in place, through a hard link
+  of a project's pyt.cmd made by hand in uv's tool bin folder, the stand-in replaced the
+  project's, which cmd then deleted;
+  `test_install.test_uninstall_never_writes_through_a_hard_link_of_the_pyt_cmd`)
+  (a file that holds, at the end of the old uv line, `(goto) 2>nul & del "%~f0" &
   "%ComSpec%" /d /c exit %ERRORLEVEL%`: the batch ends, the file goes and the exit code stays
   uv's; started on its own it says what it is, exit 1), and install refuses before any write to
   replace it with other bytes (it names `.\pyt.cmd install` in the clone); the installed
