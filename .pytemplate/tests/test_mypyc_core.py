@@ -2457,6 +2457,64 @@ def test_wheel_copies_the_package_files(wheel_project: Path, monkeypatch: pytest
     ]  # fmt: skip
 
 
+def _symlink(link: Path, target: Path | str, *, directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except OSError as e:  # Windows without Developer Mode or admin rights
+        pytest.skip(f"cannot create a symbolic link here: {e}")
+
+
+def test_wheel_copies_through_links_like_the_stage(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # A dangling link, or a link back up its own path (a cycle), in src/<pkg>/: copytree stopped
+    # in shutil.Error, an internal-error traceback, where the stage and every payload warn and build
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    def fake_uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        out = Path(str(args[args.index("--out-dir") + 1]))
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "pkg-0.1.0-py3-none-any.whl").write_bytes(b"")
+        return _done([])
+
+    src = wheel_project / "src"
+    shared = wheel_project / "shared"
+    shared.mkdir()
+    (shared / "s.txt").write_text("s", encoding="utf-8")
+    _symlink(src / "pkg" / "gone.json", wheel_project / "nonexistent.json")
+    _symlink(src / "pkg" / "data" / "up", "..", directory=True)
+    _symlink(src / "pkg" / "linked", shared, directory=True)
+    _symlink(src / "assets" / "again", src / "assets", directory=True)
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.envs, "uv", fake_uv)
+    wheel.build(BuildRequest(_wheel_cfg(), "cpython", "wheel", src))
+    pkg = wheel_project / ".build" / "wheel" / "cpython" / "src" / "pkg"
+    files = sorted(p.relative_to(pkg).as_posix() for p in pkg.rglob("*") if p.is_file())
+    assert files == [
+        "__init__.py", "app.py", "assets/img.txt", "core/__init__.py", "core/m.py", "data/x.json", "linked/s.txt",
+        "native/libfoo.so", "py.typed",
+    ]  # fmt: skip
+    assert "gone.json: broken symbolic link, not copied" in capsys.readouterr().err
+
+
+def test_wheel_names_a_file_it_cannot_copy(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import errno
+
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    real = mypyc.copy_writable
+
+    def copy(source: str, target: str) -> str:
+        if source.endswith("x.json"):
+            raise PermissionError(errno.EACCES, "Permission denied", source)
+        return real(source, target)
+
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.mypyc, "copy_writable", copy)
+    with pytest.raises(PytError, match=r"wheel: cannot copy .*x\.json: Permission denied$"):
+        wheel.build(BuildRequest(_wheel_cfg(), "cpython", "wheel", wheel_project / "src"))
+
+
 def _top_level_cfg() -> Config:
     """compile.modules naming a lone top-level module and another top-level package of src/."""
     return make({"app": {"name": "pkg", "assets": "assets"}, "compile": {"modules": ["pkg.core", "fastbench", "other.core"]}})

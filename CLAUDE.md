@@ -2577,7 +2577,11 @@ Per method:
   ignores `UV_PROJECT_ENVIRONMENT`, hence `--python`; `build-system.requires` only records the
   exact locked versions (`wheel._locked_version`: a clear error when missing). Package data =
   every file of the package (`"**/*"`: data files, `py.typed`, vendored native libraries; the
-  copy skips caches and stray build outputs: an extension next to its `.py`, `*__mypyc`);
+  copy skips caches and stray build outputs: an extension next to its `.py`, `*__mypyc`,
+  `wheel._stray_output`); `wheel._copy_tree` copies it as the stage does (`mypyc.walk`: a
+  symlinked folder followed, a link back up its own path not, a broken link a warning; a file it
+  cannot copy a PytError naming it): shutil.copytree ended on a dangling link or a cycle in an
+  internal-error traceback (`test_wheel_copies_through_links_like_the_stage`);
   assets go into `<pkg>/assets`. The top-level entries of `src/` that `compile.modules` names
   besides the package (`wheel._outside_package`: a lone module becomes `[tool.setuptools]
   py-modules`, another package gets its package data) are copied too, for every backend: only

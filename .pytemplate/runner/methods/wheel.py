@@ -15,8 +15,8 @@ and mypycify there could not see the project's dependencies.
 from __future__ import annotations
 
 import json
+import os
 import re
-import shutil
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -200,16 +200,39 @@ def setup_py(cfg: Config) -> str:
     )
 
 
-def _skip(directory: str, names: list[str]) -> set[str]:
-    """Caches, and build outputs left in src/ (a stray in-place compile): an extension next to
-    the .py it was built from, or a mypyc shared lib. Other .so/.pyd files are app content."""
-    skip = {n for n in names if n in mypyc.SKIP_DIRS}
-    for n in names:
-        if n.endswith(EXT_SUFFIXES):
-            stem = n.split(".")[0]
-            if stem.endswith("__mypyc") or f"{stem}.py" in names:
-                skip.add(n)
-    return skip
+def _stray_output(path: Path) -> bool:
+    """A build output left in src/ (a stray in-place compile): an extension next to the .py it
+    was built from, or a mypyc shared lib. Other .so/.pyd files are app content."""
+    if not path.name.endswith(EXT_SUFFIXES):
+        return False
+    stem = path.name.split(".")[0]
+    return stem.endswith("__mypyc") or path.with_name(f"{stem}.py").is_file()
+
+
+def _copy_tree(src: Path, dst: Path) -> None:
+    """Copy a folder of src/ into the build project as the stage and the payloads copy it
+    (mypyc.walk: a symlinked folder is followed, a link back up its own path is not, caches stay
+    out; a broken link is a warning), leaving out stray build outputs; a file already there is
+    replaced (the assets go into the package's folder). shutil.copytree followed a link cycle
+    until the path was too long, and stopped on a dangling link, in an internal-error traceback.
+    Every copy is owner-writable (mypyc.copy_writable): build_ext --inplace writes next to the
+    sources, and the next build must be able to delete them."""
+    from ..cli import NO_ROOM
+
+    dst.mkdir(parents=True, exist_ok=True)
+    for path in mypyc.walk(src):
+        target = dst / path.relative_to(src)
+        if path.is_dir():
+            target.mkdir(exist_ok=True)
+        elif not path.exists():
+            ui.warn(f"{rel(path)}: broken symbolic link, not copied")
+        elif not _stray_output(path):
+            try:
+                mypyc.copy_writable(os.fspath(path), os.fspath(target))
+            except OSError as e:
+                if e.errno in NO_ROOM:
+                    raise  # a full disk: cli.main names the file
+                raise PytError(f"wheel: cannot copy {rel(path)}: {e.strerror or e}") from None
 
 
 def build(req: BuildRequest) -> Path:
@@ -221,20 +244,16 @@ def build(req: BuildRequest) -> Path:
     if work.exists():
         mypyc.remove_tree(work)
     (work / "src").mkdir(parents=True)
-    # Copies from src/ itself: owner-writable (mypyc.copy_writable, and make_writable for the
-    # folders, whose modes copytree copies too): build_ext --inplace writes next to the sources,
-    # and the next build must be able to delete them
-    copy = mypyc.copy_writable
-    shutil.copytree(package, work / "src" / cfg.pkg, ignore=_skip, copy_function=copy)
+    _copy_tree(package, work / "src" / cfg.pkg)
     for top in _outside_package(cfg):  # compile.modules outside the package (a lone module)
         if (SRC / top).is_dir():
-            shutil.copytree(SRC / top, work / "src" / top, ignore=_skip, copy_function=copy)
+            _copy_tree(SRC / top, work / "src" / top)
         else:
-            copy(str(SRC / top), str(work / "src" / top))
+            mypyc.copy_writable(str(SRC / top), str(work / "src" / top))
     assets = cfg.app.assets
     if assets and (SRC / assets).is_dir():
         # In a wheel the assets travel inside the package (resources.py looks for them there)
-        shutil.copytree(SRC / assets, work / "src" / cfg.pkg / "assets", ignore=_skip, dirs_exist_ok=True, copy_function=copy)
+        _copy_tree(SRC / assets, work / "src" / cfg.pkg / "assets")
     mypyc.make_writable(work / "src")
     (work / "pyproject.toml").write_text(_pyproject(cfg, req.compiled), encoding="utf-8", newline="\n")
     if req.compiled:
