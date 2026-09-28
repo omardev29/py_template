@@ -1574,7 +1574,8 @@ only deletes files is checked too).
   hooks with its own `sh`, and the hook calls the POSIX launcher, which finds uv by itself. When
   the launcher cannot check the commit (uv not found from a GUI client, a broken
   `pytemplate.toml`, a git command that fails, a branch whose older `./pyt` has no `hooks run`), the hook says so and
-  names `git commit --no-verify` and `./pyt hooks uninstall`. A checkout without `./pyt`
+  names `git commit --no-verify` and `sh ./pyt hooks uninstall` (`./apps/a/pyt` for a project
+  in a subfolder). A checkout without `./pyt`
   (another branch) skips the checks.
 - After the runner changes, `./pyt hooks` shows the hook as outdated until `./pyt apply` or
   `./pyt hooks install` rewrites it.

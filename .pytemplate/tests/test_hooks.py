@@ -2330,6 +2330,10 @@ def test_git_runs_the_hook(tmp_path: Path, sub: str) -> None:
         r = commit(f"x{code}.txt", PT_HOOK_EXIT=code)
         assert r.returncode != 0
         assert f"could not check this commit (exit code {code})" in r.stderr and "git commit --no-verify" in r.stderr
+        # the launcher the hook calls, from the top where git runs it: a subfolder project's
+        # hint named ./pyt, which is not there
+        launcher = f"./{sub}/pyt" if sub else "./pyt"
+        assert f"Remove the hook: sh {launcher} hooks uninstall" in r.stderr
         log.unlink()
     assert commit("three.txt", PT_LOCAL_EXIT="1").returncode != 0
     assert log.read_text(encoding="utf-8").splitlines() == ["local hook"]  # stops before the checks

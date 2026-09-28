@@ -460,7 +460,8 @@ def hook_script(launcher: str) -> str:
         "_pt_rc=$?",
         'if [ "$_pt_rc" -gt 1 ]; then',
         "    printf '%s\\n' \"pytemplate pre-commit: $_pt_launcher could not check this commit (exit code $_pt_rc).\" \\",
-        "        '  Commit without the checks: git commit --no-verify   Remove the hook: ./pyt hooks uninstall' >&2",
+        # the launcher itself, from the top where git runs hooks: a project in a subfolder has no ./pyt there
+        "        \"  Commit without the checks: git commit --no-verify   Remove the hook: sh $_pt_launcher hooks uninstall\" >&2",
         "fi",
         'exit "$_pt_rc"',
     ]
