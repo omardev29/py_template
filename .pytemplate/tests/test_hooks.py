@@ -493,6 +493,65 @@ def test_core_hooks_path_is_respected(tmp_path: Path) -> None:
     assert not find(project, top).custom_hooks_path
 
 
+def _link_dir(link: Path, target: Path) -> None:
+    """A directory symlink (POSIX) or junction (Windows: no privilege needed); skip without one."""
+    try:
+        if IS_WINDOWS:
+            import _winapi
+
+            _winapi.CreateJunction(str(target), str(link))
+        else:
+            link.symlink_to(target, target_is_directory=True)
+    except (OSError, ImportError, AttributeError) as e:
+        pytest.skip(f"cannot create a folder link here: {e}")
+
+
+@needs_git
+@pytest.mark.parametrize("dangling", [False, True])
+def test_a_linked_hooks_folder_is_never_written_into(tmp_path: Path, capsys: pytest.CaptureFixture[str], dangling: bool) -> None:
+    """A team shares its hooks through a tracked folder linked in place of .git/hooks (`ln -s
+    ../.githooks .git/hooks`, older than core.hooksPath; a junction on Windows): git runs them
+    through the link, and `git rev-parse --git-path hooks` still says .git/hooks. install --force,
+    which status and setup advise for the team's hook, moved the tracked .githooks/pre-commit to
+    pre-commit.local and wrote pytemplate's script in its place, and setup wrote its hook into the
+    tracked folder: files of the work tree changed. Such a folder is handled like core.hooksPath:
+    nothing is written, and the line to add is named. A link whose folder is missing (a branch
+    without it) gets nothing created through it either."""
+    top, project = make_repo(tmp_path)
+    shared = top / ".githooks"
+    team = b"#!/bin/sh\necho team hook\n"
+    if not dangling:
+        shared.mkdir()
+        (shared / hooks.HOOK).write_bytes(team)
+        git(top, "add", ".githooks")
+        git(top, "commit", "-q", "--no-verify", "-m", "team hooks")
+    shutil.rmtree(top / ".git" / "hooks")
+    if IS_WINDOWS and dangling:
+        pytest.skip("a junction needs its target")
+    _link_dir(top / ".git" / "hooks", shared if IS_WINDOWS else Path("..") / ".githooks")
+    repo = find(project)
+    assert repo.custom_hooks_path and repo.hooks_link and os.path.samefile(repo.hooks_dir.parent, top)
+    for force in (False, True):
+        with pytest.raises(PytError, match=r"is a link to \.githooks") as e:
+            hooks.install(repo, force=force)
+        assert hooks.run_line(repo) in str(e.value)
+    hooks.ensure_installed(make(), project)  # ./pyt setup and ./pyt apply
+    assert "is a link to .githooks" in capsys.readouterr().err
+    passed, label, hint = hooks._status_line(make(), repo)
+    assert passed is None and "is a link to .githooks" in label and hooks.run_line(repo) in hint and "--force" not in hint
+    hooks.show_status(make(), project)
+    assert "inactive" not in capsys.readouterr().err  # the linked folder is where git runs hooks
+    assert git(top, "status", "--porcelain", "--untracked-files=all").stdout == ""
+    if dangling:
+        assert not shared.exists()
+        return
+    assert sorted(p.name for p in shared.iterdir()) == [hooks.HOOK] and (shared / hooks.HOOK).read_bytes() == team
+    # the team's hook runs the checks: nothing more to add
+    (shared / hooks.HOOK).write_bytes(team + hooks.run_line(repo).encode("ascii") + b"\n")
+    assert hooks._status_line(make(), repo)[0] is True
+    assert "already runs" in hooks.install(repo)
+
+
 @needs_git
 def test_core_hooks_path_husky_layout(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """husky 9: core.hooksPath=.husky/_, whose generated pre-commit sources `h`, which runs the

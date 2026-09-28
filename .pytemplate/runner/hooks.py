@@ -29,7 +29,9 @@ is true in pytemplate.toml (the default).
   forced: that repository's commits never contain it.
 - With `core.hooksPath` set (husky, a shared hooks folder...) git ignores `.git/hooks`: the
   hook is not installed there; `install` and `status` print the line to add to that setup
-  (husky 9, core.hooksPath=.husky/_: to `.husky/pre-commit`).
+  (husky 9, core.hooksPath=.husky/_: to `.husky/pre-commit`). The same for a `.git/hooks` that
+  is a link or junction to another folder (a team's tracked `.githooks`): nothing is written
+  through it.
 - Linked worktrees share one hooks directory: the hook calls the launcher at the same
   relative path in every worktree, and a checkout without it skips the checks. A checkout
   whose runner predates `hooks run` (an old branch) fails the hook: commit there with
@@ -221,14 +223,18 @@ def _drive(path: Path) -> str:
 class Repo:
     project: Path  # the project root (where ./pyt is)
     top: Path  # top of the git work tree
-    hooks_dir: Path  # where git runs hooks from (core.hooksPath, or <common dir>/hooks)
+    hooks_dir: Path  # where git runs hooks from (core.hooksPath, or <common dir>/hooks, or where it links to)
     default_dir: Path  # <common dir>/hooks: where `install` writes
     prefix: str  # the project relative to `top`, POSIX ("" = the top itself)
     env: dict[str, str] = field(default_factory=dict)  # git_env() for every git call
+    hooks_link: bool = False  # default_dir is a link or junction to hooks_dir (_link_target)
 
     @property
     def custom_hooks_path(self) -> bool:
-        """Whether core.hooksPath sends git elsewhere (git then ignores the default dir)."""
+        """Whether git runs the hooks from a folder pytemplate writes nothing into: core.hooksPath
+        sends git elsewhere (git then ignores the default dir), or the default dir is a link to
+        another folder (hooks_link: a team's tracked folder, `ln -s ../.githooks .git/hooks`, or
+        one other repositories share), where install --force changed a tracked file."""
         return not _same(self.hooks_dir, self.default_dir)
 
     @property
@@ -302,14 +308,28 @@ def find_repo(project: Path = ROOT, environ: Mapping[str, str] | None = None, cw
     if not _same_folder(top / prefix, project):
         raise PytError(f"the project {project} is not inside its git work tree {top}", 2)
     lines = [native_path(ln) for ln in lines[:3]]
+    hooks_dir = Path(os.path.normpath(project / lines[2]))  # relative ones are relative to the cwd
+    default_dir = Path(os.path.normpath(project / lines[1] / "hooks"))
+    # git names the default folder even when it is a link (a symlink, a junction): git runs the
+    # hooks through it, and pytemplate writes into it as into core.hooksPath's folder: never
+    linked = _link_target(default_dir) if _same(hooks_dir, default_dir) else None
     return Repo(
         project=project,
         top=top,
-        hooks_dir=Path(os.path.normpath(project / lines[2])),  # relative ones are relative to the cwd
-        default_dir=Path(os.path.normpath(project / lines[1] / "hooks")),
+        hooks_dir=linked or hooks_dir,
+        default_dir=default_dir,
         prefix=prefix,
         env=env,
+        hooks_link=linked is not None,
     )
+
+
+def _link_target(folder: Path) -> Path | None:
+    """The folder that `folder`, a symbolic link or a junction, leads to (a missing one too), or
+    None for a plain folder or none at all. realpath resolves both on every OS and resolves the
+    folders above it the same way on both sides, so only a link AT `folder` tells them apart."""
+    real = Path(os.path.realpath(folder))
+    return None if _same(real, Path(os.path.realpath(folder.parent)) / folder.name) else real
 
 
 # --- the hook script -----------------------------------------------------------------------------
@@ -782,6 +802,18 @@ def _hooks_path_file(repo: Repo) -> Path:
     return repo.hooks_dir.parent / HOOK if husky else repo.hooks_dir / HOOK
 
 
+def elsewhere(repo: Repo, *, value: bool = False) -> str:
+    """Why pytemplate installs no hook where git runs them (custom_hooks_path), for the messages:
+    the default folder is a link (hooks_link), or core.hooksPath is set (`value`: and to what)."""
+    if repo.hooks_link:
+        return f"{_show(repo.default_dir, repo)} is a link to {_show(repo.hooks_dir, repo)}"
+    return f"core.hooksPath = {repo.hooks_path_value()!r}" if value else "core.hooksPath is set"
+
+
+def _elsewhere_short(repo: Repo) -> str:
+    return "a linked hooks folder" if repo.hooks_link else "core.hooksPath"
+
+
 def _hooks_path_hint(repo: Repo) -> str:
     target = _hooks_path_file(repo)
     runs = "husky runs it" if target.parent != repo.hooks_dir else "a sh script; git runs it from the top of the work tree"
@@ -812,10 +844,11 @@ def install(repo: Repo, *, force: bool = False) -> str:
         hook = _hooks_path_file(repo)
         state = classify(hook, repo)
         if state in ("calls", "installed"):
-            return f"{_show(hook, repo)} already runs ./pyt hooks run (core.hooksPath)"
+            return f"{_show(hook, repo)} already runs ./pyt hooks run ({_elsewhere_short(repo)})"
+        where = "a folder pytemplate never writes into" if repo.hooks_link else "not in the default folder"
         raise PytError(
-            f"core.hooksPath = {repo.hooks_path_value()!r}: git runs the hooks in {_show(repo.hooks_dir, repo)}, "
-            "not in the default folder, so pytemplate does not install its hook there.\n"
+            f"{elsewhere(repo, value=True)}: git runs the hooks in {_show(repo.hooks_dir, repo)}, "
+            f"{where}, so pytemplate does not install its hook there.\n"
             + "\n".join(f"  {line}" for line in _hooks_path_hint(repo).splitlines())
         )
     target = repo.default_dir / HOOK
@@ -925,8 +958,8 @@ def _status_line(cfg: Config, repo: Repo) -> tuple[bool | None, str, str]:
         state = classify(hook, repo)
         where = _show(hook, repo)
         if state in ("installed", "calls"):
-            return True, f"git pre-commit hook: {where} runs ./pyt hooks run (core.hooksPath)", ""
-        return None, f"git pre-commit hook: core.hooksPath = {repo.hooks_path_value()!r}, pytemplate's checks are not in {where}", _hooks_path_hint(repo)
+            return True, f"git pre-commit hook: {where} runs ./pyt hooks run ({_elsewhere_short(repo)})", ""
+        return None, f"git pre-commit hook: {elsewhere(repo, value=True)}, pytemplate's checks are not in {where}", _hooks_path_hint(repo)
     target = repo.default_dir / HOOK
     local = repo.default_dir / LOCAL
     state = classify(target, repo)
@@ -982,7 +1015,7 @@ def show_status(cfg: Config, project: Path = ROOT) -> int:
     ui.step(f"git hooks: {_show(repo.hooks_dir, repo)}")
     passed, label, hint = _status_line(cfg, repo)
     ui.check_line(passed, label, hint)
-    if repo.custom_hooks_path and classify(repo.default_dir / HOOK, repo) in ("installed", "outdated"):
+    if repo.custom_hooks_path and not repo.hooks_link and classify(repo.default_dir / HOOK, repo) in ("installed", "outdated"):
         ui.check_line(None, f"{_show(repo.default_dir / HOOK, repo)} is pytemplate's but inactive (core.hooksPath)", "./pyt hooks uninstall removes it")
     return 0
 
@@ -1002,7 +1035,7 @@ def ensure_installed(cfg: Config, project: Path = ROOT) -> None:
     try:
         if repo.custom_hooks_path:
             if classify(_hooks_path_file(repo), repo) not in ("installed", "calls"):
-                ui.info("git pre-commit hook: core.hooksPath is set, not installed (./pyt hooks status says what to add)")
+                ui.info(f"git pre-commit hook: {elsewhere(repo)}, not installed (./pyt hooks status says what to add)")
             return
         target = repo.default_dir / HOOK
         state = classify(target, repo)

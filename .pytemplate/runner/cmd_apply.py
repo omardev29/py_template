@@ -727,11 +727,12 @@ def _left_alone(state: str, repo: hooks.Repo) -> str | None:
 
 
 def _hooks_path_summary(repo: hooks.Repo) -> str:
-    """hooks.pre_commit with core.hooksPath set: nothing is installed; does that hook run the checks?"""
+    """hooks.pre_commit with core.hooksPath set, or a linked hooks folder (hooks.elsewhere):
+    nothing is installed; does that hook run the checks?"""
     runner = hooks.hooks_path_runner(repo)
     if runner is not None:
-        return f"core.hooksPath is set: {runner} runs ./pyt hooks run"
-    return "core.hooksPath is set: nothing installed (./pyt hooks status says what to add)"
+        return f"{hooks.elsewhere(repo)}: {runner} runs ./pyt hooks run"
+    return f"{hooks.elsewhere(repo)}: nothing installed (./pyt hooks status says what to add)"
 
 
 def _apply_hook(cfg: Config) -> str:

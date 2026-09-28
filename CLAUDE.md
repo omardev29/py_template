@@ -1201,7 +1201,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (`"$ROOT"/apps/a/pyt`, `$(git rev-parse --show-toplevel)/...`) cannot be resolved and
   counts); another project's command, or a quoted string, is "foreign". A project that
   an enclosing repository ignores (`git check-ignore -q pyt`, which refuses
-  `--literal-pathspecs`) gets no hook unless forced. With `core.hooksPath` set nothing is
+  `--literal-pathspecs`) gets no hook unless forced. With `core.hooksPath` set, or a default
+  hooks folder that is a link or junction to another one (`Repo.hooks_link`, `hooks._link_target`:
+  a team's tracked `.githooks` linked in place of `.git/hooks`, which `git rev-parse --git-path
+  hooks` still names; `install --force` moved the tracked hook aside and wrote pytemplate's over
+  it, `test_hooks.test_a_linked_hooks_folder_is_never_written_into`; the messages name the link,
+  `hooks.elsewhere`), nothing is
   written: install/status/doctor print the line to add (`hooks.run_line`: `[ ! -f ./pyt ] ||
   sh ./pyt hooks run || exit $?`, which skips a checkout without the launcher as our own hook
   does: in a global hooks folder the unguarded line failed every commit of every other

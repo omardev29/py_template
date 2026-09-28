@@ -1553,7 +1553,8 @@ only deletes files is checked too).
   `pre-commit`, as husky v4 and yorkie need; a compiled one runs as git ran it; one without its
   x bit runs no more than git ran it: `chmod +x` it); `uninstall` puts it back. A hook in another
   language that reads its own name is left alone: add the line below to it instead. With
-  `core.hooksPath` set, nothing is written: add
+  `core.hooksPath` set, or a `.git/hooks` that is a link to another folder (a team's tracked
+  hooks folder), nothing is written: add
   `[ ! -f ./pyt ] || sh ./pyt hooks run || exit $?` to your own hook (husky 9:
   `.husky/pre-commit`); it skips a checkout without `./pyt`, so a global hooks folder that
   every repository runs keeps working in the others.
