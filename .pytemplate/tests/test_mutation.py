@@ -56,6 +56,10 @@ def _write(root: Path, files: dict[str, str]) -> Path:
     return root
 
 
+# The suite's own pytest settings, which every copy of a project holds (Runs.run passes them)
+SUITE_INI = {f"{mutation.TESTS}/pytest.ini": (Path(__file__).parent / "pytest.ini").read_text(encoding="utf-8")}
+
+
 # --- options ------------------------------------------------------------------------------------
 
 
@@ -1056,7 +1060,7 @@ def test_make_copy_copies_what_a_link_names_where_links_cannot_be_made(tmp_path:
 
 
 def _worker(tmp_path: Path, tests: dict[str, str]) -> Worker:
-    copy = _write(tmp_path / "copy", tests)
+    copy = _write(tmp_path / "copy", {**SUITE_INI, **tests})
     (tmp_path / "pytest").mkdir()
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     return Worker(0, copy, Path(sys.executable), tmp_path / "pytest", tmp_path / "w0.log", env)
@@ -1071,6 +1075,22 @@ def test_run_reports_pytests_result(tmp_path: Path) -> None:
     assert mutation.junit_seconds(tmp_path / "junit.xml", ["test_ok.py"]).keys() == {"test_ok.py"}
     code, output, _ = runs.run(worker, ["test_ok.py", "test_bad.py"], 120)
     assert mutation.classify(code, output)[0] == KILLED
+
+
+def test_run_uses_the_suites_own_pytest_settings(tmp_path: Path) -> None:
+    """The copy is the project: its pyproject.toml gives its app's tests their settings (a
+    coverage gate: every baseline failed, here an unknown option, exit 4) and so does its root
+    conftest.py. Runs.run passes the suite's own (-c); the test ids and the JUnit classnames
+    junit_seconds reads stay the project's (.pytemplate/tests/...)."""
+    rel = f"{mutation.TESTS}/test_ok.py"
+    worker = _worker(tmp_path, {
+        rel: "def test_ok():\n    assert True\n",
+        "pyproject.toml": '[tool.pytest.ini_options]\naddopts = ["--cov=src", "--cov-fail-under=50"]\npython_files = ["*_check.py"]\n',
+        "conftest.py": 'raise RuntimeError("the project conftest reached the suite")\n',
+    })  # fmt: skip
+    code, output, _ = Runs().run(worker, [rel], 120, junit=tmp_path / "junit.xml")
+    assert mutation.classify(code, output) == (SURVIVED, ""), output
+    assert mutation.junit_seconds(tmp_path / "junit.xml", [rel]).keys() == {rel}
 
 
 def test_a_test_run_that_a_keyboard_interrupt_ends_is_a_kill(tmp_path: Path) -> None:
@@ -2015,7 +2035,7 @@ def test_a_real_run_kills_what_the_tests_check_and_finds_what_they_miss(tmp_path
     finally:
         probe.close()
     env = _git_env(tmp_path)
-    toy = _write(tmp_path / "toy", {".pytemplate/runner/__init__.py": "", ".pytemplate/runner/calc.py": CALC, ".pytemplate/tests/test_calc.py": TEST_CALC})
+    toy = _write(tmp_path / "toy", {".pytemplate/runner/__init__.py": "", ".pytemplate/runner/calc.py": CALC, ".pytemplate/tests/test_calc.py": TEST_CALC, **SUITE_INI})
     for name in ("pyproject.toml", "uv.lock", ".python-version", ".gitignore"):
         shutil.copyfile(ROOT / name, toy / name)  # uv sync --locked of the workers: the project's own lock
     # A project with a local library (./pyt add ./libs/x, CLAUDE.md 10) names path/workspace

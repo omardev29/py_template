@@ -304,7 +304,7 @@ def cmd_tasks(cfg: object, args: list[str]) -> int:
 def cmd_selftest(cfg: object, args: list[str]) -> int:
     from . import e2e, envs, mutation, nvimtest, shells
     from .config import Config
-    from .project import TEMPLATE
+    from .project import ROOT, TEMPLATE
 
     assert isinstance(cfg, Config)
     suites: dict[str, Callable[[Config, list[str]], int]] = {
@@ -323,7 +323,12 @@ def cmd_selftest(cfg: object, args: list[str]) -> int:
             )
         return suites[args[0]](cfg, args[1:])
     tool = envs.tool_env(cfg)
-    code = envs.uv_run(tool, ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", TEMPLATE / "tests", *args], check=False).returncode
+    # The suite's own settings (-c): pytest looked for them itself and read the project's (its
+    # pyproject.toml, pytest.ini, tox.ini or setup.cfg, and its root conftest.py), so a coverage
+    # gate, python_files or a plugin the project gives its app's tests failed the runner's.
+    # --rootdir=. (the project folder, the cwd) keeps the test ids: .pytemplate/tests/test_x.py::y
+    suite: list[str | Path] = ["-c", TEMPLATE / "tests" / "pytest.ini", "--rootdir=.", TEMPLATE / "tests"]
+    code = envs.uv_run(tool, ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", *suite, *args], cwd=ROOT, check=False).returncode
     if any(a in SELFTEST_INFO_FLAGS for a in args):
         return code  # pytest printed its help or version: no mypy of the whole runner after it
     typed = envs.uv_run(

@@ -1680,7 +1680,7 @@ typings/                         the project's stubs (raylib: the corrected rayl
 .pytemplate/templates/           sources of the generated files (typing, VS Code, Neovim, CI)
 .pytemplate/presets/             the script, raylib and flet skeletons, deps and tested pins
 .pytemplate/nvim/                the Neovim plugin that .lazy.lua loads
-.pytemplate/tests/               tests of the runner (./pyt selftest)
+.pytemplate/tests/               tests of the runner (./pyt selftest) and their pytest.ini
 .pytemplate/state.json           hashes of the generated files, and the record of the last apply
 .pytemplate/editor.json          generated data for the Neovim plugin
 .build/, dist/                   outputs (ignored by git)
@@ -1738,7 +1738,10 @@ regenerate the root (CLAUDE.md, section 11).
 
 - `selftest` needs `.venv` (`./pyt setup` once). Its arguments are added to the whole suite
   (select tests with `-k EXPR`). The tests that need the network (re-locks and real
-  `./pyt new` runs of a copy, a few real builds) are skipped when it is unreachable.
+  `./pyt new` runs of a copy, a few real builds) are skipped when it is unreachable. The suite
+  has pytest settings of its own (`.pytemplate/tests/pytest.ini`): what your `pyproject.toml`
+  gives your app's tests (a coverage gate, `python_files`, plugins) and your root `conftest.py`
+  never reach it.
 - Some of its tests are property-based ([Hypothesis](https://hypothesis.works)): they make up
   inputs at random (a hundred per test, a few where each costs a runner or PowerShell start; on a
   CI the same ones every run) and a failure prints the smallest input it found.

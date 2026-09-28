@@ -942,10 +942,13 @@ class Runs:
 
     def run(self, worker: Worker, tests: Sequence[str], timeout: float, junit: Path | None = None) -> tuple[int | None, str, float]:
         """pytest on `tests` in the worker's copy: (exit code or None when ended, output, seconds).
-        The same seed for Hypothesis every time: a mutant is judged on the inputs its baseline had."""
+        The same seed for Hypothesis every time: a mutant is judged on the inputs its baseline had.
+        The suite's own settings (-c, as cli.cmd_selftest passes them), never those the copy's
+        pyproject.toml gives the app's tests: a coverage gate there failed every baseline.
+        --rootdir=. keeps the test ids and the JUnit classnames junit_seconds reads."""
         argv = [
-            str(worker.python), "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider", "--color=no", f"--basetemp={worker.tmp}",
-            "--hypothesis-seed=0", *([f"--junitxml={junit}"] if junit else []), *tests,
+            str(worker.python), "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider", "-c", f"{TESTS}/pytest.ini", "--rootdir=.",
+            "--color=no", f"--basetemp={worker.tmp}", "--hypothesis-seed=0", *([f"--junitxml={junit}"] if junit else []), *tests,
         ]  # fmt: skip
         start = time.perf_counter()
         code: int | None = None

@@ -21,7 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cli, cmd_nvim, config, e2e, envs, mutation, nvimtest, shells  # noqa: E402
+from runner import cli, cmd_nvim, config, e2e, envs, mutation, nvimtest, project, shells  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.project import TEMPLATE  # noqa: E402
 from runner.shells import Result, Shell  # noqa: E402
@@ -66,6 +66,43 @@ def test_plain_selftest_fails_when_pytest_or_mypy_fails(monkeypatch: pytest.Monk
     assert my_argv[:3] == ["mypy", "--strict", "--no-incremental"] and "--python-version" in my_argv
     assert my_argv[my_argv.index("--python-version") + 1] == "3.11"  # the runner's floor
     assert my_argv[-2:] == [str(TEMPLATE / "runner"), str(TEMPLATE / "pyt.py")]
+
+
+def test_plain_selftest_runs_the_suite_with_its_own_pytest_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """pytest looked for its settings itself and read the project's, which are its app's tests':
+    a coverage gate in addopts (here an unknown option, exit 4: this .venv has no pytest-cov;
+    with it "total of 0 is less than fail-under"), python_files (no runner test collected: exit
+    5) and its root conftest.py all reached the runner's suite. The suite has its own
+    (.pytemplate/tests/pytest.ini, -c), and the test ids stay .pytemplate/tests/..., which CI
+    deselects by (template-selftest's uv-floor job). The real pytest of .venv runs the suite's
+    real settings here; only uv run and mypy are left out."""
+    project_dir = tmp_path / "project"
+    tests = project_dir / ".pytemplate" / "tests"
+    tests.mkdir(parents=True)
+    for name in ("pytest.ini", "conftest.py"):
+        shutil.copyfile(TEMPLATE / "tests" / name, tests / name)
+    (tests / "test_tiny.py").write_text("def test_ok() -> None:\n    pass\n\n\ndef test_other() -> None:\n    pass\n", encoding="utf-8")
+    (project_dir / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\naddopts = ["-ra", "--cov=src", "--cov-fail-under=50"]\npython_files = ["*_check.py"]\n',
+        encoding="utf-8",
+    )
+    (project_dir / "conftest.py").write_text('raise RuntimeError("the project conftest reached the suite")\n', encoding="utf-8")
+    monkeypatch.setattr(project, "ROOT", project_dir)
+    monkeypatch.setattr(project, "TEMPLATE", project_dir / ".pytemplate")
+    ran: list[subprocess.CompletedProcess[str]] = []
+
+    def uv_run(env: envs.PyEnv, argv: list[Any], *, cwd: Path | None = None, check: bool = True, **_: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        if args[:3] != ["python", "-m", "pytest"]:
+            return subprocess.CompletedProcess(args, 0, "", "")  # mypy of the runner: not this test's
+        r = subprocess.run([sys.executable, *args[1:]], cwd=cwd, capture_output=True, text=True, timeout=300, check=False)
+        ran.append(r)
+        return r
+
+    monkeypatch.setattr(envs, "uv_run", uv_run)
+    assert cli.cmd_selftest(make(), ["-rA", "--deselect", ".pytemplate/tests/test_tiny.py::test_other"]) == 0, ran[0].stdout + ran[0].stderr
+    assert "PASSED .pytemplate/tests/test_tiny.py::test_ok" in ran[0].stdout
+    assert "1 passed, 1 deselected" in ran[0].stdout, ran[0].stdout
 
 
 @pytest.mark.parametrize("flag", ["-h", "--help", "--version", "-V"])

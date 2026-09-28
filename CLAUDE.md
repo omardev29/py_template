@@ -137,7 +137,7 @@ typings/                          project stubs (raylib preset: the corrected ra
                                   tests/lazy-lock.json: the plugin commits selftest --nvim pins,
                                   README.md: setup, keymaps, options)
 .pytemplate/tests/                runner tests (pytest; conftest.py: the Hypothesis profiles) +
-                                  mypy-runner.ini
+                                  pytest.ini (the suite's own pytest settings) + mypy-runner.ini
 .pytemplate/editor.json           generated data file for the Neovim plugin
 .pytemplate/state.json            hashes of the generated files + the `applied` record (committed)
 .pytemplate/template-repo         [template repo] marker, not copied by ./pyt new
@@ -3405,9 +3405,18 @@ short temp tree and unset `NVIM_APPNAME`.
 ### 13.1 Suites
 
 - `./pyt selftest [pytest args]` (`cli.cmd_selftest`): `python -m pytest -q -p
-  no:cacheprovider .pytemplate/tests [args...]` in `.venv`, then `mypy --strict
+  no:cacheprovider -c .pytemplate/tests/pytest.ini --rootdir=. .pytemplate/tests [args...]` in
+  `.venv`, in the project folder, then `mypy --strict
   --no-incremental --python-version 3.11 --config-file .pytemplate/tests/mypy-runner.ini
   .pytemplate/runner .pytemplate/pyt.py`. Both must pass. Needs `.venv` (`./pyt setup`).
+  The suite has pytest settings of its own (`-c`, `addopts = -ra`), as mypy has: pytest looked
+  for them itself and read the project's, which are its app's tests' (pyproject.toml
+  `[tool.pytest.ini_options]`, pytest.ini, tox.ini or setup.cfg, and the root conftest.py): a
+  coverage gate failed selftest with every test passed, a `python_files` collected no runner test
+  (`test_selftest_harness.test_plain_selftest_runs_the_suite_with_its_own_pytest_settings`).
+  `--rootdir=.` keeps the test ids `.pytemplate/tests/test_x.py::name` (the uv-floor job
+  deselects by one); a bare `pytest .pytemplate/tests` finds the same pytest.ini itself, and its
+  ids then start at `test_x.py` (its rootdir is `.pytemplate/tests`).
   mypy checks the host platform only: add `--platform linux` / `--platform darwin` by hand to
   check the other branches (template-selftest runs it on all three OSes). The exit code is
   pytest's when it failed, else mypy's (mypy runs either way, but not after pytest's own
@@ -3804,7 +3813,10 @@ short temp tree and unset `NVIM_APPNAME`.
   - which tests: the test files of `.pytemplate/tests` that import the module (`test_map`:
     `from runner import x`, `from runner.x import y`, `import runner.x`), the likeliest to fail
     soon first (`ordered`: mentions of the module per second of its baseline, `junit_seconds`),
-    run with `-x -q -p no:cacheprovider --color=no --hypothesis-seed=0` and without the user's
+    run with `-x -q -p no:cacheprovider -c .pytemplate/tests/pytest.ini --rootdir=. --color=no
+    --hypothesis-seed=0` (the suite's own settings, as `selftest` passes them: the copy's
+    pyproject.toml is the project's, and a coverage gate there failed every baseline;
+    `--rootdir=.` keeps the JUnit classnames `junit_seconds` reads) and without the user's
     `PYTEST_ADDOPTS`, `PYTEST_PLUGINS` and `PYTEST_DISABLE_PLUGIN_AUTOLOAD` (`mutation.PYTEST_VARIABLES`:
     `-n auto` or `--lf` would change what every run means, and disabling autoload drops Hypothesis's
     plugin, so `--hypothesis-seed=0` would make every run exit 4; a run with no summary line reports
@@ -5963,7 +5975,8 @@ Code coupling (rename together):
   (`test_workflow_literals_follow_the_ci_image_pins`) repeat its pins.
 - template-selftest.yml reads `envs.MIN_UV` (`MIN_UV = "..."`) from the code by text and
   deselects `test_init_round_trip_through_every_preset_is_byte_identical` by name in the uv-floor
-  job; the python-floor job of template-ci-image.yml and the image's `warm` take the pytest and
+  job (its id `.pytemplate/tests/test_presets.py::...`, which `cli.cmd_selftest`'s `--rootdir=.`
+  keeps); the python-floor job of template-ci-image.yml and the image's `warm` take the pytest and
   hypothesis pins of `uv.lock` (`uv export`). `test_workflows.py` checks the workflow texts they
   rely on.
 - `tools/mutation_cr.py` <-> Cosmic Ray 8.7.0's own code, not only its public API
@@ -5976,7 +5989,9 @@ Code coupling (rename together):
   `handler_classes` gives); `mutation.Driver`'s uv flags <-> the CI image's `warm` (the same
   interpreter and lock: the wheels the job needs are in the image's cache);
   `mutation.pytest_counts` <-> pytest's summary line; `mutation.junit_seconds` <-> the classname
-  pytest's JUnit XML gives a test (its file's path, dotted); `mutation.parse_diff` calls the
+  pytest's JUnit XML gives a test (its file's path from the rootdir, dotted: `Runs.run` passes
+  `--rootdir=.`, or the suite's pytest.ini would make `.pytemplate/tests` the rootdir);
+  `mutation.parse_diff` calls the
   private `presets._git_path` (git's C quotes).
 - `editor.json` `typing.basedpyright` <-> `cmd_dev.BASEDPYRIGHT` and `typing.basedpyright_node`
   <-> `cmd_dev.BASEDPYRIGHT_NODE` (bumping a pin changes a generated file: re-render); the Lua
