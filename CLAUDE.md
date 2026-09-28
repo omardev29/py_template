@@ -3218,7 +3218,13 @@ LazyVim wiring:
   vim.lsp merges it over the environment): the uvx basedpyright runs a Python entry point that a
   caller's `PYTHONHOME` kills before it starts, so no Python language server ran at all; harmless
   for a Node or native server. pyright/basedpyright find `.venv` through `pyrightconfig.json`
-  `venvPath`/`venv`, so venv-selector's automatic activation is turned off.
+  `venvPath`/`venv`, so venv-selector's automatic activation of a cached environment is turned
+  off (`integrations.venv_selector`). Its uv flow stays: for a buffer with PEP 723 script
+  metadata (`.pytemplate/pyt.py`, `tools/mutation_cr.py`, a user's `# /// script` tool) it runs
+  `uv sync --script` and activates that environment, which replaces dap-python's
+  `resolve_python` for the rest of the session (the debugger keeps `.venv`: the dap item below).
+  It cannot be turned off alone: `vim.b.venv_selector_disabled` also removes a user's own
+  `$VIRTUAL_ENV` and its PATH entry.
 - ruff server from `.venv` with `mason = false` (same version as `./pyt check`). Mason
   prepends its bin dir to PATH after `.lazy.lua` runs, so always use absolute `.venv` paths.
 - mypy (nvim-lint, core in LazyVim): `cwd = root` (finds `.mypy.ini`; mypy then prints paths
@@ -3268,7 +3274,16 @@ LazyVim wiring:
   (`vim.fs.normalize` without its `$VAR` expansion): under a project folder named with `[ ]`,
   `{ }` or `$HOME` the glob matched nothing and the adapter fell back to the network, and a
   backquoted part ran as a command through 'shell' (`test_the_venv_debugpy_is_found_in_any_project_folder`).
-  The program runs on the cpython runtime env. nvim-dap reads `<cwd>/.vscode/launch.json`
+  The program of a configuration that names no interpreter (`python`, `pythonPath`: launch.json's
+  PyPy and mypyc ones do) runs on the cpython runtime env: dap-python's `resolve_python`, and,
+  since venv-selector's uv flow replaces that function for the whole session once it saw a PEP
+  723 script (F5 then ran `src/main.py` on `.pytemplate/pyt.py`'s script environment:
+  ModuleNotFoundError), the adapter's `enrich_config` is wrapped too (`dap.setup`): `.venv`, unless
+  the program is such a script itself (`dap.inline_script`, venv-selector's own test: it keeps the
+  environment venv-selector gave it) or `$VIRTUAL_ENV`/`$CONDA_PREFIX` is set (they win, as in
+  dap-python) (`test_the_debugger_keeps_venv_after_a_pep_723_script_was_opened`,
+  `test_the_real_dap_python_keeps_venv_after_venv_selector_switched_it`: the pinned plugins).
+  nvim-dap reads `<cwd>/.vscode/launch.json`
   (per-OS blocks lifted, JSONC accepted) and expands `${workspaceFolder}` to the cwd: a
   provider (`dap.launch_configs`) covers a cwd below the root, and feeds `getconfigs` a BOM-free
   copy when a BOM was added to launch.json (`getconfigs` chokes on one, "Error parsing
@@ -5246,6 +5261,20 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   counts a missing fd as a problem, with the install command (`cmd_nvim.TOOLS`, 12.2). Test:
   `test_cmd_nvim.py::test_nvim_doctor_needs_fd`; CI (that workflow's smoke run fails without
   it). Goes: never.
+- **venv-selector's uv flow switches the debugger for the whole session** (LIMITATION, its design:
+  one active environment at a time): for every buffer with PEP 723 script metadata (its uv2.lua,
+  always on; `.pytemplate/pyt.py` and `tools/mutation_cr.py` have some) it runs `uv sync
+  --script` and activates that environment (`venv.update_paths` -> `path.update_python_dap`),
+  which replaces dap-python's `resolve_python` and stays after the user goes back to the app: F5
+  on launch.json's CPython configuration ran `src/main.py` on the runner's script environment
+  (ModuleNotFoundError: rich) until Neovim restarted. `vim.b.venv_selector_disabled`, its only
+  switch per buffer, also unsets a user's `$VIRTUAL_ENV`. Fix: `dap.setup` wraps the adapter's
+  `enrich_config`: a configuration without `python`/`pythonPath` gets `.venv`, unless its program
+  holds such metadata (`dap.inline_script`, its uv2.lua's own test) or `$VIRTUAL_ENV`/
+  `$CONDA_PREFIX` is set (12.2). Test:
+  `test_nvim_render.py::test_the_debugger_keeps_venv_after_a_pep_723_script_was_opened`,
+  `test_the_real_dap_python_keeps_venv_after_venv_selector_switched_it` (the pinned plugins, where
+  `selftest --nvim` left them). Goes: never.
 - **A grandchild keeps a pipe open** (LIMITATION, every OS): git or Mason outliving a killed
   Neovim blocked the harness's wait forever. Fix: the harnesses write to files and kill the
   whole tree (`nvimtest._run_logged`, `nvimtest.kill_tree`; `e2e`, `shells` alike; 13.1). Test:

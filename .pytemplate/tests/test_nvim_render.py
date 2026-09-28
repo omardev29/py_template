@@ -942,6 +942,122 @@ def test_a_real_debug_session_keeps_the_environment(tmp_path: Path) -> None:
     assert "PYTHONHOME" not in seen, sorted(seen)
 
 
+# The interpreter a configuration without one gets, once venv-selector's uv flow (LazyVim's
+# lang.python) saw a PEP 723 script: venv.update_paths(<its python>, "uv") runs
+# path.update_python_dap, which replaces dap-python's resolve_python for the whole session. With
+# PT_NVIM_DAP set: the pinned nvim-dap, nvim-dap-python and venv-selector themselves; else
+# stand-ins that follow their code (dap-python's get_python_path order: VIRTUAL_ENV, CONDA_PREFIX,
+# resolve_python). Nothing is spawned: the adapter is resolved and its enrich_config called.
+DAP_PYTHON_CHOICE_CHECK = r"""
+vim.g.loaded_python3_provider = 0
+vim.env.VIRTUAL_ENV = nil -- pytest runs under uv run, which exports it
+vim.env.CONDA_PREFIX = nil
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+local is_win = vim.fn.has("win32") == 1
+if vim.env.PT_NVIM_DAP then
+  vim.opt.rtp:prepend(vim.env.PT_NVIM_DAP)
+  vim.opt.rtp:prepend(vim.env.PT_NVIM_DAP_PYTHON)
+  vim.opt.rtp:prepend(vim.env.PT_VENV_SELECTOR)
+else
+  local dp = {}
+  local function python_exe(venv)
+    return venv .. (is_win and "\\Scripts\\python.exe" or "/bin/python")
+  end
+  local function get_python_path()
+    local venv = os.getenv("VIRTUAL_ENV")
+    if venv then return python_exe(venv) end
+    venv = os.getenv("CONDA_PREFIX")
+    if venv then return python_exe(venv) end
+    if dp.resolve_python then return dp.resolve_python() end
+    return nil
+  end
+  local function enrich_config(config, on_config)
+    if not config.pythonPath and not config.python then
+      config.pythonPath = get_python_path()
+    end
+    on_config(config)
+  end
+  dp.setup = function()
+    package.loaded["dap"].adapters.python = function(cb)
+      cb({ type = "executable", command = "python", args = { "-m", "debugpy.adapter" }, enrich_config = enrich_config, options = {} })
+    end
+  end
+  package.loaded["dap-python"] = dp
+  package.loaded["dap"] = { adapters = {} }
+  package.loaded["venv-selector.venv"] = {
+    update_paths = function(py) dp.resolve_python = function() return py end end,
+  }
+end
+local pt = require("pytemplate")
+pt.config.root = vim.env.PT_TEST_ROOT
+require("pytemplate.dap").setup()
+require("venv-selector.venv").update_paths(vim.env.PT_SCRIPT_PY, "uv") -- .pytemplate/pyt.py was opened
+local dap = require("dap")
+local function python_for(config)
+  local got
+  config.type, config.request = "python", "launch"
+  dap.adapters.python(function(adapter)
+    adapter.enrich_config(config, function(c) got = c end)
+  end, config)
+  return got and (got.pythonPath or got.python) or vim.NIL
+end
+local root = pt.config.root
+local out = {
+  app = python_for({ program = root .. "/src/main.py" }),
+  tests = python_for({ module = "pytest" }),
+  script = python_for({ program = root .. "/tools/script.py" }),
+  unclosed = python_for({ program = root .. "/tools/unclosed.py" }),
+  named = python_for({ program = root .. "/src/main.py", python = "/own/python" }),
+}
+vim.env.VIRTUAL_ENV = vim.env.PT_TMP .. "/active"
+out.virtual_env = python_for({ program = root .. "/src/main.py" })
+io.stdout:write("PTCHOICE" .. vim.json.encode(out) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def _dap_python_choice(tmp_path: Path, extra: dict[str, str]) -> None:
+    project = _project(tmp_path)
+    py = project / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    py.parent.mkdir(parents=True)
+    py.write_bytes(b"")
+    (project / "tools").mkdir()
+    script = "# /// script\n# requires-python = '>=3.11'\n# dependencies = ['rich']\n# ///\nprint('tool')\n"
+    (project / "tools" / "script.py").write_bytes(script.replace("\n", "\r\n").encode())  # a CRLF checkout
+    (project / "tools" / "unclosed.py").write_text("# /// script\n# dependencies = []\nprint('x')\n", encoding="utf-8")
+    script_py = tmp_path / "script-env" / "bin" / "python"
+    r = _headless_lua(tmp_path, DAP_PYTHON_CHOICE_CHECK, project, {**extra, "PT_SCRIPT_PY": script_py.as_posix()})
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTCHOICE")), None)
+    assert line is not None, r.stdout + r.stderr
+    got: dict[str, str] = json.loads(line[len("PTCHOICE") :])
+    assert Path(got["app"]) == py and Path(got["tests"]) == py and Path(got["unclosed"]) == py, (got, py)
+    assert Path(got["script"]) == script_py and got["named"] == "/own/python", got
+    assert Path(got["virtual_env"]).parent.parent == tmp_path / "active", got
+
+
+def test_the_debugger_keeps_venv_after_a_pep_723_script_was_opened(tmp_path: Path) -> None:
+    """venv-selector's uv flow (LazyVim's lang.python) activates the environment of every PEP 723
+    script it sees, .pytemplate/pyt.py included, and replaces dap-python's resolve_python for the
+    rest of the session: F5 on launch.json's CPython configuration then ran src/main.py on the
+    runner's script environment (ModuleNotFoundError: rich). A configuration without an
+    interpreter gets .venv, unless its program is such a script itself (the environment
+    venv-selector gave it) or $VIRTUAL_ENV names one (dap-python's rule)."""
+    _dap_python_choice(tmp_path, {})
+
+
+def test_the_real_dap_python_keeps_venv_after_venv_selector_switched_it(tmp_path: Path) -> None:
+    """The same through the pinned nvim-dap, nvim-dap-python and venv-selector themselves.
+    Skipped without their checkouts (./pyt selftest --nvim makes them)."""
+    plugins = _pinned_plugins("nvim-dap", "nvim-dap-python", "venv-selector.nvim")
+    if plugins is None:
+        pytest.skip("no checkout of the pinned nvim-dap, nvim-dap-python and venv-selector (./pyt selftest --nvim installs them)")
+    extra = {
+        "PT_NVIM_DAP": plugins["nvim-dap"].as_posix(), "PT_NVIM_DAP_PYTHON": plugins["nvim-dap-python"].as_posix(),
+        "PT_VENV_SELECTOR": plugins["venv-selector.nvim"].as_posix(),
+    }  # fmt: skip
+    _dap_python_choice(tmp_path, extra)
+
+
 WIN_MYPY_CHECK = r"""
 vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
 package.loaded["lint.linters.mypy"] = { parser = function() return {} end }

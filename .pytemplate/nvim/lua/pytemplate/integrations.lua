@@ -289,7 +289,9 @@ end
 
 -- --- venv-selector ------------------------------------------------------------------------------
 
----pyright/basedpyright find .venv through pyrightconfig.json (venvPath/venv): no automatic switch.
+---pyright/basedpyright find .venv through pyrightconfig.json (venvPath/venv): no automatic switch
+---to a cached environment. Its uv flow for PEP 723 scripts has no switch of its own (the buffer's
+---venv_selector_disabled also drops a user's $VIRTUAL_ENV): dap.setup keeps the debugger on .venv.
 function M.venv_selector(_, opts)
   opts.options = tbl(opts.options)
   opts.options.cached_venv_automatic_activation = false

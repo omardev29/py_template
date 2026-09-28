@@ -39,7 +39,7 @@ names the character; move the project to a plain path).
 | ruff | The language server from `.venv`: the same version as `./pyt check`. |
 | mypy | nvim-lint runs `.venv`'s mypy from the project root with `.mypy.ini`; off with the `off` typing profile, the default on cpython and pypy (`typing.relaxed = "off"`): `./pyt mode --typing warn` (or `strict`) turns it on; errors shown with the profile's severity (warn: warnings). With PyPy supported it checks the 3.11 syntax like `./pyt check`. |
 | Tasks | overseer templates `pyt: <command>` for every `./pyt` command and every `pytemplate.toml` `[tasks]` entry (they replace the `tasks.json` ones). Output of check/lint/test/build becomes diagnostics and quickfix items. |
-| Debugging | nvim-dap with the generated `.vscode/launch.json`; the adapter is `.venv`'s debugpy (else Mason's, else an ephemeral `uv run --with debugpy`). |
+| Debugging | nvim-dap with the generated `.vscode/launch.json`; the adapter is `.venv`'s debugpy (else Mason's, else an ephemeral `uv run --with debugpy`). A configuration that names no interpreter runs on `.venv`, also after venv-selector activated the environment of a PEP 723 script (`.pytemplate/pyt.py`); such a script itself keeps that environment, and an activated `$VIRTUAL_ENV` wins. |
 | Tests | neotest runs pytest with the active backend's interpreter (`.venv`, `.venv-pypy`); mypyc and "all backends" runs go through `pyt: test`. |
 | Health | `:checkhealth pytemplate` |
 

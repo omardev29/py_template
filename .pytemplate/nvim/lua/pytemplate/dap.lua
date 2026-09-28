@@ -82,6 +82,34 @@ function M.adapter_env(extra)
   return out
 end
 
+---True when the file holds PEP 723 inline script metadata, found the way venv-selector's uv flow
+---finds it in a buffer (its uv2.lua: a `# /// script` line, then a `# ///` line, within the first
+---200 lines). That flow runs such a script on its own uv environment.
+function M.inline_script(path)
+  if type(path) ~= "string" or path == "" then
+    return false
+  end
+  local f = io.open(path, "r")
+  if not f then
+    return false
+  end
+  local started, found, n = false, false, 0
+  for line in f:lines() do
+    n = n + 1
+    if n > 200 then
+      break
+    end
+    if not started then
+      started = line:match("^%s*#%s*///%s*script%s*$") ~= nil
+    elseif line:match("^%s*#%s*///%s*$") then
+      found = true
+      break
+    end
+  end
+  f:close()
+  return found
+end
+
 ---The argv an adapter would run (used by :checkhealth and the smoke test).
 function M.adapter_cmd()
   local py, source = M.adapter()
@@ -99,8 +127,9 @@ function M.setup()
   local py, source = M.adapter()
   dp.setup(py or "python")
   dp.test_runner = "pytest"
-  -- The program runs on the CPython runtime env (.venv) unless the
-  -- configuration names its own python (launch.json's PyPy one). $VIRTUAL_ENV still wins.
+  -- The program runs on the CPython runtime env (.venv) unless the configuration names its own
+  -- python (launch.json's PyPy and mypyc ones). $VIRTUAL_ENV and $CONDA_PREFIX still win, as in
+  -- dap-python. venv-selector's uv flow replaces this function (see enrich_config below).
   dp.resolve_python = function()
     return pt.python("cpython")
   end
@@ -124,6 +153,26 @@ function M.setup()
         -- a list that uv.spawn takes as the whole environment (M.adapter_env)
         options.env = M.adapter_env(options.env)
         adapter.options = options
+        -- venv-selector's uv flow (LazyVim's lang.python) points dap-python's resolve_python at
+        -- the environment of the last PEP 723 script it saw, .pytemplate/pyt.py included, for the
+        -- rest of the session: a configuration without an interpreter then debugged the app on
+        -- that script's environment (ModuleNotFoundError). It gets .venv here, unless its program
+        -- is such a script itself or $VIRTUAL_ENV / $CONDA_PREFIX is set (dap-python's order)
+        local enrich = adapter.enrich_config
+        if type(enrich) == "function" then
+          adapter.enrich_config = function(cfg, on_config)
+            if
+              cfg.python == nil
+              and cfg.pythonPath == nil
+              and os.getenv("VIRTUAL_ENV") == nil
+              and os.getenv("CONDA_PREFIX") == nil
+              and not M.inline_script(cfg.program)
+            then
+              cfg.pythonPath = pt.python("cpython")
+            end
+            return enrich(cfg, on_config)
+          end
+        end
       end
       cb(adapter)
     end, config)
