@@ -65,11 +65,12 @@ def _pinned_requirements(cfg_tool: envs.PyEnv) -> list[str]:
     `DESKTOP_CLIENT` and what only it needs (`--prune`: what the app requires itself stays): a
     flet build app runs embedded in its own Flutter host (Pyodide on the web), which never starts
     the client of `flet run` and `flet pack`; with rich and pygments it was 3.1 of the 5.6 MB of
-    a web build's app.zip.
+    a web build's app.zip. No dependency group (--no-default-groups, as common.export_requirements:
+    --no-dev kept a group [tool.uv] default-groups names, a lint group's ruff in an apk build).
     """
     out = envs.uv(
         cfg_tool,
-        ["export", "--frozen", "--no-dev", "--no-editable", "--no-emit-project", "--prune", DESKTOP_CLIENT, "--no-hashes", "--no-header", "--no-annotate", "--format", "requirements.txt"],
+        ["export", "--frozen", "--no-default-groups", "--no-editable", "--no-emit-project", "--prune", DESKTOP_CLIENT, "--no-hashes", "--no-header", "--no-annotate", "--format", "requirements.txt"],
         capture=True,
         echo=False,
     ).stdout

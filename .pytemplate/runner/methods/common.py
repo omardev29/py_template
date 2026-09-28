@@ -163,19 +163,21 @@ def targets_for(cfg: Config, backend: str, keys: list[str]) -> list[Target]:
 
 
 def export_requirements(cfg: Config) -> Path:
-    """Export the runtime dependencies (no dev) with exact versions and hashes from uv.lock.
+    """Export the runtime dependencies (no dependency group) with exact versions and hashes from uv.lock.
 
     --locked, never --frozen: a uv.lock older than pyproject.toml (a dependency added by hand, a
     merge) is refused like every `uv run --locked`; --frozen exported the old lock and the pyz or
     portable build shipped without the new dependency. --no-editable: a workspace or path
     dependency (`./pyt add ./libs/x`) is exported as a path and installed as a real package;
     editable, `uv pip install --target` left only a .pth naming this machine's source folder.
+    --no-default-groups, never --no-dev: [tool.uv] default-groups can name other groups than dev
+    (a lint group of tools), and --no-dev exported them into every pyz and portable lib/.
     """
     out = BUILD / "deploy" / "requirements.txt"
     out.parent.mkdir(parents=True, exist_ok=True)
     envs.uv(
         envs.tool_env(cfg),
-        ["export", "--locked", "--no-dev", "--no-editable", "--no-emit-project", "--format", "requirements.txt", "--output-file", out, "--quiet"],
+        ["export", "--locked", "--no-default-groups", "--no-editable", "--no-emit-project", "--format", "requirements.txt", "--output-file", out, "--quiet"],
     )
     return out
 

@@ -2321,8 +2321,11 @@ Formats:
   `platform.machine()` asks WMI for the native CPU (an x64 Python on Windows on ARM labelled its
   x64 wheels `aarch64`), and `x86`/`armv7l` for a 32-bit interpreter on a 64-bit kernel. The pyz
   bootstrap's `_arch` computes the same name (it said `i686` where the builder said `x86`).
-- `common.export_requirements` (pyz, portable): `uv export --locked --no-dev --no-editable
-  --no-emit-project` into `.build/deploy/requirements.txt`. `--locked`: a `uv.lock` that
+- `common.export_requirements` (pyz, portable): `uv export --locked --no-default-groups
+  --no-editable --no-emit-project` into `.build/deploy/requirements.txt`. `--no-default-groups`,
+  never `--no-dev` (the flet build's export too): `[tool.uv] default-groups` may name other groups
+  than dev, and a lint group's ruff went into every pyz (a pure one became host-only) and a flet
+  apk build (`test_the_builds_export_no_dependency_group`). `--locked`: a `uv.lock` that
   `pyproject.toml` moved past fails like every `uv run --locked` (with `--frozen` a `--no-check`
   pyz or portable build shipped without the new dependency). `--no-editable`: a workspace or path
   dependency (`./pyt add ./libs/x`) is exported as a path, which `uv pip install --target`
@@ -2623,7 +2626,7 @@ Per method:
   payload and also in `--dry-run`, and again in `build`. The stage `.build/flet-build/<b>` is
   persistent (Flutter cache); stale extensions are deleted from it before this payload's are
   copied (a desktop `.pyd` must not reach a mobile/web build). `flet build` ignores `uv.lock`, so `build_pyproject` pins the
-  `uv export --frozen --no-dev --no-editable --prune flet-desktop` versions
+  `uv export --frozen --no-default-groups --no-editable --prune flet-desktop` versions
   (`flet._pinned_requirements`; `flet.DESKTOP_CLIENT` goes with what only it needs, rich and
   pygments: a flet build app runs embedded, `FLET_PLATFORM` set by its Flutter host or Pyodide on
   the web, and never starts the desktop client, which was 3.1 of the 5.6 MB of the skeleton's web

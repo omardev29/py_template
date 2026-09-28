@@ -2263,12 +2263,15 @@ def test_skipped_requirements_reads_a_real_export_of_a_local_library_behind_a_ma
     assert common.skipped_requirements(requirements, site) == []
 
 
-def _workspace_project(root: Path, *, marked: str = "") -> Path:
+def _workspace_project(root: Path, *, marked: str = "", grouped: bool = False) -> Path:
     """A project that depends on a local library the way `./pyt add ./libs/mylib` leaves it
     (a uv workspace member, which uv installs editable), locked offline (static metadata).
-    `marked` adds a second library, a dependency on win32 only."""
+    `marked` adds a second library, a dependency on win32 only. `grouped` adds two libraries in
+    dependency groups that [tool.uv] default-groups installs by default: `devlib` (dev) and
+    `toollib` (lint), as `./pyt add --group lint ...` leaves them."""
     libs = ["mylib", marked] if marked else ["mylib"]
-    for lib in libs:
+    groups = ["devlib", "toollib"] if grouped else []
+    for lib in [*libs, *groups]:
         (root / "libs" / lib / "src" / lib).mkdir(parents=True)
         (root / "libs" / lib / "pyproject.toml").write_text(
             f'[project]\nname = "{lib}"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n\n'
@@ -2277,10 +2280,14 @@ def _workspace_project(root: Path, *, marked: str = "") -> Path:
         )
         (root / "libs" / lib / "src" / lib / "__init__.py").write_text("VALUE = 42\n", encoding="utf-8")
     deps = '"mylib"' + (f", \"{marked} ; sys_platform == 'win32'\"" if marked else "")
+    grouping = '[dependency-groups]\ndev = ["devlib"]\nlint = ["toollib"]\n\n' if grouped else ""
     (root / "pyproject.toml").write_text(
         f'[project]\nname = "wsapp"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = [{deps}]\n\n'
-        f"[tool.uv.workspace]\nmembers = [{', '.join(repr('libs/' + lib) for lib in libs)}]\n\n"
-        "[tool.uv.sources]\n" + "".join(f"{lib} = {{ workspace = true }}\n" for lib in libs),
+        + grouping
+        + ('[tool.uv]\ndefault-groups = ["dev", "lint"]\n\n' if grouped else "")
+        + f"[tool.uv.workspace]\nmembers = [{', '.join(repr('libs/' + lib) for lib in [*libs, *groups])}]\n\n"
+        + "[tool.uv.sources]\n"
+        + "".join(f"{lib} = {{ workspace = true }}\n" for lib in [*libs, *groups]),
         encoding="utf-8",
     )
     env = {k: v for k, v in proc.base_env().items() if not k.startswith(("UV_PROJECT", "UV_PYTHON"))}
@@ -2307,6 +2314,25 @@ def test_export_ships_path_dependencies_and_refuses_a_stale_lock(tmp_path: Path,
     (project / "pyproject.toml").write_text(text.replace('["mylib"]', '["mylib", "six>=1.16"]'), encoding="utf-8")
     with pytest.raises(proc.CommandFailed):
         common.export_requirements(make({}))
+
+
+def test_the_builds_export_no_dependency_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `uv export --no-dev` leaves out the dev group only: with [tool.uv] default-groups naming
+    # another one (a lint group of tools), the pyz, the portable lib/ and the flet build project
+    # got its packages (ruff: a pure pyz became one for this platform only, and an apk build
+    # asked for a ruff Android has no wheel of). The real uv, offline, on a real lock
+    from runner.methods import flet
+
+    project = _workspace_project(tmp_path / "proj", grouped=True)
+    monkeypatch.setattr(proc, "ROOT", project)
+    monkeypatch.setattr(common, "BUILD", tmp_path / "build")
+    monkeypatch.setattr(common, "LOCK", project / "uv.lock")
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    lines = common.export_requirements(make({})).read_text(encoding="utf-8").splitlines()
+    exported = {ln.split(";")[0].strip().replace("\\", "/") for ln in lines if ln.startswith(".")}
+    assert exported == {"./libs/mylib"}
+    pins = flet._pinned_requirements(envs.tool_env(make({})))
+    assert [pin.split(" @ ")[0] for pin in pins] == ["mylib"]
 
 
 def test_requirements_digest_ignores_the_header_and_hashes(tmp_path: Path) -> None:
