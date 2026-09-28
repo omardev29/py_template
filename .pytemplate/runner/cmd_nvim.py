@@ -28,7 +28,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 from . import envs, proc, project, ui
@@ -55,20 +55,32 @@ EXTRA_PREFIX = "lazyvim.plugins.extras."
 LAZY_LUA = ROOT / ".lazy.lua"
 MARK = "PTNVIM"  # prefix of the JSON line the headless snippets print
 
-# Neovim reads every 'runtimepath' entry as a file glob: `[ ] { }` are wildcards, a comma
-# separates entries, a backslash escapes, a backtick is command substitution, a single quote
-# sends the entry through 'shell', and a `$NAME` is expanded. A project path holding one of these
+# Neovim reads every 'runtimepath' entry as a file glob (gen_expand_wildcards). On POSIX `[ ] { }`
+# are wildcards, a comma separates entries, a backslash escapes, a backtick is command
+# substitution, a single quote sends the entry through 'shell', and a `$NAME` is expanded. On
+# Windows (Neovim 0.12.5's path.c and os/win_defs.h) only `[` is a wildcard (path_has_exp_wildcard:
+# `*?[`), no entry ever goes through 'shell' (SPECIAL_WILDCHAR, the `'`, `{` and backtick that
+# need one, is POSIX only; a backtick counts only around the whole entry, which starts with a
+# drive there), a comma still separates and a `$NAME` is still expanded (vim.fs.normalize too): a
+# `'` (C:\Users\O'Brien), `{ }` or `]` is a plain character. A project path holding one of these
 # cannot carry the plugin on the runtimepath (require fails, E79), so spec.lua skips the whole
 # integration there and names the character; this reports it for `nvim doctor` and `nvim trust`.
 RTP_UNSAFE = "[]{},\\`'$"
-RTP_UNSAFE_TEXT = "[ ] { } , \\ ` ' or $"
+RTP_UNSAFE_WINDOWS = "[,$"
 
 
-def rtp_unsafe_char(path: Path) -> str | None:
+def rtp_unsafe_text(*, windows: bool = IS_WINDOWS) -> str:
+    """The characters of `rtp_unsafe_char`, for a message: "[ ] { } , \\ ` ' or $"."""
+    chars = list(RTP_UNSAFE_WINDOWS if windows else RTP_UNSAFE)
+    return " ".join(chars[:-1]) + " or " + chars[-1]
+
+
+def rtp_unsafe_char(path: PurePath, *, windows: bool = IS_WINDOWS) -> str | None:
     """The first character of `path` Neovim cannot hold on its runtimepath, or None. `as_posix`
     so a backslash counts only where it is a name character (POSIX), not a separator (Windows)."""
+    unsafe = RTP_UNSAFE_WINDOWS if windows else RTP_UNSAFE
     for ch in path.as_posix():
-        if ch in RTP_UNSAFE:
+        if ch in unsafe:
             return ch
     return None
 
@@ -641,7 +653,7 @@ def cmd_doctor(cfg: Config) -> int:
         check(
             False,
             f"the project path holds `{unsafe}`: Neovim cannot put it on 'runtimepath', so the ./pyt integration cannot load here",
-            f"move the project to a path without {RTP_UNSAFE_TEXT}",
+            f"move the project to a path without {rtp_unsafe_text()}",
         )
     try:
         missing = missing_extras(nv.lazyvim_json)
@@ -724,7 +736,7 @@ def cmd_trust(nv: Nvim) -> int:
         raise PytError(
             f"the project path holds `{bad}`, which Neovim cannot put on its 'runtimepath': the "
             f"./pyt integration cannot load here even once trusted. Move the project to a path "
-            f"without {RTP_UNSAFE_TEXT}"
+            f"without {rtp_unsafe_text()}"
         )
     if before.state == "trusted":
         ui.ok(f"already trusted: {before.path}")

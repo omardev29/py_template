@@ -13,7 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import pytest
@@ -765,8 +765,71 @@ def test_lazy_lua_refuses_a_runtimepath_unsafe_root(tmp_path: Path) -> None:
     assert "PTOK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
     assert cmd_nvim.rtp_unsafe_char(Path("/tmp/q[x]z")) == "["
     assert cmd_nvim.rtp_unsafe_char(Path("/tmp/a,b")) == ","
-    assert cmd_nvim.rtp_unsafe_char(Path("/tmp/a`b")) == "`"
+    assert cmd_nvim.rtp_unsafe_char(Path("/tmp/a`b"), windows=False) == "`"
     assert cmd_nvim.rtp_unsafe_char(Path("/tmp/plain")) is None
+
+
+# spec.lua's verdict on each root, with has('win32') answering as `windows` says
+SPEC_RTP_CHECK = r"""
+local cases = vim.json.decode(table.concat(vim.fn.readfile(vim.env.PT_TMP .. "/rtp.json"), "\n"))
+local real_has = vim.fn.has
+local got = {}
+for i, c in ipairs(cases) do
+  vim.fn.has = function(what)
+    if what == "win32" then return c.windows and 1 or 0 end
+    return real_has(what)
+  end
+  local notified
+  vim.notify = function(msg) notified = msg end
+  local spec = dofile(vim.env.PT_PLUGIN .. "/spec.lua")(c.root)
+  vim.wait(1000, function() return notified ~= nil end, 10)
+  local loads = false
+  for _, s in ipairs(spec) do
+    if s.name == "pytemplate.nvim" then loads = true end
+  end
+  got[i] = { loads = loads, notified = notified or vim.NIL }
+end
+vim.fn.has = real_has
+io.stdout:write("PTRTP" .. vim.json.encode(got) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def test_the_runtimepath_rule_is_the_same_in_spec_lua_and_cmd_nvim(tmp_path: Path) -> None:
+    r"""On Windows Neovim 0.12.5 globs only `[` in a 'runtimepath' entry and never hands one to
+    'shell' (SPECIAL_WILDCHAR is POSIX only): a `'`, `{ }`, `]` or a backtick is a plain character
+    there, and spec.lua refused every project below C:\Users\O'Brien. A comma, `[` and `$` still
+    break it; POSIX keeps its whole set. spec.lua (the loader) and cmd_nvim (doctor, trust) must
+    give the same verdict, name the same character and list the same set."""
+    names = ["O'Brien", "a{b}c", "a]b", "a`b", "q[x]z", "a,b", "a$b", "plain"]
+    if sys.platform != "win32":
+        names.append("a\\b")  # a name character off Windows only
+    cases = []
+    for name in names:
+        root = tmp_path / "roots" / name / "proj"
+        (root / ".pytemplate" / "nvim" / "lua" / "pytemplate").mkdir(parents=True)
+        (root / "pytemplate.toml").write_text("", encoding="utf-8")
+        (root / ".pytemplate" / "nvim" / "lua" / "pytemplate" / "init.lua").write_text("return {}\n", encoding="utf-8")
+        cases += [{"root": root.as_posix(), "windows": w} for w in (False, True)]
+    (tmp_path / "rtp.json").write_text(json.dumps(cases), encoding="utf-8")
+    r = _headless_lua(tmp_path, SPEC_RTP_CHECK, ROOT)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTRTP")), None)
+    assert line is not None, r.stdout + r.stderr
+    for case, got in zip(cases, json.loads(line[len("PTRTP") :]), strict=True):
+        windows = bool(case["windows"])
+        bad = cmd_nvim.rtp_unsafe_char(PurePosixPath(case["root"]), windows=windows)
+        if bad is None:
+            assert got["loads"] and got["notified"] is None, (case, got)
+        else:
+            assert not got["loads"] and f"holds `{bad}`" in got["notified"], (case, got)
+            assert got["notified"].endswith(f"a path without {cmd_nvim.rtp_unsafe_text(windows=windows)}."), got
+    win = PureWindowsPath(r"C:\Users\O'Brien\{proj}]")
+    assert cmd_nvim.rtp_unsafe_char(win, windows=True) is None and cmd_nvim.rtp_unsafe_char(win, windows=False) == "'"
+    assert cmd_nvim.rtp_unsafe_char(PureWindowsPath(r"C:\x\a`b"), windows=True) is None
+    for text, char in ((r"C:\a,b", ","), (r"C:\q[x]z", "["), (r"C:\$HOME\p", "$")):
+        assert cmd_nvim.rtp_unsafe_char(PureWindowsPath(text), windows=True) == char
+    assert cmd_nvim.rtp_unsafe_text(windows=True) == "[ , or $"
+    assert cmd_nvim.rtp_unsafe_text(windows=False) == "[ ] { } , \\ ` ' or $"
 
 
 def test_mypy_linter_follows_a_venv_created_later(tmp_path: Path) -> None:
