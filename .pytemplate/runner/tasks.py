@@ -25,8 +25,8 @@ from __future__ import annotations
 
 import os
 import shlex
-import shutil
 from collections.abc import Callable, Mapping
+from pathlib import Path
 
 from . import config, envs, proc, ui
 from .config import Config, TaskConfig
@@ -206,9 +206,9 @@ def run_task(
         # A bare name: CreateProcess only tries `<name>.exe`, so npm, yarn or mvn (npm.cmd...)
         # were "not found". Search the task's PATH with PATHEXT, as a shell does (not found:
         # the name stays, and proc.run says so)
-        found = shutil.which(program, path=base.get("PATH", ""))
+        found = _on_windows_path(program, base, cwd)
         if found:
-            argv[0] = os.path.abspath(found)
+            argv[0] = found
     if IS_WINDOWS and argv[0].lower().endswith((".cmd", ".bat")):
         # Its own path too: list2cmdline quotes it only for a blank, and C:\Users\R&D\...\x.cmd
         # reached cmd.exe as two commands.
@@ -226,6 +226,27 @@ def run_task(
                     f"{way_out}, or run the program behind the batch file directly"
                 )
     return proc.run(argv, cwd=cwd, env=base, check=False).returncode
+
+
+def _on_windows_path(program: str, env: Mapping[str, str], cwd: Path) -> str | None:
+    """The file a bare `program` names on the task's PATH, with the extensions of PATHEXT (a name
+    that already has one as it is). Never the current folder: shutil.which searches it first on
+    Windows (always on Python 3.11), and the runner's is the caller's, so an npm.cmd in the folder
+    ./pyt was typed in ran instead of the task's. A relative PATH entry is the task cwd's, as for
+    execvp after the child's chdir on POSIX."""
+    exts = [e for e in (env.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(";") if e]
+    has_ext = os.path.splitext(program)[1].lower() in {e.lower() for e in exts}
+    names = [program] if has_ext else [program + e for e in exts]
+    for entry in env.get("PATH", "").split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if not entry:
+            continue
+        folder = entry if os.path.isabs(entry) else os.path.join(cwd, entry)
+        for name in names:
+            candidate = os.path.join(folder, name)
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+    return None
 
 
 # CreateProcess runs a .cmd/.bat through cmd.exe, which re-parses the command line that

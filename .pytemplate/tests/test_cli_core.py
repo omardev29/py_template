@@ -1346,35 +1346,45 @@ def test_a_relative_program_runs_from_the_task_cwd(rec: Recorder, tmp_path: Path
     assert rec.runs == [["tool"], [f"{ROOT}/tools/x"]]  # a bare name keeps the OS search
 
 
+def _batch(folder: Path, name: str) -> Path:
+    """A stand-in .cmd file (never run: the recorder takes its place)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_text("@echo off\r\n", encoding="ascii")
+    return folder / name
+
+
 def test_a_bare_program_is_found_with_pathext_on_windows(rec: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Windows: CreateProcess only tries `npm.exe` for a bare `npm`, so a task running npm, yarn
-    or mvn (.cmd files) failed with "program not found: npm" there and worked elsewhere."""
-    bin_dir = tmp_path / "nodejs"
-    bin_dir.mkdir()
-    looked_up: list[tuple[str, str]] = []
-
-    def which(name: str, mode: int = os.F_OK | os.X_OK, path: str | None = None) -> str | None:
-        looked_up.append((name, path or ""))
-        return str(bin_dir / "npm.cmd") if name == "npm" else None  # PATHEXT, as on Windows
-
+    or mvn (.cmd files) failed with "program not found: npm" there and worked elsewhere. The
+    search is the task's PATH alone: shutil.which looked in the current folder first, the
+    caller's (the launchers never cd), and a same-named npm.cmd there ran instead."""
+    npm = _batch(tmp_path / "nodejs", "npm.cmd")
+    _batch(tmp_path / "caller", "npm.cmd")  # the folder ./pyt web was typed in: never searched
+    monkeypatch.chdir(tmp_path / "caller")
     monkeypatch.setattr(tasks, "IS_WINDOWS", True)
-    monkeypatch.setattr(tasks.shutil, "which", which)
+    monkeypatch.setenv("PATHEXT", ".com;.exe;.bat;.cmd")  # lower case: Linux file names are case-sensitive
+    work = tmp_path / "work"
+    tool = _batch(work / "bin", "tool.bat")
     cfg = make({"tasks": {
-        "web": {"cmd": ["npm", "run", "build"], "uv": False, "env": {"PATH": str(bin_dir)}},
-        "missing": {"cmd": ["no-such-tool"], "uv": False},
+        "web": {"cmd": ["npm", "run", "build"], "uv": False, "env": {"PATH": str(npm.parent)}},
+        "missing": {"cmd": ["npm"], "uv": False, "env": {"PATH": str(tmp_path / "empty")}},
         "rel": {"cmd": ["tools/x.cmd"], "uv": False},
+        "named": {"cmd": ["npm.cmd"], "uv": False, "env": {"PATH": str(npm.parent)}},
+        "relpath": {"cmd": ["tool"], "uv": False, "env": {"PATH": "bin"}, "cwd": str(work)},
     }})
     tasks.run_task(cfg, "web", ["--prod"], rec.dispatch)
-    assert rec.runs[-1] == [str(bin_dir / "npm.cmd"), "run", "build", "--prod"]
-    assert looked_up[-1] == ("npm", str(bin_dir))  # the task's own PATH
+    assert rec.runs[-1] == [str(npm), "run", "build", "--prod"]  # the task's own PATH, never the caller's folder
     tasks.run_task(cfg, "missing", [], rec.dispatch)
-    assert rec.runs[-1] == ["no-such-tool"]  # not found: proc.run reports it
-    count = len(looked_up)
+    assert rec.runs[-1] == ["npm"]  # not found (not even in the caller's folder): proc.run reports it
     tasks.run_task(cfg, "rel", [], rec.dispatch)
-    assert len(looked_up) == count and Path(rec.runs[-1][0]) == ROOT / "tools" / "x.cmd"  # a path is no PATH lookup
+    assert Path(rec.runs[-1][0]) == ROOT / "tools" / "x.cmd"  # a path is no PATH lookup
+    tasks.run_task(cfg, "named", [], rec.dispatch)
+    assert rec.runs[-1] == [str(npm)]  # a name with its extension, as it is
+    tasks.run_task(cfg, "relpath", [], rec.dispatch)
+    assert rec.runs[-1] == [str(tool)]  # a relative PATH entry is the task cwd's, as on POSIX
     monkeypatch.setattr(tasks, "IS_WINDOWS", False)
     tasks.run_task(cfg, "web", [], rec.dispatch)
-    assert rec.runs[-1][0] == "npm" and len(looked_up) == count  # POSIX: execvp searches PATH itself
+    assert rec.runs[-1][0] == "npm"  # POSIX: execvp searches PATH itself
 
 
 @pytest.mark.parametrize(
@@ -1393,8 +1403,9 @@ def test_a_batch_file_gets_only_arguments_cmd_passes_unchanged(
     ran `b`, and %VAR% expands even inside quotes. Such an argument is refused (exit 2) instead
     of reaching the program changed; one that list2cmdline quotes (a space) is passed."""
     monkeypatch.setattr(tasks, "IS_WINDOWS", True)
-    monkeypatch.setattr(tasks.shutil, "which", lambda name, mode=0, path=None: str(tmp_path / "npm.cmd"))
-    cfg = make({"tasks": {"web": {"cmd": ["npm", "install"], "uv": False}, "bat": {"cmd": ["tools/build.BAT"], "uv": False}}})
+    monkeypatch.setenv("PATHEXT", ".com;.exe;.bat;.cmd")
+    _batch(tmp_path, "npm.cmd")
+    cfg = make({"tasks": {"web": {"cmd": ["npm", "install"], "uv": False, "env": {"PATH": str(tmp_path)}}, "bat": {"cmd": ["tools/build.BAT"], "uv": False}}})
     for task in ("web", "bat"):
         before = len(rec.runs)
         if refused is None:

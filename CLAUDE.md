@@ -1649,7 +1649,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   passed `C:\data\in.txt` as `C:datain.txt`), `cwd` is a folder (not in a dry run),
   `backend = "pypy"` in `backend.supported` (only where its environment is used). `vscode.scan`
   renders a task whose deps do not parse. `uv = false` on Windows: a bare program is looked up
-  on the task's PATH with PATHEXT (`npm` -> `npm.cmd`), and a `.cmd`/`.bat` program runs
+  on the task's PATH with PATHEXT (`npm` -> `npm.cmd`; `tasks._on_windows_path`: never in the
+  current folder, the caller's, which shutil.which searched first, so an `npm.cmd` in the folder
+  `./pyt web` was typed in ran instead; a relative PATH entry is the task cwd's, as on POSIX),
+  and a `.cmd`/`.bat` program runs
   through cmd.exe, which re-parses the `list2cmdline` line: an argument it would change (`%`,
   `"`, a line break; `^ & | < >` when list2cmdline leaves it unquoted: no space, tab or empty
   value) is refused with exit 2 (`tasks._batch_problem`), never passed changed
@@ -5333,7 +5336,8 @@ Windows:
 - **CreateProcess tries only `<name>.exe` for a bare program name** (LIMITATION, PATHEXT is a
   shell feature): a `uv = false` task running `npm`, `yarn` or `mvn` (`.cmd` files) failed with
   "program not found" on Windows only. Fix: `tasks.run_task` looks the name up on the task's
-  PATH with PATHEXT, through the standard library's shutil.which; the `.cmd` it finds runs
+  PATH with PATHEXT (`tasks._on_windows_path`, not shutil.which, which on Windows searches the
+  current folder first: always on Python 3.11); the `.cmd` it finds runs
   through cmd.exe (the entry "cmd re-parses `%*`" below) (6.1). Test:
   `test_cli_core.py::test_a_bare_program_is_found_with_pathext_on_windows`. Goes: never.
 - **A command line holds 32767 characters** (LIMITATION): Fix: `hooks.ARG_LIMIT` batches file
