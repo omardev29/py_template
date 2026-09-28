@@ -1653,7 +1653,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   through cmd.exe, which re-parses the `list2cmdline` line: an argument it would change (`%`,
   `"`, a line break; `^ & | < >` when list2cmdline leaves it unquoted: no space, tab or empty
   value) is refused with exit 2 (`tasks._batch_problem`), never passed changed
-  (`npm install react@^18` installed react@18).
+  (`npm install react@^18` installed react@18), and so is a batch file whose own path holds one
+  (`C:\Users\R&D\...\eslint.cmd` ran as `C:\Users\R` and a second command:
+  `test_cli_core.test_a_batch_file_whose_path_cmd_would_change_is_refused`).
 - `[preset.<name>]`: option overrides (`config._check_preset_tables`): `<name>` must be a preset
   of this template, and each key and its value type must match that preset's `preset.toml`
   `[options]`, read with `tomllib` (no `presets` import); the script preset has none.

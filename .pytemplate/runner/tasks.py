@@ -210,14 +210,20 @@ def run_task(
         if found:
             argv[0] = os.path.abspath(found)
     if IS_WINDOWS and argv[0].lower().endswith((".cmd", ".bat")):
-        for arg in argv[1:]:
+        # Its own path too: list2cmdline quotes it only for a blank, and C:\Users\R&D\...\x.cmd
+        # reached cmd.exe as two commands.
+        for i, arg in enumerate(argv):
             char = _batch_problem(arg)
             if char is not None:
+                what, way_out = (
+                    (f"its path {arg!r}", "Move it to a folder whose path holds no such character (a path with a space is quoted, so ^ & | < > are literal there)")
+                    if i == 0
+                    else (f"the argument {arg!r}", "Pass it without that character (an argument with a space is quoted, so ^ & | < > are literal there)")
+                )
                 raise PytError(
                     f"task '{name}': {os.path.basename(argv[0])} is a batch file, which Windows runs through cmd.exe, "
-                    f"and cmd.exe would change the argument {arg!r} ({char!r}) before the program sees it. "
-                    "Pass it without that character (an argument with a space is quoted, so ^ & | < > are "
-                    "literal there), or run the program behind the batch file directly"
+                    f"and cmd.exe would change {what} ({char!r}) before the program sees it. "
+                    f"{way_out}, or run the program behind the batch file directly"
                 )
     return proc.run(argv, cwd=cwd, env=base, check=False).returncode
 

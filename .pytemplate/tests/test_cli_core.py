@@ -1410,6 +1410,27 @@ def test_a_batch_file_gets_only_arguments_cmd_passes_unchanged(
     assert rec.runs[-1][-1] == arg
 
 
+@pytest.mark.parametrize(("folder", "refused"), [("R&D", "&"), ("a^b", "^"), ("50%", "%"), ("R & D", None)])
+def test_a_batch_file_whose_path_cmd_would_change_is_refused(
+    rec: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, folder: str, refused: str | None
+) -> None:
+    """The batch file's own path reaches cmd.exe on the same line as its arguments, and
+    list2cmdline quotes it only for a blank: C:\\Users\\R&D\\AppData\\Roaming\\npm\\eslint.cmd ran
+    as `C:\\Users\\R` and a second command. Only the arguments were checked."""
+    monkeypatch.setattr(tasks, "IS_WINDOWS", True)
+    program = tmp_path / folder / "eslint.cmd"
+    cfg = make({"tasks": {"lint": {"cmd": [str(program), "src"], "uv": False}}})
+    if refused is None:
+        tasks.run_task(cfg, "lint", [], rec.dispatch)
+        assert rec.runs[-1] == [str(program), "src"]
+        return
+    before = len(rec.runs)
+    with pytest.raises(PytError) as e:
+        tasks.run_task(cfg, "lint", [], rec.dispatch)
+    assert e.value.code == 2 and len(rec.runs) == before  # nothing ran
+    assert f"its path {str(program)!r} ({refused!r})" in str(e.value) and "Move it to a folder" in str(e.value), str(e.value)
+
+
 def test_the_task_list_is_shown_with_quiet(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(ui, "QUIET", True)
     assert cli.cmd_tasks(make({"tasks": {"ci": {"deps": ["check all"]}, "gen": {"cmd": ["g"], "help": "Generate"}}}), []) == 0
