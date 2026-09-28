@@ -3252,9 +3252,17 @@ LazyVim wiring:
   on Windows. Adapter order (`dap.adapter`): `.venv` python with debugpy (dev group), the tools
   python, Mason's debugpy venv python, an ephemeral `uv run --no-project --with debugpy`
   adapter; `initialize_timeout_sec = 30` (a cold adapter can take more than the default 4 s).
-  The adapter's `options.env` clears `PYTHONHOME` and `PYTHONPATH` (empty, unset for CPython;
-  nvim-dap merges it over the environment): it runs a Python (`-m debugpy.adapter`) that a
-  caller's `PYTHONHOME` would kill before it answers, as for every tool the runner starts.
+  The adapter's `options.env` is `dap.adapter_env`: Neovim's whole environment as a list of
+  `K=V` strings, the adapter's own values over it, without `PYTHONHOME` and `PYTHONPATH` (it runs
+  a Python, `-m debugpy.adapter`, that a caller's `PYTHONHOME` would kill before it answers, as
+  for every tool the runner starts). nvim-dap hands `options.env` to `uv.spawn` unchanged, and
+  luv reads it as that list, which REPLACES the environment: the old map
+  `{PYTHONHOME = "", PYTHONPATH = ""}` was an empty list there, so the adapter and every program
+  it launched in its own console (debugpy's default `internalConsole`, neotest's debug runs) ran
+  with no variable at all, no PATH, HOME or DISPLAY
+  (`test_the_debug_adapter_gets_the_whole_environment_but_pythonhome`,
+  `test_a_real_debug_session_keeps_the_environment`: the pinned nvim-dap and nvim-dap-python with
+  `.venv`'s debugpy).
   debugpy is looked for by listing `lib/python3*` (`init.subdirs`, as the WinGet folders of the uv
   search), never with `vim.fn.glob`, and every path goes through `init.normalize`
   (`vim.fs.normalize` without its `$VAR` expansion): under a project folder named with `[ ]`,
@@ -5198,8 +5206,9 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   quote, so `C:\dev\R&D\...` reaches cmd.exe bare and is split at `&`). Fix:
   `integrations.mypy_linter` passes the whole environment plus `PYTHONUTF8=1`, minus
   `VIRTUAL_ENV`, `PYTHONHOME` and `PYTHONPATH` (proc.base_env drops the last two: a `PYTHONHOME`
-  kills mypy and the pattern parser then shows no diagnostic; the LSP servers and the debug
-  adapter clear them too, see `integrations.lsp` and `dap.setup` in 12.2), and on Windows the
+  kills mypy and the pattern parser then shows no diagnostic; the LSP servers clear them too,
+  and the debug adapter gets a whole copy without them, see `integrations.lsp` and
+  `dap.adapter_env` in 12.2), and on Windows the
   bare `mypy` with `.venv\Scripts` first on PATH plus the buffer's path and `--python-executable`
   as root-relative paths (the linter's `cwd = root`, `under_root`; the buffer's path is a function
   element of the `args` list, which nvim-lint's wrapper unpacks). Test:
@@ -5210,12 +5219,17 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   `test_the_windows_mypy_linter_runs_through_the_real_nvim_lint` (the pinned nvim-lint, where
   `selftest --nvim` left it). Goes: never.
 - **nvim-dap** (LIMITATION): it spawns adapters with a raw `uv.spawn` (no PATHEXT: Mason's
-  `.cmd` shim fails on Windows), waits 4 s for `initialize` (a cold adapter needs more), and
-  expands `${workspaceFolder}` to Neovim's cwd. Fix: `dap.adapter` (Lua) returns an absolute
-  python, `initialize_timeout_sec = 30` unless the configuration sets one, `dap.launch_configs`
-  for a cwd below the root (12.2). Test:
-  `test_workarounds.py::test_nvim_plugin_workarounds[dap]`, `[dap adapter]`, `[dap subfolder]`.
-  Goes: never.
+  `.cmd` shim fails on Windows) and hands it the adapter's `options.env` unchanged, which luv
+  reads as a list of `K=V` strings that REPLACES the environment (a map is an empty list: the
+  adapter and the programs it launched ran with no variable at all), waits 4 s for `initialize`
+  (a cold adapter needs more), and expands `${workspaceFolder}` to Neovim's cwd. Fix:
+  `dap.adapter` (Lua) returns an absolute python, `dap.adapter_env` gives the whole environment
+  as that list (without `PYTHONHOME` and `PYTHONPATH`), `initialize_timeout_sec = 30` unless the
+  configuration sets one, `dap.launch_configs` for a cwd below the root (12.2). Test:
+  `test_workarounds.py::test_nvim_plugin_workarounds[dap]`, `[dap adapter]`, `[dap subfolder]`,
+  `test_nvim_render.py::test_the_debug_adapter_gets_the_whole_environment_but_pythonhome`,
+  `test_a_real_debug_session_keeps_the_environment` (the pinned nvim-dap, where `selftest --nvim`
+  left it). Goes: never.
 - **neotest-python finds the interpreter by globbing `*/pyvenv.cfg`** (DEFECT): with `.venv` and
   `.venv-pypy` it built a broken path, and its `uv run` fallback syncs the project. Up: none
   found. Fix: `integrations.neotest` sets `python` and `discovery.filter_dir` (12.2). Test:

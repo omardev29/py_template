@@ -19,8 +19,9 @@ end
 -- kills a Python ("Failed to import encodings module"), a PYTHONPATH can shadow a stdlib module.
 -- The launchers and init.pyt_env keep them off the runner too. The plugin starts Python tools
 -- itself - mypy, the uvx basedpyright entry point, the debug adapter - so it clears them the same
--- way. Empty is unset for CPython (like init.pyt_env); an LSP `cmd_env` and a dap `options.env`
--- merge over the process environment, so "" clears them there.
+-- way. Empty is unset for CPython (like init.pyt_env); an LSP `cmd_env` merges over the process
+-- environment, so "" clears them there (nvim-lint's `env` and the debug adapter's `options.env`
+-- replace it instead: mypy_env and dap.adapter_env leave the two names out of a whole copy).
 local NO_PYTHON_HOME = { PYTHONHOME = "", PYTHONPATH = "" }
 
 ---A path inside the project as a root-relative native path. The mypy linter runs with cwd = root,

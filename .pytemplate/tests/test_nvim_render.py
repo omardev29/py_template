@@ -800,12 +800,19 @@ local opts = {}
 integ.lsp(nil, opts)
 local ce = opts.servers[pt.lsp_name()].cmd_env
 check("lsp cmd_env clears PYTHONHOME/PYTHONPATH", ce ~= nil and ce.PYTHONHOME == "" and ce.PYTHONPATH == "", vim.inspect(ce))
--- the debug adapter (`python -m debugpy.adapter`; nvim-dap merges options.env)
+-- the debug adapter (`python -m debugpy.adapter`): nvim-dap hands options.env to uv.spawn, which
+-- takes a list of "K=V" as the WHOLE environment, so the two names are left out of a full copy
 local captured
 require("pytemplate.dap").setup()
 require("dap").adapters.python(function(a) captured = a end, {})
 local ae = captured and captured.options and captured.options.env
-check("dap adapter clears PYTHONHOME/PYTHONPATH", ae ~= nil and ae.PYTHONHOME == "" and ae.PYTHONPATH == "", vim.inspect(captured))
+local names = {}
+for _, kv in ipairs(type(ae) == "table" and ae or {}) do
+  names[kv:match("^(=?[^=]+)=") or kv] = true
+end
+check("dap adapter env is a list of K=V", type(ae) == "table" and vim.islist(ae) and #ae > 0, vim.inspect(ae))
+check("dap adapter env drops PYTHONHOME/PYTHONPATH", not names.PYTHONHOME and not names.PYTHONPATH, vim.inspect(ae))
+check("dap adapter env keeps the rest", names.PT_KEEP_ME ~= nil, vim.inspect(ae))
 check("dap keeps the initialize timeout", captured and captured.options.initialize_timeout_sec == 30, vim.inspect(captured))
 io.stdout:write(#errors == 0 and "PTLUA OK\n" or ("PTLUA FAIL\n" .. table.concat(errors, "\n") .. "\n"))
 vim.cmd(#errors == 0 and "qa!" or "cq!")
@@ -819,9 +826,120 @@ def test_plugin_python_tools_drop_pythonhome_and_pythonpath(tmp_path: Path) -> N
     entry point (cmd_env) and the debug adapter (options.env). Else mypy diagnostics silently
     vanish and no Python language server starts, while ./pyt check in the same shell works."""
     project = _project(tmp_path, profile="warn", mypy=True)
-    env_extra = {"PYTHONHOME": str(tmp_path / "home"), "PYTHONPATH": str(tmp_path / "path")}
+    env_extra = {"PYTHONHOME": str(tmp_path / "home"), "PYTHONPATH": str(tmp_path / "path"), "PT_KEEP_ME": "1"}
     r = _headless_lua(tmp_path, PYTHON_ENV_CHECK, project, env_extra)
     assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
+# The adapter's options.env through uv.spawn, as nvim-dap's session.lua spawns an executable
+# adapter (spawn_opts.env = options.env): the program sees exactly that environment.
+DAP_SPAWN_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+package.loaded["dap-python"] = { setup = function() end }
+package.loaded["dap"] = { adapters = { python = function(cb)
+  cb({ type = "executable", command = "python", args = { "-m", "debugpy.adapter" } })
+end } }
+local pt = require("pytemplate")
+pt.config.root = vim.env.PT_TEST_ROOT
+require("pytemplate.dap").setup()
+local adapter
+require("dap").adapters.python(function(a) adapter = a end, { type = "python", request = "launch" })
+local chunks, code = {}, nil
+local stdout = assert(vim.uv.new_pipe(false))
+local handle = vim.uv.spawn(vim.env.PT_PYTHON, {
+  args = { "-c", "import json, os; print(json.dumps(dict(os.environ)))" },
+  stdio = { nil, stdout, nil },
+  env = adapter.options.env,
+  hide = true,
+}, function(c) code = c end)
+if handle then
+  stdout:read_start(function(_, data) if data then chunks[#chunks + 1] = data end end)
+  vim.wait(60000, function() return code ~= nil end, 20)
+  vim.wait(500)
+end
+io.stdout:write("PTSPAWN" .. vim.json.encode({ code = code or -1, out = table.concat(chunks) }) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def test_the_debug_adapter_gets_the_whole_environment_but_pythonhome(tmp_path: Path) -> None:
+    """nvim-dap hands the adapter's options.env to uv.spawn, which takes a LIST of "K=V" as the
+    whole environment: the map {PYTHONHOME = "", PYTHONPATH = ""} was an empty list there, and the
+    adapter, with every program it launched in its own console (debugpy's internalConsole,
+    neotest's debug runs), ran without PATH, HOME, LANG or DISPLAY. A caller's PYTHONHOME must
+    still never reach it (it kills the adapter's Python before it answers)."""
+    project = _project(tmp_path)
+    env_extra = {"PYTHONHOME": str(tmp_path / "nowhere"), "PYTHONPATH": str(tmp_path / "path"), "PT_KEEP_ME": "kept"}
+    r = _headless_lua(tmp_path, DAP_SPAWN_CHECK, project, {**env_extra, "PT_PYTHON": sys.executable})
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTSPAWN")), None)
+    assert line is not None, r.stdout + r.stderr
+    got = json.loads(line[len("PTSPAWN") :])
+    assert got["code"] == 0 and got["out"].strip(), (got, r.stderr)  # a PYTHONHOME: no Python at all
+    seen = json.loads(got["out"])
+    names = {k.upper() for k in seen} if sys.platform == "win32" else set(seen)
+    assert seen.get("PT_KEEP_ME") == "kept" and "PATH" in names, sorted(seen)
+    assert "PYTHONHOME" not in names and "PYTHONPATH" not in names, sorted(seen)
+
+
+def _venv_has_debugpy(root: Path) -> bool:
+    venv = root / ".venv"
+    libs = [venv / "Lib"] if sys.platform == "win32" else sorted((venv / "lib").glob("python3*"))
+    return any((lib / "site-packages" / "debugpy" / "__init__.py").is_file() for lib in libs)
+
+
+# A real session through the pinned nvim-dap and nvim-dap-python, with the plugin's adapter: the
+# debuggee (a program that writes its environment) runs in debugpy's internalConsole, the console
+# of neotest's debug runs and of every configuration that names none.
+REAL_DAP_ENV_CHECK = r"""
+vim.g.loaded_python3_provider = 0
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+vim.opt.rtp:prepend(vim.env.PT_NVIM_DAP)
+vim.opt.rtp:prepend(vim.env.PT_NVIM_DAP_PYTHON)
+local pt = require("pytemplate")
+pt.config.root = vim.env.PT_TEST_ROOT
+require("pytemplate.dap").setup()
+local dap = require("dap")
+local out = vim.env.PT_OUT
+dap.run({
+  type = "python", request = "launch", name = "environment", program = vim.env.PT_PROG,
+  args = { out }, console = "internalConsole", justMyCode = false,
+})
+local ok = vim.wait(90000, function() return vim.uv.fs_stat(out) ~= nil end, 100)
+pcall(dap.terminate)
+vim.wait(1000, function() return dap.session() == nil end, 50)
+io.stdout:write("PTDAP" .. vim.json.encode({ ok = ok }) .. "\n")
+vim.cmd("qa!")
+"""
+
+ENV_DUMP = """\
+import json, os, sys
+tmp = sys.argv[1] + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(dict(os.environ), f)
+os.replace(tmp, sys.argv[1])
+"""
+
+
+def test_a_real_debug_session_keeps_the_environment(tmp_path: Path) -> None:
+    """The same through the pinned nvim-dap and nvim-dap-python themselves: a program debugged in
+    debugpy's internalConsole ran with only DEBUGPY_* and LC_CTYPE (5 variables), not Neovim's
+    environment. Skipped without their checkouts (./pyt selftest --nvim makes them) or debugpy."""
+    plugins = _pinned_plugins("nvim-dap", "nvim-dap-python")
+    if plugins is None:
+        pytest.skip("no checkout of the pinned nvim-dap and nvim-dap-python (./pyt selftest --nvim installs them)")
+    if not _venv_has_debugpy(ROOT):
+        pytest.skip("no debugpy in .venv (./pyt sync)")
+    prog, out = tmp_path / "prog.py", tmp_path / "env.json"
+    prog.write_text(ENV_DUMP, encoding="utf-8")
+    extra = {
+        "PT_NVIM_DAP": plugins["nvim-dap"].as_posix(), "PT_NVIM_DAP_PYTHON": plugins["nvim-dap-python"].as_posix(),
+        "PT_PROG": prog.as_posix(), "PT_OUT": out.as_posix(), "PT_KEEP_ME": "kept", "PYTHONHOME": str(tmp_path / "nowhere"),
+    }  # fmt: skip
+    r = _headless_lua(tmp_path, REAL_DAP_ENV_CHECK, ROOT, extra)
+    assert out.is_file(), r.stdout + r.stderr
+    seen = json.loads(out.read_text(encoding="utf-8"))
+    assert seen.get("PT_KEEP_ME") == "kept" and "PATH" in {k.upper() for k in seen}, sorted(seen)
+    assert "PYTHONHOME" not in seen, sorted(seen)
 
 
 WIN_MYPY_CHECK = r"""

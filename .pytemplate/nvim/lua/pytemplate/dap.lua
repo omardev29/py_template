@@ -41,6 +41,47 @@ function M.adapter()
   return nil, "none"
 end
 
+---The debug adapter's environment as uv.spawn takes it. nvim-dap hands the adapter's
+---options.env to uv.spawn unchanged, and luv reads it as a LIST of "K=V" strings that REPLACES
+---the process environment: a map is an empty list there, so the adapter, and every program it
+---launched in its own console (debugpy's internalConsole, neotest's debug runs), ran with no
+---variable at all (no PATH, HOME, LANG or DISPLAY). So: Neovim's whole environment plus `extra`
+---(a map, or a list of "K=V"), without PYTHONHOME and PYTHONPATH: a caller's PYTHONHOME kills the
+---adapter's Python before it answers, a PYTHONPATH can shadow a stdlib module, as for every tool
+---the runner starts (proc.base_env). Names compare case-insensitively on Windows.
+function M.adapter_env(extra)
+  local function key(name)
+    return pt.is_win and name:upper() or name
+  end
+  local env = vim.fn.environ()
+  local function put(name, value)
+    for have in pairs(env) do
+      if have ~= name and key(have) == key(name) then
+        env[have] = nil -- the same variable in another case (Windows)
+      end
+    end
+    env[name] = value
+  end
+  for name, value in pairs(type(extra) == "table" and extra or {}) do
+    if type(name) == "number" then -- already "K=V" (a name may start with "=" on Windows)
+      local k, v = tostring(value):match("^(=?[^=]+)=(.*)$")
+      if k then
+        put(k, v)
+      end
+    elseif value ~= nil then
+      put(name, tostring(value))
+    end
+  end
+  local out = {}
+  for name, value in pairs(env) do
+    if key(name) ~= "PYTHONHOME" and key(name) ~= "PYTHONPATH" then
+      out[#out + 1] = name .. "=" .. value
+    end
+  end
+  table.sort(out)
+  return out
+end
+
 ---The argv an adapter would run (used by :checkhealth and the smoke test).
 function M.adapter_cmd()
   local py, source = M.adapter()
@@ -79,10 +120,9 @@ function M.setup()
         if options.initialize_timeout_sec == nil then
           options.initialize_timeout_sec = 30
         end
-        -- the adapter runs a Python (`-m debugpy.adapter`): a caller's PYTHONHOME kills it before
-        -- it answers, a PYTHONPATH can shadow a stdlib module, as for every tool the runner starts
-        -- (proc.base_env). nvim-dap merges options.env over the environment; "" is unset for CPython.
-        options.env = vim.tbl_extend("force", options.env or {}, { PYTHONHOME = "", PYTHONPATH = "" })
+        -- the adapter runs a Python (`-m debugpy.adapter`) without PYTHONHOME and PYTHONPATH, in
+        -- a list that uv.spawn takes as the whole environment (M.adapter_env)
+        options.env = M.adapter_env(options.env)
         adapter.options = options
       end
       cb(adapter)
