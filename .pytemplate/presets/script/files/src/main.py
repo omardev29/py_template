@@ -8,9 +8,9 @@ import sys
 
 
 def _main() -> int:
-    from {{pkg}}.app import main
+    import {{pkg}}.app as app
 
-    return main()
+    return app.main()
 
 
 if __name__ == "__main__":

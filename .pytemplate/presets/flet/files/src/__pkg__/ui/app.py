@@ -22,8 +22,8 @@ from concurrent.futures import ProcessPoolExecutor
 
 import flet as ft
 
-from {{pkg}}.core import fractal
-from {{pkg}}.resources import assets_dir
+from ..core import fractal
+from ..resources import assets_dir
 
 WIDTH = 640
 HEIGHT = 400
@@ -60,7 +60,7 @@ def _backend() -> str:
 
 
 async def main(page: ft.Page) -> None:
-    page.title = "{{name}}"
+    page.title = "{{name}}"  # fmt: skip
     page.theme_mode = ft.ThemeMode.DARK
 
     iterations = ft.Slider(

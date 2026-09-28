@@ -1,4 +1,4 @@
-from myapp.core import bench
+import myapp.core.bench as bench
 
 
 def test_count_primes() -> None:

@@ -2780,12 +2780,22 @@ Per method:
   and a wrong type (`PRESET_KEYS`): `render.managed_block` reads it on every run.
 - `files/`: complete skeleton, including a full `pytemplate.toml` (`__init` overwrites the root
   one), `src/main.py`, `src/__pkg__/core/` (compiled) + a boundary, `tests/conftest.py`
-  (identical in every preset), optional `typings/` and tools. It must be ruff-clean: the
-  pre-commit hook of a fresh project runs `ruff format --check` and ruff on it
-  (`test_presets.py` renders every preset with three names under every profile, py311 and
-  py314 targets). No calendar year anywhere in a preset (it goes stale in later projects).
+  (identical in every preset), optional `typings/` and tools. It must be ruff-clean for any
+  name: the pre-commit hook of a fresh project runs `ruff format --check` and ruff on it
+  (`test_presets.py` renders every preset with four names, `LONG_NAME` longer than a line,
+  under every profile, py311 and py314 targets, and every length of name up to 104 under the
+  strict profile: `test_the_rendered_skeleton_is_formatted_whatever_the_length_of_the_name`).
+  An app name has no length limit and ruff (100 columns) re-wraps a line that holds a long one
+  (a project named with 59 characters or more could not make its first commit), so every line
+  of code that holds the name keeps its shape at any length: imports inside the package are
+  relative (`from .core import bench`), outside it (`src/main.py`, `tests/`)
+  `import <pkg>.x as x` (an import statement has no form to wrap into), and a string holding
+  the name sits in a call exploded with a magic trailing comma (the script's `Table`, raylib's
+  `InitWindow` and `ArgumentParser`) or, with no call at hand, carries `# fmt: skip` (flet's
+  `page.title`); docstrings and comments are never re-wrapped. No calendar year anywhere in a
+  preset (it goes stale in later projects).
 - Four templating syntaxes coexist: `__pkg__` in paths and `{{name}}`/`{{pkg}}` in text (plain
-  `.replace`; `f"{{name}}: ..."` in `script/app.py` renders to the app name on purpose);
+  `.replace`; `title=f"{{name}}: ..."` in `script/app.py` renders to the app name on purpose);
   `{option}` in `preset.toml` deps and `[uv]` (`str.format_map`); `__HEADER__`-style in
   `ci.yml`; `{root}`-style in `[tasks]` (`format_map`, double literal braces).
 - A skeleton file is text (token replacement, LF) only if its suffix is in

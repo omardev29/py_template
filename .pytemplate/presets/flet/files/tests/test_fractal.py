@@ -1,6 +1,6 @@
 import struct
 
-from {{pkg}}.core import fractal
+import {{pkg}}.core.fractal as fractal
 
 
 def test_escape_time() -> None:

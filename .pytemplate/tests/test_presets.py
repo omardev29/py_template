@@ -47,7 +47,9 @@ TEMPLATE_REPO = (ROOT / ".pytemplate" / "template-repo").is_file()
 template_repo = pytest.mark.skipif(not TEMPLATE_REPO, reason="an invariant of the template repository itself")
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 PRESETS = presets.available()
-NAMES = ["myapp", "My-Game_2", "e2e-raylib"]
+# An app name has no length limit: the last one is longer than a line of ruff's (100 columns)
+LONG_NAME = "Customer-Feedback-Analysis-Dashboard-For-The-Quarterly-Reports-Of-Every-Sales-Region-And-Every-Team_2"
+NAMES = ["myapp", "My-Game_2", "e2e-raylib", LONG_NAME]
 TOKEN = re.compile(r"\{\{\w*\}\}|__pkg__")
 # Non-ASCII folder names, written with escapes so this file stays ASCII
 CAFE = "caf\N{LATIN SMALL LETTER E WITH ACUTE}"
@@ -285,8 +287,8 @@ def test_rendered_skeleton_passes_the_precommit_ruff_checks(preset: str, tmp_pat
     """The pre-commit hook runs `ruff format --check` and ruff with the active profile on the
     staged files: a fresh project must be able to make its first commit (and pass `check`)."""
     failures: list[str] = []
-    for name in NAMES:
-        root = tmp_path / name
+    for i, name in enumerate(NAMES):
+        root = tmp_path / str(i)  # not the name: LONG_NAME twice made a path past Windows' MAX_PATH
         _write(root, presets.skeleton(preset, name))
         data = tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8"))
         variants = {"shipped": data}
@@ -306,6 +308,36 @@ def test_rendered_skeleton_passes_the_precommit_ruff_checks(preset: str, tmp_pat
                     r = subprocess.run([sys.executable, "-m", "ruff", *args], cwd=root, capture_output=True, text=True, timeout=120, check=False)
                     if r.returncode != 0:
                         failures.append(f"[{name} {label} {profile}] ruff {args[0]}:\n{r.stdout}{r.stderr}")
+    assert not failures, "\n\n".join(failures)
+
+
+def _name_of_length(n: int) -> str:
+    """A valid app name of exactly n characters: hyphens inside, a letter or digit last."""
+    text = ("customer-feedback-analysis-dashboard-for-the-quarterly-reports-" * 2)[:n]
+    return text if text[-1].isalnum() else text[:-1] + "s"
+
+
+@pytest.mark.skipif(importlib.util.find_spec("ruff") is None, reason="ruff is not installed here")
+@pytest.mark.parametrize("preset", PRESETS)
+def test_the_rendered_skeleton_is_formatted_whatever_the_length_of_the_name(preset: str, tmp_path: Path) -> None:
+    """An app name has no length limit, and ruff (100 columns) re-wraps a line that holds a long
+    one: from 59 characters on, the first commit of a new project was refused by the hook (ruff
+    format --check, and I001 for the imports), until `./pyt fmt`. Every length up to past a whole
+    line, each skeleton with its own ruff.toml (the strict profile: isort's rules too)."""
+    for n in range(1, 105):
+        name = _name_of_length(n)
+        assert len(name) == n and config.APP_NAME.fullmatch(name), name
+        root = tmp_path / str(n)
+        _write(root, presets.skeleton(preset, name))
+        cfg = _config(tomllib.loads((root / "pytemplate.toml").read_text(encoding="utf-8")))
+        (root / "ruff.toml").write_text(render.to_toml(render.ruff_config(cfg, "strict")), encoding="utf-8")
+    code_dirs = [f"{n}/{d}" for n in range(1, 105) for d in ("src", "tests")]
+    failures: list[str] = []
+    for args in (["format", "--check", "--no-cache"], ["check", "--no-cache", "--output-format", "concise"]):
+        r = subprocess.run([sys.executable, "-m", "ruff", *args, *code_dirs], cwd=tmp_path, capture_output=True, text=True, timeout=300, check=False)
+        if r.returncode != 0:
+            lengths = sorted({int(m) for m in re.findall(r"(?<![\w.-])(\d+)[/\\](?:src|tests)[/\\]", r.stdout + r.stderr)})
+            failures.append(f"ruff {args[0]} fails for the names of {lengths} characters:\n{(r.stdout + r.stderr)[-4000:]}")
     assert not failures, "\n\n".join(failures)
 
 

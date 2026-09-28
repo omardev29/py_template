@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, cast
 import raylib as rl
 from raylib import ffi
 
-from {{pkg}}.resources import asset
+from .resources import asset
 
 if TYPE_CHECKING:
     from raylib import Color, Texture
