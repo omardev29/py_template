@@ -2101,6 +2101,16 @@ Formats:
   `flet build`); modules no longer compiled; shared libs this build does not use (`<group>__mypyc`,
   or one `<module>__mypyc` per module with `compile.separate = true`, which were deleted on every
   build). A non-output file mirrored from `src/` is left alone.
+- Windows deletes no DLL a process has loaded (the app still running from the stage: `./pyt run
+  mypyc` in another terminal, a debug session), only renames it, and setuptools' `build_ext
+  --inplace` deletes each extension of the stage before it copies the new one in: every build
+  that changed one failed there, with the compiler-install hint. So `set_aside` moves an
+  extension that leaves the stage (a stale one, and before the build script runs each mypyc output
+  of the stage) into `<profile dir>/old-extensions` (`SET_ASIDE`; `_empty_set_aside` empties it,
+  best effort, at the next build); one it cannot move is a PytError asking whether the app still
+  runs, and so is setuptools' own "could not delete" (never the hint)
+  (`test_build_on_windows_sets_the_extensions_the_app_holds_aside`,
+  `test_build_says_a_file_of_the_stage_is_in_use`).
 - `group_name = pkg` gives a stable shared lib `<pkg>__mypyc.<tag>.pyd`; `hidden_imports` and
   `remove_stale_extensions` depend on that name. `compile.separate = true` -> `group_name=None`.
 - Forced rebuilds: setuptools rebuilds an extension only when a source is newer, and an option
@@ -5489,10 +5499,13 @@ Windows:
   folder gone, a runner traceback; for nuitka after minutes of work). Fix:
   `common.remove_output` moves the old output aside first (whole or not at all: portable's
   folder with its archives, those already moved come back) before the packager runs and turns
-  the error into a clear one (exit 1, 10). Test:
+  the error into a clear one (exit 1, 10). The same for the mypyc stage an app still runs from,
+  whose extensions setuptools deletes before it copies new ones in (a failed build with the
+  compiler hint): `mypyc.set_aside` renames them out of the stage first (9). Test:
   `test_build_methods.py::test_an_output_in_use_is_a_clear_error_before_the_packager_runs`,
   `test_a_previous_output_in_use_is_left_whole`,
-  `test_a_previous_portable_output_in_use_is_left_whole_with_its_archives`. Goes: never.
+  `test_a_previous_portable_output_in_use_is_left_whole_with_its_archives`,
+  `test_mypyc_core.py::test_build_on_windows_sets_the_extensions_the_app_holds_aside`. Goes: never.
 - **The classic console needs ANSI turned on** (LIMITATION): and the `os.system("")` trick
   started a cmd.exe on every run. Fix: `ui.enable_vt_mode` (`SetConsoleMode`, 5.3). Test:
   `test_paths.py::test_ui_never_spawns_cmd_for_colors`,

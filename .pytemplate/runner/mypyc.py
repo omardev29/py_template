@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import stat
+import uuid
 from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +50,11 @@ COMPILER_ENV = ("CC", "CFLAGS", "CPPFLAGS", "LDSHARED", "LDFLAGS", "ARCHFLAGS", 
 # ABI tag at the start of an extension suffix: cpython-314-x86_64-linux-gnu.so,
 # cpython-314-darwin.so, cp314-win_amd64.pyd (a trailing "t" = free-threaded build)
 _ABI_RE = re.compile(r"(?:cpython-|cp)(\d)(\d+)(t?)(?=[-.])")
+# Windows: the folder next to a stage where its extensions go when they leave it (a stale one,
+# one the build replaces). Windows deletes no DLL a process has loaded (the app still running
+# from the stage, a debug session) but renames it on the same volume; every build empties it,
+# best effort (what is still loaded stays for the next one)
+SET_ASIDE = "old-extensions"
 
 
 @dataclass(frozen=True)
@@ -312,10 +318,37 @@ def remove_stale_extensions(
             continue
         if _other_python(ext, python):
             ui.detail(f"  - {rel(ext)} (built for another Python)")
-            ext.unlink()
         elif _ext_module(ext, stage) not in wanted:
             ui.detail(f"  - {rel(ext)} (no longer compiled)")
-            ext.unlink()
+        else:
+            continue
+        try:
+            set_aside(ext, stage)
+        except OSError as e:
+            raise PytError(f"cannot remove {rel(ext)}: {e.strerror or e}. {_STILL_RUNNING.format(stage=rel(stage))}") from None
+
+
+_STILL_RUNNING = "Is the app still running from {stage} (./pyt run mypyc, a debug session)? Close it and try again"
+
+
+def set_aside(ext: Path, stage: Path) -> None:
+    """Take an extension out of the stage: deleted, or on Windows moved into SET_ASIDE next to the
+    stage, since a DLL a process has loaded cannot be deleted there, only renamed."""
+    if not IS_WINDOWS:
+        ext.unlink()
+        return
+    folder = stage.parent / SET_ASIDE
+    folder.mkdir(exist_ok=True)
+    os.replace(ext, folder / f"{uuid.uuid4().hex}-{ext.name}")
+
+
+def _empty_set_aside(stage: Path) -> None:
+    """Delete what earlier builds set aside, best effort: a file still loaded stays."""
+    folder = stage.parent / SET_ASIDE
+    with contextlib.suppress(OSError):
+        for path in folder.iterdir():
+            with contextlib.suppress(OSError):
+                path.unlink()
 
 
 def _read_json(path: Path) -> object:
@@ -341,6 +374,7 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
     group = group_name(cfg)
 
     ui.step(f"mypyc ({prof.name}): {', '.join(modules)}")
+    _empty_set_aside(prof.stage)
     # Before the sync: a folder emptied here is then removed by sync_tree
     remove_stale_extensions(prof.stage, modules, group, python=cfg.python.cpython, separate=cfg.compile.separate)
     changed = sync_tree(SRC, prof.stage, owned=modules)
@@ -384,6 +418,14 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
         annotate.parent.mkdir(parents=True, exist_ok=True)
     if compile_c and not proc.DRY_RUN:
         stamp.unlink(missing_ok=True)
+        if IS_WINDOWS:
+            # setuptools' build_ext --inplace deletes the extension in the stage before it copies a
+            # new one in: while the app still ran from the stage (Windows deletes no loaded DLL)
+            # every build that changed it failed, with the compiler-install hint
+            for ext in extension_files(prof.stage):
+                if _mypyc_output(ext, prof.stage, modules):
+                    with contextlib.suppress(OSError):  # left in place: setuptools then says why
+                        set_aside(ext, prof.stage)
     if spec["force"] and not proc.DRY_RUN:
         # mypyc reuses the IR of its cache (compile.separate: incremental) and the C files of the
         # last run for a module whose source did not change: strip_asserts and
@@ -412,6 +454,9 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
             hint = has_compiler_hint(_venv_platform(tool))
             raise PytError(f"mypyc failed: the C compiler cannot start (above)\n{hint}", 3)
         if result.returncode == C_BUILD_FAILED:
+            if "could not delete '" in output:  # setuptools: an extension it replaces is in use (Windows)
+                still = _STILL_RUNNING.format(stage=rel(prof.stage))
+                raise PytError(f"mypyc failed (exit code 1): a file of the stage is in use (above). {still}", 1)
             raise PytError(f"mypyc failed (exit code 1)\n{has_compiler_hint(_venv_platform(tool))}", 1)
         # uv, or Python before the script ran (a stale uv.lock: uv's error is above)
         raise PytError(f"mypyc failed (exit code {result.returncode}): see the error above", result.returncode)

@@ -1432,6 +1432,59 @@ def test_build_leaves_a_vendored_native_file_alone(
     assert not (stage / "myapp" / "native" / "libfoo.so").exists()
 
 
+def test_build_on_windows_sets_the_extensions_the_app_holds_aside(fake_build: FakeCompiler, src_tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows deletes no DLL a process has loaded, but renames it: setuptools' build_ext
+    # --inplace deletes each extension of the stage before it copies the new one in, so while
+    # the app still ran from the stage (./pyt run mypyc in another terminal, a debug session)
+    # every build that changed it failed, with the compiler-install hint
+    monkeypatch.setattr(mypyc, "IS_WINDOWS", True)
+    cfg = make({})
+    stage = mypyc.profile(cfg, "dev").stage
+    mypyc.build(cfg, "dev")
+    loaded = set(mypyc.extension_files(stage))  # the running app has them mapped
+    vendored = src_tree / "myapp" / "native" / ("_v" + LINUX_EXT)  # app content, never set aside
+    vendored.parent.mkdir()
+    vendored.write_bytes(b"v")
+    real_run = fake_build.run
+
+    def setuptools_like(argv: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        still = sorted(p for p in loaded if p.exists())
+        if still:  # where setuptools must first delete the old file: Access is denied
+            return _done([str(a) for a in argv], mypyc.C_BUILD_FAILED, "", f"error: could not delete '{still[0]}': Access is denied\n")
+        return real_run(argv, **kw)
+
+    monkeypatch.setattr(mypyc.proc, "run", setuptools_like)
+    mypyc.build(cfg, "dev")  # it failed: "could not delete ...", and the compiler-install hint
+    assert sorted(mypyc.extension_files(stage)) == sorted([*loaded, stage / "myapp" / "native" / ("_v" + LINUX_EXT)])
+    aside = stage.parent / mypyc.SET_ASIDE
+    assert len(list(aside.iterdir())) == len(loaded)  # the old ones, still loaded: deleted later
+    # a module no longer compiled: its loaded extension leaves the stage the same way
+    (src_tree / "myapp" / "core" / "n.py").write_text("Y = 2\n", encoding="utf-8")
+    monkeypatch.setattr(mypyc.proc, "run", real_run)
+    mypyc.build(cfg, "dev")
+    gone = stage / "myapp" / "core" / ("n" + LINUX_EXT)
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == gone:
+            raise PermissionError(13, "Access is denied", str(self))
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    (src_tree / "myapp" / "core" / "n.py").unlink()
+    mypyc.build(cfg, "dev")
+    assert not gone.exists() and any(p.name.endswith("-n" + LINUX_EXT) for p in aside.iterdir())
+
+
+def test_build_says_a_file_of_the_stage_is_in_use(fake_build: FakeCompiler) -> None:
+    # What setuptools still could not replace: never the compiler-install hint
+    fake_build.code, fake_build.stderr = mypyc.C_BUILD_FAILED, "error: could not delete 'stage\\myapp\\core\\m.cp314-win_amd64.pyd': Access is denied\n"
+    with pytest.raises(PytError) as err:
+        mypyc.build(make({}), "dev")
+    assert "a file of the stage is in use" in str(err.value) and "still running" in str(err.value)
+    assert mypyc.has_compiler_hint() not in str(err.value) and err.value.code == 1
+
+
 def test_build_with_separate_keeps_the_per_module_libs(fake_build: FakeCompiler) -> None:
     """compile.separate = true: <module>__mypyc libs are wanted (they were deleted on every build)."""
     cfg = make({"compile": {"separate": True}})
