@@ -1145,12 +1145,22 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   pytemplate.toml, an old runner without `hooks run`) also prints `git commit --no-verify` and
   `./pyt hooks uninstall`. `shellcheck -s sh`-clean (tested when installed). Any change to
   `hooks.hook_script` makes installed hooks "outdated": apply/setup rewrite them.
-- Never overwritten: a hook without the marker, or any symlink (writing through a dangling
-  link created a file in the work tree). `install --force` renames it to `pre-commit.local` (a
+- Never overwritten: a hook `hooks.hook_script` did not write, or any symlink (writing through a
+  dangling link created a file in the work tree). pytemplate's hook is one that starts with the
+  `#!/bin/sh` line and `hooks.HEADER` (`./deploy hooks install` in it before the launchers were
+  renamed) and holds a `_pt_launcher=` line `launcher_of` reads (`hooks.is_ours`), never a file
+  that only names MARKER: a hook of the user's that calls the checks names the tool in a comment
+  ("the pytemplate pre-commit hook runs last"), and it was taken for this project's outdated
+  hook, which setup and apply replaced and uninstall deleted, no copy kept
+  (`test_hooks.test_a_users_hook_that_names_pytemplates_hook_is_never_taken_for_it`,
+  `test_every_hook_an_earlier_version_wrote_is_still_pytemplates`). `install --force` renames it to `pre-commit.local` (a
   link moves as a link; a dangling `.local` counts as existing) and ours runs it first, a shell
   script (`hooks.SHELLS`, its `#!` line read by `hooks.CHAIN_LINES`, flags kept) sourced with
   `$0` = `<hooks>/pre-commit`: husky v4 and yorkie pick their job from `basename "$0"` and find
-  their helpers next to it, and run as `pre-commit.local` they checked nothing. One without a
+  their helpers next to it, and run as `pre-commit.local` they checked nothing (a kept
+  pytemplate hook is executed instead, told apart by the same two lines as `is_ours` reads,
+  `hooks._OURS_GREP`: by MARKER alone a husky hook whose comment named pytemplate's hook ran as
+  `pre-commit.local`, `test_a_kept_hook_that_names_pytemplates_hook_is_still_run_as_pre_commit`). One without a
   `#!` line is sourced only when it is text: a compiled hook (a NUL byte in its first 64 bytes,
   read with `od`; `hooks.interpreter` gives `""`, and `reads_its_name` is false for it) is
   executed, as git executes it (sourced, every commit failed with a shell syntax error:

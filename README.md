@@ -1547,7 +1547,8 @@ only deletes files is checked too).
 
 - Skip it once: `git commit --no-verify`. Remove it: `./pyt hooks uninstall`, and set
   `pre_commit = false` (then `./pyt apply` removes it too). Its state: `./pyt hooks`.
-- An existing hook of yours (or a symlink) is never overwritten: `./pyt hooks install --force`
+- An existing hook of yours (or a symlink) is never overwritten, even one whose comments name
+  pytemplate's hook (only the file `./pyt hooks install` writes is pytemplate's): `./pyt hooks install --force`
   keeps it as `pre-commit.local` and runs it first (a shell script still sees its own name,
   `pre-commit`, as husky v4 and yorkie need; a compiled one runs as git ran it; one without its
   x bit runs no more than git ran it: `chmod +x` it); `uninstall` puts it back. A hook in another

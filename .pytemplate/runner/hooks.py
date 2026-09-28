@@ -11,7 +11,8 @@ found from a GUI client, a broken pytemplate.toml, a runner without `hooks run`)
 says so and how to commit anyway. `./pyt setup` installs the hook when `hooks.pre_commit`
 is true in pytemplate.toml (the default).
 
-- A pre-commit hook that is not pytemplate's (no MARKER), or a symlink, is never overwritten:
+- A pre-commit hook that is not pytemplate's (not what hook_script writes, is_ours: a comment
+  that names pytemplate's hook does not make it so), or a symlink, is never overwritten:
   `install` fails, `install --force` keeps it as `pre-commit.local` and the new hook runs it
   first; `uninstall` removes only pytemplate's hook and puts the old one back.
 - Another pytemplate project of the same repository (a monorepo with apps/p and apps/q) is
@@ -88,6 +89,12 @@ Check = Callable[[bool | None, str, str], None]
 HOOK = "pre-commit"
 LOCAL = "pre-commit.local"  # a foreign hook moved aside by `install --force`; ours runs it first
 MARKER = "pytemplate pre-commit hook"
+# The second line of every hook hook_script has written (`./deploy hooks install` before the
+# launchers were renamed). With the `#!/bin/sh` line before it and a `_pt_launcher=` line
+# launcher_of reads, it makes a hook pytemplate's (is_ours): the phrase alone does not, since a
+# hook of the user's that calls the checks names the tool in a comment.
+HEADER = f"# {MARKER}: written by ./pyt hooks install (it rewrites this file: do not edit)"
+_OURS = re.compile(rf"#!/bin/sh\n# {MARKER}: written by \./(?:pyt|deploy) hooks install \(it rewrites this file: do not edit\)\n")
 LAUNCHERS = ("pyt", "pyt.cmd", "pyt.ps1")
 PY_SUFFIXES = (".py", ".pyi")
 USAGE = "install [--force] | uninstall | run | status"
@@ -332,13 +339,27 @@ def launcher_of(text: str) -> str | None:
         return None
 
 
+def is_ours(text: str) -> bool:
+    """Whether a hook's text (LF, as _read gives it) is one hook_script wrote, this version's or an
+    earlier one's: its first two lines and a `_pt_launcher=` line launcher_of reads. A file that
+    only held MARKER (a hook of the user's whose comment names pytemplate's hook) was taken for
+    this project's outdated hook: setup and apply replaced it and uninstall deleted it, no copy
+    kept, and the checks it ran besides ours (a secrets scan) were gone."""
+    return _OURS.match(text) is not None and launcher_of(text) is not None
+
+
 # The shells a kept hook is sourced by, with $0 = <hooks>/pre-commit: a hook that picks its job
 # from its own name (husky v4, yorkie: `basename "$0"`) or finds its helpers next to it ran as
 # pre-commit.local and silently checked nothing. zsh is left out: it sets $0 to a sourced file.
 # A kept hook without a #! line is a shell script when it is text (git runs it with sh), and a
 # compiled program when its first 64 bytes hold a NUL byte (ELF, Mach-O, PE: git executes it):
 # that one is executed too, never sourced (every commit failed with a shell syntax error).
+# A kept pytemplate hook (another project's, chained by --force) is executed as well: it must run
+# as pre-commit.local, which never chains itself. It is told from the others by what is_ours
+# reads, as grep patterns (the header line; a `_pt_launcher=` line), never by MARKER alone: a
+# husky v4 hook whose comment named pytemplate's hook ran as pre-commit.local and checked nothing.
 SHELLS = ("sh", "bash", "dash", "ash", "ksh", "mksh", "yash")
+_OURS_GREP = "'^" + HEADER.replace("./pyt", "\\./[a-z]*") + "$'"
 CHAIN_LINES = (
     f'    _pt_local="$_pt_dir/{LOCAL}"',
     "    _pt_line=",
@@ -356,7 +377,7 @@ CHAIN_LINES = (
     '        _pt_args=${_pt_args#"${_pt_args%%[! ]*}"}',
     "    fi",
     '    _pt_args=${_pt_args%"${_pt_args##*[! ]}"}',
-    f"    if grep -q '{MARKER}' \"$_pt_local\" 2>/dev/null; then",
+    f"    if grep -q {_OURS_GREP} \"$_pt_local\" 2>/dev/null && grep -q '^_pt_launcher=' \"$_pt_local\" 2>/dev/null; then",
     '        "$_pt_local" "$@" || exit $?',
     "    else",
     "        case ${_pt_interp##*/} in",
@@ -393,7 +414,7 @@ def hook_script(launcher: str) -> str:
     """Return the pre-commit hook: pure ASCII, LF, runs `sh <launcher> hooks run` from the top."""
     lines = [
         "#!/bin/sh",
-        f"# {MARKER}: written by ./pyt hooks install (it rewrites this file: do not edit)",
+        HEADER,
         "# Runs `./pyt hooks run`: fast checks of the staged files (ruff, ruff format,",
         "# generated files, uv.lock, mypyc rules, launchers). mypy runs in ./pyt check.",
         "#   remove it:    ./pyt hooks uninstall",
@@ -663,7 +684,8 @@ def runs_checks(text: str, repo: Repo) -> bool:
     runs hooks, or from the folder a `cd` before it moved to (a `cd` in a subshell stays there);
     a launcher, or a `cd` folder, that holds a shell expansion cannot be resolved and counts.
     Another project's launcher, a commented-out line or a quoted string does not."""
-    if MARKER in text and (launcher := launcher_of(text)) is not None:
+    launcher = launcher_of(text) if is_ours(text) else None
+    if launcher is not None:
         return _is_this_launcher(launcher, repo, repo.top)
     folders: dict[tuple[int, ...], Path | None] = {(): repo.top}  # the current folder of each (sub)shell
     for subshells, words in _shell_commands(text):
@@ -686,13 +708,14 @@ def classify(path: Path, repo: Repo) -> str:
     this project's `hooks run`) | foreign.
 
     A symlink is never pytemplate's (install writes a regular file): writing through it,
-    dangling or not, would create or change its target, often a file of the work tree."""
+    dangling or not, would create or change its target, often a file of the work tree. Nor is a
+    file hook_script did not write (is_ours), whatever its comments say."""
     if path.is_symlink():
         return "calls" if runs_checks(_read(path), repo) else "foreign"
     if not path.is_file():
         return "missing"
     text = _read(path)
-    if MARKER in text:
+    if is_ours(text):
         if text == hook_script(repo.launcher):
             return "installed"
         other = launcher_of(text)
@@ -707,7 +730,7 @@ def own_local(repo: Repo) -> bool:
     if local.is_symlink() or not local.is_file():
         return False
     text = _read(local)
-    launcher = launcher_of(text) if MARKER in text else None
+    launcher = launcher_of(text) if is_ours(text) else None
     return launcher is not None and _in_this_project(launcher, repo)
 
 

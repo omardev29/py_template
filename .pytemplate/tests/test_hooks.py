@@ -268,7 +268,7 @@ def test_install_update_uninstall(tmp_path: Path) -> None:
         assert target.stat().st_mode & 0o777 == 0o755
     assert hooks.classify(target, repo) == "installed"
     assert "already installed" in hooks.install(repo)
-    target.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./old/pyt hooks run\n", encoding="utf-8")
+    target.write_bytes(hooks.hook_script("./old/pyt").encode("ascii"))  # the project was moved
     assert hooks.classify(target, repo) == "outdated"
     assert "updated" in hooks.install(repo)
     assert target.read_bytes() == data
@@ -324,6 +324,91 @@ def test_a_hook_that_already_calls_hooks_run(tmp_path: Path) -> None:
     assert "already runs" in hooks.install(repo)
     assert "left alone" in hooks.uninstall(repo)
     assert target.is_file()
+
+
+# The first hook `./deploy hooks install` wrote (September 2026, before the launchers were
+# renamed). Every version of hook_script since starts with the same two lines and holds a
+# `_pt_launcher=` line: that is how pytemplate knows its own hook, whatever version wrote it.
+FIRST_HOOK = """#!/bin/sh
+# pytemplate pre-commit hook: written by ./deploy hooks install (it rewrites this file: do not edit)
+# Runs `./deploy hooks run`: fast checks of the staged files (ruff, ruff format,
+# generated files, uv.lock, mypyc rules, launchers). mypy runs in ./deploy check.
+#   remove it:    ./deploy hooks uninstall
+#   skip it once: git commit --no-verify
+# A hook that was here before is kept as pre-commit.local and runs first.
+case $0 in */*) _pt_dir=${0%/*} ;; *) _pt_dir=. ;; esac
+if [ -x "$_pt_dir/pre-commit.local" ]; then
+    "$_pt_dir/pre-commit.local" "$@" || exit $?
+fi
+_pt_launcher='./deploy'
+if [ ! -f "$_pt_launcher" ]; then
+    printf '%s\\n' "pytemplate pre-commit: $_pt_launcher not found in this checkout: checks skipped" >&2
+    exit 0
+fi
+exec sh "$_pt_launcher" hooks run
+"""
+# A hook the user wrote that runs the checks, and names pytemplate's hook in a comment
+USERS_HOOK = """#!/bin/sh
+# My team's checks. The pytemplate pre-commit hook (./pyt hooks run) runs last.
+make -s secrets-scan || exit 1
+sh ./pyt hooks run
+"""
+
+
+@needs_git
+@pytest.mark.parametrize("calls", [True, False])
+def test_a_users_hook_that_names_pytemplates_hook_is_never_taken_for_it(tmp_path: Path, capsys: pytest.CaptureFixture[str], calls: bool) -> None:
+    """A hook of the user's that runs the checks names the tool in a comment ("the pytemplate
+    pre-commit hook runs last"): any file that held those words was taken for pytemplate's
+    outdated hook, so setup and apply replaced it (its secrets scan was gone, no copy kept) and
+    hooks uninstall, or apply with hooks.pre_commit = false, deleted it. pytemplate's hook is what
+    hook_script writes: its first two lines and its _pt_launcher line."""
+    top, project = make_repo(tmp_path)
+    repo = find(project)
+    target, local = repo.default_dir / hooks.HOOK, repo.default_dir / hooks.LOCAL
+    mine = (USERS_HOOK if calls else USERS_HOOK.replace("sh ./pyt hooks run\n", "")).encode("ascii")
+    target.write_bytes(mine)
+    if not IS_WINDOWS:
+        target.chmod(0o755)
+    assert hooks.classify(target, repo) == ("calls" if calls else "foreign")
+    assert hooks.hook_state(repo) not in cmd_apply.OURS  # apply with pre_commit = false leaves it
+    hooks.ensure_installed(make(), project)  # ./pyt setup and ./pyt apply
+    assert target.read_bytes() == mine and not local.exists()
+    assert "left alone" in hooks.uninstall(repo)  # ./pyt hooks uninstall
+    assert target.read_bytes() == mine and not local.exists()
+    assert hooks._status_line(make(), repo)[0] is (True if calls else None)
+    if calls:
+        assert "already runs" in hooks.install(repo)
+    else:
+        with pytest.raises(PytError, match="--force"):
+            hooks.install(repo)
+    assert target.read_bytes() == mine and not local.exists()
+    hooks.install(repo, force=True)  # kept as pre-commit.local, never overwritten
+    assert local.read_bytes() == mine and hooks.classify(target, repo) == "installed"
+    assert "restored" in hooks.uninstall(repo) and target.read_bytes() == mine
+
+
+@needs_git
+@pytest.mark.parametrize("old", ["first", "before the rename", "another launcher path"])
+def test_every_hook_an_earlier_version_wrote_is_still_pytemplates(tmp_path: Path, capsys: pytest.CaptureFixture[str], old: str) -> None:
+    """Every hook_script so far starts with the same two lines and holds a _pt_launcher line, so
+    the hooks earlier versions installed are this project's outdated hook: setup brings them up
+    to date and uninstall removes them."""
+    top, project = make_repo(tmp_path)
+    repo = find(project)
+    target = repo.default_dir / hooks.HOOK
+    text = {
+        "first": FIRST_HOOK,
+        "before the rename": hooks.hook_script("./deploy").replace("./pyt ", "./deploy "),
+        "another launcher path": hooks.hook_script("./old/pyt"),
+    }[old]
+    target.write_bytes(text.encode("ascii"))
+    assert hooks.classify(target, repo) == "outdated"
+    hooks.ensure_installed(make(), project)
+    assert "pre-commit hook updated" in capsys.readouterr().err
+    assert target.read_bytes() == hooks.hook_script("./pyt").encode("ascii")
+    target.write_bytes(text.encode("ascii"))
+    assert "removed" in hooks.uninstall(repo) and not target.exists()
 
 
 @needs_git
@@ -462,7 +547,7 @@ def test_ensure_installed(tmp_path: Path, capsys: pytest.CaptureFixture[str], mo
     hooks.ensure_installed(make(), project)  # already there: silent
     assert capsys.readouterr().err == ""
     # this project's hook from an older template version: updated in place
-    target.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./pyt hooks run\n", encoding="utf-8")
+    target.write_text(FIRST_HOOK, encoding="utf-8")
     hooks.ensure_installed(make(), project)
     assert target.read_bytes() == hooks.hook_script("./pyt").encode("ascii")
     assert "updated" in capsys.readouterr().err
@@ -536,7 +621,7 @@ def test_doctor_lines(tmp_path: Path) -> None:
     hooks.doctor(make(), check, project)
     assert lines[-1][0] is True
     target = top / ".git" / "hooks" / hooks.HOOK
-    target.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./pyt hooks run\n", encoding="utf-8")
+    target.write_text(FIRST_HOOK, encoding="utf-8")
     hooks.doctor(make(), check, project)  # an older template version's hook: setup updates it
     assert lines[-1][0] is None and "outdated" in lines[-1][1] and lines[-1][2] == "./pyt hooks install"
     target.write_text("#!/bin/sh\nnpm test\nsh ./pyt hooks run || exit $?\n", encoding="utf-8")
@@ -2008,6 +2093,33 @@ def test_a_compiled_hook_kept_by_force_runs_first(tmp_path: Path, how: str) -> N
     assert commit("two.txt", PT_LOCAL_EXIT="1").returncode != 0  # the kept hook still blocks
     assert log.read_text(encoding="utf-8").splitlines() == ["compiled hook"]
     assert hooks.interpreter(hooks._read(target.parent / hooks.LOCAL)) == ""  # as the hook script tells it
+
+
+@needs_git
+def test_a_kept_hook_that_names_pytemplates_hook_is_still_run_as_pre_commit(tmp_path: Path) -> None:
+    """The hook script executes a kept pytemplate hook (another project's copy must run as
+    pre-commit.local, which never chains itself) and sources any other shell hook as pre-commit.
+    It told them apart by the phrase alone (`grep MARKER`), so a husky v4 hook with a comment that
+    names pytemplate's hook ran as pre-commit.local and checked nothing; install --force had
+    overwritten it before that (it read as pytemplate's own outdated hook)."""
+    top, project = make_repo(tmp_path)
+    (project / "pyt").write_bytes(FAKE_LAUNCHER.encode("ascii"))
+    (top / ".topmark").write_text("", encoding="utf-8")
+    (top / ".git" / "info" / "exclude").write_text(".topmark\n", encoding="utf-8")
+    log = tmp_path / "hook.log"
+    env = dict(git_env(), PT_HOOK_LOG=log.as_posix())
+    hooks_dir = top / ".git" / "hooks"
+    theirs = NAME_DISPATCH_HOOK.format(shebang="#!/bin/sh").replace("\n", f"\n# the {hooks.MARKER} runs after this one\n", 1)
+    (hooks_dir / hooks.HOOK).write_bytes(theirs.encode("ascii"))
+    (hooks_dir / "helper.sh").write_bytes(HELPER.encode("ascii"))
+    if not IS_WINDOWS:
+        (hooks_dir / hooks.HOOK).chmod(0o755)
+    hooks.install(find(project, top), force=True)
+    assert (hooks_dir / hooks.LOCAL).read_text(encoding="utf-8") == theirs
+    (project / "one.txt").write_text("one", encoding="utf-8")
+    git(top, "add", "-A", env=env)
+    assert git(top, "commit", "-q", "-m", "one", env=env, check=False, timeout=120).returncode == 0
+    assert log.read_text(encoding="utf-8").splitlines() == ["user check as pre-commit", "launcher hooks run from top"]
 
 
 @needs_git
