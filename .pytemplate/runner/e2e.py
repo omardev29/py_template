@@ -1015,7 +1015,17 @@ def do_build(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
 
 
 def runtime_python(ctx: Context, backend: str) -> Path:
-    return venv_python(ctx.project / (f".venv-pypy{ENV_SUFFIX}" if backend == "pypy" else f".venv{ENV_SUFFIX}"))
+    """The interpreter of the e2e PROJECT's environment. The project lives in the base and its own
+    runner may compute a different ENV_SUFFIX than this one's: on WSL with a Windows checkout the
+    default base is on the Linux file system, so the project's runner made `.venv`, not
+    `.venv-wsl` (and the reverse with `--base` on /mnt/c). Take whichever of the two suffixes
+    (this runner's first) the project actually made, so the smoke runs use the project's own env."""
+    stem = ".venv-pypy" if backend == "pypy" else ".venv"
+    for suffix in dict.fromkeys((ENV_SUFFIX, "", "-wsl")):
+        python = venv_python(ctx.project / f"{stem}{suffix}")
+        if python.exists():
+            return python
+    return venv_python(ctx.project / f"{stem}{ENV_SUFFIX}")  # neither is there: name the expected one
 
 
 def _move(src: Path, dst: Path) -> None:

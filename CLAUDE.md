@@ -3670,7 +3670,11 @@ short temp tree and unset `NVIM_APPNAME`.
     and smoke runs of the headless artifacts of console presets: exe, nuitka (`<app>.bin`
     too), the portable launcher after its folder was moved to `<base>/work` (put back
     afterwards), `python -S <pyz>` with its cache redirected, the wheel in a scratch venv;
-    the output must contain the preset's text and, for mypyc, the compiled marker.
+    the output must contain the preset's text and, for mypyc, the compiled marker. The pyz and
+    wheel smokes take the interpreter of whichever `.venv`/`.venv-pypy` (with or without the
+    `-wsl` suffix) the project's OWN runner made (`e2e.runtime_python`): under WSL with a Windows
+    checkout the default base is on the Linux file system, so the project made `.venv`, not this
+    runner's `.venv-wsl` (and the reverse with `--base` on /mnt/c).
   `--quick`: each backend's `deploy.default` method only. Default: every pair
   `cmd_build.COMPAT` allows but nuitka, `./pyt selftest` in the project, a usage error
   (`build <b> pyz` must exit 2) and a rename round trip (`--dry-run rename`, `rename` to

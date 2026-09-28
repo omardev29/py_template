@@ -290,6 +290,30 @@ def test_verify_checks_what_new_made(tmp_path: Path) -> None:
     assert e2e.do_verify(ctx, step, log)[0] == SKIP, "--reuse: nothing new to verify"
 
 
+def test_runtime_python_uses_the_env_the_projects_own_runner_made(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The e2e projects live in the base, where their own runner may make .venv while this runner's
+    ENV_SUFFIX is -wsl (WSL with a Windows checkout: the base is on the Linux file system), or the
+    reverse (--base on /mnt/c). runtime_python must find whichever env the project actually made."""
+    ctx = make_ctx(tmp_path)
+
+    def make_env(name: str) -> Path:
+        python = e2e.venv_python(ctx.project / name)
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_text("", encoding="utf-8")
+        return python
+
+    monkeypatch.setattr(e2e, "ENV_SUFFIX", "-wsl")  # this runner says -wsl; the project made .venv
+    venv = make_env(".venv")
+    assert e2e.runtime_python(ctx, "cpython") == venv
+    monkeypatch.setattr(e2e, "ENV_SUFFIX", "")  # the reverse: this runner says "", project made .venv-wsl
+    e2e.rmtree(ctx.project / ".venv")
+    venv_wsl = make_env(".venv-wsl")
+    assert e2e.runtime_python(ctx, "cpython") == venv_wsl
+    monkeypatch.setattr(e2e, "ENV_SUFFIX", "-wsl")  # pypy follows the same rule
+    pypy = make_env(".venv-pypy")
+    assert e2e.runtime_python(ctx, "pypy") == pypy
+
+
 @POSIX
 def test_cleanup_of_a_symlinked_base_never_touches_the_folder_it_names(tmp_path: Path) -> None:
     # rmtree(link) called the retry hook with os.path.islink: its chmod followed the link and
