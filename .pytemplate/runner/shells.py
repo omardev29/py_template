@@ -619,7 +619,9 @@ def command_text(sh: Shell, project: Path, where: str, args: Sequence[str], mini
     if sh.family == "nu":
         name = "pyt.cmd" if IS_WINDOWS else "pyt"
         word = {"root": f"./{name}", "sub": f"../{name}", "abs": str(project / name)}[where]
-        return " ".join([f"^'{word}'", *map(nu_quote, args)])  # '...': no escapes in nu
+        # run-external (what ^word stands for) takes the program as a string: a raw string holds
+        # any path (^'<path>' ended at a quote of the project folder's path: /home/o'brien).
+        return " ".join(["run-external", nu_quote(word), *map(nu_quote, args)])
     raise ValueError(f"unknown shell family {sh.family}")
 
 

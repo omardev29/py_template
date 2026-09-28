@@ -105,6 +105,13 @@ def test_command_text_per_family(tmp_path: Path) -> None:
     wsl = shells.Shell("wsl-u", "wsl", ("wsl.exe", "-d", "U"))
     assert "$(wslpath -u " in shells.command_text(wsl, project, "abs", [])
 
+    # nushell: the launcher's word ended at a quote of the project folder's path (/home/o'brien)
+    nu = shells.Shell("nu", "nu", ("nu", "--no-config-file"))
+    name = "pyt.cmd" if IS_WINDOWS else "pyt"
+    quoted = tmp_path / "o'brien"
+    assert shells.command_text(nu, quoted, "abs", ["x", "a'b"]) == f"run-external {shells.nu_quote(str(quoted / name))} r#'x'# r#'a'b'#"
+    assert shells.command_text(nu, quoted, "root", []) == f"run-external r#'./{name}'#"
+
 
 @pytest.mark.skipif(IS_WINDOWS, reason="a POSIX stand-in launcher")
 def test_xonsh_probe_exit_code_ignores_raise_settings(tmp_path: Path) -> None:

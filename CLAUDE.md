@@ -705,7 +705,9 @@ header rules (with detector tests proving each rule fires).
 - How the probes reach each shell: POSIX shells get the command in `$PTCMD`
   (`sh -c 'eval "$PTCMD"'`, never in argv: section 4.7), fish `eval $PTCMD`, WSL through
   `WSLENV`, script mode a script file; cmd a hand-built line whose arguments are free of
-  `% ! " ^`; PowerShell `-EncodedCommand`. `shells.child_env` drops `UV`, `VIRTUAL_ENV`,
+  `% ! " ^`; PowerShell `-EncodedCommand`; nushell `run-external` with every word a raw string
+  (`shells.nu_quote`, the launcher's path too: a `^'<path>'` word ended at a quote of the project
+  folder's path, `/home/o'brien`). `shells.child_env` drops `UV`, `VIRTUAL_ENV`,
   `UV_*` selection variables, `PYTHONHOME/PATH`, `PWD`, `OLDPWD` and `PYTEMPLATE_*`. Outputs go
   to files and every probe has a timeout. `--project DIR` probes another copy (to test launcher
   candidates before they land).
