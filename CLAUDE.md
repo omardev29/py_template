@@ -3300,15 +3300,16 @@ short temp tree and unset `NVIM_APPNAME`.
   its order, junit times, diffs and the lines they change (whatever the user's git settings),
   where no mutant is made, the exception-handler mutants the runner makes (run: the exception
   goes through), the mutants skipped, the verdict of every way pytest ends (colours and
-  subtests too), a fake Cosmic Ray side (and one that died, hangs or was closed), the snapshot,
-  the base and its lock, the workers' environment and copies (links, a submodule, a link that
-  cannot be made), a git or a ps that fails, the parser of Python 3.11.3 and older (a NUL byte
-  is a ValueError there), real pytest runs over their limit or stopped with their whole process
-  tree (sessions of its own too), the threads, deferred signals, the baselines (one that fails,
-  one that never ends: their mutants never run), what a killed run left in the base, the
-  report, an error after it, and the exit code; every operator and the pins of Cosmic Ray's
-  defects against the real Cosmic Ray, and one real run of a toy module, skipped without Cosmic
-  Ray's environment),
+  subtests too) and its detail (one line of 200 characters at most), a fake Cosmic Ray side
+  (and one that died, hangs or was closed), the snapshot, the base and its lock (the user's
+  own), the workers' environment and copies (links, a submodule, a link that cannot be made), a
+  git or a ps that fails, the parser of Python 3.11.3 and older (a NUL byte is a ValueError
+  there), real pytest runs over their limit or stopped with their whole process tree (sessions
+  of its own too), the threads, deferred signals, the baselines (one that fails, one that never
+  ends: their mutants never run; one a stopped run never reached), what a killed run left in
+  the base, the report, an error after it, and the exit code; every operator and the pins of
+  Cosmic Ray's defects against the real Cosmic Ray, and one real run of a toy module, skipped
+  without Cosmic Ray's environment),
   `test_workflows.py` (template repository only: the promises of the
   template-*.yml workflows, the keepalive covering every scheduled one, the gates, `-latest`
   labels, pinned actions, and actionlint on every workflow when installed; the CI image: the
