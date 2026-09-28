@@ -5006,6 +5006,15 @@ setuptools:
   binary. Fix: a forced build (`mypyc.COMPILED_STAMP`) deletes the profile's `mypy_cache` and
   `c` first (9). Test: `test_mypyc_core.py::test_a_forced_build_starts_without_the_cached_ir_and_c`
   (reproduced with a real compile). Goes: when mypyc keys its cache on those options.
+- **mypyc annotates only the modules it built IR for** (LIMITATION, mypyc 2.3.1): with
+  `compile.separate = true` mypy is incremental, and a module it loads from the profile's
+  `mypy_cache` gets no IR, so `./pyt report` after a compile, and every unchanged build with
+  `compile.annotate`, wrote an empty annotate page (one module after an edit of one), with the
+  success line. Fix: `mypyc.build` deletes the profile's `mypy_cache` before a run that
+  annotates with `compile.separate` (mypyc rewrites a C file only when its text changes, so the C
+  compiler rebuilds nothing more) (9). Test:
+  `test_mypyc_core.py::test_real_report_with_separate_covers_every_module_every_time`. Goes: when
+  mypyc annotates the modules it loads from its cache.
 - **A `CFLAGS` environment variable replaces Python's own C flags** (LIMITATION): it drops
   `-fno-strict-overflow` (i64/i32 wrap-around becomes undefined behaviour) and `-DNDEBUG`. Fix:
   `tools/mypyc_build.py` `extra_cflags` always adds `-fno-strict-overflow`; the wheel's
