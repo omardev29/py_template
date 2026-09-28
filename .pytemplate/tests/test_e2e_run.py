@@ -244,7 +244,20 @@ def test_verify_checks_what_new_made(tmp_path: Path) -> None:
     p = ctx.project
     for launcher in ("pyt", "pyt.ps1"):
         (p / launcher).write_text("#!/bin/sh\n", encoding="utf-8")
-    shutil.copyfile(presets.LOCK, p / "uv.lock")  # the template's own versions
+    # A hermetic uv.lock holding exactly the versions do_verify checks (the preset's constraints,
+    # each overridden by a single-version package of the running project's own lock, as
+    # lock_problems resolves them). Copying the running project's lock verbatim failed do_verify
+    # wherever it differs from the preset's tested pins - a removed plain dependency (rich), a
+    # transitive package `./pyt lock --upgrade` dropped, or one the lock forked into two versions -
+    # so the test broke in real projects (CLAUDE.md 13.1: selftest must pass in every one).
+    pins = presets.constraints(info.name)
+    tested = e2e.lock_versions(presets.LOCK) or {}
+    packages = []
+    for name, version in sorted(pins.items()):
+        single = tested.get(name)
+        resolved = next(iter(single)) if single and len(single) == 1 else version
+        packages.append(f'[[package]]\nname = "{name}"\nversion = "{resolved}"\n')
+    (p / "uv.lock").write_text("version = 1\nrequires-python = \">=3.11\"\n\n" + "\n".join(packages), encoding="utf-8")
     description = str(presets.load(info.name)["description"])
     (p / "pyproject.toml").write_text(f"[project]\nname = \"{info.app}\"\ndescription = {json.dumps(description)}\n", encoding="utf-8")
     (p / "README.md").write_text(f"# {info.app}\n", encoding="utf-8")
