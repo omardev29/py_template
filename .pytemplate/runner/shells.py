@@ -783,6 +783,7 @@ class Context:
     sysroot: str = "C:\\Windows"
     running: set[subprocess.Popen[bytes]] = field(default_factory=set)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    stopped: threading.Event = field(default_factory=threading.Event)  # interrupted: start no probe
 
     def minimal_path(self, sh: Shell) -> str:
         if sh.family == "wsl" or not IS_WINDOWS:
@@ -819,7 +820,10 @@ def _kill(p: subprocess.Popen[bytes]) -> None:
 
 def spawn(ctx: Context, argv: list[str] | str, *, cwd: Path, env: Mapping[str, str], tag: str, stdin: bytes | None = None) -> ProbeRun:
     """Run one probe process with a timeout (output to files: a pipe held open by a leftover
-    grandchild would block forever) and parse its PTPROBE line."""
+    grandchild would block forever) and parse its PTPROBE line. Once the suite is interrupted
+    (ctx.stopped) no probe starts, and one that started meanwhile is killed."""
+    if ctx.stopped.is_set():
+        return ProbeRun(None, "", "", 0, None, "not run: the suite was interrupted")
     out_file = ctx.tmp / "out" / f"{tag}.out"
     err_file = ctx.tmp / "out" / f"{tag}.err"
     in_file = ctx.tmp / "out" / f"{tag}.in"
@@ -838,8 +842,13 @@ def spawn(ctx: Context, argv: list[str] | str, *, cwd: Path, env: Mapping[str, s
         else:
             with ctx.lock:
                 ctx.running.add(p)
+                stopped = ctx.stopped.is_set()  # set after the check above: _run_all killed the others
             try:
-                rc = p.wait(timeout=ctx.timeout)
+                if stopped:
+                    _kill(p)
+                    error = "stopped: the suite was interrupted"
+                else:
+                    rc = p.wait(timeout=ctx.timeout)
             except subprocess.TimeoutExpired:
                 _kill(p)
                 error = f"timed out after {ctx.timeout:g} s"
@@ -1166,9 +1175,11 @@ def _run_all(ctx: Context, shells: Sequence[Shell], tests: Sequence[str], jobs: 
             failed = [r.test for r in got if r.status == "fail"]
             ui.info(f"  {futures[future].name}: " + (f"FAIL {' '.join(failed)}" if failed else "ok"))
     except KeyboardInterrupt:
-        with ctx.lock:
-            for p in list(ctx.running):
-                _kill(p)
+        with ctx.lock:  # a probe that starts from now on sees it and kills itself (spawn)
+            ctx.stopped.set()
+            running = list(ctx.running)
+        for p in running:
+            _kill(p)
         pool.shutdown(wait=False, cancel_futures=True)
         raise
     pool.shutdown(wait=True)
@@ -1208,8 +1219,14 @@ def selftest(cfg: Config, args: list[str]) -> int:
 
     ui.step(f"selftest --shells: {len(shells)} shells x {len(opts.tests)} tests, project {project}")
     started = time.perf_counter()
+    # SIGTERM and SIGHUP stop the run like Ctrl+C (the running probes, in sessions of their own,
+    # are killed and the scratch folder goes): their default action killed the runner at once
+    # and left the folder behind, as for the other harnesses (e2e.termination_as_interrupt).
+    from .e2e import termination_as_interrupt
+
     try:
-        results = _run_all(ctx, shells, opts.tests, opts.jobs)
+        with termination_as_interrupt():
+            results = _run_all(ctx, shells, opts.tests, opts.jobs)
     finally:
         if opts.keep:  # asked for, and a random name: shown even with -q
             ui.report(f"scratch files kept in {tmp}")

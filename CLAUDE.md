@@ -701,7 +701,12 @@ header rules (with detector tests proving each rule fires).
   `--json` to stdout; exit 1 on any FAIL. T7 is SKIP where uv cannot be hidden (PowerShell
   reads the registry PATH itself; the MSYS2 login profile puts `reg.exe` back on PATH). A WSL
   distribution without a uv of its own is SKIP as a whole (`shells._wsl_without_uv`: one probe
-  first; the Linux launcher inside it exits 127), never seven FAILs.
+  first; the Linux launcher inside it exits 127), never seven FAILs. Ctrl+C, SIGTERM and SIGHUP
+  (`e2e.termination_as_interrupt`, as for the other harnesses: their default action killed the
+  runner and left its `pts-*` scratch folder behind) kill the running probes (each in a session
+  of its own), start no other one (`Context.stopped`, read by `shells.spawn`) and remove the
+  scratch folder: `error: interrupted`, exit 130
+  (`test_selftest_harness.test_shells_termination_signal_kills_the_probe_and_removes_the_scratch_folder`).
 - How the probes reach each shell: POSIX shells get the command in `$PTCMD`
   (`sh -c 'eval "$PTCMD"'`, never in argv: section 4.7), fish `eval $PTCMD`, WSL through
   `WSLENV`, script mode a script file; cmd a hand-built line whose arguments are free of
@@ -5633,7 +5638,8 @@ Code coupling (rename together):
   `presets._git_init`, whose "inside a work tree" rule it mirrors for `new`, an ignoring one
   excepted by the same `presets.ignored_by_work_tree`);
   `nvimtest.selftest` imports `e2e.termination_as_interrupt`, `isolate_git` and
-  `hidden_template_repository` lazily (one rule for both harnesses);
+  `hidden_template_repository` lazily (one rule for both harnesses), and `shells.selftest`
+  `termination_as_interrupt`;
   `e2e.flet_build_reason` imports `methods.flet._developer_mode`, and its Flutter size and the
   flet method's docstring follow the manual (`test_docs.test_the_runner_gives_the_manuals_flutter_size`);
   `upx.uses` imports `methods.flet.MOBILE_WEB` lazily (`methods.flet` imports `upx`);

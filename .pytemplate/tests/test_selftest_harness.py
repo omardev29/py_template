@@ -182,6 +182,66 @@ def test_quiet_keeps_where_the_kept_scratch_files_are(
     assert len(kept) == 1 and f"scratch files kept in {kept[0]}" in err, err
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM/SIGHUP and process groups are POSIX")
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
+def test_shells_termination_signal_kills_the_probe_and_removes_the_scratch_folder(tmp_path: Path, signame: str) -> None:
+    """`kill <pid>`, a closed terminal: the runner died at once, left its pts-* scratch folder
+    in the temp folder, and a probe (in a session of its own) went on. Now the run stops like
+    Ctrl+C: the probe's tree is killed, the folder goes, `error: interrupted`, exit 130."""
+    import signal
+
+    pidfile = tmp_path / "probe.pid"
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    step = f"import os, pathlib, time; pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(120)"
+    script = "\n".join(
+        [
+            "import sys, tempfile",
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})",
+            "from runner import cli, shells",
+            f"tempfile.tempdir = {str(temp)!r}",
+            "shells.discover = lambda *a, **k: [shells.Shell('sh', 'posix', ('/bin/sh',))]",
+            "def run_test(ctx, sh, test):",
+            f"    shells.spawn(ctx, [sys.executable, '-c', {step!r}], cwd=ctx.tmp, env=ctx.env, tag=test)",
+            "    return shells.Result(sh.name, test, 'pass', 1, '', 'sh')",
+            "shells.run_test = run_test",
+            "sys.exit(cli.main(['selftest', '--shells', 'sh', '--tests', 'T1']))",
+        ]
+    )
+    log = tmp_path / "runner.log"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEMPLATE_")}
+    with log.open("wb") as out:
+        runner = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env)
+    child = 0
+    try:
+        deadline = time.monotonic() + 60
+        while not (pidfile.is_file() and pidfile.read_text()):
+            assert runner.poll() is None, log.read_text()
+            assert time.monotonic() < deadline, log.read_text()
+            time.sleep(0.05)
+        child = int(pidfile.read_text())
+        runner.send_signal(getattr(signal, signame))
+        assert runner.wait(timeout=60) == 130, log.read_text()
+        assert "error: interrupted" in log.read_text(), log.read_text()
+        assert _gone(child), "the probe outlived the runner"
+        assert list(temp.iterdir()) == [], "the scratch folder was left behind"
+    finally:
+        if runner.poll() is None:
+            runner.kill()
+        if child and not _gone(child, within=0):
+            os.kill(child, signal.SIGKILL)
+
+
+def test_a_probe_that_starts_after_an_interrupt_is_never_left_running(probes: dict[tuple[str, str], str], tmp_path: Path) -> None:
+    """Once the suite is interrupted, a worker thread that goes on to its shell's next test starts
+    no probe: it was never killed, and ran until its timeout after the runner had stopped."""
+    ctx = shells.Context(project=tmp_path, sub=tmp_path, tmp=tmp_path, away=tmp_path, timeout=60, env=dict(os.environ))
+    (tmp_path / "out").mkdir()
+    ctx.stopped.set()
+    run = shells.spawn(ctx, [sys.executable, "-c", "import time; time.sleep(60)"], cwd=tmp_path, env=os.environ, tag="late")
+    assert run.rc is None and "interrupted" in run.error and not ctx.running
+
+
 def test_shells_refuse_what_cannot_run(probes: dict[tuple[str, str], str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     with pytest.raises(PytError, match="not found here: fish") as e:
         shells.selftest(make(), ["fish"])
