@@ -419,7 +419,9 @@ env = { SEED = "42" }
   `deps = ["compile"]` and run `{build}/mypyc-dev/stage/main.py`.
 - `uv`: `true` (default) runs `cmd` with `uv run` in that environment; `false` runs the program
   as it is (a `{python}` whose environment does not exist yet is created first; on Windows a
-  bare name is looked up on `PATH` with its `.cmd`/`.bat` extensions too, so `npm` works).
+  bare name is looked up on the task's `PATH` with its `.cmd`/`.bat` extensions too, so `npm`
+  works, and never in the folder the command was typed in; a relative `PATH` entry is read
+  from the task's `cwd`, as on Linux and macOS).
   Windows runs a `.cmd`/`.bat` program (npm, yarn, mvn) through cmd.exe, which parses its
   arguments again, so there an argument cmd.exe would change is refused (exit 2) instead of
   reaching the program changed: one with `%`, `"` or a line break, and one with `^ & | < >`
