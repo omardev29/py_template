@@ -2280,7 +2280,13 @@ Formats:
   resolved like Python's import by `config.compiled_paths`, section 6.1; an entry that does not
   exist or holds no module -> `PytError`), minus `compile.exclude` (exact module or package
   prefix; an entry naming nothing -> `PytError`), deduplicated. Walks with `mypyc.walk`, like
-  `sync_tree` and `common.uses_tkinter`.
+  `sync_tree` and `common.uses_tkinter`. Only the modules Python can import (`mypyc._importable`:
+  every part of the dotted name an identifier): JupyterLab's `.ipynb_checkpoints/<name>-checkpoint.py`,
+  a copy `bench copy.py` and a data folder `sample-data/` gave mypyc C names with `-` or a blank
+  (a C compile error, with the compiler hint on a working compiler) or a stray top-level
+  extension, and lintc failed `check` and the hook on a stale copy; compile.exclude cannot name
+  them, and lintc, the hook and the wheel's `setup.py` take this list
+  (`test_mypyc_core.test_only_modules_python_can_import_are_compiled_and_linted`).
 - `sync_tree(src, dst, owned=())` copies changed files only and deletes removed ones. Change
   detection is size + `st_mtime_ns` (`copy2` preserves the exact mtime), so a same-size edit
   within one second is detected. `walk` follows symlinked folders (`Path.rglob` does not

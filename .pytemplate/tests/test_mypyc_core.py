@@ -886,6 +886,35 @@ def test_compiled_sources_follow_a_symlinked_subpackage(src_tree: Path, tmp_path
     assert "myapp.core.linked.z" in mypyc.compiled_modules(make({}))
 
 
+def test_only_modules_python_can_import_are_compiled_and_linted(src_tree: Path) -> None:
+    """JupyterLab writes .ipynb_checkpoints/<name>-checkpoint.py next to every .py it opened, a
+    Finder copy is `a copy.py`, a data folder `sample-data/`: none is a module Python can import.
+    mypyc got them all: C names with '-' or ' ' (a C compile error, with the C compiler hint on a
+    working compiler) or a stray top-level extension ("did not generate an extension"), and lintc
+    failed `check` and the hook on a stale checkpoint copy. compile.exclude cannot name them."""
+    from runner import hooks
+
+    stale = "class A:\n    class B:\n        pass\n"  # a nested class: a lintc error under the mypyc profile
+    leftovers = [
+        "myapp/core/.ipynb_checkpoints/a-checkpoint.py",
+        "myapp/core/a copy.py",
+        "myapp/core/sample-data/fixture.py",
+        "myapp/core/sub/.hidden/x.py",
+        "myapp/core/sub/n.old.py",
+    ]
+    _project(src_tree, {**CORE_TREE, **dict.fromkeys(leftovers, stale)})
+    cfg = make({"backend": {"active": "mypyc"}})
+    assert mypyc.compiled_modules(cfg) == ["myapp.core.a", "myapp.core.sub.m", "myapp.core.sub.n", "myapp.core.subx.k"]
+    assert lintc.lint(cfg, mypyc.compiled_sources(cfg)) == []
+    staged = {f"src/{name}" for name in leftovers} | {"src/myapp/core/a.py"}
+    result = hooks.check_mypyc(cfg, src_tree.parent, staged)
+    assert result.passed is True and not result.errors and not result.warnings
+    # a folder of compile.modules that holds only such files compiles nothing: an error, as before
+    _project(src_tree, {"myapp/other/__init__.py": "", "myapp/other/.ipynb_checkpoints/b-checkpoint.py": "X = 1\n"})
+    with pytest.raises(PytError, match="holds a module to compile"):
+        mypyc.compiled_sources(make({"compile": {"modules": ["myapp.other"]}}))
+
+
 def test_hook_reports_an_unparsable_module_and_a_bad_exclude(src_tree: Path) -> None:
     """Through the pre-commit hook's check with the real lintc: a failed check, never a crash."""
     from runner import hooks

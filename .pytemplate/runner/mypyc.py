@@ -121,7 +121,8 @@ def walk(root: Path) -> Iterator[Path]:
 
 
 def compiled_sources(cfg: Config) -> list[Path]:
-    """Return the .py files (in src/) that mypyc compiles.
+    """Return the .py files (in src/) that mypyc compiles: the modules Python can import below
+    each compile.modules entry (`_importable`: never an editor's leftover copy).
 
     compile.exclude takes modules and subpackages (a prefix) of those packages; an entry that
     names nothing that exists is an error (a typo must not silently compile everything).
@@ -132,7 +133,9 @@ def compiled_sources(cfg: Config) -> list[Path]:
         path = SRC / rel_path
         stem = rel_path.removesuffix(".py")
         if path.is_dir():
-            candidates = sorted(p for p in walk(path) if p.suffix == ".py" and p.name != "__init__.py" and p.is_file())
+            candidates = sorted(
+                p for p in walk(path) if p.suffix == ".py" and p.name != "__init__.py" and _importable(p) and p.is_file()
+            )
             if not candidates:  # an entry that compiles nothing is a mistake, never skipped silently
                 raise PytError(f"compile.modules: neither src/{stem}.py nor src/{stem}/ holds a module to compile")
         elif path.is_file():
@@ -154,6 +157,16 @@ def compiled_sources(cfg: Config) -> list[Path]:
     if not files:
         raise PytError("compile.modules contains no .py file to compile")
     return list(dict.fromkeys(files))
+
+
+def _importable(path: Path) -> bool:
+    """Whether Python can import the .py file `path` of src/ as a module: every part of its dotted
+    name an identifier. JupyterLab's .ipynb_checkpoints/<name>-checkpoint.py, a copy named
+    `bench copy.py` or `bench.old.py` and a data folder `sample-data/` hold none: mypyc made C
+    names with '-' or ' ' of them (a C compile error, with the C compiler hint), or a stray
+    top-level extension of a module mypy named from inside the folder, and lintc failed `check`
+    and the hook on a stale copy of the code; compile.exclude cannot name them."""
+    return all(part.isidentifier() for part in path.relative_to(SRC).with_suffix("").parts)
 
 
 def compiled_modules(cfg: Config) -> list[str]:
