@@ -531,6 +531,31 @@ def _venv_platform(tool: envs.PyEnv) -> str:
         return ""
 
 
+# tools/mypyc_build.py missing_compiler, asked in .venv (setuptools' distutils needs setuptools
+# imported first); the answer is the last PTCC: line
+_MISSING_COMPILER_CODE = (
+    "import sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import setuptools, mypyc_build\n"
+    "try:\n"
+    "    problem = mypyc_build.missing_compiler()\n"
+    "except Exception as e:\n"
+    "    problem = f'setuptools cannot set up a C compiler: {e}'\n"
+    "print('PTCC:' + (problem or ''))\n"
+)
+
+
+def missing_compiler(tool: envs.PyEnv) -> str | None:
+    """After a C build of mypyc code failed outside `build` (the wheel's setup.py, whose failure
+    is uv's exit code, never the script's COMPILER_MISSING): why setuptools cannot start the C
+    compiler of `tool`, with the hint to get one, or None (it can, or the question cannot run)."""
+    argv: list[str | Path] = ["run", "--locked", "python", "-c", _MISSING_COMPILER_CODE, TOOLS]
+    r = envs.uv(tool, argv, extra_env={"VSLANG": "1033"}, capture=True, check=False, echo=False)
+    marks = [line for line in (r.stdout or "").splitlines() if line.startswith("PTCC:")]
+    problem = marks[-1].removeprefix("PTCC:") if r.returncode == 0 and marks else ""
+    return f"{problem}\n{has_compiler_hint(_venv_platform(tool))}" if problem else None
+
+
 def has_compiler_hint(platform: str = "win-amd64") -> str:
     """How to get a C compiler. `platform`: sysconfig.get_platform() of the .venv Python, whose
     MSVC tools setuptools looks for (cmd_env._msvc): ARM64 ones for a win-arm64 Python."""

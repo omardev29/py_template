@@ -2584,7 +2584,11 @@ Per method:
   `src/<pkg>/` was, so mypycify stopped with "Cannot read file 'src/fastbench.py'" and a
   cpython wheel left the module out. `app.gui` -> `[project.gui-scripts]` (no console window on
   Windows), else `[project.scripts]`. mypyc -> platform wheel; cpython/pypy -> `py3-none-any`
-  (even with a vendored native library: the wheel is not retagged).
+  (even with a vendored native library: the wheel is not retagged). Its `uv build` is captured
+  under `-q` and shown when it fails (5.3); a failed mypyc wheel asks `mypyc.missing_compiler`
+  (`tools/mypyc_build.py`'s `missing_compiler`, run in `.venv`) and a C compiler that cannot
+  start is exit 3 with `has_compiler_hint`, as for the stage (it was uv's exit 2 and its generic
+  "build failures" hint: `test_wheel_a_compiler_that_cannot_start_is_a_missing_requirement`).
 - **nuitka**: `.build/nuitka-stage/<b>`, `uv run --locked --with nuitka==<NUITKA> python -P -m
   nuitka` with cwd = stage (`-P`: `-m` put the stage first on Nuitka's own `sys.path`, so an app
   named `nuitka`, or like a module Nuitka imports, ran instead of the compiler; Nuitka finds the
@@ -5782,7 +5786,9 @@ Code coupling (rename together):
   mypy): `lintc.NATIVE_CLASS_DECORATORS` <-> mypyc's native decorators;
   `lintc.relative_file_at_import` <-> when mypyc builds no shared lib; `mypyc.remove_stale_extensions`
   <-> mypyc's lib names (`<group>__mypyc`, `<module>__mypyc`). `mypyc.MYPYC_REJECTED`,
-  `COMPILER_MISSING` and `C_BUILD_FAILED` <-> `tools/mypyc_build.py`; the spec keys the script
+  `COMPILER_MISSING` and `C_BUILD_FAILED` <-> `tools/mypyc_build.py`; `mypyc.missing_compiler`
+  imports that script in `.venv` and calls its `missing_compiler`
+  (`test_missing_compiler_asks_the_venv_as_the_build_script_does`); the spec keys the script
   reads <-> `mypyc.build`; `mypyc_build.XCODE_CLANG`/`xcode_problem` <-> `cmd_env.XCODE_CLANG`/
   `_xcode_problem` (`test_build_script_reads_the_developer_folder_like_doctor`);
   `mypyc_build.extra_cflags`/`compiler_type` <-> the wheel's `SETUP_PY`

@@ -255,6 +255,11 @@ def build(req: BuildRequest) -> Path:
         output = ((built.stdout or "") + (built.stderr or "")).rstrip()
         if output:
             ui.report(output)
+        # A C compiler mypyc cannot start is a missing requirement (exit 3 and how to get one),
+        # as for the stage: uv's exit code 2 and its generic "build failures" hint said neither
+        missing = mypyc.missing_compiler(tool) if req.compiled else None
+        if missing:
+            raise PytError(f"wheel: {missing}", 3)
         raise proc.CommandFailed(built.args, built.returncode)
     wheels = sorted(out.glob("*.whl"))
     if not wheels:

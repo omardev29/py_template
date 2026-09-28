@@ -1524,7 +1524,8 @@ def test_wheel_shows_why_uv_build_failed_even_with_q(wheel_project: Path, monkey
     captures: list[bool] = []
 
     def fake_uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
-        captures.append(kw.get("capture", False))
+        if args[0] == "build":  # not the question whether a compiler starts (mypyc.missing_compiler)
+            captures.append(kw.get("capture", False))
         assert kw.get("check") is False
         return _done([str(a) for a in args], 2, "", "  [stderr]\n  src/pkg/core/m.py:3: error: bad\nerror: The build backend returned an error\n")
 
@@ -1538,6 +1539,46 @@ def test_wheel_shows_why_uv_build_failed_even_with_q(wheel_project: Path, monkey
         assert captures[-1] is quiet  # without -q uv's output streams as it comes
         if quiet:
             assert "src/pkg/core/m.py:3: error: bad" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("backend", "missing", "code"),
+    [
+        ("mypyc", "the C compiler command 'cc' cannot start: cc was not found\nHINT", 3),
+        ("mypyc", None, 2),  # the compiler starts: uv's failure as it is (a type error, a C error)
+        ("cpython", None, 2),  # nothing to compile: never asked
+    ],
+)
+def test_wheel_a_compiler_that_cannot_start_is_a_missing_requirement(
+    wheel_project: Path, monkeypatch: pytest.MonkeyPatch, backend: str, missing: str | None, code: int
+) -> None:
+    # CC=/nonexistent/cc ./pyt build mypyc --method wheel: exit 2 and uv's "Build failures usually
+    # indicate a problem with the package", where the stage says the compiler is missing, exit 3
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    asked: list[envs.PyEnv] = []
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.envs, "uv", lambda env, args, **kw: _done([str(a) for a in args], 2, "", "error: [Errno 2] No such file or directory: 'cc'\n"))
+    monkeypatch.setattr(wheel.mypyc, "missing_compiler", lambda tool: asked.append(tool) or missing)
+    with pytest.raises(PytError) as err:
+        wheel.build(BuildRequest(_wheel_cfg(), backend, "wheel", wheel_project / "src"))
+    assert err.value.code == code
+    assert [a.dir for a in asked] == ([envs.tool_env(_wheel_cfg()).dir] if backend == "mypyc" else [])
+    if missing:
+        assert str(err.value) == f"wheel: {missing}"
+
+
+@needs_venv
+@pytest.mark.skipif(os.name == "nt", reason="setuptools builds with MSVC there, whatever CC says")
+def test_missing_compiler_asks_the_venv_as_the_build_script_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = envs.tool_env(make({}))
+    monkeypatch.setenv("CC", "/nonexistent/cc")
+    missing = mypyc.missing_compiler(tool)
+    assert missing is not None and "/nonexistent/cc was not found" in missing and missing.endswith(mypyc.has_compiler_hint())
+    if _has_c_compiler():
+        monkeypatch.delenv("CC")
+        assert mypyc.missing_compiler(tool) is None
 
 
 def test_build_a_compiler_that_cannot_start_is_a_missing_requirement(fake_build: FakeCompiler) -> None:
