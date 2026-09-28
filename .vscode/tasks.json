@@ -95,7 +95,7 @@
                     ],
                     "severity": "error",
                     "pattern": {
-                        "regexp": "^((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "regexp": "^(?!SKIPPED \\[\\d+\\] )((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
                         "file": 1,
                         "line": 2,
                         "message": 3
@@ -367,7 +367,7 @@
                     ],
                     "severity": "error",
                     "pattern": {
-                        "regexp": "^(?!(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]|(?:myapp)(?:[\\\\/][^:]*)?\\.py:)((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "regexp": "^(?!(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]|(?:myapp)(?:[\\\\/][^:]*)?\\.py:)(?!SKIPPED \\[\\d+\\] )((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
                         "file": 1,
                         "line": 2,
                         "message": 3
@@ -382,7 +382,7 @@
                     ],
                     "severity": "error",
                     "pattern": {
-                        "regexp": "^(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]([^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "regexp": "^(?!SKIPPED \\[\\d+\\] )(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]([^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
                         "file": 1,
                         "line": 2,
                         "message": 3
@@ -397,7 +397,7 @@
                     ],
                     "severity": "error",
                     "pattern": {
-                        "regexp": "^((?:myapp)(?:[\\\\/][^:]*)?\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "regexp": "^(?!SKIPPED \\[\\d+\\] )((?:myapp)(?:[\\\\/][^:]*)?\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
                         "file": 1,
                         "line": 2,
                         "message": 3
@@ -462,7 +462,7 @@
                     ],
                     "severity": "error",
                     "pattern": {
-                        "regexp": "^(?!(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]|(?:myapp)(?:[\\\\/][^:]*)?\\.py:)((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "regexp": "^(?!(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]|(?:myapp)(?:[\\\\/][^:]*)?\\.py:)(?!SKIPPED \\[\\d+\\] )((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
                         "file": 1,
                         "line": 2,
                         "message": 3
@@ -477,7 +477,7 @@
                     ],
                     "severity": "error",
                     "pattern": {
-                        "regexp": "^(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]([^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "regexp": "^(?!SKIPPED \\[\\d+\\] )(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]([^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
                         "file": 1,
                         "line": 2,
                         "message": 3
@@ -492,7 +492,7 @@
                     ],
                     "severity": "error",
                     "pattern": {
-                        "regexp": "^((?:myapp)(?:[\\\\/][^:]*)?\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "regexp": "^(?!SKIPPED \\[\\d+\\] )((?:myapp)(?:[\\\\/][^:]*)?\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
                         "file": 1,
                         "line": 2,
                         "message": 3
@@ -1022,7 +1022,7 @@
                     ],
                     "severity": "error",
                     "pattern": {
-                        "regexp": "^(?!(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]|(?:myapp)(?:[\\\\/][^:]*)?\\.py:)((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "regexp": "^(?!(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]|(?:myapp)(?:[\\\\/][^:]*)?\\.py:)(?!SKIPPED \\[\\d+\\] )((?:[A-Za-z]:)?[^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
                         "file": 1,
                         "line": 2,
                         "message": 3
@@ -1037,7 +1037,7 @@
                     ],
                     "severity": "error",
                     "pattern": {
-                        "regexp": "^(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]([^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "regexp": "^(?!SKIPPED \\[\\d+\\] )(?:(?:[A-Za-z]:)?[^:\\s][^:]*[\\\\/])?\\.build[\\\\/](?:wsl[\\\\/])?mypyc-(?:dev|release)[\\\\/]stage[\\\\/]([^:\\s][^:]*\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
                         "file": 1,
                         "line": 2,
                         "message": 3
@@ -1052,7 +1052,7 @@
                     ],
                     "severity": "error",
                     "pattern": {
-                        "regexp": "^((?:myapp)(?:[\\\\/][^:]*)?\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
+                        "regexp": "^(?!SKIPPED \\[\\d+\\] )((?:myapp)(?:[\\\\/][^:]*)?\\.py):(\\d+): ((?:(?:[A-Z]\\w*)?(?:Error|Exception|Failed|Warning|Exit|Interrupt)|assert)\\b.*)$",
                         "file": 1,
                         "line": 2,
                         "message": 3

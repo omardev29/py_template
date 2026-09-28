@@ -532,6 +532,12 @@ SAMPLES: list[tuple[str, str | None, dict[str, str | None]]] = [
     ("FAILED tests/test_core.py::test_fails_assert - assert (1 + 1) == 3", None, {}),
     ("tests\\test_core.py ..FF                                                  [100%]", None, {}),
     ("  C:\\p\\tests\\test_x.py:5: DeprecationWarning: old", None, {}),
+    # the -ra skip summary of a green run (every preset's addopts): the pytest matchers read an
+    # error on a file named "SKIPPED [1] tests/test_skip.py", or on a stage module's src/ copy
+    ("SKIPPED [1] tests/test_skip.py:5: ConnectionError: the service is not running", None, {}),
+    ("SKIPPED [12] tests\\test_skip.py:4: RuntimeError on this backend", None, {}),
+    ("SKIPPED [1] /home/dev/p1/.build/mypyc-dev/stage/myapp/app.py:3: ValueError: no display", None, {}),
+    ("SKIPPED [1] myapp/core/bench.py:3: assert not on this backend", None, {}),
     # ruff summaries and the runner's own lines
     ("Found 2 errors.", None, {}),
     ("[*] 1 fixable with the `--fix` option.", None, {}),

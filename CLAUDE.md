@@ -2972,7 +2972,10 @@ instead. Neovim opens its output on start and replaces a running instance (`uniq
   MYPY error and note (`path:line[:col]: error|note: msg  [code]`, backslash paths on Windows,
   "See https://..." notes skipped), MYPYC (stage-relative paths because `mypyc_build.py`
   chdirs into the stage, mapped to `${workspaceFolder}/src`), RULES (`RULES_RE`, section 5.3),
-  PYTEST (crash lines). Under mypyc (a task whose scan has both `pytest` and `mypyc`) pytest
+  PYTEST (crash lines; never the `-ra` skip summary of a green run, `SKIPPED [1] tests/x.py:5:
+  reason`: `vscode._NO_SKIP_SUMMARY` starts every pytest matcher, as `tasks.parse_line` skips it;
+  a reason such as `ConnectionError: ...` made an error on a file named `SKIPPED [1] tests/x.py`).
+  Under mypyc (a task whose scan has both `pytest` and `mypyc`) pytest
   imports the stage, so two more PYTEST matchers relative to `${workspaceFolder}/src` map
   `.build[/wsl]/mypyc-{dev,release}/stage/X` (relative or absolute) and the stage-relative path
   mypyc records for a compiled module (`<pkg>/core/x.py`) back to `src/`; the main one skips
