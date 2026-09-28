@@ -893,7 +893,9 @@ header rules (with detector tests proving each rule fires).
   does not exist; bad `[tasks]` entries; a file under `.build/` or `dist/` it may not write, left
   by another user: `cli._scratch_denied`; a command that needs a project, typed outside one:
   global mode, 5.2); 3 = missing requirement (uv, a uv older than
-  `envs.MIN_UV`, a program (or the interpreter a script's `#!` line names: `proc._not_found`),
+  `envs.MIN_UV`, a program (or the interpreter a script's `#!` line names: `proc._not_found`;
+  a `#!` line that ends in a carriage return, a CRLF checkout used from WSL, is named as that,
+  never as a missing `/bin/sh`: `test_cli_core.test_a_script_with_windows_line_endings_says_so`),
   a C compiler mypyc cannot start, an interpreter, Neovim/git with `--require`, the runner
   itself started on Python < 3.11 by `pyt.py`'s check; what uv itself reports missing, an
   interpreter it can neither find nor download or a program `uv run` cannot spawn (a `uv =

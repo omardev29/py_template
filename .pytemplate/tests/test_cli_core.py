@@ -646,6 +646,21 @@ def test_a_script_whose_interpreter_is_missing_names_it(tmp_path: Path) -> None:
         proc.run(["no-such-tool"], env=env, echo=False)
 
 
+@posix
+def test_a_script_with_windows_line_endings_says_so(tmp_path: Path) -> None:
+    """A script checked out with CRLF (a Windows checkout used from WSL): exec looks for the
+    interpreter "/bin/sh\\r", and the message named /bin/sh, which exists."""
+    (tmp_path / "tools").mkdir()
+    gen = tmp_path / "tools" / "gen"
+    gen.write_bytes(b"#!/bin/sh\r\necho generated\r\n")
+    gen.chmod(0o755)
+    with pytest.raises(PytError) as e:
+        proc.run(["tools/gen"], cwd=tmp_path, echo=False)
+    assert e.value.code == 3
+    assert "carriage return (Windows line endings)" in str(e.value) and "LF line endings" in str(e.value), str(e.value)
+    assert "was not found: /bin/sh" not in str(e.value)
+
+
 @pytest.mark.parametrize(("name", "message"), [("missing", "folder not found"), ("a-file", "not a folder")])
 def test_a_bad_working_folder_is_named(name: str, message: str, tmp_path: Path) -> None:
     (tmp_path / "a-file").write_text("x", encoding="utf-8")
