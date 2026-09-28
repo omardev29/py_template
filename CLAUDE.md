@@ -2198,7 +2198,11 @@ Formats:
   `SKIP_DIRS`; a broken symlink is a warning, and a folder it cannot list (entered but not read:
   mode 0311, another user's 0711) a `PytError` naming it (os.walk skipped it without a word: every
   build shipped it empty, and the sync deleted the copy an earlier build had made;
-  `test_sync_tree_refuses_a_folder_it_cannot_list`). A path that turned from file to folder (or back)
+  `test_sync_tree_refuses_a_folder_it_cannot_list`); so is a file it cannot read (`mypyc._source`:
+  another user's, one another program locks, a named pipe; it was an internal-error traceback in
+  every mypyc run and build), while an error on the copy's side (a file under `.build/` another
+  user left: `cli._scratch_denied`) and a full disk go on to `cli.main` as before
+  (`test_sync_tree_names_a_file_it_cannot_copy`). A path that turned from file to folder (or back)
   is replaced; a folder deleted from `src` goes with its caches (a `__pycache__` kept it
   importable as a namespace package). Extensions: only build outputs (`_mypyc_output`: a
   module in `owned`, a `*__mypyc` lib, or an extension next to its own `.py`) are never copied

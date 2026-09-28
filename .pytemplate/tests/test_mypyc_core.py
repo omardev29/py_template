@@ -1002,6 +1002,44 @@ def test_sync_tree_refuses_a_folder_it_cannot_list(tmp_path: Path, monkeypatch: 
     assert list(mypyc.walk(tmp_path / "nowhere")) == []  # a folder that is gone is no loss: nothing to copy
 
 
+def test_sync_tree_names_a_file_it_cannot_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file of src/ it cannot read (another user's 0600 after a sudo run, one another program
+    locks on Windows) ended run mypyc, test mypyc, compile and every build in an internal-error
+    traceback; the wheel method already named it. The copy's side, a file under .build/ another
+    user left, and a full disk go on to cli.main, which names them."""
+    import errno
+
+    src = _project(tmp_path / "src", {"p1/__init__.py": "X = 1\n", "p1/secret.txt": "s\n"})
+    secret = src / "p1" / "secret.txt"
+    real = mypyc.copy_writable
+
+    def unreadable(a: str, b: str) -> str:
+        if Path(a) == secret:
+            raise PermissionError(13, "Permission denied", a)
+        return real(a, b)
+
+    monkeypatch.setattr(mypyc, "copy_writable", unreadable)
+    with pytest.raises(PytError, match=r"^cannot copy .*secret\.txt: Permission denied$"):
+        mypyc.sync_tree(src, tmp_path / "stage")
+    for error in (PermissionError(13, "Permission denied", str(tmp_path / "stage2" / "p1" / "secret.txt")), OSError(errno.ENOSPC, "No space left on device")):
+
+        def fails(a: str, b: str, error: OSError = error) -> str:
+            raise error
+
+        monkeypatch.setattr(mypyc, "copy_writable", fails)
+        with pytest.raises(OSError) as caught:
+            mypyc.sync_tree(src, tmp_path / "stage2")
+        assert caught.value is error
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a named pipe (POSIX)")
+def test_sync_tree_names_a_named_pipe_of_src(tmp_path: Path) -> None:
+    src = _project(tmp_path / "src", {"p1/__init__.py": "X = 1\n"})
+    os.mkfifo(src / "p1" / "pipe.fifo")
+    with pytest.raises(PytError, match=r"^cannot copy .*pipe\.fifo: .*is a named pipe$"):
+        mypyc.sync_tree(src, tmp_path / "stage")
+
+
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX modes, as a user they bind (not root)")
 def test_sync_tree_refuses_a_folder_without_its_read_bit(tmp_path: Path) -> None:
     src = _project(tmp_path / "src", {"p1/__init__.py": "X = 1\n", "p1/data/table.json": "{}\n"})

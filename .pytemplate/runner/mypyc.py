@@ -19,9 +19,10 @@ import re
 import shutil
 import stat
 import uuid
-from collections.abc import Collection, Iterator
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 from . import envs, proc, render, ui
 from .config import Config, compiled_paths
@@ -224,6 +225,24 @@ def remove_tree(path: Path) -> None:
         shutil.rmtree(path)
 
 
+_T = TypeVar("_T")
+
+
+def _source(path: Path, step: Callable[[], _T]) -> _T:
+    """Run a step that reads the file `path` of src/: a file it cannot read (another user's, one
+    locked by another program, a named pipe) is one error naming it; it ended run mypyc, test
+    mypyc, compile and every build in an internal-error traceback. What fails on the copy's side
+    (a file under .build/ another user left: cli names it) and a full disk go on as they are."""
+    from .cli import NO_ROOM
+
+    try:
+        return step()
+    except OSError as e:
+        if e.errno in NO_ROOM or (e.filename is not None and os.fsdecode(e.filename) != os.fspath(path)):
+            raise
+        raise PytError(f"cannot copy {rel(path)}: {e.strerror or e}") from None
+
+
 def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
     """Copy src -> dst: only what changed; remove what was deleted (except mypyc's extensions).
 
@@ -254,7 +273,7 @@ def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
             ui.warn(f"{rel(path)}: broken symbolic link, not copied")
             continue
         seen.add(target)
-        st = path.stat()
+        st = _source(path, path.stat)
         if target.is_symlink():  # never written through (sync_tree makes no links)
             target.unlink()
         elif target.is_dir():  # a folder became a file
@@ -264,7 +283,7 @@ def sync_tree(src: Path, dst: Path, owned: Collection[str] = ()) -> int:
             tt = target.stat()
             if tt.st_size == st.st_size and tt.st_mtime_ns == st.st_mtime_ns:
                 continue
-        copy_writable(os.fspath(path), os.fspath(target))
+        _source(path, lambda: copy_writable(os.fspath(path), os.fspath(target)))
         changed += 1
     for path in sorted(dst.rglob("*"), reverse=True):  # children before their folder
         if path in seen or SKIP_DIRS & set(path.relative_to(dst).parts) or _mypyc_output(path, dst, owned):
