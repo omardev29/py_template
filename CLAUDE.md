@@ -689,7 +689,8 @@ header rules (with detector tests proving each rule fires).
   a raw non-UTF-8 byte shows up as `\udcXX`, PowerShell's re-encoded text as U+FFFD.
 - `./pyt selftest --shells [NAME,...] [--list] [--json] [--keep] [--project DIR]
   [--tests T1,...] [--jobs N] [--timeout S]` (`shells.selftest`; default jobs min(8, CPUs),
-  60 s per probe). Discovers the installed shells (Windows: cmd, powershell, pwsh, xonsh,
+  60 s per probe; `-h`/`--help` prints `shells.selftest_help` on stdout, exit 0, as the other
+  suites' argparse does: it was `unknown option -h`, exit 2). Discovers the installed shells (Windows: cmd, powershell, pwsh, xonsh,
   niubash, niubash-shx, git-bash/sh/dash, msys2-<msystem> login shells, msys2-shx, msys2-dash,
   Cygwin, busybox-w32, nu, fish, WSL distros; POSIX: sh, bash, dash, zsh, ksh, mksh, yash,
   busybox, fish, nu, pwsh, xonsh; `MSYS2_ROOT`/`CYGWIN_ROOT` point at non-standard installs).

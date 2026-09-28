@@ -142,6 +142,19 @@ def test_shells_json_report_counts_what_ran(probes: dict[tuple[str, str], str], 
     }  # fmt: skip
 
 
+@pytest.mark.parametrize("flag", ["-h", "--help"])
+def test_shells_help_is_the_suites_help(
+    probes: dict[tuple[str, str], str], flag: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`./pyt selftest --shells -h` said `unknown option -h` (exit 2), while -h after --nvim,
+    --e2e and --mutation prints that suite's help: its usage on stdout, exit 0, nothing probed."""
+    monkeypatch.setattr(shells, "run_test", lambda *a: pytest.fail("-h must not probe"))
+    assert cli.cmd_selftest(make(), ["--shells", "dash", flag, "--bogus"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith(f"usage: {shells.SELFTEST_USAGE}\n"), out
+    assert "--timeout S" in out and "T7 hints" in out, out
+
+
 def test_shells_list_runs_nothing(probes: dict[tuple[str, str], str], monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shells, "run_test", lambda *a: pytest.fail("--list must not probe"))
     assert shells.selftest(make(), ["--list"]) == 0

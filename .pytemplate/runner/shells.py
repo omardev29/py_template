@@ -1087,11 +1087,33 @@ def report_json(project: Path, shells: Sequence[Shell], results: Sequence[Result
 
 MAX_TIMEOUT = 86400  # a day per probe
 SELFTEST_USAGE = "./pyt selftest --shells [NAME,...] [--list] [--json] [--keep] [--project DIR] [--tests T1,...] [--jobs N] [--timeout S]"
+SELFTEST_OPTIONS = """
+./pyt __probe through every shell of this machine, or the NAMEs given (a prefix selects a
+family: msys2 = every msys2-* shell), then a table of the results; exit 1 on any FAIL.
+
+options:
+  NAME,...        the shells to test (default: every one found)
+  --list          list the shells found and test none
+  --json          the report (or the --list) as JSON on stdout
+  --keep          keep the scratch folder, and name it
+  --project DIR   probe the launchers of another copy of the project
+  --tests T1,...  the tests to run (default: all of them)
+  --jobs N        shells tested at once (default: min(8, CPUs))
+  --timeout S     seconds per probe (default: 60)
+"""
+
+
+def selftest_help() -> str:
+    """What `selftest --shells -h` prints: the usage, the options and the tests (this module's
+    docstring names them), like the argparse help of the other suites."""
+    tests = [line for line in (__doc__ or "").splitlines() if re.match(r"    T\d |              ", line)]
+    return f"usage: {SELFTEST_USAGE}\n{SELFTEST_OPTIONS}" + ("\ntests:\n" + "\n".join(tests) + "\n" if tests else "")
 
 
 @dataclass
 class Options:
     names: list[str] = field(default_factory=list)
+    help_only: bool = False
     list_only: bool = False
     as_json: bool = False
     keep: bool = False
@@ -1113,6 +1135,9 @@ def parse_options(args: Sequence[str]) -> Options:
                 raise PytError(f"{key} needs a value  (usage: {SELFTEST_USAGE})")
             return v
 
+        if key in ("-h", "--help"):  # the suite's help, as after --nvim, --e2e and --mutation
+            opts.help_only = True
+            return opts
         if key == "--list":
             opts.list_only = True
         elif key == "--json":
@@ -1190,6 +1215,9 @@ def _run_all(ctx: Context, shells: Sequence[Shell], tests: Sequence[str], jobs: 
 def selftest(cfg: Config, args: list[str]) -> int:
     """selftest --shells [NAME,...] [--list] [--json] [--keep] [--project DIR]: ./pyt __probe through every shell."""
     opts = parse_options(args)
+    if opts.help_only:
+        print(selftest_help(), end="")
+        return 0
     shells = select(discover(), opts.names)
     if opts.list_only:
         _list_shells(shells, opts.as_json)
