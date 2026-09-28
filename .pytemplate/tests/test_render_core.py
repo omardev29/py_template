@@ -499,6 +499,15 @@ def test_render_command_exit_codes(box: Sandbox, capsys: pytest.CaptureFixture[s
     assert code == 0
 
 
+def test_the_render_summary_names_every_file_render_writes() -> None:
+    """`./pyt help render` (and editor.json, the editors' task lists) left out .python-version,
+    the file render writes first and the launchers follow."""
+    summary = cli.COMMANDS["render"].summary
+    for path in render.outputs(config.load(set())):
+        name = ".vscode/" if path.startswith(".vscode/") else path.rsplit("/", 1)[-1]
+        assert name in summary, (name, summary)
+
+
 def test_render_check_fails_on_an_outdated_pyproject(box: Sandbox, capsys: pytest.CaptureFixture[str]) -> None:
     render.apply(CFG)
     box.pyproject.write_text(pyproject_text(preset_cfg(extra={"python": {"cpython": "3.13"}})), encoding="utf-8")

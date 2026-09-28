@@ -114,7 +114,7 @@
     {
       "name": "render",
       "usage": "[--check] [--diff] [--force]",
-      "summary": "Regenerate the files derived from pytemplate.toml (.mypy.ini, .ruff.toml, pyrightconfig.json, .vscode/, .lazy.lua, editor.json, ci.yml)",
+      "summary": "Regenerate the files derived from pytemplate.toml (.python-version, .mypy.ini, .ruff.toml, pyrightconfig.json, .vscode/, .lazy.lua, editor.json, ci.yml)",
       "group": "Mode"
     },
     {
