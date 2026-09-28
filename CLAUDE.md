@@ -755,7 +755,7 @@ header rules (with detector tests proving each rule fires).
 | `cmd_env.py` | `setup` (= `cmd_apply.apply(command="setup")`), `doctor` (`_tools`, then `_project` in a project, which calls `cmd_apply.doctor`, or `_machine` outside one, then the steps of both modes: `cmd_nvim.doctor`), `sync`, `lock`, `add`, `remove`, `clean` (`_env_dirs`, `_remove`, `_is_link`); `ensure_lock`; `_fix_exec_bit`; `_c_compiler` (the one setuptools runs: `$CC`, else the `.venv` Python's sysconfig CC), `_msvc(platform)`, `_xcode_problem`, `_long_paths`. |
 | `cmd_apply.py` | `./pyt apply [--force]` / `setup [--force]` (section 5.8): `make_plan` (every refusal before the first write), `apply`, `_print_plan` (--dry-run), the `applied` record (`load_record`, `save_record`, `trusted_record`, `project_record`, `record_of`, `rename_record`), `state_file`, `applied_state` / `_infer_preset` (the record, else `_traced`: a preset's traces in pyproject.toml, `_block_options`/`_unformat`: the options the managed block was written with, `_marks`: extra tables) / `applied_name` / `_other_package`, `dependency_changes` (`DepChanges`, `req_key`), `read_project`, `pending` + `doctor` (changes not applied yet), `reference_problems`, `unused_envs`, `_restore`. |
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `new`, the internal `__init` (`cmd_init`), and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
-| `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`, `stage_pythonpath`), `report`; `split_backend`; `only_flags`; `_profile_file`; `BASEDPYRIGHT`, `BASEDPYRIGHT_NODE`. |
+| `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`, `stage_pythonpath`), `report`; `split_backend`; `only_flags`; `_profile_file` and `config_arg` (ruff's `--config`, relative to ROOT: 6.2); `BASEDPYRIGHT`, `BASEDPYRIGHT_NODE`. |
 | `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `check_lock`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
 | `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys (`parse_key`, `check_key`, `targets_for`), `UV_PLATFORMS`/`host_floor`, `ensure_env`, `export_requirements`, `install_deps`, `drop_install_junk`, `has_native`, `skipped_requirements`, `copy_app`, `uses_tkinter`, `windowed`, `tree_bytes`; `nuitka.NUITKA`/`NUITKA_PYTHON`, `check_python`, `check_options`, `optimization_args` (`[deploy.nuitka]` lto/pgo); `pyz.check_parts`, `merge`. |
 | `shells.py` | `__probe`, launcher/shell doctor checks (`ps_policies`: the PowerShell execution policies, asked once per run; `BLOCKING_POLICIES`), `selftest --shells` (section 4.9). |
@@ -1768,9 +1768,13 @@ Formats:
 - `.lazy.lua` is a copy of `.pytemplate/templates/nvim/lazy.lua` (BOM stripped, CRLF -> LF)
   and must not depend on the config (section 12.2).
 - Path styles differ per tool: `.build/cfg/mypy-*.ini` uses relative `mypy_path = src` /
-  `files = src, tests`, so mypy must run with cwd = ROOT (the `proc.run` default); the ruff and
-  pyright copies under `.build/cfg` use absolute paths (`absolute=True`) because those tools
-  resolve paths relative to the config file; the compile-time `mypy.ini` (`render.mypy_ini`
+  `files = src, tests`, so mypy must run with cwd = ROOT (the `proc.run` default); the ruff
+  copies under `.build/cfg` hold paths relative to ROOT (`render.ruff_config(relative_to=ROOT)`)
+  and reach ruff as a `--config` relative to ROOT (`cmd_dev.config_arg`): ruff reads the paths
+  of a `--config` file against its cwd, ROOT for every caller, and expands `$NAME` and
+  `${NAME}` in its `src` and in that argument, so absolute ones failed in a project folder such
+  as `app$v2` (15.1); the pyright copies use absolute paths (`absolute=True`) because pyright
+  resolves paths relative to the config file; the compile-time `mypy.ini` (`render.mypy_ini`
   with `for_compile=` the folder it is written to: the mypyc profile dir, the wheel's work dir)
   only carries `mypy_path = $MYPY_CONFIG_FILE_DIR/<relative path to typings>`, because mypyc
   runs with cwd = stage and mypy splits `mypy_path` on `,` and `:` before expanding variables (an
@@ -4808,6 +4812,18 @@ ruff:
   path", 0.16 one `unformatted` diagnostic per file. Fix: `rename._UNFORMATTED` reads both for
   the rename tidy-up (5.7). Test: `test_rename.py::test_ruff_tidy_after_a_rename`. Goes: when
   the dev group requires ruff >= 0.16.
+- **ruff expands `~`, `$NAME` and `${NAME}` in the paths of a configuration file and in its
+  `--config` argument** (LIMITATION, documented for `src`, `extend` and `cache-dir`; ruff 0.16.9
+  does it for `--config` too), and reads the relative paths of a `--config` file against its
+  cwd (documented): the absolute paths of `.build/cfg/ruff-*.toml`
+  under a project folder such as `app$v2` made `check`, the checks of `build` and every commit's
+  hook fail ("does not point to a configuration file", "environment variable not found") and
+  skipped the rename tidy-up. Fix: `render.ruff_config(relative_to=ROOT)` in
+  `cmd_dev._profile_file`, and `cmd_dev.config_arg` for the `--config` of `run_checks`,
+  `hooks.check_ruff` and `rename.tidy_before`/`tidy_after`, which all start ruff in ROOT (6.2).
+  Test: `test_cli_core.py::test_check_runs_ruff_in_a_project_folder_named_like_a_variable`,
+  `test_hooks.py::test_real_ruff_runs_in_a_project_folder_named_like_a_variable`,
+  `test_rename.py::test_ruff_tidy_in_a_project_folder_named_like_a_variable`. Goes: never.
 
 Cosmic Ray (selftest --mutation, 13.1):
 - **ExceptionReplacer names a class the mutated module never sees, and fails on dotted ones**

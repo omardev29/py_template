@@ -1579,7 +1579,7 @@ class Tidy:
 def tidy_before(cfg: Config, plan_: Plan, root: Path | None = None) -> Tidy | None:
     """Before the rename: which rewritten Python files ruff accepts as they are (formatting, and
     the import order when the typing profile selects ruff's I rules). None: ruff cannot run."""
-    from .cmd_dev import _profile_file
+    from .cmd_dev import _profile_file, config_arg
 
     root = root or ROOT
     files = [f.path for f in _python_edits(plan_)]
@@ -1587,7 +1587,7 @@ def tidy_before(cfg: Config, plan_: Plan, root: Path | None = None) -> Tidy | No
         return None
     paths = [root / f for f in files]
     try:
-        config_file = _profile_file(cfg, cfg.profile_for(), "ruff")
+        config_file = config_arg(_profile_file(cfg, cfg.profile_for(), "ruff"))
         fmt_code, fmt_out = _ruff(cfg, ["format", "--check", "--config", config_file, "--force-exclude", "--output-format", "concise"], paths)
         lint_code, lint_out = _ruff(cfg, ["check", "--config", config_file, "--force-exclude", "--no-fix", "--output-format", "concise"], paths)
     except (PytError, OSError):
@@ -1606,7 +1606,7 @@ def tidy_after(cfg: Config, plan_: Plan, clean: Tidy | None, root: Path | None =
     """After the rename: sort the imports the new name moved (only when the typing profile selects
     ruff's I rules) and re-format, each only in the files that were clean before. Best effort: it
     never fails the rename."""
-    from .cmd_dev import _profile_file
+    from .cmd_dev import _profile_file, config_arg
 
     root = root or ROOT
     edits = _python_edits(plan_)
@@ -1620,7 +1620,7 @@ def tidy_after(cfg: Config, plan_: Plan, clean: Tidy | None, root: Path | None =
     formatted = [root / f.target for f in edits if f.path in clean.formatted]
     before = {t: t.read_bytes() for t in (*sortable, *formatted) if t.is_file()}
     try:
-        config_file = _profile_file(cfg, cfg.profile_for(), "ruff")
+        config_file = config_arg(_profile_file(cfg, cfg.profile_for(), "ruff"))
         if sortable:
             _ruff(cfg, ["check", "--config", config_file, "--force-exclude", "--fix-only", "--fixable", "I001", "--quiet"], sortable)
         if formatted:

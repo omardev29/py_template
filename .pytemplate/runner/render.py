@@ -303,12 +303,23 @@ def to_toml(data: dict[str, Any], prefix: str = "") -> str:
     return "\n".join(out).strip("\n")
 
 
-def ruff_config(cfg: Config, profile: str, *, absolute: bool = False) -> dict[str, Any]:
-    """`absolute`: for copies outside the root (ruff resolves paths relative to the file itself)."""
+def relative_path(path: Path, start: Path) -> str:
+    """`path` relative to the folder `start`, POSIX style (absolute on another Windows drive)."""
+    try:
+        return Path(os.path.relpath(path, start)).as_posix()
+    except ValueError:  # another drive
+        return path.as_posix()
+
+
+def ruff_config(cfg: Config, profile: str, *, relative_to: Path | None = None) -> dict[str, Any]:
+    """`relative_to`: for the copies under .build/cfg that the runner hands ruff with --config,
+    whose paths ruff reads against its working folder, `relative_to`, never against the file.
+    Never absolute: ruff expands ~, $NAME and ${NAME} in them, and the absolute paths of a
+    project folder named like app$v2 named a variable that is not set (section 15.1)."""
     data = load_profile(profile).get("ruff", {})
 
     def path(p: str) -> str:
-        return (ROOT / p).as_posix() if absolute else p
+        return p if relative_to is None else relative_path(ROOT / p, relative_to)
 
     select = list(data.get("select", []))
     lint: dict[str, Any] = {"select": select, "ignore": list(data.get("ignore", []))}

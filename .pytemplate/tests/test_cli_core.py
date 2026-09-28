@@ -1678,7 +1678,49 @@ def test_profile_files_are_the_rendered_configs(tmp_path: Path) -> None:
     assert mypy_ini == tmp_path / "cfg" / "mypy-strict.ini"
     assert mypy_ini.read_text(encoding="utf-8") == render.mypy_ini(cfg, "strict")
     assert ruff_toml == tmp_path / "cfg" / "ruff-warn.toml"
-    assert ruff_toml.read_text(encoding="utf-8") == render.to_toml(render.ruff_config(cfg, "warn", absolute=True)) + "\n"
+    assert ruff_toml.read_text(encoding="utf-8") == render.to_toml(render.ruff_config(cfg, "warn", relative_to=ROOT)) + "\n"
+
+
+def _venv_ruff() -> Path:
+    return ROOT / ".venv" / ("Scripts/ruff.exe" if sys.platform == "win32" else "bin/ruff")
+
+
+@pytest.mark.parametrize("folder", ["app$v2", "a${b}"])
+def test_check_runs_ruff_in_a_project_folder_named_like_a_variable(folder: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ruff expands $NAME and ${NAME} in its --config argument and in the paths of that file
+    (CLAUDE.md 15.1): with absolute paths, `check` (and the checks of `build`) failed in every
+    project folder named like app$v2 ("does not point to a configuration file", "environment
+    variable not found"). The real ruff of .venv runs as the runner starts it: in the project."""
+    ruff = _venv_ruff()
+    if not ruff.is_file():
+        pytest.skip("no ruff in .venv (./pyt setup)")
+    root = tmp_path / folder
+    (root / "src" / "pkg").mkdir(parents=True)
+    (root / "tests").mkdir()
+    source = root / "src" / "pkg" / "a.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "BUILD", root / ".build")
+    monkeypatch.setattr(project, "ROOT", root)  # code_dirs: the folders ruff checks
+    for name in ("v2", "b"):
+        monkeypatch.delenv(name, raising=False)
+    outputs: list[str] = []
+
+    def uv_run(_env: envs.PyEnv, argv: list[Any], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        if args[0] != "ruff":
+            return completed(args)  # mypy: not the point here
+        r = subprocess.run([str(ruff), *args[1:]], cwd=root, capture_output=True, text=True, timeout=120, check=False)
+        outputs.append(r.stdout + r.stderr)
+        return r
+
+    monkeypatch.setattr(envs, "uv_run", uv_run)
+    cfg = make({"typing": {"relaxed": "off"}})
+    assert cmd_dev.run_checks(cfg, "cpython", rules=False) is True, outputs
+    source.write_text("print(undefined_name)\n", encoding="utf-8")
+    assert cmd_dev.run_checks(cfg, "cpython", rules=False) is False
+    assert "F821" in outputs[-1], outputs[-1]
 
 
 @pytest.mark.parametrize(("relaxed", "exit_zero"), [("warn", True), ("strict", False), ("off", False)])

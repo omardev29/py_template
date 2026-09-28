@@ -76,7 +76,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import envs, lintc, mypyc, proc, render, ui
-from .cmd_dev import _profile_file, only_flags
+from .cmd_dev import _profile_file, config_arg, only_flags
 from .config import Config
 from .project import IS_WINDOWS, ROOT, STATE_FILE, TEMPLATE, native_path
 from .ui import PytError
@@ -1137,7 +1137,7 @@ def check_ruff(cfg: Config, files: Sequence[str], as_staged: Mapping[str, bytes]
     n = f"{len(files)} file{'s' if len(files) != 1 else ''}"
     note = f"; {len(staged_)} with unstaged changes, checked as staged" if staged_ else ""
     partial_hint = "\n(a file with unstaged changes was checked as staged: stage only the fix, e.g. git add -p)" if staged_ else ""
-    common: list[str | Path] = ["--config", config_file, "--force-exclude", "--output-format", "concise"]
+    common: list[str | Path] = ["--config", config_arg(config_file), "--force-exclude", "--output-format", "concise"]
     code, out = _run_ruff(cfg, ["check", *common, *(["--exit-zero"] if exit_zero else [])], whole, staged_)
     if code > 1:
         yield Result(False, "ruff check: could not run ruff (the output says why)", output=out)

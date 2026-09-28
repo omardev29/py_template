@@ -45,15 +45,23 @@ def split_backend(cfg: Config, args: list[str], *, allow_all: bool = False) -> t
 
 
 def _profile_file(cfg: Config, profile: str, kind: str) -> Path:
-    """Write the config of a specific profile to .build/cfg/ (it may not be the editor's active one)."""
+    """Write the config of a specific profile to .build/cfg/ (it may not be the editor's active one).
+    The ruff one holds paths relative to ROOT, where every caller starts ruff (`config_arg`)."""
     out = BUILD / "cfg" / f"{kind}-{profile}.{'ini' if kind == 'mypy' else 'toml'}"
     out.parent.mkdir(parents=True, exist_ok=True)
     if kind == "mypy":
         text = render.mypy_ini(cfg, profile)
     else:
-        text = render.to_toml(render.ruff_config(cfg, profile, absolute=True)) + "\n"
+        text = render.to_toml(render.ruff_config(cfg, profile, relative_to=ROOT)) + "\n"
     out.write_text(text, encoding="utf-8", newline="\n")
     return out
+
+
+def config_arg(path: Path) -> str:
+    """The --config argument of a ruff started in ROOT (proc.run's default folder): relative to
+    it, because ruff expands $NAME and ${NAME} in that argument too (section 15.1): absolute, it
+    named no file in a project folder such as app$v2, and check, build and the hook failed."""
+    return render.relative_path(path, ROOT)
 
 
 # --- run -----------------------------------------------------------------------------------------
@@ -114,7 +122,7 @@ def run_checks(cfg: Config, backend: str, *, rules: bool = True) -> bool:
     ok = True
 
     ruff_cfg = _profile_file(cfg, profile, "ruff")
-    ruff_args: list[str | Path] = ["ruff", "check", "--config", ruff_cfg]
+    ruff_args: list[str | Path] = ["ruff", "check", "--config", config_arg(ruff_cfg)]
     if data.get("ruff", {}).get("exit_zero"):
         ruff_args.append("--exit-zero")
     if envs.uv_run(tool, [*ruff_args, *code_dirs()], check=False).returncode != 0:

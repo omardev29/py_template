@@ -1974,3 +1974,33 @@ def test_ruff_tidy_after_a_rename(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     wrapped = (tests / "test_wrap.py").read_text(encoding="utf-8")
     assert all(len(line) <= 100 for line in wrapped.splitlines()), wrapped
     assert (tests / "test_mess.py").read_text(encoding="utf-8") == "from zzzzzzzzzzzz.core import bench\nZ=bench\n"
+
+
+def test_ruff_tidy_in_a_project_folder_named_like_a_variable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ruff expands $NAME in its --config argument and in the paths of that file (CLAUDE.md
+    15.1): with absolute paths the tidy-up of a project in a folder such as app$v2 was skipped
+    without a word. The real ruff of .venv, started in the project as rename starts it."""
+    ruff = ROOT / ".venv" / ("Scripts/ruff.exe" if sys.platform == "win32" else "bin/ruff")
+    if not ruff.is_file():
+        pytest.skip("no ruff in .venv (./pyt setup)")
+    root = tmp_path / "app$v2"
+    root.mkdir()
+    _write_project(root, "script", "zzz")
+    for module, name, value in ((render, "ROOT", root), (cmd_dev, "ROOT", root), (cmd_dev, "BUILD", root / ".build"), (rename, "_RUNNER_CWD", root)):
+        monkeypatch.setattr(module, name, value)
+    monkeypatch.delenv("v2", raising=False)
+
+    def uv(_env: envs.PyEnv, argv: list[Any], *, cwd: Path, **_kw: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        return subprocess.run([str(ruff), *args[args.index("ruff") + 1 :]], cwd=cwd, capture_output=True, text=True, timeout=120, check=False)
+
+    monkeypatch.setattr(envs, "uv", uv)
+    long = "from zzz.core.bench import __name__ as bench_module_name_that_fills_the_line_up_to_a_hundred_cols\n"
+    wrap = root / "tests" / "test_wrap.py"
+    wrap.write_text(long + "\nY = bench_module_name_that_fills_the_line_up_to_a_hundred_cols\n", encoding="utf-8")
+    planned = rename.plan(root, "zzz", "zzzzzzzzzzzz")
+    clean = rename.tidy_before(_load(root), planned, root)
+    assert clean is not None and "tests/test_wrap.py" in clean.formatted
+    rename.apply_plan(root, planned)
+    rename.tidy_after(rename.validate_config(planned.config.new), planned, clean, root)
+    assert all(len(line) <= 100 for line in wrap.read_text(encoding="utf-8").splitlines())

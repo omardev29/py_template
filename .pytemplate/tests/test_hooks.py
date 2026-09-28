@@ -1766,6 +1766,51 @@ def test_real_ruff_accepts_the_hook_arguments(tmp_path: Path, monkeypatch: pytes
     assert code == 0, out
 
 
+def test_real_ruff_runs_in_a_project_folder_named_like_a_variable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ruff expands $NAME in its --config argument and in the paths of that file (CLAUDE.md
+    15.1): with absolute paths, every commit that staged a Python file of a project in a folder
+    such as app$v2 was blocked with "could not run ruff". The real ruff of .venv, started in the
+    project as the hook starts it (uv's part faked: `uv run --frozen ruff ARGS` is ruff ARGS)."""
+    ruff = _venv_ruff()
+    if not ruff.is_file():
+        pytest.skip("no ruff in .venv (./pyt setup)")
+    root = tmp_path / "app$v2"
+    (root / "src" / "pkg").mkdir(parents=True)
+    source = root / "src" / "pkg" / "a.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "BUILD", root / ".build")
+    monkeypatch.setattr(hooks, "ROOT", root)
+    monkeypatch.delenv("v2", raising=False)
+
+    def tail(argv: Sequence[object]) -> list[str]:
+        args = [str(a) for a in argv]
+        return [str(ruff), *args[args.index("ruff") + 1 :]]
+
+    def uv(_env: envs.PyEnv, argv: Sequence[object], **_kw: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(tail(argv), cwd=root, capture_output=True, text=True, timeout=120, check=False)
+
+    def run_bytes(argv: Sequence[str], *, cwd: Path, env: object, data: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(tail(argv), cwd=cwd, input=data, capture_output=True, timeout=120, check=False)
+
+    monkeypatch.setattr(envs, "uv", uv)
+    monkeypatch.setattr(hooks, "_run_bytes", run_bytes)
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+    cfg = make()
+
+    def run(as_staged: dict[str, bytes] | None = None) -> dict[str, hooks.Result]:
+        return {r.label.split(":")[0]: r for r in hooks.check_ruff(cfg, ["src/pkg/a.py"], as_staged)}
+
+    res = run()
+    assert res["ruff check"].passed is True and res["ruff format"].passed is True, (res["ruff check"].output, res["ruff format"].output)
+    source.write_text("print(y)\n", encoding="utf-8")
+    res = run()
+    assert res["ruff check"].passed is False and "F821" in res["ruff check"].output
+    res = run({"src/pkg/a.py": b"print(z)\n"})  # the staged version, on stdin
+    assert res["ruff check"].passed is False and "F821" in res["ruff check"].output
+
+
 NAME_DISPATCH_HOOK = """{shebang}
 . "$(dirname "$0")/helper.sh"
 case $(basename "$0") in
