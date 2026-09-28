@@ -1234,7 +1234,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   read as an empty answer, the failed calls let "generated files staged", "config files staged
   together" and the launcher mode pass a commit they had to block
   (`test_hooks.test_the_checks_fail_whatever_pathspec_variables_the_user_exported`,
-  `test_a_git_call_that_fails_stops_the_hook_with_gits_message`).
+  `test_a_git_call_that_fails_stops_the_hook_with_gits_message`). A submodule is never read as
+  a file: `hooks.worktree_changes` passes `--ignore-submodules=all` (its checkout is no content
+  of the commit, and `git cat-file` cannot read a gitlink: a staged submodule that had moved on
+  stopped the hook, `test_a_staged_submodule_that_moved_on_is_skipped_like_a_folder`).
   In ~0.3 s: ruff (active typing profile, `exit_zero` honoured) and `ruff format --check` on
   staged `.py/.pyi` under the code dirs via `uv run --quiet --frozen` (a stale lock is the lock
   check's finding; an exit code other than 0/1 is "could not run ruff", without a fmt hint,

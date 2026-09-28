@@ -1856,7 +1856,7 @@ def test_a_git_call_that_fails_stops_the_hook_with_gits_message(tmp_path: Path, 
     (p / "pyt").write_bytes(b"#!/bin/sh\necho later\n")  # unstaged on top: checked as staged
     staged = hooks.staged_files(repo)
     fails = {
-        "worktree": lambda a: a == ("diff", "--name-only", "--no-renames", "-z"),
+        "worktree": lambda a: a[:2] == ("diff", "--name-only") and "--" not in a,
         "unstaged": lambda a: a[:2] == ("diff", "--name-only") and "--" in a,
         "untracked": lambda a: a[:2] == ("ls-files", "--others"),
         "modes": lambda a: a[:2] == ("ls-files", "-s"),
@@ -1987,6 +1987,29 @@ def test_checks_language_guard_in_the_template_repo(tmp_path: Path, tools: Tools
     # the staged version counts: fixing the working tree without `git add` does not pass
     (repo.project / "notes.md").write_bytes(b"# translated\n")
     assert results(make(), repo, staged, template_repo=True)["language guard"].passed is False
+
+
+@needs_git
+def test_a_staged_submodule_that_moved_on_is_skipped_like_a_folder(tmp_path: Path, tools: Tools) -> None:
+    """A submodule's own checkout is no content of the commit: `git diff` listed a staged
+    submodule that had moved on as changed, its staged content was then asked of `git cat-file`,
+    which cannot read a gitlink, and the hook stopped every such commit of the template."""
+    repo, _ = staged_project(tmp_path, {"ok.md": b"# fine\n"})
+    lib = repo.project / "lib"
+    lib.mkdir()
+    git(lib, "init", "-q")
+    (lib / "a").write_text("a\n", encoding="utf-8")
+    git(lib, "add", "a")
+    git(lib, "commit", "-q", "--no-verify", "-m", "a")
+    first = git(lib, "rev-parse", "HEAD").stdout.strip()
+    git(repo.top, "update-index", "--add", "--cacheinfo", f"160000,{first},proj/lib")  # the submodule, staged
+    (lib / "b").write_text("b\n", encoding="utf-8")
+    git(lib, "add", "b")
+    git(lib, "commit", "-q", "--no-verify", "-m", "b")  # and its checkout moved on
+    staged = hooks.staged_files(repo)
+    assert "lib" in staged
+    guard = results(make(), repo, staged, template_repo=True)["language guard"]
+    assert guard.passed is True, guard
 
 
 def test_language_guard_loads_without_pytest(monkeypatch: pytest.MonkeyPatch) -> None:

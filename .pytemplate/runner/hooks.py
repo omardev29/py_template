@@ -1150,8 +1150,10 @@ def unstaged_files(repo: Repo, paths: Sequence[str]) -> list[str]:
 
 def worktree_changes(repo: Repo) -> set[str]:
     """Return the project files whose working tree differs from the index (unstaged edits and
-    files deleted from the working tree), relative to the project."""
-    out = _git_output(repo, "diff", "--name-only", "--no-renames", "-z")
+    files deleted from the working tree), relative to the project. Never a submodule: its own
+    checkout is no content of this commit, and git cat-file cannot read a gitlink (staged_blob
+    stopped the hook on a staged submodule that had moved on)."""
+    out = _git_output(repo, "diff", "--name-only", "--no-renames", "--ignore-submodules=all", "-z")
     return set(project_paths(repo.prefix, out.split("\0"), ignore_case=repo.ignore_case))
 
 
