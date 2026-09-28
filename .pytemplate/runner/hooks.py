@@ -627,16 +627,31 @@ def _cd(words: list[str], cwd: Path | None) -> Path | None:
     return Path(os.path.normpath(target if target.is_absolute() else cwd / target))
 
 
+# Programs that run the command after them (`exec ./pyt hooks run`, `env X=1 ./pyt ...`)
+_RUNNERS = frozenset({"exec", "env", "time", "nohup"})
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _before_the_program(word: str) -> bool:
+    """Whether `word` may come before the program a command runs: a keyword (`if`, `!`), a
+    shell or a program that runs it (`sh`, `/bin/bash`, `exec`, `env`), one of their options,
+    or a variable assignment. Any other word is the program (`echo`, `printf`)."""
+    name = word.rsplit("/", 1)[-1]
+    return word in _BEFORE_CD or name in _RUNNERS or name in (*SHELLS, "zsh") or word.startswith("-") or _ASSIGNMENT.match(word) is not None
+
+
 def _calls_launcher(words: list[str], repo: Repo, cwd: Path | None) -> bool:
     """Whether a command calls this project's launcher with `hooks run` (`sh ./pyt hooks run`,
-    `./pyt -q hooks run`: the launcher's global options come before the command)."""
+    `./pyt -q hooks run`: the launcher's global options come before the command). The launcher
+    must be the program the command runs: `echo Tip: also run ./pyt hooks run` only mentions
+    it, and counted as running the checks."""
     for i in range(1, len(words) - 1):
         if words[i : i + 2] != ["hooks", "run"]:
             continue
         j = i - 1
         while j > 0 and words[j] in _GLOBAL_OPTIONS:
             j -= 1
-        if words[j] not in _GLOBAL_OPTIONS and _is_this_launcher(words[j], repo, cwd):
+        if words[j] not in _GLOBAL_OPTIONS and _is_this_launcher(words[j], repo, cwd) and all(map(_before_the_program, words[:j])):
             return True
     return False
 

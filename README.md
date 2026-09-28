@@ -1544,7 +1544,8 @@ only deletes files is checked too).
   `pre_commit = false`, removes it). A third project cannot be chained that way. A project that
   the enclosing repository ignores gets no hook. Linked worktrees share the hook. A hook of your
   own counts as running the checks only when a command that is not a comment calls this
-  project's `pyt` with `hooks run`. Global options may come first (`sh ./pyt -q hooks run`).
+  project's `pyt` with `hooks run` (`pyt` is the program it runs: `echo ./pyt hooks run` only
+  mentions it). Global options may come first (`sh ./pyt -q hooks run`).
   A relative path is read from the top of the repository, where git runs hooks, or from the
   folder a `cd` moved to (`cd apps/a && ./pyt hooks run`). A path built from a variable or
   `$(...)` cannot be checked, so it counts.

@@ -852,6 +852,11 @@ def test_calls_means_this_projects_launcher_on_a_live_line(tmp_path: Path, capsy
         "sh ./apps/a/pyt -q status hooks run",  # not the hooks command
         "echo 'sh ./apps/a/pyt hooks run'",  # a string, not a call
         "sh ./apps/a/pyt hooks run-all",
+        # a mention of the launcher in another command's words: that program runs, not ./pyt
+        "npx lint-staged\necho Tip: also run ./apps/a/pyt hooks run",
+        "printf '%s\\n' ./apps/a/pyt hooks run",
+        "echo -n sh ./apps/a/pyt hooks run",
+        "git notes add -m ./apps/a/pyt hooks run",
     ]
     for body in not_ours:
         shared.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
@@ -886,6 +891,12 @@ def test_calls_means_this_projects_launcher_on_a_live_line(tmp_path: Path, capsy
         "if cd apps/a; then sh ./pyt -q hooks run; fi",
         "exec sh ./apps/a/pyt hooks run",
         "sh ./apps/a/pyt hooks run; status=$?",
+        # what may run the launcher: a shell with its options, env, assignments, keywords
+        "/bin/bash -e ./apps/a/pyt hooks run",
+        "env PT_X=1 sh ./apps/a/pyt hooks run",
+        "PT_X=1 ./apps/a/pyt hooks run",
+        "! ./apps/a/pyt hooks run && exit 1",
+        "command sh ./apps/a/pyt hooks run",
     ]
     for body in ours:
         shared.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")

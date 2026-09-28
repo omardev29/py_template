@@ -1164,7 +1164,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (`pre-commit.local` taken: `install --force` refuses): `hooks.chain_hint`/`chain_advice` then
   say so instead of suggesting `--force`. A hook pytemplate does not manage runs the checks
   ("calls") only with a command that is not a comment and calls THIS project's launcher with
-  `hooks run` (`hooks.runs_checks`: the script split into commands and words by
+  `hooks run`, the launcher being the program it runs (after only keywords, a shell,
+  `exec`/`env`/`time`/`nohup`, their options and variable assignments: `hooks._before_the_program`;
+  `echo Tip: also run ./pyt hooks run` counted) (`hooks.runs_checks`: the script split into commands and words by
   `hooks._shell_commands`, quotes and `$(...)` kept whole; `./pyt`'s global options may come
   before `hooks`; a relative launcher is resolved against the top, or the folder a `cd` before it
   moved to, a subshell's `cd` staying in it; a launcher or `cd` folder with a shell expansion
