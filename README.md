@@ -1028,9 +1028,10 @@ the package, `src/assets/` (as `<pkg>/assets`) and the other modules and package
 `compile.modules` names (a lone `src/fastbench.py`); any other module of `src/` stays out. It is built offline in the locked `.venv`
 (`uv build --no-build-isolation`). Its dependencies are the version ranges of
 `[project] dependencies`, not the exact versions of `uv.lock`. A mypyc wheel loads only in the
-CPython minor it was built for (`python.cpython`): install it with `uv tool install --python X.Y
-<file>.whl`, X.Y being that minor (the build prints the line), since `uv tool install` otherwise
-takes the newest CPython it has, whatever the wheel's `Requires-Python` (which names that minor).
+CPython minor it was built for (`python.cpython`): install it with
+`uv tool install --python X.Y <file>.whl`, X.Y being that minor (the build prints the line),
+since `uv tool install` otherwise takes the newest CPython it has, whatever the wheel's
+`Requires-Python` (which names that minor).
 
 ### nuitka
 
