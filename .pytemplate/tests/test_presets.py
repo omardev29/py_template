@@ -2644,6 +2644,64 @@ def test_flet_skeleton_draws_where_no_process_can_start(tmp_path: Path, monkeypa
     app._executor.cache_clear()
 
 
+def test_flet_skeleton_replaces_a_worker_that_died(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pool of the Draw handler was made once and kept: after its worker died (killed, out of
+    memory) it ran nothing more, and every later Draw failed with BrokenProcessPool until the
+    app restarted. A real worker, killed."""
+    import asyncio
+    import signal
+
+    if "flet" not in PRESETS:
+        pytest.skip("no flet preset")
+    app = _skeleton_package(tmp_path, monkeypatch, "flet", "demo.ui.app", {"flet": _fake_module("flet", **FAKE_FLET)})
+    app._executor.cache_clear()
+    first = app._executor()
+    if first is None:
+        pytest.skip("no worker process here")
+    try:
+        assert asyncio.run(app._render_png(8, 5, 1)).startswith(b"\x89PNG")
+        for pid in list(first._processes):
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        assert asyncio.run(app._render_png(8, 5, 1)).startswith(b"\x89PNG")  # in a new worker
+        assert app._executor() is not first
+    finally:
+        first.shutdown(wait=True)
+        if (last := app._executor()) is not None:
+            last.shutdown(wait=True)
+        app._executor.cache_clear()
+
+
+def test_flet_skeleton_draws_here_where_no_worker_ever_starts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pool that can be made but whose worker dies at once (a sandbox, a frozen app): a new
+    one is tried once, then the work runs in the event loop, as where no process can start."""
+    import asyncio
+    from concurrent.futures.process import BrokenProcessPool
+
+    if "flet" not in PRESETS:
+        pytest.skip("no flet preset")
+    app = _skeleton_package(tmp_path, monkeypatch, "flet", "demo.ui.app", {"flet": _fake_module("flet", **FAKE_FLET)})
+    made: list[Any] = []
+
+    class DyingPool:
+        def __init__(self, max_workers: int) -> None:
+            self.down = False
+            made.append(self)
+
+        def submit(self, *_: Any) -> Any:
+            raise BrokenProcessPool("A child process terminated abruptly")
+
+        def shutdown(self, wait: bool = True) -> None:
+            self.down = True
+
+    monkeypatch.setattr(app, "ProcessPoolExecutor", DyingPool)
+    app._executor.cache_clear()
+    try:
+        assert asyncio.run(app._render_png(8, 5, 1)) == app.fractal.render_png(8, 5, 1)
+        assert len(made) == 2 and all(pool.down for pool in made)  # a second one, once; both shut down
+    finally:
+        app._executor.cache_clear()
+
+
 def test_flet_skeleton_gives_the_button_back_when_drawing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncio
 

@@ -3155,7 +3155,10 @@ Per method:
   process can start (`flet build` for the web, Android, iOS: section 15.1) or the pool cannot be
   made (`_executor`: NotImplementedError without `multiprocessing.synchronize`, OSError where
   named semaphores fail, a read-only or missing `/dev/shm`; every Draw failed there), and the
-  button comes back in a `finally`. mypy overrides relax
+  button comes back in a `finally`. A pool whose worker died (killed, out of memory) runs
+  nothing more: `_render_png` drops it and tries a new one once, and when that one dies too
+  (a worker that never starts) the work runs in the event loop (every later Draw failed until
+  the app restarted: `test_flet_skeleton_replaces_a_worker_that_died`). mypy overrides relax
   `{pkg}.ui.*`. Wheel entry `{pkg}.ui.app:run`. Task `dev` (`flet run -d -r`) has
   `background = true`. `[tool.flet]` (read by `flet build` only, which embeds `copyright` in
   the app metadata): `org`, `company` and `copyright = "Copyright (C) {{name}}"` are
