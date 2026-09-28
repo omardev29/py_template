@@ -1043,21 +1043,24 @@ header rules (with detector tests proving each rule fires).
   valid `_pyz.json`, one app, one build, the platform of a pure part next to per-platform ones) and prints inputs and outputs (the `.pyz` and its
   `.cmd`).
 - `nvim trust`, `extras`, `bootstrap` and `sync` print what they would do.
-- `rename` runs the real checks (a dirty git tree is only a warning) and prints the move, each
+- `rename` runs the real checks (a dirty git tree is only a warning; the refusals of its re-lock,
+  `rename._refuse_what_the_lock_would`, section 5.7, too) and prints the move, each
   file with its reference count and sample lines, the pytemplate/pyproject lines, the lines left
   unchanged, the other files that mention the old name, what happens to `uv.lock`
-  (`rename._lock_forecast`: a new normalized project name or changed managed parts re-lock;
+  (`rename._lock_forecast` with `_lock_change`: a new normalized project name or changed managed parts re-lock;
   otherwise a read-only `uv lock --check` in the project, as the real run's `ensure_lock` asks:
   a stale lock is re-locked even by a case-only rename) and the generated files it would
   re-render (`render.apply(new_cfg)` in check mode: exactly what the real run writes). `hooks
   install`/`uninstall` only print.
 - `apply` and `setup` run every check and refusal of the real run (`cmd_apply.make_plan`: a
-  hand-edited preset, `render.check_pyproject`, the new name, the renamed pytemplate.toml; the
+  hand-edited preset, `render.check_pyproject`, the new name, the renamed pytemplate.toml, a
+  re-lock the user's UV_FROZEN or UV_LOCKED refuses, `_refuse_a_frozen_relock`, section 5.8; the
   dirty tree is only a warning; the PyPy 3.11 precheck runs read-only while `uv lock --check`
   passes, else a note says it waits for the re-lock) and print one row per step
   (`cmd_apply._print_plan`): app.name (then the rename plan, as `rename --dry-run` prints it),
   app.preset, `[preset.<name>]` (the `uv remove/add` it would run), pyproject.toml, uv.lock
-  ("would re-lock", or up to date by a read-only `uv lock --check`; a new project name re-locks
+  ("would re-lock" and why, `_relock_reason`, and that apply refuses it while UV_FROZEN or
+  UV_LOCKED is set; or up to date by a read-only `uv lock --check`; a new project name re-locks
   only when its normalized form changes), environments, git hook, generated files, then the
   unused-environment note and the reference warnings (for a rename, checked where the files
   are before the move).
@@ -1266,6 +1269,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   git", and so is a `.git` in or above the project with no git on PATH (`hooks.NO_GIT`,
   `hooks.git_missing_here`: a git GUI's own git; it was read as no repository, and a dirty tree
   was renamed without a word: `test_rename.test_git_changes_refuses_a_repository_git_is_missing_for`).
+  What `cmd_env.ensure_lock` would refuse after the writes is refused before them, in the dry
+  run too (`_refuse_what_the_lock_would`): managed pyproject parts it cannot rewrite
+  (`render.check_pyproject(new_cfg)`, a closing marker gone) and a re-lock (`_lock_change`)
+  under the user's UV_FROZEN or UV_LOCKED; both came once every file was renamed
+  (`test_rename.test_what_the_lock_would_refuse_is_refused_before_the_first_write`).
   Then: move `src/<old_pkg>/` first (the step that can fail on a locked file; case-only
   renames use two moves), write the files (`apply_plan`: each through a temporary file next to
   it and `os.replace` (`_replace_bytes` = `project.write_whole`: mode, owner and group kept, a
@@ -1440,7 +1448,14 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   deploy.wheel.entry still named the old package
   (`test_apply.test_a_package_folder_moved_by_hand_is_refused`). Without a record it cannot be
   told from an edited [project] name (a project upgraded with the template's pyproject.toml):
-  apply writes that line.
+  apply writes that line. A re-lock the user's UV_FROZEN or UV_LOCKED makes a no-op is refused
+  there too (`_refuse_a_frozen_relock`, with `_relock_reason`: the dependencies change, the
+  normalized project name, the managed parts, a stale lock) when the rename, the [project] name
+  line or the dependency edits come before it: ensure_lock refused it only after them, the app
+  renamed next to a stale uv.lock
+  (`test_apply.test_a_relock_the_users_frozen_lock_refuses_is_refused_before_the_first_write`);
+  without such a write ensure_lock's own refusal, after the managed parts are rewritten (it
+  alone knows whether the lock moves), leaves nothing changed (`_finish` puts pyproject.toml back).
 - Order of `apply`: dirty-tree check (rename only; `--force` skips it) -> the rename
   (`rename.report`, `tidy_before`, `apply_plan`, then the record under the new name: a later
   failure must not leave it naming the old app, which is no longer trusted) or the `[project]
@@ -1944,7 +1959,9 @@ Formats:
   under the user's `UV_FROZEN` or `UV_LOCKED` is refused, naming the variable
   (`cmd_env._refuse_a_frozen_lock`): with it `uv lock` writes nothing and exits 0 (UV_FROZEN
   only checks the lock's validity), and mode, apply and rename went on with a stale uv.lock;
-  refused, they put their files back.
+  refused, they put their files back. apply and rename make the refusal before their first
+  write, naming the change that needs the re-lock (`cmd_apply._refuse_a_frozen_relock`,
+  `rename._refuse_what_the_lock_would`): after it, the app stayed renamed.
 - `envs.sync` = `uv sync --locked --all-groups` (apply/setup, sync, mode, add, remove): every
   dependency group of `pyproject.toml` is installed, so `./pyt add --group G pkg` survives the
   next sync and reaches a fresh clone (an exact sync of the default groups removed it); `uv run`

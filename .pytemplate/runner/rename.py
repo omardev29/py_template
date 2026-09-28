@@ -1759,18 +1759,43 @@ def report(plan_: Plan, *, dry: bool) -> None:
         ui.detail(f"  skipped (binary or not UTF-8): {', '.join(plan_.binary)}")
 
 
-def _lock_forecast(new_cfg: Config, old_name: str, new_name: str) -> str:
-    """What the real run's cmd_env.ensure_lock does to uv.lock, for --dry-run (nothing is written;
-    the same normalized project name still re-locks a stale lock)."""
+def _lock_change(new_cfg: Config, old_name: str, new_name: str) -> str | None:
+    """Why the real run's cmd_env.ensure_lock re-locks uv.lock (None: it stays): the same
+    normalized project name still re-locks a stale lock. A PytError when `uv lock --check`
+    cannot run."""
     if presets._norm_name(old_name) != presets._norm_name(new_name):
-        return "would re-lock (uv lock): the project name changes"
+        return "the project name changes"
     if render.pyproject_outdated(new_cfg):
-        return "would re-lock (uv lock): the managed parts of pyproject.toml change"
+        return "the managed parts of pyproject.toml change"
+    r = envs.uv(envs.tool_env(new_cfg), ["lock", "--check"], cwd=ROOT, check=False, capture=True, echo=False)
+    return None if r.returncode == 0 else "uv.lock is not up to date"
+
+
+def _lock_forecast(new_cfg: Config, old_name: str, new_name: str) -> str:
+    """What the real run's cmd_env.ensure_lock does to uv.lock, for --dry-run (nothing is written)."""
     try:
-        r = envs.uv(envs.tool_env(new_cfg), ["lock", "--check"], cwd=ROOT, check=False, capture=True, echo=False)
+        why = _lock_change(new_cfg, old_name, new_name)
     except PytError as e:
         return f"cannot tell: uv lock --check could not run ({e})"
-    return "up to date (uv lock --check)" if r.returncode == 0 else "would re-lock (uv lock): uv.lock is not up to date"
+    return f"would re-lock (uv lock): {why}" if why is not None else "up to date (uv lock --check)"
+
+
+def _refuse_what_the_lock_would(new_cfg: Config, old_name: str, new_name: str) -> None:
+    """The refusals of cmd_env.ensure_lock that are known before the first write, made there (a
+    dry run makes them too): managed pyproject parts it cannot rewrite (broken markers, a key of
+    the user's between them: render.check_pyproject, as apply's make_plan asks), and a re-lock
+    under the user's UV_FROZEN or UV_LOCKED, with which `uv lock` writes nothing. Both came once
+    every file was renamed ("The files are already renamed ... ./pyt apply")."""
+    from .cmd_env import _lock_read_only, _refuse_a_frozen_lock  # imported where used, as ensure_lock is
+
+    try:
+        render.check_pyproject(new_cfg)
+        if _lock_read_only([]):
+            why = _lock_change(new_cfg, old_name, new_name)
+            if why is not None:
+                _refuse_a_frozen_lock(why)
+    except PytError as e:
+        raise PytError(f"rename: {e}\n  Nothing was changed", e.code) from None
 
 
 def needs_pypi(stderr: str) -> bool:
@@ -1855,6 +1880,7 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
         ui.warn(message)
     planned = plan(ROOT, old_name, new_name, generated=generated)
     new_cfg = validate_config(planned.config.new)
+    _refuse_what_the_lock_would(new_cfg, old_name, new_name)
     report(planned, dry=proc.DRY_RUN)
     if proc.DRY_RUN:
         ui.info(f"  uv.lock          {_lock_forecast(new_cfg, old_name, new_name)}")

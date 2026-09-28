@@ -628,7 +628,38 @@ def make_plan(cfg: Config) -> Plan:
         if project.name != cfg.app.name:
             rename.check_new_name(cfg, cfg.app.name, who="app.name", retry="another app.name in pytemplate.toml, then ./pyt apply")
             plan.name_text = _project_name_text(cfg, project)
+    _refuse_a_frozen_relock(plan)
     return plan
+
+
+def _relock_reason(plan: Plan, fresh: bool | None = None) -> str | None:
+    """Why apply re-locks (None: uv.lock stays as it is): the dependencies change, the normalized
+    project name changes (p -> P, or my_app -> My-App, changes no lock), the managed parts of
+    pyproject.toml change, or uv.lock is stale now (`fresh`, else a read-only `uv lock --check`)."""
+    cfg = plan.new_cfg or plan.cfg
+    if plan.deps:
+        return "the dependencies change"
+    renamed = plan.name_text is not None or plan.rename_plan is not None
+    if renamed and req_key(plan.project.name or "")[0] != req_key(cfg.app.name)[0]:
+        return "the project name changes"
+    if render.pyproject_outdated(cfg):
+        return "the managed parts of pyproject.toml change"
+    if fresh is None:
+        fresh = envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, capture=True, echo=False).returncode == 0
+    return None if fresh else "uv.lock is not up to date"
+
+
+def _refuse_a_frozen_relock(plan: Plan) -> None:
+    """Refuse, before the first write, the re-lock that cmd_env.ensure_lock refuses under the
+    user's UV_FROZEN or UV_LOCKED (uv lock writes nothing with them): it came once the app was
+    renamed, [project] name rewritten or the dependencies edited, and left the app renamed next to
+    a stale uv.lock. Only then: without such a write, ensure_lock's own refusal leaves nothing
+    changed (_finish puts pyproject.toml back), and it knows better whether the lock moves."""
+    if not cmd_env._lock_read_only([]) or (plan.rename_plan is None and plan.name_text is None and not plan.deps):
+        return
+    why = _relock_reason(plan)
+    if why is not None:
+        cmd_env._refuse_a_frozen_lock(why)
 
 
 def _dirty(plan: Plan, command: str, force: bool) -> None:
@@ -944,10 +975,12 @@ def _print_plan(plan: Plan, command: str, force: bool) -> None:
         if due
     ]
     rows.append(("pyproject.toml", f"would rewrite {', '.join(parts)}" if parts else "unchanged"))
-    # uv.lock holds the normalized project name: p -> P, or my_app -> My-App, changes no lock
-    renamed = (plan.name_text is not None or plan.rename_plan is not None) and req_key(plan.project.name or "")[0] != req_key(cfg.app.name)[0]
-    if render.pyproject_outdated(cfg) or plan.deps or renamed or not fresh:
-        lock = "would re-lock (uv lock)"
+    why = _relock_reason(plan, fresh)
+    frozen = cmd_env._lock_read_only([])  # before a rename make_plan refused it already
+    if why is not None and frozen:
+        lock = f"would re-lock (uv lock): {why}, which apply refuses while {frozen} is set (uv lock writes nothing with it)"
+    elif why is not None:
+        lock = f"would re-lock (uv lock): {why}"
     else:
         lock = "up to date (uv lock --check)"
     rows.append(("uv.lock", lock))

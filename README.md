@@ -468,7 +468,8 @@ content back: the mode does not change, and the same command can simply run agai
 | `backend.active`, `[typing]`, `[compile]`, `[vscode]`, `[tasks]`, `app.gui`, `app.assets` | Regenerates the generated files (most commands do it too). It warns when `compile.modules` or `app.assets` names something that does not exist. |
 | `[deploy]` and its tables | Nothing: `build` reads them. It warns when `deploy.exe.icon` or `deploy.upx.path` names a missing file. |
 
-Every check and refusal happens before the first write. When a dependency edit, the re-lock or
+Every check and refusal happens before the first write, a re-lock under your `UV_FROZEN` or
+`UV_LOCKED` included (with them `uv lock` writes nothing: unset the variable). When a dependency edit, the re-lock or
 the check of the PyPy Python (3.11 by default) fails, `pyproject.toml` and `uv.lock` get their
 old content back and nothing is recorded: fix the problem and run `apply` again. `--force` only skips the
 uncommitted-changes check of a rename. The summary ends
@@ -530,7 +531,9 @@ Symbolic links and junctions in `src/` and `tests/` are never followed: a warnin
 that mention the old name or point through it, to edit by hand.
 It refuses uncommitted changes without `--force` (a project fresh from `./pyt new` has no
 commit yet: commit first), also when it cannot check them (the project is in a git repository,
-but git is not on PATH: a git GUI's own git), and the names `new` refuses. A write that fails
+but git is not on PATH: a git GUI's own git), the names `new` refuses, and, before it writes
+anything, what its re-lock would refuse: a `[tool.uv]` block whose markers are broken, and a
+re-lock under your `UV_FROZEN` or `UV_LOCKED` (with them `uv lock` writes nothing). A write that fails
 puts every file back (each file is written to a temporary file first, so a full disk never
 leaves one half-written), and so do Ctrl+C, SIGTERM and SIGHUP while it writes; it says so when
 it could not.

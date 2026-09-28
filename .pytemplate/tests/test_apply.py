@@ -1288,6 +1288,61 @@ def test_a_package_folder_moved_by_hand_is_refused(tmp_path: Path, monkeypatch: 
     assert cmd_apply.pending(project.cfg()) == []
 
 
+@pytest.mark.parametrize("variable", ["UV_FROZEN", "UV_LOCKED"])
+@pytest.mark.parametrize("edit", ["app.name", "[project] name", "[preset.flet] version"])
+def test_a_relock_the_users_frozen_lock_refuses_is_refused_before_the_first_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], variable: str, edit: str
+) -> None:
+    """Under the user's UV_FROZEN or UV_LOCKED `uv lock` writes nothing, so ensure_lock refuses a
+    needed re-lock. apply made that refusal only after it had renamed the app (or rewritten
+    [project] name, or edited the dependencies): the app renamed next to a stale uv.lock, and the
+    dry run said "would re-lock". It is refused before the first write, in the dry run too."""
+    project, uv = _project(tmp_path, monkeypatch, "flet", "alpha")
+    assert _run(project) == 0
+    if edit == "app.name":
+        project.edit("app", "name", "beta")
+        why = "the project name changes"
+    elif edit == "[project] name":  # a copy of the template's pyproject.toml (an upgrade)
+        pyproject = project.root / "pyproject.toml"
+        pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "myapp"', 1), encoding="utf-8", newline="\n")
+        uv.locked = pyproject.read_bytes()  # the lock of that pyproject.toml
+        why = "the project name changes"
+    else:
+        project.edit("preset.flet", "version", "1.0.0")
+        why = "the dependencies change"
+    monkeypatch.setenv(variable, "1")
+    before, count = project.snapshot(), len(uv.calls)
+    for dry in (True, False):
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        with pytest.raises(PytError, match=f"uv.lock must follow pyproject.toml \\({re.escape(why)}\\), but {variable} is set") as e:
+            _run(project)
+        assert e.value.code == 2
+    assert project.snapshot() == before and uv.changing(count) == []
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    monkeypatch.delenv(variable)
+    capsys.readouterr()
+    assert _run(project) == 0  # unset: applied
+    assert cmd_apply.pending(project.cfg()) == []
+
+
+def test_the_dry_run_names_a_relock_the_users_frozen_lock_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Without a write before the lock (only the managed parts or a stale lock), ensure_lock
+    itself refuses and puts pyproject.toml back: the dry run says so on its uv.lock row."""
+    project, uv = _project(tmp_path, monkeypatch)
+    assert _run(project) == 0
+    uv.locked = b""  # uv.lock is stale
+    monkeypatch.setenv("UV_FROZEN", "1")
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    capsys.readouterr()
+    assert _run(project) == 0
+    assert "would re-lock (uv lock): uv.lock is not up to date, which apply refuses while UV_FROZEN is set" in capsys.readouterr().err
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    before = project.snapshot()
+    with pytest.raises(PytError, match="UV_FROZEN is set"):
+        _run(project)
+    assert project.snapshot() == before
+
+
 @pytest.mark.parametrize("record", [True, False])
 def test_a_name_of_another_package_in_src_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: bool) -> None:
     """app.name set by hand to the name of another package of the project (src/helpers/): apply

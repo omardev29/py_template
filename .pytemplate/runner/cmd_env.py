@@ -85,13 +85,14 @@ def _pypy_precheck(cfg: Config) -> None:
     cmd_apply.cmd_mode_precheck(cfg)
 
 
-def _refuse_a_frozen_lock() -> None:
-    """Refuse a re-lock that the user's UV_FROZEN or UV_LOCKED would turn into a no-op."""
+def _refuse_a_frozen_lock(why: str = "") -> None:
+    """Refuse a re-lock that the user's UV_FROZEN or UV_LOCKED would turn into a no-op; `why`
+    names the change that needs it (apply and rename refuse it before their first write)."""
     frozen = _lock_read_only([])
     if frozen:
         raise PytError(
-            f"uv.lock must follow pyproject.toml, but {frozen} is set, and with it `uv lock` writes "
-            f"nothing: unset {frozen} and run the command again"
+            f"uv.lock must follow pyproject.toml{f' ({why})' if why else ''}, but {frozen} is set, and with it "
+            f"`uv lock` writes nothing: unset {frozen} and run the command again"
         )
 
 

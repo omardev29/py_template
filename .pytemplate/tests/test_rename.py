@@ -1766,6 +1766,32 @@ def test_dry_run_predicts_the_lock_like_the_real_run(command_project: Path, monk
     assert "would re-lock" in lock_line("beta") and calls == []  # another project name: re-locked anyway
 
 
+@pytest.mark.parametrize("cause", ["UV_FROZEN", "UV_LOCKED", "broken markers"])
+def test_what_the_lock_would_refuse_is_refused_before_the_first_write(command_project: Path, monkeypatch: pytest.MonkeyPatch, cause: str) -> None:
+    """cmd_env.ensure_lock refuses a re-lock under the user's UV_FROZEN or UV_LOCKED (uv lock
+    writes nothing with them) and managed pyproject parts it cannot rewrite (the closing marker
+    gone): rename made those refusals once every file was renamed ("The files are already renamed
+    ... ./pyt apply"), and its dry run said "would re-lock". Both are refused before the first
+    write, in the dry run too, as apply refuses them in make_plan."""
+    root = command_project
+    if cause == "broken markers":
+        pyproject = root / "pyproject.toml"
+        text = pyproject.read_text(encoding="utf-8")
+        assert text.count("  # <<< pytemplate\n") == 1
+        pyproject.write_text(text.replace("  # <<< pytemplate\n", "\n"), encoding="utf-8", newline="\n")
+        message = "pyproject.toml: the [tool.uv] block managed by pytemplate is broken"
+    else:
+        monkeypatch.setenv(cause, "1")
+        message = f"uv.lock must follow pyproject.toml (the project name changes), but {cause} is set"
+    before = _everything(root)
+    for dry in (True, False):
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        with pytest.raises(PytError) as e:
+            rename.cmd_rename(_load(root), ["beta"])
+        assert str(e.value).startswith(f"rename: {message}") and str(e.value).endswith("Nothing was changed"), e.value
+        assert _everything(root) == before
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not found")
 def test_dirty_tree_is_refused_forced_and_only_warned_in_a_dry_run(command_project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     root = command_project
