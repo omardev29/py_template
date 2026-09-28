@@ -165,7 +165,9 @@ _pt_entry_in() {
 # $1 = this file as the shell named it. Sets _pt_root when its directory
 # holds a runner (_pt_entry_in). A symlink (~/bin/mypyt -> proj/pyt) is
 # followed to the launcher it names, at most 40 links; a relative target is
-# joined to its link's folder, and the kernel resolves the '..' in it.
+# joined to its link's folder, and the kernel resolves the '..' in it. A name
+# that is no file here (the shell itself, dash for a file sourced under
+# dash -c) names no folder of this file.
 _pt_from_launcher() {
     _pt_slashes "$1"
     _pt_link=$_pt_r
@@ -187,6 +189,9 @@ _pt_from_launcher() {
                 esac ;;
         esac
     done
+    if [ ! -f "$_pt_link" ]; then
+        return 1
+    fi
     case $_pt_link in
         */*) _pt_c=${_pt_link%/*} ;;
         *) _pt_c=. ;;
@@ -257,13 +262,19 @@ _pt_other=
 _pt_entry=pyt.py
 _pt_global=
 
-# bash and niubash name this file in $BASH_SOURCE (niubash's $0 is the
-# caller's); zsh in $_pt_self; everything else in $0; else walk up from $PWD.
-if [ -n "${BASH_SOURCE:-}" ] && _pt_from_launcher "$BASH_SOURCE"; then
-    :
-elif [ -n "$_pt_self" ] && _pt_from_launcher "$_pt_self"; then
-    :
-elif _pt_from_launcher "$0"; then
+# The shell names this file: zsh in $_pt_self, bash and niubash in
+# $BASH_SOURCE, the others in $0. Only the first name it gives counts: in a run
+# inside the calling shell (niubash, a sourced file) $0 is the caller's (niu,
+# or a script of another project), and its folder is not this file's. When
+# that folder holds no runner, walk up from $PWD.
+_pt_t=$_pt_self
+if [ -z "$_pt_t" ] && [ -n "${BASH_SOURCE:-}" ]; then
+    _pt_t=$BASH_SOURCE
+fi
+if [ -z "$_pt_t" ]; then
+    _pt_t=$0
+fi
+if _pt_from_launcher "$_pt_t"; then
     :
 else
     _pt_d=$_pt_pwd

@@ -901,6 +901,48 @@ def test_in_process_run_leaves_no_name_behind(name: str, case: str, tmp_path: Pa
 
 
 @needs_posix
+@pytest.mark.parametrize("name", ["bash", "zsh"])
+def test_an_in_process_run_runs_the_project_it_is_typed_in(name: str, tmp_path: Path, uv_dirs: dict[str, str]) -> None:
+    """niubash runs ./pyt inside the calling shell, where $0 is the caller's. The installed pyt
+    (its own folder holds no project) then took the folder of that $0 for its own: a helper
+    script of project A that runs `cd ../B/src && pyt ...` ran A's runner, whose commands then
+    changed the wrong project. The shell names the file it runs ($BASH_SOURCE, zsh's %x): only
+    that name counts, and the walk-up finds B. Simulated by sourcing the launcher from the script."""
+    argv = _shell_argv(name)
+    a, b = _copy_project(tmp_path / "A"), _copy_project(tmp_path / "B")
+    launcher, away = _outside(tmp_path)
+    script = a / "release.sh"
+    script.write_text(f"cd {q(str(b / 'src'))} || exit 9\nset -- __probe 5 0 x\n. {q(str(launcher))}\n", encoding="utf-8", newline="\n")
+    run = Run([*argv, script], away, _clean_env(__RUBASH_SHELL_NAME="1", **_nothing_installed(tmp_path), **uv_dirs))
+    where = f"stdout={run.out!r} stderr={run.err!r}"
+    assert run.rc == 5 and run.probe and run.probe["argv"] == ["x"], where
+    assert run.probe["root"] == str(b) and run.probe["caller_cwd"] == str(b / "src"), where
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not hasattr(os, "geteuid") or os.geteuid() != 0, reason="needs root to make files another user owns")
+@pytest.mark.parametrize("name", ["bash", "dash", "busybox", "ksh", "mksh", "yash"])
+def test_an_in_process_run_never_takes_the_callers_folder_for_its_own(name: str, tmp_path: Path) -> None:
+    """Under `niu -c "pyt help"` $0 is `niu`: the installed pyt took the current folder for its
+    own and ran the .pytemplate/pyt.py there without the ownership rule of the walk-up (at C:\\,
+    one any user may create). A name that is no file of that folder names no folder of the
+    launcher: the walk-up decides, and refuses another user's runner."""
+    import pwd
+
+    argv = _shell_argv(name)
+    nobody = pwd.getpwnam("nobody")
+    shared = tmp_path / "shared"
+    entry = shared / ".pytemplate" / "pyt.py"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("print('PWNED')\n", encoding="utf-8")
+    for path in (shared, entry.parent, entry):
+        os.chown(path, nobody.pw_uid, nobody.pw_gid)
+    launcher, _ = _outside(tmp_path)
+    env = _clean_env(__RUBASH_SHELL_NAME="1", PTCMD=f"set -- help; . {q(str(launcher))}", **_nothing_installed(tmp_path))
+    run = Run([*argv, "-c", 'eval "$PTCMD"', "niu"], shared, env)  # $0 = niu, as under niu -c
+    assert run.rc == 2 and "is not yours" in run.err and "PWNED" not in run.out + run.err, run.out + run.err
+
+
+@needs_posix
 def test_the_no_uv_case_runs_in_a_folder_that_is_not_ascii(tmp_path: Path) -> None:
     """`./pyt selftest` must pass in a project folder that is not ASCII (`My Game e-acute`):
     the no-uv cases build their environment from scratch, and without the caller's locale yash

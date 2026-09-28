@@ -352,8 +352,15 @@ header rules (with detector tests proving each rule fires).
   (and no other user's project), `_pt_installed` names the installed template (section 4.1,
   empty when nothing names it) and `_pt_global=1` goes with it, under the same `_pt_foreign`
   rule.
-- Root discovery: `$BASH_SOURCE` -> zsh `${(%):-%x}` (read through `eval` so dash never parses
-  it) -> `$0` -> walk up from `$PWD`. The walk stops at `/`, `C:` and `C:/`; relative
+- Root discovery: the first name the shell gives for this file, zsh `${(%):-%x}` (read through
+  `eval` so dash never parses it), else `$BASH_SOURCE`, else `$0`; when its folder holds no
+  runner, walk up from `$PWD`. Only that first name counts, and it must name a file there
+  (`_pt_from_launcher`): in a run inside the calling shell (niubash, a sourced file) `$0` is the
+  caller's (`niu` under `-c`, or a script of another project), and its folder was taken for the
+  launcher's without the walk-up's ownership rule: at `C:\` a `.pytemplate\pyt.py` any user may
+  create ran, and a helper at project A's root running `cd ../B/src && pyt ...` ran A's runner
+  (`test_an_in_process_run_never_takes_the_callers_folder_for_its_own`, root only;
+  `test_an_in_process_run_runs_the_project_it_is_typed_in`). The walk stops at `/`, `C:` and `C:/`; relative
   candidates (`./`, `../`) are folded against `$PWD`, but the folded path is used only when it
   holds `.pytemplate/pyt.py`: `$PWD` is logical, and below a symlinked folder its `..` is
   not the folder the kernel found `../pyt` in; then the relative path stays (uv resolves it
