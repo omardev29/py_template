@@ -1194,8 +1194,27 @@ def test_quiet_still_lists_what_must_be_reviewed(tmp_path: Path, monkeypatch: py
     rename.report(planned, dry=False)
     err = capsys.readouterr().err
     assert "left unchanged" in err and "src/beta/extra.py:5: return alpha.core" in err
-    assert "notes.md also mention 'alpha'" in err
+    assert "notes.md also mentions 'alpha'" in err
     assert "==> rename" not in err  # the progress stays hidden
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_the_lists_of_paths_agree_with_their_number(tmp_path: Path, capsys: pytest.CaptureFixture[str], count: int) -> None:
+    """The usual list after a rename of a project made with new is one file, README.md: it said
+    "README.md also mention 'p1' (edit them by hand...)". The verb and the pronoun follow the
+    number of paths, in the three lists."""
+    _write_project(tmp_path, "script", "alpha")
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    paths = ["README.md", "docs/guide.md"][:count]
+    planned.mentions, planned.linked, planned.unreadable = list(paths), list(paths), list(paths)
+    capsys.readouterr()
+    rename.report(planned, dry=True)
+    err = capsys.readouterr().err
+    shown = ", ".join(paths)
+    s, them = ("s", "it") if count == 1 else ("", "them")
+    assert f"{shown} also mention{s} 'alpha' (edit {them} by hand if needed)" in err, err
+    assert f"(symbolic links or junctions: their targets may be shared): {shown} mention{s} 'alpha' or point{s} through it: edit {them} by hand" in err, err
+    assert f"(not UTF-8 text): {shown} mention{s} 'alpha': edit {them} by hand" in err, err
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes: POSIX")

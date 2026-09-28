@@ -1724,6 +1724,12 @@ def _samples(changes: list[tuple[int, str, str]], limit: int) -> None:
         ui.info(f"      ... {len(changes) - limit} more line(s)")
 
 
+def _agreement(paths: Sequence[str]) -> tuple[str, str]:
+    """The verb ending and the pronoun for a list of paths: ("s", "it") for one ("README.md also
+    mentions"), ("", "them") for more."""
+    return ("s", "it") if len(paths) == 1 else ("", "them")
+
+
 def report(plan_: Plan, *, dry: bool) -> None:
     n = plan_.names
     pkg = f"package {n.old_pkg} -> {n.new_pkg}" if n.old_pkg != n.new_pkg else f"package {n.new_pkg} unchanged"
@@ -1759,16 +1765,19 @@ def report(plan_: Plan, *, dry: bool) -> None:
             ui.report(f"    ... {len(kept) - 10} more")
     if plan_.mentions:
         shown = ", ".join(plan_.mentions[:10]) + (f" and {len(plan_.mentions) - 10} more" if len(plan_.mentions) > 10 else "")
-        ui.report(f"  not changed      {shown} also mention '{n.old_name}' (edit them by hand if needed)")
+        s, them = _agreement(plan_.mentions)
+        ui.report(f"  not changed      {shown} also mention{s} '{n.old_name}' (edit {them} by hand if needed)")
     if plan_.linked:
         paths = ", ".join(_target(p, plan_.move) for p in plan_.linked)
+        s, them = _agreement(plan_.linked)
         ui.warn(
-            f"not rewritten (symbolic links or junctions: their targets may be shared): {paths} mention "
-            f"'{n.old_name}' or point through it: edit them by hand"
+            f"not rewritten (symbolic links or junctions: their targets may be shared): {paths} mention{s} "
+            f"'{n.old_name}' or point{s} through it: edit {them} by hand"
         )
     if plan_.unreadable:
         paths = ", ".join(_target(p, plan_.move) for p in plan_.unreadable)
-        ui.warn(f"not rewritten (not UTF-8 text): {paths} mention '{n.old_name}': edit them by hand")
+        s, them = _agreement(plan_.unreadable)
+        ui.warn(f"not rewritten (not UTF-8 text): {paths} mention{s} '{n.old_name}': edit {them} by hand")
     if plan_.binary:
         ui.detail(f"  skipped (binary or not UTF-8): {', '.join(plan_.binary)}")
 
