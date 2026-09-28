@@ -1159,6 +1159,11 @@ def _run_ruff(cfg: Config, args: Sequence[str | Path], whole: Sequence[str], as_
     return code, "\n".join(outs)
 
 
+# What `ruff format --check` prints for a file it cannot parse, by path (concise) or on stdin; its
+# exit code is then 2, like a ruff that did not run, which the hook called "could not run ruff"
+_UNPARSABLE = re.compile(r": invalid-syntax: |^error: Failed to parse ", re.MULTILINE)
+
+
 def check_ruff(cfg: Config, files: Sequence[str], as_staged: Mapping[str, bytes] | None = None) -> Iterator[Result]:
     """ruff check and ruff format --check on the staged Python files `files`: the ones in
     `as_staged` (path -> staged content: they have unstaged changes) through stdin, the others
@@ -1186,7 +1191,10 @@ def check_ruff(cfg: Config, files: Sequence[str], as_staged: Mapping[str, bytes]
     else:
         yield Result(False, f"ruff check: {n} (profile '{profile}'{note})", "./pyt lint --fix fixes some; then git add" + partial_hint, output=out)
     code, out = _run_ruff(cfg, ["format", "--check", *common], whole, staged_)
-    if code > 1:
+    if code > 1 and _UNPARSABLE.search(out):  # ruff format exits 2 for a file it cannot parse
+        also = ", then ./pyt fmt" if "would be reformatted" in out or "Would reformat" in out else ""
+        yield Result(False, "ruff format: a staged file does not parse", f"fix the syntax error ruff check shows{also}; then git add" + partial_hint, output=out)
+    elif code > 1:
         yield Result(False, "ruff format: could not run ruff (the output says why)", output=out)
     elif code == 0:
         yield Result(True, f"ruff format: {n} formatted" + (f" ({note[2:]})" if note else ""))

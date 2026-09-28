@@ -1800,6 +1800,32 @@ def test_real_ruff_accepts_the_hook_arguments(tmp_path: Path, monkeypatch: pytes
     assert code == 0, out
 
 
+def test_real_ruff_format_of_a_staged_syntax_error_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`ruff format --check` exits 2 for a file it cannot parse, as for a ruff that did not run:
+    the hook said "could not run ruff (the output says why)" for an ordinary syntax error, which
+    pointed at uv or the environment (and lost the ./pyt fmt hint of the other files)."""
+    if not _venv_ruff().is_file():
+        pytest.skip("no ruff in .venv (./pyt setup)")
+    try:
+        proc.find_uv()
+    except PytError:
+        pytest.skip("uv not found")
+    monkeypatch.setattr(cmd_dev, "BUILD", tmp_path / "build")
+    cfg = make()
+    syn, ugly = tmp_path / "syn.py", tmp_path / "ugly.py"
+    syn.write_text("def f(:\n    pass\n", encoding="utf-8")
+    ugly.write_text("x=1\n", encoding="utf-8")
+
+    def run(files: list[Path], as_staged: dict[str, bytes] | None = None) -> hooks.Result:
+        return next(r for r in hooks.check_ruff(cfg, [str(f) for f in files], as_staged) if r.label.startswith("ruff format"))
+
+    for fmt in (run([syn]), run([ugly], {str(ugly): b"def f(:\n    pass\n"})):  # by path, and staged on stdin
+        assert fmt.passed is False and fmt.label == "ruff format: a staged file does not parse", (fmt.label, fmt.output)
+        assert "./pyt fmt" not in fmt.hint
+    fmt = run([syn, ugly])
+    assert fmt.label == "ruff format: a staged file does not parse" and "./pyt fmt" in fmt.hint
+
+
 def test_real_ruff_runs_in_a_project_folder_named_like_a_variable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """ruff expands $NAME in its --config argument and in the paths of that file (CLAUDE.md
     15.1): with absolute paths, every commit that staged a Python file of a project in a folder

@@ -1184,7 +1184,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (`diff.relative=true` made every path relative to the project folder, and all were dropped).
   In ~0.3 s: ruff (active typing profile, `exit_zero` honoured) and `ruff format --check` on
   staged `.py/.pyi` under the code dirs via `uv run --quiet --frozen` (a stale lock is the lock
-  check's finding; an exit code other than 0/1 is "could not run ruff", without a fmt hint). A
+  check's finding; an exit code other than 0/1 is "could not run ruff", without a fmt hint,
+  except `ruff format --check`'s exit 2 for a file it cannot parse, `hooks._UNPARSABLE`: "a
+  staged file does not parse", which pointed at uv or the environment before). A
   file with unstaged changes is checked in its STAGED version (`git cat-file --filters
   :0:<path>`, the checkout form, fed to ruff with `--stdin-filename`); a staged file missing
   from the working tree fails with `git restore` / `git rm --cached`; the launcher checks
