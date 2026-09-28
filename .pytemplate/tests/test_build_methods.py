@@ -776,6 +776,26 @@ def test_nuitka_build_itself_refuses_pgo_with_mypyc(sandbox: Path, monkeypatch: 
         nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_nuitka_refuses_a_project_folder_scons_would_expand(no_build: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dry_run: bool) -> None:
+    # SCons substitutes $NAME, ${...}, $$, $( and $) in the paths Nuitka hands it: under app$v2
+    # the build wrote app/.../main.build outside the project, and failed where that path could
+    # not be made. Refused before the checks and the payload, also in --dry-run
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    monkeypatch.setattr(nuitka, "IS_MACOS", False)
+    for folder, token in (("app$v2", "$v2"), ("a${x}b", "${x}"), ("cash$$", "$$"), ("x$(y", "$(")):
+        root = tmp_path / folder / "proj"
+        monkeypatch.setattr(nuitka, "ROOT", root)
+        monkeypatch.setattr(nuitka, "BUILD", root / ".build")
+        with pytest.raises(PytError) as e:
+            cmd_build.cmd_build(make({}), ["cpython", "--method", "nuitka"])
+        assert e.value.code == 2 and repr(token) in str(e.value) and "--method exe, portable or pyz" in str(e.value)
+    for folder in ("price$1", "cash$"):  # a '$' SCons leaves as it is: the build goes on
+        monkeypatch.setattr(nuitka, "BUILD", tmp_path / folder / "proj" / ".build")
+        with pytest.raises(AssertionError, match="went past"):
+            cmd_build.cmd_build(make({}), ["cpython", "--method", "nuitka"])
+
+
 def test_nuitka_dry_run_shows_the_flags(no_build: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(proc, "DRY_RUN", True)
     monkeypatch.setattr(nuitka, "IS_MACOS", False)
@@ -2755,7 +2775,7 @@ ALL_BACKENDS = {"backend": {"supported": ["cpython", "pypy", "mypyc"]}}
 
 
 @pytest.fixture
-def no_build(monkeypatch: pytest.MonkeyPatch) -> None:
+def no_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Every argument error must come before the checks and the payload (minutes of work)."""
 
     def must_not_run(*_a: Any, **_k: Any) -> Any:
@@ -2763,6 +2783,8 @@ def no_build(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(cmd_build, "run_checks", must_not_run)
     monkeypatch.setattr(cmd_build, "payload", must_not_run)
+    # nuitka.check_options refuses a project folder SCons would expand (app$v2): not this one
+    monkeypatch.setattr(nuitka, "BUILD", tmp_path / ".build")
 
 
 @pytest.mark.parametrize("dry_run", [False, True])

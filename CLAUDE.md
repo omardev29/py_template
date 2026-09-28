@@ -1013,7 +1013,8 @@ header rules (with detector tests proving each rule fires).
 - `render.apply` behaves like `--check` (writes nothing); `render.auto` prints "would update";
   `render` prints `would update: ...`.
 - `clean` prints `would remove X` per target. `build` validates its arguments, the pyz target
-  keys, the Nuitka pin and PGO rules (`nuitka.check_python`, `check_options`), the flet preset
+  keys, the Nuitka pin, PGO rules and a project folder SCons would expand
+  (`nuitka.check_python`, `check_options`), the flet preset
   and Developer Mode (`flet.check_options`), the portable launchers' env values
   (`portable.check`), the lock (`cmd_build.check_lock`: a read-only `uv lock --check`, a stale
   uv.lock fails) and the UPX binary (`upx.preflight`: a missing `deploy.upx.path` fails) as
@@ -2765,7 +2766,10 @@ Per method:
   uv gets an argv list) and prints `PGO_NOTE` (experimental in standalone/onefile per Nuitka;
   measured gain 10-15% on pure-Python loops only; a dependency with a pure-Python fallback such
   as msgpack may be profiled on that path). `nuitka.check_options` (from `cmd_build` before the
-  checks, also in `--dry-run`, and from `build`) refuses PGO with the mypyc backend (the
+  checks, also in `--dry-run`, and from `build`) refuses a project folder whose path holds what
+  SCons expands (`nuitka.SCONS_EXPANDS`: `$NAME`, `${...}`, `$$`, `$(`, `$)`; Nuitka hands SCons
+  the absolute `--output-dir`, and under `app$v2` SCons made `app/.../main.build` outside the
+  project and failed where that path could not be made, 15.1), PGO with the mypyc backend (the
   profiling run starts before `main.dist` holds the extension modules: ImportError, yet Nuitka
   reports success) and on macOS (Nuitka 4.2.2 has no clang profdata step); `--dry-run` prints
   `Nuitka options: ...` (the lto/pgo flags, then the extras). Standalone on Linux/macOS names the
@@ -5030,6 +5034,17 @@ Nuitka:
   compiled code stopped the build. Fix: `nuitka.includable` (10). Test:
   `test_build_methods.py::test_nuitka_includable_drops_what_the_build_env_cannot_locate`. Goes:
   never.
+- **SCons expands `$NAME` in the paths Nuitka hands it** (DEFECT, Nuitka 4.2.2: it passes the
+  absolute `--output-dir` paths to its SCons unescaped, and SCons substitutes `$NAME`, `${...}`,
+  `$$`, `$(`, `$)` in them): in a project under `app$v2` the build made
+  `app/<...>/.build/nuitka/<b>/main.build` OUTSIDE the project (another project's folder,
+  maybe), and failed ("File ... found where directory expected") where that path could not be
+  made. Up: none found. Fix: `nuitka.check_options` refuses such a project folder before any
+  work, also in `--dry-run` (`nuitka.SCONS_EXPANDS`; exit 2, naming exe, portable and pyz) (10).
+  A build in a `$`-free temporary folder would need its own uv project lookup and loses Nuitka's
+  crash report: not done. Test:
+  `test_build_methods.py::test_nuitka_refuses_a_project_folder_scons_would_expand`. Goes: when
+  Nuitka escapes `$` in the paths it gives SCons.
 - **A standalone binary named like the package folder** (DEFECT): `main.dist/<name>` is a FILE
   where the mypyc package folder `<pkg>/` must go: NotADirectoryError after minutes of work. Up:
   none found (cf. Nuitka/Nuitka#2483, a data file named like the binary). Fix: `<name>.bin` on

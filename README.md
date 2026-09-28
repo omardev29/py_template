@@ -901,7 +901,8 @@ portable and wheel refuse them (exit 2). Options are not abbreviated (`--meth` i
 `--method`), and a bare word is an error with a hint ("unknown backend 'mypy': did you mean
 mypyc?", "did you mean --method pyz?"). What can refuse a build without building refuses it
 before `check` and the payload: the arguments, the pyz target keys, the Nuitka pin and PGO
-rules, `--method flet` outside the flet preset or on Windows without Developer Mode, a stale
+rules, a nuitka build in a project folder SCons would expand (`app$v2`, [nuitka](#nuitka)),
+`--method flet` outside the flet preset or on Windows without Developer Mode, a stale
 `uv.lock`, and the UPX binary of a method that packs (a missing `deploy.upx.path`, or a failed
 download).
 `./pyt --dry-run build ...` runs the same refusals and prints the output name (for nuitka
@@ -1047,7 +1048,10 @@ Nuitka `4.2.2` (run with `uv run --with nuitka==4.2.2`, outside `uv.lock`) compi
 the dependencies it follows to C. It needs a C compiler on every backend and, on Linux,
 `patchelf`; a build takes minutes (4 to 13 measured for the script preset, about 25 for the flet
 preset). This Nuitka supports CPython up to 3.14: a newer `python.cpython` stops with exit 3
-unless Nuitka's own `--experimental=python3.X` is passed.
+unless Nuitka's own `--experimental=python3.X` is passed. Nuitka compiles through SCons, which
+reads `$NAME`, `${...}` and `$$` in a path as its own variables: in a project folder whose path
+holds one (`app$v2`) the build would write outside the project, so it stops before any work
+(exit 2); move the project, or build with exe, portable or pyz.
 
 - `[deploy.nuitka] mode`: `standalone` (a folder) or `onefile` (one file, zstd-compressed with
   CPython 3.14's `compression.zstd`).

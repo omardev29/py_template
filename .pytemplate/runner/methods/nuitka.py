@@ -89,9 +89,26 @@ def optimization_args(cfg: Config) -> list[str]:
     return args
 
 
+# What SCons (Nuitka compiles through it) substitutes in a path Nuitka hands it: $NAME, ${...},
+# $$, $( and $) (SCons.Subst._dollar_exps_str, the same in the SCons 3 and 4 Nuitka 4.2.2 ships).
+# Nuitka passes the absolute paths of --output-dir unescaped: under app$v2 SCons made
+# app/<...>/.build/nuitka/<b>/main.build OUTSIDE the project (another project's folder, maybe),
+# and the build failed where that path could not be made.
+SCONS_EXPANDS = re.compile(r"\$(?:[$()]|[_A-Za-z][.\w]*|\{[^}]*\}?)")
+
+
 def check_options(cfg: Config, backend: str) -> None:
-    """The PGO rules that depend on the build (config.validate checks the config-only ones:
-    app.gui, app.assets, pgo_args without pgo). cmd_build calls this before any work."""
+    """What the build refuses before any work (cmd_build calls this before the checks, also in
+    --dry-run): a project folder SCons would expand, and the PGO rules that depend on the build
+    (config.validate checks the config-only ones: app.gui, app.assets, pgo_args without pgo)."""
+    found = SCONS_EXPANDS.search(str(BUILD))
+    if found:
+        raise PytError(
+            f"nuitka: the project's folder holds {found[0]!r} ({ROOT}), which SCons (Nuitka compiles "
+            "through it) reads as a variable: the build would write outside the project, or fail.\n"
+            "  Move the project to a folder whose path has no '$', or build with --method exe, portable or pyz",
+            2,
+        )
     if not cfg.deploy.nuitka.pgo:
         return
     if backend == "mypyc":
