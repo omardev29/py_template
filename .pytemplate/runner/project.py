@@ -323,15 +323,21 @@ def scratch_name(name: str) -> str:
 def check_private_dir(path: Path, option: str) -> None:
     """Refuse (POSIX) a scratch folder that another user owns or can write to: the harnesses
     run code from it as this user, and its owner could put their own there between two steps.
-    Both the path itself (a link planted in a shared /tmp) and the folder it names count."""
+    Both the path itself (a link planted in a shared /tmp) and the folder it names count; a
+    link that leads to no folder (its folder gone) is refused too: os.stat's FileNotFoundError
+    ended the harness in an internal-error traceback."""
     if sys.platform != "win32" and os.path.lexists(path):
         uid = os.getuid()
-        for st in (os.lstat(path), os.stat(path)):
-            if st.st_uid != uid:
-                raise PytError(f"{path} belongs to another user (uid {st.st_uid}): code run from it could be theirs; pick another {option}")
-        mode = os.stat(path).st_mode
-        if mode & 0o002:  # group-writable is the norm with a user-private group (umask 002)
-            raise PytError(f"{path} can be written by every user (mode {mode & 0o7777:o}): pick another {option}, or chmod o-w it")
+        st = os.lstat(path)
+        if st.st_uid == uid:
+            try:
+                st = os.stat(path)
+            except OSError as e:
+                raise PytError(f"{path} is a link that leads to no folder ({e.strerror or e}): pick another {option}") from None
+        if st.st_uid != uid:
+            raise PytError(f"{path} belongs to another user (uid {st.st_uid}): code run from it could be theirs; pick another {option}")
+        if st.st_mode & 0o002:  # group-writable is the norm with a user-private group (umask 002)
+            raise PytError(f"{path} can be written by every user (mode {st.st_mode & 0o7777:o}): pick another {option}, or chmod o-w it")
 
 
 def make_private_dir(path: Path, option: str) -> None:

@@ -3739,7 +3739,9 @@ short temp tree and unset `NVIM_APPNAME`.
   between two steps; checked again once it exists, `project.make_private_dir`: checked only
   before `mkdir(exist_ok=True)`, a folder another user made in between was taken,
   `test_e2e_plan.test_a_base_another_user_makes_after_the_check_is_refused`; a base it cannot create,
-  below a file or in a folder it may not write, is one error line, exit 2); only a base carrying
+  below a file or in a folder it may not write, is one error line, exit 2, and so is a link whose
+  folder is gone, for `--dir` and `--mutation`'s base too: `check_private_dir` stat()ed it, an
+  internal-error traceback, `test_e2e_plan.test_a_base_that_is_a_link_to_no_folder_is_one_error_line`); only a base carrying
   `.pytemplate-e2e` is wiped, and a symlinked or junctioned base loses only its link and marker
   (`e2e.rmtree` removes a link as a link and never chmods through one: a passing run left the
   folder it named at 0o200). One run at a time per base: `selftest` holds `project.base_lock` on

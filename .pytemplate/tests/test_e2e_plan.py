@@ -449,6 +449,27 @@ def test_a_base_another_user_makes_after_the_check_is_refused(harness: str, tmp_
     assert not any(base.iterdir())  # no marker: nothing runs from it
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX owners and modes (Windows %TEMP% is per user)")
+@pytest.mark.parametrize("harness", ["e2e", "nvim", "mutation"])
+def test_a_base_that_is_a_link_to_no_folder_is_one_error_line(harness: str, tmp_path: Path) -> None:
+    """A --base (--dir, TMPDIR's base) that is a symbolic link whose folder is gone: the check
+    of its owner stat()ed the target, and FileNotFoundError ended the harness in an
+    internal-error traceback, exit 1. One error line, exit 2."""
+    from runner import mutation, nvimtest
+
+    base = tmp_path / "pt-base"
+    base.symlink_to(tmp_path / "gone")
+    with pytest.raises(PytError, match=re.escape(f"{base} is a link that leads to no folder")) as e:
+        if harness == "e2e":
+            e2e._prepare_base(base)
+        elif harness == "nvim":
+            nvimtest._prepare_dir(nvimtest.Layout(base))
+        else:
+            mutation.prepare_base(base, tmp_path / "project")
+    assert e.value.code == 2 and "\n" not in str(e.value)
+    assert base.is_symlink() and not (tmp_path / "gone").exists()  # nothing made
+
+
 def test_a_base_it_cannot_create_is_one_error_line(tmp_path: Path) -> None:
     """A --base below a file (or in a folder it may not write) ended in an internal-error
     traceback, exit 1: one error line, exit 2, as nvimtest's --dir says it."""
