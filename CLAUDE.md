@@ -4408,6 +4408,15 @@ it was written.
       for uv.exe, apply accepted both names edited onto another package, every build shipped a
       src/ folder it could not list empty, a trusted `.lazy.lua` loaded the plugin of a nested
       untrusted folder; 36 notable), 1 per 509 lines: not at the bar. 30 minor. All 73 fixed.
+    - Round 2, commit 277e0bb (round 1's fixes), 22,581 lines: 58 findings, none rejected, 2 of
+      them also found by the first CI run of that commit, which found 5 more (test defects that
+      broke `./pyt selftest` on Windows): 63 distinct. Counted: 30 (3 critical: a user's own
+      pre-commit hook that names pytemplate's hook in a comment was taken for it, replaced by
+      apply and deleted by `hooks uninstall`; the hook's checks passed when the user exported
+      `GIT_ICASE_PATHSPECS` or `GIT_GLOB_PATHSPECS`, with which every git call they read failed;
+      the wheel left out every hidden file of the package and the assets. 2 serious: mypy never
+      ran in Neovim on Windows, and `./pyt selftest` replaced the `.venv` of a project on another
+      CPython minor. 25 notable), 1 per 753 lines: not at the bar. 33 minor. All 63 fixed.
 
 ## 14. Conventions and recipes
 
