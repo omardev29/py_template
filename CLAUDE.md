@@ -3237,7 +3237,9 @@ LazyVim wiring:
   Windows wrapper `unpack`s it, and a function there stopped every mypy run on Windows. The
   linter's `cwd = root`, so a relative path carries none of the root's own `& ^ %`, which libuv
   passes to cmd.exe unquoted; `test_windows_mypy_linter_uses_root_relative_paths` runs the linter
-  through nvim-lint's Windows wrapping). nvim-lint REPLACES the environment when a
+  through nvim-lint's Windows wrapping, and `test_the_windows_mypy_linter_runs_through_the_real_nvim_lint`
+  through the pinned nvim-lint's own `M.lint`, after LazyVim's merge, where `selftest --nvim` left
+  its checkout: `test_nvim_render._pinned_plugins`). nvim-lint REPLACES the environment when a
   linter has `env`, so it passes the full environment plus `PYTHONUTF8=1`, minus `VIRTUAL_ENV`,
   `PYTHONHOME` and `PYTHONPATH` (as `proc.base_env` drops them: a `PYTHONHOME` kills the Python
   before it checks anything and the pattern parser then shows no diagnostic, silently).
@@ -5204,7 +5206,9 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   `test_workarounds.py::test_nvim_plugin_workarounds[mypy env]`,
   `test_nvim_render.py::test_mypy_linter_follows_a_venv_created_later` (Windows),
   `test_plugin_python_tools_drop_pythonhome_and_pythonpath`,
-  `test_windows_mypy_linter_uses_root_relative_paths`. Goes: never.
+  `test_windows_mypy_linter_uses_root_relative_paths`,
+  `test_the_windows_mypy_linter_runs_through_the_real_nvim_lint` (the pinned nvim-lint, where
+  `selftest --nvim` left it). Goes: never.
 - **nvim-dap** (LIMITATION): it spawns adapters with a raw `uv.spawn` (no PATHEXT: Mason's
   `.cmd` shim fails on Windows), waits 4 s for `initialize` (a cold adapter needs more), and
   expands `${workspaceFolder}` to Neovim's cwd. Fix: `dap.adapter` (Lua) returns an absolute

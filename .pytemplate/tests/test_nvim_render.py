@@ -20,7 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cli, cmd_dev, cmd_nvim, config, mypyc, project, render  # noqa: E402
+from runner import cli, cmd_dev, cmd_nvim, config, mypyc, nvimtest, project, render  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.editors import nvim, vscode  # noqa: E402
 from runner.ui import PytError  # noqa: E402
@@ -884,6 +884,100 @@ def test_windows_mypy_linter_uses_root_relative_paths(tmp_path: Path) -> None:
     (project / ".pytemplate" / "editor.json").write_text(json.dumps(data), encoding="utf-8")
     r = _headless_lua(tmp_path, WIN_MYPY_CHECK, project)
     assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
+def _pinned_plugins(*names: str) -> dict[str, Path] | None:
+    """Checkouts of the plugins `names` at the commits nvimtest.LOCK pins, or None: the plugins
+    `selftest --nvim` installed in its default --dir, or in the lazy.nvim folder PT_NVIM_PLUGINS
+    names. Tests that run a plugin's own code (not a stand-in) skip without them."""
+    git = shutil.which("git")
+    if not git:
+        return None
+    lock = json.loads(nvimtest.LOCK.read_text(encoding="utf-8"))
+    data = nvimtest.Layout(nvimtest.default_dir()).home("XDG_DATA_HOME")
+    folders = [Path(os.environ["PT_NVIM_PLUGINS"])] if os.environ.get("PT_NVIM_PLUGINS") else []
+    folders += [data / "nvim" / "lazy", data / "nvim-data" / "lazy"]  # stdpath('data') off Windows, on it
+    for lazy in folders:
+        found: dict[str, Path] = {}
+        for name in names:
+            folder = lazy / name
+            if not folder.is_dir():
+                break
+            r = subprocess.run([git, "-C", str(folder), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30, check=False)
+            if r.returncode != 0 or r.stdout.strip() != lock.get(name, {}).get("commit"):
+                break
+            found[name] = folder
+        else:
+            return found
+    return None
+
+
+# nvim-lint's own M.lint (the pinned plugin, not a stand-in) with Windows faked: it wraps the
+# linter as `cmd.exe /C <cmd> <args...>` with unpack(linter.args), after LazyVim's merge
+# (lazyvim/plugins/linting.lua: tbl_deep_extend over nvim-lint's mypy). uv.spawn is replaced by a
+# recorder, so nothing runs; a function as the whole `args` made unpack() raise before the spawn.
+REAL_LINT_CHECK = r"""
+vim.g.loaded_python3_provider = 0
+local real_has = vim.fn.has
+vim.fn.has = function(what)
+  if what == "win32" then
+    return 1
+  end
+  return real_has(what)
+end
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+vim.opt.rtp:prepend(vim.env.PT_NVIM_LINT)
+local spawned = {}
+vim.uv.spawn = function(cmd, opts)
+  spawned[#spawned + 1] = { cmd = cmd, args = opts.args, cwd = opts.cwd }
+  return nil, "ENOENT: not spawned by the test"
+end
+local notes = {}
+vim.notify = function(msg)
+  notes[#notes + 1] = msg
+end
+vim.notify_once = vim.notify
+local pt = require("pytemplate")
+pt.config.root = vim.env.PT_TEST_ROOT
+local lint = require("lint")
+local opts = { linters = {}, linters_by_ft = {} }
+require("pytemplate.integrations").lint(nil, opts)
+for name, linter in pairs(opts.linters) do -- LazyVim's merge
+  if type(linter) == "table" and type(lint.linters[name]) == "table" then
+    lint.linters[name] = vim.tbl_deep_extend("force", lint.linters[name], linter)
+  else
+    lint.linters[name] = linter
+  end
+end
+vim.cmd.edit(vim.fn.fnameescape(pt.config.root .. "/src/app.py"))
+local ok, err = pcall(lint.lint, lint.linters.mypy)
+lint.try_lint({ "mypy" })
+io.stdout:write("PTLINT" .. vim.json.encode({ is_win = pt.is_win, ok = ok, err = tostring(err), spawned = spawned, notes = notes }) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def test_the_windows_mypy_linter_runs_through_the_real_nvim_lint(tmp_path: Path) -> None:
+    r"""The pinned nvim-lint itself, not a stand-in, wraps the plugin's mypy linter on Windows:
+    `cmd.exe /C mypy <args> src\app.py` must reach the spawn (a function as the whole `args` made
+    its unpack() raise at every lint, and mypy never ran on Windows). Skipped without a checkout of
+    the pinned nvim-lint (./pyt selftest --nvim makes one)."""
+    plugins = _pinned_plugins("nvim-lint")
+    if plugins is None:
+        pytest.skip("no checkout of the pinned nvim-lint (./pyt selftest --nvim installs one)")
+    project = _project(tmp_path, profile="warn", mypy=True)
+    (project / "src" / "app.py").write_text("x: int = 1\n", encoding="utf-8")
+    r = _headless_lua(tmp_path, REAL_LINT_CHECK, project, {"PT_NVIM_LINT": plugins["nvim-lint"].as_posix()})
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTLINT")), None)
+    assert line is not None, r.stdout + r.stderr
+    got = json.loads(line[len("PTLINT") :])
+    assert got["is_win"] is True and got["ok"] is True, got
+    assert len(got["spawned"]) == 2, got  # lint() and try_lint(): each reached the spawn
+    for spawn in got["spawned"]:
+        args = spawn["args"]
+        assert spawn["cmd"] == "cmd.exe" and args[:2] == ["/C", "mypy"] and args[-1] == "src\\app.py", spawn
+        assert "--show-column-numbers" in args and Path(spawn["cwd"]) == project, spawn
+    assert not [n for n in got["notes"] if "unpack" in n], got["notes"]
 
 
 BOM_CHECK = r"""
