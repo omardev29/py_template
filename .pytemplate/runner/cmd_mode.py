@@ -263,6 +263,12 @@ def _plan_mode(cfg: Config, new_cfg: Config, changes: list[tuple[str, str, objec
         lock = "up to date (uv lock --check)" if r.returncode == 0 else "would re-lock (uv lock)"
     else:
         lock = "unchanged"
+    if lock.startswith("would re-lock"):
+        # The real run's ensure_lock refuses this re-lock under the user's UV_FROZEN or UV_LOCKED
+        # (`uv lock` writes nothing then): the plan says so, where it promised the re-lock
+        from .cmd_env import _refuse_a_frozen_lock
+
+        _refuse_a_frozen_lock()
     ui.info(f"  uv.lock          {lock}")
     changed, edited = render.apply(new_cfg)  # --dry-run: only compares
     ui.info("  generated files  " + (f"would update {', '.join(changed)}" if changed else "unchanged"))

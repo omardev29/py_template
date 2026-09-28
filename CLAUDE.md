@@ -1029,7 +1029,9 @@ header rules (with detector tests proving each rule fires).
   that failed theirs (a `compile.exclude` naming nothing) and exits 1, as a real run does.
 - `mode` validates the new `pytemplate.toml` in memory and prints the keys that would change
   (new and current value), whether `pyproject.toml` would be rewritten, `uv.lock` ("would
-  re-lock", or a read-only `uv lock --check`), the generated files that would update, the
+  re-lock", or a read-only `uv lock --check`; a re-lock the real run refuses under the user's
+  `UV_FROZEN` or `UV_LOCKED` is refused there too, exit 2, `cmd_env._refuse_a_frozen_lock`: it
+  was promised, exit 0), the generated files that would update, the
   environments it would sync and the leftover-environment note. The PyPy 3.11 precheck runs
   read-only (`uv run --locked --no-sync`, no `uv sync` first) and is skipped when `.venv` does
   not exist (`uv run --no-sync` would create it).
@@ -6117,7 +6119,8 @@ Code coupling (rename together):
   `config._presets` mirrors `presets.available`; `render.managed_block` needs `pypy_minor`
   (PyPy's environment) and `min_python` (requires-python) to stay distinct.
 - `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`, and
-  `e2e.rmtree` lazily `cmd_env._is_link`;
+  `e2e.rmtree` lazily `cmd_env._is_link`; `cmd_mode._plan_mode` lazily calls the private
+  `cmd_env._refuse_a_frozen_lock` (the refusal `ensure_lock` makes in the real run);
   `cmd_mode._work_tree_top` calls the private `presets._git_env` (the same git environment as
   `presets._git_init`, whose "inside a work tree" rule it mirrors for `new`, an ignoring one
   excepted by the same `presets.ignored_by_work_tree`);

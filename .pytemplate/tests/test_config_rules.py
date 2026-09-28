@@ -1410,6 +1410,37 @@ def test_mode_under_uv_frozen_refuses_the_relock_and_puts_everything_back(tmp_pa
     assert fake.snapshot() == fake.before and fake.synced == []
 
 
+@pytest.mark.parametrize("name", ["UV_FROZEN", "UV_LOCKED"])
+@pytest.mark.parametrize("stale", [False, True])
+def test_mode_dry_run_under_uv_frozen_says_the_relock_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], name: str, stale: bool
+) -> None:
+    """The plan printed "uv.lock would re-lock (uv lock)", exit 0, where the real run refuses that
+    re-lock under the user's UV_FROZEN or UV_LOCKED: for new managed parts (+pypy) and for a lock
+    that `uv lock --check` finds stale (a backend change that leaves pyproject.toml alone)."""
+    cfg = config.load(set())
+    if not stale and cfg.pypy_enabled:
+        pytest.skip("the test adds PyPy support")
+    fake = _Relock(tmp_path, monkeypatch, "none")  # `uv lock --check` fails: a stale lock
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    monkeypatch.setenv(name, "1")
+    if stale:
+        monkeypatch.setattr(render, "pyproject_outdated", lambda c: False)  # only `uv lock --check` decides
+        supported = cfg.backend.supported
+        args = ["--supports", "+mypyc" if "mypyc" not in supported else "-mypyc" if len(supported) > 1 else "+cpython"]
+    else:
+        args = ["--supports", "+pypy"]
+    with pytest.raises(PytError) as info:
+        cmd_mode.cmd_mode(cfg, args)
+    assert f"{name} is set" in str(info.value) and info.value.code == 2, info.value
+    assert "would re-lock" not in capsys.readouterr().err
+    assert fake.snapshot() == fake.before
+    monkeypatch.delenv(name)  # without it the plan still promises the re-lock (render.apply: nothing to compare)
+    monkeypatch.setattr(render, "apply", lambda *a, **k: ([], []))
+    assert cmd_mode.cmd_mode(cfg, args) == 0
+    assert "uv.lock          would re-lock (uv lock)" in capsys.readouterr().err
+
+
 def test_mode_after_a_hand_edit_that_adds_pypy_checks_the_code_and_creates_its_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
