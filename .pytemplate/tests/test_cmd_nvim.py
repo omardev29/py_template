@@ -506,6 +506,32 @@ def test_nvim_git_config_includes_the_users_whole_global_config(tmp_path: Path) 
     assert nvimtest.user_git_config(base, {"HOME": str(tmp_path / "empty")}) is None
 
 
+def test_nvim_git_config_includes_a_home_whose_name_git_would_read_as_syntax(tmp_path: Path) -> None:
+    """The include path went into the file raw: git read a `#` or `;` in it as a comment (the
+    user's insteadOf, proxy or sslCAInfo dropped without a word: lazy.nvim's clones then failed
+    behind a mirror or a custom CA) and a `\\` as an escape (every git call failed) (A10-01)."""
+    git = shutil.which("git")
+    if not git:
+        pytest.skip("git not found")
+    names = ["user#1", "user;1"]
+    if sys.platform != "win32":  # characters a Windows file name cannot hold
+        names += ["back\\slash", 'q"uote', "tab\tx", "nl\nx"]
+    for i, name in enumerate(names):
+        home, xdg, base = tmp_path / f"h{i}" / name, tmp_path / f"x{i}" / name, tmp_path / f"b{i}"
+        (xdg / "git").mkdir(parents=True)
+        home.mkdir(parents=True)
+        base.mkdir()
+        (home / ".gitconfig").write_text('[url "https://mirror.example/"]\n\tinsteadOf = https://github.com/\n', encoding="utf-8")
+        (xdg / "git" / "config").write_text("[http]\n\tproxy = http://p:8080\n", encoding="utf-8")
+        path = nvimtest.user_git_config(base, {"HOME": str(home), "XDG_CONFIG_HOME": str(xdg)})
+        assert path is not None, name
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": path, "GIT_CONFIG_NOSYSTEM": "1"}
+        for key, value in (("url.https://mirror.example/.insteadOf", "https://github.com/"), ("http.proxy", "http://p:8080")):
+            got = subprocess.run([git, "config", "--get", key], cwd=base, env=env, capture_output=True, text=True, check=False)
+            assert (got.returncode, got.stdout.strip()) == (0, value), (name, key, got.stderr)
+    assert nvimtest.git_config_value('a#b;c\\d"e') == '"a#b;c\\\\d\\"e"'
+
+
 def test_default_dir_is_short() -> None:
     """Right in the temp folder, whatever that is (selftest --mutation's workers move it deeper:
     below macOS's own it passed 80 characters), and short on Windows (MAX_PATH)."""

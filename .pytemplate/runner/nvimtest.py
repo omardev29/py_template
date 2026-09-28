@@ -154,12 +154,22 @@ def user_git_config(base: Path, source: Mapping[str, str]) -> str | None:
         files.append(Path(home) / ".gitconfig")
     xdg = source.get("XDG_CONFIG_HOME")
     files.append(Path(xdg) / "git" / "config" if xdg else Path(home) / ".config" / "git" / "config" if home else Path())
-    includes = [f"[include]\n\tpath = {f.as_posix()}\n" for f in files if f != Path() and f.is_file()]
+    includes = [f"[include]\n\tpath = {git_config_value(f.as_posix())}\n" for f in files if f != Path() and f.is_file()]
     if not includes:
         return None
     path = base / "gitconfig"
     path.write_text("".join(includes), encoding="utf-8", newline="\n")
     return str(path)
+
+
+def git_config_value(text: str) -> str:
+    """`text` as a git config value: in double quotes, where `#` and `;` start no comment, with
+    `\\` and `"` escaped and a line break, tab or backspace written as git's escape. Raw, a home
+    folder named `user#1` ended the include at `#` (git dropped the user's config without a word)
+    and one holding `\\` made every git call fail (a bad escape)."""
+    for raw, escaped in (("\\", "\\\\"), ('"', '\\"'), ("\n", "\\n"), ("\t", "\\t"), ("\b", "\\b")):
+        text = text.replace(raw, escaped)
+    return f'"{text}"'
 
 
 # --- smoke output ------------------------------------------------------------------------------------
