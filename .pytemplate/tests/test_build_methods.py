@@ -3944,12 +3944,15 @@ def test_portable_runtime_smoke_refuses_a_broken_runtime(tmp_path: Path, monkeyp
 @pytest.mark.parametrize("smoke", ["_smoke_runtime", "_smoke_compiled"])
 def test_portable_smoke_runs_show_why_they_failed_even_with_q(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], smoke: str) -> None:
     # -q hid the interpreter's traceback: only "does not start" or "cannot import" was left
-    from runner import ui
+    from runner import mypyc, ui
     from runner.methods import portable
 
     out = tmp_path / "out"
     python = _runtime_python(out)
     monkeypatch.setattr(ui, "QUIET", True)
+    # make() is the template's own myapp: the compiled modules are named here, never looked for in
+    # the src/ of the project the suite runs in (a project made with ./pyt new has no src/myapp/)
+    monkeypatch.setattr(mypyc, "compiled_modules", lambda cfg: ["myapp.core"])
     monkeypatch.setattr(proc, "run", FakeRun("", 1, "Traceback (most recent call last):\nImportError: libfoo.so: cannot open shared object file"))
     with pytest.raises(PytError):
         getattr(portable, smoke)(make({"backend": {"active": "mypyc"}}), python, out)
