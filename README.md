@@ -1530,8 +1530,8 @@ only deletes files is checked too).
   `pre_commit = false` (then `./pyt apply` removes it too). Its state: `./pyt hooks`.
 - An existing hook of yours (or a symlink) is never overwritten: `./pyt hooks install --force`
   keeps it as `pre-commit.local` and runs it first (a shell script still sees its own name,
-  `pre-commit`, as husky v4 and yorkie need; a compiled one runs as git ran it); `uninstall`
-  puts it back. A hook in another
+  `pre-commit`, as husky v4 and yorkie need; a compiled one runs as git ran it; one without its
+  x bit runs no more than git ran it: `chmod +x` it); `uninstall` puts it back. A hook in another
   language that reads its own name is left alone: add the line below to it instead. With
   `core.hooksPath` set, nothing is written: add
   `[ ! -f ./pyt ] || sh ./pyt hooks run || exit $?` to your own hook (husky 9:

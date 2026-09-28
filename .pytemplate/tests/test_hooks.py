@@ -1974,6 +1974,26 @@ def test_a_compiled_hook_kept_by_force_runs_first(tmp_path: Path, how: str) -> N
 
 
 @needs_git
+@pytest.mark.skipif(IS_WINDOWS, reason="the x bit is POSIX's")
+def test_a_kept_hook_without_its_x_bit_is_never_said_to_run(tmp_path: Path) -> None:
+    """The hook script runs pre-commit.local only with its x bit, as git runs no hook without
+    one: install --force and the status said a kept hook without it ran first, and it never did
+    (git's own warning about it was gone too)."""
+    top, project = make_repo(tmp_path)
+    repo = find(project)
+    target = repo.default_dir / hooks.HOOK
+    target.write_bytes(b"#!/bin/sh\necho mine\nexit 1\n")
+    target.chmod(0o644)
+    msg = hooks.install(repo, force=True)
+    assert "runs first" not in msg and "is not executable" in msg and "chmod +x .git/hooks/pre-commit.local" in msg
+    passed, label, _ = hooks._status_line(make(), repo)
+    assert passed is True and "first" not in label.split("chmod")[0] and "is not executable" in label
+    (repo.default_dir / hooks.LOCAL).chmod(0o755)
+    passed, label, _ = hooks._status_line(make(), repo)
+    assert passed is True and f"(runs {hooks.LOCAL} first)" in label
+
+
+@needs_git
 @pytest.mark.parametrize("sub", ["", "apps/my app", "caf\u00e9"])
 def test_git_runs_the_hook(tmp_path: Path, sub: str) -> None:
     """git runs the installed hook from the top: it calls `sh <launcher> hooks run`, chains a

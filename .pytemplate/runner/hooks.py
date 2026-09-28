@@ -721,6 +721,15 @@ def _show(path: Path, repo: Repo) -> str:
     return rel if rel else path.as_posix()
 
 
+def _not_run(hook: Path, shown: str) -> str | None:
+    """None when the hook script runs the kept hook `hook` (shown as `shown`) first, else why
+    not: it runs it only with its x bit (`[ -x ]`), as git runs no hook without one (install
+    and status said it ran first, while git's own warning about it was gone)."""
+    if os.access(hook, os.X_OK):
+        return None
+    return f"{shown} is not executable, so neither git nor this hook runs it: chmod +x {shown} to run it first"
+
+
 def _hooks_path_file(repo: Repo) -> Path:
     """The pre-commit script of a core.hooksPath setup that should run pytemplate's line.
     husky 9 points core.hooksPath at .husky/_, whose generated pre-commit (it sources `h`) runs
@@ -819,11 +828,12 @@ def install(repo: Repo, *, force: bool = False) -> str:
     verb = {"missing": "installed", "outdated": "updated", "installed": "already installed"}.get(state, "installed")
     msg = f"pre-commit hook {'would be ' + verb if dry and state != 'installed' else verb}: {_show(target, repo)} -> sh {repo.launcher} hooks run"
     if moved:
-        msg += f"\n  the previous hook {'would be' if dry else 'was'} kept as {_show(local, repo)} and runs first"
+        idle = _not_run(target if dry else local, _show(local, repo))  # a dry run moved nothing
+        msg += f"\n  the previous hook {'would be' if dry else 'was'} kept as {_show(local, repo)}" + (f"; {idle}" if idle else " and runs first")
     elif drop:
         msg += f"\n  {'would remove' if dry else 'removed'} {_show(local, repo)}: a copy of this project's hook (the checks would run twice)"
     elif local.is_file():
-        msg += f"\n  it runs {_show(local, repo)} first"
+        msg += f"\n  {_not_run(local, _show(local, repo)) or f'it runs {_show(local, repo)} first'}"
     return msg
 
 
@@ -880,7 +890,8 @@ def _status_line(cfg: Config, repo: Repo) -> tuple[bool | None, str, str]:
     if state == "installed" and own_local(repo):
         return None, f"git pre-commit hook installed, but {LOCAL} is a copy of it: the checks run twice", "./pyt hooks install"
     if state == "installed":
-        extra = f" (runs {LOCAL} first)" if chained else ""
+        idle = _not_run(local, _show(local, repo)) if chained else None
+        extra = f" ({idle})" if idle else f" (runs {LOCAL} first)" if chained else ""
         return True, f"git pre-commit hook installed: {_show(target, repo)} -> sh {repo.launcher} hooks run{extra}", ""
     if state == "outdated":
         return None, "git pre-commit hook outdated (another launcher path or template version)", "./pyt hooks install"

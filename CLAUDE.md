@@ -1136,7 +1136,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `#!` line is sourced only when it is text: a compiled hook (a NUL byte in its first 64 bytes,
   read with `od`; `hooks.interpreter` gives `""`, and `reads_its_name` is false for it) is
   executed, as git executes it (sourced, every commit failed with a shell syntax error:
-  `test_hooks.test_a_compiled_hook_kept_by_force_runs_first`). A hook in
+  `test_hooks.test_a_compiled_hook_kept_by_force_runs_first`). It runs only with its x bit
+  (`[ -x ]`), as git runs no hook without one: `install --force` and the status then say it
+  does not run and name `chmod +x` (`hooks._not_run`; they said it ran first). A hook in
   another language that reads its own name (`hooks.reads_its_name`: overcommit's Ruby) is left
   alone by `--force`, which prints the line to add to it instead; `uninstall` restores it. A marked hook whose launcher is another live project of the same
   repository (state "other", a monorepo; live: the launcher file is there, or its folder still
