@@ -1818,17 +1818,23 @@ def _copy_app(root: Path) -> dict[str, Any]:
     return app
 
 
+def _new_name(root: Path) -> str:
+    """The name the copy is renamed to: beta, unless its own package is beta already (a project
+    named beta or Beta: nothing was renamed, or src/beta/ stayed, and two tests failed there)."""
+    return "gamma" if rename.package_of(_copy_app(root)["name"]) == "beta" else "beta"
+
+
 def test_real_dry_run_in_a_copy(copy: Path) -> None:
-    old = _copy_app(copy)["name"]
-    _edit_copy(copy, "app", "name", "beta")
+    old, new = _copy_app(copy)["name"], _new_name(copy)
+    _edit_copy(copy, "app", "name", new)
     _edit_copy(copy, "hooks", "pre_commit", False)
     before = _tree(copy)
     r = _pyt(copy, "--dry-run", "apply")
     assert r.returncode == 0, r.stderr
-    assert f"would rename '{old}' -> 'beta'" in r.stderr and re.search(r"\+ name = [\"']beta[\"']", r.stderr), r.stderr
+    assert f"would rename '{old}' -> '{new}'" in r.stderr and re.search(rf"\+ name = [\"']{new}[\"']", r.stderr), r.stderr
     init = copy / "src" / rename.package_of(old) / "__init__.py"
     if init.is_file() and init.read_text(encoding="utf-8") == f'"""{old}"""\n':  # the skeleton's docstring (a project may have its own)
-        assert '+ """beta"""' in r.stderr
+        assert f'+ """{new}"""' in r.stderr
     assert "git hook         not a git work tree: nothing to do" in r.stderr
     assert _tree(copy) == before, "--dry-run wrote files"
     r = _pyt(copy, "apply", "--bogus")
@@ -1851,11 +1857,11 @@ def test_real_hand_edited_preset_is_refused(copy: Path) -> None:
 @needs_uv
 @needs_git
 def test_real_apply_after_a_hand_edited_name(copy: Path) -> None:
-    old = rename.package_of(_copy_app(copy)["name"])
+    old, new = rename.package_of(_copy_app(copy)["name"]), _new_name(copy)
     _git(copy, "init", "-q")
     _git(copy, "add", "-A")
     _git(copy, "commit", "-q", "-m", "init", "--no-verify")
-    _edit_copy(copy, "app", "name", "beta")  # pytemplate.toml is dirty by definition: not refused
+    _edit_copy(copy, "app", "name", new)  # pytemplate.toml is dirty by definition: not refused
     (copy / "src" / "notes.txt").write_text("mine\n", encoding="utf-8")
     r = _pyt(copy, "apply")
     assert r.returncode == 2 and "uncommitted changes in git (1 path(s): src/notes.txt)" in r.stderr, r.stderr
@@ -1865,9 +1871,9 @@ def test_real_apply_after_a_hand_edited_name(copy: Path) -> None:
     if r.returncode != 0 and rename.needs_pypi(r.stderr):
         pytest.skip("needs PyPI: uv lock could not reach the package index")
     assert r.returncode == 0, r.stderr
-    assert not (copy / "src" / old).exists() and (copy / "src" / "beta" / "__init__.py").is_file()
-    assert tomllib.loads((copy / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"] == "beta"
-    assert "beta" in {p["name"] for p in tomllib.loads((copy / "uv.lock").read_text(encoding="utf-8"))["package"]}
+    assert not (copy / "src" / old).exists() and (copy / "src" / new / "__init__.py").is_file()
+    assert tomllib.loads((copy / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"] == new
+    assert new in {p["name"] for p in tomllib.loads((copy / "uv.lock").read_text(encoding="utf-8"))["package"]}
     assert (copy / ".git" / "hooks" / "pre-commit").is_file()
     assert _pyt(copy, "render", "--check").returncode == 0
     before = _tree(copy)
