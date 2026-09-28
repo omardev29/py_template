@@ -845,7 +845,12 @@ def rewrite(
     `package_entries`: the names of the files and folders in src/<old pkg>/ (other text: a path
     segment is the package only right inside src/ or on its way into one of them; another folder
     named like the app, `tests/pkg/data`, is kept and reported: _names_another_folder).
+    A text that never mentions the old name is searched once and returned as it is: tokenized and
+    split into lines three times, a data asset of 100 MB (a level, a CSV) took 11 s and ~950 MB.
     """
+    pattern = _pattern(names)
+    if pattern.search(text) is None:
+        return Rewrite(text=text)
     code = _python_code(text, names.old_pkg) if python else None
     module_lines = module_value_lines(text, module_keys) if module_keys else set()
     line_starts = [0, *(m.end() for m in re.finditer("\n", text))]
@@ -857,7 +862,7 @@ def rewrite(
     last = 0
     count = 0
     kept_at: list[int] = []
-    for m in _pattern(names).finditer(text):
+    for m in pattern.finditer(text):
         start, end = m.span()
         word = m.group()
         if toml and _toml_key(text, start, end):
@@ -895,12 +900,12 @@ def rewrite(
         count += 1
     pieces.append(text[last:])
     new_text = "".join(pieces)
-    old_lines = text.split("\n")
     kept_lines = sorted({bisect.bisect_right(line_starts, pos) for pos in kept_at})
+    old_lines = text.split("\n") if kept_lines else []
     return Rewrite(
         text=new_text,
         count=count,
-        changes=_line_changes(text, new_text),
+        changes=_line_changes(text, new_text) if count else [],
         kept=[(n, old_lines[n - 1].rstrip("\r")) for n in kept_lines],
         note="the tokenizer rejected it: rewritten as plain text" if python and code is None else "",
     )
@@ -1323,6 +1328,8 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
                 other = data.decode("latin-1")
             if other is not None and pattern.search(other):
                 unreadable.append(rel_path)
+            continue
+        if pattern.search(text) is None:  # a file that never mentions it (a data asset): searched once
             continue
         strings = DATA_STRINGS.get(path.suffix.lower(), "")
         result = rewrite(text, names, python=path.suffix in PY_SUFFIXES, strings=strings, package_modules=modules, package_entries=entries)

@@ -1384,6 +1384,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     or `{{pkg}}` in a preset.toml `pyproject`; flet's `org = "com.example"` stays, which for an
     app named com became `beta.example`); mentions in other tables are reported. Read as bytes decoded `utf-8-sig`: its line
     endings stay (a CRLF checkout used to come back LF), the BOM is not written back.
+  - A file of src/ or tests/ that never mentions the old name is searched once and left alone
+    (`plan`, and `rewrite` itself; its line lists are made only for the lines it changes or
+    keeps): tokenized and split into lines three times, a data asset of 100 MB (a level, a CSV)
+    took 11 s and ~950 MB (`test_rename.test_a_file_that_never_names_the_app_is_only_searched`).
   - A file of src/ or tests/ that cannot be read (root-owned, locked by another program) stops
     the plan with a PytError naming it: nothing changed, never an internal-error traceback.
     So does a folder there that cannot be listed (`_code_files`: os.walk skipped it silently, and

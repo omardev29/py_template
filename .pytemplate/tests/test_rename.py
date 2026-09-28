@@ -1949,6 +1949,29 @@ def test_an_interrupted_rename_is_undone(tmp_path: Path, monkeypatch: pytest.Mon
         assert signal.getsignal(e.value.signum) is signal.SIG_DFL  # only while the files are written
 
 
+def test_a_file_that_never_names_the_app_is_only_searched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """plan() tokenized every Python file of src/ and tests/ and split every text file into lines
+    three times, even one that never mentions the old name: a data asset of 100 MB (a level, a
+    CSV) took 11 s and about 950 MB. Such a file is searched once and left alone."""
+    _write_project(tmp_path, "raylib", "alpha")
+    level = "12345,67890,some text here,another field,3.14159\n" * 2000
+    (tmp_path / "src" / "assets").mkdir(exist_ok=True)
+    (tmp_path / "src" / "assets" / "level.csv").write_text(level, encoding="utf-8")
+    helper = '"""Maths helpers."""\n\n\ndef double(x: int) -> int:\n    return 2 * x\n'
+    (tmp_path / "src" / "alpha" / "maths.py").write_text(helper, encoding="utf-8")
+    split: list[str] = []
+    tokenized: list[str] = []
+    real_changes, real_code = rename._line_changes, rename._python_code
+    monkeypatch.setattr(rename, "_line_changes", lambda old, new: split.append(old) or real_changes(old, new))
+    monkeypatch.setattr(rename, "_python_code", lambda text, pkg: tokenized.append(text) or real_code(text, pkg))
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    assert level not in split and helper not in tokenized
+    assert split and tokenized  # the files that mention it are rewritten as before
+    assert not {"src/assets/level.csv", "src/alpha/maths.py"} & {f.path for f in planned.files}
+    for text in (level, helper):  # rewrite() itself returns such a text as it is
+        assert rename.rewrite(text, rename.Names("alpha", "beta"), python=True) == rename.Rewrite(text=text)
+
+
 def test_an_interrupt_in_a_case_only_move_puts_the_folder_back(tmp_path: Path) -> None:
     """A case-only move (alpha -> Alpha on a case-insensitive file system) goes through a
     temporary name, and an interrupt between its two steps leaves the package there: the undo
