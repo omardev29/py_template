@@ -257,10 +257,13 @@ def host_floor(target: Target) -> str | None:
     return None
 
 
-# What uv says when a locked package has no wheel (and no sdist) for the --python-platform of a
-# host target's floor: from a pylock.toml (uv 0.10.12 to 0.12.19), and from a requirements file
+# What uv says when a locked package has no wheel for the --python-platform of a host target's
+# floor: with --only-binary :all: from a pylock.toml ("--no-build" is uv's name for it: uv 0.10.12
+# to 0.12.19), and for a package that publishes no sdist either, from a pylock.toml and from a
+# requirements file
 _NO_FLOOR_WHEEL = re.compile(
-    r"doesn't have a source distribution or wheel for the current platform|has no wheels with a matching platform tag"
+    r"is marked as `--no-build` but has no binary distribution"
+    r"|doesn't have a source distribution or wheel for the current platform|has no wheels with a matching platform tag"
 )
 
 
@@ -277,9 +280,11 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
 
     Cross targets get binary wheels for UV_PLATFORMS (an sdist built here would produce host
     binaries), except the packages that publish no wheel at all (source_only): those are built
-    here, and a native result is refused. The host target gets the same platform floor when this
-    machine can load those wheels (host_floor): without it uv picks the newest the build machine
-    allows, e.g. manylinux_2_34 on Ubuntu 24.04, and the result silently needed that glibc.
+    here, and a native result is refused. The host target gets the same platform floor, wheels
+    only too, when this machine can load those wheels (host_floor): without the floor uv picks the
+    newest the build machine allows, e.g. manylinux_2_34 on Ubuntu 24.04, and the result silently
+    needed that glibc. A package without a wheel for the floor makes the host fall back to its own
+    wheels, with a warning.
     """
     if dest.exists():
         shutil.rmtree(dest)
@@ -322,10 +327,21 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
         if not floor:
             envs.uv(env, base, extra_env=extra_env)
         else:
-            # no --only-binary: the host can still build an sdist. Captured: only uv's "no wheel for
-            # this platform" drops the floor; any other failure (the network, an index, a hash, a
+            # Wheels only, as for a cross target (a package that publishes none is built here): uv
+            # built the sdist of a package whose wheels all need more than the floor (a
+            # manylinux_2_34 wheel and an sdist), which failed without the toolchain it needs, or
+            # shipped a binary built here instead of the locked wheel. Captured: only uv's "no wheel
+            # for this platform" drops the floor; any other failure (the network, an index, a hash, a
             # failed build) is raised as it is, and a transient one never loses the floor silently
-            tried = envs.uv(env, [*base, "--python-platform", floor, "--python-version", version], extra_env=extra_env, capture=True, check=False)
+            build_here = source_only(LOCK)
+            at_floor = [
+                *base,
+                "--python-platform", floor,
+                "--python-version", version,
+                "--only-binary", ":all:",
+                *(arg for name in build_here for arg in ("--no-binary", name)),
+            ]
+            tried = envs.uv(env, at_floor, extra_env=extra_env, capture=True, check=False)
             output = ((tried.stderr or "") + (tried.stdout or "")).rstrip()
             if tried.returncode != 0:
                 if output:

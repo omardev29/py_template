@@ -2497,11 +2497,17 @@ Formats:
   the build for that very interpreter),
   when this machine can load it (`host_floor`: glibc >= 2.28 x86_64 / 2.35 aarch64, never musl;
   macOS >= `MACOS_FLOOR` 13.0, pinned through `MACOSX_DEPLOYMENT_TARGET` unless the user sets it),
-  without `--only-binary`, and falls back to the host's own wheels with a warning when a
+  wheels only there too (`--only-binary :all:` with the same `--no-binary` list: without it uv
+  built the sdist of a package whose wheels all need more than the floor, a manylinux_2_34 wheel
+  next to an sdist as tree-sitter-language-pack and ibm-db publish, which failed without the
+  toolchain it needs, or shipped a binary built here instead of the locked wheel, while `./pyt
+  run` used that wheel: `test_host_floor_falls_back_for_a_package_whose_sdist_it_cannot_build`),
+  and falls back to the host's own wheels with a warning when a
   dependency has no wheel for the floor: only when uv says so (its captured error matches
-  `common._NO_FLOOR_WHEEL`, shown first); any other failure (the network, an index, a hash, a
-  failed build) is raised with uv's code: it was retried without the floor, under that false
-  warning, and a transient error lost the floor silently
+  `common._NO_FLOOR_WHEEL`, shown first: `is marked as --no-build but has no binary
+  distribution`, uv's words for it under `--only-binary`); any other failure (the network, an
+  index, a hash, a failed build) is raised with uv's code: it was retried without the floor, under
+  that false warning, and a transient error lost the floor silently
   (`test_host_floor_is_kept_when_the_install_fails_for_another_reason`,
   `test_host_floor_falls_back_for_real_on_uvs_own_words`). Without the floor uv picked the newest the build machine
   allows (manylinux_2_34 on Ubuntu 24.04: the result failed on Debian 11 / RHEL 8).
@@ -4687,12 +4693,14 @@ uv:
   build machine allows (manylinux_2_34 on Ubuntu 24.04: the pyz failed on Debian 11), its macOS
   default may move with a uv release, and an sdist built for another OS gives host binaries.
   Fix: `common.host_floor`, `common.UV_PLATFORMS`, `common.MACOS_FLOOR` through
-  `MACOSX_DEPLOYMENT_TARGET`, `--only-binary :all:` for other targets but `--no-binary` for the
-  packages that publish no wheel (`common.source_only`), kept only when pure
-  (`common.install_deps`, 10). Test:
+  `MACOSX_DEPLOYMENT_TARGET`, `--only-binary :all:` for other targets and for the host's floor but
+  `--no-binary` for the packages that publish no wheel (`common.source_only`), kept only when pure
+  on another target (`common.install_deps`, 10). Test:
   `test_build_methods.py::test_host_linux_target_gets_the_platform_floor`,
   `test_host_floor_falls_back_to_the_host_wheels`, `test_host_floor_falls_back_for_real_on_uvs_own_words`
   (uv's wording, which the fallback reads),
+  `test_host_floor_takes_wheels_only_and_falls_back_on_uvs_no_build`,
+  `test_host_floor_falls_back_for_a_package_whose_sdist_it_cannot_build`,
   `test_macos_targets_pin_the_deployment_target`,
   `test_cross_target_builds_a_package_that_publishes_no_wheel`,
   `test_cross_target_builds_a_pure_sdist_for_real`. Goes: never.

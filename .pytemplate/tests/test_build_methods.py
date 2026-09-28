@@ -2115,7 +2115,9 @@ def test_host_linux_target_gets_the_platform_floor(tmp_path: Path, monkeypatch: 
     # the interpreter's full version: uv read 3.14 as 3.14.0 and dropped a requirement marked
     # python_full_version >= '3.14.1' from the build for this very 3.14.7 interpreter
     assert _flag(args, "--python-version") == ("3.14.7" if floor else None)
-    assert "--only-binary" not in args  # the host may still build an sdist
+    # wheels only at the floor, as for a cross target: an sdist uv built there failed, or shipped a
+    # binary built here instead of the locked wheel; without a floor the host may build any sdist
+    assert _flag(args, "--only-binary") == (":all:" if floor else None)
 
 
 def test_host_and_cross_builds_share_one_floor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2148,6 +2150,28 @@ def test_host_floor_falls_back_to_the_host_wheels(tmp_path: Path, monkeypatch: p
     assert site.is_dir()
 
 
+# What uv (0.10.12 and 0.12.19) says from the floor attempt, which asks for wheels only
+# (--only-binary :all:), when a locked package's wheels all need more than the floor: an sdist it
+# publishes too is no way out
+NO_FLOOR_BINARY = "error: Package `newglibc` can't be installed because it is marked as `--no-build` but has no binary distribution"
+
+
+def test_host_floor_takes_wheels_only_and_falls_back_on_uvs_no_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # The floor attempt built such a package's sdist (it failed without its toolchain, or shipped a
+    # binary built here instead of the locked wheel): now only what publishes no wheel is built there
+    calls = _install_recorder(tmp_path, monkeypatch, fail_first=NO_FLOOR_BINARY)
+    lock = tmp_path / "uv.lock"
+    lock.write_text(SOURCE_ONLY_LOCK, encoding="utf-8")
+    monkeypatch.setattr(common, "LOCK", lock)
+    monkeypatch.setattr(common.platform, "libc_ver", lambda *a, **k: ("glibc", "2.39"))
+    common.install_deps(make({}), "cpython", common.parse_key(LINUX), tmp_path / "site", _requirements(tmp_path, "docopt==0.6.2", "six==1.17.0"))
+    (_, at_floor, _), (_, own, _) = calls
+    assert _flag(at_floor, "--python-platform") == "x86_64-manylinux_2_28" and _flag(at_floor, "--only-binary") == ":all:"
+    assert [at_floor[i + 1] for i, a in enumerate(at_floor) if a == "--no-binary"] == ["docopt", "mylib"]
+    assert "--python-platform" not in own and "--only-binary" not in own  # this machine's wheels, or a build
+    assert "a dependency has no wheel for x86_64-manylinux_2_28" in capsys.readouterr().err
+
+
 def test_host_floor_falls_back_for_real_on_uvs_own_words(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """The fallback reads uv's error: pinned with the real uv (the uv-floor job runs the oldest), a
     locked package that only has a manylinux_2_34 wheel, on a host whose glibc loads it."""
@@ -2168,6 +2192,28 @@ def test_host_floor_falls_back_for_real_on_uvs_own_words(tmp_path: Path, monkeyp
     assert common.installed(site) == {("newglibc", "1.0"), ("ptdemo", "1.0")}
     err = capsys.readouterr().err
     assert "a dependency has no wheel for x86_64-manylinux_2_28" in err and "newglibc" in err
+
+
+def test_host_floor_falls_back_for_a_package_whose_sdist_it_cannot_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A package with a manylinux_2_34 wheel and an sdist (tree-sitter-language-pack, ibm-db): the
+    floor attempt built the sdist instead of saying it has no wheel for the floor, and the pyz and
+    portable builds failed where it cannot build (or shipped a binary built here instead of the
+    locked wheel), while ./pyt run used the wheel. The real uv, offline."""
+    libc, version = common.platform.libc_ver()
+    have = common._version_tuple(version) if libc == "glibc" else None
+    if common.host_os() != "linux" or common.host_arch() != "x86_64" or have is None or have < (2, 34):
+        pytest.skip("needs Linux x86_64 with glibc 2.34 or newer")
+    requirements = _explicit_index_project(
+        tmp_path, monkeypatch, {"newglibc": "py3-none-manylinux_2_34_x86_64", "ptdemo": "py3-none-any"}, failing_sdists=("newglibc",)
+    )
+    host = common.Target("cp", 3, 14, "linux", "x86_64")
+    site = common.install_deps(make({}), "cpython", host, tmp_path / "site", requirements)
+    assert common.installed(site) == {("newglibc", "1.0"), ("ptdemo", "1.0")}
+    tags = common._wheel_tags(next(site.glob("newglibc-*.dist-info")) / "WHEEL")
+    assert tags == ["py3-none-manylinux_2_34_x86_64"]  # the locked wheel, never a build of the sdist
+    err = capsys.readouterr().err
+    assert "a dependency has no wheel for x86_64-manylinux_2_28" in err and "newglibc" in err
+    assert "needs a toolchain" not in err
 
 
 def test_host_floor_is_kept_when_the_install_fails_for_another_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -2653,16 +2699,46 @@ def _wheel_file(folder: Path, name: str, version: str, tag: str = "py3-none-any"
     return whl
 
 
-def _explicit_index_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wheels: dict[str, str]) -> Path:
+def _failing_sdist(folder: Path, name: str, version: str) -> Path:
+    """An sdist next to a package's wheels whose build always fails, as one does without the
+    toolchain it needs (Rust, a C library): its in-tree backend needs nothing to install."""
+    import io
+    import tarfile
+
+    folder.mkdir(parents=True, exist_ok=True)
+    root = f"{name}-{version}"
+    files = {
+        "PKG-INFO": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
+        "pyproject.toml": '[build-system]\nrequires = []\nbuild-backend = "failing_backend"\nbackend-path = ["."]\n',
+        "failing_backend.py": (
+            "def build_wheel(*args, **kwargs):\n"
+            "    raise SystemExit('this sdist needs a toolchain this machine lacks')\n\n\n"
+            "build_sdist = prepare_metadata_for_build_wheel = build_wheel\n"
+        ),
+    }
+    sdist = folder / f"{root}.tar.gz"
+    with tarfile.open(sdist, "w:gz") as tar:
+        for member, text in files.items():
+            data = text.encode("utf-8")
+            info = tarfile.TarInfo(f"{root}/{member}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return sdist
+
+
+def _explicit_index_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wheels: dict[str, str], *, failing_sdists: tuple[str, ...] = ()) -> Path:
     """A project whose dependencies (name: wheel tag, version 1.0) all come from an `explicit =
     true` flat index, locked offline with the real uv; the runner works on it from here (offline),
-    and the return value is its export (common.export_requirements)."""
+    and the return value is its export (common.export_requirements). `failing_sdists`: the
+    packages that also publish an sdist, one that never builds."""
     if not envs.tool_env(make({})).python.is_file():
         pytest.skip("needs .venv (./pyt setup)")
     project = tmp_path / "proj"
     index = tmp_path / "index"
     for name, tag in wheels.items():
         _wheel_file(index, name, "1.0", tag)
+    for name in failing_sdists:
+        _failing_sdist(index, name, "1.0")
     project.mkdir()
     (project / "pyproject.toml").write_text(
         f'[project]\nname = "xapp"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = {json.dumps(list(wheels))}\n\n'
