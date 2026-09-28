@@ -968,6 +968,40 @@ def test_flet_apk_check_reads_serious_pythons_layout(tmp_path: Path, capsys: pyt
         check.check_apk(project)
 
 
+@pytest.mark.parametrize(
+    ("empty", "reasons"),
+    [
+        ("assets/app.zip", ["assets/app.zip lacks main.py[c] (the app)", "assets/app.zip lacks pt_flet/ui/app.py[c] (the app)"]),
+        (
+            "assets/sitepackages.zip",
+            [
+                "assets/sitepackages.zip lacks flet",
+                "assets/sitepackages.zip lacks flet, msgpack, httpx, tomli-w, typing-extensions (no .dist-info), which the build project requires on Android",
+                "assets/sitepackages.zip: no native module (.soref) at all",
+            ],
+        ),
+        ("assets/stdlib.zip", ["assets/stdlib.zip: no native module (.soref) at all"]),
+    ],
+)
+def test_flet_apk_check_reads_an_empty_asset_zip_too(tmp_path: Path, capsys: pytest.CaptureFixture[str], empty: str, reasons: list[str]) -> None:
+    """An empty app.zip, sitepackages.zip or stdlib.zip skipped every check of its content, and
+    such an apk passed with the ok line naming the app, flet and the packages it requires."""
+    pytest.importorskip("packaging.requirements")
+    check = _flet_check()
+    project = tmp_path / FLET_PROJECT
+    _flet_project(project)
+    _write_build_project(project)
+    entries = _apk_entries()
+    entries[empty] = {}
+    _write_apk(project, entries)
+    with pytest.raises(check.Failed) as e:
+        check.check_apk(project)
+    lines = [line.strip() for line in str(e.value).splitlines()]
+    for reason in reasons:
+        assert reason in lines, str(e.value)
+    assert "ok   " not in capsys.readouterr().out
+
+
 class _FletPage:
     """Enough of Playwright's sync Page for check._drive, on a clock that moves only while the
     check waits: a Flet web app whose Python starts (python.js logs it), shows its controls in

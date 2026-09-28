@@ -4280,7 +4280,9 @@ short temp tree and unset `NVIM_APPNAME`.
   build project (`.build/flet-build/cpython/pyproject.toml`) whose marker holds on an Android
   device (`check.android_requirements`: an apk without repath, six or httpx passed, and on a
   device `import flet` fails), and in it and `assets/stdlib.zip` at least one
-  `.soref` marker whose library every ABI holds (serious_python_android 4.7.1's split); then
+  `.soref` marker whose library every ABI holds (serious_python_android 4.7.1's split; each zip
+  that is there is checked, an empty one too: an apk whose three zips were empty passed with the
+  ok line, `test_workflows.test_flet_apk_check_reads_an_empty_asset_zip_too`); then
   `apksigner verify` and `aapt2 dump badging` of the newest build tools, and the `.apk` is
   uploaded for 3 days (`flet-apk`, `if: always()`). The caches (`~/flutter`, `~/.pub-cache`,
   `~/.flet/cache`, plus Gradle's for Android; about 1.8 and 3.6 GB) are keyed by job, OS, arch
