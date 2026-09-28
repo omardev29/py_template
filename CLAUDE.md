@@ -5224,9 +5224,12 @@ Flet (flet, flet-desktop, flet pack, flet build):
   Test: `test_build_methods.py::test_flet_build_cleanup_false_turns_flets_own_cleanup_off`.
   Goes: never.
 - **Flutter needs Developer Mode on Windows (symlinks), and mobile and web targets load no
-  extension** (LIMITATION): Fix: `methods.flet._developer_mode` is checked by
-  `methods.flet.check_options` before the checks and the payload (also in `--dry-run`); mobile
-  and web builds ship the `.py` (10). Test:
+  extension** (LIMITATION): Developer Mode for every target, since flet build (flet_cli 1.0.1,
+  `install_flutter`) turns Flutter's Windows desktop on there and its template holds a
+  `windows/` folder, whose plugins Flutter links for an apk or web build too ("Building with
+  plugins requires symlink support", late). Fix: `methods.flet._developer_mode` is checked by
+  `methods.flet.check_options`, whatever the target, before the checks and the payload (also in
+  `--dry-run`); mobile and web builds ship the `.py` (10). Test:
   `test_build_methods.py::test_flet_build_needs_developer_mode_on_windows`,
   `test_flet_method_refuses_before_any_work`, `test_flet_build_mobile_and_web_ship_the_py_code`.
   Goes: never.
