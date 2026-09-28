@@ -1367,7 +1367,8 @@ def test_staged_blob_is_the_staged_version_as_checked_out(tmp_path: Path) -> Non
     assert hooks.staged_blob(repo, "pyt.cmd") == b"@echo off\r\n"  # the index stores LF
     if not IS_WINDOWS:
         assert hooks.staged_blob(repo, "1:odd.py") == b"odd = 1\n"  # not "stage 1 of odd.py"
-    assert hooks.staged_blob(repo, "missing.py") is None
+    with pytest.raises(PytError, match="missing.py"):  # git's own message: never "nothing to check"
+        hooks.staged_blob(repo, "missing.py")
     assert hooks.worktree_changes(repo) == {"x.py"}
 
 
@@ -1705,6 +1706,75 @@ def test_config_lock_and_generated_files_are_committed_together(tmp_path: Path, 
 
 
 @needs_git
+@pytest.mark.parametrize("variable", ["GIT_ICASE_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_LITERAL_PATHSPECS"])
+def test_the_checks_fail_whatever_pathspec_variables_the_user_exported(tmp_path: Path, tools: Tools, monkeypatch: pytest.MonkeyPatch, variable: str) -> None:
+    """Every git call of the hook passes --literal-pathspecs, which git refuses next to an exported
+    GIT_ICASE_PATHSPECS or GIT_GLOB_PATHSPECS (exit 128: "global 'literal' pathspec setting is
+    incompatible with all other global pathspec settings"), and check-ignore refuses all four
+    ("pathspec magic not supported by this command"). The failed calls read as "nothing
+    unstaged", "no index mode" and "not ignored": a commit that left the generated files,
+    pyproject.toml or the launcher's mode behind passed every check."""
+    base = {"pytemplate.toml": b"a = 1\n", "pyproject.toml": b"[project]\n", "uv.lock": b"v1\n", "gen.json": b"{}\n", "pyt": b"#!/bin/sh\necho hi\n"}
+    repo, _ = staged_project(tmp_path, base, commit=list(base))
+    p = repo.project
+    (p / "pytemplate.toml").write_bytes(b"a = 2\n")  # rendered: gen.json and pyproject.toml follow
+    (p / "gen.json").write_bytes(b'{"a": 2}\n')
+    (p / "pyproject.toml").write_bytes(b"[project]\nname = 'x'\n")
+    (p / "pyt").write_bytes(b"#!/bin/sh\necho hello\n")
+    git(p, "add", "pytemplate.toml", "pyt")  # the launcher staged without its exec bit: 100644
+    (tmp_path / "second").mkdir()
+    top2, ignored = make_repo(tmp_path / "second", "code/p")  # a project its repository ignores
+    (top2 / ".gitignore").write_text("*\n!.gitignore\n", encoding="utf-8")
+    (ignored / "pyt").write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv(variable, "1")
+    res = failures(results(make(), repo, hooks.staged_files(repo)))
+    assert "gen.json" in res["generated files staged"].hint
+    assert "pyproject.toml" in res["config files staged together"].label
+    launchers = next(r for k, r in res.items() if k.startswith("launchers"))
+    assert "git mode 100644" in launchers.label
+    assert find(ignored, top2).ignored()
+
+
+@needs_git
+@pytest.mark.parametrize("call", ["worktree", "unstaged", "untracked", "modes", "blob"])
+def test_a_git_call_that_fails_stops_the_hook_with_gits_message(tmp_path: Path, tools: Tools, monkeypatch: pytest.MonkeyPatch, call: str) -> None:
+    """A git call of the hook that failed read as nothing to report (no file with unstaged
+    changes, no untracked file, no index mode, no staged version): every check it fed passed. It
+    stops the hook with git's own message, as staged_files does (the hook script then blocks the
+    commit and says how to commit without the checks)."""
+    base = {"gen.json": b"{}\n", "pyt": b"#!/bin/sh\necho hi\n"}
+    repo, _ = staged_project(tmp_path, base, commit=list(base))
+    p = repo.project
+    (p / "pyt").write_bytes(b"#!/bin/sh\necho hello\n")
+    git(p, "add", "pyt")
+    (p / "pyt").write_bytes(b"#!/bin/sh\necho later\n")  # unstaged on top: checked as staged
+    staged = hooks.staged_files(repo)
+    fails = {
+        "worktree": lambda a: a == ("diff", "--name-only", "--no-renames", "-z"),
+        "unstaged": lambda a: a[:2] == ("diff", "--name-only") and "--" in a,
+        "untracked": lambda a: a[:2] == ("ls-files", "--others"),
+        "modes": lambda a: a[:2] == ("ls-files", "-s"),
+        "blob": lambda a: "cat-file" in a,
+    }[call]
+    real_git, real_bytes = hooks._git, hooks._run_bytes
+
+    def failing_git(args: Sequence[str], cwd: Path, env: dict[str, str], *, literal: bool = True) -> subprocess.CompletedProcess[str]:
+        if fails(tuple(args)):
+            return subprocess.CompletedProcess(["git", *args], 128, "", "fatal: something went wrong\n")
+        return real_git(args, cwd, env, literal=literal)
+
+    def failing_bytes(argv: Sequence[str], *, cwd: Path, env: dict[str, str], data: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+        if fails(tuple(argv)):
+            return subprocess.CompletedProcess(list(argv), 128, b"", b"fatal: something went wrong\n")
+        return real_bytes(argv, cwd=cwd, env=env, data=data)
+
+    monkeypatch.setattr(hooks, "_git", failing_git)
+    monkeypatch.setattr(hooks, "_run_bytes", failing_bytes)
+    with pytest.raises(PytError, match="something went wrong"):
+        results(make(), repo, staged)
+
+
+@needs_git
 def test_run_checks_a_commit_that_only_deletes_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """A commit that only deletes files (a generated file, uv.lock) still runs the project-wide
     checks: `git rm .mypy.ini uv.lock` alone must not print 'nothing to check'."""
@@ -2015,6 +2085,33 @@ def test_a_kept_hook_runs_under_its_own_name(tmp_path: Path, shebang: str) -> No
 
 
 @needs_git
+def test_a_kept_hook_that_names_pytemplates_hook_is_still_run_as_pre_commit(tmp_path: Path) -> None:
+    """The hook script executes a kept pytemplate hook (another project's copy must run as
+    pre-commit.local, which never chains itself) and sources any other shell hook as pre-commit.
+    It told them apart by the phrase alone (`grep MARKER`), so a husky v4 hook with a comment that
+    names pytemplate's hook ran as pre-commit.local and checked nothing; install --force had
+    overwritten it before that (it read as pytemplate's own outdated hook)."""
+    top, project = make_repo(tmp_path)
+    (project / "pyt").write_bytes(FAKE_LAUNCHER.encode("ascii"))
+    (top / ".topmark").write_text("", encoding="utf-8")
+    (top / ".git" / "info" / "exclude").write_text(".topmark\n", encoding="utf-8")
+    log = tmp_path / "hook.log"
+    env = dict(git_env(), PT_HOOK_LOG=log.as_posix())
+    hooks_dir = top / ".git" / "hooks"
+    theirs = NAME_DISPATCH_HOOK.format(shebang="#!/bin/sh").replace("\n", f"\n# the {hooks.MARKER} runs after this one\n", 1)
+    (hooks_dir / hooks.HOOK).write_bytes(theirs.encode("ascii"))
+    (hooks_dir / "helper.sh").write_bytes(HELPER.encode("ascii"))
+    if not IS_WINDOWS:
+        (hooks_dir / hooks.HOOK).chmod(0o755)
+    hooks.install(find(project, top), force=True)
+    assert (hooks_dir / hooks.LOCAL).read_text(encoding="utf-8") == theirs
+    (project / "one.txt").write_text("one", encoding="utf-8")
+    git(top, "add", "-A", env=env)
+    assert git(top, "commit", "-q", "-m", "one", env=env, check=False, timeout=120).returncode == 0
+    assert log.read_text(encoding="utf-8").splitlines() == ["user check as pre-commit", "launcher hooks run from top"]
+
+
+@needs_git
 def test_force_leaves_a_non_shell_hook_that_reads_its_name(tmp_path: Path) -> None:
     """overcommit's Ruby hook picks its job from $0: it cannot be sourced as pre-commit, and
     run as pre-commit.local it would check nothing. --force leaves it alone and says what line
@@ -2093,33 +2190,6 @@ def test_a_compiled_hook_kept_by_force_runs_first(tmp_path: Path, how: str) -> N
     assert commit("two.txt", PT_LOCAL_EXIT="1").returncode != 0  # the kept hook still blocks
     assert log.read_text(encoding="utf-8").splitlines() == ["compiled hook"]
     assert hooks.interpreter(hooks._read(target.parent / hooks.LOCAL)) == ""  # as the hook script tells it
-
-
-@needs_git
-def test_a_kept_hook_that_names_pytemplates_hook_is_still_run_as_pre_commit(tmp_path: Path) -> None:
-    """The hook script executes a kept pytemplate hook (another project's copy must run as
-    pre-commit.local, which never chains itself) and sources any other shell hook as pre-commit.
-    It told them apart by the phrase alone (`grep MARKER`), so a husky v4 hook with a comment that
-    names pytemplate's hook ran as pre-commit.local and checked nothing; install --force had
-    overwritten it before that (it read as pytemplate's own outdated hook)."""
-    top, project = make_repo(tmp_path)
-    (project / "pyt").write_bytes(FAKE_LAUNCHER.encode("ascii"))
-    (top / ".topmark").write_text("", encoding="utf-8")
-    (top / ".git" / "info" / "exclude").write_text(".topmark\n", encoding="utf-8")
-    log = tmp_path / "hook.log"
-    env = dict(git_env(), PT_HOOK_LOG=log.as_posix())
-    hooks_dir = top / ".git" / "hooks"
-    theirs = NAME_DISPATCH_HOOK.format(shebang="#!/bin/sh").replace("\n", f"\n# the {hooks.MARKER} runs after this one\n", 1)
-    (hooks_dir / hooks.HOOK).write_bytes(theirs.encode("ascii"))
-    (hooks_dir / "helper.sh").write_bytes(HELPER.encode("ascii"))
-    if not IS_WINDOWS:
-        (hooks_dir / hooks.HOOK).chmod(0o755)
-    hooks.install(find(project, top), force=True)
-    assert (hooks_dir / hooks.LOCAL).read_text(encoding="utf-8") == theirs
-    (project / "one.txt").write_text("one", encoding="utf-8")
-    git(top, "add", "-A", env=env)
-    assert git(top, "commit", "-q", "-m", "one", env=env, check=False, timeout=120).returncode == 0
-    assert log.read_text(encoding="utf-8").splitlines() == ["user check as pre-commit", "launcher hooks run from top"]
 
 
 @needs_git

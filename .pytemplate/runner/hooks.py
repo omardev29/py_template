@@ -102,6 +102,10 @@ USAGE = "install [--force] | uninstall | run | status"
 GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
 # ...and the ones removed from the environment of the tools `run` starts
 GIT_REPO_VARS = (*GIT_LOCATION_VARS, "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX", "GIT_NAMESPACE")
+# The user's pathspec settings, never passed to the git calls made here: they pass
+# --literal-pathspecs (a file named `*.py` is a path), which git refuses next to
+# GIT_GLOB_PATHSPECS or GIT_ICASE_PATHSPECS (exit 128), and check-ignore refuses all four
+PATHSPEC_VARS = ("GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_LITERAL_PATHSPECS")
 ARG_LIMIT = 8000  # characters of file arguments per tool call (Windows command lines: 32767)
 # The sources of the generated files and of the lock: committed together with them
 CONFIG_FILES = ("pytemplate.toml", "pyproject.toml", "uv.lock")
@@ -153,8 +157,10 @@ def git_env(environ: Mapping[str, str], cwd: Path) -> dict[str, str]:
 
 def _git_process_env(env: Mapping[str, str]) -> dict[str, str]:
     """The environment of the git calls made here: `env` (git_env) is the only source of the
-    repository variables; LC_ALL=C keeps git's messages English (find_repo reads them)."""
-    base = {k: v for k, v in proc.base_env().items() if k not in GIT_REPO_VARS}
+    repository variables; LC_ALL=C keeps git's messages English (find_repo reads them). The
+    user's pathspec settings go (PATHSPEC_VARS): with GIT_ICASE_PATHSPECS=1 every call with a
+    pathspec failed, and the checks it fed passed a commit that left files behind."""
+    base = {k: v for k, v in proc.base_env().items() if k not in GIT_REPO_VARS and k not in PATHSPEC_VARS}
     return {**base, "LC_ALL": "C", **env}
 
 
@@ -1077,14 +1083,24 @@ def project_paths(prefix: str, names: Iterable[str], *, ignore_case: bool = IS_W
     return out
 
 
+def _git_output(repo: Repo, *args: str) -> str:
+    """git's output for a call a check relies on. A call that failed read as an empty answer (no
+    file with unstaged changes, no untracked file, no index mode) and the checks it fed passed
+    a commit they had to block: it stops the hook with git's own message (the hook script then
+    blocks the commit and says how to commit without the checks)."""
+    r = repo.git(*args)
+    if r.returncode != 0:
+        said = r.stderr.strip() or f"exit code {r.returncode}"
+        raise PytError(f"git {' '.join(args[:2])} failed: {said}")
+    return r.stdout
+
+
 def staged_files(repo: Repo, diff_filter: str = STAGED) -> list[str]:
     """Return the staged files, relative to the project: the ones whose new content is in the
     commit by default (what the per-file checks read); diff_filter="D": the staged deletions.
     --no-renames: a rename is its deletion plus its addition, so both paths are seen."""
-    r = repo.git("diff", "--cached", "--name-only", "--no-renames", f"--diff-filter={diff_filter}", "-z")
-    if r.returncode != 0:
-        raise PytError(f"git diff --cached failed: {r.stderr.strip()}")
-    return project_paths(repo.prefix, r.stdout.split("\0"), ignore_case=repo.ignore_case)
+    out = _git_output(repo, "diff", "--cached", "--name-only", "--no-renames", f"--diff-filter={diff_filter}", "-z")
+    return project_paths(repo.prefix, out.split("\0"), ignore_case=repo.ignore_case)
 
 
 def unstaged_files(repo: Repo, paths: Sequence[str]) -> list[str]:
@@ -1092,29 +1108,31 @@ def unstaged_files(repo: Repo, paths: Sequence[str]) -> list[str]:
     (and not ignored): a commit made now would miss them."""
     if not paths:
         return []
-    diff = repo.git("diff", "--name-only", "-z", "--", *paths)
-    others = repo.git("ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--", *paths)
-    names = diff.stdout.split("\0") + others.stdout.split("\0")
+    diff = _git_output(repo, "diff", "--name-only", "-z", "--", *paths)
+    others = _git_output(repo, "ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--", *paths)
+    names = diff.split("\0") + others.split("\0")
     return sorted(set(project_paths(repo.prefix, names, ignore_case=repo.ignore_case)))
 
 
 def worktree_changes(repo: Repo) -> set[str]:
     """Return the project files whose working tree differs from the index (unstaged edits and
     files deleted from the working tree), relative to the project."""
-    r = repo.git("diff", "--name-only", "--no-renames", "-z")
-    return set(project_paths(repo.prefix, r.stdout.split("\0"), ignore_case=repo.ignore_case))
+    out = _git_output(repo, "diff", "--name-only", "--no-renames", "-z")
+    return set(project_paths(repo.prefix, out.split("\0"), ignore_case=repo.ignore_case))
 
 
-def staged_blob(repo: Repo, path: str) -> bytes | None:
+def staged_blob(repo: Repo, path: str) -> bytes:
     """Return the staged content of `path` (relative to the project) as a checkout would write
-    it (`--filters`: CRLF for `eol=crlf` files, whatever the index stores), or None.
+    it (`--filters`: CRLF for `eol=crlf` files, whatever the index stores). A path the index does
+    not hold, or git failing, is a PytError with git's message: None read as "nothing to check",
+    and the launcher and language checks passed a staged file they never read.
     `:0:` (stage 0) keeps a path like `1:x.py` from reading as a stage number."""
     spec = ":0:" + (f"{repo.prefix}/{path}" if repo.prefix else path)
-    try:
-        r = _run_bytes(["git", *GIT_CONFIG, "cat-file", "--filters", spec], cwd=repo.project, env=_git_process_env(repo.env))
-    except PytError:
-        return None
-    return r.stdout if r.returncode == 0 else None
+    r = _run_bytes(["git", *GIT_CONFIG, "cat-file", "--filters", spec], cwd=repo.project, env=_git_process_env(repo.env))
+    if r.returncode != 0:
+        said = r.stderr.decode("utf-8", errors="replace").strip() or f"exit code {r.returncode}"
+        raise PytError(f"git cat-file {spec} failed: {said}")
+    return r.stdout
 
 
 def python_files(staged: Sequence[str], dirs: Sequence[str]) -> list[str]:
@@ -1331,9 +1349,8 @@ def check_mypyc(cfg: Config, project: Path, staged: set[str]) -> Result:
 
 
 def _index_modes(repo: Repo, names: Sequence[str]) -> dict[str, str]:
-    r = repo.git("ls-files", "-s", "--", *names)
     modes: dict[str, str] = {}
-    for line in r.stdout.splitlines():
+    for line in _git_output(repo, "ls-files", "-s", "--", *names).splitlines():
         meta, _, path = line.partition("\t")
         if meta and path:
             modes[path.rsplit("/", 1)[-1]] = meta.split()[0]
@@ -1451,10 +1468,7 @@ def checks(
     py = python_files(staged, code_dirs)
     missing = [p for p in py if not (repo.project / p).is_file()]
     present = [p for p in py if p not in missing]
-    as_staged: dict[str, bytes] = {}
-    for p in present:
-        if p in partial and (blob := staged_blob(repo, p)) is not None:
-            as_staged[p] = blob
+    as_staged = {p: staged_blob(repo, p) for p in present if p in partial}
     yield from check_ruff(cfg, present, as_staged)
     if missing:
         # git commits the staged version of a file deleted from the disk: almost always an accident

@@ -1211,7 +1211,15 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 - `hooks run` checks what the commit contains: staged files (`git diff --cached --name-only
   --no-renames --diff-filter=ACMRT -z`) and staged deletions (`D`: a deletion-only commit gets
   the project-wide checks too). Every git call passes `-c diff.relative=false`
-  (`diff.relative=true` made every path relative to the project folder, and all were dropped).
+  (`diff.relative=true` made every path relative to the project folder, and all were dropped)
+  and `--literal-pathspecs`, never with the user's `GIT_*_PATHSPECS` (`hooks.PATHSPEC_VARS`,
+  dropped by `hooks._git_process_env`: git refuses the option next to `GIT_ICASE_PATHSPECS` or
+  `GIT_GLOB_PATHSPECS`, exit 128, and check-ignore refuses all four, 15.1). A git call a check
+  relies on that fails stops the hook with git's message (`hooks._git_output`, `staged_blob`):
+  read as an empty answer, the failed calls let "generated files staged", "config files staged
+  together" and the launcher mode pass a commit they had to block
+  (`test_hooks.test_the_checks_fail_whatever_pathspec_variables_the_user_exported`,
+  `test_a_git_call_that_fails_stops_the_hook_with_gits_message`).
   In ~0.3 s: ruff (active typing profile, `exit_zero` honoured) and `ruff format --check` on
   staged `.py/.pyi` under the code dirs via `uv run --quiet --frozen` (a stale lock is the lock
   check's finding; an exit code other than 0/1 is "could not run ruff", without a fmt hint,
@@ -5397,6 +5405,16 @@ git and husky:
 - **`git check-ignore` refuses `--literal-pathspecs`** (LIMITATION): Fix: `hooks._git(...,
   literal=False)` for it (5.6). Test:
   `test_hooks.py::test_ensure_installed_skips_an_ignored_project`. Goes: never.
+- **git refuses `--literal-pathspecs` next to `GIT_GLOB_PATHSPECS` or `GIT_ICASE_PATHSPECS`, and
+  `check-ignore` refuses all four `GIT_*_PATHSPECS`** (LIMITATION, git's documented variables;
+  git 2.43: "global 'literal' pathspec setting is incompatible with all other global pathspec
+  settings", "pathspec magic not supported by this command", exit 128): with one exported every
+  hook call with a pathspec failed, read as nothing unstaged, and the checks passed a commit that
+  left the generated files, pyproject.toml or the launcher's mode behind. Fix:
+  `hooks._git_process_env` drops `hooks.PATHSPEC_VARS`, and `hooks._git_output` stops the hook on
+  any failed call (5.6). Test:
+  `test_hooks.py::test_the_checks_fail_whatever_pathspec_variables_the_user_exported`,
+  `test_a_git_call_that_fails_stops_the_hook_with_gits_message`. Goes: never.
 - **`GIT_CEILING_DIRECTORIES` never excludes the current folder** (LIMITATION, documented): with
   the e2e base itself as the ceiling, `new` (it asks git from the base) still found a repository
   around the base and skipped `git init`, and `setup` installed the hook into that repository.
