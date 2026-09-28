@@ -16,7 +16,11 @@ Which occurrences change (whole words only: `myapp_extra` and `my-app-2` never m
   resolves to that import (`ast` scopes). A function, class body or comprehension that binds
   `myapp` another way (assignment, parameter, loop/with/except target, global/nonlocal) keeps
   every `myapp` in it, and a module that rebinds it keeps all of its own: they are reported,
-  not changed. Attributes (`obj.myapp`) and keyword arguments (`f(myapp=1)`) never change.
+  not changed. So is a reference the new name would capture (_captured): a use below a scope
+  that binds the new name (a parameter, a local, a class attribute), and the import and uses of
+  a scope where the renamed import would clash with another binding of the new name or hide a
+  name read from further out (a module name, a builtin such as `map`). Attributes (`obj.myapp`)
+  and keyword arguments (`f(myapp=1)`) never change.
 - Strings, comments, docstrings and other text files: every occurrence except right after a
   dot (`x.myapp` is a submodule or an attribute, never the top-level package), a path
   segment right after the package itself (`src/myapp/myapp` is a submodule of it), and a file
@@ -216,6 +220,28 @@ class _Region:
     fstring: bool = False  # an f-string or t-string: its {fields} are code, their format specs syntax
 
 
+class _Positions:
+    """Offsets in a Python text of the positions that tokenize (line, column in characters) and
+    ast (line, column in UTF-8 bytes) give for its body: the text without a BOM, a lone CR read
+    as LF (the compiler counts it as a line break), one character for one."""
+
+    def __init__(self, text: str) -> None:
+        self.shift = 1 if text.startswith("﻿") else 0
+        self.body = re.sub(r"\r(?!\n)", "\n", text[self.shift :])
+        self.line_starts = [0, *(m.end() for m in re.finditer("\n", self.body))]
+        self._lines: list[str] | None = None
+
+    def token(self, pos: tuple[int, int]) -> int:
+        return self.shift + self.line_starts[pos[0] - 1] + pos[1]
+
+    def ast(self, line: int, col: int) -> int:
+        if self._lines is None:
+            self._lines = self.body.split("\n")
+        lines = self._lines
+        chars = len(lines[line - 1].encode("utf-8")[:col].decode("utf-8", "replace")) if line <= len(lines) else col
+        return self.token((line, chars))
+
+
 @dataclass
 class _Code:
     names: dict[int, str]  # offset -> NAME token
@@ -223,6 +249,7 @@ class _Code:
     bound: bool  # `import pkg[.x]` without `as` binds the name `pkg` in this file
     regions: list[_Region]  # sorted, never overlapping
     scoped: bool = False  # refs of the bound name come from the ast scope analysis
+    positions: _Positions | None = None  # the offsets of the text's ast positions
     starts: list[int] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -361,20 +388,134 @@ def _package_uses(body: str, pkg: str) -> set[tuple[int, int]] | None:
     return {(n.lineno, n.col_offset) for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == pkg and is_package(n)}
 
 
+def _binds(node: ast.AST, name: str) -> bool:
+    """Whether `node` binds `name` in the scope it is evaluated in (_scopes), an `import name[.x]`
+    included: an assignment, a parameter, a loop, with or except target, def/class, an import,
+    a match capture, a type parameter, a nonlocal declaration."""
+    if isinstance(node, ast.Import):
+        return any(alias.asname == name or (alias.asname is None and alias.name.split(".")[0] == name) for alias in node.names)
+    if isinstance(node, ast.ImportFrom):
+        return any((alias.asname or alias.name) == name for alias in node.names)
+    if isinstance(node, ast.Name):
+        return node.id == name and not isinstance(node.ctx, ast.Load)
+    if isinstance(node, ast.arg):
+        return node.arg == name
+    if isinstance(node, ast.Nonlocal):
+        return name in node.names
+    if isinstance(node, ast.MatchMapping):
+        return node.rest == name
+    if isinstance(node, (ast.alias, ast.keyword, ast.Global)):
+        return False  # handled with their statement / a keyword argument binds nothing / below
+    return getattr(node, "name", None) == name  # def/class, except ... as, match captures, type params
+
+
+def _binding_scopes(tree: ast.Module, scope: dict[ast.AST, ast.AST], name: str) -> set[ast.AST]:
+    """The scopes that bind `name` (_binds); `global name` binds it in the module, and a walrus in
+    a comprehension in the scope around it too, as in Python."""
+    out: set[ast.AST] = set()
+    walrus = {id(n.target) for n in ast.walk(tree) if isinstance(n, ast.NamedExpr)}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Global):
+            if name in node.names:
+                out.add(tree)
+            continue
+        if not _binds(node, name):
+            continue
+        where = scope[node]
+        out.add(where)
+        if id(node) in walrus:
+            while isinstance(where, _COMPREHENSIONS):
+                where = scope[where]
+                out.add(where)
+    return out
+
+
+def _captured(body: str, pkg: str, new: str) -> set[tuple[int, int]] | None:
+    """(line, UTF-8 column) of the package references that a rename to `new` would hand to
+    another binding of `new`, so that they are kept and reported instead:
+    - a use of `pkg` below a scope that binds `new` another way before the scope that imports
+      it (a parameter, a local, a loop or comprehension variable, a class attribute): renamed,
+      `new.core.x()` read that binding;
+    - in a scope whose `import pkg[.x]` would bind `new` where `new` is bound another way (`from
+      engine import game`, `def game`) or read from further out (an enclosing function, the
+      module, a builtin such as `map` or `input`), that import and every use of it: renamed, the
+      import and that binding took each other's name.
+    None: ast cannot parse it (syntax newer than the runner's Python)."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(body)
+        scope = _scopes(tree)
+    except (SyntaxError, ValueError, MemoryError, RecursionError):
+        return None
+    imports: dict[ast.AST, list[ast.alias]] = {}  # scope -> its `import pkg[.x]` (no `as`)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname is None and alias.name.split(".")[0] == pkg:
+                    imports.setdefault(scope[node], []).append(alias)
+    if not imports:
+        return set()
+    binders = _binding_scopes(tree, scope, new)
+
+    def lookup(node: ast.AST) -> Iterator[ast.AST]:
+        """The scopes a name of `node` is looked up in, innermost first, up to the module (class
+        bodies are invisible to the scopes nested in them)."""
+        where, innermost = scope[node], True
+        while True:
+            if innermost or not isinstance(where, ast.ClassDef):
+                yield where
+            if where is tree:
+                return
+            innermost, where = False, scope[where]
+
+    clashing = {s for s in imports if s in binders}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == new:
+            for where in lookup(node):
+                if where in binders:
+                    break
+                if where in imports:  # a name the new import would take over
+                    clashing.add(where)
+                    break
+    out = {(alias.lineno, alias.col_offset) for s in clashing for alias in imports[s]}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Name) and node.id == pkg):
+            continue
+        for where in lookup(node):
+            if where in imports:
+                if where in clashing:
+                    out.add((node.lineno, node.col_offset))
+                break
+            if where in binders:  # renamed, it would read that binding
+                out.add((node.lineno, node.col_offset))
+                break
+    return out
+
+
+def _keep_captured(code: _Code, names: Names) -> None:
+    """Leave the package references a rename would hand to another binding of the new name
+    (_captured) out of code.refs: they are kept and reported, like a use under a binding of the
+    old name. Without ast, a file that names the new name anywhere keeps them all."""
+    if code.positions is None:
+        return
+    captured = _captured(code.positions.body, names.old_pkg, names.new_pkg)
+    if captured is None:
+        if names.new_pkg in code.names.values():
+            code.refs = set()
+        return
+    code.refs -= {code.positions.ast(line, col) for line, col in captured}
+
+
 def _python_code(text: str, pkg: str) -> _Code | None:
     """Tokenize a Python source: NAME tokens, package references and string/comment regions.
 
     Return None if the tokenizer rejects it (the caller then treats it as plain text).
     """
-    shift = 1 if text.startswith("\ufeff") else 0
-    # A lone CR ends a line for the compiler (ast counts it): read it as LF, one character for
-    # one, so every offset stays the same
-    body = re.sub(r"\r(?!\n)", "\n", text[shift:])
-    line_starts = [0, *(m.end() for m in re.finditer("\n", body))]
-
-    def offset(pos: tuple[int, int]) -> int:
-        return shift + line_starts[pos[0] - 1] + pos[1]
-
+    # A lone CR ends a line for the compiler (ast counts it): read as LF, one character for one,
+    # so every offset stays the same
+    positions = _Positions(text)
+    body, offset = positions.body, positions.token
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(body).readline))
     except (tokenize.TokenError, SyntaxError):
@@ -438,10 +579,7 @@ def _python_code(text: str, pkg: str) -> _Code | None:
     used: set[int] = set()  # offsets of the names that resolve to the bound package (ast)
     uses = _package_uses(body, pkg) if bound else None
     if uses is not None:
-        lines = body.split("\n")
-        for line, col in uses:
-            chars = len(lines[line - 1].encode("utf-8")[:col].decode("utf-8", "replace")) if line <= len(lines) else col
-            used.add(offset((line, chars)))
+        used.update(positions.ast(line, col) for line, col in uses)
     elif bound:  # no ast (syntax newer than this Python): pkg.core.fn(), but not obj.pkg, pkg = ..., f(pkg=...)
         for idx in range(len(sig)):
             if idx in refs or idx in in_import or not is_name(idx, pkg):
@@ -504,6 +642,7 @@ def _python_code(text: str, pkg: str) -> _Code | None:
         bound=bound,
         regions=sorted(regions, key=lambda r: r.start),
         scoped=uses is not None,
+        positions=positions,
     )
 
 
@@ -852,6 +991,8 @@ def rewrite(
     if pattern.search(text) is None:
         return Rewrite(text=text)
     code = _python_code(text, names.old_pkg) if python else None
+    if code is not None and code.bound and names.new_pkg != names.old_pkg:
+        _keep_captured(code, names)  # renamed, they would read another binding of the new name
     module_lines = module_value_lines(text, module_keys) if module_keys else set()
     line_starts = [0, *(m.end() for m in re.finditer("\n", text))]
     syntax = "toml" if toml else strings

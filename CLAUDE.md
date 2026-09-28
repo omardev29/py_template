@@ -1355,8 +1355,16 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     import (`_package_uses`, an iterative `ast` scope pass: a function, class body or
     comprehension that binds `pkg` another way (assignment, parameter, loop/with/except target,
     global/nonlocal, walrus) keeps every `pkg` in it; a module that rebinds it keeps all of its
-    own; they are reported, not changed). Keyword arguments (`f(pkg=1)`) and attributes never
-    change; `f"{pkg=}"` is a use. When `ast` cannot parse the file (syntax newer than the
+    own; they are reported, not changed). So does a reference the NEW name would capture
+    (`_captured`, `_binding_scopes`, applied by `_keep_captured` in `rewrite`): a use below a
+    scope that binds the new name before the importing one (a parameter, a local, a loop or
+    comprehension variable, a class attribute), and, in a scope whose renamed `import new[.x]`
+    would clash with another binding of the new name (`from engine import game`, `def game`) or
+    take over a name read from further out (a builtin: `map`, `input`), that import and all its
+    uses; without ast, a file that names the new name keeps every reference (renamed,
+    `game.core.x()` read the parameter `game`, silently:
+    `test_rename.test_a_reference_the_new_name_would_capture_is_kept_and_reported`). Keyword
+    arguments (`f(pkg=1)`) and attributes never change; `f"{pkg=}"` is a use. When `ast` cannot parse the file (syntax newer than the
     runner's Python) the token rule is the fallback. String tokens are recognised by their
     `*STRING_START`/`*STRING_END` suffix (f-strings 3.12, t-strings 3.14, any later family); such
     a string is one region whose `{fields}` are code, as 3.11's single token (`_in_fstring_field`:

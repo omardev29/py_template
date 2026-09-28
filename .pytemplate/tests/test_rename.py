@@ -12,6 +12,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -923,6 +924,39 @@ def test_a_local_import_of_the_package_under_a_module_rebinding() -> None:
     src = "import game.core\ngame = None\n\ndef h():\n    import game.gfx\n    return game.gfx.Z\n"
     out = rewrite(src, Names("game", "beta"), python=True)
     assert out.text == "import beta.core\ngame = None\n\ndef h():\n    import beta.gfx\n    return beta.gfx.Z\n"
+
+
+CAPTURED = [
+    # (the source, the new name, the lines kept): the lines kept are left as they are, the rest renamed
+    ('import alpha.core\n\n\ndef run(game: str) -> str:\n    return f"{game}: {alpha.core.bench.__name__}"\n', "game", [5]),  # a parameter
+    ("import alpha.core\nx = [alpha.core.score(game) for game in range(3)]\n", "game", [2]),  # a comprehension variable
+    ("import alpha.core\nf = lambda game: alpha.core.score(game)\n", "game", [2]),  # a lambda's
+    ("import alpha.core\n\n\ndef f():\n    game = 1\n    return alpha.core.x(game)\n", "game", [6]),  # a local
+    (
+        "import alpha.core\n\n\nclass Level:\n    game = 'easy'\n    speed = alpha.core.SPEED\n\n    def load(self):\n        return alpha.core.load()\n",
+        "game",
+        [6],  # a class attribute: the class body sees it, its methods do not
+    ),
+    ("import alpha.core\nfrom engine import game\n\n\ndef over():\n    return alpha.core.score(game)\n", "game", [1, 6]),  # the module binds it
+    ("import alpha.core\n\n\ndef labels(xs):\n    return list(map(str, xs)) + [alpha.core.NAME]\n", "map", [1, 5]),  # a builtin
+    ("def f(game):\n    import alpha.core\n    return alpha.core.x(game)\n", "game", [2, 3]),  # the import would rebind the parameter
+    ("import alpha.core\n\n\ndef other(game):\n    return game\n\n\ndef run():\n    return alpha.core.x()\n", "game", []),  # elsewhere: renamed
+]
+
+
+@pytest.mark.parametrize(("src", "new", "kept"), CAPTURED)
+def test_a_reference_the_new_name_would_capture_is_kept_and_reported(src: str, new: str, kept: list[int]) -> None:
+    """A rename wrote the new package name where that name was already bound another way: a
+    parameter, a local, a comprehension or lambda variable, a class attribute, a name of the
+    module (`from engine import game`) or a builtin (`map`). Renamed, `game.core.score()` read that
+    binding and the app failed at run time (or did something else), and the rename listed no line
+    to review. Those references are kept and reported, as under a binding of the old name."""
+    out = rewrite(src, Names("alpha", new), python=True)
+    lines, got = src.split("\n"), out.text.split("\n")
+    assert [n for n, _ in out.kept] == kept, out.text
+    for n, (before, after) in enumerate(zip(lines, got, strict=True), 1):
+        assert after == (before if n in kept else re.sub(r"\balpha\b", new, before)), (n, after)
+    compile(out.text, "t.py", "exec")
 
 
 def test_fstring_debug_field_of_the_bound_package() -> None:
