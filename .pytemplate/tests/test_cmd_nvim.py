@@ -373,6 +373,21 @@ def test_parse_smoke() -> None:
     assert nvimtest.parse_smoke("").total == 0
 
 
+def test_smoke_hands_every_path_to_an_ex_command_escaped() -> None:
+    """`:edit`, `:cd` and `:bwipeout` expand `%`, `#` and `$NAME` in their argument, and glob()
+    reads the root's own path as a pattern: under a --dir (or a TEMP) holding `%` or `#`, where
+    the plugin itself works, five smoke checks failed with E499 (A9-05). Every path smoke.lua hands
+    to an Ex command goes through vim.fn.fnameescape, and tests/ is listed, never globbed."""
+    text = (project.ROOT / nvimtest.SMOKE).read_text(encoding="utf-8")
+    ex = r"(?:edit|e|cd|lcd|tcd|split|vsplit|tabedit|badd|bwipeout|bdelete|write|w|source|luafile)"
+    calls = re.findall(rf"vim\.cmd\.{ex}\((.*)\)\s*$", text, re.MULTILINE)
+    concats = re.findall(rf'"{ex}!? " \.\. (.*)', text)
+    assert len(calls) >= 8 and concats, (calls, concats)  # six :edit, two :cd, one :bwipeout
+    for arg in calls + concats:
+        assert arg.startswith("vim.fn.fnameescape("), arg
+    assert "vim.fn.glob(" not in text
+
+
 def test_parse_smoke_requires_done() -> None:
     """A result glued onto leaked output (no newline before it) is lost: the DONE count shows it."""
     lost = nvimtest.parse_smoke("ok   a\ngarbage from a pty ok   x\nok   y\nDONE 3\n")

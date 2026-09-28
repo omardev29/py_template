@@ -371,7 +371,7 @@ check("mypy diagnostics (profile " .. info.typing.profile .. ")", function()
   local file = root .. "/src/" .. info.pkg .. "/_pt_smoke_mypy.py"
   vim.fn.writefile({ 'value: int = "text"' }, file)
   local ok, err = pcall(function()
-    vim.cmd.edit(file)
+    vim.cmd.edit(vim.fn.fnameescape(file))
     local buf = vim.api.nvim_get_current_buf()
     -- LazyVim lints on BufReadPost after a 100 ms debounce, and a new run of a linter cancels the
     -- running one (on Windows only its cmd.exe wrapper): let that run start and end first
@@ -425,7 +425,7 @@ end
 
 check("ruff language server from .venv", function()
   local ruff = assert(pt.tool("ruff"), "no ruff in .venv (./pyt setup)")
-  vim.cmd.edit(lsp_file())
+  vim.cmd.edit(vim.fn.fnameescape(lsp_file()))
   local buf = vim.api.nvim_get_current_buf()
   wait(90000, function()
     return #vim.lsp.get_clients({ bufnr = buf, name = "ruff" }) > 0
@@ -441,7 +441,7 @@ check("python language server (" .. pt.lsp_name() .. ")", function()
     assert(vim.lsp.is_enabled(want) and not vim.lsp.is_enabled(other), "enabled servers are wrong")
   end
   local cmd, source = integ.lsp_cmd(want)
-  vim.cmd.edit(lsp_file())
+  vim.cmd.edit(vim.fn.fnameescape(lsp_file()))
   local buf = vim.api.nvim_get_current_buf()
   local attached = vim.wait(150000, function()
     return #vim.lsp.get_clients({ bufnr = buf, name = want }) > 0
@@ -497,7 +497,7 @@ end)
 check("debugger stops at a breakpoint (launch.json)", function()
   local dap = require("dap")
   local main = root .. "/src/main.py"
-  vim.cmd.edit(main)
+  vim.cmd.edit(vim.fn.fnameescape(main))
   local line = vim.fn.search([[^if __name__ == "__main__":]], "nw")
   assert(line > 0, "no __main__ guard in src/main.py")
   require("dap.breakpoints").set({}, vim.api.nvim_get_current_buf(), line)
@@ -560,7 +560,7 @@ check("mypyc launch config: pyt: compile, then a breakpoint in src/main.py", fun
   assert(config.preLaunchTask == "pyt: compile", vim.inspect(config.preLaunchTask))
   config.console = "internalConsole"
   local main = root .. "/src/main.py"
-  vim.cmd.edit(main)
+  vim.cmd.edit(vim.fn.fnameescape(main))
   local line = vim.fn.search([[^if __name__ == "__main__":]], "nw")
   assert(line > 0, "no __main__ guard in src/main.py")
   require("dap.breakpoints").set({}, vim.api.nvim_get_current_buf(), line)
@@ -611,9 +611,17 @@ check("neotest: discovery skips .venv, tests pass", function()
     end
   end
   local nt = require("neotest")
-  local file = vim.fn.glob(root .. "/tests/test_*.py", true, true)[1]
-  assert(file, "no tests/test_*.py")
-  vim.cmd.edit(file)
+  -- listed, never globbed: the root's own path would be read as a pattern (as in init.subdirs)
+  local names = {}
+  for name, kind in vim.fs.dir(root .. "/tests") do
+    if kind == "file" and name:match("^test_.*%.py$") then
+      names[#names + 1] = name
+    end
+  end
+  table.sort(names)
+  assert(names[1], "no tests/test_*.py")
+  local file = root .. "/tests/" .. names[1]
+  vim.cmd.edit(vim.fn.fnameescape(file))
   local buf = vim.api.nvim_get_current_buf()
   nt.run.run(file) -- the neotest client starts (and discovers) on first use
   local id

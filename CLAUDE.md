@@ -3724,7 +3724,10 @@ short temp tree and unset `NVIM_APPNAME`.
   compiler); each result starts on a fresh line (stdout is shared with anything that leaks
   there, a pty or a banner, and text without a newline would hide the next result) and the
   last line is `DONE <number of checks>`; exit 0 via `qa!`, 1 via `cq!`; a 20-minute
-  watchdog; `PT_ROOT` optional. Parse only lines that start with those markers. It runs
+  watchdog; `PT_ROOT` optional. Parse only lines that start with those markers. Every path it
+  hands to an Ex command goes through `vim.fn.fnameescape` (`:edit` expands `%`, `#` and `$NAME`:
+  E499 under a `--dir` or TEMP holding `%` or `#`) and it lists `tests/`, never globs it
+  (`test_cmd_nvim.test_smoke_hands_every_path_to_an_ex_command_escaped`). It runs
   `./pyt help`, `render` and `lint`, and briefly creates `src/<pkg>/_pt_smoke_lint.py` and
   `_pt_smoke_mypy.py`. 20 checks, including the launcher fallback while the scratch project's
   `pyt` has no exec bit (POSIX), stage-relative mypyc paths in the output parser, the mypy diagnostics with the typing
