@@ -1021,7 +1021,9 @@ header rules (with detector tests proving each rule fires).
   <url> into <cache>` (`... if the build holds a binary to pack` for a `runtime = "system"`
   portable build), never the download), then stops. `report` builds nothing and never opens
   the browser. No success line for a skipped step: `compile`, `report` and `check` print
-  `(--dry-run) would ...`/`were not run` instead of their `ok` lines, and `test all` no summary
+  `(--dry-run) would ...`/`were not run` instead of their `ok` lines (`check` names the tools
+  it skipped and says the mypyc rules ran only where mypyc is supported:
+  `test_cli_core.test_a_dry_run_of_check_names_only_what_it_skipped`), and `test all` no summary
   of `[ok]` rows. A check that fails in a dry run still fails it: `test all` lists the backends
   that failed theirs (a `compile.exclude` naming nothing) and exits 1, as a real run does.
 - `mode` validates the new `pytemplate.toml` in memory and prints the keys that would change

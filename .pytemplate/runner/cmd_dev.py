@@ -195,7 +195,17 @@ def cmd_check(cfg: Config, args: list[str]) -> int:
     for profile, b in chosen.items():
         ok = run_checks(cfg, b, rules=profile == rules_profile) and ok
     if ok and proc.DRY_RUN:
-        ui.info("(--dry-run) check: ruff, mypy and basedpyright were not run (the mypyc rules were)")
+        # What the dry run skipped (the tools it only echoed) and whether the in-process rules ran:
+        # run_checks runs mypy unless every profile skips it, basedpyright only as the editor, and
+        # the mypyc rules only where mypyc is supported (it said they ran in a project without it)
+        skipped = ["ruff"]
+        if any(not render.load_profile(p).get("skip_mypy") for p in chosen):
+            skipped.append("mypy")
+        if cfg.typing.editor == "basedpyright":
+            skipped.append("basedpyright")
+        tools = f"{', '.join(skipped[:-1])} and {skipped[-1]} were" if len(skipped) > 1 else f"{skipped[0]} was"
+        rules = " (the mypyc rules were)" if cfg.supports("mypyc") else ""
+        ui.info(f"(--dry-run) check: {tools} not run{rules}")
         return 0
     if ok:
         ui.ok("check: no errors")

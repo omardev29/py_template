@@ -1577,6 +1577,21 @@ def test_check_all_runs_each_profile_once_and_the_mypyc_rules_once(checks: FakeC
     assert checks.calls == [("cpython", True)]
 
 
+def test_a_dry_run_of_check_names_only_what_it_skipped(checks: FakeChecks, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """The dry-run line of `check` was fixed text: it said the mypyc rules had run in a project
+    that does not support mypyc (they run only then), and named basedpyright with the pylance
+    editor and mypy under a profile that skips it."""
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert cmd_dev.cmd_check(make({"backend": {"supported": ["cpython"]}}), []) == 0  # profile off: no mypy
+    assert "(--dry-run) check: ruff was not run\n" in capsys.readouterr().err
+    strict = {"typing": {"relaxed": "strict"}}
+    assert cmd_dev.cmd_check(make({**strict, "backend": {"supported": ["cpython", "pypy"]}}), ["all"]) == 0
+    assert "(--dry-run) check: ruff and mypy were not run\n" in capsys.readouterr().err
+    both = {"backend": {"supported": ["cpython", "mypyc"]}, "typing": {"editor": "basedpyright"}}
+    assert cmd_dev.cmd_check(make(both), ["all"]) == 0
+    assert "(--dry-run) check: ruff, mypy and basedpyright were not run (the mypyc rules were)\n" in capsys.readouterr().err
+
+
 def test_check_rejects_extra_arguments_and_unsupported_backends(checks: FakeChecks) -> None:
     for args, message in ((["all", "extra"], "unrecognized arguments: extra"), (["foo"], "unrecognized arguments: foo"), (["pypy"], "not in backend.supported")):
         with pytest.raises(PytError, match=message) as e:
@@ -1976,7 +1991,7 @@ def test_a_dry_run_reports_no_success_for_what_it_skipped(
     err = capsys.readouterr().err
     assert "ok " not in err and "[ok]" not in err and "test summary" not in err
     assert "(--dry-run) would compile the stage" in err and "(--dry-run) would write the mypyc report" in err
-    assert "(--dry-run) would write the Any reports" in err and "(--dry-run) check: ruff, mypy and basedpyright were not run" in err
+    assert "(--dry-run) would write the Any reports" in err and "(--dry-run) check: ruff and mypy were not run (the mypyc rules were)" in err
 
 
 def test_a_dry_run_of_test_all_still_fails_when_a_backend_fails_its_checks(
