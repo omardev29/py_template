@@ -1632,6 +1632,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   that exists without a record or is a symbolic link (`not_an_install`: it was refused as one
   that "holds no" record), a clone git refuses to read (dubious ownership: named with git's way
   to let it, `presets.git_refusal_fix`, where it said "not a git work tree ... use a git clone"),
+  a clone where git is not on PATH (`_git_missing_here`, the rule of `hooks.git_missing_here`:
+  a git GUI's own git; it said "use a git clone" too,
+  `test_install.test_a_clone_with_no_git_on_path_is_told_to_put_git_on_path`),
   and on Windows a `pyt.com`, `pyt.exe` or `pyt.bat` of another tool in
   the bin folder (`pathext_shadows`: cmd, xonsh, nushell and Python's subprocess take the first
   pyt<ext> of a folder in PATHEXT order, before `pyt.cmd`) are refused before the first write,

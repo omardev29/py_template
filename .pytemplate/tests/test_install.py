@@ -411,6 +411,33 @@ def test_a_clone_git_refuses_to_read_is_named_with_the_way_out(tmp_path: Path, m
     assert "the copy includes" not in capsys.readouterr().err  # install copies nothing
 
 
+@pytest.mark.parametrize("clone", [True, False], ids=["a clone", "no repository"])
+def test_a_clone_with_no_git_on_path_is_told_to_put_git_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clone: bool) -> None:
+    """A git clone typed in where git is not on PATH (a git GUI's own git: GitHub Desktop, Fork):
+    install said "here it cannot tell which (every file, ignored ones included: git not found):
+    use a git clone", to someone in a git clone. It says that git is not on PATH; a folder that
+    is no repository still hears to use a git clone."""
+    tracked, files = presets._tracked_template, presets._git_files
+    p = Planner(tmp_path, monkeypatch)
+    monkeypatch.setattr(presets, "_tracked_template", tracked)
+    monkeypatch.setattr(presets, "_git_files", files)
+    real_which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: None if name == "git" else real_which(name, *args, **kwargs))
+    root = tmp_path / "clone"
+    root.mkdir()
+    if clone:
+        (root / ".git").mkdir()
+    elif any((d / ".git").exists() for d in root.parents):
+        pytest.skip("a folder above tmp_path holds a .git")
+    monkeypatch.setattr(cmd_install, "ROOT", root)
+    message = p.refusal()
+    if clone:
+        assert f"git is not on PATH, and {root} is a git clone: install git, or put the git you have on PATH" in message, message
+        assert "use a git clone" not in message
+    else:
+        assert "use a git clone" in message and "not on PATH" not in message, message
+
+
 def test_every_refusal_comes_in_one_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A data folder install did not make and a file of the bin folder it did not write: the
     first run named one, and the next run the other."""

@@ -524,6 +524,14 @@ def _launcher_bytes(name: str) -> bytes:
     return data
 
 
+def _git_missing_here() -> bool:
+    """git is not on PATH, and a `.git` in the clone or above it says it is a repository
+    (hooks.git_missing_here, the rule apply, rename and doctor follow)."""
+    from . import hooks  # imported here: it imports render, mypyc and more
+
+    return hooks.git_missing_here(ROOT)
+
+
 def _unwritable(folder: Path) -> str | None:
     """Why this user cannot make files in `folder` (or make `folder` itself, in the nearest
     folder above it that exists), else None: the kernel's answer for this user (os.access).
@@ -586,6 +594,13 @@ def make_plan() -> Plan:
         problems.append(
             f"pyt install copies the files git tracks in the template, and git refuses to list them here "
             f"({presets._git_refused}): {presets.git_refusal_fix()}"
+        )
+    elif tracked is None and _git_missing_here():
+        # A git clone where git is not on PATH (a git GUI's own git): "use a git clone" was no
+        # way out for someone typing in one
+        problems.append(
+            f"pyt install copies the files git tracks in the template, but git is not on PATH, and {ROOT} is a git clone: "
+            "install git, or put the git you have on PATH (a git GUI's own git often is not), then run ./pyt install again"
         )
     elif tracked is None:
         problems.append(f"pyt install copies the files git tracks in the template, and here it cannot tell which ({how}): use a git clone ({presets.TEMPLATE_URL})")
