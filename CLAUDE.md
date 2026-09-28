@@ -1624,7 +1624,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `uv tool dir --bin` (`bin_dir`; a relative answer, from a relative `UV_TOOL_BIN_DIR`, is refused),
   byte for byte, mode 0755, each checked like doctor checks it (`shells.launcher_problems`) and
   for its MARKER line. A file there without the MARKER, a symbolic link (`not_ours`), a bin
-  folder inside the clone or the data folder, or one that holds `.pytemplate`, a data folder
+  folder inside the clone or the data folder, or one that holds `.pytemplate`, a bin folder or
+  data folder this user may not write (`_unwritable`: os.access, a folder not made yet by the
+  nearest one above it; install wrote the whole new copy first, then failed on its first
+  launcher: `test_install.test_a_folder_install_may_not_write_is_refused_before_the_first_write`),
+  a data folder
   that exists without a record or is a symbolic link (`not_an_install`: it was refused as one
   that "holds no" record), a clone git refuses to read (dubious ownership: named with git's way
   to let it, `presets.git_refusal_fix`, where it said "not a git work tree ... use a git clone"),
@@ -1646,6 +1650,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   and was never changed: its entry goes before the undo (os.replace is all or nothing), which
   also skips a launcher that holds its old bytes and deletes the staged file of a put-back that
   fails (it said "could not put back" for an untouched launcher and leaked a `.pyt-install-*`).
+  A folder that refuses the files install makes there although os.access said yes (Windows
+  answers yes for every folder; sysfs refuses root) is named, with the way out, never the
+  temporary name install tried (`_folder_error`: it named `<bin>/.pyt-install-p81hkalh`, which
+  never existed;
+  `test_install.test_a_folder_that_refuses_the_new_files_is_named_not_their_temporary_names`).
   `remove_leftovers` deletes what a killed install left (only staged files with the MARKER).
   Windows renames are retried for a few seconds (a scanner holding a new file).
 - Once the swap has succeeded, the launchers of the earlier install in the bin folder its record

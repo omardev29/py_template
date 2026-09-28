@@ -18,6 +18,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -420,6 +421,35 @@ def test_every_refusal_comes_in_one_message(tmp_path: Path, monkeypatch: pytest.
     assert "pyt install writes nothing, for 2 reasons:" in message, message
     assert f"{p.snapshot}: it holds no {cmd_install.RECORD} (pyt install did not make it)" in message
     assert "never overwrites a file it did not write" in message and "pyt: not a pytemplate launcher" in message
+
+
+@pytest.mark.parametrize("which", ["bin", "data"], ids=["uv's tool bin folder", "the data folder"])
+def test_a_folder_install_may_not_write_is_refused_before_the_first_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str) -> None:
+    """uv's tool bin folder (or the data folder) this user may not write: another user's, a
+    read-only one, /usr/local/bin through UV_TOOL_BIN_DIR. install wrote the whole new copy of
+    the template, failed on its first staged launcher and named that temporary file, which does
+    not exist (`<bin>/.pyt-install-p81hkalh: Permission denied`). It is refused with the other
+    refusals, before any write, naming the folder and the way out. The folder is refused as the
+    kernel answers for a user who may not write it (os.access; root may write almost anywhere,
+    and this test runs as root in the CI image's container too)."""
+    p = Planner(tmp_path, monkeypatch)
+    locked = p.bin if which == "bin" else tmp_path  # the data folder is made in tmp_path
+    real = os.access
+
+    def access(path: Any, mode: int, *args: Any, **kwargs: Any) -> bool:
+        if mode & os.W_OK and Path(path) == locked:
+            return False
+        return real(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "access", access)
+    message = p.refusal()
+    if which == "bin":
+        assert f"pyt install cannot write into uv's tool bin folder {p.bin} (this user may not write in it)" in message, message
+        assert "set UV_TOOL_BIN_DIR to a folder of yours" in message
+    else:
+        where = p.snapshot.parent
+        assert f"pyt install cannot write the installed template into {where} (this user may not create it in {tmp_path})" in message, message
+        assert f"set another data folder ({cmd_install.data_home_names()})" in message
 
 
 def test_a_linked_data_folder_is_refused_as_a_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1077,6 +1107,42 @@ def test_a_launcher_that_cannot_be_replaced_is_named_and_nothing_leaks(tmp_path:
     assert f"pyt install failed: {target}: Operation not permitted" in message, message
     assert "nothing was changed" in message and "could not put back" not in message and ".pyt-install-" not in message, message
     assert swap.state() == swap.before  # the first launcher put back, no staged file left
+
+
+@pytest.mark.parametrize("which", ["bin", "data"], ids=["uv's tool bin folder", "the data folder"])
+def test_a_folder_that_refuses_the_new_files_is_named_not_their_temporary_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str) -> None:
+    """A folder that refuses the files install makes there although os.access says yes (Windows
+    answers yes for every folder; sysfs and a root-squashed share refuse root): the error named
+    the temporary name it tried, `<bin>/.pyt-install-p81hkalh` (mkstemp's own error, as it
+    raises it) or `.template-new-...`, which never existed. It names the folder, with the way
+    out, and changes nothing."""
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+    if which == "bin":
+        folder, fix = swap.bin, "set UV_TOOL_BIN_DIR to a folder of yours"
+        real_mkstemp = tempfile.mkstemp
+
+        def mkstemp(*args: Any, **kwargs: Any) -> tuple[int, str]:
+            if kwargs.get("dir") is not None and Path(kwargs["dir"]) == folder:
+                raise PermissionError(errno.EACCES, "Permission denied", os.path.join(kwargs["dir"], f"{kwargs.get('prefix', 'tmp')}p81hkalh"))
+            return real_mkstemp(*args, **kwargs)
+
+        monkeypatch.setattr(tempfile, "mkstemp", mkstemp)
+    else:
+        folder, fix = swap.snapshot.parent, f"set another data folder ({cmd_install.data_home_names()})"
+        real_mkdir = os.mkdir
+
+        def mkdir(path: Any, *args: Any, **kwargs: Any) -> None:
+            if Path(path).parent == folder and Path(path).name.startswith(cmd_install.NEW):
+                raise PermissionError(errno.EACCES, "Permission denied", os.fspath(path))
+            real_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "mkdir", mkdir)
+    with pytest.raises(PytError) as e:
+        cmd_install.install(swap.plan())
+    message = str(e.value)
+    assert e.value.code == 1 and f"pyt install cannot write into {folder}: Permission denied: {fix}" in message, message
+    assert "nothing was changed" in message and ".pyt-install-" not in message and cmd_install.NEW not in message, message
+    assert swap.state() == swap.before
 
 
 # --- where things go --------------------------------------------------------------------------------

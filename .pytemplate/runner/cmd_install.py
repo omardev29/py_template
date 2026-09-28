@@ -26,6 +26,7 @@ and the old launchers back.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -523,6 +524,39 @@ def _launcher_bytes(name: str) -> bytes:
     return data
 
 
+def _unwritable(folder: Path) -> str | None:
+    """Why this user cannot make files in `folder` (or make `folder` itself, in the nearest
+    folder above it that exists), else None: the kernel's answer for this user (os.access).
+    install wrote the whole new copy of the template first, then failed on its first launcher.
+    Windows answers yes for every folder; there, as where a folder refuses root, the step that
+    makes the file names the folder (_folder_error)."""
+    here = folder
+    while not os.path.lexists(here):
+        if here.parent == here:
+            return None
+        here = here.parent
+    if not here.is_dir():
+        return f"{here} is not a folder"
+    if not os.access(here, os.W_OK | os.X_OK):
+        return "this user may not write in it" if here == folder else f"this user may not create it in {here}"
+    return None
+
+
+# What a folder answers when this user may not make a file in it
+NOT_ALLOWED = (errno.EACCES, errno.EPERM, errno.EROFS)
+
+
+def _folder_error(e: OSError, folder: Path, fix: str) -> Exception | None:
+    """The error of a file install tried to make in `folder` as one that names the folder: it
+    named the temporary name it tried (`.pyt-install-p81hkalh`, `.template-new-...`), which never
+    existed. With the way out when this user may not write there; None keeps `e` as it is."""
+    if e.errno is None:
+        return None
+    if e.errno in NOT_ALLOWED:
+        return PytError(f"pyt install cannot write into {folder}: {e.strerror or os.strerror(e.errno)}: {fix}", 1)
+    return OSError(e.errno, e.strerror or os.strerror(e.errno), str(folder))
+
+
 def _refuse(problems: list[str]) -> None:
     """Every refusal of one run in one message (each on its own line when there are several)."""
     if len(problems) == 1:
@@ -560,6 +594,12 @@ def make_plan() -> Plan:
             problems.append(f"uv's tool bin folder {folder} is inside {inside}: set UV_TOOL_BIN_DIR to a folder of its own")
     if (folder / ".pytemplate").exists():
         problems.append(f"uv's tool bin folder {folder} is a project's folder (it holds .pytemplate): set UV_TOOL_BIN_DIR to a folder of its own")
+    if cannot := _unwritable(folder):
+        problems.append(f"pyt install cannot write into uv's tool bin folder {folder} ({cannot}): set UV_TOOL_BIN_DIR to a folder of yours")
+    if cannot := _unwritable(snapshot.parent):
+        problems.append(
+            f"pyt install cannot write the installed template into {snapshot.parent} ({cannot}): set another data folder ({data_home_names()})"
+        )
     launchers: dict[str, bytes] = {}
     for name in LAUNCHERS:
         try:
@@ -713,16 +753,28 @@ class _Swap:
         plan = self.plan
         parent = plan.snapshot.parent
         self.made_parent = not parent.exists()
-        parent.mkdir(parents=True, exist_ok=True)
-        # Noted only once it exists: undo reads a missing self.fresh as renamed into place
-        self.fresh = _new_folder(parent, NEW)
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+            # Noted only once it exists: undo reads a missing self.fresh as renamed into place
+            self.fresh = _new_folder(parent, NEW)
+        except OSError as e:
+            named = _folder_error(e, parent, f"set another data folder ({data_home_names()})")
+            if named is None:
+                raise
+            raise named from e
         _copy_files(plan.files, self.fresh)
         record = self.fresh / RECORD
         record.parent.mkdir(parents=True, exist_ok=True)
         record.write_text(json.dumps(plan.record, indent=2) + "\n", encoding="utf-8", newline="\n")
-        plan.bin.mkdir(parents=True, exist_ok=True)
-        for name, data in plan.launchers.items():
-            self.staged.append((_stage(plan.bin, name, data), plan.bin / name))
+        try:
+            plan.bin.mkdir(parents=True, exist_ok=True)
+            for name, data in plan.launchers.items():
+                self.staged.append((_stage(plan.bin, name, data), plan.bin / name))
+        except OSError as e:
+            named = _folder_error(e, plan.bin, "set UV_TOOL_BIN_DIR to a folder of yours")
+            if named is None:
+                raise
+            raise named from e
         if os.path.lexists(plan.snapshot):
             self.aside = parent / (OLD + self.fresh.name[len(NEW) :])
             _rename(plan.snapshot, self.aside)

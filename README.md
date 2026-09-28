@@ -208,10 +208,11 @@ the folder to PATH), then open a new terminal; on Windows a console opened befor
 keeps its old PATH. A file of the bin folder that `install` did not write (without the
 `pytemplate-launcher` line, or a symbolic link) is never overwritten: `install` names it and
 stops before writing anything, as it does for a data folder it did not make (or one that is a
-symbolic link). On Windows it also stops for another tool's `pyt.exe`, `pyt.com` or `pyt.bat`
-in the bin folder: cmd, xonsh and nushell take those before `pyt.cmd` (PATHEXT order);
-`uv tool list` names the tool it belongs to. Every such problem of one run is named in one
-message.
+symbolic link) and for a bin folder or data folder you may not write (set `UV_TOOL_BIN_DIR` to a
+folder of yours, or another data folder). On Windows it also stops for another tool's
+`pyt.exe`, `pyt.com` or `pyt.bat` in the bin folder: cmd, xonsh and nushell take those before
+`pyt.cmd` (PATHEXT order); `uv tool list` names the tool it belongs to. Every such problem of
+one run is named in one message.
 
 To update the installed template, run `./pyt install` again in the clone (after a `git pull`,
 say): the new copy is written next to the old one and swapped in whole, and a failure, Ctrl+C,
