@@ -17,6 +17,7 @@ mypyc does not compile for other OSes: there the .py is used (slower, same resul
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import shutil
@@ -57,22 +58,27 @@ def _write_archive(root: Path, out: Path, modes: Mapping[str, int] | None = None
     OS's files say.
     """
     tmp = out.with_name(out.name + ".tmp")
-    with tmp.open("wb") as fd:
-        fd.write(b"#!/usr/bin/env python3\n")
-        with zipfile.ZipFile(fd, "w", compression=zipfile.ZIP_DEFLATED, strict_timestamps=False) as z:
-            for path in sorted(root.rglob("*")):
-                if not path.is_file():
-                    continue
-                name = path.relative_to(root).as_posix()
-                if modes and name in modes:
-                    info = zipfile.ZipInfo.from_file(path, name, strict_timestamps=False)
-                    info.create_system = 3
-                    info.external_attr = (stat.S_IFREG | modes[name]) << 16
-                    info.compress_type = zipfile.ZIP_DEFLATED
-                    with path.open("rb") as src, z.open(info, "w") as dst:
-                        shutil.copyfileobj(src, dst)
-                else:
-                    z.write(path, name)
+    try:
+        with tmp.open("wb") as fd:
+            fd.write(b"#!/usr/bin/env python3\n")
+            with zipfile.ZipFile(fd, "w", compression=zipfile.ZIP_DEFLATED, strict_timestamps=False) as z:
+                for path in sorted(root.rglob("*")):
+                    if not path.is_file():
+                        continue
+                    name = path.relative_to(root).as_posix()
+                    if modes and name in modes:
+                        info = zipfile.ZipInfo.from_file(path, name, strict_timestamps=False)
+                        info.create_system = 3
+                        info.external_attr = (stat.S_IFREG | modes[name]) << 16
+                        info.compress_type = zipfile.ZIP_DEFLATED
+                        with path.open("rb") as src, z.open(info, "w") as dst:
+                            shutil.copyfileobj(src, dst)
+                    else:
+                        z.write(path, name)
+    except BaseException:  # never a half-written .tmp left next to the output
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
     try:
         tmp.replace(out)
     except OSError as e:  # Windows: the previous .pyz is in use
@@ -267,6 +273,16 @@ def _app_digest(archive: zipfile.ZipFile) -> str:
     return h.hexdigest()
 
 
+def _cannot_write(path: Path, e: OSError) -> Exception:
+    """--out is the user's (another user's folder, a read-only one, /sys): one error line, never an
+    internal-error traceback. A full disk stays itself: cli.main names the file (exit 1)."""
+    from ..cli import NO_ROOM  # lazily: the runner's entry point
+
+    if e.errno in NO_ROOM:
+        return e
+    return PytError(f"pyz-merge: cannot write {path}: {e.strerror or e}", 2)
+
+
 def wrapper_path(out: Path) -> Path:
     """The Windows wrapper written next to a merged .pyz: <stem>.cmd."""
     return out.with_name(out.stem + ".cmd")
@@ -388,9 +404,15 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
         merged = {k: v for k, v in infos[0].items() if k != "host"}
         merged.update({"targets": targets, "pure": pure, "build_id": _build_id(root), "merged": True, "abi": _target_abis(root, targets)})
         (root / "_pyz.json").write_text(json.dumps(merged, indent=2), encoding="utf-8", newline="\n")
-        out.parent.mkdir(parents=True, exist_ok=True)
-        _write_archive(root, out, modes)
-    wrapper_path(out).write_bytes(wrapper)
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            _write_archive(root, out, modes)
+        except OSError as e:
+            raise _cannot_write(out, e) from None
+    try:
+        wrapper_path(out).write_bytes(wrapper)
+    except OSError as e:
+        raise _cannot_write(wrapper_path(out), e) from None
     if pure:  # targets/ holds only mypyc overlays: the .py runs everywhere else
         detail = f"pure: works with Python >= {min_python} on any OS" + (f"; compiled code for {', '.join(targets)}" if targets else "")
     else:

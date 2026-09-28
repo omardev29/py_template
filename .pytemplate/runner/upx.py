@@ -32,6 +32,7 @@ pack current macOS binaries and packing breaks code signing).
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import hashlib
 import http.client
@@ -169,13 +170,23 @@ def _download(dest: Path) -> Path:
             binary = extracted.read() if extracted else None
     if binary is None:
         raise PytError(f"upx: {asset} has no {_exe_name()} binary", 3)
-    dest.mkdir(parents=True, exist_ok=True)
     target = dest / _exe_name()
     partial = target.with_name(target.name + ".part")  # an interrupted write must never look cached
-    partial.write_bytes(binary)
-    if not IS_WINDOWS:
-        partial.chmod(0o755)
-    partial.replace(target)
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        partial.write_bytes(binary)
+        if not IS_WINDOWS:
+            partial.chmod(0o755)
+        partial.replace(target)
+    except OSError as e:  # a cache folder that cannot be made or written: a traceback before
+        from .cli import NO_ROOM  # lazily: the runner's entry point
+
+        with contextlib.suppress(OSError):
+            partial.unlink()
+        if e.errno in NO_ROOM:
+            raise  # a full disk: cli.main names the file, exit 1
+        variable = "LOCALAPPDATA" if IS_WINDOWS else "XDG_CACHE_HOME"
+        raise PytError(f"upx: cannot write {dest}: {e.strerror or e}; make it writable (it follows {variable}), or set deploy.upx.path", 3) from None
     return target
 
 

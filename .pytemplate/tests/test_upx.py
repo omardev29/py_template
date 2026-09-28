@@ -338,6 +338,21 @@ def test_download_failures_are_clear_and_leave_nothing(monkeypatch: pytest.Monke
     assert not (tmp_path / "tools").exists() or not any((tmp_path / "tools").iterdir())
 
 
+def test_a_cache_folder_it_cannot_write_is_a_clear_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # ~/.cache/pytemplate/tools (XDG_CACHE_HOME, LOCALAPPDATA) that cannot be made or written: the
+    # download ended in an "internal runner error" traceback
+    asset = f"upx-{upx.VERSION}-amd64_linux.tar.xz"
+    _serve(monkeypatch, _tar_xz({f"upx-{upx.VERSION}-amd64_linux/upx": b"\x7fELF upx"}), asset, windows=False)
+    (tmp_path / "cache").write_text("a file where the folder must go", encoding="utf-8")
+    with pytest.raises(PytError, match=r"upx: cannot write .*cache.*deploy\.upx\.path") as e:
+        upx._download(tmp_path / "cache" / "tools")
+    assert e.value.code == 3
+    (tmp_path / "tools" / "upx.part").mkdir(parents=True)  # the file cannot be written either
+    with pytest.raises(PytError, match="upx: cannot write") as e:
+        upx._download(tmp_path / "tools")
+    assert e.value.code == 3 and not (tmp_path / "tools" / "upx").exists()
+
+
 def test_files_over_the_limit_are_never_packed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     big = tmp_path / "big.dll"
     big.write_bytes(bytes(2048))

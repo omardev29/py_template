@@ -1505,6 +1505,23 @@ def test_pyz_merge_says_a_pure_result_runs_everywhere(tmp_path: Path, capsys: py
     assert f"runs on {LINUX}, {WIN}" in err and "pure:" not in err
 
 
+def test_pyz_merge_to_a_place_it_cannot_write_is_a_clear_error(tmp_path: Path) -> None:
+    # --out is the user's: in a folder it may not write (another user's, read-only, /sys) it
+    # ended in an "internal runner error" traceback
+    from runner.methods import pyz
+
+    a = _pure_part(tmp_path / "a.pyz", host="cp314-linux-x86_64")
+    b = _pure_part(tmp_path / "b.pyz", host="cp314-windows-x86_64")
+    (tmp_path / "file").write_text("a file where the folder must go", encoding="utf-8")
+    with pytest.raises(PytError, match=r"pyz-merge: cannot write .*file.*all\.pyz") as e:
+        pyz.merge([a, b], tmp_path / "file" / "all.pyz", make({}))
+    assert e.value.code == 2
+    (tmp_path / "out" / "all.pyz.tmp").mkdir(parents=True)  # the archive cannot be written there
+    with pytest.raises(PytError, match=r"pyz-merge: cannot write .*all\.pyz") as e:
+        pyz.merge([a, b], tmp_path / "out" / "all.pyz", make({}))
+    assert e.value.code == 2 and sorted(p.name for p in (tmp_path / "out").iterdir()) == ["all.pyz.tmp"]
+
+
 def test_pyz_merge_takes_each_lib_from_the_part_built_there(tmp_path: Path) -> None:
     # Every CI part carries targets/<every key>/lib with [deploy.pyz] targets: mixing two
     # installs file by file could mix versions; the part built ON that platform wins

@@ -2545,7 +2545,9 @@ Per method:
   ASCII wrapper cannot hold, `pyz._CMD_UNSAFE`: non-ASCII, control characters,
   `% ! " ^ & | < >`; the wrapper text is made before the `.pyz` is written). A part's `name` must be an app name
   (`config.APP_NAME`: the wrapper echoes it unquoted). `pyz.check_parts` runs the part and name
-  checks in `--dry-run` too.
+  checks in `--dry-run` too. An `--out` it cannot write (another user's folder, a read-only one,
+  `/sys`) is one `pyz-merge: cannot write` line, exit 2 (`pyz._cannot_write`; it was an
+  internal-error traceback), and `_write_archive` never leaves its `.tmp` behind.
 - **wheel**: its `[project] dependencies` go through `wheel.dependencies`: a `[tool.uv.sources]`
   git or URL source becomes a direct reference (`name @ git+URL@REV`); a path, workspace or
   editable source, a named index, a marker or several sources is refused before the checks
@@ -2707,7 +2709,7 @@ Per method:
   the runtime copy; `pack_file` turns a upx that cannot start into a PytError), `upx` on
   PATH, the cache (a cached copy without its x bit is downloaded again), a download: UPX 5.2.1
   once (SHA-256 checked, written as `.part` then renamed so an interrupted write never looks
-  cached) to
+  cached; a cache folder it cannot make or write is exit 3 naming it, not a traceback) to
   `%LOCALAPPDATA%\pytemplate\tools\upx-5.2.1` / `$XDG_CACHE_HOME/pytemplate/tools`
   (`upx._cache_dir`: a relative value is ignored, as the XDG spec says and the pyz bootstrap
   does: it put the download under the caller's folder, `src/relcache/`, which the payloads
