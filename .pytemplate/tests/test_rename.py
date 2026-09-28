@@ -1539,6 +1539,21 @@ def test_rename_to_the_same_name_is_not_done_while_pyproject_differs(command_pro
     assert presets.project_name(pyproject.read_text(encoding="utf-8")) == "beta"
 
 
+@pytest.mark.parametrize("spelling", ["Alpha", "ALPHA"])
+def test_a_pyproject_name_of_another_spelling_gets_no_move_hint(command_project: Path, spelling: str) -> None:
+    """[project] name differs from app.name only in spelling (its package is app.name's own
+    folder): the refusal said "if src/alpha/ was moved by hand, move it back to src/alpha/"."""
+    from runner import cmd_apply
+
+    root = command_project
+    cmd_apply.save_record({"name": "alpha", "preset": "script", "dependencies": [], "dev": []})  # what `new` writes
+    pyproject = root / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('name = "alpha"', f'name = "{spelling}"', 1), encoding="utf-8")
+    with pytest.raises(PytError, match=rf"\[project\] name = '{spelling}'.\n  ./pyt apply writes 'alpha' there") as e:
+        rename.cmd_rename(_load(root), ["alpha"])
+    assert "moved by hand" not in str(e.value) and "src/alpha/ first" not in str(e.value)
+
+
 def test_dry_run_predicts_exactly_the_rerendered_files(command_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     root = command_project
     for new in ("Alpha", "My-Game"):  # a case-only rename keeps the package: tasks.json does not change

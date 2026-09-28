@@ -1640,10 +1640,13 @@ def _check_the_name_is_applied(cfg: Config, new_name: str) -> None:
         )
     if new_name == cfg.app.name and project_name is not None and project_name != cfg.app.name:
         moved = f"src/{package_of(project_name)}/" if config.APP_NAME.fullmatch(project_name) else "its old folder"
+        # a name of another spelling (Alpha, my-app for my_app) has app.name's own folder: nothing moved
+        hint = "" if package_of(project_name) == cfg.pkg else (
+            f"; if src/{cfg.pkg}/ was moved by hand, move it back to {moved} first, then ./pyt rename {new_name} (it rewrites the imports too)"
+        )
         raise PytError(
             f"rename: the app is already called '{new_name}' (src/{cfg.pkg}/), but pyproject.toml [project] name = "
-            f"'{project_name}'.\n  ./pyt apply writes '{new_name}' there; if src/{cfg.pkg}/ was moved by hand, "
-            f"move it back to {moved} first, then ./pyt rename {new_name} (it rewrites the imports too)"
+            f"'{project_name}'.\n  ./pyt apply writes '{new_name}' there{hint}"
         )
 
 
