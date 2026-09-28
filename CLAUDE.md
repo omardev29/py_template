@@ -965,7 +965,9 @@ header rules (with detector tests proving each rule fires).
   `selftest --e2e` table, each failed step with its log tail and path, and the kept base, the
   `selftest --mutation` results (`mutation.print_report`: the counts per file, the score, every
   survivor and error with its change, a failed baseline, and the logs folder it kept), the
-  tool output and hint of a pre-commit check that did not pass: `hooks._print`, what
+  tool output and hint of a pre-commit check that did not pass: `hooks._print`, what `hooks
+  install` and `uninstall` did or left alone and why (`hooks.cmd_hooks`: `-q hooks uninstall`
+  next to another tool's hook printed nothing), what
   `rename` and `apply` leave to review: the lines left unchanged and the other files that
   mention the old name, and why a captured step failed: mypyc's errors and the C compiler's
   (`mypyc.build`), the wheel's `uv build` (`wheel.build` captures it under `-q`: uv's `--quiet`

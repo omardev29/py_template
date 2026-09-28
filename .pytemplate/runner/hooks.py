@@ -1586,11 +1586,16 @@ def cmd_hooks(cfg: Config, args: list[str]) -> int:
     if sub == "run":
         return run(cfg, repo)
     try:
-        if sub == "install":
-            ui.ok(install(repo, force="--force" in flags))
-        else:
-            ui.info(uninstall(repo))
+        message = install(repo, force="--force" in flags) if sub == "install" else uninstall(repo)
     except OSError as e:  # a hooks folder the user may not write (another user's, read-only, immutable)
         name = e.filename or (repo.default_dir / HOOK)
         raise PytError(f"hooks {sub}: cannot change {name}: {e.strerror or e}") from None
+    # What was done, or left alone and why (a kept hook that never runs): the answer to the
+    # command, never hidden by -q (5.3), which hid "not pytemplate's hook: left alone"
+    if ui.QUIET:
+        ui.report(message)
+    elif sub == "install":
+        ui.ok(message)
+    else:
+        ui.info(message)
     return 0

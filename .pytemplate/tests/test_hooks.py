@@ -1150,6 +1150,31 @@ def test_cmd_hooks_routes_every_subcommand(tmp_path: Path, monkeypatch: pytest.M
 
 
 @needs_git
+def test_quiet_keeps_what_install_and_uninstall_did(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`./pyt -q hooks uninstall` next to another tool's hook printed nothing and exited 0 (nothing
+    was removed), and `./pyt -q hooks install --force` hid that the kept hook has no x bit and
+    never runs: -q hides progress, never what was asked for (CLAUDE.md 5.3)."""
+    from runner import ui
+
+    top, project = make_repo(tmp_path)
+    monkeypatch.setattr(hooks, "ROOT", project)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(ui, "QUIET", True)
+    target = top / ".git" / "hooks" / hooks.HOOK
+    target.write_bytes(b"#!/bin/sh\nnpx lint-staged\n")
+    if not IS_WINDOWS:
+        target.chmod(0o644)
+    assert hooks.cmd_hooks(make(), ["uninstall"]) == 0
+    assert "is not pytemplate's hook: left alone" in capsys.readouterr().err
+    assert hooks.cmd_hooks(make(), ["install", "--force"]) == 0
+    err = capsys.readouterr().err
+    assert "kept as .git/hooks/pre-commit.local" in err
+    assert ("is not executable" in err) is not IS_WINDOWS
+    assert hooks.cmd_hooks(make(), ["uninstall"]) == 0
+    assert "restored the previous hook" in capsys.readouterr().err
+
+
+@needs_git
 def test_cmd_hooks_names_a_hook_file_it_cannot_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A hooks folder the user may not write (another user's checkout, a read-only mount, chattr
     +i): `hooks install` and `hooks uninstall` ended in an internal-error traceback."""
