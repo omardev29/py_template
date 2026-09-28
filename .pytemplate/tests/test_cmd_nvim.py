@@ -442,6 +442,30 @@ def test_env_isolation(tmp_path: Path) -> None:
     assert len({env[k] for k in nvimtest.XDG_HOMES}) == 4
 
 
+def test_nvim_git_config_includes_the_users_whole_global_config(tmp_path: Path) -> None:
+    """nvim_env moves XDG_CONFIG_HOME, so Neovim's git (lazy.nvim clones the plugins with the
+    user's config: a proxy, url.*.insteadOf) would miss the user's $XDG_CONFIG_HOME/git/config.
+    user_git_config points GIT_CONFIG_GLOBAL at a file that includes both that and ~/.gitconfig."""
+    home, xdg, base = tmp_path / "home", tmp_path / "xdg", tmp_path / "base"
+    home.mkdir()
+    (home / ".gitconfig").write_text("[user]\n\tname = Me\n", encoding="utf-8")
+    (xdg / "git").mkdir(parents=True)
+    (xdg / "git" / "config").write_text("[http]\n\tproxy = http://p:8080\n", encoding="utf-8")
+    base.mkdir()
+    path = nvimtest.user_git_config(base, {"HOME": str(home), "XDG_CONFIG_HOME": str(xdg)})
+    assert path is not None and Path(path).parent == base
+    text = Path(path).read_text(encoding="utf-8")
+    assert (home / ".gitconfig").as_posix() in text and (xdg / "git" / "config").as_posix() in text
+    if shutil.which("git"):  # a real git (as a clone reads config: includes on, no --global) sees both
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": path, "GIT_CONFIG_NOSYSTEM": "1"}
+        got = subprocess.run(["git", "config", "--get", "http.proxy"], env=env, capture_output=True, text=True)
+        assert got.stdout.strip() == "http://p:8080", got.stderr
+        got = subprocess.run(["git", "config", "--get", "user.name"], env=env, capture_output=True, text=True)
+        assert got.stdout.strip() == "Me", got.stderr
+    # nothing to include -> None: git keeps its defaults (~/.gitconfig via HOME is still read)
+    assert nvimtest.user_git_config(base, {"HOME": str(tmp_path / "empty")}) is None
+
+
 def test_default_dir_is_short() -> None:
     """Right in the temp folder, whatever that is (selftest --mutation's workers move it deeper:
     below macOS's own it passed 80 characters), and short on Windows (MAX_PATH)."""

@@ -139,6 +139,29 @@ def uv_dirs(env: Mapping[str, str]) -> dict[str, str]:
     return out
 
 
+def user_git_config(base: Path, source: Mapping[str, str]) -> str | None:
+    """A GIT_CONFIG_GLOBAL file for Neovim's git (lazy.nvim clones the plugins with the user's
+    config: a proxy, url.*.insteadOf, http.sslCAInfo), or None when there is nothing to include.
+
+    git's global config is two files, ~/.gitconfig and $XDG_CONFIG_HOME/git/config, but nvim_env
+    moves XDG_CONFIG_HOME into the isolated tree, so git would read the empty moved one and miss
+    the user's. GIT_CONFIG_GLOBAL replaces BOTH defaults, so this file includes both of the user's
+    (resolved from `source`, the env before the isolation), and is written under `base`.
+    """
+    files: list[Path] = []
+    home = source.get("HOME") or source.get("USERPROFILE")
+    if home:
+        files.append(Path(home) / ".gitconfig")
+    xdg = source.get("XDG_CONFIG_HOME")
+    files.append(Path(xdg) / "git" / "config" if xdg else Path(home) / ".config" / "git" / "config" if home else Path())
+    includes = [f"[include]\n\tpath = {f.as_posix()}\n" for f in files if f != Path() and f.is_file()]
+    if not includes:
+        return None
+    path = base / "gitconfig"
+    path.write_text("".join(includes), encoding="utf-8", newline="\n")
+    return str(path)
+
+
 # --- smoke output ------------------------------------------------------------------------------------
 
 
@@ -686,9 +709,11 @@ def selftest(cfg: Config, args: list[str]) -> int:
 def _run(ns: argparse.Namespace, names: list[str], exe: str, layout: Layout) -> int:
     from .e2e import hidden_template_repository, isolate_git
 
-    renv = runner_env(proc.base_env())
+    source = proc.base_env()  # the user's env, before the git isolation below; for the git config
+    renv = runner_env(source)
     # Neovim keeps the user's git configuration: lazy.nvim clones the plugins with it (a proxy,
-    # url.*.insteadOf)
+    # url.*.insteadOf). nvim_env moves XDG_CONFIG_HOME, so point git at a config that includes the
+    # user's two global files, else the $XDG_CONFIG_HOME/git/config one would be lost (below).
     venv = nvim_env(layout, renv, uv_dirs(renv))
     # The ./pyt steps work in --dir only, as those of selftest --e2e: git there never sees a
     # repository around --dir (`new` skipped git init there and, with core.filemode = false, staged
@@ -703,6 +728,10 @@ def _run(ns: argparse.Namespace, names: list[str], exe: str, layout: Layout) -> 
             "hide the template's own. Pick a --dir outside that repository"
         )
     _prepare_dir(layout)
+    if "GIT_CONFIG_GLOBAL" not in venv:  # let the user's own GIT_CONFIG_GLOBAL win
+        global_config = user_git_config(layout.base, source)
+        if global_config is not None:
+            venv["GIT_CONFIG_GLOBAL"] = global_config
     _remove(layout.logs)  # logs of the previous run
     layout.logs.mkdir(parents=True)
     version = cmd_nvim.query(exe, env=venv)

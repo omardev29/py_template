@@ -3594,7 +3594,11 @@ short temp tree and unset `NVIM_APPNAME`.
   `core.filemode = false`, staged the scratch launchers in that repository, where they stayed
   (`test_nvim_pyt_steps_never_touch_a_repository_around_the_dir`); a `--dir` that would hide
   the template's own repository is refused (`e2e.hidden_template_repository`). Neovim keeps the
-  user's git config (lazy.nvim clones with it). Pinned, so a red run is a regression and not upstream drift: the
+  user's git config (lazy.nvim clones with it): git's global config is two files, `~/.gitconfig`
+  and `$XDG_CONFIG_HOME/git/config`, and `nvim_env` moves `XDG_CONFIG_HOME`, so `nvimtest._run`
+  points Neovim's `GIT_CONFIG_GLOBAL` at a `<dir>/gitconfig` that `[include]`s both of the user's
+  (`nvimtest.user_git_config`), unless the user set `GIT_CONFIG_GLOBAL` themselves; else the XDG
+  file (a proxy, `url.*.insteadOf`, `http.sslCAInfo`) was lost and the clones failed. Pinned, so a red run is a regression and not upstream drift: the
   LazyVim starter is cloned in full and checked out at `cmd_nvim.STARTER_REV`, and the plugins
   come from `nvimtest.LOCK` (`.pytemplate/nvim/tests/lazy-lock.json`, a green run's lock),
   copied into the isolated config before every Neovim run that installs (lazy.nvim rewrites the
