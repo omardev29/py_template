@@ -636,8 +636,18 @@ def preset_info(name: str) -> PresetInfo:
     return PresetInfo(name, tuple(cfg.backend.supported), dict(cfg.deploy.default), cfg.app.gui, cfg.backend.active, tuple(cfg.tasks))
 
 
+def _home_flutter() -> Path | None:
+    """The Flutter of ~/flutter (where flet build installs its own), or None. Path.home() raises
+    for a UID without a passwd entry and no HOME (a container's --user 4242): no home, no Flutter."""
+    try:
+        home = Path.home()
+    except RuntimeError:
+        return None
+    return next(iter(sorted(home.glob("flutter/*/bin/flutter*"))), None)
+
+
 def flet_build_reason(os_name: str) -> str:
-    flutter = shutil.which("flutter") or next(iter(sorted(Path.home().glob("flutter/*/bin/flutter*"))), None)
+    flutter = shutil.which("flutter") or _home_flutter()
     if not flutter:
         return "needs the Flutter SDK (flet build installs ~3 GB): not in PATH or ~/flutter"
     if os_name == "windows":

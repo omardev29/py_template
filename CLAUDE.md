@@ -4695,8 +4695,11 @@ CPython and its standard library:
   `test_build_methods.py::test_pyz_bootstrap_picks_the_flavour` and the other bootstrap tests.
   Goes: never.
 - **`Path.home()` raises for a UID without a passwd entry** (LIMITATION): the pyz crashed in a
-  container with a random UID. Fix: the pyz bootstrap falls back to a `tempfile.mkdtemp` folder
-  (10). Test: `test_build_methods.py::test_pyz_runs_without_a_usable_cache`. Goes: never.
+  container with a random UID, and so did every `selftest --e2e` there (its look for
+  `~/flutter`). Fix: the pyz bootstrap falls back to a `tempfile.mkdtemp` folder (10);
+  `e2e._home_flutter` finds no Flutter without a home. Test:
+  `test_build_methods.py::test_pyz_runs_without_a_usable_cache`,
+  `test_e2e_plan.py::test_detect_host_without_a_home_folder`. Goes: never.
 - **`platform`'s `machine()` names the machine, not the interpreter** (LIMITATION: on Windows
   CPython 3.12+ asks WMI for the native CPU, elsewhere it is the kernel's `uname -m`): an x64
   Python on Windows on ARM labelled its x64 wheels `aarch64`, and a pyz with a `windows-x86_64`

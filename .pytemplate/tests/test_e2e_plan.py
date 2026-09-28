@@ -386,6 +386,22 @@ def test_detect_host_gui_modes(monkeypatch: pytest.MonkeyPatch) -> None:
     assert e2e.detect_host("on").display == ""
 
 
+def test_detect_host_without_a_home_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path.home() raises for a UID without a passwd entry and no HOME (a container started with
+    --user 4242, CLAUDE.md 15.1): looking for ~/flutter ended every selftest --e2e in a
+    RuntimeError traceback before its plan (A10-02). There is no ~/flutter then."""
+
+    def no_home(cls: type[Path]) -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(e2e, "host_os", lambda: "linux")
+    monkeypatch.setattr(e2e, "host_arch", lambda: "x86_64")
+    monkeypatch.setattr(e2e.shutil, "which", lambda name, *a, **k: None)  # no flutter on PATH
+    monkeypatch.setattr(Path, "home", classmethod(no_home))
+    assert e2e.flet_build_reason("linux").startswith("needs the Flutter SDK")
+    assert e2e.detect_host("off").flet_build.startswith("needs the Flutter SDK")
+
+
 def test_default_base_is_short() -> None:
     """Right in the temp folder, whatever that is (selftest --mutation's workers move it deeper:
     below macOS's own it passed 80 characters), and short on Windows (MAX_PATH)."""
