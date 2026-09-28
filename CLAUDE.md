@@ -3130,8 +3130,9 @@ Per method:
   by the template maintainer, listed nowhere. `./pyt init` exits 2 with the hint `./pyt
   new DIR --preset P`: a project's preset is chosen when it is created.
 - Tested pins: `presets/<p>/constraints.txt` (`name==version`, sorted, generated, never
-  hand-edited) lists every package a project of the preset locks (script 24: the template's
-  own `uv.lock`; raylib 26; flet 56), the ones the template's `uv.lock` also holds at its
+  hand-edited) lists every package a project of the preset locks (script 26: the template's
+  own `uv.lock`; raylib 28; flet 58; `test_presets.test_claude_md_counts_the_pins_of_every_preset`
+  keeps these numbers in line with the files), the ones the template's `uv.lock` also holds at its
   versions (a package locked at two versions, a fork by platform, cannot be pinned: none so
   far). `init` hands the ones the project does not lock yet to `uv add --constraints`: a one-off
   (nothing in `pyproject.toml` or the lock manifest, `uv lock --check` passes, `./pyt lock

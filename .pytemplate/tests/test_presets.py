@@ -787,6 +787,21 @@ def test_preset_pins_hold_the_whole_tested_tree(preset: str) -> None:
         assert set(pins) == set(template)
 
 
+@template_repo
+def test_claude_md_counts_the_pins_of_every_preset() -> None:
+    """CLAUDE.md 11 says how many packages each preset's constraints.txt pins: it said 24, 26 and
+    56 while the files held 26, 28 and 58. Regenerating a constraints.txt updates its number."""
+    guide = ROOT / "CLAUDE.md"
+    if not guide.is_file():
+        pytest.skip("no CLAUDE.md")
+    text = " ".join(guide.read_text(encoding="utf-8").split())  # line breaks are layout
+    m = re.search(r"every package a project of the preset locks \(script (\d+): the template's own `uv\.lock`; raylib (\d+); flet (\d+)[;)]", text)
+    assert m, "CLAUDE.md 11 no longer counts the pins of each preset: update this test"
+    documented = dict(zip(("script", "raylib", "flet"), map(int, m.groups()), strict=True))
+    counted = {preset: len(presets.constraints(preset)) for preset in documented}
+    assert documented == counted, f"CLAUDE.md 11 counts {documented}, the constraints.txt files pin {counted}"
+
+
 # --- copy_template ---------------------------------------------------------------------------
 
 
