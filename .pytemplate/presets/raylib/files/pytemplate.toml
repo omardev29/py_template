@@ -81,7 +81,7 @@ exclude = []     # extra file-name globs never packed (C runtime and python3*.dl
 
 [preset.raylib]
 # ./pyt apply replaces the dependency in pyproject.toml with {package}=={version} and re-locks
-package = "raylib"   # raylib (GLFW) | raylib_sdl (SDL3) | raylib_software
+package = "raylib"   # raylib (GLFW) | raylib_sdl (SDL3) | raylib_software (Linux and Windows only)
 version = "6.0.1.0"
 
 [hooks]

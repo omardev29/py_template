@@ -6,7 +6,7 @@ dev_dependencies = ["types-cffi"]
 
 # Defaults for [preset.raylib] in pytemplate.toml
 [options]
-package = "raylib"   # raylib (GLFW) | raylib_sdl (SDL3) | raylib_software: same imports, pick one
+package = "raylib"   # raylib (GLFW) | raylib_sdl (SDL3) | raylib_software (no macOS wheel): same imports, pick one
 version = "6.0.1.0"
 
 # Extra keys for the managed [tool.uv] block

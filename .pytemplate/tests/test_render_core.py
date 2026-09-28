@@ -1258,6 +1258,20 @@ def test_ci_workflow_for_every_preset_and_backend_set(preset: str, supported: li
     assert all(re.fullmatch(r"astral-sh/setup-uv@v\d+\.\d+\.\d+", u) for u in uses if "setup-uv" in u)  # no floating tags
 
 
+@pytest.mark.parametrize(("supported", "active"), backend_sets())
+def test_ci_workflow_leaves_out_an_os_the_preset_package_has_no_wheel_for(supported: list[str], active: str) -> None:
+    """[preset.raylib] package = "raylib_software", which the preset offers, publishes wheels for
+    Linux and Windows only, and no sdist (15.1): the macOS row of the generated CI could sync
+    nothing and failed on every push, and the file cannot be edited (render --check). The macOS
+    row goes; raylib and raylib_sdl, which publish macOS wheels, keep theirs."""
+    for package, macos in (("raylib_software", False), ("raylib-software", False), ("raylib_sdl", True), ("raylib", True)):
+        cfg = combo_cfg("raylib", supported, active, {"preset": {"raylib": {"package": package}}})
+        rows = parse_yaml(render.ci_workflow(cfg))["jobs"]["test"]["strategy"]["matrix"]["include"]
+        oses = [r["os"] for r in rows]
+        assert oses[:2] == ["ubuntu-latest", "windows-latest"], (package, oses)
+        assert ("macos-latest" in oses) == (macos and supported != ["pypy"]), (package, oses)
+
+
 @pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
 def test_ci_workflow_keeps_its_moving_parts_on_purpose(preset: str, supported: list[str], active: str) -> None:
     """-latest runner labels (GitHub retires pinned ones) and no uv version (setup-uv takes the

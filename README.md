@@ -626,7 +626,7 @@ file must be UTF-8 (a BOM is fine); `schema = 1` is the layout this runner reads
 | `deploy.upx.exclude` | `[]` | extra file-name globs that are never packed |
 | `deploy.upx.path` | `""` | a UPX binary: absolute, `~`, or relative to the project root |
 | `tasks.<name>` | `ci` | custom tasks ([Custom tasks](#custom-tasks)) |
-| `preset.raylib.package` | (raylib: `"raylib"`) | `raylib` (GLFW), `raylib_sdl` (SDL3) or `raylib_software` |
+| `preset.raylib.package` | (raylib: `"raylib"`) | `raylib` (GLFW), `raylib_sdl` (SDL3) or `raylib_software` (Linux and Windows only) |
 | `preset.raylib.version` | (raylib: `"6.0.1.0"`) | the raylib version |
 | `preset.flet.version` | (flet: `"1.0.1"`) | the version of `flet`, `flet-desktop` and `flet-cli` |
 | `vscode.settings` | `{}` | merged into `.vscode/settings.json` (JSON values only) |
@@ -1192,6 +1192,9 @@ A 2D game with raylib's cffi binding (the `raylib` package). PyPy is the default
   (`./pyt run mypyc --frames 900 --bunnies 30000` for another backend).
 - `[preset.raylib] package` picks the binding (`raylib` with GLFW, `raylib_sdl` with SDL3, or
   `raylib_software`) and `version` its version; `./pyt apply` swaps the dependency.
+  `raylib_software` publishes wheels for Linux and Windows only, and no source to build (every
+  release so far): on macOS `./pyt setup` cannot install it, and the generated CI has no macOS
+  job for it.
 - `src/assets/` is bundled with the game (`<pkg>.resources.asset("name")` finds it in every
   build).
 - There is no PyPy wheel for Apple Silicon or Linux ARM64 ([PyPy](#pypy)), and on Linux the game

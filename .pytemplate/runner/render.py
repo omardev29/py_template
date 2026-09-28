@@ -340,6 +340,18 @@ def jsonc(data: Any) -> str:
 # --- CI ------------------------------------------------------------------------------------------
 
 CI_PLACEHOLDERS = ("__HEADER__", "__MATRIX__", "__LINUX_DEPS__", "__NAME__", "__BUILD_BACKEND__")
+# The packages a preset offers ([preset.<name>] package) that publish no wheel, and no sdist,
+# for a runner's OS: no backend can sync there, so the generated CI leaves that runner out.
+# raylib_software 6.0.1.0 (and every release before it): Linux and Windows wheels only (15.1)
+NO_WHEELS_FOR = {("raylib", "raylib-software"): ("macos",)}
+
+
+def _unsupported_oses(cfg: Config) -> set[str]:
+    """The runner OSes (the label's first word) the project's preset package has no wheel for."""
+    package = presets.options(cfg).get("package")
+    if not isinstance(package, str):
+        return set()
+    return set(NO_WHEELS_FOR.get((cfg.app.preset, re.sub(r"[-_.]+", "-", package).lower()), ()))  # PEP 503
 
 
 def ci_workflow(cfg: Config) -> str:
@@ -352,7 +364,10 @@ def ci_workflow(cfg: Config) -> str:
         raise PytError(f"{rel(path)} is not UTF-8 text: save it as UTF-8") from None
     builds = [b for b in ("mypyc", "cpython") if cfg.supports(b)]
     matrix: list[str] = []
+    unsupported = _unsupported_oses(cfg)
     for os_name in ("ubuntu-latest", "windows-latest", "macos-latest"):
+        if os_name.partition("-")[0] in unsupported:
+            continue  # that runner's job failed on every push: `./pyt sync` found no wheel to install
         backends = list(cfg.backend.supported)
         if os_name.startswith("macos") and cfg.app.preset == "raylib" and "pypy" in backends:
             backends.remove("pypy")  # raylib publishes no PyPy wheels for macOS arm64

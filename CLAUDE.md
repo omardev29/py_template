@@ -2779,7 +2779,7 @@ Per method:
   `constraint-dependencies` in the managed block (permanent: blocks updates, takes the key
   from the user).
 - Hard-coded preset names in the runner: `render.ci_workflow` (raylib: apt GL/X11 libs, no
-  PyPy on macOS), `methods/exe.build` (flet -> `flet pack`), `methods/flet.build` (flet only),
+  PyPy on macOS, no macOS at all for `raylib_software`: `render.NO_WHEELS_FOR`), `methods/exe.build` (flet -> `flet pack`), `methods/flet.build` (flet only),
   `config._check_default_methods` (a `deploy.default` of `flet` needs the flet preset),
   `e2e.SMOKE` / `e2e.COMPILED_MARK` (expected app output per preset). A new preset that needs
   special packaging or smoke checks must touch these.
@@ -3618,7 +3618,9 @@ short temp tree and unset `NVIM_APPNAME`.
   platform state, CRLF/BOM checkouts count as up to date): a `pytemplate.toml` edit committed
   without rendering or re-locking (web editor, no hook) fails there instead of being rendered
   silently inside the runner. It never runs `setup`: it `sync`s only the matrix backends of
-  each OS (so raylib drops PyPy on macOS; an OS left with no backend gets no matrix row), then
+  each OS (so raylib drops PyPy on macOS; an OS left with no backend gets no matrix row, and so
+  does one the preset's package has no wheel for, `render.NO_WHEELS_FOR`: raylib_software on
+  macOS, 15.1), then
   `check all`, `test` per backend, a pyz per OS, and `pyz-merge` into one cross-platform
   `.pyz`, uploaded with the `<name>.cmd` wrapper `pyz-merge` writes next to it (a literal
   block `path: |`; `pyz.wrapper_path`). Two moving parts on purpose, explained in its header
@@ -4684,6 +4686,16 @@ cffi and raylib:
   `test_e2e_plan.py::test_raylib_pypy_gap_on_linux_arm64`,
   `test_e2e_plan.py::test_host_gaps_match_the_generated_ci_matrix`,
   `test_apply.py::test_apply_raylib_package_switch`. Goes: when raylib ships those wheels.
+- **raylib_software publishes no macOS wheel, and no sdist** (LIMITATION, raylib-python-cffi:
+  6.0.1.0 and every release before it have wheels for Linux i686, x86_64 and aarch64 and for
+  Windows only; its README does not say so): `[preset.raylib] package = "raylib_software"`, an
+  option the preset offers, locks fine but `./pyt setup` cannot sync on macOS ("marked as
+  `--no-build` but has no binary distribution"), and the macOS job of the generated CI failed on
+  every push. Up: none found. Fix: `render.NO_WHEELS_FOR` (read by `render.ci_workflow` through
+  `_unsupported_oses`) leaves the macOS runner out for it; the README, the preset.toml comment
+  and the skeleton's pytemplate.toml say Linux and Windows only (11). Test:
+  `test_render_core.py::test_ci_workflow_leaves_out_an_os_the_preset_package_has_no_wheel_for`.
+  Goes: when raylib_software ships macOS wheels.
 
 UPX:
 - **What packing breaks** (LIMITATION): UPX refuses Control Flow Guard PEs (and `--force` breaks
