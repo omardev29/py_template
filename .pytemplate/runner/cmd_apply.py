@@ -972,7 +972,18 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
         except OSError as e:
             raise PytError(f"cannot write pyproject.toml: {e.strerror or e}") from None
         summary.append(("app.name", f"pyproject.toml [project] name = \"{cfg.app.name}\""))
+    try:
+        return _finish(cfg, plan, command, summary, clean)
+    except KeyboardInterrupt:  # Ctrl+C, or SIGTERM/SIGHUP passed on to uv (proc.Interrupted)
+        if plan.rename_plan is not None:  # as `./pyt rename` says it: only "terminated" was printed
+            ui.warn(f"the app is already renamed: run ./pyt {command} to finish (uv.lock, the environments and the generated files)")
+        raise
 
+
+def _finish(cfg: Config, plan: Plan, command: str, summary: list[tuple[str, str]], clean: rename.Tidy | None) -> int:
+    """apply once the app is renamed (or its [project] name line fixed): the dependencies and the
+    lock (put back when they fail), the record, the environments, the hook, the generated files,
+    the notes and the summary."""
     pyproject_before = _read_bytes(ROOT / PYPROJECT.name)
     lock_before = _read_bytes(ROOT / "uv.lock")
     try:

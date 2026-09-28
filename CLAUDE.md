@@ -1339,7 +1339,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `upx.locate` makes it exit 3); the `--dry-run` of a
   rename looks for them where they are before the move)
   -> a summary. A state.json or pyproject.toml that cannot be written is a `PytError`
-  naming it.
+  naming it. A Ctrl+C, SIGTERM or SIGHUP once the app is renamed (`cmd_apply._finish`, the steps
+  after the rename) says "the app is already renamed: run ./pyt apply to finish", as `rename`
+  does (it said only `terminated`).
 - `--frozen`, never `--no-sync`: `flet-cli==V` pins `flet==V`, so a resolving `uv add` of one
   group alone has no solution; `--frozen` only edits pyproject.toml and one `uv lock` follows.
   When the edits, the lock or the PyPy precheck fail, pyproject.toml and uv.lock get their old

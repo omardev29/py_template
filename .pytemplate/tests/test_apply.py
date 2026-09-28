@@ -911,6 +911,35 @@ def test_the_record_follows_a_rename_when_the_lock_fails(tmp_path: Path, monkeyp
     assert [r for r in project.pyproject()["project"]["dependencies"] if r.startswith("raylib")] == ["raylib-software==6.0.1.0"]
 
 
+@pytest.mark.parametrize("step", ["lock", "sync"])
+def test_an_interrupted_apply_after_the_rename_says_how_to_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], step: str
+) -> None:
+    """A Ctrl+C or SIGTERM once apply had renamed the app (during the lock, or a later step) said
+    only `error: terminated (SIGTERM)`, the project half-applied: it says how to finish, as
+    `./pyt rename` does, and the files stay renamed (the record with them)."""
+    project, uv = _project(tmp_path, monkeypatch)
+    project.edit("app", "name", "beta")
+
+    def interrupted(env: envs.PyEnv, args: Sequence[str | Path], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if [str(a) for a in args][:2] in ([step], [step, "--locked"]):
+            raise proc.Interrupted(143, 15)
+        return uv(env, args, **kw)
+
+    monkeypatch.setattr(envs, "uv", interrupted)
+    with pytest.raises(proc.Interrupted):
+        _run(project)
+    assert "the app is already renamed: run ./pyt apply to finish" in capsys.readouterr().err
+    assert (project.root / "src" / "beta").is_dir() and not (project.root / "src" / "alpha").exists()
+    record = cmd_apply.load_record()
+    assert record is not None and record["name"] == "beta"
+    # a plain apply that is interrupted says nothing of a rename
+    monkeypatch.setattr(envs, "uv", interrupted)
+    with pytest.raises(proc.Interrupted):
+        _run(project)
+    assert "already renamed" not in capsys.readouterr().err
+
+
 def test_pypy_and_a_python_change_in_one_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The Python 3.11 check syncs the tools environment (`uv sync --locked`) with the NEW
     configuration: it runs once pyproject.toml and uv.lock follow it (with a python.cpython change
