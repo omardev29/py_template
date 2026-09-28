@@ -954,9 +954,13 @@ header rules (with detector tests proving each rule fires).
   `selftest --e2e` table, each failed step with its log tail and path, and the kept base, the
   `selftest --mutation` results (`mutation.print_report`: the counts per file, the score, every
   survivor and error with its change, a failed baseline, and the logs folder it kept), the
-  tool output and hint of a pre-commit check that did not pass: `hooks._print`, and what
+  tool output and hint of a pre-commit check that did not pass: `hooks._print`, what
   `rename` and `apply` leave to review: the lines left unchanged and the other files that
-  mention the old name), warnings, errors and
+  mention the old name, and why a captured step failed: mypyc's errors and the C compiler's
+  (`mypyc.build`), the wheel's `uv build` (`wheel.build` captures it under `-q`: uv's `--quiet`
+  dropped the build backend's output), a portable smoke run, the PyPy precheck's mypy abort;
+  they said "fix the errors above" with nothing above,
+  `test_mypyc_core.test_build_shows_why_it_failed_even_with_q`), warnings, errors and
   `check_line` always print, and a dry run ignores `-q` (its output is the plan). Results are
   `ui.report` too, so `-q` keeps them: the `mode` display (`cmd_mode._describe`; only its
   `ui.step` header goes), the paths `render` lists (`cmd_mode.cmd_render`: outdated, updated,
@@ -2162,7 +2166,7 @@ Formats:
   silently when compiled (`x + 1` at `2**63 - 1` gives `-2**63`), not when interpreted.
   `opt_level "0"` (unoptimised C, C asserts on) is 1.8x SLOWER than the interpreter: for
   debugging only. MSVC has no levels: `"1"`-`"3"` are all `/O2`, `"0"` is `/Od`.
-- Output is captured unless `-v`; on failure it is printed. The compiler-install hint
+- Output is captured unless `-v`; on failure it is printed (`ui.report`: with `-q` too). The compiler-install hint
   (`has_compiler_hint`, with the MSVC tools of the `.venv` Python's platform: `_venv_platform`,
   Windows only) is added only for `COMPILER_MISSING` and `C_BUILD_FAILED` (with `-v` the
   output was not captured, and every type error used to get the hint; a stale `uv.lock` failed

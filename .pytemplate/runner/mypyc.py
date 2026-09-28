@@ -403,8 +403,9 @@ def build(cfg: Config, profile_name: str, *, annotate: Path | None = None, compi
     argv: list[str | Path] = [proc.find_uv(), "run", "--locked", "python", TOOLS / "mypyc_build.py", spec_file]
     result = proc.run(argv, env=envs.env_vars(tool, envs_extra), capture=not ui.VERBOSE, check=False)
     if result.returncode != 0:
-        if not ui.VERBOSE:
-            ui.info((result.stdout or "") + (result.stderr or ""))
+        output = ((result.stdout or "") + (result.stderr or "")).rstrip()
+        if output:
+            ui.report(output)  # why it failed (mypy's errors, the compiler's): shown even with -q
         if result.returncode == MYPYC_REJECTED:  # mypy/mypyc rejected the code: no compiler involved
             raise PytError("mypyc failed (exit code 1): fix the errors above", 1)
         if result.returncode == COMPILER_MISSING:

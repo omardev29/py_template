@@ -489,7 +489,7 @@ def _smoke_runtime(cfg: Config, python: Path, out: Path) -> None:
     marks = [ln for ln in result.stdout.splitlines() if ln.startswith(PREFIX_MARK)]
     if result.returncode != 0 or not marks:
         if result.stderr:
-            ui.info(result.stderr.rstrip())
+            ui.report(result.stderr.rstrip())  # why: shown even with -q
         raise PytError(f"the bundled interpreter {rel(python)} does not start (exit code {result.returncode})")
     prefix = Path(marks[-1].removeprefix(PREFIX_MARK))
     runtime = (out / "runtime").resolve()
@@ -523,7 +523,7 @@ def _smoke_compiled(cfg: Config, python: Path, out: Path) -> None:
     marks = [ln for ln in result.stdout.splitlines() if ln.startswith(SMOKE_MARK)]
     if result.returncode != 0 or not marks:
         if result.stderr:
-            ui.info(result.stderr.rstrip())
+            ui.report(result.stderr.rstrip())  # the traceback: shown even with -q
         raise PytError(f"the portable folder cannot import the compiled modules (exit code {result.returncode})")
     bad = marks[-1].removeprefix(SMOKE_MARK).strip()
     if bad:

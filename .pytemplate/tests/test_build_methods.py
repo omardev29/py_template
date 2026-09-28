@@ -3911,6 +3911,21 @@ def test_portable_runtime_smoke_refuses_a_broken_runtime(tmp_path: Path, monkeyp
         portable._smoke_runtime(make({}), python, out)
 
 
+@pytest.mark.parametrize("smoke", ["_smoke_runtime", "_smoke_compiled"])
+def test_portable_smoke_runs_show_why_they_failed_even_with_q(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], smoke: str) -> None:
+    # -q hid the interpreter's traceback: only "does not start" or "cannot import" was left
+    from runner import ui
+    from runner.methods import portable
+
+    out = tmp_path / "out"
+    python = _runtime_python(out)
+    monkeypatch.setattr(ui, "QUIET", True)
+    monkeypatch.setattr(proc, "run", FakeRun("", 1, "Traceback (most recent call last):\nImportError: libfoo.so: cannot open shared object file"))
+    with pytest.raises(PytError):
+        getattr(portable, smoke)(make({"backend": {"active": "mypyc"}}), python, out)
+    assert "ImportError: libfoo.so: cannot open shared object file" in capsys.readouterr().err
+
+
 def test_portable_build_stops_when_the_copied_runtime_has_no_interpreter(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A layout change (bin/python3 gone) used to surface as "program not found" from compileall
     from runner.methods import portable

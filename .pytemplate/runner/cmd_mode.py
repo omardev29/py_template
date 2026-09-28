@@ -187,7 +187,7 @@ def _precheck_py311(cfg: Config) -> None:
         ]
         r = envs.uv(tool, argv, capture=True, check=False, echo=False)
         if r.returncode not in (0, 1):  # 2 = mypy (or uv starting it) aborted: nothing was checked
-            ui.info(((r.stdout or "") + (r.stderr or "")).rstrip())
+            ui.report(((r.stdout or "") + (r.stderr or "")).rstrip())  # why: shown even with -q
             raise PytError(f"mypy could not check the code as Python {version} (exit code {r.returncode}, see above)")
         return {ln.strip() for ln in (r.stdout or "").splitlines() if ": error:" in ln}
 

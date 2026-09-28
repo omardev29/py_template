@@ -21,7 +21,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from .. import envs, mypyc, render, ui
+from .. import envs, mypyc, proc, render, ui
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config, compiled_paths
 from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, SRC, rel
@@ -248,7 +248,14 @@ def build(req: BuildRequest) -> Path:
     out = dist_path(req)
     common.remove_output(out)
     argv: list[str | Path] = ["build", "--wheel", "--no-build-isolation", "--python", tool.python, "--out-dir", out, work]
-    envs.uv(tool, argv, extra_env={"VSLANG": "1033"})
+    # -q hides uv's progress, never why the build failed (mypy's errors, the C compiler's, which
+    # uv's --quiet dropped): captured then, and shown when it fails
+    built = envs.uv(tool, argv, extra_env={"VSLANG": "1033"}, capture=ui.QUIET, check=False)
+    if built.returncode != 0:
+        output = ((built.stdout or "") + (built.stderr or "")).rstrip()
+        if output:
+            ui.report(output)
+        raise proc.CommandFailed(built.args, built.returncode)
     wheels = sorted(out.glob("*.whl"))
     if not wheels:
         raise PytError("uv build did not produce any wheel")

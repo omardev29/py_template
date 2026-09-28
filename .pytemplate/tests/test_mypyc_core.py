@@ -190,13 +190,15 @@ def test_precheck_ruff_findings_are_syntax_errors(monkeypatch: pytest.MonkeyPatc
     assert not [c for c in tools.calls if "mypy" in c]  # stops at the syntax step
 
 
+@pytest.mark.parametrize("quiet", [False, True])
 @pytest.mark.parametrize("version", ["3.11", "3.14"])
-def test_precheck_mypy_that_aborts_never_passes(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], version: str) -> None:
+def test_precheck_mypy_that_aborts_never_passes(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], version: str, quiet: bool) -> None:
     same = 'tests/__init__.py: error: Duplicate module named "tests"'
     FakeTools(mypy={version: (2, same)}).install(monkeypatch)
+    monkeypatch.setattr(ui, "QUIET", quiet)
     with pytest.raises(PytError, match=f"mypy could not check the code as Python {version} .exit code 2"):
         cmd_mode._precheck_py311(make({}))
-    assert "Duplicate module" in capsys.readouterr().err  # the reason is shown
+    assert "Duplicate module" in capsys.readouterr().err  # the reason is shown, even with -q ("see above")
 
 
 def test_precheck_reports_only_the_errors_new_at_311(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1499,6 +1501,43 @@ def test_build_compiler_hint_only_when_the_c_step_failed(
     assert str(err.value).startswith(f"mypyc failed (exit code {exit_code})") and err.value.code == exit_code
     if not verbose and stdout:
         assert stdout in capsys.readouterr().err  # the captured output is shown
+
+
+@pytest.mark.parametrize("code", [mypyc.MYPYC_REJECTED, mypyc.COMPILER_MISSING, mypyc.C_BUILD_FAILED, 2])
+def test_build_shows_why_it_failed_even_with_q(fake_build: FakeCompiler, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], code: int) -> None:
+    # -q hides progress, never what to fix: `./pyt -q run mypyc` said only "fix the errors
+    # above" with nothing above, and `CC=/nonexistent/cc ./pyt -q compile` hid which compiler
+    monkeypatch.setattr(ui, "QUIET", True)
+    fake_build.code, fake_build.stdout, fake_build.stderr = code, "myapp/core/m.py:1: error: bad  [return-value]\n", "error: CC was not found\n"
+    with pytest.raises(PytError):
+        mypyc.build(make({}), "dev")
+    err = capsys.readouterr().err
+    assert "myapp/core/m.py:1: error: bad  [return-value]" in err and "error: CC was not found" in err
+
+
+def test_wheel_shows_why_uv_build_failed_even_with_q(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # uv's --quiet (-q) dropped the build backend's output: mypy's errors, setuptools' compiler
+    # error; only "The build backend returned an error" was left
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    captures: list[bool] = []
+
+    def fake_uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        captures.append(kw.get("capture", False))
+        assert kw.get("check") is False
+        return _done([str(a) for a in args], 2, "", "  [stderr]\n  src/pkg/core/m.py:3: error: bad\nerror: The build backend returned an error\n")
+
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.envs, "uv", fake_uv)
+    for quiet in (True, False):
+        monkeypatch.setattr(ui, "QUIET", quiet)
+        with pytest.raises(proc.CommandFailed) as err:
+            wheel.build(BuildRequest(_wheel_cfg(), "mypyc", "wheel", wheel_project / "src"))
+        assert err.value.code == 2 and "build --wheel" in str(err.value)
+        assert captures[-1] is quiet  # without -q uv's output streams as it comes
+        if quiet:
+            assert "src/pkg/core/m.py:3: error: bad" in capsys.readouterr().err
 
 
 def test_build_a_compiler_that_cannot_start_is_a_missing_requirement(fake_build: FakeCompiler) -> None:
