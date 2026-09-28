@@ -1164,6 +1164,39 @@ def test_a_name_of_another_package_in_src_is_refused(tmp_path: Path, monkeypatch
     assert cmd_apply.pending(project.cfg()) == []
 
 
+@pytest.mark.parametrize("project_name", ["helpers", "gamma"])
+def test_both_names_edited_onto_another_package_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_name: str) -> None:
+    """app.name and pyproject.toml [project] name both edited by hand to another package of src/
+    (src/helpers/), or app.name to it and [project] name to a third name: the record (alpha, whose
+    package is still in src/) matched neither line and was dropped as foreign. Apply said
+    "applied" and recorded {"name": "helpers"} (the real name lost), doctor and the hook passed,
+    and `rename` then planned to move src/helpers/. The record's package is in src/: it is this
+    project's record, and apply, pending and rename refuse as for app.name edited alone."""
+    project, uv = _project(tmp_path, monkeypatch)
+    assert _run(project) == 0  # the record: alpha
+    helpers = project.root / "src" / "helpers"
+    helpers.mkdir()
+    (helpers / "__init__.py").write_text('"""Helpers."""\n', encoding="utf-8")
+    project.edit("app", "name", "helpers")
+    path = project.root / "pyproject.toml"
+    path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"', f'name = "{project_name}"', 1), encoding="utf-8", newline="\n")
+    uv.locked = path.read_bytes()
+    before, count = project.snapshot(), len(uv.calls)
+    for dry in (False, True):
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        with pytest.raises(PytError, match=r"src/helpers/ already exists and is not the app's package") as e:
+            _run(project)
+        assert e.value.code == 2 and 'Put back app.name = "alpha"' in str(e.value)
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    assert project.snapshot() == before and uv.changing(count) == []
+    assert cmd_apply.load_record() == cmd_apply.record_of(_cfg_text(presets.skeleton("script", "alpha")["pytemplate.toml"].decode("utf-8")))
+    problem, hint = cmd_apply.pending(project.cfg())[0]
+    assert "names src/helpers/, another package: the app is 'alpha'" in problem and 'put back app.name = "alpha"' in hint
+    with pytest.raises(PytError, match=r"names src/helpers/, another package: the app is 'alpha'") as e:
+        rename.cmd_rename(project.cfg(), ["gamma", "--force"])
+    assert e.value.code == 2 and project.snapshot() == before
+
+
 def test_a_pyproject_name_edited_to_another_package_is_put_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """pyproject.toml [project] name set by hand to another package of src/: the record says
     app.name is the app, so apply puts the pyproject.toml line back (it refused, advising to move

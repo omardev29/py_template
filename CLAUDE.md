@@ -1309,8 +1309,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `rename.validate_config`) or, when only pyproject `[project] name` differs, its new text
   (`rename.check_new_name` too). An app.name that names ANOTHER package of src/ (the record's
   name, or without a record pyproject's, has its own package there: `_other_package`) is
-  refused, as `rename` refuses it (`src/<new>/ already exists`); it used to rewrite only
-  `[project] name`. A record named like app.name means only pyproject.toml was edited: apply
+  refused, as `rename` refuses it (`src/<new>/ already exists`), whatever `[project] name` says
+  (edited to it too, or to a third name); it used to rewrite only `[project] name`. A record named like app.name means only pyproject.toml was edited: apply
   puts its name back (`_old_name`: also when that name differs only in case or `-`/`_`, so its
   package is app.name's folder; it was taken for the real name, and a rename myapp -> MyApp
   rewrote the user's prose). Without a record either line may be the edited one, and the refusal says
@@ -1359,9 +1359,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   keeps it): `{name, preset, dependencies, dev}`, written by `./pyt new` (`presets._record`
   in `__init`: the new project's own, never the copied one), by each apply once the lock follows
   the options, and renamed by rename. It counts only when its name is `app.name` or pyproject
-  `[project] name`, or its package is in src/ where app.name's is not (`trusted_record`: both
-  lines edited by hand to the new name; apply skipped the rename, recorded the new name and lost
-  the real one). The trusted record decides the preset
+  `[project] name`, or its own package is in src/ (`trusted_record`: both lines edited by hand,
+  to a new name, where apply skipped the rename, recorded the new name and lost the real one, or
+  onto another package of src/, where apply said "applied" and recorded that package's name,
+  doctor and the hook passed and a later `rename` moved that package; `_other_package` refuses
+  it now: `test_apply.test_both_names_edited_onto_another_package_are_refused`). The trusted
+  record decides the preset
   (`_infer_preset`): an app.preset that differs from it was edited by hand, whatever
   pyproject.toml holds (a script project may `./pyt add raylib` or flet). Without one (lost:
   a state.json merge conflict whose sides disagree on it, a deleted file) pyproject.toml's

@@ -13,7 +13,8 @@ prints the plan and stops):
      the option-driven requirements (flet==V, raylib's {package}=={version}) applied last time.
      The record `applied` in .pytemplate/state.json says what the last apply, rename or
      `./pyt new` wrote (new writes the project's own, never the copied one); it counts only
-     when its name is app.name or pyproject.toml [project] name. Without one (lost to a merge
+     when its name is app.name or pyproject.toml [project] name, or its own package is in src/
+     (both lines edited by hand: trusted_record). Without one (lost to a merge
      conflict) pyproject.toml stands in: the preset's traces, and the options the managed
      [tool.uv] block was last written with.
   2. app.preset changed by hand: refused (exit 2). A preset decides src/, tests/, the
@@ -272,15 +273,18 @@ def _onto_another_package(cfg: Config, old: str, record: dict[str, Any] | None) 
 
 def trusted_record(cfg: Config, project_name: str | None) -> dict[str, Any] | None:
     """The `applied` record, when it describes this project: its name is app.name or pyproject.toml
-    [project] name (a hand edit of one of them), or its package is in src/ where app.name's is not
-    (or is that very folder: _old_name): both lines were edited by hand to the new name, and apply
-    skipped the rename, recorded the new name and lost the real one. Anything else is foreign,
-    e.g. the template's own record in a copy of it: ignored."""
+    [project] name (a hand edit of one of them), or its own package is in src/: both lines were
+    edited by hand, to a new name (apply skipped the rename, recorded the new name and lost the
+    real one) or onto another package of src/ (src/helpers/: apply said "applied", recorded
+    helpers and a later rename moved that package; _other_package refuses it). Anything else is
+    foreign, e.g. the template's own record in a copy of it (no src/myapp/ there): ignored."""
     record = load_record()
     if record is None:
         return None
     name = record["name"]
-    if name in (cfg.app.name, project_name) or _old_name(cfg, name) == name:
+    if name in (cfg.app.name, project_name):
+        return record
+    if _APP_NAME.fullmatch(name) and rename.package_dir(_src(), rename.package_of(name)) is not None:
         return record
     return None
 
@@ -555,12 +559,15 @@ def make_plan(cfg: Config) -> Plan:
         plan.generated = render.outputs(cfg)
         plan.rename_plan = rename.plan(ROOT, applied.renamed_from, cfg.app.name, generated=plan.generated)
         plan.new_cfg = rename.validate_config(plan.rename_plan.config.new)
-    elif project.name != cfg.app.name and rename.package_dir(_src(), cfg.pkg) is not None:
+    elif rename.package_dir(_src(), cfg.pkg) is not None:
+        # app.name onto another package of src/, whatever [project] name says (both lines may have
+        # been edited to it): `rename` refuses the same, src/<new>/ exists
         other = _other_package(cfg, applied.record, project.name)
-        if other is not None:  # `rename` refuses the same: src/<new>/ exists
+        if other is not None:
             raise PytError(_onto_another_package(cfg, other, applied.record))
-        rename.check_new_name(cfg, cfg.app.name, who="app.name", retry="another app.name in pytemplate.toml, then ./pyt apply")
-        plan.name_text = _project_name_text(cfg, project)
+        if project.name != cfg.app.name:
+            rename.check_new_name(cfg, cfg.app.name, who="app.name", retry="another app.name in pytemplate.toml, then ./pyt apply")
+            plan.name_text = _project_name_text(cfg, project)
     return plan
 
 
@@ -767,7 +774,7 @@ def pending(cfg: Config, *, hook: bool = True) -> list[tuple[str, str]]:
         out.append((f"app.name = '{cfg.app.name}' is not applied: the package is still src/{rename.package_of(old)}/", f"./pyt apply  (renames '{old}' -> '{cfg.app.name}')"))
     elif (missing := missing_package(cfg)) is not None:
         out.append(missing)
-    elif project.name != cfg.app.name and (other := _other_package(cfg, applied.record, project.name)):
+    elif other := _other_package(cfg, applied.record, project.name):  # [project] name edited to it too, or not
         hint = f"put back app.name = \"{other}\" (or move src/{cfg.pkg}/ away, then ./pyt apply)"
         out.append(
             (
