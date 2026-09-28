@@ -3997,9 +3997,10 @@ short temp tree and unset `NVIM_APPNAME`.
   below a file or in a folder it may not write, is one error line, exit 2, and so is a link whose
   folder is gone, for `--dir` and `--mutation`'s base too: `check_private_dir` stat()ed it, an
   internal-error traceback, `test_e2e_plan.test_a_base_that_is_a_link_to_no_folder_is_one_error_line`); only a base carrying
-  `.pytemplate-e2e` is wiped, and a symlinked or junctioned base loses only its link and marker
-  (`e2e.rmtree` removes a link as a link and never chmods through one: a passing run left the
-  folder it named at 0o200). One run at a time per base: `selftest` holds `project.base_lock` on
+  `.pytemplate-e2e` is wiped, and a symlinked or junctioned base loses only its link, its marker
+  and its lock file (`e2e.rmtree` removes a link as a link and never chmods through one: a passing
+  run left the folder it named at 0o200; `e2e._remove_base` unlinks the two files through the link
+  first: they stayed in that folder, `test_a_passing_run_on_a_symlinked_base_leaves_the_folder_it_names_as_it_was`). One run at a time per base: `selftest` holds `project.base_lock` on
   `<base>/lock` around the run and the cleanup (as `--mutation` does), so a second run is refused
   ("another run is using <base>") instead of deleting the first's projects and logs. Steps run with stdin closed and per-step timeouts (`TIMEOUTS`,
   `BUILD_TIMEOUTS`) that kill the whole process tree (each step in its own session on POSIX);

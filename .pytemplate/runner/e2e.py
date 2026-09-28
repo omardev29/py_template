@@ -1252,10 +1252,15 @@ def _cleanup(base: Path, presets: Sequence[str], *, remove_base: bool = True) ->
 
 def _remove_base(base: Path) -> None:
     """Remove the base and its lock file once the lock is released, but only when nothing else is
-    left (an earlier --keep may have left another preset's projects)."""
+    left (an earlier --keep may have left another preset's projects). The marker and the lock
+    file go first, through a link too: a symlinked or junctioned base loses only its link and
+    what the run put in the folder it names, which is the user's (rmtree unlinks only a link,
+    and both files stayed there)."""
     try:
         if base.is_dir() and {x.name for x in base.iterdir()} <= {MARKER, "lock"}:
-            rmtree(base)  # unlinks MARKER and lock too; a symlinked base: only the link goes
+            for name in (MARKER, "lock"):
+                (base / name).unlink(missing_ok=True)
+            rmtree(base)  # a symlinked base: only the link goes
     except OSError as e:
         ui.warn(f"could not remove {base}: {e}")
 

@@ -569,6 +569,24 @@ def test_a_base_git_cannot_be_kept_inside_is_refused_before_anything_is_made(tmp
     assert e.value.code == 2 and ran == [] and not base.parent.exists()
 
 
+@POSIX
+def test_a_passing_run_on_a_symlinked_base_leaves_the_folder_it_names_as_it_was(tmp_path: Path, faked: tuple[dict[str, object], list[str]]) -> None:
+    """A symlinked --base loses only its link and what the run put in the folder it names:
+    selftest cleans up with _cleanup(remove_base=False), then _remove_base once the lock is
+    released, and that unlinked only the link: the marker and the lock file stayed in the user's
+    folder (the test of a symlinked base took _cleanup's other path, which selftest never takes)."""
+    import stat
+
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    assert e2e.selftest(None, ["script", "--quick", "--base", str(link)]) == 0  # type: ignore[arg-type]
+    assert not os.path.lexists(link), "the link stayed"
+    assert real.is_dir() and sorted(p.name for p in real.iterdir()) == [], "the run left files in the folder the link names"
+    assert stat.S_IMODE(real.stat().st_mode) == 0o700
+
+
 def test_selftest_interrupted_returns_130_and_keeps_the_base(tmp_path: Path, faked: tuple[dict[str, object], list[str]], capsys: pytest.CaptureFixture[str]) -> None:
     outcomes, _ = faked
     outcomes["test all"] = KeyboardInterrupt()
