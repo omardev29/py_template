@@ -4140,8 +4140,21 @@ it was written.
     were). Fixed since: the 11 critical ones by hand, one commit each; the other 108 findings,
     the minor ones included, by two fixers (areas 1-5 and 6-10, one branch each), each with its
     regression test, then merged and checked together (`./pyt selftest`, `--shells`,
-    `--nvim`, `--e2e --quick`). Not measured again yet: until a new measurement says otherwise,
-    the project is not at the bar.
+    `--nvim`, `--e2e --quick`). Measured again by the bug-hunt loop below.
+  - The bug-hunt loop (owner request, 2026-09-28): rounds of ONE team of 10 hunters (one area
+    each, the whole project as context, no verifier), then 5 fixers in worktrees, who verify each
+    finding (reproduce it, or trace it where this container cannot run it; the severity of rule
+    1.10), fix it with a regression test that fails without the fix, and one integration (every
+    branch reviewed, every critical re-checked, then `./pyt selftest`, mypy on three platforms,
+    `--shells`, `--nvim`, `--e2e`). It ends when a round confirms at most 1 counted defect per
+    1000 lines. One team per round: its count is a lower bound (no capture-recapture).
+    - Round 1, commit ca8134a (after PR 6), 21,891 lines: 74 findings, one reported by two
+      hunters: 73 distinct, none rejected. Counted: 43 (7 critical: an in-process launcher run
+      took the caller's folder for its own, a hard link passed the launchers' ownership rule, the
+      harnesses checked their scratch base before it existed, pyt.cmd probed a drive-root folder
+      for uv.exe, apply accepted both names edited onto another package, every build shipped a
+      src/ folder it could not list empty, a trusted `.lazy.lua` loaded the plugin of a nested
+      untrusted folder; 36 notable), 1 per 509 lines: not at the bar. 30 minor. All 73 fixed.
 
 ## 14. Conventions and recipes
 
