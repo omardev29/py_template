@@ -52,7 +52,7 @@ CONSTRAINTS = "constraints.txt"
 RESERVED_PACKAGES = {
     "src": "src/ (paths relative to the root and to src/ would read the same: the problem matchers, rename)",
     "tests": "tests/ (a package too: the imports would clash)",
-    "typings": "typings/ (.ruff.toml excludes it: ruff would skip the app)",
+    "typings": "typings/ (the stubs at the root: paths relative to the root and to src/ would read the same)",
     "build": "build/ (.gitignore excludes it at any depth: the app would never reach git)",
     "dist": "dist/ (.gitignore excludes it at any depth: the app would never reach git)",
     "assets": "src/assets/ (the data folder bundled with the app: app.assets)",

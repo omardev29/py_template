@@ -2231,6 +2231,44 @@ def test_real_ruff_runs_in_a_project_folder_named_like_a_variable(tmp_path: Path
     assert res["ruff check"].passed is False and "F821" in res["ruff check"].output
 
 
+def test_real_ruff_checks_a_staged_file_in_a_folder_named_like_a_tool_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hook passes the staged files with --force-exclude: a subpackage or test folder named
+    like a folder the generated config excluded at ANY depth (venv, typings, dist, _build,
+    node_modules...) was dropped by ruff, and the hook said "[ok] ruff check: 2 files" over a
+    syntax error. The real ruff of .venv, started as the hook starts it."""
+    ruff = _venv_ruff()
+    if not ruff.is_file():
+        pytest.skip("no ruff in .venv (./pyt setup)")
+    root = tmp_path / "p"
+    staged = ["src/pkg/venv/__init__.py", "src/pkg/node_modules/__init__.py", "tests/typings/test_x.py", "tests/_build/test_y.py"]
+    for rel in staged:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("def broken(:\n    pass\n", encoding="utf-8")
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "BUILD", root / ".build")
+    monkeypatch.setattr(hooks, "ROOT", root)
+
+    def tail(argv: Sequence[object]) -> list[str]:
+        args = [str(a) for a in argv]
+        return [str(ruff), *args[args.index("ruff") + 1 :]]
+
+    def uv(_env: envs.PyEnv, argv: Sequence[object], **_kw: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(tail(argv), cwd=root, capture_output=True, text=True, timeout=120, check=False)
+
+    def run_bytes(argv: Sequence[str], *, cwd: Path, env: object, data: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(tail(argv), cwd=cwd, input=data, capture_output=True, timeout=120, check=False)
+
+    monkeypatch.setattr(envs, "uv", uv)
+    monkeypatch.setattr(hooks, "_run_bytes", run_bytes)
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+    res = {r.label.split(":")[0]: r for r in hooks.check_ruff(make(), staged, None)}
+    assert res["ruff check"].passed is False, res["ruff check"].label
+    out = res["ruff check"].output.replace("\\", "/")
+    assert all(rel in out for rel in staged), out
+    assert res["ruff format"].passed is False, res["ruff format"].label
+
+
 NAME_DISPATCH_HOOK = """{shebang}
 . "$(dirname "$0")/helper.sh"
 case $(basename "$0") in

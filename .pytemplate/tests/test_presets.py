@@ -400,7 +400,7 @@ def test_any_folder_name_gives_the_same_words_as_an_app_name(folder: str) -> Non
         ("script", "json", "standard library module 'json'"),
         ("script", "tests", "src/tests/ would collide with the project's own tests/"),
         ("script", "Tests", "src/tests/ would collide"),
-        ("script", "typings", "typings/ (.ruff.toml"),
+        ("script", "typings", "typings/ (the stubs at the root"),
         ("script", "build", "build/ (.gitignore"),
         ("script", "dist", "dist/ (.gitignore"),
         ("script", "assets", "src/assets/"),

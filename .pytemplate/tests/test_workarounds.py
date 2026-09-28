@@ -603,6 +603,8 @@ run("neotest", function()
     and not f(".venv", ".venv", root) and not f(".venv-pypy", ".venv-pypy", root)
     and not f("dist", "dist", root) and not f("typings", "typings", root)
     and f("tests", "tests", root) and f("src", "src", root)
+    and f("build", "tests/build", root) and f("dist", "tests/dist", root) and f("typings", "tests/typings", root)
+    and not f("__pycache__", "tests/__pycache__", root)
   local mine = { adapters = { { name = "an adapter object" } } }
   integ.neotest(nil, mine)
   check("neotest", ok and mine.discovery == nil, vim.inspect({ py = py }))

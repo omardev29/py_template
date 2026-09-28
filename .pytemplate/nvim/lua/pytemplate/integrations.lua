@@ -261,7 +261,10 @@ end
 
 -- --- neotest ------------------------------------------------------------------------------------
 
-local SKIP_DIRS = { dist = true, build = true, typings = true, __pycache__ = true, node_modules = true }
+-- The root's own folders (builds, stubs, packages of other tools) hold no test; below it such a
+-- name is the user's own folder (tests/build/), whose tests were never found. No test anywhere in
+-- a dot folder or __pycache__.
+local ROOT_DIRS = { dist = true, build = true, typings = true, node_modules = true }
 
 function M.neotest(_, opts)
   opts.adapters = tbl(opts.adapters)
@@ -280,7 +283,7 @@ function M.neotest(_, opts)
   opts.discovery = tbl(opts.discovery)
   local prev = opts.discovery.filter_dir
   opts.discovery.filter_dir = function(name, rel, root)
-    if name:sub(1, 1) == "." or SKIP_DIRS[name] then
+    if name:sub(1, 1) == "." or name == "__pycache__" or (ROOT_DIRS[name] and rel == name) then
       return false
     end
     return prev == nil or prev(name, rel, root)

@@ -1822,6 +1822,44 @@ def test_check_runs_ruff_in_a_project_folder_named_like_a_variable(folder: str, 
     assert "F821" in outputs[-1], outputs[-1]
 
 
+def test_check_lint_and_fmt_see_every_folder_below_src_and_tests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ruff read the excludes of the generated configs (the project's typings and dist, its own
+    default venv, _build, node_modules, __pypackages__...) as folder names at ANY depth: `check`
+    (the .build/cfg copy), `lint` and `fmt` (the editors' .ruff.toml) passed a syntax error in a
+    subpackage or a test folder of such a name. The real ruff of .venv, started in the project."""
+    ruff = _venv_ruff()
+    if not ruff.is_file():
+        pytest.skip("no ruff in .venv (./pyt setup)")
+    root = tmp_path / "p"
+    broken = [*(f"src/pkg/{d}/__init__.py" for d in ("venv", "typings", "dist", "_build", "node_modules", "__pypackages__")), "tests/typings/test_x.py", "tests/venv/test_y.py"]
+    for rel in ("src/pkg/__init__.py", *broken):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("def broken(:\n    pass\n" if rel in broken else "", encoding="utf-8")
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "BUILD", root / ".build")
+    monkeypatch.setattr(project, "ROOT", root)  # code_dirs: the folders ruff checks
+    cfg = make({"typing": {"relaxed": "off"}})
+    (root / ".ruff.toml").write_text(render.to_toml(render.ruff_config(cfg, "off")) + "\n", encoding="utf-8")  # as render writes it
+    outputs: list[str] = []
+
+    def uv_run(_env: envs.PyEnv, argv: list[Any], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        if args[0] != "ruff":
+            return completed(args)  # mypy: skipped by the off profile anyway
+        r = subprocess.run([str(ruff), *args[1:]], cwd=root, capture_output=True, text=True, timeout=120, check=False)
+        outputs.append(r.stdout + r.stderr)
+        return r
+
+    monkeypatch.setattr(envs, "uv_run", uv_run)
+    assert cmd_dev.run_checks(cfg, "cpython", rules=False) is False, outputs
+    assert cmd_dev.cmd_lint(cfg, []) != 0, outputs[-1]
+    assert cmd_dev.cmd_fmt(cfg, ["--check"]) != 0, outputs[-1]
+    for command, out in zip(("check", "lint", "fmt --check"), outputs, strict=True):
+        missed = [rel for rel in broken if rel not in out.replace("\\", "/")]
+        assert not missed, f"./pyt {command} skipped {missed}:\n{out}"
+
+
 @pytest.mark.parametrize(("relaxed", "exit_zero"), [("warn", True), ("strict", False), ("off", False)])
 def test_lint_honours_the_profiles_exit_zero(relaxed: str, exit_zero: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []

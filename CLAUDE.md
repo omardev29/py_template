@@ -2269,9 +2269,20 @@ Formats:
 - `check all` runs each distinct profile once (cpython and pypy usually share one) and the
   mypyc rules only once, with the strictest profile (`mypyc` when present), so each finding
   appears once in the Problems panel.
-- `check` covers the app only: `src/` and `tests/` (`project.code_dirs`); `.ruff.toml` excludes
-  `.build`, `dist`, `.pytemplate` and `typings`. The runner is checked by `./pyt selftest`
-  (mypy --strict), not by `check`.
+- `check` covers the app only: `src/` and `tests/` (`project.code_dirs`); `.ruff.toml` (and its
+  `.build/cfg` copies) excludes the root's own `.build`, `dist`, `.pytemplate` and `typings`, and
+  its `exclude` replaces ruff's default one with the same names anchored at the root
+  (`render.RUFF_DEFAULT_EXCLUDE`: `./venv`, `./_build`, `./node_modules`...; a dot folder stays
+  excluded anywhere, it holds no module): ruff reads a pattern without a slash as a folder name
+  at any depth, so a subpackage or test folder named venv, typings, dist, _build or node_modules
+  was never checked, linted nor formatted, the hook's `--force-exclude` dropped it and said
+  `[ok]`, and its syntax errors were committed (15.1;
+  `test_render_core.test_ruff_skips_only_the_roots_own_folders`,
+  `test_cli_core.test_check_lint_and_fmt_see_every_folder_below_src_and_tests`). pyright's
+  `exclude` names the root's `node_modules`, `dist` and `build` (`**/__pycache__` and `**/.*`
+  anywhere); mypy's own file finder skips a folder named `node_modules` or `site-packages`, and a
+  dot folder, at any depth (hard-coded in mypy 2.3.1; a module another one imports is still
+  checked). The runner is checked by `./pyt selftest` (mypy --strict), not by `check`.
 - Profiles that select `RUF` ignore `RUF001-003` (ambiguous unicode) so app text may be
   non-ASCII; template code stays ASCII anyway.
 - Native ints (`mypy_extensions.i64`/`i32`) are a typing choice with runtime effects: compiled,
@@ -3604,8 +3615,10 @@ LazyVim wiring:
   that path, and mypy reading `.mypy.ini` with a BOM, are out of the plugin's reach.
 - neotest-python: always set `python` explicitly (auto-detection globs `*/pyvenv.cfg`, gets
   two lines with `.venv` + `.venv-pypy` and builds a broken path; its `uv run` fallback also
-  syncs); `discovery.filter_dir` skips dot-dirs (`.venv*`, `.build`), `dist`, `build`,
-  `typings`. neotest cannot pass `-o pythonpath=<stage>` or `PYTEMPLATE_*`, so mypyc/all runs
+  syncs); `discovery.filter_dir` skips dot folders (`.venv*`, `.build`) and `__pycache__`
+  anywhere, and the root's own `dist`, `build`, `typings` and `node_modules` (below the root such
+  a name is a folder of the user's, `tests/build/`, whose tests it never found; neotest-python
+  itself skips every folder named `venv`). neotest cannot pass `-o pythonpath=<stage>` or `PYTEMPLATE_*`, so mypyc/all runs
   go through the `pyt: test` task (which the runner starts, so `proc.base_env` clears
   `PYTHONHOME`/`PYTHONPATH` there); the direct cpython neotest run of a test inherits Neovim's
   environment, and neotest-python exposes no `env`, so a caller's `PYTHONHOME` reaches its
@@ -5567,6 +5580,18 @@ UPX:
   `test_a_upx_path_not_named_upx_is_refused_before_any_work`. Goes: never.
 
 ruff:
+- **ruff reads an exclude pattern without a slash as a folder name at any depth, and its default
+  `exclude` is such names** (LIMITATION, documented: venv, dist, _build, node_modules,
+  __pypackages__, site-packages, buck-out and dot folders): the project's `extend-exclude`
+  (typings, dist) and those defaults skipped every subpackage and test folder of such a name, and
+  `check`, `lint`, `fmt` and the hook passed its syntax errors. Fix: `render.ruff_config` anchors
+  its excludes at the root (`./typings`) and replaces the default `exclude` with the same names
+  anchored (`render.RUFF_DEFAULT_EXCLUDE`; the dot folders stay as they are) (8). Test:
+  `test_render_core.py::test_ruff_skips_only_the_roots_own_folders`,
+  `test_the_ruff_exclude_holds_ruffs_own_defaults_at_the_root` (it compares the list with the
+  pinned ruff's), `test_cli_core.py::test_check_lint_and_fmt_see_every_folder_below_src_and_tests`,
+  `test_hooks.py::test_real_ruff_checks_a_staged_file_in_a_folder_named_like_a_tool_folder`.
+  Goes: never.
 - **`ruff format --check` prints nothing for stdin** (LIMITATION): a staged file fed on stdin
   failed without a word. Fix: `hooks._run_ruff` writes its own "Would reformat: <path> (its
   staged version)" line (5.6). Test:

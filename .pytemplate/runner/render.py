@@ -206,7 +206,9 @@ def pyright_config(cfg: Config, profile: str, *, absolute: bool = False) -> dict
     include = [path("src"), path("tests")] if _has_tests() else [path("src")]
     conf: dict[str, Any] = {
         "include": include,
-        "exclude": ["**/node_modules", "**/__pycache__", "**/.*", path("dist"), path("build")],
+        # the root's node_modules (pyright's own default, **/node_modules, also skipped a
+        # subpackage of that name); __pycache__ and dot folders hold no module anywhere
+        "exclude": [path("node_modules"), "**/__pycache__", "**/.*", path("dist"), path("build")],
         "extraPaths": [path("src")],
         "pythonVersion": cfg.min_python,
         "venvPath": path("."),
@@ -311,15 +313,35 @@ def relative_path(path: Path, start: Path) -> str:
         return path.as_posix()
 
 
+# ruff's default `exclude` (ruff 0.16.9, test_render_core compares it with the pinned ruff's):
+# each name matches a folder of that name at ANY depth, so a subpackage or test folder called
+# venv, dist, _build or node_modules was never linted nor formatted, and `check`, `fmt --check`
+# and the hook passed its syntax errors. ruff_config replaces it: the names a Python package can
+# have are anchored to the project's root ("./venv"); a folder whose name starts with a dot holds
+# no importable module (pytest does not collect it either), so those stay excluded everywhere.
+RUFF_DEFAULT_EXCLUDE = (
+    ".bzr", ".direnv", ".eggs", ".git", ".git-rewrite", ".hg", ".ipynb_checkpoints", ".mypy_cache", ".nox", ".pants.d",
+    ".pyenv", ".pytest_cache", ".pytype", ".ruff_cache", ".svn", ".tox", ".venv", ".vscode", "__pypackages__", "_build",
+    "buck-out", "dist", "node_modules", "site-packages", "venv",
+)
+
+
 def ruff_config(cfg: Config, profile: str, *, relative_to: Path | None = None) -> dict[str, Any]:
     """`relative_to`: for the copies under .build/cfg that the runner hands ruff with --config,
     whose paths ruff reads against its working folder, `relative_to`, never against the file.
     Never absolute: ruff expands ~, $NAME and ${NAME} in them, and the absolute paths of a
-    project folder named like app$v2 named a variable that is not set (section 15.1)."""
+    project folder named like app$v2 named a variable that is not set (section 15.1).
+
+    Every folder it excludes is the root's own (RUFF_DEFAULT_EXCLUDE): ruff reads a pattern
+    without a slash as a name at any depth, and one with a slash from the project's root."""
     data = load_profile(profile).get("ruff", {})
 
     def path(p: str) -> str:
         return p if relative_to is None else relative_path(ROOT / p, relative_to)
+
+    def at_root(p: str) -> str:
+        rel = path(p)
+        return rel if "/" in rel else f"./{rel}"
 
     select = list(data.get("select", []))
     lint: dict[str, Any] = {"select": select, "ignore": list(data.get("ignore", []))}
@@ -330,7 +352,8 @@ def ruff_config(cfg: Config, profile: str, *, relative_to: Path | None = None) -
         "target-version": "py" + cfg.min_python.replace(".", ""),
         "line-length": 100,
         "src": [path("src"), path("tests")],
-        "extend-exclude": [path(p) for p in (".build", "dist", ".pytemplate", "typings")],
+        "exclude": [p if p.startswith(".") else at_root(p) for p in RUFF_DEFAULT_EXCLUDE],
+        "extend-exclude": [at_root(p) for p in (".build", "dist", ".pytemplate", "typings")],
         "lint": lint,
         "format": {"docstring-code-format": True},
     }

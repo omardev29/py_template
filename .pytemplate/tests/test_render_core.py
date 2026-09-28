@@ -11,6 +11,7 @@ import configparser
 import copy
 import datetime
 import hashlib
+import importlib.util
 import itertools
 import json
 import os
@@ -1145,6 +1146,74 @@ def test_profile_rule_names_are_known_to_the_pinned_basedpyright(tmp_path: Path)
     if "0 errors" not in out and "unrecognized" not in out:
         pytest.skip(f"{cmd_dev.BASEDPYRIGHT} is not in the uv cache: {out.strip()[-200:]}")
     assert "unrecognized setting" not in out, out
+
+
+# --- what the generated tool configs leave out -----------------------------------------------------
+
+# Names a subpackage or a test folder can have that a tool once skipped at any depth: ruff's own
+# default exclude (venv, dist, _build, node_modules, __pypackages__) and the project's extend-exclude
+# (typings, dist), plus the output folders of the root (build, .build is a dot folder)
+TOOL_FOLDERS = ("venv", "typings", "dist", "build", "_build", "node_modules", "__pypackages__")
+
+
+def _ruff() -> list[str]:
+    if importlib.util.find_spec("ruff") is None:
+        pytest.skip("ruff is not installed here (./pyt setup)")
+    return [sys.executable, "-m", "ruff"]
+
+
+def test_ruff_skips_only_the_roots_own_folders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ruff reads an exclude pattern without a slash as a folder name at ANY depth: the project's
+    extend-exclude (typings, dist) and ruff's own default exclude (venv, _build, node_modules...)
+    made `check`, `lint`, `fmt`, the hook and the editors' ruff skip every subpackage or test
+    folder of those names, and a syntax error there passed them all. The editors' .ruff.toml and
+    the runner's .build/cfg copy (its --config, read from the project folder) must skip the root's
+    own folders only; the real ruff lists what it would check."""
+    ruff = _ruff()
+    root = tmp_path / "p"
+    wanted = ["src/pkg/__init__.py", *(f"src/pkg/{d}/__init__.py" for d in TOOL_FOLDERS), *(f"tests/{d}/test_x.py" for d in TOOL_FOLDERS)]
+    skipped = ["dist/x.py", "typings/x.pyi", "venv/x.py", "_build/x.py", "node_modules/x.py", ".build/x.py", ".pytemplate/x.py", ".venv/x.py"]
+    for rel in (*wanted, *skipped):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(render, "ROOT", root)
+    cfg = preset_cfg()
+    (root / ".ruff.toml").write_text(render.to_toml(render.ruff_config(cfg, "off")) + "\n", encoding="utf-8")
+    copied = root / ".build" / "cfg" / "ruff-off.toml"
+    copied.parent.mkdir(parents=True, exist_ok=True)
+    copied.write_text(render.to_toml(render.ruff_config(cfg, "off", relative_to=root)) + "\n", encoding="utf-8")
+    for args in ([], ["--config", ".build/cfg/ruff-off.toml", "."], ["--config", ".build/cfg/ruff-off.toml", "src", "tests"]):
+        r = subprocess.run([*ruff, "check", "--no-cache", "--show-files", *args], cwd=root, capture_output=True, text=True, timeout=120, check=False)
+        assert r.returncode == 0, r.stdout + r.stderr
+        listed = {Path(line.strip()).resolve().relative_to(root.resolve()).as_posix() for line in r.stdout.splitlines() if line.strip().endswith((".py", ".pyi"))}
+        assert set(wanted) <= listed, (args, sorted(set(wanted) - listed))
+        assert not listed & set(skipped), (args, sorted(listed & set(skipped)))
+
+
+def test_the_ruff_exclude_holds_ruffs_own_defaults_at_the_root(tmp_path: Path) -> None:
+    """ruff_config replaces ruff's default `exclude` (each name at any depth) with the same names
+    anchored at the root: a ruff that adds a default must be looked at (RUFF_DEFAULT_EXCLUDE)."""
+    ruff = _ruff()
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    r = subprocess.run([*ruff, "check", "--isolated", "--show-settings", "a.py"], cwd=tmp_path, capture_output=True, text=True, timeout=120, check=False)
+    block = re.search(r"^file_resolver\.exclude = \[\n(.*?)^\]", r.stdout, re.M | re.S)
+    assert block, r.stdout[-2000:] + r.stderr
+    defaults = re.findall(r'^\t"(.*)",$', block.group(1), re.M)
+    assert defaults and sorted(defaults) == sorted(render.RUFF_DEFAULT_EXCLUDE), defaults
+    exclude = render.ruff_config(preset_cfg(), "off")["exclude"]
+    assert sorted(exclude) == sorted(p if p.startswith(".") else f"./{p}" for p in defaults)
+
+
+@pytest.mark.parametrize("absolute", [False, True], ids=["editor", "check"])
+def test_pyright_excludes_only_the_roots_own_folders(absolute: bool) -> None:
+    """pyright reads `**/name` at any depth: a subpackage named node_modules (its own default
+    exclude, which a config's `exclude` replaces) was never checked. Dot folders and caches hold
+    no module anywhere."""
+    exclude = render.pyright_config(preset_cfg(), "strict", absolute=absolute)["exclude"]
+    anywhere = [p for p in exclude if p.startswith("**/")]
+    assert anywhere == ["**/__pycache__", "**/.*"], exclude
+    base = f"{ROOT.as_posix()}/" if absolute else ""
+    assert [base + n for n in ("node_modules", "dist", "build")] == [p for p in exclude if p not in anywhere], exclude
 
 
 # --- the generated CI workflow ---------------------------------------------------------------------
