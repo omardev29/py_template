@@ -2018,6 +2018,21 @@ def test_a_real_run_kills_what_the_tests_check_and_finds_what_they_miss(tmp_path
     toy = _write(tmp_path / "toy", {".pytemplate/runner/__init__.py": "", ".pytemplate/runner/calc.py": CALC, ".pytemplate/tests/test_calc.py": TEST_CALC})
     for name in ("pyproject.toml", "uv.lock", ".python-version", ".gitignore"):
         shutil.copyfile(ROOT / name, toy / name)  # uv sync --locked of the workers: the project's own lock
+    # A project with a local library (./pyt add ./libs/x, CLAUDE.md 10) names path/workspace
+    # sources in pyproject.toml and uv.lock; a real run gets them from make_copy (git ls-files),
+    # so copy those source trees here too, or the toy's `uv sync --locked` cannot find them and the
+    # run stops. The template's own lock has none of these (a no-op there).
+    import tomllib
+
+    lock_data = tomllib.loads((toy / "uv.lock").read_text(encoding="utf-8"))
+    for pkg in lock_data.get("package", []):
+        source = pkg.get("source") or {}
+        rel = source.get("directory") or source.get("editable") or source.get("virtual")
+        if rel and rel not in (".", "./") and (ROOT / rel).is_dir():
+            shutil.copytree(
+                ROOT / rel, toy / rel, dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns(".venv*", ".build", "dist", "__pycache__", ".git", ".flet"),
+            )  # fmt: skip
     _git(toy, env, "init", "-q")
     _git(toy, env, "add", "-A")
     _git(toy, env, "commit", "-q", "-m", "toy")
