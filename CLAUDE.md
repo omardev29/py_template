@@ -1132,7 +1132,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   link moves as a link; a dangling `.local` counts as existing) and ours runs it first, a shell
   script (`hooks.SHELLS`, its `#!` line read by `hooks.CHAIN_LINES`, flags kept) sourced with
   `$0` = `<hooks>/pre-commit`: husky v4 and yorkie pick their job from `basename "$0"` and find
-  their helpers next to it, and run as `pre-commit.local` they checked nothing. A hook in
+  their helpers next to it, and run as `pre-commit.local` they checked nothing. One without a
+  `#!` line is sourced only when it is text: a compiled hook (a NUL byte in its first 64 bytes,
+  read with `od`; `hooks.interpreter` gives `""`, and `reads_its_name` is false for it) is
+  executed, as git executes it (sourced, every commit failed with a shell syntax error:
+  `test_hooks.test_a_compiled_hook_kept_by_force_runs_first`). A hook in
   another language that reads its own name (`hooks.reads_its_name`: overcommit's Ruby) is left
   alone by `--force`, which prints the line to add to it instead; `uninstall` restores it. A marked hook whose launcher is another live project of the same
   repository (state "other", a monorepo; live: the launcher file is there, or its folder still

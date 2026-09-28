@@ -335,6 +335,9 @@ def launcher_of(text: str) -> str | None:
 # The shells a kept hook is sourced by, with $0 = <hooks>/pre-commit: a hook that picks its job
 # from its own name (husky v4, yorkie: `basename "$0"`) or finds its helpers next to it ran as
 # pre-commit.local and silently checked nothing. zsh is left out: it sets $0 to a sourced file.
+# A kept hook without a #! line is a shell script when it is text (git runs it with sh), and a
+# compiled program when its first 64 bytes hold a NUL byte (ELF, Mach-O, PE: git executes it):
+# that one is executed too, never sourced (every commit failed with a shell syntax error).
 SHELLS = ("sh", "bash", "dash", "ash", "ksh", "mksh", "yash")
 CHAIN_LINES = (
     f'    _pt_local="$_pt_dir/{LOCAL}"',
@@ -342,6 +345,7 @@ CHAIN_LINES = (
     '    IFS= read -r _pt_line < "$_pt_local" || :',
     "    case $_pt_line in *\"$(printf '\\r')\") _pt_line=${_pt_line%?} ;; esac",
     "    case $_pt_line in '#!'*) _pt_line=${_pt_line#??} ;; *) _pt_line=/bin/sh ;; esac",
+    "    case $_pt_line in /bin/sh) od -An -tx1 -N 64 \"$_pt_local\" 2>/dev/null | grep -q ' 00' && _pt_line= ;; esac",
     '    _pt_line=${_pt_line#"${_pt_line%%[! ]*}"}',
     "    _pt_interp=${_pt_line%% *}",
     '    _pt_args=${_pt_line#"$_pt_interp"}',
@@ -366,10 +370,11 @@ _NAME_READS = re.compile(r"\$0\b|\$\{0\}|argv\[0\]|__FILE__|\$PROGRAM_NAME|proce
 
 
 def interpreter(text: str) -> str:
-    """The program a hook's #! line names (after env, as the hook script reads it); sh without one."""
+    """The program a hook's #! line names (after env, as the hook script reads it); sh without
+    one, and "" for a compiled hook (a NUL byte in its first 64 bytes: it runs by itself)."""
     first = text.split("\n", 1)[0].rstrip("\r")
     if not first.startswith("#!"):
-        return "sh"
+        return "" if "\0" in text[:64] else "sh"
     words = first[2:].split()
     if words and words[0].rsplit("/", 1)[-1] == "env":
         words = words[1:]
@@ -377,9 +382,11 @@ def interpreter(text: str) -> str:
 
 
 def reads_its_name(text: str) -> bool:
-    """Whether a hook that is not a shell script reads its own name: kept as pre-commit.local it
-    runs under that name (only a shell script can be sourced as pre-commit)."""
-    return interpreter(text) not in SHELLS and _NAME_READS.search(text) is not None
+    """Whether a hook script that is not a shell script reads its own name: kept as
+    pre-commit.local it runs under that name (only a shell script can be sourced as pre-commit).
+    A compiled hook's bytes cannot say: it runs as pre-commit.local, as git would run it."""
+    shell = interpreter(text)
+    return shell != "" and shell not in SHELLS and _NAME_READS.search(text) is not None
 
 
 def hook_script(launcher: str) -> str:

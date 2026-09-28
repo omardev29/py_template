@@ -1915,6 +1915,62 @@ def test_interpreter_reads_the_hash_bang_line_as_the_hook_does() -> None:
     assert not hooks.reads_its_name('#!/bin/sh\ncase $(basename "$0") in *) ;; esac\n')  # sourced: $0 is right
     assert hooks.reads_its_name("#!/usr/bin/env node\nconst h = process.argv[1]\n")
     assert not hooks.reads_its_name("#!/usr/bin/env python3\nprint('checks')\n")
+    # compiled (a NUL byte in the first 64 bytes): no interpreter, and its bytes say nothing
+    elf = "\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00" + "argv[0] $0" * 10
+    assert hooks.interpreter(elf) == "" and not hooks.reads_its_name(elf)
+    assert hooks.interpreter("MZ\x90\x00\x03\x00") == ""
+
+
+COMPILED_HOOK = r"""#include <stdio.h>
+#include <stdlib.h>
+int main(void) {
+    const char *log = getenv("PT_HOOK_LOG"), *code = getenv("PT_LOCAL_EXIT");
+    FILE *f = log ? fopen(log, "a") : NULL;
+    if (f) { fputs("compiled hook\n", f); fclose(f); }
+    return code ? atoi(code) : 0;
+}
+"""
+
+
+@needs_git
+@pytest.mark.skipif(IS_WINDOWS, reason="a compiled hook of POSIX (git for Windows runs a PE hook by the same rule)")
+@pytest.mark.parametrize("how", ["file", "symlink"])
+def test_a_compiled_hook_kept_by_force_runs_first(tmp_path: Path, how: str) -> None:
+    """A compiled hook (ELF, Mach-O), or a symlink to one, has no #! line: the hook script
+    sourced it as a shell script, so after install --force every commit failed with a shell
+    syntax error, and neither the kept hook nor the checks ran. It runs as git ran it."""
+    compiler = next((c for c in ("cc", "gcc", "clang") if shutil.which(c)), None)
+    if compiler is None:
+        pytest.skip("no C compiler")
+    source = tmp_path / "hook.c"
+    source.write_text(COMPILED_HOOK, encoding="utf-8")
+    program = tmp_path / "compiled-hook"
+    subprocess.run([compiler, "-o", str(program), str(source)], check=True, capture_output=True, timeout=120)
+    top, project = make_repo(tmp_path)
+    (project / "pyt").write_bytes(FAKE_LAUNCHER.encode("ascii"))
+    (top / ".topmark").write_text("", encoding="utf-8")
+    (top / ".git" / "info" / "exclude").write_text(".topmark\n", encoding="utf-8")
+    log = tmp_path / "hook.log"
+    env = dict(git_env(), PT_HOOK_LOG=log.as_posix())
+    target = top / ".git" / "hooks" / hooks.HOOK
+    if how == "file":
+        shutil.copy2(program, target)
+    else:
+        target.symlink_to(program)
+    assert "runs first" in hooks.install(find(project, top), force=True)
+
+    def commit(name: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        (project / name).write_text(name, encoding="utf-8")
+        git(top, "add", "-A", env=env)
+        return git(top, "commit", "-q", "-m", name, env={**env, **extra}, check=False, timeout=120)
+
+    r = commit("one.txt")
+    assert r.returncode == 0, r.stderr
+    assert log.read_text(encoding="utf-8").splitlines() == ["compiled hook", "launcher hooks run from top"]
+    log.unlink()
+    assert commit("two.txt", PT_LOCAL_EXIT="1").returncode != 0  # the kept hook still blocks
+    assert log.read_text(encoding="utf-8").splitlines() == ["compiled hook"]
+    assert hooks.interpreter(hooks._read(target.parent / hooks.LOCAL)) == ""  # as the hook script tells it
 
 
 @needs_git
