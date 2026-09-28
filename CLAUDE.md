@@ -2590,7 +2590,10 @@ Per method:
   `src/<pkg>/` was, so mypycify stopped with "Cannot read file 'src/fastbench.py'" and a
   cpython wheel left the module out. `app.gui` -> `[project.gui-scripts]` (no console window on
   Windows), else `[project.scripts]`. mypyc -> platform wheel; cpython/pypy -> `py3-none-any`
-  (even with a vendored native library: the wheel is not retagged). Its `uv build` is captured
+  (even with a vendored native library: the wheel is not retagged). A mypyc wheel loads only in
+  its CPython minor: `requires-python = "==<python.cpython>.*"`, and the printed install line is
+  `uv tool install --python <python.cpython> <file>` (15.1: uv takes its newest CPython otherwise,
+  and the plain line failed for a 3.13 project). Its `uv build` is captured
   under `-q` and shown when it fails (5.3); a failed mypyc wheel asks `mypyc.missing_compiler`
   (`tools/mypyc_build.py`'s `missing_compiler`, run in `.venv`) and a C compiler that cannot
   start is exit 3 with `has_compiler_hint`, as for the stage (it was uv's exit 2 and its generic
@@ -4386,6 +4389,15 @@ uv:
   `UV_PROJECT_ENVIRONMENT` says (wrong under WSL). Fix: `methods.wheel.build` runs `uv build
   --no-build-isolation --python <.venv python>` after `envs.sync` (10). Test:
   `test_mypyc_core.py::test_wheel_builds_in_the_locked_tools_env`. Goes: never.
+- **`uv tool install` takes the newest CPython it has, whatever the wheel's `Requires-Python`**
+  (LIMITATION, uv 0.10.12 and 0.12.19): the printed `uv tool install <file>.whl` of a mypyc wheel
+  (a cpXY platform wheel) failed with "no wheels with a matching Python version tag" whenever uv's
+  newest CPython was another minor (a project on 3.13; the default 3.14 once 3.15 is installed).
+  Fix: `wheel.build` prints `uv tool install --python <python.cpython> <file>` for a mypyc wheel,
+  whose `requires-python` `wheel._pyproject` pins to `==<python.cpython>.*` (10). Test:
+  `test_mypyc_core.py::test_wheel_builds_in_the_locked_tools_env`,
+  `test_wheel_pyproject_is_exact_and_ships_the_package_data`. Goes: when uv picks the tool's
+  interpreter from the wheel's `Requires-Python` (the printed `--python` can stay).
 - **`uv run --with` and `uvx` float** (LIMITATION): an unpinned tool re-resolves to the newest
   release whenever uv's index cache expires (basedpyright's Node.js runtime too). Fix:
   `cmd_dev.BASEDPYRIGHT`, `cmd_dev.BASEDPYRIGHT_NODE`, `methods.nuitka.NUITKA`, and editor.json

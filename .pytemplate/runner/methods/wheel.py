@@ -122,6 +122,10 @@ def _pyproject(cfg: Config, compiled: bool) -> str:
     entry = cfg.deploy.wheel.entry or f"{cfg.pkg}.app:main"
     # Informational: the build runs without isolation, with what .venv has (these exact versions)
     requires = [f"setuptools=={_locked_version('setuptools')}"] + ([f"mypy=={_locked_version('mypy')}"] if compiled else [])
+    # A mypyc wheel is a cpXY platform wheel: with the project's open range uv tool install took
+    # the newest CPython it has (3.14 for a python.cpython of 3.13, 3.15 once installed) and
+    # found "no wheels with a matching Python version tag"; pinned, it takes (or fetches) this one
+    python = f"=={cfg.python.cpython}.*" if compiled else project.get("requires-python", ">=3.11")
     lines = [
         "[build-system]",
         f"requires = {json.dumps(requires)}",
@@ -131,7 +135,7 @@ def _pyproject(cfg: Config, compiled: bool) -> str:
         f"name = {json.dumps(project['name'])}",
         f"version = {json.dumps(project['version'])}",
         f"description = {json.dumps(project.get('description', ''), ensure_ascii=False)}",
-        f"requires-python = {json.dumps(project.get('requires-python', '>=3.11'))}",
+        f"requires-python = {json.dumps(python)}",
         f"dependencies = {json.dumps(dependencies(data))}",
         "",
         # A GUI app gets a launcher without a console window on Windows (like exe's console = auto)
@@ -286,5 +290,8 @@ def build(req: BuildRequest) -> Path:
     wheels = sorted(out.glob("*.whl"))
     if not wheels:
         raise PytError("uv build did not produce any wheel")
-    ui.info(f"  install it with: uv tool install {rel(wheels[0])}   (command: {cfg.app.name})")
+    # uv tool install takes the newest CPython it has, whatever the wheel's Requires-Python says
+    # (uv 0.10.12 and 0.12.19): a mypyc wheel, which loads only in its minor, needs the request
+    python = f"--python {cfg.python.cpython} " if req.compiled else ""
+    ui.info(f"  install it with: uv tool install {python}{rel(wheels[0])}   (command: {cfg.app.name})")
     return wheels[0]

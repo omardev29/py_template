@@ -869,7 +869,7 @@ its archive):
 | `exe` | `dist/<name>-<backend>-exe/` | `<name>` (`<name>.exe` on Windows; onedir: inside the folder `<name>/`; macOS with flet: an `.app`) |
 | `portable` | `dist/<name>-<backend>-portable-<key>/` (`<key>` such as `cp314-linux-x86_64`; no key with `runtime = "system"`), and a `.zip` (Windows) or `.tar.gz` of it | `<name>.cmd` (Windows) or `<name>.sh` |
 | `pyz` | `dist/<name>-<backend>-pyz/<name>.pyz` and `<name>.cmd` | `python <name>.pyz`; on Windows also `<name>.cmd` |
-| `wheel` | `dist/<name>-<backend>-wheel/<file>.whl` | `uv tool install <file>.whl`, then `<name>` |
+| `wheel` | `dist/<name>-<backend>-wheel/<file>.whl` | `uv tool install <file>.whl` (mypyc: `--python <python.cpython>`), then `<name>` |
 | `nuitka` | `dist/<name>-<backend>-nuitka/` | `<name>` (`<name>.exe` on Windows; `<name>.bin` in a standalone build on Linux or macOS when the app name has no `-`) |
 | `flet` | `dist/<name>-<backend>-flet-<target>/` | the platform's app |
 
@@ -1027,7 +1027,10 @@ mypyc builds a platform wheel with the compiled modules and their `.py`. It hold
 the package, `src/assets/` (as `<pkg>/assets`) and the other modules and packages of `src/` that
 `compile.modules` names (a lone `src/fastbench.py`); any other module of `src/` stays out. It is built offline in the locked `.venv`
 (`uv build --no-build-isolation`). Its dependencies are the version ranges of
-`[project] dependencies`, not the exact versions of `uv.lock`.
+`[project] dependencies`, not the exact versions of `uv.lock`. A mypyc wheel loads only in the
+CPython minor it was built for (`python.cpython`): install it with `uv tool install --python X.Y
+<file>.whl`, X.Y being that minor (the build prints the line), since `uv tool install` otherwise
+takes the newest CPython it has, whatever the wheel's `Requires-Python` (which names that minor).
 
 ### nuitka
 

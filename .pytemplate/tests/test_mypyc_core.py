@@ -2358,7 +2358,7 @@ def _wheel_cfg(**extra: Any) -> Config:
 
 
 @pytest.mark.parametrize("backend", ["cpython", "mypyc", "pypy"])
-def test_wheel_builds_in_the_locked_tools_env(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+def test_wheel_builds_in_the_locked_tools_env(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], backend: str) -> None:
     from runner.cmd_build import BuildRequest
     from runner.methods import wheel
 
@@ -2389,6 +2389,10 @@ def test_wheel_builds_in_the_locked_tools_env(wheel_project: Path, monkeypatch: 
     work = wheel_project / ".build" / "wheel" / backend
     assert build[-1] == str(work)
     assert (work / "setup.py").is_file() is (backend == "mypyc") and (work / "mypy.ini").is_file() is (backend == "mypyc")
+    # uv tool install takes the newest CPython it has, whatever the wheel's Requires-Python: a
+    # mypyc wheel (cp314 only) needs the request, and the printed line failed without it
+    hint = "install it with: uv tool install " + ("--python 3.14 " if backend == "mypyc" else "")
+    assert hint + "dist/" in capsys.readouterr().err.replace(str(wheel_project) + os.sep, "")
 
 
 def test_wheel_keeps_the_previous_wheel_when_the_sync_fails(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2420,6 +2424,9 @@ def test_wheel_pyproject_is_exact_and_ships_the_package_data(wheel_project: Path
         assert requires == [f"setuptools=={_locked('setuptools')}", *([f"mypy=={_locked('mypy')}"] if compiled else [])]
         assert data["project"]["description"] == 'Say "hi" \\ caf' + chr(0xE9)  # quotes, a backslash, non-ASCII
         assert data["project"]["dependencies"] == ["rich>=15"]
+        # a mypyc wheel loads only in its CPython minor: uv tool install took the newest one it
+        # had (3.14 for a 3.13 project) and found no wheel for it
+        assert data["project"]["requires-python"] == ("==3.14.*" if compiled else ">=3.14")
         assert data["project"]["scripts"] == {"pkg": "pkg.app:main"} and "gui-scripts" not in data["project"]
         assert data["tool"]["setuptools"]["package-data"] == {"pkg": ["**/*"]}
     gui = tomllib.loads(wheel._pyproject(_wheel_cfg(gui=True), False))
