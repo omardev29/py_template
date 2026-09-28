@@ -609,7 +609,9 @@ def _project_files(cfg: Config, check: Check, python_ok: bool) -> None:
     ui.step("project")
     changed, edited = render.apply(cfg, check=True)
     if changed or not edited:  # each hand-edited file gets its own line below: count every problem once
-        check(not changed, "generated files up to date", f"outdated: {', '.join(changed)}\nThey update with any command (or ./pyt render)")
+        # without python.cpython nothing is rendered (.python-version would name it: render.NoPython)
+        when = "once python.cpython is fixed (above), with" if not python_ok else "with"
+        check(not changed, "generated files up to date", f"outdated: {', '.join(changed)}\nThey update {when} any command (or ./pyt render)")
     for path in edited:
         check(
             False,

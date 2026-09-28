@@ -1466,6 +1466,11 @@ def test_doctor_says_where_python_cpython_is(doctor: Doctor) -> None:
     assert doctor.line("environments not checked")[0] is None and doctor.line("uv.lock not checked")[0] is None
     assert not [line for line in doctor.lines if line[1].startswith(("CPython 3.14.7 in", "PyPy", "C compiler", "uv.lock up to date"))]
     assert doctor.reached == ["apply", "shells", "hooks", "nvim", "install"] * 3  # the other checks still run
+    doctor.lines.clear()
+    doctor.render_result = ([".python-version", ".mypy.ini"], [])  # python.cpython edited: render writes nothing
+    assert cmd_env.cmd_doctor(make(PYPY), []) == 1
+    passed, _label, hint = doctor.line("generated files up to date")
+    assert passed is False and "They update once python.cpython is fixed (above), with any command" in hint
 
 
 def test_doctor_missing_environment(doctor: Doctor, capsys: pytest.CaptureFixture[str]) -> None:
