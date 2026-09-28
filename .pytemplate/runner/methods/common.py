@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import envs, proc, ui
-from ..config import Config
+from ..config import Config, toml_value
 from ..imports import PARSE_ERRORS, iter_runtime_nodes, parse
 from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, SRC, host_os, rel
 from ..ui import PytError
@@ -172,14 +172,58 @@ def export_requirements(cfg: Config) -> Path:
     editable, `uv pip install --target` left only a .pth naming this machine's source folder.
     --no-default-groups, never --no-dev: [tool.uv] default-groups can name other groups than dev
     (a lint group of tools), and --no-dev exported them into every pyz and portable lib/.
+
+    The same lock is exported next to it as pylock.toml (pylock_path), which install_deps
+    installs from: each file from the URL uv.lock names. A requirements.txt keeps no index and uv
+    pip reads no [tool.uv.sources], so a package taken from an `explicit = true` index (a private
+    one, PyTorch's) was looked for elsewhere: "No solution found" for every target. The
+    requirements.txt stays what skipped_requirements and requirements_digest read.
     """
     out = BUILD / "deploy" / "requirements.txt"
     out.parent.mkdir(parents=True, exist_ok=True)
-    envs.uv(
-        envs.tool_env(cfg),
-        ["export", "--locked", "--no-default-groups", "--no-editable", "--no-emit-project", "--format", "requirements.txt", "--output-file", out, "--quiet"],
-    )
+    tool = envs.tool_env(cfg)
+    export = ["export", "--locked", "--no-default-groups", "--no-editable", "--no-emit-project"]
+    envs.uv(tool, [*export, "--format", "requirements.txt", "--output-file", out, "--quiet"])
+    lock = pylock_path(out)
+    envs.uv(tool, [*export, "--format", "pylock.toml", "--output-file", lock, "--quiet"])
+    _rebase_paths(lock, LOCK.parent)
     return out
+
+
+def pylock_path(requirements: Path) -> Path:
+    """The pylock.toml export_requirements writes next to the requirements: what install_deps installs."""
+    return requirements.with_name("pylock.toml")
+
+
+# A local file or folder of a pylock.toml (a directory, archive, sdist or wheel source)
+_PYLOCK_PATH = re.compile(r'(\bpath\s*=\s*)("(?:[^"\\\n]|\\.)*")')
+
+
+def _rebase_paths(lock: Path, project: Path) -> None:
+    """Make the relative paths of a pylock.toml export relative to its own folder.
+
+    uv (0.10.12 to 0.12.19 at least, astral-sh/uv#16299) writes them relative to the project, the
+    folder of uv.lock, but reads them, as PEP 751 says, relative to the file's folder: exported to
+    .build/deploy/pylock.toml, a local library (`./pyt add ./libs/x`) named .build/deploy/libs/x,
+    and the install stopped with "Distribution not found". Only a path that names nothing from the
+    file's folder and something from the project moves: an absolute one, and one a uv that
+    rebases its paths itself already wrote from the file's folder, stay.
+    """
+    text = lock.read_text(encoding="utf-8")
+
+    def rebase(m: re.Match[str]) -> str:
+        try:
+            path = tomllib.loads(f"path = {m[2]}")["path"]
+        except tomllib.TOMLDecodeError:
+            return m[0]
+        if not isinstance(path, str) or os.path.isabs(path):
+            return m[0]
+        if os.path.exists(os.path.join(lock.parent, path)) or not os.path.exists(os.path.join(project, path)):
+            return m[0]
+        moved = os.path.relpath(os.path.join(project, path), lock.parent)
+        return m[1] + toml_value(moved.replace(os.sep, "/"))
+
+    lock.write_text(_PYLOCK_PATH.sub(rebase, text), encoding="utf-8", newline="\n")
 
 
 def _version_tuple(text: str) -> tuple[int, int] | None:
@@ -220,7 +264,9 @@ def _runs_on(target: Target) -> str:
 
 
 def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirements: Path) -> Path:
-    """Install the runtime deps for one target (host or cross) with `uv pip install --target`.
+    """Install the runtime deps for one target (host or cross) with `uv pip install --target`,
+    from the pylock.toml export_requirements writes next to `requirements` (each file from the
+    URL uv.lock names: an explicit index's package too).
 
     Cross targets get binary wheels for UV_PLATFORMS (an sdist built here would produce host
     binaries), except the packages that publish no wheel at all (source_only): those are built
@@ -236,7 +282,7 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
     own = "pp" if backend == "pypy" else "cp"
     env = envs.runtime_env(cfg, backend) if target.impl == own else envs.tool_env(cfg)
     extra_env = {"MACOSX_DEPLOYMENT_TARGET": _macos_floor()} if target.os == "macos" else {}
-    base: list[str | Path] = ["pip", "install", "--quiet", "--target", dest, "--no-deps", "-r", requirements]
+    base: list[str | Path] = ["pip", "install", "--quiet", "--target", dest, "--no-deps", "-r", pylock_path(requirements)]
     if not target.is_host:
         # Wheels only: an sdist built here for another OS gives this machine's binaries. Except
         # the packages that publish no wheel at all (docopt, a workspace library): built here,

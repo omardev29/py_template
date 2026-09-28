@@ -29,7 +29,8 @@ from .ui import PytError
 #   it (0.10.11 and older: "No download found for request: pypy-3.11.15-...");
 # - CPython 3.14 final for python.cpython = "3.14": uv 0.9.0 (0.8.x installs 3.14.0rc2 without
 #   a word, and 0.7.x an alpha);
-# - `uv export --format requirements.txt` of the pyz/portable/wheel builds: uv 0.6.15.
+# - `uv export --format requirements.txt` of the pyz/portable/wheel builds: uv 0.6.15; their
+#   `--format pylock.toml` export and its `uv pip install -r pylock.toml`: 0.10.12 does both.
 MIN_UV = "0.10.12"
 UV_UPDATE = (
     "uv self update   (installed with a package manager? brew upgrade uv | pipx upgrade uv | "

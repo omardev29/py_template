@@ -1913,7 +1913,7 @@ Formats:
 - The oldest supported uv is `envs.MIN_UV` = 0.10.12, read from uv's own download metadata:
   the first uv that downloads `pypy@3.11.15` (0.10.11: "No download found for request");
   CPython 3.14 final needs 0.9.0 (0.8.x silently installs 3.14.0rc2) and `uv export --format
-  requirements.txt` 0.6.15. `envs.uv` calls `envs.require_min_uv` right before uv would CREATE
+  requirements.txt` 0.6.15 (its `pylock.toml` export and install work in 0.10.12). `envs.uv` calls `envs.require_min_uv` right before uv would CREATE
   an environment (its dir does not exist): an older uv exits 3 with `envs.UV_UPDATE`; asked
   once per process, an unreadable version passes. doctor flags it. The managed `[tool.uv]` block
   also carries `required-version = ">=<MIN_UV>"`, so uv itself (>= 0.5.14) refuses every project
@@ -2329,9 +2329,16 @@ Formats:
   `pyproject.toml` moved past fails like every `uv run --locked` (with `--frozen` a `--no-check`
   pyz or portable build shipped without the new dependency). `--no-editable`: a workspace or path
   dependency (`./pyt add ./libs/x`) is exported as a path, which `uv pip install --target`
-  builds and installs (editable, it left only a `.pth` naming this machine's source folder); uv
-  reads that relative path against its working folder, `ROOT`.
-- `common.install_deps` (`uv pip install --target --no-deps -r <export>`): a cross target gets
+  builds and installs (editable, it left only a `.pth` naming this machine's source folder).
+  The same export is written as `.build/deploy/pylock.toml` next to it (`common.pylock_path`),
+  which `install_deps` installs from: every file from the URL `uv.lock` names. A requirements.txt
+  keeps no index and uv pip reads no `[tool.uv.sources]`, so a package of an `explicit = true`
+  index (a private one, PyTorch's) failed every pyz and portable build with "No solution found"
+  (`test_pyz_and_portable_install_a_package_of_an_explicit_index`); `skipped_requirements` and
+  `requirements_digest` still read the requirements.txt. uv writes the pylock's relative paths
+  (a local library) from the project, and reads them from the file's folder:
+  `common._rebase_paths` moves them (15.1).
+- `common.install_deps` (`uv pip install --target --no-deps -r <pylock.toml>`): a cross target gets
   `--python-platform UV_PLATFORMS[...] --python-version --only-binary :all:` (an sdist built for
   another OS would produce host binaries), plus `--no-binary <name>` for each package uv.lock has
   no wheel for (`common.source_only`, read from `common.LOCK`: an sdist-only release such as
@@ -4310,6 +4317,22 @@ uv:
   `test_build_methods.py::test_install_deps_removes_uv_junk_but_keeps_native_tools`,
   `test_install_junk_drops_the_build_machines_path_of_a_local_library`. Goes: the `.lock` part
   when uv removes it; the rest never.
+- **A requirements.txt export keeps no index, and uv pip reads no `[tool.uv.sources]`**
+  (LIMITATION): a package uv.lock takes from an `explicit = true` index (`{ index = "name" }`: a
+  private index, PyTorch's) was looked for on the other indexes by `uv pip install -r`, and every
+  pyz and portable build failed ("No solution found"). Fix: `common.export_requirements` also
+  exports the lock as pylock.toml (each file's URL), which `common.install_deps` installs (10).
+  Test: `test_build_methods.py::test_pyz_and_portable_install_a_package_of_an_explicit_index`.
+  Goes: never.
+- **`uv export --format pylock.toml` writes a relative path from the project, not from the file**
+  (DEFECT, uv 0.10.12 to 0.12.19): `uv pip install -r` reads it from the file's folder, as PEP 751
+  says, so exported to `.build/deploy/pylock.toml` a local library (`./pyt add ./libs/x`) named
+  `.build/deploy/libs/x` ("Distribution not found"). Up: astral-sh/uv#16299 (open; a draft fix,
+  astral-sh/uv-dev#131). Fix: `common._rebase_paths` moves a relative path that names nothing from
+  the file's folder and something from the project (a fixed uv's paths stay) (10). Test:
+  `test_build_methods.py::test_the_pylock_export_names_local_libraries_from_its_own_folder`,
+  `test_the_pylock_rebase_moves_only_what_names_the_project`. Goes: when uv writes them from the
+  file's folder (the rebase then moves nothing).
 - **Wheels for this machine follow this machine** (LIMITATION): uv took the newest tags the
   build machine allows (manylinux_2_34 on Ubuntu 24.04: the pyz failed on Debian 11), its macOS
   default may move with a uv release, and an sdist built for another OS gives host binaries.

@@ -875,7 +875,8 @@ its archive):
 
 A `wheel` names its dependencies for the installer: a git or URL source of `[tool.uv.sources]`
 becomes a direct reference, and one from a local folder, a workspace or a private index
-cannot be named, so the build refuses it (`pyz` and `portable` carry such libraries).
+cannot be named, so the build refuses it (`pyz` and `portable` carry such libraries: they
+install every locked file from where `uv.lock` takes it, an `explicit = true` index included).
 
 Which one to ship: `exe`, `nuitka`, `flet` and a bundled `portable` folder need nothing installed on
 the user's machine, but each build serves the OS and CPU it was built on (build on each OS). A `pyz`

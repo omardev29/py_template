@@ -1940,6 +1940,25 @@ wheels = [{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.wh
 """
 
 
+# docopt (an sdist only) and six as `uv export --format pylock.toml` writes them (uv 0.12.19)
+SOURCE_ONLY_PYLOCK = """lock-version = "1.0"
+created-by = "uv"
+requires-python = ">=3.14"
+
+[[packages]]
+name = "docopt"
+version = "0.6.2"
+index = "https://pypi.org/simple"
+sdist = { url = "https://files.pythonhosted.org/packages/a2/55/8f8cab2afd404cf578136ef2cc5dfb50baa1761b68c9da1fb1e4eed343c9/docopt-0.6.2.tar.gz", size = 25901, hashes = { sha256 = "49b3a825280bd66b3aa83585ef59c4a8c82f2c8a522dbe754a8bc8d08c85c491" } }
+
+[[packages]]
+name = "six"
+version = "1.17.0"
+index = "https://pypi.org/simple"
+wheels = [{ url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", size = 11050, hashes = { sha256 = "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274" } }]
+"""
+
+
 @pytest.mark.parametrize(("docopt_tag", "error"), [("py3-none-any", None), ("cp314-cp314-linux_x86_64", "docopt")])
 def test_cross_target_builds_a_package_that_publishes_no_wheel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, docopt_tag: str, error: str | None) -> None:
     # --only-binary :all: refused docopt (an sdist only, pure Python) for every other OS, so no pyz
@@ -1987,6 +2006,7 @@ def test_cross_target_builds_a_pure_sdist_for_real(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(common, "LOCK", lock)
     req = tmp_path / "requirements.txt"
     req.write_text("docopt==0.6.2\nsix==1.17.0\n", encoding="utf-8")
+    common.pylock_path(req).write_text(SOURCE_ONLY_PYLOCK, encoding="utf-8")  # what install_deps installs
     site = common.install_deps(make({}), "cpython", common.parse_key(LINUX if IS_WINDOWS else WIN), tmp_path / "site", req)
     assert (site / "docopt.py").is_file() and (site / "six.py").is_file()
     assert common.installed(site) == {("docopt", "0.6.2"), ("six", "1.17.0")}
@@ -2314,6 +2334,102 @@ def test_export_ships_path_dependencies_and_refuses_a_stale_lock(tmp_path: Path,
     (project / "pyproject.toml").write_text(text.replace('["mylib"]', '["mylib", "six>=1.16"]'), encoding="utf-8")
     with pytest.raises(proc.CommandFailed):
         common.export_requirements(make({}))
+
+
+def _wheel_file(folder: Path, name: str, version: str) -> Path:
+    """A minimal pure wheel (a flat index for uv: a folder of wheel files)."""
+    import zipfile
+
+    folder.mkdir(parents=True, exist_ok=True)
+    info = f"{name}-{version}.dist-info"
+    files = {
+        f"{name}/__init__.py": "VALUE = 1\n",
+        f"{info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
+        f"{info}/WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    whl = folder / f"{name}-{version}-py3-none-any.whl"
+    with zipfile.ZipFile(whl, "w") as z:
+        for member, text in files.items():
+            z.writestr(member, text)
+        z.writestr(f"{info}/RECORD", "".join(f"{m},,\n" for m in [*files, f"{info}/RECORD"]))
+    return whl
+
+
+def test_pyz_and_portable_install_a_package_of_an_explicit_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `explicit = true` plus a [tool.uv.sources] `{ index = "name" }`, uv's way to take a package
+    # from a private index or PyTorch's: the requirements.txt export keeps no index and uv pip reads
+    # no sources, so `uv pip install -r requirements.txt` looked for it elsewhere ("No solution
+    # found") for every target, although README and the wheel's refusal sent such projects to pyz
+    # and portable. The real uv, offline: a flat index of one wheel
+    if not envs.tool_env(make({})).python.is_file():
+        pytest.skip("needs .venv (./pyt setup)")
+    project = tmp_path / "proj"
+    index = tmp_path / "index"
+    _wheel_file(index, "ptdemo", "1.0")
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "xapp"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = ["ptdemo"]\n\n'
+        f'[[tool.uv.index]]\nname = "local"\nurl = {json.dumps(index.as_uri())}\nformat = "flat"\nexplicit = true\n\n'
+        '[tool.uv.sources]\nptdemo = { index = "local" }\n',
+        encoding="utf-8",
+    )
+    env = {k: v for k, v in proc.base_env().items() if not k.startswith(("UV_PROJECT", "UV_PYTHON"))}
+    r = subprocess.run([proc.find_uv(), "lock", "--offline", "--quiet"], cwd=project, env=env, capture_output=True, text=True, timeout=120, check=False)
+    if r.returncode != 0:
+        pytest.skip(f"uv could not lock the scratch project offline: {r.stderr.strip()[-300:]}")
+    monkeypatch.setattr(proc, "ROOT", project)
+    monkeypatch.setattr(common, "BUILD", tmp_path / "build")
+    monkeypatch.setattr(common, "LOCK", project / "uv.lock")
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    requirements = common.export_requirements(make({}))
+    host = common.Target("cp", 3, 14, common.host_os(), common.host_arch())
+    cross = common.parse_key(WIN if common.host_os() != "windows" else LINUX)
+    for target in (host, cross):
+        site = common.install_deps(make({}), "cpython", target, tmp_path / "site" / target.key, requirements)
+        assert common.installed(site) == {("ptdemo", "1.0")}, target.key
+
+
+def test_the_pylock_export_names_local_libraries_from_its_own_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # uv writes a pylock.toml's relative paths from the project folder but reads them, as PEP 751
+    # says, from the file's own folder: .build/deploy/pylock.toml named .build/deploy/libs/mylib
+    project = _workspace_project(tmp_path / "proj", marked="winlib")
+    monkeypatch.setattr(proc, "ROOT", project)
+    monkeypatch.setattr(common, "BUILD", tmp_path / "build")
+    monkeypatch.setattr(common, "LOCK", project / "uv.lock")
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    lock = common.pylock_path(common.export_requirements(make({})))
+    packages = {p["name"]: p for p in tomllib.loads(lock.read_text(encoding="utf-8"))["packages"]}
+    for name in ("mylib", "winlib"):
+        folder = lock.parent / packages[name]["directory"]["path"]
+        assert folder.resolve() == (project / "libs" / name).resolve() and (folder / "pyproject.toml").is_file()
+    assert "sys_platform == 'win32'" in packages["winlib"]["marker"]
+
+
+def test_the_pylock_rebase_moves_only_what_names_the_project(tmp_path: Path) -> None:
+    # A path uv already wrote from the file's folder (the fix upstream is on its way: uv#16299)
+    # must not move twice; an absolute one and one that names nothing stay too
+    project = tmp_path / "proj"
+    for folder in ("libs/a", "libs/b", "wheels"):
+        (project / folder).mkdir(parents=True)
+    (project / "wheels" / "c-1.0-py3-none-any.whl").write_bytes(b"")
+    lock = project / ".build" / "deploy" / "pylock.toml"
+    lock.parent.mkdir(parents=True)
+    absolute = json.dumps((project / "libs" / "a").as_posix())
+    lock.write_text(
+        '[[packages]]\nname = "a"\ndirectory = { path = "libs/a" }\n\n'
+        '[[packages]]\nname = "b"\ndirectory = { path = "../../libs/b" }\n\n'
+        '[[packages]]\nname = "c"\nversion = "1.0"\nwheels = [{ path = "wheels/c-1.0-py3-none-any.whl", hashes = {} }]\n\n'
+        f'[[packages]]\nname = "d"\ndirectory = {{ path = {absolute} }}\n\n'
+        '[[packages]]\nname = "e"\ndirectory = { path = "libs/gone" }\n',
+        encoding="utf-8",
+    )
+    common._rebase_paths(lock, project)
+    packages = {p["name"]: p for p in tomllib.loads(lock.read_text(encoding="utf-8"))["packages"]}
+    assert packages["a"]["directory"]["path"] == "../../libs/a"
+    assert packages["b"]["directory"]["path"] == "../../libs/b"
+    assert packages["c"]["wheels"][0]["path"] == "../../wheels/c-1.0-py3-none-any.whl"
+    assert packages["d"]["directory"]["path"] == (project / "libs" / "a").as_posix()
+    assert packages["e"]["directory"]["path"] == "libs/gone"
 
 
 def test_the_builds_export_no_dependency_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
