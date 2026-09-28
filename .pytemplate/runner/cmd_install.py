@@ -540,7 +540,12 @@ def make_plan() -> Plan:
     elif os.path.lexists(snapshot) and (why := not_an_install(snapshot)):
         problems.append(f"{snapshot}: {why}: move it away (or set another data folder), then run ./pyt install again")
     tracked, how = presets._tracked_template()
-    if tracked is None:
+    if tracked is None and presets._git_refused:  # a git clone, which git refuses to read
+        problems.append(
+            f"pyt install copies the files git tracks in the template, and git refuses to list them here "
+            f"({presets._git_refused}): {presets.git_refusal_fix()}"
+        )
+    elif tracked is None:
         problems.append(f"pyt install copies the files git tracks in the template, and here it cannot tell which ({how}): use a git clone ({presets.TEMPLATE_URL})")
     for inside in (ROOT, snapshot.parent):
         if _inside(folder, inside):

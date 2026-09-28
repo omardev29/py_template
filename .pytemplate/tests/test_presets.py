@@ -996,6 +996,27 @@ def test_copy_template_says_when_git_fails(tmp_path: Path, monkeypatch: pytest.M
         assert ("dubious ownership" in err) is warned
     assert (tmp_path / "new" / ".env").is_file()  # the fallback: every file
     assert locales == ["C"]  # git's messages in English, whatever the user's locale
+    if "dubious ownership" in stderr:  # and how to let git read it
+        assert f"let git read it: git config --global --add safe.directory {src}" in err
+
+
+def test_new_names_a_repository_git_refuses_and_how_to_let_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A clone another user owns: git refuses it (dubious ownership), and `new --dry-run` said
+    "every file, ignored ones included: not a git work tree" with no way out. It says that git
+    refuses the repository, with git's own command to let it read the folder."""
+    src = tmp_path / "t"
+    _write(src, {".pytemplate/pyt.py": b"# entry\n"})
+    monkeypatch.setattr(presets, "ROOT", src)
+    monkeypatch.setattr(shutil, "which", lambda name: "git")
+    stderr = (
+        "fatal: detected dubious ownership in repository at '/x/t'\n"
+        "To add an exception for this directory, call:\n\n\tgit config --global --add safe.directory /x/t\n"
+    )
+    monkeypatch.setattr(proc, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 128, "", stderr))
+    assert presets.copy_scope() == "every file, ignored ones included: git refuses to read this repository"
+    err = capsys.readouterr().err
+    assert "the copy would include files git does not track" in err and "not a git work tree" not in err
+    assert err.rstrip().endswith("let git read it: git config --global --add safe.directory /x/t"), err
 
 
 @pytest.mark.parametrize(

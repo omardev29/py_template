@@ -1436,7 +1436,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   for its MARKER line. A file there without the MARKER, a symbolic link (`not_ours`), a bin
   folder inside the clone or the data folder, or one that holds `.pytemplate`, a data folder
   that exists without a record or is a symbolic link (`not_an_install`: it was refused as one
-  that "holds no" record), and on Windows a `pyt.com`, `pyt.exe` or `pyt.bat` of another tool in
+  that "holds no" record), a clone git refuses to read (dubious ownership: named with git's way
+  to let it, `presets.git_refusal_fix`, where it said "not a git work tree ... use a git clone"),
+  and on Windows a `pyt.com`, `pyt.exe` or `pyt.bat` of another tool in
   the bin folder (`pathext_shadows`: cmd, xonsh, nushell and Python's subprocess take the first
   pyt<ext> of a folder in PATHEXT order, before `pyt.cmd`) are refused before the first write,
   all of them in one message (`make_plan` gathers them, `_refuse`; only no data folder and a uv
@@ -2705,7 +2707,9 @@ Per method:
   a copy of its target. Without git, or when git does not track `.pytemplate/pyt.py` (a copy inside
   another repository, a project never committed), it copies every file, and says so and why
   (`presets._tracked_template`); a git failure other
-  than "not a git repository" (dubious ownership...) is a warning first (git runs with
+  than "not a git repository" (dubious ownership...) is a warning first, with git's own command
+  to let it read the folder (`presets._git_refused`, `git_refusal_fix`: it said "not a git work
+  tree" of a clone another user owns; install refuses with them, 5.9) (git runs with
   `LC_ALL=C`). Both skip (`presets._skipped`) `.git`, `.build`, `dist`, caches, `.flet`,
   `.venv*`, `template-repo` at any depth; `build/`, `.claude/`, `README.md` and `LICENSE` at
   the root; and `.github/workflows/template-*` (template CI files MUST use that prefix; the CI

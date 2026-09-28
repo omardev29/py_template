@@ -1065,10 +1065,19 @@ def _git_path(line: str) -> str:
     return os.fsdecode(bytes(raw))
 
 
+# What git said when the last _git_files call found a repository in ROOT that git refuses to
+# read (dubious ownership: a clone that another user owns; a broken repository), and the line
+# of git's message that says how to let it ("" for none): the callers name them (new warns, as
+# its copy then takes every file; install refuses). Both "" otherwise.
+_git_refused = ""
+_git_refused_fix = ""
+
+
 def _git_files(*args: str) -> list[str] | None:
-    """`git ls-files ARGS` in ROOT (paths relative to it, _git_path); None without git or a work
-    tree. Any other git failure (dubious ownership, a broken repository) is said out loud: the
-    copy then takes every file, untracked ones included."""
+    """`git ls-files ARGS` in ROOT (paths relative to it, _git_path); None without git, a work
+    tree, or when git refuses the repository (_git_refused then says why)."""
+    global _git_refused, _git_refused_fix
+    _git_refused = _git_refused_fix = ""
     git = shutil.which("git")
     if git is None:
         return None
@@ -1079,10 +1088,18 @@ def _git_files(*args: str) -> list[str] | None:
     if r.returncode != 0:
         reason = (r.stderr or r.stdout or "").strip()
         if "not a git repository" not in reason:
-            first = reason.splitlines()[0] if reason else f"exit code {r.returncode}"
-            ui.warn(f"git ls-files failed in {ROOT} ({first}): the copy includes files git does not track")
+            _git_refused = reason.splitlines()[0] if reason else f"exit code {r.returncode}"
+            _git_refused_fix = next((ln.strip() for ln in reason.splitlines() if "safe.directory" in ln and ln.strip().startswith("git ")), "")
         return None
     return [_git_path(line) for line in r.stdout.split("\n") if line]
+
+
+def git_refusal_fix() -> str:
+    """How to let git read the repository in ROOT, after it refused it (_git_refused): install
+    said "not a git work tree ... use a git clone" for a clone that another user owns."""
+    if "dubious ownership" in _git_refused:
+        return "run pyt as the folder's owner, or let git read it: " + (_git_refused_fix or f"git config --global --add safe.directory {ROOT}")
+    return "repair the repository, or use a fresh git clone"
 
 
 def _installed() -> bool:
@@ -1103,6 +1120,8 @@ def _tracked_template() -> tuple[list[str] | None, str]:
     The installed template (global mode) is a clean copy of a template's tracked files made by
     `pyt install`, with no .git: every file, without asking a git (the folder may even lie in
     a repository of the user's, such as a home folder kept in git)."""
+    global _git_refused, _git_refused_fix
+    _git_refused = _git_refused_fix = ""  # what an earlier call left (a stand-in _git_files sets nothing)
     if _installed():
         return None, "every file"
     tracked = _git_files("--cached")
@@ -1110,12 +1129,23 @@ def _tracked_template() -> tuple[list[str] | None, str]:
         return tracked, "the files git tracks"
     if tracked is not None:
         return None, "every file, ignored ones included: git does not track this project's files (never committed?)"
+    if _git_refused:
+        return None, "every file, ignored ones included: git refuses to read this repository"
     return None, "every file, ignored ones included: " + ("git not found" if shutil.which("git") is None else "not a git work tree")
+
+
+def _warn_refused(verb: str) -> None:
+    """new's warning when git refused the repository: the copy takes every file, secrets (.env)
+    and untracked ones included."""
+    if _git_refused:
+        ui.warn(f"git ls-files failed in {ROOT} ({_git_refused}): the copy {verb} files git does not track\n  {git_refusal_fix()}")
 
 
 def copy_scope() -> str:
     """What copy_template would copy from here (`new --dry-run`)."""
-    return _tracked_template()[1]
+    how = _tracked_template()[1]
+    _warn_refused("would include")
+    return how
 
 
 def _copy_entry(src: Path, target: Path, rel_path: str, errors: list[tuple[str, str, str]]) -> None:
@@ -1171,7 +1201,9 @@ def copy_template(dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     errors: list[tuple[str, str, str]] = []
     if tracked is None:
-        if not _installed():  # a clean copy by construction: nothing to say about it
+        if _git_refused:
+            _warn_refused("includes")
+        elif not _installed():  # a clean copy by construction: nothing to say about it
             ui.info(f"  copying {how}")
         names = sorted(os.listdir(ROOT))
         left_out = _ignore(str(ROOT), names)

@@ -387,6 +387,29 @@ class Planner:
         return str(e.value)
 
 
+def test_a_clone_git_refuses_to_read_is_named_with_the_way_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A clone another user owns (a shared machine, a root-owned checkout): git refuses it
+    (dubious ownership), and install warned that "the copy includes files git does not track"
+    (it copies nothing), then said "here it cannot tell which (every file, ignored ones
+    included: not a git work tree): use a git clone" of a git clone. Now one refusal says that
+    git refuses the repository, with git's own command to let it read the folder."""
+    tracked, files = presets._tracked_template, presets._git_files
+    p = Planner(tmp_path, monkeypatch)
+    monkeypatch.setattr(presets, "_tracked_template", tracked)
+    monkeypatch.setattr(presets, "_git_files", files)
+    monkeypatch.setattr(shutil, "which", lambda name: "git")
+    stderr = (
+        "fatal: detected dubious ownership in repository at '/x/clone'\n"
+        "To add an exception for this directory, call:\n\n\tgit config --global --add safe.directory /x/clone\n"
+    )
+    monkeypatch.setattr(proc, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 128, "", stderr))
+    message = p.refusal()
+    assert "git refuses to list them here (fatal: detected dubious ownership in repository at '/x/clone')" in message
+    assert message.endswith("let git read it: git config --global --add safe.directory /x/clone"), message
+    assert "not a git work tree" not in message and "use a git clone" not in message
+    assert "the copy includes" not in capsys.readouterr().err  # install copies nothing
+
+
 def test_every_refusal_comes_in_one_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A data folder install did not make and a file of the bin folder it did not write: the
     first run named one, and the next run the other."""
