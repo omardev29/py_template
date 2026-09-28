@@ -1432,7 +1432,7 @@ only on failure. flet: `<leader>jd` starts `dev` (hot reload) as a background ta
   Moving the folder asks again.
 - A warning about the order of the LazyVim extras: `./pyt nvim extras` fixes it for good.
 - Nothing loads and one message names a character in the project path: Neovim cannot put a path
-  with `[ ] { } , \ ` `` ` `` `'` or `$` on its runtimepath, so the integration is off there.
+  with `[ ] { } , \ ' $` or a backtick on its runtimepath, so the integration is off there.
   Move the project to a plain path (`./pyt nvim doctor` names the character).
 - No `.venv` yet (`:checkhealth pytemplate` warns): run `./pyt setup` and restart Neovim.
 - The language server is chosen when Neovim starts: restart it after changing
