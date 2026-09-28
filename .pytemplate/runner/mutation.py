@@ -780,11 +780,28 @@ def listed_files(root: Path, env: Mapping[str, str]) -> list[str]:
     return sorted({os.fsdecode(p) for p in out.split(b"\0") if p})
 
 
+def executables(root: Path, env: Mapping[str, str]) -> list[str]:
+    """The files the project's index records as executable (mode 100755); none where git cannot
+    list them."""
+    r = _git(root, env, "ls-files", "-s", "-z", check=False)
+    found: list[str] = []
+    for entry in r.stdout.split(b"\0") if r.returncode == 0 else []:
+        meta, _, path = entry.partition(b"\t")
+        if path and meta.split(b" ", 1)[0] == b"100755":
+            found.append(os.fsdecode(path))
+    return found
+
+
 def make_copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, str], contents: Mapping[str, bytes] | None = None) -> None:
     """A copy of the project with a git repository of its own (one commit of every file), so the
     tests that ask git about the project find one. Links stay links (where no link can be made,
     Windows without the right, the file or folder a link names takes its place). The files
-    `contents` names hold its bytes (list_mutants' snapshot), not the working tree's."""
+    `contents` names hold its bytes (list_mutants' snapshot), not the working tree's. Its index
+    records the project's executables as such: Git for Windows' `git init` writes core.filemode
+    = false (NTFS keeps no x bit), and `git add` then records every new file as 100644, so pyt
+    and pyt.ps1 lost the 100755 that test_launcher_sh and test_launcher_win read, and the
+    baselines of runner.project and runner.cmd_install failed (presets._git_init stages a new
+    project's launchers so too)."""
     contents = contents or {}
     for rel, data in contents.items():
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -808,6 +825,9 @@ def make_copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, st
                 shutil.copy2(src, target)
     _git(dest, env, "init", "-q")
     _git(dest, env, "add", "-A")
+    marked = [rel for rel in executables(root, root_env()) if (dest / rel).is_file() and not (dest / rel).is_symlink()]
+    for i in range(0, len(marked), 100):  # a Windows command line holds 32767 characters
+        _git(dest, env, "update-index", "--chmod=+x", "--", *marked[i : i + 100])
     _git(dest, env, *GIT_IDENTITY, "commit", "-q", "--no-verify", "-m", "selftest --mutation")
 
 

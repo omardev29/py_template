@@ -4061,7 +4061,11 @@ short temp tree and unset `NVIM_APPNAME`.
   - where: N workers (`--jobs`, default half the CPUs, at most 8), each a throwaway copy of the
     project in the scratch base (`make_copy`: the files `git ls-files --cached --others
     --exclude-standard` lists, with their working-tree content, committed into a repository of its
-    own; the modules to mutate from the snapshot `list_mutants` takes, which Cosmic Ray reads for
+    own, whose index records the project's executables as 100755, `mutation.executables`: Git for
+    Windows' `git init` writes core.filemode = false, `git add` then recorded pyt and pyt.ps1 as
+    100644, and the baselines of runner.project and runner.cmd_install failed in the launcher
+    tests' mode checks, `test_mutation.test_make_copy_keeps_the_executables_of_the_projects_index`;
+    the modules to mutate from the snapshot `list_mutants` takes, which Cosmic Ray reads for
     every mutant too, so the checkout may change meanwhile), with its own `.venv` (`sync_copy`: `uv
     sync --locked --all-groups`, its output captured and shown when it fails, even under `-q`: a
     `--quiet` hides why, `uv -qq` always and one `--quiet` with uv 0.10.12, the oldest the project
@@ -5637,10 +5641,12 @@ git and husky:
   copies drop it, and with `core.filemode=true` an index-only fix is undone by the next `git
   add`; Git for Windows runs hooks with its own sh. Fix: `cmd_env._fix_exec_bit` (the files and
   the index); `presets._git_init` stages both launchers executable (a new repository, or an
-  enclosing one with `core.filemode=false`); `sh <launcher>` in the hook; `/bin/sh
+  enclosing one with `core.filemode=false`); `mutation.make_copy` marks the project's
+  executables in a worker's new repository (13.1); `sh <launcher>` in the hook; `/bin/sh
   <root>/pyt` in VS Code tasks and the Neovim fallback (5.6, 11, 12, 14). Test:
   `test_envs_core.py::test_fix_exec_bit_repairs_the_index_and_the_files`,
   `test_presets.py::test_git_init_in_a_monorepo_stages_the_launchers_executable`,
+  `test_mutation.py::test_make_copy_keeps_the_executables_of_the_projects_index`,
   `test_hooks.py::test_git_runs_the_hook`,
   `test_vscode.py::test_every_task_runs_the_launcher_as_a_process`. Goes: never.
 - **CRLF checkouts** (LIMITATION): `* text=auto eol=native` with `core.autocrlf=true` checks

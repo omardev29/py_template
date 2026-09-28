@@ -1019,6 +1019,30 @@ def test_make_copy_is_a_repository_of_the_listed_files(tmp_path: Path) -> None:
     assert status == ""  # every file committed
 
 
+@needs_git
+def test_make_copy_keeps_the_executables_of_the_projects_index(tmp_path: Path) -> None:
+    """Git for Windows' `git init` writes core.filemode = false (NTFS keeps no x bit), and `git
+    add` then records every new file as 100644: a worker's pyt and pyt.ps1 lost the 100755 of the
+    project's index, which test_launcher_sh and test_launcher_win read, and the baselines of
+    runner.project and runner.cmd_install failed on Windows. Simulated here with that setting on
+    the copy's git (only the real Windows runner proves what its `git init` writes)."""
+    env = _git_env(tmp_path)
+    root = _write(tmp_path / "p", {"pyt": "#!/bin/sh\n", "pyt.ps1": "#!/usr/bin/env pwsh\n", "a.py": "x\n", "tools/new.sh": "#!/bin/sh\n"})
+    _git(root, env, "init", "-q")
+    _git(root, env, "add", "pyt", "pyt.ps1", "a.py")
+    _git(root, env, "update-index", "--chmod=+x", "pyt", "pyt.ps1")  # tools/new.sh: untracked, as the working tree has it
+    windows = {**env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.filemode", "GIT_CONFIG_VALUE_0": "false"}
+    copy = tmp_path / "copy"
+    mutation.make_copy(root, copy, mutation.listed_files(root, env), windows)
+    staged = subprocess.run(["git", "ls-files", "-s"], cwd=copy, env=windows, capture_output=True, text=True, check=True).stdout
+    modes = {line.split("\t")[1]: line.split()[0] for line in staged.splitlines()}
+    assert modes == {"a.py": "100644", "pyt": "100755", "pyt.ps1": "100755", "tools/new.sh": "100644"}
+    assert sorted(mutation.executables(root, env)) == ["pyt", "pyt.ps1"]
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert mutation.executables(plain, {**env, "GIT_CEILING_DIRECTORIES": str(tmp_path)}) == []  # no repository: nothing to mark
+
+
 def _symlinks(root: Path) -> None:
     try:
         os.symlink("a.py", root / "link.py")
