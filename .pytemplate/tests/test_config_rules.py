@@ -1612,11 +1612,14 @@ def test_mode_edits_a_taplo_formatted_config(project: Path) -> None:
     path.write_bytes(text.encode("utf-8"))
     before = tomllib.loads(text)
     supported = before["backend"]["supported"]
-    keep = [before["backend"]["active"]]
+    active = before["backend"]["active"]
+    # A change of the expanded array: only the active backend, or, in a project that supports
+    # that one alone (`mode --supports cpython`), another one next to it (never PyPy: no precheck
+    # nor sync). Asking for the list it has, the dry run said "unchanged" and the test failed there
+    other = "cpython" if active == "mypyc" else "mypyc"
+    keep = [active] if supported != [active] else [b for b in config.BACKENDS if b in (active, other)]
     stderr = _ok(project, "--dry-run", "mode", "--supports", ",".join(keep))
     assert f"[backend] supported = {toml_value(keep)}" in stderr
-    if supported == keep:
-        return
     _ok(project, "mode", "--supports", ",".join(keep))
     after = tomllib.loads(path.read_text(encoding="utf-8"))
     assert after == _expected(before, "backend", "supported", keep)
