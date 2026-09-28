@@ -550,8 +550,9 @@ commands regenerate them first and say which changed; `./pyt render` does only t
 
 - Never edit them by hand. `./pyt` notices an edit (by the hashes in `.pytemplate/state.json`),
   leaves the file alone and warns; `./pyt render --diff` shows the difference and
-  `./pyt render --force` overwrites it. Change `pytemplate.toml`, or the sources in
-  `.pytemplate/templates/` (a typing profile is `.pytemplate/templates/typing/<profile>.toml`).
+  `./pyt render --force` overwrites it (`--diff --force` shows it first). Change
+  `pytemplate.toml`, or the sources in `.pytemplate/templates/` (a typing profile is
+  `.pytemplate/templates/typing/<profile>.toml`).
   CRLF line endings and a BOM (Windows checkouts, editors) do not count as edits.
 - After a merge conflict in `state.json` or `editor.json`, run `./pyt render` and commit both
   (it regenerates every generated file and keeps the record of `./pyt apply` that both sides

@@ -567,10 +567,13 @@ def apply(cfg: Config, *, force: bool = False, check: bool = False, show_diff: b
                 new_state[path] = new_hash
                 continue
             recorded = state.get(path)
-            if recorded is not None and recorded != current_hash and not force:
+            hand_edited = recorded is not None and recorded != current_hash
+            if hand_edited and show_diff:
+                # --diff: shown even with -q, and before --force overwrites the edit (the diff
+                # asked for was skipped there, and the edit was gone without being seen)
+                ui.report(_diff(path, content, _norm(current)))
+            if hand_edited and not force:
                 edited.append(path)
-                if show_diff:
-                    ui.report(_diff(path, content, _norm(current)))  # --diff: shown even with -q
                 continue
         changed.append(path)
         if not check:

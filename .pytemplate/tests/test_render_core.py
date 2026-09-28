@@ -246,6 +246,18 @@ def test_diff_shows_the_generated_against_the_current_content(box: Sandbox, caps
     assert "---" not in capsys.readouterr().err  # only with show_diff
 
 
+def test_diff_with_force_shows_the_hand_edit_before_overwriting_it(box: Sandbox, capsys: pytest.CaptureFixture[str]) -> None:
+    """`render --diff --force` took a hand-edited file for an outdated one: the diff asked for was
+    skipped, and the edit was overwritten without ever being shown."""
+    render.apply(CFG)
+    box.write("b.ini", "[b]\nx = 2\n")
+    capsys.readouterr()
+    code, err = _render(["--diff", "--force"], capsys)
+    assert code == 0 and box.read("b.ini") == GENERATED["b.ini"].encode()
+    assert "--- b.ini (generated)" in err and "+x = 2" in err
+    assert err.index("+x = 2") < err.index("updated: b.ini")  # shown first, then overwritten
+
+
 def _unavailable(version: str) -> None:
     raise PytError(f'python.cpython = "{version}": uv can neither find nor install this CPython (...)', 3)
 

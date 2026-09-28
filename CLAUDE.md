@@ -1869,7 +1869,8 @@ re-rendering.
 - Current hash == new hash -> skip. Recorded hash in `state.json` != current file -> hand-edited:
   not written (warning) unless `--force`. Otherwise write (LF) and record the hash. `--diff`
   prints a hand edit as a unified diff (`render._diff`; a lost last line break, which the hash
-  counts, is marked `\ No newline at end of file`: the diff used to be empty).
+  counts, is marked `\ No newline at end of file`: the diff used to be empty), with `--force`
+  too, before overwriting it (`render --diff --force` discarded the edit without showing it).
 - A missing or corrupt `state.json` counts as empty (`render._read_state`/`_load_state`: missing,
   not UTF-8 (PS 5.1 `>` writes UTF-16), not JSON, not an object, or `files` not an object; an
   entry whose value is not a sha256 counts as unrecorded): every generated file is overwritten
