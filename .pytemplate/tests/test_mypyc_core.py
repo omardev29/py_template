@@ -2463,7 +2463,8 @@ def test_wheel_builds_in_the_locked_tools_env(wheel_project: Path, monkeypatch: 
     assert build[build.index("--python") + 1] == str(tool.python)  # never uv's own pick (./.venv, WSL)
     work = wheel_project / ".build" / "wheel" / backend
     assert build[-1] == str(work)
-    assert (work / "setup.py").is_file() is (backend == "mypyc") and (work / "mypy.ini").is_file() is (backend == "mypyc")
+    assert (work / "setup.py").is_file() and (work / "mypy.ini").is_file() is (backend == "mypyc")
+    assert ("mypycify" in (work / "setup.py").read_text(encoding="utf-8")) is (backend == "mypyc")
     # uv tool install takes the newest CPython it has, whatever the wheel's Requires-Python: a
     # mypyc wheel (cp314 only) needs the request, and the printed line failed without it
     hint = "install it with: uv tool install " + ("--python 3.14 " if backend == "mypyc" else "")
@@ -2786,6 +2787,37 @@ def test_real_pure_wheel_holds_hidden_files(wheel_project: Path, monkeypatch: py
 
 
 @needs_venv
+def test_real_wheel_builds_under_a_folder_named_like_a_variable(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # setuptools' install step (bdist_wheel runs it) expands $NAME and {NAME} in its prefix,
+    # sys.prefix: the .venv of a project folder such as app$v2 or br{x} stopped every wheel
+    # build ("invalid variable 'v2'"). The .venv is reached through such a folder here.
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    folder = wheel_project / "app$v2 {x}"
+    folder.mkdir()
+    venv = folder / ".venv"
+    _symlink(venv, TOOL_PYTHON.parent.parent, directory=True)
+    monkeypatch.setattr(wheel.envs, "tool_env", lambda cfg: envs.PyEnv("cpython", venv, cfg.python.cpython, "only-managed"))
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    names = _wheel_names(wheel.build(BuildRequest(_wheel_cfg(), "cpython", "wheel", wheel_project / "src")))
+    assert {"pkg/app.py", "pkg/data/x.json"} <= set(names)
+
+
+def test_every_wheel_setup_py_installs_with_a_plain_prefix(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Both build projects run bdist_wheel's install step with INSTALL_CLASS (setuptools ignores a
+    # prefix of setup.cfg inside a virtual environment)
+    from runner.methods import wheel
+
+    monkeypatch.setattr(mypyc, "compiled_sources", lambda cfg: [wheel_project / "src" / "pkg" / "core" / "m.py"])
+    for compiled in (False, True):
+        text = wheel.setup_py(_wheel_cfg(), compiled)
+        compile(text, "setup.py", "exec")
+        assert wheel.INSTALL_CLASS in text and 'cmdclass={"install": Install}' in text
+        assert ("mypycify" in text) is compiled
+
+
+@needs_venv
 @needs_compiler
 def test_real_mypyc_wheel_compiles_code_that_imports_a_dependency(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The compiled core imports rich (a project dependency): the isolated build env had only
@@ -2874,6 +2906,8 @@ def _fake_modules(monkeypatch: pytest.MonkeyPatch, compiler: str, extensions: li
     fake_build_mod.mypycify = lambda args, **kw: extensions  # type: ignore[attr-defined]
     fake_setuptools = types.ModuleType("setuptools")
     fake_setuptools.setup = lambda **kw: setups.append(kw)  # type: ignore[attr-defined]
+    fake_install = types.ModuleType("setuptools.command.install")
+    fake_install.install = type("install", (), {"finalize_options": lambda self: None})  # type: ignore[attr-defined]
     fake_ccompiler = types.ModuleType("distutils.ccompiler")
     fake_ccompiler.new_compiler = lambda: types.SimpleNamespace(compiler_type=compiler)  # type: ignore[attr-defined]
     fake_sysconfig = types.ModuleType("distutils.sysconfig")
@@ -2885,6 +2919,8 @@ def _fake_modules(monkeypatch: pytest.MonkeyPatch, compiler: str, extensions: li
         "mypyc": types.ModuleType("mypyc"),
         "mypyc.build": fake_build_mod,
         "setuptools": fake_setuptools,
+        "setuptools.command": types.ModuleType("setuptools.command"),
+        "setuptools.command.install": fake_install,
         "distutils": fake_distutils,
         "distutils.ccompiler": fake_ccompiler,
         "distutils.sysconfig": fake_sysconfig,
@@ -2910,7 +2946,7 @@ def test_wheel_setup_py_adds_the_same_flags_as_the_stage(
     assert flags == _load_build_script().extra_cflags(compiler, platform, nsi)
     assert [e.extra_compile_args for e in extensions] == [["-O3", *flags]] * 2
     assert extensions[0].extra_compile_args is not extensions[1].extra_compile_args
-    assert setups == [{"ext_modules": extensions}]
+    assert len(setups) == 1 and setups[0]["ext_modules"] == extensions and set(setups[0]["cmdclass"]) == {"install"}
 
 
 INLINE_PROBE = """\

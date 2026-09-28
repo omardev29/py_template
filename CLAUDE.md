@@ -2705,7 +2705,10 @@ Per method:
   name, a local library became a PyPI requirement (an unrelated PyPI package of that name got
   installed). A pyproject.toml or uv.lock that is not valid TOML is one error naming it
   (`wheel._read_toml`, exit 2): `wheel.check` reads it before `check_lock`, and it was an
-  internal-error traceback. Synthetic build project in `.build/wheel/<b>` (for mypyc a `setup.py` using
+  internal-error traceback. Synthetic build project in `.build/wheel/<b>` (a `setup.py` whose
+  install step, the one bdist_wheel runs, gets a prefix with nothing to expand,
+  `wheel.INSTALL_CLASS`: setuptools expands `$NAME` and `{NAME}` in `sys.prefix`, and in a
+  project folder such as `app$v2` every wheel build stopped, 15.1; for mypyc that `setup.py` uses
   mypycify with the same `compile.multi_file`, `separate`, `strict_dunder_typing` and extra C
   flags (`no_semantic_interposition`, section 9) as the stage, and a compile `mypy.ini`), built
   with `uv build --wheel --no-build-isolation --python <.venv python>` after
@@ -4967,6 +4970,17 @@ setuptools:
   escaped path next to `"**/*"` (10). Test:
   `test_mypyc_core.py::test_wheel_package_data_names_every_hidden_file`,
   `test_real_pure_wheel_holds_hidden_files`. Goes: never.
+- **The install step expands `$NAME` and `{NAME}` in `sys.prefix`** (DEFECT, setuptools 84:
+  `install.expand_basedirs` passes the install base, the prefix of the interpreter, through
+  `subst_vars`): the wheel is built with the project's `.venv` Python, so every wheel build, pure
+  or mypyc, stopped with "invalid variable 'v2'" in a project folder such as `app$v2` or `br{x}`;
+  inside a virtual environment setuptools ignores a `prefix` of `setup.cfg`. Up: none found (cf.
+  pypa/virtualenv#1154, closed: the same expansion of a `$` in a Windows user name). Fix: every
+  generated `setup.py` gives bdist_wheel's install step a prefix with nothing to expand
+  (`wheel.INSTALL_CLASS`; bdist_wheel names every folder it installs to) (10). Test:
+  `test_mypyc_core.py::test_real_wheel_builds_under_a_folder_named_like_a_variable`,
+  `test_every_wheel_setup_py_installs_with_a_plain_prefix`. Goes: when setuptools takes the
+  prefix literally.
 
 MSVC and Visual Studio:
 - **VS 2026's `vcvarsall.bat` runs `vswhere.exe` by its bare name** (DEFECT): outside a
