@@ -1304,6 +1304,15 @@ def test_new_render_and_init_refuse_an_option_given_twice(dry: Config, tmp_path:
     assert not (tmp_path / "p").exists()
 
 
+@pytest.mark.parametrize("supported", [["cpython"], ["pypy"], ["cpython", "mypyc"]])
+def test_mode_names_the_compiled_modules_only_where_mypyc_is_supported(supported: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    """`./pyt mode` in a PyPy-only or CPython-only project said "mypyc compiles p1.core"."""
+    cfg = make({"backend": {"active": supported[0], "supported": supported}})
+    assert cmd_mode.cmd_mode(cfg, []) == 0
+    err = capsys.readouterr().err
+    assert ("mypyc compiles myapp.core" in err) is ("mypyc" in supported), err
+
+
 def test_mode_leaves_values_that_are_already_set(dry: Config, capsys: pytest.CaptureFixture[str]) -> None:
     assert cmd_mode.cmd_mode(dry, ["--editor", dry.typing.editor]) == 0
     assert "pytemplate.toml  unchanged" in capsys.readouterr().err

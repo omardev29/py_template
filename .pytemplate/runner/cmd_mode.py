@@ -30,7 +30,8 @@ def _describe(cfg: Config, title: str = "current mode") -> None:
     for b in cfg.backend.supported:
         ui.report(f"  {'typing ' + b:<14} {cfg.profile_for(b)}")
     ui.report(f"  editor         {cfg.typing.editor}")
-    ui.report(f"  mypyc compiles {', '.join(cfg.compile.modules)}")
+    if cfg.supports("mypyc"):  # a project without it compiles nothing (the line said it did)
+        ui.report(f"  mypyc compiles {', '.join(cfg.compile.modules)}")
 
 
 def _parse(parser: argparse.ArgumentParser, args: list[str]) -> argparse.Namespace:
