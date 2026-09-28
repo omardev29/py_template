@@ -404,9 +404,11 @@ header rules (with detector tests proving each rule fires).
 - `%NAME%` in registry values is expanded from the environment, retrying the upper-case name
   (MSYS2/Cygwin upper-case `SYSTEMROOT`, `PROGRAMFILES`...). Quoted entries
   (`"C:\Program Files\x"`, written by some installers) lose their quotes first. An entry that
-  names a variable not defined is skipped (`_pt_expand` returns 1), and so is a relative one:
-  it names a folder below the current one (`_pt_uv_in_list`;
-  `test_registry_path_skips_relative_entries`).
+  names a variable not defined is skipped (`_pt_expand` returns 1), and so is one that is not
+  absolute (`X:\`, `X:/`, a share `\\server`: `_pt_uv_in_list`): a relative one names a folder
+  below the current one, a root-relative `\bin` one at the drive root, which any user may create
+  (`test_registry_path_skips_relative_entries`, whose shares are `//tmp/...` paths the kernel
+  reads as `/tmp/...`).
 - Registry lookup: `reg.exe query KEY` WITHOUT `/v` (MSYS rewrites `/v` into `V:/`). It only
   runs when every other lookup failed. The Windows-only helpers are plain sh:
   `test_windows_helpers_in_posix_shells` and `test_registry_path_quoted_entries` run them

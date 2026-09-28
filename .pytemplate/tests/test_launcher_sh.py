@@ -1302,31 +1302,37 @@ def test_registry_path_quoted_entries(name: str, tmp_path: Path) -> None:
         encoding="ascii", newline="\n",
     )  # fmt: skip
     reg.chmod(0o755)
-    lists = [f"/nope;{uvdir};/x", f'/nope;"{uvdir}";/x', f'"{uvdir}"', '"%PT_Q%"', "/nope;/x"]
+    # The helpers probe absolute Windows folders only (X:\..., \\server\...): here the folder is
+    # written as a share, //tmp/..., which the Linux and macOS kernels read as /tmp/...
+    share = "/" + str(uvdir)
+    lists = [f"/nope;{share};/x", f'/nope;"{share}";/x', f'"{share}"', '"%PT_Q%"', "/nope;/x"]
     calls = "".join(f"_pt_uv=\nif _pt_uv_in_list {q(v)}; then printf 'L:%s\\n' \"$_pt_uv\"; else printf 'L:none\\n'; fi\n" for v in lists)
     calls += "_pt_uv=\nif _pt_uv_from_registry; then printf 'R:%s\\n' \"$_pt_uv\"; else printf 'R:none\\n'; fi\n"
-    env = _clean_env(PATH=f"{fake}:/usr/bin:/bin", PT_Q=str(uvdir), PT_TYPE="REG_EXPAND_SZ", PT_VALUE='%PT_NOPE%\\x;"%PT_Q%";/nope')
-    found = str(uvdir / "uv")
+    env = _clean_env(PATH=f"{fake}:/usr/bin:/bin", PT_Q=share, PT_TYPE="REG_EXPAND_SZ", PT_VALUE='%PT_NOPE%\\x;"%PT_Q%";/nope')
+    found = "/" + str(uvdir / "uv")
     assert _run_helpers(name, calls, env) == [f"L:{found}"] * 4 + ["L:none", f"R:{found}"]
-    env.update(PT_TYPE="REG_SZ", PT_VALUE=f'"{uvdir}"')
+    env.update(PT_TYPE="REG_SZ", PT_VALUE=f'"{share}"')
     assert _run_helpers(name, "_pt_uv=\n_pt_uv_from_registry || :\nprintf 'R:%s\\n' \"$_pt_uv\"\n", env) == [f"R:{found}"]
     env.update(PT_VALUE="/nope")
     assert _run_helpers(name, "_pt_uv=\n_pt_uv_from_registry || :\nprintf 'R:%s\\n' \"$_pt_uv\"\n", env) == ["R:"]
 
 
+@needs_posix
 @pytest.mark.parametrize("name", ["sh", "dash", "bash", "busybox", "ksh", "mksh", "yash", "zsh"])
 def test_registry_path_skips_relative_entries(name: str, tmp_path: Path) -> None:
     """A relative entry of the PATH stored in the registry names a folder below the current
-    one, which may be anybody's: a uv there ran. Only absolute folders are probed (pyt.cmd and
-    pyt.ps1 skip them too)."""
+    one, which may be anybody's: a uv there ran. So does a root-relative one (\\bin, a folder of
+    the drive root, which any user may create; here the path of the folder with one slash or
+    backslash first). Only absolute folders are probed, X:\\... or a share (here //tmp/..., which
+    the kernel reads as /tmp/...), as pyt.cmd and pyt.ps1 probe them."""
     rel = tmp_path / "rel"
     rel.mkdir()
     (rel / "uv").write_text("#!/bin/sh\n", encoding="ascii")
     (rel / "uv").chmod(0o755)
-    lists = ["rel", "./rel", "%PT_REL%", f"rel;{rel}"]
+    lists = ["rel", "./rel", "%PT_REL%", str(rel), str(rel).replace("/", "\\"), f"rel;/{rel}"]
     calls = f"cd {q(str(tmp_path))} || exit 9\n"
     calls += "".join(f"_pt_uv=\nif _pt_uv_in_list {q(v)}; then printf 'L:%s\\n' \"$_pt_uv\"; else printf 'L:none\\n'; fi\n" for v in lists)
-    assert _run_helpers(name, calls, _clean_env(PT_REL="rel")) == ["L:none"] * 3 + [f"L:{rel / 'uv'}"]
+    assert _run_helpers(name, calls, _clean_env(PT_REL="rel")) == ["L:none"] * 5 + [f"L:/{rel / 'uv'}"]
 
 
 # --- the uv search order (CLAUDE.md 4.1), for ./pyt and pyt.ps1 -------------------------------

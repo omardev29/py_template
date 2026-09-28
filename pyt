@@ -484,11 +484,13 @@ _pt_uv_in_list() {
         # Some installers write quoted entries ("C:\Program Files\x").
         _pt_e=${_pt_e#\"}
         _pt_e=${_pt_e%\"}
-        # Only an absolute folder: a relative entry names one below the
-        # current folder (pyt.cmd and pyt.ps1 skip it too).
+        # Only an absolute folder (X:\..., X:/..., a share \\server\...): a
+        # relative entry names one below the current folder, a root-relative
+        # one (\bin) one at the drive root, which any user may create
+        # (pyt.cmd and pyt.ps1 skip both too).
         if _pt_expand "$_pt_e"; then
             case $_pt_r in
-                [A-Za-z]:[\\/]* | [\\/]*) _pt_try_dir "$_pt_r" "" && return 0 ;;
+                [A-Za-z]:[\\/]* | [\\/][\\/]*) _pt_try_dir "$_pt_r" "" && return 0 ;;
             esac
         fi
     done
