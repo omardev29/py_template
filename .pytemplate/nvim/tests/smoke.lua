@@ -620,7 +620,10 @@ check("neotest: discovery skips .venv, tests pass", function()
   end
   table.sort(names)
   assert(names[1], "no tests/test_*.py")
-  local file = root .. "/tests/" .. names[1]
+  -- named with neotest's own separator ("\" on Windows, as glob() gave it): neotest keys a file
+  -- position by it and finds a buffer's positions by the buffer's name, which keeps the "/" typed
+  local sep = require("neotest.lib").files.sep
+  local file = (root .. "/tests/" .. names[1]):gsub("/", sep)
   vim.cmd.edit(vim.fn.fnameescape(file))
   local buf = vim.api.nvim_get_current_buf()
   nt.run.run(file) -- the neotest client starts (and discovers) on first use

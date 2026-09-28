@@ -413,6 +413,22 @@ def test_smoke_hands_every_path_to_an_ex_command_escaped() -> None:
     assert "vim.fn.glob(" not in text
 
 
+def test_smoke_names_the_neotest_file_with_neotests_separator() -> None:
+    """neotest keys a file position with its own separator ("\\" on Windows: `lib.files.find`
+    joins with `lib.files.sep`) and finds a buffer's positions by the buffer's name, which keeps
+    the "/" of the path typed. glob() gave the native path; the file listed from `root` (which is
+    normalized) was opened as `<root>/tests/x.py`, had no positions on Windows, and the neotest
+    check timed out in every preset (C3-01, the first CI run of the round-2 fixes)."""
+    text = (project.ROOT / nvimtest.SMOKE).read_text(encoding="utf-8")
+    block = text[text.index('check("neotest:') :]
+    block = block[: block.index("\nend)")]
+    assert 'local sep = require("neotest.lib").files.sep' in block
+    file = re.search(r"^\s*local file = (.*)$", block, re.MULTILINE)
+    assert file and file.group(1).endswith(':gsub("/", sep)'), file
+    opened = block.index("vim.cmd.edit(vim.fn.fnameescape(file))")
+    assert file.start() < opened < block.index("nt.run.run(file)")
+
+
 def test_parse_smoke_requires_done() -> None:
     """A result glued onto leaked output (no newline before it) is lost: the DONE count shows it."""
     lost = nvimtest.parse_smoke("ok   a\ngarbage from a pty ok   x\nok   y\nDONE 3\n")
