@@ -2069,7 +2069,10 @@ Formats:
   within one second is detected. `walk` follows symlinked folders (`Path.rglob` does not
   descend into them: a linked `src/assets` arrived empty), skipping a link back to a folder on
   the current path (cycles; two links to one folder are both copied) and never entering
-  `SKIP_DIRS`; a broken symlink is a warning. A path that turned from file to folder (or back)
+  `SKIP_DIRS`; a broken symlink is a warning, and a folder it cannot list (entered but not read:
+  mode 0311, another user's 0711) a `PytError` naming it (os.walk skipped it without a word: every
+  build shipped it empty, and the sync deleted the copy an earlier build had made;
+  `test_sync_tree_refuses_a_folder_it_cannot_list`). A path that turned from file to folder (or back)
   is replaced; a folder deleted from `src` goes with its caches (a `__pycache__` kept it
   importable as a namespace package). Extensions: only build outputs (`_mypyc_output`: a
   module in `owned`, a `*__mypyc` lib, or an extension next to its own `.py`) are never copied

@@ -82,9 +82,23 @@ def walk(root: Path) -> Iterator[Path]:
     Path.rglob does not descend into a symlinked folder (3.11-3.14): a linked src/assets or
     subpackage reached the stage empty. A link back to a folder on the way down (a cycle) is
     skipped; two links to the same folder are both followed. Cache folders are not entered.
+    A folder that cannot be listed (entered but not read: mode 0311, another user's 0711) is a
+    PytError naming it: os.walk skipped it without a word, so every build shipped it empty while
+    the app still opened its files by name in development (and sync_tree deleted the copy an
+    earlier build had made). One that is gone (the root, or a folder deleted meanwhile) is no loss.
     """
+
+    def unlistable(e: OSError) -> None:
+        if isinstance(e, (FileNotFoundError, NotADirectoryError)):
+            return
+        where = rel(Path(os.fsdecode(e.filename))) if e.filename else rel(root)
+        raise PytError(
+            f"cannot list {where}/: {e.strerror or e}: a build would leave out every file below it.\n"
+            "  Make it readable (chmod u+rx), or move it out of the folder, and try again"
+        )
+
     chains = {os.fspath(root): frozenset({os.path.realpath(root)})}
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+    for dirpath, dirnames, filenames in os.walk(root, onerror=unlistable, followlinks=True):
         chain = chains.pop(dirpath)
         kept: list[str] = []
         for name in sorted(dirnames):

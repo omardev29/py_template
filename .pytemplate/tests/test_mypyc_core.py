@@ -965,6 +965,43 @@ def test_sync_tree_warns_about_a_broken_symlink(tmp_path: Path, capsys: pytest.C
     assert _snapshot(dst) == {"a.py": b"x = 1\n"}
 
 
+def test_sync_tree_refuses_a_folder_it_cannot_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A folder of src/ the user can enter but not list (mode 0311, another user's 0711): os.walk
+    skipped it without a word, so every build shipped it empty (the app still opened its files by
+    name in development), and the sync deleted the copy an earlier build had made."""
+    src = _project(tmp_path / "src", {"p1/__init__.py": "X = 1\n", "p1/data/table.json": "{}\n"})
+    dst = tmp_path / "stage"
+    mypyc.sync_tree(src, dst)
+    locked = src / "p1" / "data"
+    real = os.scandir
+
+    def scandir(path: Any = ".") -> Any:  # what a folder without its r bit gives a non-root user
+        if Path(os.fsdecode(path)) == locked:
+            raise PermissionError(13, "Permission denied", os.fsdecode(path))
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    with pytest.raises(PytError, match=r"cannot list .*data/: Permission denied"):
+        mypyc.sync_tree(src, dst)
+    assert (dst / "p1" / "data" / "table.json").read_text(encoding="utf-8") == "{}\n"  # the earlier copy stays
+    with pytest.raises(PytError, match=r"cannot list .*data/"):  # the other walks stop too
+        list(mypyc.walk(src))
+    monkeypatch.undo()
+    assert list(mypyc.walk(tmp_path / "nowhere")) == []  # a folder that is gone is no loss: nothing to copy
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX modes, as a user they bind (not root)")
+def test_sync_tree_refuses_a_folder_without_its_read_bit(tmp_path: Path) -> None:
+    src = _project(tmp_path / "src", {"p1/__init__.py": "X = 1\n", "p1/data/table.json": "{}\n"})
+    (src / "p1" / "data").chmod(0o311)
+    try:
+        assert (src / "p1" / "data" / "table.json").read_text(encoding="utf-8") == "{}\n"  # by name: fine
+        with pytest.raises(PytError, match=r"cannot list .*data/"):
+            mypyc.sync_tree(src, tmp_path / "stage")
+    finally:
+        (src / "p1" / "data").chmod(0o755)
+
+
 def test_sync_tree_handles_type_changes_and_removed_packages(tmp_path: Path) -> None:
     src, dst = _project(tmp_path / "src", {"pkg/__init__.py": ""}), tmp_path / "dst"
     data = src / "pkg" / "data"
