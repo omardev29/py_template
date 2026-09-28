@@ -654,6 +654,13 @@ def test_a_detail_is_cut_to_200_characters() -> None:
     assert mutation.classify(0, f"{long}\n") == (mutation.ERROR, f"exit code 0 without pytest's summary line: {long[:200]}")
 
 
+def test_a_run_with_no_summary_reports_pytests_error_line() -> None:
+    """A pytest usage error (exit 4: an unknown option) prints its `pytest: error:` line and then
+    the `rootdir:` line, which says nothing. classify names the error line, not the last one."""
+    out = "ERROR: usage: pytest [options] [file_or_dir]\npytest: error: unrecognized arguments: --hypothesis-seed=0\n\nrootdir: /home/me/proj\n"
+    assert mutation.classify(4, out) == (mutation.ERROR, "exit code 4 without pytest's summary line: pytest: error: unrecognized arguments: --hypothesis-seed=0")
+
+
 def test_pytest_counts() -> None:
     assert mutation.pytest_counts("x\n1 failed, 2 errors, 3 passed, 1 warning in 2.00s (0:00:02)\n") == {"failed": 1, "error": 2, "passed": 3, "warning": 1}
     assert mutation.pytest_counts("1 passed, 2 subtests passed in 0.1s\n") == {"passed": 1, "subtests passed": 2}
@@ -887,6 +894,7 @@ def test_worker_env_moves_home_and_temp_but_keeps_uv(tmp_path: Path) -> None:
     base_env = {
         "PATH": os.pathsep.join(["/usr/bin", "/bin"]), "HOME": "/home/me", "XDG_DATA_HOME": "/home/me/.data", "KEEP": "1",
         "PYTEST_ADDOPTS": "-n auto --lf", "PYTEST_PLUGINS": "mine",  # they would change what every run means
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",  # drops Hypothesis's --hypothesis-seed: every run would exit 4
     }  # fmt: skip
     keep = {"UV_CACHE_DIR": "/home/me/.cache/uv", "UV_PYTHON_INSTALL_DIR": "/home/me/.local/share/uv/python"}
     copy, home, tmp = tmp_path / "w0", tmp_path / "h0", tmp_path / "t0"
@@ -1673,6 +1681,20 @@ def test_selftest_exit_code(
     assert data["ok"] is (code == 0) and data["interrupted"] is interrupted
     assert data["failed"] is (baseline == mutation.FAIL or mutation.ERROR in statuses)
     assert (f"logs kept for inspection: {tmp_path / 'logs'}" in err) is report.kept
+
+
+def test_selftest_final_line_names_untested_mutants(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A mutant of a module no test file imports is never run and never judged: the closing line
+    must say so (exit 0: survivors and untested ones are the report, not a failure), never the
+    false 'every mutant judged'; with none untested it says 'every mutant judged'."""
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+    monkeypatch.setattr(mutation, "run", lambda *a: _report(tmp_path, [KILLED, SURVIVED, mutation.UNTESTED, mutation.UNTESTED]))
+    assert mutation.selftest(_cfg(), []) == 0
+    err = capsys.readouterr().err
+    assert "2 untested (no test file imports their module)" in err and "every mutant judged" not in err, err
+    monkeypatch.setattr(mutation, "run", lambda *a: _report(tmp_path, [KILLED, SURVIVED]))
+    assert mutation.selftest(_cfg(), []) == 0
+    assert "every mutant judged" in capsys.readouterr().err
 
 
 def test_selftest_prints_the_report_before_the_error_that_stopped_the_run(

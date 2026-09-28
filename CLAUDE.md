@@ -3751,8 +3751,11 @@ short temp tree and unset `NVIM_APPNAME`.
     `from runner import x`, `from runner.x import y`, `import runner.x`), the likeliest to fail
     soon first (`ordered`: mentions of the module per second of its baseline, `junit_seconds`),
     run with `-x -q -p no:cacheprovider --color=no --hypothesis-seed=0` and without the user's
-    `PYTEST_ADDOPTS` and `PYTEST_PLUGINS` (`mutation.PYTEST_VARIABLES`: `-n auto` or `--lf` would
-    change what every run means). The mutants of a module no test file imports are untested.
+    `PYTEST_ADDOPTS`, `PYTEST_PLUGINS` and `PYTEST_DISABLE_PLUGIN_AUTOLOAD` (`mutation.PYTEST_VARIABLES`:
+    `-n auto` or `--lf` would change what every run means, and disabling autoload drops Hypothesis's
+    plugin, so `--hypothesis-seed=0` would make every run exit 4; a run with no summary line reports
+    pytest's own error line, `mutation._why_line`, not the `rootdir:` line). The mutants of a module
+    no test file imports are untested.
   - where: N workers (`--jobs`, default half the CPUs, at most 8), each a throwaway copy of the
     project in the scratch base (`make_copy`: the files `git ls-files --cached --others
     --exclude-standard` lists, with their working-tree content, committed into a repository of its
@@ -3789,7 +3792,8 @@ short temp tree and unset `NVIM_APPNAME`.
   - the report (`print_report`; `Report.as_json` with `--json`, on stdout): the counts per file,
     the score (the killed and timed-out share of the judged mutants), every survivor and error
     with its line, operator and change. Exit 0 when every mutant was judged (survivors are the
-    report, not a failure), 1 on a failed baseline or an error, 2 usage (`--jobs` below 1, an
+    report, not a failure); the closing line names how many were untested when any were (a module
+    no test file imports), never the false "every mutant judged". 1 on a failed baseline or an error, 2 usage (`--jobs` below 1, an
     empty `--diff`, a BASE that names no commit), 3 without git, uv or Cosmic Ray's environment
     (offline it must be in uv's cache), 130 interrupted (the report of what ran). What stops a
     run (a worker whose `uv sync` failed, Cosmic Ray's side gone: `Report.error`) comes after

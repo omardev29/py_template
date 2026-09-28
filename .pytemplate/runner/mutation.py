@@ -102,8 +102,10 @@ if sys.platform == "win32":  # a test run's process group: it ignores the consol
     NEW_GROUP = subprocess.CREATE_NEW_PROCESS_GROUP
 else:
     NEW_GROUP = 0
-# a user's PYTEST_ADDOPTS (-n auto, --lf...) and PYTEST_PLUGINS would change what every run means
-PYTEST_VARIABLES = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS")
+# a user's PYTEST_ADDOPTS (-n auto, --lf...), PYTEST_PLUGINS and PYTEST_DISABLE_PLUGIN_AUTOLOAD
+# would change what every run means: the last one drops Hypothesis's plugin, which defines
+# --hypothesis-seed (Runs.run always passes it), so every worker's pytest would exit 4 (usage)
+PYTEST_VARIABLES = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD")
 
 
 # --- options ------------------------------------------------------------------------------------
@@ -569,6 +571,17 @@ def _last_line(output: str) -> str:
     return lines[-1][:200] if lines else "no output"
 
 
+def _why_line(output: str) -> str:
+    """The line that says why, for a run with no pytest summary: pytest's own error line
+    (`ERROR: ...`, `pytest: error: ...`, a usage error) if there is one, else the last line
+    (the plain `rootdir:` line said nothing)."""
+    for line in reversed([line.strip() for line in output.splitlines() if line.strip()]):
+        low = line.lower()
+        if low.startswith("error:") or low.startswith("error ") or ": error:" in low or "usage:" in low:
+            return line[:200]
+    return _last_line(output)
+
+
 def classify(code: int | None, output: str, *, stopped: bool = False) -> tuple[str, str]:
     """A test run -> (status, detail). `stopped`: the whole run was stopped (an interrupt) while
     this one ran, which then proves nothing, whatever it returned (stop() kills it). `code`
@@ -588,13 +601,13 @@ def classify(code: int | None, output: str, *, stopped: bool = False) -> tuple[s
         return KILLED, f"a KeyboardInterrupt ended the tests: {where}"
     counts = pytest_counts(output)
     if counts is None:
-        return ERROR, f"exit code {proc.exit_code(code)} without pytest's summary line: {_last_line(output)}"
+        return ERROR, f"exit code {proc.exit_code(code)} without pytest's summary line: {_why_line(output)}"
     failures = _failures(counts)
     if code == 0 and failures == 0:
         return SURVIVED, ""
     if code in (1, 2) and failures:
         return KILLED, _first_failure(output)
-    return ERROR, f"exit code {proc.exit_code(code)}: {_last_line(output)}"
+    return ERROR, f"exit code {proc.exit_code(code)}: {_why_line(output)}"
 
 
 # --- Cosmic Ray (tools/mutation_cr.py) ------------------------------------------------------------
@@ -1118,7 +1131,12 @@ def selftest(cfg: Config, args: list[str]) -> int:
     if report.failed():
         ui.error("selftest --mutation: a baseline failed or some mutants could not be judged (above)")
         return 1
-    ui.ok("selftest --mutation: every mutant judged")
+    c = report.counts()
+    judged = c[KILLED] + c[TIMEOUT] + c[SURVIVED]
+    if c[UNTESTED]:  # mutants of a module no test file imports were never run (never judged)
+        ui.ok(f"selftest --mutation: {judged} mutant(s) judged, {c[UNTESTED]} untested (no test file imports their module)")
+    else:
+        ui.ok("selftest --mutation: every mutant judged")
     return 0
 
 
