@@ -3282,18 +3282,30 @@ Files:
   `test_nvim_render.py` checks 6 configs): Neovim trusts it by the sha256 of its raw bytes,
   keyed by its real path, in `stdpath('state')/trust`. Any byte change (CRLF, a BOM, an edit)
   or moving the folder = untrusted again. Hence `.gitattributes` `.lazy.lua text eol=lf`. It is a
-  thin loader: `root = vim.fs.root(vim.uv.cwd(), ".lazy.lua")` (the folder of THIS trusted file,
-  the one lazy.nvim read, not a nearer `pytemplate.toml`), then `dofile(root ..
-  "/.pytemplate/nvim/spec.lua")(root)`. All the logic (extras, the plugin spec, the guarded read
+  thin loader: its root is the folder of THIS trusted file, the one lazy.nvim read (not a nearer
+  `pytemplate.toml`), found as lazy.nvim's `find_local_spec` finds it (up from `vim.uv.cwd()` with
+  `fnamemodify(':h')`, the nearest `.lazy.lua` that `vim.fn.filereadable` accepts), and only while
+  that `.lazy.lua` is the folder's own regular file (`vim.uv.fs_lstat` type `file`), then
+  `dofile(root .. "/.pytemplate/nvim/spec.lua")(root)`; otherwise it returns `{}`. It was
+  `vim.fs.root(cwd, ".lazy.lua")`, which also matches a DIRECTORY named `.lazy.lua`: lazy.nvim
+  skipped that folder of a vendored dependency and ran the project's trusted file, whose loader
+  then rooted at the vendored folder and dofile'd ITS untrusted `spec.lua`; a SYMLINK `.lazy.lua`
+  -> `../../.lazy.lua` did the same, as `vim.secure.read` resolves a link to the trusted file it
+  names (15.1), so a link's trust is never its folder's
+  (`test_lazy_lua_never_runs_a_nested_folders_spec`: both, through the pinned lazy.nvim's own
+  `find_local_spec` too). All the logic (extras, the plugin spec, the guarded read
   of lazy.nvim's `spec.modules`) lives in `spec.lua` and the plugin, which trusting `.lazy.lua`
   already trusts (`.pytemplate/nvim/**`), so a fix there needs no re-trust; only a change to the
   loader itself does (`test_lazy_lua_bytes_are_pinned` pins the sha256 in `LAZY_LUA_SHA256`, so
-  it is always deliberate; projects already made keep their own copy).
+  it is always deliberate; projects already made keep their own copy). The loader of round 3
+  (September 2026) changed its bytes: after taking it, trust the new file once (`./pyt nvim
+  trust`, README's Neovim section).
 - `spec.lua` (`.pytemplate/nvim/spec.lua`, `dofile`'d with `root`): normalizes `root`, and returns
   `{}` unless it holds `pytemplate.toml` and `.pytemplate/nvim/lua/pytemplate/init.lua` (a folder
   cloned, vendored or added as a submodule inside a trusted project, with its own `pytemplate.toml`
-  but no `.lazy.lua`, is never `root`, so its code and its `.venv` tools never run without a trust
-  of its own). It also returns `{}`, with one `vim.notify`, when `root` holds a character Neovim
+  but no `.lazy.lua` file of its own, is never `root`, so its code and its `.venv` tools never run
+  without a trust of its own; that guard lives in the loader, since a `spec.lua` dofile'd from the
+  wrong root runs its own code first). It also returns `{}`, with one `vim.notify`, when `root` holds a character Neovim
   reads as a `runtimepath` glob (`[ ] { } , \ ` `'` or a `$` it expands; on Windows only `[ , $`:
   Neovim 0.12.5 globs only `[` there and never hands an entry to 'shell', and every project below
   `C:\Users\O'Brien` was refused): the plugin cannot go on the runtimepath from such a path
@@ -5426,11 +5438,15 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   `vim.secure`): any byte change (CRLF, a BOM, a mode-dependent value) untrusted `.lazy.lua`;
   the path is realpath(3)'s, which on macOS has the on-disk case and Unicode form, where
   Python's realpath keeps the typed ones (a trusted file read as untrusted, and `nvim trust`
-  failed with exit 3). Fix: `.lazy.lua` is a static copy (`editors/nvim.py`), `.gitattributes`
+  failed with exit 3); and `vim.secure.read` resolves a link the same way, so a `.lazy.lua` link
+  in a vendored folder to the project's trusted file read as trusted, and the loader rooted at
+  that folder. Fix: `.lazy.lua` is a static copy (`editors/nvim.py`), `.gitattributes`
   keeps it LF, all logic lives in `.pytemplate/nvim/`; `cmd_nvim.trust_status` compares the
-  paths with `cmd_nvim.same_path`, as the volume does (12.2). Test:
+  paths with `cmd_nvim.same_path`, as the volume does; the loader roots only at a folder whose
+  `.lazy.lua` is its own regular file (12.2). Test:
   `test_nvim_render.py::test_lazy_lua_is_identical_in_every_mode`,
   `test_lazy_lua_bytes_are_pinned`, `test_gitattributes_keeps_lazy_lua_lf`,
+  `test_lazy_lua_never_runs_a_nested_folders_spec`,
   `test_cmd_nvim.py::test_trust_macos_paths_ignore_case_and_unicode_form`. Goes: never.
 - **Neovim reads a 'runtimepath' entry as a file glob** (LIMITATION): `[ ] { }` are wildcards, a
   comma separates entries, a backslash escapes, a backtick is command substitution, a single quote

@@ -24,9 +24,11 @@ The integration imports the LazyVim extras `lang.python`, `lang.toml`, `dap.core
 and `editor.overseer`. `./pyt nvim extras` enables them in your own `lazyvim.json`, which avoids
 LazyVim's import-order warning and keeps their plugins installed when you work elsewhere.
 
-`.lazy.lua` is a thin, static loader: it finds the folder of the trusted file lazy.nvim read and
-runs `.pytemplate/nvim/spec.lua`, so all the logic lives in `.pytemplate/nvim/` (trusted with
-`.lazy.lua`) and a later fix there needs no re-trust. Because Neovim reads a runtimepath entry as
+`.lazy.lua` is a thin, static loader: it finds the folder of the trusted file lazy.nvim read (as
+lazy.nvim finds it: the nearest `.lazy.lua` file up from Neovim's folder, which must be that
+folder's own file, never a link) and runs `.pytemplate/nvim/spec.lua`, so all the logic lives in
+`.pytemplate/nvim/` (trusted with `.lazy.lua`) and a later fix there needs no re-trust. The loader
+changed once, in September 2026: trust the new file once after taking it. Because Neovim reads a runtimepath entry as
 a file glob, a project path holding `[ ] { } , \ ` `` ` `` `'` or `$` (on Windows only `[ , $`)
 cannot carry the plugin: the integration is skipped with one message so your other plugins keep
 working (`./pyt nvim doctor` names the character; move the project to a plain path).

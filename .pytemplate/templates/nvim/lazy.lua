@@ -9,11 +9,23 @@
 --   vim.g.pytemplate_prefix = "<leader>j"     -- keymaps (which-key group "pyt")
 --   vim.g.pytemplate_render_on_save = false   -- default true: ./pyt render on :w pytemplate.toml
 -- The root is the folder of THIS file, the one lazy.nvim read through vim.secure and the user
--- trusted (vim.fs.root walks up for the nearest .lazy.lua, the same file): a folder cloned or
--- vendored inside a trusted project, with a pytemplate.toml but no .lazy.lua of its own, is
--- never this root, so its code and its .venv tools are never run without a trust of its own.
-local root = vim.fs.root(vim.uv.cwd(), ".lazy.lua")
-local spec = root and (root .. "/.pytemplate/nvim/spec.lua")
+-- trusted: found the way lazy.nvim found it (up from Neovim's folder, the nearest .lazy.lua that
+-- vim.fn.filereadable accepts, so a folder named .lazy.lua never counts), and only while it is
+-- that folder's own file (a link reads the trusted file it names, whose trust is not this
+-- folder's: then nothing loads). A folder cloned or vendored inside a trusted project, without
+-- a .lazy.lua file of its own, is never this root, so its code and its .venv tools are never
+-- run without a trust of its own.
+local dir, root = vim.uv.cwd(), nil
+while dir and dir ~= "" and not root do
+  if vim.fn.filereadable(dir .. "/.lazy.lua") == 1 then
+    root = dir
+  else
+    local up = vim.fn.fnamemodify(dir, ":h")
+    dir = up ~= dir and up or nil
+  end
+end
+local own = root and vim.uv.fs_lstat(root .. "/.lazy.lua")
+local spec = own and own.type == "file" and (root .. "/.pytemplate/nvim/spec.lua")
 if spec and vim.uv.fs_stat(spec) then
   return dofile(spec)(root)
 end

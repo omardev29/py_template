@@ -30,7 +30,7 @@ PLUGIN = ROOT / ".pytemplate" / "nvim"
 SPEC_LUA = PLUGIN / "spec.lua"  # the logic .lazy.lua (a thin loader) dofile's; trusted with the plugin
 # Neovim trusts .lazy.lua by the sha256 of its bytes: changing them forces every user of every
 # project to trust it again. Update this only on purpose (and say so in the release notes).
-LAZY_LUA_SHA256 = "b71471a56869d932d2581f739d8e9978967d3e73c6c72d7d304e02188b6cc7c3"
+LAZY_LUA_SHA256 = "ec47993b92510b7454f7575b83ad4bd3f78a546fc8e454c8009ebf4196eb57ec"
 
 VARIANTS: dict[str, dict[str, Any]] = {
     "script": {},
@@ -733,6 +733,123 @@ def test_lazy_lua_root_is_the_trusted_files_folder(tmp_path: Path) -> None:
     (inner / ".pytemplate" / "nvim" / "lua" / "pytemplate" / "init.lua").write_text("return {}\n", encoding="utf-8")
     r = _headless_lua(tmp_path, LAZY_LUA_ROOT_CHECK, ROOT)
     assert "PTOK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
+# What lazy.nvim does at startup, with only outer/.lazy.lua in the (isolated) trust database:
+# find_local_spec picks the nearest .lazy.lua vim.fn.filereadable accepts, vim.secure.read reads it
+# (a link: the file it names, trusted), loadstring runs it. PT_LAZY, when set, is the pinned
+# lazy.nvim and its own find_local_spec runs; else a copy of it, word for word.
+LOCAL_SPEC_CHECK = r"""
+local outer = vim.env.PT_TMP .. "/outer"
+vim.fn.mkdir(vim.fn.stdpath("state"), "p")
+local trusted, msg
+if vim.fn.has("nvim-0.12") == 1 then
+  trusted, msg = vim.secure.trust({ action = "allow", path = outer .. "/.lazy.lua" })
+else
+  local b = vim.fn.bufadd(outer .. "/.lazy.lua")
+  vim.fn.bufload(b)
+  trusted, msg = vim.secure.trust({ action = "allow", bufnr = b })
+end
+local find_local_spec
+if vim.env.PT_LAZY then
+  vim.opt.rtp:prepend(vim.env.PT_LAZY)
+  local Config = require("lazy.core.config")
+  Config.options = vim.deepcopy(Config.defaults)
+  find_local_spec = require("lazy.core.plugin").find_local_spec
+else
+  find_local_spec = function()
+    local path = vim.uv.cwd()
+    while path and path ~= "" do
+      local file = path .. "/.lazy.lua"
+      if vim.fn.filereadable(file) == 1 then
+        return {
+          name = file,
+          import = function()
+            local data = vim.secure.read(file)
+            if data then
+              return loadstring(data, ".lazy.lua")()
+            end
+            return {}
+          end,
+        }
+      end
+      local p = vim.fn.fnamemodify(path, ":h")
+      if p == path then
+        break
+      end
+      path = p
+    end
+  end
+end
+local got = { trusted = trusted == true, msg = msg or vim.NIL, cases = {} }
+for _, folder in ipairs({ outer, outer .. "/vendor/dep" }) do
+  vim.uv.chdir(folder)
+  _G.PT_UNTRUSTED_RAN = nil
+  local found = find_local_spec()
+  local ok, spec = pcall(found and found.import or function() return {} end)
+  local root = vim.NIL
+  for _, s in ipairs(ok and type(spec) == "table" and spec or {}) do
+    if s.name == "pytemplate.nvim" then
+      root = vim.fs.normalize(s.opts.root) == vim.fs.normalize(outer) and "outer" or s.opts.root
+    end
+  end
+  got.cases[#got.cases + 1] = {
+    ok = ok,
+    err = not ok and tostring(spec) or vim.NIL,
+    ran = _G.PT_UNTRUSTED_RAN == true,
+    root = root,
+    entries = ok and type(spec) == "table" and #spec or -1,
+  }
+end
+io.stdout:write("PTSPEC" .. vim.json.encode(got) .. "\n")
+vim.cmd("qa!")
+"""
+
+# The spec.lua of a folder vendored into the project: never trusted, it must never run.
+UNTRUSTED_SPEC = '_G.PT_UNTRUSTED_RAN = true\nreturn function() return { { name = "untrusted" } } end\n'
+
+
+@pytest.mark.parametrize("lazy", ["copy", "pinned"])
+@pytest.mark.parametrize("nested", ["directory", "link"])
+def test_lazy_lua_never_runs_a_nested_folders_spec(tmp_path: Path, nested: str, lazy: str) -> None:
+    """A folder vendored inside the trusted project with a `.lazy.lua` that is no file of its own
+    must not become the loader's root: a DIRECTORY named .lazy.lua (lazy.nvim skips it and runs the
+    project's trusted file, whose loader took the directory's folder for its root through
+    vim.fs.root), or a SYMLINK to the project's .lazy.lua (vim.secure.read resolves it to the
+    trusted file). Both ran the folder's untrusted .pytemplate/nvim/spec.lua. From the project's
+    own folder its spec still loads; from the directory's folder the project's; from the link's
+    nothing. `pinned` runs the pinned lazy.nvim's own find_local_spec (./pyt selftest --nvim
+    installs it), `copy` the same code copied here."""
+    env: dict[str, str] = {}
+    if lazy == "pinned":
+        plugins = _pinned_plugins("lazy.nvim")
+        if plugins is None:
+            pytest.skip("no checkout of the pinned lazy.nvim (./pyt selftest --nvim makes one)")
+        env["PT_LAZY"] = plugins["lazy.nvim"].as_posix()
+    outer = tmp_path / "outer"
+    _lay_out_project(outer)
+    dep = outer / "vendor" / "dep"
+    (dep / ".pytemplate" / "nvim").mkdir(parents=True)
+    (dep / ".pytemplate" / "nvim" / "spec.lua").write_text(UNTRUSTED_SPEC, encoding="utf-8", newline="\n")
+    if nested == "directory":
+        (dep / ".lazy.lua").mkdir()
+    else:
+        try:
+            (dep / ".lazy.lua").symlink_to(Path("..") / ".." / ".lazy.lua")
+        except (OSError, NotImplementedError) as e:  # Windows without the symlink privilege
+            pytest.skip(f"cannot create a symbolic link here: {e}")
+    r = _headless_lua(tmp_path, LOCAL_SPEC_CHECK, ROOT, env)
+    line = next((x for x in r.stdout.splitlines() if x.startswith("PTSPEC")), None)
+    assert line is not None and r.returncode == 0, r.stdout + r.stderr
+    got = json.loads(line.removeprefix("PTSPEC"))
+    assert got["trusted"] is True, got
+    home, nested_case = got["cases"]
+    assert home["ok"] and not home["ran"] and home["root"] == "outer", home
+    assert nested_case["ok"] and not nested_case["ran"], f"the untrusted spec.lua ran: {nested_case}"
+    if nested == "directory":
+        assert nested_case["root"] == "outer", nested_case  # the project's own spec, as in any subfolder
+    else:
+        assert nested_case["entries"] == 0, nested_case  # a link's trust is not the folder's own
 
 
 # spec.lua schedules the notify, so vim.wait pumps the loop until it fires

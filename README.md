@@ -1417,11 +1417,15 @@ installed and exits 1, naming them, when one is not (no network, a proxy). Then 
 project folder or any subfolder.
 
 **How it works.** lazy.nvim loads `.lazy.lua` from the folder where Neovim starts (or the
-nearest parent that has one), once it is trusted. That file never changes (it is identical in
-every mode and preset), so trusting it once is enough: it enables the LazyVim extras the project
-needs (`lang.python`, `lang.toml`, `dap.core`, `test.core`, `editor.overseer`) and loads the
-plugin in `.pytemplate/nvim/`. Whatever depends on the mode comes from `.pytemplate/editor.json`,
-a data file that `./pyt` regenerates.
+nearest parent that has one), once it is trusted. That file does not change with the mode or the
+preset (it is identical in all of them), so trusting it once is enough: it enables the LazyVim
+extras the project needs (`lang.python`, `lang.toml`, `dap.core`, `test.core`, `editor.overseer`)
+and loads the plugin in `.pytemplate/nvim/`. Whatever depends on the mode comes from
+`.pytemplate/editor.json`, a data file that `./pyt` regenerates. Only a template update that fixes
+the loader itself changes the file: the September 2026 one did (a folder vendored into the
+project, with a `.lazy.lua` folder or link, could run its own untrusted code under the project's
+trust), so trust the new file once after taking it (`./pyt nvim trust`). A folder inside the
+project whose `.lazy.lua` is no file of its own never loads anything of its own.
 
 **What gets downloaded, and where.** Nothing has to be added to your own LazyVim config: the
 extras are imported by `.lazy.lua` only while Neovim runs inside the project. lazy.nvim still
