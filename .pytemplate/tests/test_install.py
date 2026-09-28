@@ -1212,6 +1212,28 @@ def test_uninstall_leaves_a_self_deleting_stand_in_for_the_pyt_cmd_cmd_runs(clon
     assert pyt(clone, box, "uninstall").returncode == 0 and not target.exists()
 
 
+@pytest.mark.parametrize("dry", [False, True], ids=["run", "dry run"])
+def test_uninstall_refuses_to_delete_the_installed_pyt_cmd_cmd_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry: bool) -> None:
+    """cmd ran the installed template's own pyt.cmd (%LOCALAPPDATA%\\pytemplate\\template\\pyt.cmd
+    uninstall, or `pyt uninstall` typed in that folder: cmd runs the current folder's pyt.cmd
+    first): uninstall deleted it with the installed template, and once uv returned cmd said "The
+    batch file cannot be found." and exit 1 after a successful uninstall. It refuses before
+    removing anything, naming the launcher that works."""
+    inst = Installed(tmp_path, monkeypatch)
+    inst.stuck = False
+    inner = inst.snapshot / "pyt.cmd"
+    _run_by_cmd(monkeypatch, inner)
+    before = _files(tmp_path)
+    monkeypatch.setattr(proc, "DRY_RUN", dry)
+    with pytest.raises(PytError, match="the installed template's own pyt.cmd") as e:
+        cmd_install.cmd_uninstall(NO_CFG, [])
+    assert e.value.code == 2 and f"cmd runs {inner}" in str(e.value) and "run pyt uninstall from another folder" in str(e.value)
+    assert _files(tmp_path) == before
+    monkeypatch.setenv(cmd_install.LAUNCHER_FILE, str(inst.bin / "pyt.cmd"))  # the bin folder's: handled by _retire
+    (inst.bin / "pyt.cmd").write_bytes(EARLIER_CMD)
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+
+
 def test_the_pyt_cmd_cmd_runs_goes_only_once_the_rest_is_gone(tmp_path: Path) -> None:
     """After a failure the pyt.cmd cmd runs stays whole only while `pyt uninstall` can run again
     from it (retry); otherwise it goes as after a success."""

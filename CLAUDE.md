@@ -475,7 +475,9 @@ header rules (with detector tests proving each rule fires).
   place (a file that holds, at the end of the old uv line, `(goto) 2>nul & del "%~f0" &
   "%ComSpec%" /d /c exit %ERRORLEVEL%`: the batch ends, the file goes and the exit code stays
   uv's; started on its own it says what it is, exit 1), and install refuses before any write to
-  replace it with other bytes (it names `.\pyt.cmd install` in the clone)
+  replace it with other bytes (it names `.\pyt.cmd install` in the clone); the installed
+  template's own `pyt.cmd` would go with its folder, so uninstall refuses to run from it (section
+  5.9)
   (`test_launcher_win.test_cmd_goes_on_reading_what_uninstall_leaves`,
   `test_install.test_uninstall_leaves_a_self_deleting_stand_in_for_the_pyt_cmd_cmd_runs`,
   `test_install_never_replaces_the_pyt_cmd_cmd_runs`).
@@ -1590,7 +1592,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (`_retire`): after a failure it stays whole only while the installed template's runner does
   (`pyt uninstall` then runs again from it; kept without it, it said "install it"), else
   `self_deleting` takes its place and deletes itself as cmd reads on (section 4.4); install
-  refuses, before any write, to replace that file with other bytes. A failure names `pyt
+  refuses, before any write, to replace that file with other bytes, and uninstall, before any
+  removal, to run from the installed template's own `pyt.cmd` (`_cmd_runs_from`:
+  `<snapshot>\pyt.cmd uninstall`, or `pyt uninstall` typed in that folder, where cmd runs the
+  current folder's pyt.cmd first; the file went with the folder, and cmd said "The batch file
+  cannot be found.", exit 1, after a whole uninstall;
+  `test_install.test_uninstall_refuses_to_delete_the_installed_pyt_cmd_cmd_runs`). A failure names `pyt
   uninstall` again only while a launcher of ours that runs the installed template is left, else
   `./pyt uninstall` in a project or in a clone
   (`test_install.test_the_pyt_cmd_kept_for_a_retry_can_run_uninstall_again`,

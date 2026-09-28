@@ -1033,12 +1033,30 @@ def _remove_last(snapshot: Path, record: Path) -> bool:
     return False
 
 
+def _cmd_runs_from(snapshot: Path) -> Path | None:
+    """The pyt.cmd cmd runs for this run when it is the installed template's own
+    (<snapshot>\\pyt.cmd run by its path, or `pyt` typed in that folder: cmd runs the current
+    folder's pyt.cmd before PATH's). Uninstall deletes that folder, and cmd reads the file again
+    once this run ends: "The batch file cannot be found.", exit 1, after a whole uninstall."""
+    running = os.environ.get(LAUNCHER_FILE, "")
+    if not running or not os.environ.get("PYTEMPLATE_LAUNCHER", "").startswith("cmd"):
+        return None
+    return Path(running) if _inside(Path(running), snapshot) else None
+
+
 def cmd_uninstall(cfg: Config, args: list[str]) -> int:
     """uninstall: the launchers and the installed template that pyt install wrote, nothing else."""
     only_flags("uninstall", args, ())
     ui.step("pyt uninstall")
     snapshot = snapshot_dir()
     record = read_record(snapshot)
+    inner = _cmd_runs_from(snapshot) if snapshot is not None and os.path.lexists(snapshot) and not not_an_install(snapshot) else None
+    if inner is not None:  # before any removal, as install refuses to replace the pyt.cmd cmd runs
+        raise PytError(
+            f"cmd runs {inner}, the installed template's own pyt.cmd, which uninstall would delete while cmd "
+            "still reads it (\"The batch file cannot be found.\"): run pyt uninstall from another folder "
+            "(the pyt.cmd of uv's tool bin folder), or ./pyt uninstall in a project or in a clone of the template"
+        )
     folders: list[Path] = []
     try:
         folders.append(bin_dir())
