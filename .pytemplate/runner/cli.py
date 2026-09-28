@@ -248,6 +248,8 @@ def cmd_help(cfg: object, args: list[str]) -> int:
                 print(f"  Needs a project: {NEEDS_A_PROJECT}")
             return 0
         if project.GLOBAL:  # the installed template's own [tasks] are not the user's: never read
+            if name in config.RETIRED_COMMANDS:  # what replaced it, as typing it says
+                raise PytError(_retired(name))
             raise PytError(INIT_OUTSIDE if name == "init" else _unknown_outside(name))
         # Not a builtin: a [tasks] entry, a typo, or a pytemplate.toml that does not load (that
         # error is the answer then: it says why the task is unknown)
@@ -257,6 +259,8 @@ def cmd_help(cfg: object, args: list[str]) -> int:
             return 0
         if name == "init":
             raise PytError(INIT_REMOVED)
+        if name in config.RETIRED_COMMANDS:  # what replaced it, as typing it says (dispatch)
+            raise PytError(_retired(name))
         raise PytError(f"unknown command: {name}  (./pyt help lists the commands and tasks)")
     if project.GLOBAL:
         return _help_outside_a_project()

@@ -815,7 +815,8 @@ header rules (with detector tests proving each rule fires).
    contract, `config.CONTRACT_COMMANDS`: rule 1.11's first version; one a later builtin took,
    `install` or `uninstall`, stays the project's: dispatch runs the task, `-h` goes to it and
    `help NAME` describes it (`cli._task_named_like`), and the builtin runs outside the project;
-   `./pyt shell-setup` says what replaced it, `config.RETIRED_COMMANDS`). Builtins run
+   `./pyt shell-setup` says what replaced it, `config.RETIRED_COMMANDS`, and so does `help
+   shell-setup`, in a project and outside one: it said `unknown command`). Builtins run
    `render.auto(cfg)` first when `Command.render` is true and `--no-render` is not set, then
    `module.func(cfg, args)`. Names in `[tasks]` run `render.auto` and
    `tasks.run_task(cfg, name, args, dispatch)`; `-h` after a deps-only task prints its help.

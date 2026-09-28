@@ -383,6 +383,19 @@ def test_shell_setup_says_what_replaced_it(outside: bool, monkeypatch: pytest.Mo
     assert f"shell-setup is no longer a {prog} command: `pyt install` puts the launchers themselves on PATH" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("outside", [False, True], ids=["project", "outside"])
+def test_help_of_shell_setup_says_what_replaced_it(outside: bool, monkeypatch: pytest.MonkeyPatch, cli_state: None, capsys: pytest.CaptureFixture[str]) -> None:
+    """`help shell-setup` said `unknown command`, while typing `shell-setup` says what replaced
+    it (rule 1.11: a retired command is recognised wherever it is named)."""
+    monkeypatch.setattr(project, "GLOBAL", outside)
+    monkeypatch.setattr(config, "load", lambda *_a: make({}))
+    assert cli.main(["help", "shell-setup"]) == 2
+    err = capsys.readouterr().err
+    prog = "pyt" if outside else "./pyt"
+    assert f"shell-setup is no longer a {prog} command: `pyt install` puts the launchers themselves on PATH" in err, err
+    assert "unknown command" not in err, err
+
+
 # --- the real thing, in throwaway copies ---------------------------------------------------------
 
 
