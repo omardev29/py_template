@@ -2000,6 +2000,9 @@ def test_a_dry_run_of_test_all_still_fails_when_a_backend_fails_its_checks(
 
 @pytest.fixture(scope="module")
 def tasks_project(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A copy of the project with the tasks the tests below run. Every one of them is defined
+    here: the project's own [tasks] belong to its user (the preset's deps-only `ci`, which a test
+    ran, may be renamed, deleted or given a cmd)."""
     dest = tmp_path_factory.mktemp("cli")
     presets.copy_template(dest)
     py = json.dumps(sys.executable)
@@ -2007,6 +2010,9 @@ def tasks_project(tmp_path_factory: pytest.TempPathFactory) -> Path:
 [tasks.exit7]
 cmd = [{py}, "-c", "raise SystemExit(7)"]
 uv = false
+
+[tasks.depsonly]
+deps = ["exit7"]
 
 [tasks.depfail]
 deps = ["exit7"]
@@ -2068,7 +2074,7 @@ def _pyt(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         (["typo"], 2, "unknown placeholder 'nope'"),
         (["badcwd"], 2, "no-such-dir"),
         (["pypyt"], 2, "mode --supports +pypy"),
-        (["ci", "--no-such"], 2, "takes no arguments"),
+        (["depsonly", "--no-such"], 2, "takes no arguments"),
         pytest.param(["killed"], 137, "", marks=posix),
     ],
 )
@@ -2110,8 +2116,8 @@ def test_a_dry_run_of_sync_and_add_changes_nothing(tasks_project: Path) -> None:
 
 @posix
 @uv_on_path
-@pytest.mark.parametrize(("task", "code"), [("exit7", 7), ("killed", 137), ("ci --x", 2)])
-def test_task_exit_codes_cross_the_sh_launcher(tasks_project: Path, task: str, code: int) -> None:
+@pytest.mark.parametrize(("task", "code", "stderr"), [("exit7", 7, ""), ("killed", 137, ""), ("depsonly --x", 2, "takes no arguments")])
+def test_task_exit_codes_cross_the_sh_launcher(tasks_project: Path, task: str, code: int, stderr: str) -> None:
     # pyt -> uv run --script -> pyt.py: nothing on the way may change the code
     r = subprocess.run(
         ["sh", str(tasks_project / "pyt"), "--no-render", *task.split()],
@@ -2124,6 +2130,7 @@ def test_task_exit_codes_cross_the_sh_launcher(tasks_project: Path, task: str, c
         check=False,
     )
     assert r.returncode == code, r.stderr
+    assert stderr in r.stderr  # an unknown command exits 2 as well
 
 
 # === 12. invariants of other modules that the runner's error paths depend on =======================

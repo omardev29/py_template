@@ -596,6 +596,35 @@ def test_the_tests_that_copy_the_project_pass_in_one_with_its_own_code(tmp_path:
     assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
 
 
+def test_the_task_tests_pass_in_a_project_whose_ci_task_is_its_own(tmp_path: Path) -> None:
+    """[tasks] entries belong to the project's user. test_task_exit_codes_cross_pyt_py ran the
+    preset's deps-only `ci` task with an argument: in a project that renamed or deleted it, or
+    gave it a cmd, one test of ./pyt selftest failed. They run here in a copy whose `ci` runs a
+    program of its own (exit 42), as the tasks they run are now the fixture's own."""
+    own = tmp_path / "own"
+    presets.copy_template(own)
+    toml = own / "pytemplate.toml"
+    text = toml.read_bytes().decode("utf-8")
+    for key, value in (("deps", []), ("cmd", [sys.executable, "-c", "raise SystemExit(42)"]), ("uv", False)):
+        text = config.set_value(text, "tasks.ci", key, value)
+    toml.write_bytes(text.encode("utf-8"))
+    nodes = ["test_cli_core.py::test_task_exit_codes_cross_pyt_py", "test_cli_core.py::test_task_exit_codes_cross_the_sh_launcher"]
+    drop = (*_LAUNCHER_VARS, "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--basetemp", str(tmp_path / "t"),
+         *(f".pytemplate/tests/{node}" for node in nodes)],
+        cwd=own,
+        env={k: v for k, v in os.environ.items() if k not in drop},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=900,
+        check=False,
+    )
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+
+
 @needs_uv
 def test_dry_run_mode_supports_pypy(unchanged: Path) -> None:
     if "pypy" in _copy_config(unchanged)["backend"]["supported"]:

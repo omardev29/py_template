@@ -3431,7 +3431,10 @@ short temp tree and unset `NVIM_APPNAME`.
   checks what every project has (`[project] name`), the skeleton's docstring only while it is
   still there (7 tests failed in every real project;
   `test_paths.test_the_tests_that_copy_the_project_pass_in_one_with_its_own_code` runs them in a
-  copy with code of its own).
+  copy with code of its own). Its `[tasks]` are its user's too: a test runs only tasks its own
+  fixture defines (`test_cli_core.tasks_project`: it ran the preset's deps-only `ci`, which a
+  project may rename, delete or give a cmd;
+  `test_paths.test_the_task_tests_pass_in_a_project_whose_ci_task_is_its_own`).
 - Property-based tests (Hypothesis, the dev group's pin): `.pytemplate/tests/conftest.py` loads
   the profile `pytemplate` (no example database, so a run depends on the code, the profile and
   the seed only; no deadline; a failure prints its replay blob) on top of the profile Hypothesis
