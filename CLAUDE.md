@@ -4056,7 +4056,10 @@ short temp tree and unset `NVIM_APPNAME`.
   invocations; a gate job checks the marker file; its Linux job, with shellcheck, in the CI
   image), `template-nvim.yml` (Windows here, Linux in the CI image, Neovim pinned (above),
   `fd` (venv-selector from LazyVim's `lang.python` errors on the first Python buffer without
-  it), `selftest --nvim --require --dir $RUNNER_TEMP/pt-nvim` (the `runner`
+  it; one release, `FD_VERSION`, whose Windows zip is checked against its pinned `FD_SHA256`
+  before it goes on PATH: Chocolatey's floated, `test_the_nvim_workflow_installs_a_pinned_fd`,
+  `test_the_fd_step_refuses_a_file_that_is_not_the_pinned_one`), `selftest --nvim --require
+  --dir $RUNNER_TEMP/pt-nvim` (the `runner`
   context is not allowed in a job-level `env`, hence the step env), logs on failure or
   cancellation, as for e2e and in the nvim job of template-ci-image.yml
   (`test_workflows.test_logs_of_a_job_that_timed_out_are_uploaded`)),
@@ -5269,11 +5272,11 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   `test_workarounds.py::test_nvim_plugin_workarounds[overseer]`. Goes: never.
 - **venv-selector (LazyVim's `lang.python`) needs `fd`** (LIMITATION, documented): without it it
   raises an error on the first Python buffer, which failed every smoke check that opens one.
-  Fix: the CI image holds `fd`, and `template-nvim.yml` installs it on Windows and in the canary
-  (`fdfind` on Ubuntu) (13.2); `./pyt nvim doctor`
+  Fix: the CI image holds `fd`, and `template-nvim.yml` installs it on Windows (one release,
+  SHA-256 checked) and in the canary (`fdfind` on Ubuntu) (13.2); `./pyt nvim doctor`
   counts a missing fd as a problem, with the install command (`cmd_nvim.TOOLS`, 12.2). Test:
-  `test_cmd_nvim.py::test_nvim_doctor_needs_fd`; CI (that workflow's smoke run fails without
-  it). Goes: never.
+  `test_cmd_nvim.py::test_nvim_doctor_needs_fd`, `test_workflows.py::test_the_nvim_workflow_installs_a_pinned_fd`;
+  CI (that workflow's smoke run fails without it). Goes: never.
 - **venv-selector's uv flow switches the debugger for the whole session** (LIMITATION, its design:
   one active environment at a time): for every buffer with PEP 723 script metadata (its uv2.lua,
   always on; `.pytemplate/pyt.py` and `tools/mutation_cr.py` have some) it runs `uv sync
