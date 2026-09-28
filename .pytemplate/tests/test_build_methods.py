@@ -973,7 +973,7 @@ ABI_NAMES = {
     "_x.pypy311-pp73-x86_64-linux-gnu.so": "pypy311_pp73",
     "_x.pypy311-pp80-darwin.so": "pypy311_pp80",  # PyPy 8.0: a new ABI for the same pp311 key
     "_x.pypy311-pp73-win_amd64.pyd": "pypy311_pp73",
-    "_x.abi3.so": "",  # any CPython of the platform
+    "_x.abi3.so": "",  # no version: its wheel's tag says which CPython (wheel_abis)
     "_x.so": "",
     "_x.pyd": "",
     ".cpython-314-x86_64-linux-gnu.so": "cp314",  # EXT_SUFFIX itself (the bootstrap's _abi)
@@ -1004,6 +1004,45 @@ def test_pyz_records_the_abi_of_every_targets_binaries(tmp_path: Path) -> None:
     parts = [
         fake_pyz(tmp_path / "p1.pyz", targets=[LINUX], pure=False, host=LINUX, files={"common/app/main.py": MERGE_MAIN, f"targets/{LINUX}/lib/_d.cpython-314-x86_64-linux-gnu.so": ""}),
         fake_pyz(tmp_path / "p2.pyz", targets=[WIN], pure=False, host=WIN, files={"common/app/main.py": MERGE_MAIN, f"targets/{WIN}/lib/_d.cp314-win_amd64.pyd": ""}),
+    ]
+    info, _ = _merge(parts, tmp_path / "m.pyz")
+    assert info["abi"] == {LINUX: ["cp314"], WIN: ["cp314"]}
+
+
+def test_pyz_records_an_abi3_wheel_as_the_keys_own_cpython(tmp_path: Path) -> None:
+    # bcrypt 5.0.0 ships one cp39-abi3 wheel per platform: its files name no version, so "abi"
+    # stayed empty, a free-threaded 3.14t (which lists .abi3.so among its suffixes) took the target
+    # and died of a segmentation fault instead of the "no build for this interpreter" message
+    from runner.methods import pyz
+
+    root = tmp_path / "root"
+    wheels = {
+        LINUX: ("cp39-abi3-manylinux_2_28_x86_64", "bcrypt/_bcrypt.abi3.so"),
+        WIN: ("cp39-abi3-win_amd64", "bcrypt/_bcrypt.pyd"),  # Windows names an abi3 extension bare
+        "cp314-windows-aarch64": ("cp314-cp314-win_arm64", "dep/_speedups.pyd"),  # bare, yet for cp314
+        "pp311-linux-x86_64": ("pp311-pypy311_pp73-manylinux_2_28_x86_64", "dep/_speedups.pypy311-pp73-x86_64-linux-gnu.so"),
+        MAC: ("py3-none-macosx_13_0_arm64", "dep/libhelper.so"),  # a ctypes library: any Python loads it
+    }
+    for key, (tag, ext) in wheels.items():
+        _wheel(root / "targets" / key / "lib", "dep", "1.0", tag, {ext: b""})
+    assert pyz._target_abis(root, list(wheels)) == {
+        LINUX: ["cp314"],
+        WIN: ["cp314"],
+        "cp314-windows-aarch64": ["cp314"],
+        "pp311-linux-x86_64": ["pypy311_pp73"],
+    }
+    # pyz-merge records it from the wheels too
+    parts = [
+        fake_pyz(tmp_path / "p1.pyz", targets=[LINUX], pure=False, host=LINUX, files={
+            "common/app/main.py": MERGE_MAIN,
+            f"targets/{LINUX}/lib/bcrypt/_bcrypt.abi3.so": "",
+            f"targets/{LINUX}/lib/bcrypt-5.0.0.dist-info/WHEEL": "Wheel-Version: 1.0\nTag: cp39-abi3-manylinux_2_28_x86_64\n",
+        }),
+        fake_pyz(tmp_path / "p2.pyz", targets=[WIN], pure=False, host=WIN, files={
+            "common/app/main.py": MERGE_MAIN,
+            f"targets/{WIN}/lib/bcrypt/_bcrypt.pyd": "",
+            f"targets/{WIN}/lib/bcrypt-5.0.0.dist-info/WHEEL": "Wheel-Version: 1.0\nTag: cp39-abi3-win_amd64\n",
+        }),
     ]
     info, _ = _merge(parts, tmp_path / "m.pyz")
     assert info["abi"] == {LINUX: ["cp314"], WIN: ["cp314"]}

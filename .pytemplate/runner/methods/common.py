@@ -637,10 +637,29 @@ def abi_tag(name: str) -> str:
 
 
 def extension_abis(folder: Path) -> list[str]:
-    """The ABIs the extension modules below `folder` were built for (abi3 and an untagged
-    .so/.pyd name none: any interpreter of the platform loads them)."""
+    """The ABIs the extension modules below `folder` name in their file names (abi3 and an
+    untagged .so/.pyd name none: wheel_abis reads what their wheels declare)."""
     tags = {abi_tag(p.name) for p in folder.rglob("*") if p.name.endswith(EXT_SUFFIXES) and p.is_file()}
     return sorted(tags - {""})
+
+
+def wheel_abis(lib: Path, key: str) -> list[str]:
+    """The extension ABIs the wheels installed in `lib` declare in their WHEEL tags (cp314,
+    pypy311_pp73), an abi3 one as the CPython of the target `key` (cp314-linux-x86_64: cp314): only
+    a CPython with the GIL loads it, and its files name no version (`.abi3.so`, and on Windows a
+    bare `.pyd`). A free-threaded 3.14t lists `.abi3.so` among its suffixes, took the target of
+    a pyz whose only native dependency was abi3 (bcrypt) and died of a segmentation fault."""
+    python = key.partition("-")[0]
+    out: set[str] = set()
+    for wheel in lib.glob("*.dist-info/WHEEL"):
+        for tag in _wheel_tags(wheel):
+            parts = tag.split("-")
+            for abi in parts[1].split(".") if len(parts) == 3 else []:
+                if abi == "abi3":
+                    out.update([python] if python.startswith("cp") else [])
+                elif abi != "none":
+                    out.add(abi)
+    return sorted(out)
 
 
 def has_native(path: Path) -> bool:

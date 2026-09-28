@@ -2674,7 +2674,11 @@ Per method:
   `targets`, `pure`, `backend`, `host` (the key that built it), `deps`
   (`common.requirements_digest`: the pin lines of the export, not its header), `abi` (per key
   whose binaries carry one, the extension ABIs of `targets/<key>/`, `pyz._target_abis` with
-  `common.extension_abis`/`abi_tag`: `cp314`, `cp314t`, `pypy311_pp73`; pyz-merge recomputes it).
+  `common.extension_abis`/`abi_tag`: `cp314`, `cp314t`, `pypy311_pp73`, and the WHEEL tags of its
+  `lib/`, `common.wheel_abis`, where an abi3 wheel stands for the key's own CPython: its files name
+  no version (`.abi3.so`, a bare `.pyd` on Windows), and a free-threaded 3.14t, which lists
+  `.abi3.so` among its suffixes, took a bcrypt-only target and died of a segmentation fault,
+  `test_pyz_records_an_abi3_wheel_as_the_keys_own_cpython`; pyz-merge recomputes it).
   The bootstrap takes a target only when its own ABI (`_abi`, from `EXT_SUFFIX`) is one of them,
   else the pure flavour or its "no build for this interpreter" refusal naming both: a key does not
   tell PyPy 7.3 (pp73) from PyPy 8 (pp80), nor CPython 3.14 from 3.14t, and PyPy 8 took a PyPy

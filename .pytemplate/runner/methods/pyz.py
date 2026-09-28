@@ -220,11 +220,19 @@ def build(req: BuildRequest) -> Path:
 
 
 def _target_abis(root: Path, keys: list[str]) -> dict[str, list[str]]:
-    """_pyz.json "abi": the extension ABIs of each target's binaries (lib/ and the mypyc overlay),
-    for the keys that hold any. The bootstrap takes a target only when its interpreter has one of
-    them: a PyPy 8 (pp80) took the pp311 target of a PyPy 7.3 build (pp73) and died in an
-    ImportError, where a missing build gives a clear message."""
-    return {key: abis for key in keys if (abis := common.extension_abis(root / "targets" / key))}
+    """_pyz.json "abi": the extension ABIs of each target's binaries (lib/ and the mypyc overlay:
+    their file names, and the WHEEL tags of lib/, where an abi3 wheel stands for the key's own
+    CPython, common.wheel_abis), for the keys that hold any. The bootstrap takes a target only when
+    its interpreter has one of them: a PyPy 8 (pp80) took the pp311 target of a PyPy 7.3 build
+    (pp73), and a free-threaded 3.14t the target of an abi3-only one, and died in an ImportError or
+    a segmentation fault, where a missing build gives a clear message."""
+    out: dict[str, list[str]] = {}
+    for key in keys:
+        folder = root / "targets" / key
+        abis = sorted({*common.extension_abis(folder), *common.wheel_abis(folder / "lib", key)})
+        if abis:
+            out[key] = abis
+    return out
 
 
 def _target_floors(root: Path, keys: list[str]) -> dict[str, str]:

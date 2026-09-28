@@ -69,7 +69,8 @@ def _key() -> str:
 
 
 # The extension ABI in a file name or suffix (methods/common.py ABI_RE): cpython-314[t], cp314[t]
-# (Windows), pypy311-pp73; abi3 and an untagged .so/.pyd load in any interpreter of the platform
+# (Windows), pypy311-pp73. abi3 and an untagged .so/.pyd name none: the build reads their
+# wheels' tags, and records an abi3 one as the key's CPython (cp314), which a 3.14t is not
 ABI_RE = re.compile(r"\.(cpython-(\d+t?)|cp(\d+t?)|pypy(\d+)-(pp\d+))[-.]")
 
 
