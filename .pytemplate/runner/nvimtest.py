@@ -146,15 +146,18 @@ def user_git_config(base: Path, source: Mapping[str, str]) -> str | None:
     git's global config is two files, ~/.gitconfig and $XDG_CONFIG_HOME/git/config, but nvim_env
     moves XDG_CONFIG_HOME into the isolated tree, so git would read the empty moved one and miss
     the user's. GIT_CONFIG_GLOBAL replaces BOTH defaults, so this file includes both of the user's
-    (resolved from `source`, the env before the isolation), and is written under `base`.
+    (resolved from `source`, the env before the isolation), and is written under `base`. In git's
+    own order: the XDG file first, then ~/.gitconfig, whose value wins for a key set in both
+    (the last one read wins; the other order gave Neovim's git the XDG file's proxy).
     """
     files: list[Path] = []
     home = source.get("HOME") or source.get("USERPROFILE")
+    xdg = source.get("XDG_CONFIG_HOME")
+    if xdg or home:
+        files.append(Path(xdg) / "git" / "config" if xdg else Path(str(home)) / ".config" / "git" / "config")
     if home:
         files.append(Path(home) / ".gitconfig")
-    xdg = source.get("XDG_CONFIG_HOME")
-    files.append(Path(xdg) / "git" / "config" if xdg else Path(home) / ".config" / "git" / "config" if home else Path())
-    includes = [f"[include]\n\tpath = {git_config_value(f.as_posix())}\n" for f in files if f != Path() and f.is_file()]
+    includes = [f"[include]\n\tpath = {git_config_value(f.as_posix())}\n" for f in files if f.is_file()]
     if not includes:
         return None
     path = base / "gitconfig"

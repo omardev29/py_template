@@ -522,6 +522,33 @@ def test_nvim_git_config_includes_the_users_whole_global_config(tmp_path: Path) 
     assert nvimtest.user_git_config(base, {"HOME": str(tmp_path / "empty")}) is None
 
 
+def test_nvim_git_config_keeps_gits_own_order_of_the_two_global_files(tmp_path: Path) -> None:
+    """git reads $XDG_CONFIG_HOME/git/config first and ~/.gitconfig after it, and the last value
+    it reads wins. The file that stands in for both included them the other way round: for a key
+    set in both (a proxy, sslCAInfo) Neovim's git took the XDG file's value, where the user's git
+    takes ~/.gitconfig's."""
+    git = shutil.which("git")
+    if not git:
+        pytest.skip("git not found")
+    home, xdg, base = tmp_path / "home", tmp_path / "xdg", tmp_path / "base"
+    (xdg / "git").mkdir(parents=True)
+    home.mkdir()
+    base.mkdir()
+    (home / ".gitconfig").write_text("[http]\n\tproxy = http://from-home-gitconfig:1\n", encoding="utf-8")
+    (xdg / "git" / "config").write_text("[http]\n\tproxy = http://from-xdg-config:2\n", encoding="utf-8")
+    user = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    user.update(HOME=str(home), XDG_CONFIG_HOME=str(xdg), GIT_CONFIG_NOSYSTEM="1")
+
+    def proxy(env: dict[str, str]) -> str:
+        got = subprocess.run([git, "config", "--get", "http.proxy"], cwd=base, env=env, capture_output=True, text=True, check=False)
+        return got.stdout.strip()
+
+    assert proxy(user) == "http://from-home-gitconfig:1"  # the user's own git
+    path = nvimtest.user_git_config(base, {"HOME": str(home), "XDG_CONFIG_HOME": str(xdg)})
+    assert path is not None
+    assert proxy({**user, "GIT_CONFIG_GLOBAL": path}) == "http://from-home-gitconfig:1", Path(path).read_text(encoding="utf-8")
+
+
 def test_nvim_git_config_includes_a_home_whose_name_git_would_read_as_syntax(tmp_path: Path) -> None:
     """The include path went into the file raw: git read a `#` or `;` in it as a comment (the
     user's insteadOf, proxy or sslCAInfo dropped without a word: lazy.nvim's clones then failed

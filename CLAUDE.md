@@ -3868,7 +3868,9 @@ short temp tree and unset `NVIM_APPNAME`.
   user's git config (lazy.nvim clones with it): git's global config is two files, `~/.gitconfig`
   and `$XDG_CONFIG_HOME/git/config`, and `nvim_env` moves `XDG_CONFIG_HOME`, so `nvimtest._run`
   points Neovim's `GIT_CONFIG_GLOBAL` at a `<dir>/gitconfig` that `[include]`s both of the user's
-  (`nvimtest.user_git_config`), unless the user set `GIT_CONFIG_GLOBAL` themselves; else the XDG
+  (`nvimtest.user_git_config`), in git's own order (the XDG file, then `~/.gitconfig`, whose value
+  wins for a key set in both: `test_nvim_git_config_keeps_gits_own_order_of_the_two_global_files`),
+  unless the user set `GIT_CONFIG_GLOBAL` themselves; else the XDG
   file (a proxy, `url.*.insteadOf`, `http.sslCAInfo`) was lost and the clones failed. The include
   paths are quoted values (`nvimtest.git_config_value`): raw, a home folder named with `#` or `;`
   ended the include at a comment and one with `\` made every git call fail
