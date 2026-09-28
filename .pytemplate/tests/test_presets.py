@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import errno
 import functools
 import hashlib
 import importlib.util
@@ -1542,6 +1543,60 @@ def test_new_never_touches_a_folder_with_content(tmp_path: Path, monkeypatch: py
         presets.new(tmp_path / "sub" / "demo", "script", "demo")
     assert not (tmp_path / "sub").exists()
     assert (tmp_path / "p" / "keep.txt").read_text(encoding="utf-8") == "user data"
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["real", "dry run"])
+def test_new_refuses_a_destination_it_cannot_use_before_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool) -> None:
+    """A folder new cannot list (mode d-wx--x--x, an ACL) ended in an internal-error traceback,
+    and a path below a file in a bare `[Errno 20] Not a directory` followed by "the half-made
+    project ... was removed", for a project it never made (and its dry run promised a copy).
+    Both are one line naming the folder, exit 2, before anything is written."""
+    monkeypatch.setattr(presets, "copy_template", lambda dest: pytest.fail("copied"))
+    monkeypatch.setattr(proc, "run", lambda *a, **k: pytest.fail("ran a command"))
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    monkeypatch.delenv("PYTEMPLATE_CALLER_CWD", raising=False)
+    cfg = config.load(set())
+    afile = tmp_path / "afile"
+    afile.write_text("a file", encoding="utf-8")
+    unlistable = tmp_path / "unlistable"
+    unlistable.mkdir()
+    real = Path.iterdir
+
+    def iterdir(self: Path) -> Any:
+        if self == unlistable:
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    cases = [
+        (afile / "x", f"{afile} is not a folder: {afile / 'x'} cannot be made in it"),
+        (afile / "x" / "y", f"{afile} is not a folder: {afile / 'x' / 'y'} cannot be made in it"),
+        (unlistable, f"cannot read the folder {unlistable}: Permission denied"),
+    ]
+    for dest, message in cases:
+        with pytest.raises(PytError) as e:
+            cmd_mode.cmd_new(cfg, [str(dest), "--name", "demo"])
+        assert e.value.code == 2 and str(e.value) == f"new: {message}"
+        with pytest.raises(PytError) as e:
+            presets.new(dest, "script", "demo")
+        assert e.value.code == 2 and str(e.value) == message
+    assert sorted(p.name for p in real(tmp_path)) == ["afile", "unlistable"] and afile.read_text(encoding="utf-8") == "a file"
+
+
+def test_new_says_nothing_was_written_when_the_copy_made_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A copy that fails before it made the folder (a parent the user may not write) said "the
+    half-made project in ... was removed", after `[Errno 13] Permission denied: '...'`."""
+    dest = tmp_path / "ro" / "demo"
+
+    def copy(path: Path) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", str(path.parent))
+
+    monkeypatch.setattr(presets, "copy_template", copy)
+    monkeypatch.setattr(proc, "run", lambda *a, **k: pytest.fail("ran a command"))
+    with pytest.raises(PytError) as e:
+        presets.new(dest, "script", "demo")
+    assert e.value.code == 1 and str(e.value) == f"{dest.parent}: Permission denied\n  nothing was written"
+    assert list(tmp_path.iterdir()) == []
 
 
 @needs_git

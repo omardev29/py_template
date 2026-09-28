@@ -2739,8 +2739,11 @@ Per method:
   `core.filemode = false`, Git for Windows: a later `git add` records a new file as 100644
   there, `_fix_exec_bit` skips untracked files and the hook refused the first commit). When the copy or `__init` fails (a name uv refuses, no network, Ctrl+C) `new`
   removes what it created (the folder and the parents it made, or only the content of the
-  empty folder it was given) and says so; a folder with content is refused before anything
-  is written. On success it prints one hint (init prints none: it runs in the copy), `cd
+  empty folder it was given) and says so ("nothing was written" when the copy failed before it
+  made anything: it said it had removed a project it never made); a folder with content is
+  refused before anything is written, and so are a folder it cannot list and a path below a file
+  (`presets.check_destination`, in `cmd_mode.cmd_new` and its dry run too: an internal-error
+  traceback, and a bare `[Errno 20] Not a directory`). On success it prints one hint (init prints none: it runs in the copy), `cd
   <dest>` and the launcher's `setup` on lines of their own, for the shell of the launcher
   (`presets.next_steps`: the `PYTEMPLATE_LAUNCHER` prefix `ps1:` (PowerShell single quotes;
   `cd -LiteralPath` for a path with `[ ] * ?` or a backtick, which its cd reads as a wildcard

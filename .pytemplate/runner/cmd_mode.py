@@ -501,10 +501,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
     resolved = dest.resolve()
     if resolved == ROOT or ROOT in resolved.parents:
         raise PytError(f"new: the destination folder cannot be inside {presets.source_name()}")
-    if dest.exists() and not dest.is_dir():
-        raise PytError(f"new: {dest} exists and is not a folder")
-    if dest.is_dir() and any(dest.iterdir()):
-        raise PytError(f"new: {dest} already exists and is not empty")
+    presets.check_destination(dest, "new: ")
     # Checked here, before copying (and under --dry-run): a copy whose `init` fails is removed
     name = ns.name or presets.name_from_folder(resolved.name)
     if not config.APP_NAME.fullmatch(name):

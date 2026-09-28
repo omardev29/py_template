@@ -1339,6 +1339,28 @@ def preset_python(preset: str) -> str:
     return str(version)
 
 
+def check_destination(dest: Path, prefix: str = "") -> None:
+    """Refuse, before anything is written, a destination `new` cannot use: something that is not
+    a folder, a folder with content, one it cannot list (it ended in an internal-error traceback),
+    or a path below a file (the copy failed with a bare `[Errno 20] Not a directory`, and new said
+    it had removed a project it never made). `prefix` starts each message."""
+    if os.path.lexists(dest) and not dest.is_dir():
+        raise PytError(f"{prefix}{dest} exists and is not a folder")
+    if dest.is_dir():
+        try:
+            empty = next(iter(dest.iterdir()), None) is None
+        except OSError as e:
+            raise PytError(f"{prefix}cannot read the folder {dest}: {e.strerror or e}") from None
+        if not empty:
+            raise PytError(f"{prefix}{dest} already exists and is not empty")
+        return
+    parent = dest.parent
+    while not os.path.lexists(parent) and parent.parent != parent:
+        parent = parent.parent
+    if not parent.is_dir():
+        raise PytError(f"{prefix}{parent} is not a folder: {dest} cannot be made in it")
+
+
 def new(dest: Path, preset: str, name: str | None, python: Path | None = None) -> None:
     """`./pyt new`: copy the template to `dest` and run `init` in the copy, on `python` (the
     preset's python.cpython, which the caller made sure uv has: envs.ensure_python), else on the
@@ -1355,10 +1377,7 @@ def new(dest: Path, preset: str, name: str | None, python: Path | None = None) -
     if not APP_NAME.fullmatch(app_name):
         raise PytError(f"'{app_name}' is not a valid app name: it may only contain {NAME_RULE}.\n  Choose one with --name NAME")
     load(preset)
-    if os.path.lexists(dest) and not dest.is_dir():
-        raise PytError(f"{dest} exists and is not a folder")
-    if dest.is_dir() and any(dest.iterdir()):
-        raise PytError(f"{dest} already exists and is not empty")
+    check_destination(dest)
     top = _outermost_missing(dest)
     ui.step(f"new project in {dest}")
     try:
@@ -1371,18 +1390,24 @@ def new(dest: Path, preset: str, name: str | None, python: Path | None = None) -
         proc.run(proc.runner_argv(proc.find_uv(), dest, [*loud, *init], python=python), cwd=dest)
     except BaseException as e:
         if top is not None:
+            made = os.path.lexists(top)
             left = [] if _remove(top) else [str(top)]
         else:
-            left = [str(child) for child in dest.iterdir() if not _remove(child)]
+            children = list(dest.iterdir())
+            made = bool(children)
+            left = [str(child) for child in children if not _remove(child)]
         note = (
-            f"the half-made project in {dest} was removed"
+            "nothing was written"  # it said it had removed a project it never made
+            if not made
+            else f"the half-made project in {dest} was removed"
             if not left
             else f"could not delete everything the failed copy wrote ({', '.join(left[:3])}): delete {dest} by hand"
         )
         if not isinstance(e, Exception):  # Ctrl+C: cleaned up, stop as asked
             ui.error(note)
             raise
-        raise PytError(f"{e}\n  {note}", e.code if isinstance(e, PytError) else 1) from e
+        what = f"{e.filename}: {e.strerror or e}" if isinstance(e, OSError) and e.filename else str(e)
+        raise PytError(f"{what}\n  {note}", e.code if isinstance(e, PytError) else 1) from e
     _git_init(dest)
     ui.ok(f"project created in {dest}. Next:")
     for line in next_steps(dest):
