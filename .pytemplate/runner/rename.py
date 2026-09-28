@@ -231,7 +231,7 @@ class _Positions:
     as LF (the compiler counts it as a line break), one character for one."""
 
     def __init__(self, text: str) -> None:
-        self.shift = 1 if text.startswith("﻿") else 0
+        self.shift = 1 if text.startswith("\ufeff") else 0
         self.body = re.sub(r"\r(?!\n)", "\n", text[self.shift :])
         self.line_starts = [0, *(m.end() for m in re.finditer("\n", self.body))]
         self._lines: list[str] | None = None
