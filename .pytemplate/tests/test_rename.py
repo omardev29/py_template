@@ -326,6 +326,56 @@ def test_file_names_in_code_keep_the_name_of_the_file(text: str, expected: str |
     assert bool(out.kept) is kept
 
 
+@pytest.mark.parametrize(
+    ("old", "text", "expected"),
+    [
+        ("alpha", 'DATA = Path("tests/alpha/data/sample.json")', None),  # tests/alpha/ is not moved
+        ("alpha", 'LOGO = asset("alpha/logo.png")', None),  # src/assets/alpha/: another folder
+        ("alpha", 'LOGO = Path("src/assets/alpha/logo.png")', None),
+        ("alpha", "# See docs/alpha/index.md", None),
+        ("alpha", 'LOG = "logs\\\\alpha\\\\run.log"', None),
+        ("alpha", 'HOME = "~/games/alpha"', None),  # the last segment of another path
+        ("alpha", 'DATA = Path("tests/alpha/core/cases.json")', None),  # tests mirroring the package
+        ("alpha", 'p = "site-packages/alpha/core"', None),  # under another folder: reported
+        ("My-Game", 'DATA = "tests/my_game/data"', None),
+        ("alpha", 'p = "src/alpha/core/x.py"', 'p = "src/beta/core/x.py"'),  # the folder the rename moves
+        ("alpha", 'p = "src\\\\alpha"', 'p = "src\\\\beta"'),
+        ("alpha", 'p = "alpha/core/bench.py"', 'p = "beta/core/bench.py"'),  # into a module of the package
+        ("alpha", 'p = "alpha/data.json"', 'p = "beta/data.json"'),  # a data file of src/alpha/
+        ("alpha", "# the package lives in alpha/", "# the package lives in beta/"),
+        ("alpha", 'p = "dist/alpha-cpython-exe/alpha.exe"', 'p = "dist/beta-cpython-exe/beta.exe"'),  # artifacts: the name
+        ("alpha", 'LOGO = asset("sfx/alpha.wav")', None),  # a file named after the app (_names_a_file)
+    ],
+)
+def test_folders_named_after_the_app_keep_their_name(old: str, text: str, expected: str | None) -> None:
+    """A path segment named like the app is the package only right inside src/ or on the way into
+    an entry of src/<pkg>/: tests/alpha/data or an asset folder alpha/ keep their name (the rename
+    moves src/alpha/ only), so a reference to them is kept and reported. They were rewritten, and
+    the tests or the app no longer found their files after a rename that listed no line to review."""
+    out = rewrite(
+        text + "\n",
+        Names(old, "beta"),
+        python=True,
+        package_modules=frozenset({"core", "resources"}),
+        package_entries=frozenset({"__init__.py", "core", "resources.py", "data.json"}),
+    )
+    assert out.text == (text if expected is None else expected) + "\n"
+    assert bool(out.kept) is (expected is None)
+
+
+def test_a_test_data_folder_named_after_the_app_keeps_working(tmp_path: Path) -> None:
+    _write_project(tmp_path, "script", "alpha")
+    data = tmp_path / "tests" / "alpha" / "data"
+    data.mkdir(parents=True)
+    (data / "sample.json").write_text('{"n": 1}\n', encoding="utf-8")
+    line = 'DATA = Path("tests/alpha/data/sample.json")'
+    (tmp_path / "tests" / "alpha" / "test_data.py").write_text(f"from pathlib import Path\n\n{line}\n", encoding="utf-8")
+    planned = _rename(tmp_path, "alpha", "beta")
+    assert line in (tmp_path / "tests" / "alpha" / "test_data.py").read_text(encoding="utf-8")
+    edit = next(f for f in planned.files if f.path == "tests/alpha/test_data.py")
+    assert edit.result.kept == [(3, line)]
+
+
 def test_a_data_file_named_after_the_app_is_reported_by_the_plan(tmp_path: Path) -> None:
     _write_project(tmp_path, "script", "alpha")
     (tmp_path / "src" / "alpha" / "data.py").write_text('SAVE = "alpha.json"\nICON = "sprites/alpha.png"\n', encoding="utf-8")
@@ -419,17 +469,22 @@ def test_toml_escapes_are_never_the_name(text: str, expected: str, kept: int) ->
 
 
 def test_json_and_toml_files_of_src_and_tests_keep_their_escapes(tmp_path: Path) -> None:
-    """A JSON fixture's "a\\n" once became "a\\tool" (a tab and "ool") for an app named n."""
+    """A JSON fixture's "a\\n" once became "a\\tool" (a tab and "ool") for an app named n. After an
+    escaped backslash (and in plain text, which has no escapes) n is a path segment: the package
+    right inside src/, another folder named like the app elsewhere (kept and reported)."""
     _write_project(tmp_path, "script", "n")
-    (tmp_path / "tests" / "data.json").write_text('{"sep": "a\\n", "app": "n", "path": "C:\\\\n", "odd": "\\q\\n"}\n', encoding="utf-8", newline="\n")
-    (tmp_path / "tests" / "cfg.toml").write_text("# a\\n n\nsep = \"a\\n\"\napp = \"n\"\nraw = 'a\\n'\n", encoding="utf-8", newline="\n")
-    (tmp_path / "tests" / "notes.txt").write_text("a\\n n\n", encoding="utf-8", newline="\n")  # plain text: no escapes
+    (tmp_path / "tests" / "data.json").write_text(
+        '{"sep": "a\\n", "app": "n", "path": "src\\\\n", "other": "C:\\\\n", "odd": "\\q\\n"}\n', encoding="utf-8", newline="\n"
+    )
+    (tmp_path / "tests" / "cfg.toml").write_text("# src\\n n\nsep = \"a\\n\"\napp = \"n\"\nraw = 'a\\n'\n", encoding="utf-8", newline="\n")
+    (tmp_path / "tests" / "notes.txt").write_text("src\\n n\na\\n\n", encoding="utf-8", newline="\n")  # plain text: no escapes
     edits = {edit.path: edit for edit in rename.plan(tmp_path, "n", "tool").files}
     json_edit, toml_edit = edits["tests/data.json"], edits["tests/cfg.toml"]
-    assert json_edit.new == b'{"sep": "a\\n", "app": "tool", "path": "C:\\\\tool", "odd": "\\q\\n"}\n'
-    assert toml_edit.new == b"# a\\tool tool\nsep = \"a\\n\"\napp = \"tool\"\nraw = 'a\\n'\n"
+    assert json_edit.new == b'{"sep": "a\\n", "app": "tool", "path": "src\\\\tool", "other": "C:\\\\n", "odd": "\\q\\n"}\n'
+    assert toml_edit.new == b"# src\\tool tool\nsep = \"a\\n\"\napp = \"tool\"\nraw = 'a\\n'\n"
     assert [n for n, _ in toml_edit.result.kept] == [4]  # a literal string's \n: no escape there, reported
-    assert edits["tests/notes.txt"].new == b"a\\tool tool\n"
+    assert edits["tests/notes.txt"].new == b"src\\tool tool\na\\n\n"
+    assert [n for n, _ in edits["tests/notes.txt"].result.kept] == [2]  # a\n: another folder named n
 
 
 def test_notebooks_and_yaml_keep_their_escapes(tmp_path: Path) -> None:
@@ -439,11 +494,11 @@ def test_notebooks_and_yaml_keep_their_escapes(tmp_path: Path) -> None:
     _write_project(tmp_path, "script", "n")
     cell = {"cell_type": "code", "source": ["from n.core import bench\n", "print(bench)\n"]}
     (tmp_path / "tests" / "demo.ipynb").write_text(json.dumps({"cells": [cell]}, indent=1) + "\n", encoding="utf-8", newline="\n")
-    (tmp_path / "tests" / "messages.yaml").write_text("greeting: \"hello\\n\"\napp: n\nplain: a\\n\n", encoding="utf-8", newline="\n")
+    (tmp_path / "tests" / "messages.yaml").write_text("greeting: \"hello\\n\"\napp: n\nplain: src\\n\n", encoding="utf-8", newline="\n")
     edits = {edit.path: edit for edit in rename.plan(tmp_path, "n", "b").files}
     notebook = json.loads(edits["tests/demo.ipynb"].new)
     assert notebook["cells"][0]["source"] == ["from b.core import bench\n", "print(bench)\n"]
-    assert edits["tests/messages.yaml"].new == b"greeting: \"hello\\n\"\napp: b\nplain: a\\b\n"  # a plain scalar has no escapes
+    assert edits["tests/messages.yaml"].new == b"greeting: \"hello\\n\"\napp: b\nplain: src\\b\n"  # a plain scalar has no escapes
 
 
 @pytest.mark.parametrize("preset", ["script", "raylib", "flet"])

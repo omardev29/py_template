@@ -1214,8 +1214,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     `.json` files, notebooks `.ipynb`, `.jsonc`, `.geojson`, `.jsonl`, `.ndjson`; and YAML's
     double-quoted strings with `_YAML_ESCAPES`: an app named n once turned a notebook's `\n` and
     YAML's `"hello\n"` into `\b`); comments and other text files (Markdown, INI, YAML's plain and
-    single-quoted scalars) have no escapes: `a\n` there changes like any word (a JSON fixture's
-    `"a\n"` once became `"a\tool"`). A one-letter occurrence that ends a format directive in a string (`"%d"`,
+    single-quoted scalars) have no escapes: `a\n` there is a path like any other, `src\n` the
+    package and `a\n` another folder named n (a JSON fixture's `"a\n"` once became `"a\tool"`). A one-letter occurrence that ends a format directive in a string (`"%d"`,
     `"%(k)-s"`, `"{:d}"`, `"{0:,d}"`, `"{!r}"`, and any letter after a `%`: strftime's `"%Y"`,
     `"%-m"`, `"%^a"`, which became `"%Tool"`; `_directive`) or is a struct format character after
     a byte order or count (`">I"`, `"<2H"`: `_STRUCT_BEFORE`; the flet skeleton's PNG encoder
@@ -1227,7 +1227,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     after the app (`_names_a_file` with `_package_modules`: `pkg.png`, `sfx/pkg.wav`,
     `"pkg.json"`, a `.` and a word that is no module of src/<pkg>/, outside an import, `-m` or
     loader argument; the file keeps its name, so the reference is kept and reported: it became
-    `asset("beta.png")`; an artifact name, `pkg.exe`, follows the new name). For a package
+    `asset("beta.png")`; an artifact name, `pkg.exe`, follows the new name) or a folder named
+    after the app (`_names_another_folder`: only src/<pkg>/ moves, so under another folder a
+    segment is the package only right inside `src/`, and a path that starts with it only on its
+    way into an entry of src/<pkg>/, `_package_entries`, or ending there, `pkg/`; `tests/pkg/data`,
+    `assets/pkg/logo.png`, `asset("pkg/logo.png")` keep their name and are reported: they became
+    `tests/beta/data` while `tests/alpha/` stayed, and the tests failed). For a package
     named `src` (a project made by hand: `new` and `rename` refuse the name) a `src/` segment
     that is not right inside another `src/` is the project's own folder and never changes
     (`src/src/x` -> `src/beta/x`; it once became `beta/beta/x`). When the

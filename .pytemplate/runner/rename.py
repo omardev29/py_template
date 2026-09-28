@@ -18,8 +18,10 @@ Which occurrences change (whole words only: `myapp_extra` and `my-app-2` never m
   every `myapp` in it, and a module that rebinds it keeps all of its own: they are reported,
   not changed. Attributes (`obj.myapp`) and keyword arguments (`f(myapp=1)`) never change.
 - Strings, comments, docstrings and other text files: every occurrence except right after a
-  dot (`x.myapp` is a submodule or an attribute, never the top-level package) and a path
-  segment right after the package itself (`src/myapp/myapp` is a submodule of it). In Python,
+  dot (`x.myapp` is a submodule or an attribute, never the top-level package), a path
+  segment right after the package itself (`src/myapp/myapp` is a submodule of it), and a file
+  or a folder named like the app outside src/ (`tests/myapp/data`, `asset("myapp.png")`: only
+  src/myapp/ moves, so they are reported, not changed). In Python,
   TOML and JSON strings the prefix (`f`, `rb`...) and escapes (`\\n`, `\\x89`) are never the
   name, and a name right after a single backslash that makes no escape (`r"\\d"`,
   `"\\myapp"`) and a one-letter name that ends a format directive (`"%d"`, `"{:d}"`,
@@ -574,8 +576,37 @@ def _names_a_file(text: str, start: int, end: int, modules: frozenset[str]) -> b
     return not any(pattern.search(before) for pattern in contexts)
 
 
+_SEGMENT = re.compile(r"[/\\]+([^/\\\s'\"`,;:()\[\]{}<>|*?]+)")
+
+
+def _names_another_folder(text: str, start: int, end: int, entries: frozenset[str]) -> bool:
+    """Whether a path segment named like the app is a folder other than src/<pkg>/, the one the
+    rename moves: `tests/alpha/data`, `tests/alpha/core/`, `assets/alpha/logo.png`, `docs/alpha/`.
+    Under another folder the package is only right inside src/ (`src/alpha/x`); a path that starts
+    with the name is the package when it leads into an entry of src/<pkg>/ (`alpha/core/x.py`,
+    `alpha/data.json`: `entries`) or ends there (`alpha/`). Such a folder keeps its name, so the
+    reference is kept and reported, as a file named after the app is (_names_a_file): it was
+    rewritten, and a test or the app no longer found its files. A file or artifact name
+    (`alpha.png`, `alpha-cpython-exe`) is no folder here."""
+    prev, nxt = text[start - 1 : start], text[end : end + 1]
+    if prev in ("/", "\\"):
+        return nxt not in ("-", ".") and not _after_src(text, start)
+    if nxt in ("/", "\\"):
+        into = _SEGMENT.match(text, end)
+        return into is not None and into.group(1) not in entries  # alpha/logo.png: an asset folder named alpha
+    return False
+
+
 def _text_kind(
-    text: str, start: int, end: int, word: str, names: Names, *, contextual: bool = False, modules: frozenset[str] | None = None
+    text: str,
+    start: int,
+    end: int,
+    word: str,
+    names: Names,
+    *,
+    contextual: bool = False,
+    modules: frozenset[str] | None = None,
+    entries: frozenset[str] | None = None,
 ) -> Kind:
     """Classify an occurrence in text (a string, a comment, a Markdown or TOML file).
 
@@ -584,7 +615,8 @@ def _text_kind(
     the package only right inside `src/` (the folder the rename moves: `tools/alpha.py`,
     `assets/alpha.ico` and `./pyt` stay) and, when `modules` (the modules and subpackages of
     src/<pkg>/) is given, a dotted word only when it names one of them (`alpha.core`; not
-    `alpha.ico` or `uv.lock`).
+    `alpha.ico` or `uv.lock`). Elsewhere (src/, tests/), with `entries` (the names in src/<pkg>/),
+    a path segment is the package only on the way into it: _names_another_folder.
     """
     prev = text[start - 1 : start]
     if prev == "." and start >= 2 and _is_word(text[start - 2]):
@@ -597,6 +629,8 @@ def _text_kind(
         return "skip"  # an app named src (made by hand: new refuses it): src/src/x is the folder, then the package
     if not contextual and modules is not None and _names_a_file(text, start, end, modules):
         return "keep"  # asset("alpha.png"), "alpha.json": the file keeps its name (reported)
+    if not contextual and entries is not None and _names_another_folder(text, start, end, entries):
+        return "keep"  # tests/alpha/data, asset("alpha/logo.png"): the folder keeps its name (reported)
     if names.old_name != names.old_pkg:
         if not contextual:
             return "pkg" if word == names.old_pkg else "name"
@@ -663,10 +697,21 @@ def _string_quote(text: str, region: _Region) -> tuple[int, str] | None:
 
 
 def _classify(
-    text: str, start: int, end: int, word: str, names: Names, code: _Code | None, *, contextual: bool = False, modules: frozenset[str] | None = None
+    text: str,
+    start: int,
+    end: int,
+    word: str,
+    names: Names,
+    code: _Code | None,
+    *,
+    contextual: bool = False,
+    modules: frozenset[str] | None = None,
+    entries: frozenset[str] | None = None,
 ) -> Kind:
     if code is None:
-        return _text_kind(text, start, end, word, names, contextual=contextual, modules=modules) if _whole_word(text, start, end) else "skip"
+        if not _whole_word(text, start, end):
+            return "skip"
+        return _text_kind(text, start, end, word, names, contextual=contextual, modules=modules, entries=entries)
     token = code.names.get(start)
     if token is not None:  # code
         if token != word:
@@ -691,8 +736,9 @@ def _classify(
             return "keep"
     if not _whole_word(text, start, end):
         return "skip"
-    kind = _text_kind(text, start, end, word, names, modules=None if region.forced else modules)  # a loader's argument is a module
-    return "pkg" if region.forced and kind == "name" else kind
+    if region.forced:  # a loader's argument is a module
+        return "pkg" if (kind := _text_kind(text, start, end, word, names)) == "name" else kind
+    return _text_kind(text, start, end, word, names, modules=modules, entries=entries)
 
 
 def _toml_strings(text: str) -> list[tuple[int, int, bool]]:
@@ -783,6 +829,7 @@ def rewrite(
     strings: str = "",
     module_keys: frozenset[str] = frozenset(),
     package_modules: frozenset[str] | None = None,
+    package_entries: frozenset[str] | None = None,
 ) -> Rewrite:
     """Replace the old name/package in `text`. Line endings and everything else are kept.
 
@@ -795,6 +842,9 @@ def rewrite(
     `package_modules`: the modules and subpackages of src/<old pkg>/ (only_pkg: `pkg.x` is the
     package only when x is one of them; `pkg.ico`, `uv.lock` are file names; in other text a
     file named after the app, `asset("pkg.png")`, is kept and reported: _names_a_file).
+    `package_entries`: the names of the files and folders in src/<old pkg>/ (other text: a path
+    segment is the package only right inside src/ or on its way into one of them; another folder
+    named like the app, `tests/pkg/data`, is kept and reported: _names_another_folder).
     """
     code = _python_code(text, names.old_pkg) if python else None
     module_lines = module_value_lines(text, module_keys) if module_keys else set()
@@ -820,7 +870,7 @@ def rewrite(
             if escaped == "keep":
                 kept_at.append(start)
                 continue
-        kind = _classify(text, start, end, word, names, code, contextual=only_pkg, modules=package_modules)
+        kind = _classify(text, start, end, word, names, code, contextual=only_pkg, modules=package_modules, entries=package_entries)
         if kind == "skip":
             continue
         module_line = bool(module_lines) and bisect.bisect_right(line_starts, start) in module_lines
@@ -1100,6 +1150,19 @@ def _package_modules(root: Path, pkg: str) -> frozenset[str]:
     return frozenset(out)
 
 
+def _package_entries(root: Path, pkg: str) -> frozenset[str]:
+    """The names of the files and folders right inside src/<pkg>/ (caches aside): a path that
+    leads into one of them (`alpha/core/x.py`, `alpha/data.json`) is the package's."""
+    folder = package_dir(root / "src", pkg)
+    if folder is None:
+        return frozenset()
+    try:
+        with os.scandir(folder) as it:
+            return frozenset(e.name for e in it if e.name not in SKIP_DIRS)
+    except OSError:
+        return frozenset()
+
+
 def _plan_config(root: Path, names: Names) -> TextEdit:
     path = root / "pytemplate.toml"
     try:
@@ -1225,6 +1288,7 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
     pattern = _pattern(names)
     links: list[str] = []
     modules = _package_modules(root, names.old_pkg)  # `alpha.core` is the package, `alpha.png` a file
+    entries = _package_entries(root, names.old_pkg)  # `alpha/core/x.py` is the package, `tests/alpha/` a folder
     for rel_path, path in _code_files(root, links):
         try:
             data = path.read_bytes()
@@ -1251,7 +1315,7 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
                 unreadable.append(rel_path)
             continue
         strings = DATA_STRINGS.get(path.suffix.lower(), "")
-        result = rewrite(text, names, python=path.suffix in PY_SUFFIXES, strings=strings, package_modules=modules)
+        result = rewrite(text, names, python=path.suffix in PY_SUFFIXES, strings=strings, package_modules=modules, package_entries=entries)
         if result.count or result.kept:
             try:
                 new = result.text.encode(encoding)
