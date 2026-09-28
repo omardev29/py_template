@@ -3588,7 +3588,9 @@ short temp tree and unset `NVIM_APPNAME`.
   project has not made (`test_paths._another_backend`, `_supports_and_typing`): mode prints only
   real changes, and after `./pyt mode mypyc` or `./pyt mode --typing strict` it said "unchanged".
   So does `test_config_rules.test_mode_edits_a_taplo_formatted_config`: in a project that
-  supports one backend alone it adds another (never PyPy) and removes it again.
+  supports one backend alone it adds another (never PyPy) and removes it again. The JIT test of
+  test_removals puts its old key into `[python]` with `config.set_value`, whatever `python.pypy`
+  the project pins (it looked for the line of `pypy@3.11.15`).
 - Property-based tests (Hypothesis, the dev group's pin): `.pytemplate/tests/conftest.py` loads
   the profile `pytemplate` (no example database, so a run depends on the code, the profile and
   the seed only; no deadline; a failure prints its replay blob) on top of the profile Hypothesis

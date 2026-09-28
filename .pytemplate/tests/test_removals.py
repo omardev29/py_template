@@ -130,8 +130,10 @@ def test_a_pytemplate_toml_that_still_has_jit_fails_to_load(tmp_path: Path, monk
     """A project whose pytemplate.toml kept `jit = false` fails on every command, like any typo."""
     text = (ROOT / "pytemplate.toml").read_text(encoding="utf-8")
     assert "\njit" not in text
-    old = text.replace('pypy = "pypy@3.11.15"', 'pypy = "pypy@3.11.15"\njit = false             # old key', 1)
-    assert old != text
+    # into [python] whatever its lines say: a project that pinned another python.pypy (README's
+    # Troubleshooting) had no `pypy = "pypy@3.11.15"` line to put it after, and the test failed
+    old = config.set_value(text, "python", "jit", False)
+    assert old != text and tomllib.loads(old)["python"]["jit"] is False
     path = tmp_path / "pytemplate.toml"
     path.write_text(old, encoding="utf-8")
     monkeypatch.setattr(config, "CONFIG_FILE", path)
