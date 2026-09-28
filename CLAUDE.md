@@ -2519,7 +2519,16 @@ Per method:
   The bootstrap takes a target only when its own ABI (`_abi`, from `EXT_SUFFIX`) is one of them,
   else the pure flavour or its "no build for this interpreter" refusal naming both: a key does not
   tell PyPy 7.3 (pp73) from PyPy 8 (pp80), nor CPython 3.14 from 3.14t, and PyPy 8 took a PyPy
-  7.3 build's target and died in an ImportError. The archive is
+  7.3 build's target and died in an ImportError. Nor glibc from musl, nor their versions: `floor`
+  (per key whose `lib/` wheels need anything, `pyz._target_floors` with `common.platform_floor`,
+  read from their WHEEL tags, the least tag of each wheel: `glibc 2.28` for the newest manylinux
+  one, `musl`, `macos 13.0`, `glibc` for a wheel built on the build machine, `common.this_libc`;
+  pyz-merge recomputes it) must be met too (`_meets`: `_libc` reads `os.confstr` for glibc and
+  `EXT_SUFFIX` for musl, whose version is never compared; `platform.mac_ver`, where `10.16`, an old
+  SDK's name for macOS 11 and newer, counts as met): a musl Python (Alpine) took a glibc build's
+  target and died in "No module named 'librt.base64'", as did a glibc older than its wheels
+  (`test_pyz_bootstrap_meets_what_the_wheels_need`,
+  `test_pyz_bootstrap_takes_no_target_this_machine_cannot_load`). The archive is
   written by `pyz._write_archive` (deflate, never zstd: it must open on 3.11 and PyPy;
   `strict_timestamps=False`: a payload file older than 1980, e.g. from the Nix store, used to
   crash `zipapp`; shebang `/usr/bin/env python3`, mode 0755). Whatever `python3` starts it, the
@@ -5762,7 +5771,9 @@ Code coupling (rename together):
   `cmd_apply._unformat`): a template with a format spec or conversion is never read back.
 - `RULES_RE` / `tasks.parse_line` <-> `ui.error`, `ui.warn`, `str(lintc.Finding)` (5.3).
 - `common.ABI_RE`/`abi_tag` <-> the pyz bootstrap's own copies (`templates/pyz/__main__.py` is
-  standalone; `test_abi_tags_agree_with_the_bootstrap`).
+  standalone; `test_abi_tags_agree_with_the_bootstrap`); `common.this_libc` <-> its `_libc`
+  (`test_the_build_machine_and_the_bootstrap_name_the_c_library_alike`), and the `floor` strings
+  `common.platform_floor` writes <-> what its `_meets` reads.
 - mypyc internals mirrored by the runner (checked by `test_mypyc_core` against the locked
   mypy): `lintc.NATIVE_CLASS_DECORATORS` <-> mypyc's native decorators;
   `lintc.relative_file_at_import` <-> when mypyc builds no shared lib; `mypyc.remove_stale_extensions`

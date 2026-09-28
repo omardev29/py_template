@@ -3,8 +3,9 @@
 Python cannot import extensions (.pyd/.so) from inside a zip, so the first time the
 contents are extracted to a cache versioned per build and run from there. If this interpreter
 and OS have their own build (_pyz.json "targets": binaries, or dependencies that differ per
-platform, whose extension ABI, "abi", must be this interpreter's: PyPy 8 is no PyPy 7.3), it is
-used; otherwise the pure Python version is used (if the app allows it).
+platform, whose extension ABI, "abi", must be this interpreter's: PyPy 8 is no PyPy 7.3, and
+whose wheels' C library and oldest glibc or macOS, "floor", this machine's: musl is no glibc),
+it is used; otherwise the pure Python version is used (if the app allows it).
 
 Executables (an app's helper script, a dependency's binary) keep their x bit.
 
@@ -84,6 +85,50 @@ def _abi() -> str:
     """The extension ABI of THIS interpreter: its key does not tell PyPy 7.3 (pp73) from PyPy 8
     (pp80), nor CPython 3.14 from its free-threaded build (3.14t)."""
     return abi_tag(sysconfig.get_config_var("EXT_SUFFIX") or "")
+
+
+def _libc() -> tuple[str, str]:
+    """The C library of THIS interpreter on Linux: ("glibc", "2.39"), ("musl", "") (its
+    EXT_SUFFIX names it; a Python cannot tell its musl version), ("", "") for another one
+    (methods/common.py this_libc names the build machine's the same way). os.confstr, never
+    platform.libc_ver(), which reads the whole interpreter file where it finds no glibc."""
+    try:
+        libc, _, version = (os.confstr("CS_GNU_LIBC_VERSION") or "").partition(" ")
+    except (AttributeError, ValueError, OSError):  # no confstr (Windows), no such name, not glibc
+        libc = version = ""
+    if libc == "glibc":
+        return libc, version
+    return ("musl", "") if "musl" in (sysconfig.get_config_var("EXT_SUFFIX") or "") else ("", "")
+
+
+def _version(text: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in re.findall(r"[0-9]+", text)[:2])
+
+
+def _meets(floor: str) -> bool:
+    """Whether this machine loads what a target's wheels were built for (_pyz.json "floor", from
+    their tags: methods/common.py platform_floor): "glibc 2.28" (a glibc at least that new),
+    "musl", "glibc" (wheels built on a glibc machine), "macos 13.0" (at least that macOS), ""
+    (anything). A key does not tell glibc from musl, nor the versions."""
+    family, _, version = floor.partition(" ")
+    if not family:
+        return True
+    if family == "macos":
+        have = platform.mac_ver()[0]
+        if have.startswith("10.16"):
+            return True  # a Python built with an old SDK names any macOS from 11 on so: unknown
+    else:
+        libc, have = _libc()
+        if libc != family:
+            return False
+    return not version or _version(have) >= _version(version)
+
+
+def _machine() -> str:
+    """What _meets compared, for the refusal: glibc 2.39, musl, macos 15.1."""
+    if sys.platform == "darwin":
+        return f"macos {platform.mac_ver()[0]}"
+    return " ".join(_libc()).strip() or "no glibc"
 
 
 def _cache_root(name: str) -> Path:
@@ -282,16 +327,18 @@ def main() -> None:
             sys.exit(f"{info['name']}: needs Python {need[0]}.{need[1]} or newer (you have {platform.python_version()})")
         key = _key()
         abis = info.get("abi") or {}  # the extension ABIs of each target's binaries
+        floors = info.get("floor") or {}  # what each target's wheels need of the machine
         mine = _abi()
-        if key in info["targets"] and (not abis.get(key) or not mine or mine in abis[key]):
+        if key in info["targets"] and (not abis.get(key) or not mine or mine in abis[key]) and _meets(floors.get(key, "")):
             flavour, prefixes = key, ["common/", f"targets/{key}/"]
         elif info["pure"]:
             flavour, prefixes = "pure", ["common/"]  # the .py of a compiled module works everywhere
         else:
-            built = [t + (f" ({', '.join(abis[t])})" if abis.get(t) else "") for t in info["targets"]]
+            facts = {t: [*abis.get(t, []), *([floors[t]] if floors.get(t) else [])] for t in info["targets"]}
+            built = [t + (f" ({', '.join(facts[t])})" if facts[t] else "") for t in info["targets"]]
+            here = [key, *([mine] if key in info["targets"] and mine else []), *([_machine()] if floors.get(key) else [])]
             sys.exit(
-                f"{info['name']}: this .pyz has no build for this interpreter and platform "
-                f"({key}{', ' + mine if key in info['targets'] and mine else ''}).\n"
+                f"{info['name']}: this .pyz has no build for this interpreter and platform ({', '.join(here)}).\n"
                 f"  Built for: {', '.join(built)}"
             )
         cached = True

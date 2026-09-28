@@ -956,6 +956,156 @@ def test_pyz_bootstrap_takes_no_target_built_for_another_abi(tmp_path: Path, pur
     assert r.returncode == 0 and r.stdout.split()[:2] == ["ok", "target"], r.stderr  # its own ABI: the target
 
 
+@pytest.mark.parametrize(
+    ("tags", "floor"),
+    [
+        # librt's one wheel: any of its tags is enough, so the least of them
+        ([["cp314-cp314-manylinux_2_17_x86_64", "cp314-cp314-manylinux2014_x86_64", "cp314-cp314-manylinux_2_28_x86_64"]], "glibc 2.17"),
+        # the newest glibc a wheel of the target needs (a compressed tag set counts as its tags)
+        ([["cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64"], ["py3-none-manylinux_2_28_x86_64"], ["py3-none-any"]], "glibc 2.28"),
+        ([["cp311-cp311-manylinux2010_x86_64"], ["cp311-cp311-manylinux1_x86_64"]], "glibc 2.12"),
+        ([["cp314-cp314-musllinux_1_2_x86_64"]], "musl"),  # a build made on Alpine
+        ([["cp314-cp314-macosx_11_0_arm64"], ["cp314-cp314-macosx_13_0_arm64", "cp314-cp314-macosx_14_0_arm64"]], "macos 13.0"),
+        ([["cp314-cp314-macosx_10_9_x86_64"]], "macos 10.9"),
+        ([["cp314-cp314-linux_x86_64"]], "glibc"),  # built from its sdist on this (glibc) machine
+        ([["cp314-cp314-linux_x86_64"], ["cp314-cp314-manylinux_2_28_x86_64"]], "glibc 2.28"),
+        ([["cp314-cp314-manylinux_2_17_x86_64.musllinux_1_1_x86_64"]], ""),  # one wheel for both C libraries
+        ([["cp314-cp314-win_amd64"], ["py3-none-any"]], ""),  # Windows wheels need nothing more
+        ([["py3-none-any"]], ""),
+        ([], ""),
+    ],
+)
+def test_platform_floor_reads_what_the_wheels_need(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tags: list[list[str]], floor: str) -> None:
+    monkeypatch.setattr(common, "this_libc", lambda: "glibc")
+    for n, wheel in enumerate(tags):
+        info = tmp_path / f"dep{n}-1.0.dist-info"
+        info.mkdir()
+        (info / "WHEEL").write_text("Wheel-Version: 1.0\n" + "".join(f"Tag: {t}\n" for t in wheel), encoding="utf-8")
+    assert common.platform_floor(tmp_path) == floor
+
+
+@pytest.mark.parametrize(
+    ("confstr", "ext_suffix", "libc"),
+    [
+        ("glibc 2.39", ".cpython-314-x86_64-linux-gnu.so", "glibc"),
+        (OSError(22, "Invalid argument"), ".cpython-314-x86_64-linux-musl.so", "musl"),  # os.confstr on musl
+        (OSError(22, "Invalid argument"), ".cpython-312.so", ""),  # another C library (Android)
+        (None, ".cpython-314-darwin.so", ""),
+    ],
+)
+def test_the_build_machine_and_the_bootstrap_name_the_c_library_alike(monkeypatch: pytest.MonkeyPatch, confstr: object, ext_suffix: str, libc: str) -> None:
+    # A wheel built on the build machine (linux_x86_64) needs its C library
+    import types
+
+    def fake_confstr(name: str) -> str | None:
+        assert name == "CS_GNU_LIBC_VERSION"
+        if isinstance(confstr, OSError):
+            raise confstr
+        return confstr if isinstance(confstr, str) else None
+
+    fake_sysconfig = types.SimpleNamespace(get_config_var=lambda name: ext_suffix if name == "EXT_SUFFIX" else None)
+    monkeypatch.setattr(common, "sys", types.SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(common, "os", types.SimpleNamespace(confstr=fake_confstr))
+    monkeypatch.setattr(common, "sysconfig", fake_sysconfig)
+    assert common.this_libc() == libc
+    namespace = _bootstrap_namespace()
+    namespace.update(os=types.SimpleNamespace(confstr=fake_confstr), sysconfig=fake_sysconfig)
+    assert namespace["_libc"]()[0] == libc
+
+
+@pytest.mark.parametrize(
+    ("confstr", "ext_suffix", "mac", "floor", "meets"),
+    [
+        ("glibc 2.39", ".cpython-314-x86_64-linux-gnu.so", "", "glibc 2.28", True),
+        ("glibc 2.39", ".cpython-314-x86_64-linux-gnu.so", "", "glibc 2.40", False),  # newer wheels than this glibc
+        ("glibc 2.17", ".cpython-314-x86_64-linux-gnu.so", "", "glibc 2.28", False),  # CentOS 7
+        ("glibc 2.39", ".cpython-314-x86_64-linux-gnu.so", "", "glibc", True),
+        ("glibc 2.39", ".cpython-314-x86_64-linux-gnu.so", "", "musl", False),  # a build made on Alpine
+        ("glibc 2.39", ".cpython-314-x86_64-linux-gnu.so", "", "", True),
+        (OSError(22, "Invalid argument"), ".cpython-314-x86_64-linux-musl.so", "", "glibc 2.17", False),  # Alpine
+        (OSError(22, "Invalid argument"), ".cpython-314-x86_64-linux-musl.so", "", "glibc", False),
+        (OSError(22, "Invalid argument"), ".cpython-314-x86_64-linux-musl.so", "", "musl", True),
+        (OSError(22, "Invalid argument"), ".cpython-312.so", "", "glibc 2.17", False),  # Android's C library
+        (OSError(22, "Invalid argument"), ".cpython-312.so", "", "musl", False),
+        (None, ".cpython-314-darwin.so", "14.5", "macos 13.0", True),
+        (None, ".cpython-314-darwin.so", "12.7.6", "macos 13.0", False),
+        (None, ".cpython-314-darwin.so", "26.0", "macos 10.9", True),
+        (None, ".cpython-314-darwin.so", "10.16", "macos 13.0", True),  # an old SDK's name for any macOS 11+
+    ],
+)
+def test_pyz_bootstrap_meets_what_the_wheels_need(confstr: object, ext_suffix: str, mac: str, floor: str, meets: bool) -> None:
+    # A key does not tell glibc from musl nor their versions: a musl Python (Alpine) took the
+    # target of a glibc build and died in "No module named 'librt.base64'"
+    import types
+
+    def fake_confstr(name: str) -> str | None:
+        if isinstance(confstr, OSError):
+            raise confstr
+        return confstr if isinstance(confstr, str) else None
+
+    namespace = _bootstrap_namespace()
+    namespace.update(
+        os=types.SimpleNamespace(confstr=fake_confstr),
+        sysconfig=types.SimpleNamespace(get_config_var=lambda name: ext_suffix if name == "EXT_SUFFIX" else None),
+        platform=types.SimpleNamespace(mac_ver=lambda: (mac, ("", "", ""), "")),
+    )
+    assert namespace["_meets"](floor) is meets
+
+
+def _floors_of_this_machine() -> tuple[str, str]:
+    """A floor this machine does not meet, and one it meets."""
+    import platform
+
+    if sys.platform == "darwin":
+        return "macos 99.0", "macos 10.9"
+    if sys.platform == "win32":
+        return "glibc 2.5", ""  # no glibc there; Windows wheels need nothing more than their key
+    if platform.libc_ver()[0] != "glibc":
+        pytest.skip("a Linux without glibc")
+    return "glibc 99.0", "glibc 2.5"
+
+
+@pytest.mark.parametrize("pure", [False, True])
+def test_pyz_bootstrap_takes_no_target_this_machine_cannot_load(tmp_path: Path, pure: bool) -> None:
+    import sysconfig
+
+    key = _host_key()
+    mine = common.abi_tag(sysconfig.get_config_var("EXT_SUFFIX") or "")
+    unmet, met = _floors_of_this_machine()
+    files = {"common/app/main.py": MAIN_WAITS, "common/lib/lazymod.py": "WHERE = 'common'\n", f"targets/{key}/lib/lazymod.py": "WHERE = 'target'\n"}
+    other = fake_pyz(tmp_path / "other.pyz", build_id=f"o{pure}", targets=[key], pure=pure, files=files, floor={key: unmet})
+    r = run_pyz(other, pyz_env(tmp_path / "cache"))
+    if pure:
+        assert r.returncode == 0 and r.stdout.split()[:2] == ["ok", "common"], r.stderr
+    else:
+        assert r.returncode == 1 and "Traceback" not in r.stderr, r.stderr
+        assert f"no build for this interpreter and platform ({key}, {mine}, " in r.stderr
+        assert f"Built for: {key} ({unmet})" in r.stderr
+    for floor in ([met] if met else []) + (["musl"] if unmet.startswith("glibc 9") else []):
+        # its own C library and version: the target; and a musl build on this glibc machine: not
+        build = fake_pyz(tmp_path / "met.pyz", build_id=f"m{pure}{floor[:1]}", targets=[key], pure=pure, files=files, floor={key: floor})
+        r = run_pyz(build, pyz_env(tmp_path / "cache"))
+        taken = floor == met
+        assert r.stdout.split()[:2] == (["ok", "target"] if taken else ["ok", "common"] if pure else []), (floor, r.stderr)
+
+
+def test_pyz_records_what_every_targets_wheels_need(tmp_path: Path) -> None:
+    from runner.methods import pyz
+
+    root = tmp_path / "root"
+    _wheel(root / "targets" / "a" / "lib", "dep", "1.0", "cp314-cp314-manylinux_2_28_x86_64")
+    _wheel(root / "targets" / "b" / "lib", "dep", "1.0", "cp314-cp314-win_amd64")
+    (root / "targets" / "c" / "app").mkdir(parents=True)  # a mypyc overlay alone
+    assert pyz._target_floors(root, ["a", "b", "c"]) == {"a": "glibc 2.28"}
+    # pyz-merge records what the libs it wrote need
+    parts = [
+        fake_pyz(tmp_path / "p1.pyz", targets=[LINUX], pure=False, host=LINUX, files={"common/app/main.py": MERGE_MAIN, f"targets/{LINUX}/lib/dep-1.0.dist-info/WHEEL": "Tag: cp314-cp314-manylinux_2_17_x86_64\n"}),
+        fake_pyz(tmp_path / "p2.pyz", targets=[MAC], pure=False, host=MAC, files={"common/app/main.py": MERGE_MAIN, f"targets/{MAC}/lib/dep-1.0.dist-info/WHEEL": "Tag: cp314-cp314-macosx_11_0_arm64\n"}),
+    ]
+    info, _ = _merge(parts, tmp_path / "m.pyz")
+    assert info["floor"] == {LINUX: "glibc 2.17", MAC: "macos 11.0"}
+
+
 def _old_pythons() -> list[str]:
     """Interpreters older than 3.11 on this machine (macOS's /usr/bin/python3 is 3.9)."""
     found: dict[str, str] = {}
@@ -1377,6 +1527,7 @@ def test_pyz_platform_wheel_without_extension_is_native(sandbox: Path, monkeypat
     assert info["pure"] is False and info["targets"] == sorted([LINUX, WIN])
     assert f"targets/{WIN}/lib/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe" in names
     assert "runs on:" in capsys.readouterr().err
+    assert info["floor"] == {LINUX: "glibc 2.17"}  # the bootstrap: never on musl nor an older glibc
 
 
 def test_pyz_mypyc_overlay_holds_only_extensions(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:

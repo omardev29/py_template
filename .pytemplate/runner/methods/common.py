@@ -522,19 +522,76 @@ def _drop_build_records(info: Path) -> None:
         record.write_text("".join(kept), encoding="utf-8", newline="")
 
 
-def _platform_wheel(wheel: Path) -> bool:
-    """True when a *.dist-info/WHEEL declares an ABI or platform tag (cp314-cp314-..., py3-none-win_amd64)."""
+def _wheel_tags(wheel: Path) -> list[str]:
+    """The Tag lines of a *.dist-info/WHEEL (cp314-cp314-manylinux_2_28_x86_64, py3-none-any...)."""
     try:
         text = wheel.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return False
-    for line in text.splitlines():
-        key, _, value = line.partition(":")
-        if key.strip().lower() == "tag":
-            parts = value.strip().split("-")
-            if len(parts) == 3 and (parts[1] != "none" or parts[2] != "any"):
-                return True
+        return []
+    return [value.strip() for key, _, value in (line.partition(":") for line in text.splitlines()) if key.strip().lower() == "tag"]
+
+
+def _platform_wheel(wheel: Path) -> bool:
+    """True when a *.dist-info/WHEEL declares an ABI or platform tag (cp314-cp314-..., py3-none-win_amd64)."""
+    for tag in _wheel_tags(wheel):
+        parts = tag.split("-")
+        if len(parts) == 3 and (parts[1] != "none" or parts[2] != "any"):
+            return True
     return False
+
+
+def this_libc() -> str:
+    """The C library the running Python uses on Linux: glibc (os.confstr), musl (its EXT_SUFFIX
+    names it) or "" (another one: Android's). The pyz bootstrap's _libc tells them apart alike."""
+    if sys.platform != "win32":
+        with contextlib.suppress(ValueError, OSError):  # no such name (macOS), not glibc (musl)
+            if (os.confstr("CS_GNU_LIBC_VERSION") or "").startswith("glibc "):
+                return "glibc"
+    return "musl" if "musl" in (sysconfig.get_config_var("EXT_SUFFIX") or "") else ""
+
+
+# The glibc of the legacy manylinux tags (PEP 600 names the others manylinux_X_Y)
+_LEGACY_MANYLINUX = {"manylinux1": (2, 5), "manylinux2010": (2, 12), "manylinux2014": (2, 17)}
+
+
+def _tag_floor(tag: str) -> tuple[str, tuple[int, ...]] | None:
+    """What a wheel's platform tag needs of the machine: ("glibc", (2, 28)) for
+    manylinux_2_28_x86_64, ("musl", ()) for musllinux (a Python cannot tell its musl version),
+    ("macos", (13, 0)) for macosx_13_0_arm64, this machine's C library for a wheel built here
+    (linux_x86_64: its version unknown), None for the rest (win_amd64, any)."""
+    if m := re.fullmatch(r"manylinux_(\d+)_(\d+)_\w+", tag):
+        return "glibc", (int(m[1]), int(m[2]))
+    if m := re.fullmatch(r"(manylinux1|manylinux2010|manylinux2014)_\w+", tag):
+        return "glibc", _LEGACY_MANYLINUX[m[1]]
+    if tag.startswith("musllinux_"):
+        return "musl", ()
+    if m := re.fullmatch(r"macosx_(\d+)_(\d+)_\w+", tag):
+        return "macos", (int(m[1]), int(m[2]))
+    if tag.startswith("linux_") and (libc := this_libc()):
+        return libc, ()
+    return None
+
+
+def platform_floor(lib: Path) -> str:
+    """What the platform wheels installed in a --target folder need of the machine that loads them
+    (pyz's _pyz.json "floor", which the bootstrap's _meets compares): "glibc 2.28" (the newest
+    glibc one of them needs), "musl", "macos 13.0", "glibc" (a wheel built on the build machine),
+    or "" (pure or Windows wheels). A wheel with several tags needs only the least of them."""
+    need: dict[str, tuple[int, ...]] = {}
+    for wheel in lib.glob("*.dist-info/WHEEL"):
+        options: dict[str, tuple[int, ...]] = {}
+        for tag in _wheel_tags(wheel):
+            for plat in tag.split("-")[-1].split("."):  # a compressed tag set: a.b
+                if found := _tag_floor(plat):
+                    family, version = found
+                    options[family] = min(options.get(family, version), version)
+        if len(options) == 1:  # a wheel for several C libraries needs none of them in particular
+            ((family, version),) = options.items()
+            need[family] = max(need.get(family, version), version)
+    if len(need) != 1:
+        return ""  # nothing needed, or wheels of two C libraries: no machine has both
+    ((family, version),) = need.items()
+    return f"{family} {'.'.join(map(str, version))}".rstrip()
 
 
 # The extension ABI in a file name (templates/pyz/__main__.py has the same ABI_RE and abi_tag,

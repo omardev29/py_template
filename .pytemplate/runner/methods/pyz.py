@@ -188,6 +188,7 @@ def build(req: BuildRequest) -> Path:
         "host": host.key,  # pyz-merge: the platform a pure part's common/lib was resolved for
         "deps": common.requirements_digest(requirements),  # pyz-merge: parts of one build lock the same set
         "abi": _target_abis(root, target_keys),  # the bootstrap: a key alone misses PyPy 8, 3.14t
+        "floor": _target_floors(root, target_keys),  # ...and a musl Python, an older glibc or macOS
     }
     (root / "_pyz.json").write_text(json.dumps(info, indent=2), encoding="utf-8", newline="\n")
     shutil.copy2(TEMPLATES / "pyz" / "__main__.py", root / "__main__.py")
@@ -224,6 +225,15 @@ def _target_abis(root: Path, keys: list[str]) -> dict[str, list[str]]:
     them: a PyPy 8 (pp80) took the pp311 target of a PyPy 7.3 build (pp73) and died in an
     ImportError, where a missing build gives a clear message."""
     return {key: abis for key in keys if (abis := common.extension_abis(root / "targets" / key))}
+
+
+def _target_floors(root: Path, keys: list[str]) -> dict[str, str]:
+    """_pyz.json "floor": what the wheels of each target's lib/ need of the machine (the C library
+    and its oldest version, the oldest macOS: common.platform_floor), for the keys whose wheels
+    need anything. The bootstrap takes a target only where they load: a musl Python (Alpine) took
+    the target of a glibc build, and a glibc older than its manylinux wheels, and died in an
+    ImportError of a dependency, where a missing build gives a clear message."""
+    return {key: floor for key in keys if (floor := common.platform_floor(root / "targets" / key / "lib"))}
 
 
 # --- pyz-merge ------------------------------------------------------------------------------------
@@ -402,7 +412,16 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
                         modes[name] = stat.S_IMODE(item.external_attr >> 16)
         targets = sorted(p.name for p in (root / "targets").iterdir()) if (root / "targets").is_dir() else []
         merged = {k: v for k, v in infos[0].items() if k != "host"}
-        merged.update({"targets": targets, "pure": pure, "build_id": _build_id(root), "merged": True, "abi": _target_abis(root, targets)})
+        merged.update(
+            {
+                "targets": targets,
+                "pure": pure,
+                "build_id": _build_id(root),
+                "merged": True,
+                "abi": _target_abis(root, targets),
+                "floor": _target_floors(root, targets),
+            }
+        )
         (root / "_pyz.json").write_text(json.dumps(merged, indent=2), encoding="utf-8", newline="\n")
         try:
             out.parent.mkdir(parents=True, exist_ok=True)

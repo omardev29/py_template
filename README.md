@@ -995,8 +995,9 @@ How far a pyz reaches depends on its dependencies; the build prints which case i
   another extension ABI of the same version: a free-threaded 3.14t, or PyPy 8 for a build made
   with PyPy 7.3), on Windows, Linux
   or macOS, x86_64 or aarch64 (Linux: glibc 2.28 on x86_64 or 2.35 on aarch64, or newer; macOS 13 or
-  newer). There are no musl or Android targets. The architecture is the Python's, not the
-  machine's: an x64 Python on Windows on ARM uses the `windows-x86_64` binaries.
+  newer). There are no musl or Android targets: a Python on musl (Alpine), or on a glibc or macOS
+  older than the target's wheels need, gets the same message. The architecture is the Python's,
+  not the machine's: an x64 Python on Windows on ARM uses the `windows-x86_64` binaries.
 - `[deploy.pyz] targets` is `["host"]` by default, so a local build that is not pure runs only on
   the platform that built it. For one file that serves several platforms, add target keys
   (`targets = ["host", "cp314-windows-x86_64"]`, or `--target KEY`: the locked CPython minor on
