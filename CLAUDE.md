@@ -274,7 +274,13 @@ it: sections 4.3 to 4.5) -> POSIX: `/opt/homebrew/bin`, `/usr/local/bin`, linuxb
 plugin also tries the nix default profile, `/run/current-system/sw/bin` and `/usr/bin`). On
 Windows the sh launcher uses `USERPROFILE` as home. On Linux/macOS a candidate needs an x bit
 (`test -x` in `pyt`, `pyt.ps1`'s `Test-Uv` through `[IO.File]::GetUnixFileMode`, which
-PowerShell < 7.3 lacks: then no mode check): a `uv` left without one is skipped.
+PowerShell < 7.3 lacks: then no mode check): a `uv` left without one is skipped. So is a
+symbolic link whose target is gone (an uninstalled uv's link: pipx, Homebrew, WinGet's `Links`
+folder), which `File.Exists` and `if exist` see as a file: `pyt` asks `test -f`, `pyt.ps1`'s
+`Test-Uv` and `pyt.cmd`'s `:opens` open the file (it won, and the run stopped with exit 126;
+`test_launcher_win.test_ps1_skips_a_uv_link_whose_target_is_gone`,
+`test_a_uv_link_whose_target_is_gone_is_skipped_on_windows`). `pyt.cmd`'s PATH lookup names
+only the first `uv.exe` on PATH: after a stale one it goes on with the install folders.
 
 Install hints: Windows prints the PowerShell installer, winget and scoop (never curl); POSIX
 prints curl, brew and pipx. `pyt` (stdin and stderr are TTYs) and `pyt.ps1`

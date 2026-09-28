@@ -71,7 +71,9 @@ set "PT_GLOBAL=1"
 set "PT_PARENT="
 set "PT_UV="
 if defined UV if exist "%UV%" if not exist "%UV%\" set "PT_UV=%UV%"
+if defined PT_UV call :opens 2>nul
 if not defined PT_UV for %%I in (uv.exe) do set "PT_UV=%%~$PATH:I"
+if defined PT_UV call :opens 2>nul
 if not defined PT_UV call :uv_in_dirs
 if not defined PT_UV call :uv_in_registry
 if not defined PT_UV goto :no_uv
@@ -189,10 +191,20 @@ if "%PT_E:~0,2%"=="\\" goto :try_absolute
 exit /b 0
 :try_absolute
 if exist "%PT_E%\uv.exe" set "PT_UV=%PT_E%\uv.exe"
+if defined PT_UV call :opens 2>nul
 exit /b 0
 
 :probe
 if defined PT_UV exit /b 0
 if "%~1"=="" exit /b 0
 if exist "%~1\uv.exe" set "PT_UV=%~1\uv.exe"
+if defined PT_UV call :opens 2>nul
+exit /b 0
+
+:opens
+rem if exist is also true for a symbolic link whose target is gone (an
+rem uninstalled uv, its link left in WinGet's Links folder), which then
+rem won over the next uv: the file must open (a failed redirection runs
+rem what follows the double bar).
+<"%PT_UV%" type nul >nul || set "PT_UV="
 exit /b 0

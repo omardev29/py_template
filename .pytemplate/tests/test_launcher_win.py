@@ -1145,3 +1145,61 @@ def test_ps1_skips_a_uv_without_exec_bit(tmp_path: Path) -> None:
     env = _clean_env(HOME=str(home), PATH=f"{broken[0].parent}:/usr/bin:/bin", UV=str(broken[0]), CI="1", **dict.fromkeys(drop))
     r = _run([exe, "-NoProfile", "-NonInteractive", "-File", str(PS1), "x"], ROOT, env)
     assert (r.returncode, r.stdout.strip()) == (7, f"FAKE {good}"), (r.returncode, r.stdout, r.stderr)
+
+
+@posix_only
+def test_ps1_skips_a_uv_link_whose_target_is_gone(tmp_path: Path) -> None:
+    """File.Exists is true for a symbolic link whose target is gone (an uninstalled uv's link:
+    pipx, Homebrew, a hand-made one), and the x-bit check that then failed counted as passed: a
+    stale link ($UV, first on PATH, in ~/.local/bin) won, and the hand-over stopped with exit
+    126 where ./pyt goes on to the next uv. A uv must open."""
+    exe = _ps_exe("pwsh")
+    home = tmp_path / "home"
+    stale = [tmp_path / "path" / "uv", home / ".local" / "bin" / "uv"]
+    good = home / ".cargo" / "bin" / "uv"
+    for f in [*stale, good]:
+        f.parent.mkdir(parents=True)
+    for f in stale:
+        f.symlink_to(tmp_path / "gone" / "uv")
+    good.write_text('#!/bin/sh\necho "FAKE $0"\nexit 7\n', encoding="ascii", newline="\n")
+    good.chmod(0o755)
+    drop = ("UV_INSTALL_DIR", "XDG_BIN_HOME", "XDG_DATA_HOME", "CARGO_HOME")
+    env = _clean_env(HOME=str(home), PATH=f"{stale[0].parent}:/usr/bin:/bin", UV=str(stale[0]), CI="1", **dict.fromkeys(drop))
+    r = _run([exe, "-NoProfile", "-NonInteractive", "-File", str(PS1), "x"], ROOT, env)
+    assert (r.returncode, r.stdout.strip()) == (7, f"FAKE {good}"), (r.returncode, r.stdout, r.stderr)
+
+
+def _stale_uv_link(tmp: Path) -> Path:
+    """A uv.exe link whose target is gone, in a folder of its own (skips where Windows refuses
+    to make a symbolic link: no Developer Mode and no administrator)."""
+    stale = tmp / "stale"
+    stale.mkdir()
+    try:
+        (stale / "uv.exe").symlink_to(tmp / "gone" / "uv.exe")
+    except OSError as e:
+        pytest.skip(f"cannot make a symbolic link here: {e}")
+    return stale / "uv.exe"
+
+
+@windows_only
+@pytest.mark.parametrize("launcher", ["cmd", *PS_NAMES])
+def test_a_uv_link_whose_target_is_gone_is_skipped_on_windows(launcher: str, tmp_path: Path) -> None:
+    """A link left in WinGet's Links folder by an uninstalled uv passes `if exist` (pyt.cmd: UV
+    and the PATH lookup too) and File.Exists (pyt.ps1): it won over the uv of an install folder,
+    and the run failed. A uv must open."""
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if not uv:
+        pytest.skip("uv not found")
+    stale = _stale_uv_link(tmp_path)
+    good = tmp_path / ".local" / "bin"
+    good.mkdir(parents=True)
+    shutil.copyfile(uv, good / "uv.exe")
+    system = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    env = {**_hidden_env(tmp_path, f"{stale.parent};{system}"), "UV": str(stale)}  # USERPROFILE: tmp_path
+    if launcher == "cmd":
+        r = _run([str(CMD), "__probe", "0", "0", "s"], ROOT, env)
+    else:
+        argv = [_ps_exe(launcher), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(PS1), "__probe", "0", "0", "s"]
+        r = _run(argv, ROOT, env)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    _check(_probes(r)[0], ROOT, launcher if launcher == "cmd" else "ps1:", ["s"])

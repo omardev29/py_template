@@ -48,8 +48,12 @@ $uvExe = if ($onWindows) { 'uv.exe' } else { 'uv' }
 # A uv that can run. On Linux/macOS it also needs an x bit, like `test -x` in ./pyt
 # (Get-Command and File.Exists accept a uv left without one by a broken download).
 # GetUnixFileMode needs .NET 7 (PowerShell 7.3+): older versions skip the mode check.
+# File.Exists is also true for a symbolic link whose target is gone (an uninstalled uv's
+# link: pipx, Homebrew, WinGet's Links folder), which then won over the next uv: the file
+# must open.
 function Test-Uv([string] $Path) {
     if (-not $Path -or -not [IO.File]::Exists($Path)) { return $false }
+    try { [IO.File]::OpenRead($Path).Dispose() } catch { return $false }
     if ($onWindows) { return $true }
     try { return ([int][IO.File]::GetUnixFileMode($Path) -band 73) -ne 0 } catch { return $true }
 }
