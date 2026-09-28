@@ -75,7 +75,15 @@ function M.setup()
         end
         -- a cold `python -m debugpy.adapter` (or uv resolving debugpy) can take more than
         -- nvim-dap's default 4 s to answer `initialize`, mostly on Windows
-        adapter.options = vim.tbl_extend("keep", adapter.options or {}, { initialize_timeout_sec = 30 })
+        local options = adapter.options or {}
+        if options.initialize_timeout_sec == nil then
+          options.initialize_timeout_sec = 30
+        end
+        -- the adapter runs a Python (`-m debugpy.adapter`): a caller's PYTHONHOME kills it before
+        -- it answers, a PYTHONPATH can shadow a stdlib module, as for every tool the runner starts
+        -- (proc.base_env). nvim-dap merges options.env over the environment; "" is unset for CPython.
+        options.env = vim.tbl_extend("force", options.env or {}, { PYTHONHOME = "", PYTHONPATH = "" })
+        adapter.options = options
       end
       cb(adapter)
     end, config)

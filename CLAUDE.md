@@ -3200,8 +3200,11 @@ LazyVim wiring:
   to the newest release whenever uv's index cache expires; a new Node can raise the
   glibc/macOS floor), else Mason); pyright comes from Mason and
   needs Node.js. Pylance exists only in VS
-  Code. pyright/basedpyright find `.venv` through `pyrightconfig.json` `venvPath`/`venv`, so
-  venv-selector's automatic activation is turned off.
+  Code. The server's `cmd_env` clears `PYTHONHOME` and `PYTHONPATH` (empty, unset for CPython;
+  vim.lsp merges it over the environment): the uvx basedpyright runs a Python entry point that a
+  caller's `PYTHONHOME` kills before it starts, so no Python language server ran at all; harmless
+  for a Node or native server. pyright/basedpyright find `.venv` through `pyrightconfig.json`
+  `venvPath`/`venv`, so venv-selector's automatic activation is turned off.
 - ruff server from `.venv` with `mason = false` (same version as `./pyt check`). Mason
   prepends its bin dir to PATH after `.lazy.lua` runs, so always use absolute `.venv` paths.
 - mypy (nvim-lint, core in LazyVim): `cwd = root` (finds `.mypy.ini`; mypy then prints paths
@@ -3212,10 +3215,16 @@ LazyVim wiring:
   setup` in a terminal, or any `uv run --locked` of run/test/check): `cmd` is a function
   resolved at every run, like `condition`, and the Windows PATH prefix is built from the path
   even before `.venv` exists (`test_mypy_linter_follows_a_venv_created_later`). On Windows
-  nvim-lint wraps every linter in `cmd.exe /C`, where a quoted absolute path breaks
-  with spaces or `& ^ %`: the linter runs the bare name `mypy` with `.venv\Scripts` first on
-  PATH. nvim-lint REPLACES the environment when a linter has `env`, so it passes the full
-  environment plus `PYTHONUTF8=1`, minus `VIRTUAL_ENV`. nvim-lint only replaces a linter's
+  nvim-lint wraps every linter in `cmd.exe /C`, where an absolute path breaks
+  with a space or `& ^ %`: the linter runs the bare name `mypy` with `.venv\Scripts` first on
+  PATH, and it appends the buffer's path (and `--python-executable`) root-relative rather than
+  absolute (`args` a function, `append_fname = false`; the linter's `cwd = root`, so a relative
+  path carries none of the root's own `& ^ %`, which libuv passes to cmd.exe unquoted;
+  `test_windows_mypy_linter_uses_root_relative_paths`). nvim-lint REPLACES the environment when a
+  linter has `env`, so it passes the full environment plus `PYTHONUTF8=1`, minus `VIRTUAL_ENV`,
+  `PYTHONHOME` and `PYTHONPATH` (as `proc.base_env` drops them: a `PYTHONHOME` kills the Python
+  before it checks anything and the pattern parser then shows no diagnostic, silently).
+  nvim-lint only replaces a linter's
   diagnostics when the linter runs, so once mypy no longer runs (`integrations.mypy_available`:
   the `off` profile, no `.venv` mypy) `integrations.forget_mypy` drops them: `init.refresh` for
   every buffer, the linter's `condition` for the buffer it is asked about (after `mode --typing
@@ -3224,6 +3233,9 @@ LazyVim wiring:
   on Windows. Adapter order (`dap.adapter`): `.venv` python with debugpy (dev group), the tools
   python, Mason's debugpy venv python, an ephemeral `uv run --no-project --with debugpy`
   adapter; `initialize_timeout_sec = 30` (a cold adapter can take more than the default 4 s).
+  The adapter's `options.env` clears `PYTHONHOME` and `PYTHONPATH` (empty, unset for CPython;
+  nvim-dap merges it over the environment): it runs a Python (`-m debugpy.adapter`) that a
+  caller's `PYTHONHOME` would kill before it answers, as for every tool the runner starts.
   debugpy is looked for by listing `lib/python3*` (`init.subdirs`, as the WinGet folders of the uv
   search), never with `vim.fn.glob`, and every path goes through `init.normalize`
   (`vim.fs.normalize` without its `$VAR` expansion): under a project folder named with `[ ]`,
@@ -3239,7 +3251,10 @@ LazyVim wiring:
   two lines with `.venv` + `.venv-pypy` and builds a broken path; its `uv run` fallback also
   syncs); `discovery.filter_dir` skips dot-dirs (`.venv*`, `.build`), `dist`, `build`,
   `typings`. neotest cannot pass `-o pythonpath=<stage>` or `PYTEMPLATE_*`, so mypyc/all runs
-  go through the `pyt: test` task.
+  go through the `pyt: test` task (which the runner starts, so `proc.base_env` clears
+  `PYTHONHOME`/`PYTHONPATH` there); the direct cpython neotest run of a test inherits Neovim's
+  environment, and neotest-python exposes no `env`, so a caller's `PYTHONHOME` reaches its
+  pytest - out of the plugin's reach, like `.mypy.ini` and nvim-dap's own launch.json provider.
 - overseer: the pytemplate provider (one template per command in `editor.json`, `report` and
   `compile` only with mypyc, plus every `[tasks]` entry) replaces the `.vscode/tasks.json` one
   (`disable_template_modules = {"overseer.template.vscode"}`), otherwise labels would be
@@ -5127,11 +5142,19 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   `integrations.lsp`, `integrations.mypy_linter`; 12.2). Test:
   `test_nvim_render.py::test_mypy_linter_follows_a_venv_created_later`. Goes: never.
 - **nvim-lint** (LIMITATION): a linter with `env` gets that table INSTEAD of the environment,
-  and on Windows every linter runs through `cmd.exe /C`, where a quoted absolute path breaks on
-  spaces or `& ^ %`. Fix: `integrations.mypy_linter` passes the whole environment plus
-  `PYTHONUTF8=1`, minus `VIRTUAL_ENV`, and on Windows the bare `mypy` with `.venv\Scripts` first
-  on PATH (12.2). Test: `test_workarounds.py::test_nvim_plugin_workarounds[mypy env]`,
-  `test_nvim_render.py::test_mypy_linter_follows_a_venv_created_later` (Windows). Goes: never.
+  and on Windows every linter runs through `cmd.exe /C`, where an absolute path breaks on
+  a space or `& ^ %` (libuv quotes a Windows argument only when it holds a space, tab or double
+  quote, so `C:\dev\R&D\...` reaches cmd.exe bare and is split at `&`). Fix:
+  `integrations.mypy_linter` passes the whole environment plus `PYTHONUTF8=1`, minus
+  `VIRTUAL_ENV`, `PYTHONHOME` and `PYTHONPATH` (proc.base_env drops the last two: a `PYTHONHOME`
+  kills mypy and the pattern parser then shows no diagnostic; the LSP servers and the debug
+  adapter clear them too, see `integrations.lsp` and `dap.setup` in 12.2), and on Windows the
+  bare `mypy` with `.venv\Scripts` first on PATH plus the buffer's path and `--python-executable`
+  as root-relative paths (the linter's `cwd = root`, `under_root`). Test:
+  `test_workarounds.py::test_nvim_plugin_workarounds[mypy env]`,
+  `test_nvim_render.py::test_mypy_linter_follows_a_venv_created_later` (Windows),
+  `test_plugin_python_tools_drop_pythonhome_and_pythonpath`,
+  `test_windows_mypy_linter_uses_root_relative_paths`. Goes: never.
 - **nvim-dap** (LIMITATION): it spawns adapters with a raw `uv.spawn` (no PATHEXT: Mason's
   `.cmd` shim fails on Windows), waits 4 s for `initialize` (a cold adapter needs more), and
   expands `${workspaceFolder}` to Neovim's cwd. Fix: `dap.adapter` (Lua) returns an absolute

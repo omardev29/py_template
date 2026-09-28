@@ -15,6 +15,45 @@ local function server(opts, name)
   return opts.servers[name]
 end
 
+-- proc.base_env drops PYTHONHOME and PYTHONPATH for every tool the runner starts: a PYTHONHOME
+-- kills a Python ("Failed to import encodings module"), a PYTHONPATH can shadow a stdlib module.
+-- The launchers and init.pyt_env keep them off the runner too. The plugin starts Python tools
+-- itself - mypy, the uvx basedpyright entry point, the debug adapter - so it clears them the same
+-- way. Empty is unset for CPython (like init.pyt_env); an LSP `cmd_env` and a dap `options.env`
+-- merge over the process environment, so "" clears them there.
+local NO_PYTHON_HOME = { PYTHONHOME = "", PYTHONPATH = "" }
+
+---A path inside the project as a root-relative native path. The mypy linter runs with cwd = root,
+---and on Windows nvim-lint wraps it in `cmd.exe /C`, which splits an absolute path at & (no space),
+---removes ^ and expands %NAME% before mypy sees it (libuv quotes an argument only when it holds a
+---space, tab or double quote). A relative path under root carries none of the root's own such
+---characters, so it survives (like the bare `mypy` the linter runs instead of an absolute path).
+local function under_root(path)
+  local root = pt.root()
+  if not root or not path or path == "" then
+    return path
+  end
+  -- under_root runs only on Windows (its caller checks pt.is_win), where a backslash is a
+  -- separator; vim.fs.normalize converts it only on a real Windows host, so fold it here too
+  -- (a POSIX backslash is a file-name character, but this is never reached off Windows).
+  local function fwd(p)
+    return (pt.normalize(p):gsub("\\", "/"))
+  end
+  local p = fwd(path)
+  local r = fwd(root):gsub("/+$", "")
+  local pc, rc = p, r
+  if pt.is_win then
+    pc, rc = p:lower(), r:lower()
+  end
+  if pc == rc then
+    return "."
+  end
+  if pc:sub(1, #rc + 1) == rc .. "/" then
+    return pt.native(p:sub(#rc + 2))
+  end
+  return pt.native(p)
+end
+
 -- --- which-key ---------------------------------------------------------------------------------
 
 function M.which_key(_, opts)
@@ -67,6 +106,10 @@ function M.lsp(_, opts)
   if cmd then
     s.cmd, s.mason = cmd, false
   end
+  -- the uvx basedpyright runs a Python entry point (pyright's Node server behind it); a caller's
+  -- PYTHONHOME kills it before it starts, a PYTHONPATH can shadow a stdlib module (NO_PYTHON_HOME).
+  -- vim.lsp merges cmd_env over the environment, and it is harmless for a Node or native server.
+  s.cmd_env = vim.tbl_extend("force", tbl(s.cmd_env), NO_PYTHON_HOME)
   -- ruff from .venv: the version pinned in uv.lock, the same one ./pyt check runs
   local ruff = server(opts, "ruff")
   ruff.enabled = true
@@ -95,6 +138,11 @@ function M.mypy_args()
   }
   local python = pt.venv_exe(info.envs.tools, "python")
   if info.pypy_enabled and info.typing.python_version and python then
+    -- on Windows the linter goes through `cmd.exe /C`, which mangles an absolute path holding
+    -- & ^ or %NAME%; the linter runs with cwd = root, so a root-relative path reaches mypy intact
+    if pt.is_win then
+      python = under_root(python)
+    end
     vim.list_extend(args, { "--python-version", info.typing.python_version, "--python-executable", python })
   end
   return args
@@ -105,6 +153,10 @@ local function mypy_env()
   local env = vim.fn.environ()
   env.PYTHONUTF8 = "1" -- like the runner (proc.base_env)
   env.VIRTUAL_ENV = nil
+  -- nvim-lint REPLACES the environment with this table, so dropping the keys (not "") is what
+  -- keeps mypy from dying on a caller's PYTHONHOME / a shadowing PYTHONPATH (NO_PYTHON_HOME)
+  env.PYTHONHOME = nil
+  env.PYTHONPATH = nil
   -- the path even before .venv exists: the linter is built once, ./pyt setup may come later
   local mypy = pt.venv_exe(pt.info().envs.tools, "mypy")
   if pt.is_win and mypy then
@@ -152,9 +204,18 @@ function M.mypy_linter()
     cmd = function()
       return pt.is_win and "mypy" or (pt.tool("mypy") or "mypy")
     end,
-    args = M.mypy_args(),
+    -- off Windows the absolute buffer path is appended by nvim-lint and reaches mypy as typed;
+    -- on Windows nvim-lint wraps the linter in `cmd.exe /C`, which mangles an absolute path with
+    -- & ^ or %NAME%, so we append the buffer's root-relative path ourselves (cwd = root). The
+    -- args are a function so the buffer is read at every run (nvim-lint calls it for the linted
+    -- buffer, the current one), like `cmd` (A9-05).
+    args = pt.is_win and function()
+      local out = M.mypy_args()
+      out[#out + 1] = under_root(vim.api.nvim_buf_get_name(0))
+      return out
+    end or M.mypy_args(),
     stdin = false,
-    append_fname = true,
+    append_fname = not pt.is_win,
     stream = "both",
     ignore_exitcode = true,
     cwd = pt.root(), -- finds .mypy.ini and prints paths relative to it (the parser needs that)

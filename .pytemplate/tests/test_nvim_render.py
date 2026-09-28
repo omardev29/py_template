@@ -777,6 +777,97 @@ def test_mypy_linter_follows_a_venv_created_later(tmp_path: Path) -> None:
     assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
 
 
+PYTHON_ENV_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+package.loaded["lint.linters.mypy"] = { parser = function() return {} end }
+package.loaded["dap-python"] = { setup = function() end }
+package.loaded["dap"] = { adapters = { python = function(cb) cb({ type = "executable", command = "python", args = { "x" } }) end } }
+local pt = require("pytemplate")
+pt.config.root = vim.env.PT_TEST_ROOT
+local integ = require("pytemplate.integrations")
+local errors = {}
+local function check(name, ok, msg)
+  if not ok then errors[#errors + 1] = name .. ": " .. tostring(msg) end
+end
+check("the caller exports PYTHONHOME/PYTHONPATH", vim.env.PYTHONHOME ~= nil and vim.env.PYTHONPATH ~= nil, "test setup")
+-- mypy (nvim-lint REPLACES the environment with linter.env, so the keys must be absent)
+local linter = integ.mypy_linter()
+check("mypy env drops PYTHONHOME", linter.env.PYTHONHOME == nil, tostring(linter.env.PYTHONHOME))
+check("mypy env drops PYTHONPATH", linter.env.PYTHONPATH == nil, tostring(linter.env.PYTHONPATH))
+check("mypy keeps PYTHONUTF8", linter.env.PYTHONUTF8 == "1", tostring(linter.env.PYTHONUTF8))
+-- the Python language server (vim.lsp merges cmd_env over the environment; "" is unset for CPython)
+local opts = {}
+integ.lsp(nil, opts)
+local ce = opts.servers[pt.lsp_name()].cmd_env
+check("lsp cmd_env clears PYTHONHOME/PYTHONPATH", ce ~= nil and ce.PYTHONHOME == "" and ce.PYTHONPATH == "", vim.inspect(ce))
+-- the debug adapter (`python -m debugpy.adapter`; nvim-dap merges options.env)
+local captured
+require("pytemplate.dap").setup()
+require("dap").adapters.python(function(a) captured = a end, {})
+local ae = captured and captured.options and captured.options.env
+check("dap adapter clears PYTHONHOME/PYTHONPATH", ae ~= nil and ae.PYTHONHOME == "" and ae.PYTHONPATH == "", vim.inspect(captured))
+check("dap keeps the initialize timeout", captured and captured.options.initialize_timeout_sec == 30, vim.inspect(captured))
+io.stdout:write(#errors == 0 and "PTLUA OK\n" or ("PTLUA FAIL\n" .. table.concat(errors, "\n") .. "\n"))
+vim.cmd(#errors == 0 and "qa!" or "cq!")
+"""
+
+
+def test_plugin_python_tools_drop_pythonhome_and_pythonpath(tmp_path: Path) -> None:
+    """The launchers, init.pyt_env and proc.base_env keep PYTHONHOME and PYTHONPATH off every
+    tool the runner starts (a PYTHONHOME kills a Python, a PYTHONPATH shadows the stdlib). The
+    tools the plugin starts itself must be cleared too: mypy (env), the uvx basedpyright Python
+    entry point (cmd_env) and the debug adapter (options.env). Else mypy diagnostics silently
+    vanish and no Python language server starts, while ./pyt check in the same shell works."""
+    project = _project(tmp_path, profile="warn", mypy=True)
+    env_extra = {"PYTHONHOME": str(tmp_path / "home"), "PYTHONPATH": str(tmp_path / "path")}
+    r = _headless_lua(tmp_path, PYTHON_ENV_CHECK, project, env_extra)
+    assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
+WIN_MYPY_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+package.loaded["lint.linters.mypy"] = { parser = function() return {} end }
+local pt = require("pytemplate")
+pt.is_win = true -- simulate the cmd.exe /C wrapping nvim-lint does on Windows, on any host
+pt.config.root = vim.env.PT_TEST_ROOT -- a path holding & (a cmd.exe metacharacter)
+local integ = require("pytemplate.integrations")
+local errors = {}
+local function check(name, ok, msg)
+  if not ok then errors[#errors + 1] = name .. ": " .. tostring(msg) end
+end
+local linter = integ.mypy_linter()
+check("no append_fname on Windows", linter.append_fname == false, tostring(linter.append_fname))
+check("args is a function on Windows", type(linter.args) == "function", type(linter.args))
+vim.api.nvim_buf_set_name(0, pt.config.root .. "/src/app.py")
+local args = linter.args()
+check("the file argument is root-relative (native), never the absolute path", args[#args] == "src\\app.py", tostring(args[#args]))
+local pe
+for i, a in ipairs(args) do
+  if a == "--python-executable" then pe = args[i + 1] end
+end
+check("--python-executable is root-relative too", pe == ".venv\\Scripts\\python.exe", tostring(pe))
+io.stdout:write(#errors == 0 and "PTLUA OK\n" or ("PTLUA FAIL\n" .. table.concat(errors, "\n") .. "\n"))
+vim.cmd(#errors == 0 and "qa!" or "cq!")
+"""
+
+
+def test_windows_mypy_linter_uses_root_relative_paths(tmp_path: Path) -> None:
+    r"""On Windows nvim-lint wraps the linter in `cmd.exe /C`, which splits an absolute path at &
+    (no space), removes ^ and expands %NAME% (libuv quotes only a space, tab or quote). The linter
+    runs with cwd = root, so the buffer path and --python-executable go as root-relative paths,
+    which carry none of the root's own such characters (A9-05)."""
+    project = tmp_path / "R&D" / "proj"
+    (project / ".pytemplate").mkdir(parents=True)
+    (project / "src").mkdir()
+    (project / "pytemplate.toml").write_text("", encoding="utf-8")
+    data = json.loads((ROOT / ".pytemplate" / "editor.json").read_text(encoding="utf-8"))
+    data["pypy_enabled"] = True
+    data["typing"].update(profile="warn", mypy=True, python_version="3.11")
+    (project / ".pytemplate" / "editor.json").write_text(json.dumps(data), encoding="utf-8")
+    r = _headless_lua(tmp_path, WIN_MYPY_CHECK, project)
+    assert "PTLUA OK" in r.stdout and r.returncode == 0, r.stdout + r.stderr
+
+
 BOM_CHECK = r"""
 vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
 local pt = require("pytemplate")
