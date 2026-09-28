@@ -61,7 +61,7 @@ from typing import IO, Any
 
 from . import envs, proc, ui
 from .config import Config
-from .e2e import check_ceiling, child_env, kill_tree, rmtree, scrub_env, termination_as_interrupt
+from .e2e import check_ceiling, child_env, kill_tree, rmtree, scrub_env, termination_as_interrupt, unusable
 from .presets import _git_path
 from .project import IS_WINDOWS, ROOT, TOOLS, check_private_dir, make_private_dir, scratch_name, venv_python
 from .ui import PytError
@@ -732,16 +732,24 @@ def default_base() -> Path:
 
 
 def prepare_base(base: Path, root: Path = ROOT) -> None:
-    if base.resolve() == root.resolve() or root.resolve() in base.resolve().parents:
-        raise PytError("selftest --mutation: the scratch base cannot be inside the project")
-    check_ceiling(base)  # the workers' git is kept inside it (child_env): refused before anything is made
-    if base.exists() and not base.is_dir():
-        raise PytError(f"selftest --mutation: {base} is not a directory")
-    check_private_dir(base, "scratch folder (TMPDIR)")
-    if base.is_dir() and any(base.iterdir()) and not (base / MARKER).is_file():
-        raise PytError(f"selftest --mutation: {base} is not empty and was not made by selftest --mutation (no {MARKER})")
-    make_private_dir(base, "scratch folder (TMPDIR)")
-    (base / MARKER).write_text("Made by ./pyt selftest --mutation: safe to delete.\n", encoding="utf-8", newline="\n")
+    try:  # a base it cannot look into (below a folder it may not enter: Path.exists raises there on
+        # Python 3.11-3.13; its own without the read bit; a link loop: RuntimeError on 3.11 and 3.12)
+        resolved = base.resolve()
+        if resolved == root.resolve() or root.resolve() in resolved.parents:
+            raise PytError("selftest --mutation: the scratch base cannot be inside the project")
+        check_ceiling(base)  # the workers' git is kept inside it (child_env): refused before anything is made
+        if base.exists() and not base.is_dir():
+            raise PytError(f"selftest --mutation: {base} is not a directory")
+        check_private_dir(base, "scratch folder (TMPDIR)")
+        if base.is_dir() and any(base.iterdir()) and not (base / MARKER).is_file():
+            raise PytError(f"selftest --mutation: {base} is not empty and was not made by selftest --mutation (no {MARKER})")
+    except (OSError, RuntimeError) as e:  # it was an internal-error traceback, exit 1
+        raise PytError(f"selftest --mutation: cannot use the scratch folder {base}: {unusable(e)}: set TMPDIR to another folder") from None
+    try:  # a TMPDIR below a file, in a folder it may not write, on a read-only mount
+        make_private_dir(base, "scratch folder (TMPDIR)")
+        (base / MARKER).write_text("Made by ./pyt selftest --mutation: safe to delete.\n", encoding="utf-8", newline="\n")
+    except OSError as e:  # it was an internal-error traceback, exit 1 (as --e2e's and --nvim's bases say it)
+        raise PytError(f"selftest --mutation: cannot create the scratch folder {base}: {e.strerror or e}: set TMPDIR to another folder") from None
 
 
 @contextmanager

@@ -3994,9 +3994,16 @@ short temp tree and unset `NVIM_APPNAME`.
   between two steps; checked again once it exists, `project.make_private_dir`: checked only
   before `mkdir(exist_ok=True)`, a folder another user made in between was taken,
   `test_e2e_plan.test_a_base_another_user_makes_after_the_check_is_refused`; a base it cannot create,
-  below a file or in a folder it may not write, is one error line, exit 2, and so is a link whose
+  below a file or in a folder it may not write, or whose marker it cannot write, is one error line,
+  exit 2 (`test_a_base_it_cannot_create_is_one_error_line`, `test_a_base_whose_marker_cannot_be_written_is_one_error_line`:
+  `--mutation`'s base and `--dir`'s marker were internal-error tracebacks), and so is a link whose
   folder is gone, for `--dir` and `--mutation`'s base too: `check_private_dir` stat()ed it, an
-  internal-error traceback, `test_e2e_plan.test_a_base_that_is_a_link_to_no_folder_is_one_error_line`); only a base carrying
+  internal-error traceback, `test_e2e_plan.test_a_base_that_is_a_link_to_no_folder_is_one_error_line`;
+  and so is one it cannot look into (`e2e.unusable`, "cannot use"): below a folder the user may not
+  enter, where Path.exists raises PermissionError on Python 3.11-3.13, one of the user's without its
+  read bit (iterdir, every Python), a link loop (Path.resolve raises RuntimeError on 3.11 and 3.12,
+  in `e2e.check_ceiling` too), each an internal-error traceback before,
+  `test_e2e_plan.test_a_base_it_cannot_look_into_is_one_error_line`); only a base carrying
   `.pytemplate-e2e` is wiped, and a symlinked or junctioned base loses only its link, its marker
   and its lock file (`e2e.rmtree` removes a link as a link and never chmods through one: a passing
   run left the folder it named at 0o200; `e2e._remove_base` unlinks the two files through the link

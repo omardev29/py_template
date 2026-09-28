@@ -462,6 +462,12 @@ def scrub_env(environ: Mapping[str, str], drop_dirs: Sequence[str] = ()) -> dict
     return env
 
 
+def unusable(e: OSError | RuntimeError) -> str:
+    """Why a scratch folder cannot be looked into: an OSError's reason (the message names the
+    folder already), or a link loop's RuntimeError (Path.resolve on Python 3.11 and 3.12)."""
+    return str(e.strerror or e) if isinstance(e, OSError) else str(e)
+
+
 def check_ceiling(base: Path) -> None:
     """Refuse a scratch folder (the base, --dir) that isolate_git cannot keep git inside:
     GIT_CEILING_DIRECTORIES is a list of folders separated by os.pathsep (':' on POSIX, ';' on
@@ -469,7 +475,10 @@ def check_ceiling(base: Path) -> None:
     parent of the projects, and the ceiling stops nothing: git in the base saw the user's
     repository around it, `new` skipped git init there and `setup` installed pytemplate's hook in
     that repository, where it stayed. Called before anything is created."""
-    parent = str(base.resolve().parent)
+    try:
+        parent = str(base.resolve().parent)
+    except RuntimeError as e:  # a link loop (Python 3.11 and 3.12): it was an internal-error traceback
+        raise PytError(f"cannot use {base}: {unusable(e)}: pick another folder") from None
     if os.pathsep in parent:
         raise PytError(
             f"{base} cannot hold the scratch projects: its parent folder {parent} holds {os.pathsep!r}, which "
@@ -1217,13 +1226,19 @@ def run_preset(ctx: Context, steps: list[Step], into: list[Result] | None = None
 
 
 def _prepare_base(base: Path) -> None:
-    if base.resolve() == ROOT or ROOT in base.resolve().parents:
-        raise PytError("selftest --e2e: the base dir cannot be inside this template")
-    if base.exists() and not base.is_dir():
-        raise PytError(f"selftest --e2e: {base} is not a directory")
-    check_private_dir(base, "--base")
-    if base.is_dir() and any(base.iterdir()) and not (base / MARKER).is_file():
-        raise PytError(f"selftest --e2e: {base} is not empty and was not made by selftest --e2e (no {MARKER}): pick another --base")
+    try:  # a --base it cannot look into: below a folder it may not enter (Path.exists raises
+        # PermissionError there on Python 3.11-3.13), its own without the read bit (iterdir, every
+        # Python), a link loop (Path.resolve raises RuntimeError on 3.11 and 3.12)
+        resolved = base.resolve()
+        if resolved == ROOT or ROOT in resolved.parents:
+            raise PytError("selftest --e2e: the base dir cannot be inside this template")
+        if base.exists() and not base.is_dir():
+            raise PytError(f"selftest --e2e: {base} is not a directory")
+        check_private_dir(base, "--base")
+        if base.is_dir() and any(base.iterdir()) and not (base / MARKER).is_file():
+            raise PytError(f"selftest --e2e: {base} is not empty and was not made by selftest --e2e (no {MARKER}): pick another --base")
+    except (OSError, RuntimeError) as e:  # it was an internal-error traceback, exit 1
+        raise PytError(f"selftest --e2e: cannot use --base {base}: {unusable(e)}: pick another --base") from None
     try:  # a --base below a file, in a folder it may not write, on a read-only mount
         make_private_dir(base, "--base")
         (base / MARKER).write_text("Made by ./pyt selftest --e2e: safe to delete.\n", encoding="utf-8", newline="\n")

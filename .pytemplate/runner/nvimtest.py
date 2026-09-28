@@ -342,20 +342,26 @@ def _check_isolated(nv: cmd_nvim.Nvim, layout: Layout) -> None:
 
 
 def _prepare_dir(layout: Layout) -> None:
+    from .e2e import unusable
+
     base = layout.base
-    resolved = base.resolve()
-    if resolved == ROOT or ROOT in resolved.parents:
-        raise PytError(f"--dir must be outside the template ({base}): Neovim would find its .lazy.lua")
-    if base.exists() and not base.is_dir():
-        raise PytError(f"--dir {base} is not a folder: pick another --dir")
-    check_private_dir(base, "--dir")
-    if base.exists() and any(base.iterdir()) and not (base / DIR_MARKER).is_file():
-        raise PytError(f"{base} is not empty and was not created by selftest --nvim: pick another --dir")
+    try:  # a --dir it cannot look into (below a folder it may not enter: Path.exists raises there on
+        # Python 3.11-3.13; its own without the read bit; a link loop: RuntimeError on 3.11 and 3.12)
+        resolved = base.resolve()
+        if resolved == ROOT or ROOT in resolved.parents:
+            raise PytError(f"--dir must be outside the template ({base}): Neovim would find its .lazy.lua")
+        if base.exists() and not base.is_dir():
+            raise PytError(f"--dir {base} is not a folder: pick another --dir")
+        check_private_dir(base, "--dir")
+        if base.exists() and any(base.iterdir()) and not (base / DIR_MARKER).is_file():
+            raise PytError(f"{base} is not empty and was not created by selftest --nvim: pick another --dir")
+    except (OSError, RuntimeError) as e:  # it was an internal-error traceback, exit 1
+        raise PytError(f"cannot use --dir {base}: {unusable(e)}: pick another --dir") from None
     try:
         make_private_dir(base, "--dir")
+        (base / DIR_MARKER).write_text("work directory of ./pyt selftest --nvim (safe to delete)\n", encoding="utf-8", newline="\n")
     except OSError as e:  # a parent that is a file, no permission
         raise PytError(f"cannot create --dir {base}: {e.strerror or e}") from None
-    (base / DIR_MARKER).write_text("work directory of ./pyt selftest --nvim (safe to delete)\n", encoding="utf-8", newline="\n")
 
 
 def base_info(nv: cmd_nvim.Nvim, lock: Path | None) -> dict[str, str]:

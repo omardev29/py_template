@@ -8,6 +8,7 @@ The running parts (logs, timeouts, exit codes, signals, the step kinds) are in t
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -486,19 +488,110 @@ def test_a_base_that_is_a_link_to_no_folder_is_one_error_line(harness: str, tmp_
     assert base.is_symlink() and not (tmp_path / "gone").exists()  # nothing made
 
 
-def test_a_base_it_cannot_create_is_one_error_line(tmp_path: Path) -> None:
-    """A --base below a file (or in a folder it may not write) ended in an internal-error
-    traceback, exit 1: one error line, exit 2, as nvimtest's --dir says it."""
+@pytest.mark.parametrize("harness", ["e2e", "nvim", "mutation"])
+@pytest.mark.parametrize("failing", ["exists", "iterdir", "resolve"])
+def test_a_base_it_cannot_look_into_is_one_error_line(harness: str, failing: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A --base (--dir, TMPDIR's base) the harness cannot look into: below a folder the user may
+    not enter (Path.exists raises PermissionError there on Python 3.11-3.13, which python.cpython
+    may be), one of the user's own without its read bit (iterdir, on every Python), a link loop
+    (Path.resolve raises RuntimeError on 3.11 and 3.12). The exception ended the harness in an
+    internal-error traceback, exit 1: one error line naming the folder, exit 2, nothing made.
+    Faked, as those Pythons do: the suite may run as root, who enters every folder, and on 3.14."""
+    from runner import mutation, nvimtest
+
+    base = tmp_path / "noenter" / "pt-base"
+    if failing == "iterdir":
+        base.mkdir(mode=0o700, parents=True)  # the user's own, empty
+    real = getattr(Path, failing)
+    error: Exception = RuntimeError(f"Symlink loop from {str(base)!r}") if failing == "resolve" else PermissionError(errno.EACCES, "Permission denied", str(base))
+
+    def refused(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self == base:
+            raise error
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, failing, refused)
+    reason = "Symlink loop from" if failing == "resolve" else "Permission denied"
+    expected = {
+        "e2e": f"selftest --e2e: cannot use --base {base}: {reason}",
+        "nvim": f"cannot use --dir {base}: {reason}",
+        "mutation": f"selftest --mutation: cannot use the scratch folder {base}: {reason}",
+    }[harness]
+    with pytest.raises(PytError, match=re.escape(expected)) as e:
+        if harness == "e2e":
+            e2e._prepare_base(base)
+        elif harness == "nvim":
+            nvimtest._prepare_dir(nvimtest.Layout(base))
+        else:
+            mutation.prepare_base(base, tmp_path / "project")
+    assert e.value.code == 2 and "\n" not in str(e.value)
+    if failing == "resolve":  # the git isolation of each harness resolves it first (check_ceiling)
+        with pytest.raises(PytError, match=re.escape(f"cannot use {base}: Symlink loop from")):
+            e2e.check_ceiling(base)
+    monkeypatch.undo()
+    assert not base.exists() or not any(base.iterdir())  # nothing made
+
+
+@pytest.mark.parametrize("harness", ["e2e", "nvim", "mutation"])
+def test_a_base_it_cannot_create_is_one_error_line(harness: str, tmp_path: Path) -> None:
+    """A --base (--dir, TMPDIR's base) below a file (or in a folder it may not write) ended in
+    an internal-error traceback, exit 1 (--mutation's base still did, on every Python): one
+    error line, exit 2, as nvimtest's --dir says it."""
+    from runner import mutation, nvimtest
+
     afile = tmp_path / "afile"
     afile.write_text("x", encoding="utf-8")
     base = afile / "e2e"
     # the reason is the OS's own: POSIX says ENOTDIR, Windows "Cannot create a file when that
     # file already exists" (Path.mkdir tried the parent, the file)
     reason = "Not a directory" if sys.platform != "win32" else ""
-    with pytest.raises(PytError, match=re.escape(f"selftest --e2e: cannot create --base {base}: {reason}")) as e:
-        e2e._prepare_base(base)
+    expected = {
+        "e2e": f"selftest --e2e: cannot create --base {base}: {reason}",
+        "nvim": f"cannot create --dir {base}: {reason}",
+        "mutation": f"selftest --mutation: cannot create the scratch folder {base}: {reason}",
+    }[harness]
+    with pytest.raises(PytError, match=re.escape(expected)) as e:
+        if harness == "e2e":
+            e2e._prepare_base(base)
+        elif harness == "nvim":
+            nvimtest._prepare_dir(nvimtest.Layout(base))
+        else:
+            mutation.prepare_base(base, tmp_path / "project")
     assert e.value.code == 2 and "\n" not in str(e.value)
     assert afile.read_text(encoding="utf-8") == "x"
+
+
+@pytest.mark.parametrize("harness", ["e2e", "nvim", "mutation"])
+def test_a_base_whose_marker_cannot_be_written_is_one_error_line(harness: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A --base (--dir, TMPDIR's base) of the user's that cannot take the harness's marker (a
+    read-only folder, a read-only mount): the PermissionError ended --nvim and --mutation in an
+    internal-error traceback, exit 1; one error line, exit 2, as --e2e says it."""
+    from runner import mutation, nvimtest
+
+    base = tmp_path / "pt-base"
+    marker = {"e2e": e2e.MARKER, "nvim": nvimtest.DIR_MARKER, "mutation": mutation.MARKER}[harness]
+    real = Path.write_text
+
+    def read_only(self: Path, *args: Any, **kwargs: Any) -> int:
+        if self == base / marker:
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", read_only)
+    expected = {
+        "e2e": f"selftest --e2e: cannot create --base {base}: Permission denied",
+        "nvim": f"cannot create --dir {base}: Permission denied",
+        "mutation": f"selftest --mutation: cannot create the scratch folder {base}: Permission denied",
+    }[harness]
+    with pytest.raises(PytError, match=re.escape(expected)) as e:
+        if harness == "e2e":
+            e2e._prepare_base(base)
+        elif harness == "nvim":
+            nvimtest._prepare_dir(nvimtest.Layout(base))
+        else:
+            mutation.prepare_base(base, tmp_path / "project")
+    assert e.value.code == 2 and "\n" not in str(e.value)
+    assert not (base / marker).exists()
 
 
 # --- options -----------------------------------------------------------------------------------
