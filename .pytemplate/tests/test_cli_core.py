@@ -671,6 +671,61 @@ def test_a_bad_working_folder_is_named(name: str, message: str, tmp_path: Path) 
     assert "program not found" not in str(e.value)
 
 
+@pytest.mark.parametrize("windows", [False, True], ids=["posix", "windows"])
+def test_a_working_folder_it_cannot_enter_is_named(windows: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A working folder the child cannot enter (not searchable: another user's, mode 000): the
+    message blamed the program, "cannot run ls: Permission denied  (is it executable? a script
+    needs a #! line)". Popen raises what CPython raises there: on POSIX an OSError whose filename
+    is the cwd (the child's chdir failed), on Windows ERROR_DIRECTORY (267)."""
+    locked = tmp_path / "locked"
+    locked.mkdir()
+
+    class DirectoryError(NotADirectoryError):
+        winerror = 267  # ERROR_DIRECTORY (Windows sets winerror; POSIX has no such attribute)
+
+    def popen(args: list[str], **kwargs: Any) -> Any:
+        if windows:
+            raise DirectoryError(errno.ENOTDIR, "The directory name is invalid")
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), kwargs["cwd"])
+
+    monkeypatch.setattr(proc, "IS_WINDOWS", windows)
+    monkeypatch.setattr(proc.subprocess, "Popen", popen)
+    with pytest.raises(PytError) as e:
+        proc.run(["ls"], cwd=locked, echo=False)
+    assert e.value.code == 2
+    assert str(e.value).startswith(f"cannot enter the working folder {proc.rel(locked)}: "), str(e.value)
+    assert str(e.value).endswith("(the working folder of ls)") and "#! line" not in str(e.value)
+
+
+@posix
+def test_a_working_folder_it_cannot_enter_is_named_for_real(tmp_path: Path) -> None:
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        if os.access(locked, os.X_OK):
+            pytest.skip("this user enters any folder (root)")
+        with pytest.raises(PytError, match=re.escape(f"cannot enter the working folder {proc.rel(locked)}: Permission denied")):
+            proc.run([sys.executable, "-V"], cwd=locked, echo=False)
+    finally:
+        locked.chmod(0o755)
+
+
+def test_a_file_windows_cannot_start_gets_the_windows_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `uv = false` task whose program is a .sh or .py: CreateProcess says WinError 193, and
+    the hint asked for an exec bit or a #! line, which change nothing there."""
+
+    def popen(args: list[str], **kwargs: Any) -> Any:
+        raise OSError(errno.ENOEXEC, "%1 is not a valid Win32 application")
+
+    monkeypatch.setattr(proc, "IS_WINDOWS", True)
+    monkeypatch.setattr(proc.subprocess, "Popen", popen)
+    with pytest.raises(PytError) as e:
+        proc.run(["tools\\gen.sh"], echo=False)
+    assert e.value.code == 2 and "#! line" not in str(e.value)
+    assert str(e.value) == f"cannot run tools\\gen.sh: %1 is not a valid Win32 application  ({proc.WINDOWS_START_HINT})"
+
+
 def test_a_dry_run_does_not_need_the_working_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A previous step would create it: a dry run only prints the command
     monkeypatch.setattr(proc, "DRY_RUN", True)

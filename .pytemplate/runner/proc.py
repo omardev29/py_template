@@ -271,6 +271,26 @@ def _not_found(program: str, workdir: Path, env: Mapping[str, str]) -> str:
     return f"cannot run {program}: it exists, but what it needs to start (its loader or interpreter) was not found"
 
 
+# Why a program CreateProcess refuses could not start: it starts .exe and .com files, and .bat
+# and .cmd ones through cmd.exe (WinError 193 for a .sh or .py: a #! line changes nothing there)
+WINDOWS_START_HINT = "Windows starts .exe and .com programs, .bat and .cmd through cmd.exe: run a script through its interpreter, python or sh"
+
+
+def _start_error(e: OSError, args: Sequence[str], workdir: Path, env: Mapping[str, str]) -> PytError:
+    """Why Popen could not start `args` in `workdir`. An error the child met entering the
+    working folder (a folder it may not search, another user's) names that folder: on POSIX
+    subprocess sets its filename to the cwd then, and CreateProcess says ERROR_DIRECTORY (267).
+    It blamed the program, and asked for an exec bit or a #! line."""
+    chdir = e.filename is not None and os.fspath(e.filename) == os.fspath(workdir) != args[0]
+    if chdir or getattr(e, "winerror", None) == 267:
+        return PytError(f"cannot enter the working folder {rel(workdir)}: {e.strerror or e}  (the working folder of {show(args[:1])})")
+    if isinstance(e, FileNotFoundError):
+        return PytError(_not_found(args[0], workdir, env), 3)
+    # PermissionError (no exec bit, a folder), ENOEXEC (no #! line), WinError 193 (not a program)
+    hint = WINDOWS_START_HINT if IS_WINDOWS else "is it executable? a script needs a #! line"
+    return PytError(f"cannot run {args[0]}: {e.strerror or e}  ({hint})")
+
+
 def run(
     argv: Sequence[str | Path],
     *,
@@ -286,8 +306,8 @@ def run(
     - A child killed by signal N reports 128 + N (exit_code).
     - Ctrl+C: the child is waited for (it got the Ctrl+C too and may clean up), then
       Interrupted stops the command. SIGTERM/SIGHUP (POSIX): passed on to the child, the same.
-    - A missing working folder, a missing program or one that cannot be started (no exec bit,
-      no #! line, a folder) are PytErrors, never tracebacks.
+    - A missing working folder or one it cannot enter, a missing program or one that cannot be
+      started (no exec bit, no #! line, a folder) are PytErrors, never tracebacks.
     """
     args = [str(a) for a in argv]
     where = f"   (in {rel(cwd)})" if cwd is not None and cwd.resolve() != ROOT else ""
@@ -317,10 +337,8 @@ def run(
                 encoding="utf-8",
                 errors="replace",
             )
-        except FileNotFoundError:
-            raise PytError(_not_found(args[0], workdir, child_env), 3) from None
-        except OSError as e:  # PermissionError (no exec bit, a folder), ENOEXEC (no #! line), WinError 193
-            raise PytError(f"cannot run {args[0]}: {e.strerror or e}  (is it executable? a script needs a #! line)") from None
+        except OSError as e:
+            raise _start_error(e, args, workdir, child_env) from None
         except ValueError as e:  # an argument or environment value subprocess cannot pass (NUL, '=' in a name)
             raise PytError(f"cannot run {args[0]}: {e}") from None
         with child:  # what subprocess.run does, with the child known to the signal handlers

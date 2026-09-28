@@ -901,8 +901,12 @@ header rules (with detector tests proving each rule fires).
 
 - 0 ok; 1 = check/test failures, doctor problems, any FAIL in a selftest suite, or an internal
   runner error (traceback printed); 2 = usage/config (`PytError` default, argparse; also a
-  program that cannot be started: no exec bit, no `#!` line, a folder; a working folder that
-  does not exist; bad `[tasks]` entries; a file under `.build/` or `dist/` it may not write, left
+  program that cannot be started: no exec bit, no `#!` line, a folder, on Windows a file
+  CreateProcess cannot start, a `.sh` or `.py` (WinError 193: `proc.WINDOWS_START_HINT`, never
+  the `#!` hint); a working folder that does not exist, or that the child cannot enter
+  (`proc._start_error`: the error's filename is the cwd on POSIX, ERROR_DIRECTORY on Windows; it
+  blamed the program, `test_cli_core.test_a_working_folder_it_cannot_enter_is_named`); bad
+  `[tasks]` entries; a file under `.build/` or `dist/` it may not write, left
   by another user: `cli._scratch_denied`; a command that needs a project, typed outside one:
   global mode, 5.2); 3 = missing requirement (uv, a uv older than
   `envs.MIN_UV`, a program (or the interpreter a script's `#!` line names: `proc._not_found`;
