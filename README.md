@@ -283,8 +283,11 @@ still print; uv itself has no quiet level that keeps its warnings, so `lock`, `a
 `remove` keep uv's whole output, its change summary included, and a uv warning of a sync or a
 run shows only without `-q`),
 `--dry-run` (shows what would change and changes nothing; it ignores `-q`), `--no-render` (does
-not regenerate the generated files first). For example `./pyt --dry-run apply`; after the
-command, `--dry-run` is an error.
+not regenerate the generated files first). For example `./pyt --dry-run apply`. Typed after the
+command they are not global options: most commands refuse them (exit 2), but `run`, `test` and
+a task with a `cmd` pass them on to the app, pytest or the task's program, and the command runs
+for real (`./pyt run --dry-run` runs the app, with `--dry-run` among its arguments); `lock`
+passes them to `uv lock` (`--dry-run` is uv's own dry run there) and `selftest` to pytest.
 
 Unknown arguments are an error (exit 2), never ignored. Only these commands pass extra arguments on:
 `run` to the app, `test` to pytest, `lock` to `uv lock`, `selftest` to pytest,
@@ -295,7 +298,9 @@ where it goes to the app, pytest, uv or the suite; `./pyt -h COMMAND` works too.
 
 `--dry-run` is not a sandbox: it skips every command it would run and every change to the
 project's files, but still writes scratch files under `.build/` (tool configurations, the mypyc
-stage). `selftest --shells`, `--nvim` and `--e2e` refuse it.
+stage), and a project command still gets the `python.cpython` it runs on: uv installs it first
+when it is missing ([Where pyt runs](#where-pyt-runs)). `selftest --shells`, `--nvim`, `--e2e`
+and `--mutation` refuse it.
 
 ### Outside a project
 

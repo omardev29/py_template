@@ -807,7 +807,11 @@ header rules (with detector tests proving each rule fires).
 2. `cli.main`: `__probe` short-circuit, then `_parse_globals` (global flags must come BEFORE the
    command: `-v/--verbose`, `-q/--quiet`, `--dry-run`, `--no-render`, `-h/--help`; `-h` keeps
    the command: `./pyt -h run` = `help run`; `--dry-run` switches `-q` off), then
-   `dispatch`.
+   `dispatch`. Typed after the command they are its arguments: refused by most commands (`build`
+   names them, `cmd_build.GLOBAL_FLAGS`), passed on by those of `cli.FORWARDS` and a task with a
+   `cmd`, whose command then runs for real (`./pyt run --dry-run` runs the app); README's Commands
+   section says so (`test_docs.test_the_manual_says_where_a_global_option_typed_after_the_command_goes`:
+   it said an error). A dry run still gets `python.cpython` (`envs.ensure_python` in `_restart`).
 3. `dispatch`: `help` needs no config. `-h`/`--help` anywhere after a builtin prints `help
    COMMAND` (no config load, nothing runs), except after `cli.HELP_PASSES_THROUGH` (`run`,
    `test`, `lock`, `selftest`), where it goes to the app, pytest, uv or the suite. Otherwise

@@ -22,7 +22,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from runner import cli, config, envs, lintc, presets, render, upx  # noqa: E402
-from runner.cmd_build import COMPAT  # noqa: E402
+from runner.cmd_build import COMPAT, GLOBAL_FLAGS  # noqa: E402
 from runner.cmd_dev import BASEDPYRIGHT, BASEDPYRIGHT_NODE  # noqa: E402
 from runner.cmd_nvim import MIN_LAZYVIM  # noqa: E402
 from runner.config import Config, PythonConfig, TaskConfig  # noqa: E402
@@ -179,6 +179,28 @@ def test_the_exit_codes_are_listed() -> None:
     section = _section(_text(), "Output, exit codes and environment")
     listed = set(re.findall(r"^- (\d+):", section, re.M))
     assert {"0", "1", "2", "3", "130"} <= listed, f"exit codes listed: {sorted(listed)}"
+
+
+def test_the_manual_says_where_a_global_option_typed_after_the_command_goes() -> None:
+    """Global options go before the command. Typed after it, most commands refuse `--dry-run` (build
+    names it: cmd_build.GLOBAL_FLAGS), but the commands that pass their arguments on (cli.FORWARDS)
+    hand it to the app, pytest, uv or a task's program, and the command runs for real: `./pyt run
+    --dry-run` ran the app, where the manual said `--dry-run` after the command was an error. A dry
+    run also still gets python.cpython (envs.ensure_python is no echoed command), and the manual
+    said it changed nothing."""
+    text = " ".join(_section(_text(), "Commands").split())
+    assert "after the command, `--dry-run` is an error" not in text
+    start = text.index("Global options go before the command")
+    after = text[start : text.index("Unknown arguments are an error", start)].split("Typed after the command", 1)
+    assert len(after) == 2, f"the manual does not say where a global option typed after the command goes: {after[0]}"
+    assert set(GLOBAL_FLAGS) == {"--dry-run", "--no-render"}, GLOBAL_FLAGS  # what the paragraph names
+    for name in sorted(cli.FORWARDS - {"build"}):  # build refuses them (GLOBAL_FLAGS)
+        assert f"`{name}`" in after[1], f"`{name}` passes a --dry-run typed after it on: {after[1]}"
+    assert "a task with a `cmd`" in after[1] and "runs for real" in after[1], after[1]
+    sandbox = text[text.index("`--dry-run` is not a sandbox") :]
+    sandbox = sandbox[: sandbox.index("Outside a project")]
+    assert "`python.cpython`" in sandbox and "installs it" in sandbox, sandbox
+    assert all(f"`{suite}`" in sandbox for suite in ("--nvim", "--e2e", "--mutation")) and "`selftest --shells`" in sandbox, sandbox
 
 
 def test_the_manual_says_which_code_uv_s_missing_requirements_end_with() -> None:
