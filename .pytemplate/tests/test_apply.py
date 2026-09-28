@@ -895,6 +895,24 @@ def test_the_record_follows_the_lock_when_a_later_step_fails(tmp_path: Path, mon
     assert cmd_apply.pending(project.cfg()) == []
 
 
+def test_a_rename_whose_lock_fails_is_tidied_already(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ruff tidy-up of the renamed files came after the lock, the sync and render: a lock that
+    failed left the rename to the next apply, which finds the names in line and tidies nothing
+    (the files ruff had formatted stayed unwrapped under a longer name, and the next commit's hook
+    refused them). It runs right after the rename, before any step that can fail."""
+    project, uv = _project(tmp_path, monkeypatch)
+    tidied: list[str] = []
+    monkeypatch.setattr(rename, "tidy_before", lambda cfg, plan_, root=None: rename.Tidy(set(), set()))
+    monkeypatch.setattr(rename, "tidy_after", lambda cfg, plan_, clean, root=None: tidied.append(cfg.app.name))
+    project.edit("app", "name", "beta")
+    uv.fail.add("lock")
+    with pytest.raises(PytError, match="the app is already renamed"):
+        _run(project)
+    assert tidied == ["beta"]  # with the renamed configuration, before the lock failed
+    uv.fail.clear()
+    assert _run(project) == 0 and tidied == ["beta"]  # the apply that finishes it has nothing to tidy
+
+
 def test_the_record_follows_a_rename_when_the_lock_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The rename is done before the lock: when the lock fails, the record keeps the applied
     options under the NEW name (named after the old one it would no longer be trusted)."""

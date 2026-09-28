@@ -1681,6 +1681,45 @@ def test_an_interrupted_rename_says_how_to_finish(command_project: Path, monkeyp
     assert cmd_apply.load_record() == {**record, "name": "beta"}
 
 
+def test_the_tidy_up_comes_before_the_relock(command_project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A re-lock that failed after the rename (offline, no solution) left the job to ./pyt apply,
+    which finds the names in line and tidies nothing: the files ruff had formatted stayed
+    unwrapped under a longer name, and the next commit's hook refused them. The tidy-up runs
+    first, with the ruff of the environment as it is (`--no-sync`: `--locked` and `--frozen` fail
+    on a lock that does not follow the new name yet), and a ruff that fails says so."""
+    calls: list[list[str]] = []
+
+    def fake_uv(env: Any, args: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append([str(a) for a in args])
+        return subprocess.CompletedProcess(args, 2 if "format" in calls[-1] else 0, "", "")
+
+    def failing_lock(cfg: Config) -> None:
+        calls.append(["lock"])
+        raise PytError("No solution found when resolving dependencies")
+
+    monkeypatch.setattr(envs, "uv", fake_uv)
+    monkeypatch.setattr(cmd_dev, "BUILD", tmp_path / "build")
+    monkeypatch.setattr(cmd_dev, "ROOT", command_project)
+    monkeypatch.setattr(rename, "tidy_before", lambda cfg, plan_, root=None: rename.Tidy({f.path for f in rename._python_edits(plan_)}, set()))
+    monkeypatch.setattr(cmd_env, "ensure_lock", failing_lock)
+    with pytest.raises(PytError, match="The files are already renamed"):
+        rename.cmd_rename(_load(command_project), ["beta"])
+    ruff = [c for c in calls if "ruff" in c]
+    assert ruff and all(c[:3] == ["run", "--quiet", "--no-sync"] for c in ruff), calls
+    assert calls.index(ruff[0]) < calls.index(["lock"])
+    assert "ruff could not tidy the renamed files (exit code 2)" in capsys.readouterr().err
+
+
+def test_an_interrupt_before_the_tidy_up_says_to_tidy(command_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    def interrupted(cfg: Config, plan_: rename.Plan, clean: rename.Tidy | None, root: Path | None = None) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(rename, "tidy_after", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        rename.cmd_rename(_load(command_project), ["beta"])
+    assert "run ./pyt apply to finish (uv.lock and the generated files), then ./pyt lint --fix and ./pyt fmt" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("new", ["helpers", "other"])
 def test_rename_refuses_an_app_name_set_to_another_package(command_project: Path, new: str) -> None:
     """app.name set by hand to another package of src/ (src/helpers/): `rename helpers` said

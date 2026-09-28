@@ -1288,9 +1288,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   back from the listing of src/, `_moved_to`, the temporary name of a case-only move included:
   `test_rename.test_an_interrupted_rename_is_undone`)), the name of the `applied` record right away
   (`cmd_apply.rename_record`, only the project's own record: named after the old app it is no
-  longer trusted), `cmd_env.ensure_lock` (a failure there says "the files are already renamed
-  ... ./pyt apply"), `render.apply` and the ruff tidy-up; a Ctrl+C or SIGTERM during those
-  says the same before it stops the command.
+  longer trusted), the ruff tidy-up (before the re-lock, which can fail: below),
+  `cmd_env.ensure_lock` (a failure there says "the files are already renamed ... ./pyt apply")
+  and `render.apply`; a Ctrl+C or SIGTERM during those says the same before it stops the command
+  (and, before the tidy-up is done, `./pyt lint --fix` and `./pyt fmt`).
 - After a hand edit of `app.name` (src/<pkg>/ missing, or the very same folder: `alpha` ->
   `Alpha`), rename starts from the name the project really has (`cmd_apply.applied_name`, asked
   first, as apply does: the trusted record, else pyproject `[project] name`, whose package is in
@@ -1413,7 +1414,13 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   the active typing profile selects I) and `ruff format` run on the rewritten Python files, each
   only on the files ruff accepted BEFORE the rename (`Tidy`: a file kept unformatted or unsorted
   stays so), with the active profile's `.build/cfg/ruff-*.toml` (`cmd_dev._profile_file`), like
-  the hook.
+  the hook. `tidy_after` runs right after the files are written (rename and apply), before the
+  re-lock, with the ruff of the environment as it is (`_ruff(..., sync=False)`: `uv run
+  --no-sync`; after a name change `--locked` and `--frozen` both fail on the lock): a re-lock that
+  failed left the rename to `./pyt apply`, which finds the names in line and tidied nothing, and
+  the next commit's hook refused the unwrapped files
+  (`test_rename.test_the_tidy_up_comes_before_the_relock`). A ruff that fails there is a warning
+  with `./pyt lint --fix` and `./pyt fmt` (it said nothing).
 - Invariant (tested for the 3 presets, LF and CRLF, 7 name pairs, names Hypothesis makes up and
   the round trip A -> B -> A): renaming the skeleton of name A to B is byte-identical to the
   skeleton of B, so `presets.pristine` stays true.
@@ -1458,7 +1465,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   alone knows whether the lock moves), leaves nothing changed (`_finish` puts pyproject.toml back).
 - Order of `apply`: dirty-tree check (rename only; `--force` skips it) -> the rename
   (`rename.report`, `tidy_before`, `apply_plan`, then the record under the new name: a later
-  failure must not leave it naming the old app, which is no longer trusted) or the `[project]
+  failure must not leave it naming the old app, which is no longer trusted; then
+  `rename.tidy_after`, before every step that can fail: the apply that finishes a failed one has
+  nothing to tidy, `test_apply.test_a_rename_whose_lock_fails_is_tidied_already`) or the `[project]
   name` line -> `uv remove --frozen` / `uv add --frozen` of the option-driven requirements (dev
   group with `--dev`) -> `cmd_env.ensure_lock`, whose re-lock, when it first resolves PyPy
   (`render.gains_pypy`), is followed by `cmd_mode._precheck_py311` (it syncs the tools
@@ -1470,7 +1479,7 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `cmd_env._fix_exec_bit` -> the hook (`ensure_installed` when `hooks.pre_commit`,
   `hooks.uninstall` of pytemplate's own hook when false, the copy chained after another
   project's hook included; another tool's, another project's or a core.hooksPath setup is left
-  alone; the summary line follows `hooks.hook_state`) -> `render.apply` -> `rename.tidy_after`
+  alone; the summary line follows `hooks.hook_state`) -> `render.apply`
   -> the unused-environment note (`unused_envs`: every `.venv*` of this side no supported backend
   uses, `.venv-jit` of older templates included; never deleted) -> warnings for missing
   references (`reference_problems`: src/<pkg>/, compile.modules (the path `config.import_path`
@@ -1953,7 +1962,8 @@ Formats:
 - `runtime_env(backend)`: `pypy` -> `.venv-pypy`; `cpython`/`mypyc` -> `.venv`. `tool_env` is
   always `.venv`: every tool (mypy, ruff, mypyc, PyInstaller, pytest for selftest) runs there.
 - Every tool call is `uv run --locked` (syncs when needed, fails on a stale lock; the git
-  hook's ruff uses `--frozen`, section 5.6). `cmd_env.ensure_lock` runs `uv lock --check` and
+  hook's ruff uses `--frozen`, section 5.6, and the ruff tidy-up after a rename, which runs
+  before the re-lock, `--no-sync`, section 5.7). `cmd_env.ensure_lock` runs `uv lock --check` and
   then `uv lock` if needed; under `--dry-run`, when the managed pyproject parts would change, it
   echoes `uv lock` instead (the check would read the unwritten file and pass). A needed re-lock
   under the user's `UV_FROZEN` or `UV_LOCKED` is refused, naming the variable

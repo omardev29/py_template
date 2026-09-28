@@ -1617,11 +1617,13 @@ def _same_path(path: str | Path) -> str:
     return os.path.normcase(os.path.abspath(_RUNNER_CWD / path))
 
 
-def _ruff(cfg: Config, args: Sequence[str | Path], files: Sequence[Path]) -> tuple[int, str]:
-    """`uv run ruff ARGS FILES` in the tools environment (absolute paths, in batches)."""
+def _ruff(cfg: Config, args: Sequence[str | Path], files: Sequence[Path], *, sync: bool = True) -> tuple[int, str]:
+    """`uv run ruff ARGS FILES` in the tools environment (absolute paths, in batches). `sync`:
+    `--locked`, else `--no-sync`: the ruff of the environment as it is, which needs no lock (after
+    a rename, before the re-lock, both `--locked` and `--frozen` fail on the new project name)."""
     code, out = 0, []
     for batch in _batches([str(f) for f in files]):
-        argv: list[str | Path] = ["run", "--quiet", "--locked", "ruff", *args, *batch]
+        argv: list[str | Path] = ["run", "--quiet", "--locked" if sync else "--no-sync", "ruff", *args, *batch]
         r = envs.uv(envs.tool_env(cfg), argv, cwd=_RUNNER_CWD, check=False, capture=True, echo=False)
         code = max(code, r.returncode)
         out.append(r.stdout + r.stderr)
@@ -1666,7 +1668,9 @@ def tidy_before(cfg: Config, plan_: Plan, root: Path | None = None) -> Tidy | No
 def tidy_after(cfg: Config, plan_: Plan, clean: Tidy | None, root: Path | None = None) -> None:
     """After the rename: sort the imports the new name moved (only when the typing profile selects
     ruff's I rules) and re-format, each only in the files that were clean before. Best effort: it
-    never fails the rename."""
+    never fails the rename. It runs right after the files are written, before the re-lock (the
+    ruff of the environment as it is: `--no-sync`): a re-lock that failed or was interrupted
+    left the rename to `./pyt apply`, which finds the names in line and tidies nothing."""
     from .cmd_dev import _profile_file, config_arg
 
     root = root or ROOT
@@ -1682,13 +1686,16 @@ def tidy_after(cfg: Config, plan_: Plan, clean: Tidy | None, root: Path | None =
     before = {t: t.read_bytes() for t in (*sortable, *formatted) if t.is_file()}
     try:
         config_file = config_arg(_profile_file(cfg, cfg.profile_for(), "ruff"))
+        codes = [0]
         if sortable:
-            _ruff(cfg, ["check", "--config", config_file, "--force-exclude", "--fix-only", "--fixable", "I001", "--quiet"], sortable)
+            codes.append(_ruff(cfg, ["check", "--config", config_file, "--force-exclude", "--fix-only", "--fixable", "I001", "--quiet"], sortable, sync=False)[0])
         if formatted:
-            _ruff(cfg, ["format", "--config", config_file, "--force-exclude", "--quiet"], formatted)
+            codes.append(_ruff(cfg, ["format", "--config", config_file, "--force-exclude", "--quiet"], formatted, sync=False)[0])
     except (PytError, OSError) as e:
         ui.warn(f"ruff could not tidy the renamed files ({e}): {hint}")
         return
+    if max(codes) > 1:  # uv could not start ruff, or ruff stopped on an error
+        ui.warn(f"ruff could not tidy the renamed files (exit code {max(codes)}): {hint}")
     touched = sorted(t.relative_to(root).as_posix() for t, data in before.items() if t.is_file() and t.read_bytes() != data)
     if touched:
         ui.info(f"  ruff: import order / formatting fixed in {', '.join(touched)}")
@@ -1898,7 +1905,12 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
     # The record follows the files at once (as in apply): named after the old app it is no longer
     # trusted, and the ./pyt apply that finishes an interrupted rename reads it
     cmd_apply.rename_record(new_name, record)
+    tidied = False
     try:
+        # before the re-lock, which can fail: the ./pyt apply that finishes the job finds the
+        # names in line and tidies nothing
+        tidy_after(new_cfg, planned, clean)
+        tidied = True
         try:
             ensure_lock(new_cfg)
         except PytError as e:
@@ -1908,9 +1920,9 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
             ui.info(f"render: updated {', '.join(changed)}")
         if edited:
             ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./pyt render --force)")
-        tidy_after(new_cfg, planned, clean)
     except KeyboardInterrupt:  # Ctrl+C, or SIGTERM/SIGHUP passed on to uv (proc.Interrupted)
-        ui.warn("the files are already renamed: run ./pyt apply to finish (uv.lock and the generated files)")
+        also = "" if tidied else ", then ./pyt lint --fix and ./pyt fmt (import order and line wrapping)"
+        ui.warn(f"the files are already renamed: run ./pyt apply to finish (uv.lock and the generated files){also}")
         raise
     ui.ok(f"renamed '{old_name}' -> '{new_name}' (package src/{new_cfg.pkg}/)")
     ui.info("  Next: ./pyt test all, and review the changes with git diff")

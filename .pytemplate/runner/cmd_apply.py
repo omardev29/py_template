@@ -22,8 +22,10 @@ prints the plan and stops):
      The managed pyproject parts must be rewritable (render.check_pyproject).
   3. app.name changed by hand: the rename flow (rename.plan/apply_plan) from the applied name,
      refused on a dirty git tree without --force (pytemplate.toml and the generated files do not
-     count), then the record follows the new name. When only pyproject.toml [project] name
-     differs, only that line changes; an app.name that names another package of src/ is refused.
+     count), then the record follows the new name and ruff tidies the renamed files (before any
+     step that can fail: the apply that finishes a failed one has no rename to tidy). When only
+     pyproject.toml [project] name differs, only that line changes; an app.name that names
+     another package of src/ is refused.
   4. [preset.<name>] options: `uv remove --frozen` / `uv add --frozen` of the option-driven
      requirements (dev group too; --frozen because flet-cli==V pins flet==V, so a resolving add
      of one group alone has no solution), then cmd_env.ensure_lock (managed pyproject parts and
@@ -34,7 +36,7 @@ prints the plan and stops):
      their old bytes back: nothing half-applied. Then the record (the steps below can still fail).
   6. `uv sync --locked --all-groups` of every supported backend's environment, the exec bit of
      the launchers, the git hook (installed when hooks.pre_commit, pytemplate's own hook removed
-     when false), render.apply, ruff tidy-up of renamed files.
+     when false), render.apply.
   7. A note for every unused .venv* (never deleted), warnings for references that do not exist
      (src/<pkg>/, compile.modules, app.assets, deploy.exe.icon, deploy.upx.path), a summary.
 """
@@ -1051,15 +1053,21 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
         except OSError as e:
             raise PytError(f"cannot write pyproject.toml: {e.strerror or e}") from None
         summary.append(("app.name", f"pyproject.toml [project] name = \"{cfg.app.name}\""))
+    tidied = False
     try:
-        return _finish(cfg, plan, command, summary, clean)
+        if plan.rename_plan is not None:
+            # before the steps that can fail: the apply that finishes the job has no rename to tidy
+            rename.tidy_after(cfg, plan.rename_plan, clean)
+        tidied = True
+        return _finish(cfg, plan, command, summary)
     except KeyboardInterrupt:  # Ctrl+C, or SIGTERM/SIGHUP passed on to uv (proc.Interrupted)
         if plan.rename_plan is not None:  # as `./pyt rename` says it: only "terminated" was printed
-            ui.warn(f"the app is already renamed: run ./pyt {command} to finish (uv.lock, the environments and the generated files)")
+            also = "" if tidied else ", then ./pyt lint --fix and ./pyt fmt (import order and line wrapping)"
+            ui.warn(f"the app is already renamed: run ./pyt {command} to finish (uv.lock, the environments and the generated files){also}")
         raise
 
 
-def _finish(cfg: Config, plan: Plan, command: str, summary: list[tuple[str, str]], clean: rename.Tidy | None) -> int:
+def _finish(cfg: Config, plan: Plan, command: str, summary: list[tuple[str, str]]) -> int:
     """apply once the app is renamed (or its [project] name line fixed): the dependencies and the
     lock (put back when they fail), the record, the environments, the hook, the generated files,
     the notes and the summary."""
@@ -1107,8 +1115,6 @@ def _finish(cfg: Config, plan: Plan, command: str, summary: list[tuple[str, str]
         summary.append(("generated files", f"updated {', '.join(changed)}"))
     if edited:
         ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./pyt render --force)")
-    if plan.rename_plan is not None:
-        rename.tidy_after(cfg, plan.rename_plan, clean)
     _leftover_note(cfg)
     problems = reference_problems(cfg)
     for problem in problems:
