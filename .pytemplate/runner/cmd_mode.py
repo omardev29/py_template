@@ -63,8 +63,8 @@ def _config_from_text(text: str, where: str) -> Config:
     """Validate a pytemplate.toml text in memory (what config.load does with the file)."""
     try:
         data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
-        raise PytError(f"{where}: not valid TOML: {e}") from None
+    except config.TOML_ERRORS as e:
+        raise PytError(f"{where}: not valid TOML: {config.toml_error(e)}") from None
     cfg: Config = config._build(Config, data, "")
     config.validate(cfg, _builtins())
     return cfg

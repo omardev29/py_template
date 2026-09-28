@@ -763,13 +763,26 @@ def read_text() -> str:
     return _read()[0]
 
 
+# What tomllib.loads raises for a text it cannot read: TOMLDecodeError (a ValueError), and two
+# more that ended every command, help included, in an internal-error traceback: a plain
+# ValueError for an integer of more than 4300 digits (sys.int_max_str_digits; no TOML integer
+# either, those hold 64 bits) and RecursionError for arrays or inline tables nested about a
+# thousand deep.
+TOML_ERRORS = (ValueError, RecursionError)
+
+
+def toml_error(e: BaseException) -> str:
+    """What is wrong with the text, for a message: RecursionError's own words name nothing."""
+    return "arrays or tables nested too deeply" if isinstance(e, RecursionError) else str(e)
+
+
 def load(builtin_commands: set[str] | None = None) -> Config:
     if not CONFIG_FILE.is_file():
         raise PytError(f"{CONFIG_FILE.name} not found in the project root")
     try:
         data = tomllib.loads(read_text())
-    except tomllib.TOMLDecodeError as e:
-        raise PytError(f"pytemplate.toml is not valid TOML: {e}") from None
+    except TOML_ERRORS as e:
+        raise PytError(f"pytemplate.toml is not valid TOML: {toml_error(e)}") from None
     cfg: Config = _build(Config, data, "")
     validate(cfg, builtin_commands)
     return cfg
@@ -1079,8 +1092,8 @@ def set_value(text: str, table: str, key: str, value: Any) -> str:
     rendered = toml_value(value)
     try:
         before = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
-        raise PytError(f"pytemplate.toml is not valid TOML: {e}") from None
+    except TOML_ERRORS as e:
+        raise PytError(f"pytemplate.toml is not valid TOML: {toml_error(e)}") from None
     # A list first in the layout of the old array (its comments kept), else on one line
     for layout in ((value, None) if isinstance(value, list) else (None,)):
         try:
@@ -1099,7 +1112,7 @@ def _only_changed(before: dict[str, Any], text: str, path: tuple[str, ...], valu
     """Whether `text` parses as `before` with only `path` set to `value`."""
     try:
         after = tomllib.loads(text)
-    except tomllib.TOMLDecodeError:
+    except TOML_ERRORS:
         return False
     expected = copy.deepcopy(before)
     node: Any = expected
@@ -1124,8 +1137,8 @@ def update_file(changes: list[tuple[str, str, Any]]) -> None:
         new = set_value(new, table, key, value)
     try:
         tomllib.loads(new)
-    except tomllib.TOMLDecodeError as e:  # set_value checks each edit; this guards the sum
-        raise PytError(f"pytemplate.toml: the change would break the file ({e}); nothing was written") from None
+    except TOML_ERRORS as e:  # set_value checks each edit; this guards the sum
+        raise PytError(f"pytemplate.toml: the change would break the file ({toml_error(e)}); nothing was written") from None
     if new != old and not proc.DRY_RUN:
         try:
             write_whole(CONFIG_FILE, (("\ufeff" if bom else "") + new).encode("utf-8"))

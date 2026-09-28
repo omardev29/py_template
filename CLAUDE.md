@@ -1598,7 +1598,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   dropped, line endings are kept. UTF-16/32 (BOM; PowerShell 5.1 `>`/`Out-File`), NUL bytes
   (UTF-16 without a BOM) and invalid UTF-8 (ANSI, `Set-Content`) are a `PytError` (exit 2)
   naming the encoding or the byte and its line, and how to save the file again; never a
-  traceback, for every command (`help` still prints, without the custom tasks).
+  traceback, for every command (`help` still prints, without the custom tasks). So is a text
+  tomllib rejects without its TOMLDecodeError (`config.TOML_ERRORS`: a plain ValueError for an
+  integer of more than 4300 digits, RecursionError for arrays nested about a thousand deep;
+  `config.toml_error` words it), in `config.load`, `set_value`, `update_file`,
+  `cli._python_needed` and `cmd_mode._config_from_text`
+  (`test_config_rules.test_a_config_tomllib_cannot_read_is_a_config_error`).
 - Loader (`config._build`): types come from the dataclass annotations (`typing.get_type_hints`),
   recursively: list items (`key[i]`), table values (`key.k`; non-bare keys are quoted in the
   path). `Any`-typed values (`[vscode] settings`, `[preset.<p>]` options, mypy override options)

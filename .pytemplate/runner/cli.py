@@ -517,7 +517,7 @@ def _python_needed(rest: list[str]) -> str | None:
     name, args = rest[0], rest[1:]
     try:
         data = tomllib.loads(config.read_text())
-    except (PytError, OSError, tomllib.TOMLDecodeError):
+    except (PytError, OSError, *config.TOML_ERRORS):
         return None
     tasks = data.get("tasks")
     if not (isinstance(tasks, dict) and name in tasks):

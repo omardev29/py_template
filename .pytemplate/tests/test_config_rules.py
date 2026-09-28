@@ -1091,6 +1091,41 @@ def test_help_and_doctor_with_a_utf16_config(cfg_file: Path, capsys: pytest.Capt
     assert "is UTF-16 text" in err and "internal runner error" not in err and "Traceback" not in err
 
 
+BEYOND_TOMLLIB = [
+    ("an integer of 5000 digits", VALID.replace("schema = 1", "schema = " + "1" * 5000), "Exceeds the limit (4300 digits)"),
+    ("arrays nested 3000 deep", VALID + "\n[vscode.settings]\ndeep = " + "[" * 3000 + "]" * 3000 + "\n", "nested too deeply"),
+]
+
+
+@pytest.mark.parametrize(("label", "text", "message"), BEYOND_TOMLLIB, ids=[n for n, _, _ in BEYOND_TOMLLIB])
+def test_a_config_tomllib_cannot_read_is_a_config_error(cfg_file: Path, capsys: pytest.CaptureFixture[str], label: str, text: str, message: str) -> None:
+    """tomllib raises a plain ValueError for an integer of more than 4300 digits
+    (sys.int_max_str_digits) and a RecursionError for arrays nested about a thousand deep, not
+    its TOMLDecodeError: every command, help included, ended in an internal-error traceback.
+    Now it is the file that is not valid TOML: help still prints, the rest exits 2."""
+    cfg_file.write_text(text, encoding="utf-8")
+    calls = (
+        lambda: config.load(COMMANDS),
+        lambda: config.update_file([("typing", "relaxed", "warn")]),
+        lambda: set_value(text, "typing", "relaxed", "warn"),
+        lambda: cmd_mode._config_from_text(text, "pytemplate.toml"),
+    )
+    for call in calls:
+        with pytest.raises(PytError) as info:
+            call()
+        assert "not valid TOML" in str(info.value) and message in str(info.value), str(info.value)
+        assert info.value.code == 2
+    assert cfg_file.read_text(encoding="utf-8") == text  # nothing rewritten
+    assert cli._python_needed(["check"]) is None and cli._python_needed(["help"]) is None  # dispatch reports it
+    capsys.readouterr()
+    assert cli.main(["help"]) == 0  # help still works (without the custom tasks)
+    out = capsys.readouterr()
+    assert "BACKEND = cpython" in out.out and "custom tasks of pytemplate.toml are not listed" in out.err
+    assert cli.main(["tasks"]) == 2
+    err = capsys.readouterr().err
+    assert "not valid TOML" in err and "internal runner error" not in err and "Traceback" not in err
+
+
 # --- update_file ------------------------------------------------------------------------------------
 
 
