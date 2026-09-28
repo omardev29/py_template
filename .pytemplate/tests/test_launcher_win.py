@@ -119,6 +119,17 @@ def test_cmd_keeps_the_registry_path_out_of_call_arguments() -> None:
         assert f'set "{name}="' in before, name
 
 
+def test_cmd_echo_in_a_for_f_command_has_no_redirection() -> None:
+    """cmd's echo prints the blank before a redirection: `echo "LIST" 2>nul` in a for /f command
+    gave `"LIST" `, whose closing quote %%~L then kept, and the FOR set built from the list had an
+    unbalanced quote: ": was unexpected at this time.", exit 255, for everyone whose uv is not on
+    the console's PATH (no uv from the registry, no install hints). Windows-only behaviour, so
+    the rule is static (test_cmd_registry_path_with_quoted_entries runs it on Windows)."""
+    commands = [m.group(1) for line in _code_lines_cmd() for m in re.finditer(r"(?i)\bin\s*\('(echo\b[^']*)'\)", line)]
+    assert commands, "the registry list is no longer expanded by an echo in a for /f command"
+    assert not [c for c in commands if ">" in c], commands
+
+
 def test_cmd_takes_the_exit_code_on_the_line_after_uv() -> None:
     """Nothing follows the argument list on the uv line: an argument with an odd number of double
     quotes (a `"` CreateProcess escapes as `\\"`) swallows the rest of that line, which then

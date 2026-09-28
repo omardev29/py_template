@@ -206,14 +206,19 @@ function M.mypy_linter()
     end,
     -- off Windows the absolute buffer path is appended by nvim-lint and reaches mypy as typed;
     -- on Windows nvim-lint wraps the linter in `cmd.exe /C`, which mangles an absolute path with
-    -- & ^ or %NAME%, so we append the buffer's root-relative path ourselves (cwd = root). The
-    -- args are a function so the buffer is read at every run (nvim-lint calls it for the linted
-    -- buffer, the current one), like `cmd` (A9-05).
-    args = pt.is_win and function()
+    -- & ^ or %NAME%, so the last argument is the buffer's root-relative path (cwd = root): a
+    -- function ELEMENT, which nvim-lint calls at every run, for the linted buffer (the current
+    -- one). `args` itself must stay a list, nvim-lint's `(string|fun():string)[]`: its Windows
+    -- wrapper unpacks it into `cmd.exe /C mypy ...`, and a function there stopped every run.
+    args = (function()
       local out = M.mypy_args()
-      out[#out + 1] = under_root(vim.api.nvim_buf_get_name(0))
+      if pt.is_win then
+        out[#out + 1] = function()
+          return under_root(vim.api.nvim_buf_get_name(0))
+        end
+      end
       return out
-    end or M.mypy_args(),
+    end)(),
     stdin = false,
     append_fname = not pt.is_win,
     stream = "both",

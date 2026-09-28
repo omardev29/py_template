@@ -172,8 +172,14 @@ rem variables of REG_EXPAND_SZ values as Windows does: its command line
 rem keeps a variable that is not defined as it is. In this batch file call
 rem set removed it, and an entry of an undefined JAVA_HOME, then \bin,
 rem named a folder of the drive root, where any user may create one.
+rem The echo has no redirection: echo prints the blank before one, and the
+rem closing quote then stayed on the list, which broke the FOR below. A
+rem variable may hold quotes too (a quoted JAVA_HOME): they go as well.
 set "PT_LIST=%PT_LIST:"=%"
-for /f "delims=" %%L in ('echo "%PT_LIST%" 2^>nul') do set "PT_LIST=%%~L"
+for /f "delims=" %%L in ('echo "%PT_LIST%"') do set "PT_LIST=%%~L"
+if not defined PT_LIST exit /b 0
+set "PT_LIST=%PT_LIST:"=%"
+if not defined PT_LIST exit /b 0
 rem Each entry reaches :try_entry in a variable: as call arguments its
 rem variables would be expanded again, the batch file's way.
 for %%P in ("%PT_LIST:;=" "%") do set "PT_E=%%~P" & call :try_entry

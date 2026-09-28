@@ -837,10 +837,28 @@ local function check(name, ok, msg)
 end
 local linter = integ.mypy_linter()
 check("no append_fname on Windows", linter.append_fname == false, tostring(linter.append_fname))
-check("args is a function on Windows", type(linter.args) == "function", type(linter.args))
+-- nvim-lint's own Windows route (lua/lint.lua M.lint at the pinned commit 3d55c8f): the linter
+-- becomes `cmd.exe /C <cmd> <args...>` through unpack(), then every element is evaluated. A
+-- function as the whole `args` made unpack() fail, and mypy never ran on Windows.
+check("args is a list, as nvim-lint takes it", type(linter.args) == "table", type(linter.args))
 vim.api.nvim_buf_set_name(0, pt.config.root .. "/src/app.py")
-local args = linter.args()
+local function eval(x)
+  if type(x) == "function" then
+    return x()
+  end
+  return x
+end
+local ok, wrapped = pcall(function()
+  return vim.tbl_map(eval, { "/C", linter.cmd, unpack(linter.args or {}) })
+end)
+check("nvim-lint can wrap the linter in cmd.exe", ok, wrapped)
+local args = ok and wrapped or {}
+check("cmd.exe runs the bare mypy", args[2] == "mypy", tostring(args[2]))
 check("the file argument is root-relative (native), never the absolute path", args[#args] == "src\\app.py", tostring(args[#args]))
+-- the buffer is read at every run: another buffer, another argument
+vim.api.nvim_buf_set_name(0, pt.config.root .. "/src/other.py")
+local again = ok and vim.tbl_map(eval, { "/C", linter.cmd, unpack(linter.args) }) or {}
+check("the file argument follows the linted buffer", again[#again] == "src\\other.py", tostring(again[#again]))
 local pe
 for i, a in ipairs(args) do
   if a == "--python-executable" then pe = args[i + 1] end

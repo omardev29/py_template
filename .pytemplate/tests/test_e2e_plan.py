@@ -455,9 +455,12 @@ def test_a_base_it_cannot_create_is_one_error_line(tmp_path: Path) -> None:
     afile = tmp_path / "afile"
     afile.write_text("x", encoding="utf-8")
     base = afile / "e2e"
-    with pytest.raises(PytError, match=re.escape(f"selftest --e2e: cannot create --base {base}: Not a directory")) as e:
+    # the reason is the OS's own: POSIX says ENOTDIR, Windows "Cannot create a file when that
+    # file already exists" (Path.mkdir tried the parent, the file)
+    reason = "Not a directory" if sys.platform != "win32" else ""
+    with pytest.raises(PytError, match=re.escape(f"selftest --e2e: cannot create --base {base}: {reason}")) as e:
         e2e._prepare_base(base)
-    assert e.value.code == 2
+    assert e.value.code == 2 and "\n" not in str(e.value)
     assert afile.read_text(encoding="utf-8") == "x"
 
 

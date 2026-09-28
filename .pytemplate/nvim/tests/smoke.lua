@@ -385,9 +385,16 @@ check("mypy diagnostics (profile " .. info.typing.profile .. ")", function()
       return #vim.diagnostic.get(buf, { namespace = ns }) > 0
     end, 50) then
       -- the same command by hand: its exit code, time and output say why nothing came
-      local cmd = type(linter.cmd) == "function" and linter.cmd() or linter.cmd
-      local argv = vim.list_extend({ cmd }, vim.deepcopy(linter.args or {}))
-      argv[#argv + 1] = file
+      local function eval(x) -- nvim-lint's cmd and each of its args may be a function
+        if type(x) == "function" then
+          return x()
+        end
+        return x
+      end
+      local argv = vim.list_extend({ eval(linter.cmd) }, vim.tbl_map(eval, linter.args or {}))
+      if linter.append_fname ~= false then
+        argv[#argv + 1] = file
+      end
       if pt.is_win then
         argv = vim.list_extend({ "cmd.exe", "/C" }, argv)
       end

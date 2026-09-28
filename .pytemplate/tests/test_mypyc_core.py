@@ -1247,6 +1247,10 @@ class FakeCompiler:
                 ext = Path(spec["stage"]) / (f[:-3] + self.suffix)
                 if f[:-3].replace("/", ".") not in self.skip and (spec["force"] or not ext.exists()):
                     ext.write_bytes(spec["opt_level"].encode())
+                # compile.separate = true: one shared lib per module, rebuilt like the module
+                lib = Path(spec["stage"]) / (f[:-3] + "__mypyc" + self.suffix)
+                if spec["separate"] and (spec["force"] or not lib.exists()):
+                    lib.write_bytes(b"lib")
             if not spec["separate"]:
                 (Path(spec["stage"]) / (spec["group"] + "__mypyc" + self.suffix)).write_bytes(b"lib")
         return _done([str(a) for a in argv])
@@ -1485,14 +1489,22 @@ def test_build_says_a_file_of_the_stage_is_in_use(fake_build: FakeCompiler) -> N
     assert mypyc.has_compiler_hint() not in str(err.value) and err.value.code == 1
 
 
-def test_build_with_separate_keeps_the_per_module_libs(fake_build: FakeCompiler) -> None:
-    """compile.separate = true: <module>__mypyc libs are wanted (they were deleted on every build)."""
+@pytest.mark.parametrize("windows", [False, True])
+def test_build_with_separate_keeps_the_per_module_libs(fake_build: FakeCompiler, monkeypatch: pytest.MonkeyPatch, windows: bool) -> None:
+    """compile.separate = true: <module>__mypyc libs are wanted (they were deleted before every
+    build, so every incremental build compiled them again)."""
+    monkeypatch.setattr(mypyc, "IS_WINDOWS", windows)
     cfg = make({"compile": {"separate": True}})
     stage = mypyc.profile(cfg, "dev").stage
     mypyc.build(make({}), "dev")  # first with the shared lib
-    (stage / "myapp" / "core" / ("m__mypyc" + LINUX_EXT)).write_bytes(b"lib")  # what separate = true builds
-    mypyc.build(cfg, "dev")
+    mypyc.build(cfg, "dev")  # a new option: a full build
+    lib = stage / "myapp" / "core" / ("m__mypyc" + LINUX_EXT)
     assert _left(stage) == [f"myapp/core/m{LINUX_EXT}", f"myapp/core/m__mypyc{LINUX_EXT}"]  # the old group lib is gone
+    lib.write_bytes(b"kept")
+    mypyc.build(cfg, "dev")  # incremental: the lib stays as it is
+    assert not fake_build.force and _left(stage) == [f"myapp/core/m{LINUX_EXT}", f"myapp/core/m__mypyc{LINUX_EXT}"]
+    if not mypyc.IS_WINDOWS:  # Windows sets every mypyc output aside before it compiles, and rebuilds it
+        assert lib.read_bytes() == b"kept"
 
 
 def test_build_fails_when_an_extension_is_missing(fake_build: FakeCompiler, src_tree: Path) -> None:
@@ -2445,7 +2457,7 @@ def test_wheel_builds_in_the_locked_tools_env(wheel_project: Path, monkeypatch: 
     # uv tool install takes the newest CPython it has, whatever the wheel's Requires-Python: a
     # mypyc wheel (cp314 only) needs the request, and the printed line failed without it
     hint = "install it with: uv tool install " + ("--python 3.14 " if backend == "mypyc" else "")
-    assert hint + "dist/" in capsys.readouterr().err.replace(str(wheel_project) + os.sep, "")
+    assert hint + "dist" + os.sep in capsys.readouterr().err.replace(str(wheel_project) + os.sep, "")
 
 
 def test_wheel_keeps_the_previous_wheel_when_the_sync_fails(wheel_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:

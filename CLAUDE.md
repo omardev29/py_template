@@ -442,7 +442,11 @@ header rules (with detector tests proving each rule fires).
   never passed as `call` arguments: a quoted entry (`"C:\Program Files\x"`) would split them
   and leave the FOR set unclosed. The quotes are removed (`%PT_LIST:"=%`), then a child cmd
   expands `REG_EXPAND_SZ` values as Windows does (`for /f` over its `echo`: a command line keeps
-  a variable that is not defined as it is). `call set` did it before, and in a batch file an
+  a variable that is not defined as it is; that echo has no redirection, since echo prints the
+  blank before one, `%%~L` then kept the closing quote and the FOR set built from the list broke
+  with ": was unexpected at this time.", exit 255: no uv from the registry, no install hints;
+  `test_cmd_echo_in_a_for_f_command_has_no_redirection`; the quotes a variable brings, a quoted
+  `JAVA_HOME`, are removed after it the same way). `call set` did it before, and in a batch file an
   undefined `%JAVA_HOME%` expands to nothing: `%JAVA_HOME%\bin` became `\bin`, a folder of the
   drive root any user may create, and the uv.exe there ran. Each entry then reaches `:try_entry`
   in `PT_E`, never as `call` arguments (call would expand them again, the batch file's way), and
@@ -3218,9 +3222,12 @@ LazyVim wiring:
   nvim-lint wraps every linter in `cmd.exe /C`, where an absolute path breaks
   with a space or `& ^ %`: the linter runs the bare name `mypy` with `.venv\Scripts` first on
   PATH, and it appends the buffer's path (and `--python-executable`) root-relative rather than
-  absolute (`args` a function, `append_fname = false`; the linter's `cwd = root`, so a relative
-  path carries none of the root's own `& ^ %`, which libuv passes to cmd.exe unquoted;
-  `test_windows_mypy_linter_uses_root_relative_paths`). nvim-lint REPLACES the environment when a
+  absolute (the last element of `args` a function, read at every run for the linted buffer, and
+  `append_fname = false`; `args` itself stays a list, nvim-lint's `(string|fun():string)[]`: its
+  Windows wrapper `unpack`s it, and a function there stopped every mypy run on Windows. The
+  linter's `cwd = root`, so a relative path carries none of the root's own `& ^ %`, which libuv
+  passes to cmd.exe unquoted; `test_windows_mypy_linter_uses_root_relative_paths` runs the linter
+  through nvim-lint's Windows wrapping). nvim-lint REPLACES the environment when a
   linter has `env`, so it passes the full environment plus `PYTHONUTF8=1`, minus `VIRTUAL_ENV`,
   `PYTHONHOME` and `PYTHONPATH` (as `proc.base_env` drops them: a `PYTHONHOME` kills the Python
   before it checks anything and the pattern parser then shows no diagnostic, silently).
@@ -5163,7 +5170,8 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   kills mypy and the pattern parser then shows no diagnostic; the LSP servers and the debug
   adapter clear them too, see `integrations.lsp` and `dap.setup` in 12.2), and on Windows the
   bare `mypy` with `.venv\Scripts` first on PATH plus the buffer's path and `--python-executable`
-  as root-relative paths (the linter's `cwd = root`, `under_root`). Test:
+  as root-relative paths (the linter's `cwd = root`, `under_root`; the buffer's path is a function
+  element of the `args` list, which nvim-lint's wrapper unpacks). Test:
   `test_workarounds.py::test_nvim_plugin_workarounds[mypy env]`,
   `test_nvim_render.py::test_mypy_linter_follows_a_venv_created_later` (Windows),
   `test_plugin_python_tools_drop_pythonhome_and_pythonpath`,

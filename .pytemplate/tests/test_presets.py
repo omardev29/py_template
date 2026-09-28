@@ -1615,7 +1615,9 @@ def test_new_names_a_destination_it_cannot_look_into(tmp_path: Path, monkeypatch
         assert e.value.code == 2
     monkeypatch.setattr(os, "stat", real_stat)
     too_long = tmp_path / ("p" * 300)
-    with pytest.raises(PytError, match=r"new: cannot access .*: File name too long") as e:
+    # ENAMETOOLONG on POSIX; Windows gives its own reason (a 300-character name is invalid there)
+    reason = "File name too long" if sys.platform != "win32" else ""
+    with pytest.raises(PytError, match=re.escape(f"new: cannot access {too_long}: {reason}")) as e:
         cmd_mode.cmd_new(cfg, [str(too_long), "--name", "demo"])
     assert e.value.code == 2
     assert sorted(p.name for p in tmp_path.iterdir()) == ["locked", "unlistable"]

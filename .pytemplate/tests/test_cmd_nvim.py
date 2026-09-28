@@ -1240,7 +1240,8 @@ def test_nvim_doctor_flags_the_macos_git_and_python_stubs(tmp_path: Path, monkey
     code, out = _doctor(tmp_path, monkeypatch, capsys, cc=None)
     assert code == 1, out
     assert "[XX] git is the /usr/bin stub" in out and "xcode-select --install" in out, out
-    assert "[XX] python3 is the /usr/bin stub" in out or "[--] python3 is the /usr/bin stub" in out, out
+    # cmd_nvim.TOOLS is made at import: on a Windows host its Python entry is "python"
+    assert re.search(r"\[(XX|--)\] python3? is the /usr/bin stub", out), out
     assert "[ok] curl: /usr/bin/curl" in out and "[ok] tar: /usr/bin/tar" in out, out
     monkeypatch.setattr(cmd_env, "_xcode_problem", lambda: None)  # developer tools installed
     _, out = _doctor(tmp_path / "ok", monkeypatch, capsys)
