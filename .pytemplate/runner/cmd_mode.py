@@ -461,7 +461,8 @@ def cmd_init(cfg: Config, args: list[str]) -> int:
 
 def _work_tree_top(folder: Path) -> Path | None:
     """The top of the git work tree `folder` would be in (its nearest existing parent is asked:
-    new creates the folder), or None: no work tree there, or no git."""
+    new creates the folder), or None: no work tree there, one that ignores `folder` (the project
+    gets a repository of its own there: presets.ignored_by_work_tree), or no git."""
     git = shutil.which("git")
     if git is None:
         return None
@@ -470,7 +471,9 @@ def _work_tree_top(folder: Path) -> Path | None:
         probe = probe.parent
     r = proc.run([git, "rev-parse", "--show-toplevel"], cwd=probe, env=presets._git_env(), capture=True, check=False, echo=False)
     top = r.stdout.strip() if r.returncode == 0 else ""
-    return Path(native_path(top)) if top else None  # MSYS2's own git prints /c/...
+    if not top or presets.ignored_by_work_tree(git, folder, probe):
+        return None
+    return Path(native_path(top))  # MSYS2's own git prints /c/...
 
 
 def _monorepo_note(dest: Path, top: Path) -> None:

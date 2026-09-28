@@ -572,6 +572,13 @@ def test_doctor_notes_a_generated_ci_that_github_never_runs(tmp_path: Path) -> N
     assert "apps/p/.github/workflows/ci.yml" in note[1] and "never runs" in note[1]
     assert "working-directory" in note[2] and "apps/p" in note[2]
     lines.clear()
+    # A repository that ignores the project never holds it: no workflow of it would run the
+    # project's steps, and the hook line says to give it a repository of its own
+    (top / ".gitignore").write_text("apps/\n", encoding="utf-8")
+    hooks.doctor(make(), check, project)
+    assert not [ln for ln in lines if "ci.yml" in ln[1]], lines
+    assert "ignores this project" in lines[-1][1] and "git init the project" in lines[-1][2]
+    lines.clear()
     (tmp_path / "alone").mkdir()
     _, own = make_repo(tmp_path / "alone")  # the project is the repository: its CI runs
     (own / ".github" / "workflows").mkdir(parents=True)

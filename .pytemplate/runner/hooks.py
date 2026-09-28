@@ -958,7 +958,9 @@ def doctor(cfg: Config, check: Check, project: Path = ROOT) -> None:
     ui.step("git hook")
     check(*_status_line(cfg, repo))
     ci = ".github/workflows/ci.yml"
-    if repo.prefix and (project / ci).is_file():  # new warns only when it creates a project there
+    # new warns only when it creates a project there. An ignored project is in no commit of that
+    # repository: the line above says to give it one of its own (git init), not to add a workflow
+    if repo.prefix and not repo.ignored() and (project / ci).is_file():
         check(
             None,
             f"generated CI: {repo.prefix}/{ci} never runs (GitHub reads {repo.top.name}/.github/workflows only)",

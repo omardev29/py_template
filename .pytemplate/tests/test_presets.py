@@ -1587,17 +1587,27 @@ def test_git_init_in_a_monorepo_stages_the_launchers_executable(tmp_path: Path, 
 
 
 @needs_git
-def test_git_init_in_a_monorepo_that_ignores_the_project(tmp_path: Path, git_env: None) -> None:
+@pytest.mark.parametrize("ignore", ["apps/", "*\n!.gitignore\n"], ids=["a monorepo's apps/", "a home folder kept in git"])
+def test_git_init_in_a_repository_that_ignores_the_project(tmp_path: Path, git_env: None, ignore: str) -> None:
+    """A work tree that ignores the folder (a dotfiles repository of the home folder with `*` in
+    its .gitignore, a monorepo that ignores apps/) never holds the project: it used to get no
+    repository at all there (setup then said to `git init` it, and new advised a workflow for the
+    outer repository). It gets one of its own, as outside any work tree."""
     mono = tmp_path / "mono"
     mono.mkdir()
     _git(mono, "init", "--quiet")
     _git(mono, "config", "core.filemode", "false")
-    (mono / ".gitignore").write_text("apps/\n", encoding="utf-8")
+    (mono / ".gitignore").write_text(ignore, encoding="utf-8")
     dest = mono / "apps" / "game"
     dest.mkdir(parents=True)
-    (dest / "pyt").write_text("#!/bin/sh\n", encoding="utf-8")
-    presets._git_init(dest)  # git refuses to add an ignored path: nothing staged, no error
+    for script in ("pyt", "pyt.ps1"):
+        (dest / script).write_text("#!/bin/sh\n", encoding="utf-8")
+    presets._git_init(dest)
     assert _git(mono, "ls-files", "-s") == ""
+    assert (dest / ".git").is_dir() and os.path.samefile(_git(dest, "rev-parse", "--show-toplevel").strip(), dest)
+    assert _git(dest, "symbolic-ref", "HEAD").strip() == "refs/heads/main"
+    modes = {line.split()[3]: line.split()[0] for line in _git(dest, "ls-files", "-s").splitlines()}
+    assert modes == {"pyt": "100755", "pyt.ps1": "100755"}
 
 
 def test_git_init_falls_back_without_b(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

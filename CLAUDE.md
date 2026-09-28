@@ -961,8 +961,8 @@ header rules (with detector tests proving each rule fires).
   test `copy_template` makes, `presets.copy_scope`: the files git tracks, or every file and
   why), the number of pins `__init` would pass (the ones this `uv.lock` lacks, as `plan_init` counts them) and the
   `__init` step it would run in the copy, then `git init -b main`, or why not (DIR inside the
-  work tree of another repository, `cmd_mode._work_tree_top`, with the CI warning of section
-  13.2; no git). `pyz-merge` validates its inputs (`pyz.check_parts`:
+  work tree of another repository that does not ignore it, `cmd_mode._work_tree_top`, with the
+  CI warning of section 13.2; no git). `pyz-merge` validates its inputs (`pyz.check_parts`:
   valid `_pyz.json`, one app, one build, the platform of a pure part next to per-platform ones) and prints inputs and outputs (the `.pyz` and its
   `.cmd`).
 - `nvim trust`, `extras`, `bootstrap` and `sync` print what they would do.
@@ -1050,7 +1050,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   git failure (dubious ownership...) is shown with git's own message: a warning in apply, an
   info line in `doctor` (whose "git hook" line is otherwise info too: missing is not a
   problem; for a project below the repository's top it adds an info line that the generated
-  `ci.yml` never runs there, section 13.2). Every git call runs with `LC_ALL=C` (find_repo
+  `ci.yml` never runs there, section 13.2, unless that repository ignores the project: its
+  "git hook" line then says to give it a repository of its own). Every git call runs with `LC_ALL=C` (find_repo
   reads "not a git repository" in English). A hooks folder the user may not change (another
   user's, read-only, immutable) is a warning in apply and one error naming the file in `hooks
   install`/`uninstall` (`hooks.cmd_hooks`; it was an internal-error traceback).
@@ -2730,11 +2731,13 @@ Per method:
   `git init -b
   main` (the generated CI runs on `main`; git < 2.28: plain `init` + `symbolic-ref HEAD
   refs/heads/main`; no repository inside an existing work tree, where `cmd_mode.cmd_new` then
-  warns that the generated CI will not run: `cmd_mode._monorepo_note`, section 13.2) and `git
+  warns that the generated CI will not run: `cmd_mode._monorepo_note`, section 13.2; a work tree
+  that ignores the folder does not count, `presets.ignored_by_work_tree`, `git check-ignore
+  <dest>/pyt` as hooks asks: a home folder kept in git with `*` in its .gitignore left the project
+  in no repository at all, and setup then said to `git init` it) and `git
   add --chmod=+x pyt pyt.ps1` (inside an existing work tree only where it has
   `core.filemode = false`, Git for Windows: a later `git add` records a new file as 100644
-  there, `_fix_exec_bit` skips untracked files and the hook refused the first commit; a path it
-  ignores is left alone). When the copy or `__init` fails (a name uv refuses, no network, Ctrl+C) `new`
+  there, `_fix_exec_bit` skips untracked files and the hook refused the first commit). When the copy or `__init` fails (a name uv refuses, no network, Ctrl+C) `new`
   removes what it created (the folder and the parents it made, or only the content of the
   empty folder it was given) and says so; a folder with content is refused before anything
   is written. On success it prints one hint (init prints none: it runs in the copy), `cd
@@ -5541,7 +5544,8 @@ Code coupling (rename together):
 - `cmd_mode._config_from_text` and `e2e.preset_info` call the private `config._build`, and
   `e2e.rmtree` lazily `cmd_env._is_link`;
   `cmd_mode._work_tree_top` calls the private `presets._git_env` (the same git environment as
-  `presets._git_init`, whose "inside a work tree" rule it mirrors for `new`);
+  `presets._git_init`, whose "inside a work tree" rule it mirrors for `new`, an ignoring one
+  excepted by the same `presets.ignored_by_work_tree`);
   `nvimtest.selftest` imports `e2e.termination_as_interrupt`, `isolate_git` and
   `hidden_template_repository` lazily (one rule for both harnesses);
   `e2e.flet_build_reason` imports `methods.flet._developer_mode`, and its Flutter size and the

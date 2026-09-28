@@ -1284,6 +1284,12 @@ def test_dry_run_new_says_what_git_will_do(git_sandbox: Path, monkeypatch: pytes
     assert "warning: " in err and ".github/workflows/ci.yml" in err and "working-directory" in err
     assert "apps/sub" in err  # the folder the steps must run in
     assert not (outer / "apps").exists()  # a dry run creates nothing
+    # A work tree that ignores the folder (a home folder kept in git, `*` in its .gitignore)
+    # never holds the project: it gets a repository of its own, and no CI advice for that one
+    (outer / ".gitignore").write_text("*\n!.gitignore\n", encoding="utf-8")
+    assert cmd_mode.cmd_new(cfg, [str(outer / "code" / "game"), "--name", "game"]) == 0
+    err = capsys.readouterr().err
+    assert "and `git init -b main`" in err and "inside the git work tree" not in err and "ci.yml" not in err, err
 
 
 class _Relock:

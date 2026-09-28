@@ -1225,11 +1225,24 @@ def _outermost_missing(path: Path) -> Path | None:
     return top
 
 
+def ignored_by_work_tree(git: str, folder: Path, cwd: Path) -> bool:
+    """Whether the git work tree around `folder` ignores it (`git check-ignore <folder>/pyt`, as
+    hooks asks): a home folder kept in git with `*` in its .gitignore, a monorepo that ignores its
+    apps/. A project made there is never part of that repository, so it gets one of its own.
+    `folder` need not exist yet (git matches the path); `cwd`, an existing folder inside that
+    work tree, is where git runs (exit 0: ignored; 1: not; 128: no work tree, or an error)."""
+    path = Path(os.path.relpath(folder / "pyt", cwd)).as_posix()
+    r = proc.run([git, "check-ignore", "-q", "--", path], cwd=cwd, env=_git_env(), capture=True, check=False, echo=False)
+    return r.returncode == 0
+
+
 def _git_init(dest: Path) -> None:
     """A git repository on branch main (the branch the generated CI runs on), with pyt and
     pyt.ps1 executable. Inside a work tree (a monorepo) no repository; only where that one
     has core.filemode = false (Git for Windows) the two launchers are staged executable: a
-    later `git add` would record them as 100644, and the pre-commit hook refuses that."""
+    later `git add` would record them as 100644, and the pre-commit hook refuses that. A work
+    tree that ignores the project (ignored_by_work_tree) does not count: the project got no
+    repository at all there, and setup then said to `git init` it."""
     git = shutil.which("git")
     if git is None:
         ui.info("  git not found: the project is not a git repository (later: git init -b main)")
@@ -1238,10 +1251,10 @@ def _git_init(dest: Path) -> None:
     inside = proc.run(
         [git, "rev-parse", "--is-inside-work-tree"], cwd=dest.parent, env=env, capture=True, check=False, echo=False
     )
-    if inside.returncode == 0 and inside.stdout.strip() == "true":
+    if inside.returncode == 0 and inside.stdout.strip() == "true" and not ignored_by_work_tree(git, dest, dest.parent):
         # --bool: git's own reading of the value (off, no and 0 are false too); every git has it
         filemode = proc.run([git, "config", "--bool", "--get", "core.filemode"], cwd=dest, env=env, capture=True, check=False, echo=False)
-        if filemode.stdout.strip() == "false":  # an ignored folder: git refuses, and that is fine
+        if filemode.stdout.strip() == "false":
             proc.run([git, "add", "--chmod=+x", "--", "pyt", "pyt.ps1"], cwd=dest, env=env, capture=True, check=False)
         return
     if (dest / ".git").exists():

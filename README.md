@@ -140,8 +140,9 @@ outside the template:
    needs the network. The packages the source project does not lock yet get the versions the
    template was tested with (`.pytemplate/presets/<preset>/constraints.txt`, the preset's whole
    tested tree), once: `./pyt lock --upgrade` moves on.
-4. It runs `git init -b main` (unless `DIR` is inside a git work tree) with `pyt` and
-   `pyt.ps1` executable. Inside a work tree with `core.filemode = false` (Git for Windows) it
+4. It runs `git init -b main` (unless `DIR` is inside a git work tree that does not ignore it;
+   one that ignores it, such as a home folder kept in git with `*` in its `.gitignore`, never
+   holds the project) with `pyt` and `pyt.ps1` executable. Inside a work tree with `core.filemode = false` (Git for Windows) it
    stages those two as executable there. It makes no commit. Inside a bigger repository it warns
    that the generated `.github/workflows/ci.yml` will not run: GitHub reads workflows only from
    the repository's own `.github/workflows/`, so CI there needs a workflow of the repository that
