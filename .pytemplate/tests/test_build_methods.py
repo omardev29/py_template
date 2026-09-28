@@ -523,6 +523,12 @@ def test_nuitka_argv_follows_the_config(sandbox: Path, monkeypatch: pytest.Monke
     cfg = make({"app": {"gui": True}, "deploy": deploy})
     app = _nuitka_app(sandbox / "payload", cfg.pkg)
     fake = FakeNuitka(cfg.pkg)
+    # A project under a folder named with '#' (C:\dev\C#\game): Nuitka reads what follows the
+    # last '#' of the icon option as an icon index, and stopped the build
+    root = sandbox / "C#" / "game"
+    (root / "art").mkdir(parents=True)
+    (root / "art" / "app.ico").write_bytes(b"\x00\x00\x01\x00icon")
+    monkeypatch.setattr(nuitka, "ROOT", root)
     monkeypatch.setattr(nuitka, "IS_WINDOWS", True)
     monkeypatch.setattr(envs, "uv", fake)
     monkeypatch.setattr(upx, "active", lambda cfg: True)
@@ -539,15 +545,27 @@ def test_nuitka_argv_follows_the_config(sandbox: Path, monkeypatch: pytest.Monke
     assert ("--python-flag=no_docstrings" in argv) is (optimize >= 2)
     assert "--nofollow-import-to=PIL" in argv and "--nofollow-import-to=ssl" in argv
     assert "--windows-console-mode=disable" in argv  # app.gui on Windows
-    from runner.project import ROOT
-
-    assert f"--windows-icon-from-ico={ROOT / 'art' / 'app.ico'}" in argv
+    # The icon is copied into the stage and named relative to it (Nuitka's cwd), with no '#'
+    # for Nuitka's "ICON#N" split: what its option check reads, os.path.exists from the stage
+    icon = next(a for a in argv if a.startswith("--windows-icon-from-ico=")).split("=", 1)[1]
+    assert icon == "pyt-icon.ico" and "#" not in icon
+    assert (stage / icon).read_bytes() == (root / "art" / "app.ico").read_bytes()
     assert "--include-data-dir=assets=assets" in argv  # relative to the stage: Nuitka splits a path at ',' and '='
     assert not any(str(stage) in str(a) for a in argv if str(a).startswith("--include-data"))
     # a standalone folder is packed when it is done (the excludes apply), never by Nuitka's plugin
     assert "--plugin-enable=upx" not in argv and packed == [out]
     assert argv[-2:] == ["--lto=no", "--report=r.xml"]  # extra_args, then the command line
     assert not [a for a in argv if a.startswith("--include-module=")]  # cpython: Nuitka follows the imports
+
+
+def test_nuitka_names_a_missing_icon_before_it_runs(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = make({"deploy": {"exe": {"icon": "art/none.ico"}}})
+    app = _nuitka_app(sandbox / "payload", cfg.pkg)
+    monkeypatch.setattr(nuitka, "ROOT", sandbox)
+    monkeypatch.setattr(nuitka, "IS_WINDOWS", True)
+    monkeypatch.setattr(envs, "uv", lambda *a, **k: pytest.fail("Nuitka ran without its icon"))
+    with pytest.raises(PytError, match=r"deploy\.exe\.icon = 'art/none\.ico' does not exist"):
+        nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app))
 
 
 def test_nuitka_upx_honours_the_excludes(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

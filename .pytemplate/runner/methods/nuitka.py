@@ -300,6 +300,22 @@ def _fingerprint(archive: Path) -> None:
 FLET_PACKAGE_DATA = ("flet.controls.material:icons.json", "flet.controls.cupertino:cupertino_icons.json")
 
 
+def _stage_icon(cfg: Config, stage: Path) -> str:
+    """deploy.exe.icon, copied into the stage (Nuitka's cwd) and named relative to it.
+
+    Nuitka reads what follows the last '#' of --windows-icon-from-ico as an icon index ("ICON#N")
+    on Windows, and stops when it is no number (with a TypeError: its message has two %s for one
+    value): the absolute path of a project under a folder such as C:\\dev\\C#\\game stopped every
+    build with an icon before it compiled anything. The copy's name holds no '#'.
+    """
+    icon = ROOT / cfg.deploy.exe.icon
+    if not icon.is_file():
+        raise PytError(f"nuitka: deploy.exe.icon = {cfg.deploy.exe.icon!r} does not exist (relative to the project root)")
+    name = "pyt-icon" + ("" if "#" in icon.suffix else icon.suffix)
+    mypyc.copy_writable(os.fspath(icon), os.fspath(stage / name))
+    return name
+
+
 def build(req: BuildRequest) -> Path:
     cfg = req.cfg
     check_python(cfg, [*cfg.deploy.nuitka.extra_args, *req.extra])
@@ -349,7 +365,7 @@ def build(req: BuildRequest) -> Path:
     if cfg.app.gui and IS_WINDOWS:
         argv.append("--windows-console-mode=disable")
     if cfg.deploy.exe.icon and IS_WINDOWS:
-        argv.append(f"--windows-icon-from-ico={ROOT / cfg.deploy.exe.icon}")
+        argv.append(f"--windows-icon-from-ico={_stage_icon(cfg, stage)}")
     argv += [f"--nofollow-import-to={m}" for m in cfg.deploy.exclude_modules]
     use_upx = upx.active(cfg)
     if use_upx and onefile:

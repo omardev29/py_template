@@ -2750,7 +2750,11 @@ Per method:
   `sys.path`, built-ins dropped, compiled modules and extensions always kept; Nuitka stops with
   FATAL on a module it cannot locate, e.g. a platform-guarded `import winreg`),
   `--python-flag=no_asserts/no_docstrings` from the shared `deploy.optimize` (an owner
-  decision: no Nuitka-only switch), `--nofollow-import-to` per `deploy.exclude_modules`, the upx
+  decision: no Nuitka-only switch), on Windows `deploy.exe.icon` copied into the stage and named
+  relative to it (`nuitka._stage_icon`, `pyt-icon<suffix>`: Nuitka reads what follows the last
+  `#` of `--windows-icon-from-ico` as an icon index, and the absolute path of a project under
+  `C:\dev\C#\game` stopped every build with an icon; a missing icon is one error before Nuitka
+  runs), `--nofollow-import-to` per `deploy.exclude_modules`, the upx
   plugin for a onefile build with UPX on (a standalone folder is packed afterwards, `upx.pack_tree`:
   "Size and UPX" below), then `nuitka.optimization_args` BEFORE `deploy.nuitka.extra_args` and the
   command line (Nuitka takes the last value, so an `--lto` there still wins): always
@@ -5045,6 +5049,13 @@ Nuitka:
   crash report: not done. Test:
   `test_build_methods.py::test_nuitka_refuses_a_project_folder_scons_would_expand`. Goes: when
   Nuitka escapes `$` in the paths it gives SCons.
+- **`--windows-icon-from-ico` splits a path at its last `#`** (DEFECT, Nuitka 4.2.2 on Windows:
+  `Options.py` reads the rest as an icon index, "ICON#N", and its message for a bad one has two
+  `%s` for one value, a TypeError): the absolute icon path of a project under `C:\dev\C#\game`
+  stopped every nuitka build with `deploy.exe.icon` before it compiled anything. Up: none found.
+  Fix: `nuitka._stage_icon` copies the icon into the stage and passes its `#`-free name, relative
+  to Nuitka's cwd (10). Test: `test_build_methods.py::test_nuitka_argv_follows_the_config`,
+  `test_nuitka_names_a_missing_icon_before_it_runs`. Goes: never (a relative name stays right).
 - **A standalone binary named like the package folder** (DEFECT): `main.dist/<name>` is a FILE
   where the mypyc package folder `<pkg>/` must go: NotADirectoryError after minutes of work. Up:
   none found (cf. Nuitka/Nuitka#2483, a data file named like the binary). Fix: `<name>.bin` on
