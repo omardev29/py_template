@@ -39,7 +39,7 @@ from pathlib import Path
 
 from . import cmd_nvim, presets, proc, ui
 from .config import Config
-from .project import IS_WINDOWS, ROOT, check_private_dir, scratch_name, user_path
+from .project import IS_WINDOWS, ROOT, check_private_dir, make_private_dir, scratch_name, user_path
 from .ui import PytError
 
 DEFAULT_PRESETS = ("script", "raylib", "flet")
@@ -316,7 +316,7 @@ def _prepare_dir(layout: Layout) -> None:
     if base.exists() and any(base.iterdir()) and not (base / DIR_MARKER).is_file():
         raise PytError(f"{base} is not empty and was not created by selftest --nvim: pick another --dir")
     try:
-        base.mkdir(mode=0o700, parents=True, exist_ok=True)
+        make_private_dir(base, "--dir")
     except OSError as e:  # a parent that is a file, no permission
         raise PytError(f"cannot create --dir {base}: {e.strerror or e}") from None
     (base / DIR_MARKER).write_text("work directory of ./pyt selftest --nvim (safe to delete)\n", encoding="utf-8", newline="\n")

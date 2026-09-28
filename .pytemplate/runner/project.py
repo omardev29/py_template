@@ -334,6 +334,16 @@ def check_private_dir(path: Path, option: str) -> None:
             raise PytError(f"{path} can be written by every user (mode {mode & 0o7777:o}): pick another {option}, or chmod o-w it")
 
 
+def make_private_dir(path: Path, option: str) -> None:
+    """Create the scratch folder `path` (0700, its parents too) and check it once it exists
+    (check_private_dir): checked only before, a folder another user created in between (the
+    default /tmp/pt-e2e-<uid> is predictable) was taken by mkdir(exist_ok=True), and the
+    harness ran code from it. Once it is this user's and closed to others, nobody else can swap
+    it for theirs in a sticky /tmp."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    check_private_dir(path, option)
+
+
 def _umask() -> int:
     mask = os.umask(0)  # the only way to read it; at import, before any thread starts
     os.umask(mask)

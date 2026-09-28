@@ -706,7 +706,7 @@ header rules (with detector tests proving each rule fires).
 | `pyt.py` (one level up) | Stops with exit 3 and one `error:` line (no traceback) when uv started it on Python < 3.11 (a `uv run` by hand with an old `UV_PYTHON`, a `.venv` made by hand with an older Python), BEFORE importing the runner; reconfigures stdout/stderr to UTF-8; in global mode (the same rule as `project.detect_global`) sends the bytecode cache of the runner's modules to `<user cache>/pytemplate/pycache` (`sys.pycache_prefix`; `_user_cache`: `LOCALAPPDATA`, an absolute `XDG_CACHE_HOME`, `~/.cache`; none: `sys.dont_write_bytecode`), so nothing is written into the installed template; puts its own dir on `sys.path`, calls `runner.cli.main(argv, entry=True)` (the restart on `python.cpython`, section 5.2). |
 | `cli.py` | `COMMANDS` table of `Command(module, func, summary, usage, render, group)`, modules imported lazily; `FORWARDS` / `HELP_PASSES_THROUGH` (section 5.2); `INTERNAL` (routes listed nowhere: `__init`); global mode: `GLOBAL_COMMANDS`, `GLOBAL_SUMMARIES`, `_dispatch_outside_a_project`, `_outside_a_project`/`_unknown_outside`/`INIT_OUTSIDE` (the exit-2 messages), `_help_outside_a_project`, `_prog`. `_parse_globals`, `dispatch` (also the exit-2 hint of the removed `init`), `main`/`_main` (exception -> exit code, closed stdout), the restart on `python.cpython` (`RUNS_ON_ANY_PYTHON`, `_started_by_uv`, `_python_needed`, `_restart`: section 5.2), `cmd_help` (commands and `[tasks]` entries), `cmd_tasks`, `cmd_selftest` (plain, `--shells`, `--nvim`, `--e2e`), the `__probe` route, `EXAMPLES`. |
 | `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths` (`import_path`), comment-preserving editor `set_value` / `update_file` (section 6.1), its TOML statement scanner `scan` (render reads pyproject.toml with it, 6.3), `toml_value`. |
-| `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `GLOBAL` (`detect_global`, `INSTALL_RECORD`: section 5.2), `IS_WINDOWS/IS_MACOS/IS_WSL` (`detect_wsl`: `wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `launcher_python`/`ANY_RUNNER_PYTHON` (the Python the launchers start the runner on: section 4.1), `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`, `scratch_name` and `check_private_dir` (the harnesses' scratch folders), `write_whole` (a file rewritten through a temporary file and `os.replace`, never half-written, owner and hard links kept: `_give_owner`, `_write_in_place`). |
+| `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `GLOBAL` (`detect_global`, `INSTALL_RECORD`: section 5.2), `IS_WINDOWS/IS_MACOS/IS_WSL` (`detect_wsl`: `wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `launcher_python`/`ANY_RUNNER_PYTHON` (the Python the launchers start the runner on: section 4.1), `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`, `scratch_name`, `check_private_dir` and `make_private_dir` (the harnesses' scratch folders: checked before and once made), `write_whole` (a file rewritten through a temporary file and `os.replace`, never half-written, owner and hard links kept: `_give_owner`, `_write_in_place`). |
 | `ui.py` | All runner output to stderr; `PytError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`, no `PYTEMPLATE_GLOBAL`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C and passes SIGTERM/SIGHUP on), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`; a second runner: `runner_argv` (the launchers' uv call), `runner_env` (cli._restart's). |
 | `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (every group but those `left_out` names), `interpreter_info` (with `platform` and `cc`); python.cpython's interpreter (`find_cpython`, `cpython_downloads`, `ensure_python`, `no_download_problem`, `this_platform`, `RUNS_ON_ANY_PYTHON`: section 5.2); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
@@ -3410,7 +3410,7 @@ short temp tree and unset `NVIM_APPNAME`.
   [--dir DIR]` (`nvimtest.selftest`): isolated LazyVim under `--dir` (default `%TEMP%\pt\nvim`,
   `$TMPDIR/pt-nvim-<uid>` elsewhere, made 0700; on POSIX an existing `--dir` another user owns,
   or one every user can write, is refused: `project.check_private_dir`, since code runs from
-  it): `<dir>/x/{config,data,state,cache}` = the `XDG_*` homes,
+  it, and checked again once it exists, `project.make_private_dir`, as for `--e2e`): `<dir>/x/{config,data,state,cache}` = the `XDG_*` homes,
   `<dir>/base.json` = the base is complete, `<dir>/p/<preset>` = scratch projects,
   `<dir>/logs/` = one log per step. It stops unless Neovim reports every stdpath inside
   `<dir>/x`, refuses a `--dir` inside the template or one that is a file (exit 2), and only
@@ -3524,7 +3524,9 @@ short temp tree and unset `NVIM_APPNAME`.
   (smoke scratch); default base `%TEMP%\pt\e2e` / `$TMPDIR/pt-e2e-<uid>` (made 0700; on POSIX
   a base another user owns, or one every user can write, is refused: `project.check_private_dir`;
   every step runs code from it, and a shared /tmp/pt-e2e let another user swap a project in
-  between two steps); only a base carrying
+  between two steps; checked again once it exists, `project.make_private_dir`: checked only
+  before `mkdir(exist_ok=True)`, a folder another user made in between was taken,
+  `test_e2e_plan.test_a_base_another_user_makes_after_the_check_is_refused`); only a base carrying
   `.pytemplate-e2e` is wiped, and a symlinked or junctioned base loses only its link and marker
   (`e2e.rmtree` removes a link as a link and never chmods through one: a passing run left the
   folder it named at 0o200). Steps run with stdin closed and per-step timeouts (`TIMEOUTS`,
@@ -3619,7 +3621,7 @@ short temp tree and unset `NVIM_APPNAME`.
     the report of what ran, with its own message and code. A Ctrl+C, SIGTERM or SIGHUP during
     the cleanup or the report waits for it (`deferred_interrupts`) and makes the run interrupted.
   - the scratch base: `mutation.default_base` (`%TEMP%\pt\mut`, `$TMPDIR/pt-mutation-<uid>`,
-    0700, `project.check_private_dir`), never inside the project, wiped only with its marker
+    0700, `project.check_private_dir`, again once it exists: `make_private_dir`), never inside the project, wiped only with its marker
     `.pytemplate-mutation`, one run at a time (`base_lock` on `<base>/lock`). The workers'
     folders and the snapshot always go; the logs (`<base>/logs`: Cosmic Ray's, each worker's last
     run, the junit times, each failed baseline, each error) stay after an interrupt, a failed

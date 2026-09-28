@@ -412,6 +412,35 @@ def test_prepare_base_refuses_a_base_another_user_can_change(tmp_path: Path, mon
     e2e._prepare_base(fresh)  # its own base: reused
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX owners and modes (Windows %TEMP% is per user)")
+@pytest.mark.parametrize("harness", ["e2e", "nvim", "mutation"])
+def test_a_base_another_user_makes_after_the_check_is_refused(harness: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scratch base was checked before it existed, then made with mkdir(exist_ok=True): a
+    folder another user created in between (the default /tmp/pt-e2e-<uid> is predictable; mode
+    0777 so the suite can write in it) was taken, and every step ran code from it. The folder
+    is checked again once it exists."""
+    from runner import mutation, nvimtest
+
+    base = tmp_path / "pt-base"
+    module = {"e2e": e2e, "nvim": nvimtest, "mutation": mutation}[harness]
+    real = module.check_private_dir
+
+    def check_then_the_other_user_wins(path: Path, option: str) -> None:
+        real(path, option)  # nothing there yet: passes
+        path.mkdir()
+        path.chmod(0o777)  # the other user's folder appears
+
+    monkeypatch.setattr(module, "check_private_dir", check_then_the_other_user_wins)
+    with pytest.raises(PytError, match="written by every user"):
+        if harness == "e2e":
+            e2e._prepare_base(base)
+        elif harness == "nvim":
+            nvimtest._prepare_dir(nvimtest.Layout(base))
+        else:
+            mutation.prepare_base(base, tmp_path / "project")
+    assert not any(base.iterdir())  # no marker: nothing runs from it
+
+
 # --- options -----------------------------------------------------------------------------------
 
 

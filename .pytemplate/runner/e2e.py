@@ -55,7 +55,7 @@ from typing import Any
 from . import proc, ui
 from .cmd_build import COMPAT
 from .config import BACKENDS, METHODS, Config
-from .project import CONFIG_FILE, ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, check_private_dir, host_arch, host_os, scratch_name, user_path, venv_python
+from .project import CONFIG_FILE, ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, check_private_dir, host_arch, host_os, make_private_dir, scratch_name, user_path, venv_python
 from .ui import PytError
 
 DEFAULT_PRESETS = ("script", "raylib", "flet")
@@ -1187,7 +1187,7 @@ def _prepare_base(base: Path) -> None:
     check_private_dir(base, "--base")
     if base.is_dir() and any(base.iterdir()) and not (base / MARKER).is_file():
         raise PytError(f"selftest --e2e: {base} is not empty and was not made by selftest --e2e (no {MARKER}): pick another --base")
-    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    make_private_dir(base, "--base")
     (base / MARKER).write_text("Made by ./pyt selftest --e2e: safe to delete.\n", encoding="utf-8", newline="\n")
 
 

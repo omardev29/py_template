@@ -63,7 +63,7 @@ from . import envs, proc, ui
 from .config import Config
 from .e2e import child_env, kill_tree, rmtree, scrub_env, termination_as_interrupt
 from .presets import _git_path
-from .project import IS_WINDOWS, ROOT, TOOLS, check_private_dir, scratch_name, venv_python
+from .project import IS_WINDOWS, ROOT, TOOLS, check_private_dir, make_private_dir, scratch_name, venv_python
 from .ui import PytError
 
 SCOPE = ".pytemplate/runner"  # the modules mutated, relative to the project
@@ -726,7 +726,7 @@ def prepare_base(base: Path, root: Path = ROOT) -> None:
     check_private_dir(base, "scratch folder (TMPDIR)")
     if base.is_dir() and any(base.iterdir()) and not (base / MARKER).is_file():
         raise PytError(f"selftest --mutation: {base} is not empty and was not made by selftest --mutation (no {MARKER})")
-    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    make_private_dir(base, "scratch folder (TMPDIR)")
     (base / MARKER).write_text("Made by ./pyt selftest --mutation: safe to delete.\n", encoding="utf-8", newline="\n")
 
 
