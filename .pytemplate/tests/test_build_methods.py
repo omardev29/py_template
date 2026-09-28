@@ -65,6 +65,13 @@ def make(data: dict[str, Any]) -> Config:
     return cfg
 
 
+def real(data: dict[str, Any]) -> Config:
+    """make() for a test that runs uv against this project's .venv: with its python.cpython (the
+    template's default, 3.14, is not the interpreter of a project on another minor)."""
+    own = config.load(set()).python.cpython
+    return make({**data, "python": {"cpython": own, **data.get("python", {})}})
+
+
 def fake_app(root: Path, pkg: str = "myapp", *, assets: bool = True) -> Path:
     """A payload as cmd_build.payload returns it: main.py, the package, assets/."""
     (root / pkg / "core").mkdir(parents=True)
@@ -1939,7 +1946,7 @@ def test_pyz_merge_of_a_real_build(sandbox: Path, monkeypatch: pytest.MonkeyPatc
     then merged with a native part of another platform and run again."""
     from runner.methods import pyz
 
-    cfg = make({})
+    cfg = real({})
     skip_when_older_than(cfg)
     app = fake_app(sandbox / "payload")
     (app / "main.py").write_text("import rich, sys\nprint('rich', rich.__name__, *sys.argv[1:])\n", encoding="utf-8")
@@ -2110,9 +2117,16 @@ def test_host_floor_falls_back_for_real_on_uvs_own_words(tmp_path: Path, monkeyp
     have = common._version_tuple(version) if libc == "glibc" else None
     if common.host_os() != "linux" or common.host_arch() != "x86_64" or have is None or have < (2, 34):
         pytest.skip("needs Linux x86_64 with glibc 2.34 or newer")
-    requirements = _explicit_index_project(tmp_path, monkeypatch, {"newglibc": "cp314-cp314-manylinux_2_34_x86_64", "ptdemo": "py3-none-any"})
-    host = common.Target("cp", 3, 14, "linux", "x86_64")
-    site = common.install_deps(make({}), "cpython", host, tmp_path / "site", requirements)
+    cfg = real({})
+    if not envs.tool_env(cfg).python.is_file():
+        pytest.skip("needs .venv (./pyt setup)")
+    # the wheel of the Python that installs it (this project's .venv): a cp314 one had no
+    # interpreter to go to in a project on another minor, with the floor and without it
+    major, minor = (int(part) for part in str(envs.interpreter_info(envs.tool_env(cfg).python)["version"]).split(".")[:2])
+    tag = f"cp{major}{minor}-cp{major}{minor}-manylinux_2_34_x86_64"
+    requirements = _explicit_index_project(tmp_path, monkeypatch, {"newglibc": tag, "ptdemo": "py3-none-any"})
+    host = common.Target("cp", major, minor, "linux", "x86_64")
+    site = common.install_deps(cfg, "cpython", host, tmp_path / "site", requirements)
     assert common.installed(site) == {("newglibc", "1.0"), ("ptdemo", "1.0")}
     err = capsys.readouterr().err
     assert "a dependency has no wheel for x86_64-manylinux_2_28" in err and "newglibc" in err
@@ -2238,15 +2252,21 @@ def test_cross_target_builds_a_pure_sdist_for_real(tmp_path: Path, monkeypatch: 
     )
     if probe.returncode != 0:
         pytest.skip(f"needs PyPI (uv could not resolve docopt): {probe.stderr.strip()[-200:]}")
-    if not envs.tool_env(make({})).python.is_file():
+    cfg = real({})
+    if not envs.tool_env(cfg).python.is_file():
         pytest.skip("needs .venv (./pyt setup)")
     lock = tmp_path / "uv.lock"
     lock.write_text(SOURCE_ONLY_LOCK, encoding="utf-8")
     monkeypatch.setattr(common, "LOCK", lock)
     req = tmp_path / "requirements.txt"
     req.write_text("docopt==0.6.2\nsix==1.17.0\n", encoding="utf-8")
-    common.pylock_path(req).write_text(SOURCE_ONLY_PYLOCK, encoding="utf-8")  # what install_deps installs
-    site = common.install_deps(make({}), "cpython", common.parse_key(LINUX if IS_WINDOWS else WIN), tmp_path / "site", req)
+    # what install_deps installs, exported by a project on this python.cpython (uv checks the
+    # requires-python of the export against the .venv's interpreter, which installs it)
+    minor = cfg.python.cpython
+    pylock = SOURCE_ONLY_PYLOCK.replace('requires-python = ">=3.14"', f'requires-python = ">={minor}"')
+    common.pylock_path(req).write_text(pylock, encoding="utf-8")
+    target = common.parse_key(f"cp{minor.replace('.', '')}-{'linux' if IS_WINDOWS else 'windows'}-x86_64")  # a key the lock serves
+    site = common.install_deps(cfg, "cpython", target, tmp_path / "site", req)
     assert (site / "docopt.py").is_file() and (site / "six.py").is_file()
     assert common.installed(site) == {("docopt", "0.6.2"), ("six", "1.17.0")}
 
@@ -3116,7 +3136,7 @@ def test_portable_sh_launcher_via_symlinks_cdpath_and_spaces(tmp_path: Path, run
         python = out / "runtime" / "bin" / "python3"
         python.parent.mkdir(parents=True)
         python.symlink_to(Path(sys.executable).resolve())
-    cfg = make({"deploy": {"portable": {"runtime": runtime}}})
+    cfg = real({"deploy": {"portable": {"runtime": runtime}}})
     if runtime == "system":  # the launcher looks for cfg.min_python on PATH: this interpreter
         skip_when_older_than(cfg)
     launcher = out / "app.sh"
@@ -3868,7 +3888,7 @@ def test_portable_system_folder_real_build_runs(sandbox: Path, monkeypatch: pyte
     .sh launcher with the machine's Python: it must import the locked dependencies from lib/."""
     from runner.methods import portable
 
-    cfg = make({"deploy": {"portable": {"runtime": "system"}}})
+    cfg = real({"deploy": {"portable": {"runtime": "system"}}})
     skip_when_older_than(cfg)
     app = fake_app(sandbox / "payload")
     (app / "main.py").write_text("import rich, sys\nprint('rich', rich.__file__, *sys.argv[1:])\n", encoding="utf-8")

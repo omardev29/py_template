@@ -2033,6 +2033,13 @@ def _venv_ruff() -> Path:
     return ROOT / ".venv" / ("Scripts/ruff.exe" if IS_WINDOWS else "bin/ruff")
 
 
+def _real_cfg() -> Config:
+    """The defaults with this project's python.cpython: the hook's uv runs ruff in this project's
+    .venv, and the template's default (3.14) made uv replace the .venv of a project on another
+    minor with an empty one under the running suite."""
+    return make({"python": {"cpython": config.load(set()).python.cpython}})
+
+
 def test_real_ruff_accepts_the_hook_arguments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The ruff and uv command lines the hook builds, run for real in this project's .venv: a
     ruff or uv release that renamed a flag would otherwise block every commit of every project
@@ -2044,7 +2051,7 @@ def test_real_ruff_accepts_the_hook_arguments(tmp_path: Path, monkeypatch: pytes
     except PytError:
         pytest.skip("uv not found")
     monkeypatch.setattr(cmd_dev, "BUILD", tmp_path / "build")  # _profile_file writes its ruff config there
-    cfg = make()
+    cfg = _real_cfg()
     good, bad, undefined = (tmp_path / name for name in ("good.py", "bad.py", "undefined.py"))
     good.write_text("x = 1\n", encoding="utf-8")
     bad.write_text("x=1\n", encoding="utf-8")
@@ -2083,7 +2090,7 @@ def test_real_ruff_format_of_a_staged_syntax_error_says_so(tmp_path: Path, monke
     except PytError:
         pytest.skip("uv not found")
     monkeypatch.setattr(cmd_dev, "BUILD", tmp_path / "build")
-    cfg = make()
+    cfg = _real_cfg()
     syn, ugly = tmp_path / "syn.py", tmp_path / "ugly.py"
     syn.write_text("def f(:\n    pass\n", encoding="utf-8")
     ugly.write_text("x=1\n", encoding="utf-8")

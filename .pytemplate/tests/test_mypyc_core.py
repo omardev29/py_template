@@ -48,6 +48,15 @@ def make(data: dict[str, Any]) -> Config:
     return cfg
 
 
+def real(data: dict[str, Any]) -> Config:
+    """make() for a test that runs the real tools environment through uv (mypyc, the precheck's
+    mypy): with this project's python.cpython. The template's default (3.14) asked uv for another
+    interpreter in a project on another minor, and uv replaced the project's .venv with an empty
+    one under the running suite (every later test that needed it failed)."""
+    own = config.load(set()).python.cpython
+    return make({**data, "python": {"cpython": own, **data.get("python", {})}})
+
+
 def _has_mypyc() -> bool:
     try:
         return importlib.util.find_spec("mypyc.build") is not None  # selftest runs in .venv (mypy)
@@ -249,7 +258,7 @@ def test_precheck_real_mypy_with_a_test_folder_without_python(
     (tests / "__pycache__").mkdir(parents=True)
     monkeypatch.setattr(cmd_mode, "code_dirs", lambda: [str(src), str(tests)])
     monkeypatch.setattr(proc, "DRY_RUN", True)  # uv run --no-sync: .venv is never touched
-    cmd_mode._precheck_py311(make({}))
+    cmd_mode._precheck_py311(real({}))
     assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
 
 
@@ -274,7 +283,7 @@ def test_precheck_real_mypy_catches_new_apis_with_the_off_profile(
     monkeypatch.setattr(cmd_mode, "code_dirs", lambda: [str(code)])
     monkeypatch.setattr(proc, "DRY_RUN", True)  # uv run --no-sync: .venv is never touched
     with pytest.raises(PytError, match="APIs that do not exist in Python 3.11"):
-        cmd_mode._precheck_py311(make({}))
+        cmd_mode._precheck_py311(real({}))
     err = capsys.readouterr().err
     assert 'Module "typing" has no attribute "override"' in err
     assert err.count('has no attribute "batched"') == 1  # inside an unannotated function
@@ -284,7 +293,7 @@ def test_precheck_real_mypy_catches_new_apis_with_the_off_profile(
         ),
         encoding="utf-8",
     )
-    cmd_mode._precheck_py311(make({}))
+    cmd_mode._precheck_py311(real({}))
     assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
 
 
@@ -1637,7 +1646,7 @@ def test_wheel_a_compiler_that_cannot_start_is_a_missing_requirement(
 @needs_venv
 @pytest.mark.skipif(os.name == "nt", reason="setuptools builds with MSVC there, whatever CC says")
 def test_missing_compiler_asks_the_venv_as_the_build_script_does(monkeypatch: pytest.MonkeyPatch) -> None:
-    tool = envs.tool_env(make({}))
+    tool = envs.tool_env(real({}))
     monkeypatch.setenv("CC", "/nonexistent/cc")
     missing = mypyc.missing_compiler(tool)
     assert missing is not None and "/nonexistent/cc was not found" in missing and missing.endswith(mypyc.has_compiler_hint())
@@ -1864,7 +1873,7 @@ def test_real_compile_with_a_missing_cc_is_a_missing_requirement(src_tree: Path,
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
     monkeypatch.setenv("CC", "/nonexistent/clang-99")
     with pytest.raises(PytError) as err:
-        mypyc.build(make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}}), "dev")
+        mypyc.build(real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}}), "dev")
     assert err.value.code == 3 and "the C compiler cannot start" in str(err.value)
 
 
@@ -2057,7 +2066,7 @@ def test_real_compile_roundtrip(src_tree: Path, tmp_path: Path, monkeypatch: pyt
         },
     )
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
-    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}})
+    cfg = real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}})
     stage = mypyc.build(cfg, "dev")
     ext = next(p for p in mypyc.extension_files(stage) if p.name.startswith("m."))
     out = _import_from(stage, "import pkg.core.m as m, pkg.core.n as n; print(m.__file__); print(m.HERE); print(n.twice())", tmp_path)
@@ -2071,7 +2080,7 @@ def test_real_compile_roundtrip(src_tree: Path, tmp_path: Path, monkeypatch: pyt
     mypyc.build(cfg, "dev")
     assert ext.stat().st_mtime_ns == mtime  # incremental: nothing rebuilt
     size = lib.stat().st_size
-    mypyc.build(make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "opt_level": "0"}}), "dev")
+    mypyc.build(real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "opt_level": "0"}}), "dev")
     assert lib.stat().st_size != size  # -O0 really rebuilt the shared lib
 
 
@@ -2092,7 +2101,7 @@ def test_real_compile_names_namespace_modules_as_python_imports_them(src_tree: P
         },
     )
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
-    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core", "nsx"]}})
+    cfg = real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core", "nsx"]}})
     stage = mypyc.build(cfg, "dev")
     stems = sorted(p.relative_to(stage).as_posix().split(".")[0] for p in mypyc.extension_files(stage))
     assert stems == ["nsx/fast", "pkg/core/bench", "pkg__mypyc"]
@@ -2107,7 +2116,7 @@ def test_real_compile_separate_names_one_lib_per_module(src_tree: Path, tmp_path
     remove_stale_extensions keeps); a second build deletes none of them."""
     _project(src_tree, {"main.py": "", "pkg/__init__.py": "", "pkg/core/__init__.py": "", "pkg/core/m.py": "X = 1\n", "pkg/core/n.py": "Y = 2\n"})
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
-    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "separate": True}})
+    cfg = real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "separate": True}})
     stage = mypyc.build(cfg, "dev")
     stems = sorted(p.relative_to(stage).as_posix().split(".")[0] for p in mypyc.extension_files(stage))
     assert stems == ["pkg/core/m", "pkg/core/m__mypyc", "pkg/core/n", "pkg/core/n__mypyc"]
@@ -2124,7 +2133,7 @@ def test_real_compile_single_top_level_module_sees_a_relative_file(src_tree: Pat
     after a mypy bump, mypyc fixed it: drop the rule (lintc.relative_file_at_import)."""
     _project(src_tree, {"main.py": "", "solo.py": FILE_PROBE})
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
-    cfg = make({"app": {"name": "solo-app"}, "compile": {"modules": ["solo"]}})
+    cfg = real({"app": {"name": "solo-app"}, "compile": {"modules": ["solo"]}})
     assert lintc.relative_file_at_import(cfg)
     stage = mypyc.build(cfg, "dev")
     here, inside = _import_from(stage, "import solo; print(solo.HERE); print(solo.inside())", tmp_path).splitlines()
@@ -2922,7 +2931,7 @@ def test_real_compile_adds_the_c_flags_and_inlines_compiled_calls(
     through the PLT; switching the option really rebuilds (only a C flag changed)."""
     _project(src_tree, {"main.py": "", "pkg/__init__.py": "", "pkg/core/__init__.py": "", "pkg/core/m.py": INLINE_PROBE})
     monkeypatch.setattr(mypyc, "BUILD", tmp_path / ".build")
-    cfg = make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}})
+    cfg = real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"]}})
     assert cfg.compile.no_semantic_interposition is True  # the default
     stage = mypyc.build(cfg, "dev")
     _check_flags(logging_cc(), nsi=True)
@@ -2932,7 +2941,7 @@ def test_real_compile_adds_the_c_flags_and_inlines_compiled_calls(
     objdump = shutil.which("objdump") if sys.platform == "linux" else None
     if objdump:
         assert not _caller_calls_callee(objdump, lib)
-    mypyc.build(make({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "no_semantic_interposition": False}}), "dev")
+    mypyc.build(real({"app": {"name": "pkg"}, "compile": {"modules": ["pkg.core"], "no_semantic_interposition": False}}), "dev")
     _check_flags(logging_cc(), nsi=False)
     if objdump and _is_gcc(os.environ["PT_REAL_CC"]):
         # Pins gcc's behaviour: if this fails, gcc inlines these calls by itself and the option is moot

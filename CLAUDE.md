@@ -136,8 +136,9 @@ typings/                          project stubs (raylib preset: the corrected ra
 .pytemplate/nvim/                 local Neovim plugin pytemplate.nvim (lua/, tests/smoke.lua,
                                   tests/lazy-lock.json: the plugin commits selftest --nvim pins,
                                   README.md: setup, keymaps, options)
-.pytemplate/tests/                runner tests (pytest; conftest.py: the Hypothesis profiles) +
-                                  pytest.ini (the suite's own pytest settings) + mypy-runner.ini
+.pytemplate/tests/                runner tests (pytest; conftest.py: the Hypothesis profiles, the
+                                  guard of the project's .venv) + pytest.ini (the suite's own
+                                  pytest settings) + mypy-runner.ini
 .pytemplate/editor.json           generated data file for the Neovim plugin
 .pytemplate/state.json            hashes of the generated files + the `applied` record (committed)
 .pytemplate/template-repo         [template repo] marker, not copied by ./pyt new
@@ -3574,7 +3575,16 @@ short temp tree and unset `NVIM_APPNAME`.
   copy with code of its own). Its `[tasks]` are its user's too: a test runs only tasks its own
   fixture defines (`test_cli_core.tasks_project`: it ran the preset's deps-only `ci`, which a
   project may rename, delete or give a cmd;
-  `test_paths.test_the_task_tests_pass_in_a_project_whose_ci_task_is_its_own`).
+  `test_paths.test_the_task_tests_pass_in_a_project_whose_ci_task_is_its_own`). A test that
+  runs the real uv against the project's `.venv` (mypyc, the hook's ruff, the rename tidy-up,
+  `uv pip install`, `uv run --frozen`) gives its Config the
+  project's `python.cpython` (`real()` in test_mypyc_core and test_build_methods,
+  `test_hooks._real_cfg`, `config.load`), and its data the interpreter of that `.venv` (a wheel's
+  cp tag, a pylock's requires-python, a target key the lock serves): the template's default,
+  3.14, made uv replace the `.venv` of a project on another minor with an empty one under the
+  running suite, and dozens of later tests failed (a `python.cpython = "3.13"` project).
+  `conftest._the_project_environment_stays` fails the test after which the interpreter of
+  `.venv` (or `.venv-wsl`) changed, naming it.
 - Property-based tests (Hypothesis, the dev group's pin): `.pytemplate/tests/conftest.py` loads
   the profile `pytemplate` (no example database, so a run depends on the code, the profile and
   the seed only; no deadline; a failure prints its replay blob) on top of the profile Hypothesis

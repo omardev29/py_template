@@ -2202,6 +2202,9 @@ def test_ruff_tidy_after_a_rename(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(render, "ROOT", root)
     monkeypatch.setattr(cmd_dev, "BUILD", tmp_path / "build")
     text = (root / "pytemplate.toml").read_text(encoding="utf-8").replace('relaxed = "off"', 'relaxed = "strict"')
+    # ruff runs through uv in this project's .venv: its python.cpython, never the skeleton's 3.14
+    # (in a project on another minor uv replaced the .venv with an empty one, and ruff never ran)
+    text = config.set_value(text, "python", "cpython", config.load(set()).python.cpython)
     (root / "pytemplate.toml").write_text(text, encoding="utf-8", newline="\n")
     cfg = _load(root)
     tests = root / "tests"

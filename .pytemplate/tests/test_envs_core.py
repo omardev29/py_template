@@ -492,8 +492,10 @@ def test_quiet_keeps_the_output_of_the_uv_commands_the_user_drives(tmp_path: Pat
 
 def test_a_polluted_uv_environment_still_selects_the_project_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Real uv, offline, in this project's .venv: an exported UV_PROJECT_ENVIRONMENT, UV_PYTHON
-    or VIRTUAL_ENV (another project, an activated venv) never reaches uv."""
-    tool = envs.tool_env(make())
+    or VIRTUAL_ENV (another project, an activated venv) never reaches uv. The environment is the
+    project's own (its python.cpython): the template's default 3.14 made uv replace the .venv of a
+    project on another minor with an empty one under the running suite."""
+    tool = envs.tool_env(config.load(set()))
     if not tool.python.is_file():
         pytest.skip("no .venv (./pyt setup)")
     try:
