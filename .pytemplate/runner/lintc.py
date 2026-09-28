@@ -273,6 +273,8 @@ def lint_file(cfg: Config, path: Path) -> list[Finding]:
     except PARSE_ERRORS as e:  # ruff and mypy report a real syntax error
         line, msg = parse_error(e)
         return [Finding(path, line, f"{msg} (the mypyc rules skipped this file)")]
+    except OSError as e:  # another user's, locked by another program: ruff and mypy say so too
+        return [Finding(path, 1, f"cannot read it: {e.strerror or e} (the mypyc rules skipped this file)")]
 
     aliases = _import_aliases(tree)
     kinds = _non_native_kinds(tree, aliases)

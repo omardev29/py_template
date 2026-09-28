@@ -475,6 +475,8 @@ def hidden_imports(cfg: Config, stage: Path) -> list[str]:
         except PARSE_ERRORS as e:  # a runner older than the project's syntax, a too deeply nested source
             line, msg = parse_error(e)
             raise PytError(f"{rel(path)}:{line}: {msg}") from None
+        except OSError as e:  # another user's, locked by another program: never a traceback
+            raise PytError(f"{rel(path)}: cannot read it: {e.strerror or e}") from None
         for name in names:
             if not is_local(SRC, name):
                 external.add(name)

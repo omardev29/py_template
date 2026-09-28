@@ -2014,7 +2014,9 @@ Formats:
      finding (`imports.parse_error`: a syntax error, syntax newer than the runner's own
      Python, or a source nested too deeply for the compiler's stack; `imports.PARSE_ERRORS`,
      which `mypyc.hidden_imports` and `common.uses_tkinter` catch too), never an internal
-     error. The rules walk the tree without recursion (`lintc._scope_statements`: a generated
+     error; so is one it cannot read (`OSError`: another user's file, one locked by another
+     program: `cannot read it: ...`; it ended check, build and the hook in a traceback). The
+     rules walk the tree without recursion (`lintc._scope_statements`: a generated
      elif chain of ~1000 branches passed Python's recursion limit).
   5. With `typing.editor = "basedpyright"`: basedpyright (`BASEDPYRIGHT` pin) on
      `.build/cfg/pyright-<profile>.json` (`cmd_dev._run_basedpyright`). Exit 1 is only a
@@ -2183,7 +2185,7 @@ Formats:
   needs `html.parser`, which `html/__init__` never imports (the exe crashed at startup). That
   check imports X's parent packages (they may print: the result is the last `PTMODS:` line);
   if it cannot run, a warning and every name unchecked. A file the runner cannot parse is a
-  `PytError` (2) naming `path:line`.
+  `PytError` (2) naming `path:line`, and one it cannot read a `PytError` (2) naming the file.
 - `lintc` rules (compiled code only; findings sorted by `lint`, deduplicated per line and
   message; one finding for a file that cannot be parsed):
   - `compile.forbid_imports`, matched against `import a.b`, `from a import b` (also `a.b`) and

@@ -316,6 +316,20 @@ def test_lintc_reports_an_unparsable_file(tmp_path: Path, source: bytes, line: i
     assert str(lintc.Finding(ROOT / "src" / "m.py", line, found[0].message)).startswith(f"src/m.py:{line}: cannot parse")
 
 
+def test_lintc_reports_a_file_it_cannot_read(tmp_path: Path) -> None:
+    """A compiled module the runner cannot read (another user's, locked by another program)
+    ended check, build and the pre-commit hook in an internal-error traceback: parse's
+    OSError was not caught. It is one finding naming the file, as a syntax error is. (A folder
+    named like the module: its read fails for root too, IsADirectoryError or, on Windows,
+    PermissionError.)"""
+    mod = tmp_path / "m.py"
+    mod.mkdir()
+    found = lintc.lint_file(make({}), mod)
+    assert [f.line for f in found] == [1]
+    assert found[0].message.startswith("cannot read it: ") and "skipped this file" in found[0].message
+    assert lintc.lint(make({}), [mod]) == found
+
+
 def test_lintc_lint_sorts_and_survives_an_unparsable_file(tmp_path: Path) -> None:
     good, bad = tmp_path / "a.py", tmp_path / "b.py"
     good.write_text("from functools import cache\n\n@cache\nclass A: ...\n", encoding="utf-8")
@@ -1797,6 +1811,18 @@ def test_hidden_imports_keep_everything_when_the_check_cannot_run(
 def test_hidden_imports_of_an_unparsable_file_is_a_pyt_error(src_tree: Path, tmp_path: Path, source: str | bytes, line: int) -> None:
     _project(src_tree, {"myapp/__init__.py": "", "myapp/core/__init__.py": "", "myapp/core/m.py": source})
     with pytest.raises(PytError, match=rf"src[/\\]myapp[/\\]core[/\\]m\.py:{line}: cannot parse it with the runner's Python") as err:
+        mypyc.hidden_imports(make({}), tmp_path / "stage")
+    assert err.value.code == 2
+
+
+def test_hidden_imports_of_an_unreadable_file_is_a_pyt_error(src_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _project(src_tree, {"myapp/__init__.py": "", "myapp/core/__init__.py": "", "myapp/core/m.py": "import json\n"})
+
+    def unreadable(path: Path, *_args: Any, **_kwargs: Any) -> list[str]:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(mypyc, "imports_of", unreadable)
+    with pytest.raises(PytError, match=r"src[/\\]myapp[/\\]core[/\\]m\.py: cannot read it: Permission denied") as err:
         mypyc.hidden_imports(make({}), tmp_path / "stage")
     assert err.value.code == 2
 
