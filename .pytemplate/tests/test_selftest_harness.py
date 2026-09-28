@@ -246,7 +246,9 @@ def test_shells_termination_signal_kills_the_probe_and_removes_the_scratch_folde
     step = f"import os, pathlib, time; pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(120)"
     script = "\n".join(
         [
-            "import sys, tempfile",
+            "import signal, sys, tempfile",
+            "for sig in (signal.SIGTERM, signal.SIGHUP):  # a terminal session's (nohup'ed, SIGHUP stays ignored)",
+            "    signal.signal(sig, signal.SIG_DFL)",
             f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})",
             "from runner import cli, shells",
             f"tempfile.tempdir = {str(temp)!r}",
@@ -505,8 +507,10 @@ def test_nvim_termination_signal_kills_the_running_step(tmp_path: Path, signame:
     x = tmp_path / "w" / "x"
     script = "\n".join(
         [
-            "import os, sys",
+            "import os, signal, sys",
             "from pathlib import Path",
+            "for sig in (signal.SIGTERM, signal.SIGHUP):  # a terminal session's (nohup'ed, SIGHUP stays ignored)",
+            "    signal.signal(sig, signal.SIG_DFL)",
             f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})",
             "from runner import cli, cmd_nvim, nvimtest",
             f"x = Path({str(x)!r})",

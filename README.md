@@ -352,7 +352,9 @@ Exit codes:
   `docker stop` (Linux and macOS). It passes the signal on to the app, waits for it and stops
   like after Ctrl+C: the app's code, or 143 (129) when the app exited with 0. `selftest --nvim`,
   `selftest --e2e` and `selftest --mutation` take either signal for a Ctrl+C: they kill the step
-  that runs, with everything it started, and exit with 130.
+  that runs, with everything it started, and exit with 130. A signal the runner was started with
+  ignored stays ignored: under `nohup` a long `selftest --mutation` or `--e2e --full` goes on
+  when the terminal closes.
 - 128 + N: a program killed by signal N.
 - `run`, `test BACKEND` and tasks return their program's exit code (pytest: 5 when no test was
   collected, 4 for a usage error). `test all` tests every backend, even after a failure, and

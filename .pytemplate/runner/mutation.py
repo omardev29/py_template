@@ -1182,7 +1182,8 @@ def run(cfg: Config, opts: Options, uv: str, root: Path, base: Path) -> Report:
 def deferred_interrupts() -> Iterator[list[int]]:
     """Ctrl+C, SIGTERM and SIGHUP wait while the block runs (a cleanup, the report): the list
     gets each one that came, and the old handlers come back at its end. Main thread only: other
-    threads never get a signal."""
+    threads never get a signal. A signal the runner ignores stays ignored (SIGHUP under nohup,
+    SIGINT in a background job): recorded, it made a run that went on through it interrupted."""
     import signal
 
     got: list[int] = []
@@ -1190,7 +1191,7 @@ def deferred_interrupts() -> Iterator[list[int]]:
     if threading.current_thread() is threading.main_thread():
         for name in ("SIGINT", "SIGTERM", "SIGHUP"):
             number = getattr(signal, name, None)  # no SIGHUP on Windows
-            if number is not None:
+            if number is not None and signal.getsignal(number) is not signal.SIG_IGN:
                 saved.append((number, signal.signal(number, lambda signum, frame: got.append(signum))))
     try:
         yield got

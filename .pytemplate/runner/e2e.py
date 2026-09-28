@@ -1265,29 +1265,32 @@ def termination_as_interrupt() -> Iterator[None]:
     group (`timeout`, a closed terminal, uv forwarding it) never reaches them: without this the
     runner died at once and the running step (a build) went on as an orphan, writing into the
     base dir. The first signal also ignores the next ones, so the tree kill and the report run.
+    Only while a signal has its default handler, as proc.run and cmd_install do: a run started
+    under nohup (SIGHUP ignored, which uv hands the runner) keeps it ignored and survives a
+    closed terminal; the handler replaced SIG_IGN, and a hang-up ended the run with 130.
     """
-    saved: list[tuple[int, Any]] = []
+    installed: list[int] = []
     if sys.platform != "win32":
         import signal
 
-        watched = (signal.SIGTERM, signal.SIGHUP)
-
         def interrupt(signum: int, frame: object) -> None:
-            for sig in watched:
+            for sig in installed:
                 signal.signal(sig, signal.SIG_IGN)
             raise KeyboardInterrupt
 
         if threading.current_thread() is threading.main_thread():  # signal.signal works only there
-            for sig in watched:
-                saved.append((sig, signal.signal(sig, interrupt)))
+            for sig in (signal.SIGTERM, signal.SIGHUP):
+                if signal.getsignal(sig) is signal.SIG_DFL:
+                    signal.signal(sig, interrupt)
+                    installed.append(sig)
     try:
         yield
     finally:
         if sys.platform != "win32":
             import signal
 
-            for signum, handler in saved:
-                signal.signal(signum, signal.SIG_DFL if handler is None else handler)
+            for signum in installed:
+                signal.signal(signum, signal.SIG_DFL)
 
 
 def selftest(cfg: Config, args: list[str]) -> int:

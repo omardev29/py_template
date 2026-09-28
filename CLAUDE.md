@@ -714,7 +714,8 @@ header rules (with detector tests proving each rule fires).
   distribution without a uv of its own is SKIP as a whole (`shells._wsl_without_uv`: one probe
   first; the Linux launcher inside it exits 127), never seven FAILs. Ctrl+C, SIGTERM and SIGHUP
   (`e2e.termination_as_interrupt`, as for the other harnesses: their default action killed the
-  runner and left its `pts-*` scratch folder behind) kill the running probes (each in a session
+  runner and left its `pts-*` scratch folder behind; one ignored when the run started, SIGHUP
+  under nohup, stays ignored) kill the running probes (each in a session
   of its own), start no other one (`Context.stopped`, read by `shells.spawn`) and remove the
   scratch folder: `error: interrupted`, exit 130
   (`test_selftest_harness.test_shells_termination_signal_kills_the_probe_and_removes_the_scratch_folder`).
@@ -3998,7 +3999,11 @@ short temp tree and unset `NVIM_APPNAME`.
   needs that row to PASS. Exit codes: 0; 1 on any FAIL; 2 usage; 130 interrupted: Ctrl+C, and
   SIGTERM/SIGHUP (`termination_as_interrupt`; a group signal from `timeout` or a closed
   terminal never reached the steps' sessions, and the running build went on as an orphan):
-  the running step's tree is killed and the rows so far are reported. The base is kept on
+  the running step's tree is killed and the rows so far are reported. Like `proc.run`, the
+  helper takes a signal only while it has its default handler: a run started under nohup (SIGHUP
+  ignored, which uv hands the runner) goes on through a hang-up, as do `--nvim`, `--shells` and
+  `--mutation` (`test_e2e_run.test_a_run_started_under_nohup_survives_a_hang_up`: the handler
+  replaced SIG_IGN, and a closed terminal ended such a run with 130). The base is kept on
   failure, interrupt or `--keep`; `--reuse` reuses kept projects. `--json` report to stdout
   (`ok`, `interrupted`, `base`, `kept`, `seconds`, `host`, `options`, `results[preset, step,
   status, seconds, detail, log]`).
@@ -4089,7 +4094,9 @@ short temp tree and unset `NVIM_APPNAME`.
     (offline it must be in uv's cache), 130 interrupted (the report of what ran). What stops a
     run (a worker whose `uv sync` failed, Cosmic Ray's side gone: `Report.error`) comes after
     the report of what ran, with its own message and code. A Ctrl+C, SIGTERM or SIGHUP during
-    the cleanup or the report waits for it (`deferred_interrupts`) and makes the run interrupted.
+    the cleanup or the report waits for it (`deferred_interrupts`) and makes the run interrupted;
+    one the runner ignores (SIGHUP under nohup, SIGINT in a background job) stays ignored
+    (`test_mutation.test_deferred_interrupts_leave_an_ignored_signal_ignored`).
   - the scratch base: `mutation.default_base` (`%TEMP%\pt\mut`, `$TMPDIR/pt-mutation-<uid>`,
     0700, `project.check_private_dir`, again once it exists: `make_private_dir`), never inside the project, wiped only with its marker
     `.pytemplate-mutation`, one run at a time (`base_lock` on `<base>/lock`). The workers'

@@ -573,25 +573,52 @@ def test_selftest_interrupted_returns_130_and_keeps_the_base(tmp_path: Path, fak
 def test_termination_handlers_are_restored() -> None:
     import signal
 
-    before = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
-    with e2e.termination_as_interrupt():
-        assert all(signal.getsignal(sig) != handler for sig, handler in before.items())
-    assert {sig: signal.getsignal(sig) for sig in before} == before
+    watched = (signal.SIGTERM, signal.SIGHUP)
+    outside = {sig: signal.signal(sig, signal.SIG_DFL) for sig in watched}  # as a terminal session has them
+    try:
+        with e2e.termination_as_interrupt():
+            assert all(signal.getsignal(sig) is not signal.SIG_DFL for sig in watched)
+        assert all(signal.getsignal(sig) is signal.SIG_DFL for sig in watched)
+    finally:
+        for sig, handler in outside.items():
+            signal.signal(sig, signal.SIG_DFL if handler is None else handler)
 
 
 @POSIX
-@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
-def test_termination_signal_kills_the_running_step(tmp_path: Path, signame: str) -> None:
-    """SIGTERM/SIGHUP (`timeout`, a closed terminal, `kill`, uv forwarding either) end the running
-    step, which lives in its own session, and the run reports 'interrupted' (130) like Ctrl+C.
-    Without the handlers the runner died at once and the step (a build) went on as an orphan."""
+def test_a_signal_the_run_started_with_ignored_stays_ignored() -> None:
+    """nohup ignores SIGHUP, and uv hands that to the runner: the handler replaced SIG_IGN, and a
+    closed terminal ended a nohup'ed run (a day-long --mutation pass) with 130. It stays ignored,
+    as proc.run and cmd_install leave it; SIGTERM at its default handler is still taken."""
     import signal
 
-    pidfile = tmp_path / "step.pid"
+    outside = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    try:
+        try:
+            with e2e.termination_as_interrupt():
+                assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+                assert signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL
+                os.kill(os.getpid(), signal.SIGHUP)
+                time.sleep(0.05)  # a signal's Python handler runs between two bytecodes
+        except KeyboardInterrupt:
+            pytest.fail("the hang-up of a run started with SIGHUP ignored interrupted it")
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN and signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+    finally:
+        for sig, handler in outside.items():
+            signal.signal(sig, signal.SIG_DFL if handler is None else handler)
+
+
+def _selftest_with_a_sleeping_step(tmp_path: Path, pidfile: Path) -> str:
+    """A `selftest --e2e` whose one step sleeps (its pid in `pidfile`), started with SIGTERM and
+    SIGHUP as a terminal session has them, whatever this suite runs under, or with SIGHUP ignored
+    as nohup starts it (and uv hands it on) when PT_NOHUP is set."""
     step = f"import os, pathlib, time; pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(120)"
-    script = "\n".join(
+    return "\n".join(
         [
-            "import sys",
+            "import os, signal, sys",
+            "signal.signal(signal.SIGTERM, signal.SIG_DFL)",
+            "signal.signal(signal.SIGHUP, signal.SIG_IGN if 'PT_NOHUP' in os.environ else signal.SIG_DFL)",
             f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})",
             "from runner import e2e, proc",
             "proc.find_uv = lambda: sys.executable",
@@ -604,20 +631,66 @@ def test_termination_signal_kills_the_running_step(tmp_path: Path, signame: str)
             f"sys.exit(e2e.selftest(None, ['script', '--quick', '--base', {str(tmp_path / 'base')!r}]))",
         ]
     )
+
+
+def _wait_for_the_step(runner: subprocess.Popen[bytes], pidfile: Path, log: Path) -> int:
+    deadline = time.monotonic() + 60
+    while not (pidfile.is_file() and pidfile.read_text()):
+        assert runner.poll() is None, log.read_text()
+        assert time.monotonic() < deadline, log.read_text()
+        time.sleep(0.05)
+    return int(pidfile.read_text())
+
+
+@POSIX
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
+def test_termination_signal_kills_the_running_step(tmp_path: Path, signame: str) -> None:
+    """SIGTERM/SIGHUP (`timeout`, a closed terminal, `kill`, uv forwarding either) end the running
+    step, which lives in its own session, and the run reports 'interrupted' (130) like Ctrl+C.
+    Without the handlers the runner died at once and the step (a build) went on as an orphan."""
+    import signal
+
+    pidfile = tmp_path / "step.pid"
+    script = _selftest_with_a_sleeping_step(tmp_path, pidfile)
     log = tmp_path / "runner.log"
+    env = {k: v for k, v in os.environ.items() if k != "PT_NOHUP"}
     with log.open("wb") as out:
-        runner = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.DEVNULL, stdout=out, stderr=out)
+        runner = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env)
     child = 0
     try:
-        deadline = time.monotonic() + 60
-        while not (pidfile.is_file() and pidfile.read_text()):
-            assert runner.poll() is None, log.read_text()
-            assert time.monotonic() < deadline, log.read_text()
-            time.sleep(0.05)
-        child = int(pidfile.read_text())
+        child = _wait_for_the_step(runner, pidfile, log)
         runner.send_signal(getattr(signal, signame))
         assert runner.wait(timeout=60) == 130, log.read_text()
         assert "interrupted" in log.read_text()
+        assert gone(child), "the step outlived the runner"
+    finally:
+        if runner.poll() is None:
+            runner.kill()
+        if child and not gone(child, wait=0):
+            os.kill(child, signal.SIGKILL)
+
+
+@POSIX
+def test_a_run_started_under_nohup_survives_a_hang_up(tmp_path: Path) -> None:
+    """`nohup ./pyt selftest --e2e --full &` then the terminal closes: the runner starts with
+    SIGHUP ignored (uv hands it on) and must go on, its step too; a SIGTERM still stops it."""
+    import signal
+
+    pidfile = tmp_path / "step.pid"
+    script = _selftest_with_a_sleeping_step(tmp_path, pidfile)
+    log = tmp_path / "runner.log"
+    env = {**os.environ, "PT_NOHUP": "1"}
+    with log.open("wb") as out:
+        runner = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env)
+    child = 0
+    try:
+        child = _wait_for_the_step(runner, pidfile, log)
+        runner.send_signal(signal.SIGHUP)
+        time.sleep(1)
+        assert runner.poll() is None, "a hang-up ended a run started under nohup:\n" + log.read_text()
+        assert not gone(child, wait=0), "a hang-up killed the step of a run started under nohup"
+        runner.send_signal(signal.SIGTERM)
+        assert runner.wait(timeout=60) == 130, log.read_text()
         assert gone(child), "the step outlived the runner"
     finally:
         if runner.poll() is None:

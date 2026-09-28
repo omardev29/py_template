@@ -1790,7 +1790,11 @@ def test_an_interrupt_during_the_cleanup_waits_for_it(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(mutation, "_run_locked", passes)
     monkeypatch.setattr(mutation, "_remove_workers", remove_workers)
-    report = mutation.run(_cfg(), Options(None, 1, False), "uv", _toy(tmp_path), base)
+    before = signal.signal(signal.SIGINT, signal.default_int_handler)  # as a terminal has it (a background job ignores it)
+    try:
+        report = mutation.run(_cfg(), Options(None, 1, False), "uv", _toy(tmp_path), base)
+    finally:
+        signal.signal(signal.SIGINT, signal.SIG_DFL if before is None else before)
     assert removed == [True] and report.interrupted and report.kept and (base / "logs").is_dir()
 
 
@@ -1814,6 +1818,27 @@ def test_deferred_interrupts_wait_for_the_block_and_put_the_handlers_back(name: 
             signal.raise_signal(number)
             time.sleep(0.01)  # a signal's Python handler runs between two bytecodes
         assert got == [number] and signal.getsignal(number) is mine
+    finally:
+        signal.signal(number, signal.SIG_DFL if before is None else before)
+
+
+@pytest.mark.parametrize("name", ["SIGINT", "SIGTERM", "SIGHUP"])
+def test_deferred_interrupts_leave_an_ignored_signal_ignored(name: str) -> None:
+    """A run started with a signal ignored (SIGHUP under nohup, which uv hands the runner; SIGINT
+    in a background job) goes on through it: recorded during the cleanup or the report, a
+    hang-up made that run `interrupted` (130)."""
+    import signal
+
+    number = getattr(signal, name, None)
+    if number is None:
+        pytest.skip(f"no {name} here")
+    before = signal.signal(number, signal.SIG_IGN)
+    try:
+        with mutation.deferred_interrupts() as got:
+            assert signal.getsignal(number) is signal.SIG_IGN
+            signal.raise_signal(number)
+            time.sleep(0.01)
+        assert got == [] and signal.getsignal(number) is signal.SIG_IGN
     finally:
         signal.signal(number, signal.SIG_DFL if before is None else before)
 
