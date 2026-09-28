@@ -401,8 +401,8 @@ def test_any_folder_name_gives_the_same_words_as_an_app_name(folder: str) -> Non
         ("script", "tests", "src/tests/ would collide with the project's own tests/"),
         ("script", "Tests", "src/tests/ would collide"),
         ("script", "typings", "typings/ (the stubs at the root"),
-        ("script", "build", "build/ (.gitignore"),
-        ("script", "dist", "dist/ (.gitignore"),
+        ("script", "build", "build/ (the packagers' output at the root"),
+        ("script", "dist", "dist/ (the builds at the root"),
         ("script", "assets", "src/assets/"),
         ("script", "main", "src/main.py"),
         ("raylib", "Assets", "src/assets/"),
@@ -817,6 +817,37 @@ def git_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
         monkeypatch.delenv(key, raising=False)
+
+
+@template_repo
+def test_the_shipped_gitignore_ignores_only_the_roots_own_outputs(tmp_path: Path, git_env: None) -> None:
+    """The .gitignore every project gets named .build/, dist/, build/ and *.spec at ANY depth: a
+    subpackage or test folder of those names (src/<pkg>/build/, tests/dist/) was never committed,
+    `git add -A` and the hook skipped it without a word, a fresh clone and CI lacked it, and the
+    `git clean -fdx` README calls safe deleted it. Only the root's own outputs are ignored; the
+    environments, caches and compiled extensions stay ignored anywhere."""
+    repo = tmp_path / "p"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    shutil.copyfile(ROOT / ".gitignore", repo / ".gitignore")
+    source = [
+        "src/pkg/build/__init__.py", "src/pkg/dist/__init__.py", "src/pkg/core/build/x.py", "src/pkg/.build/data.txt",
+        "tests/build/test_x.py", "tests/dist/test_y.py", "tests/data/fixture.spec", "src/pkg/__init__.py",
+    ]  # fmt: skip
+    outputs = [
+        "build/x.txt", "dist/app.pyz", ".build/cfg/ruff-off.toml", "app.spec", ".venv/pyvenv.cfg", ".venv-pypy-wsl/pyvenv.cfg",
+        "src/pkg/__pycache__/m.cpython-314.pyc", "src/pkg/core/bench.cpython-314-x86_64-linux-gnu.so", "tests/.pytest_cache/x", ".flet/x",
+    ]  # fmt: skip
+    for rel in (*source, *outputs):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("x\n", encoding="utf-8")
+    r = subprocess.run(["git", "check-ignore", "--stdin", "-z"], cwd=repo, input="\0".join((*source, *outputs)), capture_output=True, text=True, check=False)
+    assert r.returncode in (0, 1), r.stderr
+    ignored = {p for p in r.stdout.split("\0") if p}
+    assert not ignored & set(source), sorted(ignored & set(source))
+    assert ignored == set(outputs), sorted(set(outputs) - ignored)
+    status = _git(repo, "status", "--porcelain", "--untracked-files=all", "-z")
+    assert {e[3:] for e in status.split("\0") if e} == {".gitignore", *source}
 
 
 TRACKED = {

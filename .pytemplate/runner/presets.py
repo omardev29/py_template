@@ -53,8 +53,8 @@ RESERVED_PACKAGES = {
     "src": "src/ (paths relative to the root and to src/ would read the same: the problem matchers, rename)",
     "tests": "tests/ (a package too: the imports would clash)",
     "typings": "typings/ (the stubs at the root: paths relative to the root and to src/ would read the same)",
-    "build": "build/ (.gitignore excludes it at any depth: the app would never reach git)",
-    "dist": "dist/ (.gitignore excludes it at any depth: the app would never reach git)",
+    "build": "build/ (the packagers' output at the root: paths relative to the root and to src/ would read the same)",
+    "dist": "dist/ (the builds at the root: paths relative to the root and to src/ would read the same)",
     "assets": "src/assets/ (the data folder bundled with the app: app.assets)",
 }
 # Windows reserves these names (any case, any extension) for devices: src/aux/ cannot be created

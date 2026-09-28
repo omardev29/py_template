@@ -1697,9 +1697,10 @@ only deletes files is checked too).
   from 0.28.1 on, and the httpx 1.0 previews drop what `flet.auth` needs.
 - **`./pyt clean` exits 1 on Windows**: a file in `.venv` is in use (the editor's mypy and ruff
   servers run from it). Close VS Code or Neovim and run it again.
-- **`git clean -fdx` is safe**: it only deletes untracked and ignored files (`.venv*`, `.build/`,
-  `dist/`, caches, `.claude/`); the generated files, `uv.lock` and `.pytemplate/state.json` are
-  committed. The next command works (uv recreates `.venv`, pyz and portable builds create a
+- **`git clean -fdx` is safe**: it only deletes untracked and ignored files (`.venv*`, the
+  root's `.build/`, `dist/` and `build/`, caches, `.claude/`); the generated files, `uv.lock` and
+  `.pytemplate/state.json` are committed, and a subpackage or test folder named `build` or `dist`
+  is source like any other (`.gitignore` names the root's own output folders only). The next command works (uv recreates `.venv`, pyz and portable builds create a
   missing environment, and `./pyt setup` recreates them all). The git hook lives in `.git/`, so
   it stays. `git clean -fdx -e .claude` keeps Claude Code's local settings.
 
