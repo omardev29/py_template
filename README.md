@@ -1532,8 +1532,9 @@ each commit it checks (and prints how long that took):
 
 - ruff and `ruff format --check` on the staged Python files of `src/` and `tests/`, with the
   active typing profile, in their staged version (a file with unstaged changes is checked as it
-  is staged; a staged file deleted from the working tree fails with a `git restore` or
-  `git rm --cached` hint);
+  is staged; a staged file deleted from the working tree fails with a `git restore` hint to
+  keep it, and one to drop it from the commit: `git rm --cached` for a new file,
+  `git restore --staged` for a tracked one, whose version in the last commit stays);
 - the generated files: up to date, and none left unstaged or untracked;
 - `pyproject.toml`: its managed parts, the `pytemplate.toml` changes that `./pyt apply` has not
   applied yet, and `uv lock --check`;

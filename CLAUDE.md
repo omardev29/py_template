@@ -1237,7 +1237,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   staged file does not parse", which pointed at uv or the environment before). A
   file with unstaged changes is checked in its STAGED version (`git cat-file --filters
   :0:<path>`, the checkout form, fed to ruff with `--stdin-filename`); a staged file missing
-  from the working tree fails with `git restore` / `git rm --cached`; the launcher checks
+  from the working tree fails with `git restore`, and a hint to drop it from the commit that
+  never deletes a tracked file: `git rm --cached` only for a file the commit adds,
+  `git restore --staged` for the others (`test_hooks.test_the_hint_to_drop_a_missing_file_never_deletes_a_tracked_one`:
+  following `git rm --cached` committed the deletion of a tracked file); the launcher checks
   (`shells.launcher_problems`) and the template repo's language guard read the staged content
   too. Project-wide and conservative (they read the working tree, so they may block a commit
   that touches none of their files): generated files up to date (`render.apply(check=True)`)

@@ -1505,11 +1505,18 @@ def checks(
     as_staged = {p: staged_blob(repo, p) for p in present if p in partial}
     yield from check_ruff(cfg, present, as_staged)
     if missing:
-        # git commits the staged version of a file deleted from the disk: almost always an accident
+        # git commits the staged version of a file deleted from the disk: almost always an accident.
+        # Dropping it from the commit: `git rm --cached` unstages a file the commit adds, but for a
+        # tracked one it stages its deletion; `git restore --staged` puts HEAD's version back.
+        added = set(staged_files(repo, "A"))
+        new = [p for p in missing if p in added]
+        tracked = [p for p in missing if p not in added]
+        drop = [f"git rm --cached {' '.join(new)}"] if new else []
+        drop += [f"git restore --staged {' '.join(tracked)}"] if tracked else []
         yield Result(
             False,
             f"staged files missing from the working tree: {', '.join(missing)}",
-            f"keep them: git restore {' '.join(missing)}\ndrop them from the commit: git rm --cached {' '.join(missing)}",
+            f"keep them: git restore {' '.join(missing)}\ndrop them from the commit: {'; '.join(drop)}",
         )
     generated = sorted({*render.outputs(cfg), STATE_FILE.relative_to(ROOT).as_posix()})
     group = [*CONFIG_FILES, *generated]

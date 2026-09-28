@@ -1662,6 +1662,28 @@ def test_staged_python_file_missing_from_the_working_tree(tmp_path: Path, tools:
 
 
 @needs_git
+def test_the_hint_to_drop_a_missing_file_never_deletes_a_tracked_one(tmp_path: Path, tools: Tools) -> None:
+    """For a staged file missing from the working tree the hook offers to drop it from the commit:
+    `git rm --cached` is right for a file the commit adds, but for a tracked file with a staged
+    change it stages the file's deletion, and following the hint deleted it in the commit.
+    `git restore --staged` leaves HEAD's version in the commit."""
+    repo, _ = staged_project(tmp_path, {"src/old.py": b"x = 1\n", "src/new.py": b"y = 1\n"}, commit=["src/old.py"])
+    p = repo.project
+    (p / "src/old.py").write_bytes(b"x = 2\n")
+    git(p, "add", "src/old.py")
+    (p / "src/old.py").unlink()
+    (p / "src/new.py").unlink()
+    missing = results(make(), repo, hooks.staged_files(repo))["staged files missing from the working tree"]
+    assert missing.passed is False
+    keep, drop = missing.hint.splitlines()
+    assert keep == "keep them: git restore src/new.py src/old.py"
+    assert drop == "drop them from the commit: git rm --cached src/new.py; git restore --staged src/old.py"
+    for command in drop.removeprefix("drop them from the commit: ").split("; "):  # followed as printed
+        git(p, *command.split()[1:])
+    assert hooks.staged_files(repo) == [] and hooks.staged_files(repo, "D") == []  # src/old.py stays
+
+
+@needs_git
 def test_checks_generated_files(tmp_path: Path, tools: Tools) -> None:
     repo, staged = staged_project(tmp_path, {"gen.json": b"{}\n", "src/a.py": b"x = 1\n"}, commit=["gen.json"])
     (repo.project / "gen.json").write_bytes(b'{"new": 1}\n')  # regenerated after the staging
