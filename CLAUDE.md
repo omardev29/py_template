@@ -3923,7 +3923,9 @@ short temp tree and unset `NVIM_APPNAME`.
   busybox, fish, xonsh, Neovim, actionlint, taplo and the basedpyright pins are in the image),
   `python-floor` (the runner starts on 3.11, `uv run --python 3.11 --script`, and the suite runs
   in process on 3.11, `uv run --no-project --python 3.11` with the locked pytest and hypothesis
-  (`--with`): the runner code itself on its floor; the tools the tests start stay in `.venv`.
+  (`--with`) and the suite's own settings, `-c .pytemplate/tests/pytest.ini --rootdir=.`, as
+  `./pyt selftest` passes them: the runner code itself on its floor; the tools the tests start
+  stay in `.venv`.
   Not on PyPy: uv never starts the runner there, and PyPy only changes harness details (it
   resets an inherited SIG_IGN of SIGINT, no PEP 538 locale coercion)) and `new-project` (`./pyt
   new` of a raylib and a flet project named `Pt-<preset>`, then setup and selftest there). About

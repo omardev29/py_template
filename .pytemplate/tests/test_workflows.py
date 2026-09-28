@@ -139,6 +139,9 @@ def test_selftest_workflow_covers_every_os_and_both_floors() -> None:
     assert 0 < linux.index("./pyt render --check") < linux.index("./pyt setup") < linux.index("run: ./pyt selftest -rs")
     floor = image["python-floor"]
     assert "--python 3.11 --with \"$pytest\" --with \"$hypothesis\" python -m pytest" in floor and ".pytemplate/tests" in floor
+    # the suite's own pytest settings, as ./pyt selftest passes them (cli.cmd_selftest): the
+    # project's pyproject.toml gives its app's tests another pythonpath and addopts
+    assert "-c .pytemplate/tests/pytest.ini --rootdir=." in floor
     assert "grep '^hypothesis==' " in floor  # the locked Hypothesis: the property tests need it
     assert "uv run --quiet --python 3.11 --script .pytemplate/pyt.py help" in floor
     new = image["new-project"]
