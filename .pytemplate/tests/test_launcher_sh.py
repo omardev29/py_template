@@ -1314,6 +1314,21 @@ def test_registry_path_quoted_entries(name: str, tmp_path: Path) -> None:
     assert _run_helpers(name, "_pt_uv=\n_pt_uv_from_registry || :\nprintf 'R:%s\\n' \"$_pt_uv\"\n", env) == ["R:"]
 
 
+@pytest.mark.parametrize("name", ["sh", "dash", "bash", "busybox", "ksh", "mksh", "yash", "zsh"])
+def test_registry_path_skips_relative_entries(name: str, tmp_path: Path) -> None:
+    """A relative entry of the PATH stored in the registry names a folder below the current
+    one, which may be anybody's: a uv there ran. Only absolute folders are probed (pyt.cmd and
+    pyt.ps1 skip them too)."""
+    rel = tmp_path / "rel"
+    rel.mkdir()
+    (rel / "uv").write_text("#!/bin/sh\n", encoding="ascii")
+    (rel / "uv").chmod(0o755)
+    lists = ["rel", "./rel", "%PT_REL%", f"rel;{rel}"]
+    calls = f"cd {q(str(tmp_path))} || exit 9\n"
+    calls += "".join(f"_pt_uv=\nif _pt_uv_in_list {q(v)}; then printf 'L:%s\\n' \"$_pt_uv\"; else printf 'L:none\\n'; fi\n" for v in lists)
+    assert _run_helpers(name, calls, _clean_env(PT_REL="rel")) == ["L:none"] * 3 + [f"L:{rel / 'uv'}"]
+
+
 # --- the uv search order (CLAUDE.md 4.1), for ./pyt and pyt.ps1 -------------------------------
 
 SEARCH_ORDER = ("envuv", "path", "uvi", "uvi_bin", "xdgbin", "xdgdata_bin", "home_local", "cargo", "home_cargo", "nix")

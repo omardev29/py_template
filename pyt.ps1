@@ -96,9 +96,12 @@ function Find-Uv {
         if ($env:ChocolateyInstall) { $dirs += [IO.Path]::Combine($env:ChocolateyInstall, 'bin') }
         if ($env:ProgramData) { $dirs += [IO.Path]::Combine($env:ProgramData, 'chocolatey', 'bin') }
         # The PATH stored in the registry (a console opened before uv was installed
-        # still has the old one). GetEnvironmentVariable expands %VARS% itself.
-        $dirs += @([Environment]::GetEnvironmentVariable('Path', 'User') -split ';')
-        $dirs += @([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';')
+        # still has the old one). GetEnvironmentVariable expands %VARS% itself, and keeps
+        # one that is not defined as it is. Only absolute folders (X:\... or \\server\...):
+        # a relative entry names one below the current folder.
+        $absolute = '^\s*"?([A-Za-z]:[\\/]|[\\/]{2})'
+        $dirs += @([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ -match $absolute })
+        $dirs += @([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';' | Where-Object { $_ -match $absolute })
     } else {
         $dirs += '/opt/homebrew/bin', '/usr/local/bin', '/home/linuxbrew/.linuxbrew/bin'
         if ($h) { $dirs += [IO.Path]::Combine($h, '.nix-profile', 'bin') }

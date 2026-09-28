@@ -269,7 +269,8 @@ Windows, never a `uv.cmd`/`uv.bat` shim) -> `UV_INSTALL_DIR[/bin]`, `XDG_BIN_HOM
 `Links` and `Packages/astral-sh.uv_*` (`LOCALAPPDATA`, then `ProgramFiles`), scoop shims
 (`SCOOP`, `~/scoop`, `SCOOP_GLOBAL`, `ProgramData/scoop`), chocolatey, and last the user and
 machine `Path` stored in the registry (a console opened before uv was installed; not in the
-plugin) -> POSIX: `/opt/homebrew/bin`, `/usr/local/bin`, linuxbrew, `~/.nix-profile/bin` (the
+plugin; only its absolute entries, and one naming a variable that is not defined never loses
+it: sections 4.3 to 4.5) -> POSIX: `/opt/homebrew/bin`, `/usr/local/bin`, linuxbrew, `~/.nix-profile/bin` (the
 plugin also tries the nix default profile, `/run/current-system/sw/bin` and `/usr/bin`). On
 Windows the sh launcher uses `USERPROFILE` as home. On Linux/macOS a candidate needs an x bit
 (`test -x` in `pyt`, `pyt.ps1`'s `Test-Uv` through `[IO.File]::GetUnixFileMode`, which
@@ -396,7 +397,10 @@ header rules (with detector tests proving each rule fires).
   failed (`test_winpath_inside_the_msys_root`).
 - `%NAME%` in registry values is expanded from the environment, retrying the upper-case name
   (MSYS2/Cygwin upper-case `SYSTEMROOT`, `PROGRAMFILES`...). Quoted entries
-  (`"C:\Program Files\x"`, written by some installers) lose their quotes first.
+  (`"C:\Program Files\x"`, written by some installers) lose their quotes first. An entry that
+  names a variable not defined is skipped (`_pt_expand` returns 1), and so is a relative one:
+  it names a folder below the current one (`_pt_uv_in_list`;
+  `test_registry_path_skips_relative_entries`).
 - Registry lookup: `reg.exe query KEY` WITHOUT `/v` (MSYS rewrites `/v` into `V:/`). It only
   runs when every other lookup failed. The Windows-only helpers are plain sh:
   `test_windows_helpers_in_posix_shells` and `test_registry_path_quoted_entries` run them
@@ -428,9 +432,17 @@ header rules (with detector tests proving each rule fires).
 - A `UV` variable that names a folder is rejected. The registry is read with
   `reg query KEY /v Path` (cmd has no MSYS rewriting) into a variable (`set "PT_LIST=%%B"`),
   never passed as `call` arguments: a quoted entry (`"C:\Program Files\x"`) would split them
-  and leave the FOR set unclosed. The quotes are removed (`%PT_LIST:"=%`), then `call set`
-  expands `REG_EXPAND_SZ` values (`test_cmd_registry_path_with_quoted_entries`, a fake
-  `reg.cmd` on PATH, Windows only).
+  and leave the FOR set unclosed. The quotes are removed (`%PT_LIST:"=%`), then a child cmd
+  expands `REG_EXPAND_SZ` values as Windows does (`for /f` over its `echo`: a command line keeps
+  a variable that is not defined as it is). `call set` did it before, and in a batch file an
+  undefined `%JAVA_HOME%` expands to nothing: `%JAVA_HOME%\bin` became `\bin`, a folder of the
+  drive root any user may create, and the uv.exe there ran. Each entry then reaches `:try_entry`
+  in `PT_E`, never as `call` arguments (call would expand them again, the batch file's way), and
+  only an absolute folder is probed (`X:\`, `X:/`, `\\`; `:try_absolute`). Their names start
+  with no other label's name (a `call :probe` must never meet a `:probe_x` first, whatever cmd
+  makes of a longer label). `test_cmd_registry_path_with_quoted_entries`,
+  `test_cmd_never_takes_uv_from_a_registry_entry_that_is_not_absolute` (a fake `reg.cmd` on
+  PATH, Windows only).
 - The helper variables are cleared on the uv line itself
   (`set "PT_ROOT=" & set "PT_UV=" & set "PT_ENTRY=" & set "PT_GLOBAL=" & "%PT_UV%" run ...`):
   cmd expands the whole line first, so uv still gets their values and the runner sees only the
@@ -557,7 +569,9 @@ header rules (with detector tests proving each rule fires).
 - uv: `Get-Command uv -CommandType Application -All`, and on Windows only a real `.exe` (a
   plain `Get-Command uv` can return an alias or function; a `uv.cmd`/`uv.ps1` wrapper would
   parse the arguments again). The registry `Path` is read with
-  `[Environment]::GetEnvironmentVariable` (expands `%VARS%`). `Read-Host` is wrapped in `try`.
+  `[Environment]::GetEnvironmentVariable` (expands `%VARS%`, and keeps one that is not defined
+  as it is), and only its absolute entries count (`$absolute`: `X:\`, `X:/`, `\\`; a relative
+  one names a folder below the current one). `Read-Host` is wrapped in `try`.
   A uv that cannot start (a broken download with its x bit) gives exit 126 and ONE line with
   the innermost exception's message: the outer message (and the error record) carry the
   position of the Invoke-Expression call (`test_ps1_uv_that_cannot_start_gives_one_line`).
@@ -5159,8 +5173,18 @@ cmd.exe and CreateProcess (details: section 4.4):
   (`tasks._batch_problem`, 6.1). Test: `test_shells.py::test_cmd_quote`,
   `test_cli_core.py::test_a_batch_file_gets_only_arguments_cmd_passes_unchanged`. Goes: never.
 - **A quoted registry PATH entry splits `call` arguments** (LIMITATION): Fix: `pyt.cmd` keeps
-  the value in a variable, drops the quotes, then `call set`. Test:
+  the value in a variable and drops the quotes, and its entries never go through `call`
+  arguments. Test:
   `test_launcher_win.py::test_cmd_keeps_the_registry_path_out_of_call_arguments`,
+  `test_cmd_registry_path_with_quoted_entries` (Windows). Goes: never.
+- **In a batch file a `%NAME%` that is not defined expands to nothing, `call`'s second
+  expansion included** (LIMITATION, documented; a command line keeps it as it is, and so does
+  Windows' own expansion of the registry PATH): `call set` turned the entry
+  `%JAVA_HOME%\bin` of an undefined JAVA_HOME into `\bin`, a folder of the drive root any user
+  may create, and pyt.cmd ran the uv.exe there. Fix: `pyt.cmd` `:uv_in_list` expands the list
+  in a child cmd (`for /f` over its `echo`), hands each entry to `:try_entry` in a variable and
+  probes only absolute folders (4.4). Test:
+  `test_launcher_win.py::test_cmd_never_takes_uv_from_a_registry_entry_that_is_not_absolute`,
   `test_cmd_registry_path_with_quoted_entries` (Windows). Goes: never.
 - **`set "K=v"` in a generated launcher** (LIMITATION): a literal `%` must be written `%%`, and
   non-ASCII text, `"` and line breaks cannot be held. Fix: `portable._cmd_value` (10). Test:

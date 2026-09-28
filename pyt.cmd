@@ -165,11 +165,30 @@ exit /b 0
 :uv_in_list
 if not defined PT_LIST exit /b 0
 rem Drop the quotes of quoted entries first (the list is split on the
-rem semicolons into quoted words below), then "call set" expands the
-rem variables of REG_EXPAND_SZ values.
+rem semicolons into quoted words below). Then a child cmd expands the
+rem variables of REG_EXPAND_SZ values as Windows does: its command line
+rem keeps a variable that is not defined as it is. In this batch file call
+rem set removed it, and an entry of an undefined JAVA_HOME, then \bin,
+rem named a folder of the drive root, where any user may create one.
 set "PT_LIST=%PT_LIST:"=%"
-call set "PT_LIST=%PT_LIST%"
-for %%P in ("%PT_LIST:;=" "%") do call :probe "%%~P"
+for /f "delims=" %%L in ('echo "%PT_LIST%" 2^>nul') do set "PT_LIST=%%~L"
+rem Each entry reaches :try_entry in a variable: as call arguments its
+rem variables would be expanded again, the batch file's way.
+for %%P in ("%PT_LIST:;=" "%") do set "PT_E=%%~P" & call :try_entry
+set "PT_E="
+exit /b 0
+
+:try_entry
+rem Only an absolute folder (X:\... or \\server\share\...): a relative entry
+rem names a folder below the current one, or holds a variable not defined.
+if defined PT_UV exit /b 0
+if not defined PT_E exit /b 0
+if "%PT_E:~1,2%"==":\" goto :try_absolute
+if "%PT_E:~1,2%"==":/" goto :try_absolute
+if "%PT_E:~0,2%"=="\\" goto :try_absolute
+exit /b 0
+:try_absolute
+if exist "%PT_E%\uv.exe" set "PT_UV=%PT_E%\uv.exe"
 exit /b 0
 
 :probe

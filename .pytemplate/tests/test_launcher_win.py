@@ -600,6 +600,31 @@ def test_cmd_registry_path_with_quoted_entries(tmp_path: Path) -> None:
     _assert_hints(_run([str(CMD), "__probe", "0", "0"], ROOT, _hidden_env(tmp_path, str(fake))))
 
 
+@windows_only
+@pytest.mark.parametrize("entry", ["%PT_UNDEFINED%uvdir", "%PT_UNDEFINED%\\uvdir", "uvdir", ".\\uvdir"])
+def test_cmd_never_takes_uv_from_a_registry_entry_that_is_not_absolute(entry: str, tmp_path: Path) -> None:
+    """`call set`, in a batch file, removed a variable that is not defined: an entry of an
+    undefined JAVA_HOME, %JAVA_HOME%\\bin, became \\bin, a folder of the drive root any user
+    may create, and pyt.cmd ran the uv.exe there (here uvdir, below the current folder, and
+    \\uvdir, below the drive root, which the test never creates). Windows keeps such an entry as
+    it is, and so does pyt.cmd now; an entry that is not absolute is never probed."""
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if not uv:
+        pytest.skip("uv not found")
+    work = tmp_path / "work"
+    (work / "uvdir").mkdir(parents=True)
+    shutil.copyfile(uv, work / "uvdir" / "uv.exe")
+    fake = _fake_reg(tmp_path, f"{entry};C:\\nope")
+    env = _hidden_env(tmp_path, str(fake))
+    env.pop("PT_UNDEFINED", None)
+    _assert_hints(_run([str(CMD), "__probe", "0", "0"], work, env))
+    # An absolute entry of the same folder is found: only the rule keeps uv out above.
+    (fake / "reg.txt").write_bytes(f"\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    %PT_UNDEFINED%x;{work / 'uvdir'}\r\n\r\n".encode("ascii"))
+    r = _run([str(CMD), "__probe", "0", "0", "u"], work, env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    _check(_probes(r)[0], work, "cmd", ["u"])
+
+
 # --- pyt.ps1 (pwsh everywhere, Windows PowerShell 5.1 on Windows) ---------------------------------
 
 
