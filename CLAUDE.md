@@ -3410,7 +3410,9 @@ LazyVim wiring:
   file (`cmd_nvim.SYNC_CHECK_LUA`, written to the temp dir) asks lazy.nvim for every plugin's
   `_.installed` and writes JSON to `$PT_NVIM_RESULT` (the terminal keeps Neovim's own output):
   a plugin not installed or no report is exit 1, no lazy.nvim (no `:Lazy`) exit 3, a plugin
-  with task errors (`has_errors`: a failed build step) only a warning.
+  with task errors (`has_errors`: a failed build step) only a warning. Headless Neovim ends its
+  last message without a line break, so the result starts a new line first (it was glued to it:
+  `test_nvim_sync_prints_its_result_on_a_line_of_its_own`).
 - `cmd_nvim.doctor(check)` (from `./pyt doctor`): one line, silent without `nvim`, at most
   one headless call. An `nvim` that cannot be executed (another architecture, a truncated
   download, a noexec mount: `cmd_nvim.headless` turns the OSError into a PytError, exit 3 in

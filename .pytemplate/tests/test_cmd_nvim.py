@@ -728,6 +728,32 @@ def test_nvim_sync_installs_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert isinstance(env, dict) and env.get("NVIM_LOG_FILE"), "without NVIM_LOG_FILE Neovim may drop nvim.log in the project"
 
 
+@pytest.mark.parametrize("report", [ALL_INSTALLED, '{"lazy": true, "missing": ["neotest"], "failed": []}'])
+def test_nvim_sync_prints_its_result_on_a_line_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], report: str
+) -> None:
+    """Headless Neovim ends its last message without a line break, and the result of nvim sync
+    (its ok line, or the error cli.main prints) was glued to it: "...with `mason.nvim`.ok plugins
+    installed" (A9-06). The runner starts a new line once Neovim is done, whatever it says next."""
+    nv = _trusted_nvim(tmp_path)
+    _record_runs(monkeypatch, report)
+    recorded = cmd_nvim.subprocess.run
+
+    def run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+        sys.stderr.write("Failed to install `tree-sitter-cli` with `mason.nvim`.")  # as Neovim ends
+        return recorded(argv, **kw)
+
+    monkeypatch.setattr(cmd_nvim.subprocess, "run", run)
+    try:
+        cmd_nvim.cmd_sync(nv)
+    except PytError:
+        pass  # cli.main prints it next
+    err = capsys.readouterr().err
+    assert err.endswith("Failed to install `tree-sitter-cli` with `mason.nvim`.\n") or (
+        "Failed to install `tree-sitter-cli` with `mason.nvim`.\nok plugins installed" in err
+    ), err
+
+
 @pytest.mark.parametrize(
     ("report", "code", "message"),
     [

@@ -832,6 +832,7 @@ def cmd_sync(nv: Nvim) -> int:
         env.update(PT_NVIM_CHECK=str(check_lua), PT_NVIM_RESULT=str(result))
         code = subprocess.run(argv, cwd=ROOT, env=env, stdin=subprocess.DEVNULL, check=False).returncode
         report = _read_report(result)
+    ui.report("")  # headless Neovim ends its last message without a line break: the result gets its own
     if code != 0:
         raise proc.CommandFailed(argv, code)
     if report is None:
