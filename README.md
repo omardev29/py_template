@@ -221,8 +221,9 @@ into the old one (those with the `pytemplate-launcher` line only) are removed on
 are in place. `./pyt doctor` says whether pyt is installed, whether the installed template is
 older than the clone it runs in, whether launchers of the install are left in another folder,
 and whether the bin folder is on PATH; `./pyt --dry-run install` shows what `install` would
-write. `install` runs only in a clone of the template: a project made with `new` holds no
-template to install.
+write, and `./pyt --dry-run uninstall` what `uninstall` would remove (both name what an
+unfinished install or uninstall left, which the real run deletes). `install` runs only in a
+clone of the template: a project made with `new` holds no template to install.
 
 `pyt uninstall` (outside any project, in the clone, or in a project made from this version of
 the template; in an older project, whose runner has no `uninstall`, run it from another folder)

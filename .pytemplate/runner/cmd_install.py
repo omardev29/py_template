@@ -641,26 +641,30 @@ def _copy_files(files: Iterable[str], dest: Path) -> None:
             shutil.copy2(src, target)
 
 
-def remove_leftovers(snapshot: Path, folders: Iterable[Path], stuck: list[Path] | None = None) -> list[Path]:
+LEFTOVER = "left by an unfinished install or uninstall"
+
+
+def leftovers(snapshot: Path, folders: Iterable[Path]) -> list[Path]:
     """What an unfinished install or uninstall left: `.template-new-*`/`.template-old-*` next to
-    the installed template, and staged launchers in the bin folders. Returns what it removed;
-    what it could not remove goes to `stuck` (a file in use)."""
-    gone: list[Path] = []
+    the installed template, and staged launchers (with the MARKER) in the bin folders."""
+    found: list[Path] = []
     with contextlib.suppress(OSError):
-        for entry in snapshot.parent.iterdir():
-            if entry.name.startswith((NEW, OLD)):
-                if presets._remove(entry):
-                    gone.append(entry)
-                elif stuck is not None:
-                    stuck.append(entry)
-    for folder in folders:
+        found += sorted(e for e in snapshot.parent.iterdir() if e.name.startswith((NEW, OLD)))
+    for folder in _dedupe(folders):
         with contextlib.suppress(OSError):
-            for entry in folder.iterdir():
-                if STAGED.match(entry.name) and is_launcher(entry):
-                    if _unlink(entry):
-                        gone.append(entry)
-                    elif stuck is not None:
-                        stuck.append(entry)
+            found += sorted(e for e in folder.iterdir() if STAGED.match(e.name) and is_launcher(e))
+    return found
+
+
+def remove_leftovers(snapshot: Path, folders: Iterable[Path], stuck: list[Path] | None = None) -> list[Path]:
+    """Remove the leftovers(); return what it removed. What it could not remove goes to `stuck`
+    (a file in use)."""
+    gone: list[Path] = []
+    for entry in leftovers(snapshot, folders):
+        if presets._remove(entry) if entry.parent == snapshot.parent else _unlink(entry):
+            gone.append(entry)
+        elif stuck is not None:
+            stuck.append(entry)
     return gone
 
 
@@ -891,6 +895,8 @@ def cmd_install(cfg: Config, args: list[str]) -> int:
     plan = make_plan()
     _say_plan(plan)
     if proc.DRY_RUN:
+        for path in leftovers(plan.snapshot, [plan.bin]):  # what install() removes first
+            ui.report(f"(--dry-run) would remove {path} ({LEFTOVER})")
         targets = ", ".join(str(plan.bin / n) for n in plan.launchers)
         also = f", and remove {', '.join(str(p) for p in plan.earlier)}" if plan.earlier else ""
         ui.report(f"(--dry-run) would copy {len(plan.files)} files into {plan.snapshot} and write {targets}{also}")
@@ -1079,10 +1085,16 @@ def cmd_uninstall(cfg: Config, args: list[str]) -> int:
                 removed.append(f"removed {snapshot} (the installed template)")
             else:
                 failed.append(f"{stuck}: in use or not writable")
-    if snapshot is not None and not proc.DRY_RUN:
+    swept = 0  # leftovers of an unfinished install or uninstall among `removed`
+    if snapshot is not None and proc.DRY_RUN:
+        found = leftovers(snapshot, folders)  # named as the real run removes them
+        removed += [f"would remove {p} ({LEFTOVER})" for p in found]
+        swept = len(found)
+    elif snapshot is not None:
         stuck_leftovers: list[Path] = []
-        for gone in remove_leftovers(snapshot, folders, stuck_leftovers):
-            removed.append(f"removed {gone} (left by an unfinished install or uninstall)")
+        gone = remove_leftovers(snapshot, folders, stuck_leftovers)
+        removed += [f"removed {p} ({LEFTOVER})" for p in gone]
+        swept = len(gone)
         failed.extend(f"{p}: in use or not writable" for p in stuck_leftovers)
         with contextlib.suppress(OSError):
             snapshot.parent.rmdir()  # <data home>/pytemplate, when nothing else is in it
@@ -1099,7 +1111,11 @@ def cmd_uninstall(cfg: Config, args: list[str]) -> int:
         raise PytError("could not remove:\n  " + "\n  ".join(failed) + f"\n  Close what uses them (or make them writable), then {how}", 1)
     if not removed:
         ui.ok("pyt is not installed: nothing to remove")
-    elif not proc.DRY_RUN:
+    elif proc.DRY_RUN:
+        pass
+    elif len(removed) == swept:
+        ui.ok("pyt is not installed: removed what an unfinished install or uninstall left")
+    else:
         ui.ok(f"pyt is uninstalled; to install it again: {FROM_A_CLONE}")
     return 0
 

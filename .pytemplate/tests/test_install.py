@@ -595,6 +595,38 @@ def test_leftovers_of_an_interrupted_install_are_cleaned_up(template: Path, box:
 NO_CFG: Any = None  # install and uninstall read nothing of the Config
 
 
+def test_dry_runs_name_the_leftovers_the_real_runs_remove(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`--dry-run uninstall` said "pyt is not installed: nothing to remove" where the real run then
+    removed what an unfinished install left (and said "pyt is uninstalled"), and `--dry-run
+    install` never named the leftovers install deletes first: each dry run names them now."""
+    p = Planner(tmp_path, monkeypatch)
+    old, new = p.snapshot.parent / (cmd_install.OLD + "deadbeef"), p.snapshot.parent / (cmd_install.NEW + "cafe")
+    (old / "sub").mkdir(parents=True)
+    new.mkdir()
+    staged = p.bin / ".pyt-install-abc"
+    staged.write_bytes(NEW_LAUNCHER)
+    (p.bin / ".pyt-install-xyz").write_bytes(b"not a launcher\n")  # only looks like one: never removed
+    before = _files(tmp_path)
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert cmd_install.cmd_install(NO_CFG, []) == 0
+    err = capsys.readouterr().err
+    for path in (old, new, staged):
+        assert f"would remove {path} (left by an unfinished install or uninstall)" in err, err
+    assert ".pyt-install-xyz" not in err
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    err = capsys.readouterr().err
+    for path in (old, new, staged):
+        assert f"would remove {path} (left by an unfinished install or uninstall)" in err, err
+    assert "nothing to remove" not in err and ".pyt-install-xyz" not in err
+    assert _files(tmp_path) == before and old.is_dir() and new.is_dir()
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    err = capsys.readouterr().err
+    assert f"removed {old} (left by an unfinished install or uninstall)" in err, err
+    assert "pyt is not installed: removed what an unfinished install or uninstall left" in err and "pyt is uninstalled" not in err
+    assert not p.snapshot.parent.exists() and [f.name for f in p.bin.iterdir()] == [".pyt-install-xyz"]
+
+
 class Installed:
     """An installed template (its record naming the bin folder; its runner: the ENTRY, a module
     and pytemplate.toml) and a launcher in tmp_path, for uninstall in process; a file named
