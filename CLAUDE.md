@@ -2562,7 +2562,9 @@ Per method:
   `/sys`) is one `pyz-merge: cannot write` line, exit 2 (`pyz._cannot_write`; it was an
   internal-error traceback), and `_write_archive` never leaves its `.tmp` behind.
 - **wheel**: its `[project] dependencies` go through `wheel.dependencies`: a `[tool.uv.sources]`
-  git or URL source becomes a direct reference (`name @ git+URL@REV`); a path, workspace or
+  git or URL source becomes a direct reference (`name @ git+URL@REV`), with its `subdirectory`
+  (`#subdirectory=`, `&subdirectory=` after the URL's own fragment: dropped for a URL, the
+  install built the archive's root project, `test_wheel_declares_git_and_url_sources_as_direct_references`); a path, workspace or
   editable source, a named index, a marker or several sources is refused before the checks
   and the payload (`wheel.check`, from `cmd_build`, also in `--dry-run`): copied as a plain
   name, a local library became a PyPI requirement (an unrelated PyPI package of that name got

@@ -89,7 +89,10 @@ def dependencies(data: dict[str, Any]) -> list[str]:
                 ref = next((source[k] for k in ("rev", "tag", "branch") if isinstance(source.get(k), str)), "")
                 where = url + (f"@{ref}" if ref else "") + (f"#subdirectory={source['subdirectory']}" if source.get("subdirectory") else "")
             elif isinstance(source.get("url"), str):
-                where = source["url"]
+                # An archive whose project is not at its root: uv's own requirement names the
+                # folder (without it pip and uv built the archive's root: another project, or none)
+                sub = source.get("subdirectory")
+                where = source["url"] + (f"{'&' if '#' in source['url'] else '#'}subdirectory={sub}" if sub else "")
         if not where:
             refused.append(f"{name} ({json.dumps(source, ensure_ascii=False)})")
             continue

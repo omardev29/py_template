@@ -4560,16 +4560,22 @@ def test_wheel_declares_git_and_url_sources_as_direct_references() -> None:
     from runner.methods import wheel
 
     data = {
-        "project": {"dependencies": ["rich>=15", "Tool_Kit[fast] ; sys_platform == 'linux'", "blob"]},
+        "project": {"dependencies": ["rich>=15", "Tool_Kit[fast] ; sys_platform == 'linux'", "blob", "langchain>=0.2", "hashed"]},
         "tool": {"uv": {"sources": {
             "tool-kit": {"git": "https://github.com/org/toolkit", "tag": "v1.2", "subdirectory": "python"},
             "blob": {"url": "https://example.com/blob-1.0-py3-none-any.whl"},
+            # an archive whose project is not at its root: the wheel dropped the folder, and its
+            # install built the archive's root (another project, or none)
+            "langchain": {"url": "https://example.com/langchain-0.2.0.tar.gz", "subdirectory": "libs/langchain"},
+            "hashed": {"url": "https://example.com/mono.tar.gz#sha256=" + "0" * 64, "subdirectory": "pkg"},
         }}},
     }
     assert wheel.dependencies(data) == [
         "rich>=15",
         "Tool_Kit[fast] @ git+https://github.com/org/toolkit@v1.2#subdirectory=python ; sys_platform == 'linux'",
         "blob @ https://example.com/blob-1.0-py3-none-any.whl",
+        "langchain @ https://example.com/langchain-0.2.0.tar.gz#subdirectory=libs/langchain",
+        "hashed @ https://example.com/mono.tar.gz#sha256=" + "0" * 64 + "&subdirectory=pkg",
     ]
     assert wheel.dependencies({"project": {"dependencies": ["rich"]}}) == ["rich"]
 
