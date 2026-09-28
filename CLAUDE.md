@@ -1286,8 +1286,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   says "nothing to do" while doctor and the hook still report the edit as not applied: an app.name
   set by hand to ANOTHER package of src/ is refused as apply refuses it (`_check_the_name_is_applied`
   with `cmd_apply._other_package`: `rename other --force` moved that package and left the app
-  where it was), and a pyproject.toml [project] name edited by hand, with NEW_NAME = app.name,
-  exits 2 naming `./pyt apply`.
+  where it was), so is a package folder moved to app.name's by hand (`cmd_apply.moved_by_hand`,
+  section 5.8: renaming from there left every old reference), and a pyproject.toml [project] name
+  edited by hand, with NEW_NAME = app.name, exits 2 naming `./pyt apply`.
 - What changes (`rewrite`, whole words only; `myapp_extra` and `my-app-2` never match):
   - Python code (`tokenize`): the first name of `import pkg...`/`from pkg... import`, and, in a
     file that binds the package with `import pkg[.x]` (no `as`), every name that resolves to that
@@ -1426,7 +1427,15 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   puts its name back (`_old_name`: also when that name differs only in case or `-`/`_`, so its
   package is app.name's folder; it was taken for the real name, and a rename myapp -> MyApp
   rewrote the user's prose). Without a record either line may be the edited one, and the refusal says
-  both ways out.
+  both ways out. A package folder moved to app.name's by hand (an IDE's folder rename, then
+  app.name set: `moved_by_hand`, the trusted record's package gone from src/ while app.name's is
+  there) is refused with the way out, move it back and apply (`moved_by_hand_message`; `rename`
+  and doctor say the same): apply took it for "only [project] name differs", rewrote that line,
+  recorded the new name and said "applied" while the imports, compile.modules and
+  deploy.wheel.entry still named the old package
+  (`test_apply.test_a_package_folder_moved_by_hand_is_refused`). Without a record it cannot be
+  told from an edited [project] name (a project upgraded with the template's pyproject.toml):
+  apply writes that line.
 - Order of `apply`: dirty-tree check (rename only; `--force` skips it) -> the rename
   (`rename.report`, `tidy_before`, `apply_plan`, then the record under the new name: a later
   failure must not leave it naming the old app, which is no longer trusted) or the `[project]

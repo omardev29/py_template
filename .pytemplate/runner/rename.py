@@ -1751,6 +1751,9 @@ def _check_the_name_is_applied(cfg: Config, new_name: str) -> None:
             f"rename: app.name = '{cfg.app.name}' names src/{cfg.pkg}/, another package: the app is '{other}' "
             f"(src/{package_of(other)}/).\n  Put back app.name = \"{other}\" in pytemplate.toml, then ./pyt rename {new_name}{either}"
         )
+    moved = cmd_apply.moved_by_hand(cfg, record)  # src/<old>/ moved by hand: renaming from there left every old reference
+    if moved is not None:
+        raise PytError(f"rename: {cmd_apply.moved_by_hand_message(cfg, moved, f'./pyt rename {new_name}')}")
     if new_name == cfg.app.name and project_name is not None and project_name != cfg.app.name:
         moved = f"src/{package_of(project_name)}/" if config.APP_NAME.fullmatch(project_name) else "its old folder"
         # a name of another spelling (Alpha, my-app for my_app) has app.name's own folder: nothing moved

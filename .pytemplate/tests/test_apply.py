@@ -1248,6 +1248,46 @@ def test_both_names_edited_by_hand_are_renamed(tmp_path: Path, monkeypatch: pyte
     assert record is not None and record["name"] == "beta" and cmd_apply.pending(project.cfg()) == []
 
 
+@pytest.mark.parametrize("imports", ["kept", "fixed"], ids=["a plain move", "an IDE's move"])
+def test_a_package_folder_moved_by_hand_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, imports: str) -> None:
+    """app.name set after src/alpha/ was moved to src/beta/ by hand (an IDE's folder rename): apply
+    took the "only [project] name differs" path, rewrote that line, recorded beta and said
+    "applied" (doctor too), while pytemplate.toml (compile.modules, deploy.wheel.entry...) and,
+    without the IDE, the imports still named alpha. It refuses before any write, as rename does,
+    with the way out; moved back, apply renames it all."""
+    project, uv = _project(tmp_path, monkeypatch, "flet", "alpha")
+    assert _run(project) == 0  # the record: alpha
+    src = project.root / "src"
+    (src / "alpha").rename(src / "beta")
+    if imports == "fixed":  # what the IDE's refactoring rewrites
+        for path in [*src.rglob("*.py"), *(project.root / "tests").rglob("*.py")]:
+            text = path.read_text(encoding="utf-8")
+            path.write_text(re.sub(r"(import|from) alpha\b", r"\1 beta", text), encoding="utf-8", newline="\n")
+    project.edit("app", "name", "beta")
+    cfg = project.cfg()
+    before, count = project.snapshot(), len(uv.calls)
+    for dry in (False, True):
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        with pytest.raises(PytError, match=r"src/alpha/ was moved to src/beta/ by hand") as e:
+            _run(project)
+        assert e.value.code == 2 and "Move it back to src/alpha/, then ./pyt apply" in str(e.value)
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    assert project.snapshot() == before and uv.changing(count) == []
+    problem, hint = cmd_apply.pending(cfg)[0]
+    assert "src/alpha/ was moved to src/beta/ by hand" in problem and hint.startswith("move it back to src/alpha/"), (problem, hint)
+    for new in ("beta", "gamma"):  # rename, too, never starts from the moved folder
+        with pytest.raises(PytError, match=r"src/alpha/ was moved to src/beta/ by hand"):
+            rename.cmd_rename(cfg, [new])
+    assert project.snapshot() == before
+    (src / "beta").rename(src / "alpha")  # the way out
+    assert _run(project) == 0
+    skeleton = presets.skeleton("flet", "beta")
+    assert project.config_file.read_bytes() == skeleton["pytemplate.toml"]  # compile.modules, entry... renamed
+    if imports == "kept":
+        assert _owned(project.root) == {k: v for k, v in skeleton.items() if k.split("/")[0] in ("src", "tests", "typings")}
+    assert cmd_apply.pending(project.cfg()) == []
+
+
 @pytest.mark.parametrize("record", [True, False])
 def test_a_name_of_another_package_in_src_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: bool) -> None:
     """app.name set by hand to the name of another package of the project (src/helpers/): apply
