@@ -406,8 +406,15 @@ def test_nvim_pyt_steps_never_touch_a_repository_around_the_dir(nvim_run: dict[s
     staged = subprocess.run([git, "diff", "--cached", "--name-only"], cwd=outer, env=genv, capture_output=True, text=True, check=True).stdout
     assert staged == "", f"the scratch project's files were staged in the repository around --dir: {staged}"
     assert (outer / "nvt" / "p" / "script" / ".git").is_dir()  # the project's own repository instead
-    # Neovim keeps the user's git configuration (lazy.nvim clones the plugins with it)
-    assert seen["venv"].get("GIT_CONFIG_GLOBAL") == os.environ.get("GIT_CONFIG_GLOBAL")
+    # Neovim keeps the user's git configuration (lazy.nvim clones the plugins with it): the user's
+    # own GIT_CONFIG_GLOBAL, else a <dir>/gitconfig that includes it (nvim_env moves XDG_CONFIG_HOME,
+    # so git would otherwise miss $XDG_CONFIG_HOME/git/config: nvimtest.user_git_config)
+    user_gcg = os.environ.get("GIT_CONFIG_GLOBAL")
+    gcg = seen["venv"].get("GIT_CONFIG_GLOBAL")
+    if user_gcg is not None:
+        assert gcg == user_gcg
+    elif gcg is not None:
+        assert Path(gcg) == outer / "nvt" / "gitconfig"
     assert seen["renv"]["GIT_CONFIG_NOSYSTEM"] == "1"
 
 

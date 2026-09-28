@@ -12,7 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path, PurePath
 
 from . import ui
@@ -342,6 +342,37 @@ def make_private_dir(path: Path, option: str) -> None:
     it for theirs in a sticky /tmp."""
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     check_private_dir(path, option)
+
+
+@contextlib.contextmanager
+def base_lock(base: Path, what: str) -> Iterator[None]:
+    """One run at a time per scratch base/dir: a lock on <base>/lock held for the whole run (the
+    OS drops it when the process ends, however it ends). A second run on the same folder would
+    wipe or delete the first one's files; `what` names the command in the refusal. `base` must
+    exist. (selftest --mutation has its own copy, `mutation.base_lock`.)"""
+    fd = os.open(base / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise PytError(f"{what}: another run is using {base}: wait for it to end") from None
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                import msvcrt
+
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(fd)  # releases the lock (POSIX)
 
 
 def _umask() -> int:

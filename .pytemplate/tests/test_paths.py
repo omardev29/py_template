@@ -307,6 +307,17 @@ def test_stale_caller_cwd_is_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert caller_cwd().is_absolute()
 
 
+def test_base_lock_refuses_a_second_run_and_releases(tmp_path: Path) -> None:
+    """One run at a time per scratch base (selftest --e2e and --nvim use it around their run): a
+    second holder is refused, naming the command, and the lock is released when the first exits."""
+    with project.base_lock(tmp_path, "selftest --e2e"):
+        with pytest.raises(ui.PytError, match=r"selftest --e2e: another run is using"):
+            with project.base_lock(tmp_path, "selftest --e2e"):
+                pass
+    with project.base_lock(tmp_path, "selftest --nvim"):  # released: a later run takes it
+        pass
+
+
 def test_caller_cwd_keeps_the_shells_spelling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     raw = str(tmp_path)

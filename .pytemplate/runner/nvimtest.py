@@ -39,7 +39,7 @@ from pathlib import Path
 
 from . import cmd_nvim, presets, proc, ui
 from .config import Config
-from .project import IS_WINDOWS, ROOT, check_private_dir, make_private_dir, scratch_name, user_path
+from .project import IS_WINDOWS, ROOT, base_lock, check_private_dir, make_private_dir, scratch_name, user_path
 from .ui import PytError
 
 DEFAULT_PRESETS = ("script", "raylib", "flet")
@@ -732,32 +732,36 @@ def _run(ns: argparse.Namespace, names: list[str], exe: str, layout: Layout) -> 
         global_config = user_git_config(layout.base, source)
         if global_config is not None:
             venv["GIT_CONFIG_GLOBAL"] = global_config
-    _remove(layout.logs)  # logs of the previous run
-    layout.logs.mkdir(parents=True)
-    version = cmd_nvim.query(exe, env=venv)
-    if version is not None and version.version < cmd_nvim.MIN_LAZYVIM:
-        msg = f"selftest --nvim: Neovim {version.version_text} is older than LazyVim's minimum {cmd_nvim.version_str(cmd_nvim.MIN_LAZYVIM)}"
-        if ns.require:
-            raise PytError(msg, 3)
-        ui.warn(msg + ": skipped")
-        return 0
-    nv, base_seconds = prepare_base(layout, exe, venv, fresh=ns.fresh)
+    # One run at a time per --dir: a second run deletes this one's logs (below), removes x/ under
+    # it while this one installs the base, and its project cleanup collides with this one's build.
+    # _prepare_dir above created the dir, so a second run is refused here.
+    with base_lock(layout.base, "selftest --nvim"):
+        _remove(layout.logs)  # logs of the previous run
+        layout.logs.mkdir(parents=True)
+        version = cmd_nvim.query(exe, env=venv)
+        if version is not None and version.version < cmd_nvim.MIN_LAZYVIM:
+            msg = f"selftest --nvim: Neovim {version.version_text} is older than LazyVim's minimum {cmd_nvim.version_str(cmd_nvim.MIN_LAZYVIM)}"
+            if ns.require:
+                raise PytError(msg, 3)
+            ui.warn(msg + ": skipped")
+            return 0
+        nv, base_seconds = prepare_base(layout, exe, venv, fresh=ns.fresh)
 
-    rows = [run_preset(p, layout, nv, renv=renv, venv=venv, timeout=ns.timeout) for p in names]
-    if not ns.keep:
-        for p in names:
-            try:
-                cmd_nvim.remove_tree(layout.projects / p)
-            except OSError as e:
-                ui.warn(f"could not remove {layout.projects / p}: {e}")
-    # the starter and plugin commits this run used (the uploaded CI logs; new pins after a green
-    # run without LOCK)
-    pins = record_pins(layout, nv)
-    _table(rows, base_seconds)
-    ui.report(f"  pinned to: {pins}")
-    ui.report(f"  logs: {layout.logs}" + (f"   projects: {layout.projects}" if ns.keep else "   (--keep keeps the projects)"))
-    if all(r.ok for r in rows):
-        ui.ok(f"selftest --nvim: {len(rows)} preset(s) passed")
-        return 0
-    ui.error(f"selftest --nvim: {sum(not r.ok for r in rows)} of {len(rows)} preset(s) failed")
-    return 1
+        rows = [run_preset(p, layout, nv, renv=renv, venv=venv, timeout=ns.timeout) for p in names]
+        if not ns.keep:
+            for p in names:
+                try:
+                    cmd_nvim.remove_tree(layout.projects / p)
+                except OSError as e:
+                    ui.warn(f"could not remove {layout.projects / p}: {e}")
+        # the starter and plugin commits this run used (the uploaded CI logs; new pins after a green
+        # run without LOCK)
+        pins = record_pins(layout, nv)
+        _table(rows, base_seconds)
+        ui.report(f"  pinned to: {pins}")
+        ui.report(f"  logs: {layout.logs}" + (f"   projects: {layout.projects}" if ns.keep else "   (--keep keeps the projects)"))
+        if all(r.ok for r in rows):
+            ui.ok(f"selftest --nvim: {len(rows)} preset(s) passed")
+            return 0
+        ui.error(f"selftest --nvim: {sum(not r.ok for r in rows)} of {len(rows)} preset(s) failed")
+        return 1

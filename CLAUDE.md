@@ -3588,7 +3588,9 @@ short temp tree and unset `NVIM_APPNAME`.
   `<dir>/base.json` = the base is complete, `<dir>/p/<preset>` = scratch projects,
   `<dir>/logs/` = one log per step. It stops unless Neovim reports every stdpath inside
   `<dir>/x`, refuses a `--dir` inside the template or one that is a file (exit 2), and only
-  wipes a dir carrying its marker `.pytemplate-nvim-test`. Its `./pyt` steps get
+  wipes a dir carrying its marker `.pytemplate-nvim-test`. One run at a time per `--dir`: `_run`
+  holds `project.base_lock` on `<dir>/lock` around the run (a second run is refused, "another run
+  is using <dir>", instead of deleting the first's logs or its base as it installs). Its `./pyt` steps get
   `e2e.isolate_git` (the ceiling at the `--dir`'s parent, no global or system git config), as
   those of `--e2e`: with a `--dir` inside the user's work tree `new` skipped `git init` and, with
   `core.filemode = false`, staged the scratch launchers in that repository, where they stayed
@@ -3712,7 +3714,9 @@ short temp tree and unset `NVIM_APPNAME`.
   below a file or in a folder it may not write, is one error line, exit 2); only a base carrying
   `.pytemplate-e2e` is wiped, and a symlinked or junctioned base loses only its link and marker
   (`e2e.rmtree` removes a link as a link and never chmods through one: a passing run left the
-  folder it named at 0o200). Steps run with stdin closed and per-step timeouts (`TIMEOUTS`,
+  folder it named at 0o200). One run at a time per base: `selftest` holds `project.base_lock` on
+  `<base>/lock` around the run and the cleanup (as `--mutation` does), so a second run is refused
+  ("another run is using <base>") instead of deleting the first's projects and logs. Steps run with stdin closed and per-step timeouts (`TIMEOUTS`,
   `BUILD_TIMEOUTS`) that kill the whole process tree (each step in its own session on POSIX);
   a failed `new`, `setup` or host `mode` skips the rest of its preset; a row with `after`
   needs that row to PASS. Exit codes: 0; 1 on any FAIL; 2 usage; 130 interrupted: Ctrl+C, and
@@ -5846,7 +5850,9 @@ Code coupling (rename together):
   excepted by the same `presets.ignored_by_work_tree`);
   `nvimtest.selftest` imports `e2e.termination_as_interrupt`, `isolate_git` and
   `hidden_template_repository` lazily (one rule for both harnesses), and `shells.selftest`
-  `termination_as_interrupt`;
+  `termination_as_interrupt`; `e2e.selftest` and `nvimtest._run` hold `project.base_lock` around
+  the run (`mutation.base_lock` is its own copy, specialised to `--mutation`'s message: the lock
+  protocol must stay the same);
   `e2e.flet_build_reason` imports `methods.flet._developer_mode`, and its Flutter size and the
   flet method's docstring follow the manual (`test_docs.test_the_runner_gives_the_manuals_flutter_size`);
   `upx.uses` imports `methods.flet.MOBILE_WEB` lazily (`methods.flet` imports `upx`);

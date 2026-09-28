@@ -55,7 +55,7 @@ from typing import Any
 from . import proc, ui
 from .cmd_build import COMPAT
 from .config import BACKENDS, METHODS, Config
-from .project import CONFIG_FILE, ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, check_private_dir, host_arch, host_os, make_private_dir, scratch_name, user_path, venv_python
+from .project import CONFIG_FILE, ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, base_lock, check_private_dir, host_arch, host_os, make_private_dir, scratch_name, user_path, venv_python
 from .ui import PytError
 
 DEFAULT_PRESETS = ("script", "raylib", "flet")
@@ -1204,8 +1204,11 @@ def _prepare_base(base: Path) -> None:
         raise PytError(f"selftest --e2e: cannot create --base {base}: {e.strerror or e}") from None
 
 
-def _cleanup(base: Path, presets: Sequence[str]) -> None:
-    """Remove what this run made (other presets kept by an earlier --keep stay), then the base if empty."""
+def _cleanup(base: Path, presets: Sequence[str], *, remove_base: bool = True) -> None:
+    """Remove what this run made (other presets kept by an earlier --keep stay), then the base if
+    empty. `remove_base=False` leaves the base itself: selftest holds a lock file in it and removes
+    the base only once the lock is released (`_remove_base`; its file cannot be deleted on Windows
+    while held)."""
     try:
         for p in presets:
             for d in (base / p, base / "logs" / p, base / "work" / p):
@@ -1213,9 +1216,19 @@ def _cleanup(base: Path, presets: Sequence[str]) -> None:
         for d in (base / "logs", base / "work"):
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
-        if {x.name for x in base.iterdir()} <= {MARKER}:
+        if remove_base and {x.name for x in base.iterdir()} <= {MARKER}:
             (base / MARKER).unlink(missing_ok=True)  # through a link too: that folder is the user's
             rmtree(base)  # a symlinked base: only the link goes
+    except OSError as e:
+        ui.warn(f"could not remove {base}: {e}")
+
+
+def _remove_base(base: Path) -> None:
+    """Remove the base and its lock file once the lock is released, but only when nothing else is
+    left (an earlier --keep may have left another preset's projects)."""
+    try:
+        if base.is_dir() and {x.name for x in base.iterdir()} <= {MARKER, "lock"}:
+            rmtree(base)  # unlinks MARKER and lock too; a symlinked base: only the link goes
     except OSError as e:
         ui.warn(f"could not remove {base}: {e}")
 
@@ -1287,47 +1300,57 @@ def selftest(cfg: Config, args: list[str]) -> int:
             "hide the template's own. Pick a --base outside that repository"
         )
     _prepare_base(base)
-    uv = proc.find_uv()
-    ui.step(f"selftest --e2e: {', '.join(opts.presets)} in {base}" + (" (--quick)" if opts.quick else " (--full)" if opts.full else ""))
-    results: list[Result] = []
-    interrupted = False
-    t0 = time.perf_counter()
-    with termination_as_interrupt():
-        try:
-            for info, steps in plans:
-                ctx = Context(info, base, base / info.name, base / "logs" / info.name, base / "work" / info.name, uv, env, opts)
-                for d in (ctx.logs, ctx.work):
-                    rmtree(d)
-                    d.mkdir(parents=True)
-                run_preset(ctx, steps, results)
-        except KeyboardInterrupt:
-            interrupted = True
-    seconds = time.perf_counter() - t0
-    failed = interrupted or any(r.status == FAIL for r in results)
-    if results:
-        _print_table(results, seconds)
-    kept = failed or opts.keep
-    if kept:
-        ui.report(f"kept for inspection: {base}  (logs in {base / 'logs'})")
-    else:
-        _cleanup(base, opts.presets)
-    if opts.as_json:
-        report = {
-            "ok": not failed,
-            "interrupted": interrupted,
-            "base": str(base),
-            "kept": kept,
-            "seconds": round(seconds, 1),
-            "host": asdict(host),
-            "options": asdict(opts),
-            "results": [asdict(r) for r in results],
-        }
-        print(json.dumps(report, indent=2))
-    if interrupted:
-        ui.error("interrupted")
-        return 130
-    if failed:
-        ui.error("selftest --e2e: some steps failed (table above)")
-        return 1
-    ui.ok("selftest --e2e: everything passed")
-    return 0
+    # One run at a time per base: a second run's do_new/rmtree would delete the projects and logs
+    # this one is building. _prepare_base above is non-destructive (mkdir + marker), so a second
+    # run is refused here. _cleanup removes only this run's projects under the lock; the base and
+    # its lock file go after it is released (_remove_base: the file cannot be deleted on Windows
+    # while held).
+    with base_lock(base, "selftest --e2e"):
+        uv = proc.find_uv()
+        ui.step(f"selftest --e2e: {', '.join(opts.presets)} in {base}" + (" (--quick)" if opts.quick else " (--full)" if opts.full else ""))
+        results: list[Result] = []
+        interrupted = False
+        t0 = time.perf_counter()
+        with termination_as_interrupt():
+            try:
+                for info, steps in plans:
+                    ctx = Context(info, base, base / info.name, base / "logs" / info.name, base / "work" / info.name, uv, env, opts)
+                    for d in (ctx.logs, ctx.work):
+                        rmtree(d)
+                        d.mkdir(parents=True)
+                    run_preset(ctx, steps, results)
+            except KeyboardInterrupt:
+                interrupted = True
+        seconds = time.perf_counter() - t0
+        failed = interrupted or any(r.status == FAIL for r in results)
+        if results:
+            _print_table(results, seconds)
+        kept = failed or opts.keep
+        if kept:
+            ui.report(f"kept for inspection: {base}  (logs in {base / 'logs'})")
+        else:
+            _cleanup(base, opts.presets, remove_base=False)
+        if opts.as_json:
+            report = {
+                "ok": not failed,
+                "interrupted": interrupted,
+                "base": str(base),
+                "kept": kept,
+                "seconds": round(seconds, 1),
+                "host": asdict(host),
+                "options": asdict(opts),
+                "results": [asdict(r) for r in results],
+            }
+            print(json.dumps(report, indent=2))
+        if interrupted:
+            ui.error("interrupted")
+            code = 130
+        elif failed:
+            ui.error("selftest --e2e: some steps failed (table above)")
+            code = 1
+        else:
+            ui.ok("selftest --e2e: everything passed")
+            code = 0
+    if not kept:  # the lock is released and its fd closed: remove the base and its lock file
+        _remove_base(base)
+    return code
