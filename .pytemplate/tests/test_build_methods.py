@@ -3133,12 +3133,13 @@ def test_flet_method_refuses_before_any_work(no_build: None, monkeypatch: pytest
     monkeypatch.setattr(flet, "IS_WINDOWS", True)
     monkeypatch.setattr(flet, "host_os", lambda: "windows")
     monkeypatch.setattr(flet, "_developer_mode", lambda: False)
-    with pytest.raises(PytError, match="Developer Mode") as e:
-        cmd_build.cmd_build(_flet_cfg(), ["cpython", "--method", "flet"])
-    assert e.value.code == 3
-    # A web build needs no Developer Mode, nor does a machine that has it on: they go on
+    for cfg in (_flet_cfg(), _flet_cfg(deploy={"flet": {"target": "web"}})):  # a web build too
+        with pytest.raises(PytError, match="Developer Mode") as e:
+            cmd_build.cmd_build(cfg, ["cpython", "--method", "flet"])
+        assert e.value.code == 3
+    # A machine that has it on goes on, whatever the target
+    monkeypatch.setattr(flet, "_developer_mode", lambda: True)
     for cfg in (_flet_cfg(deploy={"flet": {"target": "web"}}), _flet_cfg()):
-        monkeypatch.setattr(flet, "_developer_mode", lambda: cfg.deploy.flet.target == "host")
         if dry_run:
             assert cmd_build.cmd_build(cfg, ["cpython", "--method", "flet", "--no-check"]) == 0
         else:
@@ -4483,18 +4484,27 @@ def test_flet_build_pyproject_points_at_the_staged_app(extra: str, expected: dic
     assert ("is ignored" in capsys.readouterr().err) is ('path = "app"' in extra)
 
 
-def test_flet_build_needs_developer_mode_on_windows(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("target", ["host", "windows", "apk", "aab", "web"])
+def test_flet_build_needs_developer_mode_on_windows(sandbox: Path, monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+    # Every target: flet build turns Flutter's Windows desktop on there and its template holds a
+    # windows/ folder, so an apk or web build stopped late in Flutter's plugin symlinks, after the
+    # checks, the payload and a first Flutter download
     from runner.methods import flet
 
     monkeypatch.setattr(flet, "IS_WINDOWS", True)
     monkeypatch.setattr(flet, "_developer_mode", lambda: False)
     monkeypatch.setattr(flet, "host_os", lambda: "windows")
     monkeypatch.setattr(envs, "uv_run", lambda *a, **k: pytest.fail("flet build must not start"))
+    cfg = _flet_cfg(deploy={"flet": {"target": target}})
     with pytest.raises(PytError, match="Developer Mode") as e:
-        flet.build(BuildRequest(_flet_cfg(), "cpython", "flet", fake_app(sandbox / "p", "fletdemo")))
+        flet.check_options(cfg)
     assert e.value.code == 3
+    with pytest.raises(PytError, match="Developer Mode"):
+        flet.build(BuildRequest(cfg, "cpython", "flet", fake_app(sandbox / "p", "fletdemo")))
     with pytest.raises(PytError, match="flet preset"):
         flet.build(BuildRequest(make({}), "cpython", "flet", sandbox / "p"))
+    monkeypatch.setattr(flet, "_developer_mode", lambda: True)
+    flet.check_options(cfg)  # with it, nothing to refuse
 
 
 def test_flet_build_mobile_and_web_ship_the_py_code(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

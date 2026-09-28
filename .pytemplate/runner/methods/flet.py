@@ -201,7 +201,11 @@ def check_options(cfg: Config) -> None:
     checks and the payload (also in --dry-run), build() again."""
     if cfg.app.preset != "flet":
         raise PytError("--method flet is for the flet preset (pytemplate.toml app.preset)")
-    if IS_WINDOWS and build_target(cfg) == "windows" and not _developer_mode():
+    # Every target: on Windows flet build turns Flutter's Windows desktop on (flet_cli 1.0.1,
+    # install_flutter), and its template holds a windows/ folder, so Flutter links the plugins
+    # there for an apk, aab or web build too, and stopped late ("Building with plugins requires
+    # symlink support"), after the checks, the payload and a first Flutter download
+    if IS_WINDOWS and not _developer_mode():
         raise PytError(
             "flet build on Windows needs Developer Mode (Flutter uses symlinks):\n"
             "  Settings > System > For developers > Developer Mode. Meanwhile, use\n"

@@ -2417,8 +2417,10 @@ Formats:
   `TARGET_METHODS` (pyz), `GLOBAL_FLAGS` (`--dry-run`, `--no-render`) typed after the command,
   and a leading bare word (`_stray_word`: "unknown backend 'mypy': did you mean mypyc?", "did you
   mean --method pyz?"). Then `nuitka.check_python`, for pyz `common.check_key` on every key,
-  `flet.check_options` (the flet preset; Developer Mode on Windows for a windows target, exit
-  3), `portable.check` (the `[deploy.portable] env` values a `.cmd` launcher cannot hold),
+  `flet.check_options` (the flet preset; Developer Mode on Windows for every target, exit 3:
+  flet build turns Flutter's Windows desktop on there and its template holds a `windows/`
+  folder, so an apk or web build stopped late in Flutter's plugin symlinks,
+  `test_flet_build_needs_developer_mode_on_windows`), `portable.check` (the `[deploy.portable] env` values a `.cmd` launcher cannot hold),
   `check_lock` (a read-only `uv lock --check`, exit 2 with uv's reason and `./pyt lock`: a
   uv.lock that pyproject.toml moved past used to stop a method only where it ran `uv ...
   --locked`, with `--no-check` after the payload, exe and nuitka after the previous output was
@@ -2834,8 +2836,9 @@ Per method:
   and the archive reads to its end the way flet_desktop extracts it (`nuitka.archive_problem`:
   zipfile CRCs, or tarfile over gzip and the gzip trailer); a cached archive is checked again
   at every build and downloaded anew when damaged. 61 MB with UPX; ~25 min build.
-- **flet** (`flet build`): requires `app.preset == "flet"`. Windows needs Developer Mode
-  (Flutter symlinks; checked in the registry by `methods.flet._developer_mode`) and Visual
+- **flet** (`flet build`): requires `app.preset == "flet"`. Windows needs Developer Mode, for
+  every target (Flutter symlinks the plugins of the Windows desktop flet build turns on there;
+  checked in the registry by `methods.flet._developer_mode`) and Visual
   Studio C++; `flet.check_options` refuses both from `cmd_build`, before the checks and the
   payload and also in `--dry-run`, and again in `build`. The stage `.build/flet-build/<b>` is
   persistent (Flutter cache); stale extensions are deleted from it before this payload's are
