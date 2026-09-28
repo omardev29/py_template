@@ -227,9 +227,11 @@ template to install.
 the template; in an older project, whose runner has no `uninstall`, run it from another folder)
 removes the launchers and the installed template that `install` wrote, and names what it leaves
 and why: a file of the bin folder it did not write, a data folder without `installed.json` or
-one that is a symbolic link. When a file of the installed template cannot be deleted (a program
-still uses it), it says so: close that program and run `pyt uninstall` again (once the `pyt`
-command is gone, `./pyt uninstall` in a project or in the clone), which finishes the job.
+one that is a symbolic link. When a file cannot be deleted (a program still uses it, or its
+folder is not writable), it says so and what finishes the job once that is fixed: `pyt
+uninstall` again where a `pyt` launcher is left that still runs the installed template (a
+launcher it could not remove keeps the installed template, so `pyt` keeps working), else
+`./pyt uninstall` in a project or in the clone.
 
 Without `pyt install` nothing changes: `./pyt` works in every project, and a launcher run
 outside any project exits 2 with how to install pyt.

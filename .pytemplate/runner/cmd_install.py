@@ -916,13 +916,16 @@ def _unlink(path: Path) -> bool:
     return True
 
 
-def _retire(path: Path, removed: list[str], left: list[str], failed: list[str]) -> None:
+def _retire(path: Path, removed: list[str], left: list[str], failed: list[str], retry: bool = False) -> bool:
     """The pyt.cmd cmd runs for this run, last: once everything else is gone, self_deleting() takes
     its place (cmd reads on from there, deletes it and keeps the exit code). After a failure it is
-    left whole: pyt uninstall can then run again from it."""
-    if failed:
-        left.append(f"left {path}: cmd runs it, and it goes only once the rest is removed")
-        return
+    left whole while `pyt uninstall` can run again from it (`retry`: the installed template's
+    runner is still there, _runs_pyt); without that it goes too: kept, it only said "install it"
+    (its installed template had no ENTRY any more) when uninstall was typed again. Returns
+    whether it was left whole."""
+    if failed and retry:
+        left.append(f"left {path}: cmd runs it, and it goes only once the rest is removed (pyt uninstall runs again from it)")
+        return True
     running = _read(path)
     stand_in = self_deleting(running) if running is not None else None
     if stand_in is None:  # no uv line to read on from (not our layout): cmd will not find it
@@ -930,13 +933,28 @@ def _retire(path: Path, removed: list[str], left: list[str], failed: list[str]) 
             removed.append(f"removed {path} (cmd, which runs it, may say it cannot find the batch file)")
         else:
             failed.append(f"{path}: in use or not writable")
-        return
+        return False
     try:
         project.write_whole(path, stand_in)
     except OSError as e:
         failed.append(f"{path}: {e.strerror or e}")
-        return
+        return False
     removed.append(f"removed {path} (cmd runs it: it deletes itself as this run ends)")
+    return False
+
+
+# The installed template's runner: the launchers look for ENTRY (without it they say "install
+# it"), and in its global mode the runner loads pytemplate.toml, whose app.preset must name a
+# preset of .pytemplate/presets. _remove_in_place deletes them last, ENTRY first of them
+ENTRY = ".pytemplate/pyt.py"
+
+
+def _runs_pyt(snapshot: Path | None) -> bool:
+    """Whether the launchers still run the installed template at `snapshot`, and so `pyt
+    uninstall` again: its ENTRY is there. _remove_in_place deletes the ENTRY only once
+    everything but the runner is gone, and the rest of the runner only after it: while the
+    ENTRY is there, the runner is whole."""
+    return snapshot is not None and (snapshot / ENTRY).is_file()
 
 
 def remove_installed(snapshot: Path) -> Path | None:
@@ -955,27 +973,35 @@ def remove_installed(snapshot: Path) -> Path | None:
 
 
 def _remove_in_place(snapshot: Path) -> Path | None:
-    """The installed template deleted where it is, its record (RECORD) last."""
+    """The installed template deleted where it is, in rounds, each only once the one before has
+    deleted everything: what its runner does not need, then the runner's ENTRY, then the rest of
+    the runner and pytemplate.toml, then its record (RECORD) and the folder. A file that cannot
+    go keeps the record, so the next uninstall finds the folder by it (deleted in any order, the
+    record could go first: a file in use then left a folder that the next uninstall called the
+    user's own and install refused), and, in the first round (Windows: a terminal's folder in
+    it), the runner whole, so the launchers still run `pyt uninstall` (_runs_pyt): deleted in any
+    order, its ENTRY went too, and the pyt.cmd kept for a retry said "install it"."""
     record = snapshot / RECORD
-    done = True
+    inner = record.parent  # .pytemplate: the runner and the record
+    config = snapshot / project.CONFIG_FILE.name
     try:
         entries = list(snapshot.iterdir())
+        real = inner.is_dir() and not _is_link(inner)
+        runner = list(inner.iterdir()) if real else []
     except OSError:
         return snapshot
-    for entry in entries:
-        if entry == record.parent and entry.is_dir() and not _is_link(entry):
-            try:
-                inside = list(entry.iterdir())
-            except OSError:
-                done = False
-                continue
-            for sub in inside:
-                if sub.name != record.name:
-                    done = presets._remove(sub) and done
-        else:
-            done = presets._remove(entry) and done
-    if not done:
-        return snapshot  # the record stays: the next uninstall finds the folder by it
+    entry = snapshot / ENTRY
+    rounds = [
+        [e for e in entries if e != config and not (real and e == inner)],
+        [entry],
+        [*(e for e in runner if e not in (entry, record)), config],
+    ]
+    for paths in rounds:
+        done = True
+        for path in paths:
+            done = presets._remove(path) and done
+        if not done:
+            return snapshot  # the record stays: the next uninstall finds the folder by it
     return None if presets._remove(snapshot) else snapshot
 
 
@@ -998,6 +1024,7 @@ def cmd_uninstall(cfg: Config, args: list[str]) -> int:
     failed: list[str] = []
 
     running: Path | None = None  # the pyt.cmd cmd runs for this very run: it goes last
+    stays: list[Path] = []  # launchers of ours it could not remove: they still run the installed template
     for folder in _dedupe(folders):
         for name in NAMES:
             path = folder / name
@@ -1013,12 +1040,17 @@ def cmd_uninstall(cfg: Config, args: list[str]) -> int:
                     removed.append(f"removed {path}")
                 else:
                     failed.append(f"{path}: in use or not writable")
+                    stays.append(path)
     if snapshot is not None and os.path.lexists(snapshot):
         why = not_an_install(snapshot)
         if why:
             left.append(f"left {snapshot}: {why}")
         elif proc.DRY_RUN:
             removed.append(f"would remove {snapshot} (the installed template)")
+        elif stays and _runs_pyt(snapshot):
+            # Deleted, it left those launchers on PATH saying "install it", and `pyt uninstall`
+            # could not run again from them
+            left.append(f"left {snapshot} (the installed template): the launchers it could not remove run it, and it goes with them")
         else:
             stuck = remove_installed(snapshot)
             if stuck is None:
@@ -1033,16 +1065,16 @@ def cmd_uninstall(cfg: Config, args: list[str]) -> int:
         with contextlib.suppress(OSError):
             snapshot.parent.rmdir()  # <data home>/pytemplate, when nothing else is in it
     failed = list(dict.fromkeys(failed))  # a folder left aside above is a leftover too
-    if running is not None:
-        _retire(running, removed, left, failed)
+    kept = running is not None and _retire(running, removed, left, failed, retry=_runs_pyt(snapshot))
     for line in [*removed, *left]:
         ui.report(f"  {line}")
     if failed:
-        raise PytError(
-            "could not remove:\n  " + "\n  ".join(failed) + "\n  Close what uses them, then run pyt uninstall again"
-            " (once the `pyt` command is gone: ./pyt uninstall in a project or in a clone of the template)",
-            1,
-        )
+        # `pyt uninstall` again only where a launcher of ours is left that still runs the
+        # installed template: it was promised after every failure, and a kept pyt.cmd, or a
+        # launcher it could not remove, then said "install it"
+        again = (kept or bool(stays)) and _runs_pyt(snapshot)
+        how = "run pyt uninstall again" if again else "run ./pyt uninstall in a project or in a clone of the template"
+        raise PytError("could not remove:\n  " + "\n  ".join(failed) + f"\n  Close what uses them (or make them writable), then {how}", 1)
     if not removed:
         ui.ok("pyt is not installed: nothing to remove")
     elif not proc.DRY_RUN:

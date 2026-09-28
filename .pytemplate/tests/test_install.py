@@ -573,15 +573,17 @@ NO_CFG: Any = None  # install and uninstall read nothing of the Config
 
 
 class Installed:
-    """An installed template (its record naming the bin folder) and a launcher in tmp_path, for
-    uninstall in process; `stuck` names a file of it that cannot be deleted while it is True."""
+    """An installed template (its record naming the bin folder; its runner: the ENTRY, a module
+    and pytemplate.toml) and a launcher in tmp_path, for uninstall in process; a file named
+    in-use.txt cannot be deleted while `stuck` is True (the one at the top, or `in_use`)."""
 
-    def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch, in_use: str = "in-use.txt") -> None:
         self.snapshot = tmp / "data" / "pytemplate" / "template"
         self.bin = tmp / "bin"
-        (self.snapshot / ".pytemplate").mkdir(parents=True)
+        (self.snapshot / ".pytemplate" / "runner").mkdir(parents=True)
         (self.snapshot / "src").mkdir()
-        for rel in (".pytemplate/pyt.py", "src/a.py", "in-use.txt", "z.txt"):
+        for rel in (cmd_install.ENTRY, ".pytemplate/runner/cli.py", "pytemplate.toml", "src/a.py", in_use, "z.txt"):
+            (self.snapshot / rel).parent.mkdir(parents=True, exist_ok=True)
             (self.snapshot / rel).write_bytes(b"x\n")
         (self.snapshot / cmd_install.RECORD).write_text(json.dumps({"schema": 1, "bin": str(self.bin)}), encoding="utf-8")
         self.bin.mkdir()
@@ -621,7 +623,8 @@ def test_a_failed_uninstall_can_be_finished(tmp_path: Path, monkeypatch: pytest.
         monkeypatch.setattr(cmd_install, "_rename", rename)
     with pytest.raises(PytError, match="could not remove") as e:
         cmd_install.cmd_uninstall(NO_CFG, [])
-    assert e.value.code == 1 and "run pyt uninstall again" in str(e.value)
+    # The launcher is gone: `pyt uninstall` would find no pyt to run
+    assert e.value.code == 1 and "then run ./pyt uninstall in a project or in a clone of the template" in str(e.value)
     assert not (inst.bin / "pyt").exists()
     if movable:
         left = list(inst.snapshot.parent.iterdir())
@@ -630,7 +633,8 @@ def test_a_failed_uninstall_can_be_finished(tmp_path: Path, monkeypatch: pytest.
         assert not inst.snapshot.exists()  # install is free to write a new one there
     else:
         assert cmd_install.read_record(inst.snapshot) is not None and cmd_install.not_an_install(inst.snapshot) == ""
-        assert sorted(p.relative_to(inst.snapshot).as_posix() for p in inst.snapshot.rglob("*")) == [".pytemplate", cmd_install.RECORD, "in-use.txt"]
+        runner = [".pytemplate", cmd_install.RECORD, cmd_install.ENTRY, ".pytemplate/runner", ".pytemplate/runner/cli.py", "pytemplate.toml"]
+        assert sorted(p.relative_to(inst.snapshot).as_posix() for p in inst.snapshot.rglob("*")) == sorted([*runner, "in-use.txt"])
     inst.stuck = False  # the program that held the file has ended
     assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
     assert not inst.snapshot.parent.exists()
@@ -1117,15 +1121,119 @@ def test_uninstall_leaves_a_self_deleting_stand_in_for_the_pyt_cmd_cmd_runs(clon
 
 
 def test_the_pyt_cmd_cmd_runs_goes_only_once_the_rest_is_gone(tmp_path: Path) -> None:
+    """After a failure the pyt.cmd cmd runs stays whole only while `pyt uninstall` can run again
+    from it (retry); otherwise it goes as after a success."""
     target = tmp_path / "pyt.cmd"
     target.write_bytes(EARLIER_CMD)
     removed: list[str] = []
     left: list[str] = []
-    cmd_install._retire(target, removed, left, ["somewhere: in use or not writable"])
+    assert cmd_install._retire(target, removed, left, ["somewhere: in use or not writable"], retry=True)
     assert target.read_bytes() == EARLIER_CMD and not removed and "cmd runs it" in left[0]
+    assert not cmd_install._retire(target, removed, left, ["somewhere: in use or not writable"], retry=False)
+    assert target.read_bytes() == cmd_install.self_deleting(EARLIER_CMD) and "it deletes itself" in removed[0]
     target.write_bytes(b"@echo off\r\nrem pytemplate-launcher: no uv line\r\n")
-    cmd_install._retire(target, removed, left, [])
-    assert not target.exists() and "may say it cannot find the batch file" in removed[0]
+    assert not cmd_install._retire(target, removed, left, [])
+    assert not target.exists() and "may say it cannot find the batch file" in removed[1]
+
+
+def _run_by_cmd(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    """This run, as pyt.cmd hands it over when cmd runs it (run_by_cmd)."""
+    path.write_bytes(EARLIER_CMD)
+    monkeypatch.setenv("PYTEMPLATE_LAUNCHER", "cmd")
+    monkeypatch.setenv(cmd_install.LAUNCHER_FILE, str(path))
+
+
+@pytest.mark.parametrize(
+    ("stuck", "movable", "again"),
+    [("in-use.txt", False, True), ("in-use.txt", True, False), (".pytemplate/tools/in-use.txt", False, False)],
+    ids=["a file of the template, in place", "a file of the copy moved aside", "a file of its runner, in place"],
+)
+def test_the_pyt_cmd_kept_for_a_retry_can_run_uninstall_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stuck: str, movable: bool, again: bool) -> None:
+    """A failed uninstall kept the pyt.cmd cmd runs "so that pyt uninstall can run again from it",
+    after it had deleted the installed template's runner (moved aside, or every file but the
+    record in place): typed again, that pyt.cmd found no .pytemplate/pyt.py and said "install
+    it". Now the runner goes last in place, after everything else, and the pyt.cmd stays only
+    while the runner is whole (Windows' usual failure: a terminal's folder inside the template,
+    which cannot move then); otherwise it goes too, and the error names ./pyt uninstall in a
+    project or in a clone, which finishes the job."""
+    inst = Installed(tmp_path, monkeypatch, in_use=stuck)
+    running = inst.bin / "pyt.cmd"
+    _run_by_cmd(monkeypatch, running)
+    if not movable:
+        real = cmd_install._rename
+
+        def rename(src: Path, dst: Path) -> None:
+            if src == inst.snapshot:
+                raise PermissionError(errno.EACCES, "Permission denied", str(src))
+            real(src, dst)
+
+        monkeypatch.setattr(cmd_install, "_rename", rename)
+    with pytest.raises(PytError, match="could not remove") as e:
+        cmd_install.cmd_uninstall(NO_CFG, [])
+    assert not (inst.bin / "pyt").exists()
+    if again:
+        # What pyt.cmd runs is there: the ENTRY it looks for, the runner, the configuration
+        for rel in (cmd_install.ENTRY, ".pytemplate/runner/cli.py", "pytemplate.toml", cmd_install.RECORD):
+            assert (inst.snapshot / rel).is_file(), rel
+        assert running.read_bytes() == EARLIER_CMD and str(e.value).endswith("then run pyt uninstall again"), str(e.value)
+    else:
+        assert not (inst.snapshot / cmd_install.ENTRY).exists()
+        assert running.read_bytes() == cmd_install.self_deleting(EARLIER_CMD)
+        assert str(e.value).endswith("then run ./pyt uninstall in a project or in a clone of the template"), str(e.value)
+    inst.stuck = False  # the program that held the file has ended
+    if not again:  # from a project, whose launcher is not the pyt.cmd uninstall left
+        monkeypatch.delenv("PYTEMPLATE_LAUNCHER")
+        monkeypatch.delenv(cmd_install.LAUNCHER_FILE)
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    assert not inst.snapshot.parent.exists()
+    if again:  # from the pyt.cmd it kept, which then goes as that run ends
+        assert list(inst.bin.iterdir()) == [running] and running.read_bytes() == cmd_install.self_deleting(EARLIER_CMD)
+    else:  # its self-deleting stand-in is ours too
+        assert list(inst.bin.iterdir()) == []
+
+
+def test_a_launcher_that_cannot_be_removed_keeps_the_installed_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A launcher uninstall cannot remove (a bin folder that is not writable, chattr +i) stays on
+    PATH: uninstall deleted the installed template anyway, and that launcher then said "install
+    it" and could not run `pyt uninstall` again. Now the installed template stays while one of
+    its launchers does: pyt keeps working, and `pyt uninstall` again finishes the job."""
+    inst = Installed(tmp_path, monkeypatch)
+    inst.stuck = False
+    before = _files(inst.snapshot)
+    launcher = inst.bin / "pyt"
+    real = cmd_install._unlink
+    blocked = [True]
+    monkeypatch.setattr(cmd_install, "_unlink", lambda path: False if blocked[0] and path == launcher else real(path))
+    with pytest.raises(PytError, match="could not remove") as e:
+        cmd_install.cmd_uninstall(NO_CFG, [])
+    assert f"{launcher}: in use or not writable" in str(e.value) and str(e.value).endswith("then run pyt uninstall again")
+    assert f"left {inst.snapshot} (the installed template): the launchers it could not remove run it" in capsys.readouterr().err
+    assert launcher.is_file() and _files(inst.snapshot) == before
+    blocked[0] = False
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    assert not inst.snapshot.parent.exists() and not launcher.exists()
+
+
+@posix_only
+@needs_git
+@needs_uv
+def test_the_launcher_left_by_a_failed_uninstall_runs_it_again(clone: Path, box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real launcher: after an uninstall that could not remove it, `pyt uninstall` typed
+    outside any project runs the installed template again (it said "install it", exit 2), and
+    finishes the job."""
+    assert pyt(clone, box, "install").returncode == 0
+    for key, value in box.env().items():
+        monkeypatch.setenv(key, value)
+    for key in [k for k in os.environ if k.upper() in DROP or k.upper().startswith("PYTEMPLATE_")]:
+        monkeypatch.delenv(key)
+    launcher = box.bin / "pyt"
+    real = cmd_install._unlink
+    monkeypatch.setattr(cmd_install, "_unlink", lambda path: False if path == launcher else real(path))
+    with pytest.raises(PytError, match="then run pyt uninstall again"):
+        cmd_install.cmd_uninstall(NO_CFG, [])
+    r = subprocess.run(["/bin/sh", str(launcher), "uninstall"], cwd=box.away, env=box.env(**_uv_dirs()), capture_output=True, text=True, timeout=180, check=False)
+    assert r.returncode == 0 and "pyt is uninstalled" in r.stderr, (r.stdout, r.stderr)
+    assert box.launchers() == {} and not box.snapshot.parent.exists()
 
 
 def test_is_launcher_and_not_ours(tmp_path: Path) -> None:

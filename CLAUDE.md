@@ -1472,17 +1472,27 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   older project's runner has no such command: run it from another folder there. In the installed
   template it deletes the files it runs from): the launchers with the MARKER in the current bin
   folder and in the recorded one, the installed template when it holds a record and is no link
-  (`not_an_install`; a link is left, and named), the leftovers (each named; one it cannot delete
+  (`not_an_install`; a link is left, and named) and no launcher of ours it could not remove runs
+  it (it stays with them, so pyt keeps working and `pyt uninstall` runs again from them: deleted,
+  it left them saying "install it"), the leftovers (each named; one it cannot delete
   is a failure), and `<data home>/pytemplate` when empty; it names what it leaves and why.
   The installed template moves aside first (`remove_installed`: `.template-old-*`, a leftover
   the next uninstall or install deletes), else, where it cannot move (Windows: a terminal's
-  folder inside it), it is deleted in place with its record last (`_remove_in_place`): rmtree
-  deleted the record first, and a file in use then left a folder that the next uninstall called
-  the user's own and install refused, while both said to run uninstall again. `--dry-run` of both
-  prints and writes nothing. The `pyt.cmd` cmd runs for this very run (`run_by_cmd`) goes last,
-  and only when everything else is gone (`_retire`): `self_deleting` takes its place and deletes
-  itself as cmd reads on (section 4.4); install refuses, before any write, to replace that file
-  with other bytes.
+  folder inside it), it is deleted in place in rounds (`_remove_in_place`): what its runner does
+  not need, then its `ENTRY` (`.pytemplate/pyt.py`, what the launchers look for), then the rest
+  of the runner and `pytemplate.toml`, then its record. rmtree deleted the record first, and a
+  file in use then left a folder that the next uninstall called the user's own and install
+  refused, while both said to run uninstall again; and a file in use of the first round now
+  leaves the runner whole (`_runs_pyt`: its `ENTRY` is there). `--dry-run` of both
+  prints and writes nothing. The `pyt.cmd` cmd runs for this very run (`run_by_cmd`) goes last
+  (`_retire`): after a failure it stays whole only while the installed template's runner does
+  (`pyt uninstall` then runs again from it; kept without it, it said "install it"), else
+  `self_deleting` takes its place and deletes itself as cmd reads on (section 4.4); install
+  refuses, before any write, to replace that file with other bytes. A failure names `pyt
+  uninstall` again only while a launcher of ours that runs the installed template is left, else
+  `./pyt uninstall` in a project or in a clone
+  (`test_install.test_the_pyt_cmd_kept_for_a_retry_can_run_uninstall_again`,
+  `test_a_launcher_that_cannot_be_removed_keeps_the_installed_template`).
 - `doctor(check)` (the last step of `./pyt doctor`, every mode): notes only (`[ok]`/`[--]`,
   never `[XX]`: pyt works without it): not installed, the installed template and its commit
   (no data folder: the variables that would name one, `data_home_names`), older than this clone
