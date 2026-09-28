@@ -446,7 +446,8 @@ header rules (with detector tests proving each rule fires).
   blank before one, `%%~L` then kept the closing quote and the FOR set built from the list broke
   with ": was unexpected at this time.", exit 255: no uv from the registry, no install hints;
   `test_cmd_echo_in_a_for_f_command_has_no_redirection`; the quotes a variable brings, a quoted
-  `JAVA_HOME`, are removed after it the same way). `call set` did it before, and in a batch file an
+  `JAVA_HOME`, are removed after it the same way; `test_cmd_finds_uv_in_a_plain_registry_entry`
+  runs both on Windows). `call set` did it before, and in a batch file an
   undefined `%JAVA_HOME%` expands to nothing: `%JAVA_HOME%\bin` became `\bin`, a folder of the
   drive root any user may create, and the uv.exe there ran. Each entry then reaches `:try_entry`
   in `PT_E`, never as `call` arguments (call would expand them again, the batch file's way), and

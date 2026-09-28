@@ -612,6 +612,33 @@ def test_cmd_registry_path_with_quoted_entries(tmp_path: Path) -> None:
 
 
 @windows_only
+def test_cmd_finds_uv_in_a_plain_registry_entry(tmp_path: Path) -> None:
+    """The registry fallback on its own: a plain absolute entry, no quotes, no variable; then a
+    variable whose value brings quotes of its own (a quoted JAVA_HOME) into a folder with blanks
+    and parentheses. The echo that expands the list carried a redirection, whose blank kept the
+    closing quote: every registry Path broke the FOR set built from it (": was unexpected at this
+    time.", exit 255), and neither uv nor the install hints were ever reached."""
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if not uv:
+        pytest.skip("uv not found")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    shutil.copyfile(uv, plain / "uv.exe")
+    fake = _fake_reg(tmp_path, str(plain))
+    env = _hidden_env(tmp_path, str(fake))
+    r = _run([str(CMD), "__probe", "0", "0", "p"], ROOT, env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    _check(_probes(r)[0], ROOT, "cmd", ["p"])
+    quoted = tmp_path / "q dir (x86)"
+    quoted.mkdir()
+    shutil.copyfile(uv, quoted / "uv.exe")
+    (fake / "reg.txt").write_bytes(b"\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    C:\\nope;%PT_QV%\r\n\r\n")
+    r = _run([str(CMD), "__probe", "0", "0", "q"], ROOT, {**env, "PT_QV": f'"{quoted}"'})
+    assert r.returncode == 0, r.stdout + r.stderr
+    _check(_probes(r)[0], ROOT, "cmd", ["q"])
+
+
+@windows_only
 @pytest.mark.parametrize("entry", ["%PT_UNDEFINED%uvdir", "%PT_UNDEFINED%\\uvdir", "uvdir", ".\\uvdir"])
 def test_cmd_never_takes_uv_from_a_registry_entry_that_is_not_absolute(entry: str, tmp_path: Path) -> None:
     """`call set`, in a batch file, removed a variable that is not defined: an entry of an
