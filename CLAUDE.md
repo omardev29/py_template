@@ -3144,7 +3144,9 @@ Per method:
   `extend-exclude`, `presets.OWNED_DIRS`). Also: `[[typing.mypy_overrides]] raylib
   ignore_errors`, `no-build-package = ["raylib"]` via `[uv]`, `forbid_imports = ["pyray"]`
   (~7x slower), exe `extra_args` exclude setuptools/pycparser/_distutils_hack, PyPy is the
-  default active backend. raylib 6.0.1.0 publishes PyPy wheels only for `macosx_10_15_x86_64`,
+  default active backend. Files reach raylib as bytes Python read, never as a path
+  (`gfx.load_texture`: `LoadImageFromMemory`; raylib's `fopen` misread a Windows folder named
+  with an accent, 15.1). raylib 6.0.1.0 publishes PyPy wheels only for `macosx_10_15_x86_64`,
   `manylinux x86_64` and `win_amd64` (section 15).
 - flet: measured with Flet 1.0.1 + mypyc 2.3.1 in compiled code: `async` handlers get no event,
   generator handlers never run, `@ft.component` fails at import, `@ft.control` loses its event
@@ -5249,6 +5251,14 @@ cffi and raylib:
   `raylib_stubs.py` skips a struct whose `ffi.sizeof` raises before reading its fields (11).
   Test: `test_presets.py::test_raylib_stubs_skips_opaque_structs`. Goes: when cffi raises
   instead.
+- **raylib opens a path with the C `fopen`** (LIMITATION, raylib 6.0.1.0: its Windows binary
+  imports `fopen`, no `_wfopen`, and the C runtime reads a narrow path in the ANSI code page):
+  the skeleton's `gfx.load_texture` handed `LoadTexture` the path as UTF-8 bytes, and under a
+  folder named with an accent (`C:\Users\<a name with one>`) it named another file: an empty
+  texture, silently (a GUI build shows no log). Fix: `gfx.load_texture` reads the file in Python
+  and calls `LoadImageFromMemory`, and the skeleton's `src/assets/README.md` says to hand raylib
+  bytes (11). Test: `test_presets.py::test_raylib_skeleton_hands_raylib_a_textures_bytes_never_its_path`.
+  Goes: never (bytes need no path).
 - **raylib wheels** (LIMITATION): no PyPy wheel for arm64 (macOS and Linux: pp311 wheels for
   x86_64 only), and building raylib from its sdist needs the C library. Fix: `no-build-package`
   from the preset's `[uv]`; `e2e.HOST_GAPS` (macOS and Linux arm64) and `render.ci_workflow`

@@ -2681,6 +2681,30 @@ def test_raylib_skeleton_refuses_bad_options(tmp_path: Path, monkeypatch: pytest
     assert e.value.code == 2 and "usage: demo" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("folder", ["game", "Jos\u00e9 game"])
+def test_raylib_skeleton_hands_raylib_a_textures_bytes_never_its_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, folder: str) -> None:
+    """gfx.load_texture gave raylib the path as UTF-8 bytes, which raylib opens with the C fopen:
+    on Windows that reads them in the ANSI code page, and under a folder named with an accent
+    (a user's own name) the texture loaded nothing, silently. Now Python reads the file."""
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    def record(name: str) -> Any:
+        def call(*args: Any) -> str:
+            calls.append((name, args))
+            return f"<{name}>"
+
+        return call
+
+    names = ("LoadTexture", "LoadImage", "LoadImageFromMemory", "LoadTextureFromImage", "UnloadImage")
+    fake = _fake_module("raylib", ffi=object(), **{name: record(name) for name in names})
+    gfx = _skeleton_package(tmp_path / folder, monkeypatch, "raylib", "demo.gfx", {"raylib": fake})
+    png = b"\x89PNG\r\n\x1a\nnot really"
+    (tmp_path / folder / "src" / "assets" / "hero.PNG").write_bytes(png)
+    assert gfx.load_texture("hero.PNG") == "<LoadTextureFromImage>"
+    image = "<LoadImageFromMemory>"
+    assert calls == [("LoadImageFromMemory", (b".png", png, len(png))), ("LoadTextureFromImage", (image,)), ("UnloadImage", (image,))]
+
+
 @pytest.mark.parametrize("preset", PRESETS)
 def test_presets_are_ascii(preset: str) -> None:
     """Rule 1.5: every file of a preset (skeleton, preset.toml, pins, tools) is ASCII (a

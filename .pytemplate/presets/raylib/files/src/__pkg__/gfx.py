@@ -5,7 +5,9 @@ Rules that keep the rest of the game fast:
   forces a conversion on every call: with tuples PyPy loses all its advantage.
 - Raw raylib (`import raylib as rl`), never pyray in loops: pyray wraps every
   call in Python (~700 ns versus ~100 ns).
-- Text and paths always go to raylib as bytes.
+- Text always goes to raylib as bytes. Files are read by Python and handed over as their
+  bytes (LoadImageFromMemory): raylib opens a path with the C fopen, which on Windows reads
+  it in the ANSI code page, so a folder name with an accent loaded nothing, silently.
 """
 
 from __future__ import annotations
@@ -35,8 +37,13 @@ def bunny_texture(size: int) -> Texture:
 
 
 def load_texture(name: str) -> Texture:
-    """Load a texture from src/assets/ (an example of using resources)."""
-    return rl.LoadTexture(str(asset(name)).encode())
+    """Load a texture from src/assets/ (an example of using resources), from any folder."""
+    path = asset(name)
+    data = path.read_bytes()  # raylib gets the bytes, never the path (see above)
+    image = rl.LoadImageFromMemory(path.suffix.lower().encode(), data, len(data))
+    texture = rl.LoadTextureFromImage(image)
+    rl.UnloadImage(image)
+    return texture
 
 
 def text(message: str, x: int, y: int, size: int, tint: Color) -> None:
