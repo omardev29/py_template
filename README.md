@@ -495,8 +495,9 @@ name). What changes:
   String prefixes, escapes and format directives are never the name: an app named `f`, `n`, `r`
   or `d` keeps `f"..."`, `"\n"`, `b"\r"`, `"%d"` and `f"{x:d}"`. A name right after a single
   backslash that makes no escape (a raw string: `r"\d"`, `r"src\alpha"`; an invalid escape:
-  `"\myapp"`) and a one-letter name that ends a format directive (`"%d"`, `"{:d}"`) are
-  reported, not changed. Escapes exist only in the strings of Python, TOML and JSON files
+  `"\myapp"`) and a one-letter name that ends a format directive (`"%d"`, `"{:d}"`, the date
+  formats of `strftime("%Y-%m-%d")`) or is a `struct` format character after a byte order or
+  count (`struct.pack(">I", n)`) are reported, not changed. Escapes exist only in the strings of Python, TOML and JSON files
   (notebooks `.ipynb` included) and in YAML's double-quoted strings: comments and other text
   files (Markdown, INI...) are plain text, where `a\n` changes like any other word.
 - `pytemplate.toml`: `app.name` and every package reference (`compile.modules`, `exclude`,

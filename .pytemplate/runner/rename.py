@@ -23,7 +23,8 @@ Which occurrences change (whole words only: `myapp_extra` and `my-app-2` never m
   TOML and JSON strings the prefix (`f`, `rb`...) and escapes (`\\n`, `\\x89`) are never the
   name, and a name right after a single backslash that makes no escape (`r"\\d"`,
   `"\\myapp"`) and a one-letter name that ends a format directive (`"%d"`, `"{:d}"`,
-  `f"{x:d}"`) are reported, not changed: an app may be called `f`, `n`, `r` or `d`. Comments
+  `f"{x:d}"`, strftime's `"%Y"`) or is a struct format character after a byte order or count
+  (`">I"`) are reported, not changed: an app may be called `f`, `n`, `r` or `d`. Comments
   and other text files (Markdown, YAML...) have no escapes.
 - When the old name is also the old package but the new name is not a package name
   (`alpha` -> `My-Game`, package `my_game`), each text occurrence is either the package or the
@@ -157,11 +158,15 @@ DATA_STRINGS = {
     **dict.fromkeys((".json", ".ipynb", ".jsonc", ".geojson", ".jsonl", ".ndjson"), "json"),
     **dict.fromkeys((".yaml", ".yml"), "yaml"),
 }
-# A format directive in a string ends in one letter: printf's `%d`, `%(k)-5s`, str.format's
+# A format directive in a string ends in one letter: printf's `%d`, `%(k)-5s` and strftime's
+# `%Y`, `%-m`, `%^a` (any letter after a `%`: time, datetime and logging use them), str.format's
 # `{:d}`, `{0:>4x}`, `{!r}` (the text before the letter, and the letters it can end in)
-_PRINTF_BEFORE = re.compile(r"%(?:\([^()\n]*\))?[#0 +\-]*(?:\*|\d+)?(?:\.(?:\*|\d*))?[hlL]?\Z")
+_PRINTF_BEFORE = re.compile(r"%(?:\([^()\n]*\))?[#0 +\-^]*(?:\*|\d+)?(?:\.(?:\*|\d*))?[hlL]?\Z")
 _FORMAT_BEFORE = re.compile(r"\{[^{}\n]*[:!][^{}\n]*\Z")
 _DIRECTIVE_LETTERS = frozenset("abcdeEfFgGinorsuxX")
+# struct's format strings: a byte order or a count first, then format characters (">I", "<2H I")
+_STRUCT_LETTERS = "xcbBhHiIlLqQnNefdspP"
+_STRUCT_BEFORE = re.compile(r"(?:'''|\"\"\"|['\"])(?:[<>=!@]|\d)[\d\s" + _STRUCT_LETTERS + r"?]*\Z")
 # ruff format --check --output-format concise: "path:1:2: unformatted: ..." (older: "Would reformat: path")
 _UNFORMATTED = re.compile(r"^(?:Would reformat: (?P<old>.+)|(?P<path>.+?):\d+:\d+: unformatted\b)", re.MULTILINE)
 # ruff check --output-format concise: "path:1:1: I001 [*] Import block is un-sorted or un-formatted"
@@ -635,15 +640,20 @@ def _escaped(text: str, start: int, floor: int, *, raw: bool, escapes: frozenset
 
 
 def _directive(text: str, start: int, end: int, floor: int) -> bool:
-    """Whether a one-letter occurrence in a string (which starts at `floor`) ends a format
-    directive: `"%d" % x`, `"{:d}".format(x)`, `"{!r}"`. Whether the string is ever formatted is
-    unknown: it is reported, never changed."""
-    if end - start != 1 or text[start] not in _DIRECTIVE_LETTERS:
+    """Whether a one-letter occurrence in a string (which starts at `floor`) is format syntax: a
+    printf or strftime directive (`"%d" % x`, `strftime("%Y-%m")`: renamed, the date format and a
+    struct format broke silently), a str.format one (`"{:d}".format(x)`, `"{!r}"`), or a struct
+    format character after a byte order or count (`struct.pack(">I", n)`). Whether the string is
+    ever formatted is unknown: it is reported, never changed."""
+    letter = text[start]
+    if end - start != 1 or not (letter.isascii() and letter.isalpha()):
         return False
     before = text[max(floor, start - 100) : start]  # a directive is short: never scan a whole docstring
     if _PRINTF_BEFORE.search(before):
         return True
-    return text[end : end + 1] in ("}", ":") and _FORMAT_BEFORE.search(before) is not None
+    if letter in _DIRECTIVE_LETTERS and text[end : end + 1] in ("}", ":") and _FORMAT_BEFORE.search(before) is not None:
+        return True
+    return letter in _STRUCT_LETTERS and _STRUCT_BEFORE.fullmatch(before) is not None
 
 
 def _string_quote(text: str, region: _Region) -> tuple[int, str] | None:

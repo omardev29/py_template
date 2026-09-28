@@ -373,6 +373,18 @@ def test_fstring_fields_as_one_token() -> None:
         ("d", 'x = "{:d} {0:,d}".format(y)\n', 'x = "{:d} {0:,d}".format(y)\n', 1),
         ("r", 'x = "{!r}".format(y)\n', 'x = "{!r}".format(y)\n', 1),
         ("d", 'x = "d: {d}"\n', 'x = "tool: {tool}"\n', 0),  # not a directive
+        # strftime's directives (time, datetime, logging's datefmt), glibc's flags too
+        ("Y", 'x = time.strftime("%Y-%m-%d %H:%M:%S")\n', 'x = time.strftime("%Y-%m-%d %H:%M:%S")\n', 1),
+        ("m", 'x = time.strftime("%Y-%m-%d %H:%M:%S")\n', 'x = time.strftime("%Y-%m-%d %H:%M:%S")\n', 1),
+        ("H", 'x = time.strftime("%Y-%m-%d %H:%M:%S")\n', 'x = time.strftime("%Y-%m-%d %H:%M:%S")\n', 1),
+        ("I", 'x = "{:%I %p}".format(t)\n', 'x = "{:%I %p}".format(t)\n', 1),
+        ("a", 'x = t.strftime("%-e %^a")\n', 'x = t.strftime("%-e %^a")\n', 1),
+        # struct's format characters after a byte order or a count
+        ("I", 'x = struct.pack(">I", 5)\n', 'x = struct.pack(">I", 5)\n', 1),
+        ("d", 'x = struct.unpack(b"!d", y)\n', 'x = struct.unpack(b"!d", y)\n', 1),
+        ("H", 'x = struct.unpack("<2 H", y)\n', 'x = struct.unpack("<2 H", y)\n', 1),
+        ("I", 'x = "I am I"\n', 'x = "tool am tool"\n', 0),  # prose: the name
+        ("i", 'x = "hi i"\n', 'x = "hi tool"\n', 0),  # no byte order first: the name
     ],
 )
 @pytest.mark.filterwarnings("ignore::SyntaxWarning", "ignore::DeprecationWarning")  # "\m" is an invalid escape on purpose (3.11: a DeprecationWarning)
@@ -444,6 +456,16 @@ def test_names_that_are_string_prefixes_or_escapes_keep_the_code_intact(tmp_path
         if rel_path.endswith(".py"):
             compile(data, rel_path, "exec")
             assert data == expected[rel_path], rel_path
+
+
+@pytest.mark.parametrize("new", ["q", "tool"])
+def test_the_png_encoder_survives_a_rename_from_i(tmp_path: Path, new: str) -> None:
+    """The flet skeleton's PNG encoder packs its chunk lengths with struct.pack(">I", ...): for an
+    app named I it became ">q" (8-byte lengths, a corrupt PNG) or ">tool" (struct.error)."""
+    _write_project(tmp_path, "flet", "I")
+    _rename(tmp_path, "I", new)
+    fractal = "src/tool/core/fractal.py" if new == "tool" else f"src/{new}/core/fractal.py"
+    assert _tree(tmp_path)[fractal] == presets.skeleton("flet", new)[fractal]
 
 
 def test_the_png_signature_survives_a_rename_from_n(tmp_path: Path) -> None:

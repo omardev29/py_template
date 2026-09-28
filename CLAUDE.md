@@ -1216,8 +1216,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     YAML's `"hello\n"` into `\b`); comments and other text files (Markdown, INI, YAML's plain and
     single-quoted scalars) have no escapes: `a\n` there changes like any word (a JSON fixture's
     `"a\n"` once became `"a\tool"`). A one-letter occurrence that ends a format directive in a string (`"%d"`,
-    `"%(k)-s"`, `"{:d}"`, `"{0:,d}"`, `"{!r}"`: `_directive`) is kept and reported too (whether
-    the string is ever formatted is unknown). Names of one or two letters are legal, and the
+    `"%(k)-s"`, `"{:d}"`, `"{0:,d}"`, `"{!r}"`, and any letter after a `%`: strftime's `"%Y"`,
+    `"%-m"`, `"%^a"`, which became `"%Tool"`; `_directive`) or is a struct format character after
+    a byte order or count (`">I"`, `"<2H"`: `_STRUCT_BEFORE`; the flet skeleton's PNG encoder
+    packed `">q"` chunk lengths for an app named I renamed to q; a bare `"I"` stays the name) is
+    kept and reported too (whether the string is ever formatted is unknown). Names of one or two letters are legal, and the
     flet skeleton's PNG signature `b"\x89PNG\r\n..."` once changed silently for `r` and `n`.
   - Text (strings, comments, other files): every occurrence except `x.pkg`, a path segment
     right after the package itself (`src/pkg/pkg`, `src\pkg\pkg`: a submodule) and a file named
