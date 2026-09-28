@@ -383,9 +383,10 @@ def lock_names_lazyvim(config: Path) -> bool:
     return isinstance(data, dict) and "LazyVim" in data
 
 
-def load_lazyvim_json(path: Path) -> dict[str, Any]:
+def load_lazyvim_json(path: Path, raw: bytes | None = None) -> dict[str, Any]:
+    """lazyvim.json's object, from `raw` when the caller already read the file."""
     try:
-        data = json.loads(path.read_bytes().decode("utf-8-sig"))
+        data = json.loads((path.read_bytes() if raw is None else raw).decode("utf-8-sig"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise PytError(f"{path}: cannot read it as JSON ({e})") from None
     if not isinstance(data, dict):
@@ -434,8 +435,14 @@ def enable_extras(
     file is replaced whole (project.write_whole: a link stays a link); a config it may not write
     (a Nix store, another user's file) is a PytError that leaves no backup behind.
     """
-    raw = path.read_bytes()
-    data = load_lazyvim_json(path)
+    try:
+        raw = path.read_bytes()  # the backup's bytes, read once
+    except OSError as e:  # another user's 0600 file, a link to a folder it may not enter
+        names = ", ".join(short_extra(x) for x in wanted)
+        raise PytError(
+            f"cannot read {e.filename or path}: {e.strerror or e}. Enable the extras by hand (:LazyExtras, or {path}): {names}", 3
+        ) from None
+    data = load_lazyvim_json(path, raw)
     added = merge_extras(data, wanted)
     if not added or dry_run:
         return added, None

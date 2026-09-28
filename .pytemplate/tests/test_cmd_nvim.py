@@ -225,6 +225,31 @@ def test_extras_in_a_config_that_cannot_be_written(tmp_path: Path, monkeypatch: 
     assert sorted(p.name for p in tmp_path.iterdir()) == ["lazyvim.json"]
 
 
+def test_extras_in_a_config_that_cannot_be_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A lazyvim.json that exists but cannot be read (another user's 0600 file, a link into a
+    # folder the user may not enter) ended `nvim extras` in an internal-error traceback (A9-07):
+    # one error, exit 3, naming the file and the extras to enable by hand; nothing written
+    config = tmp_path / "c"
+    config.mkdir()
+    path = config / "lazyvim.json"
+    path.write_text(FRESH_LAZYVIM_JSON, encoding="utf-8", newline="\n")
+    real_read_bytes = Path.read_bytes
+
+    def denied(self: Path) -> bytes:
+        if self.name == "lazyvim.json":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", denied)
+    nv = cmd_nvim.Nvim("nvim", (0, 12, 5), config, tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    with pytest.raises(PytError, match=r"cannot read .*lazyvim\.json: Permission denied\. Enable the extras by hand .*lang\.python") as e:
+        cmd_nvim.cmd_extras(nv)
+    assert e.value.code == 3
+    assert sorted(p.name for p in config.iterdir()) == ["lazyvim.json"]
+    monkeypatch.setattr(Path, "read_bytes", real_read_bytes)
+    assert path.read_text(encoding="utf-8") == FRESH_LAZYVIM_JSON
+
+
 def test_extras_keep_a_linked_lazyvim_json_a_link(tmp_path: Path) -> None:
     # dotfiles managers link lazyvim.json into a repository: the file behind the link changes
     if sys.platform == "win32":
