@@ -119,9 +119,11 @@ function Get-Entry([string] $Dir) {
 
 # Whether another user owns this runner (POSIX: anyone may create /tmp/.pytemplate/pyt.py; on
 # Windows, whose owners are not read here, a drive root, where any user may create folders).
+# Its folder counts too, where the runner's package is imported from: a hard link keeps the
+# owner of the file it links (on macOS any user may link a pyt.py of yours into a folder of theirs).
 function Test-Foreign([string] $Entry, [bool] $Top) {
     if ($onWindows) { return $Top }
-    & /bin/sh -c 'set -f; IFS=; [ -O $1 ]' sh $Entry
+    & /bin/sh -c 'set -f; IFS=; [ -O "${1%/*}" ] && [ -O "$1" ]' sh $Entry
     return $LASTEXITCODE -ne 0
 }
 
@@ -184,7 +186,7 @@ if (-not $entry) {
     }
     if ($other) {
         $own = [IO.Path]::GetFileNameWithoutExtension($other) + '.ps1'
-        [Console]::Error.WriteLine("pyt: $other is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run $([IO.Path]::Combine([IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($other)), $own)) yourself.")
+        [Console]::Error.WriteLine("pyt: $other is not yours (another user owns it or its folder, or it is at a drive root): not run. If you trust it, run $([IO.Path]::Combine([IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($other)), $own)) yourself.")
         exit 2
     }
     if (-not $root) {

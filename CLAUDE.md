@@ -169,12 +169,16 @@ implement the same contract: change them together.
    before the launchers were renamed holds `.pytemplate/deploy.py` instead: that is its runner
    (a folder with both runs `pyt.py`; `pyt` `_pt_entry_in`, `pyt.ps1` `Get-Entry`, `pyt.cmd`
    `PT_ENTRY`). A walked-up root
-   must be the user's: on POSIX its `.pytemplate/pyt.py` passes `test -O` (anyone may create
-   `/tmp/.pytemplate/pyt.py`, and it ran as the caller); on Windows, whose owners are not read
+   must be the user's: on POSIX its `.pytemplate/pyt.py` AND the `.pytemplate` folder pass `test
+   -O` (anyone may create `/tmp/.pytemplate/pyt.py`, and it ran as the caller; a hard link keeps
+   the owner of the file it links, and on macOS any user may link a `pyt.py` of yours, the
+   installed template's, into a `.pytemplate` of theirs next to a `runner/` of theirs, which
+   `pyt.py` imports from its own folder); on Windows, whose owners are not read
    (an Administrators-owned checkout would fail), a drive root is never taken. Otherwise exit 2
-   naming it (`pyt` `_pt_foreign`, `pyt.ps1` through `/bin/sh -c '[ -O $1 ]'`, `pyt.cmd`
-   stops before the drive root;
+   naming it (`pyt` `_pt_foreign`, `pyt.ps1` `Test-Foreign` through `/bin/sh -c '[ -O ... ]'`,
+   `pyt.cmd` stops before the drive root;
    `test_launcher_sh.test_a_launcher_outside_a_project_never_runs_another_users_one`,
+   `test_a_link_to_your_own_pyt_py_in_another_users_folder_is_never_run`,
    `test_the_walk_up_never_takes_a_drive_root_on_windows`).
    No project found: the installed template of `./pyt install` (section 5.9), where
    `cmd_install.snapshot_dir` puts it: `%LOCALAPPDATA%\pytemplate\template` on Windows (else

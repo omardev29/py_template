@@ -807,6 +807,39 @@ def test_the_installed_template_of_another_user_is_never_run(tmp_path: Path) -> 
         assert r.returncode == 2 and "is not yours" in r.stderr and "PWNED" not in r.stdout + r.stderr, (shell, r.stdout, r.stderr)
 
 
+@pytest.mark.skipif(sys.platform == "win32" or not hasattr(os, "geteuid") or os.geteuid() != 0, reason="needs root to make files another user owns")
+@pytest.mark.parametrize("launcher", ["pyt", "pyt.ps1"])
+def test_a_link_to_your_own_pyt_py_in_another_users_folder_is_never_run(launcher: str, tmp_path: Path) -> None:
+    """The ownership rule read only .pytemplate/pyt.py, and a hard link keeps the owner of the
+    file it links: on macOS (no hard-link protection) any user may link a pyt.py of yours (the
+    installed template's, at a known path) into a .pytemplate of theirs next to a runner/ of
+    theirs, which pyt.py then imports, as you, wherever you type pyt below it (/tmp,
+    /Users/Shared). The folder must be yours too. Here root links (Linux protects hard links)."""
+    import pwd
+
+    nobody = pwd.getpwnam("nobody")
+    mine = tmp_path / "mine" / ".pytemplate"
+    mine.mkdir(parents=True)
+    shutil.copyfile(ROOT / ".pytemplate" / "pyt.py", mine / "pyt.py")
+    theirs = tmp_path / "shared" / ".pytemplate"
+    (theirs / "runner").mkdir(parents=True)
+    os.link(mine / "pyt.py", theirs / "pyt.py")  # owned by the caller, like the file it links
+    (theirs / "runner" / "__init__.py").write_text("print('PWNED')\n", encoding="utf-8")
+    (theirs / "runner" / "cli.py").write_text("def main(argv, entry=False):\n    print('PWNED', argv)\n    return 0\n", encoding="utf-8")
+    for path in (theirs.parent, theirs, theirs / "runner", theirs / "runner" / "__init__.py", theirs / "runner" / "cli.py"):
+        os.chown(path, nobody.pw_uid, nobody.pw_gid)
+    work = theirs.parent / "work"
+    work.mkdir()
+    (tmp_path / "bin").mkdir()
+    shutil.copyfile(ROOT / launcher, tmp_path / "bin" / launcher)
+    if launcher == "pyt":
+        argv: list[str | Path] = ["/bin/sh", tmp_path / "bin" / "pyt", "help"]
+    else:
+        argv = [_pwsh(), "-NoProfile", "-NonInteractive", "-File", tmp_path / "bin" / "pyt.ps1", "help"]
+    run = Run(argv, work, _clean_env(**_nothing_installed(tmp_path)))
+    assert run.rc == 2 and "is not yours" in run.err and "PWNED" not in run.out + run.err, run.out + run.err
+
+
 def _old_project(dest: Path) -> Path:
     """A project made before the launchers were renamed: its runner is .pytemplate/deploy.py."""
     project = _copy_project(dest)

@@ -210,7 +210,10 @@ _pt_from_launcher() {
 # $1 = a folder holding .pytemplate/$_pt_entry, found by walking up from $PWD
 # (or the installed template). Its code is not run when another user owns it:
 # anyone may create /tmp/.pytemplate/pyt.py (on Windows, whose owners are not
-# read here: a drive root, where any user may create folders).
+# read here: a drive root, where any user may create folders). The folder
+# .pytemplate counts too, where the runner's package is imported from: a hard
+# link keeps the owner of the file it links, and on macOS any user may link a
+# pyt.py of yours into a .pytemplate of theirs, next to a runner of theirs.
 _pt_foreign() {
     if [ -n "$_pt_win" ]; then
         case $1 in
@@ -218,7 +221,7 @@ _pt_foreign() {
         esac
         return 1
     fi
-    if [ -O "${1%/}/.pytemplate/$_pt_entry" ]; then
+    if [ -O "${1%/}/.pytemplate" ] && [ -O "${1%/}/.pytemplate/$_pt_entry" ]; then
         return 1
     fi
     return 0
@@ -499,7 +502,7 @@ EOF
 _pt_rc=
 _pt_uv=
 if [ -n "$_pt_other" ]; then
-    printf '%s\n' "pyt: ${_pt_other%/}/.pytemplate/$_pt_entry is not yours (another user owns it, or it is at a drive root): not run. If you trust it, run ${_pt_other%/}/${_pt_entry%.py} yourself." >&2
+    printf '%s\n' "pyt: ${_pt_other%/}/.pytemplate/$_pt_entry is not yours (another user owns it or its folder, or it is at a drive root): not run. If you trust it, run ${_pt_other%/}/${_pt_entry%.py} yourself." >&2
     _pt_rc=2
 elif [ -z "$_pt_root" ]; then
     printf '%s\n' "pyt: no .pytemplate/pyt.py next to this launcher, in $_pt_pwd or in any parent directory." \
