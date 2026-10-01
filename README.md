@@ -1607,7 +1607,10 @@ read the working tree, so they can stop a commit that touches none of their file
 only deletes files is checked too).
 
 - Skip it once: `git commit --no-verify`. Remove it: `./pyt hooks uninstall`, and set
-  `pre_commit = false` (then `./pyt apply` removes it too). Its state: `./pyt hooks`.
+  `pre_commit = false` (then `./pyt apply` removes it too). Its state: `./pyt hooks`, which
+  also says when git skips the hook because it lost its executable bit (a copy or a backup tool
+  that drops modes: git then only prints a hint); `./pyt hooks install`, `setup` and `apply` give
+  it back.
 - An existing hook of yours (or a symlink) is never overwritten, even one whose comments name
   pytemplate's hook (only the file `./pyt hooks install` writes is pytemplate's): `./pyt hooks install --force`
   keeps it as `pre-commit.local` and runs it first (a shell script still sees its own name,

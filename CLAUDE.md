@@ -1204,7 +1204,15 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   project's, `cd <prefix>` from the top (`hooks.run`: typed at the top, `./pyt render` and `git
   add .vscode/tasks.json` failed; `test_hooks.test_a_failed_check_says_where_its_hints_run`).
   `shellcheck -s sh`-clean (tested when installed). Any change to
-  `hooks.hook_script` makes installed hooks "outdated": apply/setup rewrite them.
+  `hooks.hook_script` makes installed hooks "outdated": apply/setup rewrite them. git runs no
+  hook without its x bit (it only prints a hint, and the commit goes through unchecked: a copy,
+  an archive or a backup tool that drops modes): status and doctor say so (`hooks.git_skips`,
+  `active_skipped`: POSIX only, git for Windows' access() ignores X_OK; never husky's
+  `.husky/pre-commit`, which husky runs with sh), install, setup and apply give pytemplate's own
+  hook its x bit back, and a hook they never change (the user's, another project's chain,
+  core.hooksPath's) is named with `chmod +x`
+  (`test_hooks.test_a_hook_git_skips_for_its_missing_x_bit_is_said_and_given_it_back`,
+  `test_apply.test_apply_gives_pytemplates_hook_its_x_bit_back`: all said "[ok] installed").
 - Never overwritten: a hook `hooks.hook_script` did not write, or any symlink (writing through a
   dangling link created a file in the work tree). pytemplate's hook is one that starts with the
   `#!/bin/sh` line and `hooks.HEADER` (`./deploy hooks install` in it before the launchers were

@@ -1992,6 +1992,33 @@ def test_apply_leaves_pytemplates_hook_in_a_tracked_linked_folder_alone(tmp_path
 
 
 @needs_git
+@pytest.mark.skipif(sys.platform == "win32", reason="Git's sh reads a file's first bytes as its x bit there (#!: the hook script's own line)")
+def test_apply_gives_pytemplates_hook_its_x_bit_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """git skips a hook without its x bit and every commit goes unchecked: apply answered
+    "already installed" and left the mode as it was. Its --dry-run says what it does."""
+    project, _ = _project(tmp_path, monkeypatch)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "no-global-gitconfig"))  # a core.hooksPath of the user's would win
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    _git(project.root, "init", "-q")
+    hook = project.root / ".git" / "hooks" / "pre-commit"
+
+    def row(dry: bool) -> str:
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        capsys.readouterr()
+        assert _run(project) == 0
+        out = capsys.readouterr().err
+        return next(line for line in out.splitlines() if line.startswith("  git hook ")).split(None, 2)[2]
+
+    assert row(False) == "installed" and os.access(hook, os.X_OK)
+    hook.chmod(0o644)
+    assert row(True) == "would make the pre-commit hook executable again (git skips it: .git/hooks/pre-commit is not executable)"
+    assert not os.access(hook, os.X_OK)
+    assert row(False) == "made executable again (git skipped it)" and os.access(hook, os.X_OK)
+    assert row(False) == "already installed"
+
+
+@needs_git
 def test_every_hook_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """What apply does, and what its --dry-run says, for each state of the hooks folder."""
     project, _ = _project(tmp_path, monkeypatch)
@@ -2022,6 +2049,8 @@ def test_every_hook_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsy
         if content is not None:
             hook.parent.mkdir(parents=True, exist_ok=True)
             hook.write_text(content, encoding="utf-8")
+            if sys.platform != "win32":
+                hook.chmod(0o755)  # as install writes it, and as git runs a hook (without: git skips it)
         assert run(True).startswith(planned), (pre_commit, content)
         assert hook.exists() == (content is not None)  # --dry-run: untouched
         assert run(False).startswith(done), (pre_commit, content)
@@ -2035,6 +2064,11 @@ def test_every_hook_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsy
     # that folder's hook already runs the checks: said so, not "nothing installed"
     (project.root / ".githooks").mkdir()
     (project.root / ".githooks" / "pre-commit").write_text("#!/bin/sh\nsh ./pyt hooks run || exit $?\n", encoding="utf-8")
+    if sys.platform != "win32":
+        os.chmod(project.root / ".githooks" / "pre-commit", 0o644)  # git skips it: said so
+        skipped = ", but git skips it: .githooks/pre-commit is not executable (chmod +x .githooks/pre-commit)"
+        assert run(True) == run(False) == f"core.hooksPath is set: .githooks/pre-commit runs ./pyt hooks run{skipped}"
+        os.chmod(project.root / ".githooks" / "pre-commit", 0o755)
     assert run(True) == run(False) == "core.hooksPath is set: .githooks/pre-commit runs ./pyt hooks run"
 
 

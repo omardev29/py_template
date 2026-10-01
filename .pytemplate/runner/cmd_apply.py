@@ -753,10 +753,17 @@ def _left_alone(state: str, repo: hooks.Repo) -> str | None:
     if state == "foreign":
         return f"another tool's hook: left alone ({hooks.chain_advice(repo)})"
     if state == "calls":
-        return "a hook that runs ./pyt hooks run: left alone"
+        return "a hook that runs ./pyt hooks run: left alone" + _skipped_note(repo)
     if state == "other":
         return f"another project's hook of this repository: left alone ({hooks.chain_advice(repo)})"
     return None
+
+
+def _skipped_note(repo: hooks.Repo) -> str:
+    """", but git skips it ..." when git does not run the hook that runs the checks (no x bit:
+    hooks.active_skipped), else ""."""
+    skipped = hooks.active_skipped(repo)
+    return f", but git skips it: {skipped[0]} ({skipped[1]})" if skipped is not None else ""
 
 
 def _hooks_path_summary(repo: hooks.Repo) -> str:
@@ -764,7 +771,7 @@ def _hooks_path_summary(repo: hooks.Repo) -> str:
     nothing is installed; does that hook run the checks?"""
     runner = hooks.hooks_path_runner(repo)
     if runner is not None:
-        return f"{hooks.elsewhere(repo)}: {runner} runs ./pyt hooks run"
+        return f"{hooks.elsewhere(repo)}: {runner} runs ./pyt hooks run{_skipped_note(repo)}"
     return f"{hooks.elsewhere(repo)}: nothing installed (./pyt hooks status says what to add)"
 
 
@@ -780,6 +787,7 @@ def _apply_hook(cfg: Config) -> str:
         return f"not checked: {_unchecked(repo)} (see above)"
     before, copy_before = hooks.hook_state(repo), hooks.own_local(repo)
     ours = before in OURS or (copy_before and before == "missing")  # what hooks.uninstall removes
+    idle_before = before == "installed" and not repo.custom_hooks_path and hooks.active_skipped(repo) is not None
     if cfg.hooks.pre_commit:
         hooks.ensure_installed(cfg, ROOT)
     elif ours:
@@ -797,10 +805,12 @@ def _apply_hook(cfg: Config) -> str:
         return ("updated" if before in ("outdated", "installed") else "installed") + dropped
     if ours and not cfg.hooks.pre_commit and after not in OURS and not copy_after:
         return "removed (hooks.pre_commit = false)"
+    if after == "installed" and idle_before:  # hooks.install gives its x bit back
+        return "made executable again (git skipped it)" if hooks.active_skipped(repo) is None else "not executable (see above)"
     if repo.custom_hooks_path and cfg.hooks.pre_commit:
         return _hooks_path_summary(repo)
     if after == "chained":
-        return _CHAINED
+        return _CHAINED + _skipped_note(repo)
     left = _left_alone(after, repo)
     if left is not None:
         return left
@@ -829,10 +839,13 @@ def _hook_plan(cfg: Config) -> str:
     if repo.custom_hooks_path:
         return _hooks_path_summary(repo)
     if state == "chained":
-        return _CHAINED
+        return _CHAINED + _skipped_note(repo)
     left = _left_alone(state, repo)
     if left is not None:
         return left
+    skipped = hooks.active_skipped(repo) if state == "installed" and not copy else None
+    if skipped is not None:
+        return f"would make the pre-commit hook executable again (git skips it: {skipped[0]})"
     if state == "installed":
         return "would remove pre-commit.local, a copy of this project's hook (the checks run twice)" if copy else "installed"
     if state == "missing" and not copy and repo.ignored():

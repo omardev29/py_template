@@ -828,6 +828,12 @@ def hook_state(repo: Repo) -> str:
     return "chained" if state == "other" and own_local(repo) else state
 
 
+def active_skipped(repo: Repo) -> tuple[str, str] | None:
+    """git_skips() of the hook git runs: core.hooksPath's (or a linked folder's) pre-commit
+    script, else the default folder's pre-commit."""
+    return git_skips(_hooks_path_file(repo) if repo.custom_hooks_path else repo.default_dir / HOOK, repo)
+
+
 def hooks_path_runner(repo: Repo) -> str | None:
     """With core.hooksPath: the hook git runs there (as shown to the user) when it already runs
     this project's checks, else None."""
@@ -863,6 +869,21 @@ def _not_run(hook: Path, shown: str) -> str | None:
     if os.access(hook, os.X_OK):
         return None
     return f"{shown} is not executable, so neither git nor this hook runs it: chmod +x {shown} to run it first"
+
+
+def git_skips(hook: Path, repo: Repo) -> tuple[str, str] | None:
+    """Why git does not run `hook`, the pre-commit of the folder git runs hooks from, and the fix,
+    or None. git runs no hook without its x bit: it only prints a hint, and the commit goes
+    through unchecked (a copy, an archive or a backup tool that drops modes). status and doctor
+    said "[ok] installed" and install, setup and apply "already installed", while every commit
+    went unchecked. Never on Windows, where git's access() ignores X_OK (compat/mingw.c) and runs
+    the hook whatever its mode; nor for husky's .husky/pre-commit, which husky runs through sh."""
+    if not (_same(hook.parent, repo.hooks_dir) or _same(hook.parent, repo.default_dir)):
+        return None  # husky 9's .husky/pre-commit (_hooks_path_file)
+    if IS_WINDOWS or not os.path.lexists(hook) or os.access(hook, os.X_OK):
+        return None
+    shown = _show(hook, repo)
+    return f"{shown} is not executable", f"chmod +x {shown}"
 
 
 def _hooks_path_file(repo: Repo) -> Path:
@@ -952,6 +973,9 @@ def install(repo: Repo, *, force: bool = False) -> str:
     if repo.custom_hooks_path:
         hook = _hooks_path_file(repo)
         state = classify(hook, repo)
+        skipped = git_skips(hook, repo) if state in ("calls", "installed") else None
+        if skipped is not None:  # pytemplate writes nothing in that folder: the fix is the user's
+            raise PytError(f"{_show(hook, repo)} runs ./pyt hooks run ({_elsewhere_short(repo)}), but git skips it: {skipped[0]}.\n  {skipped[1]}")
         if state in ("calls", "installed"):
             return f"{_show(hook, repo)} already runs ./pyt hooks run ({_elsewhere_short(repo)})"
         where = "a folder pytemplate never writes into" if repo.hooks_link else "not in the default folder"
@@ -967,19 +991,25 @@ def install(repo: Repo, *, force: bool = False) -> str:
     if state == "missing" and not force and repo.ignored():
         raise PytError(f"{_ignored_message(repo)} (or: ./pyt hooks install --force)")
     other = launcher_of(_read(target)) if state == "other" else None
+    skipped = git_skips(target, repo) if state in ("calls", "other") else None  # not pytemplate's file to change
     if other is not None and own_local(repo):
+        skip_note = f"\n  but git skips {_show(target, repo)}: {skipped[0]} ({skipped[1]})" if skipped is not None else ""
         if not _own_local_outdated(repo):
+            if skip_note:  # the other project's file: its fix is the user's
+                raise PytError(f"{_show(target, repo)} ({other}) would run this project's checks from {_show(local, repo)},{skip_note}")
             return f"{_show(target, repo)} ({other}) already runs this project's checks from {_show(local, repo)}"
         if not proc.DRY_RUN:  # the other project's hook runs it: brought up to date in place
             _write_hook(local, script)
         verb = "would be updated" if proc.DRY_RUN else "updated"
-        return f"pre-commit hook {verb}: {_show(local, repo)} -> sh {repo.launcher} hooks run (run first by {_show(target, repo)}, the hook of {other})"
+        return f"pre-commit hook {verb}: {_show(local, repo)} -> sh {repo.launcher} hooks run (run first by {_show(target, repo)}, the hook of {other}){skip_note}"
     # this project's own copy as pre-commit.local (its chain's first hook went away): with this
     # project's hook back in pre-commit, it would run the checks twice
     drop = state in ("missing", "outdated", "installed") and own_local(repo)
     moved = False
     if state in ("foreign", "calls", "other"):
         if state == "calls" and not force:
+            if skipped is not None:
+                raise PytError(f"{_show(target, repo)} runs ./pyt hooks run (not pytemplate's file: left alone), but git skips it: {skipped[0]}.\n  {skipped[1]}")
             return f"{_show(target, repo)} already runs ./pyt hooks run (not pytemplate's file: left alone)"
         if not force:
             if other is not None:
@@ -998,7 +1028,13 @@ def install(repo: Repo, *, force: bool = False) -> str:
             )
         moved = True
     elif state == "installed" and not drop:
-        return f"pre-commit hook already installed: {_show(target, repo)}"
+        skips = git_skips(target, repo)
+        if skips is None:
+            return f"pre-commit hook already installed: {_show(target, repo)}"
+        if proc.DRY_RUN:
+            return f"pre-commit hook would be made executable again: {_show(target, repo)} (git skips it: {skips[0]})"
+        target.chmod(0o755)  # the mode _write_hook gives it (POSIX only: git_skips)
+        return f"pre-commit hook made executable again: {_show(target, repo)} (git skipped it: {skips[0]})"
     dry = proc.DRY_RUN
     if not dry:
         repo.default_dir.mkdir(parents=True, exist_ok=True)
@@ -1071,6 +1107,9 @@ def _status_line(cfg: Config, repo: Repo) -> tuple[bool | None, str, str]:
         hook = _hooks_path_file(repo)
         state = classify(hook, repo)
         where = _show(hook, repo)
+        skipped = git_skips(hook, repo) if state in ("installed", "calls") else None
+        if skipped is not None:
+            return None, f"git pre-commit hook: {where} runs ./pyt hooks run ({_elsewhere_short(repo)}), but git skips it: {skipped[0]}", skipped[1]
         if state in ("installed", "calls"):
             return True, f"git pre-commit hook: {where} runs ./pyt hooks run ({_elsewhere_short(repo)})", ""
         return None, f"git pre-commit hook: {elsewhere(repo, value=True)}, pytemplate's checks are not in {where}", _hooks_path_hint(repo)
@@ -1078,20 +1117,27 @@ def _status_line(cfg: Config, repo: Repo) -> tuple[bool | None, str, str]:
     local = repo.default_dir / LOCAL
     state = classify(target, repo)
     chained = local.is_file()
+    skipped = git_skips(target, repo) if state in ("installed", "calls", "other") else None
     if state == "installed" and own_local(repo):
         return None, f"git pre-commit hook installed, but {LOCAL} is a copy of it: the checks run twice", "./pyt hooks install"
+    if state == "installed" and skipped is not None:
+        return None, f"git pre-commit hook installed, but git skips it: {skipped[0]}", f"./pyt hooks install  (or {skipped[1]})"
     if state == "installed":
         idle = _not_run(local, _show(local, repo)) if chained else None
         extra = f" ({idle})" if idle else f" (runs {LOCAL} first)" if chained else ""
         return True, f"git pre-commit hook installed: {_show(target, repo)} -> sh {repo.launcher} hooks run{extra}", ""
     if state == "outdated":
         return None, "git pre-commit hook outdated (another launcher path or template version)", "./pyt hooks install"
+    if state == "calls" and skipped is not None:
+        return None, f"git pre-commit hook: {_show(target, repo)} runs ./pyt hooks run, but git skips it: {skipped[0]}", skipped[1]
     if state == "calls":
         return True, f"git pre-commit hook: {_show(target, repo)} runs ./pyt hooks run", ""
     other = launcher_of(_read(target)) if state == "other" else None
     if other is not None and own_local(repo):
         if _own_local_outdated(repo):
             return None, f"git pre-commit hook outdated: {LOCAL}, this project's hook that {_show(target, repo)} ({other}) runs first", "./pyt hooks install"
+        if skipped is not None:
+            return None, f"git pre-commit hook: {_show(target, repo)} ({other}) would run this project's checks ({LOCAL}), but git skips it: {skipped[0]}", skipped[1]
         return True, f"git pre-commit hook: {_show(target, repo)} runs this project's checks ({LOCAL}), then those of {other}", ""
     if repo.ignored():  # missing, foreign or another project's: none of ours, and this is why
         return None, f"git pre-commit hook not installed: the repository at {repo.top} ignores this project", (
@@ -1148,17 +1194,29 @@ def ensure_installed(cfg: Config, project: Path = ROOT) -> None:
         return
     try:
         if repo.custom_hooks_path:
-            if classify(_hooks_path_file(repo), repo) not in ("installed", "calls"):
+            hook = _hooks_path_file(repo)
+            state = classify(hook, repo)
+            skipped = git_skips(hook, repo) if state in ("installed", "calls") else None
+            if skipped is not None:  # a folder pytemplate never writes into: the fix is the user's
+                ui.warn(f"git pre-commit hook: {_show(hook, repo)} runs ./pyt hooks run, but git skips it: {skipped[0]} ({skipped[1]})")
+            elif state not in ("installed", "calls"):
                 ui.info(f"git pre-commit hook: {elsewhere(repo)}, not installed (./pyt hooks status says what to add)")
             return
         target = repo.default_dir / HOOK
         state = classify(target, repo)
         own_copy = own_local(repo)
+        skipped = git_skips(target, repo) if state in ("installed", "calls", "other") else None
         if state in ("missing", "foreign", "other") and not own_copy and repo.ignored():  # nothing of ours there: why
             ui.info(f"git pre-commit hook: not installed: {_ignored_message(repo)} (or: ./pyt hooks install --force)")
-        elif state in ("missing", "outdated") or (state == "installed" and own_copy) or (state == "other" and own_copy and _own_local_outdated(repo)):
+        elif (
+            state in ("missing", "outdated")
+            or (state == "installed" and (own_copy or skipped is not None))  # a copy to drop, or the x bit to give back
+            or (state == "other" and own_copy and _own_local_outdated(repo))
+        ):
             lines = install(repo).splitlines()
             ui.ok("\n".join(lines if own_copy else lines[:1]))  # the removed copy is news
+        elif skipped is not None and (state == "calls" or own_copy):  # not pytemplate's file to change
+            ui.warn(f"git pre-commit hook: {_show(target, repo)} would run this project's checks, but git skips it: {skipped[0]} ({skipped[1]})")
         elif state == "foreign":
             ui.info(f"git pre-commit hook: another tool's hook is installed, left alone ({chain_advice(repo)})")
         elif state == "other" and not own_copy:

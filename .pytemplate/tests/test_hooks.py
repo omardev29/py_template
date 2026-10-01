@@ -88,6 +88,13 @@ def find(project: Path, top: Path | None = None, environ: dict[str, str] | None 
     return hooks.find_repo(project, environ=environ or {}, cwd=top or project)
 
 
+def _executable(path: Path) -> None:
+    """A hook of the user's as git runs it: with its x bit (on Windows its #! line is the x bit
+    Git's sh reads). Without one git skips it, and status says so."""
+    if not IS_WINDOWS:
+        path.chmod(0o755)
+
+
 # --- the script ------------------------------------------------------------------------------------
 
 
@@ -333,6 +340,7 @@ def test_a_hook_that_already_calls_hooks_run(tmp_path: Path) -> None:
     repo = find(project)
     target = repo.default_dir / hooks.HOOK
     target.write_text("#!/bin/sh\nnpm test || exit 1\nsh ./pyt hooks run\n", encoding="utf-8")
+    _executable(target)
     assert hooks.classify(target, repo) == "calls"
     assert "already runs" in hooks.install(repo)
     assert "left alone" in hooks.uninstall(repo)
@@ -467,6 +475,7 @@ def test_symlinked_hook_is_never_written_through(tmp_path: Path, capsys: pytest.
     (top / "tools" / "hooks").mkdir(parents=True)
     shared = top / "tools" / "hooks" / "pre-commit"
     shared.write_text(f"#!/bin/sh\n# {hooks.MARKER}\nexec sh ./pyt hooks run\n", encoding="utf-8")
+    _executable(shared)
     before = shared.read_bytes()
     assert hooks.classify(target, repo) == "calls"
     hooks.install(repo)
@@ -499,6 +508,7 @@ def test_core_hooks_path_is_respected(tmp_path: Path) -> None:
     assert passed is None and "core.hooksPath" in label and "sh ./proj/pyt hooks run" in hint
     (top / "hk").mkdir()
     (top / "hk" / hooks.HOOK).write_text("#!/bin/sh\nsh ./proj/pyt hooks run || exit $?\n", encoding="utf-8")
+    _executable(top / "hk" / hooks.HOOK)
     assert "already runs" in hooks.install(repo)
     assert hooks._status_line(make(), repo)[0] is True
     # core.hooksPath naming the default folder is not a custom one
@@ -561,6 +571,7 @@ def test_a_linked_hooks_folder_is_never_written_into(tmp_path: Path, capsys: pyt
     assert sorted(p.name for p in shared.iterdir()) == [hooks.HOOK] and (shared / hooks.HOOK).read_bytes() == team
     # the team's hook runs the checks: nothing more to add
     (shared / hooks.HOOK).write_bytes(team + hooks.run_line(repo).encode("ascii") + b"\n")
+    _executable(shared / hooks.HOOK)
     assert hooks._status_line(make(), repo)[0] is True
     assert "already runs" in hooks.install(repo)
 
@@ -611,6 +622,75 @@ def test_uninstall_leaves_the_hooks_a_linked_folder_tracks_alone(tmp_path: Path,
     message = hooks.uninstall(repo)
     assert "left alone" in message and "outside this repository" in message
     assert (outside / hooks.HOOK).read_bytes() == ours
+
+
+@needs_git
+@pytest.mark.skipif(IS_WINDOWS, reason="Git's sh reads a file's first bytes as its x bit there (#!: the hook script's own line)")
+def test_a_hook_git_skips_for_its_missing_x_bit_is_said_and_given_it_back(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """git runs no hook without its x bit (a copy, an archive or a backup tool that drops modes):
+    it only prints a hint, and every commit went unchecked, while status and doctor said "[ok]
+    installed" and install, setup and apply answered "already installed". pytemplate's own hook
+    gets its x bit back; a hook of the user's, or core.hooksPath's, is named with chmod +x."""
+    top, project = make_repo(tmp_path)
+    repo = find(project)
+    hooks.install(repo)
+    target = repo.default_dir / hooks.HOOK
+    target.chmod(0o644)
+    passed, label, hint = hooks._status_line(make(), repo)
+    assert passed is None and label == "git pre-commit hook installed, but git skips it: .git/hooks/pre-commit is not executable"
+    assert hint == "./pyt hooks install  (or chmod +x .git/hooks/pre-commit)"
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    assert "would be made executable again" in hooks.install(repo) and not os.access(target, os.X_OK)
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    assert "made executable again" in hooks.install(repo) and os.access(target, os.X_OK)
+    assert hooks._status_line(make(), repo)[0] is True and hooks.install(repo).startswith("pre-commit hook already installed")
+    target.chmod(0o644)
+    capsys.readouterr()
+    hooks.ensure_installed(make(), project)  # ./pyt setup and ./pyt apply
+    assert os.access(target, os.X_OK) and "made executable again" in capsys.readouterr().err
+    # a hook of the user's that runs the checks: said, never changed
+    target.write_text("#!/bin/sh\nsh ./pyt hooks run || exit $?\n", encoding="utf-8")
+    target.chmod(0o644)
+    passed, label, hint = hooks._status_line(make(), repo)
+    assert passed is None and "runs ./pyt hooks run, but git skips it" in label and hint == "chmod +x .git/hooks/pre-commit"
+    with pytest.raises(PytError, match="but git skips it"):
+        hooks.install(repo)
+    hooks.ensure_installed(make(), project)
+    assert "but git skips it" in capsys.readouterr().err and not os.access(target, os.X_OK)
+    # the hook of core.hooksPath: pytemplate writes nothing there
+    git(top, "config", "core.hooksPath", ".githooks")
+    (top / ".githooks").mkdir()
+    custom = top / ".githooks" / hooks.HOOK
+    custom.write_text("#!/bin/sh\nsh ./pyt hooks run || exit $?\n", encoding="utf-8")
+    custom.chmod(0o644)
+    repo = find(project)
+    passed, label, hint = hooks._status_line(make(), repo)
+    assert passed is None and "but git skips it" in label and hint == "chmod +x .githooks/pre-commit"
+    with pytest.raises(PytError, match="but git skips it"):
+        hooks.install(repo)
+    custom.chmod(0o755)
+    assert hooks._status_line(make(), repo)[0] is True
+
+
+def test_git_skips_a_hook_for_its_mode_only_where_git_reads_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """git for Windows' access() ignores X_OK (compat/mingw.c), so it runs a hook whatever its
+    mode: no "git skips it" there. Nor for husky's .husky/pre-commit, which husky runs with sh."""
+    folder = tmp_path / "hooks"
+    folder.mkdir()
+    repo = hooks.Repo(project=tmp_path, top=tmp_path, hooks_dir=folder, default_dir=folder, prefix="")
+    hook = folder / hooks.HOOK
+    hook.write_text("#!/bin/sh\nsh ./pyt hooks run\n", encoding="utf-8")
+    monkeypatch.setattr(hooks, "IS_WINDOWS", True)
+    assert hooks.git_skips(hook, repo) is None
+    monkeypatch.setattr(hooks, "IS_WINDOWS", False)
+    husky = tmp_path / hooks.HOOK  # next to the hooks folder, as .husky/pre-commit is to .husky/_
+    husky.write_text("sh ./pyt hooks run\n", encoding="utf-8")
+    assert hooks.git_skips(husky, repo) is None
+    if not IS_WINDOWS:
+        hook.chmod(0o644)
+        assert hooks.git_skips(hook, repo) == ("hooks/pre-commit is not executable", "chmod +x hooks/pre-commit")
+        hook.chmod(0o755)
+        assert hooks.git_skips(hook, repo) is None
 
 
 @needs_git
@@ -1105,6 +1185,7 @@ def test_calls_means_this_projects_launcher_on_a_live_line(tmp_path: Path, capsy
     ]
     for body in ours:
         shared.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        _executable(shared)
         assert hooks.classify(shared, ra) == "calls", body
         assert hooks._status_line(make(), ra)[0] is True, body
         assert "already runs" in hooks.install(ra)
