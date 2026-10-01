@@ -1907,7 +1907,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   empty entries (all parsed before the first dep runs; `tasks.split_words`: blanks separate,
   quotes group, a backslash is a plain character, as in the plugin's `:Pyt`: POSIX shlex
   passed `C:\data\in.txt` as `C:datain.txt`), `cwd` is a folder (not in a dry run),
-  `backend = "pypy"` in `backend.supported` (only where its environment is used). `vscode.scan`
+  `backend = "pypy"` in `backend.supported` (only where its environment is used: `uv = true` or
+  `{python}`), and the first word of every deps entry a task, a builtin or a retired command
+  (these two and the backend checked by `tasks._check_texts` too, before the first dep runs:
+  `tset all` or an unsupported backend stopped the task only after the deps before it;
+  `test_cli_core.test_a_deps_entry_or_backend_that_cannot_run_is_refused_before_any_dep_runs`). `vscode.scan`
   renders a task whose deps do not parse. `uv = false` on Windows: a bare program is looked up
   on the task's PATH with PATHEXT (`npm` -> `npm.cmd`; `proc.on_path`: never in the
   current folder, the caller's, which shutil.which searched first, so an `npm.cmd` in the folder

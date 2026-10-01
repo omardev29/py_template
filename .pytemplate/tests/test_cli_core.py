@@ -1451,6 +1451,41 @@ def test_an_unknown_placeholder_is_refused_before_any_dep_runs(rec: Recorder, ba
     assert rec.runs == [] and rec.dispatched == []  # neither gen nor check all ran
 
 
+@pytest.mark.parametrize(
+    ("task", "message"),
+    [
+        ("typo", r"task 'typo': deps entry 'tset all': unknown command: tset  \(./pyt help"),
+        ("inner-typo", r"task 'inner': deps entry 'chek': unknown command: chek"),  # a task the deps reach
+        ("old", r"task 'old': deps entry 'init script': init is no longer a ./pyt command"),
+        ("bench", r"backend 'pypy' is not in backend.supported"),  # uv = true runs in PyPy's environment
+        ("bench-python", r"backend 'pypy' is not in backend.supported"),  # {python} names its interpreter
+    ],
+)
+def test_a_deps_entry_or_backend_that_cannot_run_is_refused_before_any_dep_runs(rec: Recorder, task: str, message: str) -> None:
+    """A deps entry that names no command (`tset all`) or a task backend the project does not
+    support stopped the task only once the deps before it had run (`fmt --check`, `test all`:
+    minutes), like a placeholder typo did."""
+    cfg = make({"backend": {"supported": ["cpython", "mypyc"]}, "tasks": {
+        "typo": {"deps": ["fmt --check", "tset all"]},
+        "inner-typo": {"deps": ["fmt --check", "inner"]},
+        "inner": {"deps": ["chek"]},
+        "old": {"deps": ["fmt --check", "init script"]},
+        "bench": {"deps": ["fmt --check"], "cmd": ["python", "-c", "print('bench')"], "backend": "pypy"},
+        "bench-python": {"deps": ["fmt --check"], "cmd": ["{python}", "-c", "pass"], "uv": False, "backend": "pypy"},
+    }})  # fmt: skip
+    with pytest.raises(PytError, match=message) as e:
+        tasks.run_task(cfg, task, [], rec.dispatch)
+    assert e.value.code == 2
+    assert rec.runs == [] and rec.dispatched == []  # fmt --check never ran
+
+
+def test_a_task_on_an_unsupported_backend_runs_when_it_needs_no_environment(rec: Recorder) -> None:
+    """A uv = false task without {python} runs no interpreter of its backend: its deps and cmd run."""
+    cfg = make({"backend": {"supported": ["cpython"]}, "tasks": {"t": {"deps": ["fmt --check", "help"], "cmd": ["tool"], "uv": False, "backend": "pypy"}}})
+    assert tasks.run_task(cfg, "t", [], rec.dispatch) == 0
+    assert rec.dispatched == [["fmt", "--check"], ["help"]] and rec.runs == [["tool"]]
+
+
 @pytest.mark.parametrize("key", ["A=B", "", "1X", "A B", "A-B", chr(0xE9)])
 def test_task_env_names_are_validated(key: str) -> None:
     with pytest.raises(PytError, match=r"tasks\.t\.env'?: invalid environment variable name") as e:

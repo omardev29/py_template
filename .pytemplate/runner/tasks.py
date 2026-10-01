@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import string
 from collections.abc import Callable, Mapping
 
 from . import config, envs, proc, ui
@@ -109,17 +110,30 @@ def _dep_argv(name: str, dep: str) -> list[str]:
 
 
 def _check_texts(cfg: Config, name: str, seen: set[str]) -> None:
-    """The placeholders of `name` and of every task its deps reach, before anything runs: a typo
-    ({roots}) was reported only once all the deps had run, which can take minutes."""
+    """The placeholders of `name` and of every task its deps reach, the command each deps entry
+    names and the backend each of them runs on, before anything runs: a typo ({roots}, `tset
+    all`) or a backend = "pypy" the project does not support was reported only once the deps
+    before it had run, which can take minutes."""
+    from .cli import COMMANDS, INIT_REMOVED, INTERNAL  # lazily: cli runs this module's tasks
+
     seen.add(name)
     task = cfg.tasks[name]
     every = dict.fromkeys(config.TASK_PLACEHOLDERS, "")  # {python} is resolved when the task runs
-    for text in (*task.cmd, *task.env.values(), *([task.cwd] if task.cwd else [])):
+    texts = (*task.cmd, *task.env.values(), *([task.cwd] if task.cwd else []))
+    for text in texts:
         _format(name, text, every)
+    # the environment of the task's backend: uv = true runs in it, and {python} names its interpreter
+    if task.cmd and (task.uv or any(field == "python" for text in texts for _, field, _, _ in string.Formatter().parse(text))):
+        _task_env(cfg, task.backend or cfg.backend.active)
     for dep in task.deps:
         first = _dep_argv(name, dep)[0]
-        if first in cfg.tasks and first not in seen:
-            _check_texts(cfg, first, seen)
+        if first in cfg.tasks:
+            if first not in seen:
+                _check_texts(cfg, first, seen)
+        elif first == "init":  # what dispatch says once the deps before it have run
+            raise PytError(f"task '{name}': deps entry {dep!r}: {INIT_REMOVED}")
+        elif first not in COMMANDS and first not in INTERNAL and first not in config.RETIRED_COMMANDS:
+            raise PytError(f"task '{name}': deps entry {dep!r}: unknown command: {first}  (./pyt help lists the commands and tasks)")
 
 
 def _format(name: str, text: str, values: Mapping[str, str]) -> str:
