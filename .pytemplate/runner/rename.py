@@ -2542,6 +2542,7 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
         raise
     ui.ok(f"renamed '{old_name}' -> '{new_name}' (package src/{new_cfg.pkg}/)")
     ui.info("  Next: ./pyt test all, and review the changes with git diff")
-    if DIST.is_dir() and any(DIST.iterdir()):
-        ui.info(f"  dist/ still holds the artifacts built as '{old_name}' (./pyt clean removes dist/ and .build/)")
+    with contextlib.suppress(OSError):  # a dist/ this user may not list (`sudo ./pyt build`): no note, the rename is done
+        if DIST.is_dir() and any(DIST.iterdir()):
+            ui.info(f"  dist/ still holds the artifacts built as '{old_name}' (./pyt clean removes dist/ and .build/)")
     return 0

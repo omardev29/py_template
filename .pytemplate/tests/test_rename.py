@@ -2225,6 +2225,27 @@ def test_dry_run_predicts_the_lock_like_the_real_run(command_project: Path, monk
     assert "would re-lock" in lock_line("beta") and calls == []  # another project name: re-locked anyway
 
 
+def test_a_dist_folder_that_cannot_be_listed_never_fails_a_rename_that_is_done(command_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once the files were renamed, re-locked and rendered, the note about the old artifacts listed
+    dist/: one this user may not read (left by `sudo ./pyt build`) raised PermissionError, which
+    cli.main reports as "cannot write dist", exit 2, for a rename that was done (and a second
+    `./pyt rename` said "nothing to do"). The note is left out then."""
+    root = command_project
+    dist = root / "dist"
+    (dist / "alpha-cpython-exe").mkdir(parents=True)
+    monkeypatch.setattr(rename, "DIST", dist)
+    real = Path.iterdir
+
+    def iterdir(self: Path) -> Any:
+        if self == dist:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    assert rename.cmd_rename(_load(root), ["beta"]) == 0
+    assert (root / "src" / "beta").is_dir() and _load(root).app.name == "beta"
+
+
 def test_the_lock_forecast_reads_the_name_uv_lock_holds(command_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """The project name uv.lock holds decides, not the app's: after a hand edit of [project] name
     and a `./pyt lock`, uv.lock holds that name, so a case-only rename re-locks it (the dry run
