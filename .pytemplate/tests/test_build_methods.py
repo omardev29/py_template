@@ -1901,7 +1901,9 @@ def test_pyz_accepts_payload_files_older_than_1980(sandbox: Path, monkeypatch: p
 
 def _no_room_for(name: str, monkeypatch: pytest.MonkeyPatch, error: int = errno.EFBIG) -> None:
     """The copies of every file named `name` fail as a write past a file-size limit (`ulimit -f`)
-    or on a full disk does: shutil's copy loop raises the write's OSError, with no file name."""
+    or on a full disk does: shutil's copy loop raises the write's OSError, with no file name. On
+    Windows shutil.copy2 copies with _winapi.CopyFile2 (Python 3.12+) and never calls copyfile:
+    that one fails too (patched alone, every copy there succeeded and the tests failed)."""
     real = shutil.copyfile
 
     def copyfile(src: Any, dst: Any, *args: Any, **kwargs: Any) -> Any:
@@ -1910,6 +1912,16 @@ def _no_room_for(name: str, monkeypatch: pytest.MonkeyPatch, error: int = errno.
         return real(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(shutil, "copyfile", copyfile)
+    winapi = getattr(shutil, "_winapi", None)
+    if winapi is not None and hasattr(winapi, "CopyFile2"):
+        real2 = winapi.CopyFile2
+
+        def copy_file2(src: str, dst: str, *args: Any) -> Any:
+            if Path(dst).name == name:
+                raise OSError(error, os.strerror(error))
+            return real2(src, dst, *args)
+
+        monkeypatch.setattr(winapi, "CopyFile2", copy_file2)
 
 
 def _build_error(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], build: Any) -> tuple[int, str]:
