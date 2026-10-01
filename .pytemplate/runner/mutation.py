@@ -285,6 +285,9 @@ def changed_lines(root: Path, base: str, env: Mapping[str, str]) -> dict[str, se
     tree (uncommitted changes included), and every line of an untracked module. The options
     that shape the output are all given, whatever the user's git configuration says (hunks
     merged by diff.interHunkContext would count the lines between them as changed)."""
+    # A folder git cannot read at all (no repository, dubious ownership) is git's reason, exit 3:
+    # the check of `base` below fails there too, and told the user to fetch it
+    _git(root, env, "rev-parse", "--git-dir")
     if _git(root, env, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}", check=False).returncode != 0:
         raise PytError(f"selftest --mutation --diff: {base!r} names no commit here (fetch it first, e.g. git fetch origin main)")
     text = _git(

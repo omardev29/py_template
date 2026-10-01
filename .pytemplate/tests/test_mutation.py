@@ -255,6 +255,19 @@ def test_changed_lines_against_a_commit(tmp_path: Path) -> None:
 
 
 @needs_git
+def test_diff_in_a_folder_git_cannot_read_says_why(tmp_path: Path) -> None:
+    """--diff in a folder that is no repository (or one git refuses: dubious ownership) said the
+    BASE "names no commit here (fetch it first)", which cannot help (A10-06): git's own reason,
+    exit 3, as the run without --diff gives it."""
+    root = _write(tmp_path / "p", {f"{mutation.SCOPE}/a.py": "x = 1\n"})
+    env = {**_git_env(tmp_path), "GIT_CEILING_DIRECTORIES": str(tmp_path)}
+    with pytest.raises(PytError, match="not a git repository") as e:
+        mutation.changed_lines(root, "origin/main", env)
+    assert e.value.code == 3
+    assert "fetch" not in str(e.value)
+
+
+@needs_git
 def test_changed_lines_ignore_the_users_diff_configuration(tmp_path: Path) -> None:
     """The user's git configuration never shapes the diff: diff.interHunkContext merged the hunks
     of lines 2 and 8 and counted 3 to 7 as changed; no prefixes, colours or a textconv filter

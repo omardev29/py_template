@@ -4675,7 +4675,11 @@ short temp tree and unset `NVIM_APPNAME`.
     line changed since BASE) or every one was skipped, never the false "every mutant judged".
     1 on a failed baseline or an error, 2 usage (`--jobs` below 1, an
     empty `--diff`, a BASE that names no commit), 3 without git, uv or Cosmic Ray's environment
-    (offline it must be in uv's cache), 130 interrupted (the report of what ran). What stops a
+    (offline it must be in uv's cache) and in a folder git cannot read, with git's reason (no
+    repository, dubious ownership: `changed_lines` asks `git rev-parse --git-dir` first; it said
+    the BASE named no commit and to fetch it,
+    `test_mutation.test_diff_in_a_folder_git_cannot_read_says_why`), 130 interrupted (the report
+    of what ran). What stops a
     run (a worker whose `uv sync` failed, Cosmic Ray's side gone: `Report.error`) comes after
     the report of what ran, with its own message and code. A Ctrl+C, SIGTERM or SIGHUP during
     the cleanup or the report waits for it (`deferred_interrupts`) and makes the run interrupted;
