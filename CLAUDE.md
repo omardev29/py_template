@@ -954,9 +954,9 @@ header rules (with detector tests proving each rule fires).
   which raises the file's own OSError: shutil.copytree's shutil.Error holds no errno, 15.1).
   `run`, `test BACKEND` (pytest's own code: 5 = no tests collected, 4 = usage error) and tasks
   return the child's exit code (`test all`: 0 or 1, after testing every backend even when one
-  fails to build); `proc.CommandFailed` carries the failed child's code. A child killed by signal N gives
-  128 + N (`proc.exit_code`, like sh and uv; `cli.main` also maps a negative code a command
-  returns), never 256 - N.
+  fails to build); `proc.CommandFailed` carries the failed child's code. A child killed by
+  signal N gives 128 + N (`proc.exit_code`, like sh and uv; `cli.main` also maps a negative code
+  a command returns), never 256 - N.
 - Ctrl+C (`proc._wait_through_signals`): the child got the same Ctrl+C (terminal process group,
   console), so `proc.run` (a `subprocess.Popen` it waits for itself) waits for it instead of
   letting `subprocess.run` SIGKILL it 0.25 s later (an app's cleanup was cut short; under `uv

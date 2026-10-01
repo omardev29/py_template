@@ -3335,11 +3335,12 @@ def test_the_dependencies_a_build_ships_are_copies_whatever_the_users_link_mode(
     # this machine's uv cache, and the folder and its .tar.gz died with ModuleNotFoundError
     # anywhere else (or after `uv cache clean`) while the build passed its smoke test and said
     # done. The real uv, offline: a flat index of one wheel
+    if link_mode == "uv.toml" and IS_WINDOWS:
+        pytest.skip("uv reads the user's uv.toml from their Roaming folder on Windows, which this test does not move")
     requirements = _explicit_index_project(tmp_path, monkeypatch, {"ptdemo": "py3-none-any"})
     config = tmp_path / "config"
     (config / "uv").mkdir(parents=True)
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))  # no user uv.toml of this machine's
-    monkeypatch.setenv("APPDATA", str(config))  # (uv's user config folder on Windows)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))  # uv's user config on Linux and macOS: never this machine's
     monkeypatch.delenv("UV_LINK_MODE", raising=False)
     if link_mode == "UV_LINK_MODE":
         monkeypatch.setenv("UV_LINK_MODE", "symlink")
