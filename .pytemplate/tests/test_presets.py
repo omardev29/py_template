@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tomllib
 import unicodedata
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1344,17 +1345,194 @@ def test_uv_reads_the_renamed_local_libraries_of_a_copy_as_the_same_lock(tmp_pat
     assert check.returncode == 0, check.stderr
 
 
+WHEELHOUSE_PYPROJECT = """\
+[project]
+name = "proj"
+version = "0.1.0"
+dependencies = ["tinylib", "flatlib", "pypilib"]
+
+[tool.uv]
+find-links = [
+    "../wheels",  # the team's wheelhouse
+    "https://example.com/wheels/",
+    "vendor/wheels",
+]
+index-url = '../../simple'
+extra-index-url = ["../more"]
+
+[tool.uv.pip]
+find-links = ["../wheels"]
+
+[[tool.uv.index]]
+name = "local"
+url = "../flat"
+format = "flat"
+explicit = true
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+
+[tool.uv.sources]
+flatlib = { index = "local" }
+
+[tool.other]
+find-links = ["../wheels"]
+"""
+WHEELHOUSE_UV_TOML = """\
+find-links = ["../wheels"]
+
+[[index]]
+name = "local"
+url = "../flat"
+"""
+WHEELHOUSE_LOCK = """\
+version = 1
+requires-python = ">=3.11"
+
+[[package]]
+name = "flatlib"
+version = "1.0"
+source = { registry = "../flat" }
+wheels = [
+    { path = "flatlib-1.0-py3-none-any.whl" },
+]
+
+[[package]]
+name = "pypilib"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "tinylib"
+version = "1.0"
+source = { registry = "../wheels" }
+wheels = [
+    { path = "tinylib-1.0-py3-none-any.whl" },
+]
+
+[[package]]
+name = "vendored"
+version = "1.0"
+source = { registry = "vendor/wheels" }
+"""
+
+
+def _strings(data: Any) -> list[str]:
+    """Every string of parsed TOML, in order."""
+    if isinstance(data, dict):
+        return [s for v in data.values() for s in _strings(v)]
+    if isinstance(data, list):
+        return [s for item in data for s in _strings(item)]
+    return [data] if isinstance(data, str) else []
+
+
+def test_copy_template_names_local_wheelhouses_outside_the_project_from_the_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A local wheelhouse or index is named from the project too: `find-links = ["../wheels"]`,
+    an index `url = "../flat"` (pyproject.toml's [tool.uv] and [tool.uv.pip], or a uv.toml next
+    to it), and uv.lock's `source = { registry = "../wheels" }` of a package found there. Only
+    the local sources were renamed, so from a copy at another depth they named a missing folder:
+    `new` stopped in __init's `uv add` ("Failed to read `--find-links` directory") and removed the
+    project. Each such value names the same folder from the copy; a URL, a folder inside the
+    project, another tool's table, the comments and every other byte stay as they were."""
+    src = tmp_path / "a" / "b" / "proj"
+    src.mkdir(parents=True)
+    files = {"pyproject.toml": WHEELHOUSE_PYPROJECT, "uv.toml": WHEELHOUSE_UV_TOML, "uv.lock": WHEELHOUSE_LOCK}
+    for name, text in files.items():
+        (src / name).write_text(text, encoding="utf-8")
+    monkeypatch.setattr(presets, "ROOT", src)
+    monkeypatch.setattr(presets, "_git_files", lambda *args: None)  # no git: every file
+    dest = tmp_path / "x" / "y" / "z" / "copy"
+    presets.copy_template(dest)
+    moved: list[str] = []
+    for name, text in files.items():
+        new_text = (dest / name).read_text(encoding="utf-8")
+        old, new = tomllib.loads(text), tomllib.loads(new_text)
+        if name == "pyproject.toml":  # another tool's table, not uv's settings: never touched
+            assert new["tool"].pop("other") == old["tool"].pop("other") == {"find-links": ["../wheels"]}
+        for before, after in zip(_strings(old), _strings(new), strict=True):
+            if before.startswith(".."):
+                assert after != before and os.path.normpath(dest / after) == os.path.normpath(src / before), (name, before, after)
+                moved.append(f"{name}: {before}")
+            else:
+                assert after == before, (name, before, after)
+        assert new_text.count("\n") == text.count("\n")
+    assert sorted(moved) == sorted(
+        [f"pyproject.toml: {v}" for v in ("../wheels", "../../simple", "../more", "../wheels", "../flat")]
+        + ["uv.toml: ../wheels", "uv.toml: ../flat", "uv.lock: ../flat", "uv.lock: ../wheels"]
+    )
+    assert "# the team's wheelhouse" in (dest / "pyproject.toml").read_text(encoding="utf-8")
+
+
+def _tiny_wheel(folder: Path, name: str) -> None:
+    """A pure wheel `name`-1.0 with no dependency, written by hand (no build backend, no network)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    meta = f"{name}-1.0.dist-info"
+    files = {
+        f"{name}/__init__.py": "",
+        f"{meta}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n",
+        f"{meta}/WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    record = [f"{path},," for path in [*files, f"{meta}/RECORD"]]
+    with zipfile.ZipFile(folder / f"{name}-1.0-py3-none-any.whl", "w") as whl:
+        for path, text in files.items():
+            whl.writestr(path, text)
+        whl.writestr(f"{meta}/RECORD", "\n".join(record) + "\n")
+
+
+@pytest.mark.skipif(shutil.which("uv") is None and not os.environ.get("UV"), reason="uv not found")
+@pytest.mark.parametrize("where", ["find-links", "flat index", "uv.toml"])
+def test_uv_reads_the_renamed_wheelhouse_of_a_copy_as_the_same_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str) -> None:
+    """uv itself agrees: a project that takes a package from a wheelhouse next to it (find-links,
+    a flat index, or find-links in a uv.toml) locks; its copy two folders deeper, the wheelhouse
+    named from there, passes `uv lock --check` (no network: the wheel is local)."""
+    side = tmp_path / "side"
+    _tiny_wheel(side / "wheels", "tinylib")
+    src = side / "proj"
+    src.mkdir()
+    settings = {
+        "find-links": '[tool.uv]\nfind-links = ["../wheels"]\n',
+        "flat index": '[[tool.uv.index]]\nname = "local"\nurl = "../wheels"\nformat = "flat"\nexplicit = true\n\n[tool.uv.sources]\ntinylib = { index = "local" }\n',
+        "uv.toml": "",
+    }[where]
+    (src / "pyproject.toml").write_text(
+        f'[project]\nname = "proj"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = ["tinylib"]\n\n{settings}', encoding="utf-8"
+    )
+    if where == "uv.toml":
+        (src / "uv.toml").write_text('find-links = ["../wheels"]\n', encoding="utf-8")
+    uv = shutil.which("uv") or os.environ["UV"]
+    env = _child_env(tmp_path)
+    locked = subprocess.run([uv, "lock", "--offline"], cwd=src, env=env, capture_output=True, text=True, check=False)
+    if locked.returncode != 0:
+        pytest.skip(f"uv cannot lock offline here: {locked.stderr.strip()[-300:]}")
+    assert 'registry = "../wheels"' in (src / "uv.lock").read_text(encoding="utf-8")
+    monkeypatch.setattr(presets, "ROOT", src)
+    monkeypatch.setattr(presets, "_git_files", lambda *args: None)
+    dest = tmp_path / "far" / "away" / "copy"
+    presets.copy_template(dest)
+    assert 'registry = "../../../side/wheels"' in (dest / "uv.lock").read_text(encoding="utf-8")
+    check = subprocess.run([uv, "lock", "--check", "--offline"], cwd=dest, env=env, capture_output=True, text=True, check=False)
+    assert check.returncode == 0, check.stderr
+
+
 def test_rebase_local_sources_never_writes_what_it_cannot_rewrite_alone(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The edit changes the local sources and nothing else, in the copy's own files: the same
-    value outside [tool.uv.sources] would change too (not a source: the file stays as it was,
-    with a warning naming it), and a pyproject.toml of the copy that is a link to a file outside
-    it (the project's own) is never written through."""
+    value in another tool's table stays as it was (only uv's settings are edited); in a key of
+    uv's settings that names no source (cache-dir) it would change too, so the file stays as it
+    was, with a warning naming it; and a pyproject.toml of the copy that is a link to a file
+    outside it (the project's own) is never written through."""
     src = tmp_path / "proj"
     src.mkdir()
-    shared = '[tool.uv.sources]\nmylib = { path = "../mylib" }\n\n[tool.other]\npath = "../mylib"\n'
-    (src / "pyproject.toml").write_text(shared, encoding="utf-8")
     dest = tmp_path / "deeper" / "copy"
     dest.mkdir(parents=True)
+    other = '[tool.uv.sources]\nmylib = { path = "../mylib" }\n\n[tool.other]\npath = "../mylib"\n'
+    (src / "pyproject.toml").write_text(other, encoding="utf-8")
+    (dest / "pyproject.toml").write_text(other, encoding="utf-8")
+    presets.rebase_local_sources(src, dest)
+    assert (dest / "pyproject.toml").read_text(encoding="utf-8") == other.replace('"../mylib" }', '"../../mylib" }')
+    assert "warning:" not in capsys.readouterr().err
+    shared = '[tool.uv]\ncache-dir = "../mylib"\n\n[tool.uv.sources]\nmylib = { path = "../mylib" }\n'
+    (src / "pyproject.toml").write_text(shared, encoding="utf-8")
     (dest / "pyproject.toml").write_text(shared, encoding="utf-8")
     presets.rebase_local_sources(src, dest)
     assert (dest / "pyproject.toml").read_text(encoding="utf-8") == shared

@@ -885,6 +885,9 @@ class _Swap:
                 raise
             raise named from e
         _copy_files(plan.files, self.fresh)
+        # Its local sources outside the clone (../mylib, a ../wheels wheelhouse) named from the
+        # data folder, a sibling of the new copy: kept as they were, `pyt new` from there failed
+        presets.rebase_local_sources(ROOT, self.fresh)
         record = self.fresh / RECORD
         record.parent.mkdir(parents=True, exist_ok=True)
         self.record = (json.dumps(plan.record, indent=2) + "\n").encode("utf-8")

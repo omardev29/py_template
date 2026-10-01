@@ -792,7 +792,7 @@ header rules (with detector tests proving each rule fires).
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
-| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `PytError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `_installed_import_names`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./pyt __init`; with rollback), `copy_template` (`_tracked_template`: git's tracked files, or every file of the installed template, `_installed`, never its `INSTALL_RECORD`; `_copy_entry` per entry, `_raise_copy_errors`; `rebase_local_sources`: a local library outside the project named from the copy), `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
+| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `PytError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `_installed_import_names`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./pyt __init`; with rollback), `copy_template` (`_tracked_template`: git's tracked files, or every file of the installed template, `_installed`, never its `INSTALL_RECORD`; `_copy_entry` per entry, `_raise_copy_errors`; `rebase_local_sources`: a local library or wheelhouse outside the project named from the copy), `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
 | `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`; `copy_writable`, `make_writable`, `remove_tree` for every scratch copy of the app), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`, `COMPILER_MISSING`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`; what mypy reads as unreachable on `compile_version` (`_static_value`, `_reachable`, `_runtime_nodes`) and the names the app's own modules re-export (`_Resolver`; it calls the private `imports._relative_base`). |
@@ -1818,7 +1818,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `.github/workflows/template-*`; the marker, `README.md` and `LICENSE` stay (so `new` from
   there copies `.pytemplate/README.md` and `LICENSE` as from the clone). Tracked links stay
   links (`presets._copy_link`), a submodule is copied as a folder. Untracked files and tracked
-  ones deleted from the working tree are listed, not copied. Its record
+  ones deleted from the working tree are listed, not copied. What it names outside the clone by
+  a relative path (a local library, a wheelhouse) is named from the data folder
+  (`presets.rebase_local_sources`, in `_Swap.run`: copied as it was, it named a folder of the data
+  folder, and `pyt new` from the installed template failed in `__init`'s `uv add`;
+  `test_install.test_the_installed_template_names_local_sources_outside_the_clone_from_its_folder`). Its record
   `.pytemplate/installed.json` (`presets.INSTALL_RECORD`, `RECORD`): schema, commit, `dirty`
   (uncommitted changes in tracked files), source folder, bin folder, launchers, UTC time; it is
   written only there, and `presets._skipped` keeps it out of every project. In the installed
@@ -3505,11 +3509,19 @@ Per method:
   without a word); and `.github/workflows/template-*` (template CI files MUST use that prefix; the CI
   image's folder `template-ci-image/` has it too). In both, a local source outside the project
   (`./pyt add ../mylib`: `path = "../mylib"` in `pyproject.toml`, `directory = "../mylib"` in
-  `uv.lock`, which names every path from the project) is named from `dest`, in both files alike
-  (`presets.rebase_local_sources`, which `mutation.make_copy` calls too: from `dest` it named
-  another folder, and `__init`'s `uv add` failed, so `new`, the first step of `selftest --e2e`
-  and `--nvim` and every test that locks a copy of the project failed in such a project;
-  `test_presets.test_copy_template_names_local_libraries_outside_the_project_from_the_copy`). A
+  `uv.lock`, which names every path from the project) and a local wheelhouse or index there
+  (`find-links = ["../wheels"]`, an index `url`, `index-url` or `extra-index-url` of `[tool.uv]`,
+  `[tool.uv.pip]` or a `uv.toml`; `source = { registry = "../wheels" }` in `uv.lock`) are named
+  from `dest`, in every file alike (`presets.rebase_local_sources`, which `mutation.make_copy`
+  and install's `_Swap.run` call too: from `dest` they named another folder, and `__init`'s `uv
+  add` failed, so `new`, the first step of `selftest --e2e` and `--nvim` and every test that
+  locks a copy of the project failed in such a project;
+  `test_presets.test_copy_template_names_local_libraries_outside_the_project_from_the_copy`,
+  `test_copy_template_names_local_wheelhouses_outside_the_project_from_the_copy`). Only the
+  statements of uv's settings are edited (`presets._rebased_text`, through the TOML statement
+  scanner: a string of an array or an inline table too, never a comment), and the result must
+  parse as the old data with only those values changed (`_map_places`), else a warning and the
+  file as it was. A
   project made with `new` is another program, not the template (an owner decision): `new`
   (`presets._make_own`) writes its own `README.md` (`presets.project_readme`: name, preset
   description, getting started) and sets `[project] description` to the preset's
@@ -5316,13 +5328,19 @@ uv:
   `test_fixes.py::test_uv_run_pins_the_project_outside_the_root`. Goes: never.
 - **uv names a local source from the project** (LIMITATION): `./pyt add ../mylib` writes `path =
   "../mylib"` in pyproject.toml and `directory = "../mylib"` in uv.lock, which names every path
-  from the project (a library's own local dependencies too), so a copy of the project elsewhere
-  named another folder ("Distribution not found": `new`, the workers of `selftest --mutation`,
-  the tests' copies). Fix: `presets.rebase_local_sources` names them from the copy in both files
-  alike, which `uv lock --check` accepts (uv 0.10.12 and 0.12.19), in `presets.copy_template` and
-  `mutation.make_copy` (11, 13.1). Test:
+  from the project (a library's own local dependencies too), and so it reads a local wheelhouse
+  or index of its settings (`find-links = ["../wheels"]`, an index `url = "../wheels"`) and
+  records a package found there (`source = { registry = "../wheels" }`), so a copy of the
+  project elsewhere named another folder ("Distribution not found", "Failed to read
+  `--find-links` directory": `new`, the workers of `selftest --mutation`, the tests' copies, `new`
+  from the installed template). Fix: `presets.rebase_local_sources` names them from the copy in
+  every file alike, which `uv lock --check` accepts (uv 0.10.12 and 0.12.19), in
+  `presets.copy_template`, `mutation.make_copy` and install's `_Swap.run` (5.9, 11, 13.1). Test:
   `test_presets.py::test_copy_template_names_local_libraries_outside_the_project_from_the_copy`,
   `test_uv_reads_the_renamed_local_libraries_of_a_copy_as_the_same_lock`,
+  `test_copy_template_names_local_wheelhouses_outside_the_project_from_the_copy`,
+  `test_uv_reads_the_renamed_wheelhouse_of_a_copy_as_the_same_lock`,
+  `test_install.py::test_the_installed_template_names_local_sources_outside_the_clone_from_its_folder`,
   `test_mutation.py::test_make_copy_names_what_lies_outside_the_project_from_the_copy`. Goes:
   never.
 - **`uv sync` is exact for the groups it installs** (LIMITATION): it removed a group added with
@@ -7207,7 +7225,8 @@ Code coupling (rename together):
   private `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311`,
   `rename._plan_pyproject`, `render._holds_python` and `render._read_state`, and
   `cmd_mode._precheck_py311` that same `render._holds_python`; `rename` and
-  `cmd_env` import `cmd_apply` lazily (it imports both at module level).
+  `cmd_env` import `cmd_apply` lazily (it imports both at module level). `presets._rebased_text`
+  calls the private `config._string_end` on the spans of `config.scan`'s statements.
 - Which path a `compile.modules` entry names is decided once, by `config.import_path`
   (`config.compiled_paths`): `mypyc.compiled_sources`, the pyright strict list,
   `lintc.relative_file_at_import` and `cmd_apply.reference_problems` all read it (a copy of the

@@ -1188,59 +1188,105 @@ def _raise_copy_errors(dest: Path, errors: list[tuple[str, str, str]]) -> None:
         raise PytError(f"could not copy the template into {dest}:\n  " + "\n  ".join(lines) + more, 1)
 
 
-# The local sources of pyproject.toml's [tool.uv.sources] and of uv.lock: a file (path) or a
-# folder (directory, editable, virtual), each a TOML string after its key
+# What uv names from the project by a relative path: the local sources of pyproject.toml's
+# [tool.uv.sources] and of uv.lock, a file (path) or a folder (directory, editable, virtual); a
+# local wheelhouse or index of uv's settings (pyproject.toml's [tool.uv], a uv.toml next to it):
+# find-links, an index url ([[tool.uv.index]] url, index-url, extra-index-url, and the same of
+# [tool.uv.pip]); and uv.lock's record of a package found there, `source = { registry = "../w" }`
 _SOURCE_KEYS = ("path", "directory", "editable", "virtual")
-_SOURCE_VALUE = re.compile(r"""(\b(?:path|directory|editable|virtual)\s*=\s*)("(?:[^"\\\n]|\\.)*"|'[^'\n]*')""")
+_INDEX_KEYS = frozenset({("index", "url"), *((*pre, k) for pre in ((), ("pip",)) for k in ("find-links", "index-url", "extra-index-url"))})
+# Their `key = "value"` forms, for a text the TOML statement scanner cannot read
+_SOURCE_VALUE = re.compile(r"""(\b(?:path|directory|editable|virtual|registry|url)\s*=\s*)("(?:[^"\\\n]|\\.)*"|'[^'\n]*')""")
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]+:")  # a scheme (https:, file:): a drive (C:) has one letter
+
+
+def _uv_place(path: tuple[str, ...]) -> bool:
+    """Whether `path` (keys below [tool.uv], or of a uv.toml) holds a local source or index."""
+    return (path[:1] == ("sources",) and path[-1] in _SOURCE_KEYS) or path in _INDEX_KEYS
+
+
+# Each file that names them: its name, the statements that may (the scanner's key paths), and
+# the values that do (`place` of their key path, list positions left out)
+_REBASED: tuple[tuple[str, tuple[str, ...], Callable[[tuple[str, ...]], bool]], ...] = (
+    ("pyproject.toml", ("tool", "uv"), lambda p: p[:2] == ("tool", "uv") and _uv_place(p[2:])),
+    ("uv.toml", (), _uv_place),
+    ("uv.lock", (), lambda p: bool(p) and p[-1] in (*_SOURCE_KEYS, "registry")),
+)
 
 
 def _inside(path: str, folder: str) -> bool:
     return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
 
 
-def _with_sources_moved(data: Any, moved: dict[str, str], scope: tuple[str, ...]) -> Any:
-    """`data` (parsed TOML) with each local source of `moved` replaced, below `scope` only."""
-
-    def walk(node: Any) -> Any:
-        if isinstance(node, dict):
-            return {k: moved.get(v, v) if k in _SOURCE_KEYS and isinstance(v, str) else walk(v) for k, v in node.items()}
-        if isinstance(node, list):
-            return [walk(item) for item in node]
-        return node
-
-    if not scope:
-        return walk(data)
-    if not isinstance(data, dict) or scope[0] not in data:
-        return data
-    return {**data, scope[0]: _with_sources_moved(data[scope[0]], moved, scope[1:])}
+def _map_places(node: Any, place: Callable[[tuple[str, ...]], bool], f: Callable[[str], str], path: tuple[str, ...] = ()) -> Any:
+    """`node` (parsed TOML) with `f` applied to each string `place` names: `path` holds the keys
+    from the top, list positions left out (the strings of a list are its key's values)."""
+    if isinstance(node, dict):
+        return {k: _map_places(v, place, f, (*path, k)) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_map_places(item, place, f, path) for item in node]
+    return f(node) if isinstance(node, str) and place(path) else node
 
 
-def _subtree(data: Any, scope: tuple[str, ...]) -> Any:
-    for key in scope:
-        data = data.get(key) if isinstance(data, dict) else None
-    return data
+def _rebased_text(text: str, found: dict[str, str], scope: tuple[str, ...]) -> str:
+    """`text` with each string literal whose value `found` names written anew, in the statements
+    at or below `scope` (the TOML statement scanner's; a string of an array or inline table too,
+    never a comment), or, in a text the scanner cannot read, in its `key = "value"` forms."""
+    from .config import _string_end, scan, toml_value
+
+    def new_literal(literal: str) -> str | None:
+        try:
+            value = tomllib.loads(f"v = {literal}")["v"]
+        except tomllib.TOMLDecodeError:
+            return None
+        return toml_value(found[value]) if isinstance(value, str) and value in found else None
+
+    stmts = scan(text)
+    if stmts is None:
+        return _SOURCE_VALUE.sub(lambda m: m[0] if (new := new_literal(m[2])) is None else m[1] + new, text)
+    out: list[str] = []
+    at = 0
+    for s in stmts:
+        if s.kind != "key" or s.path[: len(scope)] != scope[: len(s.path)]:
+            continue
+        i, stop = s.value
+        while i < stop:
+            if text[i] in "\"'":
+                end = _string_end(text, i)
+                new = new_literal(text[i:end])
+                if new is not None:
+                    out += [text[at:i], new]
+                    at = end
+                i = end
+            elif text[i] == "#":  # a comment of a multi-line array
+                nl = text.find("\n", i, stop)
+                i = stop if nl < 0 else nl
+            else:
+                i += 1
+    return "".join(out) + text[at:]
 
 
 def rebase_local_sources(src: Path, dest: Path) -> None:
-    """In `dest`, a copy of the project `src`: a local source that names a file or folder outside
-    `src` by a relative path (`./pyt add ../mylib`: `mylib = { path = "../mylib" }` in
-    pyproject.toml's [tool.uv.sources], `directory = "../mylib"` in uv.lock, which writes every
-    path from the project, a library's own local dependencies too) names the same one from
-    `dest`, in both files alike, so `uv lock --check` still passes there (uv 0.10.12 and
-    0.12.19). Copied as they were, they named another folder from the copy: `new` stopped in
-    __init's `uv add` ("Distribution not found"), and so did selftest --e2e and --nvim (their
-    `new`), the workers of selftest --mutation and the tests that lock a copy of the project.
-    Sources inside `src` stay (the copy holds them at the same place). A file that does not
-    read, one that is no file of `dest` (a link out of it: never written through), or an edit
-    that would change anything else in it, stays as it is, with a warning when it names such a
+    """In `dest`, a copy of the project `src`: what uv names from the project by a relative path
+    that leaves `src` names the same file or folder from `dest`, in every file alike, so `uv lock
+    --check` still passes there (uv 0.10.12 and 0.12.19). A local library (`./pyt add ../mylib`:
+    `mylib = { path = "../mylib" }` in pyproject.toml's [tool.uv.sources], `directory =
+    "../mylib"` in uv.lock, which writes every path from the project, a library's own local
+    dependencies too), and a local wheelhouse or index (`find-links = ["../wheels"]`, an index
+    `url = "../wheels"` of uv's settings, `source = { registry = "../wheels" }` in uv.lock).
+    Copied as they were, they named another folder from the copy: `new` stopped in __init's `uv
+    add` ("Distribution not found", "Failed to read `--find-links` directory"), and so did
+    selftest --e2e and --nvim (their `new`), the workers of selftest --mutation, `new` from the
+    installed template and the tests that lock a copy of the project. What lies inside `src`
+    stays (the copy holds it at the same place), and so does a URL. A file that does not read,
+    one that is no file of `dest` (a link out of it: never written through), or an edit that
+    would change anything else in it, stays as it is, with a warning when it names such a
     source."""
-    from .config import toml_value
-
     root, there = os.path.realpath(src), os.path.realpath(dest)
 
     def from_dest(value: str) -> str | None:
-        if ".." not in value or os.path.isabs(value) or re.match(r"[A-Za-z]:|[\\/]", value):
-            return None  # inside, or absolute (drive-relative too): the same file from anywhere
+        if ".." not in value or os.path.isabs(value) or re.match(r"[A-Za-z]:|[\\/]", value) or _URL.match(value):
+            return None  # inside, absolute (drive-relative too) or a URL: the same from anywhere
         target = os.path.normpath(os.path.join(root, value))
         if _inside(target, root):
             return None
@@ -1251,7 +1297,7 @@ def rebase_local_sources(src: Path, dest: Path) -> None:
         new = new.replace(os.sep, "/")
         return None if any("\ud800" <= c <= "\udfff" for c in new) else new  # no TOML string holds it
 
-    for name, scope in (("pyproject.toml", ("tool", "uv", "sources")), ("uv.lock", ())):
+    for name, scope, place in _REBASED:
         path = dest / name
         try:
             raw = path.read_bytes()
@@ -1264,33 +1310,18 @@ def rebase_local_sources(src: Path, dest: Path) -> None:
             continue  # nothing to rebase, or a file the command that reads it names
         found: dict[str, str] = {}
 
-        def collect(node: Any) -> None:
-            if isinstance(node, dict):
-                for k, v in node.items():
-                    if k in _SOURCE_KEYS and isinstance(v, str):
-                        new = from_dest(v)
-                        if new is not None and new != v:
-                            found[v] = new
-                    else:
-                        collect(v)
-            elif isinstance(node, list):
-                for item in node:
-                    collect(item)
+        def note(value: str) -> str:
+            new = from_dest(value)
+            if new is not None and new != value:
+                found[value] = new
+            return value
 
-        collect(_subtree(before, scope))
+        _map_places(before, place, note)
         if not found:
             continue
-
-        def replace(m: re.Match[str]) -> str:
-            try:
-                value = tomllib.loads(f"v = {m[2]}")["v"]
-            except tomllib.TOMLDecodeError:
-                return m[0]
-            return m[1] + toml_value(found[value]) if isinstance(value, str) and value in found else m[0]
-
-        edited = _SOURCE_VALUE.sub(replace, text)
+        edited = _rebased_text(text, found, scope)
         try:
-            ok = tomllib.loads(edited) == _with_sources_moved(before, found, scope)
+            ok = tomllib.loads(edited) == _map_places(before, place, lambda v: found.get(v, v))
         except TOML_ERRORS:
             ok = False
         if not ok or not _inside(os.path.realpath(path), there):

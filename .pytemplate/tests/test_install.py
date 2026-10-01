@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -1043,6 +1044,30 @@ def test_a_failed_install_changes_nothing(tmp_path: Path, monkeypatch: pytest.Mo
             cmd_install.install(swap.plan())
         assert e.value.code == 1 and "No space left on device" in str(e.value)
     assert swap.state() == swap.before
+
+
+def test_the_installed_template_names_local_sources_outside_the_clone_from_its_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A clone that takes a library and a wheelhouse from folders next to it (`../mylib`,
+    `find-links = ["../wheels"]`): the installed template, in the data folder, names them from
+    there, as `new` names them from a new project (presets.rebase_local_sources). Copied as
+    they were, they named folders of the data folder, and `pyt new` from the installed template
+    stopped in __init's `uv add` and removed the project."""
+    swap = Swap(tmp_path, monkeypatch, fresh=True)
+    (swap.source / "pyproject.toml").write_bytes(b'[tool.uv]\nfind-links = ["../wheels"]\n\n[tool.uv.sources]\nmylib = { path = "../mylib" }\n')
+    (swap.source / "uv.lock").write_bytes(b'version = 1\n\n[[package]]\nname = "mylib"\nversion = "0.1.0"\nsource = { directory = "../mylib" }\n')
+    plan = swap.plan()
+    plan.files += ["pyproject.toml", "uv.lock"]
+    cmd_install.install(plan)
+    pyproject = tomllib.loads((swap.snapshot / "pyproject.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads((swap.snapshot / "uv.lock").read_text(encoding="utf-8"))
+    names = {
+        "../wheels": pyproject["tool"]["uv"]["find-links"][0],
+        "../mylib": pyproject["tool"]["uv"]["sources"]["mylib"]["path"],
+    }
+    assert lock["package"][0]["source"]["directory"] == names["../mylib"]
+    for original, there in names.items():
+        assert there != original and os.path.normpath(swap.snapshot / there) == os.path.normpath(swap.source / original), there
+    assert (swap.source / "pyproject.toml").read_bytes().count(b'"../mylib"') == 1  # the clone itself stays
 
 
 def test_an_interrupt_right_after_the_swap_is_undone_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
