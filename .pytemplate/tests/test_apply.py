@@ -1505,6 +1505,34 @@ def test_a_package_folder_moved_by_hand_is_refused(tmp_path: Path, monkeypatch: 
     assert cmd_apply.pending(project.cfg()) == []
 
 
+def test_a_package_moved_by_hand_that_left_its_caches_behind_is_still_a_move(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """src/alpha/ copied to src/beta/, then `git rm -r src/alpha` (or a move of its .py files):
+    git leaves the untracked __pycache__ folders, and src/alpha/ holding only them was taken for
+    the package. apply then refused src/beta/, which held all the code, as "another package" and
+    said to move or delete it, and doctor and the hook said the same. A folder that holds no
+    module is no package: the move by hand is diagnosed, with the folder left behind named."""
+    project, uv = _project(tmp_path, monkeypatch, "script", "alpha")
+    assert _run(project) == 0  # the record: alpha
+    src = project.root / "src"
+    shutil.copytree(src / "alpha", src / "beta")
+    for path in sorted((src / "alpha").rglob("*.py")):  # git rm -r: the tracked files go, the caches stay
+        (path.parent / "__pycache__").mkdir(exist_ok=True)
+        (path.parent / "__pycache__" / f"{path.stem}.cpython-314.pyc").write_bytes(b"\x00")
+        path.unlink()
+    project.edit("app", "name", "beta")
+    cfg = project.cfg()
+    assert rename.package_dir(src, "alpha") is None and rename.package_dir(src, "beta") == src / "beta"
+    with pytest.raises(PytError, match=r"src/alpha/ was moved to src/beta/ by hand") as e:
+        _run(project)
+    assert "another package" not in str(e.value) and "move away the src/alpha/ left behind first: it holds no module" in str(e.value)
+    problem, hint = cmd_apply.pending(cfg)[0]
+    assert "src/alpha/ was moved to src/beta/ by hand" in problem and "move away the src/alpha/ left behind first" in hint, (problem, hint)
+    shutil.rmtree(src / "alpha")
+    (src / "beta").rename(src / "alpha")  # the way out
+    assert _run(project) == 0 and cmd_apply.pending(project.cfg()) == []
+    assert (src / "beta" / "__init__.py").is_file()
+
+
 def test_a_package_folder_moved_by_hand_with_both_names_edited_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The folder moved by hand, then app.name AND pyproject.toml [project] name edited (a rename
     by hand edits both files): the record (alpha) named neither line and its package was gone, so

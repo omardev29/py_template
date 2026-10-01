@@ -312,12 +312,14 @@ def moved_by_hand(cfg: Config, record: dict[str, Any] | None) -> str | None:
 def moved_by_hand_message(cfg: Config, old: str, retry: str) -> str:
     """The refusal of apply and rename for moved_by_hand()."""
     was = rename.package_of(old)
+    # what `git rm -r` or the move left there, the caches: no module (rename.package_dir)
+    left = f" (move away the src/{was}/ left behind first: it holds no module)" if os.path.isdir(_src() / was) else ""
     return (
         f"app.name = '{cfg.app.name}', but the project is still '{old}' (the record of the last apply): "
         f"src/{was}/ was moved to src/{cfg.pkg}/ by hand?\n"
         f"  A moved folder changes no reference: the imports and the package references of pytemplate.toml "
         f"(compile.modules, deploy.wheel.entry...) still name {was}: {_listed(still_naming(cfg, old))}.\n"
-        f"  Move it back to src/{was}/, then {retry}: it moves the package and rewrites them all "
+        f"  Move it back to src/{was}/{left}, then {retry}: it moves the package and rewrites them all "
         f"(add --force when git shows other changes); or, if src/{cfg.pkg}/ replaces src/{was}/, make them "
         f"name {cfg.pkg}, then ./pyt apply"
     )
@@ -605,8 +607,9 @@ def missing_package(cfg: Config) -> tuple[str, str] | None:
         entries = []
     here = sorted(p.name for p in entries if os.path.isdir(p) and os.path.isfile(p / "__init__.py"))
     found = f"; src/ has {', '.join(p + '/' for p in here)}" if here else ""
+    what = "holds no module" if os.path.isdir(src / cfg.pkg) else "does not exist"
     return (
-        f"src/{cfg.pkg}/ does not exist (app.name = '{cfg.app.name}'{found}): run, test and build need the app package",
+        f"src/{cfg.pkg}/ {what} (app.name = '{cfg.app.name}'{found}): run, test and build need the app package",
         "if app.name was changed by hand, put the old name back and run ./pyt rename NEW_NAME",
     )
 
@@ -955,10 +958,11 @@ def pending(cfg: Config, *, hook: bool = True) -> list[tuple[str, str]]:
         )
     elif moved := moved_by_hand(cfg, applied.record):
         was = rename.package_of(moved)
+        left = f" (move away the src/{was}/ left behind first: it holds no module)" if os.path.isdir(_src() / was) else ""
         out.append(
             (
                 f"app.name = '{cfg.app.name}' is not applied: src/{was}/ was moved to src/{cfg.pkg}/ by hand (the project is still '{moved}')",
-                f"move it back to src/{was}/, then ./pyt apply (it rewrites the imports and pytemplate.toml too); or, if "
+                f"move it back to src/{was}/{left}, then ./pyt apply (it rewrites the imports and pytemplate.toml too); or, if "
                 f"src/{cfg.pkg}/ replaces it, make these name {cfg.pkg}: {_listed(still_naming(cfg, moved))}",
             )
         )

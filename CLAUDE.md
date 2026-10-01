@@ -1614,7 +1614,14 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     cannot follow) is no folder (`rename._is_dir`, in `package_dir` and `_package_modules`;
     `cmd_apply.missing_package` asks `os.path`): one such link hid the app package from doctor,
     the hook, rename and apply
-    (`test_rename.test_an_entry_of_src_that_cannot_be_read_never_hides_the_package`). A file of a
+    (`test_rename.test_an_entry_of_src_that_cannot_be_read_never_hides_the_package`). Nor is
+    the package a folder of src/ that holds no module (`rename._holds_code`: no .py, .pyi or
+    extension file at any depth, hidden folders and caches aside, as `render._holds_python` rules
+    for compile.modules): the `__pycache__` folders `git rm -r` or a package moved by hand leaves
+    behind were taken for the old package, and apply refused the folder that held the code as
+    "another package", with the advice to move or delete it; the move by hand is diagnosed now,
+    naming the folder left behind (`cmd_apply.moved_by_hand_message`, `pending`;
+    `test_apply.test_a_package_moved_by_hand_that_left_its_caches_behind_is_still_a_move`). A file of a
     folder this user may list but not enter is planned, and its read names it
     (`_regular_or_unreadable`), and a link of src/ or tests/ that cannot be followed is reported
     as one that may name the app (`_link_mentions`, `_nothing_there`: what pathlib takes for

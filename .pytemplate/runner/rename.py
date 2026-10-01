@@ -1456,10 +1456,36 @@ def _is_dir(entry: os.DirEntry[str]) -> bool:
         return False
 
 
+def _holds_code(folder: Path, _seen: frozenset[str] = frozenset()) -> bool:
+    """Whether `folder` holds a module (a .py, .pyi or extension file) at any depth, hidden
+    folders and __pycache__ aside: what `git rm -r` or a package moved by hand leaves behind, the
+    caches alone, is no package (render._holds_python's rule). A folder it cannot list counts as
+    holding one (it may: what is there stays the package)."""
+    real = os.path.realpath(folder)
+    if real in _seen:
+        return False
+    try:
+        entries = list(os.scandir(folder))  # read to its end: the iterator closes itself
+    except OSError:
+        return True
+    for entry in entries:
+        if entry.name.startswith((".", "__pycache__")):
+            continue
+        if _is_dir(entry):
+            if _holds_code(Path(entry.path), _seen | {real}):
+                return True
+        elif entry.name.endswith((*PY_SUFFIXES, *EXT_SUFFIXES)):
+            return True
+    return False
+
+
 def package_dir(src: Path, pkg: str) -> Path | None:
     """Return src/<pkg>/ as spelled on disk (a case-insensitive file system may hold src/Alpha/).
     An entry of src/ that cannot be stat'ed is no folder (_is_dir): one such link hid the app
-    package from doctor, the hook, rename and apply."""
+    package from doctor, the hook, rename and apply. Nor is a folder that holds no module
+    (_holds_code: the caches a package moved by hand left behind): it was taken for the old
+    package, and the folder that held the code for "another package" apply refused, with the
+    advice to move or delete it."""
     try:
         with os.scandir(src) as it:
             entries = list(it)
@@ -1467,10 +1493,10 @@ def package_dir(src: Path, pkg: str) -> Path | None:
         return None
     dirs = [Path(e.path) for e in entries if _is_dir(e)]
     for d in dirs:
-        if d.name == pkg:
+        if d.name == pkg and _holds_code(d):
             return d
     for d in dirs:
-        if d.name.lower() == pkg and same_file(d, src / pkg):
+        if d.name.lower() == pkg and same_file(d, src / pkg) and _holds_code(d):
             return d
     return None
 
