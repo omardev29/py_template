@@ -1369,6 +1369,31 @@ def test_a_hand_edited_name_is_renamed(tmp_path: Path, monkeypatch: pytest.Monke
     assert project.snapshot() == before and [c for c in uv.changing(count) if c[0] != "sync"] == []
 
 
+def test_a_hand_edited_name_in_an_inline_app_table_is_renamed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """pytemplate.toml with `app = { name = ..., ... }` (valid TOML, which doctor and the hook
+    accept): rename's set_value cannot edit an inline table, and its message asked to set the
+    name by hand; once it was set, apply and rename planned the rename again and set it again,
+    with the same refusal, while doctor and the hook asked for ./pyt apply on every commit. A
+    name already set is left alone; `./pyt rename` from such a file says to set it by hand,
+    then ./pyt apply, which renames the rest."""
+    project, _ = _project(tmp_path, monkeypatch, "script", "alpha")
+    text = project.config_file.read_text(encoding="utf-8")
+    table = re.search(r"^\[app\]\n(?:.+\n)+", text, re.M)
+    assert table is not None
+    inline = 'app = { name = "alpha", preset = "script", gui = false, assets = "" }\n'
+    project.config_file.write_text(text[: table.start()] + inline + text[table.end() :], encoding="utf-8", newline="\n")
+    assert project.cfg().app.name == "alpha" and cmd_apply.pending(project.cfg(), hook=False) == []
+    with pytest.raises(PytError, match=r'set name = "beta" there by hand, then run \./pyt apply') as e:
+        rename.plan(project.root, "alpha", "beta")
+    assert "inline `app = {...}` table" in str(e.value)
+    project.config_file.write_text(project.config_file.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "beta"', 1), encoding="utf-8", newline="\n")
+    assert cmd_apply.pending(project.cfg(), hook=False)[0][0] == "app.name = 'beta' is not applied: the package is still src/alpha/"
+    assert _run(project) == 0
+    assert (project.root / "src" / "beta").is_dir() and not (project.root / "src" / "alpha").exists()
+    assert project.config_file.read_text(encoding="utf-8").count('app = { name = "beta", preset = "script"') == 1
+    assert project.pyproject()["project"]["name"] == "beta" and cmd_apply.pending(project.cfg(), hook=False) == []
+
+
 @pytest.mark.parametrize(("old", "new"), [("Flet-App", "flet-app"), ("alpha", "Alpha"), ("my_app", "My-App")])
 def test_a_hand_edit_of_the_names_spelling_never_says_the_package_must_move(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old: str, new: str) -> None:
     """app.name edited to another spelling of the same package (Flet-App -> flet-app): doctor

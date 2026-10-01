@@ -1521,7 +1521,23 @@ def _plan_config(root: Path, names: Names) -> TextEdit:
     old = config._decode(raw, "pytemplate.toml")  # a clear error for UTF-16/ANSI; CRLF kept
     modules = _package_modules(root, names.old_pkg)
     result = rewrite(old, names, only_pkg=True, toml=True, module_keys=MODULE_KEYS, package_modules=modules)
-    new = config.set_value(result.text, "app", "name", names.new_name)
+    try:
+        app = tomllib.loads(result.text).get("app")
+    except config.TOML_ERRORS as e:
+        raise PytError(f"rename: the new pytemplate.toml would not be valid TOML ({config.toml_error(e)}); nothing was changed") from None
+    if isinstance(app, dict) and app.get("name") == names.new_name:
+        # app.name holds it already (a hand edit apply finishes): nothing to set, whatever the
+        # layout. set_value cannot edit an inline `app = {...}` table: it was refused there after
+        # the hand edit its own message asked for, and apply and rename looped on it
+        new = result.text
+    else:
+        try:
+            new = config.set_value(result.text, "app", "name", names.new_name)
+        except PytError:  # the text reads: only a layout set_value cannot edit, an inline table
+            raise PytError(
+                f"rename: pytemplate.toml writes [app] in a form rename cannot edit (an inline `app = {{...}}` table?): "
+                f'set name = "{names.new_name}" there by hand, then run ./pyt apply (it renames the package and every reference)'
+            ) from None
     try:
         tomllib.loads(new)
     except tomllib.TOMLDecodeError as e:

@@ -1581,10 +1581,15 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     deploy.exe.hidden_imports, deploy.exclude_modules, deploy.wheel.entry; table-aware and
     multi-line arrays included: `module_value_lines`) are package references even when bare
     (`modules = ["alpha"]`, `exclude = ["alpha.slow"]`). Any other mention is reported, not
-    changed ([tasks] can use `{name}` and `{pkg}`). `validate_config` validates the result in
-    memory ("the renamed pytemplate.toml would be invalid ...; nothing was changed"). Decoded
-    with `config._decode` (UTF-16/ANSI is a clear error) and written back with its own BOM and
-    line endings.
+    changed ([tasks] can use `{name}` and `{pkg}`). app.name itself is set by `config.set_value`
+    unless it holds the new name already (`_plan_config`: a hand edit apply finishes, in any
+    layout; set_value cannot edit an inline `app = {...}` table, refused it again after the hand
+    edit its own message asked for, and apply and rename looped on it while the hook blocked every
+    commit; `rename NEW` from such a file says to set the name by hand, then `./pyt apply`:
+    `test_apply.test_a_hand_edited_name_in_an_inline_app_table_is_renamed`). `validate_config`
+    validates the result in memory ("the renamed pytemplate.toml would be invalid ...; nothing
+    was changed"). Decoded with `config._decode` (UTF-16/ANSI is a clear error) and written back
+    with its own BOM and line endings.
   - `pyproject.toml`: `[project] name` (`presets.set_project_name`: the `[project]` table only,
     either quote style, any indentation; a table it cannot edit stops the plan) and, in the
     preset block, the values the preset writes with the name (`rename._named_keys`: `{{name}}`
