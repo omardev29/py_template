@@ -850,6 +850,34 @@ def test_the_shipped_gitignore_ignores_only_the_roots_own_outputs(tmp_path: Path
     assert {e[3:] for e in status.split("\0") if e} == {".gitignore", *source}
 
 
+def test_the_shipped_gitignore_ignores_the_roots_outputs_that_are_links(tmp_path: Path, git_env: None) -> None:
+    """An environment, .build or dist kept on another disk through a link, which ./pyt clean
+    supports (a link loses only the link): the .gitignore named them with a trailing slash, which
+    git reads as folders only, so `git add -A` committed the link, the hook passed, and every other
+    clone got a link to a folder of this machine, over which uv could not make .venv. Ignored at the
+    root whatever they are; a link named so below src/ or tests/ is source like any other."""
+    repo, elsewhere = tmp_path / "p", tmp_path / "fast-disk"
+    repo.mkdir()
+    elsewhere.mkdir()
+    _git(repo, "init", "-q")
+    shutil.copyfile(ROOT / ".gitignore", repo / ".gitignore")
+    links = [".venv", ".venv-pypy", ".venv-wsl", ".build", "dist", "build"]
+    source = ["src/pkg/dist", "tests/build", "src/pkg/__init__.py"]
+    (repo / "src" / "pkg").mkdir(parents=True)
+    (repo / "tests").mkdir()
+    (repo / "src/pkg/__init__.py").write_text("", encoding="utf-8")
+    try:
+        for name in (*links, "src/pkg/dist", "tests/build"):
+            (repo / name).symlink_to(elsewhere / name.replace("/", "-"), target_is_directory=True)
+    except OSError as e:  # Windows without the privilege to make links
+        pytest.skip(f"cannot make a symbolic link here: {e}")
+    r = subprocess.run(["git", "check-ignore", "--stdin", "-z"], cwd=repo, input="\0".join((*links, *source)), capture_output=True, text=True, check=False)
+    assert r.returncode in (0, 1), r.stderr
+    assert {p for p in r.stdout.split("\0") if p} == set(links)
+    status = _git(repo, "status", "--porcelain", "--untracked-files=all", "-z")
+    assert {e[3:] for e in status.split("\0") if e} == {".gitignore", *source}
+
+
 TRACKED = {
     ".gitignore": "*.spec\nhtmlcov/\n.venv*/\n/build/\n",
     ".pytemplate/pyt.py": "# entry\n",

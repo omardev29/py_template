@@ -7,14 +7,16 @@ __pycache__/
 .pytest_cache/
 .hypothesis/
 
-# Environments (one per backend: .venv, .venv-pypy, and their -wsl variants)
-.venv*/
+# Environments (one per backend: .venv, .venv-pypy, and their -wsl variants). No trailing
+# slash here and below: git reads one as "folders only", and a link to a folder on another disk,
+# which ./pyt clean supports, was committed and broke every other clone
+.venv*
 
 # ./pyt outputs (mypyc stage, PyInstaller, runtimes, reports) and artifacts: the root's own
-# folders only (a leading /), since src/<pkg>/build/ or tests/dist/ is source like any other
-/.build/
-/dist/
-/build/
+# only (a leading /), since src/<pkg>/build/ or tests/dist/ is source like any other
+/.build
+/dist
+/build
 /*.spec
 
 # Compiled extensions: mypyc's live in .build/ (one in src/ is a stray build); a vendored

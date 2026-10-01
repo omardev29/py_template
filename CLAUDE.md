@@ -153,8 +153,10 @@ typings/                          project stubs (raylib preset: the corrected ra
 .github/workflows/template-flet/  [template repo] template-flet.yml's steps: check.py (the
                                   target edit, the Flet version, the browser and .apk checks),
                                   browser.txt (the pinned Playwright); not copied
-ignored: .venv*/ *.pyd *.so .flet/ tool caches anywhere; the root's own /.build/ /dist/
-         /build/ /*.spec only (src/<pkg>/build/ and tests/dist/ are source);
+ignored: .venv* *.pyd *.so .flet/ tool caches anywhere; the root's own /.build /dist
+         /build /*.spec only (src/<pkg>/build/ and tests/dist/ are source); no trailing slash
+         on the environments and outputs, which may be links (git reads one as folders only:
+         a committed link broke every other clone);
          .claude/worktrees/ .claude/settings.local.json
 ```
 
@@ -2330,9 +2332,10 @@ Formats:
   `flet build` stage, would otherwise become the project). Plain `envs.uv` calls with a `cwd`
   (nuitka, the stages without a pyproject) rely on the walk reaching `ROOT`.
 - `git clean -fdx` is safe: only envs, the root's `.build/`, `dist/` and `build/`, caches and
-  `.claude/` go (the .gitignore anchors the output folders at the root, `/dist/`: named at any
+  `.claude/` go (the .gitignore anchors the output folders at the root, `/dist`: named at any
   depth, a subpackage or test folder called build or dist was never committed, and this deleted
-  it; section 3, `test_presets.test_the_shipped_gitignore_ignores_only_the_roots_own_outputs`);
+  it; section 3, `test_presets.test_the_shipped_gitignore_ignores_only_the_roots_own_outputs`;
+  a link in their place is ignored too, `test_the_shipped_gitignore_ignores_the_roots_outputs_that_are_links`);
   the next
   `uv run --locked` recreates `.venv` by itself (verified on a clone: `run`, `test all`, `check
   all`, `render --check`, `doctor` all pass without `setup`). pyz and portable run an env's
