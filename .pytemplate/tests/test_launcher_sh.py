@@ -1330,7 +1330,10 @@ def test_the_runner_starts_on_python_cpython_once_the_project_has_an_environment
 
 # --- the Windows-only helpers are plain sh: run them in every POSIX shell ---------------------------
 
-HELPERS = ("_pt_slashes", "_pt_backslashes", "_pt_drive", "_pt_winpath", "_pt_try_uv", "_pt_try_dir", "_pt_expand", "_pt_uv_in_list", "_pt_uv_from_registry")
+HELPERS = (
+    "_pt_slashes", "_pt_backslashes", "_pt_drive", "_pt_winpath", "_pt_try_uv", "_pt_try_dir", "_pt_getenv", "_pt_expand",
+    "_pt_uv_in_list", "_pt_uv_from_registry",
+)  # fmt: skip
 
 
 def _launcher_functions(*names: str) -> str:
@@ -1462,6 +1465,30 @@ def test_registry_path_skips_relative_entries(name: str, tmp_path: Path) -> None
     calls = f"cd {q(str(tmp_path))} || exit 9\n"
     calls += "".join(f"_pt_uv=\nif _pt_uv_in_list {q(v)}; then printf 'L:%s\\n' \"$_pt_uv\"; else printf 'L:none\\n'; fi\n" for v in lists)
     assert _run_helpers(name, calls, _clean_env(PT_REL="rel")) == ["L:none"] * 5 + [f"L:/{rel / 'uv'}"]
+
+
+@needs_posix
+@pytest.mark.parametrize("name", ["sh", "dash", "bash", "busybox", "ksh", "mksh", "yash", "zsh"])
+def test_registry_path_reads_a_windows_name_with_parentheses(name: str, tmp_path: Path) -> None:
+    """%ProgramFiles(x86)% names a variable sh cannot spell, which pyt.cmd and pyt.ps1 expand: pyt
+    dropped every such entry. It reads the name with printenv, never eval, from the environment
+    the shell hands its children, where bash, ksh, yash and zsh keep it (dash, busybox and mksh
+    drop it when they start: there the entry is skipped and the next one still counts). A name
+    with other characters is never read, and nothing it holds runs."""
+    if not shutil.which("printenv"):
+        pytest.skip("printenv not found")
+    uvdir = tmp_path / "x86 dir"
+    uvdir.mkdir()
+    (uvdir / "uv").write_text("#!/bin/sh\n", encoding="ascii")
+    (uvdir / "uv").chmod(0o755)
+    share = "/" + str(uvdir)  # a share, //tmp/..., which the kernel reads as /tmp/...
+    env = _clean_env(**{"PT_PF(x86)": share, "PT_UP(X86)": share, "PT_OK": share})
+    kept = Run([*_shell_argv(name), "-c", 'printenv "PT_PF(x86)"'], ROOT, env).out.strip() == share
+    lists = ["%PT_PF(x86)%", "%pt_up(x86)%", "%PT_PF(x86)`printf RAN`%", "%PT_NO(x86)%;%PT_OK%"]
+    calls = "".join(f"_pt_uv=\nif _pt_uv_in_list {q(v)}; then printf 'L:%s\\n' \"$_pt_uv\"; else printf 'L:none\\n'; fi\n" for v in lists)
+    found = f"L:/{uvdir / 'uv'}"
+    want = [found, found] if kept else ["L:none", "L:none"]
+    assert _run_helpers(name, calls, env) == [*want, "L:none", found]
 
 
 # --- the uv search order (CLAUDE.md 4.1), for ./pyt and pyt.ps1 -------------------------------

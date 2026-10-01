@@ -439,8 +439,23 @@ _pt_find_uv_dirs() {
     return 1
 }
 
+# $1 = a variable name -> its value in _pt_v (empty when unset). A Windows
+# name sh cannot spell, ProgramFiles(x86), is read with printenv (never eval)
+# from the environment the shell hands its children: bash, ksh, yash and zsh
+# keep such a name there; dash, busybox and mksh drop it when they start, and
+# then it reads as unset (pyt.cmd and pyt.ps1 expand it).
+_pt_getenv() {
+    _pt_v=
+    case $1 in
+        '' | [0-9]* | *[!A-Za-z0-9_\(\)]*) ;;
+        *[\(\)]*) _pt_v=$(printenv "$1" 2>/dev/null) || _pt_v= ;;
+        *) eval "_pt_v=\${$1-}" ;;
+    esac
+}
+
 # %NAME% -> its value (exact name, then upper case: MSYS2/Cygwin upper-case
-# SYSTEMROOT, PROGRAMFILES...). Fails on an unknown name.
+# SYSTEMROOT, PROGRAMFILES...). Fails on a name with no value here: unset, or
+# one _pt_getenv cannot read.
 _pt_expand() {
     _pt_r=
     _pt_s=$1
@@ -455,19 +470,11 @@ _pt_expand() {
         _pt_s=${_pt_s#*%}
         _pt_n=${_pt_s%%\%*}
         _pt_s=${_pt_s#*%}
-        _pt_v=
-        case $_pt_n in
-            '' | [0-9]* | *[!A-Za-z0-9_]*) ;;
-            *)
-                eval "_pt_v=\${$_pt_n-}"
-                if [ -z "$_pt_v" ] && command -v tr >/dev/null 2>&1; then
-                    _pt_n=$(printf '%s' "$_pt_n" | tr '[:lower:]' '[:upper:]') || _pt_n=
-                    case $_pt_n in
-                        '' | [0-9]* | *[!A-Za-z0-9_]*) ;;
-                        *) eval "_pt_v=\${$_pt_n-}" ;;
-                    esac
-                fi ;;
-        esac
+        _pt_getenv "$_pt_n"
+        if [ -z "$_pt_v" ] && command -v tr >/dev/null 2>&1; then
+            _pt_n=$(printf '%s' "$_pt_n" | tr '[:lower:]' '[:upper:]') || _pt_n=
+            _pt_getenv "$_pt_n"
+        fi
         if [ -z "$_pt_v" ]; then
             return 1
         fi
@@ -658,8 +665,8 @@ else
 fi
 
 unset -f _pt_slashes _pt_backslashes _pt_drive _pt_winpath _pt_entry_in _pt_from_launcher \
-    _pt_foreign _pt_walk _pt_installed _pt_try_uv _pt_try_dir _pt_find_uv_dirs _pt_expand _pt_uv_in_list \
-    _pt_uv_from_registry
+    _pt_foreign _pt_walk _pt_installed _pt_try_uv _pt_try_dir _pt_find_uv_dirs _pt_getenv _pt_expand \
+    _pt_uv_in_list _pt_uv_from_registry
 unset _pt_self _pt_r _pt_s _pt_p _pt_t _pt_d _pt_c _pt_n _pt_link _pt_pwd _pt_root _pt_other _pt_win \
     _pt_entry _pt_global _pt_exe _pt_uv _pt_h _pt_l _pt_f _pt_a _pt_g _pt_v _pt_rest _pt_e _pt_cr _pt_k \
     _pt_o _pt_launcher _pt_script _pt_cwd _pt_py _pt_pref _pt_rc

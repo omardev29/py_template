@@ -411,7 +411,12 @@ header rules (with detector tests proving each rule fires).
   itself, while the old `\home\x` named a folder on the current drive and every command
   failed (`test_winpath_inside_the_msys_root`).
 - `%NAME%` in registry values is expanded from the environment, retrying the upper-case name
-  (MSYS2/Cygwin upper-case `SYSTEMROOT`, `PROGRAMFILES`...). Quoted entries
+  (MSYS2/Cygwin upper-case `SYSTEMROOT`, `PROGRAMFILES`...). A name sh cannot spell,
+  `%ProgramFiles(x86)%`, is read with `printenv`, never `eval` (`_pt_getenv`), from the
+  environment the shell hands its children, as pyt.cmd and pyt.ps1 expand it: bash (Git Bash,
+  MSYS2), ksh, yash and zsh keep such a name there, dash, busybox and mksh drop it when they
+  start (measured on Linux), and there the entry is skipped; every such entry was dropped
+  (`test_registry_path_reads_a_windows_name_with_parentheses`). Quoted entries
   (`"C:\Program Files\x"`, written by some installers) lose their quotes first. An entry that
   names a variable not defined is skipped (`_pt_expand` returns 1), and so is one that is not
   absolute (`X:\`, `X:/`, a share `\\server`: `_pt_uv_in_list`): a relative one names a folder
