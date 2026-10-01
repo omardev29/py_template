@@ -551,11 +551,14 @@ _KEYBOARD_INTERRUPT = re.compile(r"^!+ KeyboardInterrupt !+$")  # pytest's banne
 
 def _interrupted_at(output: str) -> str | None:
     """Where pytest says a KeyboardInterrupt ended its session (the line after its banner:
-    "path:line: KeyboardInterrupt"), None when none did."""
+    "path:line: KeyboardInterrupt"), None when none did. A line over 200 characters keeps its
+    end: pytest names the test file by its absolute path, and under a long folder (a long
+    TMPDIR or base) the first 200 characters were folders, the file and line cut off."""
     lines = output.splitlines()
     for i, line in enumerate(lines):
         if _KEYBOARD_INTERRUPT.match(line.strip()):
-            return next((x.strip()[:200] for x in lines[i + 1 :] if x.strip()), "KeyboardInterrupt")
+            where = next((x.strip() for x in lines[i + 1 :] if x.strip()), "KeyboardInterrupt")
+            return where if len(where) <= 200 else "..." + where[-197:]
     return None
 
 

@@ -649,12 +649,18 @@ def test_classify_a_run_that_was_ended() -> None:
 
 def test_a_detail_is_cut_to_200_characters() -> None:
     """The line of the failing test, of the place a KeyboardInterrupt ended the tests, or the last
-    one of a crash: one line of the report each, however long (a test id with a long parameter)."""
+    one of a crash: one line of the report each, however long (a test id with a long parameter).
+    The place keeps its end, the file and line: pytest names the file by its absolute path, whose
+    first 200 characters under a long folder were folders only (A10-04)."""
     long = "x" * 300
     failed = f"FAILED t.py::test_x[{long}] - assert 0"
     assert mutation.classify(1, f"{failed}\n1 failed in 1.00s\n") == (KILLED, failed[:200])
-    where, banner = f"/w0/{long}.py:4: KeyboardInterrupt", f"{'!' * 30} KeyboardInterrupt {'!' * 30}"
-    assert mutation.classify(2, f"{banner}\n{where}\n1 passed in 1.00s\n") == (KILLED, f"a KeyboardInterrupt ended the tests: {where[:200]}")
+    where, banner = f"/w0/{long}/test_x.py:4: KeyboardInterrupt", f"{'!' * 30} KeyboardInterrupt {'!' * 30}"
+    status, detail = mutation.classify(2, f"{banner}\n{where}\n1 passed in 1.00s\n")
+    assert (status, detail) == (KILLED, f"a KeyboardInterrupt ended the tests: ...{where[-197:]}")
+    assert detail.endswith("/test_x.py:4: KeyboardInterrupt") and len(detail.split(": ", 1)[1]) == 200
+    short = "/w0/t/test_x.py:4: KeyboardInterrupt"
+    assert mutation.classify(2, f"{banner}\n{short}\n1 passed in 1.00s\n") == (KILLED, f"a KeyboardInterrupt ended the tests: {short}")
     assert mutation.classify(0, f"{long}\n") == (mutation.ERROR, f"exit code 0 without pytest's summary line: {long[:200]}")
 
 
@@ -1153,8 +1159,13 @@ def test_run_uses_the_suites_own_pytest_settings(tmp_path: Path) -> None:
 @pytest.mark.usefixtures("default_signals")
 def test_a_test_run_that_a_keyboard_interrupt_ends_is_a_kill(tmp_path: Path) -> None:
     """For real: a test that sends itself SIGINT (a mutant switched off the handler it counted
-    on), first or after others. The runs were not stopped: the tests' own interrupt."""
-    worker = _worker(tmp_path, {
+    on), first or after others. The runs were not stopped: the tests' own interrupt. The copy
+    lies deep enough that pytest's "path:line: KeyboardInterrupt" line passes 200 characters
+    whatever TMPDIR is: the detail kept its first 200 (folders) and lost the file and line, and
+    this test failed under a long TMPDIR (A10-04). It stays under Windows' 260 for the file."""
+    deep = tmp_path / ("d" * max(1, 170 - len(str(tmp_path)) - 1))
+    deep.mkdir()
+    worker = _worker(deep, {
         "test_first.py": "import signal\n\ndef test_sig():\n    signal.raise_signal(signal.SIGINT)\n",
         "test_later.py": "def test_ok():\n    pass\n\ndef test_ki():\n    raise KeyboardInterrupt\n",
     })  # fmt: skip

@@ -4455,8 +4455,11 @@ short temp tree and unset `NVIM_APPNAME`.
     (exit 1 or 2; "subtests failed" counts, "xfailed" never), or its KeyboardInterrupt banner with
     exit 2 in a run the suite did not stop (the tests' own interrupt, which the mutant caused: one
     that switched a signal handler off; pytest counts no failure then, and its summary may be "no
-    tests ran"); a survivor the summary with none (exit 0); any other end (no summary: a crash, a
-    Python that did not start) is an error, never a kill, and keeps its log. Colour codes are read
+    tests ran"; the detail is the `path:line` pytest names, its end kept when it passes 200
+    characters, `_interrupted_at`: the start of an absolute path under a long base or TMPDIR is
+    folders only, and the file and line were cut off); a survivor the summary with none (exit 0);
+    any other end (no summary: a crash, a Python that did not start) is an error, never a kill,
+    and keeps its log. Colour codes are read
     through (`pytest_counts`). A run the suite stopped (Ctrl+C, SIGTERM, SIGHUP:
     `e2e.termination_as_interrupt`) proves nothing and is not run, whatever it returned (`Runs.run`
     gives None: stop() may kill it before its own loop sees the stop). The terminal's Ctrl+C never
