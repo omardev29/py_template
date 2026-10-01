@@ -717,26 +717,43 @@ def test_real_nvim_query_and_trust(tmp_path: Path) -> None:
     assert not (file.parent / "nvim.log").exists() and not Path("nvim.log").exists()
 
 
-# What older Neovims answer, on the Neovim at hand: before 0.10 vim.version() is a plain table
-# (tostring gives "table: 0x..."), before 0.8 stdpath('state') is an error (E6100).
+# What older Neovims answer, on the Neovim at hand: api_info() gives their version (before 0.10
+# vim.version() is a plain table, tostring gives "table: 0x..."), before 0.8 stdpath('state') is
+# an error (E6100), before 0.6 there is no vim.json (0.5.1: the query died on it), before 0.5 no
+# vim.fn and no vim.version() (0.4.4 of Debian 11). The fakes wrap nvim_call_function, then hide
+# what the old Neovim lacks while the query runs, and put it back for Neovim's own exit.
+_FAKE_CALL = (
+    "local call = vim.api.nvim_call_function; PT_SAVED = { fn = vim.fn, version = vim.version, json = vim.json }; "
+    "vim.api.nvim_call_function = function(name, args) "
+    "if name == 'api_info' then local info = call(name, args); info.version = PT_OLD; return info end; "
+    "if name == 'stdpath' and args[1] == 'state' and PT_NO_STATE then error('E6100: state is not a valid stdpath') end; "
+    "return call(name, args) end"
+)
 OLD_API = {
-    "0.9.5": "vim.version = function() return { major = 0, minor = 9, patch = 5, api_level = 11, api_prerelease = false } end",
-    "0.7.2": "vim.version = function() return { major = 0, minor = 7, patch = 2, api_level = 9, api_prerelease = false } end; "
-    "local sp = vim.fn.stdpath; vim.fn.stdpath = function(what) if what == 'state' then error('E6100: state is not a valid stdpath') end return sp(what) end",
+    "0.9.5": "PT_OLD = { major = 0, minor = 9, patch = 5, api_level = 11, api_prerelease = false }; " + _FAKE_CALL,
+    "0.7.2": "PT_OLD = { major = 0, minor = 7, patch = 2, api_level = 9, api_prerelease = false }; PT_NO_STATE = true; " + _FAKE_CALL,
+    "0.5.1": "PT_OLD = { major = 0, minor = 5, patch = 1, api_level = 7, api_prerelease = false }; PT_NO_STATE = true; "
+    + _FAKE_CALL
+    + "; vim.json = nil",
+    "0.4.4": "PT_OLD = { major = 0, minor = 4, patch = 4, api_level = 6, api_prerelease = false }; PT_NO_STATE = true; "
+    + _FAKE_CALL
+    + "; vim.json = nil; vim.fn = nil; vim.version = nil",
 }
+_PUT_BACK = "; vim.fn, vim.version, vim.json = PT_SAVED.fn, PT_SAVED.version, PT_SAVED.json"
 
 
 @pytest.mark.skipif(shutil.which("nvim") is None, reason="nvim not in PATH")
 @pytest.mark.parametrize("old", sorted(OLD_API))
 def test_query_reports_an_old_neovim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old: str) -> None:
-    """An old distro Neovim on PATH (Ubuntu 24.04: 0.9.5, Debian 12: 0.7.2) must be reported as too
-    old by nvim doctor and skipped by selftest --nvim, not break the query (exit 3)."""
-    monkeypatch.setattr(cmd_nvim, "QUERY_LUA", "lua " + OLD_API[old] + "; " + cmd_nvim.QUERY_LUA.removeprefix("lua "))
+    """An old distro Neovim on PATH (Ubuntu 24.04: 0.9.5, Debian 12: 0.7.2, Debian 11: 0.4.4) must
+    be reported as too old by nvim doctor and skipped by selftest --nvim, not break the query (exit
+    3): on 0.5.1 it died on vim.json, which came with 0.6, and printed the raw Lua error (A9-02)."""
+    monkeypatch.setattr(cmd_nvim, "QUERY_LUA", "lua " + OLD_API[old] + "; " + cmd_nvim.QUERY_LUA.removeprefix("lua ") + _PUT_BACK)
     layout = nvimtest.Layout(tmp_path / "w")
     nv = cmd_nvim.query(shutil.which("nvim"), env=nvimtest.nvim_env(layout, dict(os.environ)))
     assert nv is not None and nv.version_text == old and nv.version < cmd_nvim.MIN_LAZYVIM
     nvimtest._check_isolated(nv, layout)
-    if old == "0.7.2":
+    if old != "0.9.5":
         assert nv.state == nv.data, "no state dir before 0.8: the data dir held what it holds now"
 
 
@@ -756,7 +773,9 @@ def test_an_nvim_that_cannot_run_is_a_clear_error(tmp_path: Path, monkeypatch: p
 
 
 def test_query_lua_needs_no_new_api() -> None:
-    assert "tostring(vim.version())" not in cmd_nvim.QUERY_LUA and "pcall(vim.fn.stdpath, 'state')" in cmd_nvim.QUERY_LUA
+    for newer in ("vim.version", "vim.fn", "vim.json", "vim.v."):  # 0.5, 0.5, 0.6, 0.5
+        assert newer not in cmd_nvim.QUERY_LUA, newer
+    assert "pcall(f, 'stdpath', {'state'})" in cmd_nvim.QUERY_LUA
     assert '"' not in cmd_nvim.QUERY_LUA, "the -c snippet crosses the Windows command line"
 
 

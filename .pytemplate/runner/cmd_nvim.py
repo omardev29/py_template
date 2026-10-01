@@ -89,15 +89,19 @@ def rtp_unsafe_char(path: PurePath, *, windows: bool = IS_WINDOWS) -> str | None
 
 # `-c` snippets: one line each, no double quotes (they go through the Windows command line).
 # QUERY_LUA must work on ANY Neovim, so an old one is reported as too old (doctor) or skipped
-# (selftest --nvim): vim.version() is a plain table before 0.10 (tostring gives "table: 0x..."),
-# and stdpath('state') is an error before 0.8 (the data dir held the shada then).
+# (selftest --nvim): it calls only the API functions every Neovim with Lua has (0.3.4 of Debian 10
+# included): api_info(), stdpath() and json_encode() through nvim_call_function. vim.version() is
+# a plain table before 0.10 (tostring gives "table: 0x...") and missing before 0.5, like vim.fn;
+# vim.json came with 0.6 (on 0.5.1 the query died on it, a raw Lua error instead of "too old");
+# stdpath('state') is an error before 0.8 (the data dir held the shada then).
 QUERY_LUA = (
-    "lua local v = vim.version(); local has_state, state = pcall(vim.fn.stdpath, 'state'); "
-    "io.stdout:write('" + MARK + "' .. vim.json.encode({"
-    "config = vim.fn.stdpath('config'), data = vim.fn.stdpath('data'), "
-    "state = has_state and state or vim.fn.stdpath('data'), cache = vim.fn.stdpath('cache'), "
-    "version = v.major .. '.' .. v.minor .. '.' .. v.patch, progpath = vim.v.progpath"
-    "}) .. '\\n')"
+    "lua local f = vim.api.nvim_call_function; local v = f('api_info', {}).version; "
+    "local has_state, state = pcall(f, 'stdpath', {'state'}); "
+    "io.stdout:write('" + MARK + "' .. f('json_encode', {{"
+    "config = f('stdpath', {'config'}), data = f('stdpath', {'data'}), "
+    "state = has_state and state or f('stdpath', {'data'}), cache = f('stdpath', {'cache'}), "
+    "version = v.major .. '.' .. v.minor .. '.' .. v.patch, progpath = vim.api.nvim_get_vvar('progpath')"
+    "}}) .. '\\n')"
 )
 # The file comes in $PT_TRUST_FILE (no quoting problems). The trust DB is written with
 # io.open(state .. '/trust', 'w'), which fails if the state directory does not exist yet.
