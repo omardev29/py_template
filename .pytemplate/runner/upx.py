@@ -216,7 +216,13 @@ def locate(cfg: Config) -> Path | None:
         if not _runnable(path):  # a checkout from Windows or a zip lost its x bit: pack_file died later
             raise PytError(f"deploy.upx.path = {cfg.deploy.upx.path!r} is not executable ({path}): chmod +x {shlex.quote(str(path))}", 3)
         return path
-    on_path = shutil.which("upx", path=proc.base_env().get("PATH"))
+    env = proc.base_env()
+    if IS_WINDOWS:  # shutil.which searches the current folder first there: the caller's, never PATH
+        from .tasks import _on_windows_path
+
+        on_path = _on_windows_path("upx", env, Path.cwd())
+    else:
+        on_path = shutil.which("upx", path=env.get("PATH"))
     if on_path:
         return Path(on_path).absolute()  # a relative PATH entry: the tools run in other folders
     cached = _cache_dir() / _exe_name()

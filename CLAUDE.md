@@ -3030,7 +3030,9 @@ Per method:
   its x bit, `upx._runnable`, or the preflight refuses it with the `chmod +x` line: a checkout
   from Windows passed it, and the portable build died in `upx.pack_file` with a traceback after
   the runtime copy; `pack_file` turns a upx that cannot start into a PytError), `upx` on
-  PATH, the cache (a cached copy without its x bit is downloaded again), a download: UPX 5.2.1
+  PATH (on Windows by `tasks._on_windows_path`, never the current folder, which shutil.which
+  searches first there: the caller's, whose `upx.exe` won), the cache (a cached copy without its
+  x bit is downloaded again), a download: UPX 5.2.1
   once (SHA-256 checked, written as `.part` then renamed so an interrupted write never looks
   cached; a cache folder it cannot make or write is exit 3 naming it, not a traceback) to
   `%LOCALAPPDATA%\pytemplate\tools\upx-5.2.1` / `$XDG_CACHE_HOME/pytemplate/tools`
@@ -6508,7 +6510,9 @@ Code coupling (rename together):
   `cmd_nvim.c_compiler` imports `cmd_env._msvc` and `_xcode_problem` lazily (`cmd_env` imports
   `cmd_nvim`); `presets._record` imports `cmd_apply` lazily (`cmd_apply` imports `presets`);
   `cmd_install._is_link` imports `cmd_env._is_link` lazily (`cmd_env` imports `cmd_install`), and
-  `cmd_mode.cmd_new` the private `cli._prog` (the `pyt`/`./pyt` rule of `help`).
+  `cmd_mode.cmd_new` the private `cli._prog` (the `pyt`/`./pyt` rule of `help`); `upx.locate`
+  calls the private `tasks._on_windows_path` lazily (one PATH search on Windows that never takes
+  the current folder).
 - `cmd_apply._block_options` reads the preset.toml `[uv]` templates back from the values
   `render.managed_block` wrote with `presets.uv_extras` (`str.format_map`, reversed by
   `cmd_apply._unformat`): a template with a format spec or conversion is never read back.

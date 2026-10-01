@@ -217,6 +217,33 @@ def test_the_upx_cache_and_a_upx_on_path_are_absolute(monkeypatch: pytest.Monkey
     assert found is not None and found.is_absolute() and os.path.normcase(found) == os.path.normcase(tool)
 
 
+def test_upx_on_path_is_never_the_one_in_the_callers_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """shutil.which searches the current folder before PATH on Windows (unless
+    NoDefaultCurrentDirectoryInExePath is set), and the runner's current folder is the caller's:
+    an upx.exe in the folder `./pyt build` was typed in won over PATH and the pinned download.
+    Windows is simulated: its PATHEXT, and its shutil.which (CPython's: the current folder first)."""
+    here = tmp_path / "here"
+    here.mkdir()
+    (here / "upx.EXE").write_bytes(b"MZ planted")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "upx.EXE").write_bytes(b"MZ on PATH")
+    monkeypatch.chdir(here)
+    monkeypatch.setattr(upx, "IS_WINDOWS", True)
+    monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": str(bindir), "PATHEXT": ".COM;.EXE"})
+
+    def windows_which(cmd: str, mode: int = os.F_OK | os.X_OK, path: str | None = None) -> str | None:
+        for folder in [os.curdir, *(path or "").split(os.pathsep)]:
+            for ext in (".COM", ".EXE"):
+                if os.path.isfile(os.path.join(folder, cmd + ext)):
+                    return os.path.join(folder, cmd + ext)
+        return None
+
+    monkeypatch.setattr(upx.shutil, "which", windows_which)
+    found = upx.locate(make({"upx": {"enabled": True}}))
+    assert found is not None and os.path.normcase(found) == os.path.normcase(bindir / "upx.EXE")
+
+
 # --- the pinned download, with crafted archives (no network) -----------------------------------------
 
 
