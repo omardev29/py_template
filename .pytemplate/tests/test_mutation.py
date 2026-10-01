@@ -1065,6 +1065,39 @@ def test_make_copy_is_a_repository_of_the_listed_files(tmp_path: Path) -> None:
 
 
 @needs_git
+def test_a_submodule_and_a_nested_repository_reach_the_copy_as_folders(tmp_path: Path) -> None:
+    """git lists a submodule, and a repository nested in the project, as one folder, which
+    make_copy left out: a local library kept in a submodule (`./pyt add ./libs/mylib`) was
+    missing from every worker, whose `uv sync --locked` failed and stopped the run (A10-02).
+    Their own files are listed in their place, as `new` copies a submodule, each repository's
+    ignores its own, and the copy commits them as files."""
+    env = _git_env(tmp_path)
+    lib = _write(tmp_path / "lib", {
+        "pyproject.toml": '[project]\nname = "mylib"\nversion = "0.1"\n', "src/mylib/__init__.py": "VALUE = 1\n",
+        ".gitignore": "build/\n",
+    })  # fmt: skip
+    _git(lib, env, "init", "-q")
+    _git(lib, env, "add", "-A")
+    _git(lib, env, "commit", "-qm", "lib")
+    root = _write(tmp_path / "p", {"a.py": "x\n"})
+    _git(root, env, "init", "-q")
+    _git(root, env, "add", "-A")
+    _git(root, env, "commit", "-qm", "p")
+    _git(root, env, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "libs/mylib")
+    _write(root, {"libs/mylib/build/x.o": "junk\n", "libs/mylib/notes.txt": "n\n", "libs/inner/b.txt": "b\n"})
+    _git(root / "libs" / "inner", env, "init", "-q")
+    files = mutation.listed_files(root, env)
+    assert {"libs/mylib/pyproject.toml", "libs/mylib/src/mylib/__init__.py", "libs/mylib/notes.txt", "libs/inner/b.txt"} <= set(files), files
+    assert not [f for f in files if f.rstrip("/") in ("libs/mylib", "libs/inner") or "/build/" in f or ".git" in f.split("/")], files
+    copy = tmp_path / "copy"
+    mutation.make_copy(root, copy, files, env)
+    assert (copy / "libs" / "mylib" / "src" / "mylib" / "__init__.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert (copy / "libs" / "inner" / "b.txt").is_file() and not (copy / "libs" / "mylib" / ".git").exists()
+    index = subprocess.run(["git", "ls-files", "-s"], cwd=copy, env=env, capture_output=True, text=True, check=True).stdout
+    assert "160000" not in index and "libs/mylib/pyproject.toml" in index and "libs/inner/b.txt" in index, index
+
+
+@needs_git
 def test_make_copy_keeps_the_executables_of_the_projects_index(tmp_path: Path) -> None:
     """Git for Windows' `git init` writes core.filemode = false (NTFS keeps no x bit), and `git
     add` then records every new file as 100644: a worker's pyt and pyt.ps1 lost the 100755 of the

@@ -4609,7 +4609,10 @@ short temp tree and unset `NVIM_APPNAME`.
     no test file imports are untested.
   - where: N workers (`--jobs`, default half the CPUs, at most 8), each a throwaway copy of the
     project in the scratch base (`make_copy`: the files `git ls-files --cached --others
-    --exclude-standard` lists, with their working-tree content, committed into a repository of its
+    --exclude-standard` lists, a submodule's and a nested repository's own files as git lists them
+    there, `mutation.listed_files`: git lists such a folder as one entry, which was skipped, and a
+    local library kept in a submodule failed every worker's `uv sync --locked`,
+    `test_mutation.test_a_submodule_and_a_nested_repository_reach_the_copy_as_folders`), with their working-tree content, committed into a repository of its
     own, whose index records the project's executables as 100755, `mutation.executables`: Git for
     Windows' `git init` writes core.filemode = false, `git add` then recorded pyt and pyt.ps1 as
     100644, and the baselines of runner.project and runner.cmd_install failed in the launcher

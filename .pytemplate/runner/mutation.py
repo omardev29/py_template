@@ -786,9 +786,22 @@ def base_lock(base: Path) -> Iterator[None]:
 
 def listed_files(root: Path, env: Mapping[str, str]) -> list[str]:
     """What a worker's copy holds: the files git lists (tracked, and untracked but not ignored),
-    as the working tree has them."""
+    as the working tree has them. git lists a submodule, and a repository nested in the project
+    (untracked, `libs/inner/`), as one folder, which make_copy skipped: their own files are listed
+    in its place, as git lists them there (each repository's ignores its own), as `new` copies a
+    submodule. A local library kept in a submodule (`./pyt add ./libs/mylib`) was missing from
+    every worker, whose `uv sync --locked` failed and stopped the run. One that is not checked out
+    (no .git in it: git there would answer for the project around it) holds nothing."""
     out = _git(root, env, "ls-files", "-z", "--cached", "--others", "--exclude-standard").stdout
-    return sorted({os.fsdecode(p) for p in out.split(b"\0") if p})
+    found: set[str] = set()
+    for name in {os.fsdecode(p) for p in out.split(b"\0") if p}:
+        folder = root / name
+        if not folder.is_dir() or folder.is_symlink():
+            found.add(name)
+        elif os.path.lexists(folder / ".git"):
+            prefix = name.rstrip("/")
+            found.update(f"{prefix}/{inner}" for inner in listed_files(folder, env))
+    return sorted(found)
 
 
 def executables(root: Path, env: Mapping[str, str]) -> list[str]:
