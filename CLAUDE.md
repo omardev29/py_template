@@ -1356,7 +1356,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   from the working tree fails with `git restore`, and a hint to drop it from the commit that
   never deletes a tracked file: `git rm --cached` only for a file the commit adds,
   `git restore --staged` for the others (`test_hooks.test_the_hint_to_drop_a_missing_file_never_deletes_a_tracked_one`:
-  following `git rm --cached` committed the deletion of a tracked file); the launcher checks
+  following `git rm --cached` committed the deletion of a tracked file), whatever became of its
+  folder (`hooks.run` names the code folders, never asks the disk: with tests/ moved away its
+  staged files were neither checked nor named, `test_a_staged_file_of_a_code_folder_gone_from_the_disk_is_missing`); the launcher checks
   (`shells.launcher_problems`) and the template repo's language guard read the staged content
   too. Project-wide and conservative (they read the working tree, so they may block a commit
   that touches none of their files): generated files up to date (`render.apply(check=True)`)

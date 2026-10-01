@@ -1911,6 +1911,20 @@ def test_the_hint_to_drop_a_missing_file_never_deletes_a_tracked_one(tmp_path: P
 
 
 @needs_git
+def test_a_staged_file_of_a_code_folder_gone_from_the_disk_is_missing(tmp_path: Path, tools: Tools, capsys: pytest.CaptureFixture[str]) -> None:
+    """run() handed the checks only the code folders on disk: with tests/ moved away, a staged
+    tests/test_new.py was neither checked by ruff nor reported missing, and following the render
+    hint the commit then got (render, git add) took it in unchecked, and CI's render --check failed
+    on the clone. It is a staged file missing from the working tree like any other."""
+    repo, _ = staged_project(tmp_path, {"src/a.py": b"x = 1\n", "tests/test_new.py": b"import os\nx  =  1\n"}, commit=["src/a.py"])
+    shutil.move(repo.project / "tests", tmp_path / "tests-aside")
+    assert hooks.run(make(), repo) == 1
+    err = capsys.readouterr().err
+    assert "staged files missing from the working tree: tests/test_new.py" in err, err
+    assert "git rm --cached tests/test_new.py" in err, err
+
+
+@needs_git
 def test_checks_generated_files(tmp_path: Path, tools: Tools) -> None:
     repo, staged = staged_project(tmp_path, {"gen.json": b"{}\n", "src/a.py": b"x = 1\n"}, commit=["gen.json"])
     (repo.project / "gen.json").write_bytes(b'{"new": 1}\n')  # regenerated after the staging

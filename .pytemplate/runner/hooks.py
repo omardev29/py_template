@@ -1854,7 +1854,10 @@ def run(cfg: Config, repo: Repo) -> int:
     n = len(staged) + len(deleted)
     gone = f", {len(deleted)} deleted" if deleted else ""
     ui.step(f"pre-commit: checking {n} staged file{'s' if n != 1 else ''}{gone}")
-    dirs = [d for d in ("src", "tests") if (repo.project / d).is_dir()]
+    # The code folders by name, never by what is on disk: a staged file of a src/ or tests/ gone
+    # from the working tree is a missing file like any other (filtered by existence, it was dropped
+    # without a word, neither checked nor named, and the commit took it in)
+    dirs = ["src", "tests"]
     failed = 0
     template_repo = (TEMPLATE / "template-repo").is_file()
     for result in checks(cfg, repo, staged, code_dirs=dirs, template_repo=template_repo, deleted=deleted):
