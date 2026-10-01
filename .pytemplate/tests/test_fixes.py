@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -362,7 +363,7 @@ def test_system_launchers_probe_the_minimum_version(tmp_path: Path) -> None:
     assert 'py -3.14 -c "import sys; sys.exit(sys.version_info[:2] < (3, 14))" >nul 2>nul && goto run0' in cmd
     assert cmd.isascii() and "\n" not in cmd.replace("\r\n", "")
     sh = portable.sh_launcher(cfg, "pypy", tmp_path, None)
-    assert "for py in pypy3 pypy; do" in sh
+    assert 0 < sh.index("if pypy3 -c ") < sh.index("if pypy -c ")  # in this order
     assert "_pt_self=${BASH_SOURCE:-$0}" in sh  # niubash keeps the caller's $0
 
 
@@ -410,6 +411,34 @@ def test_portable_system_sh_launcher_runs(tmp_path: Path, cpython: str) -> None:
     else:
         assert r.returncode == 0, r.stdout + r.stderr
         assert json.loads(r.stdout.strip().splitlines()[-1]) == {"env": POSIX_TRICKY}
+
+
+@pytest.mark.skipif(_posix_sh() is None, reason="no POSIX sh")
+@pytest.mark.parametrize("runtime", ["bundled", "system"])
+def test_portable_sh_launcher_keeps_its_folder_whatever_the_env_names(tmp_path: Path, runtime: str) -> None:
+    # The launcher kept its folder in HERE (and the system one its interpreter in py), then
+    # exported [deploy.portable] env: a variable named HERE made it run <the value>/boot.py, so the
+    # app never started, and one named py reached the app holding the interpreter's name
+    if runtime == "bundled" and IS_WINDOWS:
+        pytest.skip("a bundled build writes no .sh launcher on Windows")
+    out = _portable_folder(tmp_path)
+    values = {"HERE": "/srv/data", "py": "mine", "_pt_dir": "kept"}
+    cfg = make({"python": {"cpython": "3.11"}, "deploy": {"portable": {"runtime": runtime, "env": values}}})
+    python = None
+    if runtime == "bundled":
+        python = out / "runtime" / "bin" / "python3"
+        python.parent.mkdir(parents=True)
+        python.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n', encoding="utf-8")
+        python.chmod(0o755)
+    path = out / "app.sh"
+    path.write_text(portable.sh_launcher(cfg, "cpython", out, python), encoding="utf-8", newline="\n")
+    env = dict(os.environ)
+    env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
+    sh = _posix_sh()
+    assert sh is not None
+    r = subprocess.run([sh, path.as_posix(), "+".join(values)], capture_output=True, text=True, env=env, timeout=120, check=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads(r.stdout.strip().splitlines()[-1]) == {"env": values}
 
 
 # --- 8. commands reject unknown arguments ---------------------------------------------------------

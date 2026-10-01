@@ -280,7 +280,7 @@ def sh_launcher(cfg: Config, backend: str, out: Path, python: Path | None, env: 
         # The folder of this script. BASH_SOURCE first: shells that run sh scripts in-process
         # (niubash) keep the caller's $0. Symlinks are followed (a link in ~/.local/bin), each
         # relative target joined to the PHYSICAL folder of its link; CDPATH='' because an
-        # exported CDPATH made cd print the folder (HERE got two lines) or pick another one.
+        # exported CDPATH made cd print the folder (it got two lines) or pick another one.
         "_pt_self=${BASH_SOURCE:-$0}",
         "_pt_n=0",
         'while [ -h "$_pt_self" ] && [ "$_pt_n" -lt 40 ]; do',
@@ -294,20 +294,25 @@ def sh_launcher(cfg: Config, backend: str, out: Path, python: Path | None, env: 
         "    esac",
         "done",
         '_pt_dir=$(dirname "$_pt_self")',
-        "HERE=$(CDPATH='' cd -P -- \"$_pt_dir\" && pwd -P)",
-        "unset _pt_self _pt_dir _pt_link _pt_n",
-        *_env_lines(cfg, False, env),
+        "_pt_dir=$(CDPATH='' cd -P -- \"$_pt_dir\" && pwd -P)",
     ]
+    # What runs goes into the positional parameters, so no variable of the launcher's is left once
+    # the [deploy.portable] env variables are exported: they kept the folder in HERE and the
+    # interpreter in py, and a variable named HERE ran <its value>/boot.py (the app never started)
     if python is not None:
-        lines.append(f'exec "$HERE/{python.relative_to(out).as_posix()}" {flags} "$HERE/boot.py" "$@"')
+        lines.append(f'set -- "$_pt_dir/{python.relative_to(out).as_posix()}" {flags} "$_pt_dir/boot.py" "$@"')
+    else:
+        lines.append('set -- "$_pt_dir/boot.py" "$@"')
+    lines += ["unset _pt_self _pt_dir _pt_link _pt_n", *_env_lines(cfg, False, env)]
+    if python is not None:
+        lines.append('exec "$@"')
     else:
         need = "PyPy" if backend == "pypy" else "Python"
+        probe = shlex.quote(_version_probe(cfg))
+        for candidate in _system_candidates(cfg, backend, windows=False):
+            run = shlex.quote(candidate)
+            lines += [f"if {run} -c {probe} >/dev/null 2>&1; then", f'    exec {run} {flags} "$@"', "fi"]
         lines += [
-            f"for py in {' '.join(_system_candidates(cfg, backend, windows=False))}; do",
-            f"    if \"$py\" -c {shlex.quote(_version_probe(cfg))} >/dev/null 2>&1; then",
-            f'        exec "$py" {flags} "$HERE/boot.py" "$@"',
-            "    fi",
-            "done",
             f"echo \"{name}: needs {need} {cfg.min_python} or newer in PATH\" >&2",
             "exit 127",
         ]

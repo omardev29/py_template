@@ -3006,7 +3006,12 @@ Per method:
     caller's `$0`) with symlinks resolved (a `readlink` loop, at most 40 links, each relative
     target joined to the `cd -P`/`pwd -P` folder of its link: a logical `cd`, and ksh93's `cd -P`
     on a relative path, fold `..` as text) and `CDPATH=''` (an exported CDPATH made `cd` print the
-    folder or pick another one); its `_pt_*` helpers are unset. Both use `-s` plus `-O`/`-OO`,
+    folder or pick another one); its `_pt_*` helpers are unset, and what it runs goes into the
+    positional parameters (`set --`) before the `deploy.portable.env` values are exported, the
+    `runtime = "system"` candidates one `if` each: no variable of its own is left for one of
+    theirs to replace (it kept the folder in `HERE`, and `env = { HERE = "..." }` ran
+    `<value>/boot.py`; a loop variable `py` reached the app holding the interpreter's name,
+    `test_fixes.test_portable_sh_launcher_keeps_its_folder_whatever_the_env_names`). Both use `-s` plus `-O`/`-OO`,
     never `-I`/`-E` (Python would ignore `PYTHONUTF8` and the `PYTHON*` values of
     `deploy.portable.env`), and set `PYTHONUTF8=1`.
   - `runtime = "system"`: each launcher RUNS every candidate interpreter with a minimum-version
@@ -7036,8 +7041,9 @@ Behaviour:
   `%CD%`, `pyt.ps1`'s location and the MSYS2/Git Bash `pyt` are logical; resolving the reparse
   point of each folder is not done). cd to the folder it points to. Linux and macOS walk up
   from the physical folder too.
-- niubash: the generated portable `.sh` launcher leaks `HERE` and its exported variables into
-  the calling session (niubash runs sh scripts in-process; its `_pt_*` helpers are unset). Its
+- niubash: the generated portable `.sh` launcher leaks its exported variables (`PYTHONUTF8` and
+  the `deploy.portable.env` ones) into the calling session (niubash runs sh scripts in-process;
+  its `_pt_*` helpers are unset). Its
   `cd -P`/`pwd -P`/`CDPATH=''` symlink resolution is verified with dash, bash, zsh, ksh, mksh,
   yash and busybox, not with niubash.
 - Portable: a runtime layout change in python-build-standalone or PyPy (bin/python3 missing, the
