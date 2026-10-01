@@ -399,10 +399,23 @@ CHAIN_LINES = (
     "    _pt_interp=${_pt_line%% *}",
     '    _pt_args=${_pt_line#"$_pt_interp"}',
     '    _pt_args=${_pt_args#"${_pt_args%%[! ]*}"}',
+    "    _pt_split=",
     '    if [ "${_pt_interp##*/}" = env ]; then',
-    "        _pt_interp=${_pt_args%% *}",
-    '        _pt_args=${_pt_args#"$_pt_interp"}',
-    '        _pt_args=${_pt_args#"${_pt_args%%[! ]*}"}',
+    # env's options (-S, -i, -u NAME...) and NAME=VALUE words come before the program it runs
+    # (interpreter reads them alike); -S splits the rest of the line into words, as env does
+    "        _pt_interp=",
+    '        while [ -z "$_pt_interp" ] && [ -n "$_pt_args" ]; do',
+    "            _pt_word=${_pt_args%% *}",
+    '            _pt_args=${_pt_args#"$_pt_word"}',
+    '            _pt_args=${_pt_args#"${_pt_args%%[! ]*}"}',
+    "            case $_pt_word in",
+    '                -u|-C|--unset|--chdir) _pt_args=${_pt_args#"${_pt_args%% *}"}; _pt_args=${_pt_args#"${_pt_args%%[! ]*}"} ;;',
+    "                -S|--split-string) _pt_split=1 ;;",
+    '                -S*|--split-string=*) _pt_split=1; _pt_args="${_pt_word#*[S=]} $_pt_args" ;;',
+    "                -*|*=*) ;;",
+    "                *) _pt_interp=$_pt_word ;;",
+    "            esac",
+    "        done",
     "    fi",
     '    _pt_args=${_pt_args%"${_pt_args##*[! ]}"}',
     f"    if grep -q {_OURS_GREP} \"$_pt_local\" 2>/dev/null && grep -q '^_pt_launcher=' \"$_pt_local\" 2>/dev/null; then",
@@ -410,23 +423,61 @@ CHAIN_LINES = (
     "    else",
     "        case ${_pt_interp##*/} in",
     f"            {'|'.join(SHELLS)})",
-    '                _PT_HOOK=$_pt_local "$_pt_interp" ${_pt_args:+"$_pt_args"} -c ". \\"\\$_PT_HOOK\\"" "$_pt_dir/pre-commit" "$@" || exit $? ;;',
+    '                if [ -z "$_pt_split" ]; then',
+    '                    _PT_HOOK=$_pt_local "$_pt_interp" ${_pt_args:+"$_pt_args"} -c ". \\"\\$_PT_HOOK\\"" "$_pt_dir/pre-commit" "$@" || exit $?',
+    "                else",
+    # each word an argument of its own, before -c, and the hook's own arguments last
+    "                    (",
+    "                        _pt_n=$#",
+    '                        while [ -n "$_pt_args" ]; do',
+    "                            _pt_word=${_pt_args%% *}",
+    '                            _pt_args=${_pt_args#"$_pt_word"}',
+    '                            _pt_args=${_pt_args#"${_pt_args%%[! ]*}"}',
+    '                            set -- "$@" "$_pt_word"',
+    "                        done",
+    '                        set -- "$@" -c ". \\"\\$_PT_HOOK\\"" "$_pt_dir/pre-commit"',
+    '                        while [ "$_pt_n" -gt 0 ]; do',
+    '                            set -- "$@" "$1"',
+    "                            shift",
+    "                            _pt_n=$((_pt_n - 1))",
+    "                        done",
+    '                        _PT_HOOK=$_pt_local "$_pt_interp" "$@"',
+    "                    ) || exit $?",
+    "                fi ;;",
     '            *) "$_pt_local" "$@" || exit $? ;;',
     "        esac",
     "    fi",
 )
+# env's options that take the next word as their value (env -u NAME, -C DIR)
+_ENV_VALUE_OPTIONS = ("-u", "-C", "--unset", "--chdir")
 _NAME_READS = re.compile(r"\$0\b|\$\{0\}|argv\[0\]|__FILE__|\$PROGRAM_NAME|process\.argv")
 
 
+def _after_env(words: list[str]) -> list[str]:
+    """The words of a #! line from the program env runs: env's options (-S, -i, -u NAME, -C DIR,
+    `-Sbash`...) and NAME=VALUE words come first (`#!/usr/bin/env -S bash -e` named '-S')."""
+    rest = list(words)
+    while rest:
+        word = rest.pop(0)
+        if word in _ENV_VALUE_OPTIONS:
+            rest = rest[1:]
+        elif word.startswith(("--split-string=", "-S")) and word not in ("-S", "--split-string"):
+            return [word.split("=", 1)[1] if word.startswith("--") else word[2:], *rest]
+        elif not word.startswith("-") and "=" not in word:
+            return [word, *rest]
+    return []
+
+
 def interpreter(text: str) -> str:
-    """The program a hook's #! line names (after env, as the hook script reads it); sh without
-    one, and "" for a compiled hook (a NUL byte in its first 64 bytes: it runs by itself)."""
+    """The program a hook's #! line names (after env and its options, as the hook script reads
+    it); sh without one, and "" for a compiled hook (a NUL byte in its first 64 bytes: it runs
+    by itself)."""
     first = text.split("\n", 1)[0].rstrip("\r")
     if not first.startswith("#!"):
         return "" if "\0" in text[:64] else "sh"
     words = first[2:].split()
     if words and words[0].rsplit("/", 1)[-1] == "env":
-        words = words[1:]
+        words = _after_env(words[1:])
     return words[0].rsplit("/", 1)[-1] if words else "sh"
 
 

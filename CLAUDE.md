@@ -1193,7 +1193,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (`test_hooks.test_a_users_hook_that_names_pytemplates_hook_is_never_taken_for_it`,
   `test_every_hook_an_earlier_version_wrote_is_still_pytemplates`). `install --force` renames it to `pre-commit.local` (a
   link moves as a link; a dangling `.local` counts as existing) and ours runs it first, a shell
-  script (`hooks.SHELLS`, its `#!` line read by `hooks.CHAIN_LINES`, flags kept) sourced with
+  script (`hooks.SHELLS`, its `#!` line read by `hooks.CHAIN_LINES`, flags kept; through `env`
+  the program after env's options and NAME=VALUE words, and with `-S` each word after it an
+  argument of its own, as env splits them: `hooks.interpreter`, `_after_env`; `#!/usr/bin/env -S
+  bash -e` named a program `-S`, which install --force refused for a hook that reads `$0` and the
+  hook script ran by its path, `test_a_kept_hook_runs_under_its_own_name`) sourced with
   `$0` = `<hooks>/pre-commit`: husky v4 and yorkie pick their job from `basename "$0"` and find
   their helpers next to it, and run as `pre-commit.local` they checked nothing (a kept
   pytemplate hook is executed instead, told apart by the same two lines as `is_ours` reads,

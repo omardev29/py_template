@@ -2322,14 +2322,27 @@ HELPER = """check_it() {
 """
 
 
+def _env_splits() -> bool:
+    """Whether this env takes -S (GNU coreutils 8.30+, the BSDs, macOS; not busybox)."""
+    try:
+        return subprocess.run(["env", "-S", "true"], capture_output=True, check=False, timeout=30).returncode == 0
+    except OSError:
+        return False
+
+
 @needs_git
-@pytest.mark.parametrize("shebang", ["#!/bin/sh", "#!/bin/sh -e", "#!/usr/bin/env bash"])
+@pytest.mark.parametrize("shebang", ["#!/bin/sh", "#!/bin/sh -e", "#!/usr/bin/env bash", "#!/usr/bin/env -S bash -e", "#!/usr/bin/env -S bash -e -u"])
 def test_a_kept_hook_runs_under_its_own_name(tmp_path: Path, shebang: str) -> None:
     """husky v4 and yorkie pick their job from `basename "$0"` and source their helpers from
     `dirname "$0"`: kept as pre-commit.local and run by that name, the user's blocking check
-    silently checked nothing while pytemplate said it ran first."""
+    silently checked nothing while pytemplate said it ran first. A #! line through `env -S`
+    names its program after env's options (it took '-S' for the program: install --force
+    refused such a bash hook, and the hook script ran it by its path, as pre-commit.local), and
+    each word after it is an argument of its own, as env -S splits them."""
     if "bash" in shebang and shutil.which("bash") is None:
         pytest.skip("no bash")
+    if " -S " in shebang and not _env_splits():
+        pytest.skip("this env has no -S")
     top, project = make_repo(tmp_path)
     (project / "pyt").write_bytes(FAKE_LAUNCHER.encode("ascii"))
     (top / ".topmark").write_text("", encoding="utf-8")
@@ -2400,7 +2413,19 @@ def test_interpreter_reads_the_hash_bang_line_as_the_hook_does() -> None:
     assert hooks.interpreter("#!/bin/sh\n") == "sh"
     assert hooks.interpreter("#! /bin/bash -e\r\n") == "bash"
     assert hooks.interpreter("#!/usr/bin/env python3\n") == "python3"
-    assert hooks.interpreter("#!/usr/bin/env -S ruby -w\n") == "-S"  # as the hook script: run by its path
+    # env's options and NAME=VALUE words come before the program (it named '-S', and a bash hook
+    # that reads $0 was refused by install --force as "a -S script")
+    for line, program in [
+        ("#!/usr/bin/env -S ruby -w", "ruby"),
+        ("#!/usr/bin/env -S bash -e", "bash"),
+        ("#!/usr/bin/env -Sbash -e", "bash"),
+        ("#!/usr/bin/env --split-string=bash -e", "bash"),
+        ("#!/usr/bin/env -i PATH=/usr/bin:/bin -u HOME bash", "bash"),
+        ("#!/usr/bin/env -C /tmp --unset X LANG=C python3", "python3"),
+        ("#!/usr/bin/env -S", "sh"),
+    ]:
+        assert hooks.interpreter(f"{line}\n") == program, line
+    assert not hooks.reads_its_name('#!/usr/bin/env -S bash -e\nname=$(basename "$0")\n')  # sourced
     assert hooks.interpreter("echo no hash bang\n") == "sh"
     assert not hooks.reads_its_name('#!/bin/sh\ncase $(basename "$0") in *) ;; esac\n')  # sourced: $0 is right
     assert hooks.reads_its_name("#!/usr/bin/env node\nconst h = process.argv[1]\n")
