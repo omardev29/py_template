@@ -655,7 +655,7 @@ def set_project_name(text: str, name: str) -> str:
     the result does not say so, so no caller reports a change it did not make (apply, rename). A
     text that is no valid TOML is said to be so (it was "edit that line by hand")."""
     try:
-        tomllib.loads(text.lstrip("﻿"))
+        tomllib.loads(text.lstrip("\ufeff"))
     except TOML_ERRORS as e:
         raise PytError(f'could not set [project] name = "{name}": pyproject.toml is not valid TOML: {toml_error(e)}') from None
     new = _set_project_name(text, name)
