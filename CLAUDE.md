@@ -3185,7 +3185,9 @@ Per method:
   a name that is not UTF-8, which a wheel cannot hold, is one error naming the file in `src/`
   before `uv build` (`wheel._utf8_name`: an ordinary data file ended the build in setuptools'
   UnicodeEncodeError traceback, `test_wheel_refuses_a_file_name_that_is_not_utf8_naming_it_in_src`);
-  assets go into `<pkg>/assets`. The top-level entries of `src/` that `compile.modules` names
+  assets go into `<pkg>/assets`. The build project's `description` is written with
+  `config.toml_value` (`json.dumps` left a DEL raw, and uv refused the file:
+  `test_wheel_pyproject_holds_a_description_with_any_character`). The top-level entries of `src/` that `compile.modules` names
   besides the package (`wheel._outside_package`: a lone module becomes `[tool.setuptools]
   py-modules`, another package gets its package data) are copied too, for every backend, a lone
   module through `wheel._copy_file` as well (one it could not read, another user's or a named

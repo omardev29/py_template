@@ -168,7 +168,9 @@ def _pyproject(cfg: Config, compiled: bool, src: Path | None = None) -> str:
         "[project]",
         f"name = {json.dumps(project['name'])}",
         f"version = {json.dumps(project['version'])}",
-        f"description = {json.dumps(project.get('description', ''), ensure_ascii=False)}",
+        # toml_value, never json.dumps: JSON leaves DEL raw, which a TOML string cannot hold, and
+        # uv refused the build project of a description holding one
+        f"description = {toml_value(project.get('description', ''))}",
         f"requires-python = {json.dumps(python)}",
         f"dependencies = {json.dumps(dependencies(data))}",
         "",

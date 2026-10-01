@@ -3562,6 +3562,24 @@ def test_wheel_pyproject_is_exact_and_ships_the_package_data(wheel_project: Path
     assert entry["project"]["scripts"] == {"pkg": "pkg.ui:run"}
 
 
+def test_wheel_pyproject_holds_a_description_with_any_character(wheel_project: Path) -> None:
+    # json.dumps left DEL raw, which a TOML basic string cannot hold: the description of a valid
+    # pyproject.toml ("Tab\tand DEL\u007f end": tomllib, uv and ./pyt lock accept it) made uv refuse
+    # the build project of every wheel build, at a column that showed no character
+    from runner.methods import wheel
+
+    description = "Tab\tand DEL\x7f end, \x00 \x1f \x80   \"q\" \\"
+    pyproject = wheel.PYPROJECT
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(f"description = {json.dumps(data['project']['description'])}", f"description = {config.toml_value(description)}"),
+        encoding="utf-8",
+    )
+    assert tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["description"] == description
+    for compiled in (False, True):
+        assert tomllib.loads(wheel._pyproject(_wheel_cfg(), compiled))["project"]["description"] == description
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="a name that is not UTF-8: Linux keeps a file name's bytes (macOS and Windows refuse it)")
 @pytest.mark.parametrize("name", [b"caf\xe9.txt", b".caf\xe9.txt"])
 def test_wheel_refuses_a_file_name_that_is_not_utf8_naming_it_in_src(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, name: bytes) -> None:
