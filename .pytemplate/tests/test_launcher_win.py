@@ -713,6 +713,10 @@ def test_ps1_reached_through_a_symlink_finds_its_project(name: str, tmp_path: Pa
             (tmp_path / "home").mkdir()
             (tmp_path / "home" / "bin").symlink_to(tools, target_is_directory=True)
             links["relative, in a linked folder"] = tmp_path / "home" / "bin" / "mypyt.ps1"
+            # The link's folder reached /bin/sh unquoted, which PowerShell 7 globs: b[0-9] read as b1.
+            (tmp_path / "home" / "b[0-9]").symlink_to(tools, target_is_directory=True)
+            (tmp_path / "home" / "b1").mkdir()
+            links["relative, in a linked folder named like a glob"] = tmp_path / "home" / "b[0-9]" / "mypyt.ps1"
     except OSError as e:  # Windows without Developer Mode or admin rights
         pytest.skip(f"cannot create a symlink here: {e}")
     away = tmp_path / "away"

@@ -11,6 +11,8 @@
 #     inside the caller's session, so anything it changes stays there.
 #   * PowerShell < 7.3 (and $PSNativeCommandArgumentPassing = 'Legacy') drops
 #     empty arguments and mangles embedded quotes: arguments are pre-quoted.
+#   * PowerShell 7 globs a native argument that is not a quoted literal (Linux/macOS):
+#     a path in a variable goes double-quoted ("$path"), never bare ($path).
 #   * PowerShell itself removes a bare -- before any script sees it (5.1 and
 #     7.x alike): quote it ('--') or use .\pyt.cmd.
 #   * Never write the name of PowerShell's automatic pipeline variable in this
@@ -44,6 +46,28 @@ if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
 
 $onWindows = $env:OS -eq 'Windows_NT'
 $uvExe = if ($onWindows) { 'uv.exe' } else { 'uv' }
+$v = $PSVersionTable.PSVersion
+$legacy = $v.Major -lt 7 -or ($v.Major -eq 7 -and $v.Minor -lt 3)
+if (-not $legacy) { $legacy = (Get-Variable PSNativeCommandArgumentPassing -ValueOnly -ErrorAction Ignore) -eq 'Legacy' }
+
+# An argument as legacy passing (PowerShell < 7.3, or $PSNativeCommandArgumentPassing =
+# 'Legacy') must get it: that passing drops empty arguments and mangles embedded quotes, so the
+# argument goes pre-quoted. It wraps an argument in quotes once it sees a blank after an even
+# number of `"`. Windows PowerShell counts every `"`, so a quote is written `""` (uv reads `""`
+# inside quotes as one `"`); PowerShell 7 skips `\"` when counting.
+function ConvertTo-LegacyArg([string] $Arg) {
+    $quote = if ($PSVersionTable.PSEdition -eq 'Desktop') { '""' } else { '\"' }
+    return '"' + (($Arg -replace '(\\*)"', ('$1$1' + $quote)) -replace '(\\+)$', '$1$1') + '"'
+}
+
+# /bin/sh (Linux/macOS only) runs $Script with the path $Path as $1, both exact: double-quoted,
+# as PowerShell 7 globs a native argument that is not a quoted literal (a folder named p[0-9]
+# read as its sibling p1, whose owner then decided whose runner it was), and pre-quoted under
+# legacy passing, which dropped their double quotes (a"b read as ab).
+function Invoke-Sh([string] $Script, [string] $Path) {
+    if ($legacy) { $Script = ConvertTo-LegacyArg $Script; $Path = ConvertTo-LegacyArg $Path }
+    & /bin/sh -c "$Script" sh "$Path"
+}
 
 # A uv that can run. On Linux/macOS it also needs an x bit, like `test -x` in ./pyt
 # (Get-Command and File.Exists accept a uv left without one by a broken download).
@@ -130,7 +154,7 @@ function Get-Entry([string] $Dir) {
 # owner of the file it links (on macOS any user may link a pyt.py of yours into a folder of theirs).
 function Test-Foreign([string] $Entry, [bool] $Top) {
     if ($onWindows) { return $Top }
-    & /bin/sh -c 'set -f; IFS=; [ -O "${1%/*}" ] && [ -O "$1" ]' sh $Entry
+    Invoke-Sh 'set -f; IFS=; [ -O "${1%/*}" ] && [ -O "$1" ]' $Entry
     return $LASTEXITCODE -ne 0
 }
 
@@ -149,7 +173,7 @@ for ($hops = 0; $self -and $hops -lt 40; $hops++) {
     $dir = [IO.Path]::GetDirectoryName($self)
     if (-not $onWindows -and -not [IO.Path]::IsPathRooted($link)) {
         # Relative to the PHYSICAL folder of the link (.NET folds '..' as text, the kernel does not).
-        $dir = & /bin/sh -c 'CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P' sh $dir
+        $dir = Invoke-Sh 'CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P' $dir
     }
     $self = [IO.Path]::Combine([string]$dir, $link)
     $root = [IO.Path]::GetDirectoryName($self)
@@ -177,7 +201,7 @@ if (-not $entry) {
             # physical folder, where the kernel is (POSIX only).
             $dir = $null
             if (-not $onWindows -and $walked) {
-                $physical = (& /bin/sh -c 'CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P' sh $walked) -join "`n"
+                $physical = (Invoke-Sh 'CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P' $walked) -join "`n"
                 if ($physical -and $physical -ne $walked) { $dir = $physical }
                 $walked = $null
             }
@@ -307,19 +331,15 @@ $argv = @(for ($i = 0; $i -lt $args.Count; $i++) {
         foreach ($x in @($a)) { if ($null -ne $x -or $a -isnot [array]) { [string]$x } }
     }
 })
-$v = $PSVersionTable.PSVersion
-$legacy = $v.Major -lt 7 -or ($v.Major -eq 7 -and $v.Minor -lt 3)
-if (-not $legacy) { $legacy = (Get-Variable PSNativeCommandArgumentPassing -ValueOnly -ErrorAction Ignore) -eq 'Legacy' }
 # PowerShell 7.3+ takes any native argument equal to --% (quoted or splatted) for its
 # stop-parsing token: it drops it, then splits and %VAR%-expands the rest. Pre-quoted by
 # legacy passing (set in this script's scope only) it reaches uv intact.
 if (-not $legacy -and $argv -contains '--%') { $PSNativeCommandArgumentPassing = 'Legacy'; $legacy = $true }
+# The runner's path is an argument of uv's too: unquoted, legacy passing read a folder q"r as qr.
+$entryArg = $entry
 if ($legacy) {
-    # Legacy passing wraps an argument in quotes once it sees a blank after an even
-    # number of `"`. Windows PowerShell counts every `"`, so a quote is written `""`
-    # (uv reads `""` inside quotes as one `"`); PowerShell 7 skips `\"` when counting.
-    $quote = if ($PSVersionTable.PSEdition -eq 'Desktop') { '""' } else { '\"' }
-    $argv = @(foreach ($a in $argv) { '"' + (($a -replace '(\\*)"', ('$1$1' + $quote)) -replace '(\\+)$', '$1$1') + '"' })
+    $entryArg = ConvertTo-LegacyArg $entry
+    $argv = @(foreach ($a in $argv) { ConvertTo-LegacyArg $a })
 }
 
 # Pipeline input ('x' | ./pyt.ps1 run) goes to uv's stdin, as with a direct native call;
@@ -365,14 +385,14 @@ try {
         # included: it globs '*' (Linux/macOS) and expands '~', '~/x' ('~\x' on Windows). Run
         # the call rebuilt from single-quoted words so argv reaches uv untouched.
         $q = [Management.Automation.Language.CodeGeneration]
-        $words = foreach ($a in @($uv, 'run', '--quiet', "--python=$python", '--python-preference', $preference, '--script', $entry) + $argv) { "'" + $q::EscapeSingleQuotedStringContent($a) + "'" }
+        $words = foreach ($a in @($uv, 'run', '--quiet', "--python=$python", '--python-preference', $preference, '--script', $entryArg) + $argv) { "'" + $q::EscapeSingleQuotedStringContent($a) + "'" }
         $call = '& ' + ($words -join ' ')
         if ($fromPipe) { $call = '$pipeIn | ' + $call }
         Invoke-Expression $call
     } elseif ($fromPipe) {
-        $pipeIn | & $uv run --quiet "--python=$python" --python-preference $preference --script $entry @argv
+        $pipeIn | & $uv run --quiet "--python=$python" --python-preference $preference --script $entryArg @argv
     } else {
-        & $uv run --quiet "--python=$python" --python-preference $preference --script $entry @argv
+        & $uv run --quiet "--python=$python" --python-preference $preference --script $entryArg @argv
     }
     $code = $LASTEXITCODE
 } catch {

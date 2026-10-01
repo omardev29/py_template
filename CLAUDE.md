@@ -181,10 +181,12 @@ implement the same contract: change them together.
    installed template's, into a `.pytemplate` of theirs next to a `runner/` of theirs, which
    `pyt.py` imports from its own folder); on Windows, whose owners are not read
    (an Administrators-owned checkout would fail), a drive root is never taken. Otherwise exit 2
-   naming it (`pyt` `_pt_foreign`, `pyt.ps1` `Test-Foreign` through `/bin/sh -c '[ -O ... ]'`,
-   `pyt.cmd` stops before the drive root;
+   naming it (`pyt` `_pt_foreign`, `pyt.ps1` `Test-Foreign` through `/bin/sh -c '[ -O ... ]'`
+   with the path as it is, `Invoke-Sh`: PowerShell 7 globbed it, and in a folder named `p[0-9]`
+   the owner of `p1` next to it decided, section 4.5; `pyt.cmd` stops before the drive root;
    `test_launcher_sh.test_a_launcher_outside_a_project_never_runs_another_users_one`,
    `test_a_link_to_your_own_pyt_py_in_another_users_folder_is_never_run`,
+   `test_the_ownership_rule_reads_the_folder_it_runs`,
    `test_the_walk_up_never_takes_a_drive_root_on_windows`).
    No project found: the installed template of `./pyt install` (section 5.9), where
    `cmd_install.snapshot_dir` puts it: `%LOCALAPPDATA%\pytemplate\template` on Windows (else
@@ -572,8 +574,11 @@ header rules (with detector tests proving each rule fires).
   `pyt.cmd`, exit 126.
 - PowerShell < 7.3 (or `$PSNativeCommandArgumentPassing = 'Legacy'`) drops empty arguments and
   mangles embedded quotes when calling native programs, so the launcher pre-quotes every
-  argument: a `"` is written `""` in 5.1 (Desktop: its quote counter ignores backslashes, so
-  `x "y z` split into three arguments) and `\"` in 7.x; trailing backslashes are doubled.
+  argument (`ConvertTo-LegacyArg`): a `"` is written `""` in 5.1 (Desktop: its quote counter
+  ignores backslashes, so `x "y z` split into three arguments) and `\"` in 7.x; trailing
+  backslashes are doubled. The runner's own path (`$entryArg`, uv's `--script` value) and the
+  `/bin/sh` calls (`Invoke-Sh`) get it too: in a folder named `q"r` the ownership check read
+  `qr`, and uv then ran `qr`'s runner.
 - PowerShell 7 rewrites every native argument that is not a quoted literal, splatted `@argv`
   included (`NativeCommandParameterBinder.PossiblyGlobArg`): it globs wildcards on Linux/macOS
   (`'*'` reached uv as the file list) and expands `~`, `~/x` (and `~\x` on Windows, 7.6) to
@@ -586,7 +591,17 @@ header rules (with detector tests proving each rule fires).
   hostile arguments (a payload per quote kind, `$(...)`, backticks, newlines, U+2028, a 100000
   character one) and fails on any argv change or executed payload. `selftest --shells` T1
   passes `~`, `~/x`, `~\x` and typographic quotes with a payload to PowerShell only
-  (`shells.PS_ARGS`).
+  (`shells.PS_ARGS`). The launcher's own `/bin/sh` calls (Linux/macOS: the ownership rule
+  `Test-Foreign`, the `cd -P`/`pwd -P` of the physical walk and of a link's folder) go through
+  `Invoke-Sh`, which passes the script and the path double-quoted (`"$Path"`: an expandable
+  string is never globbed): a bare `$entry` in a folder named `p[0-9]` (or `p*`, `p?`) reached
+  sh as its sibling `p1`, so the owner of `p1` decided whose runner ran (another user's ran as
+  the user, the user's own project was refused), the physical walk from a linked `g[0-9]` ran the
+  project of `g1`, and a link's target was joined to another folder
+  (`test_launcher_sh.test_the_ownership_rule_reads_the_folder_it_runs`,
+  `test_a_folder_named_like_a_glob_reached_through_a_symlink_finds_its_project`,
+  `test_launcher_win.test_ps1_reached_through_a_symlink_finds_its_project`). Any new native call
+  takes a path the same way, never bare.
 - uv: `Get-Command uv -CommandType Application -All`, and on Windows only a real `.exe` (a
   plain `Get-Command uv` can return an alias or function; a `uv.cmd`/`uv.ps1` wrapper would
   parse the arguments again). The registry `Path` is read with
@@ -3763,7 +3778,9 @@ short temp tree and unset `NVIM_APPNAME`.
   fake uvs for `pyt` and `pyt.ps1`, the install prompt on a pseudo-terminal; outside any
   project the installed template in every shell, found through XDG_DATA_HOME or HOME, never
   another user's, a stale PYTEMPLATE_GLOBAL never reaching a project, a project's
-  `.pytemplate/deploy.py`),
+  `.pytemplate/deploy.py`; the ownership rule of `pyt` and `pyt.ps1` in folders named like a
+  glob (`p[0-9]`, `p*`, `p?`) or with a double quote, next to a sibling the glob or the lost
+  quote would name, whoever owns which),
   `test_launcher_win.py` (static rules on every OS, a PowerShell parser check; the pyt.ps1
   behaviour tests run wherever pwsh exists: injection safety of the Core hand-over, `--%`,
   `-X:v`, typed comma lists and array values, pipeline input and raw stdin, `UV_PYTHON` and
@@ -5840,16 +5857,26 @@ PowerShell (details: section 4.5):
 - **Native arguments before 7.3 (and in `Legacy` mode)** (DEFECT): empty arguments were dropped
   and embedded quotes mangled; 5.1's quote counter ignores backslashes. Up:
   PowerShell/PowerShell#1995 (fixed by 7.3's `$PSNativeCommandArgumentPassing`). Fix:
-  `pyt.ps1` pre-quotes every argument (`""` on 5.1, `\"` on 7). Test:
+  `pyt.ps1` pre-quotes every argument (`ConvertTo-LegacyArg`: `""` on 5.1, `\"` on 7), the
+  runner's path and its `/bin/sh` calls included (`$entryArg`, `Invoke-Sh`: a folder named `q"r`
+  was checked and run as `qr`). Test:
   `test_launcher_win.py::test_ps1_round_trip_in_a_session` (Legacy mode, 5.1 on Windows),
-  `test_ps1_hand_over_is_injection_safe`. Goes: when Windows PowerShell 5.1 is dropped.
+  `test_ps1_hand_over_is_injection_safe`,
+  `test_launcher_sh.py::test_the_ownership_rule_reads_the_folder_it_runs` (Legacy mode). Goes:
+  when Windows PowerShell 5.1 is dropped.
 - **PowerShell 7 rewrites native arguments that are not quoted literals** (DEFECT): splatted
-  `@argv` included, it globs on Linux/macOS (`'*'` reached uv as a file list) and expands `~`.
-  Up: PowerShell/PowerShell#24178 (the globbing; none found for `~`). Fix: on Core `pyt.ps1`
-  rebuilds the call from single-quoted words (`EscapeSingleQuotedStringContent`, typographic
-  quotes too) for `Invoke-Expression`. Test:
-  `test_launcher_win.py::test_ps1_hand_over_is_injection_safe`; `shells.PS_ARGS` in `selftest
-  --shells`. Goes: when splatted arguments pass through verbatim.
+  `@argv` included, it globs on Linux/macOS (`'*'` reached uv as a file list) and expands `~`;
+  a bare `$path` argument too, so the launcher's own `/bin/sh -c ... sh $entry` checked the
+  ownership of `p1` for a runner in `p[0-9]` (another user's runner ran as the user). Up:
+  PowerShell/PowerShell#24178 (the globbing; none found for `~`). Fix: on Core `pyt.ps1`
+  rebuilds the uv call from single-quoted words (`EscapeSingleQuotedStringContent`, typographic
+  quotes too) for `Invoke-Expression`, and its `/bin/sh` calls take the path double-quoted
+  (`Invoke-Sh`, 4.5). Test: `test_launcher_win.py::test_ps1_hand_over_is_injection_safe`,
+  `test_ps1_reached_through_a_symlink_finds_its_project`,
+  `test_launcher_sh.py::test_the_ownership_rule_reads_the_folder_it_runs`,
+  `test_a_folder_named_like_a_glob_reached_through_a_symlink_finds_its_project`;
+  `shells.PS_ARGS` in `selftest --shells`. Goes: when splatted arguments pass through verbatim
+  (a quoted path stays right).
 - **7.3+ takes any native argument equal to `--%`, quoted or splatted, for the stop-parsing
   token** (LIMITATION): it drops it, then splits and `%VAR%`-expands the rest. Fix: `pyt.ps1`
   switches that call to `Legacy` passing in its own scope. Test:
