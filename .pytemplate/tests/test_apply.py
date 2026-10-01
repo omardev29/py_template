@@ -2058,6 +2058,49 @@ def test_reference_problems_see_through_a_leftover_folder(tmp_path: Path, monkey
     assert not [p for p in cmd_apply.reference_problems(project.cfg()) if p.startswith("compile.modules")]
 
 
+@pytest.mark.parametrize("how", ["simulated", "for real"])
+def test_references_in_a_folder_this_user_may_not_enter_are_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """deploy.upx.path or deploy.exe.icon in another user's folder (a shared pytemplate.toml that
+    names ~alice/tools/upx), app.assets or a compiled module behind a folder this user may not
+    enter: Python 3.11-3.13's Path.is_file and is_dir raised PermissionError there, and doctor (its
+    whole report), apply and setup (at their very end, after the sync and the render) ended in an
+    internal-error traceback. Each is reported as missing. "simulated": os.stat refuses them, as
+    such a folder does (the tests also run as root); "for real": folders of mode 0 (POSIX, not root)."""
+    project, _ = _project(tmp_path, monkeypatch, "flet")
+    private = tmp_path / "private"
+    private.mkdir()
+    (private / "upx").write_bytes(b"x")
+    (private / "app.ico").write_bytes(b"x")
+    project.edit("deploy.upx", "path", str(private / "upx"))
+    project.edit("deploy.exe", "icon", str(private / "app.ico"))
+    assert cmd_apply.reference_problems(project.cfg()) == []
+    core = project.root / "src" / "alpha" / "core"
+    expected = ["compile.modules", "deploy.exe.icon", "deploy.upx.path"]
+    if how == "simulated":
+        real, blocked = os.stat, [os.path.abspath(p) for p in (private, core, project.root / "src" / "assets")]
+
+        def stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            here = "" if isinstance(path, int) else os.path.abspath(os.fsdecode(path))
+            if any(here == b or here.startswith(b + os.sep) for b in blocked):
+                raise PermissionError(errno.EACCES, "Permission denied", os.fsdecode(path))
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", stat)
+        expected.insert(1, "app.assets")
+        problems = cmd_apply.reference_problems(project.cfg())
+    else:
+        if sys.platform == "win32" or os.geteuid() == 0:
+            pytest.skip("modes that keep this user out: POSIX, not root (root enters every folder)")
+        for folder in (private, core):
+            folder.chmod(0)
+        try:
+            problems = cmd_apply.reference_problems(project.cfg())
+        finally:
+            for folder in (private, core):
+                folder.chmod(0o755)
+    assert [re.split(r"[ :]", p)[0] for p in problems] == expected, problems
+
+
 def test_render_auto_points_at_apply(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(render, "apply", lambda cfg, **kw: ([], []))
     monkeypatch.setattr(render, "pyproject_outdated", lambda cfg: True)

@@ -1263,6 +1263,67 @@ def test_an_entry_of_src_that_cannot_be_read_never_hides_the_package(tmp_path: P
     assert rename.package_dir(src, "ext") is None
 
 
+def _stat_denied(monkeypatch: pytest.MonkeyPatch, *paths: Path) -> None:
+    """os.stat refuses these paths and what is below them, as a folder this user may not enter
+    does (the tests also run as root, whom no folder refuses): Python 3.11-3.13's Path.is_file and
+    is_dir raised that PermissionError, os.path's say False."""
+    real = os.stat
+    blocked = [os.path.abspath(p) for p in paths]
+
+    def stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if not isinstance(path, int):
+            here = os.path.abspath(os.fsdecode(path))
+            if any(here == b or here.startswith(b + os.sep) for b in blocked):
+                raise PermissionError(errno.EACCES, "Permission denied", os.fsdecode(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat)
+
+
+def test_a_link_into_a_folder_this_user_may_not_enter_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A link in tests/ into another user's folder: Python 3.11-3.13's Path.is_dir raised
+    PermissionError in the plan, and rename (and an apply that renames) ended in an
+    internal-error traceback; 3.14's said nothing about the link. What it holds cannot be read,
+    so it may name the app: reported, as the links that do."""
+    root = tmp_path / "p"
+    root.mkdir()
+    _write_project(root, "script", "alpha")
+    private = tmp_path / "private" / "inner"
+    private.mkdir(parents=True)
+    (private / "data.py").write_text("import alpha\n", encoding="utf-8")
+    link = root / "tests" / "fixtures"
+    try:
+        link.symlink_to(private, target_is_directory=True)
+    except OSError as e:
+        pytest.skip(f"cannot create a symbolic link here: {e}")
+    _stat_denied(monkeypatch, link, tmp_path / "private")
+    planned = rename.plan(root, "alpha", "beta")
+    assert [p.rstrip("/") for p in planned.linked] == ["tests/fixtures"], planned.linked
+
+
+def test_a_file_of_tests_this_user_may_not_look_at_stops_the_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A folder of tests/ this user may list but not enter (mode 0644 after a `chmod -R 644`):
+    Python 3.11-3.13's Path.is_file raised PermissionError in the plan, and 3.14's said False:
+    its files were left out, kept the old imports, and nothing said so. The plan stops at such a
+    file, naming it, as it stops at any file it cannot read."""
+    _write_project(tmp_path, "script", "alpha")
+    (tmp_path / "tests" / "data").mkdir()
+    hidden = tmp_path / "tests" / "data" / "test_more.py"
+    hidden.write_text("import alpha\n", encoding="utf-8")
+    _stat_denied(monkeypatch, hidden)
+    real = Path.read_bytes
+
+    def read_bytes(self: Path) -> bytes:
+        if self == hidden:  # what a folder that is not searchable refuses too
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    with pytest.raises(PytError, match=r"rename: cannot read tests/data/test_more\.py: Permission denied; nothing was changed"):
+        rename.plan(tmp_path, "alpha", "beta")
+    assert rename.references_left(tmp_path, Names("alpha", "beta")).count("tests/data/test_more.py") == 1  # may name it: counted
+
+
 def test_links_in_src_and_tests_are_reported_never_rewritten(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A linked subpackage or module is neither rewritten (its target may be shared with other
     projects) nor silently skipped: the rename warns, so its old imports do not break unnoticed."""

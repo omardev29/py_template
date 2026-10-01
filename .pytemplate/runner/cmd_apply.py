@@ -820,7 +820,10 @@ def _hook_plan(cfg: Config) -> str:
 def reference_problems(cfg: Config, *, package: bool = True, move: tuple[str, str] | None = None) -> list[str]:
     """Paths pytemplate.toml refers to that do not exist (each makes some command fail later).
     `move` (rename.Plan.move: src/<old>, src/<new>): a rename that is planned, not done (--dry-run):
-    a path under src/<new>/ is looked for where it is now, under src/<old>/."""
+    a path under src/<new>/ is looked for where it is now, under src/<old>/. Asked with os.path:
+    a path it cannot look at (in a folder this user may not enter: a shared pytemplate.toml's
+    upx in another user's home) is reported as missing, where Python 3.11-3.13's Path.is_file
+    raised PermissionError and doctor, apply and setup ended in an internal-error traceback."""
     src = _src()
 
     def now(path: Path) -> Path:
@@ -833,7 +836,7 @@ def reference_problems(cfg: Config, *, package: bool = True, move: tuple[str, st
 
     def module_exists(module: str) -> bool:  # what mypyc.compiled_sources finds a module in
         path = import_path(now(src / module.replace(".", "/")))
-        return path.is_file() or render._holds_python(path)
+        return os.path.isfile(path) or render._holds_python(path)
 
     out: list[str] = []
     missing = missing_package(cfg) if package else None
@@ -843,16 +846,16 @@ def reference_problems(cfg: Config, *, package: bool = True, move: tuple[str, st
         modules = [m for m in cfg.compile.modules if not module_exists(m)]
         if modules:
             out.append(f"compile.modules: {', '.join(modules)} not found in src/ (mypyc builds and `test mypyc` will fail)")
-    if cfg.app.assets and not now(src / cfg.app.assets).is_dir():
+    if cfg.app.assets and not os.path.isdir(now(src / cfg.app.assets)):
         out.append(f"app.assets = '{cfg.app.assets}': src/{cfg.app.assets}/ does not exist (nothing is packaged with the app)")
-    if cfg.deploy.exe.icon and not now(ROOT / cfg.deploy.exe.icon).is_file():
+    if cfg.deploy.exe.icon and not os.path.isfile(now(ROOT / cfg.deploy.exe.icon)):
         out.append(f"deploy.exe.icon = '{cfg.deploy.exe.icon}' does not exist (relative to the project root): exe and nuitka builds fail")
     if cfg.deploy.upx.path:
         try:
             upx: Path | None = Path(cfg.deploy.upx.path).expanduser()
         except RuntimeError:  # a ~user of another machine (a shared pytemplate.toml), or no home folder
             upx = None
-        if upx is None or not (upx if upx.is_absolute() else now(ROOT / upx)).is_file():
+        if upx is None or not os.path.isfile(upx if upx.is_absolute() else now(ROOT / upx)):
             out.append(f"deploy.upx.path = '{cfg.deploy.upx.path}' does not exist: builds with UPX fail")
     return out
 

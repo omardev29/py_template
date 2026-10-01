@@ -1525,7 +1525,14 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     cannot follow) is no folder (`rename._is_dir`, in `package_dir` and `_package_modules`;
     `cmd_apply.missing_package` asks `os.path`): one such link hid the app package from doctor,
     the hook, rename and apply
-    (`test_rename.test_an_entry_of_src_that_cannot_be_read_never_hides_the_package`).
+    (`test_rename.test_an_entry_of_src_that_cannot_be_read_never_hides_the_package`). A file of a
+    folder this user may list but not enter is planned, and its read names it
+    (`_regular_or_unreadable`), and a link of src/ or tests/ that cannot be followed is reported
+    as one that may name the app (`_link_mentions`, `_nothing_there`: what pathlib takes for
+    "nothing there" names nothing): Python 3.11-3.13's Path.is_file and is_dir raised
+    PermissionError there, an internal-error traceback, and 3.14's left the file out without a word
+    (`test_rename.test_a_link_into_a_folder_this_user_may_not_enter_is_reported`,
+    `test_a_file_of_tests_this_user_may_not_look_at_stops_the_plan`).
   - A Python file with a PEP 263 cookie is rewritten in its own encoding; other files that are
     not UTF-8 text but mention the old name are a warning (`Plan.unreadable`; a UTF-16 or UTF-32
     file, PowerShell 5.1's `>` and Out-File, is searched through its BOM, `_bom_text`, as
@@ -1636,7 +1643,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   gives, which must be a file or hold a `.py`/`.pyi` file: a folder left holding only
   `__pycache__` is missing), app.assets, deploy.exe.icon, deploy.upx.path (a `~user` this machine
   lacks is missing too: expanduser's RuntimeError ended doctor and apply in a traceback, and
-  `upx.locate` makes it exit 3); the `--dry-run` of a
+  `upx.locate` makes it exit 3; so is a path in a folder this user may not enter, asked with
+  `os.path` there and in `config.import_path`: Python 3.11-3.13's Path.is_file raised
+  PermissionError, and doctor, apply and setup ended in a traceback,
+  `test_apply.test_references_in_a_folder_this_user_may_not_enter_are_reported`); the `--dry-run` of a
   rename looks for them where they are before the move)
   -> a summary. A state.json or pyproject.toml that cannot be written is a `PytError`
   naming it. A Ctrl+C, SIGTERM or SIGHUP once the app is renamed (`cmd_apply._finish`, the steps

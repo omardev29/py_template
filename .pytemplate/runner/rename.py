@@ -69,6 +69,7 @@ import bisect
 import codecs
 import contextlib
 import dataclasses
+import errno
 import functools
 import io
 import keyword
@@ -1301,6 +1302,24 @@ def _source_encoding(data: bytes) -> str | None:
     return None if encoding in ("utf-8", "utf-8-sig") else encoding
 
 
+def _nothing_there(e: OSError) -> bool:
+    """Whether a stat that failed with `e` found nothing (what pathlib's is_file and is_dir take
+    for False: no file, a link to nothing or a loop, a name Windows cannot follow), rather than
+    something this user may not look at (a folder they may not enter)."""
+    return e.errno in (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP) or getattr(e, "winerror", None) in (21, 123, 1921)
+
+
+def _regular_or_unreadable(path: Path) -> bool:
+    """A regular file, or an entry this user may not look at (in a folder they may list but not
+    enter), which the plan's read then names ("cannot read"): Python 3.11-3.13's Path.is_file
+    raised PermissionError there (an internal-error traceback), and 3.14's says False: the file
+    was left out, its imports never renamed, without a word."""
+    try:
+        return stat.S_ISREG(path.stat().st_mode)
+    except OSError as e:
+        return not _nothing_there(e)
+
+
 def _is_link(path: Path) -> bool:
     """A symbolic link or a Windows junction (which os.walk and Path.is_symlink do not see)."""
     from .cmd_env import _is_link as is_link  # reads st_reparse_tag (Python 3.11 has no is_junction)
@@ -1349,7 +1368,7 @@ def _code_files(root: Path, links: list[str] | None = None) -> Iterator[tuple[st
                 if _is_link(path):
                     if links is not None:
                         links.append(path.relative_to(root).as_posix())
-                elif path.is_file():
+                elif _regular_or_unreadable(path):
                     yield path.relative_to(root).as_posix(), path
 
 
@@ -1396,11 +1415,17 @@ def _dangles(link: Path, move: tuple[Path, Path] | None) -> bool:
 
 def _link_mentions(link: Path, pattern: re.Pattern[str], move: tuple[Path, Path] | None = None) -> bool:
     """Whether a link or junction dangles once the package folder moves (_dangles), or its file,
-    or a text file below its folder, mentions the old name."""
+    or a text file below its folder, mentions the old name. One that cannot be followed (into a
+    folder this user may not enter) may name it: reported. Python 3.11-3.13's Path.is_dir raised
+    PermissionError there, and rename and apply ended in an internal-error traceback."""
     if _dangles(link, move):
         return True
-    if not link.is_dir():
-        return link.is_file() and _mentions_name(link, pattern)
+    try:
+        mode = link.stat().st_mode
+    except OSError as e:
+        return not _nothing_there(e)  # a link to nothing names nothing
+    if not stat.S_ISDIR(mode):
+        return stat.S_ISREG(mode) and _mentions_name(link, pattern)
     seen: set[str] = set()
     for dirpath, dirnames, filenames in os.walk(link, followlinks=True):
         real = os.path.realpath(dirpath)

@@ -13,6 +13,7 @@ import dataclasses
 import datetime
 import json
 import math
+import os
 import re
 import tomllib
 import typing
@@ -805,10 +806,12 @@ def compiled_paths(cfg: Config) -> list[str]:
 def import_path(folder: Path) -> Path:
     """What Python imports for the module whose package folder would be `folder`: the folder
     when it holds __init__.py, else `<folder>.py` when that file exists, else the folder when it
-    exists (a namespace package, maybe one left holding only __pycache__), else `<folder>.py`."""
+    exists (a namespace package, maybe one left holding only __pycache__), else `<folder>.py`.
+    os.path: a path it cannot look at (a folder this user may not enter) is none of them; Python
+    3.11-3.13's Path.is_file raised PermissionError there (doctor, apply: a traceback)."""
     file = folder.with_name(folder.name + ".py")
-    package = (folder / "__init__.py").is_file() or not file.is_file()
-    return folder if package and folder.is_dir() else file
+    package = os.path.isfile(folder / "__init__.py") or not os.path.isfile(file)
+    return folder if package and os.path.isdir(folder) else file
 
 
 # --- editing pytemplate.toml while keeping comments --------------------------------------------
