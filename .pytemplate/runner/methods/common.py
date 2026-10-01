@@ -310,9 +310,10 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
         # the packages that publish no wheel at all (docopt, a workspace library): built here,
         # and kept only when the result is pure Python
         build_here = source_only(LOCK)
+        python = ensure_env(envs.tool_env(cfg)).python
         argv = [
             *base,
-            "--python", ensure_env(envs.tool_env(cfg)).python,
+            "--python", python,
             "--python-platform", UV_PLATFORMS[(target.os, target.arch)],
             "--python-version", target.version,
             "--only-binary", ":all:",
@@ -368,7 +369,7 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
                 )
             elif output:
                 ui.report(output)  # a warning of a successful install
-    drop_install_junk(dest)
+    drop_install_junk(dest, python)
     return dest
 
 
@@ -498,12 +499,14 @@ def _entry_points(dest: Path) -> set[str]:
     return names
 
 
-def drop_install_junk(dest: Path) -> None:
+def drop_install_junk(dest: Path, python: Path | None = None) -> None:
     """Remove what `uv pip install --target` leaves that no app needs: its .lock file, the venv
     hooks (_virtualenv*) and the console/GUI script wrappers in bin/ (Scripts/), whose shebang
     or .exe trampoline holds this machine's absolute .venv path (dead elsewhere, and it leaks the
-    developer's folder). Other files in bin/ stay: wheels such as ruff or uv ship a native binary
-    there and find it at <target>/bin; a real package named bin (with __init__.py) stays too.
+    developer's folder), and so do the data scripts (distutils scripts=, awscli's bin/aws) whose
+    `#!python` uv rewrote to `python`, the interpreter it installed with (_names_the_installer).
+    Other files in bin/ stay: wheels such as ruff or uv ship a native binary there and find it at
+    <target>/bin; a real package named bin (with __init__.py) stays too.
     In each *.dist-info: uv's cache files, and a direct_url.json naming a folder of this machine
     (a local library, installed for real since --no-editable), taken out of RECORD too.
     """
@@ -513,14 +516,34 @@ def drop_install_junk(dest: Path) -> None:
     for info in dest.glob("*.dist-info"):
         _drop_build_records(info)
     names = _entry_points(dest)
+    installer = {os.fsencode(str(python)), os.fsencode(os.path.realpath(python))} if python else set()
     for scripts in (dest / "bin", dest / "Scripts"):
         if not scripts.is_dir() or (scripts / "__init__.py").exists():
             continue
         for f in scripts.iterdir():
-            if f.is_file() and (f.name in names or (f.suffix.lower() == ".exe" and f.stem in names)):
+            if f.is_file() and (f.name in names or (f.suffix.lower() == ".exe" and f.stem in names) or _names_the_installer(f, installer)):
                 f.unlink()
         if not any(scripts.iterdir()):
             scripts.rmdir()
+
+
+def _names_the_installer(script: Path, pythons: set[bytes]) -> bool:
+    """Whether `script` starts with the line uv writes in place of a data script's `#!python`:
+    `#!<python>`, or for a long path or one with a blank `#!/bin/sh` and then `'''exec'
+    '<python>' "$0" "$@"` (a quote in the path written '\\''), `python` one of `pythons`."""
+    if not pythons:
+        return False
+    try:
+        with script.open("rb") as f:
+            head = f.read(4096)
+    except OSError:
+        return False
+    first, _, rest = head.partition(b"\n")
+    first = first.rstrip(b"\r")
+    if first.startswith(b"#!") and first[2:] in pythons:
+        return True
+    second = rest.partition(b"\n")[0]
+    return first == b"#!/bin/sh" and any(second.startswith(b"'''exec' '" + p.replace(b"'", b"'\\''") + b"' ") for p in pythons)
 
 
 def _drop_build_records(info: Path) -> None:

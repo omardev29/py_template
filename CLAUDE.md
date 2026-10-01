@@ -2615,7 +2615,11 @@ Formats:
   allows (manylinux_2_34 on Ubuntu 24.04: the result failed on Debian 11 / RHEL 8).
   `drop_install_junk` removes uv's `.lock`, `_virtualenv*` and the console/GUI script wrappers
   of `bin/` / `Scripts/` (names from `*.dist-info/entry_points.txt`; their shebang or `.exe`
-  trampoline holds the build machine's `.venv` path), keeping other files there (ruff and uv
+  trampoline holds the build machine's `.venv` path), and the data scripts (distutils
+  `scripts=`, awscli's `bin/aws`) whose `#!python` uv rewrote to the interpreter `install_deps`
+  installed with (`common._names_the_installer`: `#!<python>`, or uv's `#!/bin/sh` and
+  `'''exec' '<python>'` form for a path with a blank; they shipped dead and named the developer's
+  folder), keeping other files there (ruff and uv
   wheels look up their native binary at `<target>/bin`) and a real `bin` package; in each
   `*.dist-info` (`_drop_build_records`) uv's `uv_cache.json` and `uv_build.json`, and a
   `direct_url.json` whose URL is `file:` (a local library names its source folder on this
@@ -4869,12 +4873,14 @@ uv:
   Goes: never.
 - **`uv pip install --target` leaves build-machine files** (DEFECT for the `.lock`, LIMITATION
   for the rest): a `.lock`, `_virtualenv*`, console-script wrappers whose shebang or `.exe`
-  trampoline names this machine's `.venv`, and for a local library (installed for real since
+  trampoline names this machine's `.venv`, data scripts whose `#!python` uv rewrote to it
+  (awscli's `bin/aws`), and for a local library (installed for real since
   `--no-editable`) a `direct_url.json` naming its source folder on this machine (PEP 610) plus
   uv's `uv_cache.json`/`uv_build.json` shipped in pyz and portable builds. Up: cf.
   astral-sh/uv#11878 (the `.lock` uv left in a venv; 0.12.19 still leaves an empty one in a
   `--target` folder). Fix: `common.drop_install_junk` (10). Test:
   `test_build_methods.py::test_install_deps_removes_uv_junk_but_keeps_native_tools`,
+  `test_install_deps_drops_the_data_scripts_uv_pointed_at_this_machine`,
   `test_install_junk_drops_the_build_machines_path_of_a_local_library`. Goes: the `.lock` part
   when uv removes it; the rest never.
 - **A requirements.txt export keeps no index, and uv pip reads no `[tool.uv.sources]`**

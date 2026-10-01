@@ -2535,6 +2535,87 @@ def test_install_deps_removes_uv_junk_but_keeps_native_tools(tmp_path: Path, mon
     assert (site / "bin" / "pygmentize").is_file()
 
 
+def _tool_wheel(folder: Path) -> Path:
+    """pttool-1.0-py3-none-any.whl, pure Python: a console script (an entry point), a data script
+    whose first line is `#!python` (distutils scripts=, as awscli's bin/aws) and a binary data file
+    (as ruff's or uv's bin/ binary), which `uv pip install --target` all put in bin/."""
+    import base64
+    import zipfile
+
+    files = {
+        "pttool/__init__.py": b"def main() -> None:\n    print('pttool')\n",
+        "pttool-1.0.data/scripts/pttool-script": b"#!python\nimport pttool\npttool.main()\n",
+        "pttool-1.0.data/scripts/pttool-bin": b"\x7fELF\x02\x01\x01\x00 a native tool",
+        "pttool-1.0.dist-info/METADATA": b"Metadata-Version: 2.1\nName: pttool\nVersion: 1.0\n",
+        "pttool-1.0.dist-info/WHEEL": b"Wheel-Version: 1.0\nGenerator: hand\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        "pttool-1.0.dist-info/entry_points.txt": b"[console_scripts]\npttool-cli = pttool:main\n",
+    }
+    rows = [f"{name},sha256={base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()},{len(data)}" for name, data in files.items()]
+    wheel = folder / "pttool-1.0-py3-none-any.whl"
+    folder.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+        archive.writestr("pttool-1.0.dist-info/RECORD", "\n".join([*rows, "pttool-1.0.dist-info/RECORD,,"]) + "\n")
+    return wheel
+
+
+@pytest.mark.parametrize("blank", [False, True])
+def test_install_deps_drops_the_data_scripts_uv_pointed_at_this_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blank: bool) -> None:
+    """uv pip install --target rewrites a data script's `#!python` (awscli's bin/aws) to the
+    interpreter it installs with, this machine's .venv python: every pyz and portable folder of a
+    project that needs such a package shipped scripts dead on any other machine, which named the
+    developer's folder. A path with a blank gets uv's `#!/bin/sh` and `'''exec'` form instead.
+    The real uv installs a wheel with such a script for the host target."""
+    if blank and IS_WINDOWS:
+        pytest.skip("uv writes the #!/bin/sh form on POSIX only")
+    cfg = real({})
+    venv = envs.runtime_env(cfg, "cpython")
+    if not venv.python.is_file():
+        pytest.skip(f"no {venv.dir.name} here")
+    if blank:  # the same environment, through a folder name with a blank
+        (tmp_path / "a venv").symlink_to(venv.dir, target_is_directory=True)
+        venv = envs.PyEnv(venv.key, tmp_path / "a venv", venv.request, venv.preference)
+    monkeypatch.setattr(common, "ensure_env", lambda env: venv)
+    wheel = _tool_wheel(tmp_path / "w")
+    clean = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")}
+
+    def install(env: envs.PyEnv, argv: list[Any], **_: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        at = args.index("-r")
+        args[at : at + 2] = [str(wheel)]  # that package, not this project's export
+        r = subprocess.run([proc.find_uv(), *args, "--offline"], env=clean, capture_output=True, text=True, timeout=300, check=False)
+        assert r.returncode == 0, r.stderr
+        return r
+
+    monkeypatch.setattr(envs, "uv", install)
+    site = common.install_deps(cfg, "cpython", common.host_target(cfg, "cpython"), tmp_path / "site", _requirements(tmp_path, "pttool==1.0"))
+    scripts = next(folder for folder in (site / "bin", site / "Scripts") if folder.is_dir())
+    assert sorted(p.name for p in scripts.iterdir()) == ["pttool-bin"]  # the binary stays (ruff's)
+    python = os.fsencode(str(venv.python))
+    assert not [p for p in site.rglob("*") if p.is_file() and python in p.read_bytes()]
+
+
+def test_install_junk_keeps_the_scripts_that_name_no_interpreter_of_this_machine(tmp_path: Path) -> None:
+    python = Path("/home/o'brien/my game/.venv/bin/python")
+    scripts = tmp_path / "site" / "bin"
+    scripts.mkdir(parents=True)
+    texts = {
+        "rewritten": f"#!{python}\nimport x\n",
+        "wrapped": "#!/bin/sh\n'''exec' '/home/o'\\''brien/my game/.venv/bin/python' \"$0\" \"$@\"\n' '''\nimport x\n",
+        "env": "#!/usr/bin/env python3\nimport x\n",  # a package's own: uv rewrites `#!python` only
+        "system": "#!/usr/bin/python3\nimport x\n",
+        "other": "#!/home/o'brien/my game/.venv/bin/python3.14\nimport x\n",
+        "shell": "#!/bin/sh\necho '/home/o'brien/my game/.venv/bin/python'\n",
+    }
+    for name, text in texts.items():
+        (scripts / name).write_text(text, encoding="utf-8", newline="\n")
+    common.drop_install_junk(tmp_path / "site", python)
+    assert sorted(p.name for p in scripts.iterdir()) == ["env", "other", "shell", "system"]
+    common.drop_install_junk(tmp_path / "site")  # no interpreter named: nothing more goes
+    assert sorted(p.name for p in scripts.iterdir()) == ["env", "other", "shell", "system"]
+
+
 def test_install_junk_drops_the_build_machines_path_of_a_local_library(tmp_path: Path) -> None:
     # Since --no-editable a local library is installed for real, and uv writes its source folder
     # on this machine into direct_url.json (file:///home/someone/proj/libs/mylib), plus its own
