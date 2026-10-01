@@ -4425,6 +4425,8 @@ def _flet_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, backend: str 
     (sandbox / "uv.lock").write_text(FLET_LOCK, encoding="utf-8")
     monkeypatch.setattr(common, "LOCK", sandbox / "uv.lock")
     monkeypatch.setattr(flet, "host_os", lambda: "linux")
+    # flet build on Windows needs Developer Mode, off by default there: not these tests' subject
+    monkeypatch.setattr(flet, "_developer_mode", lambda: True)
 
     def effect(args: list[str], cwd: Path | None) -> None:
         if produce:
@@ -4946,3 +4948,35 @@ def test_wheel_refuses_a_source_it_cannot_declare(source: object, tmp_path: Path
     monkeypatch.setattr(wheel, "PYPROJECT", pyproject)
     with pytest.raises(PytError, match="b08lib"):
         wheel.check(make({}))  # cmd_build calls it before the checks and the payload
+
+
+# --- the suite in a setup it must pass in: another machine, another project ------------------------
+
+
+def _suite_run(folder: Path, tmp_path: Path, *selection: str, plugin: str = "") -> subprocess.CompletedProcess[str]:
+    """Tests of this suite run by pytest in the project `folder` as `./pyt selftest` runs them (the
+    suite's own pytest.ini, --rootdir=.). `plugin`: Python code pytest loads first (-p), which sets
+    what differs on the machine or in the project the run stands for (an attribute a check reads)."""
+    drop = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "PYTHONPATH")
+    env = {k: v for k, v in os.environ.items() if k not in drop and not k.startswith("PYTEMPLATE_")}
+    argv = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-c", ".pytemplate/tests/pytest.ini", "--rootdir=."]
+    argv += ["--basetemp", str(tmp_path / "t")]
+    if plugin:
+        (tmp_path / "plugin").mkdir()
+        (tmp_path / "plugin" / "pt_setup.py").write_text(plugin, encoding="utf-8")
+        env["PYTHONPATH"] = os.pathsep.join([str(tmp_path / "plugin"), str(folder / ".pytemplate")])
+        argv += ["-p", "pt_setup"]
+    return subprocess.run(
+        [*argv, *selection], cwd=folder, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900, check=False
+    )
+
+
+def test_the_flet_tests_pass_on_a_windows_without_developer_mode(tmp_path: Path) -> None:
+    """Developer Mode is off on a Windows machine by default (README asks for it for flet build
+    only), and flet.check_options refuses flet build there for every target: the six tests that
+    build through _flet_build failed `./pyt selftest` for every such user. They run here with the
+    platform check answering as it does on that machine."""
+    windows_without_developer_mode = "import runner.methods.flet as flet\n\nflet.IS_WINDOWS = True\nflet._developer_mode = lambda: False\n"
+    r = _suite_run(ROOT, tmp_path, ".pytemplate/tests/test_build_methods.py", "-k", "flet_build", plugin=windows_without_developer_mode)
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+    assert " passed" in r.stdout and "deselected" in r.stdout, r.stdout[-2000:]

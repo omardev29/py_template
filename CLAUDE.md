@@ -3773,7 +3773,12 @@ short temp tree and unset `NVIM_APPNAME`.
   So does `test_config_rules.test_mode_edits_a_taplo_formatted_config`: in a project that
   supports one backend alone it adds another (never PyPy) and removes it again. The JIT test of
   test_removals puts its old key into `[python]` with `config.set_value`, whatever `python.pypy`
-  the project pins (it looked for the line of `pypy@3.11.15`).
+  the project pins (it looked for the line of `pypy@3.11.15`). The build tests answer the checks
+  that read the machine or the project and are not their subject: Windows' Developer Mode of
+  flet build (`test_build_methods._flet_build`: off by default there, six tests failed for every
+  Windows user without it). `test_build_methods._suite_run` runs them in such a setup, with a
+  plugin that sets what differs there
+  (`test_build_methods.test_the_flet_tests_pass_on_a_windows_without_developer_mode`).
 - Property-based tests (Hypothesis, the dev group's pin): `.pytemplate/tests/conftest.py` loads
   the profile `pytemplate` (no example database, so a run depends on the code, the profile and
   the seed only; no deadline; a failure prints its replay blob) on top of the profile Hypothesis
