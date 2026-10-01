@@ -3842,6 +3842,10 @@ short temp tree and unset `NVIM_APPNAME`.
   `[tool.pytest.ini_options]`, pytest.ini, tox.ini or setup.cfg, and the root conftest.py): a
   coverage gate failed selftest with every test passed, a `python_files` collected no runner test
   (`test_selftest_harness.test_plain_selftest_runs_the_suite_with_its_own_pytest_settings`).
+  Nor the ones the environment gives them: `cli.cmd_selftest` hands pytest the variables of
+  `mutation.PYTEST_VARIABLES` empty, which pytest reads as none (a CI job's `PYTEST_ADDOPTS` for
+  `./pyt test`, a coverage gate or `--ff`, failed the suite: exit 1, or 4 without the cache
+  provider; `test_plain_selftest_ignores_the_pytest_variables_of_the_apps_tests`).
   `--rootdir=.` keeps the test ids `.pytemplate/tests/test_x.py::name` (the uv-floor job
   deselects by one); a bare `pytest .pytemplate/tests` finds the same pytest.ini itself, and its
   ids then start at `test_x.py` (its rootdir is `.pytemplate/tests`). Both paths are relative to

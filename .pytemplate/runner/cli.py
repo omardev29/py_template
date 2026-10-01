@@ -331,7 +331,11 @@ def cmd_selftest(cfg: object, args: list[str]) -> int:
     # in a project folder such as `Projects [2026]` the absolute one stopped the suite (exit 4)
     tests = TEMPLATE.relative_to(ROOT) / "tests"
     suite: list[str | Path] = ["-c", tests / "pytest.ini", "--rootdir=.", tests]
-    code = envs.uv_run(tool, ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", *suite, *args], cwd=ROOT, check=False).returncode
+    # Nor the settings the environment gives the app's tests (a CI job's PYTEST_ADDOPTS for
+    # ./pyt test: a coverage gate, --ff), as for selftest --mutation's runs: pytest reads an empty
+    # value as none (envs.uv only adds variables)
+    no_app_settings = {name: "" for name in mutation.PYTEST_VARIABLES}
+    code = envs.uv_run(tool, ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", *suite, *args], cwd=ROOT, check=False, extra_env=no_app_settings).returncode
     if any(a in SELFTEST_INFO_FLAGS for a in args):
         return code  # pytest printed its help or version: no mypy of the whole runner after it
     typed = envs.uv_run(

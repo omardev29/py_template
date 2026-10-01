@@ -1805,8 +1805,9 @@ regenerate the root (CLAUDE.md, section 11).
   (select tests with `-k EXPR`). The tests that need the network (re-locks and real
   `./pyt new` runs of a copy, a few real builds) are skipped when it is unreachable. The suite
   has pytest settings of its own (`.pytemplate/tests/pytest.ini`): what your `pyproject.toml`
-  gives your app's tests (a coverage gate, `python_files`, plugins) and your root `conftest.py`
-  never reach it.
+  gives your app's tests (a coverage gate, `python_files`, plugins), your root `conftest.py` and
+  the `PYTEST_ADDOPTS`, `PYTEST_PLUGINS` and `PYTEST_DISABLE_PLUGIN_AUTOLOAD` you export for
+  them never reach it.
 - Some of its tests are property-based ([Hypothesis](https://hypothesis.works)): they make up
   inputs at random (a hundred per test, a few where each costs a runner or PowerShell start; on a
   CI the same ones every run) and a failure prints the smallest input it found.

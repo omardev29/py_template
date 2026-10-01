@@ -108,6 +108,43 @@ def test_plain_selftest_runs_the_suite_with_its_own_pytest_settings(tmp_path: Pa
     assert "1 passed, 1 deselected" in ran[0].stdout, ran[0].stdout
 
 
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [("PYTEST_ADDOPTS", "--cov=src --cov-fail-under=50"), ("PYTEST_ADDOPTS", "--ff"), ("PYTEST_PLUGINS", "no_such_plugin_of_the_app"), ("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")],
+)
+def test_plain_selftest_ignores_the_pytest_variables_of_the_apps_tests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str, value: str) -> None:
+    """pytest also takes settings from the environment: a CI job that exports PYTEST_ADDOPTS
+    for `./pyt test` (a coverage gate, --ff) or PYTEST_PLUGINS reached the runner's suite too,
+    which failed with every test passed (the gate measured the app while the runner's tests ran;
+    --ff is refused without the cache provider, exit 4), and PYTEST_DISABLE_PLUGIN_AUTOLOAD drops
+    Hypothesis's plugin. The suite runs without them, as selftest --mutation's runs do. The real
+    pytest of .venv runs with the environment envs.uv_run would hand uv."""
+    project_dir = tmp_path / "project"
+    tests = project_dir / ".pytemplate" / "tests"
+    tests.mkdir(parents=True)
+    for name in ("pytest.ini", "conftest.py"):
+        shutil.copyfile(TEMPLATE / "tests" / name, tests / name)
+    (tests / "test_tiny.py").write_text("def test_ok() -> None:\n    pass\n", encoding="utf-8")
+    monkeypatch.setattr(project, "ROOT", project_dir)
+    monkeypatch.setattr(project, "TEMPLATE", project_dir / ".pytemplate")
+    monkeypatch.setenv(variable, value)
+    ran: list[subprocess.CompletedProcess[str]] = []
+
+    def uv_run(env: envs.PyEnv, argv: list[Any], *, cwd: Path | None = None, check: bool = True, extra_env: dict[str, str] | None = None, **_: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        if args[:3] != ["python", "-m", "pytest"]:
+            return subprocess.CompletedProcess(args, 0, "", "")  # mypy of the runner: not this test's
+        child = envs.env_vars(env, extra_env)  # what envs.uv hands uv, which hands it to pytest
+        r = subprocess.run([sys.executable, *args[1:]], cwd=cwd, env=child, capture_output=True, text=True, timeout=300, check=False)
+        ran.append(r)
+        return r
+
+    monkeypatch.setattr(envs, "uv_run", uv_run)
+    # an option of Hypothesis's plugin (`--hypothesis-profile=pytemplate-deep` is the README's)
+    assert cli.cmd_selftest(make(), ["--hypothesis-seed=0"]) == 0, ran[0].stdout + ran[0].stderr
+    assert "1 passed" in ran[0].stdout, ran[0].stdout
+
+
 @pytest.mark.parametrize("flag", ["-h", "--help", "--version", "-V"])
 def test_plain_selftest_help_runs_no_mypy(monkeypatch: pytest.MonkeyPatch, flag: str) -> None:
     """`./pyt selftest --help` printed pytest's help, then ran mypy --strict of the whole runner
