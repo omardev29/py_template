@@ -1613,16 +1613,45 @@ def _plan_config(root: Path, names: Names) -> TextEdit:
 
 
 @functools.cache
-def _named_keys() -> frozenset[tuple[str, ...]]:
+def _named_keys() -> dict[tuple[str, ...], tuple[str, ...]]:
     """The keys of the presets' pyproject blocks whose value holds the app's name ({{name}},
-    {{pkg}}), with their table: the only values of the block a rename rewrites."""
-    out: set[tuple[str, ...]] = set()
+    {{pkg}}), with their table: the only values of the block a rename rewrites. Each with the
+    values the presets write there (TOML text, the placeholders in it)."""
+    out: dict[tuple[str, ...], list[str]] = {}
     for preset in presets.available():
         template = str(presets.load(preset).get("pyproject", ""))
         for stmt in config.scan(template) or []:
-            if stmt.kind == "key" and re.search(r"\{\{(?:name|pkg)\}\}", template[stmt.value[0] : stmt.value[1]]):
-                out.add(stmt.path)
-    return frozenset(out)
+            value = template[stmt.value[0] : stmt.value[1]]
+            if stmt.kind == "key" and re.search(r"\{\{(?:name|pkg)\}\}", value):
+                out.setdefault(stmt.path, []).append(value)
+    return {path: tuple(values) for path, values in out.items()}
+
+
+def _as_the_preset_wrote(text: str, templates: Sequence[str], names: Names) -> tuple[str, int] | None:
+    """A named value of the preset block that still holds what a preset wrote there for the old
+    name (`text`, its TOML text), written again for the new one, with the number of placeholders
+    that change; None: edited since (rewritten word by word). Only the placeholders follow: for
+    an app named C, copyright = "Copyright (C) {{name}}" became "Copyright (Beta) Beta"."""
+
+    def fill(template: str, name: str, pkg: str) -> str:
+        return template.replace("{{name}}", name).replace("{{pkg}}", pkg)
+
+    def value(toml: str) -> object:
+        try:
+            return tomllib.loads(f"v = {toml}").get("v")
+        except config.TOML_ERRORS:
+            return None
+
+    for template in templates:
+        old, new = fill(template, names.old_name, names.old_pkg), fill(template, names.new_name, names.new_pkg)
+        if text != old:  # the same value in another spelling (a TOML formatter's quotes)?
+            parsed, new_value = value(text), value(new)
+            if parsed is None or parsed != value(old) or not isinstance(new_value, str):
+                continue
+            new = config.toml_value(new_value)
+        changed = template.count("{{name}}") * int(names.old_name != names.new_name) + template.count("{{pkg}}") * int(names.old_pkg != names.new_pkg)
+        return new, changed
+    return None
 
 
 def _names_the_old_one(line: str, names: Names) -> bool:
@@ -1656,9 +1685,13 @@ def _plan_pyproject(root: Path, names: Names) -> TextEdit | None:
         block, named, parts, pos = "\n".join(lines[begin + 1 : end]) + "\n", _named_keys(), [], 0
         for stmt in config.scan(block) or []:
             if stmt.kind == "key" and stmt.path in named:
-                value = rewrite(block[stmt.value[0] : stmt.value[1]], names, toml=True)
-                parts += [block[pos : stmt.value[0]], value.text]
-                pos, count = stmt.value[1], count + value.count
+                text = block[stmt.value[0] : stmt.value[1]]
+                written = _as_the_preset_wrote(text, named[stmt.path], names)
+                if written is None:  # edited by hand: every word that is the name follows it
+                    value = rewrite(text, names, toml=True)
+                    written = (value.text, value.count)
+                parts += [block[pos : stmt.value[0]], written[0]]
+                pos, count = stmt.value[1], count + written[1]
         lines[begin + 1 : end] = "".join([*parts, block[pos:]])[:-1].split("\n")
         new = "\n".join(lines)
     try:

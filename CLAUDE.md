@@ -1603,7 +1603,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     either quote style, any indentation; a table it cannot edit stops the plan) and, in the
     preset block, the values the preset writes with the name (`rename._named_keys`: `{{name}}`
     or `{{pkg}}` in a preset.toml `pyproject`; flet's `org = "com.example"` stays, which for an
-    app named com became `beta.example`); mentions in other tables are reported, never one spelled
+    app named com became `beta.example`), and in such a value only what the placeholder wrote
+    while it holds the preset's text (`_as_the_preset_wrote`, a formatter's quotes too: for an
+    app named C, `copyright = "Copyright (C) {{name}}"` became `"Copyright (Beta) Beta"`; a value
+    edited by hand changes word by word); mentions in other tables are reported, never one spelled
     like the new name or its package (`_names_the_old_one`: renamed to its package's spelling,
     my-flet -> my_flet, the lines just written were listed as left unchanged,
     `test_rename.test_the_pyproject_lines_a_rename_writes_are_never_left_unchanged`). Read as bytes decoded `utf-8-sig`: its line

@@ -137,14 +137,31 @@ def test_the_pyproject_preset_block_is_renamed(tmp_path: Path) -> None:
     assert data["tool"]["flet"]["product"] == data["tool"]["flet"]["company"] == "My-Game"
 
 
-@pytest.mark.parametrize(("old", "new"), [("com", "beta"), ("com", "My-Game"), ("example", "beta")])
+@pytest.mark.parametrize(("old", "new"), [("com", "beta"), ("com", "My-Game"), ("example", "beta"), ("C", "Beta"), ("Copyright", "beta")])
 def test_the_preset_block_keeps_what_is_not_the_name(tmp_path: Path, old: str, new: str) -> None:
     """Only the values the preset writes with the name follow a rename: flet's org =
-    "com.example" (a reverse domain) became "beta.example" for an app named com."""
+    "com.example" (a reverse domain) became "beta.example" for an app named com. In such a value
+    only what the preset's {{name}} wrote changes: copyright = "Copyright (C) {{name}}" became
+    "Copyright (Beta) Beta" for an app named C."""
     _write_project(tmp_path, "flet", old)
     _rename(tmp_path, old, new)
     assert _tree(tmp_path) == presets.skeleton("flet", new)
     assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == _pyproject("flet", new)
+
+
+def test_a_preset_value_in_another_spelling_still_changes_only_its_placeholder(tmp_path: Path) -> None:
+    """copyright = 'Copyright (C) C' (literal quotes, a TOML formatter's) is still the value the
+    preset wrote: only its name changes. A value edited by hand changes word by word, as before."""
+    _write_project(tmp_path, "flet", "C")
+    pyproject = tmp_path / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    assert 'copyright = "Copyright (C) C"' in text and 'company = "C"' in text
+    text = text.replace('copyright = "Copyright (C) C"', "copyright = 'Copyright (C) C'").replace('company = "C"', 'company = "C Games"')
+    pyproject.write_text(text, encoding="utf-8", newline="\n")
+    planned = rename.plan(tmp_path, "C", "Beta")
+    assert planned.pyproject is not None
+    flet = tomllib.loads(planned.pyproject.new)["tool"]["flet"]
+    assert (flet["copyright"], flet["company"], flet["product"]) == ("Copyright (C) Beta", "Beta Games", "Beta")
 
 
 def test_plan_writes_nothing(tmp_path: Path) -> None:
