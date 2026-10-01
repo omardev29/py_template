@@ -100,6 +100,25 @@ def _executable(path: Path) -> None:
 # --- the script ------------------------------------------------------------------------------------
 
 
+def test_the_paths_of_the_hints_paste_whole() -> None:
+    """The hints printed a subfolder project's folder and launcher bare (or double-quoted only for
+    a blank): `cd apps/R&D` ran `cd apps/R` in the background, then a command `D`, and `$` expanded
+    in double quotes. Plain as it is; double quotes, which sh, PowerShell and cmd read alike, when
+    nothing in them is special to one; else sh's single quotes; ASCII in the hook script."""
+    cases = {
+        "./pyt": "./pyt", "apps/my app": '"apps/my app"', "apps/R&D (v2)": '"apps/R&D (v2)"', "a;b|c<d>e": '"a;b|c<d>e"',
+        "a$b": "'a$b'", "a`b": "'a`b'", "a\\b": "'a\\b'", 'a"b': "'a\"b'", "a!b": "'a!b'", "a %OS%": "'a %OS%'", "it's": "\"it's\"", "it's $x": "'it'\"'\"'s $x'",
+    }  # fmt: skip
+    for text, word in cases.items():
+        assert hooks.pasteable(text) == word and hooks.script_word(text) == word, text
+        if not IS_WINDOWS:  # pasted into a shell: the path, whole
+            said = subprocess.run(["/bin/sh", "-c", f"printf '%s' {word}"], capture_output=True, text=True, check=True).stdout
+            assert said == text, (word, said)
+    cafe = "caf\u00e9"
+    assert hooks.script_word(f"{cafe}/pyt") == hooks.sh_literal(f"{cafe}/pyt") and hooks.script_word(f"{cafe}/pyt").isascii()
+    assert hooks.pasteable(f"{cafe} x/pyt") == f'"{cafe} x/pyt"'  # the runner's own output may hold it
+
+
 def test_hook_script_is_ascii_lf_and_marked() -> None:
     text = hooks.hook_script("./pyt")
     assert text.isascii()
@@ -2225,7 +2244,8 @@ def test_a_failed_check_says_where_its_hints_run(tmp_path: Path, monkeypatch: py
     note = "the commands and paths above are the project's: run them in its folder"
     if sub:
         folder = err.split(f"{note}, cd ", 1)[1].split(" from the top of the repository", 1)[0]
-        assert folder == shlex.quote(sub), err
+        # double quotes, which cmd and PowerShell read too, unless a shell reads something in them
+        assert folder == (shlex.quote(sub) if "$" in sub else f'"{sub}"'), err
         if not IS_WINDOWS:  # pasted into a shell, it names the folder, whole
             said = subprocess.run(["/bin/sh", "-c", f"printf '%s' {folder}"], capture_output=True, text=True, check=True).stdout
             assert said == sub, (folder, said)
@@ -2859,7 +2879,7 @@ def test_git_runs_the_hook(tmp_path: Path, sub: str) -> None:
         # the launcher the hook calls, from the top where git runs it: a subfolder project's
         # hint named ./pyt, which is not there
         launcher = f"./{sub}/pyt" if sub else "./pyt"
-        word = hooks.shell_word(launcher)
+        word = hooks.script_word(launcher)
         assert f"Remove the hook: sh {word} hooks uninstall" in r.stderr
         if not IS_WINDOWS:  # pasted into a shell, the advice names the launcher, whole
             said = subprocess.run(["/bin/sh", "-c", f"printf '%s' {word}"], capture_output=True, text=True, check=True).stdout

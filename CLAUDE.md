@@ -1222,8 +1222,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   project's, `cd <prefix>` from the top (`hooks.run`: typed at the top, `./pyt render` and `git
   add .vscode/tasks.json` failed; `test_hooks.test_a_failed_check_says_where_its_hints_run`).
   Both, and the `-> sh <launcher> hooks run` of install and status, quote the path as a shell
-  takes it (`hooks.shell_word` in the ASCII hook script, `shlex.quote` in the runner's output):
-  `cd apps/R&D` ran `cd apps/R` in the background, then a command `D`.
+  takes it (`hooks.pasteable`: double quotes when sh, PowerShell and cmd read nothing in them,
+  else sh's single quotes; `hooks.script_word` in the ASCII hook script): `cd apps/R&D` ran `cd
+  apps/R` in the background, then a command `D` (`test_hooks.test_the_paths_of_the_hints_paste_whole`).
   `shellcheck -s sh`-clean (tested when installed). Any change to
   `hooks.hook_script` makes installed hooks "outdated": apply/setup rewrite them. git runs no
   hook without its x bit (it only prints a hint, and the commit goes through unchecked: a copy,
