@@ -771,7 +771,8 @@ def _hooks_path_summary(repo: hooks.Repo) -> str:
     nothing is installed; does that hook run the checks?"""
     runner = hooks.hooks_path_runner(repo)
     if runner is not None:
-        return f"{hooks.elsewhere(repo)}: {runner} runs ./pyt hooks run{_skipped_note(repo)}"
+        stale = " (pytemplate's hook of an older version: ./pyt hooks status says how to update it)" if hooks.hooks_path_state(repo) == "stale" else ""
+        return f"{hooks.elsewhere(repo)}: {runner} runs ./pyt hooks run{stale}{_skipped_note(repo)}"
     return f"{hooks.elsewhere(repo)}: nothing installed (./pyt hooks status says what to add)"
 
 

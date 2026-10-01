@@ -1287,8 +1287,14 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   sh ./pyt hooks run || exit $?`, which skips a checkout without the launcher as our own hook
   does: in a global hooks folder the unguarded line failed every commit of every other
   repository; the hint says so for a hooks folder outside the repository), and
-  apply's summary says whether that hook already runs it (`hooks.hooks_path_runner`); husky 9
-  (`.husky/_` holding `h` or `husky.sh`) is read through `.husky/pre-commit`. In a linked
+  apply's summary says whether that hook already runs it (`hooks.hooks_path_runner`). A hook
+  there that is pytemplate's of an older version and calls this project's launcher runs the
+  checks (`hooks.hooks_path_state`: "stale", one of `RUNS_CHECKS`): status says it is outdated,
+  with `stale_hint` (replace it with the run line, after one that runs the `pre-commit.local`
+  next to it, which it runs first), install, setup and apply that it runs them;
+  read as "outdated", it was said not to run them, and the line it told to add ran them twice
+  (`test_hooks.test_pytemplates_hook_of_an_older_version_in_a_custom_folder_runs_the_checks`).
+  husky 9 (`.husky/_` holding `h` or `husky.sh`) is read through `.husky/pre-commit`. In a linked
   folder `uninstall`, and apply with `pre_commit = false`, leave pytemplate's hook alone when git
   tracks its `pre-commit` or `pre-commit.local` (a team's shared hooks, pytemplate's own script
   too) or the folder is outside the work tree (other repositories may run it), and say why

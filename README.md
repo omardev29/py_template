@@ -1622,7 +1622,9 @@ only deletes files is checked too).
   hooks folder), nothing is written: add
   `[ ! -f ./pyt ] || sh ./pyt hooks run || exit $?` to your own hook (husky 9:
   `.husky/pre-commit`); it skips a checkout without `./pyt`, so a global hooks folder that
-  every repository runs keeps working in the others. `uninstall` (and `pre_commit = false`)
+  every repository runs keeps working in the others. A copy of pytemplate's hook there runs the
+  checks too; once a newer template changes the hook, `./pyt hooks status` says the copy is
+  outdated: replace it with that line. `uninstall` (and `pre_commit = false`)
   leaves pytemplate's hook in such a linked folder alone too when git tracks it or the folder is
   outside the repository, and says so: change that folder by hand.
 - A project in a subfolder of a bigger repository: the hook goes into that repository's hooks

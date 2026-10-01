@@ -578,6 +578,53 @@ def test_a_linked_hooks_folder_is_never_written_into(tmp_path: Path, capsys: pyt
 
 
 @needs_git
+@pytest.mark.parametrize("setup", ["core.hooksPath", "linked folder"])
+def test_pytemplates_hook_of_an_older_version_in_a_custom_folder_runs_the_checks(tmp_path: Path, capsys: pytest.CaptureFixture[str], setup: str) -> None:
+    """A team copied pytemplate's hook into the folder git runs hooks from (core.hooksPath, or a
+    folder linked as .git/hooks), then took a newer template: that hook is pytemplate's of an
+    older version and calls this project's launcher, so it runs the checks. status said the
+    checks were not in it, and status, install and setup told to add the run line, which then
+    ran them twice per commit. It is reported as outdated, with how to bring it up to date; one
+    that calls another project's launcher still gets the line."""
+    top, project = make_repo(tmp_path, "proj")
+    shared = top / ".githooks"
+    shared.mkdir()
+    old = hooks.hook_script("./proj/pyt").replace("mypy runs in ./pyt check.", "mypy runs in check.")
+    (shared / hooks.HOOK).write_text(old, encoding="utf-8", newline="\n")
+    _executable(shared / hooks.HOOK)
+    if setup == "core.hooksPath":
+        git(top, "config", "core.hooksPath", ".githooks")
+    else:
+        shutil.rmtree(top / ".git" / "hooks")
+        _link_dir(top / ".git" / "hooks", shared if IS_WINDOWS else Path("..") / ".githooks")
+    repo = find(project, top)
+    assert repo.custom_hooks_path
+    passed, label, hint = hooks._status_line(make(), repo)
+    assert passed is None and "outdated" in label and "runs ./pyt hooks run" in label and "not in" not in label, label
+    assert hooks.run_line(repo) in hint and "replace it" in hint
+    message = hooks.install(repo)  # no error: the checks run
+    assert "already runs ./pyt hooks run" in message and "older version" in message and hooks.run_line(repo) in message
+    hooks.ensure_installed(make(), project)  # ./pyt setup and ./pyt apply
+    err = capsys.readouterr().err
+    assert "older version" in err and "not installed" not in err
+    assert hooks.hooks_path_state(repo) == "stale"
+    summary = cmd_apply._hooks_path_summary(repo)
+    assert "runs ./pyt hooks run" in summary and "older version" in summary
+    assert (shared / hooks.HOOK).read_text(encoding="utf-8") == old  # never written
+    assert hooks.LOCAL not in hint
+    (shared / hooks.LOCAL).write_text("#!/bin/sh\necho team check\n", encoding="utf-8")  # it runs that first: keep it running
+    hint = hooks._status_line(make(), repo)[2]
+    assert "after a line that runs" in hint and f"{hooks.LOCAL} (it runs that first now)" in hint, hint
+    # pytemplate's hook of another project (gone): it runs no checks of this one
+    gone = old.replace("_pt_launcher='./proj/pyt'", "_pt_launcher='./gone/pyt'")
+    assert gone != old
+    (shared / hooks.HOOK).write_text(gone, encoding="utf-8", newline="\n")
+    assert hooks.hooks_path_state(repo) == "outdated"
+    passed, label, hint = hooks._status_line(make(), repo)
+    assert passed is None and "checks are not in" in label and hooks.run_line(repo) in hint
+
+
+@needs_git
 def test_uninstall_leaves_the_hooks_a_linked_folder_tracks_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A team shares pytemplate's hook (and a hook of its own, run first as pre-commit.local)
     through a tracked folder linked as .git/hooks. uninstall deleted the tracked pre-commit and

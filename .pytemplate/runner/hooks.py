@@ -29,7 +29,9 @@ is true in pytemplate.toml (the default).
   forced: that repository's commits never contain it.
 - With `core.hooksPath` set (husky, a shared hooks folder...) git ignores `.git/hooks`: the
   hook is not installed there; `install` and `status` print the line to add to that setup
-  (husky 9, core.hooksPath=.husky/_: to `.husky/pre-commit`). The same for a `.git/hooks` that
+  (husky 9, core.hooksPath=.husky/_: to `.husky/pre-commit`), unless the hook there runs the
+  checks already: pytemplate's hook of an older version that calls this launcher is "stale"
+  (hooks_path_state), reported as outdated, never as missing. The same for a `.git/hooks` that
   is a link or junction to another folder (a team's tracked `.githooks`): nothing is written
   through it, and `uninstall` removes only a hook of pytemplate's there that git does not track,
   in a folder of this work tree (linked_hands_off).
@@ -835,11 +837,35 @@ def active_skipped(repo: Repo) -> tuple[str, str] | None:
     return git_skips(_hooks_path_file(repo) if repo.custom_hooks_path else repo.default_dir / HOOK, repo)
 
 
+def hooks_path_state(repo: Repo) -> str:
+    """classify() of the hook git runs in a custom hooks folder (core.hooksPath, a linked
+    folder), or "stale": pytemplate's hook of an older version that calls this project's
+    launcher. pytemplate writes nothing there, and such a hook (a team copied it into its
+    folder, then took a newer template) runs the checks all the same: read as "outdated", status,
+    install and setup said the checks were not in it and told to add the run line, which then
+    ran them twice."""
+    hook = _hooks_path_file(repo)
+    state = classify(hook, repo)
+    return "stale" if state == "outdated" and runs_checks(_read(hook), repo) else state
+
+
+# The states of a custom folder's hook (hooks_path_state) that run this project's checks
+RUNS_CHECKS = ("installed", "calls", "stale")
+
+
+def stale_hint(repo: Repo) -> str:
+    """How to bring a "stale" hook (hooks_path_state) up to date: pytemplate writes nothing in
+    that folder, so the user (or the tool that manages it) does. The pre-commit.local next to it,
+    which it runs first, must keep running."""
+    local = _hooks_path_file(repo).parent / LOCAL
+    keep = f", after a line that runs {_show(local, repo)} (it runs that first now)" if os.path.lexists(local) else ""
+    return f"it still runs the checks; to bring it up to date, replace it with this line{keep} (pytemplate writes nothing in {_show(repo.hooks_dir, repo)}):\n{run_line(repo)}"
+
+
 def hooks_path_runner(repo: Repo) -> str | None:
     """With core.hooksPath: the hook git runs there (as shown to the user) when it already runs
     this project's checks, else None."""
-    hook = _hooks_path_file(repo)
-    return _show(hook, repo) if classify(hook, repo) in ("installed", "calls") else None
+    return _show(_hooks_path_file(repo), repo) if hooks_path_state(repo) in RUNS_CHECKS else None
 
 
 def _show(path: Path, repo: Repo) -> str:
@@ -973,10 +999,13 @@ def install(repo: Repo, *, force: bool = False) -> str:
     """Install or update the hook; return the message to print (PytError if it cannot)."""
     if repo.custom_hooks_path:
         hook = _hooks_path_file(repo)
-        state = classify(hook, repo)
-        skipped = git_skips(hook, repo) if state in ("calls", "installed") else None
+        state = hooks_path_state(repo)
+        skipped = git_skips(hook, repo) if state in RUNS_CHECKS else None
         if skipped is not None:  # pytemplate writes nothing in that folder: the fix is the user's
             raise PytError(f"{_show(hook, repo)} runs ./pyt hooks run ({_elsewhere_short(repo)}), but git skips it: {skipped[0]}.\n  {skipped[1]}")
+        if state == "stale":
+            hint = "\n".join(f"  {line}" for line in stale_hint(repo).splitlines())
+            return f"{_show(hook, repo)} already runs ./pyt hooks run ({_elsewhere_short(repo)}), but it is pytemplate's hook of an older version:\n{hint}"
         if state in ("calls", "installed"):
             return f"{_show(hook, repo)} already runs ./pyt hooks run ({_elsewhere_short(repo)})"
         where = "a folder pytemplate never writes into" if repo.hooks_link else "not in the default folder"
@@ -1106,11 +1135,13 @@ def _status_line(cfg: Config, repo: Repo) -> tuple[bool | None, str, str]:
     """Return (passed, label, hint) describing the hook, for `status` and `doctor`."""
     if repo.custom_hooks_path:
         hook = _hooks_path_file(repo)
-        state = classify(hook, repo)
+        state = hooks_path_state(repo)
         where = _show(hook, repo)
-        skipped = git_skips(hook, repo) if state in ("installed", "calls") else None
+        skipped = git_skips(hook, repo) if state in RUNS_CHECKS else None
         if skipped is not None:
             return None, f"git pre-commit hook: {where} runs ./pyt hooks run ({_elsewhere_short(repo)}), but git skips it: {skipped[0]}", skipped[1]
+        if state == "stale":
+            return None, f"git pre-commit hook outdated: {where} runs ./pyt hooks run ({_elsewhere_short(repo)}), as pytemplate's hook of an older version", stale_hint(repo)
         if state in ("installed", "calls"):
             return True, f"git pre-commit hook: {where} runs ./pyt hooks run ({_elsewhere_short(repo)})", ""
         return None, f"git pre-commit hook: {elsewhere(repo, value=True)}, pytemplate's checks are not in {where}", _hooks_path_hint(repo)
@@ -1196,11 +1227,13 @@ def ensure_installed(cfg: Config, project: Path = ROOT) -> None:
     try:
         if repo.custom_hooks_path:
             hook = _hooks_path_file(repo)
-            state = classify(hook, repo)
-            skipped = git_skips(hook, repo) if state in ("installed", "calls") else None
+            state = hooks_path_state(repo)
+            skipped = git_skips(hook, repo) if state in RUNS_CHECKS else None
             if skipped is not None:  # a folder pytemplate never writes into: the fix is the user's
                 ui.warn(f"git pre-commit hook: {_show(hook, repo)} runs ./pyt hooks run, but git skips it: {skipped[0]} ({skipped[1]})")
-            elif state not in ("installed", "calls"):
+            elif state == "stale":
+                ui.info(f"git pre-commit hook: {_show(hook, repo)} runs ./pyt hooks run, as pytemplate's hook of an older version (./pyt hooks status says how to update it)")
+            elif state not in RUNS_CHECKS:
                 ui.info(f"git pre-commit hook: {elsewhere(repo)}, not installed (./pyt hooks status says what to add)")
             return
         target = repo.default_dir / HOOK
