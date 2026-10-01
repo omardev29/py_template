@@ -65,8 +65,11 @@ SMOKE_TYPING = "strict"
 RUNNER_DROP = frozenset(
     {"VIRTUAL_ENV", "UV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "UV_MANAGED_PYTHON", "UV_NO_MANAGED_PYTHON", *LOCK_MODE, *PYTEST_VARIABLES}
 )
-# Anything that could make Neovim read the user's own config, data or server.
-NVIM_DROP = frozenset({"NVIM", "NVIM_APPNAME", "NVIM_LISTEN_ADDRESS", "NVIM_LOG_FILE", "VIMINIT", "EXINIT", "MYVIMRC", "MYGVIMRC"})
+# Anything that could make Neovim read the user's own config, data or server, or another
+# Neovim's runtime: a running Neovim exports VIMRUNTIME to every job and terminal, and an isolated
+# Neovim of another version (selftest --nvim started from a 0.12 editor, testing the 0.11.2 floor)
+# ran on that version's runtime files, where its ftplugins and vim.treesitter failed.
+NVIM_DROP = frozenset({"NVIM", "NVIM_APPNAME", "NVIM_LISTEN_ADDRESS", "NVIM_LOG_FILE", "VIMINIT", "EXINIT", "MYVIMRC", "MYGVIMRC", "VIMRUNTIME", "VIM"})
 XDG_HOMES = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")
 
 

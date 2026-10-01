@@ -593,6 +593,16 @@ def test_the_nvim_harness_never_hands_its_projects_the_users_lock_mode_nor_pytes
     assert not {k for k in user if k != "HOME"} & set(env), env
 
 
+def test_the_isolated_neovim_uses_its_own_runtime(tmp_path: Path) -> None:
+    """Neovim exports VIMRUNTIME to every job and terminal: selftest --nvim started from a
+    Neovim of another version (its terminal, :Pyt, testing the 0.11.2 floor from a 0.12 editor)
+    ran the isolated Neovim on that version's runtime, and its ftplugins and vim.treesitter
+    failed (A10-04). The runtime goes with the rest of the calling Neovim's variables."""
+    user = {"VIMRUNTIME": "/opt/nvim-0.12/share/nvim/runtime", "VIM": "/opt/nvim-0.12/share/nvim", "NVIM": "/run/nvim.sock", "HOME": "/home/me"}
+    env = nvimtest.nvim_env(nvimtest.Layout(tmp_path / "w"), user)
+    assert not {"VIMRUNTIME", "VIM", "NVIM"} & set(env) and env["HOME"] == "/home/me", env
+
+
 def test_nvim_git_config_includes_the_users_whole_global_config(tmp_path: Path) -> None:
     """nvim_env moves XDG_CONFIG_HOME, so Neovim's git (lazy.nvim clones the plugins with the
     user's config: a proxy, url.*.insteadOf) would miss the user's $XDG_CONFIG_HOME/git/config.

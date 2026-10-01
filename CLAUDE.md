@@ -4375,7 +4375,11 @@ short temp tree and unset `NVIM_APPNAME`.
   or one every user can write, is refused: `project.check_private_dir`, since code runs from
   it, and checked again once it exists, `project.make_private_dir`, as for `--e2e`): `<dir>/x/{config,data,state,cache}` = the `XDG_*` homes,
   `<dir>/base.json` = the base is complete, `<dir>/p/<preset>` = scratch projects,
-  `<dir>/logs/` = one log per step. It stops unless Neovim reports every stdpath inside
+  `<dir>/logs/` = one log per step. Every Neovim call gets `nvimtest.nvim_env`: none of the calling
+  Neovim's variables (`NVIM_DROP`: `NVIM`, `MYVIMRC`... and `VIMRUNTIME`, which a Neovim exports to
+  its terminals and jobs: started from a Neovim of another version, the isolated one ran on that
+  version's runtime files and its ftplugins and vim.treesitter failed,
+  `test_cmd_nvim.test_the_isolated_neovim_uses_its_own_runtime`). It stops unless Neovim reports every stdpath inside
   `<dir>/x`, refuses a `--dir` inside the template or one that is a file (exit 2), and one whose
   physical path (Neovim's cwd in the projects below it) holds a character Neovim cannot put on
   its runtimepath (`cmd_nvim.rtp_unsafe_char`, as `nvim trust` refuses such a project: spec.lua
