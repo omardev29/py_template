@@ -62,21 +62,24 @@ def test_plain_selftest_fails_when_pytest_or_mypy_fails(monkeypatch: pytest.Monk
     assert cli.cmd_selftest(make(), ["-k", "x"]) == expected
     (pt_env, pt_argv, pt_check), (my_env, my_argv, my_check) = fake.calls  # mypy runs even after a pytest failure
     assert pt_env == my_env == envs.tool_env(make()).key and not pt_check and not my_check
-    assert pt_argv[:5] == ["python", "-m", "pytest", "-q", "-p"] and pt_argv[-3:] == [str(TEMPLATE / "tests"), "-k", "x"]
+    assert pt_argv[:5] == ["python", "-m", "pytest", "-q", "-p"] and pt_argv[-3:] == [str(Path(".pytemplate", "tests")), "-k", "x"]
     assert my_argv[:3] == ["mypy", "--strict", "--no-incremental"] and "--python-version" in my_argv
     assert my_argv[my_argv.index("--python-version") + 1] == "3.11"  # the runner's floor
     assert my_argv[-2:] == [str(TEMPLATE / "runner"), str(TEMPLATE / "pyt.py")]
 
 
-def test_plain_selftest_runs_the_suite_with_its_own_pytest_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("folder", ["project", "Projects [2026]"])
+def test_plain_selftest_runs_the_suite_with_its_own_pytest_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, folder: str) -> None:
     """pytest looked for its settings itself and read the project's, which are its app's tests':
     a coverage gate in addopts (here an unknown option, exit 4: this .venv has no pytest-cov;
     with it "total of 0 is less than fail-under"), python_files (no runner test collected: exit
     5) and its root conftest.py all reached the runner's suite. The suite has its own
     (.pytemplate/tests/pytest.ini, -c), and the test ids stay .pytemplate/tests/..., which CI
     deselects by (template-selftest's uv-floor job). The real pytest of .venv runs the suite's
-    real settings here; only uv run and mypy are left out."""
-    project_dir = tmp_path / "project"
+    real settings here; only uv run and mypy are left out. A project folder with a '[' (pytest
+    9 reads one in a collection argument as a parametrization): the absolute tests folder
+    stopped the suite, "path cannot contain [] parametrization", exit 4."""
+    project_dir = tmp_path / folder
     tests = project_dir / ".pytemplate" / "tests"
     tests.mkdir(parents=True)
     for name in ("pytest.ini", "conftest.py"):

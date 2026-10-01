@@ -3721,7 +3721,10 @@ short temp tree and unset `NVIM_APPNAME`.
   (`test_selftest_harness.test_plain_selftest_runs_the_suite_with_its_own_pytest_settings`).
   `--rootdir=.` keeps the test ids `.pytemplate/tests/test_x.py::name` (the uv-floor job
   deselects by one); a bare `pytest .pytemplate/tests` finds the same pytest.ini itself, and its
-  ids then start at `test_x.py` (its rootdir is `.pytemplate/tests`).
+  ids then start at `test_x.py` (its rootdir is `.pytemplate/tests`). Both paths are relative to
+  the project folder: pytest 9 reads a `[` in a collection argument as a parametrization, and the
+  absolute tests folder stopped the suite in a project folder such as `Projects [2026]` ("path
+  cannot contain [] parametrization", exit 4; the same test, with such a folder).
   mypy checks the host platform only: add `--platform linux` / `--platform darwin` by hand to
   check the other branches (template-selftest runs it on all three OSes). The exit code is
   pytest's when it failed, else mypy's (mypy runs either way, but not after pytest's own

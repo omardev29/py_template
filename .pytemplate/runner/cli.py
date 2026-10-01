@@ -326,8 +326,11 @@ def cmd_selftest(cfg: object, args: list[str]) -> int:
     # The suite's own settings (-c): pytest looked for them itself and read the project's (its
     # pyproject.toml, pytest.ini, tox.ini or setup.cfg, and its root conftest.py), so a coverage
     # gate, python_files or a plugin the project gives its app's tests failed the runner's.
-    # --rootdir=. (the project folder, the cwd) keeps the test ids: .pytemplate/tests/test_x.py::y
-    suite: list[str | Path] = ["-c", TEMPLATE / "tests" / "pytest.ini", "--rootdir=.", TEMPLATE / "tests"]
+    # --rootdir=. (the project folder, the cwd) keeps the test ids: .pytemplate/tests/test_x.py::y.
+    # Paths relative to it: pytest 9 reads a '[' in a collection argument as a parametrization, and
+    # in a project folder such as `Projects [2026]` the absolute one stopped the suite (exit 4)
+    tests = TEMPLATE.relative_to(ROOT) / "tests"
+    suite: list[str | Path] = ["-c", tests / "pytest.ini", "--rootdir=.", tests]
     code = envs.uv_run(tool, ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", *suite, *args], cwd=ROOT, check=False).returncode
     if any(a in SELFTEST_INFO_FLAGS for a in args):
         return code  # pytest printed its help or version: no mypy of the whole runner after it
