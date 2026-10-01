@@ -84,7 +84,19 @@ local function text(v, max)
   if type(v) ~= "string" then
     return ""
   end
-  return (v:gsub("%c", " ")):sub(1, max or 200)
+  v = v:gsub("%c", " ")
+  local cut = max or 200
+  -- at a character boundary: a [tasks] help is the user's text, in any language, and a cut
+  -- inside a UTF-8 sequence left a lone lead byte (a garbled n with tilde in the pickers). While
+  -- the byte after the cut continues a sequence (0x80-0xBF), the cut moves back before its lead
+  for _ = 1, 3 do
+    local b = v:byte(cut + 1)
+    if not b or b < 0x80 or b >= 0xC0 then
+      break
+    end
+    cut = cut - 1
+  end
+  return v:sub(1, cut)
 end
 local function list(v)
   return (type(v) == "table" and vim.islist(v)) and v or {}

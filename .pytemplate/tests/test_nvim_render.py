@@ -322,6 +322,18 @@ if cmd[2] == "run" then
 end
 local bad = pt.sanitize({ schema = 1, backend = { active = "x", supported = { "calc.exe" } }, envs = { tools = "C:/w" } })
 check("sanitize", bad.backend.active == "cpython" and bad.envs.tools == ".venv", vim.inspect(bad))
+-- a long [tasks] help (the user's text, any language) is cut at a character boundary, never inside
+-- a UTF-8 sequence: a lone lead byte showed as a garbled character in the pickers
+for i, case in ipairs({
+  { string.rep("a", 199) .. "\195\177bc", string.rep("a", 199) },
+  { string.rep("a", 198) .. "\195\177bc", string.rep("a", 198) .. "\195\177" },
+  { string.rep("a", 198) .. "\240\159\152\128", string.rep("a", 198) },
+  { string.rep("a", 197) .. "\240\159\152\128x", string.rep("a", 197) },
+  { string.rep("a", 250), string.rep("a", 200) },
+}) do
+  local cut = pt.sanitize({ schema = 1, tasks = { { name = "gen", help = case[1] } } }).tasks[1].help
+  check("help cut at a character boundary " .. i, cut == case[2], vim.inspect({ #cut, cut:sub(-4) }))
+end
 local p = require("pytemplate.tasks").parse_line
 local m = p("src/a/x.py:12: error: Incompatible types  [assignment]")
 check("parse mypy", m and m.type == "E" and m.lnum == 12, vim.inspect(m))
