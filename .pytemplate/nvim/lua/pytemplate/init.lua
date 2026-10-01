@@ -363,9 +363,20 @@ function M.uv_candidates()
     end
   end
   add(vim.env.UV)
-  -- Windows: only a real uv.exe from PATH (a uv.cmd/uv.bat shim earlier on PATH would go through
-  -- cmd.exe and parse the arguments again), like pyt.cmd and pyt.ps1
-  add(vim.fn.exepath(exe))
+  if M.is_win then
+    -- only a real uv.exe from PATH (a uv.cmd/uv.bat shim earlier on PATH would go through cmd.exe
+    -- and parse the arguments again), and only from PATH's absolute folders, like pyt.cmd and
+    -- pyt.ps1: vim.fn.exepath() also searches Neovim's current folder first (while 'shell' is
+    -- cmd.exe, the default) and a relative entry from it, so a uv.exe there ran every task
+    for _, d in ipairs(vim.split(vim.env.PATH or "", ";", { plain = true, trimempty = true })) do
+      d = d:gsub('"', "")
+      if d:match("^%a:[\\/]") or d:match("^[\\/][\\/]") then
+        dir(d)
+      end
+    end
+  else
+    add(vim.fn.exepath(exe))
+  end
   dir(vim.env.UV_INSTALL_DIR)
   dir(vim.env.UV_INSTALL_DIR, "/bin")
   dir(vim.env.XDG_BIN_HOME)

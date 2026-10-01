@@ -271,8 +271,9 @@ uv search order (the same in all three launchers and the plugin, `init.uv_candid
 `test_launcher_sh.test_uv_search_order` walks it with fake uvs for `pyt` and `pyt.ps1`):
 `$UV` (must be a file) -> PATH (`pyt`: `command -v uv` accepted only when it prints a
 path, which rejects aliases and functions; `pyt.ps1`: `Get-Command -CommandType
-Application -All`, only a real `uv.exe` on Windows; the plugin: `exepath('uv.exe')` on
-Windows, never a `uv.cmd`/`uv.bat` shim) -> `UV_INSTALL_DIR[/bin]`, `XDG_BIN_HOME`,
+Application -All`, only a real `uv.exe` on Windows; the plugin: `<folder>\uv.exe` of each
+absolute PATH entry on Windows, never a `uv.cmd`/`uv.bat` shim nor its current folder, which
+`exepath()` searches first there) -> `UV_INSTALL_DIR[/bin]`, `XDG_BIN_HOME`,
 `XDG_DATA_HOME/../bin`, `~/.local/bin`, `CARGO_HOME/bin`, `~/.cargo/bin` -> Windows: WinGet
 `Links` and `Packages/astral-sh.uv_*` (`LOCALAPPDATA`, then `ProgramFiles`), scoop shims
 (`SCOOP`, `~/scoop`, `SCOOP_GLOBAL`, `ProgramData/scoop`), chocolatey, and last the user and
@@ -3658,8 +3659,11 @@ as the project's runner). Never a string command (it would go through
 (the launcher prints the install hints; on POSIX it runs as `/bin/sh <root>/pyt`, like the
 VS Code tasks and the git hook, so a checkout without the exec bit still gets them). The uv
 lookup mirrors the launchers because a GUI, launchd or MSYS2-login Neovim may have a minimal
-PATH; on Windows PATH is searched for `uv.exe` exactly (`exepath('uv.exe')`: a `uv.cmd`/`uv.bat`
-shim earlier on PATH would run through cmd.exe and parse the arguments again).
+PATH; on Windows PATH's absolute folders are searched for `uv.exe` exactly (a `uv.cmd`/`uv.bat`
+shim earlier on PATH would run through cmd.exe and parse the arguments again), never with
+`vim.fn.exepath`, which there searches Neovim's current folder first while 'shell' is cmd.exe (the
+default), and a relative PATH entry from it: a `uv.exe` in the folder Neovim started in (a vendored
+repository below the root) ran every task (`init.uv_candidates`, `test_lua_modules_in_headless_neovim`).
 
 LazyVim wiring:
 - Extras imported by `.lazy.lua` (only when the config is LazyVim): `lazyvim.plugins.extras`
@@ -5966,6 +5970,13 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   state folder does not exist. Fix: the trust snippet of `cmd_nvim.trust_file` creates the
   folder and picks the form (12.2). Test: `test_cmd_nvim.py::test_real_nvim_query_and_trust`.
   Goes: the buffer form once 0.12 is the minimum.
+- **`vim.fn.exepath()` searches the current folder first on Windows** (LIMITATION, documented
+  at `executable()`: 0.11.2 unless `$NoDefaultCurrentDirectoryInExePath` is set, 0.12.5 also only
+  while 'shell' is cmd.exe, the default; `is_executable_in_path` prepends `.;` to PATH, and a
+  relative entry is the current folder's too): `exepath('uv.exe')` took a `uv.exe` of the folder
+  Neovim started in before PATH's, and it ran every task, the uvx language server and the uv debug
+  adapter. Fix: `init.uv_candidates` walks PATH's absolute folders itself on Windows (12.2). Test:
+  `test_nvim_render.py::test_lua_modules_in_headless_neovim`. Goes: never.
 - **Headless Neovim** (LIMITATION): a Lua error still exits 0, `confirm()` never returns,
   `VeryLazy` never fires, and an unwritable `NVIM_LOG_FILE` drops `nvim.log` into the cwd. Fix:
   the `PTNVIM{json}` marker of `cmd_nvim.headless`; `nvim sync` asks lazy.nvim afterwards which
@@ -6296,7 +6307,7 @@ PowerShell (details: section 4.5):
   Goes: never.
 - **`Get-Command uv` may return an alias, a function or a `uv.cmd`/`uv.ps1` wrapper**
   (LIMITATION): a wrapper parses the arguments again. Fix: `-CommandType Application -All` and
-  only a real `uv.exe` on Windows (the plugin: `exepath('uv.exe')`; 4.1). Test:
+  only a real `uv.exe` on Windows (the plugin: `uv.exe` in PATH's absolute folders; 4.1). Test:
   `test_launcher_sh.py::test_uv_search_order`,
   `test_nvim_render.py::test_lua_modules_in_headless_neovim`. Goes: never.
 - **`[IO.File]::GetUnixFileMode` needs .NET 7 (PowerShell 7.3+)** (LIMITATION): Fix: older

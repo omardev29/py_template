@@ -383,37 +383,37 @@ check(
   vim.inspect(denv)
 )
 
--- Windows: uv from PATH only as a real uv.exe, never a uv.cmd/uv.bat shim earlier on PATH
--- (pyt.cmd and pyt.ps1 do the same). The stub emulates Neovim's PATHEXT lookup.
+-- Windows: uv from PATH only as a real uv.exe, never a uv.cmd/uv.bat shim earlier on PATH, and
+-- only from PATH's absolute folders, never Neovim's current folder nor a relative or root-relative
+-- entry (pyt.cmd and pyt.ps1 do the same). The file system is faked, and so is vim.fn.exepath as
+-- Neovim answers on Windows with 'shell' = cmd.exe (is_executable_in_path prepends ".;" to PATH):
+-- the uv.exe of the current folder first.
 do
-  local tmp = vim.fs.normalize(vim.fn.tempname())
-  local dirs = { tmp .. "/shims", tmp .. "/bin" }
-  for i, f in ipairs({ dirs[1] .. "/uv.cmd", dirs[2] .. "/uv.exe" }) do
-    vim.fn.mkdir(dirs[i], "p")
-    vim.fn.writefile({ "" }, f)
-    vim.uv.fs_chmod(f, 493)
+  local files = { ["C:/cwd/uv.exe"] = true, ["C:/cwd/rel/uv.exe"] = true, ["C:/shims/uv.cmd"] = true, ["C:/bin/uv.exe"] = true }
+  local function fake(p)
+    return files[(tostring(p):gsub("\\", "/"))] == true
   end
-  local real, asked = vim.fn.exepath, {}
+  local real_stat, real_exec, real_exepath, asked = vim.uv.fs_stat, vim.fn.executable, vim.fn.exepath, {}
+  vim.uv.fs_stat = function(p)
+    return fake(p) and { type = "file" } or nil
+  end
+  vim.fn.executable = function(p)
+    return fake(p) and 1 or 0
+  end
   vim.fn.exepath = function(name)
     asked[#asked + 1] = name
-    for _, d in ipairs(dirs) do
-      for _, e in ipairs(name:find("%.") and { "" } or { ".com", ".exe", ".bat", ".cmd" }) do
-        if vim.uv.fs_stat(d .. "/" .. name .. e) then
-          return d .. "/" .. name .. e
-        end
-      end
-    end
-    return ""
+    return name == "uv.exe" and "C:\\cwd\\uv.exe" or ""
   end
-  local saved_env, saved_win = vim.env.UV, pt.is_win
+  local saved = { UV = vim.env.UV, PATH = vim.env.PATH, win = pt.is_win }
   vim.env.UV = nil
+  vim.env.PATH = 'rel;\\root-relative;C:\\shims;"C:\\bin";C:\\other'
   pt.is_win = true
   pt.reset()
   local okw, got = pcall(pt.uv)
-  pt.is_win, vim.fn.exepath, vim.env.UV = saved_win, real, saved_env
+  vim.uv.fs_stat, vim.fn.executable, vim.fn.exepath = real_stat, real_exec, real_exepath
+  vim.env.UV, vim.env.PATH, pt.is_win = saved.UV, saved.PATH, saved.win
   pt.reset()
-  local want = vim.fs.normalize(dirs[2] .. "/uv.exe")
-  check("windows uv is a real uv.exe", okw and got and vim.fs.normalize((got:gsub("\\", "/"))) == want, vim.inspect({ got, want, asked }))
+  check("windows uv is PATH's first real uv.exe", okw and got == "C:\\bin\\uv.exe", vim.inspect({ got, asked }))
 end
 
 -- basedpyright from uvx runs the version ./pyt check pins (editor.json typing.basedpyright)
