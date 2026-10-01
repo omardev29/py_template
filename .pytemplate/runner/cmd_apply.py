@@ -292,9 +292,15 @@ def moved_by_hand(cfg: Config, record: dict[str, Any] | None) -> str | None:
     it rewrote that line, recorded the new name and said "applied". A package written anew in
     place of the old one, with no reference to it left, is no move: apply sets [project] name, as
     for any edit of that line (it was refused with "move it back", which then only met the
-    refusal of another package, and the hook blocked every commit). None without a record: either
-    line may be the one edited (a project that took the template's pyproject.toml in an upgrade
-    has only [project] name to put back)."""
+    refusal of another package, and the hook blocked every commit). Without a trusted record the
+    record of state.json counts as it is: with [project] name edited too (a rename by hand edits
+    both files), it names neither line and its package is gone, which trusted_record takes for a
+    foreign record (the template's own in a copy of it, which leaves no reference to its package),
+    and apply recorded the new name, the last trace of the old one, and said "applied". None
+    without any record: either line may be the one edited (a project that took the template's
+    pyproject.toml in an upgrade has only [project] name to put back)."""
+    if record is None:
+        record = load_record()
     old: str | None = record["name"] if record is not None else None
     if not old or old == cfg.app.name or rename.package_of(old) == cfg.pkg or not _APP_NAME.fullmatch(old):
         return None

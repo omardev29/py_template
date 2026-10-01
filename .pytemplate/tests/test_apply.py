@@ -1397,6 +1397,46 @@ def test_a_package_folder_moved_by_hand_is_refused(tmp_path: Path, monkeypatch: 
     assert cmd_apply.pending(project.cfg()) == []
 
 
+def test_a_package_folder_moved_by_hand_with_both_names_edited_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The folder moved by hand, then app.name AND pyproject.toml [project] name edited (a rename
+    by hand edits both files): the record (alpha) named neither line and its package was gone, so
+    it was taken for a foreign record and ignored. apply re-locked, rendered, said "applied" and
+    recorded beta, the last trace of alpha, and doctor and the hook agreed, while the imports,
+    compile.modules and the wheel entry still named alpha (./pyt run: No module named 'alpha').
+    It is refused as with app.name alone; moved back, apply renames it all."""
+    project, uv = _project(tmp_path, monkeypatch, "flet", "alpha")
+    assert _run(project) == 0  # the record: alpha
+    src = project.root / "src"
+    (src / "alpha").rename(src / "beta")
+    project.edit("app", "name", "beta")
+    path = project.root / "pyproject.toml"
+    path.write_text(path.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "beta"', 1), encoding="utf-8", newline="\n")
+    cfg = project.cfg()
+    assert project.pyproject()["project"]["name"] == "beta" and cmd_apply.trusted_record(cfg, "beta") is None
+    before, count = project.snapshot(), len(uv.calls)
+    for dry in (False, True):
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        with pytest.raises(PytError, match=r"src/alpha/ was moved to src/beta/ by hand") as e:
+            _run(project)
+        assert e.value.code == 2 and "Move it back to src/alpha/, then ./pyt apply" in str(e.value), str(e.value)
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    assert project.snapshot() == before and uv.changing(count) == []
+    record = cmd_apply.load_record()
+    assert record is not None and record["name"] == "alpha"  # never replaced by the new name
+    problem, hint = cmd_apply.pending(cfg)[0]
+    assert "src/alpha/ was moved to src/beta/ by hand" in problem and hint.startswith("move it back to src/alpha/"), (problem, hint)
+    for new in ("beta", "gamma"):  # rename said "nothing to do" for beta
+        with pytest.raises(PytError, match=r"src/alpha/ was moved to src/beta/ by hand"):
+            rename.cmd_rename(cfg, [new])
+    assert project.snapshot() == before
+    (src / "beta").rename(src / "alpha")  # the way out
+    assert _run(project) == 0
+    skeleton = presets.skeleton("flet", "beta")
+    assert project.config_file.read_bytes() == skeleton["pytemplate.toml"]  # compile.modules, entry... renamed
+    assert _owned(project.root) == {k: v for k, v in skeleton.items() if k.split("/")[0] in ("src", "tests", "typings")}
+    assert project.pyproject()["project"]["name"] == "beta" and cmd_apply.pending(project.cfg()) == []
+
+
 @pytest.mark.parametrize(
     ("left", "text", "refers"),
     [

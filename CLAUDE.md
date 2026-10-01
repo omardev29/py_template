@@ -1610,7 +1610,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   doctor say the same): apply took it for "only [project] name differs", rewrote that line,
   recorded the new name and said "applied" while the imports, compile.modules and
   deploy.wheel.entry still named the old package
-  (`test_apply.test_a_package_folder_moved_by_hand_is_refused`). A package written anew in place
+  (`test_apply.test_a_package_folder_moved_by_hand_is_refused`). With `[project] name` edited too
+  the record names neither line and its package is gone, so trusted_record drops it as foreign:
+  `moved_by_hand` then reads the record as it is (a foreign one, the template's own in a copy,
+  leaves no reference to its package), else apply said "applied" and recorded the new name, the
+  last trace of the old one
+  (`test_apply.test_a_package_folder_moved_by_hand_with_both_names_edited_is_refused`). A package written anew in place
   of the old one, with no reference to it left, is no move: apply sets `[project] name` (it was
   refused with "move it back", which only met the refusal of another package, and the hook
   blocked every commit: `test_apply.test_a_package_written_to_replace_the_old_one_is_no_move`).
