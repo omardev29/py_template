@@ -272,20 +272,35 @@ def _other_package(cfg: Config, record: dict[str, Any] | None, project_name: str
     return old if folder is not None and not rename.same_file(folder, here) else None
 
 
+def still_naming(cfg: Config, old: str) -> list[str]:
+    """The files that still name the package of `old`, the app before app.name was edited
+    (rename.references_left): a folder moved by hand leaves them all, a package written anew in
+    place of the old one none."""
+    return rename.references_left(ROOT, rename.Names(old, cfg.app.name))
+
+
+def _listed(paths: list[str], limit: int = 3) -> str:
+    return ", ".join(paths[:limit]) + (f" and {len(paths) - limit} more" if len(paths) > limit else "")
+
+
 def moved_by_hand(cfg: Config, record: dict[str, Any] | None) -> str | None:
     """The name the project really has when its package folder was moved to app.name's by hand
     (an IDE's folder rename, then app.name set): the trusted record names another package, which
-    src/ no longer holds, while app.name's is there. A moved folder rewrites no reference (the
-    imports, compile.modules, deploy.wheel.entry...), and apply took it for "only pyproject.toml
-    [project] name differs": it rewrote that line, recorded the new name and said "applied". None
-    without a record: either line may be the one edited (a project that took the template's
-    pyproject.toml in an upgrade has only [project] name to put back)."""
+    src/ no longer holds, while app.name's is there, and references to the old package are left
+    (still_naming). A moved folder rewrites no reference (the imports, compile.modules,
+    deploy.wheel.entry...), and apply took it for "only pyproject.toml [project] name differs":
+    it rewrote that line, recorded the new name and said "applied". A package written anew in
+    place of the old one, with no reference to it left, is no move: apply sets [project] name, as
+    for any edit of that line (it was refused with "move it back", which then only met the
+    refusal of another package, and the hook blocked every commit). None without a record: either
+    line may be the one edited (a project that took the template's pyproject.toml in an upgrade
+    has only [project] name to put back)."""
     old: str | None = record["name"] if record is not None else None
     if not old or old == cfg.app.name or rename.package_of(old) == cfg.pkg or not _APP_NAME.fullmatch(old):
         return None
     if rename.package_dir(_src(), rename.package_of(old)) is not None or rename.package_dir(_src(), cfg.pkg) is None:
         return None
-    return old
+    return old if still_naming(cfg, old) else None
 
 
 def moved_by_hand_message(cfg: Config, old: str, retry: str) -> str:
@@ -295,9 +310,10 @@ def moved_by_hand_message(cfg: Config, old: str, retry: str) -> str:
         f"app.name = '{cfg.app.name}', but the project is still '{old}' (the record of the last apply): "
         f"src/{was}/ was moved to src/{cfg.pkg}/ by hand?\n"
         f"  A moved folder changes no reference: the imports and the package references of pytemplate.toml "
-        f"(compile.modules, deploy.wheel.entry...) still name {was}.\n"
+        f"(compile.modules, deploy.wheel.entry...) still name {was}: {_listed(still_naming(cfg, old))}.\n"
         f"  Move it back to src/{was}/, then {retry}: it moves the package and rewrites them all "
-        f"(add --force when git shows other changes)"
+        f"(add --force when git shows other changes); or, if src/{cfg.pkg}/ replaces src/{was}/, make them "
+        f"name {cfg.pkg}, then ./pyt apply"
     )
 
 
@@ -881,7 +897,8 @@ def pending(cfg: Config, *, hook: bool = True) -> list[tuple[str, str]]:
         out.append(
             (
                 f"app.name = '{cfg.app.name}' is not applied: src/{was}/ was moved to src/{cfg.pkg}/ by hand (the project is still '{moved}')",
-                f"move it back to src/{was}/, then ./pyt apply (it rewrites the imports and pytemplate.toml too)",
+                f"move it back to src/{was}/, then ./pyt apply (it rewrites the imports and pytemplate.toml too); or, if "
+                f"src/{cfg.pkg}/ replaces it, make these name {cfg.pkg}: {_listed(still_naming(cfg, moved))}",
             )
         )
     elif project.name != cfg.app.name:

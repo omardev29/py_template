@@ -1501,6 +1501,40 @@ def _mentions(root: Path, names: Names, skip: Iterable[str] = ()) -> list[str]:
     return out
 
 
+def references_left(root: Path, names: Names) -> list[str]:
+    """The files of the project at `root` that still name the old package of `names` where a
+    rename rewrites it: pytemplate.toml (a package reference: compile.modules, deploy.wheel.entry,
+    src/<old>/...) and the Python files of src/ and tests/ that import it (or use a name bound to
+    such an import). cmd_apply.moved_by_hand tells a package folder moved by hand (they are left)
+    from a package written anew in place of the old one (none is). What cannot be read or planned
+    counts: it may name it."""
+    out: list[str] = []
+    try:
+        if _plan_config(root, names).count:
+            out.append("pytemplate.toml")
+    except PytError:
+        out.append("pytemplate.toml")
+    word = re.compile(rf"(?<![\w.]){re.escape(names.old_pkg)}(?!\w)")
+    try:
+        files = list(_code_files(root))
+    except PytError:  # a folder of src/ or tests/ it cannot list
+        return [*out, "src/ or tests/ (a folder that cannot be listed)"]
+    for rel_path, path in files:
+        if path.suffix not in PY_SUFFIXES:
+            continue
+        try:
+            text = path.read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            out.append(rel_path)
+            continue
+        if word.search(text) is None:
+            continue
+        code = _python_code(text, names.old_pkg)
+        if code is None or code.refs:  # `import old.x`, `from old import y` and the names bound to them
+            out.append(rel_path)
+    return out
+
+
 def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] = ()) -> Plan:
     """Compute every change of renaming the project in `root` (nothing is written).
 

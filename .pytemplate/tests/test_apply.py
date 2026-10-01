@@ -1306,6 +1306,46 @@ def test_a_package_folder_moved_by_hand_is_refused(tmp_path: Path, monkeypatch: 
     assert cmd_apply.pending(project.cfg()) == []
 
 
+@pytest.mark.parametrize("left", [None, "tests/test_old.py"], ids=["no reference left", "a test still imports the old package"])
+def test_a_package_written_to_replace_the_old_one_is_no_move(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, left: str | None) -> None:
+    """src/alpha/ deleted and src/beta/ written in its place, with app.name = "beta" and no
+    reference to alpha left (the imports, compile.modules, the wheel entry): apply, rename, doctor
+    and the hook took it for a folder moved by hand and refused with "move it back to src/alpha/",
+    which only led to another refusal (src/beta/ is another package), and the hook blocked every
+    commit. With no reference left it is applied as an edit of app.name whose package is in place
+    already; with one left, the refusal names where it is and the way out of a replacement too."""
+    project, uv = _project(tmp_path, monkeypatch, "flet", "alpha")
+    assert _run(project) == 0  # the record: alpha
+    shutil.rmtree(project.root / "src" / "alpha")
+    for rel_path, data in presets.skeleton("flet", "beta").items():  # the new package, written anew
+        if rel_path.split("/")[0] in ("src", "tests") or rel_path == "pytemplate.toml":
+            (project.root / rel_path).parent.mkdir(parents=True, exist_ok=True)
+            (project.root / rel_path).write_bytes(data)
+    if left is not None:
+        (project.root / left).write_text("import alpha.core.fractal as fractal\n\nSIZE = fractal.SIZE\n", encoding="utf-8", newline="\n")
+    cfg = project.cfg()
+    assert cfg.app.name == "beta" and project.pyproject()["project"]["name"] == "alpha"
+    if left is not None:
+        before = project.snapshot()
+        with pytest.raises(PytError, match=r"src/alpha/ was moved to src/beta/ by hand") as e:
+            _run(project)
+        assert f"still name alpha: {left}" in str(e.value) and "Move it back to src/alpha/, then ./pyt apply" in str(e.value), str(e.value)
+        assert "if src/beta/ replaces src/alpha/, make them name beta, then ./pyt apply" in str(e.value), str(e.value)
+        problem, hint = cmd_apply.pending(cfg)[0]
+        assert "src/alpha/ was moved to src/beta/ by hand" in problem and left in hint, (problem, hint)
+        with pytest.raises(PytError, match=r"src/alpha/ was moved to src/beta/ by hand"):
+            rename.cmd_rename(cfg, ["beta"])
+        assert project.snapshot() == before
+        (project.root / left).unlink()  # the way out of a replacement
+    assert cmd_apply.pending(cfg) == [("pyproject.toml [project] name = 'alpha', but app.name = 'beta'", "./pyt apply")]
+    with pytest.raises(PytError, match=r"the app is already called 'beta' \(src/beta/\), but pyproject.toml \[project\] name = 'alpha'"):
+        rename.cmd_rename(cfg, ["beta"])  # rename names the way out: apply
+    assert _run(project) == 0
+    assert project.pyproject()["project"]["name"] == "beta"
+    record = cmd_apply.load_record()
+    assert record is not None and record["name"] == "beta" and cmd_apply.pending(project.cfg()) == []
+
+
 @pytest.mark.parametrize("variable", ["UV_FROZEN", "UV_LOCKED"])
 @pytest.mark.parametrize("edit", ["app.name", "[project] name", "[preset.flet] version"])
 def test_a_relock_the_users_frozen_lock_refuses_is_refused_before_the_first_write(
