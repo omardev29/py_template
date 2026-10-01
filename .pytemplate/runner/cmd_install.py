@@ -892,6 +892,22 @@ def _terminations_interrupt() -> Iterator[None]:
             signal.signal(signum, signal.SIG_DFL)
 
 
+@contextlib.contextmanager
+def _undo_shield() -> Iterator[None]:
+    """While an undo runs (the swap's, a rename's), a Ctrl+C waits for it: SIGINT is ignored, as
+    _terminations_interrupt ignores the SIGTERM and SIGHUP after the first. A second Ctrl+C cut
+    the undo short: the tree stayed half-done, and the line that says what was put back never
+    came. Only in the main thread, and only while SIGINT has Python's own handler."""
+    shield = threading.current_thread() is threading.main_thread() and signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    if shield:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        yield
+    finally:
+        if shield:
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+
+
 def install(plan: Plan) -> None:
     """Write the installed template and the launchers: all or nothing. Then the launchers of the
     earlier install in another bin folder go (Plan.earlier)."""
@@ -901,7 +917,8 @@ def install(plan: Plan) -> None:
         try:
             swap.run()
         except BaseException as e:
-            failed = swap.undo()
+            with _undo_shield():
+                failed = swap.undo()
             note = "nothing was changed" if not failed else "could not put back: " + ", ".join(failed)
             if isinstance(e, PytError):
                 raise PytError(f"{e}\n  {note}", e.code) from e

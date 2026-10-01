@@ -1739,8 +1739,9 @@ def apply_plan(root: Path, plan_: Plan) -> None:
     their old bytes back and the folder moves back. The error says what could not be undone. A
     Ctrl+C, SIGTERM or SIGHUP is undone the same way, then goes on (SIGTERM and SIGHUP are
     exceptions only while it writes, as for `pyt install`: their default action ended the runner
-    at once): it left the tree half-renamed with only `error: interrupted`."""
-    from .cmd_install import _terminations_interrupt  # the swap of `pyt install` uses the same
+    at once): it left the tree half-renamed with only `error: interrupted`. Another Ctrl+C waits
+    for the undo (_undo_shield): it cut the undo short, and nothing said so."""
+    from .cmd_install import _terminations_interrupt, _undo_shield  # the swap of `pyt install` uses the same
 
     writes: list[tuple[Path, bytes]] = [(root / f.target, f.new) for f in plan_.changed_files]
     for edit in (plan_.config, plan_.pyproject):
@@ -1760,7 +1761,8 @@ def apply_plan(root: Path, plan_: Plan) -> None:
                 done.append(writing)
                 writing = None
         except OSError as e:
-            undone = _undo(root, plan_, done, moved)
+            with _undo_shield():
+                undone = _undo(root, plan_, done, moved)
             raise PytError(
                 f"rename: could not write {path.relative_to(root).as_posix()}: {e.strerror or e}. {undone}.\n"
                 "  Close the programs that use it (or make it writable, or free some disk space) and try again"
@@ -1769,7 +1771,9 @@ def apply_plan(root: Path, plan_: Plan) -> None:
             raise
         except BaseException:  # Ctrl+C, SIGTERM, SIGHUP (or a bug: its traceback follows)
             # the write in progress too: an interrupt may come right after it
-            ui.error(f"rename: interrupted. {_undo(root, plan_, [*done, *([writing] if writing else [])], moved)}")
+            with _undo_shield():
+                undone = _undo(root, plan_, [*done, *([writing] if writing else [])], moved)
+            ui.error(f"rename: interrupted. {undone}")
             raise
 
 

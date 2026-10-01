@@ -1332,7 +1332,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   for `pyt install`: in-process work, whose default action ended the runner at once; it left a
   half-renamed tree with only `error: interrupted`; one that came as the folder moved is read
   back from the listing of src/, `_moved_to`, the temporary name of a case-only move included:
-  `test_rename.test_an_interrupted_rename_is_undone`)), the name of the `applied` record right away
+  `test_rename.test_an_interrupted_rename_is_undone`; another Ctrl+C waits for the undo,
+  `cmd_install._undo_shield`, as for `pyt install`: it cut the undo short without a word,
+  `test_rename.test_a_second_ctrl_c_waits_for_the_undo`)), the name of the `applied` record right away
   (`cmd_apply.rename_record`, only the project's own record: named after the old app it is no
   longer trusted), the ruff tidy-up (before the re-lock, which can fail: below),
   `cmd_env.ensure_lock` (a failure there says "the files are already renamed ... ./pyt apply")
@@ -1688,6 +1690,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   ones until the undo is done; their default action left a whole `.template-new-*` copy) undoes
   every step (`_Swap.undo`: the launchers' old bytes, the old copy back, the staged and new files
   deleted; a rename cut short is read back from the folders); what it could not undo is named.
+  A Ctrl+C during the undo waits for it (`_undo_shield`: SIGINT ignored while it runs; it cut the
+  undo short, `test_install.test_a_second_ctrl_c_waits_for_the_undo_of_the_swap`).
   A launcher that cannot be replaced (another user's, chattr +i) is named, not its staged file,
   and was never changed: its entry goes before the undo (os.replace is all or nothing), which
   also skips a launcher that holds its old bytes and deletes the staged file of a put-back that

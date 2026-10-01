@@ -2161,6 +2161,43 @@ def test_an_interrupted_rename_is_undone(tmp_path: Path, monkeypatch: pytest.Mon
         assert signal.getsignal(e.value.signum) is signal.SIG_DFL  # only while the files are written
 
 
+@pytest.mark.parametrize("first", ["ctrl+c", "a write that fails"])
+def test_a_second_ctrl_c_waits_for_the_undo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], first: str) -> None:
+    """A Ctrl+C (or a write that fails) while rename writes is undone; a second Ctrl+C during that
+    undo raised KeyboardInterrupt inside it (SIGINT keeps Python's own handler): files stayed
+    rewritten, src/beta/ stayed moved, and the line that says what was undone never came. The
+    undo goes on to its end first."""
+    import signal
+
+    if signal.getsignal(signal.SIGINT) is not signal.default_int_handler:
+        pytest.skip("SIGINT is not at Python's own handler in this process (the runner leaves such a one alone)")
+    _write_project(tmp_path, "flet", "alpha")
+    before = _everything(tmp_path)
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    real = rename._replace_bytes
+    calls: list[Path] = []
+
+    def replace(path: Path, data: bytes) -> None:
+        calls.append(path)
+        if len(calls) == 3:  # the third write
+            if first == "ctrl+c":
+                raise KeyboardInterrupt
+            raise OSError(errno.ENOSPC, "No space left on device", str(path))
+        if len(calls) == 4:  # the undo puts the first file back: a Ctrl+C there
+            signal.raise_signal(signal.SIGINT)
+        real(path, data)
+
+    monkeypatch.setattr(rename, "_replace_bytes", replace)
+    with pytest.raises((KeyboardInterrupt, PytError)) as e:  # the second Ctrl+C escaped the undo
+        rename.apply_plan(tmp_path, planned)
+    assert isinstance(e.value, KeyboardInterrupt if first == "ctrl+c" else PytError), repr(e.value)
+    # every write undone (the interrupted one too, after a Ctrl+C), the folder moved back
+    assert len(calls) == (6 if first == "ctrl+c" else 5) and _everything(tmp_path) == before
+    told = capsys.readouterr().err if first == "ctrl+c" else str(e.value)
+    assert "The rename was undone" in told, told
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler  # given back once the undo is done
+
+
 def test_a_file_that_never_names_the_app_is_only_searched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """plan() tokenized every Python file of src/ and tests/ and split every text file into lines
     three times, even one that never mentions the old name: a data asset of 100 MB (a level, a
