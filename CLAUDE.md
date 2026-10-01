@@ -946,7 +946,12 @@ header rules (with detector tests proving each rule fires).
   CreateProcess cannot start, a `.sh` or `.py` (WinError 193: `proc.WINDOWS_START_HINT`, never
   the `#!` hint); a working folder that does not exist, or that the child cannot enter
   (`proc._start_error`: the error's filename is the cwd on POSIX, ERROR_DIRECTORY on Windows; it
-  blamed the program, `test_cli_core.test_a_working_folder_it_cannot_enter_is_named`); bad
+  blamed the program, `test_cli_core.test_a_working_folder_it_cannot_enter_is_named`), or that
+  this user cannot look at, below a folder it may not search (`proc.folder_problem`, for
+  `proc.run` and a task's `cwd`: os.stat, never pathlib, whose `is_dir` raised that
+  PermissionError on Python 3.11-3.13, an internal-error traceback, and on 3.14 called the
+  folder "not a folder";
+  `test_cli_core.test_a_task_cwd_below_a_folder_it_cannot_search_is_one_error_line`); bad
   `[tasks]` entries; a file under `.build/` or `dist/` it may not write, left
   by another user: `cli._scratch_denied`; a command that needs a project, typed outside one:
   global mode, 5.2); 3 = missing requirement (uv, a uv older than
@@ -2019,7 +2024,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   had run), `deps` quoting and
   empty entries (all parsed before the first dep runs; `tasks.split_words`: blanks separate,
   quotes group, a backslash is a plain character, as in the plugin's `:Pyt`: POSIX shlex
-  passed `C:\data\in.txt` as `C:datain.txt`), `cwd` is a folder (not in a dry run),
+  passed `C:\data\in.txt` as `C:datain.txt`), `cwd` is a folder (not in a dry run;
+  `proc.folder_problem` names one this user cannot reach as such, 5.3),
   `backend = "pypy"` in `backend.supported` (only where its environment is used: `uv = true` or
   `{python}`), and the first word of every deps entry a task, a builtin or a retired command
   (these two and the backend checked by `tasks._check_texts` too, before the first dep runs:

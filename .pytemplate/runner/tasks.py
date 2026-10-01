@@ -199,8 +199,9 @@ def run_task(
     argv = [_format(name, a, values) for a in task.cmd] + extra
     extra_env = {k: _format(name, v, values) for k, v in task.env.items()}
     cwd = ROOT / _format(name, task.cwd, values) if task.cwd else ROOT
-    if not proc.DRY_RUN and not cwd.is_dir():  # a dep may create it (a dry run skips the deps)
-        raise PytError(f"task '{name}': cwd {task.cwd!r} is not a folder ({cwd})")
+    problem = None if proc.DRY_RUN else proc.folder_problem(cwd, f"its cwd {task.cwd!r} ({cwd})")
+    if problem:  # a dep may create it (a dry run skips the deps)
+        raise PytError(f"task '{name}': {problem}")
     if task.uv:
         env = _task_env(cfg, backend)
         ui.step(f"task {name}")

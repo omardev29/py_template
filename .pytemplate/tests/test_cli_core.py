@@ -739,6 +739,40 @@ def test_a_working_folder_it_cannot_enter_is_named(windows: bool, tmp_path: Path
     assert str(e.value).endswith("(the working folder of ls)") and "#! line" not in str(e.value)
 
 
+def test_folder_problem_answers_for_every_path(tmp_path: Path) -> None:
+    (tmp_path / "a-file").write_text("x", encoding="utf-8")
+    assert proc.folder_problem(tmp_path, "X") is None
+    assert proc.folder_problem(tmp_path / "missing", "X") == "folder not found: X"
+    assert proc.folder_problem(tmp_path / "a-file", "X") == "not a folder: X"
+    assert proc.folder_problem(tmp_path / "a-file" / "x", "X") == "folder not found: X"
+    assert (proc.folder_problem(tmp_path / "a\0b", "X") or "").startswith("cannot access X: ")  # a NUL: ValueError
+
+
+def _below_a_locked_folder(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    """os.stat(path) fails as it does for a path below a folder this user may not search (another
+    user's, mode 000): EACCES. The tests may run as root, which searches any folder."""
+    real = os.stat
+
+    def fake(p: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if not isinstance(p, int) and os.fspath(p) == os.fspath(path):  # an int is a file descriptor
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), os.fspath(p))
+        return real(p, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", fake)
+
+
+def test_a_working_folder_below_a_folder_it_cannot_search_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path.is_dir raises that PermissionError before Python 3.14 (an internal-error traceback)
+    and says False on 3.14, which read as "not a folder"."""
+    inner = tmp_path / "locked" / "inner"
+    inner.mkdir(parents=True)
+    _below_a_locked_folder(monkeypatch, inner)
+    with pytest.raises(PytError) as e:
+        proc.run([sys.executable, "-V"], cwd=inner, echo=False)
+    assert e.value.code == 2
+    assert str(e.value) == f"cannot access {proc.rel(inner)}: {os.strerror(errno.EACCES)}  (the working folder of {proc.show([sys.executable])})"
+
+
 @posix
 def test_a_working_folder_it_cannot_enter_is_named_for_real(tmp_path: Path) -> None:
     locked = tmp_path / "locked"
@@ -1562,6 +1596,38 @@ def test_a_task_cwd_must_be_a_folder(cwd: str, uv: bool, rec: Recorder) -> None:
     assert e.value.code == 2
     assert cwd in str(e.value) and "program not found" not in str(e.value)
     assert rec.runs == []
+
+
+@pytest.mark.parametrize("uv", [True, False])
+def test_a_task_cwd_below_a_folder_it_cannot_search_is_one_error_line(uv: bool, rec: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A task cwd below a folder this user may not search (a shared data folder, another user's):
+    on Python 3.11-3.13 Path.is_dir raised its PermissionError, an internal-error traceback, and
+    on 3.14 the task's cwd "is not a folder", which it is. One line names it and why, exit 2."""
+    inner = tmp_path / "data" / "inner"
+    inner.mkdir(parents=True)
+    _below_a_locked_folder(monkeypatch, inner)
+    cfg = make({"tasks": {"t": {"cmd": ["tool"], "cwd": str(inner), "uv": uv}}})
+    with pytest.raises(PytError) as e:
+        tasks.run_task(cfg, "t", [], rec.dispatch)
+    assert e.value.code == 2
+    assert str(e.value) == f"task 't': cannot access its cwd {str(inner)!r} ({inner}): {os.strerror(errno.EACCES)}"
+    assert rec.runs == []
+
+
+@posix
+def test_a_task_cwd_below_a_folder_it_cannot_search_is_one_error_line_for_real(rec: Recorder, tmp_path: Path) -> None:
+    locked = tmp_path / "data"
+    (locked / "inner").mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        if os.access(locked, os.X_OK):
+            pytest.skip("this user searches any folder (root)")
+        cfg = make({"tasks": {"t": {"cmd": ["tool"], "cwd": str(locked / "inner"), "uv": False}}})
+        with pytest.raises(PytError, match=re.escape(f"cannot access its cwd {str(locked / 'inner')!r}")) as e:
+            tasks.run_task(cfg, "t", [], rec.dispatch)
+        assert e.value.code == 2 and str(e.value).endswith(os.strerror(errno.EACCES)), str(e.value)
+    finally:
+        locked.chmod(0o755)
 
 
 def test_a_dry_run_does_not_check_the_task_cwd(rec: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:

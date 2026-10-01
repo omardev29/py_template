@@ -7,6 +7,7 @@ import os
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -408,6 +409,23 @@ def _start_error(e: OSError, args: Sequence[str], workdir: Path, env: Mapping[st
     return PytError(f"cannot run {args[0]}: {e.strerror or e}  ({hint})")
 
 
+def folder_problem(path: Path, shown: str) -> str | None:
+    """None when `path` is a folder, else why not, naming it `shown`: "folder not found: X",
+    "not a folder: X", or "cannot access X: <why>" for one this user may not look at (below a
+    folder it may not search, another user's). os.stat, never pathlib: before Python 3.14
+    Path.is_dir raised that PermissionError (an internal-error traceback), and 3.14 said False,
+    which called a folder out of reach "not a folder"."""
+    try:
+        info = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return f"folder not found: {shown}"
+    except OSError as e:
+        return f"cannot access {shown}: {e.strerror or e}"
+    except ValueError as e:  # a NUL in the path
+        return f"cannot access {shown}: {e}"
+    return None if stat.S_ISDIR(info.st_mode) else f"not a folder: {shown}"
+
+
 def run(
     argv: Sequence[str | Path],
     *,
@@ -436,11 +454,11 @@ def run(
     if DRY_RUN and echo:
         return subprocess.CompletedProcess(args, 0, "", "")
     workdir = cwd or ROOT
-    if not workdir.is_dir():
+    problem = folder_problem(workdir, rel(workdir))
+    if problem:
         # Checked before the spawn: its error would blame the program (FileNotFoundError names
         # the cwd on POSIX, and Windows raises NotADirectoryError for it)
-        what = "not a folder" if workdir.exists() else "folder not found"
-        raise PytError(f"{what}: {rel(workdir)}  (the working folder of {show(args[:1])})")
+        raise PytError(f"{problem}  (the working folder of {show(args[:1])})")
     args[0] = program(args[0])  # Windows: a bare name, never from the caller's folder
     pipe = subprocess.PIPE if capture else None
     child_env = dict(env) if env is not None else base_env()
