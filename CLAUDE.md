@@ -1008,7 +1008,9 @@ header rules (with detector tests proving each rule fires).
   `rename` and `apply` leave to review: the lines left unchanged and the other files that
   mention the old name, and why a captured step failed: mypyc's errors and the C compiler's
   (`mypyc.build`), the wheel's `uv build` (`wheel.build` captures it under `-q`: uv's `--quiet`
-  dropped the build backend's output), a portable smoke run, the PyPy precheck's mypy abort;
+  dropped the build backend's output), a portable smoke run, the PyPy precheck's mypy abort and
+  the mypy lines it finds new at that Python (mypy's own lines, never with a second `error: `:
+  `test_mypyc_core.test_precheck_prints_mypys_lines_as_mypy_wrote_them`);
   they said "fix the errors above" with nothing above,
   `test_mypyc_core.test_build_shows_why_it_failed_even_with_q`), warnings, errors and
   `check_line` always print, and a dry run ignores `-q` (its output is the plan). Results are

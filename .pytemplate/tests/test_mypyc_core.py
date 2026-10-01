@@ -218,11 +218,25 @@ def test_precheck_reports_only_the_errors_new_at_311(monkeypatch: pytest.MonkeyP
     with pytest.raises(PytError, match="APIs that do not exist in Python 3.11"):
         cmd_mode._precheck_py311(make({}))
     err = capsys.readouterr().err
-    assert f"error: {new}" in err and "Incompatible types" not in err
+    assert new in err.splitlines() and "Incompatible types" not in err
     # the same errors at both versions: nothing new, the precheck passes
     FakeTools(mypy={"3.11": (1, both), "3.14": (1, both)}).install(monkeypatch)
     cmd_mode._precheck_py311(make({}))
     assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_precheck_prints_mypys_lines_as_mypy_wrote_them(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], quiet: bool) -> None:
+    """Each line new at 3.11 is mypy's own `path:line: error: ...`: printed through ui.error it
+    read `error: src/x.py:1: error: ...`, and the editors' parsers, which key on the runner's
+    prefix, took mypy's whole line for the message. Shown with -q too: it is the reason."""
+    new = 'src/myapp/b.py:1: error: Module "typing" has no attribute "override"  [attr-defined]'
+    FakeTools(mypy={"3.11": (1, new + "\n"), "3.14": (0, "")}).install(monkeypatch)
+    monkeypatch.setattr(ui, "QUIET", quiet)
+    with pytest.raises(PytError, match="APIs that do not exist in Python 3.11"):
+        cmd_mode._precheck_py311(make({}))
+    lines = capsys.readouterr().err.splitlines()
+    assert new in lines and not [line for line in lines if line.startswith("error: src/")], lines
 
 
 def test_precheck_compares_the_errors_by_place_and_code_never_by_wording(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -241,8 +255,8 @@ def test_precheck_compares_the_errors_by_place_and_code_never_by_wording(monkeyp
     FakeTools(mypy={"3.11": (1, f"{at_311}\n{other}\n{moved}\n"), "3.14": (1, at_314 + "\n")}).install(monkeypatch)
     with pytest.raises(PytError, match="APIs that do not exist in Python 3.11"):
         cmd_mode._precheck_py311(make({"python": {"cpython": "3.14"}}))
-    err = capsys.readouterr().err
-    assert f"error: {other}" in err and f"error: {moved}" in err and f"error: {at_311}" not in err
+    lines = capsys.readouterr().err.splitlines()
+    assert other in lines and moved in lines and at_311 not in lines
     assert cmd_mode.precheck_key(at_311) == cmd_mode.precheck_key(at_314) == ("src/myapp/s.py:7", "arg-type")
     assert cmd_mode.precheck_key("src/a.py:1: error: Name 'x' is not defined") == ("src/a.py:1", "")
 

@@ -229,8 +229,8 @@ def _precheck_py311(cfg: Config) -> None:
     at_cpython = mypy_errors(cfg.python.cpython)
     new = sorted(line for key, line in at_version.items() if key not in at_cpython)
     if new:
-        for line in new:
-            ui.error(line)
+        for line in new:  # mypy's own lines (`path:line: error: ...`): never a second prefix
+            ui.report(line)  # what was asked for: shown with -q too
         raise PytError(
             f"the code uses APIs that do not exist in Python {version} (above). Fix it before enabling PyPy "
             "(e.g. typing.override -> typing_extensions.override)"
