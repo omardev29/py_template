@@ -4084,7 +4084,7 @@ short temp tree and unset `NVIM_APPNAME`.
   coverage gate failed selftest with every test passed, a `python_files` collected no runner test
   (`test_selftest_harness.test_plain_selftest_runs_the_suite_with_its_own_pytest_settings`).
   Nor the ones the environment gives them: `cli.cmd_selftest` hands pytest the variables of
-  `mutation.PYTEST_VARIABLES` empty, which pytest reads as none (a CI job's `PYTEST_ADDOPTS` for
+  `e2e.PYTEST_VARIABLES` empty, which pytest reads as none (a CI job's `PYTEST_ADDOPTS` for
   `./pyt test`, a coverage gate or `--ff`, failed the suite: exit 1, or 4 without the cache
   provider; `test_plain_selftest_ignores_the_pytest_variables_of_the_apps_tests`).
   `--rootdir=.` keeps the test ids `.pytemplate/tests/test_x.py::name` (the uv-floor job
@@ -4612,7 +4612,7 @@ short temp tree and unset `NVIM_APPNAME`.
     --hypothesis-seed=0` (the suite's own settings, as `selftest` passes them: the copy's
     pyproject.toml is the project's, and a coverage gate there failed every baseline;
     `--rootdir=.` keeps the JUnit classnames `junit_seconds` reads) and without the user's
-    `PYTEST_ADDOPTS`, `PYTEST_PLUGINS` and `PYTEST_DISABLE_PLUGIN_AUTOLOAD` (`mutation.PYTEST_VARIABLES`:
+    `PYTEST_ADDOPTS`, `PYTEST_PLUGINS` and `PYTEST_DISABLE_PLUGIN_AUTOLOAD` (`e2e.PYTEST_VARIABLES`:
     `-n auto` or `--lf` would change what every run means, and disabling autoload drops Hypothesis's
     plugin, so `--hypothesis-seed=0` would make every run exit 4; a run with no summary line reports
     pytest's own error line, `mutation._why_line`, not the `rootdir:` line). The mutants of a module

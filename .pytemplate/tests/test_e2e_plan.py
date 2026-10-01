@@ -636,11 +636,11 @@ def test_the_scratch_projects_never_get_the_users_lock_mode_nor_pytest_options()
     the user's own projects) made every preset's `new` refuse to lock, and every other row SKIP;
     a PYTEST_ADDOPTS such as `-n auto` failed every `test` step (A10-03). They go, as they go for
     --mutation's workers and plain selftest (envs.LOCK_MODE, PYTEST_VARIABLES)."""
-    from runner import envs, mutation
+    from runner import envs
 
     user = {"UV_LOCKED": "1", "uv_frozen": "1", "PYTEST_ADDOPTS": "-n auto", "PYTEST_PLUGINS": "xdist", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
     assert e2e.scrub_env({**user, "HOME": "keep"}) == {"HOME": "keep"}
-    assert {*envs.LOCK_MODE, *mutation.PYTEST_VARIABLES} <= e2e.SCRUBBED
+    assert {*envs.LOCK_MODE, *e2e.PYTEST_VARIABLES} <= e2e.SCRUBBED
 
 
 def test_isolate_git_sets_the_ceiling_above_the_base(tmp_path: Path) -> None:
