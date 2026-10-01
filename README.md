@@ -919,7 +919,7 @@ portable and wheel refuse them (exit 2). Options are not abbreviated (`--meth` i
 mypyc?", "did you mean --method pyz?"). What can refuse a build without building refuses it
 before `check` and the payload: the arguments, the pyz target keys, the Nuitka pin and PGO
 rules, a nuitka build in a project folder SCons would expand (`app$v2`, [nuitka](#nuitka)),
-an exe build in a project folder whose path holds `[`, `*` or `?` ([exe](#exe)),
+an exe or nuitka build in a project folder whose path holds `[`, `*` or `?` ([exe](#exe)),
 `--method flet` outside the flet preset or on Windows without Developer Mode, a stale
 `uv.lock`, and the UPX binary of a method that packs (a missing `deploy.upx.path`, or a failed
 download).
@@ -1080,7 +1080,10 @@ preset). This Nuitka supports CPython up to 3.14: a newer `python.cpython` stops
 unless Nuitka's own `--experimental=python3.X` is passed. Nuitka compiles through SCons, which
 reads `$NAME`, `${...}` and `$$` in a path as its own variables: in a project folder whose path
 holds one (`app$v2`) the build would write outside the project, so it stops before any work
-(exit 2); move the project, or build with exe, portable or pyz.
+(exit 2); move the project, or build with exe, portable or pyz. Nuitka also finds the data files
+of the packages it knows (certifi's CA bundle, used by requests and httpx) with a file pattern of
+their folder in `.venv`: in a project folder whose path holds `[`, `*` or `?` it would ship
+without them, so the build stops there too (exit 2), as exe's does ([exe](#exe)).
 
 - `[deploy.nuitka] mode`: `standalone` (a folder) or `onefile` (one file, zstd-compressed with
   CPython 3.14's `compression.zstd`).

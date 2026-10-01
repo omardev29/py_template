@@ -28,7 +28,7 @@ from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
 from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT, rel
 from ..ui import PytError
-from .common import copy_tree, remove_output
+from .common import copy_tree, refuse_a_globbed_folder, remove_output
 
 # Nuitka is not in uv.lock (`uv run --with`), so it is pinned here to keep builds reproducible:
 # the latest release on PyPI in September 2026. Bump it deliberately, together with NUITKA_PYTHON.
@@ -99,8 +99,14 @@ SCONS_EXPANDS = re.compile(r"\$(?:[$()]|[_A-Za-z][.\w]*|\{[^}]*\}?)")
 
 def check_options(cfg: Config, backend: str) -> None:
     """What the build refuses before any work (cmd_build calls this before the checks, also in
-    --dry-run): a project folder SCons would expand, and the PGO rules that depend on the build
-    (config.validate checks the config-only ones: app.gui, app.assets, pgo_args without pgo)."""
+    --dry-run): a project folder SCons would expand, one glob reads as a pattern, and the PGO
+    rules that depend on the build (config.validate checks the config-only ones: app.gui,
+    app.assets, pgo_args without pgo).
+
+    The glob: Nuitka's package configuration names the data files of many packages as patterns
+    (data-files: patterns: certifi's cacert.pem and 110 more), which DataFilesPlugin joins to the
+    package's folder in .venv and resolves with an unescaped glob.glob; under `x [1]` it found
+    none, and the binary lacked them while Nuitka and the build said done."""
     found = SCONS_EXPANDS.search(str(BUILD))
     if found:
         raise PytError(
@@ -109,6 +115,11 @@ def check_options(cfg: Config, backend: str) -> None:
             "  Move the project to a folder whose path has no '$', or build with --method exe, portable or pyz",
             2,
         )
+    refuse_a_globbed_folder(
+        "nuitka",
+        "Nuitka would find none of the package data its configuration names in .venv (certifi's CA "
+        "bundle...), and the binary would lack it while the build says done",
+    )
     if not cfg.deploy.nuitka.pgo:
         return
     if backend == "mypyc":

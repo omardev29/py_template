@@ -1038,8 +1038,8 @@ header rules (with detector tests proving each rule fires).
   `render` prints `would update: ...`.
 - `clean` prints `would remove X` per target. `build` validates its arguments, the pyz target
   keys, the Nuitka pin, PGO rules and a project folder SCons would expand
-  (`nuitka.check_python`, `check_options`), for exe a project folder glob reads as a pattern
-  (`exe.check_options`), the flet preset
+  (`nuitka.check_python`, `check_options`), for exe and nuitka a project folder glob reads as a
+  pattern (`exe.check_options`, `nuitka.check_options`), the flet preset
   and Developer Mode (`flet.check_options`), the portable launchers' env values
   (`portable.check`), the lock (`cmd_build.check_lock`: a read-only `uv lock --check`, a stale
   uv.lock fails) and the UPX binary (`upx.preflight`: a missing `deploy.upx.path` fails) as
@@ -3008,7 +3008,10 @@ Per method:
   checks, also in `--dry-run`, and from `build`) refuses a project folder whose path holds what
   SCons expands (`nuitka.SCONS_EXPANDS`: `$NAME`, `${...}`, `$$`, `$(`, `$)`; Nuitka hands SCons
   the absolute `--output-dir`, and under `app$v2` SCons made `app/.../main.build` outside the
-  project and failed where that path could not be made, 15.1), PGO with the mypyc backend (the
+  project and failed where that path could not be made, 15.1), one whose path holds `[`, `*` or
+  `?` (`common.refuse_a_globbed_folder`, as for exe: Nuitka resolves the `data-files: patterns:`
+  of its package configuration with a glob of the package's folder in `.venv`, and under `x [1]`
+  the binary lacked certifi's `cacert.pem`, 15.1), PGO with the mypyc backend (the
   profiling run starts before `main.dist` holds the extension modules: ImportError, yet Nuitka
   reports success) and on macOS (Nuitka 4.2.2 has no clang profdata step); `--dry-run` prints
   `Nuitka options: ...` (the lto/pgo flags, then the extras). Standalone on Linux/macOS names the
@@ -5492,6 +5495,22 @@ Nuitka:
   crash report: not done. Test:
   `test_build_methods.py::test_nuitka_refuses_a_project_folder_scons_would_expand`. Goes: when
   Nuitka escapes `$` in the paths it gives SCons.
+- **The data files of its package configuration are found with an unescaped glob** (DEFECT,
+  Nuitka 4.2.2 `plugins/standard/DataFilesPlugin.py`: each `data-files: patterns:` entry of
+  `standard.nuitka-package.config.yml`, 111 of them, certifi's `cacert.pem` among them, is joined
+  to the package's folder and resolved with `utils/FileOperations.resolveShellPatternToFilenames`,
+  a plain `glob.glob`): the packages sit in `.venv`, and under a project folder named like
+  `x [1]` glob read `[1]` as a character class and found none (or the file of a folder `x 1` next
+  to it). Nuitka and the build said done, and the app died with FileNotFoundError on certifi's
+  CA bundle (requests, httpx: the flet preset pulls both). Up: none found. Fix:
+  `nuitka.check_options` refuses a project folder whose path holds `[`, `*` or `?`
+  (`common.refuse_a_globbed_folder`, as for exe) before any work, also in `--dry-run`, naming
+  portable, pyz and wheel (10). Test:
+  `test_build_methods.py::test_nuitka_finds_no_package_data_in_a_folder_glob_reads_as_a_pattern`
+  (a pin, the pinned Nuitka from uv's cache: it fails once Nuitka escapes the folder),
+  `test_nuitka_refuses_a_project_folder_glob_reads_as_a_pattern`,
+  `test_nuitka_build_itself_refuses_a_project_folder_glob_reads_as_a_pattern`. Goes: when that
+  pin fails.
 - **`--windows-icon-from-ico` splits a path at its last `#`** (DEFECT, Nuitka 4.2.2 on Windows:
   `Options.py` reads the rest as an icon index, "ICON#N", and its message for a bad one has two
   `%s` for one value, a TypeError): the absolute icon path of a project under `C:\dev\C#\game`

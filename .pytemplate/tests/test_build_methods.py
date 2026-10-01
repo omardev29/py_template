@@ -783,8 +783,10 @@ def test_nuitka_python_newer_than_the_pin_is_refused_before_any_work(monkeypatch
     monkeypatch.setattr(cmd_build, "run_checks", must_not_run)
     monkeypatch.setattr(cmd_build, "payload", must_not_run)
     monkeypatch.setattr(cmd_build, "check_lock", lambda cfg: None)  # uv would download a CPython 3.15
-    # nuitka.check_options refuses a project folder SCons would expand (app$v2): not this test's
+    # nuitka.check_options refuses a project folder SCons would expand (app$v2), or one glob reads
+    # as a pattern (games [2026]): not this test's
     monkeypatch.setattr(nuitka, "BUILD", tmp_path / ".build")
+    monkeypatch.setattr(common, "BUILD", tmp_path / ".build")
     cfg = make({"python": {"cpython": "3.15"}})
     if not extra:
         with pytest.raises(PytError) as e:
@@ -938,6 +940,73 @@ def test_nuitka_refuses_a_project_folder_scons_would_expand(no_build: None, monk
         monkeypatch.setattr(nuitka, "BUILD", tmp_path / folder / "proj" / ".build")
         with pytest.raises(AssertionError, match="went past"):
             cmd_build.cmd_build(make({}), ["cpython", "--method", "nuitka"])
+
+
+# Run with the pinned Nuitka: what the glob of DataFilesPlugin (a data-files pattern of Nuitka's
+# package configuration joined to the package's folder) finds in each folder of the command line
+_NUITKA_PACKAGE_DATA = r"""
+import json, os, sys
+from nuitka.utils.FileOperations import resolveShellPatternToFilenames
+print("PTFOUND" + json.dumps([resolveShellPatternToFilenames(os.path.join(d, "cacert.pem")) for d in sys.argv[1:]]))
+"""
+
+
+def test_nuitka_finds_no_package_data_in_a_folder_glob_reads_as_a_pattern(tmp_path: Path) -> None:
+    """The dependency defect nuitka.check_options refuses, pinned with the pinned Nuitka (from
+    uv's cache, offline): DataFilesPlugin joins each `data-files: patterns:` entry of Nuitka's
+    package configuration (certifi's cacert.pem...) to the package's folder in .venv and resolves
+    it with resolveShellPatternToFilenames, a plain glob.glob, which finds nothing under a folder
+    named like `x [1]` (or the file of a folder `x 1` next to it). When this fails Nuitka escapes
+    the folder, and the refusal can go."""
+    plain, bracketed = tmp_path / "a" / "x 1" / "certifi", tmp_path / "b" / "x [1]" / "certifi"
+    for folder in (plain, bracketed):
+        folder.mkdir(parents=True)
+        (folder / "cacert.pem").write_text("-----BEGIN CERTIFICATE-----\n", encoding="ascii")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("UV_PROJECT", "UV_PYTHON", "VIRTUAL_ENV", "PYTEMPLATE_"))}
+    with_nuitka = [proc.find_uv(), "run", "--offline", "--no-project", "--python", sys.executable, "--with", nuitka.NUITKA, "python"]
+
+    def run(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([*with_nuitka, *args], cwd=tmp_path, env=env, capture_output=True, text=True, encoding="utf-8", timeout=300, check=False)
+
+    ready = run("-c", "import nuitka")
+    if ready.returncode != 0:
+        pytest.skip(f"{nuitka.NUITKA} is not in the uv cache: {ready.stderr.strip()[-300:]}")
+    r = run("-c", _NUITKA_PACKAGE_DATA, str(plain), str(bracketed))
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTFOUND")), None)
+    assert line is not None, r.stdout[-3000:] + r.stderr[-3000:]
+    assert json.loads(line[len("PTFOUND") :]) == [[str(plain / "cacert.pem")], []]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_nuitka_refuses_a_project_folder_glob_reads_as_a_pattern(no_build: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dry_run: bool) -> None:
+    # Nuitka resolves the data-files patterns of its package configuration with a glob of the
+    # package's folder in .venv (the pin above): under `x [1]` the binary lacked certifi's
+    # cacert.pem and the app died with FileNotFoundError, while Nuitka and the build said done.
+    # Refused before the checks and the payload, also in --dry-run
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    monkeypatch.setattr(nuitka, "IS_MACOS", False)
+    for folder, char in (("x [1]", "["), ("a*b", "*"), ("what?", "?")):
+        root = tmp_path / folder / "proj"
+        monkeypatch.setattr(common, "ROOT", root)
+        monkeypatch.setattr(common, "BUILD", root / ".build")
+        with pytest.raises(PytError) as e:
+            cmd_build.cmd_build(make({}), ["cpython", "--method", "nuitka"])
+        assert e.value.code == 2 and repr(char) in str(e.value) and str(root) in str(e.value)
+        assert "package data its configuration names" in str(e.value) and "--method portable, pyz or wheel" in str(e.value)
+    monkeypatch.setattr(common, "BUILD", tmp_path / "x 1" / "proj" / ".build")  # nothing glob reads as a pattern
+    with pytest.raises(AssertionError, match="went past"):
+        cmd_build.cmd_build(make({}), ["cpython", "--method", "nuitka"])
+
+
+def test_nuitka_build_itself_refuses_a_project_folder_glob_reads_as_a_pattern(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # nuitka.build checks too (the method can be called without cmd_build)
+    rec = Recorder()
+    monkeypatch.setattr(envs, "uv", rec)
+    monkeypatch.setattr(common, "BUILD", sandbox / "x [1]" / "proj" / ".build")
+    cfg = make({})
+    with pytest.raises(PytError, match="package data its configuration names"):
+        nuitka.build(BuildRequest(cfg, "cpython", "nuitka", _nuitka_app(sandbox / "payload", cfg.pkg)))
+    assert not rec.calls  # Nuitka never ran
 
 
 def test_nuitka_dry_run_shows_the_flags(no_build: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
