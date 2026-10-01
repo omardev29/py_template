@@ -2254,6 +2254,12 @@ def test_references_in_a_folder_this_user_may_not_enter_are_reported(tmp_path: P
             return real(path, *args, **kwargs)
 
         monkeypatch.setattr(os, "stat", stat)
+        # os.path's checks as stat answers them: Windows' own (nt._path_isfile...) never call
+        # os.stat, and the simulated folders read as plain ones there
+        import genericpath
+
+        for check in ("exists", "isfile", "isdir"):
+            monkeypatch.setattr(os.path, check, getattr(genericpath, check))
         expected.insert(1, "app.assets")
         problems = cmd_apply.reference_problems(project.cfg())
     else:
