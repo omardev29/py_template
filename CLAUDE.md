@@ -1369,7 +1369,8 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   command failed), and a prefix in another case than git's paths dropped every staged file (the
   checks were skipped without a word). `test_hooks` stands a symlink in for the other spelling.
 - `hooks._run_bytes` is the module's only process start outside `proc.run`: raw bytes
-  (proc.run's text mode turns CRLF into LF) and stdin, for `git cat-file` and ruff on stdin.
+  (proc.run's text mode turns CRLF into LF, and reads a name that is not UTF-8 as U+FFFD) and
+  stdin, for `git cat-file`, the git queries of `_git_output` and ruff on stdin.
 - Git hands hooks a relative `GIT_INDEX_FILE` and, in linked worktrees, `GIT_DIR` without
   `GIT_WORK_TREE`. Without `GIT_DIR`, git reads a relative `GIT_INDEX_FILE` from the top of the
   work tree wherever it runs, so `hooks.git_env` leaves it as it is (joined to the cwd, a user's
