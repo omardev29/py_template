@@ -61,7 +61,7 @@ from typing import IO, Any
 
 from . import envs, proc, ui
 from .config import Config
-from .e2e import check_ceiling, child_env, kill_tree, rmtree, scrub_env, termination_as_interrupt, unusable
+from .e2e import PYTEST_VARIABLES, check_ceiling, child_env, kill_tree, rmtree, scrub_env, termination_as_interrupt, unusable
 from .presets import _git_path, rebase_local_sources
 from .project import IS_WINDOWS, ROOT, TOOLS, check_private_dir, lock_refusal, make_private_dir, scratch_name, venv_python
 from .ui import PytError
@@ -102,10 +102,6 @@ if sys.platform == "win32":  # a test run's process group: it ignores the consol
     NEW_GROUP = subprocess.CREATE_NEW_PROCESS_GROUP
 else:
     NEW_GROUP = 0
-# a user's PYTEST_ADDOPTS (-n auto, --lf...), PYTEST_PLUGINS and PYTEST_DISABLE_PLUGIN_AUTOLOAD
-# would change what every run means: the last one drops Hypothesis's plugin, which defines
-# --hypothesis-seed (Runs.run always passes it), so every worker's pytest would exit 4 (usage)
-PYTEST_VARIABLES = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD")
 
 
 # --- options ------------------------------------------------------------------------------------

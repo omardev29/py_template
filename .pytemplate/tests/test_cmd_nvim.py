@@ -583,6 +583,16 @@ def test_env_isolation(tmp_path: Path) -> None:
     assert len({env[k] for k in nvimtest.XDG_HOMES}) == 4
 
 
+def test_the_nvim_harness_never_hands_its_projects_the_users_lock_mode_nor_pytest_options(tmp_path: Path) -> None:
+    """The inner ./pyt calls of selftest --nvim make their projects anew: under the user's
+    UV_LOCKED or UV_FROZEN its `./pyt new` refused to lock, and the smoke's tests (neotest, `pyt:
+    test`) got a PYTEST_ADDOPTS meant for the user's own app (A10-03)."""
+    user = {"UV_LOCKED": "1", "UV_FROZEN": "1", "PYTEST_ADDOPTS": "-n auto", "PYTEST_PLUGINS": "xdist", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "HOME": "/home/me"}
+    assert nvimtest.runner_env(user) == {"HOME": "/home/me"}
+    env = nvimtest.nvim_env(nvimtest.Layout(tmp_path / "w"), user)
+    assert not {k for k in user if k != "HOME"} & set(env), env
+
+
 def test_nvim_git_config_includes_the_users_whole_global_config(tmp_path: Path) -> None:
     """nvim_env moves XDG_CONFIG_HOME, so Neovim's git (lazy.nvim clones the plugins with the
     user's config: a proxy, url.*.insteadOf) would miss the user's $XDG_CONFIG_HOME/git/config.

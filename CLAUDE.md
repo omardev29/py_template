@@ -4503,7 +4503,10 @@ short temp tree and unset `NVIM_APPNAME`.
   `build (none selected)`); one that tests nothing in any preset exits 2 before anything is
   created (`selection_problem`).
   Isolation: children get `scrub_env` (no `UV`, `UV_PYTHON`, `UV_PROJECT_ENVIRONMENT`,
-  `VIRTUAL_ENV`, `PYTHONHOME/PATH`, `PYTEMPLATE_*`, `GIT_*`) plus `isolate_git`:
+  `VIRTUAL_ENV`, `PYTHONHOME/PATH`, `PYTEMPLATE_*`, `GIT_*`, nor the user's lock mode and pytest
+  options, `envs.LOCK_MODE` and `e2e.PYTEST_VARIABLES`, which `nvimtest.runner_env` drops too:
+  under UV_LOCKED every preset's `new` refused to lock, and a PYTEST_ADDOPTS failed every `test`
+  step, `test_e2e_plan.test_the_scratch_projects_never_get_the_users_lock_mode_nor_pytest_options`) plus `isolate_git`:
   `GIT_CEILING_DIRECTORIES` = the base's PARENT (git ignores a ceiling equal to its cwd, and
   `new` looks from the base), so `new` runs `git init` and `setup` installs the hook in the
   project even under a base inside a work tree (the hook used to land in the outer repository

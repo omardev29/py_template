@@ -55,6 +55,7 @@ from typing import Any
 from . import proc, ui
 from .cmd_build import COMPAT
 from .config import BACKENDS, METHODS, Config
+from .envs import LOCK_MODE
 from .project import CONFIG_FILE, ENV_SUFFIX, IS_WINDOWS, PRESETS, ROOT, base_lock, check_private_dir, host_arch, host_os, make_private_dir, scratch_name, user_path, venv_python
 from .ui import PytError
 
@@ -67,8 +68,17 @@ MARKER = ".pytemplate-e2e"  # in the base dir: only a dir carrying it is ever wi
 # GIT_CONFIG_*): isolate_git sets the ones the children get.
 # (UV_MANAGED_PYTHON, UV_NO_MANAGED_PYTHON: uv refuses them next to the --python-preference of
 # the launchers' uv call, which the launchers drop them for)
+# A user's PYTEST_ADDOPTS (-n auto, --lf...), PYTEST_PLUGINS and PYTEST_DISABLE_PLUGIN_AUTOLOAD
+# would change what every run of the runner's own tests means (selftest --mutation's workers):
+# the last one drops Hypothesis's plugin, which defines --hypothesis-seed (mutation.Runs.run
+# always passes it), so every worker's pytest would exit 4 (usage). Neither they nor the user's
+# lock mode (envs.LOCK_MODE: UV_LOCKED, UV_FROZEN, settings for the user's own projects) reach a
+# project the harnesses make: under UV_LOCKED every preset's `new` refused to lock, and a
+# PYTEST_ADDOPTS failed every `test` step.
+PYTEST_VARIABLES = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD")
 SCRUBBED = frozenset(
     {"VIRTUAL_ENV", "UV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "UV_MANAGED_PYTHON", "UV_NO_MANAGED_PYTHON", "PYTHONHOME", "PYTHONPATH"}
+    | {*LOCK_MODE, *PYTEST_VARIABLES}
 )
 SCRUBBED_PREFIXES = ("PYTEMPLATE_", "GIT_")
 

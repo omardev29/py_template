@@ -39,6 +39,8 @@ from pathlib import Path
 
 from . import cmd_nvim, presets, proc, ui
 from .config import Config
+from .e2e import PYTEST_VARIABLES
+from .envs import LOCK_MODE
 from .project import IS_WINDOWS, ROOT, base_lock, check_private_dir, make_private_dir, scratch_name, user_path
 from .ui import PytError
 
@@ -56,8 +58,13 @@ PHASES = ("new+sync", "trust+lazy", "smoke")
 SMOKE_TYPING = "strict"
 
 # The inner ./pyt runs as if typed in a fresh shell: nothing from this runner's own
-# `uv run --script` environment, nor from a shell's stale PYTEMPLATE_* exports.
-RUNNER_DROP = frozenset({"VIRTUAL_ENV", "UV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "UV_MANAGED_PYTHON", "UV_NO_MANAGED_PYTHON"})
+# `uv run --script` environment, nor from a shell's stale PYTEMPLATE_* exports, nor the user's
+# lock mode and pytest options, settings for the user's own projects (e2e.SCRUBBED drops them
+# too): under UV_LOCKED the scratch projects' `./pyt new` refused to lock, and the smoke's tests
+# got a PYTEST_ADDOPTS meant for the user's own app.
+RUNNER_DROP = frozenset(
+    {"VIRTUAL_ENV", "UV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "UV_MANAGED_PYTHON", "UV_NO_MANAGED_PYTHON", *LOCK_MODE, *PYTEST_VARIABLES}
+)
 # Anything that could make Neovim read the user's own config, data or server.
 NVIM_DROP = frozenset({"NVIM", "NVIM_APPNAME", "NVIM_LISTEN_ADDRESS", "NVIM_LOG_FILE", "VIMINIT", "EXINIT", "MYVIMRC", "MYGVIMRC"})
 XDG_HOMES = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")
