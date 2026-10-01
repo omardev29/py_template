@@ -1972,7 +1972,13 @@ The owner's bar for this template, set in `CLAUDE.md` (rule 1.10 and section 13.
   e3c3703 (18,207 lines; two independent hunts of 10 agents, whose findings were reproduced by
   the fixers), counted 66 defects (11 critical, 55 notable): 1 per 276 lines, about 1 per 164 by
   capture-recapture. UNACCEPTABLE again. All of them, and its 47 minor ones, are fixed since,
-  each with a regression test. A new measurement will say where the template stands now.
+  each with a regression test. Then a loop of rounds with one team of 10 hunters each (from
+  2026-09-28; the fixers reproduced every finding and fixed it with a regression test) measured
+  1 per 509 lines in its first round, then 1 per 753 lines, 1 per 699 lines and 1 per 659 lines,
+  and in its fifth and last round, at commit 26e1ae2 (24,479 lines), 27 counted defects (4
+  critical, 23 notable): 1 per 907 lines, TOLERABLE (better than 1 per 500), not yet at the bar
+  of 1 per 1000. Every defect those rounds found is fixed, each with a regression test; the
+  owner capped the loop at five rounds.
 
 The template is MIT-licensed (`LICENSE`). A project made with `./pyt new` keeps that notice as
 `.pytemplate/LICENSE`, next to the copied runner, and has no root `LICENSE` of its own.

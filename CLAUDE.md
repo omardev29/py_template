@@ -5102,7 +5102,8 @@ it was written.
     1.10), fix it with a regression test that fails without the fix, and one integration (every
     branch reviewed, every critical re-checked, then `./pyt selftest`, mypy on three platforms,
     `--shells`, `--nvim`, `--e2e`). It ends when a round confirms at most 1 counted defect per
-    1000 lines. One team per round: its count is a lower bound (no capture-recapture).
+    1000 lines; on October 1, 2026 the owner capped it at five rounds. One team per round: its
+    count is a lower bound (no capture-recapture).
     - Round 1, commit ca8134a (after PR 6), 21,891 lines: 74 findings, one reported by two
       hunters: 73 distinct, none rejected. Counted: 43 (7 critical: an in-process launcher run
       took the caller's folder for its own, a hard link passed the launchers' ownership rule, the
@@ -5152,6 +5153,19 @@ it was written.
       build machine's uv cache; under a project folder named with `[`, PyInstaller skipped its
       hooks and Nuitka the package data (certifi's CA bundle). 29 notable), 1 per 659 lines: not
       at the bar. 21 minor. All 57 fixed.
+    - Round 5, commit 26e1ae2 (round 4's fixes), 24,479 lines: 40 findings, none rejected, and 5
+      more the first CI run of that commit found (a test of round 4's fixes that Python 3.11 could
+      not parse; on Windows `rename` left the name values of `[tool.flet]` alone in a CRLF
+      pyproject.toml; three tests simulated a full disk, a denied folder and a relative PATH entry
+      in ways Windows never takes): 45 distinct. Counted: 27 (4 critical: the PyPy precheck's ruff
+      skipped the code of a subfolder named dist, venv or _build, and PyPy was enabled on code it
+      cannot parse; pyz and portable builds shipped the first build's copy of a local library
+      after its code changed, from uv's cache; flet build kept the previous site-packages, and
+      that library's old code with them; a `?` or `*` in the project's path made Neovim load the
+      plugin code of a sibling folder that was never trusted. 23 notable), 1 per 907 lines: not
+      at the bar (at most 24). 18 minor. All 45 fixed. The loop stopped there, at the owner's cap
+      of five rounds (October 1, 2026), not at the bar: 1 per 907 is TOLERABLE under rule 1.10,
+      with every known defect fixed; the way back under 1 per 1000 is more rounds of this loop.
 
 ## 14. Conventions and recipes
 
