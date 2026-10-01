@@ -951,6 +951,23 @@ def test_worker_env_moves_home_and_temp_but_keeps_uv(tmp_path: Path) -> None:
     assert env["PYTHONDONTWRITEBYTECODE"] == "1" and env["UV_PYTHON"] == _cfg().python.cpython
 
 
+def test_the_driver_and_the_workers_never_get_the_users_lock_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cosmic Ray's side starts with `uv run --locked --script`, which uv 0.10.12 to 0.12.8
+    refused next to the user's UV_FROZEN (exit 2), and a worker's pytest gets what `./pyt
+    selftest` gives it: no UV_FROZEN nor UV_LOCKED (envs.LOCK_MODE)."""
+    for name in ("UV_FROZEN", "UV_LOCKED"):
+        monkeypatch.setenv(name, "1")
+    code = "import json, os, sys; sys.stdin.readline(); print(json.dumps({'seen': [k for k in ('UV_FROZEN', 'UV_LOCKED') if k in os.environ]}), flush=True)"
+    driver = mutation.Driver("uv", _cfg(), tmp_path / "driver.log", argv=[sys.executable, "-c", code])
+    try:
+        assert driver.ask({"op": "version"}) == {"seen": []}
+    finally:
+        driver.close()
+    base_env = {"PATH": os.pathsep.join(["/usr/bin", "/bin"]), "UV_FROZEN": "1", "UV_LOCKED": "1", "KEEP": "1"}
+    env = mutation.worker_env(tmp_path / "w0", tmp_path / "h0", tmp_path / "t0", base_env, {}, _cfg(), "/opt/uv")
+    assert "UV_FROZEN" not in env and "UV_LOCKED" not in env and env["KEEP"] == "1"
+
+
 def test_every_write_of_a_module_gets_a_time_of_its_own(tmp_path: Path) -> None:
     """A .pyc records the whole second and the size of its source: two versions of the same size
     written in one second would share it."""

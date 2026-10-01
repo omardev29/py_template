@@ -1002,6 +1002,99 @@ def test_ensure_lock_refuses_a_relock_the_environment_makes_a_no_op(monkeypatch:
     cmd_env.ensure_lock(make())
 
 
+def _true(value: str | None) -> bool:
+    return (value or "").strip().lower() in ("1", "true", "yes", "on", "y", "t")
+
+
+class OldUv(Calls):
+    """Fakes proc.run as uv 0.10.12 to 0.12.8 answer (measured with each of 0.10.12, 0.11.0,
+    0.12.0, 0.12.8; 0.12.9 changed it): under UV_FROZEN `uv lock --check` only checks the lock's
+    validity and exits 0, whatever pyproject.toml says; `--locked` next to UV_FROZEN and
+    `--frozen` next to UV_LOCKED are refused, exit 2. `stale`: uv.lock lags pyproject.toml."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, stale: bool) -> None:
+        super().__init__(monkeypatch)
+        self.stale = stale
+
+    def _run(self, argv: Sequence[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        args = [str(a) for a in argv]
+        if args[1:] == ["--version"]:
+            return done(args, 0, "uv 0.12.8 (x86_64-unknown-linux-gnu)\n")
+        self.argvs.append(args)
+        self.kwargs.append(kw)
+        env = kw.get("env") or {}
+        frozen, locked = _true(env.get("UV_FROZEN")), _true(env.get("UV_LOCKED"))
+        words = [a for a in args[1:] if a != "--quiet"]
+        if "--locked" in words and frozen:
+            r = done(args, 2, err="error: the argument `--locked` cannot be used with `UV_FROZEN` (environment variable)\n")
+        elif "--frozen" in words and locked:
+            r = done(args, 2, err="error: the argument `UV_LOCKED` (environment variable) cannot be used with `--frozen`\n")
+        elif words[:2] == ["lock", "--check"] and frozen:
+            r = done(args, 0, err="warning: The lockfile at `uv.lock` was only checked for validity, not whether it is up-to-date, because `UV_FROZEN=1` was provided; use `--check` instead\n")
+        elif self.stale and (words[:2] == ["lock", "--check"] or (words[:1] in (["run"], ["sync"]) and "--locked" in words)):
+            r = done(args, 1, err="error: The lockfile at `uv.lock` needs to be updated, but `--check` was provided.\n")
+        else:
+            r = done(args)
+        if kw.get("check", True) and r.returncode != 0:
+            raise proc.CommandFailed(args, r.returncode)
+        return r
+
+
+@pytest.mark.parametrize("name", ["UV_FROZEN", "UV_LOCKED"])
+def test_the_runners_own_uv_calls_never_get_the_users_lock_mode(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """They pass --locked, --frozen or --check themselves: the user's UV_FROZEN and UV_LOCKED
+    reach only the uv commands the user drives with their own arguments."""
+    monkeypatch.setenv(name, "1")
+    tool = envs.tool_env(make())
+    assert name not in envs.env_vars(tool) and name not in envs.without_lock_mode(proc.base_env())
+    assert envs.env_vars(tool, keep_lock_mode=True)[name] == "1"
+    assert proc.base_env()[name] == "1"  # what is no uv call of the runner's (a task's program) keeps it
+
+
+def test_a_stale_lock_is_stale_under_the_users_uv_frozen_with_every_uv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With uv 0.10.12 to 0.12.8, `uv lock --check` under the user's UV_FROZEN passed a stale
+    uv.lock: the hook let a commit through with a dependency uv.lock lacks, doctor said "uv.lock up
+    to date", and ensure_lock neither re-locked nor made the refusal its docstring promises."""
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    monkeypatch.setattr(render, "write_pyproject", lambda cfg: False)
+    monkeypatch.setenv("UV_FROZEN", "1")
+    uv = OldUv(monkeypatch, stale=True)
+    code, out = hooks.uv_lock_check(make())
+    assert code == 1 and "needs to be updated" in out
+    with pytest.raises(PytError, match="UV_FROZEN is set") as e:
+        cmd_env.ensure_lock(make())  # the refusal, before any `uv lock`
+    assert e.value.code == 2 and all(a[1:] != ["lock"] for a in uv.argvs)
+    assert all("UV_FROZEN" not in kw["env"] for kw in uv.kwargs)
+
+
+@pytest.mark.parametrize("name", ["UV_FROZEN", "UV_LOCKED"])
+def test_the_runners_locked_and_frozen_calls_work_under_the_users_lock_mode(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """uv 0.10.12 to 0.12.8 refused `--locked` next to the user's UV_FROZEN and `--frozen` next to
+    UV_LOCKED (exit 2): run, test, check, sync, setup and the hook's ruff failed with every
+    command."""
+    monkeypatch.setenv(name, "1")
+    uv = OldUv(monkeypatch, stale=False)
+    tool = envs.tool_env(make())
+    assert envs.uv_run(tool, ["ruff", "--version"]).returncode == 0
+    envs.sync(tool)
+    assert hooks.ruff(make(), ["check"], ["src/x.py"])[0] == 0
+    assert len(uv.argvs) == 3 and all(name not in kw["env"] for kw in uv.kwargs)
+
+
+def test_the_uv_commands_the_user_drives_keep_the_users_lock_mode(lock_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`./pyt lock ARGS` and the `uv add|remove` of add/remove answer the user's own arguments:
+    UV_FROZEN reaches them (uv lock then writes nothing, and lock puts pyproject.toml back); the
+    sync after add is the runner's own."""
+    monkeypatch.setenv("UV_FROZEN", "1")
+    uv = OldUv(monkeypatch, stale=False)
+    monkeypatch.setattr(envs, "left_out", lambda env: [])
+    cmd_env.cmd_lock(make(), [])
+    assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
+    cmd_env.cmd_add(make(), ["x"])
+    sent = {a[1]: "UV_FROZEN" in kw["env"] for a, kw in zip(uv.argvs, uv.kwargs, strict=True)}
+    assert sent == {"lock": True, "add": True, "sync": False}
+
+
 # --- clean ---------------------------------------------------------------------------------------------
 
 

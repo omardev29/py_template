@@ -781,7 +781,7 @@ header rules (with detector tests proving each rule fires).
 | `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `GLOBAL` (`detect_global`, `INSTALL_RECORD`: section 5.2), `IS_WINDOWS/IS_MACOS/IS_WSL` (`detect_wsl`: `wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `launcher_python`/`ANY_RUNNER_PYTHON` (the Python the launchers start the runner on: section 4.1), `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`, `scratch_name`, `check_private_dir` and `make_private_dir` (the harnesses' scratch folders: checked before and once made), `write_whole` (a file rewritten through a temporary file and `os.replace`, never half-written, owner and hard links kept: `_give_owner`, `_write_in_place`). |
 | `ui.py` | All runner output to stderr; `PytError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
 | `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`, no `PYTEMPLATE_GLOBAL`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C and passes SIGTERM/SIGHUP on), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`; a second runner: `runner_argv` (the launchers' uv call), `runner_env` (cli._restart's); programs by name, never from the caller's folder on Windows (15.1): `find_program` (every lookup of the runner), `on_path` (PATH with PATHEXT), `windows_program`/`program` (a bare argv[0], as CreateProcess finds it), `taskkill`. |
-| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (every group but those `left_out` names), `interpreter_info` (with `platform` and `cc`); python.cpython's interpreter (`find_cpython`, `cpython_downloads`, `ensure_python`, `no_download_problem`, `this_platform`, `RUNS_ON_ANY_PYTHON`: section 5.2); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
+| `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars` (never the user's `LOCK_MODE`, `UV_FROZEN` and `UV_LOCKED`, unless `keep_lock_mode`: 5.5; `without_lock_mode`), `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (every group but those `left_out` names), `interpreter_info` (with `platform` and `cc`); python.cpython's interpreter (`find_cpython`, `cpython_downloads`, `ensure_python`, `no_download_problem`, `this_platform`, `RUNS_ON_ANY_PYTHON`: section 5.2); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
@@ -1153,9 +1153,18 @@ paths move), `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON` (exit 2 next to
 `UV_NO_DEFAULT_GROUPS`, `UV_NO_GROUP` (`=dev` wins over `--all-groups`: sync uninstalled the
 tools; no mypy/ruff/pytest: a PATH-wide one of another version runs) and
 `UV_NO_SYNC` (`.venv` stays empty after `git clean -fdx`). Resolution settings (indexes,
-`UV_EXCLUDE_NEWER`, `UV_RESOLUTION`, `UV_PRERELEASE`), `UV_FROZEN`/`UV_LOCKED` (uv ignores
-`UV_FROZEN` next to `--locked`) and the cache stay: they are the user's, and uv reports when
-they disagree with `uv.lock`. It also removes the runner's own ephemeral `Scripts/` or `bin/`
+`UV_EXCLUDE_NEWER`, `UV_RESOLUTION`, `UV_PRERELEASE`) and the cache stay: they are the user's,
+and uv reports when they disagree with `uv.lock`. `UV_FROZEN` and `UV_LOCKED` stay in
+`base_env` (a task's own program keeps them), but the runner's own uv calls, which say
+`--locked`, `--frozen` or `--check` themselves, run without them (`envs.LOCK_MODE`, dropped by
+`envs.env_vars` and `envs.without_lock_mode`: the hook's ruff, every `uv run --locked` and
+`uv sync --locked`, `uv lock --check`, `new`'s `__init`, the `selftest --mutation` driver and
+workers): every uv from `envs.MIN_UV` up to 0.12.8 let `UV_FROZEN` win over `uv lock --check`
+(a stale lock passed the hook, doctor and `ensure_lock`) and refused `--locked` next to
+`UV_FROZEN` and `--frozen` next to `UV_LOCKED` (15.1). The refusals read them from `os.environ`
+(`cmd_env._lock_read_only`), and the uv commands the user drives with their own arguments keep
+them (`envs.uv(..., keep_lock_mode=True)`: `./pyt lock ARGS`, the `uv add|remove` of
+add/remove). It also removes the runner's own ephemeral `Scripts/` or `bin/`
 from PATH when `sys.prefix != sys.base_prefix` (uv exports it for `--script` runs); sets
 `PYTHONUTF8=1`; on Windows appends `%ProgramFiles(x86)%\Microsoft Visual Studio\Installer` to
 PATH (VS 2026 `vcvarsall.bat` calls `vswhere.exe` by bare name; without it setuptools fails
@@ -4993,6 +5002,25 @@ uv:
   `test_cli_core.py::test_base_env_drops_what_would_move_uv_or_python`,
   `test_a_user_uv_no_group_never_reaches_uv`,
   `test_uv_runs_in_the_projects_environment_whatever_the_user_exported`. Goes: never.
+- **The user's `UV_FROZEN` and `UV_LOCKED` win over, or clash with, the lock flags of a call**
+  (DEFECT, every uv from `envs.MIN_UV` 0.10.12 up to 0.12.8; measured with 0.10.12, 0.11.0,
+  0.12.0, 0.12.2, 0.12.5, 0.12.7 and 0.12.8, while 0.12.9 says "Ignoring `UV_FROZEN` because
+  `--check` was provided"): under `UV_FROZEN`, `uv lock --check` only checked the lock's validity
+  and exited 0 on a stale lock, so the hook passed a commit whose pyproject.toml has a dependency
+  uv.lock lacks, doctor said "uv.lock up to date" and `ensure_lock` neither re-locked nor refused;
+  `--locked` next to `UV_FROZEN` and `--frozen` next to `UV_LOCKED` were refused ("cannot be used
+  with", exit 2): run, test, check, sync, setup, and every commit that staged a Python file (the
+  hook's ruff). Up: astral-sh/uv#21396 ("Give CLI lock flags precedence over environment
+  variables", closed September 2026); cf. astral-sh/uv#17044. Fix: the runner's own uv calls run
+  without them (`envs.LOCK_MODE`, dropped by `envs.env_vars` and `envs.without_lock_mode`); the
+  refusals read them from `os.environ`, and `./pyt lock ARGS` and the `uv add|remove` of
+  add/remove keep them (`keep_lock_mode`, 5.5). Test:
+  `test_envs_core.py::test_the_runners_own_uv_calls_never_get_the_users_lock_mode`,
+  `test_a_stale_lock_is_stale_under_the_users_uv_frozen_with_every_uv`,
+  `test_the_runners_locked_and_frozen_calls_work_under_the_users_lock_mode`,
+  `test_the_uv_commands_the_user_drives_keep_the_users_lock_mode` (a fake uv that answers as
+  those releases do), `test_mutation.py::test_the_driver_and_the_workers_never_get_the_users_lock_mode`.
+  Goes: when `envs.MIN_UV` reaches 0.12.9 (uv then ignores them next to the flags itself).
 - **`uv run --script` exports its throwaway environment** (LIMITATION): `VIRTUAL_ENV`, its
   `bin/`/`Scripts/` first on PATH and `UV` reach every child, which then took the runner's
   environment for the project's or skipped the launchers' own uv search. Fix: `proc.base_env`,

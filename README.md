@@ -394,7 +394,11 @@ and uv's environment selection (`UV_PROJECT_ENVIRONMENT`, `UV_PYTHON`, `UV_PROJE
 `UV_NO_PROJECT`, `UV_WORKING_DIR`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`, `UV_ISOLATED`,
 `UV_NO_DEV`, `UV_NO_DEFAULT_GROUPS`, `UV_NO_GROUP`, `UV_NO_SYNC`): its tools always run in the project's
 environments. uv's resolution settings (indexes, `UV_EXCLUDE_NEWER`, `UV_RESOLUTION`,
-`UV_PRERELEASE`) and its cache pass through. The runner itself starts on the Python the
+`UV_PRERELEASE`) and its cache pass through. Your `UV_FROZEN` and `UV_LOCKED` reach `./pyt lock`
+and the `uv add|remove` of `./pyt add|remove`, and make the commands that would re-lock refuse
+(with them `uv lock` writes nothing); the runner's own uv calls, which say `--locked`, `--frozen`
+or `--check` themselves, run without them (uv 0.10.12 to 0.12.8 let `UV_FROZEN` pass a stale
+`uv.lock` there, or refused the pair). The runner itself starts on the Python the
 launchers ask uv for ([Where pyt runs](#where-pyt-runs)), in the folder where the command was
 typed: the launchers remove `UV_PYTHON`, `UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON`,
 `PYTHONHOME`, `PYTHONPATH` and `UV_WORKING_DIR` before uv starts it.

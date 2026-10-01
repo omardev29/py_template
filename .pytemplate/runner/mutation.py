@@ -630,7 +630,7 @@ class Driver:
         self._lock = threading.Lock()
         try:
             self._child: subprocess.Popen[str] = subprocess.Popen(
-                argv, cwd=log.parent, env=proc.base_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._err,
+                argv, cwd=log.parent, env=envs.without_lock_mode(proc.base_env()), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._err,
                 text=True, encoding="utf-8", errors="replace",
             )  # fmt: skip
         except OSError as e:
@@ -895,7 +895,7 @@ def worker_env(worker_copy: Path, home: Path, tmp: Path, base_env: Mapping[str, 
     XDG ones default below its home): whatever a mutant makes a test write there stays in the
     base. `keep` holds uv's own folders as uv resolves them outside (nvimtest.uv_dirs: its cache,
     Pythons and tools), which the moved home would otherwise take away."""
-    env = {k: v for k, v in base_env.items() if not k.upper().startswith("XDG_") and k.upper() not in PYTEST_VARIABLES}
+    env = {k: v for k, v in envs.without_lock_mode(base_env).items() if not k.upper().startswith("XDG_") and k.upper() not in PYTEST_VARIABLES}
     env["HOME"] = str(home)
     if IS_WINDOWS:
         env.update(USERPROFILE=str(home), LOCALAPPDATA=str(home / "AppData" / "Local"), APPDATA=str(home / "AppData" / "Roaming"))

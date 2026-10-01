@@ -175,7 +175,7 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
     place: a full disk left it cut short, invalid TOML, next to the old pyproject.toml.
     """
     if any(a in LOCK_INFO for a in args):  # `./pyt lock --help` shows uv's help, changes nothing
-        envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False)
+        envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False, keep_lock_mode=True)
         return 0
     before = _snapshot((PYPROJECT, PYPROJECT.with_name("uv.lock")))
     gains_pypy = render.gains_pypy(cfg)
@@ -192,7 +192,9 @@ def cmd_lock(cfg: Config, args: list[str]) -> int:
             ui.info(f"{' and '.join(restored)}: put back as {they} ({why})")
 
     try:
-        envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False)  # -q keeps its summary and warnings
+        # -q keeps its summary and warnings; the user's UV_FROZEN or UV_LOCKED reaches it (then
+        # it writes no uv.lock, and both files are put back below)
+        envs.uv(envs.tool_env(cfg), ["lock", *args], quiet=False, keep_lock_mode=True)
     except BaseException:  # a failed uv lock (Ctrl+C too) may have written part of uv.lock
         restore("uv lock did not finish")
         raise
@@ -240,7 +242,9 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
     tool = envs.tool_env(cfg)
     before = _snapshot((PYPROJECT, PYPROJECT.with_name("uv.lock")))
     try:
-        envs.uv(tool, argv, quiet=False)  # -q keeps uv's warnings about the packages typed
+        # -q keeps uv's warnings about the packages typed; the user's UV_FROZEN or UV_LOCKED
+        # reaches it (the sync after it is the runner's own: envs.LOCK_MODE)
+        envs.uv(tool, argv, quiet=False, keep_lock_mode=True)
         envs.sync(tool)
     except BaseException:  # a failed or interrupted sync (uv add/remove revert their own failures)
         restored = _put_back(before)
