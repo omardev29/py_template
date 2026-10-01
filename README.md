@@ -919,6 +919,7 @@ portable and wheel refuse them (exit 2). Options are not abbreviated (`--meth` i
 mypyc?", "did you mean --method pyz?"). What can refuse a build without building refuses it
 before `check` and the payload: the arguments, the pyz target keys, the Nuitka pin and PGO
 rules, a nuitka build in a project folder SCons would expand (`app$v2`, [nuitka](#nuitka)),
+an exe build in a project folder whose path holds `[`, `*` or `?` ([exe](#exe)),
 `--method flet` outside the flet preset or on Windows without Developer Mode, a stale
 `uv.lock`, and the UPX binary of a method that packs (a missing `deploy.upx.path`, or a failed
 download).
@@ -945,6 +946,12 @@ launcher (edit `Exec` if you move the folder).
 
 A rebuild first deletes the previous `dist/<name>-<backend>-exe/` (or `-nuitka/`); while that
 app still runs, Windows refuses, and the build stops at once with that message (exit 1).
+
+PyInstaller finds its hooks (its own, those of `pyinstaller-hooks-contrib` and Flet's) with a
+file pattern of their folder in `.venv`, so in a project folder whose path holds `[`, `*` or `?`
+(`games [2026]`) it would find none, and the executable would silently lack what they collect
+(rich's Unicode tables, Flet's client): the build stops before any work (exit 2). Move the
+project, or build with portable, pyz or wheel there.
 
 ### portable
 

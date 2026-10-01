@@ -14,7 +14,7 @@ from .. import envs, mypyc, ui, upx
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
 from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT
-from .common import copy_tree, remove_output
+from .common import copy_tree, refuse_a_globbed_folder, remove_output
 
 
 def _console(req: BuildRequest) -> bool:
@@ -90,7 +90,22 @@ def size_args(cfg: Config) -> tuple[list[str], dict[str, str]]:
     return args, env
 
 
+def check_options(cfg: Config) -> None:
+    """What the build refuses before any work (cmd_build calls this before the checks, also in
+    --dry-run): a project folder whose path holds '[', '*' or '?'. PyInstaller lists the hook
+    scripts of each hook folder (its own, pyinstaller-hooks-contrib's, flet_cli's: all in .venv)
+    with glob.glob(os.path.join(hook_dir, 'hook-*.py')), and under `games [2026]` it found none:
+    the executable lacked what the hooks collect (rich's Unicode tables, Flet's client and icons)
+    while the build said done, and flet pack said its client was inside."""
+    refuse_a_globbed_folder(
+        "exe",
+        "PyInstaller would find none of its hooks in .venv, and the executable would lack what they "
+        "collect (rich's Unicode tables, Flet's client and icons) while the build says done",
+    )
+
+
 def build(req: BuildRequest) -> Path:
+    check_options(req.cfg)
     if req.cfg.app.preset == "flet":
         return _flet_pack(req)
     cfg = req.cfg

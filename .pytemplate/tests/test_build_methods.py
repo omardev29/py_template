@@ -199,6 +199,7 @@ def test_exe_assets_hold_no_separator_pyinstaller_splits_at(tmp_path: Path, monk
     # --add-data=SOURCE:DEST"; flet pack hands the value to PyInstaller unchanged
     root = tmp_path / "games;2026"
     monkeypatch.setattr(exe, "BUILD", root / "build")
+    monkeypatch.setattr(common, "BUILD", root / "build")  # exe.check_options: never the project's folder
     monkeypatch.setattr(cmd_build, "DIST", root / "dist")
     if flet:
         rec = _flet_pack(root, monkeypatch, _flet_cfg(), "cpython", windows=True, macos=False)
@@ -382,6 +383,73 @@ def test_flet_pack_console_and_utf8(sandbox: Path, monkeypatch: pytest.MonkeyPat
     assert "--pyinstaller-build-args=--python-option=X utf8" in argv
     assert "--pyinstaller-build-args=--optimize=1" in argv
     assert "--pyinstaller-build-args=--noupx" in argv
+
+
+# Run in .venv: the hooks the pinned PyInstaller caches from each folder of the command line
+# (depend/imphook.py: ModuleHookCache._cache_hook_dirs, which keeps a weak proxy to the graph)
+_PYINSTALLER_HOOKS = r"""
+import json, sys
+from PyInstaller.depend.imphook import ModuleHookCache
+class Graph:
+    pass
+graph = Graph()
+print("PTHOOKS" + json.dumps({d: sorted(ModuleHookCache(graph, [(d, 0)])) for d in sys.argv[1:]}))
+"""
+
+
+def test_pyinstaller_finds_no_hook_in_a_folder_glob_reads_as_a_pattern(tmp_path: Path) -> None:
+    """The dependency defect exe.check_options refuses, pinned with the locked PyInstaller: it
+    lists a hook folder's scripts with glob.glob(os.path.join(hook_dir, 'hook-*.py')), and under
+    a folder named like `games [2026]` it finds none. When this fails PyInstaller escapes its
+    hook folders, and the refusal can go (CLAUDE.md 15.1)."""
+    python = envs.tool_env(real({})).python
+    if not python.is_file():
+        pytest.skip("needs .venv (./pyt setup)")
+    plain, bracketed = tmp_path / "games 2026" / "hooks", tmp_path / "games [2026]" / "hooks"
+    for folder in (plain, bracketed):
+        folder.mkdir(parents=True)
+        (folder / "hook-rich.py").write_text("hiddenimports = []\n", encoding="utf-8")
+    r = subprocess.run(
+        [str(python), "-c", _PYINSTALLER_HOOKS, str(plain), str(bracketed)],
+        env=proc.base_env(), capture_output=True, text=True, encoding="utf-8", timeout=120, check=False,
+    )  # fmt: skip
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("PTHOOKS")), None)
+    assert line is not None, r.stdout[-2000:] + r.stderr[-2000:]
+    found = json.loads(line[len("PTHOOKS") :])
+    assert found == {str(plain): ["rich"], str(bracketed): []}
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_exe_refuses_a_project_folder_glob_reads_as_a_pattern(no_build: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dry_run: bool) -> None:
+    # PyInstaller found none of its hooks under `games [2026]` (the pin above): the executable
+    # lacked rich's Unicode tables and died with ModuleNotFoundError at its first check mark, and
+    # flet pack's lacked the Flet client and icons.json, while the build said done. Refused before
+    # the checks and the payload, also in --dry-run
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    for folder, char in (("games [2026]", "["), ("old[", "["), ("a*b", "*"), ("what?", "?")):
+        root = tmp_path / folder / "proj"
+        monkeypatch.setattr(common, "ROOT", root)
+        monkeypatch.setattr(common, "BUILD", root / ".build")
+        with pytest.raises(PytError) as e:
+            cmd_build.cmd_build(make({}), ["cpython", "--method", "exe"])
+        assert e.value.code == 2 and repr(char) in str(e.value) and str(root) in str(e.value)
+        assert "PyInstaller would find none of its hooks" in str(e.value) and "--method portable, pyz or wheel" in str(e.value)
+    for folder in ("games 2026", "app$v2", "x]y"):  # nothing glob reads as a pattern: the build goes on
+        monkeypatch.setattr(common, "BUILD", tmp_path / folder / "proj" / ".build")
+        with pytest.raises(AssertionError, match="went past"):
+            cmd_build.cmd_build(make({}), ["cpython", "--method", "exe"])
+
+
+@pytest.mark.parametrize("preset", ["script", "flet"])
+def test_exe_build_itself_refuses_a_project_folder_glob_reads_as_a_pattern(sandbox: Path, monkeypatch: pytest.MonkeyPatch, preset: str) -> None:
+    # exe.build checks too (the method can be called without cmd_build), for flet pack as well
+    rec = Recorder()
+    monkeypatch.setattr(envs, "uv_run", rec)
+    monkeypatch.setattr(common, "BUILD", sandbox / "games [2026]" / "proj" / ".build")
+    cfg = _flet_cfg() if preset == "flet" else make({})
+    with pytest.raises(PytError, match="PyInstaller would find none of its hooks"):
+        exe.build(BuildRequest(cfg, "cpython", "exe", fake_app(sandbox / "payload", cfg.pkg)))
+    assert not rec.calls  # neither PyInstaller nor flet pack ran
 
 
 # --- nuitka ---------------------------------------------------------------------------------------
@@ -3328,8 +3396,10 @@ def no_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
     monkeypatch.setattr(cmd_build, "run_checks", must_not_run)
     monkeypatch.setattr(cmd_build, "payload", must_not_run)
-    # nuitka.check_options refuses a project folder SCons would expand (app$v2): not this one
+    # nuitka.check_options refuses a project folder SCons would expand (app$v2), and exe's and
+    # nuitka's one that glob reads as a pattern (games [2026]): not this one
     monkeypatch.setattr(nuitka, "BUILD", tmp_path / ".build")
+    monkeypatch.setattr(common, "BUILD", tmp_path / ".build")
     _plain_pyproject(monkeypatch, tmp_path)
 
 
@@ -3431,6 +3501,7 @@ def test_build_forwards_extras_to_the_packagers(monkeypatch: pytest.MonkeyPatch,
 
     monkeypatch.setattr(cmd_build, "payload", lambda cfg, backend: tmp_path)
     monkeypatch.setattr(nuitka, "BUILD", tmp_path / ".build")  # nuitka.check_options: never the project's folder
+    monkeypatch.setattr(common, "BUILD", tmp_path / ".build")  # ...nor exe's and nuitka's glob rule
     monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeMethod)
     cfg = make(ALL_BACKENDS)
     assert cmd_build.cmd_build(cfg, ["cpython", "--method", "exe", "--no-check", "--onedir", "--add-data", "a:b", "--icon", "x.ico"]) == 0
@@ -3507,6 +3578,7 @@ def test_build_without_output_never_reports_done(monkeypatch: pytest.MonkeyPatch
             return out
 
     monkeypatch.setattr(cmd_build, "payload", lambda cfg, backend: tmp_path)
+    monkeypatch.setattr(common, "BUILD", tmp_path / ".build")  # exe.check_options: never the project's folder
     monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeMethod)
     with pytest.raises(PytError, match="no output") as e:
         cmd_build.cmd_build(make({}), ["--method", "exe", "--no-check", *extra])
@@ -5444,6 +5516,19 @@ def test_the_nuitka_tests_pass_in_a_project_folder_scons_would_expand(tmp_path: 
     r = _suite_run(own, tmp_path, ".pytemplate/tests/test_build_methods.py", "-k", nuitka_tests)
     assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
     assert "4 passed" in r.stdout, r.stdout[-2000:]
+
+
+def test_the_exe_and_nuitka_tests_pass_in_a_project_folder_glob_reads_as_a_pattern(tmp_path: Path) -> None:
+    """A project in a folder such as `games [2026]`, where exe and nuitka refuse to build (their
+    packagers glob .venv unescaped, CLAUDE.md 15.1) and every other method works: a test that
+    builds with them to check something else reached that refusal on the project's own folder
+    and failed `./pyt selftest` there. They run here in a copy of the project in such a folder."""
+    own = tmp_path / "games [2026]"
+    presets.copy_template(own)
+    builds = "(test_exe_ or flet_pack or nuitka or forwards_extras_to_the_packagers or never_reports_done) and not in_a_project_folder"
+    r = _suite_run(own, tmp_path, ".pytemplate/tests/test_build_methods.py", "-k", builds)
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+    assert " passed" in r.stdout and " failed" not in r.stdout, r.stdout[-2000:]
 
 
 @needs_rich

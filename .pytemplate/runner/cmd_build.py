@@ -136,6 +136,10 @@ def cmd_build(cfg: Config, args: list[str]) -> int:
     if reason:
         raise PytError(f"{method} + {backend}: {reason}")
     _check_arguments(method, ns, extra)
+    if method == "exe":
+        from .methods import exe
+
+        exe.check_options(cfg)  # a project folder PyInstaller's glob of .venv reads as a pattern
     if method == "nuitka":
         from .methods import nuitka
 

@@ -22,7 +22,7 @@ from typing import Any
 from .. import envs, proc, ui
 from ..config import Config, toml_value
 from ..imports import PARSE_ERRORS, iter_runtime_nodes, parse
-from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, SRC, host_os, rel
+from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, ROOT, SRC, host_os, rel
 from ..ui import PytError
 
 NATIVE_SUFFIXES = (*EXT_SUFFIXES, ".dll", ".dylib")
@@ -822,6 +822,26 @@ def requirements_digest(requirements: Path) -> str:
         if line and not line[0].isspace() and not line.startswith(("#", "-")):
             lines.append(line.rstrip("\\").strip())
     return hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest()[:16]
+
+
+# What glob reads as a pattern in a path (glob.has_magic). PyInstaller finds its hooks, and Nuitka
+# the package data its configuration names, with a glob of a folder of the project's .venv that
+# escapes nothing: under a folder such as `games [2026]` the pattern matched no file at all
+GLOB_MAGIC = re.compile(r"[*?[]")
+
+
+def refuse_a_globbed_folder(method: str, consequence: str) -> None:
+    """Refuse, before any work (cmd_build, also in --dry-run, and the method itself), a project
+    whose folder holds a character glob reads as a pattern: the packager of `method` would find
+    none of the files it looks for there, and the build would say done without them."""
+    found = GLOB_MAGIC.search(str(BUILD))  # BUILD is in the project's folder, as .venv is
+    if found:
+        raise PytError(
+            f"{method}: the project's folder holds {found[0]!r} ({ROOT}), which glob reads as a pattern: "
+            f"{consequence}.\n"
+            "  Move the project to a folder whose path has no '[', '*' or '?', or build with --method portable, pyz or wheel",
+            2,
+        )
 
 
 def _move(src: Path, dst: Path) -> None:

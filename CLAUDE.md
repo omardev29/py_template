@@ -787,7 +787,7 @@ header rules (with detector tests proving each rule fires).
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `new`, the internal `__init` (`cmd_init`), and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
 | `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`, `stage_pythonpath`), `report`; `split_backend`; `only_flags`; `_profile_file` and `config_arg` (ruff's `--config`, relative to ROOT: 6.2); `BASEDPYRIGHT`, `BASEDPYRIGHT_NODE`. |
 | `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `check_lock`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
-| `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys (`parse_key`, `check_key`, `targets_for`), `UV_PLATFORMS`/`host_floor`, `ensure_env`, `export_requirements`, `install_deps`, `drop_install_junk`, `has_native`, `skipped_requirements`, `copy_tree` (+ `copy_failure`), `copy_app`, `uses_tkinter`, `windowed`, `tree_bytes`; `nuitka.NUITKA`/`NUITKA_PYTHON`, `check_python`, `check_options`, `optimization_args` (`[deploy.nuitka]` lto/pgo); `pyz.check_parts`, `merge`. |
+| `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys (`parse_key`, `check_key`, `targets_for`), `UV_PLATFORMS`/`host_floor`, `ensure_env`, `export_requirements`, `install_deps`, `drop_install_junk`, `has_native`, `skipped_requirements`, `copy_tree` (+ `copy_failure`), `copy_app`, `uses_tkinter`, `windowed`, `tree_bytes`, `GLOB_MAGIC`/`refuse_a_globbed_folder`; `exe.check_options`; `nuitka.NUITKA`/`NUITKA_PYTHON`, `check_python`, `check_options`, `optimization_args` (`[deploy.nuitka]` lto/pgo); `pyz.check_parts`, `merge`. |
 | `shells.py` | `__probe`, launcher/shell doctor checks (`ps_policies`: the PowerShell execution policies, asked once per run; `BLOCKING_POLICIES`), `selftest --shells` (section 4.9). |
 | `cmd_nvim.py` | `./pyt nvim ...` and `doctor(check)` (section 12.2). |
 | `nvimtest.py` | `selftest --nvim` (section 13.1). |
@@ -1038,7 +1038,8 @@ header rules (with detector tests proving each rule fires).
   `render` prints `would update: ...`.
 - `clean` prints `would remove X` per target. `build` validates its arguments, the pyz target
   keys, the Nuitka pin, PGO rules and a project folder SCons would expand
-  (`nuitka.check_python`, `check_options`), the flet preset
+  (`nuitka.check_python`, `check_options`), for exe a project folder glob reads as a pattern
+  (`exe.check_options`), the flet preset
   and Developer Mode (`flet.check_options`), the portable launchers' env values
   (`portable.check`), the lock (`cmd_build.check_lock`: a read-only `uv lock --check`, a stale
   uv.lock fails) and the UPX binary (`upx.preflight`: a missing `deploy.upx.path` fails) as
@@ -2588,7 +2589,10 @@ Formats:
   for pyz/portable/wheel, `--onefile/--onedir` outside `ONEFILE_METHODS`, `--target` outside
   `TARGET_METHODS` (pyz), `GLOBAL_FLAGS` (`--dry-run`, `--no-render`) typed after the command,
   and a leading bare word (`_stray_word`: "unknown backend 'mypy': did you mean mypyc?", "did you
-  mean --method pyz?"). Then `nuitka.check_python`, for pyz `common.check_key` on every key,
+  mean --method pyz?"). Then `exe.check_options` (a project folder whose path holds `[`, `*` or
+  `?`, `common.GLOB_MAGIC`: PyInstaller lists its hooks with a glob of their folder in `.venv`,
+  which found none there, 15.1; exit 2 naming portable, pyz and wheel,
+  `common.refuse_a_globbed_folder`), `nuitka.check_python`, for pyz `common.check_key` on every key,
   `flet.check_options` (the flet preset; Developer Mode on Windows for every target, exit 3:
   flet build turns Flutter's Windows desktop on there and its template holds a `windows/`
   folder, so an apk or web build stopped late in Flutter's plugin symlinks,
@@ -2712,7 +2716,10 @@ Formats:
   the locked dependencies win over packages installed in the running Python.
 
 Per method:
-- **exe** (PyInstaller): `--python-option "X utf8"` (dev parity with `PYTHONUTF8`),
+- **exe** (PyInstaller; never in a project folder whose path holds `[`, `*` or `?`:
+  `exe.check_options`, from `cmd_build` and `build`, refuses it before any work, since
+  PyInstaller then finds none of its hooks and the executable silently lacks what they collect,
+  15.1): `--python-option "X utf8"` (dev parity with `PYTHONUTF8`),
   `--optimize`, `methods.exe.size_args` (`--noupx`, or UPX below; `--exclude-module` per
   `deploy.exclude_modules`; `--strip`), `--clean`, `--log-level=WARN` unless `-v`, `--hidden-import` for
   mypyc, `--add-data "<src>:<dest>"` (`:` is PyInstaller's documented separator; `exe._data_args`
@@ -5440,6 +5447,23 @@ PyInstaller:
   without `freeze_support()` a `ProcessPoolExecutor` child ran the whole app once more. Fix:
   every preset's `src/main.py` calls `multiprocessing.freeze_support()` first (11). Test:
   `test_workarounds.py::test_every_preset_main_calls_freeze_support_first`. Goes: never.
+- **It finds its hooks with an unescaped glob of their folder** (DEFECT, PyInstaller 6.22.3
+  `depend/imphook.py` `ModuleHookCache._cache_hook_dirs`: `glob.glob(os.path.join(hook_dir,
+  'hook-*.py'))`, and several hooks glob a package folder the same way: scipy, Qt, cv2, zmq,
+  Crypto, cryptography, nacl): its own hooks, pyinstaller-hooks-contrib's and flet_cli's sit in
+  `.venv`, and under a project folder named like `games [2026]` glob read `[2026]` as a
+  character class and found none. The build said done, and the executable lacked what only the
+  hooks collect: rich's Unicode tables (ModuleNotFoundError at the first check mark), and for
+  flet pack the Flet client and `icons.json`, while the build said the client was inside.
+  Up: none found. Fix: `exe.check_options` refuses a project folder whose path holds `[`, `*` or
+  `?` (`common.GLOB_MAGIC`, `common.refuse_a_globbed_folder`) before any work, also in
+  `--dry-run`, naming portable, pyz and wheel (10); a patched glob in PyInstaller's process
+  would also have to reach every hook. Test:
+  `test_build_methods.py::test_pyinstaller_finds_no_hook_in_a_folder_glob_reads_as_a_pattern` (a
+  pin: it fails once PyInstaller escapes the folder),
+  `test_exe_refuses_a_project_folder_glob_reads_as_a_pattern`,
+  `test_exe_build_itself_refuses_a_project_folder_glob_reads_as_a_pattern`. Goes: when
+  PyInstaller and its hooks escape the folders they glob (the pin fails first).
 
 Nuitka:
 - **FATAL on a module it cannot locate** (LIMITATION): a platform-guarded `import winreg` in
