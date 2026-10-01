@@ -3869,8 +3869,10 @@ short temp tree and unset `NVIM_APPNAME`.
   Code settings template) and the real builds that
   import rich (`test_build_methods.needs_rich`: a raylib project locks none). What the runner
   writes into a CI template is tested on the tests' own (`conftest.MINIMAL_CI_TEMPLATE`, the
-  `minimal_ci_template` fixture), and severities are read from the project's profiles (a weekly
-  schedule in its CI template failed 36 tests there, a blocking ruff in `warn` 2;
+  `minimal_ci_template` fixture), and severities, and what check, lint, the hook and editor.json
+  do with a profile's `blocking`, ruff `exit_zero` and `skip_mypy`, are read from the project's
+  profiles (`test_cli_core._profile_flags`; a weekly schedule in its CI template failed 36 tests
+  there, a blocking ruff in `warn` 7, mypy under `off` 4, a `strict` that does not block 3;
   `test_paths.test_the_template_tests_pass_in_a_project_that_edited_its_templates`). template-selftest's
   new-project job proves it for a raylib and a flet project (a new project has its own
   README.md; the template's is `.pytemplate/README.md`). Tests that start what they built with

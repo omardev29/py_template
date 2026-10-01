@@ -714,16 +714,20 @@ def test_the_template_tests_pass_in_a_project_that_edited_its_templates(tmp_path
     profiles and VS Code settings in .pytemplate/templates/. The tests pinned the shipped content
     (the CI's triggers and steps, a blocking ruff in no profile, the settings template's values):
     a weekly schedule in the CI template failed 36 tests of ./pyt selftest there, a blocking ruff
-    in `warn` 2. They run here in a copy with such edits (the shipped content stays pinned in the
-    template repository, which a copy is not)."""
+    in `warn` 2, and the check, lint, hook and editor.json tests 5 more with that edit, 4 with
+    mypy run under `off`, 3 with a `strict` that does not block. They run here in a copy with such
+    edits (the shipped content stays pinned in the template repository, which a copy is not)."""
     own = tmp_path / "own"
     presets.copy_template(own)
     assert not (own / ".pytemplate" / "template-repo").exists()
     templates = own / ".pytemplate" / "templates"
     ci = templates / "ci.yml"
     ci.write_text(ci.read_text(encoding="utf-8").replace("  pull_request:\n", '  pull_request:\n  schedule:\n    - cron: "0 6 * * 1"\n', 1), encoding="utf-8")
-    warn = templates / "typing" / "warn.toml"
-    warn.write_text(warn.read_text(encoding="utf-8").replace("exit_zero = true", "exit_zero = false"), encoding="utf-8")
+    for profile, old, new in (("warn", "exit_zero = true", "exit_zero = false"), ("off", "skip_mypy = true", "skip_mypy = false"), ("strict", "blocking = true", "blocking = false")):
+        path = templates / "typing" / f"{profile}.toml"
+        text = path.read_text(encoding="utf-8")
+        assert old in text, (profile, old)  # the edit must change something
+        path.write_text(text.replace(old, new), encoding="utf-8")
     settings = templates / "vscode" / "settings.json"
     settings.write_text(settings.read_text(encoding="utf-8").replace('"tasks.statusbar.default.hide": true', '"tasks.statusbar.default.hide": false'), encoding="utf-8")
     nodes = [
@@ -731,13 +735,21 @@ def test_the_template_tests_pass_in_a_project_that_edited_its_templates(tmp_path
         "test_vscode.py::test_severity_follows_the_typing_profile",
         "test_vscode.py::test_settings_and_extensions",
         "test_nvim_render.py::test_task_severity_examples",
+        "test_nvim_render.py::test_editor_json_follows_the_mode",
         "test_runner.py::test_ci_workflow_leaves_out_an_os_without_backends",
         "test_e2e_plan.py::test_host_gaps_match_the_generated_ci_matrix",
+        "test_cli_core.py::test_run_checks_blocking_matrix",
+        "test_cli_core.py::test_lint_honours_the_profiles_exit_zero",
+        "test_cli_core.py::test_a_dry_run_of_check_names_only_what_it_skipped",
+        "test_cli_core.py::test_basedpyright_runs_with_every_pin",
+        "test_cli_core.py::test_basedpyright_that_cannot_run_always_fails",
+        "test_hooks.py::test_checks_report_ruff_failures_and_exit_zero",
     ]
     drop = (*_LAUNCHER_VARS, "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")
     r = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--basetemp", str(tmp_path / "t"),
-         "-k", "ci_ or ci_workflow or host_gaps or severity or settings_and_extensions",
+         "-k", "ci_ or ci_workflow or host_gaps or severity or settings_and_extensions or editor_json_follows or blocking_matrix"
+         " or exit_zero or dry_run_of_check or basedpyright",
          *(f".pytemplate/tests/{node}" for node in nodes)],
         cwd=own,
         env={k: v for k, v in os.environ.items() if k not in drop},

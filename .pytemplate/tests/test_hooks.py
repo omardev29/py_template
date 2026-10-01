@@ -1601,9 +1601,13 @@ def test_checks_report_ruff_failures_and_exit_zero(tmp_path: Path, tools: Tools)
     assert res["ruff format"].passed is False and "./pyt fmt" in res["ruff format"].hint
     tools.ruff_calls.clear()
     tools.ruff_code = 0
+    # warn's exit_zero: true as shipped, and the project's own decides (README lets it edit the profile)
+    exit_zero = bool(render.load_profile("warn").get("ruff", {}).get("exit_zero"))
+    if (Path(__file__).resolve().parents[1] / "template-repo").is_file():
+        assert exit_zero
     res = results(make({"typing": {"relaxed": "warn"}}), repo, staged)
-    assert "--exit-zero" in tools.ruff_calls[0][0]
-    assert res["ruff check"].passed is True and "warnings only" in res["ruff check"].label
+    assert ("--exit-zero" in tools.ruff_calls[0][0]) is exit_zero
+    assert res["ruff check"].passed is True and ("warnings only" in res["ruff check"].label) is exit_zero
 
 
 @needs_git

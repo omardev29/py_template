@@ -36,6 +36,7 @@ from runner.project import BUILD, DIST, ROOT, SRC  # noqa: E402
 from runner.ui import PytError  # noqa: E402
 
 PYT_PY = TEMPLATE_DIR / "pyt.py"
+TEMPLATE_REPO = (TEMPLATE_DIR / "template-repo").is_file()  # the shipped content is pinned here only
 IS_WINDOWS = os.name == "nt"
 posix = pytest.mark.skipif(IS_WINDOWS, reason="POSIX signals, pipes and exec bits")
 needs_uv = pytest.mark.skipif(shutil.which("uv") is None and not os.environ.get("UV"), reason="uv not found")
@@ -1777,19 +1778,49 @@ def test_check_all_runs_each_profile_once_and_the_mypyc_rules_once(checks: FakeC
     assert checks.calls == [("cpython", True)]
 
 
+def _profile_flags(name: str) -> tuple[bool, bool, bool]:
+    """(blocking, ruff's exit_zero, skip_mypy) of the typing profile `name` as the project has it,
+    read as cmd_dev.run_checks reads them: README lets a project edit
+    .pytemplate/templates/typing/<profile>.toml, and the tests that pinned the shipped values
+    failed in a project that had (`exit_zero = false` in warn.toml: 5 of them)."""
+    data = render.load_profile(name)
+    return bool(data.get("blocking", False)), bool(data.get("ruff", {}).get("exit_zero")), bool(data.get("skip_mypy"))
+
+
+# The shipped profiles' flags, pinned in the template repository
+SHIPPED_PROFILE_FLAGS = {"off": (False, False, True), "warn": (False, True, False), "strict": (True, False, False), "mypyc": (True, False, False)}
+
+
+@pytest.mark.parametrize("name", sorted(SHIPPED_PROFILE_FLAGS))
+def test_the_shipped_typing_profiles_keep_their_flags(name: str) -> None:
+    if not TEMPLATE_REPO:
+        pytest.skip("the shipped profiles: a project may edit its own (README)")
+    assert _profile_flags(name) == SHIPPED_PROFILE_FLAGS[name]
+
+
 def test_a_dry_run_of_check_names_only_what_it_skipped(checks: FakeChecks, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """The dry-run line of `check` was fixed text: it said the mypyc rules had run in a project
     that does not support mypyc (they run only then), and named basedpyright with the pylance
     editor and mypy under a profile that skips it."""
+
+    def line(*tools: str) -> str:
+        return "(--dry-run) check: " + (f"{', '.join(tools[:-1])} and {tools[-1]} were" if len(tools) > 1 else f"{tools[0]} was") + " not run"
+
+    def mypy(*profiles: str) -> tuple[str, ...]:  # mypy is skipped where every profile skips it
+        return () if all(_profile_flags(p)[2] for p in profiles) else ("mypy",)
+
     monkeypatch.setattr(proc, "DRY_RUN", True)
-    assert cmd_dev.cmd_check(make({"backend": {"supported": ["cpython"]}}), []) == 0  # profile off: no mypy
-    assert "(--dry-run) check: ruff was not run\n" in capsys.readouterr().err
+    assert cmd_dev.cmd_check(make({"backend": {"supported": ["cpython"]}}), []) == 0  # profile off: no mypy (shipped)
+    assert line("ruff", *mypy("off")) + "\n" in capsys.readouterr().err
     strict = {"typing": {"relaxed": "strict"}}
     assert cmd_dev.cmd_check(make({**strict, "backend": {"supported": ["cpython", "pypy"]}}), ["all"]) == 0
-    assert "(--dry-run) check: ruff and mypy were not run\n" in capsys.readouterr().err
+    assert line("ruff", *mypy("strict")) + "\n" in capsys.readouterr().err
     both = {"backend": {"supported": ["cpython", "mypyc"]}, "typing": {"editor": "basedpyright"}}
     assert cmd_dev.cmd_check(make(both), ["all"]) == 0
-    assert "(--dry-run) check: ruff, mypy and basedpyright were not run (the mypyc rules were)\n" in capsys.readouterr().err
+    assert line("ruff", *mypy("off", "mypyc"), "basedpyright") + " (the mypyc rules were)\n" in capsys.readouterr().err
+    if TEMPLATE_REPO:  # the shipped profiles: off skips mypy, the others run it
+        assert (mypy("off"), mypy("strict"), mypy("off", "mypyc")) == ((), ("mypy",), ("mypy",))
+        assert line("ruff", "mypy", "basedpyright") == "(--dry-run) check: ruff, mypy and basedpyright were not run"
 
 
 def test_check_rejects_extra_arguments_and_unsupported_backends(checks: FakeChecks) -> None:
@@ -1848,12 +1879,18 @@ def _checks_with(monkeypatch: pytest.MonkeyPatch, cfg: Config, backend: str = "c
 )
 @pytest.mark.usefixtures("isolated_checks")
 def test_run_checks_blocking_matrix(relaxed: str, ruff: int, mypy: int, passed: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`passed` is the shipped profiles' answer; the project's own profile decides (README: a
+    project may edit it): ruff's failure always blocks, mypy's exit 1 only under a blocking one."""
+    blocking, exit_zero, skip_mypy = _profile_flags(relaxed)
+    expected = ruff == 0 and (skip_mypy or mypy == 0 or (mypy == 1 and not blocking))
+    if TEMPLATE_REPO:
+        assert expected is passed
     ok, fake = _checks_with(monkeypatch, make({"typing": {"relaxed": relaxed}}), ruff=ruff, mypy=mypy)
-    assert ok is passed
+    assert ok is expected
     ruff_argv = fake.tool("ruff")
-    assert ruff_argv is not None and ("--exit-zero" in ruff_argv) == (relaxed == "warn")
-    assert (fake.tool("mypy") is None) == (relaxed == "off")  # the off profile skips mypy
-    if relaxed == "warn" and mypy == 1:
+    assert ruff_argv is not None and ("--exit-zero" in ruff_argv) == exit_zero  # shipped: warn only
+    assert (fake.tool("mypy") is None) == skip_mypy  # shipped: the off profile skips mypy
+    if not blocking and not skip_mypy and mypy == 1:
         assert "non-blocking" in capsys.readouterr().err
 
 
@@ -1882,8 +1919,11 @@ def test_the_mypyc_rules_block_only_under_the_mypyc_profile(backend: str, passed
 @pytest.mark.usefixtures("isolated_checks")
 def test_basedpyright_runs_with_every_pin(relaxed: str, passed: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = make({"typing": {"editor": "basedpyright", "relaxed": relaxed}})
+    blocking = _profile_flags(relaxed)[0]  # `passed`: the shipped profile's answer
+    if TEMPLATE_REPO:
+        assert passed is not blocking
     ok, fake = _checks_with(monkeypatch, cfg, basedpyright=1)
-    assert ok is passed  # a failure only blocks under a blocking profile
+    assert ok is not blocking  # a failure only blocks under a blocking profile
     (argv,) = [c for c in fake.calls if "basedpyright" in c]
     withs = [argv[i + 1] for i, a in enumerate(argv) if a == "--with"]
     assert withs == [cmd_dev.BASEDPYRIGHT, cmd_dev.BASEDPYRIGHT_NODE]
@@ -1908,8 +1948,16 @@ def test_basedpyright_that_cannot_run_always_fails(
     relaxed: str, ready: int, code: int, passed: bool, message: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Offline with a cold cache, `uv run --with basedpyright==...` failed (exit 1: No solution
-    found), and under the non-blocking `warn` profile check said `ok check: no errors`."""
+    found), and under the non-blocking `warn` profile check said `ok check: no errors`. Findings
+    (exit 1 once the pins are installed) block as the project's own profile says (`passed` and
+    `message`: the shipped profile's answer)."""
     cfg = make({"typing": {"editor": "basedpyright", "relaxed": relaxed}})
+    if not ready and code == 1:
+        blocking = _profile_flags(relaxed)[0]
+        found = (not blocking, "" if blocking else f"warning: basedpyright: type warnings (profile '{relaxed}', non-blocking)")
+        if TEMPLATE_REPO:
+            assert found == (passed, message)
+        passed, message = found
     calls: list[list[str]] = []
 
     def uv(_env: envs.PyEnv, argv: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
@@ -2033,11 +2081,14 @@ def test_check_lint_and_fmt_see_every_folder_below_src_and_tests(tmp_path: Path,
 
 @pytest.mark.parametrize(("relaxed", "exit_zero"), [("warn", True), ("strict", False), ("off", False)])
 def test_lint_honours_the_profiles_exit_zero(relaxed: str, exit_zero: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`exit_zero`: the shipped profile's; the project's own decides (README: it may edit it)."""
+    if TEMPLATE_REPO:
+        assert _profile_flags(relaxed)[1] is exit_zero
     calls: list[list[str]] = []
     monkeypatch.setattr(envs, "uv_run", lambda _env, argv, **_kw: calls.append([str(a) for a in argv]) or completed(argv))
     assert cmd_dev.cmd_lint(make({"typing": {"relaxed": relaxed}}), ["--fix"]) == 0
     assert calls[0][:3] == ["ruff", "check", "--fix"]
-    assert ("--exit-zero" in calls[0]) == exit_zero
+    assert ("--exit-zero" in calls[0]) == _profile_flags(relaxed)[1]
 
 
 class FakeTests:

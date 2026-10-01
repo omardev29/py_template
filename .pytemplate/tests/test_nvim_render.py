@@ -184,10 +184,21 @@ def test_editor_json_is_data_without_machine_paths(name: str) -> None:
         assert str(ROOT) not in s and ROOT.as_posix() not in s
 
 
+def _mypy_of(profile: str) -> tuple[bool, dict[str, str]]:
+    """editor.json's typing.mypy and mypy_severity for `profile`, read from the profile as the
+    project has it (README: a project may edit .pytemplate/templates/typing/<profile>.toml; with
+    `skip_mypy = false` in off.toml the shipped values failed here)."""
+    data = render.load_profile(profile)
+    return not data.get("skip_mypy", False), data.get("vscode", {}).get("mypy-type-checker.severity", nvim.DEFAULT_SEVERITY)
+
+
 def test_editor_json_follows_the_mode() -> None:
+    if (project.TEMPLATE / "template-repo").is_file():  # the shipped profiles
+        assert _mypy_of("off")[0] is False and _mypy_of("mypyc") == (True, {"error": "Error", "note": "Information"})
+        assert _mypy_of("warn")[1]["error"] == "Warning"
     script = editor("script")
     assert script["backend"] == {"active": "cpython", "supported": ["cpython", "mypyc"]}
-    assert script["typing"]["profile"] == "off" and script["typing"]["mypy"] is False
+    assert script["typing"]["profile"] == "off" and script["typing"]["mypy"] is _mypy_of("off")[0]
     assert script["typing"]["python_version"] is None and script["pypy_enabled"] is False
 
     raylib = editor("raylib")
@@ -199,11 +210,10 @@ def test_editor_json_follows_the_mode() -> None:
     assert flet["tasks"] == [{"name": "dev", "help": "", "background": True}]
 
     mypyc = editor("mypyc-active")
-    assert mypyc["typing"]["profile"] == "mypyc" and mypyc["typing"]["mypy"] is True
-    assert mypyc["typing"]["mypy_severity"] == {"error": "Error", "note": "Information"}
+    assert mypyc["typing"]["profile"] == "mypyc" and (mypyc["typing"]["mypy"], mypyc["typing"]["mypy_severity"]) == _mypy_of("mypyc")
 
     warn = editor("pypy-supported")
-    assert warn["typing"]["mypy_severity"]["error"] == "Warning"
+    assert warn["typing"]["mypy_severity"] == _mypy_of("warn")[1]
     assert warn["min_python"] == "3.11"
 
     assert editor("basedpyright")["typing"]["editor"] == "basedpyright"
