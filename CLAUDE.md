@@ -2163,7 +2163,13 @@ Formats:
   of a `--config` file against its cwd, ROOT for every caller, and expands `$NAME` and
   `${NAME}` in its `src` and in that argument, so absolute ones failed in a project folder such
   as `app$v2` (15.1); the pyright copies use absolute paths (`absolute=True`) because pyright
-  resolves paths relative to the config file; the compile-time `mypy.ini` (`render.mypy_ini`
+  resolves paths relative to the config file: every path of the editor's config anchored at ROOT
+  by `render._anchored` (`PYRIGHT_PATH_LISTS`, `PYRIGHT_PATHS`, an execution environment's `root`
+  and `extraPaths`), the `**/__pycache__` and `**/.*` excludes and a profile's own `[pyright]`
+  paths included (left relative, they matched below `.build/cfg` only: check read the dot folders
+  of src/, a JupyterLab `.ipynb_checkpoints` copy, which the editor skips, and a profile's `ignore`
+  never applied;
+  `test_cli_core.test_check_gives_basedpyright_the_files_the_editor_checks`); the compile-time `mypy.ini` (`render.mypy_ini`
   with `for_compile=` the folder it is written to: the mypyc profile dir, the wheel's work dir)
   only carries `mypy_path = $MYPY_CONFIG_FILE_DIR/<relative path to typings>`, because mypyc
   runs with cwd = stage and mypy splits `mypy_path` on `,` and `:` before expanding variables (an
@@ -2433,7 +2439,7 @@ Formats:
   `test_render_core.test_ruff_skips_only_the_roots_own_folders`,
   `test_cli_core.test_check_lint_and_fmt_see_every_folder_below_src_and_tests`). pyright's
   `exclude` names the root's `node_modules`, `dist` and `build` (`**/__pycache__` and `**/.*`
-  anywhere); mypy's own file finder skips a folder named `node_modules` or `site-packages`, and a
+  anywhere below the root, in check's `.build/cfg` copy too: 6.2); mypy's own file finder skips a folder named `node_modules` or `site-packages`, and a
   dot folder, at any depth (hard-coded in mypy 2.3.1; a module another one imports is still
   checked). The runner is checked by `./pyt selftest` (mypy --strict), not by `check`.
 - Profiles that select `RUF` ignore `RUF001-003` (ambiguous unicode) so app text may be

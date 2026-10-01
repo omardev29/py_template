@@ -201,26 +201,32 @@ def mypy_cli_args(cfg: Config, python: Path) -> list[str]:
 # --- pyright / basedpyright ----------------------------------------------------------------------
 
 
+# The keys of a pyright configuration that hold paths, which pyright reads against the folder of
+# the file (pyright 1.1.414's initializeFromJson, `extends`, basedpyright's baselineFile), and
+# those of each execution environment
+PYRIGHT_PATH_LISTS = ("include", "exclude", "ignore", "strict", "extraPaths")
+PYRIGHT_PATHS = ("venvPath", "stubPath", "typeshedPath", "typingsPath", "baselineFile", "extends")
+
+
 def pyright_config(cfg: Config, profile: str, *, absolute: bool = False) -> dict[str, Any]:
-    """`absolute`: for a copy outside the root (pyright resolves paths relative to the file)."""
+    """`absolute`: for a copy outside the root (./pyt check's, in .build/cfg): every path of it,
+    a profile's [pyright] ones included, anchored at ROOT (_anchored). pyright reads them against
+    the folder of the file: the copy's `**/.*` matched below .build/cfg only, and check read the
+    dot folders of src/ (.ipynb_checkpoints) that the editor's pyrightconfig.json skips."""
     data = load_profile(profile)
-
-    def path(p: str) -> str:
-        return (ROOT / p).as_posix() if absolute else p
-
-    include = [path("src"), path("tests")] if _has_tests() else [path("src")]
+    include = ["src", "tests"] if _has_tests() else ["src"]
     conf: dict[str, Any] = {
         "include": include,
         # the root's node_modules (pyright's own default, **/node_modules, also skipped a
         # subpackage of that name); __pycache__ and dot folders hold no module anywhere
-        "exclude": [path("node_modules"), "**/__pycache__", "**/.*", path("dist"), path("build")],
-        "extraPaths": [path("src")],
+        "exclude": ["node_modules", "**/__pycache__", "**/.*", "dist", "build"],
+        "extraPaths": ["src"],
         "pythonVersion": cfg.min_python,
-        "venvPath": path("."),
+        "venvPath": ".",
         "venv": ".venv",
     }
     if typings_dir():
-        conf["stubPath"] = path("typings")
+        conf["stubPath"] = "typings"
     conf.update(data.get("pyright", {}))
     # compile.exclude (modules and subpackages that stay interpreted) is left out of the rules
     # for compiled code: pyright has no exclusion inside `strict`, so a compiled package that
@@ -231,14 +237,43 @@ def pyright_config(cfg: Config, profile: str, *, absolute: bool = False) -> dict
     tops = [t if t.endswith(".py") or _has_code(f"src/{t}") else f"{t}.py" for t in compiled_paths(cfg)]
     compiled = [p for top in tops for p in _paths_without(f"src/{top}", excluded)]
     if data.get("pyright_compiled", {}).get("strict"):
-        conf["strict"] = [path(p) for p in compiled]
+        conf["strict"] = compiled
     based = data.get("basedpyright_compiled")
     if cfg.typing.editor == "basedpyright" and based:
         # The first environment that matches a file wins: the excluded ones come first, without the Any rules
         conf["executionEnvironments"] = [
-            {"root": path(p), "extraPaths": [path("src")]} for p in sorted(excluded) if _has_code(p)
-        ] + [{"root": path(p), "extraPaths": [path("src")], **based} for p in compiled if _has_code(p)]
-    return conf
+            {"root": p, "extraPaths": ["src"]} for p in sorted(excluded) if _has_code(p)
+        ] + [{"root": p, "extraPaths": ["src"], **based} for p in compiled if _has_code(p)]
+    return _anchored(conf) if absolute else conf
+
+
+def _anchored(conf: dict[str, Any]) -> dict[str, Any]:
+    """`conf` with every path anchored at ROOT (PYRIGHT_PATH_LISTS, PYRIGHT_PATHS, an execution
+    environment's root and extraPaths); a path that is absolute already stays, and so does a
+    value that is no string (pyright names it)."""
+
+    def path(p: Any) -> Any:
+        return (ROOT / p).as_posix() if isinstance(p, str) else p
+
+    def paths(value: Any) -> Any:
+        return [path(p) for p in value] if isinstance(value, list) else value
+
+    out = dict(conf)
+    for key in PYRIGHT_PATH_LISTS:
+        if key in out:
+            out[key] = paths(out[key])
+    for key in PYRIGHT_PATHS:
+        if key in out:
+            out[key] = path(out[key])
+    environments = out.get("executionEnvironments")
+    if isinstance(environments, list):
+        out["executionEnvironments"] = [
+            {**env, **{k: path(env[k]) if k == "root" else paths(env[k]) for k in ("root", "extraPaths") if k in env}}
+            if isinstance(env, dict)
+            else env
+            for env in environments
+        ]
+    return out
 
 
 def _has_code(rel: str) -> bool:

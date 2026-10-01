@@ -2140,6 +2140,47 @@ def test_pyright_reads_a_wildcard_in_the_project_folder_pin(tmp_path: Path) -> N
     assert found["q?x"]["filesAnalyzed"] == 0 and found["q?x"]["errorCount"] == 0, found
 
 
+def test_check_gives_basedpyright_the_files_the_editor_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """pyright reads the paths of a configuration against the file's own folder: the copy that
+    ./pyt check writes to .build/cfg kept `**/__pycache__` and `**/.*` relative, so they matched
+    below .build/cfg only, and check failed on a JupyterLab checkpoint copy in a dot folder of src/
+    that the editor's pyrightconfig.json skips; a profile's own [pyright] paths (`ignore`) pointed
+    into .build/cfg too. The pinned basedpyright (uv's cache) on both: the same findings."""
+    root = tmp_path / "proj"
+    bad = 'x: int = "a"\n'
+    files = {
+        "src/pk/__init__.py": "",
+        "src/pk/bad.py": bad,  # the one both must report
+        "src/pk/core/.ipynb_checkpoints/bench-checkpoint.py": bad,
+        "tests/test_ok.py": "",
+        "tests/.hidden/test_x.py": bad,
+        "src/pk/legacy.py": bad,  # the profile's `ignore`
+    }
+    for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text, encoding="utf-8")
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(config, "SRC", root / "src")
+    real_profile = render.load_profile
+
+    def load_profile(name: str) -> dict[str, Any]:
+        data = real_profile(name)
+        return {**data, "pyright": {**data.get("pyright", {}), "ignore": ["src/pk/legacy.py"]}}
+
+    monkeypatch.setattr(render, "load_profile", load_profile)
+    cfg = make({"typing": {"editor": "basedpyright", "relaxed": "strict"}, "compile": {"modules": ["pk.core"]}})
+    editor = root / "pyrightconfig.json"
+    editor.write_text(json.dumps(render.pyright_config(cfg, "strict")), encoding="utf-8")
+    copy = root / ".build" / "cfg" / "pyright-strict.json"  # as run_checks writes it
+    copy.parent.mkdir(parents=True)
+    copy.write_text(json.dumps(render.pyright_config(cfg, "strict", absolute=True)), encoding="utf-8")
+    seen = {}
+    for name, conf in (("editor", editor), ("check", copy)):
+        report = _pinned_basedpyright(conf.relative_to(root), root)
+        seen[name] = sorted({d["file"].replace("\\", "/").rsplit("/proj/", 1)[-1] for d in report["generalDiagnostics"]})
+    assert seen == {"editor": ["src/pk/bad.py"], "check": ["src/pk/bad.py"]}, seen
+
+
 def test_tools_are_pinned_exactly() -> None:
     assert re.fullmatch(r"basedpyright==\d+\.\d+\.\d+", cmd_dev.BASEDPYRIGHT)
     assert re.fullmatch(r"nodejs-wheel-binaries==\d+\.\d+\.\d+", cmd_dev.BASEDPYRIGHT_NODE)

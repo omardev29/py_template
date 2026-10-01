@@ -1240,10 +1240,39 @@ def test_pyright_excludes_only_the_roots_own_folders(absolute: bool) -> None:
     exclude, which a config's `exclude` replaces) was never checked. Dot folders and caches hold
     no module anywhere."""
     exclude = render.pyright_config(preset_cfg(), "strict", absolute=absolute)["exclude"]
-    anywhere = [p for p in exclude if p.startswith("**/")]
-    assert anywhere == ["**/__pycache__", "**/.*"], exclude
+    # check's copy (in .build/cfg) anchors every one at the root, `**/.*` included: pyright reads
+    # them against the file's folder, and a relative `**/.*` there matched below .build/cfg only
     base = f"{ROOT.as_posix()}/" if absolute else ""
-    assert [base + n for n in ("node_modules", "dist", "build")] == [p for p in exclude if p not in anywhere], exclude
+    assert exclude == [base + p for p in ("node_modules", "**/__pycache__", "**/.*", "dist", "build")], exclude
+
+
+def test_check_copy_of_the_pyright_config_is_the_editors_anchored_at_the_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every path of the copy ./pyt check hands basedpyright is the editor's, anchored at ROOT, a
+    profile's own [pyright] paths included (pyright reads them against .build/cfg otherwise): an
+    `ignore` the editor honoured pointed into .build/cfg, and check reported the file."""
+    real_profile = render.load_profile
+    typeshed = (tmp_path / "ts").as_posix()  # absolute already: kept
+
+    def load_profile(name: str) -> dict[str, Any]:
+        data = real_profile(name)
+        extra = {"ignore": ["src/legacy.py"], "extraPaths": ["libs"], "baselineFile": "base.json", "typeshedPath": typeshed}
+        return {**data, "pyright": {**data.get("pyright", {}), **extra}}
+
+    monkeypatch.setattr(render, "load_profile", load_profile)
+    cfg = preset_cfg()
+    editor, anchored = render.pyright_config(cfg, "strict"), render.pyright_config(cfg, "strict", absolute=True)
+    root = ROOT.as_posix()
+    assert anchored == {
+        **editor,
+        "include": [f"{root}/{p}" for p in editor["include"]],
+        "exclude": [f"{root}/{p}" for p in ("node_modules", "**/__pycache__", "**/.*", "dist", "build")],
+        "ignore": [f"{root}/src/legacy.py"],
+        "extraPaths": [f"{root}/libs"],
+        "baselineFile": f"{root}/base.json",
+        "typeshedPath": typeshed,
+        "venvPath": root,
+        **({"stubPath": f"{root}/typings"} if "stubPath" in editor else {}),
+    }
 
 
 # --- the generated CI workflow ---------------------------------------------------------------------
