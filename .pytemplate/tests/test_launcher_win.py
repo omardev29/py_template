@@ -936,6 +936,41 @@ def test_ps1_passes_array_values_like_a_native_call(name: str) -> None:
         assert probes[6] == VALUES_ARGV
 
 
+# A -X: whose value is an array VALUE ($files) reaches a native program once per item, the switch
+# repeated; a typed list after it (-Y:a,b) stays one argument, its items joined with commas
+COLON_VALUES_TYPED = "run -X:$files -Y:a,b z"
+COLON_VALUES_ARGV = ["run", "-X:a.py", "-X:b 2.py", "-Y:a,b", "z"]
+
+
+@pytest.mark.parametrize("name", PS_NAMES)
+def test_ps1_repeats_a_colon_switch_for_each_item_of_an_array_value(name: str) -> None:
+    """`./pyt run app -X:$files` gave the app one argument, -X:a.py,b 2.py, where a direct native
+    call in the same session gives -X:a.py and -X:b 2.py; also through a wrapper function that
+    forwards @args, and with legacy argument passing."""
+    exe = _ps_exe(name)
+    uv = os.environ.get("UV") or shutil.which("uv")
+    assert uv
+    ps1 = _ps_literal(str(PS1))
+    direct = f"& {_ps_literal(uv)} run --quiet --script {_ps_literal(str(ROOT / '.pytemplate' / 'pyt.py'))}"
+    body = "\n".join([
+        VALUES_SETUP,
+        f"{direct} __probe 0 0 {COLON_VALUES_TYPED}",
+        f"& {ps1} __probe 0 0 {COLON_VALUES_TYPED}",
+        PWSH_WRAPPER,
+        f"Set-Location {_ps_literal(str(SUB))}",
+        f"pyt __probe 0 0 {COLON_VALUES_TYPED}",
+    ])  # fmt: skip
+    if name == "pwsh":  # also the legacy pre-quoting path that 5.1 always takes
+        body += f"\n$PSNativeCommandArgumentPassing = 'Legacy'\n& {ps1} __probe 0 0 {COLON_VALUES_TYPED}"
+    r = _session(exe, body + "\nexit 0\n")
+    assert r.returncode == 0, r.stdout + r.stderr
+    probes = [p["argv"] for p in _probes(r)]
+    assert len(probes) == (4 if name == "pwsh" else 3), r.stdout + r.stderr
+    if name == "pwsh":  # measured with 7.6
+        assert probes[0] == COLON_VALUES_ARGV, "a direct native call no longer passes these as expected"
+    assert probes[1:] == [COLON_VALUES_ARGV] * (len(probes) - 1)
+
+
 # A $null argument (an unset $env:X, an optional variable), the $null items of an array and a -X:
 # whose value is $null never reach a native program; an empty string does (PowerShell 7.3+), and
 # so does a List[string]'s null item, as an empty string.

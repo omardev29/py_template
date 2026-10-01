@@ -556,7 +556,10 @@ header rules (with detector tests proving each rule fires).
   'Legacy'` in the script's scope only), whose pre-quoted `"--%"` reaches uv intact.
 - A typed `-X:v` reaches a script (and a function's `@args`) as two elements, `'-X:'` marked
   with a hidden `<CommandParameterName>` note, and `v`: the launcher joins them again, as
-  PowerShell does for a native program. Limit: `-X: v` (a blank after the colon) arrives as
+  PowerShell does for a native program: a typed list after the colon (`-X:a,b`) as one argument,
+  an array value (`-X:$files`, `Get-Typed` reads which) as the switch once per item, `-X:a.py
+  -X:b.py` (it gave `-X:a.py,b.py`; a value a splatted copy brings stays joined:
+  `test_ps1_repeats_a_colon_switch_for_each_item_of_an_array_value`). Limit: `-X: v` (a blank after the colon) arrives as
   `-X:v`. `pwsh -File pyt.ps1 ...` and `./pyt.ps1` typed in bash/zsh (the shebang
   route) are worse: pwsh itself splits every argument starting with `-` at its first colon
   before the script runs (`--x=a:b` -> `--x=a` `b`): from POSIX shells use `./pyt`.

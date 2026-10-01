@@ -307,11 +307,12 @@ $typed = $null
 foreach ($a in $args) { if ($a -is [array]) { $typed = Get-Typed @(Get-PSCallStack) 0; break } }
 if ($null -ne $typed) {
     # A gap takes the arguments the others leave, and its arrays pass their items one by one,
-    # as a native call splats them; with two gaps nothing lines up.
+    # as a native call splats them; with two gaps nothing lines up. Its places hold 0, not
+    # $false: a value whose text is unknown (a -X: before one keeps its items joined).
     $gaps = @(foreach ($t in $typed) { if ($t -is [string]) { $t } }).Count
     $fill = $args.Count - $typed.Count + 1
     if ($gaps -eq 1 -and $fill -ge 0) {
-        $typed = @(foreach ($t in $typed) { if ($t -is [string]) { for ($n = 0; $n -lt $fill; $n++) { $false } } else { $t } })
+        $typed = @(foreach ($t in $typed) { if ($t -is [string]) { for ($n = 0; $n -lt $fill; $n++) { 0 } } else { $t } })
     }
     if ($typed.Count -ne $args.Count -or $gaps -gt 1) { $typed = $null }
 }
@@ -323,7 +324,12 @@ $argv = @(for ($i = 0; $i -lt $args.Count; $i++) {
     if ($a -is [string] -and $a.EndsWith(':') -and $a.PSObject.Properties['<CommandParameterName>'] -and $i + 1 -lt $args.Count) {
         $i++
         if ($null -eq $args[$i]) { continue }
-        $a + ((@($args[$i]) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join ',')
+        $items = @(@($args[$i]) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+        if ($args[$i] -is [array] -and $null -ne $typed -and $typed[$i] -is [bool] -and -not $typed[$i]) {
+            foreach ($x in $items) { $a + $x }  # an array value (-X:$files): the switch once per item
+        } else {
+            $a + ($items -join ',')  # a typed list (-X:a,b) or a value: one argument
+        }
     } elseif ($a -is [array] -and ($null -eq $typed -or $typed[$i])) {
         (@($a) | ForEach-Object { [string]$_ }) -join ','
     } else {
