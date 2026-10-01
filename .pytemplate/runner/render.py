@@ -156,6 +156,11 @@ def mypy_ini(cfg: Config, profile: str, *, for_compile: Path | None = None) -> s
     else:
         head["mypy_path"] = ["src", "typings"] if typings else "src"
         head["files"] = ["src", "tests"] if _has_tests() else "src"
+        # Modules named from src (and the project folder, for tests/), as Python and mypyc
+        # (mypyc_build.py: --explicit-package-bases) name them: from the nearest folder with an
+        # __init__.py, src/nsx/fast.py of a namespace folder in compile.modules was `fast`, out of
+        # its [mypy-nsx.*] section, and an app package without __init__.py was found twice
+        head["explicit_package_bases"] = True
         if cfg.pypy_enabled:
             # what mypy_cli_args passes to check, for a mypy run with no arguments (VS Code's mypy
             # extension): mypy still reads the packages of the Python it runs on (sys.executable)

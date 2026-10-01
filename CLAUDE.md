@@ -2033,7 +2033,13 @@ Formats:
 - `.lazy.lua` is a copy of `.pytemplate/templates/nvim/lazy.lua` (BOM stripped, CRLF -> LF)
   and must not depend on the config (section 12.2).
 - Path styles differ per tool: `.build/cfg/mypy-*.ini` uses relative `mypy_path = src` /
-  `files = src, tests`, so mypy must run with cwd = ROOT (the `proc.run` default); the ruff
+  `files = src, tests`, so mypy must run with cwd = ROOT (the `proc.run` default), and
+  `.mypy.ini` and those copies set `explicit_package_bases`: modules are named from src (and the
+  project folder for tests/), as Python and mypyc (`--explicit-package-bases`) name them; from
+  the nearest folder with an `__init__.py`, a namespace folder of `compile.modules` (`nsx/fast.py`
+  read as `fast`) missed its compiled-module section, and an app package without `__init__.py`
+  was "found twice" (`test_mypyc_core.test_mypy_names_a_namespace_folder_of_compile_modules_as_python_does`,
+  `test_mypy_checks_an_app_package_without_init_files`; the three skeletons check alike); the ruff
   copies under `.build/cfg` hold paths relative to ROOT (`render.ruff_config(relative_to=ROOT)`)
   and reach ruff as a `--config` relative to ROOT (`cmd_dev.config_arg`): ruff reads the paths
   of a `--config` file against its cwd, ROOT for every caller, and expands `$NAME` and

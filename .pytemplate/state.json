@@ -3,7 +3,7 @@
   "files": {
     ".github/workflows/ci.yml": "4d426dc79570212ec6c7896dabdaa5faeedb224e0d81cade73f7e92e6a8acebf",
     ".lazy.lua": "ec47993b92510b7454f7575b83ad4bd3f78a546fc8e454c8009ebf4196eb57ec",
-    ".mypy.ini": "caf263ce0ec64f4ca57e65cb2f929b8a0c5a75707fa3deeb5a4225e7d60740e8",
+    ".mypy.ini": "4a652239e4eaeba5992ac1c6dd990da760cc3b62dc0a145365df80a52361934c",
     ".pytemplate/editor.json": "ad4a7d28c1408bde1cea9873b62aa0be84115fbbe796218e75549634b8364245",
     ".python-version": "a876e0b10411037a012498b9fe18d9bc1df32ed8b722a13564dc944ddcfd9135",
     ".ruff.toml": "82ed5b26a8618d7c940a544880833692f2bdd8e8a3b851f0f1c6ce2b4c1f3f39",

@@ -2534,6 +2534,57 @@ def test_mypy_with_the_generated_ini_accepts_any_in_an_excluded_module(tmp_path:
     assert r.returncode == 1 and 'uses.py:5: error: Expression has type "Any"' in r.stdout, r.stdout
 
 
+def _mypy_from(root: Path, ini: Path) -> subprocess.CompletedProcess[str]:
+    argv = [str(TOOL_PYTHON), "-m", "mypy", "--config-file", str(ini), "--no-incremental"]
+    return subprocess.run(argv, cwd=root, env=proc.base_env(), capture_output=True, text=True, check=False)
+
+
+@needs_venv
+def test_mypy_names_a_namespace_folder_of_compile_modules_as_python_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A namespace folder in compile.modules (src/nsx/fast.py, no __init__.py): mypy named the
+    module after its nearest folder, `fast`, so the [mypy-nsx.*] section never applied, and
+    `check mypyc` and the editor's mypy passed an Any that the mypyc compile then rejected. The
+    generated configs name modules from src, as mypyc_build.py does (--explicit-package-bases)."""
+    root = _project(
+        tmp_path,
+        {
+            "src/myapp/__init__.py": "",
+            "src/myapp/core/__init__.py": "",
+            "src/myapp/core/bench.py": "def n() -> int:\n    return 1\n",
+            "src/nsx/fast.py": "from typing import Any\n\n\ndef double(x: Any) -> Any:\n    return x * 2\n",
+            "tests/__init__.py": "",
+        },
+    )
+    monkeypatch.setattr(render, "ROOT", root)
+    cfg = make({"compile": {"modules": ["myapp.core", "nsx"]}})
+    for profile in ("off", "warn", "strict", "mypyc"):
+        assert _ini(render.mypy_ini(cfg, profile)).getboolean("mypy", "explicit_package_bases") is True
+    ini = root / "mypy.ini"
+    ini.write_text(render.mypy_ini(cfg, "mypyc"), encoding="utf-8")
+    r = _mypy_from(root, ini)
+    assert r.returncode == 1 and 'src/nsx/fast.py:4: error: Explicit "Any" is not allowed' in r.stdout.replace("\\", "/"), r.stdout + r.stderr
+
+
+@needs_venv
+def test_mypy_checks_an_app_package_without_init_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An app package without __init__.py runs, tests and compiles (mypyc names it from src),
+    but mypy named src/myapp/app.py `app` too: "Source file found twice under different module
+    names", and `check` and the checks of `build` failed under every profile that runs mypy."""
+    root = _project(
+        tmp_path,
+        {
+            "src/myapp/app.py": "from .core import bench\n\n\ndef main() -> int:\n    return bench.n()\n",
+            "src/myapp/core/bench.py": "def n() -> int:\n    return 1\n",
+            "tests/test_app.py": "import myapp.app\n\n\ndef test_main() -> None:\n    assert myapp.app.main() == 1\n",
+        },
+    )
+    monkeypatch.setattr(render, "ROOT", root)
+    ini = root / "mypy.ini"
+    ini.write_text(render.mypy_ini(make({}), "strict"), encoding="utf-8")
+    r = _mypy_from(root, ini)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 @pytest.fixture
 def pyright_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = _project(
