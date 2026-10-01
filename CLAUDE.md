@@ -1582,7 +1582,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   group alone has no solution; `--frozen` only edits pyproject.toml and one `uv lock` follows.
   When the edits, the lock or the PyPy precheck fail, pyproject.toml and uv.lock get their old
   bytes back (`_restore`) and the record is not written: nothing half-applied, the next apply
-  retries. `--dry-run` runs the precheck read-only only while `uv lock --check` passes (its
+  retries. A `[project] name` line apply set (`Plan.name_text`) goes back with them (`_finish`'s
+  `original`: the bytes were taken after that write, and the new name stayed next to the old
+  uv.lock, `test_apply.test_a_failed_lock_puts_the_project_name_line_back_too`); a rename stays
+  done ("the app is already renamed"). `--dry-run` runs the precheck read-only only while `uv lock --check` passes (its
   `uv run --locked` would fail on a stale lock alone) and says so otherwise; its uv.lock row
   says "would re-lock" for the managed parts, the dependencies, a stale lock, or a project name
   whose NORMALIZED form changes (`p` -> `P` re-locks nothing).

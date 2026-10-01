@@ -877,6 +877,26 @@ def test_a_failed_add_restores_pyproject_too(tmp_path: Path, monkeypatch: pytest
     assert (project.root / "pyproject.toml").read_bytes() == original
 
 
+def test_a_failed_lock_puts_the_project_name_line_back_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only pyproject.toml [project] name differed (a copy of the template's pyproject.toml in an
+    upgrade): apply wrote that line before it took the bytes it puts back when the re-lock fails,
+    so a failed `uv lock` left the rewritten name next to the old uv.lock, which every `uv run
+    --locked` then refused, and the message did not say pyproject.toml had changed. The line is
+    put back with the rest."""
+    project, uv = _project(tmp_path, monkeypatch, "script", "alpha")
+    assert _run(project) == 0  # the record: alpha
+    pyproject = project.root / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "myapp"', 1), encoding="utf-8", newline="\n")
+    uv.locked = original = pyproject.read_bytes()  # the lock of that pyproject.toml
+    uv.fail.add("lock")
+    with pytest.raises(PytError, match="pyproject.toml was restored") as e:
+        _run(project)
+    assert "./pyt apply again" in str(e.value)
+    assert pyproject.read_bytes() == original
+    uv.fail.clear()
+    assert _run(project) == 0 and project.pyproject()["project"]["name"] == "alpha"
+
+
 def test_the_record_follows_the_lock_when_a_later_step_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The option change is locked, then `uv sync` fails: pyproject.toml and uv.lock hold the new
     package, and so must the record, or reverting the option kept both raylib distributions."""

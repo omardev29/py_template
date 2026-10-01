@@ -1056,6 +1056,7 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
     summary: list[tuple[str, str]] = []
     _dirty(plan, command, force)
     clean: rename.Tidy | None = None
+    original: bytes | None = None  # pyproject.toml before its [project] name line: put back when the lock fails
     if plan.rename_plan is not None and plan.new_cfg is not None:
         n = plan.rename_plan.names
         rename.report(plan.rename_plan, dry=False)
@@ -1066,6 +1067,7 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
         save_record({"name": cfg.app.name, "preset": plan.applied.preset, "dependencies": plan.applied.dependencies, "dev": plan.applied.dev})
         summary.append(("app.name", f"renamed '{n.old_name}' -> '{n.new_name}' (src/{cfg.pkg}/)"))
     elif plan.name_text is not None:
+        original = _read_bytes(ROOT / PYPROJECT.name)
         try:
             write_whole(ROOT / PYPROJECT.name, plan.name_text.encode("utf-8"))
         except OSError as e:
@@ -1077,7 +1079,7 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
             # before the steps that can fail: the apply that finishes the job has no rename to tidy
             rename.tidy_after(cfg, plan.rename_plan, clean)
         tidied = True
-        return _finish(cfg, plan, command, summary)
+        return _finish(cfg, plan, command, summary, original)
     except KeyboardInterrupt:  # Ctrl+C, or SIGTERM/SIGHUP passed on to uv (proc.Interrupted)
         if plan.rename_plan is not None:  # as `./pyt rename` says it: only "terminated" was printed
             also = "" if tidied else ", then ./pyt lint --fix and ./pyt fmt (import order and line wrapping)"
@@ -1085,10 +1087,11 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
         raise
 
 
-def _finish(cfg: Config, plan: Plan, command: str, summary: list[tuple[str, str]]) -> int:
+def _finish(cfg: Config, plan: Plan, command: str, summary: list[tuple[str, str]], original: bytes | None = None) -> int:
     """apply once the app is renamed (or its [project] name line fixed): the dependencies and the
-    lock (put back when they fail), the record, the environments, the hook, the generated files,
-    the notes and the summary."""
+    lock (put back when they fail: pyproject.toml as `original` held it, before its [project] name
+    line was set, when given; that line was left next to the old uv.lock), the record, the
+    environments, the hook, the generated files, the notes and the summary."""
     pyproject_before = _read_bytes(ROOT / PYPROJECT.name)
     lock_before = _read_bytes(ROOT / "uv.lock")
     try:
@@ -1101,7 +1104,7 @@ def _finish(cfg: Config, plan: Plan, command: str, summary: list[tuple[str, str]
     except BaseException as e:  # restore pyproject.toml and uv.lock: nothing half-applied
         restored = [
             name
-            for name, before in ((PYPROJECT.name, pyproject_before), ("uv.lock", lock_before))
+            for name, before in ((PYPROJECT.name, original if original is not None else pyproject_before), ("uv.lock", lock_before))
             if _restore(ROOT / name, before)
         ]
         if not isinstance(e, PytError):
