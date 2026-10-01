@@ -2546,7 +2546,9 @@ Formats:
   runs (`common.remove_output`: every path is first moved aside into one scratch folder in
   `dist/`, which Windows refuses while a file in it is in use, the app still running from it:
   exit 1 naming the file ("Is the app still running?"), the paths already moved come back,
-  nothing deleted; what the moved copies still hold is a warning; portable passes its folder
+  nothing deleted; what the moved copies still hold is a warning; a copy that a Ctrl+C, SIGTERM
+  or kill during the delete left aside (`dist/.<name>.old-*`) goes at the next build,
+  `common._remove_asides`; portable passes its folder
   and both archives in one call, and exports its requirements first, wheel syncs first, so a
   failure there leaves the previous output alone);
   `pyz._write_archive` turns a `.pyz` in use into the same error. rmtree used to delete half of

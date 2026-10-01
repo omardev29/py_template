@@ -830,8 +830,11 @@ def remove_output(path: Path, *also: Path) -> None:
     file is in use (the app still running from the folder, a console in it, an open archive), and
     rmtree used to delete half of the folder before it failed with a traceback. When one cannot
     move, the ones already moved come back, so nothing is deleted. What the moved copies still
-    hold (a scanner, an immutable file) is only a warning: the new output has its place.
+    hold (a scanner, an immutable file) is only a warning: the new output has its place. What an
+    earlier call left aside (_remove_asides) goes first.
     """
+    for p in (path, *also):
+        _remove_asides(p)
     present = [p for p in (path, *also) if p.exists() or p.is_symlink()]
     if not present:
         return
@@ -852,15 +855,33 @@ def remove_output(path: Path, *also: Path) -> None:
             what = "a file in it is in use" if p.is_dir() and not p.is_symlink() else "it is in use or read-only"
             raise PytError(f"cannot replace {rel(p)}: {what} ({_why(e)}){hint}", 1) from None
         moved.append(p)
-    shutil.rmtree(aside, ignore_errors=True)
-    if aside.exists():  # read-only files an older build copied from src/ (Windows deletes none)
+    if not _delete(aside):
+        ui.warn(f"could not delete all of the previous output, moved to {rel(aside)}: delete it by hand")
+
+
+def _delete(folder: Path) -> bool:
+    """Delete a folder of dist/ as far as possible; whether it is gone."""
+    shutil.rmtree(folder, ignore_errors=True)
+    if folder.exists():  # read-only files an older build copied from src/ (Windows deletes none)
         from ..mypyc import make_writable
 
         with contextlib.suppress(OSError):
-            make_writable(aside)
-        shutil.rmtree(aside, ignore_errors=True)
-    if aside.exists():
-        ui.warn(f"could not delete all of the previous output, moved to {rel(aside)}: delete it by hand")
+            make_writable(folder)
+        shutil.rmtree(folder, ignore_errors=True)
+    return not folder.exists()
+
+
+def _remove_asides(path: Path) -> None:
+    """Delete the copies of `path` an earlier remove_output left aside (.<name>.old-*): a Ctrl+C,
+    a SIGTERM or a kill while it deleted the previous output (a portable folder of 70 to 190 MB)
+    left that copy, hidden in dist/, and no later build looked for it."""
+    prefix = f".{path.name}.old-"
+    try:
+        stale = [p for p in path.parent.iterdir() if p.name.startswith(prefix) and p.is_dir() and not p.is_symlink()]
+    except OSError:
+        return
+    for folder in stale:
+        _delete(folder)
 
 
 def _why(e: OSError) -> str:

@@ -4258,6 +4258,35 @@ def test_a_previous_portable_output_in_use_is_left_whole_with_its_archives(
     assert _tree_bytes(dist) == before  # every previous file where it was, no scratch folder left
 
 
+def test_the_next_build_removes_a_previous_output_whose_delete_was_interrupted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """remove_output moves the previous output aside (dist/.<name>.old-*) and deletes it there: a
+    Ctrl+C or SIGTERM during that delete left the hidden copy (a portable folder of 70 to 190 MB)
+    for good, since every later build made a new aside and never looked for the old one."""
+    dist = tmp_path / "dist"
+    folder = dist / "x-cpython-portable"
+    (folder / "lib").mkdir(parents=True)
+    (folder / "lib" / "dep.py").write_text("X = 1\n", encoding="utf-8")
+    archive = dist / "x-cpython-portable.tar.gz"
+    archive.write_bytes(b"old")
+    real_rmtree = shutil.rmtree
+
+    def interrupted(*_a: Any, **_k: Any) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(common.shutil, "rmtree", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        common.remove_output(folder, archive)
+    monkeypatch.setattr(common.shutil, "rmtree", real_rmtree)
+    left = [p.name for p in dist.iterdir()]
+    assert len(left) == 1 and left[0].startswith(".x-cpython-portable.old-")  # what the interrupt left
+    common.remove_output(folder, archive)  # the next build: no previous output, its leftover goes
+    assert list(dist.iterdir()) == []
+    for name in (".x-cpython-portable.old-ab12", ".x-cpython-portable.tar.gz.old-cd34", ".y-cpython-portable.old-ef56", "x-cpython-portable"):
+        (dist / name).mkdir()
+    common.remove_output(folder, archive)
+    assert [p.name for p in dist.iterdir()] == [".y-cpython-portable.old-ef56"]  # another output's stays
+
+
 def test_remove_output_names_what_it_could_not_put_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     folder = tmp_path / "x-cpython-portable"
     folder.mkdir()
