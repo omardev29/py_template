@@ -2872,7 +2872,11 @@ Formats:
   `common._rebase_paths` moves them (15.1).
 - `common.install_deps` (`uv pip install --link-mode copy --target --no-deps -r <pylock.toml>`:
   the folder is shipped, so its files are copies, never links into uv's cache, whatever link mode
-  the user set, 15.1): a cross target gets
+  the user set, 15.1; `--reinstall-package <name>` for each local package of uv.lock,
+  `common._local_names`: uv rebuilds a local folder only when its pyproject.toml, setup.py or
+  setup.cfg changes, and every build after an edit of a local library's code shipped the wheel
+  of the first one, while `./pyt run` ran the new code, 15.1,
+  `test_pyz_and_portable_ship_a_local_library_as_it_is_on_disk`): a cross target gets
   `--python-platform UV_PLATFORMS[...] --python-version --only-binary :all:` (an sdist built for
   another OS would produce host binaries), plus `--no-binary <name>` for each package uv.lock has
   no wheel for (`common.source_only`, read from `common.LOCK`: an sdist-only release such as
@@ -5411,6 +5415,17 @@ uv:
   `test_build_methods.py::test_the_pylock_export_names_local_libraries_from_its_own_folder`,
   `test_the_pylock_rebase_moves_only_what_names_the_project`. Goes: when uv writes them from the
   file's folder (the rebase then moves nothing).
+- **uv builds a local folder again only when its pyproject.toml, setup.py or setup.cfg changes**
+  (LIMITATION, documented: uv's cache keys of a directory source, `tool.uv.cache-keys`; uv 0.10.12
+  and 0.12.19): once a local library's code changed (`./pyt add ./libs/x`, only its `src/`
+  edited), every pyz and portable build installed the wheel uv had built for the first one, while
+  `./pyt run` (the library editable in `.venv`) ran the new code; `./pyt clean` did not help (the
+  wheel is in uv's cache). `--refresh-package` would rebuild it, but uv refuses it next to
+  `--offline` or `UV_OFFLINE` ("cannot be used with `--refresh`", exit 2). Fix:
+  `common.install_deps` passes `--reinstall-package <name>` (which implies the refresh and works
+  offline) for every local package of uv.lock (`common._local_names`) (10). Test:
+  `test_build_methods.py::test_pyz_and_portable_ship_a_local_library_as_it_is_on_disk` (the real
+  uv, offline, a library with an in-tree build backend). Goes: never.
 - **Wheels for this machine follow this machine** (LIMITATION): uv took the newest tags the
   build machine allows (manylinux_2_34 on Ubuntu 24.04: the pyz failed on Debian 11), its macOS
   default may move with a uv release, and an sdist built for another OS gives host binaries.

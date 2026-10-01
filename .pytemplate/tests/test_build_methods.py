@@ -3194,21 +3194,57 @@ def test_skipped_requirements_reads_a_real_export_of_a_local_library_behind_a_ma
     assert common.skipped_requirements(requirements, site) == []
 
 
-def _workspace_project(root: Path, *, marked: str = "", grouped: bool = False) -> Path:
+# A build backend in the library's own folder that needs nothing installed (uv builds the library
+# offline, whatever its cache holds): a wheel of src/<name>/ as it is on disk
+_IN_TREE_BACKEND = '''import os
+import tomllib
+import zipfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
+    with open(os.path.join(HERE, "pyproject.toml"), "rb") as f:
+        project = tomllib.load(f)["project"]
+    name, version = project["name"], project["version"]
+    info = name + "-" + version + ".dist-info"
+    files = {}
+    for entry in sorted(os.listdir(os.path.join(HERE, "src", name))):
+        with open(os.path.join(HERE, "src", name, entry), "rb") as f:
+            files[name + "/" + entry] = f.read()
+    files[info + "/METADATA"] = ("Metadata-Version: 2.1\\nName: " + name + "\\nVersion: " + version + "\\n").encode()
+    files[info + "/WHEEL"] = b"Wheel-Version: 1.0\\nGenerator: test\\nRoot-Is-Purelib: true\\nTag: py3-none-any\\n"
+    wheel = name + "-" + version + "-py3-none-any.whl"
+    with zipfile.ZipFile(os.path.join(wheel_directory, wheel), "w") as z:
+        for member, data in files.items():
+            z.writestr(member, data)
+        z.writestr(info + "/RECORD", "".join(m + ",,\\n" for m in [*files, info + "/RECORD"]))
+    return wheel
+'''
+
+
+def _workspace_project(root: Path, *, marked: str = "", grouped: bool = False, buildable: bool = False) -> Path:
     """A project that depends on a local library the way `./pyt add ./libs/mylib` leaves it
     (a uv workspace member, which uv installs editable), locked offline (static metadata).
     `marked` adds a second library, a dependency on win32 only. `grouped` adds two libraries in
     dependency groups that [tool.uv] default-groups installs by default: `devlib` (dev) and
-    `toollib` (lint), as `./pyt add --group lint ...` leaves them."""
+    `toollib` (lint), as `./pyt add --group lint ...` leaves them. `buildable`: the libraries
+    build with _IN_TREE_BACKEND, offline (hatchling may not be in uv's cache)."""
     libs = ["mylib", marked] if marked else ["mylib"]
     groups = ["devlib", "toollib"] if grouped else []
+    backend = (
+        '[build-system]\nrequires = []\nbuild-backend = "pt_backend"\nbackend-path = ["."]\n'
+        if buildable
+        else '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n'
+    )
     for lib in [*libs, *groups]:
         (root / "libs" / lib / "src" / lib).mkdir(parents=True)
         (root / "libs" / lib / "pyproject.toml").write_text(
-            f'[project]\nname = "{lib}"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n\n'
-            '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n',
+            f'[project]\nname = "{lib}"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n\n' + backend,
             encoding="utf-8",
         )
+        if buildable:
+            (root / "libs" / lib / "pt_backend.py").write_text(_IN_TREE_BACKEND, encoding="utf-8")
         (root / "libs" / lib / "src" / lib / "__init__.py").write_text("VALUE = 42\n", encoding="utf-8")
     deps = '"mylib"' + (f", \"{marked} ; sys_platform == 'win32'\"" if marked else "")
     grouping = '[dependency-groups]\ndev = ["devlib"]\nlint = ["toollib"]\n\n' if grouped else ""
@@ -3386,6 +3422,32 @@ def test_the_pylock_export_names_local_libraries_from_its_own_folder(tmp_path: P
         folder = lock.parent / packages[name]["directory"]["path"]
         assert folder.resolve() == (project / "libs" / name).resolve() and (folder / "pyproject.toml").is_file()
     assert "sys_platform == 'win32'" in packages["winlib"]["marker"]
+
+
+def test_pyz_and_portable_ship_a_local_library_as_it_is_on_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # uv caches the wheel it builds from a local folder and builds it again only when the folder's
+    # pyproject.toml, setup.py or setup.cfg changes (its documented cache keys): once the library's
+    # code changed, every pyz and portable build installed the wheel of the first one, while ./pyt
+    # run (the library editable in .venv) ran the new code. The real uv, offline (UV_OFFLINE, which
+    # uv refuses next to --refresh-package), for the host and a cross target
+    cfg = real({})
+    if not envs.tool_env(cfg).python.is_file():
+        pytest.skip("needs .venv (./pyt setup)")
+    project = _workspace_project(tmp_path / "proj", buildable=True)
+    monkeypatch.setattr(proc, "ROOT", project)
+    monkeypatch.setattr(common, "BUILD", tmp_path / "build")
+    monkeypatch.setattr(common, "LOCK", project / "uv.lock")
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    major, minor = (int(part) for part in cfg.python.cpython.split("."))
+    host = common.Target("cp", major, minor, common.host_os(), common.host_arch())
+    cross = common.Target("cp", major, minor, "linux" if IS_WINDOWS else "windows", "x86_64")
+    module = project / "libs" / "mylib" / "src" / "mylib" / "__init__.py"
+    for value in (42, 43):
+        module.write_text(f"VALUE = {value}\n", encoding="utf-8")
+        requirements = common.export_requirements(cfg)
+        for target in (host, cross):
+            site = common.install_deps(cfg, "cpython", target, tmp_path / "site" / f"{target.key}-{value}", requirements)
+            assert (site / "mylib" / "__init__.py").read_text(encoding="utf-8") == f"VALUE = {value}\n", target.key
 
 
 def test_the_pylock_rebase_moves_only_what_names_the_project(tmp_path: Path) -> None:

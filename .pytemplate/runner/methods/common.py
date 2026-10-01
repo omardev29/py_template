@@ -312,6 +312,12 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
     # absolute link into this machine's cache, and the folder and its archive failed anywhere
     # else (or after `uv cache clean`) while the build passed its own smoke test
     base: list[str | Path] = ["pip", "install", "--quiet", "--link-mode", "copy", "--target", dest, "--no-deps", "-r", pylock_path(requirements)]
+    # A local library is built again from its folder: uv keys the wheel it built from a folder by
+    # the folder's pyproject.toml, setup.py and setup.cfg only, so once the library's code changed
+    # every build installed the cached wheel of the first one (./pyt run had the new code). Never
+    # --refresh-package: uv refuses it next to --offline or UV_OFFLINE
+    for name in sorted(set(_local_names(LOCK).values())):
+        base += ["--reinstall-package", name]
     if not target.is_host:
         # Wheels only: an sdist built here for another OS gives this machine's binaries. Except
         # the packages that publish no wheel at all (docopt, a workspace library): built here,
