@@ -657,7 +657,7 @@ def set_project_name(text: str, name: str) -> str:
     try:
         tomllib.loads(text.lstrip("﻿"))
     except TOML_ERRORS as e:
-        raise PytError(f"pyproject.toml is not valid TOML: {toml_error(e)}") from None
+        raise PytError(f'could not set [project] name = "{name}": pyproject.toml is not valid TOML: {toml_error(e)}') from None
     new = _set_project_name(text, name)
     if project_name(new) != name:
         raise PytError(f'could not set [project] name = "{name}" in pyproject.toml: edit that line by hand and try again')
