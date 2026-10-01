@@ -1290,15 +1290,19 @@ def project_paths(prefix: str, names: Iterable[str], *, ignore_case: bool = IS_W
 
 
 def _git_output(repo: Repo, *args: str) -> str:
-    """git's output for a call a check relies on. A call that failed read as an empty answer (no
+    """git's output for a call a check relies on, its paths as the file system names them
+    (os.fsdecode: a name that is not UTF-8 keeps its bytes, which the checks then open and hand
+    to git and ruff; read as UTF-8 text it became U+FFFD, and a staged file whose name is
+    Latin-1 was "missing from the working tree"). A call that failed read as an empty answer (no
     file with unstaged changes, no untracked file, no index mode) and the checks it fed passed
     a commit they had to block: it stops the hook with git's own message (the hook script then
     blocks the commit and says how to commit without the checks)."""
-    r = repo.git(*args)
+    argv = ["git", *GIT_CONFIG, "--literal-pathspecs", *args]
+    r = _run_bytes(argv, cwd=repo.project, env=_git_process_env(repo.env))
     if r.returncode != 0:
-        said = r.stderr.strip() or f"exit code {r.returncode}"
+        said = r.stderr.decode("utf-8", errors="replace").strip() or f"exit code {r.returncode}"
         raise PytError(f"git {' '.join(args[:2])} failed: {said}")
-    return r.stdout
+    return os.fsdecode(r.stdout)
 
 
 def staged_files(repo: Repo, diff_filter: str = STAGED) -> list[str]:

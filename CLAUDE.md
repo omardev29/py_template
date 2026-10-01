@@ -1310,10 +1310,16 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   read as an empty answer, the failed calls let "generated files staged", "config files staged
   together" and the launcher mode pass a commit they had to block
   (`test_hooks.test_the_checks_fail_whatever_pathspec_variables_the_user_exported`,
-  `test_a_git_call_that_fails_stops_the_hook_with_gits_message`). A submodule is never read as
-  a file: `hooks.worktree_changes` passes `--ignore-submodules=all` (its checkout is no content
-  of the commit, and `git cat-file` cannot read a gitlink: a staged submodule that had moved on
-  stopped the hook, `test_a_staged_submodule_that_moved_on_is_skipped_like_a_folder`).
+  `test_a_git_call_that_fails_stops_the_hook_with_gits_message`). `_git_output` reads git's raw
+  output and its paths with `os.fsdecode`, so a name that is not UTF-8 keeps its bytes for the
+  file system, git and ruff: read as UTF-8 text with "replace", a staged Latin-1 `.py` name
+  became U+FFFD and the commit was refused as "missing from the working tree"
+  (`test_a_staged_file_whose_name_is_not_utf8_is_checked`; ruff 0.16 itself then stops on such a
+  name while its cache is on, "Failed to serialize cache data", as in `./pyt check`). A
+  submodule is never read as a file: `hooks.worktree_changes` passes `--ignore-submodules=all`
+  (its checkout is no content of the commit, and `git cat-file` cannot read a gitlink: a staged
+  submodule that had moved on stopped the hook,
+  `test_a_staged_submodule_that_moved_on_is_skipped_like_a_folder`).
   In ~0.3 s: ruff (active typing profile, `exit_zero` honoured) and `ruff format --check` on
   staged `.py/.pyi/.ipynb` under the code dirs (`hooks.PY_SUFFIXES`: notebooks too, as `check`,
   `lint`, `fmt` and CI read them; a staged notebook passed the hook and failed CI,

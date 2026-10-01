@@ -1719,6 +1719,31 @@ def test_checks_ruff_only_on_staged_python_files(tmp_path: Path, tools: Tools) -
 
 
 @needs_git
+def test_a_staged_file_whose_name_is_not_utf8_is_checked(tmp_path: Path, tools: Tools) -> None:
+    """git lists the staged paths as bytes (-z), and the hook read them as UTF-8 with errors
+    "replace": a .py file whose name is not UTF-8 (Latin-1, on Linux) became U+FFFD, named no
+    file, and the commit was refused as "staged files missing from the working tree", with
+    hints that named no file either. The names keep their bytes (os.fsdecode): ruff gets the file,
+    and its staged version when it has unstaged changes."""
+    try:
+        name = os.fsdecode(b"src/pkg/caf\xe9.py")
+        (tmp_path / "probe").mkdir()
+        (tmp_path / "probe" / Path(name).name).write_bytes(b"")
+    except (OSError, UnicodeError):
+        pytest.skip("this file system takes no file name that is not UTF-8")
+    repo, staged = staged_project(tmp_path, {"src/pkg/a.py": b"x = 1\n", name: b"y = 2\n"})
+    assert staged == ["src/pkg/a.py", name]
+    res = results(make(), repo, staged)
+    assert "staged files missing from the working tree" not in res, res["staged files missing from the working tree"].hint
+    assert [files for _, files in tools.ruff_calls] == [["src/pkg/a.py", name]] * 2
+    (repo.project / name).write_bytes(b"y = 3\n")  # unstaged on top: its staged version goes to ruff
+    tools.ruff_calls.clear()
+    results(make(), repo, staged)
+    assert [files for _, files in tools.ruff_calls] == [["src/pkg/a.py"]] * 2
+    assert tools.staged_calls == [("check", name, b"y = 2\n"), ("format", name, b"y = 2\n")]
+
+
+@needs_git
 def test_checks_skip_ruff_without_python_files(tmp_path: Path, tools: Tools) -> None:
     repo, staged = staged_project(tmp_path, {"README.md": b"# r\n"})
     res = results(make(), repo, staged)
@@ -2080,7 +2105,8 @@ def test_a_git_call_that_fails_stops_the_hook_with_gits_message(tmp_path: Path, 
         return real_git(args, cwd, env, literal=literal)
 
     def failing_bytes(argv: Sequence[str], *, cwd: Path, env: dict[str, str], data: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
-        if fails(tuple(argv)):
+        argv = list(argv)  # the queries (_git_output) read raw output too: git's arguments follow the options
+        if fails(tuple(argv[argv.index("--literal-pathspecs") + 1 :] if "--literal-pathspecs" in argv else argv)):
             return subprocess.CompletedProcess(list(argv), 128, b"", b"fatal: something went wrong\n")
         return real_bytes(argv, cwd=cwd, env=env, data=data)
 
