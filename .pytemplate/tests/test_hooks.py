@@ -2509,6 +2509,33 @@ def test_a_kept_hook_without_its_x_bit_is_never_said_to_run(tmp_path: Path) -> N
 
 
 @needs_git
+@pytest.mark.parametrize(("first", "runs"), [(b"#!/bin/sh\n", True), (b"MZ\x90\x00", True), (b"echo mine\n", False)])
+def test_on_windows_a_kept_hook_runs_first_only_with_what_gits_sh_reads_as_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: bytes, runs: bool
+) -> None:
+    """Git for Windows' sh (MSYS2, noacl mounts) reads a file as executable by its first bytes, a
+    #! line or an MZ header, and the hook script runs pre-commit.local only when `[ -x ]` says
+    so; os.access says X_OK for every existing file on Windows: install --force and the status
+    said a kept hook without a #! line ran first, and it was skipped. (Simulated: the MSYS
+    runtime's own `[ -x ]` runs on Windows only.)"""
+    top, project = make_repo(tmp_path)
+    repo = find(project)
+    target = repo.default_dir / hooks.HOOK
+    target.write_bytes(first + b"exit 1\n")
+    if not IS_WINDOWS:
+        target.chmod(0o755)  # executable for POSIX: only the Windows rule may say it does not run
+    monkeypatch.setattr(hooks, "IS_WINDOWS", True)
+    msg = hooks.install(repo, force=True)
+    passed, label, _ = hooks._status_line(make(), repo)
+    assert passed is True
+    if runs:
+        assert "and runs first" in msg and f"(runs {hooks.LOCAL} first)" in label, (msg, label)
+    else:
+        why = f"{hooks.LOCAL} has no #! line, so neither git nor this hook runs it: start it with #!/bin/sh to run it first"
+        assert "runs first" not in msg and why in msg and why in label and f"(runs {hooks.LOCAL} first)" not in label, (msg, label)
+
+
+@needs_git
 @pytest.mark.parametrize("sub", ["", "apps/my app", "caf\u00e9"])
 def test_git_runs_the_hook(tmp_path: Path, sub: str) -> None:
     """git runs the installed hook from the top: it calls `sh <launcher> hooks run`, chains a

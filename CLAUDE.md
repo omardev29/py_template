@@ -1208,7 +1208,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   executed, as git executes it (sourced, every commit failed with a shell syntax error:
   `test_hooks.test_a_compiled_hook_kept_by_force_runs_first`). It runs only with its x bit
   (`[ -x ]`), as git runs no hook without one: `install --force` and the status then say it
-  does not run and name `chmod +x` (`hooks._not_run`; they said it ran first). A hook in
+  does not run and name `chmod +x` (`hooks._not_run`; they said it ran first). On Windows, Git's
+  sh (MSYS2, noacl) reads a file's first bytes as its x bit (`hooks.WINDOWS_EXEC_MAGIC`: `#!`, an
+  MZ header) and os.access says X_OK for every file: a kept hook without a `#!` line is said not
+  to run, with `#!/bin/sh` to add (it was said to run first, and was skipped;
+  `test_on_windows_a_kept_hook_runs_first_only_with_what_gits_sh_reads_as_executable`). A hook in
   another language that reads its own name (`hooks.reads_its_name`: overcommit's Ruby) is left
   alone by `--force`, which prints the line to add to it instead; `uninstall` restores it. A marked hook whose launcher is another live project of the same
   repository (state "other", a monorepo; live: the launcher file is there, or its folder still

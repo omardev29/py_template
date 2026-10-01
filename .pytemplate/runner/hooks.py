@@ -839,10 +839,26 @@ def _show(path: Path, repo: Repo) -> str:
     return rel if rel else path.as_posix()
 
 
+# What makes a file executable for Git for Windows' sh (the MSYS2 runtime on its noacl mounts,
+# Cygwin's has_exec_chars): its first two bytes. git itself runs a hook there that starts with #!
+WINDOWS_EXEC_MAGIC = (b"#!", b"MZ", b":\n")
+
+
 def _not_run(hook: Path, shown: str) -> str | None:
     """None when the hook script runs the kept hook `hook` (shown as `shown`) first, else why
     not: it runs it only with its x bit (`[ -x ]`), as git runs no hook without one (install
-    and status said it ran first, while git's own warning about it was gone)."""
+    and status said it ran first, while git's own warning about it was gone). On Windows the
+    file's first bytes are its x bit for Git's sh (WINDOWS_EXEC_MAGIC), where os.access says X_OK
+    for every file: a kept hook without a #! line was said to run first, and was skipped."""
+    if IS_WINDOWS:
+        try:
+            with open(hook, "rb") as f:
+                magic = f.read(2)
+        except OSError:
+            magic = b""
+        if magic in WINDOWS_EXEC_MAGIC:
+            return None
+        return f"{shown} has no #! line, so neither git nor this hook runs it: start it with #!/bin/sh to run it first"
     if os.access(hook, os.X_OK):
         return None
     return f"{shown} is not executable, so neither git nor this hook runs it: chmod +x {shown} to run it first"
