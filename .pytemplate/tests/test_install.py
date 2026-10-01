@@ -1259,6 +1259,47 @@ def test_a_lock_file_a_killed_run_left_holds_nothing_back(tmp_path: Path, monkey
     assert sorted(p.name for p in swap.snapshot.parent.iterdir()) == ["template"]
 
 
+def _refuse_every_lock(monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    """The lock call fails with `code`: flock on POSIX, msvcrt.locking on Windows."""
+
+    def refuse(*_args: object) -> None:
+        raise OSError(code, os.strerror(code))
+
+    if sys.platform == "win32":
+        import msvcrt
+
+        monkeypatch.setattr(msvcrt, "locking", refuse)
+    else:
+        import fcntl
+
+        monkeypatch.setattr(fcntl, "flock", refuse)
+
+
+@pytest.mark.parametrize("code", [errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOSYS, errno.EINVAL])
+def test_install_and_uninstall_run_on_a_file_system_that_takes_no_locks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    """A data folder on a file system without locks (a cluster's Lustre without flock, some FUSE
+    and network mounts) fails the lock call with ENOLCK, EOPNOTSUPP or ENOSYS (EINVAL, as the C
+    runtime maps an unsupported lock on Windows): every install and uninstall said "another pyt
+    install or uninstall is running" where none was, for good, as the harnesses did before
+    (project.lock_refusal). Nothing can be guarded there: both run without the lock and leave no
+    lock file. A lock another run holds is still refused."""
+    swap = Swap(tmp_path, monkeypatch, fresh=False)
+    monkeypatch.setattr(cmd_install, "snapshot_dir", lambda environ=None, windows=IS_WINDOWS: swap.snapshot)
+    monkeypatch.setattr(cmd_install, "bin_dir", lambda: swap.bin)
+    monkeypatch.delenv(cmd_install.LAUNCHER_FILE, raising=False)
+    _refuse_every_lock(monkeypatch, code)
+    cmd_install.install(swap.plan())
+    assert _files(swap.snapshot) == NEW_COPY
+    assert sorted(p.name for p in swap.snapshot.parent.iterdir()) == ["template"]  # no lock file left
+    assert cmd_install.cmd_uninstall(NO_CFG, []) == 0
+    assert not swap.snapshot.parent.exists()
+    for held in (errno.EWOULDBLOCK, errno.EACCES):  # flock's answer, msvcrt.locking's
+        _refuse_every_lock(monkeypatch, held)
+        with pytest.raises(PytError, match=r"pyt install: another pyt install or uninstall is running \("):
+            cmd_install.install(swap.plan())
+        assert not swap.snapshot.exists()  # refused before it copied anything
+
+
 @posix_only
 @pytest.mark.parametrize("fresh", [False, True], ids=["over an install", "first install"])
 def test_the_installed_template_has_the_mode_of_a_plain_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fresh: bool) -> None:

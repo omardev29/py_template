@@ -1884,8 +1884,14 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   or its undo deleted the installed template and said "nothing was changed". The lock file goes
   as the run ends (on POSIX while still locked: `_lock` takes a lock on a deleted file again), and
   so do the folders made for it when empty; a folder where no file can be made is no place two
-  runs of this user meet (no lock). Against a run of an older pyt, which takes no lock, the copy
-  never makes the new copy's folder again (`_copy_files`), and the undo takes the new copy's
+  runs of this user meet (no lock). Only a lock another process holds is another run (flock's
+  EWOULDBLOCK, msvcrt.locking's EACCES: `project._HELD_ELSEWHERE`, as for the harnesses' base
+  lock); on a file system that takes no locks (ENOLCK, EOPNOTSUPP, ENOSYS: a cluster's Lustre
+  without flock, some FUSE and network mounts) nothing can be guarded, and the run goes on
+  without the lock, its file deleted (`_no_lock`: every install and uninstall there was refused
+  as "another run" for good;
+  `test_install.test_install_and_uninstall_run_on_a_file_system_that_takes_no_locks`). Against
+  a run of an older pyt, which takes no lock, the copy never makes the new copy's folder again (`_copy_files`), and the undo takes the new copy's
   folder gone for the swap only when the installed template holds this run's own record
   (`test_install.test_a_second_install_or_uninstall_waits_for_none_and_changes_nothing`,
   `test_an_install_whose_new_copy_another_run_deleted_changes_nothing`).

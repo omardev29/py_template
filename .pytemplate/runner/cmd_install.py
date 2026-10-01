@@ -770,18 +770,18 @@ def _names(fd: int, path: Path) -> bool:
 
 
 def _lock(path: Path) -> int | None:
-    """`path` opened (made when missing) and locked; None: another run holds the lock. On POSIX a
-    run that ends deletes the file while it holds it: a lock taken on the file it deleted is
-    taken again on the file that has its name now."""
+    """`path` opened (made when missing) and locked; None: another run holds the lock; -1: the
+    file system takes no locks (_no_lock). On POSIX a run that ends deletes the file while it
+    holds it: a lock taken on the file it deleted is taken again on the file that has its name
+    now."""
     if sys.platform == "win32":
         import msvcrt
 
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        except OSError:
-            os.close(fd)
-            return None
+        except OSError as e:
+            return _no_lock(fd, path, e)
         return fd  # Windows deletes no file that a run has open: the name is still the file's
     else:
         import fcntl
@@ -790,12 +790,25 @@ def _lock(path: Path) -> int | None:
             fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                os.close(fd)
-                return None
+            except OSError as e:
+                return _no_lock(fd, path, e)
             if _names(fd, path):
                 return fd
             os.close(fd)
+
+
+def _no_lock(fd: int, path: Path, error: OSError) -> int | None:
+    """After a lock call that failed: None when another run holds the lock (flock's EWOULDBLOCK,
+    msvcrt.locking's EACCES: project._HELD_ELSEWHERE), else -1: a file system that takes no locks
+    (ENOLCK, EOPNOTSUPP, ENOSYS: a cluster's Lustre without flock, some FUSE and network mounts),
+    where no run can be guarded and this one goes on without the lock, its file deleted. Every
+    error was "another run", and every install and uninstall there was refused for good."""
+    os.close(fd)
+    if error.errno in project._HELD_ELSEWHERE:
+        return None
+    with contextlib.suppress(OSError):
+        path.unlink()
+    return -1
 
 
 def _unlock(fd: int, path: Path) -> None:
@@ -829,7 +842,8 @@ def _one_run(snapshot: Path, command: str, *, empty_folder_goes: bool = False) -
     changes anything. The lock file goes as the run ends, and so do the folders made for it when
     nothing else is in them (`empty_folder_goes`: <data home>/pytemplate too, as uninstall
     leaves it). Where no file can be made there (a folder this user may not write in, a file in
-    its place), no run of this user can write there either: nothing to guard."""
+    its place), no run of this user can write there either: nothing to guard. On a file system
+    that takes no locks nothing can be guarded: the run goes on without the lock (_no_lock)."""
     folder = snapshot.parent
     made = presets._outermost_missing(folder)
     path = folder / LOCK_FILE
