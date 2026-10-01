@@ -4942,17 +4942,19 @@ it was written.
       one the same test defect as another (the tests that pinned the shipped typing profiles), and
       3 more the first CI run of that commit found (a stability defect: Flet 1.0.1's build template
       overrides jni but not jni_flutter, whose release of that night broke every apk build; two
-      test defects of round 3's fixes, on every run as a user that is not root and on Windows): 56
-      distinct. Counted: 35 (7 critical: on Windows the runner started git, uv and every other
-      program by name from the caller's folder first, so a `git.exe` planted there ran; `pyt`
-      under MSYS2 took the root of a network share for a project folder, where any user may plant
-      a runner; under the user's `UV_FROZEN` every uv from the floor up to 0.12.8 passed a stale
+      test defects of round 3's fixes, on every run as a user that is not root and on Windows) and
+      1 the integration's own validation found (a Neovim test downloaded python.cpython into its
+      moved XDG folders at every run, and failed offline): 57 distinct. Counted: 36 (7 critical:
+      on Windows the runner started git, uv and every other program by name from the caller's
+      folder first, so a `git.exe` planted there ran; `pyt` under MSYS2 took the root of a network
+      share for a project folder, where any user may plant a runner; under the user's
+      `UV_FROZEN` every uv from the floor up to 0.12.8 passed a stale
       `uv.lock` in `uv lock --check`, and the hook and doctor said it was up to date;
       basedpyright found no file in a project folder named with `*` or `?`, and `check` said no
       errors; a portable build under uv's `link-mode = "symlink"` shipped `lib/` as links into the
       build machine's uv cache; under a project folder named with `[`, PyInstaller skipped its
-      hooks and Nuitka the package data (certifi's CA bundle). 28 notable), 1 per 678 lines: not
-      at the bar. 21 minor. All 56 fixed.
+      hooks and Nuitka the package data (certifi's CA bundle). 29 notable), 1 per 659 lines: not
+      at the bar. 21 minor. All 57 fixed.
 
 ## 14. Conventions and recipes
 
