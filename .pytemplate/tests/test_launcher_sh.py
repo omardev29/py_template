@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -927,10 +928,24 @@ MISREAD_CASES = [  # (launcher, $PSNativeCommandArgumentPassing, folder name, pl
 ]
 
 
+def _foreign_file() -> str | None:
+    """A regular file another user (root) owns, for a run that is not root's to link to."""
+    for path in ("/etc/passwd", "/etc/group", "/etc/hosts"):
+        try:
+            info = os.stat(path)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode) and info.st_uid != os.geteuid():
+            return path
+    return None
+
+
 def _not_yours(entry: Path) -> None:
-    """Make the runner `entry` (a .pytemplate/pyt.py that exists) another user's, as `test -O`
-    reads it: its file and folders given to nobody as root; else replaced by a link to
-    /dev/null, which root owns (test -O follows the link)."""
+    """Make the runner `entry` (a .pytemplate/pyt.py that exists) another user's, as the
+    launchers read it: its file and folders given to nobody as root; else replaced by a link to
+    a regular file root owns (`test -f` and `test -O` follow the link). A link to /dev/null, no
+    regular file, was no runner at all for pyt's `test -f`: as any user but root the "theirs"
+    cases found nothing to refuse, and ./pyt selftest failed there (the CI's Linux jobs)."""
     if os.geteuid() == 0:
         import pwd
 
@@ -938,8 +953,10 @@ def _not_yours(entry: Path) -> None:
         for path in (entry.parent.parent, entry.parent, entry):
             os.chown(path, nobody.pw_uid, nobody.pw_gid)
     else:
+        foreign = _foreign_file()
+        assert foreign is not None  # the test skips without one
         entry.unlink()
-        entry.symlink_to(os.devnull)
+        entry.symlink_to(foreign)
 
 
 def _run_copy(launcher: Path, args: list[str], cwd: Path, env: dict[str, str], mode: str = "") -> Run:
@@ -993,7 +1010,7 @@ def test_the_ownership_rule_reads_the_folder_it_runs(
     project (or installed template) was refused when p1 was another user's. Legacy passing
     dropped the quotes of q"r: the check read qr, and uv then ran qr's runner. Both launchers
     check, and run, the folder they found (as root: nobody's files; else links to a file of root's)."""
-    if not (os.geteuid() == 0 or os.stat(os.devnull).st_uid != os.geteuid()):
+    if not (os.geteuid() == 0 or _foreign_file()):
         pytest.skip("no file of another user to link to")
     root, cwd = _misread_setup(tmp_path, whose, name, place)
     (tmp_path / "bin").mkdir()
