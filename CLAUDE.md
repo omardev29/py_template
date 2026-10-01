@@ -1387,7 +1387,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   `test_rename.test_a_second_ctrl_c_waits_for_the_undo`); a file that no longer holds what the
   plan read there, an edit saved after the plan (an editor's autosave while the ruff check ran),
   stops it the same way, the edit kept (`_as_planned`, `_ChangedSincePlan`: it was overwritten,
-  `test_rename.test_a_file_edited_after_the_plan_is_never_overwritten`)), the name of the `applied` record right away
+  `test_rename.test_a_file_edited_after_the_plan_is_never_overwritten`), but another name of a
+  file written already (a hard link, which write_whole rewrites in its own inode) that holds its
+  new bytes is done, and one whose plan gives it other bytes (a `.py` and a `.txt` name) stops it
+  naming both (`_ChangedSincePlan.twin`: every rename of such a project was refused as an
+  editor's save, `test_rename.test_a_file_with_two_names_in_the_project_is_renamed_once`)), the name of the `applied` record right away
   (`cmd_apply.rename_record`, only the project's own record: named after the old app it is no
   longer trusted), the ruff tidy-up (before the re-lock, which can fail: below),
   `cmd_env.ensure_lock` (a failure there says "the files are already renamed ... ./pyt apply")

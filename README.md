@@ -551,8 +551,8 @@ anything, what its re-lock would refuse: a `[tool.uv]` block whose markers are b
 re-lock under your `UV_FROZEN` or `UV_LOCKED` (with them `uv lock` writes nothing). A write that fails
 puts every file back (each file is written to a temporary file first, so a full disk never
 leaves one half-written), and so do Ctrl+C, SIGTERM and SIGHUP while it writes, and a file
-that changed after the rename was planned (an editor saved it: your edit stays); it says so when
-it could not.
+that changed after the rename was planned (an editor saved it: your edit stays) or two names of
+one file (hard links) it would rewrite in two ways; it says so when it could not.
 When the old name is a common word (`app`, `game`, `core`), matching words in comments and
 strings change too: review `git diff`.
 

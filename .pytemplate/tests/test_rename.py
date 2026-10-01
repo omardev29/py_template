@@ -2301,6 +2301,55 @@ def test_a_file_edited_after_the_plan_is_never_overwritten(tmp_path: Path, chang
     assert _everything(tmp_path) == before  # the edit kept, every write undone, the folder back
 
 
+def _hard_link(existing: Path, new: Path) -> None:
+    try:
+        os.link(existing, new)
+    except (AttributeError, OSError) as e:
+        pytest.skip(f"no hard link here: {e}")
+
+
+def test_a_file_with_two_names_in_the_project_is_renamed_once(tmp_path: Path) -> None:
+    """Two names of one file in src/ and tests/ (hard links: jdupes -L, cp -al, an rsync
+    --link-dest restore) are two planned edits with the same bytes. write_whole rewrites such a
+    file in place, keeping its links, so the first write gave the other name its new bytes too,
+    which apply_plan took for an editor's save: every rename of the project was refused and undone
+    ("an editor saved it?"), the next one too. The other name holding the new bytes is done."""
+    _write_project(tmp_path, "script", "alpha")
+    shared = tmp_path / "tests" / "data" / "shared.py"
+    shared.parent.mkdir()
+    shared.write_text("import alpha.core\nX = alpha.core\n", encoding="utf-8")
+    _hard_link(shared, tmp_path / "src" / "alpha" / "shared.py")
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    assert {"src/alpha/shared.py", "tests/data/shared.py"} <= {f.path for f in planned.changed_files}
+    rename.apply_plan(tmp_path, planned)
+    moved = tmp_path / "src" / "beta" / "shared.py"
+    assert moved.read_text(encoding="utf-8") == "import beta.core\nX = beta.core\n"
+    assert os.path.samefile(moved, shared)  # still one file, with its two names
+    assert not (tmp_path / "src" / "alpha").exists()
+    assert "import beta.app" in (tmp_path / "src" / "main.py").read_text(encoding="utf-8")
+
+
+def test_a_file_with_two_names_rewritten_two_ways_stops_the_rename(tmp_path: Path) -> None:
+    """The names of one file may get different bytes (a .py name rewritten as code, keeping a
+    keyword argument, and a .txt name as text): whichever is written, the other cannot hold its
+    own. The rename stops, names both, says what to do and undoes what it wrote; it never says an
+    editor saved the file."""
+    _write_project(tmp_path, "script", "alpha")
+    code = tmp_path / "tests" / "shared.py"
+    code.write_text("import alpha\nf(alpha=1)\n", encoding="utf-8")
+    _hard_link(code, tmp_path / "tests" / "shared.txt")
+    before = _everything(tmp_path)
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    assert {"tests/shared.py", "tests/shared.txt"} <= {f.path for f in planned.changed_files}
+    with pytest.raises(PytError, match=r"are one file \(hard links\)") as e:
+        rename.apply_plan(tmp_path, planned)
+    told = str(e.value)
+    assert "tests/shared.py" in told and "tests/shared.txt" in told and "Make them two files" in told, told
+    assert "The rename was undone" in told and "an editor" not in told, told
+    assert _everything(tmp_path) == before  # every write undone (through either name), the folder back
+    assert os.path.samefile(code, tmp_path / "tests" / "shared.txt")
+
+
 def test_a_file_that_never_names_the_app_is_only_searched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """plan() tokenized every Python file of src/ and tests/ and split every text file into lines
     three times, even one that never mentions the old name: a data asset of 100 MB (a level, a

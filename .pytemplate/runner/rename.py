@@ -1814,7 +1814,13 @@ def apply_plan(root: Path, plan_: Plan) -> None:
             for path, data, planned in writes:
                 current = path.read_bytes()
                 if not _as_planned(current, planned):
-                    raise _ChangedSincePlan(path)
+                    # Another name of a file written already (a hard link: write_whole rewrites
+                    # such a file in its own inode) holds the new bytes: done. It was taken for an
+                    # editor's save, and every rename of the project was refused and undone.
+                    twin = next((p for p, _ in done if same_file(p, path)), None)
+                    if twin is not None and current == data:
+                        continue
+                    raise _ChangedSincePlan(path, twin)
                 writing = (path, current)
                 _replace_bytes(path, data)
                 done.append(writing)
@@ -1822,8 +1828,15 @@ def apply_plan(root: Path, plan_: Plan) -> None:
         except _ChangedSincePlan as e:
             with _undo_shield():
                 undone = _undo(root, plan_, done, moved)
+            where = e.path.relative_to(root).as_posix()
+            if e.twin is not None:  # one file, two names, rewritten two ways (a .py and a .txt)
+                raise PytError(
+                    f"rename: {where} and {e.twin.relative_to(root).as_posix()} are one file (hard links), which the "
+                    f"rename would rewrite in two ways. {undone}.\n  Make them two files (copy one to a new file and "
+                    "put the copy in its place), then run it again"
+                ) from None
             raise PytError(
-                f"rename: {e.path.relative_to(root).as_posix()} changed after the rename was planned (an editor saved it?), "
+                f"rename: {where} changed after the rename was planned (an editor saved it?), "
                 f"and is left as it is. {undone}.\n  Save your work, then run it again"
             ) from None
         except OSError as e:
@@ -1844,11 +1857,13 @@ def apply_plan(root: Path, plan_: Plan) -> None:
 
 
 class _ChangedSincePlan(Exception):
-    """A file to write no longer holds what the plan read there (apply_plan)."""
+    """A file to write no longer holds what the plan read there (apply_plan); `twin`: the name of
+    the same file (a hard link) written before, with other bytes than this name's plan."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, twin: Path | None = None) -> None:
         super().__init__(str(path))
         self.path = path
+        self.twin = twin
 
 
 def _as_planned(current: bytes, planned: str | bytes) -> bool:
