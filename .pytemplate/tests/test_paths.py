@@ -769,6 +769,66 @@ def test_the_real_apply_test_passes_in_a_project_without_the_git_hook(tmp_path: 
     assert r.returncode == 0 and "1 passed" in r.stdout, r.stdout[-6000:] + r.stderr[-2000:]
 
 
+def _wheel(folder: Path, name: str) -> Path:
+    """A pure wheel of the package `name` 0.1.0 (one module), as a build backend writes it."""
+    import base64
+    import zipfile
+
+    dist = f"{name}-0.1.0.dist-info"
+    files = {
+        f"{name}/__init__.py": b"VALUE = 1\n",
+        f"{dist}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: 0.1.0\n".encode(),
+        f"{dist}/WHEEL": b"Wheel-Version: 1.0\nGenerator: pytemplate-tests\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    digest = {p: base64.urlsafe_b64encode(hashlib.sha256(d).digest()).rstrip(b"=").decode() for p, d in files.items()}
+    files[f"{dist}/RECORD"] = ("".join(f"{p},sha256={digest[p]},{len(d)}\n" for p, d in files.items()) + f"{dist}/RECORD,,\n").encode()
+    folder.mkdir(parents=True, exist_ok=True)
+    wheel = folder / f"{name}-0.1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for path, data in files.items():
+            archive.writestr(path, data)
+    return wheel
+
+
+@needs_uv
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_tests_that_copy_the_project_pass_in_one_with_local_libraries(tmp_path: Path) -> None:
+    """CLAUDE.md 10: a project may depend on local libraries, a wheel of its own (`./pyt add
+    ./wheels/x.whl`) or one next to it (`./pyt add ../x`), which pyproject.toml and uv.lock name
+    from the project. The tests that lock or sync a copy of the project failed in such a project:
+    their copies sat elsewhere, where `../x` named another folder ("Distribution not found"),
+    and the toy of the real mutation run copied no local wheel, so every mutant stayed "not run".
+    They run here in one (its `uv add` and the tests' runs need the package index or uv's cache,
+    the mutation run Cosmic Ray's environment: without them the test skips)."""
+    from runner import rename
+
+    own = tmp_path / "proj" / "own"
+    presets.copy_template(own)
+    wheels = [_wheel(tmp_path / "proj" / "outside", "ptouter"), _wheel(own / "wheels", "ptinner")]
+    uv = shutil.which("uv") or os.environ["UV"]
+    env = {k: v for k, v in os.environ.items() if k not in (*_LAUNCHER_VARS, "UV", "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")}
+    for wheel in wheels:
+        added = subprocess.run(
+            [uv, "add", "--no-sync", os.path.relpath(wheel, own)],
+            cwd=own, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, check=False,
+        )  # fmt: skip
+        if added.returncode != 0 and any(marker in added.stderr for marker in rename.PYPI_UNREACHABLE):
+            pytest.skip("needs PyPI: uv add locks the project again")
+        assert added.returncode == 0, added.stderr
+    lock = (own / "uv.lock").read_text(encoding="utf-8")
+    assert '"../outside/ptouter-0.1.0-py3-none-any.whl"' in lock and '"wheels/ptinner-0.1.0-py3-none-any.whl"' in lock, lock[-3000:]
+    nodes = [
+        "test_mutation.py::test_a_real_run_kills_what_the_tests_check_and_finds_what_they_miss",
+        "test_rename.py::test_command_dry_run_then_real_run",
+        "test_removals.py::test_new_creates_a_project_through_the_internal_route",
+    ]
+    r = _run_tests_in(own, tmp_path, nodes)
+    skipped = re.findall(r"SKIPPED \[\d+\] \S+: (.*)", r.stdout)
+    if r.returncode == 0 and skipped:
+        pytest.skip(skipped[0])
+    assert r.returncode == 0 and f"{len(nodes)} passed" in r.stdout, r.stdout[-6000:] + r.stderr[-2000:]
+
+
 def test_the_template_tests_pass_in_a_project_that_edited_its_templates(tmp_path: Path) -> None:
     """README: a project customizes its CI by editing .pytemplate/templates/ci.yml, and its typing
     profiles and VS Code settings in .pytemplate/templates/. The tests pinned the shipped content

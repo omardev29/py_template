@@ -2206,18 +2206,18 @@ def test_a_real_run_kills_what_the_tests_check_and_finds_what_they_miss(tmp_path
     toy = _write(tmp_path / "toy", {".pytemplate/runner/__init__.py": "", ".pytemplate/runner/calc.py": CALC, ".pytemplate/tests/test_calc.py": TEST_CALC, **SUITE_INI})
     for name in ("pyproject.toml", "uv.lock", ".python-version", ".gitignore"):
         shutil.copyfile(ROOT / name, toy / name)  # uv sync --locked of the workers: the project's own lock
-    # A project with local libraries (CLAUDE.md 10: ./pyt add ./libs/x or ../x) names them from the
-    # project in pyproject.toml and uv.lock. A real run's workers get those inside it from
-    # make_copy (git ls-files) and name those outside it from their own folder: the toy gets the
-    # first and names the others from its folder (copied next to it, they were still missing from
-    # the workers' folders). The template's own lock has none.
+    # A project with local libraries (CLAUDE.md 10: ./pyt add ./libs/x, ./wheels/x.whl or ../x)
+    # names them from the project in pyproject.toml and uv.lock. A real run's workers get those
+    # inside it from make_copy (git ls-files) and name those outside it from their own folder: the
+    # toy gets the first, a folder or a file (a local wheel was left out, and every mutant stayed
+    # "not run"), and names the others from its folder. The template's own lock has none.
     import tomllib
 
     presets.rebase_local_sources(ROOT, toy)
     real_root = os.path.realpath(ROOT)
     for pkg in tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8")).get("package", []):
         source = pkg.get("source") or {}
-        rel = next((source[k] for k in ("directory", "editable", "virtual") if isinstance(source.get(k), str)), None)
+        rel = next((source[k] for k in ("directory", "editable", "virtual", "path") if isinstance(source.get(k), str)), None)
         if rel is None or os.path.isabs(rel):
             continue  # a package of an index, or a library named by its absolute path
         local = os.path.normpath(os.path.join(real_root, rel))
@@ -2228,6 +2228,9 @@ def test_a_real_run_kills_what_the_tests_check_and_finds_what_they_miss(tmp_path
                 local, toy / rel, dirs_exist_ok=True,
                 ignore=shutil.ignore_patterns(".venv*", ".build", "dist", "__pycache__", ".git", ".flet"),
             )  # fmt: skip
+        elif os.path.isfile(local):
+            (toy / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local, toy / rel)
     _git(toy, env, "init", "-q")
     _git(toy, env, "add", "-A")
     _git(toy, env, "commit", "-q", "-m", "toy")

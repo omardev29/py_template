@@ -3985,8 +3985,13 @@ short temp tree and unset `NVIM_APPNAME`.
   documented settings are its user's too: a test that needs one sets it in its copy
   (`hooks.pre_commit` for `test_apply.test_real_apply_after_a_hand_edited_name`, which failed
   with `pre_commit = false`:
-  `test_paths.test_the_real_apply_test_passes_in_a_project_without_the_git_hook`). A test that
-  runs the real uv against the project's `.venv` (mypyc, the hook's ruff, the rename tidy-up,
+  `test_paths.test_the_real_apply_test_passes_in_a_project_without_the_git_hook`). So are its
+  local libraries: a copy of the project made by `presets.copy_template` names one outside the
+  project from its own folder (11), and the toy of the real mutation run gets those inside it, a
+  folder or a file (`./pyt add ./wheels/x.whl`: every mutant stayed "not run"), and names the
+  others from its folder
+  (`test_paths.test_the_tests_that_copy_the_project_pass_in_one_with_local_libraries`). A test
+  that runs the real uv against the project's `.venv` (mypyc, the hook's ruff, the rename tidy-up,
   `uv pip install`, `uv run --frozen`) gives its Config the
   project's `python.cpython` (`real()` in test_mypyc_core and test_build_methods,
   `test_hooks._real_cfg`, `config.load`), and its data the interpreter of that `.venv` (a wheel's
