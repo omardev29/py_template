@@ -788,7 +788,7 @@ header rules (with detector tests proving each rule fires).
 | `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `PytError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `_installed_import_names`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./pyt __init`; with rollback), `copy_template` (`_tracked_template`: git's tracked files, or every file of the installed template, `_installed`, never its `INSTALL_RECORD`; `_copy_entry` per entry, `_raise_copy_errors`; `rebase_local_sources`: a local library outside the project named from the copy), `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
 | `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`; `copy_writable`, `make_writable`, `remove_tree` for every scratch copy of the app), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`, `COMPILER_MISSING`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
-| `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`; what mypy reads as unreachable on `compile_version` (`_static_value`, `_reachable`, `_runtime_nodes`). |
+| `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`; what mypy reads as unreachable on `compile_version` (`_static_value`, `_reachable`, `_runtime_nodes`) and the names the app's own modules re-export (`_Resolver`; it calls the private `imports._relative_base`). |
 | `tasks.py` | `[tasks]`: `Placeholders` (lazy `{python}`), `deps` (each once per invocation), cycle detection, `run_task`, `describe`, `list_tasks`. |
 | `cmd_env.py` | `setup` (= `cmd_apply.apply(command="setup")`), `doctor` (`_tools`, then `_project` in a project, which calls `cmd_apply.doctor`, or `_machine` outside one, then the steps of both modes: `cmd_nvim.doctor`), `sync`, `lock`, `add`, `remove`, `clean` (`_env_dirs`, `_remove`, `_is_link`); `ensure_lock`; `_fix_exec_bit`; `_c_compiler` (the one setuptools runs: `$CC`, else the `.venv` Python's sysconfig CC), `_msvc(platform)`, `_xcode_problem`, `_long_paths`. |
 | `cmd_apply.py` | `./pyt apply [--force]` / `setup [--force]` (section 5.8): `make_plan` (every refusal before the first write), `apply`, `_print_plan` (--dry-run), the `applied` record (`load_record`, `save_record`, `trusted_record`, `project_record`, `record_of`, `rename_record`), `state_file`, `applied_state` / `_infer_preset` (the record, else `_traced`: a preset's traces in pyproject.toml, `_block_options`/`_unformat`: the options the managed block was written with, `_marks`: extra tables) / `applied_name` / `_other_package` / `moved_by_hand` (`still_naming`), `dependency_changes` (`DepChanges`, `req_key`), `read_project`, `pending` + `doctor` (changes not applied yet), `reference_problems`, `unused_envs`, `_restore`. |
@@ -2621,7 +2621,13 @@ Formats:
     `NATIVE_CLASS_DECORATORS`, which mirrors mypyc (`dataclasses.dataclass`, `attr.s`,
     `attr.attrs`, `typing[_extensions].final`, `mypy_extensions.trait`/`mypyc_attr`): attrs'
     `define`/`frozen`/`mutable` are NOT native, `@attr.s` is; `@mypyc_attr(native_class=False)`
-    silences it. A drift test compares the set with the locked mypyc's own source.
+    silences it. A drift test compares the set with the locked mypyc's own source. A name
+    imported from the app's own modules (a relative import, or an absolute one of src/) is
+    followed to what that module imports, as mypy follows it (`lintc._Resolver`, a few hops, a
+    star import through `__all__`): `from .compat import dataclass`, where compat imports the
+    real one, was a blocking slow-class error on a class mypyc compiled natively (the same for
+    `final`, `ABCMeta` and the bases); what the module defines itself, or cannot be read, stays
+    the app's own (`test_mypyc_core.test_lintc_follows_what_the_apps_own_modules_re_export`).
   - Metaclasses and bases (`_non_native_kind`, same message and silencer): a `metaclass=` other
     than `NATIVE_METACLASSES` (ABCMeta; mirrors mypyc's `is_implicit_extension_class`, drift
     test), a base in `NON_NATIVE_BASES` (every `enum` class: its metaclass is EnumMeta;
@@ -6959,6 +6965,8 @@ Code coupling (rename together):
   `common.platform_floor` writes <-> what its `_meets` reads.
 - mypyc internals mirrored by the runner (checked by `test_mypyc_core` against the locked
   mypy): `lintc.NATIVE_CLASS_DECORATORS` <-> mypyc's native decorators;
+  `lintc._static_value` <-> mypy's `infer_condition_value` (the classes of `CLASSES_IN_BLOCKS`);
+  `lintc._Resolver` <-> how mypy follows a name the app's own modules import;
   `lintc.relative_file_at_import` <-> when mypyc builds no shared lib; `mypyc.remove_stale_extensions`
   <-> mypyc's lib names (`<group>__mypyc`, `<module>__mypyc`). `mypyc.MYPYC_REJECTED`,
   `COMPILER_MISSING` and `C_BUILD_FAILED` <-> `tools/mypyc_build.py`; `mypyc.missing_compiler`

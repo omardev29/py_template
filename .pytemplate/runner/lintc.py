@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import TOML_ERRORS, Config, compiled_paths
-from .imports import PARSE_ERRORS, module_name, parse, parse_error
+from .imports import PARSE_ERRORS, _relative_base, module_name, parse, parse_error
 from .project import PYPROJECT, SRC
 
 # The class decorators that keep a class native, by FULL name, as mypyc (2.3.1) decides it:
@@ -195,11 +195,79 @@ def compile_version(cfg: Config) -> tuple[int, int]:
     return int(major), int(minor)
 
 
-def _add_import(aliases: dict[str, str], node: ast.Import | ast.ImportFrom) -> None:
-    """Record the names an absolute import binds: local name -> full dotted name.
+# --- the names a class decorator, a metaclass or a base resolve to ------------------------------
 
-    Relative imports stay unresolved: a local `final` or `dataclass` is not the real one.
-    """
+
+class _Resolver:
+    """mypy's full names of what the app's own modules import. `from dataclasses import
+    dataclass` in src/p1/compat.py makes p1.compat.dataclass the real dataclasses.dataclass,
+    which mypy follows and mypyc compiles natively: lintc reported `@dataclass` imported from
+    there (or `@final`, ABCMeta) as making a slow class, an error that failed check, build and the
+    hook on code mypyc compiled natively. A name the module defines itself (a decorator of the
+    app's own) stays the module's; so does one of a module that cannot be read."""
+
+    HOPS = 8  # a re-export of a re-export...
+
+    def __init__(self, version: tuple[int, int]) -> None:
+        self.version = version
+        self._imports: dict[str, dict[str, str] | None] = {}
+        self._all: dict[str, set[str]] = {}  # a literal __all__ of a module of the app
+
+    def module_imports(self, module: str) -> dict[str, str] | None:
+        """The names the module-level imports of the app's module `module` bind (local name ->
+        full name), or None when `module` is no module of src/ this can read."""
+        if module in self._imports:
+            return self._imports[module]
+        self._imports[module] = None  # an import cycle reads as unknown
+        parts = module.split(".")
+        if not all(p.isidentifier() for p in parts):
+            return None
+        base = SRC.joinpath(*parts)  # as Python imports it: a package, else a module file
+        try:  # is_file raises for a folder it may not enter (Python 3.11 to 3.13)
+            path = base / "__init__.py" if (base / "__init__.py").is_file() else base.with_name(base.name + ".py")
+            tree = parse(path)
+        except (OSError, *PARSE_ERRORS):
+            return None
+        package = module if path.name == "__init__.py" else module.rpartition(".")[0]
+        names: dict[str, str] = {}
+        for stmt in _scope_statements(tree.body, self.version):
+            if isinstance(stmt, ast.Import | ast.ImportFrom):
+                _add_import(names, stmt, package, self)
+            elif isinstance(stmt, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__all__" for t in stmt.targets):
+                if isinstance(stmt.value, ast.List | ast.Tuple):
+                    self._all[module] = {e.value for e in stmt.value.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+        self._imports[module] = names
+        return names
+
+    def star(self, module: str) -> dict[str, str]:
+        """What `from <module> import *` binds from a module of the app: the names of its
+        __all__ (a literal list or tuple), else every name it imports that has no leading _."""
+        names = self.module_imports(module) or {}
+        public = self._all.get(module)
+        return {k: v for k, v in names.items() if (k in public if public is not None else not k.startswith("_"))}
+
+    def resolve(self, full: str) -> str:
+        """`full`, followed through the app's own modules to the name it re-exports."""
+        for _ in range(self.HOPS):
+            parts = full.split(".")
+            for i in range(len(parts) - 1, 0, -1):  # the longest prefix that is a module of src/
+                names = self.module_imports(".".join(parts[:i]))
+                if names is not None:
+                    break
+            else:
+                return full
+            target = names.get(parts[i])
+            if target is None:  # defined there (or not found): the module's own
+                return full
+            full = ".".join([target, *parts[i + 1 :]])
+        return full
+
+
+def _add_import(aliases: dict[str, str], node: ast.Import | ast.ImportFrom, package: str | None = None, resolver: _Resolver | None = None) -> None:
+    """Record the names an import binds: local name -> full dotted name. A relative import is
+    resolved against `package` (the package of the module it is in; None outside src/: it stays
+    unresolved, a local `final` or `dataclass` is not the real one). A star import of the app's
+    own module takes the names that module imports (`resolver`)."""
     if isinstance(node, ast.Import):
         for a in node.names:
             if a.asname:
@@ -207,15 +275,27 @@ def _add_import(aliases: dict[str, str], node: ast.Import | ast.ImportFrom) -> N
             else:
                 top = a.name.partition(".")[0]
                 aliases[top] = top
-    elif not node.level and node.module:
-        for a in node.names:
-            if a.name == "*":  # mypy resolves star imports too
-                for full in (*NATIVE_CLASS_DECORATORS, *NATIVE_METACLASSES, *NON_NATIVE_BASES):
-                    module, _, name = full.rpartition(".")
-                    if module == node.module:
-                        aliases.setdefault(name, full)
-            else:
-                aliases[a.asname or a.name] = f"{node.module}.{a.name}"
+        return
+    if node.level:
+        base = _relative_base(package, node.level) if package is not None else None
+        if base is None:
+            return
+        module = f"{base}.{node.module}" if node.module else base
+    elif node.module:
+        module = node.module
+    else:
+        return
+    for a in node.names:
+        if a.name != "*":
+            aliases[a.asname or a.name] = f"{module}.{a.name}"
+        elif resolver is not None and resolver.module_imports(module) is not None:  # one of the app's modules
+            for name, full in resolver.star(module).items():
+                aliases.setdefault(name, full)
+        else:  # mypy resolves star imports too
+            for full in (*NATIVE_CLASS_DECORATORS, *NATIVE_METACLASSES, *NON_NATIVE_BASES):
+                owner, _, name = full.rpartition(".")
+                if owner == module:
+                    aliases.setdefault(name, full)
 
 
 def _scope_statements(body: list[ast.stmt], version: tuple[int, int]) -> Iterator[ast.stmt]:
@@ -242,10 +322,10 @@ def _scope_statements(body: list[ast.stmt], version: tuple[int, int]) -> Iterato
         stack.append(itertools.chain.from_iterable(blocks))
 
 
-def _import_aliases(tree: ast.Module, version: tuple[int, int]) -> dict[ast.ClassDef, dict[str, str]]:
-    """Each class -> the names its decorators resolve through (what mypy resolves): the absolute
-    imports of the scope the class statement runs in over those of the scopes around it. A
-    function's own import never decides a module-level decorator."""
+def _import_aliases(tree: ast.Module, version: tuple[int, int], package: str | None = None, resolver: _Resolver | None = None) -> dict[ast.ClassDef, dict[str, str]]:
+    """Each class -> the names its decorators resolve through (what mypy resolves): the imports
+    of the scope the class statement runs in over those of the scopes around it. A function's own
+    import never decides a module-level decorator."""
     out: dict[ast.ClassDef, dict[str, str]] = {}
     stack: list[tuple[list[ast.stmt], dict[str, str]]] = [(tree.body, {})]
     while stack:
@@ -254,7 +334,7 @@ def _import_aliases(tree: ast.Module, version: tuple[int, int]) -> dict[ast.Clas
         statements = list(_scope_statements(body, version))
         for stmt in statements:
             if isinstance(stmt, ast.Import | ast.ImportFrom):
-                _add_import(aliases, stmt)
+                _add_import(aliases, stmt, package, resolver)
         for stmt in statements:
             if isinstance(stmt, ast.ClassDef):
                 out[stmt] = aliases
@@ -263,9 +343,10 @@ def _import_aliases(tree: ast.Module, version: tuple[int, int]) -> dict[ast.Clas
     return out
 
 
-def _full_name(written: str, aliases: dict[str, str]) -> str:
+def _full_name(written: str, aliases: dict[str, str], resolver: _Resolver | None = None) -> str:
     head, dot, rest = written.partition(".")
-    return aliases.get(head, head) + dot + rest
+    full = aliases.get(head, head) + dot + rest
+    return resolver.resolve(full) if resolver is not None else full
 
 
 def _is_explicitly_non_native(node: ast.expr) -> bool:
@@ -276,20 +357,20 @@ def _is_explicitly_non_native(node: ast.expr) -> bool:
     )
 
 
-def _non_native_kind(node: ast.ClassDef, aliases: dict[str, str], local: dict[str, str]) -> str | None:
+def _non_native_kind(node: ast.ClassDef, aliases: dict[str, str], local: dict[str, str], resolver: _Resolver | None = None) -> str | None:
     """What makes mypyc compile the class as a regular Python class through its metaclass or its
     bases (NATIVE_METACLASSES, NON_NATIVE_BASES), None when nothing does. `local`: the classes of
     the module seen so far whose subclasses are such a class too (a metaclass is inherited, and
     a subclass of a TypedDict is one; a subclass of a NamedTuple is a mypyc error of its own).
-    A base imported from another module is not looked into."""
+    A base imported from another module is not looked into (its name is: `resolver`)."""
     for keyword in node.keywords:
         if keyword.arg == "metaclass":
             written = _decorator_name(keyword.value)
-            if not written or _full_name(written, aliases) not in NATIVE_METACLASSES:
+            if not written or _full_name(written, aliases, resolver) not in NATIVE_METACLASSES:
                 return f"has the metaclass {written or '<expression>'}"
     for base in node.bases:
         written = _decorator_name(base.value if isinstance(base, ast.Subscript) else base)
-        full = _full_name(written, aliases)
+        full = _full_name(written, aliases, resolver)
         if full in NON_NATIVE_BASES:
             return f"is {NON_NATIVE_BASES[full]}"
         if written in local:
@@ -297,20 +378,20 @@ def _non_native_kind(node: ast.ClassDef, aliases: dict[str, str], local: dict[st
     return None
 
 
-def _non_native_kinds(tree: ast.Module, aliases: dict[ast.ClassDef, dict[str, str]], version: tuple[int, int]) -> dict[ast.ClassDef, str]:
+def _non_native_kinds(tree: ast.Module, aliases: dict[ast.ClassDef, dict[str, str]], version: tuple[int, int], resolver: _Resolver | None = None) -> dict[ast.ClassDef, str]:
     """_non_native_kind of every class, the module's own classes read in source order."""
     kinds: dict[ast.ClassDef, str] = {}
     local: dict[str, str] = {}
     for stmt in _scope_statements(tree.body, version):
         if isinstance(stmt, ast.ClassDef):
-            kind = _non_native_kind(stmt, aliases.get(stmt, {}), local)
+            kind = _non_native_kind(stmt, aliases.get(stmt, {}), local, resolver)
             if kind:
                 kinds[stmt] = kind
                 if kind != "is a NamedTuple":  # a subclass says what its base class is
                     local[stmt.name] = kind.split("', which ", 1)[1] if kind.startswith("inherits from '") else kind
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node not in kinds:
-            kind = _non_native_kind(node, aliases.get(node, {}), local)
+            kind = _non_native_kind(node, aliases.get(node, {}), local, resolver)
             if kind:
                 kinds[node] = kind
     return kinds
@@ -436,8 +517,14 @@ def lint_file(cfg: Config, path: Path) -> list[Finding]:
         return [Finding(path, 1, f"cannot read it: {e.strerror or e} (the mypyc rules skipped this file)")]
 
     version = compile_version(cfg)
-    aliases = _import_aliases(tree, version)
-    kinds = _non_native_kinds(tree, aliases, version)
+    try:  # the package relative imports start from (None outside src/: they stay unresolved)
+        module = module_name(path, SRC)
+        package: str | None = module if path.name == "__init__.py" else module.rpartition(".")[0]
+    except ValueError:
+        package = None
+    resolver = _Resolver(version)
+    aliases = _import_aliases(tree, version, package, resolver)
+    kinds = _non_native_kinds(tree, aliases, version, resolver)
     for node in _runtime_nodes(tree, version):
         if isinstance(node, ast.Import | ast.ImportFrom):
             if isinstance(node, ast.Import):
@@ -465,7 +552,7 @@ def lint_file(cfg: Config, path: Path) -> list[Finding]:
             if not any(_is_explicitly_non_native(d) for d in decorators):
                 written = [_decorator_name(d) for d in decorators]
                 scope = aliases.get(node, {})
-                bad = [w or "<expression>" for w in written if _full_name(w, scope) not in NATIVE_CLASS_DECORATORS]
+                bad = [w or "<expression>" for w in written if _full_name(w, scope, resolver) not in NATIVE_CLASS_DECORATORS]
                 why = f"uses @{bad[0]}" if bad else kinds.get(node)
                 if why and not bad and "has the metaclass" not in why:
                     # an Enum, a NamedTuple, a TypedDict (or a subclass of one): standard idioms that

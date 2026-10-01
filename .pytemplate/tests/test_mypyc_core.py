@@ -519,6 +519,71 @@ def test_lintc_flags_classes_mypyc_compiles_as_python_classes_for_their_metaclas
     assert [f.note for f in found] == ([] if kind is None else ["has the metaclass" not in kind])
 
 
+# The app's own modules that hand on the real dataclass, final and ABCMeta (mypy follows them)
+REEXPORTS = {
+    "myapp/__init__.py": "",
+    "myapp/core/__init__.py": "from .compat import final as final\n",
+    "myapp/core/compat.py": (
+        "from abc import ABCMeta\nfrom dataclasses import dataclass\nfrom enum import Enum\nfrom typing import final\n\n"
+        "__all__ = ['ABCMeta', 'Enum', 'dataclass', 'final']\n"
+    ),
+    "myapp/core/again.py": "from .compat import dataclass\n",  # a re-export of a re-export
+    "myapp/core/star.py": "from .compat import *\n",
+    "myapp/core/own.py": "def dataclass(cls: type) -> type:\n    return cls\n\n\nclass Meta(type):\n    pass\n",  # the app's own
+}
+
+
+@pytest.mark.parametrize(
+    ("source", "native"),
+    [
+        ("from .compat import dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n", True),
+        ("from myapp.core.compat import final\n\n\n@final\nclass P:\n    x: int = 0\n", True),
+        ("from . import compat\n\n\n@compat.dataclass\nclass P:\n    x: int = 0\n", True),
+        ("import myapp.core.compat as c\n\n\n@c.final\nclass P:\n    x: int = 0\n", True),
+        ("from .again import dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n", True),
+        ("from myapp.core import final\n\n\n@final\nclass P:\n    x: int = 0\n", True),  # the package's __init__
+        ("from .star import dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n", True),
+        ("from .compat import *\n\n\n@dataclass\nclass P:\n    x: int = 0\n", True),
+        ("from .compat import ABCMeta\n\n\nclass P(metaclass=ABCMeta):\n    x: int = 0\n", True),
+        # what the app defines itself stays its own, and so does what cannot be read
+        ("from .own import dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n", False),
+        ("from .own import Meta\n\n\nclass P(metaclass=Meta):\n    x: int = 0\n", False),
+        ("from .missing import dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n", False),
+    ],
+)
+def test_lintc_follows_what_the_apps_own_modules_re_export(src_tree: Path, source: str, native: bool) -> None:
+    """mypy follows `from .compat import dataclass` to dataclasses.dataclass when compat imports
+    it from there, and mypyc compiles the class natively: lintc said "uses @dataclass: mypyc
+    compiles it as a regular (slow) Python class", an error under the mypyc profile that failed
+    check, build and the hook (the same for final and ABCMeta)."""
+    _project(src_tree, {**REEXPORTS, "myapp/core/model.py": source})
+    found = lintc.lint_file(make({}), src_tree / "myapp" / "core" / "model.py")
+    assert (found == []) is native, [f.message for f in found]
+
+
+def test_lintc_reads_an_enum_the_apps_own_module_re_exports_as_one(src_tree: Path) -> None:
+    _project(src_tree, {**REEXPORTS, "myapp/core/model.py": "from .compat import Enum\n\n\nclass P(Enum):\n    A = 1\n"})
+    found = lintc.lint_file(make({}), src_tree / "myapp" / "core" / "model.py")
+    assert [(f.note, "is an Enum" in f.message) for f in found] == [(True, True)]
+
+
+def test_lintc_reads_a_folder_it_may_not_enter_as_no_module_of_the_app(src_tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path.is_file raises PermissionError for a file in a folder the user may not enter (Python
+    3.11 to 3.13; root enters it anyway, so the error is made here): following a name into such a
+    folder never ends in an internal error, and the name stays the app's own."""
+    _project(src_tree, {**REEXPORTS, "myapp/core/locked/__init__.py": "", "myapp/core/model.py": "from .locked import dataclass\n\n\n@dataclass\nclass P:\n    x: int = 0\n"})
+    is_file = Path.is_file
+
+    def denied(self: Path) -> bool:
+        if "locked" in self.parts:
+            raise PermissionError(13, "Permission denied", str(self))
+        return is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", denied)
+    found = lintc.lint_file(make({}), src_tree / "myapp" / "core" / "model.py")
+    assert ["uses @dataclass" in f.message for f in found] == [True]
+
+
 BACKPORT = """\
 import sys
 from enum import Enum
