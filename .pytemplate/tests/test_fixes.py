@@ -422,7 +422,7 @@ def test_portable_sh_launcher_keeps_its_folder_whatever_the_env_names(tmp_path: 
     if runtime == "bundled" and IS_WINDOWS:
         pytest.skip("a bundled build writes no .sh launcher on Windows")
     out = _portable_folder(tmp_path)
-    values = {"HERE": "/srv/data", "py": "mine", "_pt_dir": "kept"}
+    values = {"HERE": "elsewhere", "py": "mine", "_pt_dir": "kept"}  # no /path: MSYS would convert it for python.exe
     cfg = make({"python": {"cpython": "3.11"}, "deploy": {"portable": {"runtime": runtime, "env": values}}})
     python = None
     if runtime == "bundled":
