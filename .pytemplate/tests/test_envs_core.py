@@ -97,6 +97,17 @@ def test_env_vars_pin_the_environment_and_the_interpreter_together(which: str, m
     assert envs.env_vars(env, {"FLET_WEB": "1"})["FLET_WEB"] == "1"  # extra variables go on top
 
 
+@pytest.mark.parametrize(("pin", "minor"), [("pypy@3.11.15", "3.11"), ("pypy@3.12.14", "3.12")])
+def test_an_unsupported_pypy_names_the_python_of_its_pin(pin: str, minor: str) -> None:
+    """The hint said "lowers the syntax to Python 3.11" whatever python.pypy pins: a project on
+    pypy@3.12.x (README's plan once raylib ships PyPy 8 wheels) is prechecked as 3.12."""
+    cfg = make({"python": {"pypy": pin}})
+    with pytest.raises(PytError) as e:
+        envs.ensure_supported(cfg, "pypy")
+    assert f"./pyt mode --supports +pypy  (lowers the syntax to Python {minor} and re-locks uv.lock)" in str(e.value)
+    envs.ensure_supported(make({"backend": {"supported": ["cpython", "pypy"]}}), "pypy")  # supported: no error
+
+
 @pytest.mark.parametrize("suffix", ["", "-wsl"])
 def test_runtime_and_tool_environments(suffix: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(envs, "ENV_SUFFIX", suffix)

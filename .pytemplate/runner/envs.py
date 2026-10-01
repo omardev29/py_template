@@ -144,7 +144,8 @@ def ensure_supported(cfg: Config, backend: str) -> None:
         raise PytError(
             f"backend '{backend}' is not in backend.supported {cfg.backend.supported}.\n"
             f"  Enable it with: ./pyt mode --supports +{backend}"
-            + ("  (lowers the syntax to Python 3.11 and re-locks uv.lock)" if backend == "pypy" else "")
+            # the Python of python.pypy, as the precheck reads it (a pypy@3.12.x pin: 3.12)
+            + (f"  (lowers the syntax to Python {cfg.pypy_minor} and re-locks uv.lock)" if backend == "pypy" else "")
         )
 
 
