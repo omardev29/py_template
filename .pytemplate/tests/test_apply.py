@@ -1116,6 +1116,24 @@ def test_dry_run_of_a_name_that_normalizes_the_same(tmp_path: Path, monkeypatch:
     assert "uv.lock          would re-lock (uv lock)" in capsys.readouterr().err
 
 
+def test_dry_run_of_a_rename_whose_project_name_is_set_already(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """app.name and pyproject.toml [project] name both edited by hand to the new name: the rename
+    leaves pyproject.toml as it is, and the --dry-run said "would rewrite [project] name"."""
+    project, uv = _project(tmp_path, monkeypatch)
+    assert _run(project) == 0  # the record: alpha
+    project.edit("app", "name", "delta")
+    pyproject = project.root / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "delta"', 1), encoding="utf-8", newline="\n")
+    before = pyproject.read_bytes()
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    capsys.readouterr()
+    assert _run(project) == 0
+    err = capsys.readouterr().err
+    assert "would rename 'alpha' -> 'delta'" in err and "pyproject.toml   unchanged" in err, err
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    assert _run(project) == 0 and pyproject.read_bytes() == before  # what the real run writes there: nothing
+
+
 def test_dry_run_of_a_rename_checks_the_references_where_they_are(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """compile.modules names the renamed package (zed.core): before the move it lives in
     src/alpha/, so the --dry-run must not warn that it is missing; a module that is really

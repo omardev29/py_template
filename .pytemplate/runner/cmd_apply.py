@@ -985,11 +985,15 @@ def _print_plan(plan: Plan, command: str, force: bool) -> None:
         rows.append(("app.name", f"'{cfg.app.name}' (src/{cfg.pkg}/): unchanged"))
     rows.append(("app.preset", f"{cfg.app.preset}: unchanged"))
     rows.append((f"[preset.{cfg.app.preset}]", f"would {plan.deps.describe()}" if plan.deps else "dependencies unchanged"))
+    # A rename rewrites [project] name only when it is not the new name already (both lines edited
+    # by hand: the dry run said "would rewrite" a line the real run leaves alone)
+    renamed = plan.rename_plan.pyproject if plan.rename_plan is not None else None
     parts = [
         text
         for text, due in (
             ("the managed parts", render.pyproject_outdated(cfg)),
-            ("[project] name", plan.name_text is not None or plan.rename_plan is not None),
+            ("[project] name", plan.name_text is not None or (renamed is not None and presets.project_name(renamed.new) != presets.project_name(renamed.old))),
+            ("the name in the preset tables", renamed is not None and renamed.count > 0),
             ("dependencies", bool(plan.deps)),
         )
         if due
