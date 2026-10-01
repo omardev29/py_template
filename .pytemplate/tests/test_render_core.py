@@ -345,6 +345,28 @@ def test_a_folder_in_the_way_is_a_clear_error(box: Sandbox) -> None:
         render.apply(CFG)
 
 
+@pytest.mark.parametrize("check", [False, True])
+@pytest.mark.parametrize("blocker", ["file", "dangling link"])
+def test_a_file_where_a_generated_files_folder_must_be_is_a_clear_error(box: Sandbox, check: bool, blocker: str) -> None:
+    """`.vscode` (or `.github`) left as a file: every command that renders first stopped with
+    "cannot write the generated file .vscode/settings.json: File exists", which named the file
+    to be written, not the one in the way, after writing the files before it; --check called the
+    file outdated."""
+    box.files["late/sub/x.txt"] = "x\n"  # after every other generated file
+    (box.root / "late").mkdir()
+    if blocker == "file":
+        box.write("late/sub", "x\n")
+    else:
+        try:
+            (box.root / "late" / "sub").symlink_to(box.root / "nothing")
+        except OSError as e:  # Windows without Developer Mode
+            pytest.skip(f"cannot make a symbolic link here: {e}")
+    kind = "a file" if blocker == "file" else "a link to nothing"
+    with pytest.raises(PytError, match=rf"^late/sub/x\.txt is generated, but late/sub is {kind}, where its folder must be: remove or rename it$"):
+        render.apply(CFG, check=check)
+    assert not any((box.root / path).exists() for path in GENERATED) and not box.state.exists()  # refused before any write
+
+
 def test_write_failures_are_clear_errors(box: Sandbox, monkeypatch: pytest.MonkeyPatch) -> None:
     def refuse(self: Path, *args: Any, **kwargs: Any) -> int:
         raise PermissionError(13, "Permission denied")

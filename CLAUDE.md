@@ -2003,7 +2003,12 @@ re-rendering.
   other top-level key (`./pyt apply` records its own) and the key order. Hashes of files no longer generated stay recorded
   (a file that comes back keeps its hand-edit protection).
 - `--check` and `--dry-run` write nothing. A folder in the way, or a read/write error, is a
-  PytError naming the file. `.python-version` is written (a missing one too: a generated file
+  PytError naming the file; so is a file (or a link to nothing) where a generated file's folder
+  must be, naming both (`render._in_the_way`, for every generated path before the first write,
+  in `--check` too: `.vscode` left as a file stopped every command with "cannot write the
+  generated file .vscode/settings.json: File exists" once the files before it were written,
+  `test_render_core.test_a_file_where_a_generated_files_folder_must_be_is_a_clear_error`).
+  `.python-version` is written (a missing one too: a generated file
   deleted by hand) only once uv has that CPython (`envs.ensure_python`: `uv python find`, else
   `uv python install`, else a PytError (3) naming python.cpython), and before any other file:
   the launchers' `uv run --script` follows the file (5.2), and a typo (`3.41`) or a new minor

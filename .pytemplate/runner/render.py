@@ -542,6 +542,23 @@ def _save_state(files: dict[str, str]) -> None:
         raise PytError(f"cannot write {rel(STATE_FILE)}: {e.strerror or e}") from None
 
 
+def _in_the_way(path: str) -> str | None:
+    """What stops the generated file `path` from being written, or None: a file (or a link to
+    nothing) where one of its folders must be, `.vscode` left as a file (mkdir said only "File
+    exists", about the file to be written, and --check called it outdated), or a folder of its
+    own name."""
+    parent = ROOT
+    for part in Path(path).parts[:-1]:
+        parent = parent / part
+        if os.path.lexists(parent) and not parent.is_dir():
+            kind = "a link to nothing" if os.path.islink(parent) and not parent.exists() else "a file"
+            return f"{path} is generated, but {parent.relative_to(ROOT).as_posix()} is {kind}, where its folder must be: remove or rename it"
+    target = ROOT / path
+    if target.exists() and not target.is_file():
+        return f"{path} is generated, but a folder of that name is in the way: remove it"
+    return None
+
+
 def _write(path: str, target: Path, content: str) -> None:
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -580,11 +597,14 @@ def apply(cfg: Config, *, force: bool = False, check: bool = False, show_diff: b
     edited: list[str] = []
     new_state = dict(state)
     # .python-version first: the question it may need (below) comes before any other write
-    for path, content in sorted(outputs(cfg).items(), key=lambda item: item[0] != ".python-version"):
+    generated = sorted(outputs(cfg).items(), key=lambda item: item[0] != ".python-version")
+    for path, _ in generated:  # every path, before the first write: nothing half-rendered
+        problem = _in_the_way(path)
+        if problem is not None:
+            raise PytError(problem)
+    for path, content in generated:
         target = ROOT / path
         new_hash = _digest(content)
-        if target.exists() and not target.is_file():
-            raise PytError(f"{path} is generated, but a folder of that name is in the way: remove it")
         if target.is_file():
             try:
                 current = target.read_text(encoding="utf-8", errors="replace")
