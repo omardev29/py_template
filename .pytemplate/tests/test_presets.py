@@ -1847,12 +1847,17 @@ def test_git_init_in_a_monorepo_stages_the_launchers_executable(tmp_path: Path, 
 
 
 @needs_git
+@pytest.mark.parametrize("pathspecs", [None, "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"])
 @pytest.mark.parametrize("ignore", ["apps/", "*\n!.gitignore\n"], ids=["a monorepo's apps/", "a home folder kept in git"])
-def test_git_init_in_a_repository_that_ignores_the_project(tmp_path: Path, git_env: None, ignore: str) -> None:
+def test_git_init_in_a_repository_that_ignores_the_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_env: None, ignore: str, pathspecs: str | None) -> None:
     """A work tree that ignores the folder (a dotfiles repository of the home folder with `*` in
     its .gitignore, a monorepo that ignores apps/) never holds the project: it used to get no
     repository at all there (setup then said to `git init` it, and new advised a workflow for the
-    outer repository). It gets one of its own, as outside any work tree."""
+    outer repository). It gets one of its own, as outside any work tree, whatever pathspec
+    setting the user exported: check-ignore refuses every one of them (exit 128, read as "not
+    ignored"), and the project got no repository again."""
+    if pathspecs is not None:
+        monkeypatch.setenv(pathspecs, "1")
     mono = tmp_path / "mono"
     mono.mkdir()
     _git(mono, "init", "--quiet")

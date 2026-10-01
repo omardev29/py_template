@@ -6030,11 +6030,15 @@ git and husky:
   git 2.43: "global 'literal' pathspec setting is incompatible with all other global pathspec
   settings", "pathspec magic not supported by this command", exit 128): with one exported every
   hook call with a pathspec failed, read as nothing unstaged, and the checks passed a commit that
-  left the generated files, pyproject.toml or the launcher's mode behind. Fix:
-  `hooks._git_process_env` drops `hooks.PATHSPEC_VARS`, and `hooks._git_output` stops the hook on
-  any failed call (5.6). Test:
+  left the generated files, pyproject.toml or the launcher's mode behind; and `new` read the
+  failed `check-ignore` as a work tree that holds the project: no `git init`, and the warning that
+  its CI would not run. Fix: `hooks._git_process_env` drops `hooks.PATHSPEC_VARS`, and
+  `hooks._git_output` stops the hook on any failed call (5.6); `presets.ignored_by_work_tree`
+  drops them too (11). Test:
   `test_hooks.py::test_the_checks_fail_whatever_pathspec_variables_the_user_exported`,
-  `test_a_git_call_that_fails_stops_the_hook_with_gits_message`. Goes: never.
+  `test_a_git_call_that_fails_stops_the_hook_with_gits_message`,
+  `test_presets.py::test_git_init_in_a_repository_that_ignores_the_project`,
+  `test_config_rules.py::test_dry_run_new_says_what_git_will_do`. Goes: never.
 - **`GIT_CEILING_DIRECTORIES` never excludes the current folder** (LIMITATION, documented): with
   the e2e base itself as the ceiling, `new` (it asks git from the base) still found a repository
   around the base and skipped `git init`, and `setup` installed the hook into that repository.

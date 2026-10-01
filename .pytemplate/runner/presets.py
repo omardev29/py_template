@@ -1273,9 +1273,15 @@ def ignored_by_work_tree(git: str, folder: Path, cwd: Path) -> bool:
     hooks asks): a home folder kept in git with `*` in its .gitignore, a monorepo that ignores its
     apps/. A project made there is never part of that repository, so it gets one of its own.
     `folder` need not exist yet (git matches the path); `cwd`, an existing folder inside that
-    work tree, is where git runs (exit 0: ignored; 1: not; 128: no work tree, or an error)."""
+    work tree, is where git runs (exit 0: ignored; 1: not; 128: no work tree, or an error).
+    check-ignore refuses the user's GIT_*_PATHSPECS (exit 128, "pathspec magic not supported":
+    CLAUDE.md 15.1), which read as "not ignored": new then made no repository and warned that the
+    CI would not run. They are left out here, as hooks leaves them out of its git calls."""
+    from .hooks import PATHSPEC_VARS  # hooks imports render, mypyc and more
+
+    env = {k: v for k, v in _git_env().items() if k not in PATHSPEC_VARS}
     path = Path(os.path.relpath(folder / "pyt", cwd)).as_posix()
-    r = proc.run([git, "check-ignore", "-q", "--", path], cwd=cwd, env=_git_env(), capture=True, check=False, echo=False)
+    r = proc.run([git, "check-ignore", "-q", "--", path], cwd=cwd, env=env, capture=True, check=False, echo=False)
     return r.returncode == 0
 
 

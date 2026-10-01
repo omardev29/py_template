@@ -1385,6 +1385,14 @@ def test_dry_run_new_says_what_git_will_do(git_sandbox: Path, monkeypatch: pytes
     assert cmd_mode.cmd_new(cfg, [str(outer / "code" / "game"), "--name", "game"]) == 0
     err = capsys.readouterr().err
     assert "and `git init -b main`" in err and "inside the git work tree" not in err and "ci.yml" not in err, err
+    # ... whatever pathspec setting the user exported: check-ignore refuses each one (exit 128),
+    # which read as "not ignored" (no git init, and the warning that the CI would not run)
+    for name in ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"):
+        monkeypatch.setenv(name, "1")
+        assert cmd_mode.cmd_new(cfg, [str(outer / "code" / "game"), "--name", "game"]) == 0
+        err = capsys.readouterr().err
+        assert "and `git init -b main`" in err and "inside the git work tree" not in err and "ci.yml" not in err, (name, err)
+        monkeypatch.delenv(name)
 
 
 class _Relock:
