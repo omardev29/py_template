@@ -3182,6 +3182,9 @@ Per method:
   symlinked folder followed, a link back up its own path not, a broken link a warning; a file it
   cannot copy a PytError naming it, `wheel._copy_file`): shutil.copytree ended on a dangling link
   or a cycle in an internal-error traceback (`test_wheel_copies_through_links_like_the_stage`);
+  a name that is not UTF-8, which a wheel cannot hold, is one error naming the file in `src/`
+  before `uv build` (`wheel._utf8_name`: an ordinary data file ended the build in setuptools'
+  UnicodeEncodeError traceback, `test_wheel_refuses_a_file_name_that_is_not_utf8_naming_it_in_src`);
   assets go into `<pkg>/assets`. The top-level entries of `src/` that `compile.modules` names
   besides the package (`wheel._outside_package`: a lone module becomes `[tool.setuptools]
   py-modules`, another package gets its package data) are copied too, for every backend, a lone

@@ -3562,6 +3562,30 @@ def test_wheel_pyproject_is_exact_and_ships_the_package_data(wheel_project: Path
     assert entry["project"]["scripts"] == {"pkg": "pkg.ui:run"}
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="a name that is not UTF-8: Linux keeps a file name's bytes (macOS and Windows refuse it)")
+@pytest.mark.parametrize("name", [b"caf\xe9.txt", b".caf\xe9.txt"])
+def test_wheel_refuses_a_file_name_that_is_not_utf8_naming_it_in_src(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, name: bytes) -> None:
+    # A wheel holds UTF-8 names only: an ordinary data file named otherwise ended the build in
+    # setuptools' UnicodeEncodeError traceback, with uv's generic "build failures" hint; a hidden
+    # one was refused, but named by its copy under .build/wheel/ with a \udce9 escape
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    data = os.fsencode(wheel_project / "src" / "pkg" / "data")
+    try:
+        with open(os.path.join(data, name), "wb") as f:
+            f.write(b"x")
+    except OSError as e:
+        pytest.skip(f"this file system refuses a name that is not UTF-8: {e}")
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    monkeypatch.setattr(wheel.envs, "uv", lambda *a, **k: pytest.fail("uv build ran"))
+    with pytest.raises(PytError, match=r"its name is not valid UTF-8, which a wheel cannot hold: rename it") as e:
+        wheel.build(BuildRequest(_wheel_cfg(), "cpython", "wheel", wheel_project / "src"))
+    shown = str(e.value)
+    assert e.value.code == 2 and ".build" not in shown
+    assert shown.startswith("wheel: ") and shown.split(": ")[1].endswith("src/pkg/data/" + name.decode("ascii", "backslashreplace"))
+
+
 def test_wheel_names_a_missing_lock_entry(wheel_project: Path) -> None:
     from runner.methods import wheel
 

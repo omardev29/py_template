@@ -142,9 +142,7 @@ def _package_data(package: Path) -> list[str]:
             path = (Path(folder) / name).relative_to(package).as_posix()
             if not any(part.startswith(".") for part in path.split("/")):
                 continue  # "**/*" matches it
-            if any("\ud800" <= c <= "\udfff" for c in path):
-                raise PytError(f"wheel: {rel(Path(folder) / name)}: its name is not valid UTF-8, which a wheel cannot hold: rename it")
-            patterns.append(glob.escape(path))
+            patterns.append(glob.escape(path))  # every name is UTF-8: _copy_tree refused the others
     return patterns
 
 
@@ -298,11 +296,22 @@ def _copy_tree(src: Path, dst: Path) -> None:
     for path in mypyc.walk(src):
         target = dst / path.relative_to(src)
         if path.is_dir():
+            _utf8_name(path, src)
             target.mkdir(exist_ok=True)
         elif not path.exists():
             ui.warn(f"{rel(path)}: broken symbolic link, not copied")
         elif not _stray_output(path):
+            _utf8_name(path, src)
             _copy_file(path, target)
+
+
+def _utf8_name(path: Path, top: Path) -> None:
+    """A wheel holds UTF-8 names only: setuptools' zip writer died in a UnicodeEncodeError
+    traceback, with uv's generic "build failures" hint, for a data file named otherwise (Linux and
+    other POSIX systems keep a name's bytes). One error naming the file in src/, before the build."""
+    if any("\ud800" <= c <= "\udfff" for c in path.relative_to(top).as_posix()):
+        shown = os.fsencode(rel(path)).decode("utf-8", "backslashreplace")
+        raise PytError(f"wheel: {shown}: its name is not valid UTF-8, which a wheel cannot hold: rename it")
 
 
 def _copy_file(path: Path, target: Path) -> None:
