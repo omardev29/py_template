@@ -6365,8 +6365,9 @@ Code coupling (rename together):
   `BINARY_SUFFIXES`, and only `pytest.mark` at module level); `rename` calls the private
   `config._build`, `config._decode`, `config._string_end` (with `config._ScanError`, for
   `_toml_strings`), `presets._norm_name` and, lazily, `cmd_env._is_link`,
-  `cmd_apply._other_package` and `cmd_install._terminations_interrupt` (`apply_plan`: one rule
-  for SIGTERM and SIGHUP in the runner's own writes); `cmd_apply` calls the
+  `cmd_apply._other_package`, `cmd_install._terminations_interrupt` and `_undo_shield`
+  (`apply_plan`: one rule for SIGTERM, SIGHUP and a Ctrl+C during the undo in the runner's own
+  writes); `cmd_apply` calls the
   private `cmd_env._envs_for`, `_env_dirs`, `_fix_exec_bit`, `cmd_mode._precheck_py311`,
   `rename._plan_pyproject`, `render._holds_python` and `render._read_state`, and
   `cmd_mode._precheck_py311` that same `render._holds_python`; `rename` and
