@@ -1397,14 +1397,27 @@ def test_a_package_folder_moved_by_hand_is_refused(tmp_path: Path, monkeypatch: 
     assert cmd_apply.pending(project.cfg()) == []
 
 
-@pytest.mark.parametrize("left", [None, "tests/test_old.py"], ids=["no reference left", "a test still imports the old package"])
-def test_a_package_written_to_replace_the_old_one_is_no_move(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, left: str | None) -> None:
+@pytest.mark.parametrize(
+    ("left", "text", "refers"),
+    [
+        (None, "", False),
+        ("tests/test_old.py", "import alpha.core.fractal as fractal\n\nSIZE = fractal.SIZE\n", True),
+        ("tests/test_patch.py", 'from unittest import mock\n\nTARGET = "alpha.core.fractal.render"\n\n\ndef test_render() -> None:\n    with mock.patch(TARGET):\n        pass\n', True),
+        ("tests/test_prose.py", '"""Tests of beta, which replaces alpha (the alpha app is gone)."""\n\n# alpha was its name\n', False),
+    ],
+    ids=["no reference left", "a test still imports the old package", "a test names a module of it in a string", "only prose names it"],
+)
+def test_a_package_written_to_replace_the_old_one_is_no_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, left: str | None, text: str, refers: bool
+) -> None:
     """src/alpha/ deleted and src/beta/ written in its place, with app.name = "beta" and no
     reference to alpha left (the imports, compile.modules, the wheel entry): apply, rename, doctor
     and the hook took it for a folder moved by hand and refused with "move it back to src/alpha/",
     which only led to another refusal (src/beta/ is another package), and the hook blocked every
     commit. With no reference left it is applied as an edit of app.name whose package is in place
-    already; with one left, the refusal names where it is and the way out of a replacement too."""
+    already; with one left (an import, or a module of the package named in a string, which a
+    moved folder leaves too: mock.patch then failed at run time), the refusal names where it is
+    and the way out of a replacement too. Prose that names the old app is no reference."""
     project, uv = _project(tmp_path, monkeypatch, "flet", "alpha")
     assert _run(project) == 0  # the record: alpha
     shutil.rmtree(project.root / "src" / "alpha")
@@ -1413,10 +1426,10 @@ def test_a_package_written_to_replace_the_old_one_is_no_move(tmp_path: Path, mon
             (project.root / rel_path).parent.mkdir(parents=True, exist_ok=True)
             (project.root / rel_path).write_bytes(data)
     if left is not None:
-        (project.root / left).write_text("import alpha.core.fractal as fractal\n\nSIZE = fractal.SIZE\n", encoding="utf-8", newline="\n")
+        (project.root / left).write_text(text, encoding="utf-8", newline="\n")
     cfg = project.cfg()
     assert cfg.app.name == "beta" and project.pyproject()["project"]["name"] == "alpha"
-    if left is not None:
+    if left is not None and refers:
         before = project.snapshot()
         with pytest.raises(PytError, match=r"src/alpha/ was moved to src/beta/ by hand") as e:
             _run(project)

@@ -1535,7 +1535,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   both ways out. A package folder moved to app.name's by hand (an IDE's folder rename, then
   app.name set: `moved_by_hand`, the trusted record's package gone from src/ while app.name's is
   there, and a reference to the old package left: `rename.references_left`, pytemplate.toml's
-  package references and the imports of src/ and tests/) is refused with the way out, move it
+  package references, the imports of src/ and tests/ and the package references of their strings
+  and comments, `"alpha.core.x"` for `mock.patch`, by the rename's context rules, never their
+  prose) is refused with the way out, move it
   back and apply, naming the files that still name it (`moved_by_hand_message`; `rename` and
   doctor say the same): apply took it for "only [project] name differs", rewrote that line,
   recorded the new name and said "applied" while the imports, compile.modules and

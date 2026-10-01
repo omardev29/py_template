@@ -1004,7 +1004,8 @@ def _classify(
             # loader, reading a file or folder named after the app, which keeps its name
             return "keep"
         return "pkg" if (kind := _text_kind(text, start, end, word, names)) == "name" else kind
-    return _text_kind(text, start, end, word, names, modules=modules, entries=entries)
+    # contextual (references_left): a string's or a comment's prose is no package reference
+    return _text_kind(text, start, end, word, names, contextual=contextual, modules=modules, entries=entries)
 
 
 def _toml_strings(text: str) -> list[tuple[int, int, bool]]:
@@ -1101,7 +1102,8 @@ def rewrite(
 
     `python`: tell code from strings and comments with the tokenizer. `only_pkg`: change only
     the package references, chosen by context, and report the other occurrences as kept
-    (pytemplate.toml). `toml`: TOML keys and table headers never change. `strings` ("toml",
+    (pytemplate.toml; a Python file's strings and comments for references_left). `toml`: TOML
+    keys and table headers never change. `strings` ("toml",
     "json", "yaml"; `toml` implies "toml"): the string syntax of a data file, whose escapes are never the
     name (other text is plain: `a\\n` has no escape there). `module_keys`: TOML
     keys whose quoted values are module names (a bare old package there is the package).
@@ -1566,20 +1568,22 @@ def references_left(root: Path, names: Names) -> list[str]:
     """The files of the project at `root` that still name the old package of `names` where a
     rename rewrites it: pytemplate.toml (a package reference: compile.modules, deploy.wheel.entry,
     src/<old>/...) and the Python files of src/ and tests/ that import it (or use a name bound to
-    such an import). cmd_apply.moved_by_hand tells a package folder moved by hand (they are left)
-    from a package written anew in place of the old one (none is). What cannot be read or planned
-    counts: it may name it."""
+    such an import) or name it as a package in a string or a comment (`"old.core.x"` for a module
+    of the package, wherever it is now: `import_module`, `mock.patch`; `"-m", "old"`), never in
+    prose (a docstring that says the app replaces old). cmd_apply.moved_by_hand tells a package
+    folder moved by hand (they are left) from a package written anew in place of the old one
+    (none is). What cannot be read or planned counts: it may name it."""
     out: list[str] = []
     try:
         if _plan_config(root, names).count:
             out.append("pytemplate.toml")
     except PytError:
         out.append("pytemplate.toml")
-    word = re.compile(rf"(?<![\w.]){re.escape(names.old_pkg)}(?!\w)")
     try:
         files = list(_code_files(root))
     except PytError:  # a folder of src/ or tests/ it cannot list
         return [*out, "src/ or tests/ (a folder that cannot be listed)"]
+    modules = _package_modules(root, names.old_pkg) | _package_modules(root, names.new_pkg)  # where the package is now
     for rel_path, path in files:
         if path.suffix not in PY_SUFFIXES:
             continue
@@ -1588,10 +1592,13 @@ def references_left(root: Path, names: Names) -> list[str]:
         except OSError:
             out.append(rel_path)
             continue
-        if word.search(text) is None:
+        if not _mentioned(text, names):
             continue
         code = _python_code(text, names.old_pkg)
-        if code is None or code.refs:  # `import old.x`, `from old import y` and the names bound to them
+        # `import old.x`, `from old import y` and the names bound to them (refs: before any capture
+        # by the new name), then the package references of its strings and comments (only_pkg:
+        # chosen by context, never prose)
+        if code is None or code.refs or rewrite(text, names, python=True, only_pkg=True, package_modules=modules).count:
             out.append(rel_path)
     return out
 
