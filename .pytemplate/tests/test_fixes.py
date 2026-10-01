@@ -501,10 +501,10 @@ def test_flet_build_pyproject_takes_only_tool_flet() -> None:
     out = tomllib.loads(flet.build_pyproject(make({}), data, ["rich==15.0.0", "cffi==2.0; implementation_name == 'cpython'"]))
     assert out["project"]["dependencies"] == ["rich==15.0.0", "cffi==2.0; implementation_name == 'cpython'"]
     assert out["project"]["requires-python"] == "==3.14.*"  # flet bundles its newest Python matching it
-    assert out["tool"] == {"flet": data["tool"]["flet"]}  # no [tool.other], no [tool.uv]
+    assert out["tool"] == {"flet": {**data["tool"]["flet"], "flutter": {"pubspec": {"dependency_overrides": dict(flet.FLUTTER_OVERRIDES)}}}}  # no [tool.other], no [tool.uv]
     # [tool.flet.app] alone (no bare [tool.flet] header) used to be replaced by the default;
     # its path is always the staged src/ (test_build_methods covers the flet build stage)
     only_app = tomllib.loads('[project]\nname = "a"\nversion = "1"\n\n[tool.flet.app]\nmodule = "ui"\n')
-    assert tomllib.loads(flet.build_pyproject(make({}), only_app, []))["tool"] == {"flet": {"app": {"module": "ui", "path": "src"}}}
+    assert tomllib.loads(flet.build_pyproject(make({}), only_app, []))["tool"] == {"flet": {"app": {"module": "ui", "path": "src"}, "flutter": {"pubspec": {"dependency_overrides": dict(flet.FLUTTER_OVERRIDES)}}}}
     no_flet = tomllib.loads('[project]\nname = "a"\nversion = "1"\n')
-    assert tomllib.loads(flet.build_pyproject(make({}), no_flet, []))["tool"] == {"flet": {"app": {"path": "src"}}}
+    assert tomllib.loads(flet.build_pyproject(make({}), no_flet, []))["tool"] == {"flet": {"app": {"path": "src"}, "flutter": {"pubspec": {"dependency_overrides": dict(flet.FLUTTER_OVERRIDES)}}}}

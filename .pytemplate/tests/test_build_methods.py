@@ -4772,6 +4772,8 @@ def test_flet_build_names_local_libraries_by_absolute_url(tmp_path: Path, monkey
 def test_flet_build_argv_stage_and_pyproject(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import tomllib
 
+    from runner.methods import flet
+
     out, rec = _flet_build(sandbox, monkeypatch, exclude=["assets/big"])
     work = sandbox / "build" / "flet-build" / "cpython"
     assert out == sandbox / "dist" / "fletdemo-cpython-flet-linux"
@@ -4782,7 +4784,7 @@ def test_flet_build_argv_stage_and_pyproject(sandbox: Path, monkeypatch: pytest.
     data = tomllib.loads((work / "pyproject.toml").read_text(encoding="utf-8"))
     assert data["project"]["requires-python"] == "==3.14.*"
     assert data["project"]["dependencies"] == ["flet==1.0.1", "msgpack==1.1.0"]
-    assert data["tool"]["flet"] == {"org": "com.example", "app": {"path": "src", "module": "main"}}
+    assert data["tool"]["flet"] == {"org": "com.example", "app": {"path": "src", "module": "main"}, "flutter": {"pubspec": {"dependency_overrides": dict(flet.FLUTTER_OVERRIDES)}}}
 
 
 def test_flet_build_cleanup_false_turns_flets_own_cleanup_off(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4849,9 +4851,29 @@ def test_flet_build_pyproject_points_at_the_staged_app(extra: str, expected: dic
     data = tomllib.loads('[project]\nname = "a"\nversion = "1"\n\n' + extra)
     before = json.dumps(data, sort_keys=True)
     tool = tomllib.loads(flet.build_pyproject(make({}), data, []))["tool"]["flet"]
-    assert tool == expected
+    assert tool == {**expected, "flutter": {"pubspec": {"dependency_overrides": dict(flet.FLUTTER_OVERRIDES)}}}
     assert json.dumps(data, sort_keys=True) == before  # the caller's data is not mutated
     assert ("is ignored" in capsys.readouterr().err) is ('path = "app"' in extra)
+
+
+def test_flet_build_pins_the_dart_packages_flets_template_leaves_loose() -> None:
+    """Flet 1.0.1's build template overrides jni to 1.0.0 but leaves jni_flutter free, and
+    jni_flutter 1.0.4 (October 1, 2026) declares jni ^1.0.0 while its code needs 1.1.0: every
+    Android build stopped in Dart's compile ("The generated bindings expect package:jni ^1.1.0,
+    but 1.0.x was imported"). The build project pins it through [tool.flet.flutter.pubspec]
+    dependency_overrides, which flet merges into pubspec.yaml; the project's own entries win."""
+    import tomllib
+
+    from runner.methods import flet
+
+    head = '[project]\nname = "a"\nversion = "1"\n\n'
+    tool = tomllib.loads(flet.build_pyproject(make({}), tomllib.loads(head), []))["tool"]["flet"]
+    assert tool["flutter"]["pubspec"]["dependency_overrides"] == {"jni_flutter": "1.0.3"}
+    own = head + '[tool.flet.flutter.pubspec.dependency_overrides]\njni_flutter = "1.0.2"\nshimmer = "3.0.0"\n'
+    tool = tomllib.loads(flet.build_pyproject(make({}), tomllib.loads(own), []))["tool"]["flet"]
+    assert tool["flutter"]["pubspec"]["dependency_overrides"] == {"jni_flutter": "1.0.2", "shimmer": "3.0.0"}
+    with pytest.raises(PytError, match="dependency_overrides must be a table"):
+        flet.build_pyproject(make({}), tomllib.loads(head + "[tool.flet.flutter]\npubspec = 1\n"), [])
 
 
 @pytest.mark.parametrize("target", ["host", "windows", "apk", "aab", "web"])

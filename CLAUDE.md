@@ -3065,7 +3065,9 @@ Per method:
   Flutter) and `requires-python = "==<python.cpython>.*"` (flet bundles the HIGHEST Python of
   its manifest matching it: `>=3.13` gave 3.14 and the cp313 mypyc extensions were silently not
   loaded; a minor its manifest lacks now fails loudly), plus `[project] description` (flet puts
-  it in the app's metadata; `config.toml_value` writes it). Mobile/web targets (`apk aab ipa
+  it in the app's metadata; `config.toml_value` writes it) and the Dart versions
+  `flet.FLUTTER_OVERRIDES` pins in `[tool.flet.flutter.pubspec]` dependency_overrides (jni_flutter
+  1.0.3, under the project's own entries: 15.1). Mobile/web targets (`apk aab ipa
   ios-simulator web`) cannot load extensions: a mypyc backend ships the `.py`. Desktop embeds
   the `python.cpython` minor, so the mypyc `.pyd`/`.so` files work. `cleanup = true` passes
   `--cleanup-app --cleanup-packages`; `cleanup = false` writes `app = false` and `packages =
@@ -5545,6 +5547,18 @@ Flet (flet, flet-desktop, flet pack, flet build):
   `test_build_methods.py::test_flet_build_leaves_mobile_binaries_to_flets_index`,
   `test_flet_relaxed_message_hints_at_a_lower_bound_only_when_one_is_kept`. Goes: never
   (Flet's index and Pyodide follow their own schedule).
+- **Flet 1.0.1's build template pins jni but not jni_flutter** (DEFECT, flet-cli 1.0.1 with
+  jni_flutter 1.0.4): the template's `pubspec.yaml` overrides jni to 1.0.0, and jni_flutter 1.0.4
+  (published on October 1, 2026) declares `jni: ^1.0.0` while its generated bindings need 1.1.0,
+  so every `apk` and `aab` build stopped in Dart's compile ("The generated bindings expect
+  package:jni ^1.1.0, but 1.0.x was imported"); an override ignores the other packages' bounds,
+  so a corrected jni_flutter release would not help while the template keeps it. Up: none found.
+  Fix: `methods.flet.FLUTTER_OVERRIDES` pins jni_flutter 1.0.3 through the build project's
+  `[tool.flet.flutter.pubspec]` dependency_overrides, which flet merges into `pubspec.yaml`
+  (`methods.flet.build_pyproject`; the project's own entry wins) (10). Test:
+  `test_build_methods.py::test_flet_build_pins_the_dart_packages_flets_template_leaves_loose`;
+  template-flet.yml's apk job. Goes: when the preset's Flet release overrides jni and
+  jni_flutter in agreement, or no longer overrides jni.
 - **`flet build` looks for `<work>/<path>/main.py`** (LIMITATION): another `[tool.flet.app]
   path` aborted after installing Flutter. Fix: `methods.flet.build_pyproject` forces
   `methods.flet.STAGE_APP` with a warning (10). Test:

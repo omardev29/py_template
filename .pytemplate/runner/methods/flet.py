@@ -36,6 +36,11 @@ from . import common
 MOBILE_WEB = {"apk", "aab", "ipa", "ios-simulator", "web"}
 STAGE_APP = "src"  # build() stages the app in <work>/src: [tool.flet.app] path must point there
 DESKTOP_CLIENT = "flet-desktop"  # the client `flet run` and `flet pack` start: no flet build app does
+# Dart packages the build's Flutter project must get at these versions ([tool.flet.flutter.pubspec]
+# dependency_overrides, unless the project sets its own): Flet 1.0.1's build template overrides
+# jni to 1.0.0 but not jni_flutter, whose 1.0.4 (October 1, 2026) declares jni ^1.0.0 and needs
+# 1.1.0, so every Android build failed in Dart's compile (CLAUDE.md 15.1)
+FLUTTER_OVERRIDES = {"jni_flutter": "1.0.3"}
 # sys.platform values as platform.system() names the same platform: what target_markers writes
 PLATFORM_SYSTEM = {"android": "Android", "darwin": "Darwin", "emscripten": "Emscripten", "ios": "iOS", "linux": "Linux", "win32": "Windows"}
 _SYS_PLATFORM_MARKER = re.compile(r"\bsys_platform\s*(==|!=)\s*(['\"])([^'\"]*)\2")
@@ -138,7 +143,9 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
     its newest Python (3.14), which silently ignored the cp313 extensions. [project] description
     is kept (flet puts it in the app's metadata). With [deploy.flet] cleanup = false,
     [tool.flet.cleanup] app and packages default to false: flet cleans the packages unless told
-    not to, and its --cleanup-* flags have no negative form.
+    not to, and its --cleanup-* flags have no negative form. FLUTTER_OVERRIDES go into
+    [tool.flet.flutter.pubspec] dependency_overrides, which flet merges into the Flutter
+    project's pubspec.yaml, under the project's own entries.
     """
     project = data["project"]
     tool_flet = copy.deepcopy(data.get("tool", {}).get("flet") or {})
@@ -154,6 +161,13 @@ def build_pyproject(cfg: Config, data: dict[str, Any], pins: list[str]) -> str:
             raise PytError("pyproject.toml: [tool.flet] cleanup must be a table ([tool.flet.cleanup])")
         cleanup.setdefault("app", False)
         cleanup.setdefault("packages", False)
+    flutter = tool_flet.setdefault("flutter", {})
+    pubspec = flutter.setdefault("pubspec", {}) if isinstance(flutter, dict) else None
+    overrides = pubspec.setdefault("dependency_overrides", {}) if isinstance(pubspec, dict) else None
+    if not isinstance(overrides, dict):
+        raise PytError("pyproject.toml: [tool.flet] flutter.pubspec.dependency_overrides must be a table")
+    for name, version in FLUTTER_OVERRIDES.items():
+        overrides.setdefault(name, version)
     description = project.get("description")
     lines = [
         "[project]",
