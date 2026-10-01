@@ -48,6 +48,11 @@ NON_NATIVE_BASES = {
     **{f"{module}.NamedTuple": "a NamedTuple" for module in ("typing", "typing_extensions")},
     **{f"{module}.TypedDict": "a TypedDict" for module in ("typing", "typing_extensions", "mypy_extensions")},
 }
+# mypy's PROTOCOL_NAMES and RUNTIME_PROTOCOL_DECOS (test_mypyc_core checks both against the locked
+# mypy): mypyc compiles a Protocol class (a trait) without typing.Protocol among its runtime bases,
+# so @runtime_checkable raises TypeError at import, native or not (_runtime_checkable_protocol)
+PROTOCOL_BASES = frozenset({"typing.Protocol", "typing_extensions.Protocol"})
+RUNTIME_CHECKABLE = frozenset({"typing.runtime_checkable", "typing_extensions.runtime_checkable", "typing_extensions.runtime"})
 
 
 @dataclass(frozen=True)
@@ -379,7 +384,7 @@ def _add_import(aliases: dict[str, str], node: ast.Import | ast.ImportFrom, pack
             for name, full in resolver.star(module).items():
                 aliases.setdefault(name, full)
         else:  # mypy resolves star imports too
-            for full in (*NATIVE_CLASS_DECORATORS, *NATIVE_METACLASSES, *NON_NATIVE_BASES):
+            for full in (*NATIVE_CLASS_DECORATORS, *NATIVE_METACLASSES, *NON_NATIVE_BASES, *PROTOCOL_BASES, *RUNTIME_CHECKABLE):
                 owner, _, name = full.rpartition(".")
                 if owner == module:
                     aliases.setdefault(name, full)
@@ -442,6 +447,17 @@ def _is_explicitly_non_native(node: ast.expr) -> bool:
         and _decorator_name(node).rpartition(".")[2] == "mypyc_attr"
         and any(k.arg == "native_class" and isinstance(k.value, ast.Constant) and k.value.value is False for k in node.keywords)
     )
+
+
+def _runtime_checkable_protocol(node: ast.ClassDef, aliases: dict[str, str], resolver: _Resolver | None = None) -> bool:
+    """A Protocol class (PROTOCOL_BASES, `Protocol[T]` too) with @runtime_checkable: mypyc
+    compiles it as a trait and builds its runtime class without typing.Protocol, so the decorator
+    raises TypeError ("can be only applied to protocol classes") at import, whatever else the class
+    carries: @mypyc_attr(native_class=False) silenced the slow-class rule, check passed, and every
+    compiled build failed at import."""
+    bases = {_full_name(_decorator_name(b.value if isinstance(b, ast.Subscript) else b), aliases, resolver) for b in node.bases}
+    decorators = {_full_name(_decorator_name(d), aliases, resolver) for d in node.decorator_list}
+    return bool(bases & PROTOCOL_BASES) and bool(decorators & RUNTIME_CHECKABLE)
 
 
 def _non_native_kind(node: ast.ClassDef, aliases: dict[str, str], local: dict[str, str], resolver: _Resolver | None = None) -> str | None:
@@ -637,9 +653,16 @@ def lint_file(cfg: Config, path: Path) -> list[Finding]:
                     )
         elif isinstance(node, ast.ClassDef):
             decorators = node.decorator_list
-            if not any(_is_explicitly_non_native(d) for d in decorators):
+            scope = aliases.get(node, {})
+            if _runtime_checkable_protocol(node, scope, resolver):  # no slow class works: no silencer
+                add(
+                    node,
+                    f"class '{node.name}' is a @runtime_checkable Protocol: mypyc compiles a Protocol without its "
+                    "protocol nature, and @runtime_checkable raises TypeError at import, with "
+                    "@mypyc_attr(native_class=False) too. Define it in a boundary module",
+                )
+            elif not any(_is_explicitly_non_native(d) for d in decorators):
                 written = [_decorator_name(d) for d in decorators]
-                scope = aliases.get(node, {})
                 bad = [w or "<expression>" for w in written if _full_name(w, scope, resolver) not in NATIVE_CLASS_DECORATORS]
                 why = f"uses @{bad[0]}" if bad else kinds.get(node)
                 if why and not bad and "has the metaclass" not in why:

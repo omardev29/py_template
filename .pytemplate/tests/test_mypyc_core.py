@@ -1304,6 +1304,98 @@ def test_real_compile_fails_exactly_where_lintc_says_mypy_skips_what_runs(tmp_pa
         assert {f.line for f in found if f.message == lintc.NEVER_READ_BUT_RUN} == _marked(source, "# never read")
 
 
+RUNTIME_PROTOCOLS = {
+    # module name -> source: each defines HasLen, and `size` uses it at runtime
+    "plain": "from typing import Protocol, runtime_checkable\n\n\n@runtime_checkable\nclass HasLen(Protocol):\n    def __len__(self) -> int: ...\n",
+    "silenced": (
+        "from typing import Protocol, runtime_checkable\n\nfrom mypy_extensions import mypyc_attr\n\n\n"
+        "@runtime_checkable\n@mypyc_attr(native_class=False)\nclass HasLen(Protocol):\n    def __len__(self) -> int: ...\n"
+    ),
+    "silenced_first": (
+        "import typing as t\n\nfrom mypy_extensions import mypyc_attr\n\n\n"
+        "@mypyc_attr(native_class=False)\n@t.runtime_checkable\nclass HasLen(t.Protocol):\n    def __len__(self) -> int: ...\n"
+    ),
+    "extensions": (
+        "from typing import TypeVar\n\nimport typing_extensions\n\nT = TypeVar('T', covariant=True)\n\n\n"
+        "@typing_extensions.runtime\nclass HasLen(typing_extensions.Protocol[T]):\n    def __len__(self) -> int: ...\n\n"
+        "    def first(self) -> T: ...\n"
+    ),
+}
+SIZE = "\n\ndef size(x: object) -> int:\n    return len(x) if isinstance(x, HasLen) else -1\n"
+
+
+def test_lintc_flags_a_runtime_checkable_protocol_whatever_silences_it(tmp_path: Path) -> None:
+    """mypyc compiles a Protocol class (a trait) without its protocol nature: @runtime_checkable
+    raises TypeError at import. lintc called it a slow class that works and offered
+    @mypyc_attr(native_class=False), which silenced it: check and the build's checks passed, and
+    the compiled module still failed at import. Every spelling of mypy's names; a Protocol used
+    only for typing is fine."""
+    for name, source in RUNTIME_PROTOCOLS.items():
+        found = [(f.line, f.message) for f in _lint(tmp_path, source + SIZE)]
+        line = next(n for n, text in enumerate(source.splitlines(), 1) if text.startswith("class HasLen"))
+        assert len(found) == 1 and found[0][0] == line, (name, found)
+        message = found[0][1]
+        assert "is a @runtime_checkable Protocol" in message and "TypeError at import" in message and "boundary module" in message
+        assert "if intended" not in message, message  # no silencer is offered: none works
+    typing_only = "from typing import Protocol\n\n\nclass HasLen(Protocol):\n    def __len__(self) -> int: ...\n\n\ndef size(x: HasLen) -> int:\n    return len(x)\n"
+    assert _lint(tmp_path, typing_only) == []
+    star = "from typing import *\n\n\n@runtime_checkable\nclass HasLen(Protocol):\n    def __len__(self) -> int: ...\n"
+    assert [f.line for f in _lint(tmp_path, star)] == [5]
+
+
+@needs_venv
+def test_lintc_protocol_names_follow_the_locked_mypy() -> None:
+    """A mypy bump that changes the names it reads as Protocol or runtime_checkable must fail selftest."""
+    code = (
+        "from mypy.nodes import RUNTIME_PROTOCOL_DECOS\n"
+        "from mypy.types import PROTOCOL_NAMES\n"
+        "print(' '.join(sorted(PROTOCOL_NAMES)) + '|' + ' '.join(sorted(RUNTIME_PROTOCOL_DECOS)))\n"
+    )
+    r = subprocess.run([str(TOOL_PYTHON), "-I", "-c", code], capture_output=True, text=True, check=True)
+    bases, decorators = r.stdout.strip().split("|")
+    assert set(bases.split()) == set(lintc.PROTOCOL_BASES)
+    assert set(decorators.split()) == set(lintc.RUNTIME_CHECKABLE)
+
+
+@needs_compiler
+def test_real_compile_a_runtime_checkable_protocol_fails_at_import(tmp_path: Path) -> None:
+    """The locked mypyc: each @runtime_checkable Protocol of RUNTIME_PROTOCOLS fails at import,
+    @mypyc_attr(native_class=False) in either order too, and a Protocol used for typing only
+    imports and works. If this fails after a mypy bump, mypyc keeps a Protocol's nature now and
+    the rule can go (lintc._runtime_checkable_protocol)."""
+    names = [*RUNTIME_PROTOCOLS, "typing_only"]
+    for name, source in RUNTIME_PROTOCOLS.items():
+        (tmp_path / f"{name}.py").write_text(source + SIZE, encoding="utf-8")
+    (tmp_path / "typing_only.py").write_text(
+        "from typing import Protocol\n\n\nclass HasLen(Protocol):\n    def __len__(self) -> int: ...\n\n\n"
+        "def size(x: HasLen) -> int:\n    return len(x)\n",
+        encoding="utf-8",
+    )
+    r = subprocess.run(
+        [str(TOOL_PYTHON), "-m", "mypyc", *(f"{n}.py" for n in names)], cwd=tmp_path, capture_output=True, text=True, timeout=600, check=False
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    probe = (
+        "import importlib, json, sys\n"
+        "sys.path.insert(0, '.')\n"
+        "out = {}\n"
+        f"for name in {names!r}:\n"
+        "    try:\n"
+        "        mod = importlib.import_module(name)\n"
+        "        assert not mod.__file__.endswith('.py'), mod.__file__\n"
+        "        out[name] = ['ran', mod.size([1, 2])]\n"
+        "    except TypeError as e:\n"
+        "        out[name] = ['TypeError', str(e)]\n"
+        "print('PTPROTO' + json.dumps(out))\n"
+    )
+    r = subprocess.run([str(TOOL_PYTHON), "-c", probe], cwd=tmp_path, capture_output=True, text=True, timeout=120, check=False)
+    assert r.returncode == 0 and "PTPROTO" in r.stdout, r.stdout + r.stderr
+    results = json.loads(r.stdout.split("PTPROTO", 1)[1])
+    assert results.pop("typing_only") == ["ran", 2], results
+    for name, (kind, error) in results.items():
+        assert kind == "TypeError" and "protocol" in error, (name, results)
+
+
 @pytest.mark.skipif(not hasattr(ast, "TemplateStr"), reason="t-strings need Python 3.14")
 def test_lintc_flags_t_strings(tmp_path: Path) -> None:
     found = _lint(tmp_path, "name = 'x'\ngreeting = t'hello {name}'\n")

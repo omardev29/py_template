@@ -725,7 +725,10 @@ again.
   `@define`, `@frozen` and `@mutable` included, turns the class into a slower regular Python
   class (mark it `@mypyc_attr(native_class=False)` when that is intended). So do a metaclass other
   than `ABCMeta` (every `Enum` has one) and a `NamedTuple` or `TypedDict` class; those three work
-  compiled, only slower, so `./pyt check` notes them as warnings that never block.
+  compiled, only slower, so `./pyt check` notes them as warnings that never block. A `Protocol`
+  works compiled for typing, but mypyc drops its protocol nature: a `@runtime_checkable` one
+  raises `TypeError` at import, `@mypyc_attr(native_class=False)` or not (mypyc issue 909), so
+  define it in a boundary module (`./pyt check` says so).
 - **Concrete types**: `list[bool]` compiles to direct accesses, `bytearray` takes the generic
   path (sieve: 4.2x vs 1.9x).
 - `./pyt report --open` marks every generic operation in red ("make it Final", "Generic `*`").

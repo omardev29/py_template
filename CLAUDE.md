@@ -2686,6 +2686,13 @@ Formats:
     (`hooks.check_mypyc`): an Enum, a NamedTuple or a TypedDict works compiled, only slower, and
     blocking every Enum of a mypyc project was no help; a metaclass of the user's own stays a
     finding like a foreign decorator.
+  - A `@runtime_checkable` Protocol (`_runtime_checkable_protocol`, `PROTOCOL_BASES` and
+    `RUNTIME_CHECKABLE` mirror mypy's `PROTOCOL_NAMES` and `RUNTIME_PROTOCOL_DECOS`, drift test):
+    mypyc compiles a Protocol as a trait whose runtime class lacks `typing.Protocol`, so the
+    decorator raises TypeError at import, native or not (15.1). Its own error, which
+    `@mypyc_attr(native_class=False)` does not silence and which names the boundary module only:
+    the slow-class message offered that silencer, check then passed and every compiled build
+    failed at import (`test_mypyc_core.test_real_compile_a_runtime_checkable_protocol_fails_at_import`).
   - Nested classes and classes inside functions, each reported once (from its nearest class
     or function), and classes inside a module-level if/try/with/for/while/match block
     (`lintc._block_classes`: mypyc compiles only the classes of the module's own statements, and
@@ -5623,6 +5630,14 @@ mypy and mypyc:
   `test_lintc_flags_classes_mypyc_compiles_as_python_classes_for_their_metaclass`,
   `test_lintc_flags_t_strings`, `test_runner.py::test_lintc_rules`. Goes: per rule, when mypyc
   supports it.
+- **mypyc drops a Protocol's protocol nature** (DEFECT): it compiles a Protocol class as a trait
+  whose runtime class has no `typing.Protocol` base, so `@runtime_checkable` raises TypeError
+  ("can be only applied to protocol classes") at import, `@mypyc_attr(native_class=False)` or
+  not. Up: mypyc/mypyc#909 (open). Fix: the `lintc` rule (`lintc._runtime_checkable_protocol`,
+  9): define it in a boundary module. Test:
+  `test_mypyc_core.py::test_real_compile_a_runtime_checkable_protocol_fails_at_import` (a pin:
+  it fails once mypyc keeps the protocol), `test_lintc_flags_a_runtime_checkable_protocol_whatever_silences_it`,
+  `test_lintc_protocol_names_follow_the_locked_mypy`. Goes: when that pin fails.
 - **`librt` comes only with mypy** (LIMITATION): compiled code that imports mypyc's runtime
   library lacked it in pyz, portable and wheel builds (dev group only), and PyPy has none. Fix:
   the `librt` rule of `lintc` (9). Test:
