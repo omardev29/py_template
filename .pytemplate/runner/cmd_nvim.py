@@ -819,7 +819,7 @@ def cmd_bootstrap(nv: Nvim) -> int:
 
 
 def cmd_sync(nv: Nvim) -> int:
-    """nvim sync: `nvim --headless "+Lazy! install" +qa` from the project (installs what .lazy.lua adds).
+    """nvim sync: `nvim --headless "+Lazy! install" +qa!` from the project (installs what .lazy.lua adds).
 
     install, never sync: Lazy! sync would also update every plugin of the user's config
     (rewriting lazy-lock.json) and clean the plugins its spec does not name.
@@ -840,21 +840,37 @@ def cmd_sync(nv: Nvim) -> int:
     # Headless Neovim exits 0 after a Lua error (a clone that failed: "Too many rounds of missing
     # plugins"; no lazy.nvim: "E492: Not an editor command"), so lazy.nvim itself is asked
     # afterwards which plugins are installed (SYNC_CHECK_LUA, run from a file: short argv).
-    argv = [nv.exe, "--headless", "+Lazy! install", "+lua dofile(vim.env.PT_NVIM_CHECK)", "+qa"]
+    # The prompts answer at once (NO_PROMPTS_LUA, before the config runs), and `qa!` quits
+    # whatever buffer the config left modified (`qa` failed with E37 and Neovim went on running).
+    argv = [nv.exe, "--headless", "--cmd", "lua dofile(vim.env.PT_NVIM_PROMPTS)", "+Lazy! install", "+lua dofile(vim.env.PT_NVIM_CHECK)", "+qa!"]
     ui.command(proc.show(argv))
     if proc.DRY_RUN:
         return 0
     with tempfile.TemporaryDirectory(prefix="pt-nvim-", ignore_cleanup_errors=True) as tmp:
         env = proc.base_env()
         env.setdefault("NVIM_LOG_FILE", str(Path(tmp) / "nvim.log"))  # else it may land in ROOT
-        check_lua, result = Path(tmp) / "check.lua", Path(tmp) / "plugins.json"
+        check_lua, result, prompts = Path(tmp) / "check.lua", Path(tmp) / "plugins.json", Path(tmp) / "prompts.lua"
         check_lua.write_text(SYNC_CHECK_LUA, encoding="utf-8", newline="\n")
-        env.update(PT_NVIM_CHECK=str(check_lua), PT_NVIM_RESULT=str(result))
-        code = subprocess.run(argv, cwd=ROOT, env=env, stdin=subprocess.DEVNULL, check=False).returncode
+        prompts.write_text(NO_PROMPTS_LUA, encoding="utf-8", newline="\n")
+        env.update(PT_NVIM_CHECK=str(check_lua), PT_NVIM_RESULT=str(result), PT_NVIM_PROMPTS=str(prompts))
+        try:
+            code: int | None = subprocess.run(argv, cwd=ROOT, env=env, stdin=subprocess.DEVNULL, check=False, timeout=SYNC_TIMEOUT).returncode
+        except subprocess.TimeoutExpired:  # subprocess.run has stopped it
+            code = None
         report = _read_report(result)
     ui.report("")  # headless Neovim ends its last message without a line break: the result gets its own
+    if code is None:
+        raise PytError(
+            f"Neovim did not finish within {SYNC_TIMEOUT / 60:g} minutes and was stopped: does your config wait at a prompt "
+            "(see its messages above)? Start Neovim in the project to answer it, then run ./pyt nvim sync again",
+            1,
+        )
     if code != 0:
-        raise proc.CommandFailed(argv, code)
+        message = f"Neovim stopped with exit code {proc.exit_code(code)} before lazy.nvim could report: see its messages above (no network, a proxy?)"
+        lazy = nv.data / "lazy" / "lazy.nvim"
+        if not lazy.is_dir():
+            message += f"; {lazy}, where the LazyVim starter installs lazy.nvim, does not exist yet"
+        raise PytError(message + ". Run ./pyt nvim sync again, or start Neovim in the project", 1)
     if report is None:
         raise PytError("Neovim did not say which plugins are installed (see its messages above): run ./pyt nvim sync again", 1)
     if report.get("lazy") is not True:
@@ -872,6 +888,21 @@ def cmd_sync(nv: Nvim) -> int:
     return 0
 
 
+# A first install of a whole LazyVim on a slow line takes minutes; past this, Neovim waits at
+# something no headless run can answer, and `nvim sync` stops it (it never returned).
+SYNC_TIMEOUT = 1800.0
+# Run by `nvim sync` before the user's config (--cmd): headless Neovim waits for ever at a prompt,
+# whose keys no UI can give (stdin is /dev/null), and the LazyVim starter's bootstrap calls
+# getchar() ("Press any key to exit...") when its clone of lazy.nvim fails (offline, a proxy). The
+# prompts of vim.fn (and vim.ui.input/select, which call them) answer at once, as Esc would; a
+# Vimscript call is not covered: SYNC_TIMEOUT ends that one.
+NO_PROMPTS_LUA = """\
+vim.fn.getchar = function() return 27 end
+vim.fn.getcharstr = function() return "\\27" end
+vim.fn.input = function() return "" end
+vim.fn.inputsecret = vim.fn.input
+vim.fn.inputlist = function() return 0 end
+"""
 # Run by `nvim sync` after `Lazy! install` (which waits): lazy.nvim's own view of every plugin
 # of the spec, written as JSON to $PT_NVIM_RESULT (the user's terminal keeps Neovim's output).
 SYNC_CHECK_LUA = """\

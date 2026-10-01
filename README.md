@@ -1464,7 +1464,9 @@ LazyVim, or lazy.nvim installed LazyVim in `stdpath("data")/lazy`; a plain lazy.
 backs up `lazyvim.json` before changing it, and refuses (exit 3) until LazyVim has created that
 file (start Neovim once). `sync` installs only (it never updates or removes your plugins) and
 needs the trust first (exit 3 otherwise); it then asks lazy.nvim whether every plugin is
-installed and exits 1, naming them, when one is not (no network, a proxy). Then start Neovim inside the project: `nvim` from the
+installed and exits 1, naming them, when one is not (no network, a proxy). It never waits at a
+prompt it cannot show: the LazyVim starter's "Press any key to exit..." after a failed clone of
+lazy.nvim ends it with exit 1, and a Neovim still running after 30 minutes is stopped. Then start Neovim inside the project: `nvim` from the
 project folder or any subfolder.
 
 **How it works.** lazy.nvim loads `.lazy.lua` from the folder where Neovim starts (or the

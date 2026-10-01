@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -861,7 +862,8 @@ def test_nvim_sync_installs_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert len(runs) == 1
     argv = [str(a) for a in runs[0]["argv"]]  # type: ignore[attr-defined]
     assert "+Lazy! install" in argv and not [a for a in argv if any(w in a for w in ("sync", "update", "clean", "restore"))]
-    assert argv.index("+Lazy! install") < argv.index("+lua dofile(vim.env.PT_NVIM_CHECK)") < argv.index("+qa")
+    assert argv.index("+Lazy! install") < argv.index("+lua dofile(vim.env.PT_NVIM_CHECK)") < argv.index("+qa!")
+    assert argv.index("--cmd") < argv.index("+Lazy! install") and runs[0]["timeout"] == cmd_nvim.SYNC_TIMEOUT
     assert not [a for a in argv if '"' in a], "the arguments cross the Windows command line"
     assert runs[0]["cwd"] == cmd_nvim.ROOT
     env = runs[0]["env"]
@@ -968,6 +970,72 @@ def test_real_nvim_sync_checks_the_plugins(tmp_path: Path, monkeypatch: pytest.M
         assert e.value.code == 1 and "could not install: broken" in str(e.value) and "good" not in str(e.value)
     else:
         assert e.value.code == 3 and "lazy.nvim did not start" in str(e.value)
+
+
+# The LazyVim starter's bootstrap when its clone of lazy.nvim fails (offline, a proxy): it waits
+# for a key, which no one can press in a headless run (stdin is /dev/null).
+STARTER_CLONE_FAILED = r"""
+vim.api.nvim_echo({ { "Failed to clone lazy.nvim:\n", "ErrorMsg" }, { "fatal: unable to access" }, { "\nPress any key to exit..." } }, true, {})
+vim.fn.getchar()
+os.exit(1)
+"""
+
+
+def _real_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, init_lua: str, *, cap: float = 30) -> cmd_nvim.Nvim:
+    """A real Neovim whose config is `init_lua` (isolated XDG dirs), .lazy.lua taken as trusted.
+    Every subprocess.run of cmd_nvim is capped at `cap` seconds: a sync that hangs fails the test
+    (subprocess.TimeoutExpired, which is no PytError) instead of hanging it."""
+    exe = shutil.which("nvim")
+    if exe is None:
+        pytest.skip("nvim not in PATH")
+    for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.setenv(var, str(tmp_path / var.lower()))
+    monkeypatch.delenv("NVIM_APPNAME", raising=False)
+    monkeypatch.setenv("PT_WITH_LAZY", "1")
+    init = tmp_path / "xdg_config_home" / "nvim" / "init.lua"
+    init.parent.mkdir(parents=True)
+    init.write_text(init_lua, encoding="utf-8")
+    nv = cmd_nvim.Nvim(exe, (0, 12, 5), init.parent, tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    (nv.data / "lazy" / "LazyVim").mkdir(parents=True)
+    monkeypatch.setattr(cmd_nvim, "trust_status", lambda db, f: cmd_nvim.Trust("trusted", str(f), "x", "x"))
+    real_run = subprocess.run
+
+    def capped(*args: Any, **kw: Any) -> subprocess.CompletedProcess[Any]:
+        kw["timeout"] = min(float(kw.get("timeout") or cap), cap)
+        return real_run(*args, **kw)
+
+    monkeypatch.setattr(cmd_nvim.subprocess, "run", capped)
+    return nv
+
+
+def test_nvim_sync_never_waits_at_the_starters_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Offline (or behind a proxy) with lazy.nvim not installed yet, the LazyVim starter's
+    bootstrap prints "Press any key to exit..." and calls getchar(), which headless Neovim waits at
+    for ever: `./pyt nvim sync` never returned (A9-03). The prompt answers at once, as Esc would,
+    the starter exits 1, and sync says so."""
+    nv = _real_sync(tmp_path, monkeypatch, STARTER_CLONE_FAILED)
+    started = time.monotonic()
+    with pytest.raises(PytError, match="exit code 1") as e:
+        cmd_nvim.cmd_sync(nv)
+    assert e.value.code == 1 and time.monotonic() - started < 25
+    assert "no network, a proxy" in str(e.value) and "lazy.nvim" in str(e.value)
+
+
+def test_nvim_sync_quits_whatever_the_config_left_modified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A config that leaves a modified buffer made the closing `:qa` fail (E37, E162), and the
+    headless Neovim kept running: `:qa!`."""
+    nv = _real_sync(tmp_path, monkeypatch, FAKE_LAZY.replace("PT_BROKEN = { _ = { installed = false } },", "") + 'vim.api.nvim_buf_set_lines(0, 0, -1, false, { "x" })\n')
+    assert cmd_nvim.cmd_sync(nv) == 0
+
+
+def test_nvim_sync_stops_a_neovim_that_never_ends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the answered prompts do not cover (a Vimscript getchar(), input()) ends at
+    SYNC_TIMEOUT: Neovim is stopped and the error names the cause."""
+    nv = _real_sync(tmp_path, monkeypatch, 'vim.cmd("call getchar()")\n')
+    monkeypatch.setattr(cmd_nvim, "SYNC_TIMEOUT", 3.0, raising=False)
+    with pytest.raises(PytError, match="did not finish") as e:
+        cmd_nvim.cmd_sync(nv)
+    assert e.value.code == 1 and "prompt" in str(e.value)
 
 
 @pytest.mark.parametrize("state", ["untrusted", "changed", "denied"])

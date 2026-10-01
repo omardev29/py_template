@@ -4025,10 +4025,18 @@ LazyVim wiring:
   the JSON: `test_extras_in_a_config_that_cannot_be_read`).
   `bootstrap` clones the LazyVim starter (its newest
   commit, as LazyVim's own install steps do) and deletes its `.git`, only when the config dir
-  does not exist (a `.git` it cannot delete: exit 3, delete it by hand). `sync` = `nvim --headless "+Lazy! install" "+lua dofile(vim.env.PT_NVIM_CHECK)"
-  +qa` with cwd = ROOT and `NVIM_LOG_FILE` in a temp dir: install only (`Lazy! sync` would also
+  does not exist (a `.git` it cannot delete: exit 3, delete it by hand). `sync` = `nvim --headless --cmd "lua dofile(vim.env.PT_NVIM_PROMPTS)"
+  "+Lazy! install" "+lua dofile(vim.env.PT_NVIM_CHECK)" +qa!` with cwd = ROOT and `NVIM_LOG_FILE` in a temp dir: install only (`Lazy! sync` would also
   update every plugin of the user's config, rewriting their `lazy-lock.json`, and clean the
-  plugins its spec does not name). It refuses with exit 3 while `.lazy.lua` is not trusted (the
+  plugins its spec does not name). Headless Neovim waits for ever at a prompt: the prompts of
+  `vim.fn` answer at once, as Esc would, before the config runs (`cmd_nvim.NO_PROMPTS_LUA`: the
+  LazyVim starter's bootstrap calls `getchar()` after a failed clone of lazy.nvim, offline or
+  behind a proxy, and sync never returned; it now says the exit code and the missing lazy.nvim,
+  exit 1), `qa!` quits whatever buffer the config left modified (`qa` failed with E37 and Neovim
+  ran on), and a Neovim still running after `cmd_nvim.SYNC_TIMEOUT` (30 minutes: a Vimscript
+  `getchar()`) is stopped, exit 1 (`test_nvim_sync_never_waits_at_the_starters_prompt`,
+  `test_nvim_sync_quits_whatever_the_config_left_modified`,
+  `test_nvim_sync_stops_a_neovim_that_never_ends`). It refuses with exit 3 while `.lazy.lua` is not trusted (the
   trust prompt would hang a headless run, and from any other folder the project's plugins are
   not in the spec). Neovim's exit code proves nothing (0 after a failed clone), so the check
   file (`cmd_nvim.SYNC_CHECK_LUA`, written to the temp dir) asks lazy.nvim for every plugin's
@@ -6241,14 +6249,20 @@ Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
   adapter. Fix: `init.uv_candidates` walks PATH's absolute folders itself on Windows (12.2). Test:
   `test_nvim_render.py::test_lua_modules_in_headless_neovim`. Goes: never.
 - **Headless Neovim** (LIMITATION): a Lua error still exits 0, `confirm()` never returns,
-  `VeryLazy` never fires, and an unwritable `NVIM_LOG_FILE` drops `nvim.log` into the cwd. Fix:
+  `getchar()` and `input()` wait for ever (stdin is /dev/null; 0.11.2 and 0.12.5), `:qa` fails
+  with a modified buffer and Neovim runs on, `VeryLazy` never fires, and an unwritable
+  `NVIM_LOG_FILE` drops `nvim.log` into the cwd. Fix:
   the `PTNVIM{json}` marker of `cmd_nvim.headless`; `nvim sync` asks lazy.nvim afterwards which
   plugins are installed (`cmd_nvim.SYNC_CHECK_LUA`: a failed clone exited 0 and printed "ok
-  plugins installed"); trust through the API first (`nvim sync` refuses while `.lazy.lua` is
+  plugins installed"), answers the prompts of `vim.fn` before the config runs
+  (`cmd_nvim.NO_PROMPTS_LUA`: the LazyVim starter's `getchar()` after a failed clone of
+  lazy.nvim hung it), quits with `qa!` and stops a Neovim that never ends (`SYNC_TIMEOUT`); trust
+  through the API first (`nvim sync` refuses while `.lazy.lua` is
   untrusted); `doautocmd UIEnter` in `nvimtest`; `NVIM_LOG_FILE` always set (12.2). Test:
   `test_cmd_nvim.py::test_parse_marker_skips_noise`,
   `test_nvim_sync_refuses_an_untrusted_lazy_lua`, `test_nvim_sync_installs_only`,
   `test_nvim_sync_fails_when_a_plugin_is_not_installed`,
+  `test_nvim_sync_never_waits_at_the_starters_prompt`, `test_nvim_sync_stops_a_neovim_that_never_ends`,
   `test_real_nvim_sync_checks_the_plugins`, `test_real_nvim_query_and_trust`. Goes: never.
 - **lazy.nvim installs a fresh config in rounds and prunes the lock between them** (DEFECT):
   LazyVim's own plugins came at their newest commits despite the pinned lock. Up: cf.
