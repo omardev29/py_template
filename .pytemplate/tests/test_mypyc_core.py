@@ -3568,7 +3568,7 @@ def test_wheel_pyproject_holds_a_description_with_any_character(wheel_project: P
     # the build project of every wheel build, at a column that showed no character
     from runner.methods import wheel
 
-    description = "Tab\tand DEL\x7f end, \x00 \x1f \x80   \"q\" \\"
+    description = "Tab\tand DEL\x7f end, \x00 \x1f \x80 \u2028 \"q\" \\"
     pyproject = wheel.PYPROJECT
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     pyproject.write_text(
