@@ -2869,11 +2869,13 @@ Per method:
   whose `**/*` skips them, and the wheel shipped without `src/assets/.fonts/` or `data/.keep`
   without a word, 15.1); `wheel._copy_tree` copies it as the stage does (`mypyc.walk`: a
   symlinked folder followed, a link back up its own path not, a broken link a warning; a file it
-  cannot copy a PytError naming it): shutil.copytree ended on a dangling link or a cycle in an
-  internal-error traceback (`test_wheel_copies_through_links_like_the_stage`);
+  cannot copy a PytError naming it, `wheel._copy_file`): shutil.copytree ended on a dangling link
+  or a cycle in an internal-error traceback (`test_wheel_copies_through_links_like_the_stage`);
   assets go into `<pkg>/assets`. The top-level entries of `src/` that `compile.modules` names
   besides the package (`wheel._outside_package`: a lone module becomes `[tool.setuptools]
-  py-modules`, another package gets its package data) are copied too, for every backend: only
+  py-modules`, another package gets its package data) are copied too, for every backend, a lone
+  module through `wheel._copy_file` as well (one it could not read, another user's or a named
+  pipe, was an internal-error traceback: `test_wheel_names_a_lone_module_it_cannot_copy`): only
   `src/<pkg>/` was, so mypycify stopped with "Cannot read file 'src/fastbench.py'" and a
   cpython wheel left the module out. `app.gui` -> `[project.gui-scripts]` (no console window on
   Windows), else `[project.scripts]`. mypyc -> platform wheel; cpython/pypy -> `py3-none-any`

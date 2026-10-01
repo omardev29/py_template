@@ -294,8 +294,6 @@ def _copy_tree(src: Path, dst: Path) -> None:
     until the path was too long, and stopped on a dangling link, in an internal-error traceback.
     Every copy is owner-writable (mypyc.copy_writable): build_ext --inplace writes next to the
     sources, and the next build must be able to delete them."""
-    from ..cli import NO_ROOM
-
     dst.mkdir(parents=True, exist_ok=True)
     for path in mypyc.walk(src):
         target = dst / path.relative_to(src)
@@ -304,12 +302,21 @@ def _copy_tree(src: Path, dst: Path) -> None:
         elif not path.exists():
             ui.warn(f"{rel(path)}: broken symbolic link, not copied")
         elif not _stray_output(path):
-            try:
-                mypyc.copy_writable(os.fspath(path), os.fspath(target))
-            except OSError as e:
-                if e.errno in NO_ROOM:
-                    raise  # a full disk: cli.main names the file
-                raise PytError(f"wheel: cannot copy {rel(path)}: {e.strerror or e}") from None
+            _copy_file(path, target)
+
+
+def _copy_file(path: Path, target: Path) -> None:
+    """Copy one file of src/ into the build project: one it cannot copy (another user's, a file
+    another program holds open, a named pipe) is one error naming it, never an internal-error
+    traceback (a lone top-level module of compile.modules was one); a full disk stays itself."""
+    from ..cli import NO_ROOM
+
+    try:
+        mypyc.copy_writable(os.fspath(path), os.fspath(target))
+    except OSError as e:
+        if e.errno in NO_ROOM:
+            raise  # a full disk: cli.main names the file
+        raise PytError(f"wheel: cannot copy {rel(path)}: {e.strerror or e}") from None
 
 
 def build(req: BuildRequest) -> Path:
@@ -326,7 +333,7 @@ def build(req: BuildRequest) -> Path:
         if (SRC / top).is_dir():
             _copy_tree(SRC / top, work / "src" / top)
         else:
-            mypyc.copy_writable(str(SRC / top), str(work / "src" / top))
+            _copy_file(SRC / top, work / "src" / top)
     assets = cfg.app.assets
     if assets and (SRC / assets).is_dir():
         # In a wheel the assets travel inside the package (resources.py looks for them there)

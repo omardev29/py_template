@@ -2712,6 +2712,38 @@ def test_wheel_names_a_file_it_cannot_copy(wheel_project: Path, monkeypatch: pyt
         wheel.build(BuildRequest(_wheel_cfg(), "cpython", "wheel", wheel_project / "src"))
 
 
+@pytest.mark.parametrize("how", ["denied", "named pipe"])
+def test_wheel_names_a_lone_module_it_cannot_copy(wheel_project: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """A lone top-level module of compile.modules (src/fastbench.py) was copied without the error
+    handling of the package's files: one it cannot read (another user's file, a named pipe, on
+    Windows one another program holds open) ended in an internal-error traceback."""
+    import errno
+
+    from runner.cmd_build import BuildRequest
+    from runner.methods import wheel
+
+    src = wheel_project / "src"
+    _add_top_level_modules(src)
+    if how == "named pipe":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("no named pipes here")
+        (src / "fastbench.py").unlink()
+        os.mkfifo(src / "fastbench.py")
+    else:
+        real = mypyc.copy_writable
+
+        def copy(source: str, target: str) -> str:
+            if source.endswith("fastbench.py"):
+                raise PermissionError(errno.EACCES, "Permission denied", source)
+            return real(source, target)
+
+        monkeypatch.setattr(wheel.mypyc, "copy_writable", copy)
+    monkeypatch.setattr(wheel.envs, "sync", lambda env, **kw: None)
+    with pytest.raises(PytError, match=r"wheel: cannot copy .*fastbench\.py: ") as e:
+        wheel.build(BuildRequest(_top_level_cfg(), "cpython", "wheel", src))
+    assert e.value.code == 2
+
+
 def _top_level_cfg() -> Config:
     """compile.modules naming a lone top-level module and another top-level package of src/."""
     return make({"app": {"name": "pkg", "assets": "assets"}, "compile": {"modules": ["pkg.core", "fastbench", "other.core"]}})
