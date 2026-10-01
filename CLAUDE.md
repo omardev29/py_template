@@ -3298,9 +3298,9 @@ Files:
   of lazy.nvim's `spec.modules`) lives in `spec.lua` and the plugin, which trusting `.lazy.lua`
   already trusts (`.pytemplate/nvim/**`), so a fix there needs no re-trust; only a change to the
   loader itself does (`test_lazy_lua_bytes_are_pinned` pins the sha256 in `LAZY_LUA_SHA256`, so
-  it is always deliberate; projects already made keep their own copy). The loader of round 3
-  (September 2026) changed its bytes: after taking it, trust the new file once (`./pyt nvim
-  trust`, README's Neovim section).
+  it is always deliberate; projects already made keep their own copy). The loader changed its
+  bytes in late September 2026 (the nested-folder fix above): after taking it, trust the new file
+  once (`./pyt nvim trust`, README's Neovim section).
 - `spec.lua` (`.pytemplate/nvim/spec.lua`, `dofile`'d with `root`): normalizes `root`, and returns
   `{}` unless it holds `pytemplate.toml` and `.pytemplate/nvim/lua/pytemplate/init.lua` (a folder
   cloned, vendored or added as a submodule inside a trusted project, with its own `pytemplate.toml`
