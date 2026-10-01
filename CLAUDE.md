@@ -3830,8 +3830,14 @@ short temp tree and unset `NVIM_APPNAME`.
   `pytemplate.toml` in the throwaway-copy tests) or build hermetic fixtures (`src/myapp` in
   tmp with `SRC` monkeypatched), and skip only what cannot apply there, with the reason: the
   template repository's own invariants (the `.pytemplate/template-repo` marker: the root is the
-  script preset as `myapp`, the language guard, the workflow tests) and the real builds that
-  import rich (`test_build_methods.needs_rich`: a raylib project locks none). template-selftest's
+  script preset as `myapp`, the language guard, the workflow tests, the shipped content of the
+  templates a project may edit, README: the CI template's shape, the profiles' severities, the VS
+  Code settings template) and the real builds that
+  import rich (`test_build_methods.needs_rich`: a raylib project locks none). What the runner
+  writes into a CI template is tested on the tests' own (`conftest.MINIMAL_CI_TEMPLATE`, the
+  `minimal_ci_template` fixture), and severities are read from the project's profiles (a weekly
+  schedule in its CI template failed 36 tests there, a blocking ruff in `warn` 2;
+  `test_paths.test_the_template_tests_pass_in_a_project_that_edited_its_templates`). template-selftest's
   new-project job proves it for a raylib and a flet project (a new project has its own
   README.md; the template's is `.pytemplate/README.md`). Tests that start what they built with
   `sys.executable` skip on an interpreter older than the build's Python

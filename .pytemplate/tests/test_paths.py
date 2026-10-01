@@ -709,6 +709,49 @@ def test_the_real_apply_test_passes_in_a_project_without_the_git_hook(tmp_path: 
     assert r.returncode == 0 and "1 passed" in r.stdout, r.stdout[-6000:] + r.stderr[-2000:]
 
 
+def test_the_template_tests_pass_in_a_project_that_edited_its_templates(tmp_path: Path) -> None:
+    """README: a project customizes its CI by editing .pytemplate/templates/ci.yml, and its typing
+    profiles and VS Code settings in .pytemplate/templates/. The tests pinned the shipped content
+    (the CI's triggers and steps, a blocking ruff in no profile, the settings template's values):
+    a weekly schedule in the CI template failed 36 tests of ./pyt selftest there, a blocking ruff
+    in `warn` 2. They run here in a copy with such edits (the shipped content stays pinned in the
+    template repository, which a copy is not)."""
+    own = tmp_path / "own"
+    presets.copy_template(own)
+    assert not (own / ".pytemplate" / "template-repo").exists()
+    templates = own / ".pytemplate" / "templates"
+    ci = templates / "ci.yml"
+    ci.write_text(ci.read_text(encoding="utf-8").replace("  pull_request:\n", '  pull_request:\n  schedule:\n    - cron: "0 6 * * 1"\n', 1), encoding="utf-8")
+    warn = templates / "typing" / "warn.toml"
+    warn.write_text(warn.read_text(encoding="utf-8").replace("exit_zero = true", "exit_zero = false"), encoding="utf-8")
+    settings = templates / "vscode" / "settings.json"
+    settings.write_text(settings.read_text(encoding="utf-8").replace('"tasks.statusbar.default.hide": true', '"tasks.statusbar.default.hide": false'), encoding="utf-8")
+    nodes = [
+        "test_render_core.py",
+        "test_vscode.py::test_severity_follows_the_typing_profile",
+        "test_vscode.py::test_settings_and_extensions",
+        "test_nvim_render.py::test_task_severity_examples",
+        "test_runner.py::test_ci_workflow_leaves_out_an_os_without_backends",
+        "test_e2e_plan.py::test_host_gaps_match_the_generated_ci_matrix",
+    ]
+    drop = (*_LAUNCHER_VARS, "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--basetemp", str(tmp_path / "t"),
+         "-k", "ci_ or ci_workflow or host_gaps or severity or settings_and_extensions",
+         *(f".pytemplate/tests/{node}" for node in nodes)],
+        cwd=own,
+        env={k: v for k, v in os.environ.items() if k not in drop},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=900,
+        check=False,
+    )
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+    assert " passed" in r.stdout, r.stdout[-2000:]
+
+
 @needs_uv
 def test_dry_run_mode_supports_pypy(unchanged: Path) -> None:
     if "pypy" in _copy_config(unchanged)["backend"]["supported"]:

@@ -82,16 +82,9 @@ def test_set_value_keeps_comments() -> None:
 # --- render ------------------------------------------------------------------------------------
 
 
-# README/CLAUDE.md 13.2: deleting templates/ci.yml stops CI generation; render.ci_workflow then
-# raises, so this skips in a project that made that documented change (13.1: selftest must pass).
-needs_ci_template = pytest.mark.skipif(
-    not (render.TEMPLATES / "ci.yml").is_file(),
-    reason="CI generation stopped (templates/ci.yml deleted): render.ci_workflow raises",
-)
-
-
-@needs_ci_template
-def test_ci_workflow_leaves_out_an_os_without_backends() -> None:
+# The rows render.ci_workflow writes, on the tests' own CI template (conftest.minimal_ci_template):
+# a project edits or deletes its own (README), and selftest must pass there too (13.1)
+def test_ci_workflow_leaves_out_an_os_without_backends(minimal_ci_template: Path) -> None:
     raylib = render.ci_workflow(make({"app": {"preset": "raylib"}, "backend": {"active": "pypy", "supported": ["cpython", "pypy", "mypyc"]}}))
     assert 'backends: "cpython mypyc"' in raylib.split("macos-latest", 1)[1].split("\n", 2)[1]
     only_pypy = render.ci_workflow(make({"app": {"preset": "raylib"}, "backend": {"active": "pypy", "supported": ["pypy"]}}))

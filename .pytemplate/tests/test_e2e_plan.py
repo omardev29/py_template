@@ -32,12 +32,6 @@ from runner.ui import PytError  # noqa: E402
 
 AVAILABLE = ["flet", "raylib", "script"]
 
-# README/CLAUDE.md 13.2: deleting .pytemplate/templates/ci.yml stops CI generation, and then
-# render.ci_workflow raises. A project that made that documented change must still pass selftest.
-needs_ci_template = pytest.mark.skipif(
-    not (project.TEMPLATES / "ci.yml").is_file(),
-    reason="CI generation stopped (templates/ci.yml deleted): render.ci_workflow raises",
-)
 HOST = Host("windows")  # a display, no Flutter restriction
 DEFAULTS = {"cpython": "exe", "mypyc": "exe", "pypy": "portable"}
 SCRIPT = PresetInfo("script", ("cpython", "mypyc"), DEFAULTS, gui=False, tasks=("ci",))
@@ -326,11 +320,11 @@ def _preset_config(name: str) -> Config:
     return cfg
 
 
-@needs_ci_template
-def test_host_gaps_match_the_generated_ci_matrix() -> None:
+def test_host_gaps_match_the_generated_ci_matrix(minimal_ci_template: Path) -> None:
     """Drift guard: the generated ci.yml leaves a backend out of a runner's row exactly where
     e2e.HOST_GAPS says the runner's platform cannot install it (a new runner label, or a gap
-    added on one side only, fails here)."""
+    added on one side only, fails here). The rows are render.ci_workflow's, written into the
+    tests' own CI template: a project edits or deletes its own (README)."""
     runners = {"ubuntu-latest": "linux-x86_64", "windows-latest": "windows-x86_64", "macos-latest": "macos-aarch64"}
     for preset in e2e.DEFAULT_PRESETS:
         cfg = _preset_config(preset)

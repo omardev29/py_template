@@ -32,11 +32,12 @@ from runner.cmd_build import BuildRequest  # noqa: E402
 from runner.config import BACKENDS, Config  # noqa: E402
 from runner.editors import nvim  # noqa: E402
 from runner.methods import pyz  # noqa: E402
-from runner.project import PRESETS, ROOT, TEMPLATES  # noqa: E402
+from runner.project import PRESETS, ROOT, TEMPLATE, TEMPLATES  # noqa: E402
 from runner.ui import PytError  # noqa: E402
 
 COMMANDS = set(cli.COMMANDS)
 PRESET_NAMES = ("script", "raylib", "flet")
+TEMPLATE_REPO = (TEMPLATE / "template-repo").is_file()  # the templates hold the shipped content
 
 
 # --- configs -----------------------------------------------------------------------------------
@@ -1353,9 +1354,18 @@ needs_ci_template = pytest.mark.skipif(
     not (TEMPLATES / "ci.yml").is_file(),
     reason="CI generation stopped (templates/ci.yml deleted): render.ci_workflow raises",
 )
+# README: a project customizes its CI by editing .pytemplate/templates/ci.yml (a schedule, a step of
+# its own), and its selftest must pass (13.1). The shape of the SHIPPED template (its triggers,
+# steps, actions, YAML subset, the pyz path coupled to BuildRequest.out_name) is pinned in the
+# template repository; what the runner writes into any template is tested everywhere, on the
+# tests' own template (conftest.MINIMAL_CI_TEMPLATE: the minimal_ci_template fixture).
+shipped_ci_template = pytest.mark.skipif(
+    not (TEMPLATE_REPO and (TEMPLATES / "ci.yml").is_file()),
+    reason="the shipped templates/ci.yml: a project may edit its own (README)",
+)
 
 
-@needs_ci_template
+@shipped_ci_template
 @pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
 def test_ci_workflow_for_every_preset_and_backend_set(preset: str, supported: list[str], active: str) -> None:
     cfg = combo_cfg(preset, supported, active)
@@ -1397,22 +1407,57 @@ def test_ci_workflow_for_every_preset_and_backend_set(preset: str, supported: li
     assert all(re.fullmatch(r"astral-sh/setup-uv@v\d+\.\d+\.\d+", u) for u in uses if "setup-uv" in u)  # no floating tags
 
 
+def _matrix(cfg: Config) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = parse_yaml(render.ci_workflow(cfg))["jobs"]["test"]["strategy"]["matrix"]["include"]
+    return rows
+
+
+@pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
+def test_ci_matrix_build_and_libraries_follow_the_preset_and_backends(minimal_ci_template: Path, preset: str, supported: list[str], active: str) -> None:
+    """What render.ci_workflow writes into any CI template, the project's own included: one row
+    per OS with the backends it syncs (raylib: no PyPy on macOS arm64; an OS with none is left
+    out), the backend the pyz is built with, raylib's Linux libraries, the app's name."""
+    cfg = combo_cfg(preset, supported, active)
+    text = render.ci_workflow(cfg)
+    assert not any(p in text for p in render.CI_PLACEHOLDERS) and text.endswith("\n")
+    rows = _matrix(cfg)
+    macos_pypy = not (preset == "raylib" and "pypy" in supported)
+    expected_os = ["ubuntu-latest", "windows-latest"] + (["macos-latest"] if supported != ["pypy"] or macos_pypy else [])
+    assert [r["os"] for r in rows] == expected_os
+    for row in rows:
+        drop = "pypy" if row["os"] == "macos-latest" and not macos_pypy else ""
+        assert row["backends"].split() == [b for b in supported if b != drop], row
+    backend = next((b for b in ("mypyc", "cpython") if b in supported), active)
+    steps = parse_yaml(text)["jobs"]["test"]["steps"]
+    runs = [s["run"] for s in steps if "run" in s]
+    assert f"./pyt build {backend} --method pyz" in runs and f"ls dist/{cfg.app.name}-{backend}-pyz" in runs
+    apt = [s for s in steps if "apt-get" in s.get("run", "")]
+    assert len(apt) == (preset == "raylib") and all(s["if"] == "runner.os == 'Linux'" for s in apt)
+
+
 @needs_ci_template
+@pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
+def test_the_projects_own_ci_template_renders_for_every_preset_and_backend_set(preset: str, supported: list[str], active: str) -> None:
+    """Whatever a project made of its CI template, every placeholder is filled for every config
+    (render.ci_workflow raises for one left, and then every command's render failed)."""
+    text = render.ci_workflow(combo_cfg(preset, supported, active))
+    assert not any(p in text for p in render.CI_PLACEHOLDERS)
+
+
 @pytest.mark.parametrize(("supported", "active"), backend_sets())
-def test_ci_workflow_leaves_out_an_os_the_preset_package_has_no_wheel_for(supported: list[str], active: str) -> None:
+def test_ci_workflow_leaves_out_an_os_the_preset_package_has_no_wheel_for(minimal_ci_template: Path, supported: list[str], active: str) -> None:
     """[preset.raylib] package = "raylib_software", which the preset offers, publishes wheels for
     Linux and Windows only, and no sdist (15.1): the macOS row of the generated CI could sync
     nothing and failed on every push, and the file cannot be edited (render --check). The macOS
     row goes; raylib and raylib_sdl, which publish macOS wheels, keep theirs."""
     for package, macos in (("raylib_software", False), ("raylib-software", False), ("raylib_sdl", True), ("raylib", True)):
         cfg = combo_cfg("raylib", supported, active, {"preset": {"raylib": {"package": package}}})
-        rows = parse_yaml(render.ci_workflow(cfg))["jobs"]["test"]["strategy"]["matrix"]["include"]
-        oses = [r["os"] for r in rows]
+        oses = [r["os"] for r in _matrix(cfg)]
         assert oses[:2] == ["ubuntu-latest", "windows-latest"], (package, oses)
         assert ("macos-latest" in oses) == (macos and supported != ["pypy"]), (package, oses)
 
 
-@needs_ci_template
+@shipped_ci_template
 @pytest.mark.parametrize(("preset", "supported", "active"), COMBOS)
 def test_ci_workflow_keeps_its_moving_parts_on_purpose(preset: str, supported: list[str], active: str) -> None:
     """-latest runner labels (GitHub retires pinned ones) and no uv version (setup-uv takes the
@@ -1427,7 +1472,7 @@ def test_ci_workflow_keeps_its_moving_parts_on_purpose(preset: str, supported: l
     assert "on purpose" in header and "required-version" in header and "-latest" in header
 
 
-@needs_ci_template
+@shipped_ci_template
 def test_ci_workflows_pass_actionlint(tmp_path: Path) -> None:
     actionlint = shutil.which("actionlint")
     if actionlint is None:
@@ -1443,13 +1488,11 @@ def test_ci_workflows_pass_actionlint(tmp_path: Path) -> None:
 
 
 @pytest.fixture
-def ci_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    shutil.copy(TEMPLATES / "ci.yml", tmp_path / "ci.yml")
-    monkeypatch.setattr(render, "TEMPLATES", tmp_path)
-    return tmp_path / "ci.yml"
+def ci_template(minimal_ci_template: Path) -> Path:
+    """A CI template the test may change: the tests' own (conftest), never the project's."""
+    return minimal_ci_template
 
 
-@needs_ci_template
 def test_ci_template_bom_and_crlf_do_not_reach_the_workflow(ci_template: Path) -> None:
     expected = render.ci_workflow(CFG)
     lf = ci_template.read_bytes().replace(b"\r\n", b"\n")  # already CRLF in a Windows checkout
@@ -1457,7 +1500,6 @@ def test_ci_template_bom_and_crlf_do_not_reach_the_workflow(ci_template: Path) -
     assert render.ci_workflow(CFG) == expected
 
 
-@needs_ci_template
 def test_ci_template_linux_deps_line_may_be_indented(ci_template: Path) -> None:
     raylib = preset_cfg("raylib")
     expected = {"raylib": render.ci_workflow(raylib), "script": render.ci_workflow(CFG)}
@@ -1484,7 +1526,6 @@ def test_a_template_that_cannot_be_read_is_a_clear_error(profiles: Path, ci_temp
         render.ci_workflow(CFG)
 
 
-@needs_ci_template
 def test_ci_template_placeholder_left_is_a_clear_error(ci_template: Path) -> None:
     ci_template.write_text(ci_template.read_text(encoding="utf-8").replace("\n__LINUX_DEPS__\n", "\n      - run: x __LINUX_DEPS__\n"), encoding="utf-8")
     with pytest.raises(PytError, match="__LINUX_DEPS__ not replaced"):

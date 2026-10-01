@@ -19,6 +19,7 @@ needed it failed far from the cause. `_the_project_environment_stays` names the 
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -59,3 +60,43 @@ def _the_project_environment_stays() -> Iterator[None]:
                 "another python.cpython than the project's; give its Config the project's (config.load)",
                 pytrace=False,
             )
+
+
+# A CI template of the tests' own, with every placeholder render.ci_workflow fills, laid out as
+# templates/ci.yml lays them out. The tests of what the runner writes into a CI template (the
+# matrix rows, the build backend, the Linux libraries, the placeholders) run on it: a project
+# edits its own .pytemplate/templates/ci.yml (README: "edit that file"), or deletes it, and its
+# selftest must pass. The shipped template itself is tested in the template repository.
+MINIMAL_CI_TEMPLATE = """\
+# __HEADER__
+name: ci
+on:
+  push:
+    branches: [main, master]
+jobs:
+  test:
+    strategy:
+      matrix:
+        include:
+__MATRIX__
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+__LINUX_DEPS__
+      - run: ./pyt sync ${{ matrix.backends }}
+      - run: ./pyt build __BUILD_BACKEND__ --method pyz
+      - run: ls dist/__NAME__-__BUILD_BACKEND__-pyz
+"""
+
+
+@pytest.fixture
+def minimal_ci_template(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """render.TEMPLATES with MINIMAL_CI_TEMPLATE as its ci.yml (the other templates, the typing
+    profiles among them, as the project has them); the path of that ci.yml."""
+    from runner import render  # the test modules put .pytemplate on sys.path
+
+    folder = tmp_path_factory.mktemp("templates")
+    shutil.copytree(render.TEMPLATES, folder, dirs_exist_ok=True)
+    (folder / "ci.yml").write_text(MINIMAL_CI_TEMPLATE, encoding="utf-8", newline="\n")
+    monkeypatch.setattr(render, "TEMPLATES", folder)
+    return folder / "ci.yml"

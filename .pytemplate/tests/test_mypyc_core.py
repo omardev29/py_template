@@ -331,8 +331,10 @@ NEW_APIS = (
 def test_precheck_real_mypy_catches_new_apis_with_the_off_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # The project's own .mypy.ini is the "off" profile (ignore_errors = True): it must not matter
-    assert "ignore_errors = True" in (ROOT / ".mypy.ini").read_text(encoding="utf-8")
+    # The template's own .mypy.ini is the "off" profile (ignore_errors = True): it must not matter
+    # (a project may run another profile: then nothing would hide the errors anyway)
+    if (ROOT / ".pytemplate" / "template-repo").is_file():
+        assert "ignore_errors = True" in (ROOT / ".mypy.ini").read_text(encoding="utf-8")
     code = tmp_path / "code"
     code.mkdir()
     (code / "newapi.py").write_text(NEW_APIS, encoding="utf-8")

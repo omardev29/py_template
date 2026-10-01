@@ -5116,21 +5116,12 @@ def test_flet_build_upx_only_for_desktop_and_missing_output(sandbox: Path, monke
 # --- couplings and launcher files ---------------------------------------------------------------------
 
 
-# README/CLAUDE.md 13.2: deleting templates/ci.yml stops CI generation; a project that made that
-# documented change has no template to read here (13.1: selftest must pass in every project).
-needs_ci_template = pytest.mark.skipif(
-    not (TEMPLATES / "ci.yml").is_file(),
-    reason="CI generation stopped (templates/ci.yml deleted)",
-)
-
-
-@needs_ci_template
 def test_ci_uploads_the_pyz_where_the_build_writes_it(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # templates/ci.yml hard-codes dist/__NAME__-__BUILD_BACKEND__-pyz/__NAME__.pyz
-    ci = (TEMPLATES / "ci.yml").read_text(encoding="utf-8")
-    if "__BUILD_BACKEND__-pyz" not in ci:
-        pytest.skip("the CI template no longer uploads a pyz")
-    assert "path: dist/__NAME__-__BUILD_BACKEND__-pyz/__NAME__.pyz" in ci
+    # the shipped templates/ci.yml hard-codes dist/__NAME__-__BUILD_BACKEND__-pyz/__NAME__.pyz (a
+    # project may edit or delete its own, README): where the pyz method writes it, everywhere
+    if TEMPLATE_REPO:
+        ci = (TEMPLATES / "ci.yml").read_text(encoding="utf-8")
+        assert "path: dist/__NAME__-__BUILD_BACKEND__-pyz/__NAME__.pyz" in ci
     out, _, _ = _pyz_build(sandbox, monkeypatch, {LINUX: lambda d: _wheel(d, "rich", "15.0.0")}, ["rich==15.0.0"])
     assert out.relative_to(sandbox).as_posix() == "dist/myapp-cpython-pyz/myapp.pyz"
     assert BuildRequest(make({}), "mypyc", "pyz", sandbox).out_name == "myapp-mypyc-pyz"

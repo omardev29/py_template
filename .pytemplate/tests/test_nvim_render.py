@@ -223,12 +223,23 @@ def test_task_severity_follows_the_vscode_matchers(name: str) -> None:
         assert levels["mypy"] == by_owner.get("pytemplate-mypy", levels["mypy"]), backend  # no matcher: skip_mypy
 
 
+def _severity(profile: str) -> dict[str, str]:
+    """editor.json's task_severity of a backend on `profile`, read from the profile as the project
+    has it (README: a project may edit .pytemplate/templates/typing/<profile>.toml)."""
+    data = render.load_profile(profile)
+    return {"mypy": "error" if data.get("blocking") else "warning", "ruff": "warning" if data.get("ruff", {}).get("exit_zero") else "error"}
+
+
 def test_task_severity_examples() -> None:
-    assert editor("mypyc-active")["typing"]["task_severity"]["mypyc"] == {"mypy": "error", "ruff": "error"}
+    assert editor("mypyc-active")["typing"]["task_severity"]["mypyc"] == _severity("mypyc")
     warn = editor("pypy-supported")["typing"]["task_severity"]
-    assert warn == {"cpython": {"mypy": "warning", "ruff": "warning"}, "pypy": {"mypy": "warning", "ruff": "warning"}}
-    # the default `off` profile: mypy does not run, ruff's few rules fail the check
-    assert editor("script")["typing"]["task_severity"]["cpython"] == {"mypy": "warning", "ruff": "error"}
+    assert warn == {"cpython": _severity("warn"), "pypy": _severity("warn")}
+    assert editor("script")["typing"]["task_severity"]["cpython"] == _severity("off")
+    if (project.TEMPLATE / "template-repo").is_file():  # the shipped profiles
+        assert editor("mypyc-active")["typing"]["task_severity"]["mypyc"] == {"mypy": "error", "ruff": "error"}
+        assert warn == {"cpython": {"mypy": "warning", "ruff": "warning"}, "pypy": {"mypy": "warning", "ruff": "warning"}}
+        # the default `off` profile: mypy does not run, ruff's few rules fail the check
+        assert editor("script")["typing"]["task_severity"]["cpython"] == {"mypy": "warning", "ruff": "error"}
 
 
 def test_editor_json_lists_every_command_and_method() -> None:
