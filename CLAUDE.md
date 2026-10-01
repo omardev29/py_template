@@ -3740,7 +3740,14 @@ short temp tree and unset `NVIM_APPNAME`.
   copy with code of its own). Its `[tasks]` are its user's too: a test runs only tasks its own
   fixture defines (`test_cli_core.tasks_project`: it ran the preset's deps-only `ci`, which a
   project may rename, delete or give a cmd;
-  `test_paths.test_the_task_tests_pass_in_a_project_whose_ci_task_is_its_own`). A test that
+  `test_paths.test_the_task_tests_pass_in_a_project_whose_ci_task_is_its_own`), and a task of
+  its own named `install` or `uninstall` (5.2: dispatch runs it there) never stands in for the
+  builtin a test checks: test_install's template clone leaves such tasks out
+  (`test_install._drop_tasks_named_like_builtins`), and
+  `test_cli_core.test_every_command_rejects_an_unknown_argument` loads the configuration without
+  it (each `install` of a clone ran the user's task, and 22 tests failed:
+  `test_paths.test_the_install_tests_pass_in_a_project_with_install_and_uninstall_tasks`).
+  A test that
   runs the real uv against the project's `.venv` (mypyc, the hook's ruff, the rename tidy-up,
   `uv pip install`, `uv run --frozen`) gives its Config the
   project's `python.cpython` (`real()` in test_mypyc_core and test_build_methods,

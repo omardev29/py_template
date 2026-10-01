@@ -650,6 +650,47 @@ def test_the_task_tests_pass_in_a_project_whose_ci_task_is_its_own(tmp_path: Pat
     assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
 
 
+def _run_tests_in(own: Path, tmp: Path, nodes: list[str]) -> subprocess.CompletedProcess[str]:
+    """The test nodes (of .pytemplate/tests) run by pytest in the copy `own`, with the runner
+    there and the suite's own pytest settings, as ./pyt selftest runs them (-ra lists the skips)."""
+    drop = (*_LAUNCHER_VARS, "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-c", ".pytemplate/tests/pytest.ini", "--rootdir=.",
+         "--basetemp", str(tmp / "t"), *(f".pytemplate/tests/{node}" for node in nodes)],
+        cwd=own, env={k: v for k, v in os.environ.items() if k not in drop}, capture_output=True,
+        text=True, encoding="utf-8", errors="replace", timeout=900, check=False,
+    )  # fmt: skip
+
+
+@needs_uv
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_the_install_tests_pass_in_a_project_with_install_and_uninstall_tasks(tmp_path: Path) -> None:
+    """README (Custom tasks) and CLAUDE.md 5.2: a [tasks] entry named like a builtin added after
+    the contract (install, uninstall) keeps its name in its project, where ./pyt install runs it.
+    test_install made its template clones from the project's own files, pytemplate.toml
+    included, and each `install` of a clone ran the project's task (uv tool install, with its
+    downloads, about 20 times); test_every_command_rejects_an_unknown_argument got the task's
+    exit code for install and uninstall. 22 tests failed in such a project. They run here in a
+    copy whose install and uninstall tasks run a program of their own (exit 42)."""
+    own = tmp_path / "own"
+    presets.copy_template(own)
+    toml = own / "pytemplate.toml"
+    text = toml.read_bytes().decode("utf-8")
+    for name in ("install", "uninstall"):
+        for key, value in (("cmd", [sys.executable, "-c", "raise SystemExit(42)"]), ("uv", False)):
+            text = config.set_value(text, f"tasks.{name}", key, value)
+    toml.write_bytes(text.encode("utf-8"))
+    rejects = "test_cli_core.py::test_every_command_rejects_an_unknown_argument"
+    nodes = [
+        "test_install.py::test_install_copies_the_tracked_template_and_writes_the_launchers",
+        "test_install.py::test_dry_runs_write_nothing",
+        "test_install.py::test_uninstall_removes_only_what_install_wrote",
+        *(f"{rejects}[{name}-{bogus}]" for name in ("install", "uninstall") for bogus in ("--pt-bogus-flag", "pt-bogus-positional")),
+    ]
+    r = _run_tests_in(own, tmp_path, nodes)
+    assert r.returncode == 0 and "7 passed" in r.stdout, r.stdout[-6000:] + r.stderr[-2000:]
+
+
 @needs_uv
 def test_dry_run_mode_supports_pypy(unchanged: Path) -> None:
     if "pypy" in _copy_config(unchanged)["backend"]["supported"]:

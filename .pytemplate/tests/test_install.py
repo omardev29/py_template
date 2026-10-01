@@ -27,7 +27,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import cmd_install, presets, proc  # noqa: E402
+from runner import cli, cmd_install, config, presets, proc  # noqa: E402
 from runner.project import IS_WINDOWS, ROOT  # noqa: E402
 from runner.ui import PytError  # noqa: E402
 
@@ -101,6 +101,22 @@ def _init_repo(root: Path) -> None:
     git(root, "commit", "-q", "-m", "template")
 
 
+def _drop_tasks_named_like_builtins(toml: Path) -> None:
+    """A project's [tasks] entry may have the name of a builtin added after the contract
+    (install, uninstall: CLAUDE.md 5.2), and ./pyt install runs that task there. The template's
+    own pytemplate.toml has none: a clone made from a project's files leaves them out, or its
+    `install` ran the project's task (about 20 times, with whatever that task does)."""
+    text = toml.read_bytes().decode("utf-8-sig")
+    statements = config.scan(text)
+    assert statements is not None, f"{toml} is not valid TOML"
+    kept, start = [], 0
+    for s in statements:  # a statement's text: from the end of the one before to its own end
+        if not (len(s.path) > 1 and s.path[0] == "tasks" and s.path[1] in cli.COMMANDS):
+            kept.append(text[start : s.end])
+        start = s.end
+    toml.write_bytes(("".join(kept) + text[start:]).encode("utf-8"))
+
+
 @pytest.fixture(scope="module")
 def template(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A clone of the template: what copy_template copies (the tracked files, in any project
@@ -111,6 +127,7 @@ def template(tmp_path_factory: pytest.TempPathFactory) -> Path:
     dest = tmp_path_factory.mktemp("tpl") / "template"
     dest.mkdir()
     presets.copy_template(dest)
+    _drop_tasks_named_like_builtins(dest / "pytemplate.toml")
     (dest / ".pytemplate" / "template-repo").write_text("", encoding="utf-8")
     (dest / "README.md").write_text("# py_template\n\nThe manual.\n", encoding="utf-8")
     (dest / "LICENSE").write_text("MIT License\n", encoding="utf-8")

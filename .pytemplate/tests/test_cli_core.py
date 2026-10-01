@@ -525,6 +525,17 @@ def test_every_command_rejects_an_unknown_argument(name: str, bogus: str, monkey
     args, _ = MINIMAL.get(name, ([], False))
     monkeypatch.setattr(proc, "DRY_RUN", True)  # in case the check is broken: nothing is written
     monkeypatch.setitem(cli._OPTS, "no_render", True)
+    load = config.load
+
+    def builtin_only(builtin_commands: set[str] | None = None) -> Config:
+        """The project's config without a [tasks] entry named like the command: one may have the
+        name of a builtin added after the contract (install, uninstall: CLAUDE.md 5.2), and
+        dispatch runs that task there, with any argument. The builtin is what this test checks."""
+        cfg = load(builtin_commands)
+        cfg.tasks.pop(name, None)
+        return cfg
+
+    monkeypatch.setattr(config, "load", builtin_only)
     code = cli.main([name, *args, bogus])
     err = capsys.readouterr().err
     assert code == 2, err
