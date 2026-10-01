@@ -207,14 +207,19 @@ def test_the_upx_cache_and_a_upx_on_path_are_absolute(monkeypatch: pytest.Monkey
     for variable in ("XDG_CACHE_HOME", "LOCALAPPDATA"):
         monkeypatch.setenv(variable, str(tmp_path / "abs"))
     assert upx._cache_dir() == tmp_path / "abs" / "pytemplate" / "tools" / f"upx-{upx.VERSION}"
-    # a upx found through a relative PATH entry reaches the tools absolute
+    # a upx found through a relative PATH entry reaches the tools absolute; on Windows such an
+    # entry is never searched (proc.on_path: it names a folder below the caller's, where the
+    # current folder's own upx.exe is never taken either)
     (tmp_path / "bin").mkdir()
     tool = tmp_path / "bin" / upx._exe_name()
     tool.write_bytes(b"")
     tool.chmod(0o755)
     monkeypatch.setattr(upx.proc, "base_env", lambda: {"PATH": "bin"})
     found = upx.locate(make({"upx": {"enabled": True}}))
-    assert found is not None and found.is_absolute() and os.path.normcase(found) == os.path.normcase(tool)
+    if WINDOWS:
+        assert found is None
+    else:
+        assert found is not None and found.is_absolute() and os.path.normcase(found) == os.path.normcase(tool)
 
 
 def test_upx_on_path_is_never_the_one_in_the_callers_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
