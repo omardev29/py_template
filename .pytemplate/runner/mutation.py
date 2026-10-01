@@ -63,7 +63,7 @@ from . import envs, proc, ui
 from .config import Config
 from .e2e import check_ceiling, child_env, kill_tree, rmtree, scrub_env, termination_as_interrupt, unusable
 from .presets import _git_path
-from .project import IS_WINDOWS, ROOT, TOOLS, check_private_dir, make_private_dir, scratch_name, venv_python
+from .project import IS_WINDOWS, ROOT, TOOLS, check_private_dir, lock_refusal, make_private_dir, scratch_name, venv_python
 from .ui import PytError
 
 SCOPE = ".pytemplate/runner"  # the modules mutated, relative to the project
@@ -770,8 +770,8 @@ def base_lock(base: Path) -> Iterator[None]:
                 import fcntl
 
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise PytError(f"selftest --mutation: another run is using {base}: wait for it to end") from None
+        except OSError as e:
+            raise lock_refusal("selftest --mutation", base, e) from None
         try:
             yield
         finally:

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import json
@@ -316,6 +317,41 @@ def test_base_lock_refuses_a_second_run_and_releases(tmp_path: Path) -> None:
                 pass
     with project.base_lock(tmp_path, "selftest --nvim"):  # released: a later run takes it
         pass
+
+
+def refuse_every_lock(monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    """The lock call fails with `code`, as on a file system without locks (some FUSE and network
+    mounts): flock on POSIX, msvcrt.locking on Windows."""
+
+    def refuse(*_args: object) -> None:
+        raise OSError(code, os.strerror(code))
+
+    if sys.platform == "win32":
+        import msvcrt
+
+        monkeypatch.setattr(msvcrt, "locking", refuse)
+    else:
+        import fcntl
+
+        monkeypatch.setattr(fcntl, "flock", refuse)
+
+
+@pytest.mark.parametrize("code", [errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOSYS])
+def test_base_lock_names_a_folder_that_takes_no_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    """A file system without locks fails the lock call with ENOLCK, EOPNOTSUPP or ENOSYS: the
+    harnesses said "another run is using" the folder, where no other run existed, and every later
+    run said the same (A10-06). Only a lock another process holds is another run."""
+    refuse_every_lock(monkeypatch, code)
+    with pytest.raises(ui.PytError) as e:
+        with project.base_lock(tmp_path, "selftest --e2e"):
+            pass
+    assert str(e.value).startswith(f"selftest --e2e: cannot lock {tmp_path / 'lock'}: ") and "takes no locks" in str(e.value), e.value
+    assert "another run" not in str(e.value) and e.value.code == 2
+    for held in (errno.EWOULDBLOCK, errno.EACCES):  # flock's answer, msvcrt.locking's
+        refuse_every_lock(monkeypatch, held)
+        with pytest.raises(ui.PytError, match=r"selftest --nvim: another run is using"):
+            with project.base_lock(tmp_path, "selftest --nvim"):
+                pass
 
 
 def test_caller_cwd_keeps_the_shells_spelling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

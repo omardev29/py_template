@@ -351,6 +351,22 @@ def make_private_dir(path: Path, option: str) -> None:
     check_private_dir(path, option)
 
 
+# What a lock taken without waiting raises when another process holds it: flock's EWOULDBLOCK
+# (EAGAIN), msvcrt.locking's EACCES. Any other error (ENOLCK, EOPNOTSUPP, ENOSYS: a file system
+# without locks, some FUSE and network mounts) is no other run.
+_HELD_ELSEWHERE = {errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES}
+
+
+def lock_refusal(what: str, base: Path, error: OSError) -> PytError:
+    """The refusal of base_lock (and mutation.base_lock) for the error the lock call raised: another
+    run, or a folder whose file system takes no lock (it said "another run" for both, and every
+    later run on such a folder said the same)."""
+    if error.errno in _HELD_ELSEWHERE:
+        return PytError(f"{what}: another run is using {base}: wait for it to end")
+    reason = error.strerror or str(error)
+    return PytError(f"{what}: cannot lock {base / 'lock'}: {reason}: its file system takes no locks, use a folder on another one")
+
+
 @contextlib.contextmanager
 def base_lock(base: Path, what: str) -> Iterator[None]:
     """One run at a time per scratch base/dir: a lock on <base>/lock held for the whole run (the
@@ -368,8 +384,8 @@ def base_lock(base: Path, what: str) -> Iterator[None]:
                 import fcntl
 
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise PytError(f"{what}: another run is using {base}: wait for it to end") from None
+        except OSError as e:
+            raise lock_refusal(what, base, e) from None
         try:
             yield
         finally:

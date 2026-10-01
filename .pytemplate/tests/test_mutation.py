@@ -10,6 +10,7 @@ of one module (skipped when Cosmic Ray's environment cannot be made: offline, no
 from __future__ import annotations
 
 import _thread
+import errno
 import json
 import os
 import shutil
@@ -910,6 +911,27 @@ def test_one_run_at_a_time_per_base(tmp_path: Path) -> None:
         assert stat.S_IMODE((tmp_path / "lock").stat().st_mode) == 0o600  # the user's own, as the base
     with mutation.base_lock(tmp_path):  # released
         pass
+
+
+def test_a_base_whose_file_system_takes_no_lock_is_named_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """mutation.base_lock is project.base_lock's copy: a lock call that fails for another reason
+    than another holder (ENOSYS, a file system without locks) said "another run is using" (A10-06)."""
+
+    def refuse(*_args: object) -> None:
+        raise OSError(errno.ENOSYS, os.strerror(errno.ENOSYS))
+
+    if sys.platform == "win32":
+        import msvcrt
+
+        monkeypatch.setattr(msvcrt, "locking", refuse)
+    else:
+        import fcntl
+
+        monkeypatch.setattr(fcntl, "flock", refuse)
+    with pytest.raises(PytError) as e:
+        with mutation.base_lock(tmp_path):
+            pass
+    assert str(e.value).startswith(f"selftest --mutation: cannot lock {tmp_path / 'lock'}: ") and "another run" not in str(e.value)
 
 
 def test_worker_env_moves_home_and_temp_but_keeps_uv(tmp_path: Path) -> None:
