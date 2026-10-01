@@ -148,7 +148,7 @@ def not_ours(path: Path) -> str:
     "" when it is a launcher pyt install wrote."""
     if os.path.islink(path):
         return "a symbolic link, which pyt install never writes"
-    if (path.parent / ".pytemplate").is_dir():
+    if os.path.isdir(path.parent / ".pytemplate"):
         return "a project's own launcher (its folder holds .pytemplate)"
     if not is_launcher(path):
         return "not a pytemplate launcher (no `pytemplate-launcher` line)"
@@ -446,7 +446,9 @@ def first_pyt(path: str) -> Path | None:
     the first folder that holds pyt.ps1, pyt.cmd, pyt.exe, pyt.bat or pyt (which one runs depends
     on the shell), elsewhere the first executable file named pyt. The current folder is not
     searched (shutil.which puts it first on Windows: a project's own pyt.cmd, typed there as
-    `pyt`, is the right one to run)."""
+    `pyt`, is the right one to run). A folder this user may not enter holds none, as for the
+    shell (os.path: before 3.14, pathlib's is_file raised PermissionError there, and install
+    ended in an internal-error traceback once its work was done)."""
     names = ("pyt.ps1", "pyt.cmd", "pyt.exe", "pyt.bat", "pyt") if IS_WINDOWS else ("pyt",)
     for entry in path.split(os.pathsep):
         entry = entry.strip().strip('"') if IS_WINDOWS else entry
@@ -454,7 +456,7 @@ def first_pyt(path: str) -> Path | None:
             continue
         for name in names:
             candidate = Path(os.path.expanduser(entry)) / name
-            if candidate.is_file() and (IS_WINDOWS or os.access(candidate, os.X_OK)):
+            if os.path.isfile(candidate) and (IS_WINDOWS or os.access(candidate, os.X_OK)):
                 return candidate
     return None
 
@@ -610,7 +612,7 @@ def make_plan() -> Plan:
     for inside in (ROOT, snapshot.parent):
         if _inside(folder, inside):
             problems.append(f"uv's tool bin folder {folder} is inside {inside}: set UV_TOOL_BIN_DIR to a folder of its own")
-    if (folder / ".pytemplate").exists():
+    if os.path.exists(folder / ".pytemplate"):  # not pathlib: a folder this user may not enter raised (3.11-3.13)
         problems.append(f"uv's tool bin folder {folder} is a project's folder (it holds .pytemplate): set UV_TOOL_BIN_DIR to a folder of its own")
     if cannot := _unwritable(folder):
         problems.append(f"pyt install cannot write into uv's tool bin folder {folder} ({cannot}): set UV_TOOL_BIN_DIR to a folder of yours")

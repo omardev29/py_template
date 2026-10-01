@@ -484,11 +484,14 @@ def _installed_import_names() -> dict[str, set[str]]:
     """The top-level modules of every distribution installed in an environment of the project
     (`.venv*`, either layout), by normalized distribution name: what a dependency the user
     added installs under another name (beautifulsoup4's bs4), which IMPORT_NAMES cannot know.
-    Empty without an environment (a fresh clone, the copy `new` makes: its source checked it)."""
+    Empty without an environment (a fresh clone, the copy `new` makes: its source checked it).
+    An environment this user may not enter (a root-owned 0700 .venv) holds nothing it can read
+    (os.path: before 3.14, pathlib's is_dir raised PermissionError there, and new, rename and
+    an apply that renames ended in an internal-error traceback)."""
     out: dict[str, set[str]] = {}
-    for env in sorted(p for p in ROOT.glob(".venv*") if p.is_dir()):
+    for env in sorted(p for p in ROOT.glob(".venv*") if os.path.isdir(p)):
         for site in (*env.glob("lib/*/site-packages"), env / "Lib" / "site-packages"):
-            for info in sorted(site.glob("*.dist-info")) if site.is_dir() else ():
+            for info in sorted(site.glob("*.dist-info")) if os.path.isdir(site) else ():
                 dist = _norm_name(info.name[: -len(".dist-info")].rsplit("-", 1)[0])
                 out.setdefault(dist, set()).update(_record_modules(info))
     return out

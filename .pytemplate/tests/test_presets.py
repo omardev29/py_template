@@ -23,11 +23,13 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tomllib
 import unicodedata
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -2908,6 +2910,66 @@ def test_name_check_reads_the_import_names_of_installed_dependencies(fake: Fake)
     for name in ("othermod", "fastmod", "compiled", "bin", "demo"):  # not a dependency of the project, or no module
         presets.check_name_free(fake.cfg, "script", name)
     assert presets._installed_import_names()["compiled"] == {"fastmod"}
+
+
+@pytest.mark.parametrize("how", ["simulated", "for real"])
+def test_an_environment_this_user_may_not_enter_holds_no_names(fake: Fake, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """A .venv this user may not enter (a root-owned 0700 one, from `sudo ./pyt setup` under a
+    restrictive umask): Python 3.11-3.13's pathlib raised PermissionError at its site-packages,
+    so new, rename and an apply that renames (check_name_free) ended in an internal-error
+    traceback. Such an environment holds nothing to read; the others still name their modules.
+    "simulated": os.stat refuses what is below it, with 3.11's pathlib on any Python; "for real":
+    a folder of mode 0 (POSIX, not root), which fails on the base only on 3.11-3.13."""
+    text = FAKE_PYPROJECT.replace('"rich>=15.0.0",', '"rich>=15.0.0",\n    "python-dateutil",')
+    (fake.root / "pyproject.toml").write_text(text, encoding="utf-8")
+    locked = fake.root / ".venv"
+    (locked / "Lib" / "site-packages").mkdir(parents=True)
+    _install(fake.root / ".venv-pypy" / "lib" / "pypy3.11" / "site-packages", "python_dateutil-2.9.0.post0.dist-info", "dateutil/__init__.py")
+    if how == "simulated":
+        _pathlib_before_3_14(monkeypatch)
+        real_stat, blocked = os.stat, os.path.abspath(locked)
+
+        def no_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            here = "" if isinstance(path, int) else os.path.abspath(os.fsdecode(path))
+            if here.startswith(blocked + os.sep):
+                raise PermissionError(errno.EACCES, "Permission denied", os.fsdecode(path))
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", no_stat)
+    elif sys.platform == "win32" or os.geteuid() == 0:
+        pytest.skip("a mode that keeps this user out: POSIX, not root (root enters every folder)")
+    else:
+        locked.chmod(0)
+    try:
+        assert presets._installed_import_names() == {"python-dateutil": {"dateutil"}}
+        with pytest.raises(PytError, match="would shadow the module 'dateutil' of python-dateutil"):
+            presets.check_name_free(fake.cfg, "script", "dateutil")
+    finally:
+        locked.chmod(0o755)
+
+
+def _pathlib_before_3_14(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path.exists, is_file and is_dir as Python 3.11-3.13 have them, on any Python: they swallow
+    only ENOENT, ENOTDIR, EBADF and ELOOP, so the PermissionError of a path inside a folder this
+    user may not enter comes through (3.14 asks os.path, which says False)."""
+
+    def check(test: Callable[[int], bool]) -> Callable[..., bool]:
+        def method(self: Path, *, follow_symlinks: bool = True) -> bool:
+            try:
+                mode = self.stat(follow_symlinks=follow_symlinks).st_mode
+            except OSError as e:
+                if e.errno not in (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP):
+                    raise
+                return False
+            except ValueError:
+                return False
+            return test(mode)
+
+        return method
+
+    monkeypatch.setattr(Path, "exists", check(lambda mode: True))
+    monkeypatch.setattr(Path, "is_file", check(stat.S_ISREG))
+    monkeypatch.setattr(Path, "is_dir", check(stat.S_ISDIR))
 
 
 def test_new_from_another_project_gets_the_tested_versions(fake: Fake) -> None:

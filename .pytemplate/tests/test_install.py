@@ -507,6 +507,85 @@ def test_a_folder_install_may_not_write_is_refused_before_the_first_write(tmp_pa
         assert f"set another data folder ({cmd_install.data_home_names()})" in message
 
 
+def _pathlib_before_3_14(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path.exists, is_file and is_dir as Python 3.11-3.13 have them, on any Python: they swallow
+    only ENOENT, ENOTDIR, EBADF and ELOOP, so the PermissionError of a path inside a folder this
+    user may not enter comes through (3.14 asks os.path, which says False)."""
+
+    def check(test: Callable[[int], bool]) -> Callable[..., bool]:
+        def method(self: Path, *, follow_symlinks: bool = True) -> bool:
+            try:
+                mode = self.stat(follow_symlinks=follow_symlinks).st_mode
+            except OSError as e:
+                if e.errno not in (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP):
+                    raise
+                return False
+            except ValueError:
+                return False
+            return test(mode)
+
+        return method
+
+    monkeypatch.setattr(Path, "exists", check(lambda mode: True))
+    monkeypatch.setattr(Path, "is_file", check(stat.S_ISREG))
+    monkeypatch.setattr(Path, "is_dir", check(stat.S_ISDIR))
+
+
+def _no_entry(monkeypatch: pytest.MonkeyPatch, folder: Path) -> None:
+    """`folder` as this user sees one they may not enter (another user's ~/bin, /root/.local/bin
+    in a container that switched USER): what is below it cannot be stat'ed, and it cannot be
+    written. Simulated: the tests also run as root, who enters every folder."""
+    real_stat, real_access, blocked = os.stat, os.access, os.path.abspath(folder)
+
+    def no_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        here = "" if isinstance(path, int) else os.path.abspath(os.fsdecode(path))
+        if here.startswith(blocked + os.sep):
+            raise PermissionError(errno.EACCES, "Permission denied", os.fsdecode(path))
+        return real_stat(path, *args, **kwargs)
+
+    def no_access(path: Any, mode: int, *args: Any, **kwargs: Any) -> bool:
+        here = "" if isinstance(path, int) else os.path.abspath(os.fsdecode(path))
+        if here == blocked or here.startswith(blocked + os.sep):
+            return False
+        return real_access(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", no_stat)
+    monkeypatch.setattr(os, "access", no_access)
+
+
+@pytest.mark.parametrize("how", ["simulated", "for real"])
+def test_a_folder_this_user_may_not_enter_is_no_traceback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """A PATH folder this user may not enter (another user's ~/bin, /root/.local/bin in a
+    container that switched USER), and uv's tool bin folder below one: Python 3.11-3.13's pathlib
+    raised PermissionError there, so `pyt install` ended in an internal-error traceback (exit 1)
+    once its work was done (first_pyt, for its notes), and so did `--dry-run install`; doctor's
+    "pyt install" step was one "could not check" line, and make_plan gave a traceback instead
+    of its refusal. Such a folder holds no pyt, as for the shell, and the bin folder is refused.
+    "simulated": os.stat and os.access refuse it, with 3.11's pathlib on any Python; "for real": a
+    folder of mode 0 (POSIX, not root), which fails on the base only on 3.11-3.13 (python-floor)."""
+    p = Planner(tmp_path, monkeypatch)
+    locked, other = tmp_path / "locked", tmp_path / "other"
+    locked.mkdir()
+    other.mkdir()
+    found = other / ("pyt.cmd" if IS_WINDOWS else "pyt")
+    found.write_bytes(b"#!/bin/sh\n")
+    found.chmod(0o755)
+    monkeypatch.setattr(cmd_install, "bin_dir", lambda: locked / "bin")
+    if how == "simulated":
+        _pathlib_before_3_14(monkeypatch)
+        _no_entry(monkeypatch, locked)
+    elif IS_WINDOWS or os.geteuid() == 0:
+        pytest.skip("a mode that keeps this user out: POSIX, not root (root enters every folder)")
+    else:
+        locked.chmod(0)
+    try:
+        assert cmd_install.first_pyt(os.pathsep.join([str(locked), str(other)])) == found
+        message = p.refusal()
+    finally:
+        locked.chmod(0o755)
+    assert f"pyt install cannot write into uv's tool bin folder {locked / 'bin'} (this user may not create it in {locked})" in message, message
+
+
 def test_a_linked_data_folder_is_refused_as_a_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A data folder that is a link to a real install was refused because it "holds no"
     installed.json, which it did hold: it is refused as the link it is."""

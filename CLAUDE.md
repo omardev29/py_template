@@ -1903,7 +1903,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
 - It never edits PATH, an rc file or the registry: `path_problem` says when the bin folder is
   not on this process's PATH (`uv tool update-shell`) or only on the registry's (a console
   opened before the change), and `shadowing` names another `pyt` earlier on PATH (`first_pyt`:
-  never the current folder, which shutil.which searches first on Windows). On Windows install
+  never the current folder, which shutil.which searches first on Windows, and nothing in a folder
+  this user may not enter, as for the shell: `os.path.isfile`, where Python 3.11-3.13's
+  Path.is_file raised PermissionError and install ended in an internal-error traceback once its
+  work was done, `--dry-run install` too, as did make_plan's check of a bin folder below one,
+  `test_install.test_a_folder_this_user_may_not_enter_is_no_traceback`). On Windows install
   (and doctor) also note each PowerShell whose execution policy blocks pyt.ps1 (`policy_notes`,
   with `shells.ps_policies`: Restricted, 5.1's default on client Windows, or AllSigned), which a
   bare `pyt` runs there before pyt.cmd: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or
@@ -3480,7 +3484,10 @@ Per method:
   installs), and for any other package of those names what the project's environments
   installed (`presets._installed_import_names`: the RECORD of every `*.dist-info` in `.venv*`,
   either layout: beautifulsoup4's `bs4` once `./pyt add` synced it; `new` reads the source
-  project's). Without an environment only the pinned packages are mapped (15.2).
+  project's; an environment this user may not enter holds none, `os.path.isdir`: Python
+  3.11-3.13's Path.is_dir raised PermissionError, and new and rename ended in an internal-error
+  traceback, `test_presets.test_an_environment_this_user_may_not_enter_holds_no_names`). Without
+  an environment only the pinned packages are mapped (15.2).
   `new` derives the name from the folder with `name_from_folder` (NFKD without the combining
   marks, every run of other characters, letters without an ASCII form included, -> `-`, no
   `-`/`_` at the ends) and checks it before copying, so `./pyt new ../flet --preset
