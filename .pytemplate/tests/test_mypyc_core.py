@@ -318,6 +318,59 @@ def test_precheck_real_mypy_with_a_test_folder_without_python(
     assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
 
 
+def test_precheck_names_modules_from_src_as_the_projects_mypy_ini(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The precheck's mypy reads no config (the "off" profile's ignore_errors), so it gets what
+    .mypy.ini says about module names itself: explicit package bases and MYPYPATH = its
+    mypy_path (src, plus typings/ when it holds stubs), relative to the project folder."""
+    calls: list[tuple[list[str], Any]] = []
+
+    def uv(_env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(([str(a) for a in args], kw.get("extra_env")))
+        return _done([str(a) for a in args])
+
+    monkeypatch.setattr(cmd_mode.envs, "sync", lambda env, **_kw: None)
+    monkeypatch.setattr(cmd_mode.envs, "uv", uv)
+    monkeypatch.setattr(render, "typings_dir", lambda: None)
+    cmd_mode._precheck_py311(make({}))
+    mypy = [(argv, env) for argv, env in calls if "mypy" in argv]
+    assert len(mypy) == 2 and all("--explicit-package-bases" in argv and env == {"MYPYPATH": "src"} for argv, env in mypy), mypy
+    monkeypatch.setattr(render, "typings_dir", lambda: tmp_path / "typings")
+    assert cmd_mode._precheck_mypypath() == os.pathsep.join(["src", "typings"])
+
+
+@needs_venv
+def test_precheck_real_mypy_in_a_project_whose_app_package_has_no_init_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An app package without __init__.py works with check, test and mypyc (.mypy.ini names its
+    modules from src, CLAUDE.md 6.2): the precheck's mypy named src/pk/app.py both `app` and
+    `pk.app`, stopped ("Source file found twice"), and mode --supports +pypy and apply could not
+    enable PyPy. The real mypy of .venv, run in the tree as in its own project."""
+    root = tmp_path / "proj"
+    files = {
+        "src/main.py": "import pk.app\n\nprint(pk.app.VALUE)\n",
+        "src/pk/app.py": "from pk.core import bench\n\nVALUE = bench.f()\n",
+        "src/pk/core/bench.py": "def f() -> int:\n    return 1\n",
+        "tests/test_core.py": "from pk.core import bench\n\n\ndef test_f() -> None:\n    assert bench.f() == 1\n",
+    }
+    for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text, encoding="utf-8")
+    monkeypatch.setattr(cmd_mode, "ROOT", root)
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(cmd_mode, "code_dirs", lambda: ["src", "tests"])
+    real_uv = envs.uv
+
+    def uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        # this project's tools environment, run in the tree (the folder ./pyt runs mypy in)
+        return real_uv(env, [args[0], "--project", str(ROOT), *args[1:]], cwd=root, **kw)
+
+    monkeypatch.setattr(cmd_mode.envs, "uv", uv)
+    monkeypatch.setattr(proc, "DRY_RUN", True)  # uv run --no-sync: .venv is never touched
+    cmd_mode._precheck_py311(real({}))
+    assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
+
+
 NEW_APIS = (
     "import itertools\n"
     "from typing import override\n\n\n"

@@ -130,6 +130,9 @@ def _supports_after(cfg: Config, spec: str, backend: str | None = None) -> list[
 # mypy flags of the 3.11 API check: never the project's .mypy.ini (the default typing profile
 # "off" sets ignore_errors = True there, which hid every error), and the bodies of unannotated
 # functions are checked too. Only the errors that appear as 3.11 and not as python.cpython count.
+# Modules are named from src (MYPYPATH, _precheck_mypypath) and the project folder, as .mypy.ini
+# names them (explicit_package_bases): from the nearest folder with an __init__.py, an app package
+# without one was "found twice" (`app` and `<pkg>.app`), mypy stopped and PyPy could not be enabled
 PRECHECK_MYPY_FLAGS = (
     "--config-file=",  # an empty value: no config file at all
     "--check-untyped-defs",
@@ -138,7 +141,15 @@ PRECHECK_MYPY_FLAGS = (
     "--follow-imports", "silent",
     "--no-error-summary",
     "--hide-error-context",
+    "--explicit-package-bases",
 )
+
+
+def _precheck_mypypath() -> str:
+    """The MYPYPATH of the precheck's mypy: .mypy.ini's mypy_path (src, and typings/ when it holds
+    stubs), relative to the project folder mypy runs in (an absolute path would split at a ':' of
+    the project folder's path on POSIX)."""
+    return os.pathsep.join(["src", "typings"] if render.typings_dir() else ["src"])
 
 
 def precheck_key(line: str) -> tuple[str, str]:
@@ -204,7 +215,7 @@ def _precheck_py311(cfg: Config) -> None:
             *run, "mypy", *PRECHECK_MYPY_FLAGS,
             "--python-version", version, "--python-executable", str(tool.python), *dirs,
         ]
-        r = envs.uv(tool, argv, capture=True, check=False, echo=False)
+        r = envs.uv(tool, argv, extra_env={"MYPYPATH": _precheck_mypypath()}, capture=True, check=False, echo=False)
         if r.returncode not in (0, 1):  # 2 = mypy (or uv starting it) aborted: nothing was checked
             ui.report(((r.stdout or "") + (r.stderr or "")).rstrip())  # why: shown even with -q
             raise PytError(f"mypy could not check the code as Python {version} (exit code {r.returncode}, see above)")
