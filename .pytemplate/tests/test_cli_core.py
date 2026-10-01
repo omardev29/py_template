@@ -297,6 +297,30 @@ def test_render_runs_before_builtins_and_tasks_unless_disabled(monkeypatch: pyte
     assert calls == [("lint", ["--fix"]), ("t", ["x"]), ("clean", []), ("lint", []), ("t", [])]
 
 
+@pytest.mark.parametrize("dry", [True, False], ids=["dry-run", "real"])
+def test_a_tasks_deps_print_each_render_line_once(dry: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """dispatch renders before a task and again before each builtin among its deps (a dep such as
+    `mode` may change pytemplate.toml): the dry run's "render: would update" line and the warnings
+    came once more per builtin dep, three times for every preset's `ci`. Each comes once per task
+    now; a real write is still reported each time it happens, and a single command keeps them."""
+    cfg = make({"tasks": {"two": {"deps": ["lint", "check all"]}}})
+    monkeypatch.setattr(config, "load", lambda *_a, **_kw: cfg)
+    monkeypatch.setattr(render, "apply", lambda *_a, **_kw: (["x.json"], ["y.json"]))
+    monkeypatch.setattr(render, "pyproject_outdated", lambda _cfg: True)
+    monkeypatch.setattr(proc, "DRY_RUN", dry)
+    monkeypatch.setattr(cmd_dev, "cmd_lint", lambda _cfg, _args: 0)
+    monkeypatch.setattr(cmd_dev, "cmd_check", lambda _cfg, _args: 0)
+    assert cli.dispatch(["two"]) == 0
+    err = capsys.readouterr().err
+    assert err.count("render: would update x.json") == (1 if dry else 0)
+    assert err.count("render: updated x.json") == (0 if dry else 3)  # the task's render and each dep's
+    assert err.count("not overwriting hand-edited generated files: y.json") == 1
+    assert err.count("pyproject.toml does not match pytemplate.toml") == 1
+    assert cli.dispatch(["lint"]) == 0 and cli.dispatch(["lint"]) == 0  # a single command: every time
+    err = capsys.readouterr().err
+    assert err.count("pyproject.toml does not match pytemplate.toml") == 2
+
+
 def test_a_projects_task_keeps_a_name_a_later_builtin_took(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """Rule 1.11: a [tasks.install] of a project made before `pyt install` existed stopped every
     command. There the task runs for `./pyt install` (-h goes to its program), `help install`

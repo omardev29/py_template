@@ -15,6 +15,7 @@ meaning (parsed TOML), so a TOML formatter may lay them out as it likes.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import difflib
 import hashlib
@@ -22,7 +23,7 @@ import json
 import os
 import re
 import tomllib
-from collections.abc import Collection
+from collections.abc import Callable, Collection, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -680,24 +681,56 @@ def auto(cfg: Config, *, force: bool = False) -> None:
     """Silently render before every command: print one line if something changed. A
     python.cpython uv cannot provide (NoPython) renders nothing and never stops the command:
     doctor, which runs on any Python, then reports it with its other checks (it stopped with
-    exit 3 before any check); a command that needs that CPython stops on its own (cli._restart)."""
+    exit 3 before any check); a command that needs that CPython stops on its own (cli._restart).
+    While a task runs (once_per_task) its plan and warnings print once."""
     try:
         changed, edited = apply(cfg, force=force)
     except NoPython as e:
-        ui.warn(f"generated files not rendered: {e}")
+        _say(ui.warn, f"generated files not rendered: {e}")
         changed, edited = [], []
-    if changed:
-        ui.info(f"render: {'would update' if proc.DRY_RUN else 'updated'} {', '.join(changed)}")
+    if changed and not proc.DRY_RUN:
+        ui.info(f"render: updated {', '.join(changed)}")  # a real write, each time one happens
+    elif changed:
+        _say(ui.info, f"render: would update {', '.join(changed)}")
     if edited:
-        ui.warn(
+        _say(
+            ui.warn,
             f"not overwriting hand-edited generated files: {', '.join(edited)}\n"
-            "  Change pytemplate.toml or .pytemplate/templates instead, or use ./pyt render --force"
+            "  Change pytemplate.toml or .pytemplate/templates instead, or use ./pyt render --force",
         )
     if pyproject_outdated(cfg):
-        ui.warn(
+        _say(
+            ui.warn,
             "pyproject.toml does not match pytemplate.toml (backend.supported / python / preset).\n"
-            "  Apply your pytemplate.toml changes with: ./pyt apply"
+            "  Apply your pytemplate.toml changes with: ./pyt apply",
         )
+
+
+# What auto() said while a task runs (cli.dispatch renders before the task and again before each
+# builtin among its deps: a dep such as `mode` may change pytemplate.toml); None outside one.
+_SAID: set[str] | None = None
+
+
+@contextlib.contextmanager
+def once_per_task() -> Iterator[None]:
+    """auto()'s plan and warnings print once while a task runs: they came again for every
+    builtin dep, three times for the `ci` task of every preset."""
+    global _SAID
+    outer = _SAID
+    if outer is None:
+        _SAID = set()
+    try:
+        yield
+    finally:
+        _SAID = outer
+
+
+def _say(emit: Callable[[str], None], message: str) -> None:
+    if _SAID is not None:
+        if message in _SAID:
+            return
+        _SAID.add(message)
+    emit(message)
 
 
 # --- pyproject.toml (managed parts) ---------------------------------------------------------------

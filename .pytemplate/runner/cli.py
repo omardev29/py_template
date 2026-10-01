@@ -400,9 +400,10 @@ def dispatch(argv: list[str]) -> int:
             raise PytError(f"unknown command: {name}  (./pyt help)")
         if not task.cmd and _asks_help(args):
             return cmd_help(cfg, [name])  # a deps-only task has no program to pass -h on to
-        if not _OPTS["no_render"]:
-            render.auto(cfg)
-        return tasks.run_task(cfg, name, args, dispatch)
+        with render.once_per_task():  # its builtin deps render again: each line once
+            if not _OPTS["no_render"]:
+                render.auto(cfg)
+            return tasks.run_task(cfg, name, args, dispatch)
     if command.render and not _OPTS["no_render"]:
         render.auto(cfg)
     module = importlib.import_module(f"{__package__}.{command.module}")

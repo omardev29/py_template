@@ -868,7 +868,11 @@ header rules (with detector tests proving each rule fires).
    shell-setup`, in a project and outside one: it said `unknown command`). Builtins run
    `render.auto(cfg)` first when `Command.render` is true and `--no-render` is not set, then
    `module.func(cfg, args)`. Names in `[tasks]` run `render.auto` and
-   `tasks.run_task(cfg, name, args, dispatch)`; `-h` after a deps-only task prints its help.
+   `tasks.run_task(cfg, name, args, dispatch)` inside `render.once_per_task` (each builtin dep
+   renders again, since a dep such as `mode` may change pytemplate.toml, and the plan and
+   warnings of `render.auto` print once per task: they came once more per builtin dep,
+   `test_cli_core.test_a_tasks_deps_print_each_render_line_once`); `-h` after a deps-only task
+   prints its help.
    `help NAME` also describes a `[tasks]` entry (cmd, deps, backend, cwd, env); an unknown
    NAME, or a second one, exits 2. `cli.INTERNAL` routes (`__init`) dispatch like builtins but are
    listed nowhere (help, `editor.json`, the editors' task lists and their completion read
@@ -2145,7 +2149,9 @@ re-rendering.
   again once pytemplate.toml was fixed. When uv cannot provide it, `render.apply` raises
   `render.NoPython` (a PytError, 3) before its first write, so nothing is rendered.
 - `render.auto` runs before most commands and prints one line when something changed; it also
-  warns when `pyproject_outdated` (the hint names `./pyt apply`). On `render.NoPython` it renders
+  warns when `pyproject_outdated` (the hint names `./pyt apply`). While a task runs its deps
+  (`render.once_per_task`, 5.2) each of those lines prints once, but a real write is reported
+  each time one happens (`render._say`). On `render.NoPython` it renders
   nothing, warns (`generated files not rendered: ...`) and lets the command run: doctor, which
   runs on any Python (5.2), then reports the unusable python.cpython with its other checks, as
   README promises (it stopped with exit 3 before any check, and wrote the typo into a deleted
