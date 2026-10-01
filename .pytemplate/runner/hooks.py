@@ -41,7 +41,7 @@ is true in pytemplate.toml (the default).
 `hooks run` checks what the commit contains (`git diff --cached`, deletions included), fast,
 so no mypy (that stays in `./pyt check`, the editors and CI):
   1. ruff check (the active backend's typing profile, like `check`) and ruff format --check
-     on the staged .py/.pyi files under src/ and tests/. A file with unstaged changes is
+     on the staged .py/.pyi/.ipynb files under src/ and tests/. A file with unstaged changes is
      checked in its STAGED version (fed to ruff on stdin), and a staged file deleted from the
      working tree is reported;
   2. the generated files are up to date (`render --check`) and none has unstaged changes (an
@@ -100,7 +100,8 @@ MARKER = "pytemplate pre-commit hook"
 HEADER = f"# {MARKER}: written by ./pyt hooks install (it rewrites this file: do not edit)"
 _OURS = re.compile(rf"#!/bin/sh\n# {MARKER}: written by \./(?:pyt|deploy) hooks install \(it rewrites this file: do not edit\)\n")
 LAUNCHERS = ("pyt", "pyt.cmd", "pyt.ps1")
-PY_SUFFIXES = (".py", ".pyi")
+# The files ruff checks and formats: notebooks too, as `./pyt check`, `lint`, `fmt` and CI do
+PY_SUFFIXES = (".py", ".pyi", ".ipynb")
 USAGE = "install [--force] | uninstall | run | status"
 # Repository variables git exports to hooks, possibly relative to the top of the work tree
 GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
@@ -1418,7 +1419,8 @@ def staged_blob(repo: Repo, path: str) -> bytes:
 
 
 def python_files(staged: Sequence[str], dirs: Sequence[str]) -> list[str]:
-    """Return the staged .py/.pyi files under the code dirs (src/, tests/)."""
+    """Return the staged Python files and notebooks (PY_SUFFIXES) under the code dirs (src/,
+    tests/): ruff reads a notebook by path and on stdin alike (--stdin-filename x.ipynb)."""
     return [p for p in staged if p.endswith(PY_SUFFIXES) and "/" in p and p.split("/", 1)[0] in dirs]
 
 

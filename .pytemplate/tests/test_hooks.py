@@ -11,6 +11,7 @@ test_real_ruff_accepts_the_hook_arguments (skipped without it).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -1491,8 +1492,10 @@ def test_project_paths() -> None:
 
 
 def test_python_files() -> None:
-    staged = ["src/a.py", "src/pkg/b.pyi", "tests/test_c.py", "tools/d.py", "e.py", "src/f.txt", ".pytemplate/runner/g.py"]
-    assert hooks.python_files(staged, ["src", "tests"]) == ["src/a.py", "src/pkg/b.pyi", "tests/test_c.py"]
+    """ruff checks and formats notebooks too (`./pyt check`, `lint`, `fmt` and CI do): a staged
+    one was never fed to the hook's ruff, and passed with an undefined name."""
+    staged = ["src/a.py", "src/pkg/b.pyi", "tests/test_c.py", "tools/d.py", "e.py", "src/f.txt", ".pytemplate/runner/g.py", "tests/explore.ipynb", "nb.ipynb"]
+    assert hooks.python_files(staged, ["src", "tests"]) == ["src/a.py", "src/pkg/b.pyi", "tests/test_c.py", "tests/explore.ipynb"]
     assert hooks.python_files(staged, ["src"]) == ["src/a.py", "src/pkg/b.pyi"]
 
 
@@ -1693,10 +1696,10 @@ def failures(res: dict[str, hooks.Result]) -> dict[str, hooks.Result]:
 def test_checks_ruff_only_on_staged_python_files(tmp_path: Path, tools: Tools) -> None:
     repo, staged = staged_project(tmp_path, {
         "src/pkg/a.py": b"x = 1\n", "src/pkg/b.pyi": b"y: int\n", "tests/test_a.py": b"def test(): pass\n",
-        "tools/other.py": b"z = 1\n", "README.md": b"# r\n", "gen.json": b"{}\n",
+        "tests/explore.ipynb": _notebook("x = 1"), "tools/other.py": b"z = 1\n", "README.md": b"# r\n", "gen.json": b"{}\n",
     })
     res = results(make(), repo, staged)
-    assert [files for _, files in tools.ruff_calls] == [["src/pkg/a.py", "src/pkg/b.pyi", "tests/test_a.py"]] * 2
+    assert [files for _, files in tools.ruff_calls] == [["src/pkg/a.py", "src/pkg/b.pyi", "tests/explore.ipynb", "tests/test_a.py"]] * 2
     assert tools.staged_calls == []  # nothing has unstaged changes: every file by path
     check_args, format_args = (args for args, _ in tools.ruff_calls)
     off_exit_zero = bool(render.load_profile("off").get("ruff", {}).get("exit_zero"))  # the project's own profile
@@ -2442,6 +2445,59 @@ def test_real_ruff_checks_a_staged_file_in_a_folder_named_like_a_tool_folder(tmp
     out = res["ruff check"].output.replace("\\", "/")
     assert all(rel in out for rel in staged), out
     assert res["ruff format"].passed is False, res["ruff format"].label
+
+
+def _notebook(code: str) -> bytes:
+    """A notebook with one code cell, written as Jupyter writes it (and as ruff writes it back)."""
+    cell = {"cell_type": "code", "execution_count": None, "id": "c1", "metadata": {}, "outputs": [], "source": code.splitlines(keepends=True)}
+    nb = {"cells": [cell], "metadata": {"language_info": {"name": "python"}}, "nbformat": 4, "nbformat_minor": 5}
+    return (json.dumps(nb, indent=1) + "\n").encode()
+
+
+def test_real_ruff_checks_a_staged_notebook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ruff checks and formats notebooks (`./pyt check`, `lint`, `fmt` and the generated CI do),
+    and the hook fed it only .py and .pyi files: a staged notebook with an undefined name passed
+    ("no staged Python file"), then failed check and CI. The real ruff of .venv, as the hook starts
+    it: by path, and on stdin for a notebook with unstaged changes (--stdin-filename x.ipynb)."""
+    ruff = _venv_ruff()
+    if not ruff.is_file():
+        pytest.skip("no ruff in .venv (./pyt setup)")
+    root = tmp_path / "p"
+    rel = "tests/explore.ipynb"
+    (root / "tests").mkdir(parents=True)
+    (root / rel).write_bytes(_notebook("print(undefined_name)"))
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "ROOT", root)
+    monkeypatch.setattr(cmd_dev, "BUILD", root / ".build")
+    monkeypatch.setattr(hooks, "ROOT", root)
+
+    def tail(argv: Sequence[object]) -> list[str]:
+        args = [str(a) for a in argv]
+        return [str(ruff), *args[args.index("ruff") + 1 :]]
+
+    def uv(_env: envs.PyEnv, argv: Sequence[object], **_kw: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(tail(argv), cwd=root, capture_output=True, text=True, timeout=120, check=False)
+
+    def run_bytes(argv: Sequence[str], *, cwd: Path, env: object, data: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(tail(argv), cwd=cwd, input=data, capture_output=True, timeout=120, check=False)
+
+    monkeypatch.setattr(envs, "uv", uv)
+    monkeypatch.setattr(hooks, "_run_bytes", run_bytes)
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+
+    def run(as_staged: dict[str, bytes] | None = None) -> dict[str, hooks.Result]:
+        files = hooks.python_files([rel], ["src", "tests"])
+        return {r.label.split(":")[0]: r for r in hooks.check_ruff(make(), files, as_staged)}
+
+    res = run()  # by path
+    assert res["ruff check"].passed is False and "F821" in res["ruff check"].output, res["ruff check"].label
+    assert rel in res["ruff check"].output.replace("\\", "/")
+    assert res["ruff format"].passed is True, res["ruff format"].output
+    res = run({rel: _notebook("x = 1")})  # its staged version, on stdin: clean
+    assert res["ruff check"].passed is True and res["ruff format"].passed is True, (res["ruff check"].output, res["ruff format"].output)
+    res = run({rel: _notebook("x  =  1")})
+    assert res["ruff check"].passed is True and res["ruff format"].passed is False
+    assert "its staged version" in res["ruff format"].output
 
 
 NAME_DISPATCH_HOOK = """{shebang}

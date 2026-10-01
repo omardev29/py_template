@@ -1315,11 +1315,13 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   of the commit, and `git cat-file` cannot read a gitlink: a staged submodule that had moved on
   stopped the hook, `test_a_staged_submodule_that_moved_on_is_skipped_like_a_folder`).
   In ~0.3 s: ruff (active typing profile, `exit_zero` honoured) and `ruff format --check` on
-  staged `.py/.pyi` under the code dirs via `uv run --quiet --frozen` (a stale lock is the lock
-  check's finding; an exit code other than 0/1 is "could not run ruff", without a fmt hint,
-  except `ruff format --check`'s exit 2 for a file it cannot parse, `hooks._UNPARSABLE`: "a
-  staged file does not parse", which pointed at uv or the environment before). A
-  file with unstaged changes is checked in its STAGED version (`git cat-file --filters
+  staged `.py/.pyi/.ipynb` under the code dirs (`hooks.PY_SUFFIXES`: notebooks too, as `check`,
+  `lint`, `fmt` and CI read them; a staged notebook passed the hook and failed CI,
+  `test_hooks.test_real_ruff_checks_a_staged_notebook`) via `uv run --quiet --frozen` (a stale
+  lock is the lock check's finding; an exit code other than 0/1 is "could not run ruff",
+  without a fmt hint, except `ruff format --check`'s exit 2 for a file it cannot parse,
+  `hooks._UNPARSABLE`: "a staged file does not parse", which pointed at uv or the environment
+  before). A file with unstaged changes is checked in its STAGED version (`git cat-file --filters
   :0:<path>`, the checkout form, fed to ruff with `--stdin-filename`); a staged file missing
   from the working tree fails with `git restore`, and a hint to drop it from the commit that
   never deletes a tracked file: `git rm --cached` only for a file the commit adds,
