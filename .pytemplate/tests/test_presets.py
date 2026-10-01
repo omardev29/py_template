@@ -861,11 +861,12 @@ def test_the_shipped_gitignore_ignores_the_roots_outputs_that_are_links(tmp_path
     elsewhere.mkdir()
     _git(repo, "init", "-q")
     shutil.copyfile(ROOT / ".gitignore", repo / ".gitignore")
-    links = [".venv", ".venv-pypy", ".venv-wsl", ".build", "dist", "build"]
-    source = ["src/pkg/dist", "tests/build", "src/pkg/__init__.py"]
+    links = [".venv", ".venv-pypy", ".venv-wsl", ".venv-pypy-wsl", ".build", "dist", "build"]
+    source = ["src/pkg/dist", "tests/build", "src/pkg/__init__.py", ".venvrc"]  # a file named like an env too
     (repo / "src" / "pkg").mkdir(parents=True)
     (repo / "tests").mkdir()
     (repo / "src/pkg/__init__.py").write_text("", encoding="utf-8")
+    (repo / ".venvrc").write_text("layout python\n", encoding="utf-8")
     try:
         for name in (*links, "src/pkg/dist", "tests/build"):
             (repo / name).symlink_to(elsewhere / name.replace("/", "-"), target_is_directory=True)

@@ -153,10 +153,10 @@ typings/                          project stubs (raylib preset: the corrected ra
 .github/workflows/template-flet/  [template repo] template-flet.yml's steps: check.py (the
                                   target edit, the Flet version, the browser and .apk checks),
                                   browser.txt (the pinned Playwright); not copied
-ignored: .venv* *.pyd *.so .flet/ tool caches anywhere; the root's own /.build /dist
-         /build /*.spec only (src/<pkg>/build/ and tests/dist/ are source); no trailing slash
-         on the environments and outputs, which may be links (git reads one as folders only:
-         a committed link broke every other clone);
+ignored: .venv*/ *.pyd *.so .flet/ tool caches anywhere; the root's own /.venv /.venv-*
+         /.build /dist /build /*.spec only (src/<pkg>/build/ and tests/dist/ are source); no
+         trailing slash on the root's environments and outputs, which may be links (git reads
+         one as folders only: a committed link broke every other clone);
          .claude/worktrees/ .claude/settings.local.json
 ```
 
