@@ -1489,6 +1489,40 @@ def test_overseer_finds_the_projects_tasks_from_a_buffer_outside_it(tmp_path: Pa
     assert got.get("listener_error") is None and got.get("resumed") == "app", got
 
 
+HEALTH_CWD_CHECK = r"""
+vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
+local pt = require("pytemplate")
+pt.setup({ root = vim.env.PT_TEST_ROOT })
+local got = {}
+for _, dir in ipairs({ vim.env.PT_TEST_ROOT, vim.env.PT_TEST_ROOT .. "/src", vim.env.PT_TMP .. "/outside" }) do
+  vim.cmd.cd(vim.fn.fnameescape(dir))
+  vim.cmd("checkhealth pytemplate")
+  local lines = vim.tbl_filter(function(l)
+    return l:find("cwd", 1, true) ~= nil
+  end, vim.api.nvim_buf_get_lines(0, 0, -1, false))
+  got[#got + 1] = table.concat(lines, "\n")
+  vim.cmd("bwipeout!")
+end
+io.stdout:write("PTHEALTH" .. vim.json.encode(got) .. "\n")
+vim.cmd("qa!")
+"""
+
+
+def test_checkhealth_says_where_the_cwd_is(tmp_path: Path) -> None:
+    """:checkhealth pytemplate called any cwd that is not the root "a subdirectory of the root",
+    also one outside the project after :cd (the plugin keeps serving the root it was loaded for):
+    the line users read when things behave differently said the cwd was inside (A9-04)."""
+    project = _project(tmp_path)
+    (tmp_path / "outside").mkdir()
+    r = _headless_lua(tmp_path, HEALTH_CWD_CHECK, project)
+    line = next((ln for ln in r.stdout.replace("\r", "\n").splitlines() if ln.startswith("PTHEALTH")), None)
+    assert line is not None, r.stdout + r.stderr
+    at_root, below, outside = json.loads(line[len("PTHEALTH") :])
+    assert at_root == "", at_root
+    assert "is a subdirectory of the root" in below and "outside" not in below, below
+    assert "is outside the project" in outside and "subdirectory" not in outside, outside
+
+
 BOM_CHECK = r"""
 vim.opt.rtp:prepend(vim.env.PT_PLUGIN)
 local pt = require("pytemplate")

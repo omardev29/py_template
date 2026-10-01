@@ -24,8 +24,17 @@ function M.check()
     return
   end
   h.ok("root: " .. pt.native(root))
-  if not pt.same_path(uv.cwd(), root) then
-    h.info("cwd is a subdirectory of the root: launch.json is read through the pytemplate provider")
+  local cwd = uv.cwd()
+  if not pt.same_path(cwd, root) then
+    if pt.in_root(cwd) then
+      h.info("cwd is a subdirectory of the root: launch.json is read through the pytemplate provider")
+    else
+      -- after :cd (or :tcd, :lcd) out of the project: the plugin keeps serving the root it was loaded for
+      h.info(
+        "cwd " .. pt.native(cwd or "?") .. " is outside the project: ./pyt still runs in the root and launch.json"
+          .. " is read through the pytemplate provider, but file pickers search the cwd (:cd back to the root)"
+      )
+    end
   end
   if vim.fn.has("nvim-0.11.2") == 0 then
     h.warn("Neovim " .. tostring(vim.version()) .. ": LazyVim needs 0.11.2 or newer")
