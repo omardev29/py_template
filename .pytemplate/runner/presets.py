@@ -1188,6 +1188,117 @@ def _raise_copy_errors(dest: Path, errors: list[tuple[str, str, str]]) -> None:
         raise PytError(f"could not copy the template into {dest}:\n  " + "\n  ".join(lines) + more, 1)
 
 
+# The local sources of pyproject.toml's [tool.uv.sources] and of uv.lock: a file (path) or a
+# folder (directory, editable, virtual), each a TOML string after its key
+_SOURCE_KEYS = ("path", "directory", "editable", "virtual")
+_SOURCE_VALUE = re.compile(r"""(\b(?:path|directory|editable|virtual)\s*=\s*)("(?:[^"\\\n]|\\.)*"|'[^'\n]*')""")
+
+
+def _inside(path: str, folder: str) -> bool:
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
+def _with_sources_moved(data: Any, moved: dict[str, str], scope: tuple[str, ...]) -> Any:
+    """`data` (parsed TOML) with each local source of `moved` replaced, below `scope` only."""
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {k: moved.get(v, v) if k in _SOURCE_KEYS and isinstance(v, str) else walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    if not scope:
+        return walk(data)
+    if not isinstance(data, dict) or scope[0] not in data:
+        return data
+    return {**data, scope[0]: _with_sources_moved(data[scope[0]], moved, scope[1:])}
+
+
+def _subtree(data: Any, scope: tuple[str, ...]) -> Any:
+    for key in scope:
+        data = data.get(key) if isinstance(data, dict) else None
+    return data
+
+
+def rebase_local_sources(src: Path, dest: Path) -> None:
+    """In `dest`, a copy of the project `src`: a local source that names a file or folder outside
+    `src` by a relative path (`./pyt add ../mylib`: `mylib = { path = "../mylib" }` in
+    pyproject.toml's [tool.uv.sources], `directory = "../mylib"` in uv.lock, which writes every
+    path from the project, a library's own local dependencies too) names the same one from
+    `dest`, in both files alike, so `uv lock --check` still passes there (uv 0.10.12 and
+    0.12.19). Copied as they were, they named another folder from the copy: `new` stopped in
+    __init's `uv add` ("Distribution not found"), and so did selftest --e2e and --nvim (their
+    `new`), the workers of selftest --mutation and the tests that lock a copy of the project.
+    Sources inside `src` stay (the copy holds them at the same place). A file that does not
+    read, one that is no file of `dest` (a link out of it: never written through), or an edit
+    that would change anything else in it, stays as it is, with a warning when it names such a
+    source."""
+    from .config import toml_value
+
+    root, there = os.path.realpath(src), os.path.realpath(dest)
+
+    def from_dest(value: str) -> str | None:
+        if ".." not in value or os.path.isabs(value) or re.match(r"[A-Za-z]:|[\\/]", value):
+            return None  # inside, or absolute (drive-relative too): the same file from anywhere
+        target = os.path.normpath(os.path.join(root, value))
+        if _inside(target, root):
+            return None
+        try:
+            new = os.path.relpath(target, there)
+        except ValueError:  # another drive (Windows)
+            new = target
+        new = new.replace(os.sep, "/")
+        return None if any("\ud800" <= c <= "\udfff" for c in new) else new  # no TOML string holds it
+
+    for name, scope in (("pyproject.toml", ("tool", "uv", "sources")), ("uv.lock", ())):
+        path = dest / name
+        try:
+            raw = path.read_bytes()
+            if b".." not in raw:
+                continue  # no relative path leaves the project
+            bom = raw.startswith(b"\xef\xbb\xbf")
+            text = raw.decode("utf-8-sig")
+            before = tomllib.loads(text)
+        except (OSError, UnicodeDecodeError, *TOML_ERRORS):
+            continue  # nothing to rebase, or a file the command that reads it names
+        found: dict[str, str] = {}
+
+        def collect(node: Any) -> None:
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    if k in _SOURCE_KEYS and isinstance(v, str):
+                        new = from_dest(v)
+                        if new is not None and new != v:
+                            found[v] = new
+                    else:
+                        collect(v)
+            elif isinstance(node, list):
+                for item in node:
+                    collect(item)
+
+        collect(_subtree(before, scope))
+        if not found:
+            continue
+
+        def replace(m: re.Match[str]) -> str:
+            try:
+                value = tomllib.loads(f"v = {m[2]}")["v"]
+            except tomllib.TOMLDecodeError:
+                return m[0]
+            return m[1] + toml_value(found[value]) if isinstance(value, str) and value in found else m[0]
+
+        edited = _SOURCE_VALUE.sub(replace, text)
+        try:
+            ok = tomllib.loads(edited) == _with_sources_moved(before, found, scope)
+        except TOML_ERRORS:
+            ok = False
+        if not ok or not _inside(os.path.realpath(path), there):
+            ui.warn(f"{path}: its local sources {', '.join(sorted(found))} are not named from this copy: uv may not find them from {dest}")
+            continue
+        write_whole(path, (b"\xef\xbb\xbf" if bom else b"") + edited.encode("utf-8"))
+
+
 def copy_template(dest: Path) -> None:
     """Copy the template to `dest`, without history, environments, builds, caches or the
     template repository's own files (_skipped).
@@ -1199,7 +1310,8 @@ def copy_template(dest: Path) -> None:
     installed template (global mode), without a word about it. A symbolic link is
     copied as a link, as git tracks it (a link to a folder is not the folder's content, and a
     dangling one is still a tracked file). A copy that fails is a PytError (exit 1) naming what
-    failed.
+    failed. The local sources that name a folder outside the project by a relative path (a
+    library `../mylib`) name it from `dest` (rebase_local_sources).
     """
     if dest.exists() and any(dest.iterdir()):
         raise PytError(f"{dest} already exists and is not empty")
@@ -1222,6 +1334,7 @@ def copy_template(dest: Path) -> None:
             if name not in left_out:
                 _copy_entry(ROOT / name, dest / name, name, errors)
         _raise_copy_errors(dest, errors)
+        rebase_local_sources(ROOT, dest)
         return
     deleted: list[str] = []
     for rel_path in tracked:
@@ -1239,6 +1352,7 @@ def copy_template(dest: Path) -> None:
         if paths:
             more = f" and {len(paths) - 5} more" if len(paths) > 5 else ""
             ui.info(f"  not copied ({what}): {', '.join(paths[:5])}{more}")
+    rebase_local_sources(ROOT, dest)
 
 
 def _copy_link(src: Path, target: Path, rel_path: str, command: str = "new") -> None:

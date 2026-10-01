@@ -785,7 +785,7 @@ header rules (with detector tests proving each rule fires).
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
 | `editors/nvim.py` | `.lazy.lua` (verbatim template copy) and `.pytemplate/editor.json` (`editor_data`; section 12.2). |
-| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `PytError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `_installed_import_names`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./pyt __init`; with rollback), `copy_template` (`_tracked_template`: git's tracked files, or every file of the installed template, `_installed`, never its `INSTALL_RECORD`; `_copy_entry` per entry, `_raise_copy_errors`), `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
+| `presets.py` | Preset discovery/loading (`load`: a broken `preset.toml` is a `PytError` naming it), option merge, `uv_extras`, `dependencies`, `skeleton`, `pristine`, name rules (`APP_NAME` and `NAME_RULE`, defined in `config`; `name_from_folder`, `check_name_free` (`IMPORT_NAMES`, `_installed_import_names`, `INTERPRETER_COMMANDS`), `locked_names`), tested pins (`constraints`, `constraints_text`), `plan_init` + `init` (run by `./pyt __init`; with rollback), `copy_template` (`_tracked_template`: git's tracked files, or every file of the installed template, `_installed`, never its `INSTALL_RECORD`; `_copy_entry` per entry, `_raise_copy_errors`; `rebase_local_sources`: a local library outside the project named from the copy), `new` (`next_steps`); for apply and rename: `default_options`, `option_dependencies` (the requirements with an `{option}`), `set_project_name` (checked `_set_project_name`) / `project_name` (the `[project]` table only), `shadows_stdlib` (`STDLIB_OTHER_VERSIONS`). |
 | `mypyc.py` | `compiled_sources`, incremental stage (`sync_tree`, `remove_stale_extensions`; `copy_writable`, `make_writable`, `remove_tree` for every scratch copy of the app), `spec.json` + `COMPILED_STAMP` (+ `COMPILER_ENV`), spawning `tools/mypyc_build.py` (`MYPYC_REJECTED`, `COMPILER_MISSING`), `ANNOTATE_HTML`, `hidden_imports` (+ `importable`), `exe_stage`, `runtime_env_vars`, `has_compiler_hint`. |
 | `imports.py` | AST import extraction that skips `if TYPE_CHECKING:` blocks (`imports_of`, `iter_runtime_nodes`); parses bytes (tolerates a BOM); `parse_error`, `local_module`, `is_local`. |
 | `lintc.py` | Extra AST rules for compiled modules (section 9): `lint_file(cfg, path)`, `lint`, `Finding`, `NATIVE_CLASS_DECORATORS`, `relative_file_at_import`. |
@@ -3342,7 +3342,13 @@ Per method:
   `LICENSE` at the root (`SKIP_AT_ROOT`: as `.gitignore` and render, only the root's own
   outputs are builds; a tracked `docs/dist/` or `tools/.build/` was left out of the new project
   without a word); and `.github/workflows/template-*` (template CI files MUST use that prefix; the CI
-  image's folder `template-ci-image/` has it too). A
+  image's folder `template-ci-image/` has it too). In both, a local source outside the project
+  (`./pyt add ../mylib`: `path = "../mylib"` in `pyproject.toml`, `directory = "../mylib"` in
+  `uv.lock`, which names every path from the project) is named from `dest`, in both files alike
+  (`presets.rebase_local_sources`, which `mutation.make_copy` calls too: from `dest` it named
+  another folder, and `__init`'s `uv add` failed, so `new`, the first step of `selftest --e2e`
+  and `--nvim` and every test that locks a copy of the project failed in such a project;
+  `test_presets.test_copy_template_names_local_libraries_outside_the_project_from_the_copy`). A
   project made with `new` is another program, not the template (an owner decision): `new`
   (`presets._make_own`) writes its own `README.md` (`presets.project_readme`: name, preset
   description, getting started) and sets `[project] description` to the preset's
@@ -4153,8 +4159,8 @@ short temp tree and unset `NVIM_APPNAME`.
   goes through), the mutants skipped, the verdict of every way pytest ends (colours and
   subtests too) and its detail (one line of 200 characters at most), a fake Cosmic Ray side
   (and one that died, hangs or was closed), the snapshot, the base and its lock (the user's
-  own), the workers' environment and copies (links, a submodule, a link that cannot be made), a
-  git or a ps that fails, the parser of Python 3.11.3 and older (a NUL byte is a ValueError
+  own), the workers' environment and copies (links, a submodule, a link that cannot be made, a
+  library or a link's target outside the project), a git or a ps that fails, the parser of Python 3.11.3 and older (a NUL byte is a ValueError
   there), real pytest runs over their limit or stopped with their whole process tree (sessions
   of its own too), the threads, deferred signals, the baselines (one that fails, one that never
   ends: their mutants never run; one a stopped run never reached), what a killed run left in
@@ -4444,7 +4450,11 @@ short temp tree and unset `NVIM_APPNAME`.
     tests' mode checks, `test_mutation.test_make_copy_keeps_the_executables_of_the_projects_index`;
     only those that index holds: a file tracked past the .gitignore, `git add -f`, stays out of it,
     and marking it stopped every worker,
-    `test_make_copy_takes_an_executable_the_project_tracks_past_its_gitignore`;
+    `test_make_copy_takes_an_executable_the_project_tracks_past_its_gitignore`; what the project
+    names outside its folder by a relative path, a local library in pyproject.toml and uv.lock
+    (`presets.rebase_local_sources`) or a link's target (`mutation._rebase_links`), named from
+    the copy: from `<base>/w<i>` it named another folder, and every worker's sync stopped the run,
+    `test_make_copy_names_what_lies_outside_the_project_from_the_copy`;
     the modules to mutate from the snapshot `list_mutants` takes, which Cosmic Ray reads for
     every mutant too, so the checkout may change meanwhile), with its own `.venv` (`sync_copy`: `uv
     sync --locked --all-groups`, its output captured and shown when it fails, even under `-q`: a
@@ -5051,6 +5061,17 @@ uv:
   `pyproject.toml` (the `flet build` stage) became the project ("Unable to find lockfile"). Fix:
   `envs.uv_run` adds `--project <ROOT>` (7). Test:
   `test_fixes.py::test_uv_run_pins_the_project_outside_the_root`. Goes: never.
+- **uv names a local source from the project** (LIMITATION): `./pyt add ../mylib` writes `path =
+  "../mylib"` in pyproject.toml and `directory = "../mylib"` in uv.lock, which names every path
+  from the project (a library's own local dependencies too), so a copy of the project elsewhere
+  named another folder ("Distribution not found": `new`, the workers of `selftest --mutation`,
+  the tests' copies). Fix: `presets.rebase_local_sources` names them from the copy in both files
+  alike, which `uv lock --check` accepts (uv 0.10.12 and 0.12.19), in `presets.copy_template` and
+  `mutation.make_copy` (11, 13.1). Test:
+  `test_presets.py::test_copy_template_names_local_libraries_outside_the_project_from_the_copy`,
+  `test_uv_reads_the_renamed_local_libraries_of_a_copy_as_the_same_lock`,
+  `test_mutation.py::test_make_copy_names_what_lies_outside_the_project_from_the_copy`. Goes:
+  never.
 - **`uv sync` is exact for the groups it installs** (LIMITATION): it removed a group added with
   `./pyt add --group G`, and so did the sync `uv remove` runs itself (`./pyt remove idna`
   uninstalled the packages of every non-default group); `--all-groups` enables every group, so

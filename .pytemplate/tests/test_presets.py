@@ -1167,6 +1167,182 @@ def test_copy_of_the_real_template_is_exactly_its_tracked_files(tmp_path: Path, 
     assert (dest / "pyt").read_bytes() == (ROOT / "pyt").read_bytes()
 
 
+# A project with local libraries (CLAUDE.md 10): inside it, next to it (`./pyt add ../mylib`), a
+# wheel two folders up, one by an absolute path, and the outside library's own local dependency,
+# which uv.lock names from the project too (as every path it writes)
+LOCAL_PYPROJECT = """\
+[project]
+name = "proj"
+version = "0.1.0"
+dependencies = ["mylib", "inner", "wheely", "fixed"]
+
+[tool.uv.sources]
+mylib = { path = "../mylib" }
+inner = { path = "libs/inner", editable = true }
+wheely = { path = "../../wheels/wheely-1.0-py3-none-any.whl" }
+fixed = { path = "ABSOLUTE" }
+
+[tool.flet.app]
+path = "src"
+"""
+LOCAL_LOCK = """\
+version = 1
+requires-python = ">=3.11"
+
+[[package]]
+name = "deep"
+version = "0.1.0"
+source = { directory = "../other/deep" }
+
+[[package]]
+name = "inner"
+version = "0.1.0"
+source = { editable = "libs/inner" }
+
+[[package]]
+name = "mylib"
+version = "0.1.0"
+source = { directory = "../mylib" }
+dependencies = [
+    { name = "deep" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "deep", directory = "../other/deep" }]
+
+[[package]]
+name = "wheely"
+version = "1.0"
+source = { path = "../../wheels/wheely-1.0-py3-none-any.whl" }
+wheels = [
+    { filename = "wheely-1.0-py3-none-any.whl", hash = "sha256:00" },
+]
+
+[[package]]
+name = "proj"
+version = "0.1.0"
+source = { virtual = "." }
+
+[package.metadata]
+requires-dist = [
+    { name = "inner", editable = "libs/inner" },
+    { name = "mylib", directory = "../mylib" },
+    { name = "wheely", path = "../../wheels/wheely-1.0-py3-none-any.whl" },
+]
+"""
+
+
+def _sources(data: Any) -> list[tuple[str, str]]:
+    """Every (key, value) of a local source in parsed TOML, in order."""
+    found: list[tuple[str, str]] = []
+    if isinstance(data, dict):
+        for k, v in data.items():
+            found += [(k, v)] if k in ("path", "directory", "editable", "virtual") and isinstance(v, str) else _sources(v)
+    elif isinstance(data, list):
+        for item in data:
+            found += _sources(item)
+    return found
+
+
+def _local_project(root: Path, absolute: Path, *, bom: bool = False, crlf: bool = False) -> None:
+    root.mkdir(parents=True)
+    for name, text in (("pyproject.toml", LOCAL_PYPROJECT.replace("ABSOLUTE", absolute.as_posix())), ("uv.lock", LOCAL_LOCK)):
+        data = text.replace("\n", "\r\n") if crlf else text
+        (root / name).write_bytes((b"\xef\xbb\xbf" if bom else b"") + data.encode("utf-8"))
+    (root / "libs" / "inner").mkdir(parents=True)
+    (root / "libs" / "inner" / "pyproject.toml").write_text('[project]\nname = "inner"\n', encoding="utf-8")
+
+
+@pytest.mark.parametrize(("bom", "crlf"), [(False, False), (True, True)])
+def test_copy_template_names_local_libraries_outside_the_project_from_the_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bom: bool, crlf: bool) -> None:
+    """`./pyt add ../mylib` names the library from the project, in pyproject.toml and uv.lock
+    alike. `new` copied both as they were, so from a folder at another depth `../mylib` named
+    another one: __init's `uv add` failed ("Distribution not found") and new removed the
+    project, and so did the first step of selftest --e2e and --nvim, and every test that locks
+    a copy of the project. The copy names the same files and folders from its own place, in both
+    files; a source inside the project, an absolute one and every other byte stay as they were
+    (a BOM and CRLF too), and `uv lock --check` passes there (the test after this one)."""
+    src = tmp_path / "a" / "b" / "proj"
+    _local_project(src, tmp_path / "fixed", bom=bom, crlf=crlf)
+    monkeypatch.setattr(presets, "ROOT", src)
+    monkeypatch.setattr(presets, "_git_files", lambda *args: None)  # no git: every file
+    dest = tmp_path / "x" / "y" / "z" / "copy"
+    presets.copy_template(dest)
+    for name in ("pyproject.toml", "uv.lock"):
+        old_raw, new_raw = (src / name).read_bytes(), (dest / name).read_bytes()
+        assert new_raw.startswith(b"\xef\xbb\xbf") == bom and (b"\r\n" in new_raw) == crlf and new_raw.count(b"\n") == old_raw.count(b"\n")
+        old, new = tomllib.loads(old_raw.decode("utf-8-sig")), tomllib.loads(new_raw.decode("utf-8-sig"))
+        pairs = list(zip(_sources(old), _sources(new), strict=True))
+        assert pairs and all(k == k2 for (k, _), (k2, _) in pairs)
+        for (_, before), (_, after) in pairs:
+            if before.startswith(".."):  # outside the project: the same file or folder from the copy
+                assert after != before and os.path.normpath(dest / after) == os.path.normpath(src / before), (before, after)
+            else:  # inside it (the copy holds it at the same place), absolute, or the project itself
+                assert after == before
+        assert len(new_raw) - len(old_raw) == sum(len(after) - len(before) for (_, before), (_, after) in pairs)
+    assert tomllib.loads((dest / "pyproject.toml").read_bytes().decode("utf-8-sig"))["tool"]["flet"]["app"]["path"] == "src"
+    assert (src / "pyproject.toml").read_bytes().count(b'"../mylib"') == 1  # the project itself is never touched
+
+
+@pytest.mark.skipif(shutil.which("uv") is None and not os.environ.get("UV"), reason="uv not found")
+def test_uv_reads_the_renamed_local_libraries_of_a_copy_as_the_same_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """uv itself agrees: a project that depends on a library next to it locks; its copy two
+    folders deeper, with the library named from there, passes `uv lock --check` (no network:
+    the library has static metadata and no dependency)."""
+    side = tmp_path / "side"
+    (side / "mylib" / "src" / "mylib").mkdir(parents=True)
+    (side / "mylib" / "pyproject.toml").write_text(
+        '[project]\nname = "mylib"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n\n[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n',
+        encoding="utf-8",
+    )
+    src = side / "proj"
+    src.mkdir()
+    (src / "pyproject.toml").write_text(
+        '[project]\nname = "proj"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = ["mylib"]\n\n[tool.uv.sources]\nmylib = { path = "../mylib" }\n',
+        encoding="utf-8",
+    )
+    uv = shutil.which("uv") or os.environ["UV"]
+    env = _child_env(tmp_path)
+    locked = subprocess.run([uv, "lock", "--offline"], cwd=src, env=env, capture_output=True, text=True, check=False)
+    if locked.returncode != 0:
+        pytest.skip(f"uv cannot lock offline here: {locked.stderr.strip()[-300:]}")
+    monkeypatch.setattr(presets, "ROOT", src)
+    monkeypatch.setattr(presets, "_git_files", lambda *args: None)
+    dest = tmp_path / "far" / "away" / "copy"
+    presets.copy_template(dest)
+    assert '"../../../side/mylib"' in (dest / "uv.lock").read_text(encoding="utf-8")
+    check = subprocess.run([uv, "lock", "--check", "--offline"], cwd=dest, env=env, capture_output=True, text=True, check=False)
+    assert check.returncode == 0, check.stderr
+
+
+def test_rebase_local_sources_never_writes_what_it_cannot_rewrite_alone(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The edit changes the local sources and nothing else, in the copy's own files: the same
+    value outside [tool.uv.sources] would change too (not a source: the file stays as it was,
+    with a warning naming it), and a pyproject.toml of the copy that is a link to a file outside
+    it (the project's own) is never written through."""
+    src = tmp_path / "proj"
+    src.mkdir()
+    shared = '[tool.uv.sources]\nmylib = { path = "../mylib" }\n\n[tool.other]\npath = "../mylib"\n'
+    (src / "pyproject.toml").write_text(shared, encoding="utf-8")
+    dest = tmp_path / "deeper" / "copy"
+    dest.mkdir(parents=True)
+    (dest / "pyproject.toml").write_text(shared, encoding="utf-8")
+    presets.rebase_local_sources(src, dest)
+    assert (dest / "pyproject.toml").read_text(encoding="utf-8") == shared
+    err = capsys.readouterr().err
+    assert "warning:" in err and "../mylib" in err and str(dest) in err, err
+    (dest / "pyproject.toml").unlink()
+    alone = '[tool.uv.sources]\nmylib = { path = "../mylib" }\n'
+    (src / "pyproject.toml").write_text(alone, encoding="utf-8")
+    try:
+        os.symlink(src / "pyproject.toml", dest / "pyproject.toml")
+    except OSError as e:  # Windows without the right to make links
+        pytest.skip(f"cannot make a symbolic link here: {e}")
+    presets.rebase_local_sources(src, dest)
+    assert (src / "pyproject.toml").read_text(encoding="utf-8") == alone and (dest / "pyproject.toml").is_symlink()
+    assert "warning:" in capsys.readouterr().err
+
+
 # --- new ---------------------------------------------------------------------------------------
 
 

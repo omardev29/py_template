@@ -151,7 +151,9 @@ outside the template:
 
 When a step fails (a name uv refuses, no network, Ctrl+C), `new` removes what it created.
 Dependencies added with `./pyt add` and tracked files of your own (docs, scripts) come along
-into the copy: for a clean project, run `new` from an untouched clone of the template.
+into the copy: for a clean project, run `new` from an untouched clone of the template. A local
+library outside the project (`./pyt add ../mylib`) is named from the new folder, in
+`pyproject.toml` and `uv.lock` alike.
 
 Outside a project, `pyt new DIR` ([Install `pyt`](#install-pyt)) makes the same copy of the
 installed template, `DIR` relative to the folder it was typed in: every file of it (it has no

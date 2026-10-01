@@ -62,7 +62,7 @@ from typing import IO, Any
 from . import envs, proc, ui
 from .config import Config
 from .e2e import check_ceiling, child_env, kill_tree, rmtree, scrub_env, termination_as_interrupt, unusable
-from .presets import _git_path
+from .presets import _git_path, rebase_local_sources
 from .project import IS_WINDOWS, ROOT, TOOLS, check_private_dir, lock_refusal, make_private_dir, scratch_name, venv_python
 from .ui import PytError
 
@@ -812,7 +812,10 @@ def make_copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, st
     = false (NTFS keeps no x bit), and `git add` then records every new file as 100644, so pyt
     and pyt.ps1 lost the 100755 that test_launcher_sh and test_launcher_win read, and the
     baselines of runner.project and runner.cmd_install failed (presets._git_init stages a new
-    project's launchers so too)."""
+    project's launchers so too). What the project names outside its folder by a relative path,
+    a local library (`./pyt add ../mylib`: pyproject.toml and uv.lock) or a link's target, is
+    named from the copy (presets.rebase_local_sources, _rebase_links): from <base>/w<i> it named
+    another folder, and every worker's `uv sync --locked` stopped the run."""
     contents = contents or {}
     for rel, data in contents.items():
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -834,6 +837,8 @@ def make_copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, st
                 shutil.copytree(src, target)
             else:
                 shutil.copy2(src, target)
+    rebase_local_sources(root, dest)
+    _rebase_links(root, dest, files)
     _git(dest, env, "init", "-q")
     _git(dest, env, "add", "-A")
     # only what this index holds: a file the project tracks past its .gitignore (`git add -f`, a
@@ -844,6 +849,33 @@ def make_copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, st
     for i in range(0, len(marked), 100):  # a Windows command line holds 32767 characters
         _git(dest, env, "update-index", "--chmod=+x", "--", *marked[i : i + 100])
     _git(dest, env, *GIT_IDENTITY, "commit", "-q", "--no-verify", "-m", "selftest --mutation")
+
+
+def _rebase_links(root: Path, dest: Path, files: Sequence[str]) -> None:
+    """A link of the project with a relative target names from the copy what it names in the
+    project: a file or folder outside the project (`assets -> ../../shared`) the same one, one
+    inside it the copy's own. Copied as it was, the first named another one from <base>/w<i>.
+    One the copy holds as what it names (Windows without the right to make links) stays."""
+    real_root, real_dest = os.path.realpath(root), os.path.realpath(dest)
+    for rel in files:
+        copy = dest / rel
+        if not (root / rel).is_symlink() or not copy.is_symlink():
+            continue
+        target = os.readlink(root / rel)
+        if os.path.isabs(target):
+            continue
+        folder = os.path.dirname(rel)
+        aimed = os.path.normpath(os.path.join(real_root, folder, target))
+        inside = aimed == real_root or aimed.startswith(real_root.rstrip(os.sep) + os.sep)
+        wanted = os.path.normpath(os.path.join(real_dest, os.path.relpath(aimed, real_root))) if inside else aimed
+        if os.path.normpath(os.path.join(real_dest, folder, target)) == wanted:
+            continue
+        try:
+            new = os.path.relpath(wanted, os.path.join(real_dest, folder))
+        except ValueError:  # another drive (Windows)
+            new = wanted
+        copy.unlink()
+        os.symlink(new, copy, target_is_directory=os.path.isdir(aimed))
 
 
 def sync_copy(venv: envs.PyEnv, copy: Path) -> None:

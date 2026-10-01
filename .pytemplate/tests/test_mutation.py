@@ -30,7 +30,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner import config, mutation, nvimtest, proc  # noqa: E402
+from runner import config, mutation, nvimtest, presets, proc  # noqa: E402
 from runner.config import Config  # noqa: E402
 from runner.mutation import KILLED, NOT_RUN, SURVIVED, TIMEOUT, Baseline, Mutant, Options, Report, Runs, Worker  # noqa: E402
 from runner.project import ROOT  # noqa: E402
@@ -1115,6 +1115,42 @@ def test_make_copy_keeps_links_as_links(tmp_path: Path) -> None:
 
 
 @needs_git
+def test_make_copy_names_what_lies_outside_the_project_from_the_copy(tmp_path: Path) -> None:
+    """A library next to the project (`./pyt add ../mylib`: pyproject.toml and uv.lock name it
+    from the project) and a link that leaves the project named other folders from <base>/w<i>:
+    every worker's `uv sync --locked` failed ("Distribution not found at <base>/mylib") and the
+    run stopped. The copy names them from its own folder, both files alike; what lies inside
+    the project (a library, a link) stays as it is, and the project itself is never touched."""
+    env = _git_env(tmp_path)
+    side = tmp_path / "side"
+    _write(side / "mylib", {"pyproject.toml": '[project]\nname = "mylib"\n'})
+    _write(side / "shared", {"logo.txt": "logo\n"})
+    pyproject = '[project]\nname = "proj"\ndependencies = ["inner", "mylib"]\n\n[tool.uv.sources]\nmylib = { path = "../mylib" }\ninner = { path = "libs/inner" }\n'
+    lock = (
+        'version = 1\n\n[[package]]\nname = "inner"\nversion = "0.1.0"\nsource = { directory = "libs/inner" }\n\n'
+        '[[package]]\nname = "mylib"\nversion = "0.1.0"\nsource = { directory = "../mylib" }\n\n'
+        '[[package]]\nname = "proj"\nversion = "0.1.0"\nsource = { virtual = "." }\n\n[package.metadata]\n'
+        'requires-dist = [\n    { name = "inner", directory = "libs/inner" },\n    { name = "mylib", directory = "../mylib" },\n]\n'
+    )
+    root = _write(side / "proj", {"pyproject.toml": pyproject, "uv.lock": lock, "libs/inner/pyproject.toml": '[project]\nname = "inner"\n', "src/a.py": "x\n"})
+    try:
+        os.symlink(os.path.join("..", "shared"), root / "assets", target_is_directory=True)
+        os.symlink("src", root / "code", target_is_directory=True)
+    except OSError as e:  # Windows without the right to make links
+        pytest.skip(f"cannot make a symbolic link here: {e}")
+    _git(root, env, "init", "-q")
+    copy = tmp_path / "base" / "w0"
+    mutation.make_copy(root, copy, mutation.listed_files(root, env), env)
+    text = (copy / "pyproject.toml").read_text(encoding="utf-8")
+    assert text == pyproject.replace('"../mylib"', '"../../side/mylib"')
+    assert (copy / "uv.lock").read_text(encoding="utf-8") == lock.replace('"../mylib"', '"../../side/mylib"')
+    assert (copy / "assets" / "logo.txt").read_text(encoding="utf-8") == "logo\n" and os.readlink(copy / "code") == "src"
+    assert (root / "pyproject.toml").read_text(encoding="utf-8") == pyproject and os.readlink(root / "assets") == os.path.join("..", "shared")
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=copy, env=env, capture_output=True, text=True, check=True).stdout
+    assert status == ""  # what the copy names is what it committed
+
+
+@needs_git
 def test_make_copy_copies_what_a_link_names_where_links_cannot_be_made(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Windows without the right to make links: the file or the folder a link names takes its
     place (a folder was copied as a file: an error). Any other file that cannot be copied stops
@@ -2170,19 +2206,26 @@ def test_a_real_run_kills_what_the_tests_check_and_finds_what_they_miss(tmp_path
     toy = _write(tmp_path / "toy", {".pytemplate/runner/__init__.py": "", ".pytemplate/runner/calc.py": CALC, ".pytemplate/tests/test_calc.py": TEST_CALC, **SUITE_INI})
     for name in ("pyproject.toml", "uv.lock", ".python-version", ".gitignore"):
         shutil.copyfile(ROOT / name, toy / name)  # uv sync --locked of the workers: the project's own lock
-    # A project with a local library (./pyt add ./libs/x, CLAUDE.md 10) names path/workspace
-    # sources in pyproject.toml and uv.lock; a real run gets them from make_copy (git ls-files),
-    # so copy those source trees here too, or the toy's `uv sync --locked` cannot find them and the
-    # run stops. The template's own lock has none of these (a no-op there).
+    # A project with local libraries (CLAUDE.md 10: ./pyt add ./libs/x or ../x) names them from the
+    # project in pyproject.toml and uv.lock. A real run's workers get those inside it from
+    # make_copy (git ls-files) and name those outside it from their own folder: the toy gets the
+    # first and names the others from its folder (copied next to it, they were still missing from
+    # the workers' folders). The template's own lock has none.
     import tomllib
 
-    lock_data = tomllib.loads((toy / "uv.lock").read_text(encoding="utf-8"))
-    for pkg in lock_data.get("package", []):
+    presets.rebase_local_sources(ROOT, toy)
+    real_root = os.path.realpath(ROOT)
+    for pkg in tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8")).get("package", []):
         source = pkg.get("source") or {}
-        rel = source.get("directory") or source.get("editable") or source.get("virtual")
-        if rel and rel not in (".", "./") and (ROOT / rel).is_dir():
+        rel = next((source[k] for k in ("directory", "editable", "virtual") if isinstance(source.get(k), str)), None)
+        if rel is None or os.path.isabs(rel):
+            continue  # a package of an index, or a library named by its absolute path
+        local = os.path.normpath(os.path.join(real_root, rel))
+        if not local.startswith(real_root.rstrip(os.sep) + os.sep):
+            continue  # the project itself, or outside it (named from the toy above)
+        if os.path.isdir(local):
             shutil.copytree(
-                ROOT / rel, toy / rel, dirs_exist_ok=True,
+                local, toy / rel, dirs_exist_ok=True,
                 ignore=shutil.ignore_patterns(".venv*", ".build", "dist", "__pycache__", ".git", ".flet"),
             )  # fmt: skip
     _git(toy, env, "init", "-q")
