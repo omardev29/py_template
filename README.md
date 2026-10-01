@@ -535,8 +535,9 @@ name). What changes:
 
 Other files (README.md, `docs/`, scripts, your own workflows) are only listed when they mention
 the old name; `dist/` and `.build/` keep the old name until the next build (`./pyt clean`).
-Symbolic links and junctions in `src/` and `tests/` are never followed: a warning lists those
-that mention the old name or point through it, to edit by hand.
+Symbolic links and junctions in `src/` and `tests/` (and a `tests/` that is one) are never
+followed: a warning lists those that mention the old name or point through it, to edit by hand.
+A `src/` that is a link or junction is refused: the package lives in it.
 It refuses uncommitted changes without `--force` (a project fresh from `./pyt new` has no
 commit yet: commit first), also when it cannot check them (the project is in a git repository,
 but git is not on PATH: a git GUI's own git), the names `new` refuses, and, before it writes

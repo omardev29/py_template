@@ -1231,7 +1231,8 @@ def _is_link(path: Path) -> bool:
 def _code_files(root: Path, links: list[str] | None = None) -> Iterator[tuple[str, Path]]:
     """Every regular file of src/ and tests/ (no caches), sorted. Links and junctions are never
     followed (their target may be shared with other projects): they go to `links` (a folder
-    with a trailing slash)."""
+    with a trailing slash), src/ and tests/ themselves too (os.walk follows its top: a tests/
+    shared through a link was rewritten for every project that shares it)."""
     def unlistable(e: OSError) -> None:
         """A folder that cannot be listed stops the plan, as an unreadable file does: os.walk skipped
         it, and its files kept the old imports inside the moved package."""
@@ -1245,6 +1246,10 @@ def _code_files(root: Path, links: list[str] | None = None) -> Iterator[tuple[st
 
     for top in ("src", "tests"):
         base = root / top
+        if _is_link(base):
+            if links is not None:
+                links.append(f"{top}/")
+            continue
         if not base.is_dir():
             continue
         for dirpath, dirnames, filenames in os.walk(base, onerror=unlistable):
@@ -1542,6 +1547,14 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
     """
     names = Names(old_name, new_name)
     src = root / "src"
+    if _is_link(src):
+        # The package lives in it: the move would go through the link, into a folder other projects
+        # may share, and its files would be left unchanged (a link is never followed)
+        raise PytError(
+            "rename: src/ is a symbolic link or junction: rename never writes through one (its target may be "
+            "shared with other projects), and the package it would move lives there; nothing was changed.\n"
+            "  Put a folder of the project in its place (a copy of what it points to), or rename by hand"
+        )
     old_dir = package_dir(src, names.old_pkg)
     if old_dir is None:
         raise PytError(

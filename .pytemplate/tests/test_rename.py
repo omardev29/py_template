@@ -1356,6 +1356,67 @@ def test_a_windows_junction_in_src_is_never_followed(tmp_path: Path, monkeypatch
     assert planned.linked == ["src/alpha/shared/"]
 
 
+def _fake_junction(monkeypatch: pytest.MonkeyPatch, folder: Path) -> None:
+    """`folder` (a real folder) reads as a Windows junction, as cmd_env._is_link sees one."""
+    import stat
+    import types
+
+    real_lstat = os.lstat
+
+    def lstat(path: Any, *a: Any, **k: Any) -> Any:
+        if Path(path) == folder:
+            return types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_reparse_tag=cmd_env._JUNCTION)
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(cmd_env.os, "lstat", lstat)
+
+
+@pytest.mark.parametrize("how", ["symlink", "junction"])
+def test_a_linked_tests_folder_is_never_followed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], how: str) -> None:
+    """A tests/ folder that is itself a link or junction (tests -> ../shared/tests, shared between
+    projects) was followed, since os.walk follows its top: rename rewrote the shared files for
+    every project that shares them, and warned about nothing. It is a link like the ones below
+    it: never rewritten, named in the warning."""
+    root = tmp_path / "p"
+    root.mkdir()
+    _write_project(root, "script", "alpha")
+    if how == "symlink":
+        shutil.move(root / "tests", tmp_path / "shared")
+        _symlink_or_skip(root / "tests", "../shared", directory=True)
+    else:
+        _fake_junction(monkeypatch, root / "tests")
+    before = {p.name: p.read_bytes() for p in (root / "tests").iterdir() if p.is_file()}
+    assert "import alpha.core.bench as bench" in before["test_core.py"].decode()
+    planned = rename.plan(root, "alpha", "beta")
+    assert not [f.path for f in planned.files if f.path.startswith("tests/")]
+    assert planned.linked == ["tests/"]
+    capsys.readouterr()
+    rename.report(planned, dry=False)
+    assert "warning: not rewritten (symbolic links or junctions: their targets may be shared): tests/ mentions 'alpha'" in capsys.readouterr().err
+    rename.apply_plan(root, planned)
+    assert {p.name: p.read_bytes() for p in (root / "tests").iterdir() if p.is_file()} == before
+    assert "import beta" in (root / "src" / "main.py").read_text(encoding="utf-8")  # the rest is renamed
+
+
+@pytest.mark.parametrize("how", ["symlink", "junction"])
+def test_a_linked_src_folder_stops_the_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """src/ itself a link or junction: the package lives in it, so the move went through the link
+    (into a folder other projects may share) and its files were rewritten there. Never followed,
+    it cannot be renamed without a half-made change: the plan stops before any write."""
+    root = tmp_path / "p"
+    root.mkdir()
+    _write_project(root, "script", "alpha")
+    if how == "symlink":
+        shutil.move(root / "src", tmp_path / "shared")
+        _symlink_or_skip(root / "src", "../shared", directory=True)
+    else:
+        _fake_junction(monkeypatch, root / "src")
+    before = _tree(tmp_path)
+    with pytest.raises(PytError, match=r"src/ is a symbolic link or junction: rename never writes through one"):
+        rename.plan(root, "alpha", "beta")
+    assert _tree(tmp_path) == before
+
+
 def test_mentions_outside_src_and_tests_are_reported(tmp_path: Path) -> None:
     _write_project(tmp_path, "script", "alpha")
     files = {

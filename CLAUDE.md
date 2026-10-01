@@ -1476,7 +1476,13 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     target's text is not searched: an absolute link through the project's own folder, named like
     the app, was reported) or whose file or folder mentions it are a warning (`Plan.linked`,
     `_link_mentions`, shown in the dry run and the real run): a linked subpackage that imports
-    the old package used to break silently. `_mentions` skips links and junctions too.
+    the old package used to break silently. `_mentions` skips links and junctions too. So is a
+    tests/ that is itself a link or junction (os.walk follows its top: a tests/ shared between
+    projects was rewritten for all of them, silently,
+    `test_rename.test_a_linked_tests_folder_is_never_followed`); a src/ that is one stops the plan
+    before any write (`plan`: the package it moves lives there, so the move went through the
+    link and a half-renamed project was the only other way,
+    `test_rename.test_a_linked_src_folder_stops_the_plan`).
 - ruff tidy-up (`tidy_before`/`tidy_after`; best effort, never fails the rename): the new name
   has another length and sort position, so `ruff check --fix-only --fixable I001` (acts only when
   the active typing profile selects I) and `ruff format` run on the rewritten Python files, each
