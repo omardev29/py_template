@@ -4081,6 +4081,9 @@ short temp tree and unset `NVIM_APPNAME`.
     Windows' `git init` writes core.filemode = false, `git add` then recorded pyt and pyt.ps1 as
     100644, and the baselines of runner.project and runner.cmd_install failed in the launcher
     tests' mode checks, `test_mutation.test_make_copy_keeps_the_executables_of_the_projects_index`;
+    only those that index holds: a file tracked past the .gitignore, `git add -f`, stays out of it,
+    and marking it stopped every worker,
+    `test_make_copy_takes_an_executable_the_project_tracks_past_its_gitignore`;
     the modules to mutate from the snapshot `list_mutants` takes, which Cosmic Ray reads for
     every mutant too, so the checkout may change meanwhile), with its own `.venv` (`sync_copy`: `uv
     sync --locked --all-groups`, its output captured and shown when it fails, even under `-q`: a

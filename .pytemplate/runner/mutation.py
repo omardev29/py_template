@@ -833,7 +833,11 @@ def make_copy(root: Path, dest: Path, files: Sequence[str], env: Mapping[str, st
                 shutil.copy2(src, target)
     _git(dest, env, "init", "-q")
     _git(dest, env, "add", "-A")
-    marked = [rel for rel in executables(root, root_env()) if (dest / rel).is_file() and not (dest / rel).is_symlink()]
+    # only what this index holds: a file the project tracks past its .gitignore (`git add -f`, a
+    # vendored library with its x bit) is left out by add -A, and update-index refused it ("cannot
+    # add to the index"), which stopped every worker
+    indexed = {os.fsdecode(p) for p in _git(dest, env, "ls-files", "-z").stdout.split(b"\0") if p}
+    marked = [rel for rel in executables(root, root_env()) if rel in indexed and (dest / rel).is_file() and not (dest / rel).is_symlink()]
     for i in range(0, len(marked), 100):  # a Windows command line holds 32767 characters
         _git(dest, env, "update-index", "--chmod=+x", "--", *marked[i : i + 100])
     _git(dest, env, *GIT_IDENTITY, "commit", "-q", "--no-verify", "-m", "selftest --mutation")

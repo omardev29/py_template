@@ -1043,6 +1043,27 @@ def test_make_copy_keeps_the_executables_of_the_projects_index(tmp_path: Path) -
     assert mutation.executables(plain, {**env, "GIT_CEILING_DIRECTORIES": str(tmp_path)}) == []  # no repository: nothing to mark
 
 
+@needs_git
+def test_make_copy_takes_an_executable_the_project_tracks_past_its_gitignore(tmp_path: Path) -> None:
+    """A vendored native library is `git add -f`ed past the .gitignore (*.so), often with its x
+    bit: the copy's `git add -A` leaves it out, and marking it executable in the copy's index
+    (`git update-index --chmod=+x`) failed with "cannot add to the index", which stopped every
+    worker of selftest --mutation. Only what the copy's index holds is marked."""
+    env = _git_env(tmp_path)
+    root = _write(tmp_path / "p", {".gitignore": "*.so\n", "pyt": "#!/bin/sh\n", "src/libfoo.so": "ELF\n"})
+    _git(root, env, "init", "-q")
+    _git(root, env, "add", ".gitignore", "pyt")
+    _git(root, env, "add", "-f", "src/libfoo.so")
+    _git(root, env, "update-index", "--chmod=+x", "pyt", "src/libfoo.so")
+    assert sorted(mutation.executables(root, env)) == ["pyt", "src/libfoo.so"]
+    windows = {**env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.filemode", "GIT_CONFIG_VALUE_0": "false"}
+    copy = tmp_path / "copy"
+    mutation.make_copy(root, copy, mutation.listed_files(root, env), windows)
+    staged = subprocess.run(["git", "ls-files", "-s"], cwd=copy, env=windows, capture_output=True, text=True, check=True).stdout
+    assert {line.split("\t")[1]: line.split()[0] for line in staged.splitlines()} == {".gitignore": "100644", "pyt": "100755"}
+    assert (copy / "src" / "libfoo.so").read_text(encoding="utf-8") == "ELF\n"  # in the copy, as in the project's working tree
+
+
 def _symlinks(root: Path) -> None:
     try:
         os.symlink("a.py", root / "link.py")
