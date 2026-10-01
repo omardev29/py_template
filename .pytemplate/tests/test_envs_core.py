@@ -1675,6 +1675,23 @@ def test_doctor_counts_each_generated_file_problem_once(doctor: Doctor, changed:
         assert ".mypy.ini" in doctor.line("generated files up to date")[2]
 
 
+def test_doctor_says_basedpyright_cannot_check_a_folder_pyright_reads_as_a_pattern(doctor: Doctor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """./pyt check refuses basedpyright in a project folder whose path holds '*' or '?' (CLAUDE.md
+    15.1: pyright found no file there, and check passed): doctor names it with the ways out, only
+    when basedpyright is the editor."""
+    from runner import cmd_dev
+
+    monkeypatch.setattr(cmd_dev, "ROOT", tmp_path / "q?x" / "proj")
+    assert cmd_env.cmd_doctor(make(), []) == 0  # the Pylance editor: ./pyt check runs no basedpyright
+    assert cmd_env.cmd_doctor(make({"typing": {"editor": "basedpyright"}}), []) == 1
+    ((_passed, label, hint),) = doctor.problems()
+    assert "basedpyright: the project's folder holds '?'" in label and "a wildcard" in label
+    assert "Move the project" in hint and "./pyt mode --editor pylance" in hint
+    doctor.lines.clear()
+    monkeypatch.setattr(cmd_dev, "ROOT", tmp_path / "plain" / "proj")
+    assert cmd_env.cmd_doctor(make({"typing": {"editor": "basedpyright"}}), []) == 0 and doctor.problems() == []
+
+
 def test_doctor_flags_an_old_uv(doctor: Doctor, capsys: pytest.CaptureFixture[str]) -> None:
     doctor.uv_version = "uv 0.8.17"
     assert cmd_env.cmd_doctor(make(), []) == 1

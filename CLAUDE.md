@@ -2413,7 +2413,12 @@ Formats:
      (offline, a cold cache: asked first with a `uv run --with ... python -c ""` that echoes
      no command line, because uv then exits 1 as well), fails the check. That step is not
      captured: on a cold cache it downloads basedpyright and Node.js (tens of MB), and uv's
-     progress shows it (`-q` hides it; once cached it prints nothing).
+     progress shows it (`-q` hides it; once cached it prints nothing). In a project folder
+     whose path holds what pyright reads as a pattern (`*` or `?`; on POSIX also `\`: 15.1)
+     basedpyright never runs: the check fails naming the character and the ways out (move the
+     project, or `./pyt mode --editor pylance`), and doctor says so too
+     (`cmd_dev.basedpyright_problem`, `PYRIGHT_UNSAFE`: there basedpyright found no file and said
+     "0 errors", and check passed).
 - `check all` runs each distinct profile once (cpython and pypy usually share one) and the
   mypyc rules only once, with the strictest profile (`mypyc` when present), so each finding
   appears once in the Problems panel.
@@ -6053,6 +6058,22 @@ VS Code, its extensions, pyright and basedpyright:
   excluded paths come first in `executionEnvironments` (8). Test:
   `test_mypyc_core.py::test_pyright_config_leaves_compile_exclude_out_of_the_compiled_rules`.
   Goes: never.
+- **pyright reads `*` and `?` in the paths of its configuration as wildcards, with no escape**
+  (DEFECT, pyright 1.1.414 in basedpyright 1.40.1: `getWildcardSegmentRegexFragment`,
+  `getWildcardRoot`; on POSIX it also takes a backslash for a separator): the walk for
+  `include` starts above the first such folder and enters a folder only when its whole path
+  matches, so under a project folder named like `qq?` basedpyright found no file ("No source
+  files found."), said "0 errors" and `check` (and the checks of `build`) passed code with errors
+  only basedpyright reports; under `bs\x` it stopped (exit 3). A root-relative config and file
+  arguments fail the same way, so the editors' Pylance and basedpyright, which read the same
+  `pyrightconfig.json`, check only the files opened there (measured with the language server).
+  Up: none found. Fix: `cmd_dev.basedpyright_problem` (`PYRIGHT_UNSAFE`, read after the path's
+  anchor) fails the check before basedpyright runs, and doctor names it, with the ways out:
+  move the project, or `typing.editor = "pylance"` (8). Test:
+  `test_cli_core.py::test_basedpyright_never_runs_where_pyright_reads_the_folder_as_a_pattern`,
+  `test_pyright_reads_a_wildcard_in_the_project_folder_pin` (a pin, the pinned basedpyright from
+  uv's cache), `test_envs_core.py::test_doctor_says_basedpyright_cannot_check_a_folder_pyright_reads_as_a_pattern`.
+  Goes: when that pin fails.
 
 Neovim, lazy.nvim, LazyVim and the plugins the integration configures:
 - **Neovim trusts a file by the sha256 of its bytes and its real path** (LIMITATION,

@@ -2062,6 +2062,84 @@ def test_basedpyright_that_cannot_run_always_fails(
         assert "No solution found" in err  # uv's own reason
 
 
+@pytest.mark.parametrize(
+    ("folder", "char", "reads"),
+    [
+        ("q?x", "?", "a wildcard"),
+        ("st*r", "*", "a wildcard"),
+        pytest.param("bs\\x", "\\", "a path separator", marks=pytest.mark.skipif(IS_WINDOWS, reason="Windows' own separator")),
+    ],
+)
+@pytest.mark.usefixtures("isolated_checks")
+def test_basedpyright_never_runs_where_pyright_reads_the_folder_as_a_pattern(
+    folder: str, char: str, reads: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """pyright reads '*' and '?' in the paths of its configuration as wildcards, and on POSIX a
+    backslash as a separator (CLAUDE.md 15.1): in a project folder named like `qq?` basedpyright
+    found no file, said "0 errors", and check and the checks of build passed code that had errors
+    only basedpyright reports; under `bs\\x` it stopped (exit 3). check fails before it runs,
+    naming the character and the ways out; ruff and mypy still run."""
+    root = tmp_path / folder / "proj"
+    monkeypatch.setattr(cmd_dev, "ROOT", root)
+    ok, fake = _checks_with(monkeypatch, make({"typing": {"editor": "basedpyright", "relaxed": "warn"}}), basedpyright=0)
+    assert ok is False
+    assert not [c for c in fake.calls if "basedpyright" in c] and not list(tmp_path.glob("cfg/pyright-*.json"))
+    assert fake.tool("ruff") is not None and fake.tool("mypy") is not None
+    err = capsys.readouterr().err
+    assert f"error: basedpyright: the project's folder holds '{char}' ({root}), which pyright reads as {reads}" in err
+    assert "./pyt mode --editor pylance" in err
+    monkeypatch.setattr(cmd_dev, "ROOT", tmp_path / "plain" / "proj")  # the same project elsewhere runs it
+    ok, fake = _checks_with(monkeypatch, make({"typing": {"editor": "basedpyright", "relaxed": "warn"}}), basedpyright=0)
+    assert ok is True and [c for c in fake.calls if "basedpyright" in c]
+
+
+def test_the_pattern_rule_reads_the_path_after_its_anchor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Windows path may start with `\\\\?\\C:\\` (an extended-length path): that '?' is no part
+    of a folder's name, and basedpyright runs there."""
+    from pathlib import PureWindowsPath
+
+    monkeypatch.setattr(cmd_dev, "ROOT", PureWindowsPath("\\\\?\\C:\\dev\\game"))
+    monkeypatch.setattr(cmd_dev, "PYRIGHT_UNSAFE", re.compile(r"[*?]"))  # Windows' rule
+    assert cmd_dev.basedpyright_problem() == ("", "")
+    monkeypatch.setattr(cmd_dev, "ROOT", PureWindowsPath("\\\\?\\C:\\dev\\ga?me"))
+    assert "holds '?'" in cmd_dev.basedpyright_problem()[0]
+
+
+def _pinned_basedpyright(project_file: Path, cwd: Path) -> dict[str, Any]:
+    """The pinned basedpyright's JSON report of `--project project_file`, run in `cwd` as check
+    runs it; skip when uv or the pins (uv's cache, offline) are missing."""
+    uv = os.environ.get("UV") or shutil.which("uv")
+    if not uv:
+        pytest.skip("uv not found")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("UV_PROJECT", "UV_PYTHON", "VIRTUAL_ENV", "PYTEMPLATE_"))}
+    argv = [uv, "tool", "run", "--offline", "--from", cmd_dev.BASEDPYRIGHT, "--with", cmd_dev.BASEDPYRIGHT_NODE]
+    argv += ["basedpyright", "--outputjson", "--project", str(project_file)]
+    r = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", timeout=300, check=False)
+    try:
+        report: dict[str, Any] = json.loads(r.stdout)
+    except ValueError:
+        pytest.skip(f"{cmd_dev.BASEDPYRIGHT} is not in the uv cache: {(r.stdout + r.stderr).strip()[-200:]}")
+    return report
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="a Windows folder name cannot hold '?'")
+def test_pyright_reads_a_wildcard_in_the_project_folder_pin(tmp_path: Path) -> None:
+    """The defect basedpyright_problem refuses (CLAUDE.md 15.1), pinned: the pinned basedpyright
+    finds the file of a project in `plain/` and none of the same project in `q?x/`. When this
+    fails, pyright escapes its configuration's paths and the refusal can go."""
+    found = {}
+    for folder in ("plain", "q?x"):
+        root = tmp_path / folder / "proj"
+        (root / "src" / "pk").mkdir(parents=True)
+        (root / "src" / "pk" / "a.py").write_text('x: int = "a"\n', encoding="utf-8")
+        (root / "cfg").mkdir()
+        conf = {"include": [(root / "src").as_posix()], "exclude": [(root / "node_modules").as_posix()], "pythonVersion": "3.11"}
+        (root / "cfg" / "pyright.json").write_text(json.dumps(conf), encoding="utf-8")
+        found[folder] = _pinned_basedpyright(Path("cfg") / "pyright.json", root)["summary"]
+    assert found["plain"]["filesAnalyzed"] == 1 and found["plain"]["errorCount"] == 1, found
+    assert found["q?x"]["filesAnalyzed"] == 0 and found["q?x"]["errorCount"] == 0, found
+
+
 def test_tools_are_pinned_exactly() -> None:
     assert re.fullmatch(r"basedpyright==\d+\.\d+\.\d+", cmd_dev.BASEDPYRIGHT)
     assert re.fullmatch(r"nodejs-wheel-binaries==\d+\.\d+\.\d+", cmd_dev.BASEDPYRIGHT_NODE)

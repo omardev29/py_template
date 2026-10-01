@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Protocol
 
 from . import cmd_install, cmd_nvim, envs, hooks, mypyc, proc, project, render, shells, ui
-from .cmd_dev import only_flags
+from .cmd_dev import basedpyright_problem, only_flags
 from .config import Config
 from .project import BUILD, DIST, ENV_SUFFIX, IS_MACOS, IS_WINDOWS, PYPROJECT, ROOT, rel, write_whole
 from .ui import PytError
@@ -645,6 +645,10 @@ def _project_files(cfg: Config, check: Check, python_ok: bool) -> None:
             "(./pyt render --diff shows it), or drop it: ./pyt render --force",
         )
     check(not render.pyproject_outdated(cfg), "pyproject.toml matches pytemplate.toml", "./pyt apply")
+    if cfg.typing.editor == "basedpyright":  # ./pyt check refuses to run it there (section 15.1)
+        problem, way_out = basedpyright_problem()
+        if problem:
+            check(False, problem, way_out)
     from . import cmd_apply  # lazy: cmd_apply imports this module
 
     cmd_apply.doctor(cfg, check)  # app.name, app.preset, [preset.*], hooks.pre_commit edited but not applied

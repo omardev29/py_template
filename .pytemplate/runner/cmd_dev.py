@@ -6,6 +6,7 @@ import argparse
 import configparser
 import json
 import os
+import re
 import shlex
 import tomllib
 import webbrowser
@@ -14,7 +15,7 @@ from typing import Any
 
 from . import envs, lintc, mypyc, proc, render, ui
 from .config import BACKENDS, TOML_ERRORS, Config
-from .project import BUILD, ROOT, SRC, code_dirs, rel
+from .project import BUILD, IS_WINDOWS, ROOT, SRC, code_dirs, rel
 from .ui import PytError
 
 # basedpyright is not in uv.lock (`uv run --with`; the VS Code extension ships its own), so it
@@ -26,6 +27,33 @@ BASEDPYRIGHT = "basedpyright==1.40.1"
 # `check` (and its glibc/macOS floor) on an untouched project. What 1.40.1 resolved to in
 # September 2026; bump both together.
 BASEDPYRIGHT_NODE = "nodejs-wheel-binaries==24.19.0"
+
+# What pyright (basedpyright 1.40.1 is pyright 1.1.414) reads as a wildcard in the paths of its
+# configuration, with no way to escape it: '*' and '?' (getWildcardSegmentRegexFragment and
+# getWildcardRoot, section 15.1). Under a project folder named like `qq?` its file walk never
+# entered the project: basedpyright found no file, said "0 errors" and check passed. On POSIX also
+# a backslash, which pyright takes for a separator: it looked for the project in another folder and
+# stopped (exit 3). A Windows path holds no '*' or '?', and '\' is its separator.
+PYRIGHT_UNSAFE = re.compile(r"[*?]" if IS_WINDOWS else r"[*?\\]")
+
+
+def basedpyright_problem() -> tuple[str, str]:
+    """Why basedpyright cannot check this project, and the ways out; ("", "") when it can. Read
+    from ROOT, the physical path basedpyright is handed (its folder and every path of the config),
+    after the anchor (a Windows `\\\\?\\C:\\` prefix holds a '?')."""
+    found = PYRIGHT_UNSAFE.search(str(ROOT)[len(ROOT.anchor) :])
+    if found is None:
+        return "", ""
+    if found[0] == "\\":
+        reads = "a path separator: basedpyright would look for the project in another folder, and stop"
+    else:
+        reads = "a wildcard: basedpyright would find no file to check, and report no error"
+    chars = "'*' or '?'" if IS_WINDOWS else "'*', '?' or '\\'"
+    return (
+        f"basedpyright: the project's folder holds '{found[0]}' ({ROOT}), which pyright reads as {reads}",
+        f"Move the project to a folder whose path has no {chars}, or check without basedpyright: "
+        './pyt mode --editor pylance (typing.editor = "pylance")',
+    )
 
 
 def only_flags(command: str, args: list[str], allowed: tuple[str, ...]) -> set[str]:
@@ -143,6 +171,10 @@ def run_checks(cfg: Config, backend: str, *, rules: bool = True) -> bool:
             ui.ok(f"mypyc rules: no problems in {lintc.describe(files)}")
 
     if cfg.typing.editor == "basedpyright":
+        problem, way_out = basedpyright_problem()
+        if problem:  # never "no errors" from a basedpyright that checked nothing
+            ui.error(f"{problem}\n  {way_out}")
+            return False
         # Profile config of THIS backend (the editor's pyrightconfig.json is the active backend's).
         # --with: used without adding it to uv.lock (the VS Code extension ships its own)
         conf = BUILD / "cfg" / f"pyright-{profile}.json"

@@ -1700,6 +1700,12 @@ only deletes files is checked too).
   uv no longer downloads the pinned PyPy. Pick a version from
   `uv python list --only-downloads --all-versions pypy`, set `python.pypy`, and run
   `./pyt apply`.
+- **`check` says "basedpyright: the project's folder holds '?'"** (with
+  `typing.editor = "basedpyright"`; also `*`, and on Linux and macOS `\`): pyright reads those
+  characters in a folder's path as a pattern, so basedpyright would find no file there and report
+  no error. Move the project to a folder whose path has none of them, or use Pylance
+  (`./pyt mode --editor pylance`). The editors read the same paths: in such a folder Pylance and
+  basedpyright check only the files you open.
 - **mypyc: "Unable to find a compatible Visual Studio installation"** (Windows): `./pyt` adds
   the Visual Studio Installer folder to PATH (the `vcvarsall.bat` of VS 2026 needs `vswhere.exe`
   from it). If it still fails, `./pyt doctor` says what is missing.
