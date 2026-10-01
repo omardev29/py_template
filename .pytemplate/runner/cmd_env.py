@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import os
 import shlex
 import shutil
@@ -343,8 +344,24 @@ def _make_writable(root: Path) -> None:
                     os.chmod(path, mode | stat.S_IWRITE | (stat.S_IRWXU if stat.S_ISDIR(mode) else 0))
 
 
+def _only_a_mount_point_left(path: Path) -> bool:
+    """Whether what rmtree left of `path` is only the empty folder something is mounted on (a
+    dev container's named volume for .venv, a bind mount of dist/), which no rmdir removes: it
+    says EBUSY there (Linux, macOS; os.path.ismount misses a bind mount of the same file system).
+    Windows says EACCES for a folder in use, never taken for one. An empty folder that rmdir
+    removes after all counts too."""
+    try:
+        if not path.is_dir() or any(path.iterdir()):
+            return False
+        os.rmdir(path)
+    except OSError as e:
+        return e.errno == errno.EBUSY
+    return True
+
+
 def _remove(path: Path) -> bool:
-    """Remove a folder, or only the link when it is a symlink/junction; return whether it is gone."""
+    """Remove a folder, or only the link when it is a symlink/junction; return whether it is gone
+    (a mount point it emptied counts: _only_a_mount_point_left)."""
     if _is_link(path):
         with contextlib.suppress(OSError):
             os.unlink(path)  # on Windows this also removes a directory symlink or a junction
@@ -354,7 +371,7 @@ def _remove(path: Path) -> bool:
     if os.path.lexists(path):  # read-only files (Windows) or folders (POSIX): once more, writable
         _make_writable(path)
         shutil.rmtree(path, ignore_errors=True)
-    return not os.path.lexists(path)
+    return not os.path.lexists(path) or _only_a_mount_point_left(path)
 
 
 def _shown(path: Path) -> str:
@@ -385,6 +402,8 @@ def cmd_clean(cfg: Config, args: list[str]) -> int:
         ui.info(f"removing {_shown(t)}")
         if not _remove(t):
             failed.append(_shown(t))
+        elif os.path.lexists(t):  # it reported a folder it had emptied as one in use, at every run
+            ui.info(f"{_shown(t)} is a mount point: emptied (the folder itself stays)")
     if failed:
         again = "./pyt clean --envs" if "--envs" in flags else "./pyt clean"
         ui.error(

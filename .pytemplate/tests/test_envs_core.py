@@ -10,6 +10,7 @@ configuration) and this Python for interpreter_info.
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import stat
@@ -1053,6 +1054,56 @@ def test_clean_reports_a_folder_it_could_not_remove(tree: Path, monkeypatch: pyt
     err = capsys.readouterr().err
     assert "error: could not remove .venv completely" in err and "Close" in err and "./pyt clean --envs" in err
     assert not (tree / ".venv-pypy").exists() and not (tree / "dist").exists()  # the others still go
+
+
+@pytest.mark.parametrize("code", [errno.EBUSY, errno.EACCES], ids=["mount point", "in use"])
+def test_clean_empties_a_folder_something_is_mounted_on(tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], code: int) -> None:
+    """A .venv or dist/ that is a mount point (a dev container's named volume) is emptied, but no
+    rmdir removes the folder itself: clean said "could not remove dist completely: a file in it is
+    in use", exit 1, at every run. rmdir says EBUSY for a mount point (Linux, macOS); Windows says
+    EACCES for a folder in use, which stays an error. (The kernel's own answer:
+    test_clean_empties_a_real_bind_mount.)"""
+    real_rmtree, real_rmdir = shutil.rmtree, os.rmdir
+    dist = tree / "dist"
+
+    def mounted(path: Any, ignore_errors: bool = False, **kw: Any) -> None:
+        if Path(path) != dist:
+            real_rmtree(path, ignore_errors=ignore_errors)
+            return
+        for entry in dist.iterdir():  # what a mount point holds goes, the folder stays
+            real_rmtree(entry)
+
+    def rmdir(path: Any, *args: Any, **kw: Any) -> None:
+        if Path(path) == dist:
+            raise OSError(code, os.strerror(code), str(path))
+        real_rmdir(path, *args, **kw)
+
+    monkeypatch.setattr(cmd_env.shutil, "rmtree", mounted)
+    monkeypatch.setattr(cmd_env.os, "rmdir", rmdir)
+    rc = cmd_env.cmd_clean(make(), [])
+    err = capsys.readouterr().err
+    assert dist.is_dir() and not any(dist.iterdir()) and not (tree / ".build").exists()
+    if code == errno.EBUSY:
+        assert rc == 0 and "dist is a mount point: emptied (the folder itself stays)" in err and "error" not in err, err
+    else:
+        assert rc == 1 and "error: could not remove dist completely" in err, err
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="bind mounts: Linux")
+def test_clean_empties_a_real_bind_mount(tree: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The kernel's own answer for a mount point (EBUSY), where this user may bind-mount (root)."""
+    volume = tmp_path / "volume"
+    (volume / "sub").mkdir(parents=True)
+    (volume / "sub" / "a.txt").write_text("x\n", encoding="utf-8")
+    r = subprocess.run(["mount", "--bind", str(volume), str(tree / "dist")], capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        pytest.skip(f"this user cannot bind-mount: {r.stderr.strip()}")
+    try:
+        assert cmd_env.cmd_clean(make(), []) == 0
+        assert "dist is a mount point: emptied" in capsys.readouterr().err
+        assert (tree / "dist").is_dir() and list(volume.iterdir()) == []
+    finally:
+        subprocess.run(["umount", str(tree / "dist")], check=False)
 
 
 def test_clean_retries_read_only_contents(tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -2157,7 +2157,11 @@ Formats:
   `--envs` this side's environments (WSL on /mnt: only `.venv*-wsl`; elsewhere every `.venv*`
   directory but those). A symlink or junction loses only the link; a folder it cannot remove
   completely (a file in use: the editor's mypy/ruff server runs from `.venv` on Windows) is an
-  error, exit 1, with the others still removed.
+  error, exit 1, with the others still removed. A folder something is mounted on (a dev
+  container's named volume for `.venv`, a bind mount of `dist/`) is emptied and stays, a note
+  (`cmd_env._only_a_mount_point_left`: an empty folder rmdir refuses with EBUSY, which
+  `os.path.ismount` misses for a bind mount of the same file system; it was "in use", exit 1, at
+  every run; `test_envs_core.test_clean_empties_a_folder_something_is_mounted_on`).
 - uv finds the project by walking up from the CWD: `envs.uv_run` adds `--project <ROOT>`
   whenever it runs with another `cwd` (a work dir with its own `pyproject.toml`, like the
   `flet build` stage, would otherwise become the project). Plain `envs.uv` calls with a `cwd`
