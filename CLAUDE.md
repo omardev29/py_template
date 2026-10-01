@@ -1530,7 +1530,13 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     `"%-m"`, `"%^a"`, which became `"%Tool"`; `_directive`) or is a struct format character after
     a byte order or count (`">I"`, `"<2H"`: `_STRUCT_BEFORE`; the flet skeleton's PNG encoder
     packed `">q"` chunk lengths for an app named I renamed to q; a bare `"I"` stays the name) is
-    kept and reported too (whether the string is ever formatted is unknown). Names of one or two letters are legal, and the
+    kept and reported too (whether the string is ever formatted is unknown). So is a one-letter
+    option, a dash or two right before it at the start of a word (`"-m"`, `"--v"`, `python -m pip`
+    in a string or a comment: `_FLAG_BEFORE`, `_FLAG_AFTER` in `_text_kind`), and the file mode of
+    an open-like call (`open(p, "r")`, `Path.open("w")`, `tarfile.open(p, "r:gz")`, a `mode=` or
+    `flag=` keyword: `OPEN_CALLS`, `MODE_ARGUMENTS`, `_Region.mode`): an app named m was renamed
+    into `python -beta`, one named r into `open(p, "beta")` (ValueError), and nothing was reported
+    (`test_rename.test_a_one_letter_option_or_file_mode_is_never_the_name`). Names of one or two letters are legal, and the
     flet skeleton's PNG signature `b"\x89PNG\r\n..."` once changed silently for `r` and `n`.
   - Text (strings, comments, other files): every occurrence except `x.pkg`, a path segment
     right after the package itself (`src/pkg/pkg`, `src\pkg\pkg`: a submodule) and a file named

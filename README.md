@@ -536,7 +536,9 @@ name). What changes:
   backslash that makes no escape (a raw string: `r"\d"`, `r"src\alpha"`; an invalid escape:
   `"\myapp"`) and a one-letter name that ends a format directive (`"%d"`, `"{:d}"`, the date
   formats of `strftime("%Y-%m-%d")`) or is a `struct` format character after a byte order or
-  count (`struct.pack(">I", n)`) are reported, not changed. Escapes exist only in the strings of Python, TOML and JSON files
+  count (`struct.pack(">I", n)`), a command-line option (`"-m"`, `"--v"`, `python -m pip`) or
+  the file mode of an `open()` call (`open(p, "r")`, `tarfile.open(p, "r:gz")`) are reported,
+  not changed. Escapes exist only in the strings of Python, TOML and JSON files
   (notebooks `.ipynb` included) and in YAML's double-quoted strings: comments and other text
   files (Markdown, INI...) are plain text, where `a\n` is a path like `a/n`.
 - `pytemplate.toml`: `app.name` and every package reference (`compile.modules`, `exclude`,

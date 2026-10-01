@@ -186,6 +186,26 @@ _DIRECTIVE_LETTERS = frozenset("abcdeEfFgGinorsuxX")
 # struct's format strings: a byte order or a count first, then format characters (">I", "<2H I")
 _STRUCT_LETTERS = "xcbBhHiIlLqQnNefdspP"
 _STRUCT_BEFORE = re.compile(r"(?:'''|\"\"\"|['\"])(?:[<>=!@]|\d)[\d\s" + _STRUCT_LETTERS + r"?]*\Z")
+# A command-line option of one letter: "-m", "--v" (subprocess and task arguments, `python -m pip`
+# in a string or a comment): a dash or two right before it, at the start of a string, a word or
+# the text, and the end of a word right after it
+_FLAG_BEFORE = re.compile(r"(?:^|[\s\"'`(\[,=])--?\Z")
+_FLAG_AFTER = re.compile(r"[\s\"'`=,;:)\]]|\.(?!\w)|\Z")
+# The calls whose string argument at these positions (or of a MODE_ARGUMENTS keyword) is a file
+# mode when it reads as one: open(p, "r"), Path.open("w"), gzip.open(p, "rb"), tarfile.open(p,
+# "r:gz"), os.fdopen(fd, "w"), zipfile.ZipFile(p, "a"), tempfile.TemporaryFile("w+"), shelve's flag
+OPEN_CALLS: dict[str, tuple[int, ...]] = {
+    "open": (0, 1),  # builtin and io.open, gzip/bz2/lzma/tarfile/codecs.open (1); Path.open (0)
+    "fdopen": (1,),
+    "popen": (1,),
+    "ZipFile": (1,),
+    "TarFile": (1,),
+    "TemporaryFile": (0,),
+    "NamedTemporaryFile": (0,),
+    "SpooledTemporaryFile": (1,),
+}
+MODE_ARGUMENTS = frozenset({"mode", "filemode", "flag"})
+_MODE_STRING = re.compile(r"[rwxabtcnU+]{1,4}(?:[:|][A-Za-z0-9*]*)?")
 # ruff format --check --output-format concise: "path:1:2: unformatted: ..." (older: "Would reformat: path")
 _UNFORMATTED = re.compile(r"^(?:Would reformat: (?P<old>.+)|(?P<path>.+?):\d+:\d+: unformatted\b)", re.MULTILINE)
 # ruff check --output-format concise: "path:1:1: I001 [*] Import block is un-sorted or un-formatted"
@@ -232,6 +252,7 @@ class _Region:
     forced: bool = False  # argument of import_module() & co., a key of sys.modules...: a module name
     fstring: bool = False  # an f-string or t-string: its {fields} are code, their format specs syntax
     resource: bool = False  # forced by a loader of RESOURCE_FUNCTIONS (or a helper of that name)
+    mode: bool = False  # the file mode of an open-like call (OPEN_CALLS): "r", "w+", "r:gz"
 
 
 class _Positions:
@@ -702,6 +723,19 @@ def _python_code(text: str, pkg: str) -> _Code | None:
         found = bool(positions) and (keyword in MODULE_ARGUMENTS if keyword is not None else index in positions)
         return str(callee) if found else ""
 
+    def mode_argument(token: str) -> bool:
+        """Whether the string `token`, which starts here, is the file mode of an open-like call
+        (OPEN_CALLS, or a MODE_ARGUMENTS keyword) and reads as one ("r", "w+", "r:gz")."""
+        if not (brackets and last and last[-1].type == tokenize.OP and last[-1].string in ("(", ",", "=")):
+            return False
+        callee, index, keyword = brackets[-1]
+        if keyword is not None:
+            found = keyword in MODE_ARGUMENTS
+        else:
+            found = isinstance(callee, str) and index in OPEN_CALLS.get(callee, ())
+        body = re.fullmatch(r"[A-Za-z]*('''|\"\"\"|'|\")(.*)\1", token, re.DOTALL)
+        return found and body is not None and _MODE_STRING.fullmatch(body.group(2)) is not None
+
     for tok in tokens:
         kind = tokenize.tok_name.get(tok.type, "")
         if kind.endswith("STRING_START"):  # Python 3.12+: f-strings, t-strings (and any later family) are text
@@ -714,13 +748,14 @@ def _python_code(text: str, pkg: str) -> _Code | None:
                 forced = bool(floader) or fstart in module_names
                 regions.append(_Region(fstart, offset(tok.end), forced, fstring=True, resource=floader in RESOURCE_FUNCTIONS))
         elif depth == 0 and tok.type in (tokenize.STRING, tokenize.COMMENT):
-            loader, fstring = "", False
+            loader, fstring, mode = "", False, False
             if tok.type == tokenize.STRING:
                 loader = loader_argument()
                 prefix = re.match(r"[A-Za-z]*", tok.string)
                 fstring = prefix is not None and "f" in prefix.group().lower()
+                mode = mode_argument(tok.string)
             forced = bool(loader) or offset(tok.start) in module_names
-            regions.append(_Region(offset(tok.start), offset(tok.end), forced, fstring, resource=loader in RESOURCE_FUNCTIONS))
+            regions.append(_Region(offset(tok.start), offset(tok.end), forced, fstring, resource=loader in RESOURCE_FUNCTIONS, mode=mode))
         elif depth == 0 and tok.type == tokenize.OP:
             if tok.string in "([{":
                 called = tok.string == "(" and last and last[-1].type == tokenize.NAME
@@ -857,6 +892,8 @@ def _text_kind(
     prev = text[start - 1 : start]
     if prev == "." and start >= 2 and _is_word(text[start - 2]):
         return "keep"  # x.alpha: a submodule or an attribute, never the top-level package
+    if end - start == 1 and _FLAG_BEFORE.search(text[max(0, start - 3) : start]) and _FLAG_AFTER.match(text, end):
+        return "keep"  # "-m", "--v", `python -m pip`: a command-line option of one letter (reported)
     if word in presets.LAUNCHER_NAMES and _LAUNCHER_BEFORE.search(text[max(0, start - 3) : start]) and text[end : end + 1] not in ("/", "\\"):
         return "keep"  # an app named pyt (new refuses the name now): `./pyt report` is the launcher
     if prev in ("/", "\\") and _inside_package(text, start, names.old_pkg):
@@ -1018,6 +1055,8 @@ def _classify(
             return escaped
         if _directive(text, start, end, quote[0]):
             return "keep"
+        if region.mode:
+            return "keep"  # open(p, "r"), tarfile.open(p, "r:gz"): a file mode, never the name (reported)
         text = _escape_read_as_blank(text, end, raw=raw, escapes=escapes)  # "alpha\n" leads into no folder n
     if not _whole_word(text, start, end):
         return "skip"

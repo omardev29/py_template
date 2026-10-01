@@ -516,6 +516,43 @@ def test_string_prefixes_and_escapes_are_never_the_name(old: str, text: str, exp
 
 
 @pytest.mark.parametrize(
+    ("old", "text", "expected", "kept"),
+    [
+        # a command-line option of one letter: subprocess and parser arguments, a command in a string
+        ("m", 'subprocess.run([sys.executable, "-m", "pytest", "-q"])\n', 'subprocess.run([sys.executable, "-m", "pytest", "-q"])\n', 1),
+        ("c", 'subprocess.run([sys.executable, "-c", "print(1)"])\n', 'subprocess.run([sys.executable, "-c", "print(1)"])\n', 1),
+        ("q", 'subprocess.run(["pytest", "-q"])\n', 'subprocess.run(["pytest", "-q"])\n', 1),
+        ("v", 'cmd = ["pytest", "--v"]\n', 'cmd = ["pytest", "--v"]\n', 1),
+        ("v", 'parser.add_argument("-v", "--verbose")\n', 'parser.add_argument("-v", "--verbose")\n', 1),
+        ("m", 'os.system("python -m pip install rich")\n', 'os.system("python -m pip install rich")\n', 1),
+        ("m", "# run it with python -m pytest\n", "# run it with python -m pytest\n", 1),
+        ("M", 'subprocess.run([sys.executable, "-m", "pytest"])\n', 'subprocess.run([sys.executable, "-m", "pytest"])\n', 1),
+        ("m", 'subprocess.run([sys.executable, "-m", "m"])\n', 'subprocess.run([sys.executable, "-m", "tool"])\n', 1),  # the module after it is the app
+        # the file mode of an open-like call: positional, or a mode keyword
+        ("r", 'with open(p, "r") as f:\n    pass\n', 'with open(p, "r") as f:\n    pass\n', 1),
+        ("r", 'open(p, "r+")\n', 'open(p, "r+")\n', 1),
+        ("w", 'open(p, "w", encoding="utf-8")\n', 'open(p, "w", encoding="utf-8")\n', 1),
+        ("w", 'Path(p).open("w")\n', 'Path(p).open("w")\n', 1),
+        ("r", 'tarfile.open(p, "r:gz")\n', 'tarfile.open(p, "r:gz")\n', 1),
+        ("gz", 'tarfile.open(p, "w:gz")\n', 'tarfile.open(p, "w:gz")\n', 1),
+        ("w", 'os.fdopen(fd, "w")\n', 'os.fdopen(fd, "w")\n', 1),
+        ("x", 'zipfile.ZipFile(p, "x")\n', 'zipfile.ZipFile(p, "x")\n', 1),
+        ("a", 'logging.FileHandler(p, mode="a")\n', 'logging.FileHandler(p, mode="a")\n', 1),
+        ("c", 'shelve.open(p, flag="c")\n', 'shelve.open(p, flag="c")\n', 1),
+        # anywhere else a one-letter name is the name
+        ("m", 'x = "m is the app"\n', 'x = "tool is the app"\n', 0),
+        ("r", 'print("r")\n', 'print("tool")\n', 0),
+    ],
+)
+def test_a_one_letter_option_or_file_mode_is_never_the_name(old: str, text: str, expected: str, kept: int) -> None:
+    """Names of one letter are legal: renamed, `"-m"` became `"-beta"` (python -beta) and
+    `open(p, "r")` became `open(p, "beta")` (ValueError: invalid mode), and nothing was reported."""
+    out = rewrite(text, Names(old, "tool"), python=True)
+    assert out.text == expected and len(out.kept) == kept
+    compile(out.text, "t.py", "exec")
+
+
+@pytest.mark.parametrize(
     ("old", "new", "char"),
     [("bullet", "shooter", "\N{BULLET}"), ("alpha", "beta", "\N{GREEK SMALL LETTER ALPHA}")],
 )
