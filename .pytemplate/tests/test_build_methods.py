@@ -4773,6 +4773,18 @@ def test_check_lock_reads_the_real_lock(tmp_path: Path, monkeypatch: pytest.Monk
         cmd_build.check_lock(make({}))
 
 
+def test_check_lock_says_a_missing_lock_is_the_projects_to_fix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A uv.lock deleted or never committed was "cannot check" with exit 3 (a missing requirement)
+    # and uv's own hint, a bare `uv lock`, which skips the managed parts ./pyt lock writes first
+    project = _workspace_project(tmp_path / "proj")
+    monkeypatch.setattr(proc, "ROOT", project)
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    (project / "uv.lock").unlink()
+    with pytest.raises(PytError, match=r"uv.lock is missing\n.*Run ./pyt lock") as e:
+        cmd_build.check_lock(make({}))
+    assert e.value.code == 2
+
+
 @pytest.mark.parametrize("fail", [False, True])
 def test_portable_build_removes_the_previous_archive(sandbox: Path, monkeypatch: pytest.MonkeyPatch, fail: bool) -> None:
     # archive = false (or a failed rebuild) left the old dist/<n>...tar.gz next to the new folder:

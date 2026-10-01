@@ -2811,7 +2811,9 @@ Formats:
   --locked`, with `--no-check` after the payload, exe and nuitka after the previous output was
   removed; a check uv cannot answer, offline or without its interpreter, is exit 3 naming uv's
   reason, never "does not match", and a pyproject.toml or uv.lock uv cannot parse ("Failed to
-  parse") exit 2, as `lock` and `sync` give for it) and `upx.preflight`: when the method packs with UPX on this host (`upx.uses`: exe on Windows,
+  parse") exit 2, as `lock` and `sync` give for it; a missing uv.lock is exit 2 naming `./pyt
+  lock`: it was exit 3 with uv's own hint, a bare `uv lock`,
+  `test_check_lock_says_a_missing_lock_is_the_projects_to_fix`) and `upx.preflight`: when the method packs with UPX on this host (`upx.uses`: exe on Windows,
   nuitka, portable, flet desktop targets) it resolves the upx binary now, downloading it if
   needed; a portable build with `runtime = "system"` (no interpreter: `upx._always_packs`) only
   checks `deploy.upx.path` and leaves the download to `upx.pack_tree`, which asks for upx only
