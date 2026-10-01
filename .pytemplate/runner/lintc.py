@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import TOML_ERRORS, Config, compiled_paths
-from .imports import PARSE_ERRORS, iter_runtime_nodes, module_name, parse, parse_error
+from .imports import PARSE_ERRORS, iter_runtime_nodes, module_name, parse, parse_error, type_checking
 from .project import PYPROJECT, SRC
 
 # The class decorators that keep a class native, by FULL name, as mypyc (2.3.1) decides it:
@@ -191,6 +191,34 @@ def _within(name: str, package: str) -> bool:
     return name == package or name.startswith(package + ".")
 
 
+# The module-level compound statements a class may sit in, by the keyword that opens them
+BLOCK_KEYWORDS: dict[type[ast.stmt], str] = {ast.If: "if", ast.Try: "try", ast.TryStar: "try", ast.With: "with", ast.For: "for", ast.While: "while", ast.Match: "match"}
+
+
+def _block_classes(stmt: ast.stmt) -> Iterator[ast.ClassDef]:
+    """The classes in the blocks of a module-level compound statement (BLOCK_KEYWORDS), and in
+    theirs. mypyc compiles only the classes of the module's own statements (its build_type_map
+    reads module.defs) and stops at any other with "Nested class definitions not supported": a
+    version check, a `try:` fallback, an `if TYPE_CHECKING:` Protocol. Never one of a block mypy
+    reads as unreachable, which mypyc skips: the else of `if TYPE_CHECKING:`, the body of `if not
+    TYPE_CHECKING:`. A class in a function or class of such a block is the other rules'."""
+    stack: list[ast.stmt] = [stmt]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.ClassDef) and node is not stmt:
+            yield node
+            continue
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+        checking = type_checking(node.test) if isinstance(node, ast.If) else None
+        if isinstance(node, ast.If) and checking is not None:
+            blocks = [node.body if checking else node.orelse]
+        else:
+            blocks = [inner for name in ("body", "orelse", "finalbody") if isinstance(inner := getattr(node, name, None), list)]
+            blocks += [block.body for block in (*getattr(node, "handlers", ()), *getattr(node, "cases", ()))]
+        stack += reversed(list(itertools.chain.from_iterable(blocks)))
+
+
 def _own_classes(scope: ast.AST) -> Iterator[ast.ClassDef]:
     """Classes whose nearest enclosing class or function is `scope` (each class is reported once)."""
     stack = list(ast.iter_child_nodes(scope))
@@ -335,6 +363,9 @@ def lint_file(cfg: Config, path: Path) -> list[Finding]:
     for stmt in tree.body:
         if isinstance(stmt, ast.If) and _is_main_check(stmt.test):
             add(stmt, "`if __name__ == \"__main__\"` never runs in a compiled module: put it in src/main.py")
+        keyword = BLOCK_KEYWORDS.get(type(stmt))
+        for inner in _block_classes(stmt) if keyword else ():
+            add(inner, f"class '{inner.name}' defined inside a module-level `{keyword}` block: mypyc does not support it; define it at module level")
         if not relative_file:
             continue
         for child in _import_time_nodes(stmt):

@@ -560,6 +560,18 @@ def test_lintc_flags_a_lone_module_next_to_a_leftover_folder(src_tree: Path) -> 
         ("def f() -> None:\n    def g() -> None:\n        class L: ...\n", [], [(3, "class 'L' defined inside a function")]),
         ("class A:\n    if True:\n        class B: ...\n", [], [(3, "nested class 'B'")]),
         ("async def f() -> None:\n    class L: ...\n", [], [(2, "class 'L' defined inside a function")]),
+        # a class in a module-level block: mypyc compiles only the module's own statements
+        ("try:\n    class A: ...\nexcept ImportError:\n    class B: ...\n", [], [(2, "class 'A' defined inside a module-level `try` block"), (4, "class 'B' defined inside")]),
+        ("try:\n    pass\nexcept* ValueError:\n    pass\nelse:\n    class E: ...\nfinally:\n    class F: ...\n", [], [(6, "`try` block"), (8, "`try` block")]),
+        ("import sys\nif sys.version_info >= (3, 12):\n    class P: ...\nelif True:\n    class Q: ...\n", [], [(3, "class 'P' defined inside a module-level `if` block"), (5, "class 'Q'")]),
+        ("for _ in ():\n    class F: ...\nwhile False:\n    class W: ...\n", [], [(2, "`for` block"), (4, "`while` block")]),
+        ("import contextlib\nwith contextlib.nullcontext():\n    if True:\n        class C:\n            class D: ...\n", [], [(4, "class 'C' defined inside a module-level `with` block"), (5, "nested class 'D'")]),
+        ("match 1:\n    case 1:\n        class M: ...\n", [], [(3, "class 'M' defined inside a module-level `match` block")]),
+        # mypy reads TYPE_CHECKING as true: mypyc rejects a class under it, and skips the other branch
+        ("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    class P: ...\nelse:\n    class R: ...\n", [], [(3, "class 'P' defined inside a module-level `if`")]),
+        ("import typing\nif not typing.TYPE_CHECKING:\n    class R: ...\nelse:\n    class P: ...\n", [], [(5, "class 'P' defined inside a module-level `if`")]),
+        # a class in a function of such a block is the function rule's, once
+        ("if True:\n    def f() -> None:\n        class L: ...\n", [], [(3, "class 'L' defined inside a function")]),
         # forbid_imports: dotted names through `from a import b`; relative imports are the app's modules
         ("import flet as ft\n", ["flet"], [(1, "import of 'flet' is forbidden")]),
         ("import flet.controls\n", ["flet"], [(1, "import of 'flet.controls' is forbidden")]),
@@ -586,6 +598,75 @@ def test_lintc_reports_each_problem_once(tmp_path: Path, source: str, forbid: li
     assert len(got) == len(expected), got
     for (line, msg), (want_line, want) in zip(got, sorted(expected), strict=True):
         assert line == want_line and want in msg, got
+
+
+CLASSES_IN_BLOCKS = """\
+import contextlib
+from typing import TYPE_CHECKING
+
+FLAG = bool(len(__name__))
+
+try:
+    class InTry: ...
+except ImportError:
+    class InHandler: ...
+else:
+    class InElse: ...
+finally:
+    class InFinally: ...
+
+if FLAG:
+    class InIf: ...
+else:
+    class InIfElse: ...
+
+if TYPE_CHECKING:
+    class OnlyForMypy: ...
+else:
+    class NeverForMypy: ...
+
+if not TYPE_CHECKING:
+    class NeverForMypyEither: ...
+
+for _i in range(1):
+    class InFor: ...
+
+while not FLAG:
+    class InWhile: ...
+
+with contextlib.nullcontext():
+    class InWith: ...
+
+match FLAG:
+    case True:
+        class InCase: ...
+    case _:
+        pass
+
+if FLAG:
+    def make() -> object:
+        class InFunction: ...
+        return InFunction()
+
+
+class AtModuleLevel: ...
+"""
+
+
+@needs_venv
+def test_lintc_flags_every_class_the_locked_mypyc_rejects_as_nested(tmp_path: Path) -> None:
+    """mypyc compiles only the classes of a module's own statements: one in a module-level
+    if/try/with/for/while/match block (a version check, a `try:` fallback, an `if TYPE_CHECKING:`
+    Protocol) stopped `run mypyc`, `test mypyc` and every build with "Nested class definitions
+    not supported", while `check` said "mypyc rules: no problems". The rules flag exactly the
+    lines the locked mypyc rejects: if this fails after a mypy bump, mypyc changed what it
+    supports (lintc._block_classes)."""
+    (tmp_path / "m.py").write_text(CLASSES_IN_BLOCKS, encoding="utf-8")
+    r = subprocess.run([str(TOOL_PYTHON), "-m", "mypyc", "m.py"], cwd=tmp_path, capture_output=True, text=True, timeout=600, check=False)
+    rejected = {int(n) for n in re.findall(r"^m\.py:(\d+): error: Nested class definitions not supported", r.stdout + r.stderr, re.M)}
+    assert r.returncode != 0 and rejected, r.stdout + r.stderr
+    found = lintc.lint_file(make({}), tmp_path / "m.py")
+    assert {f.line for f in found} == rejected, ([(f.line, f.message) for f in found], sorted(rejected))
 
 
 @pytest.mark.skipif(not hasattr(ast, "TemplateStr"), reason="t-strings need Python 3.14")

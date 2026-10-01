@@ -724,7 +724,8 @@ again.
   mypy's `Any` reports).
 - `./pyt check` adds rules for the compiled modules that mypy does not check: imports listed in
   `compile.forbid_imports`, class decorators, metaclasses and bases (`Enum`, `NamedTuple`,
-  `TypedDict`) that make a class non-native, nested classes and classes defined inside functions, t-strings, `if __name__ == "__main__"`, `librt` while PyPy is
+  `TypedDict`) that make a class non-native, nested classes, classes defined inside functions or
+  inside a module-level `if`/`try`/`with`/`for` block (an `if TYPE_CHECKING:` one too), t-strings, `if __name__ == "__main__"`, `librt` while PyPy is
   supported, and a module-level `__file__` when `compile.modules` is a single top-level module
   (there it is a relative path). Compiled code that imports `librt` needs it as an app dependency:
   `./pyt add librt --cpython-only` (mypy installs it only in the dev group).

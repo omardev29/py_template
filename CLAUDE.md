@@ -2505,7 +2505,15 @@ Formats:
     blocking every Enum of a mypyc project was no help; a metaclass of the user's own stays a
     finding like a foreign decorator.
   - Nested classes and classes inside functions, each reported once (from its nearest class
-    or function); t-strings; `if __name__ == "__main__"` (either order) at module level.
+    or function), and classes inside a module-level if/try/with/for/while/match block
+    (`lintc._block_classes`: mypyc compiles only the classes of the module's own statements, and
+    a version check, a `try:` fallback or an `if TYPE_CHECKING:` Protocol stopped every mypyc
+    build with "Nested class definitions not supported" while `check` passed; not in a branch
+    mypy reads as unreachable, the else of `if TYPE_CHECKING:` and the body of `if not
+    TYPE_CHECKING:`, which mypyc skips;
+    `test_mypyc_core.test_lintc_flags_every_class_the_locked_mypyc_rejects_as_nested` compares
+    the lines with the locked mypyc's); t-strings; `if __name__ == "__main__"` (either order) at
+    module level.
   - Module-level `__file__` ONLY when `compile.modules` is one top-level module file, the one
     Python imports (`relative_file_at_import` reads `config.compiled_paths`: a leftover folder
     of that name without `__init__.py` does not turn the rule off): mypyc (>= 1.20.2) sets the
