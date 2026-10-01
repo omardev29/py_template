@@ -2728,7 +2728,12 @@ Formats:
   `--target-version py3XX --select E9`: what that version cannot parse, ruff's invalid-syntax
   (exit 1 = findings; any other code = "could not run ruff"; F63, F7 and F82 are the same on
   every version, and `x is "a"` refused PyPy as "syntax" under the warn profile, whose check
-  passes it: `test_mypyc_core.test_precheck_real_ruff_blocks_only_syntax_311_lacks`), then the
+  passes it: `test_mypyc_core.test_precheck_real_ruff_blocks_only_syntax_311_lacks`), with
+  `--isolated` (no configuration file) and `--exclude` the folders `./pyt check`'s ruff leaves
+  out (`render.ruff_exclude`, the root's own anchored, 8): ruff's default `exclude` skipped every
+  folder named dist, venv, _build, node_modules... at any depth, and a PEP 701 f-string there
+  (`f"{t["k"]}"`, which mypy's 3.11 parse passes) enabled PyPy for code PyPy cannot parse
+  (`test_mypyc_core.test_precheck_real_ruff_checks_every_folder_checks_ruff_checks`), then the
   mypy errors that appear only as that version and not as `python.cpython`
   (`PRECHECK_MYPY_FLAGS`: `--config-file=` so the project's `.mypy.ini` is never read,
   where the default `off` profile sets `ignore_errors`, and `--check-untyped-defs`; modules named
@@ -6016,15 +6021,18 @@ ruff:
   `exclude` is such names** (LIMITATION, documented: venv, dist, _build, node_modules,
   __pypackages__, site-packages, buck-out and dot folders): the project's `extend-exclude`
   (typings, dist) and those defaults skipped every subpackage and test folder of such a name, and
-  `check`, `lint`, `fmt` and the hook passed its syntax errors. Fix: `render.ruff_config` anchors
+  `check`, `lint`, `fmt`, the hook and the PyPy precheck (`--isolated`: no configuration, ruff's
+  defaults) passed its syntax errors. Fix: `render.ruff_config` anchors
   its excludes at the root (`./typings`) and replaces the default `exclude` with the same names
-  anchored (`render.RUFF_DEFAULT_EXCLUDE`; the dot folders stay as they are) (8). Test:
+  anchored (`render.ruff_exclude`, from `render.RUFF_DEFAULT_EXCLUDE`; the dot folders stay as
+  they are), which `cmd_mode._precheck_py311` passes as `--exclude` (8, 9). Test:
   `test_render_core.py::test_ruff_skips_only_the_roots_own_folders`,
   `test_the_ruff_exclude_holds_ruffs_own_defaults_at_the_root`,
   `test_ruff_exclude_defaults_are_the_pinned_ruffs` (the list against the locked ruff's, in the
   template repository only: a project's `./pyt lock --upgrade` may move ruff on),
   `test_cli_core.py::test_check_lint_and_fmt_see_every_folder_below_src_and_tests`,
-  `test_hooks.py::test_real_ruff_checks_a_staged_file_in_a_folder_named_like_a_tool_folder`.
+  `test_hooks.py::test_real_ruff_checks_a_staged_file_in_a_folder_named_like_a_tool_folder`,
+  `test_mypyc_core.py::test_precheck_real_ruff_checks_every_folder_checks_ruff_checks`.
   Goes: never.
 - **`ruff format --check` prints nothing for stdin** (LIMITATION): a staged file fed on stdin
   failed without a word. Fix: `hooks._run_ruff` writes its own "Would reformat: <path> (its

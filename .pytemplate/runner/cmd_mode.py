@@ -197,10 +197,16 @@ def _precheck_py311(cfg: Config) -> None:
     # 1) syntax: ruff reports syntax that does not exist in the target version as an error
     #    (invalid-syntax). No lint rule besides E9 (an io-error): F632 `x is "a"` or an undefined
     #    name (F63, F82) is the same on every version, and blocked PyPy as "syntax" under the warn
-    #    profile, whose check passes them
+    #    profile, whose check passes them. --isolated reads no configuration file, so the folders
+    #    it leaves out are given here, ./pyt check's (render.ruff_exclude): with ruff's own default
+    #    `exclude`, whose names match a folder at any depth, src/<pkg>/dist/ or a tests/venv/ was
+    #    never checked, and code PyPy cannot parse there (a PEP 701 f-string, which mypy's 3.11
+    #    parse passes) enabled PyPy
+    target = "py" + version.replace(".", "")
+    excludes = ",".join(render.ruff_exclude())  # read against ruff's working folder, ROOT
     r = envs.uv(
         tool,
-        [*run, "ruff", "check", "--no-cache", "--isolated", "--target-version", "py" + version.replace(".", ""), "--select", "E9", *dirs],
+        [*run, "ruff", "check", "--no-cache", "--isolated", "--target-version", target, "--select", "E9", "--exclude", excludes, *dirs],
         check=False,
         echo=not dry,  # proc.run skips echoed commands under --dry-run
     )

@@ -367,6 +367,24 @@ RUFF_DEFAULT_EXCLUDE = (
 )
 
 
+def _ruff_path(p: str, relative_to: Path | None) -> str:
+    return p if relative_to is None else relative_path(ROOT / p, relative_to)
+
+
+def _ruff_at_root(p: str, relative_to: Path | None) -> str:
+    rel = _ruff_path(p, relative_to)
+    return rel if "/" in rel else f"./{rel}"
+
+
+def ruff_exclude(relative_to: Path | None = None) -> list[str]:
+    """ruff's `exclude` for the project: RUFF_DEFAULT_EXCLUDE with every name a package can have
+    anchored at the root ("./venv"), the dot names as they are. ruff_config writes it, and the
+    PyPy precheck's ruff, which reads no configuration (--isolated, and then ruff's own defaults
+    skipped src/<pkg>/dist/ and the like), gets it on its command line, where ruff reads the
+    patterns against its working folder, ROOT (cmd_mode._precheck_py311)."""
+    return [p if p.startswith(".") else _ruff_at_root(p, relative_to) for p in RUFF_DEFAULT_EXCLUDE]
+
+
 def ruff_config(cfg: Config, profile: str, *, relative_to: Path | None = None) -> dict[str, Any]:
     """`relative_to`: for the copies under .build/cfg that the runner hands ruff with --config,
     whose paths ruff reads against its working folder, `relative_to`, never against the file.
@@ -378,11 +396,10 @@ def ruff_config(cfg: Config, profile: str, *, relative_to: Path | None = None) -
     data = load_profile(profile).get("ruff", {})
 
     def path(p: str) -> str:
-        return p if relative_to is None else relative_path(ROOT / p, relative_to)
+        return _ruff_path(p, relative_to)
 
     def at_root(p: str) -> str:
-        rel = path(p)
-        return rel if "/" in rel else f"./{rel}"
+        return _ruff_at_root(p, relative_to)
 
     select = list(data.get("select", []))
     lint: dict[str, Any] = {"select": select, "ignore": list(data.get("ignore", []))}
@@ -393,7 +410,7 @@ def ruff_config(cfg: Config, profile: str, *, relative_to: Path | None = None) -
         "target-version": "py" + cfg.min_python.replace(".", ""),
         "line-length": 100,
         "src": [path("src"), path("tests")],
-        "exclude": [p if p.startswith(".") else at_root(p) for p in RUFF_DEFAULT_EXCLUDE],
+        "exclude": ruff_exclude(relative_to),
         "extend-exclude": [at_root(p) for p in (".build", "dist", ".pytemplate", "typings")],
         "lint": lint,
         "format": {"docstring-code-format": True},

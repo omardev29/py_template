@@ -294,6 +294,65 @@ def test_precheck_real_ruff_blocks_only_syntax_311_lacks(tmp_path: Path, monkeyp
         cmd_mode._precheck_py311(real({}))
 
 
+def test_precheck_ruff_excludes_what_checks_ruff_excludes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--isolated reads no configuration, so ruff fell back to its own default `exclude`, whose
+    names (dist, venv, _build, node_modules...) match a folder at ANY depth: src/<pkg>/dist/ was
+    never checked. The precheck's ruff gets the project's list, ./pyt check's (the root's own
+    folders anchored, render.ruff_exclude), on its command line."""
+    tools = FakeTools().install(monkeypatch)
+    cmd_mode._precheck_py311(make({}))
+    ruff = next(c for c in tools.calls if "ruff" in c)
+    assert "--isolated" in ruff and ruff.count("--exclude") == 1
+    excludes = ruff[ruff.index("--exclude") + 1].split(",")
+    assert excludes == render.ruff_exclude() == render.ruff_config(make({}), "off")["exclude"]
+    assert {"./dist", "./venv", "./_build", "./node_modules", ".venv", ".git"} <= set(excludes)
+    assert not {"dist", "venv", "_build", "node_modules"} & set(excludes)
+
+
+@needs_venv
+def test_precheck_real_ruff_checks_every_folder_checks_ruff_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A PEP 701 f-string (`f"{t["k"]}"`: Python 3.11 and PyPy 3.11 cannot parse it, mypy's 3.11
+    parse passes it) in src/<pkg>/dist/ passed the gate: ruff's default excludes skipped the
+    folder, PyPy was enabled and locked in, and the code died with SyntaxError there. The real
+    ruff of .venv, run in the tree as in its own project: every folder ./pyt check's ruff checks is
+    checked, and a dot folder (no module lives there) stays out, as it does for check."""
+    root = tmp_path / "proj"
+    bad = 'TABLE = {"k": 1}\nLABEL = f"value: {TABLE["k"]}"\n'
+    names = ("dist", "venv", "_build", "node_modules", "__pypackages__", "site-packages", "buck-out")
+    files = {"src/pk/__init__.py": "", "tests/test_pk.py": "def test_pk() -> None:\n    assert True\n"}
+    for name in names:
+        files[f"src/pk/{name}/{name.strip('_').replace('-', '_')}_mod.py"] = bad
+    files["src/pk/.ipynb_checkpoints/pk-checkpoint.py"] = bad
+    for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text, encoding="utf-8")
+    monkeypatch.setattr(cmd_mode, "ROOT", root)
+    monkeypatch.setattr(render, "ROOT", root)
+    monkeypatch.setattr(cmd_mode, "code_dirs", lambda: ["src", "tests"])
+    real_uv = envs.uv
+
+    def uv(env: envs.PyEnv, args: list[Any], **kw: Any) -> subprocess.CompletedProcess[str]:
+        # this project's tools environment, run in the tree (the folder ./pyt runs ruff in)
+        return real_uv(env, [args[0], "--project", str(ROOT), *args[1:]], cwd=root, **kw)
+
+    monkeypatch.setattr(cmd_mode.envs, "uv", uv)
+    monkeypatch.setattr(proc, "DRY_RUN", True)  # uv run --no-sync: .venv is never touched
+    with pytest.raises(PytError, match="syntax that does not exist in Python 3.11"):
+        cmd_mode._precheck_py311(real({}))
+    captured = capfd.readouterr()
+    said = (captured.out + captured.err).replace("\\", "/")
+    for name in names:
+        assert f"src/pk/{name}/" in said, (name, said)
+    assert ".ipynb_checkpoints" not in said
+    for name in names:  # fixed: the dot folder's copy, which no import reaches, never blocks
+        for module in (root / "src" / "pk" / name).iterdir():
+            module.write_text('TABLE = {"k": 1}\nLABEL = f"value: {TABLE[\'k\']}"\n', encoding="utf-8")
+    cmd_mode._precheck_py311(real({}))
+    assert "ok the code is valid on Python 3.11" in capfd.readouterr().err
+
+
 def test_precheck_checks_only_the_code_folders_that_hold_python(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
