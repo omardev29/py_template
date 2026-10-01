@@ -1,7 +1,9 @@
 """pyz: a single zipapp file that runs on any compatible CPython or PyPy.
 
     myapp.pyz
-      __main__.py             bootstrap (extracts to a cache the first time)
+      __main__.py             bootstrap, first stage: the Python version check, in code any
+                              Python compiles (2.7 too), then _pyz_bootstrap.main()
+      _pyz_bootstrap.py       bootstrap (extracts to a cache the first time)
       _pyz.json               build_id, minimum version, targets, host, deps
       common/app/             your code as .py (works on any interpreter)
       common/lib/             the dependencies, when they are the same everywhere ("pure")
@@ -36,6 +38,7 @@ from ..ui import PytError
 from . import common
 
 INFO_KEYS = ("name", "build_id", "min_python", "targets", "pure")
+BOOTSTRAP = ("__main__.py", "_pyz_bootstrap.py")  # templates/pyz/, at the root of the archive
 
 
 def _build_id(root: Path) -> str:
@@ -191,7 +194,8 @@ def build(req: BuildRequest) -> Path:
         "floor": _target_floors(root, target_keys),  # ...and a musl Python, an older glibc or macOS
     }
     (root / "_pyz.json").write_text(json.dumps(info, indent=2), encoding="utf-8", newline="\n")
-    shutil.copy2(TEMPLATES / "pyz" / "__main__.py", root / "__main__.py")
+    for name in BOOTSTRAP:
+        shutil.copy2(TEMPLATES / "pyz" / name, root / name)
     if any(p.name.endswith(EXT_SUFFIXES) for p in (root / "common").rglob("*")):
         raise PytError("bug: the pyz has compiled extensions in common/")
 
@@ -342,9 +346,9 @@ def check_parts(parts: list[Path], out: Path) -> list[dict[str, Any]]:
 def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
     """Merge several .pyz files of the same project (one per OS, e.g. from CI) into a multi-platform one.
 
-    common/app and __main__.py come from the first part (every part must carry the same app);
-    targets/ from all of them, each targets/<key>/lib from ONE part (the one built on that
-    platform when there is one) and each compiled overlay targets/<key>/app from exactly one.
+    common/app and the bootstrap (BOOTSTRAP) come from the first part (every part must carry the
+    same app); targets/ from all of them, each targets/<key>/lib from ONE part (the one built on
+    that platform when there is one) and each compiled overlay targets/<key>/app from exactly one.
     When every part is pure the result is pure (common/lib of the first part). Otherwise a pure
     part's common/lib moves to targets/<its host>/lib and no common/lib is kept: one platform's
     dependencies must not be extracted on every other one. The <stem>.cmd wrapper for Windows
@@ -407,7 +411,7 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
                             )
                         name = member
                     elif n == 0:
-                        name = member  # common/app and __main__.py from the first part
+                        name = member  # common/app and the bootstrap from the first part
                     else:
                         if member.startswith("common/app/") and _executable(item):
                             # the same file as the first part's, which may come from Windows (no modes)

@@ -137,7 +137,8 @@ def test_pyz_main_puts_lib_before_site_packages(tmp_path: Path) -> None:
     root = tmp_path / "root"
     (root / "common" / "app").mkdir(parents=True)
     (root / "common" / "lib").mkdir()
-    shutil.copy2(TEMPLATES / "pyz" / "__main__.py", root / "__main__.py")
+    for name in ("__main__.py", "_pyz_bootstrap.py"):  # the two stages of the bootstrap
+        shutil.copy2(TEMPLATES / "pyz" / name, root / name)
     (root / "common" / "app" / "main.py").write_text(MAIN)
     (root / "common" / "lib" / "thirdparty.py").write_text("WHERE = 'lib'\n")
     info = {"name": "t", "build_id": "b1", "min_python": [3, 11], "targets": [], "pure": True, "backend": "cpython"}

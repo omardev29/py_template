@@ -266,7 +266,7 @@ def test_app_assets_on_and_off(assets: str) -> None:
 
 @pytest.mark.parametrize("assets", ["data", "src/assets", "assets/", "../assets", "/tmp/assets", "C:\\x", "Assets", ".."])
 def test_app_assets_only_knows_src_assets(assets: str) -> None:
-    # resources.assets_dir(), portable/boot.py and pyz/__main__.py only look for src/assets/
+    # resources.assets_dir(), portable/boot.py and pyz/_pyz_bootstrap.py only look for src/assets/
     fails({"app": {"assets": assets}}, "app.assets")
 
 

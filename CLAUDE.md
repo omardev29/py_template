@@ -130,7 +130,7 @@ typings/                          project stubs (raylib preset: the corrected ra
 .pytemplate/tools/mutation_cr.py  Cosmic Ray's side of selftest --mutation (PEP 723; its uv script
                                   lock mutation_cr.py.lock next to it; an environment of its own)
 .pytemplate/templates/            typing/*.toml, vscode/settings.json, nvim/lazy.lua, ci.yml,
-                                  portable/boot.py, pyz/__main__.py
+                                  portable/boot.py, pyz/__main__.py + pyz/_pyz_bootstrap.py
 .pytemplate/presets/<p>/          preset.toml + files/ skeleton (+ constraints.txt: tested pins;
                                   + raylib/tools/raylib_stubs.py)
 .pytemplate/nvim/                 local Neovim plugin pytemplate.nvim (lua/, tests/smoke.lua,
@@ -1119,7 +1119,7 @@ header rules (with detector tests proving each rule fires).
 | `PYTHONUTF8=1` | `proc.base_env`, portable launchers, pyz `.cmd` wrapper, the Neovim mypy linter, every VS Code launch config (`vscode.DEBUG_ENV`) | mypy/mypyc otherwise read files as cp1252; F5 behaves like `./pyt run` |
 | `PYTEMPLATE_BACKEND` | `cmd_dev.test_backend`, `mypyc.runtime_env_vars`, mypyc launch config | Backend under test (conftest) |
 | `PYTEMPLATE_COMPILED` | `mypyc.runtime_env_vars` | Modules that must load from `.pyd/.so` (conftest) |
-| `PYTEMPLATE_ASSETS` | `portable/boot.py`, `pyz/__main__.py` (assigned, never inherited) | The app's assets folder, for the app's own code; `resources.assets_dir()` (raylib, flet) finds the same folder next to its package (section 10) |
+| `PYTEMPLATE_ASSETS` | `portable/boot.py`, `pyz/_pyz_bootstrap.py` (assigned, never inherited) | The app's assets folder, for the app's own code; `resources.assets_dir()` (raylib, flet) finds the same folder next to its package (section 10) |
 | `VSLANG=1033` | `mypyc.build`, wheel builds | English MSVC messages |
 | `MACOSX_DEPLOYMENT_TARGET` | `methods.common.install_deps` for macOS targets, unless the user set it (`MACOS_FLOOR`, 13.0) | The oldest macOS the pyz/portable wheels must support |
 | `CC`, `CFLAGS`, `CPPFLAGS`, `LDSHARED`, `LDFLAGS`, `ARCHFLAGS`, `CL`, `_CL_` | user | setuptools builds the mypyc extensions with them (a `CFLAGS` REPLACES Python's own: section 9); `mypyc.COMPILER_ENV`, a change forces a rebuild |
@@ -2627,7 +2627,7 @@ Formats:
 - `common.has_native`: a `*.dist-info/WHEEL` tag with an ABI or platform (also pure-Python
   platform wheels that ship an executable, e.g. imageio-ffmpeg), else a `.pyd/.so/.dll/.dylib`
   or `.so.N` file.
-- Both bootstraps (`portable/boot.py`, `pyz/__main__.py`) put `lib/` BEFORE site-packages
+- Both bootstraps (`portable/boot.py`, `pyz/_pyz_bootstrap.py`) put `lib/` BEFORE site-packages
   (`_prepend_sitedir`: `site.addsitedir` for the `.pth` files, then moved to the front), so
   the locked dependencies win over packages installed in the running Python.
 
@@ -2803,11 +2803,17 @@ Per method:
   written by `pyz._write_archive` (deflate, never zstd: it must open on 3.11 and PyPy;
   `strict_timestamps=False`: a payload file older than 1980, e.g. from the Nix store, used to
   crash `zipapp`; shebang `/usr/bin/env python3`, mode 0755). Whatever `python3` starts it, the
-  bootstrap must reach its `min_python` check (`<name>: needs Python X.Y or newer`): nothing
-  before `main()` may need a newer Python, hence its `from __future__ import annotations` (a
-  `bool | None` annotation made macOS's python3 3.9 die with a TypeError;
-  `test_pyz_bootstrap_reaches_its_version_check_on_an_old_python` runs every Python older than
-  3.11 it finds). The `<n>.cmd` wrapper runs each
+  bootstrap must reach its `min_python` check (`<name>: needs Python X.Y or newer`), so it has
+  two stages (`pyz.BOOTSTRAP`, both at the archive's root): `__main__.py` checks the version in
+  code Python 2.7 and every Python 3 compile (no f-string, annotation, keyword argument or
+  `print`: `test_the_first_stage_of_the_pyz_bootstrap_compiles_on_any_python` holds it to an
+  allowlist of AST nodes), then imports `_pyz_bootstrap.py` (dropping a module of that name
+  another .pyz of the process left) and runs its `main(<archive>)`. One file needed Python 3.7
+  to compile (`from __future__ import annotations`, f-strings): Python 3.6, the python3 of RHEL
+  8 and SLES 15, and Python 2 died in a SyntaxError traceback, and before that import a
+  `bool | None` annotation killed macOS's python3 3.9 with a TypeError
+  (`test_pyz_bootstrap_reaches_its_version_check_on_an_old_python` runs every Python older than
+  3.11 it finds, python2 and 3.6 included). The `<n>.cmd` wrapper runs each
   candidate interpreter with a minimum-version probe, sets `PYTHONUTF8=1`;
   with `app.gui` its run lines are `start "" pyw/pythonw/pypyw` (`common.windowed`). `pyz-merge`
   (>= 2 parts; `_read_info` refuses a part without a valid `_pyz.json`) requires the same app
@@ -5061,7 +5067,7 @@ CPython and its standard library:
   `test_presets.py::test_flet_skeleton_draws_where_no_process_can_start`,
   `test_flet_skeleton_gives_the_button_back_when_drawing_fails`. Goes: never.
 - **No extension module loads from a zip** (LIMITATION, zipimport): Fix: the pyz bootstrap
-  (`templates/pyz/__main__.py`) extracts to a per-build cache (10). Test:
+  (`templates/pyz/_pyz_bootstrap.py`) extracts to a per-build cache (10). Test:
   `test_build_methods.py::test_pyz_bootstrap_picks_the_flavour` and the other bootstrap tests.
   Goes: never.
 - **`Path.home()` raises for a UID without a passwd entry** (LIMITATION): the pyz crashed in a
@@ -6497,7 +6503,7 @@ Code coupling (rename together):
   `render.managed_block` wrote with `presets.uv_extras` (`str.format_map`, reversed by
   `cmd_apply._unformat`): a template with a format spec or conversion is never read back.
 - `RULES_RE` / `tasks.parse_line` <-> `ui.error`, `ui.warn`, `str(lintc.Finding)` (5.3).
-- `common.ABI_RE`/`abi_tag` <-> the pyz bootstrap's own copies (`templates/pyz/__main__.py` is
+- `common.ABI_RE`/`abi_tag` <-> the pyz bootstrap's own copies (`templates/pyz/_pyz_bootstrap.py` is
   standalone; `test_abi_tags_agree_with_the_bootstrap`); `common.this_libc` <-> its `_libc`
   (`test_the_build_machine_and_the_bootstrap_name_the_c_library_alike`), and the `floor` strings
   `common.platform_floor` writes <-> what its `_meets` reads.

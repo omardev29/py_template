@@ -45,7 +45,8 @@ UV_PLATFORMS = {
 # sets it) so a uv upgrade or a newer build machine cannot move it
 MACOS_FLOOR = "13.0"
 # uv's names of an architecture: platform.machine() spellings, sysconfig's on Windows, and a
-# 32-bit interpreter on a 64-bit kernel. templates/pyz/__main__.py (_arch) mirrors host_arch
+# 32-bit interpreter on a 64-bit kernel. templates/pyz/_pyz_bootstrap.py (_arch) mirrors
+# host_arch
 ARCH_NAMES = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64", "x86": "x86", "i386": "x86", "i686": "x86"}
 WINDOWS_ARCH = {"win-amd64": "x86_64", "win-arm64": "aarch64", "win32": "x86"}
 ARCH_32BIT = {"x86_64": "x86", "aarch64": "armv7l"}
@@ -646,10 +647,10 @@ def platform_floor(lib: Path) -> str:
     return f"{family} {'.'.join(map(str, version))}".rstrip()
 
 
-# The extension ABI in a file name (templates/pyz/__main__.py has the same ABI_RE and abi_tag,
-# which read the running interpreter's EXT_SUFFIX with it): cpython-314[t], cp314[t] (Windows),
-# pypy311-pp73. A target key does not tell PyPy 7.3 (pp73) from PyPy 8 (pp80), nor CPython 3.14
-# from its free-threaded build (3.14t)
+# The extension ABI in a file name (templates/pyz/_pyz_bootstrap.py has the same ABI_RE and
+# abi_tag, which read the running interpreter's EXT_SUFFIX with it): cpython-314[t], cp314[t]
+# (Windows), pypy311-pp73. A target key does not tell PyPy 7.3 (pp73) from PyPy 8 (pp80), nor
+# CPython 3.14 from its free-threaded build (3.14t)
 ABI_RE = re.compile(r"\.(cpython-(\d+t?)|cp(\d+t?)|pypy(\d+)-(pp\d+))[-.]")
 
 

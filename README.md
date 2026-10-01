@@ -1005,11 +1005,11 @@ How far a pyz reaches depends on its dependencies; the build prints which case i
 - **Pure** (`pure: ...`): every locked dependency is pure Python and none is limited to some
   platforms or Python versions by a marker. Such a pyz has no platform-specific file but the mypyc
   extensions, and runs on any CPython or PyPy at or above the project's minimum Python
-  (`python.cpython`, 3.14 by default; 3.11 when PyPy is supported); an older one gets
-  `<name>: needs Python X.Y or newer`. It is tested on Windows, macOS and Linux with glibc; Linux
-  with musl (Alpine), Android through Termux (`python <name>.pyz`, or `./<name>.pyz` through
-  termux-exec), the BSDs and other CPUs are expected to work but untested (the bootstrap needs only
-  the standard library and a writable cache). On the maintainer's machine, a 1.7 MB pure pyz of a
+  (`python.cpython`, 3.14 by default; 3.11 when PyPy is supported); an older one, Python 2
+  included, gets `<name>: needs Python X.Y or newer`. It is tested on Windows, macOS and Linux
+  with glibc; Linux with musl (Alpine), Android through Termux (`python <name>.pyz`, or
+  `./<name>.pyz` through termux-exec), the BSDs and other CPUs are expected to work but untested
+  (the bootstrap needs only the standard library and a writable cache). On the maintainer's machine, a 1.7 MB pure pyz of a
   project with PyPy supported used the compiled core on CPython 3.14 and ran the `.py` on PyPy and
   on CPython 3.13.
 - **Not pure** (`runs on: <keys>`): native dependencies (raylib, flet, any platform wheel), or a

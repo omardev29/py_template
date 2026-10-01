@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib.machinery
+import io
 import json
 import ntpath
 import os
@@ -14,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tokenize
 import tomllib
 from collections.abc import Iterator
 from pathlib import Path, PureWindowsPath
@@ -916,11 +918,11 @@ def test_nuitka_keys_of_every_preset_load() -> None:
         assert nuitka.optimization_args(cfg) == ["--lto=auto"]
 
 
-# --- pyz: the bootstrap (templates/pyz/__main__.py), run for real ---------------------------------
+# --- pyz: the bootstrap (templates/pyz/), run for real -----------------------------------------------
 
 
 def _host_key() -> str:
-    """The key the bootstrap computes for THIS interpreter (templates/pyz/__main__.py _key)."""
+    """The key the bootstrap computes for THIS interpreter (templates/pyz/_pyz_bootstrap.py _key)."""
     key: str = _bootstrap_namespace()["_key"]()
     return key
 
@@ -948,7 +950,8 @@ def fake_pyz(path: Path, *, build_id: str = "b1", targets: list[str] | None = No
         (root / name).write_text(text, encoding="utf-8", newline="")
     data = {"name": "demo", "build_id": build_id, "min_python": [3, 11], "targets": targets or [], "pure": pure, "backend": "cpython", **info}
     (root / "_pyz.json").write_text(json.dumps(data), encoding="utf-8")
-    shutil.copy2(TEMPLATES / "pyz" / "__main__.py", root / "__main__.py")
+    for name in pyz.BOOTSTRAP:
+        shutil.copy2(TEMPLATES / "pyz" / name, root / name)
     path.parent.mkdir(parents=True, exist_ok=True)
     pyz._write_archive(root, path)
     return path
@@ -1276,9 +1279,11 @@ def test_pyz_records_what_every_targets_wheels_need(tmp_path: Path) -> None:
 
 
 def _old_pythons() -> list[str]:
-    """Interpreters older than 3.11 on this machine (macOS's /usr/bin/python3 is 3.9)."""
+    """Interpreters older than 3.11 on this machine: macOS's /usr/bin/python3 is 3.9, the python3
+    of RHEL 8 and SLES 15 is 3.6, and a python2 may be there."""
     found: dict[str, str] = {}
-    for name in ("python3.8", "python3.9", "python3.10", "/usr/bin/python3"):
+    names = ("python2", "python2.7", "python3.6", "python3.7", "python3.8", "python3.9", "python3.10", "/usr/bin/python3", "/usr/bin/python")
+    for name in names:
         exe = shutil.which(name)
         if not exe:
             continue
@@ -1289,14 +1294,43 @@ def _old_pythons() -> list[str]:
     return sorted(found.values())
 
 
+# What Python 2.7 and every Python 3 compile alike: the only node types the first stage of the pyz
+# bootstrap (__main__.py) may hold. No ast of an older grammar is at hand (ast.parse's
+# feature_version goes back to 3.7 at most, and never refuses a __future__ feature), so an allowlist
+ANY_PYTHON_NODES = (
+    ast.Module, ast.Expr, ast.Constant, ast.Import, ast.alias, ast.FunctionDef, ast.arguments, ast.arg, ast.Return, ast.Assign,
+    ast.Name, ast.Load, ast.Store, ast.Attribute, ast.Call, ast.Subscript, ast.Slice, ast.Tuple, ast.Compare, ast.Lt, ast.If,
+    ast.BinOp, ast.Mod, ast.Try,
+)  # fmt: skip
+
+
+def test_the_first_stage_of_the_pyz_bootstrap_compiles_on_any_python() -> None:
+    """Whatever Python starts the .pyz must get to its version check: `from __future__ import
+    annotations` (3.7+) and the f-strings of the bootstrap stopped Python 3.6 (python3 of RHEL 8
+    and SLES 15) and Python 2 with a SyntaxError traceback before it, so the check is the first
+    stage, __main__.py, in a syntax both compile (no annotation, f-string, keyword argument or
+    print), and the rest is _pyz_bootstrap.py, which it imports after the check."""
+    source = (TEMPLATES / "pyz" / "__main__.py").read_bytes()
+    assert source.isascii()  # Python 2 reads a file without a coding line as ASCII
+    tree = ast.parse(source)
+    assert not [type(node).__name__ for node in ast.walk(tree) if not isinstance(node, ANY_PYTHON_NODES)]
+    for node in ast.walk(tree):
+        assert not isinstance(node, ast.arg) or node.annotation is None
+        assert not isinstance(node, ast.arguments) or not (node.posonlyargs or node.kwonlyargs or node.vararg or node.kwarg)
+        assert not isinstance(node, ast.FunctionDef) or (node.returns is None and not node.decorator_list)
+        assert not isinstance(node, ast.Constant) or type(node.value) in (str, int, type(None))
+        assert not isinstance(node, ast.Name) or node.id != "print"  # a statement in Python 2
+    tokens = tokenize.tokenize(io.BytesIO(source).readline)
+    assert not [t.string for t in tokens if t.type == tokenize.NUMBER and "_" in t.string]  # 1_000: 3.6+
+    imports = [a.name for node in tree.body if isinstance(node, ast.Import) for a in node.names]
+    assert imports[-1] == "_pyz_bootstrap" and (TEMPLATES / "pyz" / "_pyz_bootstrap.py").is_file()
+
+
 def test_pyz_bootstrap_reaches_its_version_check_on_an_old_python(tmp_path: Path) -> None:
     # `def _lock(fd: int) -> bool | None` is evaluated when the module loads: Python 3.9 (macOS's
     # python3, Debian 11) died with "TypeError: unsupported operand type(s) for |" instead of
-    # "needs Python 3.11 or newer". Nothing before main()'s check may need a newer Python
-    source = (TEMPLATES / "pyz" / "__main__.py").read_text(encoding="utf-8")
-    tree = ast.parse(source, feature_version=(3, 7))
-    futures = {a.name for node in tree.body if isinstance(node, ast.ImportFrom) and node.module == "__future__" for a in node.names}
-    assert "annotations" in futures  # no annotation is evaluated: PEP 604 and list[int] need 3.10 / 3.9
+    # "needs Python 3.11 or newer", and Python 3.6 and 2 with a SyntaxError (the first stage's
+    # syntax: test_the_first_stage_of_the_pyz_bootstrap_compiles_on_any_python)
     old = _old_pythons()
     if not old:
         pytest.skip("no Python older than 3.11 here (macOS has one)")
@@ -1505,11 +1539,10 @@ def test_pyz_rerun_marks_a_build_as_recently_used(tmp_path: Path) -> None:
 
 
 def _bootstrap_namespace() -> dict[str, Any]:
-    """The bootstrap's functions, without running main()."""
-    source = (TEMPLATES / "pyz" / "__main__.py").read_text(encoding="utf-8")
-    assert source.rstrip().endswith("main()")
+    """The bootstrap's functions (the first stage, __main__.py, runs its main())."""
+    source = (TEMPLATES / "pyz" / "_pyz_bootstrap.py").read_text(encoding="utf-8")
     namespace: dict[str, Any] = {"__name__": "pt_bootstrap"}
-    exec(compile(source.rstrip()[: -len("main()")], "__main__.py", "exec"), namespace)  # noqa: S102
+    exec(compile(source, "_pyz_bootstrap.py", "exec"), namespace)  # noqa: S102
     return namespace
 
 
@@ -1642,7 +1675,7 @@ MAC = "cp314-macos-aarch64"
 def test_pyz_pure_build_layout(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     out, info, names = _pyz_build(sandbox, monkeypatch, {LINUX: lambda d: _wheel(d, "rich", "15.0.0")}, ["rich==15.0.0 ; implementation_name == 'cpython'"])
     assert info["pure"] is True and info["targets"] == [] and info["host"] == LINUX
-    assert {"common/lib/rich/__init__.py", "common/app/main.py", "common/app/assets/logo.txt", "__main__.py", "_pyz.json"} <= names
+    assert {"common/lib/rich/__init__.py", "common/app/main.py", "common/app/assets/logo.txt", "__main__.py", "_pyz_bootstrap.py", "_pyz.json"} <= names
     assert not [n for n in names if n.startswith("targets/")]
     assert len(info["deps"]) == 16 and info["build_id"]
     assert "pure: works with CPython >= 3.14 on any OS" in capsys.readouterr().err  # PyPy only when supported
