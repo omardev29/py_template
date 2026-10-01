@@ -419,7 +419,21 @@ def test_settings_and_extensions() -> None:
         assert settings["terminal.integrated.automationProfile.linux"]["path"] == "/bin/sh"
         assert settings["terminal.integrated.automationProfile.osx"]["path"] == "/bin/sh"
         assert generated(make("script"))[".vscode/settings.json"]["tasks.statusbar.default.hide"] is True
-        assert {"**/.venv*/**", "**/.build/**", "**/dist/**"} <= set(settings["files.watcherExclude"])
+        assert {"**/.venv*/**", "**/.build/**", "dist/**"} <= set(settings["files.watcherExclude"])
+
+
+@pytest.mark.skipif(not TEMPLATE_REPO, reason="the shipped templates/vscode/settings.json (a project may edit its own)")
+def test_vscode_excludes_only_the_roots_own_output_folders() -> None:
+    """files.watcherExclude held `**/dist/**`, every folder named dist at any depth: a subpackage
+    or test folder of that name is source (CLAUDE.md 3), and VS Code never saw the changes made
+    there outside the editor (a git checkout, ./pyt fmt) until a reload. A `**/` pattern names a
+    dot folder or a cache only (no module lives there); the root's dist/ is `dist/**`, which VS
+    Code reads relative to the workspace folder."""
+    settings = generated(make("script"))[".vscode/settings.json"]
+    for key in ("files.watcherExclude", "search.exclude", "files.exclude"):
+        anywhere = [p for p in settings[key] if p.startswith("**/") and not p[3:].startswith((".", "__pycache__"))]
+        assert not anywhere, (key, anywhere)
+    assert "dist/**" in settings["files.watcherExclude"]
 
 
 # --- problem matchers --------------------------------------------------------------------------

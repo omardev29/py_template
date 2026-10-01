@@ -3557,8 +3557,10 @@ instead. Neovim opens its output on start and replaces a running instance (`uniq
 - `settings.json` = `.pytemplate/templates/vscode/settings.json` + the profile's `[vscode]` +
   (with `typing.editor = "basedpyright"`) `vscode.BASEDPYRIGHT_SETTINGS` + `[vscode] settings`
   (later wins). The template sets the automation terminal profiles,
-  `tasks.statusbar.default.hide: true` and `files.watcherExclude` (`.venv*`, `.build`,
-  `dist`). `extensions.json`: Python, Pylance or basedpyright (then Pylance is unwanted),
+  `tasks.statusbar.default.hide: true` and `files.watcherExclude` (`.venv*` and `.build` at any
+  depth, the root's `dist/**`, which VS Code reads relative to the workspace folder: `**/dist/**`
+  hid every subpackage or test folder named dist from the watcher,
+  `test_vscode.test_vscode_excludes_only_the_roots_own_output_folders`). `extensions.json`: Python, Pylance or basedpyright (then Pylance is unwanted),
   debugpy, mypy type checker, Ruff, Even Better TOML, `actboy168.tasks`.
 - Anything VS Code or an extension writes into the Workspace settings lands in this generated
   file, which then counts as hand-edited (`render --check` and the hook fail): such settings
