@@ -986,6 +986,7 @@ def test_a_child_that_dies_of_the_sigterm_passed_on_leaves_no_orphan(tmp_path: P
 
 
 @posix
+@pytest.mark.usefixtures("default_signals")
 def test_an_ignored_sigterm_is_passed_on_to_the_child() -> None:
     # nohup and supervisors that ignore SIGHUP/SIGTERM: the children keep inheriting SIG_IGN
     code = (

@@ -4077,7 +4077,13 @@ short temp tree and unset `NVIM_APPNAME`.
   `UV_PROJECT_ENVIRONMENT`, `UV_PYTHON` and `PYTEMPLATE_*` from the child env (pytest itself
   runs under `uv run`). An environment built from scratch keeps the caller's `LANG`, `LC_ALL`
   and `LC_CTYPE` (`test_launcher_sh._no_uv_env`): in the C locale yash cannot read a project
-  path that is not ASCII. Keep them fast: a runner start costs ~0.3 s, and the Windows launcher
+  path that is not ASCII. A test that sends itself a signal, reads what a child inherits or
+  starts a child that does takes the `default_signals` fixture (conftest: SIGINT at Python's
+  handler, SIGTERM and SIGHUP at their default, the caller's back after it): `./pyt selftest`
+  started as a background job of a script (SIGINT ignored) or under nohup (SIGHUP ignored)
+  handed every test SIG_IGN, and 4 tests failed there
+  (`test_selftest_harness.test_the_signal_tests_pass_in_a_selftest_started_with_the_signals_ignored`).
+  Keep them fast: a runner start costs ~0.3 s, and the Windows launcher
   and path tests already take 10-40 s under load.
 - `test_runner.py` matches message substrings (`unknown key 'backend.mode'`, `boolean`,
   `is not in backend.supported`, `exact version`, `clashes with`, and the lintc texts `flet`,

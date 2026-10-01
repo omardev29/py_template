@@ -1150,6 +1150,7 @@ def test_run_uses_the_suites_own_pytest_settings(tmp_path: Path) -> None:
     assert mutation.junit_seconds(tmp_path / "junit.xml", [rel]).keys() == {rel}
 
 
+@pytest.mark.usefixtures("default_signals")
 def test_a_test_run_that_a_keyboard_interrupt_ends_is_a_kill(tmp_path: Path) -> None:
     """For real: a test that sends itself SIGINT (a mutant switched off the handler it counted
     on), first or after others. The runs were not stopped: the tests' own interrupt."""
@@ -1465,6 +1466,7 @@ def test_run_all_stops_at_the_first_failure(tmp_path: Path) -> None:
     assert runs.stopped.is_set()
 
 
+@pytest.mark.usefixtures("default_signals")
 def test_run_all_goes_on_as_an_interrupt(tmp_path: Path) -> None:
     """Ctrl+C reaches the main thread only: the runs stop, the workers end (a mutant written into
     a copy gets its module's bytes back), and then the interrupt goes on."""

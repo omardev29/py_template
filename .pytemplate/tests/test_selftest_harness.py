@@ -572,3 +572,33 @@ def test_nvim_termination_signal_kills_the_running_step(tmp_path: Path, signame:
             runner.kill()
         if child and not _gone(child, within=0):
             os.kill(child, signal.SIGKILL)
+
+
+SIGNAL_TESTS = [
+    "test_cli_core.py::test_an_ignored_sigterm_is_passed_on_to_the_child",
+    "test_rename.py::test_an_interrupted_rename_is_undone",
+    "test_rename.py::test_a_second_ctrl_c_waits_for_the_undo",
+    "test_install.py::test_a_second_ctrl_c_waits_for_the_undo_of_the_swap",
+    "test_mutation.py::test_a_test_run_that_a_keyboard_interrupt_ends_is_a_kill",
+    "test_mutation.py::test_run_all_goes_on_as_an_interrupt",
+]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a job's ignored SIGINT and nohup's SIGHUP are POSIX")
+def test_the_signal_tests_pass_in_a_selftest_started_with_the_signals_ignored(tmp_path: Path) -> None:
+    """./pyt selftest started as a background job of a script (a POSIX shell starts it with
+    SIGINT ignored) or under nohup (SIGHUP ignored): every test inherited SIG_IGN, and the tests
+    that send themselves a signal or read what a child inherits failed (4 of them, in every
+    project) or skipped. They set the handling they need (conftest.default_signals) and pass."""
+    start = (
+        "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_IGN); "
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN); os.execv(sys.executable, [sys.executable, *sys.argv[1:]])"
+    )
+    drop = ("UV", "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")
+    env = {k: v for k, v in os.environ.items() if k not in drop and not k.startswith("PYTEMPLATE_")}
+    r = subprocess.run(
+        [sys.executable, "-c", start, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-c", ".pytemplate/tests/pytest.ini",
+         "--rootdir=.", "--basetemp", str(tmp_path / "t"), *(f".pytemplate/tests/{node}" for node in SIGNAL_TESTS)],
+        cwd=project.ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900, check=False,
+    )  # fmt: skip
+    assert r.returncode == 0 and " passed" in r.stdout and "skipped" not in r.stdout, r.stdout[-6000:] + r.stderr[-2000:]

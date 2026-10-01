@@ -20,8 +20,11 @@ needed it failed far from the cause. `_the_project_environment_stays` names the 
 from __future__ import annotations
 
 import shutil
+import signal
+import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from hypothesis import settings
@@ -60,6 +63,26 @@ def _the_project_environment_stays() -> Iterator[None]:
                 "another python.cpython than the project's; give its Config the project's (config.load)",
                 pytrace=False,
             )
+
+
+@pytest.fixture
+def default_signals() -> Iterator[None]:
+    """The signal handling of a process started in a terminal, for a test that sends itself a
+    signal, reads what a child inherits or starts a child that does: SIGINT at Python's own
+    handler, SIGTERM and SIGHUP (POSIX) at their default; the caller's settings come back after
+    the test. ./pyt selftest started as a background job of a script (a POSIX shell starts it
+    with SIGINT ignored) or under nohup (SIGHUP ignored) handed every test SIG_IGN, and those
+    tests measured how the suite was started instead of the runner: 4 of them failed there, in
+    every project, and so did the baselines of selftest --mutation run under nohup."""
+    wanted: dict[signal.Signals, Any] = {signal.SIGINT: signal.default_int_handler}
+    if sys.platform != "win32":
+        wanted.update({signal.SIGTERM: signal.SIG_DFL, signal.SIGHUP: signal.SIG_DFL})
+    saved = {signum: signal.signal(signum, handler) for signum, handler in wanted.items()}
+    try:
+        yield
+    finally:
+        for signum, handler in saved.items():
+            signal.signal(signum, handler)
 
 
 # A CI template of the tests' own, with every placeholder render.ci_workflow fills, laid out as

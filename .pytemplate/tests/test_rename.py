@@ -2114,6 +2114,7 @@ def test_a_failed_write_undoes_the_rename(tmp_path: Path, monkeypatch: pytest.Mo
     [("ctrl+c", 3), ("ctrl+c", 1), ("ctrl+c", 0), ("sigterm", 3), ("sighup", 2)],
     ids=["ctrl+c between two writes", "ctrl+c after the first write", "ctrl+c right after the move", "sigterm", "sighup"],
 )
+@pytest.mark.usefixtures("default_signals")
 def test_an_interrupted_rename_is_undone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stop: str, at: int) -> None:
     """A Ctrl+C, SIGTERM or SIGHUP while the files were written (in process: no child to pass it
     on to) left src/beta/ moved, some files rewritten and pytemplate.toml naming the old app, with
@@ -2162,6 +2163,7 @@ def test_an_interrupted_rename_is_undone(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 @pytest.mark.parametrize("first", ["ctrl+c", "a write that fails"])
+@pytest.mark.usefixtures("default_signals")
 def test_a_second_ctrl_c_waits_for_the_undo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], first: str) -> None:
     """A Ctrl+C (or a write that fails) while rename writes is undone; a second Ctrl+C during that
     undo raised KeyboardInterrupt inside it (SIGINT keeps Python's own handler): files stayed
@@ -2169,8 +2171,6 @@ def test_a_second_ctrl_c_waits_for_the_undo(tmp_path: Path, monkeypatch: pytest.
     undo goes on to its end first."""
     import signal
 
-    if signal.getsignal(signal.SIGINT) is not signal.default_int_handler:
-        pytest.skip("SIGINT is not at Python's own handler in this process (the runner leaves such a one alone)")
     _write_project(tmp_path, "flet", "alpha")
     before = _everything(tmp_path)
     planned = rename.plan(tmp_path, "alpha", "beta")

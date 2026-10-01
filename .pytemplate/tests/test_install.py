@@ -1070,12 +1070,11 @@ def test_an_interrupt_right_after_a_launcher_is_replaced_is_undone_too(tmp_path:
     assert interrupted and swap.state() == swap.before
 
 
+@pytest.mark.usefixtures("default_signals")
 def test_a_second_ctrl_c_waits_for_the_undo_of_the_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """A Ctrl+C as the new copy moves in is undone; a second one during that undo (SIGINT keeps
     Python's own handler) raised KeyboardInterrupt inside it: the old copy stayed aside, the new one
     was left next to it, and "nothing was changed" never came. The undo goes on to its end first."""
-    if signal.getsignal(signal.SIGINT) is not signal.default_int_handler:
-        pytest.skip("SIGINT is not at Python's own handler in this process (the runner leaves such a one alone)")
     swap = Swap(tmp_path, monkeypatch, fresh=False)
     real = cmd_install._rename
     calls: list[int] = []
