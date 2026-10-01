@@ -704,7 +704,7 @@ def test_nuitka_pin_supports_the_default_python() -> None:
 
 
 @pytest.mark.parametrize("extra", [[], ["--experimental=python3.15"], ["--experimental", "python3.15"]])
-def test_nuitka_python_newer_than_the_pin_is_refused_before_any_work(monkeypatch: pytest.MonkeyPatch, extra: list[str]) -> None:
+def test_nuitka_python_newer_than_the_pin_is_refused_before_any_work(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extra: list[str]) -> None:
     # nuitka==4.2.2 stops with FATAL on CPython 3.15 after the checks and the mypyc compile
     def must_not_run(*_a: Any, **_k: Any) -> Any:
         raise AssertionError("the build went ahead")
@@ -712,6 +712,8 @@ def test_nuitka_python_newer_than_the_pin_is_refused_before_any_work(monkeypatch
     monkeypatch.setattr(cmd_build, "run_checks", must_not_run)
     monkeypatch.setattr(cmd_build, "payload", must_not_run)
     monkeypatch.setattr(cmd_build, "check_lock", lambda cfg: None)  # uv would download a CPython 3.15
+    # nuitka.check_options refuses a project folder SCons would expand (app$v2): not this test's
+    monkeypatch.setattr(nuitka, "BUILD", tmp_path / ".build")
     cfg = make({"python": {"cpython": "3.15"}})
     if not extra:
         with pytest.raises(PytError) as e:
@@ -3104,6 +3106,7 @@ def test_build_forwards_extras_to_the_packagers(monkeypatch: pytest.MonkeyPatch,
             return out
 
     monkeypatch.setattr(cmd_build, "payload", lambda cfg, backend: tmp_path)
+    monkeypatch.setattr(nuitka, "BUILD", tmp_path / ".build")  # nuitka.check_options: never the project's folder
     monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeMethod)
     cfg = make(ALL_BACKENDS)
     assert cmd_build.cmd_build(cfg, ["cpython", "--method", "exe", "--no-check", "--onedir", "--add-data", "a:b", "--icon", "x.ico"]) == 0
@@ -5014,3 +5017,16 @@ def test_the_wheel_tests_pass_in_a_project_with_local_libraries(tmp_path: Path) 
     r = _suite_run(ROOT, tmp_path, ".pytemplate/tests/test_build_methods.py", "-k", wheel_tests, plugin=plugin)
     assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
     assert "5 passed" in r.stdout, r.stdout[-2000:]
+
+
+def test_the_nuitka_tests_pass_in_a_project_folder_scons_would_expand(tmp_path: Path) -> None:
+    """A project in a folder such as `app$v2`, which every method but nuitka supports (README):
+    the tests that run cmd_build with --method nuitka to check something else reached
+    nuitka.check_options on the project's own .build/ and failed `./pyt selftest` there. They run
+    here in a copy of the project in such a folder."""
+    own = tmp_path / "app$v2"
+    presets.copy_template(own)
+    nuitka_tests = "nuitka_python_newer_than_the_pin or forwards_extras_to_the_packagers"
+    r = _suite_run(own, tmp_path, ".pytemplate/tests/test_build_methods.py", "-k", nuitka_tests)
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+    assert "4 passed" in r.stdout, r.stdout[-2000:]

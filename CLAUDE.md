@@ -3776,12 +3776,15 @@ short temp tree and unset `NVIM_APPNAME`.
   the project pins (it looked for the line of `pypy@3.11.15`). The build tests answer the checks
   that read the machine or the project and are not their subject: Windows' Developer Mode of
   flet build (`test_build_methods._flet_build`: off by default there, six tests failed for every
-  Windows user without it), and the `[tool.uv.sources]` `wheel.check` refuses
+  Windows user without it), the `[tool.uv.sources]` `wheel.check` refuses
   (`test_build_methods._plain_pyproject`: a local library, a workspace member or a named index,
-  which pyz and portable support, failed five tests that build a wheel to check something else).
+  which pyz and portable support, failed five tests that build a wheel to check something else)
+  and the project folder `nuitka.check_options` refuses (`app$v2`: `nuitka.BUILD` in tmp_path).
   `test_build_methods._suite_run` runs them in such a setup, with a plugin that sets what differs
-  there (`test_build_methods.test_the_flet_tests_pass_on_a_windows_without_developer_mode`,
-  `test_the_wheel_tests_pass_in_a_project_with_local_libraries`).
+  there, or in a copy of the project
+  (`test_build_methods.test_the_flet_tests_pass_on_a_windows_without_developer_mode`,
+  `test_the_wheel_tests_pass_in_a_project_with_local_libraries`,
+  `test_the_nuitka_tests_pass_in_a_project_folder_scons_would_expand`).
 - Property-based tests (Hypothesis, the dev group's pin): `.pytemplate/tests/conftest.py` loads
   the profile `pytemplate` (no example database, so a run depends on the code, the profile and
   the seed only; no deadline; a failure prints its replay blob) on top of the profile Hypothesis
