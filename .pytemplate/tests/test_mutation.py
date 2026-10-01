@@ -573,6 +573,14 @@ def test_made(answer: dict[str, Any], status: str, detail: str) -> None:
     assert got[2] == (answer.get("code") if status == NOT_RUN or detail.startswith("the mutant is no valid") else None)
 
 
+def test_made_takes_the_mutant_of_a_module_with_a_bom() -> None:
+    """Python imports a module that starts with a UTF-8 BOM, and Cosmic Ray's mutant of one keeps
+    it (U+FEFF first), which compile() refuses in a str: every such mutant read as "no valid
+    Python" (A10-05). made compiles the bytes Python would read."""
+    status, detail, code = mutation.made({"code": "﻿x = 2\n"}, b"\xef\xbb\xbfx = 1\n", "m.py")
+    assert (status, detail, code) == (NOT_RUN, "", "﻿x = 2\n")
+
+
 def test_made_on_a_python_that_refuses_a_nul_byte_with_a_value_error(monkeypatch: pytest.MonkeyPatch) -> None:
     _nul_as_up_to_python_3_11_3(monkeypatch)
     assert mutation.made({"code": "x = 1\0\n"}, b"x = 1\n", "m.py") == (
@@ -2184,6 +2192,30 @@ def g():
 def h(extra):
     return {**extra, "k": 1}
 """
+
+
+def test_a_module_with_a_bom_is_mutated_like_any_other(cosmic_ray: Any, tmp_path: Path) -> None:
+    """A runner module saved with a UTF-8 BOM (a Windows editor, PowerShell 5.1), which Python
+    imports: list_mutants decoded it with the BOM, and ast refused U+FEFF, so the whole run
+    stopped with "is no Python the runner can read" (A10-05). Its mutants are those of the same
+    module without the BOM (Cosmic Ray, through parso, leaves the BOM out of line 1's columns, as
+    ast does without it), each made and judged alike, the BOM kept."""
+    rel = f"{mutation.SCOPE}/calc.py"
+    body = "x = 1 + 2\n" + PASS_THROUGH
+    found: dict[bool, list[tuple[Any, ...]]] = {}
+    for bom in (False, True):
+        root = tmp_path / ("bom" if bom else "plain")
+        (root / rel).parent.mkdir(parents=True)
+        (root / rel).write_bytes((b"\xef\xbb\xbf" if bom else b"") + body.encode("utf-8"))
+        mutants, originals = mutation.list_mutants(cosmic_ray, root, [rel], None, root / "snapshot")
+        made = []
+        for m in mutants:
+            status, _, code = mutation.make_mutant(m, originals[rel], root / "snapshot", cosmic_ray)
+            assert code is None or code.startswith("﻿") == bom, (m, code)
+            made.append((m.operator, m.occurrence, m.line, m.column, m.end_line, m.end_column, status, code and code.removeprefix("﻿")))
+        found[bom] = made
+    assert found[True] == found[False] and len(found[False]) > 5
+    assert NOT_RUN in {status for *_, status, _ in found[True]}, found[True]  # mutants to test, not "no valid Python"
 
 
 def test_cosmic_rays_defects_that_the_runner_works_around(cosmic_ray: Any, tmp_path: Path) -> None:

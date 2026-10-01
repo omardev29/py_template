@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import ast
 import bisect
+import codecs
 import difflib
 import io
 import itertools
@@ -502,12 +503,27 @@ def made(answer: Mapping[str, Any], original: bytes, file: str) -> tuple[str, st
     try:
         with _COMPILE_LOCK, warnings.catch_warnings():
             warnings.simplefilter("ignore")  # SyntaxWarnings of a mutant are no verdict
-            compile(code, file, "exec", dont_inherit=True)
+            # the bytes, as Python reads the module: a mutant of one saved with a UTF-8 BOM keeps
+            # it (U+FEFF first), which compile refuses in a str ("no valid Python", every mutant)
+            compile(code.encode("utf-8"), file, "exec", dont_inherit=True)
     except SyntaxError as e:
         return SKIPPED, f"the mutant is no valid Python: {e.msg} (line {e.lineno})", code
     except ValueError as e:  # a NUL byte, up to Python 3.11.3 (a SyntaxError since)
         return SKIPPED, f"the mutant is no valid Python: {e}", code
     return NOT_RUN, "", code
+
+
+def make_mutant(m: Mutant, original: bytes, snapshot: Path, driver: Driver) -> tuple[str, str, str | None]:
+    """The mutant `m` of the module whose bytes are `original` (its copy in `snapshot`, which
+    Cosmic Ray reads), as made() judges it. A module saved with a UTF-8 BOM is read without it, as
+    Python reads it and as Cosmic Ray places its mutants (parso leaves the BOM out of line 1's
+    columns), and its mutant keeps it, as Cosmic Ray's do."""
+    text = original.decode("utf-8-sig")
+    own = own_mutant(m, text)
+    if own is not None and original.startswith(codecs.BOM_UTF8):
+        own = "﻿" + own
+    request = {"op": "mutate", "path": str(snapshot / m.file), "operator": m.operator, "occurrence": m.occurrence}
+    return made({"code": own} if own is not None else driver.ask(request), original, m.file)
 
 
 def mutant_diff(original: str, mutated: str, limit: int = 12) -> list[str]:
@@ -692,8 +708,8 @@ def list_mutants(driver: Driver, root: Path, files: Sequence[str], changed: Mapp
         listed = answer.get("mutants")
         if "error" in answer or not isinstance(listed, list):
             raise PytError(f"selftest --mutation: Cosmic Ray could not list the mutants of {rel}: {answer.get('error', answer)}", 1)
-        try:
-            chosen = select(rel, listed, data.decode("utf-8"), None if changed is None else changed.get(rel, set()))
+        try:  # utf-8-sig: a module saved with a BOM is read as Python reads it (ast refuses U+FEFF)
+            chosen = select(rel, listed, data.decode("utf-8-sig"), None if changed is None else changed.get(rel, set()))
         except (SyntaxError, ValueError) as e:  # not UTF-8 (a UnicodeDecodeError is one), a NUL byte up to Python 3.11.3
             raise PytError(f"selftest --mutation: {rel} is no Python the runner can read: {e}", 1) from None
         originals[rel] = data
@@ -1361,12 +1377,9 @@ def _test(cfg: Config, opts: Options, uv: str, root: Path, base: Path, tests: Ma
 
     def mutant(worker: Worker, m: Mutant) -> None:
         original = originals[m.file]
-        own = own_mutant(m, original.decode("utf-8"))
-        request = {"op": "mutate", "path": str(snapshot / m.file), "operator": m.operator, "occurrence": m.occurrence}
-        answer = {"code": own} if own is not None else driver.ask(request)
-        m.status, m.detail, code_text = made(answer, original, m.file)
+        m.status, m.detail, code_text = make_mutant(m, original, snapshot, driver)
         if code_text is not None:
-            m.diff = mutant_diff(original.decode("utf-8"), code_text)
+            m.diff = mutant_diff(original.decode("utf-8-sig"), code_text.removeprefix("﻿"))
         if code_text is not None and m.status == NOT_RUN:
             target = worker.copy / m.file
             b = report.baselines[m.module]

@@ -4587,7 +4587,10 @@ short temp tree and unset `NVIM_APPNAME`.
     symbol, the one that moves a boundary or turns a test around; never `/` -> `*`, which in the
     runner joins paths), NumberReplacer's +1 only, none in an annotation, in the test or body of
     `if TYPE_CHECKING:` or on a line with `# pragma: no mutate` (`select`, `skipped_spans`:
-    parso counts columns in characters, ast in UTF-8 bytes). ExceptionReplacer's mutants are
+    parso counts columns in characters, ast in UTF-8 bytes; a module saved with a UTF-8 BOM is read
+    without it, as Python reads it and as parso places Cosmic Ray's mutants, and its mutants keep
+    it, `mutation.make_mutant`, `made` compiling the bytes: ast refused U+FEFF and the whole run
+    stopped, `test_mutation.test_a_module_with_a_bom_is_mutated_like_any_other`). ExceptionReplacer's mutants are
     the runner's own (`own_mutant`, 15.1): one per exception class an except clause names
     (`handler_classes`: the whole expression, or each element of a tuple; `select` gives the
     mutant the class's span), which becomes `()` (an empty tuple: the handler catches nothing),
