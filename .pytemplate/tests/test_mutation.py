@@ -590,8 +590,8 @@ def test_made_takes_the_mutant_of_a_module_with_a_bom() -> None:
     """Python imports a module that starts with a UTF-8 BOM, and Cosmic Ray's mutant of one keeps
     it (U+FEFF first), which compile() refuses in a str: every such mutant read as "no valid
     Python" (A10-05). made compiles the bytes Python would read."""
-    status, detail, code = mutation.made({"code": "﻿x = 2\n"}, b"\xef\xbb\xbfx = 1\n", "m.py")
-    assert (status, detail, code) == (NOT_RUN, "", "﻿x = 2\n")
+    status, detail, code = mutation.made({"code": "\ufeffx = 2\n"}, b"\xef\xbb\xbfx = 1\n", "m.py")
+    assert (status, detail, code) == (NOT_RUN, "", "\ufeffx = 2\n")
 
 
 def test_made_on_a_python_that_refuses_a_nul_byte_with_a_value_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2224,8 +2224,8 @@ def test_a_module_with_a_bom_is_mutated_like_any_other(cosmic_ray: Any, tmp_path
         made = []
         for m in mutants:
             status, _, code = mutation.make_mutant(m, originals[rel], root / "snapshot", cosmic_ray)
-            assert code is None or code.startswith("﻿") == bom, (m, code)
-            made.append((m.operator, m.occurrence, m.line, m.column, m.end_line, m.end_column, status, code and code.removeprefix("﻿")))
+            assert code is None or code.startswith("\ufeff") == bom, (m, code)
+            made.append((m.operator, m.occurrence, m.line, m.column, m.end_line, m.end_column, status, code and code.removeprefix("\ufeff")))
         found[bom] = made
     assert found[True] == found[False] and len(found[False]) > 5
     assert NOT_RUN in {status for *_, status, _ in found[True]}, found[True]  # mutants to test, not "no valid Python"

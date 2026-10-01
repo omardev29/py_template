@@ -524,7 +524,7 @@ def make_mutant(m: Mutant, original: bytes, snapshot: Path, driver: Driver) -> t
     text = original.decode("utf-8-sig")
     own = own_mutant(m, text)
     if own is not None and original.startswith(codecs.BOM_UTF8):
-        own = "﻿" + own
+        own = "\ufeff" + own
     request = {"op": "mutate", "path": str(snapshot / m.file), "operator": m.operator, "occurrence": m.occurrence}
     return made({"code": own} if own is not None else driver.ask(request), original, m.file)
 
@@ -1382,7 +1382,7 @@ def _test(cfg: Config, opts: Options, uv: str, root: Path, base: Path, tests: Ma
         original = originals[m.file]
         m.status, m.detail, code_text = make_mutant(m, original, snapshot, driver)
         if code_text is not None:
-            m.diff = mutant_diff(original.decode("utf-8-sig"), code_text.removeprefix("﻿"))
+            m.diff = mutant_diff(original.decode("utf-8-sig"), code_text.removeprefix("\ufeff"))
         if code_text is not None and m.status == NOT_RUN:
             target = worker.copy / m.file
             b = report.baselines[m.module]
