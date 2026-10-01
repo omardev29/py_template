@@ -971,7 +971,7 @@ A folder that runs the app with its own interpreter:
   another way).
 - `lib/`: the dependencies at the versions of `uv.lock`, local libraries
   (`./pyt add ./libs/x`) included; they win over packages installed in a Python. They are copies,
-  whatever `link-mode` you gave uv (`symlink` would leave links into this machine's uv cache).
+  whatever `link-mode` you gave uv (`symlink` would leave links into the build machine's uv cache).
   Only the app's own (`[project] dependencies` and what they need): no dependency group, neither
   dev nor one that `[tool.uv] default-groups` installs in the environments, reaches `lib/`, a pyz
   or a `flet build`.
