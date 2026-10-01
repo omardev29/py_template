@@ -914,6 +914,22 @@ def test_a_pyproject_tomllib_cannot_read_is_one_error(tmp_path: Path, monkeypatc
         wheel._read_toml(pyproject)
 
 
+def test_a_missing_project_name_is_named_with_the_line_to_add(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """pyproject.toml without its [project] name line: doctor and the hook said "[project] name =
+    'None', but app.name = 'alpha'" with ./pyt apply as the fix, and apply then refused with "edit
+    that line by hand", a line there is not. Both name the line to add."""
+    project, uv = _project(tmp_path, monkeypatch, "script", "alpha")
+    assert _run(project) == 0
+    pyproject = project.root / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('name = "alpha"\n', "", 1), encoding="utf-8", newline="\n")
+    assert "name" not in project.pyproject()["project"]
+    problem, hint = cmd_apply.pending(project.cfg())[0]
+    assert "None" not in problem and problem == "pyproject.toml [project] has no name (app.name = 'alpha')", problem
+    assert hint == 'add name = "alpha" to the [project] table of pyproject.toml', hint
+    with pytest.raises(PytError, match=r'pyproject.toml has no \[project\] name: add name = "alpha" to that table'):
+        _run(project)
+
+
 def test_a_failed_lock_puts_the_project_name_line_back_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Only pyproject.toml [project] name differed (a copy of the template's pyproject.toml in an
     upgrade): apply wrote that line before it took the bytes it puts back when the re-lock fails,

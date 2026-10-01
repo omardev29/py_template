@@ -655,11 +655,16 @@ def set_project_name(text: str, name: str) -> str:
     the result does not say so, so no caller reports a change it did not make (apply, rename). A
     text that is no valid TOML is said to be so (it was "edit that line by hand")."""
     try:
-        tomllib.loads(text.lstrip("\ufeff"))
+        data = tomllib.loads(text.lstrip("\ufeff"))
     except TOML_ERRORS as e:
         raise PytError(f'could not set [project] name = "{name}": pyproject.toml is not valid TOML: {toml_error(e)}') from None
     new = _set_project_name(text, name)
     if project_name(new) != name:
+        table = data.get("project")
+        if not isinstance(table, dict):  # no line to edit: say what to add ("edit that line" named none)
+            raise PytError(f'could not set [project] name = "{name}": pyproject.toml has no [project] table: add one, with name = "{name}"')
+        if "name" not in table:
+            raise PytError(f'could not set [project] name = "{name}": pyproject.toml has no [project] name: add name = "{name}" to that table')
         raise PytError(f'could not set [project] name = "{name}" in pyproject.toml: edit that line by hand and try again')
     return new
 

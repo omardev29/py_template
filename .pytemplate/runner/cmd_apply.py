@@ -901,6 +901,8 @@ def pending(cfg: Config, *, hook: bool = True) -> list[tuple[str, str]]:
                 f"src/{cfg.pkg}/ replaces it, make these name {cfg.pkg}: {_listed(still_naming(cfg, moved))}",
             )
         )
+    elif project.name is None:  # apply cannot add the line: it said "'None'" and "./pyt apply"
+        out.append((f"pyproject.toml [project] has no name (app.name = '{cfg.app.name}')", f'add name = "{cfg.app.name}" to the [project] table of pyproject.toml'))
     elif project.name != cfg.app.name:
         out.append((f"pyproject.toml [project] name = '{project.name}', but app.name = '{cfg.app.name}'", "./pyt apply"))
     try:
