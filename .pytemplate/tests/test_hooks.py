@@ -1570,7 +1570,10 @@ def test_checks_ruff_only_on_staged_python_files(tmp_path: Path, tools: Tools) -
     assert [files for _, files in tools.ruff_calls] == [["src/pkg/a.py", "src/pkg/b.pyi", "tests/test_a.py"]] * 2
     assert tools.staged_calls == []  # nothing has unstaged changes: every file by path
     check_args, format_args = (args for args, _ in tools.ruff_calls)
-    assert check_args[:1] == ["check"] and "--force-exclude" in check_args and "--exit-zero" not in check_args
+    off_exit_zero = bool(render.load_profile("off").get("ruff", {}).get("exit_zero"))  # the project's own profile
+    assert check_args[:1] == ["check"] and "--force-exclude" in check_args and ("--exit-zero" in check_args) == off_exit_zero
+    if (TEMPLATE / "template-repo").is_file():  # the shipped off profile: ruff's few rules block
+        assert not off_exit_zero
     assert format_args[:2] == ["format", "--check"]
     assert res["ruff check"].passed is True and "profile 'off'" in res["ruff check"].label
     assert res["ruff format"].passed is True

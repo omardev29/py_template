@@ -829,25 +829,54 @@ def test_the_tests_that_copy_the_project_pass_in_one_with_local_libraries(tmp_pa
     assert r.returncode == 0 and f"{len(nodes)} passed" in r.stdout, r.stdout[-6000:] + r.stderr[-2000:]
 
 
+def _flip(profile: Path, key: str) -> None:
+    """Turn the first `key = true|false` line of a typing profile the other way (whatever this
+    project's copy says: a project that edited it gets the other value, never an error)."""
+    text = profile.read_text(encoding="utf-8")
+    flipped = re.sub(rf"(?m)^({re.escape(key)} = )(true|false)\b", lambda m: m[1] + ("false" if m[2] == "true" else "true"), text, count=1)
+    assert flipped != text, (profile.name, key)  # the edit must change something
+    profile.write_text(flipped, encoding="utf-8")
+
+
+def _swap_mypy_severity(profile: Path) -> None:
+    """Show the profile's mypy errors in VS Code as warnings if they were errors, else as errors."""
+    text = profile.read_text(encoding="utf-8")
+    swapped = re.sub(r'("mypy-type-checker\.severity" = \{ error = ")(Error|Warning)"', lambda m: m[1] + ("Warning" if m[2] == "Error" else "Error") + '"', text, count=1)
+    assert swapped != text, profile.name
+    profile.write_text(swapped, encoding="utf-8")
+
+
 def test_the_template_tests_pass_in_a_project_that_edited_its_templates(tmp_path: Path) -> None:
     """README: a project customizes its CI by editing .pytemplate/templates/ci.yml, and its typing
     profiles and VS Code settings in .pytemplate/templates/. The tests pinned the shipped content
     (the CI's triggers and steps, a blocking ruff in no profile, the settings template's values):
     a weekly schedule in the CI template failed 36 tests of ./pyt selftest there, a blocking ruff
     in `warn` 2, and the check, lint, hook and editor.json tests 5 more with that edit, 4 with
-    mypy run under `off`, 3 with a `strict` that does not block. They run here in a copy with such
-    edits (the shipped content stays pinned in the template repository, which a copy is not)."""
+    mypy run under `off`, 3 with a `strict` that does not block, and the ruff and mypy settings of
+    `off`, `warn` and `mypyc` 4 more (A9-02). They run here in a copy with such edits (the shipped
+    content stays pinned in the template repository, which a copy is not)."""
     own = tmp_path / "own"
     presets.copy_template(own)
     assert not (own / ".pytemplate" / "template-repo").exists()
+    venv = project.ROOT / ".venv"
+    if venv.is_dir():  # the tests that run the real ruff of .venv find it in the copy too
+        try:
+            (own / ".venv").symlink_to(venv, target_is_directory=True)
+        except OSError:
+            pass  # Windows without the right to make links: those tests skip in the copy
     templates = own / ".pytemplate" / "templates"
     ci = templates / "ci.yml"
     ci.write_text(ci.read_text(encoding="utf-8").replace("  pull_request:\n", '  pull_request:\n  schedule:\n    - cron: "0 6 * * 1"\n', 1), encoding="utf-8")
-    for profile, old, new in (("warn", "exit_zero = true", "exit_zero = false"), ("off", "skip_mypy = true", "skip_mypy = false"), ("strict", "blocking = true", "blocking = false")):
-        path = templates / "typing" / f"{profile}.toml"
-        text = path.read_text(encoding="utf-8")
-        assert old in text, (profile, old)  # the edit must change something
-        path.write_text(text.replace(old, new), encoding="utf-8")
+    typing = templates / "typing"
+    # each setting turned the other way, whatever this project's copy says (as shipped: warn never
+    # blocks on ruff and shows mypy errors as warnings in VS Code; off skips mypy and blocks on
+    # ruff's few rules; strict blocks; mypyc shows mypy errors as errors)
+    _flip(typing / "warn.toml", "exit_zero")
+    _swap_mypy_severity(typing / "warn.toml")
+    _flip(typing / "off.toml", "skip_mypy")
+    _flip(typing / "off.toml", "exit_zero")
+    _flip(typing / "strict.toml", "blocking")
+    _swap_mypy_severity(typing / "mypyc.toml")
     settings = templates / "vscode" / "settings.json"
     settings.write_text(settings.read_text(encoding="utf-8").replace('"tasks.statusbar.default.hide": true', '"tasks.statusbar.default.hide": false'), encoding="utf-8")
     nodes = [
@@ -863,13 +892,17 @@ def test_the_template_tests_pass_in_a_project_that_edited_its_templates(tmp_path
         "test_cli_core.py::test_a_dry_run_of_check_names_only_what_it_skipped",
         "test_cli_core.py::test_basedpyright_runs_with_every_pin",
         "test_cli_core.py::test_basedpyright_that_cannot_run_always_fails",
+        "test_cli_core.py::test_check_runs_ruff_in_a_project_folder_named_like_a_variable",
+        "test_cli_core.py::test_check_lint_and_fmt_see_every_folder_below_src_and_tests",
         "test_hooks.py::test_checks_report_ruff_failures_and_exit_zero",
+        "test_hooks.py::test_checks_ruff_only_on_staged_python_files",
     ]
     drop = (*_LAUNCHER_VARS, "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")
     r = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--basetemp", str(tmp_path / "t"),
          "-k", "ci_ or ci_workflow or host_gaps or severity or settings_and_extensions or editor_json_follows or blocking_matrix"
-         " or exit_zero or dry_run_of_check or basedpyright",
+         " or exit_zero or dry_run_of_check or basedpyright or ruff_only_on_staged or folder_named_like_a_variable"
+         " or see_every_folder_below",
          *(f".pytemplate/tests/{node}" for node in nodes)],
         cwd=own,
         env={k: v for k, v in os.environ.items() if k not in drop},

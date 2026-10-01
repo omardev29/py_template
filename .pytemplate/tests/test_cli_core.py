@@ -2082,6 +2082,26 @@ def _venv_ruff() -> Path:
     return ROOT / ".venv" / ("Scripts/ruff.exe" if sys.platform == "win32" else "bin/ruff")
 
 
+# The shipped `off` typing profile, for the tests about ruff itself (its config paths, the folders it
+# checks) whatever this project's off.toml says: a project may edit its profiles (README), and in one
+# whose `off` reports ruff's findings without blocking (exit_zero) they failed (A9-02).
+SHIPPED_OFF: dict[str, Any] = {
+    "description": "No type checking: only syntax errors and undefined names",
+    "blocking": False,
+    "skip_mypy": True,
+    "mypy": {"ignore_errors": True},
+    "pyright": {"typeCheckingMode": "off"},
+    "ruff": {"select": ["E9", "F63", "F7", "F82"], "ignore": [], "exit_zero": False},
+}
+
+
+def _shipped_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    if TEMPLATE_REPO:  # the copy here follows the template's own file
+        assert {k: v for k, v in render.load_profile("off").items() if k in SHIPPED_OFF} == SHIPPED_OFF
+    real = render.load_profile
+    monkeypatch.setattr(render, "load_profile", lambda name: json.loads(json.dumps(SHIPPED_OFF)) if name == "off" else real(name))
+
+
 @pytest.mark.parametrize("folder", ["app$v2", "a${b}"])
 def test_check_runs_ruff_in_a_project_folder_named_like_a_variable(folder: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """ruff expands $NAME and ${NAME} in its --config argument and in the paths of that file
@@ -2113,6 +2133,7 @@ def test_check_runs_ruff_in_a_project_folder_named_like_a_variable(folder: str, 
         return r
 
     monkeypatch.setattr(envs, "uv_run", uv_run)
+    _shipped_off(monkeypatch)
     cfg = make({"typing": {"relaxed": "off"}})
     assert cmd_dev.run_checks(cfg, "cpython", rules=False) is True, outputs
     source.write_text("print(undefined_name)\n", encoding="utf-8")
@@ -2137,6 +2158,7 @@ def test_check_lint_and_fmt_see_every_folder_below_src_and_tests(tmp_path: Path,
     monkeypatch.setattr(cmd_dev, "ROOT", root)
     monkeypatch.setattr(cmd_dev, "BUILD", root / ".build")
     monkeypatch.setattr(project, "ROOT", root)  # code_dirs: the folders ruff checks
+    _shipped_off(monkeypatch)
     cfg = make({"typing": {"relaxed": "off"}})
     (root / ".ruff.toml").write_text(render.to_toml(render.ruff_config(cfg, "off")) + "\n", encoding="utf-8")  # as render writes it
     outputs: list[str] = []
