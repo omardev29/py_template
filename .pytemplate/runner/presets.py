@@ -313,6 +313,15 @@ def _is_project(entry: dict[str, Any]) -> bool:
     return isinstance(source, dict) and "." in (source.get("virtual"), source.get("editable"))
 
 
+def locked_project_name(lock: Path | None = None) -> str | None:
+    """The project's own name in uv.lock, as uv writes it (normalized); None: no uv.lock, or none
+    that holds the project's entry."""
+    for entry in _lock_entries(lock):
+        if _is_project(entry):
+            return str(entry["name"])
+    return None
+
+
 def _requires(entry: dict[str, Any]) -> set[str]:
     """The names a uv.lock entry depends on: every extra, group and marker included."""
     items: list[Any] = list(entry.get("dependencies") or [])

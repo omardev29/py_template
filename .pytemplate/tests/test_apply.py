@@ -1681,6 +1681,41 @@ def test_the_dry_run_names_a_relock_the_users_frozen_lock_refuses(tmp_path: Path
     assert project.snapshot() == before
 
 
+@pytest.mark.parametrize("variable", ["UV_FROZEN", "UV_LOCKED"])
+def test_a_project_name_set_back_to_the_name_the_lock_holds_needs_no_relock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], variable: str
+) -> None:
+    """pyproject.toml [project] name edited by hand: apply sets it back, and uv.lock, which names
+    the project as app.name already, needs no re-lock. apply compared the line edited by hand: its
+    dry run said "would re-lock (uv lock): the project name changes", and under the user's
+    UV_FROZEN or UV_LOCKED it refused the fix. A lock stale for another reason is still refused
+    there, by ensure_lock once the line is written, and pyproject.toml is put back."""
+    project, uv = _project(tmp_path, monkeypatch)
+    assert _run(project) == 0
+    pyproject = project.root / "pyproject.toml"
+    uv.locked = pyproject.read_bytes()  # the lock of the project as it is
+    (project.root / "uv.lock").write_text('version = 1\n\n[[package]]\nname = "alpha"\nversion = "0.1.0"\nsource = { virtual = "." }\n', encoding="utf-8")
+    edited = pyproject.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "gamma"', 1)
+    pyproject.write_text(edited, encoding="utf-8", newline="\n")
+    monkeypatch.setenv(variable, "1")
+    monkeypatch.setattr(proc, "DRY_RUN", True)
+    capsys.readouterr()
+    assert _run(project) == 0
+    err = capsys.readouterr().err
+    assert "uv.lock          names the project 'alpha' already: checked (uv lock --check) once [project] name is set back" in err, err
+    assert "would re-lock" not in err
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    count = len(uv.calls)
+    assert _run(project) == 0
+    assert project.pyproject()["project"]["name"] == "alpha" and ["lock"] not in uv.calls[count:]
+    pyproject.write_text(edited, encoding="utf-8", newline="\n")
+    uv.locked = b""  # stale for another reason too
+    before = pyproject.read_bytes()
+    with pytest.raises(PytError, match=rf"{variable} is set.*\n  pyproject.toml was restored"):
+        _run(project)
+    assert pyproject.read_bytes() == before
+
+
 @pytest.mark.parametrize("record", [True, False])
 def test_a_name_of_another_package_in_src_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: bool) -> None:
     """app.name set by hand to the name of another package of the project (src/helpers/): apply

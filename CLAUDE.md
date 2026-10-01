@@ -1114,9 +1114,12 @@ header rules (with detector tests proving each rule fires).
   `rename._refuse_what_the_lock_would`, section 5.7, too) and prints the move, each
   file with its reference count and sample lines, the pytemplate/pyproject lines, the lines left
   unchanged, the other files that mention the old name, what happens to `uv.lock`
-  (`rename._lock_forecast` with `_lock_change`: a new normalized project name or changed managed parts re-lock;
+  (`rename._lock_forecast` with `_lock_change`: a new name that uv.lock does not hold, normalized
+  (`presets.locked_project_name`, else the app's), or changed managed parts re-lock;
   otherwise a read-only `uv lock --check` in the project, as the real run's `ensure_lock` asks:
-  a stale lock is re-locked even by a case-only rename) and the generated files it would
+  a stale lock is re-locked even by a case-only rename; a [project] name line edited by hand,
+  which alone fails that check while uv.lock holds the new name, is checked after the write,
+  `cmd_apply.name_line_hides_the_lock`) and the generated files it would
   re-render (`render.apply(new_cfg)` in check mode: exactly what the real run writes). `hooks
   install`/`uninstall` only print.
 - `apply` and `setup` run every check and refusal of the real run (`cmd_apply.make_plan`: a
@@ -1727,6 +1730,12 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (`test_apply.test_a_relock_the_users_frozen_lock_refuses_is_refused_before_the_first_write`);
   without such a write ensure_lock's own refusal, after the managed parts are rewritten (it
   alone knows whether the lock moves), leaves nothing changed (`_finish` puts pyproject.toml back).
+  The project name compared is the one uv.lock holds (`presets.locked_project_name`, else
+  pyproject.toml's), and a [project] name line edited by hand that apply sets back to that name
+  leaves the lock to ensure_lock too (`name_line_hides_the_lock`: today's `uv lock --check` fails
+  on the line alone; `_finish` puts it back with the rest): the dry run said "would re-lock: the
+  project name changes", and under UV_FROZEN apply refused the fix
+  (`test_apply.test_a_project_name_set_back_to_the_name_the_lock_holds_needs_no_relock`).
 - Order of `apply`: dirty-tree check (rename only; `--force` skips it) -> the rename
   (`rename.report`, `tidy_before`, `apply_plan`, then the record under the new name: a later
   failure must not leave it naming the old app, which is no longer trusted; then

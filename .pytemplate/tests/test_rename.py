@@ -2208,6 +2208,45 @@ def test_dry_run_predicts_the_lock_like_the_real_run(command_project: Path, monk
     assert "would re-lock" in lock_line("beta") and calls == []  # another project name: re-locked anyway
 
 
+def test_the_lock_forecast_reads_the_name_uv_lock_holds(command_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """The project name uv.lock holds decides, not the app's: after a hand edit of [project] name
+    and a `./pyt lock`, uv.lock holds that name, so a case-only rename re-locks it (the dry run
+    said "up to date", and under UV_FROZEN the rename ran before ensure_lock refused, the files
+    renamed). A [project] name line the rename sets to the name uv.lock holds already is checked
+    after the write (the dry run said "would re-lock": the line edited by hand failed the check)."""
+    root = command_project
+    pyproject, lock = root / "pyproject.toml", root / "uv.lock"
+    pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('name = "alpha"', 'name = "gamma"', 1), encoding="utf-8", newline="\n")
+    entry = 'version = 1\n\n[[package]]\nname = "{}"\nversion = "0.1.0"\nsource = {{ virtual = "." }}\n'
+    stale = [False]
+
+    def fake_uv(env: Any, args: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 1 if stale[0] else 0, "", "")
+
+    monkeypatch.setattr(envs, "uv", fake_uv)
+    monkeypatch.setattr(render, "pyproject_outdated", lambda cfg: False)
+
+    def lock_line() -> str:
+        monkeypatch.setattr(proc, "DRY_RUN", True)
+        capsys.readouterr()
+        assert rename.cmd_rename(_load(root), ["Alpha"]) == 0
+        return next(ln for ln in capsys.readouterr().err.splitlines() if ln.strip().startswith("uv.lock"))
+
+    lock.write_text(entry.format("gamma"), encoding="utf-8")  # `./pyt lock` after the hand edit
+    assert "would re-lock (uv lock): the project name changes" in lock_line()
+    monkeypatch.setenv("UV_FROZEN", "1")
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    before = _everything(root)
+    with pytest.raises(PytError, match=r"\(the project name changes\), but UV_FROZEN is set"):
+        rename.cmd_rename(_load(root), ["Alpha"])
+    assert _everything(root) == before
+    monkeypatch.delenv("UV_FROZEN")
+    lock.write_text(entry.format("alpha"), encoding="utf-8")  # no `./pyt lock` after it
+    stale[0] = True  # the check of today reads the line edited by hand
+    line = lock_line()
+    assert "names the project 'Alpha' already: checked (uv lock --check) once [project] name is set" in line and "would re-lock" not in line
+
+
 @pytest.mark.parametrize("cause", ["UV_FROZEN", "UV_LOCKED", "broken markers"])
 def test_what_the_lock_would_refuse_is_refused_before_the_first_write(command_project: Path, monkeypatch: pytest.MonkeyPatch, cause: str) -> None:
     """cmd_env.ensure_lock refuses a re-lock under the user's UV_FROZEN or UV_LOCKED (uv lock

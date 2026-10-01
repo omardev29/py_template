@@ -676,18 +676,34 @@ def make_plan(cfg: Config) -> Plan:
     return plan
 
 
+def name_line_hides_the_lock(today: str | None, after: str) -> bool:
+    """Whether a read-only `uv lock --check` of today's pyproject.toml says nothing about uv.lock
+    once [project] name is `after`: the line reads `today`, another name once normalized, while
+    uv.lock names the project `after` already (the line was edited by hand). That check fails on
+    the line alone; only the one after the write (cmd_env.ensure_lock) can tell."""
+    locked = presets.locked_project_name(ROOT / "uv.lock")
+    return locked is not None and req_key(locked)[0] == req_key(after)[0] != req_key(today or "")[0]
+
+
 def _relock_reason(plan: Plan, fresh: bool | None = None) -> str | None:
-    """Why apply re-locks (None: uv.lock stays as it is): the dependencies change, the normalized
-    project name changes (p -> P, or my_app -> My-App, changes no lock), the managed parts of
-    pyproject.toml change, or uv.lock is stale now (`fresh`, else a read-only `uv lock --check`)."""
+    """Why apply re-locks (None: uv.lock stays as it is, or only ensure_lock's check after the
+    [project] name line can tell: name_line_hides_the_lock): the dependencies change, the project
+    name uv.lock holds (else pyproject.toml's) is not app.name's once normalized (p -> P, or
+    my_app -> My-App, changes no lock), the managed parts of pyproject.toml change, or uv.lock is
+    stale now (`fresh`, else a read-only `uv lock --check`). A [project] name line set back to the
+    name uv.lock holds was "the project name changes" (it compared the line edited by hand), and
+    under UV_FROZEN or UV_LOCKED apply refused a fix that needs no re-lock."""
     cfg = plan.new_cfg or plan.cfg
     if plan.deps:
         return "the dependencies change"
     renamed = plan.name_text is not None or plan.rename_plan is not None
-    if renamed and req_key(plan.project.name or "")[0] != req_key(cfg.app.name)[0]:
+    locked = presets.locked_project_name(ROOT / "uv.lock")
+    if renamed and req_key(locked or plan.project.name or "")[0] != req_key(cfg.app.name)[0]:
         return "the project name changes"
     if render.pyproject_outdated(cfg):
         return "the managed parts of pyproject.toml change"
+    if plan.name_text is not None and name_line_hides_the_lock(plan.project.name, cfg.app.name):
+        return None  # _finish puts the line back when ensure_lock refuses: nothing is half-applied
     if fresh is None:
         fresh = envs.uv(envs.tool_env(cfg), ["lock", "--check"], check=False, capture=True, echo=False).returncode == 0
     return None if fresh else "uv.lock is not up to date"
@@ -1072,6 +1088,8 @@ def _print_plan(plan: Plan, command: str, force: bool) -> None:
         lock = f"would re-lock (uv lock): {why}, which apply refuses while {frozen} is set (uv lock writes nothing with it)"
     elif why is not None:
         lock = f"would re-lock (uv lock): {why}"
+    elif plan.name_text is not None and name_line_hides_the_lock(plan.project.name, cfg.app.name):
+        lock = f"names the project '{cfg.app.name}' already: checked (uv lock --check) once [project] name is set back, re-locked only when stale"
     else:
         lock = "up to date (uv lock --check)"
     rows.append(("uv.lock", lock))

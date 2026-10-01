@@ -2329,24 +2329,37 @@ def report(plan_: Plan, *, dry: bool) -> None:
         ui.detail(f"  skipped (binary or not UTF-8): {', '.join(plan_.binary)}")
 
 
+_STALE_LOCK = "uv.lock is not up to date"
+
+
 def _lock_change(new_cfg: Config, old_name: str, new_name: str) -> str | None:
-    """Why the real run's cmd_env.ensure_lock re-locks uv.lock (None: it stays): the same
-    normalized project name still re-locks a stale lock. A PytError when `uv lock --check`
-    cannot run."""
-    if presets._norm_name(old_name) != presets._norm_name(new_name):
+    """Why the real run's cmd_env.ensure_lock re-locks uv.lock (None: it stays): the project name
+    uv.lock holds (else the app's) is not the new one once normalized (a lock that `./pyt lock`
+    made after a hand edit of [project] name holds that name), and the same normalized name still
+    re-locks a stale lock. A PytError when `uv lock --check` cannot run."""
+    locked = presets.locked_project_name(ROOT / "uv.lock")
+    if presets._norm_name(locked or old_name) != presets._norm_name(new_name):
         return "the project name changes"
     if render.pyproject_outdated(new_cfg):
         return "the managed parts of pyproject.toml change"
     r = envs.uv(envs.tool_env(new_cfg), ["lock", "--check"], cwd=ROOT, check=False, capture=True, echo=False)
-    return None if r.returncode == 0 else "uv.lock is not up to date"
+    return None if r.returncode == 0 else _STALE_LOCK
 
 
-def _lock_forecast(new_cfg: Config, old_name: str, new_name: str) -> str:
-    """What the real run's cmd_env.ensure_lock does to uv.lock, for --dry-run (nothing is written)."""
+def _lock_forecast(new_cfg: Config, old_name: str, new_name: str, today: str | None = None) -> str:
+    """What the real run's cmd_env.ensure_lock does to uv.lock, for --dry-run (nothing is written).
+    `today`: pyproject.toml's [project] name now. When uv.lock holds the new name already and only
+    that line, edited by hand, keeps it from passing the check, the check after the rename decides
+    (cmd_apply.name_line_hides_the_lock). Under UV_FROZEN or UV_LOCKED the rename is refused then
+    all the same (_refuse_what_the_lock_would): it cannot be undone once written."""
+    from . import cmd_apply  # cmd_apply imports this module
+
     try:
         why = _lock_change(new_cfg, old_name, new_name)
     except PytError as e:
         return f"cannot tell: uv lock --check could not run ({e})"
+    if why == _STALE_LOCK and cmd_apply.name_line_hides_the_lock(today, new_name):
+        return f"names the project '{new_name}' already: checked (uv lock --check) once [project] name is set, re-locked only when stale"
     return f"would re-lock (uv lock): {why}" if why is not None else "up to date (uv lock --check)"
 
 
@@ -2453,7 +2466,8 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
     _refuse_what_the_lock_would(new_cfg, old_name, new_name)
     report(planned, dry=proc.DRY_RUN)
     if proc.DRY_RUN:
-        ui.info(f"  uv.lock          {_lock_forecast(new_cfg, old_name, new_name)}")
+        today = presets.project_name(planned.pyproject.old) if planned.pyproject is not None else None
+        ui.info(f"  uv.lock          {_lock_forecast(new_cfg, old_name, new_name, today)}")
         rerendered, edited = render.apply(new_cfg)  # --dry-run: compares only (what the real run writes)
         ui.info("  generated files  " + (f"would re-render {', '.join(rerendered)}" if rerendered else "unchanged"))
         if edited:
