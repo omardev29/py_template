@@ -5140,6 +5140,70 @@ def test_flet_build_argv_stage_and_pyproject(sandbox: Path, monkeypatch: pytest.
     assert data["tool"]["flet"] == {"org": "com.example", "app": {"path": "src", "module": "main"}, "flutter": {"pubspec": {"dependency_overrides": dict(flet.FLUTTER_OVERRIDES)}}}
 
 
+@pytest.mark.parametrize("local", [True, False])
+def test_flet_build_installs_a_local_library_again_at_every_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch, local: bool) -> None:
+    # flet_cli 1.0.1 hashes the arguments of its package step, the build project's requirement
+    # lines among them, into <stage>/build/.hash/package, and when they did not change it passes
+    # --skip-site-packages to serious_python, which keeps the previous build's site-packages. A
+    # local library's line names its folder, which stays the same when its code changes: every
+    # flet build after the first shipped the library as the first one had installed it. The stamp
+    # goes when a pin is a local library; with index pins only it stays (flet skips a pip run)
+    from runner.methods import flet
+
+    stamp = sandbox / "build" / "flet-build" / "cpython" / flet.PACKAGE_STAMP
+    stamp.parent.mkdir(parents=True)
+    stamp.write_text("the hash of the previous build's package arguments", encoding="utf-8")
+    library = f"mylib @ {(sandbox / 'libs' / 'mylib').as_uri()} ; python_full_version < '3.15'"
+    _flet_build(sandbox, monkeypatch, pins=["flet==1.0.1", library if local else "msgpack==1.1.0"])
+    assert stamp.exists() is not local
+
+
+@pytest.mark.parametrize("local", [True, False])
+def test_the_pinned_flet_installs_a_local_library_again(sandbox: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, local: bool) -> None:
+    """The pinned flet-cli's own HashStamp (from uv's cache, offline), at the path its build_base.py
+    names: after a build with the same requirement lines, flet skips the site-packages only while
+    the stamp of the previous build is there."""
+    import importlib.util
+
+    from runner.methods import flet
+
+    version = presets.constraints("flet").get("flet-cli")
+    if not version:
+        pytest.skip("the flet preset pins no flet-cli")
+    cli = tmp_path / "flet-cli"
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("UV_PROJECT", "UV_PYTHON", "VIRTUAL_ENV", "PYTEMPLATE_"))}
+    got = subprocess.run(
+        [proc.find_uv(), "pip", "install", "--offline", "--quiet", "--no-deps", "--target", str(cli), "--python", sys.executable, f"flet-cli=={version}"],
+        env=env, capture_output=True, text=True, timeout=300, check=False,
+    )
+    if got.returncode != 0:
+        pytest.skip(f"flet-cli=={version} is not in the uv cache: {got.stderr.strip()[-300:]}")
+    source = (cli / "flet_cli" / "commands" / "build_base.py").read_text(encoding="utf-8")
+    # the folder flet build gets (the stage) is its python_app_path; the stamp is in its build_dir
+    assert 'self.build_dir = self.python_app_path.joinpath("build")' in source
+    assert 'HashStamp(self.build_dir / ".hash" / "package")' in source and '"--skip-site-packages"' in source
+    assert flet.PACKAGE_STAMP == Path("build", ".hash", "package")
+    spec = importlib.util.spec_from_file_location("pt_flet_hash_stamp", cli / "flet_cli" / "utils" / "hash_stamp.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def package_step(requirements: list[str]) -> Any:
+        stamp = module.HashStamp(sandbox / "build" / "flet-build" / "cpython" / flet.PACKAGE_STAMP)
+        for requirement in requirements:  # flet hashes "-r <requirement>" per dependency
+            stamp.update("-r")
+            stamp.update(requirement)
+        return stamp
+
+    pins = ["flet==1.0.1", f"mylib @ {(sandbox / 'libs' / 'mylib').as_uri()}" if local else "msgpack==1.1.0"]
+    package_step(pins).commit()  # the previous build
+    _flet_build(sandbox, monkeypatch, pins=pins)
+    work = sandbox / "build" / "flet-build" / "cpython"
+    dependencies = tomllib.loads((work / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
+    assert dependencies == pins  # the very arguments of the previous build
+    assert package_step(dependencies).has_changed() is local  # changed: no --skip-site-packages
+
+
 def test_flet_build_cleanup_false_turns_flets_own_cleanup_off(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # flet_cli 1.0.1 cleans the packages by default (cleanup.packages defaults to true, and
     # --cleanup-packages has no negative form): cleanup = false only dropped --cleanup-app

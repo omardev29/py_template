@@ -3264,7 +3264,11 @@ Per method:
   Studio C++; `flet.check_options` refuses both from `cmd_build`, before the checks and the
   payload and also in `--dry-run`, and again in `build`. The stage `.build/flet-build/<b>` is
   persistent (Flutter cache); stale extensions are deleted from it before this payload's are
-  copied (a desktop `.pyd` must not reach a mobile/web build). `flet build` ignores `uv.lock`, so `build_pyproject` pins the
+  copied (a desktop `.pyd` must not reach a mobile/web build), and so is flet's hash of its
+  package step (`flet.PACKAGE_STAMP`, `<stage>/build/.hash/package`) when a pin is a local
+  library or file (`flet.local_pin`): flet skips the site-packages while its requirement lines
+  are unchanged, and a local library's line stays the same when its code changes, so every
+  build after the first shipped the library as the first one installed it (15.1). `flet build` ignores `uv.lock`, so `build_pyproject` pins the
   `uv export --frozen --no-default-groups --no-editable --prune flet-desktop` versions
   (`flet._pinned_requirements`; `flet.DESKTOP_CLIENT` goes with what only it needs, rich and
   pygments: a flet build app runs embedded, `FLET_PLATFORM` set by its Flutter host or Pyodide on
@@ -5996,6 +6000,19 @@ Flet (flet, flet-desktop, flet pack, flet build):
   Fix: `methods.flet.build_pyproject` pins the exported versions and `requires-python =
   "==X.Y.*"` (10). Test: `test_build_methods.py::test_flet_build_pins_the_python_minor`,
   `test_fixes.py::test_flet_build_pyproject_takes_only_tool_flet`. Goes: never.
+- **`flet build` reuses the previous build's site-packages while its requirement lines are
+  unchanged** (LIMITATION, flet-cli 1.0.1: its package step hashes its arguments into
+  `<build dir>/.hash/package`, `<build dir>` being `<the folder it builds>/build`, and on an
+  unchanged hash passes `--skip-site-packages` to serious_python 4.7.1, which then installs
+  nothing): a local library's line (`name @ file:///...`) names its folder, which stays the same
+  when its code changes, so every flet build after the first (desktop, Android, iOS, web) shipped
+  the library as the first one installed it, and said done. Flet's own way for local packages,
+  `[tool.flet] dev_packages`, drops each requirement's marker and passes `--no-cache-dir` (every
+  package downloaded again). Fix: `methods.flet.build` deletes that stamp
+  (`flet.PACKAGE_STAMP`) when a pin is a local library or file (`flet.local_pin`) (10). Test:
+  `test_build_methods.py::test_flet_build_installs_a_local_library_again_at_every_build`,
+  `test_the_pinned_flet_installs_a_local_library_again` (the pinned flet-cli's own HashStamp
+  and the stamp path its build_base.py names, from uv's cache). Goes: never.
 - **`flet build` takes a mobile or web target's binary packages from Flet's own index**
   (LIMITATION, flet-cli 1.0.1 with serious_python 4.7.1): pip runs with `--only-binary :all:`
   and `--extra-index-url https://pypi.flet.dev` (for the web also a local index of the packages
@@ -7165,7 +7182,9 @@ Code coupling (rename together):
   old folder-wins rule in lintc once turned the `__file__` rule off next to a leftover folder).
 - `upx.BUILTIN_EXCLUDE` must keep `flutter_windows.dll`; `nuitka._flet_client_archive` mirrors
   flet_desktop's download URL, its `FLET_CLIENT_URL` override and its `flet_desktop/app/`
-  lookup, and `nuitka.archive_problem` the way `ensure_client_cached` extracts the archive.
+  lookup, and `nuitka.archive_problem` the way `ensure_client_cached` extracts the archive;
+  `flet.PACKAGE_STAMP` names where flet_cli's package step keeps its hash
+  (`test_the_pinned_flet_installs_a_local_library_again` reads the pinned build_base.py).
 - `config._check_default_methods` imports `cmd_build.COMPAT` lazily (`cmd_build` imports
   `config`); `config._check_preset_tables` reads `preset.toml` `[options]` itself, like
   `config._presets` mirrors `presets.available`; `render.managed_block` needs `pypy_minor`

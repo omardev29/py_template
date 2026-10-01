@@ -41,6 +41,11 @@ DESKTOP_CLIENT = "flet-desktop"  # the client `flet run` and `flet pack` start: 
 # jni to 1.0.0 but not jni_flutter, whose 1.0.4 (October 1, 2026) declares jni ^1.0.0 and needs
 # 1.1.0, so every Android build failed in Dart's compile (CLAUDE.md 15.1)
 FLUTTER_OVERRIDES = {"jni_flutter": "1.0.3"}
+# Where flet build (flet_cli 1.0.1, its package step) keeps the hash of the package step's
+# arguments, the build project's requirement lines among them, relative to the folder it builds:
+# when they did not change it passes --skip-site-packages to serious_python, which keeps the
+# site-packages of the previous build (CLAUDE.md 15.1)
+PACKAGE_STAMP = Path("build", ".hash", "package")
 # sys.platform values as platform.system() names the same platform: what target_markers writes
 PLATFORM_SYSTEM = {"android": "Android", "darwin": "Darwin", "emscripten": "Emscripten", "ios": "iOS", "linux": "Linux", "win32": "Windows"}
 _SYS_PLATFORM_MARKER = re.compile(r"\bsys_platform\s*(==|!=)\s*(['\"])([^'\"]*)\2")
@@ -80,6 +85,12 @@ def _pinned_requirements(cfg_tool: envs.PyEnv) -> list[str]:
         echo=False,
     ).stdout
     return [common.direct_reference(ln.strip()) for ln in out.splitlines() if ln.strip() and not ln.startswith("#")]
+
+
+def local_pin(pin: str) -> bool:
+    """Whether a pin is a local library or file: `name @ file:...` (common.direct_reference)."""
+    _, at, url = pin.partition(" ;")[0].partition("@")
+    return bool(at) and url.strip().startswith("file:")
 
 
 def target_markers(pins: list[str]) -> list[str]:
@@ -262,6 +273,12 @@ def build(req: BuildRequest) -> Path:
             ui.warn(relaxed_message(target, relaxed))
     text = build_pyproject(cfg, data, pins)
     (work / "pyproject.toml").write_text(text, encoding="utf-8", newline="\n")
+    if any(local_pin(pin) for pin in pins):
+        # A local library's line names its folder, which stays the same when its code changes:
+        # every build after the first shipped the library as the first one installed it. Without
+        # the stamp flet installs the site-packages again ([tool.flet] dev_packages, flet's own
+        # way, drops each one's marker and downloads every package again: --no-cache-dir)
+        (work / PACKAGE_STAMP).unlink(missing_ok=True)
 
     out = dist_path(req, f"-{target}")
     argv: list[str | Path] = ["flet", "build", target, work, "--yes", "--output", out]
