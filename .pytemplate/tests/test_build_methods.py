@@ -2616,6 +2616,20 @@ def test_install_junk_keeps_the_scripts_that_name_no_interpreter_of_this_machine
     assert sorted(p.name for p in scripts.iterdir()) == ["env", "other", "shell", "system"]
 
 
+def test_install_junk_reads_the_interpreter_of_a_windows_script_in_any_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows names a file in any case: a data script whose line names the .venv python in
+    another case than the build's path is the same interpreter."""
+    scripts = tmp_path / "site" / "bin"
+    scripts.mkdir(parents=True)
+    (scripts / "aws").write_text("#!c:\\users\\o\\game\\.venv\\scripts\\python.exe\r\nimport x\r\n", encoding="utf-8", newline="")
+    python = Path("C:\\Users\\O\\game\\.venv\\Scripts\\python.exe")
+    common.drop_install_junk(tmp_path / "site", python)
+    assert (scripts / "aws").is_file() is (sys.platform != "win32")  # POSIX names files by their case
+    monkeypatch.setattr(sys, "platform", "win32")
+    common.drop_install_junk(tmp_path / "site", python)
+    assert not (scripts / "aws").exists()
+
+
 def test_install_junk_drops_the_build_machines_path_of_a_local_library(tmp_path: Path) -> None:
     # Since --no-editable a local library is installed for real, and uv writes its source folder
     # on this machine into direct_url.json (file:///home/someone/proj/libs/mylib), plus its own

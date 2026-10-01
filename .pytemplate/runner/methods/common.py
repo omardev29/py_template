@@ -538,6 +538,8 @@ def _names_the_installer(script: Path, pythons: set[bytes]) -> bool:
             head = f.read(4096)
     except OSError:
         return False
+    if sys.platform == "win32":  # the same file in any case
+        head, pythons = head.lower(), {p.lower() for p in pythons}
     first, _, rest = head.partition(b"\n")
     first = first.rstrip(b"\r")
     if first.startswith(b"#!") and first[2:] in pythons:
