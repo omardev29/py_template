@@ -986,6 +986,37 @@ def test_a_rename_whose_lock_fails_is_tidied_already(tmp_path: Path, monkeypatch
     assert _run(project) == 0 and tidied == ["beta"]  # the apply that finishes it has nothing to tidy
 
 
+def test_a_record_it_cannot_write_after_the_rename_says_the_app_is_renamed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """state.json that cannot be written right after apply renamed the app (another user's, read
+    only, locked on Windows): apply ended with only `error: cannot write .pytemplate/state.json`,
+    the ruff tidy-up skipped and nothing said the app was renamed. It tidies first, then says the
+    app is already renamed and to run apply again, which finishes the job once state.json can be
+    written (the record still names the old app: no reference to it is left, so no folder moved by
+    hand either)."""
+    project, uv = _project(tmp_path, monkeypatch)
+    assert _run(project) == 0  # the record: alpha
+    tidied: list[str] = []
+    monkeypatch.setattr(rename, "tidy_before", lambda cfg, plan_, root=None: rename.Tidy(set(), set()))
+    monkeypatch.setattr(rename, "tidy_after", lambda cfg, plan_, clean, root=None: tidied.append(cfg.app.name))
+    project.edit("app", "name", "beta")
+    real = cmd_apply.save_record
+
+    def unwritable(record: dict[str, Any], path: Path | None = None) -> bool:
+        raise PytError("cannot write .pytemplate/state.json: Permission denied")
+
+    monkeypatch.setattr(cmd_apply, "save_record", unwritable)
+    count = len(uv.calls)
+    with pytest.raises(PytError, match="cannot write .pytemplate/state.json") as e:
+        _run(project)
+    assert "the app is already renamed: fix the problem above and run ./pyt apply again" in str(e.value), str(e.value)
+    assert tidied == ["beta"] and uv.changing(count) == []  # tidied; no lock, sync or render after it
+    assert (project.root / "src" / "beta").is_dir() and not (project.root / "src" / "alpha").exists()
+    monkeypatch.setattr(cmd_apply, "save_record", real)
+    assert _run(project) == 0 and tidied == ["beta"]  # the apply that finishes it renames nothing more
+    record = cmd_apply.load_record()
+    assert record is not None and record["name"] == "beta" and cmd_apply.pending(project.cfg()) == []
+
+
 def test_the_record_follows_a_rename_when_the_lock_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The rename is done before the lock: when the lock fails, the record keeps the applied
     options under the NEW name (named after the old one it would no longer be trusted)."""

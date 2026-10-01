@@ -1395,8 +1395,11 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   editor's save, `test_rename.test_a_file_with_two_names_in_the_project_is_renamed_once`)), the name of the `applied` record right away
   (`cmd_apply.rename_record`, only the project's own record: named after the old app it is no
   longer trusted), the ruff tidy-up (before the re-lock, which can fail: below),
-  `cmd_env.ensure_lock` (a failure there says "the files are already renamed ... ./pyt apply")
-  and `render.apply`; a Ctrl+C or SIGTERM during those says the same before it stops the command
+  `cmd_env.ensure_lock` and `render.apply`; a failure of any of them says "the files are already
+  renamed ... ./pyt apply" (a record it cannot write, a state.json another user owns, comes after
+  the tidy-up: it ended with only that error, nothing tidied, and a second `./pyt rename NEW`
+  said "nothing to do": `test_rename.test_a_state_file_it_cannot_write_says_the_files_are_already_renamed`);
+  a Ctrl+C or SIGTERM during those says the same before it stops the command
   (and, before the tidy-up is done, `./pyt lint --fix` and `./pyt fmt`).
 - After a hand edit of `app.name` (src/<pkg>/ missing, or the very same folder: `alpha` ->
   `Alpha`), rename starts from the name the project really has (`cmd_apply.applied_name`, asked
@@ -1634,7 +1637,9 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   (`rename.report`, `tidy_before`, `apply_plan`, then the record under the new name: a later
   failure must not leave it naming the old app, which is no longer trusted; then
   `rename.tidy_after`, before every step that can fail: the apply that finishes a failed one has
-  nothing to tidy, `test_apply.test_a_rename_whose_lock_fails_is_tidied_already`) or the `[project]
+  nothing to tidy, `test_apply.test_a_rename_whose_lock_fails_is_tidied_already`; a record it
+  cannot write stops apply after the tidy-up, saying the app is already renamed:
+  `test_apply.test_a_record_it_cannot_write_after_the_rename_says_the_app_is_renamed`) or the `[project]
   name` line -> `uv remove --frozen` / `uv add --frozen` of the option-driven requirements (dev
   group with `--dev`) -> `cmd_env.ensure_lock`, whose re-lock, when it first resolves PyPy
   (`render.gains_pypy`), is followed by `cmd_mode._precheck_py311` (it syncs the tools

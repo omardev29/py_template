@@ -1979,6 +1979,35 @@ def test_an_interrupted_rename_says_how_to_finish(command_project: Path, monkeyp
     assert cmd_apply.load_record() == {**record, "name": "beta"}
 
 
+@pytest.mark.parametrize("step", ["the record", "render"])
+def test_a_state_file_it_cannot_write_says_the_files_are_already_renamed(command_project: Path, monkeypatch: pytest.MonkeyPatch, step: str) -> None:
+    """state.json that cannot be written once the files are renamed (another user's, read only,
+    locked on Windows), by the record right after the files or by render at the end: rename ended
+    with only `error: cannot write .pytemplate/state.json`, the re-lock and the generated files
+    left behind (and, for the record, the ruff tidy-up too), and a second `./pyt rename beta` said
+    "nothing to do". It tidies first and says the files are renamed and to run ./pyt apply."""
+    from runner import cmd_apply
+
+    cmd_apply.save_record({"name": "alpha", "preset": "script", "dependencies": [], "dev": []})
+    done: list[str] = []
+
+    def unwritable(*args: Any, **kwargs: Any) -> Any:
+        done.append(step)
+        raise PytError("cannot write .pytemplate/state.json: Permission denied")
+
+    monkeypatch.setattr(rename, "tidy_after", lambda cfg, plan_, clean, root=None: done.append("tidy"))
+    monkeypatch.setattr(cmd_env, "ensure_lock", lambda cfg: done.append("lock"))
+    if step == "the record":
+        monkeypatch.setattr(cmd_apply, "save_record", unwritable)
+    else:
+        monkeypatch.setattr(render, "apply", unwritable)
+    with pytest.raises(PytError, match="cannot write .pytemplate/state.json") as e:
+        rename.cmd_rename(_load(command_project), ["beta"])
+    assert "The files are already renamed: fix the problem above and run ./pyt apply" in str(e.value), str(e.value)
+    assert done == (["the record", "tidy"] if step == "the record" else ["tidy", "lock", "render"])
+    assert (command_project / "src" / "beta").is_dir() and not (command_project / "src" / "alpha").exists()
+
+
 def test_the_tidy_up_comes_before_the_relock(command_project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """A re-lock that failed after the rename (offline, no solution) left the job to ./pyt apply,
     which finds the names in line and tidies nothing: the files ruff had formatted stayed

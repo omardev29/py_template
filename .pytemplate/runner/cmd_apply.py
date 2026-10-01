@@ -1072,6 +1072,7 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
     _dirty(plan, command, force)
     clean: rename.Tidy | None = None
     original: bytes | None = None  # pyproject.toml before its [project] name line: put back when the lock fails
+    unrecorded: PytError | None = None  # the record could not follow the rename
     if plan.rename_plan is not None and plan.new_cfg is not None:
         n = plan.rename_plan.names
         rename.report(plan.rename_plan, dry=False)
@@ -1079,7 +1080,10 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
         rename.apply_plan(ROOT, plan.rename_plan)
         cfg = plan.new_cfg  # the renamed pytemplate.toml, validated before anything was written
         # the record follows the rename at once: a later failure must not leave it naming the old app
-        save_record({"name": cfg.app.name, "preset": plan.applied.preset, "dependencies": plan.applied.dependencies, "dev": plan.applied.dev})
+        try:
+            save_record({"name": cfg.app.name, "preset": plan.applied.preset, "dependencies": plan.applied.dependencies, "dev": plan.applied.dev})
+        except PytError as e:  # a state.json it cannot write: the app is renamed all the same
+            unrecorded = e
         summary.append(("app.name", f"renamed '{n.old_name}' -> '{n.new_name}' (src/{cfg.pkg}/)"))
     elif plan.name_text is not None:
         original = _read_bytes(ROOT / PYPROJECT.name)
@@ -1094,6 +1098,8 @@ def apply(cfg: Config, args: list[str], *, command: str = "apply") -> int:
             # before the steps that can fail: the apply that finishes the job has no rename to tidy
             rename.tidy_after(cfg, plan.rename_plan, clean)
         tidied = True
+        if unrecorded is not None:  # it ended with only that error, and nothing said the app was renamed
+            raise PytError(f"{unrecorded}\n  the app is already renamed: fix the problem above and run ./pyt {command} again", unrecorded.code)
         return _finish(cfg, plan, command, summary, original)
     except KeyboardInterrupt:  # Ctrl+C, or SIGTERM/SIGHUP passed on to uv (proc.Interrupted)
         if plan.rename_plan is not None:  # as `./pyt rename` says it: only "terminated" was printed

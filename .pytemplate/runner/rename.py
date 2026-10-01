@@ -2372,24 +2372,30 @@ def cmd_rename(cfg: Config, args: list[str]) -> int:
     record = cmd_apply.project_record(cfg)  # before the rename: its name is still the old one
     clean = tidy_before(cfg, planned)
     apply_plan(ROOT, planned)  # new_cfg: the renamed pytemplate.toml, validated before anything was written
-    # The record follows the files at once (as in apply): named after the old app it is no longer
-    # trusted, and the ./pyt apply that finishes an interrupted rename reads it
-    cmd_apply.rename_record(new_name, record)
     tidied = False
     try:
+        unrecorded: PytError | None = None
+        try:
+            # The record follows the files at once (as in apply): named after the old app it is no
+            # longer trusted, and the ./pyt apply that finishes an interrupted rename reads it
+            cmd_apply.rename_record(new_name, record)
+        except PytError as e:  # a state.json it cannot write: the files are renamed all the same
+            unrecorded = e
         # before the re-lock, which can fail: the ./pyt apply that finishes the job finds the
         # names in line and tidies nothing
         tidy_after(new_cfg, planned, clean)
         tidied = True
-        try:
-            ensure_lock(new_cfg)
-        except PytError as e:
-            raise PytError(f"{e}\n  The files are already renamed: fix the problem above and run ./pyt apply", e.code) from None
+        if unrecorded is not None:
+            raise unrecorded
+        ensure_lock(new_cfg)
         changed, edited = render.apply(new_cfg)
         if changed:
             ui.info(f"render: updated {', '.join(changed)}")
         if edited:
             ui.warn(f"not overwriting hand-edited generated files: {', '.join(edited)} (./pyt render --force)")
+    except PytError as e:  # the record, the lock, render: it ended with only that error, and a
+        # second `./pyt rename NEW` said "nothing to do"
+        raise PytError(f"{e}\n  The files are already renamed: fix the problem above and run ./pyt apply", e.code) from None
     except KeyboardInterrupt:  # Ctrl+C, or SIGTERM/SIGHUP passed on to uv (proc.Interrupted)
         also = "" if tidied else ", then ./pyt lint --fix and ./pyt fmt (import order and line wrapping)"
         ui.warn(f"the files are already renamed: run ./pyt apply to finish (uv.lock and the generated files){also}")
