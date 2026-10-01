@@ -2722,7 +2722,7 @@ Formats:
     `else:` of `if sys.version_info >= (3, 12):` was a blocking error though mypyc compiled the
     module (`test_lintc_skips_the_classes_mypy_reads_as_unreachable_on_python_cpython`,
     `test_lintc_reads_a_test_as_mypy_does`; CLASSES_IN_BLOCKS holds each case for the real
-    mypyc).
+    mypyc). What of it runs is the next rule's.
   - What runs but mypy never reads (`lintc._mypy_skips_what_runs`, an error in any scope): a
     block mypy reads as unreachable, the else of `if TYPE_CHECKING:` (or `if MYPY:`), the body of
     `if not TYPE_CHECKING:`, any test mypy and the runtime read apart (`_static_value` with
