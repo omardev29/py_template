@@ -1174,6 +1174,8 @@ def selftest(cfg: Config, args: list[str]) -> int:
     judged = c[KILLED] + c[TIMEOUT] + c[SURVIVED]
     if c[UNTESTED]:  # mutants of a module no test file imports were never run (never judged)
         ui.ok(f"selftest --mutation: {judged} mutant(s) judged, {c[UNTESTED]} untested (no test file imports their module)")
+    elif not judged:  # no mutant to test (no runner line changed since --diff's BASE), or every one skipped
+        ui.ok("selftest --mutation: no mutant judged" + (f" ({c[SKIPPED]} skipped)" if c[SKIPPED] else ""))
     else:
         ui.ok("selftest --mutation: every mutant judged")
     return 0

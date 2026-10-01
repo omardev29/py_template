@@ -4477,7 +4477,9 @@ short temp tree and unset `NVIM_APPNAME`.
     the score (the killed and timed-out share of the judged mutants), every survivor and error
     with its line, operator and change. Exit 0 when every mutant was judged (survivors are the
     report, not a failure); the closing line names how many were untested when any were (a module
-    no test file imports), never the false "every mutant judged". 1 on a failed baseline or an error, 2 usage (`--jobs` below 1, an
+    no test file imports), and says "no mutant judged" when there was none to test (no runner
+    line changed since BASE) or every one was skipped, never the false "every mutant judged".
+    1 on a failed baseline or an error, 2 usage (`--jobs` below 1, an
     empty `--diff`, a BASE that names no commit), 3 without git, uv or Cosmic Ray's environment
     (offline it must be in uv's cache), 130 interrupted (the report of what ran). What stops a
     run (a worker whose `uv sync` failed, Cosmic Ray's side gone: `Report.error`) comes after

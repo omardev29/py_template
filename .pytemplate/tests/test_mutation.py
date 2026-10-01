@@ -1809,6 +1809,21 @@ def test_selftest_final_line_names_untested_mutants(tmp_path: Path, monkeypatch:
     assert "every mutant judged" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(("statuses", "said"), [([], "no mutant judged"), ([mutation.SKIPPED, mutation.SKIPPED], "no mutant judged (2 skipped)")])
+def test_selftest_final_line_says_when_no_mutant_was_judged(
+    statuses: list[str], said: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No runner line changed since --diff's BASE (no mutant), or every mutant skipped: the report
+    said "no mutant to test" and the closing line then claimed "every mutant judged" (A10-08)."""
+    monkeypatch.setattr(proc, "find_uv", lambda: "uv")
+    report = _report(tmp_path, statuses)
+    report.note = "no runner line changed since HEAD"
+    monkeypatch.setattr(mutation, "run", lambda *a: report)
+    assert mutation.selftest(_cfg(), []) == 0
+    err = capsys.readouterr().err
+    assert f"selftest --mutation: {said}\n" in err and "every mutant judged" not in err, err
+
+
 def test_selftest_prints_the_report_before_the_error_that_stopped_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
