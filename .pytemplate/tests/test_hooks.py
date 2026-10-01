@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2202,12 +2203,13 @@ def test_run_checks_a_commit_that_only_deletes_files(tmp_path: Path, monkeypatch
 
 
 @needs_git
-@pytest.mark.parametrize("sub", ["", "apps/my app"])
+@pytest.mark.parametrize("sub", ["", "apps/my app", "apps/R&D", "apps/a$b"])
 def test_a_failed_check_says_where_its_hints_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], sub: str) -> None:
     """git runs the hook from the top of the work tree, where a project in a subfolder has no
     ./pyt: its hints (`./pyt render, then git add .vscode/tasks.json`) and the paths the tools
     print are the project's, and typed at the top they failed. The closing line says where they
-    run; a project at the top needs no such line."""
+    run, the folder quoted as a shell takes it (`cd apps/R&D` ran `cd apps/R` in the background,
+    then a command D; double quotes left `$b` to expand); a project at the top needs no such line."""
     top, project = make_repo(tmp_path, sub)
     (project / "a.txt").write_text("x\n", encoding="utf-8")
     git(project, "add", "a.txt")
@@ -2222,7 +2224,11 @@ def test_a_failed_check_says_where_its_hints_run(tmp_path: Path, monkeypatch: py
     assert "./pyt render, then git add .vscode/tasks.json" in err
     note = "the commands and paths above are the project's: run them in its folder"
     if sub:
-        assert f'{note}, cd "{sub}" from the top of the repository' in err, err
+        folder = err.split(f"{note}, cd ", 1)[1].split(" from the top of the repository", 1)[0]
+        assert folder == shlex.quote(sub), err
+        if not IS_WINDOWS:  # pasted into a shell, it names the folder, whole
+            said = subprocess.run(["/bin/sh", "-c", f"printf '%s' {folder}"], capture_output=True, text=True, check=True).stdout
+            assert said == sub, (folder, said)
     else:
         assert note not in err, err
 
@@ -2815,11 +2821,13 @@ def test_on_windows_a_kept_hook_runs_first_only_with_what_gits_sh_reads_as_execu
 
 
 @needs_git
-@pytest.mark.parametrize("sub", ["", "apps/my app", "caf\u00e9"])
+@pytest.mark.parametrize("sub", ["", "apps/my app", "caf\u00e9", "apps/R&D (v2)"])
 def test_git_runs_the_hook(tmp_path: Path, sub: str) -> None:
     """git runs the installed hook from the top: it calls `sh <launcher> hooks run`, chains a
     kept foreign hook first, blocks the commit on failure, explains a launcher that could not
-    run the checks, and --no-verify skips it."""
+    run the checks (its removal advice a command the user can paste: `sh ./apps/R&D (v2)/pyt
+    hooks uninstall` split at the blank and ran `sh ./apps/R` in the background), and
+    --no-verify skips it."""
     top, project = make_repo(tmp_path, sub)
     (project / "pyt").write_bytes(FAKE_LAUNCHER.encode("ascii"))  # no exec bit needed: the hook uses sh
     (top / ".topmark").write_text("", encoding="utf-8")
@@ -2851,7 +2859,11 @@ def test_git_runs_the_hook(tmp_path: Path, sub: str) -> None:
         # the launcher the hook calls, from the top where git runs it: a subfolder project's
         # hint named ./pyt, which is not there
         launcher = f"./{sub}/pyt" if sub else "./pyt"
-        assert f"Remove the hook: sh {launcher} hooks uninstall" in r.stderr
+        word = hooks.shell_word(launcher)
+        assert f"Remove the hook: sh {word} hooks uninstall" in r.stderr
+        if not IS_WINDOWS:  # pasted into a shell, the advice names the launcher, whole
+            said = subprocess.run(["/bin/sh", "-c", f"printf '%s' {word}"], capture_output=True, text=True, check=True).stdout
+            assert said == launcher, (word, said)
         log.unlink()
     assert commit("three.txt", PT_LOCAL_EXIT="1").returncode != 0
     assert log.read_text(encoding="utf-8").splitlines() == ["local hook"]  # stops before the checks

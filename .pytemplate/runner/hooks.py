@@ -76,6 +76,7 @@ import functools
 import importlib.util
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -349,6 +350,13 @@ def sh_literal(text: str) -> str:
     return f"\"$(printf '{fmt}')\""
 
 
+def shell_word(text: str) -> str:
+    """`text` as one word a POSIX shell takes whole, ASCII only (sh_literal), as it is when nothing
+    in it is special: what the hook script prints for the user to paste. Unquoted, the advice for
+    a project in apps/R&D (v2) split there, and `cd apps/R&D` ran `cd apps/R` in the background."""
+    return text if re.fullmatch(r"[A-Za-z0-9_./-]+", text) else sh_literal(text)
+
+
 _LAUNCHER_LINE = re.compile(r"^_pt_launcher=(.*)$", re.MULTILINE)
 _PRINTF_WORD = re.compile(r"\"\$\(printf '([^']*)'\)\"")
 
@@ -517,8 +525,10 @@ def hook_script(launcher: str) -> str:
         "_pt_rc=$?",
         'if [ "$_pt_rc" -gt 1 ]; then',
         "    printf '%s\\n' \"pytemplate pre-commit: $_pt_launcher could not check this commit (exit code $_pt_rc).\" \\",
-        # the launcher itself, from the top where git runs hooks: a project in a subfolder has no ./pyt there
-        "        \"  Commit without the checks: git commit --no-verify   Remove the hook: sh $_pt_launcher hooks uninstall\" >&2",
+        # the launcher itself, from the top where git runs hooks (a project in a subfolder has no
+        # ./pyt there), as a word the user can paste (shell_word); each `$` ends its quoted piece
+        # (`$''`, the same text), so shellcheck sees no expansion in single quotes (SC2016)
+        "        " + sh_literal(f"  Commit without the checks: git commit --no-verify   Remove the hook: sh {shell_word(launcher)} hooks uninstall").replace("$", "$''") + " >&2",
         "fi",
         'exit "$_pt_rc"',
     ]
@@ -530,7 +540,7 @@ def run_line(repo: Repo) -> str:
     checkout without the launcher, as pytemplate's own hook does (another branch): the unguarded
     `sh ./pyt hooks run || exit $?` in a global hooks folder failed every commit of every
     other repository ("cannot open ./pyt")."""
-    word = repo.launcher if re.fullmatch(r"[A-Za-z0-9_./-]+", repo.launcher) else sh_literal(repo.launcher)
+    word = shell_word(repo.launcher)
     return f"[ ! -f {word} ] || sh {word} hooks run || exit $?"
 
 
@@ -1031,7 +1041,7 @@ def install(repo: Repo, *, force: bool = False) -> str:
         if not proc.DRY_RUN:  # the other project's hook runs it: brought up to date in place
             _write_hook(local, script)
         verb = "would be updated" if proc.DRY_RUN else "updated"
-        return f"pre-commit hook {verb}: {_show(local, repo)} -> sh {repo.launcher} hooks run (run first by {_show(target, repo)}, the hook of {other}){skip_note}"
+        return f"pre-commit hook {verb}: {_show(local, repo)} -> sh {shlex.quote(repo.launcher)} hooks run (run first by {_show(target, repo)}, the hook of {other}){skip_note}"
     # this project's own copy as pre-commit.local (its chain's first hook went away): with this
     # project's hook back in pre-commit, it would run the checks twice
     drop = state in ("missing", "outdated", "installed") and own_local(repo)
@@ -1078,7 +1088,7 @@ def install(repo: Repo, *, force: bool = False) -> str:
             local.unlink()
         _write_hook(target, script)
     verb = {"missing": "installed", "outdated": "updated", "installed": "already installed"}.get(state, "installed")
-    msg = f"pre-commit hook {'would be ' + verb if dry and state != 'installed' else verb}: {_show(target, repo)} -> sh {repo.launcher} hooks run"
+    msg = f"pre-commit hook {'would be ' + verb if dry and state != 'installed' else verb}: {_show(target, repo)} -> sh {shlex.quote(repo.launcher)} hooks run"
     if moved:
         idle = _not_run(target if dry else local, _show(local, repo))  # a dry run moved nothing
         msg += f"\n  the previous hook {'would be' if dry else 'was'} kept as {_show(local, repo)}" + (f"; {idle}" if idle else " and runs first")
@@ -1157,7 +1167,7 @@ def _status_line(cfg: Config, repo: Repo) -> tuple[bool | None, str, str]:
     if state == "installed":
         idle = _not_run(local, _show(local, repo)) if chained else None
         extra = f" ({idle})" if idle else f" (runs {LOCAL} first)" if chained else ""
-        return True, f"git pre-commit hook installed: {_show(target, repo)} -> sh {repo.launcher} hooks run{extra}", ""
+        return True, f"git pre-commit hook installed: {_show(target, repo)} -> sh {shlex.quote(repo.launcher)} hooks run{extra}", ""
     if state == "outdated":
         return None, "git pre-commit hook outdated (another launcher path or template version)", "./pyt hooks install"
     if state == "calls" and skipped is not None:
@@ -1868,7 +1878,8 @@ def run(cfg: Config, repo: Repo) -> int:
         # git runs the hook from the top of the work tree, where a project in a subfolder has no
         # ./pyt: the hints, and the paths the tools print, are the project's (typed at the top,
         # `./pyt render` and `git add .vscode/tasks.json` failed)
-        folder = f'"{repo.prefix}"' if " " in repo.prefix else repo.prefix
+        # quoted as a shell takes it: `cd apps/R&D` ran `cd apps/R` in the background, then `D`
+        folder = shlex.quote(repo.prefix)
         where = f"\n  (the commands and paths above are the project's: run them in its folder, cd {folder} from the top of the repository)" if repo.prefix else ""
         ui.error(
             f"pre-commit: {failed} check{'s' if failed != 1 else ''} failed ({seconds:.1f} s). Fix, `git add` and commit again\n"
