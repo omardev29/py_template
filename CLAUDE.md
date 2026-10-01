@@ -4937,6 +4937,22 @@ it was written.
       shipped without it; a trusted `.lazy.lua` ran the `spec.lua` of a vendored folder holding a
       folder or a link named `.lazy.lua`. 26 notable), 1 per 699 lines: not at the bar. 29 minor.
       All 62 fixed.
+    - Round 4, commit 5ee6d19 (round 3's fixes), 23,736 lines: 54 findings (the hunter of one area
+      stopped on a tool call that never returned, and a fresh one hunted it again), none rejected,
+      one the same test defect as another (the tests that pinned the shipped typing profiles), and
+      3 more the first CI run of that commit found (a stability defect: Flet 1.0.1's build template
+      overrides jni but not jni_flutter, whose release of that night broke every apk build; two
+      test defects of round 3's fixes, on every run as a user that is not root and on Windows): 56
+      distinct. Counted: 35 (7 critical: on Windows the runner started git, uv and every other
+      program by name from the caller's folder first, so a `git.exe` planted there ran; `pyt`
+      under MSYS2 took the root of a network share for a project folder, where any user may plant
+      a runner; under the user's `UV_FROZEN` every uv from the floor up to 0.12.8 passed a stale
+      `uv.lock` in `uv lock --check`, and the hook and doctor said it was up to date;
+      basedpyright found no file in a project folder named with `*` or `?`, and `check` said no
+      errors; a portable build under uv's `link-mode = "symlink"` shipped `lib/` as links into the
+      build machine's uv cache; under a project folder named with `[`, PyInstaller skipped its
+      hooks and Nuitka the package data (certifi's CA bundle). 28 notable), 1 per 678 lines: not
+      at the bar. 21 minor. All 56 fixed.
 
 ## 14. Conventions and recipes
 
