@@ -545,7 +545,9 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
     parser.add_argument("--name")
     ns = _parse(parser, args)
     dest = user_path(ns.dest)
-    resolved = dest.resolve()
+    # realpath, never Path.resolve: on Python 3.11 and 3.12 (new runs on any 3.11+) resolve raises
+    # RuntimeError for a link loop, an internal error; check_destination names it below
+    resolved = Path(os.path.realpath(dest))
     if resolved == ROOT or ROOT in resolved.parents:
         raise PytError(f"new: the destination folder cannot be inside {presets.source_name()}")
     presets.check_destination(dest, "new: ")

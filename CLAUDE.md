@@ -3454,7 +3454,8 @@ Per method:
   empty folder it was given) and says so ("nothing was written" when the copy failed before it
   made anything: it said it had removed a project it never made); a folder with content is
   refused before anything is written, and so are a destination it may not look into (below a
-  folder it may not enter, a name too long: "cannot access"), a folder it cannot list and a path
+  folder it may not enter, a name too long, a link loop, whose `Path.resolve` raised RuntimeError
+  on 3.11 and 3.12, so `cmd_new` reads `os.path.realpath`: "cannot access"), a folder it cannot list and a path
   below a file (`presets.check_destination`, in `cmd_mode.cmd_new` and its dry run too: Path.exists
   raised the PermissionError on Python 3.11-3.13, an internal-error traceback, 3.14 read the folder
   as missing and git's start said "cannot run git", and a path below a file got a bare `[Errno 20]

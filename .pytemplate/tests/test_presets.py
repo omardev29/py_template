@@ -1906,6 +1906,34 @@ def test_new_below_a_folder_it_may_not_enter(tmp_path: Path, monkeypatch: pytest
     assert not (locked / "proj").exists() and list(unlistable.iterdir()) == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a symbolic link needs a privilege on Windows")
+@pytest.mark.parametrize("dry_run", [False, True], ids=["real", "dry run"])
+def test_new_names_a_destination_that_is_a_link_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool) -> None:
+    """`pyt new loop` where loop -> loop: Path.resolve raises RuntimeError("Symlink loop from ...")
+    on Python 3.11 and 3.12, which `new` runs on (any 3.11+: outside a project, or in one without
+    .venv), and the user got an internal-error traceback. One error line names the destination,
+    exit 2, nothing written. Played on every Python: resolve behaves as it does on 3.11."""
+    loop = tmp_path / "loop"
+    loop.symlink_to("loop")
+    real_resolve = Path.resolve
+
+    def resolve(self: Path, strict: bool = False) -> Path:  # pathlib's resolve of Python 3.11 and 3.12
+        try:
+            os.stat(self)
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                raise RuntimeError(f"Symlink loop from {str(self)!r}") from None
+        return real_resolve(self, strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    _new_stops_before_any_step(monkeypatch)
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    with pytest.raises(PytError) as e:
+        cmd_mode.cmd_new(config.load(set()), [str(loop), "--name", "demo"])
+    assert e.value.code == 2 and str(e.value).startswith(f"new: cannot access {loop}: "), str(e.value)
+    assert [p.name for p in tmp_path.iterdir()] == ["loop"]
+
+
 def test_new_runs_the_copys_init_on_the_python_cpython_uv_gave(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The copy's runner starts on the interpreter envs.ensure_python returned: its __init runs
     there, and uv's cached environment of the new project's runner holds python.cpython from
