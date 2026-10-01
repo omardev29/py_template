@@ -2072,6 +2072,35 @@ def test_pyz_merge_dry_run_checks_the_parts(tmp_path: Path, monkeypatch: pytest.
     assert not (tmp_path / "m.pyz").exists() and not (tmp_path / "m.cmd").exists()
 
 
+def _wrappers(lib: dict[str, bytes]) -> set[str]:
+    """The console and GUI scripts the packages of a lib/ folder (relative POSIX path -> bytes)
+    name in their *.dist-info/entry_points.txt: what uv writes into bin/ for them."""
+    import configparser
+
+    names: set[str] = set()
+    for path, data in lib.items():
+        if path.count("/") == 1 and path.endswith(".dist-info/entry_points.txt"):
+            parser = configparser.ConfigParser(delimiters=("=",), interpolation=None)
+            parser.optionxform = str  # type: ignore[assignment,method-assign]
+            parser.read_string(data.decode("utf-8"))
+            names |= {key for section in ("console_scripts", "gui_scripts") if parser.has_section(section) for key in parser.options(section)}
+    return names
+
+
+def _uv_junk(lib: dict[str, bytes]) -> list[str]:
+    """What drop_install_junk must have taken out of a lib/ folder: uv's .lock, the wrappers of the
+    entry points and the scripts whose first line names this machine's project (its .venv python).
+    The other files of bin/ belong to their package: ruff's, uv's or a tool's binary, found there."""
+    wrappers = _wrappers(lib)
+    here = os.fsencode(str(ROOT))
+    junk = [path for path in lib if path == ".lock"]
+    for path, data in lib.items():
+        folder, _, name = path.rpartition("/")
+        if folder in ("bin", "Scripts") and (name in wrappers or name.removesuffix(".exe") in wrappers or (data.startswith(b"#!") and here in data[:4096])):
+            junk.append(path)
+    return junk
+
+
 @needs_rich
 def test_pyz_merge_of_a_real_build(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A REAL host .pyz (uv export of this project's lock + uv pip install), run with `python -S`,
@@ -2095,10 +2124,12 @@ def test_pyz_merge_of_a_real_build(sandbox: Path, monkeypatch: pytest.MonkeyPatc
         info = json.loads(archive.read("_pyz.json"))
         names = archive.namelist()
         app_files = {n: archive.read(n).decode() for n in names if n.startswith("common/app/")}
+        lib = {n.removeprefix("common/lib/"): archive.read(n) for n in names if n.startswith("common/lib/") and not n.endswith("/")}
     if not info["pure"] and not TEMPLATE_REPO:  # the template's lock is pure Python: there it must be pure
         pytest.skip("this project's dependencies are not pure Python: the merge below needs a pure host part")
     assert info["pure"] is True and info["host"] == _host_key()
-    assert not [n for n in names if "/bin/" in n or n.endswith("/.lock")]  # no uv junk
+    # no uv junk; a package's own files of bin/ stay (a dependency that ships one failed the test)
+    assert _wrappers(lib) and not _uv_junk(lib)  # rich's pygments has a console script
     # The same build made on another platform, whose dependencies are native there
     files = {**app_files, f"targets/{FOREIGN}/lib/dep.py": "WHERE = 'native'\n"}
     other = fake_pyz(sandbox / "native.pyz", targets=[FOREIGN], pure=False, files=files, name="myapp", min_python=info["min_python"], deps=info["deps"], host=FOREIGN)
@@ -4285,7 +4316,9 @@ def test_portable_system_folder_real_build_runs(sandbox: Path, monkeypatch: pyte
     except proc.CommandFailed as e:
         pytest.skip(f"uv could not export/install the locked dependencies (offline?): {e}")
     assert sorted(p.name for p in out.iterdir()) == ["app", "boot.py", "lib", "myapp.cmd", "myapp.sh"]
-    assert not (out / "lib" / "bin").exists() and not (out / "lib" / ".lock").exists()
+    # no uv junk; a package's own files of bin/ stay (a dependency that ships one failed the test)
+    lib = {p.relative_to(out / "lib").as_posix(): p.read_bytes() for p in (out / "lib").rglob("*") if p.is_file()}
+    assert _wrappers(lib) and not _uv_junk(lib)  # rich's pygments has a console script
     assert (sandbox / "dist" / "myapp-cpython-portable.tar.gz").is_file()
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
     env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
@@ -5125,3 +5158,23 @@ def test_the_nuitka_tests_pass_in_a_project_folder_scons_would_expand(tmp_path: 
     r = _suite_run(own, tmp_path, ".pytemplate/tests/test_build_methods.py", "-k", nuitka_tests)
     assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
     assert "4 passed" in r.stdout, r.stdout[-2000:]
+
+
+@needs_rich
+def test_the_real_build_tests_pass_with_a_dependency_that_ships_files_in_bin(tmp_path: Path) -> None:
+    """A runtime dependency with files of its own in lib/bin, which drop_install_junk keeps (ruff's
+    and uv's binaries, found there): the real portable and pyz build tests asserted that lib/ held
+    no bin/ at all and failed `./pyt selftest` in such a project. They run here in a copy of the
+    project that depends on a package with a binary, a data script and a console script."""
+    own = tmp_path / "own"
+    presets.copy_template(own)
+    wheel = _tool_wheel(own / "wheels")
+    env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")}
+    add = [proc.find_uv(), "add", "--offline", "--no-sync", wheel.relative_to(own).as_posix()]
+    added = subprocess.run(add, cwd=own, env=env, capture_output=True, text=True, timeout=600, check=False)
+    if added.returncode != 0:
+        pytest.skip(f"uv could not add a local wheel offline: {added.stderr.strip()[-500:]}")
+    real_builds = "portable_system_folder_real_build_runs or pyz_merge_of_a_real_build"
+    r = _suite_run(own, tmp_path, ".pytemplate/tests/test_build_methods.py", "-k", real_builds)
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+    assert " failed" not in r.stdout, r.stdout[-2000:]

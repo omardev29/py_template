@@ -3786,12 +3786,16 @@ short temp tree and unset `NVIM_APPNAME`.
   Windows user without it), the `[tool.uv.sources]` `wheel.check` refuses
   (`test_build_methods._plain_pyproject`: a local library, a workspace member or a named index,
   which pyz and portable support, failed five tests that build a wheel to check something else)
-  and the project folder `nuitka.check_options` refuses (`app$v2`: `nuitka.BUILD` in tmp_path).
+  and the project folder `nuitka.check_options` refuses (`app$v2`: `nuitka.BUILD` in tmp_path);
+  and the real builds look for the junk `drop_install_junk` takes out of lib/
+  (`test_build_methods._uv_junk`), never for an empty `bin/`, where a dependency keeps files of its
+  own (ruff's or uv's binary: two tests failed with such a runtime dependency).
   `test_build_methods._suite_run` runs them in such a setup, with a plugin that sets what differs
   there, or in a copy of the project
   (`test_build_methods.test_the_flet_tests_pass_on_a_windows_without_developer_mode`,
   `test_the_wheel_tests_pass_in_a_project_with_local_libraries`,
-  `test_the_nuitka_tests_pass_in_a_project_folder_scons_would_expand`).
+  `test_the_nuitka_tests_pass_in_a_project_folder_scons_would_expand`,
+  `test_the_real_build_tests_pass_with_a_dependency_that_ships_files_in_bin`).
 - Property-based tests (Hypothesis, the dev group's pin): `.pytemplate/tests/conftest.py` loads
   the profile `pytemplate` (no example database, so a run depends on the code, the profile and
   the seed only; no deadline; a failure prints its replay blob) on top of the profile Hypothesis
