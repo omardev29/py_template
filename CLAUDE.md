@@ -1280,7 +1280,17 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   does: in a global hooks folder the unguarded line failed every commit of every other
   repository; the hint says so for a hooks folder outside the repository), and
   apply's summary says whether that hook already runs it (`hooks.hooks_path_runner`); husky 9
-  (`.husky/_` holding `h` or `husky.sh`) is read through `.husky/pre-commit`.
+  (`.husky/_` holding `h` or `husky.sh`) is read through `.husky/pre-commit`. In a linked
+  folder `uninstall`, and apply with `pre_commit = false`, leave pytemplate's hook alone when git
+  tracks its `pre-commit` or `pre-commit.local` (a team's shared hooks, pytemplate's own script
+  too) or the folder is outside the work tree (other repositories may run it), and say why
+  (`hooks.linked_hands_off`, `linked_left_alone`; doctor counts no change for apply there,
+  `cmd_apply._hook_state` "left alone"): they deleted the tracked hook and renamed the tracked
+  `.local` over it, as doctor advised
+  (`test_hooks.test_uninstall_leaves_the_hooks_a_linked_folder_tracks_alone`,
+  `test_apply.test_apply_leaves_pytemplates_hook_in_a_tracked_linked_folder_alone`); a hook of
+  pytemplate's there that git does not track, in a folder of the work tree (what an install older
+  than this rule wrote), still goes.
 - `hooks run` checks what the commit contains: staged files (`git diff --cached --name-only
   --no-renames --diff-filter=ACMRT -z`) and staged deletions (`D`: a deletion-only commit gets
   the project-wide checks too). Every git call passes `-c diff.relative=false`

@@ -31,7 +31,8 @@ is true in pytemplate.toml (the default).
   hook is not installed there; `install` and `status` print the line to add to that setup
   (husky 9, core.hooksPath=.husky/_: to `.husky/pre-commit`). The same for a `.git/hooks` that
   is a link or junction to another folder (a team's tracked `.githooks`): nothing is written
-  through it.
+  through it, and `uninstall` removes only a hook of pytemplate's there that git does not track,
+  in a folder of this work tree (linked_hands_off).
 - Linked worktrees share one hooks directory: the hook calls the launcher at the same
   relative path in every worktree, and a checkout without it skips the checks. A checkout
   whose runner predates `hooks run` (an old branch) fails the hook: commit there with
@@ -884,6 +885,44 @@ def _elsewhere_short(repo: Repo) -> str:
     return "a linked hooks folder" if repo.hooks_link else "core.hooksPath"
 
 
+def linked_hands_off(repo: Repo) -> str | None:
+    """Why uninstall, and apply with hooks.pre_commit = false, leave the hooks of a linked hooks
+    folder (Repo.hooks_link) as they are, or None. The folder is outside this repository's work
+    tree: other repositories may run its hooks; or git tracks its pre-commit or pre-commit.local:
+    a team's shared folder, whose hooks are the team's, pytemplate's own script too (shared on
+    purpose, or written there by an install older than the rule that leaves such a folder alone:
+    either way only a commit of the team's may change it). uninstall deleted the tracked
+    pre-commit and renamed the tracked pre-commit.local over it, and doctor advised it. None for a
+    folder that is no link, or for one of this work tree whose hooks git does not track: what such
+    an older install wrote there, which uninstall still removes."""
+    if not repo.hooks_link:
+        return None
+    present = [p for p in (repo.hooks_dir / HOOK, repo.hooks_dir / LOCAL) if os.path.lexists(p)]
+    top = Path(os.path.realpath(repo.top))
+    inside = _within(Path(os.path.realpath(repo.hooks_dir)), top)
+    if inside is None:
+        return f"{_show(repo.hooks_dir, repo)} is outside this repository, and other repositories may run its hooks"
+    names = [f"{inside}/{p.name}" if inside else p.name for p in present]
+    if not names:
+        return None
+    r = _git(["ls-files", "-z", "--", *names], top, repo.env)
+    if r.returncode != 0:  # read as "tracked": never a guess that deletes a file of the team's
+        return f"git cannot tell whether it tracks {', '.join(names)}: {r.stderr.strip() or f'exit code {r.returncode}'}"
+    tracked = [n for n in r.stdout.split("\0") if n]
+    if tracked:
+        return f"git tracks {', '.join(tracked)}: the hooks of everyone who uses that folder"
+    return None
+
+
+def linked_left_alone(repo: Repo, why: str) -> str:
+    """What uninstall says when it leaves pytemplate's hook in a linked hooks folder alone
+    (linked_hands_off gave `why`)."""
+    return (
+        f"pytemplate's hook in {_show(repo.hooks_dir, repo)} ({elsewhere(repo)}): left alone, since {why}. "
+        "If it should go, change that folder by hand (for a tracked file, in a commit)"
+    )
+
+
 def _hooks_path_hint(repo: Repo) -> str:
     target = _hooks_path_file(repo)
     runs = "husky runs it" if target.parent != repo.hooks_dir else "a sh script; git runs it from the top of the work tree"
@@ -987,12 +1026,17 @@ def install(repo: Repo, *, force: bool = False) -> str:
 def uninstall(repo: Repo) -> str:
     """Remove this project's hook (never another one) and restore the hook it had moved aside.
     This project's hook chained as pre-commit.local after another project's is removed too
-    (never restored: it would run twice, or run with hooks.pre_commit = false)."""
+    (never restored: it would run twice, or run with hooks.pre_commit = false). In a linked hooks
+    folder only where linked_hands_off allows it: never a hook git tracks there."""
     target = repo.default_dir / HOOK
     local = repo.default_dir / LOCAL
     state = classify(target, repo)
     dry = proc.DRY_RUN
     own_copy = own_local(repo)
+    if state in ("installed", "outdated") or own_copy:
+        why = linked_hands_off(repo)
+        if why is not None:
+            return linked_left_alone(repo, why)
     if state == "other":
         other = launcher_of(_read(target))
         if own_copy:

@@ -1946,6 +1946,52 @@ def test_a_rename_refuses_a_tree_git_cannot_check(tmp_path: Path, monkeypatch: p
 
 
 @needs_git
+def test_apply_leaves_pytemplates_hook_in_a_tracked_linked_folder_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """hooks.pre_commit = false with pytemplate's hook in a team's tracked folder linked as
+    .git/hooks: doctor said [XX] "./pyt apply", and apply deleted the tracked hook and renamed the
+    team's tracked pre-commit.local over it. apply (and its --dry-run) leaves the folder alone
+    and says why, and doctor counts nothing: no change waits for apply."""
+    project, _ = _project(tmp_path, monkeypatch)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "no-global-gitconfig"))  # a core.hooksPath of the user's would win
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    _git(project.root, "init", "-q")
+    shared = project.root / ".githooks"
+    shared.mkdir()
+    ours, team = hooks.hook_script("./pyt"), "#!/bin/sh\necho team check\n"
+    (shared / "pre-commit").write_text(ours, encoding="utf-8", newline="\n")
+    (shared / "pre-commit.local").write_text(team, encoding="utf-8", newline="\n")
+    _git(project.root, "add", ".githooks")
+    _git(project.root, "commit", "-q", "--no-verify", "-m", "share the hooks")
+    shutil.rmtree(project.root / ".git" / "hooks")
+    try:
+        if sys.platform == "win32":
+            import _winapi
+
+            _winapi.CreateJunction(str(shared), str(project.root / ".git" / "hooks"))
+        else:
+            (project.root / ".git" / "hooks").symlink_to(Path("..") / ".githooks", target_is_directory=True)
+    except (OSError, ImportError, AttributeError) as e:
+        pytest.skip(f"cannot create a folder link here: {e}")
+    project.edit("hooks", "pre_commit", False)
+    assert not [p for p, _ in cmd_apply.pending(project.cfg()) if "hook" in p]
+
+    def row(dry: bool) -> str:
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        capsys.readouterr()
+        assert _run(project) == 0
+        out = capsys.readouterr().err
+        return next(line for line in out.splitlines() if line.startswith("  git hook ")).split(None, 2)[2]
+
+    for dry in (True, False):
+        assert row(dry) == (
+            ".git/hooks is a link to .githooks: pytemplate's hook there left alone "
+            "(git tracks .githooks/pre-commit, .githooks/pre-commit.local: the hooks of everyone who uses that folder)"
+        )
+    assert (shared / "pre-commit").read_text(encoding="utf-8") == ours and (shared / "pre-commit.local").read_text(encoding="utf-8") == team
+
+
+@needs_git
 def test_every_hook_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """What apply does, and what its --dry-run says, for each state of the hooks folder."""
     project, _ = _project(tmp_path, monkeypatch)

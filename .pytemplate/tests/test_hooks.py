@@ -566,6 +566,54 @@ def test_a_linked_hooks_folder_is_never_written_into(tmp_path: Path, capsys: pyt
 
 
 @needs_git
+def test_uninstall_leaves_the_hooks_a_linked_folder_tracks_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A team shares pytemplate's hook (and a hook of its own, run first as pre-commit.local)
+    through a tracked folder linked as .git/hooks. uninstall deleted the tracked pre-commit and
+    renamed the tracked pre-commit.local over it: files of everyone's checkout changed (and
+    apply with hooks.pre_commit = false, which doctor advised, did the same). It leaves them, and
+    says why; so for a folder outside the repository, which other repositories may run. A hook of
+    pytemplate's there that git does not track (an install older than the rule that leaves such a
+    folder alone wrote it) still goes."""
+    top, project = make_repo(tmp_path)
+    shared = top / ".githooks"
+    shared.mkdir()
+    ours, team = hooks.hook_script("./pyt").encode("ascii"), b"#!/bin/sh\necho team check\n"
+    (shared / hooks.HOOK).write_bytes(ours)
+    (shared / hooks.LOCAL).write_bytes(team)
+    git(top, "add", ".githooks")
+    git(top, "commit", "-q", "--no-verify", "-m", "share the hooks")
+    shutil.rmtree(top / ".git" / "hooks")
+    _link_dir(top / ".git" / "hooks", shared if IS_WINDOWS else Path("..") / ".githooks")
+    repo = find(project)
+    assert repo.hooks_link and hooks.hook_state(repo) == "installed"
+    for dry in (True, False):
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        message = hooks.uninstall(repo)
+        assert "left alone" in message and "git tracks .githooks/pre-commit, .githooks/pre-commit.local" in message
+    assert (shared / hooks.HOOK).read_bytes() == ours and (shared / hooks.LOCAL).read_bytes() == team
+    assert git(top, "status", "--porcelain", "--untracked-files=all").stdout == ""
+    # git tracks none of them: what an older install left there goes, the kept hook comes back
+    git(top, "rm", "-q", "-r", "--cached", ".githooks")
+    message = hooks.uninstall(repo)
+    assert "removed" in message and "restored the previous hook" in message
+    assert (shared / hooks.HOOK).read_bytes() == team and not (shared / hooks.LOCAL).exists()
+    # a folder outside the repository: other repositories may run it
+    outside = tmp_path / "shared-hooks"
+    outside.mkdir()
+    (outside / hooks.HOOK).write_bytes(ours)
+    if IS_WINDOWS:
+        os.rmdir(top / ".git" / "hooks")  # a junction goes as a folder, its target stays
+    else:
+        (top / ".git" / "hooks").unlink()
+    _link_dir(top / ".git" / "hooks", outside)
+    repo = find(project)
+    assert repo.hooks_link and hooks.hook_state(repo) == "installed"
+    message = hooks.uninstall(repo)
+    assert "left alone" in message and "outside this repository" in message
+    assert (outside / hooks.HOOK).read_bytes() == ours
+
+
+@needs_git
 def test_core_hooks_path_husky_layout(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """husky 9: core.hooksPath=.husky/_, whose generated pre-commit sources `h`, which runs the
     user's .husky/pre-commit. That file is the one to check and to name in the hint."""

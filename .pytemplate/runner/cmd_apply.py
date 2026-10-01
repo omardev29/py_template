@@ -728,9 +728,20 @@ def _unchecked(repo: str) -> str:
 
 def _hook_state(cfg: Config) -> str | None:
     """hooks.hook_state() of the default hooks folder (None: not in git, or git refuses the
-    repository)."""
+    repository; "left alone": pytemplate's hook in a linked hooks folder that apply never
+    changes, hooks.linked_hands_off, so no change waits for apply)."""
     repo = _repo()
-    return hooks.hook_state(repo) if isinstance(repo, hooks.Repo) else None
+    if not isinstance(repo, hooks.Repo):
+        return None
+    state = hooks.hook_state(repo)
+    return "left alone" if state in OURS and hooks.linked_hands_off(repo) is not None else state
+
+
+def _linked_left_alone(repo: hooks.Repo) -> str | None:
+    """The summary row of apply (and its --dry-run) when hooks.pre_commit = false finds
+    pytemplate's hook in a linked hooks folder it must leave alone (hooks.linked_hands_off)."""
+    why = hooks.linked_hands_off(repo)
+    return None if why is None else f"{hooks.elsewhere(repo)}: pytemplate's hook there left alone ({why})"
 
 
 # the other project's hook runs pre-commit.local (this project's copy) first (hooks.hook_script)
@@ -772,6 +783,9 @@ def _apply_hook(cfg: Config) -> str:
     if cfg.hooks.pre_commit:
         hooks.ensure_installed(cfg, ROOT)
     elif ours:
+        left = _linked_left_alone(repo)  # a team's tracked hooks folder linked as .git/hooks
+        if left is not None:
+            return left
         try:
             ui.ok(hooks.uninstall(repo))
         except OSError as e:
@@ -804,6 +818,9 @@ def _hook_plan(cfg: Config) -> str:
         return f"not checked: {hooks.NO_GIT}" if repo == hooks.NO_GIT else f"not checked: git refuses the repository ({repo})"
     state, copy = hooks.hook_state(repo), hooks.own_local(repo)
     if not cfg.hooks.pre_commit:
+        left = _linked_left_alone(repo) if state in OURS or (copy and state == "missing") else None
+        if left is not None:
+            return left
         if state == "chained":
             return "would remove pre-commit.local, this project's checks that another project's hook runs first (hooks.pre_commit = false)"
         if state in OURS or (copy and state == "missing"):
