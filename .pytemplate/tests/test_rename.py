@@ -2198,6 +2198,23 @@ def test_a_second_ctrl_c_waits_for_the_undo(tmp_path: Path, monkeypatch: pytest.
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler  # given back once the undo is done
 
 
+@pytest.mark.parametrize("changed", ["tests/test_core.py", "pytemplate.toml", "pyproject.toml"])
+def test_a_file_edited_after_the_plan_is_never_overwritten(tmp_path: Path, changed: str) -> None:
+    """rename and apply plan every file, report, run the ruff check (uv run, a sync maybe), then
+    write the planned bytes: an edit saved in between (an editor's autosave, `--force` in a tree
+    being edited) was overwritten without a word. A file that no longer holds what was planned
+    stops the rename: what was written is undone, and the edit stays."""
+    _write_project(tmp_path, "script", "alpha")
+    planned = rename.plan(tmp_path, "alpha", "beta")
+    path = tmp_path / changed
+    path.write_bytes(path.read_bytes() + b"\n# saved by an editor meanwhile\n")
+    before = _everything(tmp_path)
+    with pytest.raises(PytError, match=rf"rename: {re.escape(changed)} changed after the rename was planned") as e:
+        rename.apply_plan(tmp_path, planned)
+    assert "The rename was undone" in str(e.value) and "run it again" in str(e.value), str(e.value)
+    assert _everything(tmp_path) == before  # the edit kept, every write undone, the folder back
+
+
 def test_a_file_that_never_names_the_app_is_only_searched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """plan() tokenized every Python file of src/ and tests/ and split every text file into lines
     three times, even one that never mentions the old name: a data asset of 100 MB (a level, a

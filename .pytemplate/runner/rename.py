@@ -1743,10 +1743,12 @@ def apply_plan(root: Path, plan_: Plan) -> None:
     for the undo (_undo_shield): it cut the undo short, and nothing said so."""
     from .cmd_install import _terminations_interrupt, _undo_shield  # the swap of `pyt install` uses the same
 
-    writes: list[tuple[Path, bytes]] = [(root / f.target, f.new) for f in plan_.changed_files]
+    # (path, new bytes, the text or bytes the plan read there): a file that no longer holds what was
+    # planned (an editor saved it meanwhile) is never overwritten
+    writes: list[tuple[Path, bytes, str | bytes]] = [(root / f.target, f.new, f.old) for f in plan_.changed_files]
     for edit in (plan_.config, plan_.pyproject):
         if edit is not None and edit.new != edit.old:
-            writes.append((root / edit.path, (("\ufeff" if edit.bom else "") + edit.new).encode("utf-8")))
+            writes.append((root / edit.path, (("\ufeff" if edit.bom else "") + edit.new).encode("utf-8"), edit.old))
     done: list[tuple[Path, bytes]] = []  # written, with their old bytes
     writing: tuple[Path, bytes] | None = None  # the write in progress
     moved = False
@@ -1755,11 +1757,21 @@ def apply_plan(root: Path, plan_: Plan) -> None:
             if plan_.move is not None:
                 _move_dir(root, *plan_.move)  # a PytError there: nothing was changed
                 moved = True
-            for path, data in writes:
-                writing = (path, path.read_bytes())
+            for path, data, planned in writes:
+                current = path.read_bytes()
+                if not _as_planned(current, planned):
+                    raise _ChangedSincePlan(path)
+                writing = (path, current)
                 _replace_bytes(path, data)
                 done.append(writing)
                 writing = None
+        except _ChangedSincePlan as e:
+            with _undo_shield():
+                undone = _undo(root, plan_, done, moved)
+            raise PytError(
+                f"rename: {e.path.relative_to(root).as_posix()} changed after the rename was planned (an editor saved it?), "
+                f"and is left as it is. {undone}.\n  Save your work, then run it again"
+            ) from None
         except OSError as e:
             with _undo_shield():
                 undone = _undo(root, plan_, done, moved)
@@ -1775,6 +1787,25 @@ def apply_plan(root: Path, plan_: Plan) -> None:
                 undone = _undo(root, plan_, [*done, *([writing] if writing else [])], moved)
             ui.error(f"rename: interrupted. {undone}")
             raise
+
+
+class _ChangedSincePlan(Exception):
+    """A file to write no longer holds what the plan read there (apply_plan)."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(str(path))
+        self.path = path
+
+
+def _as_planned(current: bytes, planned: str | bytes) -> bool:
+    """Whether a file's bytes are still what the plan read: the same bytes (src/, tests/), or the
+    same text (pytemplate.toml and pyproject.toml, planned as text without their BOM)."""
+    if isinstance(planned, bytes):
+        return current == planned
+    try:
+        return current.decode("utf-8-sig") == planned
+    except UnicodeDecodeError:
+        return False
 
 
 def _undo(root: Path, plan_: Plan, done: list[tuple[Path, bytes]], moved: bool) -> str:

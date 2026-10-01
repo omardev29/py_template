@@ -1334,7 +1334,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   back from the listing of src/, `_moved_to`, the temporary name of a case-only move included:
   `test_rename.test_an_interrupted_rename_is_undone`; another Ctrl+C waits for the undo,
   `cmd_install._undo_shield`, as for `pyt install`: it cut the undo short without a word,
-  `test_rename.test_a_second_ctrl_c_waits_for_the_undo`)), the name of the `applied` record right away
+  `test_rename.test_a_second_ctrl_c_waits_for_the_undo`); a file that no longer holds what the
+  plan read there, an edit saved after the plan (an editor's autosave while the ruff check ran),
+  stops it the same way, the edit kept (`_as_planned`, `_ChangedSincePlan`: it was overwritten,
+  `test_rename.test_a_file_edited_after_the_plan_is_never_overwritten`)), the name of the `applied` record right away
   (`cmd_apply.rename_record`, only the project's own record: named after the old app it is no
   longer trusted), the ruff tidy-up (before the re-lock, which can fail: below),
   `cmd_env.ensure_lock` (a failure there says "the files are already renamed ... ./pyt apply")
