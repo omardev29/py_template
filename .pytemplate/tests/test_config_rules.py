@@ -1319,6 +1319,32 @@ def test_new_refuses_an_empty_name(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert made == [] and not (tmp_path / "game").exists()
 
 
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_new_refuses_the_template_folder_whatever_spelling_names_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool) -> None:
+    """new compared realpath(DEST) with ROOT as strings: another spelling of the template's folder
+    (another case on macOS's case-insensitive volume, where ROOT keeps the case typed; a bind
+    mount) passed, and new made its project inside the template's work tree. A link stands in for
+    that other spelling here: ROOT names the folder through it, DEST through the folder itself."""
+    template = tmp_path / "template"
+    template.mkdir()
+    try:
+        (tmp_path / "Template").symlink_to(template, target_is_directory=True)
+    except OSError as e:  # Windows without the privilege to make links
+        pytest.skip(f"cannot make a symbolic link here: {e}")
+    monkeypatch.setattr(cmd_mode, "ROOT", tmp_path / "Template")
+    monkeypatch.setattr(proc, "DRY_RUN", dry_run)
+    made: list[str] = []
+    monkeypatch.setattr(presets, "new", lambda dest, preset, name, python=None: made.append(name))
+    monkeypatch.setattr(cmd_mode.envs, "ensure_python", lambda version: Path(sys.executable))
+    for dest in (template, template / "game", template / "deep" / "er" / "game"):
+        with pytest.raises(PytError) as info:
+            cmd_mode.cmd_new(config.load(set()), [str(dest), "--name", "game"])
+        assert "the destination folder cannot be inside" in str(info.value) and info.value.code == 2
+    assert made == [] and sorted(p.name for p in template.iterdir()) == []
+    assert not cmd_mode._inside_the_template(tmp_path / "elsewhere" / "game")
+    assert not cmd_mode._inside_the_template(tmp_path)
+
+
 def test_init_refuses_an_empty_name(dry: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`__init PRESET --name ""` (what `new` runs in the copy) planned the init under the current
     app name, and presets.new named the project after its folder: an empty name is no name, and

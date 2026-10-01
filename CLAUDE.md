@@ -3516,7 +3516,10 @@ Per method:
   below a file (`presets.check_destination`, in `cmd_mode.cmd_new` and its dry run too: Path.exists
   raised the PermissionError on Python 3.11-3.13, an internal-error traceback, 3.14 read the folder
   as missing and git's start said "cannot run git", and a path below a file got a bare `[Errno 20]
-  Not a directory`). On success it prints one hint (init prints none: it runs in the copy), `cd
+  Not a directory`), and a destination inside the template, whatever spelling names its folder
+  (`cmd_mode._inside_the_template`: each existing folder of it against ROOT with
+  `os.path.samefile`; as strings, another case on macOS or a bind mount passed, and new made its
+  project inside the template's work tree). On success it prints one hint (init prints none: it runs in the copy), `cd
   <dest>` and the launcher's `setup` on lines of their own, for the shell of the launcher
   (`presets.next_steps`: the `PYTEMPLATE_LAUNCHER` prefix `ps1:` (PowerShell single quotes;
   `cd -LiteralPath` for a path with `[ ] * ?` or a backtick, which its cd reads as a wildcard

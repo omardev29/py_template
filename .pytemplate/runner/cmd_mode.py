@@ -543,6 +543,24 @@ def _monorepo_note(dest: Path, top: Path) -> None:
     )
 
 
+def _inside_the_template(resolved: Path) -> bool:
+    """Whether `resolved` (a realpath) is the template's folder or lies inside it, whatever
+    spelling names that folder: realpath folds links only, and another case of its name (macOS's
+    case-insensitive volume, where ROOT keeps the case typed) or a bind mount of it named the
+    same folder by another string, so new made its project inside the template's work tree. Each
+    folder of it that exists is compared with ROOT itself (os.path.samefile, as hooks compares the
+    project's folder)."""
+    if resolved == ROOT or ROOT in resolved.parents:
+        return True
+    for folder in (resolved, *resolved.parents):
+        try:
+            if os.path.samefile(folder, ROOT):
+                return True
+        except OSError:  # the destination's tail, not made yet (or a folder it may not look into)
+            continue
+    return False
+
+
 def cmd_new(cfg: Config, args: list[str]) -> int:
     """new DIR [--preset P] [--name NAME]: copy the template to a new project."""
     from .cli import _prog  # `pyt` outside a project (global mode), where `new` runs too
@@ -556,7 +574,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
     # realpath, never Path.resolve: on Python 3.11 and 3.12 (new runs on any 3.11+) resolve raises
     # RuntimeError for a link loop, an internal error; check_destination names it below
     resolved = Path(os.path.realpath(dest))
-    if resolved == ROOT or ROOT in resolved.parents:
+    if _inside_the_template(resolved):
         raise PytError(f"new: the destination folder cannot be inside {presets.source_name()}")
     presets.check_destination(dest, "new: ")
     # Checked here, before copying (and under --dry-run): a copy whose `init` fails is removed.
