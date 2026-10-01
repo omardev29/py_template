@@ -305,7 +305,12 @@ def install_deps(cfg: Config, backend: str, target: Target, dest: Path, requirem
     own = "pp" if backend == "pypy" else "cp"
     env = envs.runtime_env(cfg, backend) if target.impl == own else envs.tool_env(cfg)
     extra_env = {"MACOSX_DEPLOYMENT_TARGET": _macos_floor()} if target.os == "macos" else {}
-    base: list[str | Path] = ["pip", "install", "--quiet", "--target", dest, "--no-deps", "-r", pylock_path(requirements)]
+    # --link-mode copy: `dest` is shipped (a portable lib/, a pyz's sites). uv links the files of
+    # its cache by default (hardlinks on Linux and Windows) and follows the user's link mode
+    # (UV_LINK_MODE, uv.toml, [tool.uv] link-mode): with "symlink" every file of lib/ was an
+    # absolute link into this machine's cache, and the folder and its archive failed anywhere
+    # else (or after `uv cache clean`) while the build passed its own smoke test
+    base: list[str | Path] = ["pip", "install", "--quiet", "--link-mode", "copy", "--target", dest, "--no-deps", "-r", pylock_path(requirements)]
     if not target.is_host:
         # Wheels only: an sdist built here for another OS gives this machine's binaries. Except
         # the packages that publish no wheel at all (docopt, a workspace library): built here,

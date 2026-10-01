@@ -2660,7 +2660,9 @@ Formats:
   `requirements_digest` still read the requirements.txt. uv writes the pylock's relative paths
   (a local library) from the project, and reads them from the file's folder:
   `common._rebase_paths` moves them (15.1).
-- `common.install_deps` (`uv pip install --target --no-deps -r <pylock.toml>`): a cross target gets
+- `common.install_deps` (`uv pip install --link-mode copy --target --no-deps -r <pylock.toml>`:
+  the folder is shipped, so its files are copies, never links into uv's cache, whatever link mode
+  the user set, 15.1): a cross target gets
   `--python-platform UV_PLATFORMS[...] --python-version --only-binary :all:` (an sdist built for
   another OS would produce host binaries), plus `--no-binary <name>` for each package uv.lock has
   no wheel for (`common.source_only`, read from `common.LOCK`: an sdist-only release such as
@@ -5014,6 +5016,16 @@ uv:
   `test_install_deps_drops_the_data_scripts_uv_pointed_at_this_machine`,
   `test_install_junk_drops_the_build_machines_path_of_a_local_library`. Goes: the `.lock` part
   when uv removes it; the rest never.
+- **`uv pip install --target` links the files of uv's cache, the user's way** (LIMITATION,
+  documented: `link-mode`, hardlinks by default on Linux and Windows, `symlink` discouraged): with
+  the user's `link-mode = "symlink"` (`UV_LINK_MODE`, their `uv.toml`, the project's `[tool.uv]`)
+  every file of a portable `lib/` was an absolute link into this machine's cache, and the folder
+  and its archive died with ModuleNotFoundError anywhere else (or after `uv cache clean`) while the
+  build passed its smoke test and said done. Fix: `common.install_deps` passes `--link-mode copy`
+  (10); `.venv`, which exe and nuitka read, keeps the user's mode (PyInstaller and Nuitka copy
+  what a link names outside their output). Test:
+  `test_build_methods.py::test_the_dependencies_a_build_ships_are_copies_whatever_the_users_link_mode`
+  (the real uv, offline). Goes: never.
 - **A requirements.txt export keeps no index, and uv pip reads no `[tool.uv.sources]`**
   (LIMITATION): a package uv.lock takes from an `explicit = true` index (`{ index = "name" }`: a
   private index, PyTorch's) was looked for on the other indexes by `uv pip install -r`, and every

@@ -959,10 +959,11 @@ A folder that runs the app with its own interpreter:
   `src/` or a dependency imports `tkinter` (`prune = false` keeps it for an app that loads it
   another way).
 - `lib/`: the dependencies at the versions of `uv.lock`, local libraries
-  (`./pyt add ./libs/x`) included; they win over packages installed in a Python. Only the app's
-  own (`[project] dependencies` and what they need): no dependency group, neither dev nor one
-  that `[tool.uv] default-groups` installs in the environments, reaches `lib/`, a pyz or a
-  `flet build`.
+  (`./pyt add ./libs/x`) included; they win over packages installed in a Python. They are copies,
+  whatever `link-mode` you gave uv (`symlink` would leave links into this machine's uv cache).
+  Only the app's own (`[project] dependencies` and what they need): no dependency group, neither
+  dev nor one that `[tool.uv] default-groups` installs in the environments, reaches `lib/`, a pyz
+  or a `flet build`.
 - `app/`: the app (with mypyc, the compiled modules next to their `.py`), and `boot.py`.
 - `<name>.cmd` (a Windows build) or `<name>.sh` (Linux, macOS): run it from any folder (the `.sh`
   also through a symlink); the arguments reach the app and its exit code comes back. They run

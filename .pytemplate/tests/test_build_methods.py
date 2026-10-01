@@ -3088,6 +3088,38 @@ def test_pyz_and_portable_install_a_package_of_an_explicit_index(tmp_path: Path,
         assert common.installed(site) == {("ptdemo", "1.0")}, target.key
 
 
+@pytest.mark.parametrize("link_mode", ["UV_LINK_MODE", "[tool.uv]", "uv.toml", "uv's default"])
+def test_the_dependencies_a_build_ships_are_copies_whatever_the_users_link_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link_mode: str) -> None:
+    # uv links the files of its cache into a --target install (hardlinks on Linux and Windows)
+    # and follows the user's link mode: with link-mode = "symlink" (UV_LINK_MODE, the user's
+    # uv.toml or the project's [tool.uv]) every file of a portable lib/ was an absolute link into
+    # this machine's uv cache, and the folder and its .tar.gz died with ModuleNotFoundError
+    # anywhere else (or after `uv cache clean`) while the build passed its smoke test and said
+    # done. The real uv, offline: a flat index of one wheel
+    requirements = _explicit_index_project(tmp_path, monkeypatch, {"ptdemo": "py3-none-any"})
+    config = tmp_path / "config"
+    (config / "uv").mkdir(parents=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))  # no user uv.toml of this machine's
+    monkeypatch.setenv("APPDATA", str(config))  # (uv's user config folder on Windows)
+    monkeypatch.delenv("UV_LINK_MODE", raising=False)
+    if link_mode == "UV_LINK_MODE":
+        monkeypatch.setenv("UV_LINK_MODE", "symlink")
+    elif link_mode == "uv.toml":
+        (config / "uv" / "uv.toml").write_text('link-mode = "symlink"\n', encoding="utf-8")
+    elif link_mode == "[tool.uv]":
+        pyproject = proc.ROOT / "pyproject.toml"  # the scratch project's, uv's working folder
+        pyproject.write_text(pyproject.read_text(encoding="utf-8") + '\n[tool.uv]\nlink-mode = "symlink"\n', encoding="utf-8")
+    host = common.Target("cp", 3, 14, common.host_os(), common.host_arch())
+    cross = common.parse_key(WIN if common.host_os() != "windows" else LINUX)
+    for target in (host, cross):
+        site = common.install_deps(make({}), "cpython", target, tmp_path / "site" / target.key, requirements)
+        assert common.installed(site) == {("ptdemo", "1.0")}, target.key
+        files = [p for p in site.rglob("*") if not p.is_dir()]
+        assert site / "ptdemo" / "__init__.py" in files
+        assert not [p for p in files if p.is_symlink()], target.key  # a link dies with the cache
+        assert not [p for p in files if p.stat().st_nlink > 1], target.key  # nothing shared with uv's cache
+
+
 def test_the_pylock_export_names_local_libraries_from_its_own_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # uv writes a pylock.toml's relative paths from the project folder but reads them, as PEP 751
     # says, from the file's own folder: .build/deploy/pylock.toml named .build/deploy/libs/mylib
