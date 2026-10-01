@@ -2555,8 +2555,11 @@ Formats:
   `--target-version py3XX` syntax rules (exit 1 = findings; any other code = "could not run
   ruff"), then the mypy errors that appear only as that version and not as `python.cpython`
   (`PRECHECK_MYPY_FLAGS`: `--config-file=` so the project's `.mypy.ini` is never read,
-  where the default `off` profile sets `ignore_errors`, and `--check-untyped-defs`); a mypy
-  abort (exit 2) is a `PytError` with mypy's output, never a silent pass. Both tools get the
+  where the default `off` profile sets `ignore_errors`, and `--check-untyped-defs`), compared by
+  place and error code (`cmd_mode.precheck_key`: typeshed words the same error per version,
+  `int()` of a `str | None` lists SupportsTrunc as 3.11 only, and by its whole text valid 3.11
+  code was refused; `test_mypyc_core.test_precheck_real_mypy_passes_an_error_typeshed_words_per_version`);
+  a mypy abort (exit 2) is a `PytError` with mypy's output, never a silent pass. Both tools get the
   code folders that hold Python files (`render._holds_python`, as `.mypy.ini`'s `files`: a
   tests/ left with only `__pycache__` stopped mypy with "There are no .py[i] files"); with none,
   there is nothing to check.

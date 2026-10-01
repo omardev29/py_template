@@ -225,6 +225,43 @@ def test_precheck_reports_only_the_errors_new_at_311(monkeypatch: pytest.MonkeyP
     assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
 
 
+def test_precheck_compares_the_errors_by_place_and_code_never_by_wording(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """typeshed words the same error differently for each version: int() of a `str | None` lists
+    SupportsTrunc as 3.11 only. Compared by its whole text, the error was "new at 3.11", and PyPy
+    could not be enabled for valid 3.11 code (`int(os.environ.get("PORT"))`, common in untyped
+    code under the default `off` profile). An error is new only when its place and code are."""
+    at_311 = 'src/myapp/s.py:7: error: Argument 1 to "int" has incompatible type "str | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"  [arg-type]'
+    at_314 = 'src/myapp/s.py:7: error: Argument 1 to "int" has incompatible type "str | None"; expected "str | Buffer | SupportsInt | SupportsIndex"  [arg-type]'
+    FakeTools(mypy={"3.11": (1, at_311 + "\n"), "3.14": (1, at_314 + "\n")}).install(monkeypatch)
+    cmd_mode._precheck_py311(make({"python": {"cpython": "3.14"}}))
+    assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
+    # another error on the same line (another code) is still new; so is the same code elsewhere
+    other = 'src/myapp/s.py:7: error: Module "typing" has no attribute "override"  [attr-defined]'
+    moved = at_311.replace("s.py:7:", "s.py:8:")
+    FakeTools(mypy={"3.11": (1, f"{at_311}\n{other}\n{moved}\n"), "3.14": (1, at_314 + "\n")}).install(monkeypatch)
+    with pytest.raises(PytError, match="APIs that do not exist in Python 3.11"):
+        cmd_mode._precheck_py311(make({"python": {"cpython": "3.14"}}))
+    err = capsys.readouterr().err
+    assert f"error: {other}" in err and f"error: {moved}" in err and f"error: {at_311}" not in err
+    assert cmd_mode.precheck_key(at_311) == cmd_mode.precheck_key(at_314) == ("src/myapp/s.py:7", "arg-type")
+    assert cmd_mode.precheck_key("src/a.py:1: error: Name 'x' is not defined") == ("src/a.py:1", "")
+
+
+@needs_venv
+def test_precheck_real_mypy_passes_an_error_typeshed_words_per_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real mypy of .venv: `int(os.environ.get("PORT"))` runs on PyPy 3.11, and its type
+    error, worded per version, is no API that 3.11 lacks."""
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "settings.py").write_text('import os\n\n\ndef port():\n    return int(os.environ.get("PORT"))\n', encoding="utf-8")
+    monkeypatch.setattr(cmd_mode, "code_dirs", lambda: [str(code)])
+    monkeypatch.setattr(proc, "DRY_RUN", True)  # uv run --no-sync: .venv is never touched
+    cmd_mode._precheck_py311(real({}))
+    assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
+
+
 def test_precheck_checks_only_the_code_folders_that_hold_python(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

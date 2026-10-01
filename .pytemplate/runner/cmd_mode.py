@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import tomllib
 from pathlib import Path
@@ -141,6 +142,14 @@ PRECHECK_MYPY_FLAGS = (
 )
 
 
+def precheck_key(line: str) -> tuple[str, str]:
+    """A mypy error line (`path:line: error: message  [code]`) by what no typeshed wording
+    changes: its place and its error code ("" for an error without one)."""
+    where = line.split(": error:", 1)[0]
+    code = re.search(r"\[([A-Za-z0-9_-]+)\]\s*$", line)
+    return where, code.group(1) if code else ""
+
+
 def _precheck_py311(cfg: Config) -> None:
     """Check that the code is valid on the pinned PyPy's Python (python.pypy: 3.11 by default,
     hence the name) before adding PyPy support.
@@ -186,7 +195,9 @@ def _precheck_py311(cfg: Config) -> None:
         raise PytError(f"could not run ruff for the Python {version} check (exit code {r.returncode}, see above)")
 
     # 2) APIs: mypy errors that appear ONLY when checking as that version (e.g. typing.override)
-    def mypy_errors(version: str) -> set[str]:
+    def mypy_errors(version: str) -> dict[tuple[str, str], str]:
+        """The error lines, by place and code (precheck_key): typeshed words the same error
+        differently for each version (int(str | None) lists SupportsTrunc as 3.11 only)."""
         argv = [
             *run, "mypy", *PRECHECK_MYPY_FLAGS,
             "--python-version", version, "--python-executable", str(tool.python), *dirs,
@@ -195,9 +206,15 @@ def _precheck_py311(cfg: Config) -> None:
         if r.returncode not in (0, 1):  # 2 = mypy (or uv starting it) aborted: nothing was checked
             ui.report(((r.stdout or "") + (r.stderr or "")).rstrip())  # why: shown even with -q
             raise PytError(f"mypy could not check the code as Python {version} (exit code {r.returncode}, see above)")
-        return {ln.strip() for ln in (r.stdout or "").splitlines() if ": error:" in ln}
+        errors: dict[tuple[str, str], str] = {}
+        for ln in (r.stdout or "").splitlines():
+            if ": error:" in ln:
+                errors.setdefault(precheck_key(ln.strip()), ln.strip())
+        return errors
 
-    new = sorted(mypy_errors(version) - mypy_errors(cfg.python.cpython))
+    at_version = mypy_errors(version)
+    at_cpython = mypy_errors(cfg.python.cpython)
+    new = sorted(line for key, line in at_version.items() if key not in at_cpython)
     if new:
         for line in new:
             ui.error(line)
