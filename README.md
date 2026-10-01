@@ -1510,7 +1510,9 @@ is typed the same way everywhere:
 Editors do not depend on the shell: VS Code tasks run `/bin/sh pyt` (`pyt.cmd` on
 Windows) and Neovim runs uv directly. The launchers ignore a `UV_PYTHON`, `PYTHONHOME`,
 `PYTHONPATH` or `UV_WORKING_DIR` you export: the runner always runs on the project's
-`python.cpython`, in the folder where the command was typed. `./pyt` works under a caller's `set -eu`.
+`python.cpython`, in the folder where the command was typed. The programs it starts by name (git,
+nvim, PowerShell) come from PATH, never from that folder, which Windows otherwise searches first.
+`./pyt` works under a caller's `set -eu`.
 `./pyt doctor` shows which launcher started it and checks that the launchers kept their line
 endings and executable bit.
 

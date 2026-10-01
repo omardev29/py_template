@@ -673,7 +673,7 @@ def _home_flutter() -> Path | None:
 
 
 def flet_build_reason(os_name: str) -> str:
-    flutter = shutil.which("flutter") or _home_flutter()
+    flutter = proc.find_program("flutter") or _home_flutter()
     if not flutter:
         return "needs the Flutter SDK (flet build installs ~3 GB): not in PATH or ~/flutter"
     if os_name == "windows":
@@ -690,7 +690,7 @@ def detect_host(gui: str) -> Host:
     wrap: tuple[str, ...] = ()
     headless_linux = os_name == "linux" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if gui != "off" and headless_linux:
-        xvfb = shutil.which("xvfb-run")
+        xvfb = proc.find_program("xvfb-run")
         if xvfb:
             wrap = (xvfb, "-a", "-s", "-screen 0 1280x720x24")  # depth 24: GLX has no 8-bit visuals
         elif gui == "auto":
@@ -714,14 +714,14 @@ def child_env(base: Path) -> dict[str, str]:
     env = scrub_env(os.environ, own)
     uv_dir = str(Path(proc.find_uv()).parent)
     key = next((k for k in env if k.upper() == "PATH"), "PATH")
-    if not shutil.which("uv", path=env.get(key, "")):
+    if not proc.find_program("uv", path=env.get(key, "")):
         env[key] = os.pathsep.join(p for p in (uv_dir, env.get(key, "")) if p)
     isolate_git(env, base)
     return env
 
 
 def _git_top(env: Mapping[str, str]) -> str:
-    git = shutil.which("git")
+    git = proc.find_program("git")
     if git is None:
         return ""
     try:
@@ -807,7 +807,7 @@ def kill_tree(child: subprocess.Popen[bytes]) -> None:
     if child.poll() is not None:
         return
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(child.pid)], stdin=subprocess.DEVNULL, capture_output=True, check=False)
+        proc.taskkill(child.pid)
     else:
         import signal
 
@@ -836,7 +836,8 @@ def run_logged(argv: Sequence[str], cwd: Path, env: Mapping[str, str], log: Path
         with log.open("ab") as err, out_path.open("w+b") as out:
             err.write(f"$ {proc.show(list(argv))}\n  (in {cwd})\n".encode())
             err.flush()
-            child = subprocess.Popen(list(argv), cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=not IS_WINDOWS)
+            program = proc.program(argv[0])  # Windows: a bare name (cmd.exe, git), never from the caller's folder
+            child = subprocess.Popen([program, *argv[1:]], cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=not IS_WINDOWS)
             end = "interrupted"
             try:
                 code = child.wait(timeout=timeout)
@@ -884,7 +885,7 @@ def _log_note(log: Path, text: str) -> None:
 
 
 def _git(ctx: Context, log: Path, timeout: float, *args: str) -> tuple[int | None, str]:
-    git = shutil.which("git") or "git"
+    git = proc.find_program("git") or "git"
     return run_logged([git, *args], ctx.project, ctx.env, log, timeout)
 
 
@@ -920,7 +921,7 @@ def do_verify(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
                 problems.append(f"copied {name}/")
     if not (p / "pyt").is_file():
         problems.append("no ./pyt launcher")
-    git = shutil.which("git")
+    git = proc.find_program("git")
     if git is None:
         notes.append("git not found: the repository and the exec bits are not checked")
     elif not (p / ".git").exists():
@@ -945,7 +946,7 @@ def do_commit(ctx: Context, step: Step, log: Path) -> tuple[str, str]:
     commit fails (the step before changed nothing), except a first commit under --reuse."""
     from .hooks import HOOK, MARKER as HOOK_MARKER
 
-    if shutil.which("git") is None:
+    if proc.find_program("git") is None:
         return SKIP, "git not found"
     if not (ctx.project / ".git").exists():
         return FAIL, "no git repository"

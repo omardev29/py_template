@@ -1088,7 +1088,7 @@ def _git_files(*args: str) -> list[str] | None:
     tree, or when git refuses the repository (_git_refused then says why)."""
     global _git_refused, _git_refused_fix
     _git_refused = _git_refused_fix = ""
-    git = shutil.which("git")
+    git = proc.find_program("git")
     if git is None:
         return None
     env = {**_git_env(), "LC_ALL": "C"}  # git's messages in English: "not a git repository"
@@ -1141,7 +1141,7 @@ def _tracked_template() -> tuple[list[str] | None, str]:
         return None, "every file, ignored ones included: git does not track this project's files (never committed?)"
     if _git_refused:
         return None, "every file, ignored ones included: git refuses to read this repository"
-    return None, "every file, ignored ones included: " + ("git not found" if shutil.which("git") is None else "not a git work tree")
+    return None, "every file, ignored ones included: " + ("git not found" if proc.find_program("git") is None else "not a git work tree")
 
 
 def _warn_refused(verb: str) -> None:
@@ -1285,7 +1285,7 @@ def _git_init(dest: Path) -> None:
     later `git add` would record them as 100644, and the pre-commit hook refuses that. A work
     tree that ignores the project (ignored_by_work_tree) does not count: the project got no
     repository at all there, and setup then said to `git init` it."""
-    git = shutil.which("git")
+    git = proc.find_program("git")
     if git is None:
         ui.info("  git not found: the project is not a git repository (later: git init -b main)")
         return

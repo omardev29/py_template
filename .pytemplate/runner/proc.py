@@ -85,10 +85,112 @@ def find_uv() -> str:
     uv = os.environ.get("UV")
     if uv and Path(uv).is_file():
         return uv
-    found = shutil.which("uv")
+    found = find_program("uv")
     if not found:
         raise PytError("uv not found in PATH", 3)
     return found
+
+
+# --- programs by name: never from the caller's folder (CLAUDE.md 15.1) ---------------------------
+#
+# The runner's current folder is the caller's (the launchers never cd; uv run --script and
+# cli._restart keep it). On Windows both lookups of a bare name searched it before PATH:
+# shutil.which inserts the current folder first (always on Python 3.11; on 3.12+ unless
+# NoDefaultCurrentDirectoryInExePath is set) and returns the relative .\git.BAT it finds there,
+# and CreateProcess, which subprocess hands a bare name (lpApplicationName = NULL), looks in the
+# folder of the runner's python.exe and the parent's current folder before the system folders
+# and PATH. A git, nvim, powershell or uv any other user could leave in the folder `pyt new` or
+# `pyt doctor` was typed in (a folder under C:\ is writable by every authenticated user by
+# default) ran with the caller's rights.
+
+# Windows' default PATHEXT, as tasks and the launchers read it when the variable is not set
+_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+
+
+def _absolute(entry: str) -> bool:
+    """A PATH entry that names one folder wherever the runner runs. On Windows only one with a
+    drive or a share (C:\\x, \\\\server\\share\\x): a root-relative \\bin is at the root of the
+    current drive, which any user may create, and C:bin is relative to that drive's own current
+    folder (ntpath.isabs called \\bin absolute before Python 3.13)."""
+    return os.path.isabs(entry) and (bool(os.path.splitdrive(entry)[0]) or os.sep == "/")
+
+
+def on_path(program: str, path: str, pathext: str = "", relative_to: Path | None = None) -> str | None:
+    """The file a bare `program` names in the folders of `path` (a PATH value), with Windows'
+    extensions: those of `pathext` (default .COM;.EXE;.BAT;.CMD) after a name without one of
+    them, a name that has one as it is, a name with another extension (gen.py) as it is after
+    them. Never the current folder: a relative entry is joined to `relative_to` (a task's PATH:
+    its cwd, as execvp reads it after the child's chdir on POSIX) and skipped without it, and
+    so is an entry rooted at the current drive (_absolute). An absolute path, or None."""
+    exts = [e for e in (pathext or _PATHEXT).split(";") if e]
+    ext = os.path.splitext(program)[1].lower()
+    has_ext = ext in {e.lower() for e in exts}
+    names = [program] if has_ext else [program + e for e in exts]
+    if ext and not has_ext:  # as CreateProcess takes it: gen.py is found, and then cannot start (and says so)
+        names.append(program)
+    for entry in path.split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if not entry:
+            continue
+        if not _absolute(entry):
+            if relative_to is None or os.path.splitdrive(entry)[0] or entry.startswith(("\\", "/")):
+                continue
+            entry = os.path.join(relative_to, entry)
+        for name in names:
+            candidate = os.path.join(entry, name)
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+    return None
+
+
+def _has_folder(name: str) -> bool:
+    """Whether a Windows program name holds a folder (or a drive), so no search applies to it."""
+    return any(c in name for c in "\\/:")
+
+
+def find_program(name: str, path: str | None = None) -> str | None:
+    """Where the program `name` is on PATH (`path`, default this process's own PATH), as
+    shutil.which finds it, but on Windows never in the current folder: an answer there that is
+    no absolute path (the current folder, which it searches first, or an empty or relative PATH
+    entry, which name it too) is searched again with on_path, which skips them. Elsewhere
+    shutil.which's answer (a relative PATH entry is the user's own choice there, as for every
+    program they start)."""
+    found = shutil.which(name) if path is None else shutil.which(name, path=path)
+    if found is None or not IS_WINDOWS or _absolute(found) or _has_folder(name):
+        return found
+    return on_path(name, os.environ.get("PATH", "") if path is None else path, os.environ.get("PATHEXT", ""))
+
+
+def windows_program(name: str) -> str | None:
+    """The program CreateProcess runs for a bare `name` (lpApplicationName = NULL), found without
+    the first two places it searches, the folder of the runner's own python.exe and the runner's
+    current folder (the caller's): the system folders, then this process's PATH (CreateProcess
+    reads the parent's, never the child's), `.exe` added to a name without an extension. An
+    absolute path, or None."""
+    exe = name if os.path.splitext(name)[1] else name + ".exe"
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") or ""
+    system = [os.path.join(root, "System32"), os.path.join(root, "System"), root] if root else []
+    return on_path(exe, os.pathsep.join([*system, os.environ.get("PATH", "")]), os.path.splitext(exe)[1])
+
+
+def program(name: str) -> str:
+    """argv[0] as the runner hands it to the system: on Windows a bare name becomes the program
+    windows_program finds (not found: PytError 3, never a bare name CreateProcess would look for
+    in the caller's folder); anything else as it is."""
+    if not IS_WINDOWS or _has_folder(name):
+        return name
+    found = windows_program(name)
+    if found is None:
+        raise PytError(f"program not found: {name}", 3)
+    return found
+
+
+def taskkill(pid: int) -> None:
+    """Windows: end process `pid` and every process it started (taskkill /F /T follows the
+    parent links), with the taskkill of the system folders: never one in the caller's folder."""
+    exe = windows_program("taskkill")
+    if exe is not None:
+        subprocess.run([exe, "/F", "/T", "/PID", str(pid)], stdin=subprocess.DEVNULL, capture_output=True, check=False)
 
 
 def vs_installer_dir() -> Path | None:
@@ -247,7 +349,7 @@ def _not_found(program: str, workdir: Path, env: Mapping[str, str]) -> str:
     if os.path.dirname(program):  # a path: exec resolves it in the working folder
         path: Path | None = workdir / program
     else:  # a name: exec searches the child's PATH
-        found = shutil.which(program, path=env.get("PATH", os.defpath))
+        found = find_program(program, path=env.get("PATH", os.defpath))
         path = Path(found) if found else None
     if path is None or not path.is_file():
         return missing
@@ -308,6 +410,7 @@ def run(
       Interrupted stops the command. SIGTERM/SIGHUP (POSIX): passed on to the child, the same.
     - A missing working folder or one it cannot enter, a missing program or one that cannot be
       started (no exec bit, no #! line, a folder) are PytErrors, never tracebacks.
+    - Windows: a bare program name is looked up without the caller's folder (program()).
     """
     args = [str(a) for a in argv]
     where = f"   (in {rel(cwd)})" if cwd is not None and cwd.resolve() != ROOT else ""
@@ -323,6 +426,7 @@ def run(
         # the cwd on POSIX, and Windows raises NotADirectoryError for it)
         what = "not a folder" if workdir.exists() else "folder not found"
         raise PytError(f"{what}: {rel(workdir)}  (the working folder of {show(args[:1])})")
+    args[0] = program(args[0])  # Windows: a bare name, never from the caller's folder
     pipe = subprocess.PIPE if capture else None
     child_env = dict(env) if env is not None else base_env()
     with _wait_through_signals() as waiter:

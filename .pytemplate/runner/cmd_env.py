@@ -126,14 +126,15 @@ def _fix_exec_bit() -> None:
                         # record; `sh ./pyt` works without the bit
                         ui.warn(f"cannot make {launcher} executable: {e.strerror or e}. Its owner can: chmod +x {launcher}")
     # rev-parse, not ROOT/.git: the project may live in a subfolder of a bigger repository
-    if not shutil.which("git"):
+    git = proc.find_program("git")
+    if not git:
         return
-    if proc.run(["git", "rev-parse", "--is-inside-work-tree"], capture=True, check=False, echo=False).returncode != 0:
+    if proc.run([git, "rev-parse", "--is-inside-work-tree"], capture=True, check=False, echo=False).returncode != 0:
         return
     for launcher in LAUNCHERS_X:
-        r = proc.run(["git", "ls-files", "-s", launcher], capture=True, check=False, echo=False)
+        r = proc.run([git, "ls-files", "-s", launcher], capture=True, check=False, echo=False)
         if r.stdout.startswith("100644"):
-            proc.run(["git", "update-index", "--chmod=+x", launcher], check=False)
+            proc.run([git, "update-index", "--chmod=+x", launcher], check=False)
 
 
 def cmd_sync(cfg: Config, args: list[str]) -> int:
@@ -478,7 +479,7 @@ def _c_compiler(platform: str = "", cc: str = "") -> tuple[bool, str]:
         words = []
     if not words:
         return False, f"no C compiler ({source})"
-    found = shutil.which(words[0])  # "ccache gcc" runs ccache
+    found = proc.find_program(words[0])  # "ccache gcc" runs ccache
     if not found:
         return False, f"{words[0]} not found ({source})"
     if IS_MACOS and os.path.dirname(found) == "/usr/bin":
@@ -537,7 +538,7 @@ def _machine(check: Check, python: Path | None = None) -> None:
     """doctor outside a project: git, the C compiler mypyc would use, the launcher of this run and
     the shell. What is missing is a note: uv is the one requirement of every project, and a
     project's own doctor says what that project needs."""
-    git = shutil.which("git")
+    git = proc.find_program("git")
     if git:
         version = proc.run([git, "--version"], capture=True, check=False, echo=False).stdout.strip()
         check(True, f"git: {version or 'found'} ({git})")

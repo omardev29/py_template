@@ -332,7 +332,7 @@ def read_record(snapshot: Path | None) -> dict[str, object] | None:
 
 def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
     """git in the template (no optional locks: a status must not write the index); None without git."""
-    git = shutil.which("git")
+    git = proc.find_program("git")
     if git is None:
         return None
     env = {**presets._git_env(), "LC_ALL": "C"}

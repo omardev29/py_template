@@ -73,7 +73,6 @@ import functools
 import importlib.util
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -130,7 +129,7 @@ def git_missing_here(project: Path = ROOT) -> bool:
     repository: the hook can be neither checked nor installed nor removed (GitHub Desktop, Fork
     and SourceTree bring a git of their own, often not on PATH). apply said "not a git work
     tree: nothing to do" and doctor called hooks.pre_commit applied."""
-    return shutil.which("git") is None and any((d / ".git").exists() for d in (project, *project.parents))
+    return proc.find_program("git") is None and any((d / ".git").exists() for d in (project, *project.parents))
 
 
 # --- the repository ------------------------------------------------------------------------------
@@ -189,7 +188,8 @@ def _run_bytes(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], data: 
     need both."""
     ui.detail("$ " + proc.show(argv))
     try:
-        return subprocess.run(list(argv), cwd=cwd, env=dict(env), input=data, capture_output=True, check=False)
+        # Windows: a bare name, never from the folder the commit was made in (proc.program)
+        return subprocess.run([proc.program(argv[0]), *argv[1:]], cwd=cwd, env=dict(env), input=data, capture_output=True, check=False)
     except OSError as e:
         raise PytError(f"cannot run {argv[0]}: {e}", 3) from None
 
@@ -290,7 +290,7 @@ def find_repo(project: Path = ROOT, environ: Mapping[str, str] | None = None, cw
     """Return the git repository of `project`. NotInGit when git is missing (3) or the project
     is not inside a git work tree (2); PytError with git's own message for any other git
     failure (dubious ownership, a broken .git...)."""
-    if shutil.which("git") is None:
+    if proc.find_program("git") is None:
         raise NotInGit(NO_GIT, 3)
     source = os.environ if environ is None else environ
     env = _found_from(project, git_env(source, cwd or Path(os.getcwd())), source)

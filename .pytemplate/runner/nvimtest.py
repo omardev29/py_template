@@ -245,7 +245,7 @@ def kill_tree(p: subprocess.Popen[bytes], grace: float = KILL_GRACE) -> None:
     own sessions), and SIGKILL after `grace` seconds.
     """
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True, check=False)
+        proc.taskkill(p.pid)
     else:
         try:
             os.killpg(p.pid, signal.SIGTERM)
@@ -297,7 +297,7 @@ def _run_logged(
     with log.open("w", encoding="utf-8", errors="replace") as out:
         try:
             p = subprocess.Popen(
-                args, cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                [proc.program(args[0]), *args[1:]], cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                 start_new_session=not IS_WINDOWS,
             )  # fmt: skip
         except FileNotFoundError:

@@ -264,7 +264,7 @@ def parse_diff(text: str) -> dict[str, set[int]]:
 
 
 def _git(root: Path, env: Mapping[str, str], *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
-    git = shutil.which("git")
+    git = proc.find_program("git")
     if git is None:
         raise PytError("selftest --mutation needs git: its workers are git repositories, and --diff asks git", 3)
     try:
@@ -916,7 +916,7 @@ def descendants(pid: int) -> list[int]:
             if len(fields) > 1 and fields[1].isdigit():
                 children.setdefault(int(fields[1]), []).append(int(name))
     else:
-        ps = shutil.which("ps")
+        ps = proc.find_program("ps")
         try:
             out = b"" if ps is None else subprocess.run([ps, "-A", "-o", "pid=", "-o", "ppid="], stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=30).stdout
         except (OSError, subprocess.TimeoutExpired):

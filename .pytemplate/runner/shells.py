@@ -103,9 +103,10 @@ _FIX_ASCII = "Keep the launchers ASCII-only: cmd, sh and Windows PowerShell 5.1 
 
 def _git_modes(names: Sequence[str]) -> dict[str, str]:
     """Return the git index mode of each launcher (missing: untracked, or not a git checkout)."""
-    if not shutil.which("git"):
+    git = proc.find_program("git")
+    if not git:
         return {}
-    r = proc.run(["git", "ls-files", "-s", "--", *names], capture=True, check=False, echo=False)
+    r = proc.run([git, "ls-files", "-s", "--", *names], capture=True, check=False, echo=False)
     modes: dict[str, str] = {}
     if r.returncode == 0:
         for line in r.stdout.splitlines():
@@ -175,7 +176,7 @@ def _ps_policies() -> list[tuple[str, str, str]]:
     policy a new window gets. A session started with -ExecutionPolicy X (a way around a blocked
     pyt.ps1, the VS Code PowerShell console) hands its children PSExecutionPolicyPreference=X, its
     Process scope, which then won over a Restricted CurrentUser or LocalMachine policy."""
-    found = [(label, edition, exe) for label, edition, name in PS_EDITIONS if (exe := shutil.which(name))]
+    found = [(label, edition, exe) for label, edition, name in PS_EDITIONS if (exe := proc.find_program(name))]
     env = {k: v for k, v in os.environ.items() if k.upper() != "PSEXECUTIONPOLICYPREFERENCE"}
 
     def policy(exe: str) -> str:
@@ -222,7 +223,7 @@ def doctor(check: Check, *, in_project: bool = True) -> None:
         return  # the shell checks are Windows' (the bash stub, execution policies) and WSL's
     ui.step("shell")
     if IS_WINDOWS:
-        bash = shutil.which("bash") or ""
+        bash = proc.find_program("bash") or ""
         if "system32" in bash.lower():
             check(
                 None,
@@ -504,7 +505,7 @@ def discover(
     path = env.get("PATH") or env.get("Path")
 
     def default_which(name: str) -> str | None:
-        return shutil.which(name, path=path)
+        return proc.find_program(name, path=path)
 
     finder = which or default_which
     return _discover_windows(env, finder, standard, distros) if windows else _discover_posix(finder)
@@ -806,7 +807,7 @@ class Context:
 def _kill(p: subprocess.Popen[bytes]) -> None:
     """Kill a probe and everything it started (uv, python)."""
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True, check=False)
+        proc.taskkill(p.pid)
     else:
         try:
             os.killpg(p.pid, signal.SIGKILL)

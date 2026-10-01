@@ -39,7 +39,6 @@ import http.client
 import io
 import os
 import shlex
-import shutil
 import subprocess
 import tarfile
 import urllib.request
@@ -218,11 +217,9 @@ def locate(cfg: Config) -> Path | None:
         return path
     env = proc.base_env()
     if IS_WINDOWS:  # shutil.which searches the current folder first there: the caller's, never PATH
-        from .tasks import _on_windows_path
-
-        on_path = _on_windows_path("upx", env, Path.cwd())
+        on_path = proc.on_path("upx", env.get("PATH", ""), env.get("PATHEXT", ""))
     else:
-        on_path = shutil.which("upx", path=env.get("PATH"))
+        on_path = proc.find_program("upx", path=env.get("PATH"))
     if on_path:
         return Path(on_path).absolute()  # a relative PATH entry: the tools run in other folders
     cached = _cache_dir() / _exe_name()

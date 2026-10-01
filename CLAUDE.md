@@ -293,7 +293,7 @@ unset; `pyt.cmd` never prompts. `test_launcher_sh.test_install_prompt_through_a_
 answers y/n on a pseudo-terminal (a fake `curl` installs a fake uv) for both.
 
 uv exports `UV` (its own path) to everything it starts, so `proc.find_uv` checks `$UV` first,
-then `shutil.which("uv")`, else `PytError(..., 3)`.
+then `proc.find_program("uv")` (never the current folder: section 15.1), else `PytError(..., 3)`.
 
 `PYTEMPLATE_LAUNCHER` values: `sh`, `sh:bash`, `sh:zsh`, `sh:niubash`, each with `:msys` (when
 `/usr/bin/msys-2.0.dll` exists) or `:cygwin` (`cygwin1.dll`) appended (`sh:bash:msys`,
@@ -772,7 +772,7 @@ header rules (with detector tests proving each rule fires).
 | `config.py` | Dataclass schema (`SCHEMA`, `DEFAULT_METHODS`), `read_text` (UTF-8 only, clear error otherwise), strict loader (`_build`: unknown key or wrong type -> error with the full key path), `validate`, derived values (`pkg`, `min_python`, `pypy_minor`, `profile_for`, `pypy_enabled`), `compiled_paths` (`import_path`), comment-preserving editor `set_value` / `update_file` (section 6.1), its TOML statement scanner `scan` (render reads pyproject.toml with it, 6.3), `toml_value`. |
 | `project.py` | Paths (`ROOT`, `SRC`, `BUILD`, `DIST`, `TEMPLATES`, `PRESETS`...), `GLOBAL` (`detect_global`, `INSTALL_RECORD`: section 5.2), `IS_WINDOWS/IS_MACOS/IS_WSL` (`detect_wsl`: `wsl_kernel`, `windows_checkout`), `ENV_SUFFIX`, `venv_python`, `launcher_python`/`ANY_RUNNER_PYTHON` (the Python the launchers start the runner on: section 4.1), `host_os/host_arch` (uv names), `rel`, `code_dirs`, `native_path`, `find_cygpath`, `caller_cwd`, `user_path`, `scratch_name`, `check_private_dir` and `make_private_dir` (the harnesses' scratch folders: checked before and once made), `write_whole` (a file rewritten through a temporary file and `os.replace`, never half-written, owner and hard links kept: `_give_owner`, `_write_in_place`). |
 | `ui.py` | All runner output to stderr; `PytError(msg, code)`; `VERBOSE/QUIET`; `report` (never hidden by `-q`); colours (`color_enabled`, `enable_vt_mode`); `check_line` (doctor lines `[ok]`, `[XX]`, `[--]`). |
-| `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`, no `PYTEMPLATE_GLOBAL`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C and passes SIGTERM/SIGHUP on), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`; a second runner: `runner_argv` (the launchers' uv call), `runner_env` (cli._restart's). |
+| `proc.py` | `find_uv`, `base_env` (`UV_SELECTION`, no `PYTEMPLATE_GLOBAL`), `run` (echo, `DRY_RUN`, cwd defaults to `ROOT` and must be a folder, UTF-8 capture, waits through Ctrl+C and passes SIGTERM/SIGHUP on), `output`, `show` (display quoting only), `exit_code` (signal N -> 128+N), `vs_installer_dir`, `CommandFailed`, `Interrupted`; a second runner: `runner_argv` (the launchers' uv call), `runner_env` (cli._restart's); programs by name, never from the caller's folder on Windows (15.1): `find_program` (every lookup of the runner), `on_path` (PATH with PATHEXT), `windows_program`/`program` (a bare argv[0], as CreateProcess finds it), `taskkill`. |
 | `envs.py` | `PyEnv(key, dir, request, preference)`; `cpython_env`, `pypy_env`, `tool_env` (always CPython), `runtime_env(backend)`, `env_vars`, `uv`, `uv_run` (= `uv run --locked`, plus `--project <ROOT>` when `cwd` is not the root: section 7), `sync` (every group but those `left_out` names), `interpreter_info` (with `platform` and `cc`); python.cpython's interpreter (`find_cpython`, `cpython_downloads`, `ensure_python`, `no_download_problem`, `this_platform`, `RUNS_ON_ANY_PYTHON`: section 5.2); `MIN_UV`, `uv_version`, `uv_problem`, `require_min_uv`, `UV_UPDATE`, `uv_error` (uv's `error:` message). |
 | `render.py` | Every generated file (`outputs`), hand-edit detection (`apply`, `auto`), typing profiles (`load_profile`), `mypy_ini`, `mypy_cli_args`, `pyright_config`, `ruff_config`, `to_toml`, `jsonc`, `ci_workflow`, managed pyproject parts (`managed_block`, `write_pyproject`, `pyproject_outdated`, `check_pyproject`). |
 | `editors/vscode.py` | `.vscode/settings.json`, `extensions.json`, `launch.json`, `tasks.json` (`catalog`, `scan`, `problem_matchers`; section 12.1). |
@@ -1905,7 +1905,7 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   passed `C:\data\in.txt` as `C:datain.txt`), `cwd` is a folder (not in a dry run),
   `backend = "pypy"` in `backend.supported` (only where its environment is used). `vscode.scan`
   renders a task whose deps do not parse. `uv = false` on Windows: a bare program is looked up
-  on the task's PATH with PATHEXT (`npm` -> `npm.cmd`; `tasks._on_windows_path`: never in the
+  on the task's PATH with PATHEXT (`npm` -> `npm.cmd`; `proc.on_path`: never in the
   current folder, the caller's, which shutil.which searched first, so an `npm.cmd` in the folder
   `./pyt web` was typed in ran instead; a relative PATH entry is the task cwd's, as on POSIX; a
   name with another extension, `gen.py`, as it is). A name the task's PATH lacks is `program not
@@ -3125,7 +3125,7 @@ Per method:
   its x bit, `upx._runnable`, or the preflight refuses it with the `chmod +x` line: a checkout
   from Windows passed it, and the portable build died in `upx.pack_file` with a traceback after
   the runtime copy; `pack_file` turns a upx that cannot start into a PytError), `upx` on
-  PATH (on Windows by `tasks._on_windows_path`, never the current folder, which shutil.which
+  PATH (on Windows by `proc.on_path`, never the current folder, which shutil.which
   searches first there: the caller's, whose `upx.exe` won), the cache (a cached copy without its
   x bit is downloaded again), a download: UPX 5.2.1
   once (SHA-256 checked, written as `.part` then renamed so an interrupted write never looks
@@ -4758,7 +4758,10 @@ Runner code:
   `shell=True`. `proc.run` defaults to cwd = ROOT and `proc.base_env()`. Long-running
   harnesses (`shells`, `nvimtest`, `e2e`) use `subprocess` directly with stdin closed, output
   to log files and timeouts that kill the process tree; `hooks._run_bytes` too, for raw bytes
-  and stdin (section 5.6).
+  and stdin (section 5.6). A program is looked up by `proc.find_program`, never shutil.which,
+  and a bare argv[0] that does not go through `proc.run` through `proc.program` (or
+  `proc.taskkill`): on Windows both of Python's lookups search the caller's folder first
+  (15.1; `test_cli_core.test_the_runner_finds_programs_only_through_proc` greps the runner).
 - A project file the user may have edited (pyproject.toml, pytemplate.toml, state.json, the
   generated files, a restored uv.lock) is rewritten with `project.write_whole`, never in place: a
   write cut short (a full disk, a quota) left pyproject.toml truncated mid-block. It keeps the
@@ -6394,11 +6397,32 @@ Windows:
   folder of the runner's python.exe, the runner's current folder (the caller's: the launchers
   never cd), the system folders, then the runner's PATH, never the child's: a `mytool.exe` in the
   folder a task was typed in ran where its PATH had no mytool. Fix: `tasks.run_task` looks the
-  name up on the task's PATH with PATHEXT (`tasks._on_windows_path`, not shutil.which, which on
+  name up on the task's PATH with PATHEXT (`proc.on_path`, not shutil.which, which on
   Windows searches the current folder first: always on Python 3.11), and a name not found there
   never reaches CreateProcess bare (`program not found`, exit 3); the `.cmd` it finds runs
   through cmd.exe (the entry "cmd re-parses `%*`" below) (6.1). Test:
   `test_cli_core.py::test_a_bare_program_is_found_with_pathext_on_windows`. Goes: never.
+- **shutil.which and CreateProcess search the caller's folder first** (LIMITATION, both
+  documented): CPython's shutil.which puts the current folder before PATH on Windows (always on
+  Python 3.11; on 3.12+ unless `NoDefaultCurrentDirectoryInExePath` is set) and returns the
+  relative `.\git.BAT` it finds there, and CreateProcess, which subprocess hands a bare name, looks
+  in the folder of the runner's python.exe and the parent's current folder before the system
+  folders and PATH. The runner's current folder is the caller's (the launchers never cd), so
+  `pyt doctor`, `pyt new` (its `--dry-run` too), setup's exec-bit fix, install, the hook and
+  rename ran a git, nvim, powershell or pwsh another user had left in the folder they were typed
+  in, with the caller's rights (every folder made under `C:\` is writable by any authenticated
+  user by default). Up: cf. python/cpython#101283 (subprocess's own unqualified cmd.exe, fixed
+  for `shell=True` only). Fix: every lookup goes through `proc.find_program` (shutil.which's
+  answer when it is an absolute path, else `proc.on_path`: PATH's absolute entries with PATHEXT),
+  and a bare argv[0] through `proc.program` (`proc.windows_program`: the system folders, then
+  PATH; not found, exit 3), which `proc.run`, `hooks._run_bytes` and the harnesses'
+  `e2e.run_logged` and `nvimtest._run_logged` apply; `proc.taskkill` for their tree kills (5.1,
+  14). Test: `test_cli_core.py::test_find_program_never_takes_the_callers_folder_on_windows`,
+  `test_a_bare_program_never_runs_from_the_callers_folder_on_windows`,
+  `test_the_runners_git_never_comes_from_the_callers_folder_on_windows`,
+  `test_doctors_nvim_and_powershell_never_come_from_the_callers_folder_on_windows`,
+  `test_the_runner_finds_programs_only_through_proc` (Windows simulated: CPython's shutil.which
+  there; only a real Windows proves CreateProcess's own order). Goes: never.
 - **A command line holds 32767 characters** (LIMITATION): Fix: `hooks.ARG_LIMIT` batches file
   arguments (5.6). Test: `test_hooks.py::test_batches`. Goes: never.
 - **A file stays locked after its process ends** (LIMITATION): a just-exited exe, an antivirus
@@ -6722,8 +6746,9 @@ Code coupling (rename together):
   `cmd_nvim`); `presets._record` imports `cmd_apply` lazily (`cmd_apply` imports `presets`);
   `cmd_install._is_link` imports `cmd_env._is_link` lazily (`cmd_env` imports `cmd_install`), and
   `cmd_mode.cmd_new` the private `cli._prog` (the `pyt`/`./pyt` rule of `help`); `upx.locate`
-  calls the private `tasks._on_windows_path` lazily (one PATH search on Windows that never takes
-  the current folder).
+  and `tasks.run_task` call `proc.on_path` (one PATH search on Windows that never takes the
+  current folder), and `project.find_cygpath` imports `proc.find_program` lazily (`proc` imports
+  `project`).
 - `cmd_apply._block_options` reads the preset.toml `[uv]` templates back from the values
   `render.managed_block` wrote with `presets.uv_extras` (`str.format_map`, reversed by
   `cmd_apply._unformat`): a template with a format spec or conversion is never read back.

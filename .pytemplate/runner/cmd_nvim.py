@@ -153,8 +153,8 @@ class Nvim:
 
 
 def which(name: str) -> str | None:
-    """shutil.which on the PATH that child processes get (without this runner's own venv)."""
-    return shutil.which(name, path=proc.base_env().get("PATH"))
+    """proc.find_program on the PATH that child processes get (without this runner's own venv)."""
+    return proc.find_program(name, path=proc.base_env().get("PATH"))
 
 
 def find_nvim() -> str | None:

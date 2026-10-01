@@ -239,7 +239,7 @@ def test_upx_on_path_is_never_the_one_in_the_callers_folder(monkeypatch: pytest.
                     return os.path.join(folder, cmd + ext)
         return None
 
-    monkeypatch.setattr(upx.shutil, "which", windows_which)
+    monkeypatch.setattr(shutil, "which", windows_which)
     found = upx.locate(make({"upx": {"enabled": True}}))
     assert found is not None and os.path.normcase(found) == os.path.normcase(bindir / "upx.EXE")
 

@@ -7,7 +7,6 @@ import errno
 import os
 import platform
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -211,7 +210,9 @@ def find_cygpath(dll: str) -> str | None:
     shell = os.environ.get("SHELL", "")  # <root>\usr\bin\bash.exe, or Git's <git>\bin\bash.exe
     if _DRIVE_ABS.match(shell):
         dirs += [Path(shell).parent, Path(shell).parent.parent / "usr" / "bin"]
-    found = shutil.which("cygpath")
+    from .proc import find_program  # lazily: proc imports this module
+
+    found = find_program("cygpath")  # never one in the caller's folder
     if found:
         dirs.append(Path(found).parent)
     for d in dirs:

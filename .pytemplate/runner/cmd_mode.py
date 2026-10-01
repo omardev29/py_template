@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -500,7 +499,7 @@ def _work_tree_top(folder: Path) -> Path | None:
     """The top of the git work tree `folder` would be in (its nearest existing parent is asked:
     new creates the folder), or None: no work tree there, one that ignores `folder` (the project
     gets a repository of its own there: presets.ignored_by_work_tree), or no git."""
-    git = shutil.which("git")
+    git = proc.find_program("git")
     if git is None:
         return None
     probe = folder
@@ -569,7 +568,7 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
             ui.info(f"  pins    {len(pins)} packages new to uv.lock at the versions the template tested (constraints.txt of the preset)")
         if top is not None:
             git = f"(inside the git work tree of {top}: no git init)"
-        elif shutil.which("git") is None:
+        elif proc.find_program("git") is None:
             git = "(git not found: no git init)"
         else:
             git = "and `git init -b main`"

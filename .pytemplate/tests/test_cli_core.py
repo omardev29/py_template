@@ -701,6 +701,8 @@ def test_a_working_folder_it_cannot_enter_is_named(windows: bool, tmp_path: Path
 
     monkeypatch.setattr(proc, "IS_WINDOWS", windows)
     monkeypatch.setattr(proc.subprocess, "Popen", popen)
+    # the lookup of a bare name on Windows: test_a_bare_program_never_runs_from_the_callers_folder_on_windows
+    monkeypatch.setattr(proc, "program", lambda name: name)
     with pytest.raises(PytError) as e:
         proc.run(["ls"], cwd=locked, echo=False)
     assert e.value.code == 2
@@ -767,13 +769,181 @@ def test_find_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("UV", str(fake))
     assert proc.find_uv() == str(fake)
     monkeypatch.setenv("UV", str(tmp_path))  # a folder is not uv
-    monkeypatch.setattr(proc.shutil, "which", lambda _name: "/elsewhere/uv")
-    assert proc.find_uv() == "/elsewhere/uv"
+    elsewhere = str(tmp_path / "elsewhere" / "uv")  # absolute on every OS (a drive on Windows)
+    monkeypatch.setattr(proc.shutil, "which", lambda _name: elsewhere)
+    assert proc.find_uv() == elsewhere
     monkeypatch.delenv("UV")
     monkeypatch.setattr(proc.shutil, "which", lambda _name: None)
     with pytest.raises(PytError, match="uv not found") as e:
         proc.find_uv()
     assert e.value.code == 3
+
+
+# --- programs by name, never from the caller's folder (Windows) ---------------------------------
+
+
+def _windows_which(cmd: str, mode: int = os.F_OK | os.X_OK, path: str | None = None) -> str | None:
+    """CPython's shutil.which on Windows (3.11; 3.12+ without NoDefaultCurrentDirectoryInExePath):
+    the current folder first, then PATH, each with the extensions of PATHEXT; it returns the
+    relative .\\git.bat it finds in the current folder."""
+    value = os.environ.get("PATH", "") if path is None else path
+    if not value:  # PATH='' finds nothing, the current folder neither
+        return None
+    entries = value.split(os.pathsep)
+    exts = [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+    names = [cmd] if any(cmd.lower().endswith(e.lower()) for e in exts) else [cmd + e for e in exts]
+    for folder in [os.curdir, *entries]:
+        for name in names:
+            if os.path.isfile(os.path.join(folder, name)):
+                return os.path.join(folder, name)
+    return None
+
+
+@pytest.fixture
+def windows_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Windows simulated for proc (its flag, PATHEXT, CPython's shutil.which there), the runner in
+    a caller's folder `here` where another user left a git.bat, git.exe and nvim.cmd, and the real
+    programs in `bin`, on PATH. Returns `bin`."""
+    here, bindir = tmp_path / "here", tmp_path / "bin"
+    for folder, names in ((here, ("git.bat", "git.exe", "nvim.cmd", "pwsh.exe", "only-here.exe")), (bindir, ("git.exe", "nvim.cmd", "pwsh.exe"))):
+        folder.mkdir()
+        for name in names:
+            (folder / name).write_bytes(b"planted" if folder == here else b"real")
+    monkeypatch.chdir(here)
+    monkeypatch.setattr(proc, "IS_WINDOWS", True)
+    monkeypatch.setenv("PATHEXT", ".com;.exe;.bat;.cmd")  # lower case: Linux file names are case-sensitive
+    monkeypatch.setenv("PATH", os.pathsep.join(["", ".", "here-too", str(bindir)]))  # empty and relative entries name the current folder too
+    monkeypatch.delenv("SystemRoot", raising=False)
+    monkeypatch.delenv("windir", raising=False)
+    monkeypatch.setattr(shutil, "which", _windows_which)
+    return bindir
+
+
+def test_find_program_never_takes_the_callers_folder_on_windows(windows_caller: Path) -> None:
+    """shutil.which searches the current folder first on Windows, and the runner's is the
+    caller's (the launchers never cd): `pyt doctor` or `pyt new` typed in a folder where another
+    user left a git.bat (any authenticated user may write into a folder made under C:\\) ran it
+    as the caller. The lookup takes PATH's absolute entries alone, and answers an absolute path."""
+    bindir = windows_caller
+    assert os.path.dirname(shutil.which("git") or "") == os.curdir  # the scenario: CPython's own answer, the planted one
+    assert proc.find_program("git") == str(bindir / "git.exe")
+    assert proc.find_program("nvim", path=os.environ["PATH"]) == str(bindir / "nvim.cmd")  # cmd_nvim.which passes PATH
+    assert proc.find_program("only-here") is None  # found only in the caller's folder: not found
+    assert proc.find_program("git", path="") is None  # an empty PATH holds nothing, as for shutil.which
+
+
+def test_doctors_nvim_and_powershell_never_come_from_the_callers_folder_on_windows(windows_caller: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`pyt doctor` (global mode too) starts nvim (its Neovim step, cmd_nvim.which) and both
+    PowerShells (the execution policies, shells._ps_policies): an nvim.cmd or pwsh.exe left in
+    the folder it was typed in ran instead."""
+    from runner import cmd_nvim
+
+    bindir = windows_caller
+    assert cmd_nvim.which("nvim") == str(bindir / "nvim.cmd")
+    ran: list[str] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        ran.append(argv[0])
+        return subprocess.CompletedProcess(argv, 0, "RemoteSigned\n", "")
+
+    monkeypatch.setattr(shells.subprocess, "run", run)
+    assert shells._ps_policies() == [("PowerShell 7", "Core", "RemoteSigned")]  # no powershell.exe on PATH
+    assert ran == [str(bindir / "pwsh.exe")]
+
+
+def test_a_bare_program_never_runs_from_the_callers_folder_on_windows(windows_caller: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """subprocess hands CreateProcess a bare name (lpApplicationName = NULL), and CreateProcess
+    looks in the folder of the runner's python.exe and the runner's current folder (the caller's)
+    before the system folders and PATH: `proc.run(["git", ...])` (setup's exec-bit fix, the hook,
+    rename) ran a git.exe left there. proc.run hands it the program of the system folders or PATH,
+    and a name found in neither never reaches CreateProcess."""
+    bindir = windows_caller
+    started: list[list[str]] = []
+
+    class Started(Exception):
+        pass
+
+    def popen(args: list[str], **kwargs: Any) -> Any:
+        started.append(list(args))
+        raise Started
+
+    monkeypatch.setattr(proc.subprocess, "Popen", popen)
+    with pytest.raises(Started):
+        proc.run(["git", "rev-parse"], cwd=tmp_path, echo=False)
+    assert started[-1] == [str(bindir / "git.exe"), "rev-parse"]
+    with pytest.raises(PytError, match=r"^program not found: only-here$") as e:
+        proc.run(["only-here"], cwd=tmp_path, echo=False)
+    assert e.value.code == 3 and len(started) == 1  # never handed to CreateProcess bare
+    with pytest.raises(PytError, match="program not found: nvim"):
+        proc.run(["nvim"], cwd=tmp_path, echo=False)  # CreateProcess takes nvim.exe only: nvim.cmd is no candidate
+    # the system folders come first, as for CreateProcess; a name with a folder is no search
+    system32 = tmp_path / "Windows" / "System32"
+    system32.mkdir(parents=True)
+    (system32 / "git.exe").write_bytes(b"system")
+    monkeypatch.setenv("SystemRoot", str(tmp_path / "Windows"))
+    with pytest.raises(Started):
+        proc.run(["git"], cwd=tmp_path, echo=False)
+    assert started[-1] == [str(system32 / "git.exe")]
+    with pytest.raises(Started):
+        proc.run(["tools\\gen.exe"], cwd=tmp_path, echo=False)
+    assert started[-1] == ["tools\\gen.exe"]
+    # taskkill (the harnesses' tree kill) is the system folders' too
+    killed: list[list[str]] = []
+    (system32 / "taskkill.exe").write_bytes(b"system")
+    (Path.cwd() / "taskkill.exe").write_bytes(b"planted")
+    monkeypatch.setattr(proc.subprocess, "run", lambda argv, **kw: killed.append(list(argv)))
+    proc.taskkill(42)
+    assert killed == [[str(system32 / "taskkill.exe"), "/F", "/T", "/PID", "42"]]
+
+
+@pytest.mark.parametrize(
+    "where",
+    ["new: the work tree", "new: git ls-files", "new: git init", "install: git", "doctor: git (global)", "doctor: launcher modes", "setup: exec bits", "hook: find_repo", "rename: git status"],
+)
+def test_the_runners_git_never_comes_from_the_callers_folder_on_windows(windows_caller: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str) -> None:
+    """The commands of A2-01 (`pyt new`, `pyt doctor`, setup, install, the hook, rename), each
+    with a git.exe and a git.bat another user left in the folder they were typed in: every git
+    they start is PATH's (the first one is caught before it runs)."""
+    from runner import cmd_install, hooks, rename
+
+    started: list[str] = []
+
+    class Started(Exception):
+        pass
+
+    def popen(args: list[str], **kwargs: Any) -> Any:
+        started.append(str(args[0]))
+        raise Started
+
+    monkeypatch.setattr(proc.subprocess, "Popen", popen)
+    calls = {
+        "new: the work tree": lambda: cmd_mode._work_tree_top(tmp_path / "game"),
+        "new: git ls-files": lambda: presets._git_files("--cached"),
+        "new: git init": lambda: presets._git_init(tmp_path / "game"),
+        "install: git": lambda: cmd_install._git("rev-parse", "HEAD"),
+        "doctor: git (global)": lambda: cmd_env._machine(lambda passed, label, hint="": None),
+        "doctor: launcher modes": lambda: shells._git_modes(["pyt"]),
+        "setup: exec bits": lambda: cmd_env._fix_exec_bit(),
+        "hook: find_repo": lambda: hooks.find_repo(tmp_path, environ={}, cwd=tmp_path),
+        "rename: git status": lambda: rename.git_changes(tmp_path),
+    }
+    with pytest.raises(Started):
+        calls[where]()
+    assert started == [str(windows_caller / "git.exe")]
+
+
+def test_the_runner_finds_programs_only_through_proc() -> None:
+    """Every lookup of a program by name goes through proc.find_program (never shutil.which,
+    which searches the caller's folder first on Windows), and no process starts from a literal
+    bare name past proc.run's own lookup (taskkill, git: proc.program, proc.taskkill)."""
+    found: list[str] = []
+    for path in sorted((TEMPLATE_DIR / "runner").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        name = path.relative_to(TEMPLATE_DIR).as_posix()
+        if name != "runner/proc.py":
+            found += [f"{name}: shutil.which" for _ in re.finditer(r"\bshutil\.which\(", text)]
+        found += [f"{name}: {m.group(0)}" for m in re.finditer(r"subprocess\.(?:run|Popen|call|check_call|check_output)\(\s*\[\s*[\"']", text)]
+    assert found == []
 
 
 def test_show_is_for_display() -> None:
