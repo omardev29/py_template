@@ -2522,7 +2522,8 @@ Formats:
   uv.lock that pyproject.toml moved past used to stop a method only where it ran `uv ...
   --locked`, with `--no-check` after the payload, exe and nuitka after the previous output was
   removed; a check uv cannot answer, offline or without its interpreter, is exit 3 naming uv's
-  reason, never "does not match") and `upx.preflight`: when the method packs with UPX on this host (`upx.uses`: exe on Windows,
+  reason, never "does not match", and a pyproject.toml or uv.lock uv cannot parse ("Failed to
+  parse") exit 2, as `lock` and `sync` give for it) and `upx.preflight`: when the method packs with UPX on this host (`upx.uses`: exe on Windows,
   nuitka, portable, flet desktop targets) it resolves the upx binary now, downloading it if
   needed; a portable build with `runtime = "system"` (no interpreter: `upx._always_packs`) only
   checks `deploy.upx.path` and leaves the download to `upx.pack_tree`, which asks for upx only

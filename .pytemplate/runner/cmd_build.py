@@ -67,7 +67,10 @@ def check_lock(cfg: Config) -> None:
         why = envs.uv_error(r.stderr or r.stdout) or f"uv lock --check: exit code {r.returncode}"
         why = why[len("error:") :].strip() if why.lower().startswith("error:") else why
         if "needs to be updated" not in why:  # no answer (offline, no interpreter): not a stale lock
-            raise PytError(f"cannot check uv.lock against pyproject.toml: {why}", 3)
+            # ...but a file uv cannot read ("Failed to parse: `pyproject.toml`", a uv.lock) is the
+            # project's to fix: exit 2, as ./pyt lock and sync give for it, never a missing requirement
+            code = 2 if why.startswith("Failed to parse") else 3
+            raise PytError(f"cannot check uv.lock against pyproject.toml: {why}", code)
         raise PytError(
             f"uv.lock does not match pyproject.toml ({why})\n"
             "  Run ./pyt lock (./pyt apply after a pytemplate.toml edit), then build again"

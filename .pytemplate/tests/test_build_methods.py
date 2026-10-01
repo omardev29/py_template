@@ -4389,6 +4389,24 @@ def test_a_lock_uv_cannot_check_is_not_called_stale(no_build: None, monkeypatch:
     assert e.value.code == 3 and "does not match" not in str(e.value) and "./pyt lock" not in str(e.value)
 
 
+@pytest.mark.parametrize("broken", ["pyproject.toml", "uv.lock"])
+def test_a_file_uv_cannot_parse_is_a_config_error(no_build: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, broken: str) -> None:
+    """A pyproject.toml (or uv.lock) uv cannot parse made `build` exit 3, a missing requirement,
+    where ./pyt lock and sync exit 2. The real uv says what it says about such a file."""
+    project = tmp_path / "p"
+    project.mkdir()
+    (project / "pyproject.toml").write_text('[project]\nname = "p"\nversion = "0"\nrequires-python = ">=3.11"\n', encoding="utf-8")
+    with (project / broken).open("a", encoding="utf-8") as f:
+        f.write("broken = [\n")
+    env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON")}
+    said = subprocess.run([proc.find_uv(), "lock", "--check", "--offline"], cwd=project, env=env, capture_output=True, text=True, timeout=300, check=False)
+    assert said.returncode != 0, said.stderr
+    monkeypatch.setattr(envs, "uv", lambda env, args, **kw: subprocess.CompletedProcess(args, said.returncode, said.stdout, said.stderr))
+    with pytest.raises(PytError, match=f"cannot check uv.lock against pyproject.toml: Failed to parse.*{re.escape(broken)}") as e:
+        cmd_build.cmd_build(make({}), ["cpython", "--method", "pyz", "--no-check"])
+    assert e.value.code == 2
+
+
 def test_check_lock_reads_the_real_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project = _workspace_project(tmp_path / "proj")
     monkeypatch.setattr(proc, "ROOT", project)
