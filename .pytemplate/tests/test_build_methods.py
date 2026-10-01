@@ -3477,6 +3477,35 @@ def test_the_pylock_rebase_moves_only_what_names_the_project(tmp_path: Path) -> 
     assert packages["e"]["directory"]["path"] == "libs/gone"
 
 
+def test_the_pylock_rebase_never_leaves_the_file_half_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every pyz and portable build of a project exports into the same .build/deploy, and the
+    # rebase rewrote pylock.toml in place (truncated, then written): a build started at that
+    # moment read it empty ("missing field `lock-version`") or cut after some [[packages]] (fewer
+    # packages installed, without an error). The file is replaced whole, and not written at all
+    # when no path moves: it is never opened for writing itself
+    project = tmp_path / "proj"
+    (project / "libs" / "a").mkdir(parents=True)
+    lock = project / ".build" / "deploy" / "pylock.toml"
+    lock.parent.mkdir(parents=True)
+    lock.write_text('lock-version = "1.0"\n\n[[packages]]\nname = "a"\ndirectory = { path = "libs/a" }\n', encoding="utf-8")
+    written: list[str] = []
+    real_open = io.open
+
+    def watched(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if any(c in mode for c in "wax+") and isinstance(file, (str, os.PathLike)):
+            written.append(os.path.realpath(file))
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(io, "open", watched)
+    common._rebase_paths(lock, project)
+    assert tomllib.loads(lock.read_text(encoding="utf-8"))["packages"][0]["directory"]["path"] == "../../libs/a"
+    assert written and os.path.realpath(lock) not in written  # a whole new file took its place
+    written.clear()
+    before = lock.stat()
+    common._rebase_paths(lock, project)  # nothing moves now
+    assert not written and lock.stat().st_mtime_ns == before.st_mtime_ns
+
+
 def test_the_builds_export_no_dependency_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # `uv export --no-dev` leaves out the dev group only: with [tool.uv] default-groups naming
     # another one (a lint group of tools), the pyz, the portable lib/ and the flet build project

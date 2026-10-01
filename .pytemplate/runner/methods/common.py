@@ -22,7 +22,7 @@ from typing import Any
 from .. import envs, proc, ui
 from ..config import Config, toml_value
 from ..imports import PARSE_ERRORS, iter_runtime_nodes, parse
-from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, ROOT, SRC, host_os, rel
+from ..project import BUILD, EXT_SUFFIXES, PYPROJECT, ROOT, SRC, host_os, rel, write_whole
 from ..ui import PytError
 
 NATIVE_SUFFIXES = (*EXT_SUFFIXES, ".dll", ".dylib")
@@ -210,6 +210,11 @@ def _rebase_paths(lock: Path, project: Path) -> None:
     and the install stopped with "Distribution not found". Only a path that names nothing from the
     file's folder and something from the project moves: an absolute one, and one a uv that
     rebases its paths itself already wrote from the file's folder, stay.
+
+    The file is replaced whole (project.write_whole), and only when a path moved: every pyz and
+    portable build of the project exports here, and rewritten in place (truncated, then written)
+    a build started at that moment read it empty ("missing field `lock-version`") or cut after
+    some [[packages]] (fewer packages installed, without an error).
     """
     text = lock.read_text(encoding="utf-8")
 
@@ -225,7 +230,9 @@ def _rebase_paths(lock: Path, project: Path) -> None:
         moved = os.path.relpath(os.path.join(project, path), lock.parent)
         return m[1] + toml_value(moved.replace(os.sep, "/"))
 
-    lock.write_text(_PYLOCK_PATH.sub(rebase, text), encoding="utf-8", newline="\n")
+    rebased = _PYLOCK_PATH.sub(rebase, text)
+    if rebased != text:
+        write_whole(lock, rebased.encode("utf-8"))
 
 
 def _version_tuple(text: str) -> tuple[int, int] | None:

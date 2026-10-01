@@ -2875,7 +2875,10 @@ Formats:
   (`test_pyz_and_portable_install_a_package_of_an_explicit_index`); `skipped_requirements` and
   `requirements_digest` still read the requirements.txt. uv writes the pylock's relative paths
   (a local library) from the project, and reads them from the file's folder:
-  `common._rebase_paths` moves them (15.1).
+  `common._rebase_paths` moves them (15.1), replacing the file whole (`project.write_whole`) and
+  only when a path moves: every pyz and portable build of the project exports there, and a build
+  started while another rewrote it in place read it empty or cut after some `[[packages]]`
+  (`test_the_pylock_rebase_never_leaves_the_file_half_written`).
 - `common.install_deps` (`uv pip install --link-mode copy --target --no-deps -r <pylock.toml>`:
   the folder is shipped, so its files are copies, never links into uv's cache, whatever link mode
   the user set, 15.1; `--reinstall-package <name>` for each local package of uv.lock,
