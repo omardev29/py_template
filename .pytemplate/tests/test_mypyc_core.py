@@ -714,7 +714,10 @@ def test_lintc_skips_the_classes_mypy_reads_as_unreachable_on_python_cpython(tmp
         ("not (sys.version_info >= (3, 11) and sys.version_info[0] == 3)", False, False),
         ("TYPE_CHECKING and FLAG", None, False),
         ("not (TYPE_CHECKING or FLAG)", False, None),
-        ("not " * 3001 + "TYPE_CHECKING", False, True),  # a chain that deep parses: read in a loop
+        # deeper than the recursion limit, so a recursive reading would fail, and still within what
+        # Python 3.11 parses inside pytest (3001 levels did not: "maximum recursion depth exceeded
+        # during ast construction"): read in a loop
+        ("not " * 1501 + "TYPE_CHECKING", False, True),  # odd: not TYPE_CHECKING
     ],
 )
 def test_lintc_reads_a_test_as_mypy_does(test: str, checking: bool | None, runtime: bool | None) -> None:
