@@ -43,8 +43,10 @@ TCL_RE = re.compile(r"(lib)?(tcl|tk|itcl|thread)\d|_tkinter\.", re.IGNORECASE)
 # copy for programs that embed Python). Pruned only when the interpreter does not need it (its
 # ELF DT_NEEDED entries, _elf_needed): extension modules never link libpython on Linux (3.8+)
 LIBPYTHON_RE = re.compile(r"libpython3[.0-9]*[a-z]*\.so(\.[.0-9]+)?")
-# PyPy still ships lib2to3's deliberately broken test data: it never compiles
-COMPILE_EXCLUDE = r"[/\\]lib2to3[/\\]tests[/\\]"
+# Test data broken on purpose, which never compiles: PyPy still ships lib2to3's, and its stdlib
+# test package (kept by prune = false) has the badsyntax_* and bad_coding* files CPython's own
+# build leaves out the same way (its Makefile: compileall -x 'bad_coding|badsyntax|...')
+COMPILE_EXCLUDE = r"[/\\]lib2to3[/\\]tests[/\\]|[/\\](bad_coding|badsyntax)[^/\\]*\.py$"
 LONG_PREFIX = "\\\\?\\"
 LONG_UNC = LONG_PREFIX + "UNC\\"  # the extended-length form of \\server\share\...
 

@@ -4005,6 +4005,34 @@ def test_portable_precompiles_the_stdlib_at_the_launcher_level(tmp_path: Path, o
         assert str(out).encode() not in data, pyc  # -s: this machine's folder is not embedded
 
 
+def test_portable_never_precompiles_the_runtimes_broken_test_data(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """PyPy ships its stdlib test package, which prune = false keeps in runtime/: its files broken
+    on purpose (badsyntax_*, bad_coding*: CPython's own build skips them the same way) failed
+    compileall, and every such build printed some 40 lines of errors and a warning that 12 files
+    of the runtime could not be precompiled. The real compileall runs."""
+    from runner.methods import portable
+
+    version = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    out = tmp_path / "out"
+    stdlib = out / "runtime" / ("Lib" if IS_WINDOWS else f"lib/{'pypy' if sys.implementation.name == 'pypy' else 'python'}{version}")
+    files = {
+        "test/__init__.py": b"",
+        "test/test_future_stmt/badsyntax_future3.py": b"from __future__ import nested_scopes\nfrom __future__ import rested_snopes\n",
+        "test/tokenizedata/bad_coding.py": b"# -*- coding: uft-8 -*-\nX = 1\n",
+        "test/tokenizedata/badsyntax_pep3120.py": b"print('b\xe4se')\n",
+        "json/__init__.py": b"X = 1\n",
+    }
+    for name, data in files.items():
+        (stdlib / name).parent.mkdir(parents=True, exist_ok=True)
+        (stdlib / name).write_bytes(data)
+    (out / "app").mkdir()
+    (out / "lib").mkdir()
+    portable._precompile(make({}), Path(sys.executable), out, version)
+    err = capsys.readouterr().err
+    assert "Error compiling" not in err and "warning" not in err, err
+    assert list((stdlib / "json").rglob("*.pyc"))  # the rest of the stdlib is compiled
+
+
 @pytest.mark.parametrize("windows", [False, True])
 def test_portable_names_the_files_it_could_not_precompile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], windows: bool) -> None:
     # compileall's output was captured and dropped: the warning named no file, blamed paths longer

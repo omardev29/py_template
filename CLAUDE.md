@@ -2689,7 +2689,9 @@ Per method:
   the Windows zip's 2-second local times cannot make them stale, `-s <out>` so no `.pyc` embeds
   the build folder): `lib/` and `app/` at levels 0 and `deploy.optimize`, the bundled stdlib
   (`runtime_stdlib`: `lib/pythonX.Y`, `lib/pypyX.Y` or `Lib`) only at the launchers' level,
-  `-x` skipping PyPy's broken `lib2to3/tests` data: a read-only install never recompiles.
+  `-x` skipping PyPy's test data broken on purpose (`COMPILE_EXCLUDE`: `lib2to3/tests`, and the
+  `badsyntax_*`/`bad_coding*` files of the test package `prune = false` keeps): a read-only
+  install never recompiles.
   What they cannot compile is reported (`portable._precompile`): compileall's own lines (each
   file and why, even with `-q`; the first `REPORTED_LINES`), a file of `app/` apart (the app
   fails where it imports it: a syntax error a `--no-check` build let through), and the
@@ -5127,10 +5129,14 @@ PyPy:
   from the CPython base (10). Test:
   `test_workarounds.py::test_portable_pypy_on_windows_gets_the_vc_runtime`. Goes: when PyPy's
   zip ships them.
-- **PyPy ships lib2to3's broken test data** (LIMITATION): compileall fails on it. Fix:
-  `portable.COMPILE_EXCLUDE` (`-x`, 10). Test:
-  `test_build_methods.py::test_portable_precompiles_the_stdlib_at_the_launcher_level`. Goes:
-  when PyPy drops lib2to3.
+- **PyPy ships test data broken on purpose** (LIMITATION): compileall fails on lib2to3's, and,
+  with `prune = false`, on the `badsyntax_*` and `bad_coding*` files of its stdlib test package,
+  12 files in PyPy 3.11.15 (every such build printed some 40 lines of errors and a warning that
+  files of the runtime do not compile; CPython's own build excludes them the same way, and uv's
+  CPython ships no test package). Fix: `portable.COMPILE_EXCLUDE` (`-x`, 10). Test:
+  `test_build_methods.py::test_portable_precompiles_the_stdlib_at_the_launcher_level`,
+  `test_portable_never_precompiles_the_runtimes_broken_test_data`. Goes: never (PyPy ships its
+  test package).
 - **There is no `pypy3w.exe` or `python3w.exe`** (LIMITATION): Fix: `common.windowed` names
   `pypyw`, `pythonw`, `pyw` (10). Test: `test_build_methods.py::test_windowed_twins_exist`.
   Goes: never.
