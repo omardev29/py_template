@@ -86,10 +86,11 @@ def _pypy_precheck(cfg: Config) -> None:
     cmd_apply.cmd_mode_precheck(cfg)
 
 
-def _refuse_a_frozen_lock(why: str = "") -> None:
+def _refuse_a_frozen_lock(why: str = "", *, names: tuple[str, ...] = ()) -> None:
     """Refuse a re-lock that the user's UV_FROZEN or UV_LOCKED would turn into a no-op; `why`
-    names the change that needs it (apply and rename refuse it before their first write)."""
-    frozen = _lock_read_only([])
+    names the change that needs it (apply and rename refuse it before their first write);
+    `names`: only these of the two variables."""
+    frozen = next((n for n in names if _set_true(n)), "") if names else _lock_read_only([])
     if frozen:
         raise PytError(
             f"uv.lock must follow pyproject.toml{f' ({why})' if why else ''}, but {frozen} is set, and with it "
@@ -154,14 +155,19 @@ LOCK_READ_ONLY_ENV = ("UV_LOCKED", "UV_FROZEN")
 LOCK_INFO = ("-h", "--help", "-V", "--version")
 
 
+def _set_true(name: str) -> bool:
+    """Whether the user set uv's boolean variable `name` (1/true/yes/on)."""
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on", "y", "t")
+
+
 def _lock_read_only(args: list[str]) -> str:
     """The argument or variable that keeps `uv lock` from writing uv.lock, or "" (--script
     locks a script's own `<script>.lock`)."""
     for a in args:
         if a.split("=", 1)[0] in LOCK_READ_ONLY:
             return a
-    for name in LOCK_READ_ONLY_ENV:  # uv's boolean variables: 1/true/yes/on
-        if os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on", "y", "t"):
+    for name in LOCK_READ_ONLY_ENV:
+        if _set_true(name):
             return name
     return ""
 
@@ -231,6 +237,10 @@ def _add_remove(cfg: Config, verb: str, args: list[str]) -> int:
     # by then: when the sync fails (a package that locks but cannot be built) or is
     # interrupted, both get their old bytes back, as a plain `uv add` does when its own sync
     # fails. Otherwise every `uv run --locked` tried to build that package again.
+    # uv refuses that --no-sync next to the user's UV_FROZEN ("cannot be used with"), an argument
+    # the user never typed, and add and remove re-lock: refused as mode, apply and rename refuse
+    # it, naming the variable (under UV_LOCKED uv's own message says what is wrong)
+    _refuse_a_frozen_lock(f"./pyt {verb} re-locks it", names=("UV_FROZEN",))
     argv: list[str] = [verb, "--no-sync"]
     if ns.dev:
         argv.append("--dev")

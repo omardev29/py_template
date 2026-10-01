@@ -1083,16 +1083,39 @@ def test_the_runners_locked_and_frozen_calls_work_under_the_users_lock_mode(monk
 
 def test_the_uv_commands_the_user_drives_keep_the_users_lock_mode(lock_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`./pyt lock ARGS` and the `uv add|remove` of add/remove answer the user's own arguments:
-    UV_FROZEN reaches them (uv lock then writes nothing, and lock puts pyproject.toml back); the
-    sync after add is the runner's own."""
+    the user's lock mode reaches them (under UV_FROZEN uv lock writes nothing, and lock puts
+    pyproject.toml back; add and remove refuse UV_FROZEN themselves, which uv refuses next to their
+    --no-sync, and UV_LOCKED reaches them); the sync after add is the runner's own."""
     monkeypatch.setenv("UV_FROZEN", "1")
     uv = OldUv(monkeypatch, stale=False)
     monkeypatch.setattr(envs, "left_out", lambda env: [])
     cmd_env.cmd_lock(make(), [])
     assert lock_project.read_bytes() == b"[project]\r\nname = 'old'\r\n"
+    monkeypatch.delenv("UV_FROZEN")
+    monkeypatch.setenv("UV_LOCKED", "1")
     cmd_env.cmd_add(make(), ["x"])
-    sent = {a[1]: "UV_FROZEN" in kw["env"] for a, kw in zip(uv.argvs, uv.kwargs, strict=True)}
+    sent = {a[1]: any(name in kw["env"] for name in cmd_env.LOCK_READ_ONLY_ENV) for a, kw in zip(uv.argvs, uv.kwargs, strict=True)}
     assert sent == {"lock": True, "add": True, "sync": False}
+
+
+@pytest.mark.parametrize("verb", ["add", "remove"])
+def test_add_and_remove_refuse_the_users_uv_frozen_before_uv_runs(monkeypatch: pytest.MonkeyPatch, verb: str) -> None:
+    """uv refuses the --no-sync of add and remove next to the user's UV_FROZEN: `./pyt remove
+    rich` said "the argument `--no-sync` cannot be used with `UV_FROZEN`", an argument the user
+    never typed. Refused before uv runs, naming the variable and the way out, as mode, apply and
+    rename refuse a re-lock under it; in a dry run too."""
+    calls = fake_uv(monkeypatch)
+    monkeypatch.setenv("UV_FROZEN", "1")
+    for dry in (False, True):
+        monkeypatch.setattr(proc, "DRY_RUN", dry)
+        with pytest.raises(PytError, match=r"UV_FROZEN is set.*unset UV_FROZEN") as e:
+            getattr(cmd_env, f"cmd_{verb}")(make(), ["x"])
+        assert e.value.code == 2 and f"./pyt {verb} re-locks it" in str(e.value)
+    assert calls == []
+    monkeypatch.setattr(proc, "DRY_RUN", False)
+    monkeypatch.setenv("UV_FROZEN", "0")  # a false value is no lock mode
+    getattr(cmd_env, f"cmd_{verb}")(make(), ["x"])
+    assert calls[0] == [verb, "--no-sync", "x"]
 
 
 # --- clean ---------------------------------------------------------------------------------------------

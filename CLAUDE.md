@@ -2307,7 +2307,10 @@ Formats:
   cannot be built: an sdist that needs a compiler or pg_config) or is interrupted,
   `cmd_env._add_remove` puts both back byte for byte (`_snapshot`, `_put_back`), as a plain
   `uv add` reverts its edits when its own sync fails; kept, they made every `uv run --locked`
-  try to build that package again.
+  try to build that package again. Under the user's UV_FROZEN they are refused before uv runs,
+  as mode, apply and rename refuse such a re-lock (`_refuse_a_frozen_lock` with `names`): uv
+  refuses `--no-sync` next to it, and said so about an argument the user never typed
+  (`test_envs_core.test_add_and_remove_refuse_the_users_uv_frozen_before_uv_runs`).
 - The oldest supported uv is `envs.MIN_UV` = 0.10.12, read from uv's own download metadata:
   the first uv that downloads `pypy@3.11.15` (0.10.11: "No download found for request");
   CPython 3.14 final needs 0.9.0 (0.8.x silently installs 3.14.0rc2) and `uv export --format
