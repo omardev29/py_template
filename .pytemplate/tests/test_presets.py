@@ -1630,6 +1630,30 @@ def test_new_asks_for_python_cpython_before_it_copies_anything(tmp_path: Path, m
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize("variable", ["UV_FROZEN", "UV_LOCKED"])
+@pytest.mark.parametrize("dry", [False, True], ids=["real", "dry run"])
+def test_new_refuses_a_frozen_lock_before_it_copies_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str, dry: bool) -> None:
+    """Every new project is locked anew, which the user's UV_FROZEN or UV_LOCKED forbid: new
+    copied the template, ran __init, and only then uv said `--no-sync` cannot be used with
+    UV_FROZEN (a flag the user never typed) or, for UV_LOCKED, to run `uv lock`; the dry run
+    printed the whole plan and exited 0. Refused before anything is written, naming the variable,
+    as mode, apply and rename refuse such a re-lock."""
+    from runner import envs
+
+    cfg = config.load(set())
+    monkeypatch.setenv(variable, "1")
+    monkeypatch.setattr(proc, "DRY_RUN", dry)
+    monkeypatch.setattr(envs, "ensure_python", lambda v: pytest.fail("asked uv for the interpreter"))
+    monkeypatch.setattr(envs, "find_cpython", lambda v: Path("/uv/python3"))
+    monkeypatch.setattr(presets, "copy_template", lambda dest: pytest.fail("copied"))
+    monkeypatch.setattr(presets, "new", lambda *a, **k: pytest.fail("made a project"))
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(PytError, match=rf"{variable} is set, and with it `uv lock` writes nothing: unset {variable}") as e:
+        cmd_mode.cmd_new(cfg, ["demo", "--preset", "script"])
+    assert e.value.code == 2 and "a new project is locked anew" in str(e.value)
+    assert list(tmp_path.iterdir()) == []
+
+
 def _new_stops_before_any_step(monkeypatch: pytest.MonkeyPatch) -> None:
     from runner import envs
 

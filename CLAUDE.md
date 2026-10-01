@@ -1077,7 +1077,8 @@ header rules (with detector tests proving each rule fires).
   `+` new or `~` replaced, the dependencies removed and added, the pinned versions, and what
   happens to `pyproject.toml` and `uv.lock`. `new` checks the destination and the name
   (format, `check_name_free`), fails where uv cannot install the new project's `python.cpython`
-  as the real run does (`envs.no_download_problem`), and prints destination, preset, name, that
+  as the real run does (`envs.no_download_problem`) and under the user's `UV_FROZEN` or
+  `UV_LOCKED` (`cmd_env._refuse_a_frozen_lock`: the new lock), and prints destination, preset, name, that
   Python (where it is, or that uv would install it), what it would copy (the
   test `copy_template` makes, `presets.copy_scope`: the files git tracks, or every file and
   why), the number of pins `__init` would pass (the ones this `uv.lock` lacks, as `plan_init` counts them) and the
@@ -2156,7 +2157,9 @@ Formats:
   only checks the lock's validity), and mode, apply and rename went on with a stale uv.lock;
   refused, they put their files back. apply and rename make the refusal before their first
   write, naming the change that needs the re-lock (`cmd_apply._refuse_a_frozen_relock`,
-  `rename._refuse_what_the_lock_would`): after it, the app stayed renamed.
+  `rename._refuse_what_the_lock_would`): after it, the app stayed renamed. `new`, whose project is
+  always locked anew, refuses it before the copy, its dry run too (`cmd_mode.cmd_new`: uv's own
+  error came after the copy, blaming a `--no-sync` the user never typed).
 - `envs.sync` = `uv sync --locked --all-groups` (apply/setup, sync, mode, add, remove): every
   dependency group of `pyproject.toml` is installed, so `./pyt add --group G pkg` survives the
   next sync and reaches a fresh clone (an exact sync of the default groups removed it); `uv run`

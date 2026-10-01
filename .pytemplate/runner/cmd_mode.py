@@ -549,6 +549,13 @@ def cmd_new(cfg: Config, args: list[str]) -> int:
             "Choose one with --name NAME"
         )
     presets.check_name_free(cfg, ns.preset, name)
+    # Every new project is locked anew (its own name, the preset's requirements: __init runs `uv
+    # add` and `uv lock`), which the user's UV_FROZEN or UV_LOCKED forbid. Refused here, before
+    # the copy and in the dry run too: uv's own error came after the copy, blaming a `--no-sync`
+    # the user never typed (or saying to run `uv lock`), and the dry run promised success.
+    from .cmd_env import _refuse_a_frozen_lock  # imported where used: cmd_env imports much more
+
+    _refuse_a_frozen_lock("a new project is locked anew")
     top = _work_tree_top(dest)
     # The new project's python.cpython: its lock needs it (uv lock), and its __init runs on it.
     # Asked before the copy: where uv cannot install it (Android/Termux), nothing is written.
