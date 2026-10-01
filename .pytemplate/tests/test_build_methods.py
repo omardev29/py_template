@@ -3004,6 +3004,20 @@ def no_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(cmd_build, "payload", must_not_run)
     # nuitka.check_options refuses a project folder SCons would expand (app$v2): not this one
     monkeypatch.setattr(nuitka, "BUILD", tmp_path / ".build")
+    _plain_pyproject(monkeypatch, tmp_path)
+
+
+def _plain_pyproject(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """wheel.check (cmd_build calls it for --method wheel) reads the project's pyproject.toml and
+    refuses a local library, a workspace member or a named index there, which pyz and portable
+    support: the tests that build a wheel for another reason failed in such a project. They get
+    a pyproject.toml without [tool.uv.sources]."""
+    from runner.methods import wheel
+
+    pyproject = tmp_path / "plain" / "pyproject.toml"
+    pyproject.parent.mkdir()
+    pyproject.write_text('[project]\nname = "myapp"\nversion = "0.1.0"\ndependencies = ["rich"]\n', encoding="utf-8")
+    monkeypatch.setattr(wheel, "PYPROJECT", pyproject)
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
@@ -3070,6 +3084,7 @@ def test_the_wheel_never_compiles_the_mypyc_stage_it_does_not_use(monkeypatch: p
 
     monkeypatch.setattr(cmd_build, "payload", lambda cfg, backend: pytest.fail("the payload of a wheel build"))
     monkeypatch.setattr(cmd_build, "check_lock", lambda cfg: None)
+    _plain_pyproject(monkeypatch, tmp_path)  # wheel.check: never the sources of the project's own
     monkeypatch.setattr(cmd_build.importlib, "import_module", lambda name: FakeWheel)
     assert cmd_build.cmd_build(make(ALL_BACKENDS), ["mypyc", "--method", "wheel", "--no-check"]) == 0
     assert seen[-1].app_dir == SRC and seen[-1].compiled
@@ -4980,3 +4995,22 @@ def test_the_flet_tests_pass_on_a_windows_without_developer_mode(tmp_path: Path)
     r = _suite_run(ROOT, tmp_path, ".pytemplate/tests/test_build_methods.py", "-k", "flet_build", plugin=windows_without_developer_mode)
     assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
     assert " passed" in r.stdout and "deselected" in r.stdout, r.stdout[-2000:]
+
+
+def test_the_wheel_tests_pass_in_a_project_with_local_libraries(tmp_path: Path) -> None:
+    """A local library (`./pyt add ./libs/x`, a workspace member to uv), a path library or a named
+    index (PyTorch's) in pyproject.toml, which pyz and portable support, is what wheel.check
+    refuses: five tests that build a wheel to check something else ran it on the project's own
+    pyproject.toml and failed `./pyt selftest` there. They run here with such a pyproject.toml."""
+    pyproject = tmp_path / "project" / "pyproject.toml"
+    pyproject.parent.mkdir()
+    pyproject.write_text(
+        '[project]\nname = "game"\nversion = "0.1.0"\ndependencies = ["rich", "mylib", "sharedlib", "torch"]\n\n'
+        '[tool.uv.sources]\nmylib = { workspace = true }\nsharedlib = { path = "../shared lib" }\ntorch = { index = "pytorch-cpu" }\n',
+        encoding="utf-8",
+    )
+    plugin = f"from pathlib import Path\n\nimport runner.methods.wheel as wheel\n\nwheel.PYPROJECT = Path({str(pyproject)!r})\n"
+    wheel_tests = "wheel and (never_compiles or upx_is_resolved or refuses_a_stale_lock)"
+    r = _suite_run(ROOT, tmp_path, ".pytemplate/tests/test_build_methods.py", "-k", wheel_tests, plugin=plugin)
+    assert r.returncode == 0, r.stdout[-6000:] + r.stderr[-2000:]
+    assert "5 passed" in r.stdout, r.stdout[-2000:]
