@@ -4702,6 +4702,19 @@ it was written.
       the wheel left out every hidden file of the package and the assets. 2 serious: mypy never
       ran in Neovim on Windows, and `./pyt selftest` replaced the `.venv` of a project on another
       CPython minor. 25 notable), 1 per 753 lines: not at the bar. 33 minor. All 63 fixed.
+    - Round 3, commit 578140d (round 2's fixes), 23,066 lines: 60 findings, none rejected, and 1
+      more the first CI run of that commit found (the Neovim smoke test opened neotest's test file
+      by a name neotest does not key on Windows): 61 distinct. Counted: 32 (7 critical: `pyt.ps1`
+      on PowerShell 7 off Windows let a folder named like a glob, `p[0-9]`, hand the ownership
+      rule a sibling's path, and another user's runner ran; the hook passed a commit that deleted
+      generated files a global gitignore hid; `check`, ruff and pyright skipped every subpackage
+      named like a tool folder (`build`, `dist`, `venv`, `typings`...) and said "no errors"; the
+      template's `.gitignore` left `src/<pkg>/build/` and the like out of git; nuitka dropped the
+      assets with a code suffix (`.bin`, `.dll`, `.py`); a case-only rename on a case-insensitive
+      volume (macOS) deleted the module from the mypyc stage and the payloads, so the builds
+      shipped without it; a trusted `.lazy.lua` ran the `spec.lua` of a vendored folder holding a
+      folder or a link named `.lazy.lua`. 25 notable), 1 per 721 lines: not at the bar. 29 minor.
+      All 61 fixed.
 
 ## 14. Conventions and recipes
 
