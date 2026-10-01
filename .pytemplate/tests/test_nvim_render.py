@@ -514,13 +514,16 @@ def test_a_neovim_that_inherited_the_global_mode_runs_the_projects_runner(tmp_pa
     """A Neovim started with PYTEMPLATE_GLOBAL=1 in its environment (a shell a launcher left it in,
     a user export) handed it to the project's runner, which then ran in the installed template's
     global mode: every task exited 2 "needs a project". The launchers remove it; the plugin empties
-    it (the runner reads only "1")."""
+    it (the runner reads only "1"). uv keeps the folders it has outside the isolated XDG ones
+    (nvimtest.uv_dirs, as selftest --nvim does): from the moved XDG_CACHE_HOME and XDG_DATA_HOME it
+    downloaded python.cpython at every run, offline the test failed ("uv is set to offline mode"),
+    and on a full disk too. UV_OFFLINE proves it needs no download."""
     if not (os.environ.get("UV") or shutil.which("uv")):
         pytest.skip("uv not found")
     monkeypatch.setenv("PYTEMPLATE_GLOBAL", "1")
     for name in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON"):
         monkeypatch.delenv(name, raising=False)
-    r = _headless_lua(tmp_path, GLOBAL_MODE_CHECK, ROOT)
+    r = _headless_lua(tmp_path, GLOBAL_MODE_CHECK, ROOT, {**nvimtest.uv_dirs(os.environ), "UV_OFFLINE": "1"})
     out = r.stdout
     assert "PTRC 0\n./pyt [-v|-q]" in out and "Outside a project" not in out, out + r.stderr
 
