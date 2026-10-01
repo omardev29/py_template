@@ -818,7 +818,8 @@ def cmd_bootstrap(nv: Nvim) -> int:
     except OSError as e:
         raise PytError(f"the starter is in {nv.config}, but its .git could not be removed ({e}): delete it by hand", 3) from None
     ui.ok(f"LazyVim starter installed in {nv.config}")
-    ui.info("  Next: start nvim once (LazyVim installs its plugins), then ./pyt nvim trust && ./pyt nvim sync")
+    # one command per line, as `new` prints its next steps: cmd and Windows PowerShell 5.1 have no &&
+    ui.info("  Next: start nvim once (LazyVim installs its plugins), then run in the project:\n    ./pyt nvim trust\n    ./pyt nvim sync")
     return 0
 
 

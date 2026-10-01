@@ -284,6 +284,30 @@ def test_bootstrap_says_what_to_do_when_the_starter_git_cannot_be_removed(tmp_pa
     assert e.value.code == 3
 
 
+def _fake_clone(nv: cmd_nvim.Nvim, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`nvim bootstrap` with git found and the starter's clone faked (a config with a .git)."""
+    monkeypatch.setattr(cmd_nvim, "which", lambda name: "/usr/bin/git")
+
+    def clone(argv: list[object], **_: object) -> subprocess.CompletedProcess[str]:
+        (nv.config / ".git").mkdir(parents=True)
+        (nv.config / "init.lua").write_text('require("config.lazy")\n', encoding="utf-8")
+        return subprocess.CompletedProcess([str(a) for a in argv], 0, "", "")
+
+    monkeypatch.setattr(cmd_nvim.proc, "run", clone)
+
+
+def test_bootstrap_names_the_next_steps_on_lines_of_their_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """cmd and Windows PowerShell 5.1 have no `&&`: the hint `./pyt nvim trust && ./pyt nvim sync`
+    could not be pasted there (A9-05). One command per line, as `new` prints its next steps."""
+    nv = cmd_nvim.Nvim("nvim", (0, 12, 5), tmp_path / "c", tmp_path / "d", tmp_path / "s", tmp_path / "k")
+    _fake_clone(nv, monkeypatch)
+    assert cmd_nvim.cmd_bootstrap(nv) == 0
+    lines = capsys.readouterr().err.splitlines()
+    assert not [ln for ln in lines if "&&" in ln], lines
+    assert [ln.strip() for ln in lines if "./pyt nvim" in ln] == ["./pyt nvim trust", "./pyt nvim sync"], lines
+    assert not (nv.config / ".git").exists()
+
+
 def test_local_spec_off(tmp_path: Path) -> None:
     config = tmp_path / "nvim"
     (config / "lua" / "config").mkdir(parents=True)
