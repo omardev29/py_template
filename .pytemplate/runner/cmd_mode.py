@@ -183,9 +183,12 @@ def _precheck_py311(cfg: Config) -> None:
         ui.ok(f"no Python code in src/ or tests/: nothing to check for Python {version}")
         return
     # 1) syntax: ruff reports syntax that does not exist in the target version as an error
+    #    (invalid-syntax). No lint rule besides E9 (an io-error): F632 `x is "a"` or an undefined
+    #    name (F63, F82) is the same on every version, and blocked PyPy as "syntax" under the warn
+    #    profile, whose check passes them
     r = envs.uv(
         tool,
-        [*run, "ruff", "check", "--no-cache", "--isolated", "--target-version", "py" + version.replace(".", ""), "--select", "E9,F63,F7,F82", *dirs],
+        [*run, "ruff", "check", "--no-cache", "--isolated", "--target-version", "py" + version.replace(".", ""), "--select", "E9", *dirs],
         check=False,
         echo=not dry,  # proc.run skips echoed commands under --dry-run
     )

@@ -2552,8 +2552,11 @@ Formats:
   (`cmd_mode._precheck_py311`, named after the default pin: it checks `Config.pypy_minor`, the
   Python of `python.pypy`, so a project pinned to `pypy@3.12.x` may use 3.12 code): it syncs the
   tools env first (a stale `uv.lock` fails in uv's own step; not under `--dry-run`), then ruff
-  `--target-version py3XX` syntax rules (exit 1 = findings; any other code = "could not run
-  ruff"), then the mypy errors that appear only as that version and not as `python.cpython`
+  `--target-version py3XX --select E9`: what that version cannot parse, ruff's invalid-syntax
+  (exit 1 = findings; any other code = "could not run ruff"; F63, F7 and F82 are the same on
+  every version, and `x is "a"` refused PyPy as "syntax" under the warn profile, whose check
+  passes it: `test_mypyc_core.test_precheck_real_ruff_blocks_only_syntax_311_lacks`), then the
+  mypy errors that appear only as that version and not as `python.cpython`
   (`PRECHECK_MYPY_FLAGS`: `--config-file=` so the project's `.mypy.ini` is never read,
   where the default `off` profile sets `ignore_errors`, and `--check-untyped-defs`), compared by
   place and error code (`cmd_mode.precheck_key`: typeshed words the same error per version,

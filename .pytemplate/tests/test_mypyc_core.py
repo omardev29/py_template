@@ -262,6 +262,24 @@ def test_precheck_real_mypy_passes_an_error_typeshed_words_per_version(
     assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
 
 
+@needs_venv
+def test_precheck_real_ruff_blocks_only_syntax_311_lacks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """The ruff step selected F63, F7 and F82 too, and called any finding "syntax that does not
+    exist in Python 3.11": `x is "a"` (F632) or an undefined name, the same on every version and
+    a warning that `check` passes under the warn profile, refused PyPy. Only what 3.11 cannot
+    parse blocks (the real ruff and mypy of .venv)."""
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "names.py").write_text('def is_default(name: str) -> bool:\n    return name is "default"\n\n\ndef use() -> object:\n    return undefined_name\n', encoding="utf-8")
+    monkeypatch.setattr(cmd_mode, "code_dirs", lambda: [str(code)])
+    monkeypatch.setattr(proc, "DRY_RUN", True)  # uv run --no-sync: .venv is never touched
+    cmd_mode._precheck_py311(real({}))
+    assert "ok the code is valid on Python 3.11" in capsys.readouterr().err
+    (code / "generic.py").write_text("def first[T](xs: list[T]) -> T:\n    return xs[0]\n", encoding="utf-8")
+    with pytest.raises(PytError, match="syntax that does not exist in Python 3.11"):
+        cmd_mode._precheck_py311(real({}))
+
+
 def test_precheck_checks_only_the_code_folders_that_hold_python(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -827,8 +827,8 @@ cpython and pypy test runs cannot catch a wrap-around.
 ### PyPy
 
 `./pyt mode --supports +pypy` enables PyPy (the raylib preset has it): it checks that the code
-is valid on the Python of `python.pypy`, 3.11 by default (ruff's syntax rules for it, and the
-mypy errors that appear only on it, whatever the typing profile), lowers `requires-python` to
+is valid on the Python of `python.pypy`, 3.11 by default (the syntax ruff says it cannot parse,
+and the mypy errors that appear only on it, whatever the typing profile), lowers `requires-python` to
 `>=3.11`, re-locks `uv.lock` and creates `.venv-pypy`. The same check runs whenever `uv.lock` is
 re-locked for PyPy for the first time, whatever does it: `apply` after you add `pypy` to
 `backend.supported` by hand, and also `mode`, `rename` or `lock` after such an edit (when the
