@@ -1925,6 +1925,34 @@ def test_pyz_merge_refuses_invalid_parts(tmp_path: Path) -> None:
     assert not out.exists() and not list(tmp_path.parent.glob("escaped.py"))
 
 
+def _damage(pyz: Path, member: str) -> None:
+    """Flip a byte in the middle of a member's compressed data; the central directory stays whole
+    (a CI artifact altered on its way)."""
+    import zipfile
+
+    with zipfile.ZipFile(pyz) as archive:
+        info = archive.getinfo(member)
+    data = bytearray(pyz.read_bytes())
+    at = info.header_offset  # zipfile counts the shebang in front of the archive
+    start = at + 30 + int.from_bytes(data[at + 26 : at + 28], "little") + int.from_bytes(data[at + 28 : at + 30], "little")
+    data[start + info.compress_size // 2] ^= 0xFF
+    pyz.write_bytes(bytes(data))
+
+
+@pytest.mark.parametrize("member", ["common/app/main.py", "common/lib/lazymod.py"])
+def test_pyz_merge_names_a_damaged_part(tmp_path: Path, member: str) -> None:
+    """Only _pyz.json was checked: a part with a damaged member made archive.read raise zlib.error
+    or BadZipFile (a bad CRC), and pyz-merge ended in an internal-error traceback."""
+    good = fake_pyz(tmp_path / "a.pyz")
+    damaged = fake_pyz(tmp_path / "b.pyz")
+    _damage(damaged, member)
+    out = tmp_path / "m" / "all.pyz"
+    with pytest.raises(PytError, match="is damaged") as e:
+        cmd_build.cmd_pyz_merge(make({}), [str(damaged), str(good), "--out", str(out)])
+    assert e.value.code == 2 and str(damaged) in str(e.value) and member in str(e.value)
+    assert not out.exists()
+
+
 def test_pyz_merge_refuses_two_compiled_apps_for_one_platform(tmp_path: Path) -> None:
     a = _native_part(tmp_path / "a.pyz", compiled=True)
     b = _native_part(tmp_path / "b.pyz", compiled=True)

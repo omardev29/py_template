@@ -2820,7 +2820,8 @@ Per method:
   3.11 it finds, python2 and 3.6 included). The `<n>.cmd` wrapper runs each
   candidate interpreter with a minimum-version probe, sets `PYTHONUTF8=1`;
   with `app.gui` its run lines are `start "" pyw/pythonw/pypyw` (`common.windowed`). `pyz-merge`
-  (>= 2 parts; `_read_info` refuses a part without a valid `_pyz.json`) requires the same app
+  (>= 2 parts; `_read_info` refuses a part without a valid `_pyz.json`, and `_member` names a
+  part whose member does not read, a bad CRC or deflate stream: it was a traceback) requires the same app
   name, `min_python`, `deps` and app code (`common/app`, CRLF-normalised: Windows CI checkouts);
   takes `common/app` and `__main__.py` from the first part, every `targets/<key>/lib` from ONE
   part (the one built on that platform, else the first), refuses two compiled overlays for one

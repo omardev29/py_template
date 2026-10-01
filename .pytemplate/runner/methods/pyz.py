@@ -26,6 +26,7 @@ import shutil
 import stat
 import tempfile
 import zipfile
+import zlib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -287,12 +288,22 @@ def _part_host(part: Path, info: dict[str, Any]) -> str:
     )
 
 
-def _app_digest(archive: zipfile.ZipFile) -> str:
+def _app_digest(archive: zipfile.ZipFile, part: Path) -> str:
     """The app code of a part (common/app), line endings normalised: a Windows checkout is CRLF."""
     h = hashlib.sha256()
     for name in sorted(n for n in archive.namelist() if n.startswith("common/app/") and not n.endswith("/")):
-        h.update(name.encode() + b"\0" + archive.read(name).replace(b"\r\n", b"\n") + b"\0")
+        h.update(name.encode() + b"\0" + _member(archive, name, part).replace(b"\r\n", b"\n") + b"\0")
     return h.hexdigest()
+
+
+def _member(archive: zipfile.ZipFile, item: zipfile.ZipInfo | str, part: Path) -> bytes:
+    """A member of a part, whole: a damaged part (a CI artifact cut short or altered: a bad CRC, a
+    broken deflate stream) is one error naming it, never an internal-error traceback."""
+    try:
+        return archive.read(item)
+    except (zipfile.BadZipFile, zlib.error, EOFError, OSError) as e:
+        name = item if isinstance(item, str) else item.filename
+        raise PytError(f"pyz-merge: {part} is damaged ({name}: {e}): download or build it again", 2) from None
 
 
 def _cannot_write(path: Path, e: OSError) -> Exception:
@@ -380,7 +391,7 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
         modes: dict[str, int] = {}  # the parts' executables keep their mode (see _write_archive)
         for n, part in enumerate(parts):
             with zipfile.ZipFile(part) as archive:
-                digest = _app_digest(archive)
+                digest = _app_digest(archive, part)
                 if n == 0:
                     app_digest = digest
                 elif digest != app_digest:
@@ -419,7 +430,7 @@ def merge(parts: list[Path], out: Path, cfg: Config) -> Path:
                         continue
                     target = root / name
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(archive.read(item))
+                    target.write_bytes(_member(archive, item, part))
                     if _executable(item):
                         modes[name] = stat.S_IMODE(item.external_attr >> 16)
         targets = sorted(p.name for p in (root / "targets").iterdir()) if (root / "targets").is_dir() else []
