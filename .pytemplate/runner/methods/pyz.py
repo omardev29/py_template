@@ -172,9 +172,9 @@ def build(req: BuildRequest) -> Path:
     varies = native or any(skipped.values()) or len({common.installed(s) for s in sites.values()}) > 1
     if varies:
         for key, site in sites.items():
-            shutil.copytree(site, root / "targets" / key / "lib")
+            common.copy_tree(site, root / "targets" / key / "lib")  # a full disk: one error line, no traceback
     else:
-        shutil.copytree(sites[host.key], root / "common" / "lib")
+        common.copy_tree(sites[host.key], root / "common" / "lib")
 
     if req.compiled:
         _copy_extensions(req.app_dir, root / "targets" / host.key / "app")

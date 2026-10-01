@@ -787,7 +787,7 @@ header rules (with detector tests proving each rule fires).
 | `cmd_mode.py` | `mode` (+ the Python 3.11 precheck before enabling PyPy), `render`, `new`, the internal `__init` (`cmd_init`), and their `--dry-run` planners (`_plan_mode`, `_plan_init`). |
 | `cmd_dev.py` | `run`, `compile`, `check` (`run_checks`), `lint`, `fmt`, `test` (`test_backend`, `stage_pythonpath`), `report`; `split_backend`; `only_flags`; `_profile_file` and `config_arg` (ruff's `--config`, relative to ROOT: 6.2); `BASEDPYRIGHT`, `BASEDPYRIGHT_NODE`. |
 | `cmd_build.py` | `build`: backend + method resolution, `COMPAT`, `check_lock`, `payload`, `BuildRequest`, `dist_path`; `pyz-merge`. |
-| `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys (`parse_key`, `check_key`, `targets_for`), `UV_PLATFORMS`/`host_floor`, `ensure_env`, `export_requirements`, `install_deps`, `drop_install_junk`, `has_native`, `skipped_requirements`, `copy_app`, `uses_tkinter`, `windowed`, `tree_bytes`; `nuitka.NUITKA`/`NUITKA_PYTHON`, `check_python`, `check_options`, `optimization_args` (`[deploy.nuitka]` lto/pgo); `pyz.check_parts`, `merge`. |
+| `methods/*.py` | One `build(req: BuildRequest) -> Path` per method; `common.py` has target keys (`parse_key`, `check_key`, `targets_for`), `UV_PLATFORMS`/`host_floor`, `ensure_env`, `export_requirements`, `install_deps`, `drop_install_junk`, `has_native`, `skipped_requirements`, `copy_tree` (+ `copy_failure`), `copy_app`, `uses_tkinter`, `windowed`, `tree_bytes`; `nuitka.NUITKA`/`NUITKA_PYTHON`, `check_python`, `check_options`, `optimization_args` (`[deploy.nuitka]` lto/pgo); `pyz.check_parts`, `merge`. |
 | `shells.py` | `__probe`, launcher/shell doctor checks (`ps_policies`: the PowerShell execution policies, asked once per run; `BLOCKING_POLICIES`), `selftest --shells` (section 4.9). |
 | `cmd_nvim.py` | `./pyt nvim ...` and `doctor(check)` (section 12.2). |
 | `nvimtest.py` | `selftest --nvim` (section 13.1). |
@@ -950,10 +950,11 @@ header rules (with detector tests proving each rule fires).
   only, Windows reports a closed pipe as `OSError` EINVAL, unhandled). A write that finds no
   room (`./pyt help > /dev/full`, a full disk, a quota: `cli.NO_ROOM`, ENOSPC, EDQUOT, EFBIG)
   is one `error:` line naming the file when the error does, exit 1, never an internal error
-  (quiet when stderr has no room either). `run`, `test BACKEND`
-  (pytest's own code: 5 = no tests collected, 4 = usage error) and tasks return the child's
-  exit code (`test all`: 0 or 1, after testing every backend even when one fails to build);
-  `proc.CommandFailed` carries the failed child's code. A child killed by signal N gives
+  (quiet when stderr has no room either; a build's folder copies go through `common.copy_tree`,
+  which raises the file's own OSError: shutil.copytree's shutil.Error holds no errno, 15.1).
+  `run`, `test BACKEND` (pytest's own code: 5 = no tests collected, 4 = usage error) and tasks
+  return the child's exit code (`test all`: 0 or 1, after testing every backend even when one
+  fails to build); `proc.CommandFailed` carries the failed child's code. A child killed by signal N gives
   128 + N (`proc.exit_code`, like sh and uv; `cli.main` also maps a negative code a command
   returns), never 256 - N.
 - Ctrl+C (`proc._wait_through_signals`): the child got the same Ctrl+C (terminal process group,
@@ -2742,7 +2743,9 @@ Per method:
   a share or a mapped drive, which resolve() gives as `\\server\share\...`, takes the
   `\\?\UNC\server\share\...` form, since `\\?\\\server` is no valid name (WinError 123), as
   `e2e.rmtree` does; the `ignore` callback reads the folders back with `portable.short_path`
-  before comparing), `boot.py`, `<n>.cmd` / `<n>.sh`. A bundled folder whose `lib/` holds
+  before comparing; through `common.copy_tree`: a write that finds no room is cli's one line,
+  any other failure one PytError line, with the 260-character hint on Windows only), `boot.py`,
+  `<n>.cmd` / `<n>.sh`. A bundled folder whose `lib/` holds
   `flet_desktop` also carries the Flet client (`portable._bundle_flet_client`: the archive of
   `nuitka._flet_client_archive` in `lib/flet_desktop/app/`, and `nuitka.flet_client_env` in the
   launchers: on Linux `FLET_LINUX_DISTRO` and `FLET_DESKTOP_FLAVOR`, the parts of its name, since
@@ -5179,6 +5182,18 @@ CPython and its standard library:
   `test_install.py::test_the_installed_template_has_the_mode_of_a_plain_folder`,
   `test_global.py::test_new_outside_a_project_never_changes_the_projects_own_folder`,
   `test_a_copy_that_fails_says_what_failed`. Goes: never.
+- **`shutil.copytree` reports a file it could not copy without its errno** (LIMITATION,
+  documented: it goes on and raises one shutil.Error, a list of (source, target, reason)
+  strings): a full disk, a quota or `ulimit -f` during a pyz's copy of its sites or the app, an
+  exe or nuitka stage, or the portable runtime ended in an internal-error traceback (the
+  runtime: exit 2, its tuple list cut at 300 characters and Windows' 260-character hint, on
+  every OS). Fix: `common.copy_tree` raises the first file's OSError again, naming the file it
+  could not write (shutil's own named the source, or nothing), so `cli.main` prints its one
+  no-room line; `portable.copy_runtime` passes it on and gives other failures as one line
+  (`common.copy_failure`), with the hint on Windows only (5.3, 10). Test:
+  `test_build_methods.py::test_a_pyz_build_that_finds_no_room_says_so_in_one_line`,
+  `test_an_exe_or_nuitka_stage_that_finds_no_room_says_so_in_one_line`,
+  `test_a_runtime_copy_says_what_failed_and_names_the_path_limit_on_windows_only`. Goes: never.
 - **`Path.is_symlink()` is False for a Windows junction** (LIMITATION; `Path.is_junction` from
   3.12): `clean --envs` would have deleted what a junctioned `.venv` points to, and os.walk,
   which stops only where os.path.islink says so, entered a junction in src/: rename rewrote

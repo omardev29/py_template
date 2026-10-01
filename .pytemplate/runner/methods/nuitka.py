@@ -28,7 +28,7 @@ from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
 from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT, rel
 from ..ui import PytError
-from .common import remove_output
+from .common import copy_tree, remove_output
 
 # Nuitka is not in uv.lock (`uv run --with`), so it is pinned here to keep builds reproducible:
 # the latest release on PyPI in September 2026. Bump it deliberately, together with NUITKA_PYTHON.
@@ -326,7 +326,7 @@ def build(req: BuildRequest) -> Path:
     else:
         if stage.exists():
             mypyc.remove_tree(stage)
-        shutil.copytree(req.app_dir, stage, ignore=shutil.ignore_patterns("__pycache__"), copy_function=mypyc.copy_writable)
+        copy_tree(req.app_dir, stage, ignore=shutil.ignore_patterns("__pycache__"), copy_function=mypyc.copy_writable)
     work = BUILD / "nuitka" / req.backend
     if work.exists():
         mypyc.remove_tree(work)

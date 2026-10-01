@@ -14,6 +14,7 @@ import sys
 import sysconfig
 import tempfile
 import tomllib
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -894,6 +895,51 @@ def _why(e: OSError) -> str:
     return f"{e.strerror or e}: {e.filename}" if e.filename else str(e.strerror or e)
 
 
+def copy_tree(
+    src: str | Path,
+    dst: str | Path,
+    *,
+    ignore: Callable[[str, list[str]], Iterable[str]] | None = None,
+    symlinks: bool = False,
+    copy_function: Callable[[str, str], object] = shutil.copy2,
+) -> None:
+    """shutil.copytree for a build's copies, raising the first file it could not copy as its own
+    OSError: copytree goes on past such a file and ends with one shutil.Error that holds every
+    failure as text and no errno, so a full disk, a quota or a file-size limit (cli.NO_ROOM)
+    during a pyz, portable, exe or nuitka build ended in an internal-error traceback, where
+    cli.main prints one line naming the file (exit 1). A write that found no room names the file
+    it could not write (shutil's own error named the source, or nothing). What copytree reports
+    besides files (a link, a folder it could not make) stays its shutil.Error."""
+    from ..cli import NO_ROOM
+
+    failed: list[OSError] = []
+
+    def copy(source: str, target: str) -> object:
+        try:
+            return copy_function(source, target)
+        except OSError as e:
+            if not failed:
+                failed.append(OSError(e.errno, e.strerror, target) if e.errno in NO_ROOM else e)
+            raise
+
+    try:
+        shutil.copytree(src, dst, symlinks=symlinks, ignore=ignore, copy_function=copy)
+    except shutil.Error:
+        if failed:
+            raise failed[0] from None
+        raise
+
+
+def copy_failure(e: OSError) -> str:
+    """What went wrong in a copy, as a line a person reads: shutil.Error printed its list of
+    (source, target, why) tuples, which a message cut at 300 characters left in mid-path."""
+    found = e.args[0] if isinstance(e, shutil.Error) and e.args else None
+    if isinstance(found, list) and found and isinstance(found[0], tuple) and len(found[0]) == 3:
+        more = f" (and {len(found) - 1} more)" if len(found) > 1 else ""
+        return f"{found[0][2]}{more}"
+    return str(e)
+
+
 def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:
     """Copy the payload. extensions=False keeps only the .py files (pure fallback)."""
     from ..mypyc import copy_writable, remove_tree  # read-only files of src/: see copy_writable
@@ -907,7 +953,7 @@ def copy_app(app_dir: Path, dest: Path, *, extensions: bool) -> None:
             skip |= {n for n in names if n.endswith(EXT_SUFFIXES)}
         return skip
 
-    shutil.copytree(app_dir, dest, ignore=ignore, copy_function=copy_writable)
+    copy_tree(app_dir, dest, ignore=ignore, copy_function=copy_writable)
 
 
 def uses_tkinter(*extra: Path) -> bool:

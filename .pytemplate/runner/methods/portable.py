@@ -178,13 +178,17 @@ def copy_runtime(cfg: Config, backend: str, dest: Path, lib: Path | None = None)
 
     ui.info(f"  runtime: {base} -> {rel(dest)}{' (pruned)' if prune else ''}")
     try:
-        shutil.copytree(long_path(base), long_path(dest), ignore=ignore, symlinks=True)
-    except (shutil.Error, OSError) as e:
-        raise PytError(
-            f"could not copy the interpreter to {rel(dest)}: {str(e)[:300]}\n"
-            "  On Windows this is usually the 260-character limit: shorten the project path or enable\n"
+        common.copy_tree(long_path(base), long_path(dest), ignore=ignore, symlinks=True)
+    except OSError as e:
+        from ..cli import NO_ROOM
+
+        if e.errno in NO_ROOM:
+            raise  # a full disk, a quota: cli.main says so in one line naming the file (exit 1)
+        hint = (
+            "\n  On Windows this is usually the 260-character limit: shorten the project path or enable\n"
             "  LongPathsEnabled (./pyt doctor checks it)."
-        ) from None
+        )
+        raise PytError(f"could not copy the interpreter to {rel(dest)}: {common.copy_failure(e)}{hint if IS_WINDOWS else ''}") from None
     for marker in dest.rglob("EXTERNALLY-MANAGED"):
         marker.unlink()
     if IS_WINDOWS and info["impl"] == "pypy":

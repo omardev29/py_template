@@ -621,9 +621,11 @@ def hidden_imports(cfg: Config, stage: Path) -> list[str]:
 
 def exe_stage(cfg: Config, stage: Path, dest: Path) -> Path:
     """Copy the stage WITHOUT the compiled .py files, so the packager can only bundle the binary."""
+    from .methods.common import copy_tree  # a full disk: one error line (cli.NO_ROOM), no traceback
+
     if dest.exists():
         remove_tree(dest)
-    shutil.copytree(stage, dest, ignore=shutil.ignore_patterns(*SKIP_DIRS), copy_function=copy_writable)
+    copy_tree(stage, dest, ignore=shutil.ignore_patterns(*SKIP_DIRS), copy_function=copy_writable)
     for path in compiled_sources(cfg):
         target = dest / path.relative_to(SRC)
         if target.exists():

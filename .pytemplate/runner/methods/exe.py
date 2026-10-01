@@ -14,7 +14,7 @@ from .. import envs, mypyc, ui, upx
 from ..cmd_build import BuildRequest, dist_path
 from ..config import Config
 from ..project import BUILD, IS_MACOS, IS_WINDOWS, ROOT
-from .common import remove_output
+from .common import copy_tree, remove_output
 
 
 def _console(req: BuildRequest) -> bool:
@@ -33,7 +33,7 @@ def _stage(req: BuildRequest) -> Path:
         return mypyc.exe_stage(req.cfg, req.app_dir, dest)
     if dest.exists():
         mypyc.remove_tree(dest)
-    shutil.copytree(req.app_dir, dest, ignore=shutil.ignore_patterns("__pycache__"), copy_function=mypyc.copy_writable)
+    copy_tree(req.app_dir, dest, ignore=shutil.ignore_patterns("__pycache__"), copy_function=mypyc.copy_writable)
     return dest
 
 

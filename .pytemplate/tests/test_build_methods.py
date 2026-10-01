@@ -4,6 +4,7 @@ pyz/portable layouts and bootstraps. No network, no packager: the packager calls
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import importlib.machinery
 import io
@@ -1759,6 +1760,107 @@ def test_pyz_accepts_payload_files_older_than_1980(sandbox: Path, monkeypatch: p
         assert archive.testzip() is None
         assert archive.getinfo("common/app/myapp/app.py").date_time[0] == 1980
     assert os.stat(app / "myapp" / "app.py").st_mtime == 1  # the payload itself is untouched
+
+
+def _no_room_for(name: str, monkeypatch: pytest.MonkeyPatch, error: int = errno.EFBIG) -> None:
+    """The copies of every file named `name` fail as a write past a file-size limit (`ulimit -f`)
+    or on a full disk does: shutil's copy loop raises the write's OSError, with no file name."""
+    real = shutil.copyfile
+
+    def copyfile(src: Any, dst: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(dst).name == name:
+            raise OSError(error, os.strerror(error))
+        return real(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "copyfile", copyfile)
+
+
+def _build_error(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], build: Any) -> tuple[int, str]:
+    """Run `build` as ./pyt runs a command (cli.main's error handling): its exit code and stderr."""
+    from runner import cli
+
+    monkeypatch.setattr(cli, "dispatch", lambda rest: build())
+    code = cli.main(["build"])
+    return code, capsys.readouterr().err
+
+
+@pytest.mark.parametrize("where", ["lib", "app"])
+def test_a_pyz_build_that_finds_no_room_says_so_in_one_line(sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], where: str) -> None:
+    # shutil.copytree goes on past a file it cannot copy and raises one shutil.Error with every
+    # failure as text and no errno: a full disk, a quota or `ulimit -f` during the pyz's copy of the
+    # dependencies or of the app ended in a traceback and "internal runner error ... is a bug"
+    app = fake_app(sandbox / "payload")
+    if where == "app":
+        (app / "myapp" / "big.dat").write_bytes(b"x")
+
+    def site(d: Path) -> None:
+        _wheel(d, "rich", "15.0.0", files={"rich/__init__.py": b"", **({"rich/big.dat": b"x"} if where == "lib" else {})})
+
+    _no_room_for("big.dat", monkeypatch)
+    code, err = _build_error(monkeypatch, capsys, lambda: _pyz_build(sandbox, monkeypatch, {LINUX: site}, ["rich==15.0.0"], app=app))
+    folder = Path("lib", "rich") if where == "lib" else Path("app", "myapp")
+    written = sandbox / "build" / "pyz" / "cpython" / "root" / "common" / folder / "big.dat"
+    assert code == 1 and f"cannot write {written}: {os.strerror(errno.EFBIG)}" in err, err
+    assert "internal runner error" not in err and "Traceback" not in err
+
+
+@pytest.mark.parametrize("method", ["exe", "nuitka", "mypyc stage"])
+def test_an_exe_or_nuitka_stage_that_finds_no_room_says_so_in_one_line(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], method: str
+) -> None:
+    cfg = make({})
+    app = fake_app(sandbox / "payload", cfg.pkg)
+    (app / "assets" / "big.dat").write_bytes(b"x")
+    _no_room_for("big.dat", monkeypatch, errno.ENOSPC)
+    if method == "exe":
+        monkeypatch.setattr(envs, "uv_run", Recorder())
+        code, err = _build_error(monkeypatch, capsys, lambda: exe.build(BuildRequest(cfg, "cpython", "exe", app)))
+        stage = sandbox / "build" / "exe-stage" / "cpython"
+    elif method == "nuitka":
+        monkeypatch.setattr(envs, "uv", Recorder())
+        code, err = _build_error(monkeypatch, capsys, lambda: nuitka.build(BuildRequest(cfg, "cpython", "nuitka", app)))
+        stage = sandbox / "build" / "nuitka-stage" / "cpython"
+    else:
+        stage = sandbox / "exe-stage"
+        code, err = _build_error(monkeypatch, capsys, lambda: mypyc.exe_stage(cfg, app, stage))
+    assert code == 1 and f"cannot write {stage / 'assets' / 'big.dat'}: {os.strerror(errno.ENOSPC)}" in err, err
+    assert "internal runner error" not in err and "Traceback" not in err
+
+
+def test_a_runtime_copy_says_what_failed_and_names_the_path_limit_on_windows_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The portable runtime copy turned every failure into exit 2 with the first 300 characters of
+    # shutil.Error's tuple list and Windows' 260-character hint, on every OS: a full disk on Linux
+    # read as a path-length problem. A write that finds no room is now cli's one line (exit 1)
+    from runner.methods import portable
+
+    base = tmp_path / "base"
+    _fake_base(base, ["bin/python3.14", "lib/python3.14/os.py", "lib/python3.14/big.py"], {})
+    monkeypatch.setattr(envs, "interpreter_info", lambda python: {"base_prefix": str(base), "version": "3.14.7", "impl": "cpython"})
+    monkeypatch.setattr(common, "ensure_env", lambda env: env)
+    monkeypatch.setattr(common, "SRC", tmp_path / "src")
+    (tmp_path / "src").mkdir()
+    monkeypatch.setattr(portable, "IS_WINDOWS", False)
+
+    def copy(name: str) -> Path:
+        dest = tmp_path / name / "runtime"
+        return portable.copy_runtime(make({}), "cpython", dest, lib=tmp_path / "lib")
+
+    _no_room_for("big.py", monkeypatch)
+    code, err = _build_error(monkeypatch, capsys, lambda: copy("full"))
+    written = tmp_path.resolve() / "full" / "runtime" / "lib" / "python3.14" / "big.py"  # long_path resolves it
+    assert code == 1 and f"cannot write {written}: {os.strerror(errno.EFBIG)}" in err, err
+    assert "260-character" not in err and "internal runner error" not in err
+    _no_room_for("big.py", monkeypatch, errno.ENAMETOOLONG)  # any other failure: why, and no list of tuples
+    with pytest.raises(PytError) as e:
+        copy("long")
+    assert str(e.value).startswith("could not copy the interpreter to ") and os.strerror(errno.ENAMETOOLONG) in str(e.value)
+    assert "260-character" not in str(e.value) and "[(" not in str(e.value)
+    monkeypatch.setattr(portable, "IS_WINDOWS", True)  # where the path limit is the usual reason
+    monkeypatch.setattr(portable, "long_path", lambda path: str(path))
+    with pytest.raises(PytError, match="260-character limit"):
+        copy("windows")
 
 
 @pytest.mark.parametrize(("backend", "windowed"), [("cpython", ["pyw -3.14", "pythonw", "pythonw", "pypyw"]), ("pypy", ["pypyw", "pypyw", "pyw", "pythonw"])])
@@ -3964,7 +4066,7 @@ def test_the_runtime_prune_reads_the_folders_of_a_network_share(tmp_path: Path, 
     monkeypatch.setattr(portable, "long_path", lambda p: portable.LONG_UNC + base[2:] if p == Path(base).resolve() else str(p))
     seen: dict[str, Any] = {}
 
-    def copytree(src: str, dst: str, ignore: Any, symlinks: bool) -> None:
+    def copytree(src: str, dst: str, ignore: Any, symlinks: bool, **_: Any) -> None:
         seen.update(src=src, ignore=ignore)
 
     monkeypatch.setattr(portable.shutil, "copytree", copytree)
