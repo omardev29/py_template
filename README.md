@@ -426,9 +426,9 @@ env = { SEED = "42" }
   as it is (a `{python}` whose environment does not exist yet is created first; on Windows a
   bare name is looked up on the task's `PATH` with its `.cmd`/`.bat` extensions too, so `npm`
   works, and only there: never in the folder the command was typed in, nor in the folders
-  Windows itself would search for it; one the task's `PATH` lacks stops the task, `program not
-  found`, exit 3, as on Linux and macOS; a relative `PATH` entry is read from the task's `cwd`,
-  as there too).
+  Windows itself would search for it; one the task's `PATH` lacks stops the task,
+  `program not found`, exit 3, as on Linux and macOS; a relative `PATH` entry is read from the
+  task's `cwd`, as there too).
   Windows runs a `.cmd`/`.bat` program (npm, yarn, mvn) through cmd.exe, which parses its
   arguments again, so there an argument cmd.exe would change is refused (exit 2) instead of
   reaching the program changed: one with `%`, `"` or a line break, and one with `^ & | < >`
