@@ -2689,16 +2689,19 @@ def test_install_deps_drops_the_data_scripts_uv_pointed_at_this_machine(tmp_path
 
 
 def test_install_junk_keeps_the_scripts_that_name_no_interpreter_of_this_machine(tmp_path: Path) -> None:
+    # The lines are made from the path as this OS spells it (Windows: \home\o'brien\...): the
+    # wrapped form written with "/" never named a Windows Path, and the test failed there
     python = Path("/home/o'brien/my game/.venv/bin/python")
+    quoted = "'" + str(python).replace("'", "'\\''") + "'"  # as uv quotes it for sh
     scripts = tmp_path / "site" / "bin"
     scripts.mkdir(parents=True)
     texts = {
         "rewritten": f"#!{python}\nimport x\n",
-        "wrapped": "#!/bin/sh\n'''exec' '/home/o'\\''brien/my game/.venv/bin/python' \"$0\" \"$@\"\n' '''\nimport x\n",
+        "wrapped": f"#!/bin/sh\n'''exec' {quoted} \"$0\" \"$@\"\n' '''\nimport x\n",
         "env": "#!/usr/bin/env python3\nimport x\n",  # a package's own: uv rewrites `#!python` only
         "system": "#!/usr/bin/python3\nimport x\n",
-        "other": "#!/home/o'brien/my game/.venv/bin/python3.14\nimport x\n",
-        "shell": "#!/bin/sh\necho '/home/o'brien/my game/.venv/bin/python'\n",
+        "other": f"#!{python}3.14\nimport x\n",
+        "shell": f"#!/bin/sh\necho {quoted}\n",
     }
     for name, text in texts.items():
         (scripts / name).write_text(text, encoding="utf-8", newline="\n")
