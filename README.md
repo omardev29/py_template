@@ -518,7 +518,8 @@ name). What changes:
   moves. A path is the package right inside `src/` (`src/<pkg>/data`), or when it starts with
   the package on its way into it (`<pkg>/core/x.py`).
   String prefixes, escapes and format directives are never the name: an app named `f`, `n`, `r`
-  or `d` keeps `f"..."`, `"\n"`, `b"\r"`, `"%d"` and `f"{x:d}"`. A name right after a single
+  or `d` keeps `f"..."`, `"\n"`, `b"\r"`, `"%d"` and `f"{x:d}"`; next to the name an escape is
+  just an escape (`"<name>\n"` and `"Usage:\n<name>"` are renamed like other prose). A name right after a single
   backslash that makes no escape (a raw string: `r"\d"`, `r"src\alpha"`; an invalid escape:
   `"\myapp"`) and a one-letter name that ends a format directive (`"%d"`, `"{:d}"`, the date
   formats of `strftime("%Y-%m-%d")`) or is a `struct` format character after a byte order or

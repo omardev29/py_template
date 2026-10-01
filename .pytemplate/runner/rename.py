@@ -30,8 +30,9 @@ Which occurrences change (whole words only: `myapp_extra` and `my-app-2` never m
   name, and a name right after a single backslash that makes no escape (`r"\\d"`,
   `"\\myapp"`) and a one-letter name that ends a format directive (`"%d"`, `"{:d}"`,
   `f"{x:d}"`, strftime's `"%Y"`) or is a struct format character after a byte order or count
-  (`">I"`) are reported, not changed: an app may be called `f`, `n`, `r` or `d`. Comments
-  and other text files (Markdown, YAML...) have no escapes.
+  (`">I"`) are reported, not changed: an app may be called `f`, `n`, `r` or `d`. An escape
+  next to the name is neither a path separator nor part of its word (`"myapp\\n"`,
+  `"Usage:\\nmyapp"`: prose). Comments and other text files (Markdown, YAML...) have no escapes.
 - When the old name is also the old package but the new name is not a package name
   (`alpha` -> `My-Game`, package `my_game`), each text occurrence is either the package or the
   name. Package: path-like (`src/alpha/`, `alpha\\core`), dotted (`alpha.core`, `alpha.*`,
@@ -163,6 +164,9 @@ _BYTES_ESCAPES = frozenset("abfnrtvx01234567")
 _TOML_ESCAPES = frozenset("btnfruUex")  # TOML 1.0, plus \e and \x of TOML 1.1
 _JSON_ESCAPES = frozenset("bfnrtu")
 _YAML_ESCAPES = frozenset("0abtnvfreNLPxuU")  # YAML 1.2, in double-quoted scalars only
+# The escapes of one letter, after which the old name starts a word ("Usage:\nalpha", "Name:\talpha");
+# \x, \u, \U and Python's \N{...} take more than their letter
+_LETTER_ESCAPES = frozenset("abefnrtvLP")
 _JSON_STRING = re.compile(r'"(?:[^"\\\n]|\\.)*"?')
 # Data files of src/ and tests/ whose strings have escapes (other text files are plain text): a
 # notebook is JSON, and YAML's double-quoted strings have escapes (an app named n turned their
@@ -278,6 +282,19 @@ def _is_word(char: str) -> bool:
 def _pattern(names: Names) -> re.Pattern[str]:
     words = sorted({names.old_name, names.old_pkg}, key=len, reverse=True)
     return re.compile(r"(?<!\w)(?:" + "|".join(re.escape(w) for w in words) + r")(?!\w)")
+
+
+def _escaped_pattern(names: Names) -> re.Pattern[str]:
+    """The old name right after a backslash and a letter (`"Usage:\\nalpha"`): to _pattern the
+    letter makes it part of a longer word. rewrite takes it only where that is a string's escape
+    (_after_an_escape): it was neither renamed nor reported."""
+    words = sorted({names.old_name, names.old_pkg}, key=len, reverse=True)
+    return re.compile(r"(?<=\\[A-Za-z])(?:" + "|".join(re.escape(w) for w in words) + r")(?!\w)")
+
+
+def _mentioned(text: str, names: Names) -> bool:
+    """Whether `text` holds an occurrence rewrite looks at (_pattern, _escaped_pattern)."""
+    return _pattern(names).search(text) is not None or _escaped_pattern(names).search(text) is not None
 
 
 # --- which names resolve to the package (ast scopes) -----------------------------------------------
@@ -891,6 +908,23 @@ def _escaped(text: str, start: int, floor: int, *, raw: bool, escapes: frozenset
     return "skip" if not raw and text[start] in escapes else "keep"
 
 
+def _after_an_escape(text: str, start: int, floor: int, *, raw: bool, escapes: frozenset[str]) -> bool:
+    """Whether the occurrence at `start` (an _escaped_pattern match, in a string that starts at
+    `floor`) follows an escape of one letter (`"Usage:\\nalpha"`): then it starts a word of the
+    string's text. A raw string's `\\n` is two characters, `\\\\nalpha` an escaped backslash."""
+    return start - 1 > floor and text[start - 1] in (escapes & _LETTER_ESCAPES) and _escaped(text, start - 1, floor, raw=raw, escapes=escapes) == "skip"
+
+
+def _escape_read_as_blank(text: str, end: int, *, raw: bool, escapes: frozenset[str]) -> str:
+    """`text` as the context rules read it after an occurrence that ends at `end` in a string:
+    an escape right after it (`"alpha\\n"`, `"alpha\\tready"`) is no path separator, so its
+    backslash reads as a blank (it was taken for `alpha/n`, a folder named like the app, and the
+    line was kept). An escaped backslash (`"alpha\\\\data"`) still is one; offsets stay the same."""
+    if not raw and text[end : end + 1] == "\\" and text[end + 1 : end + 2] in escapes:
+        return f"{text[:end]} {text[end + 1 :]}"
+    return text
+
+
 def _directive(text: str, start: int, end: int, floor: int) -> bool:
     """Whether a one-letter occurrence in a string (which starts at `floor`) is format syntax: a
     printf or strftime directive (`"%d" % x`, `strftime("%Y-%m")`: renamed, the date format and a
@@ -925,7 +959,10 @@ def _classify(
     contextual: bool = False,
     modules: frozenset[str] | None = None,
     entries: frozenset[str] | None = None,
+    escaped_before: bool = False,
 ) -> Kind:
+    """`escaped_before`: an _escaped_pattern match (right after a backslash and a letter), which
+    counts only after an escape of one letter in a string; the caller checks it in a data file."""
     if code is None:
         if not _whole_word(text, start, end):
             return "skip"
@@ -941,17 +978,24 @@ def _classify(
     quote = _string_quote(text, region)
     if quote is not None and start < quote[0]:
         return "skip"  # the string prefix (f, r, b, rb...): syntax, never the name
-    if region.fstring and _in_fstring_field(text, region, start):  # code, or the format spec of a field
+    in_field = region.fstring and _in_fstring_field(text, region, start)
+    if escaped_before and (quote is None or in_field):
+        return "skip"  # a comment or a field's code: no escape there
+    if in_field:  # code, or the format spec of a field
         if code.scoped:
             return "pkg" if start in code.refs else "keep"
         return "pkg" if word == names.old_pkg and code.bound and text[start - 1 : start] != "." else "keep"
     if quote is not None:
         prefix = quote[1]
-        escaped = _escaped(text, start, quote[0], raw="r" in prefix, escapes=_BYTES_ESCAPES if "b" in prefix else _PY_ESCAPES)
+        raw, escapes = "r" in prefix, (_BYTES_ESCAPES if "b" in prefix else _PY_ESCAPES)
+        if escaped_before and not _after_an_escape(text, start, quote[0], raw=raw, escapes=escapes):
+            return "skip"  # a raw string's \nalpha, an escaped backslash's: one longer word
+        escaped = _escaped(text, start, quote[0], raw=raw, escapes=escapes)
         if escaped is not None:
             return escaped
         if _directive(text, start, end, quote[0]):
             return "keep"
+        text = _escape_read_as_blank(text, end, raw=raw, escapes=escapes)  # "alpha\n" leads into no folder n
     if not _whole_word(text, start, end):
         return "skip"
     if region.forced:  # a loader's argument is a module
@@ -1071,7 +1115,7 @@ def rewrite(
     split into lines three times, a data asset of 100 MB (a level, a CSV) took 11 s and ~950 MB.
     """
     pattern = _pattern(names)
-    if pattern.search(text) is None:
+    if not _mentioned(text, names):
         return Rewrite(text=text)
     code = _python_code(text, names.old_pkg) if python else None
     if code is not None and code.bound and names.new_pkg != names.old_pkg:
@@ -1086,20 +1130,32 @@ def rewrite(
     last = 0
     count = 0
     kept_at: list[int] = []
-    for m in pattern.finditer(text):
+    # Every occurrence, in order: the name as a word of its own, and right after an escape of one
+    # letter ("Usage:\nalpha"), which only a string's escapes make one
+    matches = sorted([*((m, False) for m in pattern.finditer(text)), *((m, True) for m in _escaped_pattern(names).finditer(text))], key=lambda found_at: found_at[0].start())
+    for m, escaped_before in matches:
         start, end = m.span()
         word = m.group()
         if toml and _toml_key(text, start, end):
             continue
+        view = text  # the text the context rules read (_escape_read_as_blank)
         i = bisect.bisect_right(string_starts, start) - 1
         if i >= 0 and start < found[i][1]:  # inside a TOML or JSON string: its escapes are never the name
-            escaped = _escaped(text, start, found[i][0], raw=found[i][2], escapes=escapes)
+            raw = found[i][2]
+            if escaped_before and not _after_an_escape(text, start, found[i][0], raw=raw, escapes=escapes):
+                continue
+            escaped = _escaped(text, start, found[i][0], raw=raw, escapes=escapes)
             if escaped == "skip":
                 continue
             if escaped == "keep":
                 kept_at.append(start)
                 continue
-        kind = _classify(text, start, end, word, names, code, contextual=only_pkg, modules=package_modules, entries=package_entries)
+            view = _escape_read_as_blank(text, end, raw=raw, escapes=escapes)
+        elif escaped_before and code is None:
+            continue  # plain text (Markdown, a comment of a data file): `\nalpha` is no escape there
+        kind = _classify(
+            view, start, end, word, names, code, contextual=only_pkg, modules=package_modules, entries=package_entries, escaped_before=escaped_before
+        )
         if kind == "skip":
             continue
         module_line = bool(module_lines) and bisect.bisect_right(line_starts, start) in module_lines
@@ -1600,7 +1656,7 @@ def plan(root: Path, old_name: str, new_name: str, *, generated: Iterable[str] =
             if other is not None and pattern.search(other):
                 unreadable.append(rel_path)
             continue
-        if pattern.search(text) is None:  # a file that never mentions it (a data asset): searched once
+        if not _mentioned(text, names):  # a file that never mentions it (a data asset): searched once
             continue
         strings = DATA_STRINGS.get(path.suffix.lower(), "")
         result = rewrite(text, names, python=path.suffix in PY_SUFFIXES, strings=strings, package_modules=modules, package_entries=entries)

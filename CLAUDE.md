@@ -1382,7 +1382,13 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
     double-quoted strings with `_YAML_ESCAPES`: an app named n once turned a notebook's `\n` and
     YAML's `"hello\n"` into `\b`); comments and other text files (Markdown, INI, YAML's plain and
     single-quoted scalars) have no escapes: `a\n` there is a path like any other, `src\n` the
-    package and `a\n` another folder named n (a JSON fixture's `"a\n"` once became `"a\tool"`). A one-letter occurrence that ends a format directive in a string (`"%d"`,
+    package and `a\n` another folder named n (a JSON fixture's `"a\n"` once became `"a\tool"`).
+    Next to the name, a string's escape is neither a path separator nor part of a word: after it
+    (`"alpha\n"`, `_escape_read_as_blank`: it was read as alpha/n, a folder named like the app,
+    and kept) and before it (`"Usage:\nalpha"`, `"Name:\talpha"`: `_escaped_pattern` with
+    `_after_an_escape`, escapes of one letter, `_LETTER_ESCAPES`; to `_pattern` the letter made
+    `nalpha` one word, neither renamed nor reported) the name is prose like any other
+    (`test_rename.test_a_name_next_to_an_escape_is_the_name`). A one-letter occurrence that ends a format directive in a string (`"%d"`,
     `"%(k)-s"`, `"{:d}"`, `"{0:,d}"`, `"{!r}"`, and any letter after a `%`: strftime's `"%Y"`,
     `"%-m"`, `"%^a"`, which became `"%Tool"`; `_directive`) or is a struct format character after
     a byte order or count (`">I"`, `"<2H"`: `_STRUCT_BEFORE`; the flet skeleton's PNG encoder

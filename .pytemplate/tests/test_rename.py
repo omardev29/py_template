@@ -522,6 +522,43 @@ def test_backslash_pairs_and_comments_are_plain_text(old: str, text: str, expect
 @pytest.mark.parametrize(
     ("text", "expected", "kept"),
     [
+        ('print("Welcome to alpha\\n")\n', 'print("Welcome to beta\\n")\n', 0),  # an escape after it: no folder n
+        ('print("alpha\\tready")\n', 'print("beta\\tready")\n', 0),
+        ('log.write(b"alpha\\r\\n")\n', 'log.write(b"beta\\r\\n")\n', 0),
+        ('USAGE = "Usage:\\nalpha [--frames N]"\n', 'USAGE = "Usage:\\nbeta [--frames N]"\n', 0),  # an escape before it
+        ('TITLE = f"Name:\\talpha {x}"\n', 'TITLE = f"Name:\\tbeta {x}"\n', 0),
+        ('DOC = """\\nalpha\\n"""\n', 'DOC = """\\nbeta\\n"""\n', 0),
+        ('x = r"\\nalpha"\n', 'x = r"\\nalpha"\n', 0),  # raw: \n is two characters, nalpha one word
+        ('x = "\\\\nalpha"\n', 'x = "\\\\nalpha"\n', 0),  # an escaped backslash: nalpha is one word
+        ("# Usage:\\nalpha\n", "# Usage:\\nalpha\n", 0),  # a comment has no escapes
+        ('x = "data/alpha\\\\x"\n', 'x = "data/alpha\\\\x"\n', 1),  # an escaped backslash after it: a folder named alpha
+    ],
+)
+def test_a_name_next_to_an_escape_is_the_name(text: str, expected: str, kept: int) -> None:
+    """In a string, an escape right after the name was taken for a path separator (`"alpha\\n"`
+    read as alpha/n, another folder named like the app: kept and reported), and one right before
+    it made the name part of a longer word (`"Usage:\\nalpha"`: neither renamed nor reported).
+    Prose next to an escape is prose like any other."""
+    out = rewrite(text, Names("alpha", "beta"), python=True, package_modules=frozenset({"core"}), package_entries=frozenset({"__init__.py", "core"}))
+    assert out.text == expected and len(out.kept) == kept, (out.text, out.kept)
+
+
+def test_a_name_next_to_an_escape_in_data_files(tmp_path: Path) -> None:
+    """The same in the strings of JSON and TOML files (and YAML's double-quoted ones), whose escapes
+    the rename knows; plain text has none, so `\\nalpha` there stays one word."""
+    _write_project(tmp_path, "script", "alpha")
+    (tmp_path / "tests" / "data.json").write_text('{"usage": "Usage:\\nalpha", "msg": "alpha\\n"}\n', encoding="utf-8", newline="\n")
+    (tmp_path / "tests" / "cfg.toml").write_text("usage = \"Usage:\\talpha\"\nraw = 'Usage:\\talpha'\n", encoding="utf-8", newline="\n")
+    (tmp_path / "tests" / "notes.md").write_text("Usage:\\nalpha\n", encoding="utf-8", newline="\n")
+    edits = {edit.path: edit for edit in rename.plan(tmp_path, "alpha", "beta").files}
+    assert edits["tests/data.json"].new == b'{"usage": "Usage:\\nbeta", "msg": "beta\\n"}\n'
+    assert edits["tests/cfg.toml"].new == b"usage = \"Usage:\\tbeta\"\nraw = 'Usage:\\talpha'\n"  # a literal string has no escapes
+    assert "tests/notes.md" not in edits
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "kept"),
+    [
         ('[tasks.a]\ncmd = ["x", "\\n", "n"]\n', '[tasks.a]\ncmd = ["x", "\\n", "tool"]\n', 0),  # a basic string escape
         ("[tasks.a]\ncmd = ['x', '\\n']\n", "[tasks.a]\ncmd = ['x', '\\n']\n", 1),  # a literal string: kept, reported
     ],
