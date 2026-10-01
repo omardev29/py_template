@@ -1719,7 +1719,10 @@ with "Unable to find a compatible Visual Studio installation"). Everything else 
   the managed block names (else the preset.toml defaults, what `__init` wrote) and the old name
   is pyproject `[project] name` when its package is in src/.
 - `pending` / `doctor` (one call from `cmd_env.cmd_doctor`): an `[XX]` line per change not
-  applied yet (hand-edited app.name or app.preset, an app.name that names another package,
+  applied yet (hand-edited app.name: "the package is still src/<old>/", or for another spelling
+  of the same package, Flet-App -> flet-app, "the project is still called '<old>'", where it
+  named app.name's own folder,
+  `test_apply.test_a_hand_edit_of_the_names_spelling_never_says_the_package_must_move`; app.preset, an app.name that names another package,
   `[preset.*]` vs pyproject.toml, `hooks.pre_commit = false` with pytemplate's hook installed,
   chained copy included), else `[ok] pytemplate.toml
   applied`; missing references are `[--]` notes; a broken pyproject.toml is a line, never a

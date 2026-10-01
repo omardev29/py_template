@@ -1333,6 +1333,22 @@ def test_a_hand_edited_name_is_renamed(tmp_path: Path, monkeypatch: pytest.Monke
     assert project.snapshot() == before and [c for c in uv.changing(count) if c[0] != "sync"] == []
 
 
+@pytest.mark.parametrize(("old", "new"), [("Flet-App", "flet-app"), ("alpha", "Alpha"), ("my_app", "My-App")])
+def test_a_hand_edit_of_the_names_spelling_never_says_the_package_must_move(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old: str, new: str) -> None:
+    """app.name edited to another spelling of the same package (Flet-App -> flet-app): doctor
+    said "app.name = 'flet-app' is not applied: the package is still src/flet_app/", the very
+    folder app.name's package already is, as if the package had to move. It says the project is
+    still called by the old name; apply renames it as before."""
+    project, _ = _project(tmp_path, monkeypatch, "flet", old)
+    project.edit("app", "name", new)
+    assert cmd_apply.pending(project.cfg())[0] == (
+        f"app.name = '{new}' is not applied: the project is still called '{old}'",
+        f"./pyt apply  (renames '{old}' -> '{new}')",
+    )
+    assert _run(project) == 0
+    assert project.pyproject()["project"]["name"] == new and cmd_apply.pending(project.cfg()) == []
+
+
 def test_only_the_pyproject_name_differs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project, uv = _project(tmp_path, monkeypatch, "flet", "alpha")
     path = project.root / "pyproject.toml"

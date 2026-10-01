@@ -890,7 +890,11 @@ def pending(cfg: Config, *, hook: bool = True) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     if applied.renamed_from is not None:
         old = applied.renamed_from
-        out.append((f"app.name = '{cfg.app.name}' is not applied: the package is still src/{rename.package_of(old)}/", f"./pyt apply  (renames '{old}' -> '{cfg.app.name}')"))
+        was = rename.package_of(old)
+        # another spelling of the same package (Flet-App -> flet-app) moves no folder: "the package
+        # is still src/flet_app/" named the very folder app.name's package is
+        still = f"the package is still src/{was}/" if was != cfg.pkg else f"the project is still called '{old}'"
+        out.append((f"app.name = '{cfg.app.name}' is not applied: {still}", f"./pyt apply  (renames '{old}' -> '{cfg.app.name}')"))
     elif (missing := missing_package(cfg)) is not None:
         out.append(missing)
     elif other := _other_package(cfg, applied.record, project.name):  # [project] name edited to it too, or not
